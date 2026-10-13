@@ -20,7 +20,7 @@ walkdir = "=2.5.0"
 tempfile = "=3.27.0"
 cv-index = { path = "../cv-index" }
 cv-state = { path = "../cv-state" }
-# ofm = { path = "../../../crucible-tui/crates/ofm" }  # enabled by the ofm-enable step
+ofm = { path = "../../../crucible-tui/crates/ofm" }
 
 [lints]
 workspace = true
