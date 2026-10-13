@@ -1,0 +1,69 @@
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
+
+use cv_vault::{ContentHash, MemoryShadowLog, NoCutover, VaultFs, VaultWriter};
+use tempfile::TempDir;
+
+pub struct Fx {
+    pub vault: TempDir,
+    pub idx: TempDir,
+    pub prot: TempDir,
+}
+
+impl Fx {
+    pub fn new(files: &[(&str, &str)]) -> Self {
+        let vault = tempfile::tempdir().unwrap();
+        for (p, c) in files {
+            let full = vault.path().join(p);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, c).unwrap();
+        }
+        Self {
+            vault,
+            idx: tempfile::tempdir().unwrap(),
+            prot: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    pub fn root(&self) -> PathBuf {
+        std::fs::canonicalize(self.vault.path()).unwrap()
+    }
+
+    pub fn base(&self) -> PathBuf {
+        self.idx.path().join("index.db")
+    }
+
+    pub fn live(&self) -> VaultWriter {
+        let fs = VaultFs::live(self.vault.path(), self.prot.path(), &NoCutover).unwrap();
+        VaultWriter::open(fs, &self.base()).unwrap()
+    }
+
+    pub fn shadow(&self, scratch: &Path, log: MemoryShadowLog) -> VaultWriter {
+        let fs = VaultFs::shadow(
+            self.vault.path(),
+            scratch,
+            &[self.prot.path().to_path_buf()],
+            Box::new(log),
+        )
+        .unwrap();
+        VaultWriter::open(fs, &self.base()).unwrap()
+    }
+
+    pub fn read(&self, p: &str) -> String {
+        std::fs::read_to_string(self.vault.path().join(p)).unwrap()
+    }
+}
+
+pub fn h(s: &str) -> ContentHash {
+    ContentHash::of(s.as_bytes())
+}
+
+/// Every file name under `dir`, recursively.
+pub fn all_names(dir: &Path) -> Vec<String> {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
