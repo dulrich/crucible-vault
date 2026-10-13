@@ -1,0 +1,20 @@
+[package]
+name = "cv-index"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Exact `=x.y.z` pins, all declared up front at WP-1 of `plans/v0-core-daemon.md` so later
+# WPs never edit manifests or Cargo.lock. A bump is a deliberate change of its own.
+thiserror = "=2.0.21"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+walkdir = "=2.5.0"
+tracing = "=0.1.44"
+# ofm = { path = "../../../crucible-tui/crates/ofm" }  # enabled by the ofm-enable step
+
+[lints]
+workspace = true

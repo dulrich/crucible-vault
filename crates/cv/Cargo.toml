@@ -1,0 +1,39 @@
+[package]
+name = "cv"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Exact `=x.y.z` pins, all declared up front at WP-1 of `plans/v0-core-daemon.md` so later
+# WPs never edit manifests or Cargo.lock. A bump is a deliberate change of its own.
+anyhow = "=1.0.104"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json"] }
+toml = "=1.1.8"
+sha2 = "=0.11.1"
+hex = "=0.4.3"
+md-5 = "=0.10.6"
+base64 = "=0.22.1"
+url = "=2.5.8"
+percent-encoding = "=2.3.2"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+regex = "=1.13.1"
+cv-protocol = { path = "../cv-protocol" }
+cv-text = { path = "../cv-text" }
+cv-lint = { path = "../cv-lint" }
+cv-actions = { path = "../cv-actions" }
+cv-index = { path = "../cv-index" }
+cv-state = { path = "../cv-state" }
+cv-vault = { path = "../cv-vault" }
+cv-providers = { path = "../cv-providers" }
+cv-search = { path = "../cv-search" }
+
+[lints]
+workspace = true
