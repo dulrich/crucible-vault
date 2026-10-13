@@ -1,0 +1,14 @@
+# crucible-vault core daemon, shadow mode — shipped, not installed: the user installs it (plan WP-8).
+# Install (user): copy to ~/.config/systemd/user/, then `systemctl --user daemon-reload`.
+[Unit]
+Description=crucible-vault core daemon (shadow mode)
+
+[Service]
+Type=simple
+# Adjust to the installed path of the `cv` binary.
+ExecStart=%h/.cargo/bin/cv daemon
+Environment=CV_MODE=shadow
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
