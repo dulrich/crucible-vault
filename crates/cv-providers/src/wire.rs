@@ -1,0 +1,499 @@
+//! Pure request builders and response parsers for each HTTP provider kind.
+//!
+//! Carried from Crucible `https://github.com/dulrich/obsidian-crucible/blob/master/src/providers/openaiCompatible.ts:109-229`,
+//! `anthropic.ts:12-45`, `google.ts:12-45`, `ollama.ts:36-92` and `shared.ts:137-206`.
+//! Changes: `max_tokens` (or the kind's equivalent) is ALWAYS sent (`src/providers/AGENTS.md:18`
+//! — Crucible's openai-compatible/ollama `complete()` omitted it); Google's key moves from the
+//! `?key=` query string to the `x-goog-api-key` header so it never lands in logged URLs;
+//! OpenRouter's attribution headers and the `/api/v0/models` probe/model catalog are dropped
+//! (inventory #23). Obsidian's `requestUrl` is replaced by `reqwest` in `crate::manager`.
+
+use serde_json::{Value, json};
+
+use crate::config::{ProviderConfig, ProviderKind};
+use crate::error::{ProviderError, Result};
+
+/// A built HTTP request (always POST + JSON).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WireRequest {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Completion {
+    pub text: String,
+    pub finish_reason: FinishReason,
+    pub raw_finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Embeddings {
+    pub vectors: Vec<Vec<f32>>,
+    pub dimensions: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RerankItem {
+    pub index: usize,
+    pub relevance_score: f64,
+}
+
+pub fn base_url(p: &ProviderConfig) -> String {
+    let fallback = match p.kind {
+        ProviderKind::OpenaiCompatible => "http://localhost:1234/v1",
+        ProviderKind::Anthropic => "https://api.anthropic.com",
+        ProviderKind::Google => "https://generativelanguage.googleapis.com",
+        ProviderKind::Ollama => "http://localhost:11434",
+        ProviderKind::Cli => "",
+    };
+    p.base_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback)
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn json_headers(bearer: Option<&str>) -> Vec<(String, String)> {
+    let mut h = vec![("content-type".to_owned(), "application/json".to_owned())];
+    // Local servers may run without auth; only send the header when a key is present.
+    if let Some(k) = bearer {
+        h.push(("authorization".to_owned(), format!("Bearer {k}")));
+    }
+    h
+}
+
+/// Builds a completion request for an HTTP kind.
+pub fn build_completion(
+    p: &ProviderConfig,
+    api_key: Option<&str>,
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<WireRequest> {
+    let base = base_url(p);
+    Ok(match p.kind {
+        ProviderKind::OpenaiCompatible => WireRequest {
+            url: format!("{base}/chat/completions"),
+            headers: json_headers(api_key),
+            body: json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": max_tokens,
+            }),
+        },
+        ProviderKind::Anthropic => {
+            let key = api_key.ok_or_else(|| {
+                ProviderError::Secret(format!("provider {:?} needs an API key", p.id))
+            })?;
+            WireRequest {
+                url: format!("{base}/v1/messages"),
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("x-api-key".into(), key.to_owned()),
+                    ("anthropic-version".into(), "2023-06-01".into()),
+                ],
+                body: json!({
+                    "model": model,
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                    "max_tokens": max_tokens,
+                }),
+            }
+        }
+        ProviderKind::Google => {
+            let key = api_key.ok_or_else(|| {
+                ProviderError::Secret(format!("provider {:?} needs an API key", p.id))
+            })?;
+            let mut body = json!({
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens},
+            });
+            if !system.is_empty() {
+                body["system_instruction"] = json!({"parts": [{"text": system}]});
+            }
+            WireRequest {
+                url: format!("{base}/v1beta/models/{model}:generateContent"),
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("x-goog-api-key".into(), key.to_owned()),
+                ],
+                body,
+            }
+        }
+        ProviderKind::Ollama => WireRequest {
+            url: format!("{base}/api/chat"),
+            headers: json_headers(None),
+            body: json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "stream": false,
+                // Ollama's name for max_tokens.
+                "options": {"num_predict": max_tokens},
+            }),
+        },
+        ProviderKind::Cli => {
+            return Err(ProviderError::Unsupported {
+                kind: "cli",
+                capability: "build an HTTP request",
+            });
+        }
+    })
+}
+
+fn raw_reason(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn finish(raw: Option<&str>) -> FinishReason {
+    match raw {
+        Some("stop" | "end_turn" | "STOP" | "stop_sequence") => FinishReason::Stop,
+        Some("length" | "max_tokens" | "MAX_TOKENS") => FinishReason::Length,
+        _ => FinishReason::Other,
+    }
+}
+
+/// Parses a completion response for an HTTP kind.
+pub fn parse_completion(kind: ProviderKind, v: &Value) -> Result<Completion> {
+    let (text, raw) = match kind {
+        ProviderKind::OpenaiCompatible => {
+            let choice = v
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .ok_or_else(|| ProviderError::Malformed("API returned no choices".into()))?;
+            (
+                choice["message"]["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                raw_reason(choice.get("finish_reason")),
+            )
+        }
+        ProviderKind::Anthropic => {
+            let blocks = v.get("content").and_then(Value::as_array);
+            let text = blocks
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<String>();
+            (text, raw_reason(v.get("stop_reason")))
+        }
+        ProviderKind::Google => {
+            let cand = v
+                .get("candidates")
+                .and_then(|c| c.get(0))
+                .ok_or_else(|| ProviderError::Malformed("API returned no candidates".into()))?;
+            let text = cand["content"]["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<String>();
+            (text, raw_reason(cand.get("finishReason")))
+        }
+        ProviderKind::Ollama => (
+            v["message"]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            raw_reason(v.get("done_reason")),
+        ),
+        ProviderKind::Cli => {
+            return Err(ProviderError::Unsupported {
+                kind: "cli",
+                capability: "parse an HTTP response",
+            });
+        }
+    };
+    Ok(Completion {
+        text,
+        finish_reason: finish(raw.as_deref()),
+        raw_finish_reason: raw,
+    })
+}
+
+/// Embedding request (openai-compatible `/embeddings`, ollama `/api/embed`).
+pub fn build_embed(
+    p: &ProviderConfig,
+    api_key: Option<&str>,
+    model: &str,
+    inputs: &[String],
+) -> Result<WireRequest> {
+    let base = base_url(p);
+    match p.kind {
+        ProviderKind::OpenaiCompatible => Ok(WireRequest {
+            url: format!("{base}/embeddings"),
+            headers: json_headers(api_key),
+            body: json!({"model": model, "input": inputs}),
+        }),
+        ProviderKind::Ollama => Ok(WireRequest {
+            url: format!("{base}/api/embed"),
+            headers: json_headers(None),
+            body: json!({"model": model, "input": inputs}),
+        }),
+        k => Err(ProviderError::Unsupported {
+            kind: k.as_str(),
+            capability: "generate embeddings",
+        }),
+    }
+}
+
+fn vector(v: &Value) -> Result<Vec<f32>> {
+    v.as_array()
+        .ok_or_else(|| ProviderError::Malformed("embedding is not an array".into()))?
+        .iter()
+        .map(|x| {
+            x.as_f64()
+                .map(|f| f as f32)
+                .ok_or_else(|| ProviderError::Malformed("non-numeric embedding value".into()))
+        })
+        .collect()
+}
+
+pub fn parse_embed(kind: ProviderKind, v: &Value, input_count: usize) -> Result<Embeddings> {
+    let vectors: Vec<Vec<f32>> = match kind {
+        ProviderKind::OpenaiCompatible => {
+            let mut rows: Vec<&Value> = v
+                .get("data")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().collect())
+                .unwrap_or_default();
+            rows.sort_by_key(|r| r.get("index").and_then(Value::as_u64).unwrap_or(0));
+            rows.iter()
+                .map(|r| vector(&r["embedding"]))
+                .collect::<Result<_>>()?
+        }
+        ProviderKind::Ollama => {
+            if let Some(a) = v.get("embeddings").and_then(Value::as_array) {
+                a.iter().map(vector).collect::<Result<_>>()?
+            } else if let Some(e) = v.get("embedding") {
+                vec![vector(e)?]
+            } else {
+                Vec::new()
+            }
+        }
+        k => {
+            return Err(ProviderError::Unsupported {
+                kind: k.as_str(),
+                capability: "generate embeddings",
+            });
+        }
+    };
+    if vectors.len() != input_count {
+        return Err(ProviderError::Malformed(format!(
+            "embeddings API returned {} embeddings for {input_count} inputs",
+            vectors.len()
+        )));
+    }
+    let dimensions = vectors.first().map(Vec::len);
+    Ok(Embeddings {
+        vectors,
+        dimensions,
+    })
+}
+
+/// Native rerank (openai-compatible / llama.cpp `/rerank`). Other kinds use the
+/// completion-based fallback.
+pub fn build_rerank(
+    p: &ProviderConfig,
+    api_key: Option<&str>,
+    model: &str,
+    query: &str,
+    documents: &[String],
+) -> WireRequest {
+    WireRequest {
+        url: format!("{}/rerank", base_url(p)),
+        headers: json_headers(api_key),
+        body: json!({"model": model, "query": query, "documents": documents}),
+    }
+}
+
+/// Strict rerank normalization (`shared.ts:137-163`): a missing results array, wrong count,
+/// out-of-range/duplicate index or non-numeric score throws rather than degrading.
+pub fn normalize_rerank(v: &Value, document_count: usize) -> Result<Vec<RerankItem>> {
+    let bad = |m: String| Err(ProviderError::Malformed(m));
+    let Some(results) = v.get("results").and_then(Value::as_array) else {
+        return bad("Rerank response did not include a results array".into());
+    };
+    if results.len() != document_count {
+        return bad(format!(
+            "Rerank response returned {} results for {document_count} documents",
+            results.len()
+        ));
+    }
+    let mut seen = vec![false; document_count];
+    let mut out = Vec::with_capacity(document_count);
+    for e in results {
+        if !e.is_object() {
+            return bad("Rerank response contained a malformed result entry".into());
+        }
+        let index = match e.get("index").and_then(Value::as_u64) {
+            Some(i) if (i as usize) < document_count => i as usize,
+            _ => {
+                return bad(format!(
+                    "Rerank response contained an out-of-range or non-integer index: {}",
+                    e.get("index").unwrap_or(&Value::Null)
+                ));
+            }
+        };
+        if seen[index] {
+            return bad(format!(
+                "Rerank response contained a duplicate index: {index}"
+            ));
+        }
+        let Some(score) = e
+            .get("relevance_score")
+            .and_then(Value::as_f64)
+            .filter(|f| f.is_finite())
+        else {
+            return bad(format!(
+                "Rerank response contained a non-numeric relevance_score for index {index}"
+            ));
+        };
+        seen[index] = true;
+        out.push(RerankItem {
+            index,
+            relevance_score: score,
+        });
+    }
+    Ok(out)
+}
+
+/// `shared.ts:171-178`.
+pub const RERANK_FALLBACK_SYSTEM_PROMPT: &str = "You are a relevance-scoring function for a personal knowledge-base search result set.\nYou will be given a query and a numbered list of documents (snippets, not full notes).\nScore how relevant each document is to the query, from 0.0 (irrelevant) to 1.0 (highly relevant).\nRespond with ONLY compact JSON of this exact shape, no other text, no markdown fences:\n{\"results\":[{\"index\":0,\"relevance_score\":0.0},{\"index\":1,\"relevance_score\":0.0}]}\nInclude exactly one entry per document, covering every index from 0 to N-1 exactly once, in any order.";
+
+pub fn rerank_fallback_user_prompt(query: &str, documents: &[String]) -> String {
+    let numbered: Vec<String> = documents
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("[{i}] {d}"))
+        .collect();
+    format!("Query: {query}\n\nDocuments:\n{}", numbered.join("\n\n"))
+}
+
+/// Parses the fallback completion text: raw, then a bare `{...}` slice, then a fenced block
+/// (`shared.ts:192-206`). Never fabricates scores.
+pub fn parse_rerank_completion_text(raw: &str, document_count: usize) -> Result<Vec<RerankItem>> {
+    let slice = match (raw.find('{'), raw.rfind('}')) {
+        (Some(a), Some(b)) if b > a => Some(&raw[a..=b]),
+        _ => None,
+    };
+    let fenced = raw
+        .split("```")
+        .nth(1)
+        .map(|s| s.strip_prefix("json").unwrap_or(s).trim());
+    let mut last = "empty response".to_owned();
+    for cand in [Some(raw.trim()), slice, fenced]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+    {
+        match serde_json::from_str::<Value>(cand) {
+            Ok(v) => match normalize_rerank(&v, document_count) {
+                Ok(r) => return Ok(r),
+                Err(e) => last = e.to_string(),
+            },
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(ProviderError::Malformed(format!(
+        "Rerank fallback response was not usable: {last}"
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Rerank vectors ported from `https://github.com/dulrich/obsidian-crucible/blob/master/tests/providerRerank.test.mjs:73-240`.
+    use super::*;
+
+    #[test]
+    fn rerank_maps_by_index_not_position() {
+        let v = json!({"results": [
+            {"index": 2, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.1},
+            {"index": 1, "relevance_score": 0.5},
+        ]});
+        let r = normalize_rerank(&v, 3).unwrap();
+        let get = |i| r.iter().find(|x| x.index == i).unwrap().relevance_score;
+        assert_eq!((get(0), get(1), get(2)), (0.1, 0.5, 0.9));
+    }
+
+    #[test]
+    fn rerank_rejects_malformed() {
+        let cases = [
+            (json!({"object": "rerank"}), 2, "results array"),
+            (
+                json!({"results": [{"index": 0, "relevance_score": "high"}, {"index": 1, "relevance_score": 0.5}]}),
+                2,
+                "non-numeric relevance_score",
+            ),
+            (
+                json!({"results": [{"index": 0, "relevance_score": 0.7}]}),
+                3,
+                "returned 1 results for 3 documents",
+            ),
+            (
+                json!({"results": [{"index": 0, "relevance_score": 0.7}, {"index": 0, "relevance_score": 0.2}]}),
+                2,
+                "duplicate index",
+            ),
+            (
+                json!({"results": [{"index": 5, "relevance_score": 0.7}]}),
+                1,
+                "out-of-range",
+            ),
+        ];
+        for (v, n, needle) in cases {
+            let e = normalize_rerank(&v, n).unwrap_err().to_string();
+            assert!(e.contains(needle), "{e} !~ {needle}");
+        }
+    }
+
+    #[test]
+    fn fallback_text_parses_bare_slice_and_fenced_or_fails_precisely() {
+        let ok =
+            r#"{"results":[{"index":0,"relevance_score":0.2},{"index":1,"relevance_score":0.8}]}"#;
+        for t in [
+            ok.to_owned(),
+            format!("Sure: {ok} done"),
+            format!("```json\n{ok}\n```"),
+        ] {
+            assert_eq!(parse_rerank_completion_text(&t, 2).unwrap().len(), 2);
+        }
+        let e = parse_rerank_completion_text("I cannot rank these, sorry.", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("Rerank fallback response was not usable"));
+    }
+
+    #[test]
+    fn finish_reasons_normalize() {
+        let c = parse_completion(
+            ProviderKind::Anthropic,
+            &json!({"content": [{"text": "a"}, {"text": "b"}], "stop_reason": "max_tokens"}),
+        )
+        .unwrap();
+        assert_eq!(c.text, "ab");
+        assert_eq!(c.finish_reason, FinishReason::Length);
+        assert!(parse_completion(ProviderKind::OpenaiCompatible, &json!({"choices": []})).is_err());
+    }
+}
