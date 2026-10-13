@@ -66,12 +66,28 @@ CREATE INDEX tasks_status ON tasks(status);
 CREATE VIRTUAL TABLE fts USING fts5(body, content='', contentless_delete=1);
 ";
 
-/// Connection pragmas for the writer. Rollback journal (not WAL), so the atomic rename swap
-/// never leaves a stale `-wal` beside the new file (see `Index::rebuild`).
+/// Switches `conn` to WAL and verifies the returned mode.
+pub(crate) fn set_wal(conn: &Connection) -> Result<()> {
+    let mode: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(Error::JournalMode(mode));
+    }
+    Ok(())
+}
+
+/// Writer pragmas on a final generation file: WAL (verified), `synchronous=NORMAL`, 5 s busy
+/// timeout, default `wal_autocheckpoint`.
 pub(crate) fn configure_writer(conn: &Connection) -> Result<()> {
-    conn.pragma_update(None, "journal_mode", "DELETE")?;
+    set_wal(conn)?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(())
+}
+
+/// Pragmas for the bulk build into `<final>.building` (rollback journal until the final switch).
+pub(crate) fn configure_build(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "journal_mode", "DELETE")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(())
 }
 

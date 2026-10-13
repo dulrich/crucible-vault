@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use cv_index::{Error, Index, LinkKind, Reader, SCHEMA_VERSION};
+use cv_index::{
+    Error, Index, LinkKind, Reader, SCHEMA_VERSION, current_generation, generation_path,
+};
 use serde_json::json;
 
 struct Tmp(PathBuf);
@@ -182,18 +184,35 @@ fn rebuild_indexes_the_synthetic_vault() {
     assert!(q.fts("should", 10).unwrap().is_empty());
 }
 
+/// Names in the test dir other than `vault`, sorted.
+fn listing(t: &Tmp) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(&t.0)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "vault")
+        .collect();
+    v.sort();
+    v
+}
+
 #[test]
 fn rebuild_swaps_atomically_and_bumps_generation() {
     let t = Tmp::new();
     fixture(&t);
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
-    let mut old = Reader::open(&t.db()).unwrap();
+    assert_eq!(idx.db_path(), generation_path(&t.db(), 1));
+    assert_eq!(idx.base_path(), t.db());
+    assert_eq!(idx.query().journal_mode().unwrap(), "wal");
+    let mut old = Reader::open(&t.db(), 1).unwrap();
     assert_eq!(old.query().generation().unwrap(), 1);
+    assert_eq!(old.query().journal_mode().unwrap(), "wal");
 
     t.write("New.md", "fresh [[Alpha]]\n");
     std::fs::remove_file(t.vault().join("Parent.md")).unwrap();
     assert_eq!(idx.rebuild(&t.vault()).unwrap(), 2);
     assert_eq!(idx.generation().unwrap(), 2);
+    assert_eq!(idx.query().generation().unwrap(), 2);
 
     // The old reader still sees generation 1, consistently.
     let (g, n, parent, new) = old
@@ -208,22 +227,19 @@ fn rebuild_swaps_atomically_and_bumps_generation() {
         .unwrap();
     assert_eq!((g, n, parent, new), (1, 6, true, false));
 
-    let fresh = Reader::open(&t.db()).unwrap();
+    let fresh = Reader::open_current(&t.db()).unwrap();
+    assert_eq!(fresh.generation(), 2);
     let q = fresh.query();
     assert_eq!(q.generation().unwrap(), 2);
     assert!(q.file("Parent.md").unwrap().is_none());
     assert_eq!(q.backlinks("Alpha.md").unwrap().len(), 2);
 
-    // No temp file left behind; generation survives a reopen and a third rebuild.
-    let leftovers: Vec<_> = std::fs::read_dir(&t.0)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
-        .collect();
-    assert!(leftovers.is_empty());
+    // Generation survives a reopen and further rebuilds/creates.
     drop(idx);
     let mut idx = Index::open(&t.db()).unwrap();
+    assert_eq!(idx.generation().unwrap(), 2);
     assert_eq!(idx.rebuild(&t.vault()).unwrap(), 3);
+    drop(idx);
     assert_eq!(
         Index::create(&t.vault(), &t.db())
             .unwrap()
@@ -231,6 +247,125 @@ fn rebuild_swaps_atomically_and_bumps_generation() {
             .unwrap(),
         4
     );
+    assert!(!t.db().exists());
+}
+
+#[test]
+fn writer_never_waits_on_a_reader() {
+    let t = Tmp::new();
+    fixture(&t);
+    let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
+    let mut r = Reader::open(&t.db(), 1).unwrap();
+    let elapsed = r
+        .snapshot(|q| {
+            assert_eq!(q.file_count()?, 6);
+            let start = std::time::Instant::now();
+            for i in 0..20 {
+                let p = format!("w/N{i}.md");
+                assert!(idx.upsert_file(&p, b"x [[Alpha]]\n", 1, 1)?.is_some());
+            }
+            for i in 0..10 {
+                assert!(idx.remove_file(&format!("w/N{i}.md"))?);
+            }
+            assert!(idx.remove_file("Parent.md")?);
+            let elapsed = start.elapsed();
+            // The held read transaction still sees its pre-write snapshot.
+            assert_eq!(q.file_count()?, 6);
+            assert!(q.file("Parent.md")?.is_some());
+            Ok(elapsed)
+        })
+        .unwrap();
+    eprintln!("writer sequence under a held reader: {elapsed:?}");
+    assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+    // A new read transaction sees the writes.
+    assert_eq!(r.query().file_count().unwrap(), 6 + 10 - 1);
+    assert_eq!(idx.query().file_count().unwrap(), 15);
+}
+
+#[test]
+fn reader_mid_read_across_two_swaps() {
+    let t = Tmp::new();
+    fixture(&t);
+    let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
+    let mut r = Reader::open(&t.db(), 1).unwrap();
+    r.snapshot(|q| {
+        let before = (q.file_count()?, q.backlinks("Alpha.md")?.len());
+        t.write("New.md", "[[Alpha]]\n");
+        std::fs::remove_file(t.vault().join("Parent.md")).unwrap();
+        assert_eq!(idx.rebuild(&t.vault())?, 2);
+        assert_eq!(idx.rebuild(&t.vault())?, 3);
+        assert!(!generation_path(&t.db(), 1).exists());
+        assert_eq!(q.generation()?, 1);
+        assert_eq!((q.file_count()?, q.backlinks("Alpha.md")?.len()), before);
+        assert!(q.file("Parent.md")?.is_some());
+        assert!(q.file("New.md")?.is_none());
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(
+        Reader::open(&t.db(), 1),
+        Err(Error::GenerationMissing { generation: 1, .. })
+    ));
+    let cur = Reader::open_current(&t.db()).unwrap();
+    assert_eq!(cur.generation(), 3);
+    assert_eq!(cur.query().file_count().unwrap(), 6);
+}
+
+#[test]
+fn no_stale_wal_pairing_or_leftovers() {
+    let t = Tmp::new();
+    fixture(&t);
+    let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
+    for g in 2..=4 {
+        assert_eq!(idx.rebuild(&t.vault()).unwrap(), g);
+    }
+    let allowed = |n: &str| {
+        ["index-3.db", "index-4.db"]
+            .iter()
+            .any(|m| n == *m || n == format!("{m}-wal") || n == format!("{m}-shm"))
+    };
+    let names = listing(&t);
+    assert!(names.iter().all(|n| allowed(n)), "{names:?}");
+    assert!(names.contains(&"index-3.db".into()) && names.contains(&"index-4.db".into()));
+    assert!(!t.db().exists());
+    drop(idx);
+
+    // Planted stale build + orphan WAL are swept by open; the next build numbers past them.
+    std::fs::write(t.0.join("index-9.db.building"), b"junk").unwrap();
+    std::fs::write(t.0.join("index-8.db-wal"), b"junk").unwrap();
+    let mut idx = Index::open(&t.db()).unwrap();
+    assert_eq!(idx.generation().unwrap(), 4);
+    let names = listing(&t);
+    assert!(names.iter().all(|n| allowed(n)), "{names:?}");
+    assert_eq!(current_generation(&t.db()).unwrap(), Some(4));
+    // Plant again: the build must still number past every generation-shaped file.
+    std::fs::write(t.0.join("index-9.db.building"), b"junk").unwrap();
+    assert_eq!(idx.rebuild(&t.vault()).unwrap(), 10);
+    let names = listing(&t);
+    assert!(!names.iter().any(|n| n.contains(".building")), "{names:?}");
+    assert!(names.contains(&"index-10.db".into()));
+}
+
+#[test]
+fn failed_build_keeps_current_generation_live() {
+    let t = Tmp::new();
+    fixture(&t);
+    let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
+    let missing = t.0.join("no-such-vault");
+    assert!(matches!(idx.rebuild(&missing), Err(Error::Io { .. })));
+    assert_eq!(idx.generation().unwrap(), 1);
+    assert_eq!(idx.query().file_count().unwrap(), 6);
+    idx.upsert_file("After.md", b"ok\n", 1, 1).unwrap();
+    let r = Reader::open_current(&t.db()).unwrap();
+    assert_eq!(r.generation(), 1);
+    assert_eq!(r.query().file_count().unwrap(), 7);
+    let names = listing(&t);
+    assert!(!names.iter().any(|n| n.contains(".building")), "{names:?}");
+    assert!(matches!(
+        Index::create(&missing, &t.db()),
+        Err(Error::Io { .. })
+    ));
+    assert_eq!(current_generation(&t.db()).unwrap(), Some(1));
 }
 
 #[test]
@@ -239,14 +374,14 @@ fn schema_mismatch_is_refused() {
     fixture(&t);
     drop(Index::create(&t.vault(), &t.db()).unwrap());
     {
-        let c = rusqlite::Connection::open(t.db()).unwrap();
+        let c = rusqlite::Connection::open(generation_path(&t.db(), 1)).unwrap();
         c.execute(
             "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
             [],
         )
         .unwrap();
     }
-    match Reader::open(&t.db()) {
+    match Reader::open(&t.db(), 1) {
         Err(Error::SchemaMismatch { found, expected }) => {
             assert_eq!(found, Some(999));
             assert_eq!(expected, SCHEMA_VERSION);
@@ -257,12 +392,39 @@ fn schema_mismatch_is_refused() {
         Index::open(&t.db()),
         Err(Error::SchemaMismatch { .. })
     ));
-    let empty = t.0.join("empty.db");
-    drop(rusqlite::Connection::open(&empty).unwrap());
+    assert_eq!(current_generation(&t.db()).unwrap(), None);
     assert!(matches!(
-        Reader::open(&empty),
+        Reader::open_current(&t.db()),
+        Err(Error::NoIndex(_))
+    ));
+    // Rebuild (D14) replaces it with generation 2 and retires the stale file.
+    let idx = Index::create(&t.vault(), &t.db()).unwrap();
+    assert_eq!(idx.generation().unwrap(), 2);
+    assert!(!generation_path(&t.db(), 1).exists());
+
+    let empty = t.0.join("empty.db");
+    drop(rusqlite::Connection::open(generation_path(&empty, 1)).unwrap());
+    assert!(matches!(
+        Reader::open(&empty, 1),
         Err(Error::SchemaMismatch { found: None, .. })
     ));
+    assert!(matches!(
+        Index::open(&t.0.join("none.db")),
+        Err(Error::NoIndex(_))
+    ));
+}
+
+#[test]
+fn generation_mismatch_is_refused() {
+    let t = Tmp::new();
+    fixture(&t);
+    drop(Index::create(&t.vault(), &t.db()).unwrap());
+    std::fs::copy(generation_path(&t.db(), 1), generation_path(&t.db(), 5)).unwrap();
+    assert!(matches!(
+        Reader::open(&t.db(), 5),
+        Err(Error::GenerationMismatch { file: 5, stored: 1 })
+    ));
+    assert_eq!(current_generation(&t.db()).unwrap(), Some(1));
 }
 
 fn sync_check(idx: &Index) {
@@ -437,12 +599,14 @@ fn reader_is_read_only() {
     let t = Tmp::new();
     fixture(&t);
     drop(Index::create(&t.vault(), &t.db()).unwrap());
-    let r = Reader::open(&t.db()).unwrap();
+    let r = Reader::open(&t.db(), 1).unwrap();
     // A write through the reader's own connection must fail; exercised via a raw open with the
     // same flags the Reader uses.
-    let raw =
-        rusqlite::Connection::open_with_flags(t.db(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
+    let raw = rusqlite::Connection::open_with_flags(
+        generation_path(&t.db(), 1),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     assert!(raw.execute("DELETE FROM files", []).is_err());
     assert_eq!(r.query().file_count().unwrap(), 6);
 }

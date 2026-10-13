@@ -1,5 +1,12 @@
 //! The writer: atomic rebuild under a generation number, and incremental per-file updates.
 //!
+//! Layout (see [`crate::generation`]): the configured path is a *base*; generation `n` is its own
+//! WAL database at `<stem>-<n>.<ext>`. A rebuild writes `<final>.building`, switches it to WAL,
+//! closes it (no `-wal` left) and renames it to a never-before-used final name, so no `-wal`/`-shm`
+//! can ever pair with the wrong main file. The writer then reopens on the new file, checkpoints
+//! and closes the outgoing one, and retires generations older than the outgoing one; readers
+//! holding a retired file keep its inode (POSIX) and reopen on `index_generation`.
+//!
 //! The daemon's single writer thread owns one [`Index`] (S2 "Recommendation": single writer
 //! owning the `Connection`, in-memory resolver in sync, per-file transaction; on create/rename
 //! re-resolve, on delete null inbound).
@@ -12,14 +19,16 @@ use walkdir::WalkDir;
 
 use crate::error::{Error, Result, io};
 use crate::extract::{self, Extracted, is_parsed_path, is_skipped_path};
+use crate::generation::{self as gen_files, generation_path, with_suffix};
 use crate::query::Query;
 use crate::resolver::{Resolver, file_key, normalize, target_key};
 use crate::schema;
 
-/// The writer handle on `index.db`.
+/// The writer handle on the current `index.db` generation.
 pub struct Index {
     conn: Connection,
-    db_path: PathBuf,
+    base: PathBuf,
+    generation: u64,
     resolver: Resolver,
 }
 
@@ -217,17 +226,6 @@ fn load_resolver(conn: &Connection) -> Result<Resolver> {
     Ok(r)
 }
 
-/// The generation stored in an existing DB at `db_path` (0 if absent or unreadable).
-fn previous_generation(db_path: &Path) -> u64 {
-    if !db_path.exists() {
-        return 0;
-    }
-    Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .ok()
-        .and_then(|c| schema::generation(&c).ok())
-        .unwrap_or(0)
-}
-
 /// Vault-relative `/` path of `entry`, or `None` (root itself, non-UTF-8).
 fn rel_path(root: &Path, p: &Path) -> Option<String> {
     let rel = p.strip_prefix(root).ok()?;
@@ -236,15 +234,28 @@ fn rel_path(root: &Path, p: &Path) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-fn open_writer(db_path: &Path) -> Result<Connection> {
-    let conn = Connection::open(db_path)?;
+fn open_writer(base: &Path, generation: u64) -> Result<Connection> {
+    let path = generation_path(base, generation);
+    if !path.is_file() {
+        return Err(Error::GenerationMissing {
+            generation,
+            path: path.display().to_string(),
+        });
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     schema::configure_writer(&conn)?;
+    gen_files::validate(&conn, generation)?;
     Ok(conn)
 }
 
-/// Builds a complete index of `vault_root` at `tmp`, returning nothing; one transaction.
-fn build(vault_root: &Path, tmp: &Path, generation: u64) -> Result<()> {
-    let mut conn = open_writer(tmp)?;
+/// Builds a complete index of `vault_root` at `building` in one transaction, then switches it to
+/// WAL and closes it.
+fn build(vault_root: &Path, building: &Path, generation: u64) -> Result<()> {
+    let mut conn = Connection::open(building)?;
+    schema::configure_build(&conn)?;
     schema::create(&conn, generation)?;
     let mut entries: Vec<(String, PathBuf, std::fs::Metadata)> = Vec::new();
     let walker = WalkDir::new(vault_root)
@@ -299,17 +310,12 @@ fn build(vault_root: &Path, tmp: &Path, generation: u64) -> Result<()> {
         }
     }
     tx.commit()?;
+    schema::set_wal(&conn)?;
     conn.close().map_err(|(_, e)| Error::Sqlite(e))?;
     Ok(())
 }
 
-fn tmp_path(db_path: &Path, generation: u64) -> PathBuf {
-    let mut name = db_path
-        .file_name()
-        .map_or_else(|| "index.db".into(), std::ffi::OsStr::to_os_string);
-    name.push(format!(".tmp-{generation}"));
-    db_path.with_file_name(name)
-}
+const SIDE_FILES: [&str; 4] = ["", "-journal", "-wal", "-shm"];
 
 fn remove_if_exists(p: &Path) -> Result<()> {
     match std::fs::remove_file(p) {
@@ -319,67 +325,122 @@ fn remove_if_exists(p: &Path) -> Result<()> {
     }
 }
 
+/// Builds the next generation beside `base` and renames it into place; returns its number.
+/// On failure the `.building` files are removed and the current generation stays live.
+fn build_generation(vault_root: &Path, base: &Path) -> Result<u64> {
+    let generation = gen_files::next(&gen_files::scan(base)?);
+    let fin = generation_path(base, generation);
+    let building = with_suffix(&fin, ".building");
+    for s in SIDE_FILES {
+        remove_if_exists(&with_suffix(&building, s))?;
+    }
+    let res = build(vault_root, &building, generation).and_then(|()| {
+        let wal = with_suffix(&building, "-wal");
+        if wal.exists() {
+            return Err(Error::JournalMode(format!(
+                "{} left behind after close",
+                wal.display()
+            )));
+        }
+        std::fs::rename(&building, &fin).map_err(|e| io(&fin, e))
+    });
+    if let Err(e) = res {
+        for s in SIDE_FILES {
+            gen_files::remove_best_effort(&with_suffix(&building, s));
+        }
+        return Err(e);
+    }
+    gen_files::sync_dir(&gen_files::dir(base));
+    tracing::info!(generation, "index generation built");
+    Ok(generation)
+}
+
 impl Index {
-    /// Opens an existing `index.db` for writing. A schema mismatch is an error: the caller
-    /// rebuilds (D14 — derived, never migrated).
-    pub fn open(db_path: &Path) -> Result<Self> {
-        let conn = open_writer(db_path)?;
-        schema::check(&conn)?;
+    /// Opens the current generation beside `base` for writing (sweeping stale `.building` files,
+    /// retired generations and orphan `-wal`/`-shm` first). No valid generation →
+    /// [`Error::NoIndex`] (the caller runs [`Index::create`]); when the newest file exists but
+    /// fails validation its error ([`Error::SchemaMismatch`], …) is returned instead — rebuild
+    /// (D14 — derived, never migrated).
+    pub fn open(base: &Path) -> Result<Self> {
+        let entries = gen_files::scan(base)?;
+        let Some(generation) = gen_files::current_in(base, &entries) else {
+            if let Some(&newest) = gen_files::finals(&entries).first() {
+                gen_files::open_read_only(base, newest)?;
+            }
+            return Err(Error::NoIndex(base.display().to_string()));
+        };
+        let prev = gen_files::finals(&entries)
+            .into_iter()
+            .find(|&g| g < generation);
+        let keep: Vec<u64> = std::iter::once(generation).chain(prev).collect();
+        gen_files::sweep(base, &keep)?;
+        Self::open_generation(base, generation)
+    }
+
+    fn open_generation(base: &Path, generation: u64) -> Result<Self> {
+        let conn = open_writer(base, generation)?;
         let resolver = load_resolver(&conn)?;
         Ok(Self {
             conn,
-            db_path: db_path.to_path_buf(),
+            base: base.to_path_buf(),
+            generation,
             resolver,
         })
     }
 
-    /// Builds a fresh index of `vault_root` and swaps it in at `db_path` (see
-    /// [`Index::rebuild`]); the generation continues from any DB already there.
-    pub fn create(vault_root: &Path, db_path: &Path) -> Result<Self> {
-        let generation = Self::build_and_swap(vault_root, db_path)?;
-        let index = Self::open(db_path)?;
-        debug_assert_eq!(index.generation().ok(), Some(generation));
+    /// Builds the next generation of `vault_root` beside `base` and opens it. The previous valid
+    /// generation (if any) is kept one more round for readers still on it; older ones retire.
+    pub fn create(vault_root: &Path, base: &Path) -> Result<Self> {
+        let entries = gen_files::scan(base)?;
+        let prev = gen_files::current_in(base, &entries);
+        gen_files::sweep(base, &prev.into_iter().collect::<Vec<_>>())?;
+        let generation = build_generation(vault_root, base)?;
+        let index = Self::open_generation(base, generation)?;
+        let keep: Vec<u64> = std::iter::once(generation).chain(prev).collect();
+        gen_files::sweep(base, &keep)?;
         Ok(index)
     }
 
-    /// Writes `index.db.tmp-<gen>` beside the live file in one transaction, then `rename`s it
-    /// over the live path. Readers holding the old file keep a consistent old generation until
-    /// they reopen; a reopen sees only the complete new file. Returns the new generation.
-    ///
-    /// The DB uses a rollback journal rather than WAL: a rename swap under WAL could leave the
-    /// old file's `-wal` beside the new one.
+    /// Builds generation `g` (one past every generation file on disk), reopens the writer on it,
+    /// checkpoints (best-effort) and closes the outgoing generation, then retires every generation
+    /// except `g` and the outgoing one. A failed build leaves the current generation live.
+    /// Returns `g`.
     pub fn rebuild(&mut self, vault_root: &Path) -> Result<u64> {
-        let generation = Self::build_and_swap(vault_root, &self.db_path)?;
-        let fresh = Self::open(&self.db_path)?;
+        let generation = build_generation(vault_root, &self.base)?;
+        let fresh = Self::open_generation(&self.base, generation)?;
         let old = std::mem::replace(self, fresh);
-        drop(old);
-        Ok(generation)
-    }
-
-    fn build_and_swap(vault_root: &Path, db_path: &Path) -> Result<u64> {
-        let generation = previous_generation(db_path).saturating_add(1);
-        let tmp = tmp_path(db_path, generation);
-        remove_if_exists(&tmp)?;
-        let mut journal = tmp.clone().into_os_string();
-        journal.push("-journal");
-        remove_if_exists(Path::new(&journal))?;
-        if let Err(e) = build(vault_root, &tmp, generation) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
+        let outgoing = old.generation;
+        // PASSIVE, never TRUNCATE/RESTART: those invoke the busy handler and would let a reader
+        // still on the outgoing generation stall the writer thread (plan :95/:298). The outgoing
+        // file keeps its own `-wal` beside it until it retires, so a partial checkpoint is safe.
+        if let Err(e) = old
+            .conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
+        {
+            tracing::warn!(generation = outgoing, error = %e, "outgoing checkpoint failed");
         }
-        std::fs::rename(&tmp, db_path).map_err(|e| io(db_path, e))?;
-        tracing::info!(generation, "index rebuilt");
+        if let Err((_, e)) = old.conn.close() {
+            tracing::warn!(generation = outgoing, error = %e, "closing outgoing generation failed");
+        }
+        if let Err(e) = gen_files::sweep(&self.base, &[generation, outgoing]) {
+            tracing::warn!(error = %e, "retiring old generations failed");
+        }
         Ok(generation)
     }
 
-    /// The live DB path.
-    pub fn db_path(&self) -> &Path {
-        &self.db_path
+    /// The current generation's file.
+    pub fn db_path(&self) -> PathBuf {
+        generation_path(&self.base, self.generation)
     }
 
-    /// The rebuild generation.
+    /// The configured base path (what `hello`'s `index_db` carries; never itself a DB).
+    pub fn base_path(&self) -> &Path {
+        &self.base
+    }
+
+    /// The current generation (equal to the file's number and to `meta.generation`).
     pub fn generation(&self) -> Result<u64> {
-        schema::generation(&self.conn)
+        Ok(self.generation)
     }
 
     /// The in-memory resolver (in sync with `files`).

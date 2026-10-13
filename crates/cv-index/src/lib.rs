@@ -7,11 +7,18 @@
 //!   with an in-memory [`Resolver`] kept in sync with `files`.
 //! - [`Reader`] is the read-only client handle (`SQLITE_OPEN_READ_ONLY`); both expose the same
 //!   [`Query`] API (backlinks, outgoing links, tags, props, folders, tasks, unresolved, FTS).
+//! - Layout: `CV_INDEX_DB` is a *base* path, never itself a DB. Generation `n` is its own WAL
+//!   database at [`generation_path`] (`index.db` → `index-7.db`) with its own `-wal`/`-shm`, so
+//!   readers never block the writer and no WAL ever pairs with a different main file. The current
+//!   and the previous generation stay on disk; older ones are unlinked (open readers keep their
+//!   inode). For WP-8: `hello`'s `index_db` carries the base path and `generation` the number;
+//!   clients open `Reader::open(base, generation)` and reopen on `index_generation`.
 //!
 //! Pure and sync: no async runtime (AGENTS.md → Stack).
 
 mod error;
 mod extract;
+mod generation;
 mod index;
 mod query;
 mod resolver;
@@ -19,6 +26,7 @@ mod schema;
 
 pub use error::{Error, Result};
 pub use extract::{is_parsed_path, is_skipped_path, is_target_only_path};
+pub use generation::{current_generation, generation_path};
 pub use index::Index;
 pub use query::{
     BlockRow, FileRow, FtsHit, LinkKind, LinkRow, PropRow, Query, Reader, TagCount, TagRow, TaskRow,

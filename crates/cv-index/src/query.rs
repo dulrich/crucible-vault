@@ -4,11 +4,11 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::schema;
+use crate::{generation, schema};
 
 /// A link's syntactic kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -218,6 +218,13 @@ impl<'a> Query<'a> {
     }
 
     /// The rebuild generation of this DB.
+    /// The connection's `PRAGMA journal_mode` (`wal` for every final generation).
+    pub fn journal_mode(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))?)
+    }
+
     pub fn generation(&self) -> Result<u64> {
         schema::generation(self.conn)
     }
@@ -433,22 +440,33 @@ impl<'a> Query<'a> {
     }
 }
 
-/// A read-only client handle on `index.db`. Reopen on `index_generation` (plan Public
-/// Interfaces): a rebuild swaps a new file in, and this handle keeps reading the old one.
+/// A read-only client handle on one `index.db` generation. Reopen on `index_generation` (plan
+/// Public Interfaces): a rebuild builds a new generation file, and this handle keeps reading its
+/// own (even after retirement unlinks it). Readers never write and never checkpoint.
 pub struct Reader {
     conn: Connection,
+    generation: u64,
 }
 
 impl Reader {
-    /// Opens `path` with `SQLITE_OPEN_READ_ONLY`; fails on a schema mismatch.
-    pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        schema::check(&conn)?;
-        Ok(Self { conn })
+    /// Opens generation `generation` beside `base` with `SQLITE_OPEN_READ_ONLY` (never creates
+    /// it). Fails with [`Error::GenerationMissing`] when the file is absent, and on a schema or
+    /// stored-generation mismatch.
+    pub fn open(base: &Path, generation: u64) -> Result<Self> {
+        let conn = generation::open_read_only(base, generation)?;
+        Ok(Self { conn, generation })
+    }
+
+    /// Opens [`crate::current_generation`]; none → [`Error::NoIndex`].
+    pub fn open_current(base: &Path) -> Result<Self> {
+        let generation = generation::current_generation(base)?
+            .ok_or_else(|| Error::NoIndex(base.display().to_string()))?;
+        Self::open(base, generation)
+    }
+
+    /// The generation this handle reads.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The query API.

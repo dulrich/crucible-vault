@@ -21,6 +21,19 @@ pub enum Error {
     NotFound(String),
     #[error("already indexed: {0}")]
     AlreadyExists(String),
+    /// No valid index generation exists beside the base path: the caller runs `Index::create`.
+    #[error("no index generation at {0}")]
+    NoIndex(String),
+    /// The requested generation's file is absent (retired, or never built): reopen the current
+    /// generation.
+    #[error("index generation {generation} missing at {path}")]
+    GenerationMissing { generation: u64, path: String },
+    /// A generation file whose stored `meta.generation` disagrees with its file number.
+    #[error("index generation file {file} stores generation {stored}")]
+    GenerationMismatch { file: u64, stored: u64 },
+    /// `PRAGMA journal_mode` did not report `wal`.
+    #[error("index journal mode is {0:?}, expected \"wal\"")]
+    JournalMode(String),
     #[error("stored prop is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
