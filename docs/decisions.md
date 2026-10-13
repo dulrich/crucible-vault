@@ -111,3 +111,8 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 ## D17 — Visibility (2026-10-13; assumed, not asked)
 
 - The repo stays **private** (`initiative-visibility: private`) and is never published. Revisit only if the user raises it.
+
+## D18 — Config format (2026-10-13)
+
+- **Decision:** every crucible-vault config file under the vault's `_custom/crucible-vault/` is **TOML** — actions, kinds, captures, agents, providers, schedules, plus plan B's views and bookmarks and A2's tracker/pipeline config.
+- **Rationale:** serde-native, comments allowed, no YAML typing traps; proposed in `plans/v0-core-daemon.md` Decisions locked and confirmed by the user at approval time.
