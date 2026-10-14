@@ -34,7 +34,40 @@ pub trait ViewService: Send {
 /// [`ViewService::on_config_changed`]). [`ViewRegistry::index_base`] gives the index base path
 /// (`cv_index::generation_path(base, reader.generation())` is the generation file a service may
 /// open its own read-only connection on).
-pub fn register_views(_reg: &mut ViewRegistry, _config_dir: &Path) {}
+pub fn register_views(reg: &mut ViewRegistry, config_dir: &Path) {
+    // `views` cannot depend on `cv`, so the trait impl for its host lives here.
+    struct Hosted(views::ViewHost);
+    impl ViewService for Hosted {
+        fn view_ids(&self) -> Vec<String> {
+            self.0.view_ids()
+        }
+        fn run(
+            &mut self,
+            reader: &cv_index::Reader,
+            view_id: &str,
+            this_path: Option<&str>,
+        ) -> Result<ViewResult, String> {
+            self.0.run(reader, view_id, this_path)
+        }
+        fn on_index_generation(&mut self, n: u64) -> Vec<String> {
+            self.0.on_index_generation(n)
+        }
+        fn on_config_changed(&mut self, config_dir: &Path) -> Vec<String> {
+            let ids = self.0.on_config_changed(config_dir);
+            for n in self.0.load_notices() {
+                tracing::warn!(notice = %n, "view definitions");
+            }
+            ids
+        }
+    }
+    let host = views::ViewHost::new(config_dir, reg.index_base());
+    for n in host.load_notices() {
+        tracing::warn!(notice = %n, "view definitions");
+    }
+    if let Err(e) = reg.register(Box::new(Hosted(host))) {
+        tracing::warn!(error = %e, "registering the views service");
+    }
+}
 
 enum Cmd {
     Run {

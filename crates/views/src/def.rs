@@ -1,0 +1,544 @@
+//! The TOML definition format (one file = one `.base`) and its compiled form.
+//!
+//! Keys mirror `.base` YAML 1:1 (`groupBy`, `displayName`, `columnSize` keep their camelCase;
+//! snake_case aliases are accepted). Expressions stay strings in Bases syntax.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::Deserialize;
+
+use crate::expr::{self, Expr};
+
+/// A filter tree: an expression string, or `and`/`or`/`not` lists.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum FilterNode {
+    Expr(String),
+    And { and: Vec<FilterNode> },
+    Or { or: Vec<FilterNode> },
+    Not { not: Vec<FilterNode> },
+}
+
+/// `[properties."<id>"]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PropertyDef {
+    #[serde(rename = "displayName", alias = "display_name", default)]
+    pub display_name: Option<String>,
+}
+
+/// Sort direction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum Direction {
+    #[default]
+    #[serde(alias = "asc")]
+    ASC,
+    #[serde(alias = "desc")]
+    DESC,
+}
+
+/// `{property, direction}`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SortSpec {
+    pub property: String,
+    #[serde(default)]
+    pub direction: Direction,
+}
+
+/// View type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewType {
+    Table,
+    Pivot,
+    Tasks,
+}
+
+/// One pivot column: assigned to a row when `when` is truthy (first match in list order; a
+/// column without `when` catches everything left).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PivotColumn {
+    pub label: String,
+    #[serde(default)]
+    pub when: Option<String>,
+}
+
+/// Pivot aggregate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Aggregate {
+    #[default]
+    Sum,
+    Count,
+}
+
+/// Task grouping.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskGroup {
+    #[default]
+    Heading,
+    File,
+    None,
+}
+
+/// `[[views]]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewDef {
+    #[serde(rename = "type")]
+    pub kind: ViewType,
+    pub name: String,
+    #[serde(default)]
+    pub filters: Option<FilterNode>,
+    #[serde(default)]
+    pub order: Vec<String>,
+    #[serde(default)]
+    pub sort: Vec<SortSpec>,
+    #[serde(rename = "groupBy", alias = "group_by", default)]
+    pub group_by: Option<SortSpec>,
+    /// Property id → `Sum` | `Average` | `Count` | `Min` | `Max`.
+    #[serde(default)]
+    pub summaries: BTreeMap<String, String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Accepted for 1:1 migration; display hint only (unused by the evaluator).
+    #[serde(rename = "columnSize", alias = "column_size", default)]
+    pub column_size: BTreeMap<String, i64>,
+    // --- pivot ---
+    /// Row key expression.
+    #[serde(default)]
+    pub rows: Option<String>,
+    /// Header of the row-key column.
+    #[serde(default)]
+    pub rows_label: Option<String>,
+    #[serde(default)]
+    pub rows_direction: Direction,
+    #[serde(default)]
+    pub columns: Vec<PivotColumn>,
+    /// Value expression aggregated per cell.
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub aggregate: Aggregate,
+    /// Cell display expression with `value` = the aggregated number (default: the number).
+    #[serde(default)]
+    pub display: Option<String>,
+    /// Label of the per-row total column (omitted when unset).
+    #[serde(default)]
+    pub total_column: Option<String>,
+    /// Label of the Total summary row (omitted when unset).
+    #[serde(default)]
+    pub total_row: Option<String>,
+    /// Label of the average summary row: column total ÷ number of row keys with entries.
+    #[serde(default)]
+    pub average_row: Option<String>,
+    // --- tasks ---
+    /// Allowed status chars (`[" "]` = open); empty = any.
+    #[serde(default)]
+    pub status: Vec<String>,
+    /// Drop tasks whose text is blank (default true).
+    #[serde(default)]
+    pub require_text: Option<bool>,
+    /// Per-task predicate with `value` = `{status, text, heading, line}`.
+    #[serde(default)]
+    pub task_filter: Option<String>,
+    #[serde(default)]
+    pub task_group: TaskGroup,
+}
+
+/// One definition file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaseDef {
+    #[serde(default)]
+    pub filters: Option<FilterNode>,
+    #[serde(default)]
+    pub formulas: BTreeMap<String, String>,
+    #[serde(default)]
+    pub properties: BTreeMap<String, PropertyDef>,
+    #[serde(default)]
+    pub views: Vec<ViewDef>,
+}
+
+/// A compiled filter tree.
+#[derive(Debug, Clone)]
+pub enum Filter {
+    Expr(Expr),
+    And(Vec<Filter>),
+    Or(Vec<Filter>),
+    Not(Vec<Filter>),
+}
+
+fn compile_filter(n: &FilterNode, errs: &mut Vec<String>, what: &str) -> Filter {
+    let list = |v: &[FilterNode], errs: &mut Vec<String>| {
+        v.iter()
+            .map(|x| compile_filter(x, errs, what))
+            .collect::<Vec<_>>()
+    };
+    match n {
+        FilterNode::Expr(s) => match expr::parse(s) {
+            Ok(e) => Filter::Expr(e),
+            Err(e) => {
+                errs.push(format!("{what}: {e} in `{s}`"));
+                Filter::Expr(Expr::Lit(crate::value::Value::Bool(false)))
+            }
+        },
+        FilterNode::And { and } => Filter::And(list(and, errs)),
+        FilterNode::Or { or } => Filter::Or(list(or, errs)),
+        FilterNode::Not { not } => Filter::Not(list(not, errs)),
+    }
+}
+
+fn compile_opt(s: Option<&String>, errs: &mut Vec<String>, what: &str) -> Option<Expr> {
+    let s = s?;
+    match expr::parse(s) {
+        Ok(e) => Some(e),
+        Err(e) => {
+            errs.push(format!("{what}: {e} in `{s}`"));
+            None
+        }
+    }
+}
+
+/// A summary function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SumFn {
+    Sum,
+    Average,
+    Count,
+    Min,
+    Max,
+}
+
+impl SumFn {
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "sum" => Self::Sum,
+            "average" | "avg" => Self::Average,
+            "count" => Self::Count,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            _ => return None,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sum => "Sum",
+            Self::Average => "Average",
+            Self::Count => "Count",
+            Self::Min => "Min",
+            Self::Max => "Max",
+        }
+    }
+}
+
+/// A compiled pivot.
+#[derive(Debug, Clone)]
+pub struct Pivot {
+    pub rows: Expr,
+    pub rows_label: String,
+    pub rows_direction: Direction,
+    pub columns: Vec<(String, Option<Expr>)>,
+    pub value: Expr,
+    pub aggregate: Aggregate,
+    pub display: Option<Expr>,
+    pub total_column: Option<String>,
+    pub total_row: Option<String>,
+    pub average_row: Option<String>,
+}
+
+/// A compiled task query.
+#[derive(Debug, Clone)]
+pub struct Tasks {
+    pub status: Vec<String>,
+    pub require_text: bool,
+    pub task_filter: Option<Expr>,
+    pub group: TaskGroup,
+}
+
+/// A compiled view.
+#[derive(Debug, Clone)]
+pub struct View {
+    pub name: String,
+    pub kind: ViewType,
+    /// Base-level and view-level filters (all must hold).
+    pub filters: Vec<Filter>,
+    /// `(property id, expression, label)`.
+    pub order: Vec<(String, Expr, String)>,
+    pub sort: Vec<(Expr, Direction)>,
+    pub group: Option<(Expr, Direction)>,
+    pub summaries: Vec<(String, SumFn)>,
+    pub limit: Option<usize>,
+    pub pivot: Option<Pivot>,
+    pub tasks: Option<Tasks>,
+    /// Definition errors: shown as notices; a filter error empties the view.
+    pub errors: Vec<String>,
+    pub filter_error: bool,
+}
+
+/// A compiled definition file.
+#[derive(Debug, Clone)]
+pub struct Base {
+    pub stem: String,
+    pub formulas: BTreeMap<String, Result<Expr, String>>,
+    pub views: Vec<View>,
+}
+
+fn default_label(id: &str) -> String {
+    match id.split_once('.') {
+        Some(("file", "name")) => "file name".into(),
+        Some(("file" | "note" | "formula", rest)) => rest.to_string(),
+        _ => id.to_string(),
+    }
+}
+
+/// Normalizes a property id for display-name lookup (`word-count` ≡ `note.word-count`).
+fn norm(id: &str) -> String {
+    match id.split_once('.') {
+        Some(("file" | "note" | "formula", _)) => id.to_string(),
+        _ => format!("note.{id}"),
+    }
+}
+
+impl Base {
+    /// Compiles `def` (from file stem `stem`); never fails — problems become view notices.
+    pub fn compile(stem: &str, def: &BaseDef, load_notices: &mut Vec<String>) -> Self {
+        let formulas: BTreeMap<String, Result<Expr, String>> = def
+            .formulas
+            .iter()
+            .map(|(k, s)| {
+                (
+                    k.clone(),
+                    expr::parse(s).map_err(|e| format!("formula `{k}`: {e}")),
+                )
+            })
+            .collect();
+        let formula_errs: Vec<String> = formulas
+            .values()
+            .filter_map(|r| r.as_ref().err().cloned())
+            .collect();
+        let labels: BTreeMap<String, String> = def
+            .properties
+            .iter()
+            .filter_map(|(k, p)| p.display_name.clone().map(|d| (norm(k), d)))
+            .collect();
+        let mut views: Vec<View> = Vec::new();
+        for v in &def.views {
+            if views.iter().any(|x| x.name == v.name) {
+                load_notices.push(format!("{stem}: duplicate view name `{}` skipped", v.name));
+                continue;
+            }
+            views.push(compile_view(v, def, &formula_errs, &labels));
+        }
+        Self {
+            stem: stem.to_string(),
+            formulas,
+            views,
+        }
+    }
+
+    pub fn id(&self, v: &View) -> String {
+        format!("{}#{}", self.stem, v.name)
+    }
+}
+
+fn compile_view(
+    v: &ViewDef,
+    def: &BaseDef,
+    formula_errs: &[String],
+    labels: &BTreeMap<String, String>,
+) -> View {
+    let mut errors: Vec<String> = formula_errs.to_vec();
+    let mut ferrs = Vec::new();
+    let mut filters = Vec::new();
+    if let Some(f) = &def.filters {
+        filters.push(compile_filter(f, &mut ferrs, "filters"));
+    }
+    if let Some(f) = &v.filters {
+        filters.push(compile_filter(f, &mut ferrs, "view filters"));
+    }
+    let filter_error = !ferrs.is_empty();
+    errors.extend(ferrs);
+    let label = |id: &str| {
+        labels
+            .get(&norm(id))
+            .cloned()
+            .unwrap_or_else(|| default_label(id))
+    };
+    let order = v
+        .order
+        .iter()
+        .map(|id| (id.clone(), expr::property(id), label(id)))
+        .collect();
+    let sort = v
+        .sort
+        .iter()
+        .map(|s| (expr::property(&s.property), s.direction))
+        .collect();
+    let group = v
+        .group_by
+        .as_ref()
+        .map(|s| (expr::property(&s.property), s.direction));
+    let mut summaries = Vec::new();
+    for (k, f) in &v.summaries {
+        match SumFn::parse(f) {
+            Some(s) => summaries.push((k.clone(), s)),
+            None => errors.push(format!("summaries: unknown summary `{f}` for `{k}`")),
+        }
+    }
+    let pivot = if v.kind == ViewType::Pivot {
+        let rows = compile_opt(v.rows.as_ref(), &mut errors, "rows");
+        let value = compile_opt(v.value.as_ref(), &mut errors, "value");
+        let display = compile_opt(v.display.as_ref(), &mut errors, "display");
+        let mut columns = Vec::new();
+        for c in &v.columns {
+            let when = compile_opt(c.when.as_ref(), &mut errors, "columns.when");
+            if c.when.is_some() && when.is_none() {
+                continue;
+            }
+            columns.push((c.label.clone(), when));
+        }
+        if v.rows.is_none() || v.value.is_none() || v.columns.is_empty() {
+            errors.push("pivot needs `rows`, `columns` and `value`".into());
+        }
+        rows.zip(value).map(|(rows, value)| Pivot {
+            rows,
+            rows_label: v.rows_label.clone().unwrap_or_else(|| "key".into()),
+            rows_direction: v.rows_direction,
+            columns,
+            value,
+            aggregate: v.aggregate,
+            display,
+            total_column: v.total_column.clone(),
+            total_row: v.total_row.clone(),
+            average_row: v.average_row.clone(),
+        })
+    } else {
+        None
+    };
+    let tasks = (v.kind == ViewType::Tasks).then(|| Tasks {
+        status: v.status.clone(),
+        require_text: v.require_text.unwrap_or(true),
+        task_filter: compile_opt(v.task_filter.as_ref(), &mut errors, "task_filter"),
+        group: v.task_group,
+    });
+    View {
+        name: v.name.clone(),
+        kind: v.kind,
+        filters,
+        order,
+        sort,
+        group,
+        summaries,
+        limit: v.limit,
+        pivot,
+        tasks,
+        filter_error,
+        errors,
+    }
+}
+
+/// Loads every `<dir>/views/*.toml` (sorted). A file that fails to read or parse becomes a load
+/// notice; the others still load. A missing directory is no views, no notice.
+pub fn load_dir(config_dir: &Path) -> (Vec<Base>, Vec<String>) {
+    let dir = config_dir.join("views");
+    let mut notices = Vec::new();
+    let mut paths: Vec<_> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "toml") && p.is_file())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), notices),
+        Err(e) => {
+            notices.push(format!("views dir: {e}"));
+            return (Vec::new(), notices);
+        }
+    };
+    paths.sort();
+    let mut bases = Vec::new();
+    for p in paths {
+        let stem = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let parsed = std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())
+            .and_then(|s| toml::from_str::<BaseDef>(&s).map_err(|e| e.to_string()));
+        match parsed {
+            Ok(def) => bases.push(Base::compile(&stem, &def, &mut notices)),
+            Err(e) => notices.push(format!("{stem}.toml: {}", e.trim())),
+        }
+    }
+    (bases, notices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"
+[filters]
+and = ['file.inFolder("daily/day")', { or = ["note.a", { not = ["note.b"] }] }]
+
+[formulas]
+minutes = '(number(note["word-count"]) / 200).round(1)'
+bad = 'nope(1)'
+
+[properties."note.word-count"]
+displayName = "Words"
+
+[[views]]
+type = "table"
+name = "T"
+order = ["file.name", "word-count", "formula.minutes"]
+sort = [{ property = "formula.minutes", direction = "DESC" }]
+groupBy = { property = "note.kind", direction = "ASC" }
+summaries = { "note.word-count" = "Sum", "formula.minutes" = "Bogus" }
+columnSize = { "file.name" = 120 }
+
+[[views]]
+type = "pivot"
+name = "P"
+rows = "note.created"
+columns = [{ label = "a", when = "file.hasTag(\"a\")" }, { label = "other" }]
+value = "number(note.n)"
+total_row = "Total"
+average_row = "Average/day"
+
+[[views]]
+type = "tasks"
+name = "K"
+status = [" "]
+"#;
+
+    #[test]
+    fn parses_and_compiles() {
+        let def: BaseDef = toml::from_str(SAMPLE).unwrap();
+        let mut n = Vec::new();
+        let b = Base::compile("s", &def, &mut n);
+        assert!(n.is_empty());
+        assert_eq!(b.views.len(), 3);
+        let t = &b.views[0];
+        assert_eq!(b.id(t), "s#T");
+        assert_eq!(t.order[1].2, "Words");
+        assert_eq!(t.order[0].2, "file name");
+        assert!(t.errors.iter().any(|e| e.contains("nope")));
+        assert!(t.errors.iter().any(|e| e.contains("Bogus")));
+        assert!(!t.filter_error);
+        assert_eq!(t.summaries.len(), 1);
+        assert!(b.views[1].pivot.is_some());
+        assert!(b.views[2].tasks.as_ref().is_some_and(|k| k.require_text));
+    }
+
+    #[test]
+    fn rejects_unknown_keys() {
+        assert!(toml::from_str::<BaseDef>("[[views]]\ntype='table'\nname='x'\nbogus=1\n").is_err());
+        assert!(toml::from_str::<BaseDef>("[[views]]\ntype='chart'\nname='x'\n").is_err());
+    }
+}

@@ -839,6 +839,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "views",
 ]
 
 [[package]]

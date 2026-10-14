@@ -30,6 +30,7 @@ cv-text = { path = "../cv-text" }
 cv-lint = { path = "../cv-lint" }
 cv-actions = { path = "../cv-actions" }
 cv-index = { path = "../cv-index" }
+views = { path = "../views" }
 cv-state = { path = "../cv-state" }
 cv-vault = { path = "../cv-vault" }
 cv-providers = { path = "../cv-providers" }
