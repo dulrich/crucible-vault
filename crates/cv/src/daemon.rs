@@ -177,7 +177,7 @@ impl Daemon {
         let (handle, vault_events, writer_join) =
             cv_vault::spawn_writer_with_watcher(writer, opts.watch).context("starting writer")?;
         let mut views = ViewRegistry::new(&config.index_db, events.clone());
-        register_views(&mut views);
+        register_views(&mut views, &config.config_dir);
         Ok(Self {
             shared: Arc::new(Shared {
                 config,

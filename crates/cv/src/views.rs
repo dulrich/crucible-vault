@@ -28,7 +28,13 @@ pub trait ViewService: Send {
 }
 
 /// The A1 registration point. Plan B's WP-6 adds its one `reg.register(...)` line here.
-pub fn register_views(_reg: &mut ViewRegistry) {}
+///
+/// `config_dir` is `CV_CONFIG_DIR` at startup, so a service loads its definitions when it is
+/// constructed (the config poller only reports later *changes* through
+/// [`ViewService::on_config_changed`]). [`ViewRegistry::index_base`] gives the index base path
+/// (`cv_index::generation_path(base, reader.generation())` is the generation file a service may
+/// open its own read-only connection on).
+pub fn register_views(_reg: &mut ViewRegistry, _config_dir: &Path) {}
 
 enum Cmd {
     Run {
@@ -81,6 +87,11 @@ impl ViewRegistry {
             events,
             hosts: Vec::new(),
         }
+    }
+
+    /// The index base path (`CV_INDEX_DB`) this registry's readers open generations under.
+    pub fn index_base(&self) -> &Path {
+        &self.index_base
     }
 
     /// Hosts `service` on its own thread.
@@ -248,8 +259,9 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(16);
 
         let mut empty = ViewRegistry::new(&base, tx.clone());
-        register_views(&mut empty);
+        register_views(&mut empty, &tmp);
         assert!(empty.view_ids().is_empty());
+        assert_eq!(empty.index_base(), base.as_path());
         assert_eq!(
             empty.run("x", None).await.unwrap_err(),
             ViewError::NotFound("x".into())
