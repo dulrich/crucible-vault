@@ -26,10 +26,11 @@ pub mod materialize;
 pub mod search;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use cv_actions::{Action, ConfigSet, Step, StepKind};
 use cv_protocol::ActionContext;
-use cv_state::FailureReason;
+use cv_state::{FailureReason, StateDb};
 use cv_vault::{ContentHash, VaultError, WriterHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -132,6 +133,9 @@ pub struct StepCtx<'a> {
     pub vault_root: &'a Path,
     /// The `CV_INDEX_DB` base (open a `cv_index::Reader` for queries).
     pub index_db: &'a Path,
+    /// The daemon's `state.db` (e.g. image descriptions for the search feed). Lock briefly and
+    /// never across a writer call; steps run on a blocking thread, so a std `Mutex` is fine.
+    pub state: &'a Arc<Mutex<StateDb>>,
     pub(crate) writer: Option<WriterHandle>,
     pub(crate) children: &'a dyn ChildSpawner,
     pub(crate) written: Vec<String>,

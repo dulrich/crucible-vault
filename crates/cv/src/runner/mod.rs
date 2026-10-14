@@ -744,6 +744,7 @@ fn execute_steps(
             config,
             vault_root: &inner.vault_root,
             index_db: &inner.index_db,
+            state: &inner.state,
             writer: inner.writer.writer(),
             children: &spawner,
             written: Vec::new(),
