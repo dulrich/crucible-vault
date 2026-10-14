@@ -195,9 +195,26 @@ pub enum PanelsMsg {
     Scrolled(crate::panels::ListId, ListWindow),
 }
 
-/// WP-7: view fences.
+/// WP-7: view fences, keyed by `(view id, embedding note)`.
 #[derive(Debug, Clone)]
-pub enum ViewsMsg {}
+pub enum ViewsMsg {
+    /// A fence came into view (or was invalidated while shown): request its result.
+    Need { id: String, host: Option<String> },
+    /// `view_run` finished: the raw `ViewResult` JSON or an error.
+    Loaded {
+        id: String,
+        host: Option<String>,
+        result: Result<serde_json::Value, String>,
+    },
+    /// The fence's virtual list scrolled.
+    Scrolled {
+        id: String,
+        host: Option<String>,
+        window: ListWindow,
+    },
+    /// A row / link cell click: open `path`, cursor at 1-based `line` when set.
+    Open { path: String, line: Option<i64> },
+}
 
 /// WP-4: day/month nav. The bar belongs to `pane`; results open in that pane's active tab.
 #[derive(Debug, Clone)]

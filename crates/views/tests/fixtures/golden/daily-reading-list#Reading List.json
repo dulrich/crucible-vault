@@ -1,0 +1,141 @@
+{
+  "columns": [
+    {
+      "key": "file.name",
+      "label": "file name"
+    },
+    {
+      "key": "formula.tags",
+      "label": "tags"
+    },
+    {
+      "key": "word-count",
+      "label": "word-count"
+    },
+    {
+      "key": "formula.minutes",
+      "label": "minutes"
+    },
+    {
+      "key": "formula.read",
+      "label": "read"
+    },
+    {
+      "key": "formula.unread_words",
+      "label": "unread_words"
+    },
+    {
+      "key": "formula.unread_minutes",
+      "label": "unread_minutes"
+    }
+  ],
+  "groups": [
+    {
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "Alpha Post",
+              "path": "daily/day/2026-10-01/Alpha Post.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "blog"
+            },
+            {
+              "t": "number",
+              "v": 400.0
+            },
+            {
+              "t": "number",
+              "v": 2.0
+            },
+            {
+              "t": "text",
+              "v": "✅"
+            },
+            {
+              "t": "number",
+              "v": 0.0
+            },
+            {
+              "t": "number",
+              "v": 0.0
+            }
+          ],
+          "path": "daily/day/2026-10-01/Alpha Post.md"
+        },
+        {
+          "cells": [
+            {
+              "label": "World News",
+              "path": "daily/day/2026-10-01/World News.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "news"
+            },
+            {
+              "t": "number",
+              "v": 1000.0
+            },
+            {
+              "t": "number",
+              "v": 5.0
+            },
+            {
+              "t": "text",
+              "v": "❌"
+            },
+            {
+              "t": "number",
+              "v": 1000.0
+            },
+            {
+              "t": "number",
+              "v": 5.0
+            }
+          ],
+          "path": "daily/day/2026-10-01/World News.md"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": [
+    {
+      "cells": [
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "number",
+          "v": 1400.0
+        },
+        {
+          "t": "number",
+          "v": 7.0
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "number",
+          "v": 1000.0
+        },
+        {
+          "t": "number",
+          "v": 5.0
+        }
+      ],
+      "label": "Sum"
+    }
+  ]
+}

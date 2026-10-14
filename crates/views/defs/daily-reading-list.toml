@@ -1,0 +1,19 @@
+# Migrated from vault-repo `_custom/bases/daily-reading-list.base` (view `Reading List`), expressions verbatim.
+# `this` = the day note; rows are the reading entries in `daily/day/<day>/`.
+
+[filters]
+and = ['file.folder == "daily/day/" + this.file.name']
+
+[formulas]
+tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "using").join(", ")'
+minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
+unread_words = 'if(note.read == true, 0, number(note["word-count"]))'
+unread_minutes = 'if(note.read == true, 0, (number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1))'
+read = 'if(note.read == true, "✅", "❌")'
+
+[[views]]
+type = "table"
+name = "Reading List"
+order = ["file.name", "formula.tags", "word-count", "formula.minutes", "formula.read", "formula.unread_words", "formula.unread_minutes"]
+summaries = { "word-count" = "Sum", "formula.minutes" = "Sum", "formula.unread_words" = "Sum", "formula.unread_minutes" = "Sum" }
+columnSize = { "formula.read" = 137, "formula.unread_words" = 204 }

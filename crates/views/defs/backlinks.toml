@@ -1,0 +1,8 @@
+# Restored feature: the backlinks of the embedding note (`this`), newest first.
+
+[[views]]
+type = "table"
+name = "Here"
+filters = { and = ['file.hasLink(this.file)'] }
+order = ["file.name", "file.mtime"]
+sort = [{ property = "file.mtime", direction = "DESC" }]

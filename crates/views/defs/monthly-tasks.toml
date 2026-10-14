@@ -1,0 +1,15 @@
+# Restored from the deleted Dataview `monthly-note-incomplete-tasks.js`: open tasks (status " ",
+# non-empty text) in the host month's day notes (`daily/day/<YYYY-MM>-DD.md`, `this` = the month
+# note) whose basename date is strictly before today, grouped by enclosing heading ("General").
+
+[[views]]
+type = "tasks"
+name = "Overdue"
+filters = { and = [
+  'file.folder == "daily/day"',
+  'file.name.startsWith(this.file.name)',
+  'file.name < today().format("YYYY-MM-DD")',
+] }
+status = [" "]
+require_text = true
+task_group = "heading"

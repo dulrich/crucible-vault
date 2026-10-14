@@ -1,0 +1,22 @@
+# Migrated from vault-repo `_custom/bases/blog-story-list.base` (view `Stories`), expressions verbatim.
+# `this` = the work note embedding the view (its `author-filter` / `source-prefix-filter`).
+
+[formulas]
+tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "using").join(", ")'
+minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
+read = 'if(note.read == true, "✅", "❌")'
+created = 'if(note.created, note.created, file.ctime)'
+unread_words = 'if(note.read == true, 0, number(note["word-count"]))'
+
+[filters]
+and = [
+  'file.inFolder("daily/day")',
+  '(this["author-filter"] && this["author-filter"].toString().trim() != "" || list(this["source-prefix-filter"]).filter(value.toString().trim() != "").length > 0) && (!(this["author-filter"] && this["author-filter"].toString().trim() != "") || list(note.author).map(value.toString().trim().replace("#", "")).contains(this["author-filter"].toString().trim().replace("#", ""))) && (list(this["source-prefix-filter"]).filter(value.toString().trim() != "").length == 0 || list(this["source-prefix-filter"]).filter(value.toString().trim() != "").filter(note.source.toString().trim().startsWith(value.toString().trim())).length > 0)',
+]
+
+[[views]]
+type = "table"
+name = "Stories"
+order = ["file.name", "formula.tags", "note.word-count", "formula.minutes", "formula.created", "formula.read"]
+sort = [{ property = "formula.created", direction = "ASC" }]
+summaries = { "note.word-count" = "Sum", "formula.minutes" = "Sum", "formula.unread_words" = "Sum" }

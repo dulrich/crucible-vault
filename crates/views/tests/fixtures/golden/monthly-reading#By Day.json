@@ -1,0 +1,196 @@
+{
+  "columns": [
+    {
+      "key": "rows",
+      "label": "Day"
+    },
+    {
+      "key": "Blog",
+      "label": "Blog"
+    },
+    {
+      "key": "News",
+      "label": "News"
+    },
+    {
+      "key": "Transcript",
+      "label": "Transcript"
+    },
+    {
+      "key": "Fanfic",
+      "label": "Fanfic"
+    },
+    {
+      "key": "Other",
+      "label": "Other"
+    },
+    {
+      "key": "total",
+      "label": "Total"
+    }
+  ],
+  "groups": [
+    {
+      "rows": [
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "2026-10-01"
+            },
+            {
+              "t": "text",
+              "v": "400 / 2.0m"
+            },
+            {
+              "t": "text",
+              "v": "1000 / 5.0m"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
+              "v": "1400 / 7.0m"
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "2026-10-02"
+            },
+            {
+              "t": "text",
+              "v": "600 / 3.0m"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
+              "v": "600 / 3.0m"
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "2026-10-03"
+            },
+            {
+              "t": "text",
+              "v": "250 / 1.2m"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
+              "v": "300 / 1.5m"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
+              "v": "150 / 0.8m"
+            },
+            {
+              "t": "text",
+              "v": "700 / 3.5m"
+            }
+          ]
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "pivot",
+  "notices": [],
+  "summaries": [
+    {
+      "cells": [
+        {
+          "t": "text",
+          "v": "Total"
+        },
+        {
+          "t": "text",
+          "v": "1250 / 6.2m"
+        },
+        {
+          "t": "text",
+          "v": "1000 / 5.0m"
+        },
+        {
+          "t": "text",
+          "v": "300 / 1.5m"
+        },
+        {
+          "t": "text",
+          "v": "—"
+        },
+        {
+          "t": "text",
+          "v": "150 / 0.8m"
+        },
+        {
+          "t": "text",
+          "v": "2700 / 13.5m"
+        }
+      ],
+      "label": "Total"
+    },
+    {
+      "cells": [
+        {
+          "t": "text",
+          "v": "Average/day"
+        },
+        {
+          "t": "text",
+          "v": "417 / 2.1m"
+        },
+        {
+          "t": "text",
+          "v": "333 / 1.7m"
+        },
+        {
+          "t": "text",
+          "v": "100 / 0.5m"
+        },
+        {
+          "t": "text",
+          "v": "—"
+        },
+        {
+          "t": "text",
+          "v": "50 / 0.2m"
+        },
+        {
+          "t": "text",
+          "v": "900 / 4.5m"
+        }
+      ],
+      "label": "Average/day"
+    }
+  ]
+}

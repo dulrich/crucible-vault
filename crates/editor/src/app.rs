@@ -115,6 +115,8 @@ pub struct App {
     pub palette: crate::palette::Palette,
     /// WP-5: the right-hand side panels.
     pub panels: crate::panels::Panels,
+    /// WP-7: `crucible-view` fence results, keyed by `(view id, embedding note)`.
+    pub views: crate::views::ViewStore,
     tokens: Tokens,
     notifications: NotifHandle,
     state_path: Option<PathBuf>,
@@ -229,6 +231,7 @@ impl App {
             reading: crate::reading::ReadingStore::new(),
             palette: crate::palette::Palette::default(),
             panels: crate::panels::Panels::default(),
+            views: crate::views::ViewStore::default(),
             notifications,
             state_path,
         };
@@ -372,7 +375,13 @@ impl App {
 
     /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
     fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
-        crate::reading::tab_body(&self.reading, tab, self.tokens, self.status.mode)
+        crate::reading::tab_body(
+            &self.reading,
+            &self.views,
+            tab,
+            self.tokens,
+            self.status.mode,
+        )
     }
 
     /// Every tab removal funnels through here (button, pane close, replace, trash).
@@ -380,6 +389,7 @@ impl App {
         #[cfg(test)]
         self.closed.push(path.to_owned());
         self.reading.on_tab_closed(path);
+        self.views.on_tab_closed(path);
     }
 
     /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`).
@@ -467,7 +477,7 @@ impl App {
             Message::Switcher(m) => return self.update_switcher(m),
             Message::Palette(m) => return self.update_palette(m),
             Message::Panels(m) => return self.update_panels(m),
-            Message::Views(m) => match m {},
+            Message::Views(m) => return self.update_views(m),
             Message::Nav(m) => return self.update_nav(m),
             Message::Panes(m) => return self.update_panes(m),
         }
@@ -1201,6 +1211,40 @@ impl App {
         }
     }
 
+    /// WP-7: view fences (`crate::views`); `view_run` runs off the UI thread.
+    fn update_views(&mut self, m: crate::message::ViewsMsg) -> Task<Message> {
+        match crate::views::update(&mut self.views, m) {
+            crate::views::Effect::None => Task::none(),
+            crate::views::Effect::Run { id, host } => {
+                let (rid, rhost) = (id.clone(), host.clone());
+                self.rpc(
+                    move |d| {
+                        d.view_run(&rid, rhost.as_deref())
+                            .map(|r| r.0)
+                            .map_err(|e| e.to_string())
+                    },
+                    move |result| {
+                        Message::Views(crate::message::ViewsMsg::Loaded { id, host, result })
+                    },
+                )
+            }
+            crate::views::Effect::Open { path, line } => {
+                self.open(&path, true);
+                let line = line.and_then(|l| usize::try_from(l.saturating_sub(1)).ok());
+                if let (Some(line), Some(ps)) = (line, self.panes.get_mut(self.focus))
+                    && let Some(tab) = ps.active.and_then(|i| ps.tabs.get_mut(i))
+                    && tab.path == path
+                {
+                    tab.source.move_to(iced::widget::text_editor::Cursor {
+                        position: iced::widget::text_editor::Position { line, column: 0 },
+                        selection: None,
+                    });
+                }
+                Task::none()
+            }
+        }
+    }
+
     fn update_status(&mut self, m: StatusMsg) {
         match m {
             StatusMsg::Disconnected => self.status.connected = false,
@@ -1244,9 +1288,9 @@ impl App {
                         }
                     }
                     Notification::OpenRequested { path } => self.open(&path, true),
-                    Notification::ConfigReloaded { .. }
-                    | Notification::ShadowWrite { .. }
-                    | Notification::ViewsInvalidated { .. } => {}
+                    Notification::ViewsInvalidated { view_ids } => self.views.invalidate(&view_ids),
+                    Notification::ConfigReloaded { .. } => self.palette.invalidate(),
+                    Notification::ShadowWrite { .. } => {}
                 }
             }
         }

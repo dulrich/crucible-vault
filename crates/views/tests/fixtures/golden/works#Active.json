@@ -1,0 +1,163 @@
+{
+  "columns": [
+    {
+      "key": "file.name",
+      "label": "file name"
+    },
+    {
+      "key": "note.work-status",
+      "label": "work-status"
+    },
+    {
+      "key": "note.author-filter",
+      "label": "author-filter"
+    },
+    {
+      "key": "note.source-prefix-filter",
+      "label": "source-prefix-filter"
+    },
+    {
+      "key": "note.tags",
+      "label": "tags"
+    },
+    {
+      "key": "formula.entries",
+      "label": "Entries"
+    },
+    {
+      "key": "formula.unread",
+      "label": "Unread"
+    },
+    {
+      "key": "formula.last_update",
+      "label": "Last Update"
+    }
+  ],
+  "groups": [
+    {
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "Ann Blog",
+              "path": "core/works/Ann Blog.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "active"
+            },
+            {
+              "t": "text",
+              "v": "Ann"
+            },
+            {
+              "t": "list",
+              "v": [
+                {
+                  "t": "text",
+                  "v": "https://blog.example/"
+                }
+              ]
+            },
+            {
+              "t": "list",
+              "v": [
+                {
+                  "t": "text",
+                  "v": "blog"
+                }
+              ]
+            },
+            {
+              "t": "number",
+              "v": 2.0
+            },
+            {
+              "t": "number",
+              "v": 1.0
+            },
+            {
+              "t": "date",
+              "v": "2026-10-02"
+            }
+          ],
+          "path": "core/works/Ann Blog.md"
+        },
+        {
+          "cells": [
+            {
+              "label": "Cy Story",
+              "path": "core/works/Cy Story.md",
+              "t": "link"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
+              "v": "#Cy"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "number",
+              "v": 1.0
+            },
+            {
+              "t": "number",
+              "v": 1.0
+            },
+            {
+              "t": "date",
+              "v": "2026-10-03"
+            }
+          ],
+          "path": "core/works/Cy Story.md"
+        },
+        {
+          "cells": [
+            {
+              "label": "Empty Work",
+              "path": "core/works/Empty Work.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "active"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
+              "v": "·"
+            },
+            {
+              "t": "text",
+              "v": "·"
+            },
+            {
+              "t": "null"
+            }
+          ],
+          "path": "core/works/Empty Work.md"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": []
+}

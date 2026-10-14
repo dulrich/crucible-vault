@@ -22,18 +22,25 @@ enum LinkTarget {
 
 struct Ctx<'a> {
     store: &'a ReadingStore,
+    views: &'a crate::views::ViewStore,
     doc: &'a Doc,
     path: &'a str,
     t: Tokens,
 }
 
 /// The reading pane for `path`.
-pub fn reading<'a>(store: &'a ReadingStore, path: &'a str, t: Tokens) -> Element<'a, Message> {
+pub fn reading<'a>(
+    store: &'a ReadingStore,
+    views: &'a crate::views::ViewStore,
+    path: &'a str,
+    t: Tokens,
+) -> Element<'a, Message> {
     let Some(doc) = store.doc(path) else {
         return text("Rendering…").color(t.text_faint.to_color()).into();
     };
     let cx = Ctx {
         store,
+        views,
         doc,
         path,
         t,
@@ -61,16 +68,9 @@ pub fn reading<'a>(store: &'a ReadingStore, path: &'a str, t: Tokens) -> Element
         .into()
 }
 
-/// The `crucible-view` fence hook: WP-7 replaces this placeholder with the rendered view.
-pub fn view_fence<'a>(file: &'a str, name: &'a str, t: Tokens) -> Element<'a, Message> {
-    boxed(
-        text(format!("view: {file}#{name}"))
-            .font(Font::MONOSPACE)
-            .color(t.text_dim.to_color())
-            .into(),
-        t,
-        t.line,
-    )
+/// The `crucible-view` fence hook: the view `<file>#<name>` with `this` = the embedding note.
+fn view_fence<'a>(cx: &Ctx<'a>, file: &str, name: &str) -> Element<'a, Message> {
+    crate::views::fence(cx.views, &crate::views::view_id(file, name), cx.path, cx.t)
 }
 
 fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Message> {
@@ -229,7 +229,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             };
             boxed(column![head, body].spacing(6).into(), t, t.accent_ui)
         }
-        Block::ViewFence { file, name } => view_fence(file, name, t),
+        Block::ViewFence { file, name } => view_fence(cx, file, name),
     }
 }
 

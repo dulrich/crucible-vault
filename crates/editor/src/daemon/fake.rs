@@ -29,6 +29,9 @@ struct Inner {
     actions: BTreeMap<String, (ActionInfo, ActionHandler)>,
     jobs: BTreeMap<String, JobStatus>,
     next_job: u64,
+    /// WP-7: scripted view results, and every `view_run` call `(view_id, this_path)` in order.
+    views: BTreeMap<String, ViewResult>,
+    view_calls: Vec<(String, Option<String>)>,
 }
 
 /// The fake daemon.
@@ -79,6 +82,8 @@ impl FakeDaemon {
                 actions: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 next_job: 1,
+                views: BTreeMap::new(),
+                view_calls: Vec::new(),
             }),
             hello,
             vault_root: vault_root.to_path_buf(),
@@ -114,6 +119,17 @@ impl FakeDaemon {
         let mut g = self.lock()?;
         emit(&mut g, n);
         Ok(())
+    }
+
+    /// WP-7: scripts `view_run(id, _)` to return `result` (and lists `id` in `views_list`).
+    pub fn set_view_result(&self, id: &str, result: ViewResult) -> Result<()> {
+        self.lock()?.views.insert(id.to_owned(), result);
+        Ok(())
+    }
+
+    /// WP-7: every `view_run` call so far, `(view_id, this_path)` in order.
+    pub fn view_calls(&self) -> Result<Vec<(String, Option<String>)>> {
+        Ok(self.lock()?.view_calls.clone())
     }
 
     /// The current index generation.
@@ -301,11 +317,19 @@ impl DaemonClient for FakeDaemon {
     }
 
     fn views_list(&self) -> Result<ViewsListResult> {
-        Ok(ViewsListResult { view_ids: vec![] })
+        Ok(ViewsListResult {
+            view_ids: self.lock()?.views.keys().cloned().collect(),
+        })
     }
 
-    fn view_run(&self, view_id: &str, _this_path: Option<&str>) -> Result<ViewResult> {
-        Err(DaemonError::NotFound(view_id.to_owned()))
+    fn view_run(&self, view_id: &str, this_path: Option<&str>) -> Result<ViewResult> {
+        let mut g = self.lock()?;
+        g.view_calls
+            .push((view_id.to_owned(), this_path.map(str::to_owned)));
+        g.views
+            .get(view_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound(view_id.to_owned()))
     }
 
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {

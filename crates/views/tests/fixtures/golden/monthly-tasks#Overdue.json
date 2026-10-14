@@ -1,0 +1,89 @@
+{
+  "columns": [
+    {
+      "key": "task",
+      "label": "Task"
+    },
+    {
+      "key": "file",
+      "label": "File"
+    }
+  ],
+  "groups": [
+    {
+      "key": {
+        "t": "text",
+        "v": "General"
+      },
+      "rows": [
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "loose task"
+            },
+            {
+              "label": "2026-10-01",
+              "path": "daily/day/2026-10-01.md",
+              "t": "link"
+            }
+          ],
+          "line": 4,
+          "path": "daily/day/2026-10-01.md"
+        }
+      ],
+      "summaries": []
+    },
+    {
+      "key": {
+        "t": "text",
+        "v": "Morning"
+      },
+      "rows": [
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "open one"
+            },
+            {
+              "label": "2026-10-01",
+              "path": "daily/day/2026-10-01.md",
+              "t": "link"
+            }
+          ],
+          "line": 9,
+          "path": "daily/day/2026-10-01.md"
+        }
+      ],
+      "summaries": []
+    },
+    {
+      "key": {
+        "t": "text",
+        "v": "Work"
+      },
+      "rows": [
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "yesterday task"
+            },
+            {
+              "label": "2026-10-02",
+              "path": "daily/day/2026-10-02.md",
+              "t": "link"
+            }
+          ],
+          "line": 6,
+          "path": "daily/day/2026-10-02.md"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "tasks",
+  "notices": [],
+  "summaries": []
+}

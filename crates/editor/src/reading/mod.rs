@@ -26,8 +26,6 @@ use crate::image_cache::{self, ImageCache};
 use crate::message::{Message, ReadingMsg, TabsMsg};
 use crate::theme::Tokens;
 
-pub use view::view_fence;
-
 /// Recompute debounce: a change is rendered once `edit_seq` has been stable for one tick.
 pub const TICK: Duration = Duration::from_millis(250);
 
@@ -372,6 +370,7 @@ pub fn update(
 /// The active tab's body: source, reading, or split (source left, reading right).
 pub fn tab_body<'a>(
     store: &'a ReadingStore,
+    views: &'a crate::views::ViewStore,
     tab: &'a Tab,
     t: Tokens,
     mode: cv_protocol::Mode,
@@ -380,10 +379,10 @@ pub fn tab_body<'a>(
     use iced::widget::{container, row};
     match store.mode(&tab.path) {
         ViewMode::Source => crate::source::view(&tab.source, t, mode),
-        ViewMode::Reading => view::reading(store, &tab.path, t),
+        ViewMode::Reading => view::reading(store, views, &tab.path, t),
         ViewMode::Split => row![
             container(crate::source::view(&tab.source, t, mode)).width(Length::FillPortion(1)),
-            container(view::reading(store, &tab.path, t)).width(Length::FillPortion(1)),
+            container(view::reading(store, views, &tab.path, t)).width(Length::FillPortion(1)),
         ]
         .spacing(12)
         .into(),
