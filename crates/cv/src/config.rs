@@ -84,10 +84,22 @@ impl Config {
             Some(v) => PathBuf::from(v),
             None => state_dir()?.join("scratch"),
         };
-        let config_dir = match get("CV_CONFIG_DIR") {
-            Some(v) => PathBuf::from(v),
-            None => home()?.join(".config").join("crucible-vault"),
+        // D4: live mode reads `<vault>/_custom/crucible-vault/`. Shadow mode must never write
+        // into the vault (I1), so it keeps `~/.config/crucible-vault` and refuses a config dir
+        // inside the vault or the protected root (WP-9).
+        let config_dir = match (get("CV_CONFIG_DIR"), mode) {
+            (Some(v), _) => PathBuf::from(v),
+            (None, Mode::Live) => vault.join("_custom").join("crucible-vault"),
+            (None, Mode::Shadow) => home()?.join(".config").join("crucible-vault"),
         };
+        if mode == Mode::Shadow
+            && (is_within(&config_dir, &vault) || is_within(&config_dir, &protected_vault))
+        {
+            bail!(
+                "CV_CONFIG_DIR {} is inside the vault; shadow mode needs it outside (I1)",
+                config_dir.display()
+            );
+        }
         let socket = match (get("CV_SOCKET"), get("XDG_RUNTIME_DIR")) {
             (Some(v), _) => PathBuf::from(v),
             (None, Some(rt)) => PathBuf::from(rt).join("crucible-vault").join("daemon.sock"),
@@ -151,6 +163,30 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Whether `p` is `root` or below it — lexically, and again after resolving symlinks of the
+/// deepest existing ancestors (fail closed on either).
+fn is_within(p: &Path, root: &Path) -> bool {
+    fn resolve(p: &Path) -> Option<PathBuf> {
+        let mut tail = Vec::new();
+        let mut cur = p;
+        loop {
+            if let Ok(c) = cur.canonicalize() {
+                let mut out = c;
+                for t in tail.iter().rev() {
+                    out.push(t);
+                }
+                return Some(out);
+            }
+            tail.push(cur.file_name()?.to_owned());
+            cur = cur.parent()?;
+        }
+    }
+    if p.starts_with(root) {
+        return true;
+    }
+    matches!((resolve(p), resolve(root)), (Some(a), Some(b)) if a.starts_with(&b))
 }
 
 fn parent_dir(p: &Path) -> PathBuf {
@@ -219,6 +255,44 @@ mod tests {
         assert_eq!(c.index_db, PathBuf::from("/c/crucible-vault/index.db"));
         assert_eq!(c.socket, PathBuf::from("/sock/d.sock"));
         assert_eq!(c.open_cmd, Some(PathBuf::from("/bin/ed")));
+    }
+
+    #[test]
+    fn config_dir_defaults_by_mode_and_shadow_refuses_vault() {
+        let base = [("HOME", "/h"), ("CV_SOCKET", "/s"), ("CV_VAULT", "/v")];
+        let live = Config::resolve(env(&[base[0], base[1], base[2], ("CV_MODE", "live")])).unwrap();
+        assert_eq!(live.config_dir, PathBuf::from("/v/_custom/crucible-vault"));
+        let shadow = Config::resolve(env(&base)).unwrap();
+        assert_eq!(
+            shadow.config_dir,
+            PathBuf::from("/h/.config/crucible-vault")
+        );
+        let inside = Config::resolve(env(&[
+            base[0],
+            base[1],
+            base[2],
+            ("CV_CONFIG_DIR", "/v/_custom/crucible-vault"),
+        ]));
+        assert!(inside.unwrap_err().to_string().contains("inside the vault"));
+        let protected = Config::resolve(env(&[
+            base[0],
+            base[1],
+            base[2],
+            ("CV_PROTECTED_VAULT", "/p"),
+            ("CV_CONFIG_DIR", "/p/x"),
+        ]));
+        assert!(protected.is_err());
+        // Live mode may keep config in the vault.
+        assert!(
+            Config::resolve(env(&[
+                base[0],
+                base[1],
+                base[2],
+                ("CV_MODE", "live"),
+                ("CV_CONFIG_DIR", "/v/_custom/crucible-vault"),
+            ]))
+            .is_ok()
+        );
     }
 
     #[test]

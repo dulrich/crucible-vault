@@ -9,6 +9,7 @@ mod id;
 mod job;
 pub mod migrate;
 mod query;
+mod runner_state;
 mod store;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ pub use job::{
     Lane, NewJob, namespaced_key,
 };
 pub use query::{ListQuery, ShadowWrite, StatusCount};
+pub use runner_state::StepCheckpoint;
 pub use store::{
     DEFAULT_RESEED_WINDOW_MS, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, NewShadowWrite,
     QueueConfig, RequeueBreakdown, StateDb, StateReader,

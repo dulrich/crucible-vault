@@ -6,14 +6,17 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod daemon;
+pub mod runner;
 pub mod server;
 pub mod spool;
+pub mod steps;
 pub mod uri;
 pub mod views;
 
 pub use client::{Client, ClientError};
 pub use config::Config;
 pub use daemon::{Daemon, DaemonOptions, RunningDaemon, Shared};
+pub use runner::Runner;
 pub use views::{ViewRegistry, ViewService, register_views};
 
 /// Milliseconds since the Unix epoch.

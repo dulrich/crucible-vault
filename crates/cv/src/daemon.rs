@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
 use crate::config::Config;
+use crate::runner::{ProductionExecutor, Runner, RunnerDeps, StepExecutor, SystemClock};
 use crate::uri::{self, UriAction};
 use crate::views::{ViewError, ViewRegistry, register_views};
 use crate::{now_ms, spool};
@@ -95,6 +96,7 @@ pub struct Shared {
     events: broadcast::Sender<Notification>,
     views: ViewRegistry,
     open_subscribers: AtomicUsize,
+    runner: OnceLock<Runner>,
 }
 
 impl std::fmt::Debug for Shared {
@@ -185,6 +187,7 @@ impl Daemon {
                 events,
                 views,
                 open_subscribers: AtomicUsize::new(0),
+                runner: OnceLock::new(),
             }),
             writer_join,
             vault_events,
@@ -195,6 +198,11 @@ impl Daemon {
     /// Binds the socket, drains the spool, then serves in the background. Call inside a tokio
     /// runtime.
     pub async fn spawn(self) -> Result<RunningDaemon> {
+        self.spawn_with(Arc::new(ProductionExecutor)).await
+    }
+
+    /// [`Daemon::spawn`] with an injected step executor (tests).
+    pub async fn spawn_with(self, executor: Arc<dyn StepExecutor>) -> Result<RunningDaemon> {
         let Self {
             shared,
             writer_join,
@@ -205,14 +213,35 @@ impl Daemon {
         start_event_bridge(&shared, vault_events)?;
         drain_spool(&shared).await;
         let (stop_tx, stop_rx) = watch::channel(false);
-        let tasks = vec![
+        let writer_source: Arc<dyn crate::runner::WriterSource> = Arc::new(Arc::downgrade(&shared));
+        let runner = Runner::new(RunnerDeps {
+            state: Arc::clone(&shared.state),
+            writer: writer_source,
+            events: shared.events.clone(),
+            executor,
+            clock: Arc::new(SystemClock),
+            concurrency: 2,
+            vault_root: shared.vault_root.clone(),
+            index_db: shared.config.index_db.clone(),
+            config_dir: shared.config.config_dir.clone(),
+        });
+        runner.reload_config();
+        if shared.runner.set(runner.clone()).is_err() {
+            bail!("runner already started");
+        }
+        let mut tasks = vec![
+            runner.spawn_claim_loop(stop_rx.clone()),
+            runner.spawn_event_starter(stop_rx.clone()),
+            runner.spawn_scheduler(stop_rx.clone()),
+        ];
+        tasks.extend([
             tokio::spawn(generation_listener(Arc::clone(&shared), stop_rx.clone())),
             tokio::spawn(config_poller(
                 Arc::clone(&shared),
                 opts.config_poll,
                 stop_rx.clone(),
             )),
-        ];
+        ]);
         let server = tokio::spawn(crate::server::serve(listener, Arc::clone(&shared), stop_rx));
         tracing::info!(socket = %shared.config.socket.display(), mode = ?shared.config.mode, "daemon serving");
         Ok(RunningDaemon {
@@ -370,6 +399,15 @@ impl Shared {
         &self.views
     }
 
+    /// The action runner (set once the daemon is serving).
+    pub fn runner(&self) -> Option<&Runner> {
+        self.runner.get()
+    }
+
+    fn runner_or_err(&self) -> Result<&Runner, RpcError> {
+        self.runner().ok_or_else(|| internal("runner not started"))
+    }
+
     pub(crate) fn open_subscribers(&self) -> &AtomicUsize {
         &self.open_subscribers
     }
@@ -485,9 +523,10 @@ impl Shared {
                 res.and_then(|r| r).map_err(vault_err)?;
                 Ok(json!({}))
             }
-            // WP-9 registers actions and implements the runner.
-            Request::ActionsList => Ok(json!([])),
-            Request::RunAction(_) => Err(rpc_err(error_codes::NOT_FOUND, "no actions registered")),
+            Request::ActionsList => to_value(&crate::runner::actions_list(self.runner_or_err()?)),
+            Request::RunAction(p) => {
+                crate::runner::run_action(self, self.runner_or_err()?, p).await
+            }
             Request::Job(p) => {
                 let job = lock(&self.state).job(&p.job_id).map_err(internal)?;
                 match job {
@@ -510,6 +549,16 @@ impl Shared {
                         error_codes::NOT_FOUND,
                         format!("no job {}", p.job_id),
                     )),
+                    // A running job stops before its next step (WP-9 runner).
+                    Err(StateError::WrongStatus { .. })
+                        if self.runner().is_some_and(|r| r.request_cancel(&p.job_id)) =>
+                    {
+                        let job = lock(&self.state).job(&p.job_id).map_err(internal)?;
+                        match job {
+                            Some(j) => to_value(&map_job(&j)),
+                            None => Err(rpc_err(error_codes::NOT_FOUND, "job vanished")),
+                        }
+                    }
                     Err(e @ StateError::WrongStatus { .. }) => {
                         Err(rpc_err(error_codes::INVALID_PARAMS, e.to_string()))
                     }
@@ -558,7 +607,7 @@ impl Shared {
             mode: self.config.mode,
             generation: self.generation(),
             queue,
-            config_errors: Vec::new(),
+            config_errors: self.runner().map(Runner::config_errors).unwrap_or_default(),
             services,
         })
     }
@@ -754,8 +803,8 @@ fn config_fingerprint(dir: &Path) -> (u128, usize) {
     (max, count)
 }
 
-/// Polls `CV_CONFIG_DIR`; on change notifies view services and broadcasts
-/// `config_reloaded{errors: []}`. WP-9's config loader supplies the real errors.
+/// Polls `CV_CONFIG_DIR`; on change notifies view services, reloads the action config (WP-9) and
+/// broadcasts `config_reloaded{errors}` with the loader's errors.
 async fn config_poller(shared: Arc<Shared>, every: Duration, mut stop: watch::Receiver<bool>) {
     let dir = shared.config.config_dir.clone();
     let mut last = config_fingerprint(&dir);
@@ -769,7 +818,8 @@ async fn config_poller(shared: Arc<Shared>, every: Duration, mut stop: watch::Re
                 if fp != last {
                     last = fp;
                     shared.views.notify_config(&dir);
-                    shared.publish(Notification::ConfigReloaded { errors: Vec::new() });
+                    let errors = shared.runner().map(Runner::reload_config).unwrap_or_default();
+                    shared.publish(Notification::ConfigReloaded { errors });
                 }
             }
         }

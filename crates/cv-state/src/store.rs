@@ -443,10 +443,20 @@ impl StateDb {
             return Ok(0);
         }
         let cutoff = now_ms - self.config.retention_ms;
-        Ok(self.conn.execute(
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // WP-9: a pruned job's step checkpoints go with it.
+        tx.execute(
+            "DELETE FROM job_step_checkpoints WHERE job_id IN (SELECT id FROM jobs WHERE status IN ('done','failed','cancelled') AND settled_at_ms < ?1)",
+            params![cutoff],
+        )?;
+        let n = tx.execute(
             "DELETE FROM jobs WHERE status IN ('done','failed','cancelled') AND settled_at_ms < ?1",
             params![cutoff],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Outage requeue: move `failure_kind = 'service'` failed rows back to queued in one
@@ -568,7 +578,6 @@ impl StateDb {
         query::counts(&self.conn)
     }
 
-    #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }

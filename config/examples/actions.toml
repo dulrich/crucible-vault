@@ -1,0 +1,66 @@
+# Example `actions.toml` (plan v0-core-daemon WP-9). Copy into CV_CONFIG_DIR.
+# Live mode reads <vault>/_custom/crucible-vault/; shadow mode must use a dir outside the vault.
+#
+# An action = id, label, typed steps, starters, resource keys, lane.
+#   durable = false  -> `run_action` waits (<=10 s) and returns `open_path`.
+#   durable = true   -> `run_action` returns the job id at once (default).
+#   lane = "auto" (default: command runs -> user lane, event/schedule runs -> background),
+#          "user" or "background".
+#   starters default to [{ type = "command" }]; event starters need a non-empty selector (I5).
+#   resources: the active/triggering note path (note = true, default) plus `kind::id`
+#              templates using {path} and {param.NAME}. An action that mutates a note but
+#              derives no key is refused at enqueue.
+# Step `type`s: guard, capture, materialize, move, copy, set_props, remove_props, upsert_tags,
+# lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete.
+# Each step's other keys belong to its module (WP-10..13 document them).
+
+[[action]]
+id = "lint-note"
+label = "Lint current note"
+group = "Notes"
+keys = ["ctrl+alt+l"]
+needs = ["active_path"]
+durable = false
+[[action.steps]]
+type = "lint"
+
+[[action]]
+id = "tag-note"
+label = "Add a tag"
+group = "Notes"
+needs = ["active_path"]
+[[action.params]]
+name = "tag"
+label = "Tag"
+kind = "text"
+required = true
+[[action.steps]]
+type = "upsert_tags"
+
+# Event-started: re-lint inbox notes edited outside the daemon (origin defaults to "external").
+[[action]]
+id = "inbox-lint"
+label = "Lint inbox notes on edit"
+starters = [
+  { type = "event", kinds = ["created", "modified"], selector = { folder = "inbox" } },
+]
+[[action.steps]]
+type = "lint"
+
+# A chain: run another action as a child job (same lane, depth limit 4, no cycles).
+[[action]]
+id = "tidy"
+label = "Tidy current note"
+needs = ["active_path"]
+[[action.steps]]
+type = "run_action"
+action = "lint-note"
+
+# Schedule-only (see schedules.toml); search keys need no note.
+[[action]]
+id = "search-refresh"
+label = "Refresh search feed"
+starters = []
+resources = { note = false, keys = ["search::feed"] }
+[[action.steps]]
+type = "search_upsert"

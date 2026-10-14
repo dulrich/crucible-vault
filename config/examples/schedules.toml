@@ -1,0 +1,7 @@
+# Example `schedules.toml` (plan v0-core-daemon WP-9). Each entry adds a schedule starter to an
+# action from actions.toml: `daily = "HH:MM"` (local time) or `every = "<n>m" | "<n>h"`.
+# The last run is kept in state.db; after downtime a missed schedule catches up once.
+
+[[schedule]]
+action = "search-refresh"
+every = "30m"

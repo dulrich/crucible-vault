@@ -63,6 +63,21 @@ CREATE TABLE shadow_writes (
 );
 CREATE INDEX shadow_writes_at ON shadow_writes(at_ms);
 ",
+    // v2 (WP-9): per-step checkpoints (audit E2) and schedule last-run bookkeeping.
+    r"
+CREATE TABLE job_step_checkpoints (
+    job_id      TEXT NOT NULL,
+    step_index  INTEGER NOT NULL,
+    outcome     TEXT NOT NULL,
+    at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (job_id, step_index)
+);
+
+CREATE TABLE schedule_runs (
+    action_id    TEXT PRIMARY KEY,
+    last_run_ms  INTEGER NOT NULL
+);
+",
 ];
 
 /// Highest schema version this build knows.

@@ -1,0 +1,479 @@
+//! Runner ↔ daemon tests: an in-process daemon in shadow mode on a synthetic temp vault under a
+//! temp `CV_PROTECTED_VAULT` (I1), driven over its socket. Pattern from `tests/daemon.rs`.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use cv_actions::Step;
+use cv_protocol::{
+    ActionContext, ChangeKind, JobState, Notification, Origin, Request, RunActionParams,
+    SubscribeParams, Topic, error_codes,
+};
+use cv_vault::{ContentHash, WatchConfig};
+use serde_json::{Map, Value, json};
+
+use super::{StepExecutor, Trigger};
+use crate::steps::{StepCtx, StepError, StepOutcome};
+use crate::{Client, ClientError, Config, Daemon, DaemonOptions, RunningDaemon};
+
+static N: AtomicUsize = AtomicUsize::new(0);
+
+struct Env {
+    root: PathBuf,
+    vars: HashMap<String, String>,
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Env {
+    fn new(actions: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "cv-run-it-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let vault = root.join("prot").join("Synth");
+        std::fs::create_dir_all(vault.join("inbox")).unwrap();
+        std::fs::write(vault.join("a.md"), "# A\n").unwrap();
+        std::fs::write(vault.join("inbox/x.md"), "# X\n").unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/actions.toml"), actions).unwrap();
+        let mut vars = HashMap::new();
+        for (k, v) in [
+            ("HOME", root.join("home")),
+            ("CV_VAULT", vault),
+            ("CV_PROTECTED_VAULT", root.join("prot")),
+            ("CV_STATE_DB", root.join("state/state.db")),
+            ("CV_INDEX_DB", root.join("cache/index.db")),
+            ("CV_SCRATCH", root.join("scratch")),
+            ("CV_CONFIG_DIR", root.join("config")),
+            ("CV_SOCKET", root.join("run/d.sock")),
+        ] {
+            vars.insert(k.to_owned(), v.display().to_string());
+        }
+        Self { root, vars }
+    }
+    fn config(&self) -> Config {
+        let vars = self.vars.clone();
+        Config::resolve(move |k| vars.get(k).cloned()).unwrap()
+    }
+    fn vault(&self) -> PathBuf {
+        PathBuf::from(&self.vars["CV_VAULT"])
+    }
+    fn client(&self) -> Client {
+        Client::connect(
+            Path::new(&self.vars["CV_SOCKET"]),
+            "test",
+            cv_index::SCHEMA_VERSION,
+        )
+        .unwrap()
+    }
+}
+
+async fn start(env: &Env, exec: Arc<dyn StepExecutor>) -> RunningDaemon {
+    let opts = DaemonOptions {
+        landlock: false,
+        watch: WatchConfig {
+            debounce: Duration::from_millis(50),
+            echo_ttl: Duration::from_secs(5),
+        },
+        config_poll: Duration::from_millis(100),
+    };
+    Daemon::start(env.config(), opts)
+        .unwrap()
+        .spawn_with(exec)
+        .await
+        .unwrap()
+}
+
+type Behavior = dyn Fn(&Step, &mut StepCtx<'_>) -> Result<StepOutcome, StepError> + Send + Sync;
+struct FnExec(Box<Behavior>);
+impl StepExecutor for FnExec {
+    fn execute(&self, step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        (self.0)(step, ctx)
+    }
+}
+
+/// `set_props` stand-in: appends a line to the active note through the writer (CAS on the hash
+/// it read) and asks the client to open it.
+fn appending_exec(calls: Arc<AtomicUsize>) -> Arc<dyn StepExecutor> {
+    Arc::new(FnExec(Box::new(move |_, ctx| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        let path = ctx
+            .context
+            .active_path
+            .clone()
+            .ok_or_else(|| StepError::failed("no path"))?;
+        let (mut bytes, hash) = ctx
+            .read(&path)?
+            .ok_or_else(|| StepError::failed("missing"))?;
+        bytes.extend_from_slice(b"touched\n");
+        ctx.write(&path, bytes, Some(hash))?;
+        Ok(StepOutcome {
+            open_path: Some(path.clone()),
+            output_paths: vec![path],
+            ..StepOutcome::default()
+        })
+    })))
+}
+
+fn rpc_code(r: Result<Value, ClientError>) -> i64 {
+    match r {
+        Err(ClientError::Rpc(e)) => e.code,
+        other => panic!("expected an RPC error, got {other:?}"),
+    }
+}
+
+fn hashes(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let h = ContentHash::of(&std::fs::read(&p).unwrap());
+                out.push((p, h.as_str().to_owned()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn poll(mut f: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if f() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("condition not reached");
+}
+
+fn run(action: &str, params: Value, ctx: ActionContext) -> Request {
+    let params: Map<String, Value> = serde_json::from_value(params).unwrap();
+    Request::RunAction(RunActionParams {
+        action_id: action.into(),
+        params,
+        context: ctx,
+    })
+}
+
+const ACTIONS: &str = r#"
+[[action]]
+id = "touch"
+label = "Touch note"
+group = "Notes"
+keys = ["ctrl+t"]
+needs = ["active_path"]
+durable = false
+[[action.params]]
+name = "mode"
+label = "Mode"
+kind = "enum"
+choices = ["a", "b"]
+default = "a"
+[[action.params]]
+name = "why"
+label = "Why"
+kind = "text"
+required = true
+[[action.steps]]
+type = "set_props"
+
+[[action]]
+id = "bg"
+needs = ["active_path"]
+[[action.steps]]
+type = "set_props"
+
+[[action]]
+id = "broken"
+[[action.steps]]
+type = "run_action"
+action = "nowhere"
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_action_end_to_end_over_the_socket() {
+    let env = Env::new(ACTIONS);
+    let before = hashes(&env.vault());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let d = start(&env, appending_exec(Arc::clone(&calls))).await;
+    let mut c = env.client();
+
+    // actions_list: armed actions only, with their ParamSpecs.
+    let list = c.call(Request::ActionsList).unwrap();
+    let ids: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["bg", "touch"]);
+    assert_eq!(list[1]["title"], "Touch note");
+    assert_eq!(list[1]["durable"], false);
+    assert_eq!(list[1]["params"][0]["kind"], "enum");
+    assert_eq!(list[1]["params"][0]["choices"], json!(["a", "b"]));
+    assert_eq!(list[1]["params"][1]["required"], true);
+    let status = c.call(Request::Status).unwrap();
+    assert_eq!(
+        status["config_errors"].as_array().unwrap().len(),
+        1,
+        "broken disarmed + reported"
+    );
+
+    let a_hash = ContentHash::of(b"# A\n").as_str().to_owned();
+    let ctx = |h: &str| ActionContext {
+        active_path: Some("a.md".into()),
+        buffer_hash: Some(h.into()),
+        ..ActionContext::default()
+    };
+    // Unknown / disarmed / missing param / missing context.
+    assert_eq!(
+        rpc_code(c.call(run("nope", json!({}), ActionContext::default()))),
+        error_codes::NOT_FOUND
+    );
+    assert_eq!(
+        rpc_code(c.call(run("broken", json!({}), ActionContext::default()))),
+        error_codes::INVALID_PARAMS
+    );
+    assert_eq!(
+        rpc_code(c.call(run("touch", json!({}), ctx(&a_hash)))),
+        error_codes::INVALID_PARAMS
+    );
+    assert_eq!(
+        rpc_code(c.call(run("touch", json!({"why": "x"}), ActionContext::default()))),
+        error_codes::INVALID_PARAMS
+    );
+    // Stale buffer_hash → CONFLICT, nothing enqueued.
+    assert_eq!(
+        rpc_code(c.call(run("touch", json!({"why": "x"}), ctx("deadbeef")))),
+        error_codes::CONFLICT
+    );
+    assert!(
+        d.shared()
+            .state()
+            .lock()
+            .unwrap()
+            .counts()
+            .unwrap()
+            .is_empty(),
+        "nothing enqueued"
+    );
+
+    // Non-durable: returns after completion with open_path.
+    let r = c
+        .call(run("touch", json!({"why": "x"}), ctx(&a_hash)))
+        .unwrap();
+    assert_eq!(r["open_path"], "a.md");
+    let job_id = r["job_id"].as_str().unwrap().to_owned();
+    let job = d
+        .shared()
+        .state()
+        .lock()
+        .unwrap()
+        .job(&job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, cv_state::JobStatus::Done);
+    assert_eq!(job.lane, cv_state::Lane::User);
+    assert_eq!(job.resource_keys, vec!["a.md".to_owned()]);
+    let jp: super::JobParams = serde_json::from_value(job.params).unwrap();
+    assert_eq!(jp.params["mode"], "a", "ParamSpec default applied");
+    assert_eq!(jp.trigger, Trigger::Command);
+
+    // Durable: job id at once; then completes.
+    let r = c
+        .call(run(
+            "bg",
+            json!({}),
+            ActionContext {
+                active_path: Some("a.md".into()),
+                ..ActionContext::default()
+            },
+        ))
+        .unwrap();
+    assert!(r.get("open_path").is_none());
+    let bg = r["job_id"].as_str().unwrap().to_owned();
+    poll(|| {
+        d.shared()
+            .state()
+            .lock()
+            .unwrap()
+            .job(&bg)
+            .unwrap()
+            .unwrap()
+            .status
+            == cv_state::JobStatus::Done
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // Shadow invariant: the live vault is byte-identical; writes are attributed to the jobs.
+    assert_eq!(hashes(&env.vault()), before, "live vault untouched (I1)");
+    let writes = d
+        .shared()
+        .state()
+        .lock()
+        .unwrap()
+        .shadow_writes(0, 100)
+        .unwrap();
+    let ours: Vec<_> = writes.iter().filter(|w| w.path == "a.md").collect();
+    assert_eq!(ours.len(), 2);
+    assert_eq!(ours[0].job_id.as_deref(), Some(job_id.as_str()));
+    assert_eq!(ours[1].job_id.as_deref(), Some(bg.as_str()));
+    let overlay = PathBuf::from(&env.vars["CV_SCRATCH"]).join("vault/a.md");
+    assert_eq!(
+        std::fs::read_to_string(overlay).unwrap(),
+        "# A\ntouched\ntouched\n"
+    );
+
+    // Hot reload: a broken actions.toml keeps the old actions and reports the error.
+    c.call(Request::Subscribe(SubscribeParams {
+        topics: vec![Topic::ConfigReloaded],
+    }))
+    .unwrap();
+    std::fs::write(env.root.join("config/actions.toml"), "[[action]\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let errors = loop {
+        assert!(Instant::now() < deadline, "no config_reloaded");
+        if let Some(Notification::ConfigReloaded { errors }) =
+            c.next_notification(Duration::from_millis(200)).unwrap()
+        {
+            break errors;
+        }
+    };
+    assert!(
+        errors.iter().any(|e| e.starts_with("actions.toml:")),
+        "{errors:?}"
+    );
+    assert_eq!(
+        c.call(Request::ActionsList)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "last valid version kept"
+    );
+    drop(c);
+    d.shutdown().await.unwrap();
+}
+
+const EVENTS: &str = r#"
+[[action]]
+id = "inbox"
+starters = [{ type = "event", kinds = ["created", "modified"], origin = "any", selector = { folder = "inbox" } }]
+[[action.steps]]
+type = "set_props"
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
+    let env = Env::new(EVENTS);
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let s2 = Arc::clone(&seen);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let inner = appending_exec(Arc::clone(&calls));
+    let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |step, ctx| {
+        s2.lock()
+            .unwrap()
+            .push(ctx.context.active_path.clone().unwrap_or_default());
+        inner.execute(step, ctx)
+    })));
+    let d = start(&env, exec).await;
+    // I4: the startup scan of inbox/x.md fires nothing.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no startup replay");
+
+    // An external edit matching the selector starts a background run…
+    std::fs::write(env.vault().join("inbox/x.md"), "# X\nedited\n").unwrap();
+    poll(|| calls.load(Ordering::SeqCst) == 1);
+    // …an external edit outside the selector does not.
+    std::fs::write(env.vault().join("a.md"), "# A\nedited\n").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(*seen.lock().unwrap(), vec!["inbox/x.md".to_owned()]);
+    let jobs = d
+        .shared()
+        .state()
+        .lock()
+        .unwrap()
+        .list(&cv_state::ListQuery::default())
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].lane, cv_state::Lane::Background);
+    poll(|| {
+        d.shared()
+            .state()
+            .lock()
+            .unwrap()
+            .job(&jobs[0].id)
+            .unwrap()
+            .unwrap()
+            .status
+            == cv_state::JobStatus::Done
+    });
+
+    // The action wrote its own trigger note; that write's daemon-origin echo must not re-start it
+    // (in shadow mode the overlay is not watched, so the echo is injected as the watcher would
+    // send it in live mode).
+    let mut rx = d.subscribe();
+    d.shared().publish(Notification::FileChanged {
+        path: "inbox/x.md".into(),
+        kind: ChangeKind::Modified,
+        hash: None,
+        origin: Origin::Daemon,
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "cycle guard: no self-feed");
+    while let Ok(n) = rx.try_recv() {
+        assert!(
+            !matches!(n, Notification::JobUpdated(ref s) if s.status == JobState::Pending),
+            "no new job"
+        );
+    }
+    d.shutdown().await.unwrap();
+}
+
+#[test]
+fn example_config_files_load_cleanly() {
+    let dir = std::env::temp_dir().join(format!(
+        "cv-run-ex-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("actions.toml"),
+        include_str!("../../../../config/examples/actions.toml"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("schedules.toml"),
+        include_str!("../../../../config/examples/schedules.toml"),
+    )
+    .unwrap();
+    let mut set = cv_actions::ConfigSet::new();
+    super::load_config_dir(&dir, &mut set);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(set.errors().is_empty(), "{:?}", set.errors());
+    assert_eq!(set.armed_actions().count(), 5);
+    assert!(
+        set.armed("search-refresh")
+            .unwrap()
+            .starters
+            .iter()
+            .any(|s| matches!(s, cv_actions::Starter::Schedule(_)))
+    );
+}
