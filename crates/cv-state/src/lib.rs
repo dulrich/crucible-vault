@@ -6,6 +6,7 @@
 mod error;
 pub mod health;
 mod id;
+mod image_descriptions;
 mod job;
 pub mod migrate;
 mod query;
@@ -18,6 +19,7 @@ mod tests;
 pub use error::{Result, StateError};
 pub use health::{BreakerState, ServiceFailureKind, ServiceHealth};
 pub use id::new_job_id;
+pub use image_descriptions::{ImageDescription, ImportSummary};
 pub use job::{
     EnqueueOutcome, FailureKind, FailureReason, Job, JobResult, JobSeed, JobStatus, JobTypeSpec,
     Lane, NewJob, namespaced_key,

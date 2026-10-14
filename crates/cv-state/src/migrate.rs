@@ -78,6 +78,19 @@ CREATE TABLE schedule_runs (
     last_run_ms  INTEGER NOT NULL
 );
 ",
+    // v3 (WP-13): image descriptions the search feed folds into chunk content and contentHash
+    // (Crucible `imageDescriptionStore.ts`; key = content md5; raw = the full record JSON).
+    r"
+CREATE TABLE image_descriptions (
+    md5               TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL,
+    narrative         TEXT NOT NULL,
+    extraction        TEXT NOT NULL,
+    description_hash  TEXT NOT NULL,
+    described_at      TEXT NOT NULL,
+    raw               TEXT NOT NULL
+);
+",
 ];
 
 /// Highest schema version this build knows.

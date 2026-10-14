@@ -104,7 +104,7 @@ mod tests {
             tx.commit().unwrap();
         }
         let mut s = StateDb::open(&p, 10, QueueConfig::default()).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 2);
+        assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
         assert_eq!(s.job("j1").unwrap().unwrap().job_type, "t");
         s.put_checkpoint("j1", 0, "{}", 11).unwrap();
         assert_eq!(s.checkpoints("j1").unwrap().len(), 1);

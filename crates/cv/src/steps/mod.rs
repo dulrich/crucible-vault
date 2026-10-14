@@ -30,6 +30,8 @@ mod wp10_tests;
 mod wp11_tests;
 #[cfg(test)]
 mod wp12_tests;
+#[cfg(test)]
+mod wp13_tests;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
