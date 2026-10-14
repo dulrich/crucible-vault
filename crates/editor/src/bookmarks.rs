@@ -1,0 +1,1 @@
+//! Bookmarks (WP-4).

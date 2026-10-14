@@ -1,0 +1,21 @@
+[package]
+name = "editor-model"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Pure editor logic (plan `v0-editor.md` Summary): no iced, no tokio, no reqwest.
+[dependencies]
+# Exact `=x.y.z` pins, all declared up front at WP-1 of `plans/v0-editor.md` so later plan-B
+# WPs never edit manifests or Cargo.lock. A bump is a deliberate change of its own.
+thiserror = "=2.0.21"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+comrak = { version = "=0.56.0", default-features = false }
+nucleo-matcher = "=0.3.1"
+ofm = { path = "../../../crucible-tui/crates/ofm" }
+
+[lints]
+workspace = true

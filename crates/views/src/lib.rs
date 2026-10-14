@@ -1,0 +1,1 @@
+//! `views` — daemon-native view definitions (TOML under `_custom/crucible-vault/views/`) and the Bases-subset expression evaluator, hosted in the daemon through the `ViewService` seam. Filled by WP-6 of `plans/v0-editor.md`; this stub only reserves the crate and its pinned dependencies (WP-1).

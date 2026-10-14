@@ -1,0 +1,28 @@
+[package]
+name = "views"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Pure view definitions + Bases-subset evaluator (plan `v0-editor.md` WP-6): no iced/tokio.
+[dependencies]
+# Exact `=x.y.z` pins, all declared up front at WP-1 of `plans/v0-editor.md` so later plan-B
+# WPs never edit manifests or Cargo.lock. A bump is a deliberate change of its own.
+# `rusqlite`: WP-6 compiles selection to SQL over the index, and `cv_index::Query`'s connection
+# is crate-private, so the evaluator needs its own read-only connection on the generation file.
+thiserror = "=2.0.21"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+toml = "=1.1.8"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+cv-index = { path = "../cv-index" }
+cv-protocol = { path = "../cv-protocol" }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+cv-testkit = { path = "../cv-testkit" }
+
+[lints]
+workspace = true

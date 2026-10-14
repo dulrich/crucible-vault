@@ -1,0 +1,42 @@
+[package]
+name = "editor"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cvault-editor"
+path = "src/main.rs"
+
+[dependencies]
+# Exact `=x.y.z` pins, all declared up front at WP-1 of `plans/v0-editor.md` so later plan-B
+# WPs never edit manifests or Cargo.lock. A bump is a deliberate change of its own.
+# iced features: `image-without-codecs` (image widget + `Handle::from_rgba`; codecs come from the
+# `image` pin below, matching `crates/cv`), `tokio` (executor), `advanced` (custom widgets: the
+# virtual list, the highlighter-driven editor). No `markdown` (plan "Dependency posture"), no
+# `highlighter` (syntect; WP-2 implements iced's `Highlighter` trait itself).
+iced = { version = "=0.14.0", features = ["image-without-codecs", "tokio", "advanced"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+anyhow = "=1.0.104"
+thiserror = "=2.0.21"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+toml = "=1.1.8"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "sync"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+cv-protocol = { path = "../cv-protocol" }
+cv-index = { path = "../cv-index" }
+cv-state = { path = "../cv-state" }
+cv-vault = { path = "../cv-vault" }
+cv-testkit = { path = "../cv-testkit" }
+editor-model = { path = "../editor-model" }
+ofm = { path = "../../../crucible-tui/crates/ofm" }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true
