@@ -3,6 +3,7 @@
 //!
 //! Pure and synchronous: no async runtime. Every time-dependent API takes `now_ms`.
 
+mod cutover;
 mod error;
 pub mod health;
 mod id;
@@ -16,6 +17,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
+pub use cutover::{CutoverRecord, UnfinishedJob};
 pub use error::{Result, StateError};
 pub use health::{BreakerState, ServiceFailureKind, ServiceHealth};
 pub use id::new_job_id;

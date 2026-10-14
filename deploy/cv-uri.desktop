@@ -1,0 +1,9 @@
+# obsidian:// handler for crucible-vault — shipped, not installed (plan cut-over-now WP-2 registers it with `xdg-mime` only with the user's go-ahead).
+# Exec (spec-escaped; unescapes to: sh -c 'exec "$HOME/.cargo/bin/cv" uri "$1"' cv-uri <url>) runs through `sh -c` so `$HOME` resolves at launch: desktop-entry Exec has no `%h`, and a bare `cv` depends on the session PATH containing ~/.cargo/bin.
+[Desktop Entry]
+Type=Application
+Name=crucible-vault URI handler
+Exec=sh -c "exec \\"\\$HOME/.cargo/bin/cv\\" uri \\"\\$1\\"" cv-uri %u
+NoDisplay=true
+Terminal=false
+MimeType=x-scheme-handler/obsidian;

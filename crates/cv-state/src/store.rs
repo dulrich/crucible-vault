@@ -641,6 +641,10 @@ impl StateReader {
     pub fn image_descriptions_for(&self, md5s: &[String]) -> Result<Vec<ImageDescription>> {
         crate::image_descriptions::descriptions_for(&self.conn, md5s)
     }
+
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
 }
 
 #[cfg(test)]

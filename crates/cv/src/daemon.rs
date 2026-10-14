@@ -20,8 +20,8 @@ use cv_protocol::{
 };
 use cv_state::{NewShadowWrite, QueueConfig, StateDb, StateError, StateReader};
 use cv_vault::{
-    ContentHash, EventKind, NoCutover, ShadowLog, VaultError, VaultEvent, VaultFs, VaultWriter,
-    WatchConfig, WriterHandle,
+    ContentHash, EventKind, ShadowLog, VaultError, VaultEvent, VaultFs, VaultWriter, WatchConfig,
+    WriterHandle,
 };
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
@@ -152,9 +152,13 @@ impl Daemon {
         ));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let fs = match config.mode {
-            Mode::Live => VaultFs::live(&config.vault, &config.protected_vault, &NoCutover)
-                .context("live mode refused")?
-                .with_link_write_roots(config.link_write_roots.clone()),
+            Mode::Live => VaultFs::live(
+                &config.vault,
+                &config.protected_vault,
+                &crate::cutover::StateCutover::new(Arc::clone(&state), &config.protected_vault),
+            )
+            .context("live mode refused")?
+            .with_link_write_roots(config.link_write_roots.clone()),
             Mode::Shadow => {
                 let repo_roots: Vec<PathBuf> = cv_vault::DEFAULT_REPO_ROOTS
                     .iter()

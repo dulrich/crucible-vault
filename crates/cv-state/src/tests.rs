@@ -704,3 +704,68 @@ fn unparseable_resource_keys_fail_closed_at_claim() {
     );
     assert!(s.job(&bad).unwrap().is_some(), "still listed");
 }
+
+// ---- cut-over marker (plan cut-over-now WP-1) -------------------------------
+
+#[test]
+fn v3_to_v4_migration_keeps_rows_and_sets_no_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let c = rusqlite::Connection::open(&p).unwrap();
+        for sql in &migrate::MIGRATIONS[..3] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", 3).unwrap();
+        c.execute(
+            "INSERT INTO jobs (id, job_type, lane, status, params, resource_keys, created_ms)
+             VALUES ('j1', 't', 1, 'queued', '{}', '[]', 1)",
+            [],
+        )
+        .unwrap();
+    }
+    assert_eq!(StateReader::open(&p).unwrap().cutover().unwrap(), None);
+    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(migrate::latest_version(), 4);
+    assert_eq!(s.schema_version().unwrap(), 4);
+    assert!(s.job("j1").unwrap().is_some());
+    assert_eq!(s.cutover().unwrap(), None);
+}
+
+#[test]
+fn set_cutover_is_idempotent() {
+    let (_d, mut s) = db();
+    let a = s.set_cutover("/v", "me", 10).unwrap();
+    let b = s.set_cutover("/other", "you", 20).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.vault, "/v");
+    assert_eq!(s.cutover().unwrap(), Some(a));
+}
+
+#[test]
+fn cancel_unfinished_covers_queued_deferred_running_and_keeps_rows() {
+    let (_d, mut s) = db();
+    let deferred = id_of(s.enqueue(job("t", Some("d"), &[]), 1).unwrap());
+    let c = s.claim(2).unwrap().unwrap();
+    assert_eq!(c.id, deferred);
+    s.settle(
+        &deferred,
+        &JobResult::Deferred {
+            retry_after_ms: 1_000_000,
+            service_unhealthy: None,
+        },
+        3,
+    )
+    .unwrap();
+    let running = id_of(s.enqueue(job("t", Some("r"), &[]), 4).unwrap());
+    assert_eq!(s.claim(5).unwrap().unwrap().id, running);
+    let queued = id_of(s.enqueue(job("t", Some("q"), &[]), 6).unwrap());
+    let done = s.cancel_unfinished(7).unwrap();
+    assert_eq!(done.len(), 3);
+    assert!(s.unfinished_jobs().unwrap().is_empty());
+    for id in [&deferred, &running, &queued] {
+        let j = s.job(id).unwrap().expect("row kept");
+        assert_eq!(j.status, JobStatus::Cancelled, "{id}");
+    }
+    assert_eq!(s.cutover().unwrap(), None, "cancelling never marks");
+}

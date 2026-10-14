@@ -91,6 +91,15 @@ CREATE TABLE image_descriptions (
     raw               TEXT NOT NULL
 );
 ",
+    // v4 (plan cut-over-now WP-1): the single-row cut-over marker; only `cv cutover mark` writes it.
+    r"
+CREATE TABLE cutover_marker (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    vault          TEXT NOT NULL,
+    created_at_ms  INTEGER NOT NULL,
+    created_by     TEXT NOT NULL
+);
+",
 ];
 
 /// Highest schema version this build knows.

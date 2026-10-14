@@ -29,8 +29,9 @@ pub const DEFAULT_REPO_ROOTS: &[&str] = &["<code-root>"];
 const TOMBSTONES: &str = ".cv-tombstones.json";
 const OVERLAY: &str = "vault";
 
-/// The cut-over check (I1), injected by the caller. WP-8 implements it over `state.db`; this crate
-/// ships only [`NoCutover`] and never creates a marker.
+/// The cut-over check (I1), injected by the caller. `cv::cutover::StateCutover` implements it over
+/// `state.db` (plan `cut-over-now` WP-1); this crate ships only [`NoCutover`] and never creates a
+/// marker.
 pub trait CutoverMarker {
     /// Whether the cut-over marker is present.
     fn present(&self) -> Result<bool>;
