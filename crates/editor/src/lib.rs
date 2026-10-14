@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod explorer;
 pub mod image_cache;
 pub mod message;
+pub mod migrate;
 pub mod nav;
 pub mod palette;
 pub mod panels;
