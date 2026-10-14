@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text.
-pub const USAGE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    shadow-mode reports (not yet implemented, WP-14)\n  cv --help        this text\n";
+pub const USAGE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv --help        this text\n";
 
 /// Runs the CLI with `args` (without argv[0]); returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
@@ -32,10 +32,7 @@ pub fn run(args: &[String]) -> i32 {
             print!("{}", status_command(&c)?);
             Ok(())
         })),
-        Some("shadow") => {
-            eprintln!("cv shadow: not yet implemented (WP-14)");
-            2
-        }
+        Some("shadow") => crate::shadow::run(&args[1..]),
         _ => {
             eprint!("{USAGE}");
             2

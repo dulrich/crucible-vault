@@ -202,7 +202,16 @@ pub(crate) fn run(
     let mode = mode(ctx);
     let live = matches!(mode, Mode::Live(_));
     let target = p.path.clone().or_else(|| ctx.context.active_path.clone());
-    let host = Host::open(ctx)?;
+    let reader = open_reader(ctx)?;
+    let ctx_ref: &StepCtx<'_> = ctx;
+    let host = NotePrep::new(
+        Box::new(move |p| ctx_ref.read(p).map(|o| o.map(|(b, _)| b))),
+        &reader,
+        Box::new(move |md5| {
+            let db = ctx_ref.state.lock().ok()?;
+            db.image_description(md5).ok().flatten()
+        }),
+    );
     let report = match (step, target) {
         (Step::SearchDelete(_), Some(path)) => {
             handle.block_on(feed::delete_path(&cfg, mode, &path))
@@ -239,32 +248,52 @@ pub(crate) fn run(
     })
 }
 
-/// File preparation's host: index queries, overlay-aware reads, `state.db` descriptions.
-struct Host<'c, 'a> {
-    ctx: &'c StepCtx<'a>,
-    reader: Reader,
+/// Opens the current index generation for the step (reopens once on a generation swap).
+fn open_reader(ctx: &StepCtx<'_>) -> Result<Reader, StepError> {
+    let open = || Reader::open_current(ctx.index_db);
+    // A generation swap between reading the pointer and opening the file: reopen once.
+    open()
+        .or_else(|_| open())
+        .map_err(|e| StepError::failed(format!("index: {e}")))
 }
 
-impl<'c, 'a> Host<'c, 'a> {
-    fn open(ctx: &'c StepCtx<'a>) -> Result<Self, StepError> {
-        let open = || Reader::open_current(ctx.index_db);
-        // A generation swap between reading the pointer and opening the file: reopen once.
-        let reader = open()
-            .or_else(|_| open())
-            .map_err(|e| StepError::failed(format!("index: {e}")))?;
-        Ok(Self { ctx, reader })
+/// Vault read used by [`NotePrep`]: the bytes of a vault-relative path, `None` when absent.
+pub(crate) type ReadFn<'r> = Box<dyn Fn(&str) -> Result<Option<Vec<u8>>, StepError> + 'r>;
+/// Image-description lookup used by [`NotePrep`] (Crucible `store.has` + `store.get`).
+pub(crate) type DescribeFn<'r> = Box<dyn Fn(&str) -> Option<ImageDescription> + 'r>;
+
+/// File preparation's host: index queries, a vault read function and an image-description
+/// lookup. The feed step builds it over the overlay-aware writer and the daemon's `StateDb`;
+/// `cv shadow parity` (WP-14, P3) builds it over a fresh index, direct read-only vault reads and
+/// a `StateReader`, so both compute `contentHash` with exactly this code.
+pub(crate) struct NotePrep<'r> {
+    read: ReadFn<'r>,
+    reader: &'r Reader,
+    describe: DescribeFn<'r>,
+}
+
+impl<'r> NotePrep<'r> {
+    /// A preparation host over `reader`, reading notes with `read` and descriptions with
+    /// `describe`.
+    pub(crate) fn new(read: ReadFn<'r>, reader: &'r Reader, describe: DescribeFn<'r>) -> Self {
+        Self {
+            read,
+            reader,
+            describe,
+        }
     }
 
     fn idx<T>(r: cv_index::Result<T>) -> Result<T, StepError> {
         r.map_err(|e| StepError::failed(format!("index: {e}")))
     }
 
-    fn indexable(path: &str) -> bool {
+    /// Whether the feed indexes `path`.
+    pub(crate) fn indexable(path: &str) -> bool {
         is_search_indexable_path(path) && !cv_index::is_skipped_path(path)
     }
 
-    /// Every indexable note's `(path, contentHash)`.
-    fn local_hashes(&self) -> Result<Vec<(String, String)>, StepError> {
+    /// Every indexable note, prepared, in path order.
+    pub(crate) fn local_notes(&self) -> Result<Vec<(String, LocalNote)>, StepError> {
         let q = self.reader.query();
         let mut out = Vec::new();
         let mut folders = vec![String::new()];
@@ -274,21 +303,32 @@ impl<'c, 'a> Host<'c, 'a> {
                     continue;
                 }
                 if let Some(n) = self.local_note(&f.path)? {
-                    out.push((f.path, n.prepared.content_hash));
+                    out.push((f.path, n));
                 }
             }
             folders.extend(Self::idx(q.subfolders(&folder))?);
         }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Every indexable note's `(path, contentHash)`.
+    pub(crate) fn local_hashes(&self) -> Result<Vec<(String, String)>, StepError> {
+        let mut out: Vec<(String, String)> = self
+            .local_notes()?
+            .into_iter()
+            .map(|(p, n)| (p, n.prepared.content_hash))
+            .collect();
         out.sort();
         Ok(out)
     }
 
     /// Prepares `path`, or `None` when it is gone or not indexable.
-    fn local_note(&self, path: &str) -> Result<Option<LocalNote>, StepError> {
+    pub(crate) fn local_note(&self, path: &str) -> Result<Option<LocalNote>, StepError> {
         if !Self::indexable(path) {
             return Ok(None);
         }
-        let Some((bytes, _)) = self.ctx.read(path)? else {
+        let Some(bytes) = (self.read)(path)? else {
             return Ok(None);
         };
         let q = self.reader.query();
@@ -319,10 +359,9 @@ impl<'c, 'a> Host<'c, 'a> {
     }
 }
 
-impl PrepareHost for Host<'_, '_> {
+impl PrepareHost for NotePrep<'_> {
     fn image_description(&self, md5: &str) -> Option<ImageDescription> {
-        let db = self.ctx.state.lock().ok()?;
-        db.image_description(md5).ok().flatten()
+        (self.describe)(md5)
     }
 
     /// Obsidian `getFirstLinkpathDest`, through the index: the note's own resolved link to
@@ -340,7 +379,7 @@ impl PrepareHost for Host<'_, '_> {
                     .into_iter()
                     .find(|p| q.file(p).ok().flatten().is_some())
             })?;
-        let (bytes, _) = self.ctx.read(&resolved).ok()??;
+        let bytes = (self.read)(&resolved).ok()??;
         Some(LinkedSource {
             basename: cv_search::prepare::basename(&resolved),
             path: resolved,

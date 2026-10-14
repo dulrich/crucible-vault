@@ -17,6 +17,7 @@
 use crate::error::{Result, StateError};
 use crate::health::{self, BreakerState, ServiceFailureKind, ServiceHealth};
 use crate::id::new_job_id;
+use crate::image_descriptions::ImageDescription;
 use crate::job::{
     EnqueueOutcome, FailureKind, Job, JobResult, JobSeed, JobStatus, JobTypeSpec, Lane, NewJob,
     namespaced_key,
@@ -634,6 +635,11 @@ impl StateReader {
     /// Shadow writes after `since_seq`.
     pub fn shadow_writes(&self, since_seq: i64, limit: u32) -> Result<Vec<ShadowWrite>> {
         query::shadow_writes(&self.conn, since_seq, limit)
+    }
+
+    /// Every stored image description among `md5s`, ordered by md5 (unknown keys skipped).
+    pub fn image_descriptions_for(&self, md5s: &[String]) -> Result<Vec<ImageDescription>> {
+        crate::image_descriptions::descriptions_for(&self.conn, md5s)
     }
 }
 

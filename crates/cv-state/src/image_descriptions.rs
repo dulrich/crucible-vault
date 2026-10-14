@@ -109,6 +109,27 @@ fn put_on(conn: &rusqlite::Connection, d: &ImageDescription) -> Result<bool> {
 
 const COLS: &str = "md5, kind, narrative, extraction, description_hash, described_at, raw";
 
+/// Every stored record among `md5s`, ordered by md5 (shared by [`StateDb`] and
+/// [`crate::StateReader`]).
+pub(crate) fn descriptions_for(
+    conn: &rusqlite::Connection,
+    md5s: &[String],
+) -> Result<Vec<ImageDescription>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLS} FROM image_descriptions WHERE md5 = ?1"
+    ))?;
+    let mut keys: Vec<&String> = md5s.iter().collect();
+    keys.sort();
+    keys.dedup();
+    let mut out = Vec::new();
+    for k in keys {
+        if let Some(d) = stmt.query_row(params![k], row).optional()? {
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
 impl StateDb {
     /// Upserts one record (keyed by `md5`). Returns `true` when a row was inserted or changed.
     pub fn put_image_description(&mut self, d: &ImageDescription) -> Result<bool> {
@@ -129,19 +150,7 @@ impl StateDb {
 
     /// Every stored record among `md5s`, ordered by md5 (unknown keys are skipped).
     pub fn image_descriptions_for(&self, md5s: &[String]) -> Result<Vec<ImageDescription>> {
-        let mut stmt = self.conn().prepare_cached(&format!(
-            "SELECT {COLS} FROM image_descriptions WHERE md5 = ?1"
-        ))?;
-        let mut keys: Vec<&String> = md5s.iter().collect();
-        keys.sort();
-        keys.dedup();
-        let mut out = Vec::new();
-        for k in keys {
-            if let Some(d) = stmt.query_row(params![k], row).optional()? {
-                out.push(d);
-            }
-        }
-        Ok(out)
+        descriptions_for(self.conn(), md5s)
     }
 
     /// One-time import of Crucible's `image-descriptions/*.json` records. Read-only on `dir`;
@@ -263,6 +272,12 @@ mod tests {
             got.iter().map(|d| d.md5.as_str()).collect::<Vec<_>>(),
             ["aa", "bb"]
         );
+        drop(s);
+        let r = StateReader::open(&dir.path().join("s.db")).unwrap();
+        let via_reader = r
+            .image_descriptions_for(&["bb".into(), "zz".into(), "aa".into()])
+            .unwrap();
+        assert_eq!(via_reader, got);
     }
 
     #[test]

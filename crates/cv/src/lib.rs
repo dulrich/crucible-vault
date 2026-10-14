@@ -8,6 +8,7 @@ pub mod config;
 pub mod daemon;
 pub mod runner;
 pub mod server;
+pub mod shadow;
 pub mod spool;
 pub mod steps;
 pub mod uri;

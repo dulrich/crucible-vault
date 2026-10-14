@@ -683,7 +683,7 @@ fn binary_cli_contract() {
     assert_eq!(o.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&o.stderr).contains("live mode refused"));
     assert_eq!(run(&["bogus"]).status.code(), Some(2));
-    assert_eq!(run(&["shadow", "report"]).status.code(), Some(2));
+    assert_eq!(run(&["shadow", "bogus"]).status.code(), Some(2));
     assert_eq!(run(&["--help"]).status.code(), Some(0));
     // Status with no daemon falls back to state.db (created by the failed start above).
     let o = run(&["status"]);
