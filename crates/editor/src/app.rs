@@ -108,6 +108,8 @@ pub struct App {
     /// Tests: every `on_tab_closed` path, in order.
     #[cfg(test)]
     pub closed: Vec<String>,
+    /// WP-3: per-tab reading state (mode, render cache, image handles), keyed by path.
+    pub reading: crate::reading::ReadingStore,
     tokens: Tokens,
     notifications: NotifHandle,
     state_path: Option<PathBuf>,
@@ -219,6 +221,7 @@ impl App {
             today: None,
             #[cfg(test)]
             closed: Vec::new(),
+            reading: crate::reading::ReadingStore::new(),
             notifications,
             state_path,
         };
@@ -362,14 +365,14 @@ impl App {
 
     /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
     fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
-        crate::source::view(&tab.source, self.tokens, self.status.mode)
+        crate::reading::tab_body(&self.reading, tab, self.tokens, self.status.mode)
     }
 
     /// Every tab removal funnels through here (button, pane close, replace, trash).
     fn on_tab_closed(&mut self, path: &str) {
         #[cfg(test)]
         self.closed.push(path.to_owned());
-        let _ = path;
+        self.reading.on_tab_closed(path);
     }
 
     /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`).
@@ -440,7 +443,20 @@ impl App {
                     },
                 );
             }
-            Message::Reading(m) => match m {},
+            Message::Reading(m) => {
+                let tabs: Vec<&Tab> = self
+                    .panes
+                    .iter()
+                    .flat_map(|(_, ps)| ps.tabs.iter())
+                    .collect();
+                return crate::reading::update(
+                    &mut self.reading,
+                    m,
+                    &tabs,
+                    self.panes.get(self.focus).and_then(PaneState::active_tab),
+                    self.daemon.as_ref(),
+                );
+            }
             Message::Switcher(m) => return self.update_switcher(m),
             Message::Palette(m) => match m {},
             Message::Panels(m) => match m {},
@@ -854,6 +870,7 @@ impl App {
         Subscription::batch([
             Subscription::run_with(self.notifications.clone(), notification_stream),
             iced::keyboard::listen().filter_map(switcher::key_event),
+            self.reading.subscription(),
         ])
     }
 

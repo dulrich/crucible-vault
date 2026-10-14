@@ -55,7 +55,32 @@ pub enum SourceMsg {
 
 /// WP-3: reading pane.
 #[derive(Debug, Clone)]
-pub enum ReadingMsg {}
+pub enum ReadingMsg {
+    /// Cycle the active tab's mode source → reading → split (Ctrl+E; WP-5's palette too).
+    CycleMode,
+    /// Set a tab's mode by path.
+    SetMode {
+        path: String,
+        mode: crate::reading::ViewMode,
+    },
+    /// The recompute debounce tick.
+    Tick,
+    /// A wiki-link / vault md-link click in the reading pane of `src`.
+    OpenLink { src: String, target: String },
+    /// An image sensor came into view (`width` = laid-out width).
+    ImageShown {
+        tab: String,
+        key: String,
+        width: f32,
+    },
+    /// An image sensor left view.
+    ImageHidden { tab: String, key: String },
+    /// An off-thread decode finished (`Err` = unreadable/undecodable; no note text).
+    ImageLoaded {
+        key: String,
+        result: Result<crate::image_cache::Decoded, String>,
+    },
+}
 
 /// WP-4: the file explorer.
 #[derive(Debug, Clone)]
