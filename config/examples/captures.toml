@@ -1,0 +1,66 @@
+# Example `captures.toml` (plan v0-core-daemon WP-10). Copy into CV_CONFIG_DIR.
+#
+# [periods.*]: period-note settings used by `materialize`, period capture targets and the
+# `{period.day|week|month}` folder placeholder (today's asset folder `<folder>/<formatted date>`).
+#   folder       vault folder (required)
+#   format       Moment format (default: day YYYY-MM-DD, week GGGG-[W]WW, month YYYY-MM)
+#   template     vault path of the note template (optional; no template = empty note)
+#   asset_folder report `<folder>/<name>` as vars.asset_folder (the folder appears with its first asset)
+# Ported from Crucible settings dailyFolder/dailyTemplate/dailyCreateAssetFolder etc. (src/periods.ts).
+
+[periods.day]
+folder = "daily/day"
+format = "YYYY-MM-DD"
+template = "_custom/day-template.md"
+asset_folder = true
+
+[periods.week]
+folder = "daily/week"
+format = "GGGG-[W]WW"
+template = "_custom/week-template.md"
+
+[periods.month]
+folder = "daily/month"
+format = "YYYY-MM"
+template = "_custom/month-template.md"
+
+# [[capture]]: named capture presets; a `capture` step names one with `capture = "NAME"` and may
+# override any key. Keys: target (daily | daily_next | weekly | monthly | active | path), path,
+# mode (append | prepend | replace | section), section ("# Heading"), section_mode (fixed | source),
+# format ({{value}}, {{value:oneline}}, {{time}}, {{date}}, {{source_link}}, {{vars.NAME}}, {{param.NAME}}),
+# source (value | line). The four presets reproduce Crucible's data.json captures.
+
+[[capture]]
+name = "daylog"
+label = "Daylog"
+target = "daily"
+section = "# Daylogs"
+mode = "append"
+format = "- [{{time}}] {{value}}"
+
+# Crucible "Forward task": the task line under the cursor goes to the next daily note, into the
+# same heading it sat under when the target has it, else "# Todos".
+[[capture]]
+name = "forward-task"
+label = "Forward task"
+target = "daily_next"
+source = "line"
+section = "# Todos"
+section_mode = "source"
+mode = "append"
+format = "{{value}}"
+
+[[capture]]
+name = "replace-note"
+label = "Replace note contents"
+target = "active"
+mode = "replace"
+format = "{{value}}"
+
+[[capture]]
+name = "monthly-observation"
+label = "Monthly observation"
+target = "monthly"
+section = "# Observations"
+mode = "append"
+format = "- {{source_link}}\n\t- {{value:oneline}}"

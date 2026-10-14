@@ -1,0 +1,62 @@
+# Example `kinds.toml` (plan v0-core-daemon WP-10; D3, inventory #4). Copy into CV_CONFIG_DIR.
+#
+# One `file-as-kind` action (actions.toml) replaces Crucible's ten "Ingest as …" chains: its
+# `kind` param picks a row here. Keys:
+#   label               palette text
+#   tags                tags upserted by `upsert_tags { kind = "{param.kind}" }`
+#   folder              destination folder for `move { kind = "{param.kind}" }`; placeholders:
+#                       {period.day} = today's daily asset folder, {param.NAME}, {vars.NAME}
+#   cleanup_transcript  run the transcript cleanup before lint (`lint { kind = … }`)
+#   props               extra properties for `set_props { kind = … }`
+# The kind names must match the `kind` param's enum choices in actions.toml.
+
+[kinds.transcript]
+label = "Transcript"
+tags = ["transcript"]
+folder = "{period.day}"
+
+[kinds.fanfic]
+label = "Fanfic"
+tags = ["fanfic"]
+folder = "{period.day}"
+
+[kinds.blog]
+label = "Blog"
+tags = ["blog"]
+folder = "{period.day}"
+
+[kinds.newsletter-a]
+label = "newsletter-a"
+tags = ["newsletter-a"]
+folder = "{period.day}"
+
+[kinds.repo]
+label = "Repository"
+tags = ["repo"]
+folder = "stack"
+
+[kinds.prompt-kit]
+label = "Prompt kit"
+tags = ["prompt-kit"]
+folder = "topic_b"
+
+[kinds.post]
+label = "Post"
+tags = ["post"]
+folder = "{period.day}"
+cleanup_transcript = true
+
+[kinds.news]
+label = "News"
+tags = ["news"]
+folder = "{period.day}"
+
+[kinds.thread]
+label = "Thread"
+tags = ["thread"]
+folder = "{period.day}"
+
+[kinds.quote]
+label = "Quote"
+tags = ["quote"]
+folder = "{period.day}"

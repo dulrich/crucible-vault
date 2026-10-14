@@ -12,7 +12,12 @@
 #              derives no key is refused at enqueue.
 # Step `type`s: guard, capture, materialize, move, copy, set_props, remove_props, upsert_tags,
 # lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete.
-# Each step's other keys belong to its module (WP-10..13 document them).
+# Each step's other keys belong to its module (WP-10..13 document them; WP-10's in
+# crates/cv/src/steps/{materialize,capture,file,lint}.rs). Step string params take single-brace
+# placeholders {param.NAME}, {vars.NAME}, {path}, {period.day|week|month}; note/capture templates
+# take Crucible's {{...}} tokens plus {{vars.NAME}}.
+# Actions that write a note other than the active one name it in `resources.keys`
+# (period notes: "note::period::<day|week|month>").
 
 [[action]]
 id = "lint-note"
@@ -36,6 +41,7 @@ kind = "text"
 required = true
 [[action.steps]]
 type = "upsert_tags"
+tags = ["{param.tag}"]
 
 # Event-started: re-lint inbox notes edited outside the daemon (origin defaults to "external").
 [[action]]
@@ -64,3 +70,182 @@ starters = []
 resources = { note = false, keys = ["search::feed"] }
 [[action.steps]]
 type = "search_upsert"
+
+# ---- WP-10: periods and notes ---------------------------------------------------------------
+
+# Plan B's "open today/this week/this month": materializes the period note if missing (template
+# from captures.toml [periods.*]) and returns it as open_path.
+[[action]]
+id = "period.open"
+label = "Open period note"
+group = "Periods"
+durable = false
+resources = { note = false, keys = ["note::period::{param.period}"] }
+[[action.params]]
+name = "period"
+label = "Period"
+kind = "enum"
+choices = ["day", "week", "month"]
+default = "day"
+[[action.params]]
+name = "date"
+label = "Date (default today)"
+kind = "date"
+[[action.steps]]
+type = "materialize"
+period = "{param.period}"
+date = "{param.date}"
+
+[[action]]
+id = "note.create"
+label = "Create note"
+group = "Notes"
+durable = false
+resources = { note = false, keys = ["{param.path}"] }
+[[action.params]]
+name = "path"
+label = "Path"
+kind = "path"
+required = true
+[[action.params]]
+name = "template"
+label = "Template"
+kind = "path"
+[[action.steps]]
+type = "materialize"
+path = "{param.path}"
+template = "{param.template}"
+
+# An externally created period note (e.g. synced from another device) is filled from its period
+# template — only while it is empty (Crucible's empty-file-only self-guard). Notes in asset
+# subfolders are not period notes and stop the run.
+[[action]]
+id = "period.fill-created"
+label = "Fill externally created period notes"
+starters = [
+  { type = "event", kinds = ["created"], origin = "external", selector = { folder = "daily" } },
+]
+[[action.steps]]
+type = "materialize"
+target = "active"
+only_if_empty = true
+
+# ---- WP-10: captures (captures.toml presets) ------------------------------------------------
+
+[[action]]
+id = "capture.daylog"
+label = "Daylog"
+group = "Capture"
+resources = { note = false, keys = ["note::period::day"] }
+[[action.params]]
+name = "value"
+label = "Entry"
+kind = "text"
+required = true
+[[action.steps]]
+type = "capture"
+capture = "daylog"
+
+# Forward task: capture the task line into the next daily note, then mark it [>] in place.
+[[action]]
+id = "capture.forward-task"
+label = "Forward task"
+group = "Capture"
+needs = ["active_path", "line"]
+resources = { note = true, keys = ["note::period::day"] }
+[[action.steps]]
+type = "capture"
+capture = "forward-task"
+[[action.steps]]
+type = "mark_forwarded"
+
+[[action]]
+id = "capture.replace-note"
+label = "Replace note contents"
+group = "Capture"
+needs = ["active_path"]
+[[action.params]]
+name = "value"
+label = "New contents"
+kind = "multiline"
+required = true
+[[action.steps]]
+type = "capture"
+capture = "replace-note"
+
+[[action]]
+id = "capture.monthly-observation"
+label = "Monthly observation"
+group = "Capture"
+needs = ["active_path", "selection"]
+resources = { note = false, keys = ["note::period::month"] }
+[[action.steps]]
+type = "capture"
+capture = "monthly-observation"
+
+# ---- WP-10: file-as-kind (kinds.toml) ---------------------------------------------------------
+
+# One action for Crucible's ten "Ingest as ..." chains: tag, move to the kind's folder (links
+# rewritten), lint at the new path (transcript cleanup for kinds that ask for it). The resource
+# key is the active note, which is the note being moved.
+[[action]]
+id = "file-as-kind"
+label = "File as kind"
+group = "Ingest"
+needs = ["active_path"]
+[[action.params]]
+name = "kind"
+label = "Kind"
+kind = "enum"
+choices = ["transcript", "fanfic", "blog", "3-2-1", "repo", "prompt-kit", "post", "news", "thread", "quote"]
+required = true
+[[action.steps]]
+type = "upsert_tags"
+kind = "{param.kind}"
+[[action.steps]]
+type = "move"
+kind = "{param.kind}"
+[[action.steps]]
+type = "lint"
+path = "{vars.moved_path}"
+kind = "{param.kind}"
+
+# Refine a transcript with an agent (WP-12 runs the `agent` step; agents.toml/providers.toml are
+# WP-12's). Crucible's four per-provider chains become one action with a `provider` param whose
+# choices are providers.toml `provider:model` routes. The raw note is copied aside first; the
+# refined text then replaces the active note's body (frontmatter kept), as Crucible's
+# "Replace Note Contents" capture did.
+[[action]]
+id = "refine-transcript"
+label = "Refine transcript"
+group = "Ingest"
+needs = ["active_path"]
+resources = { note = true, keys = ["raw::{path}"] }
+[[action.params]]
+name = "provider"
+label = "Provider"
+kind = "enum"
+choices = ["local:local-chat-model", "openrouter:@preset/example-model", "openrouter:@preset/example-model", "codex:gpt-5.5"]
+default = "local:local-chat-model"
+[[action.steps]]
+type = "guard"
+not_tag = "refined"
+[[action.steps]]
+type = "copy"
+to = "_raw_transcript"
+[[action.steps]]
+type = "set_props"
+props = { raw-transcript = "{vars.copied_link}" }
+[[action.steps]]
+type = "agent"
+agent = "refine-transcript"
+model = "{param.provider}"
+output_var = "agent_output"
+[[action.steps]]
+type = "capture"
+target = "active"
+mode = "replace"
+format = "{{vars.agent_output}}"
+[[action.steps]]
+type = "upsert_tags"
+tags = ["refined"]

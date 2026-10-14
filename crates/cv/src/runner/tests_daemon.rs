@@ -464,11 +464,33 @@ fn example_config_files_load_cleanly() {
         include_str!("../../../../config/examples/schedules.toml"),
     )
     .unwrap();
+    // WP-10's example files (period settings, capture presets, kinds).
+    std::fs::write(
+        dir.join("captures.toml"),
+        include_str!("../../../../config/examples/captures.toml"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("kinds.toml"),
+        include_str!("../../../../config/examples/kinds.toml"),
+    )
+    .unwrap();
+    // WP-12's files: refine-transcript's agent step validates against them (WP-10 x WP-12 contract).
+    std::fs::write(
+        dir.join("agents.toml"),
+        include_str!("../../../../config/examples/agents.toml"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("providers.toml"),
+        include_str!("../../../../config/examples/providers.toml"),
+    )
+    .unwrap();
     let mut set = cv_actions::ConfigSet::new();
     super::load_config_dir(&dir, &mut set);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(set.errors().is_empty(), "{:?}", set.errors());
-    assert_eq!(set.armed_actions().count(), 5);
+    assert_eq!(set.armed_actions().count(), 14);
     assert!(
         set.armed("search-refresh")
             .unwrap()
