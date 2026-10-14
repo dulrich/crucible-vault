@@ -20,7 +20,8 @@ use crate::bookmarks::{self, BOOKMARKS_PATH, BookmarkMsg, Bookmarks, WriteOutcom
 use crate::daemon::{DaemonClient, DaemonError};
 use crate::explorer::{self, EditKind, Explorer, FileOp, FileOpDone};
 use crate::message::{
-    ExplorerMsg, Message, NavMsg, PanesMsg, SourceMsg, StatusMsg, SwitcherMsg, TabsMsg, ThemeMsg,
+    ExplorerMsg, Message, NavMsg, PaletteMsg, PanelsMsg, PanesMsg, SourceMsg, StatusMsg,
+    SwitcherMsg, TabsMsg, ThemeMsg,
 };
 use crate::nav;
 use crate::panes::{self, PaneState};
@@ -110,6 +111,10 @@ pub struct App {
     pub closed: Vec<String>,
     /// WP-3: per-tab reading state (mode, render cache, image handles), keyed by path.
     pub reading: crate::reading::ReadingStore,
+    /// WP-5: command palette, action invocation and the job toast.
+    pub palette: crate::palette::Palette,
+    /// WP-5: the right-hand side panels.
+    pub panels: crate::panels::Panels,
     tokens: Tokens,
     notifications: NotifHandle,
     state_path: Option<PathBuf>,
@@ -222,6 +227,8 @@ impl App {
             #[cfg(test)]
             closed: Vec::new(),
             reading: crate::reading::ReadingStore::new(),
+            palette: crate::palette::Palette::default(),
+            panels: crate::panels::Panels::default(),
             notifications,
             state_path,
         };
@@ -458,8 +465,8 @@ impl App {
                 );
             }
             Message::Switcher(m) => return self.update_switcher(m),
-            Message::Palette(m) => match m {},
-            Message::Panels(m) => match m {},
+            Message::Palette(m) => return self.update_palette(m),
+            Message::Panels(m) => return self.update_panels(m),
             Message::Views(m) => match m {},
             Message::Nav(m) => return self.update_nav(m),
             Message::Panes(m) => return self.update_panes(m),
@@ -819,6 +826,381 @@ impl App {
         Task::none()
     }
 
+    // ---- WP-5: command palette and action invocation ----
+
+    fn update_palette(&mut self, m: PaletteMsg) -> Task<Message> {
+        use crate::palette::prompt::Step;
+        match m {
+            PaletteMsg::Open => {
+                self.palette.show();
+                let fetch = self.fetch_actions();
+                return Task::batch([
+                    fetch,
+                    iced::widget::operation::focus(crate::palette::INPUT_ID),
+                ]);
+            }
+            PaletteMsg::Close => self.palette.close(),
+            PaletteMsg::Query(q) => self.palette.set_query(q),
+            PaletteMsg::Up if self.palette.prompt.is_none() => {
+                self.palette.selected = self.palette.selected.saturating_sub(1);
+            }
+            PaletteMsg::Down if self.palette.prompt.is_none() => {
+                if self.palette.selected + 1 < self.palette.results.len() {
+                    self.palette.selected += 1;
+                }
+            }
+            PaletteMsg::Up | PaletteMsg::Down => {}
+            PaletteMsg::Submit | PaletteMsg::CtrlEnter => {
+                if !self.palette.open {
+                    return Task::none();
+                }
+                let Some(p) = &mut self.palette.prompt else {
+                    if matches!(m, PaletteMsg::Submit)
+                        && let Some(i) = self.palette.current()
+                    {
+                        return self.invoke_entry(i);
+                    }
+                    return Task::none();
+                };
+                match p.advance() {
+                    Err(e) => self.palette.prompt_error = Some(e.to_string()),
+                    Ok(Step::More) => {
+                        let snapshot = p.clone();
+                        self.palette.sync_step(&snapshot);
+                    }
+                    Ok(Step::Done(params)) => {
+                        let a = p.action.clone();
+                        self.palette.close();
+                        return self.run_call(crate::palette::Call {
+                            action_id: a.id,
+                            title: a.title,
+                            params,
+                            needs: a.needs,
+                        });
+                    }
+                }
+            }
+            PaletteMsg::Pick(i) => return self.invoke_entry(i),
+            PaletteMsg::Loaded(r) => {
+                self.palette.loading = false;
+                match r {
+                    Ok(a) => self.palette.set_actions(a),
+                    Err(e) => self.status.error = Some(format!("actions: {e}")),
+                }
+                if let Some(c) = self.palette.pending_chord.take()
+                    && self.palette.actions.is_some()
+                {
+                    return self.on_chord(&c);
+                }
+            }
+            PaletteMsg::Key(c) => return self.on_chord(&c),
+            PaletteMsg::Prompt(pm) => {
+                self.palette
+                    .prompt_input(pm, &self.explorer.paths, &self.ui.recent);
+            }
+            PaletteMsg::SaveDone {
+                path,
+                seq,
+                outcome,
+                call,
+            } => return self.after_save_first(&path, seq, outcome, call),
+            PaletteMsg::Ran { title, result } => match result {
+                Ok(r) => {
+                    self.palette.job_titles.insert(r.job_id.clone(), title);
+                    if let Some(p) = r.open_path {
+                        self.open(&p, true);
+                    }
+                }
+                Err(e) => self.status.error = Some(format!("{title}: {e}")),
+            },
+            PaletteMsg::Tick => self.palette.expire_toast(std::time::Instant::now()),
+        }
+        Task::none()
+    }
+
+    fn fetch_actions(&mut self) -> Task<Message> {
+        if self.palette.actions.is_some() || self.palette.loading || self.daemon.is_none() {
+            return Task::none();
+        }
+        self.palette.loading = true;
+        self.rpc(
+            |d| d.actions_list().map_err(|e| e.to_string()),
+            |r| Message::Palette(PaletteMsg::Loaded(r)),
+        )
+    }
+
+    fn on_chord(&mut self, c: &crate::palette::chord::Chord) -> Task<Message> {
+        if crate::palette::chord::reserved(c) {
+            return Task::none();
+        }
+        if self.palette.actions.is_none() {
+            self.palette.pending_chord = Some(c.clone());
+            return self.fetch_actions();
+        }
+        match self.palette.bindings.get(c).cloned() {
+            Some(id) => self.invoke_action(&id),
+            None => Task::none(),
+        }
+    }
+
+    fn invoke_entry(&mut self, i: usize) -> Task<Message> {
+        let Some(e) = self.palette.entries.get(i).cloned() else {
+            return Task::none();
+        };
+        match e.id {
+            crate::palette::EntryId::Client(c) => {
+                self.palette.close();
+                self.update(c.message(self.focus))
+            }
+            crate::palette::EntryId::Action(id) => self.invoke_action(&id),
+        }
+    }
+
+    /// Invokes an action exactly as the palette does: prompt its params, then run.
+    fn invoke_action(&mut self, id: &str) -> Task<Message> {
+        let Some(info) = self.palette.action(id).cloned() else {
+            self.status.error = Some(format!("unknown action {id}"));
+            return Task::none();
+        };
+        if !info.params.is_empty() {
+            let today = self.today();
+            self.palette.begin_prompt(info, today);
+            return iced::widget::operation::focus(crate::palette::INPUT_ID);
+        }
+        self.palette.close();
+        self.run_call(crate::palette::Call {
+            action_id: info.id,
+            title: info.title,
+            params: serde_json::Map::new(),
+            needs: info.needs,
+        })
+    }
+
+    /// Save-first (live mode, dirty active buffer), then `run_action`.
+    fn run_call(&mut self, call: crate::palette::Call) -> Task<Message> {
+        let shadow = self.status.mode == Mode::Shadow;
+        let Some(ps) = self.panes.get_mut(self.focus) else {
+            return self.dispatch_call(call);
+        };
+        let Some(i) = ps.active.filter(|&i| i < ps.tabs.len()) else {
+            if call.needs.iter().any(|n| n == "active_path") {
+                self.status.error = Some(format!("{}: open a note first", call.title));
+                return Task::none();
+            }
+            return self.dispatch_call(call);
+        };
+        let tab = &mut ps.tabs[i];
+        if shadow || !tab.source.is_dirty() {
+            return self.dispatch_call(call);
+        }
+        let path = tab.path.clone();
+        let Some(job) = tab.source.begin_save(false) else {
+            self.status.error = Some(format!(
+                "{}: not run (the note is saving or has a conflict)",
+                call.title
+            ));
+            return Task::none();
+        };
+        let seq = job.seq;
+        self.rpc(
+            move |d| Ok(job.run(d)),
+            move |r| {
+                Message::Palette(PaletteMsg::SaveDone {
+                    path,
+                    seq,
+                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                    call,
+                })
+            },
+        )
+    }
+
+    fn after_save_first(
+        &mut self,
+        path: &str,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+        call: crate::palette::Call,
+    ) -> Task<Message> {
+        use crate::source::SaveOutcome;
+        let Some((pane, i)) = panes::find(&self.panes, path) else {
+            self.status.error = Some(format!("{}: not run (note closed)", call.title));
+            return Task::none();
+        };
+        let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) else {
+            return Task::none();
+        };
+        let ok = matches!(outcome, SaveOutcome::Saved(_));
+        let again = match tab.source.finish_save(seq, outcome.clone()) {
+            Ok(again) => again,
+            Err(e) => {
+                self.status.error = Some(format!("{}: not run (save failed: {e})", call.title));
+                return Task::none();
+            }
+        };
+        if !ok {
+            self.status.error = Some(format!(
+                "{}: not run (save conflict: the file changed on disk)",
+                call.title
+            ));
+            return Task::none();
+        }
+        let ctx = crate::palette::context(Some(tab));
+        let follow = if again {
+            tab.source.begin_save(false)
+        } else {
+            None
+        };
+        let follow = match follow {
+            Some(job) => {
+                let done = job.clone();
+                self.rpc(
+                    move |d| Ok(job.run(d)),
+                    move |r| done.done(r.unwrap_or_else(SaveOutcome::Failed)),
+                )
+            }
+            None => Task::none(),
+        };
+        let run = self.dispatch_with(call, ctx);
+        Task::batch([follow, run])
+    }
+
+    fn dispatch_call(&mut self, call: crate::palette::Call) -> Task<Message> {
+        let ctx = crate::palette::context(self.active_tab());
+        self.dispatch_with(call, ctx)
+    }
+
+    fn dispatch_with(
+        &mut self,
+        call: crate::palette::Call,
+        context: cv_protocol::ActionContext,
+    ) -> Task<Message> {
+        let params = cv_protocol::RunActionParams {
+            action_id: call.action_id,
+            params: call.params,
+            context,
+        };
+        let title = call.title;
+        self.rpc(
+            move |d| d.run_action(params).map_err(|e| e.to_string()),
+            move |result| Message::Palette(PaletteMsg::Ran { title, result }),
+        )
+    }
+
+    // ---- WP-5: side panels ----
+
+    fn update_panels(&mut self, m: PanelsMsg) -> Task<Message> {
+        match m {
+            PanelsMsg::Toggle => {
+                self.panels.visible = !self.panels.visible;
+                return self.sync_panels();
+            }
+            PanelsMsg::Show(k) => {
+                self.panels.visible = true;
+                self.panels.kind = k;
+                let t = self.sync_panels();
+                if k == crate::panels::PanelKind::Search {
+                    return Task::batch([
+                        t,
+                        iced::widget::operation::focus(crate::panels::SEARCH_ID),
+                    ]);
+                }
+                return t;
+            }
+            PanelsMsg::Tick => return self.sync_panels(),
+            PanelsMsg::OutlineJump(line) => {
+                if let Some(ps) = self.panes.get_mut(self.focus)
+                    && let Some(i) = ps.active.filter(|&i| i < ps.tabs.len())
+                {
+                    ps.tabs[i]
+                        .source
+                        .move_to(iced::widget::text_editor::Cursor {
+                            position: iced::widget::text_editor::Position { line, column: 0 },
+                            selection: None,
+                        });
+                }
+            }
+            PanelsMsg::Open(p) => self.open(&p, true),
+            PanelsMsg::Backlinks { path, result } => match result {
+                Ok(b) if self.panels.path.as_deref() == Some(path.as_str()) => {
+                    self.panels.backlinks = b;
+                }
+                Ok(_) => {}
+                Err(e) => self.status.error = Some(format!("backlinks: {e}")),
+            },
+            PanelsMsg::TagPick(tag) => {
+                if let Some(d) = self.daemon.clone()
+                    && let Err(e) = self.panels.pick_tag(d.as_ref(), &tag)
+                {
+                    self.status.error = Some(format!("tags: {e}"));
+                }
+            }
+            PanelsMsg::TagBack => self.panels.tag_files = None,
+            PanelsMsg::SearchInput(q) => {
+                self.panels.search.query = q;
+                self.panels.search.seq += 1;
+                let seq = self.panels.search.seq;
+                return Task::perform(
+                    async { tokio::time::sleep(crate::panels::SEARCH_DEBOUNCE).await },
+                    move |()| Message::Panels(PanelsMsg::SearchDue(seq)),
+                );
+            }
+            PanelsMsg::SearchDue(seq) => {
+                if seq != self.panels.search.seq {
+                    return Task::none();
+                }
+                let q = self.panels.search.query.clone();
+                if q.trim().is_empty() {
+                    self.panels.search.results.clear();
+                    return Task::none();
+                }
+                return self.rpc(
+                    move |d| crate::panels::run_search(d, &q),
+                    move |result| Message::Panels(PanelsMsg::SearchDone { seq, result }),
+                );
+            }
+            PanelsMsg::SearchDone { seq, result } => {
+                if seq == self.panels.search.seq {
+                    match result {
+                        Ok(r) => {
+                            self.panels.search.results = r;
+                            self.panels.search.error = None;
+                        }
+                        Err(e) => self.panels.search.error = Some(e),
+                    }
+                }
+            }
+            PanelsMsg::Scrolled(id, w) => self.panels.set_window(id, w),
+        }
+        Task::none()
+    }
+
+    /// Brings the panels up to date with the focused pane's active tab (cheap when unchanged).
+    fn sync_panels(&mut self) -> Task<Message> {
+        if !self.panels.visible {
+            return Task::none();
+        }
+        let generation = self.status.generation;
+        let d = self.daemon.clone();
+        let tab = self.panes.get(self.focus).and_then(PaneState::active_tab);
+        self.panels.sync_buffer(tab, d.as_deref(), generation);
+        if let Some(d) = &d
+            && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)
+        {
+            self.status.error = Some(format!("tags: {e}"));
+        }
+        match self.panels.backlinks_due(generation) {
+            Some(path) => {
+                let p = path.clone();
+                self.rpc(
+                    move |d| crate::panels::load_backlinks(d, &p),
+                    move |result| Message::Panels(PanelsMsg::Backlinks { path, result }),
+                )
+            }
+            None => Task::none(),
+        }
+    }
+
     fn update_status(&mut self, m: StatusMsg) {
         match m {
             StatusMsg::Disconnected => self.status.connected = false,
@@ -843,11 +1225,16 @@ impl App {
                             .and_then(|v| v.as_str().map(str::to_owned))
                             .unwrap_or_default();
                         self.status.last_job = Some(format!("{}: {state}", j.job_id));
+                        self.palette.job_updated(&j, std::time::Instant::now());
                     }
                     Notification::FileChanged {
                         path, kind, hash, ..
                     } => {
                         self.reload_tab(&path, hash.as_deref());
+                        self.panels.invalidate();
+                        if path.starts_with(crate::palette::CONFIG_PREFIX) {
+                            self.palette.invalidate();
+                        }
                         self.explorer.file_changed(&path, kind, &self.ui.expanded);
                         if path == BOOKMARKS_PATH
                             && !self.bookmarks.writing
@@ -871,6 +1258,7 @@ impl App {
             Subscription::run_with(self.notifications.clone(), notification_stream),
             iced::keyboard::listen().filter_map(switcher::key_event),
             self.reading.subscription(),
+            crate::palette::subscription(&self.palette, self.panels.visible),
         ])
     }
 
@@ -958,6 +1346,12 @@ impl App {
             button(text("Quick switch (Ctrl+O)").size(14))
                 .style(button::text)
                 .on_press(Message::Switcher(SwitcherMsg::Open)),
+            button(text("Command palette (Ctrl+P)").size(14))
+                .style(button::text)
+                .on_press(Message::Palette(PaletteMsg::Open)),
+            button(text("Panels").size(14))
+                .style(button::text)
+                .on_press(Message::Panels(PanelsMsg::Toggle)),
             button(text("Split right").size(14))
                 .style(button::text)
                 .on_press(Message::Panes(PanesMsg::SplitRight)),
@@ -979,8 +1373,15 @@ impl App {
             .on_click(|p| Message::Panes(PanesMsg::Focus(p)))
             .on_resize(8, |e| Message::Panes(PanesMsg::Resized(e)));
 
+        let toast = self
+            .palette
+            .toast
+            .as_ref()
+            .map(|t| format!("▸ {}", t.line()))
+            .unwrap_or_default();
         let status = row![
             text(self.status.line()).size(16),
+            text(toast).size(16).color(t.accent_text.to_color()),
             button(text(format!("Surround: {}", self.ui.surround.label())).size(16))
                 .style(button::text)
                 .on_press(Message::Theme(ThemeMsg::Cycle)),
@@ -996,26 +1397,40 @@ impl App {
                     .style(inset),
             );
         }
-        main.push(
-            row![
-                container(side)
+        if self.palette.open {
+            main = main.push(
+                container(crate::palette::view(&self.palette, t))
+                    .padding(6)
+                    .width(Length::Fill)
+                    .style(inset),
+            );
+        }
+        let mut body = row![
+            container(side)
+                .style(inset)
+                .width(Length::FillPortion(1))
+                .height(Length::Fill),
+            container(grid)
+                .padding(4)
+                .width(Length::FillPortion(4))
+                .height(Length::Fill),
+        ];
+        if self.panels.visible {
+            body = body.push(
+                container(crate::panels::view(&self.panels, t))
                     .style(inset)
                     .width(Length::FillPortion(1))
                     .height(Length::Fill),
-                container(grid)
+            );
+        }
+        main.push(body.height(Length::Fill))
+            .push(
+                container(status)
                     .padding(4)
-                    .width(Length::FillPortion(4))
-                    .height(Length::Fill),
-            ]
-            .height(Length::Fill),
-        )
-        .push(
-            container(status)
-                .padding(4)
-                .width(Length::Fill)
-                .style(panel),
-        )
-        .into()
+                    .width(Length::Fill)
+                    .style(panel),
+            )
+            .into()
     }
 }
 

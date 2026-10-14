@@ -189,6 +189,10 @@ impl SourceBuffer {
     pub fn cursor(&self) -> text_editor::Cursor {
         self.content.cursor()
     }
+    /// The selected text, if any (WP-5 action context).
+    pub fn selection(&self) -> Option<String> {
+        self.content.selection()
+    }
     /// Moves the cursor (navigation; not an edit).
     pub fn move_to(&mut self, c: text_editor::Cursor) {
         self.content.move_to(c);

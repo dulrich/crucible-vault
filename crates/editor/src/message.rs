@@ -128,13 +128,72 @@ pub enum SwitcherMsg {
     Created(Result<Option<String>, String>),
 }
 
-/// WP-5: command palette.
+/// WP-5: command palette (Ctrl+P) and action invocation.
 #[derive(Debug, Clone)]
-pub enum PaletteMsg {}
+pub enum PaletteMsg {
+    Open,
+    /// Esc: closes the list or cancels the whole invocation (prompt included).
+    Close,
+    Query(String),
+    Up,
+    Down,
+    /// Enter: invoke the selection, or advance the param prompt.
+    Submit,
+    /// Click on entry `i` (index into `Palette::entries`).
+    Pick(usize),
+    /// `actions_list` finished.
+    Loaded(Result<Vec<cv_protocol::ActionInfo>, String>),
+    /// A global key chord (Ctrl/Alt held).
+    Key(crate::palette::chord::Chord),
+    /// Ctrl+Enter: submit a multiline prompt.
+    CtrlEnter,
+    /// Param prompt input.
+    Prompt(crate::palette::PromptMsg),
+    /// The save-first write finished; `call` runs only on success.
+    SaveDone {
+        path: String,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+        call: crate::palette::Call,
+    },
+    /// `run_action` returned.
+    Ran {
+        title: String,
+        result: Result<cv_protocol::RunActionResult, String>,
+    },
+    /// Toast expiry tick.
+    Tick,
+}
 
 /// WP-5: side panels.
 #[derive(Debug, Clone)]
-pub enum PanelsMsg {}
+pub enum PanelsMsg {
+    /// Show/hide the column.
+    Toggle,
+    /// Show the column on a panel.
+    Show(crate::panels::PanelKind),
+    /// Recompute tick (buffer-keyed; cheap when nothing changed).
+    Tick,
+    /// Outline click: move the source cursor to this 0-based line.
+    OutlineJump(usize),
+    /// Open a path in the focused pane.
+    Open(String),
+    /// Backlinks for `path` loaded off-thread.
+    Backlinks {
+        path: String,
+        result: Result<Vec<crate::panels::Backlink>, String>,
+    },
+    TagPick(String),
+    TagBack,
+    SearchInput(String),
+    /// The search debounce for keystroke `seq` elapsed.
+    SearchDue(u64),
+    SearchDone {
+        seq: u64,
+        result: Result<Vec<crate::panels::SearchHit>, String>,
+    },
+    Scrolled(crate::panels::ListId, ListWindow),
+}
 
 /// WP-7: view fences.
 #[derive(Debug, Clone)]
