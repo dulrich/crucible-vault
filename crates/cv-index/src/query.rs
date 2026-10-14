@@ -289,6 +289,17 @@ impl<'a> Query<'a> {
         Ok(out)
     }
 
+    /// Every indexed file as `(id, path)`, by path — one scan for whole-tree builds (the
+    /// editor's explorer and resolver) instead of a `subfolders` call per folder.
+    pub fn file_paths(&self) -> Result<Vec<(i64, String)>> {
+        collect(
+            self.conn,
+            "SELECT id, path FROM files ORDER BY path",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
     /// Links resolving to `path`, by source path then line.
     pub fn backlinks(&self, path: &str) -> Result<Vec<LinkRow>> {
         collect(
@@ -485,5 +496,46 @@ impl Reader {
         let out = f(Query::new(&tx))?;
         tx.finish()?;
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_paths_lists_every_file_sorted_and_matches_the_folder_walk() {
+        let conn = Connection::open_in_memory().expect("db");
+        schema::create(&conn, 1).expect("schema");
+        for (i, p) in ["b/c/d.md", "a.md", "b/x.png", "z/y/w.md"]
+            .iter()
+            .enumerate()
+        {
+            let folder = p.rsplit_once('/').map_or("", |(f, _)| f);
+            conn.execute(
+                "INSERT INTO files(id, path, folder, name, ext, is_md, size, mtime, ctime, has_fm) \
+                 VALUES (?1, ?2, ?3, ?2, 'md', 1, 0, 0, 0, 0)",
+                rusqlite::params![i64::try_from(i).expect("small") + 1, p, folder],
+            )
+            .expect("insert");
+        }
+        let q = Query::new(&conn);
+        let all = q.file_paths().expect("paths");
+        let paths: Vec<&str> = all.iter().map(|(_, p)| p.as_str()).collect();
+        assert_eq!(paths, ["a.md", "b/c/d.md", "b/x.png", "z/y/w.md"]);
+        assert_eq!(all[0].0, 2);
+        let mut walked = Vec::new();
+        let mut stack = vec![String::new()];
+        while let Some(f) = stack.pop() {
+            walked.extend(
+                q.folder_files(&f)
+                    .expect("files")
+                    .into_iter()
+                    .map(|r| r.path),
+            );
+            stack.extend(q.subfolders(&f).expect("subs"));
+        }
+        walked.sort();
+        assert_eq!(walked, paths);
     }
 }

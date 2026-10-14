@@ -320,3 +320,66 @@ fn highlighter_change_line_reentry() {
     h.update(&HighlightSettings { epoch: 1, ..s });
     assert_eq!(h.current_line(), 0);
 }
+
+#[test]
+fn materialise_round_trip_keeps_text_cursor_undo_and_save_state() {
+    let mut b = SourceBuffer::new("n.md", b"alpha\nbeta\r\ngamma\n", ContentHash::of(b"x"));
+    assert!(!b.is_shaped(), "new buffers start plain");
+    let now = Instant::now();
+    b.move_to(Cursor {
+        position: Position { line: 1, column: 4 },
+        selection: None,
+    });
+    for c in "XY".chars() {
+        assert!(b.perform(Action::Edit(Edit::Insert(c)), false, now));
+    }
+    assert!(b.is_shaped(), "editing materialises");
+    b.move_to(Cursor {
+        position: Position { line: 0, column: 5 },
+        selection: Some(Position { line: 0, column: 1 }),
+    });
+    // A dirty buffer meets a newer file on disk: conflict bar.
+    assert_eq!(b.external_change(Some("ffff"), || unreachable!()), None);
+    let reference = b.clone();
+    let snap = |b: &SourceBuffer| {
+        (
+            b.text(),
+            b.cursor(),
+            b.selection(),
+            b.is_dirty(),
+            b.edit_seq(),
+            b.base_hash().clone(),
+            b.conflict().cloned(),
+        )
+    };
+    let before = snap(&b);
+    assert_eq!(before.2.as_deref(), Some("lpha"));
+    assert!(before.6.is_some());
+    b.dematerialise();
+    assert!(!b.is_shaped());
+    assert_eq!(snap(&b), before, "plain keeps everything");
+    b.materialise();
+    assert!(b.is_shaped());
+    assert_eq!(snap(&b), before, "re-shaped restores cursor and selection");
+    b.dematerialise();
+    // Undo from the plain form matches undo on a never-dropped buffer.
+    let mut r = reference;
+    assert!(r.undo());
+    assert!(b.undo());
+    assert_eq!(b.text(), r.text());
+    assert_eq!(b.text(), "alpha\nbeta\r\ngamma\n");
+    assert_eq!(b.cursor(), r.cursor());
+    assert_eq!(b.edit_seq(), r.edit_seq());
+    assert!(b.redo());
+    assert!(r.redo());
+    assert_eq!(b.text(), r.text());
+    assert_eq!(b.cursor(), r.cursor());
+    // Reload on a plain buffer clamps the cursor without shaping.
+    b.dematerialise();
+    b.reload(b"one\n", ContentHash::of(b"one\n"));
+    assert!(!b.is_shaped());
+    assert_eq!(b.text(), "one\n");
+    assert_eq!(b.cursor().position, Position { line: 1, column: 0 });
+    assert!(!b.is_dirty());
+    assert!(b.conflict().is_none());
+}

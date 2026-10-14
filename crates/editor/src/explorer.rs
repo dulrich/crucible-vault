@@ -116,30 +116,31 @@ fn shown(path: &str) -> bool {
     !cv_index::is_skipped_path(path)
 }
 
+/// The shown files and every folder above them (skipping is by first component, so a shown
+/// file never sits under a skipped folder).
+fn tree_of(paths: impl Iterator<Item = String>) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut files = BTreeSet::new();
+    let mut folders = BTreeSet::new();
+    for path in paths.filter(|p| shown(p)) {
+        let mut p = parent(&path);
+        while !p.is_empty() && !folders.contains(p) {
+            folders.insert(p.to_owned());
+            p = parent(p);
+        }
+        files.insert(path);
+    }
+    (files, folders)
+}
+
 impl Explorer {
-    /// Rebuilds from the index.
+    /// Rebuilds from the index: one `file_paths` scan, folders derived in memory (plan
+    /// editor-cutover-blockers WP-2; the per-folder `subfolders` walk was quadratic, ~2.0 s on
+    /// ~2,700 folders).
     pub fn build(&mut self, index: &LocalIndex, expanded: &BTreeSet<String>) -> Result<(), String> {
-        let (files, folders) = index
-            .with_query(|q| {
-                let mut files = BTreeSet::new();
-                let mut folders = BTreeSet::new();
-                let mut stack = vec![String::new()];
-                while let Some(folder) = stack.pop() {
-                    for f in q.folder_files(&folder)? {
-                        if shown(&f.path) {
-                            files.insert(f.path);
-                        }
-                    }
-                    for sub in q.subfolders(&folder)? {
-                        if shown(&sub) {
-                            folders.insert(sub.clone());
-                            stack.push(sub);
-                        }
-                    }
-                }
-                Ok((files, folders))
-            })
+        let all = index
+            .with_query(|q| q.file_paths())
             .map_err(|e| format!("index: {e}"))?;
+        let (files, folders) = tree_of(all.into_iter().map(|(_, p)| p));
         self.files = files;
         self.folders = folders;
         self.stale = false;
@@ -439,4 +440,63 @@ pub fn view<'a>(ex: &'a Explorer, tokens: Tokens, mode: Mode) -> Element<'a, Mes
             .into()
     });
     col.push(list).height(Length::Fill).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use cv_testkit::{SyntheticVault, VaultSpec};
+
+    use super::*;
+    use crate::daemon::{DaemonClient, FakeDaemon};
+
+    /// The pre-WP-2 build: a `folder_files` + `subfolders` call per folder.
+    fn per_folder(index: &LocalIndex) -> (BTreeSet<String>, BTreeSet<String>) {
+        index
+            .with_query(|q| {
+                let mut files = BTreeSet::new();
+                let mut folders = BTreeSet::new();
+                let mut stack = vec![String::new()];
+                while let Some(folder) = stack.pop() {
+                    for f in q.folder_files(&folder)? {
+                        if shown(&f.path) {
+                            files.insert(f.path);
+                        }
+                    }
+                    for sub in q.subfolders(&folder)? {
+                        if shown(&sub) {
+                            folders.insert(sub.clone());
+                            stack.push(sub);
+                        }
+                    }
+                }
+                Ok((files, folders))
+            })
+            .expect("walk")
+    }
+
+    #[test]
+    fn single_query_tree_equals_per_folder_build() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let vault = tmp.path().join("vault");
+        SyntheticVault::build(&vault, &VaultSpec::default()).expect("vault");
+        for p in [
+            "deep/a/b/c/n.md",
+            "deep/a/x.md",
+            "Deep2/y.md",
+            ".trash/gone.md",
+            "att/pic.png",
+        ] {
+            let abs = vault.join(p);
+            std::fs::create_dir_all(abs.parent().expect("parent")).expect("mkdir");
+            std::fs::write(abs, "x\n").expect("write");
+        }
+        let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
+        let (files, folders) = per_folder(d.index());
+        assert!(files.len() > 5 && folders.contains("deep/a/b/c"));
+        let mut e = Explorer::default();
+        e.build(d.index(), &BTreeSet::new()).expect("build");
+        assert_eq!(e.files, files);
+        assert_eq!(e.folders, folders);
+        assert!(!e.files.iter().any(|p| p.starts_with(".trash")));
+    }
 }

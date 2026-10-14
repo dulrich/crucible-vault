@@ -70,11 +70,32 @@ impl SaveJob {
     }
 }
 
+/// The buffer text: a shaped iced `Content` while the tab is visible in Source/Split, else the
+/// plain text plus the saved cursor/selection (plan editor-cutover-blockers WP-2 — a shaped
+/// `Content` costs ~22.5 MiB per tab). Switching never touches text, history or save state.
+#[derive(Debug)]
+enum Repr {
+    Shaped(Content),
+    Plain { text: String, cursor: undo::Cursor },
+}
+
+impl Clone for Repr {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Shaped(c) => Self::Shaped(c.clone()),
+            Self::Plain { text, cursor } => Self::Plain {
+                text: text.clone(),
+                cursor: *cursor,
+            },
+        }
+    }
+}
+
 /// One open note's source buffer.
 #[derive(Debug)]
 pub struct SourceBuffer {
     path: String,
-    content: Content,
+    content: Repr,
     base_hash: ContentHash,
     history: UndoHistory,
     dirty: bool,
@@ -140,7 +161,10 @@ impl SourceBuffer {
     pub fn with_cap(path: &str, bytes: &[u8], hash: ContentHash, cap: usize) -> Self {
         Self {
             path: path.to_owned(),
-            content: Content::with_text(&String::from_utf8_lossy(bytes)),
+            content: Repr::Plain {
+                text: String::from_utf8_lossy(bytes).into_owned(),
+                cursor: undo::Cursor::default(),
+            },
             base_hash: hash,
             history: UndoHistory::new(cap),
             dirty: false,
@@ -159,7 +183,46 @@ impl SourceBuffer {
     }
     /// The full text.
     pub fn text(&self) -> String {
-        self.content.text()
+        match &self.content {
+            Repr::Shaped(c) => c.text(),
+            Repr::Plain { text, .. } => text.clone(),
+        }
+    }
+    /// The shaped iced buffer exists (the tab is visible in Source/Split).
+    pub fn is_shaped(&self) -> bool {
+        matches!(self.content, Repr::Shaped(_))
+    }
+    /// Builds the shaped buffer from the plain text, restoring cursor and selection.
+    pub fn materialise(&mut self) {
+        let _ = self.shaped();
+    }
+    /// Drops the shaped buffer, keeping the text and cursor/selection.
+    pub fn dematerialise(&mut self) {
+        if let Repr::Shaped(c) = &self.content {
+            self.content = Repr::Plain {
+                text: c.text(),
+                cursor: to_model(c.cursor()),
+            };
+        }
+    }
+    /// Materialises iff `visible` (no-op when already in that state).
+    pub fn set_shaped(&mut self, visible: bool) {
+        if visible {
+            self.materialise();
+        } else {
+            self.dematerialise();
+        }
+    }
+    fn shaped(&mut self) -> &mut Content {
+        if let Repr::Plain { text, cursor } = &self.content {
+            let mut c = Content::with_text(text);
+            c.move_to(to_iced(*cursor));
+            self.content = Repr::Shaped(c);
+        }
+        match &mut self.content {
+            Repr::Shaped(c) => c,
+            Repr::Plain { .. } => unreachable!("materialised above"),
+        }
     }
     /// The hash the next save is CAS'd against.
     pub fn base_hash(&self) -> &ContentHash {
@@ -187,50 +250,49 @@ impl SourceBuffer {
     }
     /// The iced cursor.
     pub fn cursor(&self) -> text_editor::Cursor {
-        self.content.cursor()
+        match &self.content {
+            Repr::Shaped(c) => c.cursor(),
+            Repr::Plain { cursor, .. } => to_iced(*cursor),
+        }
     }
     /// The selected text, if any (WP-5 action context).
     pub fn selection(&self) -> Option<String> {
-        self.content.selection()
+        match &self.content {
+            Repr::Shaped(c) => c.selection(),
+            Repr::Plain { text, cursor } => {
+                let anchor = cursor.anchor?;
+                let a = undo::offset_of(text, anchor)?;
+                let b = undo::offset_of(text, cursor.pos)?;
+                text.get(a.min(b)..a.max(b)).map(str::to_owned)
+            }
+        }
     }
     /// Moves the cursor (navigation; not an edit).
     pub fn move_to(&mut self, c: text_editor::Cursor) {
-        self.content.move_to(c);
-    }
-
-    /// Text of lines `a..=b` joined with their own line endings (as `Content::text` does).
-    fn window(&self, a: usize, b: usize) -> String {
-        let mut s = String::new();
-        for i in a..=b {
-            let Some(l) = self.content.line(i) else { break };
-            s.push_str(&l.text);
-            if i < b && self.content.line(i + 1).is_some() {
-                s.push_str(match l.ending {
-                    text_editor::LineEnding::None => "\n",
-                    e => e.as_str(),
-                });
-            }
+        match &mut self.content {
+            Repr::Shaped(content) => content.move_to(c),
+            Repr::Plain { cursor, .. } => *cursor = to_model(c),
         }
-        s
     }
 
     /// Applies an iced action. Editing actions are recorded in the undo history (and dropped
     /// when `read_only`). Returns whether the text changed.
     pub fn perform(&mut self, action: Action, read_only: bool, now: Instant) -> bool {
         if !action.is_edit() {
-            self.content.perform(action);
+            self.shaped().perform(action);
             return false;
         }
         if read_only {
             return false;
         }
-        let before = self.content.cursor();
+        let content = self.shaped();
+        let before = content.cursor();
         let kind = match (&action, before.selection) {
             (Action::Edit(Edit::Insert(c)), None) => EditKind::Type(*c),
             (Action::Edit(Edit::Backspace | Edit::Delete), None) => EditKind::Delete,
             _ => EditKind::Other,
         };
-        let l0 = self.content.line_count();
+        let l0 = content.line_count();
         let (lo, hi) = match before.selection {
             Some(s) => (
                 before.position.line.min(s.line),
@@ -240,15 +302,15 @@ impl SourceBuffer {
         };
         let a = lo.saturating_sub(1);
         let b = (hi + 1).min(l0.saturating_sub(1));
-        let old = self.window(a, b);
-        self.content.perform(action);
-        let l1 = self.content.line_count();
+        let old = window(content, a, b);
+        content.perform(action);
+        let l1 = content.line_count();
         let b1 = (b + l1).saturating_sub(l0);
-        let new = self.window(a, b1.max(a));
+        let new = window(content, a, b1.max(a));
         let Some(change) = Change::diff(a, &old, &new) else {
             return false;
         };
-        let after = self.content.cursor();
+        let after = content.cursor();
         self.history
             .record(change, kind, to_model(before), to_model(after), now);
         self.mark_edited();
@@ -258,35 +320,6 @@ impl SourceBuffer {
     fn mark_edited(&mut self) {
         self.dirty = true;
         self.edit_seq += 1;
-    }
-
-    /// The text between two positions (`None` if out of range).
-    fn span(&self, from: undo::Pos, to: undo::Pos) -> Option<String> {
-        let w = self.window(from.line, to.line);
-        let a = undo::offset_of(&w, undo::Pos::new(0, from.col))?;
-        let b = undo::offset_of(&w, undo::Pos::new(to.line - from.line, to.col))?;
-        w.get(a..b).map(str::to_owned)
-    }
-
-    /// Applies one recorded change in place (select the removed span, paste/delete). In-place
-    /// application costs microseconds; `Content::with_text` on a 1 MB buffer measured ~650 ms
-    /// (report). Returns `false` if the buffer no longer matches the record.
-    fn apply_change(&mut self, c: &Change) -> bool {
-        let end = c.removed_end();
-        if self.span(c.at, end).as_deref() != Some(c.removed.as_str()) {
-            return false;
-        }
-        self.content.move_to(to_iced(undo::Cursor {
-            pos: end,
-            anchor: Some(c.at),
-        }));
-        if !c.inserted.is_empty() {
-            self.content
-                .perform(Action::Edit(Edit::Paste(Arc::new(c.inserted.clone()))));
-        } else if !c.removed.is_empty() {
-            self.content.perform(Action::Edit(Edit::Delete));
-        }
-        self.span(c.at, c.inserted_end()).as_deref() == Some(c.inserted.as_str())
     }
 
     /// Undo (`true` if something was undone).
@@ -305,15 +338,17 @@ impl SourceBuffer {
         let Some((changes, cursor)) = ops else {
             return false;
         };
-        for c in &changes {
-            if !self.apply_change(c) {
-                tracing::warn!("undo history out of sync with the buffer; reset");
-                self.history.reset();
-                self.mark_edited();
-                return false;
-            }
+        let content = self.shaped();
+        let ok = changes.iter().all(|c| apply_change(content, c));
+        if ok {
+            content.move_to(to_iced(cursor));
         }
-        self.content.move_to(to_iced(cursor));
+        if !ok {
+            tracing::warn!("undo history out of sync with the buffer; reset");
+            self.history.reset();
+            self.mark_edited();
+            return false;
+        }
         self.mark_edited();
         true
     }
@@ -321,23 +356,28 @@ impl SourceBuffer {
     /// Replaces the text with what is on disk, keeping the cursor line (clamped);
     /// history is reset, the buffer becomes clean, and any conflict clears.
     pub fn reload(&mut self, bytes: &[u8], hash: ContentHash) {
-        let old = self.content.cursor().position;
-        let text = String::from_utf8_lossy(bytes);
-        self.content = Content::with_text(&text);
-        let line = old.line.min(self.content.line_count().saturating_sub(1));
-        let line_text = self
-            .content
-            .line(line)
-            .map(|l| l.text.into_owned())
+        let old = self.cursor().position;
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let line_count = text.split('\n').count();
+        let line = old.line.min(line_count.saturating_sub(1));
+        let line_text = text
+            .split('\n')
+            .nth(line)
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
             .unwrap_or_default();
         let mut column = old.column.min(line_text.len());
         while !line_text.is_char_boundary(column) {
             column -= 1;
         }
-        self.content.move_to(text_editor::Cursor {
-            position: text_editor::Position { line, column },
-            selection: None,
-        });
+        let cursor = undo::Cursor {
+            pos: undo::Pos::new(line, column),
+            anchor: None,
+        };
+        let shaped = self.is_shaped();
+        self.content = Repr::Plain { text, cursor };
+        if shaped {
+            self.materialise();
+        }
         self.epoch += 1;
         self.base_hash = hash;
         self.history.reset();
@@ -356,7 +396,7 @@ impl SourceBuffer {
             self.save_again = true;
             return None;
         }
-        let text = self.content.text();
+        let text = self.text();
         self.saving = true;
         self.save_again = false;
         self.pending_hash = Some(ContentHash::of(text.as_bytes()));
@@ -432,6 +472,50 @@ impl SourceBuffer {
         self.base_hash = current;
         self.begin_save(read_only)
     }
+}
+
+/// The text between two positions (`None` if out of range).
+fn span(content: &Content, from: undo::Pos, to: undo::Pos) -> Option<String> {
+    let w = window(content, from.line, to.line);
+    let a = undo::offset_of(&w, undo::Pos::new(0, from.col))?;
+    let b = undo::offset_of(&w, undo::Pos::new(to.line - from.line, to.col))?;
+    w.get(a..b).map(str::to_owned)
+}
+
+/// Applies one recorded change in place (select the removed span, paste/delete). In-place
+/// application costs microseconds; `Content::with_text` on a 1 MB buffer measured ~650 ms
+/// (report). Returns `false` if the buffer no longer matches the record.
+fn apply_change(content: &mut Content, c: &Change) -> bool {
+    let end = c.removed_end();
+    if span(content, c.at, end).as_deref() != Some(c.removed.as_str()) {
+        return false;
+    }
+    content.move_to(to_iced(undo::Cursor {
+        pos: end,
+        anchor: Some(c.at),
+    }));
+    if !c.inserted.is_empty() {
+        content.perform(Action::Edit(Edit::Paste(Arc::new(c.inserted.clone()))));
+    } else if !c.removed.is_empty() {
+        content.perform(Action::Edit(Edit::Delete));
+    }
+    span(content, c.at, c.inserted_end()).as_deref() == Some(c.inserted.as_str())
+}
+
+/// Text of lines `a..=b` joined with their own line endings (as `Content::text` does).
+fn window(content: &Content, a: usize, b: usize) -> String {
+    let mut s = String::new();
+    for i in a..=b {
+        let Some(l) = content.line(i) else { break };
+        s.push_str(&l.text);
+        if i < b && content.line(i + 1).is_some() {
+            s.push_str(match l.ending {
+                text_editor::LineEnding::None => "\n",
+                e => e.as_str(),
+            });
+        }
+    }
+    s
 }
 
 fn find<'a>(tabs: &'a mut [Tab], path: &str) -> Option<&'a mut SourceBuffer> {
@@ -576,17 +660,22 @@ fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
 
 /// Renders a tab's source buffer with its conflict bar / read-only marker.
 pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
-    let editor = text_editor::TextEditor::new(&buf.content)
-        .height(Length::Fill)
-        .on_action(|a| Message::Source(SourceMsg::Action(a)))
-        .key_binding(key_binding)
-        .highlight_with::<MarkdownHighlighter>(
-            HighlightSettings {
-                colors: KindColors::from_tokens(&tokens),
-                epoch: buf.epoch,
-            },
-            highlighter::to_format,
-        );
+    let editor: Element<'a, Message> = match &buf.content {
+        Repr::Shaped(content) => text_editor::TextEditor::new(content)
+            .height(Length::Fill)
+            .on_action(|a| Message::Source(SourceMsg::Action(a)))
+            .key_binding(key_binding)
+            .highlight_with::<MarkdownHighlighter>(
+                HighlightSettings {
+                    colors: KindColors::from_tokens(&tokens),
+                    epoch: buf.epoch,
+                },
+                highlighter::to_format,
+            )
+            .into(),
+        // Never visible in practice (the app materialises visible tabs before drawing).
+        Repr::Plain { text: t, .. } => text(t.as_str()).into(),
+    };
     let mut col = column![].spacing(4);
     if mode == Mode::Shadow {
         col = col.push(

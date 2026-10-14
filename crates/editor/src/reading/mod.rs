@@ -29,11 +29,11 @@ use crate::theme::Tokens;
 /// Recompute debounce: a change is rendered once `edit_seq` has been stable for one tick.
 pub const TICK: Duration = Duration::from_millis(250);
 
-/// A tab's display mode.
+/// A tab's display mode (new tabs open in Reading; plan editor-cutover-blockers).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ViewMode {
-    #[default]
     Source,
+    #[default]
     Reading,
     /// Source left, reading right.
     Split,
@@ -51,6 +51,32 @@ impl ViewMode {
 
     fn shows_reading(self) -> bool {
         self != Self::Source
+    }
+
+    /// The source buffer is on screen (Source or Split) and needs its shaped `Content`.
+    pub fn shows_source(self) -> bool {
+        self != Self::Reading
+    }
+}
+
+impl From<crate::ui_state::Layout> for ViewMode {
+    fn from(l: crate::ui_state::Layout) -> Self {
+        use crate::ui_state::Layout;
+        match l {
+            Layout::Source => Self::Source,
+            Layout::Reading => Self::Reading,
+            Layout::Split => Self::Split,
+        }
+    }
+}
+
+impl From<ViewMode> for crate::ui_state::Layout {
+    fn from(m: ViewMode) -> Self {
+        match m {
+            ViewMode::Source => Self::Source,
+            ViewMode::Reading => Self::Reading,
+            ViewMode::Split => Self::Split,
+        }
     }
 }
 
@@ -133,6 +159,25 @@ impl ReadingStore {
             ])
         } else {
             keys
+        }
+    }
+
+    /// A tab opened in `mode`: creates its entry and, when it shows a reading pane, renders it
+    /// now (`render_now`, the open path) or on the next debounce tick (the restore path, so
+    /// startup does not render every restored tab inline). Audit E1: no tab is left at
+    /// "Rendering…" without a Ctrl+E.
+    pub fn register(
+        &mut self,
+        tab: &Tab,
+        mode: ViewMode,
+        render_now: bool,
+        daemon: Option<&Arc<dyn DaemonClient>>,
+    ) {
+        if render_now {
+            self.set_mode(tab, mode, daemon);
+        } else {
+            let entry = self.tabs.entry(tab.path.clone()).or_default();
+            entry.mode = mode;
         }
     }
 
@@ -222,15 +267,8 @@ impl ReadingStore {
         {
             return;
         }
-        let rows = d.index().with_query(|q| {
-            let mut out = Vec::new();
-            let mut stack = vec![String::new()];
-            while let Some(folder) = stack.pop() {
-                out.extend(q.folder_files(&folder)?.into_iter().map(|f| (f.id, f.path)));
-                stack.extend(q.subfolders(&folder)?);
-            }
-            Ok(out)
-        });
+        // One scan (the per-folder `subfolders` walk was quadratic over folders).
+        let rows = d.index().with_query(|q| q.file_paths());
         match rows {
             Ok(rows) => {
                 let mut resolver = Resolver::default();

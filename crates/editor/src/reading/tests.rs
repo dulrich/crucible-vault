@@ -85,8 +85,7 @@ fn modes_cycle_and_transclusion_is_depth_one() {
         ("C.md", b"c text\n"),
     ]);
     let mut app = app_on(&d, "A.md");
-    assert_eq!(app.reading.mode("A.md"), ViewMode::Source);
-    let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
+    // New tabs open in Reading and render without a Ctrl+E (audit E1, open path).
     assert_eq!(app.reading.mode("A.md"), ViewMode::Reading);
     let doc = app.reading.doc("A.md").expect("rendered");
     let Block::Transclusion {
@@ -110,6 +109,9 @@ fn modes_cycle_and_transclusion_is_depth_one() {
     let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
     assert_eq!(app.reading.mode("A.md"), ViewMode::Source);
     assert!(app.reading.doc("A.md").is_none());
+    let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
+    assert_eq!(app.reading.mode("A.md"), ViewMode::Reading);
+    assert!(app.reading.doc("A.md").is_some());
 }
 
 #[test]
@@ -284,5 +286,54 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
     // Tab close releases.
     let _ = app.update(Message::Tabs(TabsMsg::Close(app.focus, 0)));
     assert!(app.reading.images.is_empty());
-    assert_eq!(app.reading.mode("A.md"), ViewMode::Source);
+    assert_eq!(
+        app.reading.mode("A.md"),
+        ViewMode::default(),
+        "closed tab: state forgotten"
+    );
+}
+
+#[test]
+fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
+    let (tmp, d) = setup(&[("A.md", b"# A\n"), ("B.md", b"# B\n")]);
+    let state = tmp.path().join("state/editor.json");
+    let mut app = App::new(Some(Arc::clone(&d)), Some(state.clone()));
+    let _ = app.update(Message::Tabs(TabsMsg::Open("A.md".into())));
+    let _ = app.update(Message::Tabs(TabsMsg::Open("B.md".into())));
+    assert!(
+        app.reading.doc("B.md").is_some(),
+        "open path renders at once"
+    );
+    let shaped = |app: &App, p: &str| {
+        app.panes
+            .iter()
+            .flat_map(|(_, ps)| ps.tabs.iter())
+            .find(|t| t.path == p)
+            .is_some_and(|t| t.source.is_shaped())
+    };
+    assert!(
+        !shaped(&app, "A.md") && !shaped(&app, "B.md"),
+        "Reading: plain"
+    );
+    reading(&mut app, "A.md", ViewMode::Source);
+    assert!(!shaped(&app, "A.md"), "hidden Source tab stays plain");
+    let _ = app.update(Message::Tabs(TabsMsg::Select(app.focus, 0)));
+    assert!(shaped(&app, "A.md") && !shaped(&app, "B.md"));
+
+    let mut back = App::new(Some(Arc::clone(&d)), Some(state));
+    assert_eq!(back.open_paths(), ["A.md", "B.md"]);
+    assert_eq!(back.reading.mode("A.md"), ViewMode::Source);
+    assert_eq!(back.reading.mode("B.md"), ViewMode::Reading);
+    assert!(
+        shaped(&back, "A.md"),
+        "active Source tab shaped after restore"
+    );
+    assert!(!shaped(&back, "B.md"));
+    assert!(
+        back.reading.doc("B.md").is_none(),
+        "restore defers the render"
+    );
+    let _ = back.update(Message::Reading(ReadingMsg::Tick));
+    assert!(back.reading.doc("B.md").is_some(), "first tick renders it");
+    assert!(back.reading.doc("A.md").is_none());
 }

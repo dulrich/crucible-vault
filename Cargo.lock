@@ -1067,6 +1067,7 @@ dependencies = [
  "editor-model",
  "iced",
  "image",
+ "libc",
  "ofm",
  "serde",
  "serde_json",

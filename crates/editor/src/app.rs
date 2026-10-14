@@ -120,6 +120,8 @@ pub struct App {
     tokens: Tokens,
     notifications: NotifHandle,
     state_path: Option<PathBuf>,
+    /// `App::new` is restoring tabs: their first reading render waits for the debounce tick.
+    restoring: bool,
 }
 
 fn tokens_for(s: Surround) -> Tokens {
@@ -234,6 +236,7 @@ impl App {
             views: crate::views::ViewStore::default(),
             notifications,
             state_path,
+            restoring: true,
         };
         app.refresh_files();
         app.load_bookmarks();
@@ -250,7 +253,32 @@ impl App {
             }
         }
         app.focus = focus;
+        app.restoring = false;
+        app.sync_buffers();
         app
+    }
+
+    /// Lazy source buffers (plan editor-cutover-blockers WP-2): a tab keeps its shaped iced
+    /// `Content` only while it is its pane's active tab in Source or Split; every other tab
+    /// holds plain text. Idempotent; run after every update.
+    fn sync_buffers(&mut self) {
+        for (_, ps) in self.panes.iter_mut() {
+            let active = ps.active;
+            for (i, tab) in ps.tabs.iter_mut().enumerate() {
+                let visible = active == Some(i) && self.reading.mode(&tab.path).shows_source();
+                tab.source.set_shaped(visible);
+            }
+        }
+    }
+
+    /// The mode a newly opened `path` starts in: its persisted mode, else Reading.
+    fn initial_mode(&self, path: &str) -> crate::reading::ViewMode {
+        self.ui
+            .modes
+            .get(path)
+            .copied()
+            .map(crate::reading::ViewMode::from)
+            .unwrap_or_default()
     }
 
     /// A disconnected app (used if boot cannot take the prepared one).
@@ -353,6 +381,9 @@ impl App {
             path: path.to_owned(),
             source: crate::source::SourceBuffer::new(path, &bytes, hash),
         };
+        let mode = self.initial_mode(path);
+        self.reading
+            .register(&tab, mode, !self.restoring, self.daemon.as_ref());
         let mut replaced = None;
         if let Some(ps) = self.panes.get_mut(pane) {
             match ps.active.filter(|&i| i < ps.tabs.len()) {
@@ -409,6 +440,12 @@ impl App {
             self.ui.active_tab = ps.active;
         }
         self.ui.panes = Some(layout);
+        self.ui.modes = self
+            .panes
+            .iter()
+            .flat_map(|(_, ps)| ps.tabs.iter())
+            .map(|t| (t.path.clone(), self.reading.mode(&t.path).into()))
+            .collect();
         let Some(path) = &self.state_path else { return };
         let vault = self.daemon.as_ref().map(|d| d.vault_root().to_path_buf());
         if let Err(e) = ui_state::save(path, &self.ui, vault.as_deref()) {
@@ -426,6 +463,12 @@ impl App {
 
     /// The update function.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        self.sync_buffers();
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tabs(m) => self.update_tabs(m),
             Message::Status(m) => self.update_status(m),
@@ -461,18 +504,27 @@ impl App {
                 );
             }
             Message::Reading(m) => {
+                let mode_change = matches!(
+                    m,
+                    crate::message::ReadingMsg::CycleMode
+                        | crate::message::ReadingMsg::SetMode { .. }
+                );
                 let tabs: Vec<&Tab> = self
                     .panes
                     .iter()
                     .flat_map(|(_, ps)| ps.tabs.iter())
                     .collect();
-                return crate::reading::update(
+                let task = crate::reading::update(
                     &mut self.reading,
                     m,
                     &tabs,
                     self.panes.get(self.focus).and_then(PaneState::active_tab),
                     self.daemon.as_ref(),
                 );
+                if mode_change {
+                    self.persist();
+                }
+                return task;
             }
             Message::Switcher(m) => return self.update_switcher(m),
             Message::Palette(m) => return self.update_palette(m),
@@ -703,15 +755,20 @@ impl App {
         let Some(d) = &self.daemon else { return };
         match d.read_file(to) {
             Ok((bytes, hash)) => {
+                let mode = self.reading.mode(from);
+                let tab = Tab {
+                    path: to.to_owned(),
+                    source: crate::source::SourceBuffer::new(to, &bytes, hash),
+                };
                 if let Some(ps) = self.panes.get_mut(pane)
                     && let Some(slot) = ps.tabs.get_mut(i)
                 {
-                    *slot = Tab {
-                        path: to.to_owned(),
-                        source: crate::source::SourceBuffer::new(to, &bytes, hash),
-                    };
+                    *slot = tab;
                 }
                 self.on_tab_closed(from);
+                if let Some(t) = self.panes.get(pane).and_then(|ps| ps.tabs.get(i)).cloned() {
+                    self.reading.register(&t, mode, true, self.daemon.as_ref());
+                }
                 self.ui.touch_recent(to);
                 self.persist();
             }

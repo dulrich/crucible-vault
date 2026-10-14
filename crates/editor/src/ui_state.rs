@@ -2,7 +2,7 @@
 //! `~/.local/state/crucible-vault/editor.json`. Never stored in the vault. Missing or corrupt
 //! files yield defaults; writes are atomic (temp file + rename).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -11,12 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::Surround;
 
-/// Source / reading / split (D9; WP-3 fills the reading side).
+/// A tab's persisted display mode: source / reading / split (D9). New tabs open in Reading
+/// (plan editor-cutover-blockers, Decisions locked).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Layout {
-    #[default]
     Source,
+    #[default]
     Reading,
     Split,
 }
@@ -29,7 +30,10 @@ pub struct UiState {
     pub tabs: Vec<String>,
     /// Index into `tabs`.
     pub active_tab: Option<usize>,
-    pub layout: Layout,
+    /// Per-tab display mode of the open tabs (vault-relative path → mode); a path absent here
+    /// opens in the default (Reading). Replaces the old global `layout` field, which was saved
+    /// but never read; old files carrying it still load (the key is ignored).
+    pub modes: BTreeMap<String, Layout>,
     pub surround: Surround,
     /// Most recent first, capped at [`RECENT_CAP`].
     pub recent: Vec<String>,
@@ -185,7 +189,7 @@ mod tests {
         let mut s = UiState {
             tabs: vec!["a.md".into(), "b/c.md".into()],
             active_tab: Some(1),
-            layout: Layout::Split,
+            modes: BTreeMap::from([("b/c.md".to_owned(), Layout::Split)]),
             surround: Surround::Light,
             recent: vec![],
             ..UiState::default()
@@ -204,6 +208,31 @@ mod tests {
             Surround::Dark,
             "partial → defaults for the rest"
         );
+    }
+
+    #[test]
+    fn old_format_file_loads_and_modes_round_trip() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("editor.json");
+        // A pre-WP-2 file: global `layout`, no per-tab modes.
+        std::fs::write(
+            &path,
+            br#"{"tabs":["a.md"],"active_tab":0,"layout":"source","surround":"dark","recent":[],"panes":{"root":{"kind":"leaf","tabs":["a.md"],"active":0},"focused":0},"expanded":[]}"#,
+        )
+        .expect("old");
+        let s = load(&path);
+        assert_eq!(s.tabs, vec!["a.md".to_owned()]);
+        assert!(s.panes.is_some(), "old panes still restore");
+        assert!(s.modes.is_empty(), "no per-tab modes → defaults");
+        assert_eq!(
+            s.modes.get("a.md").copied().unwrap_or_default(),
+            Layout::Reading
+        );
+        let mut s2 = s.clone();
+        s2.modes.insert("a.md".into(), Layout::Source);
+        s2.modes.insert("b.md".into(), Layout::Split);
+        save(&path, &s2, None).expect("save");
+        assert_eq!(load(&path).modes, s2.modes);
     }
 
     #[test]
