@@ -1,0 +1,50 @@
+# providers.toml — example provider registry (plan v0-core-daemon WP-4/WP-12).
+# Mirrors the shape of Crucible's 3 providers (data.json `providers`) with generic ids and
+# placeholder secrets. API keys come from the env var named by `api_key_env`, or a bare file
+# name under ~/.config/crucible-vault/ via `api_key_file` — never from the vault (D4).
+# The `refine-transcript` action's `provider` enum param lists `provider:model` refs from here.
+
+[[provider]]
+id = "local"
+kind = "openai-compatible"
+name = "Local inference"
+base_url = "http://127.0.0.1:8080/v1"
+local = true
+
+[[provider.models]]
+id = "local-chat-model"
+
+[[provider.models]]
+id = "local-embed-model"
+capabilities = ["embed"]
+
+[[provider.models]]
+id = "local-rerank-model"
+capabilities = ["rerank"]
+
+[[provider]]
+id = "openrouter"
+kind = "openai-compatible"
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+
+[[provider.models]]
+id = "@preset/example-model"
+
+[[provider.models]]
+id = "@preset/example-model"
+
+[[provider.models]]
+id = "openai/text-embedding-3-small"
+capabilities = ["embed"]
+
+[[provider]]
+id = "codex"
+kind = "cli"
+name = "Codex CLI"
+command = "codex"
+timeout_seconds = 900
+
+[[provider.models]]
+id = "gpt-5.5"

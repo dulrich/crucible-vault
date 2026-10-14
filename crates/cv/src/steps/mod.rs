@@ -24,6 +24,8 @@ pub mod lint;
 pub mod localize;
 pub mod materialize;
 pub mod search;
+#[cfg(test)]
+mod wp12_tests;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

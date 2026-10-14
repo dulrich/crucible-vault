@@ -1,0 +1,41 @@
+# agents.toml — example agents (plan v0-core-daemon WP-12; Crucible `src/agents.ts`).
+# One table per agent id. Keys: `name`, `system` | `system_file`, `prompt` | `prompt_file`
+# (vault paths, read through the daemon), `input` (rendered into {{value}}/{{input}}),
+# `model` ("provider:model" default), `max_tokens` (required, > 0).
+# Placeholders: {{content}} (note body, no frontmatter), {{selection}}, {{value}}, {{input}},
+# {{title}}, {{vars.NAME}}.
+#
+# Crucible's 4 "Transcript Refiner" agents (data.json) differed only in their pinned model and
+# prompt file; the refine action picks the model with its `provider` param (D3), so the HTTP
+# ones collapse into `refine-transcript`. The tables below keep one per original agent so each
+# default stays reachable by id.
+
+[refine-transcript]
+name = "Transcript Refiner (Local)"
+prompt_file = "_custom/prompts/Refine Transcript.md"
+input = "{{content}}"
+model = "local:local-chat-model"
+max_tokens = 16384
+
+[refine-transcript-openrouter]
+name = "Transcript Refiner (OpenRouter)"
+prompt_file = "_custom/prompts/Refine Transcript.md"
+input = "{{content}}"
+model = "openrouter:@preset/example-model"
+max_tokens = 16384
+
+[refine-transcript-openrouter-gemma]
+name = "Transcript Refiner (OpenRouter Gemma)"
+prompt_file = "_custom/prompts/Refine Transcript.md"
+input = "{{content}}"
+model = "openrouter:@preset/example-model"
+max_tokens = 16384
+
+# The CLI refiner edited the note in place given its path; here it receives the body like the
+# others and returns the refined text (the daemon stays the only writer).
+[refine-transcript-cli]
+name = "Transcript Refiner (Codex CLI)"
+prompt_file = "_custom/prompts/CLI In-Place Refine Transcript.md"
+input = "{{content}}"
+model = "codex:gpt-5.5"
+max_tokens = 16384
