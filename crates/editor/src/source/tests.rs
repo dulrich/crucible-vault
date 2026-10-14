@@ -1,0 +1,321 @@
+//! WP-2 source-buffer tests against `FakeDaemon` (synthetic vault only, I1).
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use cv_protocol::{ChangeKind, Mode, Notification, Origin};
+use cv_testkit::{SyntheticVault, VaultSpec};
+use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
+
+use super::*;
+use crate::app::App;
+use crate::daemon::FakeDaemon;
+use crate::message::{Message, StatusMsg, TabsMsg};
+
+fn setup() -> (tempfile::TempDir, Arc<FakeDaemon>, App, String) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vault = tmp.path().join("vault");
+    SyntheticVault::build(&vault, &VaultSpec::default()).expect("vault");
+    let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
+    let p = "wp2/note.md".to_owned();
+    d.create_note(&p, "line one\nline two\nline three\n")
+        .expect("create");
+    let dc: Arc<dyn DaemonClient> = d.clone();
+    let mut app = App::new(Some(dc), None);
+    let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
+    (tmp, d, app, p)
+}
+
+fn buf(app: &mut App) -> &mut SourceBuffer {
+    &mut app.tabs[app.active.expect("active")].source
+}
+
+fn type_text(app: &mut App, s: &str) {
+    for c in s.chars() {
+        let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+            Edit::Insert(c),
+        ))));
+    }
+}
+
+/// Runs the save the app would spawn, synchronously, and feeds the result back.
+fn save_now(app: &mut App, d: &FakeDaemon) -> SaveOutcome {
+    let job = buf(app).begin_save(false).expect("a save job");
+    let out = job.run(d);
+    let _ = app.update(job.done(out.clone()));
+    out
+}
+
+fn notify(app: &mut App, path: &str, hash: Option<String>) {
+    let _ = app.update(Message::Status(StatusMsg::Notification(
+        Notification::FileChanged {
+            path: path.to_owned(),
+            kind: ChangeKind::Modified,
+            hash,
+            origin: Origin::Daemon,
+        },
+    )));
+}
+
+#[test]
+fn edits_route_through_undo_and_restore_cursor() {
+    let (_t, _d, mut app, _p) = setup();
+    let b = buf(&mut app);
+    b.move_to(Cursor {
+        position: Position { line: 1, column: 4 },
+        selection: None,
+    });
+    type_text(&mut app, "XY");
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "line one\nlineXY two\nline three\n");
+    assert!(b.is_dirty());
+    // Select "two" (anchor at col 7, cursor at col 10) and Enter over it.
+    b.move_to(Cursor {
+        position: Position {
+            line: 1,
+            column: 10,
+        },
+        selection: Some(Position { line: 1, column: 7 }),
+    });
+    let sel = b.cursor();
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+        Edit::Enter,
+    ))));
+    assert_eq!(buf(&mut app).text(), "line one\nlineXY \n\nline three\n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "line one\nlineXY two\nline three\n");
+    assert_eq!(b.cursor(), sel, "selection restored exactly");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
+    assert_eq!(
+        buf(&mut app).cursor().position,
+        Position { line: 1, column: 4 }
+    );
+    let _ = app.update(Message::Source(SourceMsg::Redo));
+    let _ = app.update(Message::Source(SourceMsg::Redo));
+    assert_eq!(buf(&mut app).text(), "line one\nlineXY \n\nline three\n");
+    // Backspace across a line join, then undo.
+    let b = buf(&mut app);
+    b.move_to(Cursor {
+        position: Position { line: 2, column: 0 },
+        selection: None,
+    });
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+        Edit::Backspace,
+    ))));
+    assert_eq!(buf(&mut app).text(), "line one\nlineXY \nline three\n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "line one\nlineXY \n\nline three\n");
+    // Navigation is not an edit.
+    let seq = buf(&mut app).edit_seq();
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Move(
+        Motion::Down,
+    ))));
+    assert_eq!(buf(&mut app).edit_seq(), seq);
+}
+
+#[test]
+fn save_succeeds_and_updates_base_hash() {
+    let (_t, d, mut app, p) = setup();
+    type_text(&mut app, "A");
+    let out = save_now(&mut app, &d);
+    let b = buf(&mut app);
+    let SaveOutcome::Saved(h) = out else {
+        panic!("expected saved, got {out:?}");
+    };
+    assert_eq!(b.base_hash(), &h);
+    assert!(!b.is_dirty() && !b.is_saving());
+    assert_eq!(
+        d.read_file(&p).expect("read").0,
+        b"Aline one\nline two\nline three\n"
+    );
+    // The echo of our own save (origin is `daemon`, so only the hash identifies it).
+    notify(&mut app, &p, Some(h.as_str().to_owned()));
+    assert_eq!(buf(&mut app).text(), "Aline one\nline two\nline three\n");
+    assert!(buf(&mut app).conflict().is_none());
+}
+
+#[test]
+fn echo_arriving_before_save_result_is_ignored() {
+    let (_t, d, mut app, p) = setup();
+    type_text(&mut app, "Q");
+    let job = buf(&mut app).begin_save(false).expect("job");
+    let out = job.run(d.as_ref());
+    let SaveOutcome::Saved(h) = out.clone() else {
+        panic!("saved")
+    };
+    notify(&mut app, &p, Some(h.as_str().to_owned()));
+    assert!(buf(&mut app).conflict().is_none(), "pending-save echo");
+    let _ = app.update(job.done(out));
+    assert!(!buf(&mut app).is_dirty());
+}
+
+#[test]
+fn stale_base_conflicts_then_keep_mine_resaves() {
+    let (_t, d, mut app, p) = setup();
+    type_text(&mut app, "mine ");
+    // Someone else writes first.
+    let base = buf(&mut app).base_hash().clone();
+    let theirs = d.write_note(&p, "theirs\n", &base).expect("write");
+    let out = save_now(&mut app, &d);
+    assert_eq!(out, SaveOutcome::Conflict(theirs.clone()));
+    assert_eq!(buf(&mut app).conflict(), Some(&theirs));
+    assert!(
+        buf(&mut app).begin_save(false).is_none(),
+        "no save while conflicted"
+    );
+    // Keep mine: re-save against the new hash.
+    let job = buf(&mut app).keep_mine(false).expect("job");
+    let out = job.run(d.as_ref());
+    let _ = app.update(job.done(out));
+    assert!(buf(&mut app).conflict().is_none());
+    assert!(!buf(&mut app).is_dirty());
+    assert_eq!(
+        d.read_file(&p).expect("read").0,
+        b"mine line one\nline two\nline three\n"
+    );
+}
+
+#[test]
+fn dirty_buffer_external_change_shows_bar_and_take_theirs_reloads() {
+    let (_t, d, mut app, p) = setup();
+    type_text(&mut app, "x");
+    let base = buf(&mut app).base_hash().clone();
+    let theirs = d.write_note(&p, "external\n", &base).expect("write");
+    notify(&mut app, &p, Some(theirs.as_str().to_owned()));
+    assert_eq!(buf(&mut app).conflict(), Some(&theirs));
+    assert!(buf(&mut app).text().starts_with('x'), "buffer kept");
+    let _ = app.update(Message::Source(SourceMsg::TakeTheirs(p.clone())));
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "external\n");
+    assert!(b.conflict().is_none() && !b.is_dirty());
+    assert_eq!(b.history().undo_len(), 0, "undo reset");
+    assert_eq!(b.base_hash(), &theirs);
+}
+
+#[test]
+fn clean_buffer_reloads_and_keeps_cursor_line() {
+    let (_t, d, mut app, p) = setup();
+    buf(&mut app).move_to(Cursor {
+        position: Position { line: 2, column: 6 },
+        selection: None,
+    });
+    let base = buf(&mut app).base_hash().clone();
+    let h = d
+        .write_note(&p, "a\nb\nc changed here\nd\n", &base)
+        .expect("write");
+    notify(&mut app, &p, Some(h.as_str().to_owned()));
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "a\nb\nc changed here\nd\n");
+    assert_eq!(b.cursor().position, Position { line: 2, column: 6 });
+    assert_eq!(b.base_hash(), &h);
+    // Shorter file: line clamps.
+    let h2 = d.write_note(&p, "only\n", &h).expect("write");
+    notify(&mut app, &p, None);
+    let b = buf(&mut app);
+    assert_eq!(b.base_hash(), &h2);
+    assert_eq!(b.cursor().position.line, 1);
+}
+
+#[test]
+fn shadow_mode_drops_edits_and_never_saves() {
+    let (_t, d, mut app, p) = setup();
+    let _ = app.update(Message::Status(StatusMsg::Notification(
+        Notification::ModeChanged { mode: Mode::Shadow },
+    )));
+    type_text(&mut app, "nope");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.update(Message::Source(SourceMsg::Save));
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "line one\nline two\nline three\n");
+    assert!(!b.is_dirty() && !b.is_saving());
+    assert!(b.begin_save(true).is_none());
+    // Navigation still works.
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Move(
+        Motion::Down,
+    ))));
+    assert_eq!(buf(&mut app).cursor().position.line, 1);
+    assert_eq!(
+        d.read_file(&p).expect("read").0,
+        b"line one\nline two\nline three\n"
+    );
+}
+
+#[test]
+fn save_in_flight_queues_one_follow_up() {
+    let (_t, d, mut app, _p) = setup();
+    type_text(&mut app, "a");
+    let job = buf(&mut app).begin_save(false).expect("job");
+    type_text(&mut app, "b");
+    assert!(buf(&mut app).begin_save(false).is_none(), "one in flight");
+    let out = job.run(d.as_ref());
+    // Still dirty after the first save lands (edit `b` came later); a follow-up is due.
+    assert_eq!(buf(&mut app).finish_save(job.seq, out), Ok(true));
+    assert!(buf(&mut app).is_dirty());
+    let _ = save_now(&mut app, &d);
+    assert!(!buf(&mut app).is_dirty());
+}
+
+/// Undo applies via `Content::with_text` + `move_to`: measure on a 1 MB buffer.
+#[test]
+fn undo_on_one_megabyte_buffer_timing() {
+    let line = "lorem ipsum dolor sit amet [[link]] #tag consectetur adipiscing\n";
+    let text = line.repeat(1_000_000 / line.len() + 1);
+    let mut b = SourceBuffer::new("big.md", text.as_bytes(), ContentHash::of(text.as_bytes()));
+    b.move_to(Cursor {
+        position: Position {
+            line: 7000,
+            column: 5,
+        },
+        selection: None,
+    });
+    let t = Instant::now();
+    assert!(b.perform(Action::Edit(Edit::Insert('Z')), false, Instant::now()));
+    eprintln!("type one char {:?}", t.elapsed());
+    let t = Instant::now();
+    assert!(b.undo());
+    let undo_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    assert!(b.redo());
+    let redo_ms = t.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "1MB ({} bytes) undo {undo_ms:.1} ms, redo {redo_ms:.1} ms",
+        text.len()
+    );
+    assert_eq!(
+        b.cursor().position,
+        Position {
+            line: 7000,
+            column: 6
+        }
+    );
+}
+
+#[test]
+fn highlighter_change_line_reentry() {
+    use iced::advanced::text::highlighter::Highlighter as _;
+    let tokens = crate::theme::Surround::Med.tokens().expect("tokens");
+    let s = HighlightSettings {
+        colors: KindColors::from_tokens(&tokens),
+        epoch: 0,
+    };
+    let lines = ["```", "#a", "```", "#b"];
+    let mut h = MarkdownHighlighter::new(&s);
+    let full: Vec<Vec<_>> = lines
+        .iter()
+        .map(|l| h.highlight_line(l).collect())
+        .collect();
+    assert_eq!(h.current_line(), 4);
+    h.change_line(1);
+    assert_eq!(h.current_line(), 1);
+    let again: Vec<Vec<_>> = lines[1..]
+        .iter()
+        .map(|l| h.highlight_line(l).collect())
+        .collect();
+    assert_eq!(&full[1..], again.as_slice());
+    assert_eq!(full[1], vec![(0..2, s.colors.code)]);
+    assert_eq!(full[3], vec![(0..2, s.colors.tag)]);
+    h.update(&HighlightSettings { epoch: 1, ..s });
+    assert_eq!(h.current_line(), 0);
+}

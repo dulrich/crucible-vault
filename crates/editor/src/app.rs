@@ -12,7 +12,7 @@ use cv_protocol::{Mode, Notification};
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 
-use crate::daemon::{ContentHash, DaemonClient, DaemonError};
+use crate::daemon::{DaemonClient, DaemonError};
 use crate::message::{ExplorerMsg, Message, StatusMsg, TabsMsg, ThemeMsg};
 use crate::theme::{Surround, Tokens};
 use crate::ui_state::{self, UiState};
@@ -20,12 +20,11 @@ use crate::ui_state::{self, UiState};
 /// Cap on the WP-1 flat file list.
 const FILE_LIST_CAP: usize = 2000;
 
-/// One open tab.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One open tab: its path and source buffer (WP-2 `source::SourceBuffer`).
+#[derive(Debug, Clone)]
 pub struct Tab {
     pub path: String,
-    pub text: String,
-    pub hash: ContentHash,
+    pub source: crate::source::SourceBuffer,
 }
 
 /// The status-bar model.
@@ -251,8 +250,7 @@ impl App {
                 Ok((bytes, hash)) => {
                     self.tabs.push(Tab {
                         path: path.to_owned(),
-                        text: String::from_utf8_lossy(&bytes).into_owned(),
-                        hash,
+                        source: crate::source::SourceBuffer::new(path, &bytes, hash),
                     });
                     self.active = Some(self.tabs.len() - 1);
                     self.ui.touch_recent(path);
@@ -268,13 +266,12 @@ impl App {
         }
     }
 
-    fn reload_tab(&mut self, path: &str) {
-        let Some(d) = &self.daemon else { return };
-        if let Some(tab) = self.tabs.iter_mut().find(|t| t.path == path)
-            && let Ok((bytes, hash)) = d.read_file(path)
+    /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`).
+    fn reload_tab(&mut self, path: &str, hash: Option<&str>) {
+        if let Some(e) =
+            crate::source::file_changed(&mut self.tabs, path, hash, self.daemon.as_ref())
         {
-            tab.text = String::from_utf8_lossy(&bytes).into_owned();
-            tab.hash = hash;
+            self.status.error = Some(e);
         }
     }
 
@@ -302,7 +299,18 @@ impl App {
                 self.persist();
             }
             Message::Explorer(ExplorerMsg::Refresh) => self.refresh_files(),
-            Message::Source(m) => match m {},
+            Message::Source(m) => {
+                return crate::source::update(
+                    &mut self.tabs,
+                    self.active,
+                    m,
+                    crate::source::Ctx {
+                        daemon: self.daemon.as_ref(),
+                        mode: self.status.mode,
+                        error: &mut self.status.error,
+                    },
+                );
+            }
             Message::Reading(m) => match m {},
             Message::Switcher(m) => match m {},
             Message::Palette(m) => match m {},
@@ -357,7 +365,9 @@ impl App {
                             .unwrap_or_default();
                         self.status.last_job = Some(format!("{}: {state}", j.job_id));
                     }
-                    Notification::FileChanged { path, .. } => self.reload_tab(&path),
+                    Notification::FileChanged { path, hash, .. } => {
+                        self.reload_tab(&path, hash.as_deref());
+                    }
                     Notification::OpenRequested { path } => self.open(&path, true),
                     Notification::ConfigReloaded { .. }
                     | Notification::ShadowWrite { .. }
@@ -420,10 +430,7 @@ impl App {
         .width(Length::FillPortion(1));
 
         let body: Element<'_, Message> = match self.active_tab() {
-            Some(tab) => scrollable(text(tab.text.as_str()))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into(),
+            Some(tab) => crate::source::view(&tab.source, t, self.status.mode),
             None => text("No file open").color(t.text_faint.to_color()).into(),
         };
 

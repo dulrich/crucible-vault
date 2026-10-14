@@ -289,10 +289,7 @@ fn app_open_file_adds_tab_and_status_updates() {
 
     let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
     assert_eq!(app.tabs.len(), 1);
-    assert_eq!(
-        app.active_tab().map(|t| t.text.as_str()),
-        Some(expected.as_str())
-    );
+    assert_eq!(app.active_tab().map(|t| t.source.text()), Some(expected));
     let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
     assert_eq!(app.tabs.len(), 1, "re-open focuses the tab");
     let _ = app.update(Message::Tabs(TabsMsg::Open("missing.md".into())));
@@ -319,7 +316,10 @@ fn app_open_file_adds_tab_and_status_updates() {
             origin: Origin::External,
         },
     )));
-    assert_eq!(app.active_tab().map(|t| t.text.as_str()), Some("changed\n"));
+    assert_eq!(
+        app.active_tab().map(|t| t.source.text()).as_deref(),
+        Some("changed\n")
+    );
     let _ = app.update(Message::Status(StatusMsg::Disconnected));
     assert!(app.status.line().starts_with("disconnected · shadow"));
 

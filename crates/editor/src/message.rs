@@ -22,9 +22,32 @@ pub enum Message {
     Theme(ThemeMsg),
 }
 
-/// WP-2: source editing.
+/// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name
+/// their buffer by vault path (tabs may move while a save or timer is in flight).
 #[derive(Debug, Clone)]
-pub enum SourceMsg {}
+pub enum SourceMsg {
+    /// An iced `text_editor` action (edits go through the undo model).
+    Action(iced::widget::text_editor::Action),
+    Undo,
+    Redo,
+    /// Explicit save (Ctrl+S).
+    Save,
+    /// The autosave debounce for edit `seq` elapsed.
+    AutosaveDue {
+        path: String,
+        seq: u64,
+    },
+    /// A save finished.
+    Saved {
+        path: String,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+    },
+    /// Conflict bar: re-save against the on-disk hash.
+    KeepMine(String),
+    /// Conflict bar: reload from disk.
+    TakeTheirs(String),
+}
 
 /// WP-3: reading pane.
 #[derive(Debug, Clone)]
