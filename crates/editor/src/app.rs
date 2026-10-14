@@ -1,24 +1,32 @@
 //! The iced application state, `update` and `view` (plan WP-1 skeleton).
 //!
-//! WP-1 renders: a tab strip, a flat file list (placeholder until WP-4's explorer), the active tab
-//! as plain read-only text (WP-2 owns editing), and a connection/mode status bar.
+//! Layout (WP-4): a top bar, the quick switcher (when open), a side column (explorer tree +
+//! bookmarks) beside a `pane_grid` whose panes each own a tab strip, an optional day/month nav
+//! bar and the active tab's body ([`App::tab_body`]), and the status bar.
 
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
+use chrono::NaiveDate;
 use cv_protocol::{Mode, Notification};
-use iced::widget::{button, column, container, row, scrollable, text};
+use editor_model::period::NavTarget;
+use iced::widget::pane_grid::{self, Pane};
+use iced::widget::{PaneGrid, button, column, container, row, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 
+use crate::bookmarks::{self, BOOKMARKS_PATH, BookmarkMsg, Bookmarks, WriteOutcome};
 use crate::daemon::{DaemonClient, DaemonError};
-use crate::message::{ExplorerMsg, Message, StatusMsg, TabsMsg, ThemeMsg};
+use crate::explorer::{self, EditKind, Explorer, FileOp, FileOpDone};
+use crate::message::{
+    ExplorerMsg, Message, NavMsg, PanesMsg, SourceMsg, StatusMsg, SwitcherMsg, TabsMsg, ThemeMsg,
+};
+use crate::nav;
+use crate::panes::{self, PaneState};
+use crate::switcher::{self, Switcher};
 use crate::theme::{Surround, Tokens};
-use crate::ui_state::{self, UiState};
-
-/// Cap on the WP-1 flat file list.
-const FILE_LIST_CAP: usize = 2000;
+use crate::ui_state::{self, SplitDir, UiState};
 
 /// One open tab: its path and source buffer (WP-2 `source::SourceBuffer`).
 #[derive(Debug, Clone)]
@@ -85,10 +93,21 @@ impl Hash for NotifHandle {
 pub struct App {
     pub daemon: Option<Arc<dyn DaemonClient>>,
     pub status: StatusModel,
-    pub tabs: Vec<Tab>,
-    pub active: Option<usize>,
+    /// The pane grid; each pane owns its tabs.
+    pub panes: pane_grid::State<PaneState>,
+    /// The focused pane (explorer / switcher / bookmark opens target it).
+    pub focus: Pane,
     pub ui: UiState,
-    pub files: Vec<String>,
+    pub explorer: Explorer,
+    pub switcher: Switcher,
+    pub bookmarks: Bookmarks,
+    /// Tests: run RPC calls inline instead of on the blocking pool.
+    pub rpc_inline: bool,
+    /// Tests: the injected "today" for nav (`None` = local date).
+    pub today: Option<NaiveDate>,
+    /// Tests: every `on_tab_closed` path, in order.
+    #[cfg(test)]
+    pub closed: Vec<String>,
     tokens: Tokens,
     notifications: NotifHandle,
     state_path: Option<PathBuf>,
@@ -181,26 +200,43 @@ impl App {
                 NotifHandle::default(),
             ),
         };
+        let layout = ui
+            .panes
+            .clone()
+            .unwrap_or_else(|| panes::from_flat(&ui.tabs, ui.active_tab));
+        let (grid, plan, focus) = panes::restore(&layout);
         let mut app = Self {
             daemon,
             status,
-            tabs: Vec::new(),
-            active: None,
+            panes: grid,
+            focus,
             tokens: tokens_for(ui.surround),
             ui,
-            files: Vec::new(),
+            explorer: Explorer::default(),
+            switcher: Switcher::default(),
+            bookmarks: Bookmarks::default(),
+            rpc_inline: false,
+            today: None,
+            #[cfg(test)]
+            closed: Vec::new(),
             notifications,
             state_path,
         };
         app.refresh_files();
-        let restore: Vec<String> = app.ui.tabs.clone();
-        let want_active = app.ui.active_tab;
-        for p in restore {
-            app.open(&p, false);
+        app.load_bookmarks();
+        for (pane, paths, active) in plan {
+            for p in &paths {
+                if let Err(e) = app.open_into(pane, p, false) {
+                    app.status.error = Some(open_error(&e));
+                }
+            }
+            if let Some(ps) = app.panes.get_mut(pane)
+                && let Some(i) = active.filter(|&i| i < ps.tabs.len())
+            {
+                ps.active = Some(i);
+            }
         }
-        if let Some(i) = want_active.filter(|&i| i < app.tabs.len()) {
-            app.active = Some(i);
-        }
+        app.focus = focus;
         app
     }
 
@@ -209,80 +245,163 @@ impl App {
         Self::new(None, None)
     }
 
-    /// The active tab.
+    /// The focused pane's active tab.
     pub fn active_tab(&self) -> Option<&Tab> {
-        self.active.and_then(|i| self.tabs.get(i))
+        self.panes.get(self.focus).and_then(PaneState::active_tab)
+    }
+
+    /// Every open tab path, pane by pane in layout order.
+    pub fn open_paths(&self) -> Vec<String> {
+        panes::order(&self.panes)
+            .into_iter()
+            .filter_map(|p| self.panes.get(p))
+            .flat_map(|s| s.tabs.iter().map(|t| t.path.clone()))
+            .collect()
+    }
+
+    fn today(&self) -> NaiveDate {
+        self.today
+            .unwrap_or_else(|| chrono::Local::now().date_naive())
     }
 
     fn refresh_files(&mut self) {
         let Some(d) = &self.daemon else { return };
-        let res = d.index().with_query(|q| {
-            let mut out = Vec::new();
-            let mut stack = vec![String::new()];
-            while let Some(folder) = stack.pop() {
-                for f in q.folder_files(&folder)? {
-                    if f.is_md && out.len() < FILE_LIST_CAP {
-                        out.push(f.path);
-                    }
-                }
-                stack.extend(q.subfolders(&folder)?);
-            }
-            out.sort();
-            Ok(out)
-        });
-        match res {
-            Ok(files) => self.files = files,
-            Err(e) => self.status.error = Some(format!("index: {e}")),
+        if let Err(e) = self.explorer.build(d.index(), &self.ui.expanded) {
+            self.status.error = Some(e);
+        }
+        if self.switcher.open {
+            self.switcher.refresh(&self.explorer.paths, &self.ui.recent);
         }
     }
 
-    /// Opens `path` into a tab (focusing an existing one). The read is a local disk read of one
-    /// note, done inline; RPC calls never run here.
+    fn load_bookmarks(&mut self) {
+        let Some(d) = &self.daemon else { return };
+        if let Err(e) = self.bookmarks.load(d.as_ref()) {
+            self.status.error = Some(e);
+        }
+    }
+
+    /// Runs `call` against the daemon off the UI thread and feeds `done` its result.
+    fn rpc<X: Send + 'static>(
+        &mut self,
+        call: impl FnOnce(&dyn DaemonClient) -> Result<X, String> + Send + 'static,
+        done: impl FnOnce(Result<X, String>) -> Message + Send + 'static,
+    ) -> Task<Message> {
+        let Some(d) = self.daemon.clone() else {
+            self.status.error = Some("not connected".into());
+            return Task::none();
+        };
+        if self.rpc_inline {
+            let r = call(d.as_ref());
+            return self.update(done(r));
+        }
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || call(d.as_ref()))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            done,
+        )
+    }
+
+    /// Opens `path` into the focused pane (focusing an existing tab anywhere). The read is a
+    /// local disk read of one note, done inline; RPC calls never run here.
     fn open(&mut self, path: &str, persist: bool) {
-        if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
-            self.active = Some(i);
-        } else {
-            let Some(d) = &self.daemon else {
-                self.status.error = Some("not connected".into());
-                return;
-            };
-            match d.read_file(path) {
-                Ok((bytes, hash)) => {
-                    self.tabs.push(Tab {
-                        path: path.to_owned(),
-                        source: crate::source::SourceBuffer::new(path, &bytes, hash),
-                    });
-                    self.active = Some(self.tabs.len() - 1);
-                    self.ui.touch_recent(path);
-                }
-                Err(e) => {
-                    self.status.error = Some(open_error(&e));
-                    return;
-                }
-            }
+        if let Err(e) = self.open_into(self.focus, path, false) {
+            self.status.error = Some(open_error(&e));
+            return;
         }
         if persist {
             self.persist();
         }
     }
 
+    /// Opens `path` in `pane`: an already-open tab anywhere is focused instead; with `replace`
+    /// the pane's active tab is replaced (unless it has unsaved edits, then a new tab opens).
+    fn open_into(&mut self, pane: Pane, path: &str, replace: bool) -> Result<(), DaemonError> {
+        if let Some((p, i)) = panes::find(&self.panes, path) {
+            self.focus = p;
+            if let Some(ps) = self.panes.get_mut(p) {
+                ps.active = Some(i);
+            }
+            return Ok(());
+        }
+        let Some(d) = &self.daemon else {
+            return Err(DaemonError::Disconnected);
+        };
+        let (bytes, hash) = d.read_file(path)?;
+        let pane = if self.panes.get(pane).is_some() {
+            pane
+        } else {
+            self.focus
+        };
+        let tab = Tab {
+            path: path.to_owned(),
+            source: crate::source::SourceBuffer::new(path, &bytes, hash),
+        };
+        let mut replaced = None;
+        if let Some(ps) = self.panes.get_mut(pane) {
+            match ps.active.filter(|&i| i < ps.tabs.len()) {
+                Some(i) if replace && !ps.tabs[i].source.is_dirty() => {
+                    replaced = Some(std::mem::replace(&mut ps.tabs[i], tab).path);
+                }
+                _ => {
+                    ps.tabs.push(tab);
+                    ps.active = Some(ps.tabs.len() - 1);
+                }
+            }
+        }
+        self.focus = pane;
+        if let Some(old) = replaced {
+            self.on_tab_closed(&old);
+        }
+        self.ui.touch_recent(path);
+        Ok(())
+    }
+
+    /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
+    fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
+        crate::source::view(&tab.source, self.tokens, self.status.mode)
+    }
+
+    /// Every tab removal funnels through here (button, pane close, replace, trash).
+    fn on_tab_closed(&mut self, path: &str) {
+        #[cfg(test)]
+        self.closed.push(path.to_owned());
+        let _ = path;
+    }
+
     /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`).
     fn reload_tab(&mut self, path: &str, hash: Option<&str>) {
-        if let Some(e) =
-            crate::source::file_changed(&mut self.tabs, path, hash, self.daemon.as_ref())
-        {
-            self.status.error = Some(e);
+        let daemon = self.daemon.as_ref();
+        for (_, ps) in self.panes.iter_mut() {
+            if let Some(e) = crate::source::file_changed(&mut ps.tabs, path, hash, daemon) {
+                self.status.error = Some(e);
+            }
         }
     }
 
     fn persist(&mut self) {
-        self.ui.tabs = self.tabs.iter().map(|t| t.path.clone()).collect();
-        self.ui.active_tab = self.active;
+        let layout = panes::snapshot(&self.panes, self.focus);
+        if let Some(ps) = self.panes.get(self.focus) {
+            self.ui.tabs = ps.tabs.iter().map(|t| t.path.clone()).collect();
+            self.ui.active_tab = ps.active;
+        }
+        self.ui.panes = Some(layout);
         let Some(path) = &self.state_path else { return };
         let vault = self.daemon.as_ref().map(|d| d.vault_root().to_path_buf());
         if let Err(e) = ui_state::save(path, &self.ui, vault.as_deref()) {
             tracing::warn!(error = %e, "saving editor.json failed");
         }
+    }
+
+    fn shadow_blocked(&mut self, reason: &str) -> bool {
+        if self.status.mode == Mode::Shadow {
+            self.status.error = Some(reason.to_owned());
+            return true;
+        }
+        false
     }
 
     /// The update function.
@@ -298,11 +417,21 @@ impl App {
                 self.tokens = tokens_for(self.ui.surround);
                 self.persist();
             }
-            Message::Explorer(ExplorerMsg::Refresh) => self.refresh_files(),
+            Message::Explorer(m) => return self.update_explorer(m),
             Message::Source(m) => {
+                let pane = match &m {
+                    SourceMsg::AutosaveDue { path, .. }
+                    | SourceMsg::Saved { path, .. }
+                    | SourceMsg::KeepMine(path)
+                    | SourceMsg::TakeTheirs(path) => panes::find(&self.panes, path).map(|(p, _)| p),
+                    _ => Some(self.focus),
+                };
+                let Some(ps) = pane.and_then(|p| self.panes.get_mut(p)) else {
+                    return Task::none();
+                };
                 return crate::source::update(
-                    &mut self.tabs,
-                    self.active,
+                    &mut ps.tabs,
+                    ps.active,
                     m,
                     crate::source::Ctx {
                         daemon: self.daemon.as_ref(),
@@ -312,11 +441,12 @@ impl App {
                 );
             }
             Message::Reading(m) => match m {},
-            Message::Switcher(m) => match m {},
+            Message::Switcher(m) => return self.update_switcher(m),
             Message::Palette(m) => match m {},
             Message::Panels(m) => match m {},
             Message::Views(m) => match m {},
-            Message::Nav(m) => match m {},
+            Message::Nav(m) => return self.update_nav(m),
+            Message::Panes(m) => return self.update_panes(m),
         }
         Task::none()
     }
@@ -324,22 +454,353 @@ impl App {
     fn update_tabs(&mut self, m: TabsMsg) {
         match m {
             TabsMsg::Open(p) => self.open(&p, true),
-            TabsMsg::Select(i) if i < self.tabs.len() => {
-                self.active = Some(i);
-                self.persist();
+            TabsMsg::Select(pane, i) => {
+                if let Some(ps) = self.panes.get_mut(pane)
+                    && i < ps.tabs.len()
+                {
+                    ps.active = Some(i);
+                    self.focus = pane;
+                    self.persist();
+                }
             }
-            TabsMsg::Select(_) => {}
-            TabsMsg::Close(i) if i < self.tabs.len() => {
-                self.tabs.remove(i);
-                self.active = match self.active {
-                    _ if self.tabs.is_empty() => None,
-                    Some(a) if a > i || a >= self.tabs.len() => Some(a.saturating_sub(1)),
-                    other => other,
-                };
-                self.persist();
+            TabsMsg::Close(pane, i) => {
+                if let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
+                    self.on_tab_closed(&tab.path);
+                    self.persist();
+                }
             }
-            TabsMsg::Close(_) => {}
         }
+    }
+
+    fn update_panes(&mut self, m: PanesMsg) -> Task<Message> {
+        match m {
+            PanesMsg::SplitRight | PanesMsg::SplitDown => {
+                let dir = if matches!(m, PanesMsg::SplitRight) {
+                    SplitDir::Right
+                } else {
+                    SplitDir::Down
+                };
+                if let Some((p, _)) =
+                    self.panes
+                        .split(panes::axis_of(dir), self.focus, PaneState::default())
+                {
+                    self.focus = p;
+                }
+                self.persist();
+            }
+            PanesMsg::Close(pane) => {
+                let closed = if self.panes.len() > 1 {
+                    match self.panes.close(pane) {
+                        Some((state, sibling)) => {
+                            if self.focus == pane || self.panes.get(self.focus).is_none() {
+                                self.focus = sibling;
+                            }
+                            state.tabs
+                        }
+                        None => Vec::new(),
+                    }
+                } else {
+                    self.panes.get_mut(pane).map_or_else(Vec::new, |ps| {
+                        ps.active = None;
+                        std::mem::take(&mut ps.tabs)
+                    })
+                };
+                for t in &closed {
+                    self.on_tab_closed(&t.path);
+                }
+                self.persist();
+            }
+            PanesMsg::Focus(pane) => {
+                if self.focus != pane && self.panes.get(pane).is_some() {
+                    self.focus = pane;
+                    self.persist();
+                }
+            }
+            PanesMsg::Resized(ev) => self.panes.resize(ev.split, ev.ratio),
+            PanesMsg::Bookmark(b) => return self.update_bookmarks(b),
+        }
+        Task::none()
+    }
+
+    fn update_bookmarks(&mut self, m: BookmarkMsg) -> Task<Message> {
+        match m {
+            BookmarkMsg::Open(p) => self.open(&p, true),
+            BookmarkMsg::Written(r) => {
+                self.bookmarks.writing = false;
+                match r {
+                    Ok(WriteOutcome::Saved(h)) => self.bookmarks.hash = Some(h),
+                    Ok(WriteOutcome::Created) => self.load_bookmarks(),
+                    Ok(WriteOutcome::Conflict) => {
+                        self.load_bookmarks();
+                        self.status.error =
+                            Some("bookmarks changed on disk; reloaded (edit not saved)".into());
+                    }
+                    Err(e) => {
+                        self.load_bookmarks();
+                        self.status.error = Some(format!("bookmarks: {e}"));
+                    }
+                }
+            }
+            edit => {
+                if self.shadow_blocked("bookmark edits are disabled in shadow mode")
+                    || self.bookmarks.writing
+                {
+                    return Task::none();
+                }
+                let active = self.active_tab().map(|t| t.path.clone());
+                if let Some(job) = self.bookmarks.edit(&edit, active.as_deref()) {
+                    return self.rpc(
+                        move |d| job.run(d),
+                        |r| Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Written(r))),
+                    );
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn dispatch_op(&mut self, op: FileOp) -> Task<Message> {
+        // A rename/move/trash re-reads (or closes) the open tab, which would drop unsaved edits.
+        let target = match &op {
+            FileOp::Rename { from, .. } => Some(from.as_str()),
+            FileOp::Delete { path } => Some(path.as_str()),
+            _ => None,
+        };
+        if let Some(t) = target
+            && self.panes.iter().any(|(_, ps)| {
+                ps.tabs
+                    .iter()
+                    .any(|tab| tab.path == t && tab.source.is_dirty())
+            })
+        {
+            self.status.error = Some("save the open note first (it has unsaved edits)".into());
+            return Task::none();
+        }
+        if let FileOp::Rename { from, to } = &op {
+            self.explorer.expect_rename(from, to);
+        }
+        let back = op.clone();
+        self.rpc(
+            move |d| op.run(d),
+            move |result| Message::Explorer(ExplorerMsg::Done(FileOpDone { op: back, result })),
+        )
+    }
+
+    fn update_explorer(&mut self, m: ExplorerMsg) -> Task<Message> {
+        match m {
+            ExplorerMsg::Refresh => self.refresh_files(),
+            ExplorerMsg::Toggle(f) => {
+                if !self.ui.expanded.remove(&f) {
+                    self.ui.expanded.insert(f.clone());
+                }
+                self.explorer.selected = Some(f);
+                self.explorer.relayout(&self.ui.expanded);
+                self.persist();
+            }
+            ExplorerMsg::Select(p) => self.explorer.selected = Some(p),
+            ExplorerMsg::Open(p) => {
+                self.explorer.selected = Some(p.clone());
+                self.open(&p, true);
+            }
+            ExplorerMsg::Scrolled(w) => self.explorer.window = w,
+            ExplorerMsg::BeginNew | ExplorerMsg::BeginRename | ExplorerMsg::BeginMove => {
+                if self.shadow_blocked(explorer::SHADOW_REASON) {
+                    return Task::none();
+                }
+                let kind = match m {
+                    ExplorerMsg::BeginNew => EditKind::New,
+                    ExplorerMsg::BeginRename => EditKind::Rename,
+                    _ => EditKind::Move,
+                };
+                if !self.explorer.begin(kind) {
+                    self.status.error = Some("select a file first".into());
+                }
+            }
+            ExplorerMsg::Trash => {
+                if self.shadow_blocked(explorer::SHADOW_REASON) {
+                    return Task::none();
+                }
+                match self
+                    .explorer
+                    .selected
+                    .clone()
+                    .filter(|s| self.explorer.contains(s))
+                {
+                    Some(path) => return self.dispatch_op(FileOp::Delete { path }),
+                    None => self.status.error = Some("select a file first".into()),
+                }
+            }
+            ExplorerMsg::Input(s) => {
+                if let Some(e) = &mut self.explorer.edit {
+                    e.input = s;
+                }
+            }
+            ExplorerMsg::Submit => {
+                if self.shadow_blocked(explorer::SHADOW_REASON) {
+                    self.explorer.edit = None;
+                    return Task::none();
+                }
+                match self.explorer.submit() {
+                    Ok(Some(op)) => return self.dispatch_op(op),
+                    Ok(None) => {}
+                    Err(e) => self.status.error = Some(e),
+                }
+            }
+            ExplorerMsg::Cancel => self.explorer.edit = None,
+            ExplorerMsg::Done(FileOpDone { op, result }) => match result {
+                Ok(final_path) => {
+                    self.explorer.apply_op(&op, &final_path, &self.ui.expanded);
+                    match &op {
+                        FileOp::Create { .. } => self.open(&final_path, true),
+                        FileOp::Rename { from, to } => self.retarget(from, to),
+                        FileOp::Delete { path } => self.close_path(path),
+                    }
+                }
+                Err(e) => self.status.error = Some(e),
+            },
+        }
+        Task::none()
+    }
+
+    /// A renamed file's open tab follows it (re-read at the new path).
+    fn retarget(&mut self, from: &str, to: &str) {
+        let Some((pane, i)) = panes::find(&self.panes, from) else {
+            return;
+        };
+        let Some(d) = &self.daemon else { return };
+        match d.read_file(to) {
+            Ok((bytes, hash)) => {
+                if let Some(ps) = self.panes.get_mut(pane)
+                    && let Some(slot) = ps.tabs.get_mut(i)
+                {
+                    *slot = Tab {
+                        path: to.to_owned(),
+                        source: crate::source::SourceBuffer::new(to, &bytes, hash),
+                    };
+                }
+                self.on_tab_closed(from);
+                self.ui.touch_recent(to);
+                self.persist();
+            }
+            Err(e) => self.status.error = Some(open_error(&e)),
+        }
+    }
+
+    /// Closes every tab on `path` (trashed files).
+    fn close_path(&mut self, path: &str) {
+        while let Some((pane, i)) = panes::find(&self.panes, path) {
+            match self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
+                Some(t) => self.on_tab_closed(&t.path),
+                None => break,
+            }
+        }
+        self.persist();
+    }
+
+    fn update_switcher(&mut self, m: SwitcherMsg) -> Task<Message> {
+        let s = &mut self.switcher;
+        match m {
+            SwitcherMsg::Open => {
+                s.open = true;
+                s.query.clear();
+                s.selected = 0;
+                s.refresh(&self.explorer.paths, &self.ui.recent);
+                return iced::widget::operation::focus(switcher::INPUT_ID);
+            }
+            SwitcherMsg::Close => s.open = false,
+            SwitcherMsg::Query(q) => {
+                s.query = q;
+                s.selected = 0;
+                s.refresh(&self.explorer.paths, &self.ui.recent);
+            }
+            SwitcherMsg::Up => s.selected = s.selected.saturating_sub(1),
+            SwitcherMsg::Down => {
+                if s.selected + 1 < s.results.len() {
+                    s.selected += 1;
+                }
+            }
+            SwitcherMsg::Modifiers(m) => s.shift = switcher::shift(m),
+            SwitcherMsg::Submit => {
+                if !s.open {
+                    return Task::none();
+                }
+                match s.current().map(str::to_owned) {
+                    Some(p) if !s.shift => {
+                        s.open = false;
+                        self.open(&p, true);
+                    }
+                    _ => return self.update_switcher(SwitcherMsg::Create),
+                }
+            }
+            SwitcherMsg::Pick(p) => {
+                s.open = false;
+                self.open(&p, true);
+            }
+            SwitcherMsg::Create => {
+                if self.shadow_blocked("creating notes is disabled in shadow mode") {
+                    return Task::none();
+                }
+                let Some(path) = switcher::create_path(&self.switcher.query) else {
+                    return Task::none();
+                };
+                return self.rpc(
+                    move |d| {
+                        d.run_action(switcher::create_params(&path))
+                            .map(|r| r.open_path)
+                            .map_err(|e| e.to_string())
+                    },
+                    |r| Message::Switcher(SwitcherMsg::Created(r)),
+                );
+            }
+            SwitcherMsg::Created(r) => match r {
+                Ok(Some(p)) => {
+                    self.switcher.open = false;
+                    self.open(&p, true);
+                }
+                Ok(None) => self.status.error = Some("note.create returned no path".into()),
+                Err(e) => self.status.error = Some(format!("note.create: {e}")),
+            },
+        }
+        Task::none()
+    }
+
+    fn update_nav(&mut self, m: NavMsg) -> Task<Message> {
+        match m {
+            NavMsg::Go { pane, target } => match target {
+                NavTarget::Path(p) => {
+                    if let Err(e) = self.open_into(pane, p, true) {
+                        self.status.error = Some(open_error(&e));
+                    }
+                    self.persist();
+                }
+                NavTarget::Period(period, date) => {
+                    let params = nav::period_params(period, date);
+                    return self.rpc(
+                        move |d| {
+                            d.run_action(params)
+                                .map(|r| r.open_path)
+                                .map_err(|e| e.to_string())
+                        },
+                        move |result| Message::Nav(NavMsg::Opened { pane, result }),
+                    );
+                }
+            },
+            NavMsg::Opened { pane, result } => match result {
+                Ok(Some(p)) => {
+                    match self.open_into(pane, &p, true) {
+                        Ok(()) => {}
+                        Err(DaemonError::NotFound(_)) if self.status.mode == Mode::Shadow => {
+                            self.status.error = Some("not materialized (shadow)".into());
+                        }
+                        Err(e) => self.status.error = Some(open_error(&e)),
+                    }
+                    self.persist();
+                }
+                Ok(None) => self.status.error = Some("period.open returned no path".into()),
+                Err(e) => self.status.error = Some(format!("period.open: {e}")),
+            },
+        }
+        Task::none()
     }
 
     fn update_status(&mut self, m: StatusMsg) {
@@ -356,7 +817,9 @@ impl App {
                         {
                             self.status.error = Some(format!("index: {e}"));
                         }
-                        self.refresh_files();
+                        if self.explorer.stale {
+                            self.refresh_files();
+                        }
                     }
                     Notification::JobUpdated(j) => {
                         let state = serde_json::to_value(j.status)
@@ -365,8 +828,17 @@ impl App {
                             .unwrap_or_default();
                         self.status.last_job = Some(format!("{}: {state}", j.job_id));
                     }
-                    Notification::FileChanged { path, hash, .. } => {
+                    Notification::FileChanged {
+                        path, kind, hash, ..
+                    } => {
                         self.reload_tab(&path, hash.as_deref());
+                        self.explorer.file_changed(&path, kind, &self.ui.expanded);
+                        if path == BOOKMARKS_PATH
+                            && !self.bookmarks.writing
+                            && hash.as_deref() != self.bookmarks.hash.as_ref().map(|h| h.as_str())
+                        {
+                            self.load_bookmarks();
+                        }
                     }
                     Notification::OpenRequested { path } => self.open(&path, true),
                     Notification::ConfigReloaded { .. }
@@ -377,9 +849,12 @@ impl App {
         }
     }
 
-    /// Daemon notifications as an iced subscription.
+    /// Daemon notifications and global keys as iced subscriptions.
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::run_with(self.notifications.clone(), notification_stream)
+        Subscription::batch([
+            Subscription::run_with(self.notifications.clone(), notification_stream),
+            iced::keyboard::listen().filter_map(switcher::key_event),
+        ])
     }
 
     /// The iced theme for the current surround.
@@ -390,6 +865,62 @@ impl App {
             Surround::Light => "N1 Light",
         };
         self.tokens.iced_theme(name)
+    }
+
+    fn pane_view<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> pane_grid::Content<'a, Message> {
+        let t = self.tokens;
+        let focused = pane == self.focus;
+        let mut strip = row(ps.tabs.iter().enumerate().map(|(i, tab)| {
+            let label = if ps.active == Some(i) {
+                format!("● {}", tab.path)
+            } else {
+                tab.path.clone()
+            };
+            let mut lbl = text(label).size(14);
+            if focused && ps.active == Some(i) {
+                lbl = lbl.color(t.accent_text.to_color());
+            }
+            row![
+                button(lbl)
+                    .style(button::text)
+                    .on_press(Message::Tabs(TabsMsg::Select(pane, i))),
+                button(text("×").size(14))
+                    .style(button::text)
+                    .on_press(Message::Tabs(TabsMsg::Close(pane, i))),
+            ]
+            .spacing(2)
+            .into()
+        }))
+        .spacing(8)
+        .width(Length::Fill);
+        if self.panes.len() > 1 {
+            strip = strip.push(
+                button(text("close pane").size(13))
+                    .style(button::text)
+                    .on_press(Message::Panes(PanesMsg::Close(pane))),
+            );
+        }
+        let mut col = column![container(strip).padding(2).width(Length::Fill)].spacing(4);
+        match ps.active_tab() {
+            Some(tab) => {
+                if let Some(bar) = nav::bar(pane, &tab.path, self.today(), t) {
+                    col = col.push(bar);
+                }
+                col = col.push(self.tab_body(tab));
+            }
+            None => col = col.push(text("No file open").color(t.text_faint.to_color())),
+        }
+        let border = if focused { t.accent_ui } else { t.line };
+        pane_grid::Content::new(container(col).padding(8).height(Length::Fill)).style(
+            move |_: &Theme| container::Style {
+                border: iced::Border {
+                    color: border.to_color(),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..container::Style::default()
+            },
+        )
     }
 
     /// The view.
@@ -406,33 +937,30 @@ impl App {
             ..container::Style::default()
         };
 
-        let tabs = row(self.tabs.iter().enumerate().map(|(i, tab)| {
-            let label = if self.active == Some(i) {
-                format!("● {}", tab.path)
-            } else {
-                tab.path.clone()
-            };
-            row![
-                button(text(label)).on_press(Message::Tabs(TabsMsg::Select(i))),
-                button(text("×")).on_press(Message::Tabs(TabsMsg::Close(i))),
-            ]
-            .spacing(2)
-            .into()
-        }))
+        let top = row![
+            button(text("Quick switch (Ctrl+O)").size(14))
+                .style(button::text)
+                .on_press(Message::Switcher(SwitcherMsg::Open)),
+            button(text("Split right").size(14))
+                .style(button::text)
+                .on_press(Message::Panes(PanesMsg::SplitRight)),
+            button(text("Split down").size(14))
+                .style(button::text)
+                .on_press(Message::Panes(PanesMsg::SplitDown)),
+        ]
         .spacing(8);
 
-        let files = scrollable(column(self.files.iter().map(|p| {
-            button(text(p.as_str()).size(16))
-                .style(button::text)
-                .on_press(Message::Tabs(TabsMsg::Open(p.clone())))
-                .into()
-        })))
-        .width(Length::FillPortion(1));
+        let side = column![
+            container(explorer::view(&self.explorer, t, self.status.mode)).height(Length::Fill),
+            bookmarks::view(&self.bookmarks, t, self.status.mode),
+        ]
+        .spacing(8)
+        .padding(4);
 
-        let body: Element<'_, Message> = match self.active_tab() {
-            Some(tab) => crate::source::view(&tab.source, t, self.status.mode),
-            None => text("No file open").color(t.text_faint.to_color()).into(),
-        };
+        let grid = PaneGrid::new(&self.panes, |pane, ps, _| self.pane_view(pane, ps))
+            .spacing(4)
+            .on_click(|p| Message::Panes(PanesMsg::Focus(p)))
+            .on_resize(8, |e| Message::Panes(PanesMsg::Resized(e)));
 
         let status = row![
             text(self.status.line()).size(16),
@@ -442,21 +970,34 @@ impl App {
         ]
         .spacing(16);
 
-        column![
-            container(tabs).padding(4).width(Length::Fill).style(panel),
+        let mut main = column![container(top).padding(4).width(Length::Fill).style(panel)];
+        if self.switcher.open {
+            main = main.push(
+                container(switcher::view(&self.switcher, t, self.status.mode))
+                    .padding(6)
+                    .width(Length::Fill)
+                    .style(inset),
+            );
+        }
+        main.push(
             row![
-                container(files).style(inset).height(Length::Fill),
-                container(body)
-                    .padding(12)
+                container(side)
+                    .style(inset)
+                    .width(Length::FillPortion(1))
+                    .height(Length::Fill),
+                container(grid)
+                    .padding(4)
                     .width(Length::FillPortion(4))
                     .height(Length::Fill),
             ]
             .height(Length::Fill),
+        )
+        .push(
             container(status)
                 .padding(4)
                 .width(Length::Fill)
                 .style(panel),
-        ]
+        )
         .into()
     }
 }

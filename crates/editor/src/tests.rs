@@ -285,15 +285,15 @@ fn app_open_file_adds_tab_and_status_updates() {
     let mut app = App::new(Some(Arc::clone(&d)), Some(state.clone()));
     assert!(app.status.connected);
     assert_eq!(app.status.mode, Mode::Live);
-    assert!(app.files.contains(&p));
+    assert!(app.explorer.paths.contains(&p));
 
     let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
-    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.open_paths().len(), 1);
     assert_eq!(app.active_tab().map(|t| t.source.text()), Some(expected));
     let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
-    assert_eq!(app.tabs.len(), 1, "re-open focuses the tab");
+    assert_eq!(app.open_paths().len(), 1, "re-open focuses the tab");
     let _ = app.update(Message::Tabs(TabsMsg::Open("missing.md".into())));
-    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.open_paths().len(), 1);
     assert_eq!(app.status.error.as_deref(), Some("file not found"));
 
     let _ = app.update(Message::Status(StatusMsg::Notification(
@@ -325,6 +325,548 @@ fn app_open_file_adds_tab_and_status_updates() {
 
     // Tabs persist and restore from editor.json.
     let restored = App::new(Some(d), Some(state));
-    assert_eq!(restored.tabs.len(), 1);
+    assert_eq!(restored.open_paths().len(), 1);
     assert_eq!(restored.ui.recent.first(), Some(&p));
+}
+
+// ---------------------------------------------------------------------------------------------
+// WP-4: panes, explorer, switcher, bookmarks, nav (against FakeDaemon, RPC run inline)
+// ---------------------------------------------------------------------------------------------
+
+mod wp4 {
+    use std::sync::Mutex;
+
+    use chrono::NaiveDate;
+    use editor_model::period::{NavTarget, Period};
+
+    use super::*;
+    use crate::bookmarks::{BOOKMARKS_PATH, BookmarkMsg};
+    use crate::message::{ExplorerMsg, NavMsg, PanesMsg, SwitcherMsg};
+    use crate::panes;
+
+    fn app_over(d: &Arc<FakeDaemon>, state: Option<std::path::PathBuf>) -> App {
+        let dc: Arc<dyn DaemonClient> = Arc::clone(d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), state);
+        app.rpc_inline = true;
+        app
+    }
+
+    fn fake_arc() -> (tempfile::TempDir, Arc<FakeDaemon>) {
+        let (tmp, d) = fake();
+        (tmp, Arc::new(d))
+    }
+
+    fn changed(app: &mut App, path: &str, kind: ChangeKind) {
+        let _ = app.update(Message::Status(StatusMsg::Notification(
+            Notification::FileChanged {
+                path: path.to_owned(),
+                kind,
+                hash: None,
+                origin: Origin::Daemon,
+            },
+        )));
+    }
+
+    fn shadow(app: &mut App) {
+        let _ = app.update(Message::Status(StatusMsg::Notification(
+            Notification::ModeChanged { mode: Mode::Shadow },
+        )));
+    }
+
+    fn row_paths(app: &App) -> Vec<String> {
+        app.explorer.rows.iter().map(|r| r.path.clone()).collect()
+    }
+
+    #[test]
+    fn explorer_tree_build_and_incremental() {
+        let (_tmp, d) = fake_arc();
+        for p in [
+            "wp4tree/Zeta/b.md",
+            "wp4tree/alpha/c.md",
+            "wp4tree/alpha/A.md",
+            "wp4tree/B.md",
+            "wp4tree/a.md",
+        ] {
+            d.create_note(p, "x").expect("create");
+        }
+        let mut app = app_over(&d, None);
+        assert!(app.explorer.contains("wp4tree/alpha/A.md"));
+        assert!(row_paths(&app).contains(&"wp4tree".to_owned()));
+        assert!(
+            !row_paths(&app).contains(&"wp4tree/a.md".to_owned()),
+            "collapsed"
+        );
+        let _ = app.update(Message::Explorer(ExplorerMsg::Toggle("wp4tree".into())));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Toggle(
+            "wp4tree/alpha".into(),
+        )));
+        let rows = row_paths(&app);
+        let start = rows
+            .iter()
+            .position(|p| p == "wp4tree")
+            .expect("folder row");
+        assert_eq!(
+            &rows[start + 1..start + 7],
+            [
+                "wp4tree/alpha",
+                "wp4tree/alpha/A.md",
+                "wp4tree/alpha/c.md",
+                "wp4tree/Zeta",
+                "wp4tree/a.md",
+                "wp4tree/B.md",
+            ],
+            "folders first, case-insensitive"
+        );
+        assert!(app.ui.expanded.contains("wp4tree/alpha"));
+
+        d.create_note("wp4tree/alpha/new.md", "n").expect("create");
+        changed(&mut app, "wp4tree/alpha/new.md", ChangeKind::Created);
+        assert!(row_paths(&app).contains(&"wp4tree/alpha/new.md".to_owned()));
+        d.delete("wp4tree/a.md").expect("delete");
+        changed(&mut app, "wp4tree/a.md", ChangeKind::Deleted);
+        assert!(!app.explorer.contains("wp4tree/a.md"));
+        assert!(!app.explorer.stale);
+
+        // An external rename names only its destination: stale until the next generation.
+        d.rename("wp4tree/B.md", "wp4tree/C.md").expect("rename");
+        changed(&mut app, "wp4tree/C.md", ChangeKind::Renamed);
+        assert!(app.explorer.stale);
+        assert!(app.explorer.contains("wp4tree/B.md"));
+        let g = d.generation().expect("gen");
+        let _ = app.update(Message::Status(StatusMsg::Notification(
+            Notification::IndexGeneration { n: g },
+        )));
+        assert!(!app.explorer.stale);
+        assert!(!app.explorer.contains("wp4tree/B.md"));
+        assert!(app.explorer.contains("wp4tree/C.md"));
+    }
+
+    #[test]
+    fn explorer_rename_move_new_trash_via_rpc() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp4ops/one.md", "body").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp4ops/one.md".into())));
+        assert_eq!(app.open_paths(), ["wp4ops/one.md"]);
+
+        let _ = app.update(Message::Explorer(ExplorerMsg::BeginRename));
+        assert_eq!(
+            app.explorer.edit.as_ref().map(|e| e.input.as_str()),
+            Some("one.md")
+        );
+        let _ = app.update(Message::Explorer(ExplorerMsg::Input("two.md".into())));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Submit));
+        assert!(
+            d.read_file("wp4ops/two.md").is_ok(),
+            "renamed through the daemon"
+        );
+        assert!(app.explorer.contains("wp4ops/two.md"));
+        assert!(!app.explorer.contains("wp4ops/one.md"));
+        assert_eq!(app.open_paths(), ["wp4ops/two.md"], "the tab follows");
+        changed(&mut app, "wp4ops/two.md", ChangeKind::Renamed);
+        assert!(!app.explorer.stale, "own rename is matched");
+
+        let _ = app.update(Message::Explorer(ExplorerMsg::BeginMove));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Input("wp4moved".into())));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Submit));
+        assert!(app.explorer.contains("wp4moved/two.md"));
+        assert_eq!(app.explorer.selected.as_deref(), Some("wp4moved/two.md"));
+
+        let _ = app.update(Message::Explorer(ExplorerMsg::BeginNew));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Input("fresh".into())));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Submit));
+        assert!(app.explorer.contains("wp4moved/fresh.md"));
+        assert_eq!(
+            app.active_tab().map(|t| t.path.as_str()),
+            Some("wp4moved/fresh.md")
+        );
+
+        let _ = app.update(Message::Explorer(ExplorerMsg::Select(
+            "wp4moved/two.md".into(),
+        )));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
+        assert!(matches!(
+            d.read_file("wp4moved/two.md"),
+            Err(DaemonError::NotFound(_))
+        ));
+        assert!(!app.explorer.contains("wp4moved/two.md"));
+        assert!(!app.open_paths().contains(&"wp4moved/two.md".to_owned()));
+        assert!(app.closed.contains(&"wp4moved/two.md".to_owned()));
+    }
+
+    #[test]
+    fn rename_and_trash_refuse_a_dirty_open_note() {
+        use iced::widget::text_editor::{Action, Edit};
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp4dirty/one.md", "body").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(
+            "wp4dirty/one.md".into(),
+        )));
+        let _ = app.update(Message::Source(crate::message::SourceMsg::Action(
+            Action::Edit(Edit::Insert('x')),
+        )));
+        assert!(app.active_tab().is_some_and(|t| t.source.is_dirty()));
+
+        let _ = app.update(Message::Explorer(ExplorerMsg::BeginRename));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Input("two.md".into())));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Submit));
+        assert!(d.read_file("wp4dirty/one.md").is_ok(), "not renamed");
+        assert!(d.read_file("wp4dirty/two.md").is_err());
+        assert!(
+            app.active_tab().is_some_and(|t| t.source.is_dirty()),
+            "edits kept"
+        );
+
+        let _ = app.update(Message::Explorer(ExplorerMsg::Select(
+            "wp4dirty/one.md".into(),
+        )));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
+        assert!(d.read_file("wp4dirty/one.md").is_ok(), "not trashed");
+        assert!(app.status.error.is_some());
+    }
+
+    #[test]
+    fn shadow_mode_blocks_file_ops_but_not_navigation() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp4sh/keep.md", "k").expect("create");
+        let mut app = app_over(&d, None);
+        shadow(&mut app);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp4sh/keep.md".into())));
+        assert_eq!(app.open_paths(), ["wp4sh/keep.md"], "navigation works");
+        let _ = app.update(Message::Explorer(ExplorerMsg::BeginNew));
+        assert!(app.explorer.edit.is_none());
+        assert_eq!(
+            app.status.error.as_deref(),
+            Some(crate::explorer::SHADOW_REASON)
+        );
+        let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
+        assert!(d.read_file("wp4sh/keep.md").is_ok());
+        let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+        assert!(app.bookmarks.items.is_empty());
+        assert!(d.read_file(BOOKMARKS_PATH).is_err());
+        let _ = app.update(Message::Switcher(SwitcherMsg::Open));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Query(
+            "nothing like it".into(),
+        )));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Create));
+        assert!(d.read_file("nothing like it.md").is_err());
+    }
+
+    fn register_create(d: &Arc<FakeDaemon>) {
+        let inner = Arc::clone(d);
+        d.register_action(
+            ActionInfo {
+                id: "note.create".into(),
+                title: "Create note".into(),
+                group: None,
+                keys: vec![],
+                params: vec![],
+                needs: vec![],
+                durable: false,
+            },
+            Arc::new(move |p: &RunActionParams| {
+                let path = p
+                    .params
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or("missing path")?;
+                inner.create_note(path, "").map_err(|e| e.to_string())?;
+                Ok(Some(path.to_owned()))
+            }),
+        )
+        .expect("register");
+    }
+
+    #[test]
+    fn switcher_ranks_opens_and_creates_on_miss() {
+        let (_tmp, d) = fake_arc();
+        register_create(&d);
+        d.create_note("wp4sw/Works.md", "w").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Switcher(SwitcherMsg::Open));
+        assert!(app.switcher.open);
+        let _ = app.update(Message::Switcher(SwitcherMsg::Query("works".into())));
+        assert_eq!(app.switcher.current(), Some("wp4sw/Works.md"));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Submit));
+        assert!(!app.switcher.open);
+        assert_eq!(
+            app.active_tab().map(|t| t.path.as_str()),
+            Some("wp4sw/Works.md")
+        );
+
+        let _ = app.update(Message::Switcher(SwitcherMsg::Open));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Query(
+            "qqzz brand idea".into(),
+        )));
+        assert!(app.switcher.results.is_empty());
+        let _ = app.update(Message::Switcher(SwitcherMsg::Submit));
+        assert!(d.read_file("qqzz brand idea.md").is_ok(), "note.create ran");
+        assert_eq!(
+            app.active_tab().map(|t| t.path.as_str()),
+            Some("qqzz brand idea.md")
+        );
+
+        // Shift+Enter creates even when something matches.
+        let _ = app.update(Message::Switcher(SwitcherMsg::Open));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Query("wp4sw/Works2".into())));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Modifiers(
+            iced::keyboard::Modifiers::SHIFT,
+        )));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Submit));
+        assert!(d.read_file("wp4sw/Works2.md").is_ok());
+    }
+
+    #[test]
+    fn bookmarks_load_add_and_conflict() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp4bm/a.md", "a").expect("create");
+        let mut app = app_over(&d, None);
+        assert!(app.bookmarks.items.is_empty() && app.bookmarks.hash.is_none());
+        let _ = app.update(Message::Tabs(TabsMsg::Open("wp4bm/a.md".into())));
+        let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+        let (bytes, h1) = d.read_file(BOOKMARKS_PATH).expect("created");
+        assert_eq!(
+            crate::bookmarks::parse(&bytes).expect("parse"),
+            [crate::bookmarks::Bookmark {
+                name: "a".into(),
+                path: "wp4bm/a.md".into()
+            }]
+        );
+        assert_eq!(app.bookmarks.hash.as_ref(), Some(&h1));
+
+        // Loading from an existing file.
+        let fresh = app_over(&d, None);
+        assert_eq!(fresh.bookmarks.items.len(), 1);
+
+        // Someone else rewrites the file: the next edit hits a CAS conflict and reloads.
+        let other = "[[bookmark]]\nname = \"x\"\npath = \"x.md\"\n\n[[bookmark]]\nname = \"y\"\npath = \"y.md\"\n";
+        d.write_note(BOOKMARKS_PATH, other, &h1).expect("external");
+        let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Remove(0))));
+        assert!(
+            app.status
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("changed on disk"))
+        );
+        let names: Vec<&str> = app
+            .bookmarks
+            .items
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(names, ["x", "y"]);
+        assert!(!app.bookmarks.writing);
+        let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Down(0))));
+        let names: Vec<String> =
+            crate::bookmarks::parse(&d.read_file(BOOKMARKS_PATH).expect("r").0)
+                .expect("parse")
+                .into_iter()
+                .map(|b| b.name)
+                .collect();
+        assert_eq!(names, ["y", "x"]);
+    }
+
+    fn register_period(
+        d: &Arc<FakeDaemon>,
+        materialize: bool,
+    ) -> Arc<Mutex<Vec<(String, String)>>> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let inner = Arc::clone(d);
+        d.register_action(
+            ActionInfo {
+                id: "period.open".into(),
+                title: "Open period".into(),
+                group: None,
+                keys: vec![],
+                params: vec![],
+                needs: vec![],
+                durable: false,
+            },
+            Arc::new(move |p: &RunActionParams| {
+                let get = |k: &str| {
+                    p.params
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                let (period, date) = (get("period"), get("date"));
+                if let Ok(mut g) = seen.lock() {
+                    g.push((period.clone(), date.clone()));
+                }
+                let path = if period == "month" {
+                    format!("daily/month/{}.md", &date[..7])
+                } else {
+                    format!("daily/day/{date}.md")
+                };
+                if materialize && inner.read_file(&path).is_err() {
+                    inner.create_note(&path, "").map_err(|e| e.to_string())?;
+                }
+                Ok(Some(path))
+            }),
+        )
+        .expect("register");
+        calls
+    }
+
+    #[test]
+    fn nav_runs_period_open_and_opens_in_the_same_pane() {
+        let (_tmp, d) = fake_arc();
+        let calls = register_period(&d, true);
+        d.create_note("daily/day/2026-12-31.md", "d")
+            .expect("create");
+        d.create_note("wp4nav/other.md", "o").expect("create");
+        let mut app = app_over(&d, None);
+        app.today = NaiveDate::from_ymd_opt(2026, 10, 13);
+        let _ = app.update(Message::Tabs(TabsMsg::Open(
+            "daily/day/2026-12-31.md".into(),
+        )));
+        let day_pane = app.focus;
+        let _ = app.update(Message::Panes(PanesMsg::SplitRight));
+        assert_ne!(app.focus, day_pane);
+        let _ = app.update(Message::Tabs(TabsMsg::Open("wp4nav/other.md".into())));
+        let other_pane = app.focus;
+
+        let tomorrow = NaiveDate::from_ymd_opt(2027, 1, 1).expect("date");
+        let _ = app.update(Message::Nav(NavMsg::Go {
+            pane: day_pane,
+            target: NavTarget::Period(Period::Day, tomorrow),
+        }));
+        assert_eq!(
+            calls.lock().expect("calls").last(),
+            Some(&("day".to_owned(), "2027-01-01".to_owned()))
+        );
+        let tabs_of = |app: &App, p| -> Vec<String> {
+            app.panes
+                .get(p)
+                .map(|s| s.tabs.iter().map(|t| t.path.clone()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            tabs_of(&app, day_pane),
+            ["daily/day/2027-01-01.md"],
+            "replaced in its own pane"
+        );
+        assert_eq!(tabs_of(&app, other_pane), ["wp4nav/other.md"]);
+        assert!(app.closed.contains(&"daily/day/2026-12-31.md".to_owned()));
+
+        let _ = app.update(Message::Nav(NavMsg::Go {
+            pane: day_pane,
+            target: NavTarget::Period(
+                Period::Month,
+                NaiveDate::from_ymd_opt(2027, 1, 1).expect("d"),
+            ),
+        }));
+        assert_eq!(
+            calls.lock().expect("calls").last(),
+            Some(&("month".to_owned(), "2027-01-01".to_owned()))
+        );
+        assert_eq!(tabs_of(&app, day_pane), ["daily/month/2027-01.md"]);
+    }
+
+    #[test]
+    fn nav_in_shadow_reports_not_materialized() {
+        let (_tmp, d) = fake_arc();
+        let _calls = register_period(&d, false);
+        d.create_note("daily/day/2026-10-13.md", "d")
+            .expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Tabs(TabsMsg::Open(
+            "daily/day/2026-10-13.md".into(),
+        )));
+        shadow(&mut app);
+        let pane = app.focus;
+        let _ = app.update(Message::Nav(NavMsg::Go {
+            pane,
+            target: NavTarget::Period(
+                Period::Day,
+                NaiveDate::from_ymd_opt(2026, 10, 14).expect("d"),
+            ),
+        }));
+        assert_eq!(
+            app.status.error.as_deref(),
+            Some("not materialized (shadow)")
+        );
+        assert_eq!(app.open_paths(), ["daily/day/2026-10-13.md"]);
+    }
+
+    #[test]
+    fn panes_split_open_close_and_persist() {
+        let (tmp, d) = fake_arc();
+        for p in ["wp4p/a.md", "wp4p/b.md", "wp4p/c.md"] {
+            d.create_note(p, "x").expect("create");
+        }
+        let state = tmp.path().join("state/crucible-vault/editor.json");
+        let mut app = app_over(&d, Some(state.clone()));
+        let _ = app.update(Message::Tabs(TabsMsg::Open("wp4p/a.md".into())));
+        let first = app.focus;
+        let _ = app.update(Message::Panes(PanesMsg::SplitDown));
+        let second = app.focus;
+        assert_eq!(app.panes.len(), 2);
+        let _ = app.update(Message::Tabs(TabsMsg::Open("wp4p/b.md".into())));
+        let _ = app.update(Message::Tabs(TabsMsg::Open("wp4p/c.md".into())));
+        assert_eq!(
+            app.panes.get(second).map(|s| s.tabs.len()),
+            Some(2),
+            "opens into focus"
+        );
+        assert_eq!(app.panes.get(first).map(|s| s.tabs.len()), Some(1));
+        // Re-opening a tab open in another pane focuses it.
+        let _ = app.update(Message::Tabs(TabsMsg::Open("wp4p/a.md".into())));
+        assert_eq!(app.focus, first);
+        let _ = app.update(Message::Panes(PanesMsg::Focus(second)));
+
+        // Persist and reload the layout.
+        let restored = app_over(&d, Some(state.clone()));
+        assert_eq!(restored.panes.len(), 2);
+        assert_eq!(
+            restored.open_paths(),
+            ["wp4p/a.md", "wp4p/b.md", "wp4p/c.md"]
+        );
+        assert_eq!(
+            restored.active_tab().map(|t| t.path.as_str()),
+            Some("wp4p/c.md")
+        );
+        assert!(matches!(
+            restored.ui.panes.as_ref().map(|l| &l.root),
+            Some(crate::ui_state::PaneNode::Split {
+                dir: crate::ui_state::SplitDir::Down,
+                ..
+            })
+        ));
+
+        // Closing a pane reports each of its tabs.
+        app.closed.clear();
+        let _ = app.update(Message::Panes(PanesMsg::Close(second)));
+        assert_eq!(app.panes.len(), 1);
+        assert_eq!(app.closed, ["wp4p/b.md", "wp4p/c.md"]);
+        assert_eq!(app.focus, first);
+        let _ = app.update(Message::Tabs(TabsMsg::Close(first, 0)));
+        assert_eq!(app.closed.last().map(String::as_str), Some("wp4p/a.md"));
+        assert!(app.open_paths().is_empty());
+    }
+
+    #[test]
+    fn wp1_shaped_editor_json_loads_into_one_pane() {
+        let (tmp, d) = fake_arc();
+        d.create_note("wp4old/a.md", "x").expect("create");
+        d.create_note("wp4old/b.md", "y").expect("create");
+        let state = tmp.path().join("state/crucible-vault/editor.json");
+        std::fs::create_dir_all(state.parent().expect("dir")).expect("mkdir");
+        std::fs::write(
+            &state,
+            br#"{"tabs":["wp4old/a.md","wp4old/b.md"],"active_tab":0,"layout":"source","surround":"dark","recent":[]}"#,
+        )
+        .expect("write");
+        let app = app_over(&d, Some(state));
+        assert_eq!(app.panes.len(), 1);
+        assert_eq!(app.open_paths(), ["wp4old/a.md", "wp4old/b.md"]);
+        assert_eq!(
+            app.active_tab().map(|t| t.path.as_str()),
+            Some("wp4old/a.md")
+        );
+        let _ = panes::order(&app.panes);
+    }
 }

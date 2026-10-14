@@ -2,6 +2,7 @@
 //! `~/.local/state/crucible-vault/editor.json`. Never stored in the vault. Missing or corrupt
 //! files yield defaults; writes are atomic (temp file + rename).
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,65 @@ pub struct UiState {
     pub surround: Surround,
     /// Most recent first, capped at [`RECENT_CAP`].
     pub recent: Vec<String>,
+    /// WP-4 pane layout (pane tree + per-pane tabs + focused pane). `None` (a WP-1 file) →
+    /// one pane built from `tabs`/`active_tab`.
+    pub panes: Option<PaneLayout>,
+    /// WP-4 explorer: expanded folders (vault-relative).
+    pub expanded: BTreeSet<String>,
+}
+
+/// Split direction: `Right` = side by side, `Down` = stacked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitDir {
+    Right,
+    Down,
+}
+
+/// A persisted pane tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneNode {
+    /// One pane: its tab paths in order and the active index.
+    Leaf {
+        #[serde(default)]
+        tabs: Vec<String>,
+        #[serde(default)]
+        active: Option<usize>,
+    },
+    /// A split; `ratio_milli` is the first child's share in thousandths.
+    Split {
+        dir: SplitDir,
+        ratio_milli: u16,
+        a: Box<PaneNode>,
+        b: Box<PaneNode>,
+    },
+}
+
+/// The persisted layout: the tree and the focused leaf (depth-first index).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneLayout {
+    pub root: PaneNode,
+    #[serde(default)]
+    pub focused: usize,
+}
+
+impl PaneNode {
+    /// Leaves in depth-first order.
+    pub fn leaves(&self) -> Vec<(&[String], Option<usize>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![self];
+        while let Some(n) = stack.pop() {
+            match n {
+                Self::Leaf { tabs, active } => out.push((tabs.as_slice(), *active)),
+                Self::Split { a, b, .. } => {
+                    stack.push(b);
+                    stack.push(a);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Recent-files cap.
@@ -128,6 +188,7 @@ mod tests {
             layout: Layout::Split,
             surround: Surround::Light,
             recent: vec![],
+            ..UiState::default()
         };
         s.touch_recent("a.md");
         s.touch_recent("b/c.md");

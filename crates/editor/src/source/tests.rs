@@ -27,7 +27,8 @@ fn setup() -> (tempfile::TempDir, Arc<FakeDaemon>, App, String) {
 }
 
 fn buf(app: &mut App) -> &mut SourceBuffer {
-    &mut app.tabs[app.active.expect("active")].source
+    let ps = app.panes.get_mut(app.focus).expect("focused pane");
+    &mut ps.tabs[ps.active.expect("active")].source
 }
 
 fn type_text(app: &mut App, s: &str) {

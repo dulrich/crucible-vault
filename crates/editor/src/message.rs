@@ -4,7 +4,10 @@
 
 use cv_protocol::Notification;
 
+use iced::widget::pane_grid::{self, Pane};
+
 use crate::theme::Surround;
+use crate::widget::virtual_list::ListWindow;
 
 /// Every message the app handles.
 #[derive(Debug, Clone)]
@@ -20,6 +23,7 @@ pub enum Message {
     Status(StatusMsg),
     Tabs(TabsMsg),
     Theme(ThemeMsg),
+    Panes(PanesMsg),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name
@@ -53,15 +57,51 @@ pub enum SourceMsg {
 #[derive(Debug, Clone)]
 pub enum ReadingMsg {}
 
-/// WP-4 replaces this with the real explorer; WP-1 only refreshes a flat file list.
+/// WP-4: the file explorer.
 #[derive(Debug, Clone)]
 pub enum ExplorerMsg {
+    /// Full rebuild from the index.
     Refresh,
+    /// Expand/collapse a folder.
+    Toggle(String),
+    /// Select a row (file or folder) without opening it.
+    Select(String),
+    /// Select and open a file in the focused pane.
+    Open(String),
+    /// The virtual list scrolled.
+    Scrolled(ListWindow),
+    /// Context actions on the selection.
+    BeginNew,
+    BeginRename,
+    BeginMove,
+    Trash,
+    /// The inline name/folder field.
+    Input(String),
+    Submit,
+    Cancel,
+    /// An RPC file operation finished.
+    Done(crate::explorer::FileOpDone),
 }
 
-/// WP-4: quick switcher.
+/// WP-4: quick switcher (Ctrl+O).
 #[derive(Debug, Clone)]
-pub enum SwitcherMsg {}
+pub enum SwitcherMsg {
+    Open,
+    Close,
+    Query(String),
+    Up,
+    Down,
+    /// Enter: open the selection (Shift held, or no match → create).
+    Submit,
+    /// "Create <query>".
+    Create,
+    /// Click on a result.
+    Pick(String),
+    /// Modifier state (Shift+Enter detection).
+    Modifiers(iced::keyboard::Modifiers),
+    /// `note.create` finished: `open_path` or an error.
+    Created(Result<Option<String>, String>),
+}
 
 /// WP-5: command palette.
 #[derive(Debug, Clone)]
@@ -75,9 +115,30 @@ pub enum PanelsMsg {}
 #[derive(Debug, Clone)]
 pub enum ViewsMsg {}
 
-/// WP-4: day/month nav.
+/// WP-4: day/month nav. The bar belongs to `pane`; results open in that pane's active tab.
 #[derive(Debug, Clone)]
-pub enum NavMsg {}
+pub enum NavMsg {
+    Go {
+        pane: Pane,
+        target: editor_model::period::NavTarget,
+    },
+    /// `period.open` finished: `open_path` or an error.
+    Opened {
+        pane: Pane,
+        result: Result<Option<String>, String>,
+    },
+}
+
+/// WP-4: pane grid and the pane-side bookmarks list.
+#[derive(Debug, Clone)]
+pub enum PanesMsg {
+    SplitRight,
+    SplitDown,
+    Close(Pane),
+    Focus(Pane),
+    Resized(pane_grid::ResizeEvent),
+    Bookmark(crate::bookmarks::BookmarkMsg),
+}
 
 /// Daemon connection and notifications.
 #[derive(Debug, Clone)]
@@ -93,8 +154,8 @@ pub enum StatusMsg {
 pub enum TabsMsg {
     /// Open a vault-relative path (or focus its tab).
     Open(String),
-    Select(usize),
-    Close(usize),
+    Select(Pane, usize),
+    Close(Pane, usize),
 }
 
 /// The surround switch (client command, `surround.ts:75`).
