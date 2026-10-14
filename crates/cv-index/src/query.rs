@@ -217,6 +217,11 @@ impl<'a> Query<'a> {
         Self { conn }
     }
 
+    /// The underlying connection (for query modules under `queries/`).
+    pub(crate) fn conn(&self) -> &'a Connection {
+        self.conn
+    }
+
     /// The rebuild generation of this DB.
     /// The connection's `PRAGMA journal_mode` (`wal` for every final generation).
     pub fn journal_mode(&self) -> Result<String> {

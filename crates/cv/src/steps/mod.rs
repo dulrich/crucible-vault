@@ -25,6 +25,8 @@ pub mod localize;
 pub mod materialize;
 pub mod search;
 #[cfg(test)]
+mod wp11_tests;
+#[cfg(test)]
 mod wp12_tests;
 
 use std::path::Path;
