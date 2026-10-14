@@ -153,7 +153,8 @@ impl Daemon {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let fs = match config.mode {
             Mode::Live => VaultFs::live(&config.vault, &config.protected_vault, &NoCutover)
-                .context("live mode refused")?,
+                .context("live mode refused")?
+                .with_link_write_roots(config.link_write_roots.clone()),
             Mode::Shadow => {
                 let repo_roots: Vec<PathBuf> = cv_vault::DEFAULT_REPO_ROOTS
                     .iter()

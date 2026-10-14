@@ -610,3 +610,38 @@ fn reader_is_read_only() {
     assert!(raw.execute("DELETE FROM files", []).is_err());
     assert_eq!(r.query().file_count().unwrap(), 6);
 }
+
+// ---- symlinked notes (plan editor-cutover-blockers WP-1) ------------------------------------
+
+#[test]
+fn symlinked_note_outside_the_root_is_indexed_under_its_vault_path() {
+    let t = Tmp::new();
+    t.write("a.md", "# A\n");
+    let repo = t.0.join("repo");
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    std::fs::write(
+        repo.join("INITIATIVE.md"),
+        "---\nstatus: active\n---\n[[a]] #init\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(t.vault().join("initiatives/x")).unwrap();
+    std::os::unix::fs::symlink(
+        repo.join("INITIATIVE.md"),
+        t.vault().join("initiatives/x/INITIATIVE.md"),
+    )
+    .unwrap();
+    // A dangling link is skipped (not an error); a directory link is not followed.
+    std::os::unix::fs::symlink(repo.join("gone.md"), t.vault().join("dangling.md")).unwrap();
+    std::fs::write(repo.join("sub/inner.md"), "inner").unwrap();
+    std::os::unix::fs::symlink(repo.join("sub"), t.vault().join("dirlink")).unwrap();
+
+    let idx = Index::create(&t.vault(), &t.db()).unwrap();
+    let q = idx.query();
+    assert_eq!(q.file_count().unwrap(), 2);
+    assert!(q.file("initiatives/x/INITIATIVE.md").unwrap().is_some());
+    assert_eq!(q.tags_of("initiatives/x/INITIATIVE.md").unwrap().len(), 1);
+    assert_eq!(q.props("initiatives/x/INITIATIVE.md").unwrap().len(), 1);
+    assert_eq!(q.backlinks("a.md").unwrap().len(), 1);
+    assert!(q.file("dangling.md").unwrap().is_none());
+    assert!(q.file("dirlink/inner.md").unwrap().is_none());
+}

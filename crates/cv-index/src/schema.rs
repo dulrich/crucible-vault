@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 
 /// The `index.db` schema version, carried by the `hello` handshake (`plans/v0-core-daemon.md`
 /// Public Interfaces) so a stale client fails loudly.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Tables per S2 (`FINDINGS.md` "Index design") plus WP-5's additions: `files.ctime`, link
 /// line/span, `tasks`. Every child table carries a `file_id` index — S2 measured a 4× full-index

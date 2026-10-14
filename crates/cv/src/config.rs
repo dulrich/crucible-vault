@@ -34,6 +34,10 @@ pub struct Config {
     pub open_cmd: Option<PathBuf>,
     /// `CV_CLIPBOARD_CMD`: program + whitespace-separated args (default [`DEFAULT_CLIPBOARD_CMD`]).
     pub clipboard_cmd: Vec<String>,
+    /// `CV_LINK_WRITE_ROOTS`: `:`-separated absolute roots outside the vault that a live write
+    /// through a symlinked note may land under (plan editor-cutover-blockers WP-1, audit B1).
+    /// Unset or empty means none.
+    pub link_write_roots: Vec<PathBuf>,
 }
 
 impl Config {
@@ -113,6 +117,17 @@ impl Config {
         if clipboard_cmd.is_empty() {
             bail!("CV_CLIPBOARD_CMD is blank");
         }
+        let mut link_write_roots = Vec::new();
+        for part in get("CV_LINK_WRITE_ROOTS").unwrap_or_default().split(':') {
+            if part.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(part);
+            if !p.is_absolute() {
+                bail!("CV_LINK_WRITE_ROOTS entries must be absolute paths, got {part:?}");
+            }
+            link_write_roots.push(p);
+        }
         Ok(Self {
             vault,
             mode,
@@ -124,6 +139,7 @@ impl Config {
             socket,
             open_cmd: get("CV_OPEN_CMD").map(PathBuf::from),
             clipboard_cmd,
+            link_write_roots,
         })
     }
 
@@ -235,6 +251,30 @@ mod tests {
             PathBuf::from("/h/.local/state/crucible-vault/uri-spool")
         );
         assert!(c.open_cmd.is_none());
+        assert!(c.link_write_roots.is_empty());
+    }
+
+    #[test]
+    fn link_write_roots_parse_and_refuse_relative() {
+        let base = [("HOME", "/h"), ("CV_SOCKET", "/s")];
+        let c = Config::resolve(env(&[
+            base[0],
+            base[1],
+            ("CV_LINK_WRITE_ROOTS", "/a/b::/c"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            c.link_write_roots,
+            vec![PathBuf::from("/a/b"), PathBuf::from("/c")]
+        );
+        let empty = Config::resolve(env(&[base[0], base[1], ("CV_LINK_WRITE_ROOTS", "")])).unwrap();
+        assert!(empty.link_write_roots.is_empty());
+        let rel = Config::resolve(env(&[
+            base[0],
+            base[1],
+            ("CV_LINK_WRITE_ROOTS", "/a:rel/x"),
+        ]));
+        assert!(rel.unwrap_err().to_string().contains("absolute"));
     }
 
     #[test]

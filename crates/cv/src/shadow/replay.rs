@@ -208,6 +208,9 @@ pub async fn run(config: &Config, req: &ReplayRequest) -> Result<Value> {
         socket: base.join("d.sock"),
         open_cmd: None,
         clipboard_cmd: config.clipboard_cmd.clone(),
+        // Never write through a corpus link into a real repo (audit B1): a `cp -a`/rsync corpus
+        // keeps the vault's symlinks.
+        link_write_roots: Vec::new(),
     };
     let before = snapshot(&corpus)?;
     let daemon = Daemon::start(

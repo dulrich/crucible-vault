@@ -5,6 +5,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
 use notify::{RecursiveMode, Watcher};
 
 use crate::error::{Result, VaultError};
@@ -124,13 +127,15 @@ pub fn spawn_writer_with_watcher(
     })?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
     let mut state = WatchState::seed(&root, cfg.debounce);
+    let mut link_dirs = BTreeSet::new();
+    sync_link_dirs(&mut watcher, &mut state, &mut link_dirs);
     let (tx, rx) = mpsc::channel::<Job>();
     let (ev_tx, ev_rx) = mpsc::channel::<VaultEvent>();
     let idle = cfg.debounce.max(Duration::from_millis(10));
     let join = std::thread::Builder::new()
         .name("cv-writer".into())
         .spawn(move || {
-            let _watcher = watcher; // lives as long as the thread
+            let mut watcher = watcher; // lives as long as the thread
             loop {
                 let wait = state.next_due(Instant::now()).unwrap_or(idle).min(idle);
                 match rx.recv_timeout(wait.max(Duration::from_millis(1))) {
@@ -149,8 +154,41 @@ pub fn spawn_writer_with_watcher(
                         tracing::debug!("vault event dropped: no subscriber");
                     }
                 }
+                sync_link_dirs(&mut watcher, &mut state, &mut link_dirs);
             }
         })
         .map_err(|e| crate::error::io(std::path::Path::new("cv-writer thread"), e))?;
     Ok((WriterHandle { tx }, ev_rx, join))
+}
+
+/// Brings the non-recursive watches on symlink-target directories in line with the link set
+/// (plan editor-cutover-blockers WP-1): one watch per directory, added and dropped as links are
+/// added, removed or retargeted inside the vault.
+fn sync_link_dirs(
+    watcher: &mut impl Watcher,
+    state: &mut WatchState,
+    watched: &mut BTreeSet<PathBuf>,
+) {
+    let Some(want) = state.take_watch_dirs() else {
+        return;
+    };
+    for d in watched.difference(&want) {
+        if let Err(e) = watcher.unwatch(d) {
+            tracing::debug!(error = %e, "unwatching a link-target directory");
+        }
+    }
+    let mut now = BTreeSet::new();
+    for d in want {
+        if watched.contains(&d) {
+            now.insert(d);
+            continue;
+        }
+        match watcher.watch(&d, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                now.insert(d);
+            }
+            Err(e) => tracing::warn!(error = %e, "watching a link-target directory failed"),
+        }
+    }
+    *watched = now;
 }

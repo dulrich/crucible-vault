@@ -73,6 +73,7 @@ fn config(root: &Path, mode: Mode) -> Config {
         socket: root.join("run/d.sock"),
         open_cmd: None,
         clipboard_cmd: vec!["false".into()],
+        link_write_roots: Vec::new(),
     }
 }
 
@@ -713,6 +714,14 @@ starters = [
 type = "lint"
 
 [[action]]
+id = "stamp"
+label = "Stamp the active note"
+needs = ["active_path"]
+[[action.steps]]
+type = "set_props"
+props = { stamped = "yes" }
+
+[[action]]
 id = "feed"
 label = "Feed"
 [[action.steps]]
@@ -785,4 +794,37 @@ fn replay_runs_one_action_against_the_corpus() {
     assert_eq!(jobs[0].job_type, "action:make-note");
     // The live vault is untouched.
     assert_eq!(std::fs::read_dir(&cfg.vault).unwrap().count(), 1);
+}
+
+#[test]
+fn replay_refuses_a_link_write_into_a_repo_outside_the_corpus() {
+    let (t, cfg) = replay_world();
+    // A stand-in "repo" outside the corpus, linked from it (as a `cp -a` copy preserves).
+    let repo = t.0.join("standin-repo");
+    write(&repo, "INITIATIVE.md", "# Init\n");
+    std::os::unix::fs::symlink(
+        repo.join("INITIATIVE.md"),
+        t.0.join("corpus/notes/INITIATIVE.md"),
+    )
+    .unwrap();
+    let mut r = req(&t, "corpus", "stamp");
+    r.active_path = Some("notes/INITIATIVE.md".into());
+    let out = runtime().block_on(replay::run(&cfg, &r)).unwrap();
+    assert_ne!(out["status"], "done", "{out}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("INITIATIVE.md")).unwrap(),
+        "# Init\n"
+    );
+    assert!(
+        t.0.join("corpus/notes/INITIATIVE.md")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    // The same action on a regular corpus note goes through.
+    let mut ok = req(&t, "corpus", "stamp");
+    ok.active_path = Some("notes/existing.md".into());
+    let out = runtime().block_on(replay::run(&cfg, &ok)).unwrap();
+    assert_eq!(out["status"], "done", "{out}");
 }

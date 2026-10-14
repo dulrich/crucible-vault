@@ -27,6 +27,12 @@ pub enum VaultError {
         "live mode refused: {root} is under the protected root {protected} and no cut-over marker is present"
     )]
     ProtectedRoot { root: String, protected: String },
+    /// A live write through a symlinked note was refused: the link's target is dangling, not a
+    /// regular file, under the protected root without the cut-over marker, or outside the vault
+    /// root and every `CV_LINK_WRITE_ROOTS` entry (audit B1). Nothing was written; the link is
+    /// never replaced.
+    #[error("write through the symlinked note {path} refused: {reason}")]
+    LinkWriteRefused { path: String, reason: String },
     /// The scratch directory failed validation.
     #[error("scratch dir {scratch} refused: {reason}")]
     ScratchRefused { scratch: String, reason: String },

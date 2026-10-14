@@ -258,6 +258,7 @@ fn build(vault_root: &Path, building: &Path, generation: u64) -> Result<()> {
     schema::configure_build(&conn)?;
     schema::create(&conn, generation)?;
     let mut entries: Vec<(String, PathBuf, std::fs::Metadata)> = Vec::new();
+    let mut dangling = 0_usize;
     let walker = WalkDir::new(vault_root)
         .follow_links(false)
         .into_iter()
@@ -272,18 +273,35 @@ fn build(vault_root: &Path, building: &Path, generation: u64) -> Result<()> {
             ),
             source: e.into(),
         })?;
-        if !entry.file_type().is_file() {
+        let ft = entry.file_type();
+        let md = if ft.is_file() {
+            entry.metadata().map_err(|e| Error::Io {
+                path: entry.path().display().to_string(),
+                source: e.into(),
+            })?
+        } else if ft.is_symlink() {
+            // A symlink to a regular file is indexed under its vault path with the target's
+            // metadata (plan editor-cutover-blockers WP-1); directory links stay unfollowed and a
+            // dangling link is skipped and counted.
+            match std::fs::metadata(entry.path()) {
+                Ok(m) if m.is_file() => m,
+                Ok(_) => continue,
+                Err(_) => {
+                    dangling += 1;
+                    continue;
+                }
+            }
+        } else {
             continue;
-        }
+        };
         let Some(rel) = rel_path(vault_root, entry.path()) else {
             tracing::warn!("skipping a non-UTF-8 vault path");
             continue;
         };
-        let md = entry.metadata().map_err(|e| Error::Io {
-            path: entry.path().display().to_string(),
-            source: e.into(),
-        })?;
         entries.push((rel, entry.path().to_path_buf(), md));
+    }
+    if dangling > 0 {
+        tracing::info!(dangling, "skipped dangling symlinks while indexing");
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 

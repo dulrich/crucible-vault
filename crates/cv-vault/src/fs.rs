@@ -132,6 +132,13 @@ pub struct VaultFs {
     root: PathBuf,
     shadow: Option<Shadow>,
     job_id: Option<String>,
+    /// The canonical protected root (I1), for the write-through-link destination check.
+    protected: Option<PathBuf>,
+    /// Whether the cut-over marker was present when live mode was opened.
+    marker_present: bool,
+    /// Canonical roots outside the vault a write through a symlinked note may land under
+    /// (`CV_LINK_WRITE_ROOTS`, audit B1). Empty by default.
+    link_write_roots: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for VaultFs {
@@ -181,6 +188,43 @@ fn read_opt(full: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// A regular file, or a symlink resolving to one (directory links are never followed and dangling
+/// links are skipped: the cv-index walk policy).
+pub(crate) fn is_file_or_file_link(entry: &walkdir::DirEntry) -> bool {
+    let ft = entry.file_type();
+    ft.is_file() || (ft.is_symlink() && entry.path().is_file())
+}
+
+/// For a symlink at `src`: the link text to recreate it at `dest` (made absolute — canonical when it
+/// resolves — when the original was relative and the folder changes). `None` when `src` is not a symlink.
+fn relink_target(src: &Path, dest: &Path) -> Result<Option<PathBuf>> {
+    let is_link = src
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return Ok(None);
+    }
+    let link = std::fs::read_link(src).map_err(|e| io(src, e))?;
+    if link.is_absolute() || src.parent() == dest.parent() {
+        return Ok(Some(link));
+    }
+    if let Ok(t) = std::fs::canonicalize(src) {
+        return Ok(Some(t));
+    }
+    // Dangling: resolve `..` lexically so the link does not depend on the old folder existing.
+    let mut out = src.parent().unwrap_or(Path::new("/")).to_path_buf();
+    for c in link.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    Ok(Some(out))
+}
+
 #[cfg(test)]
 pub(crate) static FAIL_BEFORE_PERSIST: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -193,7 +237,8 @@ impl VaultFs {
         let root = std::fs::canonicalize(root).map_err(|e| io(root, e))?;
         let protected = canon_or_self(protected_root);
         // Either containing the other is refused: a root above the live vault reaches into it.
-        if (root.starts_with(&protected) || protected.starts_with(&root)) && !marker.present()? {
+        let marker_present = marker.present()?;
+        if (root.starts_with(&protected) || protected.starts_with(&root)) && !marker_present {
             return Err(VaultError::ProtectedRoot {
                 root: root.display().to_string(),
                 protected: protected.display().to_string(),
@@ -203,7 +248,65 @@ impl VaultFs {
             root,
             shadow: None,
             job_id: None,
+            protected: Some(protected),
+            marker_present,
+            link_write_roots: Vec::new(),
         })
+    }
+
+    /// Allows writes through symlinked notes whose canonical target lies under one of `roots`
+    /// (besides the vault root). Roots are canonicalized; missing ones are dropped. Default: none.
+    #[must_use]
+    pub fn with_link_write_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.link_write_roots = roots
+            .iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .collect();
+        self
+    }
+
+    /// The canonical link-write roots in effect.
+    pub fn link_write_roots(&self) -> &[PathBuf] {
+        &self.link_write_roots
+    }
+
+    /// The file a live write of `path` lands on: `full` itself for a regular (or new) entry, or
+    /// the canonical target of a symlinked entry when that target is a regular file under the
+    /// vault root or an allowlisted root, and not under the protected root without the marker.
+    /// Anything else is [`VaultError::LinkWriteRefused`]; the link is never replaced.
+    fn write_target(&self, path: &str, full: &Path) -> Result<PathBuf> {
+        let is_link = full
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink());
+        if !is_link {
+            return Ok(full.to_path_buf());
+        }
+        let refuse = |reason: &str| VaultError::LinkWriteRefused {
+            path: path.to_string(),
+            reason: reason.to_string(),
+        };
+        let Ok(target) = std::fs::canonicalize(full) else {
+            return Err(refuse("the link is dangling"));
+        };
+        if !target.is_file() {
+            return Err(refuse("the link target is not a regular file"));
+        }
+        if let Some(p) = &self.protected
+            && target.starts_with(p)
+            && !self.marker_present
+        {
+            return Err(refuse(
+                "the link target is under the protected root and no cut-over marker is present",
+            ));
+        }
+        let allowed = target.starts_with(&self.root)
+            || self.link_write_roots.iter().any(|r| target.starts_with(r));
+        if !allowed {
+            return Err(refuse(
+                "the link target is outside the vault root and every link-write root",
+            ));
+        }
+        Ok(target)
     }
 
     /// Shadow mode: reads `live_root` (never writes it), mutations go to `<scratch>/vault/` and
@@ -232,6 +335,9 @@ impl VaultFs {
                 log,
             }),
             job_id: None,
+            protected: None,
+            marker_present: false,
+            link_write_roots: Vec::new(),
         })
     }
 
@@ -373,8 +479,15 @@ impl VaultFs {
         op: &str,
     ) -> Result<(ContentHash, PathBuf)> {
         validate_rel_path(path)?;
+        let vault_full = self.write_base().join(path);
+        // Live mode writes through a symlinked note onto its (confined) target; shadow mode
+        // writes only regular overlay files.
+        let full = if self.is_shadow() {
+            vault_full.clone()
+        } else {
+            self.write_target(path, &vault_full)?
+        };
         self.check(path, expected)?;
-        let full = self.write_base().join(path);
         let dir = full.parent().unwrap_or(self.write_base()).to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
         let mut tmp = tempfile::Builder::new()
@@ -408,7 +521,7 @@ impl VaultFs {
             self.set_tombstone(path, false)?;
             self.log(op, path, expected, Some(&after))?;
         }
-        Ok((after, full))
+        Ok((after, vault_full))
     }
 
     /// Recoverable delete (CAS on `expected`). Live: moves the file to `.trash/<path>` (` (n)`
@@ -500,6 +613,18 @@ impl VaultFs {
             std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
         }
         self.check(from, Some(expected))?;
+        if let Some(link) = relink_target(&src, &dest)? {
+            // A symlinked note moves as a link (the target never moves). A relative link target
+            // is re-anchored so it still resolves from the new folder.
+            match std::os::unix::fs::symlink(&link, &dest) {
+                Ok(()) => std::fs::remove_file(&src).map_err(|e| io(&src, e))?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(VaultError::Exists(to.to_string()));
+                }
+                Err(e) => return Err(io(&dest, e)),
+            }
+            return Ok((expected.clone(), dest));
+        }
         // hard_link is a no-clobber rename on one filesystem; then drop the old name.
         match std::fs::hard_link(&src, &dest) {
             Ok(()) => std::fs::remove_file(&src).map_err(|e| io(&src, e))?,
@@ -533,7 +658,7 @@ impl VaultFs {
                     path: start.display().to_string(),
                     source: std::io::Error::other(e.to_string()),
                 })?;
-                if !entry.file_type().is_file() {
+                if !is_file_or_file_link(&entry) {
                     continue;
                 }
                 if let Some(rel) = rel_of(&base, entry.path())

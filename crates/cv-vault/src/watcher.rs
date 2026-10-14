@@ -10,13 +10,13 @@
 //! write-queue echo handling) is dropped as Obsidian-induced: the initial scan here only seeds
 //! the `(size, mtime)` map and emits nothing (I4).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 
-use crate::fs::{rel_of, times};
+use crate::fs::{is_file_or_file_link, rel_of, times};
 use crate::hash::ContentHash;
 use crate::path::is_ignored;
 use crate::writer::VaultWriter;
@@ -137,17 +137,51 @@ pub(crate) struct WatchState {
     pending: HashMap<String, Instant>,
     renames: Vec<(String, String, Instant)>,
     debounce: Duration,
+    /// Symlinked vault entries → their resolved target file (plan editor-cutover-blockers WP-1).
+    links: HashMap<String, PathBuf>,
+    /// Target file → the vault paths linking to it.
+    by_target: HashMap<PathBuf, BTreeSet<String>>,
+    /// Set when `links` changed since the last [`Self::take_watch_dirs`].
+    links_changed: bool,
+}
+
+/// The file a symlink at `full` points to: canonical when it resolves, else (dangling) the
+/// link's text resolved against the canonical parent it names, so the target's directory can be
+/// watched until the target appears (audit E2). `None` when `full` is not a symlink.
+fn link_target(full: &Path) -> Option<PathBuf> {
+    let md = full.symlink_metadata().ok()?;
+    if !md.file_type().is_symlink() {
+        return None;
+    }
+    if let Ok(t) = std::fs::canonicalize(full) {
+        return Some(t);
+    }
+    let link = std::fs::read_link(full).ok()?;
+    let abs = if link.is_absolute() {
+        link
+    } else {
+        full.parent()?.join(link)
+    };
+    let name = abs.file_name()?.to_owned();
+    let dir = abs.parent()?;
+    Some(
+        std::fs::canonicalize(dir)
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .join(name),
+    )
 }
 
 impl WatchState {
     /// Seeds the `(size, mtime)` map from a walk of `root`; emits nothing (I4).
     pub(crate) fn seed(root: &Path, debounce: Duration) -> Self {
         let mut seen = HashMap::new();
+        let mut links = HashMap::new();
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
         {
-            if !entry.file_type().is_file() {
+            let ft = entry.file_type();
+            if !ft.is_file() && !ft.is_symlink() {
                 continue;
             }
             let Some(rel) = rel_of(root, entry.path()) else {
@@ -156,7 +190,18 @@ impl WatchState {
             if is_ignored(&rel) {
                 continue;
             }
-            if let Ok(md) = entry.metadata() {
+            if ft.is_symlink()
+                && let Some(t) = link_target(entry.path())
+            {
+                // Directory links stay unfollowed; dangling links are tracked for E2.
+                if t.is_dir() {
+                    continue;
+                }
+                links.insert(rel.clone(), t);
+            }
+            if let Ok(md) = std::fs::metadata(entry.path())
+                && md.is_file()
+            {
                 seen.insert(
                     rel,
                     Stat {
@@ -167,13 +212,61 @@ impl WatchState {
                 );
             }
         }
+        let mut by_target: HashMap<PathBuf, BTreeSet<String>> = HashMap::new();
+        for (rel, t) in &links {
+            by_target.entry(t.clone()).or_default().insert(rel.clone());
+        }
         Self {
             root: root.to_path_buf(),
             seen,
             pending: HashMap::new(),
             renames: Vec::new(),
             debounce,
+            links,
+            by_target,
+            links_changed: true,
         }
+    }
+
+    /// Records (or clears) `rel`'s symlink target from the current filesystem state.
+    fn refresh_link(&mut self, rel: &str) {
+        let new = link_target(&self.root.join(rel)).filter(|t| !t.is_dir());
+        if self.links.get(rel) == new.as_ref() {
+            return;
+        }
+        if let Some(old) = self.links.remove(rel)
+            && let Some(set) = self.by_target.get_mut(&old)
+        {
+            set.remove(rel);
+            if set.is_empty() {
+                self.by_target.remove(&old);
+            }
+        }
+        if let Some(t) = new {
+            self.by_target
+                .entry(t.clone())
+                .or_default()
+                .insert(rel.to_string());
+            self.links.insert(rel.to_string(), t);
+        }
+        self.links_changed = true;
+    }
+
+    /// The directories outside the root holding link targets (one per directory; the root
+    /// itself is watched recursively), when the link set changed since the last call.
+    pub(crate) fn take_watch_dirs(&mut self) -> Option<BTreeSet<PathBuf>> {
+        if !self.links_changed {
+            return None;
+        }
+        self.links_changed = false;
+        Some(
+            self.by_target
+                .keys()
+                .filter(|t| !t.starts_with(&self.root))
+                .filter_map(|t| t.parent().map(Path::to_path_buf))
+                .filter(|d| d.is_dir())
+                .collect(),
+        )
     }
 
     fn rel(&self, p: &Path) -> Option<String> {
@@ -198,6 +291,12 @@ impl WatchState {
         for p in &ev.paths {
             if let Some(r) = self.rel(p) {
                 self.pending.insert(r, now);
+            }
+            // A change to a link target maps back to every vault path linking to it.
+            if let Some(set) = self.by_target.get(p) {
+                for r in set {
+                    self.pending.insert(r.clone(), now);
+                }
             }
         }
     }
@@ -330,7 +429,7 @@ impl WatchState {
                     .into_iter()
                     .filter_map(|e| e.ok())
                 {
-                    if e.file_type().is_file()
+                    if (is_file_or_file_link(&e) || e.path_is_symlink())
                         && let Some(r) = self.rel(e.path())
                     {
                         files.push(r);
@@ -348,6 +447,7 @@ impl WatchState {
     }
 
     fn examine_file(&mut self, w: &mut VaultWriter, path: &str, out: &mut Vec<VaultEvent>) {
+        self.refresh_link(path);
         let full = self.root.join(path);
         let md = match std::fs::metadata(&full) {
             Ok(md) if md.is_file() => md,
