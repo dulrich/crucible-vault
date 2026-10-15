@@ -11,6 +11,7 @@ use iced::widget::{
 use iced::{Border, Element, Font, Length, Theme};
 
 use super::{Doc, ReadingStore};
+use crate::icons::Icon;
 use crate::message::{Message, ReadingMsg};
 use crate::theme::{Rgb, Tokens};
 
@@ -31,6 +32,8 @@ struct Ctx<'a> {
     t: Tokens,
     /// `editor.toml` `font_size / 22` (plan editor-settings-tab WP-2, audit M1).
     scale: f32,
+    /// Inside a cancelled (`- [-]`) task: text is faint and struck through.
+    strike: bool,
 }
 
 impl Ctx<'_> {
@@ -75,6 +78,7 @@ pub fn reading<'a>(
         path,
         t,
         scale,
+        strike: false,
     };
     // Fixed slots 0 (filename) and 1 (properties, `Space` when absent) keep every body widget
     // at a stable tree position whether or not the note has frontmatter.
@@ -365,30 +369,175 @@ fn callout_color(kind: &str, t: Tokens) -> Rgb {
     }
 }
 
-fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Element<'a, Message> {
-    let marker = match (it.task, ordered) {
-        (Some(c), _) => format!("[{c}]"),
-        (None, true) => format!("{n}."),
-        (None, false) => "•".to_owned(),
+/// The colour role of a task marker, resolved against `Tokens` at draw time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskRole {
+    Dim,
+    Faint,
+    Accent,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+    Purple,
+}
+
+impl TaskRole {
+    fn color(self, t: Tokens) -> Rgb {
+        match self {
+            Self::Dim => t.text_dim,
+            Self::Faint => t.text_faint,
+            Self::Accent => t.accent,
+            Self::Red => t.red,
+            Self::Orange => t.orange,
+            Self::Yellow => t.yellow,
+            Self::Green => t.green,
+            Self::Cyan => t.cyan,
+            Self::Blue => t.blue,
+            Self::Purple => t.purple,
+        }
+    }
+}
+
+/// The glyph and colour role of a task status char (plan editor-feedback-round-2 WP-5).
+///
+/// Source: Crucible theme alternate checkboxes, `https://github.com/dulrich/obsidian-crucible/blob/master/theme/theme.css`
+/// lines 447-744 (Block 4); the CSS `--color-*` / `--text-faint` roles map to the same-named
+/// `Tokens`, Obsidian's `--interactive-accent` (`x`, `/`) to `accent`. The inline SVG masks are
+/// replaced by the nearest lucide glyph. Obsidian-induced part dropped: the `input:checked` +
+/// `mask-image` / `::after` selector machinery (Obsidian renders tasks as HTML checkboxes); the
+/// box-filled variants (`?`, `"`, `i`, `S`) draw as a coloured glyph without the filled box.
+/// `' '` is an empty box; an unknown char (`None` glyph, not `' '`) is a box showing the char.
+fn task_mark(c: char) -> (Option<Icon>, TaskRole) {
+    match c {
+        ' ' => (None, TaskRole::Dim),
+        'x' | 'X' => (Some(Icon::Check), TaskRole::Accent),
+        '>' => (Some(Icon::ArrowRight), TaskRole::Faint),
+        '<' => (Some(Icon::Calendar), TaskRole::Faint),
+        '?' => (Some(Icon::CircleHelp), TaskRole::Yellow),
+        '/' => (Some(Icon::SquareSlash), TaskRole::Accent),
+        '!' => (Some(Icon::TriangleAlert), TaskRole::Orange),
+        '"' | '\u{201C}' => (Some(Icon::Quote), TaskRole::Cyan),
+        '-' => (Some(Icon::Minus), TaskRole::Faint),
+        '*' => (Some(Icon::Star), TaskRole::Yellow),
+        'l' => (Some(Icon::MapPin), TaskRole::Red),
+        'i' => (Some(Icon::Info), TaskRole::Blue),
+        'S' => (Some(Icon::DollarSign), TaskRole::Green),
+        'I' => (Some(Icon::Lightbulb), TaskRole::Yellow),
+        'f' => (Some(Icon::Flame), TaskRole::Red),
+        'k' => (Some(Icon::Key), TaskRole::Yellow),
+        'u' => (Some(Icon::TrendingUp), TaskRole::Green),
+        'd' => (Some(Icon::TrendingDown), TaskRole::Red),
+        'w' => (Some(Icon::Trophy), TaskRole::Purple),
+        'p' => (Some(Icon::ThumbsUp), TaskRole::Green),
+        'c' => (Some(Icon::ThumbsDown), TaskRole::Orange),
+        'b' => (Some(Icon::Bookmark), TaskRole::Orange),
+        _ => (None, TaskRole::Dim),
+    }
+}
+
+/// Whether a task's item text is struck through (Crucible theme.css ~616-621: `[-]` only).
+fn task_struck(c: char) -> bool {
+    c == '-'
+}
+
+/// The click message of a task marker: host-note tasks toggle; transcluded ones (no line)
+/// stay display-only (audit M1).
+fn task_press(path: &str, task: Option<char>, line: Option<usize>) -> Option<Message> {
+    match (task, line) {
+        (Some(_), Some(line)) => Some(Message::Reading(ReadingMsg::ToggleTask {
+            path: path.to_owned(),
+            line,
+        })),
+        _ => None,
+    }
+}
+
+/// The drawn checkbox for status char `c`, `side` px square.
+fn task_box<'a>(c: char, side: f32, t: Tokens) -> Element<'a, Message> {
+    let (glyph, role) = task_mark(c);
+    let col = role.color(t);
+    let boxed_char = |inner: Element<'a, Message>, fill: Option<Rgb>, edge: Rgb| {
+        container(inner)
+            .width(side)
+            .height(side)
+            .center_x(side)
+            .center_y(side)
+            .style(move |_: &Theme| container::Style {
+                background: fill.map(|f| f.to_color().into()),
+                border: Border {
+                    color: edge.to_color(),
+                    width: 1.5,
+                    radius: 4.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .into()
     };
-    let done = matches!(it.task, Some('x' | 'X' | '-'));
-    let color = if done { cx.t.text_faint } else { cx.t.text_dim };
-    let marker = text(marker).font(Font::MONOSPACE).color(color.to_color());
-    // Host-note tasks are clickable; transcluded ones (no line) stay display-only (audit M1).
-    let marker: Element<'a, Message> = match it.line {
-        Some(line) if it.task.is_some() => button(marker)
+    match (c, glyph) {
+        ('x' | 'X', Some(icon)) => boxed_char(
+            text(icon.glyph())
+                .font(crate::icons::FONT)
+                .size(side * 0.8)
+                .color(t.on_accent.to_color())
+                .into(),
+            Some(col),
+            col,
+        ),
+        (_, Some(icon)) => container(
+            text(icon.glyph())
+                .font(crate::icons::FONT)
+                .size(side)
+                .color(col.to_color()),
+        )
+        .center_x(side)
+        .center_y(side)
+        .into(),
+        (' ', None) => boxed_char(Space::new().into(), None, t.text_faint),
+        (_, None) => boxed_char(
+            text(c.to_string())
+                .size(side * 0.75)
+                .color(col.to_color())
+                .into(),
+            None,
+            t.text_faint,
+        ),
+    }
+}
+
+fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Element<'a, Message> {
+    // Paragraph text is `block_size(None)` at iced's default 1.3 line height: the marker sits in
+    // a box one first-line tall so it centres on the first line, not on the whole item.
+    let line_h = cx.sz(block_size(None)) * 1.3;
+    let marker: Element<'a, Message> = match (it.task, ordered) {
+        (Some(c), _) => task_box(c, cx.sz(block_size(None)) * 0.95, cx.t),
+        (None, true) => text(format!("{n}."))
+            .font(Font::MONOSPACE)
+            .color(cx.t.text_dim.to_color())
+            .into(),
+        (None, false) => text("•")
+            .font(Font::MONOSPACE)
+            .color(cx.t.text_dim.to_color())
+            .into(),
+    };
+    let marker = container(marker).height(line_h).center_y(line_h);
+    let marker: Element<'a, Message> = match task_press(cx.path, it.task, it.line) {
+        Some(msg) => button(marker)
             .padding(0)
             .style(button::text)
-            .on_press(Message::Reading(ReadingMsg::ToggleTask {
-                path: cx.path.to_owned(),
-                line,
-            }))
+            .on_press(msg)
             .into(),
-        _ => marker.into(),
+        None => marker.into(),
+    };
+    let child_cx = Ctx {
+        strike: cx.strike || it.task.is_some_and(task_struck),
+        ..*cx
     };
     row![
         marker,
-        column(it.children.iter().map(|c| block(cx, c))).spacing(4),
+        column(it.children.iter().map(|c| block(&child_cx, c))).spacing(4),
     ]
     .spacing(6)
     .into()
@@ -472,7 +621,11 @@ fn inlines_view<'a>(
 ) -> Element<'a, Message> {
     let size = cx.sz(size);
     let t = cx.t;
-    let base = color.unwrap_or(t.text);
+    let base = if cx.strike {
+        t.text_faint
+    } else {
+        color.unwrap_or(t.text)
+    };
     let mut spans = Vec::with_capacity(inlines.len());
     for i in inlines {
         let s = match i {
@@ -488,7 +641,7 @@ fn inlines_view<'a>(
                     let mut s = span(piece)
                         .font(font)
                         .color(base.to_color())
-                        .strikethrough(style.strike);
+                        .strikethrough(style.strike || cx.strike);
                     if style.highlight {
                         s = s.background(t.sel_tint.to_color()).color(t.text.to_color());
                     }
@@ -553,4 +706,60 @@ fn inlines_view<'a>(
         .size(size)
         .on_link_click(link_msg(cx.path))
         .into()
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+
+    const LISTED: &str = " x><?/!\"-*liSIfkudwpcb";
+
+    #[test]
+    fn every_listed_char_has_a_private_use_glyph_except_empty() {
+        for c in LISTED.chars() {
+            let (g, _) = task_mark(c);
+            if c == ' ' {
+                assert_eq!(g, None);
+            } else {
+                let g = g.unwrap_or_else(|| panic!("no glyph for {c:?}"));
+                assert!(('\u{e000}'..='\u{f8ff}').contains(&g.glyph()), "{c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn roles_follow_the_crucible_css() {
+        assert_eq!(task_mark('x'), (Some(Icon::Check), TaskRole::Accent));
+        assert_eq!(task_mark('!').1, TaskRole::Orange);
+        assert_eq!(task_mark('w').1, TaskRole::Purple);
+        assert_eq!(task_mark('i').1, TaskRole::Blue);
+        assert_eq!(task_mark('-'), (Some(Icon::Minus), TaskRole::Faint));
+        assert_eq!(task_mark('>').1, TaskRole::Faint);
+    }
+
+    #[test]
+    fn unknown_char_falls_back_to_a_plain_box() {
+        assert_eq!(task_mark('Z'), (None, TaskRole::Dim));
+        assert_eq!(task_mark('9'), (None, TaskRole::Dim));
+    }
+
+    #[test]
+    fn only_cancelled_is_struck() {
+        assert!(task_struck('-'));
+        for c in LISTED.chars().filter(|c| *c != '-') {
+            assert!(!task_struck(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn host_tasks_toggle_and_transcluded_do_not() {
+        let Some(Message::Reading(ReadingMsg::ToggleTask { path, line })) =
+            task_press("a.md", Some(' '), Some(3))
+        else {
+            panic!("host task must toggle");
+        };
+        assert_eq!((path.as_str(), line), ("a.md", 3));
+        assert!(task_press("a.md", Some('x'), None).is_none());
+        assert!(task_press("a.md", None, Some(3)).is_none());
+    }
 }

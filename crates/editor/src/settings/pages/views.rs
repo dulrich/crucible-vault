@@ -55,7 +55,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
             .width(Length::Fixed(260.0))
             .on_input(|v| Message::Settings(SettingsMsg::NewViewName(v)))
             .on_submit(Message::Settings(SettingsMsg::NewViewCreate)),
-        button(text("New view file").size(14))
+        button(theme::control_label("New view file", 14.0))
             .height(theme::CONTROL)
             .padding([0, 14])
             .style(theme::icon_button_style(t, false))

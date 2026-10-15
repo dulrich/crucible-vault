@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use iced::font::Weight;
-use iced::widget::{column, container, mouse_area, rich_text, row, sensor, span, text};
-use iced::{Border, Element, Font, Length, Theme, mouse};
+use iced::widget::{button, column, container, rich_text, row, sensor, span, text};
+use iced::{Border, Element, Font, Length, Theme};
 use serde_json::Value;
 
 use crate::message::{Message, ViewsMsg};
@@ -419,6 +419,10 @@ fn cell_view<'a>(c: &Cell, bold: bool, link: LinkCell, t: Tokens) -> Element<'a,
         // Styled like Reading-mode links (`reading/view.rs` `Inline::WikiLink`): accent-ui, no
         // permanent underline. `Clickable` makes the span an iced rich-text link, which
         // underlines it and shows a pointer while hovered.
+        // `Styled`: no explicit colour, so the text inherits the row button's `text_color`
+        // (`accent_ui`, `accent_ui_hover` while the row is hovered; plan editor-feedback-round-2
+        // WP-5).
+        Cell::Link { .. } if link == LinkCell::Styled => text(s).size(13).font(font).into(),
         Cell::Link { path, .. } if link != LinkCell::Plain => {
             let clickable = link == LinkCell::Clickable;
             let mut sp: iced::widget::text::Span<'a, ()> = span(s).color(t.accent_ui.to_color());
@@ -501,8 +505,12 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                 grid(&r.cells, false, links)
             };
             match &r.path {
-                Some(p) => mouse_area(el)
-                    .interaction(mouse::Interaction::Pointer)
+                // A button (not a `mouse_area`) so the hover state comes from the widget's own
+                // status: no hover message, no stored state, no extra redraw traffic.
+                Some(p) => button(el)
+                    .padding(0)
+                    .width(Length::Fill)
+                    .style(move |_, status| row_link_style(t, status))
                     .on_press(Message::Views(ViewsMsg::Open {
                         path: p.clone(),
                         line: r.line,
@@ -511,6 +519,21 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                 None => el,
             }
         }
+    }
+}
+
+/// A row-target button: link cells take `text_color` (accent-ui, brighter on hover) and the row
+/// gets a `sel_tint` wash while hovered or pressed.
+fn row_link_style(t: Tokens, status: button::Status) -> button::Style {
+    let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: hot.then(|| t.sel_tint.to_color().into()),
+        text_color: if hot { t.accent_ui_hover } else { t.accent_ui }.to_color(),
+        border: iced::Border {
+            radius: 4.0.into(),
+            ..iced::Border::default()
+        },
+        ..button::Style::default()
     }
 }
 

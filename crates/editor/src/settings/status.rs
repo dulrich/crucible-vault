@@ -52,14 +52,14 @@ fn kv<'a>(k: &'a str, v: String, t: Tokens) -> Element<'a, Message> {
 
 /// The page.
 pub fn view(s: &StatusPage, t: Tokens) -> Element<'_, Message> {
-    let refresh = button(
-        text(if s.loading {
+    let refresh = button(crate::theme::control_label(
+        if s.loading {
             "Refreshing…"
         } else {
             "Refresh"
-        })
-        .size(14),
-    )
+        },
+        14.0,
+    ))
     .height(crate::theme::CONTROL)
     .padding([0, 14])
     .style(crate::theme::icon_button_style(t, false))

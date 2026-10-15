@@ -2807,7 +2807,7 @@ impl App {
             return Space::new().into();
         };
         let btn = |label: &'static str, m: SettingsMsg| {
-            button(text(label).size(13))
+            button(crate::theme::control_label(label, 13.0))
                 .height(crate::theme::CONTROL)
                 .padding([0, 10])
                 .style(crate::theme::icon_button_style(t, false))

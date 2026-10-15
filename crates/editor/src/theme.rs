@@ -335,6 +335,18 @@ pub fn icon_button_style(
     }
 }
 
+/// A text label for a fixed-height (`CONTROL`) button: fills the button's height and centres
+/// vertically (plan editor-feedback-round-2 WP-5; a bare `text` sits at the top of the box).
+pub fn control_label<'a>(
+    s: impl iced::widget::text::IntoFragment<'a>,
+    size: f32,
+) -> iced::widget::Text<'a> {
+    iced::widget::text(s)
+        .size(size)
+        .align_y(iced::alignment::Vertical::Center)
+        .height(iced::Length::Fill)
+}
+
 /// The glyph text for `icon`.
 pub fn icon_text<'a>(icon: crate::icons::Icon) -> iced::widget::Text<'a> {
     iced::widget::text(icon.glyph().to_string())

@@ -45,6 +45,27 @@ pub enum Icon {
     Table,
     Activity,
     TriangleAlert,
+    // plan editor-feedback-round-2 WP-5: reading-view task checkboxes (codepoints read from the
+    // vendored font's `cmap` + `post` glyph names: check, arrow-right, calendar, circle-help, square-slash, quote, minus, star, map-pin, info, dollar-sign, lightbulb, flame, key, trending-up, trending-down, trophy, thumbs-up, thumbs-down).
+    Check,
+    ArrowRight,
+    Calendar,
+    CircleHelp,
+    SquareSlash,
+    Quote,
+    Minus,
+    Star,
+    MapPin,
+    Info,
+    DollarSign,
+    Lightbulb,
+    Flame,
+    Key,
+    TrendingUp,
+    TrendingDown,
+    Trophy,
+    ThumbsUp,
+    ThumbsDown,
 }
 
 impl Icon {
@@ -78,6 +99,25 @@ impl Icon {
             Self::Table => '\u{e180}',
             Self::Activity => '\u{e038}',
             Self::TriangleAlert => '\u{e192}',
+            Self::Check => '\u{e070}',
+            Self::ArrowRight => '\u{e04d}',
+            Self::Calendar => '\u{e067}',
+            Self::CircleHelp => '\u{e082}',
+            Self::SquareSlash => '\u{e177}',
+            Self::Quote => '\u{e238}',
+            Self::Minus => '\u{e11f}',
+            Self::Star => '\u{e179}',
+            Self::MapPin => '\u{e114}',
+            Self::Info => '\u{e0fe}',
+            Self::DollarSign => '\u{e0b5}',
+            Self::Lightbulb => '\u{e1c1}',
+            Self::Flame => '\u{e0d7}',
+            Self::Key => '\u{e102}',
+            Self::TrendingUp => '\u{e190}',
+            Self::TrendingDown => '\u{e18f}',
+            Self::Trophy => '\u{e376}',
+            Self::ThumbsUp => '\u{e189}',
+            Self::ThumbsDown => '\u{e188}',
         }
     }
 }
@@ -88,7 +128,31 @@ mod tests {
 
     #[test]
     fn glyphs_are_private_use_and_font_is_vendored() {
-        for i in [Icon::ChevronLeft, Icon::Search, Icon::FolderTree, Icon::X] {
+        for i in [
+            Icon::ChevronLeft,
+            Icon::Search,
+            Icon::FolderTree,
+            Icon::X,
+            Icon::Check,
+            Icon::ArrowRight,
+            Icon::Calendar,
+            Icon::CircleHelp,
+            Icon::SquareSlash,
+            Icon::Quote,
+            Icon::Minus,
+            Icon::Star,
+            Icon::MapPin,
+            Icon::Info,
+            Icon::DollarSign,
+            Icon::Lightbulb,
+            Icon::Flame,
+            Icon::Key,
+            Icon::TrendingUp,
+            Icon::TrendingDown,
+            Icon::Trophy,
+            Icon::ThumbsUp,
+            Icon::ThumbsDown,
+        ] {
             assert!(('\u{e000}'..='\u{f8ff}').contains(&i.glyph()));
         }
         // TrueType magic.

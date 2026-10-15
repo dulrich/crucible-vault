@@ -1217,7 +1217,7 @@ pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'
     let mut bar = row![].spacing(8).align_y(iced::Alignment::Center);
     if matches!(f.state, LoadState::Malformed(_)) && f.doc.is_none() {
         bar = bar.push(
-            button(text("Start from defaults").size(14))
+            button(crate::theme::control_label("Start from defaults", 14.0))
                 .height(crate::theme::CONTROL)
                 .padding([0, 14])
                 .style(crate::theme::icon_button_style(t, false))

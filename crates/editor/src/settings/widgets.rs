@@ -73,7 +73,7 @@ pub fn text_button<'a>(
     msg: Option<Message>,
     t: Tokens,
 ) -> Element<'a, Message> {
-    button(text(label.into()).size(14))
+    button(theme::control_label(label.into(), 14.0))
         .height(theme::CONTROL)
         .padding([0, 12])
         .style(theme::icon_button_style(t, false))
@@ -370,7 +370,7 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
             };
             row![
                 theme::icon_button(chev, Some(cx.form(FormMsg::Toggle(path.clone()))), t),
-                button(text(summary).size(14))
+                button(theme::control_label(summary, 14.0))
                     .style(button::text)
                     .height(theme::CONTROL)
                     .width(Length::Fill)
