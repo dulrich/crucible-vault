@@ -34,7 +34,7 @@
 //! arm for its section with a form that reads `file.doc` and emits
 //! [`SettingsMsg::Edit`]`(path, DocEdit)`; the save loop, the Save/Revert bar ([`save_bar`]),
 //! the load-state / error header ([`file_header`]) and the routing stay as they are.
-//! Editor prefs (and the `[keys]` table WP-4 consumes) are [`editor_prefs::Prefs`], held on the
+//! Editor prefs (and the `[keys]` table the WP-4 keymap applies) are [`editor_prefs::Prefs`], held on the
 //! app as `App::prefs`.
 
 pub mod editor_prefs;
@@ -468,6 +468,8 @@ pub struct Settings {
     pub view_selected: Option<String>,
     /// The "New view file" name field.
     pub new_view: String,
+    /// The Hotkeys page (WP-4): capture state and keymap / action snapshots.
+    pub hotkeys: pages::hotkeys::HotkeyState,
 }
 
 impl Default for Settings {
@@ -482,6 +484,7 @@ impl Default for Settings {
             form: form::FormState::default(),
             view_selected: None,
             new_view: String::new(),
+            hotkeys: pages::hotkeys::HotkeyState::default(),
         }
     }
 }
@@ -886,6 +889,8 @@ pub enum SettingsMsg {
     RefreshStatus,
     /// The `status` RPC returned.
     StatusLoaded(Result<cv_protocol::StatusResult, String>),
+    /// A Hotkeys page control (WP-4).
+    Hotkey(pages::hotkeys::HotkeyMsg),
     /// Confirm-before-Trash: go ahead / cancel.
     TrashConfirm,
     TrashCancel,
@@ -1073,7 +1078,7 @@ fn page_inner<'a>(
             None => Space::new().into(),
         },
         Section::Status => status::view(&s.status, t),
-        Section::Hotkeys => placeholder(t, "Hotkey configuration arrives with the Hotkeys page."),
+        Section::Hotkeys => pages::hotkeys::view(cx),
         Section::Views => pages::views::view(cx),
         sec => match sec.file().and_then(|p| s.file(p)) {
             Some(f) => match sec {
@@ -1090,10 +1095,6 @@ fn page_inner<'a>(
         },
     };
     column![heading, body].spacing(12).into()
-}
-
-fn placeholder(t: Tokens, why: &str) -> Element<'_, Message> {
-    text(why).size(14).color(t.text_faint.to_color()).into()
 }
 
 /// The file path, load state, form errors, reload errors and notice of a file page.
@@ -1189,3 +1190,6 @@ mod tests;
 
 #[cfg(test)]
 mod form_tests;
+
+#[cfg(test)]
+mod hotkeys_tests;

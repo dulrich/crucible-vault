@@ -7,6 +7,7 @@ pub mod actions;
 pub mod agents;
 pub mod bookmarks;
 pub mod captures;
+pub mod hotkeys;
 pub mod kinds;
 pub mod providers;
 pub mod schedules;

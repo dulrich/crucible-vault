@@ -15,6 +15,43 @@ pub const CONTROL_PLANE: &str = "dashboard/Sample Charts.md";
 /// Fixed Day-bar link.
 pub const WORKS: &str = "core/Works.md";
 
+/// The day / month note folders navigation recognizes (plan `editor-settings-tab` WP-4, audit
+/// E2): the editor fills them from `captures.toml` `[periods.day].folder` /
+/// `[periods.month].folder`; [`Default`] is [`DAY_FOLDER`] / [`MONTH_FOLDER`]. Only the folder
+/// is configurable here — note basenames must stay ISO (`YYYY-MM-DD` / `YYYY-MM`); a non-ISO
+/// `format` is not honoured by navigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeriodFolders {
+    pub day: String,
+    pub month: String,
+}
+
+impl Default for PeriodFolders {
+    fn default() -> Self {
+        Self {
+            day: DAY_FOLDER.to_owned(),
+            month: MONTH_FOLDER.to_owned(),
+        }
+    }
+}
+
+impl PeriodFolders {
+    /// Folders from optional configured values; a missing or blank one falls back to its
+    /// constant. Surrounding `/` are trimmed.
+    pub fn from_config(day: Option<&str>, month: Option<&str>) -> Self {
+        let pick = |v: Option<&str>, d: &str| {
+            v.map(|s| s.trim().trim_matches('/'))
+                .filter(|s| !s.is_empty())
+                .unwrap_or(d)
+                .to_owned()
+        };
+        Self {
+            day: pick(day, DAY_FOLDER),
+            month: pick(month, MONTH_FOLDER),
+        }
+    }
+}
+
 /// The period a `period.open` call targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Period {
@@ -48,11 +85,11 @@ pub struct NavItem {
     pub target: NavTarget,
 }
 
-/// `path` is exactly `daily/day/YYYY-MM-DD.md` → its date. Reading entries under
-/// `daily/day/<date>/…` are not day notes.
-pub fn day_note_date(path: &str) -> Option<NaiveDate> {
+/// `path` is exactly `<day folder>/YYYY-MM-DD.md` → its date. Reading entries under
+/// `<day folder>/<date>/…` are not day notes.
+pub fn day_note_date(path: &str, folders: &PeriodFolders) -> Option<NaiveDate> {
     let stem = path
-        .strip_prefix(DAY_FOLDER)?
+        .strip_prefix(folders.day.as_str())?
         .strip_prefix('/')?
         .strip_suffix(".md")?;
     if stem.len() != 10 || !shape(stem, &[4, 2, 2]) {
@@ -61,10 +98,10 @@ pub fn day_note_date(path: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(stem, "%Y-%m-%d").ok()
 }
 
-/// `path` is exactly `daily/month/YYYY-MM.md` → the first of that month.
-pub fn month_note_date(path: &str) -> Option<NaiveDate> {
+/// `path` is exactly `<month folder>/YYYY-MM.md` → the first of that month.
+pub fn month_note_date(path: &str, folders: &PeriodFolders) -> Option<NaiveDate> {
     let stem = path
-        .strip_prefix(MONTH_FOLDER)?
+        .strip_prefix(folders.month.as_str())?
         .strip_prefix('/')?
         .strip_suffix(".md")?;
     if stem.len() != 7 || !shape(stem, &[4, 2]) {
@@ -122,9 +159,9 @@ pub fn iso(d: NaiveDate) -> String {
 }
 
 /// The nav bar for a tab on `path`, or `None` when the path gets no bar.
-pub fn bar_for(path: &str, today: NaiveDate) -> Option<Vec<NavItem>> {
+pub fn bar_for(path: &str, today: NaiveDate, folders: &PeriodFolders) -> Option<Vec<NavItem>> {
     let item = |label: String, target| NavItem { label, target };
-    if let Some(d) = day_note_date(path) {
+    if let Some(d) = day_note_date(path, folders) {
         return Some(vec![
             item(
                 "← yesterday".into(),
@@ -143,7 +180,7 @@ pub fn bar_for(path: &str, today: NaiveDate) -> Option<Vec<NavItem>> {
             ),
         ]);
     }
-    if let Some(m) = month_note_date(path) {
+    if let Some(m) = month_note_date(path, folders) {
         return Some(vec![
             item(
                 "← Last Month".into(),
@@ -162,6 +199,9 @@ pub fn bar_for(path: &str, today: NaiveDate) -> Option<Vec<NavItem>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
+
+    static F: LazyLock<PeriodFolders> = LazyLock::new(PeriodFolders::default);
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).expect("date")
@@ -190,28 +230,31 @@ mod tests {
     #[test]
     fn path_predicates() {
         assert_eq!(
-            day_note_date("daily/day/2026-10-13.md"),
+            day_note_date("daily/day/2026-10-13.md", &F),
             Some(d(2026, 10, 13))
         );
-        assert_eq!(day_note_date("daily/day/2026-10-13/reading.md"), None);
-        assert_eq!(day_note_date("daily/day/2026-10-13/2026-10-13.md"), None);
-        assert_eq!(day_note_date("daily/day/2026-02-30.md"), None);
-        assert_eq!(day_note_date("daily/day/2026-1-13.md"), None);
-        assert_eq!(day_note_date("notes/2026-10-13.md"), None);
-        assert_eq!(day_note_date("x/daily/day/2026-10-13.md"), None);
+        assert_eq!(day_note_date("daily/day/2026-10-13/reading.md", &F), None);
         assert_eq!(
-            month_note_date("daily/month/2026-10.md"),
+            day_note_date("daily/day/2026-10-13/2026-10-13.md", &F),
+            None
+        );
+        assert_eq!(day_note_date("daily/day/2026-02-30.md", &F), None);
+        assert_eq!(day_note_date("daily/day/2026-1-13.md", &F), None);
+        assert_eq!(day_note_date("notes/2026-10-13.md", &F), None);
+        assert_eq!(day_note_date("x/daily/day/2026-10-13.md", &F), None);
+        assert_eq!(
+            month_note_date("daily/month/2026-10.md", &F),
             Some(d(2026, 10, 1))
         );
-        assert_eq!(month_note_date("daily/month/2026-13.md"), None);
-        assert_eq!(month_note_date("daily/day/2026-10.md"), None);
-        assert_eq!(month_note_date("notes/2026-10.md"), None);
+        assert_eq!(month_note_date("daily/month/2026-13.md", &F), None);
+        assert_eq!(month_note_date("daily/day/2026-10.md", &F), None);
+        assert_eq!(month_note_date("notes/2026-10.md", &F), None);
     }
 
     #[test]
     fn bars() {
         let today = d(2026, 10, 13);
-        let day = bar_for("daily/day/2026-12-31.md", today).expect("day bar");
+        let day = bar_for("daily/day/2026-12-31.md", today, &F).expect("day bar");
         let labels: Vec<&str> = day.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -230,7 +273,7 @@ mod tests {
             NavTarget::Period(Period::Month, d(2026, 12, 1))
         );
         assert_eq!(day[2].target, NavTarget::Period(Period::Day, today));
-        let month = bar_for("daily/month/2026-01.md", today).expect("month bar");
+        let month = bar_for("daily/month/2026-01.md", today, &F).expect("month bar");
         assert_eq!(month.len(), 3);
         assert_eq!(
             month[0].target,
@@ -241,7 +284,37 @@ mod tests {
             month[2].target,
             NavTarget::Period(Period::Month, d(2026, 2, 1))
         );
-        assert!(bar_for("daily/day/2026-10-13/entry.md", today).is_none());
-        assert!(bar_for("notes/a.md", today).is_none());
+        assert!(bar_for("daily/day/2026-10-13/entry.md", today, &F).is_none());
+        assert!(bar_for("notes/a.md", today, &F).is_none());
+    }
+
+    #[test]
+    fn configured_folders_replace_the_constants() {
+        let f = PeriodFolders::from_config(Some("journal/days/"), Some(" /journal/months "));
+        assert_eq!(f.day, "journal/days");
+        assert_eq!(f.month, "journal/months");
+        assert_eq!(
+            day_note_date("journal/days/2026-10-13.md", &f),
+            Some(d(2026, 10, 13))
+        );
+        assert_eq!(day_note_date("daily/day/2026-10-13.md", &f), None);
+        assert_eq!(
+            month_note_date("journal/months/2026-10.md", &f),
+            Some(d(2026, 10, 1))
+        );
+        assert!(bar_for("journal/days/2026-10-13.md", d(2026, 10, 14), &f).is_some());
+        // ISO basenames stay required (a non-ISO `format` is not honoured).
+        assert_eq!(day_note_date("journal/days/13-10-2026.md", &f), None);
+    }
+
+    #[test]
+    fn missing_or_blank_folders_fall_back() {
+        assert_eq!(
+            PeriodFolders::from_config(None, None),
+            PeriodFolders::default()
+        );
+        let f = PeriodFolders::from_config(Some("  "), Some("m"));
+        assert_eq!(f.day, DAY_FOLDER);
+        assert_eq!(f.month, "m");
     }
 }

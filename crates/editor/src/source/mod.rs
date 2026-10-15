@@ -896,7 +896,7 @@ pub fn file_changed(
 }
 
 /// Ctrl+S / Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, then iced's defaults.
-fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
+fn key_binding(kp: KeyPress, km: &crate::palette::Keymap) -> Option<Binding<Message>> {
     if !matches!(kp.status, text_editor::Status::Focused { .. }) {
         return None;
     }
@@ -944,9 +944,11 @@ fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
     }
     // editor-usability-round WP-4: client chords (Ctrl+W/Q/F/P, Alt+1..8, …) reach the app even
     // while the editor is focused — `text_editor` would swallow some (Alt+digit inserts).
+    // plan editor-settings-tab WP-4 (audit E1): decided from the effective keymap, so `[keys]`
+    // overrides route here too (and a chord moved away no longer does).
     if (kp.modifiers.command() || kp.modifiers.alt())
         && let Some(c) = crate::palette::chord::from_event(&kp.key, kp.modifiers)
-        && crate::palette::routed(&c)
+        && km.routed(&c)
     {
         return Some(Binding::Custom(Message::Palette(
             crate::message::PaletteMsg::Key(c),
@@ -958,7 +960,16 @@ fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
 /// `key_binding` for tests.
 #[cfg(test)]
 pub(crate) fn test_key_binding(kp: KeyPress) -> Option<Binding<Message>> {
-    key_binding(kp)
+    key_binding(kp, &crate::palette::Keymap::default())
+}
+
+/// `key_binding` under a given keymap, for tests.
+#[cfg(test)]
+pub(crate) fn test_key_binding_with(
+    kp: KeyPress,
+    km: &crate::palette::Keymap,
+) -> Option<Binding<Message>> {
+    key_binding(kp, km)
 }
 
 /// The source editor's widget id for `path` (find bar Escape refocuses it).
@@ -967,12 +978,14 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
 }
 
 /// Renders a tab's source buffer with its conflict bar / read-only marker; `font_size` is the
-/// `editor.toml` base text size (live, plan editor-settings-tab WP-2).
+/// `editor.toml` base text size (live, plan editor-settings-tab WP-2); `keymap` is the effective
+/// keymap its key bindings route by (WP-4).
 pub fn view<'a>(
     buf: &'a SourceBuffer,
     tokens: Tokens,
     mode: Mode,
     font_size: f32,
+    keymap: &'a crate::palette::Keymap,
 ) -> Element<'a, Message> {
     let editor: Element<'a, Message> = match &buf.content {
         Repr::Shaped(content) => crate::widget::middle_click::middle_click(
@@ -982,7 +995,7 @@ pub fn view<'a>(
                 .height(Length::Fill)
                 .padding(EDITOR_PADDING)
                 .on_action(|a| Message::Source(SourceMsg::Action(a)))
-                .key_binding(key_binding)
+                .key_binding(move |kp| key_binding(kp, keymap))
                 .highlight_with::<MarkdownHighlighter>(
                     HighlightSettings {
                         colors: KindColors::from_tokens(&tokens),

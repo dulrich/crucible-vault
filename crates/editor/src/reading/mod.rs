@@ -197,21 +197,20 @@ impl ReadingStore {
         self.images.release_owner(path);
     }
 
-    /// The debounce tick while any tab shows a reading pane, plus Ctrl+E.
+    /// The debounce tick while any tab shows a reading pane, plus the title editor's Escape.
+    /// Ctrl+E is no longer listened to here (plan editor-settings-tab WP-4, audit E1): "Toggle
+    /// source / reading view" is an ordinary client command resolved by the effective keymap
+    /// in `App::on_chord`, so it can be rebound.
     pub fn subscription(&self) -> Subscription<Message> {
-        let mut keys = iced::keyboard::listen().filter_map(ctrl_e);
+        let mut subs = Vec::new();
         if !self.titles.is_empty() {
             // The focused text input captures Escape, so listen to captured events too.
-            keys = Subscription::batch([keys, iced::event::listen_with(escape)]);
+            subs.push(iced::event::listen_with(escape));
         }
         if self.tabs.values().any(|t| t.mode.shows_reading()) {
-            Subscription::batch([
-                keys,
-                iced::time::every(TICK).map(|_| Message::Reading(ReadingMsg::Tick)),
-            ])
-        } else {
-            keys
+            subs.push(iced::time::every(TICK).map(|_| Message::Reading(ReadingMsg::Tick)));
         }
+        Subscription::batch(subs)
     }
 
     /// A tab opened in `mode`: creates its entry and, when it shows a reading pane, renders it
@@ -411,18 +410,6 @@ fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option
     }
 }
 
-fn ctrl_e(e: iced::keyboard::Event) -> Option<Message> {
-    if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = e
-        && modifiers.command()
-        && !modifiers.shift()
-        && let iced::keyboard::Key::Character(c) = key.as_ref()
-        && c.eq_ignore_ascii_case("e")
-    {
-        return Some(Message::Reading(ReadingMsg::CycleMode));
-    }
-    None
-}
-
 /// The reading update.
 pub fn update(
     store: &mut ReadingStore,
@@ -499,16 +486,17 @@ pub fn tab_body<'a>(
     t: Tokens,
     mode: cv_protocol::Mode,
     font_size: f32,
+    keymap: &'a crate::palette::Keymap,
 ) -> Element<'a, Message> {
     use iced::Length;
     use iced::widget::{container, row};
     // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
     let scale = font_size / crate::theme::BASE_TEXT_SIZE;
     match store.mode(&tab.path) {
-        ViewMode::Source => crate::source::view(&tab.source, t, mode, font_size),
+        ViewMode::Source => crate::source::view(&tab.source, t, mode, font_size, keymap),
         ViewMode::Reading => view::reading(store, views, &tab.path, t, scale),
         ViewMode::Split => row![
-            container(crate::source::view(&tab.source, t, mode, font_size))
+            container(crate::source::view(&tab.source, t, mode, font_size, keymap))
                 .width(Length::FillPortion(1)),
             container(view::reading(store, views, &tab.path, t, scale))
                 .width(Length::FillPortion(1)),

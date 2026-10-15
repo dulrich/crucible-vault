@@ -173,8 +173,11 @@ pub struct App {
     find_shift: bool,
     /// plan editor-settings-tab WP-2: the Settings tab's model (file save loops, Status).
     pub settings: crate::settings::Settings,
-    /// The effective `editor.toml` prefs (live; WP-4 reads `prefs.keys`).
+    /// The effective `editor.toml` prefs (live; `prefs.keys` feeds the palette keymap).
     pub prefs: crate::settings::editor_prefs::Prefs,
+    /// plan editor-settings-tab WP-4 (audit E2): the day / month note folders from the loaded
+    /// `captures.toml` (constants when absent / unloaded / malformed).
+    pub period_folders: editor_model::period::PeriodFolders,
 }
 
 /// A quit in progress: the saves it waits on, and whether one failed.
@@ -182,6 +185,26 @@ pub struct App {
 struct QuitState {
     pending: std::collections::HashSet<String>,
     failed: bool,
+}
+
+/// `captures.toml` (period folders, WP-4 audit E2).
+pub const CAPTURES_PATH: &str = "_custom/crucible-vault/captures.toml";
+
+/// The day / month note folders from the loaded `captures.toml` (`[periods.day].folder`,
+/// `[periods.month].folder`); constants when absent, unloaded, malformed or not a string.
+/// `[periods.week]` does not feed the editor.
+pub fn period_folders(
+    f: Option<&crate::settings::ConfigFile>,
+) -> editor_model::period::PeriodFolders {
+    let doc = f.and_then(|f| f.doc.as_ref());
+    let get = |p: &str| {
+        let path = cv_schema::Path::parse(p).ok()?;
+        doc?.get_str(&path)
+    };
+    editor_model::period::PeriodFolders::from_config(
+        get("periods.day.folder"),
+        get("periods.month.folder"),
+    )
 }
 
 fn tokens_for(s: Surround) -> Tokens {
@@ -304,6 +327,7 @@ impl App {
             find_shift: false,
             settings: crate::settings::Settings::default(),
             prefs: crate::settings::editor_prefs::Prefs::default(),
+            period_folders: editor_model::period::PeriodFolders::default(),
         };
         app.load_editor_prefs();
         app.refresh_files();
@@ -561,6 +585,7 @@ impl App {
             self.tokens,
             self.status.mode,
             self.prefs.font_size,
+            &self.palette.keymap,
         )
     }
 
@@ -1536,6 +1561,9 @@ impl App {
                     iced::widget::operation::focus(crate::palette::INPUT_ID),
                 ]);
             }
+            PaletteMsg::Close if self.settings.hotkeys.recording.is_some() => {
+                self.settings.hotkeys.cancel();
+            }
             PaletteMsg::Close => self.palette.close(),
             PaletteMsg::Query(q) => self.palette.set_query(q),
             PaletteMsg::Up if self.palette.prompt.is_none() => {
@@ -1584,6 +1612,7 @@ impl App {
                     Ok(a) => self.palette.set_actions(a),
                     Err(e) => self.status.error = Some(format!("actions: {e}")),
                 }
+                self.sync_hotkeys();
                 if let Some(c) = self.palette.pending_chord.take()
                     && self.palette.actions.is_some()
                 {
@@ -1634,28 +1663,32 @@ impl App {
         )
     }
 
+    /// A chord from the palette key listener or a focused source editor, decided from the
+    /// effective keymap (plan editor-settings-tab WP-4, audit E1). While the Hotkeys page is
+    /// recording, the chord goes to the capture instead.
     fn on_chord(&mut self, c: &crate::palette::chord::Chord) -> Task<Message> {
-        if let Some(cmd) = crate::palette::client_chord(c) {
-            return self.update(cmd.message(self.focus));
-        }
-        if let Some(preset) = crate::palette::default_action(c) {
-            if self.palette.actions.is_none() {
-                self.palette.pending_chord = Some(c.clone());
-                return self.fetch_actions();
-            }
-            return self.run_preset(preset);
-        }
-        if crate::palette::chord::reserved(c) {
+        use crate::palette::Bound;
+        if self.settings.hotkeys.recording.is_some() {
+            self.capture_chord(c);
             return Task::none();
         }
-        if self.palette.actions.is_none() {
-            self.palette.pending_chord = Some(c.clone());
-            return self.fetch_actions();
+        match self.palette.keymap.get(c).cloned() {
+            Some(Bound::Client(cmd)) => return self.update(cmd.message(self.focus)),
+            Some(Bound::Preset(preset)) => {
+                if self.palette.actions.is_none() {
+                    self.palette.pending_chord = Some(c.clone());
+                    return self.fetch_actions();
+                }
+                return self.run_preset(preset);
+            }
+            Some(Bound::Action(id)) => return self.invoke_action(&id),
+            None => {}
         }
-        match self.palette.bindings.get(c).cloned() {
-            Some(id) => self.invoke_action(&id),
-            None => Task::none(),
+        if crate::palette::chord::text_editing(c) || self.palette.actions.is_some() {
+            return Task::none();
         }
+        self.palette.pending_chord = Some(c.clone());
+        self.fetch_actions()
     }
 
     /// Runs a preset action with its fixed params; a no-op when the action is not loaded.
@@ -2135,6 +2168,11 @@ impl App {
     /// Loads `editor.toml` (boot): seeds `surround` from the old `UiState` once, applies prefs.
     fn load_editor_prefs(&mut self) {
         use crate::settings::editor_prefs::{self, EDITOR_PATH};
+        // WP-4 (audit E2): `captures.toml` is loaded at boot too — navigation reads its period
+        // folders, not only the Captures page.
+        if let (Some(d), Some(f)) = (&self.daemon, self.settings.files.get_mut(CAPTURES_PATH)) {
+            f.load(d.as_ref());
+        }
         if let (Some(d), Some(f)) = (&self.daemon, self.settings.files.get_mut(EDITOR_PATH)) {
             f.load(d.as_ref());
             if editor_prefs::seed_surround(f, self.ui.surround) {
@@ -2160,7 +2198,71 @@ impl App {
         };
         self.tokens = tokens_for(prefs.surround);
         self.palette.set_hidden(prefs.palette_hidden.clone());
+        // WP-4: `[keys]` overrides rebuild the effective keymap live (no restart).
+        self.palette.set_keys(prefs.keys.clone());
         self.prefs = prefs;
+        self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
+        self.sync_hotkeys();
+    }
+
+    /// Refreshes the Hotkeys page's keymap / action snapshots from the palette.
+    fn sync_hotkeys(&mut self) {
+        let h = &mut self.settings.hotkeys;
+        if !std::sync::Arc::ptr_eq(&h.keymap, &self.palette.keymap) {
+            h.keymap = self.palette.keymap.clone();
+        }
+        let actions = self.palette.actions.as_deref().unwrap_or_default();
+        if h.actions != actions {
+            h.actions = actions.to_vec();
+        }
+    }
+
+    /// A chord captured while the Hotkeys page records: becomes the row's chord (in the doc;
+    /// written by Save), or a note when it cannot be bound.
+    fn capture_chord(&mut self, c: &crate::palette::chord::Chord) {
+        use crate::settings::pages::hotkeys::{self, ACTIONS_PATH};
+        let Some(target) = self.settings.hotkeys.recording.take() else {
+            return;
+        };
+        let actions_doc = self
+            .settings
+            .file(ACTIONS_PATH)
+            .and_then(|f| f.doc.as_ref());
+        match hotkeys::record_edit(&target, c, actions_doc) {
+            Ok((file, edit)) => self.hotkey_edit(&file, &edit),
+            Err(n) => self.settings.hotkeys.note = Some(n),
+        }
+    }
+
+    /// Applies a Hotkeys document edit and re-derives prefs / keymap.
+    fn hotkey_edit(&mut self, file: &str, edit: &crate::settings::DocEdit) {
+        if let Err(e) = self.settings.edit(file, edit) {
+            self.settings.hotkeys.note = Some(e);
+        }
+        self.apply_prefs();
+    }
+
+    fn update_hotkeys(&mut self, m: crate::settings::pages::hotkeys::HotkeyMsg) {
+        use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg};
+        let doc = |s: &crate::settings::Settings, p: &str| s.file(p).and_then(|f| f.doc.clone());
+        match m {
+            HotkeyMsg::Record(t) => self.settings.hotkeys.record(t),
+            HotkeyMsg::Cancel => self.settings.hotkeys.cancel(),
+            HotkeyMsg::Clear(t) => {
+                let ad = doc(&self.settings, ACTIONS_PATH);
+                match hotkeys::clear_edit(&t, ad.as_ref()) {
+                    Ok(Some((f, e))) => self.hotkey_edit(&f, &e),
+                    Ok(None) => {}
+                    Err(n) => self.settings.hotkeys.note = Some(n),
+                }
+            }
+            HotkeyMsg::Reset(id) => {
+                let ed = doc(&self.settings, crate::settings::editor_prefs::EDITOR_PATH);
+                if let Some((f, e)) = hotkeys::reset_edit(&id, ed.as_ref()) {
+                    self.hotkey_edit(&f, &e);
+                }
+            }
+        }
     }
 
     /// The surround switch: edits `editor.toml`'s `surround` in memory (dirty until saved on
@@ -2238,6 +2340,9 @@ impl App {
             self.settings.hidden_draft = None;
             self.apply_prefs();
         }
+        if reloaded && path == CAPTURES_PATH {
+            self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
+        }
     }
 
     /// Fetches `status` off the UI thread when the Settings tab shows the Status page.
@@ -2269,12 +2374,21 @@ impl App {
             SettingsMsg::Open => {
                 self.open_settings_into(self.focus);
                 self.persist();
+                if self.settings.section == Section::Hotkeys {
+                    return self.fetch_actions();
+                }
                 return self.refresh_status_if_open();
             }
+            SettingsMsg::Hotkey(m) => self.update_hotkeys(m),
             SettingsMsg::Section(s) => {
                 self.settings.section = s;
+                self.settings.hotkeys.cancel();
                 if s == Section::Views {
                     self.sync_view_files();
+                }
+                if s == Section::Hotkeys {
+                    self.sync_view_files();
+                    return self.fetch_actions();
                 }
                 if s == Section::Status {
                     return self.fetch_status();
@@ -2376,6 +2490,8 @@ impl App {
             }
             SettingsMsg::TrashCancel => self.settings.confirm_trash = None,
         }
+        // WP-4 (audit E2): a captures.toml edit / save / revert re-derives the period folders.
+        self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
         Task::none()
     }
 
@@ -2547,7 +2663,8 @@ impl App {
         match ps.active_tab() {
             Some(tab) => {
                 if !tab.is_settings()
-                    && let Some(bar) = nav::bar(pane, &tab.path, self.today(), t)
+                    && let Some(bar) =
+                        nav::bar(pane, &tab.path, self.today(), &self.period_folders, t)
                 {
                     col = col.push(bar);
                 }

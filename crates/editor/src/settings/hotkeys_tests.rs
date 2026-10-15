@@ -1,0 +1,573 @@
+//! plan editor-settings-tab WP-4 tests: the effective keymap (resolver precedence, audit E1 —
+//! every key handler consults it), the Hotkeys page capture / Clear / Reset, and period folders
+//! from `captures.toml` (audit E2). Synthetic vaults + `FakeDaemon` only.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use cv_protocol::{ActionInfo, RunActionParams};
+use cv_schema::Path;
+use cv_testkit::{SyntheticVault, VaultSpec};
+use iced::keyboard::{Key, Modifiers, key::Physical};
+use iced::widget::text_editor::{Binding, KeyPress, Status};
+
+use super::editor_prefs::EDITOR_PATH;
+use super::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg, Target};
+use super::*;
+use crate::app::{App, CAPTURES_PATH, TabKind};
+use crate::daemon::FakeDaemon;
+use crate::message::{ExplorerMsg, PaletteMsg, ReadingMsg};
+use crate::palette::chord::{self, Chord};
+use crate::palette::{Bound, ClientCmd, KeySource, Keymap, resolve};
+use crate::reading::ViewMode;
+
+fn fake() -> (tempfile::TempDir, Arc<FakeDaemon>) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vault = tmp.path().join("vault");
+    SyntheticVault::build(&vault, &VaultSpec::default()).expect("vault");
+    let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
+    (tmp, Arc::new(d))
+}
+
+fn put(d: &FakeDaemon, path: &str, body: &str) {
+    let p = d.vault_root().join(path);
+    std::fs::create_dir_all(p.parent().expect("parent")).expect("dir");
+    std::fs::write(p, body).expect("write");
+}
+
+fn app_over(d: &Arc<FakeDaemon>) -> App {
+    let dc: Arc<dyn DaemonClient> = Arc::clone(d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.rpc_inline = true;
+    app
+}
+
+fn c(s: &str) -> Chord {
+    chord::parse(s).expect("chord")
+}
+
+fn key(app: &mut App, k: &str) {
+    let _ = app.update(Message::Palette(PaletteMsg::Key(c(k))));
+}
+
+fn hk(app: &mut App, m: HotkeyMsg) {
+    let _ = app.update(Message::Settings(SettingsMsg::Hotkey(m)));
+}
+
+fn open(app: &mut App, p: &str) {
+    let _ = app.update(Message::Explorer(ExplorerMsg::Open(p.into())));
+}
+
+fn set_mode(app: &mut App, p: &str, mode: ViewMode) {
+    let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+        path: p.into(),
+        mode,
+    }));
+}
+
+fn ov(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.iter().map(|s| (*s).to_owned()).collect()))
+        .collect()
+}
+
+fn info(id: &str, keys: &[&str]) -> ActionInfo {
+    ActionInfo {
+        id: id.into(),
+        title: id.into(),
+        group: None,
+        keys: keys.iter().map(|k| (*k).to_owned()).collect(),
+        params: vec![],
+        needs: vec![],
+        durable: false,
+    }
+}
+
+/// Registers `id` (with `keys`) on the fake daemon, counting its runs.
+fn register(d: &FakeDaemon, id: &str, keys: &[&str]) -> Arc<std::sync::Mutex<usize>> {
+    let n = Arc::new(std::sync::Mutex::new(0));
+    let seen = Arc::clone(&n);
+    d.register_action(
+        info(id, keys),
+        Arc::new(move |_: &RunActionParams| {
+            if let Ok(mut g) = seen.lock() {
+                *g += 1;
+            }
+            Ok(None)
+        }),
+    )
+    .expect("register");
+    n
+}
+
+fn kp(ch: &str, m: Modifiers) -> KeyPress {
+    KeyPress {
+        key: Key::Character(ch.into()),
+        modified_key: Key::Character(ch.into()),
+        physical_key: Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
+        modifiers: m,
+        text: Some(ch.into()),
+        status: Status::Focused { is_hovered: false },
+    }
+}
+
+/// The chord a focused source editor hands to the app, if any.
+fn routed(b: Option<Binding<Message>>) -> Option<String> {
+    match b {
+        Some(Binding::Custom(Message::Palette(PaletteMsg::Key(c)))) => Some(c.to_string()),
+        _ => None,
+    }
+}
+
+fn keys_of(app: &App, id: &str) -> Option<Vec<String>> {
+    app.settings
+        .file(EDITOR_PATH)?
+        .doc
+        .as_ref()?
+        .get_str_list(&Path::root().key("keys").key(id))
+}
+
+const NOTE: &str = "hk/a.md";
+
+fn app_with_note(d: &Arc<FakeDaemon>) -> App {
+    d.create_note(NOTE, "body").expect("note");
+    let mut app = app_over(d);
+    open(&mut app, NOTE);
+    app
+}
+
+// ---- pure: the resolver ----
+
+#[test]
+fn no_overrides_is_todays_keymap() {
+    let km = Keymap::default();
+    for (k, _) in crate::palette::keymap() {
+        let ch = c(&k);
+        let fixed = matches!(k.as_str(), "Ctrl+S" | "Ctrl+Z" | "Ctrl+Shift+Z")
+            || k.starts_with("Ctrl+Alt+");
+        if fixed {
+            assert!(km.get(&ch).is_none(), "{k} stays with the text editor");
+            continue;
+        }
+        let want_client = crate::palette::client_chord(&ch).map(Bound::Client);
+        let want_preset = crate::palette::default_action(&ch).map(Bound::Preset);
+        let got = km.get(&ch).cloned();
+        if k == "Ctrl+E" {
+            assert_eq!(got, Some(Bound::Client(ClientCmd::CycleReading)));
+        } else {
+            assert_eq!(got, want_client.or(want_preset), "{k}");
+        }
+        assert_eq!(km.routed(&ch), crate::palette::routed(&ch) || k == "Ctrl+E");
+    }
+    assert!(km.notices.is_empty(), "{:?}", km.notices);
+}
+
+#[test]
+fn override_moves_a_chord_and_empty_unbinds() {
+    let km = resolve(&ov(&[("close_tab", &["Ctrl+Shift+W"]), ("quit", &[])]), &[]);
+    assert_eq!(
+        km.get(&c("Ctrl+Shift+W")),
+        Some(&Bound::Client(ClientCmd::CloseTab))
+    );
+    assert_eq!(km.get(&c("Ctrl+W")), None, "the default no longer fires");
+    assert_eq!(km.get(&c("Ctrl+Q")), None, "[] unbinds");
+    assert_eq!(km.chords["quit"], Vec::<String>::new());
+    assert!(km.overridden.contains("quit"));
+    // A RESERVED editor default (Ctrl+E) is rebindable too.
+    let km = resolve(&ov(&[("cycle_reading", &["Alt+E"])]), &[]);
+    assert_eq!(
+        km.get(&c("Alt+E")),
+        Some(&Bound::Client(ClientCmd::CycleReading))
+    );
+    assert!(km.get(&c("Ctrl+E")).is_none());
+    assert!(km.routed(&c("Alt+E")));
+    // Presets take overrides by their stable ids.
+    let km = resolve(
+        &ov(&[
+            ("open_period.day", &["Alt+D"]),
+            ("preset.lint-note", &["Alt+L"]),
+        ]),
+        &[],
+    );
+    assert!(matches!(km.get(&c("Alt+D")), Some(Bound::Preset(p)) if p.period.is_some()));
+    assert!(matches!(km.get(&c("Alt+L")), Some(Bound::Preset(p)) if p.action == "lint-note"));
+    assert!(km.get(&c("Ctrl+O")).is_none() && km.get(&c("Ctrl+R")).is_none());
+}
+
+#[test]
+fn precedence_override_then_default_then_config_action() {
+    let acts = [info("a", &["Ctrl+Q"]), info("b", &["Ctrl+W"])];
+    let km = resolve(&ov(&[("quit", &["Ctrl+W"])]), &acts);
+    // Override > default: Ctrl+W is Quit; Close tab lost its default.
+    assert_eq!(km.get(&c("Ctrl+W")), Some(&Bound::Client(ClientCmd::Quit)));
+    assert!(
+        km.row_notices["close_tab"]
+            .iter()
+            .any(|n| n.contains("taken by the quit override"))
+    );
+    // Default > action: b's Ctrl+W refused; the freed Ctrl+Q goes to action a.
+    assert_eq!(km.get(&c("Ctrl+Q")), Some(&Bound::Action("a".into())));
+    assert_eq!(
+        km.row_notices["b"],
+        ["b: Ctrl+W is an editor default (not bound)"]
+    );
+    assert!(
+        !km.routed(&c("Ctrl+Q")),
+        "actions are not routed out of the editor"
+    );
+}
+
+#[test]
+fn bad_override_chords_become_notices() {
+    let km = resolve(
+        &ov(&[
+            ("quit", &["Ctrl+S", "Nope+Q", "K", "Ctrl+K"]),
+            ("close_tab", &["Ctrl+K"]),
+            ("save", &["Ctrl+J"]),
+            ("no_such", &["Ctrl+J"]),
+        ]),
+        &[],
+    );
+    let has = |s: &str| km.notices.iter().any(|n| n.contains(s));
+    assert!(has("quit: Ctrl+S is reserved"), "{:?}", km.notices);
+    assert!(has("quit: unreadable key \"Nope+Q\""));
+    assert!(has("quit: K needs Ctrl or Alt"));
+    assert!(has("already bound to"));
+    assert!(has("save: a text-editing command"));
+    assert!(has("no_such: unknown command id"));
+    assert!(km.get(&c("Ctrl+J")).is_none());
+    assert!(km.get(&c("Ctrl+S")).is_none());
+    assert!(km.get(&c("Ctrl+K")).is_some());
+}
+
+#[test]
+fn ctrl_comma_opens_settings_and_ctrl_shift_comma_cannot_be_bound() {
+    let km = Keymap::default();
+    assert_eq!(
+        km.get(&c("Ctrl+,")),
+        Some(&Bound::Client(ClientCmd::OpenSettings))
+    );
+    let km = resolve(
+        &ov(&[("quit", &["Ctrl+Shift+,"])]),
+        &[info("a", &["Ctrl+Shift+,"])],
+    );
+    assert!(km.get(&c("Ctrl+Shift+,")).is_none());
+    assert_eq!(km.notices.len(), 2, "{:?}", km.notices);
+    assert!(
+        km.routed(&c("Ctrl+Shift+,")),
+        "still kept away from the text editor"
+    );
+
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d);
+    key(&mut app, "Ctrl+,");
+    let n = app
+        .panes
+        .iter()
+        .flat_map(|(_, ps)| ps.tabs.iter())
+        .filter(|t| t.kind() == TabKind::Settings)
+        .count();
+    assert_eq!(n, 1);
+}
+
+// ---- app: every handler consults the effective keymap (audit E1) ----
+
+#[test]
+fn rebound_client_command_fires_in_a_focused_source_editor() {
+    let (_tmp, d) = fake();
+    put(&d, EDITOR_PATH, "[keys]\nclose_tab = [\"Ctrl+Shift+W\"]\n");
+    let mut app = app_with_note(&d);
+    set_mode(&mut app, NOTE, ViewMode::Source);
+    let km = Arc::clone(&app.palette.keymap);
+    let cs = Modifiers::CTRL | Modifiers::SHIFT;
+    assert_eq!(
+        routed(crate::source::test_key_binding_with(kp("W", cs), &km)).as_deref(),
+        Some("Ctrl+Shift+W")
+    );
+    assert_eq!(
+        routed(crate::source::test_key_binding_with(
+            kp("w", Modifiers::CTRL),
+            &km
+        )),
+        None,
+        "the moved-away default no longer routes"
+    );
+    key(&mut app, "Ctrl+W");
+    assert_eq!(app.open_paths(), [NOTE], "old chord does nothing");
+    key(&mut app, "Ctrl+Shift+W");
+    assert!(app.open_paths().is_empty(), "new chord closes the tab");
+}
+
+#[test]
+fn rebound_client_command_fires_in_reading_mode() {
+    let (_tmp, d) = fake();
+    put(&d, EDITOR_PATH, "[keys]\nclose_tab = [\"Alt+W\"]\n");
+    let mut app = app_with_note(&d);
+    set_mode(&mut app, NOTE, ViewMode::Reading);
+    key(&mut app, "Ctrl+W");
+    assert_eq!(app.open_paths(), [NOTE]);
+    key(&mut app, "Alt+W");
+    assert!(app.open_paths().is_empty());
+}
+
+#[test]
+fn ctrl_e_is_an_ordinary_rebindable_command() {
+    let (_tmp, d) = fake();
+    let mut app = app_with_note(&d);
+    set_mode(&mut app, NOTE, ViewMode::Reading);
+    // Default: Ctrl+E through the keymap (no Reading listener anymore).
+    key(&mut app, "Ctrl+E");
+    assert_eq!(app.reading.mode(NOTE), ViewMode::Source);
+    key(&mut app, "Ctrl+E");
+    assert_eq!(app.reading.mode(NOTE), ViewMode::Reading);
+    // Rebound live (no restart) through the Settings edit path.
+    let _ = app.update(Message::Settings(SettingsMsg::Edit(
+        EDITOR_PATH.into(),
+        DocEdit::Set(
+            Path::root().key("keys").key("cycle_reading"),
+            ScalarValue::StrList(vec!["Ctrl+Shift+E".into()]),
+        ),
+    )));
+    key(&mut app, "Ctrl+E");
+    assert_eq!(app.reading.mode(NOTE), ViewMode::Reading, "old chord inert");
+    key(&mut app, "Ctrl+Shift+E");
+    assert_eq!(app.reading.mode(NOTE), ViewMode::Source);
+    // The focused source editor routes the new chord, not Ctrl+E.
+    let km = Arc::clone(&app.palette.keymap);
+    let cs = Modifiers::CTRL | Modifiers::SHIFT;
+    assert!(routed(crate::source::test_key_binding_with(kp("E", cs), &km)).is_some());
+    assert!(
+        routed(crate::source::test_key_binding_with(
+            kp("e", Modifiers::CTRL),
+            &km
+        ))
+        .is_none()
+    );
+}
+
+#[test]
+fn unbound_command_chord_is_disabled() {
+    let (_tmp, d) = fake();
+    put(&d, EDITOR_PATH, "[keys]\nquit = []\n");
+    let mut app = app_over(&d);
+    key(&mut app, "Ctrl+Q");
+    assert!(!app.exiting, "Ctrl+Q unbound");
+}
+
+#[test]
+fn config_action_takes_a_chord_an_override_freed() {
+    let (_tmp, d) = fake();
+    put(&d, EDITOR_PATH, "[keys]\nquit = [\"Ctrl+Shift+Q\"]\n");
+    let runs = register(&d, "a", &["Ctrl+Q"]);
+    let mut app = app_over(&d);
+    key(&mut app, "Ctrl+Q");
+    assert_eq!(*runs.lock().expect("lock"), 1, "the action runs");
+    assert!(!app.exiting);
+    key(&mut app, "Ctrl+Shift+Q");
+    assert!(app.exiting, "quit moved");
+}
+
+#[test]
+fn palette_entries_show_effective_chords() {
+    let (_tmp, d) = fake();
+    put(&d, EDITOR_PATH, "[keys]\nquick_switcher = [\"Alt+P\"]\n");
+    let app = app_over(&d);
+    let e = app
+        .palette
+        .entries
+        .iter()
+        .find(|e| e.id == crate::palette::EntryId::Client(ClientCmd::QuickSwitcher))
+        .expect("entry");
+    assert_eq!(e.keys, ["Alt+P"]);
+}
+
+// ---- the Hotkeys page ----
+
+fn hotkeys_app(d: &Arc<FakeDaemon>) -> App {
+    let mut app = app_over(d);
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    let _ = app.update(Message::Settings(SettingsMsg::Section(Section::Hotkeys)));
+    app
+}
+
+#[test]
+fn record_captures_the_next_chord_into_editor_toml_without_writing() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    key(&mut app, "Ctrl+W");
+    assert!(!app.exiting);
+    assert_eq!(keys_of(&app, "quit"), Some(vec!["Ctrl+W".into()]));
+    assert!(app.settings.hotkeys.recording.is_none());
+    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
+    assert!(
+        !d.vault_root().join(EDITOR_PATH).exists(),
+        "nothing written without Save"
+    );
+    // Live: the keymap and the page snapshot already use it.
+    assert_eq!(
+        app.palette.keymap.get(&c("Ctrl+W")),
+        Some(&Bound::Client(ClientCmd::Quit))
+    );
+    let rows = hotkeys::rows(&app.settings.hotkeys, None);
+    let q = rows
+        .iter()
+        .find(|r| r.target == Target::Command("quit".into()))
+        .expect("row");
+    assert_eq!(
+        (q.chords.clone(), q.source),
+        (vec!["Ctrl+W".into()], KeySource::EditorToml)
+    );
+    let ct = rows
+        .iter()
+        .find(|r| r.target == Target::Command("close_tab".into()))
+        .expect("row");
+    assert!(!ct.notices.is_empty(), "conflict shown inline");
+    // Save writes it through the exact-name path.
+    let _ = app.update(Message::Settings(SettingsMsg::Save(EDITOR_PATH.into())));
+    let body = std::fs::read_to_string(d.vault_root().join(EDITOR_PATH)).expect("saved");
+    assert!(body.contains("quit = [\"Ctrl+W\"]"), "{body}");
+}
+
+#[test]
+fn escape_cancels_and_reserved_chords_are_refused() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    let _ = app.update(Message::Palette(PaletteMsg::Close));
+    assert!(app.settings.hotkeys.recording.is_none());
+    assert_eq!(keys_of(&app, "quit"), None);
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    key(&mut app, "Ctrl+C");
+    assert_eq!(keys_of(&app, "quit"), None);
+    assert!(
+        app.settings
+            .hotkeys
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("reserved"))
+    );
+}
+
+#[test]
+fn clear_and_reset_a_command() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    hk(&mut app, HotkeyMsg::Clear(Target::Command("quit".into())));
+    assert_eq!(keys_of(&app, "quit"), Some(vec![]));
+    assert!(app.palette.keymap.get(&c("Ctrl+Q")).is_none());
+    hk(&mut app, HotkeyMsg::Reset("quit".into()));
+    assert_eq!(keys_of(&app, "quit"), None);
+    assert_eq!(
+        app.palette.keymap.get(&c("Ctrl+Q")),
+        Some(&Bound::Client(ClientCmd::Quit))
+    );
+}
+
+#[test]
+fn config_action_chords_edit_actions_toml() {
+    let (_tmp, d) = fake();
+    put(
+        &d,
+        ACTIONS_PATH,
+        "# my actions\n[[action]]\nid = \"a\"\nkeys = [\"Ctrl+Shift+K\"]\n\n[[action.steps]]\ntype = \"move\"\npath = \"{file}\"\nto = \"archive\"\n",
+    );
+    register(&d, "a", &["Ctrl+Shift+K"]);
+    let mut app = hotkeys_app(&d);
+    assert!(
+        app.settings.hotkeys.actions.iter().any(|a| a.id == "a"),
+        "Hotkeys fetched the action list"
+    );
+    hk(&mut app, HotkeyMsg::Record(Target::Action("a".into())));
+    key(&mut app, "Ctrl+J");
+    let keys = Path::root().key("action").index(0).key("keys");
+    let doc = |app: &App| {
+        app.settings
+            .file(ACTIONS_PATH)
+            .and_then(|f| f.doc.as_ref())
+            .and_then(|d| d.get_str_list(&keys))
+    };
+    assert_eq!(doc(&app), Some(vec!["Ctrl+J".into()]));
+    let rows = hotkeys::rows(
+        &app.settings.hotkeys,
+        app.settings.file(ACTIONS_PATH).and_then(|f| f.doc.as_ref()),
+    );
+    let r = rows
+        .iter()
+        .find(|r| r.target == Target::Action("a".into()))
+        .expect("row");
+    assert_eq!(
+        (r.chords.clone(), r.source),
+        (vec!["Ctrl+J".into()], KeySource::ActionsToml)
+    );
+    let _ = app.update(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
+    let body = std::fs::read_to_string(d.vault_root().join(ACTIONS_PATH)).expect("file");
+    assert!(
+        body.contains("# my actions") && body.contains("\"Ctrl+J\""),
+        "{body}"
+    );
+    hk(&mut app, HotkeyMsg::Clear(Target::Action("a".into())));
+    assert_eq!(doc(&app), None);
+    // An action that is not in actions.toml is refused with a note.
+    hk(&mut app, HotkeyMsg::Record(Target::Action("zz".into())));
+    key(&mut app, "Ctrl+J");
+    assert!(app.settings.hotkeys.note.is_some());
+}
+
+#[test]
+fn record_edit_is_pure_and_refuses_plain_keys() {
+    assert!(hotkeys::record_edit(&Target::Command("quit".into()), &c("K"), None).is_err());
+    let (file, _) =
+        hotkeys::record_edit(&Target::Command("quit".into()), &c("Alt+K"), None).expect("edit");
+    assert_eq!(file, EDITOR_PATH);
+    assert!(hotkeys::reset_edit("quit", None).is_none());
+}
+
+// ---- period folders from captures.toml (audit E2) ----
+
+#[test]
+fn period_folders_come_from_captures_with_const_fallback() {
+    use editor_model::period::PeriodFolders;
+    let (_tmp, d) = fake();
+    let app = app_over(&d);
+    assert_eq!(
+        app.period_folders,
+        PeriodFolders::default(),
+        "absent → consts"
+    );
+
+    put(
+        &d,
+        CAPTURES_PATH,
+        "[periods.day]\nfolder = \"journal/d\"\n[periods.week]\nfolder = \"journal/w\"\n",
+    );
+    let mut app = app_over(&d);
+    assert_eq!(app.period_folders.day, "journal/d", "loaded at boot");
+    assert_eq!(app.period_folders.month, editor_model::period::MONTH_FOLDER);
+    // Live edit re-derives.
+    let _ = app.update(Message::Settings(SettingsMsg::Edit(
+        CAPTURES_PATH.into(),
+        DocEdit::Set(
+            Path::root().key("periods").key("month").key("folder"),
+            ScalarValue::Str("journal/m".into()),
+        ),
+    )));
+    assert_eq!(app.period_folders.month, "journal/m");
+    assert!(
+        editor_model::period::bar_for(
+            "journal/d/2026-10-13.md",
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 14).expect("d"),
+            &app.period_folders
+        )
+        .is_some()
+    );
+
+    put(&d, CAPTURES_PATH, "[periods.day\nfolder = ");
+    let app = app_over(&d);
+    assert_eq!(
+        app.period_folders,
+        PeriodFolders::default(),
+        "malformed → consts"
+    );
+}

@@ -393,7 +393,8 @@ fn view_tree_position_stable_across_dirty_states() {
 
     fn shape(b: &SourceBuffer) -> Vec<iced::advanced::widget::tree::Tag> {
         let t = crate::theme::Surround::default().tokens().expect("tokens");
-        let el = view(b, t, Mode::Live, crate::theme::BASE_TEXT_SIZE);
+        let km = crate::palette::Keymap::default();
+        let el = view(b, t, Mode::Live, crate::theme::BASE_TEXT_SIZE, &km);
         Tree::new(&el).children.iter().map(|c| c.tag).collect()
     }
     let mut b = SourceBuffer::new("n.md", b"text\n", ContentHash::of(b"text\n"));

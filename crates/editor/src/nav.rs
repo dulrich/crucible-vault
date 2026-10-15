@@ -38,9 +38,10 @@ pub fn bar<'a>(
     pane: Pane,
     path: &str,
     today: NaiveDate,
+    folders: &period::PeriodFolders,
     tokens: Tokens,
 ) -> Option<Element<'a, Message>> {
-    let items = period::bar_for(path, today)?;
+    let items = period::bar_for(path, today, folders)?;
     let buttons = items.into_iter().map(|item| {
         button(
             text(item.label)

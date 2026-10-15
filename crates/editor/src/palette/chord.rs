@@ -187,3 +187,49 @@ pub const RESERVED: &[&str] = &[
 pub fn reserved(c: &Chord) -> bool {
     RESERVED.iter().filter_map(|r| parse(r)).any(|r| &r == c)
 }
+
+/// Chords no override or action may bind (plan `editor-settings-tab` WP-4 "Resolver
+/// precedence"): the inert `Ctrl+Shift+,`, the `text_editor` editing chords (save, undo/redo,
+/// select-all, clipboard, Ctrl+Enter submit) and the pane back/forward chords. The other
+/// [`RESERVED`] entries are editor defaults, rebindable through `editor.toml` `[keys]`.
+pub const TEXT_EDITING: &[&str] = &[
+    "Ctrl+Shift+,",
+    "Ctrl+S",
+    "Ctrl+Z",
+    "Ctrl+Shift+Z",
+    "Ctrl+Y",
+    "Ctrl+A",
+    "Ctrl+C",
+    "Ctrl+V",
+    "Ctrl+X",
+    "Ctrl+Enter",
+    "Ctrl+Alt+Left",
+    "Ctrl+Alt+Right",
+];
+
+/// Named keys the source editor uses for motion and editing (without Alt they never bind).
+const EDITING_KEYS: [&str; 13] = [
+    "left",
+    "right",
+    "up",
+    "down",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "backspace",
+    "delete",
+    "enter",
+    "tab",
+    "escape",
+];
+
+/// Whether `c` stays unrebindable: a [`TEXT_EDITING`] chord, or an editing/motion key without
+/// Alt.
+pub fn text_editing(c: &Chord) -> bool {
+    TEXT_EDITING
+        .iter()
+        .filter_map(|r| parse(r))
+        .any(|r| &r == c)
+        || (!c.alt && EDITING_KEYS.contains(&c.key.as_str()))
+}

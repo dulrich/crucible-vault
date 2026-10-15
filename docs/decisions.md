@@ -128,3 +128,14 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
   - Row 8 (taking `x-scheme-handler/obsidian`) was in scope ("clippings should be captured by cv now").
 - **Consequence:** Crucible's automation (YT/X enrichment, trackers, Daily Brief, image describe, link records) is dark until A2 lands; A1's own actions run live.
 - **Premise correction:** `plans/v0-core-daemon.md` assumed a Wayland host with `wl-paste`. The host is X11, so the default clipboard command now follows the session (`xclip -o -selection clipboard` without `WAYLAND_DISPLAY`, else `wl-paste --no-newline`; `CV_CLIPBOARD_CMD` overrides).
+
+## D20 — Settings tab over the vault config files (2026-10-14; reopens inventory #23, amends D18)
+
+- **Decision (plan `editor-settings-tab`, approved 2026-10-14):** config stays TOML in the vault and the file is the source of truth. The editor's Settings tab (Ctrl+,) is a typed, comment-preserving editor over those files (`cv-schema` + `toml_edit`), never a second store; a key the schema does not know is left untouched.
+- **`editor.toml`:** `_custom/crucible-vault/editor.toml` holds the editor prefs (font size, UI scale, surround, search limit/debounce, confirm-trash, palette hidden ids) and the keymap overrides (`[keys]`: command id → chords, `[]` unbinds; override > editor default > config action `keys`). Window and tab session state stays in the machine-local `UiState`.
+- **Writes:** the daemon stays the only writer. Every settings save is `write_note` on the fixed path with CAS on the last-read hash, or the empty-hash exact-name absence-CAS when the file was absent — never `create_note` (no collision suffix). A conflict reloads and shows "changed on disk"; it never overwrites.
+- **Validation is two-layer:** schema form checks (required, enum, range, mutual exclusion) block Save; the daemon's post-reload `ConfigReloaded { errors }` is shown on the page of the file it names. No `validate_config` RPC.
+- **Views carve-out:** views keep no last valid file and never reach `ConfigReloaded`, so the Views page runs the `views` crate's own parse + compile in the editor and blocks Save on a parse error.
+- **Not carried (no cv feature behind them; each arrives with its feature, see Backlog):** ToC (`showToC`, `tocPosition`, `tocCollapseBehavior`), folder templates and move-picker pins, per-period enable toggles, global `excludedFolders`, search rerank/boosts/query log, `imageMetadataExtraction*`, destructive-confirm tiers.
+- **Dropped as Obsidian-induced:** `lintOnSave`, the palette-replacement knobs and hint tuning, `hiddenFromChainSearch`.
+- **Known limitation:** day/month navigation reads `captures.toml` `[periods.day|month].folder` but still requires ISO basenames (`YYYY-MM-DD` / `YYYY-MM`); a non-ISO `format` is not honoured by navigation.

@@ -480,27 +480,311 @@ pub fn rank_entries(query: &str, entries: &[Entry]) -> Vec<usize> {
         .collect()
 }
 
-/// Chord → action id for every parseable, non-conflicting `ActionInfo.keys`, plus a notice per
-/// conflict (editor defaults win; between actions the first registered wins).
-pub fn bindings(actions: &[ActionInfo]) -> (HashMap<Chord, String>, Vec<String>) {
-    let mut map: HashMap<Chord, String> = HashMap::new();
-    let mut notes = Vec::new();
-    for a in actions {
-        for k in &a.keys {
+/// What a bound chord runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bound {
+    Client(ClientCmd),
+    /// A default action preset (`period.open` / `lint-note`): fetches the action list first.
+    Preset(Preset),
+    /// A config action (`actions.toml` `keys`).
+    Action(String),
+}
+
+/// Where a Hotkeys row's chords come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// The editor default.
+    Default,
+    /// An `editor.toml` `[keys]` override.
+    EditorToml,
+    /// The action's `keys` in `actions.toml`.
+    ActionsToml,
+}
+
+impl KeySource {
+    /// The Hotkeys page label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::EditorToml => "editor.toml",
+            Self::ActionsToml => "actions.toml",
+        }
+    }
+}
+
+/// One editor-owned bindable command: a client command or a default-action preset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bindable {
+    /// The `[keys]` id ([`ClientCmd::id`] / [`Preset::id`]).
+    pub id: String,
+    pub title: String,
+    pub run: Bound,
+    /// The editor default chords.
+    pub defaults: Vec<String>,
+    /// Save / Undo / Redo: their chords are `text_editor` editing chords (not rebindable).
+    pub fixed: bool,
+}
+
+/// Every editor-owned bindable command, in palette order (client commands, then the
+/// non-period default-action presets; the period presets are the `open_period.*` commands).
+pub fn bindables() -> Vec<Bindable> {
+    let mut v: Vec<Bindable> = ClientCmd::all()
+        .into_iter()
+        .chain([ClientCmd::CommandPaletteKey])
+        .map(|c| Bindable {
+            id: c.id(),
+            title: c.title().0,
+            run: match c {
+                ClientCmd::OpenPeriod(p) => Bound::Preset(Preset {
+                    action: PERIOD_OPEN,
+                    period: Some(p),
+                }),
+                _ => Bound::Client(c),
+            },
+            defaults: c.keys(),
+            fixed: matches!(c, ClientCmd::Save | ClientCmd::Undo | ClientCmd::Redo),
+        })
+        .collect();
+    v.extend(
+        DEFAULT_ACTIONS
+            .iter()
+            .filter(|(_, p)| p.period.is_none())
+            .map(|&(k, p)| Bindable {
+                id: p.id(),
+                title: format!("Run {} (default chord)", p.action),
+                run: Bound::Preset(p),
+                defaults: vec![k.to_owned()],
+                fixed: false,
+            }),
+    );
+    v
+}
+
+impl Preset {
+    /// The stable `[keys]` id: a period preset is the matching `open_period.<p>` client
+    /// command; any other is `preset.<action>`.
+    pub fn id(self) -> String {
+        match self.period {
+            Some(p) => ClientCmd::OpenPeriod(p).id(),
+            None => format!("preset.{}", self.action),
+        }
+    }
+}
+
+/// The effective keymap (plan `editor-settings-tab` WP-4 "Resolver precedence"):
+/// `editor.toml` `[keys]` override > editor default > config action `keys`. Every key handler
+/// (`App::on_chord`, the focused source editor's `key_binding`) decides from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keymap {
+    map: HashMap<Chord, Bound>,
+    /// Every malformed / reserved / duplicate / displaced chord, as one line each.
+    pub notices: Vec<String>,
+    /// id → the chords it effectively holds (canonical spelling), for display.
+    pub chords: HashMap<String, Vec<String>>,
+    /// id → its notices (Hotkeys inline conflicts).
+    pub row_notices: HashMap<String, Vec<String>>,
+    /// The ids an override applies to.
+    pub overridden: std::collections::BTreeSet<String>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        resolve(&std::collections::BTreeMap::new(), &[])
+    }
+}
+
+impl Keymap {
+    /// What `c` runs.
+    pub fn get(&self, c: &Chord) -> Option<&Bound> {
+        self.map.get(c)
+    }
+
+    /// Whether the focused source editor must hand `c` to the app (`PaletteMsg::Key`) instead
+    /// of handling it (Alt+digit would insert the digit): chords bound to a client command or
+    /// preset, Ctrl+, and the inert Ctrl+Shift+,.
+    pub fn routed(&self, c: &Chord) -> bool {
+        matches!(self.map.get(c), Some(Bound::Client(_) | Bound::Preset(_)))
+            || (c.command && c.key == ",")
+    }
+
+    /// Chord → config action id (the old `bindings` map).
+    pub fn actions(&self) -> HashMap<Chord, String> {
+        self.map
+            .iter()
+            .filter_map(|(c, b)| match b {
+                Bound::Action(id) => Some((c.clone(), id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn note(&mut self, id: &str, n: String) {
+        self.row_notices
+            .entry(id.to_owned())
+            .or_default()
+            .push(n.clone());
+        self.notices.push(n);
+    }
+
+    fn holder(&self, c: &Chord) -> String {
+        match self.map.get(c) {
+            Some(Bound::Client(cmd)) => cmd.id(),
+            Some(Bound::Preset(p)) => p.id(),
+            Some(Bound::Action(a)) => a.clone(),
+            None => String::new(),
+        }
+    }
+
+    fn bind(&mut self, id: &str, c: Chord, b: Bound) {
+        self.chords
+            .entry(id.to_owned())
+            .or_default()
+            .push(c.to_string());
+        self.map.insert(c, b);
+    }
+}
+
+/// Resolves the effective keymap from `[keys]` `overrides` (id → chords; `[]` unbinds), the
+/// editor defaults and the config actions' `keys`. Malformed, reserved ([`chord::text_editing`])
+/// and duplicate chords become notices; an override takes a chord from an editor default (the
+/// default then no longer fires on it); config actions get only chords nothing editor-owned
+/// holds, the first registered winning between actions.
+pub fn resolve(
+    overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    actions: &[ActionInfo],
+) -> Keymap {
+    let mut km = Keymap {
+        map: HashMap::new(),
+        notices: Vec::new(),
+        chords: HashMap::new(),
+        row_notices: HashMap::new(),
+        overridden: std::collections::BTreeSet::new(),
+    };
+    let rows = bindables();
+    for id in overrides.keys() {
+        if !rows.iter().any(|r| &r.id == id) {
+            km.note(id, format!("{id}: unknown command id (override ignored)"));
+        }
+    }
+    // Pass 1: overrides.
+    for r in &rows {
+        let Some(list) = overrides.get(&r.id) else {
+            continue;
+        };
+        if r.fixed {
+            km.note(
+                &r.id,
+                format!("{}: a text-editing command (override ignored)", r.id),
+            );
+            continue;
+        }
+        km.overridden.insert(r.id.clone());
+        km.chords.entry(r.id.clone()).or_default();
+        for k in list {
             let Some(c) = chord::parse(k) else {
-                notes.push(format!("{}: unreadable key \"{k}\"", a.id));
+                km.note(&r.id, format!("{}: unreadable key \"{k}\"", r.id));
                 continue;
             };
-            if chord::reserved(&c) || client_chord(&c).is_some() {
-                notes.push(format!("{}: {c} is an editor default (not bound)", a.id));
-            } else if let Some(other) = map.get(&c) {
-                notes.push(format!("{}: {c} already bound to {other}", a.id));
+            if chord::text_editing(&c) {
+                km.note(&r.id, format!("{}: {c} is reserved (not bound)", r.id));
+            } else if !c.command && !c.alt {
+                km.note(
+                    &r.id,
+                    format!("{}: {c} needs Ctrl or Alt (not bound)", r.id),
+                );
+            } else if km.map.contains_key(&c) {
+                let other = km.holder(&c);
+                km.note(&r.id, format!("{}: {c} already bound to {other}", r.id));
             } else {
-                map.insert(c, a.id.clone());
+                km.bind(&r.id, c, r.run.clone());
             }
         }
     }
-    (map, notes)
+    // Pass 2: editor defaults of the commands without an override.
+    for r in &rows {
+        if km.overridden.contains(&r.id) {
+            continue;
+        }
+        km.chords.entry(r.id.clone()).or_default();
+        for k in &r.defaults {
+            let Some(c) = chord::parse(k) else { continue };
+            if r.fixed {
+                // Handled by the source editor's own bindings; shown, never routed.
+                km.chords
+                    .entry(r.id.clone())
+                    .or_default()
+                    .push(c.to_string());
+            } else if km.map.contains_key(&c) {
+                let other = km.holder(&c);
+                km.note(
+                    &r.id,
+                    format!("{}: default {c} taken by the {other} override", r.id),
+                );
+            } else {
+                km.bind(&r.id, c, r.run.clone());
+            }
+        }
+    }
+    // Pass 3: config actions.
+    for a in actions {
+        km.chords.entry(a.id.clone()).or_default();
+        for k in &a.keys {
+            let Some(c) = chord::parse(k) else {
+                km.note(&a.id, format!("{}: unreadable key \"{k}\"", a.id));
+                continue;
+            };
+            match km.map.get(&c) {
+                _ if chord::text_editing(&c) => {
+                    km.note(
+                        &a.id,
+                        format!("{}: {c} is an editor default (not bound)", a.id),
+                    );
+                }
+                Some(Bound::Action(other)) => {
+                    let other = other.clone();
+                    km.note(&a.id, format!("{}: {c} already bound to {other}", a.id));
+                }
+                Some(_) => {
+                    km.note(
+                        &a.id,
+                        format!("{}: {c} is an editor default (not bound)", a.id),
+                    );
+                }
+                None => km.bind(&a.id, c, Bound::Action(a.id.clone())),
+            }
+        }
+    }
+    km
+}
+
+/// Chord → action id for every parseable, non-conflicting `ActionInfo.keys`, plus a notice per
+/// conflict (editor defaults win; between actions the first registered wins) — [`resolve`]
+/// with no overrides.
+pub fn bindings(actions: &[ActionInfo]) -> (HashMap<Chord, String>, Vec<String>) {
+    let km = resolve(&std::collections::BTreeMap::new(), actions);
+    (km.actions(), km.notices)
+}
+
+/// `entries` with each entry's chords taken from the effective keymap (an action entry shows
+/// its default-action preset chords first, as [`build_entries`] does).
+pub fn apply_keys(entries: &mut [Entry], km: &Keymap) {
+    for e in entries {
+        let get = |id: &str| km.chords.get(id).cloned().unwrap_or_default();
+        e.keys = match &e.id {
+            EntryId::Client(c) => {
+                if km.chords.contains_key(&c.id()) {
+                    get(&c.id())
+                } else {
+                    continue;
+                }
+            }
+            EntryId::Action(a) => {
+                let mut k = get(&format!("preset.{a}"));
+                k.extend(get(a));
+                k
+            }
+        };
+    }
 }
 
 /// The invocation context for the active tab: path, 1-based cursor line and buffer hash always;
@@ -530,7 +814,11 @@ pub struct Palette {
     /// Cached `actions_list` (`None` = not fetched / invalidated).
     pub actions: Option<Vec<ActionInfo>>,
     pub loading: bool,
-    pub bindings: HashMap<Chord, String>,
+    /// The effective keymap (WP-4): rebuilt on action reload and `[keys]` change; shared with
+    /// the source editors' `key_binding` closures.
+    pub keymap: std::sync::Arc<Keymap>,
+    /// The `editor.toml` `[keys]` overrides the keymap was built from.
+    pub overrides: std::collections::BTreeMap<String, Vec<String>>,
     /// Key-binding conflicts, shown in the palette.
     pub notice: Vec<String>,
     pub prompt: Option<Prompt>,
@@ -563,7 +851,8 @@ impl Default for Palette {
             entries: build_entries(&[]),
             actions: None,
             loading: false,
-            bindings: HashMap::new(),
+            keymap: std::sync::Arc::new(Keymap::default()),
+            overrides: std::collections::BTreeMap::new(),
             notice: Vec::new(),
             prompt: None,
             prompt_error: None,
@@ -618,12 +907,29 @@ impl Palette {
 
     /// Installs a fetched action list (entries + bindings).
     pub fn set_actions(&mut self, actions: Vec<ActionInfo>) {
-        let (map, notes) = bindings(&actions);
-        self.bindings = map;
-        self.notice = notes;
-        self.entries = visible_entries(build_entries(&actions), &self.hidden);
         self.actions = Some(actions);
         self.loading = false;
+        self.rebuild();
+    }
+
+    /// Sets the `[keys]` overrides and rebuilds the keymap (a no-op when unchanged).
+    pub fn set_keys(&mut self, overrides: std::collections::BTreeMap<String, Vec<String>>) {
+        if overrides == self.overrides {
+            return;
+        }
+        self.overrides = overrides;
+        self.rebuild();
+    }
+
+    /// Rebuilds keymap, notices and entries from the overrides and the cached actions.
+    fn rebuild(&mut self) {
+        let actions = self.actions.as_deref().unwrap_or_default();
+        let km = resolve(&self.overrides, actions);
+        self.notice = km.notices.clone();
+        let mut all = build_entries(actions);
+        apply_keys(&mut all, &km);
+        self.entries = visible_entries(all, &self.hidden);
+        self.keymap = std::sync::Arc::new(km);
         self.refresh();
     }
 
@@ -633,9 +939,7 @@ impl Palette {
             return;
         }
         self.hidden = hidden;
-        let all = build_entries(self.actions.as_deref().unwrap_or_default());
-        self.entries = visible_entries(all, &self.hidden);
-        self.refresh();
+        self.rebuild();
     }
 
     /// Drops the cached action list (refetched on next use).

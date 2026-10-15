@@ -61,14 +61,14 @@ pub fn render<'a>(rows: Vec<Row>, cx: Rcx<'_>) -> Element<'a, Message> {
     col.into()
 }
 
-fn small(s: impl Into<String>, t: Tokens) -> Element<'static, Message> {
+pub fn small(s: impl Into<String>, t: Tokens) -> Element<'static, Message> {
     text(s.into())
         .size(12)
         .color(t.text_faint.to_color())
         .into()
 }
 
-fn text_button<'a>(
+pub fn text_button<'a>(
     label: impl Into<String>,
     msg: Option<Message>,
     t: Tokens,
