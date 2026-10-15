@@ -821,6 +821,7 @@ dependencies = [
  "cv-lint",
  "cv-protocol",
  "cv-providers",
+ "cv-schema",
  "cv-search",
  "cv-state",
  "cv-text",
@@ -897,6 +898,13 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "cv-schema"
+version = "0.1.0"
+dependencies = [
+ "toml_edit",
 ]
 
 [[package]]
@@ -4489,6 +4497,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
