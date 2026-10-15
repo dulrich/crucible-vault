@@ -7,8 +7,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use cv_protocol::Mode;
 
-/// Default clipboard command (plan decision "wl-paste"); split on whitespace, never a shell.
+/// Default clipboard command in a Wayland session (`WAYLAND_DISPLAY` set; plan decision
+/// "wl-paste"); split on whitespace, never a shell.
 pub const DEFAULT_CLIPBOARD_CMD: &str = "wl-paste --no-newline";
+
+/// Default clipboard command outside Wayland (an X11 session; plan cut-over-now WP-2 found
+/// the host on X11, where `wl-paste` cannot read the clipboard).
+pub const DEFAULT_CLIPBOARD_CMD_X11: &str = "xclip -o -selection clipboard";
 
 /// Resolved daemon/CLI configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +37,8 @@ pub struct Config {
     /// `CV_OPEN_CMD`: optional program run with the absolute note path on an unclaimed
     /// `obsidian://open` (never through a shell).
     pub open_cmd: Option<PathBuf>,
-    /// `CV_CLIPBOARD_CMD`: program + whitespace-separated args (default [`DEFAULT_CLIPBOARD_CMD`]).
+    /// `CV_CLIPBOARD_CMD`: program + whitespace-separated args (default [`DEFAULT_CLIPBOARD_CMD`]
+    /// when `WAYLAND_DISPLAY` is set, else [`DEFAULT_CLIPBOARD_CMD_X11`]).
     pub clipboard_cmd: Vec<String>,
     /// `CV_LINK_WRITE_ROOTS`: `:`-separated absolute roots outside the vault that a live write
     /// through a symlinked note may land under (plan editor-cutover-blockers WP-1, audit B1).
@@ -110,7 +116,14 @@ impl Config {
             (None, None) => bail!("neither CV_SOCKET nor XDG_RUNTIME_DIR is set"),
         };
         let clipboard_cmd: Vec<String> = get("CV_CLIPBOARD_CMD")
-            .unwrap_or_else(|| DEFAULT_CLIPBOARD_CMD.to_owned())
+            .unwrap_or_else(|| {
+                if get("WAYLAND_DISPLAY").is_some() {
+                    DEFAULT_CLIPBOARD_CMD
+                } else {
+                    DEFAULT_CLIPBOARD_CMD_X11
+                }
+                .to_owned()
+            })
             .split_whitespace()
             .map(str::to_owned)
             .collect();
@@ -226,6 +239,27 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_default_follows_session_type() {
+        let base = [("HOME", "/h"), ("XDG_RUNTIME_DIR", "/run/u")];
+        let wayland =
+            Config::resolve(env(&[base[0], base[1], ("WAYLAND_DISPLAY", "wayland-0")])).unwrap();
+        assert_eq!(wayland.clipboard_cmd, vec!["wl-paste", "--no-newline"]);
+        let x11 = Config::resolve(env(&[base[0], base[1], ("DISPLAY", ":0")])).unwrap();
+        assert_eq!(
+            x11.clipboard_cmd,
+            vec!["xclip", "-o", "-selection", "clipboard"]
+        );
+        let explicit = Config::resolve(env(&[
+            base[0],
+            base[1],
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("CV_CLIPBOARD_CMD", "xsel -ob"),
+        ]))
+        .unwrap();
+        assert_eq!(explicit.clipboard_cmd, vec!["xsel", "-ob"]);
+    }
+
+    #[test]
     fn defaults_follow_xdg_and_home() {
         let c = Config::resolve(env(&[("HOME", "/h"), ("XDG_RUNTIME_DIR", "/run/u")])).unwrap();
         assert_eq!(c.mode, Mode::Shadow);
@@ -245,7 +279,10 @@ mod tests {
         );
         assert_eq!(c.config_dir, PathBuf::from("/h/.config/crucible-vault"));
         assert_eq!(c.socket, PathBuf::from("/run/u/crucible-vault/daemon.sock"));
-        assert_eq!(c.clipboard_cmd, vec!["wl-paste", "--no-newline"]);
+        assert_eq!(
+            c.clipboard_cmd,
+            vec!["xclip", "-o", "-selection", "clipboard"]
+        );
         assert_eq!(
             c.spool_dir(),
             PathBuf::from("/h/.local/state/crucible-vault/uri-spool")

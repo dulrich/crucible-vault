@@ -116,3 +116,15 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 
 - **Decision:** every crucible-vault config file under the vault's `_custom/crucible-vault/` is **TOML** — actions, kinds, captures, agents, providers, schedules, plus plan B's views and bookmarks and A2's tracker/pipeline config.
 - **Rationale:** serde-native, comments allowed, no YAML typing traps; proposed in `plans/v0-core-daemon.md` Decisions locked and confirmed by the user at approval time.
+
+## D19 — Cut over before A2; D11 exceptions (2026-10-14; supersedes parts of D11, D16)
+
+- **Decision:** the switch to live ran on 2026-10-14 (plan `cut-over-now`), before A2 (`v0-automation-pipelines`), at the user's request after Obsidian segfaulted three days running. D11's invariant is unchanged: one switch, no dual-writer period, no automation carried across modes.
+- **Exceptions (user, 2026-10-14):**
+  - The ≥ 7-day soak (cut-over row 1) is waived. One parity run is kept for the record, not as a gate.
+  - Row 4 is satisfied by Obsidian being dead and not running ("Obsidian is crashed, treat it as dead").
+  - The P3 search-parity gap (row 9) is accepted as an exception, not a hold: 0.968 match after reconcile, 0 unexplained.
+  - `v0-editor` WP-9's A2 precondition is dropped. Its steps ran as `cut-over-now` WP-2.
+  - Row 8 (taking `x-scheme-handler/obsidian`) was in scope ("clippings should be captured by cv now").
+- **Consequence:** Crucible's automation (YT/X enrichment, trackers, Daily Brief, image describe, link records) is dark until A2 lands; A1's own actions run live.
+- **Premise correction:** `plans/v0-core-daemon.md` assumed a Wayland host with `wl-paste`. The host is X11, so the default clipboard command now follows the session (`xclip -o -selection clipboard` without `WAYLAND_DISPLAY`, else `wl-paste --no-newline`; `CV_CLIPBOARD_CMD` overrides).
