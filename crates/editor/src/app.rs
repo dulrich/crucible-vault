@@ -13,7 +13,7 @@ use chrono::NaiveDate;
 use cv_protocol::{Mode, Notification};
 use editor_model::period::NavTarget;
 use iced::widget::pane_grid::{self, Pane};
-use iced::widget::{PaneGrid, button, column, container, row, text};
+use iced::widget::{PaneGrid, Space, button, column, container, row, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 
 use crate::bookmarks::{self, BOOKMARKS_PATH, BookmarkMsg, Bookmarks, WriteOutcome};
@@ -1489,23 +1489,32 @@ impl App {
         ]
         .spacing(16);
 
-        let mut main = column![container(top).padding(4).width(Length::Fill).style(panel)];
-        if self.switcher.open {
-            main = main.push(
-                container(switcher::view(&self.switcher, t, self.status.mode))
-                    .padding(6)
-                    .width(Length::Fill)
-                    .style(inset),
-            );
-        }
-        if self.palette.open {
-            main = main.push(
-                container(crate::palette::view(&self.palette, t))
-                    .padding(6)
-                    .width(Length::Fill)
-                    .style(inset),
-            );
-        }
+        // Widget state is matched by tree position: the switcher and palette slots stay present
+        // (an empty `Space` when closed) so opening one does not rebuild every pane's editor state
+        // (focus, scroll) below it.
+        let switcher_slot: Element<'_, Message> = if self.switcher.open {
+            container(switcher::view(&self.switcher, t, self.status.mode))
+                .padding(6)
+                .width(Length::Fill)
+                .style(inset)
+                .into()
+        } else {
+            Space::new().into()
+        };
+        let palette_slot: Element<'_, Message> = if self.palette.open {
+            container(crate::palette::view(&self.palette, t))
+                .padding(6)
+                .width(Length::Fill)
+                .style(inset)
+                .into()
+        } else {
+            Space::new().into()
+        };
+        let main = column![
+            container(top).padding(4).width(Length::Fill).style(panel),
+            switcher_slot,
+            palette_slot,
+        ];
         let mut body = row![
             container(side)
                 .style(inset)

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use iced::font::Weight;
 use iced::widget::{column, container, mouse_area, rich_text, row, sensor, span, text};
-use iced::{Border, Element, Font, Length, Theme};
+use iced::{Border, Element, Font, Length, Theme, mouse};
 use serde_json::Value;
 
 use crate::message::{Message, ViewsMsg};
@@ -392,7 +392,16 @@ pub fn fence<'a>(store: &'a ViewStore, id: &str, host: &str, t: Tokens) -> Eleme
         .into()
 }
 
-fn cell_view<'a>(c: &Cell, bold: bool, t: Tokens) -> Element<'a, Message> {
+/// How a [`Cell::Link`] renders: `Plain` (summary labels), `Styled` (looks like a link; its row is
+/// the click target) or `Clickable` (looks like a link and opens its own path).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkCell {
+    Plain,
+    Styled,
+    Clickable,
+}
+
+fn cell_view<'a>(c: &Cell, bold: bool, link: LinkCell, t: Tokens) -> Element<'a, Message> {
     let font = Font {
         weight: if bold { Weight::Bold } else { Weight::Normal },
         ..Font::default()
@@ -406,31 +415,34 @@ fn cell_view<'a>(c: &Cell, bold: bool, t: Tokens) -> Element<'a, Message> {
             .color(t.text_faint.to_color())
             .into();
     }
-    let color = match c {
-        Cell::Link { .. } => t.accent_text,
-        _ => t.text,
-    };
-    let el: Element<'a, Message> = text(s).size(13).font(font).color(color.to_color()).into();
     match c {
-        Cell::Link { path, .. } => mouse_area(el)
-            .on_press(Message::Views(ViewsMsg::Open {
-                path: path.clone(),
-                line: None,
-            }))
-            .into(),
-        _ => el,
+        // Styled like Reading-mode links (`reading/view.rs` `Inline::WikiLink`): accent-ui, underlined.
+        Cell::Link { path, .. } if link != LinkCell::Plain => {
+            let sp: iced::widget::text::Span<'a, ()> =
+                span(s).color(t.accent_ui.to_color()).underline(true);
+            let el: Element<'a, Message> = rich_text(vec![sp]).size(13).font(font).into();
+            if link == LinkCell::Clickable {
+                mouse_area(el)
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::Views(ViewsMsg::Open {
+                        path: path.clone(),
+                        line: None,
+                    }))
+                    .into()
+            } else {
+                el
+            }
+        }
+        _ => text(s).size(13).font(font).color(t.text.to_color()).into(),
     }
 }
 
 fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
     let cols = d.columns.len().max(1);
-    let grid = |cs: &[Cell], bold: bool, links: bool| -> Element<'a, Message> {
+    let grid = |cs: &[Cell], bold: bool, links: LinkCell| -> Element<'a, Message> {
         row((0..cols).map(|i| {
             let c = cs.get(i).unwrap_or(&Cell::Null);
-            let el = match (c, links) {
-                (Cell::Link { label, .. }, false) => cell_view(&Cell::Text(label.clone()), bold, t),
-                _ => cell_view(c, bold, t),
-            };
+            let el = cell_view(c, bold, links, t);
             container(el).width(Length::FillPortion(1)).into()
         }))
         .spacing(8)
@@ -447,7 +459,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
             .into(),
         Line::Summary { label, cells } => {
             if d.kind == Kind::Pivot {
-                grid(cells, true, false)
+                grid(cells, true, LinkCell::Plain)
             } else {
                 let mut cs = cells.clone();
                 // Ungrouped tables carry the summary name only in `label`: show it in an empty
@@ -458,7 +470,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                     }
                     cs[0] = Cell::Text(label.clone());
                 }
-                grid(&cs, true, false)
+                grid(&cs, true, LinkCell::Plain)
             }
         }
         Line::Row(r) => {
@@ -475,10 +487,16 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                 .into()
             } else {
                 // A row with its own target is clickable as a whole; otherwise link cells are.
-                grid(&r.cells, false, r.path.is_none())
+                let links = if r.path.is_some() {
+                    LinkCell::Styled
+                } else {
+                    LinkCell::Clickable
+                };
+                grid(&r.cells, false, links)
             };
             match &r.path {
                 Some(p) => mouse_area(el)
+                    .interaction(mouse::Interaction::Pointer)
                     .on_press(Message::Views(ViewsMsg::Open {
                         path: p.clone(),
                         line: r.line,

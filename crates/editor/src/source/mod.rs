@@ -20,7 +20,7 @@ use cv_protocol::Mode;
 use editor_model::undo::{self, Change, EditKind, UndoHistory};
 use iced::keyboard;
 use iced::widget::text_editor::{self, Action, Binding, Content, Edit, KeyPress};
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use crate::app::Tab;
@@ -676,18 +676,24 @@ pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a
         // Never visible in practice (the app materialises visible tabs before drawing).
         Repr::Plain { text: t, .. } => text(t.as_str()).into(),
     };
-    let mut col = column![].spacing(4);
-    if mode == Mode::Shadow {
-        col = col.push(
-            text("read-only (shadow)")
-                .size(14)
-                .color(tokens.warn_text.to_color()),
-        );
+    // The editor's widget state (focus, cursor scroll) is matched by tree position, so the status
+    // and conflict slots are always present (an empty `Space` when unused): inserting a sibling
+    // before the editor on the first dirtying keypress would rebuild its state and drop focus.
+    let status: Element<'a, Message> = if mode == Mode::Shadow {
+        text("read-only (shadow)")
+            .size(14)
+            .color(tokens.warn_text.to_color())
+            .into()
     } else if buf.dirty {
         let state = if buf.saving { "saving…" } else { "unsaved" };
-        col = col.push(text(state).size(14).color(tokens.text_faint.to_color()));
-    }
-    if buf.conflict.is_some() {
+        text(state)
+            .size(14)
+            .color(tokens.text_faint.to_color())
+            .into()
+    } else {
+        Space::new().into()
+    };
+    let conflict: Element<'a, Message> = if buf.conflict.is_some() {
         let bar = row![
             text("File changed on disk while you were editing.").color(tokens.warn_text.to_color()),
             button(text("Keep mine"))
@@ -696,17 +702,18 @@ pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a
                 .on_press(Message::Source(SourceMsg::TakeTheirs(buf.path.clone()))),
         ]
         .spacing(8);
-        col = col.push(
-            container(bar)
-                .padding(6)
-                .width(Length::Fill)
-                .style(move |_| container::Style {
-                    background: Some(tokens.panel_2.to_color().into()),
-                    ..container::Style::default()
-                }),
-        );
-    }
-    col.push(editor).into()
+        container(bar)
+            .padding(6)
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(tokens.panel_2.to_color().into()),
+                ..container::Style::default()
+            })
+            .into()
+    } else {
+        Space::new().into()
+    };
+    column![status, conflict, editor].spacing(4).into()
 }
 
 #[cfg(test)]

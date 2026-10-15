@@ -383,3 +383,31 @@ fn materialise_round_trip_keeps_text_cursor_undo_and_save_state() {
     assert!(!b.is_dirty());
     assert!(b.conflict().is_none());
 }
+
+/// The text editor keeps its child index and widget tag across clean → dirty → saving → clean:
+/// iced matches widget state (focus) by tree position, so a sibling inserted before the editor on
+/// the first dirtying keypress dropped focus on every keystroke after each autosave (cut-over E10).
+#[test]
+fn view_tree_position_stable_across_dirty_states() {
+    use iced::advanced::widget::Tree;
+
+    fn shape(b: &SourceBuffer) -> Vec<iced::advanced::widget::tree::Tag> {
+        let t = crate::theme::Surround::default().tokens().expect("tokens");
+        let el = view(b, t, Mode::Live);
+        Tree::new(&el).children.iter().map(|c| c.tag).collect()
+    }
+    let mut b = SourceBuffer::new("n.md", b"text\n", ContentHash::of(b"text\n"));
+    b.set_shaped(true);
+    let clean = shape(&b);
+    assert!(b.perform(Action::Edit(Edit::Insert('x')), false, Instant::now()));
+    assert!(b.is_dirty());
+    let dirty = shape(&b);
+    let _job = b.begin_save(false).expect("save job");
+    assert!(b.is_saving());
+    let saving = shape(&b);
+    assert_eq!(clean.len(), dirty.len());
+    assert_eq!(clean.len(), saving.len());
+    let last = clean.len() - 1;
+    assert_eq!(clean[last], dirty[last], "editor tag moved");
+    assert_eq!(clean[last], saving[last], "editor tag moved");
+}
