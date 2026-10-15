@@ -32,7 +32,7 @@ use crate::theme::Tokens;
 pub use highlighter::{KindColors, MarkdownHighlighter, Settings as HighlightSettings};
 
 /// Autosave debounce after the last edit.
-pub const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
+pub const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// The text editor's padding (middle-click points are mapped through it like iced's own clicks).
 const EDITOR_PADDING: f32 = 5.0;
@@ -740,6 +740,20 @@ pub struct Ctx<'a> {
     pub daemon: Option<&'a Arc<dyn DaemonClient>>,
     pub mode: Mode,
     pub error: &'a mut Option<String>,
+}
+
+/// Plan editor-feedback-round-2 WP-3: flush `buf` now (tab switch away, window unfocus) through
+/// the one save machine — `begin_save` is a no-op for clean, read-only (shadow) and conflicted
+/// buffers and re-queues (`save_again`) behind an in-flight save.
+pub(crate) fn flush(
+    buf: &mut SourceBuffer,
+    daemon: Option<&Arc<dyn DaemonClient>>,
+    read_only: bool,
+) -> Task<Message> {
+    if daemon.is_none() {
+        return Task::none();
+    }
+    spawn_save(daemon, buf.begin_save(read_only))
 }
 
 fn spawn_save(daemon: Option<&Arc<dyn DaemonClient>>, job: Option<SaveJob>) -> Task<Message> {

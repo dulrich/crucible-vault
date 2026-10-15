@@ -166,7 +166,9 @@ pub struct App {
     /// A back/forward step is opening a path: it must not push onto the history.
     history_nav: bool,
     /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
-    quit: Option<QuitState>,
+    pub(crate) quit: Option<QuitState>,
+    /// Notes whose close waits on an in-flight normal save (WP-3 rework).
+    closing: std::collections::HashSet<String>,
     /// The app asked iced to exit (tests observe it).
     pub exiting: bool,
     /// Shift is held while a find bar is open (Shift+Enter = previous).
@@ -182,10 +184,13 @@ pub struct App {
 
 /// A quit in progress: the saves it waits on, and whether one failed.
 #[derive(Debug, Default)]
-struct QuitState {
+pub(crate) struct QuitState {
     pending: std::collections::HashSet<String>,
     /// Settings files whose flush write has not landed yet (plan editor-feedback-round-2 WP-2).
     settings: std::collections::HashSet<String>,
+    /// Notes whose normal (autosave/flush) save was already in flight at quit; resolved by
+    /// their `SourceMsg::Saved` (plan editor-feedback-round-2 WP-3 rework).
+    awaiting: std::collections::HashSet<String>,
     failed: bool,
 }
 
@@ -325,6 +330,7 @@ impl App {
             mode_menu: None,
             history_nav: false,
             quit: None,
+            closing: std::collections::HashSet::new(),
             exiting: false,
             find_shift: false,
             settings: crate::settings::Settings::default(),
@@ -640,13 +646,72 @@ impl App {
 
     /// The update function.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let before = self.active_paths();
         let task = self.update_inner(message);
+        let flush = self.flush_switched_away(&before);
         self.sync_buffers();
         let auto = self.schedule_settings_autosave();
-        if auto.units() == 0 {
+        let extra: Vec<Task<Message>> = [flush, auto]
+            .into_iter()
+            .filter(|t| t.units() > 0)
+            .collect();
+        if extra.is_empty() {
             return task;
         }
-        Task::batch([task, auto])
+        Task::batch(std::iter::once(task).chain(extra))
+    }
+
+    /// Each pane's active tab path (WP-3 tab-switch flush snapshot).
+    fn active_paths(&self) -> Vec<(Pane, String)> {
+        self.panes
+            .iter()
+            .filter_map(|(p, ps)| ps.active_tab().map(|t| (*p, t.path.clone())))
+            .collect()
+    }
+
+    /// Plan editor-feedback-round-2 WP-3: every path that changes a pane's active tab (select,
+    /// Alt+N, open/Quick Switch, history, closing a neighbour) runs through `update`, so one
+    /// before/after comparison here flushes the note a pane switched away from — no per-path
+    /// save calls. The tab must still exist (a closed tab already went through `close_tab`).
+    fn flush_switched_away(&mut self, before: &[(Pane, String)]) -> Task<Message> {
+        let left: Vec<String> = before
+            .iter()
+            .filter(|(p, path)| {
+                self.panes
+                    .get(*p)
+                    .and_then(|ps| ps.active_tab())
+                    .is_none_or(|t| &t.path != path)
+            })
+            .map(|(_, path)| path.clone())
+            .collect();
+        Task::batch(left.iter().map(|path| self.flush_note(path)))
+    }
+
+    /// Flushes the note tab at `path` now (no-op when clean, saving — re-queued — conflicted,
+    /// in shadow mode, or not open).
+    fn flush_note(&mut self, path: &str) -> Task<Message> {
+        let read_only = self.status.mode == Mode::Shadow;
+        let Some((p, i)) = panes::find(&self.panes, path) else {
+            return Task::none();
+        };
+        match self.panes.get_mut(p).and_then(|ps| ps.tabs.get_mut(i)) {
+            Some(tab) if !tab.is_settings() => {
+                crate::source::flush(&mut tab.source, self.daemon.as_ref(), read_only)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// WP-3: window focus loss flushes every dirty note buffer.
+    fn flush_all_notes(&mut self) -> Task<Message> {
+        let dirty: Vec<String> = self
+            .panes
+            .iter()
+            .flat_map(|(_, ps)| ps.tabs.iter())
+            .filter(|t| !t.is_settings() && t.source.is_dirty())
+            .map(|t| t.path.clone())
+            .collect();
+        Task::batch(dirty.iter().map(|path| self.flush_note(path)))
     }
 
     /// Plan editor-feedback-round-2 WP-2: arms one debounce timer per settings file whose
@@ -738,10 +803,20 @@ impl App {
                     _ if self.active_note().is_none() => None,
                     _ => Some(self.focus),
                 };
-                let Some(ps) = pane.and_then(|p| self.panes.get_mut(p)) else {
-                    return Task::none();
+                let saved = match &m {
+                    SourceMsg::Saved { path, outcome, .. } => Some((
+                        path.clone(),
+                        matches!(outcome, crate::source::SaveOutcome::Saved(_)),
+                    )),
+                    _ => None,
                 };
-                return crate::source::update(
+                let Some(ps) = pane.and_then(|p| self.panes.get_mut(p)) else {
+                    return match saved {
+                        Some((path, _)) => self.note_save_landed(&path, true),
+                        None => Task::none(),
+                    };
+                };
+                let task = crate::source::update(
                     &mut ps.tabs,
                     ps.active,
                     m,
@@ -751,6 +826,10 @@ impl App {
                         error: &mut self.status.error,
                     },
                 );
+                return match saved {
+                    Some((path, ok)) => Task::batch([task, self.note_save_landed(&path, ok)]),
+                    None => task,
+                };
             }
             Message::Reading(crate::message::ReadingMsg::ToggleTask { path, line }) => {
                 return self.toggle_task(&path, line);
@@ -833,6 +912,7 @@ impl App {
                 }
             }
             TabsMsg::Quit => return self.quit(),
+            TabsMsg::FlushAll => return self.flush_all_notes(),
             TabsMsg::QuitSaved { path, seq, outcome } => {
                 let ok = self.flushed(&path, seq, outcome, "quit");
                 let Some(q) = &mut self.quit else {
@@ -851,7 +931,7 @@ impl App {
         let Some(q) = &self.quit else {
             return Task::none();
         };
-        if q.pending.is_empty() && q.settings.is_empty() {
+        if q.pending.is_empty() && q.settings.is_empty() && q.awaiting.is_empty() {
             let failed = q.failed;
             self.quit = None;
             if !failed {
@@ -896,9 +976,17 @@ impl App {
             self.remove_tab(pane, i);
             return Task::none();
         }
+        if tab.source.conflict().is_some() {
+            self.status.error = Some("close cancelled (the note has a conflict)".into());
+            return Task::none();
+        }
         let Some(job) = tab.source.begin_save(false) else {
-            self.status.error =
-                Some("close cancelled (the note is saving or has a conflict)".into());
+            // WP-3 rework: a save is in flight (`begin_save` queued the follow-up); the close
+            // completes when it lands clean (`note_save_landed`).
+            if tab.source.is_saving() {
+                let path = tab.path.clone();
+                self.closing.insert(path);
+            }
             return Task::none();
         };
         let (seq, path) = (job.seq, tab.path.clone());
@@ -912,6 +1000,56 @@ impl App {
                 })
             },
         )
+    }
+
+    /// WP-3 rework: a normal note save (`SourceMsg::Saved`, already applied to the buffer)
+    /// landed; resolves a close or quit waiting on it. Clean → done; saved but a queued
+    /// follow-up is in flight → keep waiting; conflict, failure or a newer unsaved edit →
+    /// cancel with a status message. Every await ends here, so the wait is bounded.
+    fn note_save_landed(&mut self, path: &str, ok: bool) -> Task<Message> {
+        let waiting_quit = self
+            .quit
+            .as_ref()
+            .is_some_and(|q| q.awaiting.contains(path));
+        let waiting_close = self.closing.contains(path);
+        if !waiting_quit && !waiting_close {
+            return Task::none();
+        }
+        let tab = panes::find(&self.panes, path)
+            .and_then(|(p, i)| self.panes.get(p).and_then(|ps| ps.tabs.get(i)));
+        let (saving, dirty) = tab.map_or((false, false), |t| {
+            (t.source.is_saving(), t.source.is_dirty())
+        });
+        if ok && saving {
+            return Task::none();
+        }
+        let done = ok && !dirty;
+        let why = if !ok {
+            "save conflict or failure"
+        } else {
+            "the note changed while saving"
+        };
+        if waiting_close {
+            self.closing.remove(path);
+            if done {
+                if let Some((p, i)) = panes::find(&self.panes, path) {
+                    self.remove_tab(p, i);
+                }
+            } else {
+                self.status.error = Some(format!("close cancelled ({why})"));
+            }
+        }
+        if waiting_quit {
+            if let Some(q) = &mut self.quit {
+                q.awaiting.remove(path);
+                q.failed |= !done;
+            }
+            if !done {
+                self.status.error = Some(format!("quit cancelled ({why})"));
+            }
+            return self.quit_progress();
+        }
+        Task::none()
     }
 
     /// A save-before-close/quit finished: `true` only when it saved and the buffer is clean;
@@ -974,23 +1112,30 @@ impl App {
             self.panes
                 .get(p)
                 .and_then(|ps| ps.tabs.get(i))
-                .is_some_and(|t| t.source.is_saving() || t.source.conflict().is_some())
+                .is_some_and(|t| t.source.conflict().is_some())
         });
         if blocked {
-            self.status.error = Some("quit cancelled (a note is saving or has a conflict)".into());
+            self.status.error = Some("quit cancelled (a note has a conflict)".into());
             return Task::none();
         }
         let mut jobs = Vec::new();
+        let mut awaiting = std::collections::HashSet::new();
         for (p, i) in dirty {
-            if let Some(tab) = self.panes.get_mut(p).and_then(|ps| ps.tabs.get_mut(i))
-                && let Some(job) = tab.source.begin_save(false)
-            {
-                jobs.push((tab.path.clone(), job));
+            if let Some(tab) = self.panes.get_mut(p).and_then(|ps| ps.tabs.get_mut(i)) {
+                match tab.source.begin_save(false) {
+                    Some(job) => jobs.push((tab.path.clone(), job)),
+                    // WP-3 rework: in flight — `begin_save` queued the follow-up; await it.
+                    None if tab.source.is_saving() => {
+                        awaiting.insert(tab.path.clone());
+                    }
+                    None => {}
+                }
             }
         }
         self.quit = Some(QuitState {
             pending: jobs.iter().map(|(p, _)| p.clone()).collect(),
             settings: std::collections::HashSet::new(),
+            awaiting,
             failed: false,
         });
         // WP-2: settings writes are flushed and awaited like note saves.
@@ -2684,6 +2829,11 @@ impl App {
             crate::find::subscription(self.panes.iter().any(|(_, ps)| ps.find.is_some())),
             // Window close goes through Quit (dirty buffers flush first).
             iced::window::close_requests().map(|_| Message::Tabs(TabsMsg::Quit)),
+            // WP-3: focus loss flushes every dirty note buffer.
+            iced::window::events().filter_map(|(_, e)| {
+                matches!(e, iced::window::Event::Unfocused)
+                    .then_some(Message::Tabs(TabsMsg::FlushAll))
+            }),
         ])
     }
 

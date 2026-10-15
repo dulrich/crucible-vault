@@ -336,6 +336,8 @@ pub enum TabsMsg {
     GoTo(u8),
     /// Ctrl+Q / window close: flush every dirty buffer, then exit.
     Quit,
+    /// Window focus lost: flush every dirty note buffer (plan editor-feedback-round-2 WP-3).
+    FlushAll,
     /// One save-before-quit finished.
     QuitSaved {
         path: String,
