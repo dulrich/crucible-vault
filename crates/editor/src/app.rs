@@ -223,6 +223,8 @@ pub struct App {
     history_nav: bool,
     /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
     pub(crate) quit: Option<QuitState>,
+    /// plan editor-data-safety WP-2: the open modal dialog (input priority while `Some`).
+    pub dialog: Option<crate::dialog::Dialog>,
     /// Notes whose close waits on an in-flight normal save (WP-3 rework).
     /// Keyed by path; the values are the ids of the tabs to close (audit E1: a close keeps its
     /// target tab identity across the save, so closing one duplicate never closes the other).
@@ -258,7 +260,9 @@ pub(crate) struct QuitState {
     /// Notes whose normal (autosave/flush) save was already in flight at quit; resolved by
     /// their `SourceMsg::Saved` (plan editor-feedback-round-2 WP-3 rework).
     awaiting: std::collections::HashSet<String>,
-    failed: bool,
+    /// plan editor-data-safety WP-2: what cannot be saved (shown in the dialog once every
+    /// flush has resolved).
+    losses: crate::dialog::UnsavedEdits,
 }
 
 /// `captures.toml` (period folders, WP-4 audit E2).
@@ -401,6 +405,7 @@ impl App {
             mode_menu: None,
             history_nav: false,
             quit: None,
+            dialog: None,
             closing: std::collections::HashMap::new(),
             docs: Docs::new(),
             exiting: false,
@@ -577,7 +582,11 @@ impl App {
                 let job = doc.resync(&bytes, hash, read_only);
                 crate::source::spawn_save(Some(&d), job)
             }
-            // A vanished file keeps the document as it is (WP-2 owns missing-file handling).
+            // plan editor-data-safety WP-2: a vanished file under edits → missing-file state.
+            Err(DaemonError::NotFound(_)) => {
+                doc.mark_missing();
+                Task::none()
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "reconnect resync read failed");
                 Task::none()
@@ -928,6 +937,9 @@ impl App {
 
     /// The update function.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let Some(message) = self.modal_filter(message) else {
+            return Task::none();
+        };
         let before = self.active_paths();
         let task = self.update_inner(message);
         let flush = self.flush_switched_away(&before);
@@ -941,6 +953,78 @@ impl App {
             return task;
         }
         Task::batch(std::iter::once(task).chain(extra))
+    }
+
+    /// plan editor-data-safety WP-2 (audit E3): while a dialog is open it takes input
+    /// priority — user input (keys, chords, tab / editor / find / switcher messages, the
+    /// focus-loss flush, a repeated close request) is dropped; async completions (saves,
+    /// notifications, loads) still run. Escape (the switcher's Close) is the dialog's Cancel.
+    fn modal_filter(&self, m: Message) -> Option<Message> {
+        if self.dialog.is_none() {
+            return match m {
+                Message::Dialog(_) => None,
+                m => Some(m),
+            };
+        }
+        match m {
+            Message::Switcher(SwitcherMsg::Close) => {
+                Some(Message::Dialog(crate::dialog::DialogMsg::Cancel))
+            }
+            Message::Switcher(_) | Message::Find(_) | Message::Palette(PaletteMsg::Key(_)) => None,
+            Message::Tabs(TabsMsg::QuitSaved { .. } | TabsMsg::CloseSaved { .. }) => Some(m),
+            Message::Tabs(_) => None,
+            Message::Source(SourceMsg::Saved { .. } | SourceMsg::AutosaveDue { .. }) => Some(m),
+            Message::Source(_) => None,
+            m => Some(m),
+        }
+    }
+
+    /// The dialog's OK / Cancel.
+    fn update_dialog(&mut self, m: crate::dialog::DialogMsg) -> Task<Message> {
+        use crate::dialog::{DialogMsg, OnOk};
+        let Some(d) = self.dialog.take() else {
+            return Task::none();
+        };
+        let ok = match m {
+            DialogMsg::Ok => true,
+            DialogMsg::Cancel => false,
+            DialogMsg::Default => d.enter_is_ok,
+        };
+        if !ok {
+            return Task::none();
+        }
+        match d.on_ok {
+            OnOk::Quit => self.exit(),
+            OnOk::CloseTabs(ids) => {
+                for id in ids {
+                    if let Some((p, i)) = panes::find_id(&self.panes, id) {
+                        self.remove_tab(p, i);
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// Why `path`'s edits could not be saved (`fallback` when no conflict / outage explains it).
+    fn loss_reason(&self, path: &str, fallback: &str) -> crate::dialog::LossReason {
+        use crate::dialog::LossReason;
+        match self.docs.get(path) {
+            Some(d) if d.is_missing() => LossReason::Missing,
+            Some(d) if d.conflict().is_some() => LossReason::Conflict,
+            _ if !self.status.connected => LossReason::Disconnected,
+            _ => LossReason::SaveFailed(fallback.to_owned()),
+        }
+    }
+
+    /// Opens the unsaved-edits dialog for one note's tab close.
+    fn close_dialog(&mut self, path: &str, ids: Vec<u64>, fallback: &str) {
+        let mut losses = crate::dialog::UnsavedEdits::default();
+        losses.note(path, self.loss_reason(path, fallback));
+        self.dialog = Some(crate::dialog::Dialog::unsaved(
+            losses,
+            crate::dialog::OnOk::CloseTabs(ids),
+        ));
     }
 
     /// Each pane's active tab path (WP-3 tab-switch flush snapshot).
@@ -1055,6 +1139,7 @@ impl App {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tabs(m) => return self.update_tabs(m),
+            Message::Dialog(m) => return self.update_dialog(m),
             Message::Find(m) => return self.update_find(m),
             Message::Status(m) => return self.update_status(m),
             Message::Theme(m) => {
@@ -1066,6 +1151,15 @@ impl App {
             }
             Message::Settings(m) => return self.update_settings(m),
             Message::Explorer(m) => return self.update_explorer(m),
+            Message::Source(SourceMsg::TakeTheirs(path))
+                if self.docs.get(&path).is_some_and(|d| d.is_missing()) =>
+            {
+                // plan editor-data-safety WP-2: the file is gone — discard and close its tabs.
+                while let Some((p, i)) = panes::find(&self.panes, &path) {
+                    self.remove_tab(p, i);
+                }
+                self.docs.remove(&path);
+            }
             Message::Source(m) => {
                 let routed = matches!(
                     &m,
@@ -1205,38 +1299,52 @@ impl App {
                 outcome,
             } => {
                 // Audit E1: the close removes exactly the tab it was asked for (by id).
-                if self.flushed(&path, seq, outcome, "close")
-                    && let Some((pane, i)) = panes::find_id(&self.panes, tab)
-                {
-                    self.remove_tab(pane, i);
+                match self.flushed(&path, seq, outcome) {
+                    Ok(()) => {
+                        if let Some((pane, i)) = panes::find_id(&self.panes, tab) {
+                            self.remove_tab(pane, i);
+                        }
+                    }
+                    Err(why) => {
+                        if panes::find_id(&self.panes, tab).is_some() {
+                            self.close_dialog(&path, vec![tab], &why);
+                        }
+                    }
                 }
             }
             TabsMsg::Quit => return self.quit(),
             TabsMsg::FlushAll => return self.flush_all_notes(),
             TabsMsg::QuitSaved { path, seq, outcome } => {
-                let ok = self.flushed(&path, seq, outcome, "quit");
+                let r = self.flushed(&path, seq, outcome);
+                let reason = r.err().map(|why| self.loss_reason(&path, &why));
                 let Some(q) = &mut self.quit else {
                     return Task::none();
                 };
                 q.pending.remove(&path);
-                q.failed |= !ok;
+                if let Some(reason) = reason {
+                    q.losses.note(&path, reason);
+                }
                 return self.quit_progress();
             }
         }
         Task::none()
     }
 
-    /// Exits once every quit flush (notes and settings) has landed, unless one failed.
+    /// Exits once every quit flush (notes and settings) has landed; anything that could not
+    /// be saved opens the unsaved-edits dialog instead (plan editor-data-safety WP-2).
     fn quit_progress(&mut self) -> Task<Message> {
         let Some(q) = &self.quit else {
             return Task::none();
         };
         if q.pending.is_empty() && q.settings.is_empty() && q.awaiting.is_empty() {
-            let failed = q.failed;
-            self.quit = None;
-            if !failed {
+            let losses = self.quit.take().map(|q| q.losses).unwrap_or_default();
+            if losses.is_empty() {
                 return self.exit();
             }
+            self.dialog = Some(crate::dialog::Dialog::unsaved(
+                losses,
+                crate::dialog::OnOk::Quit,
+            ));
         }
         Task::none()
     }
@@ -1282,8 +1390,8 @@ impl App {
             self.remove_tab(pane, i);
             return Task::none();
         }
-        if doc.conflict().is_some() {
-            self.status.error = Some("close cancelled (the note has a conflict)".into());
+        if doc.conflict().is_some() || !self.status.connected {
+            self.close_dialog(&tab.path, vec![tab.id], "not connected");
             return Task::none();
         }
         let Some(job) = doc.begin_save(false) else {
@@ -1294,6 +1402,9 @@ impl App {
                 if !ids.contains(&tab.id) {
                     ids.push(tab.id);
                 }
+            } else {
+                // A dirty buffer whose save cannot start.
+                self.close_dialog(&tab.path, vec![tab.id], "the save could not start");
             }
             return Task::none();
         };
@@ -1333,7 +1444,7 @@ impl App {
         }
         let done = ok && !dirty;
         let why = if !ok {
-            "save conflict or failure"
+            "save failed"
         } else {
             "the note changed while saving"
         };
@@ -1346,55 +1457,55 @@ impl App {
                     }
                 }
             } else {
-                self.status.error = Some(format!("close cancelled ({why})"));
+                let ids: Vec<u64> = ids
+                    .into_iter()
+                    .filter(|id| panes::find_id(&self.panes, *id).is_some())
+                    .collect();
+                if !ids.is_empty() && self.quit.is_none() {
+                    self.close_dialog(path, ids, why);
+                }
             }
         }
         if waiting_quit {
+            let reason = (!done).then(|| self.loss_reason(path, why));
             if let Some(q) = &mut self.quit {
                 q.awaiting.remove(path);
-                q.failed |= !done;
-            }
-            if !done {
-                self.status.error = Some(format!("quit cancelled ({why})"));
+                if let Some(reason) = reason {
+                    q.losses.note(path, reason);
+                }
             }
             return self.quit_progress();
         }
         Task::none()
     }
 
-    /// A save-before-close/quit finished: `true` only when it saved and the buffer is clean;
-    /// otherwise the error is surfaced (`what` cancelled).
+    /// A save-before-close/quit finished: `Ok` only when it saved and the buffer is clean;
+    /// otherwise why not (the caller turns it into a dialog entry).
     fn flushed(
         &mut self,
         path: &str,
         seq: u64,
         outcome: crate::source::SaveOutcome,
-        what: &str,
-    ) -> bool {
+    ) -> Result<(), String> {
         use crate::source::SaveOutcome;
         let Some(doc) = self.docs.get_mut(path) else {
-            return true;
+            return Ok(());
         };
         let ok = matches!(outcome, SaveOutcome::Saved(_));
-        if let Err(e) = doc.finish_save(seq, outcome) {
-            self.status.error = Some(format!("{what} cancelled (save failed: {e})"));
-            return false;
+        doc.finish_save(seq, outcome)?;
+        if !ok {
+            return Err("save conflict".into());
         }
-        if !ok || doc.is_dirty() {
-            self.status.error = Some(if ok {
-                format!("{what} cancelled (the note changed while saving)")
-            } else {
-                format!("{what} cancelled (save conflict: the file changed on disk)")
-            });
-            return false;
+        if doc.is_dirty() {
+            return Err("the note changed while saving".into());
         }
-        true
+        Ok(())
     }
 
     /// Quit: flush every dirty document (once per document, however many tabs show it — plan
     /// editor-feedback-round-2 WP-7), exit once all saves land; any failure cancels the quit.
     fn quit(&mut self) -> Task<Message> {
-        if self.quit.is_some() {
+        if self.quit.is_some() || self.dialog.is_some() {
             return Task::none();
         }
         let dirty: Vec<String> = self
@@ -1408,19 +1519,29 @@ impl App {
             .files
             .values()
             .any(|f| f.wants_save() || f.saving);
-        if dirty.is_empty() && (!settings_pending || self.status.mode == Mode::Shadow) {
+        // plan editor-data-safety WP-2 (audit M1): dirty settings files the flush cannot
+        // write (validation errors, malformed / unloaded) are losses, never written (D20).
+        let mut losses = crate::dialog::UnsavedEdits::default();
+        for f in self.settings.files.values() {
+            if f.dirty && !f.wants_save() && !f.saving {
+                losses.setting(&f.path);
+            }
+        }
+        if dirty.is_empty()
+            && losses.is_empty()
+            && (!settings_pending || self.status.mode == Mode::Shadow)
+        {
             return self.exit();
         }
-        let blocked = dirty
-            .iter()
-            .any(|p| self.docs.get(p).is_some_and(|d| d.conflict().is_some()));
-        if blocked {
-            self.status.error = Some("quit cancelled (a note has a conflict)".into());
-            return Task::none();
-        }
+        let connected = self.status.connected && self.daemon.is_some();
         let mut jobs = Vec::new();
         let mut awaiting = std::collections::HashSet::new();
         for path in dirty {
+            if !connected {
+                losses.note(&path, crate::dialog::LossReason::Disconnected);
+                continue;
+            }
+            let reason = self.loss_reason(&path, "the save could not start");
             if let Some(doc) = self.docs.get_mut(&path) {
                 match doc.begin_save(false) {
                     Some(job) => jobs.push((path, job)),
@@ -1428,7 +1549,15 @@ impl App {
                     None if doc.is_saving() => {
                         awaiting.insert(path);
                     }
-                    None => {}
+                    // Conflict / missing file (or a save that cannot start).
+                    None => losses.note(&path, reason),
+                }
+            }
+        }
+        if !connected {
+            for f in self.settings.files.values() {
+                if f.wants_save() || f.saving {
+                    losses.setting(&f.path);
                 }
             }
         }
@@ -1436,8 +1565,11 @@ impl App {
             pending: jobs.iter().map(|(p, _)| p.clone()).collect(),
             settings: std::collections::HashSet::new(),
             awaiting,
-            failed: false,
+            losses,
         });
+        if !connected {
+            return self.quit_progress();
+        }
         // WP-2: settings writes are flushed and awaited like note saves.
         // Await exactly the paths the flush started or queued (none in shadow mode, so a
         // shadow quit never waits on a settings write that cannot run).
@@ -3066,7 +3198,9 @@ impl App {
                     if let Some(q) = &mut self.quit
                         && q.settings.contains(&path)
                     {
-                        q.failed |= failed;
+                        if failed && !again {
+                            q.losses.setting(&path);
+                        }
                         if !again {
                             q.settings.remove(&path);
                         }
@@ -3166,6 +3300,7 @@ impl App {
         Subscription::batch([
             Subscription::run_with(self.notifications.clone(), notification_stream),
             iced::keyboard::listen().filter_map(switcher::key_event),
+            iced::keyboard::listen().filter_map(|e| crate::dialog::key_event(&e)),
             self.reading.subscription(),
             crate::palette::subscription(&self.palette, self.panels.visible),
             crate::find::subscription(self.panes.iter().any(|(_, ps)| ps.find.is_some())),
@@ -3191,7 +3326,9 @@ impl App {
 
     /// The backdrop-click / close message for the open overlay (`None` = no overlay open).
     pub fn overlay_close(&self) -> Option<Message> {
-        if self.switcher.open {
+        if self.dialog.is_some() {
+            Some(Message::Dialog(crate::dialog::DialogMsg::Cancel))
+        } else if self.switcher.open {
             Some(Message::Switcher(SwitcherMsg::Close))
         } else if self.palette.open {
             Some(Message::Palette(PaletteMsg::Close))
@@ -3713,10 +3850,12 @@ impl App {
         let overlay: Element<'_, Message> = match self.overlay_close() {
             Some(close) => {
                 let mut card = column![].spacing(6).width(Length::Fill);
-                if self.switcher.open {
+                if let Some(d) = &self.dialog {
+                    card = card.push(crate::dialog::view(d, t));
+                } else if self.switcher.open {
                     card = card.push(switcher::view(&self.switcher, t, self.status.mode));
                 }
-                if self.palette.open {
+                if self.palette.open && self.dialog.is_none() {
                     card = card.push(crate::palette::view(&self.palette, t));
                 }
                 let card = container(card)

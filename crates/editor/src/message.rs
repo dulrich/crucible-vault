@@ -28,6 +28,8 @@ pub enum Message {
     Find(FindMsg),
     /// plan editor-settings-tab WP-2: the Settings tab.
     Settings(crate::settings::SettingsMsg),
+    /// plan editor-data-safety WP-2: the open modal dialog.
+    Dialog(crate::dialog::DialogMsg),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name

@@ -260,6 +260,21 @@ impl SourceBuffer {
     pub fn conflict(&self) -> Option<&ContentHash> {
         self.conflict.as_ref()
     }
+
+    /// plan editor-data-safety WP-2: the conflict is "the file is gone" (the disk hash is the
+    /// empty hash — a save CAS conflict against no file, or a NotFound read under edits).
+    pub fn is_missing(&self) -> bool {
+        self.conflict
+            .as_ref()
+            .is_some_and(|h| h.as_str().is_empty())
+    }
+
+    /// A dirty buffer whose file is gone enters the missing-file state (no-op when clean).
+    pub fn mark_missing(&mut self) {
+        if self.dirty {
+            self.conflict = Some(ContentHash::from_hex(""));
+        }
+    }
     /// The edit counter.
     pub fn edit_seq(&self) -> u64 {
         self.edit_seq
@@ -762,6 +777,8 @@ impl SourceBuffer {
                 Some(h) => ContentHash::from_hex(h),
                 None => match read() {
                     Ok((_, h)) => h,
+                    // WP-2 (audit E2a): deleted / moved away under edits → missing-file state.
+                    Err(DaemonError::NotFound(_)) => ContentHash::from_hex(""),
                     Err(e) => return Some(format!("file changed: {e}")),
                 },
             };
@@ -1291,8 +1308,13 @@ pub fn view<'a>(
         None => Space::new().into(),
     };
     let conflict: Element<'a, Message> = if buf.conflict.is_some() {
+        let msg = if buf.is_missing() {
+            "The file is gone from disk (deleted or moved away). Keep mine recreates it; Take theirs closes it."
+        } else {
+            "File changed on disk while you were editing."
+        };
         let bar = row![
-            text("File changed on disk while you were editing.").color(tokens.warn_text.to_color()),
+            text(msg).color(tokens.warn_text.to_color()),
             button(text("Keep mine"))
                 .on_press(Message::Source(SourceMsg::KeepMine(buf.path.clone()))),
             button(text("Take theirs"))

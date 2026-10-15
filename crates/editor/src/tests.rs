@@ -1463,15 +1463,8 @@ mod usability_wp4 {
         d.write_note("wp4c/b.md", "theirs", &h)
             .expect("external write");
         let _ = app.update(Message::Tabs(TabsMsg::Close(app.focus, 0)));
-        assert_eq!(app.open_paths(), ["wp4c/b.md"], "close cancelled");
-        assert!(
-            app.status
-                .error
-                .as_deref()
-                .is_some_and(|e| e.starts_with("close cancelled")),
-            "{:?}",
-            app.status.error
-        );
+        assert_eq!(app.open_paths(), ["wp4c/b.md"], "close waits on the dialog");
+        assert!(app.dialog.is_some(), "plan editor-data-safety WP-2: dialog");
         assert!(!app.exiting);
     }
 
@@ -1488,8 +1481,8 @@ mod usability_wp4 {
         d.write_note("wp4q/a.md", "theirs", &h)
             .expect("external write");
         let _ = app.update(Message::Tabs(TabsMsg::Quit));
-        assert!(!app.exiting, "a failed save cancels the quit");
-        assert!(app.status.error.is_some());
+        assert!(!app.exiting, "a failed save stops the quit");
+        assert!(app.dialog.is_some(), "plan editor-data-safety WP-2: dialog");
 
         let (_tmp2, d2, mut app2) = app_with(&[("wp4q/b.md", "b")]);
         open(&mut app2, "wp4q/b.md");
@@ -1774,14 +1767,7 @@ mod round2_wp3 {
         );
         assert!(!app.exiting);
         assert!(app.quit.is_none(), "quit state cleared, not hanging");
-        assert!(
-            app.status
-                .error
-                .as_deref()
-                .is_some_and(|e| e.starts_with("quit cancelled")),
-            "{:?}",
-            app.status.error
-        );
+        assert!(app.dialog.is_some(), "plan editor-data-safety WP-2: dialog");
     }
 
     #[test]
@@ -2342,5 +2328,303 @@ mod data_safety_wp1 {
         );
         assert!(t.is_dirty());
         assert!(!t.take_resync_pending());
+    }
+}
+
+/// plan editor-data-safety WP-2: unsaved-edits dialog; missing-file conflict (all `FakeDaemon`).
+mod data_safety_wp2 {
+    use iced::widget::text_editor::{Action, Edit};
+
+    use super::*;
+    use crate::dialog::{DialogMsg, LossReason, OnOk};
+    use crate::header::QuickSwitchOpen;
+    use crate::message::{ExplorerMsg, PaletteMsg, PanesMsg, SourceMsg, SwitcherMsg};
+    use crate::source::SaveOutcome;
+
+    fn setup(notes: &[&str]) -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
+        let (tmp, d) = fake();
+        let d = Arc::new(d);
+        for p in notes {
+            d.create_note(p, "body").expect("create");
+        }
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), None);
+        app.rpc_inline = true;
+        for p in notes {
+            let _ = app.update(Message::Explorer(ExplorerMsg::Open((*p).to_owned())));
+        }
+        (tmp, d, app)
+    }
+
+    fn type_x(app: &mut App) {
+        let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+            Edit::Insert('x'),
+        ))));
+    }
+
+    fn dialog_notes(app: &App) -> Vec<(String, LossReason)> {
+        app.dialog
+            .as_ref()
+            .and_then(|d| d.unsaved_edits())
+            .map(|u| u.notes.clone())
+            .unwrap_or_default()
+    }
+
+    fn deleted(app: &mut App, path: &str) {
+        let _ = app.update(Message::Status(StatusMsg::Notification(
+            Notification::FileChanged {
+                path: path.to_owned(),
+                kind: cv_protocol::ChangeKind::Deleted,
+                hash: None,
+                origin: cv_protocol::Origin::Daemon,
+            },
+        )));
+    }
+
+    /// Runs `job` (a `begin_save` / `keep_mine` result) on the daemon and lands it.
+    fn land(app: &mut App, d: &FakeDaemon, job: Option<crate::source::SaveJob>) {
+        let job = job.expect("a save starts");
+        let outcome = job.run(d);
+        let _ = app.update(job.done(outcome));
+    }
+
+    fn save(app: &mut App, d: &FakeDaemon, path: &str) {
+        let job = app.doc_mut(path).and_then(|t| t.begin_save(false));
+        land(app, d, job);
+    }
+
+    fn keep_mine(app: &mut App, d: &FakeDaemon, path: &str) {
+        let job = app.doc_mut(path).and_then(|t| t.keep_mine(false));
+        land(app, d, job);
+    }
+
+    fn missing(app: &App, path: &str) -> bool {
+        app.doc(path)
+            .is_some_and(crate::source::SourceBuffer::is_missing)
+    }
+
+    #[test]
+    fn quit_with_a_disconnected_dirty_note_shows_the_dialog_ok_exits_cancel_returns() {
+        let (_tmp, d, mut app) = setup(&["d2q/a.md"]);
+        type_x(&mut app);
+        app.status.connected = false;
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        assert!(!app.exiting);
+        assert_eq!(
+            dialog_notes(&app),
+            [("d2q/a.md".to_owned(), LossReason::Disconnected)]
+        );
+        let _ = app.update(Message::Dialog(DialogMsg::Cancel));
+        assert!(app.dialog.is_none() && !app.exiting);
+        assert!(app.doc("d2q/a.md").is_some_and(|t| t.is_dirty()));
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        assert!(app.dialog.is_some());
+        let _ = app.update(Message::Dialog(DialogMsg::Ok));
+        assert!(app.exiting);
+        assert_eq!(
+            d.read_file("d2q/a.md").expect("file").0,
+            b"body",
+            "nothing written"
+        );
+    }
+
+    #[test]
+    fn quit_with_every_flush_succeeding_exits_without_a_dialog() {
+        let (_tmp, d, mut app) = setup(&["d2s/a.md"]);
+        type_x(&mut app);
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        assert!(app.dialog.is_none());
+        assert!(app.exiting);
+        assert_eq!(d.read_file("d2s/a.md").expect("file").0, b"xbody");
+    }
+
+    /// WP-1 hand-off: a quit awaiting a save that failed during an outage lands in the dialog.
+    #[test]
+    fn quit_awaiting_a_save_that_failed_shows_the_dialog() {
+        let (_tmp, _d, mut app) = setup(&["d2f/a.md"]);
+        type_x(&mut app);
+        let job = app.doc_mut("d2f/a.md").and_then(|t| t.begin_save(false));
+        let seq = job.expect("job").seq;
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        assert_eq!(app.quit_waits(), Some(1));
+        let _ = app.update(Message::Source(SourceMsg::Saved {
+            path: "d2f/a.md".into(),
+            seq,
+            outcome: SaveOutcome::Failed("daemon disconnected".into()),
+        }));
+        assert!(!app.exiting);
+        assert_eq!(dialog_notes(&app).len(), 1);
+        assert_eq!(app.dialog.as_ref().map(|d| &d.on_ok), Some(&OnOk::Quit));
+    }
+
+    #[test]
+    fn quit_with_only_a_validation_blocked_settings_edit_shows_the_dialog() {
+        let (_tmp, _d, mut app) = setup(&[]);
+        let mut f = crate::settings::ConfigFile::new("_custom/crucible-vault/x.toml", None);
+        f.dirty = true; // `doc: None` → `wants_save()` is false: the flush can never write it.
+        app.settings.files.insert(f.path.clone(), f);
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        assert!(!app.exiting);
+        let u = app
+            .dialog
+            .as_ref()
+            .and_then(|d| d.unsaved_edits())
+            .expect("dialog");
+        assert_eq!(u.settings, ["_custom/crucible-vault/x.toml"]);
+        let _ = app.update(Message::Dialog(DialogMsg::Ok));
+        assert!(app.exiting);
+    }
+
+    #[test]
+    fn tab_close_of_a_conflicted_duplicate_closes_only_that_tab_on_ok() {
+        let (_tmp, d, mut app) = setup(&["d2c/a.md"]);
+        let _ = app.update(Message::Panes(PanesMsg::SplitRight));
+        app.prefs.quick_switch_open = QuickSwitchOpen::Duplicate;
+        let _ = app.update(Message::Switcher(SwitcherMsg::Pick("d2c/a.md".into())));
+        let count = |app: &App| {
+            app.panes
+                .iter()
+                .flat_map(|(_, ps)| ps.tabs.iter())
+                .filter(|t| t.path == "d2c/a.md")
+                .count()
+        };
+        assert_eq!(count(&app), 2);
+        type_x(&mut app);
+        let (_, h) = d.read_file("d2c/a.md").expect("file");
+        d.write_note("d2c/a.md", "theirs", &h).expect("external");
+        save(&mut app, &d, "d2c/a.md");
+        assert!(app.doc("d2c/a.md").is_some_and(|t| t.conflict().is_some()));
+        let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+        assert_eq!(
+            dialog_notes(&app),
+            [("d2c/a.md".to_owned(), LossReason::Conflict)]
+        );
+        let _ = app.update(Message::Dialog(DialogMsg::Cancel));
+        assert_eq!(count(&app), 2, "Cancel keeps it");
+        let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+        let _ = app.update(Message::Dialog(DialogMsg::Ok));
+        assert_eq!(count(&app), 1, "only that tab closed");
+        assert!(
+            app.doc("d2c/a.md").is_some_and(|t| t.is_dirty()),
+            "the other tab keeps the shared document"
+        );
+        assert_eq!(d.read_file("d2c/a.md").expect("file").0, b"theirs");
+    }
+
+    /// Audit E2 (a): a delete notification under a dirty buffer → missing-file state; Keep
+    /// mine recreates the file at its exact path.
+    #[test]
+    fn deleted_under_edits_enters_missing_state_and_keep_mine_recreates() {
+        let (_tmp, d, mut app) = setup(&["d2m/a.md"]);
+        type_x(&mut app);
+        d.delete("d2m/a.md").expect("delete");
+        deleted(&mut app, "d2m/a.md");
+        assert!(missing(&app, "d2m/a.md"));
+        keep_mine(&mut app, &d, "d2m/a.md");
+        assert_eq!(d.read_file("d2m/a.md").expect("file").0, b"xbody");
+        let t = app.doc("d2m/a.md").expect("doc");
+        assert!(!t.is_dirty() && t.conflict().is_none());
+    }
+
+    /// Audit E2 (b): a save CAS conflict with an empty current hash → missing; Take theirs
+    /// discards the edits and closes the note's tabs (no re-read of a missing file).
+    #[test]
+    fn save_conflict_against_no_file_is_missing_and_take_theirs_closes_tabs() {
+        let (_tmp, d, mut app) = setup(&["d2t/a.md"]);
+        type_x(&mut app);
+        std::fs::remove_file(d.vault_root().join("d2t/a.md")).expect("rm");
+        save(&mut app, &d, "d2t/a.md");
+        assert!(missing(&app, "d2t/a.md"));
+        let _ = app.update(Message::Source(SourceMsg::TakeTheirs("d2t/a.md".into())));
+        assert!(app.open_paths().is_empty());
+        assert!(app.doc("d2t/a.md").is_none());
+        assert!(d.read_file("d2t/a.md").is_err(), "nothing written");
+    }
+
+    /// WP-1 hand-off: a reconnect resync whose read is NotFound enters the missing state.
+    #[test]
+    fn reconnect_resync_of_a_vanished_file_enters_missing_state() {
+        let (_tmp, d, app) = setup(&["d2r/a.md"]);
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = app.with_connector(Arc::new(move || Ok(Arc::clone(&dc))));
+        type_x(&mut app);
+        std::fs::remove_file(d.vault_root().join("d2r/a.md")).expect("rm");
+        let _ = app.update(Message::Status(StatusMsg::Disconnected));
+        let _ = app.update(Message::Status(StatusMsg::ReconnectDue));
+        assert!(missing(&app, "d2r/a.md"));
+    }
+
+    /// Audit B1: Keep mine when another file took the path meanwhile → the normal conflict,
+    /// and no alternate (suffixed) file is created.
+    #[test]
+    fn keep_mine_when_the_path_was_taken_conflicts_without_an_alternate_file() {
+        let (_tmp, d, mut app) = setup(&["d2b/a.md"]);
+        type_x(&mut app);
+        d.delete("d2b/a.md").expect("delete");
+        deleted(&mut app, "d2b/a.md");
+        assert!(missing(&app, "d2b/a.md"));
+        std::fs::write(d.vault_root().join("d2b/a.md"), "other").expect("write");
+        keep_mine(&mut app, &d, "d2b/a.md");
+        let t = app.doc("d2b/a.md").expect("doc");
+        assert!(
+            t.conflict().is_some() && !t.is_missing(),
+            "a normal conflict"
+        );
+        assert_eq!(d.read_file("d2b/a.md").expect("file").0, b"other");
+        let names: Vec<_> = std::fs::read_dir(d.vault_root().join("d2b"))
+            .expect("dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, ["a.md"], "no alternate file");
+    }
+
+    /// Audit E3: the open dialog takes input priority; Escape = Cancel; a repeated close
+    /// request is ignored.
+    #[test]
+    fn dialog_is_modal_and_escape_cancels() {
+        let (_tmp, _d, mut app) = setup(&["d2e/a.md", "d2e/b.md"]);
+        type_x(&mut app);
+        app.status.connected = false;
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        let before = app.dialog.clone();
+        assert!(before.is_some());
+        let text = app.active_doc().map(crate::source::SourceBuffer::text);
+        // Global chords, editor input, focus-loss flush, tab close, repeated close request.
+        let ctrl_w = crate::palette::chord::parse("Ctrl+W").expect("chord");
+        let _ = app.update(Message::Palette(PaletteMsg::Key(ctrl_w)));
+        type_x(&mut app);
+        let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
+        let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        assert_eq!(app.open_paths().len(), 2, "no tab closed");
+        assert_eq!(
+            app.active_doc().map(crate::source::SourceBuffer::text),
+            text
+        );
+        assert_eq!(app.dialog, before, "repeated close ignored");
+        assert!(app.quit.is_none() && !app.exiting);
+        // Escape: the dialog key listener maps it to Cancel (the switcher's Close too).
+        let esc = iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        assert!(matches!(
+            crate::dialog::key_event(&esc),
+            Some(Message::Dialog(DialogMsg::Cancel))
+        ));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Close));
+        assert!(app.dialog.is_none() && !app.exiting);
+        // Enter on the unsaved-edits dialog is Cancel (the safe default), never OK.
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        let _ = app.update(Message::Dialog(DialogMsg::Default));
+        assert!(app.dialog.is_none() && !app.exiting);
     }
 }
