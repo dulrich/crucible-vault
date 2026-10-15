@@ -380,6 +380,7 @@ fn palette_prompts_saves_first_and_runs_with_context() {
             status: JobState::Done,
             message: None,
             output_paths: Vec::new(),
+            open_path: None,
         }),
     )));
     let toast = e.app.palette.toast.clone().expect("toast");
@@ -481,4 +482,132 @@ fn client_command_runs_from_palette() {
     pal(&mut e.app, PaletteMsg::Pick(i));
     assert_eq!(e.app.panes.len(), panes + 1);
     assert!(!e.app.palette.open);
+}
+
+// ---- editor-usability-round WP-5: durable "File as kind" follows the note (audit B1, M2) ----
+
+fn durable_move_env() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vault = tmp.path().join("vault");
+    write(&vault, "a.md", "# A\n\nfirst line\n");
+    let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
+    let mut info = action("file-as-kind", vec![], &[]);
+    info.durable = true;
+    let d2 = Arc::clone(&d);
+    d.register_action(
+        info,
+        Arc::new(move |p: &RunActionParams| {
+            let from = p.context.active_path.clone().ok_or("no path")?;
+            d2.rename(&from, "kinds/a.md").map_err(|e| e.to_string())?;
+            Ok(Some("kinds/a.md".into()))
+        }),
+    )
+    .expect("register");
+    d.defer_action("file-as-kind").expect("defer");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.rpc_inline = true;
+    app.today = Some(today());
+    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    (tmp, d, app)
+}
+
+fn run_file_as_kind(app: &mut App) {
+    pal(app, PaletteMsg::Open);
+    let i = entry_of(app, "file-as-kind");
+    pal(app, PaletteMsg::Pick(i));
+}
+
+fn deliver_terminal(d: &FakeDaemon, app: &mut App) {
+    for id in d.complete_deferred().expect("complete") {
+        let j = d.job(&id).expect("job");
+        assert_eq!(j.status, JobState::Done);
+        let _ = app.update(Message::Status(StatusMsg::Notification(
+            Notification::JobUpdated(j),
+        )));
+    }
+}
+
+fn all_tabs(app: &App) -> Vec<String> {
+    app.panes
+        .iter()
+        .flat_map(|(_, ps)| ps.tabs.iter().map(|t| t.path.clone()))
+        .collect()
+}
+
+#[test]
+fn durable_file_as_kind_retargets_the_tab_on_terminal_status() {
+    let (_tmp, d, mut app) = durable_move_env();
+    run_file_as_kind(&mut app);
+    assert_eq!(
+        all_tabs(&app),
+        ["a.md"],
+        "nothing opens before the job ends"
+    );
+    deliver_terminal(&d, &mut app);
+    assert_eq!(
+        all_tabs(&app),
+        ["kinds/a.md"],
+        "exactly one tab, at the new path"
+    );
+    let tab = app.active_tab().expect("tab");
+    assert!(!tab.source.is_dirty() && tab.source.conflict().is_none());
+    assert_eq!(tab.source.path(), "kinds/a.md");
+}
+
+#[test]
+fn durable_file_as_kind_keeps_edits_made_during_the_run_as_a_conflict() {
+    let (_tmp, d, mut app) = durable_move_env();
+    run_file_as_kind(&mut app);
+    type_z(&mut app);
+    let text = app.active_tab().expect("tab").source.text();
+    deliver_terminal(&d, &mut app);
+    assert_eq!(all_tabs(&app), ["kinds/a.md"]);
+    let tab = app.active_tab().expect("tab");
+    assert_eq!(tab.source.text(), text, "edits are not replaced");
+    assert!(tab.source.is_dirty() && tab.source.conflict().is_some());
+    assert_eq!(
+        tab.source.path(),
+        "kinds/a.md",
+        "Keep mine saves at the new path"
+    );
+    let disk = std::fs::read_to_string(d.vault_root().join("kinds/a.md")).expect("read");
+    assert_eq!(disk, "# A\n\nfirst line\n", "nothing written yet");
+}
+
+#[test]
+fn terminal_status_before_the_reply_still_follows_and_original_kept_opens_new_tab() {
+    // The original path still exists (a copy-style action): open_path opens as a new tab.
+    let (_tmp, d, mut app) = durable_move_env();
+    let vault = d.vault_root().to_path_buf();
+    write(&vault, "kinds/b.md", "# B\n");
+    let j = JobStatus {
+        job_id: "early".into(),
+        status: JobState::Done,
+        message: None,
+        output_paths: Vec::new(),
+        open_path: Some("kinds/b.md".into()),
+    };
+    let _ = app.update(Message::Status(StatusMsg::Notification(
+        Notification::JobUpdated(j),
+    )));
+    assert_eq!(
+        all_tabs(&app),
+        ["a.md"],
+        "unknown job: remembered, not opened"
+    );
+    pal(
+        &mut app,
+        PaletteMsg::Ran {
+            title: "t".into(),
+            origin: Some(("a.md".into(), 0)),
+            result: Ok(cv_protocol::RunActionResult {
+                job_id: "early".into(),
+                open_path: None,
+            }),
+        },
+    );
+    let mut tabs = all_tabs(&app);
+    tabs.sort();
+    assert_eq!(tabs, ["a.md", "kinds/b.md"]);
 }

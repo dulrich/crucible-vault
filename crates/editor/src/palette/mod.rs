@@ -487,6 +487,11 @@ pub struct Palette {
     pub toast: Option<Toast>,
     /// job id → title of the action that started it.
     pub job_titles: HashMap<String, String>,
+    /// editor-usability-round WP-5 (audit B1/M2): job id → the invoking tab's
+    /// `(path, edit_seq)` at dispatch, so a terminal `open_path` can follow the note.
+    pub job_origins: HashMap<String, (String, u64)>,
+    /// Terminal `open_path`s that arrived before the `run_action` reply (job id → path).
+    pub early_open: HashMap<String, String>,
 }
 
 impl Default for Palette {
@@ -508,6 +513,8 @@ impl Default for Palette {
             pending_chord: None,
             toast: None,
             job_titles: HashMap::new(),
+            job_origins: HashMap::new(),
+            early_open: HashMap::new(),
         }
     }
 }

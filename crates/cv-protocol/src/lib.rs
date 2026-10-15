@@ -300,6 +300,10 @@ pub struct JobStatus {
     pub message: Option<String>,
     #[serde(default)]
     pub output_paths: Vec<String>,
+    /// Terminal statuses only: the note the run asks the client to open (e.g. a `move`
+    /// destination). Additive (absent from older daemons; omitted when `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,6 +622,24 @@ mod tests {
     }
 
     #[test]
+    fn job_status_open_path_is_additive() {
+        // Old daemon payload (no open_path) still parses.
+        let old: JobStatus =
+            serde_json::from_value(json!({"job_id":"j","status":"done","output_paths":[]}))
+                .expect("old");
+        assert_eq!(old.open_path, None);
+        // None is omitted, so old clients see the exact old shape.
+        let v = serde_json::to_value(&old).expect("ser");
+        assert!(v.get("open_path").is_none());
+        // Some round-trips; an old client ignoring unknown fields still parses it.
+        let new = JobStatus {
+            open_path: Some("k/a.md".into()),
+            ..old
+        };
+        assert_eq!(round_trip(&new)["open_path"], "k/a.md");
+    }
+
+    #[test]
     fn notifications_round_trip_and_topic() {
         let all = vec![
             Notification::FileChanged {
@@ -632,6 +654,7 @@ mod tests {
                 status: JobState::Deferred,
                 message: None,
                 output_paths: vec!["o.md".into()],
+                open_path: None,
             }),
             Notification::ConfigReloaded { errors: vec![] },
             Notification::OpenRequested {

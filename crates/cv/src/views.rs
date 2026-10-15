@@ -326,4 +326,76 @@ mod tests {
         drop(index);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// editor-usability-round WP-5 (view live-update invariant): a rename, or a frontmatter
+    /// change that moves a note in/out of a view's rows, commits a new generation, which
+    /// invalidates the view; the re-run reflects the change.
+    #[tokio::test]
+    async fn rename_and_frontmatter_change_invalidate_the_hosted_view() {
+        let tmp = std::env::temp_dir().join(format!("cv-views-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let vault = tmp.join("vault");
+        std::fs::create_dir_all(vault.join("stack")).unwrap();
+        std::fs::write(vault.join("stack/t1.md"), "---\nstatus: on\n---\n").unwrap();
+        std::fs::write(vault.join("stack/t2.md"), "---\nstatus: off\n---\n").unwrap();
+        let config = tmp.join("config");
+        std::fs::create_dir_all(config.join("views")).unwrap();
+        std::fs::write(
+            config.join("views/hubs.toml"),
+            "[[views]]\ntype='table'\nname='On'\nfilters='note.status == \"on\"'\norder=['file.name']\n",
+        )
+        .unwrap();
+        let base = tmp.join("idx").join("index.db");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        let mut index = cv_index::Index::create(&vault, &base).unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut reg = ViewRegistry::new(&base, tx);
+        register_views(&mut reg, &config);
+        let names = |r: &ViewResult| -> Vec<String> {
+            r.0["groups"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|g| g["rows"].as_array().cloned().unwrap_or_default())
+                .map(|row| {
+                    let c = &row["cells"][0];
+                    c["v"]
+                        .as_str()
+                        .or(c["label"].as_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect()
+        };
+        let id = "hubs#On".to_owned();
+        assert_eq!(names(&reg.run(&id, None).await.unwrap()), ["t1"]);
+        let mut step = async |change: &dyn Fn()| {
+            change();
+            let g = index.rebuild(&vault).unwrap();
+            reg.notify_generation(g);
+            let n = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let Notification::ViewsInvalidated { view_ids } = n else {
+                panic!("expected views_invalidated, got {n:?}");
+            };
+            assert!(view_ids.contains(&id));
+            names(&reg.run(&id, None).await.unwrap())
+        };
+        // Rename: the row follows the new name.
+        let rows = step(&|| {
+            std::fs::rename(vault.join("stack/t1.md"), vault.join("stack/renamed.md")).unwrap();
+        })
+        .await;
+        assert_eq!(rows, ["renamed"]);
+        // Frontmatter change: t2 enters the view.
+        let rows = step(&|| {
+            std::fs::write(vault.join("stack/t2.md"), "---\nstatus: on\n---\n").unwrap();
+        })
+        .await;
+        assert_eq!(rows, ["renamed", "t2"]);
+        drop(index);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

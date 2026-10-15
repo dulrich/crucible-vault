@@ -358,6 +358,7 @@ fn map_job(j: &cv_state::Job) -> JobStatus {
         status,
         message: j.error.clone(),
         output_paths: Vec::new(),
+        open_path: None,
     }
 }
 

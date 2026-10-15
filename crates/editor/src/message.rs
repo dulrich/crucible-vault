@@ -55,13 +55,13 @@ pub enum SourceMsg {
     TakeTheirs(String),
     /// A key the source editor handles itself as one undoable edit / smart motion (WP-1).
     Key(SourceKey),
-    /// The pointer moved over the source editor of `path` (editor-local coordinates).
-    Pointer {
+    /// Middle-press over the source editor of `path` at `at` (editor-local coordinates): place
+    /// the cursor, then paste PRIMARY. editor-usability-round WP-5: the position comes with the
+    /// press (`widget::middle_click`), not from a message per pointer move.
+    MiddleClick {
         path: String,
         at: iced::Point,
     },
-    /// Middle-press over the source editor of `path`: place the cursor, then paste PRIMARY.
-    MiddleClick(String),
     /// The PRIMARY selection read for a middle-click paste.
     PastePrimary {
         path: String,
@@ -207,6 +207,8 @@ pub enum PaletteMsg {
     /// `run_action` returned.
     Ran {
         title: String,
+        /// The invoking tab's `(path, edit_seq)` at dispatch (WP-5 follow-the-note).
+        origin: Option<(String, u64)>,
         result: Result<cv_protocol::RunActionResult, String>,
     },
     /// Toast expiry tick.

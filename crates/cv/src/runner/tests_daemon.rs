@@ -499,3 +499,67 @@ fn example_config_files_load_cleanly() {
             .any(|s| matches!(s, cv_actions::Starter::Schedule(_)))
     );
 }
+
+const MOVE_ACTIONS: &str = r#"
+[[action]]
+id = "file-away"
+needs = ["active_path"]
+[[action.steps]]
+type = "move"
+to = "archive"
+"#;
+
+/// Plan editor-usability-round WP-5 (audit B1): a durable action whose `move` step relocates the
+/// note publishes the destination as `open_path` on its terminal `JobUpdated`, so the editor can
+/// follow the note instead of orphaning its tab.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn durable_move_publishes_open_path_on_terminal_status() {
+    let env = Env::new(MOVE_ACTIONS);
+    let d = Daemon::start(
+        env.config(),
+        DaemonOptions {
+            landlock: false,
+            watch: WatchConfig {
+                debounce: Duration::from_millis(50),
+                echo_ttl: Duration::from_secs(5),
+            },
+            config_poll: Duration::from_millis(100),
+        },
+    )
+    .unwrap()
+    .spawn()
+    .await
+    .unwrap();
+    let mut rx = d.subscribe();
+    let mut c = env.client();
+    let r = c
+        .call(run(
+            "file-away",
+            json!({}),
+            ActionContext {
+                active_path: Some("inbox/x.md".into()),
+                ..ActionContext::default()
+            },
+        ))
+        .unwrap();
+    assert!(r.get("open_path").is_none(), "durable: job id only");
+    let job_id = r["job_id"].as_str().unwrap().to_owned();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let terminal = loop {
+        assert!(Instant::now() < deadline, "no terminal status");
+        match rx.try_recv() {
+            Ok(Notification::JobUpdated(s)) if s.job_id == job_id => {
+                if matches!(s.status, JobState::Pending | JobState::Running) {
+                    assert_eq!(s.open_path, None, "non-terminal carries no open_path");
+                } else {
+                    break s;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    assert_eq!(terminal.status, JobState::Done, "{:?}", terminal.message);
+    assert_eq!(terminal.open_path.as_deref(), Some("archive/x.md"));
+    d.shutdown().await.unwrap();
+}

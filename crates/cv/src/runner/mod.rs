@@ -431,7 +431,7 @@ impl Inner {
             .map_err(|e| EnqueueError::State(e.to_string()))?;
         let id = match out {
             EnqueueOutcome::Enqueued(id) => {
-                self.publish_status(&id, JobState::Pending, None, Vec::new());
+                self.publish_status(&id, JobState::Pending, None, Vec::new(), None);
                 id
             }
             EnqueueOutcome::Duplicate(id) => id,
@@ -449,12 +449,14 @@ impl Inner {
         status: JobState,
         message: Option<String>,
         output_paths: Vec<String>,
+        open_path: Option<String>,
     ) {
         let _ = self.events.send(Notification::JobUpdated(JobStatus {
             job_id: id.to_owned(),
             status,
             message,
             output_paths,
+            open_path,
         }));
     }
 
@@ -550,7 +552,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 RunSummary::default(),
             ),
             Some(action) => {
-                inner.publish_status(&id, JobState::Running, None, Vec::new());
+                inner.publish_status(&id, JobState::Running, None, Vec::new(), None);
                 let inner2 = Arc::clone(&inner);
                 let job_id = id.clone();
                 let lane = job.lane;
@@ -593,7 +595,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
             f.remove(&k);
         }
     }
-    inner.publish_status(&id, state, message, summary.output_paths);
+    inner.publish_status(&id, state, message, summary.output_paths, summary.open_path);
 }
 
 struct Spawner<'a> {

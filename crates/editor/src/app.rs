@@ -289,12 +289,17 @@ impl App {
     /// `Content` only while it is its pane's active tab in Source or Split; every other tab
     /// holds plain text. Idempotent; run after every update.
     fn sync_buffers(&mut self) {
+        let t0 = std::time::Instant::now();
         for (_, ps) in self.panes.iter_mut() {
             let active = ps.active;
             for (i, tab) in ps.tabs.iter_mut().enumerate() {
                 let visible = active == Some(i) && self.reading.mode(&tab.path).shows_source();
                 tab.source.set_shaped(visible);
             }
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        if ms >= 1.0 {
+            tracing::debug!(elapsed_ms = ms, "sync_buffers");
         }
     }
 
@@ -550,8 +555,7 @@ impl App {
                     | SourceMsg::Saved { path, .. }
                     | SourceMsg::KeepMine(path)
                     | SourceMsg::TakeTheirs(path)
-                    | SourceMsg::Pointer { path, .. }
-                    | SourceMsg::MiddleClick(path)
+                    | SourceMsg::MiddleClick { path, .. }
                     | SourceMsg::PastePrimary { path, .. } => {
                         panes::find(&self.panes, path).map(|(p, _)| p)
                     }
@@ -1469,11 +1473,18 @@ impl App {
                 outcome,
                 call,
             } => return self.after_save_first(&path, seq, outcome, call),
-            PaletteMsg::Ran { title, result } => match result {
+            PaletteMsg::Ran {
+                title,
+                origin,
+                result,
+            } => match result {
                 Ok(r) => {
                     self.palette.job_titles.insert(r.job_id.clone(), title);
-                    if let Some(p) = r.open_path {
-                        self.open(&p, true);
+                    let early = self.palette.early_open.remove(&r.job_id);
+                    if let Some(p) = r.open_path.or(early) {
+                        self.follow_open(origin, &p);
+                    } else if let Some(o) = origin {
+                        self.palette.job_origins.insert(r.job_id, o);
                     }
                 }
                 Err(e) => self.status.error = Some(format!("{title}: {e}")),
@@ -1679,10 +1690,102 @@ impl App {
             context,
         };
         let title = call.title;
+        let origin = params.context.active_path.as_ref().and_then(|p| {
+            let (pane, i) = panes::find(&self.panes, p)?;
+            let tab = self.panes.get(pane)?.tabs.get(i)?;
+            Some((p.clone(), tab.source.edit_seq()))
+        });
         self.rpc(
             move |d| d.run_action(params).map_err(|e| e.to_string()),
-            move |result| Message::Palette(PaletteMsg::Ran { title, result }),
+            move |result| {
+                Message::Palette(PaletteMsg::Ran {
+                    title,
+                    origin,
+                    result,
+                })
+            },
         )
+    }
+
+    /// A terminal `JobUpdated`: follow its `open_path` (WP-5). A job whose `run_action` reply has
+    /// not arrived yet is remembered for [`PaletteMsg::Ran`].
+    fn job_finished(&mut self, j: &cv_protocol::JobStatus) {
+        if j.status != cv_protocol::JobState::Done {
+            self.palette.job_origins.remove(&j.job_id);
+            return;
+        }
+        let Some(open) = j.open_path.clone() else {
+            self.palette.job_origins.remove(&j.job_id);
+            return;
+        };
+        if self.palette.job_titles.contains_key(&j.job_id) {
+            if let Some(origin) = self.palette.job_origins.remove(&j.job_id) {
+                self.follow_open(Some(origin), &open);
+            }
+            // A non-durable run already followed its reply's `open_path`; a durable run started
+            // without a tab has no origin and does not open anything unasked.
+        } else {
+            if self.palette.early_open.len() >= 64 {
+                self.palette.early_open.clear();
+            }
+            self.palette.early_open.insert(j.job_id.clone(), open);
+        }
+    }
+
+    /// An action asks the client to open `to`. If the invoking tab is still open at its original
+    /// path and that file no longer exists, the tab follows the note (retarget, as explorer
+    /// renames do); edits made during the run are kept and surfaced as a conflict instead of
+    /// being replaced (audit M2). Otherwise `to` opens as a new tab.
+    fn follow_open(&mut self, origin: Option<(String, u64)>, to: &str) {
+        let Some((from, seq)) = origin.filter(|(p, _)| p != to) else {
+            self.open(to, true);
+            return;
+        };
+        let Some((pane, i)) = panes::find(&self.panes, &from) else {
+            self.open(to, true);
+            return;
+        };
+        let Some(d) = self.daemon.clone() else { return };
+        match d.read_file(&from) {
+            Err(DaemonError::NotFound(_)) => {}
+            _ => {
+                self.open(to, true);
+                return;
+            }
+        }
+        let edited = self
+            .panes
+            .get(pane)
+            .and_then(|ps| ps.tabs.get(i))
+            .is_some_and(|t| t.source.edit_seq() != seq);
+        if !edited {
+            self.retarget(&from, to);
+            return;
+        }
+        let hash = match d.read_file(to) {
+            Ok((_, h)) => h,
+            Err(e) => {
+                self.status.error = Some(open_error(&e));
+                return;
+            }
+        };
+        let mode = self.reading.mode(&from);
+        if let Some(t) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) {
+            t.path = to.to_owned();
+            t.source.follow_move(to, hash);
+        }
+        self.on_tab_closed(&from);
+        for (_, ps) in self.panes.iter_mut() {
+            ps.history.retarget(&from, to);
+        }
+        if let Some(t) = self.panes.get(pane).and_then(|ps| ps.tabs.get(i)).cloned() {
+            self.reading.register(&t, mode, true, self.daemon.as_ref());
+        }
+        self.status.error = Some(format!(
+            "{from} moved to {to} while you were editing: keep mine saves your text there"
+        ));
+        self.ui.touch_recent(to);
+        self.persist();
     }
 
     // ---- WP-5: side panels ----
@@ -1778,6 +1881,7 @@ impl App {
         if !self.panels.visible {
             return Task::none();
         }
+        let t0 = std::time::Instant::now();
         let generation = self.status.generation;
         let d = self.daemon.clone();
         let tab = self.panes.get(self.focus).and_then(PaneState::active_tab);
@@ -1786,6 +1890,10 @@ impl App {
             && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)
         {
             self.status.error = Some(format!("tags: {e}"));
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        if ms >= 1.0 {
+            tracing::debug!(elapsed_ms = ms, "sync_panels");
         }
         match self.panels.backlinks_due(generation) {
             Some(path) => {
@@ -1858,6 +1966,7 @@ impl App {
                             .unwrap_or_default();
                         self.status.last_job = Some(format!("{}: {state}", j.job_id));
                         self.palette.job_updated(&j, std::time::Instant::now());
+                        self.job_finished(&j);
                     }
                     Notification::FileChanged {
                         path, kind, hash, ..

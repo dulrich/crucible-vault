@@ -206,3 +206,60 @@ fn pure_helpers() {
         Rendered::Text("12".into())
     );
 }
+
+/// editor-usability-round WP-5 measurement harness (not a gate): Toggle Panels latency against a
+/// real `cv-index` index of the synthetic spike vault in `CV_SPIKE_VAULT`
+/// (`runs/spike/panels-lag/gen.py`). Run:
+/// `CV_SPIKE_VAULT=$PWD/runs/spike/panels-lag/vault cargo test -p editor --release --lib panels_open_latency -- --ignored --nocapture`
+#[test]
+#[ignore = "measurement harness; needs CV_SPIKE_VAULT"]
+fn panels_open_latency() {
+    let Ok(vault) = std::env::var("CV_SPIKE_VAULT") else {
+        return;
+    };
+    let vault = std::path::PathBuf::from(vault);
+    let tmp = tempfile::tempdir().expect("tmp");
+    let t = std::time::Instant::now();
+    let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
+    println!("index build: {:?}", t.elapsed());
+    let first = {
+        let mut stack = vec![vault.clone()];
+        let mut found = None;
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).expect("dir").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if found.is_none() && p.extension().is_some_and(|x| x == "md") {
+                    found = Some(p);
+                }
+            }
+        }
+        found.expect("a note")
+    };
+    let rel = first
+        .strip_prefix(&vault)
+        .expect("rel")
+        .to_string_lossy()
+        .into_owned();
+    let dc: Arc<dyn DaemonClient> = d;
+    let mut app = App::new(Some(dc), None);
+    app.rpc_inline = true;
+    let _ = app.update(Message::Tabs(TabsMsg::Open(rel)));
+    for round in 0..3 {
+        // Each round: a new index generation (as after any save), then Toggle Panels open.
+        app.status.generation += 1;
+        let t = std::time::Instant::now();
+        let _ = app.update(Message::Panels(PanelsMsg::Toggle));
+        let open = t.elapsed();
+        let t = std::time::Instant::now();
+        let _ = app.update(Message::Panels(PanelsMsg::Tick));
+        let tick = t.elapsed();
+        println!(
+            "round {round}: toggle-open {:.1} ms, next tick {:.1} ms",
+            open.as_secs_f64() * 1e3,
+            tick.as_secs_f64() * 1e3
+        );
+        let _ = app.update(Message::Panels(PanelsMsg::Toggle));
+    }
+}

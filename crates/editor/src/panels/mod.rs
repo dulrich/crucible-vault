@@ -310,17 +310,14 @@ impl Panels {
         {
             return;
         }
-        let rows = d.index().with_query(|q| {
-            let mut out = Vec::new();
-            let mut stack = vec![String::new()];
-            while let Some(folder) = stack.pop() {
-                out.extend(q.folder_files(&folder)?.into_iter().map(|f| (f.id, f.path)));
-                stack.extend(q.subfolders(&folder)?);
-            }
-            Ok(out)
-        });
+        let t0 = std::time::Instant::now();
+        // One scan (editor-usability-round WP-5): the old per-folder `folder_files` +
+        // `subfolders` walk re-scanned every distinct folder per folder — ~1.2 s on a
+        // 2.7k-folder vault (runs/spike/panels-lag/FINDINGS.md).
+        let rows = d.index().with_query(|q| q.file_paths());
         match rows {
             Ok(rows) => {
+                tracing::debug!(rows = rows.len(), "panels resolver rows");
                 let mut resolver = Resolver::default();
                 let mut ids = HashMap::new();
                 let mut paths = HashMap::new();
@@ -338,6 +335,10 @@ impl Panels {
             }
             Err(e) => tracing::warn!(error = %e, "panels: resolver rebuild failed"),
         }
+        tracing::debug!(
+            elapsed_ms = t0.elapsed().as_secs_f64() * 1e3,
+            "panels refresh_resolver"
+        );
     }
 
     fn resolve(&self, src: &str, target: &str) -> Option<String> {
@@ -384,6 +385,7 @@ impl Panels {
             }
             return;
         };
+        let t0 = std::time::Instant::now();
         if let Some(d) = d {
             let stale = self
                 .resolver
@@ -434,6 +436,10 @@ impl Panels {
             self.path = Some(tab.path.clone());
         }
         self.buffer_key = Some(key);
+        tracing::debug!(
+            elapsed_ms = t0.elapsed().as_secs_f64() * 1e3,
+            "panels sync_buffer"
+        );
     }
 
     /// The path whose backlinks should be (re)loaded now, if the key changed.
@@ -452,6 +458,7 @@ impl Panels {
         if self.tags_gen == Some(generation) {
             return Ok(());
         }
+        let t0 = std::time::Instant::now();
         let mut tags = d
             .index()
             .with_query(|q| q.tags())
@@ -463,6 +470,10 @@ impl Panels {
         });
         self.tags = tags;
         self.tags_gen = Some(generation);
+        tracing::debug!(
+            elapsed_ms = t0.elapsed().as_secs_f64() * 1e3,
+            "panels sync_tags"
+        );
         Ok(())
     }
 

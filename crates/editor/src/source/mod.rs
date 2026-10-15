@@ -21,7 +21,7 @@ use editor_model::editing::{self, ListEnter};
 use editor_model::undo::{self, Change, EditKind, UndoHistory};
 use iced::keyboard::{self, key};
 use iced::widget::text_editor::{self, Action, Binding, Content, Edit, KeyPress, Motion};
-use iced::widget::{Space, button, column, container, mouse_area, row, text};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Element, Length, Point, Task, clipboard};
 
 use crate::app::Tab;
@@ -115,8 +115,6 @@ pub struct SourceBuffer {
     conflict: Option<ContentHash>,
     /// Highlighter epoch (bumped on wholesale content replacement).
     epoch: u64,
-    /// Last pointer position over the editor (editor-local), for middle-click paste.
-    pointer: Option<Point>,
     /// The selection last written to PRIMARY (not re-written while unchanged).
     primary: Option<String>,
 }
@@ -135,7 +133,6 @@ impl Clone for SourceBuffer {
             save_again: self.save_again,
             conflict: self.conflict.clone(),
             epoch: self.epoch,
-            pointer: self.pointer,
             primary: self.primary.clone(),
         }
     }
@@ -184,7 +181,6 @@ impl SourceBuffer {
             save_again: false,
             conflict: None,
             epoch: 0,
-            pointer: None,
             primary: None,
         }
     }
@@ -672,6 +668,15 @@ impl SourceBuffer {
         }
     }
 
+    /// The note moved to `to` (whose on-disk hash is `disk`) while this buffer had edits the move
+    /// did not carry: follow the path, keep the text, and raise the conflict bar (Keep mine
+    /// saves it at `to`; Take theirs discards it). editor-usability-round WP-5, audit M2.
+    pub fn follow_move(&mut self, to: &str, disk: ContentHash) {
+        to.clone_into(&mut self.path);
+        self.dirty = true;
+        self.conflict = Some(disk);
+    }
+
     /// Keep mine: re-save against the on-disk hash.
     pub fn keep_mine(&mut self, read_only: bool) -> Option<SaveJob> {
         let current = self.conflict.take()?;
@@ -780,8 +785,7 @@ pub fn update(
         | SourceMsg::Saved { path, .. }
         | SourceMsg::KeepMine(path)
         | SourceMsg::TakeTheirs(path)
-        | SourceMsg::Pointer { path, .. }
-        | SourceMsg::MiddleClick(path)
+        | SourceMsg::MiddleClick { path, .. }
         | SourceMsg::PastePrimary { path, .. } => find(tabs, path),
         _ => active_buf.and_then(|p| find(tabs, &p)),
     };
@@ -820,14 +824,7 @@ pub fn update(
             };
             edited(buf, changed)
         }
-        SourceMsg::Pointer { at, .. } => {
-            buf.pointer = Some(at);
-            Task::none()
-        }
-        SourceMsg::MiddleClick(path) => {
-            let Some(p) = buf.pointer else {
-                return Task::none();
-            };
+        SourceMsg::MiddleClick { path, at: p } => {
             buf.perform(
                 Action::Click(Point::new(p.x - EDITOR_PADDING, p.y - EDITOR_PADDING)),
                 read_only,
@@ -972,7 +969,7 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
 /// Renders a tab's source buffer with its conflict bar / read-only marker.
 pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
     let editor: Element<'a, Message> = match &buf.content {
-        Repr::Shaped(content) => mouse_area(
+        Repr::Shaped(content) => crate::widget::middle_click::middle_click(
             text_editor::TextEditor::new(content)
                 .id(editor_id(&buf.path))
                 .height(Length::Fill)
@@ -986,14 +983,13 @@ pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a
                     },
                     highlighter::to_format,
                 ),
+            move |at| {
+                Message::Source(SourceMsg::MiddleClick {
+                    path: buf.path.clone(),
+                    at,
+                })
+            },
         )
-        .on_move(move |at| {
-            Message::Source(SourceMsg::Pointer {
-                path: buf.path.clone(),
-                at,
-            })
-        })
-        .on_middle_press(Message::Source(SourceMsg::MiddleClick(buf.path.clone())))
         .into(),
         // Never visible in practice (the app materialises visible tabs before drawing).
         Repr::Plain { text: t, .. } => text(t.as_str()).into(),

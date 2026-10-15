@@ -32,6 +32,10 @@ struct Inner {
     /// WP-7: scripted view results, and every `view_run` call `(view_id, this_path)` in order.
     views: BTreeMap<String, ViewResult>,
     view_calls: Vec<(String, Option<String>)>,
+    /// editor-usability-round WP-5: actions run as durable jobs (job id now, handler and
+    /// terminal `JobUpdated` on [`FakeDaemon::complete_deferred`]), and the queued runs.
+    deferred_ids: std::collections::BTreeSet<String>,
+    queued: Vec<(String, RunActionParams)>,
 }
 
 /// The fake daemon.
@@ -84,6 +88,8 @@ impl FakeDaemon {
                 next_job: 1,
                 views: BTreeMap::new(),
                 view_calls: Vec::new(),
+                deferred_ids: std::collections::BTreeSet::new(),
+                queued: Vec::new(),
             }),
             hello,
             vault_root: vault_root.to_path_buf(),
@@ -104,6 +110,35 @@ impl FakeDaemon {
             .actions
             .insert(info.id.clone(), (info, handler));
         Ok(())
+    }
+
+    /// Makes `action_id` durable: `run_action` returns only a job id (emitting `pending`); the
+    /// handler runs and the terminal status (with `open_path`) is emitted on
+    /// [`FakeDaemon::complete_deferred`], like the real runner's durable path.
+    pub fn defer_action(&self, action_id: &str) -> Result<()> {
+        self.lock()?.deferred_ids.insert(action_id.to_owned());
+        Ok(())
+    }
+
+    /// Runs every queued durable job and emits its terminal `JobUpdated`. Returns the job ids.
+    pub fn complete_deferred(&self) -> Result<Vec<String>> {
+        let queued = std::mem::take(&mut self.lock()?.queued);
+        let mut done = Vec::new();
+        for (job_id, params) in queued {
+            let handler = {
+                let g = self.lock()?;
+                g.actions
+                    .get(&params.action_id)
+                    .map(|(_, h)| Arc::clone(h))
+                    .ok_or_else(|| DaemonError::NotFound(params.action_id.clone()))?
+            };
+            let job = terminal(job_id.clone(), handler(&params));
+            let mut g = self.lock()?;
+            g.jobs.insert(job_id.clone(), job.clone());
+            emit(&mut g, Notification::JobUpdated(job));
+            done.push(job_id);
+        }
+        Ok(done)
     }
 
     /// Switches the reported mode and emits `mode_changed`.
@@ -156,6 +191,21 @@ impl FakeDaemon {
         );
         emit(g, Notification::IndexGeneration { n });
         Ok(())
+    }
+}
+
+/// A terminal job status from a handler outcome.
+fn terminal(job_id: String, outcome: std::result::Result<Option<String>, String>) -> JobStatus {
+    let (status, open_path, message) = match outcome {
+        Ok(p) => (JobState::Done, p, None),
+        Err(m) => (JobState::Failed, None, Some(m)),
+    };
+    JobStatus {
+        job_id,
+        status,
+        message,
+        output_paths: open_path.iter().cloned().collect(),
+        open_path,
     }
 }
 
@@ -259,27 +309,39 @@ impl DaemonClient for FakeDaemon {
 
     fn run_action(&self, params: RunActionParams) -> Result<RunActionResult> {
         let handler = {
-            let g = self.lock()?;
-            g.actions
+            let mut g = self.lock()?;
+            let handler = g
+                .actions
                 .get(&params.action_id)
                 .map(|(_, h)| Arc::clone(h))
-                .ok_or_else(|| DaemonError::NotFound(params.action_id.clone()))?
+                .ok_or_else(|| DaemonError::NotFound(params.action_id.clone()))?;
+            if g.deferred_ids.contains(&params.action_id) {
+                let job_id = format!("fake-{}", g.next_job);
+                g.next_job += 1;
+                let job = JobStatus {
+                    job_id: job_id.clone(),
+                    status: JobState::Pending,
+                    message: None,
+                    output_paths: Vec::new(),
+                    open_path: None,
+                };
+                g.jobs.insert(job_id.clone(), job.clone());
+                g.queued.push((job_id.clone(), params));
+                emit(&mut g, Notification::JobUpdated(job));
+                return Ok(RunActionResult {
+                    job_id,
+                    open_path: None,
+                });
+            }
+            handler
         };
         // The handler runs without the lock so it may call back into the fake.
         let outcome = handler(&params);
         let mut g = self.lock()?;
         let job_id = format!("fake-{}", g.next_job);
         g.next_job += 1;
-        let (status, open_path, message) = match outcome {
-            Ok(p) => (JobState::Done, p, None),
-            Err(m) => (JobState::Failed, None, Some(m)),
-        };
-        let job = JobStatus {
-            job_id: job_id.clone(),
-            status,
-            message,
-            output_paths: open_path.iter().cloned().collect(),
-        };
+        let job = terminal(job_id.clone(), outcome);
+        let open_path = job.open_path.clone();
         g.jobs.insert(job_id.clone(), job.clone());
         emit(&mut g, Notification::JobUpdated(job));
         Ok(RunActionResult { job_id, open_path })

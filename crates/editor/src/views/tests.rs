@@ -249,3 +249,63 @@ fn closing_the_host_tab_drops_its_results() {
     let _ = app.update(Message::Tabs(TabsMsg::Close(app.focus, 0)));
     assert!(app.views.get(ID, Some(NOTE)).is_none());
 }
+
+/// editor-usability-round WP-5 (view live-update invariant): refreshing an entry that already
+/// has rows keeps them on screen (never `Loading…`/empty) and keeps its scroll window until the
+/// new result lands.
+#[test]
+fn refresh_of_a_ready_entry_keeps_rows_and_window() {
+    let mut store = ViewStore::default();
+    let key = (ID.to_owned(), Some(NOTE.to_owned()));
+    let need = || ViewsMsg::Need {
+        id: ID.into(),
+        host: Some(NOTE.into()),
+    };
+    assert!(matches!(update(&mut store, need()), Effect::Run { .. }));
+    let _ = update(
+        &mut store,
+        ViewsMsg::Loaded {
+            id: ID.into(),
+            host: Some(NOTE.into()),
+            result: Ok(result()),
+        },
+    );
+    let window = crate::widget::virtual_list::ListWindow {
+        offset: 120.0,
+        height: 300.0,
+    };
+    let _ = update(
+        &mut store,
+        ViewsMsg::Scrolled {
+            id: ID.into(),
+            host: Some(NOTE.into()),
+            window,
+        },
+    );
+    store.invalidate(&[ID.into()]);
+    assert!(matches!(update(&mut store, need()), Effect::Run { .. }));
+    let e = store.entries.get(&key).expect("entry");
+    assert!(
+        matches!(&e.state, State::Ready(d) if d.lines.len() == 1),
+        "rows stay while the refresh is in flight: {:?}",
+        e.state
+    );
+    assert_eq!(e.window, window);
+    let mut next = result();
+    let row = next["groups"][0]["rows"][0].clone();
+    next["groups"][0]["rows"]
+        .as_array_mut()
+        .expect("rows")
+        .push(row);
+    let _ = update(
+        &mut store,
+        ViewsMsg::Loaded {
+            id: ID.into(),
+            host: Some(NOTE.into()),
+            result: Ok(next),
+        },
+    );
+    let e = store.entries.get(&key).expect("entry");
+    assert!(matches!(&e.state, State::Ready(d) if d.lines.len() == 2));
+    assert_eq!(e.window, window, "scroll window kept across the refresh");
+}
