@@ -411,3 +411,120 @@ fn view_tree_position_stable_across_dirty_states() {
     assert_eq!(clean[last], dirty[last], "editor tag moved");
     assert_eq!(clean[last], saving[last], "editor tag moved");
 }
+
+fn key(app: &mut App, k: crate::message::SourceKey) {
+    let _ = app.update(Message::Source(SourceMsg::Key(k)));
+}
+
+fn at(app: &mut App, line: usize, column: usize, sel: Option<(usize, usize)>) {
+    buf(app).move_to(Cursor {
+        position: Position { line, column },
+        selection: sel.map(|(line, column)| Position { line, column }),
+    });
+}
+
+fn set_text(app: &mut App, d: &FakeDaemon, p: &str, text: &str) {
+    let h = d.write_note(p, text, buf(app).base_hash()).expect("write");
+    buf(app).reload(text.as_bytes(), h);
+    buf(app).materialise();
+}
+
+#[test]
+fn enter_continues_list_and_undoes_in_one_step() {
+    use crate::message::SourceKey;
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "  - [x] done\n");
+    at(&mut app, 0, 12, None);
+    key(&mut app, SourceKey::Enter);
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "  - [x] done\n  - [ ] \n");
+    assert_eq!(b.cursor().position, Position { line: 1, column: 8 });
+    assert!(b.is_dirty());
+    assert_eq!(b.edit_seq(), 1);
+    // Enter on the empty item removes the marker instead.
+    key(&mut app, SourceKey::Enter);
+    assert_eq!(buf(&mut app).text(), "  - [x] done\n  \n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "  - [x] done\n  - [ ] \n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "  - [x] done\n");
+    assert_eq!(
+        b.cursor().position,
+        Position {
+            line: 0,
+            column: 12
+        }
+    );
+}
+
+#[test]
+fn enter_numbered_replaces_selection_and_plain_lines_split() {
+    use crate::message::SourceKey;
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "> 3. abcdef\nplain\n");
+    // Select "cd" and Enter: selection replaced, then the list rule applies.
+    at(&mut app, 0, 9, Some((0, 7)));
+    key(&mut app, SourceKey::Enter);
+    assert_eq!(buf(&mut app).text(), "> 3. ab\n> 4. ef\nplain\n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "> 3. abcdef\nplain\n");
+    assert_eq!(b.cursor().selection, Some(Position { line: 0, column: 7 }));
+    at(&mut app, 1, 2, None);
+    key(&mut app, SourceKey::Enter);
+    assert_eq!(buf(&mut app).text(), "> 3. abcdef\npl\nain\n");
+}
+
+#[test]
+fn word_delete_is_one_undoable_edit() {
+    use crate::message::SourceKey;
+    let (_t, _d, mut app, _p) = setup();
+    at(&mut app, 1, 8, None);
+    key(&mut app, SourceKey::DeleteWordBack);
+    assert_eq!(buf(&mut app).text(), "line one\nline \nline three\n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let b = buf(&mut app);
+    assert_eq!(b.text(), "line one\nline two\nline three\n");
+    assert_eq!(b.cursor().position, Position { line: 1, column: 8 });
+    assert_eq!(b.cursor().selection, None);
+    at(&mut app, 2, 0, None);
+    key(&mut app, SourceKey::DeleteWordForward);
+    assert_eq!(buf(&mut app).text(), "line one\nline two\n three\n");
+    // With a selection, only the selection goes.
+    at(&mut app, 0, 3, Some((0, 1)));
+    key(&mut app, SourceKey::DeleteWordBack);
+    assert_eq!(buf(&mut app).text(), "le one\nline two\n three\n");
+}
+
+#[test]
+fn smart_home_end_on_unwrapped_lines() {
+    use crate::message::SourceKey;
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "    indented text\n");
+    at(&mut app, 0, 10, None);
+    key(&mut app, SourceKey::Home { select: false });
+    assert_eq!(buf(&mut app).cursor().position.column, 4);
+    key(&mut app, SourceKey::Home { select: false });
+    assert_eq!(buf(&mut app).cursor().position.column, 0);
+    key(&mut app, SourceKey::Home { select: false });
+    assert_eq!(buf(&mut app).cursor().position.column, 4);
+    key(&mut app, SourceKey::End { select: true });
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.position.column, 17);
+    assert_eq!(c.selection, Some(Position { line: 0, column: 4 }));
+    assert_eq!(buf(&mut app).selection().as_deref(), Some("indented text"));
+}
+
+#[test]
+fn primary_paste_inserts_as_one_edit() {
+    let (_t, _d, mut app, p) = setup();
+    at(&mut app, 0, 4, None);
+    let _ = app.update(Message::Source(SourceMsg::PastePrimary {
+        path: p,
+        text: Some(" big".into()),
+    }));
+    assert_eq!(buf(&mut app).text(), "line big one\nline two\nline three\n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
+}

@@ -51,6 +51,35 @@ pub enum SourceMsg {
     KeepMine(String),
     /// Conflict bar: reload from disk.
     TakeTheirs(String),
+    /// A key the source editor handles itself as one undoable edit / smart motion (WP-1).
+    Key(SourceKey),
+    /// The pointer moved over the source editor of `path` (editor-local coordinates).
+    Pointer {
+        path: String,
+        at: iced::Point,
+    },
+    /// Middle-press over the source editor of `path`: place the cursor, then paste PRIMARY.
+    MiddleClick(String),
+    /// The PRIMARY selection read for a middle-click paste.
+    PastePrimary {
+        path: String,
+        text: Option<String>,
+    },
+}
+
+/// WP-1 source keys routed through `SourceMsg::Key` (each one transaction or motion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKey {
+    /// Enter with list continuation.
+    Enter,
+    /// Ctrl+Backspace: delete to the previous word boundary (or the selection).
+    DeleteWordBack,
+    /// Ctrl+Delete: delete to the next word boundary (or the selection).
+    DeleteWordForward,
+    /// Smart Home (`select` = Shift).
+    Home { select: bool },
+    /// Smart End (`select` = Shift).
+    End { select: bool },
 }
 
 /// WP-3: reading pane.

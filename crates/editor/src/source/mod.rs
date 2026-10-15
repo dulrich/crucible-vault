@@ -17,21 +17,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cv_protocol::Mode;
+use editor_model::editing::{self, ListEnter};
 use editor_model::undo::{self, Change, EditKind, UndoHistory};
-use iced::keyboard;
-use iced::widget::text_editor::{self, Action, Binding, Content, Edit, KeyPress};
-use iced::widget::{Space, button, column, container, row, text};
-use iced::{Element, Length, Task};
+use iced::keyboard::{self, key};
+use iced::widget::text_editor::{self, Action, Binding, Content, Edit, KeyPress, Motion};
+use iced::widget::{Space, button, column, container, mouse_area, row, text};
+use iced::{Element, Length, Point, Task, clipboard};
 
 use crate::app::Tab;
 use crate::daemon::{ContentHash, DaemonClient, DaemonError};
-use crate::message::{Message, SourceMsg};
+use crate::message::{Message, SourceKey, SourceMsg};
 use crate::theme::Tokens;
 
 pub use highlighter::{KindColors, MarkdownHighlighter, Settings as HighlightSettings};
 
 /// Autosave debounce after the last edit.
 pub const AUTOSAVE_DELAY: Duration = Duration::from_secs(2);
+
+/// The text editor's padding (middle-click points are mapped through it like iced's own clicks).
+const EDITOR_PADDING: f32 = 5.0;
 
 /// Result of one save attempt (cloneable for the message bus; never carries note text).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +115,10 @@ pub struct SourceBuffer {
     conflict: Option<ContentHash>,
     /// Highlighter epoch (bumped on wholesale content replacement).
     epoch: u64,
+    /// Last pointer position over the editor (editor-local), for middle-click paste.
+    pointer: Option<Point>,
+    /// The selection last written to PRIMARY (not re-written while unchanged).
+    primary: Option<String>,
 }
 
 impl Clone for SourceBuffer {
@@ -127,6 +135,8 @@ impl Clone for SourceBuffer {
             save_again: self.save_again,
             conflict: self.conflict.clone(),
             epoch: self.epoch,
+            pointer: self.pointer,
+            primary: self.primary.clone(),
         }
     }
 }
@@ -174,6 +184,8 @@ impl SourceBuffer {
             save_again: false,
             conflict: None,
             epoch: 0,
+            pointer: None,
+            primary: None,
         }
     }
 
@@ -285,25 +297,40 @@ impl SourceBuffer {
         if read_only {
             return false;
         }
-        let content = self.shaped();
-        let before = content.cursor();
+        let before = self.shaped().cursor();
         let kind = match (&action, before.selection) {
             (Action::Edit(Edit::Insert(c)), None) => EditKind::Type(*c),
             (Action::Edit(Edit::Backspace | Edit::Delete), None) => EditKind::Delete,
             _ => EditKind::Other,
         };
+        self.transact(before, kind, now, |c| c.perform(action))
+    }
+
+    /// Runs `f` (any number of actions) as ONE recorded edit (plan editor-usability-round E1):
+    /// one Undo reverts it and restores `before`. `f` may only change lines within one line of
+    /// `before` or the current cursor/selection.
+    fn transact(
+        &mut self,
+        before: text_editor::Cursor,
+        kind: EditKind,
+        now: Instant,
+        f: impl FnOnce(&mut Content),
+    ) -> bool {
+        let content = self.shaped();
+        let now_c = content.cursor();
+        let lines = [
+            Some(before.position.line),
+            before.selection.map(|p| p.line),
+            Some(now_c.position.line),
+            now_c.selection.map(|p| p.line),
+        ];
+        let lo = lines.iter().flatten().min().copied().unwrap_or(0);
+        let hi = lines.iter().flatten().max().copied().unwrap_or(0);
         let l0 = content.line_count();
-        let (lo, hi) = match before.selection {
-            Some(s) => (
-                before.position.line.min(s.line),
-                before.position.line.max(s.line),
-            ),
-            None => (before.position.line, before.position.line),
-        };
         let a = lo.saturating_sub(1);
         let b = (hi + 1).min(l0.saturating_sub(1));
         let old = window(content, a, b);
-        content.perform(action);
+        f(content);
         let l1 = content.line_count();
         let b1 = (b + l1).saturating_sub(l0);
         let new = window(content, a, b1.max(a));
@@ -315,6 +342,120 @@ impl SourceBuffer {
             .record(change, kind, to_model(before), to_model(after), now);
         self.mark_edited();
         true
+    }
+
+    /// Enter with list continuation (one edit; a selection is replaced first).
+    pub fn enter(&mut self, read_only: bool, now: Instant) -> bool {
+        if read_only {
+            return false;
+        }
+        let before = self.shaped().cursor();
+        self.transact(before, EditKind::Other, now, |c| {
+            if c.cursor().selection.is_some() {
+                c.perform(Action::Edit(Edit::Delete));
+            }
+            let pos = c.cursor().position;
+            let line = c.line(pos.line).map(|l| l.text.into_owned());
+            match line.and_then(|l| editing::list_enter(&l, pos.column)) {
+                Some(ListEnter::Continue(s)) => c.perform(Action::Edit(Edit::Paste(Arc::new(s)))),
+                Some(ListEnter::Exit(r)) => {
+                    c.move_to(text_editor::Cursor {
+                        position: text_editor::Position {
+                            line: pos.line,
+                            column: r.end,
+                        },
+                        selection: Some(text_editor::Position {
+                            line: pos.line,
+                            column: r.start,
+                        }),
+                    });
+                    c.perform(Action::Edit(Edit::Delete));
+                }
+                None => c.perform(Action::Edit(Edit::Enter)),
+            }
+        })
+    }
+
+    /// Ctrl+Backspace / Ctrl+Delete: delete to the previous / next word boundary (iced
+    /// `WordLeft`/`WordRight`), or the selection, as one edit.
+    pub fn delete_word(&mut self, forward: bool, read_only: bool, now: Instant) -> bool {
+        if read_only {
+            return false;
+        }
+        let content = self.shaped();
+        let before = content.cursor();
+        if before.selection.is_none() {
+            content.perform(Action::Select(if forward {
+                Motion::WordRight
+            } else {
+                Motion::WordLeft
+            }));
+            if content.cursor().selection.is_none() {
+                return false;
+            }
+        }
+        let changed = self.transact(before, EditKind::Other, now, |c| {
+            c.perform(Action::Edit(Edit::Delete));
+        });
+        if !changed {
+            self.shaped().move_to(before);
+        }
+        changed
+    }
+
+    /// Smart Home / End (see `editor_model::editing`); `select` extends the selection.
+    pub fn smart_home_end(&mut self, end: bool, select: bool) {
+        let content = self.shaped();
+        let before = content.cursor();
+        let pos = before.position;
+        let Some(line) = content.line(pos.line).map(|l| l.text.into_owned()) else {
+            return;
+        };
+        content.move_to(text_editor::Cursor {
+            position: pos,
+            selection: None,
+        });
+        content.perform(Action::Move(if end { Motion::End } else { Motion::Home }));
+        let moved = content.cursor().position;
+        let visual = if moved.line == pos.line {
+            moved.column
+        } else if end {
+            line.len()
+        } else {
+            0
+        };
+        let column = if end {
+            editing::end_target(pos.column, visual, line.len())
+        } else {
+            editing::home_target(pos.column, editing::indent_width(&line), visual)
+        };
+        let position = text_editor::Position {
+            line: pos.line,
+            column,
+        };
+        let anchor = before.selection.unwrap_or(pos);
+        content.move_to(text_editor::Cursor {
+            position,
+            selection: (select && anchor != position).then_some(anchor),
+        });
+    }
+
+    /// Pastes `text` at the cursor (replacing any selection) as one edit.
+    pub fn paste(&mut self, text: String, read_only: bool, now: Instant) -> bool {
+        self.perform(Action::Edit(Edit::Paste(Arc::new(text))), read_only, now)
+    }
+
+    /// The selection if it is non-empty and differs from what PRIMARY last received; records it.
+    fn take_new_primary(&mut self) -> Option<String> {
+        if !self.is_shaped() {
+            return None;
+        }
+        let sel = self.selection().filter(|s| !s.is_empty())?;
+        if self.primary.as_deref() == Some(sel.as_str()) {
+            return None;
+        }
+        self.primary = Some(sel.clone());
+        Some(sel)
     }
 
     fn mark_edited(&mut self) {
@@ -573,18 +714,71 @@ pub fn update(
         SourceMsg::AutosaveDue { path, .. }
         | SourceMsg::Saved { path, .. }
         | SourceMsg::KeepMine(path)
-        | SourceMsg::TakeTheirs(path) => find(tabs, path),
+        | SourceMsg::TakeTheirs(path)
+        | SourceMsg::Pointer { path, .. }
+        | SourceMsg::MiddleClick(path)
+        | SourceMsg::PastePrimary { path, .. } => find(tabs, path),
         _ => active_buf.and_then(|p| find(tabs, &p)),
     };
     let Some(buf) = buf else {
         return Task::none();
     };
+    let edited = |buf: &mut SourceBuffer, changed: bool| {
+        let primary = buf
+            .take_new_primary()
+            .map_or_else(Task::none, clipboard::write_primary);
+        if changed {
+            Task::batch([primary, autosave_timer(buf.path.clone(), buf.edit_seq)])
+        } else {
+            primary
+        }
+    };
     match msg {
         SourceMsg::Action(a) => {
-            if buf.perform(a, read_only, Instant::now()) {
-                return autosave_timer(buf.path.clone(), buf.edit_seq);
-            }
+            let changed = buf.perform(a, read_only, Instant::now());
+            edited(buf, changed)
+        }
+        SourceMsg::Key(k) => {
+            let now = Instant::now();
+            let changed = match k {
+                SourceKey::Enter => buf.enter(read_only, now),
+                SourceKey::DeleteWordBack => buf.delete_word(false, read_only, now),
+                SourceKey::DeleteWordForward => buf.delete_word(true, read_only, now),
+                SourceKey::Home { select } => {
+                    buf.smart_home_end(false, select);
+                    false
+                }
+                SourceKey::End { select } => {
+                    buf.smart_home_end(true, select);
+                    false
+                }
+            };
+            edited(buf, changed)
+        }
+        SourceMsg::Pointer { at, .. } => {
+            buf.pointer = Some(at);
             Task::none()
+        }
+        SourceMsg::MiddleClick(path) => {
+            let Some(p) = buf.pointer else {
+                return Task::none();
+            };
+            buf.perform(
+                Action::Click(Point::new(p.x - EDITOR_PADDING, p.y - EDITOR_PADDING)),
+                read_only,
+                Instant::now(),
+            );
+            clipboard::read_primary().map(move |text| {
+                Message::Source(SourceMsg::PastePrimary {
+                    path: path.clone(),
+                    text,
+                })
+            })
+        }
+        SourceMsg::PastePrimary { text, .. } => {
+            let changed =
+                text.is_some_and(|t| !t.is_empty() && buf.paste(t, read_only, Instant::now()));
+            edited(buf, changed)
         }
         SourceMsg::Undo | SourceMsg::Redo => {
             let changed = !read_only
@@ -641,6 +835,26 @@ pub fn file_changed(
 
 /// Ctrl+S / Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, then iced's defaults.
 fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
+    if !matches!(kp.status, text_editor::Status::Focused { .. }) {
+        return None;
+    }
+    if let keyboard::Key::Named(named) = kp.key.as_ref() {
+        let m = kp.modifiers;
+        let plain = !m.alt() && !m.logo();
+        let k = match named {
+            key::Named::Enter if plain && !m.command() && !m.shift() => Some(SourceKey::Enter),
+            key::Named::Backspace if plain && m.command() => Some(SourceKey::DeleteWordBack),
+            key::Named::Delete if plain && m.command() => Some(SourceKey::DeleteWordForward),
+            key::Named::Home if plain && !m.command() => {
+                Some(SourceKey::Home { select: m.shift() })
+            }
+            key::Named::End if plain && !m.command() => Some(SourceKey::End { select: m.shift() }),
+            _ => None,
+        };
+        if let Some(k) = k {
+            return Some(Binding::Custom(Message::Source(SourceMsg::Key(k))));
+        }
+    }
     if kp.modifiers.command()
         && let keyboard::Key::Character(c) = kp.key.as_ref()
     {
@@ -661,18 +875,28 @@ fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
 /// Renders a tab's source buffer with its conflict bar / read-only marker.
 pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
     let editor: Element<'a, Message> = match &buf.content {
-        Repr::Shaped(content) => text_editor::TextEditor::new(content)
-            .height(Length::Fill)
-            .on_action(|a| Message::Source(SourceMsg::Action(a)))
-            .key_binding(key_binding)
-            .highlight_with::<MarkdownHighlighter>(
-                HighlightSettings {
-                    colors: KindColors::from_tokens(&tokens),
-                    epoch: buf.epoch,
-                },
-                highlighter::to_format,
-            )
-            .into(),
+        Repr::Shaped(content) => mouse_area(
+            text_editor::TextEditor::new(content)
+                .height(Length::Fill)
+                .padding(EDITOR_PADDING)
+                .on_action(|a| Message::Source(SourceMsg::Action(a)))
+                .key_binding(key_binding)
+                .highlight_with::<MarkdownHighlighter>(
+                    HighlightSettings {
+                        colors: KindColors::from_tokens(&tokens),
+                        epoch: buf.epoch,
+                    },
+                    highlighter::to_format,
+                ),
+        )
+        .on_move(move |at| {
+            Message::Source(SourceMsg::Pointer {
+                path: buf.path.clone(),
+                at,
+            })
+        })
+        .on_middle_press(Message::Source(SourceMsg::MiddleClick(buf.path.clone())))
+        .into(),
         // Never visible in practice (the app materialises visible tabs before drawing).
         Repr::Plain { text: t, .. } => text(t.as_str()).into(),
     };

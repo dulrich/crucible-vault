@@ -486,7 +486,12 @@ impl App {
                     SourceMsg::AutosaveDue { path, .. }
                     | SourceMsg::Saved { path, .. }
                     | SourceMsg::KeepMine(path)
-                    | SourceMsg::TakeTheirs(path) => panes::find(&self.panes, path).map(|(p, _)| p),
+                    | SourceMsg::TakeTheirs(path)
+                    | SourceMsg::Pointer { path, .. }
+                    | SourceMsg::MiddleClick(path)
+                    | SourceMsg::PastePrimary { path, .. } => {
+                        panes::find(&self.panes, path).map(|(p, _)| p)
+                    }
                     _ => Some(self.focus),
                 };
                 let Some(ps) = pane.and_then(|p| self.panes.get_mut(p)) else {
