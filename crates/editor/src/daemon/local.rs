@@ -62,6 +62,20 @@ impl LocalIndex {
     }
 }
 
+impl LocalIndex {
+    /// Whether the index holds `path` (plan editor-ui-round-3 WP-2, audit B1). A miss on the
+    /// open generation is re-checked on the current one without switching to it: a rebuild may
+    /// have committed before its `index_generation` arrived.
+    pub fn holds(&self, path: &str) -> bool {
+        if self.with_query(|q| q.file(path)).is_ok_and(|r| r.is_some()) {
+            return true;
+        }
+        Reader::open_current(&self.base)
+            .and_then(|r| r.query().file(path))
+            .is_ok_and(|r| r.is_some())
+    }
+}
+
 fn poisoned() -> DaemonError {
     DaemonError::Protocol("index handle lock poisoned".into())
 }

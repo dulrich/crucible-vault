@@ -93,6 +93,10 @@ impl From<ViewMode> for crate::ui_state::Layout {
 pub struct Doc {
     /// The buffer `edit_seq()` this was rendered from.
     pub seq: u64,
+    /// The buffer `epoch()` (wholesale reload counter) this was rendered from: an external
+    /// reload (e.g. a daemon-origin lint write) replaces the text without bumping `edit_seq`
+    /// (plan editor-ui-round-3 WP-2).
+    pub epoch: u64,
     /// The index generation links/images were resolved against.
     pub generation: Option<u64>,
     pub model: RenderModel,
@@ -323,6 +327,7 @@ impl ReadingStore {
         entry.seen_seq = Some(seq);
         entry.doc = Some(Doc {
             seq,
+            epoch: tab.epoch(),
             generation,
             model,
             images,
@@ -341,12 +346,14 @@ impl ReadingStore {
         let seq = tab.edit_seq();
         let stale = match &entry.doc {
             None => true,
-            Some(d) => d.seq != seq || d.generation != generation,
+            Some(d) => d.seq != seq || d.epoch != tab.epoch() || d.generation != generation,
         };
         if !stale {
             return;
         }
-        if entry.seen_seq == Some(seq) || entry.doc.is_none() {
+        // A reload (epoch moved) is a settled replacement: render it now, no debounce.
+        let reloaded = entry.doc.as_ref().is_some_and(|d| d.epoch != tab.epoch());
+        if reloaded || entry.seen_seq == Some(seq) || entry.doc.is_none() {
             self.recompute(tab, daemon);
         } else {
             entry.seen_seq = Some(seq);

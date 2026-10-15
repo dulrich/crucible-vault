@@ -956,3 +956,57 @@ async fn gitignore_change_rebuilds_index() {
     drop(sub);
     d.shutdown().await.unwrap();
 }
+
+/// plan editor-ui-round-3 WP-2: incremental note changes (daemon writes and external edits)
+/// invalidate views, coalesced into one `views_invalidated` per short window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn incremental_changes_invalidate_views_coalesced() {
+    let env = Env::new();
+    let views = PathBuf::from(&env.vars["CV_CONFIG_DIR"]).join("views");
+    std::fs::create_dir_all(&views).unwrap();
+    std::fs::write(
+        views.join("t.toml"),
+        "[[views]]\ntype='tasks'\nname='All'\n",
+    )
+    .unwrap();
+    let d = start(&env).await;
+    let mut c = client(&env);
+    let mut sub = client(&env);
+    sub.call(Request::Subscribe(SubscribeParams {
+        topics: vec![Topic::ViewsInvalidated],
+    }))
+    .unwrap();
+
+    // Two daemon-origin writes back to back → one coalesced invalidation of every view.
+    let mut base = hash_of(&env.vault().join("a.md"));
+    for body in ["# A\n- [ ] one\n", "# A\n- [ ] one\n- [ ] two\n"] {
+        let v = c
+            .call(Request::WriteNote(WriteNoteParams {
+                path: "a.md".into(),
+                content: body.into(),
+                base_hash: base.clone(),
+            }))
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_value(v).unwrap(),
+            WriteNoteResult::Written { .. }
+        ));
+        base = ContentHash::of(body.as_bytes()).as_str().to_owned();
+    }
+    let Notification::ViewsInvalidated { view_ids } = wait_for(&mut sub, |n| {
+        matches!(n, Notification::ViewsInvalidated { .. })
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(view_ids, vec!["t#All".to_owned()]);
+    let extra = sub.next_notification(Duration::from_millis(600)).unwrap();
+    assert!(extra.is_none(), "one notification per batch, got {extra:?}");
+
+    // An external edit invalidates too.
+    std::fs::write(env.vault().join("notes/b.md"), "# B\n- [ ] ext\n").unwrap();
+    wait_for(&mut sub, |n| {
+        matches!(n, Notification::ViewsInvalidated { .. })
+    });
+    drop((c, sub));
+    d.shutdown().await.unwrap();
+}

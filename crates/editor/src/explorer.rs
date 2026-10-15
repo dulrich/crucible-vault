@@ -158,8 +158,10 @@ impl Explorer {
         path.is_empty() || self.folders.contains(path)
     }
 
-    fn insert(&mut self, path: &str) {
-        if !shown(path) {
+    /// Inserts `path` only when the index holds it (plan editor-ui-round-3 WP-2, audit B1): an
+    /// ignored file stays writable, but its op completion or `file_changed` never lists it.
+    fn insert(&mut self, path: &str, indexed: &dyn Fn(&str) -> bool) {
+        if !shown(path) || !indexed(path) {
             return;
         }
         self.files.insert(path.to_owned());
@@ -175,12 +177,19 @@ impl Explorer {
     }
 
     /// Applies a finished file operation (idempotent with the matching `file_changed`).
-    pub fn apply_op(&mut self, op: &FileOp, final_path: &str, expanded: &BTreeSet<String>) {
+    /// `indexed` answers index membership.
+    pub fn apply_op(
+        &mut self,
+        op: &FileOp,
+        final_path: &str,
+        expanded: &BTreeSet<String>,
+        indexed: &dyn Fn(&str) -> bool,
+    ) {
         match op {
-            FileOp::Create { .. } => self.insert(final_path),
+            FileOp::Create { .. } => self.insert(final_path, indexed),
             FileOp::Rename { from, to } => {
                 self.remove(from);
-                self.insert(to);
+                self.insert(to, indexed);
                 if self.selected.as_deref() == Some(from.as_str()) {
                     self.selected = Some(to.clone());
                 }
@@ -203,14 +212,20 @@ impl Explorer {
         }
     }
 
-    /// Applies a `file_changed` delta.
-    pub fn file_changed(&mut self, path: &str, kind: ChangeKind, expanded: &BTreeSet<String>) {
+    /// Applies a `file_changed` delta (`indexed` answers index membership).
+    pub fn file_changed(
+        &mut self,
+        path: &str,
+        kind: ChangeKind,
+        expanded: &BTreeSet<String>,
+        indexed: &dyn Fn(&str) -> bool,
+    ) {
         match kind {
-            ChangeKind::Created => self.insert(path),
+            ChangeKind::Created => self.insert(path, indexed),
             ChangeKind::Deleted => self.remove(path),
             ChangeKind::Modified => {
                 if !self.files.contains(path) {
-                    self.insert(path);
+                    self.insert(path, indexed);
                 }
             }
             ChangeKind::Renamed => {
@@ -221,7 +236,7 @@ impl Explorer {
                     // Only the destination is known: the source lingers until a rebuild.
                     self.stale = true;
                 }
-                self.insert(path);
+                self.insert(path, indexed);
             }
         }
         self.relayout(expanded);

@@ -851,17 +851,44 @@ async fn drain_spool(shared: &Shared) {
     }
 }
 
-/// Forwards `index_generation` to the view registry.
+/// Coalescing window for incremental note changes → one `views_invalidated` (plan
+/// editor-ui-round-3 WP-2).
+pub(crate) const VIEWS_COALESCE: Duration = Duration::from_millis(150);
+
+/// Forwards `index_generation` to the view registry, and coalesces `file_changed` (daemon- and
+/// external-origin; the index is already updated when it is sent) and `shadow_write` into one
+/// [`ViewRegistry::notify_notes_changed`] per [`VIEWS_COALESCE`] window.
 async fn generation_listener(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let mut rx = shared.subscribe();
+    let mut due: Option<tokio::time::Instant> = None;
     loop {
+        let flush = async {
+            match due {
+                Some(t) => tokio::time::sleep_until(t).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = stop.changed() => return,
+            () = flush => {
+                due = None;
+                shared.views.notify_notes_changed();
+            }
             r = rx.recv() => match r {
-                Ok(Notification::IndexGeneration { n }) => shared.views.notify_generation(n),
+                Ok(Notification::IndexGeneration { n }) => {
+                    // A generation invalidates everything itself; a pending batch is subsumed.
+                    due = None;
+                    shared.views.notify_generation(n);
+                }
+                // Shadow mode: the writes land in the overlay the watcher does not see, so the
+                // shadow log's broadcast stands in for their `file_changed`.
+                Ok(Notification::FileChanged { .. } | Notification::ShadowWrite { .. }) => {
+                    due.get_or_insert_with(|| tokio::time::Instant::now() + VIEWS_COALESCE);
+                }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(k)) => {
                     tracing::warn!(skipped = k, "generation listener lagged");
+                    due.get_or_insert_with(|| tokio::time::Instant::now() + VIEWS_COALESCE);
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             },

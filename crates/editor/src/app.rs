@@ -663,6 +663,13 @@ impl App {
             .unwrap_or_else(|| chrono::Local::now().date_naive())
     }
 
+    /// Index membership for explorer inserts (plan editor-ui-round-3 WP-2, audit B1). Without
+    /// a daemon (tests without one) nothing is held.
+    fn indexed_fn(&self) -> impl Fn(&str) -> bool + use<> {
+        let d = self.daemon.clone();
+        move |p: &str| d.as_ref().is_some_and(|d| d.index().holds(p))
+    }
+
     fn refresh_files(&mut self) {
         let Some(d) = &self.daemon else { return };
         if let Err(e) = self.explorer.build(d.index(), &self.ui.expanded) {
@@ -1984,7 +1991,9 @@ impl App {
             ExplorerMsg::Cancel => self.explorer.edit = None,
             ExplorerMsg::Done(FileOpDone { op, result }) => match result {
                 Ok(final_path) => {
-                    self.explorer.apply_op(&op, &final_path, &self.ui.expanded);
+                    let indexed = self.indexed_fn();
+                    self.explorer
+                        .apply_op(&op, &final_path, &self.ui.expanded, &indexed);
                     match &op {
                         FileOp::Create { .. } => self.open(&final_path, true),
                         FileOp::Rename { from, to } => self.retarget(from, to),
@@ -2840,9 +2849,9 @@ impl App {
                         {
                             self.status.error = Some(format!("index: {e}"));
                         }
-                        if self.explorer.stale {
-                            self.refresh_files();
-                        }
+                        // WP-2 (audit B1): every generation re-reads membership from the index
+                        // (a `.gitignore` rebuild drops/restores paths).
+                        self.refresh_files();
                     }
                     Notification::JobUpdated(j) => {
                         let state = serde_json::to_value(j.status)
@@ -2866,7 +2875,9 @@ impl App {
                             // fences re-run while their old result stays up (no flash).
                             self.views.invalidate(&[]);
                         }
-                        self.explorer.file_changed(&path, kind, &self.ui.expanded);
+                        let indexed = self.indexed_fn();
+                        self.explorer
+                            .file_changed(&path, kind, &self.ui.expanded, &indexed);
                         if crate::settings::is_view_path(&path)
                             && panes::find(&self.panes, crate::settings::SETTINGS_TAB).is_some()
                         {

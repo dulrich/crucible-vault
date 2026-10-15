@@ -77,6 +77,8 @@ enum Cmd {
     },
     Generation(u64),
     Config(PathBuf),
+    /// Notes changed incrementally (coalesced by the daemon): every view id goes stale.
+    NotesChanged,
 }
 
 struct Host {
@@ -185,6 +187,16 @@ impl ViewRegistry {
         }
     }
 
+    /// Tells every service that notes changed incrementally (plan editor-ui-round-3 WP-2): each
+    /// invalidates all of its view ids (no dependency tracking). The caller coalesces.
+    pub fn notify_notes_changed(&self) {
+        for h in &self.hosts {
+            if h.tx.send(Cmd::NotesChanged).is_err() {
+                tracing::warn!("view service thread is gone");
+            }
+        }
+    }
+
     /// Tells every service the config dir changed.
     pub fn notify_config(&self, dir: &Path) {
         for h in &self.hosts {
@@ -242,6 +254,7 @@ fn serve(
                 invalidate(service.on_index_generation(n));
                 *lock(ids) = service.view_ids();
             }
+            Cmd::NotesChanged => invalidate(service.view_ids()),
             Cmd::Config(dir) => {
                 invalidate(service.on_config_changed(&dir));
                 *lock(ids) = service.view_ids();
