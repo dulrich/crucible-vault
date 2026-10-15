@@ -528,3 +528,49 @@ fn primary_paste_inserts_as_one_edit() {
     let _ = app.update(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
 }
+
+// ---- editor-usability-round WP-2: Reading-view task toggle ----
+
+#[test]
+fn toggle_task_on_plain_buffer_is_one_undoable_edit() {
+    let src = "---\na: 1\n---\n- [ ] one\n- [/] two\n";
+    let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+    assert!(!b.is_shaped(), "a fresh buffer stays plain (Reading mode)");
+    let seq = b.edit_seq();
+    assert!(b.toggle_task(3, false, Instant::now()));
+    assert!(!b.is_shaped(), "the toggle does not shape the buffer");
+    assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [/] two\n");
+    assert!(b.is_dirty());
+    assert_eq!(b.edit_seq(), seq + 1);
+    assert!(b.toggle_task(4, false, Instant::now()));
+    assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [x] two\n");
+    assert!(!b.toggle_task(1, false, Instant::now()), "not a task line");
+    assert!(
+        !b.toggle_task(3, true, Instant::now()),
+        "read-only drops it"
+    );
+    assert!(b.undo());
+    assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [/] two\n");
+    assert!(b.undo());
+    assert_eq!(b.text(), src);
+    assert!(b.redo());
+    assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [/] two\n");
+}
+
+#[test]
+fn toggle_task_on_shaped_buffer_keeps_cursor_and_undoes() {
+    let src = "intro\n- [x] done\n";
+    let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+    b.materialise();
+    let at = Cursor {
+        position: Position { line: 0, column: 2 },
+        selection: None,
+    };
+    b.move_to(at);
+    assert!(b.toggle_task(1, false, Instant::now()));
+    assert!(b.is_shaped());
+    assert_eq!(b.text(), "intro\n- [ ] done\n");
+    assert_eq!(b.cursor().position, at.position, "cursor kept");
+    assert!(b.undo());
+    assert_eq!(b.text(), src);
+}

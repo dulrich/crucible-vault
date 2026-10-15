@@ -869,4 +869,129 @@ mod wp4 {
         );
         let _ = panes::order(&app.panes);
     }
+
+    // ---- editor-usability-round WP-2: Reading-view filename rename + task toggle ----
+
+    use crate::message::ReadingMsg;
+
+    fn title(app: &mut App, path: &str, value: &str) {
+        let _ = app.update(Message::Reading(ReadingMsg::TitleInput {
+            path: path.into(),
+            value: value.into(),
+        }));
+    }
+
+    #[test]
+    fn filename_rename_dispatches_explorer_flow_and_retargets() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp2ren/one.md", "body").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp2ren/one.md".into())));
+        assert_eq!(app.reading.title("wp2ren/one.md"), "one");
+        title(&mut app, "wp2ren/one.md", "two");
+        assert_eq!(app.reading.title("wp2ren/one.md"), "two");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
+            path: "wp2ren/one.md".into(),
+        }));
+        assert!(
+            d.read_file("wp2ren/two.md").is_ok(),
+            "renamed via the daemon"
+        );
+        assert!(app.explorer.contains("wp2ren/two.md"));
+        assert_eq!(app.open_paths(), ["wp2ren/two.md"], "the tab follows");
+        assert_eq!(app.reading.title("wp2ren/two.md"), "two");
+        changed(&mut app, "wp2ren/two.md", ChangeKind::Renamed);
+        assert!(!app.explorer.stale, "matched via expect_rename");
+
+        // Blur (focus-loss poll) submits; Escape reverts.
+        title(&mut app, "wp2ren/two.md", "three");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleFocus {
+            path: "wp2ren/two.md".into(),
+            focused: false,
+        }));
+        assert_eq!(app.open_paths(), ["wp2ren/three.md"]);
+        title(&mut app, "wp2ren/three.md", "four");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleRevert));
+        assert_eq!(app.reading.title("wp2ren/three.md"), "three");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
+            path: "wp2ren/three.md".into(),
+        }));
+        assert_eq!(app.open_paths(), ["wp2ren/three.md"], "reverted: no rename");
+    }
+
+    #[test]
+    fn filename_rename_daemon_error_surfaces_and_keeps_tab() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp2err/one.md", "body").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp2err/one.md".into())));
+        // The file vanished behind the editor's back: the daemon's rename fails (NotFound).
+        std::fs::remove_file(d.vault_root().join("wp2err/one.md")).expect("rm");
+        title(&mut app, "wp2err/one.md", "two");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
+            path: "wp2err/one.md".into(),
+        }));
+        assert!(app.status.error.is_some(), "daemon error surfaced");
+        assert_eq!(app.open_paths(), ["wp2err/one.md"], "tab unchanged");
+        assert_eq!(app.reading.title("wp2err/one.md"), "one");
+        // A slash is refused before any RPC.
+        app.status.error = None;
+        title(&mut app, "wp2err/one.md", "a/b");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
+            path: "wp2err/one.md".into(),
+        }));
+        assert_eq!(app.status.error.as_deref(), Some("invalid name"));
+    }
+
+    #[test]
+    fn filename_rename_flushes_a_dirty_buffer_first() {
+        use iced::widget::text_editor::{Action, Edit};
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp2dirty/one.md", "body").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(
+            "wp2dirty/one.md".into(),
+        )));
+        let _ = app.update(Message::Source(crate::message::SourceMsg::Action(
+            Action::Edit(Edit::Insert('x')),
+        )));
+        assert!(app.active_tab().is_some_and(|t| t.source.is_dirty()));
+        title(&mut app, "wp2dirty/one.md", "two");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
+            path: "wp2dirty/one.md".into(),
+        }));
+        assert_eq!(app.open_paths(), ["wp2dirty/two.md"]);
+        assert_eq!(d.read_file("wp2dirty/two.md").expect("renamed").0, b"xbody");
+        assert!(app.active_tab().is_some_and(|t| !t.source.is_dirty()));
+    }
+
+    #[test]
+    fn reading_task_toggle_edits_the_buffer_and_rerenders() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp2task/t.md", "- [ ] a\n- [x] b\n")
+            .expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp2task/t.md".into())));
+        let _ = app.update(Message::Reading(ReadingMsg::ToggleTask {
+            path: "wp2task/t.md".into(),
+            line: 0,
+        }));
+        let tab = app.active_tab().expect("tab");
+        assert_eq!(tab.source.text(), "- [x] a\n- [x] b\n");
+        assert!(tab.source.is_dirty(), "saved by the normal autosave path");
+        assert_eq!(
+            d.read_file("wp2task/t.md").expect("file").0,
+            b"- [ ] a\n- [x] b\n"
+        );
+        let doc = app.reading.doc("wp2task/t.md").expect("rendered");
+        assert_eq!(
+            doc.seq,
+            tab.source.edit_seq(),
+            "re-rendered from the buffer"
+        );
+        assert_eq!(
+            editor_model::render::task_lines(&doc.model),
+            vec![(0, 'x'), (1, 'x')]
+        );
+    }
 }

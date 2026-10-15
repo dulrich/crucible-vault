@@ -440,6 +440,60 @@ impl SourceBuffer {
         });
     }
 
+    /// Replaces byte columns `cols` of `line` with `with` as ONE recorded edit, on either
+    /// representation (a Reading-mode buffer stays plain — no shaping). The cursor is kept.
+    /// Returns whether the text changed.
+    pub fn replace_in_line(
+        &mut self,
+        line: usize,
+        cols: std::ops::Range<usize>,
+        with: &str,
+        read_only: bool,
+        now: Instant,
+    ) -> bool {
+        if read_only {
+            return false;
+        }
+        let text = self.text();
+        let (Some(a), Some(b)) = (
+            undo::offset_of(&text, undo::Pos::new(line, cols.start)),
+            undo::offset_of(&text, undo::Pos::new(line, cols.end)),
+        ) else {
+            return false;
+        };
+        if text[a..b] == *with {
+            return false;
+        }
+        let change = Change {
+            at: undo::Pos::new(line, cols.start),
+            removed: text[a..b].to_owned(),
+            inserted: with.to_owned(),
+        };
+        let cursor = to_model(self.cursor());
+        match &mut self.content {
+            Repr::Shaped(c) => {
+                if !apply_change(c, &change) {
+                    c.move_to(to_iced(cursor));
+                    return false;
+                }
+                c.move_to(to_iced(cursor));
+            }
+            Repr::Plain { text: t, .. } => t.replace_range(a..b, with),
+        }
+        self.history
+            .record(change, EditKind::Other, cursor, cursor, now);
+        self.mark_edited();
+        true
+    }
+
+    /// Toggles the task checkbox at source `line` (see `editor_model::render::task_toggle`).
+    pub fn toggle_task(&mut self, line: usize, read_only: bool, now: Instant) -> bool {
+        let Some((cols, next)) = editor_model::render::task_toggle(&self.text(), line) else {
+            return false;
+        };
+        self.replace_in_line(line, cols, &next.to_string(), read_only, now)
+    }
+
     /// Pastes `text` at the cursor (replacing any selection) as one edit.
     pub fn paste(&mut self, text: String, read_only: bool, now: Instant) -> bool {
         self.perform(Action::Edit(Edit::Paste(Arc::new(text))), read_only, now)
@@ -688,7 +742,7 @@ fn spawn_save(daemon: Option<&Arc<dyn DaemonClient>>, job: Option<SaveJob>) -> T
     )
 }
 
-fn autosave_timer(path: String, seq: u64) -> Task<Message> {
+pub(crate) fn autosave_timer(path: String, seq: u64) -> Task<Message> {
     // The sleep future is built lazily inside the async block (it needs the executor's reactor).
     Task::perform(
         async { tokio::time::sleep(AUTOSAVE_DELAY).await },

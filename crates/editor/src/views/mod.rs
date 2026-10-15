@@ -416,21 +416,27 @@ fn cell_view<'a>(c: &Cell, bold: bool, link: LinkCell, t: Tokens) -> Element<'a,
             .into();
     }
     match c {
-        // Styled like Reading-mode links (`reading/view.rs` `Inline::WikiLink`): accent-ui, underlined.
+        // Styled like Reading-mode links (`reading/view.rs` `Inline::WikiLink`): accent-ui, no
+        // permanent underline. `Clickable` makes the span an iced rich-text link, which
+        // underlines it and shows a pointer while hovered.
         Cell::Link { path, .. } if link != LinkCell::Plain => {
-            let sp: iced::widget::text::Span<'a, ()> =
-                span(s).color(t.accent_ui.to_color()).underline(true);
-            let el: Element<'a, Message> = rich_text(vec![sp]).size(13).font(font).into();
-            if link == LinkCell::Clickable {
-                mouse_area(el)
-                    .interaction(mouse::Interaction::Pointer)
-                    .on_press(Message::Views(ViewsMsg::Open {
+            let clickable = link == LinkCell::Clickable;
+            let mut sp: iced::widget::text::Span<'a, ()> = span(s).color(t.accent_ui.to_color());
+            if clickable {
+                sp = sp.link(());
+            }
+            let rt = rich_text(vec![sp]).size(13).font(font);
+            if clickable {
+                let path = path.clone();
+                rt.on_link_click(move |()| {
+                    Message::Views(ViewsMsg::Open {
                         path: path.clone(),
                         line: None,
-                    }))
-                    .into()
+                    })
+                })
+                .into()
             } else {
-                el
+                rt.into()
             }
         }
         _ => text(s).size(13).font(font).color(t.text.to_color()).into(),

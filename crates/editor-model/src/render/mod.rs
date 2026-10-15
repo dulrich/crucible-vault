@@ -3,7 +3,8 @@
 //! One parser (D12): the body is parsed with `ofm::comrak_options()` plus
 //! `extension.footnotes = true` (plan "Dependency posture", audit M3), and wiki-links are matched
 //! with `ofm::wikilink::match_wikilink` (the shared grammar). Frontmatter is split with
-//! `ofm::frontmatter::split_frontmatter` and not rendered. OFM forms comrak does not model
+//! `ofm::frontmatter::split_frontmatter` and parsed into [`RenderModel::properties`] (the
+//! Reading properties block), never into the body. OFM forms comrak does not model
 //! (callouts, `==highlight==`, `#tags`, `$$` display math, `![[embeds]]`) are recognised on the
 //! lowered tree, the same way `ofm::parse` recognises them over comrak's output.
 //!
@@ -70,7 +71,29 @@ pub enum Fold {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListItem {
     pub task: Option<char>,
+    /// The 0-based line of a task item in the lowered note's full source (frontmatter
+    /// included) — the toggle target. `None` for non-tasks and for every item inside
+    /// transcluded content (display-only, audit M1).
+    pub line: Option<usize>,
     pub children: Vec<Block>,
+}
+
+/// One frontmatter value: plain text or a `[[wikilink]]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropValue {
+    Text(String),
+    Link {
+        target: String,
+        fragment: Option<String>,
+        alias: Option<String>,
+    },
+}
+
+/// One frontmatter key with its values (a scalar has one value, a list one per element).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Property {
+    pub key: String,
+    pub values: Vec<PropValue>,
 }
 
 /// A table cell's inlines.
@@ -137,6 +160,8 @@ pub struct FootnoteDef {
 /// A lowered note.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderModel {
+    /// The parsed frontmatter, in key order (empty when absent or unparseable).
+    pub properties: Vec<Property>,
     pub blocks: Vec<Block>,
     pub footnotes: Vec<FootnoteDef>,
 }
@@ -184,18 +209,23 @@ pub fn lower(source: &str) -> RenderModel {
 
 /// Lowers a whole note.
 pub fn lower_with(source: &str, opts: LowerOptions) -> RenderModel {
-    let (_, body) = ofm::frontmatter::split_frontmatter(source);
+    let (meta, body) = ofm::frontmatter::split_frontmatter(source);
     let body = body.strip_prefix('\u{feff}').unwrap_or(body);
+    // `body` is a suffix of `source`: its first line's index in the full note.
+    let line_offset = source[..source.len() - body.len()].matches('\n').count();
+    let properties = meta.as_deref().map(properties).unwrap_or_default();
     let mut options = ofm::comrak_options();
     options.extension.footnotes = true;
     let arena = Arena::new();
     let root = parse_document(&arena, body, &options);
     let mut l = Lower {
         opts,
+        line_offset,
         footnotes: Vec::new(),
     };
     let blocks = l.blocks(root);
     RenderModel {
+        properties,
         blocks,
         footnotes: l.footnotes,
     }
@@ -205,6 +235,8 @@ type N<'a> = &'a AstNode<'a>;
 
 struct Lower {
     opts: LowerOptions,
+    /// Lines before the body (frontmatter), added to comrak's body-relative line numbers.
+    line_offset: usize,
     footnotes: Vec<FootnoteDef>,
 }
 
@@ -247,8 +279,12 @@ impl Lower {
                         NodeValue::TaskItem(t) => Some(t.symbol.unwrap_or(' ')),
                         _ => None,
                     };
+                    let line = task.map(|_| {
+                        self.line_offset + item.data().sourcepos.start.line.saturating_sub(1)
+                    });
                     items.push(ListItem {
                         task,
+                        line,
                         children: self.blocks(item),
                     });
                 }
@@ -719,10 +755,13 @@ fn fill(blocks: &mut [Block], fetch: &mut dyn FnMut(&str) -> Option<String>) {
             } => {
                 *content = fetch(target).map(|src| {
                     let m = lower_with(&src, LowerOptions { transclude: false });
-                    match fragment.as_deref() {
+                    let mut blocks = match fragment.as_deref() {
                         Some(f) if !f.starts_with('^') => section(m.blocks, f),
                         _ => m.blocks,
-                    }
+                    };
+                    // Lines index the embedded note, not the host: display-only (audit M1).
+                    clear_lines(&mut blocks);
+                    blocks
                 });
             }
             Block::List { items, .. } => {
@@ -734,6 +773,119 @@ fn fill(blocks: &mut [Block], fetch: &mut dyn FnMut(&str) -> Option<String>) {
             _ => {}
         }
     }
+}
+
+fn clear_lines(blocks: &mut [Block]) {
+    for b in blocks {
+        match b {
+            Block::List { items, .. } => {
+                for i in items {
+                    i.line = None;
+                    clear_lines(&mut i.children);
+                }
+            }
+            Block::Callout { children, .. } | Block::BlockQuote(children) => {
+                clear_lines(children);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every host-note task line with its status, in document order (transclusions excluded).
+pub fn task_lines(model: &RenderModel) -> Vec<(usize, char)> {
+    let mut out = Vec::new();
+    collect_tasks(&model.blocks, &mut out);
+    out
+}
+
+fn collect_tasks(blocks: &[Block], out: &mut Vec<(usize, char)>) {
+    for b in blocks {
+        match b {
+            Block::List { items, .. } => {
+                for i in items {
+                    if let (Some(l), Some(c)) = (i.line, i.task) {
+                        out.push((l, c));
+                    }
+                    collect_tasks(&i.children, out);
+                }
+            }
+            Block::Callout { children, .. } | Block::BlockQuote(children) => {
+                collect_tasks(children, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The frontmatter YAML as property rows; a parse failure yields no rows.
+fn properties(meta: &str) -> Vec<Property> {
+    use ofm::frontmatter::{JsValue, parse_frontmatter};
+    let Ok(JsValue::Obj(obj)) = parse_frontmatter(meta) else {
+        return Vec::new();
+    };
+    obj.entries()
+        .into_iter()
+        .map(|(k, v)| Property {
+            key: k.to_owned(),
+            values: match v {
+                JsValue::Arr(a) => a.iter().map(prop_value).collect(),
+                JsValue::Null => Vec::new(),
+                v => vec![prop_value(v)],
+            },
+        })
+        .collect()
+}
+
+fn prop_value(v: &ofm::frontmatter::JsValue) -> PropValue {
+    use ofm::frontmatter::{JsValue, js_number_to_string, json_stringify};
+    let s = match v {
+        JsValue::Str(s) => s.clone(),
+        JsValue::Num(n) => js_number_to_string(*n),
+        JsValue::Bool(b) => b.to_string(),
+        JsValue::Null => String::new(),
+        other => json_stringify(other),
+    };
+    let t = s.trim();
+    if let Some((len, w)) = ofm::wikilink::match_wikilink(t)
+        && len == t.len()
+        && !w.embed
+    {
+        return PropValue::Link {
+            target: w.slug,
+            fragment: w.fragment,
+            alias: w.alias,
+        };
+    }
+    PropValue::Text(s)
+}
+
+/// The toggle for the task at `line` of `source`: `[x]`/`[X]` → `[ ]`; `[ ]` and custom
+/// statuses (`[/]`, `[-]`, …) → `[x]`. Returns the status char's byte-column range within
+/// that line and its replacement, or `None` if the line holds no task box.
+pub fn task_toggle(source: &str, line: usize) -> Option<(std::ops::Range<usize>, char)> {
+    let start: usize = source.split_inclusive('\n').take(line).map(str::len).sum();
+    let text = source[start..].split('\n').next()?;
+    let open = text.find('[')?;
+    let prefix = text[..open].trim_start();
+    // Only a list marker (and quote/callout `>` prefixes) may precede the box.
+    let marker_ok = prefix
+        .trim_start_matches(|c: char| c == '>' || c.is_whitespace())
+        .trim_end()
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '-' | '*' | '+' | '.' | ')'));
+    let rest = &text[open + 1..];
+    let status = rest.chars().next()?;
+    if !marker_ok || !rest[status.len_utf8()..].starts_with(']') {
+        return None;
+    }
+    let at = open + 1;
+    let next = if matches!(status, 'x' | 'X') {
+        ' '
+    } else {
+        'x'
+    };
+    Some((at..at + status.len_utf8(), next))
 }
 
 /// The blocks under heading `name` (until the next heading of the same or higher level).

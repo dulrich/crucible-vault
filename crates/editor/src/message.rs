@@ -109,6 +109,23 @@ pub enum ReadingMsg {
         key: String,
         result: Result<crate::image_cache::Decoded, String>,
     },
+    /// A host-note task checkbox was clicked: toggle the box at source `line` of `path`.
+    ToggleTask { path: String, line: usize },
+    /// The filename input of `path` changed.
+    TitleInput { path: String, value: String },
+    /// Enter (or focus loss) in the filename input: rename if changed.
+    TitleSubmit { path: String },
+    /// Escape: revert every pending filename edit.
+    TitleRevert,
+    /// Blur poll result for `path`'s filename input.
+    TitleFocus { path: String, focused: bool },
+    /// The save-before-rename finished.
+    TitleSaved {
+        path: String,
+        to: String,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+    },
 }
 
 /// WP-4: the file explorer.

@@ -117,6 +117,33 @@ pub struct ReadingStore {
     resolver: Option<ResolverCache>,
     /// Render-model recomputations so far (observability + tests).
     pub recomputes: u64,
+    /// Pending filename-input edits, keyed by tab path (absent = shows the stem).
+    titles: HashMap<String, String>,
+}
+
+/// The note stem shown in the filename input (`a/b/Note.md` → `Note`).
+pub fn stem(path: &str) -> &str {
+    let leaf = path.rsplit('/').next().unwrap_or(path);
+    leaf.strip_suffix(".md").unwrap_or(leaf)
+}
+
+/// The rename target for a submitted filename: `None` when unchanged or empty.
+pub fn rename_target(path: &str, input: &str) -> Option<String> {
+    let input = input.trim();
+    let input = input.strip_suffix(".md").unwrap_or(input);
+    if input.is_empty() || input == stem(path) {
+        return None;
+    }
+    let ext = if path.ends_with(".md") { ".md" } else { "" };
+    Some(match path.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/{input}{ext}"),
+        None => format!("{input}{ext}"),
+    })
+}
+
+/// The widget id of `path`'s filename input (blur polling).
+pub fn title_id(path: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("reading-title:{path}"))
 }
 
 impl ReadingStore {
@@ -138,6 +165,18 @@ impl ReadingStore {
         self.tabs.get(path).map(|t| t.mode).unwrap_or_default()
     }
 
+    /// The filename input's current text for `path`.
+    pub fn title<'a>(&'a self, path: &'a str) -> &'a str {
+        self.titles
+            .get(path)
+            .map_or_else(|| stem(path), String::as_str)
+    }
+
+    /// Takes (clears) `path`'s pending filename edit.
+    pub fn take_title(&mut self, path: &str) -> Option<String> {
+        self.titles.remove(path)
+    }
+
     /// `path`'s rendered doc.
     pub fn doc(&self, path: &str) -> Option<&Doc> {
         self.tabs.get(path).and_then(|t| t.doc.as_ref())
@@ -146,12 +185,17 @@ impl ReadingStore {
     /// A tab closed: forget its state and release its image pins (E2).
     pub fn on_tab_closed(&mut self, path: &str) {
         self.tabs.remove(path);
+        self.titles.remove(path);
         self.images.release_owner(path);
     }
 
     /// The debounce tick while any tab shows a reading pane, plus Ctrl+E.
     pub fn subscription(&self) -> Subscription<Message> {
-        let keys = iced::keyboard::listen().filter_map(ctrl_e);
+        let mut keys = iced::keyboard::listen().filter_map(ctrl_e);
+        if !self.titles.is_empty() {
+            // The focused text input captures Escape, so listen to captured events too.
+            keys = Subscription::batch([keys, iced::event::listen_with(escape)]);
+        }
         if self.tabs.values().any(|t| t.mode.shows_reading()) {
             Subscription::batch([
                 keys,
@@ -349,6 +393,16 @@ impl ReadingStore {
     }
 }
 
+fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Message> {
+    match e {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            ..
+        }) => Some(Message::Reading(ReadingMsg::TitleRevert)),
+        _ => None,
+    }
+}
+
 fn ctrl_e(e: iced::keyboard::Event) -> Option<Message> {
     if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = e
         && modifiers.command()
@@ -385,7 +439,31 @@ pub fn update(
             for tab in tabs {
                 store.tick(tab, daemon);
             }
+            // Blur poll: a pending filename edit whose input lost focus is submitted.
+            let polls: Vec<Task<Message>> = store
+                .titles
+                .keys()
+                .map(|p| {
+                    let path = p.clone();
+                    iced::widget::operation::is_focused(title_id(p)).map(move |focused| {
+                        Message::Reading(ReadingMsg::TitleFocus {
+                            path: path.clone(),
+                            focused,
+                        })
+                    })
+                })
+                .collect();
+            return Task::batch(polls);
         }
+        ReadingMsg::TitleInput { path, value } => {
+            store.titles.insert(path, value);
+        }
+        ReadingMsg::TitleRevert => store.titles.clear(),
+        // Buffer edits and renames need the app (tabs, explorer, saves): handled in `App`.
+        ReadingMsg::ToggleTask { .. }
+        | ReadingMsg::TitleSubmit { .. }
+        | ReadingMsg::TitleFocus { .. }
+        | ReadingMsg::TitleSaved { .. } => {}
         ReadingMsg::OpenLink { src, target } => {
             if let Some(m) = store.click(&src, &target, daemon) {
                 return Task::done(m);

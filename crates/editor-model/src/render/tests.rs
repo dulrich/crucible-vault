@@ -343,3 +343,74 @@ fn remote_detection() {
     assert!(is_image_target("a/b.PNG"));
     assert!(!is_image_target("note"));
 }
+
+// ---- editor-usability-round WP-2: frontmatter properties + task source lines ----
+
+#[test]
+fn frontmatter_becomes_properties_and_body_is_unchanged() {
+    let src = "---\ntitle: Hello\ncount: 3\ntags:\n  - a\n  - b\nup: \"[[Parent|P]]\"\nempty:\n---\npara\n";
+    let m = lower(src);
+    assert_eq!(m.blocks, lower("para\n").blocks);
+    let keys: Vec<_> = m.properties.iter().map(|p| p.key.as_str()).collect();
+    assert_eq!(keys, ["title", "count", "tags", "up", "empty"]);
+    assert_eq!(m.properties[0].values, [PropValue::Text("Hello".into())]);
+    assert_eq!(m.properties[1].values, [PropValue::Text("3".into())]);
+    assert_eq!(
+        m.properties[2].values,
+        [PropValue::Text("a".into()), PropValue::Text("b".into())]
+    );
+    assert_eq!(
+        m.properties[3].values,
+        [PropValue::Link {
+            target: "Parent".into(),
+            fragment: None,
+            alias: Some("P".into())
+        }]
+    );
+    assert!(m.properties[4].values.is_empty());
+    assert!(lower("no frontmatter\n").properties.is_empty());
+    assert!(lower("---\na: [unclosed\n---\nx\n").properties.is_empty());
+}
+
+#[test]
+fn task_items_carry_full_source_lines() {
+    let src = "---\na: 1\n---\n# H\n\n- [ ] one\n- plain\n  - [x] nested\n\n> [!note]\n> - [/] in callout\n";
+    let m = lower(src);
+    assert_eq!(task_lines(&m), vec![(5, ' '), (7, 'x'), (10, '/')]);
+    for (line, _) in task_lines(&m) {
+        assert!(task_toggle(src, line).is_some(), "line {line} has a box");
+    }
+    let Block::List { items, .. } = &m.blocks[1] else {
+        panic!("list")
+    };
+    assert_eq!(items[1].line, None, "non-task items carry no line");
+}
+
+#[test]
+fn transcluded_tasks_carry_no_source_line() {
+    let mut m = lower("- [ ] host\n\n![[B]]\n");
+    let mut fetch = |t: &str| (t == "B").then(|| "- [ ] embedded\n- [x] two\n".to_owned());
+    transclude(&mut m, &mut fetch);
+    assert_eq!(task_lines(&m), vec![(0, ' ')]);
+    let Block::Transclusion {
+        content: Some(c), ..
+    } = &m.blocks[1]
+    else {
+        panic!("filled")
+    };
+    let Block::List { items, .. } = &c[0] else {
+        panic!("list")
+    };
+    assert!(items.iter().all(|i| i.task.is_some() && i.line.is_none()));
+}
+
+#[test]
+fn task_toggle_targets_the_status_char() {
+    let src = "- [ ] a\n  * [x] b\n1. [/] c\n> - [-] d\nnot [ ] a task\n";
+    assert_eq!(task_toggle(src, 0), Some((3..4, 'x')));
+    assert_eq!(task_toggle(src, 1), Some((5..6, ' ')));
+    assert_eq!(task_toggle(src, 2), Some((4..5, 'x')));
+    assert_eq!(task_toggle(src, 3), Some((5..6, 'x')));
+    assert_eq!(task_toggle(src, 4), None);
+    assert_eq!(task_toggle(src, 9), None);
+}

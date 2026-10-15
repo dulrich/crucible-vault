@@ -1,9 +1,12 @@
 //! Drawing the render model with iced widgets (`rich_text`, `image`, `sensor`, containers).
 
-use editor_model::render::{Align, Block, Fold, Inline, ListItem, inline_text};
+use editor_model::render::{
+    Align, Block, Fold, Inline, ListItem, PropValue, Property, inline_text,
+};
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{
-    column, container, image, rich_text, row, rule, scrollable, sensor, span, text,
+    Space, button, column, container, image, rich_text, row, rule, scrollable, sensor, span, text,
+    text_input,
 };
 use iced::{Border, Element, Font, Length, Theme};
 
@@ -45,8 +48,13 @@ pub fn reading<'a>(
         path,
         t,
     };
-    let mut items: Vec<Element<'a, Message>> =
-        doc.model.blocks.iter().map(|b| block(&cx, b)).collect();
+    // Fixed slots 0 (filename) and 1 (properties, `Space` when absent) keep every body widget
+    // at a stable tree position whether or not the note has frontmatter.
+    let mut items: Vec<Element<'a, Message>> = vec![
+        title_input(store, path, t),
+        properties(&cx, &doc.model.properties),
+    ];
+    items.extend(doc.model.blocks.iter().map(|b| block(&cx, b)));
     if !doc.model.footnotes.is_empty() {
         items.push(rule::horizontal(1).into());
         for (i, f) in doc.model.footnotes.iter().enumerate() {
@@ -66,6 +74,76 @@ pub fn reading<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// The editable filename (the note's stem); Enter / blur renames, Escape reverts.
+fn title_input<'a>(store: &'a ReadingStore, path: &'a str, t: Tokens) -> Element<'a, Message> {
+    let p_in = path.to_owned();
+    text_input("note name", store.title(path))
+        .id(super::title_id(path))
+        .size(22)
+        .on_input(move |value| {
+            Message::Reading(ReadingMsg::TitleInput {
+                path: p_in.clone(),
+                value,
+            })
+        })
+        .on_submit(Message::Reading(ReadingMsg::TitleSubmit {
+            path: path.to_owned(),
+        }))
+        .style(move |theme: &Theme, status| text_input::Style {
+            border: Border {
+                width: 0.0,
+                ..text_input::default(theme, status).border
+            },
+            background: iced::Background::Color(iced::Color::TRANSPARENT),
+            value: t.heading.to_color(),
+            ..text_input::default(theme, status)
+        })
+        .into()
+}
+
+/// The read-only frontmatter block (an empty `Space` when there is none).
+fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
+    if props.is_empty() {
+        return Space::new().into();
+    }
+    let t = cx.t;
+    let rows = props.iter().map(|p| {
+        let mut spans = Vec::new();
+        for (i, v) in p.values.iter().enumerate() {
+            if i > 0 {
+                spans.push(span(", ").color(t.text_faint.to_color()));
+            }
+            spans.push(match v {
+                PropValue::Text(s) => span(s.as_str()).color(t.text.to_color()),
+                PropValue::Link {
+                    target,
+                    fragment,
+                    alias,
+                } => span(link_label(target, fragment.as_ref(), alias.as_ref()))
+                    .color(t.accent_ui.to_color())
+                    .link(LinkTarget::Vault(target.clone())),
+            });
+        }
+        row![
+            container(text(p.key.as_str()).size(14).color(t.text_dim.to_color()))
+                .width(Length::Fixed(140.0)),
+            rich_text(spans).size(14).on_link_click(link_msg(cx.path)),
+        ]
+        .spacing(8)
+        .into()
+    });
+    boxed(column(rows).spacing(4).into(), t, t.line)
+}
+
+fn link_label(target: &str, fragment: Option<&String>, alias: Option<&String>) -> String {
+    match (alias, fragment) {
+        (Some(a), _) => a.clone(),
+        (None, Some(f)) if target.is_empty() => format!("#{f}"),
+        (None, Some(f)) => format!("{target}#{f}"),
+        (None, None) => target.to_owned(),
+    }
 }
 
 /// The `crucible-view` fence hook: the view `<file>#<name>` with `this` = the embedding note.
@@ -261,8 +339,21 @@ fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Ele
     };
     let done = matches!(it.task, Some('x' | 'X' | '-'));
     let color = if done { cx.t.text_faint } else { cx.t.text_dim };
+    let marker = text(marker).font(Font::MONOSPACE).color(color.to_color());
+    // Host-note tasks are clickable; transcluded ones (no line) stay display-only (audit M1).
+    let marker: Element<'a, Message> = match it.line {
+        Some(line) if it.task.is_some() => button(marker)
+            .padding(0)
+            .style(button::text)
+            .on_press(Message::Reading(ReadingMsg::ToggleTask {
+                path: cx.path.to_owned(),
+                line,
+            }))
+            .into(),
+        _ => marker.into(),
+    };
     row![
-        text(marker).font(Font::MONOSPACE).color(color.to_color()),
+        marker,
         column(it.children.iter().map(|c| block(cx, c))).spacing(4),
     ]
     .spacing(6)
@@ -373,15 +464,9 @@ fn inlines_view<'a>(
                 fragment,
                 alias,
             } => {
-                let label = match (alias, fragment) {
-                    (Some(a), _) => a.clone(),
-                    (None, Some(f)) if target.is_empty() => format!("#{f}"),
-                    (None, Some(f)) => format!("{target}#{f}"),
-                    (None, None) => target.clone(),
-                };
-                span(label)
+                // No permanent underline: rich_text underlines the hovered link itself.
+                span(link_label(target, fragment.as_ref(), alias.as_ref()))
                     .color(t.accent_ui.to_color())
-                    .underline(true)
                     .link(LinkTarget::Vault(target.clone()))
             }
             Inline::Link { url, label } => {
@@ -390,10 +475,7 @@ fn inlines_view<'a>(
                 } else {
                     LinkTarget::Vault(url.clone())
                 };
-                span(label.as_str())
-                    .color(t.accent_ui.to_color())
-                    .underline(true)
-                    .link(l)
+                span(label.as_str()).color(t.accent_ui.to_color()).link(l)
             }
             Inline::Tag(tag) => span(format!("#{tag}")).color(t.accent.to_color()),
             Inline::FootnoteRef { ix, .. } => span(format!("[{ix}]"))

@@ -508,6 +508,23 @@ impl App {
                     },
                 );
             }
+            Message::Reading(crate::message::ReadingMsg::ToggleTask { path, line }) => {
+                return self.toggle_task(&path, line);
+            }
+            Message::Reading(crate::message::ReadingMsg::TitleSubmit { path }) => {
+                return self.title_submit(&path);
+            }
+            Message::Reading(crate::message::ReadingMsg::TitleFocus { path, focused }) => {
+                if !focused {
+                    return self.title_submit(&path);
+                }
+            }
+            Message::Reading(crate::message::ReadingMsg::TitleSaved {
+                path,
+                to,
+                seq,
+                outcome,
+            }) => return self.title_saved(&path, &to, seq, outcome),
             Message::Reading(m) => {
                 let mode_change = matches!(
                     m,
@@ -750,6 +767,116 @@ impl App {
             },
         }
         Task::none()
+    }
+
+    // ---- editor-usability-round WP-2: Reading-view edits ----
+
+    /// Toggles a host-note task box in `path`'s buffer (one undoable edit; normal autosave).
+    fn toggle_task(&mut self, path: &str, line: usize) -> Task<Message> {
+        let read_only = self.status.mode == Mode::Shadow;
+        let Some((pane, i)) = panes::find(&self.panes, path) else {
+            return Task::none();
+        };
+        let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) else {
+            return Task::none();
+        };
+        if read_only {
+            self.status.error = Some("edits are disabled in shadow mode".into());
+            return Task::none();
+        }
+        if !tab
+            .source
+            .toggle_task(line, false, std::time::Instant::now())
+        {
+            return Task::none();
+        }
+        let seq = tab.source.edit_seq();
+        let tab = tab.clone();
+        // Re-render now from the updated buffer (not on the next debounce tick).
+        self.reading.recompute(&tab, self.daemon.as_ref());
+        crate::source::autosave_timer(path.to_owned(), seq)
+    }
+
+    /// Enter / blur in the filename input: rename through the explorer path when changed,
+    /// flushing a dirty buffer through the normal save first.
+    fn title_submit(&mut self, path: &str) -> Task<Message> {
+        let Some(input) = self.reading.take_title(path) else {
+            return Task::none();
+        };
+        let Some(to) = crate::reading::rename_target(path, &input) else {
+            return Task::none();
+        };
+        if input.contains('/') {
+            self.status.error = Some("invalid name".into());
+            return Task::none();
+        }
+        if self.shadow_blocked(explorer::SHADOW_REASON) {
+            return Task::none();
+        }
+        let Some((pane, i)) = panes::find(&self.panes, path) else {
+            return Task::none();
+        };
+        let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) else {
+            return Task::none();
+        };
+        if !tab.source.is_dirty() {
+            return self.dispatch_op(FileOp::Rename {
+                from: path.to_owned(),
+                to,
+            });
+        }
+        let Some(job) = tab.source.begin_save(false) else {
+            self.status.error =
+                Some("rename not done (the note is saving or has a conflict)".into());
+            return Task::none();
+        };
+        let seq = job.seq;
+        let from = path.to_owned();
+        self.rpc(
+            move |d| Ok(job.run(d)),
+            move |r| {
+                Message::Reading(crate::message::ReadingMsg::TitleSaved {
+                    path: from,
+                    to,
+                    seq,
+                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                })
+            },
+        )
+    }
+
+    /// The save-before-rename finished: rename on success, else abort and surface it.
+    fn title_saved(
+        &mut self,
+        path: &str,
+        to: &str,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+    ) -> Task<Message> {
+        use crate::source::SaveOutcome;
+        let Some((pane, i)) = panes::find(&self.panes, path) else {
+            return Task::none();
+        };
+        let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) else {
+            return Task::none();
+        };
+        let ok = matches!(outcome, SaveOutcome::Saved(_));
+        if let Err(e) = tab.source.finish_save(seq, outcome) {
+            self.status.error = Some(format!("rename not done (save failed: {e})"));
+            return Task::none();
+        }
+        if !ok || tab.source.is_dirty() {
+            self.status.error = Some(if ok {
+                "rename not done (the note changed while saving)".into()
+            } else {
+                "rename not done (save conflict: the file changed on disk)".into()
+            });
+            return Task::none();
+        }
+        self.dispatch_op(FileOp::Rename {
+            from: path.to_owned(),
+            to: to.to_owned(),
+        })
     }
 
     /// A renamed file's open tab follows it (re-read at the new path).
