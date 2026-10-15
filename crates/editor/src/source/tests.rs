@@ -782,3 +782,69 @@ fn find_after_non_ascii_selects_and_paints_exact_bytes() {
     assert_eq!(painted.len(), 1);
     assert_eq!(&line[painted[0].0.clone()], "bar");
 }
+
+// ---- plan editor-feedback-round-2 WP-9: image paste ----
+
+#[test]
+fn image_paste_stores_attachment_and_inserts_embed() {
+    use crate::clipboard_image::{ClipboardReader, PasteOutcome, resolve};
+    struct Png;
+    impl ClipboardReader for Png {
+        fn read(&self, target: &str) -> std::result::Result<Vec<u8>, String> {
+            match target {
+                "TARGETS" => Ok(b"TARGETS\nimage/png\nimage/jpeg\n".to_vec()),
+                "image/png" => Ok(b"\x89PNG fake".to_vec()),
+                t => Err(format!("no {t}")),
+            }
+        }
+    }
+    let (_t, d, mut app, p) = setup();
+    let outcome = resolve(&Png, Some(d.as_ref() as &dyn DaemonClient), &p);
+    let PasteOutcome::Insert(ref s) = outcome else {
+        panic!("expected an insert, got {outcome:?}");
+    };
+    let name = s
+        .strip_prefix("![[")
+        .and_then(|r| r.strip_suffix("]]"))
+        .expect("wiki embed")
+        .to_owned();
+    assert!(name.ends_with(".png"), "{name}");
+    let stored = d
+        .read_file(&format!("wp2/_attachments/note/{name}"))
+        .expect("attachment written");
+    assert_eq!(stored.0, b"\x89PNG fake");
+    // Identical bytes resolve to the same file.
+    assert_eq!(
+        resolve(&Png, Some(d.as_ref() as &dyn DaemonClient), &p),
+        outcome
+    );
+    at(&mut app, 0, 4, None);
+    let _ = app.update(Message::Source(SourceMsg::PasteResolved {
+        path: p,
+        outcome,
+    }));
+    assert_eq!(
+        buf(&mut app).text(),
+        format!("line![[{name}]] one\nline two\nline three\n")
+    );
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
+}
+
+#[test]
+fn ctrl_v_routes_to_image_aware_paste() {
+    let kp = KeyPress {
+        key: keyboard::Key::Character("v".into()),
+        modified_key: keyboard::Key::Character("v".into()),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        modifiers: keyboard::Modifiers::CTRL,
+        text: None,
+        status: text_editor::Status::Focused { is_hovered: false },
+    };
+    assert!(matches!(
+        test_key_binding(kp),
+        Some(Binding::Custom(Message::Source(SourceMsg::Paste)))
+    ));
+}

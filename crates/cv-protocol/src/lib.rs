@@ -113,6 +113,7 @@ pub enum Request {
     Subscribe(SubscribeParams),
     WriteNote(WriteNoteParams),
     CreateNote(CreateNoteParams),
+    WriteAttachment(WriteAttachmentParams),
     Rename(RenameParams),
     Delete(PathParams),
     ActionsList,
@@ -191,6 +192,24 @@ pub struct CreateNoteParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateNoteResult {
     /// Final, collision-suffixed path.
+    pub path: String,
+}
+
+/// `write_attachment`: binary attachment bytes for `note_path`, stored under the `localize`
+/// step's default attachment templates (content-MD5 name, idempotent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteAttachmentParams {
+    /// The note the attachment belongs to (drives `{{folder}}`/`{{slug}}`).
+    pub note_path: String,
+    /// Lowercase file extension without the dot (`[a-z0-9]{1,8}`).
+    pub ext: String,
+    /// Standard base64 of the bytes.
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteAttachmentResult {
+    /// Vault path of the (new or reused) attachment.
     pub path: String,
 }
 
@@ -490,6 +509,11 @@ mod tests {
                 path: "b.md".into(),
                 content: String::new(),
             }),
+            Request::WriteAttachment(WriteAttachmentParams {
+                note_path: "b.md".into(),
+                ext: "png".into(),
+                data_base64: "AA==".into(),
+            }),
             Request::Rename(RenameParams {
                 from: "a.md".into(),
                 to: "c.md".into(),
@@ -581,6 +605,9 @@ mod tests {
         round_trip(&WriteNoteResult::Written { hash: "h".into() });
         round_trip(&CreateNoteResult {
             path: "x 1.md".into(),
+        });
+        round_trip(&WriteAttachmentResult {
+            path: "_attachments/x/a_MD5.png".into(),
         });
         round_trip(&vec![ActionInfo {
             id: "a".into(),

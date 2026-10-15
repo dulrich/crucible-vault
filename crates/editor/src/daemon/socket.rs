@@ -15,7 +15,8 @@ use std::time::Duration;
 use cv_protocol::{
     CreateNoteParams, CreateNoteResult, HelloParams, HelloResult, JobIdParams, PROTOCOL_VERSION,
     PathParams, RenameParams, Request, RpcError, RpcId, RpcNotification, RpcRequest,
-    SubscribeParams, ViewRunParams, WriteNoteParams, WriteNoteResult,
+    SubscribeParams, ViewRunParams, WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams,
+    WriteNoteResult,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -225,6 +226,17 @@ impl DaemonClient for SocketDaemon {
             path: path.to_owned(),
             content: content.to_owned(),
         }))?;
+        Ok(r.path)
+    }
+
+    fn write_attachment(&self, note_path: &str, ext: &str, bytes: &[u8]) -> Result<String> {
+        use base64::Engine as _;
+        let r: WriteAttachmentResult =
+            self.call_typed(Request::WriteAttachment(WriteAttachmentParams {
+                note_path: note_path.to_owned(),
+                ext: ext.to_owned(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }))?;
         Ok(r.path)
     }
 

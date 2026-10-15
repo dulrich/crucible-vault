@@ -83,6 +83,9 @@ pub trait DaemonClient: Send + Sync {
     -> Result<ContentHash>;
     /// Creates a note; the daemon may suffix the name, so the final path is returned.
     fn create_note(&self, path: &str, content: &str) -> Result<String>;
+    /// Stores attachment `bytes` (extension `ext`) for `note_path` in the vault's attachment
+    /// folder; returns the vault path (content-addressed, so identical bytes reuse one file).
+    fn write_attachment(&self, note_path: &str, ext: &str, bytes: &[u8]) -> Result<String>;
     /// Renames (the daemon rewrites links).
     fn rename(&self, from: &str, to: &str) -> Result<()>;
     /// Deletes.

@@ -272,6 +272,35 @@ impl DaemonClient for FakeDaemon {
         Ok(path.to_owned())
     }
 
+    /// Stand-in path (not the daemon's MD5 template): `<folder>/_attachments/<basename>/
+    /// <content-hash prefix>_FAKE.<ext>` — deterministic, so identical bytes reuse one file.
+    fn write_attachment(&self, note_path: &str, ext: &str, bytes: &[u8]) -> Result<String> {
+        let (folder, file) = note_path.rsplit_once('/').unwrap_or(("", note_path));
+        let base = file.strip_suffix(".md").unwrap_or(file);
+        let h = ContentHash::of(bytes);
+        let name = format!("{}_FAKE.{ext}", &h.as_str()[..16.min(h.as_str().len())]);
+        let path = if folder.is_empty() {
+            format!("_attachments/{base}/{name}")
+        } else {
+            format!("{folder}/_attachments/{base}/{name}")
+        };
+        let abs = vault_abs(&self.vault_root, &path)?;
+        let mut g = self.lock()?;
+        if !abs.exists() {
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&abs, bytes)?;
+            self.after_write(
+                &mut g,
+                &path,
+                ChangeKind::Created,
+                Some(h.as_str().to_owned()),
+            )?;
+        }
+        Ok(path)
+    }
+
     fn rename(&self, from: &str, to: &str) -> Result<()> {
         let (a, b) = (
             vault_abs(&self.vault_root, from)?,

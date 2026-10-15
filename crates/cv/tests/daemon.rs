@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use cv::{Client, ClientError, Config, Daemon, DaemonOptions, RunningDaemon};
 use cv_protocol::{
     ChangeKind, CreateNoteParams, JobIdParams, Notification, Origin, PathParams, RenameParams,
-    Request, SubscribeParams, Topic, UriParams, UriResult, ViewRunParams, WriteNoteParams,
-    WriteNoteResult, WriteOp, error_codes,
+    Request, SubscribeParams, Topic, UriParams, UriResult, ViewRunParams, WriteAttachmentParams,
+    WriteNoteParams, WriteNoteResult, WriteOp, error_codes,
 };
 use cv_vault::{ContentHash, WatchConfig};
 use serde_json::{Value, json};
@@ -867,4 +867,53 @@ fn binary_cutover_contract() {
         "{s}"
     );
     assert_eq!(run(&["cutover", "bogus"]).status.code(), Some(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_attachment_is_content_addressed_and_idempotent() {
+    use base64::Engine as _;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let env = Env::new();
+    let d = start(&env).await;
+    let mut c = client(&env);
+    let bytes = b"\x89PNG fake image bytes";
+    let req = |ext: &str, data: String| {
+        Request::WriteAttachment(WriteAttachmentParams {
+            note_path: "notes/b.md".into(),
+            ext: ext.into(),
+            data_base64: data,
+        })
+    };
+    let v = c.call(req("png", b64(bytes))).unwrap();
+    let path = v["path"].as_str().unwrap().to_owned();
+    use md5::Digest as _;
+    let md5 = hex::encode(md5::Md5::digest(bytes));
+    assert_eq!(path, format!("notes/_attachments/b/{md5}_MD5.png"));
+    // Shadow mode: the write lands in the overlay, never live.
+    let on_disk = env.overlay().join(&path);
+    assert_eq!(std::fs::read(&on_disk).unwrap(), bytes);
+    assert!(!env.vault().join(&path).exists());
+    // Tamper with the stored file: a second identical call must reuse it, not write again.
+    std::fs::write(&on_disk, b"marker").unwrap();
+    let v2 = c.call(req("png", b64(bytes))).unwrap();
+    assert_eq!(v2["path"].as_str().unwrap(), path);
+    assert_eq!(std::fs::read(&on_disk).unwrap(), b"marker");
+    // Refusals.
+    assert_eq!(
+        rpc_code(c.call(req("png", "!!not base64!!".into()))),
+        error_codes::INVALID_PARAMS
+    );
+    for bad in ["", "PNG", "p.g", "toolongext"] {
+        assert_eq!(
+            rpc_code(c.call(req(bad, b64(bytes)))),
+            error_codes::INVALID_PARAMS
+        );
+    }
+    let big = vec![0u8; 25 * 1024 * 1024 + 1];
+    assert_eq!(
+        rpc_code(c.call(req("png", b64(&big)))),
+        error_codes::INVALID_PARAMS
+    );
+    drop(c);
+    d.shutdown().await.unwrap();
 }

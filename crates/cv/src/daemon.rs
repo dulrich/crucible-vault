@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use cv_protocol::{
     ChangeKind, CreateNoteResult, HelloResult, JobState, JobStatus, Mode, Notification, Origin,
     PROTOCOL_VERSION, Request, RpcError, ServiceHealth, StatusResult, UriResult, ViewsListResult,
-    WriteNoteResult, WriteOp, error_codes,
+    WriteAttachmentParams, WriteAttachmentResult, WriteNoteResult, WriteOp, error_codes,
 };
 use cv_state::{NewShadowWrite, QueueConfig, StateDb, StateError, StateReader};
 use cv_vault::{
@@ -36,6 +36,15 @@ use crate::{now_ms, spool};
 const EVENT_CAPACITY: usize = 1024;
 /// Upper bound on the ` N` collision suffix search.
 const MAX_SUFFIX: u32 = 10_000;
+/// `write_attachment` decoded-size cap (25 MiB).
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
+fn too_large() -> RpcError {
+    rpc_err(
+        error_codes::INVALID_PARAMS,
+        format!("attachment exceeds {MAX_ATTACHMENT_BYTES} bytes"),
+    )
+}
 
 /// Daemon start options.
 #[derive(Debug, Clone, Copy)]
@@ -495,6 +504,7 @@ impl Shared {
                 let path = self.create_suffixed(p.path, p.content).await?;
                 to_value(&CreateNoteResult { path })
             }
+            Request::WriteAttachment(p) => self.write_attachment(p).await,
             Request::Rename(p) => {
                 // Read the hash and rename in one writer job: the CAS token is the hash the writer
                 // itself just read, so no other writer job can interleave.
@@ -616,6 +626,59 @@ impl Shared {
             config_errors: self.runner().map(Runner::config_errors).unwrap_or_default(),
             services,
         })
+    }
+
+    /// `write_attachment`: validates, resolves the path with the `localize` default templates,
+    /// reuses an existing file (content-MD5 name ⇒ identical bytes), else creates it through the
+    /// writer.
+    async fn write_attachment(&self, p: WriteAttachmentParams) -> Result<Value, RpcError> {
+        use crate::steps::localize;
+        use base64::Engine as _;
+        let ext_ok = (1..=8).contains(&p.ext.len())
+            && p.ext
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        if !ext_ok {
+            return Err(rpc_err(
+                error_codes::INVALID_PARAMS,
+                format!("invalid attachment ext {:?}", p.ext),
+            ));
+        }
+        // Reject before decoding: base64 is 4/3 of the decoded size.
+        if p.data_base64.len() / 4 * 3 > MAX_ATTACHMENT_BYTES + 3 {
+            return Err(too_large());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(p.data_base64.as_bytes())
+            .map_err(|e| rpc_err(error_codes::INVALID_PARAMS, format!("bad base64: {e}")))?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(too_large());
+        }
+        let md5 = localize::md5_hex(&bytes);
+        let target = localize::resolve_attachment_path(
+            localize::DEFAULT_FOLDER_TEMPLATE,
+            localize::DEFAULT_NAME_TEMPLATE,
+            &p.note_path,
+            "",
+            &p.ext,
+            &md5,
+        );
+        let t = target.clone();
+        let res = self
+            .with_writer(move |w| {
+                w.call(move |vw| {
+                    if vw.fs().hash(&t)?.is_some() {
+                        return Ok(());
+                    }
+                    match vw.create(&t, &bytes) {
+                        Ok(_) | Err(VaultError::Exists(_)) => Ok(()),
+                        Err(e) => Err(e),
+                    }
+                })
+            })
+            .await?;
+        res.and_then(|r| r).map_err(vault_err)?;
+        to_value(&WriteAttachmentResult { path: target })
     }
 
     /// Creates `path` with Obsidian's ` N` collision suffix; returns the final path.

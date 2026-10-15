@@ -69,6 +69,14 @@ pub enum SourceMsg {
         path: String,
         text: Option<String>,
     },
+    /// Plan editor-feedback-round-2 WP-9: Ctrl+V in the focused source editor (the active
+    /// note) — image-aware via `clipboard_image`.
+    Paste,
+    /// The resolved Ctrl+V for `path` (image stored + embed, remote embed, or text paste).
+    PasteResolved {
+        path: String,
+        outcome: crate::clipboard_image::PasteOutcome,
+    },
 }
 
 /// WP-1 source keys routed through `SourceMsg::Key` (each one transaction or motion).

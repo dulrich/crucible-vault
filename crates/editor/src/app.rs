@@ -933,6 +933,7 @@ impl App {
                         | SourceMsg::TakeTheirs(_)
                         | SourceMsg::MiddleClick { .. }
                         | SourceMsg::PastePrimary { .. }
+                        | SourceMsg::PasteResolved { .. }
                 );
                 let active = self.active_note().map(|t| t.path.clone());
                 let saved = match &m {

@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod bookmarks;
+pub mod clipboard_image;
 pub mod daemon;
 pub mod explorer;
 pub mod find;

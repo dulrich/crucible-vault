@@ -940,7 +940,8 @@ pub fn update(
         | SourceMsg::KeepMine(path)
         | SourceMsg::TakeTheirs(path)
         | SourceMsg::MiddleClick { path, .. }
-        | SourceMsg::PastePrimary { path, .. } => find(tabs, path),
+        | SourceMsg::PastePrimary { path, .. }
+        | SourceMsg::PasteResolved { path, .. } => find(tabs, path),
         _ => active_buf.and_then(|p| find(tabs, p)),
     };
     let Some(buf) = buf else {
@@ -997,6 +998,62 @@ pub fn update(
             let changed =
                 text.is_some_and(|t| !t.is_empty() && buf.paste(t, read_only, Instant::now()));
             edited(buf, changed)
+        }
+        SourceMsg::Paste => {
+            // Read-only (shadow) notes take no paste, as before.
+            if read_only {
+                return Task::none();
+            }
+            let path = buf.path.clone();
+            let daemon = ctx.daemon.map(Arc::clone);
+            let p = path.clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        crate::clipboard_image::resolve(
+                            &crate::clipboard_image::Xclip,
+                            daemon.as_deref(),
+                            &p,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        crate::clipboard_image::PasteOutcome::Text {
+                            notice: Some(format!("image paste failed: {e}")),
+                        }
+                    })
+                },
+                move |outcome| {
+                    Message::Source(SourceMsg::PasteResolved {
+                        path: path.clone(),
+                        outcome,
+                    })
+                },
+            )
+        }
+        SourceMsg::PasteResolved { path, outcome } => {
+            use crate::clipboard_image::PasteOutcome;
+            match outcome {
+                PasteOutcome::Insert(s) => {
+                    let changed = buf.paste(s, read_only, Instant::now());
+                    edited(buf, changed)
+                }
+                PasteOutcome::Failed(e) => {
+                    *ctx.error = Some(e);
+                    Task::none()
+                }
+                PasteOutcome::Text { notice } => {
+                    if notice.is_some() {
+                        *ctx.error = notice;
+                    }
+                    clipboard::read().map(move |text| {
+                        Message::Source(SourceMsg::PastePrimary {
+                            path: path.clone(),
+                            text,
+                        })
+                    })
+                }
+            }
         }
         SourceMsg::Undo | SourceMsg::Redo => {
             let changed = !read_only
@@ -1098,6 +1155,8 @@ fn key_binding(kp: KeyPress, km: &crate::palette::Keymap) -> Option<Binding<Mess
             "z" => Some(SourceMsg::Undo),
             "y" => Some(SourceMsg::Redo),
             "s" => Some(SourceMsg::Save),
+            // Plan editor-feedback-round-2 WP-9: image-aware paste (was iced's text Paste).
+            "v" if !kp.modifiers.shift() && !kp.modifiers.alt() => Some(SourceMsg::Paste),
             _ => None,
         };
         if let Some(m) = msg {

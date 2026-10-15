@@ -699,6 +699,41 @@ pub fn normalize_path(p: &str) -> String {
         .join("/")
 }
 
+/// Default `folder_template` (Crucible `DEFAULT_SETTINGS`); shared with the `write_attachment` RPC.
+pub(crate) const DEFAULT_FOLDER_TEMPLATE: &str = "{{folder}}/_attachments/{{slug}}";
+/// Default `name_template`; shared with the `write_attachment` RPC.
+pub(crate) const DEFAULT_NAME_TEMPLATE: &str = "{{md5}}_MD5.{{ext}}";
+
+/// Splits a note path into `(folder, basename-without-.md)`.
+pub(crate) fn note_folder_basename(path: &str) -> (&str, &str) {
+    let (folder, file) = path.rsplit_once('/').unwrap_or(("", path));
+    (folder, file.strip_suffix(".md").unwrap_or(file))
+}
+
+/// Resolves the vault path of an attachment for `note_path` from the templates
+/// (folder template + name template, normalized). Shared by [`Run::write_attachment`] and the
+/// daemon's `write_attachment` RPC.
+pub(crate) fn resolve_attachment_path(
+    folder_template: &str,
+    name_template: &str,
+    note_path: &str,
+    original: &str,
+    ext: &str,
+    md5: &str,
+) -> String {
+    let (note_folder, note_basename) = note_folder_basename(note_path);
+    let tc = TemplateCtx {
+        note_basename,
+        note_folder,
+        original,
+        ext,
+        md5,
+    };
+    let folder = normalize_path(&apply_template(folder_template, &tc));
+    let name = apply_template(name_template, &tc);
+    normalize_path(&format!("{folder}/{name}"))
+}
+
 /// Crucible `AttachmentTemplateContext`.
 struct TemplateCtx<'a> {
     note_basename: &'a str,
@@ -815,9 +850,8 @@ fn parse_params(t: Option<&toml::Table>) -> Result<Params, String> {
         Some("repair") => true,
         Some(o) => return Err(format!("localize: mode {o:?} (want localize|repair)")),
     };
-    let folder_template =
-        s("folder_template")?.unwrap_or_else(|| "{{folder}}/_attachments/{{slug}}".into());
-    let name_template = s("name_template")?.unwrap_or_else(|| "{{md5}}_MD5.{{ext}}".into());
+    let folder_template = s("folder_template")?.unwrap_or_else(|| DEFAULT_FOLDER_TEMPLATE.into());
+    let name_template = s("name_template")?.unwrap_or_else(|| DEFAULT_NAME_TEMPLATE.into());
     for tpl in [&folder_template, &name_template] {
         if tpl.contains("{{datetime:") {
             return Err("localize: {{datetime:…}} templates are not supported".into());
@@ -994,8 +1028,7 @@ struct Note<'a> {
 
 impl<'a> Note<'a> {
     fn new(path: &'a str) -> Self {
-        let (folder, file) = path.rsplit_once('/').unwrap_or(("", path));
-        let basename = file.strip_suffix(".md").unwrap_or(file);
+        let (folder, basename) = note_folder_basename(path);
         Self {
             path,
             basename,
@@ -1093,16 +1126,14 @@ impl Run<'_> {
         original: &str,
     ) -> Result<String, StepError> {
         let md5 = md5_hex(&bytes);
-        let tc = TemplateCtx {
-            note_basename: note.basename,
-            note_folder: note.folder,
+        let target = resolve_attachment_path(
+            &self.p.folder_template,
+            &self.p.name_template,
+            note.path,
             original,
             ext,
-            md5: &md5,
-        };
-        let folder = normalize_path(&apply_template(&self.p.folder_template, &tc));
-        let name = apply_template(&self.p.name_template, &tc);
-        let target = normalize_path(&format!("{folder}/{name}"));
+            &md5,
+        );
         if ctx.read(&target)?.is_some() {
             self.counts.reused += 1;
             return Ok(target);
@@ -2111,6 +2142,20 @@ mod vectors {
     #[test]
     fn validate_accepts_empty_and_rejects_bad_params() {
         assert!(parse_params(None).is_ok());
+        let d = parse_params(None).unwrap();
+        assert_eq!(d.folder_template, DEFAULT_FOLDER_TEMPLATE);
+        assert_eq!(d.name_template, DEFAULT_NAME_TEMPLATE);
+        assert_eq!(
+            resolve_attachment_path(
+                DEFAULT_FOLDER_TEMPLATE,
+                DEFAULT_NAME_TEMPLATE,
+                "notes/My Note.md",
+                "",
+                "png",
+                "abc"
+            ),
+            format!("notes/_attachments/{}/abc_MD5.png", slugify("My Note"))
+        );
         let bad: toml::Table = toml::from_str("mode = \"nope\"").unwrap();
         assert!(parse_params(Some(&bad)).is_err());
         let unknown: toml::Table = toml::from_str("bogus = 1").unwrap();
