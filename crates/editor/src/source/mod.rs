@@ -122,6 +122,9 @@ pub struct SourceBuffer {
     /// The find bar's current match ((line, byte column) from..to), painted by the highlighter
     /// while the find input holds focus (plan editor-feedback-round-2 WP-4).
     find_hl: Option<FindSpan>,
+    /// plan editor-data-safety WP-1 (audit E1): a reconnect arrived while a save on the old
+    /// connection was in flight; resync once its completion has been processed.
+    resync_pending: bool,
 }
 
 impl Clone for SourceBuffer {
@@ -140,6 +143,7 @@ impl Clone for SourceBuffer {
             epoch: self.epoch,
             primary: self.primary.clone(),
             find_hl: self.find_hl,
+            resync_pending: self.resync_pending,
         }
     }
 }
@@ -189,6 +193,7 @@ impl SourceBuffer {
             epoch: 0,
             primary: None,
             find_hl: None,
+            resync_pending: false,
         }
     }
 
@@ -792,6 +797,43 @@ impl SourceBuffer {
         self.base_hash = current;
         self.begin_save(read_only)
     }
+
+    /// plan editor-data-safety WP-1 (audit E1): mark a reconnect resync as waiting on the
+    /// in-flight save's completion.
+    pub fn defer_resync(&mut self) {
+        self.resync_pending = true;
+    }
+
+    /// Takes the deferred-resync mark (set while a save was in flight across a reconnect).
+    pub fn take_resync_pending(&mut self) -> bool {
+        std::mem::take(&mut self.resync_pending)
+    }
+
+    /// Reconnect resync against the file now on disk (`bytes`, `disk`). Clean → reload when
+    /// the disk differs. Dirty → if the disk already holds this exact text (an old save landed
+    /// but its reply was lost) adopt it as clean; else conflict bar when the disk differs from
+    /// the base; else a fresh save (any queued `save_again` is subsumed: the save carries the
+    /// latest text). Never call while a save is in flight.
+    pub fn resync(&mut self, bytes: &[u8], disk: ContentHash, read_only: bool) -> Option<SaveJob> {
+        if !self.dirty {
+            if disk != self.base_hash {
+                self.reload(bytes, disk);
+            }
+            return None;
+        }
+        if ContentHash::of(self.text().as_bytes()) == disk {
+            self.base_hash = disk;
+            self.dirty = false;
+            self.conflict = None;
+            self.save_again = false;
+            return None;
+        }
+        if self.conflict.is_some() || disk != self.base_hash {
+            self.conflict = Some(disk);
+            return None;
+        }
+        self.begin_save(read_only)
+    }
 }
 
 /// `Content::move_to` that also clears a stale selection: iced's `move_to` leaves the old
@@ -894,7 +936,10 @@ pub(crate) fn flush(
     spawn_save(daemon, buf.begin_save(read_only))
 }
 
-fn spawn_save(daemon: Option<&Arc<dyn DaemonClient>>, job: Option<SaveJob>) -> Task<Message> {
+pub(crate) fn spawn_save(
+    daemon: Option<&Arc<dyn DaemonClient>>,
+    job: Option<SaveJob>,
+) -> Task<Message> {
     let (Some(d), Some(job)) = (daemon, job) else {
         return Task::none();
     };

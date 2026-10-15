@@ -326,8 +326,12 @@ pub enum PanesMsg {
 pub enum StatusMsg {
     /// A daemon notification.
     Notification(Notification),
-    /// The notification channel closed (connection lost).
+    /// The notification channel closed (connection lost), or there never was one.
     Disconnected,
+    /// plan editor-data-safety WP-1: the reconnect backoff elapsed; try the connector.
+    ReconnectDue,
+    /// A reconnect attempt's result (`Err` = failed; retry after the next backoff).
+    Connected(Result<crate::daemon::Connection, String>),
 }
 
 /// Tabs.

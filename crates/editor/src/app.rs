@@ -114,6 +114,8 @@ pub struct StatusModel {
     pub last_job: Option<String>,
     /// Last error worth surfacing (no note text).
     pub error: Option<String>,
+    /// plan editor-data-safety WP-1: disconnected with a reconnect loop running.
+    pub reconnecting: bool,
 }
 
 impl StatusModel {
@@ -121,6 +123,8 @@ impl StatusModel {
     pub fn line(&self) -> String {
         let conn = if self.connected {
             "connected"
+        } else if self.reconnecting {
+            "reconnecting"
         } else {
             "disconnected"
         };
@@ -142,20 +146,39 @@ impl StatusModel {
 }
 
 /// The notification receiver, handed once to the iced subscription.
+/// The connection epoch is part of its identity (plan editor-data-safety WP-1): a reconnect
+/// bumps it, so iced drops the old subscription and runs a new one over the new receiver.
 #[derive(Clone, Default)]
-pub struct NotifHandle(Arc<Mutex<Option<Receiver<Notification>>>>);
+pub struct NotifHandle(Arc<Mutex<Option<Receiver<Notification>>>>, u64);
 
 impl NotifHandle {
-    /// Wraps a receiver.
+    /// Wraps a receiver (epoch 0).
     pub fn new(rx: Option<Receiver<Notification>>) -> Self {
-        Self(Arc::new(Mutex::new(rx)))
+        Self(Arc::new(Mutex::new(rx)), 0)
+    }
+
+    /// A reconnect's receiver at connection `epoch`.
+    pub fn shared(rx: Arc<Mutex<Option<Receiver<Notification>>>>, epoch: u64) -> Self {
+        Self(rx, epoch)
+    }
+
+    /// The connection epoch.
+    pub fn epoch(&self) -> u64 {
+        self.1
     }
 }
 
 impl Hash for NotifHandle {
     fn hash<H: Hasher>(&self, state: &mut H) {
         "daemon-notifications".hash(state);
+        self.1.hash(state);
     }
+}
+
+/// Reconnect backoff (plan editor-data-safety WP-1): 0.5 s doubling, capped at 5 s.
+pub fn reconnect_delay(attempt: u32) -> std::time::Duration {
+    let ms = 500u64.saturating_mul(1u64 << attempt.min(4));
+    std::time::Duration::from_millis(ms.min(5_000))
 }
 
 /// The application.
@@ -187,6 +210,10 @@ pub struct App {
     pub views: crate::views::ViewStore,
     tokens: Tokens,
     notifications: NotifHandle,
+    /// plan editor-data-safety WP-1: opens a fresh client (`None` = never reconnect).
+    connector: Option<crate::daemon::Connector>,
+    /// Failed reconnect attempts since the last disconnect (the backoff exponent).
+    reconnect_attempt: u32,
     state_path: Option<PathBuf>,
     /// `App::new` is restoring tabs: their first reading render waits for the debounce tick.
     restoring: bool,
@@ -326,6 +353,7 @@ impl App {
                         generation: h.generation,
                         last_job: None,
                         error: None,
+                        reconnecting: false,
                     },
                     NotifHandle::new(rx),
                 )
@@ -337,6 +365,7 @@ impl App {
                     generation: 0,
                     last_job: None,
                     error: None,
+                    reconnecting: false,
                 },
                 NotifHandle::default(),
             ),
@@ -365,6 +394,8 @@ impl App {
             panels: crate::panels::Panels::default(),
             views: crate::views::ViewStore::default(),
             notifications,
+            connector: None,
+            reconnect_attempt: 0,
             state_path,
             restoring: true,
             mode_menu: None,
@@ -441,6 +472,117 @@ impl App {
     /// A disconnected app (used if boot cannot take the prepared one).
     pub fn disconnected() -> Self {
         Self::new(None, None)
+    }
+
+    /// plan editor-data-safety WP-1: reconnect through `connector` whenever the connection is
+    /// lost (or was never made).
+    #[must_use]
+    pub fn with_connector(mut self, connector: crate::daemon::Connector) -> Self {
+        self.connector = Some(connector);
+        self
+    }
+
+    /// The connection epoch (bumped by every successful reconnect).
+    pub fn connection_epoch(&self) -> u64 {
+        self.notifications.epoch()
+    }
+
+    /// Starts the reconnect loop unless it is running or there is no connector.
+    fn start_reconnect(&mut self) -> Task<Message> {
+        if self.connector.is_none() || self.status.reconnecting {
+            return Task::none();
+        }
+        self.status.reconnecting = true;
+        self.reconnect_attempt = 0;
+        self.schedule_reconnect()
+    }
+
+    fn schedule_reconnect(&mut self) -> Task<Message> {
+        if self.rpc_inline {
+            // Tests drive attempts with `StatusMsg::ReconnectDue`.
+            return Task::none();
+        }
+        let delay = reconnect_delay(self.reconnect_attempt);
+        Task::perform(async move { tokio::time::sleep(delay).await }, |()| {
+            Message::Status(StatusMsg::ReconnectDue)
+        })
+    }
+
+    fn try_reconnect(&mut self) -> Task<Message> {
+        let Some(c) = self.connector.clone() else {
+            return Task::none();
+        };
+        if !self.status.reconnecting {
+            return Task::none();
+        }
+        if self.rpc_inline {
+            let r = crate::daemon::connect(&c).map_err(|e| e.to_string());
+            return self.update_status(StatusMsg::Connected(r));
+        }
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    crate::daemon::connect(&c).map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            },
+            |r| Message::Status(StatusMsg::Connected(r)),
+        )
+    }
+
+    /// Installs a fresh connection: new client, epoch bump (restarts the notification
+    /// subscription), daemon state refetch, view/panel invalidation and open-document resync.
+    /// Tasks still holding the old client fail with `Disconnected` and are not resurrected.
+    fn install_connection(&mut self, conn: crate::daemon::Connection) -> Task<Message> {
+        let h = conn.client.hello();
+        tracing::info!(mode = ?h.mode, generation = h.generation, "reconnected to daemon");
+        self.status.mode = h.mode;
+        self.status.generation = h.generation;
+        self.status.connected = true;
+        self.status.reconnecting = false;
+        self.status.error = None;
+        self.reconnect_attempt = 0;
+        let epoch = self.notifications.epoch() + 1;
+        self.notifications = NotifHandle::shared(conn.rx, epoch);
+        self.daemon = Some(conn.client);
+        self.refresh_files();
+        self.panels.invalidate();
+        self.views.invalidate(&[]);
+        self.palette.invalidate();
+        self.palette.loading = false;
+        let fetch = self.fetch_actions();
+        let status = self.refresh_status_if_open();
+        let paths: Vec<String> = self.docs.keys().cloned().collect();
+        let saves: Vec<Task<Message>> = paths.iter().map(|p| self.resync_doc(p)).collect();
+        Task::batch([fetch, status].into_iter().chain(saves))
+    }
+
+    /// Reconnect resync of one open document against the disk (audit E1: a document with a
+    /// save in flight on the old connection waits for that save's completion).
+    fn resync_doc(&mut self, path: &str) -> Task<Message> {
+        let Some(d) = self.daemon.clone() else {
+            return Task::none();
+        };
+        let read_only = self.status.mode == Mode::Shadow;
+        let Some(doc) = self.docs.get_mut(path) else {
+            return Task::none();
+        };
+        if doc.is_saving() {
+            doc.defer_resync();
+            return Task::none();
+        }
+        match d.read_file(path) {
+            Ok((bytes, hash)) => {
+                let job = doc.resync(&bytes, hash, read_only);
+                crate::source::spawn_save(Some(&d), job)
+            }
+            // A vanished file keeps the document as it is (WP-2 owns missing-file handling).
+            Err(e) => {
+                tracing::warn!(error = %e, "reconnect resync read failed");
+                Task::none()
+            }
+        }
     }
 
     /// The focused pane's active tab.
@@ -961,6 +1103,23 @@ impl App {
                         error: &mut self.status.error,
                     },
                 );
+                // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this
+                // save was in flight resyncs now. A failed completion's queued `save_again` is
+                // not relaunched by `source::update`, so the resync's fresh save covers it; a
+                // follow-up save already started (success path) runs on the current client.
+                let resync = match &saved {
+                    Some((path, _))
+                        if self
+                            .docs
+                            .get_mut(path)
+                            .is_some_and(|d| d.take_resync_pending() && !d.is_saving()) =>
+                    {
+                        let path = path.clone();
+                        self.resync_doc(&path)
+                    }
+                    _ => Task::none(),
+                };
+                let task = Task::batch([task, resync]);
                 return match saved {
                     Some((path, ok)) => Task::batch([task, self.note_save_landed(&path, ok)]),
                     None => task,
@@ -2522,7 +2681,22 @@ impl App {
 
     fn update_status(&mut self, m: StatusMsg) -> Task<Message> {
         match m {
-            StatusMsg::Disconnected => self.status.connected = false,
+            StatusMsg::Disconnected => {
+                self.status.connected = false;
+                return self.start_reconnect();
+            }
+            StatusMsg::ReconnectDue => return self.try_reconnect(),
+            StatusMsg::Connected(Ok(conn)) => {
+                if !self.status.reconnecting {
+                    return Task::none();
+                }
+                return self.install_connection(conn);
+            }
+            StatusMsg::Connected(Err(e)) => {
+                tracing::debug!(error = %e, attempt = self.reconnect_attempt, "reconnect failed");
+                self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
+                return self.schedule_reconnect();
+            }
             StatusMsg::Notification(n) => {
                 self.status.connected = true;
                 match n {
@@ -3590,6 +3764,9 @@ fn notification_stream(handle: &NotifHandle) -> impl iced::futures::Stream<Item 
     let rx = handle.0.lock().ok().and_then(|mut g| g.take());
     iced::stream::channel(64, async move |mut out| {
         let Some(rx) = rx else {
+            // No connection (boot without a daemon, or a failed subscribe): start the
+            // reconnect loop (plan editor-data-safety WP-1).
+            let _ = out.send(Message::Status(StatusMsg::Disconnected)).await;
             return;
         };
         // Bridge the blocking std receiver onto an async channel from a dedicated thread.

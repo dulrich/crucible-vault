@@ -12,6 +12,7 @@ pub mod socket;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 
 pub use cv_protocol::{
     ActionInfo, HelloResult, JobStatus, Mode, Notification, RunActionParams, RunActionResult,
@@ -135,4 +136,32 @@ pub trait DaemonClient: Send + Sync {
 pub fn vault_abs(root: &Path, rel: &str) -> Result<PathBuf> {
     cv_vault::validate_rel_path(rel).map_err(|_| DaemonError::InvalidPath)?;
     Ok(root.join(rel))
+}
+
+/// Opens a fresh daemon client (plan editor-data-safety WP-1). Production:
+/// `SocketDaemon::connect(default_socket())`; tests: a `FakeDaemon` factory. Blocking.
+pub type Connector = Arc<dyn Fn() -> Result<Arc<dyn DaemonClient>> + Send + Sync>;
+
+/// A fresh connection: the client and its notification receiver (subscribed to
+/// [`ALL_TOPICS`]), carried from the reconnect task to the UI thread.
+#[derive(Clone)]
+pub struct Connection {
+    pub client: Arc<dyn DaemonClient>,
+    pub rx: Arc<Mutex<Option<Receiver<Notification>>>>,
+}
+
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection").finish_non_exhaustive()
+    }
+}
+
+/// Runs `connector` and subscribes the new client; any failure is a failed attempt.
+pub fn connect(connector: &Connector) -> Result<Connection> {
+    let client = connector()?;
+    let rx = client.subscribe(&ALL_TOPICS)?;
+    Ok(Connection {
+        client,
+        rx: Arc::new(Mutex::new(Some(rx))),
+    })
 }

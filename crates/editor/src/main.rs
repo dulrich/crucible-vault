@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, bail};
 use editor::app::App;
-use editor::daemon::{DaemonClient, FakeDaemon, SocketDaemon};
+use editor::daemon::{Connector, DaemonClient, FakeDaemon, SocketDaemon};
 
 fn usage() -> anyhow::Error {
     anyhow::anyhow!("usage: cvault-editor [--fake <dir>]")
@@ -43,15 +43,22 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut connector: Option<Connector> = None;
     let daemon: Option<Arc<dyn DaemonClient>> = match args.as_slice() {
         [] => {
             let sock = editor::daemon::socket::default_socket()
                 .context("no CV_SOCKET and no XDG_RUNTIME_DIR")?;
-            match SocketDaemon::connect(&sock) {
+            // plan editor-data-safety WP-1: the same connect, reused by the reconnect loop.
+            let c: Connector = Arc::new(move || {
+                SocketDaemon::connect(&sock).map(|d| Arc::new(d) as Arc<dyn DaemonClient>)
+            });
+            let first = c();
+            connector = Some(c);
+            match first {
                 Ok(d) => {
                     let h = d.hello();
                     tracing::info!(mode = ?h.mode, generation = h.generation, "connected to daemon");
-                    Some(Arc::new(d))
+                    Some(d)
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "daemon not reachable; starting disconnected");
@@ -66,7 +73,10 @@ fn main() -> anyhow::Result<()> {
         }
         _ => return Err(usage()),
     };
-    let app = App::new(daemon, editor::ui_state::default_path());
+    let mut app = App::new(daemon, editor::ui_state::default_path());
+    if let Some(c) = connector {
+        app = app.with_connector(c);
+    }
     let cell = Mutex::new(Some(app));
     let boot = move || {
         cell.lock()
