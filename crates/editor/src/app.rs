@@ -122,6 +122,10 @@ pub struct App {
     state_path: Option<PathBuf>,
     /// `App::new` is restoring tabs: their first reading render waits for the debounce tick.
     restoring: bool,
+    /// editor-usability-round WP-3: the pane whose view-mode dropdown is open.
+    pub mode_menu: Option<Pane>,
+    /// A back/forward step is opening a path: it must not push onto the history.
+    history_nav: bool,
 }
 
 fn tokens_for(s: Surround) -> Tokens {
@@ -237,6 +241,8 @@ impl App {
             notifications,
             state_path,
             restoring: true,
+            mode_menu: None,
+            history_nav: false,
         };
         app.refresh_files();
         app.load_bookmarks();
@@ -254,6 +260,11 @@ impl App {
         }
         app.focus = focus;
         app.restoring = false;
+        for (_, ps) in app.panes.iter_mut() {
+            if let Some(p) = ps.active_tab().map(|t| t.path.clone()) {
+                ps.history.push(&p);
+            }
+        }
         app.sync_buffers();
         app
     }
@@ -366,6 +377,7 @@ impl App {
             if let Some(ps) = self.panes.get_mut(p) {
                 ps.active = Some(i);
             }
+            self.record_visit(p, path);
             return Ok(());
         }
         let Some(d) = &self.daemon else {
@@ -400,8 +412,42 @@ impl App {
         if let Some(old) = replaced {
             self.on_tab_closed(&old);
         }
+        self.record_visit(pane, path);
         self.ui.touch_recent(path);
         Ok(())
+    }
+
+    /// Pushes `path` onto `pane`'s history (not while restoring or stepping back/forward).
+    fn record_visit(&mut self, pane: Pane, path: &str) {
+        if self.restoring || self.history_nav {
+            return;
+        }
+        if let Some(ps) = self.panes.get_mut(pane) {
+            ps.history.push(path);
+        }
+    }
+
+    /// Back (`forward = false`) or forward in `pane`'s history: the target path is focused or
+    /// reopened in that pane without pushing.
+    fn history_step(&mut self, pane: Pane, forward: bool) {
+        let Some(ps) = self.panes.get_mut(pane) else {
+            return;
+        };
+        let target = if forward {
+            ps.history.forward()
+        } else {
+            ps.history.back()
+        };
+        let Some(path) = target.map(str::to_owned) else {
+            return;
+        };
+        self.history_nav = true;
+        let r = self.open_into(pane, &path, false);
+        self.history_nav = false;
+        if let Err(e) = r {
+            self.status.error = Some(open_error(&e));
+        }
+        self.persist();
     }
 
     /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
@@ -544,6 +590,7 @@ impl App {
                     self.daemon.as_ref(),
                 );
                 if mode_change {
+                    self.mode_menu = None;
                     self.persist();
                 }
                 return task;
@@ -566,7 +613,9 @@ impl App {
                     && i < ps.tabs.len()
                 {
                     ps.active = Some(i);
+                    let path = ps.tabs[i].path.clone();
                     self.focus = pane;
+                    self.record_visit(pane, &path);
                     self.persist();
                 }
             }
@@ -625,6 +674,19 @@ impl App {
             }
             PanesMsg::Resized(ev) => self.panes.resize(ev.split, ev.ratio),
             PanesMsg::Bookmark(b) => return self.update_bookmarks(b),
+            PanesMsg::Back(pane) => self.history_step(pane, false),
+            PanesMsg::Forward(pane) => self.history_step(pane, true),
+            PanesMsg::BackFocused => self.history_step(self.focus, false),
+            PanesMsg::ForwardFocused => self.history_step(self.focus, true),
+            PanesMsg::ToggleSide => {
+                self.ui.side_collapsed = !self.ui.side_collapsed;
+                self.persist();
+            }
+            PanesMsg::ToggleBorders => {
+                self.ui.pane_borders = !self.ui.pane_borders;
+                self.persist();
+            }
+            PanesMsg::ModeMenu(p) => self.mode_menu = p,
         }
         Task::none()
     }
@@ -898,6 +960,9 @@ impl App {
                     *slot = tab;
                 }
                 self.on_tab_closed(from);
+                for (_, ps) in self.panes.iter_mut() {
+                    ps.history.retarget(from, to);
+                }
                 if let Some(t) = self.panes.get(pane).and_then(|ps| ps.tabs.get(i)).cloned() {
                     self.reading.register(&t, mode, true, self.daemon.as_ref());
                 }
@@ -1505,20 +1570,36 @@ impl App {
         self.tokens.iced_theme(name)
     }
 
+    /// The backdrop-click / close message for the open overlay (`None` = no overlay open).
+    pub fn overlay_close(&self) -> Option<Message> {
+        if self.switcher.open {
+            Some(Message::Switcher(SwitcherMsg::Close))
+        } else if self.palette.open {
+            Some(Message::Palette(PaletteMsg::Close))
+        } else {
+            None
+        }
+    }
+
     fn pane_view<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> pane_grid::Content<'a, Message> {
+        use crate::icons::Icon;
+        use crate::theme::{icon_button, icon_button_style, icon_text};
         let t = self.tokens;
         let focused = pane == self.focus;
         let mut strip = row(ps.tabs.iter().enumerate().map(|(i, tab)| {
-            let label = if ps.active == Some(i) {
-                format!("● {}", tab.path)
-            } else {
-                tab.path.clone()
+            let active = ps.active == Some(i);
+            // Focus cue (borders are debug-only): the focused pane's active tab is an
+            // `accent_text` label on a `panel_2` block; an unfocused pane's active tab keeps the
+            // block with a `text` label; inactive tabs are `text_dim`.
+            let colour = match (active, focused) {
+                (true, true) => t.accent_text,
+                (true, false) => t.text,
+                _ => t.text_dim,
             };
-            let mut lbl = text(label).size(14);
-            if focused && ps.active == Some(i) {
-                lbl = lbl.color(t.accent_text.to_color());
-            }
-            row![
+            let lbl = text(crate::source::tab_title(&tab.source, &tab.path))
+                .size(14)
+                .color(colour.to_color());
+            let chip = row![
                 button(lbl)
                     .style(button::text)
                     .on_press(Message::Tabs(TabsMsg::Select(pane, i))),
@@ -1527,9 +1608,20 @@ impl App {
                     .on_press(Message::Tabs(TabsMsg::Close(pane, i))),
             ]
             .spacing(2)
-            .into()
+            .align_y(iced::Alignment::Center);
+            container(chip)
+                .style(move |_: &Theme| container::Style {
+                    background: active.then(|| t.panel_2.to_color().into()),
+                    border: iced::Border {
+                        radius: crate::theme::RADIUS.into(),
+                        ..iced::Border::default()
+                    },
+                    ..container::Style::default()
+                })
+                .into()
         }))
         .spacing(8)
+        .align_y(iced::Alignment::Center)
         .width(Length::Fill);
         if self.panes.len() > 1 {
             strip = strip.push(
@@ -1538,7 +1630,42 @@ impl App {
                     .on_press(Message::Panes(PanesMsg::Close(pane))),
             );
         }
-        let mut col = column![container(strip).padding(2).width(Length::Fill)].spacing(4);
+        let mode = ps.active_tab().map(|tab| self.reading.mode(&tab.path));
+        let mode_icon = match mode {
+            Some(crate::reading::ViewMode::Source) => Icon::Code,
+            Some(crate::reading::ViewMode::Split) => Icon::Columns2,
+            Some(crate::reading::ViewMode::Reading) | None => Icon::BookOpen,
+        };
+        let menu_open = self.mode_menu == Some(pane) && mode.is_some();
+        let mode_btn = button(icon_text(mode_icon))
+            .width(crate::theme::CONTROL)
+            .height(crate::theme::CONTROL)
+            .padding(0)
+            .style(icon_button_style(t, menu_open))
+            .on_press_maybe(
+                mode.map(|_| Message::Panes(PanesMsg::ModeMenu((!menu_open).then_some(pane)))),
+            );
+        let controls = row![
+            icon_button(
+                Icon::ChevronLeft,
+                ps.history
+                    .can_back()
+                    .then_some(Message::Panes(PanesMsg::Back(pane))),
+                t,
+            ),
+            icon_button(
+                Icon::ChevronRight,
+                ps.history
+                    .can_forward()
+                    .then_some(Message::Panes(PanesMsg::Forward(pane))),
+                t,
+            ),
+            strip,
+            mode_btn,
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+        let mut col = column![container(controls).padding(2).width(Length::Fill)].spacing(4);
         match ps.active_tab() {
             Some(tab) => {
                 if let Some(bar) = nav::bar(pane, &tab.path, self.today(), t) {
@@ -1548,17 +1675,123 @@ impl App {
             }
             None => col = col.push(text("No file open").color(t.text_faint.to_color())),
         }
-        let border = if focused { t.accent_ui } else { t.line };
-        pane_grid::Content::new(container(col).padding(8).height(Length::Fill)).style(
+        // The dropdown sits in a stack layer above the pane body (layer 0 never moves).
+        let menu: Element<'a, Message> = match (menu_open, ps.active_tab(), mode) {
+            (true, Some(tab), Some(current)) => {
+                use crate::reading::ViewMode;
+                let item = |label: &'static str, icon: Icon, m: ViewMode| {
+                    let on = m == current;
+                    button(
+                        row![
+                            text(icon.glyph().to_string())
+                                .font(crate::icons::FONT)
+                                .size(crate::theme::ICON_SIZE),
+                            text(label).size(14),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .height(crate::theme::SEGMENT)
+                    .width(Length::Fill)
+                    .padding([0, 10])
+                    .style(crate::theme::segment_style(t, on))
+                    .on_press(Message::Reading(
+                        crate::message::ReadingMsg::SetMode {
+                            path: tab.path.clone(),
+                            mode: m,
+                        },
+                    ))
+                };
+                let list = container(
+                    column![
+                        item("Source", Icon::Code, ViewMode::Source),
+                        item("Split", Icon::Columns2, ViewMode::Split),
+                        item("Reading", Icon::BookOpen, ViewMode::Reading),
+                    ]
+                    .spacing(0),
+                )
+                .padding(1)
+                .width(160)
+                .style(crate::theme::seg_group_style(t));
+                iced::widget::mouse_area(
+                    container(iced::widget::opaque(list))
+                        .padding(iced::Padding {
+                            top: crate::theme::CONTROL + 8.0,
+                            ..iced::Padding::ZERO
+                        })
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(Message::Panes(PanesMsg::ModeMenu(None)))
+                .into()
+            }
+            _ => Space::new().into(),
+        };
+        let body = iced::widget::stack![col, menu];
+        let border = if !self.ui.pane_borders {
+            None
+        } else if focused {
+            Some(t.accent_ui)
+        } else {
+            Some(t.line)
+        };
+        pane_grid::Content::new(container(body).padding(8).height(Length::Fill)).style(
             move |_: &Theme| container::Style {
                 border: iced::Border {
-                    color: border.to_color(),
-                    width: 1.0,
+                    color: border.map_or(iced::Color::TRANSPARENT, crate::theme::Rgb::to_color),
+                    width: if border.is_some() { 1.0 } else { 0.0 },
                     radius: 0.0.into(),
                 },
                 ..container::Style::default()
             },
         )
+    }
+
+    fn side_view(&self) -> Element<'_, Message> {
+        use crate::icons::Icon;
+        use crate::theme::icon_button;
+        let t = self.tokens;
+        let collapsed = self.ui.side_collapsed;
+        // Collapsed: a 46px icon strip; any icon expands. The full column stays in the tree (a
+        // zero-width clipped container) so the explorer's scroll offset and focus survive.
+        let strip: Element<'_, Message> = if collapsed {
+            let expand = || Some(Message::Panes(PanesMsg::ToggleSide));
+            column![
+                icon_button(Icon::PanelLeftOpen, expand(), t),
+                icon_button(Icon::FolderTree, expand(), t),
+                icon_button(Icon::Bookmark, expand(), t),
+            ]
+            .spacing(6)
+            .padding(6)
+            .into()
+        } else {
+            Space::new().into()
+        };
+        let header = row![
+            Space::new().width(Length::Fill),
+            icon_button(
+                Icon::PanelLeftClose,
+                Some(Message::Panes(PanesMsg::ToggleSide)),
+                t,
+            ),
+        ];
+        let full = column![
+            header,
+            container(explorer::view(&self.explorer, t, self.status.mode)).height(Length::Fill),
+            bookmarks::view(&self.bookmarks, t, self.status.mode),
+        ]
+        .spacing(8)
+        .padding(4);
+        let full = container(full)
+            .width(if collapsed {
+                Length::Fixed(0.0)
+            } else {
+                Length::Fill
+            })
+            .height(Length::Fill)
+            .clip(true);
+        row![strip, full].height(Length::Fill).into()
     }
 
     /// The view.
@@ -1594,13 +1827,6 @@ impl App {
         ]
         .spacing(8);
 
-        let side = column![
-            container(explorer::view(&self.explorer, t, self.status.mode)).height(Length::Fill),
-            bookmarks::view(&self.bookmarks, t, self.status.mode),
-        ]
-        .spacing(8)
-        .padding(4);
-
         let grid = PaneGrid::new(&self.panes, |pane, ps, _| self.pane_view(pane, ps))
             .spacing(4)
             .on_click(|p| Message::Panes(PanesMsg::Focus(p)))
@@ -1621,36 +1847,16 @@ impl App {
         ]
         .spacing(16);
 
-        // Widget state is matched by tree position: the switcher and palette slots stay present
-        // (an empty `Space` when closed) so opening one does not rebuild every pane's editor state
-        // (focus, scroll) below it.
-        let switcher_slot: Element<'_, Message> = if self.switcher.open {
-            container(switcher::view(&self.switcher, t, self.status.mode))
-                .padding(6)
-                .width(Length::Fill)
-                .style(inset)
-                .into()
+        let main = column![container(top).padding(4).width(Length::Fill).style(panel)];
+        let side_width = if self.ui.side_collapsed {
+            Length::Fixed(46.0)
         } else {
-            Space::new().into()
+            Length::FillPortion(1)
         };
-        let palette_slot: Element<'_, Message> = if self.palette.open {
-            container(crate::palette::view(&self.palette, t))
-                .padding(6)
-                .width(Length::Fill)
-                .style(inset)
-                .into()
-        } else {
-            Space::new().into()
-        };
-        let main = column![
-            container(top).padding(4).width(Length::Fill).style(panel),
-            switcher_slot,
-            palette_slot,
-        ];
         let mut body = row![
-            container(side)
+            container(self.side_view())
                 .style(inset)
-                .width(Length::FillPortion(1))
+                .width(side_width)
                 .height(Length::Fill),
             container(grid)
                 .padding(4)
@@ -1665,14 +1871,54 @@ impl App {
                     .height(Length::Fill),
             );
         }
-        main.push(body.height(Length::Fill))
-            .push(
-                container(status)
-                    .padding(4)
-                    .width(Length::Fill)
-                    .style(panel),
-            )
-            .into()
+        let base = main.push(body.height(Length::Fill)).push(
+            container(status)
+                .padding(4)
+                .width(Length::Fill)
+                .style(panel),
+        );
+
+        // Widget state is matched by tree position: the base layer never changes shape when the
+        // switcher / palette opens; they render as a centred card in layer 1 (`Space` when
+        // closed). The backdrop closes on click; the card itself swallows clicks (`opaque`).
+        let overlay: Element<'_, Message> = match self.overlay_close() {
+            Some(close) => {
+                let mut card = column![].spacing(6).width(Length::Fill);
+                if self.switcher.open {
+                    card = card.push(switcher::view(&self.switcher, t, self.status.mode));
+                }
+                if self.palette.open {
+                    card = card.push(crate::palette::view(&self.palette, t));
+                }
+                let card = container(card)
+                    .padding(10)
+                    .width(640)
+                    .style(move |_: &Theme| container::Style {
+                        background: Some(t.panel.to_color().into()),
+                        text_color: Some(t.text.to_color()),
+                        border: iced::Border {
+                            color: t.line.to_color(),
+                            width: 1.0,
+                            radius: crate::theme::RADIUS.into(),
+                        },
+                        ..container::Style::default()
+                    });
+                iced::widget::mouse_area(
+                    container(iced::widget::opaque(card))
+                        .padding(iced::Padding {
+                            top: 80.0,
+                            ..iced::Padding::ZERO
+                        })
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(close)
+                .into()
+            }
+            None => Space::new().into(),
+        };
+        iced::widget::stack![base, overlay].into()
     }
 }
 

@@ -11,6 +11,8 @@ use crate::ui_state::{PaneLayout, PaneNode, SplitDir};
 pub struct PaneState {
     pub tabs: Vec<Tab>,
     pub active: Option<usize>,
+    /// editor-usability-round WP-3: back/forward (not persisted).
+    pub history: crate::history::History,
 }
 
 impl PaneState {

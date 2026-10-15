@@ -288,6 +288,120 @@ const LIGHT: &str = "
   --n1-on-accent-ui: #fff;
 ";
 
+// ---- editor-usability-round WP-3: Signalworks icon buttons and seg-groups ----
+//
+// Signalworks (`signalworks-design/readme.md`, CC-11 icon button, CC-16 seg-group) mapped onto
+// N1 tokens: `panel_2` raised fill, `line` hairline, `text_faint` achromatic hover promote,
+// `text_dim` glyph, `accent_text` active glyph. One control height: 34px.
+
+/// The single control height (Signalworks).
+pub const CONTROL: f32 = 34.0;
+/// The seg-group inner segment height.
+pub const SEGMENT: f32 = 32.0;
+/// Control corner radius.
+pub const RADIUS: f32 = 8.0;
+/// Icon glyph size.
+pub const ICON_SIZE: f32 = 16.0;
+
+/// CC-11 icon-button style: `panel_2` fill, 1px `line` border; hover/press promotes the border
+/// to `text_faint` (never an accent tint); `active` draws the glyph in `accent_text`; disabled
+/// dims the glyph to `text_faint`.
+pub fn icon_button_style(
+    t: Tokens,
+    active: bool,
+) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+    move |_, status| {
+        let border = match status {
+            Status::Hovered | Status::Pressed => t.text_faint,
+            Status::Active | Status::Disabled => t.line,
+        };
+        let glyph = match status {
+            Status::Disabled => t.text_faint,
+            Status::Pressed => t.accent_text,
+            _ if active => t.accent_text,
+            _ => t.text_dim,
+        };
+        iced::widget::button::Style {
+            background: Some(t.panel_2.to_color().into()),
+            text_color: glyph.to_color(),
+            border: iced::Border {
+                color: border.to_color(),
+                width: 1.0,
+                radius: RADIUS.into(),
+            },
+            ..iced::widget::button::Style::default()
+        }
+    }
+}
+
+/// The glyph text for `icon`.
+pub fn icon_text<'a>(icon: crate::icons::Icon) -> iced::widget::Text<'a> {
+    iced::widget::text(icon.glyph().to_string())
+        .font(crate::icons::FONT)
+        .size(ICON_SIZE)
+        .line_height(1.0)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill)
+}
+
+/// A 34×34 CC-11 icon button; `msg = None` renders it disabled.
+pub fn icon_button<'a, M: Clone + 'a>(
+    icon: crate::icons::Icon,
+    msg: Option<M>,
+    t: Tokens,
+) -> iced::widget::Button<'a, M> {
+    iced::widget::button(icon_text(icon))
+        .width(CONTROL)
+        .height(CONTROL)
+        .padding(0)
+        .style(icon_button_style(t, false))
+        .on_press_maybe(msg)
+}
+
+/// CC-16 seg-group container: `panel` fill, 1px `line` border, radius 8.
+pub fn seg_group_style(t: Tokens) -> impl Fn(&iced::Theme) -> iced::widget::container::Style {
+    move |_| iced::widget::container::Style {
+        background: Some(t.panel.to_color().into()),
+        border: iced::Border {
+            color: t.line.to_color(),
+            width: 1.0,
+            radius: RADIUS.into(),
+        },
+        ..iced::widget::container::Style::default()
+    }
+}
+
+/// CC-16 segment: flush, transparent; the active one is a `panel_2` block with an `accent_text`
+/// glyph; hover promotes the glyph achromatically (`text`) and never clears the active block.
+pub fn segment_style(
+    t: Tokens,
+    active: bool,
+) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+    move |_, status| {
+        let hovered = matches!(status, Status::Hovered | Status::Pressed);
+        let glyph = if active {
+            t.accent_text
+        } else if hovered {
+            t.text
+        } else {
+            t.text_dim
+        };
+        iced::widget::button::Style {
+            background: active.then(|| t.panel_2.to_color().into()),
+            text_color: glyph.to_color(),
+            border: iced::Border {
+                radius: (RADIUS - 1.0).into(),
+                ..iced::Border::default()
+            },
+            ..iced::widget::button::Style::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

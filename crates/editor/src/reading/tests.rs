@@ -103,7 +103,7 @@ fn modes_cycle_and_transclusion_is_depth_one() {
         }])
     );
     drop(app.view());
-    let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
+    reading(&mut app, "A.md", ViewMode::Split);
     assert_eq!(app.reading.mode("A.md"), ViewMode::Split);
     drop(app.view());
     let _ = app.update(Message::Reading(ReadingMsg::CycleMode));

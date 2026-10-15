@@ -68,6 +68,8 @@ pub enum ClientCmd {
     Undo,
     Redo,
     TogglePanels,
+    /// editor-usability-round WP-3: debug pane borders.
+    TogglePaneBorders,
     Panel(PanelKind),
 }
 
@@ -85,6 +87,7 @@ impl ClientCmd {
             ClientCmd::Undo,
             ClientCmd::Redo,
             ClientCmd::TogglePanels,
+            ClientCmd::TogglePaneBorders,
         ];
         v.extend(PanelKind::ALL.iter().map(|&k| ClientCmd::Panel(k)));
         v
@@ -93,7 +96,7 @@ impl ClientCmd {
     /// Title and group.
     pub fn title(self) -> (String, &'static str) {
         let t = match self {
-            ClientCmd::CycleReading => "Toggle reading / split view",
+            ClientCmd::CycleReading => "Toggle source / reading view",
             ClientCmd::Surround => "Cycle surround (theme)",
             ClientCmd::SplitRight => "Split pane right",
             ClientCmd::SplitDown => "Split pane down",
@@ -103,6 +106,7 @@ impl ClientCmd {
             ClientCmd::Undo => "Undo",
             ClientCmd::Redo => "Redo",
             ClientCmd::TogglePanels => "Toggle side panels",
+            ClientCmd::TogglePaneBorders => "Toggle pane borders (debug)",
             ClientCmd::Panel(k) => return (format!("Show {} panel", k.label()), "Panels"),
         };
         (t.to_owned(), "Editor")
@@ -134,6 +138,7 @@ impl ClientCmd {
             ClientCmd::Undo => Message::Source(SourceMsg::Undo),
             ClientCmd::Redo => Message::Source(SourceMsg::Redo),
             ClientCmd::TogglePanels => Message::Panels(PanelsMsg::Toggle),
+            ClientCmd::TogglePaneBorders => Message::Panes(PanesMsg::ToggleBorders),
             ClientCmd::Panel(k) => Message::Panels(PanelsMsg::Show(k)),
         }
     }
@@ -471,6 +476,14 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
         Key::Named(Named::ArrowUp) => p(PaletteMsg::Up),
         Key::Named(Named::ArrowDown) => p(PaletteMsg::Down),
         Key::Named(Named::Enter) if modifiers.command() => p(PaletteMsg::CtrlEnter),
+        // editor-usability-round WP-3: focused-pane back/forward (`chord` has no arrow names,
+        // so these never reach action bindings).
+        Key::Named(Named::ArrowLeft) if modifiers.command() && modifiers.alt() => {
+            Some(Message::Panes(PanesMsg::BackFocused))
+        }
+        Key::Named(Named::ArrowRight) if modifiers.command() && modifiers.alt() => {
+            Some(Message::Panes(PanesMsg::ForwardFocused))
+        }
         Key::Character(c)
             if modifiers.command()
                 && !modifiers.shift()

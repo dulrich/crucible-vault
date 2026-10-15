@@ -83,6 +83,8 @@ fn main() -> anyhow::Result<()> {
             default_text_size: editor::theme::BASE_TEXT_SIZE.into(),
             ..iced::Settings::default()
         })
+        // After `.settings` (which replaces the font list): the vendored lucide icon font.
+        .font(editor::icons::FONT_BYTES)
         .run();
     if let Err(e) = res {
         bail!("iced: {e}");

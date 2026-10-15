@@ -49,6 +49,14 @@ impl ViewMode {
         }
     }
 
+    /// Ctrl+E (editor-usability-round WP-3): Source ↔ Reading; Split goes to Source.
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Source => Self::Reading,
+            Self::Reading | Self::Split => Self::Source,
+        }
+    }
+
     fn shows_reading(self) -> bool {
         self != Self::Source
     }
@@ -426,7 +434,7 @@ pub fn update(
     match msg {
         ReadingMsg::CycleMode => {
             if let Some(tab) = active {
-                let next = store.mode(&tab.path).next();
+                let next = store.mode(&tab.path).toggle();
                 store.set_mode(tab, next, daemon);
             }
         }

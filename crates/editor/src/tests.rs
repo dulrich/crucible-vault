@@ -995,3 +995,220 @@ mod wp4 {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// editor-usability-round WP-3: overlay, side collapse, borders, history, view mode, dirty slot
+// ---------------------------------------------------------------------------------------------
+
+mod usability_wp3 {
+    use super::*;
+    use crate::message::{ExplorerMsg, PaletteMsg, PanesMsg, ReadingMsg, SwitcherMsg};
+    use crate::reading::ViewMode;
+
+    type Fixture = (tempfile::TempDir, Arc<FakeDaemon>, App);
+
+    fn app_with(notes: &[&str], state: Option<std::path::PathBuf>) -> Fixture {
+        let (tmp, d) = fake();
+        let d = Arc::new(d);
+        for n in notes {
+            d.create_note(n, "x").expect("create");
+        }
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), state);
+        app.rpc_inline = true;
+        (tmp, d, app)
+    }
+
+    fn open(app: &mut App, p: &str) {
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(p.into())));
+    }
+
+    fn active(app: &App) -> Option<String> {
+        app.active_tab().map(|t| t.path.clone())
+    }
+
+    fn history(app: &App) -> Vec<String> {
+        app.panes
+            .get(app.focus)
+            .map(|ps| ps.history.entries().to_vec())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn back_forward_walks_the_pane_history_without_pushing() {
+        let (_tmp, _d, mut app) = app_with(&["h3/a.md", "h3/b.md", "h3/c.md"], None);
+        for p in ["h3/a.md", "h3/b.md", "h3/c.md"] {
+            open(&mut app, p);
+        }
+        assert_eq!(history(&app), ["h3/a.md", "h3/b.md", "h3/c.md"]);
+        let pane = app.focus;
+        let _ = app.update(Message::Panes(PanesMsg::Back(pane)));
+        assert_eq!(active(&app).as_deref(), Some("h3/b.md"));
+        let _ = app.update(Message::Panes(PanesMsg::BackFocused));
+        assert_eq!(active(&app).as_deref(), Some("h3/a.md"));
+        let _ = app.update(Message::Panes(PanesMsg::BackFocused));
+        assert_eq!(active(&app).as_deref(), Some("h3/a.md"), "no-op at start");
+        let _ = app.update(Message::Panes(PanesMsg::ForwardFocused));
+        assert_eq!(active(&app).as_deref(), Some("h3/b.md"));
+        assert_eq!(history(&app).len(), 3, "back/forward never push");
+        // Re-opening the current entry does not duplicate it; a new open drops forward.
+        open(&mut app, "h3/b.md");
+        open(&mut app, "h3/a.md");
+        assert_eq!(history(&app), ["h3/a.md", "h3/b.md", "h3/a.md"]);
+        let _ = app.update(Message::Panes(PanesMsg::Forward(pane)));
+        assert_eq!(active(&app).as_deref(), Some("h3/a.md"));
+    }
+
+    #[test]
+    fn rename_retargets_history_entries() {
+        let (_tmp, _d, mut app) = app_with(&["h3r/one.md", "h3r/other.md"], None);
+        open(&mut app, "h3r/one.md");
+        open(&mut app, "h3r/other.md");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleInput {
+            path: "h3r/other.md".into(),
+            value: "two".into(),
+        }));
+        let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
+            path: "h3r/other.md".into(),
+        }));
+        assert_eq!(history(&app), ["h3r/one.md", "h3r/two.md"]);
+    }
+
+    #[test]
+    fn ctrl_e_toggles_source_and_reading_only() {
+        assert_eq!(ViewMode::Source.toggle(), ViewMode::Reading);
+        assert_eq!(ViewMode::Reading.toggle(), ViewMode::Source);
+        assert_eq!(ViewMode::Split.toggle(), ViewMode::Source);
+        let (_tmp, _d, mut app) = app_with(&["m3/a.md"], None);
+        open(&mut app, "m3/a.md");
+        let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+            path: "m3/a.md".into(),
+            mode: ViewMode::Split,
+        }));
+        let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
+        assert_eq!(app.reading.mode("m3/a.md"), ViewMode::Source);
+        let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
+        assert_eq!(app.reading.mode("m3/a.md"), ViewMode::Reading);
+    }
+
+    #[test]
+    fn mode_menu_opens_and_closes_on_select() {
+        let (_tmp, _d, mut app) = app_with(&["m3m/a.md"], None);
+        open(&mut app, "m3m/a.md");
+        let pane = app.focus;
+        let _ = app.update(Message::Panes(PanesMsg::ModeMenu(Some(pane))));
+        assert_eq!(app.mode_menu, Some(pane));
+        drop(app.view());
+        let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+            path: "m3m/a.md".into(),
+            mode: ViewMode::Split,
+        }));
+        assert_eq!(app.mode_menu, None);
+        assert_eq!(app.reading.mode("m3m/a.md"), ViewMode::Split);
+    }
+
+    #[test]
+    fn overlay_close_message_closes_switcher_and_palette() {
+        let (_tmp, _d, mut app) = app_with(&[], None);
+        assert!(app.overlay_close().is_none());
+        let _ = app.update(Message::Switcher(SwitcherMsg::Open));
+        drop(app.view());
+        let close = app.overlay_close().expect("switcher open");
+        assert!(matches!(close, Message::Switcher(SwitcherMsg::Close)));
+        let _ = app.update(close);
+        assert!(!app.switcher.open);
+        let _ = app.update(Message::Palette(PaletteMsg::Open));
+        drop(app.view());
+        let close = app.overlay_close().expect("palette open");
+        assert!(matches!(close, Message::Palette(PaletteMsg::Close)));
+        let _ = app.update(close);
+        assert!(!app.palette.open);
+        assert!(app.overlay_close().is_none());
+    }
+
+    #[test]
+    fn side_collapse_and_borders_persist() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let state = tmp.path().join("state/editor.json");
+        let (_tmp, d, mut app) = app_with(&[], Some(state.clone()));
+        assert!(!app.ui.side_collapsed && !app.ui.pane_borders);
+        let _ = app.update(Message::Panes(PanesMsg::ToggleSide));
+        let _ = app.update(Message::Panes(PanesMsg::ToggleBorders));
+        drop(app.view());
+        let dc: Arc<dyn DaemonClient> = d as Arc<dyn DaemonClient>;
+        let again = App::new(Some(dc), Some(state));
+        assert!(again.ui.side_collapsed && again.ui.pane_borders);
+    }
+
+    #[test]
+    fn palette_lists_the_pane_border_toggle() {
+        let cmd = crate::palette::ClientCmd::TogglePaneBorders;
+        assert!(crate::palette::ClientCmd::all().contains(&cmd));
+        assert_eq!(cmd.title().0, "Toggle pane borders (debug)");
+        assert!(matches!(
+            cmd.message(pane_grid_pane()),
+            Message::Panes(PanesMsg::ToggleBorders)
+        ));
+    }
+
+    fn pane_grid_pane() -> iced::widget::pane_grid::Pane {
+        let (_tmp, _d, app) = app_with(&[], None);
+        app.focus
+    }
+
+    #[test]
+    fn dirty_marker_lives_on_the_tab_and_source_slots_are_stable() {
+        assert_eq!(
+            crate::source::SLOTS.iter().position(|s| *s == "editor"),
+            Some(2)
+        );
+        assert_eq!(crate::source::status_notice(Mode::Live), None);
+        assert!(crate::source::status_notice(Mode::Shadow).is_some());
+        let (_tmp, _d, mut app) = app_with(&["d3/t.md"], None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("d3/t.md".into())));
+        let tab = app.active_tab().expect("tab");
+        assert_eq!(crate::source::tab_title(&tab.source, &tab.path), "d3/t.md");
+        let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+            path: "d3/t.md".into(),
+            mode: ViewMode::Source,
+        }));
+        drop(app.view());
+        let _ = app.update(Message::Source(crate::message::SourceMsg::Action(
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('y')),
+        )));
+        let tab = app.active_tab().expect("tab");
+        assert!(tab.source.is_dirty());
+        assert_eq!(
+            crate::source::tab_title(&tab.source, &tab.path),
+            "d3/t.md •"
+        );
+        drop(app.view());
+    }
+
+    #[test]
+    fn ctrl_alt_arrows_step_the_focused_pane() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key::Named, key::Physical};
+        let ev = |n: Named, m: Modifiers| Event::KeyPressed {
+            key: Key::Named(n),
+            modified_key: Key::Named(n),
+            physical_key: Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: m,
+            text: None,
+            repeat: false,
+        };
+        let ca = Modifiers::CTRL | Modifiers::ALT;
+        assert!(matches!(
+            crate::palette::key_event(ev(Named::ArrowLeft, ca)),
+            Some(Message::Panes(PanesMsg::BackFocused))
+        ));
+        assert!(matches!(
+            crate::palette::key_event(ev(Named::ArrowRight, ca)),
+            Some(Message::Panes(PanesMsg::ForwardFocused))
+        ));
+        assert!(!matches!(
+            crate::palette::key_event(ev(Named::ArrowLeft, Modifiers::CTRL)),
+            Some(Message::Panes(_))
+        ));
+    }
+}

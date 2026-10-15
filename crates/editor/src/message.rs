@@ -85,7 +85,7 @@ pub enum SourceKey {
 /// WP-3: reading pane.
 #[derive(Debug, Clone)]
 pub enum ReadingMsg {
-    /// Cycle the active tab's mode source → reading → split (Ctrl+E; WP-5's palette too).
+    /// Toggle the active tab's mode Source ↔ Reading; Split → Source (Ctrl+E; the palette too).
     CycleMode,
     /// Set a tab's mode by path.
     SetMode {
@@ -285,6 +285,18 @@ pub enum PanesMsg {
     Focus(Pane),
     Resized(pane_grid::ResizeEvent),
     Bookmark(crate::bookmarks::BookmarkMsg),
+    /// editor-usability-round WP-3: per-pane history.
+    Back(Pane),
+    Forward(Pane),
+    /// The focused pane's back/forward (WP-4 binds these; Ctrl+Alt+Left/Right).
+    BackFocused,
+    ForwardFocused,
+    /// Collapse / expand the side column to its icon strip.
+    ToggleSide,
+    /// Debug pane borders on/off.
+    ToggleBorders,
+    /// Open / close the view-mode dropdown of a pane (`None` closes).
+    ModeMenu(Option<Pane>),
 }
 
 /// Daemon connection and notifications.

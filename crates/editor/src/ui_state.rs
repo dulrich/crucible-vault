@@ -42,6 +42,10 @@ pub struct UiState {
     pub panes: Option<PaneLayout>,
     /// WP-4 explorer: expanded folders (vault-relative).
     pub expanded: BTreeSet<String>,
+    /// editor-usability-round WP-3: the side column is collapsed to its icon strip.
+    pub side_collapsed: bool,
+    /// editor-usability-round WP-3: debug pane borders (off by default).
+    pub pane_borders: bool,
 }
 
 /// Split direction: `Right` = side by side, `Down` = stacked.
@@ -208,6 +212,20 @@ mod tests {
             Surround::Dark,
             "partial → defaults for the rest"
         );
+    }
+
+    #[test]
+    fn wp3_layout_flags_default_off_and_round_trip() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("editor.json");
+        std::fs::write(&path, br#"{"tabs":["a.md"],"surround":"dark"}"#).expect("old");
+        let s = load(&path);
+        assert!(!s.side_collapsed && !s.pane_borders, "pre-WP-3 file → off");
+        let mut s2 = s.clone();
+        s2.side_collapsed = true;
+        s2.pane_borders = true;
+        save(&path, &s2, None).expect("save");
+        assert_eq!(load(&path), s2);
     }
 
     #[test]

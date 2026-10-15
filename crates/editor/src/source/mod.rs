@@ -895,6 +895,17 @@ fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
     if let keyboard::Key::Named(named) = kp.key.as_ref() {
         let m = kp.modifiers;
         let plain = !m.alt() && !m.logo();
+        // editor-usability-round WP-3: Ctrl+Alt+Left/Right is pane back/forward, not word motion.
+        if m.command() && m.alt() {
+            let nav = match named {
+                key::Named::ArrowLeft => Some(crate::message::PanesMsg::BackFocused),
+                key::Named::ArrowRight => Some(crate::message::PanesMsg::ForwardFocused),
+                _ => None,
+            };
+            if let Some(n) = nav {
+                return Some(Binding::Custom(Message::Panes(n)));
+            }
+        }
         let k = match named {
             key::Named::Enter if plain && !m.command() && !m.shift() => Some(SourceKey::Enter),
             key::Named::Backspace if plain && m.command() => Some(SourceKey::DeleteWordBack),
@@ -957,19 +968,11 @@ pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a
     // The editor's widget state (focus, cursor scroll) is matched by tree position, so the status
     // and conflict slots are always present (an empty `Space` when unused): inserting a sibling
     // before the editor on the first dirtying keypress would rebuild its state and drop focus.
-    let status: Element<'a, Message> = if mode == Mode::Shadow {
-        text("read-only (shadow)")
-            .size(14)
-            .color(tokens.warn_text.to_color())
-            .into()
-    } else if buf.dirty {
-        let state = if buf.saving { "saving…" } else { "unsaved" };
-        text(state)
-            .size(14)
-            .color(tokens.text_faint.to_color())
-            .into()
-    } else {
-        Space::new().into()
+    // editor-usability-round WP-3: dirty/saving moved to the tab title; the status slot carries
+    // only the shadow notice (see [`SLOTS`]).
+    let status: Element<'a, Message> = match status_notice(mode) {
+        Some(s) => text(s).size(14).color(tokens.warn_text.to_color()).into(),
+        None => Space::new().into(),
     };
     let conflict: Element<'a, Message> = if buf.conflict.is_some() {
         let bar = row![
@@ -992,6 +995,26 @@ pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a
         Space::new().into()
     };
     column![status, conflict, editor].spacing(4).into()
+}
+
+/// The source column's children, in order: the editor is always at index 2, whatever the
+/// dirty / shadow / conflict state (each conditional element owns a fixed slot).
+pub const SLOTS: [&str; 3] = ["status", "conflict", "editor"];
+
+/// The status slot's text: only the shadow notice (dirty/saving live on the tab title).
+pub fn status_notice(mode: Mode) -> Option<&'static str> {
+    (mode == Mode::Shadow).then_some("read-only (shadow)")
+}
+
+/// A tab title with its dirty marker: `path •` unsaved, `path (saving…)` while a save runs.
+pub fn tab_title(buf: &SourceBuffer, path: &str) -> String {
+    if buf.saving {
+        format!("{path} (saving…)")
+    } else if buf.dirty {
+        format!("{path} •")
+    } else {
+        path.to_owned()
+    }
 }
 
 #[cfg(test)]
