@@ -484,14 +484,37 @@ fn inlines_view<'a>(
                 if style.em {
                     font.style = FontStyle::Italic;
                 }
-                let mut s = span(text.as_str())
-                    .font(font)
-                    .color(base.to_color())
-                    .strikethrough(style.strike);
-                if style.highlight {
-                    s = s.background(t.sel_tint.to_color()).color(t.text.to_color());
+                let style_span = |piece: &'a str| {
+                    let mut s = span(piece)
+                        .font(font)
+                        .color(base.to_color())
+                        .strikethrough(style.strike);
+                    if style.highlight {
+                        s = s.background(t.sel_tint.to_color()).color(t.text.to_color());
+                    }
+                    s
+                };
+                // plan editor-feedback-round-2 WP-4: paint the find query's occurrences.
+                let Some(q) = cx.store.find_query(cx.path) else {
+                    spans.push(style_span(text.as_str()));
+                    continue;
+                };
+                let mut at = 0;
+                for m in editor_model::find::matches(text, q) {
+                    if m.start > at {
+                        spans.push(style_span(&text[at..m.start]));
+                    }
+                    spans.push(
+                        style_span(&text[m.clone()])
+                            .background(t.accent.to_color())
+                            .color(t.on_accent.to_color()),
+                    );
+                    at = m.end;
                 }
-                s
+                if at < text.len() || at == 0 {
+                    spans.push(style_span(&text[at..]));
+                }
+                continue;
             }
             Inline::Code(c) => span(c.as_str())
                 .font(Font::MONOSPACE)

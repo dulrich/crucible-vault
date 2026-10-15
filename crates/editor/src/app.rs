@@ -1191,6 +1191,10 @@ impl App {
                 if ps.find.take().is_none() {
                     return Task::none();
                 }
+                for t in &mut ps.tabs {
+                    t.source.set_find_highlight(None);
+                    self.reading.set_find(&t.path, None);
+                }
                 self.find_shift = false;
                 return self.focus_editor();
             }
@@ -1243,20 +1247,27 @@ impl App {
         Task::none()
     }
 
-    /// Puts the focused pane's current match on screen: the source selection (Source/Split) and
-    /// a proportional snap of the reading scrollable (Reading/Split).
+    /// Puts the focused pane's current match on screen: the source selection (Source/Split) —
+    /// whose cursor move scrolls the shaped editor to it — plus a painted find span (the
+    /// unfocused `text_editor` draws no selection; plan editor-feedback-round-2 WP-4), and in
+    /// Reading/Split the query's occurrences painted plus a proportional snap of the scrollable.
+    /// Positions are byte columns end to end (no char conversion).
     fn show_match(&mut self) -> Task<Message> {
         let pane = self.focus;
         let Some(ps) = self.panes.get_mut(pane) else {
             return Task::none();
         };
-        let Some(r) = ps.find.as_ref().and_then(crate::find::FindBar::range) else {
-            return Task::none();
-        };
         let Some(i) = ps.active.filter(|&i| i < ps.tabs.len()) else {
             return Task::none();
         };
+        let range = ps.find.as_ref().and_then(crate::find::FindBar::range);
+        let query = ps.find.as_ref().map(|b| b.query.clone());
         let tab = &mut ps.tabs[i];
+        let Some(r) = range else {
+            tab.source.set_find_highlight(None);
+            self.reading.set_find(&tab.path, None);
+            return Task::none();
+        };
         let text = tab.source.text();
         let (l0, c0) = editor_model::find::line_col(&text, r.start);
         let (l1, c1) = editor_model::find::line_col(&text, r.end);
@@ -1264,6 +1275,8 @@ impl App {
         if mode.shows_source() {
             tab.source.select_range((l0, c0), (l1, c1));
         }
+        tab.source.set_find_highlight(Some(((l0, c0), (l1, c1))));
+        self.reading.set_find(&tab.path, query);
         if mode.shows_reading() {
             let lines = text.matches('\n').count().max(1);
             #[allow(clippy::cast_precision_loss)]

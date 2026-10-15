@@ -84,6 +84,10 @@ pub enum SourceKey {
     Home { select: bool },
     /// Smart End (`select` = Shift).
     End { select: bool },
+    /// Tab: indent the selected lines, else insert `\t` (plan editor-feedback-round-2 WP-4).
+    Indent,
+    /// Shift+Tab: outdent the selected lines (or the cursor's line).
+    Outdent,
 }
 
 /// WP-3: reading pane.

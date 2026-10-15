@@ -300,6 +300,7 @@ fn highlighter_change_line_reentry() {
     let s = HighlightSettings {
         colors: KindColors::from_tokens(&tokens),
         epoch: 0,
+        find: None,
     };
     let lines = ["```", "#a", "```", "#b"];
     let mut h = MarkdownHighlighter::new(&s);
@@ -315,8 +316,26 @@ fn highlighter_change_line_reentry() {
         .map(|l| h.highlight_line(l).collect())
         .collect();
     assert_eq!(&full[1..], again.as_slice());
-    assert_eq!(full[1], vec![(0..2, s.colors.code)]);
-    assert_eq!(full[3], vec![(0..2, s.colors.tag)]);
+    assert_eq!(
+        full[1],
+        vec![(
+            0..2,
+            Paint {
+                color: s.colors.code,
+                bold: false
+            }
+        )]
+    );
+    assert_eq!(
+        full[3],
+        vec![(
+            0..2,
+            Paint {
+                color: s.colors.tag,
+                bold: false
+            }
+        )]
+    );
     h.update(&HighlightSettings { epoch: 1, ..s });
     assert_eq!(h.current_line(), 0);
 }
@@ -574,4 +593,193 @@ fn toggle_task_on_shaped_buffer_keeps_cursor_and_undoes() {
     assert_eq!(b.cursor().position, at.position, "cursor kept");
     assert!(b.undo());
     assert_eq!(b.text(), src);
+}
+
+// ---- plan editor-feedback-round-2 WP-4: Tab / Shift+Tab, find highlight ----
+
+fn sel(app: &mut App, from: (usize, usize), to: (usize, usize)) {
+    buf(app).select_range(from, to);
+}
+
+#[test]
+fn tab_without_selection_inserts_tab_and_undoes() {
+    let (_t, _d, mut app, _p) = setup();
+    buf(&mut app).materialise();
+    sel(&mut app, (1, 4), (1, 4));
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(buf(&mut app).text(), "line one\nline\t two\nline three\n");
+    assert_eq!(
+        buf(&mut app).cursor().position,
+        Position { line: 1, column: 5 }
+    );
+    assert!(buf(&mut app).is_dirty());
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
+}
+
+#[test]
+fn tab_within_line_selection_replaces_it() {
+    let (_t, _d, mut app, _p) = setup();
+    buf(&mut app).materialise();
+    sel(&mut app, (0, 4), (0, 8));
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(buf(&mut app).text(), "line\t\nline two\nline three\n");
+}
+
+#[test]
+fn tab_multi_line_indents_every_line_in_one_undo_step() {
+    let (_t, _d, mut app, _p) = setup();
+    buf(&mut app).materialise();
+    sel(&mut app, (0, 2), (2, 3));
+    let seq = buf(&mut app).edit_seq();
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(
+        buf(&mut app).text(),
+        "\tline one\n\tline two\n\tline three\n"
+    );
+    assert_eq!(buf(&mut app).edit_seq(), seq + 1);
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.position, Position { line: 2, column: 4 });
+    assert_eq!(c.selection, Some(Position { line: 0, column: 3 }));
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.position, Position { line: 2, column: 3 });
+    assert_eq!(c.selection, Some(Position { line: 0, column: 2 }));
+    // A selection ending at column 0 does not touch that line; a whole-line selection indents.
+    sel(&mut app, (0, 0), (2, 0));
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(buf(&mut app).text(), "\tline one\n\tline two\nline three\n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    sel(&mut app, (1, 0), (1, 8));
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(buf(&mut app).text(), "line one\n\tline two\nline three\n");
+}
+
+#[test]
+fn shift_tab_removes_tab_or_spaces_or_nothing() {
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "\ta\n      b\n  c\nd\n");
+    sel(&mut app, (0, 1), (3, 1));
+    key(&mut app, SourceKey::Outdent);
+    assert_eq!(buf(&mut app).text(), "a\n  b\nc\nd\n");
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.position, Position { line: 3, column: 1 });
+    assert_eq!(c.selection, Some(Position { line: 0, column: 0 }));
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "\ta\n      b\n  c\nd\n");
+    // Nothing to remove: no edit recorded.
+    sel(&mut app, (3, 1), (3, 1));
+    let seq = buf(&mut app).edit_seq();
+    key(&mut app, SourceKey::Outdent);
+    assert_eq!(buf(&mut app).edit_seq(), seq);
+}
+
+#[test]
+fn shift_tab_without_selection_outdents_cursor_line() {
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "x\n    - item\n");
+    sel(&mut app, (1, 7), (1, 7));
+    key(&mut app, SourceKey::Outdent);
+    assert_eq!(buf(&mut app).text(), "x\n- item\n");
+    assert_eq!(
+        buf(&mut app).cursor().position,
+        Position { line: 1, column: 3 }
+    );
+    assert_eq!(buf(&mut app).cursor().selection, None);
+}
+
+#[test]
+fn tab_and_shift_tab_are_noops_when_read_only() {
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "\tx\n");
+    let b = buf(&mut app);
+    let now = Instant::now();
+    assert!(!b.indent(false, true, now));
+    assert!(!b.indent(true, true, now));
+    assert_eq!(b.text(), "\tx\n");
+    assert!(!b.is_dirty());
+}
+
+#[test]
+fn tab_keys_bind_only_when_focused() {
+    use iced::keyboard::key::{Named, Physical};
+    use iced::keyboard::{Key, Modifiers};
+    use iced::widget::text_editor::{Binding, KeyPress, Status};
+    let kp = |m: Modifiers, status: Status| KeyPress {
+        key: Key::Named(Named::Tab),
+        modified_key: Key::Named(Named::Tab),
+        physical_key: Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
+        modifiers: m,
+        text: None,
+        status,
+    };
+    let focused = Status::Focused { is_hovered: false };
+    let k = |b: Option<Binding<Message>>| match b {
+        Some(Binding::Custom(Message::Source(SourceMsg::Key(k)))) => Some(k),
+        _ => None,
+    };
+    assert_eq!(
+        k(test_key_binding(kp(Modifiers::empty(), focused))),
+        Some(SourceKey::Indent)
+    );
+    assert_eq!(
+        k(test_key_binding(kp(Modifiers::SHIFT, focused))),
+        Some(SourceKey::Outdent)
+    );
+    assert!(test_key_binding(kp(Modifiers::empty(), Status::Active)).is_none());
+}
+
+#[test]
+fn find_highlight_tracks_current_match_and_clears_on_close() {
+    use crate::message::FindMsg;
+    let (_t, _d, mut app, p) = setup();
+    let _ = app.update(Message::Find(FindMsg::Open));
+    let _ = app.update(Message::Find(FindMsg::Query("two".into())));
+    assert_eq!(buf(&mut app).find_highlight(), Some(((1, 5), (1, 8))));
+    assert_eq!(app.reading.find_query(&p), Some("two"));
+    let _ = app.update(Message::Find(FindMsg::Query("zzz".into())));
+    assert_eq!(buf(&mut app).find_highlight(), None);
+    let _ = app.update(Message::Find(FindMsg::Query("line".into())));
+    assert!(buf(&mut app).find_highlight().is_some());
+    let text = buf(&mut app).text();
+    let _ = app.update(Message::Find(FindMsg::Close));
+    assert_eq!(buf(&mut app).find_highlight(), None);
+    assert_eq!(app.reading.find_query(&p), None);
+    assert_eq!(buf(&mut app).text(), text, "find never mutates the buffer");
+}
+
+#[test]
+fn find_after_non_ascii_selects_and_paints_exact_bytes() {
+    use crate::message::FindMsg;
+    use iced::advanced::text::highlighter::Highlighter as _;
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "café bar\n");
+    let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+        path: p.clone(),
+        mode: crate::reading::ViewMode::Source,
+    }));
+    buf(&mut app).move_to(Cursor {
+        position: Position { line: 0, column: 0 },
+        selection: None,
+    });
+    let _ = app.update(Message::Find(FindMsg::Open));
+    let _ = app.update(Message::Find(FindMsg::Query("bar".into())));
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.selection, Some(Position { line: 0, column: 6 }));
+    assert_eq!(c.position, Position { line: 0, column: 9 });
+    assert_eq!(&buf(&mut app).text()[6..9], "bar");
+    let span = buf(&mut app).find_highlight();
+    assert_eq!(span, Some(((0, 6), (0, 9))));
+    let tokens = crate::theme::Surround::Med.tokens().expect("tokens");
+    let s = HighlightSettings {
+        colors: KindColors::from_tokens(&tokens),
+        epoch: 0,
+        find: span,
+    };
+    let mut h = MarkdownHighlighter::new(&s);
+    let line = "café bar";
+    let painted: Vec<_> = h.highlight_line(line).filter(|(_, p)| p.bold).collect();
+    assert_eq!(painted.len(), 1);
+    assert_eq!(&line[painted[0].0.clone()], "bar");
 }

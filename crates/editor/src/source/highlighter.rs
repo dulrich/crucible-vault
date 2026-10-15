@@ -34,6 +34,8 @@ pub struct KindColors {
     pub task_other: Color,
     pub callout: Color,
     pub footnote: Color,
+    /// The find bar's current match (plan editor-feedback-round-2 WP-4; painted bold).
+    pub find: Color,
 }
 
 impl KindColors {
@@ -57,6 +59,7 @@ impl KindColors {
             task_other: t.accent_ui.to_color(),
             callout: t.info_text.to_color(),
             footnote: t.text_faint.to_color(),
+            find: t.accent.to_color(),
         }
     }
 
@@ -84,18 +87,48 @@ impl KindColors {
     }
 }
 
+/// A find match to paint: (line, byte column) `from` .. `to` (WP-4).
+pub type FindSpan = ((usize, usize), (usize, usize));
+
+/// One painted span: a colour, optionally bold (the find match).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Paint {
+    pub color: Color,
+    pub bold: bool,
+}
+
+impl Paint {
+    fn plain(color: Color) -> Self {
+        Self { color, bold: false }
+    }
+}
+
 /// Highlighter settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     pub colors: KindColors,
     /// Bumped on wholesale content replacement.
     pub epoch: u64,
+    /// The find match painted over the markdown spans (iced re-highlights when it changes).
+    pub find: Option<FindSpan>,
+}
+
+/// The byte range of `line` (index `ix`, length `len`) covered by `find`, if non-empty.
+pub fn find_cols(find: Option<FindSpan>, ix: usize, len: usize) -> Option<Range<usize>> {
+    let ((l0, c0), (l1, c1)) = find?;
+    if ix < l0 || ix > l1 {
+        return None;
+    }
+    let a = if ix == l0 { c0.min(len) } else { 0 };
+    let b = if ix == l1 { c1.min(len) } else { len };
+    (a < b).then_some(a..b)
 }
 
 /// The adapter.
 #[derive(Debug)]
 pub struct MarkdownHighlighter {
     colors: KindColors,
+    find: Option<FindSpan>,
     /// `states[i]` = state at the start of line `i`; always non-empty.
     states: Vec<LineState>,
     current: usize,
@@ -103,12 +136,13 @@ pub struct MarkdownHighlighter {
 
 impl Highlighter for MarkdownHighlighter {
     type Settings = Settings;
-    type Highlight = Color;
-    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Color)>;
+    type Highlight = Paint;
+    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Paint)>;
 
     fn new(settings: &Settings) -> Self {
         Self {
             colors: settings.colors,
+            find: settings.find,
             states: vec![LineState::default()],
             current: 0,
         }
@@ -116,6 +150,7 @@ impl Highlighter for MarkdownHighlighter {
 
     fn update(&mut self, settings: &Settings) {
         self.colors = settings.colors;
+        self.find = settings.find;
         self.change_line(0);
     }
 
@@ -126,17 +161,28 @@ impl Highlighter for MarkdownHighlighter {
     }
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
-        let st = self.states.get(self.current).copied().unwrap_or_default();
+        let ix = self.current;
+        let st = self.states.get(ix).copied().unwrap_or_default();
         let (spans, next) = scan_line(st, line);
-        self.states.truncate(self.current + 1);
+        self.states.truncate(ix + 1);
         self.states.push(next);
         self.current += 1;
         let colors = self.colors;
-        spans
+        let mut out: Vec<_> = spans
             .into_iter()
-            .map(|(r, k)| (r, colors.of(k)))
-            .collect::<Vec<_>>()
-            .into_iter()
+            .map(|(r, k)| (r, Paint::plain(colors.of(k))))
+            .collect();
+        // Pushed last: overlapping spans resolve to the later one (cosmic-text `add_span`).
+        if let Some(r) = find_cols(self.find, ix, line.len()) {
+            out.push((
+                r,
+                Paint {
+                    color: colors.find,
+                    bold: true,
+                },
+            ));
+        }
+        out.into_iter()
     }
 
     fn current_line(&self) -> usize {
@@ -145,9 +191,14 @@ impl Highlighter for MarkdownHighlighter {
 }
 
 /// iced `to_format`.
-pub fn to_format(c: &Color, _theme: &iced::Theme) -> highlighter::Format<iced::Font> {
+pub fn to_format(p: &Paint, _theme: &iced::Theme) -> highlighter::Format<iced::Font> {
     highlighter::Format {
-        color: Some(*c),
-        font: None,
+        color: Some(p.color),
+        // The app's default family (main.rs `default_font`), not `Font::DEFAULT` (generic
+        // sans-serif), so the bold match keeps the editor's typeface.
+        font: p.bold.then_some(iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::with_name(crate::theme::FONT_FAMILY)
+        }),
     }
 }

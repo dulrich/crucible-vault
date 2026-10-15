@@ -2,9 +2,10 @@
 //! `editor_model::find`; this module holds the bar's state, its view and the key listener.
 //!
 //! Source/Split: the current match becomes the buffer selection (the shaped `text_editor`
-//! follows its cursor). Reading: render-model blocks carry no source span, so the reading
-//! scrollable snaps to the match's relative line position (`line / lines`) — the emphasis is the
-//! bar's "n/m" count plus that snap; no block is restyled.
+//! scrolls to its cursor) and is painted by the highlighter, since the unfocused editor draws no
+//! selection (plan editor-feedback-round-2 WP-4). Reading: render-model blocks carry no source
+//! span, so the query's occurrences are painted in the rich text and the scrollable snaps to the
+//! match's relative line position (`line / lines`).
 
 use std::ops::Range;
 

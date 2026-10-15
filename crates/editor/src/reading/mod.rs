@@ -127,6 +127,9 @@ pub struct ReadingStore {
     pub recomputes: u64,
     /// Pending filename-input edits, keyed by tab path (absent = shows the stem).
     titles: HashMap<String, String>,
+    /// The open find bar's query per tab path: its occurrences are painted in the reading view
+    /// (plan editor-feedback-round-2 WP-4; render blocks carry no source span).
+    find: HashMap<String, String>,
 }
 
 /// The note stem shown in the filename input (`a/b/Note.md` → `Note`).
@@ -173,6 +176,23 @@ impl ReadingStore {
         self.tabs.get(path).map(|t| t.mode).unwrap_or_default()
     }
 
+    /// Sets (or clears, `None`/empty) the find query painted in `path`'s reading view.
+    pub fn set_find(&mut self, path: &str, query: Option<String>) {
+        match query.filter(|q| !q.is_empty()) {
+            Some(q) => {
+                self.find.insert(path.to_owned(), q);
+            }
+            None => {
+                self.find.remove(path);
+            }
+        }
+    }
+
+    /// The find query painted in `path`'s reading view.
+    pub fn find_query(&self, path: &str) -> Option<&str> {
+        self.find.get(path).map(String::as_str)
+    }
+
     /// The filename input's current text for `path`.
     pub fn title<'a>(&'a self, path: &'a str) -> &'a str {
         self.titles
@@ -194,6 +214,7 @@ impl ReadingStore {
     pub fn on_tab_closed(&mut self, path: &str) {
         self.tabs.remove(path);
         self.titles.remove(path);
+        self.find.remove(path);
         self.images.release_owner(path);
     }
 

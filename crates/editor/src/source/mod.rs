@@ -29,7 +29,9 @@ use crate::daemon::{ContentHash, DaemonClient, DaemonError};
 use crate::message::{Message, SourceKey, SourceMsg};
 use crate::theme::Tokens;
 
-pub use highlighter::{KindColors, MarkdownHighlighter, Settings as HighlightSettings};
+pub use highlighter::{
+    FindSpan, KindColors, MarkdownHighlighter, Paint, Settings as HighlightSettings,
+};
 
 /// Autosave debounce after the last edit.
 pub const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
@@ -117,6 +119,9 @@ pub struct SourceBuffer {
     epoch: u64,
     /// The selection last written to PRIMARY (not re-written while unchanged).
     primary: Option<String>,
+    /// The find bar's current match ((line, byte column) from..to), painted by the highlighter
+    /// while the find input holds focus (plan editor-feedback-round-2 WP-4).
+    find_hl: Option<FindSpan>,
 }
 
 impl Clone for SourceBuffer {
@@ -134,6 +139,7 @@ impl Clone for SourceBuffer {
             conflict: self.conflict.clone(),
             epoch: self.epoch,
             primary: self.primary.clone(),
+            find_hl: self.find_hl,
         }
     }
 }
@@ -182,6 +188,7 @@ impl SourceBuffer {
             conflict: None,
             epoch: 0,
             primary: None,
+            find_hl: None,
         }
     }
 
@@ -286,10 +293,107 @@ impl SourceBuffer {
         });
     }
 
+    /// The painted find match, if any.
+    pub fn find_highlight(&self) -> Option<FindSpan> {
+        self.find_hl
+    }
+
+    /// Sets (or clears) the painted find match; never touches the text.
+    pub fn set_find_highlight(&mut self, span: Option<FindSpan>) {
+        self.find_hl = span;
+    }
+
+    /// Tab / Shift+Tab (plan editor-feedback-round-2 WP-4) as ONE recorded edit. Indent with a
+    /// multi-line or whole-line selection prepends `\t` to every touched line; otherwise Tab
+    /// types `\t` (replacing a within-line selection). Outdent removes one leading `\t`, else up
+    /// to [`OUTDENT_SPACES`] leading spaces, from every touched line (the cursor's line without
+    /// a selection). A selection ending at column 0 of a later line does not touch that line.
+    /// The selection keeps covering the same lines (columns shift by the bytes changed).
+    pub fn indent(&mut self, outdent: bool, read_only: bool, now: Instant) -> bool {
+        if read_only {
+            return false;
+        }
+        let content = self.shaped();
+        let before = content.cursor();
+        let pos = before.position;
+        let sel = before.selection.filter(|s| *s != pos);
+        let key = |p: text_editor::Position| (p.line, p.column);
+        let (lo, hi) = match sel {
+            Some(a) if key(a) < key(pos) => (a, pos),
+            Some(a) => (pos, a),
+            None => (pos, pos),
+        };
+        let whole_line = sel.is_some()
+            && lo.line == hi.line
+            && lo.column == 0
+            && content
+                .line(lo.line)
+                .is_some_and(|l| !l.text.is_empty() && hi.column >= l.text.len());
+        let block = sel.is_some() && (lo.line != hi.line || whole_line);
+        if !outdent && !block {
+            return self.perform(
+                Action::Edit(Edit::Paste(Arc::new("\t".to_owned()))),
+                false,
+                now,
+            );
+        }
+        let last = if hi.line > lo.line && hi.column == 0 {
+            hi.line - 1
+        } else {
+            hi.line
+        };
+        let first = lo.line;
+        self.transact(before, EditKind::Other, now, |c| {
+            let mut delta = Vec::with_capacity(last - first + 1);
+            for l in first..=last {
+                let n = if outdent {
+                    let n = c.line(l).map_or(0, |x| outdent_width(&x.text));
+                    if n > 0 {
+                        c.move_to(text_editor::Cursor {
+                            position: text_editor::Position { line: l, column: n },
+                            selection: Some(text_editor::Position { line: l, column: 0 }),
+                        });
+                        c.perform(Action::Edit(Edit::Delete));
+                    }
+                    n
+                } else {
+                    place(
+                        c,
+                        text_editor::Cursor {
+                            position: text_editor::Position { line: l, column: 0 },
+                            selection: None,
+                        },
+                    );
+                    c.perform(Action::Edit(Edit::Paste(Arc::new("\t".to_owned()))));
+                    1
+                };
+                delta.push(n);
+            }
+            let adj = |p: text_editor::Position| {
+                let column = match p.line.checked_sub(first).and_then(|i| delta.get(i)) {
+                    Some(&n) if outdent => p.column.saturating_sub(n),
+                    Some(&n) => p.column + n,
+                    None => p.column,
+                };
+                text_editor::Position {
+                    line: p.line,
+                    column,
+                }
+            };
+            place(
+                c,
+                text_editor::Cursor {
+                    position: adj(pos),
+                    selection: before.selection.map(adj),
+                },
+            );
+        })
+    }
+
     /// Moves the cursor (navigation; not an edit).
     pub fn move_to(&mut self, c: text_editor::Cursor) {
         match &mut self.content {
-            Repr::Shaped(content) => content.move_to(c),
+            Repr::Shaped(content) => place(content, c),
             Repr::Plain { cursor, .. } => *cursor = to_model(c),
         }
     }
@@ -520,6 +624,7 @@ impl SourceBuffer {
     }
 
     fn mark_edited(&mut self) {
+        self.find_hl = None;
         self.dirty = true;
         self.edit_seq += 1;
     }
@@ -685,6 +790,37 @@ impl SourceBuffer {
     }
 }
 
+/// `Content::move_to` that also clears a stale selection: iced's `move_to` leaves the old
+/// selection in place when `c.selection` is `None` (WP-4); a motion over an empty selection
+/// collapses it without moving the cursor.
+fn place(content: &mut Content, c: text_editor::Cursor) {
+    if c.selection.is_some() {
+        content.move_to(c);
+    } else {
+        content.move_to(text_editor::Cursor {
+            position: c.position,
+            selection: Some(c.position),
+        });
+        content.perform(Action::Move(Motion::Left));
+    }
+}
+
+/// Shift+Tab removes up to this many leading spaces when the line does not start with `\t`.
+pub const OUTDENT_SPACES: usize = 4;
+
+/// The leading bytes Shift+Tab removes from `line`: one `\t`, else up to [`OUTDENT_SPACES`]
+/// spaces.
+pub fn outdent_width(line: &str) -> usize {
+    if line.starts_with('\t') {
+        1
+    } else {
+        line.bytes()
+            .take(OUTDENT_SPACES)
+            .take_while(|&b| b == b' ')
+            .count()
+    }
+}
+
 /// The text between two positions (`None` if out of range).
 fn span(content: &Content, from: undo::Pos, to: undo::Pos) -> Option<String> {
     let w = window(content, from.line, to.line);
@@ -835,6 +971,8 @@ pub fn update(
                     buf.smart_home_end(true, select);
                     false
                 }
+                SourceKey::Indent => buf.indent(false, read_only, now),
+                SourceKey::Outdent => buf.indent(true, read_only, now),
             };
             edited(buf, changed)
         }
@@ -936,6 +1074,12 @@ fn key_binding(kp: KeyPress, km: &crate::palette::Keymap) -> Option<Binding<Mess
                 Some(SourceKey::Home { select: m.shift() })
             }
             key::Named::End if plain && !m.command() => Some(SourceKey::End { select: m.shift() }),
+            // plan editor-feedback-round-2 WP-4: Tab stays in the editor (indent / outdent).
+            key::Named::Tab if plain && !m.command() => Some(if m.shift() {
+                SourceKey::Outdent
+            } else {
+                SourceKey::Indent
+            }),
             _ => None,
         };
         if let Some(k) = k {
@@ -1014,6 +1158,7 @@ pub fn view<'a>(
                     HighlightSettings {
                         colors: KindColors::from_tokens(&tokens),
                         epoch: buf.epoch,
+                        find: buf.find_hl,
                     },
                     highlighter::to_format,
                 ),
