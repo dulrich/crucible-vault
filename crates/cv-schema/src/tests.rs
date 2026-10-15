@@ -337,6 +337,31 @@ fn validate_ranges_int_and_float() {
 }
 
 #[test]
+fn editor_tab_title_enum_and_default() {
+    for v in ["title", "basename", "path", "unambiguous"] {
+        assert!(
+            errs(&format!("tab_title = \"{v}\"\n"), "editor.toml").is_empty(),
+            "{v}"
+        );
+    }
+    let e = errs("tab_title = \"stem\"\n", "editor.toml");
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(
+        e[0].starts_with("tab_title: \"stem\" is not one of"),
+        "{e:?}"
+    );
+    let Node::Record(r) = editor_schema() else {
+        panic!("editor schema is a record");
+    };
+    let f = r
+        .fields
+        .iter()
+        .find(|f| f.key == "tab_title")
+        .expect("field");
+    assert!(matches!(f.default, Some(node::Default::Str("title"))));
+}
+
+#[test]
 fn validate_exactly_one_of() {
     assert!(
         errs(

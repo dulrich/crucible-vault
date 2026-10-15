@@ -259,6 +259,10 @@ impl SourceBuffer {
     pub fn edit_seq(&self) -> u64 {
         self.edit_seq
     }
+    /// The wholesale-replacement counter (bumped by [`SourceBuffer::reload`]).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
     /// The undo history (read-only).
     pub fn history(&self) -> &UndoHistory {
         &self.history
@@ -1173,11 +1177,11 @@ pub fn view<'a>(
         // Never visible in practice (the app materialises visible tabs before drawing).
         Repr::Plain { text: t, .. } => text(t.as_str()).size(font_size).into(),
     };
-    // The editor's widget state (focus, cursor scroll) is matched by tree position, so the status
-    // and conflict slots are always present (an empty `Space` when unused): inserting a sibling
-    // before the editor on the first dirtying keypress would rebuild its state and drop focus.
-    // editor-usability-round WP-3: dirty/saving moved to the tab title; the status slot carries
-    // only the shadow notice (see [`SLOTS`]).
+    // The editor's widget state (focus, cursor scroll) is matched by tree position, so it is
+    // always layer 0 of a stack; the status and conflict slots float in layer 1 (an empty
+    // `Space` when unused). Plan editor-feedback-round-2 WP-6: they are out of the editor's
+    // vertical flow, so a shadow notice or a conflict bar never pushes the editor down (dirty /
+    // saving live on the tab header, see `crate::header`).
     let status: Element<'a, Message> = match status_notice(mode) {
         Some(s) => text(s).size(14).color(tokens.warn_text.to_color()).into(),
         None => Space::new().into(),
@@ -1202,27 +1206,25 @@ pub fn view<'a>(
     } else {
         Space::new().into()
     };
-    column![status, conflict, editor].spacing(4).into()
+    let overlay = column![
+        container(status)
+            .align_x(iced::alignment::Horizontal::Right)
+            .width(Length::Fill),
+        conflict,
+    ]
+    .spacing(4)
+    .padding(4)
+    .width(Length::Fill);
+    iced::widget::stack![editor, overlay].into()
 }
 
-/// The source column's children, in order: the editor is always at index 2, whatever the
-/// dirty / shadow / conflict state (each conditional element owns a fixed slot).
-pub const SLOTS: [&str; 3] = ["status", "conflict", "editor"];
+/// The source stack's slots, in order: the editor is always layer 0, whatever the dirty /
+/// shadow / conflict state; status and conflict float above it (each owns a fixed slot).
+pub const SLOTS: [&str; 3] = ["editor", "status", "conflict"];
 
-/// The status slot's text: only the shadow notice (dirty/saving live on the tab title).
+/// The status slot's text: only the shadow notice (dirty/saving live on the tab header).
 pub fn status_notice(mode: Mode) -> Option<&'static str> {
     (mode == Mode::Shadow).then_some("read-only (shadow)")
-}
-
-/// A tab title with its dirty marker: `path •` unsaved, `path (saving…)` while a save runs.
-pub fn tab_title(buf: &SourceBuffer, path: &str) -> String {
-    if buf.saving {
-        format!("{path} (saving…)")
-    } else if buf.dirty {
-        format!("{path} •")
-    } else {
-        path.to_owned()
-    }
 }
 
 #[cfg(test)]

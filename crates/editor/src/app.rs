@@ -180,7 +180,14 @@ pub struct App {
     /// plan editor-settings-tab WP-4 (audit E2): the day / month note folders from the loaded
     /// `captures.toml` (constants when absent / unloaded / malformed).
     pub period_folders: editor_model::period::PeriodFolders,
+    /// Frontmatter `title` per note path, keyed by the buffer's edit seq (plan
+    /// editor-feedback-round-2 WP-6: the `tab_title = "title"` source; recomputed only when the
+    /// buffer changed, so drawing the tab bar never re-parses an unchanged note).
+    fm_titles: std::cell::RefCell<FmTitleCache>,
 }
+
+/// Frontmatter `title` per tab path, keyed by `(edit_seq, epoch)` (plan editor-feedback-round-2 WP-6).
+type FmTitleCache = std::collections::HashMap<String, ((u64, u64), Option<String>)>;
 
 /// A quit in progress: the saves it waits on, and whether one failed.
 #[derive(Debug, Default)]
@@ -336,6 +343,7 @@ impl App {
             settings: crate::settings::Settings::default(),
             prefs: crate::settings::editor_prefs::Prefs::default(),
             period_folders: editor_model::period::PeriodFolders::default(),
+            fm_titles: std::cell::RefCell::default(),
         };
         app.load_editor_prefs();
         app.refresh_files();
@@ -2871,12 +2879,49 @@ impl App {
         }
     }
 
-    fn pane_view<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> pane_grid::Content<'a, Message> {
+    /// `tab`'s frontmatter `title` (cached per edit seq and reload epoch — an external reload
+    /// does not bump `edit_seq`).
+    pub fn frontmatter_title(&self, tab: &Tab) -> Option<String> {
+        let seq = (tab.source.edit_seq(), tab.source.epoch());
+        let mut cache = self.fm_titles.borrow_mut();
+        if let Some((s, t)) = cache.get(&tab.path)
+            && *s == seq
+        {
+            return t.clone();
+        }
+        let t = crate::header::frontmatter_title(&tab.source.text());
+        cache.insert(tab.path.clone(), (seq, t.clone()));
+        t
+    }
+
+    /// The header text of `ps`'s tab `tab` under the `tab_title` pref.
+    pub fn tab_header_title(&self, ps: &PaneState, tab: &Tab) -> String {
+        match tab.kind() {
+            TabKind::Settings => "Settings".to_owned(),
+            TabKind::Note(p) => {
+                let siblings: Vec<&str> = ps
+                    .tabs
+                    .iter()
+                    .filter(|t| !t.is_settings())
+                    .map(|t| t.path.as_str())
+                    .collect();
+                let fm = match self.prefs.tab_title {
+                    crate::header::TabTitle::Title => self.frontmatter_title(tab),
+                    _ => None,
+                };
+                crate::header::resolve(self.prefs.tab_title, p, &siblings, fm.as_deref())
+            }
+        }
+    }
+
+    /// The tab bar: the pane's tab headers (fixed height, clipped), then the close-pane button.
+    fn tab_bar<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> Element<'a, Message> {
+        use crate::header::{BAR_HEIGHT, MARKER_WIDTH, TITLE_MAX_CHARS, ellipsize, marker};
         use crate::icons::Icon;
-        use crate::theme::{icon_button, icon_button_style, icon_text};
+        use crate::theme::{FONT_FAMILY, control_label, icon_button};
         let t = self.tokens;
         let focused = pane == self.focus;
-        let mut strip = row(ps.tabs.iter().enumerate().map(|(i, tab)| {
+        let headers = row(ps.tabs.iter().enumerate().map(|(i, tab)| {
             let active = ps.active == Some(i);
             // Focus cue (borders are debug-only): the focused pane's active tab is an
             // `accent_text` label on a `panel_2` block; an unfocused pane's active tab keeps the
@@ -2886,28 +2931,53 @@ impl App {
                 (true, false) => t.text,
                 _ => t.text_dim,
             };
-            let title = match tab.kind() {
-                crate::app::TabKind::Settings => {
-                    if self.settings.any_dirty() {
-                        "Settings •".to_owned()
-                    } else {
-                        "Settings".to_owned()
-                    }
-                }
-                crate::app::TabKind::Note(p) => crate::source::tab_title(&tab.source, p),
+            let (dirty, saving) = if tab.is_settings() {
+                (self.settings.any_dirty(), false)
+            } else {
+                (tab.source.is_dirty(), tab.source.is_saving())
             };
-            let lbl = text(title).size(14).color(colour.to_color());
+            let title = ellipsize(&self.tab_header_title(ps, tab), TITLE_MAX_CHARS);
+            let lbl = control_label(title, 14.0)
+                .font(iced::Font::with_name(FONT_FAMILY))
+                .wrapping(iced::widget::text::Wrapping::None)
+                .color(colour.to_color());
+            // The marker owns a fixed-width slot, blank when clean: the header never resizes.
+            let mark =
+                container(control_label(marker(dirty, saving), 14.0).color(colour.to_color()))
+                    .width(MARKER_WIDTH)
+                    .height(BAR_HEIGHT)
+                    .center_x(MARKER_WIDTH);
+            let select = button(row![lbl, mark].spacing(2).height(BAR_HEIGHT))
+                .height(BAR_HEIGHT)
+                .padding([0, 6])
+                .style(button::text)
+                .on_press(Message::Tabs(TabsMsg::Select(pane, i)));
+            let hover = if tab.is_settings() {
+                "Settings".to_owned()
+            } else {
+                tab.path.clone()
+            };
+            let select = iced::widget::tooltip(
+                select,
+                container(text(hover).size(13))
+                    .padding(6)
+                    .style(crate::theme::seg_group_style(t)),
+                iced::widget::tooltip::Position::Bottom,
+            );
             let chip = row![
-                button(lbl)
-                    .style(button::text)
-                    .on_press(Message::Tabs(TabsMsg::Select(pane, i))),
-                button(text("×").size(14))
+                select,
+                button(control_label("×", 14.0))
+                    .height(BAR_HEIGHT)
+                    .padding([0, 4])
                     .style(button::text)
                     .on_press(Message::Tabs(TabsMsg::Close(pane, i))),
             ]
-            .spacing(2)
+            .spacing(0)
+            .height(BAR_HEIGHT)
             .align_y(iced::Alignment::Center);
             container(chip)
+                .height(BAR_HEIGHT)
+                .clip(true)
                 .style(move |_: &Theme| container::Style {
                     background: active.then(|| t.panel_2.to_color().into()),
                     border: iced::Border {
@@ -2918,16 +2988,144 @@ impl App {
                 })
                 .into()
         }))
-        .spacing(8)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill);
-        if self.panes.len() > 1 {
-            strip = strip.push(
-                button(text("close pane").size(13))
-                    .style(button::text)
-                    .on_press(Message::Panes(PanesMsg::Close(pane))),
+        .spacing(4)
+        .height(BAR_HEIGHT)
+        .align_y(iced::Alignment::Center);
+        let headers = container(headers)
+            .width(Length::Fill)
+            .height(BAR_HEIGHT)
+            .clip(true);
+        // The close-pane button is pane-level, so it lives at the tab bar's right end.
+        let close: Element<'a, Message> = if self.panes.len() > 1 {
+            icon_button(Icon::X, Some(Message::Panes(PanesMsg::Close(pane))), t).into()
+        } else {
+            Space::new().into()
+        };
+        row![headers, close]
+            .spacing(4)
+            .height(BAR_HEIGHT)
+            .align_y(iced::Alignment::Center)
+            .into()
+    }
+
+    /// The note control bar: back/forward seg-group, centred breadcrumb (folders + editable
+    /// filename), the view-mode control. Only for note tabs.
+    fn note_bar<'a>(
+        &'a self,
+        pane: Pane,
+        ps: &'a PaneState,
+        tab: &'a Tab,
+        mode_btn: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        use crate::header::{BAR_HEIGHT, folders};
+        use crate::icons::Icon;
+        use crate::theme::{FONT_FAMILY, SEGMENT, control_label, icon_text};
+        let t = self.tokens;
+        let seg = |icon: Icon, msg: Option<Message>| {
+            let enabled = msg.is_some();
+            button(icon_text(icon))
+                .width(SEGMENT)
+                .height(SEGMENT)
+                .padding(0)
+                .style(move |th: &Theme, st| {
+                    let mut s = crate::theme::segment_style(t, false)(th, st);
+                    if !enabled {
+                        s.text_color = t.text_faint.to_color();
+                    }
+                    s
+                })
+                .on_press_maybe(msg)
+        };
+        let history = container(
+            row![
+                seg(
+                    Icon::ChevronLeft,
+                    ps.history
+                        .can_back()
+                        .then_some(Message::Panes(PanesMsg::Back(pane))),
+                ),
+                seg(
+                    Icon::ChevronRight,
+                    ps.history
+                        .can_forward()
+                        .then_some(Message::Panes(PanesMsg::Forward(pane))),
+                ),
+            ]
+            .spacing(0),
+        )
+        .padding(1)
+        .style(crate::theme::seg_group_style(t));
+        let path = tab.path.as_str();
+        let mut crumbs: Vec<Element<'a, Message>> = Vec::new();
+        for f in folders(path) {
+            crumbs.push(
+                control_label(f, 14.0)
+                    .font(iced::Font::with_name(FONT_FAMILY))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .color(t.text_dim.to_color())
+                    .into(),
+            );
+            crumbs.push(
+                control_label("/", 14.0)
+                    .color(t.text_faint.to_color())
+                    .into(),
             );
         }
+        let name = self.reading.title(path);
+        // Sized to its text (approximate advance) so the breadcrumb stays centred.
+        #[allow(clippy::cast_precision_loss)]
+        let name_w = (name.chars().count().max(4) as f32)
+            .mul_add(8.5, 20.0)
+            .min(360.0);
+        let p_in = path.to_owned();
+        crumbs.push(
+            iced::widget::text_input("note name", name)
+                .id(crate::reading::title_id(path))
+                .size(14)
+                .width(name_w)
+                .on_input(move |value| {
+                    Message::Reading(crate::message::ReadingMsg::TitleInput {
+                        path: p_in.clone(),
+                        value,
+                    })
+                })
+                .on_submit(Message::Reading(crate::message::ReadingMsg::TitleSubmit {
+                    path: path.to_owned(),
+                }))
+                .style(
+                    move |theme: &Theme, status| iced::widget::text_input::Style {
+                        border: iced::Border {
+                            width: 0.0,
+                            ..iced::widget::text_input::default(theme, status).border
+                        },
+                        background: iced::Background::Color(iced::Color::TRANSPARENT),
+                        value: t.text.to_color(),
+                        ..iced::widget::text_input::default(theme, status)
+                    },
+                )
+                .into(),
+        );
+        let breadcrumb = container(
+            row(crumbs)
+                .spacing(4)
+                .height(BAR_HEIGHT)
+                .align_y(iced::Alignment::Center),
+        )
+        .center_x(Length::Fill)
+        .height(BAR_HEIGHT)
+        .clip(true);
+        row![history, breadcrumb, mode_btn]
+            .spacing(4)
+            .height(BAR_HEIGHT)
+            .align_y(iced::Alignment::Center)
+            .into()
+    }
+
+    fn pane_view<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> pane_grid::Content<'a, Message> {
+        use crate::icons::Icon;
+        use crate::theme::{icon_button_style, icon_text};
+        let t = self.tokens;
+        let focused = pane == self.focus;
         let mode = ps.active_note().map(|tab| self.reading.mode(&tab.path));
         let mode_icon = match mode {
             Some(crate::reading::ViewMode::Source) => Icon::Code,
@@ -2943,44 +3141,39 @@ impl App {
             .on_press_maybe(
                 mode.map(|_| Message::Panes(PanesMsg::ModeMenu((!menu_open).then_some(pane)))),
             );
-        let controls = row![
-            icon_button(
-                Icon::ChevronLeft,
-                ps.history
-                    .can_back()
-                    .then_some(Message::Panes(PanesMsg::Back(pane))),
-                t,
-            ),
-            icon_button(
-                Icon::ChevronRight,
-                ps.history
-                    .can_forward()
-                    .then_some(Message::Panes(PanesMsg::Forward(pane))),
-                t,
-            ),
-            strip,
-            mode_btn,
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
-        let mut col = column![
-            container(controls).padding(2).width(Length::Fill),
+        // Stable slots: tab bar, note control bar (`Space` for Settings / no tab), find bar,
+        // period nav bar (`Space` when the note gets none), body — so the body's tree position
+        // (and the editor's widget state) never depends on which bars are showing.
+        let note_bar: Element<'a, Message> = match ps.active_note() {
+            Some(tab) => self.note_bar(pane, ps, tab, mode_btn.into()),
+            None => Space::new().into(),
+        };
+        let nav_bar: Element<'a, Message> = ps
+            .active_note()
+            .and_then(|tab| nav::bar(pane, &tab.path, self.today(), &self.period_folders, t))
+            .map_or_else(
+                || Space::new().into(),
+                |bar| {
+                    container(bar)
+                        .height(crate::header::BAR_HEIGHT)
+                        .width(Length::Fill)
+                        .clip(true)
+                        .into()
+                },
+            );
+        let body: Element<'a, Message> = match ps.active_tab() {
+            Some(tab) => self.tab_body(tab),
+            None => text("No file open").color(t.text_faint.to_color()).into(),
+        };
+        let col = column![
+            self.tab_bar(pane, ps),
+            note_bar,
             // Stable slot: an empty `Space` while the find bar is closed.
             crate::find::view(pane, ps.find.as_ref(), t),
+            nav_bar,
+            body,
         ]
         .spacing(4);
-        match ps.active_tab() {
-            Some(tab) => {
-                if !tab.is_settings()
-                    && let Some(bar) =
-                        nav::bar(pane, &tab.path, self.today(), &self.period_folders, t)
-                {
-                    col = col.push(bar);
-                }
-                col = col.push(self.tab_body(tab));
-            }
-            None => col = col.push(text("No file open").color(t.text_faint.to_color())),
-        }
         // The dropdown sits in a stack layer above the pane body (layer 0 never moves).
         let menu: Element<'a, Message> = match (menu_open, ps.active_note(), mode) {
             (true, Some(tab), Some(current)) => {
@@ -3022,7 +3215,8 @@ impl App {
                 iced::widget::mouse_area(
                     container(iced::widget::opaque(list))
                         .padding(iced::Padding {
-                            top: crate::theme::CONTROL + 8.0,
+                            // Below the tab bar + note control bar (`BAR_HEIGHT` each, 4 apart).
+                            top: 2.0f32.mul_add(crate::header::BAR_HEIGHT, 8.0),
                             ..iced::Padding::ZERO
                         })
                         .align_x(iced::alignment::Horizontal::Right)

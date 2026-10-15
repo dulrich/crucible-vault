@@ -6,7 +6,6 @@ use editor_model::render::{
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{
     Space, button, column, container, image, rich_text, row, rule, scrollable, sensor, span, text,
-    text_input,
 };
 use iced::{Border, Element, Font, Length, Theme};
 
@@ -80,12 +79,10 @@ pub fn reading<'a>(
         scale,
         strike: false,
     };
-    // Fixed slots 0 (filename) and 1 (properties, `Space` when absent) keep every body widget
-    // at a stable tree position whether or not the note has frontmatter.
-    let mut items: Vec<Element<'a, Message>> = vec![
-        title_input(store, path, t, scale),
-        properties(&cx, &doc.model.properties),
-    ];
+    // Fixed slot 0 (properties, `Space` when absent) keeps every body widget at a stable tree
+    // position whether or not the note has frontmatter. The filename edit moved to the note
+    // control bar's breadcrumb (plan editor-feedback-round-2 WP-6).
+    let mut items: Vec<Element<'a, Message>> = vec![properties(&cx, &doc.model.properties)];
     items.extend(doc.model.blocks.iter().map(|b| block(&cx, b)));
     if !doc.model.footnotes.is_empty() {
         items.push(rule::horizontal(1).into());
@@ -106,38 +103,6 @@ pub fn reading<'a>(
         .id(crate::find::reading_scroll_id(path))
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
-}
-
-/// The editable filename (the note's stem); Enter / blur renames, Escape reverts.
-fn title_input<'a>(
-    store: &'a ReadingStore,
-    path: &'a str,
-    t: Tokens,
-    scale: f32,
-) -> Element<'a, Message> {
-    let p_in = path.to_owned();
-    text_input("note name", store.title(path))
-        .id(super::title_id(path))
-        .size(scaled(22.0, scale))
-        .on_input(move |value| {
-            Message::Reading(ReadingMsg::TitleInput {
-                path: p_in.clone(),
-                value,
-            })
-        })
-        .on_submit(Message::Reading(ReadingMsg::TitleSubmit {
-            path: path.to_owned(),
-        }))
-        .style(move |theme: &Theme, status| text_input::Style {
-            border: Border {
-                width: 0.0,
-                ..text_input::default(theme, status).border
-            },
-            background: iced::Background::Color(iced::Color::TRANSPARENT),
-            value: t.heading.to_color(),
-            ..text_input::default(theme, status)
-        })
         .into()
 }
 

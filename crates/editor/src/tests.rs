@@ -344,14 +344,14 @@ mod wp4 {
     use crate::message::{ExplorerMsg, NavMsg, PanesMsg, SwitcherMsg};
     use crate::panes;
 
-    fn app_over(d: &Arc<FakeDaemon>, state: Option<std::path::PathBuf>) -> App {
+    pub(super) fn app_over(d: &Arc<FakeDaemon>, state: Option<std::path::PathBuf>) -> App {
         let dc: Arc<dyn DaemonClient> = Arc::clone(d) as Arc<dyn DaemonClient>;
         let mut app = App::new(Some(dc), state);
         app.rpc_inline = true;
         app
     }
 
-    fn fake_arc() -> (tempfile::TempDir, Arc<FakeDaemon>) {
+    pub(super) fn fake_arc() -> (tempfile::TempDir, Arc<FakeDaemon>) {
         let (tmp, d) = fake();
         (tmp, Arc::new(d))
     }
@@ -885,7 +885,7 @@ mod wp4 {
 
     use crate::message::ReadingMsg;
 
-    fn title(app: &mut App, path: &str, value: &str) {
+    pub(super) fn title(app: &mut App, path: &str, value: &str) {
         let _ = app.update(Message::Reading(ReadingMsg::TitleInput {
             path: path.into(),
             value: value.into(),
@@ -1171,14 +1171,20 @@ mod usability_wp3 {
     fn dirty_marker_lives_on_the_tab_and_source_slots_are_stable() {
         assert_eq!(
             crate::source::SLOTS.iter().position(|s| *s == "editor"),
-            Some(2)
+            Some(0)
         );
         assert_eq!(crate::source::status_notice(Mode::Live), None);
         assert!(crate::source::status_notice(Mode::Shadow).is_some());
         let (_tmp, _d, mut app) = app_with(&["d3/t.md"], None);
         let _ = app.update(Message::Explorer(ExplorerMsg::Open("d3/t.md".into())));
         let tab = app.active_tab().expect("tab");
-        assert_eq!(crate::source::tab_title(&tab.source, &tab.path), "d3/t.md");
+        // WP-6: the title text never carries the marker; the marker is a separate glyph slot.
+        let ps = app.panes.get(app.focus).expect("pane");
+        assert_eq!(app.tab_header_title(ps, tab), "t");
+        assert_eq!(
+            crate::header::marker(tab.source.is_dirty(), tab.source.is_saving()),
+            ""
+        );
         let _ = app.update(Message::Reading(ReadingMsg::SetMode {
             path: "d3/t.md".into(),
             mode: ViewMode::Source,
@@ -1189,10 +1195,67 @@ mod usability_wp3 {
         )));
         let tab = app.active_tab().expect("tab");
         assert!(tab.source.is_dirty());
-        assert_eq!(
-            crate::source::tab_title(&tab.source, &tab.path),
-            "d3/t.md •"
+        let ps = app.panes.get(app.focus).expect("pane");
+        assert_eq!(app.tab_header_title(ps, tab), "t", "no marker text");
+        assert_eq!(crate::header::marker(true, false), "•");
+        drop(app.view());
+    }
+
+    // ---- editor-feedback-round-2 WP-6: pane header ----
+
+    use super::wp4::{app_over, fake_arc, title};
+
+    #[test]
+    fn breadcrumb_filename_edit_runs_in_source_mode_and_renames() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp6ren/one.md", "body").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp6ren/one.md".into())));
+        let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+            path: "wp6ren/one.md".into(),
+            mode: ViewMode::Source,
+        }));
+        assert!(!app.reading.ticks() && !app.reading.listens_escape());
+        title(&mut app, "wp6ren/one.md", "two");
+        // Source-only, yet the blur poll and Escape listener run while the edit is pending.
+        assert!(app.reading.ticks(), "blur-poll tick in Source mode");
+        assert!(app.reading.listens_escape(), "Escape in Source mode");
+        drop(app.view());
+        let _ = app.update(Message::Reading(ReadingMsg::TitleRevert));
+        assert!(!app.reading.title_pending());
+        title(&mut app, "wp6ren/one.md", "two");
+        let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
+            path: "wp6ren/one.md".into(),
+        }));
+        assert!(
+            d.read_file("wp6ren/two.md").is_ok(),
+            "renamed via the daemon"
         );
+        assert_eq!(app.open_paths(), ["wp6ren/two.md"]);
+        assert!(!app.reading.ticks());
+    }
+
+    #[test]
+    fn tab_titles_follow_the_pref() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp6t/a/n.md", "---\ntitle: Front Title\n---\nbody")
+            .expect("create");
+        d.create_note("wp6t/b/n.md", "plain").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp6t/a/n.md".into())));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp6t/b/n.md".into())));
+        let titles = |app: &App| {
+            let ps = app.panes.get(app.focus).expect("pane");
+            ps.tabs
+                .iter()
+                .map(|t| app.tab_header_title(ps, t))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(titles(&app), ["Front Title", "n"]);
+        app.prefs.tab_title = crate::header::TabTitle::Unambiguous;
+        assert_eq!(titles(&app), ["a/n", "b/n"]);
+        app.prefs.tab_title = crate::header::TabTitle::Path;
+        assert_eq!(titles(&app), ["wp6t/a/n.md", "wp6t/b/n.md"]);
         drop(app.view());
     }
 

@@ -1481,6 +1481,13 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Str("med")),
         field(
+            "tab_title",
+            "Tab title",
+            "Tab header text: frontmatter title, file stem, vault path, or shortest unambiguous path suffix",
+            Node::Enum(&["title", "basename", "path", "unambiguous"]),
+        )
+        .dflt(D::Str("title")),
+        field(
             "confirm_trash",
             "Confirm Trash",
             "Ask before moving to .trash/",

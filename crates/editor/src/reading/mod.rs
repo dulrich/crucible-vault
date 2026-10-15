@@ -132,7 +132,7 @@ pub struct ReadingStore {
     find: HashMap<String, String>,
 }
 
-/// The note stem shown in the filename input (`a/b/Note.md` → `Note`).
+/// The note stem shown in the breadcrumb filename input (`a/b/Note.md` → `Note`).
 pub fn stem(path: &str) -> &str {
     let leaf = path.rsplit('/').next().unwrap_or(path);
     leaf.strip_suffix(".md").unwrap_or(leaf)
@@ -152,7 +152,7 @@ pub fn rename_target(path: &str, input: &str) -> Option<String> {
     })
 }
 
-/// The widget id of `path`'s filename input (blur polling).
+/// The widget id of `path`'s breadcrumb filename input (blur polling).
 pub fn title_id(path: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("reading-title:{path}"))
 }
@@ -218,17 +218,35 @@ impl ReadingStore {
         self.images.release_owner(path);
     }
 
-    /// The debounce tick while any tab shows a reading pane, plus the title editor's Escape.
-    /// Ctrl+E is no longer listened to here (plan editor-settings-tab WP-4, audit E1): "Toggle
-    /// source / reading view" is an ordinary client command resolved by the effective keymap
-    /// in `App::on_chord`, so it can be rebound.
+    /// A filename edit is pending (the breadcrumb's input holds unsubmitted text).
+    pub fn title_pending(&self) -> bool {
+        !self.titles.is_empty()
+    }
+
+    /// The Escape listener runs: a filename edit is pending, in any view mode.
+    pub fn listens_escape(&self) -> bool {
+        self.title_pending()
+    }
+
+    /// The tick runs: some tab shows a reading pane (render debounce) or a filename edit is
+    /// pending (the breadcrumb's blur poll) — in any view mode, Source-only included (plan
+    /// editor-feedback-round-2 WP-6).
+    pub fn ticks(&self) -> bool {
+        self.title_pending() || self.tabs.values().any(|t| t.mode.shows_reading())
+    }
+
+    /// The debounce / blur-poll tick, plus the filename editor's Escape (see [`Self::ticks`],
+    /// [`Self::listens_escape`]). Ctrl+E is no longer listened to here (plan
+    /// editor-settings-tab WP-4, audit E1): "Toggle source / reading view" is an ordinary
+    /// client command resolved by the effective keymap in `App::on_chord`, so it can be
+    /// rebound.
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = Vec::new();
-        if !self.titles.is_empty() {
+        if self.listens_escape() {
             // The focused text input captures Escape, so listen to captured events too.
             subs.push(iced::event::listen_with(escape));
         }
-        if self.tabs.values().any(|t| t.mode.shows_reading()) {
+        if self.ticks() {
             subs.push(iced::time::every(TICK).map(|_| Message::Reading(ReadingMsg::Tick)));
         }
         Subscription::batch(subs)
