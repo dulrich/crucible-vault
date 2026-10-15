@@ -203,6 +203,10 @@ fn prefs_defaults_fields_and_fallbacks() {
     assert!((full.ui_scale - 1.5).abs() < f32::EPSILON);
     assert_eq!(full.surround, Surround::Light);
     assert_eq!(full.tab_title, crate::header::TabTitle::Unambiguous);
+    assert_eq!(
+        full.quick_switch_open,
+        crate::header::QuickSwitchOpen::Duplicate
+    );
     assert_eq!(full.search_limit, 80);
     assert_eq!(full.search_debounce_ms, 120);
     assert!(full.confirm_trash);
@@ -211,7 +215,7 @@ fn prefs_defaults_fields_and_fallbacks() {
     assert_eq!(full.keys.get("quit").map(Vec::len), Some(0), "[] unbinds");
     // Out of range / mistyped → that field's default.
     let bad = editor_prefs::parse(
-        "font_size = 2\nui_scale = 9.0\nsurround = \"neon\"\ntab_title = \"stem\"\n[search]\nlimit = \"x\"\n",
+        "font_size = 2\nui_scale = 9.0\nsurround = \"neon\"\ntab_title = \"stem\"\nquick_switch_open = \"focus\"\n[search]\nlimit = \"x\"\n",
         Surround::Med,
     )
     .expect("parse");
@@ -223,6 +227,17 @@ fn prefs_defaults_fields_and_fallbacks() {
     let mut doc = ConfigDoc::parse("").expect("doc");
     editor_prefs::apply(&mut doc, &PrefEdit::TabTitle(crate::header::TabTitle::Path)).expect("set");
     assert!(doc.to_string().contains("tab_title = \"path\""));
+    assert_eq!(
+        int.quick_switch_open,
+        crate::header::QuickSwitchOpen::Move,
+        "default"
+    );
+    editor_prefs::apply(
+        &mut doc,
+        &PrefEdit::QuickSwitchOpen(crate::header::QuickSwitchOpen::Switch),
+    )
+    .expect("set");
+    assert!(doc.to_string().contains("quick_switch_open = \"switch\""));
 }
 
 #[test]
@@ -294,6 +309,7 @@ font_size = 18.0
 ui_scale = 1.5
 surround = "light"
 tab_title = "unambiguous"
+quick_switch_open = "duplicate"
 confirm_trash = true
 
 [search]

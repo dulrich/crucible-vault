@@ -107,11 +107,13 @@ pub enum ReadingMsg {
     /// An image sensor came into view (`width` = laid-out width).
     ImageShown {
         tab: String,
+        /// The showing view (tab id): pins are per view (plan editor-feedback-round-2 WP-7).
+        view: u64,
         key: String,
         width: f32,
     },
     /// An image sensor left view.
-    ImageHidden { tab: String, key: String },
+    ImageHidden { tab: String, view: u64, key: String },
     /// An off-thread decode finished (`Err` = unreadable/undecodable; no note text).
     ImageLoaded {
         key: String,
@@ -333,6 +335,8 @@ pub enum TabsMsg {
     /// The save-before-close finished.
     CloseSaved {
         path: String,
+        /// The [`crate::app::Tab::id`] to close (audit E1: not "the first tab of `path`").
+        tab: u64,
         seq: u64,
         outcome: crate::source::SaveOutcome,
     },

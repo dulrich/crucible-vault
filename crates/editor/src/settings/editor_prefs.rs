@@ -17,6 +17,7 @@ use iced::widget::{Space, button, column, container, row, text, text_input, togg
 use iced::{Element, Length};
 
 use super::{ConfigFile, LoadState, SettingsMsg, file_header, save_bar};
+pub use crate::header::QuickSwitchOpen;
 use crate::header::TabTitle;
 use crate::message::Message;
 use crate::theme::{Surround, Tokens};
@@ -43,6 +44,8 @@ pub struct Prefs {
     pub surround: Surround,
     /// `tab_title`: what tab headers show (plan editor-feedback-round-2 WP-6).
     pub tab_title: TabTitle,
+    /// `quick_switch_open` (plan editor-feedback-round-2 WP-7).
+    pub quick_switch_open: QuickSwitchOpen,
     pub search_limit: usize,
     pub search_debounce_ms: u64,
     pub confirm_trash: bool,
@@ -59,6 +62,7 @@ impl Default for Prefs {
             ui_scale: 1.0,
             surround: Surround::default(),
             tab_title: TabTitle::default(),
+            quick_switch_open: QuickSwitchOpen::default(),
             search_limit: DEFAULT_SEARCH_LIMIT,
             search_debounce_ms: DEFAULT_SEARCH_DEBOUNCE_MS,
             confirm_trash: false,
@@ -127,6 +131,10 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             .get_str(&p("tab_title"))
             .and_then(TabTitle::of)
             .unwrap_or(d.tab_title),
+        quick_switch_open: doc
+            .get_str(&p("quick_switch_open"))
+            .and_then(QuickSwitchOpen::of)
+            .unwrap_or(d.quick_switch_open),
         search_limit: int_in("search.limit", 1, 1000)
             .and_then(|v| usize::try_from(v).ok())
             .unwrap_or(d.search_limit),
@@ -188,6 +196,7 @@ pub enum PrefEdit {
     UiScale(f32),
     Surround(Surround),
     TabTitle(TabTitle),
+    QuickSwitchOpen(QuickSwitchOpen),
     SearchLimit(i64),
     SearchDebounceMs(i64),
     ConfirmTrash(bool),
@@ -203,6 +212,7 @@ pub fn apply(doc: &mut ConfigDoc, e: &PrefEdit) -> Result<(), DocError> {
         PrefEdit::UiScale(v) => doc.set(&p("ui_scale"), round(*v)),
         PrefEdit::Surround(s) => doc.set(&p("surround"), surround_key(*s)),
         PrefEdit::TabTitle(m) => doc.set(&p("tab_title"), m.key()),
+        PrefEdit::QuickSwitchOpen(m) => doc.set(&p("quick_switch_open"), m.key()),
         PrefEdit::SearchLimit(v) => doc.set(&p("search.limit"), *v),
         PrefEdit::SearchDebounceMs(v) => doc.set(&p("search.debounce_ms"), *v),
         PrefEdit::ConfirmTrash(b) => doc.set(&p("confirm_trash"), *b),
@@ -303,6 +313,28 @@ pub fn view<'a>(
         .spacing(6)
         .align_y(iced::Alignment::Center)
     };
+    let quick_switch = {
+        let seg = |m: QuickSwitchOpen| {
+            button(text(m.label()).size(14))
+                .height(crate::theme::SEGMENT)
+                .padding([0, 12])
+                .style(crate::theme::segment_style(t, prefs.quick_switch_open == m))
+                .on_press_maybe(
+                    on(PrefEdit::QuickSwitchOpen(m))
+                        .map(|e| Message::Settings(SettingsMsg::Pref(e))),
+                )
+        };
+        row![
+            text("Quick Switch opens")
+                .size(14)
+                .width(Length::Fixed(200.0)),
+            container(row(QuickSwitchOpen::ALL.into_iter().map(|m| seg(m).into())).spacing(0))
+                .padding(1)
+                .style(crate::theme::seg_group_style(t)),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+    };
     let confirm = row![
         text("Confirm before Trash")
             .size(14)
@@ -368,6 +400,7 @@ pub fn view<'a>(
         ),
         surround,
         tab_title,
+        quick_switch,
         stepper(
             "Search result limit",
             lim.to_string(),

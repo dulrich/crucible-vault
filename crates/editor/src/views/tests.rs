@@ -127,7 +127,7 @@ fn row_click_opens_the_path_at_its_line() {
     }));
     let tab = app.active_tab().expect("tab");
     assert_eq!(tab.path, "Linker.md");
-    assert_eq!(tab.source.cursor().position.line, 2);
+    assert_eq!(app.active_doc().expect("doc").cursor().position.line, 2);
 }
 
 #[test]

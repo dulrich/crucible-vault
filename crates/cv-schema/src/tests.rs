@@ -362,6 +362,31 @@ fn editor_tab_title_enum_and_default() {
 }
 
 #[test]
+fn editor_quick_switch_open_enum_and_default() {
+    for v in ["switch", "move", "duplicate"] {
+        assert!(
+            errs(&format!("quick_switch_open = \"{v}\"\n"), "editor.toml").is_empty(),
+            "{v}"
+        );
+    }
+    let e = errs("quick_switch_open = \"focus\"\n", "editor.toml");
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(
+        e[0].starts_with("quick_switch_open: \"focus\" is not one of"),
+        "{e:?}"
+    );
+    let Node::Record(r) = editor_schema() else {
+        panic!("editor schema is a record");
+    };
+    let f = r
+        .fields
+        .iter()
+        .find(|f| f.key == "quick_switch_open")
+        .expect("field");
+    assert!(matches!(f.default, Some(node::Default::Str("move"))));
+}
+
+#[test]
 fn validate_exactly_one_of() {
     assert!(
         errs(

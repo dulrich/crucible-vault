@@ -15,6 +15,47 @@ pub const MARKER_WIDTH: f32 = 12.0;
 /// A tab header's title is cut to this many characters (plus `…`).
 pub const TITLE_MAX_CHARS: usize = 28;
 
+/// `editor.toml` `quick_switch_open`: what Quick Switch does with a note already open (plan
+/// editor-feedback-round-2 WP-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickSwitchOpen {
+    /// Focus the existing tab wherever it is.
+    Switch,
+    /// Move the existing tab into the active pane and focus it.
+    #[default]
+    Move,
+    /// Open a second tab of the note in the active pane.
+    Duplicate,
+}
+
+impl QuickSwitchOpen {
+    /// Every mode, in settings order.
+    pub const ALL: [Self; 3] = [Self::Switch, Self::Move, Self::Duplicate];
+
+    /// The `editor.toml` spelling.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Move => "move",
+            Self::Duplicate => "duplicate",
+        }
+    }
+
+    /// Parses the `editor.toml` spelling.
+    pub fn of(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.key() == s)
+    }
+
+    /// The Settings page label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Switch => "Switch",
+            Self::Move => "Move",
+            Self::Duplicate => "Duplicate",
+        }
+    }
+}
+
 /// `editor.toml` `tab_title`: what a tab header shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TabTitle {

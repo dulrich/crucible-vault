@@ -28,6 +28,8 @@ struct Ctx<'a> {
     views: &'a crate::views::ViewStore,
     doc: &'a Doc,
     path: &'a str,
+    /// The showing view (tab id) — image pins are per view (plan editor-feedback-round-2 WP-7).
+    view: u64,
     t: Tokens,
     /// `editor.toml` `font_size / 22` (plan editor-settings-tab WP-2, audit M1).
     scale: f32,
@@ -64,6 +66,7 @@ pub fn reading<'a>(
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
     path: &'a str,
+    view: u64,
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
@@ -75,6 +78,7 @@ pub fn reading<'a>(
         views,
         doc,
         path,
+        view,
         t,
         scale,
         strike: false,
@@ -549,17 +553,20 @@ fn image_block<'a>(
     let tab = cx.path.to_owned();
     let shown_key = key.clone();
     let shown_tab = tab.clone();
+    let view = cx.view;
     sensor(content)
         .key_ref(key.as_str())
         .on_show(move |size| {
             Message::Reading(ReadingMsg::ImageShown {
                 tab: shown_tab.clone(),
+                view,
                 key: shown_key.clone(),
                 width: width.map_or(size.width, |w| w as f32),
             })
         })
         .on_hide(Message::Reading(ReadingMsg::ImageHidden {
             tab,
+            view,
             key: key.clone(),
         }))
         .into()

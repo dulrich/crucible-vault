@@ -289,7 +289,7 @@ fn app_open_file_adds_tab_and_status_updates() {
 
     let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
     assert_eq!(app.open_paths().len(), 1);
-    assert_eq!(app.active_tab().map(|t| t.source.text()), Some(expected));
+    assert_eq!(app.active_doc().map(|t| t.text()), Some(expected));
     let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
     assert_eq!(app.open_paths().len(), 1, "re-open focuses the tab");
     let _ = app.update(Message::Tabs(TabsMsg::Open("missing.md".into())));
@@ -317,7 +317,7 @@ fn app_open_file_adds_tab_and_status_updates() {
         },
     )));
     assert_eq!(
-        app.active_tab().map(|t| t.source.text()).as_deref(),
+        app.active_doc().map(|t| t.text()).as_deref(),
         Some("changed\n")
     );
     let _ = app.update(Message::Status(StatusMsg::Disconnected));
@@ -506,17 +506,14 @@ mod wp4 {
         let _ = app.update(Message::Source(crate::message::SourceMsg::Action(
             Action::Edit(Edit::Insert('x')),
         )));
-        assert!(app.active_tab().is_some_and(|t| t.source.is_dirty()));
+        assert!(app.active_doc().is_some_and(|t| t.is_dirty()));
 
         let _ = app.update(Message::Explorer(ExplorerMsg::BeginRename));
         let _ = app.update(Message::Explorer(ExplorerMsg::Input("two.md".into())));
         let _ = app.update(Message::Explorer(ExplorerMsg::Submit));
         assert!(d.read_file("wp4dirty/one.md").is_ok(), "not renamed");
         assert!(d.read_file("wp4dirty/two.md").is_err());
-        assert!(
-            app.active_tab().is_some_and(|t| t.source.is_dirty()),
-            "edits kept"
-        );
+        assert!(app.active_doc().is_some_and(|t| t.is_dirty()), "edits kept");
 
         let _ = app.update(Message::Explorer(ExplorerMsg::Select(
             "wp4dirty/one.md".into(),
@@ -966,14 +963,14 @@ mod wp4 {
         let _ = app.update(Message::Source(crate::message::SourceMsg::Action(
             Action::Edit(Edit::Insert('x')),
         )));
-        assert!(app.active_tab().is_some_and(|t| t.source.is_dirty()));
+        assert!(app.active_doc().is_some_and(|t| t.is_dirty()));
         title(&mut app, "wp2dirty/one.md", "two");
         let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
             path: "wp2dirty/one.md".into(),
         }));
         assert_eq!(app.open_paths(), ["wp2dirty/two.md"]);
         assert_eq!(d.read_file("wp2dirty/two.md").expect("renamed").0, b"xbody");
-        assert!(app.active_tab().is_some_and(|t| !t.source.is_dirty()));
+        assert!(app.active_doc().is_some_and(|t| !t.is_dirty()));
     }
 
     #[test]
@@ -987,19 +984,15 @@ mod wp4 {
             path: "wp2task/t.md".into(),
             line: 0,
         }));
-        let tab = app.active_tab().expect("tab");
-        assert_eq!(tab.source.text(), "- [x] a\n- [x] b\n");
-        assert!(tab.source.is_dirty(), "saved by the normal autosave path");
+        let tab = app.active_doc().expect("tab");
+        assert_eq!(tab.text(), "- [x] a\n- [x] b\n");
+        assert!(tab.is_dirty(), "saved by the normal autosave path");
         assert_eq!(
             d.read_file("wp2task/t.md").expect("file").0,
             b"- [ ] a\n- [x] b\n"
         );
         let doc = app.reading.doc("wp2task/t.md").expect("rendered");
-        assert_eq!(
-            doc.seq,
-            tab.source.edit_seq(),
-            "re-rendered from the buffer"
-        );
+        assert_eq!(doc.seq, tab.edit_seq(), "re-rendered from the buffer");
         assert_eq!(
             editor_model::render::task_lines(&doc.model),
             vec![(0, 'x'), (1, 'x')]
@@ -1182,7 +1175,10 @@ mod usability_wp3 {
         let ps = app.panes.get(app.focus).expect("pane");
         assert_eq!(app.tab_header_title(ps, tab), "t");
         assert_eq!(
-            crate::header::marker(tab.source.is_dirty(), tab.source.is_saving()),
+            crate::header::marker(
+                app.active_doc().expect("doc").is_dirty(),
+                app.active_doc().expect("doc").is_saving()
+            ),
             ""
         );
         let _ = app.update(Message::Reading(ReadingMsg::SetMode {
@@ -1193,8 +1189,8 @@ mod usability_wp3 {
         let _ = app.update(Message::Source(crate::message::SourceMsg::Action(
             iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('y')),
         )));
+        assert!(app.active_doc().expect("doc").is_dirty());
         let tab = app.active_tab().expect("tab");
-        assert!(tab.source.is_dirty());
         let ps = app.panes.get(app.focus).expect("pane");
         assert_eq!(app.tab_header_title(ps, tab), "t", "no marker text");
         assert_eq!(crate::header::marker(true, false), "•");
@@ -1531,8 +1527,8 @@ mod usability_wp4 {
         let _ = app.update(Message::Palette(PaletteMsg::Key(c("Ctrl+F"))));
         assert!(app.panes.get(app.focus).is_some_and(|ps| ps.find.is_some()));
         let _ = app.update(Message::Find(FindMsg::Query("FOO".into())));
-        let sel = |app: &App| app.active_tab().and_then(|t| t.source.selection());
-        let line = |app: &App| app.active_tab().map(|t| t.source.cursor().position.line);
+        let sel = |app: &App| app.active_doc().and_then(|t| t.selection());
+        let line = |app: &App| app.active_doc().map(|t| t.cursor().position.line);
         assert_eq!(sel(&app).as_deref(), Some("Foo"));
         assert_eq!(line(&app), Some(0));
         let _ = app.update(Message::Find(FindMsg::Submit));
@@ -1611,7 +1607,6 @@ mod round2_wp3 {
     use iced::widget::text_editor::{Action, Edit};
 
     use super::*;
-    use crate::app::Tab;
     use crate::message::{ExplorerMsg, SourceMsg};
     use crate::panes;
     use crate::source::SaveOutcome;
@@ -1631,9 +1626,8 @@ mod round2_wp3 {
         (tmp, d, app)
     }
 
-    fn tab<'a>(app: &'a mut App, path: &str) -> &'a mut Tab {
-        let (p, i) = panes::find(&app.panes, path).expect("open");
-        &mut app.panes.get_mut(p).expect("pane").tabs[i]
+    fn tab<'a>(app: &'a mut App, path: &str) -> &'a mut crate::source::SourceBuffer {
+        app.doc_mut(path).expect("open")
     }
 
     fn type_x(app: &mut App) {
@@ -1643,7 +1637,7 @@ mod round2_wp3 {
     }
 
     fn dirty_in_place(app: &mut App, path: &str) {
-        let _ = tab(app, path).source.perform(
+        let _ = tab(app, path).perform(
             Action::Edit(Edit::Insert('y')),
             false,
             std::time::Instant::now(),
@@ -1665,16 +1659,16 @@ mod round2_wp3 {
         let (_tmp, _d, mut app) = setup(&["w3s/a.md", "w3s/b.md"]);
         select(&mut app, "w3s/a.md");
         type_x(&mut app);
-        assert!(tab(&mut app, "w3s/a.md").source.is_dirty());
-        assert!(!tab(&mut app, "w3s/a.md").source.is_saving());
+        assert!(tab(&mut app, "w3s/a.md").is_dirty());
+        assert!(!tab(&mut app, "w3s/a.md").is_saving());
         select(&mut app, "w3s/b.md");
         assert!(
-            tab(&mut app, "w3s/a.md").source.is_saving(),
+            tab(&mut app, "w3s/a.md").is_saving(),
             "flush started on switch"
         );
         // Alt+N back: leaving the clean tab starts nothing.
         let _ = app.update(Message::Tabs(TabsMsg::GoTo(1)));
-        assert!(!tab(&mut app, "w3s/b.md").source.is_saving());
+        assert!(!tab(&mut app, "w3s/b.md").is_saving());
     }
 
     #[test]
@@ -1684,12 +1678,9 @@ mod round2_wp3 {
         type_x(&mut app);
         dirty_in_place(&mut app, "w3u/b.md");
         let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
-        assert!(tab(&mut app, "w3u/a.md").source.is_saving());
-        assert!(tab(&mut app, "w3u/b.md").source.is_saving());
-        assert!(
-            !tab(&mut app, "w3u/c.md").source.is_saving(),
-            "clean: no-op"
-        );
+        assert!(tab(&mut app, "w3u/a.md").is_saving());
+        assert!(tab(&mut app, "w3u/b.md").is_saving());
+        assert!(!tab(&mut app, "w3u/c.md").is_saving(), "clean: no-op");
     }
 
     #[test]
@@ -1698,19 +1689,14 @@ mod round2_wp3 {
         select(&mut app, "w3c/a.md");
         type_x(&mut app);
         let t = tab(&mut app, "w3c/a.md");
-        let job = t.source.begin_save(false).expect("job");
-        let _ = t
-            .source
-            .finish_save(job.seq, SaveOutcome::Conflict(ContentHash::from_hex("abc")));
-        assert!(t.source.conflict().is_some());
+        let job = t.begin_save(false).expect("job");
+        let _ = t.finish_save(job.seq, SaveOutcome::Conflict(ContentHash::from_hex("abc")));
+        assert!(t.conflict().is_some());
         select(&mut app, "w3c/b.md");
         let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
         let t = tab(&mut app, "w3c/a.md");
-        assert!(
-            !t.source.is_saving(),
-            "a conflicted buffer is never auto-saved"
-        );
-        assert!(t.source.is_dirty());
+        assert!(!t.is_saving(), "a conflicted buffer is never auto-saved");
+        assert!(t.is_dirty());
 
         let _ = app.update(Message::Status(StatusMsg::Notification(
             Notification::ModeChanged { mode: Mode::Shadow },
@@ -1718,10 +1704,7 @@ mod round2_wp3 {
         dirty_in_place(&mut app, "w3c/b.md");
         select(&mut app, "w3c/a.md");
         let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
-        assert!(
-            !tab(&mut app, "w3c/b.md").source.is_saving(),
-            "shadow: no-op"
-        );
+        assert!(!tab(&mut app, "w3c/b.md").is_saving(), "shadow: no-op");
     }
 
     #[test]
@@ -1731,18 +1714,17 @@ mod round2_wp3 {
         type_x(&mut app);
         let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
         let t = tab(&mut app, "w3r/a.md");
-        assert!(t.source.is_saving());
-        let seq = t.source.edit_seq();
+        assert!(t.is_saving());
+        let seq = t.edit_seq();
         type_x(&mut app);
         // A second flush while saving only queues the follow-up.
         let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
         let t = tab(&mut app, "w3r/a.md");
         let again = t
-            .source
             .finish_save(seq, SaveOutcome::Saved(ContentHash::from_hex("h1")))
             .expect("saved");
         assert!(again, "the newer edit re-queues a save");
-        assert!(t.source.is_dirty());
+        assert!(t.is_dirty());
     }
 
     /// Starts a flush (async task, left in flight) and returns its seq.
@@ -1751,8 +1733,8 @@ mod round2_wp3 {
         type_x(app);
         let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
         let t = tab(app, path);
-        assert!(t.source.is_saving());
-        t.source.edit_seq()
+        assert!(t.is_saving());
+        t.edit_seq()
     }
 
     fn land(app: &mut App, path: &str, seq: u64, outcome: SaveOutcome) {
@@ -1817,5 +1799,351 @@ mod round2_wp3 {
         );
         assert!(panes::find(&app.panes, "w3x/a.md").is_none(), "closed");
         assert!(panes::find(&app.panes, "w3x/b.md").is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// editor-feedback-round-2 WP-7: shared documents + Quick Switch modes (FakeDaemon)
+// ---------------------------------------------------------------------------------------------
+
+mod round2_wp7 {
+    use std::collections::HashSet;
+
+    use iced::widget::pane_grid::Pane;
+    use iced::widget::text_editor::{Action, Edit};
+
+    use super::*;
+    use crate::app::Tab;
+    use crate::header::QuickSwitchOpen;
+    use crate::message::{ExplorerMsg, PanesMsg, SourceMsg, SwitcherMsg};
+    use crate::reading::ViewMode;
+    use crate::source::SaveOutcome;
+
+    /// Opens `notes` into one pane (rpc inline).
+    fn setup(notes: &[&str]) -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
+        let (tmp, d) = fake();
+        let d = Arc::new(d);
+        for p in notes {
+            d.create_note(p, "body").expect("create");
+        }
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), None);
+        app.rpc_inline = true;
+        for p in notes {
+            let _ = app.update(Message::Explorer(ExplorerMsg::Open((*p).to_owned())));
+        }
+        (tmp, d, app)
+    }
+
+    fn type_x(app: &mut App) {
+        let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+            Edit::Insert('x'),
+        ))));
+    }
+
+    fn quick(app: &mut App, mode: QuickSwitchOpen, path: &str) {
+        app.prefs.quick_switch_open = mode;
+        let _ = app.update(Message::Switcher(SwitcherMsg::Pick(path.to_owned())));
+    }
+
+    fn split(app: &mut App) -> Pane {
+        let _ = app.update(Message::Panes(PanesMsg::SplitRight));
+        app.focus
+    }
+
+    /// Every `(pane, tab id)` showing `path`.
+    fn views(app: &App, path: &str) -> Vec<(Pane, u64)> {
+        app.panes
+            .iter()
+            .flat_map(|(p, ps)| {
+                ps.tabs
+                    .iter()
+                    .filter(|t| t.path == path)
+                    .map(move |t| (*p, t.id))
+            })
+            .collect()
+    }
+
+    fn tab_paths(app: &App, pane: Pane) -> Vec<String> {
+        app.panes
+            .get(pane)
+            .map(|ps| ps.tabs.iter().map(|t| t.path.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// `w7/a.md` open in the left pane and duplicated into the (focused) right pane.
+    fn duplicated() -> (tempfile::TempDir, Arc<FakeDaemon>, App, Pane, Pane) {
+        let (tmp, d, mut app) = setup(&["w7/a.md"]);
+        let left = app.focus;
+        let right = split(&mut app);
+        quick(&mut app, QuickSwitchOpen::Duplicate, "w7/a.md");
+        assert_eq!(views(&app, "w7/a.md").len(), 2);
+        (tmp, d, app, left, right)
+    }
+
+    fn saved(app: &mut App, path: &str, seq: u64) {
+        let _ = app.update(Message::Source(SourceMsg::Saved {
+            path: path.to_owned(),
+            seq,
+            outcome: SaveOutcome::Saved(ContentHash::from_hex("h1")),
+        }));
+    }
+
+    #[test]
+    fn image_pins_are_per_view() {
+        use crate::image_cache::{Decoded, ImageCache, view_owner};
+        let decoded = || Decoded {
+            handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]),
+            width: 1,
+            height: 1,
+            bytes: 4,
+        };
+        let mut c = ImageCache::with_budget(1 << 20);
+        let (v1, v2) = (view_owner("a.md", 1), view_owner("a.md", 2));
+        assert!(c.show(&v1, "k"));
+        assert!(!c.show(&v2, "k"), "the second view waits on the same load");
+        assert!(c.loaded("k", Some(decoded())));
+        // show / show / hide: the other view keeps the pin.
+        c.hide(&v1, "k");
+        assert!(c.contains("k"), "the other view still shows it");
+        assert_eq!(c.pins("k"), 1);
+        c.hide(&v2, "k");
+        assert!(!c.contains("k"), "no view shows it: released");
+        // A bare-path release (last tab closed) covers every view.
+        assert!(c.show(&v1, "k"));
+        assert!(c.loaded("k", Some(decoded())));
+        c.show(&v2, "k");
+        c.release_owner("a.md");
+        assert!(c.is_empty());
+        // ... and never another note whose path merely starts with it.
+        assert!(c.show(&view_owner("a.md.md", 3), "j"));
+        assert!(c.loaded("j", Some(decoded())));
+        c.retain_owner("a.md", &HashSet::new());
+        assert!(c.contains("j"));
+    }
+
+    #[test]
+    fn duplicate_tabs_share_one_document_and_its_edits() {
+        let (_tmp, _d, mut app, left, right) = duplicated();
+        assert_eq!(app.docs.len(), 1);
+        type_x(&mut app);
+        assert!(app.doc("w7/a.md").is_some_and(|d| d.is_dirty()));
+        app.focus = left;
+        let text = app.active_doc().expect("doc").text();
+        assert!(text.starts_with('x'), "{text}");
+        assert_eq!(tab_paths(&app, right), ["w7/a.md"]);
+    }
+
+    #[test]
+    fn save_completion_with_two_tabs_of_one_path() {
+        let (_tmp, _d, mut app, _left, _right) = duplicated();
+        type_x(&mut app);
+        let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
+        let seq = app.doc("w7/a.md").expect("doc").edit_seq();
+        assert!(app.doc("w7/a.md").expect("doc").is_saving());
+        saved(&mut app, "w7/a.md", seq);
+        let doc = app.doc("w7/a.md").expect("doc");
+        assert!(!doc.is_dirty() && !doc.is_saving());
+        assert_eq!(views(&app, "w7/a.md").len(), 2, "both tabs stay");
+        // The autosave timer is path-keyed too: the one (clean) document answers it.
+        let _ = app.update(Message::Source(SourceMsg::AutosaveDue {
+            path: "w7/a.md".into(),
+            seq,
+        }));
+        assert!(!app.doc("w7/a.md").expect("doc").is_saving(), "clean");
+    }
+
+    #[test]
+    fn closing_one_duplicate_keeps_the_others_document_and_reading_state() {
+        let (_tmp, _d, mut app, left, right) = duplicated();
+        assert!(app.reading.doc("w7/a.md").is_some(), "rendered");
+        let _ = app.update(Message::Tabs(TabsMsg::Close(right, 0)));
+        let v = views(&app, "w7/a.md");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].0, left);
+        assert!(app.doc("w7/a.md").is_some());
+        assert!(app.reading.doc("w7/a.md").is_some(), "reading state kept");
+        let _ = app.update(Message::Tabs(TabsMsg::Close(left, 0)));
+        assert!(app.doc("w7/a.md").is_none(), "dropped with the last tab");
+        assert!(app.reading.doc("w7/a.md").is_none());
+    }
+
+    #[test]
+    fn e1_closing_either_dirty_duplicate_closes_exactly_that_tab() {
+        for close_left in [true, false] {
+            // Different panes (the save-before-close runs inline).
+            let (_tmp, d, mut app, left, right) = duplicated();
+            type_x(&mut app);
+            let target = if close_left { left } else { right };
+            let all = views(&app, "w7/a.md");
+            let gone = all.iter().find(|v| v.0 == target).expect("view").1;
+            let _ = app.update(Message::Tabs(TabsMsg::Close(target, 0)));
+            let now = views(&app, "w7/a.md");
+            assert_eq!(now.len(), 1, "close_left={close_left}");
+            assert_ne!(now[0].1, gone, "close_left={close_left}");
+            assert_ne!(now[0].0, target);
+            assert!(app.doc("w7/a.md").is_some_and(|d| !d.is_dirty()), "saved");
+            assert!(d.read_file("w7/a.md").expect("file").0.starts_with(b"x"));
+
+            // Same pane, closed while a save is in flight (the close waits on it).
+            let (_tmp, _d, mut app) = setup(&["w7s/a.md"]);
+            let pane = app.focus;
+            let extra = Tab::new("w7s/a.md");
+            let extra_id = extra.id;
+            let first_id = app.active_note().expect("tab").id;
+            if let Some(ps) = app.panes.get_mut(pane) {
+                ps.tabs.push(extra);
+            }
+            type_x(&mut app);
+            let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
+            let seq = app.doc("w7s/a.md").expect("doc").edit_seq();
+            let i = usize::from(!close_left);
+            let _ = app.update(Message::Tabs(TabsMsg::Close(pane, i)));
+            assert_eq!(views(&app, "w7s/a.md").len(), 2, "waits on the save");
+            saved(&mut app, "w7s/a.md", seq);
+            let kept = if close_left { extra_id } else { first_id };
+            assert_eq!(
+                views(&app, "w7s/a.md"),
+                [(pane, kept)],
+                "close_left={close_left}"
+            );
+            assert!(app.doc("w7s/a.md").is_some(), "shared document intact");
+        }
+    }
+
+    #[test]
+    fn e2_shared_document_is_shaped_from_the_union_of_its_views() {
+        let (_tmp, d, mut app, left, right) = duplicated();
+        d.create_note("w7/b.md", "other").expect("create");
+        let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+            path: "w7/a.md".into(),
+            mode: ViewMode::Source,
+        }));
+        assert!(app.doc("w7/a.md").expect("doc").is_shaped());
+        // The right pane switches to another note: the left pane still shows a.md.
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("w7/b.md".into())));
+        assert_eq!(app.focus, right);
+        assert_eq!(tab_paths(&app, right), ["w7/a.md", "w7/b.md"]);
+        assert!(
+            app.doc("w7/a.md").expect("doc").is_shaped(),
+            "still visible in the left pane"
+        );
+        // Hidden in both panes → plain text.
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("w7/b.md".into())));
+        let _ = app.update(Message::Tabs(TabsMsg::Close(left, 0)));
+        assert!(app.doc("w7/a.md").is_some_and(|d| !d.is_shaped()));
+    }
+
+    #[test]
+    fn quit_with_duplicates_awaits_the_document_once() {
+        let (_tmp, _d, mut app, _left, _right) = duplicated();
+        type_x(&mut app);
+        let _ = app.update(Message::Tabs(TabsMsg::FlushAll));
+        let seq = app.doc("w7/a.md").expect("doc").edit_seq();
+        let _ = app.update(Message::Tabs(TabsMsg::Quit));
+        assert_eq!(app.quit_waits(), Some(1));
+        saved(&mut app, "w7/a.md", seq);
+        assert!(app.exiting);
+    }
+
+    #[test]
+    fn move_carries_unsaved_edits_and_undo() {
+        let (_tmp, _d, mut app) = setup(&["w7m/a.md"]);
+        let left = app.focus;
+        let id = app.active_note().expect("tab").id;
+        type_x(&mut app);
+        let right = split(&mut app);
+        quick(&mut app, QuickSwitchOpen::Move, "w7m/a.md");
+        assert!(tab_paths(&app, left).is_empty());
+        assert_eq!(views(&app, "w7m/a.md"), [(right, id)], "the same tab moved");
+        assert_eq!(app.focus, right);
+        let doc = app.active_doc().expect("doc");
+        assert!(doc.is_dirty() && doc.text().starts_with('x'));
+        let _ = app.update(Message::Source(SourceMsg::Undo));
+        assert_eq!(app.active_doc().expect("doc").text(), "body");
+    }
+
+    #[test]
+    fn quick_switch_modes_cover_other_pane_active_pane_and_nowhere() {
+        for mode in QuickSwitchOpen::ALL {
+            // Open in another pane.
+            let (_tmp, d, mut app) = setup(&["w7q/a.md"]);
+            d.create_note("w7q/n.md", "new").expect("create");
+            let left = app.focus;
+            let right = split(&mut app);
+            quick(&mut app, mode, "w7q/a.md");
+            let (want_left, want_right, focus): (&[&str], &[&str], Pane) = match mode {
+                QuickSwitchOpen::Switch => (&["w7q/a.md"], &[], left),
+                QuickSwitchOpen::Move => (&[], &["w7q/a.md"], right),
+                QuickSwitchOpen::Duplicate => (&["w7q/a.md"], &["w7q/a.md"], right),
+            };
+            assert_eq!(tab_paths(&app, left), want_left, "{mode:?}");
+            assert_eq!(tab_paths(&app, right), want_right, "{mode:?}");
+            assert_eq!(app.focus, focus, "{mode:?}");
+            assert_eq!(app.docs.len(), 1, "{mode:?}");
+
+            // Open nowhere: opens in the active pane.
+            quick(&mut app, mode, "w7q/n.md");
+            assert_eq!(
+                app.active_note().map(|t| t.path.as_str()),
+                Some("w7q/n.md"),
+                "{mode:?}"
+            );
+            assert_eq!(app.focus, focus, "{mode:?}");
+
+            // Already in the active pane: just focused.
+            let (_tmp2, _d2, mut app2) = setup(&["w7q/a.md", "w7q/b.md"]);
+            let pane = app2.focus;
+            quick(&mut app2, mode, "w7q/a.md");
+            assert_eq!(tab_paths(&app2, pane), ["w7q/a.md", "w7q/b.md"], "{mode:?}");
+            assert_eq!(
+                app2.active_note().map(|t| t.path.as_str()),
+                Some("w7q/a.md"),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_keeps_the_same_path_in_two_panes() {
+        let (tmp, d) = fake();
+        let d = Arc::new(d);
+        d.create_note("w7r/a.md", "body").expect("create");
+        let state = tmp.path().join("editor.json");
+        {
+            let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+            let mut app = App::new(Some(dc), Some(state.clone()));
+            app.rpc_inline = true;
+            let _ = app.update(Message::Explorer(ExplorerMsg::Open("w7r/a.md".into())));
+            split(&mut app);
+            quick(&mut app, QuickSwitchOpen::Duplicate, "w7r/a.md");
+            assert_eq!(views(&app, "w7r/a.md").len(), 2);
+        }
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let app = App::new(Some(dc), Some(state));
+        assert_eq!(views(&app, "w7r/a.md").len(), 2, "both tabs restore");
+        assert_eq!(app.docs.len(), 1, "one document");
+    }
+
+    #[test]
+    fn rename_retargets_every_tab_and_the_document_key() {
+        let (_tmp, d, mut app, _left, _right) = duplicated();
+        let ids: Vec<u64> = views(&app, "w7/a.md").iter().map(|v| v.1).collect();
+        d.rename("w7/a.md", "w7/z.md").expect("rename");
+        let _ = app.update(Message::Explorer(ExplorerMsg::Done(
+            crate::explorer::FileOpDone {
+                op: crate::explorer::FileOp::Rename {
+                    from: "w7/a.md".into(),
+                    to: "w7/z.md".into(),
+                },
+                result: Ok("w7/z.md".into()),
+            },
+        )));
+        assert!(views(&app, "w7/a.md").is_empty());
+        let now: Vec<u64> = views(&app, "w7/z.md").iter().map(|v| v.1).collect();
+        assert_eq!(now, ids, "every tab follows, ids kept");
+        assert!(app.doc("w7/a.md").is_none());
+        assert_eq!(app.doc("w7/z.md").map(|d| d.path()), Some("w7/z.md"));
+        assert_eq!(app.docs.len(), 1);
     }
 }

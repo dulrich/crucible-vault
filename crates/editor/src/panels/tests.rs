@@ -115,8 +115,8 @@ fn outline_links_and_props_from_the_buffer() {
     let _ = app.update(Message::Panels(PanelsMsg::Tick));
     assert_eq!(app.panels.outline[0].text, "New top");
     let _ = app.update(Message::Panels(PanelsMsg::OutlineJump(10)));
+    assert_eq!(app.active_doc().expect("doc").cursor().position.line, 10);
     let tab = app.active_tab().expect("tab");
-    assert_eq!(tab.source.cursor().position.line, 10);
     assert_eq!(tab.path, "a.md");
 }
 

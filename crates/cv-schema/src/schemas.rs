@@ -1488,6 +1488,13 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Str("title")),
         field(
+            "quick_switch_open",
+            "Quick Switch opens",
+            "Quick Switch on a note already open: switch to its tab, move the tab into the active pane, or duplicate it there",
+            Node::Enum(&["switch", "move", "duplicate"]),
+        )
+        .dflt(D::Str("move")),
+        field(
             "confirm_trash",
             "Confirm Trash",
             "Ask before moving to .trash/",

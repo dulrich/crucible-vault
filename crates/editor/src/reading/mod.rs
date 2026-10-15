@@ -1,7 +1,7 @@
 //! Reading pane and toggle/split (WP-3).
 //!
 //! Per-tab reading state lives in a [`ReadingStore`] keyed by vault path (mode, cached render
-//! model, resolved image keys); `Tab` itself is untouched. The render model
+//! model, resolved image keys), one entry per document (plan editor-feedback-round-2 WP-7). The render model
 //! (`editor_model::render`) is recomputed on a debounce tick only when the buffer's
 //! `edit_seq()` (or the index generation) moved, and cached between frames. Clicks resolve
 //! through a `cv_index::Resolver` built from the local index (rebuilt per index generation),
@@ -20,10 +20,10 @@ use cv_index::Resolver;
 use editor_model::render::{self, RenderModel};
 use iced::{Element, Subscription, Task};
 
-use crate::app::Tab;
 use crate::daemon::DaemonClient;
 use crate::image_cache::{self, ImageCache};
 use crate::message::{Message, ReadingMsg, TabsMsg};
+use crate::source::SourceBuffer;
 use crate::theme::Tokens;
 
 /// Recompute debounce: a change is rendered once `edit_seq` has been stable for one tick.
@@ -258,7 +258,7 @@ impl ReadingStore {
     /// "Rendering…" without a Ctrl+E.
     pub fn register(
         &mut self,
-        tab: &Tab,
+        tab: &SourceBuffer,
         mode: ViewMode,
         render_now: bool,
         daemon: Option<&Arc<dyn DaemonClient>>,
@@ -266,13 +266,18 @@ impl ReadingStore {
         if render_now {
             self.set_mode(tab, mode, daemon);
         } else {
-            let entry = self.tabs.entry(tab.path.clone()).or_default();
+            let entry = self.tabs.entry(tab.path().to_owned()).or_default();
             entry.mode = mode;
         }
     }
 
-    fn set_mode(&mut self, tab: &Tab, mode: ViewMode, daemon: Option<&Arc<dyn DaemonClient>>) {
-        let entry = self.tabs.entry(tab.path.clone()).or_default();
+    fn set_mode(
+        &mut self,
+        tab: &SourceBuffer,
+        mode: ViewMode,
+        daemon: Option<&Arc<dyn DaemonClient>>,
+    ) {
+        let entry = self.tabs.entry(tab.path().to_owned()).or_default();
         entry.mode = mode;
         if mode.shows_reading() {
             if entry.doc.is_none() {
@@ -282,23 +287,23 @@ impl ReadingStore {
             // Leaving reading/split: drop the model and its image pins (E2).
             entry.doc = None;
             entry.seen_seq = None;
-            self.images.release_owner(&tab.path);
+            self.images.release_owner(tab.path());
         }
     }
 
     /// Re-lowers `tab`'s buffer, fills transclusions (depth 1), resolves images, and releases
     /// image pins the new model no longer references (E2).
-    pub fn recompute(&mut self, tab: &Tab, daemon: Option<&Arc<dyn DaemonClient>>) {
+    pub fn recompute(&mut self, tab: &SourceBuffer, daemon: Option<&Arc<dyn DaemonClient>>) {
         self.recomputes += 1;
-        let seq = tab.source.edit_seq();
+        let seq = tab.edit_seq();
         if let Some(d) = daemon {
             self.refresh_resolver(d.as_ref());
         }
         let generation = daemon.and_then(|d| d.index().generation());
-        let mut model = render::lower(&tab.source.text());
+        let mut model = render::lower(&tab.text());
         let mut fetch = |target: &str| {
             let d = daemon?;
-            let path = self.resolve(&tab.path, target)?;
+            let path = self.resolve(tab.path(), target)?;
             let (bytes, _) = d.read_file(&path).ok()?;
             Some(String::from_utf8_lossy(&bytes).into_owned())
         };
@@ -308,13 +313,13 @@ impl ReadingStore {
             .filter(|(_, remote)| !remote)
             .map(|(src, _)| {
                 let target = src.replace("%20", " ");
-                let key = self.resolve(&tab.path, &target);
+                let key = self.resolve(tab.path(), &target);
                 (src, key)
             })
             .collect();
         let keep: HashSet<String> = images.values().flatten().cloned().collect();
-        self.images.retain_owner(&tab.path, &keep);
-        let entry = self.tabs.entry(tab.path.clone()).or_default();
+        self.images.retain_owner(tab.path(), &keep);
+        let entry = self.tabs.entry(tab.path().to_owned()).or_default();
         entry.seen_seq = Some(seq);
         entry.doc = Some(Doc {
             seq,
@@ -325,15 +330,15 @@ impl ReadingStore {
     }
 
     /// Debounce: re-render `tab` once its `edit_seq` held still for a tick (or the index moved).
-    fn tick(&mut self, tab: &Tab, daemon: Option<&Arc<dyn DaemonClient>>) {
+    fn tick(&mut self, tab: &SourceBuffer, daemon: Option<&Arc<dyn DaemonClient>>) {
         let generation = daemon.and_then(|d| d.index().generation());
-        let Some(entry) = self.tabs.get_mut(&tab.path) else {
+        let Some(entry) = self.tabs.get_mut(tab.path()) else {
             return;
         };
         if !entry.mode.shows_reading() {
             return;
         }
-        let seq = tab.source.edit_seq();
+        let seq = tab.edit_seq();
         let stale = match &entry.doc {
             None => true,
             Some(d) => d.seq != seq || d.generation != generation,
@@ -412,6 +417,7 @@ impl ReadingStore {
     fn image_shown(
         &mut self,
         tab: &str,
+        view: u64,
         key: &str,
         width: f32,
         daemon: Option<&Arc<dyn DaemonClient>>,
@@ -426,7 +432,7 @@ impl ReadingStore {
         let Some(d) = daemon else {
             return Task::none();
         };
-        if self.images.show(tab, key) {
+        if self.images.show(&image_cache::view_owner(tab, view), key) {
             image_cache::load_task(
                 Arc::clone(d),
                 key.to_owned(),
@@ -453,19 +459,19 @@ fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option
 pub fn update(
     store: &mut ReadingStore,
     msg: ReadingMsg,
-    tabs: &[&Tab],
-    active: Option<&Tab>,
+    tabs: &[&SourceBuffer],
+    active: Option<&SourceBuffer>,
     daemon: Option<&Arc<dyn DaemonClient>>,
 ) -> Task<Message> {
     match msg {
         ReadingMsg::CycleMode => {
             if let Some(tab) = active {
-                let next = store.mode(&tab.path).toggle();
+                let next = store.mode(tab.path()).toggle();
                 store.set_mode(tab, next, daemon);
             }
         }
         ReadingMsg::SetMode { path, mode } => {
-            if let Some(tab) = tabs.iter().find(|t| t.path == path) {
+            if let Some(tab) = tabs.iter().find(|t| t.path() == path) {
                 store.set_mode(tab, mode, daemon);
             }
         }
@@ -503,10 +509,19 @@ pub fn update(
                 return Task::done(m);
             }
         }
-        ReadingMsg::ImageShown { tab, key, width } => {
-            return store.image_shown(&tab, &key, width, daemon);
+        ReadingMsg::ImageShown {
+            tab,
+            view,
+            key,
+            width,
+        } => {
+            return store.image_shown(&tab, view, &key, width, daemon);
         }
-        ReadingMsg::ImageHidden { tab, key } => store.images.hide(&tab, &key),
+        ReadingMsg::ImageHidden { tab, view, key } => {
+            store
+                .images
+                .hide(&image_cache::view_owner(&tab, view), &key);
+        }
         ReadingMsg::ImageLoaded { key, result } => {
             if let Err(e) = &result {
                 tracing::debug!(error = %e, "image load failed");
@@ -517,11 +532,14 @@ pub fn update(
     Task::none()
 }
 
-/// The active tab's body: source, reading, or split (source left, reading right).
+/// The active tab's body: source, reading, or split (source left, reading right). `view` is
+/// the showing tab's id (per-view image pins, plan editor-feedback-round-2 WP-7).
+#[allow(clippy::too_many_arguments)] // one render site; a context struct would only rename these
 pub fn tab_body<'a>(
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
-    tab: &'a Tab,
+    tab: &'a SourceBuffer,
+    view: u64,
     t: Tokens,
     mode: cv_protocol::Mode,
     font_size: f32,
@@ -531,13 +549,13 @@ pub fn tab_body<'a>(
     use iced::widget::{container, row};
     // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
     let scale = font_size / crate::theme::BASE_TEXT_SIZE;
-    match store.mode(&tab.path) {
-        ViewMode::Source => crate::source::view(&tab.source, t, mode, font_size, keymap),
-        ViewMode::Reading => view::reading(store, views, &tab.path, t, scale),
+    match store.mode(tab.path()) {
+        ViewMode::Source => crate::source::view(tab, t, mode, font_size, keymap),
+        ViewMode::Reading => view::reading(store, views, tab.path(), view, t, scale),
         ViewMode::Split => row![
-            container(crate::source::view(&tab.source, t, mode, font_size, keymap))
+            container(crate::source::view(tab, t, mode, font_size, keymap))
                 .width(Length::FillPortion(1)),
-            container(view::reading(store, views, &tab.path, t, scale))
+            container(view::reading(store, views, tab.path(), view, t, scale))
                 .width(Length::FillPortion(1)),
         ]
         .spacing(12)

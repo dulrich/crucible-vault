@@ -308,7 +308,7 @@ fn type_z(app: &mut App) {
     let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
         Edit::Insert('Z'),
     ))));
-    assert!(app.active_tab().is_some_and(|t| t.source.is_dirty()));
+    assert!(app.active_doc().is_some_and(|t| t.is_dirty()));
 }
 
 fn entry_of(app: &App, id: &str) -> usize {
@@ -444,11 +444,7 @@ fn shadow_skips_save_first() {
         "context carries the base hash (still the on-disk one)"
     );
     assert!(
-        e.app
-            .panes
-            .iter()
-            .flat_map(|(_, ps)| ps.tabs.iter())
-            .any(|t| t.path == "a.md" && t.source.is_dirty()),
+        e.app.doc("a.md").is_some_and(|d| d.is_dirty()),
         "buffer left dirty"
     );
     let disk = std::fs::read_to_string(e.d.vault_root().join("a.md")).expect("read");
@@ -557,9 +553,9 @@ fn durable_file_as_kind_retargets_the_tab_on_terminal_status() {
         ["kinds/a.md"],
         "exactly one tab, at the new path"
     );
-    let tab = app.active_tab().expect("tab");
-    assert!(!tab.source.is_dirty() && tab.source.conflict().is_none());
-    assert_eq!(tab.source.path(), "kinds/a.md");
+    let tab = app.active_doc().expect("tab");
+    assert!(!tab.is_dirty() && tab.conflict().is_none());
+    assert_eq!(tab.path(), "kinds/a.md");
 }
 
 #[test]
@@ -567,17 +563,13 @@ fn durable_file_as_kind_keeps_edits_made_during_the_run_as_a_conflict() {
     let (_tmp, d, mut app) = durable_move_env();
     run_file_as_kind(&mut app);
     type_z(&mut app);
-    let text = app.active_tab().expect("tab").source.text();
+    let text = app.active_doc().expect("tab").text();
     deliver_terminal(&d, &mut app);
     assert_eq!(all_tabs(&app), ["kinds/a.md"]);
-    let tab = app.active_tab().expect("tab");
-    assert_eq!(tab.source.text(), text, "edits are not replaced");
-    assert!(tab.source.is_dirty() && tab.source.conflict().is_some());
-    assert_eq!(
-        tab.source.path(),
-        "kinds/a.md",
-        "Keep mine saves at the new path"
-    );
+    let tab = app.active_doc().expect("tab");
+    assert_eq!(tab.text(), text, "edits are not replaced");
+    assert!(tab.is_dirty() && tab.conflict().is_some());
+    assert_eq!(tab.path(), "kinds/a.md", "Keep mine saves at the new path");
     let disk = std::fs::read_to_string(d.vault_root().join("kinds/a.md")).expect("read");
     assert_eq!(disk, "# A\n\nfirst line\n", "nothing written yet");
 }

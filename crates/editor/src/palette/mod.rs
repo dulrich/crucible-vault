@@ -23,12 +23,12 @@ use iced::widget::{button, column, pick_list, row, text, text_editor, text_input
 use iced::{Element, Length, Subscription};
 use serde_json::{Map, Value};
 
-use crate::app::Tab;
 use crate::message::{
     FindMsg, Message, PaletteMsg, PanelsMsg, PanesMsg, ReadingMsg, SourceMsg, SwitcherMsg, TabsMsg,
     ThemeMsg,
 };
 use crate::panels::PanelKind;
+use crate::source::SourceBuffer;
 use crate::theme::{Surround, Tokens};
 use chord::Chord;
 use prompt::{ParamValue, Prompt};
@@ -784,17 +784,17 @@ pub fn apply_keys(entries: &mut [Entry], km: &Keymap) {
 
 /// The invocation context for the active tab: path, 1-based cursor line and buffer hash always;
 /// the selection when non-empty.
-pub fn context(tab: Option<&Tab>) -> ActionContext {
+pub fn context(tab: Option<&SourceBuffer>) -> ActionContext {
     let Some(tab) = tab else {
         return ActionContext::default();
     };
-    let line = u32::try_from(tab.source.cursor().position.line + 1).ok();
+    let line = u32::try_from(tab.cursor().position.line + 1).ok();
     ActionContext {
-        active_path: Some(tab.path.clone()),
-        selection: tab.source.selection().filter(|s| !s.is_empty()),
+        active_path: Some(tab.path().to_owned()),
+        selection: tab.selection().filter(|s| !s.is_empty()),
         value: None,
         line,
-        buffer_hash: Some(tab.source.base_hash().as_str().to_owned()),
+        buffer_hash: Some(tab.base_hash().as_str().to_owned()),
     }
 }
 

@@ -139,7 +139,7 @@ fn recompute_only_when_edit_seq_moves() {
     assert_eq!(app.reading.recomputes, 2);
     let _ = app.update(Message::Reading(ReadingMsg::Tick));
     assert_eq!(app.reading.recomputes, 2);
-    let seq = app.active_tab().expect("tab").source.edit_seq();
+    let seq = app.active_doc().expect("tab").edit_seq();
     assert_eq!(app.reading.doc("A.md").expect("doc").seq, seq);
 }
 
@@ -212,6 +212,7 @@ fn decode_downscales_to_display_width() {
 fn show_and_load(app: &mut App, d: &Arc<dyn DaemonClient>, path: &str, key: &str) {
     let _ = app.update(Message::Reading(ReadingMsg::ImageShown {
         tab: path.to_owned(),
+        view: 1,
         key: key.to_owned(),
         width: 300.0,
     }));
@@ -245,6 +246,7 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
     // Remote URLs never trigger a load.
     let _ = app.update(Message::Reading(ReadingMsg::ImageShown {
         tab: "A.md".into(),
+        view: 1,
         key: "https://host/r.png".into(),
         width: 100.0,
     }));
@@ -306,11 +308,8 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
         "open path renders at once"
     );
     let shaped = |app: &App, p: &str| {
-        app.panes
-            .iter()
-            .flat_map(|(_, ps)| ps.tabs.iter())
-            .find(|t| t.path == p)
-            .is_some_and(|t| t.source.is_shaped())
+        app.doc(p)
+            .is_some_and(crate::source::SourceBuffer::is_shaped)
     };
     assert!(
         !shaped(&app, "A.md") && !shaped(&app, "B.md"),

@@ -27,6 +27,23 @@ use iced::widget::image::Handle;
 
 use crate::daemon::DaemonClient;
 
+/// Separates a document path from its view id in a per-view owner (never in a vault path).
+const VIEW_SEP: char = '\u{1f}';
+
+/// The pin owner for view `view` (a tab id) of document `path` (plan editor-feedback-round-2
+/// WP-7): two tabs of one note pin an image independently, so one duplicate scrolling an image
+/// away does not release it while the other still shows it. [`ImageCache::release_owner`] /
+/// [`ImageCache::retain_owner`] on the bare `path` cover every view of it.
+pub fn view_owner(path: &str, view: u64) -> String {
+    format!("{path}{VIEW_SEP}{view}")
+}
+
+/// `o` is `owner` itself or one of its per-view owners.
+fn owned_by(o: &str, owner: &str) -> bool {
+    o.strip_prefix(owner)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(VIEW_SEP))
+}
+
 /// Default byte budget, in MiB.
 pub const DEFAULT_BUDGET_MB: usize = 64;
 /// Display widths are rounded up to this bucket, and capped at [`MAX_WIDTH`].
@@ -173,7 +190,8 @@ impl ImageCache {
         }
     }
 
-    /// Releases every pin `owner` holds (tab close, mode switch to source).
+    /// Releases every pin `owner` holds (tab close, mode switch to source), including every
+    /// per-view owner [`view_owner`]`(owner, _)` (plan editor-feedback-round-2 WP-7).
     pub fn release_owner(&mut self, owner: &str) {
         self.retain_owner(owner, &HashSet::new());
     }
@@ -182,7 +200,7 @@ impl ImageCache {
     pub fn retain_owner(&mut self, owner: &str, keep: &HashSet<String>) {
         for (k, w) in &mut self.pending {
             if !keep.contains(k) {
-                w.remove(owner);
+                w.retain(|o| !owned_by(o, owner));
             }
         }
         let drop: Vec<String> = self
@@ -190,7 +208,7 @@ impl ImageCache {
             .iter_mut()
             .filter(|(k, _)| !keep.contains(*k))
             .filter_map(|(k, e)| {
-                e.owners.remove(owner);
+                e.owners.retain(|o| !owned_by(o, owner));
                 e.owners.is_empty().then(|| k.clone())
             })
             .collect();

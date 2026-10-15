@@ -18,9 +18,9 @@ use editor_model::render::is_remote;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length};
 
-use crate::app::Tab;
 use crate::daemon::DaemonClient;
 use crate::message::{Message, PanelsMsg};
+use crate::source::SourceBuffer;
 use crate::theme::Tokens;
 use crate::widget::virtual_list::{ListWindow, VirtualList};
 
@@ -375,7 +375,7 @@ impl Panels {
     /// Recomputes outline, links and properties from `tab`'s live text when its key changed.
     pub fn sync_buffer(
         &mut self,
-        tab: Option<&Tab>,
+        tab: Option<&SourceBuffer>,
         d: Option<&dyn DaemonClient>,
         generation: u64,
     ) {
@@ -402,21 +402,21 @@ impl Panels {
             }
         }
         let key = (
-            tab.path.clone(),
-            tab.source.edit_seq(),
-            tab.source.base_hash().as_str().to_owned(),
+            tab.path().to_owned(),
+            tab.edit_seq(),
+            tab.base_hash().as_str().to_owned(),
         );
         if self.buffer_key.as_ref() == Some(&key) {
             return;
         }
-        let src = tab.source.text();
+        let src = tab.text();
         let note = ofm::parse(&src);
         self.outline = outline::from_note(&src, &note);
         self.props = props::from_note(&note);
         let mut links = Links::default();
         for w in &note.wikilinks {
             if !w.target.is_empty() {
-                self.classify(&tab.path, &w.target, &mut links);
+                self.classify(tab.path(), &w.target, &mut links);
             }
         }
         for m in &note.md_links {
@@ -426,19 +426,19 @@ impl Panels {
                     resolved: None,
                 }),
                 ofm::LinkDest::Local { path, .. } if !path.is_empty() => {
-                    self.classify(&tab.path, path, &mut links);
+                    self.classify(tab.path(), path, &mut links);
                 }
                 ofm::LinkDest::Local { .. } => {}
             }
         }
         for f in &note.fm_links {
             if !f.target.is_empty() {
-                self.classify(&tab.path, &f.target, &mut links);
+                self.classify(tab.path(), &f.target, &mut links);
             }
         }
         self.links = links;
-        if self.path.as_deref() != Some(tab.path.as_str()) {
-            self.path = Some(tab.path.clone());
+        if self.path.as_deref() != Some(tab.path()) {
+            self.path = Some(tab.path().to_owned());
         }
         self.buffer_key = Some(key);
         tracing::debug!(

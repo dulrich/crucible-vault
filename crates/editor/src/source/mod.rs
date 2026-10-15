@@ -24,7 +24,7 @@ use iced::widget::text_editor::{self, Action, Binding, Content, Edit, KeyPress, 
 use iced::widget::{Space, button, column, container, row, text};
 use iced::{Element, Length, Point, Task, clipboard};
 
-use crate::app::Tab;
+use crate::app::Docs;
 use crate::daemon::{ContentHash, DaemonClient, DaemonError};
 use crate::message::{Message, SourceKey, SourceMsg};
 use crate::theme::Tokens;
@@ -869,10 +869,8 @@ fn window(content: &Content, a: usize, b: usize) -> String {
     s
 }
 
-fn find<'a>(tabs: &'a mut [Tab], path: &str) -> Option<&'a mut SourceBuffer> {
-    tabs.iter_mut()
-        .find(|t| t.path == path)
-        .map(|t| &mut t.source)
+fn find<'a>(docs: &'a mut Docs, path: &str) -> Option<&'a mut SourceBuffer> {
+    docs.get_mut(path)
 }
 
 /// What `update` needs from the app.
@@ -925,15 +923,17 @@ pub(crate) fn autosave_timer(path: String, seq: u64) -> Task<Message> {
     )
 }
 
-/// Handles a [`SourceMsg`] (`Action`/`Undo`/`Redo`/`Save` target the active tab).
+/// Handles a [`SourceMsg`] (`Action`/`Undo`/`Redo`/`Save` target the `active` note's
+/// document; the rest are routed by path: one document per path, plan editor-feedback-round-2
+/// WP-7).
 pub fn update(
-    tabs: &mut [Tab],
-    active: Option<usize>,
+    tabs: &mut Docs,
+    active: Option<&str>,
     msg: SourceMsg,
     ctx: Ctx<'_>,
 ) -> Task<Message> {
     let read_only = ctx.mode == Mode::Shadow;
-    let active_buf = active.and_then(|i| tabs.get(i)).map(|t| t.path.clone());
+    let active_buf = active;
     let buf = match &msg {
         SourceMsg::AutosaveDue { path, .. }
         | SourceMsg::Saved { path, .. }
@@ -941,7 +941,7 @@ pub fn update(
         | SourceMsg::TakeTheirs(path)
         | SourceMsg::MiddleClick { path, .. }
         | SourceMsg::PastePrimary { path, .. } => find(tabs, path),
-        _ => active_buf.and_then(|p| find(tabs, &p)),
+        _ => active_buf.and_then(|p| find(tabs, p)),
     };
     let Some(buf) = buf else {
         return Task::none();
@@ -1041,7 +1041,7 @@ pub fn update(
 
 /// Handles `file_changed` for any open tab on `path`.
 pub fn file_changed(
-    tabs: &mut [Tab],
+    tabs: &mut Docs,
     path: &str,
     hash: Option<&str>,
     daemon: Option<&Arc<dyn DaemonClient>>,

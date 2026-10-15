@@ -179,3 +179,10 @@ pub fn find(state: &pane_grid::State<PaneState>, path: &str) -> Option<(Pane, us
         .iter()
         .find_map(|(p, s)| s.tabs.iter().position(|t| t.path == path).map(|i| (*p, i)))
 }
+
+/// The pane and index of the tab with id `id` (plan editor-feedback-round-2 WP-7).
+pub fn find_id(state: &pane_grid::State<PaneState>, id: u64) -> Option<(Pane, usize)> {
+    state
+        .iter()
+        .find_map(|(p, s)| s.tabs.iter().position(|t| t.id == id).map(|i| (*p, i)))
+}
