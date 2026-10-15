@@ -571,13 +571,16 @@ impl Preset {
     }
 }
 
-/// The effective keymap (plan `editor-settings-tab` WP-4 "Resolver precedence"):
-/// `editor.toml` `[keys]` override > editor default > config action `keys`. Every key handler
-/// (`App::on_chord`, the focused source editor's `key_binding`) decides from it.
+/// The effective keymap (plan `editor-feedback-round-2` WP-1 "Hotkey conflict policy", which
+/// replaced `editor-settings-tab`'s "override > editor default > config action keys"): every
+/// bindable claims its chords (an `editor.toml` `[keys]` override replaces the command's editor
+/// default; `[]` releases it), and a chord claimed by two or more distinct bindables is bound
+/// to none of them. Every key handler (`App::on_chord`, the focused source editor's
+/// `key_binding`) decides from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Keymap {
     map: HashMap<Chord, Bound>,
-    /// Every malformed / reserved / duplicate / displaced chord, as one line each.
+    /// Every malformed / reserved / conflicting chord, as one line each.
     pub notices: Vec<String>,
     /// id → the chords it effectively holds (canonical spelling), for display.
     pub chords: HashMap<String, Vec<String>>,
@@ -585,6 +588,10 @@ pub struct Keymap {
     pub row_notices: HashMap<String, Vec<String>>,
     /// The ids an override applies to.
     pub overridden: std::collections::BTreeSet<String>,
+    /// Chord → every bindable id claiming it (registered or conflicted), in claim order.
+    pub claims: HashMap<Chord, Vec<String>>,
+    /// The ids holding at least one conflicted (unregistered) chord.
+    pub conflicted: std::collections::BTreeSet<String>,
 }
 
 impl Default for Keymap {
@@ -626,29 +633,25 @@ impl Keymap {
         self.notices.push(n);
     }
 
-    fn holder(&self, c: &Chord) -> String {
-        match self.map.get(c) {
-            Some(Bound::Client(cmd)) => cmd.id(),
-            Some(Bound::Preset(p)) => p.id(),
-            Some(Bound::Action(a)) => a.clone(),
-            None => String::new(),
+    /// Records `id`'s claim on `c` (a chord listed twice by one bindable is collapsed).
+    fn claim(&mut self, claims: &mut Vec<(Chord, String, Bound)>, id: &str, c: Chord, b: Bound) {
+        if claims.iter().any(|(x, i, _)| *x == c && i == id) {
+            return;
         }
-    }
-
-    fn bind(&mut self, id: &str, c: Chord, b: Bound) {
-        self.chords
-            .entry(id.to_owned())
+        self.claims
+            .entry(c.clone())
             .or_default()
-            .push(c.to_string());
-        self.map.insert(c, b);
+            .push(id.to_owned());
+        claims.push((c, id.to_owned(), b));
     }
 }
 
 /// Resolves the effective keymap from `[keys]` `overrides` (id → chords; `[]` unbinds), the
-/// editor defaults and the config actions' `keys`. Malformed, reserved ([`chord::text_editing`])
-/// and duplicate chords become notices; an override takes a chord from an editor default (the
-/// default then no longer fires on it); config actions get only chords nothing editor-owned
-/// holds, the first registered winning between actions.
+/// editor defaults and the config actions' `keys`. Malformed and reserved
+/// ([`chord::text_editing`]) chords become notices; the same chord listed twice by one
+/// bindable is collapsed; a chord claimed by two or more distinct bindables is registered for
+/// none of them, every claimant is marked [`Keymap::conflicted`] and gets a notice naming the
+/// chord.
 pub fn resolve(
     overrides: &std::collections::BTreeMap<String, Vec<String>>,
     actions: &[ActionInfo],
@@ -659,6 +662,8 @@ pub fn resolve(
         chords: HashMap::new(),
         row_notices: HashMap::new(),
         overridden: std::collections::BTreeSet::new(),
+        claims: HashMap::new(),
+        conflicted: std::collections::BTreeSet::new(),
     };
     let rows = bindables();
     for id in overrides.keys() {
@@ -666,46 +671,37 @@ pub fn resolve(
             km.note(id, format!("{id}: unknown command id (override ignored)"));
         }
     }
-    // Pass 1: overrides.
+    let mut claims: Vec<(Chord, String, Bound)> = Vec::new();
+    // Editor commands and presets: an override replaces the default.
     for r in &rows {
-        let Some(list) = overrides.get(&r.id) else {
-            continue;
-        };
-        if r.fixed {
+        km.chords.entry(r.id.clone()).or_default();
+        let over = overrides.get(&r.id);
+        if over.is_some() && r.fixed {
             km.note(
                 &r.id,
                 format!("{}: a text-editing command (override ignored)", r.id),
             );
-            continue;
         }
-        km.overridden.insert(r.id.clone());
-        km.chords.entry(r.id.clone()).or_default();
-        for k in list {
-            let Some(c) = chord::parse(k) else {
-                km.note(&r.id, format!("{}: unreadable key \"{k}\"", r.id));
-                continue;
-            };
-            if chord::text_editing(&c) {
-                km.note(&r.id, format!("{}: {c} is reserved (not bound)", r.id));
-            } else if !c.command && !c.alt {
-                km.note(
-                    &r.id,
-                    format!("{}: {c} needs Ctrl or Alt (not bound)", r.id),
-                );
-            } else if km.map.contains_key(&c) {
-                let other = km.holder(&c);
-                km.note(&r.id, format!("{}: {c} already bound to {other}", r.id));
-            } else {
-                km.bind(&r.id, c, r.run.clone());
+        if let Some(list) = over.filter(|_| !r.fixed) {
+            km.overridden.insert(r.id.clone());
+            for k in list {
+                let Some(c) = chord::parse(k) else {
+                    km.note(&r.id, format!("{}: unreadable key \"{k}\"", r.id));
+                    continue;
+                };
+                if chord::text_editing(&c) {
+                    km.note(&r.id, format!("{}: {c} is reserved (not bound)", r.id));
+                } else if !c.command && !c.alt {
+                    km.note(
+                        &r.id,
+                        format!("{}: {c} needs Ctrl or Alt (not bound)", r.id),
+                    );
+                } else {
+                    km.claim(&mut claims, &r.id, c, r.run.clone());
+                }
             }
-        }
-    }
-    // Pass 2: editor defaults of the commands without an override.
-    for r in &rows {
-        if km.overridden.contains(&r.id) {
             continue;
         }
-        km.chords.entry(r.id.clone()).or_default();
         for k in &r.defaults {
             let Some(c) = chord::parse(k) else { continue };
             if r.fixed {
@@ -714,18 +710,12 @@ pub fn resolve(
                     .entry(r.id.clone())
                     .or_default()
                     .push(c.to_string());
-            } else if km.map.contains_key(&c) {
-                let other = km.holder(&c);
-                km.note(
-                    &r.id,
-                    format!("{}: default {c} taken by the {other} override", r.id),
-                );
             } else {
-                km.bind(&r.id, c, r.run.clone());
+                km.claim(&mut claims, &r.id, c, r.run.clone());
             }
         }
     }
-    // Pass 3: config actions.
+    // Config actions.
     for a in actions {
         km.chords.entry(a.id.clone()).or_default();
         for k in &a.keys {
@@ -733,32 +723,37 @@ pub fn resolve(
                 km.note(&a.id, format!("{}: unreadable key \"{k}\"", a.id));
                 continue;
             };
-            match km.map.get(&c) {
-                _ if chord::text_editing(&c) => {
-                    km.note(
-                        &a.id,
-                        format!("{}: {c} is an editor default (not bound)", a.id),
-                    );
-                }
-                Some(Bound::Action(other)) => {
-                    let other = other.clone();
-                    km.note(&a.id, format!("{}: {c} already bound to {other}", a.id));
-                }
-                Some(_) => {
-                    km.note(
-                        &a.id,
-                        format!("{}: {c} is an editor default (not bound)", a.id),
-                    );
-                }
-                None => km.bind(&a.id, c, Bound::Action(a.id.clone())),
+            if chord::text_editing(&c) {
+                km.note(&a.id, format!("{}: {c} is reserved (not bound)", a.id));
+            } else {
+                km.claim(&mut claims, &a.id, c, Bound::Action(a.id.clone()));
             }
+        }
+    }
+    // Register the uncontested chords; a contested chord is registered for nobody.
+    for (c, id, b) in claims {
+        let others: Vec<String> = km
+            .claims
+            .get(&c)
+            .into_iter()
+            .flatten()
+            .filter(|o| **o != id)
+            .cloned()
+            .collect();
+        if others.is_empty() {
+            km.chords.entry(id).or_default().push(c.to_string());
+            km.map.insert(c, b);
+        } else {
+            km.conflicted.insert(id.clone());
+            let n = format!("{id}: {c} conflicts with {} (not bound)", others.join(", "));
+            km.note(&id, n);
         }
     }
     km
 }
 
 /// Chord → action id for every parseable, non-conflicting `ActionInfo.keys`, plus a notice per
-/// conflict (editor defaults win; between actions the first registered wins) — [`resolve`]
+/// conflict (a chord claimed by several bindables is bound to none) — [`resolve`]
 /// with no overrides.
 pub fn bindings(actions: &[ActionInfo]) -> (HashMap<Chord, String>, Vec<String>) {
     let km = resolve(&std::collections::BTreeMap::new(), actions);

@@ -2154,7 +2154,12 @@ impl App {
                     Notification::ConfigReloaded { errors } => {
                         self.palette.invalidate();
                         self.settings.route_reload_errors(&errors);
-                        return self.refresh_status_if_open();
+                        // WP-1: refetch now (the daemon has reloaded actions.toml) so the
+                        // keymap and the Hotkeys rows follow the new action keys; a fetch
+                        // in flight from before the reload is superseded.
+                        self.palette.loading = false;
+                        let fetch = self.fetch_actions();
+                        return Task::batch([fetch, self.refresh_status_if_open()]);
                     }
                     Notification::ShadowWrite { .. } => {}
                 }
@@ -2211,7 +2216,12 @@ impl App {
         if !std::sync::Arc::ptr_eq(&h.keymap, &self.palette.keymap) {
             h.keymap = self.palette.keymap.clone();
         }
-        let actions = self.palette.actions.as_deref().unwrap_or_default();
+        // Plan editor-feedback-round-2 WP-1: an invalidated (refetching) action cache is not
+        // an empty action list — keep the last snapshot until the refetch lands, else every
+        // action row vanishes from the page.
+        let Some(actions) = self.palette.actions.as_deref() else {
+            return;
+        };
         if h.actions != actions {
             h.actions = actions.to_vec();
         }
@@ -2220,6 +2230,7 @@ impl App {
     /// A chord captured while the Hotkeys page records: becomes the row's chord (in the doc;
     /// written by Save), or a note when it cannot be bound.
     fn capture_chord(&mut self, c: &crate::palette::chord::Chord) {
+        use crate::palette::chord;
         use crate::settings::pages::hotkeys::{self, ACTIONS_PATH};
         let Some(target) = self.settings.hotkeys.recording.take() else {
             return;
@@ -2228,6 +2239,13 @@ impl App {
             .settings
             .file(ACTIONS_PATH)
             .and_then(|f| f.doc.as_ref());
+        if !chord::text_editing(c)
+            && let Some(other) = hotkeys::owner(&self.settings.hotkeys, actions_doc, &target, c)
+        {
+            // Plan editor-feedback-round-2 WP-1: the existing binding wins; nothing is edited.
+            self.settings.hotkeys.note = Some(format!("{c} is already assigned to {other}"));
+            return;
+        }
         match hotkeys::record_edit(&target, c, actions_doc) {
             Ok((file, edit)) => self.hotkey_edit(&file, &edit),
             Err(n) => self.settings.hotkeys.note = Some(n),

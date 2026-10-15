@@ -196,26 +196,55 @@ fn override_moves_a_chord_and_empty_unbinds() {
 }
 
 #[test]
-fn precedence_override_then_default_then_config_action() {
+fn conflicting_claims_register_none_and_mark_every_claimant() {
+    // Plan editor-feedback-round-2 WP-1: quit's override, close_tab's default and action b
+    // all claim Ctrl+W → nobody gets it; the override still releases quit's Ctrl+Q default,
+    // which action a then holds alone.
     let acts = [info("a", &["Ctrl+Q"]), info("b", &["Ctrl+W"])];
     let km = resolve(&ov(&[("quit", &["Ctrl+W"])]), &acts);
-    // Override > default: Ctrl+W is Quit; Close tab lost its default.
-    assert_eq!(km.get(&c("Ctrl+W")), Some(&Bound::Client(ClientCmd::Quit)));
-    assert!(
-        km.row_notices["close_tab"]
-            .iter()
-            .any(|n| n.contains("taken by the quit override"))
-    );
-    // Default > action: b's Ctrl+W refused; the freed Ctrl+Q goes to action a.
+    assert_eq!(km.get(&c("Ctrl+W")), None);
+    for id in ["quit", "close_tab", "b"] {
+        assert!(km.conflicted.contains(id), "{id} marked");
+        assert!(
+            km.row_notices[id]
+                .iter()
+                .any(|n| n.contains("Ctrl+W conflicts with")),
+            "{id}: {:?}",
+            km.row_notices.get(id)
+        );
+        assert_eq!(km.chords[id], Vec::<String>::new(), "{id} holds nothing");
+    }
     assert_eq!(km.get(&c("Ctrl+Q")), Some(&Bound::Action("a".into())));
-    assert_eq!(
-        km.row_notices["b"],
-        ["b: Ctrl+W is an editor default (not bound)"]
-    );
+    assert!(!km.conflicted.contains("a"));
     assert!(
         !km.routed(&c("Ctrl+Q")),
         "actions are not routed out of the editor"
     );
+}
+
+#[test]
+fn same_chord_twice_in_one_action_is_collapsed() {
+    let km = resolve(
+        &BTreeMap::new(),
+        &[info("a", &["Ctrl+Shift+K", "ctrl+shift+k"])],
+    );
+    assert_eq!(km.get(&c("Ctrl+Shift+K")), Some(&Bound::Action("a".into())));
+    assert_eq!(km.chords["a"], ["Ctrl+Shift+K"]);
+    assert!(
+        km.conflicted.is_empty() && km.notices.is_empty(),
+        "{:?}",
+        km.notices
+    );
+}
+
+#[test]
+fn empty_unbind_of_a_default_releases_its_chord() {
+    // Without the unbind, action a's Ctrl+W collides with close_tab's default.
+    let acts = [info("a", &["Ctrl+W"])];
+    assert_eq!(resolve(&BTreeMap::new(), &acts).get(&c("Ctrl+W")), None);
+    let km = resolve(&ov(&[("close_tab", &[])]), &acts);
+    assert_eq!(km.get(&c("Ctrl+W")), Some(&Bound::Action("a".into())));
+    assert!(km.conflicted.is_empty(), "{:?}", km.notices);
 }
 
 #[test]
@@ -233,12 +262,16 @@ fn bad_override_chords_become_notices() {
     assert!(has("quit: Ctrl+S is reserved"), "{:?}", km.notices);
     assert!(has("quit: unreadable key \"Nope+Q\""));
     assert!(has("quit: K needs Ctrl or Alt"));
-    assert!(has("already bound to"));
+    assert!(has("quit: Ctrl+K conflicts with close_tab"));
+    assert!(has("close_tab: Ctrl+K conflicts with quit"));
     assert!(has("save: a text-editing command"));
     assert!(has("no_such: unknown command id"));
     assert!(km.get(&c("Ctrl+J")).is_none());
     assert!(km.get(&c("Ctrl+S")).is_none());
-    assert!(km.get(&c("Ctrl+K")).is_some());
+    assert!(
+        km.get(&c("Ctrl+K")).is_none(),
+        "contested: bound to neither"
+    );
 }
 
 #[test]
@@ -396,9 +429,9 @@ fn record_captures_the_next_chord_into_editor_toml_without_writing() {
     let (_tmp, d) = fake();
     let mut app = hotkeys_app(&d);
     hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
-    key(&mut app, "Ctrl+W");
+    key(&mut app, "Alt+K");
     assert!(!app.exiting);
-    assert_eq!(keys_of(&app, "quit"), Some(vec!["Ctrl+W".into()]));
+    assert_eq!(keys_of(&app, "quit"), Some(vec!["Alt+K".into()]));
     assert!(app.settings.hotkeys.recording.is_none());
     assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
     assert!(
@@ -407,7 +440,7 @@ fn record_captures_the_next_chord_into_editor_toml_without_writing() {
     );
     // Live: the keymap and the page snapshot already use it.
     assert_eq!(
-        app.palette.keymap.get(&c("Ctrl+W")),
+        app.palette.keymap.get(&c("Alt+K")),
         Some(&Bound::Client(ClientCmd::Quit))
     );
     let rows = hotkeys::rows(&app.settings.hotkeys, None);
@@ -417,17 +450,96 @@ fn record_captures_the_next_chord_into_editor_toml_without_writing() {
         .expect("row");
     assert_eq!(
         (q.chords.clone(), q.source),
-        (vec!["Ctrl+W".into()], KeySource::EditorToml)
+        (vec!["Alt+K".into()], KeySource::EditorToml)
     );
-    let ct = rows
-        .iter()
-        .find(|r| r.target == Target::Command("close_tab".into()))
-        .expect("row");
-    assert!(!ct.notices.is_empty(), "conflict shown inline");
     // Save writes it through the exact-name path.
     let _ = app.update(Message::Settings(SettingsMsg::Save(EDITOR_PATH.into())));
     let body = std::fs::read_to_string(d.vault_root().join(EDITOR_PATH)).expect("saved");
-    assert!(body.contains("quit = [\"Ctrl+W\"]"), "{body}");
+    assert!(body.contains("quit = [\"Alt+K\"]"), "{body}");
+}
+
+const ACTION_STEP: &str =
+    "\n[[action.steps]]\ntype = \"move\"\npath = \"{file}\"\nto = \"archive\"\n";
+
+#[test]
+fn assigning_a_chord_held_elsewhere_is_refused() {
+    let (_tmp, d) = fake();
+    put(
+        &d,
+        ACTIONS_PATH,
+        &format!("[[action]]\nid = \"a\"\nkeys = [\"Ctrl+Shift+K\"]\n{ACTION_STEP}"),
+    );
+    register(&d, "a", &["Ctrl+Shift+K"]);
+    let mut app = hotkeys_app(&d);
+    // An editor default (Close tab's Ctrl+W).
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    key(&mut app, "Ctrl+W");
+    assert_eq!(keys_of(&app, "quit"), None, "nothing edited");
+    assert!(!app.exiting);
+    let note = app.settings.hotkeys.note.clone().unwrap_or_default();
+    assert!(note.contains("Ctrl+W is already assigned to"), "{note}");
+    // A config action's key.
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    key(&mut app, "Ctrl+Shift+K");
+    assert_eq!(keys_of(&app, "quit"), None);
+    let note = app.settings.hotkeys.note.clone().unwrap_or_default();
+    assert!(note.contains("already assigned to a"), "{note}");
+    // An action taking an editor default.
+    hk(&mut app, HotkeyMsg::Record(Target::Action("a".into())));
+    key(&mut app, "Ctrl+Q");
+    let keys = Path::root().key("action").index(0).key("keys");
+    let doc = app
+        .settings
+        .file(ACTIONS_PATH)
+        .and_then(|f| f.doc.as_ref())
+        .and_then(|d| d.get_str_list(&keys));
+    assert_eq!(doc, Some(vec!["Ctrl+Shift+K".into()]), "unchanged");
+    assert!(!app.settings.file(ACTIONS_PATH).is_some_and(|f| f.dirty));
+    // Re-recording its own chord is not a conflict.
+    hk(&mut app, HotkeyMsg::Record(Target::Action("a".into())));
+    key(&mut app, "Ctrl+Shift+K");
+    let note = app.settings.hotkeys.note.clone().unwrap_or_default();
+    assert!(!note.contains("Ctrl+Shift+K is already"), "{note}");
+}
+
+#[test]
+fn binding_an_action_key_keeps_every_action_row() {
+    // The "actions vanish after binding" repro: bind + Save → the daemon reloads actions.toml
+    // (ConfigReloaded / FileChanged invalidate the palette's action cache) → the next Hotkeys
+    // edit used to sync an EMPTY action list onto the page.
+    let (_tmp, d) = fake();
+    put(
+        &d,
+        ACTIONS_PATH,
+        &format!("[[action]]\nid = \"a\"\n{ACTION_STEP}\n[[action]]\nid = \"b\"\n{ACTION_STEP}"),
+    );
+    register(&d, "a", &[]);
+    register(&d, "b", &[]);
+    let mut app = hotkeys_app(&d);
+    let action_rows = |app: &App| {
+        hotkeys::rows(
+            &app.settings.hotkeys,
+            app.settings.file(ACTIONS_PATH).and_then(|f| f.doc.as_ref()),
+        )
+        .into_iter()
+        .filter(|r| matches!(r.target, Target::Action(_)))
+        .count()
+    };
+    assert_eq!(action_rows(&app), 2);
+    hk(&mut app, HotkeyMsg::Record(Target::Action("a".into())));
+    key(&mut app, "Alt+J");
+    let _ = app.update(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
+    let _ = app.update(Message::Status(crate::message::StatusMsg::Notification(
+        cv_protocol::Notification::ConfigReloaded { errors: vec![] },
+    )));
+    assert_eq!(action_rows(&app), 2, "after the reload");
+    hk(&mut app, HotkeyMsg::Record(Target::Action("b".into())));
+    key(&mut app, "Alt+M");
+    assert_eq!(action_rows(&app), 2, "after the next binding");
+    // A bare invalidation (FileChanged on a config path) keeps the snapshot too.
+    app.palette.invalidate();
+    hk(&mut app, HotkeyMsg::Clear(Target::Command("quit".into())));
+    assert_eq!(action_rows(&app), 2, "after an invalidation");
 }
 
 #[test]

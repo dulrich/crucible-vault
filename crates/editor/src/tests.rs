@@ -1345,7 +1345,14 @@ mod usability_wp4 {
             crate::palette::bindings(&[info("a", &["ctrl+w"]), info("b", &["ctrl+alt+l"])]);
         assert!(!map.contains_key(&c("Ctrl+W")));
         assert_eq!(map.get(&c("Ctrl+Alt+L")).map(String::as_str), Some("b"));
-        assert_eq!(notes, ["a: Ctrl+W is an editor default (not bound)"]);
+        // Plan editor-feedback-round-2 WP-1: the collision binds neither claimant.
+        assert_eq!(
+            notes,
+            [
+                "close_tab: Ctrl+W conflicts with a (not bound)",
+                "a: Ctrl+W conflicts with close_tab (not bound)"
+            ]
+        );
     }
 
     #[test]

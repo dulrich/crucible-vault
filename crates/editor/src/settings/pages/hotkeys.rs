@@ -90,6 +90,9 @@ pub struct HotkeyRow {
     /// Text-editing commands (Save / Undo / Redo): shown, not editable.
     pub fixed: bool,
     pub notices: Vec<String>,
+    /// One of its chords is claimed by another bindable too, so it is registered for none
+    /// (plan `editor-feedback-round-2` WP-1 conflict policy).
+    pub conflicted: bool,
 }
 
 fn keys_path(id: &str) -> Path {
@@ -117,6 +120,7 @@ pub fn rows(st: &HotkeyState, actions_doc: Option<&ConfigDoc>) -> Vec<HotkeyRow>
                 KeySource::Default
             },
             notices: notices(&b.id),
+            conflicted: km.conflicted.contains(&b.id),
             fixed: b.fixed,
             title: b.title,
             target: Target::Command(b.id),
@@ -141,9 +145,34 @@ pub fn rows(st: &HotkeyState, actions_doc: Option<&ConfigDoc>) -> Vec<HotkeyRow>
             source: KeySource::ActionsToml,
             fixed: false,
             notices: notices(&a.id),
+            conflicted: km.conflicted.contains(&a.id),
         }
     }));
     v
+}
+
+/// The bindable other than `t` that already claims `c` — its row title — counting the
+/// effective keymap's claims (bound or conflicted) and the unsaved chord edits `rows` shows.
+/// Interactive assignment of such a chord is refused (plan `editor-feedback-round-2` WP-1).
+pub fn owner(
+    st: &HotkeyState,
+    actions_doc: Option<&ConfigDoc>,
+    t: &Target,
+    c: &Chord,
+) -> Option<String> {
+    let id_of = |t: &Target| match t {
+        Target::Command(i) | Target::Action(i) => i.clone(),
+    };
+    let me = id_of(t);
+    let rows = rows(st, actions_doc);
+    let claimed = st.keymap.claims.get(c);
+    rows.into_iter()
+        .filter(|r| r.target != *t && id_of(&r.target) != me)
+        .find(|r| {
+            claimed.is_some_and(|ids| ids.contains(&id_of(&r.target)))
+                || r.chords.iter().any(|k| chord::parse(k).as_ref() == Some(c))
+        })
+        .map(|r| r.title)
 }
 
 /// The document edit a capture of `c` for `t` makes: `(file, edit)`. `Err` = a note to show
@@ -220,6 +249,17 @@ fn row_view<'a>(r: HotkeyRow, recording: bool, editable: bool, t: Tokens) -> Ele
     } else {
         text(r.chords.join("  ")).size(14)
     };
+    let title: Element<'a, Message> = if r.conflicted {
+        row![
+            text(r.title).size(14),
+            text("conflict").size(12).color(t.warn_text.to_color()),
+        ]
+        .spacing(6)
+        .width(Length::Fixed(280.0))
+        .into()
+    } else {
+        text(r.title).size(14).width(Length::Fixed(280.0)).into()
+    };
     let controls: Element<'a, Message> = if r.fixed {
         small("text-editing (fixed)", t)
     } else {
@@ -249,7 +289,7 @@ fn row_view<'a>(r: HotkeyRow, recording: bool, editable: bool, t: Tokens) -> Ele
     };
     let mut col = column![
         row![
-            text(r.title).size(14).width(Length::Fixed(280.0)),
+            title,
             container(chords).width(Length::Fixed(220.0)),
             container(small(r.source.label(), t)).width(Length::Fixed(100.0)),
             controls,

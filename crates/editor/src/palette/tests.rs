@@ -184,18 +184,25 @@ fn bindings_report_conflicts() {
         action("two", vec![], &["ctrl+shift+k", "Alt+J"]),
     ];
     let (map, notes) = bindings(&acts);
-    assert_eq!(
-        map.get(&chord::parse("Ctrl+Shift+K").expect("p")),
-        Some(&"one".to_owned())
-    );
+    // Plan editor-feedback-round-2 WP-1: a chord claimed by two actions is bound to neither.
+    assert_eq!(map.get(&chord::parse("Ctrl+Shift+K").expect("p")), None);
     assert_eq!(
         map.get(&chord::parse("Alt+J").expect("p")),
         Some(&"two".to_owned())
     );
-    assert_eq!(map.len(), 2);
-    assert_eq!(notes.len(), 3, "{notes:?}");
-    assert!(notes.iter().any(|n| n.contains("editor default")));
-    assert!(notes.iter().any(|n| n.contains("already bound to one")));
+    assert_eq!(map.len(), 1);
+    assert_eq!(notes.len(), 4, "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("Ctrl+S is reserved")));
+    assert!(
+        notes
+            .iter()
+            .any(|n| n == "one: Ctrl+Shift+K conflicts with two (not bound)")
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|n| n == "two: Ctrl+Shift+K conflicts with one (not bound)")
+    );
 }
 
 // ---- pure: ranking / merge ----
