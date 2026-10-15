@@ -754,3 +754,185 @@ fn settings_save_of_a_daemon_file_round_trips_comments() {
     );
     assert!(text.contains("folder = \"library\""), "{text}");
 }
+
+// ---- plan editor-feedback-round-2 WP-2: auto-save ----
+
+fn seq(app: &App, path: &str) -> u64 {
+    app.settings.file(path).map_or(0, |f| f.edit_seq)
+}
+
+fn due(app: &mut App, path: &str) {
+    let n = seq(app, path);
+    let _ = app.update(s(SettingsMsg::AutoSaveDue(path.into(), n)));
+}
+
+fn disk(d: &FakeDaemon, path: &str) -> Option<String> {
+    d.read_file(path)
+        .ok()
+        .map(|(b, _)| String::from_utf8(b).expect("utf8"))
+}
+
+#[test]
+fn autosave_valid_edit_writes_once_after_the_debounce() {
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d, None);
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let f = app.settings.file(EDITOR_PATH).expect("f");
+    assert_eq!(f.scheduled_seq, f.edit_seq, "a debounce timer was armed");
+    assert!(disk(&d, EDITOR_PATH).is_none(), "nothing before the timer");
+    due(&mut app, EDITOR_PATH);
+    let (_, h) = d.read_file(EDITOR_PATH).expect("written");
+    assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 30")));
+    let f = app.settings.file(EDITOR_PATH).expect("f");
+    assert!(!f.dirty && f.base.as_ref() == Some(&h));
+    assert_eq!(f.save_status().map(|s| s.0).as_deref(), Some("saved"));
+    // The same timer again writes nothing more.
+    due(&mut app, EDITOR_PATH);
+    assert_eq!(d.read_file(EDITOR_PATH).expect("r").1, h);
+}
+
+#[test]
+fn autosave_rapid_edits_coalesce_into_one_write() {
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d, None);
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(20.0))));
+    let first = seq(&app, EDITOR_PATH);
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(22.0))));
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(24.0))));
+    // The superseded timers fire: no write.
+    let _ = app.update(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first)));
+    let _ = app.update(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first + 1)));
+    assert!(disk(&d, EDITOR_PATH).is_none(), "stale timers never write");
+    due(&mut app, EDITOR_PATH);
+    let text = disk(&d, EDITOR_PATH).expect("written");
+    assert!(text.contains("font_size = 24"), "{text}");
+}
+
+#[test]
+fn autosave_invalid_edit_never_writes() {
+    let (_tmp, d) = fake();
+    let kinds = "_custom/crucible-vault/kinds.toml";
+    let seed = "[kinds.book]\nfolder = \"books\"\n";
+    d.write_note(kinds, seed, &ContentHash::from_hex(""))
+        .expect("seed");
+    let mut app = app_over(&d, None);
+    let _ = app.update(s(SettingsMsg::Open));
+    let _ = app.update(s(SettingsMsg::Edit(
+        kinds.into(),
+        DocEdit::Set(
+            Path::parse("kinds.book.folder").expect("p"),
+            ScalarValue::Int(1),
+        ),
+    )));
+    let f = app.settings.file(kinds).expect("f");
+    assert!(f.dirty && !f.errors.is_empty(), "{:?}", f.errors);
+    assert_ne!(f.scheduled_seq, f.edit_seq, "no timer for an invalid state");
+    assert!(
+        f.save_status()
+            .is_some_and(|(l, warn)| warn && l.starts_with("not saved: ")),
+        "{:?}",
+        f.save_status()
+    );
+    due(&mut app, kinds);
+    let _ = app.update(s(SettingsMsg::Save(kinds.into())));
+    let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+    assert_eq!(
+        disk(&d, kinds).as_deref(),
+        Some(seed),
+        "last valid content kept"
+    );
+}
+
+#[test]
+fn autosave_edit_during_an_inflight_write_requeues() {
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d, None);
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    // The first write is in flight (not run inline).
+    app.rpc_inline = false;
+    due(&mut app, EDITOR_PATH);
+    let f = app.settings.file(EDITOR_PATH).expect("f");
+    assert!(f.saving);
+    let first = f.doc.as_ref().expect("doc").to_string();
+    let base = f.base.clone();
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(32.0))));
+    due(&mut app, EDITOR_PATH);
+    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.queued));
+    // The first write lands; the queued one runs right after.
+    app.rpc_inline = true;
+    let r = write_config(d.as_ref(), EDITOR_PATH, &first, base.as_ref());
+    let _ = app.update(s(SettingsMsg::Saved(EDITOR_PATH.into(), r)));
+    let text = disk(&d, EDITOR_PATH).expect("written");
+    assert!(text.contains("font_size = 32"), "{text}");
+    let f = app.settings.file(EDITOR_PATH).expect("f");
+    assert!(!f.dirty && !f.saving && !f.queued);
+}
+
+#[test]
+fn autosave_cas_conflict_reloads_without_overwrite() {
+    let (_tmp, d) = fake();
+    let h0 = d
+        .write_note(EDITOR_PATH, "font_size = 20\n", &ContentHash::from_hex(""))
+        .expect("seed");
+    let mut app = app_over(&d, None);
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
+        .expect("external");
+    due(&mut app, EDITOR_PATH);
+    assert_eq!(disk(&d, EDITOR_PATH).as_deref(), Some("font_size = 26\n"));
+    let f = app.settings.file(EDITOR_PATH).expect("f");
+    assert_eq!(f.notice.as_deref(), Some(CHANGED_ON_DISK));
+    assert!(!f.dirty);
+    assert!((app.prefs.font_size - 26.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn autosave_views_parse_error_blocks_compile_warning_does_not() {
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d, None);
+    let path = app.settings.new_view_file("mine").expect("new");
+    let _ = app.update(s(SettingsMsg::Edit(
+        path.clone(),
+        DocEdit::Set(Path::root().key("invented"), ScalarValue::Int(1)),
+    )));
+    assert!(
+        app.settings
+            .file(&path)
+            .is_some_and(|f| !f.errors.is_empty())
+    );
+    due(&mut app, &path);
+    assert!(disk(&d, &path).is_none(), "a parse error blocks the write");
+    let bad = "[[views]]\ntype = \"table\"\nname = \"T\"\nfilters = \"((\"\n";
+    if let Some(f) = app.settings.file_mut(&path) {
+        f.doc = Some(ConfigDoc::parse(bad).expect("doc"));
+    }
+    let _ = app.update(s(SettingsMsg::Edit(
+        path.clone(),
+        DocEdit::Set(
+            Path::parse("views[0].name").expect("p"),
+            ScalarValue::Str("U".into()),
+        ),
+    )));
+    let f = app.settings.file(&path).expect("f");
+    assert!(f.errors.is_empty() && !f.warnings.is_empty());
+    due(&mut app, &path);
+    let text = disk(&d, &path).expect("a compile warning does not block");
+    assert!(text.contains("name = \"U\""), "{text}");
+}
+
+#[test]
+fn autosave_flushes_on_settings_tab_close_and_quit() {
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d, None);
+    let _ = app.update(s(SettingsMsg::Open));
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    assert!(disk(&d, EDITOR_PATH).is_none());
+    let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+    assert_eq!(settings_tabs(&app), 0);
+    assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 30")));
+    // Quit flushes a pending write before exiting.
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(34.0))));
+    let _ = app.update(Message::Tabs(TabsMsg::Quit));
+    assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 34")));
+    assert!(app.exiting);
+}

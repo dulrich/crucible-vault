@@ -16,14 +16,21 @@
 //!   Absent → an empty [`ConfigDoc`] with `base = None`; unparseable → [`LoadState::Malformed`]
 //!   (no doc; the page shows the error; nothing is ever written until the user starts over and
 //!   saves).
-//! - **Edit**: [`ConfigFile::edit`] applies a `cv_schema` document edit, marks the file dirty and
-//!   re-runs the form-level [`cv_schema::validate`]; any error blocks Save.
-//! - **Save / Revert**: [`ConfigFile::begin_save`] yields a [`SaveJob`] that the app runs off
+//! - **Edit**: [`ConfigFile::edit`] applies a `cv_schema` document edit, marks the file dirty,
+//!   bumps its edit sequence and re-runs the form-level [`cv_schema::validate`]; any error
+//!   blocks the automatic write (the page shows it; the file keeps its last valid content).
+//! - **Auto-save** (plan `editor-feedback-round-2` WP-2, replacing the explicit Save of D20):
+//!   [`Settings::due_autosaves`] yields every file whose latest edit left it valid and has no
+//!   debounce timer yet; the app arms an [`AUTOSAVE_DELAY`] timer per edit (coalescing: only the
+//!   timer of the latest edit sequence writes). At most one write is in flight per file; a
+//!   timer that fires during a write sets [`ConfigFile::queued`] and the write re-runs once the
+//!   first lands. Closing the Settings tab and quitting flush pending writes.
+//! - **Write**: [`ConfigFile::begin_save`] yields a [`SaveJob`] that the app runs off
 //!   the UI thread through [`write_config`] — the one exact-name config write (whole file,
 //!   `write_note` CAS on the last-read hash, or the empty-hash absence-CAS when the file was
 //!   absent; never `create_note`, so a fixed config name never gets a collision suffix).
 //!   [`ConfigFile::finish_save`] lands the outcome; a conflict reloads the file and sets the
-//!   "changed on disk" notice — it never overwrites. Revert is a reload.
+//!   "changed on disk" notice — it never overwrites. Revert (no longer on the page) is a reload.
 //! - **Daemon feedback**: `Notification::ConfigReloaded { errors }` is routed per file by
 //!   [`Settings::route_reload_errors`] ([`attribute`]); unattributable errors go to Status.
 //!
@@ -32,7 +39,7 @@
 //! A page is a [`Section`] plus, for file pages, its [`ConfigFile`]. WP-3 adds
 //! `settings/{form.rs,widgets.rs,pages/*.rs}` and replaces the body of [`page`]'s placeholder
 //! arm for its section with a form that reads `file.doc` and emits
-//! [`SettingsMsg::Edit`]`(path, DocEdit)`; the save loop, the Save/Revert bar ([`save_bar`]),
+//! [`SettingsMsg::Edit`]`(path, DocEdit)`; the save loop, the save status line ([`save_bar`]),
 //! the load-state / error header ([`file_header`]) and the routing stay as they are.
 //! Editor prefs (and the `[keys]` table the WP-4 keymap applies) are [`editor_prefs::Prefs`], held on the
 //! app as `App::prefs`.
@@ -243,6 +250,10 @@ impl SaveJob {
     }
 }
 
+/// The auto-save debounce after the last valid edit (WP-2: a few hundred ms, so a text input
+/// never writes per keystroke).
+pub const AUTOSAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// The notice set when a save hit a CAS conflict (the file was reloaded).
 pub const CHANGED_ON_DISK: &str = "changed on disk; reloaded (your edits were not saved)";
 
@@ -272,6 +283,14 @@ pub struct ConfigFile {
     pub warnings: Vec<String>,
     /// A local check over the candidate text: `(blocking errors, warnings)` (views carve-out).
     pub local_check: Option<LocalCheck>,
+    /// Bumped by every edit (auto-save coalescing key).
+    pub edit_seq: u64,
+    /// The edit sequence the last debounce timer was armed for.
+    pub scheduled_seq: u64,
+    /// The edit sequence the in-flight write carries.
+    pub saving_seq: u64,
+    /// A write was requested while one was in flight: re-run it when the first lands.
+    pub queued: bool,
 }
 
 /// A local check of a file's candidate text: `(blocking errors, warnings)`.
@@ -293,6 +312,10 @@ impl ConfigFile {
             saving: false,
             warnings: Vec::new(),
             local_check: None,
+            edit_seq: 0,
+            scheduled_seq: 0,
+            saving_seq: 0,
+            queued: false,
         }
     }
 
@@ -304,6 +327,8 @@ impl ConfigFile {
     /// Installs a read result (pure; [`ConfigFile::load`] feeds it).
     pub fn apply_read(&mut self, r: Result<(Vec<u8>, ContentHash), DaemonError>) {
         self.dirty = false;
+        self.queued = false;
+        self.scheduled_seq = self.edit_seq;
         self.errors.clear();
         match r {
             Ok((bytes, hash)) => {
@@ -363,6 +388,7 @@ impl ConfigFile {
         };
         f(doc).map_err(|e| e.to_string())?;
         self.dirty = true;
+        self.edit_seq += 1;
         self.notice = None;
         self.revalidate();
         Ok(())
@@ -374,13 +400,34 @@ impl ConfigFile {
         if matches!(self.state, LoadState::Malformed(_)) {
             self.doc = Some(ConfigDoc::new());
             self.dirty = true;
+            self.edit_seq += 1;
             self.revalidate();
         }
     }
 
-    /// Whether Save is enabled.
+    /// Whether the current doc should be written (dirty, loaded, no blocking errors), whether
+    /// or not a write is in flight.
+    pub fn wants_save(&self) -> bool {
+        self.dirty && self.doc.is_some() && self.errors.is_empty()
+    }
+
+    /// Whether a write can start now.
     pub fn can_save(&self) -> bool {
-        self.dirty && !self.saving && self.doc.is_some() && self.errors.is_empty()
+        self.wants_save() && !self.saving
+    }
+
+    /// The one-line save status (`None` when there is nothing to say) and whether it is a
+    /// warning.
+    pub fn save_status(&self) -> Option<(String, bool)> {
+        if self.dirty && self.doc.is_some() && !self.errors.is_empty() {
+            let n = self.errors.len();
+            let s = if n == 1 { "" } else { "s" };
+            return Some((format!("not saved: {n} error{s}"), true));
+        }
+        if self.saving || self.dirty {
+            return Some(("saving…".into(), false));
+        }
+        matches!(self.state, LoadState::Loaded).then(|| ("saved".into(), false))
     }
 
     /// The save job for the current doc (`None` when Save is disabled).
@@ -390,6 +437,8 @@ impl ConfigFile {
         }
         let content = self.doc.as_ref()?.to_string();
         self.saving = true;
+        self.saving_seq = self.edit_seq;
+        self.queued = false;
         Some(SaveJob {
             path: self.path.clone(),
             content,
@@ -404,7 +453,8 @@ impl ConfigFile {
         match r {
             Ok(WriteOutcome::Saved(h)) => {
                 self.base = Some(h);
-                self.dirty = false;
+                // An edit made while the write was in flight stays dirty (it re-queues).
+                self.dirty = self.edit_seq != self.saving_seq;
                 self.state = LoadState::Loaded;
                 self.notice = None;
             }
@@ -429,7 +479,7 @@ impl ConfigFile {
             return false;
         }
         if self.dirty {
-            self.notice = Some("changed on disk; saving will conflict (revert to reload)".into());
+            self.notice = Some("changed on disk; the pending save will conflict and reload".into());
             return false;
         }
         self.load(d);
@@ -523,6 +573,19 @@ impl Settings {
                 None => self.status.unrouted.push(e.clone()),
             }
         }
+    }
+
+    /// Every file whose latest edit is valid and has no debounce timer yet, as
+    /// `(path, edit_seq)`; marks each as scheduled.
+    pub fn due_autosaves(&mut self) -> Vec<(String, u64)> {
+        self.files
+            .values_mut()
+            .filter(|f| f.wants_save() && f.scheduled_seq != f.edit_seq)
+            .map(|f| {
+                f.scheduled_seq = f.edit_seq;
+                (f.path.clone(), f.edit_seq)
+            })
+            .collect()
     }
 
     /// Whether any file page has unsaved edits.
@@ -743,6 +806,7 @@ impl Settings {
         f.doc = Some(ConfigDoc::new());
         f.state = LoadState::Absent;
         f.dirty = true;
+        f.edit_seq = 1;
         f.revalidate();
         self.files.insert(path.clone(), f);
         self.view_selected = Some(path.clone());
@@ -878,7 +942,10 @@ pub enum SettingsMsg {
     NewViewName(String),
     /// Views page: create the named file (absent until saved).
     NewViewCreate,
+    /// Write `path` now (a due auto-save or a flush); queued behind an in-flight write.
     Save(String),
+    /// An auto-save debounce timer fired for `(path, edit_seq)`; stale sequences are ignored.
+    AutoSaveDue(String, u64),
     /// Reload from disk, dropping edits.
     Revert(String),
     /// A malformed file: start from an empty doc.
@@ -1101,7 +1168,7 @@ fn page_inner<'a>(
 pub fn file_header(f: &ConfigFile, t: Tokens) -> Element<'_, Message> {
     let state = match &f.state {
         LoadState::NotLoaded => "not loaded".to_owned(),
-        LoadState::Absent => "absent (Save creates it)".to_owned(),
+        LoadState::Absent => "absent (the first valid edit creates it)".to_owned(),
         LoadState::Loaded => "loaded".to_owned(),
         LoadState::Malformed(e) => format!("does not parse: {e}"),
         LoadState::Error(e) => format!("read failed: {e}"),
@@ -1142,36 +1209,20 @@ pub fn file_header(f: &ConfigFile, t: Tokens) -> Element<'_, Message> {
     col.into()
 }
 
-/// Save / Revert (and Start over for a malformed file). Shadow mode disables Save.
+/// The save status line (plan `editor-feedback-round-2` WP-2: replaces the Save / Revert bar):
+/// "saving…" / "saved" / "not saved: N errors", "Start from defaults" for a malformed file,
+/// and the shadow-mode note. Fixed height.
 pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'_, Message> {
     let shadow = mode == cv_protocol::Mode::Shadow;
-    let style = move |on: bool| crate::theme::icon_button_style(t, on);
-    let save = button(text(if f.saving { "Saving…" } else { "Save" }).size(14))
-        .height(crate::theme::CONTROL)
-        .padding([0, 14])
-        .style(style(f.can_save() && !shadow))
-        .on_press_maybe(
-            (f.can_save() && !shadow).then_some(msg(SettingsMsg::Save(f.path.clone()))),
-        );
-    let revert = button(text("Revert").size(14))
-        .height(crate::theme::CONTROL)
-        .padding([0, 14])
-        .style(style(false))
-        .on_press_maybe((!f.saving).then_some(msg(SettingsMsg::Revert(f.path.clone()))));
-    let mut bar = row![save, revert]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
+    let mut bar = row![].spacing(8).align_y(iced::Alignment::Center);
     if matches!(f.state, LoadState::Malformed(_)) && f.doc.is_none() {
         bar = bar.push(
             button(text("Start from defaults").size(14))
                 .height(crate::theme::CONTROL)
                 .padding([0, 14])
-                .style(style(false))
+                .style(crate::theme::icon_button_style(t, false))
                 .on_press(msg(SettingsMsg::StartOver(f.path.clone()))),
         );
-    }
-    if f.dirty {
-        bar = bar.push(text("unsaved").size(13).color(t.warn_text.to_color()));
     }
     if shadow {
         bar = bar.push(
@@ -1179,8 +1230,13 @@ pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'
                 .size(13)
                 .color(t.warn_text.to_color()),
         );
+    } else if let Some((label, warn)) = f.save_status() {
+        let c = if warn { t.warn_text } else { t.text_faint };
+        bar = bar.push(text(label).size(13).color(c.to_color()));
     }
     container(bar)
+        .height(crate::theme::CONTROL)
+        .align_y(iced::Alignment::Center)
         .style(|_: &Theme| container::Style::default())
         .into()
 }

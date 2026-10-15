@@ -184,6 +184,8 @@ pub struct App {
 #[derive(Debug, Default)]
 struct QuitState {
     pending: std::collections::HashSet<String>,
+    /// Settings files whose flush write has not landed yet (plan editor-feedback-round-2 WP-2).
+    settings: std::collections::HashSet<String>,
     failed: bool,
 }
 
@@ -640,7 +642,73 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.update_inner(message);
         self.sync_buffers();
-        task
+        let auto = self.schedule_settings_autosave();
+        if auto.units() == 0 {
+            return task;
+        }
+        Task::batch([task, auto])
+    }
+
+    /// Plan editor-feedback-round-2 WP-2: arms one debounce timer per settings file whose
+    /// latest edit left it valid (every edit path — form, prefs, hotkeys, theme cycle — ends
+    /// here). Shadow mode and a missing daemon arm nothing (the file stays dirty).
+    fn schedule_settings_autosave(&mut self) -> Task<Message> {
+        if self.status.mode == Mode::Shadow || self.daemon.is_none() {
+            return Task::none();
+        }
+        let due = self.settings.due_autosaves();
+        Task::batch(due.into_iter().map(|(path, seq)| {
+            Task::perform(
+                // Built lazily inside the async block (it needs the executor's reactor).
+                async { tokio::time::sleep(crate::settings::AUTOSAVE_DELAY).await },
+                move |()| {
+                    Message::Settings(crate::settings::SettingsMsg::AutoSaveDue(path.clone(), seq))
+                },
+            )
+        }))
+    }
+
+    /// Writes settings file `path` now when it is valid and dirty; behind an in-flight write it
+    /// is queued (re-run when that write lands).
+    fn save_settings_file(&mut self, path: String) -> Task<Message> {
+        use crate::settings::SettingsMsg;
+        if self.status.mode == Mode::Shadow {
+            return Task::none();
+        }
+        let Some(f) = self.settings.file_mut(&path) else {
+            return Task::none();
+        };
+        if f.saving {
+            f.queued |= f.wants_save();
+            return Task::none();
+        }
+        let Some(job) = f.begin_save() else {
+            return Task::none();
+        };
+        self.rpc(
+            move |d| job.run(d),
+            move |r| Message::Settings(SettingsMsg::Saved(path, r)),
+        )
+    }
+
+    /// Flushes every pending settings write (Settings tab close, quit). Returns the paths now
+    /// writing (started or queued) and the task.
+    fn flush_settings(&mut self) -> (Vec<String>, Task<Message>) {
+        let paths: Vec<String> = self
+            .settings
+            .files
+            .values()
+            .filter(|f| f.wants_save() || f.saving)
+            .map(|f| f.path.clone())
+            .collect();
+        if self.status.mode == Mode::Shadow {
+            return (Vec::new(), Task::none());
+        }
+        let tasks: Vec<Task<Message>> = paths
+            .iter()
+            .map(|p| self.save_settings_file(p.clone()))
+            .collect();
+        (paths, Task::batch(tasks))
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -772,13 +840,22 @@ impl App {
                 };
                 q.pending.remove(&path);
                 q.failed |= !ok;
-                if q.pending.is_empty() {
-                    let failed = q.failed;
-                    self.quit = None;
-                    if !failed {
-                        return self.exit();
-                    }
-                }
+                return self.quit_progress();
+            }
+        }
+        Task::none()
+    }
+
+    /// Exits once every quit flush (notes and settings) has landed, unless one failed.
+    fn quit_progress(&mut self) -> Task<Message> {
+        let Some(q) = &self.quit else {
+            return Task::none();
+        };
+        if q.pending.is_empty() && q.settings.is_empty() {
+            let failed = q.failed;
+            self.quit = None;
+            if !failed {
+                return self.exit();
             }
         }
         Task::none()
@@ -809,6 +886,12 @@ impl App {
         let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) else {
             return Task::none();
         };
+        if tab.is_settings() {
+            // WP-2: closing the Settings tab flushes pending settings writes (the model and
+            // its save loops outlive the tab, so the writes land after the close).
+            self.remove_tab(pane, i);
+            return self.flush_settings().1;
+        }
         if !tab.source.is_dirty() {
             self.remove_tab(pane, i);
             return Task::none();
@@ -879,7 +962,12 @@ impl App {
                     .map(move |(i, _)| (*p, i))
             })
             .collect();
-        if dirty.is_empty() {
+        let settings_pending = self
+            .settings
+            .files
+            .values()
+            .any(|f| f.wants_save() || f.saving);
+        if dirty.is_empty() && (!settings_pending || self.status.mode == Mode::Shadow) {
             return self.exit();
         }
         let blocked = dirty.iter().any(|&(p, i)| {
@@ -902,24 +990,34 @@ impl App {
         }
         self.quit = Some(QuitState {
             pending: jobs.iter().map(|(p, _)| p.clone()).collect(),
+            settings: std::collections::HashSet::new(),
             failed: false,
         });
-        let tasks: Vec<Task<Message>> = jobs
-            .into_iter()
-            .map(|(path, job)| {
-                let seq = job.seq;
-                self.rpc(
-                    move |d| Ok(job.run(d)),
-                    move |r| {
-                        Message::Tabs(TabsMsg::QuitSaved {
-                            path,
-                            seq,
-                            outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
-                        })
-                    },
-                )
-            })
-            .collect();
+        // WP-2: settings writes are flushed and awaited like note saves.
+        // Await exactly the paths the flush started or queued (none in shadow mode, so a
+        // shadow quit never waits on a settings write that cannot run).
+        let (flushing, settings_task) = self.flush_settings();
+        if let Some(q) = &mut self.quit {
+            q.settings.extend(flushing);
+        }
+        if self.quit.is_none() {
+            // Every write landed inline and the quit already exited.
+            return settings_task;
+        }
+        let mut tasks: Vec<Task<Message>> = vec![settings_task, self.quit_progress()];
+        tasks.extend(jobs.into_iter().map(|(path, job)| {
+            let seq = job.seq;
+            self.rpc(
+                move |d| Ok(job.run(d)),
+                move |r| {
+                    Message::Tabs(TabsMsg::QuitSaved {
+                        path,
+                        seq,
+                        outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                    })
+                },
+            )
+        }));
         Task::batch(tasks)
     }
 
@@ -1129,6 +1227,14 @@ impl App {
                     self.status.error = err;
                 }
                 self.sync_bookmarks();
+                // WP-2: a Settings-page auto-save that fired during this write re-runs now.
+                if self
+                    .settings
+                    .file(BOOKMARKS_PATH)
+                    .is_some_and(|f| f.queued && f.can_save())
+                {
+                    return self.save_settings_file(BOOKMARKS_PATH.to_owned());
+                }
             }
             edit => {
                 if self.shadow_blocked("bookmark edits are disabled in shadow mode") {
@@ -1143,7 +1249,7 @@ impl App {
                 }
                 if f.dirty {
                     self.status.error = Some(
-                        "bookmarks have unsaved edits on the Settings page; save or revert there"
+                        "bookmarks have unsaved edits on the Settings page (saving or invalid)"
                             .into(),
                     );
                     return Task::none();
@@ -2228,7 +2334,7 @@ impl App {
     }
 
     /// A chord captured while the Hotkeys page records: becomes the row's chord (in the doc;
-    /// written by Save), or a note when it cannot be bound.
+    /// auto-saved, plan editor-feedback-round-2 WP-2), or a note when it cannot be bound.
     fn capture_chord(&mut self, c: &crate::palette::chord::Chord) {
         use crate::palette::chord;
         use crate::settings::pages::hotkeys::{self, ACTIONS_PATH};
@@ -2283,8 +2389,8 @@ impl App {
         }
     }
 
-    /// The surround switch: edits `editor.toml`'s `surround` in memory (dirty until saved on
-    /// the Editor page — no config write without an explicit Save) and keeps the local
+    /// The surround switch: edits `editor.toml`'s `surround` (auto-saved after the debounce,
+    /// plan editor-feedback-round-2 WP-2) and keeps the local
     /// `UiState` copy in step.
     fn set_surround(&mut self, s: crate::theme::Surround) {
         use crate::settings::editor_prefs::{self, EDITOR_PATH, PrefEdit};
@@ -2452,18 +2558,38 @@ impl App {
                 if self.shadow_blocked("settings saves are disabled in shadow mode") {
                     return Task::none();
                 }
-                let Some(job) = self.settings.file_mut(&path).and_then(|f| f.begin_save()) else {
-                    return Task::none();
-                };
-                return self.rpc(
-                    move |d| job.run(d),
-                    move |r| Message::Settings(SettingsMsg::Saved(path, r)),
-                );
+                return self.save_settings_file(path);
+            }
+            SettingsMsg::AutoSaveDue(path, seq) => {
+                // Coalescing: only the timer of the latest edit writes.
+                if self.settings.file(&path).is_some_and(|f| f.edit_seq == seq) {
+                    return self.save_settings_file(path);
+                }
             }
             SettingsMsg::Saved(path, r) => {
                 let d = self.daemon.clone();
+                let mut again = false;
                 if let Some(f) = self.settings.file_mut(&path) {
+                    let failed = !matches!(r, Ok(crate::settings::WriteOutcome::Saved(_)));
                     f.finish_save(r, d.as_deref());
+                    again = f.queued && f.can_save();
+                    if !again {
+                        f.queued = false;
+                    }
+                    if let Some(q) = &mut self.quit
+                        && q.settings.contains(&path)
+                    {
+                        q.failed |= failed;
+                        if !again {
+                            q.settings.remove(&path);
+                        }
+                    }
+                }
+                let mut tasks = Vec::new();
+                if again {
+                    tasks.push(self.save_settings_file(path.clone()));
+                } else {
+                    tasks.push(self.quit_progress());
                 }
                 if path == EDITOR_PATH {
                     self.settings.hidden_draft = None;
@@ -2473,6 +2599,8 @@ impl App {
                 if path == BOOKMARKS_PATH {
                     self.sync_bookmarks();
                 }
+                self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
+                return Task::batch(tasks);
             }
             SettingsMsg::Revert(path) => {
                 if let (Some(d), Some(f)) = (self.daemon.clone(), self.settings.file_mut(&path)) {
