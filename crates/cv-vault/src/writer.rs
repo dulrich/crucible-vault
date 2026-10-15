@@ -66,7 +66,10 @@ impl VaultWriter {
     /// and rebuilding it on a schema/generation mismatch (D14: derived, never migrated).
     pub fn open(fs: VaultFs, index_base: &Path) -> Result<Self> {
         let index = match Index::open(index_base) {
-            Ok(i) => i,
+            Ok(mut i) => {
+                i.load_ignore(fs.root());
+                i
+            }
             Err(
                 cv_index::Error::NoIndex(_)
                 | cv_index::Error::SchemaMismatch { .. }
@@ -107,7 +110,10 @@ impl VaultWriter {
             Err(e) => {
                 let base = self.index.base_path().to_path_buf();
                 match Index::open(&base) {
-                    Ok(i) => self.index = i,
+                    Ok(mut i) => {
+                        i.load_ignore(&root);
+                        self.index = i;
+                    }
                     Err(e2) => tracing::warn!(error = %e2, "reopening index after failed rebuild"),
                 }
                 Err(e.into())

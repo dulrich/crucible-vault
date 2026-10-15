@@ -645,3 +645,59 @@ fn symlinked_note_outside_the_root_is_indexed_under_its_vault_path() {
     assert!(q.file("dangling.md").unwrap().is_none());
     assert!(q.file("dirlink/inner.md").unwrap().is_none());
 }
+
+#[test]
+fn gitignore_excludes_and_rebuild_restores() {
+    let t = Tmp::new();
+    t.write("keep.md", "# keep\n");
+    t.write("drop/x.md", "# x\n");
+    t.write("sub/a.log", "log");
+    t.write("sub/b.md", "# b\n");
+    t.write("sub/.gitignore", "*.log\n");
+    t.write(".obsidian/app.md", "x");
+    t.write(".git/HEAD", "x");
+    t.write(".trash/old.md", "x");
+    t.write("a/.hidden/h.md", "x");
+    t.write(".gitignore", "drop/\n");
+    let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
+    let has = |idx: &Index, p: &str| idx.query().file(p).unwrap().is_some();
+    assert!(has(&idx, "keep.md") && has(&idx, "sub/b.md"));
+    for p in [
+        "drop/x.md",
+        "sub/a.log",
+        ".obsidian/app.md",
+        ".git/HEAD",
+        ".trash/old.md",
+        "a/.hidden/h.md",
+        ".gitignore",
+        "sub/.gitignore",
+    ] {
+        assert!(!has(&idx, p), "{p}");
+    }
+    // Incremental updates for ignored paths are dropped; a rename into one drops the row.
+    assert_eq!(idx.upsert_file("drop/y.md", b"# y", 0, 0).unwrap(), None);
+    assert!(idx.is_excluded("drop/y.md") && !idx.is_excluded("keep.md"));
+    assert!(matches!(
+        idx.rename_file("keep.md", "drop/keep.md"),
+        Err(Error::NotFound(_))
+    ));
+    assert!(!has(&idx, "keep.md") && !has(&idx, "drop/keep.md"));
+
+    // Editing the .gitignore then rebuilding restores and drops paths.
+    t.write(".gitignore", "keep.md\n");
+    idx.rebuild(&t.vault()).unwrap();
+    assert!(has(&idx, "drop/x.md") && !has(&idx, "keep.md"));
+    assert_eq!(idx.upsert_file("keep.md", b"# k", 0, 0).unwrap(), None);
+    std::fs::remove_file(t.vault().join(".gitignore")).unwrap();
+    idx.rebuild(&t.vault()).unwrap();
+    assert!(has(&idx, "drop/x.md") && has(&idx, "keep.md"));
+    assert!(!has(&idx, "sub/a.log"));
+
+    // A reopened index loads the rules via `load_ignore`.
+    t.write(".gitignore", "drop/\n");
+    idx.rebuild(&t.vault()).unwrap();
+    drop(idx);
+    let mut idx = Index::open(&t.db()).unwrap();
+    idx.load_ignore(&t.vault());
+    assert_eq!(idx.upsert_file("drop/z.md", b"# z", 0, 0).unwrap(), None);
+}

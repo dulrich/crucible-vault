@@ -917,3 +917,42 @@ async fn write_attachment_is_content_addressed_and_idempotent() {
     drop(c);
     d.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gitignore_change_rebuilds_index() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.vault().join("drop")).unwrap();
+    std::fs::write(env.vault().join("drop/x.md"), "# x\n").unwrap();
+    let d = start(&env).await;
+    let mut sub = client(&env);
+    sub.call(Request::Subscribe(SubscribeParams {
+        topics: vec![Topic::IndexGeneration],
+    }))
+    .unwrap();
+    let base = PathBuf::from(&env.vars["CV_INDEX_DB"]);
+    let has = |n: u64, p: &str| {
+        cv_index::Reader::open(&base, n)
+            .unwrap()
+            .query()
+            .file(p)
+            .unwrap()
+            .is_some()
+    };
+    std::fs::write(env.vault().join(".gitignore"), "drop/\n").unwrap();
+    let Notification::IndexGeneration { n } = wait_for(&mut sub, |x| {
+        matches!(x, Notification::IndexGeneration { .. })
+    }) else {
+        unreachable!()
+    };
+    assert!(!has(n, "drop/x.md") && has(n, "a.md"));
+    std::fs::remove_file(env.vault().join(".gitignore")).unwrap();
+    let Notification::IndexGeneration { n } = wait_for(
+        &mut sub,
+        |x| matches!(x, Notification::IndexGeneration { n: m } if *m > n),
+    ) else {
+        unreachable!()
+    };
+    assert!(has(n, "drop/x.md"));
+    drop(sub);
+    d.shutdown().await.unwrap();
+}

@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 use crate::error::{Error, Result, io};
 use crate::extract::{self, Extracted, is_parsed_path, is_skipped_path};
 use crate::generation::{self as gen_files, generation_path, with_suffix};
+use crate::ignore::IgnoreRules;
 use crate::query::Query;
 use crate::resolver::{Resolver, file_key, normalize, target_key};
 use crate::schema;
@@ -30,6 +31,9 @@ pub struct Index {
     base: PathBuf,
     generation: u64,
     resolver: Resolver,
+    /// The vault's `.gitignore` rules (WP-1, plan editor-ui-round-3); loaded on create/rebuild
+    /// and by [`Index::load_ignore`] after [`Index::open`].
+    ignore: IgnoreRules,
 }
 
 /// (folder, name, ext) of a vault path; `ext` lowercased, `name` without the extension.
@@ -253,7 +257,7 @@ fn open_writer(base: &Path, generation: u64) -> Result<Connection> {
 
 /// Builds a complete index of `vault_root` at `building` in one transaction, then switches it to
 /// WAL and closes it.
-fn build(vault_root: &Path, building: &Path, generation: u64) -> Result<()> {
+fn build(vault_root: &Path, building: &Path, generation: u64, rules: &IgnoreRules) -> Result<()> {
     let mut conn = Connection::open(building)?;
     schema::configure_build(&conn)?;
     schema::create(&conn, generation)?;
@@ -263,7 +267,10 @@ fn build(vault_root: &Path, building: &Path, generation: u64) -> Result<()> {
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
-            e.depth() != 1 || e.file_name().to_str().is_none_or(|n| !is_skipped_path(n))
+            // Prunes excluded directories (never descended) and drops excluded files.
+            e.depth() == 0
+                || rel_path(vault_root, e.path())
+                    .is_none_or(|rel| !rules.is_excluded(&rel, e.file_type().is_dir()))
         });
     for entry in walker {
         let entry = entry.map_err(|e| Error::Io {
@@ -345,14 +352,14 @@ fn remove_if_exists(p: &Path) -> Result<()> {
 
 /// Builds the next generation beside `base` and renames it into place; returns its number.
 /// On failure the `.building` files are removed and the current generation stays live.
-fn build_generation(vault_root: &Path, base: &Path) -> Result<u64> {
+fn build_generation(vault_root: &Path, base: &Path, rules: &IgnoreRules) -> Result<u64> {
     let generation = gen_files::next(&gen_files::scan(base)?);
     let fin = generation_path(base, generation);
     let building = with_suffix(&fin, ".building");
     for s in SIDE_FILES {
         remove_if_exists(&with_suffix(&building, s))?;
     }
-    let res = build(vault_root, &building, generation).and_then(|()| {
+    let res = build(vault_root, &building, generation, rules).and_then(|()| {
         let wal = with_suffix(&building, "-wal");
         if wal.exists() {
             return Err(Error::JournalMode(format!(
@@ -392,10 +399,10 @@ impl Index {
             .find(|&g| g < generation);
         let keep: Vec<u64> = std::iter::once(generation).chain(prev).collect();
         gen_files::sweep(base, &keep)?;
-        Self::open_generation(base, generation)
+        Self::open_generation(base, generation, IgnoreRules::default())
     }
 
-    fn open_generation(base: &Path, generation: u64) -> Result<Self> {
+    fn open_generation(base: &Path, generation: u64, ignore: IgnoreRules) -> Result<Self> {
         let conn = open_writer(base, generation)?;
         let resolver = load_resolver(&conn)?;
         Ok(Self {
@@ -403,6 +410,7 @@ impl Index {
             base: base.to_path_buf(),
             generation,
             resolver,
+            ignore,
         })
     }
 
@@ -412,8 +420,9 @@ impl Index {
         let entries = gen_files::scan(base)?;
         let prev = gen_files::current_in(base, &entries);
         gen_files::sweep(base, &prev.into_iter().collect::<Vec<_>>())?;
-        let generation = build_generation(vault_root, base)?;
-        let index = Self::open_generation(base, generation)?;
+        let rules = IgnoreRules::load(vault_root);
+        let generation = build_generation(vault_root, base, &rules)?;
+        let index = Self::open_generation(base, generation, rules)?;
         let keep: Vec<u64> = std::iter::once(generation).chain(prev).collect();
         gen_files::sweep(base, &keep)?;
         Ok(index)
@@ -424,8 +433,9 @@ impl Index {
     /// except `g` and the outgoing one. A failed build leaves the current generation live.
     /// Returns `g`.
     pub fn rebuild(&mut self, vault_root: &Path) -> Result<u64> {
-        let generation = build_generation(vault_root, &self.base)?;
-        let fresh = Self::open_generation(&self.base, generation)?;
+        let rules = IgnoreRules::load(vault_root);
+        let generation = build_generation(vault_root, &self.base, &rules)?;
+        let fresh = Self::open_generation(&self.base, generation, rules)?;
         let old = std::mem::replace(self, fresh);
         let outgoing = old.generation;
         // PASSIVE, never TRUNCATE/RESTART: those invoke the busy handler and would let a reader
@@ -444,6 +454,18 @@ impl Index {
             tracing::warn!(error = %e, "retiring old generations failed");
         }
         Ok(generation)
+    }
+
+    /// (Re)loads the vault's `.gitignore` rules for incremental updates (call after
+    /// [`Index::open`], which has no vault root; create/rebuild load them themselves).
+    pub fn load_ignore(&mut self, vault_root: &Path) {
+        self.ignore = IgnoreRules::load(vault_root);
+    }
+
+    /// `path` is never indexed: a skipped folder, a dot-prefixed component or a `.gitignore`
+    /// match (or under an excluded directory).
+    pub fn is_excluded(&self, path: &str) -> bool {
+        is_skipped_path(path) || self.ignore.is_excluded(path, false)
     }
 
     /// The current generation's file.
@@ -473,7 +495,8 @@ impl Index {
 
     /// Indexes `path` with content `bytes` (one transaction). A new file re-resolves every link
     /// whose basename could now land on it; a modified file keeps its id and rewrites its rows.
-    /// Returns the file id, or `None` for a skipped path (`.obsidian/`, `.git/`, `.trash/`).
+    /// Returns the file id, or `None` for an excluded path ([`Index::is_excluded`]; a stale row
+    /// for it is dropped).
     pub fn upsert_file(
         &mut self,
         path: &str,
@@ -482,7 +505,8 @@ impl Index {
         ctime: i64,
     ) -> Result<Option<i64>> {
         check_path(path)?;
-        if is_skipped_path(path) {
+        if self.is_excluded(path) {
+            self.remove_file(path)?;
             return Ok(None);
         }
         let ex = extract_bytes(path, bytes);
@@ -552,12 +576,18 @@ impl Index {
     /// Moves `from` to `to`, keeping the file id. Inbound links, links whose basename matches
     /// either name, and the file's own (folder-relative) outgoing links re-resolve. If the move
     /// changes whether the file is a parsed note, its content rows are dropped and the caller
-    /// re-indexes it with [`Index::upsert_file`].
+    /// re-indexes it with [`Index::upsert_file`]. A move to an excluded (ignored) path drops
+    /// `from` and returns [`Error::NotFound`], so callers' "not indexed → upsert" path runs and
+    /// the upsert is dropped too.
     pub fn rename_file(&mut self, from: &str, to: &str) -> Result<i64> {
         check_path(from)?;
         check_path(to)?;
         if is_skipped_path(to) {
             return Err(Error::InvalidPath(to.to_string()));
+        }
+        if self.is_excluded(to) {
+            self.remove_file(from)?;
+            return Err(Error::NotFound(from.to_string()));
         }
         let tx = self.conn.transaction()?;
         let id = file_id(&tx, from)?.ok_or_else(|| Error::NotFound(from.to_string()))?;

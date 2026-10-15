@@ -19,6 +19,7 @@
 mod error;
 mod extract;
 mod generation;
+mod ignore;
 mod index;
 pub mod queries;
 mod query;
@@ -28,6 +29,7 @@ mod schema;
 pub use error::{Error, Result};
 pub use extract::{is_parsed_path, is_skipped_path, is_target_only_path};
 pub use generation::{current_generation, generation_path};
+pub use ignore::{GITIGNORE, IgnoreRules, is_gitignore_path};
 pub use index::Index;
 pub use queries::attachments::{OrphanRow, attachment_vault_paths, orphaned_attachments};
 pub use query::{

@@ -759,6 +759,11 @@ fn start_event_bridge(
         .name("cv-events".into())
         .spawn(move || {
             while let Ok(ev) = rx.recv() {
+                // A `.gitignore` create/modify/delete/rename changes index membership: rebuild
+                // (plan editor-ui-round-3 WP-1). Checked before anything else, since the file is
+                // itself a dot-file the index never holds.
+                let ignore_changed = cv_index::is_gitignore_path(&ev.path)
+                    || matches!(&ev.kind, EventKind::Renamed { from } if cv_index::is_gitignore_path(from));
                 let (kind, want_hash) = match ev.kind {
                     EventKind::Created => (ChangeKind::Created, true),
                     EventKind::Modified => (ChangeKind::Modified, true),
@@ -787,6 +792,19 @@ fn start_event_bridge(
                     hash,
                     origin,
                 });
+                if ignore_changed
+                    && let Some(w) = weak.upgrade().and_then(|s| s.writer())
+                {
+                    match w.call(|vw| vw.rebuild()) {
+                        Ok(Ok(n)) => {
+                            let _ = events.send(Notification::IndexGeneration { n });
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!(error = %e, "index rebuild after .gitignore change failed");
+                        }
+                        Err(e) => tracing::warn!(error = %e, "writer gone during .gitignore rebuild"),
+                    }
+                }
             }
         })
         .context("spawning event bridge")?;
