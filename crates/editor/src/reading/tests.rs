@@ -283,7 +283,8 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
     let _ = app.update(Message::Reading(ReadingMsg::Tick));
     assert_eq!(app.reading.images.pins("att/pic.png"), 1);
 
-    // Tab close releases.
+    // Tab close releases (the dirty buffer is saved first — WP-4 — inline here).
+    app.rpc_inline = true;
     let _ = app.update(Message::Tabs(TabsMsg::Close(app.focus, 0)));
     assert!(app.reading.images.is_empty());
     assert_eq!(

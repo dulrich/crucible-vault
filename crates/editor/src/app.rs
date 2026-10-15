@@ -20,7 +20,7 @@ use crate::bookmarks::{self, BOOKMARKS_PATH, BookmarkMsg, Bookmarks, WriteOutcom
 use crate::daemon::{DaemonClient, DaemonError};
 use crate::explorer::{self, EditKind, Explorer, FileOp, FileOpDone};
 use crate::message::{
-    ExplorerMsg, Message, NavMsg, PaletteMsg, PanelsMsg, PanesMsg, SourceMsg, StatusMsg,
+    ExplorerMsg, FindMsg, Message, NavMsg, PaletteMsg, PanelsMsg, PanesMsg, SourceMsg, StatusMsg,
     SwitcherMsg, TabsMsg, ThemeMsg,
 };
 use crate::nav;
@@ -126,6 +126,19 @@ pub struct App {
     pub mode_menu: Option<Pane>,
     /// A back/forward step is opening a path: it must not push onto the history.
     history_nav: bool,
+    /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
+    quit: Option<QuitState>,
+    /// The app asked iced to exit (tests observe it).
+    pub exiting: bool,
+    /// Shift is held while a find bar is open (Shift+Enter = previous).
+    find_shift: bool,
+}
+
+/// A quit in progress: the saves it waits on, and whether one failed.
+#[derive(Debug, Default)]
+struct QuitState {
+    pending: std::collections::HashSet<String>,
+    failed: bool,
 }
 
 fn tokens_for(s: Surround) -> Tokens {
@@ -243,6 +256,9 @@ impl App {
             restoring: true,
             mode_menu: None,
             history_nav: false,
+            quit: None,
+            exiting: false,
+            find_shift: false,
         };
         app.refresh_files();
         app.load_bookmarks();
@@ -516,7 +532,8 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tabs(m) => self.update_tabs(m),
+            Message::Tabs(m) => return self.update_tabs(m),
+            Message::Find(m) => return self.update_find(m),
             Message::Status(m) => self.update_status(m),
             Message::Theme(m) => {
                 self.ui.surround = match m {
@@ -605,26 +622,310 @@ impl App {
         Task::none()
     }
 
-    fn update_tabs(&mut self, m: TabsMsg) {
+    fn update_tabs(&mut self, m: TabsMsg) -> Task<Message> {
         match m {
             TabsMsg::Open(p) => self.open(&p, true),
-            TabsMsg::Select(pane, i) => {
-                if let Some(ps) = self.panes.get_mut(pane)
-                    && i < ps.tabs.len()
+            TabsMsg::Select(pane, i) => self.select_tab(pane, i),
+            TabsMsg::GoTo(n) => {
+                let i = usize::from(n.saturating_sub(1));
+                if n >= 1
+                    && self
+                        .panes
+                        .get(self.focus)
+                        .is_some_and(|ps| i < ps.tabs.len())
                 {
-                    ps.active = Some(i);
-                    let path = ps.tabs[i].path.clone();
-                    self.focus = pane;
-                    self.record_visit(pane, &path);
-                    self.persist();
+                    self.select_tab(self.focus, i);
                 }
             }
-            TabsMsg::Close(pane, i) => {
-                if let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
-                    self.on_tab_closed(&tab.path);
-                    self.persist();
+            TabsMsg::Close(pane, i) => return self.close_tab(pane, i),
+            TabsMsg::CloseActive => {
+                if let Some(i) = self.panes.get(self.focus).and_then(|ps| ps.active) {
+                    return self.close_tab(self.focus, i);
                 }
             }
+            TabsMsg::CloseSaved { path, seq, outcome } => {
+                if self.flushed(&path, seq, outcome, "close")
+                    && let Some((pane, i)) = panes::find(&self.panes, &path)
+                {
+                    self.remove_tab(pane, i);
+                }
+            }
+            TabsMsg::Quit => return self.quit(),
+            TabsMsg::QuitSaved { path, seq, outcome } => {
+                let ok = self.flushed(&path, seq, outcome, "quit");
+                let Some(q) = &mut self.quit else {
+                    return Task::none();
+                };
+                q.pending.remove(&path);
+                q.failed |= !ok;
+                if q.pending.is_empty() {
+                    let failed = q.failed;
+                    self.quit = None;
+                    if !failed {
+                        return self.exit();
+                    }
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn select_tab(&mut self, pane: Pane, i: usize) {
+        if let Some(ps) = self.panes.get_mut(pane)
+            && i < ps.tabs.len()
+        {
+            ps.active = Some(i);
+            let path = ps.tabs[i].path.clone();
+            self.focus = pane;
+            self.record_visit(pane, &path);
+            self.persist();
+        }
+    }
+
+    fn remove_tab(&mut self, pane: Pane, i: usize) {
+        if let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
+            self.on_tab_closed(&tab.path);
+            self.persist();
+        }
+    }
+
+    /// Close tab `i` of `pane`; a dirty buffer is flushed through the normal CAS save first and
+    /// the close happens only once that save lands with nothing newer typed (Decisions).
+    fn close_tab(&mut self, pane: Pane, i: usize) -> Task<Message> {
+        let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) else {
+            return Task::none();
+        };
+        if !tab.source.is_dirty() {
+            self.remove_tab(pane, i);
+            return Task::none();
+        }
+        let Some(job) = tab.source.begin_save(false) else {
+            self.status.error =
+                Some("close cancelled (the note is saving or has a conflict)".into());
+            return Task::none();
+        };
+        let (seq, path) = (job.seq, tab.path.clone());
+        self.rpc(
+            move |d| Ok(job.run(d)),
+            move |r| {
+                Message::Tabs(TabsMsg::CloseSaved {
+                    path,
+                    seq,
+                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                })
+            },
+        )
+    }
+
+    /// A save-before-close/quit finished: `true` only when it saved and the buffer is clean;
+    /// otherwise the error is surfaced (`what` cancelled).
+    fn flushed(
+        &mut self,
+        path: &str,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+        what: &str,
+    ) -> bool {
+        use crate::source::SaveOutcome;
+        let Some((pane, i)) = panes::find(&self.panes, path) else {
+            return true;
+        };
+        let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.tabs.get_mut(i)) else {
+            return true;
+        };
+        let ok = matches!(outcome, SaveOutcome::Saved(_));
+        if let Err(e) = tab.source.finish_save(seq, outcome) {
+            self.status.error = Some(format!("{what} cancelled (save failed: {e})"));
+            return false;
+        }
+        if !ok || tab.source.is_dirty() {
+            self.status.error = Some(if ok {
+                format!("{what} cancelled (the note changed while saving)")
+            } else {
+                format!("{what} cancelled (save conflict: the file changed on disk)")
+            });
+            return false;
+        }
+        true
+    }
+
+    /// Quit: flush every dirty buffer, exit once all saves land; any failure cancels the quit.
+    fn quit(&mut self) -> Task<Message> {
+        if self.quit.is_some() {
+            return Task::none();
+        }
+        let dirty: Vec<(Pane, usize)> = self
+            .panes
+            .iter()
+            .flat_map(|(p, ps)| {
+                ps.tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.source.is_dirty())
+                    .map(move |(i, _)| (*p, i))
+            })
+            .collect();
+        if dirty.is_empty() {
+            return self.exit();
+        }
+        let blocked = dirty.iter().any(|&(p, i)| {
+            self.panes
+                .get(p)
+                .and_then(|ps| ps.tabs.get(i))
+                .is_some_and(|t| t.source.is_saving() || t.source.conflict().is_some())
+        });
+        if blocked {
+            self.status.error = Some("quit cancelled (a note is saving or has a conflict)".into());
+            return Task::none();
+        }
+        let mut jobs = Vec::new();
+        for (p, i) in dirty {
+            if let Some(tab) = self.panes.get_mut(p).and_then(|ps| ps.tabs.get_mut(i))
+                && let Some(job) = tab.source.begin_save(false)
+            {
+                jobs.push((tab.path.clone(), job));
+            }
+        }
+        self.quit = Some(QuitState {
+            pending: jobs.iter().map(|(p, _)| p.clone()).collect(),
+            failed: false,
+        });
+        let tasks: Vec<Task<Message>> = jobs
+            .into_iter()
+            .map(|(path, job)| {
+                let seq = job.seq;
+                self.rpc(
+                    move |d| Ok(job.run(d)),
+                    move |r| {
+                        Message::Tabs(TabsMsg::QuitSaved {
+                            path,
+                            seq,
+                            outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                        })
+                    },
+                )
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
+    fn exit(&mut self) -> Task<Message> {
+        self.persist();
+        self.exiting = true;
+        iced::exit()
+    }
+
+    // ---- editor-usability-round WP-4: find in note ----
+
+    fn update_find(&mut self, m: FindMsg) -> Task<Message> {
+        let pane = self.focus;
+        let Some(ps) = self.panes.get_mut(pane) else {
+            return Task::none();
+        };
+        match m {
+            FindMsg::Open => {
+                if ps.active_tab().is_none() {
+                    return Task::none();
+                }
+                ps.find.get_or_insert_with(Default::default);
+                return iced::widget::operation::focus(crate::find::input_id(pane));
+            }
+            FindMsg::Close => {
+                if ps.find.take().is_none() {
+                    return Task::none();
+                }
+                self.find_shift = false;
+                return self.focus_editor();
+            }
+            FindMsg::Shift(b) => self.find_shift = b,
+            FindMsg::Query(q) => {
+                let Some(text) = ps.active_tab().map(|t| t.source.text()) else {
+                    return Task::none();
+                };
+                let Some(bar) = &mut ps.find else {
+                    return Task::none();
+                };
+                bar.query = q;
+                bar.current = None;
+                bar.search(&text);
+                let at = ps.active_tab().map_or(0, |t| {
+                    let c = t.source.cursor().position;
+                    editor_model::undo::offset_of(
+                        &text,
+                        editor_model::undo::Pos::new(c.line, c.column),
+                    )
+                    .unwrap_or(0)
+                });
+                if let Some(bar) = &mut ps.find {
+                    bar.current = editor_model::find::first_from(&bar.matches, at);
+                }
+                return self.show_match();
+            }
+            FindMsg::Submit | FindMsg::Next | FindMsg::Prev => {
+                let back =
+                    matches!(m, FindMsg::Prev) || (matches!(m, FindMsg::Submit) && self.find_shift);
+                let Some(ps) = self.panes.get_mut(pane) else {
+                    return Task::none();
+                };
+                let Some(text) = ps.active_tab().map(|t| t.source.text()) else {
+                    return Task::none();
+                };
+                let Some(bar) = &mut ps.find else {
+                    return Task::none();
+                };
+                bar.search(&text);
+                let n = bar.matches.len();
+                bar.current = if back {
+                    editor_model::find::prev(bar.current, n)
+                } else {
+                    editor_model::find::next(bar.current, n)
+                };
+                return self.show_match();
+            }
+        }
+        Task::none()
+    }
+
+    /// Puts the focused pane's current match on screen: the source selection (Source/Split) and
+    /// a proportional snap of the reading scrollable (Reading/Split).
+    fn show_match(&mut self) -> Task<Message> {
+        let pane = self.focus;
+        let Some(ps) = self.panes.get_mut(pane) else {
+            return Task::none();
+        };
+        let Some(r) = ps.find.as_ref().and_then(crate::find::FindBar::range) else {
+            return Task::none();
+        };
+        let Some(i) = ps.active.filter(|&i| i < ps.tabs.len()) else {
+            return Task::none();
+        };
+        let tab = &mut ps.tabs[i];
+        let text = tab.source.text();
+        let (l0, c0) = editor_model::find::line_col(&text, r.start);
+        let (l1, c1) = editor_model::find::line_col(&text, r.end);
+        let mode = self.reading.mode(&tab.path);
+        if mode.shows_source() {
+            tab.source.select_range((l0, c0), (l1, c1));
+        }
+        if mode.shows_reading() {
+            let lines = text.matches('\n').count().max(1);
+            #[allow(clippy::cast_precision_loss)]
+            let y = (l0 as f32 / lines as f32).clamp(0.0, 1.0);
+            return iced::widget::operation::snap_to(
+                crate::find::reading_scroll_id(&tab.path),
+                iced::widget::scrollable::RelativeOffset { x: 0.0, y },
+            );
+        }
+        Task::none()
+    }
+
+    /// Refocuses the focused pane's source editor (when it shows one).
+    fn focus_editor(&self) -> Task<Message> {
+        match self.active_tab() {
+            Some(t) if self.reading.mode(&t.path).shows_source() => {
+                iced::widget::operation::focus(crate::source::editor_id(&t.path))
+            }
+            _ => Task::none(),
         }
     }
 
@@ -1178,6 +1479,7 @@ impl App {
                 Err(e) => self.status.error = Some(format!("{title}: {e}")),
             },
             PaletteMsg::Tick => self.palette.expire_toast(std::time::Instant::now()),
+            PaletteMsg::RunPreset(p) => return self.run_preset(p),
         }
         Task::none()
     }
@@ -1194,6 +1496,16 @@ impl App {
     }
 
     fn on_chord(&mut self, c: &crate::palette::chord::Chord) -> Task<Message> {
+        if let Some(cmd) = crate::palette::client_chord(c) {
+            return self.update(cmd.message(self.focus));
+        }
+        if let Some(preset) = crate::palette::default_action(c) {
+            if self.palette.actions.is_none() {
+                self.palette.pending_chord = Some(c.clone());
+                return self.fetch_actions();
+            }
+            return self.run_preset(preset);
+        }
         if crate::palette::chord::reserved(c) {
             return Task::none();
         }
@@ -1205,6 +1517,28 @@ impl App {
             Some(id) => self.invoke_action(&id),
             None => Task::none(),
         }
+    }
+
+    /// Runs a preset action with its fixed params; a no-op when the action is not loaded.
+    fn run_preset(&mut self, p: crate::palette::Preset) -> Task<Message> {
+        let Some(info) = self.palette.action(p.action).cloned() else {
+            return Task::none();
+        };
+        let mut params = serde_json::Map::new();
+        if let Some(period) = p.period {
+            params.insert("period".into(), period.as_str().into());
+            params.insert(
+                "date".into(),
+                editor_model::period::iso(self.today()).into(),
+            );
+        }
+        self.palette.close();
+        self.run_call(crate::palette::Call {
+            action_id: info.id,
+            title: info.title,
+            params,
+            needs: info.needs,
+        })
     }
 
     fn invoke_entry(&mut self, i: usize) -> Task<Message> {
@@ -1557,6 +1891,9 @@ impl App {
             iced::keyboard::listen().filter_map(switcher::key_event),
             self.reading.subscription(),
             crate::palette::subscription(&self.palette, self.panels.visible),
+            crate::find::subscription(self.panes.iter().any(|(_, ps)| ps.find.is_some())),
+            // Window close goes through Quit (dirty buffers flush first).
+            iced::window::close_requests().map(|_| Message::Tabs(TabsMsg::Quit)),
         ])
     }
 
@@ -1665,7 +2002,12 @@ impl App {
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
-        let mut col = column![container(controls).padding(2).width(Length::Fill)].spacing(4);
+        let mut col = column![
+            container(controls).padding(2).width(Length::Fill),
+            // Stable slot: an empty `Space` while the find bar is closed.
+            crate::find::view(pane, ps.find.as_ref(), t),
+        ]
+        .spacing(4);
         match ps.active_tab() {
             Some(tab) => {
                 if let Some(bar) = nav::bar(pane, &tab.path, self.today(), t) {
@@ -1809,10 +2151,10 @@ impl App {
         };
 
         let top = row![
-            button(text("Quick switch (Ctrl+O)").size(14))
+            button(text("Quick switch (Ctrl+P)").size(14))
                 .style(button::text)
                 .on_press(Message::Switcher(SwitcherMsg::Open)),
-            button(text("Command palette (Ctrl+P)").size(14))
+            button(text("Command palette (Ctrl+Shift+P)").size(14))
                 .style(button::text)
                 .on_press(Message::Palette(PaletteMsg::Open)),
             button(text("Panels").size(14))

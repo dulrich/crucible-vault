@@ -13,6 +13,8 @@ pub struct PaneState {
     pub active: Option<usize>,
     /// editor-usability-round WP-3: back/forward (not persisted).
     pub history: crate::history::History,
+    /// editor-usability-round WP-4: the find bar (`None` = closed).
+    pub find: Option<crate::find::FindBar>,
 }
 
 impl PaneState {

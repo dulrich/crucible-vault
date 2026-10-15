@@ -7,6 +7,7 @@ pub mod app;
 pub mod bookmarks;
 pub mod daemon;
 pub mod explorer;
+pub mod find;
 pub mod history;
 pub mod icons;
 pub mod image_cache;

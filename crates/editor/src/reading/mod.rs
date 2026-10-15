@@ -57,7 +57,7 @@ impl ViewMode {
         }
     }
 
-    fn shows_reading(self) -> bool {
+    pub fn shows_reading(self) -> bool {
         self != Self::Source
     }
 

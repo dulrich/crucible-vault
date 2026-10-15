@@ -24,6 +24,8 @@ pub enum Message {
     Tabs(TabsMsg),
     Theme(ThemeMsg),
     Panes(PanesMsg),
+    /// editor-usability-round WP-4: find in note.
+    Find(FindMsg),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name
@@ -154,7 +156,7 @@ pub enum ExplorerMsg {
     Done(crate::explorer::FileOpDone),
 }
 
-/// WP-4: quick switcher (Ctrl+O).
+/// WP-4: quick switcher (Ctrl+P).
 #[derive(Debug, Clone)]
 pub enum SwitcherMsg {
     Open,
@@ -174,7 +176,7 @@ pub enum SwitcherMsg {
     Created(Result<Option<String>, String>),
 }
 
-/// WP-5: command palette (Ctrl+P) and action invocation.
+/// WP-5: command palette (Ctrl+Shift+P) and action invocation.
 #[derive(Debug, Clone)]
 pub enum PaletteMsg {
     Open,
@@ -209,6 +211,8 @@ pub enum PaletteMsg {
     },
     /// Toast expiry tick.
     Tick,
+    /// Run a preset action (client default chord / palette entry).
+    RunPreset(crate::palette::Preset),
 }
 
 /// WP-5: side panels.
@@ -314,7 +318,42 @@ pub enum TabsMsg {
     /// Open a vault-relative path (or focus its tab).
     Open(String),
     Select(Pane, usize),
+    /// Close (the tab ×): a dirty buffer saves first; a failed save cancels.
     Close(Pane, usize),
+    /// Ctrl+W: close the focused pane's active tab.
+    CloseActive,
+    /// The save-before-close finished.
+    CloseSaved {
+        path: String,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+    },
+    /// Alt+N: the focused pane's tab N (1-based; out of range = no-op).
+    GoTo(u8),
+    /// Ctrl+Q / window close: flush every dirty buffer, then exit.
+    Quit,
+    /// One save-before-quit finished.
+    QuitSaved {
+        path: String,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+    },
+}
+
+/// editor-usability-round WP-4: the focused pane's find bar.
+#[derive(Debug, Clone)]
+pub enum FindMsg {
+    /// Ctrl+F: open (or refocus) the bar.
+    Open,
+    /// Escape: close and refocus the editor.
+    Close,
+    Query(String),
+    /// Enter (Shift held → previous).
+    Submit,
+    Next,
+    Prev,
+    /// Shift state while the bar is open (Shift+Enter detection).
+    Shift(bool),
 }
 
 /// The surround switch (client command, `surround.ts:75`).

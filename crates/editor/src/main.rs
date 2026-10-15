@@ -78,6 +78,8 @@ fn main() -> anyhow::Result<()> {
         .title("crucible-vault")
         .subscription(App::subscription)
         .theme(App::theme)
+        // Window close is a Quit: dirty buffers flush first (editor-usability-round WP-4).
+        .exit_on_close_request(false)
         .settings(iced::Settings {
             default_font: iced::Font::with_name(editor::theme::FONT_FAMILY),
             default_text_size: editor::theme::BASE_TEXT_SIZE.into(),

@@ -279,6 +279,17 @@ impl SourceBuffer {
             }
         }
     }
+    /// Selects `from..to` ((line, byte column) each; the cursor ends at `to`), materialising a
+    /// plain buffer first so the shaped editor scrolls to it (find in note).
+    pub fn select_range(&mut self, from: (usize, usize), to: (usize, usize)) {
+        self.materialise();
+        let pos = |(line, column)| text_editor::Position { line, column };
+        self.move_to(text_editor::Cursor {
+            position: pos(to),
+            selection: (from != to).then(|| pos(from)),
+        });
+    }
+
     /// Moves the cursor (navigation; not an edit).
     pub fn move_to(&mut self, c: text_editor::Cursor) {
         match &mut self.content {
@@ -934,7 +945,28 @@ fn key_binding(kp: KeyPress) -> Option<Binding<Message>> {
             return Some(Binding::Custom(Message::Source(m)));
         }
     }
+    // editor-usability-round WP-4: client chords (Ctrl+W/Q/F/P, Alt+1..8, …) reach the app even
+    // while the editor is focused — `text_editor` would swallow some (Alt+digit inserts).
+    if (kp.modifiers.command() || kp.modifiers.alt())
+        && let Some(c) = crate::palette::chord::from_event(&kp.key, kp.modifiers)
+        && crate::palette::routed(&c)
+    {
+        return Some(Binding::Custom(Message::Palette(
+            crate::message::PaletteMsg::Key(c),
+        )));
+    }
     Binding::from_key_press(kp)
+}
+
+/// `key_binding` for tests.
+#[cfg(test)]
+pub(crate) fn test_key_binding(kp: KeyPress) -> Option<Binding<Message>> {
+    key_binding(kp)
+}
+
+/// The source editor's widget id for `path` (find bar Escape refocuses it).
+pub fn editor_id(path: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("source-editor:{path}"))
 }
 
 /// Renders a tab's source buffer with its conflict bar / read-only marker.
@@ -942,6 +974,7 @@ pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a
     let editor: Element<'a, Message> = match &buf.content {
         Repr::Shaped(content) => mouse_area(
             text_editor::TextEditor::new(content)
+                .id(editor_id(&buf.path))
                 .height(Length::Fill)
                 .padding(EDITOR_PADDING)
                 .on_action(|a| Message::Source(SourceMsg::Action(a)))

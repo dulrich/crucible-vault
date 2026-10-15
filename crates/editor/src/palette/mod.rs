@@ -25,10 +25,11 @@ use serde_json::{Map, Value};
 
 use crate::app::Tab;
 use crate::message::{
-    Message, PaletteMsg, PanelsMsg, PanesMsg, ReadingMsg, SourceMsg, SwitcherMsg, ThemeMsg,
+    FindMsg, Message, PaletteMsg, PanelsMsg, PanesMsg, ReadingMsg, SourceMsg, SwitcherMsg, TabsMsg,
+    ThemeMsg,
 };
 use crate::panels::PanelKind;
-use crate::theme::Tokens;
+use crate::theme::{Surround, Tokens};
 use chord::Chord;
 use prompt::{ParamValue, Prompt};
 
@@ -71,6 +72,127 @@ pub enum ClientCmd {
     /// editor-usability-round WP-3: debug pane borders.
     TogglePaneBorders,
     Panel(PanelKind),
+    /// editor-usability-round WP-4 commands.
+    Quit,
+    CloseTab,
+    /// Go to tab N (1-based) of the focused pane.
+    GoToTab(u8),
+    /// Open today / this week / this month (`period.open`; listed only when it is loaded).
+    OpenPeriod(PeriodSel),
+    SetSurround(Surround),
+    FindInNote,
+    FocusSearch,
+    /// Opens the command palette (Ctrl+Shift+P); not listed in the palette itself.
+    CommandPaletteKey,
+}
+
+/// A `period.open` period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeriodSel {
+    Day,
+    Week,
+    Month,
+}
+
+impl PeriodSel {
+    /// The `period` param value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PeriodSel::Day => "day",
+            PeriodSel::Week => "week",
+            PeriodSel::Month => "month",
+        }
+    }
+}
+
+/// A daemon action with fixed params, run by a client default chord or palette entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preset {
+    pub action: &'static str,
+    /// `period.open`'s `period` (with `date` = today).
+    pub period: Option<PeriodSel>,
+}
+
+/// The `period.open` action id.
+pub const PERIOD_OPEN: &str = "period.open";
+
+/// Client default chords bound to daemon actions (Decisions hotkey table). A preset whose action
+/// is absent from the loaded config does nothing.
+pub const DEFAULT_ACTIONS: [(&str, Preset); 2] = [
+    (
+        "Ctrl+O",
+        Preset {
+            action: PERIOD_OPEN,
+            period: Some(PeriodSel::Day),
+        },
+    ),
+    (
+        "Ctrl+R",
+        Preset {
+            action: "lint-note",
+            period: None,
+        },
+    ),
+];
+
+/// The preset a chord runs, if it is a default action chord.
+pub fn default_action(c: &Chord) -> Option<Preset> {
+    DEFAULT_ACTIONS
+        .iter()
+        .find(|(k, _)| chord::parse(k).as_ref() == Some(c))
+        .map(|&(_, p)| p)
+}
+
+/// The client command a chord runs through the palette's chord path (`on_chord`). Ctrl+E/S/Z
+/// keep their own listeners and `text_editor` bindings, so only the WP-4 chords route here.
+pub fn client_chord(c: &Chord) -> Option<ClientCmd> {
+    let simple = [
+        ("Ctrl+P", ClientCmd::QuickSwitcher),
+        ("Ctrl+Shift+P", ClientCmd::CommandPaletteKey),
+        ("Ctrl+W", ClientCmd::CloseTab),
+        ("Ctrl+Q", ClientCmd::Quit),
+        ("Ctrl+F", ClientCmd::FindInNote),
+        ("Ctrl+Shift+F", ClientCmd::FocusSearch),
+    ];
+    if let Some((_, cmd)) = simple
+        .iter()
+        .find(|(k, _)| chord::parse(k).as_ref() == Some(c))
+    {
+        return Some(*cmd);
+    }
+    if c.alt && !c.command && !c.shift {
+        let n: u8 = c.key.parse().ok()?;
+        return (1..=8).contains(&n).then_some(ClientCmd::GoToTab(n));
+    }
+    None
+}
+
+/// Whether the focused source editor must hand a chord to the app (`PaletteMsg::Key`) instead
+/// of handling it itself (Alt+digit would insert the digit): the WP-4 client chords, the default
+/// action chords and the inert settings chords Ctrl+, / Ctrl+Shift+,.
+pub fn routed(c: &Chord) -> bool {
+    client_chord(c).is_some() || default_action(c).is_some() || (c.command && c.key == ",")
+}
+
+/// The full default keymap: (chord, what it runs), for display and the no-duplicate check.
+pub fn keymap() -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = ClientCmd::all()
+        .into_iter()
+        .chain([ClientCmd::CommandPaletteKey])
+        .flat_map(|c| {
+            let t = c.title().0;
+            c.keys().into_iter().map(move |k| (k, t.clone()))
+        })
+        .collect();
+    v.extend(
+        DEFAULT_ACTIONS
+            .iter()
+            .filter(|(_, p)| p.period.is_none())
+            .map(|(k, p)| ((*k).to_owned(), p.action.to_owned())),
+    );
+    v.push(("Ctrl+Alt+Left".into(), "Back".into()));
+    v.push(("Ctrl+Alt+Right".into(), "Forward".into()));
+    v
 }
 
 impl ClientCmd {
@@ -88,7 +210,17 @@ impl ClientCmd {
             ClientCmd::Redo,
             ClientCmd::TogglePanels,
             ClientCmd::TogglePaneBorders,
+            ClientCmd::Quit,
+            ClientCmd::CloseTab,
         ];
+        v.extend((1..=8).map(ClientCmd::GoToTab));
+        v.extend(
+            [PeriodSel::Day, PeriodSel::Week, PeriodSel::Month]
+                .into_iter()
+                .map(ClientCmd::OpenPeriod),
+        );
+        v.extend(Surround::ALL.into_iter().map(ClientCmd::SetSurround));
+        v.extend([ClientCmd::FindInNote, ClientCmd::FocusSearch]);
         v.extend(PanelKind::ALL.iter().map(|&k| ClientCmd::Panel(k)));
         v
     }
@@ -108,6 +240,18 @@ impl ClientCmd {
             ClientCmd::TogglePanels => "Toggle side panels",
             ClientCmd::TogglePaneBorders => "Toggle pane borders (debug)",
             ClientCmd::Panel(k) => return (format!("Show {} panel", k.label()), "Panels"),
+            ClientCmd::Quit => "Quit",
+            ClientCmd::CloseTab => "Close tab",
+            ClientCmd::GoToTab(n) => return (format!("Go to tab {n}"), "Editor"),
+            ClientCmd::OpenPeriod(PeriodSel::Day) => return ("Open today".into(), "Periods"),
+            ClientCmd::OpenPeriod(PeriodSel::Week) => return ("Open this week".into(), "Periods"),
+            ClientCmd::OpenPeriod(PeriodSel::Month) => {
+                return ("Open this month".into(), "Periods");
+            }
+            ClientCmd::SetSurround(s) => return (format!("Set surround: {}", s.label()), "Editor"),
+            ClientCmd::FindInNote => "Find in note",
+            ClientCmd::FocusSearch => "Search the vault",
+            ClientCmd::CommandPaletteKey => "Command palette",
         };
         (t.to_owned(), "Editor")
     }
@@ -116,10 +260,23 @@ impl ClientCmd {
     pub fn keys(self) -> Vec<String> {
         let k = match self {
             ClientCmd::CycleReading => "Ctrl+E",
-            ClientCmd::QuickSwitcher => "Ctrl+O",
+            ClientCmd::QuickSwitcher => "Ctrl+P",
+            ClientCmd::CommandPaletteKey => "Ctrl+Shift+P",
             ClientCmd::Save => "Ctrl+S",
             ClientCmd::Undo => "Ctrl+Z",
             ClientCmd::Redo => "Ctrl+Shift+Z",
+            ClientCmd::Quit => "Ctrl+Q",
+            ClientCmd::CloseTab => "Ctrl+W",
+            ClientCmd::FindInNote => "Ctrl+F",
+            ClientCmd::FocusSearch => "Ctrl+Shift+F",
+            ClientCmd::GoToTab(n) => return vec![format!("Alt+{n}")],
+            ClientCmd::OpenPeriod(p) => {
+                return DEFAULT_ACTIONS
+                    .iter()
+                    .filter(|(_, d)| d.action == PERIOD_OPEN && d.period == Some(p))
+                    .map(|(k, _)| (*k).to_owned())
+                    .collect();
+            }
             _ => return Vec::new(),
         };
         vec![k.to_owned()]
@@ -140,6 +297,17 @@ impl ClientCmd {
             ClientCmd::TogglePanels => Message::Panels(PanelsMsg::Toggle),
             ClientCmd::TogglePaneBorders => Message::Panes(PanesMsg::ToggleBorders),
             ClientCmd::Panel(k) => Message::Panels(PanelsMsg::Show(k)),
+            ClientCmd::Quit => Message::Tabs(TabsMsg::Quit),
+            ClientCmd::CloseTab => Message::Tabs(TabsMsg::CloseActive),
+            ClientCmd::GoToTab(n) => Message::Tabs(TabsMsg::GoTo(n)),
+            ClientCmd::OpenPeriod(p) => Message::Palette(PaletteMsg::RunPreset(Preset {
+                action: PERIOD_OPEN,
+                period: Some(p),
+            })),
+            ClientCmd::SetSurround(s) => Message::Theme(ThemeMsg::Set(s)),
+            ClientCmd::FindInNote => Message::Find(FindMsg::Open),
+            ClientCmd::FocusSearch => Message::Panels(PanelsMsg::Show(PanelKind::Search)),
+            ClientCmd::CommandPaletteKey => Message::Palette(PaletteMsg::Open),
         }
     }
 }
@@ -199,8 +367,10 @@ pub fn terminal(s: JobState) -> bool {
 
 /// Client commands then actions.
 pub fn build_entries(actions: &[ActionInfo]) -> Vec<Entry> {
+    let has = |id: &str| actions.iter().any(|a| a.id == id);
     let mut v: Vec<Entry> = ClientCmd::all()
         .into_iter()
+        .filter(|c| !matches!(c, ClientCmd::OpenPeriod(_)) || has(PERIOD_OPEN))
         .map(|c| {
             let (title, group) = c.title();
             Entry {
@@ -211,11 +381,18 @@ pub fn build_entries(actions: &[ActionInfo]) -> Vec<Entry> {
             }
         })
         .collect();
-    v.extend(actions.iter().map(|a| Entry {
-        id: EntryId::Action(a.id.clone()),
-        title: a.title.clone(),
-        group: a.group.clone().unwrap_or_else(|| "Actions".into()),
-        keys: a.keys.clone(),
+    v.extend(actions.iter().map(|a| {
+        Entry {
+            id: EntryId::Action(a.id.clone()),
+            title: a.title.clone(),
+            group: a.group.clone().unwrap_or_else(|| "Actions".into()),
+            keys: DEFAULT_ACTIONS
+                .iter()
+                .filter(|(_, p)| p.period.is_none() && p.action == a.id)
+                .map(|(k, _)| (*k).to_owned())
+                .chain(a.keys.iter().cloned())
+                .collect(),
+        }
     }));
     v
 }
@@ -464,7 +641,7 @@ impl Palette {
     }
 }
 
-/// Global keys: Ctrl+P opens, Esc closes/cancels, Up/Down move, Ctrl+Enter submits a multiline
+/// Global keys: Esc closes/cancels, Up/Down move, Ctrl+Enter submits a multiline
 /// prompt, any other Ctrl/Alt chord is offered to the action bindings.
 pub fn key_event(ev: keyboard::Event) -> Option<Message> {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = ev else {
@@ -484,14 +661,8 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
         Key::Named(Named::ArrowRight) if modifiers.command() && modifiers.alt() => {
             Some(Message::Panes(PanesMsg::ForwardFocused))
         }
-        Key::Character(c)
-            if modifiers.command()
-                && !modifiers.shift()
-                && !modifiers.alt()
-                && c.eq_ignore_ascii_case("p") =>
-        {
-            p(PaletteMsg::Open)
-        }
+        // Ctrl+P / Ctrl+Shift+P and the other client chords resolve in `on_chord`
+        // (`client_chord`).
         _ if modifiers.command() || modifiers.alt() => {
             chord::from_event(&key, modifiers).map(|c| Message::Palette(PaletteMsg::Key(c)))
         }

@@ -151,9 +151,26 @@ pub fn from_event(key: &Key, modifiers: Modifiers) -> Option<Chord> {
 
 /// Chords the editor itself owns (other listeners or `text_editor` handle them). Editor defaults
 /// win: an action binding one of these is reported as a conflict and not bound.
-pub const RESERVED: [&str; 12] = [
+pub const RESERVED: &[&str] = &[
     "Ctrl+P",
+    "Ctrl+Shift+P",
     "Ctrl+O",
+    "Ctrl+R",
+    "Ctrl+F",
+    "Ctrl+Shift+F",
+    "Ctrl+W",
+    "Ctrl+Q",
+    "Alt+1",
+    "Alt+2",
+    "Alt+3",
+    "Alt+4",
+    "Alt+5",
+    "Alt+6",
+    "Alt+7",
+    "Alt+8",
+    // Reserved, inert: the settings plan (`editor-settings-tab`).
+    "Ctrl+,",
+    "Ctrl+Shift+,",
     "Ctrl+E",
     "Ctrl+S",
     "Ctrl+Z",
