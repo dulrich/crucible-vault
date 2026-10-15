@@ -206,13 +206,24 @@ impl Env {
         context: ActionContext,
     ) -> Result<(Option<String>, Map<String, Value>), StepError> {
         let action = self.config.armed(id).expect("armed").clone();
+        self.run_steps(&action.steps, params, context)
+    }
+
+    /// Runs `steps` like the runner does (vars merged, stop honoured, active path follows a move).
+    fn run_steps(
+        &self,
+        steps: &[Step],
+        params: Value,
+        mut context: ActionContext,
+    ) -> Result<(Option<String>, Map<String, Value>), StepError> {
         let mut vars = Map::new();
         let mut open = None;
-        for step in &action.steps {
+        for step in steps {
             let o = self.exec(step, &params, &context, &vars)?;
             if o.open_path.is_some() {
                 open = o.open_path.clone();
             }
+            super::follow_move(&mut context, &o);
             vars.extend(o.vars);
             if o.stop {
                 break;
@@ -850,6 +861,46 @@ fn file_as_kind_tags_moves_and_lints() {
         )
         .unwrap();
     assert_eq!(open, Some(format!("daily/day/{}/n.md", today())));
+}
+
+/// WP-8 (editor-feedback-round-2): the live `file-as-kind` orders `move` first; the following
+/// `upsert_tags` (no `path`) must target the moved note, not the dead pre-move path.
+#[test]
+fn file_as_kind_move_first_tags_the_moved_note() {
+    let env = Env::new(&[("inbox/clip.md", "---\ntags: [clip]\n---\nbody\n")]);
+    let steps: Vec<Step> = [
+        "type = \"move\"\nkind = \"{param.kind}\"",
+        "type = \"upsert_tags\"\nkind = \"{param.kind}\"",
+        "type = \"lint\"\npath = \"{vars.moved_path}\"\nkind = \"{param.kind}\"",
+    ]
+    .iter()
+    .map(|s| Step::from_table(s.parse::<toml::Table>().unwrap()).unwrap())
+    .collect();
+    let (open, vars) = env
+        .run_steps(&steps, json!({"kind": "repo"}), active("inbox/clip.md"))
+        .unwrap();
+    assert_eq!(open.as_deref(), Some("stack/clip.md"));
+    assert_eq!(vars["moved_path"], json!("stack/clip.md"));
+    assert!(env.read("inbox/clip.md").is_none());
+    let text = env.read("stack/clip.md").unwrap();
+    assert!(text.contains("- repo"), "{text}");
+    assert!(
+        text.contains(&format!("created: {}", today())),
+        "lint ran: {text}"
+    );
+}
+
+#[test]
+fn follow_move_only_follows_the_active_note() {
+    let mut ctx = active("a.md");
+    let mut o = StepOutcome::default();
+    o.vars.insert("moved_path".into(), json!("b/a.md"));
+    o.vars.insert(super::MOVED_FROM.into(), json!("other.md"));
+    super::follow_move(&mut ctx, &o);
+    assert_eq!(ctx.active_path.as_deref(), Some("a.md"));
+    o.vars.insert(super::MOVED_FROM.into(), json!("a.md"));
+    super::follow_move(&mut ctx, &o);
+    assert_eq!(ctx.active_path.as_deref(), Some("b/a.md"));
 }
 
 #[test]

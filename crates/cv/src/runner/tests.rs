@@ -344,6 +344,98 @@ fn crash_mid_action_resumes_at_first_unapplied_step() {
     assert_eq!(f.state.lock().unwrap().checkpoints(&id).unwrap().len(), 3);
 }
 
+const MOVE_THEN_TAG: &str = r#"
+[[action]]
+id = "file"
+needs = ["active_path"]
+[[action.steps]]
+type = "move"
+to = "stack"
+[[action.steps]]
+type = "upsert_tags"
+tags = "x"
+[[action.steps]]
+type = "guard"
+path = "keep.md"
+"#;
+
+/// `(step index, active path the step saw)`.
+type Seen = (usize, Option<String>);
+
+/// The `move` stand-in: reports `inbox/a.md` → `stack/a.md` like `steps::file::move_note`.
+fn moved_outcome() -> StepOutcome {
+    let mut o = StepOutcome {
+        open_path: Some("stack/a.md".into()),
+        ..StepOutcome::default()
+    };
+    o.vars
+        .insert("moved_path".into(), serde_json::json!("stack/a.md"));
+    o.vars
+        .insert(steps::MOVED_FROM.into(), serde_json::json!("inbox/a.md"));
+    o
+}
+
+/// WP-8: after a step moves the active note, later steps see the moved path as the active note
+/// — on a fresh run and when the move is replayed from a checkpoint on resume.
+#[test]
+fn active_path_follows_a_move_fresh_and_on_resume() {
+    for resume in [false, true] {
+        let f = fixture();
+        let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let s2 = Arc::clone(&seen);
+        let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |_, ctx| {
+            s2.lock()
+                .unwrap()
+                .push((ctx.step_index, ctx.context.active_path.clone()));
+            Ok(if ctx.step_index == 0 {
+                moved_outcome()
+            } else {
+                StepOutcome::default()
+            })
+        })));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let r = runner(&f, exec, Arc::new(SystemClock), 1, MOVE_THEN_TAG);
+        let mut rx = f.events.subscribe();
+        let id = enqueue(&r, "file", Some("inbox/a.md"), Lane::User);
+        if resume {
+            let text = serde_json::to_string(&moved_outcome()).unwrap();
+            f.state
+                .lock()
+                .unwrap()
+                .put_checkpoint(&id, 0, &text, 0)
+                .unwrap();
+        }
+        rt.block_on(async {
+            let (_stop_tx, stop) = watch::channel(false);
+            let _h = r.spawn_claim_loop(stop);
+            assert_eq!(wait_terminal(&f, &id).await, DbStatus::Done);
+        });
+        let got = seen.lock().unwrap().clone();
+        let mut want = vec![
+            (1, Some("stack/a.md".to_owned())),
+            (2, Some("stack/a.md".to_owned())),
+        ];
+        if !resume {
+            want.insert(0, (0, Some("inbox/a.md".to_owned())));
+        }
+        assert_eq!(got, want, "resume={resume}");
+        let mut open = None;
+        while let Ok(n) = rx.try_recv() {
+            if let Notification::JobUpdated(s) = n
+                && s.job_id == id
+                && s.status == JobState::Done
+            {
+                open = s.open_path;
+            }
+        }
+        assert_eq!(open.as_deref(), Some("stack/a.md"), "resume={resume}");
+    }
+}
+
 const SCHEDULED: &str = r#"
 [[action]]
 id = "hourly"

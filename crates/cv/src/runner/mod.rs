@@ -712,6 +712,8 @@ fn execute_steps(
         config,
     };
     let mut seen_outputs = BTreeSet::new();
+    // The run's own context: `active_path` follows a `move` of the active note (WP-8).
+    let mut context = jp.context.clone();
     let mut absorb = |o: &StepOutcome, summary: &mut RunSummary, vars: &mut Map<String, Value>| {
         if o.open_path.is_some() {
             summary.open_path.clone_from(&o.open_path);
@@ -728,6 +730,7 @@ fn execute_steps(
     for (i, step) in action.steps.iter().enumerate() {
         if let Some(o) = done.get(&i) {
             absorb(o, &mut summary, &mut vars);
+            steps::follow_move(&mut context, o);
             if o.stop {
                 break;
             }
@@ -741,7 +744,7 @@ fn execute_steps(
             action,
             step_index: i,
             params: &jp.params,
-            context: &jp.context,
+            context: &context,
             vars: &vars,
             config,
             vault_root: &inner.vault_root,
@@ -781,6 +784,7 @@ fn execute_steps(
                     );
                 }
                 absorb(&o, &mut summary, &mut vars);
+                steps::follow_move(&mut context, &o);
                 if o.stop {
                     break;
                 }

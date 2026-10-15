@@ -558,6 +558,24 @@ fn durable_file_as_kind_retargets_the_tab_on_terminal_status() {
     assert_eq!(tab.path(), "kinds/a.md");
 }
 
+/// editor-feedback-round-2 WP-8: a `Done` job whose `open_path` is the moved note retargets
+/// every tab of the origin (duplicates included), not just the invoking one.
+#[test]
+fn durable_file_as_kind_retargets_every_tab_of_the_origin() {
+    let (_tmp, d, mut app) = durable_move_env();
+    let _ = app.update(Message::Panes(crate::message::PanesMsg::SplitRight));
+    app.prefs.quick_switch_open = crate::header::QuickSwitchOpen::Duplicate;
+    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Pick(
+        "a.md".into(),
+    )));
+    assert_eq!(all_tabs(&app), ["a.md", "a.md"]);
+    run_file_as_kind(&mut app);
+    deliver_terminal(&d, &mut app);
+    assert_eq!(all_tabs(&app), ["kinds/a.md", "kinds/a.md"]);
+    assert!(app.doc("a.md").is_none());
+    assert_eq!(app.doc("kinds/a.md").map(|d| d.path()), Some("kinds/a.md"));
+}
+
 #[test]
 fn durable_file_as_kind_keeps_edits_made_during_the_run_as_a_conflict() {
     let (_tmp, d, mut app) = durable_move_env();

@@ -1804,7 +1804,9 @@ impl App {
 
     /// A renamed file's open tabs follow it (re-read at the new path). Plan
     /// editor-feedback-round-2 WP-7: the document key and every tab of `from` move to `to`
-    /// (tab ids kept); `from`'s reading / view / title / image-pin state is torn down.
+    /// (tab ids kept); `from`'s reading / title / image-pin state is torn down. Plan
+    /// editor-feedback-round-2 WP-8: the explorer rename, the breadcrumb rename and an action's
+    /// `move` (via [`Self::follow_open`]) all end here.
     fn retarget(&mut self, from: &str, to: &str) {
         if !self.path_open(from) {
             return;
@@ -1812,31 +1814,41 @@ impl App {
         let Some(d) = &self.daemon else { return };
         match d.read_file(to) {
             Ok((bytes, hash)) => {
-                let mode = self.reading.mode(from);
                 let doc = crate::source::SourceBuffer::new(to, &bytes, hash);
-                for (_, ps) in self.panes.iter_mut() {
-                    for t in ps.tabs.iter_mut().filter(|t| t.path == from) {
-                        to.clone_into(&mut t.path);
-                    }
-                    ps.history.retarget(from, to);
-                }
-                #[cfg(test)]
-                self.closed.push(from.to_owned());
                 self.docs.remove(from);
-                if let Some(ids) = self.closing.remove(from) {
-                    self.closing.insert(to.to_owned(), ids);
-                }
-                self.fm_titles.borrow_mut().remove(from);
-                self.reading.on_tab_closed(from);
-                self.views.on_tab_closed(from);
-                self.reading
-                    .register(&doc, mode, true, self.daemon.as_ref());
-                self.docs.insert(to.to_owned(), doc);
-                self.ui.touch_recent(to);
-                self.persist();
+                self.move_path_state(from, to, doc);
             }
             Err(e) => self.status.error = Some(open_error(&e)),
         }
+    }
+
+    /// The shared tail of every rename follow: every tab of `from` (and its history) moves to
+    /// `to`, `doc` is installed under `to`, per-path state is re-keyed. Hosted view results move
+    /// with the host and go stale (re-run against `to` while the old result stays shown — no
+    /// flash), and every other view goes stale too, since a rename changes link targets they
+    /// may list (WP-8).
+    fn move_path_state(&mut self, from: &str, to: &str, doc: crate::source::SourceBuffer) {
+        let mode = self.reading.mode(from);
+        for (_, ps) in self.panes.iter_mut() {
+            for t in ps.tabs.iter_mut().filter(|t| t.path == from) {
+                to.clone_into(&mut t.path);
+            }
+            ps.history.retarget(from, to);
+        }
+        #[cfg(test)]
+        self.closed.push(from.to_owned());
+        if let Some(ids) = self.closing.remove(from) {
+            self.closing.insert(to.to_owned(), ids);
+        }
+        self.fm_titles.borrow_mut().remove(from);
+        self.reading.on_tab_closed(from);
+        self.views.rehost(from, to);
+        self.views.invalidate(&[]);
+        self.reading
+            .register(&doc, mode, true, self.daemon.as_ref());
+        self.docs.insert(to.to_owned(), doc);
+        self.ui.touch_recent(to);
+        self.persist();
     }
 
     /// The Quick Switch placement from `editor.toml` `quick_switch_open` (plan
@@ -2343,33 +2355,14 @@ impl App {
                 return;
             }
         };
-        let mode = self.reading.mode(&from);
         let Some(mut doc) = self.docs.remove(&from) else {
             return;
         };
         doc.follow_move(to, hash);
-        for (_, ps) in self.panes.iter_mut() {
-            for t in ps.tabs.iter_mut().filter(|t| t.path == from) {
-                to.clone_into(&mut t.path);
-            }
-            ps.history.retarget(&from, to);
-        }
-        #[cfg(test)]
-        self.closed.push(from.clone());
-        if let Some(ids) = self.closing.remove(&from) {
-            self.closing.insert(to.to_owned(), ids);
-        }
-        self.fm_titles.borrow_mut().remove(&from);
-        self.reading.on_tab_closed(&from);
-        self.views.on_tab_closed(&from);
-        self.reading
-            .register(&doc, mode, true, self.daemon.as_ref());
-        self.docs.insert(to.to_owned(), doc);
+        self.move_path_state(&from, to, doc);
         self.status.error = Some(format!(
             "{from} moved to {to} while you were editing: keep mine saves your text there"
         ));
-        self.ui.touch_recent(to);
-        self.persist();
     }
 
     // ---- WP-5: side panels ----
@@ -2560,6 +2553,11 @@ impl App {
                         self.panels.invalidate();
                         if path.starts_with(crate::palette::CONFIG_PREFIX) {
                             self.palette.invalidate();
+                        }
+                        if kind == cv_protocol::ChangeKind::Renamed {
+                            // WP-8: a rename changes link targets any view may list; shown
+                            // fences re-run while their old result stays up (no flash).
+                            self.views.invalidate(&[]);
                         }
                         self.explorer.file_changed(&path, kind, &self.ui.expanded);
                         if crate::settings::is_view_path(&path)

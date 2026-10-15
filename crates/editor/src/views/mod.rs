@@ -147,6 +147,27 @@ impl ViewStore {
         }
     }
 
+    /// The host note `from` was renamed/moved to `to` (plan editor-feedback-round-2 WP-8): its
+    /// hosted entries move to `to` keeping their shown state and scroll window (no flash), go
+    /// stale and bump their epoch so the fence re-runs against `to`. A run in flight for `from`
+    /// is abandoned (its `Loaded` finds no `from` entry).
+    pub fn rehost(&mut self, from: &str, to: &str) {
+        let keys: Vec<Key> = self
+            .entries
+            .keys()
+            .filter(|(_, h)| h.as_deref() == Some(from))
+            .cloned()
+            .collect();
+        for k in keys {
+            if let Some(mut e) = self.entries.remove(&k) {
+                e.in_flight = false;
+                e.stale = true;
+                e.epoch = e.epoch.wrapping_add(1);
+                self.entries.insert((k.0, Some(to.to_owned())), e);
+            }
+        }
+    }
+
     /// A tab closed: drop the results it hosted.
     pub fn on_tab_closed(&mut self, path: &str) {
         self.entries.retain(|(_, h), _| h.as_deref() != Some(path));
@@ -177,6 +198,11 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
         ViewsMsg::Loaded { id, host, result } => {
             if let Some(e) = store.entries.get_mut(&(id, host)) {
                 e.in_flight = false;
+                if e.stale {
+                    // Invalidated while in flight (WP-8): the fence's `Need` for the bumped
+                    // epoch was refused then, so bump again to make a shown fence re-request.
+                    e.epoch = e.epoch.wrapping_add(1);
+                }
                 e.state = match result.and_then(|v| decode(&v).map_err(|e| e.to_string())) {
                     Ok(d) => State::Ready(d),
                     Err(err) => State::Error(err),

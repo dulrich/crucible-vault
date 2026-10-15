@@ -388,6 +388,8 @@ fn move_note(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, Step
     let mut out = StepOutcome::default();
     out.vars
         .insert("moved_path".into(), Value::String(dst.clone()));
+    out.vars
+        .insert(super::MOVED_FROM.into(), Value::String(src.clone()));
     out.open_path = Some(dst.clone());
     if dst == src {
         return Ok(out);

@@ -309,3 +309,87 @@ fn refresh_of_a_ready_entry_keeps_rows_and_window() {
     assert!(matches!(&e.state, State::Ready(d) if d.lines.len() == 2));
     assert_eq!(e.window, window, "scroll window kept across the refresh");
 }
+
+// ---- editor-feedback-round-2 WP-8: views follow a rename without a flash ----
+
+fn ready(app: &App, host: &str) -> bool {
+    matches!(
+        app.views.get(ID, Some(host)).map(|e| &e.state),
+        Some(State::Ready(_))
+    )
+}
+
+#[test]
+fn file_changed_renamed_marks_every_view_stale() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ID, ViewResult(result())).expect("script");
+    need(&mut app);
+    let epoch = app.views.get(ID, Some(NOTE)).expect("entry").epoch;
+    let _ = app.update(Message::Status(StatusMsg::Notification(
+        Notification::FileChanged {
+            path: "Other.md".into(),
+            kind: cv_protocol::ChangeKind::Renamed,
+            hash: None,
+            origin: cv_protocol::Origin::External,
+        },
+    )));
+    let e = app.views.get(ID, Some(NOTE)).expect("entry");
+    assert!(e.stale && e.epoch == epoch + 1);
+    assert!(ready(&app, NOTE), "old result stays shown");
+    need(&mut app);
+    assert_eq!(d.view_calls().expect("calls").len(), 2);
+}
+
+#[test]
+fn retarget_rehosts_view_entries_under_the_new_path() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ID, ViewResult(result())).expect("script");
+    need(&mut app);
+    d.rename(NOTE, "Moved.md").expect("rename");
+    let _ = app.update(Message::Explorer(crate::message::ExplorerMsg::Done(
+        crate::explorer::FileOpDone {
+            op: crate::explorer::FileOp::Rename {
+                from: NOTE.into(),
+                to: "Moved.md".into(),
+            },
+            result: Ok("Moved.md".into()),
+        },
+    )));
+    assert!(app.views.get(ID, Some(NOTE)).is_none());
+    let e = app.views.get(ID, Some("Moved.md")).expect("rehosted");
+    assert!(e.stale && !e.in_flight);
+    assert!(ready(&app, "Moved.md"), "no flash: the old rows stay up");
+    let _ = app.update(Message::Views(ViewsMsg::Need {
+        id: ID.into(),
+        host: Some("Moved.md".into()),
+    }));
+    assert_eq!(
+        d.view_calls().expect("calls").last(),
+        Some(&(ID.to_owned(), Some("Moved.md".to_owned())))
+    );
+}
+
+#[test]
+fn invalidation_during_a_run_re_requests_after_it_lands() {
+    let mut store = ViewStore::default();
+    let need = || ViewsMsg::Need {
+        id: ID.into(),
+        host: Some(NOTE.into()),
+    };
+    assert!(matches!(update(&mut store, need()), Effect::Run { .. }));
+    store.invalidate(&[]);
+    let epoch = store.get(ID, Some(NOTE)).expect("entry").epoch;
+    // The fence's re-sighting while in flight is refused …
+    assert_eq!(update(&mut store, need()), Effect::None);
+    let _ = update(
+        &mut store,
+        ViewsMsg::Loaded {
+            id: ID.into(),
+            host: Some(NOTE.into()),
+            result: Ok(result()),
+        },
+    );
+    // … so landing bumps the epoch (new sensor key) and the next sighting re-runs.
+    assert_eq!(store.get(ID, Some(NOTE)).expect("entry").epoch, epoch + 1);
+    assert!(matches!(update(&mut store, need()), Effect::Run { .. }));
+}
