@@ -622,7 +622,13 @@ mod wp4 {
         let (_tmp, d) = fake_arc();
         d.create_note("wp4bm/a.md", "a").expect("create");
         let mut app = app_over(&d, None);
-        assert!(app.bookmarks.items.is_empty() && app.bookmarks.hash.is_none());
+        assert!(
+            app.bookmarks.items.is_empty()
+                && app
+                    .settings
+                    .file(BOOKMARKS_PATH)
+                    .is_some_and(|f| f.base.is_none())
+        );
         let _ = app.update(Message::Tabs(TabsMsg::Open("wp4bm/a.md".into())));
         let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
         let (bytes, h1) = d.read_file(BOOKMARKS_PATH).expect("created");
@@ -633,7 +639,12 @@ mod wp4 {
                 path: "wp4bm/a.md".into()
             }]
         );
-        assert_eq!(app.bookmarks.hash.as_ref(), Some(&h1));
+        assert_eq!(
+            app.settings
+                .file(BOOKMARKS_PATH)
+                .and_then(|f| f.base.as_ref()),
+            Some(&h1)
+        );
 
         // Loading from an existing file.
         let fresh = app_over(&d, None);

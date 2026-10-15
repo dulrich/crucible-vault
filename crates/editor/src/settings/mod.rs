@@ -38,11 +38,14 @@
 //! app as `App::prefs`.
 
 pub mod editor_prefs;
+pub mod form;
+pub mod pages;
 pub mod status;
+pub mod widgets;
 
 use std::collections::BTreeMap;
 
-use cv_schema::{ConfigDoc, DocError, FieldError, Node};
+use cv_schema::{ConfigDoc, DocError, FieldError, Node, Seg};
 use iced::widget::{Space, button, column, container, row, scrollable, text};
 use iced::{Element, Length, Theme};
 
@@ -228,7 +231,7 @@ pub enum LoadState {
 /// A save ready to run off the UI thread.
 #[derive(Debug, Clone)]
 pub struct SaveJob {
-    pub path: &'static str,
+    pub path: String,
     pub content: String,
     pub base: Option<ContentHash>,
 }
@@ -236,7 +239,7 @@ pub struct SaveJob {
 impl SaveJob {
     /// Runs the write (blocking).
     pub fn run(&self, d: &dyn DaemonClient) -> Result<WriteOutcome, String> {
-        write_config(d, self.path, &self.content, self.base.as_ref())
+        write_config(d, &self.path, &self.content, self.base.as_ref())
     }
 }
 
@@ -247,7 +250,7 @@ pub const CHANGED_ON_DISK: &str = "changed on disk; reloaded (your edits were no
 #[derive(Debug, Clone)]
 pub struct ConfigFile {
     /// Vault-relative path.
-    pub path: &'static str,
+    pub path: String,
     /// Form-level schema (`None` = no checks).
     pub schema: Option<&'static Node>,
     /// The document (`None` = not loaded / malformed / read error).
@@ -265,13 +268,20 @@ pub struct ConfigFile {
     pub notice: Option<String>,
     /// A save is in flight.
     pub saving: bool,
+    /// Local non-blocking diagnostics (views compile notices).
+    pub warnings: Vec<String>,
+    /// A local check over the candidate text: `(blocking errors, warnings)` (views carve-out).
+    pub local_check: Option<LocalCheck>,
 }
+
+/// A local check of a file's candidate text: `(blocking errors, warnings)`.
+pub type LocalCheck = fn(&str, &str) -> (Vec<String>, Vec<String>);
 
 impl ConfigFile {
     /// An unloaded file.
-    pub fn new(path: &'static str, schema: Option<&'static Node>) -> Self {
+    pub fn new(path: impl Into<String>, schema: Option<&'static Node>) -> Self {
         Self {
-            path,
+            path: path.into(),
             schema,
             doc: None,
             base: None,
@@ -281,12 +291,14 @@ impl ConfigFile {
             reload_errors: Vec::new(),
             notice: None,
             saving: false,
+            warnings: Vec::new(),
+            local_check: None,
         }
     }
 
     /// (Re)loads from disk, dropping unsaved edits.
     pub fn load(&mut self, d: &dyn DaemonClient) {
-        self.apply_read(d.read_file(self.path));
+        self.apply_read(d.read_file(&self.path));
     }
 
     /// Installs a read result (pure; [`ConfigFile::load`] feeds it).
@@ -329,6 +341,16 @@ impl ConfigFile {
             (Some(doc), Some(schema)) => cv_schema::validate(doc, schema),
             _ => Vec::new(),
         };
+        self.warnings.clear();
+        if let (Some(doc), Some(check)) = (&self.doc, self.local_check) {
+            let (errs, warns) = check(&self.path, &doc.to_string());
+            self.errors
+                .extend(errs.into_iter().map(|message| FieldError {
+                    path: cv_schema::Path::root(),
+                    message,
+                }));
+            self.warnings = warns;
+        }
     }
 
     /// Applies an edit to the doc (marks dirty, revalidates). No doc (malformed) → an error.
@@ -369,7 +391,7 @@ impl ConfigFile {
         let content = self.doc.as_ref()?.to_string();
         self.saving = true;
         Some(SaveJob {
-            path: self.path,
+            path: self.path.clone(),
             content,
             base: self.base.clone(),
         })
@@ -416,13 +438,13 @@ impl ConfigFile {
 }
 
 /// Every editable file, in rail order.
-fn new_files() -> BTreeMap<&'static str, ConfigFile> {
+fn new_files() -> BTreeMap<String, ConfigFile> {
     Section::ALL
         .into_iter()
         .filter_map(|s| {
             let path = s.file()?;
             let schema = cv_schema::schema_for(s.file_name()?);
-            Some((path, ConfigFile::new(path, schema)))
+            Some((path.to_owned(), ConfigFile::new(path, schema)))
         })
         .collect()
 }
@@ -432,7 +454,7 @@ fn new_files() -> BTreeMap<&'static str, ConfigFile> {
 pub struct Settings {
     pub section: Section,
     /// Every file page's save loop, keyed by vault path.
-    pub files: BTreeMap<&'static str, ConfigFile>,
+    pub files: BTreeMap<String, ConfigFile>,
     pub status: status::StatusPage,
     /// Malformed-`editor.toml` / migration notes shown on the Editor page.
     pub editor_note: Option<String>,
@@ -440,6 +462,12 @@ pub struct Settings {
     pub confirm_trash: Option<String>,
     /// The hidden-commands field as typed (reset on load/revert).
     pub hidden_draft: Option<String>,
+    /// Form UI state (expansion, drafts) of every file page.
+    pub form: form::FormState,
+    /// The Views page's selected file (vault path).
+    pub view_selected: Option<String>,
+    /// The "New view file" name field.
+    pub new_view: String,
 }
 
 impl Default for Settings {
@@ -451,6 +479,9 @@ impl Default for Settings {
             editor_note: None,
             confirm_trash: None,
             hidden_draft: None,
+            form: form::FormState::default(),
+            view_selected: None,
+            new_view: String::new(),
         }
     }
 }
@@ -495,6 +526,334 @@ impl Settings {
     pub fn any_dirty(&self) -> bool {
         self.files.values().any(|f| f.dirty)
     }
+
+    /// Applies a document edit to `file` (an error becomes its notice) and keeps the form UI
+    /// state attached to the items it names.
+    pub fn edit(&mut self, file: &str, edit: &DocEdit) -> Result<(), String> {
+        let Some(f) = self.files.get_mut(file) else {
+            return Err(format!("{file}: no such settings file"));
+        };
+        if let Err(e) = f.edit(|doc| edit.apply(doc)) {
+            f.notice = Some(e.clone());
+            return Err(e);
+        }
+        let fs = &mut self.form;
+        let idx = |s: &Seg| match s {
+            Seg::Index(i) => Some(*i),
+            Seg::Key(_) => None,
+        };
+        match edit {
+            DocEdit::Set(..) => {}
+            DocEdit::Remove(p) => {
+                fs.clear_drafts(file);
+                if let Some((Seg::Index(gone), parent)) = p.0.split_last() {
+                    let parent = cv_schema::Path(parent.to_vec());
+                    let gone = *gone;
+                    fs.remap(file, &parent, |s| match idx(s) {
+                        Some(i) if i == gone => None,
+                        Some(i) if i > gone => Some(Seg::Index(i - 1)),
+                        _ => Some(s.clone()),
+                    });
+                } else {
+                    let p = p.clone();
+                    fs.expanded.retain(|(fl, q)| {
+                        fl != file || q.0.len() < p.0.len() || q.0[..p.0.len()] != p.0[..]
+                    });
+                }
+            }
+            DocEdit::InsertRecord(list, at, _) => {
+                fs.clear_drafts(file);
+                let at = *at;
+                fs.remap(file, list, |s| match idx(s) {
+                    Some(i) if i >= at => Some(Seg::Index(i + 1)),
+                    _ => Some(s.clone()),
+                });
+                fs.expanded.insert((file.to_owned(), list.index(at)));
+            }
+            DocEdit::Move(list, from, to) => {
+                fs.clear_drafts(file);
+                let (from, to) = (*from, *to);
+                fs.remap(file, list, |s| match idx(s) {
+                    Some(i) if i == from => Some(Seg::Index(to)),
+                    Some(i) if from < to && i > from && i <= to => Some(Seg::Index(i - 1)),
+                    Some(i) if to < from && i >= to && i < from => Some(Seg::Index(i + 1)),
+                    _ => Some(s.clone()),
+                });
+            }
+            DocEdit::InsertKey(map, key, _) => {
+                fs.clear_drafts(file);
+                fs.expanded.insert((file.to_owned(), map.key(key)));
+            }
+            DocEdit::RenameKey(map, from, to) => {
+                fs.clear_drafts(file);
+                let (from, to) = (from.clone(), to.clone());
+                fs.remap(file, map, |s| match s {
+                    Seg::Key(k) if *k == from => Some(Seg::Key(to.clone())),
+                    _ => Some(s.clone()),
+                });
+            }
+            DocEdit::SwitchVariant(..) => fs.clear_drafts(file),
+        }
+        Ok(())
+    }
+
+    /// A form UI message on `file` (drafts, expansion, typed input that may edit the doc).
+    pub fn form_msg(&mut self, file: &str, m: FormMsg) {
+        use form::draft_key;
+        let fs = &mut self.form;
+        let edit = match m {
+            FormMsg::Toggle(p) => {
+                fs.toggle(file, &p);
+                None
+            }
+            FormMsg::Text {
+                path,
+                text,
+                required,
+                path_field,
+            } => {
+                if path_field {
+                    fs.active_path = Some((file.to_owned(), path.clone()));
+                }
+                Some(text_edit(&self.files, file, path, text, required))
+            }
+            FormMsg::PickPath { path, text } => {
+                fs.active_path = None;
+                Some(DocEdit::Set(path, ScalarValue::Str(text)))
+            }
+            FormMsg::Number { path, text, float } => {
+                let key = draft_key("num", &path);
+                fs.set_draft(file, key, Some(text.clone()));
+                if text.trim().is_empty() {
+                    let present = self
+                        .files
+                        .get(file)
+                        .and_then(|f| f.doc.as_ref())
+                        .is_some_and(|d| d.get(&path).is_some());
+                    present.then_some(DocEdit::Remove(path))
+                } else {
+                    form::parse_number(&text, float).map(|v| match v.as_integer() {
+                        Some(i) => DocEdit::Set(path, ScalarValue::Int(i)),
+                        None => DocEdit::Set(path, ScalarValue::Float(v.as_float().unwrap_or(0.0))),
+                    })
+                }
+            }
+            FormMsg::ChipDraft { path, text } => {
+                fs.set_draft(file, draft_key("chip", &path), Some(text));
+                None
+            }
+            FormMsg::ChipAdd { path, value } => {
+                let key = draft_key("chip", &path);
+                let v = value.or_else(|| fs.draft(file, &key).map(str::to_owned));
+                fs.set_draft(file, key, None);
+                let v = v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+                v.map(|v| {
+                    let mut items = self.str_list(file, &path);
+                    items.push(v);
+                    DocEdit::Set(path, ScalarValue::StrList(items))
+                })
+            }
+            FormMsg::ChipRemove { path, index } => {
+                let mut items = self.str_list(file, &path);
+                (index < items.len()).then(|| {
+                    items.remove(index);
+                    DocEdit::Set(path, ScalarValue::StrList(items))
+                })
+            }
+            FormMsg::NewKeyDraft { map, text } => {
+                fs.set_draft(file, draft_key("newkey", &map), Some(text));
+                None
+            }
+            FormMsg::NewKeyAdd { map, value } => {
+                let key = draft_key("newkey", &map);
+                let name = fs.draft(file, &key).unwrap_or_default().trim().to_owned();
+                if name.is_empty() {
+                    None
+                } else {
+                    fs.set_draft(file, key, None);
+                    Some(DocEdit::InsertKey(map, name, value))
+                }
+            }
+            FormMsg::RenameDraft { at, text } => {
+                fs.set_draft(file, draft_key("rename", &at), Some(text));
+                None
+            }
+            FormMsg::RenameCommit { map, from } => {
+                let key = draft_key("rename", &map.key(&from));
+                let to = fs.draft(file, &key).unwrap_or(&from).trim().to_owned();
+                fs.set_draft(file, key, None);
+                (!to.is_empty() && to != from).then_some(DocEdit::RenameKey(map, from, to))
+            }
+        };
+        if let Some(e) = edit {
+            let _ = self.edit(file, &e);
+        }
+    }
+
+    fn str_list(&self, file: &str, path: &cv_schema::Path) -> Vec<String> {
+        self.files
+            .get(file)
+            .and_then(|f| f.doc.as_ref())
+            .and_then(|d| d.get_str_list(path))
+            .unwrap_or_default()
+    }
+
+    /// Registers a [`ConfigFile`] for every `views/*.toml` among `paths` (the explorer's path
+    /// list — no new daemon call), not yet known.
+    pub fn sync_views(&mut self, paths: &[String]) {
+        for p in paths {
+            if is_view_path(p) && !self.files.contains_key(p.as_str()) {
+                self.files.insert(p.clone(), view_file(p));
+            }
+        }
+        if self.view_selected.is_none() {
+            self.view_selected = self.view_paths().into_iter().next();
+        }
+    }
+
+    /// Every known view file, sorted.
+    pub fn view_paths(&self) -> Vec<String> {
+        self.files
+            .keys()
+            .filter(|k| is_view_path(k))
+            .cloned()
+            .collect()
+    }
+
+    /// "New view file": an absent [`ConfigFile`] at `views/<name>.toml` (dirty, so Save
+    /// creates it at the exact name). Returns the path, or why not.
+    pub fn new_view_file(&mut self, name: &str) -> Result<String, String> {
+        let name = name.trim();
+        let stem = name.strip_suffix(".toml").unwrap_or(name);
+        if stem.is_empty()
+            || !stem
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err("a view file name is letters, digits, '-' or '_'".into());
+        }
+        let path = format!("{VIEWS_DIR}/{stem}.toml");
+        if self.files.contains_key(&path) {
+            return Err(format!("{path} already exists"));
+        }
+        let mut f = view_file(&path);
+        f.doc = Some(ConfigDoc::new());
+        f.state = LoadState::Absent;
+        f.dirty = true;
+        f.revalidate();
+        self.files.insert(path.clone(), f);
+        self.view_selected = Some(path.clone());
+        Ok(path)
+    }
+}
+
+/// The views folder.
+pub const VIEWS_DIR: &str = "_custom/crucible-vault/views";
+
+/// A direct `views/*.toml` child.
+pub fn is_view_path(p: &str) -> bool {
+    p.strip_prefix(VIEWS_DIR)
+        .and_then(|r| r.strip_prefix('/'))
+        .is_some_and(|n| !n.contains('/') && n.ends_with(".toml") && n.len() > 5)
+}
+
+fn view_file(path: &str) -> ConfigFile {
+    let mut f = ConfigFile::new(path, Some(cv_schema::view_schema()));
+    f.local_check = Some(views_check);
+    f
+}
+
+/// The Views carve-out's local diagnostics: the `views` crate's own parse (blocking) and
+/// compile (notices → warnings), as the daemon's `views::def::load_dir` runs them.
+pub fn views_check(path: &str, text: &str) -> (Vec<String>, Vec<String>) {
+    let stem = path
+        .rsplit('/')
+        .next()
+        .and_then(|n| n.strip_suffix(".toml"))
+        .unwrap_or("view");
+    match toml::from_str::<::views::def::BaseDef>(text) {
+        Err(e) => (vec![format!("views: {}", e.message().trim())], Vec::new()),
+        Ok(def) => {
+            let mut notices = Vec::new();
+            let base = ::views::def::Base::compile(stem, &def, &mut notices);
+            for v in &base.views {
+                notices.extend(v.errors.iter().map(|e| format!("view `{}`: {e}", v.name)));
+            }
+            (Vec::new(), notices)
+        }
+    }
+}
+
+fn text_edit(
+    files: &BTreeMap<String, ConfigFile>,
+    file: &str,
+    path: cv_schema::Path,
+    text: String,
+    required: bool,
+) -> DocEdit {
+    let present = files
+        .get(file)
+        .and_then(|f| f.doc.as_ref())
+        .is_some_and(|d| d.get(&path).is_some());
+    if text.is_empty() && !required && present {
+        DocEdit::Remove(path)
+    } else {
+        DocEdit::Set(path, ScalarValue::Str(text))
+    }
+}
+
+/// Form UI messages (typing, expansion); see [`Settings::form_msg`].
+#[derive(Debug, Clone)]
+pub enum FormMsg {
+    /// Expand / collapse a list item or map entry.
+    Toggle(cv_schema::Path),
+    /// A text field changed (empty + optional removes the key).
+    Text {
+        path: cv_schema::Path,
+        text: String,
+        required: bool,
+        path_field: bool,
+    },
+    /// A vault-path suggestion was picked.
+    PickPath {
+        path: cv_schema::Path,
+        text: String,
+    },
+    /// A number field changed (applied when it parses).
+    Number {
+        path: cv_schema::Path,
+        text: String,
+        float: bool,
+    },
+    ChipDraft {
+        path: cv_schema::Path,
+        text: String,
+    },
+    /// Add a chip (`None`: the draft).
+    ChipAdd {
+        path: cv_schema::Path,
+        value: Option<String>,
+    },
+    ChipRemove {
+        path: cv_schema::Path,
+        index: usize,
+    },
+    NewKeyDraft {
+        map: cv_schema::Path,
+        text: String,
+    },
+    NewKeyAdd {
+        map: cv_schema::Path,
+        value: form::NewValue,
+    },
+    RenameDraft {
+        at: cv_schema::Path,
+        text: String,
+    },
+    RenameCommit {
+        map: cv_schema::Path,
+        from: String,
+    },
 }
 
 /// Settings messages (wrapped in [`Message::Settings`]).
@@ -507,14 +866,22 @@ pub enum SettingsMsg {
     /// An Editor-page control changed.
     Pref(editor_prefs::PrefEdit),
     /// A generic document edit on a file page (WP-3 forms emit these).
-    Edit(&'static str, DocEdit),
-    Save(&'static str),
+    Edit(String, DocEdit),
+    /// A form UI message on a file page.
+    Form(String, FormMsg),
+    /// Views page: select a file.
+    ViewSelect(String),
+    /// Views page: the new-file name field.
+    NewViewName(String),
+    /// Views page: create the named file (absent until saved).
+    NewViewCreate,
+    Save(String),
     /// Reload from disk, dropping edits.
-    Revert(&'static str),
+    Revert(String),
     /// A malformed file: start from an empty doc.
-    StartOver(&'static str),
+    StartOver(String),
     /// A save finished.
-    Saved(&'static str, Result<WriteOutcome, String>),
+    Saved(String, Result<WriteOutcome, String>),
     /// Refresh the Status page.
     RefreshStatus,
     /// The `status` RPC returned.
@@ -531,6 +898,18 @@ pub enum DocEdit {
     Set(cv_schema::Path, ScalarValue),
     /// Remove the item at a path.
     Remove(cv_schema::Path),
+    /// Insert a table record into a list at an index, with initial scalar fields (a union's
+    /// tag among them).
+    InsertRecord(cv_schema::Path, usize, Vec<(String, ScalarValue)>),
+    /// Move a list item `from` → `to`.
+    Move(cv_schema::Path, usize, usize),
+    /// Add a map key.
+    InsertKey(cv_schema::Path, String, form::NewValue),
+    /// Rename a map key (position, value and comments kept).
+    RenameKey(cv_schema::Path, String, String),
+    /// Switch a tagged union's kind at a path: keys the old kind declares and the new one does
+    /// not are dropped; shared and unknown keys stay.
+    SwitchVariant(cv_schema::Path, &'static cv_schema::Union, String),
 }
 
 /// A scalar value for [`DocEdit::Set`].
@@ -543,28 +922,57 @@ pub enum ScalarValue {
     StrList(Vec<String>),
 }
 
+impl ScalarValue {
+    fn value(&self) -> cv_schema::toml_edit::Value {
+        use cv_schema::toml_edit::{Array, Value};
+        match self {
+            ScalarValue::Str(s) => s.as_str().into(),
+            ScalarValue::Bool(b) => (*b).into(),
+            ScalarValue::Int(i) => (*i).into(),
+            ScalarValue::Float(f) => (*f).into(),
+            ScalarValue::StrList(l) => {
+                let mut a = Array::new();
+                for s in l {
+                    a.push(s.as_str());
+                }
+                Value::Array(a)
+            }
+        }
+    }
+}
+
 impl DocEdit {
     /// Applies the edit to `doc`.
     pub fn apply(&self, doc: &mut ConfigDoc) -> Result<(), DocError> {
-        use cv_schema::toml_edit::{Array, Value};
         match self {
-            DocEdit::Set(p, v) => {
-                let value: Value = match v {
-                    ScalarValue::Str(s) => s.as_str().into(),
-                    ScalarValue::Bool(b) => (*b).into(),
-                    ScalarValue::Int(i) => (*i).into(),
-                    ScalarValue::Float(f) => (*f).into(),
-                    ScalarValue::StrList(l) => {
-                        let mut a = Array::new();
-                        for s in l {
-                            a.push(s.as_str());
-                        }
-                        Value::Array(a)
-                    }
-                };
-                doc.set(p, value)
-            }
+            DocEdit::Set(p, v) => doc.set(p, v.value()),
             DocEdit::Remove(p) => doc.remove(p).map(|_| ()),
+            DocEdit::InsertRecord(list, at, fields) => {
+                let mut t = cv_schema::toml_edit::Table::new();
+                for (k, v) in fields {
+                    t.insert(k, cv_schema::toml_edit::Item::Value(v.value()));
+                }
+                doc.insert_record(list, *at, t)
+            }
+            DocEdit::Move(list, from, to) => doc.move_item(list, *from, *to),
+            DocEdit::InsertKey(map, key, v) => doc.insert_key(map, key, v.item()),
+            DocEdit::RenameKey(map, from, to) => doc.rename_key(map, from, to),
+            DocEdit::SwitchVariant(p, u, tag) => {
+                let new = u
+                    .variant(tag)
+                    .ok_or_else(|| DocError::BadPath(format!("{p}: unknown kind `{tag}`")))?;
+                if let Some(old) = doc.get_str(&p.key(u.tag)).and_then(|t| u.variant(t)) {
+                    for k in doc.keys(p) {
+                        if k != u.tag
+                            && old.record.field(&k).is_some()
+                            && new.record.field(&k).is_none()
+                        {
+                            doc.remove(&p.key(&k))?;
+                        }
+                    }
+                }
+                doc.set(&p.key(u.tag), tag.as_str())
+            }
         }
     }
 }
@@ -577,6 +985,7 @@ fn msg(m: SettingsMsg) -> Message {
 pub fn view<'a>(
     s: &'a Settings,
     prefs: &'a editor_prefs::Prefs,
+    paths: &'a [String],
     t: Tokens,
     mode: cv_protocol::Mode,
 ) -> Element<'a, Message> {
@@ -614,19 +1023,42 @@ pub fn view<'a>(
     let rail = container(rail)
         .padding(1)
         .style(crate::theme::seg_group_style(t));
-    let body = scrollable(container(page(s, prefs, t, mode)).padding([0, 16]))
+    let body = scrollable(container(page(s, prefs, paths, t, mode)).padding([0, 16]))
         .width(Length::Fill)
         .height(Length::Fill);
     row![rail, body].spacing(12).height(Length::Fill).into()
 }
 
-/// One section's page.
+/// One section's page (view build timed like `sync_buffers`: `CV_EDITOR_TRACE` debug line
+/// when it takes ≥1 ms).
 pub fn page<'a>(
     s: &'a Settings,
     prefs: &'a editor_prefs::Prefs,
+    paths: &'a [String],
     t: Tokens,
     mode: cv_protocol::Mode,
 ) -> Element<'a, Message> {
+    let t0 = std::time::Instant::now();
+    let el = page_inner(s, prefs, paths, t, mode);
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    if ms >= 1.0 {
+        tracing::debug!(
+            elapsed_ms = ms,
+            section = s.section.label(),
+            "settings::page"
+        );
+    }
+    el
+}
+
+fn page_inner<'a>(
+    s: &'a Settings,
+    prefs: &'a editor_prefs::Prefs,
+    paths: &'a [String],
+    t: Tokens,
+    mode: cv_protocol::Mode,
+) -> Element<'a, Message> {
+    let cx = pages::PageCx { s, paths, t, mode };
     let heading = text(s.section.label()).size(20).color(t.heading.to_color());
     let body: Element<'a, Message> = match s.section {
         Section::Editor => match s.file(editor_prefs::EDITOR_PATH) {
@@ -642,22 +1074,18 @@ pub fn page<'a>(
         },
         Section::Status => status::view(&s.status, t),
         Section::Hotkeys => placeholder(t, "Hotkey configuration arrives with the Hotkeys page."),
-        Section::Views => placeholder(
-            t,
-            "One page per _custom/crucible-vault/views/*.toml arrives with the Views forms.",
-        ),
-        // WP-3: the config-file forms replace this arm per section.
+        Section::Views => pages::views::view(cx),
         sec => match sec.file().and_then(|p| s.file(p)) {
-            Some(f) => column![
-                file_header(f, t),
-                placeholder(
-                    t,
-                    "The typed form for this file arrives with the config forms."
-                ),
-                save_bar(f, t, mode),
-            ]
-            .spacing(10)
-            .into(),
+            Some(f) => match sec {
+                Section::Actions => pages::actions::view(cx, f),
+                Section::Schedules => pages::schedules::view(cx, f),
+                Section::Captures => pages::captures::view(cx, f),
+                Section::Kinds => pages::kinds::view(cx, f),
+                Section::Agents => pages::agents::view(cx, f),
+                Section::Providers => pages::providers::view(cx, f),
+                Section::Bookmarks => pages::bookmarks::view(cx, f),
+                _ => pages::generic(cx, f, ""),
+            },
             None => Space::new().into(),
         },
     };
@@ -679,7 +1107,7 @@ pub fn file_header(f: &ConfigFile, t: Tokens) -> Element<'_, Message> {
     };
     let bad = matches!(f.state, LoadState::Malformed(_) | LoadState::Error(_));
     let mut col = column![
-        text(f.path).size(13).color(t.text_dim.to_color()),
+        text(f.path.as_str()).size(13).color(t.text_dim.to_color()),
         text(state).size(13).color(if bad {
             t.error_text.to_color()
         } else {
@@ -692,6 +1120,9 @@ pub fn file_header(f: &ConfigFile, t: Tokens) -> Element<'_, Message> {
     }
     for e in &f.errors {
         col = col.push(text(e.to_string()).size(13).color(t.error_text.to_color()));
+    }
+    for w in &f.warnings {
+        col = col.push(text(w.as_str()).size(13).color(t.warn_text.to_color()));
     }
     for e in &f.reload_errors {
         col = col.push(
@@ -718,12 +1149,14 @@ pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'
         .height(crate::theme::CONTROL)
         .padding([0, 14])
         .style(style(f.can_save() && !shadow))
-        .on_press_maybe((f.can_save() && !shadow).then_some(msg(SettingsMsg::Save(f.path))));
+        .on_press_maybe(
+            (f.can_save() && !shadow).then_some(msg(SettingsMsg::Save(f.path.clone()))),
+        );
     let revert = button(text("Revert").size(14))
         .height(crate::theme::CONTROL)
         .padding([0, 14])
         .style(style(false))
-        .on_press_maybe((!f.saving).then_some(msg(SettingsMsg::Revert(f.path))));
+        .on_press_maybe((!f.saving).then_some(msg(SettingsMsg::Revert(f.path.clone()))));
     let mut bar = row![save, revert]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -733,7 +1166,7 @@ pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'
                 .height(crate::theme::CONTROL)
                 .padding([0, 14])
                 .style(style(false))
-                .on_press(msg(SettingsMsg::StartOver(f.path))),
+                .on_press(msg(SettingsMsg::StartOver(f.path.clone()))),
         );
     }
     if f.dirty {
@@ -753,3 +1186,6 @@ pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod form_tests;

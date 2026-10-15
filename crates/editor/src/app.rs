@@ -404,11 +404,21 @@ impl App {
         }
     }
 
+    /// (Re)loads `bookmarks.toml` into its shared settings [`ConfigFile`] (unless the Bookmarks
+    /// page holds unsaved edits) and re-derives the panel list.
     fn load_bookmarks(&mut self) {
-        let Some(d) = &self.daemon else { return };
-        if let Err(e) = self.bookmarks.load(d.as_ref()) {
-            self.status.error = Some(e);
+        let Some(d) = self.daemon.clone() else { return };
+        if let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) {
+            if !f.dirty {
+                f.load(d.as_ref());
+            }
+            if let crate::settings::LoadState::Malformed(e) | crate::settings::LoadState::Error(e) =
+                &f.state
+            {
+                self.status.error = Some(format!("bookmarks: {e}"));
+            }
         }
+        self.sync_bookmarks();
     }
 
     /// Runs `call` against the daemon off the UI thread and feeds `done` its result.
@@ -539,6 +549,7 @@ impl App {
             return crate::settings::view(
                 &self.settings,
                 &self.prefs,
+                &self.explorer.paths,
                 self.tokens,
                 self.status.mode,
             );
@@ -1074,33 +1085,73 @@ impl App {
         match m {
             BookmarkMsg::Open(p) => self.open(&p, true),
             BookmarkMsg::Written(r) => {
-                self.bookmarks.writing = false;
-                match r {
-                    Ok(WriteOutcome::Saved(h)) => self.bookmarks.hash = Some(h),
+                let d = self.daemon.clone();
+                let err = match &r {
+                    Ok(WriteOutcome::Saved(_)) => None,
                     Ok(WriteOutcome::Conflict) => {
-                        self.load_bookmarks();
-                        self.status.error =
-                            Some("bookmarks changed on disk; reloaded (edit not saved)".into());
+                        Some("bookmarks changed on disk; reloaded (edit not saved)".to_owned())
                     }
-                    Err(e) => {
-                        self.load_bookmarks();
-                        self.status.error = Some(format!("bookmarks: {e}"));
+                    Err(e) => Some(format!("bookmarks: {e}")),
+                };
+                if let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) {
+                    let failed = r.is_err();
+                    f.finish_save(r, d.as_deref());
+                    if failed && let Some(d) = &d {
+                        f.load(d.as_ref());
                     }
                 }
+                if err.is_some() {
+                    self.status.error = err;
+                }
+                self.sync_bookmarks();
             }
             edit => {
-                if self.shadow_blocked("bookmark edits are disabled in shadow mode")
-                    || self.bookmarks.writing
-                {
+                if self.shadow_blocked("bookmark edits are disabled in shadow mode") {
                     return Task::none();
                 }
                 let active = self.active_note().map(|t| t.path.clone());
-                if let Some(job) = self.bookmarks.edit(&edit, active.as_deref()) {
-                    return self.rpc(
-                        move |d| job.run(d),
-                        |r| Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Written(r))),
-                    );
+                let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) else {
+                    return Task::none();
+                };
+                if f.saving {
+                    return Task::none();
                 }
+                if f.dirty {
+                    self.status.error = Some(
+                        "bookmarks have unsaved edits on the Settings page; save or revert there"
+                            .into(),
+                    );
+                    return Task::none();
+                }
+                let Some(e) = bookmarks::doc_edit(&edit, &self.bookmarks.items, active.as_deref())
+                else {
+                    return Task::none();
+                };
+                if let Err(err) = self.settings.edit(BOOKMARKS_PATH, &e) {
+                    self.status.error = Some(format!("bookmarks: {err}"));
+                    return Task::none();
+                }
+                let job = self
+                    .settings
+                    .file_mut(BOOKMARKS_PATH)
+                    .and_then(crate::settings::ConfigFile::begin_save);
+                self.sync_bookmarks();
+                let Some(job) = job else {
+                    self.status.error = Some(
+                        "bookmarks: the file has form errors; fix them on the Settings page".into(),
+                    );
+                    if let (Some(d), Some(f)) =
+                        (self.daemon.clone(), self.settings.file_mut(BOOKMARKS_PATH))
+                    {
+                        f.load(d.as_ref());
+                    }
+                    self.sync_bookmarks();
+                    return Task::none();
+                };
+                return self.rpc(
+                    move |d| job.run(d),
+                    |r| Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Written(r))),
+                );
             }
         }
         Task::none()
@@ -2058,11 +2109,10 @@ impl App {
                             self.palette.invalidate();
                         }
                         self.explorer.file_changed(&path, kind, &self.ui.expanded);
-                        if path == BOOKMARKS_PATH
-                            && !self.bookmarks.writing
-                            && hash.as_deref() != self.bookmarks.hash.as_ref().map(|h| h.as_str())
+                        if crate::settings::is_view_path(&path)
+                            && panes::find(&self.panes, crate::settings::SETTINGS_TAB).is_some()
                         {
-                            self.load_bookmarks();
+                            self.sync_view_files();
                         }
                         self.settings_file_changed(&path, hash.as_deref());
                     }
@@ -2151,8 +2201,21 @@ impl App {
             ps.active = Some(ps.tabs.len() - 1);
         }
         self.focus = pane;
+        self.sync_view_files();
+    }
+
+    /// Registers the `views/*.toml` files the explorer knows and loads every unloaded page.
+    fn sync_view_files(&mut self) {
+        self.settings.sync_views(&self.explorer.paths);
         if let Some(d) = &self.daemon {
             self.settings.load_unloaded(d.as_ref());
+        }
+    }
+
+    /// Re-derives the bookmarks panel list from the shared `bookmarks.toml` [`ConfigFile`].
+    fn sync_bookmarks(&mut self) {
+        if let Some(f) = self.settings.file(BOOKMARKS_PATH) {
+            self.bookmarks.sync(f);
         }
     }
 
@@ -2165,6 +2228,12 @@ impl App {
             .settings
             .file_mut(path)
             .is_some_and(|f| f.file_changed(hash, d.as_ref()));
+        if reloaded {
+            self.settings.form.clear_drafts(path);
+        }
+        if path == BOOKMARKS_PATH {
+            self.sync_bookmarks();
+        }
         if reloaded && path == crate::settings::editor_prefs::EDITOR_PATH {
             self.settings.hidden_draft = None;
             self.apply_prefs();
@@ -2204,6 +2273,9 @@ impl App {
             }
             SettingsMsg::Section(s) => {
                 self.settings.section = s;
+                if s == Section::Views {
+                    self.sync_view_files();
+                }
                 if s == Section::Status {
                     return self.fetch_status();
                 }
@@ -2224,20 +2296,31 @@ impl App {
                 self.apply_prefs();
             }
             SettingsMsg::Edit(path, edit) => {
-                if let Some(f) = self.settings.file_mut(path)
-                    && let Err(err) = f.edit(|doc| edit.apply(doc))
-                {
-                    f.notice = Some(err);
-                }
+                let _ = self.settings.edit(&path, &edit);
                 if path == EDITOR_PATH {
                     self.apply_prefs();
+                }
+            }
+            SettingsMsg::Form(path, m) => {
+                self.settings.form_msg(&path, m);
+                if path == EDITOR_PATH {
+                    self.apply_prefs();
+                }
+            }
+            SettingsMsg::ViewSelect(p) => self.settings.view_selected = Some(p),
+            SettingsMsg::NewViewName(n) => self.settings.new_view = n,
+            SettingsMsg::NewViewCreate => {
+                let name = std::mem::take(&mut self.settings.new_view);
+                if let Err(e) = self.settings.new_view_file(&name) {
+                    self.settings.new_view = name;
+                    self.status.error = Some(e);
                 }
             }
             SettingsMsg::Save(path) => {
                 if self.shadow_blocked("settings saves are disabled in shadow mode") {
                     return Task::none();
                 }
-                let Some(job) = self.settings.file_mut(path).and_then(|f| f.begin_save()) else {
+                let Some(job) = self.settings.file_mut(&path).and_then(|f| f.begin_save()) else {
                     return Task::none();
                 };
                 return self.rpc(
@@ -2247,7 +2330,7 @@ impl App {
             }
             SettingsMsg::Saved(path, r) => {
                 let d = self.daemon.clone();
-                if let Some(f) = self.settings.file_mut(path) {
+                if let Some(f) = self.settings.file_mut(&path) {
                     f.finish_save(r, d.as_deref());
                 }
                 if path == EDITOR_PATH {
@@ -2256,13 +2339,17 @@ impl App {
                     self.apply_prefs();
                 }
                 if path == BOOKMARKS_PATH {
-                    self.load_bookmarks();
+                    self.sync_bookmarks();
                 }
             }
             SettingsMsg::Revert(path) => {
-                if let (Some(d), Some(f)) = (self.daemon.clone(), self.settings.file_mut(path)) {
+                if let (Some(d), Some(f)) = (self.daemon.clone(), self.settings.file_mut(&path)) {
                     f.load(d.as_ref());
                     f.notice = None;
+                }
+                self.settings.form.clear_drafts(&path);
+                if path == BOOKMARKS_PATH {
+                    self.sync_bookmarks();
                 }
                 if path == EDITOR_PATH {
                     self.settings.hidden_draft = None;
@@ -2270,7 +2357,7 @@ impl App {
                 }
             }
             SettingsMsg::StartOver(path) => {
-                if let Some(f) = self.settings.file_mut(path) {
+                if let Some(f) = self.settings.file_mut(&path) {
                     f.start_over();
                 }
                 if path == EDITOR_PATH {

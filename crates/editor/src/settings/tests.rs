@@ -449,7 +449,7 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
         (app.prefs.font_size - 30.0).abs() < f32::EPSILON,
         "applied live"
     );
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
     let (bytes, h) = d.read_file(EDITOR_PATH).expect("created");
     let text = String::from_utf8(bytes).expect("utf8");
     assert!(text.contains("font_size = 30"), "{text}");
@@ -475,7 +475,7 @@ fn editor_toml_appeared_since_load_is_a_conflict() {
     let theirs = "font_size = 12\n";
     d.write_note(EDITOR_PATH, theirs, &ContentHash::from_hex(""))
         .expect("external create");
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, theirs.as_bytes());
     assert_eq!(
         config_dir_entries(&d),
@@ -503,7 +503,7 @@ fn editor_toml_cas_conflict_reloads_without_overwrite() {
     let _ = app.update(s(SettingsMsg::Pref(PrefEdit::ConfirmTrash(true))));
     d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
         .expect("external");
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, b"font_size = 26\n");
     assert_eq!(
         app.settings
@@ -545,12 +545,12 @@ fn malformed_editor_toml_falls_back_and_is_kept() {
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert!(matches!(f.state, LoadState::Malformed(_)));
     let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, bad.as_bytes());
     // Start over + Save replaces it through CAS on the malformed content.
-    let _ = app.update(s(SettingsMsg::StartOver(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::StartOver(EDITOR_PATH.into())));
     let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
     let text = String::from_utf8(d.read_file(EDITOR_PATH).expect("r").0).expect("utf8");
     assert!(text.contains("font_size = 30"), "{text}");
 }
@@ -573,7 +573,7 @@ fn surround_migrates_once_from_ui_state() {
     );
     // After a save, editor.toml is the source (the local copy no longer wins).
     let _ = app.update(s(SettingsMsg::Pref(PrefEdit::Surround(Surround::Dark))));
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
     std::fs::write(&state, br#"{"surround":"med"}"#).expect("state");
     let app = app_over(&d, Some(state));
     assert_eq!(app.prefs.surround, Surround::Dark);
@@ -608,7 +608,7 @@ fn font_size_change_resizes_source_and_reading_live() {
     );
     assert!((after - 2.0 * before).abs() < 1e-4, "{before} → {after}");
     // Revert drops the unsaved size.
-    let _ = app.update(s(SettingsMsg::Revert(EDITOR_PATH)));
+    let _ = app.update(s(SettingsMsg::Revert(EDITOR_PATH.into())));
     assert_eq!(app.prefs, Prefs::default());
     // ui_scale is clamped for iced.
     app.prefs.ui_scale = 9.0;
@@ -701,7 +701,11 @@ fn bookmarks_absent_then_appeared_is_a_conflict_not_a_copy() {
     let (_tmp, d) = fake();
     d.create_note("wp2bm/a.md", "a").expect("create");
     let mut app = app_over(&d, None);
-    assert!(app.bookmarks.hash.is_none());
+    assert!(
+        app.settings
+            .file(BOOKMARKS_PATH)
+            .is_some_and(|f| f.base.is_none())
+    );
     let theirs = "[[bookmark]]\nname = \"t\"\npath = \"t.md\"\n";
     d.write_note(BOOKMARKS_PATH, theirs, &ContentHash::from_hex(""))
         .expect("external");
@@ -735,14 +739,14 @@ fn settings_save_of_a_daemon_file_round_trips_comments() {
     let mut app = app_over(&d, None);
     let _ = app.update(s(SettingsMsg::Open));
     let _ = app.update(s(SettingsMsg::Edit(
-        kinds,
+        kinds.into(),
         DocEdit::Set(
             Path::parse("kinds.book.folder").expect("p"),
             ScalarValue::Str("library".into()),
         ),
     )));
     assert!(app.settings.file(kinds).is_some_and(|f| f.dirty));
-    let _ = app.update(s(SettingsMsg::Save(kinds)));
+    let _ = app.update(s(SettingsMsg::Save(kinds.into())));
     let text = String::from_utf8(d.read_file(kinds).expect("r").0).expect("utf8");
     assert!(
         text.contains("# my kinds") && text.contains("# keep"),

@@ -14,9 +14,11 @@ use iced::widget::{button, column, row, text};
 use iced::{Element, Length};
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::{ContentHash, DaemonClient, DaemonError};
+use cv_schema::{ConfigDoc, Path};
+
 use crate::message::{Message, PanesMsg};
 pub use crate::settings::WriteOutcome;
+use crate::settings::{ConfigFile, DocEdit, ScalarValue};
 use crate::theme::Tokens;
 
 /// The vault file.
@@ -48,26 +50,13 @@ pub enum BookmarkMsg {
     Written(Result<WriteOutcome, String>),
 }
 
-/// A whole-file write ready to run off the UI thread.
-#[derive(Debug, Clone)]
-pub struct WriteJob {
-    content: String,
-    base: Option<ContentHash>,
-}
-
-impl WriteJob {
-    /// Runs the write (blocking).
-    pub fn run(&self, d: &dyn DaemonClient) -> Result<WriteOutcome, String> {
-        crate::settings::write_config(d, BOOKMARKS_PATH, &self.content, self.base.as_ref())
-    }
-}
-
-/// The loaded list and the hash it was read at (`None` = file absent).
+/// The panel's list, derived from the shared `bookmarks.toml` settings [`ConfigFile`] — the one
+/// loaded doc + hash both the panel and the Settings Bookmarks page edit (plan
+/// `editor-settings-tab` WP-3), so a save from either surface never conflicts with the other.
 #[derive(Debug, Default)]
 pub struct Bookmarks {
     pub items: Vec<Bookmark>,
-    pub hash: Option<ContentHash>,
-    /// A write is in flight (edits wait for it).
+    /// A write of the shared file is in flight (edits wait for it).
     pub writing: bool,
 }
 
@@ -87,52 +76,54 @@ pub fn render(items: &[Bookmark]) -> Result<String, String> {
     .map_err(|e| format!("bookmarks: {e}"))
 }
 
-impl Bookmarks {
-    /// (Re)loads from disk; a missing file is an empty list.
-    pub fn load(&mut self, d: &dyn DaemonClient) -> Result<(), String> {
-        match d.read_file(BOOKMARKS_PATH) {
-            Ok((bytes, hash)) => {
-                self.items = parse(&bytes)?;
-                self.hash = Some(hash);
-            }
-            Err(DaemonError::NotFound(_)) => {
-                self.items.clear();
-                self.hash = None;
-            }
-            Err(e) => return Err(format!("bookmarks: {e}")),
-        }
-        Ok(())
-    }
-
-    /// Applies an edit locally and returns the write that persists it.
-    pub fn edit(&mut self, m: &BookmarkMsg, active: Option<&str>) -> Option<WriteJob> {
-        let n = self.items.len();
-        match *m {
-            BookmarkMsg::AddActive => {
-                let path = active?;
-                if self.items.iter().any(|b| b.path == path) {
-                    return None;
-                }
-                let leaf = path.rsplit('/').next().unwrap_or(path);
-                let name = leaf.strip_suffix(".md").unwrap_or(leaf).to_owned();
-                self.items.push(Bookmark {
-                    name,
-                    path: path.to_owned(),
-                });
-            }
-            BookmarkMsg::Remove(i) if i < n => {
-                self.items.remove(i);
-            }
-            BookmarkMsg::Up(i) if i > 0 && i < n => self.items.swap(i - 1, i),
-            BookmarkMsg::Down(i) if i + 1 < n => self.items.swap(i, i + 1),
-            _ => return None,
-        }
-        let content = render(&self.items).ok()?;
-        self.writing = true;
-        Some(WriteJob {
-            content,
-            base: self.hash.clone(),
+/// The bookmarks in a `bookmarks.toml` doc (entries without a `path` are skipped).
+pub fn items_of(doc: &ConfigDoc) -> Vec<Bookmark> {
+    let list = Path::root().key("bookmark");
+    (0..doc.len(&list))
+        .filter_map(|i| {
+            let p = list.index(i);
+            let path = doc.get_str(&p.key("path"))?.to_owned();
+            let name = doc
+                .get_str(&p.key("name"))
+                .map_or_else(|| path.clone(), str::to_owned);
+            Some(Bookmark { name, path })
         })
+        .collect()
+}
+
+/// The document edit a panel message makes (`None`: nothing to do).
+pub fn doc_edit(m: &BookmarkMsg, items: &[Bookmark], active: Option<&str>) -> Option<DocEdit> {
+    let list = Path::root().key("bookmark");
+    let n = items.len();
+    Some(match *m {
+        BookmarkMsg::AddActive => {
+            let path = active?;
+            if items.iter().any(|b| b.path == path) {
+                return None;
+            }
+            let leaf = path.rsplit('/').next().unwrap_or(path);
+            let name = leaf.strip_suffix(".md").unwrap_or(leaf).to_owned();
+            DocEdit::InsertRecord(
+                list,
+                n,
+                vec![
+                    ("name".into(), ScalarValue::Str(name)),
+                    ("path".into(), ScalarValue::Str(path.to_owned())),
+                ],
+            )
+        }
+        BookmarkMsg::Remove(i) if i < n => DocEdit::Remove(list.index(i)),
+        BookmarkMsg::Up(i) if i > 0 && i < n => DocEdit::Move(list, i, i - 1),
+        BookmarkMsg::Down(i) if i + 1 < n => DocEdit::Move(list, i, i + 1),
+        _ => return None,
+    })
+}
+
+impl Bookmarks {
+    /// Re-derives the list from the shared file.
+    pub fn sync(&mut self, f: &ConfigFile) {
+        self.items = f.doc.as_ref().map(items_of).unwrap_or_default();
+        self.writing = f.saving;
     }
 }
 
