@@ -4,7 +4,10 @@
 //! of Crucible's `Shortcut{name, file}` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/types.ts:20-23`; the
 //! Obsidian-induced part — living inside plugin `data.json` — is dropped: the list is a vault
 //! file the daemon writes). Reads are local disk reads; every edit rewrites the whole file through
-//! `write_note` with the last-read hash (CAS), or `create_note` when the file is absent.
+//! `write_note` with the last-read hash (CAS), or the empty-hash absence-CAS when the file is absent
+//! — the shared exact-name config write [`crate::settings::write_config`] (plan
+//! `editor-settings-tab`, audit M6: never `create_note`, so a file that appeared since load is a
+//! conflict, never a suffixed copy).
 
 use cv_protocol::Mode;
 use iced::widget::{button, column, row, text};
@@ -13,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::daemon::{ContentHash, DaemonClient, DaemonError};
 use crate::message::{Message, PanesMsg};
+pub use crate::settings::WriteOutcome;
 use crate::theme::Tokens;
 
 /// The vault file.
@@ -44,15 +48,6 @@ pub enum BookmarkMsg {
     Written(Result<WriteOutcome, String>),
 }
 
-/// A write's outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteOutcome {
-    Saved(ContentHash),
-    /// The file was created (hash re-read afterwards).
-    Created,
-    Conflict,
-}
-
 /// A whole-file write ready to run off the UI thread.
 #[derive(Debug, Clone)]
 pub struct WriteJob {
@@ -63,17 +58,7 @@ pub struct WriteJob {
 impl WriteJob {
     /// Runs the write (blocking).
     pub fn run(&self, d: &dyn DaemonClient) -> Result<WriteOutcome, String> {
-        match &self.base {
-            Some(h) => match d.write_note(BOOKMARKS_PATH, &self.content, h) {
-                Ok(h) => Ok(WriteOutcome::Saved(h)),
-                Err(DaemonError::Conflict { .. }) => Ok(WriteOutcome::Conflict),
-                Err(e) => Err(e.to_string()),
-            },
-            None => d
-                .create_note(BOOKMARKS_PATH, &self.content)
-                .map(|_| WriteOutcome::Created)
-                .map_err(|e| e.to_string()),
-        }
+        crate::settings::write_config(d, BOOKMARKS_PATH, &self.content, self.base.as_ref())
     }
 }
 

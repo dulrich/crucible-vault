@@ -168,8 +168,8 @@ pub const RESERVED: &[&str] = &[
     "Alt+6",
     "Alt+7",
     "Alt+8",
-    // Reserved, inert: the settings plan (`editor-settings-tab`).
-    "Ctrl+,",
+    // Reserved, inert (plan `editor-settings-tab`: Ctrl+, is now the Open settings client
+    // command, resolved by `palette::client_chord`).
     "Ctrl+Shift+,",
     "Ctrl+E",
     "Ctrl+S",

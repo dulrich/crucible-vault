@@ -29,11 +29,50 @@ use crate::switcher::{self, Switcher};
 use crate::theme::{Surround, Tokens};
 use crate::ui_state::{self, SplitDir, UiState};
 
-/// One open tab: its path and source buffer (WP-2 `source::SourceBuffer`).
+/// One open tab: its path and source buffer (WP-2 `source::SourceBuffer`). The Settings tab
+/// (plan editor-settings-tab WP-2) is a tab whose `path` is the reserved
+/// [`crate::settings::SETTINGS_TAB`] sentinel (not a valid vault path) with an empty, never
+/// dirty buffer; [`Tab::kind`] tells them apart, and it never reaches a daemon read or write.
 #[derive(Debug, Clone)]
 pub struct Tab {
     pub path: String,
     pub source: crate::source::SourceBuffer,
+}
+
+/// What a tab shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKind<'a> {
+    /// A vault note at this path.
+    Note(&'a str),
+    Settings,
+}
+
+impl Tab {
+    /// The tab's kind.
+    pub fn kind(&self) -> TabKind<'_> {
+        if self.is_settings() {
+            TabKind::Settings
+        } else {
+            TabKind::Note(&self.path)
+        }
+    }
+
+    /// Whether this is the Settings tab.
+    pub fn is_settings(&self) -> bool {
+        self.path == crate::settings::SETTINGS_TAB
+    }
+
+    /// The Settings tab (no daemon read).
+    pub fn settings() -> Self {
+        Self {
+            path: crate::settings::SETTINGS_TAB.to_owned(),
+            source: crate::source::SourceBuffer::new(
+                crate::settings::SETTINGS_TAB,
+                b"",
+                crate::daemon::ContentHash::from_hex(""),
+            ),
+        }
+    }
 }
 
 /// The status-bar model.
@@ -132,6 +171,10 @@ pub struct App {
     pub exiting: bool,
     /// Shift is held while a find bar is open (Shift+Enter = previous).
     find_shift: bool,
+    /// plan editor-settings-tab WP-2: the Settings tab's model (file save loops, Status).
+    pub settings: crate::settings::Settings,
+    /// The effective `editor.toml` prefs (live; WP-4 reads `prefs.keys`).
+    pub prefs: crate::settings::editor_prefs::Prefs,
 }
 
 /// A quit in progress: the saves it waits on, and whether one failed.
@@ -259,7 +302,10 @@ impl App {
             quit: None,
             exiting: false,
             find_shift: false,
+            settings: crate::settings::Settings::default(),
+            prefs: crate::settings::editor_prefs::Prefs::default(),
         };
+        app.load_editor_prefs();
         app.refresh_files();
         app.load_bookmarks();
         for (pane, paths, active) in plan {
@@ -277,7 +323,7 @@ impl App {
         app.focus = focus;
         app.restoring = false;
         for (_, ps) in app.panes.iter_mut() {
-            if let Some(p) = ps.active_tab().map(|t| t.path.clone()) {
+            if let Some(p) = ps.active_note().map(|t| t.path.clone()) {
                 ps.history.push(&p);
             }
         }
@@ -321,6 +367,17 @@ impl App {
     /// The focused pane's active tab.
     pub fn active_tab(&self) -> Option<&Tab> {
         self.panes.get(self.focus).and_then(PaneState::active_tab)
+    }
+
+    /// The focused pane's active tab when it is a note (never the Settings tab).
+    pub fn active_note(&self) -> Option<&Tab> {
+        self.panes.get(self.focus).and_then(PaneState::active_note)
+    }
+
+    /// The iced scale factor (`editor.toml` `ui_scale`, clamped 0.5–3.0).
+    pub fn scale_factor(&self) -> f32 {
+        let (lo, hi) = crate::settings::editor_prefs::UI_SCALE_RANGE;
+        self.prefs.ui_scale.clamp(lo, hi)
     }
 
     /// Every open tab path, pane by pane in layout order.
@@ -393,6 +450,10 @@ impl App {
     /// Opens `path` in `pane`: an already-open tab anywhere is focused instead; with `replace`
     /// the pane's active tab is replaced (unless it has unsaved edits, then a new tab opens).
     fn open_into(&mut self, pane: Pane, path: &str, replace: bool) -> Result<(), DaemonError> {
+        if path == crate::settings::SETTINGS_TAB {
+            self.open_settings_into(pane);
+            return Ok(());
+        }
         if let Some((p, i)) = panes::find(&self.panes, path) {
             self.focus = p;
             if let Some(ps) = self.panes.get_mut(p) {
@@ -438,9 +499,10 @@ impl App {
         Ok(())
     }
 
-    /// Pushes `path` onto `pane`'s history (not while restoring or stepping back/forward).
+    /// Pushes `path` onto `pane`'s history (not while restoring or stepping back/forward; never
+    /// the Settings tab).
     fn record_visit(&mut self, pane: Pane, path: &str) {
-        if self.restoring || self.history_nav {
+        if self.restoring || self.history_nav || path == crate::settings::SETTINGS_TAB {
             return;
         }
         if let Some(ps) = self.panes.get_mut(pane) {
@@ -473,12 +535,21 @@ impl App {
 
     /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
     fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
+        if tab.is_settings() {
+            return crate::settings::view(
+                &self.settings,
+                &self.prefs,
+                self.tokens,
+                self.status.mode,
+            );
+        }
         crate::reading::tab_body(
             &self.reading,
             &self.views,
             tab,
             self.tokens,
             self.status.mode,
+            self.prefs.font_size,
         )
     }
 
@@ -511,6 +582,7 @@ impl App {
             .panes
             .iter()
             .flat_map(|(_, ps)| ps.tabs.iter())
+            .filter(|t| !t.is_settings())
             .map(|t| (t.path.clone(), self.reading.mode(&t.path).into()))
             .collect();
         let Some(path) = &self.state_path else { return };
@@ -539,15 +611,15 @@ impl App {
         match message {
             Message::Tabs(m) => return self.update_tabs(m),
             Message::Find(m) => return self.update_find(m),
-            Message::Status(m) => self.update_status(m),
+            Message::Status(m) => return self.update_status(m),
             Message::Theme(m) => {
-                self.ui.surround = match m {
-                    ThemeMsg::Cycle => self.ui.surround.next(),
+                let s = match m {
+                    ThemeMsg::Cycle => self.prefs.surround.next(),
                     ThemeMsg::Set(s) => s,
                 };
-                self.tokens = tokens_for(self.ui.surround);
-                self.persist();
+                self.set_surround(s);
             }
+            Message::Settings(m) => return self.update_settings(m),
             Message::Explorer(m) => return self.update_explorer(m),
             Message::Source(m) => {
                 let pane = match &m {
@@ -559,6 +631,7 @@ impl App {
                     | SourceMsg::PastePrimary { path, .. } => {
                         panes::find(&self.panes, path).map(|(p, _)| p)
                     }
+                    _ if self.active_note().is_none() => None,
                     _ => Some(self.focus),
                 };
                 let Some(ps) = pane.and_then(|p| self.panes.get_mut(p)) else {
@@ -602,12 +675,13 @@ impl App {
                     .panes
                     .iter()
                     .flat_map(|(_, ps)| ps.tabs.iter())
+                    .filter(|t| !t.is_settings())
                     .collect();
                 let task = crate::reading::update(
                     &mut self.reading,
                     m,
                     &tabs,
-                    self.panes.get(self.focus).and_then(PaneState::active_tab),
+                    self.panes.get(self.focus).and_then(PaneState::active_note),
                     self.daemon.as_ref(),
                 );
                 if mode_change {
@@ -828,7 +902,7 @@ impl App {
         };
         match m {
             FindMsg::Open => {
-                if ps.active_tab().is_none() {
+                if ps.active_note().is_none() {
                     return Task::none();
                 }
                 ps.find.get_or_insert_with(Default::default);
@@ -925,7 +999,7 @@ impl App {
 
     /// Refocuses the focused pane's source editor (when it shows one).
     fn focus_editor(&self) -> Task<Message> {
-        match self.active_tab() {
+        match self.active_note() {
             Some(t) if self.reading.mode(&t.path).shows_source() => {
                 iced::widget::operation::focus(crate::source::editor_id(&t.path))
             }
@@ -1003,7 +1077,6 @@ impl App {
                 self.bookmarks.writing = false;
                 match r {
                     Ok(WriteOutcome::Saved(h)) => self.bookmarks.hash = Some(h),
-                    Ok(WriteOutcome::Created) => self.load_bookmarks(),
                     Ok(WriteOutcome::Conflict) => {
                         self.load_bookmarks();
                         self.status.error =
@@ -1021,7 +1094,7 @@ impl App {
                 {
                     return Task::none();
                 }
-                let active = self.active_tab().map(|t| t.path.clone());
+                let active = self.active_note().map(|t| t.path.clone());
                 if let Some(job) = self.bookmarks.edit(&edit, active.as_deref()) {
                     return self.rpc(
                         move |d| job.run(d),
@@ -1100,6 +1173,10 @@ impl App {
                     .clone()
                     .filter(|s| self.explorer.contains(s))
                 {
+                    // `editor.toml` `confirm_trash`: ask once in the side column's stable slot.
+                    Some(path) if self.prefs.confirm_trash => {
+                        self.settings.confirm_trash = Some(path);
+                    }
                     Some(path) => return self.dispatch_op(FileOp::Delete { path }),
                     None => self.status.error = Some("select a file first".into()),
                 }
@@ -1591,7 +1668,10 @@ impl App {
         let Some(ps) = self.panes.get_mut(self.focus) else {
             return self.dispatch_call(call);
         };
-        let Some(i) = ps.active.filter(|&i| i < ps.tabs.len()) else {
+        let Some(i) = ps
+            .active
+            .filter(|&i| ps.tabs.get(i).is_some_and(|t| !t.is_settings()))
+        else {
             if call.needs.iter().any(|n| n == "active_path") {
                 self.status.error = Some(format!("{}: open a note first", call.title));
                 return Task::none();
@@ -1675,7 +1755,7 @@ impl App {
     }
 
     fn dispatch_call(&mut self, call: crate::palette::Call) -> Task<Message> {
-        let ctx = crate::palette::context(self.active_tab());
+        let ctx = crate::palette::context(self.active_note());
         self.dispatch_with(call, ctx)
     }
 
@@ -1841,10 +1921,10 @@ impl App {
                 self.panels.search.query = q;
                 self.panels.search.seq += 1;
                 let seq = self.panels.search.seq;
-                return Task::perform(
-                    async { tokio::time::sleep(crate::panels::SEARCH_DEBOUNCE).await },
-                    move |()| Message::Panels(PanelsMsg::SearchDue(seq)),
-                );
+                let wait = self.prefs.search_debounce();
+                return Task::perform(async move { tokio::time::sleep(wait).await }, move |()| {
+                    Message::Panels(PanelsMsg::SearchDue(seq))
+                });
             }
             PanelsMsg::SearchDue(seq) => {
                 if seq != self.panels.search.seq {
@@ -1855,8 +1935,9 @@ impl App {
                     self.panels.search.results.clear();
                     return Task::none();
                 }
+                let limit = self.prefs.search_limit;
                 return self.rpc(
-                    move |d| crate::panels::run_search(d, &q),
+                    move |d| crate::panels::run_search(d, &q, limit),
                     move |result| Message::Panels(PanelsMsg::SearchDone { seq, result }),
                 );
             }
@@ -1884,7 +1965,7 @@ impl App {
         let t0 = std::time::Instant::now();
         let generation = self.status.generation;
         let d = self.daemon.clone();
-        let tab = self.panes.get(self.focus).and_then(PaneState::active_tab);
+        let tab = self.panes.get(self.focus).and_then(PaneState::active_note);
         self.panels.sync_buffer(tab, d.as_deref(), generation);
         if let Some(d) = &d
             && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)
@@ -1941,7 +2022,7 @@ impl App {
         }
     }
 
-    fn update_status(&mut self, m: StatusMsg) {
+    fn update_status(&mut self, m: StatusMsg) -> Task<Message> {
         match m {
             StatusMsg::Disconnected => self.status.connected = false,
             StatusMsg::Notification(n) => {
@@ -1983,14 +2064,265 @@ impl App {
                         {
                             self.load_bookmarks();
                         }
+                        self.settings_file_changed(&path, hash.as_deref());
                     }
                     Notification::OpenRequested { path } => self.open(&path, true),
                     Notification::ViewsInvalidated { view_ids } => self.views.invalidate(&view_ids),
-                    Notification::ConfigReloaded { .. } => self.palette.invalidate(),
+                    Notification::ConfigReloaded { errors } => {
+                        self.palette.invalidate();
+                        self.settings.route_reload_errors(&errors);
+                        return self.refresh_status_if_open();
+                    }
                     Notification::ShadowWrite { .. } => {}
                 }
             }
         }
+        Task::none()
+    }
+
+    // ---- plan editor-settings-tab WP-2: the Settings tab ----
+
+    /// Loads `editor.toml` (boot): seeds `surround` from the old `UiState` once, applies prefs.
+    fn load_editor_prefs(&mut self) {
+        use crate::settings::editor_prefs::{self, EDITOR_PATH};
+        if let (Some(d), Some(f)) = (&self.daemon, self.settings.files.get_mut(EDITOR_PATH)) {
+            f.load(d.as_ref());
+            if editor_prefs::seed_surround(f, self.ui.surround) {
+                self.settings.editor_note = Some(
+                    "surround taken from the local editor state; it is written to editor.toml \
+                     with the next Save"
+                        .into(),
+                );
+            }
+        }
+        self.apply_prefs();
+    }
+
+    /// Recomputes the effective prefs from the `editor.toml` doc and applies them live.
+    fn apply_prefs(&mut self) {
+        use crate::settings::editor_prefs::{self, EDITOR_PATH};
+        let prefs = match self.settings.file(EDITOR_PATH) {
+            Some(f) => editor_prefs::effective(f, self.ui.surround),
+            None => editor_prefs::Prefs {
+                surround: self.ui.surround,
+                ..editor_prefs::Prefs::default()
+            },
+        };
+        self.tokens = tokens_for(prefs.surround);
+        self.palette.set_hidden(prefs.palette_hidden.clone());
+        self.prefs = prefs;
+    }
+
+    /// The surround switch: edits `editor.toml`'s `surround` in memory (dirty until saved on
+    /// the Editor page — no config write without an explicit Save) and keeps the local
+    /// `UiState` copy in step.
+    fn set_surround(&mut self, s: crate::theme::Surround) {
+        use crate::settings::editor_prefs::{self, EDITOR_PATH, PrefEdit};
+        let edit = PrefEdit::Surround(s);
+        let edited = self
+            .settings
+            .file_mut(EDITOR_PATH)
+            .is_some_and(|f| f.edit(|doc| editor_prefs::apply(doc, &edit)).is_ok());
+        if !edited {
+            tracing::debug!("surround: editor.toml not editable; local state only");
+        }
+        self.ui.surround = s;
+        self.apply_prefs();
+        self.persist();
+    }
+
+    /// Opens the Settings tab in `pane`, or focuses it where it is already open (at most one).
+    fn open_settings_into(&mut self, pane: Pane) {
+        let sentinel = crate::settings::SETTINGS_TAB;
+        if let Some((p, i)) = panes::find(&self.panes, sentinel) {
+            self.focus = p;
+            if let Some(ps) = self.panes.get_mut(p) {
+                ps.active = Some(i);
+            }
+            return;
+        }
+        let pane = if self.panes.get(pane).is_some() {
+            pane
+        } else {
+            self.focus
+        };
+        if let Some(ps) = self.panes.get_mut(pane) {
+            ps.tabs.push(Tab::settings());
+            ps.active = Some(ps.tabs.len() - 1);
+        }
+        self.focus = pane;
+        if let Some(d) = &self.daemon {
+            self.settings.load_unloaded(d.as_ref());
+        }
+    }
+
+    /// A `file_changed` for one of the settings files: reload when clean (external edits).
+    fn settings_file_changed(&mut self, path: &str, hash: Option<&str>) {
+        let Some(d) = self.daemon.clone() else {
+            return;
+        };
+        let reloaded = self
+            .settings
+            .file_mut(path)
+            .is_some_and(|f| f.file_changed(hash, d.as_ref()));
+        if reloaded && path == crate::settings::editor_prefs::EDITOR_PATH {
+            self.settings.hidden_draft = None;
+            self.apply_prefs();
+        }
+    }
+
+    /// Fetches `status` off the UI thread when the Settings tab shows the Status page.
+    fn refresh_status_if_open(&mut self) -> Task<Message> {
+        let open = panes::find(&self.panes, crate::settings::SETTINGS_TAB).is_some();
+        if open && self.settings.section == crate::settings::Section::Status {
+            return self.fetch_status();
+        }
+        Task::none()
+    }
+
+    fn fetch_status(&mut self) -> Task<Message> {
+        use crate::settings::SettingsMsg;
+        if self.daemon.is_none() {
+            self.settings.status.error = Some("not connected".into());
+            return Task::none();
+        }
+        self.settings.status.loading = true;
+        self.rpc(
+            |d| d.status().map_err(|e| e.to_string()),
+            |r| Message::Settings(SettingsMsg::StatusLoaded(r)),
+        )
+    }
+
+    fn update_settings(&mut self, m: crate::settings::SettingsMsg) -> Task<Message> {
+        use crate::settings::editor_prefs::{self, EDITOR_PATH};
+        use crate::settings::{Section, SettingsMsg};
+        match m {
+            SettingsMsg::Open => {
+                self.open_settings_into(self.focus);
+                self.persist();
+                return self.refresh_status_if_open();
+            }
+            SettingsMsg::Section(s) => {
+                self.settings.section = s;
+                if s == Section::Status {
+                    return self.fetch_status();
+                }
+            }
+            SettingsMsg::Pref(e) => {
+                if let editor_prefs::PrefEdit::PaletteHidden(s) = &e {
+                    self.settings.hidden_draft = Some(s.clone());
+                }
+                if let Some(f) = self.settings.file_mut(EDITOR_PATH)
+                    && let Err(err) = f.edit(|doc| editor_prefs::apply(doc, &e))
+                {
+                    f.notice = Some(err);
+                }
+                if let editor_prefs::PrefEdit::Surround(s) = e {
+                    self.ui.surround = s;
+                    self.persist();
+                }
+                self.apply_prefs();
+            }
+            SettingsMsg::Edit(path, edit) => {
+                if let Some(f) = self.settings.file_mut(path)
+                    && let Err(err) = f.edit(|doc| edit.apply(doc))
+                {
+                    f.notice = Some(err);
+                }
+                if path == EDITOR_PATH {
+                    self.apply_prefs();
+                }
+            }
+            SettingsMsg::Save(path) => {
+                if self.shadow_blocked("settings saves are disabled in shadow mode") {
+                    return Task::none();
+                }
+                let Some(job) = self.settings.file_mut(path).and_then(|f| f.begin_save()) else {
+                    return Task::none();
+                };
+                return self.rpc(
+                    move |d| job.run(d),
+                    move |r| Message::Settings(SettingsMsg::Saved(path, r)),
+                );
+            }
+            SettingsMsg::Saved(path, r) => {
+                let d = self.daemon.clone();
+                if let Some(f) = self.settings.file_mut(path) {
+                    f.finish_save(r, d.as_deref());
+                }
+                if path == EDITOR_PATH {
+                    self.settings.hidden_draft = None;
+                    self.settings.editor_note = None;
+                    self.apply_prefs();
+                }
+                if path == BOOKMARKS_PATH {
+                    self.load_bookmarks();
+                }
+            }
+            SettingsMsg::Revert(path) => {
+                if let (Some(d), Some(f)) = (self.daemon.clone(), self.settings.file_mut(path)) {
+                    f.load(d.as_ref());
+                    f.notice = None;
+                }
+                if path == EDITOR_PATH {
+                    self.settings.hidden_draft = None;
+                    self.apply_prefs();
+                }
+            }
+            SettingsMsg::StartOver(path) => {
+                if let Some(f) = self.settings.file_mut(path) {
+                    f.start_over();
+                }
+                if path == EDITOR_PATH {
+                    self.apply_prefs();
+                }
+            }
+            SettingsMsg::RefreshStatus => return self.fetch_status(),
+            SettingsMsg::StatusLoaded(r) => self.settings.status.loaded(r),
+            SettingsMsg::TrashConfirm => {
+                if let Some(path) = self.settings.confirm_trash.take() {
+                    if self.shadow_blocked(explorer::SHADOW_REASON) {
+                        return Task::none();
+                    }
+                    return self.dispatch_op(FileOp::Delete { path });
+                }
+            }
+            SettingsMsg::TrashCancel => self.settings.confirm_trash = None,
+        }
+        Task::none()
+    }
+
+    /// The confirm-before-Trash prompt (stable slot; `Space` when none is pending).
+    fn trash_confirm_view(&self) -> Element<'_, Message> {
+        use crate::settings::SettingsMsg;
+        let t = self.tokens;
+        let Some(path) = &self.settings.confirm_trash else {
+            return Space::new().into();
+        };
+        let btn = |label: &'static str, m: SettingsMsg| {
+            button(text(label).size(13))
+                .height(crate::theme::CONTROL)
+                .padding([0, 10])
+                .style(crate::theme::icon_button_style(t, false))
+                .on_press(Message::Settings(m))
+        };
+        container(
+            column![
+                text(format!("Move {path} to .trash/?"))
+                    .size(13)
+                    .color(t.warn_text.to_color()),
+                row![
+                    btn("Trash", SettingsMsg::TrashConfirm),
+                    btn("Cancel", SettingsMsg::TrashCancel),
+                ]
+                .spacing(6),
+            ]
+            .spacing(4),
+        )
+        .padding(6)
+        .width(Length::Fill)
+        .style(crate::theme::seg_group_style(t))
+        .into()
     }
 
     /// Daemon notifications and global keys as iced subscriptions.
@@ -2008,7 +2340,7 @@ impl App {
 
     /// The iced theme for the current surround.
     pub fn theme(&self) -> Theme {
-        let name = match self.ui.surround {
+        let name = match self.prefs.surround {
             Surround::Dark => "N1 Dark",
             Surround::Med => "N1 Med",
             Surround::Light => "N1 Light",
@@ -2042,9 +2374,17 @@ impl App {
                 (true, false) => t.text,
                 _ => t.text_dim,
             };
-            let lbl = text(crate::source::tab_title(&tab.source, &tab.path))
-                .size(14)
-                .color(colour.to_color());
+            let title = match tab.kind() {
+                crate::app::TabKind::Settings => {
+                    if self.settings.any_dirty() {
+                        "Settings •".to_owned()
+                    } else {
+                        "Settings".to_owned()
+                    }
+                }
+                crate::app::TabKind::Note(p) => crate::source::tab_title(&tab.source, p),
+            };
+            let lbl = text(title).size(14).color(colour.to_color());
             let chip = row![
                 button(lbl)
                     .style(button::text)
@@ -2076,7 +2416,7 @@ impl App {
                     .on_press(Message::Panes(PanesMsg::Close(pane))),
             );
         }
-        let mode = ps.active_tab().map(|tab| self.reading.mode(&tab.path));
+        let mode = ps.active_note().map(|tab| self.reading.mode(&tab.path));
         let mode_icon = match mode {
             Some(crate::reading::ViewMode::Source) => Icon::Code,
             Some(crate::reading::ViewMode::Split) => Icon::Columns2,
@@ -2119,7 +2459,9 @@ impl App {
         .spacing(4);
         match ps.active_tab() {
             Some(tab) => {
-                if let Some(bar) = nav::bar(pane, &tab.path, self.today(), t) {
+                if !tab.is_settings()
+                    && let Some(bar) = nav::bar(pane, &tab.path, self.today(), t)
+                {
                     col = col.push(bar);
                 }
                 col = col.push(self.tab_body(tab));
@@ -2127,7 +2469,7 @@ impl App {
             None => col = col.push(text("No file open").color(t.text_faint.to_color())),
         }
         // The dropdown sits in a stack layer above the pane body (layer 0 never moves).
-        let menu: Element<'a, Message> = match (menu_open, ps.active_tab(), mode) {
+        let menu: Element<'a, Message> = match (menu_open, ps.active_note(), mode) {
             (true, Some(tab), Some(current)) => {
                 use crate::reading::ViewMode;
                 let item = |label: &'static str, icon: Icon, m: ViewMode| {
@@ -2229,6 +2571,8 @@ impl App {
         ];
         let full = column![
             header,
+            // Stable slot: the confirm-before-Trash prompt (`Space` when none is pending).
+            self.trash_confirm_view(),
             container(explorer::view(&self.explorer, t, self.status.mode)).height(Length::Fill),
             bookmarks::view(&self.bookmarks, t, self.status.mode),
         ]
@@ -2275,6 +2619,9 @@ impl App {
             button(text("Split down").size(14))
                 .style(button::text)
                 .on_press(Message::Panes(PanesMsg::SplitDown)),
+            button(text("Settings (Ctrl+,)").size(14))
+                .style(button::text)
+                .on_press(Message::Settings(crate::settings::SettingsMsg::Open)),
         ]
         .spacing(8);
 
@@ -2292,7 +2639,7 @@ impl App {
         let status = row![
             text(self.status.line()).size(16),
             text(toast).size(16).color(t.accent_text.to_color()),
-            button(text(format!("Surround: {}", self.ui.surround.label())).size(16))
+            button(text(format!("Surround: {}", self.prefs.surround.label())).size(16))
                 .style(button::text)
                 .on_press(Message::Theme(ThemeMsg::Cycle)),
         ]

@@ -78,10 +78,14 @@ fn main() -> anyhow::Result<()> {
         .title("crucible-vault")
         .subscription(App::subscription)
         .theme(App::theme)
+        // `editor.toml` `ui_scale`, live (plan editor-settings-tab WP-2).
+        .scale_factor(App::scale_factor)
         // Window close is a Quit: dirty buffers flush first (editor-usability-round WP-4).
         .exit_on_close_request(false)
         .settings(iced::Settings {
             default_font: iced::Font::with_name(editor::theme::FONT_FAMILY),
+            // Boot default only: the source / Reading text sizes follow `editor.toml`
+            // `font_size` from App state.
             default_text_size: editor::theme::BASE_TEXT_SIZE.into(),
             ..iced::Settings::default()
         })

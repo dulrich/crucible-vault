@@ -23,6 +23,11 @@ impl PaneState {
         self.active.and_then(|i| self.tabs.get(i))
     }
 
+    /// The active tab when it is a note (never the Settings tab).
+    pub fn active_note(&self) -> Option<&Tab> {
+        self.active_tab().filter(|t| !t.is_settings())
+    }
+
     /// Removes tab `i`, fixing the active index; returns the removed tab.
     pub fn remove(&mut self, i: usize) -> Option<Tab> {
         if i >= self.tabs.len() {

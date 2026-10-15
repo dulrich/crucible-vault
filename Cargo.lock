@@ -1069,6 +1069,7 @@ dependencies = [
  "chrono",
  "cv-index",
  "cv-protocol",
+ "cv-schema",
  "cv-state",
  "cv-testkit",
  "cv-vault",

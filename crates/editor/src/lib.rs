@@ -18,6 +18,7 @@ pub mod palette;
 pub mod panels;
 pub mod panes;
 pub mod reading;
+pub mod settings;
 pub mod source;
 pub mod switcher;
 pub mod theme;

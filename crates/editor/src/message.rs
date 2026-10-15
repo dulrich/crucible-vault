@@ -26,6 +26,8 @@ pub enum Message {
     Panes(PanesMsg),
     /// editor-usability-round WP-4: find in note.
     Find(FindMsg),
+    /// plan editor-settings-tab WP-2: the Settings tab.
+    Settings(crate::settings::SettingsMsg),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name

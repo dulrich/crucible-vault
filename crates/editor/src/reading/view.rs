@@ -29,14 +29,41 @@ struct Ctx<'a> {
     doc: &'a Doc,
     path: &'a str,
     t: Tokens,
+    /// `editor.toml` `font_size / 22` (plan editor-settings-tab WP-2, audit M1).
+    scale: f32,
 }
 
-/// The reading pane for `path`.
+impl Ctx<'_> {
+    /// A design size (px at the 22px base) scaled to the current font size.
+    fn sz(&self, px: f32) -> f32 {
+        scaled(px, self.scale)
+    }
+}
+
+/// `px` (a size at the 22px base font) at text scale `scale`.
+pub fn scaled(px: f32, scale: f32) -> f32 {
+    (px * scale).max(6.0)
+}
+
+/// The design size (px at the 22px base) of a heading level / paragraph (`None`).
+pub fn block_size(heading: Option<u8>) -> f32 {
+    match heading {
+        Some(1) => 28.0,
+        Some(2) => 24.0,
+        Some(3) => 20.0,
+        Some(4) => 18.0,
+        Some(_) => 16.0,
+        None => 16.0,
+    }
+}
+
+/// The reading pane for `path`; `scale` = `font_size / 22`.
 pub fn reading<'a>(
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
     path: &'a str,
     t: Tokens,
+    scale: f32,
 ) -> Element<'a, Message> {
     let Some(doc) = store.doc(path) else {
         return text("Rendering…").color(t.text_faint.to_color()).into();
@@ -47,11 +74,12 @@ pub fn reading<'a>(
         doc,
         path,
         t,
+        scale,
     };
     // Fixed slots 0 (filename) and 1 (properties, `Space` when absent) keep every body widget
     // at a stable tree position whether or not the note has frontmatter.
     let mut items: Vec<Element<'a, Message>> = vec![
-        title_input(store, path, t),
+        title_input(store, path, t, scale),
         properties(&cx, &doc.model.properties),
     ];
     items.extend(doc.model.blocks.iter().map(|b| block(&cx, b)));
@@ -61,7 +89,7 @@ pub fn reading<'a>(
             items.push(
                 row![
                     text(format!("[{}]", i + 1))
-                        .size(14)
+                        .size(cx.sz(14.0))
                         .color(t.text_dim.to_color()),
                     column(f.blocks.iter().map(|b| block(&cx, b))).spacing(4),
                 ]
@@ -78,11 +106,16 @@ pub fn reading<'a>(
 }
 
 /// The editable filename (the note's stem); Enter / blur renames, Escape reverts.
-fn title_input<'a>(store: &'a ReadingStore, path: &'a str, t: Tokens) -> Element<'a, Message> {
+fn title_input<'a>(
+    store: &'a ReadingStore,
+    path: &'a str,
+    t: Tokens,
+    scale: f32,
+) -> Element<'a, Message> {
     let p_in = path.to_owned();
     text_input("note name", store.title(path))
         .id(super::title_id(path))
-        .size(22)
+        .size(scaled(22.0, scale))
         .on_input(move |value| {
             Message::Reading(ReadingMsg::TitleInput {
                 path: p_in.clone(),
@@ -128,9 +161,15 @@ fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
             });
         }
         row![
-            container(text(p.key.as_str()).size(14).color(t.text_dim.to_color()))
-                .width(Length::Fixed(140.0)),
-            rich_text(spans).size(14).on_link_click(link_msg(cx.path)),
+            container(
+                text(p.key.as_str())
+                    .size(cx.sz(14.0))
+                    .color(t.text_dim.to_color())
+            )
+            .width(Length::Fixed(140.0)),
+            rich_text(spans)
+                .size(cx.sz(14.0))
+                .on_link_click(link_msg(cx.path)),
         ]
         .spacing(8)
         .into()
@@ -172,16 +211,10 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
     let t = cx.t;
     match b {
         Block::Heading { level, inlines } => {
-            let size = match level {
-                1 => 28.0,
-                2 => 24.0,
-                3 => 20.0,
-                4 => 18.0,
-                _ => 16.0,
-            };
+            let size = block_size(Some(*level));
             inlines_view(cx, inlines, size, Some(t.heading), true)
         }
-        Block::Paragraph(inlines) => inlines_view(cx, inlines, 16.0, None, false),
+        Block::Paragraph(inlines) => inlines_view(cx, inlines, block_size(None), None, false),
         Block::List {
             ordered,
             start,
@@ -237,7 +270,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             );
             let edge = callout_color(kind, t);
             let mut col: Vec<Element<'a, Message>> =
-                vec![text(head).size(16).color(edge.to_color()).into()];
+                vec![text(head).size(cx.sz(16.0)).color(edge.to_color()).into()];
             // Folding is shown by the marker; the body stays readable (no fold state in v0).
             col.extend(children.iter().map(|c| block(cx, c)));
             boxed(column(col).spacing(6).into(), t, edge)
@@ -247,7 +280,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             if !lang.is_empty() {
                 col.push(
                     text(lang.as_str())
-                        .size(12)
+                        .size(cx.sz(12.0))
                         .color(t.text_faint.to_color())
                         .into(),
                 );
@@ -255,7 +288,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             col.push(
                 text(code.as_str())
                     .font(Font::MONOSPACE)
-                    .size(14)
+                    .size(cx.sz(14.0))
                     .color(t.text.to_color())
                     .into(),
             );
@@ -297,7 +330,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             let head: Element<'a, Message> = rich_text([span(label)
                 .color(t.accent_ui.to_color())
                 .link(LinkTarget::Vault(target.clone()))])
-            .size(13)
+            .size(cx.sz(13.0))
             .on_link_click(link_msg(cx.path))
             .into();
             let body: Element<'a, Message> = match content {
@@ -371,7 +404,10 @@ fn image_block<'a>(
     let t = cx.t;
     let placeholder = |label: String| -> Element<'a, Message> {
         boxed(
-            text(label).size(13).color(t.text_faint.to_color()).into(),
+            text(label)
+                .size(cx.sz(13.0))
+                .color(t.text_faint.to_color())
+                .into(),
             t,
             t.line,
         )
@@ -391,7 +427,7 @@ fn image_block<'a>(
                 None => img.into(),
             }
         }
-        None => container(text(alt).size(13).color(t.text_faint.to_color()))
+        None => container(text(alt).size(cx.sz(13.0)).color(t.text_faint.to_color()))
             .height(Length::Fixed(120.0))
             .width(Length::Fill)
             .into(),
@@ -434,6 +470,7 @@ fn inlines_view<'a>(
     color: Option<Rgb>,
     bold: bool,
 ) -> Element<'a, Message> {
+    let size = cx.sz(size);
     let t = cx.t;
     let base = color.unwrap_or(t.text);
     let mut spans = Vec::with_capacity(inlines.len());

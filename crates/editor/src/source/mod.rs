@@ -966,12 +966,19 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("source-editor:{path}"))
 }
 
-/// Renders a tab's source buffer with its conflict bar / read-only marker.
-pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
+/// Renders a tab's source buffer with its conflict bar / read-only marker; `font_size` is the
+/// `editor.toml` base text size (live, plan editor-settings-tab WP-2).
+pub fn view<'a>(
+    buf: &'a SourceBuffer,
+    tokens: Tokens,
+    mode: Mode,
+    font_size: f32,
+) -> Element<'a, Message> {
     let editor: Element<'a, Message> = match &buf.content {
         Repr::Shaped(content) => crate::widget::middle_click::middle_click(
             text_editor::TextEditor::new(content)
                 .id(editor_id(&buf.path))
+                .size(font_size)
                 .height(Length::Fill)
                 .padding(EDITOR_PADDING)
                 .on_action(|a| Message::Source(SourceMsg::Action(a)))
@@ -992,7 +999,7 @@ pub fn view<'a>(buf: &'a SourceBuffer, tokens: Tokens, mode: Mode) -> Element<'a
         )
         .into(),
         // Never visible in practice (the app materialises visible tabs before drawing).
-        Repr::Plain { text: t, .. } => text(t.as_str()).into(),
+        Repr::Plain { text: t, .. } => text(t.as_str()).size(font_size).into(),
     };
     // The editor's widget state (focus, cursor scroll) is matched by tree position, so the status
     // and conflict slots are always present (an empty `Space` when unused): inserting a sibling

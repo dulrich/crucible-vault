@@ -30,6 +30,21 @@ pub enum Icon {
     Eye,
     X,
     Search,
+    // plan editor-settings-tab WP-2: the settings rail (codepoints read from the vendored
+    // font's `cmap` + `post` glyph names: settings, type, keyboard, zap, timer, calendar-days,
+    // tags, bot, server, table, activity, triangle-alert).
+    Settings,
+    Type,
+    Keyboard,
+    Zap,
+    Timer,
+    CalendarDays,
+    Tags,
+    Bot,
+    Server,
+    Table,
+    Activity,
+    TriangleAlert,
 }
 
 impl Icon {
@@ -51,6 +66,18 @@ impl Icon {
             Self::Eye => '\u{e0be}',
             Self::X => '\u{e1b1}',
             Self::Search => '\u{e154}',
+            Self::Settings => '\u{e157}',
+            Self::Type => '\u{e197}',
+            Self::Keyboard => '\u{e283}',
+            Self::Zap => '\u{e1b3}',
+            Self::Timer => '\u{e1df}',
+            Self::CalendarDays => '\u{e2b8}',
+            Self::Tags => '\u{e35f}',
+            Self::Bot => '\u{e1ba}',
+            Self::Server => '\u{e156}',
+            Self::Table => '\u{e180}',
+            Self::Activity => '\u{e038}',
+            Self::TriangleAlert => '\u{e192}',
         }
     }
 }

@@ -10,7 +10,7 @@
 //! Image handles are pinned per tab in the [`ImageCache`]; see that module for the release points
 //! (audit E2) and the handle-release vs renderer-reclamation distinction.
 
-mod view;
+pub mod view;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -498,15 +498,20 @@ pub fn tab_body<'a>(
     tab: &'a Tab,
     t: Tokens,
     mode: cv_protocol::Mode,
+    font_size: f32,
 ) -> Element<'a, Message> {
     use iced::Length;
     use iced::widget::{container, row};
+    // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
+    let scale = font_size / crate::theme::BASE_TEXT_SIZE;
     match store.mode(&tab.path) {
-        ViewMode::Source => crate::source::view(&tab.source, t, mode),
-        ViewMode::Reading => view::reading(store, views, &tab.path, t),
+        ViewMode::Source => crate::source::view(&tab.source, t, mode, font_size),
+        ViewMode::Reading => view::reading(store, views, &tab.path, t, scale),
         ViewMode::Split => row![
-            container(crate::source::view(&tab.source, t, mode)).width(Length::FillPortion(1)),
-            container(view::reading(store, views, &tab.path, t)).width(Length::FillPortion(1)),
+            container(crate::source::view(&tab.source, t, mode, font_size))
+                .width(Length::FillPortion(1)),
+            container(view::reading(store, views, &tab.path, t, scale))
+                .width(Length::FillPortion(1)),
         ]
         .spacing(12)
         .into(),

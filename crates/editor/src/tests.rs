@@ -1307,11 +1307,16 @@ mod usability_wp4 {
             "Ctrl+Q",
             "Alt+1",
             "Alt+8",
-            "Ctrl+,",
             "Ctrl+Shift+,",
         ] {
             assert!(chord::reserved(&c(k)), "{k} reserved");
         }
+        // plan editor-settings-tab WP-2: Ctrl+, left RESERVED for the Open settings command.
+        assert!(!chord::reserved(&c("Ctrl+,")));
+        assert_eq!(
+            crate::palette::client_chord(&c("Ctrl+,")),
+            Some(crate::palette::ClientCmd::OpenSettings)
+        );
         assert_eq!(
             crate::palette::client_chord(&c("Ctrl+P")),
             Some(crate::palette::ClientCmd::QuickSwitcher)

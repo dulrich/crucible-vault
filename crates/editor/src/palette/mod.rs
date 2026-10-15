@@ -84,6 +84,8 @@ pub enum ClientCmd {
     FocusSearch,
     /// Opens the command palette (Ctrl+Shift+P); not listed in the palette itself.
     CommandPaletteKey,
+    /// plan editor-settings-tab WP-2: open (or focus) the Settings tab (Ctrl+,).
+    OpenSettings,
 }
 
 /// A `period.open` period.
@@ -153,6 +155,7 @@ pub fn client_chord(c: &Chord) -> Option<ClientCmd> {
         ("Ctrl+Q", ClientCmd::Quit),
         ("Ctrl+F", ClientCmd::FindInNote),
         ("Ctrl+Shift+F", ClientCmd::FocusSearch),
+        ("Ctrl+,", ClientCmd::OpenSettings),
     ];
     if let Some((_, cmd)) = simple
         .iter()
@@ -169,7 +172,7 @@ pub fn client_chord(c: &Chord) -> Option<ClientCmd> {
 
 /// Whether the focused source editor must hand a chord to the app (`PaletteMsg::Key`) instead
 /// of handling it itself (Alt+digit would insert the digit): the WP-4 client chords, the default
-/// action chords and the inert settings chords Ctrl+, / Ctrl+Shift+,.
+/// action chords, Ctrl+, (Open settings) and the inert reserved Ctrl+Shift+,.
 pub fn routed(c: &Chord) -> bool {
     client_chord(c).is_some() || default_action(c).is_some() || (c.command && c.key == ",")
 }
@@ -220,7 +223,11 @@ impl ClientCmd {
                 .map(ClientCmd::OpenPeriod),
         );
         v.extend(Surround::ALL.into_iter().map(ClientCmd::SetSurround));
-        v.extend([ClientCmd::FindInNote, ClientCmd::FocusSearch]);
+        v.extend([
+            ClientCmd::FindInNote,
+            ClientCmd::FocusSearch,
+            ClientCmd::OpenSettings,
+        ]);
         v.extend(PanelKind::ALL.iter().map(|&k| ClientCmd::Panel(k)));
         v
     }
@@ -252,8 +259,39 @@ impl ClientCmd {
             ClientCmd::FindInNote => "Find in note",
             ClientCmd::FocusSearch => "Search the vault",
             ClientCmd::CommandPaletteKey => "Command palette",
+            ClientCmd::OpenSettings => "Open settings",
         };
         (t.to_owned(), "Editor")
+    }
+
+    /// The stable command id (`editor.toml` `palette.hidden`; WP-4 `[keys]`).
+    pub fn id(self) -> String {
+        let s = match self {
+            ClientCmd::CycleReading => "cycle_reading",
+            ClientCmd::Surround => "surround",
+            ClientCmd::SplitRight => "split_right",
+            ClientCmd::SplitDown => "split_down",
+            ClientCmd::ClosePane => "close_pane",
+            ClientCmd::QuickSwitcher => "quick_switcher",
+            ClientCmd::Save => "save",
+            ClientCmd::Undo => "undo",
+            ClientCmd::Redo => "redo",
+            ClientCmd::TogglePanels => "toggle_panels",
+            ClientCmd::TogglePaneBorders => "toggle_pane_borders",
+            ClientCmd::Panel(k) => return format!("panel.{}", k.label().to_lowercase()),
+            ClientCmd::Quit => "quit",
+            ClientCmd::CloseTab => "close_tab",
+            ClientCmd::GoToTab(n) => return format!("go_to_tab.{n}"),
+            ClientCmd::OpenPeriod(p) => return format!("open_period.{}", p.as_str()),
+            ClientCmd::SetSurround(s) => {
+                return format!("set_surround.{}", s.label().to_lowercase());
+            }
+            ClientCmd::FindInNote => "find_in_note",
+            ClientCmd::FocusSearch => "focus_search",
+            ClientCmd::CommandPaletteKey => "command_palette",
+            ClientCmd::OpenSettings => "open_settings",
+        };
+        s.to_owned()
     }
 
     /// The editor's default chord, if any.
@@ -269,6 +307,7 @@ impl ClientCmd {
             ClientCmd::CloseTab => "Ctrl+W",
             ClientCmd::FindInNote => "Ctrl+F",
             ClientCmd::FocusSearch => "Ctrl+Shift+F",
+            ClientCmd::OpenSettings => "Ctrl+,",
             ClientCmd::GoToTab(n) => return vec![format!("Alt+{n}")],
             ClientCmd::OpenPeriod(p) => {
                 return DEFAULT_ACTIONS
@@ -308,6 +347,7 @@ impl ClientCmd {
             ClientCmd::FindInNote => Message::Find(FindMsg::Open),
             ClientCmd::FocusSearch => Message::Panels(PanelsMsg::Show(PanelKind::Search)),
             ClientCmd::CommandPaletteKey => Message::Palette(PaletteMsg::Open),
+            ClientCmd::OpenSettings => Message::Settings(crate::settings::SettingsMsg::Open),
         }
     }
 }
@@ -397,6 +437,23 @@ pub fn build_entries(actions: &[ActionInfo]) -> Vec<Entry> {
     v
 }
 
+/// `entries` without the ids in `hidden` (client command ids or action ids).
+pub fn visible_entries(entries: Vec<Entry>, hidden: &[String]) -> Vec<Entry> {
+    if hidden.is_empty() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|e| {
+            let id = match &e.id {
+                EntryId::Client(c) => c.id(),
+                EntryId::Action(a) => a.clone(),
+            };
+            !hidden.contains(&id)
+        })
+        .collect()
+}
+
 /// Ranks `entries` against `query` (fuzzy over `"title group"`), best first, as indices.
 pub fn rank_entries(query: &str, entries: &[Entry]) -> Vec<usize> {
     // `rank` scores path-like strings; '/' would split a "basename", so it is neutralized, and a
@@ -434,7 +491,7 @@ pub fn bindings(actions: &[ActionInfo]) -> (HashMap<Chord, String>, Vec<String>)
                 notes.push(format!("{}: unreadable key \"{k}\"", a.id));
                 continue;
             };
-            if chord::reserved(&c) {
+            if chord::reserved(&c) || client_chord(&c).is_some() {
                 notes.push(format!("{}: {c} is an editor default (not bound)", a.id));
             } else if let Some(other) = map.get(&c) {
                 notes.push(format!("{}: {c} already bound to {other}", a.id));
@@ -492,6 +549,8 @@ pub struct Palette {
     pub job_origins: HashMap<String, (String, u64)>,
     /// Terminal `open_path`s that arrived before the `run_action` reply (job id → path).
     pub early_open: HashMap<String, String>,
+    /// `editor.toml` `palette.hidden`: ids left out of the list (chords still work).
+    pub hidden: Vec<String>,
 }
 
 impl Default for Palette {
@@ -515,6 +574,7 @@ impl Default for Palette {
             job_titles: HashMap::new(),
             job_origins: HashMap::new(),
             early_open: HashMap::new(),
+            hidden: Vec::new(),
         }
     }
 }
@@ -561,9 +621,20 @@ impl Palette {
         let (map, notes) = bindings(&actions);
         self.bindings = map;
         self.notice = notes;
-        self.entries = build_entries(&actions);
+        self.entries = visible_entries(build_entries(&actions), &self.hidden);
         self.actions = Some(actions);
         self.loading = false;
+        self.refresh();
+    }
+
+    /// Sets the hidden ids and rebuilds the list (a no-op when unchanged).
+    pub fn set_hidden(&mut self, hidden: Vec<String>) {
+        if hidden == self.hidden {
+            return;
+        }
+        self.hidden = hidden;
+        let all = build_entries(self.actions.as_deref().unwrap_or_default());
+        self.entries = visible_entries(all, &self.hidden);
         self.refresh();
     }
 

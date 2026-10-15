@@ -28,10 +28,11 @@ pub use props::{Prop, PropType, Rendered};
 
 /// Snippet length cap (chars).
 pub const SNIPPET_CHARS: usize = 120;
-/// FTS result cap.
-pub const SEARCH_LIMIT: usize = 50;
-/// Search input debounce.
-pub const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+/// FTS result cap default (`editor.toml` `search.limit` overrides it; plan editor-settings-tab).
+pub const SEARCH_LIMIT: usize = crate::settings::editor_prefs::DEFAULT_SEARCH_LIMIT;
+/// Search input debounce default (`editor.toml` `search.debounce_ms` overrides it).
+pub const SEARCH_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(crate::settings::editor_prefs::DEFAULT_SEARCH_DEBOUNCE_MS);
 /// Single-line row height.
 pub const ROW: f32 = 24.0;
 /// Two-line row height (path + snippet).
@@ -250,14 +251,18 @@ pub fn load_backlinks(d: &dyn DaemonClient, path: &str) -> Result<Vec<Backlink>,
         .collect())
 }
 
-/// FTS search with snippets (blocking: runs off the UI thread).
-pub fn run_search(d: &dyn DaemonClient, input: &str) -> Result<Vec<SearchHit>, String> {
+/// FTS search with snippets, at most `limit` hits (blocking: runs off the UI thread).
+pub fn run_search(
+    d: &dyn DaemonClient,
+    input: &str,
+    limit: usize,
+) -> Result<Vec<SearchHit>, String> {
     let Some(q) = fts_query(input) else {
         return Ok(Vec::new());
     };
     let hits = d
         .index()
-        .with_query(|x| x.fts(&q, SEARCH_LIMIT))
+        .with_query(|x| x.fts(&q, limit))
         .map_err(|e| e.to_string())?;
     let needle = input
         .split_whitespace()

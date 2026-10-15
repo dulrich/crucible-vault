@@ -34,6 +34,8 @@ cv-state = { path = "../cv-state" }
 cv-vault = { path = "../cv-vault" }
 cv-testkit = { path = "../cv-testkit" }
 editor-model = { path = "../editor-model" }
+# Plan editor-settings-tab WP-2: config schemas + comment-preserving `ConfigDoc` (pure crate).
+cv-schema = { path = "../cv-schema" }
 ofm = { path = "../../../crucible-tui/crates/ofm" }
 
 [dev-dependencies]
