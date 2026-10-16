@@ -30,6 +30,8 @@ pub enum Message {
     Settings(crate::settings::SettingsMsg),
     /// plan editor-data-safety WP-2: the open modal dialog.
     Dialog(crate::dialog::DialogMsg),
+    /// plan editor-ui-round-3 WP-4: the right-click context menu.
+    Menu(crate::context_menu::MenuMsg),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name

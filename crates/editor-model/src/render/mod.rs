@@ -864,6 +864,29 @@ fn prop_value(v: &ofm::frontmatter::JsValue) -> PropValue {
 /// statuses (`[/]`, `[-]`, …) → `[x]`. Returns the status char's byte-column range within
 /// that line and its replacement, or `None` if the line holds no task box.
 pub fn task_toggle(source: &str, line: usize) -> Option<(std::ops::Range<usize>, char)> {
+    let (cols, status) = task_status_at(source, line)?;
+    let next = if matches!(status, 'x' | 'X') {
+        ' '
+    } else {
+        'x'
+    };
+    Some((cols, next))
+}
+
+/// plan editor-ui-round-3 WP-4: set the task at `line` to status `to` (the Reading context
+/// menu). Returns the status char's byte-column range within that line and `to`, or `None`
+/// if the line holds no task box or already has that status.
+pub fn task_set_status(
+    source: &str,
+    line: usize,
+    to: char,
+) -> Option<(std::ops::Range<usize>, char)> {
+    let (cols, status) = task_status_at(source, line)?;
+    (status != to).then_some((cols, to))
+}
+
+/// The status char of the task box at `line` and its byte-column range within that line.
+fn task_status_at(source: &str, line: usize) -> Option<(std::ops::Range<usize>, char)> {
     let start: usize = source.split_inclusive('\n').take(line).map(str::len).sum();
     let text = source[start..].split('\n').next()?;
     let open = text.find('[')?;
@@ -880,12 +903,7 @@ pub fn task_toggle(source: &str, line: usize) -> Option<(std::ops::Range<usize>,
         return None;
     }
     let at = open + 1;
-    let next = if matches!(status, 'x' | 'X') {
-        ' '
-    } else {
-        'x'
-    };
-    Some((at..at + status.len_utf8(), next))
+    Some((at..at + status.len_utf8(), status))
 }
 
 /// The blocks under heading `name` (until the next heading of the same or higher level).

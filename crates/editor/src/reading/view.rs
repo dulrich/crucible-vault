@@ -425,7 +425,7 @@ fn task_press(path: &str, task: Option<char>, line: Option<usize>) -> Option<Mes
 }
 
 /// The drawn checkbox for status char `c`, `side` px square.
-fn task_box<'a>(c: char, side: f32, t: Tokens) -> Element<'a, Message> {
+pub(crate) fn task_box<'a>(c: char, side: f32, t: Tokens) -> Element<'a, Message> {
     let (glyph, role) = task_mark(c);
     let col = role.color(t);
     let boxed_char = |inner: Element<'a, Message>, fill: Option<Rgb>, edge: Rgb| {
@@ -493,11 +493,20 @@ fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Ele
     };
     let marker = container(marker).height(line_h).center_y(line_h);
     let marker: Element<'a, Message> = match task_press(cx.path, it.task, it.line) {
-        Some(msg) => button(marker)
-            .padding(0)
-            .style(button::text)
-            .on_press(msg)
-            .into(),
+        Some(msg) => {
+            let b = button(marker).padding(0).style(button::text).on_press(msg);
+            // plan editor-ui-round-3 WP-4: right-click opens the status menu.
+            match it.line {
+                Some(line) => crate::context_menu::on_right(
+                    b,
+                    crate::context_menu::Target::Task {
+                        path: cx.path.to_owned(),
+                        line,
+                    },
+                ),
+                None => b.into(),
+            }
+        }
         None => marker.into(),
     };
     let child_cx = Ctx {

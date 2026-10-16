@@ -6,6 +6,7 @@
 pub mod app;
 pub mod bookmarks;
 pub mod clipboard_image;
+pub mod context_menu;
 pub mod daemon;
 pub mod dialog;
 pub mod explorer;

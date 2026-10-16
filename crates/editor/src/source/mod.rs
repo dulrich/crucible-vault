@@ -629,6 +629,22 @@ impl SourceBuffer {
         self.replace_in_line(line, cols, &next.to_string(), read_only, now)
     }
 
+    /// Sets the task status at source `line` to `to` as one edit (plan editor-ui-round-3 WP-4;
+    /// see `editor_model::render::task_set_status`).
+    pub fn set_task_status(
+        &mut self,
+        line: usize,
+        to: char,
+        read_only: bool,
+        now: Instant,
+    ) -> bool {
+        let Some((cols, next)) = editor_model::render::task_set_status(&self.text(), line, to)
+        else {
+            return false;
+        };
+        self.replace_in_line(line, cols, &next.to_string(), read_only, now)
+    }
+
     /// Pastes `text` at the cursor (replacing any selection) as one edit.
     pub fn paste(&mut self, text: String, read_only: bool, now: Instant) -> bool {
         self.perform(Action::Edit(Edit::Paste(Arc::new(text))), read_only, now)

@@ -246,6 +246,11 @@ pub struct App {
     /// editor-feedback-round-2 WP-6: the `tab_title = "title"` source; recomputed only when the
     /// buffer changed, so drawing the tab bar never re-parses an unchanged note).
     fm_titles: std::cell::RefCell<FmTitleCache>,
+    /// plan editor-ui-round-3 WP-4: the open right-click menu (one at a time).
+    pub context_menu: Option<crate::context_menu::ContextMenu>,
+    /// Tests: every "Copy path" text, in order.
+    #[cfg(test)]
+    pub copied: Vec<String>,
 }
 
 /// Frontmatter `title` per tab path, keyed by `(edit_seq, epoch)` (plan editor-feedback-round-2 WP-6).
@@ -414,6 +419,9 @@ impl App {
             prefs: crate::settings::editor_prefs::Prefs::default(),
             period_folders: editor_model::period::PeriodFolders::default(),
             fm_titles: std::cell::RefCell::default(),
+            context_menu: None,
+            #[cfg(test)]
+            copied: Vec::new(),
         };
         app.load_editor_prefs();
         app.refresh_files();
@@ -949,6 +957,10 @@ impl App {
         };
         let before = self.active_paths();
         let task = self.update_inner(message);
+        if self.dialog.is_some() {
+            // The dialog outranks the menu: never leave one open beneath it.
+            self.context_menu = None;
+        }
         let flush = self.flush_switched_away(&before);
         self.sync_buffers();
         let auto = self.schedule_settings_autosave();
@@ -966,24 +978,150 @@ impl App {
     /// priority — user input (keys, chords, tab / editor / find / switcher messages, the
     /// focus-loss flush, a repeated close request) is dropped; async completions (saves,
     /// notifications, loads) still run. Escape (the switcher's Close) is the dialog's Cancel.
+    ///
+    /// plan editor-ui-round-3 WP-4: an open context menu ranks next (below the dialog, above
+    /// pane keys): the same user input is dropped, and Escape is the menu's Close.
     fn modal_filter(&self, m: Message) -> Option<Message> {
-        if self.dialog.is_none() {
+        use crate::context_menu::MenuMsg;
+        if self.dialog.is_some() {
             return match m {
-                Message::Dialog(_) => None,
+                Message::Switcher(SwitcherMsg::Close) => {
+                    Some(Message::Dialog(crate::dialog::DialogMsg::Cancel))
+                }
+                Message::Menu(MenuMsg::Open(..) | MenuMsg::Choose(_)) => None,
+                m if is_modal_blocked(&m) => None,
                 m => Some(m),
             };
         }
-        match m {
-            Message::Switcher(SwitcherMsg::Close) => {
-                Some(Message::Dialog(crate::dialog::DialogMsg::Cancel))
-            }
-            Message::Switcher(_) | Message::Find(_) | Message::Palette(PaletteMsg::Key(_)) => None,
-            Message::Tabs(TabsMsg::QuitSaved { .. } | TabsMsg::CloseSaved { .. }) => Some(m),
-            Message::Tabs(_) => None,
-            Message::Source(SourceMsg::Saved { .. } | SourceMsg::AutosaveDue { .. }) => Some(m),
-            Message::Source(_) => None,
-            m => Some(m),
+        if matches!(m, Message::Dialog(_)) {
+            return None;
         }
+        if self.context_menu.is_some() {
+            return match m {
+                Message::Switcher(SwitcherMsg::Close) => Some(Message::Menu(MenuMsg::Close)),
+                m if is_modal_blocked(&m) => None,
+                m => Some(m),
+            };
+        }
+        Some(m)
+    }
+
+    /// WP-4: the right-click menu.
+    fn update_menu(&mut self, m: crate::context_menu::MenuMsg) -> Task<Message> {
+        use crate::context_menu::{ContextMenu, MenuMsg};
+        match m {
+            MenuMsg::Open(target, at) => {
+                self.mode_menu = None;
+                self.context_menu = Some(ContextMenu { at, target });
+            }
+            MenuMsg::Close => self.context_menu = None,
+            MenuMsg::Choose(item) => {
+                if let Some(menu) = self.context_menu.take() {
+                    return self.run_menu_item(menu.target, item);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Runs a chosen menu item on its target.
+    fn run_menu_item(
+        &mut self,
+        target: crate::context_menu::Target,
+        item: crate::context_menu::Item,
+    ) -> Task<Message> {
+        use crate::context_menu::{Item, Target};
+        match (target, item) {
+            (Target::Task { path, line }, Item::TaskStatus(c)) => {
+                self.set_task_status(&path, line, c)
+            }
+            (Target::Tab { pane, id, .. }, Item::Close) => {
+                match self
+                    .panes
+                    .get(pane)
+                    .and_then(|ps| ps.tabs.iter().position(|t| t.id == id))
+                {
+                    Some(i) => self.close_tab(pane, i),
+                    None => Task::none(),
+                }
+            }
+            (Target::Tab { pane, id, .. }, Item::CloseOthers) => {
+                let others: Vec<u64> = self
+                    .panes
+                    .get(pane)
+                    .map(|ps| ps.tabs.iter().map(|t| t.id).filter(|t| *t != id).collect())
+                    .unwrap_or_default();
+                let mut tasks = Vec::new();
+                for other in others {
+                    let i = self
+                        .panes
+                        .get(pane)
+                        .and_then(|ps| ps.tabs.iter().position(|t| t.id == other));
+                    if let Some(i) = i {
+                        tasks.push(self.close_tab(pane, i));
+                    }
+                }
+                Task::batch(tasks)
+            }
+            (Target::Tab { pane, id, path }, Item::Rename) => {
+                let i = self
+                    .panes
+                    .get(pane)
+                    .and_then(|ps| ps.tabs.iter().position(|t| t.id == id));
+                if let Some(i) = i {
+                    self.focus_tab(pane, i, &path);
+                }
+                iced::widget::operation::focus(crate::reading::title_id(&path))
+            }
+            (Target::Tab { path, .. } | Target::Row { path, .. }, Item::Reveal) => {
+                self.reveal(&path);
+                Task::none()
+            }
+            (Target::Tab { path, .. } | Target::Row { path, .. }, Item::CopyPath) => {
+                #[cfg(test)]
+                self.copied.push(path.clone());
+                iced::clipboard::write(path)
+            }
+            (Target::Tab { path, .. } | Target::Row { path, .. }, Item::Delete) => {
+                self.begin_delete(path)
+            }
+            (Target::Row { path, .. }, Item::Open) => self.update_explorer(ExplorerMsg::Open(path)),
+            (Target::Row { path, .. }, Item::OpenInNewPane) => {
+                self.explorer.selected = Some(path.clone());
+                if let Some((p, _)) = self.panes.split(
+                    panes::axis_of(SplitDir::Right),
+                    self.focus,
+                    PaneState::default(),
+                ) {
+                    self.focus = p;
+                }
+                self.open_with(&path, Place::Duplicate, true);
+                Task::none()
+            }
+            (Target::Row { path, .. }, Item::Rename) => {
+                self.explorer.selected = Some(path);
+                self.update_explorer(ExplorerMsg::BeginRename)
+            }
+            (Target::Row { path, .. }, Item::NewNote) => {
+                self.explorer.selected = Some(path);
+                self.update_explorer(ExplorerMsg::BeginNew)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Reveal in explorer: open the sidebar, expand the note's ancestor folders, select it.
+    /// (The virtual list has no scroll-to operation, so the row is not scrolled into view.)
+    fn reveal(&mut self, path: &str) {
+        self.ui.side_collapsed = false;
+        let mut p = path;
+        while let Some((parent, _)) = p.rsplit_once('/') {
+            self.ui.expanded.insert(parent.to_owned());
+            p = parent;
+        }
+        self.explorer.selected = Some(path.to_owned());
+        self.explorer.relayout(&self.ui.expanded);
+        self.persist();
     }
 
     /// The dialog's OK / Cancel.
@@ -1198,6 +1336,7 @@ impl App {
         match message {
             Message::Tabs(m) => return self.update_tabs(m),
             Message::Dialog(m) => return self.update_dialog(m),
+            Message::Menu(m) => return self.update_menu(m),
             Message::Find(m) => return self.update_find(m),
             Message::Status(m) => return self.update_status(m),
             Message::Theme(m) => {
@@ -2084,6 +2223,25 @@ impl App {
     }
 
     // ---- editor-usability-round WP-2: Reading-view edits ----
+
+    /// plan editor-ui-round-3 WP-4: sets a host-note task's status char in `path`'s buffer
+    /// (one undoable edit; normal autosave; the toggle's read-only rule).
+    fn set_task_status(&mut self, path: &str, line: usize, to: char) -> Task<Message> {
+        let read_only = self.status.mode == Mode::Shadow;
+        let Some(doc) = self.docs.get_mut(path) else {
+            return Task::none();
+        };
+        if read_only {
+            self.status.error = Some("edits are disabled in shadow mode".into());
+            return Task::none();
+        }
+        if !doc.set_task_status(line, to, false, std::time::Instant::now()) {
+            return Task::none();
+        }
+        let seq = doc.edit_seq();
+        self.reading.recompute(doc, self.daemon.as_ref());
+        crate::source::autosave_timer(path.to_owned(), seq)
+    }
 
     /// Toggles a host-note task box in `path`'s buffer (one undoable edit; normal autosave).
     fn toggle_task(&mut self, path: &str, line: usize) -> Task<Message> {
@@ -3482,6 +3640,19 @@ impl App {
             .spacing(0)
             .height(BAR_HEIGHT)
             .align_y(iced::Alignment::Center);
+            // WP-4: right-click a note tab for its context menu.
+            let chip: Element<'a, Message> = if tab.is_settings() {
+                chip.into()
+            } else {
+                crate::context_menu::on_right(
+                    chip,
+                    crate::context_menu::Target::Tab {
+                        pane,
+                        id: tab.id,
+                        path: tab.path.clone(),
+                    },
+                )
+            };
             container(chip)
                 .height(BAR_HEIGHT)
                 .clip(true)
@@ -3930,7 +4101,26 @@ impl App {
             }
             None => Space::new().into(),
         };
-        iced::widget::stack![base, overlay].into()
+        // WP-4: the context menu is layer 2 (`Space` when closed; never beneath a dialog).
+        let menu: Element<'_, Message> = match (&self.context_menu, &self.dialog) {
+            (Some(m), None) => crate::context_menu::view(m, t),
+            _ => Space::new().into(),
+        };
+        iced::widget::stack![base, overlay, menu].into()
+    }
+}
+
+/// User input a modal layer (dialog, then context menu) drops: keys, chords, tab / editor /
+/// find / switcher messages, the focus-loss flush, a repeated close request. Async
+/// completions (saves, autosave ticks) still run.
+fn is_modal_blocked(m: &Message) -> bool {
+    match m {
+        Message::Switcher(_) | Message::Find(_) | Message::Palette(PaletteMsg::Key(_)) => true,
+        Message::Tabs(TabsMsg::QuitSaved { .. } | TabsMsg::CloseSaved { .. }) => false,
+        Message::Tabs(_) => true,
+        Message::Source(SourceMsg::Saved { .. } | SourceMsg::AutosaveDue { .. }) => false,
+        Message::Source(_) => true,
+        _ => false,
     }
 }
 

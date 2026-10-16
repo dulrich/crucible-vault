@@ -447,12 +447,19 @@ pub fn view<'a>(ex: &'a Explorer, tokens: Tokens, mode: Mode) -> Element<'a, Mes
         if selected == Some(r.path.as_str()) {
             t = t.color(tokens.accent_text.to_color());
         }
-        button(t)
+        let b = button(t)
             .style(button::text)
             .padding([2, 4])
             .width(Length::Fill)
-            .on_press(Message::Explorer(msg))
-            .into()
+            .on_press(Message::Explorer(msg));
+        // plan editor-ui-round-3 WP-4: right-click a row for its context menu.
+        crate::context_menu::on_right(
+            b,
+            crate::context_menu::Target::Row {
+                path: r.path.clone(),
+                folder: r.folder.is_some(),
+            },
+        )
     });
     col.push(list).height(Length::Fill).into()
 }

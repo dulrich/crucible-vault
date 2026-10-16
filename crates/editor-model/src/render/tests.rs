@@ -414,3 +414,13 @@ fn task_toggle_targets_the_status_char() {
     assert_eq!(task_toggle(src, 4), None);
     assert_eq!(task_toggle(src, 9), None);
 }
+
+#[test]
+fn task_set_status_targets_the_status_char() {
+    let src = "- [ ] a\n  * [x] b\nnot [ ] a task\n";
+    assert_eq!(task_set_status(src, 0, '!'), Some((3..4, '!')));
+    assert_eq!(task_set_status(src, 1, '>'), Some((5..6, '>')));
+    assert_eq!(task_set_status(src, 1, 'x'), None, "already that status");
+    assert_eq!(task_set_status(src, 2, 'x'), None, "not a task");
+    assert_eq!(task_set_status(src, 9, 'x'), None);
+}

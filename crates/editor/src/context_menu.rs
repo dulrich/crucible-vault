@@ -1,0 +1,182 @@
+//! plan editor-ui-round-3 WP-4: the one reusable right-click menu.
+//!
+//! An overlay anchored at the pointer, drawn above the panes (below the modal dialog, which
+//! keeps top input priority). It closes on Escape (routed through `App::modal_filter`), a
+//! click outside the card, or choosing an item. One menu is open at a time: opening another
+//! replaces it. The anchor is read at press time by [`crate::widget::right_click`] (no
+//! per-move subscription).
+
+use iced::widget::pane_grid::Pane;
+use iced::widget::{Space, button, column, container, row, text};
+use iced::{Element, Length, Point, Theme};
+
+use crate::message::Message;
+use crate::theme::Tokens;
+
+/// What the menu was opened on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    /// A host-note task box in Reading (source `line` of `path`).
+    Task { path: String, line: usize },
+    /// A tab header: the tab with [`crate::app::Tab::id`] `id` in `pane`.
+    Tab { pane: Pane, id: u64, path: String },
+    /// An explorer row (`folder` = a folder row).
+    Row { path: String, folder: bool },
+}
+
+/// A menu entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    /// Set the task status char.
+    TaskStatus(char),
+    Open,
+    OpenInNewPane,
+    Close,
+    CloseOthers,
+    Reveal,
+    CopyPath,
+    Rename,
+    Delete,
+    NewNote,
+}
+
+/// Menu messages.
+#[derive(Debug, Clone)]
+pub enum MenuMsg {
+    /// Right-press on a target at a window position (the anchor).
+    Open(Target, Point),
+    /// Escape / outside click.
+    Close,
+    /// An item was chosen (the menu closes first).
+    Choose(Item),
+}
+
+/// The open menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextMenu {
+    pub at: Point,
+    pub target: Target,
+}
+
+/// The themed task status set (plan editor-feedback-round-2 WP-5's glyph map, `reading/view.rs`
+/// `task_mark`): status char + short label.
+pub const TASK_STATUSES: &[(char, &str)] = &[
+    (' ', "To do"),
+    ('x', "Done"),
+    ('/', "In progress"),
+    ('-', "Cancelled"),
+    ('>', "Forwarded"),
+    ('<', "Scheduled"),
+    ('?', "Question"),
+    ('!', "Important"),
+    ('"', "Quote"),
+    ('*', "Star"),
+    ('l', "Location"),
+    ('i', "Information"),
+    ('S', "Savings"),
+    ('I', "Idea"),
+    ('f', "Fire"),
+    ('k', "Key"),
+    ('u', "Up"),
+    ('d', "Down"),
+    ('w', "Win"),
+    ('p', "Pro"),
+    ('c', "Con"),
+    ('b', "Bookmark"),
+];
+
+/// The items of `target`'s menu, in order.
+pub fn items(target: &Target) -> Vec<(Item, String)> {
+    let named = |list: &[(Item, &str)]| -> Vec<(Item, String)> {
+        list.iter().map(|(i, l)| (*i, (*l).to_owned())).collect()
+    };
+    match target {
+        Target::Task { .. } => TASK_STATUSES
+            .iter()
+            .map(|(c, l)| (Item::TaskStatus(*c), format!("[{c}]  {l}")))
+            .collect(),
+        Target::Tab { .. } => named(&[
+            (Item::Close, "Close"),
+            (Item::CloseOthers, "Close others"),
+            (Item::Reveal, "Reveal in explorer"),
+            (Item::CopyPath, "Copy path"),
+            (Item::Rename, "Rename"),
+            (Item::Delete, "Delete note…"),
+        ]),
+        Target::Row { folder: false, .. } => named(&[
+            (Item::Open, "Open"),
+            (Item::OpenInNewPane, "Open in new pane"),
+            (Item::Reveal, "Reveal"),
+            (Item::CopyPath, "Copy path"),
+            (Item::Rename, "Rename"),
+            (Item::Delete, "Delete…"),
+        ]),
+        // Explorer ops rename / move / trash files only (no folder RPC): New note, Copy path.
+        Target::Row { folder: true, .. } => {
+            named(&[(Item::NewNote, "New note"), (Item::CopyPath, "Copy path")])
+        }
+    }
+}
+
+/// Card width.
+const WIDTH: f32 = 220.0;
+
+/// The menu layer: a full-window catcher (any click outside the card closes) holding the
+/// card at the anchor.
+pub fn view<'a>(m: &'a ContextMenu, t: Tokens) -> Element<'a, Message> {
+    let entries = items(&m.target).into_iter().map(|(item, label)| {
+        let lbl: Element<'a, Message> = match item {
+            Item::TaskStatus(c) => row![
+                crate::reading::view::task_box(c, 14.0, t),
+                text(label).size(13)
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            _ => text(label).size(13).into(),
+        };
+        button(lbl)
+            .padding([3, 8])
+            .width(Length::Fill)
+            .style(button::text)
+            .on_press(Message::Menu(MenuMsg::Choose(item)))
+            .into()
+    });
+    let card = container(column(entries).spacing(0))
+        .padding(4)
+        .width(WIDTH)
+        .style(move |_: &Theme| container::Style {
+            background: Some(t.panel.to_color().into()),
+            text_color: Some(t.text.to_color()),
+            border: iced::Border {
+                color: t.line.to_color(),
+                width: 1.0,
+                radius: crate::theme::RADIUS.into(),
+            },
+            ..container::Style::default()
+        });
+    let placed = column![
+        Space::new().height(m.at.y.max(0.0)),
+        row![
+            Space::new().width(m.at.x.max(0.0)),
+            iced::widget::opaque(card)
+        ],
+    ];
+    iced::widget::mouse_area(container(placed).width(Length::Fill).height(Length::Fill))
+        .on_press(Message::Menu(MenuMsg::Close))
+        .on_right_press(Message::Menu(MenuMsg::Close))
+        .into()
+}
+
+/// Wraps `content` so a right press opens `target`'s menu at the press point.
+pub fn on_right<'a>(
+    content: impl Into<Element<'a, Message>>,
+    target: Target,
+) -> Element<'a, Message> {
+    crate::widget::right_click::right_click(content, open_msg(target)).into()
+}
+
+/// The right-press message for `target`: opens its menu at the press point.
+pub fn open_msg(target: Target) -> impl Fn(Point) -> Message {
+    move |at| Message::Menu(MenuMsg::Open(target.clone(), at))
+}
