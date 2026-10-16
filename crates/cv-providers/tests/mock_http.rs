@@ -138,6 +138,7 @@ fn req(max: Option<u32>) -> CompletionRequest {
         system: "SYS".into(),
         user: "USER".into(),
         max_tokens: max,
+        images: Vec::new(),
     }
 }
 

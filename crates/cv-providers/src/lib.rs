@@ -16,7 +16,7 @@ pub mod wire;
 
 pub use config::{Capability, ModelConfig, ProviderConfig, ProviderKind, ProvidersConfig};
 pub use error::{ProviderError, Result};
-pub use manager::{CompletionRequest, ProviderManager};
+pub use manager::{CompletionRequest, ImagePart, ProviderManager};
 pub use refs::{ProviderModelRef, parse_model_ref};
 pub use secrets::{SecretSource, SystemSecrets};
 pub use wire::{Completion, Embeddings, FinishReason, RerankItem};

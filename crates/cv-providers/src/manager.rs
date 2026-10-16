@@ -16,6 +16,7 @@ use crate::config::{DEFAULT_MAX_TOKENS, ProviderConfig, ProviderKind};
 use crate::error::{ProviderError, Result};
 use crate::limiter::{ConcurrencyLimiter, resolve_concurrency_limit};
 use crate::secrets::{SecretSource, resolve_api_key};
+pub use crate::wire::ImagePart;
 use crate::wire::{self, Completion, Embeddings, FinishReason, RerankItem, WireRequest};
 
 /// One completion request. `max_tokens` falls back to the provider's, then 4096 — it is always
@@ -25,6 +26,9 @@ pub struct CompletionRequest {
     pub system: String,
     pub user: String,
     pub max_tokens: Option<u32>,
+    /// Images attached to the user turn (plan `v0-automation-pipelines` WP-6); empty = the
+    /// text-only wire shape, byte for byte. A CLI provider cannot take images (`Unsupported`).
+    pub images: Vec<ImagePart>,
 }
 
 pub struct ProviderManager {
@@ -79,6 +83,12 @@ impl ProviderManager {
         let limit = resolve_concurrency_limit(p);
         let (p2, model) = (p.clone(), model.to_owned());
         if p.kind == ProviderKind::Cli {
+            if !req.images.is_empty() {
+                return Err(ProviderError::Unsupported {
+                    kind: "cli",
+                    capability: "take image input",
+                });
+            }
             let fut = async move {
                 let text = run_cli_completion(&p2, &model, &req.system, &req.user).await?;
                 Ok(Completion {
@@ -96,6 +106,7 @@ impl ProviderManager {
             &model,
             &req.system,
             &req.user,
+            &req.images,
             max_tokens,
         )?;
         let http = self.http.clone();
@@ -143,6 +154,7 @@ impl ProviderManager {
                     system: wire::RERANK_FALLBACK_SYSTEM_PROMPT.to_owned(),
                     user: wire::rerank_fallback_user_prompt(query, documents),
                     max_tokens: None,
+                    images: Vec::new(),
                 },
             )
             .await?;

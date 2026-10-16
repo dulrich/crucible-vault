@@ -72,33 +72,106 @@ fn json_headers(bearer: Option<&str>) -> Vec<(String, String)> {
     h
 }
 
-/// Builds a completion request for an HTTP kind.
+/// One image attached to a completion request (plan `v0-automation-pipelines` WP-6). The caller
+/// base64-encodes the bytes; this crate never decodes them, and `Debug` never prints them.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct ImagePart {
+    /// MIME type, e.g. `image/png`.
+    pub mime: String,
+    /// Standard base64 of the image bytes.
+    pub base64: String,
+}
+
+impl std::fmt::Debug for ImagePart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImagePart")
+            .field("mime", &self.mime)
+            .field("base64_len", &self.base64.len())
+            .finish()
+    }
+}
+
+/// The messages array of the chat-style kinds. The system message is omitted when images are
+/// attached and `system` is empty (Crucible's vision call sends none,
+/// `openaiCompatible.ts:277-296`); text-only requests keep their historical shape byte for byte.
+fn chat_messages(system: &str, user_msg: Value, has_images: bool) -> Value {
+    if has_images && system.is_empty() {
+        json!([{"role": "user", "content": user_msg}])
+    } else {
+        json!([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ])
+    }
+}
+
+/// Builds a completion request for an HTTP kind. Empty `images` = the text-only wire shape.
 pub fn build_completion(
     p: &ProviderConfig,
     api_key: Option<&str>,
     model: &str,
     system: &str,
     user: &str,
+    images: &[ImagePart],
     max_tokens: u32,
 ) -> Result<WireRequest> {
     let base = base_url(p);
+    let has_images = !images.is_empty();
     Ok(match p.kind {
-        ProviderKind::OpenaiCompatible => WireRequest {
-            url: format!("{base}/chat/completions"),
-            headers: json_headers(api_key),
-            body: json!({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "max_tokens": max_tokens,
-            }),
-        },
+        ProviderKind::OpenaiCompatible => {
+            let content = if has_images {
+                let mut parts = vec![json!({"type": "text", "text": user})];
+                parts.extend(images.iter().map(|i| {
+                    json!({
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:{};base64,{}", i.mime, i.base64)},
+                    })
+                }));
+                Value::Array(parts)
+            } else {
+                Value::String(user.to_owned())
+            };
+            WireRequest {
+                url: format!("{base}/chat/completions"),
+                headers: json_headers(api_key),
+                body: json!({
+                    "model": model,
+                    "messages": chat_messages(system, content, has_images),
+                    "max_tokens": max_tokens,
+                }),
+            }
+        }
         ProviderKind::Anthropic => {
             let key = api_key.ok_or_else(|| {
                 ProviderError::Secret(format!("provider {:?} needs an API key", p.id))
             })?;
+            let content = if has_images {
+                let mut blocks: Vec<Value> = images
+                    .iter()
+                    .map(|i| {
+                        json!({
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": i.mime, "data": i.base64},
+                        })
+                    })
+                    .collect();
+                blocks.push(json!({"type": "text", "text": user}));
+                Value::Array(blocks)
+            } else {
+                Value::String(user.to_owned())
+            };
+            let mut body = json!({
+                "model": model,
+                "system": system,
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": max_tokens,
+            });
+            if has_images
+                && system.is_empty()
+                && let Some(o) = body.as_object_mut()
+            {
+                o.remove("system");
+            }
             WireRequest {
                 url: format!("{base}/v1/messages"),
                 headers: vec![
@@ -106,20 +179,21 @@ pub fn build_completion(
                     ("x-api-key".into(), key.to_owned()),
                     ("anthropic-version".into(), "2023-06-01".into()),
                 ],
-                body: json!({
-                    "model": model,
-                    "system": system,
-                    "messages": [{"role": "user", "content": user}],
-                    "max_tokens": max_tokens,
-                }),
+                body,
             }
         }
         ProviderKind::Google => {
             let key = api_key.ok_or_else(|| {
                 ProviderError::Secret(format!("provider {:?} needs an API key", p.id))
             })?;
+            let mut parts = vec![json!({"text": user})];
+            parts.extend(
+                images
+                    .iter()
+                    .map(|i| json!({"inline_data": {"mime_type": i.mime, "data": i.base64}})),
+            );
             let mut body = json!({
-                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": {"maxOutputTokens": max_tokens},
             });
             if !system.is_empty() {
@@ -134,20 +208,26 @@ pub fn build_completion(
                 body,
             }
         }
-        ProviderKind::Ollama => WireRequest {
-            url: format!("{base}/api/chat"),
-            headers: json_headers(None),
-            body: json!({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "stream": false,
-                // Ollama's name for max_tokens.
-                "options": {"num_predict": max_tokens},
-            }),
-        },
+        ProviderKind::Ollama => {
+            let mut messages = chat_messages(system, Value::String(user.to_owned()), has_images);
+            if has_images && let Some(last) = messages.as_array_mut().and_then(|a| a.last_mut()) {
+                last["images"] = images
+                    .iter()
+                    .map(|i| Value::String(i.base64.clone()))
+                    .collect();
+            }
+            WireRequest {
+                url: format!("{base}/api/chat"),
+                headers: json_headers(None),
+                body: json!({
+                    "model": model,
+                    "messages": messages,
+                    "stream": false,
+                    // Ollama's name for max_tokens.
+                    "options": {"num_predict": max_tokens},
+                }),
+            }
+        }
         ProviderKind::Cli => {
             return Err(ProviderError::Unsupported {
                 kind: "cli",
@@ -495,5 +575,86 @@ mod tests {
         assert_eq!(c.text, "ab");
         assert_eq!(c.finish_reason, FinishReason::Length);
         assert!(parse_completion(ProviderKind::OpenaiCompatible, &json!({"choices": []})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod image_wire_tests {
+    //! Plan `v0-automation-pipelines` WP-6: multimodal wire shapes per kind; text-only requests
+    //! keep the pre-WP-6 shape byte for byte.
+    use super::*;
+    use crate::config::ProvidersConfig;
+
+    fn prov(kind: &str) -> ProviderConfig {
+        ProvidersConfig::from_toml(&format!(
+            "[[provider]]\nid = \"p\"\nkind = \"{kind}\"\nbase_url = \"http://h\"\n"
+        ))
+        .unwrap()
+        .providers
+        .remove(0)
+    }
+
+    fn img() -> Vec<ImagePart> {
+        vec![ImagePart {
+            mime: "image/png".into(),
+            base64: "QUJD".into(),
+        }]
+    }
+
+    fn body(kind: &str, system: &str, images: &[ImagePart]) -> Value {
+        build_completion(&prov(kind), Some("k"), "m", system, "U", images, 7)
+            .unwrap()
+            .body
+    }
+
+    #[test]
+    fn text_only_shapes_unchanged() {
+        let chat = json!([{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]);
+        assert_eq!(
+            body("openai-compatible", "S", &[]).to_string(),
+            json!({"model": "m", "messages": chat, "max_tokens": 7}).to_string()
+        );
+        assert_eq!(
+            body("anthropic", "S", &[]).to_string(),
+            json!({"model": "m", "system": "S", "messages": [{"role": "user", "content": "U"}], "max_tokens": 7}).to_string()
+        );
+        assert_eq!(
+            body("google", "", &[]).to_string(),
+            json!({"contents": [{"role": "user", "parts": [{"text": "U"}]}], "generationConfig": {"maxOutputTokens": 7}}).to_string()
+        );
+        assert_eq!(
+            body("ollama", "S", &[]).to_string(),
+            json!({"model": "m", "messages": chat, "stream": false, "options": {"num_predict": 7}})
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn image_shapes_per_kind() {
+        assert_eq!(
+            body("openai-compatible", "", &img())["messages"],
+            json!([{"role": "user", "content": [
+                {"type": "text", "text": "U"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+            ]}])
+        );
+        let a = body("anthropic", "", &img());
+        assert!(a.get("system").is_none());
+        assert_eq!(
+            a["messages"][0]["content"],
+            json!([
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+                {"type": "text", "text": "U"},
+            ])
+        );
+        assert_eq!(
+            body("google", "", &img())["contents"][0]["parts"],
+            json!([{"text": "U"}, {"inline_data": {"mime_type": "image/png", "data": "QUJD"}}])
+        );
+        assert_eq!(
+            body("ollama", "", &img())["messages"],
+            json!([{"role": "user", "content": "U", "images": ["QUJD"]}])
+        );
+        assert!(!format!("{:?}", img()[0]).contains("QUJD"));
     }
 }

@@ -208,6 +208,59 @@ impl StateDb {
         tx.commit()?;
         Ok(summary)
     }
+
+    /// Crucible `pruneFailed('transient')` (`imageDescriptionStore.ts:253-277`): deletes `failed`
+    /// records whose `raw.failureClass` is `transient` (a record without one classifies lazily
+    /// from its `failure` text, [`legacy_transient`]). Returns the pruned count.
+    pub fn prune_transient_failed_image_descriptions(&mut self) -> Result<usize> {
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let rows: Vec<(String, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT md5, raw FROM image_descriptions WHERE kind = 'failed'")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let mut n = 0;
+        for (md5, raw) in rows {
+            let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+            let transient = match v.get("failureClass").and_then(Value::as_str) {
+                Some(c) => c == "transient",
+                None => legacy_transient(v.get("failure").and_then(Value::as_str).unwrap_or("")),
+            };
+            if transient {
+                n += tx.execute(
+                    "DELETE FROM image_descriptions WHERE md5 = ?1",
+                    params![md5],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Crucible `pruneDegenerate` (`imageDescriptionStore.ts:239-251`): deletes `vision` records
+    /// whose extraction exceeds `max_chars` characters. Returns the pruned count.
+    pub fn prune_degenerate_image_descriptions(&mut self, max_chars: usize) -> Result<usize> {
+        let max = i64::try_from(max_chars).unwrap_or(i64::MAX);
+        Ok(self.conn().execute(
+            "DELETE FROM image_descriptions WHERE kind = 'vision' AND length(extraction) > ?1",
+            params![max],
+        )?)
+    }
+}
+
+/// Lazy classification of a pre-`failureClass` failure message — Crucible `classifyFailure`
+/// (`imageDescriptionStore.ts:101-106`): `/timed out after \d+ms|net::ERR_/`.
+fn legacy_transient(failure: &str) -> bool {
+    if failure.contains("net::ERR_") {
+        return true;
+    }
+    failure.match_indices("timed out after ").any(|(i, m)| {
+        let rest = &failure[i + m.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0 && rest[digits..].starts_with("ms")
+    })
 }
 
 #[cfg(test)]

@@ -191,6 +191,10 @@ const STEPS: &[(&str, &str)] = &[
     ("x_metadata", ""),
     ("x_backfill", ""),
     ("image_describe", ""),
+    (
+        "image_describe",
+        "scope = \"vault\"\nlimit = 5\nprune_transient = true",
+    ),
     ("track_youtube", ""),
     ("track_blogs", ""),
     ("ignore_video", ""),

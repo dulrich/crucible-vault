@@ -73,6 +73,16 @@ fn attachment_ref_re() -> &'static Regex {
     )
 }
 
+/// A managed (`<md5>_MD5.<image ext>`) image name, for the `images` outcome var (plan
+/// `v0-automation-pipelines` WP-6: the image-describe trigger seam).
+fn managed_image_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    re(
+        &R,
+        r"(?i)[0-9a-f]{32}_MD5\.(?:png|jpe?g|gif|webp|bmp|svg|avif)\b",
+    )
+}
+
 /// Crucible `REMOTE_MD_IMAGE_RE`.
 fn remote_md_image_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
@@ -1284,6 +1294,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     let mut vars = Map::new();
     if !path.ends_with(".md") {
         vars.insert("changed".into(), Value::Bool(false));
+        vars.insert("images".into(), 0u64.into());
         return Ok(StepOutcome {
             vars,
             ..StepOutcome::default()
@@ -1420,6 +1431,8 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         updated = strip_data_uri_image_placeholders(&updated).0;
     }
     let changed = updated != content;
+    // Managed image references left in the note after the pass (localized + reused + earlier).
+    let images = managed_image_re().find_iter(&updated).count() as u64;
     let mut output_paths = run.counts.created.clone();
     if changed {
         // The one note write, CAS against the hash read at the start (I2).
@@ -1454,6 +1467,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     vars.insert("reused".into(), c.reused.into());
     vars.insert("stripped".into(), c.stripped.into());
     vars.insert("failed".into(), c.failed.into());
+    vars.insert("images".into(), images.into());
     vars.insert(
         "localized".into(),
         (if changed { applied } else { 0 }).into(),

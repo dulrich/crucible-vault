@@ -627,10 +627,33 @@ pub static X_BACKFILL: Record = Record {
     rules: &[],
 };
 
-/// `image_describe` — `crates/cv/src/steps/image_describe.rs` (A2 stub: no params until WP-6).
+/// `image_describe` — `crates/cv/src/steps/image_describe.rs` (`parse`; keys at
+/// `image_describe.rs` `KEYS`).
 pub static IMAGE_DESCRIBE: Record = Record {
     name: "image_describe",
-    fields: &[],
+    fields: &[
+        field(
+            "scope",
+            "Scope",
+            "note: the run's active note's images; vault: every indexed _MD5 image",
+            Node::Enum(&["note", "vault"]),
+        )
+        .dflt(D::Str("note")),
+        field(
+            "limit",
+            "Limit",
+            "Images described per run; the rest wait for the next run",
+            POS_INT,
+        )
+        .dflt(D::Int(100)),
+        field(
+            "prune_transient",
+            "Prune transient",
+            "First drop transient failed and degenerate vision records (backfill)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+    ],
     rules: &[],
 };
 

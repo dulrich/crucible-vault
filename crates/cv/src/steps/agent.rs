@@ -158,7 +158,7 @@ fn agent_def(config: &ConfigSet, id: &str) -> Result<AgentDef, String> {
     Ok(def)
 }
 
-fn providers(config: &ConfigSet) -> Result<ProvidersConfig, String> {
+pub(crate) fn providers(config: &ConfigSet) -> Result<ProvidersConfig, String> {
     let text = toml::to_string(config.table("providers.toml"))
         .map_err(|e| format!("providers.toml: {e}"))?;
     ProvidersConfig::from_toml(&text).map_err(|e| e.to_string())
@@ -230,7 +230,7 @@ pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
 }
 
 /// The process-wide manager: completion calls share its per-provider concurrency limiter.
-fn manager() -> Result<&'static ProviderManager, StepError> {
+pub(crate) fn manager() -> Result<&'static ProviderManager, StepError> {
     static MANAGER: OnceLock<Result<ProviderManager, String>> = OnceLock::new();
     MANAGER
         .get_or_init(|| {
@@ -489,6 +489,7 @@ pub(crate) fn run(
         system,
         user,
         max_tokens,
+        images: Vec::new(),
     };
     let completion = handle
         .block_on(mgr.complete(&provider, &model, req))
