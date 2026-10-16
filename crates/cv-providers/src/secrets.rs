@@ -79,6 +79,25 @@ pub fn resolve_api_key(p: &ProviderConfig, src: &dyn SecretSource) -> Result<Opt
     Ok(None)
 }
 
+/// Resolves a bare-named secret (e.g. `YOUTUBE_API_KEY`, plan `v0-automation-pipelines` WP-4):
+/// the env var `name` first, then the file `name` in the secrets directory (same convention as
+/// [`resolve_api_key`]'s `api_key_file`). Trimmed; empty = missing. A `name` that is not a bare
+/// file name never reads a file.
+pub fn resolve_secret(name: &str, src: &dyn SecretSource) -> Option<String> {
+    let clean = |v: String| Some(v.trim().to_owned()).filter(|v| !v.is_empty());
+    if let Some(v) = src.env_var(name).and_then(clean) {
+        return Some(v);
+    }
+    let bare = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && Path::new(name).file_name().is_some_and(|f| f == name);
+    if !bare {
+        return None;
+    }
+    src.secret_file(name).and_then(clean)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -128,6 +147,20 @@ pub(crate) mod tests {
             Some("from-env".into())
         );
         assert_eq!(resolve_api_key(&provider(None, None), &s).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_secret_env_then_file_trimmed() {
+        let mut s = MapSecrets::default();
+        assert_eq!(resolve_secret("YT", &s), None);
+        s.files.insert("YT".into(), " f \n".into());
+        assert_eq!(resolve_secret("YT", &s), Some("f".into()));
+        s.env.insert("YT".into(), "  ".into());
+        assert_eq!(resolve_secret("YT", &s), Some("f".into()));
+        s.env.insert("YT".into(), "e".into());
+        assert_eq!(resolve_secret("YT", &s), Some("e".into()));
+        s.files.insert("../x".into(), "bad".into());
+        assert_eq!(resolve_secret("../x", &s), None);
     }
 
     #[test]

@@ -565,17 +565,44 @@ pub static LINK_SCAN: Record = Record {
     rules: &[],
 };
 
-/// `yt_metadata` — `crates/cv/src/steps/youtube.rs` (A2 stub: no params until WP-4).
+/// `yt_metadata` — `crates/cv/src/steps/youtube.rs` (`validate`; keys at `META_KEYS`).
 pub static YT_METADATA: Record = Record {
     name: "yt_metadata",
-    fields: &[],
+    fields: &[field(
+        "video_id",
+        "Video id",
+        "Placeholders ok; default: the note's yt-video-id, else the id in its source URL",
+        Node::Str,
+    )],
     rules: &[],
 };
 
-/// `yt_channel_enrich` — `crates/cv/src/steps/youtube.rs` (A2 stub: no params until WP-4).
+/// `yt_channel_enrich` — `crates/cv/src/steps/youtube.rs` (`validate`; keys at `ENRICH_KEYS`).
 pub static YT_CHANNEL_ENRICH: Record = Record {
     name: "yt_channel_enrich",
-    fields: &[],
+    fields: &[
+        field(
+            "channel_id",
+            "Channel id",
+            "Placeholders ok; default: the channel of a just-created metadata note",
+            Node::Str,
+        )
+        .dflt(D::Str("{vars.channel_id}")),
+        field(
+            "force",
+            "Force",
+            "Refresh even when the metadata note was not just created / about.md is fresh",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+        field(
+            "max_age_days",
+            "Max age (days)",
+            "Refresh about.md older than this",
+            POS_INT,
+        )
+        .dflt(D::Int(30)),
+    ],
     rules: &[],
 };
 

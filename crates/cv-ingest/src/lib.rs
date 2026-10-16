@@ -7,6 +7,7 @@
 pub mod feed;
 pub mod html;
 pub mod urls;
+pub mod youtube;
 
 pub use feed::{FeedError, FeedItem, parse_feed};
 pub use html::{html_to_markdown, word_count};

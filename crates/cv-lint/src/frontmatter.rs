@@ -307,6 +307,37 @@ impl FrontmatterDoc {
         }
     }
 
+    /// Crucible `insertFrontmatterPropertyAfter` (`src/frontmatter.ts`): an existing `key` is
+    /// [`Self::set`] in place; an absent `key` is inserted directly after `anchor`'s lines (before
+    /// the anchor's trailing comments/blank lines), or at the end of the block when `anchor` is
+    /// absent (a note without frontmatter gets a new block).
+    pub fn insert_after(
+        &mut self,
+        anchor: &str,
+        key: &str,
+        value: &JsValue,
+    ) -> Result<bool, FmError> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(FmError::EmptyKey);
+        }
+        let (block, entries) = self.scan()?;
+        if entries.iter().any(|e| e.key == key) {
+            return self.set(key, value);
+        }
+        let nl = block
+            .as_ref()
+            .map_or_else(|| detect_newline(&self.text), |b| b.newline);
+        let rendered = render_entry(key, value, nl);
+        match entries.iter().find(|e| e.key == anchor.trim()) {
+            Some(a) => {
+                let at = a.end;
+                Ok(self.splice(at, at, &format!("{rendered}{nl}")))
+            }
+            None => Ok(self.append_entry(block, &rendered)),
+        }
+    }
+
     /// Crucible `upsertFrontmatterPropertyIfEmpty` (`src/frontmatter.ts:293-300`): set only when
     /// the key is absent, `null`, or the empty string.
     pub fn set_if_empty(&mut self, key: &str, value: &JsValue) -> Result<bool, FmError> {
@@ -589,6 +620,24 @@ mod tests {
             d.text(),
             DOC.replace("n: 0x1F\n", "n: 0x1F\nword-count: 2\n")
         );
+    }
+
+    #[test]
+    fn insert_after_places_new_key_after_anchor() {
+        let link = JsValue::Arr(vec![s("[[m/a]]")]);
+        let mut d = FrontmatterDoc::new("---\na: 1\nyt-video-id: x\nz: 2\n---\nB\n");
+        assert!(d.insert_after("yt-video-id", "yt-metadata", &link).unwrap());
+        assert_eq!(
+            d.text(),
+            "---\na: 1\nyt-video-id: x\nyt-metadata:\n  - \"[[m/a]]\"\nz: 2\n---\nB\n"
+        );
+        // Anchor absent → end of block.
+        let mut d = FrontmatterDoc::new("---\na: 1\n---\n");
+        assert!(d.insert_after("nope", "k", &s("v")).unwrap());
+        assert_eq!(d.text(), "---\na: 1\nk: v\n---\n");
+        // Existing key → set in place.
+        let mut d = FrontmatterDoc::new("---\nk: v\nyt-video-id: x\n---\n");
+        assert!(!d.insert_after("yt-video-id", "k", &s("v")).unwrap());
     }
 
     #[test]

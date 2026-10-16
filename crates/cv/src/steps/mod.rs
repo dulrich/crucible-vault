@@ -37,6 +37,7 @@ pub mod localize;
 pub mod materialize;
 pub mod search;
 pub mod tracker;
+pub mod web;
 #[cfg(test)]
 mod wp10_tests;
 #[cfg(test)]
@@ -134,7 +135,6 @@ pub(crate) const TRANSIENT_CAP_MS: i64 = 30 * 60_000;
 /// Transient deferrals past this many claims settle `Failed{ServiceOutage}`.
 pub(crate) const TRANSIENT_MAX_ATTEMPTS: i64 = 5;
 /// Default quota wait when the service names none.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by WP-4..8 fetch steps
 pub(crate) const QUOTA_DEFAULT_MS: i64 = 60 * 60_000;
 
 /// Maps an HTTP fetch failure to a step disposition (plan WP-2; used by WP-4..8).
@@ -144,7 +144,6 @@ pub(crate) const QUOTA_DEFAULT_MS: i64 = 60 * 60_000;
 /// (`"timeout"`, `"HTTP 408"`, `"network"`, client errors) → `Timeout`. Delay = server
 /// `retry_after` or [`TRANSIENT_BASE_MS`]. `Quota` → `Deferred{Quota}` with `retry_after` or
 /// 1 h. `NotFound`/`Permanent`/`Malformed` → `Failed` (never retried).
-#[cfg_attr(not(test), allow(dead_code))] // consumed by WP-4..8 fetch steps
 pub(crate) fn fetch_disposition(e: &cv_providers::web::FetchError) -> StepError {
     use cv_providers::web::FetchError;
     let ms = |d: &Option<std::time::Duration>, default: i64| {

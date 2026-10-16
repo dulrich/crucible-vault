@@ -181,7 +181,12 @@ const STEPS: &[(&str, &str)] = &[
         "scope = \"vault\"\nexclude = [\"_crucible\", \"Archive/\"]",
     ),
     ("yt_metadata", ""),
+    ("yt_metadata", "video_id = \"{vars.video_id}\""),
     ("yt_channel_enrich", ""),
+    (
+        "yt_channel_enrich",
+        "channel_id = \"{vars.channel_id}\"\nforce = true\nmax_age_days = 7",
+    ),
     ("x_discover", ""),
     ("x_metadata", ""),
     ("x_backfill", ""),
