@@ -300,6 +300,7 @@ fn highlighter_change_line_reentry() {
         colors: KindColors::from_tokens(&tokens),
         epoch: 0,
         find: None,
+        find_all: Arc::from([]),
     };
     let lines = ["```", "#a", "```", "#b"];
     let mut h = MarkdownHighlighter::new(&s);
@@ -335,7 +336,10 @@ fn highlighter_change_line_reentry() {
             }
         )]
     );
-    h.update(&HighlightSettings { epoch: 1, ..s });
+    h.update(&HighlightSettings {
+        epoch: 1,
+        ..s.clone()
+    });
     assert_eq!(h.current_line(), 0);
 }
 
@@ -775,6 +779,7 @@ fn find_after_non_ascii_selects_and_paints_exact_bytes() {
         colors: KindColors::from_tokens(&tokens),
         epoch: 0,
         find: span,
+        find_all: Arc::from([]),
     };
     let mut h = MarkdownHighlighter::new(&s);
     let line = "café bar";
@@ -847,4 +852,104 @@ fn ctrl_v_routes_to_image_aware_paste() {
         test_key_binding(kp),
         Some(Binding::Custom(Message::Source(SourceMsg::Paste)))
     ));
+}
+
+// ---- plan editor-ui-round-3 WP-5 ----
+
+#[test]
+fn ctrl_x_without_selection_cuts_the_line_as_one_undoable_edit() {
+    let (_t, _d, mut app, _p) = setup();
+    buf(&mut app).materialise();
+    at(&mut app, 1, 3, None);
+    let (clip, changed) = buf(&mut app).cut(false, Instant::now());
+    assert!(changed);
+    assert_eq!(clip.as_deref(), Some("line two\n"));
+    assert_eq!(buf(&mut app).text(), "line one\nline three\n");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
+    // Last line without a trailing newline: the line text; the preceding newline goes too.
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "a\nlast");
+    at(&mut app, 1, 2, None);
+    let (clip, _) = buf(&mut app).cut(false, Instant::now());
+    assert_eq!(clip.as_deref(), Some("last"));
+    assert_eq!(buf(&mut app).text(), "a");
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "a\nlast");
+    // With a selection: only the selection (as before).
+    at(&mut app, 0, 1, Some((0, 0)));
+    let (clip, _) = buf(&mut app).cut(false, Instant::now());
+    assert_eq!(clip.as_deref(), Some("a"));
+    assert_eq!(buf(&mut app).text(), "\nlast");
+    // Read-only: nothing is cut.
+    at(&mut app, 1, 0, None);
+    assert_eq!(buf(&mut app).cut(true, Instant::now()), (None, false));
+}
+
+#[test]
+fn ctrl_x_routes_to_cut() {
+    let kp = KeyPress {
+        key: keyboard::Key::Character("x".into()),
+        modified_key: keyboard::Key::Character("x".into()),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        modifiers: keyboard::Modifiers::CTRL,
+        text: None,
+        status: text_editor::Status::Focused { is_hovered: false },
+    };
+    assert!(matches!(
+        test_key_binding(kp),
+        Some(Binding::Custom(Message::Source(SourceMsg::Cut)))
+    ));
+}
+
+#[test]
+fn go_to_top_and_bottom_move_the_source_cursor() {
+    use crate::palette::ClientCmd;
+    let (_t, _d, mut app, p) = setup();
+    let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+        path: p.clone(),
+        mode: crate::reading::ViewMode::Source,
+    }));
+    at(&mut app, 1, 3, Some((1, 0)));
+    let focus = app.focus;
+    let _ = app.update(ClientCmd::GoToBottom.message(focus));
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.position, Position { line: 3, column: 0 });
+    assert_eq!(c.selection, None);
+    let _ = app.update(ClientCmd::GoToTop.message(focus));
+    assert_eq!(
+        buf(&mut app).cursor().position,
+        Position { line: 0, column: 0 }
+    );
+    assert!(!buf(&mut app).is_dirty(), "motion only");
+}
+
+#[test]
+fn highlighter_paints_every_match_light_and_the_current_strong_in_bytes() {
+    use iced::advanced::text::highlighter::Highlighter as _;
+    let tokens = crate::theme::Surround::Med.tokens().expect("tokens");
+    let line = "été bar été";
+    // Byte columns: "été" = 0..5 and 10..15 (é is two bytes).
+    let all: Arc<[FindSpan]> = Arc::from([((0, 0), (0, 5)), ((0, 10), (0, 15))]);
+    let s = HighlightSettings {
+        colors: KindColors::from_tokens(&tokens),
+        epoch: 0,
+        find: Some(((0, 10), (0, 15))),
+        find_all: all,
+    };
+    let mut h = MarkdownHighlighter::new(&s);
+    let painted: Vec<_> = h.highlight_line(line).collect();
+    let light: Vec<_> = painted
+        .iter()
+        .filter(|(_, p)| p.color == s.colors.find_all && !p.bold)
+        .map(|(r, _)| r.clone())
+        .collect();
+    assert_eq!(light, vec![0..5, 10..15]);
+    let strong: Vec<_> = painted.iter().filter(|(_, p)| p.bold).collect();
+    assert_eq!(strong.len(), 1);
+    assert_eq!(strong[0].0, 10..15);
+    assert_eq!(strong[0].1.color, s.colors.find);
+    assert_eq!(&line[strong[0].0.clone()], "été");
 }

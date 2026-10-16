@@ -985,9 +985,11 @@ impl App {
         use crate::context_menu::MenuMsg;
         if self.dialog.is_some() {
             return match m {
-                Message::Switcher(SwitcherMsg::Close) => {
+                Message::Switcher(SwitcherMsg::Close | SwitcherMsg::Escape) => {
                     Some(Message::Dialog(crate::dialog::DialogMsg::Cancel))
                 }
+                // WP-5: Escape is the dialog's (via the switcher listener), never the palette's.
+                Message::Palette(PaletteMsg::Escape) => None,
                 Message::Menu(MenuMsg::Open(..) | MenuMsg::Choose(_)) => None,
                 m if is_modal_blocked(&m) => None,
                 m => Some(m),
@@ -998,7 +1000,10 @@ impl App {
         }
         if self.context_menu.is_some() {
             return match m {
-                Message::Switcher(SwitcherMsg::Close) => Some(Message::Menu(MenuMsg::Close)),
+                Message::Switcher(SwitcherMsg::Close | SwitcherMsg::Escape) => {
+                    Some(Message::Menu(MenuMsg::Close))
+                }
+                Message::Palette(PaletteMsg::Escape) => None,
                 m if is_modal_blocked(&m) => None,
                 m => Some(m),
             };
@@ -1419,6 +1424,9 @@ impl App {
             Message::Reading(crate::message::ReadingMsg::ToggleTask { path, line }) => {
                 return self.toggle_task(&path, line);
             }
+            Message::Reading(crate::message::ReadingMsg::GoToEdge { bottom }) => {
+                return self.go_to_edge(bottom);
+            }
             Message::Reading(crate::message::ReadingMsg::TitleSubmit { path }) => {
                 return self.title_submit(&path);
             }
@@ -1823,6 +1831,7 @@ impl App {
                 for t in &ps.tabs {
                     if let Some(d) = self.docs.get_mut(&t.path) {
                         d.set_find_highlight(None);
+                        d.set_find_matches(Vec::new());
                     }
                     self.reading.set_find(&t.path, None);
                 }
@@ -1904,16 +1913,33 @@ impl App {
         };
         let range = ps.find.as_ref().and_then(crate::find::FindBar::range);
         let query = ps.find.as_ref().map(|b| b.query.clone());
+        let all = ps
+            .find
+            .as_ref()
+            .map(|b| b.matches.clone())
+            .unwrap_or_default();
         let path = ps.tabs[i].path.clone();
         let Some(doc) = self.docs.get_mut(&path) else {
             return Task::none();
         };
+        let text = doc.text();
+        // plan editor-ui-round-3 WP-5: every match painted light (byte columns end to end).
+        let spans = all
+            .iter()
+            .map(|m| {
+                (
+                    editor_model::find::line_col(&text, m.start),
+                    editor_model::find::line_col(&text, m.end),
+                )
+            })
+            .collect();
+        doc.set_find_matches(spans);
         let Some(r) = range else {
             doc.set_find_highlight(None);
-            self.reading.set_find(&path, None);
+            self.reading.set_find(&path, query);
+            self.reading.set_find_active(&path, &text, None);
             return Task::none();
         };
-        let text = doc.text();
         let (l0, c0) = editor_model::find::line_col(&text, r.start);
         let (l1, c1) = editor_model::find::line_col(&text, r.end);
         let mode = self.reading.mode(&path);
@@ -1922,10 +1948,34 @@ impl App {
         }
         doc.set_find_highlight(Some(((l0, c0), (l1, c1))));
         self.reading.set_find(&path, query);
+        self.reading.set_find_active(&path, &text, Some(r.clone()));
         if mode.shows_reading() {
             let lines = text.matches('\n').count().max(1);
             #[allow(clippy::cast_precision_loss)]
             let y = (l0 as f32 / lines as f32).clamp(0.0, 1.0);
+            return iced::widget::operation::snap_to(
+                crate::find::reading_scroll_id(&path),
+                iced::widget::scrollable::RelativeOffset { x: 0.0, y },
+            );
+        }
+        Task::none()
+    }
+
+    /// plan editor-ui-round-3 WP-5: Go to top / bottom. Source/Split: the cursor moves to the
+    /// buffer's start / end (the shaped editor scrolls to its cursor; the selection drops);
+    /// Reading/Split: the reading scrollable snaps to its top / bottom.
+    fn go_to_edge(&mut self, bottom: bool) -> Task<Message> {
+        let Some(path) = self.active_note().map(|t| t.path.clone()) else {
+            return Task::none();
+        };
+        let mode = self.reading.mode(&path);
+        if mode.shows_source()
+            && let Some(doc) = self.docs.get_mut(&path)
+        {
+            doc.go_to_edge(bottom);
+        }
+        if mode.shows_reading() {
+            let y = if bottom { 1.0 } else { 0.0 };
             return iced::widget::operation::snap_to(
                 crate::find::reading_scroll_id(&path),
                 iced::widget::scrollable::RelativeOffset { x: 0.0, y },
@@ -2420,6 +2470,13 @@ impl App {
                 return iced::widget::operation::focus(switcher::INPUT_ID);
             }
             SwitcherMsg::Close => s.open = false,
+            // plan editor-ui-round-3 WP-5: two-stage Escape.
+            SwitcherMsg::Escape if s.open && !s.query.is_empty() => {
+                s.query.clear();
+                s.selected = 0;
+                s.refresh(&self.explorer.paths, &self.ui.recent);
+            }
+            SwitcherMsg::Escape => s.open = false,
             SwitcherMsg::Query(q) => {
                 s.query = q;
                 s.selected = 0;
@@ -2528,10 +2585,19 @@ impl App {
                     iced::widget::operation::focus(crate::palette::INPUT_ID),
                 ]);
             }
-            PaletteMsg::Close if self.settings.hotkeys.recording.is_some() => {
+            PaletteMsg::Escape
+                if self.settings.hotkeys.recording.is_none()
+                    && self.palette.open
+                    && self.palette.prompt.is_none()
+                    && !self.palette.query.is_empty() =>
+            {
+                // plan editor-ui-round-3 WP-5: two-stage Escape (clear, then close).
+                self.palette.set_query(String::new());
+            }
+            PaletteMsg::Close | PaletteMsg::Escape if self.settings.hotkeys.recording.is_some() => {
                 self.settings.hotkeys.cancel();
             }
-            PaletteMsg::Close => self.palette.close(),
+            PaletteMsg::Close | PaletteMsg::Escape => self.palette.close(),
             PaletteMsg::Query(q) => self.palette.set_query(q),
             PaletteMsg::Up if self.palette.prompt.is_none() => {
                 self.palette.selected = self.palette.selected.saturating_sub(1);

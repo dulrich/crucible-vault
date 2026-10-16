@@ -225,11 +225,16 @@ const EDITING_KEYS: [&str; 13] = [
 ];
 
 /// Whether `c` stays unrebindable: a [`TEXT_EDITING`] chord, or an editing/motion key without
-/// Alt.
+/// Alt — except Ctrl+PageUp / Ctrl+PageDown (Ctrl, no Shift, no Alt; plan editor-ui-round-3
+/// WP-5, audit E2), which the text editor does not use and which are the Go to top / bottom
+/// defaults. Plain and Shift+PageUp/PageDown (scroll / select) and Ctrl+Shift+PageUp/PageDown
+/// stay reserved.
 pub fn text_editing(c: &Chord) -> bool {
+    let page_jump =
+        c.command && !c.shift && !c.alt && matches!(c.key.as_str(), "pageup" | "pagedown");
     TEXT_EDITING
         .iter()
         .filter_map(|r| parse(r))
         .any(|r| &r == c)
-        || (!c.alt && EDITING_KEYS.contains(&c.key.as_str()))
+        || (!c.alt && !page_jump && EDITING_KEYS.contains(&c.key.as_str()))
 }

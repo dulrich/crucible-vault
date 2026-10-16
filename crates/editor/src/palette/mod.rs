@@ -88,6 +88,9 @@ pub enum ClientCmd {
     OpenSettings,
     /// plan editor-ui-round-3 WP-3: delete the active note (confirm dialog with its orphans).
     DeleteNote,
+    /// plan editor-ui-round-3 WP-5: Go to top / bottom of the note (Ctrl+PgUp / Ctrl+PgDn).
+    GoToTop,
+    GoToBottom,
 }
 
 /// A `period.open` period.
@@ -158,6 +161,8 @@ pub fn client_chord(c: &Chord) -> Option<ClientCmd> {
         ("Ctrl+F", ClientCmd::FindInNote),
         ("Ctrl+Shift+F", ClientCmd::FocusSearch),
         ("Ctrl+,", ClientCmd::OpenSettings),
+        ("Ctrl+PageUp", ClientCmd::GoToTop),
+        ("Ctrl+PageDown", ClientCmd::GoToBottom),
     ];
     if let Some((_, cmd)) = simple
         .iter()
@@ -230,6 +235,8 @@ impl ClientCmd {
             ClientCmd::FocusSearch,
             ClientCmd::OpenSettings,
             ClientCmd::DeleteNote,
+            ClientCmd::GoToTop,
+            ClientCmd::GoToBottom,
         ]);
         v.extend(PanelKind::ALL.iter().map(|&k| ClientCmd::Panel(k)));
         v
@@ -264,6 +271,8 @@ impl ClientCmd {
             ClientCmd::CommandPaletteKey => "Command palette",
             ClientCmd::OpenSettings => "Open settings",
             ClientCmd::DeleteNote => "Delete note…",
+            ClientCmd::GoToTop => "Go to top",
+            ClientCmd::GoToBottom => "Go to bottom",
         };
         (t.to_owned(), "Editor")
     }
@@ -295,6 +304,8 @@ impl ClientCmd {
             ClientCmd::CommandPaletteKey => "command_palette",
             ClientCmd::OpenSettings => "open_settings",
             ClientCmd::DeleteNote => "delete_note",
+            ClientCmd::GoToTop => "go_to_top",
+            ClientCmd::GoToBottom => "go_to_bottom",
         };
         s.to_owned()
     }
@@ -313,6 +324,8 @@ impl ClientCmd {
             ClientCmd::FindInNote => "Ctrl+F",
             ClientCmd::FocusSearch => "Ctrl+Shift+F",
             ClientCmd::OpenSettings => "Ctrl+,",
+            ClientCmd::GoToTop => "Ctrl+PageUp",
+            ClientCmd::GoToBottom => "Ctrl+PageDown",
             ClientCmd::GoToTab(n) => return vec![format!("Alt+{n}")],
             ClientCmd::OpenPeriod(p) => {
                 return DEFAULT_ACTIONS
@@ -354,6 +367,8 @@ impl ClientCmd {
             ClientCmd::CommandPaletteKey => Message::Palette(PaletteMsg::Open),
             ClientCmd::OpenSettings => Message::Settings(crate::settings::SettingsMsg::Open),
             ClientCmd::DeleteNote => Message::Explorer(crate::message::ExplorerMsg::DeleteActive),
+            ClientCmd::GoToTop => Message::Reading(ReadingMsg::GoToEdge { bottom: false }),
+            ClientCmd::GoToBottom => Message::Reading(ReadingMsg::GoToEdge { bottom: true }),
         }
     }
 }
@@ -1032,7 +1047,7 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
     };
     let p = |m| Some(Message::Palette(m));
     match key.as_ref() {
-        Key::Named(Named::Escape) => p(PaletteMsg::Close),
+        Key::Named(Named::Escape) => p(PaletteMsg::Escape),
         Key::Named(Named::ArrowUp) => p(PaletteMsg::Up),
         Key::Named(Named::ArrowDown) => p(PaletteMsg::Down),
         Key::Named(Named::Enter) if modifiers.command() => p(PaletteMsg::CtrlEnter),

@@ -424,3 +424,13 @@ fn task_set_status_targets_the_status_char() {
     assert_eq!(task_set_status(src, 2, 'x'), None, "not a task");
     assert_eq!(task_set_status(src, 9, 'x'), None);
 }
+
+/// plan editor-ui-round-3 WP-5: block source provenance (full-note lines, frontmatter included).
+#[test]
+fn blocks_carry_their_source_line_ranges() {
+    let m = lower("---\na: 1\n---\n# H\n\npara one\npara two\n\n- x\n- y\n");
+    assert_eq!(m.blocks.len(), 3);
+    assert_eq!(m.block_lines, vec![3..4, 5..7, 8..10]);
+    assert_eq!(m.block_at_line(6), Some(1));
+    assert_eq!(m.block_at_line(4), None);
+}

@@ -73,6 +73,9 @@ pub enum SourceMsg {
         path: String,
         text: Option<String>,
     },
+    /// plan editor-ui-round-3 WP-5: Ctrl+X in the focused source editor — the selection, or
+    /// with none the whole current line (one undoable edit), to the clipboard.
+    Cut,
     /// Plan editor-feedback-round-2 WP-9: Ctrl+V in the focused source editor (the active
     /// note) — image-aware via `clipboard_image`.
     Paste,
@@ -133,6 +136,9 @@ pub enum ReadingMsg {
     },
     /// A host-note task checkbox was clicked: toggle the box at source `line` of `path`.
     ToggleTask { path: String, line: usize },
+    /// plan editor-ui-round-3 WP-5: Go to top / bottom (Ctrl+PgUp / Ctrl+PgDn) of the focused
+    /// pane's note — the source cursor (Source/Split) and the reading scroll (Reading/Split).
+    GoToEdge { bottom: bool },
     /// The filename input of `path` changed.
     TitleInput { path: String, value: String },
     /// Enter (or focus loss) in the filename input: rename if changed.
@@ -190,6 +196,8 @@ pub enum ExplorerMsg {
 pub enum SwitcherMsg {
     Open,
     Close,
+    /// plan editor-ui-round-3 WP-5: the Escape key — clears a non-empty query, else closes.
+    Escape,
     Query(String),
     Up,
     Down,
@@ -209,8 +217,11 @@ pub enum SwitcherMsg {
 #[derive(Debug, Clone)]
 pub enum PaletteMsg {
     Open,
-    /// Esc: closes the list or cancels the whole invocation (prompt included).
+    /// Closes the list or cancels the whole invocation (prompt included).
     Close,
+    /// plan editor-ui-round-3 WP-5: the Escape key — with the list open and a non-empty query,
+    /// clears it; otherwise [`PaletteMsg::Close`].
+    Escape,
     Query(String),
     Up,
     Down,

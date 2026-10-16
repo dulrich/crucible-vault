@@ -683,3 +683,76 @@ fn period_folders_come_from_captures_with_const_fallback() {
         "malformed → consts"
     );
 }
+
+// ---- plan editor-ui-round-3 WP-5 (audit E2): Ctrl+PgUp / Ctrl+PgDn ----
+
+#[test]
+fn page_chord_classification() {
+    for (k, reserved) in [
+        ("Ctrl+PageUp", false),
+        ("Ctrl+PageDown", false),
+        ("PageUp", true),
+        ("PageDown", true),
+        ("Shift+PageUp", true),
+        ("Shift+PageDown", true),
+        ("Ctrl+Shift+PageUp", true),
+        ("Alt+PageUp", false),
+    ] {
+        assert_eq!(chord::text_editing(&c(k)), reserved, "{k}");
+    }
+}
+
+#[test]
+fn go_to_top_bottom_are_bound_defaults_and_released_by_empty_override() {
+    let km = resolve(&BTreeMap::new(), &[]);
+    assert_eq!(
+        km.get(&c("Ctrl+PageUp")),
+        Some(&Bound::Client(ClientCmd::GoToTop))
+    );
+    assert_eq!(
+        km.get(&c("Ctrl+PageDown")),
+        Some(&Bound::Client(ClientCmd::GoToBottom))
+    );
+    assert!(km.routed(&c("Ctrl+PageUp")));
+    // `[]` releases the default, so an action may take it without a conflict.
+    let acts = [info("a", &["Ctrl+PageUp"])];
+    assert_eq!(
+        resolve(&BTreeMap::new(), &acts).get(&c("Ctrl+PageUp")),
+        None
+    );
+    let km = resolve(&ov(&[("go_to_top", &[])]), &acts);
+    assert_eq!(km.get(&c("Ctrl+PageUp")), Some(&Bound::Action("a".into())));
+    assert!(km.conflicted.is_empty(), "{:?}", km.notices);
+}
+
+#[test]
+fn capture_accepts_ctrl_page_up() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    // Held by Go to top: another command's capture is refused as a conflict, not as reserved.
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    key(&mut app, "Ctrl+PageUp");
+    let note = app.settings.hotkeys.note.clone().unwrap_or_default();
+    assert!(note.contains("Go to top"), "{note}");
+    assert_eq!(keys_of(&app, "quit"), None);
+    // Captured onto Go to bottom after Go to top released it, it binds.
+    hk(
+        &mut app,
+        HotkeyMsg::Record(Target::Command("go_to_top".into())),
+    );
+    key(&mut app, "Alt+T");
+    hk(
+        &mut app,
+        HotkeyMsg::Record(Target::Command("go_to_bottom".into())),
+    );
+    key(&mut app, "Ctrl+PageUp");
+    let got = keys_of(&app, "go_to_bottom").expect("captured");
+    assert_eq!(
+        got.iter().map(|k| c(k)).collect::<Vec<_>>(),
+        vec![c("Ctrl+PageUp")]
+    );
+    assert_eq!(
+        app.palette.keymap.get(&c("Ctrl+PageUp")),
+        Some(&Bound::Client(ClientCmd::GoToBottom))
+    );
+}

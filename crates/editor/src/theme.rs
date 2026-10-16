@@ -169,6 +169,17 @@ fn parse_block(src: &str) -> Result<HashMap<String, Rgb>, ThemeError> {
 }
 
 impl Tokens {
+    /// Find in note: the light highlight on every match (plan editor-ui-round-3 WP-5). Derived
+    /// (the vendored token blocks stay verbatim): the surround's `yellow`.
+    pub fn find_light(&self) -> Rgb {
+        self.yellow
+    }
+
+    /// Find in note: the strong highlight on the current match (drawn bold): the brand accent.
+    pub fn find_strong(&self) -> Rgb {
+        self.accent
+    }
+
     /// The iced theme for this token set: background/text from the surround, `primary` from
     /// `accent-ui` (never the brand accent), semantic colours from the status tokens.
     pub fn iced_theme(&self, name: &'static str) -> iced::Theme {

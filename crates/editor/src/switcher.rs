@@ -78,11 +78,13 @@ impl Switcher {
     }
 }
 
-/// Global keys (Ctrl+P opens via the palette chord path): Escape closes, modifier changes feed Shift+Enter.
+/// Global keys (Ctrl+P opens via the palette chord path): Escape clears the query then closes (WP-5), modifier changes feed Shift+Enter.
 pub fn key_event(ev: keyboard::Event) -> Option<Message> {
     match ev {
         keyboard::Event::KeyPressed { key, .. } => match key.as_ref() {
-            Key::Named(keyboard::key::Named::Escape) => Some(Message::Switcher(SwitcherMsg::Close)),
+            Key::Named(keyboard::key::Named::Escape) => {
+                Some(Message::Switcher(SwitcherMsg::Escape))
+            }
             Key::Named(keyboard::key::Named::ArrowDown) => {
                 Some(Message::Switcher(SwitcherMsg::Down))
             }

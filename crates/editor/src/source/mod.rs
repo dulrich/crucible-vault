@@ -122,6 +122,8 @@ pub struct SourceBuffer {
     /// The find bar's current match ((line, byte column) from..to), painted by the highlighter
     /// while the find input holds focus (plan editor-feedback-round-2 WP-4).
     find_hl: Option<FindSpan>,
+    /// plan editor-ui-round-3 WP-5: every find match, painted light.
+    find_all: std::sync::Arc<[FindSpan]>,
     /// plan editor-data-safety WP-1 (audit E1): a reconnect arrived while a save on the old
     /// connection was in flight; resync once its completion has been processed.
     resync_pending: bool,
@@ -143,6 +145,7 @@ impl Clone for SourceBuffer {
             epoch: self.epoch,
             primary: self.primary.clone(),
             find_hl: self.find_hl,
+            find_all: self.find_all.clone(),
             resync_pending: self.resync_pending,
         }
     }
@@ -193,6 +196,7 @@ impl SourceBuffer {
             epoch: 0,
             primary: None,
             find_hl: None,
+            find_all: std::sync::Arc::from([]),
             resync_pending: false,
         }
     }
@@ -317,6 +321,24 @@ impl SourceBuffer {
         });
     }
 
+    /// plan editor-ui-round-3 WP-5: moves the cursor to the buffer's start (`false`) or end
+    /// (`true`), dropping the selection; materialises a plain buffer so the editor scrolls.
+    pub fn go_to_edge(&mut self, bottom: bool) {
+        let text = self.text();
+        let at = if bottom {
+            let line = text.matches('\n').count();
+            let column = text.rsplit('\n').next().map_or(0, str::len);
+            text_editor::Position { line, column }
+        } else {
+            text_editor::Position { line: 0, column: 0 }
+        };
+        self.materialise();
+        self.move_to(text_editor::Cursor {
+            position: at,
+            selection: None,
+        });
+    }
+
     /// The painted find match, if any.
     pub fn find_highlight(&self) -> Option<FindSpan> {
         self.find_hl
@@ -325,6 +347,16 @@ impl SourceBuffer {
     /// Sets (or clears) the painted find match; never touches the text.
     pub fn set_find_highlight(&mut self, span: Option<FindSpan>) {
         self.find_hl = span;
+    }
+
+    /// Every painted find match (plan editor-ui-round-3 WP-5).
+    pub fn find_matches(&self) -> &[FindSpan] {
+        &self.find_all
+    }
+
+    /// Sets (or clears, with an empty list) every painted find match; never touches the text.
+    pub fn set_find_matches(&mut self, all: Vec<FindSpan>) {
+        self.find_all = all.into();
     }
 
     /// Tab / Shift+Tab (plan editor-feedback-round-2 WP-4) as ONE recorded edit. Indent with a
@@ -477,6 +509,53 @@ impl SourceBuffer {
             .record(change, kind, to_model(before), to_model(after), now);
         self.mark_edited();
         true
+    }
+
+    /// Ctrl+X (plan editor-ui-round-3 WP-5): returns (clipboard text, text changed). With a
+    /// selection: the selection, deleted (as iced's own cut; read-only copies only). Without
+    /// one: the whole current line including its trailing newline, removed as ONE recorded
+    /// edit; on the last line (no trailing newline) the line text is copied and the preceding
+    /// newline is removed with it (same edit), so the line disappears. Read-only cuts nothing.
+    pub fn cut(&mut self, read_only: bool, now: Instant) -> (Option<String>, bool) {
+        if let Some(sel) = self.selection().filter(|s| !s.is_empty()) {
+            let changed = self.perform(Action::Edit(Edit::Delete), read_only, now);
+            return (Some(sel), changed);
+        }
+        if read_only {
+            return (None, false);
+        }
+        let content = self.shaped();
+        let before = content.cursor();
+        let l = before.position.line;
+        let count = content.line_count();
+        let len = |c: &Content, i: usize| c.line(i).map_or(0, |x| x.text.len());
+        let pos = |line, column| text_editor::Position { line, column };
+        let line_text = content
+            .line(l)
+            .map(|x| x.text.to_string())
+            .unwrap_or_default();
+        let (clip, from, to) = if l + 1 < count {
+            (format!("{line_text}\n"), pos(l, 0), pos(l + 1, 0))
+        } else if l > 0 {
+            (
+                line_text,
+                pos(l - 1, len(content, l - 1)),
+                pos(l, len(content, l)),
+            )
+        } else {
+            (line_text, pos(0, 0), pos(0, len(content, 0)))
+        };
+        if from == to {
+            return (Some(clip), false);
+        }
+        let changed = self.transact(before, EditKind::Other, now, |c| {
+            c.move_to(text_editor::Cursor {
+                position: to,
+                selection: Some(from),
+            });
+            c.perform(Action::Edit(Edit::Delete));
+        });
+        (Some(clip), changed)
     }
 
     /// Enter with list continuation (one edit; a selection is replaced first).
@@ -665,6 +744,7 @@ impl SourceBuffer {
 
     fn mark_edited(&mut self) {
         self.find_hl = None;
+        self.find_all = std::sync::Arc::from([]);
         self.dirty = true;
         self.edit_seq += 1;
     }
@@ -1077,6 +1157,11 @@ pub fn update(
                 text.is_some_and(|t| !t.is_empty() && buf.paste(t, read_only, Instant::now()));
             edited(buf, changed)
         }
+        SourceMsg::Cut => {
+            let (clip, changed) = buf.cut(read_only, Instant::now());
+            let write = clip.map_or_else(Task::none, clipboard::write);
+            Task::batch([write, edited(buf, changed)])
+        }
         SourceMsg::Paste => {
             // Read-only (shadow) notes take no paste, as before.
             if read_only {
@@ -1233,6 +1318,8 @@ fn key_binding(kp: KeyPress, km: &crate::palette::Keymap) -> Option<Binding<Mess
             "z" => Some(SourceMsg::Undo),
             "y" => Some(SourceMsg::Redo),
             "s" => Some(SourceMsg::Save),
+            // plan editor-ui-round-3 WP-5: line cut without a selection.
+            "x" if !kp.modifiers.shift() && !kp.modifiers.alt() => Some(SourceMsg::Cut),
             // Plan editor-feedback-round-2 WP-9: image-aware paste (was iced's text Paste).
             "v" if !kp.modifiers.shift() && !kp.modifiers.alt() => Some(SourceMsg::Paste),
             _ => None,
@@ -1300,6 +1387,7 @@ pub fn view<'a>(
                         colors: KindColors::from_tokens(&tokens),
                         epoch: buf.epoch,
                         find: buf.find_hl,
+                        find_all: buf.find_all.clone(),
                     },
                     highlighter::to_format,
                 ),

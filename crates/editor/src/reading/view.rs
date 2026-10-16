@@ -35,9 +35,21 @@ struct Ctx<'a> {
     scale: f32,
     /// Inside a cancelled (`- [-]`) task: text is faint and struck through.
     strike: bool,
+    /// plan editor-ui-round-3 WP-5: the find bar's active match as (top-level block, nth
+    /// occurrence in it), the top-level block being drawn, and occurrences painted in it so far.
+    active: Option<(usize, usize)>,
+    cur_block: std::rc::Rc<std::cell::Cell<usize>>,
+    seen: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl Ctx<'_> {
+    /// Counts one painted find occurrence; true when it is the active match's (WP-5).
+    fn is_active_occurrence(&self) -> bool {
+        let n = self.seen.get();
+        self.seen.set(n + 1);
+        self.active == Some((self.cur_block.get(), n))
+    }
+
     /// A design size (px at the 22px base) scaled to the current font size.
     fn sz(&self, px: f32) -> f32 {
         scaled(px, self.scale)
@@ -82,12 +94,20 @@ pub fn reading<'a>(
         t,
         scale,
         strike: false,
+        active: store.find_active(path),
+        cur_block: std::rc::Rc::new(std::cell::Cell::new(usize::MAX)),
+        seen: std::rc::Rc::new(std::cell::Cell::new(0)),
     };
     // Fixed slot 0 (properties, `Space` when absent) keeps every body widget at a stable tree
     // position whether or not the note has frontmatter. The filename edit moved to the note
     // control bar's breadcrumb (plan editor-feedback-round-2 WP-6).
     let mut items: Vec<Element<'a, Message>> = vec![properties(&cx, &doc.model.properties)];
-    items.extend(doc.model.blocks.iter().map(|b| block(&cx, b)));
+    items.extend(doc.model.blocks.iter().enumerate().map(|(i, b)| {
+        cx.cur_block.set(i);
+        cx.seen.set(0);
+        block(&cx, b)
+    }));
+    cx.cur_block.set(usize::MAX);
     if !doc.model.footnotes.is_empty() {
         items.push(rule::horizontal(1).into());
         for (i, f) in doc.model.footnotes.iter().enumerate() {
@@ -511,6 +531,8 @@ fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Ele
     };
     let child_cx = Ctx {
         strike: cx.strike || it.task.is_some_and(task_struck),
+        cur_block: cx.cur_block.clone(),
+        seen: cx.seen.clone(),
         ..*cx
     };
     row![
@@ -638,10 +660,16 @@ fn inlines_view<'a>(
                     if m.start > at {
                         spans.push(style_span(&text[at..m.start]));
                     }
+                    // plan editor-ui-round-3 WP-5: every occurrence light, the active one strong.
+                    let (bg, fg) = if cx.is_active_occurrence() {
+                        (t.find_strong(), t.on_accent)
+                    } else {
+                        (t.find_light(), t.bg)
+                    };
                     spans.push(
                         style_span(&text[m.clone()])
-                            .background(t.accent.to_color())
-                            .color(t.on_accent.to_color()),
+                            .background(bg.to_color())
+                            .color(fg.to_color()),
                     );
                     at = m.end;
                 }

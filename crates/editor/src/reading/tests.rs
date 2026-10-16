@@ -337,3 +337,31 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
     assert!(back.reading.doc("B.md").is_some(), "first tick renders it");
     assert!(back.reading.doc("A.md").is_none());
 }
+
+/// plan editor-ui-round-3 WP-5 (audit E1): the active find match maps to (block, nth occurrence).
+#[test]
+fn active_find_match_maps_to_its_block_and_occurrence() {
+    use crate::message::FindMsg;
+    let p = "wp5/f.md";
+    let (_t, d) = setup(&[(p, b"alpha foo\n\nbeta foo foo\n")]);
+    let mut app = app_on(&d, p);
+    reading(&mut app, p, ViewMode::Reading);
+    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    assert!(app.reading.doc(p).is_some(), "rendered");
+    let _ = app.update(Message::Find(FindMsg::Open));
+    let _ = app.update(Message::Find(FindMsg::Query("foo".into())));
+    assert_eq!(app.reading.find_active(p), Some((0, 0)));
+    let _ = app.update(Message::Find(FindMsg::Next));
+    assert_eq!(
+        app.reading.find_active(p),
+        Some((1, 0)),
+        "second block, first occurrence"
+    );
+    let _ = app.update(Message::Find(FindMsg::Next));
+    assert_eq!(app.reading.find_active(p), Some((1, 1)));
+    // Painting: exactly one occurrence of the second block is the active one.
+    drop(app.view());
+    let _ = app.update(Message::Find(FindMsg::Close));
+    assert_eq!(app.reading.find_active(p), None);
+}

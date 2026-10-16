@@ -7,6 +7,7 @@
 //! is how a replaced buffer drops the stale per-line cache.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use editor_model::highlight::{Kind, LineState, scan_line};
 use iced::Color;
@@ -36,6 +37,8 @@ pub struct KindColors {
     pub footnote: Color,
     /// The find bar's current match (plan editor-feedback-round-2 WP-4; painted bold).
     pub find: Color,
+    /// Every other find match (plan editor-ui-round-3 WP-5; the light highlight).
+    pub find_all: Color,
 }
 
 impl KindColors {
@@ -59,7 +62,8 @@ impl KindColors {
             task_other: t.accent_ui.to_color(),
             callout: t.info_text.to_color(),
             footnote: t.text_faint.to_color(),
-            find: t.accent.to_color(),
+            find: t.find_strong().to_color(),
+            find_all: t.find_light().to_color(),
         }
     }
 
@@ -104,13 +108,15 @@ impl Paint {
 }
 
 /// Highlighter settings.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub colors: KindColors,
     /// Bumped on wholesale content replacement.
     pub epoch: u64,
     /// The find match painted over the markdown spans (iced re-highlights when it changes).
     pub find: Option<FindSpan>,
+    /// Every find match (plan editor-ui-round-3 WP-5), painted light under the current one.
+    pub find_all: Arc<[FindSpan]>,
 }
 
 /// The byte range of `line` (index `ix`, length `len`) covered by `find`, if non-empty.
@@ -129,6 +135,7 @@ pub fn find_cols(find: Option<FindSpan>, ix: usize, len: usize) -> Option<Range<
 pub struct MarkdownHighlighter {
     colors: KindColors,
     find: Option<FindSpan>,
+    find_all: Arc<[FindSpan]>,
     /// `states[i]` = state at the start of line `i`; always non-empty.
     states: Vec<LineState>,
     current: usize,
@@ -143,6 +150,7 @@ impl Highlighter for MarkdownHighlighter {
         Self {
             colors: settings.colors,
             find: settings.find,
+            find_all: settings.find_all.clone(),
             states: vec![LineState::default()],
             current: 0,
         }
@@ -151,6 +159,7 @@ impl Highlighter for MarkdownHighlighter {
     fn update(&mut self, settings: &Settings) {
         self.colors = settings.colors;
         self.find = settings.find;
+        self.find_all = settings.find_all.clone();
         self.change_line(0);
     }
 
@@ -172,7 +181,13 @@ impl Highlighter for MarkdownHighlighter {
             .into_iter()
             .map(|(r, k)| (r, Paint::plain(colors.of(k))))
             .collect();
-        // Pushed last: overlapping spans resolve to the later one (cosmic-text `add_span`).
+        // Pushed last: overlapping spans resolve to the later one (cosmic-text `add_span`), so
+        // the light all-match spans go first and the strong current match over them.
+        for m in self.find_all.iter() {
+            if let Some(r) = find_cols(Some(*m), ix, line.len()) {
+                out.push((r, Paint::plain(colors.find_all)));
+            }
+        }
         if let Some(r) = find_cols(self.find, ix, line.len()) {
             out.push((
                 r,

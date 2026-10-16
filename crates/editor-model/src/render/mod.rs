@@ -163,7 +163,18 @@ pub struct RenderModel {
     /// The parsed frontmatter, in key order (empty when absent or unparseable).
     pub properties: Vec<Property>,
     pub blocks: Vec<Block>,
+    /// Source provenance (plan editor-ui-round-3 WP-5, block granularity): `block_lines[i]` is
+    /// the 0-based line range (end exclusive) of `blocks[i]` in the lowered note's full source
+    /// (frontmatter included). Blocks split out of one source block share its range.
+    pub block_lines: Vec<std::ops::Range<usize>>,
     pub footnotes: Vec<FootnoteDef>,
+}
+
+impl RenderModel {
+    /// The index of the top-level block whose source lines contain `line`, if any.
+    pub fn block_at_line(&self, line: usize) -> Option<usize> {
+        self.block_lines.iter().position(|r| r.contains(&line))
+    }
 }
 
 /// Lowering options.
@@ -223,10 +234,21 @@ pub fn lower_with(source: &str, opts: LowerOptions) -> RenderModel {
         line_offset,
         footnotes: Vec::new(),
     };
-    let blocks = l.blocks(root);
+    let mut blocks = Vec::new();
+    let mut block_lines = Vec::new();
+    for c in root.children() {
+        let before = blocks.len();
+        l.block(c, &mut blocks);
+        let sp = c.data().sourcepos;
+        let start = line_offset + sp.start.line.saturating_sub(1);
+        let end = (line_offset + sp.end.line).max(start + 1);
+        block_lines.resize(blocks.len(), start..end);
+        debug_assert!(block_lines.len() >= before);
+    }
     RenderModel {
         properties,
         blocks,
+        block_lines,
         footnotes: l.footnotes,
     }
 }

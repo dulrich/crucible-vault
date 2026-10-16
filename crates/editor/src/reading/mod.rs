@@ -134,6 +134,19 @@ pub struct ReadingStore {
     /// The open find bar's query per tab path: its occurrences are painted in the reading view
     /// (plan editor-feedback-round-2 WP-4; render blocks carry no source span).
     find: HashMap<String, String>,
+    /// plan editor-ui-round-3 WP-5: the active find match per tab path, as (top-level render
+    /// block, nth query occurrence inside it).
+    find_active: HashMap<String, (usize, usize)>,
+}
+
+/// The byte offset where 0-based `line` starts in `text` (`text.len()` past the end).
+fn line_start(text: &str, line: usize) -> usize {
+    if line == 0 {
+        return 0;
+    }
+    text.match_indices('\n')
+        .nth(line - 1)
+        .map_or(text.len(), |(i, _)| i + 1)
 }
 
 /// The note stem shown in the breadcrumb filename input (`a/b/Note.md` → `Note`).
@@ -188,8 +201,39 @@ impl ReadingStore {
             }
             None => {
                 self.find.remove(path);
+                self.find_active.remove(path);
             }
         }
+    }
+
+    /// Sets (or clears) the active find match for `path`'s reading view from the current match's
+    /// source byte range `r` in `text`: the top-level block containing its first line, and its
+    /// occurrence index among the query's matches inside that block's source lines
+    /// (block-granularity provenance, `RenderModel::block_lines`).
+    pub fn set_find_active(&mut self, path: &str, text: &str, r: Option<std::ops::Range<usize>>) {
+        let hit = r.and_then(|r| {
+            let q = self.find.get(path)?;
+            let model = &self.tabs.get(path)?.doc.as_ref()?.model;
+            let (line, _) = editor_model::find::line_col(text, r.start);
+            let b = model.block_at_line(line)?;
+            let start_line = model.block_lines[b].start;
+            let from = line_start(text, start_line);
+            let nth = editor_model::find::matches(&text[from..r.start.max(from)], q).len();
+            Some((b, nth))
+        });
+        match hit {
+            Some(h) => {
+                self.find_active.insert(path.to_owned(), h);
+            }
+            None => {
+                self.find_active.remove(path);
+            }
+        }
+    }
+
+    /// The active find match of `path`'s reading view (block, nth occurrence in it).
+    pub fn find_active(&self, path: &str) -> Option<(usize, usize)> {
+        self.find_active.get(path).copied()
     }
 
     /// The find query painted in `path`'s reading view.
@@ -219,6 +263,7 @@ impl ReadingStore {
         self.tabs.remove(path);
         self.titles.remove(path);
         self.find.remove(path);
+        self.find_active.remove(path);
         self.images.release_owner(path);
     }
 
@@ -508,6 +553,7 @@ pub fn update(
         ReadingMsg::TitleRevert => store.titles.clear(),
         // Buffer edits and renames need the app (tabs, explorer, saves): handled in `App`.
         ReadingMsg::ToggleTask { .. }
+        | ReadingMsg::GoToEdge { .. }
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. }
         | ReadingMsg::TitleSaved { .. } => {}

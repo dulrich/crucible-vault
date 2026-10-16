@@ -1131,6 +1131,31 @@ mod usability_wp3 {
         assert!(app.overlay_close().is_none());
     }
 
+    /// plan editor-ui-round-3 WP-5: Esc clears a non-empty input first, then closes.
+    #[test]
+    fn escape_clears_then_closes_switcher_and_palette() {
+        let (_tmp, _d, mut app) = app_with(&[], None);
+        let _ = app.update(Message::Switcher(SwitcherMsg::Open));
+        let empty = app.switcher.results.clone();
+        let _ = app.update(Message::Switcher(SwitcherMsg::Query("zzqq".into())));
+        let _ = app.update(Message::Switcher(SwitcherMsg::Escape));
+        assert!(app.switcher.open, "first Esc only clears");
+        assert!(app.switcher.query.is_empty());
+        assert_eq!(app.switcher.results, empty, "back to the empty-query list");
+        let _ = app.update(Message::Switcher(SwitcherMsg::Escape));
+        assert!(!app.switcher.open);
+
+        let _ = app.update(Message::Palette(PaletteMsg::Open));
+        let empty = app.palette.results.clone();
+        let _ = app.update(Message::Palette(PaletteMsg::Query("zzqq".into())));
+        let _ = app.update(Message::Palette(PaletteMsg::Escape));
+        assert!(app.palette.open, "first Esc only clears");
+        assert!(app.palette.query.is_empty());
+        assert_eq!(app.palette.results, empty);
+        let _ = app.update(Message::Palette(PaletteMsg::Escape));
+        assert!(!app.palette.open);
+    }
+
     #[test]
     fn side_collapse_and_borders_persist() {
         let tmp = tempfile::tempdir().expect("tmp");
