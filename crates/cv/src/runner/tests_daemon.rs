@@ -486,11 +486,24 @@ fn example_config_files_load_cleanly() {
         include_str!("../../../../config/examples/providers.toml"),
     )
     .unwrap();
+    // Plan v0-automation-pipelines WP-12: the pipeline config and the source registry.
+    std::fs::write(
+        dir.join("pipelines.toml"),
+        include_str!("../../../../config/examples/pipelines.toml"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sources.toml"),
+        include_str!("../../../../config/examples/sources.toml"),
+    )
+    .unwrap();
     let mut set = cv_actions::ConfigSet::new();
     super::load_config_dir(&dir, &mut set);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(set.errors().is_empty(), "{:?}", set.errors());
-    assert_eq!(set.armed_actions().count(), 14);
+    assert_eq!(set.armed_actions().count(), 28);
+    assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
+    assert_eq!(set.sources().blog.len(), 1);
     assert!(
         set.armed("search-refresh")
             .unwrap()

@@ -249,3 +249,162 @@ format = "{{vars.agent_output}}"
 [[action.steps]]
 type = "upsert_tags"
 tags = ["refined"]
+
+# ---- plan v0-automation-pipelines (A2): ingestion pipelines -----------------------------------
+# Each step is gated by its pipelines.toml section (absent file = off); cadences live in
+# schedules.toml. Event selectors take folder / tag / prop only (no exclusion, no globs); a folder
+# selector matches every note below it, subfolders included.
+
+# Link records: rescan a clip on create/modify (an unchanged rescan writes nothing).
+[[action]]
+id = "link-scan"
+label = "Link scan (note)"
+group = "Ingest"
+starters = [
+  { type = "event", kinds = ["created", "modified"], selector = { folder = "Clippings" } },
+  { type = "command" },
+]
+[[action.steps]]
+type = "link_scan"
+
+[[action]]
+id = "link-scan-all"
+label = "Link scan (whole vault)"
+group = "Ingest"
+resources = { note = false, keys = ["link-scan::vault"] }
+[[action.steps]]
+type = "link_scan"
+scope = "vault"
+exclude = ["_crucible"]
+
+# YouTube metadata: a note carrying `yt-video-id` gains its `_yt_metadata` note. One static key
+# serializes find-or-create (per-video keys are not expressible from a prop).
+[[action]]
+id = "yt-metadata"
+label = "YouTube: fetch metadata"
+group = "Ingest"
+starters = [
+  { type = "event", kinds = ["created", "modified"], selector = { prop = { key = "yt-video-id" } } },
+  { type = "command" },
+]
+resources = { note = true, keys = ["yt-video::metadata"] }
+[[action.steps]]
+type = "yt_metadata"
+[[action.steps]]
+type = "yt_channel_enrich"   # no-op unless pipelines.toml [youtube] channel_enrich = true
+
+# X: discover clipped posts in the clipper inbox (pipelines.toml [x] inbox), fetch one post's
+# metadata, backfill from link records.
+[[action]]
+id = "x-discover"
+label = "X: discover clipped posts"
+group = "Ingest"
+starters = [
+  { type = "event", kinds = ["created", "modified"], selector = { folder = "Clippings" } },
+]
+resources = { note = true, keys = ["x::metadata"] }
+[[action.steps]]
+type = "x_discover"
+limit = 50
+
+[[action]]
+id = "x-metadata"
+label = "X: fetch post metadata"
+group = "Ingest"
+needs = ["active_path"]
+resources = { note = true, keys = ["x::metadata"] }
+[[action.steps]]
+type = "x_metadata"
+
+[[action]]
+id = "x-backfill"
+label = "X: backfill metadata from link records"
+group = "Ingest"
+resources = { note = false, keys = ["x::metadata"] }
+[[action.steps]]
+type = "x_backfill"
+limit = 50
+
+# Image describe: the clip action localizes a new clip's images, then describes them.
+[[action]]
+id = "clip-images"
+label = "Clip: localize + describe images"
+group = "Ingest"
+starters = [
+  { type = "event", kinds = ["created"], selector = { folder = "Clippings" } },
+]
+[[action.steps]]
+type = "localize"
+[[action.steps]]
+type = "run_action"
+action = "image-describe-note"
+
+[[action]]
+id = "image-describe-note"
+label = "Describe images in note"
+group = "Ingest"
+needs = ["active_path"]
+[[action.steps]]
+type = "image_describe"
+scope = "note"
+[[action.steps]]
+type = "search_upsert"
+
+[[action]]
+id = "image-describe-backfill"
+label = "Backfill image descriptions"
+group = "Ingest"
+resources = { note = false, keys = ["image-describe::backfill"] }
+[[action.steps]]
+type = "image_describe"
+scope = "vault"
+
+# Trackers (schedules.toml: every 3 h): new items become `# Intake` lines in today's note
+# (captures.toml `tracker-intake`); full-body blog posts become captured notes.
+[[action]]
+id = "track-youtube"
+label = "Track YouTube channels"
+group = "Ingest"
+resources = { note = false, keys = ["tracker::youtube"] }
+[[action.steps]]
+type = "track_youtube"
+limit_per_source = 50
+
+[[action]]
+id = "track-blogs"
+label = "Track blogs"
+group = "Ingest"
+resources = { note = false, keys = ["tracker::blogs"] }
+[[action.steps]]
+type = "track_blogs"
+
+# Ignore Shorts: a new metadata note from an [ignore_shorts] channel, at most max_seconds long,
+# is ignored. The folder selector cannot exclude `_yt_metadata/_unavailable/` tombstones; they
+# carry no duration_seconds, so the step is a no-op success on them.
+[[action]]
+id = "ignore-shorts"
+label = "Ignore Shorts"
+group = "Ingest"
+starters = [
+  { type = "event", kinds = ["created"], selector = { folder = "_yt_metadata" } },
+]
+[[action.steps]]
+type = "ignore_video"
+
+[[action]]
+id = "youtube-ignore-video"
+label = "YouTube: ignore this video"
+group = "Ingest"
+needs = ["active_path"]
+[[action.steps]]
+type = "ignore_video"
+mode = "manual"
+
+# Daily Brief (schedules.toml: daily 06:00): FX + weather into today's `# Daily Brief`.
+[[action]]
+id = "daily-brief"
+label = "Daily Brief"
+group = "Ingest"
+resources = { note = false, keys = ["note::period::day"] }
+[[action.steps]]
+type = "daily_brief"

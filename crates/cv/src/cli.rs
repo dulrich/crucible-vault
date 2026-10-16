@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text (`{JOBS}` is replaced by [`crate::jobs::USAGE`]).
-const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv import ...    link-records --from <jobs.sqlite> (daemon stopped)\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
+const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv import ...    link-records --from <jobs.sqlite> | sources --from <md> [--from <md>] | ignored --from <md> (daemon stopped)\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
 
 /// Usage text.
 #[must_use]

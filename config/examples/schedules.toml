@@ -5,3 +5,16 @@
 [[schedule]]
 action = "search-refresh"
 every = "30m"
+
+# plan v0-automation-pipelines (A2): every pipeline cadence is an entry here.
+[[schedule]]
+action = "track-youtube"
+every = "3h"
+
+[[schedule]]
+action = "track-blogs"
+every = "3h"
+
+[[schedule]]
+action = "daily-brief"
+daily = "06:00"

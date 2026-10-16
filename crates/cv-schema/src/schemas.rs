@@ -1759,6 +1759,335 @@ pub static EDITOR_FILE: Record = Record {
 };
 
 // ---------------------------------------------------------------------------------------------
+// pipelines.toml — `PipelinesConfig`, `crates/cv-actions/src/pipelines.rs` (plan
+// v0-automation-pipelines WP-12). Cadences are `schedules.toml` entries, not keys here.
+// ---------------------------------------------------------------------------------------------
+
+/// `[youtube]`.
+pub static PIPE_YOUTUBE: Record = Record {
+    name: "youtube",
+    fields: &[
+        field("enabled", "Enabled", "Master switch", Node::Bool).dflt(D::Bool(false)),
+        field(
+            "metadata_root",
+            "Metadata root",
+            "Metadata note folder",
+            Node::Path,
+        )
+        .dflt(D::Str("_yt_metadata")),
+        field(
+            "channel_enrich",
+            "Channel enrich",
+            "Write channel about.md notes",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+    ],
+    rules: &[],
+};
+
+/// `[x]`.
+pub static PIPE_X: Record = Record {
+    name: "x",
+    fields: &[
+        field("enabled", "Enabled", "Master switch", Node::Bool).dflt(D::Bool(false)),
+        field(
+            "metadata_root",
+            "Metadata root",
+            "Metadata note folder",
+            Node::Path,
+        )
+        .dflt(D::Str("_x_metadata")),
+        field(
+            "inbox",
+            "Inbox",
+            "Clipper inbox folder x_discover watches",
+            Node::Path,
+        ),
+    ],
+    rules: &[],
+};
+
+/// `[blogs]`.
+pub static PIPE_BLOGS: Record = Record {
+    name: "blogs",
+    fields: &[
+        field("enabled", "Enabled", "Master switch", Node::Bool).dflt(D::Bool(false)),
+        field(
+            "automatable_window",
+            "Automatable window",
+            "body = auto sources whose last N posts had a full body are automatable",
+            POS_U32,
+        )
+        .dflt(D::Int(5)),
+    ],
+    rules: &[],
+};
+
+/// `[image_describe]`.
+pub static PIPE_IMAGE_DESCRIBE: Record = Record {
+    name: "image_describe",
+    fields: &[
+        field("enabled", "Enabled", "Master switch", Node::Bool).dflt(D::Bool(false)),
+        field(
+            "provider",
+            "Provider",
+            "providers.toml provider id",
+            Node::Str,
+        ),
+        field("model", "Model", "Model id", Node::Str),
+        field("max_tokens", "Max tokens", "Response token cap", U32),
+    ],
+    rules: &[],
+};
+
+/// `[[daily_brief.fx]]`.
+pub static PIPE_FX: Record = Record {
+    name: "fx",
+    fields: &[
+        field("base", "Base", "Base currency (ISO 4217)", Node::Str).req(),
+        field("quote", "Quote", "Quote currency", Node::Str).req(),
+        field("label", "Label", "Default BASE/QUOTE", Node::Str),
+    ],
+    rules: &[],
+};
+
+/// `[[daily_brief.weather]]`.
+pub static PIPE_WEATHER: Record = Record {
+    name: "weather",
+    fields: &[
+        field("label", "Label", "Place name", Node::Str).req(),
+        field(
+            "lat",
+            "Latitude",
+            "-90..90",
+            Node::Float {
+                min: Some(-90.0),
+                max: Some(90.0),
+            },
+        )
+        .req(),
+        field(
+            "lon",
+            "Longitude",
+            "-180..180",
+            Node::Float {
+                min: Some(-180.0),
+                max: Some(180.0),
+            },
+        )
+        .req(),
+    ],
+    rules: &[],
+};
+
+/// `[daily_brief]`.
+pub static PIPE_DAILY_BRIEF: Record = Record {
+    name: "daily_brief",
+    fields: &[
+        field("enabled", "Enabled", "Master switch", Node::Bool).dflt(D::Bool(false)),
+        field(
+            "section",
+            "Section",
+            "Daily-note heading the brief fills",
+            Node::Str,
+        )
+        .dflt(D::Str("# Daily Brief")),
+        field(
+            "fx",
+            "Exchange rates",
+            "Frankfurter pairs",
+            Node::List(&Node::Record(&PIPE_FX)),
+        ),
+        field(
+            "weather",
+            "Weather",
+            "Open-Meteo places",
+            Node::List(&Node::Record(&PIPE_WEATHER)),
+        ),
+    ],
+    rules: &[],
+};
+
+/// `[scorer]`.
+pub static PIPE_SCORER: Record = Record {
+    name: "scorer",
+    fields: &[
+        field(
+            "url",
+            "URL",
+            "SystemOne-shaped scoring endpoint (unset = stub)",
+            Node::Str,
+        ),
+        field(
+            "model",
+            "Model",
+            "<provider>/<model-id>; needed with url",
+            Node::Str,
+        ),
+    ],
+    rules: &[],
+};
+
+/// `[ignore_shorts]`.
+pub static PIPE_IGNORE_SHORTS: Record = Record {
+    name: "ignore_shorts",
+    fields: &[
+        field("channels", "Channels", "Channel ids or names", STR_LIST),
+        field(
+            "max_seconds",
+            "Max seconds",
+            "A video this short counts as a Short",
+            U32,
+        )
+        .dflt(D::Int(120)),
+    ],
+    rules: &[],
+};
+
+/// `[queue]`.
+pub static PIPE_QUEUE: Record = Record {
+    name: "queue",
+    fields: &[field(
+        "retention_days",
+        "Retention days",
+        "Settled jobs older than this are pruned",
+        U32,
+    )
+    .dflt(D::Int(30))],
+    rules: &[],
+};
+
+/// `pipelines.toml`.
+pub static PIPELINES_FILE: Record = Record {
+    name: "pipelines.toml",
+    fields: &[
+        field(
+            "youtube",
+            "YouTube",
+            "Metadata, enrich, tracker",
+            Node::Record(&PIPE_YOUTUBE),
+        ),
+        field(
+            "x",
+            "X",
+            "Discover, metadata, backfill",
+            Node::Record(&PIPE_X),
+        ),
+        field("blogs", "Blogs", "Blog tracker", Node::Record(&PIPE_BLOGS)),
+        field(
+            "image_describe",
+            "Image describe",
+            "Clip image descriptions",
+            Node::Record(&PIPE_IMAGE_DESCRIBE),
+        ),
+        field(
+            "daily_brief",
+            "Daily Brief",
+            "FX + weather section",
+            Node::Record(&PIPE_DAILY_BRIEF),
+        ),
+        field(
+            "scorer",
+            "Scorer",
+            "Importance scorer",
+            Node::Record(&PIPE_SCORER),
+        ),
+        field(
+            "ignore_shorts",
+            "Ignore Shorts",
+            "Short-video rule",
+            Node::Record(&PIPE_IGNORE_SHORTS),
+        ),
+        field("queue", "Queue", "Job retention", Node::Record(&PIPE_QUEUE)),
+    ],
+    rules: &[],
+};
+
+// ---------------------------------------------------------------------------------------------
+// sources.toml — `SourcesConfig`, `crates/cv-actions/src/pipelines.rs`
+// ---------------------------------------------------------------------------------------------
+
+const PRIORITY: Node = Node::Enum(&["high", "normal", "low", "skip", "ignore"]);
+
+/// One `[[youtube]]` channel.
+pub static SOURCE_YOUTUBE: Record = Record {
+    name: "youtube",
+    fields: &[
+        field("channel", "Channel", "Display name", Node::Str).req(),
+        field("id", "Id", "Channel id (UC…)", Node::Str).req(),
+        field("tags", "Tags", "Tags", STR_LIST),
+        field(
+            "priority",
+            "Priority",
+            "skip/ignore exclude the row",
+            PRIORITY,
+        )
+        .dflt(D::Str("normal")),
+    ],
+    rules: &[],
+};
+
+/// One `[[blog]]` feed.
+pub static SOURCE_BLOG: Record = Record {
+    name: "blog",
+    fields: &[
+        field("name", "Name", "Display name", Node::Str).req(),
+        field("link", "Feed", "RSS/Atom feed URL", Node::Str).req(),
+        field(
+            "method",
+            "Method",
+            "Fetch method; non-rss rows are skipped",
+            Node::Str,
+        )
+        .dflt(D::Str("rss")),
+        field("tags", "Tags", "Tags", STR_LIST),
+        field(
+            "priority",
+            "Priority",
+            "skip/ignore exclude the row",
+            PRIORITY,
+        )
+        .dflt(D::Str("normal")),
+        field(
+            "canon",
+            "Canon",
+            "Post-id canonicalization",
+            Node::Enum(&["auto", "substack", "strip-params", "keep-params"]),
+        )
+        .dflt(D::Str("auto")),
+        field(
+            "body",
+            "Body",
+            "auto / full (always capture) / snippet (never)",
+            Node::Enum(&["auto", "full", "snippet"]),
+        )
+        .dflt(D::Str("auto")),
+    ],
+    rules: &[],
+};
+
+/// `sources.toml`.
+pub static SOURCES_FILE: Record = Record {
+    name: "sources.toml",
+    fields: &[
+        field(
+            "youtube",
+            "YouTube channels",
+            "One [[youtube]] each",
+            Node::List(&Node::Record(&SOURCE_YOUTUBE)),
+        ),
+        field(
+            "blog",
+            "Blogs",
+            "One [[blog]] each",
+            Node::List(&Node::Record(&SOURCE_BLOG)),
+        ),
+    ],
+    rules: &[],
+};
+
+// ---------------------------------------------------------------------------------------------
 // Lookup
 // ---------------------------------------------------------------------------------------------
 
@@ -1770,16 +2099,20 @@ static PROVIDERS_NODE: Node = Node::Record(&PROVIDERS_FILE);
 static BOOKMARKS_NODE: Node = Node::Record(&BOOKMARKS_FILE);
 static EDITOR_NODE: Node = Node::Record(&EDITOR_FILE);
 static VIEW_NODE: Node = Node::Record(&VIEW_FILE);
+static PIPELINES_NODE: Node = Node::Record(&PIPELINES_FILE);
+static SOURCES_NODE: Node = Node::Record(&SOURCES_FILE);
 
 /// Every config file name with a schema (the daemon's `CONFIG_FILES`, then `bookmarks.toml`,
 /// `editor.toml`). Views are per-file: see [`view_schema`].
-pub const FILES: [&str; 8] = [
+pub const FILES: [&str; 10] = [
     "actions.toml",
     "schedules.toml",
     "kinds.toml",
     "captures.toml",
     "agents.toml",
     "providers.toml",
+    "pipelines.toml",
+    "sources.toml",
     "bookmarks.toml",
     "editor.toml",
 ];
@@ -1794,6 +2127,8 @@ pub fn schema_for(file: &str) -> Option<&'static Node> {
         "captures.toml" => &CAPTURES_NODE,
         "agents.toml" => &AGENTS_FILE,
         "providers.toml" => &PROVIDERS_NODE,
+        "pipelines.toml" => &PIPELINES_NODE,
+        "sources.toml" => &SOURCES_NODE,
         "bookmarks.toml" => &BOOKMARKS_NODE,
         "editor.toml" => &EDITOR_NODE,
         f if f.starts_with("views/") && f.ends_with(".toml") => &VIEW_NODE,

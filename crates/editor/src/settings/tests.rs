@@ -86,6 +86,8 @@ fn reload_errors_attribute_by_file_name() {
         attribute("providers.toml: expected a table (line 3)"),
         Some(Section::Providers)
     );
+    assert_eq!(attribute("pipelines.toml: bad"), Some(Section::Pipelines));
+    assert_eq!(attribute("sources.toml: bad"), Some(Section::Sources));
     assert_eq!(attribute("captures.toml: bad"), Some(Section::Captures));
     assert_eq!(attribute("agents.toml: bad"), Some(Section::Agents));
     assert_eq!(attribute("kinds.toml: bad"), Some(Section::Kinds));
@@ -128,6 +130,8 @@ fn every_section_is_in_the_rail_with_its_file() {
             "Hotkeys",
             "Actions",
             "Schedules",
+            "Pipelines",
+            "Sources",
             "Captures & periods",
             "Kinds",
             "Agents",
@@ -145,7 +149,7 @@ fn every_section_is_in_the_rail_with_its_file() {
             assert!(f.schema.is_some(), "{p} has a schema");
         }
     }
-    assert_eq!(st.files.len(), 8);
+    assert_eq!(st.files.len(), 10);
 }
 
 #[test]

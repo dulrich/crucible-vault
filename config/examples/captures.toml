@@ -64,3 +64,13 @@ target = "monthly"
 section = "# Observations"
 mode = "append"
 format = "- {{source_link}}\n\t- {{value:oneline}}"
+
+# plan v0-automation-pipelines (A2): the trackers' intake lines in today's note. Optional: without
+# it the trackers use this same default; add `{{vars.score}}` once the importance scorer is wired.
+[[capture]]
+name = "tracker-intake"
+label = "Tracker intake"
+target = "daily"
+mode = "section"
+section = "# Intake"
+format = "- [ ] [{{vars.title}}]({{vars.url}}) — {{vars.source}}"

@@ -1,0 +1,44 @@
+# Example `pipelines.toml` (plan v0-automation-pipelines, D21). Copy into CV_CONFIG_DIR
+# (live: <vault>/_custom/crucible-vault/). An absent file or section means that pipeline is off.
+# Cadences are not set here: every pipeline cadence is a schedules.toml entry.
+# Every key below is shown with its default unless noted.
+
+[youtube]
+enabled = false                 # yt_metadata / yt_channel_enrich / track_youtube
+metadata_root = "_yt_metadata"
+channel_enrich = false          # write channel about.md notes
+# secret: YOUTUBE_API_KEY (env or ~/.config/crucible-vault/YOUTUBE_API_KEY)
+
+[x]
+enabled = false
+metadata_root = "_x_metadata"
+inbox = "Clippings"             # the clipper inbox x_discover watches (default unset)
+
+[blogs]
+enabled = false
+automatable_window = 5          # body = "auto" sources with N full-body posts in a row are captured
+
+[image_describe]
+enabled = false
+# provider = "local"            # providers.toml provider id
+# model = "vision-model"
+# max_tokens = 800
+
+[daily_brief]
+enabled = false
+section = "# Daily Brief"
+# fx = [{ base = "EUR", quote = "USD" }]
+# weather = [{ label = "Home", lat = 0.0, lon = 0.0 }]
+
+# Importance scorer: unset = stub (items stay unscored). Provisional SystemOne response
+# `{"score": n}` (D21); a url without a model falls back to the stub.
+[scorer]
+# url = "http://127.0.0.1:9000/v1/systemone"
+# model = "local/importance"
+
+[ignore_shorts]
+channels = []                   # channel ids (or display names) whose Shorts are ignored
+max_seconds = 120
+
+[queue]
+retention_days = 30             # settled jobs older than this are pruned

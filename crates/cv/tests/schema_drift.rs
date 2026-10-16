@@ -260,6 +260,63 @@ lane = "user"
 type = "guard"
 "#;
 
+/// Plan v0-automation-pipelines WP-12: every `PipelinesConfig` section.
+const PIPELINES: &[&str] = &[r##"
+[youtube]
+enabled = true
+metadata_root = "_yt_metadata"
+channel_enrich = true
+
+[x]
+enabled = true
+metadata_root = "_x_metadata"
+inbox = "Clippings"
+
+[blogs]
+enabled = true
+automatable_window = 3
+
+[image_describe]
+enabled = true
+provider = "local"
+model = "vl"
+max_tokens = 800
+
+[daily_brief]
+enabled = true
+section = "# Daily Brief"
+fx = [{ base = "EUR", quote = "USD", label = "EUR/USD" }]
+weather = [{ label = "Home", lat = 0.0, lon = 0.0 }]
+
+[scorer]
+url = "http://127.0.0.1:9000/v1/systemone"
+model = "local/importance"
+
+[ignore_shorts]
+channels = ["UCxxxxxxxxxxxxxxxxxxxxxx"]
+max_seconds = 90
+
+[queue]
+retention_days = 14
+"##];
+
+const SOURCES: &[&str] = &[r#"
+[[youtube]]
+channel = "Example"
+id = "UCxxxxxxxxxxxxxxxxxxxxxx"
+tags = ["a"]
+priority = "high"
+
+[[blog]]
+name = "Example"
+link = "https://example.com/feed.xml"
+method = "rss"
+tags = ["a"]
+priority = "skip"
+canon = "strip-params"
+body = "full"
+"#];
+
 const SCHEDULES: &[&str] = &[
     "[[schedule]]\naction = \"s\"\ndaily = \"06:00\"\n\n[[schedule]]\naction = \"s\"\nevery = \"2h\"\n",
 ];
@@ -417,6 +474,8 @@ fn support_files_parse_and_validate() {
         ("agents.toml", AGENTS),
         ("kinds.toml", KINDS),
         ("captures.toml", CAPTURES),
+        ("pipelines.toml", PIPELINES),
+        ("sources.toml", SOURCES),
     ] {
         for s in samples {
             assert_eq!(
@@ -498,4 +557,14 @@ fn invented_fields_are_rejected() {
     assert!(reload(&files).iter().any(|e| e.contains("invented")));
     assert!(ProvidersConfig::from_toml(&format!("{}invented = 1\n", PROVIDERS[0])).is_err());
     assert!(toml::from_str::<views::def::BaseDef>("invented = 1\n").is_err());
+    let mut files = support();
+    files.insert("pipelines.toml", format!("{}invented = 1\n", PIPELINES[0]));
+    assert!(reload(&files).iter().any(|e| e.contains("invented")));
+    let mut files = support();
+    files.insert("sources.toml", format!("{}invented = 1\n", SOURCES[0]));
+    assert!(reload(&files).iter().any(|e| e.contains("invented")));
+    // The dropped cadence keys (cadences live in schedules.toml).
+    let mut files = support();
+    files.insert("pipelines.toml", "[youtube]\nschedule = \"3h\"\n".into());
+    assert!(reload(&files).iter().any(|e| e.contains("schedule")));
 }

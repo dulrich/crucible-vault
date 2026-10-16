@@ -263,7 +263,7 @@ fn fails(r: Result<StepOutcome, StepError>) -> String {
 fn example_config_arms_every_action() {
     let c = example_config();
     assert!(c.errors().is_empty(), "{:?}", c.errors());
-    assert_eq!(c.armed_actions().count(), 14);
+    assert_eq!(c.armed_actions().count(), 28);
     for id in [
         "period.open",
         "note.create",
@@ -285,7 +285,7 @@ fn example_config_arms_every_action() {
             .as_array()
             .unwrap()
             .len(),
-        4
+        5
     );
 }
 

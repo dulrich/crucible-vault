@@ -1,5 +1,7 @@
 //! Typed `pipelines.toml` and `sources.toml` (plan `v0-automation-pipelines` WP-1, D4/D18).
 //!
+//! Cadences live in `schedules.toml` (user decision 2026-10-15), not here.
+//!
 //! Both are strict (`deny_unknown_fields`, like `actions.toml`) and default to "everything off":
 //! an absent file (or section) means no pipeline runs and no source is tracked. Loaded by
 //! [`crate::ConfigSet`] with the other files: hot-reloaded, and a file that fails to parse or to
@@ -11,26 +13,6 @@
 //! policy (skip/ignore priorities, non-`UC` ids, non-RSS methods) stays with the trackers.
 
 use serde::Deserialize;
-
-use crate::model::Schedule;
-
-/// Parses a cadence string: `"HH:MM"` (daily) or `"<n>m"`/`"<n>h"` (interval).
-pub fn parse_cadence(s: &str) -> Result<Schedule, String> {
-    if s.contains(':') {
-        Schedule::parse_daily(s)
-    } else {
-        Schedule::parse_every(s)
-    }
-}
-
-fn check_cadence(what: &str, s: Option<&String>) -> Result<(), String> {
-    match s {
-        Some(v) => parse_cadence(v)
-            .map(|_| ())
-            .map_err(|e| format!("{what}.schedule: {e}")),
-        None => Ok(()),
-    }
-}
 
 /// `pipelines.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -60,8 +42,6 @@ impl PipelinesConfig {
         let c: Self = toml::Value::Table(t.clone())
             .try_into()
             .map_err(|e: toml::de::Error| e.message().to_owned())?;
-        check_cadence("youtube", c.youtube.schedule.as_ref())?;
-        check_cadence("blogs", c.blogs.schedule.as_ref())?;
         if c.blogs.automatable_window == 0 {
             return Err("blogs.automatable_window must be at least 1".into());
         }
@@ -87,8 +67,6 @@ pub struct YoutubePipeline {
     pub metadata_root: String,
     /// Write channel `about.md` notes (default off, as in Crucible).
     pub channel_enrich: bool,
-    /// Tracker cadence: `"HH:MM"` daily or `"<n>m"`/`"<n>h"`; `None` = command-only.
-    pub schedule: Option<String>,
 }
 
 impl Default for YoutubePipeline {
@@ -97,7 +75,6 @@ impl Default for YoutubePipeline {
             enabled: false,
             metadata_root: "_yt_metadata".into(),
             channel_enrich: false,
-            schedule: None,
         }
     }
 }
@@ -130,8 +107,6 @@ impl Default for XPipeline {
 pub struct BlogsPipeline {
     /// Master switch (default off).
     pub enabled: bool,
-    /// Tracker cadence (see [`parse_cadence`]); `None` = command-only.
-    pub schedule: Option<String>,
     /// `body = "auto"` sources are automatable when each of their last N posts had a full body
     /// (default 5).
     pub automatable_window: u32,
@@ -141,7 +116,6 @@ impl Default for BlogsPipeline {
     fn default() -> Self {
         Self {
             enabled: false,
-            schedule: None,
             automatable_window: 5,
         }
     }
@@ -402,13 +376,11 @@ mod tests {
 [youtube]
 enabled = true
 channel_enrich = true
-schedule = "07:15"
 [x]
 enabled = true
-inbox = "clippings"
+inbox = "Clippings"
 [blogs]
 enabled = true
-schedule = "6h"
 automatable_window = 3
 [image_describe]
 enabled = true
@@ -431,12 +403,18 @@ retention_days = 14
         .parse()
         .unwrap();
         let c = PipelinesConfig::from_table(&p).unwrap();
-        assert_eq!(c.youtube.schedule.as_deref(), Some("07:15"));
+        assert!(c.youtube.channel_enrich);
         assert_eq!(c.daily_brief.weather[0].lat, 52.5);
         assert_eq!(c.blogs.automatable_window, 3);
         assert_eq!(c.scorer.model.as_deref(), Some("local/scorer"));
-        let bad: toml::Table = "[blogs]\nschedule = \"soon\"".parse().unwrap();
-        assert!(PipelinesConfig::from_table(&bad).is_err());
+        for bad in [
+            "[blogs]\nschedule = \"soon\"",
+            "[youtube]\nschedule = \"3h\"",
+            "[blogs]\nautomatable_window = 0",
+        ] {
+            let bad: toml::Table = bad.parse().unwrap();
+            assert!(PipelinesConfig::from_table(&bad).is_err(), "{bad:?}");
+        }
         let bad: toml::Table = "[youtube]\nbogus = 1".parse().unwrap();
         assert!(
             PipelinesConfig::from_table(&bad)
