@@ -495,7 +495,15 @@ fn parity_reports_every_criterion_as_aggregates() {
     assert_eq!(p1["links"], 3);
     assert_eq!(p1["unresolved"], 1);
     assert!(p1["drift_pct"]["files"].as_f64().unwrap() < -99.0);
-    assert_eq!(c["P1"]["status"], "warn");
+    // Peak RSS is this process's VmHWM, and the test binary's other tests share the process, so
+    // the RSS/build-time fail legs depend on what ran alongside; drift alone makes it a warn.
+    let env_fail = p1["peak_rss_kb"]
+        .as_u64()
+        .is_some_and(|r| r > parity::MAX_RSS_KB)
+        || p1["build_ms"]
+            .as_u64()
+            .is_some_and(|ms| u128::from(ms) > parity::MAX_BUILD_MS);
+    assert_eq!(c["P1"]["status"], if env_fail { "fail" } else { "warn" });
 
     let p2 = &c["P2"]["metrics"];
     assert_eq!(c["P2"]["status"], "manual");

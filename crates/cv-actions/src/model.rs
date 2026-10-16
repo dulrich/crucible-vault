@@ -275,8 +275,9 @@ impl Step {
 
     /// Whether the step may write a note (replaces Crucible's `mutating` flag, `src/AGENTS.md:28`).
     /// Fails closed: anything that might write counts.
-    /// A2: every pipeline step mutates (fails closed) except `x_discover` and `x_backfill`,
-    /// which only enqueue `x_metadata` runs, and `link_scan`, which writes only `state.db`.
+    /// A2: every pipeline step mutates (fails closed) except `link_scan`, which writes only
+    /// `state.db`. `x_discover`/`x_backfill` ensure metadata inline and append to source notes'
+    /// `x-metadata` lists (plan `v0-automation-pipelines` WP-5), so they mutate.
     #[must_use]
     pub fn mutates_note(&self) -> bool {
         match self.kind() {
@@ -284,8 +285,6 @@ impl Step {
             | StepKind::RunAction
             | StepKind::SearchUpsert
             | StepKind::SearchDelete
-            | StepKind::XDiscover
-            | StepKind::XBackfill
             | StepKind::LinkScan => false,
             StepKind::Capture
             | StepKind::Materialize
@@ -300,7 +299,9 @@ impl Step {
             | StepKind::MarkForwarded
             | StepKind::YtMetadata
             | StepKind::YtChannelEnrich
+            | StepKind::XDiscover
             | StepKind::XMetadata
+            | StepKind::XBackfill
             | StepKind::ImageDescribe
             | StepKind::TrackYoutube
             | StepKind::TrackBlogs
@@ -691,7 +692,7 @@ mod tests {
         assert_eq!(s.kind(), StepKind::TrackBlogs);
         assert!(s.mutates_note());
         let t: toml::Table = toml::from_str("type = \"x_backfill\"").unwrap();
-        assert!(!Step::from_table(t).unwrap().mutates_note());
+        assert!(Step::from_table(t).unwrap().mutates_note());
         let t: toml::Table = toml::from_str("type = \"link_scan\"").unwrap();
         assert!(!Step::from_table(t).unwrap().mutates_note());
         let t: toml::Table = toml::from_str("type = \"nope\"").unwrap();

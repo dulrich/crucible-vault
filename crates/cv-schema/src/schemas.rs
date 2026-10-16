@@ -606,24 +606,41 @@ pub static YT_CHANNEL_ENRICH: Record = Record {
     rules: &[],
 };
 
-/// `x_discover` — `crates/cv/src/steps/x.rs` (A2 stub: no params until WP-5).
+/// `x_discover` — `crates/cv/src/steps/x.rs` (`validate`; keys at `BATCH_KEYS`).
 pub static X_DISCOVER: Record = Record {
     name: "x_discover",
-    fields: &[],
+    fields: &[field(
+        "limit",
+        "Limit",
+        "Statuses ensured per run; the rest wait for the next run",
+        POS_INT,
+    )
+    .dflt(D::Int(50))],
     rules: &[],
 };
 
-/// `x_metadata` — `crates/cv/src/steps/x.rs` (A2 stub: no params until WP-5).
+/// `x_metadata` — `crates/cv/src/steps/x.rs` (`validate`; keys at `META_KEYS`).
 pub static X_METADATA: Record = Record {
     name: "x_metadata",
-    fields: &[],
+    fields: &[field(
+        "status_id",
+        "Status id",
+        "Placeholders ok; default: the note's x-status-id, else the status in its source URL",
+        Node::Str,
+    )],
     rules: &[],
 };
 
-/// `x_backfill` — `crates/cv/src/steps/x.rs` (A2 stub: no params until WP-5).
+/// `x_backfill` — `crates/cv/src/steps/x.rs` (`validate`; keys at `BATCH_KEYS`).
 pub static X_BACKFILL: Record = Record {
     name: "x_backfill",
-    fields: &[],
+    fields: &[field(
+        "limit",
+        "Limit",
+        "Statuses ensured per run; the rest wait for the next run",
+        POS_INT,
+    )
+    .dflt(D::Int(50))],
     rules: &[],
 };
 

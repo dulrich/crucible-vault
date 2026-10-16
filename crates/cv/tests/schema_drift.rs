@@ -188,8 +188,11 @@ const STEPS: &[(&str, &str)] = &[
         "channel_id = \"{vars.channel_id}\"\nforce = true\nmax_age_days = 7",
     ),
     ("x_discover", ""),
+    ("x_discover", "limit = 10"),
     ("x_metadata", ""),
+    ("x_metadata", "status_id = \"{vars.status_id}\""),
     ("x_backfill", ""),
+    ("x_backfill", "limit = 25"),
     ("image_describe", ""),
     (
         "image_describe",
