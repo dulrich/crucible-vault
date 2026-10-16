@@ -12,6 +12,7 @@ pub mod jobs;
 pub mod runner;
 pub mod server;
 pub mod shadow;
+pub mod signals;
 pub mod spool;
 pub mod steps;
 pub mod uri;

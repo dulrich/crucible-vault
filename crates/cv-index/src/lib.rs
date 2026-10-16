@@ -25,6 +25,7 @@ pub mod queries;
 mod query;
 mod resolver;
 mod schema;
+pub mod signals;
 
 pub use error::{Error, Result};
 pub use extract::{is_parsed_path, is_skipped_path, is_target_only_path};

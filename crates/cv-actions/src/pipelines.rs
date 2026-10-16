@@ -217,6 +217,8 @@ pub struct WeatherPlace {
 pub struct ScorerConfig {
     /// SystemOne-shaped scoring endpoint.
     pub url: Option<String>,
+    /// SystemOne `model` (`<provider>/<model-id>`); a `url` without it falls back to the stub.
+    pub model: Option<String>,
 }
 
 /// `[ignore_shorts]`: Ignore Shorts rule.
@@ -419,6 +421,7 @@ fx = [{ base = "EUR", quote = "USD" }]
 weather = [{ label = "Home", lat = 52.5, lon = 13.4 }]
 [scorer]
 url = "http://127.0.0.1:9000"
+model = "local/scorer"
 [ignore_shorts]
 channels = ["UCx"]
 max_seconds = 90
@@ -431,6 +434,7 @@ retention_days = 14
         assert_eq!(c.youtube.schedule.as_deref(), Some("07:15"));
         assert_eq!(c.daily_brief.weather[0].lat, 52.5);
         assert_eq!(c.blogs.automatable_window, 3);
+        assert_eq!(c.scorer.model.as_deref(), Some("local/scorer"));
         let bad: toml::Table = "[blogs]\nschedule = \"soon\"".parse().unwrap();
         assert!(PipelinesConfig::from_table(&bad).is_err());
         let bad: toml::Table = "[youtube]\nbogus = 1".parse().unwrap();

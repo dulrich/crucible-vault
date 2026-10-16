@@ -461,3 +461,129 @@ fn disabled_pipeline_does_nothing() {
     assert_eq!(n(&o, "disabled"), json!(true));
     assert!(w.log.lock().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------- WP-10 scorer wiring
+
+/// A scorer endpoint that reads the whole POST body (logged) and answers `status`/`body`.
+async fn serve_scorer(status: u16, body: &'static str, log: Arc<Mutex<Vec<String>>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).into_owned();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len: usize = text
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + len {
+                            log.lock().unwrap().push(text[end + 4..].to_owned());
+                            break;
+                        }
+                    }
+                }
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    format!("http://{addr}/v1/systemone")
+}
+
+const SCORED_CAPTURES: &str = "[periods.day]\nfolder = \"daily\"\nformat = \"YYYY-MM-DD\"\n\n[[capture]]\nname = \"tracker-intake\"\ntarget = \"daily\"\nmode = \"section\"\nsection = \"# Intake\"\nformat = \"- [ ] [{{vars.title}}]({{vars.url}}) — {{vars.source}} ({{vars.score}})\"\n";
+
+/// One V1-only run with `[scorer]` pointed at `url` (`None` = a scorer server answering
+/// `status`/`body`); returns the world and the logged scorer request bodies.
+fn scored_run(status: u16, body: &'static str, url: Option<&str>) -> (World, Vec<String>) {
+    let routes = vec![
+        ("playlistId=UUa", 200, playlist(&[V1])),
+        ("/videos", 200, videos(&[(V1, "PT10M")])),
+    ];
+    let mut w = world(&[], routes, ON, SOURCES);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let scorer = match url {
+        Some(u) => u.to_owned(),
+        None => w.rt.block_on(serve_scorer(status, body, log.clone())),
+    };
+    let pipelines = format!("{ON}\n[scorer]\nurl = \"{scorer}\"\nmodel = \"local/scorer\"\n");
+    let files = BTreeMap::from([
+        ("pipelines.toml".to_owned(), Some(pipelines)),
+        ("sources.toml".to_owned(), Some(SOURCES.to_owned())),
+        ("captures.toml".to_owned(), Some(SCORED_CAPTURES.to_owned())),
+    ]);
+    w.config.reload(&files, &crate::steps::validate);
+    let o = run(&w).unwrap();
+    assert_eq!(
+        n(&o, "lines"),
+        json!(1),
+        "intake never blocks on the scorer"
+    );
+    let bodies = log.lock().unwrap().clone();
+    (w, bodies)
+}
+
+fn score_of(w: &World, id: &str) -> Option<f64> {
+    w.state
+        .lock()
+        .unwrap()
+        .tracker_item(KIND, "UCa", id)
+        .unwrap()
+        .and_then(|r| r.score)
+}
+
+#[test]
+fn stub_scorer_leaves_items_unscored() {
+    let w = world(&[], std_routes(), ON, SOURCES);
+    run(&w).unwrap();
+    assert_eq!(score_of(&w, V1), None);
+    assert!(daily(&w).contains(&format!("({}) — Chan A\n", url(V1))));
+}
+
+#[test]
+fn systemone_score_is_stored_and_rendered() {
+    let (w, bodies) = scored_run(200, r#"{"score":3}"#, None);
+    assert_eq!(score_of(&w, V1), Some(3.0));
+    assert!(daily(&w).contains("— Chan A (3)"), "{}", daily(&w));
+    assert_eq!(bodies.len(), 1);
+    let req: Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(req["model"], "local/scorer");
+    assert!(
+        req["state"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("title: Video {V1}"))
+    );
+    assert!(req["questions"]["importance"].is_string());
+}
+
+#[test]
+fn scorer_failures_never_block_intake() {
+    for (status, body, url) in [
+        (500, "boom", None),
+        (200, "not json", None),
+        (200, "", Some("http://127.0.0.1:1/v1/systemone")),
+    ] {
+        let (w, _) = scored_run(status, body, url);
+        assert_eq!(outcome(&w, V1), Some(TrackerOutcome::Line));
+        assert_eq!(score_of(&w, V1), None);
+        assert!(daily(&w).contains("— Chan A ()"), "{}", daily(&w));
+    }
+}

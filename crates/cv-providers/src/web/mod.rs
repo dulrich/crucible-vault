@@ -22,6 +22,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub mod fx;
+pub mod scorer;
 pub mod weather;
 pub mod x;
 pub mod youtube;

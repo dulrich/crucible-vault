@@ -359,7 +359,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                         outcome = TrackerOutcome::Note;
                     }
                 }
-                record_with(ctx, &cand, outcome, full)?;
+                record_with(ctx, &cand, outcome, full, None)?;
                 evidence.push_back(post.has_body());
                 continue;
             }
@@ -369,7 +369,8 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 if write_note(ctx, row, &post, &mut out.output_paths)? {
                     notes += 1;
                 }
-                record_with(ctx, &cand, TrackerOutcome::Note, full)?;
+                let score = super::score_item(ctx, &cand);
+                record_with(ctx, &cand, TrackerOutcome::Note, full, score)?;
             } else if emit_line_with(ctx, &cand, full, &mut out.output_paths)?
                 != super::Emitted::AlreadyRecorded
             {

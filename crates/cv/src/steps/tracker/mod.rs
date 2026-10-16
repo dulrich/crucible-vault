@@ -78,15 +78,17 @@ pub fn record(
     c: &Candidate,
     outcome: TrackerOutcome,
 ) -> Result<bool, StepError> {
-    record_with(ctx, c, outcome, None)
+    record_with(ctx, c, outcome, None, None)
 }
 
-/// [`record`] with the blog automatable evidence (`full_body`, WP-8).
+/// [`record`] with the blog automatable evidence (`full_body`, WP-8) and the importance `score`
+/// (WP-10).
 pub(crate) fn record_with(
     ctx: &StepCtx<'_>,
     c: &Candidate,
     outcome: TrackerOutcome,
     full_body: Option<bool>,
+    score: Option<f64>,
 ) -> Result<bool, StepError> {
     lock(ctx)
         .insert_tracker_item(&TrackerItem {
@@ -98,7 +100,7 @@ pub(crate) fn record_with(
             first_seen_ms: now_ms(),
             day: local_day(),
             outcome,
-            score: None,
+            score,
             full_body,
         })
         .map_err(state_err)
@@ -284,9 +286,10 @@ pub(crate) fn emit_line_with(
         && !c.url.is_empty()
         && String::from_utf8_lossy(&bytes).contains(&c.url)
     {
-        record_with(ctx, c, TrackerOutcome::Line, full_body)?;
+        record_with(ctx, c, TrackerOutcome::Line, full_body, None)?;
         return Ok(Emitted::Recovered);
     }
+    let score = score_item(ctx, c);
     let step = intake_step(ctx.config)?;
     let mut vars = ctx.vars.clone();
     vars.insert(
@@ -295,6 +298,10 @@ pub(crate) fn emit_line_with(
     );
     vars.insert("url".into(), Value::String(c.url.clone()));
     vars.insert("source".into(), Value::String(c.source_name.clone()));
+    vars.insert(
+        "score".into(),
+        Value::String(score.map_or_else(String::new, score_text)),
+    );
     let mut sub = StepCtx {
         job_id: ctx.job_id,
         action: ctx.action,
@@ -318,8 +325,60 @@ pub(crate) fn emit_line_with(
     if hook::fail_now() {
         return Err(StepError::failed("injected failure after line write"));
     }
-    record_with(ctx, c, TrackerOutcome::Line, full_body)?;
+    record_with(ctx, c, TrackerOutcome::Line, full_body, score)?;
     Ok(Emitted::Written)
+}
+
+/// `{{vars.score}}` text: integral scores without a fraction.
+fn score_text(s: f64) -> String {
+    if s.fract() == 0.0 && s.abs() < 1e15 {
+        format!("{}", s as i64)
+    } else {
+        format!("{s}")
+    }
+}
+
+/// Scores one **new** item with the `[scorer]` of `pipelines.toml` (WP-10). Never fails: any
+/// scorer error (transport, non-2xx, bad body, timeout) is one `warn!` and `None`, so intake
+/// proceeds unscored (invariant: a scorer failure never blocks intake; no breaker feed).
+pub(crate) fn score_item(ctx: &StepCtx<'_>, c: &Candidate) -> Option<f64> {
+    use cv_providers::web::scorer::{ImportanceScorer, ScoreItem, StubReason};
+    static MISSING_MODEL_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let cfg = &ctx.config.pipelines().scorer;
+    let (scorer, reason) = ImportanceScorer::from_config(cfg.url.as_deref(), cfg.model.as_deref());
+    if reason == Some(StubReason::MissingModel)
+        && !MISSING_MODEL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        tracing::warn!("scorer: [scorer] url is set without `model`; using the stub scorer");
+    }
+    if scorer == ImportanceScorer::Stub {
+        return None;
+    }
+    let item = ScoreItem {
+        kind: &c.source_kind,
+        source_name: &c.source_name,
+        title: &c.title,
+        url: &c.url,
+    };
+    let client = match super::web::client() {
+        Ok(cl) => cl,
+        Err(e) => {
+            tracing::warn!(error = %e, "scorer: no http client; item unscored");
+            return None;
+        }
+    };
+    match block_on(scorer.score(client, &item)) {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, item = %c.item_id, "scorer failed; item unscored");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, item = %c.item_id, "scorer failed; item unscored");
+            None
+        }
+    }
 }
 
 /// Every `.md` file under `<vault_root>/<rel>` (recursive, read-only, no symlinks), as

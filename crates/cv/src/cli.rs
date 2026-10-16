@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text (`{JOBS}` is replaced by [`crate::jobs::USAGE`]).
-const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv import ...    link-records --from <jobs.sqlite> (daemon stopped)\n{JOBS}  cv --help        this text\n";
+const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv import ...    link-records --from <jobs.sqlite> (daemon stopped)\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
 
 /// Usage text.
 #[must_use]
@@ -41,6 +41,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("shadow") => crate::shadow::run(&args[1..]),
         Some("cutover") => crate::cutover::run(&args[1..]),
         Some("import") => crate::import::run(&args[1..]),
+        Some("signals") => crate::signals::run(&args[1..]),
         Some("jobs") => crate::jobs::run(args),
         Some("intake") => crate::jobs::run(args),
         Some("run") => crate::jobs::run(args),
