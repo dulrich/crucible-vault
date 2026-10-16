@@ -15,8 +15,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 pub use cv_protocol::{
-    ActionInfo, HelloResult, JobStatus, Mode, Notification, RunActionParams, RunActionResult,
-    StatusResult, Topic, ViewResult, ViewsListResult,
+    ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, HelloResult, JobStatus, Mode,
+    Notification, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
+    ViewsListResult,
 };
 pub use cv_state::StateReader;
 pub use cv_vault::ContentHash;
@@ -91,6 +92,16 @@ pub trait DaemonClient: Send + Sync {
     fn rename(&self, from: &str, to: &str) -> Result<()>;
     /// Deletes.
     fn delete(&self, path: &str) -> Result<()>;
+    /// The note's embeds / attachments with whether something else references them
+    /// (plan editor-ui-round-3 WP-3).
+    fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>>;
+    /// Deletes `path` and those of `attachments` nothing else references at delete time.
+    fn delete_note(
+        &self,
+        path: &str,
+        attachments: &[String],
+        mode: DeleteMode,
+    ) -> Result<DeleteNoteResult>;
     /// The action registry.
     fn actions_list(&self) -> Result<Vec<ActionInfo>>;
     /// Runs an action.

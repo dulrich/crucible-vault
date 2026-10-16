@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::query::Query;
+use crate::query::{LinkKind, Query};
 
 /// One orphaned managed attachment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +82,34 @@ pub fn attachment_vault_paths(q: &Query<'_>) -> Result<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
 }
 
+/// Whether any indexed link row (all kinds) from a source other than `note` resolves to
+/// `target` (plan editor-ui-round-3 WP-3). Links from non-indexed files do not count.
+pub fn referenced_elsewhere(q: &Query<'_>, target: &str, note: &str) -> Result<bool> {
+    Ok(q.backlinks(target)?.iter().any(|l| l.src_path != note))
+}
+
+/// The `delete_preview` items of `note` as `(path, referenced_elsewhere)`, in first-link order:
+/// the note's outgoing embeds plus its non-note link targets that resolve to an indexed file.
+/// Unresolved (missing) targets and self-links are not listed.
+pub fn delete_preview(q: &Query<'_>, note: &str) -> Result<Vec<(String, bool)>> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for l in q.outgoing(note)? {
+        let Some(target) = l.resolved_path else {
+            continue;
+        };
+        let is_note = target.to_ascii_lowercase().ends_with(".md");
+        if target == note || (is_note && l.kind != LinkKind::Embed) {
+            continue;
+        }
+        if out.iter().any(|(p, _)| *p == target) {
+            continue;
+        }
+        let shared = referenced_elsewhere(q, &target, note)?;
+        out.push((target, shared));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -141,5 +169,34 @@ mod tests {
         let all = attachment_vault_paths(&q).unwrap();
         assert!(all.windows(2).all(|w| w[0] < w[1]));
         assert!(all.contains(&"n.md".to_owned()));
+    }
+
+    #[test]
+    fn delete_preview_classifies_orphan_shared_missing() {
+        let t = Tmp::new();
+        t.write("img/own.png", "png");
+        t.write("img/shared.png", "png");
+        t.write("doc.pdf", "pdf");
+        t.write("other.md", "body");
+        t.write("emb.md", "embedded");
+        t.write(
+            "n.md",
+            "![[own.png]] ![[shared.png]] ![[gone.png]] [[other]] ![[emb]] [d](doc.pdf) ![[own.png]] [[n]]\n",
+        );
+        t.write("m.md", "uses ![[shared.png]]\n");
+        let idx = Index::create(&t.0.join("vault"), &t.0.join("index.db")).unwrap();
+        let q = idx.query();
+        let items = delete_preview(&q, "n.md").unwrap();
+        assert_eq!(
+            items,
+            vec![
+                ("img/own.png".to_owned(), false),
+                ("img/shared.png".to_owned(), true),
+                ("emb.md".to_owned(), false),
+                ("doc.pdf".to_owned(), false),
+            ]
+        );
+        assert!(referenced_elsewhere(&q, "img/shared.png", "n.md").unwrap());
+        assert!(!referenced_elsewhere(&q, "img/own.png", "n.md").unwrap());
     }
 }

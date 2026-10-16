@@ -387,6 +387,30 @@ fn editor_quick_switch_open_enum_and_default() {
 }
 
 #[test]
+fn editor_delete_mode_enum_default_and_legacy_confirm_trash() {
+    for v in ["trash", "permanent"] {
+        assert!(
+            errs(&format!("delete_mode = \"{v}\"\n"), "editor.toml").is_empty(),
+            "{v}"
+        );
+    }
+    let e = errs("delete_mode = \"shred\"\n", "editor.toml");
+    assert_eq!(e.len(), 1, "{e:?}");
+    // plan editor-ui-round-3 WP-3: the retired key is tolerated (no error).
+    assert!(errs("confirm_trash = true\n", "editor.toml").is_empty());
+    let Node::Record(r) = editor_schema() else {
+        panic!("editor schema is a record");
+    };
+    let f = r
+        .fields
+        .iter()
+        .find(|f| f.key == "delete_mode")
+        .expect("field");
+    assert!(matches!(f.default, Some(node::Default::Str("trash"))));
+    assert!(!r.fields.iter().any(|f| f.key == "confirm_trash"));
+}
+
+#[test]
 fn validate_exactly_one_of() {
     assert!(
         errs(

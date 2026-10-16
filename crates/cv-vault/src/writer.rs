@@ -168,7 +168,18 @@ impl VaultWriter {
 
     /// Recoverable delete (Live: into `.trash/`; Shadow: tombstone). CAS on `expected`.
     pub fn delete(&mut self, path: &str, expected: ContentHash) -> Result<()> {
-        self.fs.remove(path, &expected)?;
+        self.delete_with(path, expected, false)
+    }
+
+    /// [`Self::delete`] with a mode: `permanent` removes the file outright (Live) instead of the
+    /// `.trash/` move; Shadow behaviour (tombstone) is identical.
+    pub fn delete_with(
+        &mut self,
+        path: &str,
+        expected: ContentHash,
+        permanent: bool,
+    ) -> Result<()> {
+        self.fs.remove_with(path, &expected, permanent)?;
         if !self.fs.is_shadow() {
             match self.index.remove_file(path) {
                 Ok(_) => self.echoes.register(path, None),
@@ -176,6 +187,43 @@ impl VaultWriter {
             }
         }
         Ok(())
+    }
+
+    /// Deletes `note` (CAS on its current hash, `permanent` as in [`Self::delete_with`]), then
+    /// each of `attachments` that no indexed file other than `note` references *at this moment*
+    /// (plan editor-ui-round-3 WP-3: never removes a path referenced after the preview). Returns
+    /// `(removed, skipped)`; `removed` starts with the note.
+    pub fn delete_note(
+        &mut self,
+        note: &str,
+        attachments: &[String],
+        permanent: bool,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let h = self
+            .fs
+            .hash(note)?
+            .ok_or_else(|| VaultError::NotFound(note.to_string()))?;
+        self.delete_with(note, h, permanent)?;
+        let mut removed = vec![note.to_string()];
+        let mut skipped = Vec::new();
+        for a in attachments {
+            if a == note || cv_index::referenced_elsewhere(&self.index.query(), a, note)? {
+                skipped.push(a.clone());
+                continue;
+            }
+            let Some(ah) = self.fs.hash(a)? else {
+                skipped.push(a.clone());
+                continue;
+            };
+            match self.delete_with(a, ah, permanent) {
+                Ok(()) => removed.push(a.clone()),
+                Err(e) => {
+                    tracing::warn!(path = %a, error = %e, "delete_note: attachment kept");
+                    skipped.push(a.clone());
+                }
+            }
+        }
+        Ok((removed, skipped))
     }
 
     /// Whether the index's view of `src` still matches what the filesystem holds (Live mode,

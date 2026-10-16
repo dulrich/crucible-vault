@@ -508,8 +508,6 @@ pub struct Settings {
     pub status: status::StatusPage,
     /// Malformed-`editor.toml` / migration notes shown on the Editor page.
     pub editor_note: Option<String>,
-    /// A pending confirm-before-Trash (the explorer path), when `confirm_trash` is on.
-    pub confirm_trash: Option<String>,
     /// The hidden-commands field as typed (reset on load/revert).
     pub hidden_draft: Option<String>,
     /// Form UI state (expansion, drafts) of every file page.
@@ -529,7 +527,6 @@ impl Default for Settings {
             files: new_files(),
             status: status::StatusPage::default(),
             editor_note: None,
-            confirm_trash: None,
             hidden_draft: None,
             form: form::FormState::default(),
             view_selected: None,
@@ -958,9 +955,6 @@ pub enum SettingsMsg {
     StatusLoaded(Result<cv_protocol::StatusResult, String>),
     /// A Hotkeys page control (WP-4).
     Hotkey(pages::hotkeys::HotkeyMsg),
-    /// Confirm-before-Trash: go ahead / cancel.
-    TrashConfirm,
-    TrashCancel,
 }
 
 /// A generic document edit (WP-3 grows the form vocabulary on top of these).

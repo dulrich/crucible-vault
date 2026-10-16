@@ -86,6 +86,8 @@ pub enum ClientCmd {
     CommandPaletteKey,
     /// plan editor-settings-tab WP-2: open (or focus) the Settings tab (Ctrl+,).
     OpenSettings,
+    /// plan editor-ui-round-3 WP-3: delete the active note (confirm dialog with its orphans).
+    DeleteNote,
 }
 
 /// A `period.open` period.
@@ -227,6 +229,7 @@ impl ClientCmd {
             ClientCmd::FindInNote,
             ClientCmd::FocusSearch,
             ClientCmd::OpenSettings,
+            ClientCmd::DeleteNote,
         ]);
         v.extend(PanelKind::ALL.iter().map(|&k| ClientCmd::Panel(k)));
         v
@@ -260,6 +263,7 @@ impl ClientCmd {
             ClientCmd::FocusSearch => "Search the vault",
             ClientCmd::CommandPaletteKey => "Command palette",
             ClientCmd::OpenSettings => "Open settings",
+            ClientCmd::DeleteNote => "Delete note…",
         };
         (t.to_owned(), "Editor")
     }
@@ -290,6 +294,7 @@ impl ClientCmd {
             ClientCmd::FocusSearch => "focus_search",
             ClientCmd::CommandPaletteKey => "command_palette",
             ClientCmd::OpenSettings => "open_settings",
+            ClientCmd::DeleteNote => "delete_note",
         };
         s.to_owned()
     }
@@ -348,6 +353,7 @@ impl ClientCmd {
             ClientCmd::FocusSearch => Message::Panels(PanelsMsg::Show(PanelKind::Search)),
             ClientCmd::CommandPaletteKey => Message::Palette(PaletteMsg::Open),
             ClientCmd::OpenSettings => Message::Settings(crate::settings::SettingsMsg::Open),
+            ClientCmd::DeleteNote => Message::Explorer(crate::message::ExplorerMsg::DeleteActive),
         }
     }
 }

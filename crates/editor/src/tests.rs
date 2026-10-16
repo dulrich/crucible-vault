@@ -485,6 +485,7 @@ mod wp4 {
             "wp4moved/two.md".into(),
         )));
         let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
+        let _ = app.update(Message::Dialog(crate::dialog::DialogMsg::Ok));
         assert!(matches!(
             d.read_file("wp4moved/two.md"),
             Err(DaemonError::NotFound(_))

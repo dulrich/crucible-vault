@@ -13,9 +13,9 @@ use cv_index::Index;
 use cv_protocol::{ChangeKind, JobState, Origin};
 
 use super::{
-    ActionInfo, ContentHash, DaemonClient, DaemonError, HelloResult, JobStatus, LocalIndex, Mode,
-    Notification, Result, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
-    ViewsListResult, vault_abs,
+    ActionInfo, ContentHash, DaemonClient, DaemonError, DeleteMode, DeleteNoteResult,
+    DeletePreviewItem, HelloResult, JobStatus, LocalIndex, Mode, Notification, Result,
+    RunActionParams, RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult, vault_abs,
 };
 
 /// A scripted action: params in, `Ok(open_path)` or `Err(message)` out.
@@ -172,6 +172,42 @@ impl FakeDaemon {
         Ok(self.lock()?.index.generation()?)
     }
 
+    /// Removes `path` per `mode` (trash: `.trash/<path>` with a ` (n)` suffix on collision,
+    /// like the daemon) and rebuilds the index.
+    fn remove_mode(&self, g: &mut Inner, path: &str, mode: DeleteMode) -> Result<()> {
+        let abs = vault_abs(&self.vault_root, path)?;
+        if !abs.is_file() {
+            return Err(DaemonError::NotFound(path.to_owned()));
+        }
+        match mode {
+            DeleteMode::Permanent => std::fs::remove_file(&abs)?,
+            DeleteMode::Trash => {
+                let (stem, ext) = match path.rsplit_once('.') {
+                    Some((s, e)) if !s.is_empty() && !e.contains('/') => (s, format!(".{e}")),
+                    _ => (path, String::new()),
+                };
+                let mut n = 0u32;
+                let dest = loop {
+                    let cand = if n == 0 {
+                        format!(".trash/{path}")
+                    } else {
+                        format!(".trash/{stem} ({n}){ext}")
+                    };
+                    let d = self.vault_root.join(cand);
+                    if !d.exists() {
+                        break d;
+                    }
+                    n += 1;
+                };
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::rename(&abs, &dest)?;
+            }
+        }
+        self.after_write(g, path, ChangeKind::Deleted, None)
+    }
+
     fn after_write(
         &self,
         g: &mut Inner,
@@ -325,6 +361,41 @@ impl DaemonClient for FakeDaemon {
             _ => DaemonError::Io(e),
         })?;
         self.after_write(&mut g, path, ChangeKind::Deleted, None)
+    }
+
+    fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
+        let g = self.lock()?;
+        let items = cv_index::delete_preview(&g.index.query(), path)?;
+        Ok(items
+            .into_iter()
+            .map(|(path, referenced_elsewhere)| DeletePreviewItem {
+                path,
+                referenced_elsewhere,
+            })
+            .collect())
+    }
+
+    fn delete_note(
+        &self,
+        path: &str,
+        attachments: &[String],
+        mode: DeleteMode,
+    ) -> Result<DeleteNoteResult> {
+        let mut g = self.lock()?;
+        self.remove_mode(&mut g, path, mode)?;
+        let mut out = DeleteNoteResult {
+            removed: vec![path.to_owned()],
+            skipped: Vec::new(),
+        };
+        for a in attachments {
+            let shared = a == path || cv_index::referenced_elsewhere(&g.index.query(), a, path)?;
+            if shared || self.remove_mode(&mut g, a, mode).is_err() {
+                out.skipped.push(a.clone());
+            } else {
+                out.removed.push(a.clone());
+            }
+        }
+        Ok(out)
     }
 
     fn actions_list(&self) -> Result<Vec<ActionInfo>> {

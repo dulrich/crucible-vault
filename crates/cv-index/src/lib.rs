@@ -31,7 +31,9 @@ pub use extract::{is_parsed_path, is_skipped_path, is_target_only_path};
 pub use generation::{current_generation, generation_path};
 pub use ignore::{GITIGNORE, IgnoreRules, is_gitignore_path};
 pub use index::Index;
-pub use queries::attachments::{OrphanRow, attachment_vault_paths, orphaned_attachments};
+pub use queries::attachments::{
+    OrphanRow, attachment_vault_paths, delete_preview, orphaned_attachments, referenced_elsewhere,
+};
 pub use query::{
     BlockRow, FileRow, FtsHit, LinkKind, LinkRow, PropRow, Query, Reader, TagCount, TagRow, TaskRow,
 };

@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cv_protocol::{
-    CreateNoteParams, CreateNoteResult, HelloParams, HelloResult, JobIdParams, PROTOCOL_VERSION,
+    CreateNoteParams, CreateNoteResult, DeleteMode, DeleteNoteParams, DeleteNoteResult,
+    DeleteParams, DeletePreviewResult, HelloParams, HelloResult, JobIdParams, PROTOCOL_VERSION,
     PathParams, RenameParams, Request, RpcError, RpcId, RpcNotification, RpcRequest,
     SubscribeParams, ViewRunParams, WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams,
     WriteNoteResult,
@@ -22,8 +23,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    ActionInfo, ContentHash, DaemonClient, DaemonError, JobStatus, LocalIndex, Notification,
-    Result, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult,
+    ActionInfo, ContentHash, DaemonClient, DaemonError, DeletePreviewItem, JobStatus, LocalIndex,
+    Notification, Result, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
+    ViewsListResult,
 };
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -249,10 +251,31 @@ impl DaemonClient for SocketDaemon {
     }
 
     fn delete(&self, path: &str) -> Result<()> {
-        self.call(Request::Delete(PathParams {
+        self.call(Request::Delete(DeleteParams {
             path: path.to_owned(),
+            mode: DeleteMode::Trash,
         }))
         .map(drop)
+    }
+
+    fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
+        let r: DeletePreviewResult = self.call_typed(Request::DeletePreview(PathParams {
+            path: path.to_owned(),
+        }))?;
+        Ok(r.items)
+    }
+
+    fn delete_note(
+        &self,
+        path: &str,
+        attachments: &[String],
+        mode: DeleteMode,
+    ) -> Result<DeleteNoteResult> {
+        self.call_typed(Request::DeleteNote(DeleteNoteParams {
+            path: path.to_owned(),
+            attachments: attachments.to_vec(),
+            mode,
+        }))
     }
 
     fn actions_list(&self) -> Result<Vec<ActionInfo>> {

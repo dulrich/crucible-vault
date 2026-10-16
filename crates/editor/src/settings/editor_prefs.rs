@@ -13,10 +13,11 @@
 use std::collections::BTreeMap;
 
 use cv_schema::{ConfigDoc, DocError, Path};
-use iced::widget::{Space, button, column, container, row, text, text_input, toggler};
+use iced::widget::{Space, button, column, container, row, text, text_input};
 use iced::{Element, Length};
 
 use super::{ConfigFile, LoadState, SettingsMsg, file_header, save_bar};
+use crate::daemon::DeleteMode;
 pub use crate::header::QuickSwitchOpen;
 use crate::header::TabTitle;
 use crate::message::Message;
@@ -48,7 +49,8 @@ pub struct Prefs {
     pub quick_switch_open: QuickSwitchOpen,
     pub search_limit: usize,
     pub search_debounce_ms: u64,
-    pub confirm_trash: bool,
+    /// `delete_mode` (plan editor-ui-round-3 WP-3; replaces `confirm_trash`, now ignored).
+    pub delete_mode: DeleteMode,
     /// Command/action ids omitted from the palette list (their chords still work).
     pub palette_hidden: Vec<String>,
     /// `[keys]`: command id → chords (WP-4 consumes it).
@@ -65,7 +67,7 @@ impl Default for Prefs {
             quick_switch_open: QuickSwitchOpen::default(),
             search_limit: DEFAULT_SEARCH_LIMIT,
             search_debounce_ms: DEFAULT_SEARCH_DEBOUNCE_MS,
-            confirm_trash: false,
+            delete_mode: DeleteMode::Trash,
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
         }
@@ -141,7 +143,11 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
         search_debounce_ms: int_in("search.debounce_ms", 0, 5000)
             .and_then(|v| u64::try_from(v).ok())
             .unwrap_or(d.search_debounce_ms),
-        confirm_trash: doc.get_bool(&p("confirm_trash")).unwrap_or(d.confirm_trash),
+        delete_mode: match doc.get_str(&p("delete_mode")) {
+            Some("permanent") => DeleteMode::Permanent,
+            Some("trash") => DeleteMode::Trash,
+            _ => d.delete_mode,
+        },
         palette_hidden: doc.get_str_list(&p("palette.hidden")).unwrap_or_default(),
         keys: doc
             .keys(&p("keys"))
@@ -199,7 +205,7 @@ pub enum PrefEdit {
     QuickSwitchOpen(QuickSwitchOpen),
     SearchLimit(i64),
     SearchDebounceMs(i64),
-    ConfirmTrash(bool),
+    DeleteMode(DeleteMode),
     /// The comma-separated hidden-id list as typed.
     PaletteHidden(String),
 }
@@ -215,7 +221,13 @@ pub fn apply(doc: &mut ConfigDoc, e: &PrefEdit) -> Result<(), DocError> {
         PrefEdit::QuickSwitchOpen(m) => doc.set(&p("quick_switch_open"), m.key()),
         PrefEdit::SearchLimit(v) => doc.set(&p("search.limit"), *v),
         PrefEdit::SearchDebounceMs(v) => doc.set(&p("search.debounce_ms"), *v),
-        PrefEdit::ConfirmTrash(b) => doc.set(&p("confirm_trash"), *b),
+        PrefEdit::DeleteMode(m) => doc.set(
+            &p("delete_mode"),
+            match m {
+                DeleteMode::Trash => "trash",
+                DeleteMode::Permanent => "permanent",
+            },
+        ),
         PrefEdit::PaletteHidden(s) => {
             let mut a = cv_schema::toml_edit::Array::new();
             for id in s.split(',').map(str::trim).filter(|x| !x.is_empty()) {
@@ -335,17 +347,31 @@ pub fn view<'a>(
         .spacing(6)
         .align_y(iced::Alignment::Center)
     };
-    let confirm = row![
-        text("Confirm before Trash")
-            .size(14)
-            .width(Length::Fixed(200.0)),
-        toggler(prefs.confirm_trash)
-            .on_toggle_maybe(editable.then_some(|b| {
-                Message::Settings(SettingsMsg::Pref(PrefEdit::ConfirmTrash(b)))
-            })),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
+    let confirm = {
+        let seg = |m: DeleteMode, label: &'static str| {
+            button(text(label).size(14))
+                .height(crate::theme::SEGMENT)
+                .padding([0, 12])
+                .style(crate::theme::segment_style(t, prefs.delete_mode == m))
+                .on_press_maybe(
+                    on(PrefEdit::DeleteMode(m)).map(|e| Message::Settings(SettingsMsg::Pref(e))),
+                )
+        };
+        row![
+            text("Delete moves to").size(14).width(Length::Fixed(200.0)),
+            container(
+                row![
+                    seg(DeleteMode::Trash, ".trash/"),
+                    seg(DeleteMode::Permanent, "Permanent delete"),
+                ]
+                .spacing(0)
+            )
+            .padding(1)
+            .style(crate::theme::seg_group_style(t)),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+    };
     let joined;
     let hidden_text = match hidden_draft {
         Some(d) => d,

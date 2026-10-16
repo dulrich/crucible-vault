@@ -989,12 +989,18 @@ impl App {
     /// The dialog's OK / Cancel.
     fn update_dialog(&mut self, m: crate::dialog::DialogMsg) -> Task<Message> {
         use crate::dialog::{DialogMsg, OnOk};
+        if let DialogMsg::Toggle(n) = m {
+            if let Some(c) = self.dialog.as_mut().and_then(|d| d.delete_confirm_mut()) {
+                c.toggle(n);
+            }
+            return Task::none();
+        }
         let Some(d) = self.dialog.take() else {
             return Task::none();
         };
         let ok = match m {
             DialogMsg::Ok => true,
-            DialogMsg::Cancel => false,
+            DialogMsg::Cancel | DialogMsg::Toggle(_) => false,
             DialogMsg::Default => d.enter_is_ok,
         };
         if !ok {
@@ -1010,7 +1016,52 @@ impl App {
                 }
                 Task::none()
             }
+            OnOk::DeleteNote => match d.delete_confirm() {
+                Some(c) => self.run_delete_note(c.path.clone(), c.ticked(), c.mode),
+                None => Task::none(),
+            },
         }
+    }
+
+    /// plan editor-ui-round-3 WP-3: "Delete note…" / explorer Trash. Fetches the preview, then
+    /// opens the always-confirm dialog. A note with unsaved edits is refused with a notice
+    /// (save or close it first), so the delete never drops edits silently.
+    fn begin_delete(&mut self, path: String) -> Task<Message> {
+        if self.shadow_blocked(explorer::SHADOW_REASON) {
+            return Task::none();
+        }
+        if self.doc_dirty(&path) {
+            self.status.error = Some("save the open note first (it has unsaved edits)".into());
+            return Task::none();
+        }
+        let p = path.clone();
+        self.rpc(
+            move |d| d.delete_preview(&p).map_err(|e| e.to_string()),
+            move |result| Message::Explorer(ExplorerMsg::DeletePreview { path, result }),
+        )
+    }
+
+    /// Dialog OK: `delete_note` with the ticked items in the `editor.toml` `delete_mode`.
+    fn run_delete_note(
+        &mut self,
+        path: String,
+        attachments: Vec<String>,
+        mode: crate::daemon::DeleteMode,
+    ) -> Task<Message> {
+        if self.shadow_blocked(explorer::SHADOW_REASON) {
+            return Task::none();
+        }
+        if self.doc_dirty(&path) {
+            self.status.error = Some("save the open note first (it has unsaved edits)".into());
+            return Task::none();
+        }
+        self.rpc(
+            move |d| {
+                d.delete_note(&path, &attachments, mode)
+                    .map_err(|e| e.to_string())
+            },
+            |r| Message::Explorer(ExplorerMsg::NoteDeleted(r)),
+        )
     }
 
     /// Why `path`'s edits could not be saved (`fallback` when no conflict / outage explains it).
@@ -1964,14 +2015,40 @@ impl App {
                     .clone()
                     .filter(|s| self.explorer.contains(s))
                 {
-                    // `editor.toml` `confirm_trash`: ask once in the side column's stable slot.
-                    Some(path) if self.prefs.confirm_trash => {
-                        self.settings.confirm_trash = Some(path);
-                    }
-                    Some(path) => return self.dispatch_op(FileOp::Delete { path }),
+                    // plan editor-ui-round-3 WP-3: always through the delete dialog.
+                    Some(path) => return self.begin_delete(path),
                     None => self.status.error = Some("select a file first".into()),
                 }
             }
+            ExplorerMsg::DeleteActive => match self.active_note().map(|t| t.path.clone()) {
+                Some(path) => return self.begin_delete(path),
+                None => self.status.error = Some("no active note".into()),
+            },
+            ExplorerMsg::DeletePreview { path, result } => match result {
+                Ok(items) => {
+                    let c = crate::dialog::DeleteConfirm::new(path, self.prefs.delete_mode, items);
+                    self.dialog = Some(crate::dialog::Dialog::delete(c));
+                }
+                Err(e) => self.status.error = Some(e),
+            },
+            ExplorerMsg::NoteDeleted(result) => match result {
+                Ok(r) => {
+                    let indexed = self.indexed_fn();
+                    for p in &r.removed {
+                        let op = FileOp::Delete { path: p.clone() };
+                        self.explorer.apply_op(&op, p, &self.ui.expanded, &indexed);
+                        self.close_path(p);
+                    }
+                    if !r.skipped.is_empty() {
+                        self.status.error = Some(format!(
+                            "kept {} item(s) linked elsewhere: {}",
+                            r.skipped.len(),
+                            r.skipped.join(", ")
+                        ));
+                    }
+                }
+                Err(e) => self.status.error = Some(e),
+            },
             ExplorerMsg::Input(s) => {
                 if let Some(e) = &mut self.explorer.edit {
                     e.input = s;
@@ -3258,52 +3335,10 @@ impl App {
             }
             SettingsMsg::RefreshStatus => return self.fetch_status(),
             SettingsMsg::StatusLoaded(r) => self.settings.status.loaded(r),
-            SettingsMsg::TrashConfirm => {
-                if let Some(path) = self.settings.confirm_trash.take() {
-                    if self.shadow_blocked(explorer::SHADOW_REASON) {
-                        return Task::none();
-                    }
-                    return self.dispatch_op(FileOp::Delete { path });
-                }
-            }
-            SettingsMsg::TrashCancel => self.settings.confirm_trash = None,
         }
         // WP-4 (audit E2): a captures.toml edit / save / revert re-derives the period folders.
         self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
         Task::none()
-    }
-
-    /// The confirm-before-Trash prompt (stable slot; `Space` when none is pending).
-    fn trash_confirm_view(&self) -> Element<'_, Message> {
-        use crate::settings::SettingsMsg;
-        let t = self.tokens;
-        let Some(path) = &self.settings.confirm_trash else {
-            return Space::new().into();
-        };
-        let btn = |label: &'static str, m: SettingsMsg| {
-            button(crate::theme::control_label(label, 13.0))
-                .height(crate::theme::CONTROL)
-                .padding([0, 10])
-                .style(crate::theme::icon_button_style(t, false))
-                .on_press(Message::Settings(m))
-        };
-        container(
-            column![
-                text(format!("Move {path} to .trash/?"))
-                    .size(13)
-                    .color(t.warn_text.to_color()),
-                row![
-                    btn("Trash", SettingsMsg::TrashConfirm),
-                    btn("Cancel", SettingsMsg::TrashCancel),
-                ]
-                .spacing(6),
-            ]
-            .spacing(4),
-        )
-        .padding(6)
-        .width(Length::Fill)
-        .style(crate::theme::seg_group_style(t))
-        .into()
     }
 
     /// Daemon notifications and global keys as iced subscriptions.
@@ -3750,8 +3785,6 @@ impl App {
         ];
         let full = column![
             header,
-            // Stable slot: the confirm-before-Trash prompt (`Space` when none is pending).
-            self.trash_confirm_view(),
             container(explorer::view(&self.explorer, t, self.status.mode)).height(Length::Fill),
             bookmarks::view(&self.bookmarks, t, self.status.mode),
         ]

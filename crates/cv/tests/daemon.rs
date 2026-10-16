@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use cv::{Client, ClientError, Config, Daemon, DaemonOptions, RunningDaemon};
 use cv_protocol::{
-    ChangeKind, CreateNoteParams, JobIdParams, Notification, Origin, PathParams, RenameParams,
-    Request, SubscribeParams, Topic, UriParams, UriResult, ViewRunParams, WriteAttachmentParams,
-    WriteNoteParams, WriteNoteResult, WriteOp, error_codes,
+    ChangeKind, CreateNoteParams, DeleteMode, DeleteParams, JobIdParams, Notification, Origin,
+    PathParams, RenameParams, Request, SubscribeParams, Topic, UriParams, UriResult, ViewRunParams,
+    WriteAttachmentParams, WriteNoteParams, WriteNoteResult, WriteOp, error_codes,
 };
 use cv_vault::{ContentHash, WatchConfig};
 use serde_json::{Value, json};
@@ -322,7 +322,8 @@ async fn shadow_mutations_never_touch_live() {
             }
         )
     });
-    c.call(Request::Delete(PathParams {
+    c.call(Request::Delete(DeleteParams {
+        mode: DeleteMode::Trash,
         path: "a 1.md".into(),
     }))
     .unwrap();
@@ -336,7 +337,8 @@ async fn shadow_mutations_never_touch_live() {
         )
     });
     assert_eq!(
-        rpc_code(c.call(Request::Delete(PathParams {
+        rpc_code(c.call(Request::Delete(DeleteParams {
+            mode: DeleteMode::Trash,
             path: "nope.md".into()
         }))),
         error_codes::NOT_FOUND
@@ -354,6 +356,23 @@ async fn shadow_mutations_never_touch_live() {
     for op in ["create", "modify", "rename_to", "rename_from", "delete"] {
         assert!(ops.iter().any(|o| o == op), "{op} missing from {ops:?}");
     }
+    // plan editor-ui-round-3 WP-3: the preview / delete_note RPCs are wired (shadow-safe).
+    let pv = c
+        .call(Request::DeletePreview(PathParams {
+            path: "notes/c.md".into(),
+        }))
+        .unwrap();
+    assert!(pv["items"].is_array(), "{pv}");
+    let dn = c
+        .call(Request::DeleteNote(cv_protocol::DeleteNoteParams {
+            path: "notes/c.md".into(),
+            attachments: vec!["missing.png".into()],
+            mode: DeleteMode::Permanent,
+        }))
+        .unwrap();
+    assert_eq!(dn["removed"], json!(["notes/c.md"]), "{dn}");
+    assert_eq!(dn["skipped"], json!(["missing.png"]), "{dn}");
+    assert_eq!(snapshot(&env.vault()), before, "live vault changed");
     drop((c, sub));
     d.shutdown().await.unwrap();
 }

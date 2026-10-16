@@ -115,7 +115,9 @@ pub enum Request {
     CreateNote(CreateNoteParams),
     WriteAttachment(WriteAttachmentParams),
     Rename(RenameParams),
-    Delete(PathParams),
+    Delete(DeleteParams),
+    DeletePreview(PathParams),
+    DeleteNote(DeleteNoteParams),
     ActionsList,
     RunAction(RunActionParams),
     Job(JobIdParams),
@@ -222,6 +224,56 @@ pub struct RenameParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathParams {
     pub path: String,
+}
+
+/// How a delete removes a file: `trash` moves it to `<vault>/.trash/<same path>` (` (n)` suffix
+/// on collision; the default and the pre-WP-3 behaviour), `permanent` removes it outright.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteMode {
+    #[default]
+    Trash,
+    Permanent,
+}
+
+/// `delete` params; `mode` is optional on the wire (old clients omit it = `trash`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteParams {
+    pub path: String,
+    #[serde(default)]
+    pub mode: DeleteMode,
+}
+
+/// One `delete_preview` item: an embed / non-note link target of the note that exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletePreviewItem {
+    pub path: String,
+    /// Some indexed file other than the note links to it.
+    pub referenced_elsewhere: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletePreviewResult {
+    pub items: Vec<DeletePreviewItem>,
+}
+
+/// `delete_note`: delete `path` (CAS delete) and then each listed attachment that nothing
+/// other than the note references at that moment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteNoteParams {
+    pub path: String,
+    #[serde(default)]
+    pub attachments: Vec<String>,
+    #[serde(default)]
+    pub mode: DeleteMode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteNoteResult {
+    /// Paths removed (the note first).
+    pub removed: Vec<String>,
+    /// Attachments left in place (referenced elsewhere at delete time, or already gone).
+    pub skipped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -518,8 +570,17 @@ mod tests {
                 from: "a.md".into(),
                 to: "c.md".into(),
             }),
-            Request::Delete(PathParams {
+            Request::Delete(DeleteParams {
                 path: "c.md".into(),
+                mode: DeleteMode::Permanent,
+            }),
+            Request::DeletePreview(PathParams {
+                path: "c.md".into(),
+            }),
+            Request::DeleteNote(DeleteNoteParams {
+                path: "c.md".into(),
+                attachments: vec!["img.png".into()],
+                mode: DeleteMode::Trash,
             }),
             Request::RunAction(RunActionParams {
                 action_id: "capture.daily".into(),
@@ -547,6 +608,30 @@ mod tests {
         for (i, call) in calls.into_iter().enumerate() {
             round_trip(&RpcRequest::new(RpcId::Num(i as u64), call));
         }
+    }
+
+    #[test]
+    fn delete_without_mode_is_trash() {
+        let v: RpcRequest = serde_json::from_value(
+            json!({"jsonrpc":"2.0","id":1,"method":"delete","params":{"path":"a.md"}}),
+        )
+        .expect("parse");
+        assert_eq!(
+            v.call,
+            Request::Delete(DeleteParams {
+                path: "a.md".into(),
+                mode: DeleteMode::Trash,
+            })
+        );
+        let v: RpcRequest = serde_json::from_value(
+            json!({"jsonrpc":"2.0","id":2,"method":"delete_note","params":{"path":"a.md"}}),
+        )
+        .expect("parse");
+        let Request::DeleteNote(p) = v.call else {
+            panic!("wrong variant")
+        };
+        assert_eq!(p.mode, DeleteMode::Trash);
+        assert!(p.attachments.is_empty());
     }
 
     #[test]

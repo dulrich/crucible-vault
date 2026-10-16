@@ -209,7 +209,10 @@ fn prefs_defaults_fields_and_fallbacks() {
     );
     assert_eq!(full.search_limit, 80);
     assert_eq!(full.search_debounce_ms, 120);
-    assert!(full.confirm_trash);
+    assert_eq!(full.delete_mode, crate::daemon::DeleteMode::Permanent);
+    // plan editor-ui-round-3 WP-3: a legacy `confirm_trash` key is tolerated and ignored.
+    let legacy = editor_prefs::parse("confirm_trash = true\n", Surround::Med).expect("parse");
+    assert_eq!(legacy.delete_mode, crate::daemon::DeleteMode::Trash);
     assert_eq!(full.palette_hidden, ["quit", "my.action"]);
     assert_eq!(full.keys.get("quick_switcher").map(Vec::len), Some(2));
     assert_eq!(full.keys.get("quit").map(Vec::len), Some(0), "[] unbinds");
@@ -311,6 +314,7 @@ surround = "light"
 tab_title = "unambiguous"
 quick_switch_open = "duplicate"
 confirm_trash = true
+delete_mode = "permanent"
 
 [search]
 limit = 80
@@ -522,7 +526,9 @@ fn editor_toml_cas_conflict_reloads_without_overwrite() {
         .expect("seed");
     let mut app = app_over(&d, None);
     assert!((app.prefs.font_size - 20.0).abs() < f32::EPSILON);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::ConfirmTrash(true))));
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::DeleteMode(
+        crate::daemon::DeleteMode::Permanent,
+    ))));
     d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
         .expect("external");
     let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
@@ -534,7 +540,11 @@ fn editor_toml_cas_conflict_reloads_without_overwrite() {
         Some(CHANGED_ON_DISK)
     );
     assert!((app.prefs.font_size - 26.0).abs() < f32::EPSILON);
-    assert!(!app.prefs.confirm_trash, "the lost edit is not applied");
+    assert_eq!(
+        app.prefs.delete_mode,
+        crate::daemon::DeleteMode::Trash,
+        "the lost edit is not applied"
+    );
 }
 
 #[test]
@@ -658,33 +668,93 @@ fn palette_hidden_and_search_prefs_apply() {
 }
 
 #[test]
-fn confirm_trash_asks_once() {
+fn explorer_trash_always_confirms_with_orphan_ticks() {
+    use crate::dialog::DialogMsg;
     let (_tmp, d) = fake();
     d.write_note(
         EDITOR_PATH,
-        "confirm_trash = true\n",
+        "confirm_trash = false\n",
         &ContentHash::from_hex(""),
     )
     .expect("seed");
-    d.create_note("wp2trash/one.md", "x").expect("create");
+    d.write_note("wp3del/own.png", "o", &ContentHash::from_hex(""))
+        .expect("own");
+    d.write_note("wp3del/shared.png", "s", &ContentHash::from_hex(""))
+        .expect("shared");
+    d.create_note("wp3del/m.md", "![[shared.png]]\n")
+        .expect("m");
+    d.create_note("wp3del/one.md", "![[own.png]] ![[shared.png]]\n")
+        .expect("create");
     let mut app = app_over(&d, None);
     let _ = app.update(Message::Explorer(ExplorerMsg::Refresh));
+    let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp3del/one.md".into())));
     let _ = app.update(Message::Explorer(ExplorerMsg::Select(
-        "wp2trash/one.md".into(),
+        "wp3del/one.md".into(),
     )));
     let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
-    assert_eq!(
-        app.settings.confirm_trash.as_deref(),
-        Some("wp2trash/one.md")
-    );
-    assert!(d.read_file("wp2trash/one.md").is_ok(), "not yet trashed");
-    let _ = app.update(s(SettingsMsg::TrashCancel));
-    assert!(d.read_file("wp2trash/one.md").is_ok());
+    let c = app
+        .dialog
+        .as_ref()
+        .and_then(|d| d.delete_confirm())
+        .expect("delete dialog (legacy confirm_trash = false is ignored)");
+    assert_eq!(c.ticked(), ["wp3del/own.png"]);
+    assert_eq!(c.items.len(), 2);
+    // Escape = Cancel: nothing deleted.
+    let _ = app.update(Message::Dialog(DialogMsg::Cancel));
+    assert!(app.dialog.is_none());
+    assert!(d.read_file("wp3del/one.md").is_ok(), "not yet trashed");
+    // Again, and the referenced item cannot be ticked.
     let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
-    let _ = app.update(s(SettingsMsg::TrashConfirm));
+    let shared_ix = app
+        .dialog
+        .as_ref()
+        .and_then(|d| d.delete_confirm())
+        .and_then(|c| c.items.iter().position(|(i, _)| i.referenced_elsewhere))
+        .expect("shared listed");
+    let _ = app.update(Message::Dialog(DialogMsg::Toggle(shared_ix)));
+    assert_eq!(
+        app.dialog
+            .as_ref()
+            .and_then(|d| d.delete_confirm())
+            .map(crate::dialog::DeleteConfirm::ticked),
+        Some(vec!["wp3del/own.png".to_owned()])
+    );
+    // Enter is Cancel on this destructive dialog.
+    let _ = app.update(Message::Dialog(DialogMsg::Default));
+    assert!(d.read_file("wp3del/one.md").is_ok());
+    let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
+    let _ = app.update(Message::Dialog(DialogMsg::Ok));
+    assert!(d.read_file("wp3del/one.md").is_err(), "deleted after OK");
+    assert!(d.read_file("wp3del/own.png").is_err(), "orphan deleted");
+    assert!(d.read_file("wp3del/shared.png").is_ok(), "shared kept");
     assert!(
-        d.read_file("wp2trash/one.md").is_err(),
-        "trashed after confirm"
+        d.vault_root().join(".trash/wp3del/one.md").is_file(),
+        "trash mode"
+    );
+    assert!(
+        crate::panes::find(&app.panes, "wp3del/one.md").is_none(),
+        "open tab closed"
+    );
+}
+
+#[test]
+fn delete_note_command_honours_permanent_mode() {
+    let (_tmp, d) = fake();
+    d.write_note(
+        EDITOR_PATH,
+        "delete_mode = \"permanent\"\n",
+        &ContentHash::from_hex(""),
+    )
+    .expect("seed");
+    d.create_note("wp3perm/a.md", "x\n").expect("create");
+    let mut app = app_over(&d, None);
+    let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp3perm/a.md".into())));
+    let _ = app.update(Message::Explorer(ExplorerMsg::DeleteActive));
+    let _ = app.update(Message::Dialog(crate::dialog::DialogMsg::Ok));
+    assert!(d.read_file("wp3perm/a.md").is_err());
+    assert!(
+        !d.vault_root().join(".trash").exists(),
+        "permanent: not in .trash"
     );
 }
 

@@ -172,6 +172,15 @@ pub enum ExplorerMsg {
     Cancel,
     /// An RPC file operation finished.
     Done(crate::explorer::FileOpDone),
+    /// plan editor-ui-round-3 WP-3: "Delete note…" on the active note.
+    DeleteActive,
+    /// The `delete_preview` answer for `path` (opens the delete dialog).
+    DeletePreview {
+        path: String,
+        result: Result<Vec<crate::daemon::DeletePreviewItem>, String>,
+    },
+    /// `delete_note` finished.
+    NoteDeleted(Result<crate::daemon::DeleteNoteResult, String>),
 }
 
 /// WP-4: quick switcher (Ctrl+P).

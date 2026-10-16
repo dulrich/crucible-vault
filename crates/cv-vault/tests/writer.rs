@@ -53,6 +53,50 @@ fn recoverable_delete_into_trash() {
     ));
 }
 
+#[test]
+fn permanent_delete_removes_outright_with_cas() {
+    let fx = Fx::new(&[("f/a.md", "A")]);
+    let mut w = fx.live();
+    assert!(matches!(
+        w.delete_with("f/a.md", h("nope"), true),
+        Err(VaultError::Conflict { .. })
+    ));
+    assert_eq!(fx.read("f/a.md"), "A");
+    w.delete_with("f/a.md", h("A"), true).unwrap();
+    assert!(!fx.vault.path().join("f/a.md").exists());
+    assert!(!fx.vault.path().join(".trash").exists());
+    assert!(w.index().query().file("f/a.md").unwrap().is_none());
+}
+
+#[test]
+fn delete_note_rechecks_references_at_delete_time() {
+    let fx = Fx::new(&[
+        ("n.md", "![[own.png]] ![[late.png]] ![[shared.png]]\n"),
+        ("own.png", "o"),
+        ("late.png", "l"),
+        ("shared.png", "s"),
+        ("m.md", "![[shared.png]]\n"),
+        (".trash/own.png", "older"),
+    ]);
+    let mut w = fx.live();
+    // A reference to late.png appears after the preview (here: written through the writer).
+    w.create("x.md", b"![[late.png]]\n").unwrap();
+    let atts: Vec<String> = ["own.png", "late.png", "shared.png", "gone.png"]
+        .map(String::from)
+        .to_vec();
+    let (removed, skipped) = w.delete_note("n.md", &atts, false).unwrap();
+    assert_eq!(removed, ["n.md", "own.png"]);
+    assert_eq!(skipped, ["late.png", "shared.png", "gone.png"]);
+    assert!(fx.vault.path().join("late.png").exists());
+    assert!(fx.vault.path().join("shared.png").exists());
+    // Trash collision still suffixes.
+    assert_eq!(fx.read(".trash/own (1).png"), "o");
+    assert_eq!(
+        fx.read(".trash/n.md"),
+        "![[own.png]] ![[late.png]] ![[shared.png]]\n"
+    );
+}
+
 fn rename_fixture() -> Fx {
     Fx::new(&[
         ("notes/B.md", "# B\n## Sec\nself [[B#Sec]] and [[#Sec]]\n"),

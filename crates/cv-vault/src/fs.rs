@@ -528,7 +528,14 @@ impl VaultFs {
     /// Recoverable delete (CAS on `expected`). Live: moves the file to `.trash/<path>` (` (n)`
     /// suffix on collision) and returns that vault-relative trash path. Shadow: drops the overlay
     /// copy, tombstones the path and returns `None`.
-    pub(crate) fn remove(&mut self, path: &str, expected: &ContentHash) -> Result<Option<String>> {
+    /// `permanent` (plan editor-ui-round-3 WP-3) removes the live file outright instead of the
+    /// trash move (same CAS, same shadow tombstone) and returns `None`.
+    pub(crate) fn remove_with(
+        &mut self,
+        path: &str,
+        expected: &ContentHash,
+        permanent: bool,
+    ) -> Result<Option<String>> {
         validate_rel_path(path)?;
         if self.hash(path)?.is_none() {
             return Err(VaultError::NotFound(path.to_string()));
@@ -542,6 +549,11 @@ impl VaultFs {
             let live_has = self.root.join(path).is_file();
             self.set_tombstone(path, live_has)?;
             self.log("delete", path, Some(expected), None)?;
+            return Ok(None);
+        }
+        if permanent {
+            let src = self.root.join(path);
+            std::fs::remove_file(&src).map_err(|e| io(&src, e))?;
             return Ok(None);
         }
         let trash_rel = self.trash_slot(path);

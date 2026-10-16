@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use cv_protocol::{
-    ChangeKind, CreateNoteResult, HelloResult, JobState, JobStatus, Mode, Notification, Origin,
+    ChangeKind, CreateNoteResult, DeleteMode, DeleteNoteResult, DeletePreviewItem,
+    DeletePreviewResult, HelloResult, JobState, JobStatus, Mode, Notification, Origin,
     PROTOCOL_VERSION, Request, RpcError, ServiceHealth, StatusResult, UriResult, ViewsListResult,
     WriteAttachmentParams, WriteAttachmentResult, WriteNoteResult, WriteOp, error_codes,
 };
@@ -525,6 +526,7 @@ impl Shared {
                 )
             }
             Request::Delete(p) => {
+                let permanent = p.mode == DeleteMode::Permanent;
                 let res = self
                     .with_writer(move |w| {
                         w.call(move |vw| {
@@ -532,12 +534,43 @@ impl Shared {
                                 .fs()
                                 .hash(&p.path)?
                                 .ok_or_else(|| VaultError::NotFound(p.path.clone()))?;
-                            vw.delete(&p.path, h)
+                            vw.delete_with(&p.path, h, permanent)
                         })
                     })
                     .await?;
                 res.and_then(|r| r).map_err(vault_err)?;
                 Ok(json!({}))
+            }
+            Request::DeletePreview(p) => {
+                let res = self
+                    .with_writer(move |w| {
+                        w.call(move |vw| -> Result<Vec<(String, bool)>, VaultError> {
+                            Ok(cv_index::delete_preview(&vw.index().query(), &p.path)?)
+                        })
+                    })
+                    .await?;
+                let items = res.and_then(|r| r).map_err(vault_err)?;
+                to_value(&DeletePreviewResult {
+                    items: items
+                        .into_iter()
+                        .map(|(path, referenced_elsewhere)| DeletePreviewItem {
+                            path,
+                            referenced_elsewhere,
+                        })
+                        .collect(),
+                })
+            }
+            Request::DeleteNote(p) => {
+                // One writer job: the note's CAS delete, then each attachment re-checked against
+                // the index at that moment (never removes something referenced since the preview).
+                let permanent = p.mode == DeleteMode::Permanent;
+                let res = self
+                    .with_writer(move |w| {
+                        w.call(move |vw| vw.delete_note(&p.path, &p.attachments, permanent))
+                    })
+                    .await?;
+                let (removed, skipped) = res.and_then(|r| r).map_err(vault_err)?;
+                to_value(&DeleteNoteResult { removed, skipped })
             }
             Request::ActionsList => to_value(&crate::runner::actions_list(self.runner_or_err()?)),
             Request::RunAction(p) => {

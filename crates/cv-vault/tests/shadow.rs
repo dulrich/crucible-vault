@@ -125,6 +125,23 @@ fn shadow_writes_go_to_overlay_and_log() {
 }
 
 #[test]
+fn shadow_permanent_delete_tombstones() {
+    let fx = Fx::new(&[("b.md", "B")]);
+    let scratch = tempfile::tempdir().unwrap();
+    let log = MemoryShadowLog::default();
+    let mut w = fx.shadow(scratch.path(), log.clone());
+    assert!(matches!(
+        w.delete_with("b.md", h("x"), true),
+        Err(cv_vault::VaultError::Conflict { .. })
+    ));
+    w.delete_with("b.md", h("B"), true).unwrap();
+    assert_eq!(fx.read("b.md"), "B");
+    assert!(!fx.vault.path().join(".trash").exists());
+    assert_eq!(w.read("b.md").unwrap(), None);
+    assert!(w.fs().list_files("").unwrap().is_empty());
+}
+
+#[test]
 fn shadow_state_db_log() {
     let fx = Fx::new(&[("a.md", "A")]);
     let scratch = tempfile::tempdir().unwrap();
