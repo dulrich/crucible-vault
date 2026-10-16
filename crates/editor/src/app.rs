@@ -1447,6 +1447,13 @@ impl App {
                     crate::message::ReadingMsg::CycleMode
                         | crate::message::ReadingMsg::SetMode { .. }
                 );
+                // plan editor-ui-round-3 WP-6: the switch's (path, old mode) and the source
+                // line at the top before it, carried to the new mode below.
+                let carry = if mode_change {
+                    self.mode_switch_origin(&m)
+                } else {
+                    None
+                };
                 let docs: Vec<&crate::source::SourceBuffer> = self.docs.values().collect();
                 let active = self
                     .panes
@@ -1464,7 +1471,10 @@ impl App {
                     self.mode_menu = None;
                     self.persist();
                 }
-                return task;
+                let carried = carry.map_or_else(Task::none, |(path, old, line)| {
+                    self.carry_place(&path, old, line)
+                });
+                return Task::batch([task, carried]);
             }
             Message::Switcher(m) => return self.update_switcher(m),
             Message::Palette(m) => return self.update_palette(m),
@@ -1472,6 +1482,83 @@ impl App {
             Message::Views(m) => return self.update_views(m),
             Message::Nav(m) => return self.update_nav(m),
             Message::Panes(m) => return self.update_panes(m),
+        }
+        Task::none()
+    }
+
+    /// plan editor-ui-round-3 WP-6: for a mode-switch message, the tab path, its current mode
+    /// and the source line at the top of the view being left — the Source pane's tracked top
+    /// line, or the first source line of the Reading pane's probed top block (line 0 when the
+    /// reading pane is at the top / never probed).
+    fn mode_switch_origin(
+        &self,
+        m: &crate::message::ReadingMsg,
+    ) -> Option<(String, crate::reading::ViewMode, usize)> {
+        let path = match m {
+            crate::message::ReadingMsg::SetMode { path, .. } => path.clone(),
+            _ => self
+                .panes
+                .get(self.focus)
+                .and_then(PaneState::active_note)?
+                .path
+                .clone(),
+        };
+        let old = self.reading.mode(&path);
+        let line = if old.shows_reading() {
+            let doc = self.reading.doc(&path);
+            self.reading
+                .top_block(&path)
+                .and_then(|b| doc?.model.block_lines.get(b).map(|r| r.start))
+                .unwrap_or(0)
+        } else {
+            self.docs.get(&path)?.top_line()
+        };
+        Some((path, old, line))
+    }
+
+    /// plan editor-ui-round-3 WP-6 (audit E1, block granularity, never proportional): after a
+    /// mode switch from `old`, puts source `line`'s block at the top of the new view — Source
+    /// scrolls to the line when it was hidden (Reading → Source/Split); Reading scrolls its
+    /// block (`RenderModel::block_for_line`) to the top via a measured layout probe.
+    fn carry_place(
+        &mut self,
+        path: &str,
+        old: crate::reading::ViewMode,
+        line: usize,
+    ) -> Task<Message> {
+        let new = self.reading.mode(path);
+        if new == old {
+            return Task::none();
+        }
+        if new.shows_source()
+            && !old.shows_source()
+            && let Some(doc) = self.docs.get_mut(path)
+        {
+            doc.scroll_to_line(line);
+        }
+        let above_first = self
+            .reading
+            .doc(path)
+            .and_then(|d| d.model.block_lines.first())
+            .is_none_or(|r| line < r.start);
+        if new.shows_reading() && above_first {
+            // Frontmatter / leading lines: the properties panel heads the view.
+            self.reading.clear_top_block(path);
+            return iced::widget::operation::scroll_to(
+                crate::find::reading_scroll_id(path),
+                iced::widget::scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(0.0),
+                },
+            );
+        }
+        if new.shows_reading()
+            && let Some(doc) = self.reading.doc(path)
+            && let Some(b) = doc.model.block_for_line(line)
+        {
+            let blocks = doc.model.blocks.len();
+            self.reading.set_top_block(path, b);
+            return crate::reading::probe(path, blocks, Some(b));
         }
         Task::none()
     }

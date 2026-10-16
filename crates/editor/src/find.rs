@@ -3,9 +3,10 @@
 //!
 //! Source/Split: the current match becomes the buffer selection (the shaped `text_editor`
 //! scrolls to its cursor) and is painted by the highlighter, since the unfocused editor draws no
-//! selection (plan editor-feedback-round-2 WP-4). Reading: render-model blocks carry no source
-//! span, so the query's occurrences are painted in the rich text and the scrollable snaps to the
-//! match's relative line position (`line / lines`).
+//! selection (plan editor-feedback-round-2 WP-4). Reading: render-model blocks carry only
+//! block-granular source line ranges (`RenderModel::block_lines`, plan editor-ui-round-3 WP-5),
+//! not inline spans, so the query's occurrences are painted in the rich text and the scrollable
+//! snaps to the match's relative line position (`line / lines`).
 
 use std::ops::Range;
 

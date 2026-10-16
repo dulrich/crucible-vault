@@ -365,3 +365,80 @@ fn active_find_match_maps_to_its_block_and_occurrence() {
     let _ = app.update(Message::Find(FindMsg::Close));
     assert_eq!(app.reading.find_active(p), None);
 }
+
+/// plan editor-ui-round-3 WP-6: the measured probe picks the block at the viewport top and the
+/// offset that puts a block there (layout coordinates, never proportional).
+#[test]
+fn probe_maps_scroll_offset_to_blocks() {
+    let p = Probe {
+        offset_y: 100.0,
+        content_y: 40.0,
+        block_ys: vec![Some(48.0), Some(90.0), Some(139.5), Some(240.0), None],
+    };
+    assert_eq!(
+        p.top_block(),
+        Some(2),
+        "139.5 - 40 = 99.5 <= 100 (+1 slack)"
+    );
+    assert_eq!(p.block_offset(3), Some(200.0));
+    assert_eq!(p.block_offset(0), Some(8.0));
+    assert_eq!(p.block_offset(4), None, "not laid out");
+    let at_top = Probe {
+        offset_y: 0.0,
+        ..p.clone()
+    };
+    assert_eq!(at_top.top_block(), Some(0));
+}
+
+const PLACE_NOTE: &[u8] =
+    b"---\na: 1\n---\n# H\n\npara\n\n- x\n- y\n\n```\ncode\nmore\n```\n\nlast\n";
+
+/// plan editor-ui-round-3 WP-6: Source -> Reading carries the Source top line to its block.
+#[test]
+fn source_to_reading_carries_top_line_to_its_block() {
+    let p = "wp6/s.md";
+    let (_t, d) = setup(&[(p, PLACE_NOTE)]);
+    let mut app = app_on(&d, p);
+    reading(&mut app, p, ViewMode::Source);
+    // Wheel down 11 lines: line 11 ("code") is at the top.
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Scroll {
+        lines: 11,
+    })));
+    assert_eq!(app.active_doc().expect("doc").top_line(), 11);
+    reading(&mut app, p, ViewMode::Reading);
+    let model = &app.reading.doc(p).expect("doc").model;
+    assert_eq!(model.block_for_line(11), Some(3), "the code block");
+    assert_eq!(
+        app.reading.top_block(p),
+        Some(3),
+        "the scroll task targets it"
+    );
+}
+
+/// plan editor-ui-round-3 WP-6: Reading -> Source scrolls Source to the top block's first line.
+#[test]
+fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
+    let p = "wp6/r.md";
+    let (_t, d) = setup(&[(p, PLACE_NOTE)]);
+    let mut app = app_on(&d, p);
+    assert_eq!(app.reading.mode(p), ViewMode::Reading);
+    let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
+    // A probe lands with the list (block 2, source lines 7..9) at the viewport top.
+    let mut block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 50.0)).collect();
+    block_ys[0] = Some(30.0);
+    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+        path: p.to_owned(),
+        probe: Some(Probe {
+            offset_y: 100.0,
+            content_y: 0.0,
+            block_ys,
+        }),
+        scroll_to: None,
+    }));
+    assert_eq!(app.reading.top_block(p), Some(2));
+    reading(&mut app, p, ViewMode::Source);
+    assert_eq!(app.active_doc().expect("doc").top_line(), 7);
+    // And back: Source line 7 maps to the list again.
+    reading(&mut app, p, ViewMode::Split);
+    assert_eq!(app.reading.top_block(p), Some(2));
+}

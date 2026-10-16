@@ -31,7 +31,7 @@ struct Ctx<'a> {
     /// The showing view (tab id) — image pins are per view (plan editor-feedback-round-2 WP-7).
     view: u64,
     t: Tokens,
-    /// `editor.toml` `font_size / 22` (plan editor-settings-tab WP-2, audit M1).
+    /// [`reading_scale`] of `editor.toml` `font_size` (plan editor-ui-round-3 WP-6).
     scale: f32,
     /// Inside a cancelled (`- [-]`) task: text is faint and struck through.
     strike: bool,
@@ -50,18 +50,26 @@ impl Ctx<'_> {
         self.active == Some((self.cur_block.get(), n))
     }
 
-    /// A design size (px at the 22px base) scaled to the current font size.
+    /// A design size (px; paragraph = 16) scaled to the current font size.
     fn sz(&self, px: f32) -> f32 {
         scaled(px, self.scale)
     }
 }
 
-/// `px` (a size at the 22px base font) at text scale `scale`.
+/// plan editor-ui-round-3 WP-6: the Reading text scale for `editor.toml` `font_size` — a
+/// paragraph (design size [`block_size`]`(None)` = 16) renders at exactly `font_size`; headings
+/// and every other design size keep their ratio to it. (Was `font_size / 22`, which drew
+/// paragraphs at 16/22 of the Source size.)
+pub fn reading_scale(font_size: f32) -> f32 {
+    font_size / block_size(None)
+}
+
+/// `px` (a design size; paragraph = 16) at text scale `scale`.
 pub fn scaled(px: f32, scale: f32) -> f32 {
     (px * scale).max(6.0)
 }
 
-/// The design size (px at the 22px base) of a heading level / paragraph (`None`).
+/// The design size (px; paragraph = 16) of a heading level / paragraph (`None`).
 pub fn block_size(heading: Option<u8>) -> f32 {
     match heading {
         Some(1) => 28.0,
@@ -73,7 +81,7 @@ pub fn block_size(heading: Option<u8>) -> f32 {
     }
 }
 
-/// The reading pane for `path`; `scale` = `font_size / 22`.
+/// The reading pane for `path`; `scale` = [`reading_scale`]`(font_size)`.
 pub fn reading<'a>(
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
@@ -105,7 +113,9 @@ pub fn reading<'a>(
     items.extend(doc.model.blocks.iter().enumerate().map(|(i, b)| {
         cx.cur_block.set(i);
         cx.seen.set(0);
-        block(&cx, b)
+        // plan editor-ui-round-3 WP-6: an id'd container per top-level block, so a widget
+        // operation can read its layout bounds (place-keeping across mode switches).
+        container(block(&cx, b)).id(super::block_id(path, i)).into()
     }));
     cx.cur_block.set(usize::MAX);
     if !doc.model.footnotes.is_empty() {
@@ -125,6 +135,11 @@ pub fn reading<'a>(
     }
     scrollable(container(column(items).spacing(10)).padding(8))
         .id(crate::find::reading_scroll_id(path))
+        .on_scroll(move |_| {
+            Message::Reading(ReadingMsg::Scrolled {
+                path: path.to_owned(),
+            })
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

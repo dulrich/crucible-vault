@@ -263,14 +263,23 @@ fn pref_edits_keep_comments() {
 #[test]
 fn reading_sizes_scale_with_font_size() {
     use crate::reading::view::{block_size, scaled};
-    let base = Prefs::default();
-    assert!((scaled(block_size(Some(1)), base.text_scale()) - 28.0).abs() < 1e-4);
+    // plan editor-ui-round-3 WP-6: a paragraph renders at exactly `font_size`, for two sizes,
+    // and the H1 : paragraph ratio is the design table's (28 : 16) at both.
+    for font_size in [22.0_f32, 33.0] {
+        let p = Prefs {
+            font_size,
+            ..Prefs::default()
+        };
+        let para = scaled(block_size(None), p.text_scale());
+        let h1 = scaled(block_size(Some(1)), p.text_scale());
+        assert!((para - font_size).abs() < 1e-4, "{font_size}: {para}");
+        assert!((h1 / para - 28.0 / 16.0).abs() < 1e-4);
+    }
     let big = Prefs {
         font_size: 33.0,
         ..Prefs::default()
     };
-    assert!((scaled(block_size(None), big.text_scale()) - 24.0).abs() < 1e-4);
-    assert!((scaled(block_size(Some(2)), big.text_scale()) - 36.0).abs() < 1e-4);
+    assert!((scaled(block_size(Some(2)), big.text_scale()) - 49.5).abs() < 1e-4);
 }
 
 #[test]

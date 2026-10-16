@@ -434,3 +434,22 @@ fn blocks_carry_their_source_line_ranges() {
     assert_eq!(m.block_at_line(6), Some(1));
     assert_eq!(m.block_at_line(4), None);
 }
+
+/// plan editor-ui-round-3 WP-6: place-keeping maps line → block → first line, both directions.
+#[test]
+fn place_keeping_maps_lines_to_blocks_and_back() {
+    let src = "---\na: 1\n---\n# H\n\npara\n\n- x\n- y\n\n```\ncode\nmore\n```\n";
+    let m = lower(src);
+    assert_eq!(m.block_lines, vec![3..4, 5..6, 7..9, 10..14]);
+    // Frontmatter and blank lines map to the next block; inner lines to their block.
+    assert_eq!(m.block_for_line(0), Some(0));
+    assert_eq!(m.block_for_line(4), Some(1));
+    assert_eq!(m.block_for_line(8), Some(2));
+    assert_eq!(m.block_for_line(12), Some(3));
+    assert_eq!(m.block_for_line(99), Some(3), "past the end = last block");
+    // Back: a block's first line maps to itself.
+    for (i, r) in m.block_lines.iter().enumerate() {
+        assert_eq!(m.block_for_line(r.start), Some(i));
+    }
+    assert_eq!(lower("").block_for_line(0), None);
+}

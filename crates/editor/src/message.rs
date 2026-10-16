@@ -115,6 +115,15 @@ pub enum ReadingMsg {
         path: String,
         mode: crate::reading::ViewMode,
     },
+    /// plan editor-ui-round-3 WP-6: the reading scrollable scrolled (re-probe its top block).
+    Scrolled { path: String },
+    /// plan editor-ui-round-3 WP-6: a reading layout probe landed; `scroll_to` = then scroll
+    /// that top-level block to the viewport top.
+    Probed {
+        path: String,
+        probe: Option<crate::reading::Probe>,
+        scroll_to: Option<usize>,
+    },
     /// The recompute debounce tick.
     Tick,
     /// A wiki-link / vault md-link click in the reading pane of `src`.

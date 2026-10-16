@@ -75,9 +75,9 @@ impl Default for Prefs {
 }
 
 impl Prefs {
-    /// Text scale relative to the 22px base (Reading sizes scale by it).
+    /// The Reading text scale: a paragraph renders at `font_size` (plan editor-ui-round-3 WP-6).
     pub fn text_scale(&self) -> f32 {
-        self.font_size / DEFAULT_FONT_SIZE
+        crate::reading::view::reading_scale(self.font_size)
     }
 
     /// The search debounce.

@@ -175,6 +175,15 @@ impl RenderModel {
     pub fn block_at_line(&self, line: usize) -> Option<usize> {
         self.block_lines.iter().position(|r| r.contains(&line))
     }
+
+    /// plan editor-ui-round-3 WP-6 (place-keeping): the block to show at the top for source
+    /// `line` — the one containing it ([`Self::block_at_line`]), else the first block after it
+    /// (blank lines, frontmatter), else the last block.
+    pub fn block_for_line(&self, line: usize) -> Option<usize> {
+        self.block_at_line(line)
+            .or_else(|| self.block_lines.iter().position(|r| r.start > line))
+            .or_else(|| self.block_lines.len().checked_sub(1))
+    }
 }
 
 /// Lowering options.

@@ -127,6 +127,10 @@ pub struct SourceBuffer {
     /// plan editor-data-safety WP-1 (audit E1): a reconnect arrived while a save on the old
     /// connection was in flight; resync once its completion has been processed.
     resync_pending: bool,
+    /// plan editor-ui-round-3 WP-6: the top visible source line, tracked from the wheel's
+    /// `Action::Scroll` and our own [`Self::scroll_to_line`] (iced 0.14's `text_editor` exposes
+    /// no scroll offset); pulled up when the cursor moves above it. 0 for a fresh shaped buffer.
+    top_line: usize,
 }
 
 impl Clone for SourceBuffer {
@@ -147,6 +151,7 @@ impl Clone for SourceBuffer {
             find_hl: self.find_hl,
             find_all: self.find_all.clone(),
             resync_pending: self.resync_pending,
+            top_line: self.top_line,
         }
     }
 }
@@ -198,6 +203,7 @@ impl SourceBuffer {
             find_hl: None,
             find_all: std::sync::Arc::from([]),
             resync_pending: false,
+            top_line: 0,
         }
     }
 
@@ -242,6 +248,7 @@ impl SourceBuffer {
             let mut c = Content::with_text(text);
             c.move_to(to_iced(*cursor));
             self.content = Repr::Shaped(c);
+            self.top_line = 0;
         }
         match &mut self.content {
             Repr::Shaped(c) => c,
@@ -319,6 +326,44 @@ impl SourceBuffer {
             position: pos(to),
             selection: (from != to).then(|| pos(from)),
         });
+    }
+
+    /// plan editor-ui-round-3 WP-6: the top visible source line (block-granular place-keeping
+    /// estimate; see the `top_line` field).
+    pub fn top_line(&self) -> usize {
+        self.top_line
+    }
+
+    /// Updates the tracked top line after a non-edit action: a wheel scroll of `lines` (visual
+    /// lines; equal to source lines when nothing wraps), then — when the cursor moved from
+    /// line `before` to above the top — the editor scrolled up to it.
+    fn track_top(&mut self, scroll: Option<i32>, before: usize) {
+        let last = self.shaped().line_count().saturating_sub(1);
+        if let Some(lines) = scroll {
+            let top = i64::try_from(self.top_line).unwrap_or(i64::MAX) + i64::from(lines);
+            self.top_line = usize::try_from(top.max(0)).unwrap_or(0).min(last);
+        }
+        let cursor = self.cursor().position.line;
+        if cursor != before && cursor < self.top_line {
+            self.top_line = cursor;
+        }
+    }
+
+    /// plan editor-ui-round-3 WP-6: scrolls the editor so source `line` is at the top
+    /// (materialising it): scroll fully up, then down by `line` lines. Wrapped lines above
+    /// `line` count once each, so a wrapped paragraph above it lands the view slightly early.
+    pub fn scroll_to_line(&mut self, line: usize) {
+        let content = self.shaped();
+        let last = content.line_count().saturating_sub(1);
+        let line = line.min(last);
+        let up = i32::try_from(content.line_count()).unwrap_or(i32::MAX / 2);
+        content.perform(Action::Scroll {
+            lines: -up.saturating_mul(4),
+        });
+        content.perform(Action::Scroll {
+            lines: i32::try_from(line).unwrap_or(i32::MAX),
+        });
+        self.top_line = line;
     }
 
     /// plan editor-ui-round-3 WP-5: moves the cursor to the buffer's start (`false`) or end
@@ -458,7 +503,13 @@ impl SourceBuffer {
     /// when `read_only`). Returns whether the text changed.
     pub fn perform(&mut self, action: Action, read_only: bool, now: Instant) -> bool {
         if !action.is_edit() {
+            let scroll = match action {
+                Action::Scroll { lines } => Some(lines),
+                _ => None,
+            };
+            let before = self.cursor().position.line;
             self.shaped().perform(action);
+            self.track_top(scroll, before);
             return false;
         }
         if read_only {

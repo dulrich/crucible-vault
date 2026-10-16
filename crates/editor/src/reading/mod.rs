@@ -132,8 +132,13 @@ pub struct ReadingStore {
     /// Pending filename-input edits, keyed by tab path (absent = shows the stem).
     titles: HashMap<String, String>,
     /// The open find bar's query per tab path: its occurrences are painted in the reading view
-    /// (plan editor-feedback-round-2 WP-4; render blocks carry no source span).
+    /// (plan editor-feedback-round-2 WP-4). Render blocks carry source line ranges
+    /// (`RenderModel::block_lines`, plan editor-ui-round-3 WP-5) at block granularity only, so
+    /// matches are still found in the rendered text.
     find: HashMap<String, String>,
+    /// plan editor-ui-round-3 WP-6: the top-level block at the reading viewport's top per tab
+    /// path, from the last layout probe (absent = scrolled to the top / not probed yet).
+    top: HashMap<String, usize>,
     /// plan editor-ui-round-3 WP-5: the active find match per tab path, as (top-level render
     /// block, nth query occurrence inside it).
     find_active: HashMap<String, (usize, usize)>,
@@ -254,6 +259,23 @@ impl ReadingStore {
     }
 
     /// `path`'s rendered doc.
+    /// plan editor-ui-round-3 WP-6: the top-level block at the reading viewport's top, from
+    /// the last layout probe (`None` = at the top / not probed).
+    pub fn top_block(&self, path: &str) -> Option<usize> {
+        self.top.get(path).copied()
+    }
+
+    /// plan editor-ui-round-3 WP-6: records the intended top block of a carry (the scroll task
+    /// is in flight; its probe confirms it).
+    pub fn set_top_block(&mut self, path: &str, block: usize) {
+        self.top.insert(path.to_owned(), block);
+    }
+
+    /// plan editor-ui-round-3 WP-6: the reading view is (being scrolled) at its top.
+    pub fn clear_top_block(&mut self, path: &str) {
+        self.top.remove(path);
+    }
+
     pub fn doc(&self, path: &str) -> Option<&Doc> {
         self.tabs.get(path).and_then(|t| t.doc.as_ref())
     }
@@ -335,6 +357,7 @@ impl ReadingStore {
         } else {
             // Leaving reading/split: drop the model and its image pins (E2).
             entry.doc = None;
+            self.top.remove(tab.path());
             entry.seen_seq = None;
             self.images.release_owner(tab.path());
         }
@@ -527,6 +550,42 @@ pub fn update(
                 store.set_mode(tab, mode, daemon);
             }
         }
+        ReadingMsg::Scrolled { path } => {
+            if let Some(doc) = store.doc(&path) {
+                return probe(&path, doc.model.blocks.len(), None);
+            }
+        }
+        ReadingMsg::Probed {
+            path,
+            probe,
+            scroll_to,
+        } => {
+            let Some(p) = probe else {
+                return Task::none();
+            };
+            match scroll_to {
+                Some(b) => {
+                    store.top.insert(path.clone(), b);
+                    if let Some(y) = p.block_offset(b) {
+                        return iced::widget::operation::scroll_to(
+                            crate::find::reading_scroll_id(&path),
+                            iced::widget::scrollable::AbsoluteOffset {
+                                x: None,
+                                y: Some(y),
+                            },
+                        );
+                    }
+                }
+                None => match p.top_block() {
+                    Some(b) => {
+                        store.top.insert(path, b);
+                    }
+                    None => {
+                        store.top.remove(&path);
+                    }
+                },
+            }
+        }
         ReadingMsg::Tick => {
             for tab in tabs {
                 store.tick(tab, daemon);
@@ -601,7 +660,7 @@ pub fn tab_body<'a>(
     use iced::Length;
     use iced::widget::{container, row};
     // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
-    let scale = font_size / crate::theme::BASE_TEXT_SIZE;
+    let scale = view::reading_scale(font_size);
     match store.mode(tab.path()) {
         ViewMode::Source => crate::source::view(tab, t, mode, font_size, keymap),
         ViewMode::Reading => view::reading(store, views, tab.path(), view, t, scale),
@@ -614,6 +673,119 @@ pub fn tab_body<'a>(
         .spacing(12)
         .into(),
     }
+}
+
+/// plan editor-ui-round-3 WP-6: the widget id of top-level reading block `i` of `path`.
+pub fn block_id(path: &str, i: usize) -> iced::widget::Id {
+    iced::widget::Id::from(format!("reading-block:{path}:{i}"))
+}
+
+/// plan editor-ui-round-3 WP-6: measured reading layout — the scrollable's offset and each
+/// top-level block's top, all in absolute layout coordinates (audit E1: measured, never a
+/// proportional estimate).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Probe {
+    /// The scrollable's vertical scroll offset.
+    pub offset_y: f32,
+    /// The top of the scrollable's content.
+    pub content_y: f32,
+    /// The top of each top-level block (`None` = not laid out / not found).
+    pub block_ys: Vec<Option<f32>>,
+}
+
+impl Probe {
+    /// The block at the viewport top: the last block whose top is at or above the offset
+    /// (1px slack), else the first laid-out block.
+    pub fn top_block(&self) -> Option<usize> {
+        let rel = |y: f32| y - self.content_y;
+        let mut first = None;
+        let mut top = None;
+        for (i, y) in self.block_ys.iter().enumerate() {
+            let Some(y) = *y else { continue };
+            first.get_or_insert(i);
+            if rel(y) <= self.offset_y + 1.0 {
+                top = Some(i);
+            }
+        }
+        top.or(first)
+    }
+
+    /// The scroll offset that puts block `b`'s top at the viewport top.
+    pub fn block_offset(&self, b: usize) -> Option<f32> {
+        let y = (*self.block_ys.get(b)?)?;
+        Some((y - self.content_y).max(0.0))
+    }
+}
+
+/// The widget operation behind [`Probe`]: reads the reading scrollable and the id'd block
+/// containers of one path.
+struct ProbeOp {
+    scroll: iced::widget::Id,
+    blocks: Vec<iced::widget::Id>,
+    out: Probe,
+    found: bool,
+}
+
+impl iced::advanced::widget::Operation<Probe> for ProbeOp {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<Probe>),
+    ) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle) {
+        if let Some(id) = id
+            && let Some(i) = self.blocks.iter().position(|b| b == id)
+        {
+            self.out.block_ys[i] = Some(bounds.y);
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&iced::widget::Id>,
+        _bounds: iced::Rectangle,
+        content_bounds: iced::Rectangle,
+        translation: iced::Vector,
+        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        if id == Some(&self.scroll) {
+            self.out.offset_y = translation.y;
+            self.out.content_y = content_bounds.y;
+            self.found = true;
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<Probe> {
+        if self.found {
+            iced::advanced::widget::operation::Outcome::Some(self.out.clone())
+        } else {
+            iced::advanced::widget::operation::Outcome::None
+        }
+    }
+}
+
+/// plan editor-ui-round-3 WP-6: probes `path`'s reading layout (`blocks` top-level blocks),
+/// answering with [`ReadingMsg::Probed`] (`scroll_to` passed through).
+pub fn probe(path: &str, blocks: usize, scroll_to: Option<usize>) -> Task<Message> {
+    let op = ProbeOp {
+        scroll: crate::find::reading_scroll_id(path),
+        blocks: (0..blocks).map(|i| block_id(path, i)).collect(),
+        out: Probe {
+            block_ys: vec![None; blocks],
+            ..Probe::default()
+        },
+        found: false,
+    };
+    let path = path.to_owned();
+    iced::advanced::widget::operate(op).map(move |p| {
+        Message::Reading(ReadingMsg::Probed {
+            path: path.clone(),
+            probe: Some(p),
+            scroll_to,
+        })
+    })
 }
 
 #[cfg(test)]
