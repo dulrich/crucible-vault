@@ -1,0 +1,74 @@
+{
+  "columns": [
+    {
+      "key": "file.name",
+      "label": "file name"
+    },
+    {
+      "key": "note.word-count",
+      "label": "word-count"
+    },
+    {
+      "key": "formula.created",
+      "label": "created"
+    },
+    {
+      "key": "formula.read",
+      "label": "read"
+    }
+  ],
+  "groups": [
+    {
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "Talk One",
+              "path": "daily/transcripts/Talk One.md",
+              "t": "link"
+            },
+            {
+              "t": "number",
+              "v": 1200.0
+            },
+            {
+              "t": "date",
+              "v": "2026-10-05"
+            },
+            {
+              "t": "text",
+              "v": "❌"
+            }
+          ],
+          "path": "daily/transcripts/Talk One.md"
+        },
+        {
+          "cells": [
+            {
+              "label": "Story Ch 1",
+              "path": "daily/day/2026-10-03/Story Ch 1.md",
+              "t": "link"
+            },
+            {
+              "t": "number",
+              "v": 300.0
+            },
+            {
+              "t": "date",
+              "v": "2026-10-03"
+            },
+            {
+              "t": "text",
+              "v": "❌"
+            }
+          ],
+          "path": "daily/day/2026-10-03/Story Ch 1.md"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": []
+}

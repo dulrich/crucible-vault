@@ -15,11 +15,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use cv_protocol::{
     ChangeKind, CreateNoteResult, DeleteMode, DeleteNoteResult, DeletePreviewItem,
-    DeletePreviewResult, HelloResult, JobState, JobStatus, Mode, Notification, Origin,
-    PROTOCOL_VERSION, Request, RpcError, ServiceHealth, StatusResult, UriResult, ViewsListResult,
-    WriteAttachmentParams, WriteAttachmentResult, WriteNoteResult, WriteOp, error_codes,
+    DeletePreviewResult, HelloResult, IntakeListResult, JobState, JobStatus, JobsListResult, Mode,
+    Notification, Origin, PROTOCOL_VERSION, Request, RpcError, StatusResult, UriResult,
+    ViewsListResult, WriteAttachmentParams, WriteAttachmentResult, WriteNoteResult, WriteOp,
+    error_codes,
 };
-use cv_state::{NewShadowWrite, QueueConfig, StateDb, StateError, StateReader};
+use cv_state::{NewShadowWrite, QueueConfig, RetryOutcome, StateDb, StateError, StateReader};
 use cv_vault::{
     ContentHash, EventKind, ShadowLog, VaultError, VaultEvent, VaultFs, VaultWriter, WatchConfig,
     WriterHandle,
@@ -614,6 +615,52 @@ impl Shared {
                     Err(e) => Err(internal(e)),
                 }
             }
+            Request::JobsList(p) => {
+                let now = now_ms();
+                let q = crate::jobs::list_query(&p, now)
+                    .map_err(|m| rpc_err(error_codes::INVALID_PARAMS, m))?;
+                let jobs = StateReader::open(&self.config.state_db)
+                    .and_then(|r| r.list(&q))
+                    .map_err(internal)?;
+                to_value(&JobsListResult {
+                    jobs: jobs
+                        .iter()
+                        .map(|j| crate::jobs::job_summary(j, now))
+                        .collect(),
+                })
+            }
+            Request::JobRetry(p) => {
+                let res = {
+                    let mut db = lock(&self.state);
+                    db.retry_job(&p.job_id, now_ms())
+                        .and_then(|o| Ok((o, db.job(&p.job_id)?)))
+                };
+                match res {
+                    Ok((RetryOutcome::Retried, Some(j))) => to_value(&map_job(&j)),
+                    Ok((RetryOutcome::Duplicate(other), _)) => Err(rpc_err(
+                        error_codes::CONFLICT,
+                        format!("job {other} with the same dedupe key is already pending"),
+                    )),
+                    Ok((_, None)) | Err(StateError::NoSuchJob(_)) => Err(rpc_err(
+                        error_codes::NOT_FOUND,
+                        format!("no job {}", p.job_id),
+                    )),
+                    Err(e @ StateError::WrongStatus { .. }) => {
+                        Err(rpc_err(error_codes::INVALID_PARAMS, e.to_string()))
+                    }
+                    Err(e) => Err(internal(e)),
+                }
+            }
+            Request::IntakeList(p) => {
+                let q = crate::jobs::intake_query(&p)
+                    .map_err(|m| rpc_err(error_codes::INVALID_PARAMS, m))?;
+                let items = StateReader::open(&self.config.state_db)
+                    .and_then(|r| r.tracker_items(&q))
+                    .map_err(internal)?;
+                to_value(&IntakeListResult {
+                    items: items.into_iter().map(crate::jobs::intake_item).collect(),
+                })
+            }
             Request::Uri(p) => {
                 let r = self.intake(&p.url).await?;
                 to_value(&r)
@@ -640,24 +687,22 @@ impl Shared {
             *queue.entry(c.status.as_str().to_owned()).or_default() +=
                 u64::try_from(c.count).unwrap_or(0);
         }
-        let services = StateReader::open(&self.config.state_db)
-            .and_then(|r| r.service_health())
+        let reader = StateReader::open(&self.config.state_db).map_err(internal)?;
+        let services = reader
+            .service_health()
             .map_err(internal)?
             .into_iter()
-            .map(|h| ServiceHealth {
-                service: h.service,
-                state: serde_json::to_value(h.state)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_default(),
-            })
+            .map(crate::jobs::service_health)
             .collect();
+        let (tracker_items, link_records) = crate::jobs::store_counts(&reader);
         Ok(StatusResult {
             mode: self.config.mode,
             generation: self.generation(),
             queue,
             config_errors: self.runner().map(Runner::config_errors).unwrap_or_default(),
             services,
+            tracker_items,
+            link_records,
         })
     }
 

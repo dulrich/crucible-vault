@@ -12,14 +12,20 @@ use crate::config::Config;
 use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
+/// Usage text (`{JOBS}` is replaced by [`crate::jobs::USAGE`]).
+const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv import ...    link-records --from <jobs.sqlite> (daemon stopped)\n{JOBS}  cv --help        this text\n";
+
 /// Usage text.
-pub const USAGE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv import ...    link-records --from <jobs.sqlite> (daemon stopped)\n  cv --help        this text\n";
+#[must_use]
+pub fn usage() -> String {
+    USAGE_TEMPLATE.replace("{JOBS}", crate::jobs::USAGE)
+}
 
 /// Runs the CLI with `args` (without argv[0]); returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("--help" | "-h" | "help") => {
-            print!("{USAGE}");
+            print!("{}", usage());
             0
         }
         Some("daemon") if args.len() == 1 => report(cmd_daemon()),
@@ -35,8 +41,11 @@ pub fn run(args: &[String]) -> i32 {
         Some("shadow") => crate::shadow::run(&args[1..]),
         Some("cutover") => crate::cutover::run(&args[1..]),
         Some("import") => crate::import::run(&args[1..]),
+        Some("jobs") => crate::jobs::run(args),
+        Some("intake") => crate::jobs::run(args),
+        Some("run") => crate::jobs::run(args),
         _ => {
-            eprint!("{USAGE}");
+            eprint!("{}", usage());
             2
         }
     }
@@ -154,11 +163,42 @@ fn render(s: &StatusResult, daemon: &str) -> String {
             out.push_str(&format!("  {e}\n"));
         }
     }
+    if s.tracker_items.is_some() || s.link_records.is_some() {
+        let n = |v: Option<u64>| v.map_or_else(|| "?".to_owned(), |n| n.to_string());
+        out.push_str(&format!(
+            "tracker items: {}\nlink records: {}\n",
+            n(s.tracker_items),
+            n(s.link_records)
+        ));
+    }
     if s.services.is_empty() {
         out.push_str("services: none recorded\n");
     } else {
         for h in &s.services {
-            out.push_str(&format!("service {}: {}\n", h.service, h.state));
+            let mut detail = Vec::new();
+            if let Some(s) = h.failure_score {
+                detail.push(format!("score {s:.1}"));
+            }
+            if let Some(r) = h.retry_at_ms {
+                let secs = (r - crate::now_ms()) / 1000;
+                if secs > 0 {
+                    detail.push(format!("retry in {secs}s"));
+                }
+            }
+            if let Some(l) = &h.last_reason {
+                let l: String = l.chars().take(80).collect();
+                detail.push(format!("last: {l}"));
+            }
+            if detail.is_empty() {
+                out.push_str(&format!("service {}: {}\n", h.service, h.state));
+            } else {
+                out.push_str(&format!(
+                    "service {}: {} ({})\n",
+                    h.service,
+                    h.state,
+                    detail.join(", ")
+                ));
+            }
         }
     }
     out
@@ -185,6 +225,8 @@ pub fn status_command(config: &Config) -> Result<String> {
         queue: Default::default(),
         config_errors: Vec::new(),
         services: Vec::new(),
+        tracker_items: None,
+        link_records: None,
     };
     if let Ok(r) = reader {
         for c in r.counts()? {
@@ -192,14 +234,59 @@ pub fn status_command(config: &Config) -> Result<String> {
                 u64::try_from(c.count).unwrap_or(0);
         }
         for h in r.service_health()? {
-            s.services.push(cv_protocol::ServiceHealth {
-                service: h.service,
-                state: serde_json::to_value(h.state)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_default(),
-            });
+            s.services.push(crate::jobs::service_health(h));
         }
+        (s.tracker_items, s.link_records) = crate::jobs::store_counts(&r);
     }
     Ok(render(&s, "not running"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_fallback_reports_counts_and_breaker_detail() {
+        let dir = std::env::temp_dir().join(format!("cv-wp11-status-{}", std::process::id()));
+        let home = dir.to_string_lossy().into_owned();
+        let sock = dir.join("none.sock").to_string_lossy().into_owned();
+        let db = dir.join("state.db").to_string_lossy().into_owned();
+        let config = Config::resolve(|k| match k {
+            "HOME" => Some(home.clone()),
+            "CV_SOCKET" => Some(sock.clone()),
+            "CV_STATE_DB" => Some(db.clone()),
+            _ => None,
+        })
+        .unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        drop(
+            cv_state::StateDb::open(&config.state_db, 1, cv_state::QueueConfig::default()).unwrap(),
+        );
+        let out = status_command(&config).unwrap();
+        assert!(out.contains("daemon: not running"), "{out}");
+        assert!(out.contains("tracker items: 0\nlink records: 0\n"), "{out}");
+        let mut s = StatusResult {
+            mode: config.mode,
+            generation: 0,
+            queue: Default::default(),
+            config_errors: vec![],
+            services: vec![cv_protocol::ServiceHealth {
+                service: "youtube-api".into(),
+                state: "open".into(),
+                failure_score: Some(3.0),
+                retry_at_ms: None,
+                last_reason: Some("transient Timeout".into()),
+            }],
+            tracker_items: None,
+            link_records: None,
+        };
+        assert!(
+            render(&s, "running")
+                .contains("service youtube-api: open (score 3.0, last: transient Timeout)")
+        );
+        s.services[0].failure_score = None;
+        s.services[0].last_reason = None;
+        assert!(render(&s, "running").contains("service youtube-api: open\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -24,7 +24,7 @@ use crate::job::{
 };
 use crate::migrate;
 use crate::query::{self, ListQuery, ShadowWrite, StatusCount};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -380,6 +380,46 @@ impl StateDb {
         Ok(())
     }
 
+    /// Retry one `failed` or `cancelled` job: back to `queued` with a fresh attempt budget
+    /// (`attempts = 0`) and every settle/claim/diagnostic column cleared, in one immediate
+    /// transaction. Never mints a second pending job for one dedupe key: when a `queued` or
+    /// `running` job shares the key, nothing changes and its id is returned as
+    /// [`RetryOutcome::Duplicate`]. Missing → [`StateError::NoSuchJob`]; any other status →
+    /// [`StateError::WrongStatus`].
+    pub fn retry_job(&mut self, id: &str, _now_ms: i64) -> Result<RetryOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(job) = query::get(&tx, id)? else {
+            return Err(StateError::NoSuchJob(id.to_owned()));
+        };
+        if !matches!(job.status, JobStatus::Failed | JobStatus::Cancelled) {
+            return Err(StateError::WrongStatus {
+                id: id.to_owned(),
+                status: job.status.as_str().to_owned(),
+                expected: "failed or cancelled",
+            });
+        }
+        if let Some(key) = &job.dedupe_key {
+            let dup: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM jobs WHERE dedupe_key = ?1 AND status IN ('queued','running') AND id != ?2 LIMIT 1",
+                    params![key, id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(other) = dup {
+                return Ok(RetryOutcome::Duplicate(other));
+            }
+        }
+        tx.execute(
+            "UPDATE jobs SET status = 'queued', error = NULL, failure_reason = NULL, failure_kind = NULL, settled_at_ms = NULL, defer_until_ms = NULL, claim_token = NULL, claimed_at_ms = NULL, attempts = 0 WHERE id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(RetryOutcome::Retried)
+    }
+
     /// Bulk-cancel every queued row in one statement; returns the count.
     pub fn clear_queued(&mut self, now_ms: i64) -> Result<usize> {
         Ok(self.conn.execute(
@@ -616,6 +656,15 @@ impl StateDb {
     }
 }
 
+/// Result of [`StateDb::retry_job`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryOutcome {
+    /// The job is queued again.
+    Retried,
+    /// A pending job with the same dedupe key exists (its id); nothing changed.
+    Duplicate(String),
+}
+
 /// Read-only client handle (plan B editor, A2 dashboard, `cv status`). Opened with
 /// `SQLITE_OPEN_READ_ONLY`; it never migrates, so a not-yet-created or newer DB is an error.
 pub struct StateReader {
@@ -674,6 +723,28 @@ impl StateReader {
         crate::image_descriptions::descriptions_for(&self.conn, md5s)
     }
 
+    /// Tracker intake rows matching `q`, newest first.
+    pub fn tracker_items(
+        &self,
+        q: &crate::tracker::IntakeQuery,
+    ) -> Result<Vec<crate::tracker::TrackerItem>> {
+        crate::tracker::list(&self.conn, q)
+    }
+
+    /// Number of `tracker_items` rows.
+    pub fn tracker_item_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM tracker_items", [], |r| r.get(0))?)
+    }
+
+    /// Number of `link_records` rows.
+    pub fn link_record_count(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM link_records", [], |r| r.get(0))?)
+    }
+
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -683,5 +754,167 @@ impl StateReader {
 impl StateReader {
     pub(crate) fn conn_for_test(&self) -> &Connection {
         &self.conn
+    }
+}
+
+#[cfg(test)]
+mod wp11_tests {
+    use crate::*;
+    use serde_json::json;
+
+    fn new_job(key: &str) -> NewJob {
+        NewJob {
+            job_type: "t".into(),
+            lane: Lane::Background,
+            dedupe_key: Some(key.into()),
+            params: json!({}),
+            resource_keys: vec![],
+            service: None,
+        }
+    }
+
+    fn enq(s: &mut StateDb, key: &str, now: i64) -> String {
+        match s.enqueue(new_job(key), now).unwrap() {
+            EnqueueOutcome::Enqueued(id) | EnqueueOutcome::Duplicate(id) => id,
+            EnqueueOutcome::Suppressed => panic!("suppressed"),
+        }
+    }
+
+    #[test]
+    fn retry_job_transitions_and_refusals() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = StateDb::open(&dir.path().join("state.db"), 1, QueueConfig::default()).unwrap();
+        let a = enq(&mut s, "a", 1);
+        assert!(matches!(
+            s.retry_job("nope", 2),
+            Err(StateError::NoSuchJob(_))
+        ));
+        assert!(matches!(
+            s.retry_job(&a, 2),
+            Err(StateError::WrongStatus { .. })
+        ));
+        let claimed = s.claim(3).unwrap().unwrap();
+        assert_eq!(claimed.id, a);
+        assert!(
+            matches!(s.retry_job(&a, 4), Err(StateError::WrongStatus { .. })),
+            "running refused"
+        );
+        s.settle(
+            &a,
+            &JobResult::Failed {
+                error: "boom".into(),
+                reason: None,
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(s.retry_job(&a, 6).unwrap(), RetryOutcome::Retried);
+        let j = s.job(&a).unwrap().unwrap();
+        assert_eq!(j.status, JobStatus::Queued);
+        assert_eq!(j.attempts, 0);
+        assert!(j.error.is_none() && j.settled_at_ms.is_none() && j.claim_token.is_none());
+        // Cancelled → retried; a pending sibling with the same key → Duplicate, nothing changes.
+        s.cancel(&a, 7).unwrap();
+        let b = enq(&mut s, "a", 8);
+        assert_ne!(a, b);
+        assert_eq!(s.retry_job(&a, 9).unwrap(), RetryOutcome::Duplicate(b));
+        assert_eq!(s.job(&a).unwrap().unwrap().status, JobStatus::Cancelled);
+    }
+
+    fn item(kind: &str, id: &str, seen: i64, day: &str, outcome: TrackerOutcome) -> TrackerItem {
+        TrackerItem {
+            source_kind: kind.into(),
+            source_key: "src".into(),
+            item_id: id.into(),
+            title: "T".into(),
+            url: "u".into(),
+            first_seen_ms: seen,
+            day: day.into(),
+            outcome,
+            score: None,
+            full_body: None,
+        }
+    }
+
+    #[test]
+    fn list_filters_deferred_and_reader_intake() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("state.db");
+        let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+        let a = enq(&mut s, "a", 1);
+        let _b = enq(&mut s, "b", 2);
+        assert_eq!(s.claim(3).unwrap().unwrap().id, a);
+        s.settle(
+            &a,
+            &JobResult::Deferred {
+                retry_after_ms: 1_000,
+                service_unhealthy: None,
+            },
+            4,
+        )
+        .unwrap();
+        let q = |deferred| ListQuery {
+            status: Some(JobStatus::Queued),
+            deferred,
+            now_ms: 10,
+            ..ListQuery::default()
+        };
+        let deferred = s.list(&q(Some(true))).unwrap();
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].id, a);
+        assert_eq!(s.list(&q(Some(false))).unwrap().len(), 1);
+        assert_eq!(s.list(&q(None)).unwrap().len(), 2);
+        s.insert_tracker_item(&item(
+            "youtube",
+            "v1",
+            5,
+            "2026-10-15",
+            TrackerOutcome::Line,
+        ))
+        .unwrap();
+        s.insert_tracker_item(&item(
+            "blog",
+            "p0",
+            6,
+            "2026-10-14",
+            TrackerOutcome::Ignored,
+        ))
+        .unwrap();
+        s.insert_tracker_item(&item("blog", "p1", 7, "2026-10-15", TrackerOutcome::Note))
+            .unwrap();
+        let r = StateReader::open(&p).unwrap();
+        assert_eq!(r.tracker_item_count().unwrap(), 3);
+        assert_eq!(r.link_record_count().unwrap(), 0);
+        let ids = |q: IntakeQuery| {
+            r.tracker_items(&q)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.item_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(IntakeQuery::default()), ["p1", "p0", "v1"]);
+        assert_eq!(
+            ids(IntakeQuery {
+                day: Some("2026-10-15".into()),
+                ..IntakeQuery::default()
+            }),
+            ["p1", "v1"]
+        );
+        assert_eq!(
+            ids(IntakeQuery {
+                source_kind: Some("blog".into()),
+                outcome: Some(TrackerOutcome::Ignored),
+                ..IntakeQuery::default()
+            }),
+            ["p0"]
+        );
+        assert_eq!(
+            ids(IntakeQuery {
+                limit: 1,
+                offset: 1,
+                ..IntakeQuery::default()
+            }),
+            ["p0"]
+        );
     }
 }

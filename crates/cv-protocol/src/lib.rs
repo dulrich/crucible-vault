@@ -122,6 +122,12 @@ pub enum Request {
     RunAction(RunActionParams),
     Job(JobIdParams),
     Cancel(JobIdParams),
+    /// Queue listing (plan v0-automation-pipelines WP-11).
+    JobsList(JobsListParams),
+    /// Re-queue one failed/cancelled job.
+    JobRetry(JobIdParams),
+    /// Tracker intake rows.
+    IntakeList(IntakeListParams),
     Uri(UriParams),
     Status,
     ViewsList,
@@ -377,6 +383,91 @@ pub struct JobStatus {
     pub open_path: Option<String>,
 }
 
+/// `jobs_list` params. `status`: `queued|running|done|failed|cancelled|deferred`, where
+/// `deferred` is queued with a future `defer_until_ms` and `queued` excludes those rows.
+/// `limit` defaults to 50 (max 500); `recent_first` defaults to `true`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobsListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_first: Option<bool>,
+}
+
+/// One queue row in `jobs_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobSummary {
+    pub job_id: String,
+    pub job_type: String,
+    /// `user` | `background` (the store lane name).
+    pub lane: String,
+    /// `queued|running|done|failed|cancelled|deferred`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    pub attempts: i64,
+    pub created_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_until_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobsListResult {
+    pub jobs: Vec<JobSummary>,
+}
+
+/// `intake_list` params; `day` is `YYYY-MM-DD`, `outcome` `line|note|ignored|skipped`.
+/// `limit` defaults to 50 (max 500).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntakeListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+}
+
+/// One `tracker_items` row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntakeItem {
+    pub source_kind: String,
+    pub source_key: String,
+    pub item_id: String,
+    pub title: String,
+    pub url: String,
+    pub first_seen_ms: i64,
+    pub day: String,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_body: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntakeListResult {
+    pub items: Vec<IntakeItem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UriParams {
     pub url: String,
@@ -395,14 +486,21 @@ pub enum UriResult {
     Spooled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceHealth {
     pub service: String,
     /// `closed` | `open` | `half_open`.
     pub state: String,
+    /// Breaker detail (additive, WP-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusResult {
     pub mode: Mode,
     pub generation: u64,
@@ -412,6 +510,12 @@ pub struct StatusResult {
     pub config_errors: Vec<String>,
     #[serde(default)]
     pub services: Vec<ServiceHealth>,
+    /// `tracker_items` row count (additive, WP-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_items: Option<u64>,
+    /// `link_records` row count (additive, WP-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_records: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,6 +701,25 @@ mod tests {
             Request::Cancel(JobIdParams {
                 job_id: "j1".into(),
             }),
+            Request::JobsList(JobsListParams {
+                status: Some("deferred".into()),
+                job_type: Some("t".into()),
+                limit: Some(5),
+                offset: Some(1),
+                recent_first: Some(false),
+            }),
+            Request::JobsList(JobsListParams::default()),
+            Request::JobRetry(JobIdParams {
+                job_id: "j1".into(),
+            }),
+            Request::IntakeList(IntakeListParams {
+                source_kind: Some("youtube".into()),
+                source_key: Some("ch".into()),
+                day: Some("2026-10-15".into()),
+                outcome: Some("line".into()),
+                limit: Some(2),
+                offset: Some(0),
+            }),
             Request::Uri(UriParams {
                 url: "obsidian://new?file=x".into(),
             }),
@@ -726,6 +849,47 @@ mod tests {
             services: vec![ServiceHealth {
                 service: "search".into(),
                 state: "open".into(),
+                failure_score: Some(3.0),
+                retry_at_ms: Some(42),
+                last_reason: Some("transient Timeout".into()),
+            }],
+            tracker_items: Some(4),
+            link_records: Some(9),
+        });
+        // An older daemon's status (no WP-11 fields) still parses.
+        let old: StatusResult = serde_json::from_value(json!({
+            "mode": "live", "generation": 1, "services": [{"service": "s", "state": "closed"}]
+        }))
+        .expect("old status");
+        assert_eq!(old.tracker_items, None);
+        assert_eq!(old.services[0].failure_score, None);
+        round_trip(&JobsListResult {
+            jobs: vec![JobSummary {
+                job_id: "j".into(),
+                job_type: "t".into(),
+                lane: "background".into(),
+                status: "deferred".into(),
+                service: Some("x".into()),
+                attempts: 2,
+                created_ms: 1,
+                settled_at_ms: None,
+                defer_until_ms: Some(5),
+                error: Some("e".into()),
+                failure_kind: None,
+            }],
+        });
+        round_trip(&IntakeListResult {
+            items: vec![IntakeItem {
+                source_kind: "blog".into(),
+                source_key: "f".into(),
+                item_id: "i".into(),
+                title: "t".into(),
+                url: "u".into(),
+                first_seen_ms: 1,
+                day: "2026-10-15".into(),
+                outcome: "line".into(),
+                score: Some(0.5),
+                full_body: Some(true),
             }],
         });
         round_trip(&ViewsListResult { view_ids: vec![] });

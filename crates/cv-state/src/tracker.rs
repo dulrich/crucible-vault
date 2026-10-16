@@ -88,6 +88,46 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
     })
 }
 
+/// `tracker_items` listing filter (every field optional; `limit` 0 = unlimited).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IntakeQuery {
+    /// `youtube` | `blog`.
+    pub source_kind: Option<String>,
+    /// Channel id / feed URL.
+    pub source_key: Option<String>,
+    /// Intake day `YYYY-MM-DD`.
+    pub day: Option<String>,
+    /// Outcome filter.
+    pub outcome: Option<TrackerOutcome>,
+    /// Max rows (0 = unlimited).
+    pub limit: u32,
+    /// Rows to skip.
+    pub offset: u32,
+}
+
+/// Lists rows matching `q`, ordered `first_seen_ms DESC, item_id`.
+pub(crate) fn list(conn: &rusqlite::Connection, q: &IntakeQuery) -> Result<Vec<TrackerItem>> {
+    let limit: i64 = if q.limit == 0 { -1 } else { i64::from(q.limit) };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM tracker_items
+         WHERE (?1 IS NULL OR source_kind = ?1) AND (?2 IS NULL OR source_key = ?2)
+           AND (?3 IS NULL OR day = ?3) AND (?4 IS NULL OR outcome = ?4)
+         ORDER BY first_seen_ms DESC, item_id ASC LIMIT ?5 OFFSET ?6"
+    ))?;
+    let rows = stmt.query_map(
+        params![
+            q.source_kind,
+            q.source_key,
+            q.day,
+            q.outcome.map(TrackerOutcome::as_str),
+            limit,
+            i64::from(q.offset)
+        ],
+        row,
+    )?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 impl StateDb {
     /// Inserts `item` unless its key exists (first sighting wins). Returns `true` when inserted.
     pub fn insert_tracker_item(&mut self, item: &TrackerItem) -> Result<bool> {

@@ -1,0 +1,36 @@
+{
+  "columns": [
+    {
+      "key": "file.name",
+      "label": "file name"
+    },
+    {
+      "key": "formula.created",
+      "label": "created"
+    }
+  ],
+  "groups": [
+    {
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "Clipped Article",
+              "path": "_clippings/inbox/Clipped Article.md",
+              "t": "link"
+            },
+            {
+              "t": "date",
+              "v": "2026-10-10"
+            }
+          ],
+          "path": "_clippings/inbox/Clipped Article.md"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": []
+}

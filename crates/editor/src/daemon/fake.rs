@@ -475,6 +475,8 @@ impl DaemonClient for FakeDaemon {
             queue: BTreeMap::new(),
             config_errors: vec![],
             services: vec![],
+            tracker_items: None,
+            link_records: None,
         })
     }
 

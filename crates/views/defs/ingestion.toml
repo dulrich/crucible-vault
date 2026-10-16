@@ -1,0 +1,59 @@
+# Ingestion dashboard, index-only sections (plan v0-automation-pipelines WP-11). Ported from
+# Crucible's dashboard `https://github.com/dulrich/obsidian-crucible/blob/master/src/ingestionDashboard.ts:157-212`, predicates from
+# `src/ingestion/data/{clippings,transcripts,uncaptured,xPosts}.ts`. Sections backed by
+# state.db (tracker intake, ignored ids, the link registry) are served by `cv intake list` /
+# `cv jobs list`, not by views.
+
+[formulas]
+read = 'if(note.read == true, "✅", "❌")'
+created = 'if(note.created, note.created, file.ctime)'
+
+# Markdown notes directly in the clipper inbox (`clippings.ts`). The folder is user-editable:
+# Crucible's `ingestionClipperInboxFolder` setting defaults to `_clippings/inbox`
+# (`src/types.ts:897`); edit the path below if the vault uses another inbox.
+[[views]]
+type = "table"
+name = "Unprocessed clippings"
+filters = { and = [
+  'file.folder == "_clippings/inbox"',
+  'file.ext == "md"',
+] }
+order = ["file.name", "formula.created"]
+sort = [{ property = "formula.created", direction = "DESC" }]
+
+# Under `daily`, tagged #transcript and not #refined (`transcripts.ts`).
+[[views]]
+type = "table"
+name = "Unrefined transcripts"
+filters = { and = [
+  'file.inFolder("daily")',
+  'file.hasTag("transcript")',
+  '!file.hasTag("refined")',
+] }
+order = ["file.name", "note.word-count", "formula.created", "formula.read"]
+sort = [{ property = "formula.created", direction = "DESC" }]
+
+# A `yt-video-id` with no `yt-metadata` link yet (`uncaptured.ts`). Crucible also drops ids in
+# its ignored-ids list; that list lives in state.db (`ignored_ids`), so the exclusion is not
+# expressible here — `cv intake list --outcome ignored` covers it.
+[[views]]
+type = "table"
+name = "YouTube without metadata"
+filters = { and = [
+  'note["yt-video-id"] && note["yt-video-id"].toString().trim() != ""',
+  '!note["yt-metadata"] || list(note["yt-metadata"]).length == 0',
+] }
+order = ["file.name", "note.yt-video-id", "formula.created"]
+sort = [{ property = "formula.created", direction = "DESC" }]
+
+# Materialized X metadata notes (`xPosts.ts`, `state: ok | unavailable`). Registry-only
+# statuses (link_records without a note) are served by the `cv` CLI, not views.
+[[views]]
+type = "table"
+name = "X posts"
+filters = { and = [
+  'file.inFolder("_x_metadata")',
+  'note["status-id"]',
+] }
+order = ["file.name", "note.status-id", "note.url", "note.state"]
+sort = [{ property = "note.status-id", direction = "DESC" }]

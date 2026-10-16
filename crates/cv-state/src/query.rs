@@ -108,6 +108,11 @@ pub struct ListQuery {
     pub offset: u32,
     /// Newest-settled first instead of claim order (useful for terminal buckets).
     pub recent_first: bool,
+    /// Deferral filter, evaluated against `now_ms`: `Some(true)` keeps only rows with
+    /// `defer_until_ms > now_ms`, `Some(false)` only rows without a future deferral.
+    pub deferred: Option<bool>,
+    /// Clock for the `deferred` filter.
+    pub now_ms: i64,
 }
 
 pub(crate) fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Job>> {
@@ -118,7 +123,9 @@ pub(crate) fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Job>> {
     };
     let limit: i64 = if q.limit == 0 { -1 } else { i64::from(q.limit) };
     let sql = format!(
-        "SELECT {JOB_COLS} FROM jobs WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR job_type = ?2) ORDER BY {order} LIMIT ?3 OFFSET ?4"
+        "SELECT {JOB_COLS} FROM jobs WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR job_type = ?2) \
+         AND (?5 IS NULL OR (CASE WHEN defer_until_ms IS NOT NULL AND defer_until_ms > ?6 THEN 1 ELSE 0 END) = ?5) \
+         ORDER BY {order} LIMIT ?3 OFFSET ?4"
     );
     let mut stmt = conn.prepare(&sql)?;
     let raws = stmt
@@ -127,7 +134,9 @@ pub(crate) fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Job>> {
                 q.status.map(JobStatus::as_str),
                 q.job_type,
                 limit,
-                i64::from(q.offset)
+                i64::from(q.offset),
+                q.deferred.map(i64::from),
+                q.now_ms
             ],
             raw_row,
         )?
