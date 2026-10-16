@@ -198,7 +198,7 @@ const STEPS: &[(&str, &str)] = &[
         "image_describe",
         "scope = \"vault\"\nlimit = 5\nprune_transient = true",
     ),
-    ("track_youtube", ""),
+    ("track_youtube", "limit_per_source = 25"),
     ("track_blogs", ""),
     ("ignore_video", ""),
     ("daily_brief", ""),

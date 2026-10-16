@@ -78,7 +78,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     }
 }
 
-fn metadata_root(ctx: &StepCtx<'_>) -> String {
+pub(crate) fn metadata_root(ctx: &StepCtx<'_>) -> String {
     let r = ctx
         .config
         .pipelines()
@@ -100,7 +100,7 @@ fn fm_err(e: cv_lint::FmError) -> StepError {
     StepError::failed(e.to_string())
 }
 
-fn no_key() -> StepError {
+pub(crate) fn no_key() -> StepError {
     StepError::Failed {
         message: format!("YouTube Data API key missing (set {API_KEY_SECRET})"),
         reason: Some(FailureReason::NoApiKey),
@@ -114,7 +114,7 @@ fn iso_now() -> String {
         .to_string()
 }
 
-fn youtube() -> YoutubeApi {
+pub(crate) fn youtube() -> YoutubeApi {
     YoutubeApi::new(super::web::api_base(api::SERVICE, api::DEFAULT_BASE))
 }
 
@@ -149,9 +149,7 @@ pub(crate) fn ensure_metadata_note(
     ctx: &mut StepCtx<'_>,
     id: &str,
 ) -> Result<(String, bool, bool, Option<String>), StepError> {
-    let root = metadata_root(ctx);
-    if let Some(p) = find_in_subfolders(ctx, &root, &format!("{id}.md"))? {
-        let tombstone = p.starts_with(&format!("{root}/_unavailable/"));
+    if let Some((p, tombstone)) = find_metadata_note(ctx, id)? {
         return Ok((p, false, tombstone, None));
     }
     let key = secret(API_KEY_SECRET).ok_or_else(no_key)?;
@@ -168,6 +166,33 @@ pub(crate) fn ensure_metadata_note(
         }
         Err(e) => return Err(fetch_disposition(&e)),
     };
+    write_metadata_note(ctx, id, video)
+}
+
+/// Finds an existing metadata note for `id`: `(path, tombstone)`.
+pub(crate) fn find_metadata_note(
+    ctx: &StepCtx<'_>,
+    id: &str,
+) -> Result<Option<(String, bool)>, StepError> {
+    let root = metadata_root(ctx);
+    Ok(
+        find_in_subfolders(ctx, &root, &format!("{id}.md"))?.map(|p| {
+            let tombstone = p.starts_with(&format!("{root}/_unavailable/"));
+            (p, tombstone)
+        }),
+    )
+}
+
+/// Writes the metadata note for `id` from an already fetched `videos.list` item (`None` = the
+/// video is unavailable → tombstone), find-or-create, no refetch: `(path, created, tombstone,
+/// channel_id)` (`channel_id` only when created). The tracker (WP-7) calls this with batched
+/// results.
+pub(crate) fn write_metadata_note(
+    ctx: &mut StepCtx<'_>,
+    id: &str,
+    video: Option<api::Video>,
+) -> Result<(String, bool, bool, Option<String>), StepError> {
+    let root = metadata_root(ctx);
     let Some(v) = video else {
         let path = format!("{root}/_unavailable/{id}.md");
         create_or_found(ctx, &path, tombstone_note(id, &iso_now()).into_bytes())?;

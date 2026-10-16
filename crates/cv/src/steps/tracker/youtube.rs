@@ -1,17 +1,259 @@
 //! `track_youtube` (plan `v0-automation-pipelines` WP-7): the YouTube channel tracker.
 //!
-//! WP-1 stub: params must be empty until WP-7 defines them; execution fails `not implemented`.
+//! Per tracked `sources.toml` `[[youtube]]` row (not `skip`/`ignore`, `UC…` id only): the
+//! uploads playlist's first page (`playlistItems.list` on `UU…`, Crucible `youtubeApi.ts:340`,
+//! 1 unit), new ids (not in the [`SeenSet`]) → `videos.list` in batches of
+//! [`api::MAX_IDS`] (1 unit each) → the `_yt_metadata` note (WP-4 find-or-create, no refetch) →
+//! the Ignore Shorts predicate ([`cv_ingest::tracker::is_ignored_short`]; a match records
+//! `ignored_ids` + `tracker_items(Ignored)`, no line) → else one daily intake line
+//! ([`super::emit_line`]).
+//!
+//! Failures: a missing key fails `NoApiKey` once (never the breaker); every channel failing with
+//! a service error settles deferred (opening the `youtube-api` breaker); partial failures
+//! succeed with a `failed` count. Outcome vars: `sources`, `new`, `lines`, `ignored`, `failed`.
+//!
+//! | param | type | default | meaning |
+//! |---|---|---|---|
+//! | `limit_per_source` | int 1..=50 | 50 | uploads fetched per channel (the feed window) |
+
+use std::collections::{BTreeSet, HashMap};
 
 use cv_actions::{ConfigSet, Step};
+use cv_ingest::tracker::{is_ignored_short, uploads_playlist_id, youtube_ids_in_text};
+use cv_ingest::youtube::{parse_iso8601_duration, watch_url};
+use cv_providers::web::FetchError;
+use cv_providers::web::youtube::{self as api, PlaylistItem};
+use cv_state::TrackerOutcome;
+use serde_json::json;
 
-use crate::steps::{StepCtx, StepError, StepOutcome};
+use super::super::materialize::{check_keys, table};
+use super::super::web::{block_on, client, record_usage, secret};
+use super::super::youtube::{
+    API_KEY_SECRET, find_metadata_note, metadata_root, no_key, write_metadata_note, youtube,
+};
+use super::super::{StepCtx, StepError, StepOutcome};
+use super::{Candidate, SeenSet, emit_line, fetch_bounded, md_files_under, now_ms, record};
 
-/// Validates the step's params (none accepted yet; unknown keys disarm, I5).
+/// `tracker_items.source_kind` and `ignored_ids.kind` of YouTube videos.
+pub const KIND: &str = "youtube";
+/// The index prop carrying a captured note's video id.
+pub const PROP: &str = "yt-video-id";
+/// Crucible's orchestration folder (intake notes, `ignored.md`), read-only seeding input.
+pub const CRUCIBLE_ROOT: &str = "_crucible/orchestration";
+
+const KEYS: &[&str] = &["limit_per_source"];
+const DEFAULT_LIMIT: u32 = 50;
+
+fn limit(t: &toml::Table) -> Result<u32, String> {
+    match t.get("limit_per_source") {
+        None => Ok(DEFAULT_LIMIT),
+        Some(toml::Value::Integer(n)) if (1..=50).contains(n) => {
+            u32::try_from(*n).map_err(|e| e.to_string())
+        }
+        Some(_) => Err("track_youtube: `limit_per_source` must be an integer 1..=50".into()),
+    }
+}
+
+/// Validates the step's params (unknown keys disarm, I5).
 pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    crate::steps::reject_params(step)
+    let t = table(step);
+    check_keys(&t, KEYS, "track_youtube")?;
+    limit(&t).map(|_| ())
+}
+
+/// First-run seed: ids of existing `_yt_metadata/**/<id>.md` notes plus the video ids in
+/// Crucible's `_crucible/orchestration/**` notes (intake notes, `ignored.md`).
+fn seed(ctx: &StepCtx<'_>) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for p in md_files_under(ctx, &metadata_root(ctx)) {
+        let stem = p.rsplit('/').next().unwrap_or(&p).trim_end_matches(".md");
+        if stem.len() == 11 {
+            ids.insert(stem.to_owned());
+        }
+    }
+    for p in md_files_under(ctx, CRUCIBLE_ROOT) {
+        if let Ok(text) = std::fs::read_to_string(ctx.vault_root.join(&p)) {
+            ids.extend(youtube_ids_in_text(&text));
+        }
+    }
+    ids
+}
+
+fn vars(out: &mut StepOutcome, counts: [(&str, usize); 5]) {
+    for (k, v) in counts {
+        out.vars.insert(k.into(), json!(v));
+    }
 }
 
 /// Executes the step.
-pub fn execute(step: &Step, _ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    Err(StepError::not_implemented(step.kind(), "WP-7"))
+pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    validate(step, ctx.config).map_err(StepError::failed)?;
+    let max = limit(&table(step)).map_err(StepError::failed)?;
+    let mut out = StepOutcome::default();
+    if !ctx.config.pipelines().youtube.enabled {
+        out.vars.insert("disabled".into(), json!(true));
+        vars(
+            &mut out,
+            [
+                ("sources", 0),
+                ("new", 0),
+                ("lines", 0),
+                ("ignored", 0),
+                ("failed", 0),
+            ],
+        );
+        return Ok(out);
+    }
+    let rows: Vec<_> = ctx
+        .config
+        .sources()
+        .youtube
+        .iter()
+        .filter(|r| !r.priority.is_excluded())
+        .filter_map(|r| uploads_playlist_id(&r.id).map(|pl| (r.clone(), pl)))
+        .collect();
+    let key = secret(API_KEY_SECRET).ok_or_else(no_key)?;
+    let mut seen = SeenSet::load(ctx, KIND, PROP, seed)?;
+    let shorts = ctx.config.pipelines().ignore_shorts.clone();
+
+    let c = client()?;
+    let k2 = key.clone();
+    let lists = fetch_bounded(rows.iter().map(|(_, pl)| pl.clone()).collect(), |pl| {
+        let k = k2.clone();
+        let yt = youtube();
+        async move { yt.playlist_items(c, &k, &pl, max).await }
+    })?;
+
+    let (mut new, mut lines, mut ignored, mut failed) = (0, 0, 0, 0);
+    let mut deferred = None;
+    let mut fail = |e: &FetchError, failed: &mut usize| {
+        *failed += 1;
+        let d = super::super::fetch_disposition(e);
+        tracing::warn!(error = %e, "track_youtube: channel failed");
+        if matches!(d, StepError::Deferred { .. }) && deferred.is_none() {
+            deferred = Some(d);
+        }
+    };
+    for ((row, _), list) in rows.iter().zip(lists) {
+        let items: Vec<PlaylistItem> = match list {
+            Ok(v) => {
+                record_usage(ctx, api::SERVICE, 1);
+                v
+            }
+            Err(e) => {
+                if matches!(e, FetchError::NotFound { .. }) {
+                    record_usage(ctx, api::SERVICE, 1);
+                }
+                fail(&e, &mut failed);
+                continue;
+            }
+        };
+        // Oldest first, so the day's lines read chronologically.
+        let mut fresh: Vec<(String, String)> = Vec::new();
+        for it in items.into_iter().rev() {
+            let id = it.content_details.video_id.trim().to_owned();
+            if id.is_empty() || fresh.iter().any(|(f, _)| *f == id) || seen.contains(&id) {
+                continue;
+            }
+            fresh.push((id, it.snippet.title));
+        }
+        if fresh.is_empty() {
+            continue;
+        }
+        let mut videos = HashMap::new();
+        let mut batch_err = None;
+        for chunk in fresh.chunks(api::MAX_IDS) {
+            let ids: Vec<&str> = chunk.iter().map(|(i, _)| i.as_str()).collect();
+            match block_on(youtube().videos(c, &key, &ids))? {
+                Ok(vs) => {
+                    record_usage(ctx, api::SERVICE, 1);
+                    videos.extend(vs.into_iter().map(|v| (v.id.clone(), v)));
+                }
+                Err(e) => {
+                    batch_err = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = batch_err {
+            fail(&e, &mut failed);
+            continue;
+        }
+        for (id, feed_title) in fresh {
+            new += 1;
+            let video = videos.remove(&id);
+            let duration = video
+                .as_ref()
+                .and_then(|v| parse_iso8601_duration(&v.content_details.duration));
+            let channel_title = video
+                .as_ref()
+                .map(|v| v.snippet.channel_title.clone())
+                .unwrap_or_default();
+            let title = video
+                .as_ref()
+                .map(|v| v.snippet.title.clone())
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or(feed_title);
+            let available = video.is_some();
+            if find_metadata_note(ctx, &id)?.is_none() {
+                write_metadata_note(ctx, &id, video)?;
+            }
+            let cand = Candidate {
+                source_kind: KIND.into(),
+                source_key: row.id.clone(),
+                source_name: row.channel.clone(),
+                item_id: id.clone(),
+                title,
+                url: watch_url(&id),
+            };
+            seen.insert(&id);
+            if !available {
+                record(ctx, &cand, TrackerOutcome::Skipped)?;
+                continue;
+            }
+            let names = [row.channel.as_str(), channel_title.as_str()];
+            if is_ignored_short(
+                &row.id,
+                &names,
+                duration,
+                &shorts.channels,
+                shorts.max_seconds,
+            ) {
+                ctx.state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert_ignored_id(KIND, &id, "short", now_ms())
+                    .map_err(|e| StepError::failed(format!("state: {e}")))?;
+                record(ctx, &cand, TrackerOutcome::Ignored)?;
+                ignored += 1;
+                continue;
+            }
+            if emit_line(ctx, &cand, &mut out.output_paths)? != super::Emitted::AlreadyRecorded {
+                lines += 1;
+            }
+        }
+    }
+    if !rows.is_empty()
+        && failed == rows.len()
+        && let Some(d) = deferred
+    {
+        return Err(d);
+    }
+    out.output_paths.sort();
+    out.output_paths.dedup();
+    vars(
+        &mut out,
+        [
+            ("sources", rows.len()),
+            ("new", new),
+            ("lines", lines),
+            ("ignored", ignored),
+            ("failed", failed),
+        ],
+    );
+    Ok(out)
 }
+
+#[cfg(test)]
+#[path = "youtube_tests.rs"]
+mod tests;

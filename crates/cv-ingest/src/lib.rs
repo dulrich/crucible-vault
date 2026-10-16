@@ -6,6 +6,7 @@
 
 pub mod feed;
 pub mod html;
+pub mod tracker;
 pub mod urls;
 pub mod x;
 pub mod youtube;

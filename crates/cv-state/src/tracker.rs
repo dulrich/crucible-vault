@@ -188,6 +188,29 @@ impl StateDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every `item_id` recorded for `source_kind` (any source, any outcome), sorted — the
+    /// tracker seen-set's state part (WP-7).
+    pub fn tracker_item_ids(&self, source_kind: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT DISTINCT item_id FROM tracker_items WHERE source_kind = ?1 ORDER BY item_id",
+        )?;
+        let rows = stmt.query_map(params![source_kind], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Whether `source_kind` has any `tracker_items` row (first-run seeding test, WP-7).
+    pub fn has_tracker_items(&self, source_kind: &str) -> Result<bool> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT 1 FROM tracker_items WHERE source_kind = ?1 LIMIT 1",
+                params![source_kind],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Records `(kind, id)` as ignored. Returns `true` when newly inserted.
     pub fn insert_ignored_id(
         &mut self,

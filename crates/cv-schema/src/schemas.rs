@@ -674,10 +674,19 @@ pub static IMAGE_DESCRIBE: Record = Record {
     rules: &[],
 };
 
-/// `track_youtube` — `crates/cv/src/steps/tracker/youtube.rs` (A2 stub: no params until WP-7).
+/// `track_youtube` — `crates/cv/src/steps/tracker/youtube.rs` (`limit`, `KEYS`).
 pub static TRACK_YOUTUBE: Record = Record {
     name: "track_youtube",
-    fields: &[],
+    fields: &[field(
+        "limit_per_source",
+        "Limit per source",
+        "Uploads fetched per channel each run (1-50, the feed window)",
+        Node::Int {
+            min: Some(1),
+            max: Some(50),
+        },
+    )
+    .dflt(D::Int(50))],
     rules: &[],
 };
 
