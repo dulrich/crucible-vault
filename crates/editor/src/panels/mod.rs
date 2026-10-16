@@ -318,7 +318,7 @@ impl Panels {
         let t0 = std::time::Instant::now();
         // One scan (editor-usability-round WP-5): the old per-folder `folder_files` +
         // `subfolders` walk re-scanned every distinct folder per folder — ~1.2 s on a
-        // 2.7k-folder vault (runs/spike/panels-lag/FINDINGS.md).
+        // 2.7k-folder vault (docs/spikes/panels-lag/FINDINGS.md).
         let rows = d.index().with_query(|q| q.file_paths());
         match rows {
             Ok(rows) => {

@@ -2,7 +2,7 @@
 //! handling").
 //!
 //! S2 measured ~5 raw events per tmp+rename write (Create/Modify/Name From/To/Both across the
-//! temp and the final name — `runs/spike/core-index/FINDINGS.md:64`). Raw events are therefore
+//! temp and the final name — `docs/spikes/core-index/FINDINGS.md:64`). Raw events are therefore
 //! only *hints*: a path is re-examined once it has been quiet for the debounce window, and its
 //! current `(size, mtime)` then hash decide whether anything changed. The writer records
 //! `(path → after_hash)` for its own writes; a change matching that echo is `Origin::Daemon` and

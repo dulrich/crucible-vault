@@ -1,7 +1,7 @@
 //! Byte-compatibility against Crucible's own TypeScript chunker.
 //!
 //! `fixtures/golden.json` was produced by running `https://github.com/dulrich/obsidian-crucible/blob/master/src/search/chunker.ts`
-//! on synthetic inputs (`runs/spike/wp13-golden/golden.ts`, see the report for the command).
+//! on synthetic inputs (`docs/spikes/wp13-golden/golden.ts`, see the report for the command).
 //! Strings are UTF-16 code-unit arrays so lone surrogates (E4) survive. Plus the vectors of
 //! Crucible's `tests/searchChunker.test.mjs`, ported.
 

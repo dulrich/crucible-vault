@@ -209,7 +209,7 @@ mod tests {
         )
     }
 
-    /// Firefox "Copy Image" TARGETS (runs/spike/firefox-paste/FINDINGS.md).
+    /// Firefox "Copy Image" TARGETS (docs/spikes/firefox-paste/FINDINGS.md).
     const FIREFOX: &[u8] = b"TIMESTAMP\nTARGETS\nMULTIPLE\nSAVE_TARGETS\nimage/png\nimage/jpeg\nimage/bmp\nimage/x-bmp\nimage/x-MS-bmp\nimage/x-icon\nimage/x-ico\nimage/x-win-bitmap\nimage/vnd.microsoft.icon\napplication/ico\nimage/ico\nimage/icon\ntext/ico\nimage/tiff\nimage/webp\naudio/x-riff\n";
 
     #[test]

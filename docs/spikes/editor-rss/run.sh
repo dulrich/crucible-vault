@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# run.sh <label> — one scripted cvault-editor measurement run (~6 min), adapted from ../gui-rss/run.sh:
+# same checkpoints (t=5/12/40 s, idle CPU t=280–340 s, t=340 s) and the same mem.sh/cpu.sh, against
+# the WP-8 scratch daemon; the workload is driver.sh (S3 picks opened through `cv uri`).
+# Needs the scratch env (CV_VAULT, CV_SOCKET, XDG_STATE_HOME, …) exported and CV_BIN/EDITOR_BIN set.
+set -u
+label=$1; S=${SCRATCH:?SCRATCH unset}; title=crucible-vault
+here=$(dirname "$(readlink -f "$0")"); g=<code-root>/crucible-vault/runs/spike/gui-rss
+out=$here/results; mkdir -p $out
+log=$out/$label.log; err=$S/logs/$label.stderr
+rm -rf "$XDG_STATE_HOME/crucible-vault"
+since=$(date '+%Y-%m-%d %H:%M:%S')
+echo "label=$label start=$since cmd=cvault-editor image_cache_mb=${CV_IMAGE_CACHE_MB:-64(default)}" > $log
+t0=$(date +%s.%N)
+"$EDITOR_BIN" 2>$err >/dev/null & pid=$!
+$here/driver.sh $t0 $pid $S > $S/logs/$label.driver 2>&1 & dpid=$!
+for i in $(seq 1 600); do
+  if xwininfo -name "$title" 2>/dev/null | grep -q IsViewable; then t1=$(date +%s.%N); break; fi; sleep 0.01
+done
+echo "startup_s $(awk -v a=$t0 -v b=${t1:-0} 'BEGIN{printf "%.3f", b-a}')" >> $log
+at() { local now; now=$(awk -v a=$t0 -v b=$(date +%s.%N) 'BEGIN{print b-a}'); awk -v n=$now -v t=$1 'BEGIN{d=t-n; if(d>0) system("sleep " d)}'; }
+at 5;   echo "idle5s $($g/mem.sh $pid)" >> $log
+at 12;  echo "after1 $($g/mem.sh $pid)" >> $log
+at 40;  echo "after20 $($g/mem.sh $pid)" >> $log; echo "smaps40 $(python3 -I $here/smaps.py $pid)" >> $log
+wait $dpid; cat $S/logs/$label.driver >> $log
+at 280; echo "idlecpu60s_pct $($g/cpu.sh 60 $pid)" >> $log
+at 340; echo "idle5min $($g/mem.sh $pid)" >> $log
+echo "editor_tabs_persisted $(python3 -I -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+def n(x): return len(x.get("tabs",[])) if x["kind"]=="leaf" else n(x["a"])+n(x["b"])
+print(n(d["panes"]["root"]) if d.get("panes") else len(d.get("tabs",[])))' "$XDG_STATE_HOME/crucible-vault/editor.json")" >> $log
+kill $pid; sleep 2; kill -9 $pid 2>/dev/null
+pkill -P $pid 2>/dev/null
+echo "kernel_gpu_lines $(journalctl -k --since "$since" --no-pager -q | grep -ciE 'amdgpu|ring .*timeout|gpu reset|vulkan|drm')" >> $log
+journalctl -k --since "$since" --no-pager -q | grep -iE 'amdgpu|timeout|reset|drm' | sed -E 's/^.{0,40}//' >> $log
+echo "stderr_vk_warn $(grep -ciE 'vulkan|validation|radv|wgpu.*(warn|error)|error' $err)" >> $log
+echo "stderr_lines $(wc -l < $err)" >> $log
+cat $log

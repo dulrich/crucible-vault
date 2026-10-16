@@ -1,6 +1,6 @@
 //! Pure `obsidian://` parsing and path clamping (plan WP-8 "`cv uri`").
 //!
-//! Behaviour is ported from the S2 URI probe (`runs/spike/core-index/FINDINGS.md` "URI probe"):
+//! Behaviour is ported from the S2 URI probe (`docs/spikes/core-index/FINDINGS.md` "URI probe"):
 //! params `vault`, `file`, `content` | `clipboard`, `silent`; `.md` appended when absent; the
 //! `file` path is normalized and clamped to the vault root; UTF-8 kept intact; an unknown vault
 //! is rejected. Crucible has no source for this — Obsidian core owns the scheme (inventory #5);

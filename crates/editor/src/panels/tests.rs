@@ -209,7 +209,7 @@ fn pure_helpers() {
 
 /// editor-usability-round WP-5 measurement harness (not a gate): Toggle Panels latency against a
 /// real `cv-index` index of the synthetic spike vault in `CV_SPIKE_VAULT`
-/// (`runs/spike/panels-lag/gen.py`). Run:
+/// (`docs/spikes/panels-lag/gen.py`). Run:
 /// `CV_SPIKE_VAULT=$PWD/runs/spike/panels-lag/vault cargo test -p editor --release --lib panels_open_latency -- --ignored --nocapture`
 #[test]
 #[ignore = "measurement harness; needs CV_SPIKE_VAULT"]

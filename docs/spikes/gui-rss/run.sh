@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# run.sh <label> <title-substring> <cmd...>  — one scripted measurement run (~6 min)
+set -u
+label=$1; title=$2; shift 2
+here=$(dirname "$(readlink -f "$0")"); out=$here/results; mkdir -p $out
+log=$out/$label.log; err=$out/$label.stderr
+since=$(date '+%Y-%m-%d %H:%M:%S')
+echo "label=$label start=$since cmd=$*" > $log
+t0=$(date +%s.%N)
+SPIKE_AUTO=1 "$@" 2>$err >/dev/null & pid=$!
+# startup: launch -> window with our title mapped (wmctrl lists mapped managed windows)
+for i in $(seq 1 600); do
+  if xwininfo -name "$title" 2>/dev/null | grep -q IsViewable; then t1=$(date +%s.%N); break; fi; sleep 0.01
+done
+echo "startup_s $(awk -v a=$t0 -v b=${t1:-0} 'BEGIN{printf "%.3f", b-a}')" >> $log
+at() { local now; now=$(awk -v a=$t0 -v b=$(date +%s.%N) 'BEGIN{print b-a}'); awk -v n=$now -v t=$1 'BEGIN{d=t-n; if(d>0) system("sleep " d)}'; }
+at 5;   echo "idle5s $($here/mem.sh $pid)" >> $log
+at 12;  echo "after1 $($here/mem.sh $pid)" >> $log
+at 40;  echo "after20 $($here/mem.sh $pid)" >> $log
+at 280; echo "idlecpu60s_pct $($here/cpu.sh 60 $pid)" >> $log
+at 340; echo "idle5min $($here/mem.sh $pid)" >> $log
+kill $pid; sleep 2; kill -9 $pid 2>/dev/null
+pkill -P $pid 2>/dev/null
+echo "kernel_gpu_lines $(journalctl -k --since "$since" --no-pager -q | grep -ciE 'amdgpu|ring .*timeout|gpu reset|vulkan|drm')" >> $log
+journalctl -k --since "$since" --no-pager -q | grep -iE 'amdgpu|timeout|reset|drm' >> $log
+echo "stderr_vk_warn $(grep -ciE 'vulkan|validation|radv|wgpu.*(warn|error)|error' $err)" >> $log
+cat $log

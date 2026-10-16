@@ -182,7 +182,7 @@ fn p1(
 ) -> Result<Value> {
     let q = reader.query();
     let md = files.iter().filter(|f| f.is_md).count() as u64;
-    // The S2 baseline (`runs/spike/core-index/FINDINGS.md:30`) counts vault links only; md links
+    // The S2 baseline (`docs/spikes/core-index/FINDINGS.md:30`) counts vault links only; md links
     // with a URI scheme (`external`) are reported separately, like `unresolved(false)` below.
     let mut links = 0u64;
     let mut external_links = 0u64;

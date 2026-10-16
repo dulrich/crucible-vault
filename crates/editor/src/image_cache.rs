@@ -1,6 +1,6 @@
 //! Bounded, off-thread image cache (WP-3).
 //!
-//! S3 measured image memory growing with `Handle::from_path` (`runs/spike/gui-rss/FINDINGS.md`),
+//! S3 measured image memory growing with `Handle::from_path` (`docs/spikes/gui-rss/FINDINGS.md`),
 //! and iced's GPU atlas keeps a texture alive as long as any live handle exists
 //! (`iced_wgpu-0.14.0/src/image/raster.rs:78-103`), so bounding CPU-side handle lifetime is ours.
 //!

@@ -81,14 +81,14 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 - **Decision:** **Extract a shared pure `ofm` crate** from crucible-tui's `mdview` parse layer (wiki-links, frontmatter, lex). Both repos path-depend on it. The extraction is a **separate plan in `../crucible-tui/`**; crucible-vault's plan sequences on it.
 - **Rationale:** One tokenizer, with no terminal or GUI deps in the core. This honours the never-copy-paste-fork rule (AGENTS.md → Stack).
 
-## D13 — GUI stack (2026-10-13; measured, `runs/spike/gui-rss/FINDINGS.md`)
+## D13 — GUI stack (2026-10-13; measured, `docs/spikes/gui-rss/FINDINGS.md`)
 
 - **Decision:** **iced** (0.14.x) for the editor client.
 - **Evidence:** ~390 MiB RSS at 20 image-heavy notes, flat at 5 min, ~0 % idle CPU, stable crates.io release with `markdown`/`image`/`text_editor` built in, 0 GPU faults. Tauri+CM6 measured ~1.0 GiB, about Obsidian's footprint. GPUI measured 4.9 GiB (unbounded image cache) and +6 GiB on a 1 MB paste.
 - **Owned costs accepted:** an undo/redo stack (iced 0.14 has none), a virtual list for large file lists, a bounded image cache, and probably an improved editor widget. These fit D9's source + reading pane scope.
-- **Crash premise retired:** both Obsidian crashes are a V8 fatal in Crucible's `NoteLockManager.withLock` (`runs/spike/crash-attribution/FINDINGS.md`), not the graphics stack, so wgpu/Vulkan carries no inherited-crash risk.
+- **Crash premise retired:** both Obsidian crashes are a V8 fatal in Crucible's `NoteLockManager.withLock` (`docs/spikes/crash-attribution/FINDINGS.md`), not the graphics stack, so wgpu/Vulkan carries no inherited-crash risk.
 
-## D14 — Database (project-setup Gate 3; 2026-10-13; measured, `runs/spike/core-index/FINDINGS.md`)
+## D14 — Database (project-setup Gate 3; 2026-10-13; measured, `docs/spikes/core-index/FINDINGS.md`)
 
 - **Decision:** **SQLite (bundled rusqlite), two files, both owned by the daemon, paths behind env vars.**
   - `index.db` — **derived**: files, props (JSON-typed values), links, tags, blocks, FTS5. Dropped and rebuilt on any schema change, never migrated.

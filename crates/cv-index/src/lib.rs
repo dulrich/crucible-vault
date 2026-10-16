@@ -1,5 +1,5 @@
 //! `cv-index` — the derived, rebuildable vault index (`index.db`), per WP-5 of
-//! `plans/v0-core-daemon.md` and S2's measured design (`runs/spike/core-index/FINDINGS.md`,
+//! `plans/v0-core-daemon.md` and S2's measured design (`docs/spikes/core-index/FINDINGS.md`,
 //! "Index design" and "Recommendation").
 //!
 //! - [`Index`] is the single writer: full atomic [`Index::rebuild`] under a generation number,

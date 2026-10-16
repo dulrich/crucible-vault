@@ -1,6 +1,6 @@
 //! In-memory link resolver, kept in sync with `files` by the writer.
 //!
-//! Order (S2, `runs/spike/core-index/FINDINGS.md` "Index design", matching Obsidian's
+//! Order (S2, `docs/spikes/core-index/FINDINGS.md` "Index design", matching Obsidian's
 //! `getFirstLinkpathDest` as Crucible relies on it in `https://github.com/dulrich/obsidian-crucible/blob/master/src/search/linkGraph.ts:63-90`):
 //! 1. exact vault path (the target as written, then with `.md`), case-sensitive first, then
 //!    case-insensitive;
