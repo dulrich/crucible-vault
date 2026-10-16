@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex};
 
 use cv_actions::{Action, ConfigSet, Step, StepKind};
 use cv_protocol::ActionContext;
-use cv_state::{FailureReason, StateDb};
+use cv_state::{FailureReason, ServiceFailureKind, StateDb};
 use cv_vault::{ContentHash, VaultError, WriterHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -111,7 +111,78 @@ pub enum StepError {
         retry_after_ms: i64,
         /// The unhealthy service, if any.
         service: Option<String>,
+        /// Why: a plain wait, or a service failure that feeds the breaker (plan WP-2).
+        cause: DeferCause,
     },
+}
+
+/// Why a step deferred. Only `Transient`/`Quota` feed the service breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferCause {
+    /// Not a service failure: no breaker report, no attempt cap.
+    Wait,
+    /// A transient service failure: reported to the breaker, bounded retry with backoff.
+    Transient(ServiceFailureKind),
+    /// Quota exhausted: reported as `RateLimited`, waits for `retry_after`, never exhausts.
+    Quota,
+}
+
+/// Base delay of a transient retry (doubles per attempt up to [`TRANSIENT_CAP_MS`]).
+pub(crate) const TRANSIENT_BASE_MS: i64 = 30_000;
+/// Cap of the transient backoff.
+pub(crate) const TRANSIENT_CAP_MS: i64 = 30 * 60_000;
+/// Transient deferrals past this many claims settle `Failed{ServiceOutage}`.
+pub(crate) const TRANSIENT_MAX_ATTEMPTS: i64 = 5;
+/// Default quota wait when the service names none.
+#[cfg_attr(not(test), allow(dead_code))] // consumed by WP-4..8 fetch steps
+pub(crate) const QUOTA_DEFAULT_MS: i64 = 60 * 60_000;
+
+/// Maps an HTTP fetch failure to a step disposition (plan WP-2; used by WP-4..8).
+///
+/// `Transient` → `Deferred{Transient(kind)}` where kind is read from the detail: `"connect"`
+/// → `Refused`; `"HTTP 429"` → `RateLimited`; `"HTTP 5xx"` → `ServerError`; anything else
+/// (`"timeout"`, `"HTTP 408"`, `"network"`, client errors) → `Timeout`. Delay = server
+/// `retry_after` or [`TRANSIENT_BASE_MS`]. `Quota` → `Deferred{Quota}` with `retry_after` or
+/// 1 h. `NotFound`/`Permanent`/`Malformed` → `Failed` (never retried).
+#[cfg_attr(not(test), allow(dead_code))] // consumed by WP-4..8 fetch steps
+pub(crate) fn fetch_disposition(e: &cv_providers::web::FetchError) -> StepError {
+    use cv_providers::web::FetchError;
+    let ms = |d: &Option<std::time::Duration>, default: i64| {
+        d.map_or(default, |d| {
+            i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+        })
+    };
+    match e {
+        FetchError::Transient {
+            service,
+            retry_after,
+            detail,
+        } => {
+            let kind = if detail == "connect" {
+                ServiceFailureKind::Refused
+            } else if detail == "HTTP 429" {
+                ServiceFailureKind::RateLimited
+            } else if detail.starts_with("HTTP 5") {
+                ServiceFailureKind::ServerError
+            } else {
+                ServiceFailureKind::Timeout
+            };
+            StepError::Deferred {
+                retry_after_ms: ms(retry_after, TRANSIENT_BASE_MS),
+                service: Some(service.clone()),
+                cause: DeferCause::Transient(kind),
+            }
+        }
+        FetchError::Quota {
+            service,
+            retry_after,
+        } => StepError::Deferred {
+            retry_after_ms: ms(retry_after, QUOTA_DEFAULT_MS),
+            service: Some(service.clone()),
+            cause: DeferCause::Quota,
+        },
+        other => StepError::failed(other.to_string()),
+    }
 }
 
 impl StepError {
@@ -336,6 +407,89 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 vars,
                 ..StepOutcome::default()
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod fetch_disposition_tests {
+    use std::time::Duration;
+
+    use cv_providers::web::FetchError;
+    use cv_state::ServiceFailureKind as K;
+
+    use super::{DeferCause, QUOTA_DEFAULT_MS, StepError, TRANSIENT_BASE_MS, fetch_disposition};
+
+    fn transient(detail: &str, retry: Option<u64>) -> FetchError {
+        FetchError::Transient {
+            service: "svc".into(),
+            retry_after: retry.map(Duration::from_millis),
+            detail: detail.into(),
+        }
+    }
+
+    fn deferred(ms: i64, cause: DeferCause) -> StepError {
+        StepError::Deferred {
+            retry_after_ms: ms,
+            service: Some("svc".into()),
+            cause,
+        }
+    }
+
+    #[test]
+    fn maps_every_fetch_error() {
+        let t = |k| deferred(TRANSIENT_BASE_MS, DeferCause::Transient(k));
+        assert_eq!(
+            fetch_disposition(&transient("connect", None)),
+            t(K::Refused)
+        );
+        assert_eq!(
+            fetch_disposition(&transient("timeout", None)),
+            t(K::Timeout)
+        );
+        assert_eq!(
+            fetch_disposition(&transient("network", None)),
+            t(K::Timeout)
+        );
+        assert_eq!(
+            fetch_disposition(&transient("HTTP 408", None)),
+            t(K::Timeout)
+        );
+        assert_eq!(
+            fetch_disposition(&transient("HTTP 503", None)),
+            t(K::ServerError)
+        );
+        assert_eq!(
+            fetch_disposition(&transient("HTTP 429", Some(5_000))),
+            deferred(5_000, DeferCause::Transient(K::RateLimited))
+        );
+        let quota = |r| FetchError::Quota {
+            service: "svc".into(),
+            retry_after: r,
+        };
+        assert_eq!(
+            fetch_disposition(&quota(None)),
+            deferred(QUOTA_DEFAULT_MS, DeferCause::Quota)
+        );
+        assert_eq!(
+            fetch_disposition(&quota(Some(Duration::from_secs(7)))),
+            deferred(7_000, DeferCause::Quota)
+        );
+        for e in [
+            FetchError::NotFound {
+                service: "svc".into(),
+                status: 404,
+            },
+            FetchError::Permanent {
+                service: "svc".into(),
+                status: 403,
+            },
+            FetchError::Malformed {
+                service: "svc".into(),
+                detail: "invalid JSON".into(),
+            },
+        ] {
+            assert!(matches!(fetch_disposition(&e), StepError::Failed { .. }));
         }
     }
 }

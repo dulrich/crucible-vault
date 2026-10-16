@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::sync::{Notify, broadcast, watch};
 
-use crate::steps::{self, ChildSpawner, StepCtx, StepError, StepOutcome};
+use crate::steps::{
+    self, ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome, TRANSIENT_BASE_MS,
+    TRANSIENT_CAP_MS, TRANSIENT_MAX_ATTEMPTS,
+};
 
 pub use config_load::load_config_dir;
 pub use rpc::{actions_list, run_action};
@@ -43,6 +46,17 @@ pub const NON_DURABLE_WAIT: Duration = Duration::from_secs(10);
 const IDLE_POLL: Duration = Duration::from_secs(1);
 /// Remembered finished runs (for non-durable `open_path` replies).
 const FINISHED_CAP: usize = 256;
+/// Period of the claim loop's lease-recovery / prune maintenance (plan WP-2).
+pub(crate) const MAINTENANCE_EVERY_MS: i64 = 60_000;
+/// Terminal-row pruning runs at most this often.
+pub(crate) const PRUNE_EVERY_MS: i64 = 3_600_000;
+
+/// When the claim loop last ran each maintenance task (`None` = never).
+#[derive(Debug, Default)]
+pub(crate) struct Maintenance {
+    last_recover_ms: Option<i64>,
+    last_prune_ms: Option<i64>,
+}
 
 /// Time source (tests inject [`ManualClock`]).
 pub trait Clock: Send + Sync {
@@ -213,6 +227,8 @@ pub struct RunSummary {
     pub open_path: Option<String>,
     /// Accumulated output paths.
     pub output_paths: Vec<String>,
+    /// Why the run deferred (set only when the result is `Deferred`).
+    pub defer_cause: Option<DeferCause>,
 }
 
 /// Runner construction parameters.
@@ -470,6 +486,143 @@ impl Inner {
         tracing::info!(?own, ?foreign, ?stale, "runner recovered leases");
     }
 
+    /// Breaker feeding + bounded transient retry (plan WP-2), run after the steps and before
+    /// `settle`. Takes the `state` lock only for the short breaker/queue calls.
+    pub(crate) fn apply_service_policy(
+        &self,
+        job: &cv_state::Job,
+        result: JobResult,
+        cause: Option<DeferCause>,
+    ) -> JobResult {
+        let now = self.clock.now_ms();
+        let mut db = lock(&self.state);
+        let log = |e: cv_state::StateError| tracing::warn!(job_id = %job.id, error = %e, "service health update failed");
+        let result = match (result, cause) {
+            (
+                JobResult::Deferred {
+                    retry_after_ms,
+                    service_unhealthy: Some(svc),
+                },
+                Some(DeferCause::Transient(kind)),
+            ) => {
+                // Transient: the breaker computes its own doubling window (no retry_after).
+                let reason = format!("transient {kind:?} (attempt {})", job.attempts);
+                if let Err(e) = db.report_service_failure(&svc, kind, &reason, None, now) {
+                    log(e);
+                }
+                if job.attempts >= TRANSIENT_MAX_ATTEMPTS {
+                    JobResult::Failed {
+                        error: format!(
+                            "service {svc} still failing after {} attempts",
+                            job.attempts
+                        ),
+                        reason: Some(cv_state::FailureReason::ServiceOutage),
+                    }
+                } else {
+                    let shift = u32::try_from((job.attempts - 1).clamp(0, 20)).unwrap_or(20);
+                    let backoff = TRANSIENT_BASE_MS
+                        .saturating_mul(1_i64 << shift)
+                        .min(TRANSIENT_CAP_MS);
+                    JobResult::Deferred {
+                        retry_after_ms: retry_after_ms.max(backoff),
+                        service_unhealthy: Some(svc),
+                    }
+                }
+            }
+            (
+                JobResult::Deferred {
+                    retry_after_ms,
+                    service_unhealthy: Some(svc),
+                },
+                Some(DeferCause::Quota),
+            ) => {
+                if let Err(e) = db.report_service_failure(
+                    &svc,
+                    cv_state::ServiceFailureKind::RateLimited,
+                    "quota exhausted",
+                    Some(retry_after_ms),
+                    now,
+                ) {
+                    log(e);
+                }
+                JobResult::Deferred {
+                    retry_after_ms,
+                    service_unhealthy: Some(svc),
+                }
+            }
+            (r, _) => r,
+        };
+        let Some(svc) = job.service.as_deref() else {
+            return result;
+        };
+        match &result {
+            JobResult::Done => {
+                let before = db.service_health(svc).map(|h| h.state);
+                if let Err(e) = db.report_service_success(svc) {
+                    log(e);
+                } else if matches!(before, Ok(s) if s != cv_state::BreakerState::Closed) {
+                    match db.requeue_service_failures(false) {
+                        Ok(b) => tracing::info!(
+                            service = svc,
+                            requeued = b.requeued,
+                            "breaker closed; requeued service failures"
+                        ),
+                        Err(e) => log(e),
+                    }
+                }
+            }
+            _ => {
+                // A job that held the half-open probe and ended without a verdict returns it
+                // (a transient failure above already reopened the breaker, clearing it).
+                if let Ok(h) = db.service_health(svc)
+                    && h.state == cv_state::BreakerState::HalfOpen
+                    && h.probe_in_flight()
+                    && let Err(e) = db.release_probe(svc)
+                {
+                    log(e);
+                }
+            }
+        }
+        result
+    }
+
+    /// Periodic queue maintenance from the claim loop: stale-lease recovery every
+    /// [`MAINTENANCE_EVERY_MS`] (never touching this runner's live jobs) and terminal pruning at
+    /// most every [`PRUNE_EVERY_MS`] with the configured retention (`0` = keep forever).
+    pub(crate) fn maintenance_tick(&self, m: &mut Maintenance) {
+        let now = self.clock.now_ms();
+        if m.last_recover_ms
+            .is_some_and(|t| now - t < MAINTENANCE_EVERY_MS)
+        {
+            return;
+        }
+        m.last_recover_ms = Some(now);
+        let live = lock(&self.running).clone();
+        let retention_days = self
+            .config
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pipelines()
+            .queue
+            .retention_days;
+        let mut db = lock(&self.state);
+        match db.recover_stale_leases_except(now, &live) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(recovered = n, "maintenance: stale leases requeued"),
+            Err(e) => tracing::warn!(error = %e, "maintenance: stale lease recovery failed"),
+        }
+        if m.last_prune_ms.is_some_and(|t| now - t < PRUNE_EVERY_MS) {
+            return;
+        }
+        m.last_prune_ms = Some(now);
+        db.set_retention_ms(i64::from(retention_days).saturating_mul(86_400_000));
+        match db.prune_terminal(now) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(pruned = n, "maintenance: terminal jobs pruned"),
+            Err(e) => tracing::warn!(error = %e, "maintenance: prune failed"),
+        }
+    }
+
     fn record_writes(&self, action: &str, paths: &[String]) {
         if paths.is_empty() {
             return;
@@ -484,11 +637,13 @@ impl Inner {
 
 async fn claim_loop(inner: Arc<Inner>, mut stop: watch::Receiver<bool>) {
     inner.recover();
+    let mut maintenance = Maintenance::default();
     let permits = Arc::new(tokio::sync::Semaphore::new(inner.concurrency));
     loop {
         if *stop.borrow() {
             return;
         }
+        inner.maintenance_tick(&mut maintenance);
         while let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
             let claimed = lock(&inner.state).claim(inner.clock.now_ms());
             match claimed {
@@ -573,6 +728,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
             }
         },
     };
+    let result = inner.apply_service_policy(&job, result, summary.defer_cause);
     let settled = lock(&inner.state).settle(&id, &result, inner.clock.now_ms());
     if let Err(e) = settled {
         tracing::error!(job_id = %id, error = %e, "settle failed");
@@ -801,7 +957,9 @@ fn execute_steps(
             Err(StepError::Deferred {
                 retry_after_ms,
                 service,
+                cause,
             }) => {
+                summary.defer_cause = Some(cause);
                 return (
                     JobResult::Deferred {
                         retry_after_ms,

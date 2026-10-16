@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::agent;
-use super::{ChildSpawner, StepCtx, StepError, StepOutcome};
+use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
 
 struct Tmp(PathBuf);
 impl Tmp {
@@ -543,7 +543,8 @@ async fn outage_is_deferred() {
         err,
         StepError::Deferred {
             retry_after_ms: 60_000,
-            service: Some("fake".into())
+            service: Some("fake".into()),
+            cause: DeferCause::Transient(cv_state::ServiceFailureKind::ServerError)
         }
     );
 
@@ -568,7 +569,8 @@ async fn outage_is_deferred() {
         err,
         StepError::Deferred {
             retry_after_ms: 60_000,
-            service: Some("fake".into())
+            service: Some("fake".into()),
+            cause: DeferCause::Transient(cv_state::ServiceFailureKind::Refused)
         }
     );
 }

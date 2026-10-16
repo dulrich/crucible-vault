@@ -576,3 +576,5 @@ fn event_selector_origin_and_cycle_guard() {
         "an external edit still fires"
     );
 }
+
+mod queue;

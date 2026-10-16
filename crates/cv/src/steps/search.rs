@@ -30,16 +30,17 @@ use cv_index::{LinkKind, Reader};
 use cv_providers::{
     ProviderManager, ProvidersConfig, SystemSecrets, parse_model_ref, secrets::default_secrets_dir,
 };
+use cv_search::UnavailableKind;
 use cv_search::chunker::{DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
 use cv_search::feed::{self, EmbedTarget, FeedConfig, FeedReport, LocalNote, Mode};
 use cv_search::{
     DEFAULT_COMPANION_URL, EmbedRef, LinkedSource, LiveProof, PrepareHost, PrepareInput,
     SearchError, is_search_indexable_path, prepare_search_file,
 };
-use cv_state::ImageDescription;
+use cv_state::{ImageDescription, ServiceFailureKind};
 use serde_json::{Map, Value};
 
-use super::{StepCtx, StepError, StepOutcome};
+use super::{DeferCause, StepCtx, StepError, StepOutcome};
 
 /// Crucible's `searchVaultId` default.
 pub const DEFAULT_VAULT_ID: &str = "default";
@@ -116,13 +117,21 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
 
 fn map_err(e: SearchError) -> StepError {
     match e {
-        SearchError::Unavailable { .. } => StepError::Deferred {
+        SearchError::Unavailable { kind, .. } => StepError::Deferred {
             retry_after_ms: RETRY_AFTER_MS,
             service: Some(COMPANION_SERVICE.to_owned()),
+            cause: DeferCause::Transient(match kind {
+                UnavailableKind::Refused => ServiceFailureKind::Refused,
+                UnavailableKind::Timeout => ServiceFailureKind::Timeout,
+                UnavailableKind::ServerError | UnavailableKind::NotOk => {
+                    ServiceFailureKind::ServerError
+                }
+            }),
         },
         SearchError::EmbedderUnavailable { provider, .. } => StepError::Deferred {
             retry_after_ms: RETRY_AFTER_MS,
             service: Some(provider),
+            cause: DeferCause::Transient(ServiceFailureKind::ServerError),
         },
         other => StepError::failed(other.to_string()),
     }

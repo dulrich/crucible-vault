@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::search::run;
-use super::{ChildSpawner, StepCtx, StepError, StepOutcome};
+use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
 
 struct Tmp(PathBuf);
 impl Tmp {
@@ -369,6 +369,7 @@ fn assert_deferred(r: Result<StepOutcome, StepError>, service: &str) {
         Err(StepError::Deferred {
             retry_after_ms,
             service: Some(s),
+            cause: DeferCause::Transient(_),
         }) => {
             assert_eq!(retry_after_ms, 60_000);
             assert_eq!(s, service);

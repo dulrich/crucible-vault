@@ -455,6 +455,52 @@ fn live_leases_recover_only_after_timeout() {
 }
 
 #[test]
+fn stale_recovery_skips_live_ids() {
+    let (_d, mut s) = db_with(QueueConfig {
+        stale_lease_ms: 100,
+        ..QueueConfig::default()
+    });
+    let a = id_of(s.enqueue(job("t", None, &[]), 1).unwrap());
+    let b = id_of(s.enqueue(job("t", None, &[]), 1).unwrap());
+    s.claim(1_000).unwrap();
+    s.claim(1_000).unwrap();
+    let live: std::collections::HashSet<String> = [a.clone()].into_iter().collect();
+    assert_eq!(s.recover_stale_leases_except(5_000, &live).unwrap(), 1);
+    assert_eq!(s.job(&a).unwrap().unwrap().status, JobStatus::Running);
+    assert_eq!(s.job(&b).unwrap().unwrap().status, JobStatus::Queued);
+}
+
+#[test]
+fn set_retention_changes_prune_cutoff() {
+    let (_d, mut s) = db_with(QueueConfig {
+        retention_ms: 0,
+        ..QueueConfig::default()
+    });
+    let x = id_of(s.enqueue(job("t", None, &[]), 1).unwrap());
+    s.cancel(&x, 10).unwrap();
+    assert_eq!(s.prune_terminal(1_000).unwrap(), 0, "0 keeps forever");
+    s.set_retention_ms(100);
+    assert_eq!(s.prune_terminal(1_000).unwrap(), 1);
+}
+
+#[test]
+fn deferred_settle_stamps_service() {
+    let (_d, mut s) = db();
+    let id = id_of(s.enqueue(job("t", None, &[]), 1).unwrap());
+    s.claim(1).unwrap();
+    s.settle(
+        &id,
+        &JobResult::Deferred {
+            retry_after_ms: 10,
+            service_unhealthy: Some("svc".into()),
+        },
+        2,
+    )
+    .unwrap();
+    assert_eq!(s.job(&id).unwrap().unwrap().service.as_deref(), Some("svc"));
+}
+
+#[test]
 fn prune_terminal_respects_cutoff_boundary_and_keep_forever() {
     let (_d, mut s) = db_with(QueueConfig {
         retention_ms: 100,
@@ -521,8 +567,15 @@ fn requeue_moves_service_failures_only_and_dry_run_writes_nothing() {
     assert_eq!(real.requeued, 2);
     let j = s.job(&s1).unwrap().unwrap();
     assert_eq!(
-        (j.status, j.error, j.failure_kind, j.settled_at_ms),
-        (JobStatus::Queued, None, None, None)
+        (
+            j.status,
+            j.error,
+            j.failure_kind,
+            j.settled_at_ms,
+            j.attempts
+        ),
+        (JobStatus::Queued, None, None, None, 0),
+        "requeued rows get a fresh retry budget"
     );
     assert_eq!(s.job(&g).unwrap().unwrap().status, JobStatus::Failed);
     assert_eq!(s.job(&q).unwrap().unwrap().status, JobStatus::Queued);

@@ -13,7 +13,7 @@ use cv_vault::{ContentHash, MemoryShadowLog, NoCutover, VaultFs, VaultWriter, Wr
 use serde_json::{Map, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::{ChildSpawner, StepCtx, StepError, StepOutcome, localize};
+use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome, localize};
 
 struct Tmp(PathBuf);
 impl Tmp {
@@ -415,7 +415,8 @@ fn all_unreachable_defers() {
         res,
         Err(StepError::Deferred {
             retry_after_ms: 60_000,
-            service: Some("network".into())
+            service: Some("network".into()),
+            cause: DeferCause::Transient(cv_state::ServiceFailureKind::Timeout)
         })
     );
     assert!(env.text("n.md").contains("http://127.0.0.1"));

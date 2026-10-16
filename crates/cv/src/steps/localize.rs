@@ -1410,6 +1410,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         return Err(StepError::Deferred {
             retry_after_ms: 60_000,
             service: Some("network".into()),
+            cause: super::DeferCause::Transient(cv_state::ServiceFailureKind::Timeout),
         });
     }
 

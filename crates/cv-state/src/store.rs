@@ -350,9 +350,10 @@ impl StateDb {
             )?,
             JobResult::Deferred { retry_after_ms, service_unhealthy } => {
                 let note = service_unhealthy.as_ref().map(|s| format!("deferred: service {s} unhealthy"));
+                // Audit E1: stamp the deferring service so the claim gate consults its breaker.
                 tx.execute(
-                    &format!("UPDATE jobs SET status = 'queued', defer_until_ms = ?2, error = ?3, settled_at_ms = NULL, {CLEAR} WHERE id = ?1"),
-                    params![id, now_ms.saturating_add((*retry_after_ms).max(0)), note],
+                    &format!("UPDATE jobs SET status = 'queued', defer_until_ms = ?2, error = ?3, service = COALESCE(?4, service), settled_at_ms = NULL, {CLEAR} WHERE id = ?1"),
+                    params![id, now_ms.saturating_add((*retry_after_ms).max(0)), note, service_unhealthy],
                 )?
             }
         };
@@ -437,6 +438,36 @@ impl StateDb {
         )?)
     }
 
+    /// Like [`Self::recover_stale_leases`], but never requeues a row whose id is in `live`
+    /// (a job this process is still executing is long-running, not stale).
+    pub fn recover_stale_leases_except(
+        &mut self,
+        now_ms: i64,
+        live: &HashSet<String>,
+    ) -> Result<usize> {
+        let cutoff = now_ms - self.config.stale_lease_ms;
+        let stale: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM jobs WHERE status = 'running' AND claimed_at_ms < ?1")?;
+            stmt.query_map(params![cutoff], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut n = 0;
+        for id in stale.iter().filter(|id| !live.contains(*id)) {
+            n += self.conn.execute(
+                "UPDATE jobs SET status = 'queued', claim_token = NULL, claimed_at_ms = NULL WHERE id = ?1 AND status = 'running' AND claimed_at_ms < ?2",
+                params![id, cutoff],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// Set the terminal-row retention used by [`Self::prune_terminal`] (`<= 0` keeps forever).
+    pub fn set_retention_ms(&mut self, retention_ms: i64) {
+        self.config.retention_ms = retention_ms;
+    }
+
     /// Delete terminal rows settled strictly before `now - retention_ms` (boundary kept).
     /// `retention_ms <= 0` keeps forever.
     pub fn prune_terminal(&mut self, now_ms: i64) -> Result<usize> {
@@ -464,7 +495,8 @@ impl StateDb {
     /// statement, clearing their diagnostic. Port of `requeueServiceFailures`
     /// (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/failedJobRepair.ts:106-134`); selection reads
     /// the stamped column, never the error text. Rows whose dedupe key already has a pending
-    /// job are left failed (deviation: avoids minting a duplicate).
+    /// job are left failed (deviation: avoids minting a duplicate). Requeued rows get
+    /// `attempts = 0` — a fresh transient-retry budget.
     pub fn requeue_service_failures(&mut self, dry_run: bool) -> Result<RequeueBreakdown> {
         let tx = self
             .conn
@@ -482,7 +514,7 @@ impl StateDb {
         }
         if !dry_run {
             let n = tx.execute(
-                "UPDATE jobs SET status = 'queued', error = NULL, failure_reason = NULL, failure_kind = NULL, settled_at_ms = NULL, defer_until_ms = NULL
+                "UPDATE jobs SET status = 'queued', error = NULL, failure_reason = NULL, failure_kind = NULL, settled_at_ms = NULL, defer_until_ms = NULL, attempts = 0
                  WHERE status = 'failed' AND failure_kind = 'service'
                    AND (dedupe_key IS NULL OR NOT EXISTS (SELECT 1 FROM jobs p WHERE p.dedupe_key = jobs.dedupe_key AND p.status IN ('queued','running')))",
                 [],
