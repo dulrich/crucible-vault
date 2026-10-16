@@ -628,3 +628,160 @@ fn terminal_status_before_the_reply_still_follows_and_original_kept_opens_new_ta
     tabs.sort();
     assert_eq!(tabs, ["a.md", "kinds/b.md"]);
 }
+
+// --- WP-8: palette hints -----------------------------------------------------------------
+
+fn titled(id: &str, title: &str, group: &str) -> ActionInfo {
+    let mut a = action(id, Vec::new(), &[]);
+    a.title = title.into();
+    a.group = Some(group.into());
+    a
+}
+
+/// Whether `q` ranks `i` strictly first (rank_entries' order, plus no equal-score runner-up).
+fn uniquely_first(q: &str, i: usize, entries: &[Entry]) -> bool {
+    let hays = haystacks(entries);
+    let r = editor_model::rank::rank(q, &hays, &[], |_| false, 2);
+    rank_entries(q, entries).first() == Some(&i) && (r.len() < 2 || r[0].score > r[1].score)
+}
+
+fn real_plus_synthetic() -> Vec<Entry> {
+    let words = [
+        "Capture",
+        "Ingest",
+        "Summarize",
+        "Translate",
+        "Archive",
+        "Tag",
+        "Link",
+        "Export",
+        "Review",
+        "Draft",
+    ];
+    let objs = ["note", "clipping", "fanfic", "daily", "inbox"];
+    let mut actions = vec![titled(PERIOD_OPEN, "Open period note", "Periodic")];
+    for (n, (w, o)) in words
+        .iter()
+        .flat_map(|w| objs.iter().map(move |o| (w, o)))
+        .enumerate()
+    {
+        actions.push(titled(
+            &format!("syn.{n}"),
+            &format!("{w} {o}"),
+            "Pipelines",
+        ));
+    }
+    build_entries(&actions)
+}
+
+#[test]
+fn hints_rank_their_entry_uniquely_first() {
+    let entries = real_plus_synthetic();
+    let hints = hints::compute(&entries);
+    assert_eq!(hints.len(), entries.len());
+    let mut with = 0;
+    for (i, h) in hints.iter().enumerate() {
+        if let Some(h) = h {
+            with += 1;
+            assert!(h.chars().count() <= hints::MAX_LEN);
+            assert!(
+                uniquely_first(h, i, &entries),
+                "{h:?} for {:?}",
+                entries[i].title
+            );
+        }
+    }
+    assert!(
+        with * 2 > entries.len(),
+        "only {with}/{} have hints",
+        entries.len()
+    );
+}
+
+#[test]
+fn hints_are_shortest_first() {
+    let entries = real_plus_synthetic();
+    let hints = hints::compute(&entries);
+    for (i, h) in hints.iter().enumerate() {
+        let Some(h) = h else { continue };
+        let t: Vec<char> = entries[i].title.to_lowercase().chars().collect();
+        let n = h.chars().count();
+        if n == 1 {
+            continue;
+        }
+        // No shorter alphanumeric subsequence of the title qualifies.
+        let allowed: Vec<char> = t.iter().copied().filter(|c| c.is_alphanumeric()).collect();
+        let mut shorter = std::collections::HashSet::new();
+        let mut stack: Vec<(usize, String)> = vec![(0, String::new())];
+        while let Some((start, s)) = stack.pop() {
+            if !s.is_empty() {
+                shorter.insert(s.clone());
+            }
+            if s.chars().count() == n - 1 || s.chars().count() >= 2 {
+                continue; // bounded check: lengths 1..=min(n-1, 2)
+            }
+            for (k, c) in allowed.iter().enumerate().skip(start) {
+                stack.push((k + 1, format!("{s}{c}")));
+            }
+        }
+        for s in shorter {
+            assert!(!uniquely_first(&s, i, &entries), "{s:?} beats {h:?}");
+        }
+    }
+}
+
+#[test]
+fn colliding_entries_get_no_hint() {
+    // Two identical titles in the same group: neither can be strictly first.
+    let actions = vec![
+        titled("a", "Same title", "G"),
+        titled("b", "Same title", "G"),
+        titled("c", "Other thing", "G"),
+    ];
+    let entries = build_entries(&actions);
+    let hints = hints::compute(&entries);
+    let n = entries.len();
+    assert_eq!(hints[n - 3], None);
+    assert_eq!(hints[n - 2], None);
+    assert!(hints[n - 1].is_some());
+}
+
+#[test]
+fn hints_recompute_on_entry_set_change() {
+    let mut p = Palette::default();
+    assert_eq!(p.hints.len(), p.entries.len());
+    assert!(p.hints.iter().any(Option::is_some));
+    p.set_actions(vec![titled("zz", "Zebra quokka", "Animals")]);
+    assert_eq!(p.hints.len(), p.entries.len());
+    let i = p.entries.len() - 1;
+    let h = p.hints[i].clone().expect("hint for the new action");
+    assert!(uniquely_first(&h, i, &p.entries));
+    let first = p.entries[0].id.clone();
+    let id = match first {
+        EntryId::Client(c) => c.id(),
+        EntryId::Action(a) => a,
+    };
+    p.set_hidden(vec![id]);
+    assert_eq!(p.hints.len(), p.entries.len());
+    assert_eq!(p.hints, hints::compute(&p.entries));
+}
+
+#[test]
+fn hints_compute_time_is_bounded() {
+    let entries = real_plus_synthetic();
+    let t0 = Instant::now();
+    let hints = hints::compute(&entries);
+    let el = t0.elapsed();
+    eprintln!(
+        "WP-8 hints: {} entries, {} with hints, {:?} ({} build)",
+        entries.len(),
+        hints.iter().filter(|h| h.is_some()).count(),
+        el,
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
+    assert!(el < Duration::from_secs(5), "{el:?}");
+}

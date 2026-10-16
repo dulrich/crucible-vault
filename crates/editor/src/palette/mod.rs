@@ -9,6 +9,7 @@
 //! hash (the app's `run_call`/`after_save_first`).
 
 pub mod chord;
+pub mod hints;
 pub mod prompt;
 #[cfg(test)]
 mod tests;
@@ -477,20 +478,11 @@ pub fn visible_entries(entries: Vec<Entry>, hidden: &[String]) -> Vec<Entry> {
 
 /// Ranks `entries` against `query` (fuzzy over `"title group"`), best first, as indices.
 pub fn rank_entries(query: &str, entries: &[Entry]) -> Vec<usize> {
-    // `rank` scores path-like strings; '/' would split a "basename", so it is neutralized, and a
-    // per-entry suffix keeps haystacks unique.
-    let mut by_hay: HashMap<String, usize> = HashMap::new();
-    let hays: Vec<String> = entries
+    let hays = haystacks(entries);
+    let by_hay: HashMap<String, usize> = hays
         .iter()
         .enumerate()
-        .map(|(i, e)| {
-            let mut h = format!("{} {}", e.title, e.group).replace('/', " ");
-            if by_hay.contains_key(&h) {
-                h.push_str(&" ".repeat(i + 1));
-            }
-            by_hay.insert(h.clone(), i);
-            h
-        })
+        .map(|(i, h)| (h.clone(), i))
         .collect();
     if query.trim().is_empty() {
         return (0..entries.len()).collect();
@@ -498,6 +490,24 @@ pub fn rank_entries(query: &str, entries: &[Entry]) -> Vec<usize> {
     rank(query, &hays, &[], |_| false, entries.len())
         .into_iter()
         .filter_map(|r| by_hay.get(&r.path).copied())
+        .collect()
+}
+
+/// The ranking haystacks of `entries` (parallel): `rank` scores path-like strings; '/' would
+/// split a "basename", so it is neutralized, and a per-entry suffix keeps haystacks unique.
+pub(crate) fn haystacks(entries: &[Entry]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let mut h = format!("{} {}", e.title, e.group).replace('/', " ");
+            if seen.contains(&h) {
+                h.push_str(&" ".repeat(i + 1));
+            }
+            seen.insert(h.clone());
+            h
+        })
         .collect()
 }
 
@@ -855,16 +865,21 @@ pub struct Palette {
     pub early_open: HashMap<String, String>,
     /// `editor.toml` `palette.hidden`: ids left out of the list (chords still work).
     pub hidden: Vec<String>,
+    /// WP-8: the cached minimum-subsequence hint per entry (parallel to `entries`), recomputed
+    /// in `rebuild` (entry-set change) only.
+    pub hints: Vec<Option<String>>,
 }
 
 impl Default for Palette {
     fn default() -> Self {
+        let entries = build_entries(&[]);
         Self {
+            hints: hints::compute(&entries),
             open: false,
             query: String::new(),
             results: Vec::new(),
             selected: 0,
-            entries: build_entries(&[]),
+            entries,
             actions: None,
             loading: false,
             keymap: std::sync::Arc::new(Keymap::default()),
@@ -944,7 +959,11 @@ impl Palette {
         self.notice = km.notices.clone();
         let mut all = build_entries(actions);
         apply_keys(&mut all, &km);
-        self.entries = visible_entries(all, &self.hidden);
+        let entries = visible_entries(all, &self.hidden);
+        if entries != self.entries || self.hints.len() != entries.len() {
+            self.hints = hints::compute(&entries);
+        }
+        self.entries = entries;
         self.keymap = std::sync::Arc::new(km);
         self.refresh();
     }
@@ -1187,10 +1206,20 @@ pub fn view<'a>(p: &'a Palette, t: Tokens) -> Element<'a, Message> {
         if row_i == p.selected {
             title = title.color(t.accent_text.to_color());
         }
+        let hint = p.hints.get(i).cloned().flatten().unwrap_or_default();
+        let hint_color = if !hint.is_empty() && p.query.trim().to_lowercase() == hint {
+            t.accent_text
+        } else {
+            t.text_faint
+        };
         col = col.push(
             button(
                 row![
                     title.width(Length::Fill),
+                    text(hint)
+                        .size(12)
+                        .font(iced::Font::MONOSPACE)
+                        .color(hint_color.to_color()),
                     text(e.group.as_str())
                         .size(12)
                         .color(t.text_faint.to_color()),
