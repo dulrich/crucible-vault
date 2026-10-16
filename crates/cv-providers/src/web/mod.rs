@@ -21,6 +21,8 @@ use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+pub mod fx;
+pub mod weather;
 pub mod x;
 pub mod youtube;
 

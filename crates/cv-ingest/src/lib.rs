@@ -5,6 +5,7 @@
 //! HTML to Markdown ([`html`]). Later WPs add modules (one `mod` line each).
 
 pub mod blogs;
+pub mod brief;
 pub mod feed;
 pub mod html;
 pub mod tracker;

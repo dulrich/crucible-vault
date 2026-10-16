@@ -200,7 +200,7 @@ const STEPS: &[(&str, &str)] = &[
     ),
     ("track_youtube", "limit_per_source = 25"),
     ("track_blogs", ""),
-    ("ignore_video", ""),
+    ("ignore_video", "mode = \"manual\""),
     ("daily_brief", ""),
 ];
 

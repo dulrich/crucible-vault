@@ -697,14 +697,21 @@ pub static TRACK_BLOGS: Record = Record {
     rules: &[],
 };
 
-/// `ignore_video` — `crates/cv/src/steps/ignore.rs` (A2 stub: no params until WP-9).
+/// `ignore_video` — `crates/cv/src/steps/ignore.rs` (`mode`, `KEYS`).
 pub static IGNORE_VIDEO: Record = Record {
     name: "ignore_video",
-    fields: &[],
+    fields: &[field(
+        "mode",
+        "Mode",
+        "auto: ignore the active metadata note's video when it is a short on an [ignore_shorts] channel; manual: always ignore it",
+        Node::Enum(&["auto", "manual"]),
+    )
+    .dflt(D::Str("auto"))],
     rules: &[],
 };
 
-/// `daily_brief` — `crates/cv/src/steps/daily_brief.rs` (A2 stub: no params until WP-9).
+/// `daily_brief` — `crates/cv/src/steps/daily_brief.rs` (no params: `pipelines.toml`
+/// `[daily_brief]` configures it).
 pub static DAILY_BRIEF: Record = Record {
     name: "daily_brief",
     fields: &[],
