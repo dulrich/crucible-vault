@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_protocol::{ChangeKind, Mode};
-use iced::widget::{button, column, row, text, text_input};
+use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length};
 
 use crate::daemon::LocalIndex;
@@ -430,38 +430,61 @@ pub fn view<'a>(ex: &'a Explorer, tokens: Tokens, mode: Mode) -> Element<'a, Mes
     let list = VirtualList::new(&ex.rows, ROW_HEIGHT, ex.window, |w| {
         Message::Explorer(ExplorerMsg::Scrolled(w))
     })
-    .view(move |_, r| {
-        let indent = "  ".repeat(r.depth);
-        let icon = match r.folder {
-            Some(true) => "▾ ",
-            Some(false) => "▸ ",
-            None => "  ",
-        };
-        let label = format!("{indent}{icon}{}", r.name);
-        let msg = if r.folder.is_some() {
-            ExplorerMsg::Toggle(r.path.clone())
-        } else {
-            ExplorerMsg::Open(r.path.clone())
-        };
-        let mut t = text(label).size(14);
-        if selected == Some(r.path.as_str()) {
-            t = t.color(tokens.accent_text.to_color());
-        }
-        let b = button(t)
-            .style(button::text)
-            .padding([2, 4])
-            .width(Length::Fill)
-            .on_press(Message::Explorer(msg));
-        // plan editor-ui-round-3 WP-4: right-click a row for its context menu.
-        crate::context_menu::on_right(
-            b,
-            crate::context_menu::Target::Row {
-                path: r.path.clone(),
-                folder: r.folder.is_some(),
-            },
-        )
-    });
+    .view(move |_, r| row_view(r, selected, tokens));
     col.push(list).height(Length::Fill).into()
+}
+
+/// One tree row (plan editor-ui-round-3 WP-7): a single clipped line of `ROW_HEIGHT` — the label
+/// never wraps (iced 0.14 has no ellipsis, so it is clipped to the row width) and the full path
+/// shows in a delayed hover tooltip, so a long name never overlaps the next row.
+pub fn row_view<'a>(r: &'a Row, selected: Option<&str>, tokens: Tokens) -> Element<'a, Message> {
+    let indent = "  ".repeat(r.depth);
+    let icon = match r.folder {
+        Some(true) => "▾ ",
+        Some(false) => "▸ ",
+        None => "  ",
+    };
+    let label = format!("{indent}{icon}{}", r.name);
+    let msg = if r.folder.is_some() {
+        ExplorerMsg::Toggle(r.path.clone())
+    } else {
+        ExplorerMsg::Open(r.path.clone())
+    };
+    let mut t = text(label)
+        .size(14)
+        .wrapping(iced::widget::text::Wrapping::None)
+        .align_y(iced::alignment::Vertical::Center)
+        .height(Length::Fill);
+    if selected == Some(r.path.as_str()) {
+        t = t.color(tokens.accent_text.to_color());
+    }
+    let b = button(
+        container(t)
+            .clip(true)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .style(button::text)
+    .padding([2, 4])
+    .width(Length::Fill)
+    .height(ROW_HEIGHT)
+    .on_press(Message::Explorer(msg));
+    let tip = iced::widget::tooltip(
+        b,
+        container(text(r.path.clone()).size(13))
+            .padding(6)
+            .style(crate::theme::seg_group_style(tokens)),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .delay(std::time::Duration::from_millis(600));
+    // plan editor-ui-round-3 WP-4: right-click a row for its context menu.
+    crate::context_menu::on_right(
+        container(tip).clip(true).height(ROW_HEIGHT),
+        crate::context_menu::Target::Row {
+            path: r.path.clone(),
+            folder: r.folder.is_some(),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -520,5 +543,20 @@ mod tests {
         assert_eq!(e.files, files);
         assert_eq!(e.folders, folders);
         assert!(!e.files.iter().any(|p| p.starts_with(".trash")));
+    }
+
+    /// Plan editor-ui-round-3 WP-7: a 200-char name builds as one clipped row.
+    #[test]
+    fn long_name_row_builds() {
+        let name = "x".repeat(200);
+        let r = Row {
+            depth: 3,
+            path: format!("a/b/c/{name}.md"),
+            name,
+            folder: None,
+        };
+        let t = crate::theme::Surround::Dark.tokens().expect("tokens");
+        let _el: Element<'_, Message> = row_view(&r, Some(r.path.as_str()), t);
+        assert!((ROW_HEIGHT - 24.0).abs() < f32::EPSILON);
     }
 }

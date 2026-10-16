@@ -756,3 +756,28 @@ fn capture_accepts_ctrl_page_up() {
         Some(&Bound::Client(ClientCmd::GoToBottom))
     );
 }
+
+/// Plan editor-ui-round-3 WP-7: a capture note and entering capture leave the scrollable's
+/// content (row count, per-row notices, i.e. row heights) and its stable id unchanged — the note
+/// lives in the fixed `notice_bar` outside the scrollable.
+#[test]
+fn note_and_capture_keep_scroll_content() {
+    let shape = |st: &hotkeys::HotkeyState| {
+        hotkeys::rows(st, None)
+            .iter()
+            .map(|r| r.notices.len())
+            .collect::<Vec<_>>()
+    };
+    let mut st = hotkeys::HotkeyState::default();
+    let before = shape(&st);
+    let id = body_scroll_id(Section::Hotkeys);
+    st.note = Some("Ctrl+W is already assigned to Close tab".into());
+    assert_eq!(shape(&st), before);
+    st.record(Target::Command("quit".into()));
+    assert_eq!(shape(&st), before);
+    st.note = Some("reserved".into());
+    assert_eq!(shape(&st), before);
+    assert_eq!(body_scroll_id(Section::Hotkeys), id);
+    let t = crate::theme::Surround::Dark.tokens().expect("tokens");
+    let _bar: iced::Element<'_, crate::message::Message> = hotkeys::notice_bar(&st, t);
+}

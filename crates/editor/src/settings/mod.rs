@@ -1047,6 +1047,12 @@ fn msg(m: SettingsMsg) -> Message {
     Message::Settings(m)
 }
 
+/// The page body scrollable's stable id, per section (plan editor-ui-round-3 WP-7): its scroll
+/// offset survives view rebuilds (capture enter/leave, notices) instead of following tree shape.
+pub fn body_scroll_id(sec: Section) -> iced::widget::Id {
+    iced::widget::Id::from(format!("settings-body:{}", sec.label()))
+}
+
 /// The rail + page.
 pub fn view<'a>(
     s: &'a Settings,
@@ -1073,9 +1079,13 @@ pub fn view<'a>(
                 row![
                     text(sec.icon().glyph().to_string())
                         .font(crate::icons::FONT)
-                        .size(crate::theme::ICON_SIZE),
-                    text(label).size(14),
+                        .size(crate::theme::ICON_SIZE)
+                        .line_height(1.0)
+                        .align_y(iced::alignment::Vertical::Center)
+                        .height(Length::Fill),
+                    crate::theme::control_label(label, 14.0),
                 ]
+                .height(Length::Fill)
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
             )
@@ -1090,8 +1100,16 @@ pub fn view<'a>(
         .padding(1)
         .style(crate::theme::seg_group_style(t));
     let body = scrollable(container(page(s, prefs, paths, t, mode)).padding([0, 16]))
+        .id(body_scroll_id(s.section))
         .width(Length::Fill)
         .height(Length::Fill);
+    let body: Element<'a, Message> = if s.section == Section::Hotkeys {
+        column![pages::hotkeys::notice_bar(&s.hotkeys, t), body]
+            .height(Length::Fill)
+            .into()
+    } else {
+        body.into()
+    };
     row![rail, body].spacing(12).height(Length::Fill).into()
 }
 

@@ -304,6 +304,26 @@ fn row_view<'a>(r: HotkeyRow, recording: bool, editable: bool, t: Tokens) -> Ele
     col.into()
 }
 
+/// The fixed-height notice strip shown above the Hotkeys page's scrollable (always present on
+/// the page, empty when there is no note), so the conflict / "already assigned" / reserved
+/// notice is visible wherever the list is scrolled and never resizes it.
+pub fn notice_bar(st: &HotkeyState, t: Tokens) -> Element<'_, Message> {
+    let n = st.note.as_deref().unwrap_or("");
+    container(
+        text(n)
+            .size(13)
+            .color(t.warn_text.to_color())
+            .wrapping(iced::widget::text::Wrapping::None)
+            .align_y(iced::alignment::Vertical::Center)
+            .height(Length::Fill),
+    )
+    .height(crate::theme::CONTROL)
+    .width(Length::Fill)
+    .padding([0, 16])
+    .clip(true)
+    .into()
+}
+
 /// The page.
 pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     let t = cx.t;
@@ -311,10 +331,9 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     let ed = cx.s.file(EDITOR_PATH);
     let ac = cx.s.file(ACTIONS_PATH);
     let editable = ed.is_some_and(|f| f.doc.is_some() && !f.saving);
+    // The capture note lives in [`notice_bar`], outside the scrollable (plan editor-ui-round-3
+    // WP-7): setting or clearing it never changes the list's height or scroll offset.
     let mut col = column![text(INTRO).size(13).color(t.text_faint.to_color())].spacing(8);
-    if let Some(n) = &st.note {
-        col = col.push(text(n.as_str()).size(13).color(t.warn_text.to_color()));
-    }
     for r in rows(st, ac.and_then(|f| f.doc.as_ref())) {
         let rec = st.recording.as_ref() == Some(&r.target);
         let ok = match &r.target {

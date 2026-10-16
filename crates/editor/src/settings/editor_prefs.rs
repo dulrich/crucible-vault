@@ -289,7 +289,7 @@ pub fn view<'a>(
     let surround = {
         let seg = |s: Surround| {
             let active = prefs.surround == s;
-            button(text(s.label()).size(14))
+            button(crate::theme::control_label(s.label(), 14.0))
                 .height(crate::theme::SEGMENT)
                 .padding([0, 12])
                 .style(crate::theme::segment_style(t, active))
@@ -308,7 +308,7 @@ pub fn view<'a>(
     };
     let tab_title = {
         let seg = |m: TabTitle| {
-            button(text(m.label()).size(14))
+            button(crate::theme::control_label(m.label(), 14.0))
                 .height(crate::theme::SEGMENT)
                 .padding([0, 12])
                 .style(crate::theme::segment_style(t, prefs.tab_title == m))
@@ -327,7 +327,7 @@ pub fn view<'a>(
     };
     let quick_switch = {
         let seg = |m: QuickSwitchOpen| {
-            button(text(m.label()).size(14))
+            button(crate::theme::control_label(m.label(), 14.0))
                 .height(crate::theme::SEGMENT)
                 .padding([0, 12])
                 .style(crate::theme::segment_style(t, prefs.quick_switch_open == m))
@@ -349,7 +349,7 @@ pub fn view<'a>(
     };
     let confirm = {
         let seg = |m: DeleteMode, label: &'static str| {
-            button(text(label).size(14))
+            button(crate::theme::control_label(label, 14.0))
                 .height(crate::theme::SEGMENT)
                 .padding([0, 12])
                 .style(crate::theme::segment_style(t, prefs.delete_mode == m))

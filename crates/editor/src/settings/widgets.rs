@@ -220,7 +220,7 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                     } else {
                         DocEdit::Set(path.clone(), ScalarValue::Str((*c).to_owned()))
                     };
-                    button(text(*c).size(14))
+                    button(theme::control_label(*c, 14.0))
                         .height(theme::SEGMENT)
                         .padding([0, 12])
                         .style(theme::segment_style(t, active))

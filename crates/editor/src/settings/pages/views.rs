@@ -30,7 +30,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
         let label = if dirty { format!("{name} •") } else { name };
         let on = s.view_selected.as_deref() == Some(p.as_str());
         list = list.push(
-            button(text(label).size(14))
+            button(theme::control_label(label, 14.0))
                 .height(theme::SEGMENT)
                 .padding([0, 12])
                 .style(theme::segment_style(t, on))
