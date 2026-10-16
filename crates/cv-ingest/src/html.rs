@@ -28,6 +28,22 @@ pub fn word_count(html: &str) -> usize {
     strip_tags(html).split_whitespace().count()
 }
 
+/// Plain text of `html` on one line (tags dropped, the common entities decoded, whitespace
+/// collapsed) — the captured blog note's `description` (plan `v0-automation-pipelines` WP-8).
+#[must_use]
+pub fn html_to_text(html: &str) -> String {
+    let pre = html
+        .replace("&nbsp;", " ")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    strip_tags(&pre)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Replaces `<script>…</script>`/`<style>…</style>` blocks, tags and `&name;`/`&#n;` entities with
 /// spaces.
 fn strip_tags(html: &str) -> String {

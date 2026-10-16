@@ -690,7 +690,7 @@ pub static TRACK_YOUTUBE: Record = Record {
     rules: &[],
 };
 
-/// `track_blogs` — `crates/cv/src/steps/tracker/blogs.rs` (A2 stub: no params until WP-8).
+/// `track_blogs` — `crates/cv/src/steps/tracker/blogs.rs` (no params; config from `pipelines.toml` `[blogs]` + `sources.toml` `[[blog]]`).
 pub static TRACK_BLOGS: Record = Record {
     name: "track_blogs",
     fields: &[],

@@ -78,6 +78,16 @@ pub fn record(
     c: &Candidate,
     outcome: TrackerOutcome,
 ) -> Result<bool, StepError> {
+    record_with(ctx, c, outcome, None)
+}
+
+/// [`record`] with the blog automatable evidence (`full_body`, WP-8).
+pub(crate) fn record_with(
+    ctx: &StepCtx<'_>,
+    c: &Candidate,
+    outcome: TrackerOutcome,
+    full_body: Option<bool>,
+) -> Result<bool, StepError> {
     lock(ctx)
         .insert_tracker_item(&TrackerItem {
             source_kind: c.source_kind.clone(),
@@ -89,7 +99,7 @@ pub fn record(
             day: local_day(),
             outcome,
             score: None,
-            full_body: None,
+            full_body,
         })
         .map_err(state_err)
 }
@@ -252,6 +262,16 @@ pub fn emit_line(
     c: &Candidate,
     out_paths: &mut Vec<String>,
 ) -> Result<Emitted, StepError> {
+    emit_line_with(ctx, c, None, out_paths)
+}
+
+/// [`emit_line`] recording the blog automatable evidence `full_body` on the row (WP-8).
+pub(crate) fn emit_line_with(
+    ctx: &mut StepCtx<'_>,
+    c: &Candidate,
+    full_body: Option<bool>,
+    out_paths: &mut Vec<String>,
+) -> Result<Emitted, StepError> {
     let known = lock(ctx)
         .tracker_item(&c.source_kind, &c.source_key, &c.item_id)
         .map_err(state_err)?
@@ -264,7 +284,7 @@ pub fn emit_line(
         && !c.url.is_empty()
         && String::from_utf8_lossy(&bytes).contains(&c.url)
     {
-        record(ctx, c, TrackerOutcome::Line)?;
+        record_with(ctx, c, TrackerOutcome::Line, full_body)?;
         return Ok(Emitted::Recovered);
     }
     let step = intake_step(ctx.config)?;
@@ -298,7 +318,7 @@ pub fn emit_line(
     if hook::fail_now() {
         return Err(StepError::failed("injected failure after line write"));
     }
-    record(ctx, c, TrackerOutcome::Line)?;
+    record_with(ctx, c, TrackerOutcome::Line, full_body)?;
     Ok(Emitted::Written)
 }
 
