@@ -544,3 +544,16 @@ fn defaults_are_valid_values_of_their_nodes() {
     walk(view_schema(), &mut seen);
     assert!(seen > 30, "{seen}");
 }
+
+/// Plan editor-ui-round-3 WP-9: a bookmark's optional `keys` validates as chords; a file
+/// without it (the pre-WP-9 shape) stays valid, and unknown keys are still tolerated.
+#[test]
+fn bookmark_keys_optional_and_checked() {
+    let old = "[[bookmark]]\nname = \"A\"\npath = \"a.md\"\nextra = 1\n";
+    assert!(errs(old, "bookmarks.toml").is_empty());
+    assert_eq!(doc(old).to_string(), old);
+    let with = "[[bookmark]]\nname = \"A\"\npath = \"a.md\"\nkeys = [\"Ctrl+Alt+1\"]\n";
+    assert!(errs(with, "bookmarks.toml").is_empty());
+    let bad = "[[bookmark]]\nname = \"A\"\npath = \"a.md\"\nkeys = \"Ctrl+1\"\n";
+    assert!(!errs(bad, "bookmarks.toml").is_empty());
+}

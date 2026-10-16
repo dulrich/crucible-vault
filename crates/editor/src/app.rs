@@ -2146,7 +2146,7 @@ impl App {
 
     fn update_bookmarks(&mut self, m: BookmarkMsg) -> Task<Message> {
         match m {
-            BookmarkMsg::Open(p) => self.open(&p, true),
+            BookmarkMsg::Open(p) => return self.open_bookmark(&p),
             BookmarkMsg::Written(r) => {
                 let d = self.daemon.clone();
                 let err = match &r {
@@ -2194,8 +2194,14 @@ impl App {
                     );
                     return Task::none();
                 }
-                let Some(e) = bookmarks::doc_edit(&edit, &self.bookmarks.items, active.as_deref())
-                else {
+                let e = match &edit {
+                    BookmarkMsg::SetKeys(path, keys) => f
+                        .doc
+                        .as_ref()
+                        .and_then(|d| bookmarks::keys_edit(d, path, keys.as_deref())),
+                    _ => bookmarks::doc_edit(&edit, &self.bookmarks.items, active.as_deref()),
+                };
+                let Some(e) = e else {
                     return Task::none();
                 };
                 if let Err(err) = self.settings.edit(BOOKMARKS_PATH, &e) {
@@ -2226,6 +2232,29 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Opens a bookmark (panel click, palette command or chord); a bookmark whose path the
+    /// index does not hold gives a status notice instead of an error tab (plan
+    /// editor-ui-round-3 WP-9).
+    fn open_bookmark(&mut self, path: &str) -> Task<Message> {
+        if self.bookmarks.missing.contains(path) {
+            self.status.error = Some(format!("bookmark target missing: {path}"));
+            return Task::none();
+        }
+        self.open(path, true);
+        Task::none()
+    }
+
+    /// WP-9: recomputes which bookmarks the index lacks (load, `FileChanged`,
+    /// `IndexGeneration`). Without a daemon nothing is known, so nothing is marked.
+    fn refresh_bookmark_missing(&mut self) {
+        if self.daemon.is_none() {
+            self.bookmarks.missing.clear();
+            return;
+        }
+        let held = self.indexed_fn();
+        self.bookmarks.refresh_missing(held);
     }
 
     fn dispatch_op(&mut self, op: FileOp) -> Task<Message> {
@@ -2789,8 +2818,7 @@ impl App {
     fn on_chord(&mut self, c: &crate::palette::chord::Chord) -> Task<Message> {
         use crate::palette::Bound;
         if self.settings.hotkeys.recording.is_some() {
-            self.capture_chord(c);
-            return Task::none();
+            return self.capture_chord(c);
         }
         match self.palette.keymap.get(c).cloned() {
             Some(Bound::Client(cmd)) => return self.update(cmd.message(self.focus)),
@@ -2802,6 +2830,7 @@ impl App {
                 return self.run_preset(preset);
             }
             Some(Bound::Action(id)) => return self.invoke_action(&id),
+            Some(Bound::Bookmark(p)) => return self.open_bookmark(&p),
             None => {}
         }
         if crate::palette::chord::text_editing(c) || self.palette.actions.is_some() {
@@ -2843,6 +2872,10 @@ impl App {
                 self.update(c.message(self.focus))
             }
             crate::palette::EntryId::Action(id) => self.invoke_action(&id),
+            crate::palette::EntryId::Bookmark(p) => {
+                self.palette.close();
+                self.open_bookmark(&p)
+            }
         }
     }
 
@@ -3240,6 +3273,7 @@ impl App {
                         // WP-2 (audit B1): every generation re-reads membership from the index
                         // (a `.gitignore` rebuild drops/restores paths).
                         self.refresh_files();
+                        self.refresh_bookmark_missing();
                     }
                     Notification::JobUpdated(j) => {
                         let state = serde_json::to_value(j.status)
@@ -3272,6 +3306,7 @@ impl App {
                             self.sync_view_files();
                         }
                         self.settings_file_changed(&path, hash.as_deref());
+                        self.refresh_bookmark_missing();
                     }
                     Notification::OpenRequested { path } => self.open(&path, true),
                     Notification::ViewsInvalidated { view_ids } => self.views.invalidate(&view_ids),
@@ -3353,11 +3388,11 @@ impl App {
 
     /// A chord captured while the Hotkeys page records: becomes the row's chord (in the doc;
     /// auto-saved, plan editor-feedback-round-2 WP-2), or a note when it cannot be bound.
-    fn capture_chord(&mut self, c: &crate::palette::chord::Chord) {
+    fn capture_chord(&mut self, c: &crate::palette::chord::Chord) -> Task<Message> {
         use crate::palette::chord;
-        use crate::settings::pages::hotkeys::{self, ACTIONS_PATH};
+        use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, Target};
         let Some(target) = self.settings.hotkeys.recording.take() else {
-            return;
+            return Task::none();
         };
         let actions_doc = self
             .settings
@@ -3368,12 +3403,25 @@ impl App {
         {
             // Plan editor-feedback-round-2 WP-1: the existing binding wins; nothing is edited.
             self.settings.hotkeys.note = Some(format!("{c} is already assigned to {other}"));
-            return;
+            return Task::none();
+        }
+        if let Target::Bookmark(path) = target {
+            // WP-9: the chord goes on the bookmark record, written at once (shared CAS write).
+            return match hotkeys::check(c) {
+                Ok(()) => {
+                    self.update_bookmarks(BookmarkMsg::SetKeys(path, Some(vec![c.to_string()])))
+                }
+                Err(n) => {
+                    self.settings.hotkeys.note = Some(n);
+                    Task::none()
+                }
+            };
         }
         match hotkeys::record_edit(&target, c, actions_doc) {
             Ok((file, edit)) => self.hotkey_edit(&file, &edit),
             Err(n) => self.settings.hotkeys.note = Some(n),
         }
+        Task::none()
     }
 
     /// Applies a Hotkeys document edit and re-derives prefs / keymap.
@@ -3384,10 +3432,13 @@ impl App {
         self.apply_prefs();
     }
 
-    fn update_hotkeys(&mut self, m: crate::settings::pages::hotkeys::HotkeyMsg) {
-        use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg};
+    fn update_hotkeys(&mut self, m: crate::settings::pages::hotkeys::HotkeyMsg) -> Task<Message> {
+        use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg, Target};
         let doc = |s: &crate::settings::Settings, p: &str| s.file(p).and_then(|f| f.doc.clone());
         match m {
+            HotkeyMsg::Clear(Target::Bookmark(path)) => {
+                return self.update_bookmarks(BookmarkMsg::SetKeys(path, None));
+            }
             HotkeyMsg::Record(t) => self.settings.hotkeys.record(t),
             HotkeyMsg::Cancel => self.settings.hotkeys.cancel(),
             HotkeyMsg::Clear(t) => {
@@ -3405,6 +3456,7 @@ impl App {
                 }
             }
         }
+        Task::none()
     }
 
     /// The surround switch: edits `editor.toml`'s `surround` (auto-saved after the debounce,
@@ -3461,6 +3513,11 @@ impl App {
         if let Some(f) = self.settings.file(BOOKMARKS_PATH) {
             self.bookmarks.sync(f);
         }
+        // WP-9: the bookmark commands / chords follow the list.
+        self.palette.set_bookmarks(self.bookmarks.items.clone());
+        self.settings.hotkeys.bookmarks = self.bookmarks.items.clone();
+        self.refresh_bookmark_missing();
+        self.sync_hotkeys();
     }
 
     /// A `file_changed` for one of the settings files: reload when clean (external edits).
@@ -3521,7 +3578,7 @@ impl App {
                 }
                 return self.refresh_status_if_open();
             }
-            SettingsMsg::Hotkey(m) => self.update_hotkeys(m),
+            SettingsMsg::Hotkey(m) => return self.update_hotkeys(m),
             SettingsMsg::Section(s) => {
                 self.settings.section = s;
                 self.settings.hotkeys.cancel();

@@ -1206,6 +1206,8 @@ pub static BOOKMARK: Record = Record {
     fields: &[
         field("name", "Name", "Shown in the panel", Node::Str).req(),
         field("path", "Path", "Vault path", Node::Path).req(),
+        // plan editor-ui-round-3 WP-9: chords for "Open bookmark: <name>" (an action's shape).
+        field("keys", "Keys", "Key chords", Node::Chords),
     ],
     rules: &[],
 };

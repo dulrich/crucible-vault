@@ -634,7 +634,8 @@ mod wp4 {
             crate::bookmarks::parse(&bytes).expect("parse"),
             [crate::bookmarks::Bookmark {
                 name: "a".into(),
-                path: "wp4bm/a.md".into()
+                path: "wp4bm/a.md".into(),
+                keys: vec![],
             }]
         );
         assert_eq!(

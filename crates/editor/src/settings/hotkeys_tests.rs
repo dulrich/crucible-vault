@@ -781,3 +781,163 @@ fn note_and_capture_keep_scroll_content() {
     let t = crate::theme::Surround::Dark.tokens().expect("tokens");
     let _bar: iced::Element<'_, crate::message::Message> = hotkeys::notice_bar(&st, t);
 }
+
+// ---- plan editor-ui-round-3 WP-9: bookmark commands, chords and missing targets ----
+
+const BM: &str = "_custom/crucible-vault/bookmarks.toml";
+
+const TWO: &str = "[[bookmark]]\nname = \"A\"\npath = \"wp9/a.md\"\n\n[[bookmark]]\nname = \"B\"\npath = \"wp9/b.md\"\n";
+
+fn bm_app(d: &Arc<FakeDaemon>, toml: &str) -> App {
+    d.create_note("wp9/a.md", "a").expect("a");
+    d.create_note("wp9/b.md", "b").expect("b");
+    put(d, BM, toml);
+    hotkeys_app(d)
+}
+
+fn bm_on_disk(d: &FakeDaemon) -> Vec<crate::bookmarks::Bookmark> {
+    crate::bookmarks::parse(&std::fs::read(d.vault_root().join(BM)).expect("read")).expect("parse")
+}
+
+fn bm_msg(app: &mut App, m: crate::bookmarks::BookmarkMsg) {
+    let _ = app.update(Message::Panes(crate::message::PanesMsg::Bookmark(m)));
+}
+
+#[test]
+fn bookmark_commands_join_palette_and_hotkeys() {
+    let (_tmp, d) = fake();
+    let app = bm_app(&d, TWO);
+    assert_eq!(crate::palette::bookmark_id("wp9/a.md"), "bookmark:wp9/a.md");
+    assert!(
+        app.palette
+            .entries
+            .iter()
+            .any(|e| e.title == "Open bookmark: A"
+                && e.id == crate::palette::EntryId::Bookmark("wp9/a.md".into()))
+    );
+    let rows = hotkeys::rows(&app.settings.hotkeys, None);
+    let r = rows
+        .iter()
+        .find(|r| r.target == Target::Bookmark("wp9/b.md".into()))
+        .expect("row");
+    assert_eq!(
+        (r.title.as_str(), r.source),
+        ("Open bookmark: B", KeySource::BookmarksToml)
+    );
+}
+
+#[test]
+fn assigning_a_bookmark_chord_writes_keys_and_survives_reorder() {
+    let (_tmp, d) = fake();
+    let mut app = bm_app(&d, TWO);
+    hk(
+        &mut app,
+        HotkeyMsg::Record(Target::Bookmark("wp9/a.md".into())),
+    );
+    key(&mut app, "Alt+9");
+    let on_disk = bm_on_disk(&d);
+    assert_eq!(on_disk[0].keys, ["Alt+9"], "written at once");
+    assert!(on_disk[1].keys.is_empty());
+    assert_eq!(
+        app.palette.keymap.get(&c("Alt+9")),
+        Some(&Bound::Bookmark("wp9/a.md".into()))
+    );
+    // Reorder: the chord follows the bookmark.
+    bm_msg(&mut app, crate::bookmarks::BookmarkMsg::Down(0));
+    let on_disk = bm_on_disk(&d);
+    assert_eq!(on_disk[1].path, "wp9/a.md");
+    assert_eq!(on_disk[1].keys, ["Alt+9"]);
+    assert_eq!(
+        app.palette.keymap.get(&c("Alt+9")),
+        Some(&Bound::Bookmark("wp9/a.md".into()))
+    );
+    // The chord opens it.
+    key(&mut app, "Alt+9");
+    assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("wp9/a.md"));
+    // Clear drops the keys.
+    hk(
+        &mut app,
+        HotkeyMsg::Clear(Target::Bookmark("wp9/a.md".into())),
+    );
+    assert!(bm_on_disk(&d).iter().all(|b| b.keys.is_empty()));
+    assert_eq!(app.palette.keymap.get(&c("Alt+9")), None);
+}
+
+#[test]
+fn bookmark_chord_taken_elsewhere_is_refused() {
+    let (_tmp, d) = fake();
+    let mut app = bm_app(&d, TWO);
+    let before = std::fs::read_to_string(d.vault_root().join(BM)).expect("r");
+    hk(
+        &mut app,
+        HotkeyMsg::Record(Target::Bookmark("wp9/a.md".into())),
+    );
+    key(&mut app, "Ctrl+W");
+    let note = app.settings.hotkeys.note.clone().unwrap_or_default();
+    assert!(note.contains("Ctrl+W is already assigned to"), "{note}");
+    assert_eq!(
+        std::fs::read_to_string(d.vault_root().join(BM)).expect("r"),
+        before
+    );
+    // And a command cannot take a bookmark's chord.
+    hk(
+        &mut app,
+        HotkeyMsg::Record(Target::Bookmark("wp9/a.md".into())),
+    );
+    key(&mut app, "Alt+9");
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    key(&mut app, "Alt+9");
+    let note = app.settings.hotkeys.note.clone().unwrap_or_default();
+    assert!(
+        note.contains("already assigned to Open bookmark: A"),
+        "{note}"
+    );
+    assert_eq!(keys_of(&app, "quit"), None);
+}
+
+#[test]
+fn bookmark_chord_claimed_twice_at_load_registers_neither() {
+    let (_tmp, d) = fake();
+    let toml = "[[bookmark]]\nname = \"A\"\npath = \"wp9/a.md\"\nkeys = [\"Alt+9\"]\n\n[[bookmark]]\nname = \"B\"\npath = \"wp9/b.md\"\nkeys = [\"Alt+9\"]\n";
+    let app = bm_app(&d, toml);
+    let km = &app.palette.keymap;
+    assert_eq!(km.get(&c("Alt+9")), None);
+    assert!(km.conflicted.contains("bookmark:wp9/a.md"));
+    assert!(km.conflicted.contains("bookmark:wp9/b.md"));
+}
+
+#[test]
+fn missing_bookmarks_on_load_and_after_delete() {
+    let (_tmp, d) = fake();
+    let toml = format!("{TWO}\n[[bookmark]]\nname = \"G\"\npath = \"wp9/gone.md\"\n");
+    let mut app = bm_app(&d, &toml);
+    let set = |app: &App| app.bookmarks.missing.iter().cloned().collect::<Vec<_>>();
+    assert_eq!(set(&app), ["wp9/gone.md"]);
+    d.delete("wp9/b.md").expect("delete");
+    let _ = app.update(Message::Status(crate::message::StatusMsg::Notification(
+        cv_protocol::Notification::FileChanged {
+            path: "wp9/b.md".into(),
+            kind: cv_protocol::ChangeKind::Deleted,
+            hash: None,
+            origin: cv_protocol::Origin::External,
+        },
+    )));
+    // The daemon's rebuild lands as a new generation (refreshed there too).
+    let n = d.generation().expect("gen");
+    let _ = app.update(Message::Status(crate::message::StatusMsg::Notification(
+        cv_protocol::Notification::IndexGeneration { n },
+    )));
+    assert_eq!(set(&app), ["wp9/b.md", "wp9/gone.md"]);
+    // Opening a missing bookmark (panel click or command): a notice, no tab.
+    let tabs = |app: &App| app.panes.iter().map(|(_, p)| p.tabs.len()).sum::<usize>();
+    let before = tabs(&app);
+    bm_msg(
+        &mut app,
+        crate::bookmarks::BookmarkMsg::Open("wp9/gone.md".into()),
+    );
+    assert_eq!(
+        app.status.error.as_deref(),
+        Some("bookmark target missing: wp9/gone.md")
+    );
+    assert_eq!(tabs(&app), before);
+}

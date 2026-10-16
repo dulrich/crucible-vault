@@ -760,6 +760,7 @@ fn hints_recompute_on_entry_set_change() {
     let id = match first {
         EntryId::Client(c) => c.id(),
         EntryId::Action(a) => a,
+        EntryId::Bookmark(p) => bookmark_id(&p),
     };
     p.set_hidden(vec![id]);
     assert_eq!(p.hints.len(), p.entries.len());

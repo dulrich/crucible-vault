@@ -29,6 +29,11 @@ pub const BOOKMARKS_PATH: &str = "_custom/crucible-vault/bookmarks.toml";
 pub struct Bookmark {
     pub name: String,
     pub path: String,
+    /// Plan editor-ui-round-3 WP-9: the chords bound to "Open bookmark: <name>" (the shape of
+    /// an action's `keys`); absent = none. Stored on the record, so it follows the bookmark
+    /// through renames and reorders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -46,6 +51,9 @@ pub enum BookmarkMsg {
     Up(usize),
     Down(usize),
     Open(String),
+    /// WP-9: set (`Some`) or drop (`None`) the `keys` of the bookmark at this path (Hotkeys
+    /// page), written straight through the shared CAS write.
+    SetKeys(String, Option<Vec<String>>),
     /// A write finished.
     Written(Result<WriteOutcome, String>),
 }
@@ -58,6 +66,9 @@ pub struct Bookmarks {
     pub items: Vec<Bookmark>,
     /// A write of the shared file is in flight (edits wait for it).
     pub writing: bool,
+    /// WP-9: paths of bookmarks the index does not hold (refreshed on load, `FileChanged` and
+    /// `IndexGeneration`; never queried per frame).
+    pub missing: std::collections::BTreeSet<String>,
 }
 
 /// Parses the file body.
@@ -86,9 +97,29 @@ pub fn items_of(doc: &ConfigDoc) -> Vec<Bookmark> {
             let name = doc
                 .get_str(&p.key("name"))
                 .map_or_else(|| path.clone(), str::to_owned);
-            Some(Bookmark { name, path })
+            let keys = doc.get_str_list(&p.key("keys")).unwrap_or_default();
+            Some(Bookmark { name, path, keys })
         })
         .collect()
+}
+
+/// The `[[bookmark]]` index whose `path` is `path` in the doc.
+pub fn doc_index(doc: &ConfigDoc, path: &str) -> Option<usize> {
+    let list = Path::root().key("bookmark");
+    (0..doc.len(&list)).find(|&i| doc.get_str(&list.index(i).key("path")) == Some(path))
+}
+
+/// WP-9: the edit setting (`Some`) or dropping (`None`) the bookmark's `keys` (`None`: the
+/// bookmark is gone, or there is nothing to drop).
+pub fn keys_edit(doc: &ConfigDoc, path: &str, keys: Option<&[String]>) -> Option<DocEdit> {
+    let p = Path::root()
+        .key("bookmark")
+        .index(doc_index(doc, path)?)
+        .key("keys");
+    match keys {
+        Some(k) => Some(DocEdit::Set(p, ScalarValue::StrList(k.to_vec()))),
+        None => doc.get(&p).map(|_| DocEdit::Remove(p)),
+    }
 }
 
 /// The document edit a panel message makes (`None`: nothing to do).
@@ -120,6 +151,16 @@ pub fn doc_edit(m: &BookmarkMsg, items: &[Bookmark], active: Option<&str>) -> Op
 }
 
 impl Bookmarks {
+    /// WP-9: recomputes [`Self::missing`] with `held` (index membership).
+    pub fn refresh_missing(&mut self, held: impl Fn(&str) -> bool) {
+        self.missing = self
+            .items
+            .iter()
+            .filter(|b| !held(&b.path))
+            .map(|b| b.path.clone())
+            .collect();
+    }
+
     /// Re-derives the list from the shared file.
     pub fn sync(&mut self, f: &ConfigFile) {
         self.items = f.doc.as_ref().map(items_of).unwrap_or_default();
@@ -135,14 +176,20 @@ pub fn view<'a>(b: &'a Bookmarks, tokens: Tokens, mode: Mode) -> Element<'a, Mes
         let bt = button(text(label).size(13)).style(button::text);
         if editable { bt.on_press(msg(m)) } else { bt }
     };
-    let mut col = column![
-        row![
-            text("Bookmarks").size(14).color(tokens.heading.to_color()),
-            small("+ active", BookmarkMsg::AddActive),
-        ]
-        .spacing(6)
+    let mut head = row![
+        text("Bookmarks").size(14).color(tokens.heading.to_color()),
+        small("+ active", BookmarkMsg::AddActive),
     ]
-    .spacing(2);
+    .spacing(6);
+    if !b.missing.is_empty() {
+        // WP-9: the warning pill — how many bookmarks point at paths the index lacks.
+        head = head.push(
+            text(format!("{} missing", b.missing.len()))
+                .size(12)
+                .color(tokens.warn_text.to_color()),
+        );
+    }
+    let mut col = column![head].spacing(2);
     if mode == Mode::Shadow {
         col = col.push(
             text("bookmark edits are disabled in shadow mode")
@@ -153,10 +200,17 @@ pub fn view<'a>(b: &'a Bookmarks, tokens: Tokens, mode: Mode) -> Element<'a, Mes
     for (i, bm) in b.items.iter().enumerate() {
         col = col.push(
             row![
-                button(text(bm.name.as_str()).size(14))
-                    .style(button::text)
-                    .width(Length::Fill)
-                    .on_press(msg(BookmarkMsg::Open(bm.path.clone()))),
+                button({
+                    let t = text(bm.name.as_str()).size(14);
+                    if b.missing.contains(&bm.path) {
+                        t.color(tokens.warn_text.to_color())
+                    } else {
+                        t
+                    }
+                })
+                .style(button::text)
+                .width(Length::Fill)
+                .on_press(msg(BookmarkMsg::Open(bm.path.clone()))),
                 small("↑", BookmarkMsg::Up(i)),
                 small("↓", BookmarkMsg::Down(i)),
                 small("×", BookmarkMsg::Remove(i)),

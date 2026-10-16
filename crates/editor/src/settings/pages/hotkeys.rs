@@ -33,7 +33,7 @@ use crate::theme::{Tokens, icon_button};
 pub const ACTIONS_PATH: &str = "_custom/crucible-vault/actions.toml";
 
 /// The page intro line.
-pub const INTRO: &str = "Every bindable command. Record: the next Ctrl/Alt chord becomes its chord (Esc cancels). Editor commands are stored in editor.toml [keys], config actions in their actions.toml keys; nothing is written until Save.";
+pub const INTRO: &str = "Every bindable command. Record: the next Ctrl/Alt chord becomes its chord (Esc cancels). Editor commands are stored in editor.toml [keys], config actions in their actions.toml keys, bookmarks in their bookmarks.toml keys (written at once); the rest waits for Save.";
 
 /// Which row a Hotkeys edit targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,19 @@ pub enum Target {
     Command(String),
     /// A config action (its id).
     Action(String),
+    /// Plan editor-ui-round-3 WP-9: a bookmark (its path); its chord is written to the
+    /// bookmark's `keys` through the shared `bookmarks.toml` CAS write right away.
+    Bookmark(String),
+}
+
+impl Target {
+    /// The keymap id of the row.
+    pub fn id(&self) -> String {
+        match self {
+            Target::Command(i) | Target::Action(i) => i.clone(),
+            Target::Bookmark(p) => crate::palette::bookmark_id(p),
+        }
+    }
 }
 
 /// Hotkeys page messages.
@@ -65,6 +78,8 @@ pub struct HotkeyState {
     pub note: Option<String>,
     pub keymap: Arc<Keymap>,
     pub actions: Vec<ActionInfo>,
+    /// WP-9: the bookmarks snapshot (their rows follow the config actions).
+    pub bookmarks: Vec<crate::bookmarks::Bookmark>,
 }
 
 impl HotkeyState {
@@ -148,6 +163,18 @@ pub fn rows(st: &HotkeyState, actions_doc: Option<&ConfigDoc>) -> Vec<HotkeyRow>
             conflicted: km.conflicted.contains(&a.id),
         }
     }));
+    v.extend(st.bookmarks.iter().map(|b| {
+        let id = crate::palette::bookmark_id(&b.path);
+        HotkeyRow {
+            target: Target::Bookmark(b.path.clone()),
+            title: format!("Open bookmark: {}", b.name),
+            chords: km.chords.get(&id).cloned().unwrap_or_default(),
+            source: KeySource::BookmarksToml,
+            fixed: false,
+            notices: notices(&id),
+            conflicted: km.conflicted.contains(&id),
+        }
+    }));
     v
 }
 
@@ -160,9 +187,7 @@ pub fn owner(
     t: &Target,
     c: &Chord,
 ) -> Option<String> {
-    let id_of = |t: &Target| match t {
-        Target::Command(i) | Target::Action(i) => i.clone(),
-    };
+    let id_of = Target::id;
     let me = id_of(t);
     let rows = rows(st, actions_doc);
     let claimed = st.keymap.claims.get(c);
@@ -175,6 +200,17 @@ pub fn owner(
         .map(|r| r.title)
 }
 
+/// Whether `c` may be bound at all (`Err`: the note to show).
+pub fn check(c: &Chord) -> Result<(), String> {
+    if chord::text_editing(c) {
+        return Err(format!("{c} is reserved (not bound)"));
+    }
+    if !c.command && !c.alt {
+        return Err(format!("{c} needs Ctrl or Alt"));
+    }
+    Ok(())
+}
+
 /// The document edit a capture of `c` for `t` makes: `(file, edit)`. `Err` = a note to show
 /// (reserved chord, unknown action).
 pub fn record_edit(
@@ -182,12 +218,7 @@ pub fn record_edit(
     c: &Chord,
     actions_doc: Option<&ConfigDoc>,
 ) -> Result<(String, DocEdit), String> {
-    if chord::text_editing(c) {
-        return Err(format!("{c} is reserved (not bound)"));
-    }
-    if !c.command && !c.alt {
-        return Err(format!("{c} needs Ctrl or Alt"));
-    }
+    check(c)?;
     let list = ScalarValue::StrList(vec![c.to_string()]);
     match t {
         Target::Command(id) => Ok((EDITOR_PATH.to_owned(), DocEdit::Set(keys_path(id), list))),
@@ -198,6 +229,7 @@ pub fn record_edit(
                 DocEdit::Set(Path::root().key("action").index(i).key("keys"), list),
             ))
         }
+        Target::Bookmark(_) => Err("bookmark chords are written through bookmarks.toml".into()),
     }
 }
 
@@ -224,6 +256,7 @@ pub fn clear_edit(
                 .and_then(|d| d.get(&p))
                 .map(|_| (ACTIONS_PATH.to_owned(), DocEdit::Remove(p))))
         }
+        Target::Bookmark(_) => Err("bookmark chords are written through bookmarks.toml".into()),
     }
 }
 
@@ -330,6 +363,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     let st = &cx.s.hotkeys;
     let ed = cx.s.file(EDITOR_PATH);
     let ac = cx.s.file(ACTIONS_PATH);
+    let bm = cx.s.file(crate::bookmarks::BOOKMARKS_PATH);
     let editable = ed.is_some_and(|f| f.doc.is_some() && !f.saving);
     // The capture note lives in [`notice_bar`], outside the scrollable (plan editor-ui-round-3
     // WP-7): setting or clearing it never changes the list's height or scroll offset.
@@ -339,6 +373,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
         let ok = match &r.target {
             Target::Command(_) => editable,
             Target::Action(_) => ac.is_some_and(|f| f.doc.is_some() && !f.saving),
+            Target::Bookmark(_) => bm.is_some_and(|f| f.doc.is_some() && !f.saving && !f.dirty),
         };
         col = col.push(row_view(r, rec, ok, t));
     }

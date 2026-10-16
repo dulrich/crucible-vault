@@ -379,6 +379,27 @@ impl ClientCmd {
 pub enum EntryId {
     Client(ClientCmd),
     Action(String),
+    /// Plan editor-ui-round-3 WP-9: "Open bookmark: <name>" (the bookmark's path).
+    Bookmark(String),
+}
+
+/// The stable bindable id of the bookmark at `path` (WP-9): keyed by the stored path, so it
+/// survives reorders and renames of other bookmarks.
+pub fn bookmark_id(path: &str) -> String {
+    format!("bookmark:{path}")
+}
+
+/// The palette rows of `bookmarks` (WP-9), with their stored chords.
+pub fn bookmark_entries(bookmarks: &[crate::bookmarks::Bookmark]) -> Vec<Entry> {
+    bookmarks
+        .iter()
+        .map(|b| Entry {
+            id: EntryId::Bookmark(b.path.clone()),
+            title: format!("Open bookmark: {}", b.name),
+            group: "Bookmarks".into(),
+            keys: b.keys.clone(),
+        })
+        .collect()
 }
 
 /// One palette row.
@@ -470,6 +491,7 @@ pub fn visible_entries(entries: Vec<Entry>, hidden: &[String]) -> Vec<Entry> {
             let id = match &e.id {
                 EntryId::Client(c) => c.id(),
                 EntryId::Action(a) => a.clone(),
+                EntryId::Bookmark(p) => bookmark_id(p),
             };
             !hidden.contains(&id)
         })
@@ -519,6 +541,8 @@ pub enum Bound {
     Preset(Preset),
     /// A config action (`actions.toml` `keys`).
     Action(String),
+    /// WP-9: open the bookmark at this path (`bookmarks.toml` `keys`).
+    Bookmark(String),
 }
 
 /// Where a Hotkeys row's chords come from.
@@ -530,6 +554,8 @@ pub enum KeySource {
     EditorToml,
     /// The action's `keys` in `actions.toml`.
     ActionsToml,
+    /// WP-9: the bookmark's `keys` in `bookmarks.toml`.
+    BookmarksToml,
 }
 
 impl KeySource {
@@ -539,6 +565,7 @@ impl KeySource {
             Self::Default => "default",
             Self::EditorToml => "editor.toml",
             Self::ActionsToml => "actions.toml",
+            Self::BookmarksToml => "bookmarks.toml",
         }
     }
 }
@@ -641,8 +668,10 @@ impl Keymap {
     /// of handling it (Alt+digit would insert the digit): chords bound to a client command or
     /// preset, Ctrl+, and the inert Ctrl+Shift+,.
     pub fn routed(&self, c: &Chord) -> bool {
-        matches!(self.map.get(c), Some(Bound::Client(_) | Bound::Preset(_)))
-            || (c.command && c.key == ",")
+        matches!(
+            self.map.get(c),
+            Some(Bound::Client(_) | Bound::Preset(_) | Bound::Bookmark(_))
+        ) || (c.command && c.key == ",")
     }
 
     /// Chord → config action id (the old `bindings` map).
@@ -686,6 +715,16 @@ impl Keymap {
 pub fn resolve(
     overrides: &std::collections::BTreeMap<String, Vec<String>>,
     actions: &[ActionInfo],
+) -> Keymap {
+    resolve_all(overrides, actions, &[])
+}
+
+/// [`resolve`] with the bookmarks' chords as claimants too (plan editor-ui-round-3 WP-9): the
+/// same conflict policy covers them against every other claimant.
+pub fn resolve_all(
+    overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    actions: &[ActionInfo],
+    bookmarks: &[crate::bookmarks::Bookmark],
 ) -> Keymap {
     let mut km = Keymap {
         map: HashMap::new(),
@@ -761,6 +800,22 @@ pub fn resolve(
             }
         }
     }
+    // Bookmarks (WP-9): their record's `keys`, checked like an action's.
+    for b in bookmarks {
+        let id = bookmark_id(&b.path);
+        km.chords.entry(id.clone()).or_default();
+        for k in &b.keys {
+            let Some(c) = chord::parse(k) else {
+                km.note(&id, format!("{id}: unreadable key \"{k}\""));
+                continue;
+            };
+            if chord::text_editing(&c) {
+                km.note(&id, format!("{id}: {c} is reserved (not bound)"));
+            } else {
+                km.claim(&mut claims, &id, c, Bound::Bookmark(b.path.clone()));
+            }
+        }
+    }
     // Register the uncontested chords; a contested chord is registered for nobody.
     for (c, id, b) in claims {
         let others: Vec<String> = km
@@ -809,6 +864,7 @@ pub fn apply_keys(entries: &mut [Entry], km: &Keymap) {
                 k.extend(get(a));
                 k
             }
+            EntryId::Bookmark(p) => get(&bookmark_id(p)),
         };
     }
 }
@@ -868,6 +924,8 @@ pub struct Palette {
     /// WP-8: the cached minimum-subsequence hint per entry (parallel to `entries`), recomputed
     /// in `rebuild` (entry-set change) only.
     pub hints: Vec<Option<String>>,
+    /// WP-9: the bookmarks whose "Open bookmark" commands and chords join the list / keymap.
+    pub bookmarks: Vec<crate::bookmarks::Bookmark>,
 }
 
 impl Default for Palette {
@@ -895,6 +953,7 @@ impl Default for Palette {
             job_origins: HashMap::new(),
             early_open: HashMap::new(),
             hidden: Vec::new(),
+            bookmarks: Vec::new(),
         }
     }
 }
@@ -955,9 +1014,10 @@ impl Palette {
     /// Rebuilds keymap, notices and entries from the overrides and the cached actions.
     fn rebuild(&mut self) {
         let actions = self.actions.as_deref().unwrap_or_default();
-        let km = resolve(&self.overrides, actions);
+        let km = resolve_all(&self.overrides, actions, &self.bookmarks);
         self.notice = km.notices.clone();
         let mut all = build_entries(actions);
+        all.extend(bookmark_entries(&self.bookmarks));
         apply_keys(&mut all, &km);
         let entries = visible_entries(all, &self.hidden);
         if entries != self.entries || self.hints.len() != entries.len() {
@@ -966,6 +1026,15 @@ impl Palette {
         self.entries = entries;
         self.keymap = std::sync::Arc::new(km);
         self.refresh();
+    }
+
+    /// Sets the bookmarks (WP-9) and rebuilds keymap + entries (a no-op when unchanged).
+    pub fn set_bookmarks(&mut self, bookmarks: Vec<crate::bookmarks::Bookmark>) {
+        if bookmarks == self.bookmarks {
+            return;
+        }
+        self.bookmarks = bookmarks;
+        self.rebuild();
     }
 
     /// Sets the hidden ids and rebuilds the list (a no-op when unchanged).

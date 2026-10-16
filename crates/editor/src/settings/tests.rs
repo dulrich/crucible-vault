@@ -344,6 +344,7 @@ path = "Home.md"
 [[bookmark]]
 name = "Inbox"
 path = "inbox/Inbox.md"
+keys = ["Alt+I"]
 "#;
 
 #[test]
