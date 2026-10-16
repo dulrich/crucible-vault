@@ -11,6 +11,7 @@ pub mod limiter;
 pub mod manager;
 pub mod refs;
 pub mod secrets;
+pub mod web;
 pub mod wire;
 
 pub use config::{Capability, ModelConfig, ProviderConfig, ProviderKind, ProvidersConfig};

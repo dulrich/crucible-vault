@@ -81,11 +81,23 @@ pub enum StepKind {
     RunAction,
     SearchUpsert,
     SearchDelete,
+    // A2 (plan v0-automation-pipelines WP-1).
+    LinkScan,
+    YtMetadata,
+    YtChannelEnrich,
+    XDiscover,
+    XMetadata,
+    XBackfill,
+    ImageDescribe,
+    TrackYoutube,
+    TrackBlogs,
+    IgnoreVideo,
+    DailyBrief,
 }
 
 impl StepKind {
     /// Every kind.
-    pub const ALL: [StepKind; 15] = [
+    pub const ALL: [StepKind; 26] = [
         StepKind::Guard,
         StepKind::Capture,
         StepKind::Materialize,
@@ -101,6 +113,17 @@ impl StepKind {
         StepKind::RunAction,
         StepKind::SearchUpsert,
         StepKind::SearchDelete,
+        StepKind::LinkScan,
+        StepKind::YtMetadata,
+        StepKind::YtChannelEnrich,
+        StepKind::XDiscover,
+        StepKind::XMetadata,
+        StepKind::XBackfill,
+        StepKind::ImageDescribe,
+        StepKind::TrackYoutube,
+        StepKind::TrackBlogs,
+        StepKind::IgnoreVideo,
+        StepKind::DailyBrief,
     ];
 
     /// The TOML `type` string.
@@ -122,6 +145,17 @@ impl StepKind {
             StepKind::RunAction => "run_action",
             StepKind::SearchUpsert => "search_upsert",
             StepKind::SearchDelete => "search_delete",
+            StepKind::LinkScan => "link_scan",
+            StepKind::YtMetadata => "yt_metadata",
+            StepKind::YtChannelEnrich => "yt_channel_enrich",
+            StepKind::XDiscover => "x_discover",
+            StepKind::XMetadata => "x_metadata",
+            StepKind::XBackfill => "x_backfill",
+            StepKind::ImageDescribe => "image_describe",
+            StepKind::TrackYoutube => "track_youtube",
+            StepKind::TrackBlogs => "track_blogs",
+            StepKind::IgnoreVideo => "ignore_video",
+            StepKind::DailyBrief => "daily_brief",
         }
     }
 
@@ -158,6 +192,18 @@ pub enum Step {
     },
     SearchUpsert(toml::Table),
     SearchDelete(toml::Table),
+    // A2 pipeline steps (plan v0-automation-pipelines; bodies in WP-3..10).
+    LinkScan(toml::Table),
+    YtMetadata(toml::Table),
+    YtChannelEnrich(toml::Table),
+    XDiscover(toml::Table),
+    XMetadata(toml::Table),
+    XBackfill(toml::Table),
+    ImageDescribe(toml::Table),
+    TrackYoutube(toml::Table),
+    TrackBlogs(toml::Table),
+    IgnoreVideo(toml::Table),
+    DailyBrief(toml::Table),
 }
 
 impl Step {
@@ -180,6 +226,17 @@ impl Step {
             Step::RunAction { .. } => StepKind::RunAction,
             Step::SearchUpsert(_) => StepKind::SearchUpsert,
             Step::SearchDelete(_) => StepKind::SearchDelete,
+            Step::LinkScan(_) => StepKind::LinkScan,
+            Step::YtMetadata(_) => StepKind::YtMetadata,
+            Step::YtChannelEnrich(_) => StepKind::YtChannelEnrich,
+            Step::XDiscover(_) => StepKind::XDiscover,
+            Step::XMetadata(_) => StepKind::XMetadata,
+            Step::XBackfill(_) => StepKind::XBackfill,
+            Step::ImageDescribe(_) => StepKind::ImageDescribe,
+            Step::TrackYoutube(_) => StepKind::TrackYoutube,
+            Step::TrackBlogs(_) => StepKind::TrackBlogs,
+            Step::IgnoreVideo(_) => StepKind::IgnoreVideo,
+            Step::DailyBrief(_) => StepKind::DailyBrief,
         }
     }
 
@@ -200,19 +257,56 @@ impl Step {
             | Step::Agent(t)
             | Step::MarkForwarded(t)
             | Step::SearchUpsert(t)
-            | Step::SearchDelete(t) => Some(t),
+            | Step::SearchDelete(t)
+            | Step::LinkScan(t)
+            | Step::YtMetadata(t)
+            | Step::YtChannelEnrich(t)
+            | Step::XDiscover(t)
+            | Step::XMetadata(t)
+            | Step::XBackfill(t)
+            | Step::ImageDescribe(t)
+            | Step::TrackYoutube(t)
+            | Step::TrackBlogs(t)
+            | Step::IgnoreVideo(t)
+            | Step::DailyBrief(t) => Some(t),
             Step::RunAction { .. } => None,
         }
     }
 
     /// Whether the step may write a note (replaces Crucible's `mutating` flag, `src/AGENTS.md:28`).
     /// Fails closed: anything that might write counts.
+    /// A2: every pipeline step mutates (fails closed) except `x_discover` and `x_backfill`,
+    /// which only enqueue `x_metadata` runs.
     #[must_use]
     pub fn mutates_note(&self) -> bool {
-        !matches!(
-            self.kind(),
-            StepKind::Guard | StepKind::RunAction | StepKind::SearchUpsert | StepKind::SearchDelete
-        )
+        match self.kind() {
+            StepKind::Guard
+            | StepKind::RunAction
+            | StepKind::SearchUpsert
+            | StepKind::SearchDelete
+            | StepKind::XDiscover
+            | StepKind::XBackfill => false,
+            StepKind::Capture
+            | StepKind::Materialize
+            | StepKind::Move
+            | StepKind::Copy
+            | StepKind::SetProps
+            | StepKind::RemoveProps
+            | StepKind::UpsertTags
+            | StepKind::Lint
+            | StepKind::Localize
+            | StepKind::Agent
+            | StepKind::MarkForwarded
+            | StepKind::LinkScan
+            | StepKind::YtMetadata
+            | StepKind::YtChannelEnrich
+            | StepKind::XMetadata
+            | StepKind::ImageDescribe
+            | StepKind::TrackYoutube
+            | StepKind::TrackBlogs
+            | StepKind::IgnoreVideo
+            | StepKind::DailyBrief => true,
+        }
     }
 
     /// Parses one `[[action.steps]]` table (`type` + params).
@@ -239,6 +333,17 @@ impl Step {
             StepKind::MarkForwarded => Step::MarkForwarded(t),
             StepKind::SearchUpsert => Step::SearchUpsert(t),
             StepKind::SearchDelete => Step::SearchDelete(t),
+            StepKind::LinkScan => Step::LinkScan(t),
+            StepKind::YtMetadata => Step::YtMetadata(t),
+            StepKind::YtChannelEnrich => Step::YtChannelEnrich(t),
+            StepKind::XDiscover => Step::XDiscover(t),
+            StepKind::XMetadata => Step::XMetadata(t),
+            StepKind::XBackfill => Step::XBackfill(t),
+            StepKind::ImageDescribe => Step::ImageDescribe(t),
+            StepKind::TrackYoutube => Step::TrackYoutube(t),
+            StepKind::TrackBlogs => Step::TrackBlogs(t),
+            StepKind::IgnoreVideo => Step::IgnoreVideo(t),
+            StepKind::DailyBrief => Step::DailyBrief(t),
             StepKind::RunAction => {
                 let action_id = match t.remove("action") {
                     Some(toml::Value::String(s)) if !s.is_empty() => s,
@@ -578,6 +683,15 @@ mod tests {
                 params: json!({"k": "v"}).as_object().unwrap().clone()
             }
         );
+        for k in StepKind::ALL {
+            assert_eq!(StepKind::parse(k.as_str()), Some(k));
+        }
+        let t: toml::Table = toml::from_str("type = \"track_blogs\"").unwrap();
+        let s = Step::from_table(t).unwrap();
+        assert_eq!(s.kind(), StepKind::TrackBlogs);
+        assert!(s.mutates_note());
+        let t: toml::Table = toml::from_str("type = \"x_backfill\"").unwrap();
+        assert!(!Step::from_table(t).unwrap().mutates_note());
         let t: toml::Table = toml::from_str("type = \"nope\"").unwrap();
         assert!(Step::from_table(t).is_err());
     }

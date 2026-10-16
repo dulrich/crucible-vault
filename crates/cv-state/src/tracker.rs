@@ -1,0 +1,212 @@
+//! Tracker bookkeeping (migration v5, plan `v0-automation-pipelines`): `tracker_items`,
+//! `ignored_ids` and `api_usage`. WP-1 ships minimal insert/get/list accessors; the trackers'
+//! policy (seen sets, automatable windows, quota checks) belongs to WP-4/7/8/9.
+
+use crate::error::Result;
+use crate::store::StateDb;
+use rusqlite::{OptionalExtension, params};
+
+/// What a tracker did with an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackerOutcome {
+    /// A daily intake line was appended.
+    Line,
+    /// A captured note was created (automatable blog post).
+    Note,
+    /// Filtered by `ignored_ids` / Ignore Shorts.
+    Ignored,
+    /// Seen but not surfaced (already in the vault, skipped row, …).
+    Skipped,
+}
+
+impl TrackerOutcome {
+    /// The stored string.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrackerOutcome::Line => "line",
+            TrackerOutcome::Note => "note",
+            TrackerOutcome::Ignored => "ignored",
+            TrackerOutcome::Skipped => "skipped",
+        }
+    }
+
+    /// Parses a stored string.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "line" => TrackerOutcome::Line,
+            "note" => TrackerOutcome::Note,
+            "ignored" => TrackerOutcome::Ignored,
+            "skipped" => TrackerOutcome::Skipped,
+            _ => return None,
+        })
+    }
+}
+
+/// One `tracker_items` row. Key: (`source_kind`, `source_key`, `item_id`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackerItem {
+    /// `youtube` | `blog`.
+    pub source_kind: String,
+    /// Channel id / feed URL.
+    pub source_key: String,
+    /// Video id / post id.
+    pub item_id: String,
+    /// Item title.
+    pub title: String,
+    /// Item URL.
+    pub url: String,
+    /// When the tracker first saw it.
+    pub first_seen_ms: i64,
+    /// Local intake day `YYYY-MM-DD`.
+    pub day: String,
+    /// What happened to it.
+    pub outcome: TrackerOutcome,
+    /// Importance score (WP-10), if scored.
+    pub score: Option<f64>,
+    /// Automatable evidence: whether the fetched item carried a full body (blogs only).
+    pub full_body: Option<bool>,
+}
+
+const COLS: &str =
+    "source_kind, source_key, item_id, title, url, first_seen_ms, day, outcome, score, full_body";
+
+fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
+    let outcome: String = r.get(7)?;
+    Ok(TrackerItem {
+        source_kind: r.get(0)?,
+        source_key: r.get(1)?,
+        item_id: r.get(2)?,
+        title: r.get(3)?,
+        url: r.get(4)?,
+        first_seen_ms: r.get(5)?,
+        day: r.get(6)?,
+        outcome: TrackerOutcome::parse(&outcome).unwrap_or(TrackerOutcome::Skipped),
+        score: r.get(8)?,
+        full_body: r.get(9)?,
+    })
+}
+
+impl StateDb {
+    /// Inserts `item` unless its key exists (first sighting wins). Returns `true` when inserted.
+    pub fn insert_tracker_item(&mut self, item: &TrackerItem) -> Result<bool> {
+        let n = self.conn().execute(
+            &format!(
+                "INSERT INTO tracker_items ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT DO NOTHING"
+            ),
+            params![
+                item.source_kind,
+                item.source_key,
+                item.item_id,
+                item.title,
+                item.url,
+                item.first_seen_ms,
+                item.day,
+                item.outcome.as_str(),
+                item.score,
+                item.full_body,
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The row for one key.
+    pub fn tracker_item(
+        &self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+    ) -> Result<Option<TrackerItem>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {COLS} FROM tracker_items
+                     WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3"
+                ),
+                params![source_kind, source_key, item_id],
+                row,
+            )
+            .optional()?)
+    }
+
+    /// One source's rows, newest first, at most `limit`.
+    pub fn tracker_items_for_source(
+        &self,
+        source_kind: &str,
+        source_key: &str,
+        limit: usize,
+    ) -> Result<Vec<TrackerItem>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE source_kind = ?1 AND source_key = ?2
+             ORDER BY first_seen_ms DESC, item_id LIMIT ?3"
+        ))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![source_kind, source_key, limit], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Records `(kind, id)` as ignored. Returns `true` when newly inserted.
+    pub fn insert_ignored_id(
+        &mut self,
+        kind: &str,
+        id: &str,
+        reason: &str,
+        at_ms: i64,
+    ) -> Result<bool> {
+        let n = self.conn().execute(
+            "INSERT INTO ignored_ids (kind, id, reason, at_ms) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT DO NOTHING",
+            params![kind, id, reason, at_ms],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Whether `(kind, id)` is ignored.
+    pub fn is_ignored(&self, kind: &str, id: &str) -> Result<bool> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT 1 FROM ignored_ids WHERE kind = ?1 AND id = ?2",
+                params![kind, id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Every ignored id of `kind`, sorted.
+    pub fn ignored_ids(&self, kind: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id FROM ignored_ids WHERE kind = ?1 ORDER BY id")?;
+        let rows = stmt.query_map(params![kind], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Adds `units` to `service`'s usage on `day`; returns the new total.
+    pub fn add_api_usage(&mut self, service: &str, day: &str, units: i64) -> Result<i64> {
+        Ok(self.conn().query_row(
+            "INSERT INTO api_usage (service, day, units) VALUES (?1, ?2, ?3)
+             ON CONFLICT(service, day) DO UPDATE SET units = units + excluded.units
+             RETURNING units",
+            params![service, day, units],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// `service`'s units on `day` (0 when none).
+    pub fn api_usage(&self, service: &str, day: &str) -> Result<i64> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT units FROM api_usage WHERE service = ?1 AND day = ?2",
+                params![service, day],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+}

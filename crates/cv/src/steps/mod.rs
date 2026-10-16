@@ -11,6 +11,14 @@
 //! | `Agent` | [`agent`] | WP-12 |
 //! | `SearchUpsert`, `SearchDelete` | [`search`] | WP-13 |
 //! | `RunAction` | here → the runner's child enqueue | WP-9 |
+//! | `LinkScan` | [`link_scan`] | A2 WP-3 |
+//! | `YtMetadata`, `YtChannelEnrich` | [`youtube`] | A2 WP-4 |
+//! | `XDiscover`, `XMetadata`, `XBackfill` | [`x`] | A2 WP-5 |
+//! | `ImageDescribe` | [`image_describe`] | A2 WP-6 |
+//! | `TrackYoutube` | [`tracker::youtube`] | A2 WP-7 |
+//! | `TrackBlogs` | [`tracker::blogs`] | A2 WP-8 |
+//! | `IgnoreVideo` | [`ignore`] | A2 WP-9 |
+//! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //!
 //! A module's `execute` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -19,11 +27,16 @@
 
 pub mod agent;
 pub mod capture;
+pub mod daily_brief;
 pub mod file;
+pub mod ignore;
+pub mod image_describe;
+pub mod link_scan;
 pub mod lint;
 pub mod localize;
 pub mod materialize;
 pub mod search;
+pub mod tracker;
 #[cfg(test)]
 mod wp10_tests;
 #[cfg(test)]
@@ -32,6 +45,8 @@ mod wp11_tests;
 mod wp12_tests;
 #[cfg(test)]
 mod wp13_tests;
+pub mod x;
+pub mod youtube;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -244,6 +259,14 @@ impl StepCtx<'_> {
     }
 }
 
+/// Rejects any param key (A2 stubs accept none until their WP defines them; I5 disarm).
+pub(crate) fn reject_params(step: &Step) -> Result<(), String> {
+    match step.table().and_then(|t| t.keys().next()) {
+        Some(k) => Err(format!("{} step: unknown key {k:?}", step.kind().as_str())),
+        None => Ok(()),
+    }
+}
+
 /// Validates one step (config load; a failure disarms the action, I5).
 pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
     match step {
@@ -260,6 +283,14 @@ pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
         Step::Localize(_) => localize::validate(step, config),
         Step::Agent(_) => agent::validate(step, config),
         Step::SearchUpsert(_) | Step::SearchDelete(_) => search::validate(step, config),
+        Step::LinkScan(_) => link_scan::validate(step, config),
+        Step::YtMetadata(_) | Step::YtChannelEnrich(_) => youtube::validate(step, config),
+        Step::XDiscover(_) | Step::XMetadata(_) | Step::XBackfill(_) => x::validate(step, config),
+        Step::ImageDescribe(_) => image_describe::validate(step, config),
+        Step::TrackYoutube(_) => tracker::youtube::validate(step, config),
+        Step::TrackBlogs(_) => tracker::blogs::validate(step, config),
+        Step::IgnoreVideo(_) => ignore::validate(step, config),
+        Step::DailyBrief(_) => daily_brief::validate(step, config),
         Step::RunAction { action_id, .. } => {
             if config.is_known(action_id) {
                 Ok(())
@@ -286,6 +317,14 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         Step::Localize(_) => localize::execute(step, ctx),
         Step::Agent(_) => agent::execute(step, ctx),
         Step::SearchUpsert(_) | Step::SearchDelete(_) => search::execute(step, ctx),
+        Step::LinkScan(_) => link_scan::execute(step, ctx),
+        Step::YtMetadata(_) | Step::YtChannelEnrich(_) => youtube::execute(step, ctx),
+        Step::XDiscover(_) | Step::XMetadata(_) | Step::XBackfill(_) => x::execute(step, ctx),
+        Step::ImageDescribe(_) => image_describe::execute(step, ctx),
+        Step::TrackYoutube(_) => tracker::youtube::execute(step, ctx),
+        Step::TrackBlogs(_) => tracker::blogs::execute(step, ctx),
+        Step::IgnoreVideo(_) => ignore::execute(step, ctx),
+        Step::DailyBrief(_) => daily_brief::execute(step, ctx),
         Step::RunAction { action_id, params } => {
             let child = ctx
                 .children

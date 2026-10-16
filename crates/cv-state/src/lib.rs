@@ -13,6 +13,7 @@ pub mod migrate;
 mod query;
 mod runner_state;
 mod store;
+mod tracker;
 
 #[cfg(test)]
 mod tests;
@@ -32,3 +33,4 @@ pub use store::{
     DEFAULT_RESEED_WINDOW_MS, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, NewShadowWrite,
     QueueConfig, RequeueBreakdown, StateDb, StateReader,
 };
+pub use tracker::{TrackerItem, TrackerOutcome};

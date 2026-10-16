@@ -540,6 +540,83 @@ pub static SEARCH_DELETE: Record = Record {
     rules: &[],
 };
 
+/// `link_scan` — `crates/cv/src/steps/link_scan.rs` (A2 stub: no params until WP-3).
+pub static LINK_SCAN: Record = Record {
+    name: "link_scan",
+    fields: &[],
+    rules: &[],
+};
+
+/// `yt_metadata` — `crates/cv/src/steps/youtube.rs` (A2 stub: no params until WP-4).
+pub static YT_METADATA: Record = Record {
+    name: "yt_metadata",
+    fields: &[],
+    rules: &[],
+};
+
+/// `yt_channel_enrich` — `crates/cv/src/steps/youtube.rs` (A2 stub: no params until WP-4).
+pub static YT_CHANNEL_ENRICH: Record = Record {
+    name: "yt_channel_enrich",
+    fields: &[],
+    rules: &[],
+};
+
+/// `x_discover` — `crates/cv/src/steps/x.rs` (A2 stub: no params until WP-5).
+pub static X_DISCOVER: Record = Record {
+    name: "x_discover",
+    fields: &[],
+    rules: &[],
+};
+
+/// `x_metadata` — `crates/cv/src/steps/x.rs` (A2 stub: no params until WP-5).
+pub static X_METADATA: Record = Record {
+    name: "x_metadata",
+    fields: &[],
+    rules: &[],
+};
+
+/// `x_backfill` — `crates/cv/src/steps/x.rs` (A2 stub: no params until WP-5).
+pub static X_BACKFILL: Record = Record {
+    name: "x_backfill",
+    fields: &[],
+    rules: &[],
+};
+
+/// `image_describe` — `crates/cv/src/steps/image_describe.rs` (A2 stub: no params until WP-6).
+pub static IMAGE_DESCRIBE: Record = Record {
+    name: "image_describe",
+    fields: &[],
+    rules: &[],
+};
+
+/// `track_youtube` — `crates/cv/src/steps/tracker/youtube.rs` (A2 stub: no params until WP-7).
+pub static TRACK_YOUTUBE: Record = Record {
+    name: "track_youtube",
+    fields: &[],
+    rules: &[],
+};
+
+/// `track_blogs` — `crates/cv/src/steps/tracker/blogs.rs` (A2 stub: no params until WP-8).
+pub static TRACK_BLOGS: Record = Record {
+    name: "track_blogs",
+    fields: &[],
+    rules: &[],
+};
+
+/// `ignore_video` — `crates/cv/src/steps/ignore.rs` (A2 stub: no params until WP-9).
+pub static IGNORE_VIDEO: Record = Record {
+    name: "ignore_video",
+    fields: &[],
+    rules: &[],
+};
+
+/// `daily_brief` — `crates/cv/src/steps/daily_brief.rs` (A2 stub: no params until WP-9).
+pub static DAILY_BRIEF: Record = Record {
+    name: "daily_brief",
+    fields: &[],
+    rules: &[],
+};
+
 /// The `[[action.steps]]` union, one variant per `StepKind::ALL` member (same order).
 pub static STEP: Union = Union {
     name: "step",
@@ -619,6 +696,61 @@ pub static STEP: Union = Union {
             tag: "search_delete",
             label: "Search: delete",
             record: &SEARCH_DELETE,
+        },
+        Variant {
+            tag: "link_scan",
+            label: "Link scan",
+            record: &LINK_SCAN,
+        },
+        Variant {
+            tag: "yt_metadata",
+            label: "YouTube metadata",
+            record: &YT_METADATA,
+        },
+        Variant {
+            tag: "yt_channel_enrich",
+            label: "YouTube channel enrich",
+            record: &YT_CHANNEL_ENRICH,
+        },
+        Variant {
+            tag: "x_discover",
+            label: "X: discover",
+            record: &X_DISCOVER,
+        },
+        Variant {
+            tag: "x_metadata",
+            label: "X: metadata",
+            record: &X_METADATA,
+        },
+        Variant {
+            tag: "x_backfill",
+            label: "X: backfill",
+            record: &X_BACKFILL,
+        },
+        Variant {
+            tag: "image_describe",
+            label: "Describe images",
+            record: &IMAGE_DESCRIBE,
+        },
+        Variant {
+            tag: "track_youtube",
+            label: "Track YouTube",
+            record: &TRACK_YOUTUBE,
+        },
+        Variant {
+            tag: "track_blogs",
+            label: "Track blogs",
+            record: &TRACK_BLOGS,
+        },
+        Variant {
+            tag: "ignore_video",
+            label: "Ignore video",
+            record: &IGNORE_VIDEO,
+        },
+        Variant {
+            tag: "daily_brief",
+            label: "Daily brief",
+            record: &DAILY_BRIEF,
         },
     ],
 };

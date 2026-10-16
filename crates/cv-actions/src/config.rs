@@ -3,6 +3,9 @@
 //! - `actions.toml` (`[[action]]`) and `schedules.toml` (`[[schedule]]`) are parsed into the model;
 //!   `kinds.toml`, `captures.toml`, `agents.toml`, `providers.toml` are kept as raw tables for the
 //!   step validators/executors (WP-10..12) to consult via [`ConfigSet::table`].
+//! - `pipelines.toml` and `sources.toml` (plan `v0-automation-pipelines` WP-1) are typed
+//!   ([`ConfigSet::pipelines`], [`ConfigSet::sources`]); a file that parses but fails to type-check
+//!   keeps its last valid typed value and reports the error, like a syntax error.
 //! - A missing file is empty. A file that fails to parse keeps its last valid version and its
 //!   error is reported (file + message; never note content).
 //! - An action whose definition, starters or steps fail validation is **disarmed** and reported,
@@ -19,15 +22,18 @@ use serde::Deserialize;
 use crate::model::{
     Action, ChangeKindSel, LaneChoice, OriginSel, ResourceSpec, Schedule, Selector, Starter, Step,
 };
+use crate::pipelines::{PipelinesConfig, SourcesConfig};
 
 /// Every config file name WP-9 loads, in load order.
-pub const CONFIG_FILES: [&str; 6] = [
+pub const CONFIG_FILES: [&str; 8] = [
     "actions.toml",
     "schedules.toml",
     "kinds.toml",
     "captures.toml",
     "agents.toml",
     "providers.toml",
+    "pipelines.toml",
+    "sources.toml",
 ];
 
 /// Step validation callback (`cv`'s `steps::validate`): `Err(reason)` disarms the action.
@@ -104,6 +110,9 @@ pub struct ConfigSet {
     actions: BTreeMap<String, Action>,
     disarmed: BTreeMap<String, String>,
     empty: toml::Table,
+    pipelines: PipelinesConfig,
+    sources: SourcesConfig,
+    typed_errors: BTreeMap<String, String>,
 }
 
 impl ConfigSet {
@@ -140,7 +149,44 @@ impl ConfigSet {
                 },
             }
         }
+        self.retype();
         self.rebuild(validate);
+    }
+
+    /// Re-derives the typed files; a type error keeps the last valid value (and reports).
+    fn retype(&mut self) {
+        match PipelinesConfig::from_table(self.table("pipelines.toml")) {
+            Ok(p) => {
+                self.pipelines = p;
+                self.typed_errors.remove("pipelines.toml");
+            }
+            Err(e) => {
+                self.typed_errors
+                    .insert("pipelines.toml".into(), format!("pipelines.toml: {e}"));
+            }
+        }
+        match SourcesConfig::from_table(self.table("sources.toml")) {
+            Ok(s) => {
+                self.sources = s;
+                self.typed_errors.remove("sources.toml");
+            }
+            Err(e) => {
+                self.typed_errors
+                    .insert("sources.toml".into(), format!("sources.toml: {e}"));
+            }
+        }
+    }
+
+    /// The typed `pipelines.toml` (default = every pipeline off).
+    #[must_use]
+    pub fn pipelines(&self) -> &PipelinesConfig {
+        &self.pipelines
+    }
+
+    /// The typed `sources.toml` (default = no sources).
+    #[must_use]
+    pub fn sources(&self) -> &SourcesConfig {
+        &self.sources
     }
 
     fn rebuild(&mut self, validate: StepValidator) {
@@ -264,6 +310,7 @@ impl ConfigSet {
     #[must_use]
     pub fn errors(&self) -> Vec<String> {
         let mut out: Vec<String> = self.file_errors.values().cloned().collect();
+        out.extend(self.typed_errors.values().cloned());
         out.extend(self.entry_errors.iter().cloned());
         out.extend(
             self.disarmed
@@ -529,5 +576,37 @@ type = "agent"
         assert_eq!(c.errors().len(), 1, "unknown action reported");
         assert!(c.table("kinds.toml").contains_key("book"));
         assert!(c.table("agents.toml").is_empty());
+    }
+
+    #[test]
+    fn typed_pipeline_files_hot_reload_and_keep_last_valid() {
+        let mut c = ConfigSet::new();
+        assert!(!c.pipelines().youtube.enabled, "absent = off");
+        let mut f = BTreeMap::new();
+        f.insert(
+            "pipelines.toml".to_owned(),
+            Some("[youtube]\nenabled = true\n".to_owned()),
+        );
+        f.insert(
+            "sources.toml".to_owned(),
+            Some("[[youtube]]\nchannel = \"C\"\nid = \"UC1\"\n".to_owned()),
+        );
+        c.reload(&f, &ok);
+        assert!(c.errors().is_empty(), "{:?}", c.errors());
+        assert!(c.pipelines().youtube.enabled);
+        assert_eq!(c.sources().youtube.len(), 1);
+        // Type error: last valid kept, reported.
+        f.insert(
+            "pipelines.toml".to_owned(),
+            Some("[youtube]\nenabled = \"yes\"\n".to_owned()),
+        );
+        c.reload(&f, &ok);
+        assert!(c.pipelines().youtube.enabled);
+        assert!(c.errors().iter().any(|e| e.starts_with("pipelines.toml:")));
+        // Removed files: everything off, errors cleared.
+        c.reload(&BTreeMap::new(), &ok);
+        assert!(!c.pipelines().youtube.enabled);
+        assert!(c.sources().youtube.is_empty());
+        assert!(c.errors().is_empty());
     }
 }

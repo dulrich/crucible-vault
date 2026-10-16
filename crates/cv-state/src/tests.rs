@@ -53,6 +53,75 @@ fn migrations_reach_latest_and_reopen_is_idempotent() {
 }
 
 #[test]
+fn v4_database_migrates_to_v5_and_tracker_accessors_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        for (i, sql) in migrate::MIGRATIONS.iter().take(4).enumerate() {
+            let tx = c.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        c.execute(
+            "INSERT INTO cutover_marker (id, vault, created_at_ms, created_by) VALUES (1, 'v', 1, 't')",
+            [],
+        )
+        .unwrap();
+    }
+    let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 5);
+    let n: i64 = s
+        .conn()
+        .query_row("SELECT COUNT(*) FROM cutover_marker", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "v4 data survives");
+    s.conn()
+        .execute(
+            "INSERT INTO link_records (canonical_url, url, yt_video_id) VALUES ('c', 'u', 'y')",
+            [],
+        )
+        .unwrap();
+    let item = TrackerItem {
+        source_kind: "blog".into(),
+        source_key: "https://f.example/feed".into(),
+        item_id: "p1".into(),
+        title: "T".into(),
+        url: "https://f.example/p1".into(),
+        first_seen_ms: 10,
+        day: "2026-10-15".into(),
+        outcome: TrackerOutcome::Note,
+        score: None,
+        full_body: Some(true),
+    };
+    assert!(s.insert_tracker_item(&item).unwrap());
+    assert!(
+        !s.insert_tracker_item(&item).unwrap(),
+        "first sighting wins"
+    );
+    assert_eq!(
+        s.tracker_item("blog", "https://f.example/feed", "p1")
+            .unwrap(),
+        Some(item.clone())
+    );
+    assert_eq!(
+        s.tracker_items_for_source("blog", "https://f.example/feed", 5)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(s.insert_ignored_id("yt", "abc", "short", 1).unwrap());
+    assert!(!s.insert_ignored_id("yt", "abc", "short", 2).unwrap());
+    assert!(s.is_ignored("yt", "abc").unwrap());
+    assert_eq!(s.ignored_ids("yt").unwrap(), vec!["abc".to_owned()]);
+    assert_eq!(s.add_api_usage("youtube", "2026-10-15", 3).unwrap(), 3);
+    assert_eq!(s.add_api_usage("youtube", "2026-10-15", 2).unwrap(), 5);
+    assert_eq!(s.api_usage("youtube", "2026-10-16").unwrap(), 0);
+}
+
+#[test]
 fn newer_schema_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("state.db");
@@ -726,8 +795,7 @@ fn v3_to_v4_migration_keeps_rows_and_sets_no_marker() {
     }
     assert_eq!(StateReader::open(&p).unwrap().cutover().unwrap(), None);
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(migrate::latest_version(), 4);
-    assert_eq!(s.schema_version().unwrap(), 4);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     assert!(s.job("j1").unwrap().is_some());
     assert_eq!(s.cutover().unwrap(), None);
 }

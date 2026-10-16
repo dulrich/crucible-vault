@@ -1,0 +1,15 @@
+[package]
+name = "cv-ingest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Exact `=x.y.z` pins (plan `v0-automation-pipelines` WP-1). Pure crate: never tokio/reqwest/iced.
+quick-xml = "=0.41.0"
+htmd = "=0.5.6"
+cv-text = { path = "../cv-text" }
+
+[lints]
+workspace = true

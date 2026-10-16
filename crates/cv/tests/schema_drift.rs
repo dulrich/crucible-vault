@@ -174,6 +174,18 @@ const STEPS: &[(&str, &str)] = &[
         "search_delete",
         "companion_url = \"https://example.invalid\"\nvault_id = \"v\"\nembed = \"local:e1\"\npath = \"a.md\"",
     ),
+    // A2 stubs (plan v0-automation-pipelines WP-1): no params until their WPs define them.
+    ("link_scan", ""),
+    ("yt_metadata", ""),
+    ("yt_channel_enrich", ""),
+    ("x_discover", ""),
+    ("x_metadata", ""),
+    ("x_backfill", ""),
+    ("image_describe", ""),
+    ("track_youtube", ""),
+    ("track_blogs", ""),
+    ("ignore_video", ""),
+    ("daily_brief", ""),
 ];
 
 const ACTION_FULL: &str = r#"

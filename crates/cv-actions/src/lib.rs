@@ -15,6 +15,7 @@
 
 mod config;
 mod model;
+pub mod pipelines;
 
 pub use config::{CONFIG_FILES, ConfigSet, StepValidator};
 pub use cv_protocol::{ParamKind, ParamSpec};
@@ -22,3 +23,4 @@ pub use model::{
     Action, ChangeKindSel, LaneChoice, OriginSel, PropSelector, ResourceSpec, Schedule, Selector,
     Starter, Step, StepKind,
 };
+pub use pipelines::{PipelinesConfig, SourcesConfig};
