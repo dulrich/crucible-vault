@@ -1899,6 +1899,14 @@ impl App {
     // ---- editor-usability-round WP-4: find in note ----
 
     fn update_find(&mut self, m: FindMsg) -> Task<Message> {
+        if let FindMsg::Focus(p) = m {
+            // `operation::focus` unfocuses every other focusable, the source editor included. A
+            // press on the bar's close button closed it first (Close keeps the editor refocus).
+            if self.panes.get(p).is_none_or(|ps| ps.find.is_none()) {
+                return Task::none();
+            }
+            return iced::widget::operation::focus(crate::find::input_id(p));
+        }
         let pane = self.focus;
         let Some(ps) = self.panes.get_mut(pane) else {
             return Task::none();
@@ -1926,6 +1934,7 @@ impl App {
                 return self.focus_editor();
             }
             FindMsg::Shift(b) => self.find_shift = b,
+            FindMsg::Focus(_) => {}
             FindMsg::Query(q) => {
                 let Some(text) = ps
                     .active_tab()

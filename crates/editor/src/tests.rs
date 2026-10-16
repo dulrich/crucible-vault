@@ -2983,3 +2983,216 @@ mod ui_round3_wp4 {
         assert_eq!(e.target, "m4row");
     }
 }
+
+// Bug fix editor-find-return-leak: keys pressed in the find bar must never edit the note. Drives
+// the real widget tree (headless tiny-skia renderer) so widget focus is exercised end to end.
+mod find_return_leak {
+    use iced::advanced::widget::{Operation, Tree, operation};
+    use iced::advanced::{Shell, clipboard, layout, mouse, renderer::Headless};
+    use iced::keyboard::{self, Key, Location, Modifiers, key};
+    use iced::widget::text_editor::{Action, Motion};
+    use iced::{Event, Font, Pixels, Rectangle, Size};
+
+    use super::*;
+    use crate::message::{ExplorerMsg, FindMsg, PaletteMsg, SourceMsg};
+    use crate::reading::ViewMode;
+
+    const PATH: &str = "frl/a.md";
+    const BODY: &str = "- one\n- two foo";
+
+    fn renderer() -> iced::Renderer {
+        let fut =
+            <iced::Renderer as Headless>::new(Font::default(), Pixels(16.0), Some("tiny-skia"));
+        let mut fut = std::pin::pin!(fut);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        loop {
+            if let std::task::Poll::Ready(r) = fut.as_mut().poll(&mut cx) {
+                return r.expect("headless renderer");
+            }
+        }
+    }
+
+    /// A window-less UI: the app's view tree kept across rebuilds like iced's `UserInterface`.
+    struct Ui {
+        renderer: iced::Renderer,
+        tree: Option<Tree>,
+    }
+
+    impl Ui {
+        fn with<R>(
+            &mut self,
+            app: &App,
+            f: impl FnOnce(
+                &mut iced::Element<'_, Message>,
+                &mut Tree,
+                layout::Layout<'_>,
+                &iced::Renderer,
+            ) -> R,
+        ) -> R {
+            let mut el = app.view();
+            let tree = match &mut self.tree {
+                Some(t) => {
+                    t.diff(&el);
+                    t
+                }
+                None => self.tree.insert(Tree::new(&el)),
+            };
+            let limits = layout::Limits::new(Size::ZERO, Size::new(1200.0, 800.0));
+            let node = el.as_widget_mut().layout(tree, &self.renderer, &limits);
+            f(&mut el, tree, layout::Layout::new(&node), &self.renderer)
+        }
+
+        fn focus(&mut self, app: &App, id: iced::widget::Id) {
+            self.with(app, |el, tree, l, r| {
+                let mut op = operation::focusable::focus::<()>(id);
+                el.as_widget_mut()
+                    .operate(tree, l, r, &mut op as &mut dyn Operation<()>);
+            });
+        }
+
+        /// Sends `event` through the tree, then feeds the published messages to the app.
+        fn send(&mut self, app: &mut App, event: &Event) {
+            self.send_at(app, event, mouse::Cursor::Unavailable);
+        }
+
+        fn send_at(&mut self, app: &mut App, event: &Event, cursor: mouse::Cursor) {
+            let msgs = self.with(app, |el, tree, l, r| {
+                let mut msgs = Vec::new();
+                let mut shell = Shell::new(&mut msgs);
+                let viewport = Rectangle::with_size(Size::new(1200.0, 800.0));
+                el.as_widget_mut().update(
+                    tree,
+                    event,
+                    l,
+                    cursor,
+                    r,
+                    &mut clipboard::Null,
+                    &mut shell,
+                    &viewport,
+                );
+                msgs
+            });
+            for m in msgs {
+                // The runtime side of `FindMsg::Focus`'s task (`operation::focus(input)`), which
+                // the window-less harness cannot execute from the returned `Task`.
+                let refocus = match &m {
+                    Message::Find(FindMsg::Focus(p)) => Some(crate::find::input_id(*p)),
+                    _ => None,
+                };
+                let _ = app.update(m);
+                if let Some(id) = refocus {
+                    self.focus(app, id);
+                }
+            }
+        }
+    }
+
+    impl Ui {
+        fn click(&mut self, app: &mut App, at: iced::Point) {
+            let c = mouse::Cursor::Available(at);
+            self.send_at(
+                app,
+                &Event::Mouse(mouse::Event::CursorMoved { position: at }),
+                c,
+            );
+            self.send_at(
+                app,
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                c,
+            );
+            self.send_at(
+                app,
+                &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                c,
+            );
+        }
+    }
+
+    fn press(k: Key, text: Option<&str>) -> Event {
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: k.clone(),
+            modified_key: k,
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: text.map(Into::into),
+            repeat: false,
+        })
+    }
+
+    fn text_of(app: &App) -> String {
+        app.active_doc()
+            .map(crate::source::SourceBuffer::text)
+            .expect("doc")
+    }
+
+    /// A source-mode note with its caret on a list line, the editor focused (the user was
+    /// typing), then Ctrl+F with a query typed into the bar.
+    fn setup() -> (tempfile::TempDir, App, Ui) {
+        let (tmp, d) = fake();
+        let d = Arc::new(d);
+        d.create_note(PATH, BODY).expect("create");
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), None);
+        app.rpc_inline = true;
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(PATH.into())));
+        let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+            path: PATH.into(),
+            mode: ViewMode::Source,
+        }));
+        let _ = app.update(Message::Source(SourceMsg::Action(Action::Move(
+            Motion::DocumentEnd,
+        ))));
+        let mut ui = Ui {
+            renderer: renderer(),
+            tree: None,
+        };
+        ui.focus(&app, crate::source::editor_id(PATH));
+        let _ = app.update(Message::Palette(PaletteMsg::Key(
+            crate::palette::chord::parse("Ctrl+F").expect("chord"),
+        )));
+        assert!(app.panes.get(app.focus).is_some_and(|ps| ps.find.is_some()));
+        // FindMsg::Open's task: focus the bar's input.
+        ui.focus(&app, crate::find::input_id(app.focus));
+        let _ = app.update(Message::Find(FindMsg::Query("foo".into())));
+        (tmp, app, ui)
+    }
+
+    /// Note at (600, 400); find input at (400, 140); the bar's ChevronDown (Next) at (1131, 141).
+    const IN_NOTE: iced::Point = iced::Point::new(600.0, 400.0);
+    const IN_INPUT: iced::Point = iced::Point::new(400.0, 140.0);
+    const ON_BAR: iced::Point = iced::Point::new(1131.0, 141.0);
+
+    #[test]
+    fn find_input_click_takes_focus_from_the_note() {
+        let (_tmp, mut app, mut ui) = setup();
+        // Click into the note, then back into the find input: the editor must lose focus.
+        ui.click(&mut app, IN_NOTE);
+        ui.click(&mut app, IN_INPUT);
+        for _ in 0..3 {
+            ui.send(&mut app, &press(Key::Named(key::Named::Enter), Some("\r")));
+        }
+        ui.send(&mut app, &press(Key::Named(key::Named::Tab), Some("\t")));
+        ui.send(&mut app, &press(Key::Named(key::Named::Backspace), None));
+        ui.send(&mut app, &press(Key::Character("x".into()), Some("x")));
+        assert_eq!(text_of(&app), BODY, "find-bar keys leaked into the note");
+        let q = app.panes.get(app.focus).and_then(|ps| ps.find.clone());
+        assert_eq!(
+            q.map(|b| b.query).as_deref(),
+            Some("fox"),
+            "keys went to the bar"
+        );
+    }
+
+    #[test]
+    fn find_bar_click_then_return_never_edits_the_note() {
+        let (_tmp, mut app, mut ui) = setup();
+        // Click into the note, then on the bar beside the input (Next chevron), then Return x12.
+        ui.click(&mut app, IN_NOTE);
+        ui.click(&mut app, ON_BAR);
+        for _ in 0..12 {
+            ui.send(&mut app, &press(Key::Named(key::Named::Enter), Some("\r")));
+        }
+        assert_eq!(text_of(&app), BODY, "Return leaked into the note");
+    }
+}

@@ -66,19 +66,24 @@ pub fn view<'a>(pane: Pane, bar: Option<&'a FindBar>, t: Tokens) -> Element<'a, 
         return Space::new().height(0).into();
     };
     let fm = |m| Message::Find(m);
-    row![
-        text_input("Find in note…", &b.query)
-            .id(input_id(pane))
-            .on_input(move |q| fm(FindMsg::Query(q)))
-            .on_submit(fm(FindMsg::Submit))
-            .width(Length::Fill),
-        text(b.count()).size(13).color(t.text_dim.to_color()),
-        icon_button(Icon::ChevronUp, Some(fm(FindMsg::Prev)), t),
-        icon_button(Icon::ChevronDown, Some(fm(FindMsg::Next)), t),
-        icon_button(Icon::X, Some(fm(FindMsg::Close)), t),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center)
+    // Any press on the bar (input, count, chevrons) makes the input the sole focused widget, so
+    // its keys never also reach a still-focused source editor (bug fix editor-find-return-leak).
+    crate::widget::press_notify::press_notify(
+        row![
+            text_input("Find in note…", &b.query)
+                .id(input_id(pane))
+                .on_input(move |q| fm(FindMsg::Query(q)))
+                .on_submit(fm(FindMsg::Submit))
+                .width(Length::Fill),
+            text(b.count()).size(13).color(t.text_dim.to_color()),
+            icon_button(Icon::ChevronUp, Some(fm(FindMsg::Prev)), t),
+            icon_button(Icon::ChevronDown, Some(fm(FindMsg::Next)), t),
+            icon_button(Icon::X, Some(fm(FindMsg::Close)), t),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+        fm(FindMsg::Focus(pane)),
+    )
     .into()
 }
 

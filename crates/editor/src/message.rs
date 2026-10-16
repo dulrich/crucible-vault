@@ -413,6 +413,9 @@ pub enum FindMsg {
     Prev,
     /// Shift state while the bar is open (Shift+Enter detection).
     Shift(bool),
+    /// A press on the pane's find input: make it the sole focused widget (the source editor
+    /// would otherwise stay focused too and take the bar's keys; bug fix editor-find-return-leak).
+    Focus(Pane),
 }
 
 /// The surround switch (client command, `surround.ts:75`).
