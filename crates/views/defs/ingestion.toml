@@ -8,14 +8,14 @@
 read = 'if(note.read == true, "✅", "❌")'
 created = 'if(note.created, note.created, file.ctime)'
 
-# Markdown notes directly in the clipper inbox (`clippings.ts`). The folder is user-editable:
-# Crucible's `ingestionClipperInboxFolder` setting defaults to `_clippings/inbox`
-# (`src/types.ts:897`); edit the path below if the vault uses another inbox.
+# Markdown notes directly in the clipper inbox (`clippings.ts`). The live vault's Web Clipper
+# writes to `Clippings` (user-confirmed 2026-10-15); Crucible's `ingestionClipperInboxFolder`
+# setting defaults to `_clippings/inbox` (`src/types.ts:897`).
 [[views]]
 type = "table"
 name = "Unprocessed clippings"
 filters = { and = [
-  'file.folder == "_clippings/inbox"',
+  'file.folder == "Clippings"',
   'file.ext == "md"',
 ] }
 order = ["file.name", "formula.created"]
