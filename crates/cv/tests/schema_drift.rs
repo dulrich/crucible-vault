@@ -176,6 +176,10 @@ const STEPS: &[(&str, &str)] = &[
     ),
     // A2 stubs (plan v0-automation-pipelines WP-1): no params until their WPs define them.
     ("link_scan", ""),
+    (
+        "link_scan",
+        "scope = \"vault\"\nexclude = [\"_crucible\", \"Archive/\"]",
+    ),
     ("yt_metadata", ""),
     ("yt_channel_enrich", ""),
     ("x_discover", ""),

@@ -7,6 +7,7 @@ pub mod client;
 pub mod config;
 pub mod cutover;
 pub mod daemon;
+pub mod import;
 pub mod runner;
 pub mod server;
 pub mod shadow;

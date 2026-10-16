@@ -9,6 +9,7 @@ pub mod health;
 mod id;
 mod image_descriptions;
 mod job;
+pub mod link_records;
 pub mod migrate;
 mod query;
 mod runner_state;
@@ -26,6 +27,9 @@ pub use image_descriptions::{ImageDescription, ImportSummary};
 pub use job::{
     EnqueueOutcome, FailureKind, FailureReason, Job, JobResult, JobSeed, JobStatus, JobTypeSpec,
     Lane, NewJob, namespaced_key,
+};
+pub use link_records::{
+    LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome, read_crucible_link_records,
 };
 pub use query::{ListQuery, ShadowWrite, StatusCount};
 pub use runner_state::StepCheckpoint;

@@ -1,5 +1,5 @@
 //! Hand-rolled CLI dispatch (no clap is pinned): `cv daemon`, `cv uri <url>`, `cv status`,
-//! `cv shadow …` (WP-14), `cv cutover …`, `cv --help`.
+//! `cv shadow …` (WP-14), `cv cutover …`, `cv import …`, `cv --help`.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text.
-pub const USAGE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv --help        this text\n";
+pub const USAGE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv shadow ...    soak tooling: report | parity | replay | import-descriptions\n  cv cutover ...   status | mark --vault <path> --yes [--cancel-unfinished]\n  cv import ...    link-records --from <jobs.sqlite> (daemon stopped)\n  cv --help        this text\n";
 
 /// Runs the CLI with `args` (without argv[0]); returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
@@ -34,6 +34,7 @@ pub fn run(args: &[String]) -> i32 {
         })),
         Some("shadow") => crate::shadow::run(&args[1..]),
         Some("cutover") => crate::cutover::run(&args[1..]),
+        Some("import") => crate::import::run(&args[1..]),
         _ => {
             eprint!("{USAGE}");
             2

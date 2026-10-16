@@ -35,6 +35,7 @@ cv-state = { path = "../cv-state" }
 cv-vault = { path = "../cv-vault" }
 cv-providers = { path = "../cv-providers" }
 cv-search = { path = "../cv-search" }
+cv-ingest = { path = "../cv-ingest" }
 
 [dev-dependencies]
 # Plan editor-settings-tab WP-1: the schema drift test (`tests/schema_drift.rs`); dev-only edge.

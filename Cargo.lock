@@ -818,6 +818,7 @@ dependencies = [
  "chrono",
  "cv-actions",
  "cv-index",
+ "cv-ingest",
  "cv-lint",
  "cv-protocol",
  "cv-providers",

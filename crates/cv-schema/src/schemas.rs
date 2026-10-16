@@ -540,10 +540,28 @@ pub static SEARCH_DELETE: Record = Record {
     rules: &[],
 };
 
-/// `link_scan` — `crates/cv/src/steps/link_scan.rs` (A2 stub: no params until WP-3).
+/// `link_scan` — `crates/cv/src/steps/link_scan.rs` (`parse`; keys at `link_scan.rs` `KEYS`).
 pub static LINK_SCAN: Record = Record {
     name: "link_scan",
-    fields: &[],
+    fields: &[
+        field(
+            "scope",
+            "Scope",
+            "note: the run's active note; vault: every indexed markdown note",
+            Node::Enum(&["note", "vault"]),
+        )
+        .dflt(D::Str("note")),
+        field(
+            "exclude",
+            "Exclude",
+            "Folder prefixes never scanned",
+            Node::StrList {
+                scalar_ok: true,
+                choices: &[],
+            },
+        )
+        .dflt(D::StrList(&["_crucible"])),
+    ],
     rules: &[],
 };
 
