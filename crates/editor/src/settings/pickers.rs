@@ -3,13 +3,14 @@
 //! [`crate::widget::typeahead`]. Stored values never change shape — a picker shows names but
 //! writes the provider id, model id, channel id or vault path exactly as typed today.
 //!
-//! The network-backed pickers (currencies, geocode, live models, channel titles) are WP-6; the
-//! model picker's declared list is built so WP-6 can append live models after it.
+//! WP-6 adds the network-backed pickers (currencies, geocode, live models, channel titles) over
+//! the [`super::lookups`] cache.
 
 use cv_schema::{ConfigDoc, Node, Path, Seg};
 
 use super::Settings;
-use crate::widget::typeahead::{self, Candidate, LIMIT};
+use super::lookups::Models;
+use crate::widget::typeahead::{self, Candidate, LIMIT, Status};
 
 /// Which candidate source a field uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,11 +21,20 @@ pub enum Picker {
     Path,
     /// providers.toml providers (stores the id).
     Provider,
-    /// providers.toml declared models (stores the model id).
+    /// providers.toml declared models + the live list (stores the model id).
     Model,
     /// sources.toml `[[youtube]]` channels (stores the id; free text allowed).
     Channel,
+    /// WP-6: ISO 4217 currencies (`CODE — Name`, stores the code).
+    Currency,
+    /// WP-6: a geocoded place (`City, CC`); a pick writes `label` + sibling `lat`/`lon`.
+    Place,
+    /// WP-6: a `provider:model` reference (the list edits the part after the first `:`).
+    ModelRef,
 }
+
+/// The separator of a [`Picker::Place`] candidate value: `label␟lat␟lon`.
+pub const PLACE_SEP: char = '\u{1f}';
 
 /// The picker of a field of `file` (vault path) at `p` with schema `node`.
 pub fn for_field(file: &str, p: &Path, node: &Node) -> Option<Picker> {
@@ -34,9 +44,6 @@ pub fn for_field(file: &str, p: &Path, node: &Node) -> Option<Picker> {
         _ => {}
     }
     let name = file.rsplit('/').next().unwrap_or(file);
-    if name != "pipelines.toml" {
-        return None;
-    }
     let keys: Vec<&str> =
         p.0.iter()
             .map(|s| match s {
@@ -44,15 +51,25 @@ pub fn for_field(file: &str, p: &Path, node: &Node) -> Option<Picker> {
                 Seg::Index(_) => "",
             })
             .collect();
-    match (keys.as_slice(), node) {
-        (["image_describe", "provider"], Node::Str) => Some(Picker::Provider),
-        (["image_describe", "model"], Node::Str) => Some(Picker::Model),
-        (["ignore_shorts", "channels"], Node::StrList { .. }) => Some(Picker::Channel),
+    match (name, keys.as_slice(), node) {
+        ("pipelines.toml", ["image_describe", "provider"], Node::Str) => Some(Picker::Provider),
+        ("pipelines.toml", ["image_describe", "model"], Node::Str) => Some(Picker::Model),
+        ("pipelines.toml", ["ignore_shorts", "channels"], Node::StrList { .. }) => {
+            Some(Picker::Channel)
+        }
+        ("pipelines.toml", ["daily_brief", "fx", "", "base" | "quote"], Node::Str) => {
+            Some(Picker::Currency)
+        }
+        ("pipelines.toml", ["daily_brief", "weather", "", "label"], Node::Str) => {
+            Some(Picker::Place)
+        }
+        ("agents.toml", [_, "model"], Node::Str)
+        | ("actions.toml", [.., "steps", "", "model"], Node::Str) => Some(Picker::ModelRef),
         _ => None,
     }
 }
 
-fn doc_named<'a>(s: &'a Settings, name: &str) -> Option<&'a ConfigDoc> {
+pub(super) fn doc_named<'a>(s: &'a Settings, name: &str) -> Option<&'a ConfigDoc> {
     s.files
         .values()
         .find(|f| f.path.rsplit('/').next() == Some(name))
@@ -84,7 +101,7 @@ pub fn providers(s: &Settings) -> Vec<Candidate> {
 }
 
 /// providers.toml declared models (of `provider` when given and declared, else every
-/// provider), labelled "declared". WP-6 appends the live list after these.
+/// provider), labelled "declared". [`merged_models`] puts the live list ahead of these.
 pub fn declared_models(s: &Settings, provider: Option<&str>) -> Vec<Candidate> {
     let Some(doc) = doc_named(s, "providers.toml") else {
         return Vec::new();
@@ -125,6 +142,28 @@ pub fn declared_models(s: &Settings, provider: Option<&str>) -> Vec<Candidate> {
     out
 }
 
+/// Live models first (secondary = display name, else "live"), then the declared models not
+/// already listed (secondary "declared"), deduped by id.
+pub fn merged_models(s: &Settings, provider: Option<&str>) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = match provider.and_then(|p| s.lookups.models.get(p)) {
+        Some(Models::Live(ms)) => ms
+            .iter()
+            .map(|m| Candidate {
+                label: m.id.clone(),
+                secondary: m.display_name.clone().unwrap_or_else(|| "live".to_owned()),
+                value: m.id.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for d in declared_models(s, provider) {
+        if !out.iter().any(|c| c.value == d.value) {
+            out.push(d);
+        }
+    }
+    out
+}
+
 /// sources.toml `[[youtube]]` channels: label `channel (UC…)`, value = id.
 pub fn channels(s: &Settings) -> Vec<Candidate> {
     let Some(doc) = doc_named(s, "sources.toml") else {
@@ -156,6 +195,64 @@ pub fn channel_label(chans: &[Candidate], stored: &str) -> String {
         .map_or_else(|| stored.to_owned(), |c| c.label.clone())
 }
 
+/// [`channel_label`], falling back to a fetched title (`title (UC…)`, WP-6) for ids sources.toml
+/// does not name; a missing title shows the id.
+pub fn chip_label(s: &Settings, chans: &[Candidate], stored: &str) -> String {
+    if chans
+        .iter()
+        .any(|c| c.value == stored && c.label != c.value)
+    {
+        return channel_label(chans, stored);
+    }
+    match s.lookups.channel_title(stored) {
+        Some(t) => format!("{t} ({stored})"),
+        None => stored.to_owned(),
+    }
+}
+
+/// Channel candidates: sources.toml channels (a fetched title for unnamed ids), then other
+/// ids with a fetched title.
+fn all_channels(s: &Settings) -> Vec<Candidate> {
+    let mut out = channels(s);
+    for c in &mut out {
+        if c.label == c.value
+            && let Some(t) = s.lookups.channel_title(&c.value)
+        {
+            c.label = format!("{t} ({})", c.value);
+        }
+    }
+    for (id, t) in &s.lookups.channels {
+        if let Some(t) = t
+            && !out.iter().any(|c| c.value == *id)
+        {
+            out.push(Candidate {
+                label: format!("{t} ({id})"),
+                secondary: String::new(),
+                value: id.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// The `[[youtube]]` row's fetched title, the placeholder of an empty `channel` field (never
+/// written to the doc).
+pub fn source_channel_placeholder(s: &Settings, file: &str, at: &Path) -> Option<String> {
+    if file.rsplit('/').next() != Some("sources.toml") {
+        return None;
+    }
+    let n = at.0.len();
+    if n < 2 || at.0[n - 1] != Seg::Key("channel".to_owned()) {
+        return None;
+    }
+    if !matches!(at.0[n - 2], Seg::Index(_)) {
+        return None;
+    }
+    let doc = s.file(file)?.doc.as_ref()?;
+    let id = doc.get_str(&Path(at.0[..n - 1].to_vec()).key("id"))?;
+    s.lookups.channel_title(id).map(str::to_owned)
+}
+
 /// The model picker's provider: `image_describe.provider` of the same file.
 fn sibling_provider<'a>(s: &'a Settings, file: &str, at: &Path) -> Option<&'a str> {
     let doc = s.file(file)?.doc.as_ref()?;
@@ -164,13 +261,143 @@ fn sibling_provider<'a>(s: &'a Settings, file: &str, at: &Path) -> Option<&'a st
     doc.get_str(&p).filter(|v| !v.is_empty())
 }
 
+/// Splits a `provider:model` reference at the first `:` (`crates/cv-providers/src/refs.rs:13`).
+pub fn split_ref(v: &str) -> Option<(&str, &str)> {
+    v.split_once(':')
+}
+
+/// The provider whose models the picker lists: image_describe's sibling `provider`, or the
+/// prefix of a `provider:model` reference (typed, else stored; `{param.…}` has none).
+pub fn model_provider(
+    s: &Settings,
+    picker: Picker,
+    file: &str,
+    at: &Path,
+    text: &str,
+) -> Option<String> {
+    match picker {
+        Picker::Model => sibling_provider(s, file, at).map(str::to_owned),
+        Picker::ModelRef => {
+            let stored = s
+                .file(file)
+                .and_then(|f| f.doc.as_ref())
+                .and_then(|d| d.get_str(at))
+                .unwrap_or_default();
+            [text, stored]
+                .into_iter()
+                .filter(|v| !v.starts_with('{'))
+                .find_map(|v| split_ref(v).map(|(p, _)| p.to_owned()))
+                .filter(|p| !p.is_empty())
+        }
+        _ => None,
+    }
+}
+
+/// The status line of the active picker's async source.
+pub fn status(s: &Settings, picker: Picker, file: &str, at: &Path, text: &str) -> Status {
+    match picker {
+        Picker::Model | Picker::ModelRef => {
+            match model_provider(s, picker, file, at, text).and_then(|p| s.lookups.models.get(&p)) {
+                Some(Models::Loading) => Status::Loading,
+                Some(Models::Failed) => Status::Failed(super::lookups::MODELS_FAILED.to_owned()),
+                _ => Status::Ready,
+            }
+        }
+        Picker::Currency => match &s.lookups.currencies {
+            None => Status::Loading,
+            Some(Err(_)) => Status::Failed("currency list unavailable".to_owned()),
+            Some(Ok(_)) => Status::Ready,
+        },
+        Picker::Place => {
+            let q = super::lookups::geo_key(text);
+            match s.lookups.geo.get(&q) {
+                Some(Err(_)) => Status::Failed("place search unavailable".to_owned()),
+                Some(Ok(v)) if v.is_empty() => Status::Failed("no places found".to_owned()),
+                None if q.chars().count() >= 2 => Status::Loading,
+                _ => Status::Ready,
+            }
+        }
+        _ => Status::Ready,
+    }
+}
+
+/// Currency candidates (`CODE — Name`, value = code); empty until fetched.
+fn currencies(s: &Settings) -> Vec<Candidate> {
+    match &s.lookups.currencies {
+        Some(Ok(cs)) => cs
+            .iter()
+            .map(|c| Candidate {
+                label: format!("{} — {}", c.code, c.name),
+                secondary: String::new(),
+                value: c.code.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Place candidates for `query` (`City, CC`, admin1 secondary, value `label␟lat␟lon`).
+fn places(s: &Settings, query: &str) -> Vec<Candidate> {
+    s.lookups
+        .places(query)
+        .iter()
+        .take(LIMIT)
+        .map(|g| Candidate {
+            label: g.label.clone(),
+            secondary: g.admin1.clone().unwrap_or_default(),
+            value: format!("{}{PLACE_SEP}{}{PLACE_SEP}{}", g.label, g.lat, g.lon),
+        })
+        .collect()
+}
+
+/// Decodes a [`Picker::Place`] candidate value into `(label, lat, lon)`.
+pub fn decode_place(v: &str) -> Option<(String, f64, f64)> {
+    let mut it = v.split(PLACE_SEP);
+    let (l, a, o) = (it.next()?, it.next()?, it.next()?);
+    Some((l.to_owned(), a.parse().ok()?, o.parse().ok()?))
+}
+
+/// `provider:model` candidates of the reference's provider (every declared provider's models
+/// when the text has no prefix yet); labels show the model part only.
+fn model_refs(s: &Settings, file: &str, at: &Path, text: &str) -> Vec<Candidate> {
+    if text.starts_with('{') {
+        return Vec::new();
+    }
+    match model_provider(s, Picker::ModelRef, file, at, text) {
+        Some(p) => merged_models(s, Some(&p))
+            .into_iter()
+            .map(|c| Candidate {
+                value: format!("{p}:{}", c.value),
+                ..c
+            })
+            .collect(),
+        None => providers(s)
+            .into_iter()
+            .flat_map(|pc| {
+                let p = pc.value;
+                declared_models(s, Some(&p))
+                    .into_iter()
+                    .map(|c| Candidate {
+                        secondary: format!("declared · {p}"),
+                        value: format!("{p}:{}", c.value),
+                        label: c.label,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+    }
+}
+
 /// Every candidate of a non-path picker (`Folder`/`Path` rank the raw path list instead, see
 /// [`visible`]).
-fn small_set(s: &Settings, picker: Picker, file: &str, at: &Path) -> Vec<Candidate> {
+fn small_set(s: &Settings, picker: Picker, file: &str, at: &Path, text: &str) -> Vec<Candidate> {
     match picker {
         Picker::Provider => providers(s),
-        Picker::Model => declared_models(s, sibling_provider(s, file, at)),
-        Picker::Channel => channels(s),
+        Picker::Model => merged_models(s, sibling_provider(s, file, at)),
+        Picker::Channel => all_channels(s),
+        Picker::Currency => currencies(s),
+        Picker::Place => places(s, text),
+        Picker::ModelRef => model_refs(s, file, at, text),
         Picker::Folder | Picker::Path => Vec::new(),
     }
 }
@@ -198,7 +425,13 @@ pub fn visible(
     match picker {
         Picker::Folder => raw(&folders(paths)),
         Picker::Path => raw(paths),
-        _ => typeahead::filter(query, &small_set(s, picker, file, at), LIMIT),
+        // Geocode results are already ranked by the service for this query.
+        Picker::Place => places(s, query),
+        Picker::ModelRef => {
+            let q = split_ref(query).map_or(query, |(_, m)| m);
+            typeahead::filter(q, &small_set(s, picker, file, at, query), LIMIT)
+        }
+        _ => typeahead::filter(query, &small_set(s, picker, file, at, query), LIMIT),
     }
 }
 
@@ -214,18 +447,27 @@ pub fn is_valid(
     match picker {
         Picker::Folder => folders(paths).iter().any(|f| f == text),
         Picker::Path => paths.iter().any(|p| p == text),
-        _ => typeahead::is_value(text, &small_set(s, picker, file, at)),
+        // Free text: a place label alone, a `{param.…}` model, a currency before the list loads.
+        Picker::Place => true,
+        Picker::ModelRef if text.starts_with('{') => true,
+        Picker::Currency if !matches!(s.lookups.currencies, Some(Ok(_))) => true,
+        _ => typeahead::is_value(text, &small_set(s, picker, file, at, text)),
     }
 }
 
-/// The display label of a stored value (Provider: its name; others: as stored).
+/// The display label of a stored value (Provider: its name; Currency: `CODE — Name`; Channel:
+/// its name or fetched title; others: as stored).
 pub fn label_of(s: &Settings, picker: Picker, stored: &str) -> Option<String> {
     match picker {
         Picker::Provider => providers(s)
             .into_iter()
             .find(|c| c.value == stored)
             .map(|c| c.label),
-        Picker::Channel => Some(channel_label(&channels(s), stored)),
+        Picker::Channel => Some(chip_label(s, &channels(s), stored)),
+        Picker::Currency => currencies(s)
+            .into_iter()
+            .find(|c| c.value == stored)
+            .map(|c| c.label),
         _ => None,
     }
 }

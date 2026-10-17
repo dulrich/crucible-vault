@@ -46,6 +46,7 @@
 
 pub mod editor_prefs;
 pub mod form;
+pub mod lookups;
 pub mod pages;
 pub mod pickers;
 pub mod status;
@@ -534,6 +535,8 @@ pub struct Settings {
     /// Plan round-5 WP-1: each section's last body scroll offset (px), re-applied on section /
     /// tab activation — iced scrollable state is positional, never retained across them.
     pub body_offsets: std::collections::HashMap<Section, f32>,
+    /// Plan round-5 WP-6: the network-backed pickers' session cache.
+    pub lookups: lookups::Lookups,
 }
 
 impl Default for Settings {
@@ -549,6 +552,7 @@ impl Default for Settings {
             new_view: String::new(),
             hotkeys: pages::hotkeys::HotkeyState::default(),
             body_offsets: std::collections::HashMap::new(),
+            lookups: lookups::Lookups::default(),
         }
     }
 }
@@ -635,7 +639,7 @@ impl Settings {
             Seg::Key(_) => None,
         };
         match edit {
-            DocEdit::Set(..) => {}
+            DocEdit::Set(..) | DocEdit::SetMany(..) => {}
             DocEdit::Remove(p) => {
                 fs.clear_drafts(file);
                 if let Some((Seg::Index(gone), parent)) = p.0.split_last() {
@@ -723,6 +727,16 @@ impl Settings {
         })
     }
 
+    /// The active typeahead's status line (plan round-5 WP-6 async sources).
+    pub fn ta_status(&self) -> crate::widget::typeahead::Status {
+        self.form
+            .typeahead
+            .as_ref()
+            .map_or_else(Default::default, |a| {
+                pickers::status(self, a.picker, &a.file, &a.path, &self.ta_text(a))
+            })
+    }
+
     /// A key on the active typeahead (Up/Down/Enter/Escape; Escape doubles as blur).
     pub fn typeahead_key(&mut self, key: crate::widget::typeahead::Key, paths: &[String]) {
         let Some(mut a) = self.form.typeahead.take() else {
@@ -796,6 +810,21 @@ impl Settings {
             Outcome::None if !a.ta.open => text.to_owned(),
             Outcome::None => return,
         };
+        if a.picker == pickers::Picker::Place
+            && let Some((label, lat, lon)) = pickers::decode_place(&v)
+        {
+            // A geocoded pick: label + sibling lat/lon in one edit.
+            let parent = cv_schema::Path(a.path.0[..a.path.0.len().saturating_sub(1)].to_vec());
+            a.draft.clone_from(&label);
+            a.ta.committed.clone_from(&label);
+            let e = DocEdit::SetMany(vec![
+                (a.path.clone(), ScalarValue::Str(label)),
+                (parent.key("lat"), ScalarValue::Float(lat)),
+                (parent.key("lon"), ScalarValue::Float(lon)),
+            ]);
+            let _ = self.edit(&file, &e);
+            return;
+        }
         a.draft.clone_from(&v);
         if self.stored_str(&file, &a.path) != v {
             let e = text_edit(&self.files, &file, a.path.clone(), v, a.required);
@@ -1171,6 +1200,8 @@ pub enum SettingsMsg {
     Edit(String, DocEdit),
     /// A form UI message on a file page.
     Form(String, FormMsg),
+    /// Plan round-5 WP-6: a picker lookup result (or the geocode debounce tick).
+    Lookup(lookups::LookupMsg),
     /// Views page: select a file.
     ViewSelect(String),
     /// Views page: the new-file name field.
@@ -1200,6 +1231,8 @@ pub enum SettingsMsg {
 pub enum DocEdit {
     /// Set a scalar at a schema path.
     Set(cv_schema::Path, ScalarValue),
+    /// Set several scalars as one edit (one undo / dirty step; plan round-5 WP-6 weather pick).
+    SetMany(Vec<(cv_schema::Path, ScalarValue)>),
     /// Remove the item at a path.
     Remove(cv_schema::Path),
     /// Insert a table record into a list at an index, with initial scalar fields (a union's
@@ -1250,6 +1283,7 @@ impl DocEdit {
     pub fn apply(&self, doc: &mut ConfigDoc) -> Result<(), DocError> {
         match self {
             DocEdit::Set(p, v) => doc.set(p, v.value()),
+            DocEdit::SetMany(kv) => kv.iter().try_for_each(|(p, v)| doc.set(p, v.value())),
             DocEdit::Remove(p) => doc.remove(p).map(|_| ()),
             DocEdit::InsertRecord(list, at, fields) => {
                 let mut t = cv_schema::toml_edit::Table::new();

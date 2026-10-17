@@ -847,6 +847,56 @@ impl App {
         self.sync_bookmarks();
     }
 
+    /// Plan round-5 WP-6: issues the picker lookups Settings wants (each off the UI thread via
+    /// [`Self::rpc`]); geocode first waits out its debounce.
+    fn settings_lookups(&mut self) -> Task<Message> {
+        use crate::settings::lookups::{GEO_DEBOUNCE_MS, LookupMsg, Want};
+        if self.daemon.is_none() {
+            return Task::none();
+        }
+        let lm = |m: LookupMsg| Message::Settings(crate::settings::SettingsMsg::Lookup(m));
+        let mut tasks = Vec::new();
+        for w in self.settings.lookup_wants() {
+            tasks.push(match w {
+                Want::Currencies => self.rpc(
+                    |d| d.lookup_currencies().map_err(|e| e.to_string()),
+                    move |r| lm(LookupMsg::Currencies(r)),
+                ),
+                Want::Models(p) => {
+                    let p2 = p.clone();
+                    self.rpc(
+                        move |d| d.lookup_models(&p2).map_err(|e| e.to_string()),
+                        move |r| lm(LookupMsg::Models(p, r)),
+                    )
+                }
+                Want::Channels(ids) => {
+                    let ids2 = ids.clone();
+                    self.rpc(
+                        move |d| d.lookup_channels(&ids2).map_err(|e| e.to_string()),
+                        move |r| lm(LookupMsg::Channels(ids, r)),
+                    )
+                }
+                Want::GeoDebounce(seq) => {
+                    if self.rpc_inline {
+                        // Tests: the debounce elapses immediately.
+                        self.update(lm(LookupMsg::GeoDue(seq)))
+                    } else {
+                        Task::perform(
+                            async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    GEO_DEBOUNCE_MS,
+                                ))
+                                .await;
+                            },
+                            move |()| lm(LookupMsg::GeoDue(seq)),
+                        )
+                    }
+                }
+            });
+        }
+        Task::batch(tasks)
+    }
+
     /// Runs `call` against the daemon off the UI thread and feeds `done` its result.
     fn rpc<X: Send + 'static>(
         &mut self,
@@ -4190,7 +4240,7 @@ impl App {
                 if s == Section::Status {
                     return Task::batch([restore, self.fetch_status()]);
                 }
-                return restore;
+                return Task::batch([restore, self.settings_lookups()]);
             }
             SettingsMsg::BodyScrolled(s, y) => {
                 self.settings.body_offsets.insert(s, y);
@@ -4218,13 +4268,29 @@ impl App {
             }
             SettingsMsg::Typeahead(k) => {
                 self.settings.typeahead_key(k, &self.explorer.paths);
+                return self.settings_lookups();
             }
             SettingsMsg::Form(path, m) => {
                 self.settings.form_msg_paths(&path, m, &self.explorer.paths);
                 if path == EDITOR_PATH {
                     self.apply_prefs();
                 }
+                return self.settings_lookups();
             }
+            SettingsMsg::Lookup(crate::settings::lookups::LookupMsg::GeoDue(seq)) => {
+                if let Some(q) = self.settings.lookups.geo_due(seq) {
+                    let q2 = q.clone();
+                    return self.rpc(
+                        move |d| d.lookup_geocode(&q2).map_err(|e| e.to_string()),
+                        move |r| {
+                            Message::Settings(SettingsMsg::Lookup(
+                                crate::settings::lookups::LookupMsg::Geo(q, r),
+                            ))
+                        },
+                    );
+                }
+            }
+            SettingsMsg::Lookup(m) => self.settings.lookups.apply(m),
             SettingsMsg::ViewSelect(p) => self.settings.view_selected = Some(p),
             SettingsMsg::NewViewName(n) => self.settings.new_view = n,
             SettingsMsg::NewViewCreate => {

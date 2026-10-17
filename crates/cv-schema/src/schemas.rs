@@ -1366,7 +1366,12 @@ pub static AGENT_DEF: Record = Record {
             "Template rendered into {{value}}/{{input}}",
             Node::Str,
         ),
-        field("model", "Model", "Default provider:model", Node::Str),
+        field(
+            "model",
+            "Model",
+            "Default provider:model (live list per provider)",
+            Node::Str,
+        ),
         field("max_tokens", "Max tokens", "Completion cap (> 0)", POS_U32).req(),
     ],
     rules: &[
@@ -1914,8 +1919,14 @@ pub static PIPE_IMAGE_DESCRIBE: Record = Record {
 pub static PIPE_FX: Record = Record {
     name: "fx",
     fields: &[
-        field("base", "Base", "Base currency (ISO 4217)", Node::Str).req(),
-        field("quote", "Quote", "Quote currency", Node::Str).req(),
+        field("base", "Base", "Base currency (ISO 4217 code)", Node::Str).req(),
+        field(
+            "quote",
+            "Quote",
+            "Quote currency (ISO 4217 code)",
+            Node::Str,
+        )
+        .req(),
         field("label", "Label", "Default BASE/QUOTE", Node::Str),
     ],
     rules: &[],
@@ -1925,7 +1936,13 @@ pub static PIPE_FX: Record = Record {
 pub static PIPE_WEATHER: Record = Record {
     name: "weather",
     fields: &[
-        field("label", "Label", "Place name", Node::Str).req(),
+        field(
+            "label",
+            "Label",
+            "Place name; a search pick also fills lat/lon",
+            Node::Str,
+        )
+        .req(),
         field(
             "lat",
             "Latitude",

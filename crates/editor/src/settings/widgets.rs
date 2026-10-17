@@ -68,7 +68,7 @@ impl<'a> Rcx<'a> {
         Some(typeahead::list(
             &visible,
             a.ta.highlight,
-            &typeahead::Status::Ready,
+            &self.settings.ta_status(),
             pick,
             self.t,
         ))
@@ -147,6 +147,13 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                     pickers::label_of(cx.settings, pk, &value).unwrap_or(value.clone())
                 }
                 (None, _) => value.clone(),
+            };
+            // WP-6: an empty sources.toml `channel` shows the fetched title (never written).
+            let placeholder = if value.is_empty() {
+                pickers::source_channel_placeholder(cx.settings, cx.file, &path)
+                    .unwrap_or(placeholder)
+            } else {
+                placeholder
             };
             let mut input = text_input(&placeholder, &shown)
                 .size(14)
@@ -321,7 +328,12 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                 chips = chips.push(
                     container(
                         row![
-                            text(pickers::channel_label(&chans, it)).size(13),
+                            text(if picker == Some(pickers::Picker::Channel) {
+                                pickers::chip_label(cx.settings, &chans, it)
+                            } else {
+                                pickers::channel_label(&chans, it)
+                            })
+                            .size(13),
                             button(theme::icon_text(Icon::X).size(12))
                                 .style(button::text)
                                 .padding(2)
