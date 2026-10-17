@@ -786,3 +786,226 @@ fn hints_compute_time_is_bounded() {
     );
     assert!(el < Duration::from_secs(5), "{el:?}");
 }
+
+// ---- usability-sprint-captures-links WP-6: "File as kind" repro through the real flow ----
+
+/// The live `file-as-kind`: durable, one required enum param, `upsert_tags` (writes `from`) →
+/// `move` → `lint`. Handler effects run on `complete_deferred`.
+fn file_as_kind_live_env() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vault = tmp.path().join("vault");
+    write(&vault, "a.md", "# A\n\nfirst line\n");
+    let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
+    let mut kind = spec("kind", ParamKind::Enum, true);
+    kind.choices = vec!["transcript".into(), "blog".into()];
+    let mut info = action("file-as-kind", vec![kind], &[]);
+    info.durable = true;
+    let d2 = Arc::clone(&d);
+    d.register_action(
+        info,
+        Arc::new(move |p: &RunActionParams| {
+            let from = p.context.active_path.clone().ok_or("no path")?;
+            let kind = p.params.get("kind").and_then(Value::as_str).ok_or("kind")?;
+            let to = format!("{kind}/a.md");
+            let (bytes, h) = d2.read_file(&from).map_err(|e| e.to_string())?;
+            let tagged = format!(
+                "---\ntags: [{kind}]\n---\n{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            d2.write_note(&from, &tagged, &h)
+                .map_err(|e| e.to_string())?;
+            d2.rename(&from, &to).map_err(|e| e.to_string())?;
+            Ok(Some(to))
+        }),
+    )
+    .expect("register");
+    d.defer_action("file-as-kind").expect("defer");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.rpc_inline = true;
+    app.today = Some(today());
+    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    (tmp, d, app)
+}
+
+fn notify(app: &mut App, n: Notification) {
+    let _ = app.update(Message::Status(StatusMsg::Notification(n)));
+}
+
+fn job_status(id: &str, status: JobState, open: Option<&str>) -> JobStatus {
+    JobStatus {
+        job_id: id.into(),
+        status,
+        message: None,
+        output_paths: Vec::new(),
+        open_path: open.map(str::to_owned),
+    }
+}
+
+/// Picks the action, chooses `blog` in the enum prompt, submits; then replays the daemon's
+/// notifications in its emit order: `Running` (published when the runner starts the job,
+/// `cv/src/runner/mod.rs` `publish_status(.., Running ..)`), the tags write on `from`, the
+/// rename, `Done` with `open_path`.
+fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
+    pal(app, PaletteMsg::Open);
+    let i = entry_of(app, "file-as-kind");
+    pal(app, PaletteMsg::Pick(i));
+    assert!(app.palette.prompt.is_some(), "enum param prompted");
+    pal(app, PaletteMsg::Prompt(PromptMsg::Choice("blog".into())));
+    pal(app, PaletteMsg::Submit);
+    let id = app
+        .palette
+        .job_titles
+        .keys()
+        .next()
+        .cloned()
+        .expect("reply handled");
+    notify(
+        app,
+        Notification::JobUpdated(job_status(&id, JobState::Running, None)),
+    );
+    assert_eq!(
+        d.complete_deferred().expect("complete"),
+        std::slice::from_ref(&id)
+    );
+    let tagged = std::fs::read(d.vault_root().join("blog/a.md")).expect("moved");
+    notify(
+        app,
+        Notification::FileChanged {
+            path: "a.md".into(),
+            kind: cv_protocol::ChangeKind::Modified,
+            hash: Some(ContentHash::of(&tagged).as_str().to_owned()),
+            origin: cv_protocol::Origin::Daemon,
+        },
+    );
+    for (path, kind) in [
+        ("blog/a.md", cv_protocol::ChangeKind::Renamed),
+        ("a.md", cv_protocol::ChangeKind::Deleted),
+    ] {
+        notify(
+            app,
+            Notification::FileChanged {
+                path: path.into(),
+                kind,
+                hash: None,
+                origin: cv_protocol::Origin::Daemon,
+            },
+        );
+    }
+    notify(
+        app,
+        Notification::JobUpdated(job_status(&id, JobState::Done, Some("blog/a.md"))),
+    );
+}
+
+#[test]
+fn live_file_as_kind_moves_the_tab_clean_buffer() {
+    let (_tmp, d, mut app) = file_as_kind_live_env();
+    run_live_file_as_kind(&d, &mut app);
+    assert_eq!(all_tabs(&app), ["blog/a.md"], "one tab, at the moved path");
+    assert!(app.doc("a.md").is_none(), "no stale doc for from");
+    assert!(!d.vault_root().join("a.md").exists(), "from not recreated");
+    let tab = app.active_doc().expect("tab");
+    assert!(!tab.is_dirty() && tab.conflict().is_none());
+    assert!(tab.text().contains("tags: [blog]"));
+}
+
+#[test]
+fn live_file_as_kind_moves_the_tab_dirty_buffer_saved_first() {
+    let (_tmp, d, mut app) = file_as_kind_live_env();
+    type_z(&mut app);
+    run_live_file_as_kind(&d, &mut app);
+    assert_eq!(all_tabs(&app), ["blog/a.md"], "one tab, at the moved path");
+    assert!(!d.vault_root().join("a.md").exists(), "from not recreated");
+    let tab = app.active_doc().expect("tab");
+    assert!(!tab.is_dirty() && tab.conflict().is_none());
+    assert!(tab.text().contains('Z'), "saved-first edit kept");
+}
+
+// ---- WP-6 Part B: "Move note…" ----
+
+#[test]
+fn move_folder_candidates_dedup_root_and_exclude_current() {
+    use crate::switcher::{folder_candidates, move_target};
+    let paths: Vec<String> = ["a.md", "x/b.md", "x/c.md", "x/y/z/d.md", "q/e.md"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    assert_eq!(
+        folder_candidates(&paths, "x/b.md"),
+        ["/", "q", "x/y", "x/y/z"],
+        "root shown, dedup, ancestors kept, current folder excluded"
+    );
+    assert_eq!(
+        folder_candidates(&paths, "a.md"),
+        ["q", "x", "x/y", "x/y/z"],
+        "a root note has no root candidate"
+    );
+    assert_eq!(move_target("x/b.md", "/"), "b.md");
+    assert_eq!(move_target("a.md", "x/y"), "x/y/a.md");
+}
+
+fn move_env() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vault = tmp.path().join("vault");
+    write(&vault, "a.md", "# A\n");
+    write(&vault, "notes/b.md", "# B\n");
+    let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.rpc_inline = true;
+    app.today = Some(today());
+    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    (tmp, d, app)
+}
+
+fn move_to(app: &mut App, folder: &str) {
+    let _ = app.update(ClientCmd::MoveNote.message(app.focus));
+    assert_eq!(app.switcher.move_from.as_deref(), Some("a.md"));
+    assert_eq!(app.switcher.folders, ["notes"]);
+    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Pick(
+        folder.into(),
+    )));
+    assert!(!app.switcher.open && app.switcher.move_from.is_none());
+}
+
+#[test]
+fn move_note_renames_and_the_tab_follows() {
+    let (_tmp, d, mut app) = move_env();
+    move_to(&mut app, "notes");
+    assert_eq!(all_tabs(&app), ["notes/a.md"]);
+    assert!(app.doc("a.md").is_none());
+    assert_eq!(app.doc("notes/a.md").map(|d| d.path()), Some("notes/a.md"));
+    assert!(d.vault_root().join("notes/a.md").exists());
+    assert!(!d.vault_root().join("a.md").exists());
+}
+
+#[test]
+fn move_note_collision_is_a_status_and_no_rename() {
+    let (_tmp, d, mut app) = move_env();
+    write(d.vault_root(), "notes/a.md", "# other\n");
+    move_to(&mut app, "notes");
+    assert_eq!(all_tabs(&app), ["a.md"]);
+    assert!(d.vault_root().join("a.md").exists());
+    assert!(
+        app.status
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("already exists"))
+    );
+}
+
+#[test]
+fn move_note_refuses_a_dirty_buffer() {
+    let (_tmp, d, mut app) = move_env();
+    type_z(&mut app);
+    move_to(&mut app, "notes");
+    assert_eq!(all_tabs(&app), ["a.md"]);
+    assert!(d.vault_root().join("a.md").exists());
+    assert!(
+        app.status
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("save the open note first"))
+    );
+}

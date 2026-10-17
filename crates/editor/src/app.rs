@@ -2730,11 +2730,13 @@ impl App {
         match m {
             SwitcherMsg::Open => {
                 s.open = true;
+                s.move_from = None;
                 s.query.clear();
                 s.selected = 0;
                 s.refresh(&self.explorer.paths, &self.ui.recent);
                 return iced::widget::operation::focus(switcher::INPUT_ID);
             }
+            SwitcherMsg::OpenMove => return self.open_move_note(),
             SwitcherMsg::Close => s.open = false,
             // plan editor-ui-round-3 WP-5: two-stage Escape.
             SwitcherMsg::Escape if s.open && !s.query.is_empty() => {
@@ -2759,6 +2761,12 @@ impl App {
                 if !s.open {
                     return Task::none();
                 }
+                if s.move_from.is_some() {
+                    return match s.current().map(str::to_owned) {
+                        Some(f) => self.move_note_to(&f),
+                        None => Task::none(),
+                    };
+                }
                 match s.current().map(str::to_owned) {
                     Some(p) if !s.shift => {
                         s.open = false;
@@ -2767,10 +2775,12 @@ impl App {
                     _ => return self.update_switcher(SwitcherMsg::Create),
                 }
             }
+            SwitcherMsg::Pick(p) if s.move_from.is_some() => return self.move_note_to(&p),
             SwitcherMsg::Pick(p) => {
                 s.open = false;
                 self.open_with(&p, self.quick_switch_place(), true);
             }
+            SwitcherMsg::Create if s.move_from.is_some() => {}
             SwitcherMsg::Create => {
                 if self.shadow_blocked("creating notes is disabled in shadow mode") {
                     return Task::none();
@@ -2797,6 +2807,54 @@ impl App {
             },
         }
         Task::none()
+    }
+
+    /// WP-6 (usability-sprint-captures-links): "Move note…" — the switcher in folder mode for
+    /// the active note.
+    fn open_move_note(&mut self) -> Task<Message> {
+        if self.shadow_blocked(explorer::SHADOW_REASON) {
+            return Task::none();
+        }
+        let Some(from) = self.active_note().map(|t| t.path.clone()) else {
+            self.status.error = Some("move note: no active note".into());
+            return Task::none();
+        };
+        let s = &mut self.switcher;
+        s.folders = switcher::folder_candidates(&self.explorer.paths, &from);
+        s.move_from = Some(from);
+        s.open = true;
+        s.query.clear();
+        s.selected = 0;
+        s.refresh(&self.explorer.paths, &self.ui.recent);
+        iced::widget::operation::focus(switcher::INPUT_ID)
+    }
+
+    /// WP-6: moves the folder-mode note into `folder` (a [`switcher::folder_candidates`] label)
+    /// through [`Self::dispatch_op`]; completion follows via `ExplorerMsg::Done` → `retarget`.
+    fn move_note_to(&mut self, folder: &str) -> Task<Message> {
+        let Some(from) = self.switcher.move_from.take() else {
+            return Task::none();
+        };
+        self.switcher.open = false;
+        if self.shadow_blocked(explorer::SHADOW_REASON) {
+            return Task::none();
+        }
+        let to = switcher::move_target(&from, folder);
+        if to == from {
+            return Task::none();
+        }
+        let Some(d) = self.daemon.clone() else {
+            self.status.error = Some("move note: not connected".into());
+            return Task::none();
+        };
+        match d.read_file(&to) {
+            Err(DaemonError::NotFound(_)) => {}
+            _ => {
+                self.status.error = Some(format!("move note: {to} already exists"));
+                return Task::none();
+            }
+        }
+        self.dispatch_op(FileOp::Rename { from, to })
     }
 
     fn update_nav(&mut self, m: NavMsg) -> Task<Message> {
@@ -3172,6 +3230,12 @@ impl App {
     /// A terminal `JobUpdated`: follow its `open_path` (WP-5). A job whose `run_action` reply has
     /// not arrived yet is remembered for [`PaletteMsg::Ran`].
     fn job_finished(&mut self, j: &cv_protocol::JobStatus) {
+        // WP-6 (usability-sprint-captures-links): `Pending`/`Running` are not terminal — the
+        // daemon publishes `Running` when the runner starts a durable job, usually after the
+        // `run_action` reply; dropping the origin there left the tab at the vanished path.
+        if !crate::palette::terminal(j.status) {
+            return;
+        }
         if j.status != cv_protocol::JobState::Done {
             self.palette.job_origins.remove(&j.job_id);
             return;

@@ -28,6 +28,49 @@ pub struct Switcher {
     pub results: Vec<Ranked>,
     pub selected: usize,
     pub shift: bool,
+    /// WP-6 (usability-sprint-captures-links): folder mode — the note being moved; results rank
+    /// [`Self::folders`] instead of note paths, and a pick moves the note there.
+    pub move_from: Option<String>,
+    /// Folder mode candidates ([`folder_candidates`]).
+    pub folders: Vec<String>,
+}
+
+/// How the vault root shows (and ranks) in folder mode.
+pub const ROOT_LABEL: &str = "/";
+
+/// The parent folder of a vault path (`""` at the root).
+pub fn parent_folder(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(d, _)| d)
+}
+
+/// WP-6: "Move note…" destinations — every distinct folder holding (or above) an indexed path,
+/// plus the vault root as [`ROOT_LABEL`], minus `current`'s own folder; sorted.
+pub fn folder_candidates(paths: &[String], current: &str) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for p in paths {
+        let mut d = parent_folder(p);
+        while !d.is_empty() && set.insert(d.to_owned()) {
+            d = parent_folder(d);
+        }
+    }
+    let here = parent_folder(current);
+    let mut v: Vec<String> = Vec::with_capacity(set.len() + 1);
+    if !here.is_empty() {
+        v.push(ROOT_LABEL.to_owned());
+    }
+    v.extend(set.into_iter().filter(|d| d != here));
+    v
+}
+
+/// WP-6: the rename target for moving `from` into the picked folder label.
+pub fn move_target(from: &str, folder: &str) -> String {
+    let base = from.rsplit_once('/').map_or(from, |(_, b)| b);
+    let folder = folder.trim_matches('/');
+    if folder.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{folder}/{base}")
+    }
 }
 
 /// Paths the switcher ranks below equal matches elsewhere.
@@ -63,7 +106,11 @@ pub fn create_params(path: &str) -> RunActionParams {
 impl Switcher {
     /// Re-ranks against `paths`.
     pub fn refresh(&mut self, paths: &[String], recent: &[String]) {
-        self.results = rank(&self.query, paths, recent, deranked, LIMIT);
+        self.results = if self.move_from.is_some() {
+            rank(&self.query, &self.folders, &[], |_| false, LIMIT)
+        } else {
+            rank(&self.query, paths, recent, deranked, LIMIT)
+        };
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
     }
 
@@ -103,8 +150,13 @@ pub fn shift(m: Modifiers) -> bool {
 
 /// The switcher panel (shown above the panes while open).
 pub fn view<'a>(s: &'a Switcher, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
+    let hint = if s.move_from.is_some() {
+        "Move note to folder…"
+    } else {
+        "Find or create a note…"
+    };
     let mut col = column![
-        text_input("Find or create a note…", &s.query)
+        text_input(hint, &s.query)
             .id(INPUT_ID)
             .on_input(|q| Message::Switcher(SwitcherMsg::Query(q)))
             .on_submit(Message::Switcher(SwitcherMsg::Submit))
@@ -123,7 +175,7 @@ pub fn view<'a>(s: &'a Switcher, tokens: Tokens, mode: Mode) -> Element<'a, Mess
                 .on_press(Message::Switcher(SwitcherMsg::Pick(r.path.clone()))),
         );
     }
-    if let Some(p) = create_path(&s.query).filter(|_| !s.exact_hit()) {
+    if let Some(p) = create_path(&s.query).filter(|_| s.move_from.is_none() && !s.exact_hit()) {
         let label = format!("Create {p}");
         col = col.push(if mode == Mode::Shadow {
             column![

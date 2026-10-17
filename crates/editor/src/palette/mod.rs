@@ -89,6 +89,8 @@ pub enum ClientCmd {
     OpenSettings,
     /// plan editor-ui-round-3 WP-3: delete the active note (confirm dialog with its orphans).
     DeleteNote,
+    /// Plan usability-sprint-captures-links WP-6: move the active note to a picked folder.
+    MoveNote,
     /// plan editor-ui-round-3 WP-5: Go to top / bottom of the note (Ctrl+PgUp / Ctrl+PgDn).
     GoToTop,
     GoToBottom,
@@ -236,6 +238,7 @@ impl ClientCmd {
             ClientCmd::FocusSearch,
             ClientCmd::OpenSettings,
             ClientCmd::DeleteNote,
+            ClientCmd::MoveNote,
             ClientCmd::GoToTop,
             ClientCmd::GoToBottom,
         ]);
@@ -272,6 +275,7 @@ impl ClientCmd {
             ClientCmd::CommandPaletteKey => "Command palette",
             ClientCmd::OpenSettings => "Open settings",
             ClientCmd::DeleteNote => "Delete note…",
+            ClientCmd::MoveNote => "Move note…",
             ClientCmd::GoToTop => "Go to top",
             ClientCmd::GoToBottom => "Go to bottom",
         };
@@ -305,6 +309,7 @@ impl ClientCmd {
             ClientCmd::CommandPaletteKey => "command_palette",
             ClientCmd::OpenSettings => "open_settings",
             ClientCmd::DeleteNote => "delete_note",
+            ClientCmd::MoveNote => "move_note",
             ClientCmd::GoToTop => "go_to_top",
             ClientCmd::GoToBottom => "go_to_bottom",
         };
@@ -368,6 +373,7 @@ impl ClientCmd {
             ClientCmd::CommandPaletteKey => Message::Palette(PaletteMsg::Open),
             ClientCmd::OpenSettings => Message::Settings(crate::settings::SettingsMsg::Open),
             ClientCmd::DeleteNote => Message::Explorer(crate::message::ExplorerMsg::DeleteActive),
+            ClientCmd::MoveNote => Message::Switcher(crate::message::SwitcherMsg::OpenMove),
             ClientCmd::GoToTop => Message::Reading(ReadingMsg::GoToEdge { bottom: false }),
             ClientCmd::GoToBottom => Message::Reading(ReadingMsg::GoToEdge { bottom: true }),
         }

@@ -224,6 +224,9 @@ pub enum ExplorerMsg {
 #[derive(Debug, Clone)]
 pub enum SwitcherMsg {
     Open,
+    /// Plan usability-sprint-captures-links WP-6: "Move note…" — the switcher in folder mode
+    /// for the active note.
+    OpenMove,
     Close,
     /// plan editor-ui-round-3 WP-5: the Escape key — clears a non-empty query, else closes.
     Escape,
