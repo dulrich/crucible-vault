@@ -154,6 +154,9 @@ pub enum ReadingMsg {
     },
     /// A host-note task checkbox was clicked: toggle the box at source `line` of `path`.
     ToggleTask { path: String, line: usize },
+    /// plan usability-sprint-captures-links WP-4: a frontmatter boolean checkbox was clicked:
+    /// flip top-level `key` of `path`.
+    ToggleProp { path: String, key: String },
     /// plan editor-ui-round-3 WP-5: Go to top / bottom (Ctrl+PgUp / Ctrl+PgDn) of the focused
     /// pane's note — the source cursor (Source/Split) and the reading scroll (Reading/Split).
     GoToEdge { bottom: bool },

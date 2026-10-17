@@ -612,6 +612,7 @@ pub fn update(
         ReadingMsg::TitleRevert => store.titles.clear(),
         // Buffer edits and renames need the app (tabs, explorer, saves): handled in `App`.
         ReadingMsg::ToggleTask { .. }
+        | ReadingMsg::ToggleProp { .. }
         | ReadingMsg::GoToEdge { .. }
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. }

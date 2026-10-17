@@ -1430,6 +1430,9 @@ impl App {
             Message::Reading(crate::message::ReadingMsg::ToggleTask { path, line }) => {
                 return self.toggle_task(&path, line);
             }
+            Message::Reading(crate::message::ReadingMsg::ToggleProp { path, key }) => {
+                return self.toggle_prop(&path, &key);
+            }
             Message::Reading(crate::message::ReadingMsg::GoToEdge { bottom }) => {
                 return self.go_to_edge(bottom);
             }
@@ -2439,6 +2442,25 @@ impl App {
         }
         let seq = doc.edit_seq();
         // Re-render now from the updated buffer (not on the next debounce tick).
+        self.reading.recompute(doc, self.daemon.as_ref());
+        crate::source::autosave_timer(path.to_owned(), seq)
+    }
+
+    /// plan usability-sprint-captures-links WP-4: flips a frontmatter boolean in `path`'s
+    /// buffer — the same edit → autosave → CAS-save path as `toggle_task`.
+    fn toggle_prop(&mut self, path: &str, key: &str) -> Task<Message> {
+        let read_only = self.status.mode == Mode::Shadow;
+        let Some(doc) = self.docs.get_mut(path) else {
+            return Task::none();
+        };
+        if read_only {
+            self.status.error = Some("edits are disabled in shadow mode".into());
+            return Task::none();
+        }
+        if !doc.toggle_frontmatter_bool(key, false, std::time::Instant::now()) {
+            return Task::none();
+        }
+        let seq = doc.edit_seq();
         self.reading.recompute(doc, self.daemon.as_ref());
         crate::source::autosave_timer(path.to_owned(), seq)
     }

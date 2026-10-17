@@ -78,10 +78,18 @@ pub struct ListItem {
     pub children: Vec<Block>,
 }
 
-/// One frontmatter value: plain text or a `[[wikilink]]`.
+/// One frontmatter value: plain text, a boolean, an external URL or a `[[wikilink]]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropValue {
     Text(String),
+    /// plan usability-sprint-captures-links WP-4: a YAML boolean (a Reading checkbox).
+    Bool(bool),
+    /// plan usability-sprint-captures-links WP-4: a bare remote URL or one `[label](url)`
+    /// md-link with a remote url (opened by the external opener).
+    Url {
+        url: String,
+        label: String,
+    },
     Link {
         target: String,
         fragment: Option<String>,
@@ -873,7 +881,7 @@ fn prop_value(v: &ofm::frontmatter::JsValue) -> PropValue {
     let s = match v {
         JsValue::Str(s) => s.clone(),
         JsValue::Num(n) => js_number_to_string(*n),
-        JsValue::Bool(b) => b.to_string(),
+        JsValue::Bool(b) => return PropValue::Bool(*b),
         JsValue::Null => String::new(),
         other => json_stringify(other),
     };
@@ -888,7 +896,68 @@ fn prop_value(v: &ofm::frontmatter::JsValue) -> PropValue {
             alias: w.alias,
         };
     }
+    if let Some((url, label)) = prop_url(t) {
+        return PropValue::Url { url, label };
+    }
     PropValue::Text(s)
+}
+
+/// A bare `http(s)://…` / `mailto:` value, or exactly one `[label](url)` md-link whose url is
+/// remote: `(url, label)` (a bare URL is its own label).
+fn prop_url(t: &str) -> Option<(String, String)> {
+    let bare = |u: &str| {
+        !u.contains(char::is_whitespace)
+            && (u.starts_with("http://") || u.starts_with("https://") || u.starts_with("mailto:"))
+    };
+    if bare(t) {
+        return Some((t.to_owned(), t.to_owned()));
+    }
+    let inner = t.strip_prefix('[')?.strip_suffix(')')?;
+    let (label, url) = inner.split_once("](")?;
+    if label.contains(['[', ']']) || url.contains(['(', ')']) {
+        return None;
+    }
+    let url = url.trim();
+    (!url.is_empty() && !url.contains(char::is_whitespace) && is_remote(url))
+        .then(|| (url.to_owned(), label.to_owned()))
+}
+
+/// plan usability-sprint-captures-links WP-4: the toggle of top-level frontmatter boolean
+/// `key` in `source`: `(line, byte-column range of the scalar within that line, negation)`.
+/// Only an unquoted `true`/`false` scalar (surrounding spaces and a trailing `# comment`
+/// allowed) qualifies; quoted, nested, missing or frontmatter-less → `None`.
+pub fn frontmatter_bool_toggle(
+    source: &str,
+    key: &str,
+) -> Option<(usize, std::ops::Range<usize>, &'static str)> {
+    let mut lines = source.split('\n');
+    if lines.next()?.trim_end_matches('\r') != "---" {
+        return None;
+    }
+    for (i, raw) in lines.enumerate() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line == "---" || line == "..." {
+            return None;
+        }
+        let Some(val) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) else {
+            continue;
+        };
+        let lead = val.len() - val.trim_start_matches([' ', '\t']).len();
+        let start = key.len() + 1 + lead;
+        let rest = &line[start..];
+        let word = rest.find([' ', '\t']).unwrap_or(rest.len());
+        let tail = rest[word..].trim();
+        if !(tail.is_empty() || tail.starts_with('#')) {
+            return None;
+        }
+        let next = match &rest[..word] {
+            "true" => "false",
+            "false" => "true",
+            _ => return None,
+        };
+        return Some((i + 1, start..start + word, next));
+    }
+    None
 }
 
 /// The toggle for the task at `line` of `source`: `[x]`/`[X]` → `[ ]`; `[ ]` and custom

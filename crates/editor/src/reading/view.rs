@@ -152,6 +152,24 @@ fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
     }
     let t = cx.t;
     let rows = props.iter().map(|p| {
+        if let [PropValue::Bool(b)] = p.values.as_slice() {
+            let side = cx.sz(14.0);
+            let mark = task_box(if *b { 'x' } else { ' ' }, side, t);
+            return row![
+                container(
+                    text(p.key.as_str())
+                        .size(cx.sz(14.0))
+                        .color(t.text_dim.to_color())
+                )
+                .width(Length::Fixed(140.0)),
+                button(mark)
+                    .padding(0)
+                    .style(button::text)
+                    .on_press(prop_press(cx.path, &p.key)),
+            ]
+            .spacing(8)
+            .into();
+        }
         let mut spans = Vec::new();
         for (i, v) in p.values.iter().enumerate() {
             if i > 0 {
@@ -159,6 +177,12 @@ fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
             }
             spans.push(match v {
                 PropValue::Text(s) => span(s.as_str()).color(t.text.to_color()),
+                PropValue::Bool(b) => {
+                    span(if *b { "true" } else { "false" }).color(t.text.to_color())
+                }
+                PropValue::Url { url, label } => span(label.as_str())
+                    .color(t.accent_ui.to_color())
+                    .link(LinkTarget::External(url.clone())),
                 PropValue::Link {
                     target,
                     fragment,
@@ -183,6 +207,14 @@ fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
         .into()
     });
     boxed(column(rows).spacing(4).into(), t, t.line)
+}
+
+/// plan usability-sprint-captures-links WP-4: the click message of a frontmatter boolean.
+fn prop_press(path: &str, key: &str) -> Message {
+    Message::Reading(ReadingMsg::ToggleProp {
+        path: path.to_owned(),
+        key: key.to_owned(),
+    })
 }
 
 fn link_label(target: &str, fragment: Option<&String>, alias: Option<&String>) -> String {

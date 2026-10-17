@@ -976,6 +976,28 @@ mod wp4 {
     }
 
     #[test]
+    fn reading_prop_toggle_edits_the_buffer_and_rerenders() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp4prop/t.md", "---\nread: false\n---\nx\n")
+            .expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp4prop/t.md".into())));
+        let _ = app.update(Message::Reading(ReadingMsg::ToggleProp {
+            path: "wp4prop/t.md".into(),
+            key: "read".into(),
+        }));
+        let tab = app.active_doc().expect("tab");
+        assert_eq!(tab.text(), "---\nread: true\n---\nx\n");
+        assert!(tab.is_dirty(), "saved by the normal autosave path");
+        let doc = app.reading.doc("wp4prop/t.md").expect("rendered");
+        assert_eq!(doc.seq, tab.edit_seq(), "re-rendered from the buffer");
+        assert_eq!(
+            doc.model.properties[0].values,
+            [editor_model::render::PropValue::Bool(true)]
+        );
+    }
+
+    #[test]
     fn reading_task_toggle_edits_the_buffer_and_rerenders() {
         let (_tmp, d) = fake_arc();
         d.create_note("wp2task/t.md", "- [ ] a\n- [x] b\n")

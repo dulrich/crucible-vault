@@ -555,6 +555,21 @@ fn primary_paste_inserts_as_one_edit() {
 // ---- editor-usability-round WP-2: Reading-view task toggle ----
 
 #[test]
+fn toggle_frontmatter_bool_flips_only_the_scalar() {
+    let src = "---\nread: false # x\ntags: [a]\n---\nbody\n";
+    let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+    let seq = b.edit_seq();
+    assert!(b.toggle_frontmatter_bool("read", false, Instant::now()));
+    assert_eq!(b.text(), "---\nread: true # x\ntags: [a]\n---\nbody\n");
+    assert!(b.is_dirty());
+    assert_eq!(b.edit_seq(), seq + 1);
+    assert!(!b.toggle_frontmatter_bool("tags", false, Instant::now()));
+    assert!(!b.toggle_frontmatter_bool("read", true, Instant::now()));
+    assert!(b.undo());
+    assert_eq!(b.text(), src);
+}
+
+#[test]
 fn toggle_task_on_plain_buffer_is_one_undoable_edit() {
     let src = "---\na: 1\n---\n- [ ] one\n- [/] two\n";
     let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));

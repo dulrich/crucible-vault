@@ -759,6 +759,18 @@ impl SourceBuffer {
         self.replace_in_line(line, cols, &next.to_string(), read_only, now)
     }
 
+    /// plan usability-sprint-captures-links WP-4: flips top-level frontmatter boolean `key`
+    /// as one edit that rewrites only its scalar (see
+    /// `editor_model::render::frontmatter_bool_toggle`).
+    pub fn toggle_frontmatter_bool(&mut self, key: &str, read_only: bool, now: Instant) -> bool {
+        let Some((line, cols, next)) =
+            editor_model::render::frontmatter_bool_toggle(&self.text(), key)
+        else {
+            return false;
+        };
+        self.replace_in_line(line, cols, next, read_only, now)
+    }
+
     /// Sets the task status at source `line` to `to` as one edit (plan editor-ui-round-3 WP-4;
     /// see `editor_model::render::task_set_status`).
     pub fn set_task_status(

@@ -453,3 +453,78 @@ fn place_keeping_maps_lines_to_blocks_and_back() {
     }
     assert_eq!(lower("").block_for_line(0), None);
 }
+
+// ---- plan usability-sprint-captures-links WP-4: interactive frontmatter ----
+
+fn apply_bool_toggle(src: &str, key: &str) -> Option<String> {
+    let (line, cols, with) = frontmatter_bool_toggle(src, key)?;
+    let start: usize = src.split_inclusive('\n').take(line).map(str::len).sum();
+    let mut out = src.to_owned();
+    out.replace_range(start + cols.start..start + cols.end, with);
+    Some(out)
+}
+
+#[test]
+fn bool_toggle_rewrites_only_the_scalar() {
+    let src = "---\ntitle: x\nread: false\nn: 1\n---\nbody read: false\n";
+    assert_eq!(
+        apply_bool_toggle(src, "read").as_deref(),
+        Some("---\ntitle: x\nread: true\nn: 1\n---\nbody read: false\n")
+    );
+    let src = "---\nread:   true   # done?\n---\n";
+    assert_eq!(
+        apply_bool_toggle(src, "read").as_deref(),
+        Some("---\nread:   false   # done?\n---\n")
+    );
+}
+
+#[test]
+fn bool_toggle_refuses_non_boolean_shapes() {
+    assert!(frontmatter_bool_toggle("---\nread: \"true\"\n---\n", "read").is_none());
+    assert!(frontmatter_bool_toggle("---\nm:\n  read: true\n---\n", "read").is_none());
+    assert!(frontmatter_bool_toggle("---\nother: true\n---\n", "read").is_none());
+    assert!(frontmatter_bool_toggle("---\nreadx: true\n---\n", "read").is_none());
+    assert!(frontmatter_bool_toggle("read: true\n", "read").is_none());
+    assert!(frontmatter_bool_toggle("---\n---\nread: true\n", "read").is_none());
+    assert!(frontmatter_bool_toggle("---\nread: true yes\n---\n", "read").is_none());
+}
+
+#[test]
+fn bool_toggle_handles_crlf() {
+    let src = "---\r\na: 1\r\nread: true\r\n---\r\n";
+    assert_eq!(
+        apply_bool_toggle(src, "read").as_deref(),
+        Some("---\r\na: 1\r\nread: false\r\n---\r\n")
+    );
+}
+
+#[test]
+fn frontmatter_bools_and_urls_become_typed_values() {
+    let src = "---\nread: true\nsrc: https://ex.com/a\nmd: \"[Site](https://ex.com/b)\"\nrel: \"[x](notes/a.md)\"\nauthor: [\"[[A]]\", \"[[B]]\"]\n---\n";
+    let m = lower(src);
+    assert_eq!(m.properties[0].values, [PropValue::Bool(true)]);
+    assert_eq!(
+        m.properties[1].values,
+        [PropValue::Url {
+            url: "https://ex.com/a".into(),
+            label: "https://ex.com/a".into()
+        }]
+    );
+    assert_eq!(
+        m.properties[2].values,
+        [PropValue::Url {
+            url: "https://ex.com/b".into(),
+            label: "Site".into()
+        }]
+    );
+    assert_eq!(
+        m.properties[3].values,
+        [PropValue::Text("[x](notes/a.md)".into())]
+    );
+    let link = |t: &str| PropValue::Link {
+        target: t.into(),
+        fragment: None,
+        alias: None,
+    };
+    assert_eq!(m.properties[4].values, [link("A"), link("B")]);
+}
