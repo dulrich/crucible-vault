@@ -88,10 +88,16 @@ pub struct NewShadowWrite {
 static TOKEN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Read-write handle on `state.db`. One per daemon process (I2's single writer).
+/// Called with a table name after a write that readers of that table should see (plan
+/// round-5-reading-pickers-intake WP-10: `tracker_items` → view invalidation). Runs while the
+/// caller holds the `StateDb`, so it must only signal (e.g. a channel send), never block.
+pub type ChangeHook = Box<dyn Fn(&'static str) + Send>;
+
 pub struct StateDb {
     conn: Connection,
     token: String,
     config: QueueConfig,
+    change_hook: Option<ChangeHook>,
 }
 
 impl std::fmt::Debug for StateDb {
@@ -126,7 +132,20 @@ impl StateDb {
             conn,
             token,
             config,
+            change_hook: None,
         })
+    }
+
+    /// Installs the daemon-internal change signal (replaces any previous hook).
+    pub fn set_change_hook(&mut self, hook: ChangeHook) {
+        self.change_hook = Some(hook);
+    }
+
+    /// Raises the change signal for `table`.
+    pub(crate) fn changed(&self, table: &'static str) {
+        if let Some(h) = &self.change_hook {
+            h(table);
+        }
     }
 
     /// This handle's claim token.

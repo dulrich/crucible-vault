@@ -1,6 +1,8 @@
 //! [`ViewHost`]: the daemon-hosted service. `crates/cv` adapts it to its `ViewService` trait
 //! (this crate cannot depend on `cv`). It owns its own read-only connection on the reader's
-//! generation file and reopens it when the generation changes.
+//! generation file and reopens it when the generation changes. `source = "tracker_items"` views
+//! (plan round-5-reading-pickers-intake WP-10) also read `state.db` through a lazily opened
+//! read-only connection.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -10,7 +12,7 @@ use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 
 use crate::db::Db;
-use crate::def::{Base, load_dir};
+use crate::def::{Base, Source, load_dir};
 use crate::engine;
 use crate::eval::Env;
 use crate::result::ViewResult;
@@ -22,6 +24,10 @@ pub enum ViewsError {
     UnknownView(String),
     #[error("index: {0}")]
     Sql(#[from] rusqlite::Error),
+    #[error("state.db: {0}")]
+    State(rusqlite::Error),
+    #[error("view `{0}` reads state.db, but no state.db path is configured")]
+    NoStateDb(String),
     #[error("encoding result: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -33,6 +39,8 @@ pub struct ViewHost {
     bases: Vec<Base>,
     load_notices: Vec<String>,
     conn: Option<(u64, Connection)>,
+    state_db: Option<PathBuf>,
+    state_conn: Option<Connection>,
     today: Option<NaiveDate>,
 }
 
@@ -55,7 +63,37 @@ impl ViewHost {
             bases,
             load_notices,
             conn: None,
+            state_db: None,
+            state_conn: None,
             today: None,
+        }
+    }
+
+    /// Sets the `state.db` path (`CV_STATE_DB`) `tracker_items` views read from.
+    #[must_use]
+    pub fn with_state_db(mut self, path: &Path) -> Self {
+        self.state_db = Some(path.to_path_buf());
+        self.state_conn = None;
+        self
+    }
+
+    /// The ids of the views whose definition file has `source`.
+    pub fn view_ids_for(&self, source: Source) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .bases
+            .iter()
+            .filter(|b| b.source == source)
+            .flat_map(|b| b.views.iter().map(|v| b.id(v)))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A `state.db` table changed (daemon-internal signal): the ids of the views reading it.
+    pub fn on_state_changed(&mut self, table: &str) -> Vec<String> {
+        match table {
+            "tracker_items" => self.view_ids_for(Source::TrackerItems),
+            _ => Vec::new(),
         }
     }
 
@@ -82,12 +120,13 @@ impl ViewHost {
         v
     }
 
-    /// A new index generation: every view is invalidated (coarse); the connection reopens lazily.
+    /// A new index generation: every index-sourced view is invalidated (coarse; `tracker_items`
+    /// views are not — they change on [`Self::on_state_changed`]); the connection reopens lazily.
     pub fn on_index_generation(&mut self, n: u64) -> Vec<String> {
         if self.conn.as_ref().is_some_and(|(g, _)| *g != n) {
             self.conn = None;
         }
-        self.view_ids()
+        self.view_ids_for(Source::Index)
     }
 
     /// Reloads definitions from `config_dir`; returns the old and new ids (deduplicated).
@@ -123,6 +162,17 @@ impl ViewHost {
             .ok_or_else(|| ViewsError::UnknownView(view_id.to_string()))?;
         let today = self.today.unwrap_or_else(|| Local::now().date_naive());
         let load_notices = self.load_notices.clone();
+        let records = match self.bases.get(bi).map(|b| b.source) {
+            Some(Source::TrackerItems) => {
+                let path = self
+                    .state_db
+                    .clone()
+                    .ok_or_else(|| ViewsError::NoStateDb(view_id.to_string()))?;
+                let sc = open_state(&mut self.state_conn, &path)?;
+                Some(tracker_records(sc).map_err(ViewsError::State)?)
+            }
+            _ => None,
+        };
         let conn = open_conn(&mut self.conn, &self.index_base, generation)?;
         let Some(base) = self.bases.get(bi) else {
             return Err(ViewsError::UnknownView(view_id.to_string()));
@@ -143,7 +193,7 @@ impl ViewHost {
             now: today.and_time(Local::now().time()),
             notices: RefCell::default(),
         };
-        let mut r = engine::run(&env, view)?;
+        let mut r = engine::run_on(&env, view, records.as_deref())?;
         r.notices
             .extend(load_notices.into_iter().map(|n| format!("load: {n}")));
         Ok(r)
@@ -160,6 +210,68 @@ impl ViewHost {
             .and_then(|r| r.into_protocol().map_err(ViewsError::from))
             .map_err(|e| e.to_string())
     }
+}
+
+fn open_state<'c>(
+    slot: &'c mut Option<Connection>,
+    path: &Path,
+) -> Result<&'c Connection, ViewsError> {
+    if slot.is_none() {
+        let c = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(ViewsError::State)?;
+        c.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(ViewsError::State)?;
+        *slot = Some(c);
+    }
+    match slot {
+        Some(c) => Ok(c),
+        None => Err(ViewsError::State(rusqlite::Error::InvalidQuery)),
+    }
+}
+
+/// Every `tracker_items` row as a record, newest first (`first_seen_ms DESC, item_id`). Fields:
+/// `title`, `url`, `source_kind`, `source_key`, `item_id`, `day`, `outcome`, `score`,
+/// `full_body`, `first_seen`. WP-11 adds `done` here once `done_ms` exists.
+pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record>> {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crate::value::Value;
+    let mut stmt = conn.prepare_cached(
+        "SELECT title, url, source_kind, source_key, item_id, day, outcome, score, full_body,
+                first_seen_ms
+         FROM tracker_items ORDER BY first_seen_ms DESC, item_id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let mut m = BTreeMap::new();
+        for (i, k) in [
+            "title",
+            "url",
+            "source_kind",
+            "source_key",
+            "item_id",
+            "day",
+            "outcome",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.insert(k.to_string(), Value::Str(r.get(i)?));
+        }
+        let score: Option<f64> = r.get(7)?;
+        m.insert("score".into(), score.map_or(Value::Null, Value::Num));
+        let full_body: Option<bool> = r.get(8)?;
+        m.insert(
+            "full_body".into(),
+            full_body.map_or(Value::Null, Value::Bool),
+        );
+        m.insert("first_seen".into(), crate::eval::ms_date(r.get(9)?));
+        Ok(Arc::new(m))
+    })?;
+    rows.collect()
 }
 
 fn open_conn<'c>(

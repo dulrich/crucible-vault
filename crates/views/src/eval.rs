@@ -44,6 +44,9 @@ struct Scope<'s> {
 pub struct RowCtx<'a> {
     env: &'a Env<'a>,
     file: Option<Arc<FileInfo>>,
+    /// A non-file row (`tracker_items`, plan round-5 WP-10): its fields are bare identifiers and
+    /// `note.<field>`; `file` is null.
+    rec: Option<Arc<BTreeMap<String, Value>>>,
     memo: RefCell<HashMap<String, Value>>,
     busy: RefCell<HashSet<String>>,
 }
@@ -148,8 +151,17 @@ impl<'a> RowCtx<'a> {
         Self {
             env,
             file,
+            rec: None,
             memo: RefCell::default(),
             busy: RefCell::default(),
+        }
+    }
+
+    /// A context bound to a non-file record row.
+    pub fn record(env: &'a Env<'a>, rec: Arc<BTreeMap<String, Value>>) -> Self {
+        Self {
+            rec: Some(rec),
+            ..Self::new(env, None)
         }
     }
 
@@ -213,16 +225,21 @@ impl<'a> RowCtx<'a> {
             ),
             Expr::Ident(n) => match n.as_str() {
                 "file" => self.file.clone().map_or(Value::Null, Value::File),
-                "note" => self.file.clone().map_or(Value::Null, Value::Note),
+                "note" => match (&self.file, &self.rec) {
+                    (Some(f), _) => Value::Note(Arc::clone(f)),
+                    (None, Some(r)) => Value::Object(Arc::clone(r)),
+                    (None, None) => Value::Null,
+                },
                 "formula" => Value::Formulas,
                 "this" => self.env.this.clone().map_or(Value::Null, Value::File),
                 "value" => sc.map_or(Value::Null, |s| s.value.clone()),
                 "outer" => sc
                     .and_then(|s| s.parent)
                     .map_or(Value::Null, |s| s.value.clone()),
-                other => match &self.file {
-                    Some(f) => self.prop(f, other)?,
-                    None => Value::Null,
+                other => match (&self.file, &self.rec) {
+                    (Some(f), _) => self.prop(f, other)?,
+                    (None, Some(r)) => r.get(other).cloned().unwrap_or(Value::Null),
+                    (None, None) => Value::Null,
                 },
             },
             Expr::Member(r, name) => {

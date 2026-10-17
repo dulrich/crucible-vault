@@ -149,6 +149,9 @@ impl StateDb {
                 item.full_body,
             ],
         )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
         Ok(n > 0)
     }
 

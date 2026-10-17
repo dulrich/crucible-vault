@@ -150,10 +150,23 @@ pub struct ViewDef {
     pub task_group: TaskGroup,
 }
 
+/// Where a definition file's rows come from (plan round-5-reading-pickers-intake WP-10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// Markdown files in the index (`file`/`note`/`formula` bound per row).
+    #[default]
+    Index,
+    /// `state.db` `tracker_items` rows (fields bound as bare identifiers and on `note`).
+    TrackerItems,
+}
+
 /// One definition file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaseDef {
+    #[serde(default)]
+    pub source: Source,
     #[serde(default)]
     pub filters: Option<FilterNode>,
     #[serde(default)]
@@ -285,6 +298,7 @@ pub struct View {
 #[derive(Debug, Clone)]
 pub struct Base {
     pub stem: String,
+    pub source: Source,
     pub formulas: BTreeMap<String, Result<Expr, String>>,
     pub views: Vec<View>,
 }
@@ -337,6 +351,7 @@ impl Base {
         }
         Self {
             stem: stem.to_string(),
+            source: def.source,
             formulas,
             views,
         }
@@ -540,5 +555,10 @@ status = [" "]
     fn rejects_unknown_keys() {
         assert!(toml::from_str::<BaseDef>("[[views]]\ntype='table'\nname='x'\nbogus=1\n").is_err());
         assert!(toml::from_str::<BaseDef>("[[views]]\ntype='chart'\nname='x'\n").is_err());
+        assert!(toml::from_str::<BaseDef>("source='links'\n").is_err());
+        let d: BaseDef = toml::from_str("source='tracker_items'\n").unwrap();
+        assert_eq!(d.source, Source::TrackerItems);
+        let d: BaseDef = toml::from_str("").unwrap();
+        assert_eq!(d.source, Source::Index);
     }
 }

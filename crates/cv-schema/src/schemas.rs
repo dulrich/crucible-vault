@@ -1662,6 +1662,14 @@ pub static VIEW: Record = Record {
 pub static VIEW_FILE: Record = Record {
     name: "views/*.toml",
     fields: &[
+        // Plan round-5-reading-pickers-intake WP-10: where rows come from (`views::Source`).
+        field(
+            "source",
+            "Source",
+            "Row source: index notes or state.db tracker items",
+            Node::Enum(&["index", "tracker_items"]),
+        )
+        .dflt(D::Str("index")),
         field("filters", "Filters", "Base filter tree", Node::Filter),
         field(
             "formulas",

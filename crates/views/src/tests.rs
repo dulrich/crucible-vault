@@ -854,3 +854,71 @@ order = ["file.name", "formula.label"]
         assert!(per.as_secs() < 2);
     }
 }
+
+/// Plan round-5-reading-pickers-intake WP-10: a fixture `state.db` with `tracker_items` (the
+/// columns of `cv-state` `migrate.rs`; this crate cannot depend on `cv-state`).
+fn tracker_db(dir: &Path) -> PathBuf {
+    let p = dir.join("state.db");
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch(
+        "CREATE TABLE tracker_items (source_kind TEXT NOT NULL, source_key TEXT NOT NULL,
+            item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+            first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
+            score REAL, full_body INTEGER, PRIMARY KEY (source_kind, source_key, item_id));
+         INSERT INTO tracker_items VALUES
+            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL),
+            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1),
+            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL),
+            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL);",
+    )
+    .unwrap();
+    p
+}
+
+const INTAKE: &str = "source = 'tracker_items'\n[formulas]\nsrc = 'source_kind + \"/\" + source_key'\n[[views]]\ntype='table'\nname='Day'\nfilters = { and = ['day == this.file.name', 'outcome == \"line\" || note.outcome == \"note\"'] }\norder = ['title', 'url', 'formula.src', 'score', 'full_body', 'item_id']\n";
+
+#[test]
+fn tracker_items_view_filters_by_this_day() {
+    let fx = fixture(&[("intake.toml", INTAKE)]);
+    let state = tracker_db(fx._tmp.path());
+    let mut host = fx.host().with_state_db(&state);
+    let r = fx.run(&mut host, "intake#Day", Some("daily/day/2026-10-03.md"));
+    assert_eq!(r.kind, Kind::Table);
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    assert_eq!(
+        grid(&r),
+        vec![
+            vec!["Post", "https://b/1", "blog/b", "0.5", "true", "p1"],
+            vec!["New video", "https://y/2", "youtube/UC1", "2", "", "v2"],
+        ]
+    );
+    assert!(r.rows().all(|row| row.path.is_none()));
+    let r = fx.run(&mut host, "intake#Day", Some("daily/day/2026-10-02.md"));
+    assert_eq!(grid(&r).len(), 1);
+    // No `this`: `day == null` matches nothing.
+    assert!(grid(&fx.run(&mut host, "intake#Day", None)).is_empty());
+}
+
+#[test]
+fn tracker_items_view_needs_a_state_db() {
+    let fx = fixture(&[("intake.toml", INTAKE)]);
+    let mut host = fx.host();
+    let g = fx.reader().generation();
+    let e = host.run_typed(g, "intake#Day", None).unwrap_err();
+    assert!(e.to_string().contains("no state.db"), "{e}");
+}
+
+#[test]
+fn state_change_invalidates_only_tracker_views() {
+    let fx = fixture(&[
+        ("intake.toml", INTAKE),
+        (
+            "notes.toml",
+            "[[views]]\ntype='table'\nname='All'\norder=['file.name']\n",
+        ),
+    ]);
+    let mut host = fx.host();
+    assert_eq!(host.on_state_changed("tracker_items"), vec!["intake#Day"]);
+    assert!(host.on_state_changed("link_records").is_empty());
+    assert_eq!(host.on_index_generation(99), vec!["notes#All"]);
+}

@@ -25,6 +25,11 @@ pub trait ViewService: Send {
     fn on_index_generation(&mut self, n: u64) -> Vec<String>;
     /// `CV_CONFIG_DIR` changed; returns the invalidated view ids.
     fn on_config_changed(&mut self, config_dir: &Path) -> Vec<String>;
+    /// A `state.db` table changed (plan round-5-reading-pickers-intake WP-10); returns the
+    /// invalidated view ids (default: none).
+    fn on_state_changed(&mut self, _table: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The A1 registration point. Plan B's WP-6 adds its one `reg.register(...)` line here.
@@ -59,8 +64,14 @@ pub fn register_views(reg: &mut ViewRegistry, config_dir: &Path) {
             }
             ids
         }
+        fn on_state_changed(&mut self, table: &str) -> Vec<String> {
+            self.0.on_state_changed(table)
+        }
     }
-    let host = views::ViewHost::new(config_dir, reg.index_base());
+    let mut host = views::ViewHost::new(config_dir, reg.index_base());
+    if let Some(p) = reg.state_db() {
+        host = host.with_state_db(p);
+    }
     for n in host.load_notices() {
         tracing::warn!(notice = %n, "view definitions");
     }
@@ -79,6 +90,8 @@ enum Cmd {
     Config(PathBuf),
     /// Notes changed incrementally (coalesced by the daemon): every view id goes stale.
     NotesChanged,
+    /// A `state.db` table changed (from [`ViewRegistry::state_notifier`]).
+    StateChanged(&'static str),
 }
 
 struct Host {
@@ -89,6 +102,7 @@ struct Host {
 /// Hosts every registered [`ViewService`]; threads exit when the registry is dropped.
 pub struct ViewRegistry {
     index_base: PathBuf,
+    state_db: Option<PathBuf>,
     events: broadcast::Sender<Notification>,
     hosts: Vec<Host>,
 }
@@ -119,9 +133,34 @@ impl ViewRegistry {
     pub fn new(index_base: &Path, events: broadcast::Sender<Notification>) -> Self {
         Self {
             index_base: index_base.to_path_buf(),
+            state_db: None,
             events,
             hosts: Vec::new(),
         }
+    }
+
+    /// Sets the `state.db` path (`CV_STATE_DB`) handed to services registered afterwards.
+    #[must_use]
+    pub fn with_state_db(mut self, path: &Path) -> Self {
+        self.state_db = Some(path.to_path_buf());
+        self
+    }
+
+    /// The `state.db` path, when set.
+    pub fn state_db(&self) -> Option<&Path> {
+        self.state_db.as_deref()
+    }
+
+    /// The daemon-internal `state.db` change signal (install with
+    /// `StateDb::set_change_hook`): forwards a table name to every service registered so far.
+    pub fn state_notifier(&self) -> cv_state::ChangeHook {
+        let txs: Vec<mpsc::Sender<Cmd>> = self.hosts.iter().map(|h| h.tx.clone()).collect();
+        Box::new(move |table| {
+            for tx in &txs {
+                // A gone thread means shutdown; nothing to invalidate.
+                let _ = tx.send(Cmd::StateChanged(table));
+            }
+        })
     }
 
     /// The index base path (`CV_INDEX_DB`) this registry's readers open generations under.
@@ -255,6 +294,7 @@ fn serve(
                 *lock(ids) = service.view_ids();
             }
             Cmd::NotesChanged => invalidate(service.view_ids()),
+            Cmd::StateChanged(table) => invalidate(service.on_state_changed(table)),
             Cmd::Config(dir) => {
                 invalidate(service.on_config_changed(&dir));
                 *lock(ids) = service.view_ids();
@@ -410,5 +450,84 @@ mod tests {
         assert_eq!(rows, ["renamed", "t2"]);
         drop(index);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    struct TmpRoot(PathBuf);
+    impl TmpRoot {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Plan round-5-reading-pickers-intake WP-10: a `tracker_items` insert raises the state
+    /// change hook, which invalidates only the `source = "tracker_items"` view; the re-run sees
+    /// the new row. A duplicate insert (returns false) raises nothing.
+    #[tokio::test]
+    async fn tracker_insert_invalidates_tracker_views_only() {
+        let root = std::env::temp_dir().join(format!("cv-views-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tmp = TmpRoot(root);
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(vault.join("daily")).unwrap();
+        std::fs::write(vault.join("daily/2026-10-17.md"), "# d\n").unwrap();
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(config.join("views")).unwrap();
+        std::fs::write(
+            config.join("views/intake.toml"),
+            "source='tracker_items'\n[[views]]\ntype='table'\nname='Day'\nfilters='day == this.file.name'\norder=['title']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("views/notes.toml"),
+            "[[views]]\ntype='table'\nname='All'\norder=['file.name']\n",
+        )
+        .unwrap();
+        let base = tmp.path().join("idx").join("index.db");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        let _index = cv_index::Index::create(&vault, &base).unwrap();
+        let state_path = tmp.path().join("state.db");
+        let mut state =
+            cv_state::StateDb::open(&state_path, 1, cv_state::QueueConfig::default()).unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut reg = ViewRegistry::new(&base, tx).with_state_db(&state_path);
+        register_views(&mut reg, &config);
+        state.set_change_hook(reg.state_notifier());
+        let id = "intake#Day".to_owned();
+        let this = Some("daily/2026-10-17.md".to_owned());
+        let rows = |r: &ViewResult| r.0["groups"][0]["rows"].as_array().map_or(0, Vec::len);
+        assert_eq!(rows(&reg.run(&id, this.clone()).await.unwrap()), 0);
+        let item = cv_state::TrackerItem {
+            source_kind: "youtube".into(),
+            source_key: "UC1".into(),
+            item_id: "v1".into(),
+            title: "T".into(),
+            url: "https://y/1".into(),
+            first_seen_ms: 1,
+            day: "2026-10-17".into(),
+            outcome: cv_state::TrackerOutcome::Line,
+            score: None,
+            full_body: None,
+        };
+        assert!(state.insert_tracker_item(&item).unwrap());
+        let n = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            n,
+            Notification::ViewsInvalidated {
+                view_ids: vec![id.clone()]
+            }
+        );
+        assert_eq!(rows(&reg.run(&id, this).await.unwrap()), 1);
+        assert!(!state.insert_tracker_item(&item).unwrap());
+        // Nothing further was emitted (the duplicate raised no signal).
+        let _ = reg.run(&id, None).await.unwrap();
+        assert!(rx.try_recv().is_err());
     }
 }

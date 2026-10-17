@@ -228,7 +228,7 @@ fn same_prop(a: &str, b: &str) -> bool {
 }
 
 struct Rec {
-    file: Arc<FileInfo>,
+    file: Option<Arc<FileInfo>>,
     cells: Vec<Value>,
     sort: Vec<Value>,
     group: Value,
@@ -242,8 +242,17 @@ fn ordered(dir: Direction, o: std::cmp::Ordering) -> std::cmp::Ordering {
     }
 }
 
-/// Runs `view`.
+/// A non-file row (`tracker_items`): field name → value.
+pub type Record = Arc<std::collections::BTreeMap<String, Value>>;
+
+/// Runs `view` over index files.
 pub fn run(env: &Env<'_>, view: &View) -> R<ViewResult> {
+    run_on(env, view, None)
+}
+
+/// Runs `view` over `records` when given (no SQL narrowing; filters evaluate per record),
+/// otherwise over index files.
+pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewResult> {
     let kind = match view.kind {
         ViewType::Table => Kind::Table,
         ViewType::Pivot => Kind::Pivot,
@@ -253,15 +262,26 @@ pub fn run(env: &Env<'_>, view: &View) -> R<ViewResult> {
     if view.filter_error {
         return Ok(ViewResult::empty(kind, notices));
     }
-    let unbound = RowCtx::new(env, None);
-    let n = narrow(&view.filters, &unbound)?;
-    let cands = env.db.candidates(&n.sql, &n.args)?;
-    if cands.len() > PRELOAD_AT {
-        env.db.preload(&cands)?;
-    }
-    let mut kept: Vec<(Arc<FileInfo>, RowCtx<'_>)> = Vec::new();
-    for f in cands {
-        let ctx = RowCtx::new(env, Some(Arc::clone(&f)));
+    let rows: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)> = match records {
+        Some(recs) => recs
+            .iter()
+            .map(|r| (None, RowCtx::record(env, Arc::clone(r))))
+            .collect(),
+        None => {
+            let unbound = RowCtx::new(env, None);
+            let n = narrow(&view.filters, &unbound)?;
+            let cands = env.db.candidates(&n.sql, &n.args)?;
+            if cands.len() > PRELOAD_AT {
+                env.db.preload(&cands)?;
+            }
+            cands
+                .into_iter()
+                .map(|f| (Some(Arc::clone(&f)), RowCtx::new(env, Some(f))))
+                .collect()
+        }
+    };
+    let mut kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)> = Vec::new();
+    for (f, ctx) in rows {
         let mut ok = true;
         for flt in &view.filters {
             if !passes(&ctx, flt)? {
@@ -284,7 +304,7 @@ pub fn run(env: &Env<'_>, view: &View) -> R<ViewResult> {
     Ok(res)
 }
 
-fn table(view: &View, kept: Vec<(Arc<FileInfo>, RowCtx<'_>)>) -> R<ViewResult> {
+fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewResult> {
     let mut recs = Vec::with_capacity(kept.len());
     for (file, ctx) in kept {
         let mut cells = Vec::with_capacity(view.order.len());
@@ -316,7 +336,11 @@ fn table(view: &View, kept: Vec<(Arc<FileInfo>, RowCtx<'_>)>) -> R<ViewResult> {
                 return o;
             }
         }
-        a.file.path.cmp(&b.file.path)
+        match (&a.file, &b.file) {
+            (Some(x), Some(y)) => x.path.cmp(&y.path),
+            // Records keep their source order (the sort is stable).
+            _ => std::cmp::Ordering::Equal,
+        }
     });
     if let Some(l) = view.limit {
         recs.truncate(l);
@@ -361,21 +385,18 @@ fn table(view: &View, kept: Vec<(Arc<FileInfo>, RowCtx<'_>)>) -> R<ViewResult> {
             .collect()
     };
     let to_row = |r: &Rec| Row {
-        path: Some(r.file.path.clone()),
+        path: r.file.as_ref().map(|f| f.path.clone()),
         line: None,
         cells: r
             .cells
             .iter()
             .zip(&view.order)
-            .map(|(v, (id, _, _))| {
-                if id == "file.name" {
-                    Cell::Link {
-                        path: r.file.path.clone(),
-                        label: r.file.name.clone(),
-                    }
-                } else {
-                    v.to_cell()
-                }
+            .map(|(v, (id, _, _))| match &r.file {
+                Some(f) if id == "file.name" => Cell::Link {
+                    path: f.path.clone(),
+                    label: f.name.clone(),
+                },
+                _ => v.to_cell(),
             })
             .collect(),
     };
@@ -422,7 +443,7 @@ fn table(view: &View, kept: Vec<(Arc<FileInfo>, RowCtx<'_>)>) -> R<ViewResult> {
 fn pivot(
     env: &Env<'_>,
     p: &crate::def::Pivot,
-    kept: &[(Arc<FileInfo>, RowCtx<'_>)],
+    kept: &[(Option<Arc<FileInfo>>, RowCtx<'_>)],
 ) -> R<ViewResult> {
     let ncol = p.columns.len();
     let mut keys: Vec<(Value, Vec<f64>, Vec<bool>)> = Vec::new();
@@ -547,11 +568,12 @@ fn tasks(
     env: &Env<'_>,
     t: &crate::def::Tasks,
     limit: Option<usize>,
-    kept: &[(Arc<FileInfo>, RowCtx<'_>)],
+    kept: &[(Option<Arc<FileInfo>>, RowCtx<'_>)],
 ) -> R<ViewResult> {
     let mut groups: Vec<(String, Cell, Vec<Row>)> = Vec::new();
     let mut total = 0usize;
     'files: for (f, ctx) in kept {
+        let Some(f) = f else { continue };
         let file_tasks = env.db.tasks(f)?;
         for task in file_tasks.iter() {
             if !t.status.is_empty() && !t.status.contains(&task.status) {

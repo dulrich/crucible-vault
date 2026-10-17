@@ -194,8 +194,14 @@ impl Daemon {
         let writer = VaultWriter::open(fs, &config.index_db).context("opening the index")?;
         let (handle, vault_events, writer_join) =
             cv_vault::spawn_writer_with_watcher(writer, opts.watch).context("starting writer")?;
-        let mut views = ViewRegistry::new(&config.index_db, events.clone());
+        let mut views =
+            ViewRegistry::new(&config.index_db, events.clone()).with_state_db(&config.state_db);
         register_views(&mut views, &config.config_dir);
+        // `tracker_items` inserts invalidate `source = "tracker_items"` views (round-5 WP-10).
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_change_hook(views.state_notifier());
         let lookups = Lookups::new(
             &config.config_dir,
             Arc::clone(&state),

@@ -501,6 +501,19 @@ fn validate_view_filters() {
     );
 }
 
+/// Plan round-5-reading-pickers-intake WP-10: the view-file `source` key.
+#[test]
+fn validate_view_source() {
+    let t = "[[views]]\ntype = \"table\"\nname = \"T\"\n";
+    assert!(errs(&format!("source = \"tracker_items\"\n{t}"), "views/x.toml").is_empty());
+    assert!(errs(&format!("source = \"index\"\n{t}"), "views/x.toml").is_empty());
+    let e = errs(&format!("source = \"links\"\n{t}"), "views/x.toml");
+    assert!(
+        e.len() == 1 && e[0].starts_with("source: \"links\" is not one of"),
+        "{e:?}"
+    );
+}
+
 #[test]
 fn lookup_by_file_and_step_kind() {
     for f in FILES {

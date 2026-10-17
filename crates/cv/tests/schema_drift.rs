@@ -327,6 +327,7 @@ const SCHEDULES: &[&str] = &[
 ];
 
 const VIEWS: &[&str] = &[r#"
+source = "index"
 filters = 'file.inFolder("daily/day")'
 
 [formulas]
