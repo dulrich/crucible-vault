@@ -1784,6 +1784,13 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Str("trash")),
         field(
+            "open_url_cmd",
+            "Open URL command",
+            "Program + args that open an external http/https/mailto link; the URL is appended as the last argument (no shell). Empty = default",
+            STR_LIST,
+        )
+        .dflt(D::StrList(&["xdg-open"])),
+        field(
             "search",
             "Search panel",
             "Search panel tuning",

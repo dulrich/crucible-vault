@@ -5,8 +5,13 @@
 //! `SourceMsg::Pointer` on every mouse move, i.e. a full `update` + `view` per motion event, only
 //! to remember where a later middle click landed. This widget reads the position at press time
 //! instead, so plain pointer motion costs no message at all.
+//!
+//! Plan usability-sprint-captures-links WP-3: [`MiddleClick::on_command_left`] adds the
+//! Ctrl/Cmd+left-press seam (link follow in source mode). Modifiers are tracked from
+//! `ModifiersChanged` in the widget state; a modified press is published and captured *before*
+//! the content sees it, while a plain left press is forwarded untouched (normal cursor placement).
 
-use iced::advanced::widget::{Operation, Tree};
+use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer};
 use iced::{Element, Event, Length, Point, Rectangle, Size, Vector};
 
@@ -14,6 +19,23 @@ use iced::{Element, Event, Length, Point, Rectangle, Size, Vector};
 pub struct MiddleClick<'a, Message, Theme, Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
     on_middle: Box<dyn Fn(Point) -> Message + 'a>,
+    on_command_left: Option<Box<dyn Fn(Point) -> Message + 'a>>,
+}
+
+/// The keyboard modifiers last seen.
+#[derive(Debug, Default)]
+struct State {
+    modifiers: iced::keyboard::Modifiers,
+}
+
+impl<'a, Message, Theme, Renderer> MiddleClick<'a, Message, Theme, Renderer> {
+    /// A Ctrl/Cmd+left press over the content publishes `f(local position)` instead of reaching
+    /// the content.
+    #[must_use]
+    pub fn on_command_left(mut self, f: impl Fn(Point) -> Message + 'a) -> Self {
+        self.on_command_left = Some(Box::new(f));
+        self
+    }
 }
 
 /// Wraps `content`; a middle press over it publishes `on_middle(local position)`.
@@ -24,6 +46,7 @@ pub fn middle_click<'a, Message, Theme, Renderer>(
     MiddleClick {
         content: content.into(),
         on_middle: Box::new(on_middle),
+        on_command_left: None,
     }
 }
 
@@ -32,6 +55,14 @@ impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
 where
     Renderer: renderer::Renderer,
 {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State::default())
+    }
+
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
     }
@@ -78,6 +109,18 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if let Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) = event {
+            tree.state.downcast_mut::<State>().modifiers = *m;
+        }
+        if let Some(f) = &self.on_command_left
+            && let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
+            && tree.state.downcast_ref::<State>().modifiers.command()
+            && let Some(at) = cursor.position_in(layout.bounds())
+        {
+            shell.publish(f(at));
+            shell.capture_event();
+            return;
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,

@@ -953,3 +953,28 @@ fn highlighter_paints_every_match_light_and_the_current_strong_in_bytes() {
     assert_eq!(strong[0].1.color, s.colors.find);
     assert_eq!(&line[strong[0].0.clone()], "été");
 }
+
+/// Plan usability-sprint-captures-links WP-3: Ctrl+click routing (bare URL, md-link, wikilink).
+#[test]
+fn command_click_routes_links() {
+    use crate::message::{Message, ReadingMsg};
+    let line = "x https://a.b/c#frag [[Note|n]] [l](sub/n.md) [w](http://w.x)";
+    let at = |needle: &str| line.find(needle).expect("needle");
+    assert!(matches!(
+        super::command_click_msg("a.md", line, at("#frag")),
+        Some(Message::OpenUrl(u)) if u == "https://a.b/c#frag"
+    ));
+    assert!(matches!(
+        super::command_click_msg("a.md", line, at("Note")),
+        Some(Message::Reading(ReadingMsg::OpenLink { src, target })) if src == "a.md" && target == "Note"
+    ));
+    assert!(matches!(
+        super::command_click_msg("a.md", line, at("[l]")),
+        Some(Message::Reading(ReadingMsg::OpenLink { target, .. })) if target == "sub/n.md"
+    ));
+    assert!(matches!(
+        super::command_click_msg("a.md", line, at("[w]")),
+        Some(Message::OpenUrl(u)) if u == "http://w.x"
+    ));
+    assert!(super::command_click_msg("a.md", line, 0).is_none());
+}

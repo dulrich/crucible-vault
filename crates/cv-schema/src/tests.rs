@@ -557,3 +557,27 @@ fn bookmark_keys_optional_and_checked() {
     let bad = "[[bookmark]]\nname = \"A\"\npath = \"a.md\"\nkeys = \"Ctrl+1\"\n";
     assert!(!errs(bad, "bookmarks.toml").is_empty());
 }
+
+#[test]
+fn editor_open_url_cmd_list_and_default() {
+    assert!(
+        errs(
+            "open_url_cmd = [\"firefox\", \"--new-tab\"]\n",
+            "editor.toml"
+        )
+        .is_empty()
+    );
+    assert_eq!(errs("open_url_cmd = \"firefox\"\n", "editor.toml").len(), 1);
+    let Node::Record(r) = editor_schema() else {
+        panic!("editor schema is a record");
+    };
+    let f = r
+        .fields
+        .iter()
+        .find(|f| f.key == "open_url_cmd")
+        .expect("field");
+    assert!(matches!(
+        f.default,
+        Some(node::Default::StrList(&["xdg-open"]))
+    ));
+}

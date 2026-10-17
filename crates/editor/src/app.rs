@@ -1370,6 +1370,7 @@ impl App {
                         | SourceMsg::KeepMine(_)
                         | SourceMsg::TakeTheirs(_)
                         | SourceMsg::MiddleClick { .. }
+                        | SourceMsg::CommandClick { .. }
                         | SourceMsg::PastePrimary { .. }
                         | SourceMsg::PasteResolved { .. }
                 );
@@ -1420,6 +1421,11 @@ impl App {
                     Some((path, ok)) => Task::batch([task, self.note_save_landed(&path, ok)]),
                     None => task,
                 };
+            }
+            Message::OpenUrl(url) => {
+                if let Err(e) = crate::open_url::open(&self.prefs.open_url_cmd, &url) {
+                    self.status.error = Some(e);
+                }
             }
             Message::Reading(crate::message::ReadingMsg::ToggleTask { path, line }) => {
                 return self.toggle_task(&path, line);

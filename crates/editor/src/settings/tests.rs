@@ -328,6 +328,7 @@ tab_title = "unambiguous"
 quick_switch_open = "duplicate"
 confirm_trash = true
 delete_mode = "permanent"
+open_url_cmd = ["firefox", "--new-tab"]
 
 [search]
 limit = 80
@@ -1041,4 +1042,19 @@ fn autosave_flushes_on_settings_tab_close_and_quit() {
     let _ = app.update(Message::Tabs(TabsMsg::Quit));
     assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 34")));
     assert!(app.exiting);
+}
+
+/// Plan usability-sprint-captures-links WP-3: `open_url_cmd` defaults to `xdg-open`, parses a
+/// list, and an empty list falls back to the default.
+#[test]
+fn open_url_cmd_pref_default_and_override() {
+    assert_eq!(editor_prefs::Prefs::default().open_url_cmd, ["xdg-open"]);
+    let p = editor_prefs::parse(
+        "open_url_cmd = [\"firefox\", \"--new-tab\"]\n",
+        Surround::Med,
+    )
+    .expect("parse");
+    assert_eq!(p.open_url_cmd, ["firefox", "--new-tab"]);
+    let p = editor_prefs::parse("open_url_cmd = []\n", Surround::Med).expect("parse");
+    assert_eq!(p.open_url_cmd, ["xdg-open"]);
 }

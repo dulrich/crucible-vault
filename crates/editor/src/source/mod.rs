@@ -1149,6 +1149,7 @@ pub fn update(
         | SourceMsg::KeepMine(path)
         | SourceMsg::TakeTheirs(path)
         | SourceMsg::MiddleClick { path, .. }
+        | SourceMsg::CommandClick { path, .. }
         | SourceMsg::PastePrimary { path, .. }
         | SourceMsg::PasteResolved { path, .. } => find(tabs, path),
         _ => active_buf.and_then(|p| find(tabs, p)),
@@ -1202,6 +1203,19 @@ pub fn update(
                     text,
                 })
             })
+        }
+        SourceMsg::CommandClick { path, at: p } => {
+            buf.perform(
+                Action::Click(Point::new(p.x - EDITOR_PADDING, p.y - EDITOR_PADDING)),
+                read_only,
+                Instant::now(),
+            );
+            let pos = buf.cursor().position;
+            let line = buf.shaped().line(pos.line).map(|l| l.text.into_owned());
+            match line.and_then(|l| command_click_msg(&path, &l, pos.column)) {
+                Some(m) => Task::done(m),
+                None => Task::none(),
+            }
         }
         SourceMsg::PastePrimary { text, .. } => {
             let changed =
@@ -1414,6 +1428,23 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("source-editor:{path}"))
 }
 
+/// Plan usability-sprint-captures-links WP-3: what a Ctrl/Cmd+click at byte `col` of `line` in
+/// note `path` does — a remote URL (bare or md-link) opens in the browser, a wikilink or vault
+/// md-link opens the note exactly as Reading's `OpenLink` does; elsewhere nothing.
+pub fn command_click_msg(path: &str, line: &str, col: usize) -> Option<Message> {
+    use editor_model::link_at::{LinkAt, link_at};
+    Some(match link_at(line, col)? {
+        LinkAt::Url(u) => Message::OpenUrl(u),
+        LinkAt::Md(u) if editor_model::render::is_remote(&u) => Message::OpenUrl(u),
+        LinkAt::Md(target) | LinkAt::Wiki(target) => {
+            Message::Reading(crate::message::ReadingMsg::OpenLink {
+                src: path.to_owned(),
+                target,
+            })
+        }
+    })
+}
+
 /// Renders a tab's source buffer with its conflict bar / read-only marker; `font_size` is the
 /// `editor.toml` base text size (live, plan editor-settings-tab WP-2); `keymap` is the effective
 /// keymap its key bindings route by (WP-4).
@@ -1449,6 +1480,12 @@ pub fn view<'a>(
                 })
             },
         )
+        .on_command_left(move |at| {
+            Message::Source(SourceMsg::CommandClick {
+                path: buf.path.clone(),
+                at,
+            })
+        })
         .into(),
         // Never visible in practice (the app materialises visible tabs before drawing).
         Repr::Plain { text: t, .. } => text(t.as_str()).size(font_size).into(),

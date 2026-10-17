@@ -32,6 +32,9 @@ pub enum Message {
     Dialog(crate::dialog::DialogMsg),
     /// plan editor-ui-round-3 WP-4: the right-click context menu.
     Menu(crate::context_menu::MenuMsg),
+    /// Plan usability-sprint-captures-links WP-3: open an external URL with `open_url_cmd`
+    /// (scheme allowlist enforced in `open_url`).
+    OpenUrl(String),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name
@@ -65,6 +68,12 @@ pub enum SourceMsg {
     /// the cursor, then paste PRIMARY. editor-usability-round WP-5: the position comes with the
     /// press (`widget::middle_click`), not from a message per pointer move.
     MiddleClick {
+        path: String,
+        at: iced::Point,
+    },
+    /// Plan usability-sprint-captures-links WP-3: Ctrl/Cmd+left-press over the source editor of
+    /// `path` at `at` (editor-local): place the cursor, then follow the link under it.
+    CommandClick {
         path: String,
         at: iced::Point,
     },

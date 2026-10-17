@@ -516,6 +516,23 @@ fn link_button<'a>(label: String, open: Option<String>, t: Tokens) -> Element<'a
     }
 }
 
+/// Plan usability-sprint-captures-links WP-3: an external entry that passes the opener's
+/// scheme allowlist opens in the browser; attachments and other schemes stay inert.
+fn external_button<'a>(target: String, t: Tokens) -> Element<'a, Message> {
+    if crate::open_url::check_scheme(&target).is_err() {
+        return link_button(target, None, t);
+    }
+    button(
+        text(target.clone())
+            .size(13)
+            .color(t.accent_text.to_color()),
+    )
+    .style(button::text)
+    .padding(2)
+    .on_press(Message::OpenUrl(target))
+    .into()
+}
+
 fn heading<'a>(s: String, t: Tokens) -> Element<'a, Message> {
     text(s).size(12).color(t.text_faint.to_color()).into()
 }
@@ -563,7 +580,7 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
                 t,
             ));
             for l in &p.links.external {
-                c = c.push(link_button(l.target.clone(), None, t));
+                c = c.push(external_button(l.target.clone(), t));
             }
             scrollable(c.spacing(2)).height(Length::Fill).into()
         }

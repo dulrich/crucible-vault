@@ -19,8 +19,8 @@ use crate::theme::{Rgb, Tokens};
 enum LinkTarget {
     /// A vault target (wiki-link target or relative md-link URL).
     Vault(String),
-    /// A URL with a scheme: shown, never followed (no browser hand-off in v0).
-    External,
+    /// A URL with a scheme: opened via `open_url` (plan usability-sprint-captures-links WP-3).
+    External(String),
 }
 
 struct Ctx<'a> {
@@ -578,7 +578,12 @@ fn image_block<'a>(
     };
     if remote {
         // Never fetched: localization is the daemon's job (inventory #7).
-        return placeholder(format!("[remote image: {alt}]"));
+        // WP-3: the placeholder opens the image URL in the browser.
+        return button(placeholder(format!("[remote image: {alt}]")))
+            .padding(0)
+            .style(button::text)
+            .on_press(Message::OpenUrl(src.to_owned()))
+            .into();
     }
     let Some(Some(key)) = cx.doc.images.get(src) else {
         return placeholder(format!("[missing image: {alt}]"));
@@ -625,8 +630,8 @@ fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {
             src: src.clone(),
             target,
         }),
-        // External URLs are not followed; a no-op tick keeps the click inert.
-        LinkTarget::External => Message::Reading(ReadingMsg::Tick),
+        // WP-3: handed to the opener (which refuses non-allowlisted schemes).
+        LinkTarget::External(url) => Message::OpenUrl(url),
     }
 }
 
@@ -709,7 +714,7 @@ fn inlines_view<'a>(
             }
             Inline::Link { url, label } => {
                 let l = if editor_model::render::is_remote(url) {
-                    LinkTarget::External
+                    LinkTarget::External(url.clone())
                 } else {
                     LinkTarget::Vault(url.clone())
                 };
@@ -759,6 +764,20 @@ mod task_tests {
         assert_eq!(task_mark('i').1, TaskRole::Blue);
         assert_eq!(task_mark('-'), (Some(Icon::Minus), TaskRole::Faint));
         assert_eq!(task_mark('>').1, TaskRole::Faint);
+    }
+
+    /// Plan usability-sprint-captures-links WP-3: external links reach the opener.
+    #[test]
+    fn external_link_maps_to_open_url() {
+        let f = link_msg("a.md");
+        assert!(matches!(
+            f(LinkTarget::External("https://x.y".into())),
+            Message::OpenUrl(u) if u == "https://x.y"
+        ));
+        assert!(matches!(
+            f(LinkTarget::Vault("b".into())),
+            Message::Reading(ReadingMsg::OpenLink { .. })
+        ));
     }
 
     #[test]

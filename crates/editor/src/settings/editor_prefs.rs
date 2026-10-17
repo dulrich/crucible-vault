@@ -55,6 +55,15 @@ pub struct Prefs {
     pub palette_hidden: Vec<String>,
     /// `[keys]`: command id → chords (WP-4 consumes it).
     pub keys: BTreeMap<String, Vec<String>>,
+    /// `open_url_cmd`: program + args that open an external URL (plan
+    /// usability-sprint-captures-links WP-3); the URL is appended last. Absent, mistyped or
+    /// empty → [`default_open_url_cmd`].
+    pub open_url_cmd: Vec<String>,
+}
+
+/// The default `open_url_cmd`: `["xdg-open"]`.
+pub fn default_open_url_cmd() -> Vec<String> {
+    vec!["xdg-open".to_owned()]
 }
 
 impl Default for Prefs {
@@ -70,6 +79,7 @@ impl Default for Prefs {
             delete_mode: DeleteMode::Trash,
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
+            open_url_cmd: default_open_url_cmd(),
         }
     }
 }
@@ -157,6 +167,10 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
                 Some((k, chords))
             })
             .collect(),
+        open_url_cmd: doc
+            .get_str_list(&p("open_url_cmd"))
+            .filter(|v| v.first().is_some_and(|c| !c.trim().is_empty()))
+            .unwrap_or(d.open_url_cmd),
     }
 }
 
