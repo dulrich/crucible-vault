@@ -19,6 +19,7 @@
 //! | `TrackBlogs` | [`tracker::blogs`] | A2 WP-8 |
 //! | `IgnoreVideo` | [`ignore`] | A2 WP-9 |
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
+//! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
 //!
 //! A module's `execute` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -27,6 +28,9 @@
 
 pub mod agent;
 pub mod capture;
+pub mod capture_repair;
+#[cfg(test)]
+mod capture_repair_tests;
 pub mod daily_brief;
 pub mod file;
 pub mod ignore;
@@ -361,6 +365,7 @@ pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
         Step::TrackBlogs(_) => tracker::blogs::validate(step, config),
         Step::IgnoreVideo(_) => ignore::validate(step, config),
         Step::DailyBrief(_) => daily_brief::validate(step, config),
+        Step::CaptureRepair(_) => capture_repair::validate(step, config),
         Step::RunAction { action_id, .. } => {
             if config.is_known(action_id) {
                 Ok(())
@@ -395,6 +400,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         Step::TrackBlogs(_) => tracker::blogs::execute(step, ctx),
         Step::IgnoreVideo(_) => ignore::execute(step, ctx),
         Step::DailyBrief(_) => daily_brief::execute(step, ctx),
+        Step::CaptureRepair(_) => capture_repair::execute(step, ctx),
         Step::RunAction { action_id, params } => {
             let child = ctx
                 .children

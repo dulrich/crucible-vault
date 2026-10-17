@@ -522,3 +522,106 @@ fn local_attachment_is_rehomed_and_unshared_source_retired() {
     assert!(env.file("pics/shared.png").is_some(), "shared source kept");
     assert_eq!(var(&out, "reused"), 1);
 }
+
+// --- plan usability-sprint-captures-links WP-2: folder-scope backfill ---------------------------
+
+fn ignored(env: &Env) -> Vec<String> {
+    env.state
+        .lock()
+        .unwrap()
+        .ignored_ids(localize::BACKFILL_KIND)
+        .unwrap()
+}
+
+#[test]
+fn folder_backfill_is_bounded_resumes_and_records_failures() {
+    let img = png(7);
+    let routes = HashMap::from([route("/ok.png", "image/png", img.clone())]);
+    let (env, outs) = with_server(routes, None, move |port, _| {
+        let ok = format!("![](http://127.0.0.1:{port}/ok.png)\n");
+        let bad = format!("![](http://127.0.0.1:{port}/gone.png)\n");
+        let fenced = format!("```\n![](http://127.0.0.1:{port}/ok.png)\n```\n");
+        let env = env(
+            &[
+                ("Clippings/a.md", ok.as_bytes()),
+                ("Clippings/b.md", bad.as_bytes()),
+                ("Clippings/sub/c.md", ok.as_bytes()),
+                ("Clippings/d.md", b"no images\n"),
+                ("Clippings/e.md", fenced.as_bytes()),
+                ("other/x.md", ok.as_bytes()),
+            ],
+            false,
+        );
+        let step = env.step("scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 2");
+        let outs: Vec<StepOutcome> = (0..3).map(|_| env.run(&step, "").unwrap()).collect();
+        (env, outs)
+    });
+    let v = |i: usize, k: &str| var(&outs[i], k);
+    // Run 1: a (localized) + b (404 → recorded); c left for later.
+    assert_eq!(
+        (
+            v(0, "localized"),
+            v(0, "failed"),
+            v(0, "unattempted_remaining")
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(v(0, "scanned"), 5);
+    assert_eq!(ignored(&env), ["Clippings/b.md"]);
+    // Run 2: b is not re-selected; c is localized; nothing remains.
+    assert_eq!(
+        (
+            v(1, "localized"),
+            v(1, "failed"),
+            v(1, "unattempted_remaining")
+        ),
+        (1, 0, 0)
+    );
+    // Run 3: converged.
+    assert_eq!(
+        (
+            v(2, "localized"),
+            v(2, "failed"),
+            v(2, "unattempted_remaining")
+        ),
+        (0, 0, 0)
+    );
+    let md5 = localize::md5_hex(&img);
+    assert_eq!(
+        env.text("Clippings/sub/c.md"),
+        format!("![](Clippings/sub/_attachments/c/{md5}_MD5.png)\n")
+    );
+    assert!(env.text("Clippings/b.md").contains("gone.png"));
+    assert!(env.text("Clippings/e.md").contains("127.0.0.1"));
+    assert!(env.text("other/x.md").contains("127.0.0.1"));
+}
+
+#[test]
+fn folder_scope_params_validate() {
+    let c = config();
+    let mk = |src: &str| {
+        let mut t: toml::Table = toml::from_str(src).unwrap();
+        t.insert("type".into(), toml::Value::String("localize".into()));
+        localize::validate(&Step::from_table(t).unwrap(), &c)
+    };
+    assert!(mk("scope = \"folder\"\nfolder = \"daily\"").is_ok());
+    assert!(mk("scope = \"note\"").is_ok());
+    assert!(mk("scope = \"folder\"").is_err());
+    assert!(mk("folder = \"daily\"").is_err());
+    assert!(mk("scope = \"vault\"").is_err());
+    assert!(mk("scope = \"folder\"\nfolder = \"d\"\nlimit = 0").is_err());
+}
+
+#[test]
+fn remote_ref_predicate_skips_fences_and_sees_data_uris() {
+    assert!(localize::has_remote_image_refs("![](https://x.test/a.png)"));
+    assert!(localize::has_remote_image_refs(
+        "![](data:image/gif;base64,AA)"
+    ));
+    assert!(!localize::has_remote_image_refs(
+        "```\n![](https://x.test/a.png)\n```\n"
+    ));
+    assert!(!localize::has_remote_image_refs(
+        "[link](https://x.test/a.png) ![](local.png)"
+    ));
+}

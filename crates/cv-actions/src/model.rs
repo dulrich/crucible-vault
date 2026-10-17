@@ -93,11 +93,13 @@ pub enum StepKind {
     TrackBlogs,
     IgnoreVideo,
     DailyBrief,
+    /// One-time blog-capture repair (plan `usability-sprint-captures-links` WP-2).
+    CaptureRepair,
 }
 
 impl StepKind {
     /// Every kind.
-    pub const ALL: [StepKind; 26] = [
+    pub const ALL: [StepKind; 27] = [
         StepKind::Guard,
         StepKind::Capture,
         StepKind::Materialize,
@@ -124,6 +126,7 @@ impl StepKind {
         StepKind::TrackBlogs,
         StepKind::IgnoreVideo,
         StepKind::DailyBrief,
+        StepKind::CaptureRepair,
     ];
 
     /// The TOML `type` string.
@@ -156,6 +159,7 @@ impl StepKind {
             StepKind::TrackBlogs => "track_blogs",
             StepKind::IgnoreVideo => "ignore_video",
             StepKind::DailyBrief => "daily_brief",
+            StepKind::CaptureRepair => "capture_repair",
         }
     }
 
@@ -204,6 +208,8 @@ pub enum Step {
     TrackBlogs(toml::Table),
     IgnoreVideo(toml::Table),
     DailyBrief(toml::Table),
+    /// `capture_repair`.
+    CaptureRepair(toml::Table),
 }
 
 impl Step {
@@ -237,6 +243,7 @@ impl Step {
             Step::TrackBlogs(_) => StepKind::TrackBlogs,
             Step::IgnoreVideo(_) => StepKind::IgnoreVideo,
             Step::DailyBrief(_) => StepKind::DailyBrief,
+            Step::CaptureRepair(_) => StepKind::CaptureRepair,
         }
     }
 
@@ -268,7 +275,8 @@ impl Step {
             | Step::TrackYoutube(t)
             | Step::TrackBlogs(t)
             | Step::IgnoreVideo(t)
-            | Step::DailyBrief(t) => Some(t),
+            | Step::DailyBrief(t)
+            | Step::CaptureRepair(t) => Some(t),
             Step::RunAction { .. } => None,
         }
     }
@@ -306,7 +314,8 @@ impl Step {
             | StepKind::TrackYoutube
             | StepKind::TrackBlogs
             | StepKind::IgnoreVideo
-            | StepKind::DailyBrief => true,
+            | StepKind::DailyBrief
+            | StepKind::CaptureRepair => true,
         }
     }
 
@@ -345,6 +354,7 @@ impl Step {
             StepKind::TrackBlogs => Step::TrackBlogs(t),
             StepKind::IgnoreVideo => Step::IgnoreVideo(t),
             StepKind::DailyBrief => Step::DailyBrief(t),
+            StepKind::CaptureRepair => Step::CaptureRepair(t),
             StepKind::RunAction => {
                 let action_id = match t.remove("action") {
                     Some(toml::Value::String(s)) if !s.is_empty() => s,

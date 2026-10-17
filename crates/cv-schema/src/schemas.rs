@@ -361,9 +361,10 @@ pub static LINT: Record = Record {
     rules: &[],
 };
 
-/// `localize` — `crates/cv/src/steps/localize.rs:896` (`validate` → `parse_params` at
-/// `localize.rs:784`; keys at `localize.rs:764`). Not modelled: templates must not use
-/// `{{datetime:…}}`, `name_template` must contain `{{md5}}`.
+/// `localize` — `crates/cv/src/steps/localize.rs:963` (`validate` → `parse_params` at
+/// `localize.rs:835`; keys at `localize.rs:812`). Not modelled: templates must not use
+/// `{{datetime:…}}`, `name_template` must contain `{{md5}}`, `folder` is required exactly when
+/// `scope = "folder"`.
 pub static LOCALIZE: Record = Record {
     name: "localize",
     fields: &[
@@ -442,6 +443,26 @@ pub static LOCALIZE: Record = Record {
         ),
         field("timeout_secs", "Timeout (s)", "Per download", POS_INT).dflt(D::Int(30)),
         field("max_bytes", "Max bytes", "Per download", POS_INT).dflt(D::Int(50 * 1024 * 1024)),
+        field(
+            "scope",
+            "Scope",
+            "folder: backfill every note under `folder` with remote images",
+            Node::Enum(&["note", "folder"]),
+        )
+        .dflt(D::Str("note")),
+        field(
+            "folder",
+            "Folder",
+            "Backfill folder (scope = folder)",
+            Node::Str,
+        ),
+        field(
+            "limit",
+            "Limit",
+            "Notes attempted per run (scope = folder)",
+            POS_INT,
+        )
+        .dflt(D::Int(50)),
     ],
     rules: &[],
 };
@@ -718,6 +739,27 @@ pub static DAILY_BRIEF: Record = Record {
     rules: &[],
 };
 
+/// `capture_repair` — `crates/cv/src/steps/capture_repair.rs` (`parse_params`). Not modelled:
+/// `folder` is required.
+pub static CAPTURE_REPAIR: Record = Record {
+    name: "capture_repair",
+    fields: &[
+        field(
+            "folder",
+            "Folder",
+            "Captured blog notes to rename + retag",
+            Node::Str,
+        ),
+        field(
+            "limit",
+            "Limit",
+            "Notes changed per run (default: all)",
+            POS_INT,
+        ),
+    ],
+    rules: &[],
+};
+
 /// The `[[action.steps]]` union, one variant per `StepKind::ALL` member (same order).
 pub static STEP: Union = Union {
     name: "step",
@@ -852,6 +894,11 @@ pub static STEP: Union = Union {
             tag: "daily_brief",
             label: "Daily brief",
             record: &DAILY_BRIEF,
+        },
+        Variant {
+            tag: "capture_repair",
+            label: "Capture repair",
+            record: &CAPTURE_REPAIR,
         },
     ],
 };

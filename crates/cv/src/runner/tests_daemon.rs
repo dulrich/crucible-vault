@@ -501,7 +501,7 @@ fn example_config_files_load_cleanly() {
     super::load_config_dir(&dir, &mut set);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(set.errors().is_empty(), "{:?}", set.errors());
-    assert_eq!(set.armed_actions().count(), 28);
+    assert_eq!(set.armed_actions().count(), 31);
     assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
     assert_eq!(set.sources().blog.len(), 1);
     assert!(

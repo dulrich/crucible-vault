@@ -11,7 +11,9 @@
 #              templates using {path} and {param.NAME}. An action that mutates a note but
 #              derives no key is refused at enqueue.
 # Step `type`s: guard, capture, materialize, move, copy, set_props, remove_props, upsert_tags,
-# lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete.
+# lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete, link_scan,
+# yt_metadata, yt_channel_enrich, x_discover, x_metadata, x_backfill, image_describe,
+# track_youtube, track_blogs, ignore_video, daily_brief, capture_repair.
 # Each step's other keys belong to its module (WP-10..13 document them; WP-10's in
 # crates/cv/src/steps/{materialize,capture,file,lint}.rs). Step string params take single-brace
 # placeholders {param.NAME}, {vars.NAME}, {path}, {period.day|week|month}; note/capture templates
@@ -408,3 +410,41 @@ group = "Ingest"
 resources = { note = false, keys = ["note::period::day"] }
 [[action.steps]]
 type = "daily_brief"
+
+# One-time repair + backfill (plan usability-sprint-captures-links WP-2). `cv run` passes no
+# params, so each step binds its folder. Counts (localized/failed/unattempted_remaining,
+# renamed/retagged/skipped) are logged at info and returned as step vars.
+# Localize backfill: up to `limit` notes per run with remote/data images; a note that still has
+# them afterwards is recorded (ignored_ids kind `localize_backfill`) and never re-selected.
+[[action]]
+id = "localize-backfill-clippings"
+label = "Localize backfill: Clippings"
+group = "Maintenance"
+resources = { note = false, keys = ["localize-backfill::Clippings"] }
+[[action.steps]]
+type = "localize"
+scope = "folder"
+folder = "Clippings"
+limit = 50
+
+[[action]]
+id = "localize-backfill-daily"
+label = "Localize backfill: daily"
+group = "Maintenance"
+resources = { note = false, keys = ["localize-backfill::daily"] }
+[[action.steps]]
+type = "localize"
+scope = "folder"
+folder = "daily"
+limit = 50
+
+# Capture repair: blog captures (tag `blog`) renamed to their title filename (links rewritten)
+# and malformed `tags` normalized. Idempotent.
+[[action]]
+id = "capture-repair"
+label = "Capture repair: blog notes"
+group = "Maintenance"
+resources = { note = false, keys = ["capture-repair::daily/day"] }
+[[action.steps]]
+type = "capture_repair"
+folder = "daily/day"

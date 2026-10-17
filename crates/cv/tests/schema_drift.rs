@@ -159,6 +159,10 @@ const STEPS: &[(&str, &str)] = &[
     ),
     ("localize", "image_quality = 0.8"),
     (
+        "localize",
+        "scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 50",
+    ),
+    (
         "agent",
         "agent = \"a1\"\nmodel = \"local:m1\"\noutput_var = \"out\"\nmax_tokens = 10\noutput = \"replace\"",
     ),
@@ -202,6 +206,7 @@ const STEPS: &[(&str, &str)] = &[
     ("track_blogs", ""),
     ("ignore_video", "mode = \"manual\""),
     ("daily_brief", ""),
+    ("capture_repair", "folder = \"daily/day\"\nlimit = 10"),
 ];
 
 const ACTION_FULL: &str = r#"

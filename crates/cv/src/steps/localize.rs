@@ -794,6 +794,9 @@ pub enum ImageFormat {
 #[derive(Debug, Clone)]
 struct Params {
     path: Option<String>,
+    /// `Some(folder)` = folder scope (plan `usability-sprint-captures-links` WP-2 backfill).
+    folder_scope: Option<String>,
+    limit: u64,
     repair: bool,
     folder_template: String,
     name_template: String,
@@ -824,6 +827,9 @@ const KEYS: &[&str] = &[
     "image_quality",
     "timeout_secs",
     "max_bytes",
+    "scope",
+    "folder",
+    "limit",
 ];
 
 fn parse_params(t: Option<&toml::Table>) -> Result<Params, String> {
@@ -907,8 +913,25 @@ fn parse_params(t: Option<&toml::Table>) -> Result<Params, String> {
         Some(toml::Value::Float(v)) => Some(*v),
         Some(_) => return Err("localize: image_quality must be a number".into()),
     };
+    let folder = s("folder")?;
+    let folder_scope = match s("scope")?.as_deref() {
+        None | Some("note") => {
+            if folder.is_some() {
+                return Err("localize: folder requires scope = \"folder\"".into());
+            }
+            None
+        }
+        Some("folder") => Some(
+            folder
+                .map(|f| f.trim_matches('/').to_owned())
+                .ok_or("localize: scope = \"folder\" requires folder")?,
+        ),
+        Some(o) => return Err(format!("localize: scope {o:?} (want note|folder)")),
+    };
     Ok(Params {
         path: s("path")?,
+        folder_scope,
+        limit: u("limit", 50)?,
         repair,
         folder_template,
         name_template,
@@ -1287,10 +1310,124 @@ fn repair_counts(
     (resolved.saturating_sub(missed), unrepairable + missed)
 }
 
-/// Executes one `localize` step (mode `localize` or `repair`) on the target note.
+/// The `ignored_ids` kind recording notes a folder-scope backfill attempted and could not fully
+/// localize (audit M2 progress invariant: never re-selected, so repeated runs reach new notes).
+pub const BACKFILL_KIND: &str = "localize_backfill";
+
+/// Whether `content` has a remote markdown image or a `data:image` placeholder outside fenced
+/// code (the folder-scope candidate predicate).
+pub fn has_remote_image_refs(content: &str) -> bool {
+    let fenced = fenced_ranges(content);
+    let outside = |at: usize| !fenced.iter().any(|&(a, b)| at >= a && at < b);
+    remote_md_image_re().captures_iter(content).any(|c| {
+        c.get(0).is_some_and(|m| outside(m.start()))
+            && c.get(2).is_some_and(|u| is_remote(u.as_str()))
+    }) || data_uri_image_re()
+        .find_iter(content)
+        .any(|m| outside(m.start()))
+}
+
+/// Executes one `localize` step (mode `localize` or `repair`) on the target note, or — with
+/// `scope = "folder"` — on up to `limit` candidate notes under `folder`.
 pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let p = parse_params(step.table()).map_err(StepError::failed)?;
+    if let Some(folder) = p.folder_scope.clone() {
+        return execute_folder(&p, &folder, ctx);
+    }
     let path = ctx_note_path(&p, ctx)?;
+    execute_note(&p, &path, ctx)
+}
+
+fn lock_state<'c>(
+    ctx: &'c StepCtx<'_>,
+) -> Result<std::sync::MutexGuard<'c, cv_state::StateDb>, StepError> {
+    ctx.state
+        .lock()
+        .map_err(|_| StepError::failed("localize: state lock poisoned"))
+}
+
+/// Folder-scope backfill: candidates are `.md` under `folder` (sorted) with remote/data image
+/// refs that are not recorded under [`BACKFILL_KIND`]; at most `limit` are attempted. A note
+/// whose localize errs, or that still has such refs afterwards, is recorded (never re-selected).
+fn execute_folder(
+    p: &Params,
+    folder: &str,
+    ctx: &mut StepCtx<'_>,
+) -> Result<StepOutcome, StepError> {
+    let files = super::tracker::md_files_under(ctx, folder);
+    let scanned = files.len() as u64;
+    let mut candidates = Vec::new();
+    for f in files {
+        if lock_state(ctx)?
+            .is_ignored(BACKFILL_KIND, &f)
+            .map_err(|e| StepError::failed(format!("localize: state: {e}")))?
+        {
+            continue;
+        }
+        let Some((bytes, _)) = ctx.read(&f)? else {
+            continue;
+        };
+        if std::str::from_utf8(&bytes).is_ok_and(has_remote_image_refs) {
+            candidates.push(f);
+        }
+    }
+    let (mut localized, mut failed, mut attempted) = (0_u64, 0_u64, 0_u64);
+    let mut output_paths = Vec::new();
+    for f in &candidates {
+        if attempted >= p.limit {
+            break;
+        }
+        attempted += 1;
+        let reason = match execute_note(p, f, ctx) {
+            Ok(o) => {
+                for op in o.output_paths {
+                    if !output_paths.contains(&op) {
+                        output_paths.push(op);
+                    }
+                }
+                let left = ctx
+                    .read(f)?
+                    .is_some_and(|(b, _)| std::str::from_utf8(&b).is_ok_and(has_remote_image_refs));
+                left.then(|| "refs remain after localize".to_owned())
+            }
+            Err(e @ StepError::Deferred { .. }) => return Err(e),
+            Err(e) => Some(e.to_string()),
+        };
+        match reason {
+            None => localized += 1,
+            Some(r) => {
+                failed += 1;
+                let r: String = r.chars().take(200).collect();
+                lock_state(ctx)?
+                    .insert_ignored_id(BACKFILL_KIND, f, &r, super::tracker::now_ms())
+                    .map_err(|e| StepError::failed(format!("localize: state: {e}")))?;
+            }
+        }
+    }
+    let unattempted_remaining = candidates.len() as u64 - attempted;
+    tracing::info!(
+        folder,
+        scanned,
+        localized,
+        failed,
+        unattempted_remaining,
+        "localize backfill"
+    );
+    let mut vars = Map::new();
+    vars.insert("scanned".into(), scanned.into());
+    vars.insert("localized".into(), localized.into());
+    vars.insert("failed".into(), failed.into());
+    vars.insert("unattempted_remaining".into(), unattempted_remaining.into());
+    Ok(StepOutcome {
+        output_paths,
+        vars,
+        ..StepOutcome::default()
+    })
+}
+
+fn execute_note(p: &Params, path: &str, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let path = path.to_owned();
+    let p = p.clone();
     let mut vars = Map::new();
     if !path.ends_with(".md") {
         vars.insert("changed".into(), Value::Bool(false));
