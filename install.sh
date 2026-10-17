@@ -180,7 +180,9 @@ fi
 
 if [[ $editor_was_running = 1 ]]; then
   say "relaunching cvault-editor"
-  setsid -f cvault-editor </dev/null >/dev/null 2>&1
+  # 9>&-: the editor must not inherit the install.lock fd, or it holds the flock for its whole
+  # lifetime and every later install.sh fails with "another install.sh is running".
+  setsid -f cvault-editor 9>&- </dev/null >/dev/null 2>&1
 fi
 
 [[ $config_ok = 1 ]] || exit 1
