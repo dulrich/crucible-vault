@@ -618,6 +618,52 @@ impl App {
         self.panes.get(self.focus).and_then(PaneState::active_tab)
     }
 
+    /// Plan round-5 WP-1: the tab id showing `path` — the focused pane's active tab when it shows
+    /// `path`, else the first pane whose active tab does (0 when none: ids start at 1).
+    pub fn view_of(&self, path: &str) -> u64 {
+        self.active_note()
+            .filter(|t| t.path == path)
+            .or_else(|| {
+                self.panes
+                    .iter()
+                    .filter_map(|(_, ps)| ps.active_note())
+                    .find(|t| t.path == path)
+            })
+            .map_or(0, |t| t.id)
+    }
+
+    /// Plan round-5 WP-1: every pane's active tab id (with its path; Settings = `None`).
+    fn active_views(&self) -> Vec<(u64, Option<String>)> {
+        self.panes
+            .iter()
+            .filter_map(|(_, ps)| ps.active_tab())
+            .map(|t| (t.id, (!t.is_settings()).then(|| t.path.clone())))
+            .collect()
+    }
+
+    /// Plan round-5 WP-1 (tab blur/resume): iced widget state is positional and only active tab
+    /// bodies are in the tree, so every tab that became active in this update gets its stored
+    /// place re-applied explicitly — Reading (probe → `scroll_to`), Settings (body offset).
+    /// Source re-applies its tracked top line on materialise (`SourceBuffer::shaped`).
+    fn restore_places(&mut self, before: &[(u64, Option<String>)]) -> Task<Message> {
+        let mut tasks = Vec::new();
+        for (id, path) in self.active_views() {
+            if before.iter().any(|(b, _)| *b == id) {
+                continue;
+            }
+            match path {
+                Some(p) => {
+                    tasks.extend(self.reading.restore(&p, id));
+                    if self.reading.mode(&p).shows_reading() {
+                        tasks.extend(self.views.restore(&p));
+                    }
+                }
+                None => tasks.push(self.settings.restore_scroll()),
+            }
+        }
+        Task::batch(tasks)
+    }
+
     /// The focused pane's active tab when it is a note (never the Settings tab).
     pub fn active_note(&self) -> Option<&Tab> {
         self.panes.get(self.focus).and_then(PaneState::active_note)
@@ -967,6 +1013,7 @@ impl App {
             return Task::none();
         };
         let before = self.active_paths();
+        let views_before = self.active_views();
         let task = self.update_inner(message);
         if self.dialog.is_some() {
             // The dialog outranks the menu: never leave one open beneath it.
@@ -975,7 +1022,8 @@ impl App {
         let flush = self.flush_switched_away(&before);
         self.sync_buffers();
         let auto = self.schedule_settings_autosave();
-        let extra: Vec<Task<Message>> = [flush, auto]
+        let restore = self.restore_places(&views_before);
+        let extra: Vec<Task<Message>> = [flush, auto, restore]
             .into_iter()
             .filter(|t| t.units() > 0)
             .collect();
@@ -1403,6 +1451,11 @@ impl App {
                 }
                 self.docs.remove(&path);
             }
+            Message::Source(SourceMsg::Viewport { path, lines }) => {
+                if let Some(d) = self.docs.get_mut(&path) {
+                    d.set_visible_lines(lines);
+                }
+            }
             Message::Source(m) => {
                 // plan editor-round-4 WP-2: Shift+click extends the selection.
                 let m = crate::source::shift_click(m, self.switcher.shift);
@@ -1570,10 +1623,11 @@ impl App {
                 .clone(),
         };
         let old = self.reading.mode(&path);
+        let view = self.view_of(&path);
         let line = if old.shows_reading() {
             let doc = self.reading.doc(&path);
             self.reading
-                .top_block(&path)
+                .top_block(&path, view)
                 .and_then(|b| doc?.model.block_lines.get(b).map(|r| r.start))
                 .unwrap_or(0)
         } else {
@@ -1596,6 +1650,7 @@ impl App {
         if new == old {
             return Task::none();
         }
+        let view = self.view_of(path);
         if new.shows_source()
             && !old.shows_source()
             && let Some(doc) = self.docs.get_mut(path)
@@ -1609,9 +1664,9 @@ impl App {
             .is_none_or(|r| line < r.start);
         if new.shows_reading() && above_first {
             // Frontmatter / leading lines: the properties panel heads the view.
-            self.reading.clear_top_block(path);
+            self.reading.clear_top_block(path, view);
             return iced::widget::operation::scroll_to(
-                crate::find::reading_scroll_id(path),
+                crate::find::reading_scroll_id(path, view),
                 iced::widget::scrollable::AbsoluteOffset {
                     x: None,
                     y: Some(0.0),
@@ -1623,8 +1678,8 @@ impl App {
             && let Some(b) = doc.model.block_for_line(line)
         {
             let blocks = doc.model.blocks.len();
-            self.reading.set_top_block(path, b);
-            return crate::reading::probe(path, blocks, Some(b));
+            self.reading.set_top_block(path, view, b);
+            return crate::reading::probe(path, view, blocks, Some(b));
         }
         Task::none()
     }
@@ -2010,6 +2065,7 @@ impl App {
                     return Task::none();
                 };
                 let path = ps.active_tab().map(|t| t.path.clone()).unwrap_or_default();
+                let view = ps.active_tab().map_or(0, |t| t.id);
                 let Some(bar) = &mut ps.find else {
                     return Task::none();
                 };
@@ -2019,7 +2075,7 @@ impl App {
                 if bar.visible.is_some() {
                     // plan editor-round-4 WP-3: Reading starts at the first visible occurrence
                     // at or below the viewport's top block.
-                    let top = self.reading.top_block(&path).unwrap_or(0);
+                    let top = self.reading.top_block(&path, view).unwrap_or(0);
                     let v = bar.visible.as_deref().unwrap_or_default();
                     bar.current =
                         (!v.is_empty()).then(|| v.iter().position(|&(b, _)| b >= top).unwrap_or(0));
@@ -2099,6 +2155,7 @@ impl App {
             .map(|b| b.matches.clone())
             .unwrap_or_default();
         let path = ps.tabs[i].path.clone();
+        let view = ps.tabs[i].id;
         let Some(doc) = self.docs.get_mut(&path) else {
             return Task::none();
         };
@@ -2121,9 +2178,10 @@ impl App {
             let Some((b, _)) = occ else {
                 return Task::none();
             };
-            self.reading.set_top_block(&path, b);
+            let view = ps.tabs[i].id;
+            self.reading.set_top_block(&path, view, b);
             let n = self.reading.doc(&path).map_or(0, |d| d.model.blocks.len());
-            return crate::reading::probe(&path, n, Some(b));
+            return crate::reading::probe(&path, view, n, Some(b));
         }
         let Some(r) = range else {
             doc.set_find_highlight(None);
@@ -2145,7 +2203,7 @@ impl App {
             #[allow(clippy::cast_precision_loss)]
             let y = (l0 as f32 / lines as f32).clamp(0.0, 1.0);
             return iced::widget::operation::snap_to(
-                crate::find::reading_scroll_id(&path),
+                crate::find::reading_scroll_id(&path, view),
                 iced::widget::scrollable::RelativeOffset { x: 0.0, y },
             );
         }
@@ -2170,7 +2228,7 @@ impl App {
             // plan editor-round-4 WP-2: a programmatic snap emits no `on_scroll`, so the stored
             // top block is re-probed after it (else a view switch carries a stale place).
             return iced::widget::operation::snap_to(
-                crate::find::reading_scroll_id(&path),
+                crate::find::reading_scroll_id(&path, self.view_of(&path)),
                 iced::widget::scrollable::RelativeOffset { x: 0.0, y },
             )
             .chain(self.reprobe(&path));
@@ -2181,7 +2239,7 @@ impl App {
     /// Re-probes `path`'s reading top block (after a programmatic scroll).
     fn reprobe(&self, path: &str) -> Task<Message> {
         self.reading.doc(path).map_or_else(Task::none, |d| {
-            crate::reading::probe(path, d.model.blocks.len(), None)
+            crate::reading::probe(path, self.view_of(path), d.model.blocks.len(), None)
         })
     }
 
@@ -2197,11 +2255,28 @@ impl App {
             TabKind::Settings => {
                 Some((crate::settings::body_scroll_id(self.settings.section), None))
             }
-            TabKind::Note(path) => self
-                .reading
-                .mode(path)
-                .shows_reading()
-                .then(|| (crate::find::reading_scroll_id(path), Some(path.to_owned()))),
+            TabKind::Note(path) => self.reading.mode(path).shows_reading().then(|| {
+                (
+                    crate::find::reading_scroll_id(path, self.view_of(path)),
+                    Some(path.to_owned()),
+                )
+            }),
+        }
+    }
+
+    /// Plan round-5 WP-1: Up/Down — one Reading line in the page target (never with a context
+    /// or mode menu open, nor while a widget holds keyboard focus).
+    fn line_step(&self, down: bool) -> Task<Message> {
+        if self.context_menu.is_some() || self.mode_menu.is_some() {
+            return Task::none();
+        }
+        let Some((id, note)) = self.page_target() else {
+            return Task::none();
+        };
+        let t = crate::page::step(id, crate::page::line_step(self.prefs.font_size, down));
+        match note {
+            Some(p) => t.chain(self.reprobe(&p)),
+            None => t,
         }
     }
 
@@ -3071,6 +3146,11 @@ impl App {
             }
             PaletteMsg::Close | PaletteMsg::Escape => self.palette.close(),
             PaletteMsg::Query(q) => self.palette.set_query(q),
+            // Plan round-5 WP-1: with no palette open, Up/Down scroll the focused pane one line
+            // (the switcher / dialog / menus gate in `page_target`; focused inputs in `step`).
+            PaletteMsg::Up | PaletteMsg::Down if !self.palette.open => {
+                return self.line_step(matches!(m, PaletteMsg::Down));
+            }
             PaletteMsg::Up if self.palette.prompt.is_none() => {
                 self.palette.selected = self.palette.selected.saturating_sub(1);
             }
@@ -3976,16 +4056,22 @@ impl App {
             SettingsMsg::Section(s) => {
                 self.settings.section = s;
                 self.settings.hotkeys.cancel();
+                // Plan round-5 WP-1: the section's own body offset, re-applied explicitly.
+                let restore = self.settings.restore_scroll();
                 if s == Section::Views {
                     self.sync_view_files();
                 }
                 if s == Section::Hotkeys {
                     self.sync_view_files();
-                    return self.fetch_actions();
+                    return Task::batch([restore, self.fetch_actions()]);
                 }
                 if s == Section::Status {
-                    return self.fetch_status();
+                    return Task::batch([restore, self.fetch_status()]);
                 }
+                return restore;
+            }
+            SettingsMsg::BodyScrolled(s, y) => {
+                self.settings.body_offsets.insert(s, y);
             }
             SettingsMsg::Pref(e) => {
                 if let editor_prefs::PrefEdit::PaletteHidden(s) = &e {

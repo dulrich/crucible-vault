@@ -1111,3 +1111,23 @@ fn command_click_routes_links() {
     ));
     assert!(super::command_click_msg("a.md", line, 0).is_none());
 }
+
+/// Plan round-5 WP-1 (items 3C, 4b): the tracked top line survives dematerialise (tab blur)
+/// and is re-applied on materialise; the measured viewport drives go-to-bottom and the clamp.
+#[test]
+fn top_line_survives_blur_and_uses_the_measured_viewport() {
+    let (_t, d, mut app, p) = setup();
+    let text: String = (0..100).map(|i| format!("line {i}\n\n")).collect();
+    set_text(&mut app, &d, &p, &text);
+    assert_eq!(viewport_lines(5.0 * 2.0 + 20.8 * 12.5, 16.0), 12);
+    buf(&mut app).set_visible_lines(12);
+    buf(&mut app).scroll_to_line(50);
+    buf(&mut app).set_shaped(false);
+    buf(&mut app).set_shaped(true);
+    assert_eq!(buf(&mut app).top_line(), 50, "kept across blur/resume");
+    // 201 lines, 12 visible: the last reachable top is 189.
+    buf(&mut app).scroll_to_line(199);
+    assert_eq!(buf(&mut app).top_line(), 189);
+    buf(&mut app).go_to_edge(true);
+    assert_eq!(buf(&mut app).top_line(), 200 - 11);
+}

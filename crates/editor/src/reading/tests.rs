@@ -41,6 +41,14 @@ fn app_on(d: &Arc<dyn DaemonClient>, path: &str) -> App {
     app
 }
 
+/// Plan round-5 WP-1: the source editor of `path` measured `lines` visible lines.
+fn viewport(app: &mut App, path: &str, lines: usize) {
+    let _ = app.update(Message::Source(crate::message::SourceMsg::Viewport {
+        path: path.to_owned(),
+        lines,
+    }));
+}
+
 fn reading(app: &mut App, path: &str, mode: ViewMode) {
     let _ = app.update(Message::Reading(ReadingMsg::SetMode {
         path: path.to_owned(),
@@ -400,6 +408,8 @@ fn source_to_reading_carries_top_line_to_its_block() {
     let (_t, d) = setup(&[(p, PLACE_NOTE)]);
     let mut app = app_on(&d, p);
     reading(&mut app, p, ViewMode::Source);
+    // Plan round-5 WP-1: a 3-line viewport, so line 11 is a reachable top.
+    viewport(&mut app, p, 3);
     // Wheel down 11 lines: line 11 ("code") is at the top.
     let _ = app.update(Message::Source(SourceMsg::Action(Action::Scroll {
         lines: 11,
@@ -409,7 +419,7 @@ fn source_to_reading_carries_top_line_to_its_block() {
     let model = &app.reading.doc(p).expect("doc").model;
     assert_eq!(model.block_for_line(11), Some(3), "the code block");
     assert_eq!(
-        app.reading.top_block(p),
+        app.reading.top_block(p, app.view_of(p)),
         Some(3),
         "the scroll task targets it"
     );
@@ -426,8 +436,10 @@ fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
     // A probe lands with the list (block 2, source lines 7..9) at the viewport top.
     let mut block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 50.0)).collect();
     block_ys[0] = Some(30.0);
+    let view = app.view_of(p);
     let _ = app.update(Message::Reading(ReadingMsg::Probed {
         path: p.to_owned(),
+        view,
         probe: Some(Probe {
             offset_y: 100.0,
             content_y: 0.0,
@@ -435,12 +447,13 @@ fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
         }),
         scroll_to: None,
     }));
-    assert_eq!(app.reading.top_block(p), Some(2));
+    assert_eq!(app.reading.top_block(p, app.view_of(p)), Some(2));
+    viewport(&mut app, p, 3);
     reading(&mut app, p, ViewMode::Source);
     assert_eq!(app.active_doc().expect("doc").top_line(), 7);
     // And back: Source line 7 maps to the list again.
     reading(&mut app, p, ViewMode::Split);
-    assert_eq!(app.reading.top_block(p), Some(2));
+    assert_eq!(app.reading.top_block(p, app.view_of(p)), Some(2));
 }
 
 /// The live daemon indexes incrementally without bumping the generation, so a generation-keyed
@@ -503,16 +516,21 @@ fn go_to_bottom_then_source_to_reading_lands_at_the_bottom() {
     let (_t, d) = setup(&[(p, &body)]);
     let mut app = app_on(&d, p);
     reading(&mut app, p, ViewMode::Source);
+    // Plan round-5 WP-1: the measured viewport (40 lines), not the 30-line estimate.
+    viewport(&mut app, p, 40);
     let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
     let top = app.active_doc().expect("doc").top_line();
-    assert!(top > 150, "top line follows the cursor to the end: {top}");
+    assert_eq!(top, 200 - 39, "the last 40 lines are the visible window");
     reading(&mut app, p, ViewMode::Reading);
     let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
-    let b = app.reading.top_block(p).expect("carried block");
-    assert!(
-        b + crate::source::VISIBLE_LINES / 2 >= blocks,
-        "block {b} of {blocks}"
-    );
+    let b = app
+        .reading
+        .top_block(p, app.view_of(p))
+        .expect("carried block");
+    // Line 161 (the blank after para 80) carries to para 81: the visible window's first block
+    // — the last ~20 blocks (= 40 lines) fill the final screen.
+    assert_eq!(b, 81, "block {b} of {blocks}");
+    assert!(b + 40 / 2 >= blocks);
 }
 
 /// plan editor-round-4 WP-2: Reading at its last block, then Reading -> Source lands on the
@@ -525,8 +543,10 @@ fn reading_at_bottom_then_source_lands_on_the_last_lines() {
     let mut app = app_on(&d, p);
     let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
     let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
+    let view = app.view_of(p);
     let _ = app.update(Message::Reading(ReadingMsg::Probed {
         path: p.to_owned(),
+        view,
         probe: Some(Probe {
             offset_y: (blocks - 1) as f32 * 20.0,
             content_y: 0.0,
@@ -534,9 +554,112 @@ fn reading_at_bottom_then_source_lands_on_the_last_lines() {
         }),
         scroll_to: None,
     }));
-    assert_eq!(app.reading.top_block(p), Some(blocks - 1));
+    assert_eq!(app.reading.top_block(p, app.view_of(p)), Some(blocks - 1));
+    // Plan round-5 WP-1: the last block starts at line 198, but the editor cannot scroll past
+    // its end — the carry clamps to the last full viewport (cause B: it used to set 198 and
+    // show two lines and blank space).
+    viewport(&mut app, p, 40);
     reading(&mut app, p, ViewMode::Source);
-    assert!(app.active_doc().expect("doc").top_line() >= 198);
+    let doc = app.active_doc().expect("doc");
+    let lines = doc.text().matches('\n').count() + 1;
+    assert_eq!(doc.top_line(), lines - 40);
+    assert_eq!(
+        doc.top_line() + doc.visible_lines(),
+        lines,
+        "the window ends at the last line"
+    );
+}
+
+/// Plan round-5 WP-1 (item 1, cause b): two panes showing one note page / probe their own
+/// reading scrollable — the id was per path, so a PageDown scrolled both (and a probe read the
+/// last match).
+#[test]
+fn reading_scroll_ids_are_per_tab_not_per_path() {
+    assert_ne!(
+        crate::find::reading_scroll_id("a.md", 1),
+        crate::find::reading_scroll_id("a.md", 2)
+    );
+    assert_ne!(
+        crate::reading::block_id("a.md", 1, 0),
+        crate::reading::block_id("a.md", 2, 0)
+    );
+}
+
+/// Plan round-5 WP-1 (item 4): a Reading tab blurred and re-selected keeps its place — the
+/// re-created scrollable's first `on_scroll` (offset 0) re-applies it instead of overwriting.
+#[test]
+fn tab_resume_keeps_the_reading_place() {
+    let (a, b) = ("r5/a.md", "r5/b.md");
+    let body = long_note();
+    let (_t, d) = setup(&[(a, &body), (b, b"other\n")]);
+    let mut app = app_on(&d, a);
+    let view = app.view_of(a);
+    let blocks = app.reading.doc(a).expect("doc").model.blocks.len();
+    let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
+    let probe = |offset_y: f32| Probe {
+        offset_y,
+        content_y: 0.0,
+        block_ys: block_ys.clone(),
+    };
+    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+        path: a.to_owned(),
+        view,
+        probe: Some(probe(40.0 * 20.0)),
+        scroll_to: None,
+    }));
+    assert_eq!(app.reading.top_block(a, view), Some(40));
+    let _ = app.update(Message::Tabs(TabsMsg::Open(b.to_owned())));
+    assert!(!app.reading.is_restoring(view));
+    let pane = app.focus;
+    let task = app.update(Message::Tabs(TabsMsg::Select(pane, 0)));
+    assert_eq!(app.view_of(a), view);
+    assert!(task.units() > 0, "activation issues the restore probe");
+    assert!(app.reading.is_restoring(view));
+    // The re-created scrollable reports offset 0 first: the place is re-applied, not lost.
+    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+        path: a.to_owned(),
+        view,
+    }));
+    assert!(!app.reading.is_restoring(view));
+    assert_eq!(app.reading.top_block(a, view), Some(40));
+    // Afterwards scroll reports update the place normally.
+    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+        path: a.to_owned(),
+        view,
+        probe: Some(probe(10.0 * 20.0)),
+        scroll_to: None,
+    }));
+    assert_eq!(app.reading.top_block(a, view), Some(10));
+}
+
+/// Plan round-5 WP-1 (item 2): Up/Down with no palette open scroll the focused Reading pane
+/// one line; nothing in Source-only, and the open palette keeps its own arrows.
+#[test]
+fn arrows_step_the_reading_pane_one_line() {
+    use crate::message::PaletteMsg;
+    use iced::keyboard::{Event, Key, Location, Modifiers, key::Named};
+    let press = Event::KeyPressed {
+        key: Key::Named(Named::ArrowDown),
+        modified_key: Key::Named(Named::ArrowDown),
+        physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::ArrowDown),
+        location: Location::Standard,
+        modifiers: Modifiers::empty(),
+        text: None,
+        repeat: false,
+    };
+    assert!(matches!(
+        crate::palette::key_event(press),
+        Some(Message::Palette(PaletteMsg::Down))
+    ));
+    assert!((crate::page::line_step(16.0, true) - 20.8).abs() < 1e-3);
+    assert!(crate::page::line_step(16.0, false) < 0.0);
+    let p = "r5/arrows.md";
+    let body = long_note();
+    let (_t, d) = setup(&[(p, &body)]);
+    let mut app = app_on(&d, p);
+    assert!(app.update(Message::Palette(PaletteMsg::Down)).units() > 0);
+    reading(&mut app, p, ViewMode::Source);
+    assert_eq!(app.update(Message::Palette(PaletteMsg::Down)).units(), 0);
 }
 
 /// plan editor-round-4 WP-2: plain PageDown (uncaptured) routes to the focused pane's
@@ -567,7 +690,7 @@ fn page_down_routes_to_the_reading_scrollable() {
     let mut app = app_on(&d, p);
     reading(&mut app, p, ViewMode::Reading);
     let (id, note) = app.page_target().expect("reading target");
-    assert_eq!(id, crate::find::reading_scroll_id(p));
+    assert_eq!(id, crate::find::reading_scroll_id(p, app.view_of(p)));
     assert_eq!(note.as_deref(), Some(p));
     reading(&mut app, p, ViewMode::Split);
     assert!(app.page_target().is_some());
@@ -667,7 +790,11 @@ fn reading_next_steps_over_visible_occurrences() {
     assert_eq!(app.reading.find_active(p), Some((0, 0)));
     let _ = app.update(Message::Find(FindMsg::Next));
     assert_eq!(app.reading.find_active(p), Some((2, 0)));
-    assert_eq!(app.reading.top_block(p), Some(2), "scrolled to its block");
+    assert_eq!(
+        app.reading.top_block(p, app.view_of(p)),
+        Some(2),
+        "scrolled to its block"
+    );
     let _ = app.update(Message::Find(FindMsg::Next));
     assert_eq!(app.reading.find_active(p), Some((2, 1)));
     let _ = app.update(Message::Find(FindMsg::Next));

@@ -74,6 +74,8 @@ pub struct VirtualList<'a, T, M> {
     row_height: f32,
     window: ListWindow,
     on_scroll: Box<dyn Fn(ListWindow) -> M + 'a>,
+    /// Plan round-5 WP-1: the scrollable's widget id (so an owner can restore its offset).
+    id: Option<iced::widget::Id>,
 }
 
 impl<'a, T, M: 'a> VirtualList<'a, T, M> {
@@ -89,7 +91,15 @@ impl<'a, T, M: 'a> VirtualList<'a, T, M> {
             row_height,
             window,
             on_scroll: Box::new(on_scroll),
+            id: None,
         }
+    }
+
+    /// Plan round-5 WP-1: gives the scrollable widget id `id`.
+    #[must_use]
+    pub fn id(mut self, id: iced::widget::Id) -> Self {
+        self.id = Some(id);
+        self
     }
 
     /// The rows that will be built.
@@ -119,11 +129,14 @@ impl<'a, T, M: 'a> VirtualList<'a, T, M> {
             .push(Space::new().height(Length::Fixed(after)))
             .width(Length::Fill);
         let on_scroll = self.on_scroll;
-        scrollable(body)
+        let s = scrollable(body)
             .on_scroll(move |v| on_scroll(ListWindow::from_viewport(&v)))
             .height(Length::Fill)
-            .width(Length::Fill)
-            .into()
+            .width(Length::Fill);
+        match self.id {
+            Some(id) => s.id(id).into(),
+            None => s.into(),
+        }
     }
 }
 

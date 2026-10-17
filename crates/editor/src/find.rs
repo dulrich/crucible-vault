@@ -85,9 +85,10 @@ pub fn input_id(pane: Pane) -> iced::widget::Id {
     iced::widget::Id::from(format!("find-input:{pane:?}"))
 }
 
-/// The reading scrollable's widget id for `path`.
-pub fn reading_scroll_id(path: &str) -> iced::widget::Id {
-    iced::widget::Id::from(format!("reading-scroll:{path}"))
+/// The reading scrollable's widget id for `path` in tab `view` — plan round-5 WP-1: per tab,
+/// not per path, so paging / probing one pane never also scrolls another pane on the note.
+pub fn reading_scroll_id(path: &str, view: u64) -> iced::widget::Id {
+    iced::widget::Id::from(format!("reading-scroll:{view}:{path}"))
 }
 
 /// The bar (a `Space` slot when closed, so the pane body keeps its tree position).

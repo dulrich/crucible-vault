@@ -116,7 +116,9 @@ pub fn reading<'a>(
         cx.seen.set(0);
         // plan editor-ui-round-3 WP-6: an id'd container per top-level block, so a widget
         // operation can read its layout bounds (place-keeping across mode switches).
-        container(block(&cx, b)).id(super::block_id(path, i)).into()
+        container(block(&cx, b))
+            .id(super::block_id(path, view, i))
+            .into()
     }));
     cx.cur_block.set(usize::MAX);
     if !doc.model.footnotes.is_empty() {
@@ -135,10 +137,11 @@ pub fn reading<'a>(
         }
     }
     scrollable(container(column(items).spacing(10)).padding(8))
-        .id(crate::find::reading_scroll_id(path))
+        .id(crate::find::reading_scroll_id(path, view))
         .on_scroll(move |_| {
             Message::Reading(ReadingMsg::Scrolled {
                 path: path.to_owned(),
+                view,
             })
         })
         .width(Length::Fill)

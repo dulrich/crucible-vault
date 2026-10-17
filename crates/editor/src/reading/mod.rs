@@ -138,7 +138,11 @@ pub struct ReadingStore {
     find: HashMap<String, String>,
     /// plan editor-ui-round-3 WP-6: the top-level block at the reading viewport's top per tab
     /// path, from the last layout probe (absent = scrolled to the top / not probed yet).
-    top: HashMap<String, usize>,
+    /// Plan round-5 WP-1: keyed by (path, tab id) — two tabs on one note keep their own place.
+    top: HashMap<(String, u64), usize>,
+    /// Plan round-5 WP-1: tabs just (re)activated whose first `on_scroll` (iced reports offset
+    /// 0 for a re-created scrollable) must re-apply the stored place instead of overwriting it.
+    restoring: std::collections::HashSet<u64>,
     /// plan editor-ui-round-3 WP-5: the active find match per tab path, as (top-level render
     /// block, nth query occurrence inside it).
     find_active: HashMap<String, (usize, usize)>,
@@ -441,19 +445,38 @@ impl ReadingStore {
     /// `path`'s rendered doc.
     /// plan editor-ui-round-3 WP-6: the top-level block at the reading viewport's top, from
     /// the last layout probe (`None` = at the top / not probed).
-    pub fn top_block(&self, path: &str) -> Option<usize> {
-        self.top.get(path).copied()
+    pub fn top_block(&self, path: &str, view: u64) -> Option<usize> {
+        self.top.get(&(path.to_owned(), view)).copied()
     }
 
     /// plan editor-ui-round-3 WP-6: records the intended top block of a carry (the scroll task
     /// is in flight; its probe confirms it).
-    pub fn set_top_block(&mut self, path: &str, block: usize) {
-        self.top.insert(path.to_owned(), block);
+    pub fn set_top_block(&mut self, path: &str, view: u64, block: usize) {
+        self.top.insert((path.to_owned(), view), block);
     }
 
     /// plan editor-ui-round-3 WP-6: the reading view is (being scrolled) at its top.
-    pub fn clear_top_block(&mut self, path: &str) {
-        self.top.remove(path);
+    pub fn clear_top_block(&mut self, path: &str, view: u64) {
+        self.top.remove(&(path.to_owned(), view));
+    }
+
+    /// Plan round-5 WP-1: tab `view` showing `path` was (re)activated — restores its stored
+    /// top block (probe → `scroll_to`), and arms the guard so the re-created scrollable's first
+    /// `on_scroll` (offset 0) re-applies it instead of overwriting it. `None` when the tab has
+    /// no stored place (it starts at the top anyway) or shows no reading view.
+    pub fn restore(&mut self, path: &str, view: u64) -> Option<Task<Message>> {
+        if !self.mode(path).shows_reading() {
+            return None;
+        }
+        let b = self.top_block(path, view)?;
+        let blocks = self.doc(path)?.model.blocks.len();
+        self.restoring.insert(view);
+        Some(probe(path, view, blocks, Some(b)))
+    }
+
+    /// Plan round-5 WP-1: the restore guard of tab `view` is armed.
+    pub fn is_restoring(&self, view: u64) -> bool {
+        self.restoring.contains(&view)
     }
 
     pub fn doc(&self, path: &str) -> Option<&Doc> {
@@ -466,6 +489,7 @@ impl ReadingStore {
         self.titles.remove(path);
         self.find.remove(path);
         self.find_active.remove(path);
+        self.top.retain(|(p, _), _| p != path);
         self.images.release_owner(path);
     }
 
@@ -537,7 +561,8 @@ impl ReadingStore {
         } else {
             // Leaving reading/split: drop the model and its image pins (E2).
             entry.doc = None;
-            self.top.remove(tab.path());
+            let path = tab.path();
+            self.top.retain(|(p, _), _| p != path);
             entry.seen_seq = None;
             self.images.release_owner(tab.path());
         }
@@ -737,13 +762,21 @@ pub fn update(
                 store.set_mode(tab, mode, daemon);
             }
         }
-        ReadingMsg::Scrolled { path } => {
-            if let Some(doc) = store.doc(&path) {
-                return probe(&path, doc.model.blocks.len(), None);
+        ReadingMsg::Scrolled { path, view } => {
+            if let Some(blocks) = store.doc(&path).map(|d| d.model.blocks.len()) {
+                // Plan round-5 WP-1: the first scroll report after a (re)activation is the
+                // re-created scrollable's offset 0 — re-apply the stored place instead.
+                let again = store
+                    .restoring
+                    .remove(&view)
+                    .then(|| store.top_block(&path, view))
+                    .flatten();
+                return probe(&path, view, blocks, again);
             }
         }
         ReadingMsg::Probed {
             path,
+            view,
             probe,
             scroll_to,
         } => {
@@ -752,10 +785,10 @@ pub fn update(
             };
             match scroll_to {
                 Some(b) => {
-                    store.top.insert(path.clone(), b);
+                    store.top.insert((path.clone(), view), b);
                     if let Some(y) = p.block_offset(b) {
                         return iced::widget::operation::scroll_to(
-                            crate::find::reading_scroll_id(&path),
+                            crate::find::reading_scroll_id(&path, view),
                             iced::widget::scrollable::AbsoluteOffset {
                                 x: None,
                                 y: Some(y),
@@ -765,10 +798,10 @@ pub fn update(
                 }
                 None => match p.top_block() {
                     Some(b) => {
-                        store.top.insert(path, b);
+                        store.top.insert((path, view), b);
                     }
                     None => {
-                        store.top.remove(&path);
+                        store.top.remove(&(path, view));
                     }
                 },
             }
@@ -863,9 +896,10 @@ pub fn tab_body<'a>(
     }
 }
 
-/// plan editor-ui-round-3 WP-6: the widget id of top-level reading block `i` of `path`.
-pub fn block_id(path: &str, i: usize) -> iced::widget::Id {
-    iced::widget::Id::from(format!("reading-block:{path}:{i}"))
+/// plan editor-ui-round-3 WP-6: the widget id of top-level reading block `i` of `path` in tab
+/// `view` (plan round-5 WP-1: per tab, so a probe never mixes two panes showing one note).
+pub fn block_id(path: &str, view: u64, i: usize) -> iced::widget::Id {
+    iced::widget::Id::from(format!("reading-block:{view}:{path}:{i}"))
 }
 
 /// plan editor-ui-round-3 WP-6: measured reading layout — the scrollable's offset and each
@@ -956,10 +990,10 @@ impl iced::advanced::widget::Operation<Probe> for ProbeOp {
 
 /// plan editor-ui-round-3 WP-6: probes `path`'s reading layout (`blocks` top-level blocks),
 /// answering with [`ReadingMsg::Probed`] (`scroll_to` passed through).
-pub fn probe(path: &str, blocks: usize, scroll_to: Option<usize>) -> Task<Message> {
+pub fn probe(path: &str, view: u64, blocks: usize, scroll_to: Option<usize>) -> Task<Message> {
     let op = ProbeOp {
-        scroll: crate::find::reading_scroll_id(path),
-        blocks: (0..blocks).map(|i| block_id(path, i)).collect(),
+        scroll: crate::find::reading_scroll_id(path, view),
+        blocks: (0..blocks).map(|i| block_id(path, view, i)).collect(),
         out: Probe {
             block_ys: vec![None; blocks],
             ..Probe::default()
@@ -970,6 +1004,7 @@ pub fn probe(path: &str, blocks: usize, scroll_to: Option<usize>) -> Task<Messag
     iced::advanced::widget::operate(op).map(move |p| {
         Message::Reading(ReadingMsg::Probed {
             path: path.clone(),
+            view,
             probe: Some(p),
             scroll_to,
         })

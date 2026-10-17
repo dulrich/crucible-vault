@@ -530,6 +530,9 @@ pub struct Settings {
     pub new_view: String,
     /// The Hotkeys page (WP-4): capture state and keymap / action snapshots.
     pub hotkeys: pages::hotkeys::HotkeyState,
+    /// Plan round-5 WP-1: each section's last body scroll offset (px), re-applied on section /
+    /// tab activation — iced scrollable state is positional, never retained across them.
+    pub body_offsets: std::collections::HashMap<Section, f32>,
 }
 
 impl Default for Settings {
@@ -544,11 +547,24 @@ impl Default for Settings {
             view_selected: None,
             new_view: String::new(),
             hotkeys: pages::hotkeys::HotkeyState::default(),
+            body_offsets: std::collections::HashMap::new(),
         }
     }
 }
 
 impl Settings {
+    /// Plan round-5 WP-1: re-applies the current section's stored body offset (0 when none).
+    pub fn restore_scroll<T: Send + 'static>(&self) -> iced::Task<T> {
+        let y = self.body_offsets.get(&self.section).copied().unwrap_or(0.0);
+        iced::widget::operation::scroll_to(
+            body_scroll_id(self.section),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
+    }
+
     /// A file page's loop.
     pub fn file(&self, path: &str) -> Option<&ConfigFile> {
         self.files.get(path)
@@ -939,6 +955,8 @@ pub enum SettingsMsg {
     Open,
     /// Select a rail section.
     Section(Section),
+    /// Plan round-5 WP-1: a section's body scrolled to vertical offset `.1` (px).
+    BodyScrolled(Section, f32),
     /// An Editor-page control changed.
     Pref(editor_prefs::PrefEdit),
     /// A generic document edit on a file page (WP-3 forms emit these).
@@ -1113,6 +1131,10 @@ pub fn view<'a>(
         .style(crate::theme::seg_group_style(t));
     let body = scrollable(container(page(s, prefs, paths, t, mode)).padding([0, 16]))
         .id(body_scroll_id(s.section))
+        .on_scroll({
+            let sec = s.section;
+            move |v| msg(SettingsMsg::BodyScrolled(sec, v.absolute_offset().y))
+        })
         .width(Length::Fill)
         .height(Length::Fill);
     let body: Element<'a, Message> = if s.section == Section::Hotkeys {

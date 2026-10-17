@@ -941,3 +941,26 @@ fn missing_bookmarks_on_load_and_after_delete() {
     );
     assert_eq!(tabs(&app), before);
 }
+
+/// Plan round-5 WP-1 (item 4d): each section keeps its own body offset and re-applies it on
+/// section activation (iced scrollable state is positional).
+#[test]
+fn settings_sections_keep_their_body_offsets() {
+    use crate::message::Message;
+    let mut app = crate::app::App::new(None, None);
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    let _ = app.update(Message::Settings(SettingsMsg::BodyScrolled(
+        Section::Hotkeys,
+        120.0,
+    )));
+    assert_eq!(
+        app.settings.body_offsets.get(&Section::Hotkeys),
+        Some(&120.0)
+    );
+    let t = app.update(Message::Settings(SettingsMsg::Section(Section::Editor)));
+    assert!(t.units() > 0, "the section's offset is re-applied");
+    assert_eq!(
+        app.settings.body_offsets.get(&Section::Hotkeys),
+        Some(&120.0)
+    );
+}

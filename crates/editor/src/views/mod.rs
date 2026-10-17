@@ -103,10 +103,35 @@ pub struct Entry {
     pub window: ListWindow,
 }
 
+/// Plan round-5 WP-1: the widget id of the virtual result list of view `id` in note `host`.
+pub fn list_id(id: &str, host: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("views-list:{host}:{id}"))
+}
+
 /// The per-app view cache.
 #[derive(Debug, Default)]
 pub struct ViewStore {
     pub entries: HashMap<Key, Entry>,
+}
+
+impl ViewStore {
+    /// Plan round-5 WP-1: re-applies the stored scroll window of every virtual list hosted in
+    /// note `host` (its scrollable state is positional and lost while the tab was hidden).
+    pub fn restore<T: Send + 'static>(&self, host: &str) -> Vec<iced::Task<T>> {
+        self.entries
+            .iter()
+            .filter(|((_, h), e)| h.as_deref() == Some(host) && e.window.offset > 0.0)
+            .map(|((id, _), e)| {
+                iced::widget::operation::scroll_to(
+                    list_id(id, host),
+                    iced::widget::scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(e.window.offset),
+                    },
+                )
+            })
+            .collect()
+    }
 }
 
 /// What the app must do after [`update`].
@@ -603,6 +628,7 @@ fn result_view<'a>(
                 window: w,
             })
         })
+        .id(list_id(id, host))
         .view(move |_, l| line_view(d, l, t));
         items.push(
             container(list)

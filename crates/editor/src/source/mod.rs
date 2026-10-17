@@ -131,6 +131,10 @@ pub struct SourceBuffer {
     /// `Action::Scroll` and our own [`Self::scroll_to_line`] (iced 0.14's `text_editor` exposes
     /// no scroll offset); pulled up when the cursor moves above it. 0 for a fresh shaped buffer.
     top_line: usize,
+    /// Plan round-5 WP-1: the source lines the editor's viewport shows, measured from the laid
+    /// out pane height (a `sensor` around the editor stack; [`viewport_lines`]); falls back to
+    /// [`VISIBLE_LINES`] before the first measure.
+    visible_lines: usize,
     /// Plan usability-sprint-captures-links WP-5: the frontmatter `title` of the text last known
     /// on disk (`new`/`reload`/landed saves).
     disk_title: Option<String>,
@@ -163,6 +167,7 @@ impl Clone for SourceBuffer {
             find_all: self.find_all.clone(),
             resync_pending: self.resync_pending,
             top_line: self.top_line,
+            visible_lines: self.visible_lines,
             disk_title: self.disk_title.clone(),
             name_title: self.name_title.clone(),
             pending_title: self.pending_title.clone(),
@@ -221,6 +226,7 @@ impl SourceBuffer {
             find_all: std::sync::Arc::from([]),
             resync_pending: false,
             top_line: 0,
+            visible_lines: VISIBLE_LINES,
             disk_title: title.clone(),
             name_title: title,
             pending_title: None,
@@ -268,8 +274,10 @@ impl SourceBuffer {
         if let Repr::Plain { text, cursor } = &self.content {
             let mut c = Content::with_text(text);
             c.move_to(to_iced(*cursor));
+            // Plan round-5 WP-1: a fresh shaped buffer starts scrolled to the top; re-apply the
+            // tracked top line (kept across dematerialise — tab blur/resume keeps its place).
+            scroll_content(&mut c, self.top_line);
             self.content = Repr::Shaped(c);
-            self.top_line = 0;
         }
         match &mut self.content {
             Repr::Shaped(c) => c,
@@ -363,7 +371,10 @@ impl SourceBuffer {
         let last = self.shaped().line_count().saturating_sub(1);
         if let Some(lines) = scroll {
             let top = i64::try_from(self.top_line).unwrap_or(i64::MAX) + i64::from(lines);
-            self.top_line = usize::try_from(top.max(0)).unwrap_or(0).min(last);
+            self.top_line = usize::try_from(top.max(0))
+                .unwrap_or(0)
+                .min(last)
+                .min(self.max_top());
         }
         if self.cursor().position.line != before {
             self.follow_cursor();
@@ -377,25 +388,39 @@ impl SourceBuffer {
         let cursor = self.cursor().position.line;
         if cursor < self.top_line {
             self.top_line = cursor;
-        } else if cursor >= self.top_line + VISIBLE_LINES {
-            self.top_line = cursor + 1 - VISIBLE_LINES;
+        } else if cursor >= self.top_line + self.visible_lines {
+            self.top_line = cursor + 1 - self.visible_lines;
         }
+    }
+
+    /// Plan round-5 WP-1: the measured viewport line count ([`Self::visible_lines`]).
+    pub fn visible_lines(&self) -> usize {
+        self.visible_lines
+    }
+
+    /// Plan round-5 WP-1: records the viewport's measured line count (at least 1).
+    pub fn set_visible_lines(&mut self, lines: usize) {
+        self.visible_lines = lines.max(1);
+    }
+
+    /// Plan round-5 WP-1: the largest top line — the editor never scrolls past the last line
+    /// at the viewport's bottom, so a top nearer the end than one viewport is unreachable.
+    fn max_top(&self) -> usize {
+        let lines = match &self.content {
+            Repr::Shaped(c) => c.line_count(),
+            Repr::Plain { text, .. } => text.matches('\n').count() + 1,
+        };
+        lines.saturating_sub(self.visible_lines)
     }
 
     /// plan editor-ui-round-3 WP-6: scrolls the editor so source `line` is at the top
     /// (materialising it): scroll fully up, then down by `line` lines. Wrapped lines above
     /// `line` count once each, so a wrapped paragraph above it lands the view slightly early.
+    /// Plan round-5 WP-1: clamped to the last reachable top ([`Self::max_top`]), so a carry
+    /// to a block near the end shows the document's last viewport, never a past-the-end view.
     pub fn scroll_to_line(&mut self, line: usize) {
-        let content = self.shaped();
-        let last = content.line_count().saturating_sub(1);
-        let line = line.min(last);
-        let up = i32::try_from(content.line_count()).unwrap_or(i32::MAX / 2);
-        content.perform(Action::Scroll {
-            lines: -up.saturating_mul(4),
-        });
-        content.perform(Action::Scroll {
-            lines: i32::try_from(line).unwrap_or(i32::MAX),
-        });
+        let line = line.min(self.max_top());
+        scroll_content(self.shaped(), line);
         self.top_line = line;
     }
 
@@ -417,7 +442,7 @@ impl SourceBuffer {
         });
         // plan editor-round-4 WP-2: the editor scrolls to the edge; place-keeping follows.
         self.top_line = if bottom {
-            at.line.saturating_sub(VISIBLE_LINES - 1)
+            at.line.saturating_sub(self.visible_lines - 1)
         } else {
             0
         };
@@ -1400,6 +1425,8 @@ pub fn update(
             }
         },
         SourceMsg::KeepMine(_) => spawn_save(ctx.daemon, buf.keep_mine(read_only)),
+        // Routed by the app (`App::update_inner`); never reaches here.
+        SourceMsg::Viewport { .. } => Task::none(),
         SourceMsg::TakeTheirs(path) => {
             if let Some(d) = ctx.daemon {
                 match d.read_file(&path) {
@@ -1422,9 +1449,34 @@ pub fn shift_click(msg: SourceMsg, shift: bool) -> SourceMsg {
     }
 }
 
-/// plan editor-round-4 WP-2: the visible source line count `top_line` tracking assumes (the
-/// shaped editor's viewport height is not exposed by iced; ~800 px at the default size).
+/// plan editor-round-4 WP-2: the visible source line count `top_line` tracking assumes before
+/// the editor's viewport was first measured (plan round-5 WP-1: then [`viewport_lines`]).
 pub const VISIBLE_LINES: usize = 30;
+
+/// Plan round-5 WP-1: the source lines a laid-out editor `height` (px) shows at text size
+/// `font_size` — iced's default relative line height (1.3), minus the editor padding.
+pub fn viewport_lines(height: f32, font_size: f32) -> usize {
+    let line = (font_size * 1.3).max(1.0);
+    let lines = ((height - 2.0 * EDITOR_PADDING).max(0.0) / line).floor();
+    // Truncation is the intent: a partly visible last line does not count.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let n = lines as usize;
+    n.max(1)
+}
+
+/// Scrolls `content` so source `line` is at the top: fully up, then down by `line` lines
+/// (wrapped lines above `line` count once each).
+fn scroll_content(content: &mut Content, line: usize) {
+    let up = i32::try_from(content.line_count()).unwrap_or(i32::MAX / 2);
+    content.perform(Action::Scroll {
+        lines: -up.saturating_mul(4),
+    });
+    if line > 0 {
+        content.perform(Action::Scroll {
+            lines: i32::try_from(line).unwrap_or(i32::MAX),
+        });
+    }
+}
 
 /// Handles `file_changed` for any open tab on `path`.
 pub fn file_changed(
@@ -1635,7 +1687,19 @@ pub fn view<'a>(
     .spacing(4)
     .padding(4)
     .width(Length::Fill);
-    iced::widget::stack![editor, overlay].into()
+    // Plan round-5 WP-1: the stack is always wrapped (stable tree shape); the sensor reports
+    // the laid-out height so `top_line` tracking uses the real viewport line count.
+    let path = buf.path.as_str();
+    let report = move |s: iced::Size| {
+        Message::Source(SourceMsg::Viewport {
+            path: path.to_owned(),
+            lines: viewport_lines(s.height, font_size),
+        })
+    };
+    iced::widget::sensor(iced::widget::stack![editor, overlay])
+        .on_show(report)
+        .on_resize(report)
+        .into()
 }
 
 /// The source stack's slots, in order: the editor is always layer 0, whatever the dirty /

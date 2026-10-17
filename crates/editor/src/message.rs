@@ -55,6 +55,11 @@ pub enum SourceMsg {
     Redo,
     /// Explicit save (Ctrl+S).
     Save,
+    /// Plan round-5 WP-1: `path`'s source editor was laid out showing `lines` lines.
+    Viewport {
+        path: String,
+        lines: usize,
+    },
     /// The autosave debounce for edit `seq` elapsed.
     AutosaveDue {
         path: String,
@@ -133,11 +138,13 @@ pub enum ReadingMsg {
         mode: crate::reading::ViewMode,
     },
     /// plan editor-ui-round-3 WP-6: the reading scrollable scrolled (re-probe its top block).
-    Scrolled { path: String },
+    Scrolled { path: String, view: u64 },
     /// plan editor-ui-round-3 WP-6: a reading layout probe landed; `scroll_to` = then scroll
     /// that top-level block to the viewport top.
     Probed {
         path: String,
+        /// The tab id whose reading view was probed (plan round-5 WP-1).
+        view: u64,
         probe: Option<crate::reading::Probe>,
         scroll_to: Option<usize>,
     },
