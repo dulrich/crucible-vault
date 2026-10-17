@@ -1161,7 +1161,11 @@ mod usability_wp3 {
         let _ = app.update(Message::Switcher(SwitcherMsg::Open));
         let empty = app.switcher.results.clone();
         let _ = app.update(Message::Switcher(SwitcherMsg::Query("zzqq".into())));
-        let _ = app.update(Message::Switcher(SwitcherMsg::Escape));
+        let refocus = app.update(Message::Switcher(SwitcherMsg::Escape));
+        assert!(
+            refocus.units() > 0,
+            "editor-round-4 WP-1: clear re-focuses the input"
+        );
         assert!(app.switcher.open, "first Esc only clears");
         assert!(app.switcher.query.is_empty());
         assert_eq!(app.switcher.results, empty, "back to the empty-query list");
@@ -1171,7 +1175,11 @@ mod usability_wp3 {
         let _ = app.update(Message::Palette(PaletteMsg::Open));
         let empty = app.palette.results.clone();
         let _ = app.update(Message::Palette(PaletteMsg::Query("zzqq".into())));
-        let _ = app.update(Message::Palette(PaletteMsg::Escape));
+        let refocus = app.update(Message::Palette(PaletteMsg::Escape));
+        assert!(
+            refocus.units() > 0,
+            "editor-round-4 WP-1: clear re-focuses the input"
+        );
         assert!(app.palette.open, "first Esc only clears");
         assert!(app.palette.query.is_empty());
         assert_eq!(app.palette.results, empty);

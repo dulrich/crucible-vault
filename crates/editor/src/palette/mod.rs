@@ -1145,6 +1145,7 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
         Key::Named(Named::ArrowUp) => p(PaletteMsg::Up),
         Key::Named(Named::ArrowDown) => p(PaletteMsg::Down),
         Key::Named(Named::Enter) if modifiers.command() => p(PaletteMsg::CtrlEnter),
+        Key::Named(Named::Enter) if !modifiers.alt() && !modifiers.shift() => p(PaletteMsg::Enter),
         // editor-usability-round WP-3: focused-pane back/forward (`chord` has no arrow names,
         // so these never reach action bindings).
         Key::Named(Named::ArrowLeft) if modifiers.command() && modifiers.alt() => {
@@ -1162,10 +1163,35 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
     }
 }
 
+/// plan editor-round-4 WP-1: an Escape press a widget captured (iced's `text_input` takes
+/// Escape to unfocus itself, and `keyboard::listen` only yields ignored events). Only
+/// captured presses map, so an ignored press still goes through [`key_event`] alone — one
+/// press, one stage.
+pub fn captured_escape(
+    ev: iced::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    is_captured_escape(&ev, status).then_some(Message::Palette(PaletteMsg::Escape))
+}
+
+/// Whether `ev` is an Escape key press with `Captured` status.
+pub fn is_captured_escape(ev: &iced::Event, status: iced::event::Status) -> bool {
+    status == iced::event::Status::Captured
+        && matches!(
+            ev,
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+                if key.as_ref() == Key::Named(Named::Escape)
+        )
+}
+
 /// The palette/panels subscription: the key listener, the toast expiry tick while a toast is
 /// up, and the panels recompute tick while the column is visible.
 pub fn subscription(palette: &Palette, panels_visible: bool) -> Subscription<Message> {
     let mut subs = vec![iced::keyboard::listen().filter_map(key_event)];
+    if palette.open {
+        subs.push(iced::event::listen_with(captured_escape));
+    }
     if palette.toast.is_some() {
         subs.push(
             iced::time::every(Duration::from_secs(1)).map(|_| Message::Palette(PaletteMsg::Tick)),

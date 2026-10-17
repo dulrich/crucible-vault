@@ -2743,6 +2743,8 @@ impl App {
                 s.query.clear();
                 s.selected = 0;
                 s.refresh(&self.explorer.paths, &self.ui.recent);
+                // plan editor-round-4 WP-1: iced unfocused the input on Escape.
+                return iced::widget::operation::focus(switcher::INPUT_ID);
             }
             SwitcherMsg::Escape => s.open = false,
             SwitcherMsg::Query(q) => {
@@ -2917,6 +2919,8 @@ impl App {
             {
                 // plan editor-ui-round-3 WP-5: two-stage Escape (clear, then close).
                 self.palette.set_query(String::new());
+                // plan editor-round-4 WP-1: iced unfocused the input on Escape.
+                return iced::widget::operation::focus(crate::palette::INPUT_ID);
             }
             PaletteMsg::Close | PaletteMsg::Escape if self.settings.hotkeys.recording.is_some() => {
                 self.settings.hotkeys.cancel();
@@ -2932,6 +2936,24 @@ impl App {
                 }
             }
             PaletteMsg::Up | PaletteMsg::Down => {}
+            // plan editor-round-4 WP-1: Enter submits only steps without an `on_submit` input.
+            PaletteMsg::Enter => {
+                let non_text = self.palette.open
+                    && self
+                        .palette
+                        .prompt
+                        .as_ref()
+                        .and_then(|p| p.current())
+                        .is_some_and(|s| {
+                            matches!(
+                                s.kind,
+                                cv_protocol::ParamKind::Enum | cv_protocol::ParamKind::Bool
+                            )
+                        });
+                if non_text {
+                    return self.update_palette(PaletteMsg::Submit);
+                }
+            }
             PaletteMsg::Submit | PaletteMsg::CtrlEnter => {
                 if !self.palette.open {
                     return Task::none();
@@ -3939,8 +3961,14 @@ impl App {
 
     /// Daemon notifications and global keys as iced subscriptions.
     pub fn subscription(&self) -> Subscription<Message> {
+        let captured_esc = if self.switcher.open {
+            iced::event::listen_with(switcher::captured_escape)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             Subscription::run_with(self.notifications.clone(), notification_stream),
+            captured_esc,
             iced::keyboard::listen().filter_map(switcher::key_event),
             iced::keyboard::listen().filter_map(|e| crate::dialog::key_event(&e)),
             self.reading.subscription(),

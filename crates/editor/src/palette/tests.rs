@@ -1009,3 +1009,90 @@ fn move_note_refuses_a_dirty_buffer() {
             .is_some_and(|e| e.contains("save the open note first"))
     );
 }
+
+// ---- editor-round-4 WP-1: modal keys ----
+
+fn key_press(named: Named, modifiers: iced::keyboard::Modifiers) -> iced::keyboard::Event {
+    iced::keyboard::Event::KeyPressed {
+        key: iced::keyboard::Key::Named(named),
+        modified_key: iced::keyboard::Key::Named(named),
+        physical_key: iced::keyboard::key::Physical::Unidentified(
+            iced::keyboard::key::NativeCode::Unidentified,
+        ),
+        location: iced::keyboard::Location::Standard,
+        modifiers,
+        text: None,
+        repeat: false,
+    }
+}
+
+fn esc_event() -> iced::Event {
+    iced::Event::Keyboard(key_press(Named::Escape, iced::keyboard::Modifiers::empty()))
+}
+
+/// A captured Escape (the focused text input took it) routes to the modal; an ignored one
+/// does not (it already reaches `key_event`), so one press is one stage.
+#[test]
+fn captured_escape_routes_to_palette_and_switcher_once() {
+    use iced::event::Status;
+    let w = iced::window::Id::unique();
+    assert!(matches!(
+        captured_escape(esc_event(), Status::Captured, w),
+        Some(Message::Palette(PaletteMsg::Escape))
+    ));
+    assert!(captured_escape(esc_event(), Status::Ignored, w).is_none());
+    assert!(matches!(
+        crate::switcher::captured_escape(esc_event(), Status::Captured, w),
+        Some(Message::Switcher(crate::message::SwitcherMsg::Escape))
+    ));
+    assert!(crate::switcher::captured_escape(esc_event(), Status::Ignored, w).is_none());
+    let enter = iced::Event::Keyboard(key_press(Named::Enter, iced::keyboard::Modifiers::empty()));
+    assert!(captured_escape(enter, Status::Captured, w).is_none());
+}
+
+/// Plain Enter maps to `Enter`; Ctrl+Enter stays `CtrlEnter`.
+#[test]
+fn plain_enter_key_maps_to_enter() {
+    assert!(matches!(
+        key_event(key_press(Named::Enter, iced::keyboard::Modifiers::empty())),
+        Some(Message::Palette(PaletteMsg::Enter))
+    ));
+    assert!(matches!(
+        key_event(key_press(Named::Enter, iced::keyboard::Modifiers::CTRL)),
+        Some(Message::Palette(PaletteMsg::CtrlEnter))
+    ));
+}
+
+/// Enter on the File-as-kind enum step submits (runs the action once).
+#[test]
+fn enter_submits_enum_step() {
+    let (_tmp, _d, mut app) = file_as_kind_live_env();
+    pal(&mut app, PaletteMsg::Open);
+    let i = entry_of(&app, "file-as-kind");
+    pal(&mut app, PaletteMsg::Pick(i));
+    assert!(app.palette.prompt.is_some());
+    pal(
+        &mut app,
+        PaletteMsg::Prompt(PromptMsg::Choice("blog".into())),
+    );
+    pal(&mut app, PaletteMsg::Enter);
+    assert!(app.palette.prompt.is_none(), "enum step submitted");
+    assert_eq!(app.palette.job_titles.len(), 1, "action ran once");
+}
+
+/// Enter on a text step is a no-op (its input's `on_submit` owns Enter): no double submit.
+#[test]
+fn enter_on_text_step_does_not_submit() {
+    let (_tmp, _d, mut app) = file_as_kind_live_env();
+    let mut p = Prompt::new(
+        action("t", vec![spec("name", ParamKind::Text, true)], &[]),
+        today(),
+    );
+    p.set_text("x".into());
+    app.palette.open = true;
+    app.palette.prompt = Some(p);
+    pal(&mut app, PaletteMsg::Enter);
+    let pr = app.palette.prompt.as_ref().expect("still prompting");
+    assert_eq!(pr.step, 0);
+    assert!(app.palette.prompt_error.is_none());
+}

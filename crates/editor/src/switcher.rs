@@ -143,6 +143,17 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
     }
 }
 
+/// plan editor-round-4 WP-1: a widget-captured Escape (the focused query input) for the
+/// open switcher; ignored presses reach it through [`key_event`] only.
+pub fn captured_escape(
+    ev: iced::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    crate::palette::is_captured_escape(&ev, status)
+        .then_some(Message::Switcher(SwitcherMsg::Escape))
+}
+
 /// Whether Shift is held in `m`.
 pub fn shift(m: Modifiers) -> bool {
     m.shift()

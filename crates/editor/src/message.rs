@@ -267,6 +267,9 @@ pub enum PaletteMsg {
     Key(crate::palette::chord::Chord),
     /// Ctrl+Enter: submit a multiline prompt.
     CtrlEnter,
+    /// plan editor-round-4 WP-1: plain Enter not captured by a widget — submits a prompt step
+    /// whose input has no `on_submit` (`Enum` pick list, `Bool` toggler); otherwise a no-op.
+    Enter,
     /// Param prompt input.
     Prompt(crate::palette::PromptMsg),
     /// The save-first write finished; `call` runs only on success.
