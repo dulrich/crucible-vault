@@ -19,6 +19,7 @@ pub mod message;
 pub mod migrate;
 pub mod nav;
 pub mod open_url;
+pub mod page;
 pub mod palette;
 pub mod panels;
 pub mod panes;

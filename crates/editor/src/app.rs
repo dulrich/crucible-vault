@@ -1363,6 +1363,8 @@ impl App {
                 self.docs.remove(&path);
             }
             Message::Source(m) => {
+                // plan editor-round-4 WP-2: Shift+click extends the selection.
+                let m = crate::source::shift_click(m, self.switcher.shift);
                 let routed = matches!(
                     &m,
                     SourceMsg::AutosaveDue { .. }
@@ -2095,12 +2097,53 @@ impl App {
         }
         if mode.shows_reading() {
             let y = if bottom { 1.0 } else { 0.0 };
+            // plan editor-round-4 WP-2: a programmatic snap emits no `on_scroll`, so the stored
+            // top block is re-probed after it (else a view switch carries a stale place).
             return iced::widget::operation::snap_to(
                 crate::find::reading_scroll_id(&path),
                 iced::widget::scrollable::RelativeOffset { x: 0.0, y },
-            );
+            )
+            .chain(self.reprobe(&path));
         }
         Task::none()
+    }
+
+    /// Re-probes `path`'s reading top block (after a programmatic scroll).
+    fn reprobe(&self, path: &str) -> Task<Message> {
+        self.reading.doc(path).map_or_else(Task::none, |d| {
+            crate::reading::probe(path, d.model.blocks.len(), None)
+        })
+    }
+
+    /// plan editor-round-4 WP-2: the scrollable plain PageUp/PageDown pages in the focused
+    /// pane — Reading (incl. Split's reading side; a focused source editor captures the key
+    /// first) or the Settings page; `None` with a modal open or a Source-only note. The second
+    /// field is the note to re-probe afterwards.
+    pub fn page_target(&self) -> Option<(iced::widget::Id, Option<String>)> {
+        if self.palette.open || self.switcher.open || self.dialog.is_some() {
+            return None;
+        }
+        match self.active_tab()?.kind() {
+            TabKind::Settings => {
+                Some((crate::settings::body_scroll_id(self.settings.section), None))
+            }
+            TabKind::Note(path) => self
+                .reading
+                .mode(path)
+                .shows_reading()
+                .then(|| (crate::find::reading_scroll_id(path), Some(path.to_owned()))),
+        }
+    }
+
+    fn page(&self, down: bool) -> Task<Message> {
+        let Some((id, note)) = self.page_target() else {
+            return Task::none();
+        };
+        let t = crate::page::page(id, down);
+        match note {
+            Some(p) => t.chain(self.reprobe(&p)),
+            None => t,
+        }
     }
 
     /// Refocuses the focused pane's source editor (when it shows one).
@@ -2161,6 +2204,7 @@ impl App {
             PanesMsg::Bookmark(b) => return self.update_bookmarks(b),
             PanesMsg::Back(pane) => self.history_step(pane, false),
             PanesMsg::Forward(pane) => self.history_step(pane, true),
+            PanesMsg::Page(down) => return self.page(down),
             PanesMsg::BackFocused => self.history_step(self.focus, false),
             PanesMsg::ForwardFocused => self.history_step(self.focus, true),
             PanesMsg::ToggleSide => {

@@ -485,3 +485,101 @@ fn file_membership_change_drops_cached_resolver() {
         "Modified keeps the resolver"
     );
 }
+
+/// plan editor-round-4 WP-2: 100 one-line paragraphs (blocks), 200 source lines.
+fn long_note() -> Vec<u8> {
+    (0..100)
+        .map(|i| format!("para {i}\n\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// plan editor-round-4 WP-2: Ctrl+PgDn in Source, then Source -> Reading lands in the final
+/// screen of blocks (the stale top line used to carry block 0).
+#[test]
+fn go_to_bottom_then_source_to_reading_lands_at_the_bottom() {
+    let p = "r4/long.md";
+    let body = long_note();
+    let (_t, d) = setup(&[(p, &body)]);
+    let mut app = app_on(&d, p);
+    reading(&mut app, p, ViewMode::Source);
+    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
+    let top = app.active_doc().expect("doc").top_line();
+    assert!(top > 150, "top line follows the cursor to the end: {top}");
+    reading(&mut app, p, ViewMode::Reading);
+    let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
+    let b = app.reading.top_block(p).expect("carried block");
+    assert!(
+        b + crate::source::VISIBLE_LINES / 2 >= blocks,
+        "block {b} of {blocks}"
+    );
+}
+
+/// plan editor-round-4 WP-2: Reading at its last block, then Reading -> Source lands on the
+/// last lines.
+#[test]
+fn reading_at_bottom_then_source_lands_on_the_last_lines() {
+    let p = "r4/long2.md";
+    let body = long_note();
+    let (_t, d) = setup(&[(p, &body)]);
+    let mut app = app_on(&d, p);
+    let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
+    let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
+    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+        path: p.to_owned(),
+        probe: Some(Probe {
+            offset_y: (blocks - 1) as f32 * 20.0,
+            content_y: 0.0,
+            block_ys,
+        }),
+        scroll_to: None,
+    }));
+    assert_eq!(app.reading.top_block(p), Some(blocks - 1));
+    reading(&mut app, p, ViewMode::Source);
+    assert!(app.active_doc().expect("doc").top_line() >= 198);
+}
+
+/// plan editor-round-4 WP-2: plain PageDown (uncaptured) routes to the focused pane's
+/// scrollable — Reading's in Reading/Split, none in Source; Ctrl+PageDown stays a chord.
+#[test]
+fn page_down_routes_to_the_reading_scrollable() {
+    use iced::keyboard::{Event, Key, Location, Modifiers, key::Named};
+    let press = |m: Modifiers| Event::KeyPressed {
+        key: Key::Named(Named::PageDown),
+        modified_key: Key::Named(Named::PageDown),
+        physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::PageDown),
+        location: Location::Standard,
+        modifiers: m,
+        text: None,
+        repeat: false,
+    };
+    assert!(matches!(
+        crate::palette::key_event(press(Modifiers::empty())),
+        Some(Message::Panes(crate::message::PanesMsg::Page(true)))
+    ));
+    assert!(matches!(
+        crate::palette::key_event(press(Modifiers::CTRL)),
+        Some(Message::Palette(crate::message::PaletteMsg::Key(_)))
+    ));
+    let p = "r4/page.md";
+    let body = long_note();
+    let (_t, d) = setup(&[(p, &body)]);
+    let mut app = app_on(&d, p);
+    reading(&mut app, p, ViewMode::Reading);
+    let (id, note) = app.page_target().expect("reading target");
+    assert_eq!(id, crate::find::reading_scroll_id(p));
+    assert_eq!(note.as_deref(), Some(p));
+    reading(&mut app, p, ViewMode::Split);
+    assert!(app.page_target().is_some());
+    reading(&mut app, p, ViewMode::Source);
+    assert!(app.page_target().is_none());
+}
+
+/// plan editor-round-4 WP-2: PageDown pages by a viewport minus one line.
+#[test]
+fn page_delta_keeps_one_line_of_overlap() {
+    let line = crate::page::PAGE_OVERLAP;
+    assert!((crate::page::page_delta(500.0, true) - (500.0 - line)).abs() < f32::EPSILON);
+    assert!((crate::page::page_delta(500.0, false) + (500.0 - line)).abs() < f32::EPSILON);
+    assert!(crate::page::page_delta(10.0, true) > 0.0);
+}

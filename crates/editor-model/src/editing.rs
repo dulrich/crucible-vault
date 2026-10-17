@@ -101,6 +101,14 @@ pub fn indent_width(line: &str) -> usize {
     line.len() - line.trim_start_matches([' ', '\t']).len()
 }
 
+/// plan editor-round-4 WP-2: whether `prefix` (the text before the cursor) is only indentation
+/// plus a list marker (`-`/`*`/`+`/`1.`/`1)`, optional task box) and optional spaces — the
+/// case where Tab indents the whole line instead of typing `\t`.
+pub fn is_list_prefix(prefix: &str) -> bool {
+    let rest = &prefix[indent_width(prefix)..];
+    marker(rest).is_some_and(|(n, _)| rest[n..].bytes().all(|b| b == b' '))
+}
+
 /// Smart Home. `col`: logical byte column before; `indent`: [`indent_width`]; `visual_home`: the
 /// column iced's visual-line `Home` motion lands on from `col`. A visual home past column 0 means
 /// the cursor is on a wrapped continuation row.
@@ -139,6 +147,19 @@ pub fn end_target(col: usize, visual_end: usize, line_len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_prefix_detection() {
+        assert!(is_list_prefix("- "));
+        assert!(is_list_prefix("  - [ ] "));
+        assert!(is_list_prefix("\t1. "));
+        assert!(is_list_prefix("3)  "));
+        assert!(is_list_prefix("* [x]"));
+        assert!(!is_list_prefix("- a"));
+        assert!(!is_list_prefix("-"));
+        assert!(!is_list_prefix("text"));
+        assert!(!is_list_prefix(""));
+    }
 
     fn cont(line: &str) -> Option<ListEnter> {
         list_enter(line, line.len())

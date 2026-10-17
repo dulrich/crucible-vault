@@ -347,6 +347,7 @@ impl SourceBuffer {
             position: pos(to),
             selection: (from != to).then(|| pos(from)),
         });
+        self.follow_cursor();
     }
 
     /// plan editor-ui-round-3 WP-6: the top visible source line (block-granular place-keeping
@@ -364,9 +365,20 @@ impl SourceBuffer {
             let top = i64::try_from(self.top_line).unwrap_or(i64::MAX) + i64::from(lines);
             self.top_line = usize::try_from(top.max(0)).unwrap_or(0).min(last);
         }
+        if self.cursor().position.line != before {
+            self.follow_cursor();
+        }
+    }
+
+    /// plan editor-round-4 WP-2: keeps the cursor inside the tracked viewport — the editor
+    /// scrolls to a cursor that moved above the top or below the last visible line
+    /// ([`VISIBLE_LINES`] estimate), so the top line follows it either way.
+    fn follow_cursor(&mut self) {
         let cursor = self.cursor().position.line;
-        if cursor != before && cursor < self.top_line {
+        if cursor < self.top_line {
             self.top_line = cursor;
+        } else if cursor >= self.top_line + VISIBLE_LINES {
+            self.top_line = cursor + 1 - VISIBLE_LINES;
         }
     }
 
@@ -403,6 +415,12 @@ impl SourceBuffer {
             position: at,
             selection: None,
         });
+        // plan editor-round-4 WP-2: the editor scrolls to the edge; place-keeping follows.
+        self.top_line = if bottom {
+            at.line.saturating_sub(VISIBLE_LINES - 1)
+        } else {
+            0
+        };
     }
 
     /// The painted find match, if any.
@@ -426,8 +444,8 @@ impl SourceBuffer {
     }
 
     /// Tab / Shift+Tab (plan editor-feedback-round-2 WP-4) as ONE recorded edit. Indent with a
-    /// multi-line or whole-line selection prepends `\t` to every touched line; otherwise Tab
-    /// types `\t` (replacing a within-line selection). Outdent removes one leading `\t`, else up
+    /// selection (any, incl. within one line) or with only indentation + a list marker before the
+    /// cursor prepends `\t` to every touched line; otherwise Tab types `\t` (round-4 WP-2). Outdent removes one leading `\t`, else up
     /// to [`OUTDENT_SPACES`] leading spaces, from every touched line (the cursor's line without
     /// a selection). A selection ending at column 0 of a later line does not touch that line.
     /// The selection keeps covering the same lines (columns shift by the bytes changed).
@@ -445,14 +463,15 @@ impl SourceBuffer {
             Some(a) => (pos, a),
             None => (pos, pos),
         };
-        let whole_line = sel.is_some()
-            && lo.line == hi.line
-            && lo.column == 0
-            && content
-                .line(lo.line)
-                .is_some_and(|l| !l.text.is_empty() && hi.column >= l.text.len());
-        let block = sel.is_some() && (lo.line != hi.line || whole_line);
-        if !outdent && !block {
+        // plan editor-round-4 WP-2: any selection indents every touched line; without one, Tab
+        // indents the line only when the text before the cursor is indentation + a list marker.
+        let list = sel.is_none()
+            && content.line(pos.line).is_some_and(|l| {
+                l.text
+                    .get(..pos.column)
+                    .is_some_and(editing::is_list_prefix)
+            });
+        if !outdent && sel.is_none() && !list {
             return self.perform(
                 Action::Edit(Edit::Paste(Arc::new("\t".to_owned()))),
                 false,
@@ -1392,6 +1411,20 @@ pub fn update(
         }
     }
 }
+
+/// plan editor-round-4 WP-2: iced maps a single click to `Action::Click` whatever the
+/// modifiers; with Shift held it becomes a drag to the click point, which extends the
+/// selection from its anchor (or the cursor when there is none).
+pub fn shift_click(msg: SourceMsg, shift: bool) -> SourceMsg {
+    match msg {
+        SourceMsg::Action(Action::Click(p)) if shift => SourceMsg::Action(Action::Drag(p)),
+        m => m,
+    }
+}
+
+/// plan editor-round-4 WP-2: the visible source line count `top_line` tracking assumes (the
+/// shaped editor's viewport height is not exposed by iced; ~800 px at the default size).
+pub const VISIBLE_LINES: usize = 30;
 
 /// Handles `file_changed` for any open tab on `path`.
 pub fn file_changed(

@@ -635,13 +635,125 @@ fn tab_without_selection_inserts_tab_and_undoes() {
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
 }
 
+// plan editor-round-4 WP-2: a within-line selection indents the line (was: replaced by `\t`).
 #[test]
-fn tab_within_line_selection_replaces_it() {
+fn tab_within_line_selection_indents_the_line() {
     let (_t, _d, mut app, _p) = setup();
     buf(&mut app).materialise();
     sel(&mut app, (0, 4), (0, 8));
+    let seq = buf(&mut app).edit_seq();
     key(&mut app, SourceKey::Indent);
-    assert_eq!(buf(&mut app).text(), "line\t\nline two\nline three\n");
+    assert_eq!(buf(&mut app).text(), "\tline one\nline two\nline three\n");
+    assert_eq!(buf(&mut app).edit_seq(), seq + 1);
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.position, Position { line: 0, column: 9 });
+    assert_eq!(c.selection, Some(Position { line: 0, column: 5 }));
+    assert_eq!(buf(&mut app).selection().as_deref(), Some(" one"));
+}
+
+#[test]
+fn tab_after_list_marker_indents_the_line() {
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "- item\n");
+    sel(&mut app, (0, 2), (0, 2));
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(buf(&mut app).text(), "\t- item\n");
+    assert_eq!(
+        buf(&mut app).cursor().position,
+        Position { line: 0, column: 3 }
+    );
+    let _ = app.update(Message::Source(SourceMsg::Undo));
+    assert_eq!(buf(&mut app).text(), "- item\n");
+}
+
+#[test]
+fn tab_after_indented_task_marker_indents_the_line() {
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "  - [ ] todo\n");
+    sel(&mut app, (0, 8), (0, 8));
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(buf(&mut app).text(), "\t  - [ ] todo\n");
+    assert_eq!(
+        buf(&mut app).cursor().position,
+        Position { line: 0, column: 9 }
+    );
+}
+
+#[test]
+fn tab_mid_text_on_list_line_types_a_tab() {
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "- item\n");
+    sel(&mut app, (0, 4), (0, 4));
+    key(&mut app, SourceKey::Indent);
+    assert_eq!(buf(&mut app).text(), "- it\tem\n");
+}
+
+#[test]
+fn shift_tab_after_list_marker_outdents_the_line() {
+    let (_t, d, mut app, p) = setup();
+    set_text(&mut app, &d, &p, "\t- item\n");
+    sel(&mut app, (0, 3), (0, 3));
+    key(&mut app, SourceKey::Outdent);
+    assert_eq!(buf(&mut app).text(), "- item\n");
+    assert_eq!(
+        buf(&mut app).cursor().position,
+        Position { line: 0, column: 2 }
+    );
+}
+
+#[test]
+fn shift_click_maps_to_a_drag_only_with_shift() {
+    let p = iced::Point::new(3.0, 4.0);
+    let click = || SourceMsg::Action(Action::Click(p));
+    assert!(matches!(
+        shift_click(click(), true),
+        SourceMsg::Action(Action::Drag(q)) if q == p
+    ));
+    assert!(matches!(
+        shift_click(click(), false),
+        SourceMsg::Action(Action::Click(_))
+    ));
+}
+
+#[test]
+fn shift_click_extends_selection_from_the_cursor() {
+    use iced::keyboard::Modifiers;
+    let (_t, _d, mut app, _p) = setup();
+    buf(&mut app).materialise();
+    sel(&mut app, (2, 3), (2, 3));
+    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
+        Modifiers::SHIFT,
+    )));
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Click(
+        iced::Point::new(0.0, 0.0),
+    ))));
+    let c = buf(&mut app).cursor();
+    assert_eq!(c.position, Position { line: 0, column: 0 });
+    assert_eq!(c.selection, Some(Position { line: 2, column: 3 }));
+    // Shift released: a click just moves the cursor.
+    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
+        Modifiers::empty(),
+    )));
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Click(
+        iced::Point::new(0.0, 0.0),
+    ))));
+    assert_eq!(buf(&mut app).cursor().selection, None);
+}
+
+#[test]
+fn go_to_bottom_moves_top_line_near_the_end() {
+    let (_t, d, mut app, p) = setup();
+    let text: String = (0..100).map(|i| format!("line {i}\n\n")).collect();
+    set_text(&mut app, &d, &p, &text);
+    buf(&mut app).go_to_edge(true);
+    let last = 200;
+    let top = buf(&mut app).top_line();
+    assert_eq!(top, last + 1 - VISIBLE_LINES);
+    buf(&mut app).go_to_edge(false);
+    assert_eq!(buf(&mut app).top_line(), 0);
+    // A cursor jump below the viewport (find) drags the top line with it.
+    sel(&mut app, (150, 0), (150, 2));
+    assert_eq!(buf(&mut app).top_line(), 151 - VISIBLE_LINES);
 }
 
 #[test]

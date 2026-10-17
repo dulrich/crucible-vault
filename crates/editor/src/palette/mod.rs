@@ -1154,6 +1154,16 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
         Key::Named(Named::ArrowRight) if modifiers.command() && modifiers.alt() => {
             Some(Message::Panes(PanesMsg::ForwardFocused))
         }
+        // plan editor-round-4 WP-2: plain PageUp/PageDown (uncaptured: no editor or input
+        // took it) pages the focused pane; Ctrl+PageUp/PageDown stay chords (go to top/bottom).
+        Key::Named(Named::PageUp | Named::PageDown)
+            if !modifiers.command() && !modifiers.alt() && !modifiers.logo() =>
+        {
+            Some(Message::Panes(PanesMsg::Page(matches!(
+                key.as_ref(),
+                Key::Named(Named::PageDown)
+            ))))
+        }
         // Ctrl+P / Ctrl+Shift+P and the other client chords resolve in `on_chord`
         // (`client_chord`).
         _ if modifiers.command() || modifiers.alt() => {

@@ -378,6 +378,9 @@ pub enum PanesMsg {
     ToggleBorders,
     /// Open / close the view-mode dropdown of a pane (`None` closes).
     ModeMenu(Option<Pane>),
+    /// plan editor-round-4 WP-2: plain PageUp (`false`) / PageDown (`true`) no widget
+    /// captured — pages the focused pane's scrollable (Reading, Settings).
+    Page(bool),
 }
 
 /// Daemon connection and notifications.
