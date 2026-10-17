@@ -15,13 +15,14 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 pub use cv_protocol::{
-    ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, HelloResult, JobStatus, Mode,
+    ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, HelloResult, JobStatus,
+    LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult, Mode,
     Notification, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
     ViewsListResult,
 };
 pub use cv_state::StateReader;
 pub use cv_vault::ContentHash;
-pub use fake::{ActionHandler, FakeDaemon};
+pub use fake::{ActionHandler, FakeDaemon, FakeLookups};
 pub use local::LocalIndex;
 pub use socket::SocketDaemon;
 
@@ -116,6 +117,14 @@ pub trait DaemonClient: Send + Sync {
     fn views_list(&self) -> Result<ViewsListResult>;
     /// Evaluates one view.
     fn view_run(&self, view_id: &str, this_path: Option<&str>) -> Result<ViewResult>;
+    /// Supported currencies, sorted by code (plan round-5-reading-pickers-intake WP-5).
+    fn lookup_currencies(&self) -> Result<Vec<LookupCurrency>>;
+    /// Place search (`City, CC` labels).
+    fn lookup_geocode(&self, query: &str) -> Result<Vec<LookupGeoResult>>;
+    /// `provider`'s model list; `live: false` = declared models only (provider unreachable).
+    fn lookup_models(&self, provider: &str) -> Result<LookupModelsResult>;
+    /// YouTube channel titles for `ids` (unknown ids absent).
+    fn lookup_channels(&self, ids: &[String]) -> Result<Vec<LookupChannel>>;
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;

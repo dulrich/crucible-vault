@@ -54,6 +54,23 @@ pub fn parse_latest(base: &str, quote: &str, body: &[u8]) -> Result<FxRate, Fetc
     }
 }
 
+/// One currency (`/currencies` entry; Crucible `fx.ts:22-32` `fetchCurrencies`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Currency {
+    /// ISO code (`USD`).
+    pub code: String,
+    /// Display name (`United States Dollar`).
+    pub name: String,
+}
+
+/// Decodes a `/currencies` body (`{code: name}`) into a list sorted by code.
+pub fn parse_currencies(body: &[u8]) -> Result<Vec<Currency>, FetchError> {
+    let m: std::collections::BTreeMap<String, String> = decode_json(SERVICE, body)?;
+    Ok(m.into_iter()
+        .map(|(code, name)| Currency { code, name })
+        .collect())
+}
+
 /// The Frankfurter API rooted at a base URL.
 #[derive(Debug, Clone)]
 pub struct FxApi {
@@ -73,6 +90,14 @@ impl FxApi {
         Self {
             base: base.into().trim_end_matches('/').to_owned(),
         }
+    }
+
+    /// `GET /currencies` → every supported currency, sorted by code.
+    pub async fn currencies(&self, client: &WebClient) -> Result<Vec<Currency>, FetchError> {
+        let body = client
+            .get_bytes(SERVICE, &format!("{}/currencies", self.base))
+            .await?;
+        parse_currencies(&body)
     }
 
     /// `GET /latest?from=BASE&to=QUOTE` → the rate.
@@ -108,5 +133,15 @@ mod tests {
             parse_latest("USD", "EUR", b),
             Err(FetchError::Malformed { .. })
         ));
+    }
+
+    #[test]
+    fn decodes_currencies_sorted() {
+        let b = br#"{"USD":"United States Dollar","EUR":"Euro","AUD":"Australian Dollar"}"#;
+        let c = parse_currencies(b).unwrap();
+        let codes: Vec<&str> = c.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(codes, ["AUD", "EUR", "USD"]);
+        assert_eq!(c[1].name, "Euro");
+        assert!(parse_currencies(b"[1]").is_err());
     }
 }

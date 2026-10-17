@@ -4,6 +4,7 @@
 //! `anthropic`, `google`, `ollama`, `cli` (Codex). Carried from Crucible
 //! `https://github.com/dulrich/obsidian-crucible/blob/master/src/providers/*.ts`; see each module for citations and drops.
 
+pub mod catalog;
 pub mod cli;
 pub mod config;
 pub mod error;

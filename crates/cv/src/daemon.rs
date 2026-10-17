@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
 use crate::config::Config;
+use crate::lookup::{LookupBases, Lookups};
 use crate::runner::{ProductionExecutor, Runner, RunnerDeps, StepExecutor, SystemClock};
 use crate::uri::{self, UriAction};
 use crate::views::{ViewError, ViewRegistry, register_views};
@@ -108,6 +109,7 @@ pub struct Shared {
     views: ViewRegistry,
     open_subscribers: AtomicUsize,
     runner: OnceLock<Runner>,
+    lookups: Lookups,
 }
 
 impl std::fmt::Debug for Shared {
@@ -194,6 +196,11 @@ impl Daemon {
             cv_vault::spawn_writer_with_watcher(writer, opts.watch).context("starting writer")?;
         let mut views = ViewRegistry::new(&config.index_db, events.clone());
         register_views(&mut views, &config.config_dir);
+        let lookups = Lookups::new(
+            &config.config_dir,
+            Arc::clone(&state),
+            LookupBases::default(),
+        );
         Ok(Self {
             shared: Arc::new(Shared {
                 config,
@@ -204,6 +211,7 @@ impl Daemon {
                 views,
                 open_subscribers: AtomicUsize::new(0),
                 runner: OnceLock::new(),
+                lookups,
             }),
             writer_join,
             vault_events,
@@ -676,6 +684,10 @@ impl Shared {
                 }
                 Err(ViewError::Failed(m)) => Err(internal(m)),
             },
+            Request::LookupCurrencies => to_value(&self.lookups.currencies().await?),
+            Request::LookupGeocode(p) => to_value(&self.lookups.geocode(&p.query).await?),
+            Request::LookupModels(p) => to_value(&self.lookups.models(&p.provider).await?),
+            Request::LookupChannels(p) => to_value(&self.lookups.channels(&p.ids).await?),
         }
     }
 
@@ -1010,6 +1022,7 @@ async fn config_poller(shared: Arc<Shared>, every: Duration, mut stop: watch::Re
                 if fp != last {
                     last = fp;
                     shared.views.notify_config(&dir);
+                    shared.lookups.invalidate_models();
                     let errors = shared.runner().map(Runner::reload_config).unwrap_or_default();
                     shared.publish(Notification::ConfigReloaded { errors });
                 }

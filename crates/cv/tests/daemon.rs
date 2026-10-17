@@ -1035,3 +1035,40 @@ async fn incremental_changes_invalidate_views_coalesced() {
     drop((c, sub));
     d.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lookup_models_round_trip_falls_back_to_declared() {
+    let env = Env::new();
+    let cfg = PathBuf::from(&env.vars["CV_CONFIG_DIR"]);
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("providers.toml"),
+        "[[provider]]\nid = \"local\"\nkind = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:1/v1\"\nmodels = [{ id = \"gemma-4\" }]\n",
+    )
+    .unwrap();
+    let d = start(&env).await;
+    let mut c = client(&env);
+    let v = c
+        .call(Request::LookupModels(cv_protocol::LookupModelsParams {
+            provider: "local".into(),
+        }))
+        .unwrap();
+    assert_eq!(v, json!({"models": [{"id": "gemma-4"}], "live": false}));
+    assert_eq!(
+        rpc_code(
+            c.call(Request::LookupModels(cv_protocol::LookupModelsParams {
+                provider: "missing".into(),
+            }))
+        ),
+        error_codes::NOT_FOUND
+    );
+    assert_eq!(
+        c.call(Request::LookupGeocode(cv_protocol::LookupGeocodeParams {
+            query: " ".into(),
+        }))
+        .unwrap(),
+        json!([])
+    );
+    drop(c);
+    d.shutdown().await.unwrap();
+}

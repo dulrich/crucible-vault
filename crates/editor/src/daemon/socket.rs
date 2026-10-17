@@ -313,6 +313,28 @@ impl DaemonClient for SocketDaemon {
         }))
     }
 
+    fn lookup_currencies(&self) -> Result<Vec<cv_protocol::LookupCurrency>> {
+        self.call_typed(Request::LookupCurrencies)
+    }
+
+    fn lookup_geocode(&self, query: &str) -> Result<Vec<cv_protocol::LookupGeoResult>> {
+        self.call_typed(Request::LookupGeocode(cv_protocol::LookupGeocodeParams {
+            query: query.to_owned(),
+        }))
+    }
+
+    fn lookup_models(&self, provider: &str) -> Result<cv_protocol::LookupModelsResult> {
+        self.call_typed(Request::LookupModels(cv_protocol::LookupModelsParams {
+            provider: provider.to_owned(),
+        }))
+    }
+
+    fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {
+        self.call_typed(Request::LookupChannels(cv_protocol::LookupChannelsParams {
+            ids: ids.to_vec(),
+        }))
+    }
+
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let (tx, rx) = mpsc::channel();
         *self

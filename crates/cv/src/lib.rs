@@ -9,6 +9,7 @@ pub mod cutover;
 pub mod daemon;
 pub mod import;
 pub mod jobs;
+pub mod lookup;
 pub mod runner;
 pub mod server;
 pub mod shadow;

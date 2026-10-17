@@ -132,6 +132,14 @@ pub enum Request {
     Status,
     ViewsList,
     ViewRun(ViewRunParams),
+    /// Frankfurter currency list (plan round-5-reading-pickers-intake WP-5) → `[LookupCurrency]`.
+    LookupCurrencies,
+    /// Open-Meteo place search → `[LookupGeoResult]`.
+    LookupGeocode(LookupGeocodeParams),
+    /// A provider's model list → [`LookupModelsResult`].
+    LookupModels(LookupModelsParams),
+    /// YouTube channel titles → `[LookupChannel]`.
+    LookupChannels(LookupChannelsParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,6 +544,62 @@ pub struct ViewRunParams {
 #[serde(transparent)]
 pub struct ViewResult(pub Value);
 
+/// One `lookup_currencies` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupCurrency {
+    pub code: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupGeocodeParams {
+    pub query: String,
+}
+
+/// One `lookup_geocode` hit: `label` is `City, CC`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LookupGeoResult {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin1: Option<String>,
+    pub country_code: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupModelsParams {
+    /// A `providers.toml` provider id.
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// `lookup_models` result: `live = false` means the provider was unreachable (or has no listing
+/// endpoint) and `models` are the ones declared in `providers.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupModelsResult {
+    pub models: Vec<LookupModel>,
+    pub live: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupChannelsParams {
+    pub ids: Vec<String>,
+}
+
+/// One `lookup_channels` entry (ids YouTube does not know are absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupChannel {
+    pub id: String,
+    pub title: String,
+}
+
 // ---------------------------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------------------------
@@ -645,7 +709,12 @@ mod tests {
 
     #[test]
     fn unit_requests_round_trip() {
-        for call in [Request::ActionsList, Request::Status, Request::ViewsList] {
+        for call in [
+            Request::ActionsList,
+            Request::Status,
+            Request::ViewsList,
+            Request::LookupCurrencies,
+        ] {
             round_trip(&RpcRequest::new(RpcId::Str("a".into()), call));
         }
     }
@@ -791,6 +860,53 @@ mod tests {
             }),
         };
         round_trip(&err);
+    }
+
+    #[test]
+    fn lookup_wire_shapes() {
+        let v = round_trip(&RpcRequest::new(
+            RpcId::Num(1),
+            Request::LookupModels(LookupModelsParams {
+                provider: "local".into(),
+            }),
+        ));
+        assert_eq!(v["method"], "lookup_models");
+        assert_eq!(v["params"], json!({"provider": "local"}));
+        round_trip(&RpcRequest::new(
+            RpcId::Num(2),
+            Request::LookupGeocode(LookupGeocodeParams {
+                query: "aus".into(),
+            }),
+        ));
+        round_trip(&RpcRequest::new(
+            RpcId::Num(3),
+            Request::LookupChannels(LookupChannelsParams {
+                ids: vec!["UC1".into()],
+            }),
+        ));
+        let r = round_trip(&LookupModelsResult {
+            models: vec![LookupModel {
+                id: "m".into(),
+                display_name: None,
+            }],
+            live: false,
+        });
+        assert_eq!(r, json!({"models": [{"id": "m"}], "live": false}));
+        round_trip(&vec![LookupGeoResult {
+            label: "Gotham, US".into(),
+            admin1: Some("Exampleland".into()),
+            country_code: "US".into(),
+            lat: 30.0,
+            lon: -100.0,
+        }]);
+        round_trip(&vec![LookupCurrency {
+            code: "EUR".into(),
+            name: "Euro".into(),
+        }]);
+        round_trip(&vec![LookupChannel {
+            id: "UC1".into(),
+            title: "T".into(),
+        }]);
     }
 
     #[test]

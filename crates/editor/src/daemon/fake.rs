@@ -22,7 +22,60 @@ use super::{
 pub type ActionHandler =
     Arc<dyn Fn(&RunActionParams) -> std::result::Result<Option<String>, String> + Send + Sync>;
 
+/// Canned lookup data (plan round-5-reading-pickers-intake WP-5). `fail = Some(msg)` makes every
+/// lookup return an RPC error with `msg`; a provider absent from `models` is `NotFound`.
+#[derive(Debug, Clone)]
+pub struct FakeLookups {
+    pub currencies: Vec<cv_protocol::LookupCurrency>,
+    pub places: Vec<cv_protocol::LookupGeoResult>,
+    pub models: BTreeMap<String, cv_protocol::LookupModelsResult>,
+    pub channels: BTreeMap<String, String>,
+    pub fail: Option<String>,
+}
+
+impl Default for FakeLookups {
+    fn default() -> Self {
+        use cv_protocol::{LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult};
+        let cur = |code: &str, name: &str| LookupCurrency {
+            code: code.to_owned(),
+            name: name.to_owned(),
+        };
+        let place = |label: &str, admin1: &str, cc: &str, lat: f64, lon: f64| LookupGeoResult {
+            label: label.to_owned(),
+            admin1: Some(admin1.to_owned()),
+            country_code: cc.to_owned(),
+            lat,
+            lon,
+        };
+        let model = |id: &str| LookupModel {
+            id: id.to_owned(),
+            display_name: None,
+        };
+        Self {
+            currencies: vec![
+                cur("EUR", "Euro"),
+                cur("MXN", "Mexican Peso"),
+                cur("USD", "United States Dollar"),
+            ],
+            places: vec![
+                place("Gotham, US", "Exampleland", "US", 40.000, -100.000),
+                place("Paris, FR", "Ile-de-France", "FR", 48.853, 2.349),
+            ],
+            models: BTreeMap::from([(
+                "local".to_owned(),
+                LookupModelsResult {
+                    models: vec![model("gemma-4"), model("bge-m3")],
+                    live: true,
+                },
+            )]),
+            channels: BTreeMap::from([("UCfake".to_owned(), "Fake Channel".to_owned())]),
+            fail: None,
+        }
+    }
+}
+
 struct Inner {
+    lookups: FakeLookups,
     index: Index,
     mode: Mode,
     subscriber: Option<(Vec<Topic>, Sender<Notification>)>,
@@ -80,6 +133,7 @@ impl FakeDaemon {
         };
         Ok(Self {
             inner: Mutex::new(Inner {
+                lookups: FakeLookups::default(),
                 index,
                 mode: Mode::Live,
                 subscriber: None,
@@ -165,6 +219,25 @@ impl FakeDaemon {
     /// WP-7: every `view_run` call so far, `(view_id, this_path)` in order.
     pub fn view_calls(&self) -> Result<Vec<(String, Option<String>)>> {
         Ok(self.lock()?.view_calls.clone())
+    }
+
+    /// WP-5: replaces the canned lookup data.
+    pub fn set_lookups(&self, lookups: FakeLookups) -> Result<()> {
+        self.lock()?.lookups = lookups;
+        Ok(())
+    }
+
+    /// The canned lookups, or the scripted failure.
+    fn lookups(&self) -> Result<FakeLookups> {
+        let l = self.lock()?.lookups.clone();
+        match &l.fail {
+            Some(msg) => Err(DaemonError::Rpc(cv_protocol::RpcError {
+                code: 1005,
+                message: msg.clone(),
+                data: None,
+            })),
+            None => Ok(l),
+        }
     }
 
     /// The current index generation.
@@ -496,6 +569,43 @@ impl DaemonClient for FakeDaemon {
             .ok_or_else(|| DaemonError::NotFound(view_id.to_owned()))
     }
 
+    fn lookup_currencies(&self) -> Result<Vec<cv_protocol::LookupCurrency>> {
+        Ok(self.lookups()?.currencies)
+    }
+
+    fn lookup_geocode(&self, query: &str) -> Result<Vec<cv_protocol::LookupGeoResult>> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .lookups()?
+            .places
+            .into_iter()
+            .filter(|p| p.label.to_lowercase().contains(&q))
+            .collect())
+    }
+
+    fn lookup_models(&self, provider: &str) -> Result<cv_protocol::LookupModelsResult> {
+        self.lookups()?
+            .models
+            .remove(provider)
+            .ok_or_else(|| DaemonError::NotFound(provider.to_owned()))
+    }
+
+    fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {
+        let l = self.lookups()?;
+        Ok(ids
+            .iter()
+            .filter_map(|id| {
+                l.channels.get(id).map(|t| cv_protocol::LookupChannel {
+                    id: id.clone(),
+                    title: t.clone(),
+                })
+            })
+            .collect())
+    }
+
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let (tx, rx) = mpsc::channel();
         self.lock()?.subscriber = Some((topics.to_vec(), tx));
@@ -512,5 +622,37 @@ impl DaemonClient for FakeDaemon {
 
     fn state_db(&self) -> &Path {
         &self.state_db
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookups_are_canned_and_scriptable() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let vault = tmp.path().join("v");
+        std::fs::create_dir_all(&vault).expect("mkdir");
+        let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
+        assert_eq!(d.lookup_currencies().expect("cur")[0].code, "EUR");
+        assert_eq!(d.lookup_geocode("got").expect("geo")[0].label, "Gotham, US");
+        assert!(d.lookup_models("local").expect("models").live);
+        assert!(matches!(
+            d.lookup_models("nope"),
+            Err(DaemonError::NotFound(_))
+        ));
+        let ch = d
+            .lookup_channels(&["UCfake".to_owned(), "UCx".to_owned()])
+            .expect("ch");
+        assert_eq!(ch.len(), 1);
+        d.set_lookups(FakeLookups {
+            fail: Some("model list unavailable".into()),
+            ..FakeLookups::default()
+        })
+        .expect("set");
+        assert!(
+            matches!(d.lookup_currencies(), Err(DaemonError::Rpc(e)) if e.message == "model list unavailable")
+        );
     }
 }
