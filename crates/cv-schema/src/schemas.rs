@@ -196,7 +196,7 @@ pub static MATERIALIZE: Record = Record {
             "folder",
             "Folder",
             "Per-step override of the period folder",
-            Node::Path,
+            Node::Folder,
         ),
         field(
             "format",
@@ -961,7 +961,7 @@ pub static SELECTOR: Record = Record {
             "folder",
             "Folder",
             "Folder prefix (no trailing slash)",
-            Node::Path,
+            Node::Folder,
         ),
         field("tag", "Tag", "Tag without #", Node::Str),
         field(
@@ -1190,7 +1190,7 @@ pub static KIND: Record = Record {
             "folder",
             "Folder",
             "Destination folder template for move { kind }",
-            Node::Str,
+            Node::Folder,
         ),
         field(
             "cleanup_transcript",
@@ -1229,7 +1229,7 @@ pub static KINDS_FILE: Record = Record {
 pub static PERIOD: Record = Record {
     name: "period",
     fields: &[
-        field("folder", "Folder", "Period notes folder", Node::Path).req(),
+        field("folder", "Folder", "Period notes folder", Node::Folder).req(),
         field(
             "format",
             "Format",
@@ -1841,7 +1841,7 @@ pub static PIPE_YOUTUBE: Record = Record {
             "metadata_root",
             "Metadata root",
             "Metadata note folder",
-            Node::Path,
+            Node::Folder,
         )
         .dflt(D::Str("_yt_metadata")),
         field(
@@ -1864,14 +1864,14 @@ pub static PIPE_X: Record = Record {
             "metadata_root",
             "Metadata root",
             "Metadata note folder",
-            Node::Path,
+            Node::Folder,
         )
         .dflt(D::Str("_x_metadata")),
         field(
             "inbox",
             "Inbox",
             "Clipper inbox folder x_discover watches",
-            Node::Path,
+            Node::Folder,
         ),
     ],
     rules: &[],

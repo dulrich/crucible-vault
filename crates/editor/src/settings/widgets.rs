@@ -9,11 +9,12 @@
 use iced::widget::{Space, button, column, container, pick_list, row, text, text_input, toggler};
 use iced::{Alignment, Element, Font, Length};
 
-use super::form::{Kind, Row};
-use super::{DocEdit, FormMsg, ScalarValue, SettingsMsg};
+use super::form::{ActiveTa, Kind, Row};
+use super::{DocEdit, FormMsg, ScalarValue, Settings, SettingsMsg, pickers};
 use crate::icons::Icon;
 use crate::message::Message;
 use crate::theme::{self, Tokens};
+use crate::widget::typeahead;
 
 /// Label column width.
 pub const LABEL_W: f32 = 220.0;
@@ -21,8 +22,6 @@ pub const LABEL_W: f32 = 220.0;
 pub const FIELD_W: f32 = 420.0;
 /// Indent per nesting level.
 pub const INDENT: f32 = 18.0;
-/// Vault-path suggestions shown under an active path field.
-pub const SUGGESTIONS: usize = 6;
 
 /// Render context.
 #[derive(Clone, Copy)]
@@ -32,13 +31,15 @@ pub struct Rcx<'a> {
     pub t: Tokens,
     /// The doc is editable (loaded, not saving).
     pub editable: bool,
-    /// Vault paths for path-field suggestions (the switcher's list).
+    /// Vault paths for path / folder typeaheads (the explorer's list).
     pub paths: &'a [String],
-    /// The path field currently showing suggestions.
-    pub active_path: Option<&'a cv_schema::Path>,
+    /// The settings model (picker candidates and labels, plan round-5 WP-4).
+    pub settings: &'a Settings,
+    /// The active typeahead, when it is on this file.
+    pub active: Option<&'a ActiveTa>,
 }
 
-impl Rcx<'_> {
+impl<'a> Rcx<'a> {
     fn edit(&self, e: DocEdit) -> Message {
         Message::Settings(SettingsMsg::Edit(self.file.to_owned(), e))
     }
@@ -49,6 +50,28 @@ impl Rcx<'_> {
 
     fn on<T>(&self, m: T) -> Option<T> {
         self.editable.then_some(m)
+    }
+
+    /// The active typeahead when it is the field at `path`.
+    fn active_at(&self, path: &cv_schema::Path) -> Option<&'a ActiveTa> {
+        self.active.filter(|a| a.path == *path)
+    }
+
+    /// The open typeahead list for the field at `path` (empty element when closed).
+    fn ta_list<'b>(
+        &self,
+        path: &cv_schema::Path,
+        pick: impl Fn(String) -> Message,
+    ) -> Option<Element<'b, Message>> {
+        let a = self.active_at(path).filter(|a| a.ta.open)?;
+        let visible = self.settings.ta_visible(self.paths);
+        Some(typeahead::list(
+            &visible,
+            a.ta.highlight,
+            &typeahead::Status::Ready,
+            pick,
+            self.t,
+        ))
     }
 }
 
@@ -114,11 +137,18 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
             value,
             placeholder,
             mono,
-            path_field,
+            picker,
             required,
         } => {
             let p2 = path.clone();
-            let mut input = text_input(&placeholder, &value)
+            let shown = match (picker, cx.active_at(&path)) {
+                (Some(_), Some(a)) => a.draft.clone(),
+                (Some(pk), None) => {
+                    pickers::label_of(cx.settings, pk, &value).unwrap_or(value.clone())
+                }
+                (None, _) => value.clone(),
+            };
+            let mut input = text_input(&placeholder, &shown)
                 .size(14)
                 .padding([8, 10])
                 .width(Length::Fixed(FIELD_W));
@@ -134,30 +164,44 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                             path: p2.clone(),
                             text,
                             required,
-                            path_field,
+                            picker,
                         },
                     ))
                 });
-            }
-            let mut control = column![input].spacing(2);
-            if path_field && cx.active_path == Some(&path) && !value.is_empty() {
-                let q = value.to_lowercase();
-                for s in cx
-                    .paths
-                    .iter()
-                    .filter(|p| p.to_lowercase().contains(&q) && **p != value)
-                    .take(SUGGESTIONS)
-                {
-                    control = control.push(
-                        button(text(s.clone()).size(13))
-                            .style(button::text)
-                            .padding([2, 10])
-                            .on_press_maybe(cx.on(cx.form(FormMsg::PickPath {
-                                path: path.clone(),
-                                text: s.clone(),
-                            }))),
-                    );
+                if picker.is_some() {
+                    input = input.on_submit(Message::Settings(SettingsMsg::Typeahead(
+                        typeahead::Key::Enter,
+                    )));
                 }
+            }
+            let field: Element<'a, Message> = if picker.is_some() {
+                let clear = (!value.is_empty())
+                    .then(|| {
+                        cx.on(cx.form(FormMsg::Clear {
+                            path: path.clone(),
+                            required,
+                        }))
+                    })
+                    .flatten();
+                row![input, typeahead::clear_button(clear, t)]
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+                    .into()
+            } else {
+                input.into()
+            };
+            let mut control = column![field].spacing(2);
+            let (file, p3) = (cx.file.to_owned(), path.clone());
+            if let Some(l) = cx.ta_list(&path, move |value| {
+                Message::Settings(SettingsMsg::Form(
+                    file.clone(),
+                    FormMsg::Pick {
+                        path: p3.clone(),
+                        value,
+                    },
+                ))
+            }) {
+                control = control.push(container(l).width(Length::Fixed(FIELD_W)));
             }
             row![label_col(r.label, r.help), control]
                 .spacing(8)
@@ -266,13 +310,18 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
             items,
             choices,
             draft,
+            picker,
         } => {
+            let chans = match picker {
+                Some(pickers::Picker::Channel) => pickers::channels(cx.settings),
+                _ => Vec::new(),
+            };
             let mut chips = row![].spacing(4).align_y(Alignment::Center);
             for (i, it) in items.iter().enumerate() {
                 chips = chips.push(
                     container(
                         row![
-                            text(it.clone()).size(13),
+                            text(pickers::channel_label(&chans, it)).size(13),
                             button(theme::icon_text(Icon::X).size(12))
                                 .style(button::text)
                                 .padding(2)
@@ -303,15 +352,34 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                                 FormMsg::ChipDraft {
                                     path: p2.clone(),
                                     text,
+                                    picker,
                                 },
                             ))
                         })
-                        .on_submit(cx.form(FormMsg::ChipAdd {
-                            path: path.clone(),
-                            value: None,
-                        }));
+                        .on_submit(if picker.is_some() {
+                            Message::Settings(SettingsMsg::Typeahead(typeahead::Key::Enter))
+                        } else {
+                            cx.form(FormMsg::ChipAdd {
+                                path: path.clone(),
+                                value: None,
+                            })
+                        });
                 }
-                input.into()
+                let (file, p3) = (cx.file.to_owned(), path.clone());
+                match cx.ta_list(&path, move |v| {
+                    Message::Settings(SettingsMsg::Form(
+                        file.clone(),
+                        FormMsg::ChipAdd {
+                            path: p3.clone(),
+                            value: Some(v),
+                        },
+                    ))
+                }) {
+                    Some(l) => column![input, container(l).width(Length::Fixed(FIELD_W))]
+                        .spacing(2)
+                        .into(),
+                    None => input.into(),
+                }
             } else {
                 let left: Vec<String> = choices
                     .iter()

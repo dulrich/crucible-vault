@@ -620,3 +620,40 @@ fn editor_open_url_cmd_list_and_default() {
         Some(node::Default::StrList(&["xdg-open"]))
     ));
 }
+
+/// Plan round-5 WP-4: folder-valued fields are `Node::Folder` (validated as strings).
+#[test]
+fn folder_fields_are_node_folder() {
+    let rec = |file: &str| -> &'static Record {
+        match *schema_for(file).unwrap() {
+            Node::Record(r) => r,
+            _ => panic!("record"),
+        }
+    };
+    let sub = |r: &'static Record, key: &str| -> &'static Record {
+        match r.field(key).unwrap().node {
+            Node::Record(r) => r,
+            Node::Map(Node::Record(r)) => r,
+            n => panic!("{key}: {n:?}"),
+        }
+    };
+    let pipes = rec("pipelines.toml");
+    assert_eq!(sub(pipes, "x").field("inbox").unwrap().node, Node::Folder);
+    assert_eq!(
+        sub(pipes, "x").field("metadata_root").unwrap().node,
+        Node::Folder
+    );
+    assert_eq!(
+        sub(pipes, "youtube").field("metadata_root").unwrap().node,
+        Node::Folder
+    );
+    let periods = sub(sub(rec("captures.toml"), "periods"), "day");
+    assert_eq!(periods.field("folder").unwrap().node, Node::Folder);
+    let kind = sub(rec("kinds.toml"), "kinds");
+    assert_eq!(kind.field("folder").unwrap().node, Node::Folder);
+    assert_eq!(
+        errs("[x]\ninbox = 3\n", "pipelines.toml"),
+        vec!["x.inbox: must be a string".to_owned()]
+    );
+    assert!(errs("[x]\ninbox = \"Clippings\"\n", "pipelines.toml").is_empty());
+}

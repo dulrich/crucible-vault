@@ -391,7 +391,7 @@ fn empty_optional_text_removes_the_key_required_keeps_it() {
             path: p("action[0].title"),
             text: String::new(),
             required: false,
-            path_field: false,
+            picker: None,
         },
     );
     assert!(!doc_text(&st, ACTIONS).contains("title"));
@@ -401,7 +401,7 @@ fn empty_optional_text_removes_the_key_required_keeps_it() {
             path: p("action[0].id"),
             text: String::new(),
             required: true,
-            path_field: false,
+            picker: None,
         },
     );
     assert!(doc_text(&st, ACTIONS).contains("id = \"\""));
@@ -417,6 +417,7 @@ fn chips_add_and_remove() {
         FormMsg::ChipDraft {
             path: at.clone(),
             text: " b ".into(),
+            picker: None,
         },
     );
     st.form_msg(
@@ -444,42 +445,212 @@ fn chips_add_and_remove() {
 }
 
 #[test]
-fn path_field_offers_suggestions_and_pick_sets_it() {
+fn path_field_typeahead_picks_and_escape_restores() {
+    use crate::widget::typeahead::Key;
     let mut st = loaded(
         BOOKMARKS_PATH,
         "[[bookmark]]\nname = \"n\"\npath = \"a.md\"\n",
     );
+    let paths = vec!["notes/x.md".to_owned(), "a.md".to_owned()];
+    let at = p("bookmark[0].path");
+    let typed = |st: &mut Settings, t: &str| {
+        st.form_msg_paths(
+            BOOKMARKS_PATH,
+            FormMsg::Text {
+                path: at.clone(),
+                text: t.into(),
+                required: true,
+                picker: Some(form::Picker::Path),
+            },
+            &paths,
+        );
+    };
     st.form_msg(BOOKMARKS_PATH, FormMsg::Toggle(p("bookmark[0]")));
-    st.form_msg(
-        BOOKMARKS_PATH,
-        FormMsg::Text {
-            path: p("bookmark[0].path"),
-            text: "note".into(),
-            required: true,
-            path_field: true,
-        },
-    );
-    assert_eq!(
-        st.form.active_path,
-        Some((BOOKMARKS_PATH.to_owned(), p("bookmark[0].path")))
-    );
     let rows = rows_of(&st, BOOKMARKS_PATH);
     assert!(rows.iter().any(|r| matches!(
         &r.kind,
         Kind::Text {
-            path_field: true,
+            picker: Some(form::Picker::Path),
             ..
         }
     )));
+    // Typing is a query: nothing written; Escape on an invalid text restores the committed.
+    typed(&mut st, "zzz");
+    assert!(st.form.typeahead.as_ref().is_some_and(|a| a.ta.open));
+    assert!(doc_text(&st, BOOKMARKS_PATH).contains("path = \"a.md\""));
+    st.typeahead_key(Key::Escape, &paths);
+    assert!(st.form.typeahead.is_none());
+    assert!(doc_text(&st, BOOKMARKS_PATH).contains("path = \"a.md\""));
+    // Enter picks the highlighted candidate.
+    typed(&mut st, "notx");
+    assert_eq!(st.ta_visible(&paths)[0].value, "notes/x.md");
+    st.typeahead_key(Key::Enter, &paths);
+    assert!(doc_text(&st, BOOKMARKS_PATH).contains("path = \"notes/x.md\""));
+    // Click picks; `x` clears.
+    st.form_msg_paths(
+        BOOKMARKS_PATH,
+        FormMsg::Pick {
+            path: at.clone(),
+            value: "a.md".into(),
+        },
+        &paths,
+    );
+    assert!(doc_text(&st, BOOKMARKS_PATH).contains("path = \"a.md\""));
     st.form_msg(
         BOOKMARKS_PATH,
-        FormMsg::PickPath {
-            path: p("bookmark[0].path"),
-            text: "notes/x.md".into(),
+        FormMsg::Clear {
+            path: at.clone(),
+            required: true,
         },
     );
-    assert!(st.form.active_path.is_none());
-    assert!(doc_text(&st, BOOKMARKS_PATH).contains("path = \"notes/x.md\""));
+    assert!(doc_text(&st, BOOKMARKS_PATH).contains("path = \"\""));
+}
+
+#[test]
+fn typeahead_widget_contract() {
+    use crate::widget::typeahead::{Candidate, Key, Outcome, Typeahead, filter};
+    let cands = vec![
+        Candidate::plain("alpha"),
+        Candidate::plain("beta"),
+        Candidate::plain("alphabet"),
+    ];
+    let mut ta = Typeahead::begin("beta");
+    ta.typed();
+    let vis = filter("alp", &cands, 8);
+    assert_eq!(vis.len(), 2);
+    assert_eq!(
+        ta.key(Key::Escape, "alp", &vis, false),
+        Outcome::Restore("beta".into())
+    );
+    assert!(!ta.open);
+    ta.typed();
+    assert_eq!(ta.key(Key::Escape, "alpha", &vis, true), Outcome::None);
+    assert_eq!(ta.committed, "alpha");
+    ta.typed();
+    ta.key(Key::Down, "alp", &vis, false);
+    assert_eq!(
+        ta.key(Key::Enter, "alp", &vis, false),
+        Outcome::Commit(vis[1].value.clone())
+    );
+    assert_eq!(ta.pick("beta"), Outcome::Commit("beta".into()));
+    assert_eq!(ta.clear(), Outcome::Commit(String::new()));
+    assert_eq!(ta.committed, "");
+    // Enter with nothing visible commits the typed text (explicit free text).
+    ta.typed();
+    assert_eq!(
+        ta.key(Key::Enter, "custom", &[], false),
+        Outcome::Commit("custom".into())
+    );
+}
+
+#[test]
+fn folder_field_offers_folders() {
+    let mut st = loaded(
+        "_custom/crucible-vault/captures.toml",
+        "[periods.day]\nfolder = \"journal\"\n",
+    );
+    st.section = Section::Captures;
+    let paths = vec!["journal/2026/a.md".to_owned(), "notes/b.md".to_owned()];
+    let at = p("periods.day.folder");
+    let picker = pickers::for_field(
+        "_custom/crucible-vault/captures.toml",
+        &at,
+        &cv_schema::Node::Folder,
+    );
+    assert_eq!(picker, Some(form::Picker::Folder));
+    st.form_msg_paths(
+        "_custom/crucible-vault/captures.toml",
+        FormMsg::Text {
+            path: at,
+            text: "jour".into(),
+            required: true,
+            picker,
+        },
+        &paths,
+    );
+    let vals: Vec<String> = st.ta_visible(&paths).into_iter().map(|c| c.value).collect();
+    assert!(vals.contains(&"journal".to_owned()));
+    assert!(vals.contains(&"journal/2026".to_owned()));
+    assert!(!vals.iter().any(|v| v.ends_with(".md")));
+}
+
+#[test]
+fn provider_shows_name_and_stores_id() {
+    use crate::widget::typeahead::Key;
+    const PIPES: &str = "_custom/crucible-vault/pipelines.toml";
+    let mut st = loaded(
+        "_custom/crucible-vault/providers.toml",
+        "[[provider]]\nid = \"oai\"\nkind = \"openai-compatible\"\nname = \"OpenAI\"\n\n[[provider.models]]\nid = \"gpt-x\"\n\n[[provider]]\nid = \"local\"\nkind = \"ollama\"\n",
+    );
+    let f = ConfigFile::new(PIPES, cv_schema::schema_for("pipelines.toml"));
+    st.files.insert(PIPES.to_owned(), f);
+    st.file_mut(PIPES).expect("pipes").apply_read(Ok((
+        b"[image_describe]\n".to_vec(),
+        ContentHash::from_hex("00"),
+    )));
+    let labels: Vec<(String, String)> = pickers::providers(&st)
+        .into_iter()
+        .map(|c| (c.label, c.value))
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            ("OpenAI".to_owned(), "oai".to_owned()),
+            ("local".to_owned(), "local".to_owned())
+        ]
+    );
+    let at = p("image_describe.provider");
+    let picker = pickers::for_field(PIPES, &at, &cv_schema::Node::Str);
+    assert_eq!(picker, Some(form::Picker::Provider));
+    st.form_msg(
+        PIPES,
+        FormMsg::Text {
+            path: at,
+            text: "open".into(),
+            required: false,
+            picker,
+        },
+    );
+    st.typeahead_key(Key::Enter, &[]);
+    assert!(doc_text(&st, PIPES).contains("provider = \"oai\""));
+    assert_eq!(
+        pickers::label_of(&st, form::Picker::Provider, "oai").as_deref(),
+        Some("OpenAI")
+    );
+    // The model picker lists the provider's declared models, labelled "declared".
+    let models = pickers::declared_models(&st, Some("oai"));
+    assert_eq!(models.len(), 1);
+    assert_eq!(
+        (models[0].value.as_str(), models[0].secondary.as_str()),
+        ("gpt-x", "declared")
+    );
+}
+
+#[test]
+fn ignore_shorts_channel_chips_label_and_summary() {
+    let st = loaded(
+        "_custom/crucible-vault/sources.toml",
+        "[[youtube]]\nchannel = \"Chan\"\nid = \"UC123\"\n",
+    );
+    let chans = pickers::channels(&st);
+    assert_eq!(pickers::channel_label(&chans, "UC123"), "Chan (UC123)");
+    assert_eq!(pickers::channel_label(&chans, "Free Name"), "Free Name");
+    assert_eq!(
+        pickers::for_field(
+            "_custom/crucible-vault/pipelines.toml",
+            &p("ignore_shorts.channels"),
+            &cv_schema::Node::StrList {
+                scalar_ok: false,
+                choices: &[]
+            }
+        ),
+        Some(form::Picker::Channel)
+    );
+    let rows = rows_of(&st, "_custom/crucible-vault/sources.toml");
+    assert!(rows.iter().any(|r| matches!(
+        &r.kind,
+        Kind::Item { summary, .. } if summary == "Chan"
+    )));
 }
 
 #[test]
@@ -550,7 +721,7 @@ fn form_edit_round_trip_keeps_comment_and_unknown_key_in_saved_text() {
             path: p("action[0].title"),
             text: "Tidy up".into(),
             required: false,
-            path_field: false,
+            picker: None,
         },
     )));
     let _ = app.update(s(SettingsMsg::Save(ACTIONS.into())));

@@ -29,6 +29,9 @@ pub enum Node {
     Chords,
     /// A vault-relative path string (or path template).
     Path,
+    /// A vault-relative folder path string (a directory; no trailing slash), or a folder
+    /// template. Validates like [`Node::Path`]; forms offer vault folders.
+    Folder,
     /// A Bases expression string (edited as text, never evaluated here).
     Expr,
     /// A views filter tree: an expression string, or a table with one of `and`/`or`/`not` holding

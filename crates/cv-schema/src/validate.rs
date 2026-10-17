@@ -65,7 +65,7 @@ pub(crate) fn list_elems(it: &Item) -> Option<Vec<&Item>> {
 #[allow(clippy::cast_precision_loss)]
 fn check(it: &Item, node: &Node, at: &Path, out: &mut Vec<FieldError>) {
     match *node {
-        Node::Str | Node::Path | Node::Expr => {
+        Node::Str | Node::Path | Node::Folder | Node::Expr => {
             if it.as_str().is_none() {
                 err(out, at, "must be a string");
             }

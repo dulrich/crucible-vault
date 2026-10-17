@@ -47,6 +47,7 @@
 pub mod editor_prefs;
 pub mod form;
 pub mod pages;
+pub mod pickers;
 pub mod status;
 pub mod widgets;
 
@@ -688,9 +689,193 @@ impl Settings {
         Ok(())
     }
 
-    /// A form UI message on `file` (drafts, expansion, typed input that may edit the doc).
+    /// A form UI message on `file` (drafts, expansion, typed input that may edit the doc),
+    /// with no vault path list (path / folder typeaheads see no candidates).
     pub fn form_msg(&mut self, file: &str, m: FormMsg) {
+        self.form_msg_paths(file, m, &[]);
+    }
+
+    /// The active typeahead's typed text.
+    fn ta_text(&self, a: &form::ActiveTa) -> String {
+        if a.chips {
+            self.form
+                .draft(&a.file, &form::draft_key("chip", &a.path))
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            a.draft.clone()
+        }
+    }
+
+    /// The stored text value at `(file, path)` (`""` when absent).
+    fn stored_str(&self, file: &str, path: &cv_schema::Path) -> String {
+        self.file(file)
+            .and_then(|f| f.doc.as_ref())
+            .and_then(|d| d.get_str(path))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The visible candidates of the active typeahead (plan round-5 WP-4).
+    pub fn ta_visible(&self, paths: &[String]) -> Vec<crate::widget::typeahead::Candidate> {
+        self.form.typeahead.as_ref().map_or_else(Vec::new, |a| {
+            pickers::visible(self, a.picker, &a.file, &a.path, paths, &self.ta_text(a))
+        })
+    }
+
+    /// A key on the active typeahead (Up/Down/Enter/Escape; Escape doubles as blur).
+    pub fn typeahead_key(&mut self, key: crate::widget::typeahead::Key, paths: &[String]) {
+        let Some(mut a) = self.form.typeahead.take() else {
+            return;
+        };
+        let text = self.ta_text(&a);
+        let visible = pickers::visible(self, a.picker, &a.file, &a.path, paths, &text);
+        let valid = pickers::is_valid(self, a.picker, &a.file, &a.path, paths, &text);
+        let out = a.ta.key(key, &text, &visible, valid);
+        let close = !a.ta.open;
+        self.apply_ta(&mut a, out, &text);
+        if !close {
+            self.form.typeahead = Some(a);
+        }
+    }
+
+    /// Closes the active typeahead as a blur (Escape semantics), when it is not `(file, path)`.
+    fn blur_other(&mut self, file: &str, path: &cv_schema::Path, paths: &[String]) {
+        if self
+            .form
+            .typeahead
+            .as_ref()
+            .is_some_and(|a| !a.is(file, path))
+        {
+            self.typeahead_key(crate::widget::typeahead::Key::Escape, paths);
+            self.form.typeahead = None;
+        }
+    }
+
+    /// Writes a typeahead outcome.
+    fn apply_ta(
+        &mut self,
+        a: &mut form::ActiveTa,
+        out: crate::widget::typeahead::Outcome,
+        text: &str,
+    ) {
+        use crate::widget::typeahead::Outcome;
+        let file = a.file.clone();
+        if a.chips {
+            let key = form::draft_key("chip", &a.path);
+            match out {
+                Outcome::Commit(v) => {
+                    a.ta.committed.clear();
+                    self.form_msg(
+                        &file,
+                        FormMsg::ChipAdd {
+                            path: a.path.clone(),
+                            value: Some(v),
+                        },
+                    );
+                }
+                Outcome::Restore(_) => self.form.set_draft(&file, key, None),
+                Outcome::None => {
+                    if !a.ta.open && !text.is_empty() {
+                        // A valid typed id: add it as a chip.
+                        a.ta.committed.clear();
+                        self.form_msg(
+                            &file,
+                            FormMsg::ChipAdd {
+                                path: a.path.clone(),
+                                value: None,
+                            },
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        let v = match out {
+            Outcome::Commit(v) | Outcome::Restore(v) => v,
+            Outcome::None if !a.ta.open => text.to_owned(),
+            Outcome::None => return,
+        };
+        a.draft.clone_from(&v);
+        if self.stored_str(&file, &a.path) != v {
+            let e = text_edit(&self.files, &file, a.path.clone(), v, a.required);
+            let _ = self.edit(&file, &e);
+        }
+    }
+
+    /// [`Self::form_msg`] with the vault path list (path / folder typeahead candidates).
+    pub fn form_msg_paths(&mut self, file: &str, m: FormMsg, paths: &[String]) {
         use form::draft_key;
+        match &m {
+            FormMsg::Text {
+                path,
+                text,
+                required,
+                picker: Some(picker),
+            } => {
+                self.blur_other(file, path, paths);
+                let stored = self.stored_str(file, path);
+                let a = self.form.typeahead.get_or_insert_with(|| form::ActiveTa {
+                    file: file.to_owned(),
+                    path: path.clone(),
+                    picker: *picker,
+                    chips: false,
+                    required: *required,
+                    draft: String::new(),
+                    ta: crate::widget::typeahead::Typeahead::begin(stored),
+                });
+                a.draft.clone_from(text);
+                a.ta.typed();
+                return;
+            }
+            FormMsg::ChipDraft {
+                path,
+                text,
+                picker: Some(picker),
+            } => {
+                self.blur_other(file, path, paths);
+                let a = self.form.typeahead.get_or_insert_with(|| form::ActiveTa {
+                    file: file.to_owned(),
+                    path: path.clone(),
+                    picker: *picker,
+                    chips: true,
+                    required: false,
+                    draft: String::new(),
+                    ta: crate::widget::typeahead::Typeahead::begin(""),
+                });
+                a.ta.typed();
+                self.form
+                    .set_draft(file, draft_key("chip", path), Some(text.clone()));
+                return;
+            }
+            FormMsg::Pick { path, value } => {
+                self.blur_other(file, path, paths);
+                let mut a = self
+                    .form
+                    .typeahead
+                    .take()
+                    .unwrap_or_else(|| form::ActiveTa {
+                        file: file.to_owned(),
+                        path: path.clone(),
+                        picker: form::Picker::Path,
+                        chips: false,
+                        required: false,
+                        draft: String::new(),
+                        ta: crate::widget::typeahead::Typeahead::default(),
+                    });
+                let out = a.ta.pick(value.clone());
+                self.apply_ta(&mut a, out, value);
+                return;
+            }
+            FormMsg::Clear { path, required } => {
+                self.blur_other(file, path, paths);
+                self.form.typeahead = None;
+                let e = text_edit(&self.files, file, path.clone(), String::new(), *required);
+                let _ = self.edit(file, &e);
+                return;
+            }
+            _ => {}
+        }
         let fs = &mut self.form;
         let edit = match m {
             FormMsg::Toggle(p) => {
@@ -701,17 +886,9 @@ impl Settings {
                 path,
                 text,
                 required,
-                path_field,
-            } => {
-                if path_field {
-                    fs.active_path = Some((file.to_owned(), path.clone()));
-                }
-                Some(text_edit(&self.files, file, path, text, required))
-            }
-            FormMsg::PickPath { path, text } => {
-                fs.active_path = None;
-                Some(DocEdit::Set(path, ScalarValue::Str(text)))
-            }
+                ..
+            } => Some(text_edit(&self.files, file, path, text, required)),
+            FormMsg::Pick { .. } | FormMsg::Clear { .. } => None,
             FormMsg::Number { path, text, float } => {
                 let key = draft_key("num", &path);
                 fs.set_draft(file, key, Some(text.clone()));
@@ -729,7 +906,7 @@ impl Settings {
                     })
                 }
             }
-            FormMsg::ChipDraft { path, text } => {
+            FormMsg::ChipDraft { path, text, .. } => {
                 fs.set_draft(file, draft_key("chip", &path), Some(text));
                 None
             }
@@ -894,6 +1071,27 @@ fn text_edit(
     }
 }
 
+/// Plan round-5 WP-4: the active typeahead's keys — Up/Down, and Escape whether or not the
+/// focused input captured it (a captured Escape also unfocuses: blur = Escape).
+pub fn typeahead_key_event(
+    ev: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    use crate::widget::typeahead::Key as K;
+    use iced::keyboard::{self, Key, key::Named};
+    let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) = ev else {
+        return None;
+    };
+    let k = match key.as_ref() {
+        Key::Named(Named::ArrowUp) => K::Up,
+        Key::Named(Named::ArrowDown) => K::Down,
+        Key::Named(Named::Escape) => K::Escape,
+        _ => return None,
+    };
+    Some(Message::Settings(SettingsMsg::Typeahead(k)))
+}
+
 /// Form UI messages (typing, expansion); see [`Settings::form_msg`].
 #[derive(Debug, Clone)]
 pub enum FormMsg {
@@ -904,12 +1102,18 @@ pub enum FormMsg {
         path: cv_schema::Path,
         text: String,
         required: bool,
-        path_field: bool,
+        /// A typeahead field: the text is a query, written on commit (plan round-5 WP-4).
+        picker: Option<form::Picker>,
     },
-    /// A vault-path suggestion was picked.
-    PickPath {
+    /// A typeahead candidate was clicked: store `value`.
+    Pick {
         path: cv_schema::Path,
-        text: String,
+        value: String,
+    },
+    /// A typeahead field's `x`: clear the committed value.
+    Clear {
+        path: cv_schema::Path,
+        required: bool,
     },
     /// A number field changed (applied when it parses).
     Number {
@@ -920,6 +1124,8 @@ pub enum FormMsg {
     ChipDraft {
         path: cv_schema::Path,
         text: String,
+        /// A typeahead chips field (plan round-5 WP-4).
+        picker: Option<form::Picker>,
     },
     /// Add a chip (`None`: the draft).
     ChipAdd {
@@ -953,6 +1159,8 @@ pub enum FormMsg {
 pub enum SettingsMsg {
     /// Open (or focus) the Settings tab (Ctrl+,).
     Open,
+    /// Plan round-5 WP-4: a key for the active form typeahead.
+    Typeahead(crate::widget::typeahead::Key),
     /// Select a rail section.
     Section(Section),
     /// Plan round-5 WP-1: a section's body scrolled to vertical offset `.1` (px).

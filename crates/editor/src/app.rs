@@ -4216,8 +4216,11 @@ impl App {
                     self.apply_prefs();
                 }
             }
+            SettingsMsg::Typeahead(k) => {
+                self.settings.typeahead_key(k, &self.explorer.paths);
+            }
             SettingsMsg::Form(path, m) => {
-                self.settings.form_msg(&path, m);
+                self.settings.form_msg_paths(&path, m, &self.explorer.paths);
                 if path == EDITOR_PATH {
                     self.apply_prefs();
                 }
@@ -4328,6 +4331,12 @@ impl App {
                 Subscription::none()
             },
             iced::keyboard::listen().filter_map(switcher::key_event),
+            // plan round-5 WP-4: Up/Down/Escape (captured or not) for an open form typeahead.
+            if self.settings.form.typeahead.is_some() && !self.switcher.open {
+                iced::event::listen_with(crate::settings::typeahead_key_event)
+            } else {
+                Subscription::none()
+            },
             iced::keyboard::listen().filter_map(|e| crate::dialog::key_event(&e)),
             self.reading.subscription(),
             crate::palette::subscription(&self.palette, self.panels.visible),

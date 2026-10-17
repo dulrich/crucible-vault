@@ -54,13 +54,8 @@ pub fn rcx<'a>(cx: PageCx<'a>, f: &'a ConfigFile) -> Rcx<'a> {
         t: cx.t,
         editable: f.doc.is_some() && !f.saving,
         paths: cx.paths,
-        active_path: cx
-            .s
-            .form
-            .active_path
-            .as_ref()
-            .filter(|(fl, _)| *fl == f.path)
-            .map(|(_, p)| p),
+        settings: cx.s,
+        active: cx.s.form.typeahead.as_ref().filter(|a| a.file == f.path),
     }
 }
 

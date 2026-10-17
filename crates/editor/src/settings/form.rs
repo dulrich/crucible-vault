@@ -16,9 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use cv_schema::toml_edit::{Item, Value};
 use cv_schema::{ConfigDoc, Default as Dflt, FieldError, Node, Path, Record, Seg, Union};
 
+pub use super::pickers::Picker;
+use crate::widget::typeahead::Typeahead;
+
 /// Keys a summary row reads, in preference order.
-const SUMMARY_KEYS: [&str; 9] = [
-    "id", "name", "label", "key", "action", "agent", "path", "folder", "file",
+const SUMMARY_KEYS: [&str; 10] = [
+    "channel", "id", "name", "label", "key", "action", "agent", "path", "folder", "file",
 ];
 
 /// Transient form UI state (never written to a file). Keyed by vault path of the file.
@@ -28,8 +31,29 @@ pub struct FormState {
     pub expanded: BTreeSet<(String, Path)>,
     /// Typing drafts, by `(file, draft key)` (see [`draft_key`]).
     pub drafts: BTreeMap<(String, String), String>,
-    /// The path field currently offering vault-path suggestions.
-    pub active_path: Option<(String, Path)>,
+    /// The field whose typeahead is active (plan round-5 WP-4).
+    pub typeahead: Option<ActiveTa>,
+}
+
+/// The active typeahead field: its file, path, picker, typed text and widget state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveTa {
+    pub file: String,
+    pub path: Path,
+    pub picker: Picker,
+    /// A chips field (the typed text is the chip draft; commits add a chip).
+    pub chips: bool,
+    pub required: bool,
+    /// The typed text (text fields; chips use their chip draft).
+    pub draft: String,
+    pub ta: Typeahead,
+}
+
+impl ActiveTa {
+    /// Whether this is the field at `(file, path)`.
+    pub fn is(&self, file: &str, path: &Path) -> bool {
+        self.file == file && self.path == *path
+    }
 }
 
 /// The draft key of a widget kind at a path (`num:action[0].x`).
@@ -74,8 +98,8 @@ impl FormState {
     /// Drops every draft of `file` (a reload, or a structural edit that shifts paths).
     pub fn clear_drafts(&mut self, file: &str) {
         self.drafts.retain(|(f, _), _| f != file);
-        if self.active_path.as_ref().is_some_and(|(f, _)| f == file) {
-            self.active_path = None;
+        if self.typeahead.as_ref().is_some_and(|a| a.file == file) {
+            self.typeahead = None;
         }
     }
 
@@ -122,7 +146,9 @@ impl NewValue {
             Node::Bool => Self::Bool,
             Node::Int { .. } | Node::Float { .. } => Self::Int,
             Node::StrList { .. } | Node::Chords | Node::List(_) => Self::List,
-            Node::Str | Node::Path | Node::Expr | Node::Enum(_) | Node::Filter => Self::Str,
+            Node::Str | Node::Path | Node::Folder | Node::Expr | Node::Enum(_) | Node::Filter => {
+                Self::Str
+            }
             Node::FreeTable | Node::Map(_) | Node::Record(_) | Node::Union(_) => Self::Table,
         }
     }
@@ -145,13 +171,13 @@ impl NewValue {
 pub enum Kind {
     /// A section heading (nested record / list / map).
     Heading,
-    /// A single-line text field. `path_field`: offers vault-path suggestions; `mono`:
+    /// A single-line text field. `picker`: a typeahead source (WP-4); `mono`:
     /// expression (monospace, never evaluated).
     Text {
         value: String,
         placeholder: String,
         mono: bool,
-        path_field: bool,
+        picker: Option<Picker>,
         required: bool,
     },
     Toggle {
@@ -174,6 +200,8 @@ pub enum Kind {
         items: Vec<String>,
         choices: &'static [&'static str],
         draft: String,
+        /// A typeahead source for the adder (WP-4; chips then show picker labels).
+        picker: Option<Picker>,
     },
     /// A value the form does not render: its TOML text, read-only.
     ReadOnly {
@@ -406,7 +434,7 @@ fn node_rows(
             map_rows(cx, p, inner, depth + 1, out);
         }
         Node::FreeTable => read_only(cx, p, leaf, depth, out),
-        Node::Str | Node::Path | Node::Expr | Node::Filter => {
+        Node::Str | Node::Path | Node::Folder | Node::Expr | Node::Filter => {
             let value = match item {
                 None => String::new(),
                 Some(i) => match i.as_str() {
@@ -424,7 +452,7 @@ fn node_rows(
                     value,
                     placeholder: dflt_text(leaf.default),
                     mono: matches!(node, Node::Expr | Node::Filter),
-                    path_field: matches!(node, Node::Path),
+                    picker: super::pickers::for_field(cx.file, p, node),
                     required: leaf.required,
                 },
             ));
@@ -525,6 +553,7 @@ fn node_rows(
                     items,
                     choices,
                     draft,
+                    picker: super::pickers::for_field(cx.file, p, node),
                 },
             ));
         }
