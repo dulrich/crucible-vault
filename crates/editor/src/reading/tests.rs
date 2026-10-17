@@ -583,3 +583,128 @@ fn page_delta_keeps_one_line_of_overlap() {
     assert!((crate::page::page_delta(500.0, false) + (500.0 - line)).abs() < f32::EPSILON);
     assert!(crate::page::page_delta(10.0, true) > 0.0);
 }
+
+// ---- plan editor-round-4 WP-3: Reading find over visible text ----
+
+/// Opens `p` (body `body`) in `mode`, rendered, with the find bar searching `q`.
+fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir, App) {
+    use crate::message::FindMsg;
+    let (t, d) = setup(&[(p, body)]);
+    let mut app = app_on(&d, p);
+    reading(&mut app, p, mode);
+    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    assert!(app.reading.doc(p).is_some(), "rendered");
+    let _ = app.update(Message::Find(FindMsg::Open));
+    let _ = app.update(Message::Find(FindMsg::Query(q.into())));
+    (t, app)
+}
+
+fn bar(app: &App) -> crate::find::FindBar {
+    app.panes
+        .get(app.focus)
+        .and_then(|ps| ps.find.clone())
+        .expect("find bar")
+}
+
+#[test]
+fn code_span_and_link_labels_are_visible_text() {
+    let m =
+        render::lower("a `foo` b [[t|foo]] [foo](https://foo.example) #foo\n\n```foo\nfoo\n```\n");
+    let segs = visible_segments(&m.blocks[0]);
+    assert!(segs.iter().any(|s| s == "foo"), "code span: {segs:?}");
+    assert!(segs.iter().any(|s| s == "#foo"), "tag: {segs:?}");
+    assert!(
+        !segs.iter().any(|s| s.contains("example")),
+        "no URL: {segs:?}"
+    );
+    // code span, alias, link label, tag; code block: text only (not the `foo` info string).
+    assert_eq!(
+        visible_occurrences(&m, "foo"),
+        vec![(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]
+    );
+}
+
+#[test]
+fn reading_code_span_match_is_counted_and_painted() {
+    let p = "r4/code.md";
+    let (_t, app) = find_on(p, b"run `cargo foo` now\n", ViewMode::Reading, "foo");
+    assert_eq!(bar(&app).count(), "1/1");
+    assert_eq!(app.reading.find_active(p), Some((0, 0)));
+    drop(app.view());
+}
+
+#[test]
+fn reading_url_only_query_counts_zero() {
+    let p = "r4/url.md";
+    let (_t, app) = find_on(
+        p,
+        b"see [label](https://zzz.example/x) and [[target|alias]]\n",
+        ViewMode::Reading,
+        "zzz",
+    );
+    assert_eq!(bar(&app).count(), "0/0");
+    assert_eq!(app.reading.find_active(p), None);
+    let (_t2, app2) = find_on(p, b"see [[target|alias]]\n", ViewMode::Reading, "target");
+    assert_eq!(
+        bar(&app2).count(),
+        "0/0",
+        "an aliased wiki-link target is hidden"
+    );
+}
+
+#[test]
+fn reading_next_steps_over_visible_occurrences() {
+    use crate::message::FindMsg;
+    let p = "r4/next.md";
+    let (_t, mut app) = find_on(
+        p,
+        b"[x](https://foo.example) foo\n\nmid\n\nfoo `foo`\n",
+        ViewMode::Reading,
+        "foo",
+    );
+    assert_eq!(bar(&app).count(), "1/3");
+    assert_eq!(app.reading.find_active(p), Some((0, 0)));
+    let _ = app.update(Message::Find(FindMsg::Next));
+    assert_eq!(app.reading.find_active(p), Some((2, 0)));
+    assert_eq!(app.reading.top_block(p), Some(2), "scrolled to its block");
+    let _ = app.update(Message::Find(FindMsg::Next));
+    assert_eq!(app.reading.find_active(p), Some((2, 1)));
+    let _ = app.update(Message::Find(FindMsg::Next));
+    assert_eq!(app.reading.find_active(p), Some((0, 0)), "wraps");
+    drop(app.view());
+}
+
+#[test]
+fn split_active_match_inside_url_has_no_strong_occurrence() {
+    use crate::message::FindMsg;
+    let p = "r4/split.md";
+    let (_t, mut app) = find_on(p, b"[x](https://foo.example) foo\n", ViewMode::Split, "foo");
+    // Source drives the bar: the cursor sits at 0, so the URL match is current.
+    assert_eq!(bar(&app).count(), "1/2");
+    assert_eq!(
+        app.reading.find_active(p),
+        None,
+        "invisible: nothing strong"
+    );
+    let _ = app.update(Message::Find(FindMsg::Next));
+    assert_eq!(
+        app.reading.find_active(p),
+        Some((0, 0)),
+        "the visible match after an invisible one is the block's first occurrence"
+    );
+    drop(app.view());
+}
+
+#[test]
+fn source_counterpart_skips_invisible_matches() {
+    let text = "intro\n\n[[foo|x]] ![[foo.png]] [a](foo) foo `foo`\n";
+    let m = render::lower(text);
+    let ms = editor_model::find::matches(text, "foo");
+    assert_eq!(ms.len(), 5);
+    let got: Vec<_> = ms
+        .iter()
+        .map(|r| source_counterpart(&m, text, "foo", r))
+        .collect();
+    assert_eq!(got, vec![None, None, None, Some((1, 0)), Some((1, 1))]);
+}

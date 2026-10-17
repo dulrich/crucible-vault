@@ -393,3 +393,50 @@ fn invalidation_during_a_run_re_requests_after_it_lands() {
     assert_eq!(store.get(ID, Some(NOTE)).expect("entry").epoch, epoch + 1);
     assert!(matches!(update(&mut store, need()), Effect::Run { .. }));
 }
+
+/// plan editor-round-4 WP-3: every link cell opens its own target; a row with a path and no
+/// link cell opens the row path from its first cell.
+#[test]
+fn row_link_cells_open_their_own_targets() {
+    let open = |m: &Option<Message>| match m {
+        Some(Message::Views(ViewsMsg::Open { path, line })) => Some((path.clone(), *line)),
+        _ => None,
+    };
+    let r = Row {
+        path: Some("INITIATIVE.md".into()),
+        line: Some(3),
+        cells: vec![
+            Cell::Link {
+                path: "a.md".into(),
+                label: "A".into(),
+            },
+            Cell::Text("x".into()),
+            Cell::Link {
+                path: "b.md".into(),
+                label: "B".into(),
+            },
+        ],
+    };
+    let got: Vec<_> = row_targets(&r).iter().map(open).collect();
+    assert_eq!(
+        got,
+        vec![
+            Some(("a.md".into(), None)),
+            None,
+            Some(("b.md".into(), None))
+        ]
+    );
+    let plain = Row {
+        path: Some("n.md".into()),
+        line: Some(7),
+        cells: vec![Cell::Text("t".into()), Cell::Number(1.0)],
+    };
+    let got: Vec<_> = row_targets(&plain).iter().map(open).collect();
+    assert_eq!(got, vec![Some(("n.md".into(), Some(7))), None]);
+    let none = Row {
+        path: None,
+        line: None,
+        cells: vec![Cell::Text("t".into())],
+    };
+    assert!(row_targets(&none).iter().all(Option::is_none));
+}

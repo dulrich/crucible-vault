@@ -1968,12 +1968,22 @@ impl App {
                 else {
                     return Task::none();
                 };
+                let path = ps.active_tab().map(|t| t.path.clone()).unwrap_or_default();
                 let Some(bar) = &mut ps.find else {
                     return Task::none();
                 };
                 bar.query = q;
                 bar.current = None;
-                bar.search(&text);
+                bar.search_in(&text, reading_find_model(&self.reading, &path));
+                if bar.visible.is_some() {
+                    // plan editor-round-4 WP-3: Reading starts at the first visible occurrence
+                    // at or below the viewport's top block.
+                    let top = self.reading.top_block(&path).unwrap_or(0);
+                    let v = bar.visible.as_deref().unwrap_or_default();
+                    bar.current =
+                        (!v.is_empty()).then(|| v.iter().position(|&(b, _)| b >= top).unwrap_or(0));
+                    return self.show_match();
+                }
                 let at = ps
                     .active_tab()
                     .and_then(|t| self.docs.get(&t.path))
@@ -2003,11 +2013,12 @@ impl App {
                 else {
                     return Task::none();
                 };
+                let path = ps.active_tab().map(|t| t.path.clone()).unwrap_or_default();
                 let Some(bar) = &mut ps.find else {
                     return Task::none();
                 };
-                bar.search(&text);
-                let n = bar.matches.len();
+                bar.search_in(&text, reading_find_model(&self.reading, &path));
+                let n = bar.len();
                 bar.current = if back {
                     editor_model::find::prev(bar.current, n)
                 } else {
@@ -2034,6 +2045,13 @@ impl App {
         };
         let range = ps.find.as_ref().and_then(crate::find::FindBar::range);
         let query = ps.find.as_ref().map(|b| b.query.clone());
+        // plan editor-round-4 WP-3: Reading steps through visible occurrences — the active one
+        // is drawn strong and its block scrolled to; invisible source matches never count.
+        let occurrence = ps
+            .find
+            .as_ref()
+            .filter(|b| b.visible.is_some())
+            .map(crate::find::FindBar::occurrence);
         let all = ps
             .find
             .as_ref()
@@ -2055,6 +2073,17 @@ impl App {
             })
             .collect();
         doc.set_find_matches(spans);
+        if let Some(occ) = occurrence {
+            doc.set_find_highlight(None);
+            self.reading.set_find(&path, query);
+            self.reading.set_find_active_at(&path, occ);
+            let Some((b, _)) = occ else {
+                return Task::none();
+            };
+            self.reading.set_top_block(&path, b);
+            let n = self.reading.doc(&path).map_or(0, |d| d.model.blocks.len());
+            return crate::reading::probe(&path, n, Some(b));
+        }
         let Some(r) = range else {
             doc.set_find_highlight(None);
             self.reading.set_find(&path, query);
@@ -4676,4 +4705,15 @@ fn notification_stream(handle: &NotifHandle) -> impl iced::futures::Stream<Item 
         }
         let _ = out.send(Message::Status(StatusMsg::Disconnected)).await;
     })
+}
+
+/// plan editor-round-4 WP-3: the rendered model the find bar counts visible occurrences in —
+/// `path` in Reading mode with a render; `None` (source matches drive the bar) otherwise.
+fn reading_find_model<'a>(
+    reading: &'a crate::reading::ReadingStore,
+    path: &str,
+) -> Option<&'a editor_model::render::RenderModel> {
+    (reading.mode(path) == crate::reading::ViewMode::Reading)
+        .then(|| reading.doc(path).map(|d| &d.model))
+        .flatten()
 }

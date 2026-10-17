@@ -25,18 +25,45 @@ pub struct FindBar {
     /// Byte ranges into the buffer text at the last search.
     pub matches: Vec<Range<usize>>,
     pub current: Option<usize>,
+    /// plan editor-round-4 WP-3: in Reading mode, the visible occurrences (top-level block, nth
+    /// in it) the bar steps through instead of `matches` (`None` = Source/Split, or no render).
+    pub visible: Option<Vec<(usize, usize)>>,
 }
 
 impl FindBar {
     /// Recomputes matches over `text`, keeping the current index when still valid.
     pub fn search(&mut self, text: &str) {
+        self.search_in(text, None);
+    }
+
+    /// [`Self::search`], plus — when `reading` is a rendered Reading-mode model — the visible
+    /// occurrences the bar then counts and steps through (plan editor-round-4 WP-3).
+    pub fn search_in(&mut self, text: &str, reading: Option<&editor_model::render::RenderModel>) {
         self.matches = editor_model::find::matches(text, &self.query);
-        self.current = self.current.filter(|&i| i < self.matches.len());
+        self.visible = reading.map(|m| crate::reading::visible_occurrences(m, &self.query));
+        let n = self.len();
+        self.current = self.current.filter(|&i| i < n);
+    }
+
+    /// The number of matches the bar steps through.
+    pub fn len(&self) -> usize {
+        self.visible.as_ref().map_or(self.matches.len(), Vec::len)
+    }
+
+    /// No match to step through.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The current visible occurrence (Reading mode).
+    pub fn occurrence(&self) -> Option<(usize, usize)> {
+        self.current
+            .and_then(|i| self.visible.as_ref()?.get(i).copied())
     }
 
     /// The "n/m" label.
     pub fn count(&self) -> String {
-        match (self.current, self.matches.len()) {
+        match (self.current, self.len()) {
             (_, 0) if self.query.is_empty() => String::new(),
             (_, 0) => "0/0".into(),
             (Some(i), m) => format!("{}/{m}", i + 1),
@@ -46,6 +73,9 @@ impl FindBar {
 
     /// The current match range.
     pub fn range(&self) -> Option<Range<usize>> {
+        if self.visible.is_some() {
+            return None;
+        }
         self.current.and_then(|i| self.matches.get(i).cloned())
     }
 }

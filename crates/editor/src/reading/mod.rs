@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cv_index::Resolver;
-use editor_model::render::{self, RenderModel};
+use editor_model::render::{self, Block, Inline, RenderModel};
 use iced::{Element, Subscription, Task};
 
 use crate::daemon::DaemonClient;
@@ -154,6 +154,182 @@ fn line_start(text: &str, line: usize) -> usize {
         .map_or(text.len(), |(i, _)| i + 1)
 }
 
+/// A wiki-link's displayed label (alias, else `target#fragment`).
+pub fn link_label(target: &str, fragment: Option<&String>, alias: Option<&String>) -> String {
+    match (alias, fragment) {
+        (Some(a), _) => a.clone(),
+        (None, Some(f)) if target.is_empty() => format!("#{f}"),
+        (None, Some(f)) => format!("{target}#{f}"),
+        (None, None) => target.to_owned(),
+    }
+}
+
+/// plan editor-round-4 WP-3: the visible (painted) text of an inline, if any — text, code
+/// spans, wiki-link/link labels and tags. URLs and link targets are never displayed.
+pub fn inline_visible(i: &Inline) -> Option<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+    match i {
+        Inline::Text { text, .. } | Inline::Code(text) => Some(Cow::Borrowed(text)),
+        Inline::WikiLink {
+            target,
+            fragment,
+            alias,
+        } => Some(Cow::Owned(link_label(
+            target,
+            fragment.as_ref(),
+            alias.as_ref(),
+        ))),
+        Inline::Link { label, .. } => Some(Cow::Borrowed(label)),
+        Inline::Tag(t) => Some(Cow::Owned(format!("#{t}"))),
+        Inline::FootnoteRef { .. } | Inline::LineBreak => None,
+    }
+}
+
+/// plan editor-round-4 WP-3: the find-painted text segments of block `b` in paint order (the
+/// order `view::block` draws them). Matches never cross a segment boundary.
+pub fn visible_segments(b: &Block) -> Vec<String> {
+    fn inl(out: &mut Vec<String>, is: &[Inline]) {
+        out.extend(is.iter().filter_map(inline_visible).map(|c| c.into_owned()));
+    }
+    fn go(out: &mut Vec<String>, b: &Block) {
+        match b {
+            Block::Heading { inlines, .. } | Block::Paragraph(inlines) => inl(out, inlines),
+            Block::List { items, .. } => {
+                for it in items {
+                    it.children.iter().for_each(|c| go(out, c));
+                }
+            }
+            Block::Table { header, rows, .. } => {
+                header.iter().for_each(|c| inl(out, c));
+                for r in rows {
+                    r.iter().for_each(|c| inl(out, c));
+                }
+            }
+            Block::Callout { children, .. } | Block::BlockQuote(children) => {
+                children.iter().for_each(|c| go(out, c));
+            }
+            Block::CodeBlock { text, .. } => out.push(text.clone()),
+            Block::Transclusion {
+                content: Some(bs), ..
+            } => bs.iter().for_each(|c| go(out, c)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    go(&mut out, b);
+    out
+}
+
+/// plan editor-round-4 WP-3: every visible occurrence of `q` in the reading view, in order, as
+/// (top-level block, nth occurrence inside it) — the Reading-mode find bar's match list.
+pub fn visible_occurrences(model: &RenderModel, q: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (i, b) in model.blocks.iter().enumerate() {
+        let n: usize = visible_segments(b)
+            .iter()
+            .map(|s| editor_model::find::matches(s, q).len())
+            .sum();
+        out.extend((0..n).map(|k| (i, k)));
+    }
+    out
+}
+
+/// plan editor-round-4 WP-3: byte ranges of a block's source that Reading never displays —
+/// md-link destinations `](url "title")`, image `![alt](src)` wholes, wiki-link targets hidden
+/// by an alias (`[[target|`), `[[`/`]]` brackets, embeds `![[…]]` and code-fence lines.
+pub fn invisible_ranges(src: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let bytes = src.as_bytes();
+    // Code-fence lines (the info string is not painted; the fence is markup).
+    let mut at = 0;
+    for line in src.split_inclusive('\n') {
+        let t = line.trim_start();
+        let t = t.trim_start_matches(['>', ' ']);
+        if t.starts_with("```") || t.starts_with("~~~") {
+            out.push(at..at + line.len());
+        }
+        at += line.len();
+    }
+    // Wiki-links and embeds.
+    let mut i = 0;
+    while let Some(off) = src[i..].find("[[") {
+        let s = i + off;
+        let Some(len) = src[s..].find("]]") else {
+            break;
+        };
+        let e = s + len + 2;
+        let embed = s > 0 && bytes[s - 1] == b'!';
+        if embed {
+            out.push(s - 1..e);
+        } else {
+            match src[s..e].find('|') {
+                Some(p) => out.push(s..s + p + 1),
+                None => out.push(s..s + 2),
+            }
+            out.push(e - 2..e);
+        }
+        i = e;
+    }
+    // Md-link destinations (and whole images).
+    let mut i = 0;
+    while let Some(off) = src[i..].find("](") {
+        let s = i + off;
+        let mut depth = 0usize;
+        let mut end = src.len();
+        for (k, c) in src[s + 1..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = s + 1 + k + 1;
+                        break;
+                    }
+                }
+                '\n' => {
+                    end = s + 1 + k;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let open = src[..s].rfind('[');
+        match open {
+            Some(o) if o > 0 && bytes[o - 1] == b'!' => out.push(o - 1..end),
+            _ => out.push(s..end),
+        }
+        i = end.max(s + 2);
+    }
+    out
+}
+
+/// plan editor-round-4 WP-3: the rendered counterpart (top-level block, nth visible
+/// occurrence) of the source match `r` of `q` in `text`; `None` = outside every block, or an
+/// invisible match (no rendered counterpart).
+pub fn source_counterpart(
+    model: &RenderModel,
+    text: &str,
+    q: &str,
+    r: &std::ops::Range<usize>,
+) -> Option<(usize, usize)> {
+    let (line, _) = editor_model::find::line_col(text, r.start);
+    let b = model.block_at_line(line)?;
+    let lines = &model.block_lines[b];
+    let from = line_start(text, lines.start);
+    let to = line_start(text, lines.end).max(from);
+    let src = &text[from..to];
+    let rel = r.start.checked_sub(from)?;
+    let hidden = invisible_ranges(src);
+    let visible =
+        |m: &std::ops::Range<usize>| !hidden.iter().any(|h| m.start < h.end && h.start < m.end);
+    let ms = editor_model::find::matches(src, q);
+    let idx = ms.iter().position(|m| m.start >= rel)?;
+    if !visible(&ms[idx]) {
+        return None;
+    }
+    Some((b, ms[..idx].iter().filter(|m| visible(m)).count()))
+}
+
 /// The note stem shown in the breadcrumb filename input (`a/b/Note.md` → `Note`).
 pub fn stem(path: &str) -> &str {
     let leaf = path.rsplit('/').next().unwrap_or(path);
@@ -212,20 +388,24 @@ impl ReadingStore {
     }
 
     /// Sets (or clears) the active find match for `path`'s reading view from the current match's
-    /// source byte range `r` in `text`: the top-level block containing its first line, and its
-    /// occurrence index among the query's matches inside that block's source lines
-    /// (block-granularity provenance, `RenderModel::block_lines`).
+    /// source byte range `r` in `text` (Source/Split): the top-level block containing its first
+    /// line (block-granularity provenance, `RenderModel::block_lines`), and its rendered
+    /// counterpart's ordinal = the number of *visible* source matches before it in that block's
+    /// source lines (plan editor-round-4 WP-3). When the active source match is itself
+    /// invisible ([`invisible_ranges`]: a URL, link target, markup) it has no rendered
+    /// counterpart and nothing is drawn strong (audit E2).
     pub fn set_find_active(&mut self, path: &str, text: &str, r: Option<std::ops::Range<usize>>) {
         let hit = r.and_then(|r| {
             let q = self.find.get(path)?;
             let model = &self.tabs.get(path)?.doc.as_ref()?.model;
-            let (line, _) = editor_model::find::line_col(text, r.start);
-            let b = model.block_at_line(line)?;
-            let start_line = model.block_lines[b].start;
-            let from = line_start(text, start_line);
-            let nth = editor_model::find::matches(&text[from..r.start.max(from)], q).len();
-            Some((b, nth))
+            source_counterpart(model, text, q, &r)
         });
+        self.set_find_active_at(path, hit);
+    }
+
+    /// Sets (or clears) the active find occurrence of `path`'s reading view directly (Reading
+    /// mode steps through visible occurrences, plan editor-round-4 WP-3).
+    pub fn set_find_active_at(&mut self, path: &str, hit: Option<(usize, usize)>) {
         match hit {
             Some(h) => {
                 self.find_active.insert(path.to_owned(), h);

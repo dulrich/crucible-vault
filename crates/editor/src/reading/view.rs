@@ -9,10 +9,11 @@ use iced::widget::{
 };
 use iced::{Border, Element, Font, Length, Theme};
 
-use super::{Doc, ReadingStore};
+use super::{Doc, ReadingStore, link_label};
 use crate::icons::Icon;
 use crate::message::{Message, ReadingMsg};
 use crate::theme::{Rgb, Tokens};
+use std::borrow::Cow;
 
 /// A clickable target inside rich text.
 #[derive(Debug, Clone)]
@@ -217,15 +218,6 @@ fn prop_press(path: &str, key: &str) -> Message {
     })
 }
 
-fn link_label(target: &str, fragment: Option<&String>, alias: Option<&String>) -> String {
-    match (alias, fragment) {
-        (Some(a), _) => a.clone(),
-        (None, Some(f)) if target.is_empty() => format!("#{f}"),
-        (None, Some(f)) => format!("{target}#{f}"),
-        (None, None) => target.to_owned(),
-    }
-}
-
 /// The `crucible-view` fence hook: the view `<file>#<name>` with `this` = the embedding note.
 fn view_fence<'a>(cx: &Ctx<'a>, file: &str, name: &str) -> Element<'a, Message> {
     crate::views::fence(cx.views, &crate::views::view_id(file, name), cx.path, cx.t)
@@ -325,13 +317,12 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
                         .into(),
                 );
             }
-            col.push(
-                text(code.as_str())
-                    .font(Font::MONOSPACE)
-                    .size(cx.sz(14.0))
-                    .color(t.text.to_color())
-                    .into(),
-            );
+            // plan editor-round-4 WP-3: code-block text is visible text (find-painted).
+            let mut spans: Vec<RSpan<'a>> = Vec::new();
+            painted(cx, &mut spans, Cow::Borrowed(code.as_str()), |p| {
+                span(p).font(Font::MONOSPACE).color(t.text.to_color())
+            });
+            col.push(rich_text(spans).size(cx.sz(14.0)).into());
             boxed(column(col).spacing(4).into(), t, t.line)
         }
         Block::BlockQuote(children) => {
@@ -667,6 +658,55 @@ fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {
     }
 }
 
+/// A rich-text span of the reading view.
+type RSpan<'a> = iced::widget::text::Span<'a, LinkTarget>;
+
+/// `text[r]`, borrowed when `text` is.
+fn sub<'a>(text: &Cow<'a, str>, r: std::ops::Range<usize>) -> Cow<'a, str> {
+    match text {
+        Cow::Borrowed(s) => Cow::Borrowed(&s[r]),
+        Cow::Owned(s) => Cow::Owned(s[r].to_owned()),
+    }
+}
+
+/// Pushes visible `text` as spans built by `make`, split on the find query's occurrences: every
+/// occurrence light, the active one strong (plan editor-ui-round-3 WP-5; every visible segment,
+/// plan editor-round-4 WP-3). Occurrences are counted in the same order as
+/// [`super::visible_segments`].
+fn painted<'a>(
+    cx: &Ctx<'a>,
+    spans: &mut Vec<RSpan<'a>>,
+    text: Cow<'a, str>,
+    make: impl Fn(Cow<'a, str>) -> RSpan<'a>,
+) {
+    let Some(q) = cx.store.find_query(cx.path) else {
+        spans.push(make(text));
+        return;
+    };
+    let t = cx.t;
+    let mut at = 0;
+    for m in editor_model::find::matches(&text, q) {
+        if m.start > at {
+            spans.push(make(sub(&text, at..m.start)));
+        }
+        let (bg, fg) = if cx.is_active_occurrence() {
+            (t.find_strong(), t.on_accent)
+        } else {
+            (t.find_light(), t.bg)
+        };
+        spans.push(
+            make(sub(&text, m.clone()))
+                .background(bg.to_color())
+                .color(fg.to_color()),
+        );
+        at = m.end;
+    }
+    if at < text.len() || at == 0 {
+        let len = text.len();
+        spans.push(make(sub(&text, at..len)));
+    }
+}
+
 fn inlines_view<'a>(
     cx: &Ctx<'a>,
     inlines: &'a [Inline],
@@ -681,9 +721,9 @@ fn inlines_view<'a>(
     } else {
         color.unwrap_or(t.text)
     };
-    let mut spans = Vec::with_capacity(inlines.len());
+    let mut spans: Vec<RSpan<'a>> = Vec::with_capacity(inlines.len());
     for i in inlines {
-        let s = match i {
+        match i {
             Inline::Text { text, style } => {
                 let mut font = Font::DEFAULT;
                 if style.strong || bold {
@@ -692,7 +732,7 @@ fn inlines_view<'a>(
                 if style.em {
                     font.style = FontStyle::Italic;
                 }
-                let style_span = |piece: &'a str| {
+                let style_span = |piece: Cow<'a, str>| {
                     let mut s = span(piece)
                         .font(font)
                         .color(base.to_color())
@@ -702,47 +742,24 @@ fn inlines_view<'a>(
                     }
                     s
                 };
-                // plan editor-feedback-round-2 WP-4: paint the find query's occurrences.
-                let Some(q) = cx.store.find_query(cx.path) else {
-                    spans.push(style_span(text.as_str()));
-                    continue;
-                };
-                let mut at = 0;
-                for m in editor_model::find::matches(text, q) {
-                    if m.start > at {
-                        spans.push(style_span(&text[at..m.start]));
-                    }
-                    // plan editor-ui-round-3 WP-5: every occurrence light, the active one strong.
-                    let (bg, fg) = if cx.is_active_occurrence() {
-                        (t.find_strong(), t.on_accent)
-                    } else {
-                        (t.find_light(), t.bg)
-                    };
-                    spans.push(
-                        style_span(&text[m.clone()])
-                            .background(bg.to_color())
-                            .color(fg.to_color()),
-                    );
-                    at = m.end;
-                }
-                if at < text.len() || at == 0 {
-                    spans.push(style_span(&text[at..]));
-                }
-                continue;
+                painted(cx, &mut spans, Cow::Borrowed(text.as_str()), style_span);
             }
-            Inline::Code(c) => span(c.as_str())
-                .font(Font::MONOSPACE)
-                .background(t.inset.to_color())
-                .color(t.text.to_color()),
-            Inline::WikiLink {
-                target,
-                fragment,
-                alias,
-            } => {
+            // plan editor-round-4 WP-3: code spans, link labels and tags are visible text too,
+            // painted like `Text`; split link pieces keep their click target.
+            Inline::Code(c) => painted(cx, &mut spans, Cow::Borrowed(c.as_str()), |p| {
+                span(p)
+                    .font(Font::MONOSPACE)
+                    .background(t.inset.to_color())
+                    .color(t.text.to_color())
+            }),
+            Inline::WikiLink { target, .. } => {
                 // No permanent underline: rich_text underlines the hovered link itself.
-                span(link_label(target, fragment.as_ref(), alias.as_ref()))
-                    .color(t.accent_ui.to_color())
-                    .link(LinkTarget::Vault(target.clone()))
+                let label = super::inline_visible(i).unwrap_or_default().into_owned();
+                painted(cx, &mut spans, Cow::Owned(label), |p| {
+                    span(p)
+                        .color(t.accent_ui.to_color())
+                        .link(LinkTarget::Vault(target.clone()))
+                });
             }
             Inline::Link { url, label } => {
                 let l = if editor_model::render::is_remote(url) {
@@ -750,15 +767,20 @@ fn inlines_view<'a>(
                 } else {
                     LinkTarget::Vault(url.clone())
                 };
-                span(label.as_str()).color(t.accent_ui.to_color()).link(l)
+                painted(cx, &mut spans, Cow::Borrowed(label.as_str()), |p| {
+                    span(p).color(t.accent_ui.to_color()).link(l.clone())
+                });
             }
-            Inline::Tag(tag) => span(format!("#{tag}")).color(t.accent.to_color()),
-            Inline::FootnoteRef { ix, .. } => span(format!("[{ix}]"))
-                .size((size - 4.0).max(10.0))
-                .color(t.accent_ui.to_color()),
-            Inline::LineBreak => span("\n"),
-        };
-        spans.push(s);
+            Inline::Tag(tag) => painted(cx, &mut spans, Cow::Owned(format!("#{tag}")), |p| {
+                span(p).color(t.accent.to_color())
+            }),
+            Inline::FootnoteRef { ix, .. } => spans.push(
+                span(format!("[{ix}]"))
+                    .size((size - 4.0).max(10.0))
+                    .color(t.accent_ui.to_color()),
+            ),
+            Inline::LineBreak => spans.push(span("\n")),
+        }
     }
     if spans.is_empty() {
         spans.push(span(inline_text(inlines)));

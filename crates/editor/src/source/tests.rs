@@ -864,6 +864,12 @@ fn tab_keys_bind_only_when_focused() {
 fn find_highlight_tracks_current_match_and_clears_on_close() {
     use crate::message::FindMsg;
     let (_t, _d, mut app, p) = setup();
+    // plan editor-round-4 WP-3: Reading steps visible occurrences (no source highlight), so
+    // the source highlight is exercised in Source mode.
+    let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+        path: p.clone(),
+        mode: crate::reading::ViewMode::Source,
+    }));
     let _ = app.update(Message::Find(FindMsg::Open));
     let _ = app.update(Message::Find(FindMsg::Query("two".into())));
     assert_eq!(buf(&mut app).find_highlight(), Some(((1, 5), (1, 8))));

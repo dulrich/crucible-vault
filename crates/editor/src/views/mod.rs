@@ -418,16 +418,38 @@ pub fn fence<'a>(store: &'a ViewStore, id: &str, host: &str, t: Tokens) -> Eleme
         .into()
 }
 
-/// How a [`Cell::Link`] renders: `Plain` (summary labels), `Styled` (looks like a link; its row is
-/// the click target) or `Clickable` (looks like a link and opens its own path).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LinkCell {
-    Plain,
-    Styled,
-    Clickable,
+/// plan editor-round-4 WP-3: what each cell of a non-task row opens on click. Every link cell
+/// opens its own path; a row with a `path` but no link cell opens it (and `line`) from its first
+/// cell. There is no whole-row click target.
+pub(crate) fn row_targets(r: &Row) -> Vec<Option<Message>> {
+    let mut out: Vec<Option<Message>> = r
+        .cells
+        .iter()
+        .map(|c| match c {
+            Cell::Link { path, .. } => Some(Message::Views(ViewsMsg::Open {
+                path: path.clone(),
+                line: None,
+            })),
+            _ => None,
+        })
+        .collect();
+    if let Some(p) = &r.path
+        && out.iter().all(Option::is_none)
+    {
+        if out.is_empty() {
+            out.push(None);
+        }
+        out[0] = Some(Message::Views(ViewsMsg::Open {
+            path: p.clone(),
+            line: r.line,
+        }));
+    }
+    out
 }
 
-fn cell_view<'a>(c: &Cell, bold: bool, link: LinkCell, t: Tokens) -> Element<'a, Message> {
+/// One cell. `open` = its click message: drawn like a Reading-mode note link (accent-ui, no
+/// permanent underline; iced's rich-text link underlines it and shows a pointer while hovered).
+fn cell_view<'a>(c: &Cell, bold: bool, open: Option<Message>, t: Tokens) -> Element<'a, Message> {
     let font = Font {
         weight: if bold { Weight::Bold } else { Weight::Normal },
         ..Font::default()
@@ -441,44 +463,27 @@ fn cell_view<'a>(c: &Cell, bold: bool, link: LinkCell, t: Tokens) -> Element<'a,
             .color(t.text_faint.to_color())
             .into();
     }
-    match c {
-        // Styled like Reading-mode links (`reading/view.rs` `Inline::WikiLink`): accent-ui, no
-        // permanent underline. `Clickable` makes the span an iced rich-text link, which
-        // underlines it and shows a pointer while hovered.
-        // `Styled`: no explicit colour, so the text inherits the row button's `text_color`
-        // (`accent_ui`, `accent_ui_hover` while the row is hovered; plan editor-feedback-round-2
-        // WP-5).
-        Cell::Link { .. } if link == LinkCell::Styled => text(s).size(13).font(font).into(),
-        Cell::Link { path, .. } if link != LinkCell::Plain => {
-            let clickable = link == LinkCell::Clickable;
-            let mut sp: iced::widget::text::Span<'a, ()> = span(s).color(t.accent_ui.to_color());
-            if clickable {
-                sp = sp.link(());
-            }
-            let rt = rich_text(vec![sp]).size(13).font(font);
-            if clickable {
-                let path = path.clone();
-                rt.on_link_click(move |()| {
-                    Message::Views(ViewsMsg::Open {
-                        path: path.clone(),
-                        line: None,
-                    })
-                })
+    match open {
+        Some(msg) => {
+            let sp: iced::widget::text::Span<'a, ()> =
+                span(s).color(t.accent_ui.to_color()).link(());
+            rich_text(vec![sp])
+                .size(13)
+                .font(font)
+                .on_link_click(move |()| msg.clone())
                 .into()
-            } else {
-                rt.into()
-            }
         }
-        _ => text(s).size(13).font(font).color(t.text.to_color()).into(),
+        None => text(s).size(13).font(font).color(t.text.to_color()).into(),
     }
 }
 
 fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
     let cols = d.columns.len().max(1);
-    let grid = |cs: &[Cell], bold: bool, links: LinkCell| -> Element<'a, Message> {
+    let grid = |cs: &[Cell], bold: bool, targets: &[Option<Message>]| -> Element<'a, Message> {
         row((0..cols).map(|i| {
             let c = cs.get(i).unwrap_or(&Cell::Null);
-            let el = cell_view(c, bold, links, t);
+            let open = targets.get(i).cloned().flatten();
+            let el = cell_view(c, bold, open, t);
             container(el).width(Length::FillPortion(1)).into()
         }))
         .spacing(8)
@@ -495,7 +500,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
             .into(),
         Line::Summary { label, cells } => {
             if d.kind == Kind::Pivot {
-                grid(cells, true, LinkCell::Plain)
+                grid(cells, true, &[])
             } else {
                 let mut cs = cells.clone();
                 // Ungrouped tables carry the summary name only in `label`: show it in an empty
@@ -506,33 +511,25 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                     }
                     cs[0] = Cell::Text(label.clone());
                 }
-                grid(&cs, true, LinkCell::Plain)
+                grid(&cs, true, &[])
             }
         }
         Line::Row(r) => {
-            let el: Element<'a, Message> = if d.kind == Kind::Tasks {
-                let task = r.cells.first().map(format_cell).unwrap_or_default();
-                let file = r.cells.get(1).map(format_cell).unwrap_or_default();
-                row![
-                    text(format!("☐ {task}")).size(13).color(t.text.to_color()),
-                    text(format!("— {file}"))
-                        .size(13)
-                        .color(t.text_dim.to_color()),
-                ]
-                .spacing(6)
-                .into()
-            } else {
-                // A row with its own target is clickable as a whole; otherwise link cells are.
-                let links = if r.path.is_some() {
-                    LinkCell::Styled
-                } else {
-                    LinkCell::Clickable
-                };
-                grid(&r.cells, false, links)
-            };
+            if d.kind != Kind::Tasks {
+                return grid(&r.cells, false, &row_targets(r));
+            }
+            let task = r.cells.first().map(format_cell).unwrap_or_default();
+            let file = r.cells.get(1).map(format_cell).unwrap_or_default();
+            let el: Element<'a, Message> = row![
+                text(format!("☐ {task}")).size(13).color(t.text.to_color()),
+                text(format!("— {file}"))
+                    .size(13)
+                    .color(t.text_dim.to_color()),
+            ]
+            .spacing(6)
+            .into();
             match &r.path {
-                // A button (not a `mouse_area`) so the hover state comes from the widget's own
-                // status: no hover message, no stored state, no extra redraw traffic.
+                // Tasks rows keep their whole-row button (plan editor-round-4 WP-3: unchanged).
                 Some(p) => button(el)
                     .padding(0)
                     .width(Length::Fill)
@@ -548,8 +545,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
     }
 }
 
-/// A row-target button: link cells take `text_color` (accent-ui, brighter on hover) and the row
-/// gets a `sel_tint` wash while hovered or pressed.
+/// A Tasks row-target button: accent-ui text, a `sel_tint` wash while hovered or pressed.
 fn row_link_style(t: Tokens, status: button::Status) -> button::Style {
     let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
