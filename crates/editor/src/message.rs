@@ -364,6 +364,10 @@ pub enum PanesMsg {
     SplitDown,
     Close(Pane),
     Focus(Pane),
+    /// plan editor-round-4 WP-4: the pointer entered a pane (`focus_follows_mouse`).
+    Hover(Pane),
+    /// WP-4: a mouse button went down (`true`) / up — the hover drag guard.
+    MouseButton(bool),
     Resized(pane_grid::ResizeEvent),
     Bookmark(crate::bookmarks::BookmarkMsg),
     /// editor-usability-round WP-3: per-pane history.

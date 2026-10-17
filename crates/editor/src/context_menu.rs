@@ -22,6 +22,9 @@ pub enum Target {
     Tab { pane: Pane, id: u64, path: String },
     /// An explorer row (`folder` = a folder row).
     Row { path: String, folder: bool },
+    /// plan editor-round-4 WP-4: a Reading image — `src` is the vault path (resolved key) or,
+    /// when `remote`, the URL.
+    Image { src: String, remote: bool },
 }
 
 /// A menu entry.
@@ -38,6 +41,12 @@ pub enum Item {
     Rename,
     Delete,
     NewNote,
+    /// WP-4: move the explorer file row.
+    Move,
+    /// WP-4: copy a vault image's bytes (MIME-typed) to the clipboard.
+    CopyImage,
+    /// WP-4: copy a remote image's URL.
+    CopyUrl,
 }
 
 /// Menu messages.
@@ -49,6 +58,8 @@ pub enum MenuMsg {
     Close,
     /// An item was chosen (the menu closes first).
     Choose(Item),
+    /// WP-4: the off-thread Copy image finished (`Err` = status notice).
+    ImageCopied(Result<String, String>),
 }
 
 /// The open menu.
@@ -109,8 +120,15 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
             (Item::Reveal, "Reveal"),
             (Item::CopyPath, "Copy path"),
             (Item::Rename, "Rename"),
+            (Item::Move, "Move…"),
             (Item::Delete, "Delete…"),
         ]),
+        // No "Open in new pane" (audit E1): it would load binary bytes into a note buffer.
+        Target::Image { remote: false, .. } => named(&[
+            (Item::CopyImage, "Copy image"),
+            (Item::CopyPath, "Copy path"),
+        ]),
+        Target::Image { remote: true, .. } => named(&[(Item::CopyUrl, "Copy URL")]),
         // Explorer ops rename / move / trash files only (no folder RPC): New note, Copy path.
         Target::Row { folder: true, .. } => {
             named(&[(Item::NewNote, "New note"), (Item::CopyPath, "Copy path")])

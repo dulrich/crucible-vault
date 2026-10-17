@@ -33,6 +33,82 @@ impl ClipboardReader for Xclip {
     }
 }
 
+/// Plan editor-round-4 WP-4: writes bytes to the CLIPBOARD selection under one target.
+pub trait ClipboardWriter {
+    /// `Err` carries a human-readable reason (binary missing, non-zero exit, …).
+    fn write(&self, mime: &str, bytes: &[u8]) -> Result<(), String>;
+}
+
+/// The production writer: `xclip -selection clipboard -t <mime> -i`.
+///
+/// Lifecycle (audit E4): stdin piped, all bytes written, stdin explicitly dropped (EOF), then
+/// the child is `wait()`ed (reaped). `xclip -i` forks a selection owner and the parent exits
+/// promptly, so the wait does not block on the selection's lifetime. Blocking: call off the
+/// UI thread.
+impl ClipboardWriter for Xclip {
+    fn write(&self, mime: &str, bytes: &[u8]) -> Result<(), String> {
+        use std::io::Write;
+        let mut child = Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", mime, "-i"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("xclip unavailable: {e}"))?;
+        let written = match child.stdin.take() {
+            Some(mut stdin) => {
+                let r = stdin.write_all(bytes);
+                drop(stdin);
+                r.map_err(|e| format!("xclip write failed: {e}"))
+            }
+            None => Err("xclip stdin unavailable".to_owned()),
+        };
+        let status = child
+            .wait()
+            .map_err(|e| format!("xclip wait failed: {e}"))?;
+        written?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("xclip -t {mime} -i failed ({status})"))
+        }
+    }
+}
+
+/// The MIME type for an image file path, by extension.
+pub fn image_mime(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "tif" | "tiff" => "image/tiff",
+        "avif" => "image/avif",
+        _ => return None,
+    })
+}
+
+/// Copy image: reads the vault file `path` through the daemon and writes its original bytes
+/// under its MIME type (no transcoding). `Ok` carries the status line. Blocking.
+pub fn copy_image(
+    daemon: &dyn DaemonClient,
+    writer: &dyn ClipboardWriter,
+    path: &str,
+) -> Result<String, String> {
+    let mime = image_mime(path).unwrap_or("application/octet-stream");
+    let (bytes, _) = daemon
+        .read_file(path)
+        .map_err(|e| format!("copy image: read failed: {e}"))?;
+    writer
+        .write(mime, &bytes)
+        .map_err(|e| format!("copy image failed: {e}"))?;
+    Ok(format!("copied image {path}"))
+}
+
 /// What a Ctrl+V should do, before any daemon call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {

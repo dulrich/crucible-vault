@@ -51,6 +51,8 @@ pub struct Prefs {
     pub search_debounce_ms: u64,
     /// `delete_mode` (plan editor-ui-round-3 WP-3; replaces `confirm_trash`, now ignored).
     pub delete_mode: DeleteMode,
+    /// `focus_follows_mouse` (plan editor-round-4 WP-4): hovering a pane focuses it.
+    pub focus_follows_mouse: bool,
     /// Command/action ids omitted from the palette list (their chords still work).
     pub palette_hidden: Vec<String>,
     /// `[keys]`: command id → chords (WP-4 consumes it).
@@ -77,6 +79,7 @@ impl Default for Prefs {
             search_limit: DEFAULT_SEARCH_LIMIT,
             search_debounce_ms: DEFAULT_SEARCH_DEBOUNCE_MS,
             delete_mode: DeleteMode::Trash,
+            focus_follows_mouse: false,
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
             open_url_cmd: default_open_url_cmd(),
@@ -158,6 +161,9 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             Some("trash") => DeleteMode::Trash,
             _ => d.delete_mode,
         },
+        focus_follows_mouse: doc
+            .get_bool(&p("focus_follows_mouse"))
+            .unwrap_or(d.focus_follows_mouse),
         palette_hidden: doc.get_str_list(&p("palette.hidden")).unwrap_or_default(),
         keys: doc
             .keys(&p("keys"))
@@ -220,6 +226,7 @@ pub enum PrefEdit {
     SearchLimit(i64),
     SearchDebounceMs(i64),
     DeleteMode(DeleteMode),
+    FocusFollowsMouse(bool),
     /// The comma-separated hidden-id list as typed.
     PaletteHidden(String),
 }
@@ -242,6 +249,7 @@ pub fn apply(doc: &mut ConfigDoc, e: &PrefEdit) -> Result<(), DocError> {
                 DeleteMode::Permanent => "permanent",
             },
         ),
+        PrefEdit::FocusFollowsMouse(b) => doc.set(&p("focus_follows_mouse"), *b),
         PrefEdit::PaletteHidden(s) => {
             let mut a = cv_schema::toml_edit::Array::new();
             for id in s.split(',').map(str::trim).filter(|x| !x.is_empty()) {
@@ -386,6 +394,31 @@ pub fn view<'a>(
         .spacing(6)
         .align_y(iced::Alignment::Center)
     };
+    let follow = {
+        let seg = |v: bool, label: &'static str| {
+            button(crate::theme::control_label(label, 14.0))
+                .height(crate::theme::SEGMENT)
+                .padding([0, 12])
+                .style(crate::theme::segment_style(
+                    t,
+                    prefs.focus_follows_mouse == v,
+                ))
+                .on_press_maybe(
+                    on(PrefEdit::FocusFollowsMouse(v))
+                        .map(|e| Message::Settings(SettingsMsg::Pref(e))),
+                )
+        };
+        row![
+            text("Focus follows mouse")
+                .size(14)
+                .width(Length::Fixed(200.0)),
+            container(row![seg(false, "Off"), seg(true, "On")].spacing(0))
+                .padding(1)
+                .style(crate::theme::seg_group_style(t)),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+    };
     let joined;
     let hidden_text = match hidden_draft {
         Some(d) => d,
@@ -456,6 +489,7 @@ pub fn view<'a>(
             t,
         ),
         confirm,
+        follow,
         hidden,
         text(keys_line).size(13).color(t.text_faint.to_color()),
         save_bar(f, t, mode),

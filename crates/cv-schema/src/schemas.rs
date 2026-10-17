@@ -1784,6 +1784,13 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Str("trash")),
         field(
+            "focus_follows_mouse",
+            "Focus follows mouse",
+            "The pointer entering a pane focuses it (never while a modal or menu is open, or during a drag)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+        field(
             "open_url_cmd",
             "Open URL command",
             "Program + args that open an external http/https/mailto link; the URL is appended as the last argument (no shell). Empty = default",

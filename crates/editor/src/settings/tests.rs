@@ -328,6 +328,7 @@ tab_title = "unambiguous"
 quick_switch_open = "duplicate"
 confirm_trash = true
 delete_mode = "permanent"
+focus_follows_mouse = true
 open_url_cmd = ["firefox", "--new-tab"]
 
 [search]

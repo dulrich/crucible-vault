@@ -382,24 +382,9 @@ impl Explorer {
 /// The explorer panel.
 pub fn view<'a>(ex: &'a Explorer, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
     let shadow = mode == Mode::Shadow;
-    let act = |label: &'a str, m: ExplorerMsg| {
-        let b = button(text(label).size(14)).style(button::text);
-        if shadow {
-            b
-        } else {
-            b.on_press(Message::Explorer(m))
-        }
-    };
-    let mut col = column![
-        row![
-            act("New note", ExplorerMsg::BeginNew),
-            act("Rename", ExplorerMsg::BeginRename),
-            act("Move", ExplorerMsg::BeginMove),
-            act("Trash", ExplorerMsg::Trash),
-        ]
-        .spacing(2)
-    ]
-    .spacing(4);
+    // plan editor-round-4 WP-4: no button row — New note / Rename / Move… / Delete live in the
+    // row context menu (`context_menu::items`).
+    let mut col = column![].spacing(4);
     if shadow {
         col = col.push(
             text(SHADOW_REASON)

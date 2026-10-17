@@ -602,11 +602,17 @@ fn image_block<'a>(
     if remote {
         // Never fetched: localization is the daemon's job (inventory #7).
         // WP-3: the placeholder opens the image URL in the browser.
-        return button(placeholder(format!("[remote image: {alt}]")))
-            .padding(0)
-            .style(button::text)
-            .on_press(Message::OpenUrl(src.to_owned()))
-            .into();
+        // plan editor-round-4 WP-4: right-click → Copy URL.
+        return crate::context_menu::on_right(
+            button(placeholder(format!("[remote image: {alt}]")))
+                .padding(0)
+                .style(button::text)
+                .on_press(Message::OpenUrl(src.to_owned())),
+            crate::context_menu::Target::Image {
+                src: src.to_owned(),
+                remote: true,
+            },
+        );
     }
     let Some(Some(key)) = cx.doc.images.get(src) else {
         return placeholder(format!("[missing image: {alt}]"));
@@ -628,7 +634,11 @@ fn image_block<'a>(
     let shown_key = key.clone();
     let shown_tab = tab.clone();
     let view = cx.view;
-    sensor(content)
+    let menu_target = crate::context_menu::Target::Image {
+        src: key.clone(),
+        remote: false,
+    };
+    let sensed = sensor(content)
         .key_ref(key.as_str())
         .on_show(move |size| {
             Message::Reading(ReadingMsg::ImageShown {
@@ -642,8 +652,9 @@ fn image_block<'a>(
             tab,
             view,
             key: key.clone(),
-        }))
-        .into()
+        }));
+    // plan editor-round-4 WP-4: right-click → Copy image / Copy path.
+    crate::context_menu::on_right(sensed, menu_target)
 }
 
 fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {

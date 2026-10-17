@@ -411,6 +411,32 @@ fn editor_delete_mode_enum_default_and_legacy_confirm_trash() {
 }
 
 #[test]
+fn editor_focus_follows_mouse_bool_default_false() {
+    // plan editor-round-4 WP-4.
+    for v in ["true", "false"] {
+        assert!(
+            errs(&format!("focus_follows_mouse = {v}\n"), "editor.toml").is_empty(),
+            "{v}"
+        );
+    }
+    assert_eq!(
+        errs("focus_follows_mouse = \"yes\"\n", "editor.toml").len(),
+        1
+    );
+    // D20: a file without the key stays valid.
+    assert!(errs("delete_mode = \"trash\"\n", "editor.toml").is_empty());
+    let Node::Record(r) = editor_schema() else {
+        panic!("editor schema is a record");
+    };
+    let f = r
+        .fields
+        .iter()
+        .find(|f| f.key == "focus_follows_mouse")
+        .expect("field");
+    assert!(matches!(f.default, Some(node::Default::Bool(false))));
+}
+
+#[test]
 fn validate_exactly_one_of() {
     assert!(
         errs(

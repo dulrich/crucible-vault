@@ -219,6 +219,8 @@ pub struct App {
     restoring: bool,
     /// editor-usability-round WP-3: the pane whose view-mode dropdown is open.
     pub mode_menu: Option<Pane>,
+    /// plan editor-round-4 WP-4: a mouse button is held (hover focus is suppressed).
+    pub mouse_down: bool,
     /// A back/forward step is opening a path: it must not push onto the history.
     history_nav: bool,
     /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
@@ -251,6 +253,11 @@ pub struct App {
     /// Tests: every "Copy path" text, in order.
     #[cfg(test)]
     pub copied: Vec<String>,
+    /// Tests: every "Copy image" vault path, in order.
+    #[cfg(test)]
+    pub copied_images: Vec<String>,
+    /// plan editor-round-4 WP-4: the image clipboard writer (`xclip` in production).
+    pub clip_writer: Arc<dyn crate::clipboard_image::ClipboardWriter + Send + Sync>,
 }
 
 /// Frontmatter `title` per tab path, keyed by `(edit_seq, epoch)` (plan editor-feedback-round-2 WP-6).
@@ -408,6 +415,7 @@ impl App {
             state_path,
             restoring: true,
             mode_menu: None,
+            mouse_down: false,
             history_nav: false,
             quit: None,
             dialog: None,
@@ -422,6 +430,9 @@ impl App {
             context_menu: None,
             #[cfg(test)]
             copied: Vec::new(),
+            #[cfg(test)]
+            copied_images: Vec::new(),
+            clip_writer: Arc::new(crate::clipboard_image::Xclip),
         };
         app.load_editor_prefs();
         app.refresh_files();
@@ -1025,6 +1036,11 @@ impl App {
                     return self.run_menu_item(menu.target, item);
                 }
             }
+            MenuMsg::ImageCopied(r) => {
+                if let Err(e) = r {
+                    self.status.error = Some(e);
+                }
+            }
         }
         Task::none()
     }
@@ -1082,10 +1098,35 @@ impl App {
                 self.reveal(&path);
                 Task::none()
             }
-            (Target::Tab { path, .. } | Target::Row { path, .. }, Item::CopyPath) => {
+            (Target::Image { src, remote: false }, Item::CopyImage) => {
                 #[cfg(test)]
-                self.copied.push(path.clone());
-                iced::clipboard::write(path)
+                self.copied_images.push(src.clone());
+                let Some(d) = self.daemon.clone() else {
+                    self.status.error = Some("copy image: no daemon connection".into());
+                    return Task::none();
+                };
+                let writer = self.clip_writer.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::clipboard_image::copy_image(d.as_ref(), writer.as_ref(), &src)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("copy image: worker failed".into()))
+                    },
+                    |r| Message::Menu(crate::context_menu::MenuMsg::ImageCopied(r)),
+                )
+            }
+            (Target::Image { src, remote: true }, Item::CopyUrl)
+            | (Target::Image { src, remote: false }, Item::CopyPath)
+            | (Target::Tab { path: src, .. } | Target::Row { path: src, .. }, Item::CopyPath) => {
+                #[cfg(test)]
+                self.copied.push(src.clone());
+                iced::clipboard::write(src)
+            }
+            (Target::Row { path, .. }, Item::Move) => {
+                self.explorer.selected = Some(path);
+                self.update_explorer(ExplorerMsg::BeginMove)
             }
             (Target::Tab { path, .. } | Target::Row { path, .. }, Item::Delete) => {
                 self.begin_delete(path)
@@ -2185,6 +2226,34 @@ impl App {
         }
     }
 
+    /// plan editor-round-4 WP-4: `focus_follows_mouse` — the pointer entered `pane`. Ignored
+    /// while any modal / menu is open or a mouse button is held (drag, selection). Besides
+    /// `self.focus` (which routes source actions via `active_note`), native widget focus moves
+    /// too (audit E3): the entered pane's source editor is focused, or — when it shows none —
+    /// every focusable is unfocused (`operation::focus` on an id no widget carries), so keys
+    /// never land in the previous pane's editor.
+    fn hover_focus(&mut self, pane: Pane) -> Task<Message> {
+        let modal = self.palette.open
+            || self.switcher.open
+            || self.dialog.is_some()
+            || self.context_menu.is_some()
+            || self.mode_menu.is_some();
+        if !self.prefs.focus_follows_mouse
+            || modal
+            || self.mouse_down
+            || self.focus == pane
+            || self.panes.get(pane).is_none()
+        {
+            return Task::none();
+        }
+        self.focus = pane;
+        self.persist();
+        match self.active_note() {
+            Some(t) if self.reading.mode(&t.path).shows_source() => self.focus_editor(),
+            _ => iced::widget::operation::focus(iced::widget::Id::new("hover-focus-none")),
+        }
+    }
+
     fn update_panes(&mut self, m: PanesMsg) -> Task<Message> {
         match m {
             PanesMsg::SplitRight | PanesMsg::SplitDown => {
@@ -2229,6 +2298,8 @@ impl App {
                     self.persist();
                 }
             }
+            PanesMsg::Hover(pane) => return self.hover_focus(pane),
+            PanesMsg::MouseButton(down) => self.mouse_down = down,
             PanesMsg::Resized(ev) => self.panes.resize(ev.split, ev.ratio),
             PanesMsg::Bookmark(b) => return self.update_bookmarks(b),
             PanesMsg::Back(pane) => self.history_step(pane, false),
@@ -4042,6 +4113,12 @@ impl App {
         Subscription::batch([
             Subscription::run_with(self.notifications.clone(), notification_stream),
             captured_esc,
+            // WP-4: track held mouse buttons only while hover focus is on (drag guard).
+            if self.prefs.focus_follows_mouse {
+                iced::event::listen_with(mouse_button_event)
+            } else {
+                Subscription::none()
+            },
             iced::keyboard::listen().filter_map(switcher::key_event),
             iced::keyboard::listen().filter_map(|e| crate::dialog::key_event(&e)),
             self.reading.subscription(),
@@ -4453,16 +4530,20 @@ impl App {
         } else {
             Some(t.line)
         };
-        pane_grid::Content::new(container(body).padding(8).height(Length::Fill)).style(
-            move |_: &Theme| container::Style {
-                border: iced::Border {
-                    color: border.map_or(iced::Color::TRANSPARENT, crate::theme::Rgb::to_color),
-                    width: if border.is_some() { 1.0 } else { 0.0 },
-                    radius: 0.0.into(),
-                },
-                ..container::Style::default()
+        // plan editor-round-4 WP-4: the pointer entering a pane may focus it. The wrapper is
+        // always present (stable widget tree); only its `on_enter` follows the pref.
+        let mut hover = iced::widget::mouse_area(container(body).padding(8).height(Length::Fill));
+        if self.prefs.focus_follows_mouse && !focused {
+            hover = hover.on_enter(Message::Panes(PanesMsg::Hover(pane)));
+        }
+        pane_grid::Content::new(hover).style(move |_: &Theme| container::Style {
+            border: iced::Border {
+                color: border.map_or(iced::Color::TRANSPARENT, crate::theme::Rgb::to_color),
+                width: if border.is_some() { 1.0 } else { 0.0 },
+                radius: 0.0.into(),
             },
-        )
+            ..container::Style::default()
+        })
     }
 
     fn side_view(&self) -> Element<'_, Message> {
@@ -4646,6 +4727,23 @@ impl App {
             _ => Space::new().into(),
         };
         iced::widget::stack![base, overlay, menu].into()
+    }
+}
+
+/// WP-4: mouse press / release → [`PanesMsg::MouseButton`] (captured or not).
+fn mouse_button_event(
+    e: iced::Event,
+    _: iced::event::Status,
+    _: iced::window::Id,
+) -> Option<Message> {
+    match e {
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => {
+            Some(Message::Panes(PanesMsg::MouseButton(true)))
+        }
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
+            Some(Message::Panes(PanesMsg::MouseButton(false)))
+        }
+        _ => None,
     }
 }
 
