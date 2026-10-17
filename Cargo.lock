@@ -1083,6 +1083,7 @@ dependencies = [
  "cv-schema",
  "cv-state",
  "cv-testkit",
+ "cv-text",
  "cv-vault",
  "editor-model",
  "iced",

@@ -212,14 +212,7 @@ fn link_url(raw: &str) -> String {
 }
 
 fn tags(raw: Option<&String>) -> Vec<String> {
-    raw.map(|s| {
-        s.split(',')
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(str::to_owned)
-            .collect()
-    })
-    .unwrap_or_default()
+    cv_text::template::normalize_tags(raw)
 }
 
 fn one_of(raw: Option<&String>, allowed: &[&str], dflt: &str) -> String {

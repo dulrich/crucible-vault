@@ -23,7 +23,9 @@
 //! Failures: an invalid row (unsupported method, non-http(s) link) is counted `invalid` and
 //! logged; a feed failing (HTTP or parse) is counted `failed`; every feed failing with a service
 //! error settles deferred (`fetch_disposition`). Outcome vars: `sources`, `new`, `lines`,
-//! `notes`, `failed`, `invalid` (+ `disabled` when `[blogs] enabled = false`). No step params.
+//! `notes`, `failed`, `invalid`, `localize_failed` (+ `disabled` when `[blogs] enabled = false`).
+//! No step params. A full-body captured note is localized inline (remote images → `_MD5`
+//! attachments); a localize failure is logged and counted, never fails the capture.
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -36,7 +38,7 @@ use serde_json::json;
 use super::super::file::kind_def;
 use super::super::materialize::{expand, get_str, get_str_list, join, now};
 use super::super::web::{client, create_or_found};
-use super::super::{StepCtx, StepError, StepOutcome, lint};
+use super::super::{StepCtx, StepError, StepOutcome, lint, localize};
 use super::{Candidate, SeenSet, emit_line_with, fetch_bounded, md_files_under, record_with};
 
 /// `tracker_items.source_kind` / `ignored_ids.kind` of blog posts.
@@ -124,7 +126,7 @@ fn row_is_valid(r: &BlogSource) -> Result<(), String> {
     Ok(())
 }
 
-fn vars(out: &mut StepOutcome, counts: [(&str, usize); 6]) {
+fn vars(out: &mut StepOutcome, counts: [(&str, usize); 7]) {
     for (k, v) in counts {
         out.vars.insert(k.into(), json!(v));
     }
@@ -156,10 +158,9 @@ fn note_target(ctx: &StepCtx<'_>, row: &BlogSource) -> Result<(String, Vec<Strin
     if tags.is_empty() {
         tags.push(NOTE_KIND.into());
     }
-    for t in &row.tags {
-        let t = t.trim().trim_start_matches('#');
-        if !t.is_empty() && !tags.iter().any(|x| x == t) {
-            tags.push(t.to_owned());
+    for t in cv_text::template::normalize_tags(&row.tags) {
+        if !tags.contains(&t) {
+            tags.push(t);
         }
     }
     Ok((expand(ctx, &folder)?, tags))
@@ -176,14 +177,15 @@ fn is_post_note(ctx: &StepCtx<'_>, path: &str, post: &BlogPost) -> Result<Option
     }))
 }
 
-/// The path for `post`'s note in `folder`: `<slug>.md`, or `<slug>-<hash>.md` when another
-/// note holds the slug. `(path, exists)`.
+/// The path for `post`'s note in `folder`: `<name>.md` (the title filename), or
+/// `<name> <hash>.md` when another note holds the name (deterministic, so re-runs stay
+/// idempotent). `(path, exists)`.
 fn note_path(
     ctx: &StepCtx<'_>,
     folder: &str,
     post: &BlogPost,
 ) -> Result<(String, bool), StepError> {
-    let slug = policy::note_slug(post);
+    let slug = policy::note_name(post);
     let first = join(folder, &format!("{slug}.md"));
     match is_post_note(ctx, &first, post)? {
         None => Ok((first, false)),
@@ -192,7 +194,7 @@ fn note_path(
             let alt = join(
                 folder,
                 &format!(
-                    "{slug}-{}.md",
+                    "{slug} {}.md",
                     cv_text::url_canon::short_hash(&post.post_id)
                 ),
             );
@@ -208,6 +210,7 @@ fn write_note(
     row: &BlogSource,
     post: &BlogPost,
     out_paths: &mut Vec<String>,
+    localize_failed: &mut usize,
 ) -> Result<bool, StepError> {
     let (folder, tags) = note_target(ctx, row)?;
     let (path, exists) = note_path(ctx, &folder, post)?;
@@ -220,6 +223,16 @@ fn write_note(
         return Ok(false);
     }
     out_paths.push(path.clone());
+    // Inline localize (plan usability-sprint-captures-links WP-1): remote images become local
+    // `_MD5` attachments now; a failure leaves the remote refs and never fails the capture.
+    let mut t = toml::Table::new();
+    t.insert("type".into(), "localize".into());
+    t.insert("path".into(), path.clone().into());
+    let step = Step::from_table(t).map_err(StepError::failed)?;
+    if let Err(e) = localize::execute(&step, ctx) {
+        *localize_failed += 1;
+        tracing::warn!(path = %path, error = %e, "track_blogs: inline localize failed");
+    }
     let mut t = toml::Table::new();
     t.insert("type".into(), "lint".into());
     t.insert("path".into(), path.into());
@@ -251,6 +264,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 ("notes", 0),
                 ("failed", 0),
                 ("invalid", 0),
+                ("localize_failed", 0),
             ],
         );
         return Ok(out);
@@ -289,7 +303,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         |u| async move { c.get_text(SERVICE, &u).await },
     )?;
 
-    let (mut new, mut lines, mut notes, mut failed) = (0, 0, 0, 0);
+    let (mut new, mut lines, mut notes, mut failed, mut localize_failed) = (0, 0, 0, 0, 0);
     let mut deferred = None;
     for (row, body) in rows.iter().zip(bodies) {
         let xml = match body {
@@ -366,7 +380,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             new += 1;
             seen.insert(&post.post_id);
             if auto {
-                if write_note(ctx, row, &post, &mut out.output_paths)? {
+                if write_note(ctx, row, &post, &mut out.output_paths, &mut localize_failed)? {
                     notes += 1;
                 }
                 let score = super::score_item(ctx, &cand);
@@ -396,6 +410,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             ("notes", notes),
             ("failed", failed),
             ("invalid", invalid),
+            ("localize_failed", localize_failed),
         ],
     );
     Ok(out)

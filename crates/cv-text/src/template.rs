@@ -147,6 +147,51 @@ pub fn slugify(value: &str) -> String {
     out
 }
 
+/// Obsidian Web Clipper-style note basename for `title`: drops characters illegal in filenames
+/// (`/ \ : * ? " < > |`) and those that break wikilinks (`# ^ [ ]`) plus control characters,
+/// collapses whitespace runs to one space, caps at 120 chars on a char boundary, and trims edge
+/// spaces and trailing dots. An empty result is `""` (the caller falls back).
+pub fn title_filename(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '^' | '[' | ']'
+            )
+        })
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut out = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some((i, _)) = out.char_indices().nth(120) {
+        out.truncate(i);
+    }
+    out.trim_end_matches(['.', ' ']).to_owned()
+}
+
+/// Normalizes raw tag strings: each is split on commas and whitespace, a leading `#` is
+/// stripped, empties are dropped, and duplicates are removed keeping first-seen order
+/// (`["#a #b, c", "a"]` → `a`, `b`, `c`).
+pub fn normalize_tags<I, S>(raw: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out: Vec<String> = Vec::new();
+    for s in raw {
+        for t in s
+            .as_ref()
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(|t| t.trim_start_matches('#'))
+        {
+            if !t.is_empty() && !out.iter().any(|x| x == t) {
+                out.push(t.to_owned());
+            }
+        }
+    }
+    out
+}
+
 static INPUT_ALIAS: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"\{\{input(:[^}]*)?\}\}").ok());
 
@@ -346,6 +391,29 @@ mod tests {
             out,
             "projects/x/my-note-draft-2-My Note: Draft 2-My Note: Draft 2-IMG_01.png||2026-10-13|2026"
         );
+    }
+
+    #[test]
+    fn title_filename_vectors() {
+        assert_eq!(
+            title_filename("  A/B: C*? \"x\" <y> | #t ^b [[l]]  "),
+            "AB C x y t b l"
+        );
+        assert_eq!(title_filename("Tabs\tand\nlines\u{7}x"), "Tabs and lines x");
+        assert_eq!(title_filename("Trailing dots... "), "Trailing dots");
+        assert_eq!(title_filename("Café — déjà vu"), "Café — déjà vu");
+        assert_eq!(title_filename("///"), "");
+        let long = "é".repeat(200);
+        assert_eq!(title_filename(&long).chars().count(), 120);
+    }
+
+    #[test]
+    fn normalize_tags_splits_strips_dedupes() {
+        assert_eq!(
+            normalize_tags(["#a #b #c", "b, d,,#a", "  ", "##e"]),
+            ["a", "b", "c", "d", "e"]
+        );
+        assert!(normalize_tags(Vec::<String>::new()).is_empty());
     }
 
     #[test]

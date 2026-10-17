@@ -190,13 +190,18 @@ pub fn normalize_published(raw: &str) -> String {
     }
 }
 
-/// The note basename for `post`: slugged title, else the URL slug; at most 80 chars.
+/// The note basename for `post`: the Web Clipper-style title filename
+/// ([`cv_text::template::title_filename`]); when the title is empty or `(untitled)`, the URL
+/// slug (at most 80 chars, else `post`).
 #[must_use]
-pub fn note_slug(post: &BlogPost) -> String {
-    let mut s = cv_text::template::slugify(&post.title);
-    if s.is_empty() || post.title == "(untitled)" {
-        s = cv_text::url_canon::slug_for_canonical(&post.url);
+pub fn note_name(post: &BlogPost) -> String {
+    if post.title != "(untitled)" {
+        let t = cv_text::template::title_filename(&post.title);
+        if !t.is_empty() {
+            return t;
+        }
     }
+    let mut s = cv_text::url_canon::slug_for_canonical(&post.url);
     if s.len() > 80 {
         s.truncate(80);
         s = s.trim_end_matches('-').to_owned();
@@ -365,6 +370,6 @@ mod tests {
         assert!(n.contains("description: \"Short & sweet\"\n"));
         assert!(n.contains("tags:\n  - blog\n  - research\nread: false\n---\n"));
         assert!(n.contains("Hello **world**"));
-        assert_eq!(note_slug(p), "full-one");
+        assert_eq!(note_name(p), "Full One");
     }
 }

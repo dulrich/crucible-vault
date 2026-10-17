@@ -229,7 +229,7 @@ fn daily(w: &World) -> String {
 }
 
 fn note(w: &World, slug: &str) -> Option<String> {
-    std::fs::read_to_string(w.vault.join(format!("daily/{}/post-{slug}.md", today()))).ok()
+    std::fs::read_to_string(w.vault.join(format!("daily/{}/Post {slug}.md", today()))).ok()
 }
 
 fn outcome(w: &World, key: &str, s: &str) -> Option<TrackerOutcome> {
@@ -433,4 +433,51 @@ fn disabled_pipeline_does_nothing() {
     let o = run(&w).unwrap();
     assert_eq!(n(&o, "disabled"), json!(true));
     assert!(daily(&w).is_empty());
+}
+
+/// One full-body RSS item titled `title` whose body embeds the image at `img`.
+fn rss_with_image(title: &str, img: &str) -> String {
+    format!(
+        "<rss><channel><title>B</title><item><title>{title}</title><link>https://blog.example/p/i</link><dc:creator>Ann</dc:creator><pubDate>Tue, 14 Oct 2026 10:00:00 +0000</pubDate><description>About</description><content:encoded><![CDATA[<p>Look</p><p><img src=\"{img}\" alt=\"pic\"></p>]]></content:encoded></item></channel></rss>"
+    )
+}
+
+const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"></svg>";
+
+#[test]
+fn full_body_capture_is_title_named_tag_normalized_and_localized_inline() {
+    let w = world(
+        &[],
+        ON,
+        &[(
+            "Full",
+            "/a",
+            "body = \"full\"\ntags = [\"#a #b\", \"a, c\"]",
+        )],
+    );
+    let img = format!("{}/img.svg", w.base);
+    set(&w, "/a", 200, rss_with_image("Why: Rust? #1", &img));
+    set(&w, "/img.svg", 200, SVG.to_owned());
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "notes"), json!(1));
+    assert_eq!(n(&o, "localize_failed"), json!(0));
+    let path = w.vault.join(format!("daily/{}/Why Rust 1.md", today()));
+    let t = std::fs::read_to_string(&path).expect("title-named note");
+    assert!(t.contains("tags:\n  - blog\n  - a\n  - b\n  - c\n"), "{t}");
+    assert!(!t.contains(&img), "{t}");
+    assert!(t.contains("_MD5.svg"), "{t}");
+}
+
+#[test]
+fn image_404_keeps_the_remote_ref_and_still_captures() {
+    let w = world(&[], ON, &[("Full", "/a", "body = \"full\"")]);
+    let img = format!("{}/gone.png", w.base);
+    set(&w, "/a", 200, rss_with_image("Gone", &img));
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "notes"), json!(1));
+    let t =
+        std::fs::read_to_string(w.vault.join(format!("daily/{}/Gone.md", today()))).expect("note");
+    assert!(t.contains(&img), "{t}");
+    let key = format!("{}/a", w.base);
+    assert_eq!(outcome(&w, &key, "i"), Some(TrackerOutcome::Note));
 }

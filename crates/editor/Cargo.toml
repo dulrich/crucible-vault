@@ -33,6 +33,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock", "
 cv-protocol = { path = "../cv-protocol" }
 cv-index = { path = "../cv-index" }
 cv-state = { path = "../cv-state" }
+cv-text = { path = "../cv-text" }
 cv-vault = { path = "../cv-vault" }
 cv-testkit = { path = "../cv-testkit" }
 editor-model = { path = "../editor-model" }
