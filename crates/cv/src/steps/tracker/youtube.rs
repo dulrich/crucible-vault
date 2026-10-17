@@ -85,6 +85,57 @@ fn vars(out: &mut StepOutcome, counts: [(&str, usize); 5]) {
     }
 }
 
+/// Rows the duration backfill looks at per run (10 `videos.list` calls at most).
+const BACKFILL_LIMIT: usize = 500;
+
+/// Length backfill (plan intake-type-column-length-backfill WP-1): `line`/`note` rows recorded
+/// without `duration_s` get it from `videos.list`, in [`api::MAX_IDS`] batches. An id a
+/// successful response omits (deleted/private), or whose duration does not parse, is marked `0`
+/// (rendered blank, never re-queried). A failed batch leaves its rows NULL for the next run and
+/// stops the backfill; it never affects the step's outcome or counters.
+fn backfill_durations(
+    ctx: &mut StepCtx<'_>,
+    c: &cv_providers::web::WebClient,
+    key: &str,
+) -> Result<(), StepError> {
+    let missing = ctx
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .tracker_items_missing_duration(KIND, BACKFILL_LIMIT)
+        .map_err(|e| StepError::failed(format!("state: {e}")))?;
+    for chunk in missing.chunks(api::MAX_IDS) {
+        let ids: Vec<&str> = chunk.iter().map(|(_, i)| i.as_str()).collect();
+        let videos = match block_on(youtube().videos(c, key, &ids))? {
+            Ok(vs) => {
+                record_usage(ctx, api::SERVICE, 1);
+                vs
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "track_youtube: duration backfill batch failed");
+                break;
+            }
+        };
+        let durations: HashMap<String, i64> = videos
+            .into_iter()
+            .map(|v| {
+                let d = parse_iso8601_duration(&v.content_details.duration).unwrap_or(0);
+                (v.id, d)
+            })
+            .collect();
+        let mut st = ctx
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (source_key, id) in chunk {
+            let d = durations.get(id).copied().unwrap_or(0);
+            st.fill_tracker_duration(KIND, source_key, id, d)
+                .map_err(|e| StepError::failed(format!("state: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
 /// Executes the step.
 pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     validate(step, ctx.config).map_err(StepError::failed)?;
@@ -241,6 +292,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             }
         }
     }
+    backfill_durations(ctx, c, &key)?;
     if !rows.is_empty()
         && failed == rows.len()
         && let Some(d) = deferred

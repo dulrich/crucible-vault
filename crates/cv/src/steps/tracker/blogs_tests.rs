@@ -296,6 +296,55 @@ fn rows_record_body_word_count_and_source_name() {
 }
 
 #[test]
+fn recorded_posts_backfill_null_word_count_of_line_and_note_rows_only() {
+    let w = world(&[], ON, &[("Mix", "/a", "")]);
+    set(&w, "/a", 200, rss(&[("d", true), ("c", true), ("a", true)]));
+    let key = format!("{}/a", w.base);
+    let mk = |s: &str, outcome: TrackerOutcome, wc: Option<i64>| cv_state::TrackerItem {
+        source_kind: KIND.into(),
+        source_key: key.clone(),
+        item_id: post_url(s),
+        title: String::new(),
+        url: post_url(s),
+        first_seen_ms: 0,
+        day: "2026-10-16".into(),
+        outcome,
+        score: None,
+        full_body: Some(true),
+        note_path: None,
+        source_name: None,
+        duration_s: None,
+        word_count: wc,
+    };
+    {
+        let mut s = w.state.lock().unwrap();
+        for it in [
+            mk("a", TrackerOutcome::Line, None),
+            mk("c", TrackerOutcome::Note, Some(99)),
+            mk("d", TrackerOutcome::Skipped, None),
+        ] {
+            assert!(s.insert_tracker_item(&it).unwrap());
+        }
+    }
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "new"), json!(0), "backfill never counts as an item");
+    assert_eq!(n(&o, "lines"), json!(0));
+    assert_eq!(n(&o, "notes"), json!(0));
+    let row = |s: &str| {
+        w.state
+            .lock()
+            .unwrap()
+            .tracker_item(KIND, &key, &post_url(s))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(row("a").word_count, Some(4), "null → filled");
+    assert_eq!(row("c").word_count, Some(99), "non-null untouched");
+    assert_eq!(row("d").word_count, None, "skipped rows untouched");
+    assert_eq!(row("a").duration_s, None);
+}
+
+#[test]
 fn full_source_post_becomes_a_linted_filed_blog_note() {
     let w = world(
         &[],

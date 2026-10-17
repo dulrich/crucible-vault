@@ -682,3 +682,103 @@ fn scorer_failures_never_block_intake() {
         assert!(daily(&w).contains("— Chan A ()"), "{}", daily(&w));
     }
 }
+
+fn legacy_row(id: &str, outcome: TrackerOutcome) -> cv_state::TrackerItem {
+    cv_state::TrackerItem {
+        source_kind: KIND.into(),
+        source_key: "UCa".into(),
+        item_id: id.into(),
+        title: String::new(),
+        url: String::new(),
+        first_seen_ms: 0,
+        day: "2026-10-16".into(),
+        outcome,
+        score: None,
+        full_body: None,
+        note_path: None,
+        source_name: None,
+        duration_s: None,
+        word_count: None,
+    }
+}
+
+fn videos_calls(w: &World) -> usize {
+    w.log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.contains("/videos"))
+        .count()
+}
+
+const GONE: &str = "gonegone001";
+const SKIP: &str = "skipskip001";
+
+#[test]
+fn duration_backfill_fills_null_rows_marks_omitted_and_never_requeries() {
+    let w = world(&[], std_routes(), ON, SOURCES);
+    {
+        let mut s = w.state.lock().unwrap();
+        for it in [
+            legacy_row(V1, TrackerOutcome::Line),
+            legacy_row(V2, TrackerOutcome::Line),
+            legacy_row(V3, TrackerOutcome::Note),
+            legacy_row(GONE, TrackerOutcome::Line),
+            legacy_row(SKIP, TrackerOutcome::Skipped),
+        ] {
+            assert!(s.insert_tracker_item(&it).unwrap());
+        }
+    }
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "new"), json!(0), "backfill never counts as an item");
+    assert_eq!(n(&o, "lines"), json!(0));
+    assert_eq!(n(&o, "failed"), json!(0));
+    assert_eq!(row_of(&w, "UCa", V1).duration_s, Some(600));
+    assert_eq!(row_of(&w, "UCa", V2).duration_s, Some(30));
+    assert_eq!(row_of(&w, "UCa", V3).duration_s, Some(3600));
+    assert_eq!(
+        row_of(&w, "UCa", GONE).duration_s,
+        Some(0),
+        "omitted id marked"
+    );
+    assert_eq!(
+        row_of(&w, "UCa", SKIP).duration_s,
+        None,
+        "skipped rows untouched"
+    );
+    for id in [V1, V2, V3, GONE] {
+        assert_eq!(row_of(&w, "UCa", id).word_count, None);
+    }
+    let calls = videos_calls(&w);
+    assert_eq!(calls, 1, "one batch");
+    run(&w).unwrap();
+    assert_eq!(videos_calls(&w), calls, "nothing re-queried next run");
+}
+
+#[test]
+fn failed_duration_backfill_leaves_rows_null_and_a_later_run_fills_them() {
+    let routes = vec![
+        ("playlistId=UUa", 200, playlist(&[V1, V2, V3])),
+        ("/videos", 503, String::new()),
+    ];
+    let mut w = world(&[], routes, ON, SOURCES);
+    {
+        let mut s = w.state.lock().unwrap();
+        for id in [V1, V2, V3] {
+            assert!(
+                s.insert_tracker_item(&legacy_row(id, TrackerOutcome::Line))
+                    .unwrap()
+            );
+        }
+    }
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "failed"), json!(0), "a backfill failure never fails");
+    assert_eq!(n(&o, "new"), json!(0));
+    assert_eq!(n(&o, "lines"), json!(0));
+    assert_eq!(row_of(&w, "UCa", V1).duration_s, None, "retryable");
+    w.base = w.rt.block_on(serve(std_routes(), w.log.clone()));
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "new"), json!(0));
+    assert_eq!(row_of(&w, "UCa", V1).duration_s, Some(600));
+    assert_eq!(row_of(&w, "UCa", V3).duration_s, Some(3600));
+}

@@ -2,9 +2,10 @@
 # embedding day note when `pipelines.toml` `[intake] mode = "view"` replaces the daily intake lines.
 # `this` = the day note. Rows come from state.db `tracker_items`; `note` outcomes link to the
 # captured note, `line` outcomes to the item URL. The `done` column is the editor's toggle.
-# Source = the source's display name (`sources.toml` at record time), else the kind label; Length =
-# the YouTube duration (`h:mm:ss` / `m:ss`), else a blog body's reading minutes from its word count
-# and `Settings.md` `reading_wpm`, else blank (plan intake-view-source-length WP-1).
+# Type = the kind label (YouTube / Blog / raw kind). Source = the source's display name
+# (`sources.toml` at record time, self-healed for older rows), blank when unknown. Length = the
+# YouTube duration (`h:mm:ss` / `m:ss`), else a blog body's reading minutes from its word count and
+# `Settings.md` `reading_wpm`, else blank. Plans intake-view-source-length, intake-type-column-length-backfill.
 source = "tracker_items"
 
 [filters]
@@ -12,7 +13,8 @@ and = ['day == this.file.name', 'outcome == "line" || outcome == "note"']
 
 [formulas]
 item = 'if(outcome == "note" && note_path, link(note_path, title), url(url, title))'
-source = 'if(source_name, source_name, if(source_kind == "youtube", "YouTube", if(source_kind == "blog", "Blog", source_kind)))'
+type = 'if(source_kind == "youtube", "YouTube", if(source_kind == "blog", "Blog", source_kind))'
+source = 'if(source_name, source_name, "")'
 mins = '(duration % 3600 - duration % 60) / 60'
 secs = 'if(duration % 60 < 10, "0", "") + duration % 60'
 wpm = 'number(file("_custom/Settings.md").properties.reading_wpm)'
@@ -20,6 +22,9 @@ length = 'if(duration, if(duration >= 3600, (duration - duration % 3600) / 3600 
 
 [properties."formula.item"]
 displayName = "Title"
+
+[properties."formula.type"]
+displayName = "Type"
 
 [properties."formula.source"]
 displayName = "Source"
@@ -33,4 +38,4 @@ displayName = "Done"
 [[views]]
 type = "table"
 name = "Intake"
-order = ["formula.item", "formula.source", "formula.length", "done"]
+order = ["formula.item", "formula.type", "formula.source", "formula.length", "done"]

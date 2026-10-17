@@ -191,6 +191,75 @@ impl StateDb {
         Ok(n)
     }
 
+    /// Sets `word_count` on one `line`/`note` row where it is NULL (the length backfill for rows
+    /// recorded before migration v7). Returns rows changed; raises the `tracker_items` change
+    /// signal only when some changed.
+    pub fn fill_tracker_word_count(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        word_count: i64,
+    ) -> Result<usize> {
+        self.fill_tracker_length("word_count", source_kind, source_key, item_id, word_count)
+    }
+
+    /// Sets `duration_s` on one `line`/`note` row where it is NULL (`0` = the video is no longer
+    /// available, rendered blank). Returns rows changed; raises the `tracker_items` change signal
+    /// only when some changed.
+    pub fn fill_tracker_duration(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        duration_s: i64,
+    ) -> Result<usize> {
+        self.fill_tracker_length("duration_s", source_kind, source_key, item_id, duration_s)
+    }
+
+    fn fill_tracker_length(
+        &mut self,
+        column: &'static str,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        value: i64,
+    ) -> Result<usize> {
+        let n = self.conn().execute(
+            &format!(
+                "UPDATE tracker_items SET {column} = ?4
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3
+                   AND {column} IS NULL AND outcome IN ('line', 'note')"
+            ),
+            params![source_kind, source_key, item_id, value],
+        )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n)
+    }
+
+    /// `(source_key, item_id)` of up to `limit` `line`/`note` rows of `source_kind` whose
+    /// `duration_s` is NULL (the YouTube duration backfill), oldest first.
+    pub fn tracker_items_missing_duration(
+        &self,
+        source_kind: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn().prepare(
+            "SELECT source_key, item_id FROM tracker_items
+             WHERE source_kind = ?1 AND outcome IN ('line', 'note') AND duration_s IS NULL
+             ORDER BY first_seen_ms, item_id LIMIT ?2",
+        )?;
+        let rows = st
+            .query_map(
+                params![source_kind, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Marks one item done (`done_ms` = now) or not done (`done_ms` = NULL). Returns whether a
     /// row matched; raises the `tracker_items` change signal when one did.
     pub fn set_tracker_item_done(

@@ -5,6 +5,10 @@
       "label": "Title"
     },
     {
+      "key": "formula.type",
+      "label": "Type"
+    },
+    {
       "key": "formula.source",
       "label": "Source"
     },
@@ -26,6 +30,10 @@
               "label": "Teaser",
               "t": "url",
               "url": "https://c.example/2"
+            },
+            {
+              "t": "text",
+              "v": "Blog"
             },
             {
               "t": "text",
@@ -51,6 +59,10 @@
             },
             {
               "t": "text",
+              "v": "YouTube"
+            },
+            {
+              "t": "text",
               "v": "Chan A"
             },
             {
@@ -70,6 +82,10 @@
               "label": "A video",
               "t": "url",
               "url": "https://y.example/1"
+            },
+            {
+              "t": "text",
+              "v": "YouTube"
             },
             {
               "t": "text",
@@ -96,6 +112,10 @@
             {
               "t": "text",
               "v": "Blog"
+            },
+            {
+              "t": "text",
+              "v": ""
             },
             {
               "t": "text",

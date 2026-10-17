@@ -369,6 +369,15 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 .map_err(|e| StepError::failed(format!("state: {e}")))?
                 .is_some();
             if recorded {
+                // Length backfill for rows recorded before v7: the store fills only a NULL
+                // `word_count` of a `line`/`note` row (plan intake-type-column-length-backfill).
+                if let Some(wc) = cand.word_count {
+                    ctx.state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .fill_tracker_word_count(KIND, &key, &post.post_id, wc)
+                        .map_err(|e| StepError::failed(format!("state: {e}")))?;
+                }
                 continue;
             }
             let already = seen.contains(&post.post_id)
