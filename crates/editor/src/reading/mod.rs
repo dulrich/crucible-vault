@@ -10,6 +10,7 @@
 //! Image handles are pinned per tab in the [`ImageCache`]; see that module for the release points
 //! (audit E2) and the handle-release vs renderer-reclamation distinction.
 
+pub mod selection;
 pub mod view;
 
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,7 @@ use crate::image_cache::{self, ImageCache};
 use crate::message::{Message, ReadingMsg, TabsMsg};
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
+use crate::widget::selectable::SelPos;
 
 /// Recompute debounce: a change is rendered once `edit_seq` has been stable for one tick.
 pub const TICK: Duration = Duration::from_millis(250);
@@ -105,6 +107,8 @@ pub struct Doc {
     pub model: RenderModel,
     /// Image `src` → resolved vault path (`None` = unresolved); remote images are absent.
     pub images: HashMap<String, Option<String>>,
+    /// Plan round-5 WP-7: the selectable runs in render order (copy text, select-all).
+    pub runs: Vec<selection::RunInfo>,
 }
 
 /// One tab's reading state.
@@ -154,6 +158,9 @@ pub struct ReadingStore {
     /// plan editor-ui-round-3 WP-5: the active find match per tab path, as (top-level render
     /// block, nth query occurrence inside it).
     find_active: HashMap<String, (usize, usize)>,
+    /// Plan round-5 WP-7: the Reading selection `(anchor, focus)` per (path, tab id); never
+    /// collapsed (an empty selection is absent). Cleared whenever the path's Doc is replaced.
+    sel: HashMap<(String, u64), (SelPos, SelPos)>,
 }
 
 /// The byte offset where 0-based `line` starts in `text` (`text.len()` past the end).
@@ -491,6 +498,44 @@ impl ReadingStore {
         self.tabs.get(path).and_then(|t| t.doc.as_ref())
     }
 
+    /// Plan round-5 WP-7: tab `view`'s Reading selection of `path` as `(anchor, focus)`.
+    pub fn selection(&self, path: &str, view: u64) -> Option<(SelPos, SelPos)> {
+        self.sel.get(&(path.to_owned(), view)).copied()
+    }
+
+    /// Sets (or clears: `None` or collapsed) tab `view`'s Reading selection of `path`.
+    pub fn set_selection(&mut self, path: &str, view: u64, sel: Option<(SelPos, SelPos)>) {
+        match sel.filter(|(a, f)| a != f) {
+            Some(s) => {
+                self.sel.insert((path.to_owned(), view), s);
+            }
+            None => {
+                self.sel.remove(&(path.to_owned(), view));
+            }
+        }
+    }
+
+    /// Ctrl+A: selects `path`'s whole rendered document in tab `view`; false when nothing is
+    /// rendered.
+    pub fn select_all(&mut self, path: &str, view: u64) -> bool {
+        let all = self.doc(path).and_then(|d| selection::all(&d.runs));
+        self.set_selection(path, view, all);
+        self.selection(path, view).is_some()
+    }
+
+    /// Plan round-5 WP-7 (the WP-8 accessor): the copy text of tab `view`'s Reading selection
+    /// of `path` — `None` when nothing (or only an empty range) is selected.
+    pub fn selection_text(&self, path: &str, view: u64) -> Option<String> {
+        let (a, f) = self.selection(path, view)?;
+        let text = selection::copy_text(&self.doc(path)?.runs, a, f);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Drops every tab's selection of `path` (its Doc was replaced or dropped).
+    fn clear_selections(&mut self, path: &str) {
+        self.sel.retain(|(p, _), _| p != path);
+    }
+
     /// A tab closed: forget its state and release its image pins (E2).
     pub fn on_tab_closed(&mut self, path: &str) {
         self.tabs.remove(path);
@@ -498,6 +543,7 @@ impl ReadingStore {
         self.find.remove(path);
         self.find_active.remove(path);
         self.top.retain(|(p, _), _| p != path);
+        self.clear_selections(path);
         self.images.release_owner(path);
     }
 
@@ -571,6 +617,7 @@ impl ReadingStore {
             entry.doc = None;
             let path = tab.path();
             self.top.retain(|(p, _), _| p != path);
+            self.sel.retain(|(p, _), _| p != path);
             entry.seen_seq = None;
             self.images.release_owner(tab.path());
         }
@@ -610,6 +657,9 @@ impl ReadingStore {
             }
         }
         self.images.retain_owner(tab.path(), &keep);
+        // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
+        self.clear_selections(tab.path());
+        let runs = selection::runs(&model);
         let entry = self.tabs.entry(tab.path().to_owned()).or_default();
         entry.seen_seq = Some(seq);
         entry.doc = Some(Doc {
@@ -619,6 +669,7 @@ impl ReadingStore {
             resolver_epoch: self.resolver_epoch,
             model,
             images,
+            runs,
         });
     }
 
@@ -883,6 +934,13 @@ pub fn update(
             store.titles.insert(path, value);
         }
         ReadingMsg::TitleRevert => store.titles.clear(),
+        ReadingMsg::Select { path, view, sel } => store.set_selection(&path, view, sel),
+        // Plan round-5 WP-7: a finished selection gesture goes to PRIMARY (as Source does).
+        ReadingMsg::SelectDone { path, view } => {
+            if let Some(text) = store.selection_text(&path, view) {
+                return iced::clipboard::write_primary(text);
+            }
+        }
         // Buffer edits and renames need the app (tabs, explorer, saves): handled in `App`.
         ReadingMsg::ToggleTask { .. }
         | ReadingMsg::ToggleProp { .. }
@@ -946,6 +1004,7 @@ pub fn tab_body<'a>(
     mode: cv_protocol::Mode,
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
+    focused: bool,
 ) -> Element<'a, Message> {
     use iced::Length;
     use iced::widget::{container, row};
@@ -953,12 +1012,20 @@ pub fn tab_body<'a>(
     let scale = view::reading_scale(font_size);
     match store.mode(tab.path()) {
         ViewMode::Source => crate::source::view(tab, t, mode, font_size, keymap),
-        ViewMode::Reading => view::reading(store, views, tab.path(), view, t, scale),
+        ViewMode::Reading => view::reading(store, views, tab.path(), view, t, scale, focused),
         ViewMode::Split => row![
             container(crate::source::view(tab, t, mode, font_size, keymap))
                 .width(Length::FillPortion(1)),
-            container(view::reading(store, views, tab.path(), view, t, scale))
-                .width(Length::FillPortion(1)),
+            container(view::reading(
+                store,
+                views,
+                tab.path(),
+                view,
+                t,
+                scale,
+                focused
+            ))
+            .width(Length::FillPortion(1)),
         ]
         .spacing(12)
         .into(),
@@ -1080,5 +1147,7 @@ pub fn probe(path: &str, view: u64, blocks: usize, scroll_to: Option<usize>) -> 
     })
 }
 
+#[cfg(test)]
+mod selection_tests;
 #[cfg(test)]
 mod tests;

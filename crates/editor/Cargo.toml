@@ -43,6 +43,8 @@ cv-schema = { path = "../cv-schema" }
 # local view-file diagnostics.
 views = { path = "../views" }
 ofm = { path = "../../../crucible-tui/crates/ofm" }
+# Plan round-5 WP-7: word bounds / grapheme steps of the Reading selection (already locked).
+unicode-segmentation = "=1.13.3"
 
 [dev-dependencies]
 tempfile = "=3.27.0"

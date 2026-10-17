@@ -183,6 +183,17 @@ pub enum ReadingMsg {
     TitleRevert,
     /// Blur poll result for `path`'s filename input.
     TitleFocus { path: String, focused: bool },
+    /// Plan round-5 WP-7: tab `view`'s Reading selection of `path` changed (`None` = cleared).
+    Select {
+        path: String,
+        view: u64,
+        sel: Option<(
+            crate::widget::selectable::SelPos,
+            crate::widget::selectable::SelPos,
+        )>,
+    },
+    /// Plan round-5 WP-7: a selection gesture ended (mouse release): copy to PRIMARY.
+    SelectDone { path: String, view: u64 },
     /// The save-before-rename finished.
     TitleSaved {
         path: String,

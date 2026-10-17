@@ -1087,6 +1087,7 @@ impl App {
             self.status.mode,
             self.prefs.font_size,
             &self.palette.keymap,
+            self.active_tab().is_some_and(|t| t.id == tab.id),
         )
     }
 
@@ -3445,11 +3446,43 @@ impl App {
             Some(Bound::Bookmark(p)) => return self.open_bookmark(&p),
             None => {}
         }
+        // Plan round-5 WP-7: unbound Ctrl+A / Ctrl+C go to the focused Reading view (a text
+        // input or the source editor would have captured them before the key listener).
+        if let Some(t) = self.reading_chord(c) {
+            return t;
+        }
         if crate::palette::chord::text_editing(c) || self.palette.actions.is_some() {
             return Task::none();
         }
         self.palette.pending_chord = Some(c.clone());
         self.fetch_actions()
+    }
+
+    /// Plan round-5 WP-7: Ctrl+A selects the focused Reading view's document, Ctrl+C copies its
+    /// selection to the clipboard. `None` = not a Reading chord here (the focused tab is not
+    /// showing Reading, or a modal is open).
+    fn reading_chord(&mut self, c: &crate::palette::chord::Chord) -> Option<Task<Message>> {
+        let plain_ctrl = c.command && !c.shift && !c.alt;
+        if !plain_ctrl || !matches!(c.key.as_str(), "a" | "c") {
+            return None;
+        }
+        if self.palette.open || self.switcher.open || self.dialog.is_some() {
+            return None;
+        }
+        let tab = self.active_note()?;
+        let (path, view) = (tab.path.clone(), tab.id);
+        if !self.reading.mode(&path).shows_reading() {
+            return None;
+        }
+        if c.key == "a" {
+            self.reading.select_all(&path, view);
+            return Some(Task::none());
+        }
+        Some(
+            self.reading
+                .selection_text(&path, view)
+                .map_or_else(Task::none, iced::clipboard::write),
+        )
     }
 
     /// Runs a preset action with its fixed params; a no-op when the action is not loaded.

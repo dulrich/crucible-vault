@@ -5,7 +5,7 @@ use editor_model::render::{
 };
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{
-    Space, button, column, container, image, rich_text, row, rule, scrollable, sensor, span, text,
+    Space, button, column, container, image, row, rule, scrollable, sensor, span, text,
 };
 use iced::{Border, Element, Font, Length, Theme};
 
@@ -13,11 +13,12 @@ use super::{Doc, ReadingStore, link_label};
 use crate::icons::Icon;
 use crate::message::{Message, ReadingMsg};
 use crate::theme::{Rgb, Tokens};
+use crate::widget::selectable::{self, SelPos};
 use std::borrow::Cow;
 
 /// A clickable target inside rich text.
-#[derive(Debug, Clone)]
-enum LinkTarget {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LinkTarget {
     /// A vault target (wiki-link target or relative md-link URL).
     Vault(String),
     /// A URL with a scheme: opened via `open_url` (plan usability-sprint-captures-links WP-3).
@@ -41,14 +42,34 @@ struct Ctx<'a> {
     active: Option<(usize, usize)>,
     cur_block: std::rc::Rc<std::cell::Cell<usize>>,
     seen: std::rc::Rc<std::cell::Cell<usize>>,
+    /// Plan round-5 WP-7: the next selectable run's index (render order = `selection::runs`).
+    run: std::rc::Rc<std::cell::Cell<usize>>,
+    /// The tab's selection `(anchor, focus)`.
+    sel: Option<(SelPos, SelPos)>,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     /// Counts one painted find occurrence; true when it is the active match's (WP-5).
     fn is_active_occurrence(&self) -> bool {
         let n = self.seen.get();
         self.seen.set(n + 1);
         self.active == Some((self.cur_block.get(), n))
+    }
+
+    /// Takes the next run index (plan round-5 WP-7).
+    fn next_run(&self) -> usize {
+        let i = self.run.get();
+        self.run.set(i + 1);
+        i
+    }
+
+    /// A selectable text run of `spans` at `size` (plan round-5 WP-7; replaces `rich_text`).
+    fn run_el(&self, spans: Vec<RSpan<'a>>, size: f32) -> Element<'a, Message> {
+        let i = self.next_run();
+        let len = spans.iter().map(|s| s.text.len()).sum();
+        let mut c = self.t.accent_ui.to_color();
+        c.a = 0.35;
+        selectable::run(i, spans, size, selectable::run_range(self.sel, i, len), c).into()
     }
 
     /// A design size (px; paragraph = 16) scaled to the current font size.
@@ -82,7 +103,8 @@ pub fn block_size(heading: Option<u8>) -> f32 {
     }
 }
 
-/// The reading pane for `path`; `scale` = [`reading_scale`]`(font_size)`.
+/// The reading pane for `path`; `scale` = [`reading_scale`]`(font_size)`; `keys` = the pane
+/// takes the selection keys (Shift+Arrows, Esc; plan round-5 WP-7).
 pub fn reading<'a>(
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
@@ -90,6 +112,7 @@ pub fn reading<'a>(
     view: u64,
     t: Tokens,
     scale: f32,
+    keys: bool,
 ) -> Element<'a, Message> {
     let Some(doc) = store.doc(path) else {
         return text("Rendering…").color(t.text_faint.to_color()).into();
@@ -106,6 +129,8 @@ pub fn reading<'a>(
         active: store.find_active(path),
         cur_block: std::rc::Rc::new(std::cell::Cell::new(usize::MAX)),
         seen: std::rc::Rc::new(std::cell::Cell::new(0)),
+        run: std::rc::Rc::new(std::cell::Cell::new(0)),
+        sel: store.selection(path, view),
     };
     // Fixed slot 0 (properties, `Space` when absent) keeps every body widget at a stable tree
     // position whether or not the note has frontmatter. The filename edit moved to the note
@@ -136,7 +161,7 @@ pub fn reading<'a>(
             );
         }
     }
-    scrollable(container(column(items).spacing(10)).padding(8))
+    let scroll = scrollable(container(column(items).spacing(10)).padding(8))
         .id(crate::find::reading_scroll_id(path, view))
         .on_scroll(move |_| {
             Message::Reading(ReadingMsg::Scrolled {
@@ -145,8 +170,29 @@ pub fn reading<'a>(
             })
         })
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill);
+    // Plan round-5 WP-7: the gesture root owns press/drag/keys; the selection is the tab's.
+    selectable::root(
+        scroll,
+        crate::find::reading_scroll_id(path, view),
+        cx.sel,
+        keys,
+        move |sel| {
+            Message::Reading(ReadingMsg::Select {
+                path: path.to_owned(),
+                view,
+                sel,
+            })
+        },
+        move || {
+            Message::Reading(ReadingMsg::SelectDone {
+                path: path.to_owned(),
+                view,
+            })
+        },
+        link_msg(path),
+    )
+    .into()
 }
 
 /// The read-only frontmatter block (an empty `Space` when there is none).
@@ -203,9 +249,7 @@ fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
                     .color(t.text_dim.to_color())
             )
             .width(Length::Fixed(140.0)),
-            rich_text(spans)
-                .size(cx.sz(14.0))
-                .on_link_click(link_msg(cx.path)),
+            cx.run_el(spans, cx.sz(14.0)),
         ]
         .spacing(8)
         .into()
@@ -305,7 +349,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             );
             let edge = callout_color(kind, t);
             let mut col: Vec<Element<'a, Message>> =
-                vec![text(head).size(cx.sz(16.0)).color(edge.to_color()).into()];
+                vec![cx.run_el(vec![span(head).color(edge.to_color())], cx.sz(16.0))];
             // Folding is shown by the marker; the body stays readable (no fold state in v0).
             col.extend(children.iter().map(|c| block(cx, c)));
             boxed(column(col).spacing(6).into(), t, edge)
@@ -325,7 +369,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             painted(cx, &mut spans, Cow::Borrowed(code.as_str()), |p| {
                 span(p).font(Font::MONOSPACE).color(t.text.to_color())
             });
-            col.push(rich_text(spans).size(cx.sz(14.0)).into());
+            col.push(cx.run_el(spans, cx.sz(14.0)));
             boxed(column(col).spacing(4).into(), t, t.line)
         }
         Block::BlockQuote(children) => {
@@ -351,7 +395,11 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             alt,
             width,
             remote,
-        } => image_block(cx, src, alt, *width, *remote),
+        } => {
+            // Plan round-5 WP-7: an image holds a run slot (its alt text is copy text).
+            cx.next_run();
+            image_block(cx, src, alt, *width, *remote)
+        }
         Block::Transclusion {
             target,
             fragment,
@@ -361,12 +409,14 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
                 Some(f) => format!("↳ {target}#{f}"),
                 None => format!("↳ {target}"),
             };
-            let head: Element<'a, Message> = rich_text([span(label)
-                .color(t.accent_ui.to_color())
-                .link(LinkTarget::Vault(target.clone()))])
-            .size(cx.sz(13.0))
-            .on_link_click(link_msg(cx.path))
-            .into();
+            let head: Element<'a, Message> = cx.run_el(
+                vec![
+                    span(label)
+                        .color(t.accent_ui.to_color())
+                        .link(LinkTarget::Vault(target.clone())),
+                ],
+                cx.sz(13.0),
+            );
             let body: Element<'a, Message> = match content {
                 Some(blocks) => column(blocks.iter().map(|c| block(cx, c)))
                     .spacing(6)
@@ -574,6 +624,7 @@ fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Ele
         strike: cx.strike || it.task.is_some_and(task_struck),
         cur_block: cx.cur_block.clone(),
         seen: cx.seen.clone(),
+        run: cx.run.clone(),
         ..*cx
     };
     row![
@@ -788,7 +839,7 @@ fn inlines_view<'a>(
                     .color(t.text.to_color())
             }),
             Inline::WikiLink { target, .. } => {
-                // No permanent underline: rich_text underlines the hovered link itself.
+                // No permanent underline: the run widget underlines the hovered link itself.
                 let label = super::inline_visible(i).unwrap_or_default().into_owned();
                 painted(cx, &mut spans, Cow::Owned(label), |p| {
                     span(p)
@@ -820,10 +871,7 @@ fn inlines_view<'a>(
     if spans.is_empty() {
         spans.push(span(inline_text(inlines)));
     }
-    rich_text(spans)
-        .size(size)
-        .on_link_click(link_msg(cx.path))
-        .into()
+    cx.run_el(spans, size)
 }
 
 #[cfg(test)]
