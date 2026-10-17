@@ -201,6 +201,10 @@ async fn serve(routes: HashMap<String, (String, Vec<u8>)>, hook: Option<Hook>) -
                     h(&path);
                 }
                 let resp = match routes.get(&path) {
+                    _ if path.starts_with("/throttle") => {
+                        b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec()
+                    }
                     Some((ct, body)) => {
                         let mut r = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -594,6 +598,45 @@ fn folder_backfill_is_bounded_resumes_and_records_failures() {
     assert!(env.text("Clippings/b.md").contains("gone.png"));
     assert!(env.text("Clippings/e.md").contains("127.0.0.1"));
     assert!(env.text("other/x.md").contains("127.0.0.1"));
+}
+
+#[test]
+fn folder_backfill_throttle_is_not_a_permanent_failure() {
+    let img = png(9);
+    let routes = HashMap::from([route("/ok.png", "image/png", img)]);
+    let (env, outs) = with_server(routes, None, move |port, _| {
+        let ok = format!("![](http://127.0.0.1:{port}/ok.png)\n");
+        let limited = format!("![](http://127.0.0.1:{port}/throttle.png)\n");
+        let env = env(
+            &[
+                ("daily/a.md", ok.as_bytes()),
+                ("daily/b.md", limited.as_bytes()),
+                ("daily/c.md", ok.as_bytes()),
+            ],
+            false,
+        );
+        let step = env.step("scope = \"folder\"\nfolder = \"daily\"\nlimit = 10");
+        let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
+        (env, outs)
+    });
+    let v = |i: usize, k: &str| var(&outs[i], k);
+    // Run 1: a localized; b throttled → not recorded, batch ends; b and c stay unattempted.
+    assert_eq!(
+        (
+            v(0, "localized"),
+            v(0, "failed"),
+            v(0, "throttled"),
+            v(0, "unattempted_remaining")
+        ),
+        (1, 0, 1, 2)
+    );
+    assert!(
+        ignored(&env).is_empty(),
+        "a throttled note is never recorded"
+    );
+    // Run 2: b is re-selected (still throttled) — progress waits on the host, nothing is lost.
+    assert_eq!((v(1, "throttled"), v(1, "unattempted_remaining")), (1, 2));
+    assert!(env.text("daily/b.md").contains("throttle.png"));
 }
 
 #[test]

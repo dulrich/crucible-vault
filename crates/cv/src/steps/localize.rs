@@ -973,6 +973,8 @@ pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
 enum DownloadError {
     /// Connect/timeout: the network (or host) is unreachable.
     Unreachable,
+    /// HTTP 429 / 503: the host asks us to come back later (not a property of the image).
+    Throttled,
     /// Anything else (HTTP status, body error, too large).
     Failed(String),
 }
@@ -992,8 +994,14 @@ fn download(
     };
     handle.block_on(async {
         let resp = client.get(url).send().await.map_err(classify)?;
-        if !resp.status().is_success() {
-            return Err(DownloadError::Failed(format!("http {}", resp.status())));
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        {
+            return Err(DownloadError::Throttled);
+        }
+        if !status.is_success() {
+            return Err(DownloadError::Failed(format!("http {status}")));
         }
         if resp.content_length().is_some_and(|n| n > max_bytes) {
             return Err(DownloadError::Failed("too large".into()));
@@ -1135,6 +1143,8 @@ struct Counts {
     stripped: u64,
     failed: u64,
     unreachable: u64,
+    /// Downloads refused with 429/503 (also counted in `failed`).
+    throttled: u64,
     remote_attempts: u64,
     created: Vec<String>,
 }
@@ -1209,8 +1219,10 @@ impl Run<'_> {
             Err(e) => {
                 tracing::debug!(error = ?e, "localize: download failed (left as-is)");
                 self.counts.failed += 1;
-                if e == DownloadError::Unreachable {
-                    self.counts.unreachable += 1;
+                match e {
+                    DownloadError::Unreachable => self.counts.unreachable += 1,
+                    DownloadError::Throttled => self.counts.throttled += 1,
+                    DownloadError::Failed(_) => {}
                 }
                 return Ok(None);
             }
@@ -1349,6 +1361,8 @@ fn lock_state<'c>(
 /// Folder-scope backfill: candidates are `.md` under `folder` (sorted) with remote/data image
 /// refs that are not recorded under [`BACKFILL_KIND`]; at most `limit` are attempted. A note
 /// whose localize errs, or that still has such refs afterwards, is recorded (never re-selected).
+/// A note whose downloads were throttled (429/503) is neither recorded nor counted as attempted,
+/// and ends the batch: the host is rate-limiting, so a later run retries it (`throttled = 1`).
 fn execute_folder(
     p: &Params,
     folder: &str,
@@ -1371,7 +1385,7 @@ fn execute_folder(
             candidates.push(f);
         }
     }
-    let (mut localized, mut failed, mut attempted) = (0_u64, 0_u64, 0_u64);
+    let (mut localized, mut failed, mut attempted, mut throttled) = (0_u64, 0_u64, 0_u64, 0_u64);
     let mut output_paths = Vec::new();
     for f in &candidates {
         if attempted >= p.limit {
@@ -1380,6 +1394,11 @@ fn execute_folder(
         attempted += 1;
         let reason = match execute_note(p, f, ctx) {
             Ok(o) => {
+                let hit_limit = o
+                    .vars
+                    .get("throttled")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|n| n > 0);
                 for op in o.output_paths {
                     if !output_paths.contains(&op) {
                         output_paths.push(op);
@@ -1388,6 +1407,11 @@ fn execute_folder(
                 let left = ctx
                     .read(f)?
                     .is_some_and(|(b, _)| std::str::from_utf8(&b).is_ok_and(has_remote_image_refs));
+                if left && hit_limit {
+                    attempted -= 1;
+                    throttled += 1;
+                    break;
+                }
                 left.then(|| "refs remain after localize".to_owned())
             }
             Err(e @ StepError::Deferred { .. }) => return Err(e),
@@ -1410,6 +1434,7 @@ fn execute_folder(
         scanned,
         localized,
         failed,
+        throttled,
         unattempted_remaining,
         "localize backfill"
     );
@@ -1417,6 +1442,7 @@ fn execute_folder(
     vars.insert("scanned".into(), scanned.into());
     vars.insert("localized".into(), localized.into());
     vars.insert("failed".into(), failed.into());
+    vars.insert("throttled".into(), throttled.into());
     vars.insert("unattempted_remaining".into(), unattempted_remaining.into());
     Ok(StepOutcome {
         output_paths,
@@ -1604,6 +1630,7 @@ fn execute_note(p: &Params, path: &str, ctx: &mut StepCtx<'_>) -> Result<StepOut
     vars.insert("reused".into(), c.reused.into());
     vars.insert("stripped".into(), c.stripped.into());
     vars.insert("failed".into(), c.failed.into());
+    vars.insert("throttled".into(), c.throttled.into());
     vars.insert("images".into(), images.into());
     vars.insert(
         "localized".into(),
