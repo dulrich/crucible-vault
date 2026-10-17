@@ -640,6 +640,103 @@ fn folder_backfill_throttle_is_not_a_permanent_failure() {
 }
 
 #[test]
+fn embed_pages_are_not_attachments() {
+    for u in [
+        "https://www.youtube.com/watch?v=abc",
+        "https://youtube.com/shorts/abc",
+        "https://m.youtube.com/watch?v=abc",
+        "https://www.youtube.com/embed/abc",
+        "https://youtu.be/abc",
+        "https://x.com/someone/status/123",
+        "https://twitter.com/i/status/123",
+    ] {
+        assert!(localize::is_embed_page(u), "{u}");
+        assert!(
+            !localize::has_remote_image_refs(&format!("![]({u})")),
+            "{u}"
+        );
+    }
+    for u in [
+        "https://i.ytimg.com/vi/abc/hqdefault.jpg",
+        "https://www.youtube.com/",
+        "https://pbs.twimg.com/media/a.jpg",
+        "https://x.com/someone",
+    ] {
+        assert!(!localize::is_embed_page(u), "{u}");
+    }
+    assert!(localize::has_remote_image_refs(
+        "![](https://www.youtube.com/watch?v=a)\n![](https://x.test/a.png)"
+    ));
+}
+
+#[test]
+fn a_page_response_is_ineligible_not_failed() {
+    let img = png(3);
+    let routes = HashMap::from([
+        route("/ok.png", "image/png", img),
+        route(
+            "/page.png",
+            "text/html; charset=utf-8",
+            b"<html></html>".to_vec(),
+        ),
+    ]);
+    let (env, out) = with_server(routes, None, move |port, _| {
+        let note = format!(
+            "![](http://127.0.0.1:{port}/ok.png)\n![](http://127.0.0.1:{port}/page.png)\n![](https://www.youtube.com/watch?v=a)\n"
+        );
+        let env = env(&[("n.md", note.as_bytes())], false);
+        let step = env.step("");
+        let out = env.run(&step, "n.md").unwrap();
+        (env, out)
+    });
+    assert_eq!(
+        (
+            var(&out, "downloaded"),
+            var(&out, "failed"),
+            var(&out, "ineligible")
+        ),
+        (1, 0, 2)
+    );
+    let t = env.text("n.md");
+    assert!(t.contains("/page.png") && t.contains("youtube.com/watch"));
+    assert!(!t.contains("/ok.png"));
+}
+
+#[test]
+fn folder_backfill_settles_ineligible_notes_and_skips_embed_only_notes() {
+    let routes = HashMap::from([route("/page.png", "text/html", b"<html></html>".to_vec())]);
+    let (env, outs) = with_server(routes, None, move |port, _| {
+        let page = format!("![](http://127.0.0.1:{port}/page.png)\n");
+        let env = env(
+            &[
+                ("daily/a.md", page.as_bytes()),
+                ("daily/v.md", b"![](https://www.youtube.com/watch?v=a)\n"),
+            ],
+            false,
+        );
+        let step = env.step("scope = \"folder\"\nfolder = \"daily\"\nlimit = 10");
+        let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
+        (env, outs)
+    });
+    let v = |i: usize, k: &str| var(&outs[i], k);
+    assert_eq!(
+        (
+            v(0, "localized"),
+            v(0, "failed"),
+            v(0, "ineligible"),
+            v(0, "unattempted_remaining")
+        ),
+        (0, 0, 1, 0)
+    );
+    assert_eq!(
+        ignored(&env),
+        ["daily/a.md"],
+        "settled, never the embed-only note"
+    );
+    assert_eq!((v(1, "ineligible"), v(1, "unattempted_remaining")), (0, 0));
+}
+
+#[test]
 fn folder_scope_params_validate() {
     let c = config();
     let mk = |src: &str| {

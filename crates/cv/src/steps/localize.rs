@@ -467,6 +467,29 @@ fn fenced_ranges(content: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// A remote link Obsidian renders as an embedded page (YouTube video, X/Twitter post), not an
+/// attachment: never downloaded and never a backfill candidate.
+pub fn is_embed_page(link: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(link.trim()) else {
+        return false;
+    };
+    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let host = host.strip_prefix("m.").unwrap_or(host);
+    let path = u.path();
+    match host {
+        "youtube.com" | "music.youtube.com" | "youtube-nocookie.com" => {
+            path == "/watch"
+                || ["/shorts/", "/embed/", "/live/"]
+                    .iter()
+                    .any(|p| path.starts_with(p))
+        }
+        "youtu.be" => path.len() > 1,
+        "x.com" | "twitter.com" | "mobile.twitter.com" => path.contains("/status/"),
+        _ => false,
+    }
+}
+
 fn is_remote(link: &str) -> bool {
     let l = link.get(..8).unwrap_or(link).to_ascii_lowercase();
     l.starts_with("http://") || l.starts_with("https://")
@@ -626,6 +649,17 @@ impl Media {
 }
 
 /// Crucible `extFromMime`.
+/// A Content-Type naming a document page rather than a media file.
+fn is_page_mime(mime: &str) -> bool {
+    let head = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    head.starts_with("text/") || head == "application/xhtml+xml"
+}
+
 fn ext_from_mime(mime: &str) -> Option<&'static str> {
     let head = mime
         .split(';')
@@ -975,6 +1009,9 @@ enum DownloadError {
     Unreachable,
     /// HTTP 429 / 503: the host asks us to come back later (not a property of the image).
     Throttled,
+    /// The response's type (Content-Type, else the URL extension) is not an eligible
+    /// attachment; the body was not read.
+    NotEligible,
     /// Anything else (HTTP status, body error, too large).
     Failed(String),
 }
@@ -984,6 +1021,7 @@ fn download(
     handle: &tokio::runtime::Handle,
     url: &str,
     max_bytes: u64,
+    eligible: impl Fn(&str) -> bool,
 ) -> Result<(Vec<u8>, String), DownloadError> {
     let classify = |e: reqwest::Error| {
         if e.is_connect() || e.is_timeout() {
@@ -1012,14 +1050,22 @@ fn download(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_owned();
-        let bytes = resp.bytes().await.map_err(classify)?;
-        if bytes.len() as u64 > max_bytes {
-            return Err(DownloadError::Failed("too large".into()));
+        // Content-type aware: decide from the headers, before reading the body. A page
+        // (`text/*`, XHTML) is never an attachment, whatever the URL's extension says.
+        if is_page_mime(&ctype) {
+            return Err(DownloadError::NotEligible);
         }
         let ext = ext_from_mime(&ctype)
             .map(str::to_owned)
             .or_else(|| ext_from_url(url))
             .unwrap_or_else(|| "bin".into());
+        if !eligible(&ext) {
+            return Err(DownloadError::NotEligible);
+        }
+        let bytes = resp.bytes().await.map_err(classify)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(DownloadError::Failed("too large".into()));
+        }
         Ok((bytes.to_vec(), ext))
     })
 }
@@ -1145,6 +1191,9 @@ struct Counts {
     unreachable: u64,
     /// Downloads refused with 429/503 (also counted in `failed`).
     throttled: u64,
+    /// Remote refs left as-is because they are not eligible attachments (embed pages, or a
+    /// response type outside the whitelists) — not failures.
+    ineligible: u64,
     remote_attempts: u64,
     created: Vec<String>,
 }
@@ -1213,22 +1262,33 @@ impl Run<'_> {
         let (Some(client), Some(handle)) = (self.client.as_ref(), self.handle.as_ref()) else {
             return Err(StepError::failed("no async runtime"));
         };
+        if is_embed_page(&m.link) {
+            self.counts.ineligible += 1;
+            return Ok(None);
+        }
         self.counts.remote_attempts += 1;
-        let (bytes, ext) = match download(client, handle, &m.link, self.p.max_bytes) {
+        let p = self.p;
+        let (bytes, ext) = match download(client, handle, &m.link, p.max_bytes, |e| p.eligible(e)) {
             Ok(d) => d,
+            Err(DownloadError::NotEligible) => {
+                // Crucible: "ext not eligible (left as-is)" — not a failure.
+                self.counts.ineligible += 1;
+                return Ok(None);
+            }
             Err(e) => {
                 tracing::debug!(error = ?e, "localize: download failed (left as-is)");
                 self.counts.failed += 1;
                 match e {
                     DownloadError::Unreachable => self.counts.unreachable += 1,
                     DownloadError::Throttled => self.counts.throttled += 1,
-                    DownloadError::Failed(_) => {}
+                    DownloadError::Failed(_) | DownloadError::NotEligible => {}
                 }
                 return Ok(None);
             }
         };
         if !self.p.eligible(&ext) {
             // Crucible: "ext not eligible (left as-is)" — not a failure.
+            self.counts.ineligible += 1;
             return Ok(None);
         }
         let (bytes, ext) = self.maybe_convert(bytes, &ext);
@@ -1333,7 +1393,8 @@ pub fn has_remote_image_refs(content: &str) -> bool {
     let outside = |at: usize| !fenced.iter().any(|&(a, b)| at >= a && at < b);
     remote_md_image_re().captures_iter(content).any(|c| {
         c.get(0).is_some_and(|m| outside(m.start()))
-            && c.get(2).is_some_and(|u| is_remote(u.as_str()))
+            && c.get(2)
+                .is_some_and(|u| is_remote(u.as_str()) && !is_embed_page(u.as_str()))
     }) || data_uri_image_re()
         .find_iter(content)
         .any(|m| outside(m.start()))
@@ -1363,6 +1424,9 @@ fn lock_state<'c>(
 /// whose localize errs, or that still has such refs afterwards, is recorded (never re-selected).
 /// A note whose downloads were throttled (429/503) is neither recorded nor counted as attempted,
 /// and ends the batch: the host is rate-limiting, so a later run retries it (`throttled = 1`).
+/// A note left only with refs that are not eligible attachments (embed pages excluded up front;
+/// e.g. a URL serving HTML) is settled — recorded so it is not re-selected, counted `ineligible`,
+/// not `failed`.
 fn execute_folder(
     p: &Params,
     folder: &str,
@@ -1386,6 +1450,7 @@ fn execute_folder(
         }
     }
     let (mut localized, mut failed, mut attempted, mut throttled) = (0_u64, 0_u64, 0_u64, 0_u64);
+    let mut ineligible = 0_u64;
     let mut output_paths = Vec::new();
     for f in &candidates {
         if attempted >= p.limit {
@@ -1394,11 +1459,9 @@ fn execute_folder(
         attempted += 1;
         let reason = match execute_note(p, f, ctx) {
             Ok(o) => {
-                let hit_limit = o
-                    .vars
-                    .get("throttled")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|n| n > 0);
+                let n = |k: &str| o.vars.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let hit_limit = n("throttled") > 0;
+                let failed_refs = n("failed");
                 for op in o.output_paths {
                     if !output_paths.contains(&op) {
                         output_paths.push(op);
@@ -1412,7 +1475,19 @@ fn execute_folder(
                     throttled += 1;
                     break;
                 }
-                left.then(|| "refs remain after localize".to_owned())
+                if left && failed_refs == 0 {
+                    ineligible += 1;
+                    lock_state(ctx)?
+                        .insert_ignored_id(
+                            BACKFILL_KIND,
+                            f,
+                            "settled: remaining refs are not eligible attachments",
+                            super::tracker::now_ms(),
+                        )
+                        .map_err(|e| StepError::failed(format!("localize: state: {e}")))?;
+                    continue;
+                }
+                left.then(|| format!("{failed_refs} download(s) failed; refs remain"))
             }
             Err(e @ StepError::Deferred { .. }) => return Err(e),
             Err(e) => Some(e.to_string()),
@@ -1434,6 +1509,7 @@ fn execute_folder(
         scanned,
         localized,
         failed,
+        ineligible,
         throttled,
         unattempted_remaining,
         "localize backfill"
@@ -1443,6 +1519,7 @@ fn execute_folder(
     vars.insert("localized".into(), localized.into());
     vars.insert("failed".into(), failed.into());
     vars.insert("throttled".into(), throttled.into());
+    vars.insert("ineligible".into(), ineligible.into());
     vars.insert("unattempted_remaining".into(), unattempted_remaining.into());
     Ok(StepOutcome {
         output_paths,
@@ -1631,6 +1708,7 @@ fn execute_note(p: &Params, path: &str, ctx: &mut StepCtx<'_>) -> Result<StepOut
     vars.insert("stripped".into(), c.stripped.into());
     vars.insert("failed".into(), c.failed.into());
     vars.insert("throttled".into(), c.throttled.into());
+    vars.insert("ineligible".into(), c.ineligible.into());
     vars.insert("images".into(), images.into());
     vars.insert(
         "localized".into(),
