@@ -620,18 +620,38 @@ fn image_block<'a>(
     let Some(Some(key)) = cx.doc.images.get(src) else {
         return placeholder(format!("[missing image: {alt}]"));
     };
-    let content: Element<'a, Message> = match cx.store.images.get(key) {
-        Some(h) => {
+    // Plan round-5 WP-2: the header-read size sizes the placeholder exactly as the decoded image
+    // will be (a transparent same-aspect handle, `expand` + Contain), so nothing below jumps.
+    let dims = cx.store.images.dims(key);
+    let natural = |d: &crate::image_cache::Dims| width.unwrap_or(d.width) as f32;
+    let content: Element<'a, Message> = match (cx.store.images.get(key), dims) {
+        (Some(h), _) => {
             let img = image(h.clone());
             match width {
                 Some(w) => img.width(Length::Fixed(w as f32)).into(),
                 None => img.into(),
             }
         }
-        None => container(text(alt).size(cx.sz(13.0)).color(t.text_faint.to_color()))
+        (None, Some(d)) => iced::widget::stack![
+            image(d.placeholder.clone())
+                .width(Length::Fixed(natural(d)))
+                .expand(true),
+            text(alt).size(cx.sz(13.0)).color(t.text_faint.to_color()),
+        ]
+        .into(),
+        (None, None) => container(text(alt).size(cx.sz(13.0)).color(t.text_faint.to_color()))
             .height(Length::Fixed(120.0))
             .width(Length::Fill)
             .into(),
+    };
+    // Plan round-5 WP-2: anticipate by the element's own extent so an image taller than the
+    // viewport stays pinned (shown) while any part of it overlaps the viewport.
+    let margin = match dims {
+        Some(d) => {
+            let w = natural(d).min(crate::image_cache::MAX_WIDTH as f32);
+            crate::image_cache::sensor_margin(w, d.scaled_height(w))
+        }
+        None => crate::image_cache::sensor_margin(crate::image_cache::MAX_WIDTH as f32, 120.0),
     };
     let tab = cx.path.to_owned();
     let shown_key = key.clone();
@@ -643,6 +663,7 @@ fn image_block<'a>(
     };
     let sensed = sensor(content)
         .key_ref(key.as_str())
+        .anticipate(margin)
         .on_show(move |size| {
             Message::Reading(ReadingMsg::ImageShown {
                 tab: shown_tab.clone(),

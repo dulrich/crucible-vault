@@ -153,21 +153,19 @@ fn recompute_only_when_edit_seq_moves() {
 
 #[test]
 fn lru_evicts_by_bytes() {
+    // Plan round-5 WP-2: eviction never drops a shown (pinned) image, and every cached entry
+    // is pinned (unpinned entries are released at once), so over budget the shown set stays.
     let mut c = ImageCache::with_budget(1000);
     for k in ["a", "b", "c"] {
         assert!(c.show("t", k));
         assert!(!c.show("t", k), "in flight: no second load");
         assert!(c.loaded(k, Some(fake_decoded(400))));
     }
-    // 1200 > 1000: the least recently used ("a") went.
-    assert_eq!(c.len(), 2);
+    assert_eq!(c.len(), 3, "all shown: none evicted");
+    assert_eq!(c.used_bytes(), 1200);
+    // Hiding releases at once, bringing the cache back within budget.
+    c.hide("t", "a");
     assert!(!c.contains("a"));
-    assert_eq!(c.used_bytes(), 800);
-    // Touch "b", load "d": "c" is now the LRU.
-    assert!(!c.show("t", "b"));
-    assert!(c.show("t", "d"));
-    c.loaded("d", Some(fake_decoded(400)));
-    assert!(c.contains("b") && c.contains("d") && !c.contains("c"));
     assert!(c.used_bytes() <= c.budget());
     // A load nobody waits for any more is discarded.
     assert!(c.show("t", "e"));
@@ -834,4 +832,134 @@ fn source_counterpart_skips_invisible_matches() {
         .map(|r| source_counterpart(&m, text, "foo", r))
         .collect();
     assert_eq!(got, vec![None, None, None, Some((1, 0)), Some((1, 1))]);
+}
+
+/// Plan round-5 WP-2: the placeholder (header-read size) is exactly as tall as the decoded image
+/// displayed at the same width.
+#[test]
+fn placeholder_height_matches_the_decoded_scaled_height() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let path = tmp.path().join("pic.png");
+    let bytes = png(300, 150);
+    std::fs::write(&path, &bytes).expect("write");
+    let (w, h) = crate::image_cache::header_dims(&path).expect("header");
+    assert_eq!((w, h), (300, 150));
+    let dims = crate::image_cache::Dims::new(w, h).expect("dims");
+    for display in [64u32, 200, 300] {
+        let d = decode(&bytes, display).expect("decode");
+        assert_eq!(dims.scaled_height(d.width as f32), d.height as f32);
+    }
+    // The cache records it once the key is known.
+    let mut c = ImageCache::with_budget(1 << 20);
+    c.note_dims("pic.png", tmp.path());
+    assert_eq!(
+        c.dims("pic.png").map(|d| (d.width, d.height)),
+        Some((300, 150))
+    );
+    c.note_dims("missing.png", tmp.path());
+    assert!(
+        c.dims("missing.png").is_none(),
+        "unknown dims: 120 px fallback"
+    );
+}
+
+/// Plan round-5 WP-2: iced's sensor visibility test (`sensor.rs:207-213`: nearest-corner distance
+/// against `anticipate`) — a tall image covering the viewport is hidden with margin 0 and stays
+/// shown with ours; and eviction never drops a pinned image.
+#[test]
+fn tall_image_stays_pinned_while_it_overlaps_the_viewport() {
+    use iced::{Point, Rectangle, Size, Vector};
+    let visible = |viewport: Rectangle, bounds: Rectangle, anticipate: f32| {
+        let tl = viewport.distance(bounds.position());
+        let br = viewport.distance(bounds.position() + Vector::from(bounds.size()));
+        tl.min(br) <= anticipate
+    };
+    let viewport = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+    let (w, h) = (700.0, 3000.0);
+    let margin = crate::image_cache::sensor_margin(w, h);
+    for y in [-2399.0, -1200.0, -10.0, 590.0] {
+        let bounds = Rectangle::new(Point::new(20.0, y), Size::new(w, h));
+        assert!(visible(viewport, bounds, margin), "y={y}: overlaps");
+    }
+    let covering = Rectangle::new(Point::new(20.0, -1200.0), Size::new(w, h));
+    assert!(
+        !visible(viewport, covering, 0.0),
+        "the iced default reports a covering image hidden (the jump's cause)"
+    );
+
+    let mut c = ImageCache::with_budget(100);
+    for k in ["a", "b"] {
+        assert!(c.show("t", k));
+        assert!(c.loaded(k, Some(fake_decoded(80))));
+    }
+    assert!(
+        c.contains("a") && c.contains("b"),
+        "shown images are never evicted"
+    );
+    c.hide("t", "a");
+    assert!(!c.contains("a"));
+}
+
+/// Plan round-5 WP-2: a Doc rendered before its attachment is resolvable re-renders with the
+/// image once the attachment appears (index generation unchanged on the editor side).
+#[test]
+fn late_attachment_re_renders_the_doc() {
+    use cv_protocol::{ChangeKind, Notification, Origin};
+
+    use crate::message::StatusMsg;
+
+    let pic = png(8, 4);
+    let h = crate::daemon::ContentHash::of(&pic);
+    let key = format!("_attachments/A/{}_FAKE.png", &h.as_str()[..16]);
+    let body = format!("![]({})\n", key.replace('_', "%5F"));
+    let (_tmp, d) = setup(&[("A.md", body.as_bytes())]);
+    let mut app = app_on(&d, "A.md");
+    reading(&mut app, "A.md", ViewMode::Reading);
+    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let resolved = |app: &App| {
+        app.reading
+            .doc("A.md")
+            .and_then(|doc| doc.images.values().next().cloned().flatten())
+    };
+    assert_eq!(resolved(&app), None, "not resolvable yet");
+    let written = d.write_attachment("A.md", "png", &pic).expect("attach");
+    assert_eq!(written, key);
+    // The live daemon indexes incrementally (same generation); the fake rebuilds into a new
+    // one. Point the editor's reader at it and re-stamp the Doc with that generation, so the
+    // only change left is the vault membership one (the race: before the fix nothing marked
+    // the Doc stale and it kept the broken image).
+    d.index().on_generation(u64::MAX).expect("reader");
+    let doc = app
+        .reading
+        .tabs
+        .get_mut("A.md")
+        .and_then(|t| t.doc.as_mut())
+        .expect("doc");
+    doc.generation = d.index().generation();
+    let _ = app.update(Message::Status(StatusMsg::Notification(
+        Notification::FileChanged {
+            path: key.clone(),
+            kind: ChangeKind::Created,
+            hash: None,
+            origin: Origin::Daemon,
+        },
+    )));
+    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    assert_eq!(
+        resolved(&app),
+        Some(key.clone()),
+        "re-rendered with the image"
+    );
+    assert_eq!(
+        app.reading.images.dims(&key).map(|d| (d.width, d.height)),
+        Some((8, 4))
+    );
+}
+
+#[test]
+fn percent_decode_handles_every_escape() {
+    assert_eq!(percent_decode("a%20b%5Fc"), "a b_c");
+    assert_eq!(percent_decode("caf%C3%A9.png"), "café.png");
+    assert_eq!(percent_decode("100%zz%2"), "100%zz%2");
+    assert_eq!(percent_decode("bad%FF"), "bad%FF");
 }

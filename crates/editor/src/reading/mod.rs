@@ -99,6 +99,9 @@ pub struct Doc {
     pub epoch: u64,
     /// The index generation links/images were resolved against.
     pub generation: Option<u64>,
+    /// The [`ReadingStore`] resolver epoch this was resolved against (plan round-5 WP-2): a
+    /// file created/deleted/renamed keeps the index generation, so this marks the Doc stale.
+    pub resolver_epoch: u64,
     pub model: RenderModel,
     /// Image `src` → resolved vault path (`None` = unresolved); remote images are absent.
     pub images: HashMap<String, Option<String>>,
@@ -127,6 +130,9 @@ pub struct ReadingStore {
     tabs: HashMap<String, TabReading>,
     pub images: ImageCache,
     resolver: Option<ResolverCache>,
+    /// Bumped by [`ReadingStore::invalidate_resolver`]; Docs resolved under an older epoch
+    /// re-render on the next tick (plan round-5 WP-2).
+    resolver_epoch: u64,
     /// Render-model recomputations so far (observability + tests).
     pub recomputes: u64,
     /// Pending filename-input edits, keyed by tab path (absent = shows the stem).
@@ -589,12 +595,18 @@ impl ReadingStore {
             .into_iter()
             .filter(|(_, remote)| !remote)
             .map(|(src, _)| {
-                let target = src.replace("%20", " ");
+                let target = percent_decode(&src);
                 let key = self.resolve(tab.path(), &target);
                 (src, key)
             })
             .collect();
         let keep: HashSet<String> = images.values().flatten().cloned().collect();
+        if let Some(d) = daemon {
+            // Plan round-5 WP-2: header-read sizes so placeholders take the image's height.
+            for key in &keep {
+                self.images.note_dims(key, d.vault_root());
+            }
+        }
         self.images.retain_owner(tab.path(), &keep);
         let entry = self.tabs.entry(tab.path().to_owned()).or_default();
         entry.seen_seq = Some(seq);
@@ -602,6 +614,7 @@ impl ReadingStore {
             seq,
             epoch: tab.epoch(),
             generation,
+            resolver_epoch: self.resolver_epoch,
             model,
             images,
         });
@@ -617,15 +630,25 @@ impl ReadingStore {
             return;
         }
         let seq = tab.edit_seq();
+        let resolver_epoch = self.resolver_epoch;
         let stale = match &entry.doc {
             None => true,
-            Some(d) => d.seq != seq || d.epoch != tab.epoch() || d.generation != generation,
+            Some(d) => {
+                d.seq != seq
+                    || d.epoch != tab.epoch()
+                    || d.generation != generation
+                    || d.resolver_epoch != resolver_epoch
+            }
         };
         if !stale {
             return;
         }
-        // A reload (epoch moved) is a settled replacement: render it now, no debounce.
-        let reloaded = entry.doc.as_ref().is_some_and(|d| d.epoch != tab.epoch());
+        // A reload (epoch moved) or a vault membership change is a settled replacement: render
+        // it now, no debounce.
+        let reloaded = entry
+            .doc
+            .as_ref()
+            .is_some_and(|d| d.epoch != tab.epoch() || d.resolver_epoch != resolver_epoch);
         if reloaded || entry.seen_seq == Some(seq) || entry.doc.is_none() {
             self.recompute(tab, daemon);
         } else {
@@ -636,8 +659,12 @@ impl ReadingStore {
     /// Drops the cached resolver: a file was created, deleted or renamed. Incremental indexing
     /// keeps the generation, so a generation-keyed cache alone never sees new files (a
     /// localized attachment written after the first render stayed unresolved = broken image).
+    /// Plan round-5 WP-2: it also marks every rendered Doc stale (a Doc rendered before its
+    /// attachment was resolvable re-renders with the image on the next tick).
     pub fn invalidate_resolver(&mut self) {
         self.resolver = None;
+        self.resolver_epoch += 1;
+        self.images.forget_dims();
     }
 
     fn refresh_resolver(&mut self, d: &dyn DaemonClient) {
@@ -694,7 +721,7 @@ impl ReadingStore {
         let d = daemon?;
         self.refresh_resolver(d.as_ref());
         let target = target.split('#').next().unwrap_or(target);
-        let target = target.replace("%20", " ");
+        let target = percent_decode(target);
         // `[[#h]]` resolves to the note itself; keep it (focuses the same tab).
         self.resolve(src, &target)
             .map(|p| Message::Tabs(TabsMsg::Open(p)))
@@ -730,6 +757,30 @@ impl ReadingStore {
             Task::none()
         }
     }
+}
+
+/// Decodes every `%xx` escape in a link/image target (plan round-5 WP-2; was `%20`-only).
+/// Invalid escapes stay verbatim; a result that is not UTF-8 leaves the input unchanged.
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (
+                b.get(i + 1).copied().and_then(hex),
+                b.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push(u8::try_from(h * 16 + l).unwrap_or(b'%'));
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
 }
 
 fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Message> {

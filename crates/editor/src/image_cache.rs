@@ -72,6 +72,83 @@ pub struct Decoded {
     pub bytes: usize,
 }
 
+/// An image's intrinsic size, read from its file header before any decode (plan round-5
+/// WP-2), plus a tiny transparent handle of the same aspect ratio that sizes the placeholder
+/// exactly like the decoded image will be sized (no jump when the decode lands).
+#[derive(Debug, Clone)]
+pub struct Dims {
+    pub width: u32,
+    pub height: u32,
+    pub placeholder: Handle,
+}
+
+impl Dims {
+    /// Dims of a `width` × `height` image (`None` when either is 0).
+    pub fn new(width: u32, height: u32) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let (pw, ph) = placeholder_size(width, height);
+        let px = (pw as usize) * (ph as usize) * 4;
+        Some(Self {
+            width,
+            height,
+            placeholder: Handle::from_rgba(pw, ph, vec![0u8; px]),
+        })
+    }
+
+    /// The height the image takes when displayed `display_width` wide (aspect kept) — the same
+    /// scaling `decode` and iced's `ContentFit::Contain` apply.
+    pub fn scaled_height(&self, display_width: f32) -> f32 {
+        display_width * self.height as f32 / self.width as f32
+    }
+}
+
+/// Largest side of the placeholder handle: the aspect ratio is reduced by the gcd first, so
+/// common ratios (16:9, 4:3, 1:1) are exact; others are rounded at this resolution.
+const PLACEHOLDER_SIDE: u32 = 64;
+
+fn placeholder_size(width: u32, height: u32) -> (u32, u32) {
+    let (mut a, mut b) = (width, height);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let (w, h) = (width / a, height / a);
+    let side = w.max(h);
+    if side <= PLACEHOLDER_SIDE {
+        return (w, h);
+    }
+    let scale = |v: u32| {
+        u32::try_from((u64::from(v) * u64::from(PLACEHOLDER_SIDE)).div_ceil(u64::from(side)))
+            .unwrap_or(1)
+            .max(1)
+    };
+    (scale(w), scale(h))
+}
+
+/// Width and height from the image file header (no full decode); `None` when unreadable.
+pub fn header_dims(path: &std::path::Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// The `sensor` anticipate margin for an image displayed `width` × `height` (plan round-5
+/// WP-2). iced's sensor measures the distance from the viewport to the element's nearest
+/// *corner* (`iced_widget-0.14.2/src/sensor.rs:207-213`), so with margin 0 an element taller
+/// than the viewport whose corners are both off-screen reports hidden while it covers the
+/// screen. Any overlapping element has a corner within `width + height` of the viewport, so
+/// that plus a slack margin keeps it pinned while visible.
+pub fn sensor_margin(width: f32, height: f32) -> f32 {
+    width.max(0.0) + height.max(0.0) + SENSOR_SLACK
+}
+
+/// Extra anticipate distance beyond the element's own extent.
+const SENSOR_SLACK: f32 = 256.0;
+
 #[derive(Debug)]
 struct Entry {
     handle: Handle,
@@ -89,6 +166,8 @@ pub struct ImageCache {
     entries: HashMap<String, Entry>,
     /// Keys with a load in flight, and who asked.
     pending: HashMap<String, HashSet<String>>,
+    /// Header-read intrinsic sizes by key (plan round-5 WP-2).
+    dims: HashMap<String, Dims>,
 }
 
 impl Default for ImageCache {
@@ -115,7 +194,28 @@ impl ImageCache {
             tick: 0,
             entries: HashMap::new(),
             pending: HashMap::new(),
+            dims: HashMap::new(),
         }
+    }
+
+    /// Records `key`'s intrinsic size from the header of `root/key`, once per key.
+    pub fn note_dims(&mut self, key: &str, root: &std::path::Path) {
+        if self.dims.contains_key(key) {
+            return;
+        }
+        if let Some(d) = header_dims(&root.join(key)).and_then(|(w, h)| Dims::new(w, h)) {
+            self.dims.insert(key.to_owned(), d);
+        }
+    }
+
+    /// `key`'s header-read size, if known.
+    pub fn dims(&self, key: &str) -> Option<&Dims> {
+        self.dims.get(key)
+    }
+
+    /// Forgets every header-read size (files were created, deleted or renamed).
+    pub fn forget_dims(&mut self) {
+        self.dims.clear();
     }
 
     /// The byte budget.
@@ -247,11 +347,13 @@ impl ImageCache {
                 .entries
                 .iter()
                 .filter(|(k, _)| k.as_str() != keep)
+                // Plan round-5 WP-2: an image currently shown (pinned) is never evicted.
+                .filter(|(_, e)| e.owners.is_empty())
                 .min_by_key(|(_, e)| e.last_used)
                 .map(|(k, _)| k.clone());
             match victim {
                 Some(k) => self.remove(&k),
-                // Only the new entry is left: one image larger than the budget stays shown.
+                // Only shown entries are left: what is on screen stays, over budget or not.
                 None => break,
             }
         }
