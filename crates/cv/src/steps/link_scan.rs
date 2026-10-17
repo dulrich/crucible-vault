@@ -115,7 +115,13 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             let path = ctx.context.active_path.clone().ok_or_else(|| {
                 StepError::failed("link_scan step: scope = note needs an active note")
             })?;
-            vec![path]
+            // A folder-selector event also fires for attachments; their bytes (XMP etc.)
+            // carry URLs that are not links, so only notes are scanned.
+            if path.ends_with(".md") {
+                vec![path]
+            } else {
+                Vec::new()
+            }
         }
         Scope::Vault => q
             .file_paths()

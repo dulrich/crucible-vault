@@ -197,3 +197,13 @@ fn note_scope_scans_the_active_note_only() {
     assert_eq!(r.source_notes, vec!["[[n/b]]", "[[n/a]]"]);
     assert_eq!(r.tracked_source, json!(false));
 }
+
+#[test]
+fn note_scope_skips_non_markdown_active_path() {
+    let e = env(&[(
+        "n/_attachments/x.png",
+        "xmp http://ns.adobe.com/xap/1.0/ https://example.com/a",
+    )]);
+    let o = run(&e, "", Some("n/_attachments/x.png")).unwrap();
+    assert_eq!((n(&o, "scanned"), n(&o, "created")), (0, 0));
+}
