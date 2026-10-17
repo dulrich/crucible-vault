@@ -13,7 +13,11 @@
 //! `{"t":"null"}`, `{"t":"bool","v":true}`, `{"t":"number","v":1.5}`, `{"t":"text","v":"…"}`,
 //! `{"t":"date","v":"2026-10-12"}` (date only) or `{"t":"date","v":"2026-10-12T08:30:00"}`
 //! (local, no zone), `{"t":"link","path":"vault/relative.md","label":"…"}`,
-//! `{"t":"list","v":[Cell…]}`.
+//! `{"t":"list","v":[Cell…]}`, `{"t":"url","url":"https://…","label":"…"}` (an external link,
+//! round-5 WP-11; `link` stays a vault note).
+//!
+//! A record-sourced row (`tracker_items`) carries an opaque `"key"` (a [`TrackerKey`]); index rows
+//! never do, so their JSON is unchanged.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,12 +35,30 @@ pub enum Kind {
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Cell {
     Null,
-    Bool { v: bool },
-    Number { v: f64 },
-    Text { v: String },
-    Date { v: String },
-    Link { path: String, label: String },
-    List { v: Vec<Cell> },
+    Bool {
+        v: bool,
+    },
+    Number {
+        v: f64,
+    },
+    Text {
+        v: String,
+    },
+    Date {
+        v: String,
+    },
+    Link {
+        path: String,
+        label: String,
+    },
+    List {
+        v: Vec<Cell>,
+    },
+    /// An external URL (opened in the browser, never resolved in the vault).
+    Url {
+        url: String,
+        label: String,
+    },
 }
 
 /// A column header.
@@ -54,6 +76,38 @@ pub struct Row {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub line: Option<i64>,
     pub cells: Vec<Cell>,
+    /// Opaque row identity for record-sourced rows ([`TrackerKey::encode`]); `None` for index rows.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub key: Option<String>,
+}
+
+/// The identity of one `tracker_items` row, carried in [`Row::key`] as a JSON array
+/// `["<source_kind>","<source_key>","<item_id>"]` (unambiguous for any string content).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerKey {
+    pub source_kind: String,
+    pub source_key: String,
+    pub item_id: String,
+}
+
+impl TrackerKey {
+    /// The opaque key string.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        serde_json::to_string(&[&self.source_kind, &self.source_key, &self.item_id])
+            .unwrap_or_default()
+    }
+
+    /// Parses a key made by [`TrackerKey::encode`]; `None` for anything else.
+    #[must_use]
+    pub fn decode(key: &str) -> Option<Self> {
+        let [source_kind, source_key, item_id]: [String; 3] = serde_json::from_str(key).ok()?;
+        Some(Self {
+            source_kind,
+            source_key,
+            item_id,
+        })
+    }
 }
 
 /// A footer row aligned with the columns.

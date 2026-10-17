@@ -373,6 +373,11 @@ pub enum ViewsMsg {
     },
     /// A row / link cell click: open `path`, cursor at 1-based `line` when set.
     Open { path: String, line: Option<i64> },
+    /// Round-5 WP-11: a done-toggle click on a `tracker_items` row (`key` = the row's opaque
+    /// `views::result::TrackerKey`): set it to `done`.
+    SetDone { key: String, done: bool },
+    /// `tracker_item_set_done` finished.
+    DoneSet(Result<(), String>),
 }
 
 /// WP-4: day/month nav. The bar belongs to `pane`; results open in that pane's active tab.

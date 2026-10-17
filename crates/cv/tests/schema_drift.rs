@@ -303,6 +303,9 @@ max_seconds = 90
 
 [queue]
 retention_days = 14
+
+[intake]
+mode = "view"
 "##];
 
 const SOURCES: &[&str] = &[r#"

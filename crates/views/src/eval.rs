@@ -165,6 +165,24 @@ impl<'a> RowCtx<'a> {
         }
     }
 
+    /// The opaque [`crate::result::TrackerKey`] of a `tracker_items` record row (`None` for
+    /// file rows or a record lacking the key fields).
+    pub fn record_key(&self) -> Option<String> {
+        let rec = self.rec.as_ref()?;
+        let s = |k: &str| match rec.get(k) {
+            Some(Value::Str(v)) => Some(v.clone()),
+            _ => None,
+        };
+        Some(
+            crate::result::TrackerKey {
+                source_kind: s("source_kind")?,
+                source_key: s("source_key")?,
+                item_id: s("item_id")?,
+            }
+            .encode(),
+        )
+    }
+
     /// Evaluates `e` for this row.
     pub fn eval(&self, e: &Expr) -> R<Value> {
         self.ev(e, None)
@@ -400,6 +418,16 @@ impl<'a> RowCtx<'a> {
                     base.strip_suffix(".md").unwrap_or(base).to_string()
                 };
                 Value::Link { path, label }
+            }
+            Func::Url => {
+                let url = arg(0)?.to_text();
+                let label = if args.len() > 1 {
+                    arg(1)?.to_text()
+                } else {
+                    String::new()
+                };
+                let label = if label.is_empty() { url.clone() } else { label };
+                Value::Url { url, label }
             }
             Func::Today => Value::date(self.env.today),
             Func::Now => Value::Date(self.env.now, false),

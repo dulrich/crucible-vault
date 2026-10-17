@@ -852,6 +852,7 @@ mod wp11_tests {
             outcome,
             score: None,
             full_body: None,
+            note_path: None,
         }
     }
 

@@ -229,6 +229,7 @@ fn same_prop(a: &str, b: &str) -> bool {
 
 struct Rec {
     file: Option<Arc<FileInfo>>,
+    key: Option<String>,
     cells: Vec<Value>,
     sort: Vec<Value>,
     group: Value,
@@ -319,8 +320,10 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
             Some((e, _)) => ctx.eval(e)?,
             None => Value::Null,
         };
+        let key = ctx.record_key();
         recs.push(Rec {
             file,
+            key,
             cells,
             sort,
             group,
@@ -387,6 +390,7 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
     let to_row = |r: &Rec| Row {
         path: r.file.as_ref().map(|f| f.path.clone()),
         line: None,
+        key: r.key.clone(),
         cells: r
             .cells
             .iter()
@@ -518,6 +522,7 @@ fn pivot(
         rows.push(Row {
             path: None,
             line: None,
+            key: None,
             cells,
         });
     }
@@ -608,6 +613,7 @@ fn tasks(
             let row = Row {
                 path: Some(f.path.clone()),
                 line: Some(task.line),
+                key: None,
                 cells: vec![
                     Cell::Text {
                         v: task.text.clone(),

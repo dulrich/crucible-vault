@@ -657,3 +657,10 @@ fn folder_fields_are_node_folder() {
     );
     assert!(errs("[x]\ninbox = \"Clippings\"\n", "pipelines.toml").is_empty());
 }
+
+#[test]
+fn intake_mode_accepts_lines_and_view_and_rejects_others() {
+    assert!(errs("[intake]\nmode = \"view\"\n", "pipelines.toml").is_empty());
+    assert!(errs("[intake]\nmode = \"lines\"\n", "pipelines.toml").is_empty());
+    assert!(!errs("[intake]\nmode = \"sidebar\"\n", "pipelines.toml").is_empty());
+}

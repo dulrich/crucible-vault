@@ -4021,6 +4021,22 @@ impl App {
                     },
                 )
             }
+            crate::views::Effect::SetDone { key, done } => {
+                let p = cv_protocol::TrackerItemSetDoneParams {
+                    source_kind: key.source_kind,
+                    source_key: key.source_key,
+                    item_id: key.item_id,
+                    done,
+                };
+                self.rpc(
+                    move |d| d.tracker_item_set_done(&p).map_err(|e| e.to_string()),
+                    |r| Message::Views(crate::message::ViewsMsg::DoneSet(r)),
+                )
+            }
+            crate::views::Effect::Notice(text) => {
+                self.status.set_error(text);
+                Task::none()
+            }
             crate::views::Effect::Open { path, line } => {
                 self.open(&path, true);
                 let line = line.and_then(|l| usize::try_from(l.saturating_sub(1)).ok());

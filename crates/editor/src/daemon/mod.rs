@@ -125,6 +125,9 @@ pub trait DaemonClient: Send + Sync {
     fn lookup_models(&self, provider: &str) -> Result<LookupModelsResult>;
     /// YouTube channel titles for `ids` (unknown ids absent).
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<LookupChannel>>;
+    /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake
+    /// WP-11); the refresh arrives as `views_invalidated`.
+    fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()>;
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;

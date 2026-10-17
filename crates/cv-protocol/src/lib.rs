@@ -140,6 +140,9 @@ pub enum Request {
     LookupModels(LookupModelsParams),
     /// YouTube channel titles → `[LookupChannel]`.
     LookupChannels(LookupChannelsParams),
+    /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake WP-11)
+    /// → `null`; unknown rows are `NOT_FOUND`.
+    TrackerItemSetDone(TrackerItemSetDoneParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,6 +591,15 @@ pub struct LookupModelsResult {
     pub live: bool,
 }
 
+/// `tracker_item_set_done` params: the row key plus the new state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerItemSetDoneParams {
+    pub source_kind: String,
+    pub source_key: String,
+    pub item_id: String,
+    pub done: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupChannelsParams {
     pub ids: Vec<String>,
@@ -884,6 +896,20 @@ mod tests {
                 ids: vec!["UC1".into()],
             }),
         ));
+        let v = round_trip(&RpcRequest::new(
+            RpcId::Num(4),
+            Request::TrackerItemSetDone(TrackerItemSetDoneParams {
+                source_kind: "youtube".into(),
+                source_key: "UC1".into(),
+                item_id: "v1".into(),
+                done: true,
+            }),
+        ));
+        assert_eq!(v["method"], "tracker_item_set_done");
+        assert_eq!(
+            v["params"],
+            json!({"source_kind": "youtube", "source_key": "UC1", "item_id": "v1", "done": true})
+        );
         let r = round_trip(&LookupModelsResult {
             models: vec![LookupModel {
                 id: "m".into(),

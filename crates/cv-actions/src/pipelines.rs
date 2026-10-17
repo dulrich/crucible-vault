@@ -34,6 +34,8 @@ pub struct PipelinesConfig {
     pub ignore_shorts: IgnoreShortsConfig,
     /// `[queue]`.
     pub queue: QueuePipelineConfig,
+    /// `[intake]` (plan round-5-reading-pickers-intake WP-11).
+    pub intake: IntakeConfig,
 }
 
 impl PipelinesConfig {
@@ -205,6 +207,26 @@ pub struct IgnoreShortsConfig {
     pub max_seconds: u32,
 }
 
+/// `[intake]`: where tracker intake items surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IntakeConfig {
+    /// `lines` (default: one line per item in the daily note) or `view` (record only; the
+    /// `daily-intake` view shows them).
+    pub mode: IntakeMode,
+}
+
+/// `[intake] mode`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IntakeMode {
+    /// Append a daily-note line per item (today's behaviour).
+    #[default]
+    Lines,
+    /// Record the item only; write nothing to the daily note.
+    View,
+}
+
 impl Default for IgnoreShortsConfig {
     fn default() -> Self {
         Self {
@@ -364,6 +386,14 @@ mod tests {
         assert_eq!(p.daily_brief.section, "# Daily Brief");
         assert_eq!(p.ignore_shorts.max_seconds, 120);
         assert_eq!(p.queue.retention_days, 30);
+        assert_eq!(p.intake.mode, IntakeMode::Lines);
+        let t: toml::Table = toml::from_str("[intake]\nmode = \"view\"\n").unwrap();
+        assert_eq!(
+            PipelinesConfig::from_table(&t).unwrap().intake.mode,
+            IntakeMode::View
+        );
+        let t: toml::Table = toml::from_str("[intake]\nmode = \"side\"\n").unwrap();
+        assert!(PipelinesConfig::from_table(&t).is_err());
         assert_eq!(
             SourcesConfig::from_table(&toml::Table::new()).unwrap(),
             SourcesConfig::default()

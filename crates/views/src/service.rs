@@ -234,7 +234,7 @@ fn open_state<'c>(
 
 /// Every `tracker_items` row as a record, newest first (`first_seen_ms DESC, item_id`). Fields:
 /// `title`, `url`, `source_kind`, `source_key`, `item_id`, `day`, `outcome`, `score`,
-/// `full_body`, `first_seen`. WP-11 adds `done` here once `done_ms` exists.
+/// `full_body`, `first_seen`, `done` (bool, from `done_ms`) and `note_path` (text or null).
 pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record>> {
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -242,7 +242,7 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
     use crate::value::Value;
     let mut stmt = conn.prepare_cached(
         "SELECT title, url, source_kind, source_key, item_id, day, outcome, score, full_body,
-                first_seen_ms
+                first_seen_ms, done_ms IS NOT NULL, note_path
          FROM tracker_items ORDER BY first_seen_ms DESC, item_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -269,6 +269,12 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
             full_body.map_or(Value::Null, Value::Bool),
         );
         m.insert("first_seen".into(), crate::eval::ms_date(r.get(9)?));
+        m.insert("done".into(), Value::Bool(r.get(10)?));
+        let note_path: Option<String> = r.get(11)?;
+        m.insert(
+            "note_path".into(),
+            note_path.map_or(Value::Null, Value::Str),
+        );
         Ok(Arc::new(m))
     })?;
     rows.collect()

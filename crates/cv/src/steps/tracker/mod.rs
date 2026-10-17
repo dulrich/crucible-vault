@@ -23,6 +23,7 @@ pub mod youtube;
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 
+use cv_actions::pipelines::IntakeMode;
 use cv_actions::{ConfigSet, Step};
 use cv_state::{TrackerItem, TrackerOutcome};
 use serde_json::{Value, json};
@@ -78,17 +79,18 @@ pub fn record(
     c: &Candidate,
     outcome: TrackerOutcome,
 ) -> Result<bool, StepError> {
-    record_with(ctx, c, outcome, None, None)
+    record_with(ctx, c, outcome, None, None, None)
 }
 
-/// [`record`] with the blog automatable evidence (`full_body`, WP-8) and the importance `score`
-/// (WP-10).
+/// [`record`] with the blog automatable evidence (`full_body`, WP-8), the importance `score`
+/// (WP-10) and a captured note's vault-relative path (`Note` outcomes, round-5 WP-11).
 pub(crate) fn record_with(
     ctx: &StepCtx<'_>,
     c: &Candidate,
     outcome: TrackerOutcome,
     full_body: Option<bool>,
     score: Option<f64>,
+    note_path: Option<String>,
 ) -> Result<bool, StepError> {
     lock(ctx)
         .insert_tracker_item(&TrackerItem {
@@ -102,6 +104,7 @@ pub(crate) fn record_with(
             outcome,
             score,
             full_body,
+            note_path,
         })
         .map_err(state_err)
 }
@@ -253,6 +256,8 @@ pub enum Emitted {
     Recovered,
     /// The line was written and recorded.
     Written,
+    /// `[intake] mode = "view"`: recorded only, nothing written.
+    Recorded,
 }
 
 /// Writes one intake line for `c` into today's daily note via the `tracker-intake` capture and
@@ -281,12 +286,18 @@ pub(crate) fn emit_line_with(
     if known {
         return Ok(Emitted::AlreadyRecorded);
     }
+    if ctx.config.pipelines().intake.mode == IntakeMode::View {
+        // `[intake] mode = "view"`: record only; the `daily-intake` view surfaces the item.
+        let score = score_item(ctx, c);
+        record_with(ctx, c, TrackerOutcome::Line, full_body, score, None)?;
+        return Ok(Emitted::Recorded);
+    }
     let daily = daily_path(ctx)?;
     if let Some((bytes, _)) = ctx.read(&daily)?
         && !c.url.is_empty()
         && String::from_utf8_lossy(&bytes).contains(&c.url)
     {
-        record_with(ctx, c, TrackerOutcome::Line, full_body, None)?;
+        record_with(ctx, c, TrackerOutcome::Line, full_body, None, None)?;
         return Ok(Emitted::Recovered);
     }
     let score = score_item(ctx, c);
@@ -325,7 +336,7 @@ pub(crate) fn emit_line_with(
     if hook::fail_now() {
         return Err(StepError::failed("injected failure after line write"));
     }
-    record_with(ctx, c, TrackerOutcome::Line, full_body, score)?;
+    record_with(ctx, c, TrackerOutcome::Line, full_body, score, None)?;
     Ok(Emitted::Written)
 }
 

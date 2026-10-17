@@ -14,6 +14,7 @@ use views::{ViewHost, ViewResult};
 const IDS: &[&str] = &[
     "backlinks#Here",
     "blog-story-list#Stories",
+    "daily-intake#Intake",
     "daily-reading-list#Reading List",
     "hubs#Hub View A",
     "hubs#Project Alpha",
@@ -42,7 +43,7 @@ fn host_of(id: &str) -> Option<&'static str> {
     match id.split('#').next() {
         Some("backlinks") => Some("stack/Tool One.md"),
         Some("blog-story-list") => Some("core/works/Ann Blog.md"),
-        Some("daily-reading-list") => Some("daily/day/2026-10-01.md"),
+        Some("daily-reading-list" | "daily-intake") => Some("daily/day/2026-10-01.md"),
         Some("hubs") => Some("core/projects/project-alpha/Hub.md"),
         Some("monthly-reading" | "monthly-tasks") => Some(MONTH),
         _ => None,
@@ -75,6 +76,7 @@ struct Fx {
     _tmp: tempfile::TempDir,
     config: PathBuf,
     base: PathBuf,
+    state: PathBuf,
     _index: cv_index::Index,
 }
 
@@ -105,17 +107,40 @@ fn fixture() -> Fx {
     let base = tmp.path().join("idx").join("index.db");
     std::fs::create_dir_all(base.parent().unwrap()).unwrap();
     let index = cv_index::Index::create(&vault, &base).unwrap();
+    let state = tmp.path().join("state.db");
+    tracker_fixture(&state);
     Fx {
         _tmp: tmp,
         config,
         base,
+        state,
         _index: index,
     }
+}
+
+/// A synthetic `state.db` `tracker_items` (the columns of `cv-state` `migrate.rs` v5 + v6) for
+/// `daily-intake`: a line and a note on 2026-10-01 (one done), a skipped row, another day.
+fn tracker_fixture(p: &Path) {
+    let c = rusqlite::Connection::open(p).unwrap();
+    c.execute_batch(
+        "CREATE TABLE tracker_items (source_kind TEXT NOT NULL, source_key TEXT NOT NULL,
+            item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+            first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
+            score REAL, full_body INTEGER, done_ms INTEGER, note_path TEXT,
+            PRIMARY KEY (source_kind, source_key, item_id));
+         INSERT INTO tracker_items VALUES
+            ('youtube', 'UC1', 'v1', 'A video', 'https://y.example/1', 2, '2026-10-01', 'line', NULL, NULL, 9, NULL),
+            ('blog', 'https://b.example/feed', 'p1', 'A post', 'https://b.example/1', 1, '2026-10-01', 'note', NULL, 1, NULL, 'core/works/A post.md'),
+            ('youtube', 'UC1', 'v2', 'Skipped', 'https://y.example/2', 3, '2026-10-01', 'skipped', NULL, NULL, NULL, NULL),
+            ('youtube', 'UC1', 'v3', 'Other day', 'https://y.example/3', 4, '2026-10-02', 'line', NULL, NULL, NULL, NULL);",
+    )
+    .unwrap();
 }
 
 impl Fx {
     fn host(&self) -> ViewHost {
         ViewHost::new(&self.config, &self.base)
+            .with_state_db(&self.state)
             .with_today(NaiveDate::from_ymd_opt(2026, 10, 3).unwrap())
     }
     fn run(&self, host: &mut ViewHost, id: &str, this: Option<&str>) -> ViewResult {
@@ -146,7 +171,7 @@ fn mask(v: &mut Json) {
 }
 
 #[test]
-fn defs_load_without_notices_and_yield_the_21_ids() {
+fn defs_load_without_notices_and_yield_the_22_ids() {
     let fx = fixture();
     let host = fx.host();
     assert!(host.load_notices().is_empty(), "{:?}", host.load_notices());
@@ -197,7 +222,7 @@ fn text(c: &Cell) -> String {
         Cell::Bool { v } => v.to_string(),
         Cell::Number { v } => v.to_string(),
         Cell::Text { v } | Cell::Date { v } => v.clone(),
-        Cell::Link { label, .. } => label.clone(),
+        Cell::Link { label, .. } | Cell::Url { label, .. } => label.clone(),
         Cell::List { v } => v.iter().map(text).collect::<Vec<_>>().join(","),
     }
 }

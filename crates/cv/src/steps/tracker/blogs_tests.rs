@@ -317,6 +317,18 @@ fn full_source_post_becomes_a_linted_filed_blog_note() {
     assert!(t.contains("word-count: 4"), "{t}");
     let key = format!("{}/a", w.base);
     assert_eq!(outcome(&w, &key, "x"), Some(TrackerOutcome::Note));
+    // Round-5 WP-11: the row carries the captured note's vault-relative path.
+    let row = w
+        .state
+        .lock()
+        .unwrap()
+        .tracker_item(KIND, &key, &post_url("x"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.note_path.as_deref(),
+        Some(format!("daily/{}/Post x.md", today()).as_str())
+    );
     let o = run(&w).unwrap();
     assert_eq!(n(&o, "new"), json!(0));
 }

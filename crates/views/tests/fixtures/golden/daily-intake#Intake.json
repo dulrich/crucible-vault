@@ -1,0 +1,62 @@
+{
+  "columns": [
+    {
+      "key": "formula.item",
+      "label": "Title"
+    },
+    {
+      "key": "formula.source",
+      "label": "Source"
+    },
+    {
+      "key": "done",
+      "label": "Done"
+    }
+  ],
+  "groups": [
+    {
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "A video",
+              "t": "url",
+              "url": "https://y.example/1"
+            },
+            {
+              "t": "text",
+              "v": "YouTube"
+            },
+            {
+              "t": "bool",
+              "v": true
+            }
+          ],
+          "key": "[\"youtube\",\"UC1\",\"v1\"]"
+        },
+        {
+          "cells": [
+            {
+              "label": "A post",
+              "path": "core/works/A post.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "Blog"
+            },
+            {
+              "t": "bool",
+              "v": false
+            }
+          ],
+          "key": "[\"blog\",\"https://b.example/feed\",\"p1\"]"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": []
+}

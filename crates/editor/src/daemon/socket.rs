@@ -335,6 +335,10 @@ impl DaemonClient for SocketDaemon {
         }))
     }
 
+    fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()> {
+        self.call_typed(Request::TrackerItemSetDone(p.clone()))
+    }
+
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let (tx, rx) = mpsc::channel();
         *self

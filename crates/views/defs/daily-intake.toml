@@ -1,0 +1,26 @@
+# Daily intake (plan round-5-reading-pickers-intake WP-11): the tracker items recorded for the
+# embedding day note when `pipelines.toml` `[intake] mode = "view"` replaces the daily intake lines.
+# `this` = the day note. Rows come from state.db `tracker_items`; `note` outcomes link to the
+# captured note, `line` outcomes to the item URL. The `done` column is the editor's toggle.
+source = "tracker_items"
+
+[filters]
+and = ['day == this.file.name', 'outcome == "line" || outcome == "note"']
+
+[formulas]
+item = 'if(outcome == "note" && note_path, link(note_path, title), url(url, title))'
+source = 'if(source_kind == "youtube", "YouTube", if(source_kind == "blog", "Blog", source_kind))'
+
+[properties."formula.item"]
+displayName = "Title"
+
+[properties."formula.source"]
+displayName = "Source"
+
+[properties.done]
+displayName = "Done"
+
+[[views]]
+type = "table"
+name = "Intake"
+order = ["formula.item", "formula.source", "done"]

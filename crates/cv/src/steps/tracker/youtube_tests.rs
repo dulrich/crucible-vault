@@ -337,6 +337,26 @@ fn new_uploads_land_as_lines_with_metadata_and_rerun_is_a_noop() {
 }
 
 #[test]
+fn view_intake_mode_records_items_and_writes_no_daily_line() {
+    let w = world(
+        &[],
+        std_routes(),
+        &format!("{ON}\n[intake]\nmode = \"view\"\n"),
+        SOURCES,
+    );
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "new"), json!(3));
+    assert_eq!(n(&o, "lines"), json!(3), "recorded items still count");
+    assert!(daily(&w).is_empty(), "no daily note write in view mode");
+    for id in [V1, V2, V3] {
+        assert_eq!(outcome(&w, id), Some(TrackerOutcome::Line));
+    }
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "lines"), json!(0), "dedupe unchanged");
+    assert!(daily(&w).is_empty());
+}
+
+#[test]
 fn interrupted_run_replays_each_line_exactly_once() {
     let w = world(&[], std_routes(), ON, SOURCES);
     hook::fail_after(Some(2));
@@ -379,6 +399,7 @@ fn url_already_in_daily_is_recorded_not_rewritten() {
             outcome: TrackerOutcome::Skipped,
             score: None,
             full_body: None,
+            note_path: None,
         })
         .unwrap();
     let o = run(&w).unwrap();

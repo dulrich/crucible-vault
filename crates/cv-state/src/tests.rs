@@ -72,7 +72,7 @@ fn v4_database_migrates_to_v5_and_tracker_accessors_work() {
         .unwrap();
     }
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 5);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     let n: i64 = s
         .conn()
         .query_row("SELECT COUNT(*) FROM cutover_marker", [], |r| r.get(0))
@@ -95,6 +95,7 @@ fn v4_database_migrates_to_v5_and_tracker_accessors_work() {
         outcome: TrackerOutcome::Note,
         score: None,
         full_body: Some(true),
+        note_path: None,
     };
     assert!(s.insert_tracker_item(&item).unwrap());
     assert!(
@@ -119,6 +120,70 @@ fn v4_database_migrates_to_v5_and_tracker_accessors_work() {
     assert_eq!(s.add_api_usage("youtube", "2026-10-15", 3).unwrap(), 3);
     assert_eq!(s.add_api_usage("youtube", "2026-10-15", 2).unwrap(), 5);
     assert_eq!(s.api_usage("youtube", "2026-10-16").unwrap(), 0);
+}
+
+#[test]
+fn v5_database_migrates_to_v6_preserving_tracker_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        for (i, sql) in migrate::MIGRATIONS.iter().take(5).enumerate() {
+            let tx = c.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        c.execute(
+            "INSERT INTO tracker_items (source_kind, source_key, item_id, title, url,
+                first_seen_ms, day, outcome) VALUES ('youtube', 'UC1', 'v1', 'T', 'u', 1, 'd', 'line')",
+            [],
+        )
+        .unwrap();
+    }
+    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 6);
+    let it = s.tracker_item("youtube", "UC1", "v1").unwrap().unwrap();
+    assert_eq!((it.title.as_str(), it.note_path), ("T", None));
+    assert_eq!(
+        s.tracker_item_done("youtube", "UC1", "v1").unwrap(),
+        Some(false)
+    );
+}
+
+#[test]
+fn set_tracker_item_done_round_trips_and_signals() {
+    use std::sync::{Arc, Mutex};
+    let (_d, mut s) = db();
+    let item = TrackerItem {
+        source_kind: "blog".into(),
+        source_key: "f".into(),
+        item_id: "p1".into(),
+        title: "T".into(),
+        url: "u".into(),
+        first_seen_ms: 1,
+        day: "2026-10-17".into(),
+        outcome: TrackerOutcome::Note,
+        score: None,
+        full_body: None,
+        note_path: Some("notes/T.md".into()),
+    };
+    assert!(s.insert_tracker_item(&item).unwrap());
+    assert_eq!(s.tracker_item("blog", "f", "p1").unwrap(), Some(item));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    s.set_change_hook(Box::new(move |t| sink.lock().unwrap().push(t)));
+    assert!(s.set_tracker_item_done("blog", "f", "p1", true).unwrap());
+    assert_eq!(s.tracker_item_done("blog", "f", "p1").unwrap(), Some(true));
+    assert!(s.set_tracker_item_done("blog", "f", "p1", false).unwrap());
+    assert_eq!(s.tracker_item_done("blog", "f", "p1").unwrap(), Some(false));
+    assert!(!s.set_tracker_item_done("blog", "f", "nope", true).unwrap());
+    assert_eq!(s.tracker_item_done("blog", "f", "nope").unwrap(), None);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["tracker_items", "tracker_items"]
+    );
 }
 
 #[test]

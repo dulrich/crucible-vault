@@ -89,6 +89,9 @@ struct Inner {
     /// terminal `JobUpdated` on [`FakeDaemon::complete_deferred`]), and the queued runs.
     deferred_ids: std::collections::BTreeSet<String>,
     queued: Vec<(String, RunActionParams)>,
+    /// Round-5 WP-11: every `tracker_item_set_done` call, and a scripted failure message.
+    done_calls: Vec<cv_protocol::TrackerItemSetDoneParams>,
+    done_fail: Option<String>,
 }
 
 /// The fake daemon.
@@ -144,6 +147,8 @@ impl FakeDaemon {
                 view_calls: Vec::new(),
                 deferred_ids: std::collections::BTreeSet::new(),
                 queued: Vec::new(),
+                done_calls: Vec::new(),
+                done_fail: None,
             }),
             hello,
             vault_root: vault_root.to_path_buf(),
@@ -219,6 +224,17 @@ impl FakeDaemon {
     /// WP-7: every `view_run` call so far, `(view_id, this_path)` in order.
     pub fn view_calls(&self) -> Result<Vec<(String, Option<String>)>> {
         Ok(self.lock()?.view_calls.clone())
+    }
+
+    /// Round-5 WP-11: every `tracker_item_set_done` call so far, in order.
+    pub fn done_calls(&self) -> Result<Vec<cv_protocol::TrackerItemSetDoneParams>> {
+        Ok(self.lock()?.done_calls.clone())
+    }
+
+    /// Round-5 WP-11: makes `tracker_item_set_done` fail with `msg` (`None` = succeed).
+    pub fn set_done_failure(&self, msg: Option<&str>) -> Result<()> {
+        self.lock()?.done_fail = msg.map(str::to_owned);
+        Ok(())
     }
 
     /// WP-5: replaces the canned lookup data.
@@ -591,6 +607,19 @@ impl DaemonClient for FakeDaemon {
             .models
             .remove(provider)
             .ok_or_else(|| DaemonError::NotFound(provider.to_owned()))
+    }
+
+    fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()> {
+        let mut g = self.lock()?;
+        g.done_calls.push(p.clone());
+        match &g.done_fail {
+            Some(msg) => Err(DaemonError::Rpc(cv_protocol::RpcError {
+                code: cv_protocol::error_codes::NOT_FOUND,
+                message: msg.clone(),
+                data: None,
+            })),
+            None => Ok(()),
+        }
     }
 
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {

@@ -67,10 +67,12 @@ pub struct TrackerItem {
     pub score: Option<f64>,
     /// Automatable evidence: whether the fetched item carried a full body (blogs only).
     pub full_body: Option<bool>,
+    /// Vault-relative path of the captured note (`Note` outcomes; migration v6).
+    pub note_path: Option<String>,
 }
 
-const COLS: &str =
-    "source_kind, source_key, item_id, title, url, first_seen_ms, day, outcome, score, full_body";
+const COLS: &str = "source_kind, source_key, item_id, title, url, first_seen_ms, day, outcome, \
+                    score, full_body, note_path";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
     let outcome: String = r.get(7)?;
@@ -85,6 +87,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
         outcome: TrackerOutcome::parse(&outcome).unwrap_or(TrackerOutcome::Skipped),
         score: r.get(8)?,
         full_body: r.get(9)?,
+        note_path: r.get(10)?,
     })
 }
 
@@ -133,7 +136,7 @@ impl StateDb {
     pub fn insert_tracker_item(&mut self, item: &TrackerItem) -> Result<bool> {
         let n = self.conn().execute(
             &format!(
-                "INSERT INTO tracker_items ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO tracker_items ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT DO NOTHING"
             ),
             params![
@@ -147,12 +150,56 @@ impl StateDb {
                 item.outcome.as_str(),
                 item.score,
                 item.full_body,
+                item.note_path,
             ],
         )?;
         if n > 0 {
             self.changed("tracker_items");
         }
         Ok(n > 0)
+    }
+
+    /// Marks one item done (`done_ms` = now) or not done (`done_ms` = NULL). Returns whether a
+    /// row matched; raises the `tracker_items` change signal when one did.
+    pub fn set_tracker_item_done(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        done: bool,
+    ) -> Result<bool> {
+        let done_ms = done.then(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        });
+        let n = self.conn().execute(
+            "UPDATE tracker_items SET done_ms = ?4
+             WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+            params![source_kind, source_key, item_id, done_ms],
+        )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n > 0)
+    }
+
+    /// Whether one item is marked done (`None` when no such row).
+    pub fn tracker_item_done(
+        &self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+    ) -> Result<Option<bool>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT done_ms IS NOT NULL FROM tracker_items
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+                params![source_kind, source_key, item_id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// The row for one key.

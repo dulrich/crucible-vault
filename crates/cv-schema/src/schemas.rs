@@ -2044,6 +2044,19 @@ pub static PIPE_QUEUE: Record = Record {
     rules: &[],
 };
 
+/// `[intake]` (plan round-5-reading-pickers-intake WP-11).
+pub static PIPE_INTAKE: Record = Record {
+    name: "intake",
+    fields: &[field(
+        "mode",
+        "Mode",
+        "lines: one daily-note line per tracked item; view: record only, shown by the daily-intake view",
+        Node::Enum(&["lines", "view"]),
+    )
+    .dflt(D::Str("lines"))],
+    rules: &[],
+};
+
 /// `pipelines.toml`.
 pub static PIPELINES_FILE: Record = Record {
     name: "pipelines.toml",
@@ -2086,6 +2099,12 @@ pub static PIPELINES_FILE: Record = Record {
             Node::Record(&PIPE_IGNORE_SHORTS),
         ),
         field("queue", "Queue", "Job retention", Node::Record(&PIPE_QUEUE)),
+        field(
+            "intake",
+            "Intake",
+            "Where tracked items surface",
+            Node::Record(&PIPE_INTAKE),
+        ),
     ],
     rules: &[],
 };

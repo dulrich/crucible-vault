@@ -405,6 +405,7 @@ fn row_link_cells_open_their_own_targets() {
     let r = Row {
         path: Some("INITIATIVE.md".into()),
         line: Some(3),
+        key: None,
         cells: vec![
             Cell::Link {
                 path: "a.md".into(),
@@ -417,7 +418,7 @@ fn row_link_cells_open_their_own_targets() {
             },
         ],
     };
-    let got: Vec<_> = row_targets(&r).iter().map(open).collect();
+    let got: Vec<_> = row_targets(&r, &[]).iter().map(open).collect();
     assert_eq!(
         got,
         vec![
@@ -429,14 +430,117 @@ fn row_link_cells_open_their_own_targets() {
     let plain = Row {
         path: Some("n.md".into()),
         line: Some(7),
+        key: None,
         cells: vec![Cell::Text("t".into()), Cell::Number(1.0)],
     };
-    let got: Vec<_> = row_targets(&plain).iter().map(open).collect();
+    let got: Vec<_> = row_targets(&plain, &[]).iter().map(open).collect();
     assert_eq!(got, vec![Some(("n.md".into(), Some(7))), None]);
     let none = Row {
         path: None,
         line: None,
+        key: None,
         cells: vec![Cell::Text("t".into())],
     };
-    assert!(row_targets(&none).iter().all(Option::is_none));
+    assert!(row_targets(&none, &[]).iter().all(Option::is_none));
+}
+
+/// Round-5 WP-11: a `daily-intake`-shaped result (keyed tracker rows, `url` + `link` titles,
+/// the `done` column).
+fn intake_result() -> serde_json::Value {
+    let key = views::result::TrackerKey {
+        source_kind: "youtube".into(),
+        source_key: "UC1".into(),
+        item_id: "v1".into(),
+    }
+    .encode();
+    json!({
+        "kind": "table",
+        "columns": [{"key": "formula.item", "label": "Title"}, {"key": "done", "label": "Done"}],
+        "groups": [{"rows": [
+            {"key": key, "cells": [
+                {"t": "url", "url": "https://y.example/1", "label": "A video"},
+                {"t": "bool", "v": false}
+            ]},
+            {"cells": [
+                {"t": "link", "path": "notes/P.md", "label": "P"},
+                {"t": "bool", "v": true}
+            ]}
+        ], "summaries": []}],
+        "summaries": [],
+        "notices": []
+    })
+}
+
+fn intake_rows(app: &App) -> Vec<(Row, Vec<String>)> {
+    let Some(State::Ready(dec)) = state(app) else {
+        panic!("not ready: {:?}", state(app));
+    };
+    dec.lines
+        .iter()
+        .filter_map(|l| match l {
+            Line::Row(r) => Some((r.clone(), dec.column_keys.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn url_cells_open_in_the_browser_and_only_keyed_rows_toggle() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ID, ViewResult(intake_result()))
+        .expect("script");
+    need(&mut app);
+    let rows = intake_rows(&app);
+    let (keyed, keys) = &rows[0];
+    let t = row_targets(keyed, keys);
+    assert!(matches!(&t[0], Some(Message::OpenUrl(u)) if u == "https://y.example/1"));
+    assert!(matches!(
+        &t[1],
+        Some(Message::Views(ViewsMsg::SetDone { done: true, .. }))
+    ));
+    // No key (an index row): the bool is plain, the link opens the note.
+    let (plain, keys) = &rows[1];
+    let t = row_targets(plain, keys);
+    assert!(
+        matches!(&t[0], Some(Message::Views(ViewsMsg::Open { path, .. })) if path == "notes/P.md")
+    );
+    assert!(t[1].is_none());
+}
+
+#[test]
+fn done_toggle_click_calls_the_rpc_with_the_decoded_identity() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ID, ViewResult(intake_result()))
+        .expect("script");
+    need(&mut app);
+    let (keyed, keys) = intake_rows(&app).remove(0);
+    let Some(click) = row_targets(&keyed, &keys).remove(1) else {
+        panic!("no toggle target");
+    };
+    let _ = app.update(click);
+    assert_eq!(
+        d.done_calls().expect("calls"),
+        [cv_protocol::TrackerItemSetDoneParams {
+            source_kind: "youtube".into(),
+            source_key: "UC1".into(),
+            item_id: "v1".into(),
+            done: true,
+        }]
+    );
+    assert!(app.status.error_text().is_none(), "success is silent");
+    // No optimistic flip: the cell stays until `views_invalidated` re-runs the view.
+    assert_eq!(intake_rows(&app)[0].0.cells[1], Cell::Bool(false));
+    d.set_done_failure(Some("no tracker item")).expect("fail");
+    let Some(click) = row_targets(&keyed, &keys).remove(1) else {
+        panic!("no toggle target");
+    };
+    let _ = app.update(click);
+    assert_eq!(d.done_calls().expect("calls").len(), 2);
+    assert!(
+        app.status
+            .error_text()
+            .is_some_and(|e| e.contains("no tracker item")),
+        "{:?}",
+        app.status.error_text()
+    );
 }

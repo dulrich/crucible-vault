@@ -48,8 +48,16 @@ pub enum Cell {
     Number(f64),
     Text(String),
     Date(String),
-    Link { path: String, label: String },
+    Link {
+        path: String,
+        label: String,
+    },
     List(Vec<Cell>),
+    /// An external URL (round-5 WP-11): opens in the browser.
+    Url {
+        url: String,
+        label: String,
+    },
 }
 
 /// A result row.
@@ -58,6 +66,8 @@ pub struct Row {
     pub path: Option<String>,
     pub line: Option<i64>,
     pub cells: Vec<Cell>,
+    /// Opaque row identity (record-sourced rows, round-5 WP-11), handed back verbatim.
+    pub key: Option<String>,
 }
 
 /// A flattened display line: group headers, rows and footers in one list.
@@ -78,6 +88,8 @@ pub enum Line {
 pub struct Decoded {
     pub kind: Kind,
     pub columns: Vec<String>,
+    /// The column keys (`file.name`, `done`, …), aligned with `columns`.
+    pub column_keys: Vec<String>,
     pub lines: Vec<Line>,
     pub notices: Vec<String>,
 }
@@ -148,6 +160,13 @@ pub enum Effect {
         path: String,
         line: Option<i64>,
     },
+    /// Round-5 WP-11: run `tracker_item_set_done` off the UI thread.
+    SetDone {
+        key: views::result::TrackerKey,
+        done: bool,
+    },
+    /// A failure notice for the status bar.
+    Notice(String),
 }
 
 /// A malformed `ViewResult`.
@@ -242,6 +261,13 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
             Effect::None
         }
         ViewsMsg::Open { path, line } => Effect::Open { path, line },
+        ViewsMsg::SetDone { key, done } => match views::result::TrackerKey::decode(&key) {
+            Some(key) => Effect::SetDone { key, done },
+            None => Effect::Notice("done toggle: malformed row key".into()),
+        },
+        // Success needs nothing: the refresh arrives as `views_invalidated`.
+        ViewsMsg::DoneSet(Ok(())) => Effect::None,
+        ViewsMsg::DoneSet(Err(e)) => Effect::Notice(format!("done toggle failed: {e}")),
     }
 }
 
@@ -264,6 +290,15 @@ pub fn decode_cell(v: &Value) -> Cell {
             Some(path) => Cell::Link {
                 label: s("label").unwrap_or_else(|| path.clone()),
                 path,
+            },
+            None => Cell::Text("?".into()),
+        },
+        Some("url") => match s("url") {
+            Some(url) => Cell::Url {
+                label: s("label")
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or_else(|| url.clone()),
+                url,
             },
             None => Cell::Text("?".into()),
         },
@@ -304,18 +339,18 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
         Some("tasks") => Kind::Tasks,
         _ => return Err(DecodeError("kind")),
     };
-    let columns = v
+    let cols = v
         .get("columns")
         .and_then(Value::as_array)
-        .ok_or(DecodeError("columns"))?
-        .iter()
-        .map(|c| {
-            c.get("label")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .collect();
+        .ok_or(DecodeError("columns"))?;
+    let field = |c: &Value, k: &str| {
+        c.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let columns = cols.iter().map(|c| field(c, "label")).collect();
+    let column_keys = cols.iter().map(|c| field(c, "key")).collect();
     let groups = v
         .get("groups")
         .and_then(Value::as_array)
@@ -334,6 +369,7 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
                 path: r.get("path").and_then(Value::as_str).map(str::to_owned),
                 line: r.get("line").and_then(Value::as_i64),
                 cells: cells(r.get("cells")),
+                key: r.get("key").and_then(Value::as_str).map(str::to_owned),
             }));
         }
         summaries(g.get("summaries"), &mut lines);
@@ -352,6 +388,7 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
     Ok(Decoded {
         kind,
         columns,
+        column_keys,
         lines,
         notices,
     })
@@ -371,7 +408,7 @@ pub fn format_cell(c: &Cell) -> String {
             Some((day, time)) => format!("{day} {}", time.get(..5).unwrap_or(time)),
             None => d.clone(),
         },
-        Cell::Link { label, .. } => label.clone(),
+        Cell::Link { label, .. } | Cell::Url { label, .. } => label.clone(),
         Cell::List(l) => l.iter().map(format_cell).collect::<Vec<_>>().join(", "),
     }
 }
@@ -443,17 +480,34 @@ pub fn fence<'a>(store: &'a ViewStore, id: &str, host: &str, t: Tokens) -> Eleme
         .into()
 }
 
+/// The column key of the done toggle (round-5 WP-11, `defs/daily-intake.toml`).
+pub const DONE_KEY: &str = "done";
+
+/// Whether cell `i` of `r` is a done toggle: a bool under the `done` column of a keyed row.
+fn is_toggle(r: &Row, keys: &[String], i: usize) -> bool {
+    r.key.is_some()
+        && keys.get(i).is_some_and(|k| k == DONE_KEY)
+        && matches!(r.cells.get(i), Some(Cell::Bool(_)))
+}
+
 /// plan editor-round-4 WP-3: what each cell of a non-task row opens on click. Every link cell
 /// opens its own path; a row with a `path` but no link cell opens it (and `line`) from its first
-/// cell. There is no whole-row click target.
-pub(crate) fn row_targets(r: &Row) -> Vec<Option<Message>> {
+/// cell. There is no whole-row click target. Round-5 WP-11: a `url` cell opens in the browser;
+/// the done toggle of a keyed row (column key `done`, see `keys`) flips it.
+pub(crate) fn row_targets(r: &Row, keys: &[String]) -> Vec<Option<Message>> {
     let mut out: Vec<Option<Message>> = r
         .cells
         .iter()
-        .map(|c| match c {
+        .enumerate()
+        .map(|(i, c)| match c {
             Cell::Link { path, .. } => Some(Message::Views(ViewsMsg::Open {
                 path: path.clone(),
                 line: None,
+            })),
+            Cell::Url { url, .. } => Some(Message::OpenUrl(url.clone())),
+            Cell::Bool(v) if is_toggle(r, keys, i) => Some(Message::Views(ViewsMsg::SetDone {
+                key: r.key.clone().unwrap_or_default(),
+                done: !v,
             })),
             _ => None,
         })
@@ -541,7 +595,16 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
         }
         Line::Row(r) => {
             if d.kind != Kind::Tasks {
-                return grid(&r.cells, false, &row_targets(r));
+                // The done toggle draws as the task checkbox (☐/☑) instead of ✓/✗.
+                let cs: Vec<Cell> = (0..r.cells.len())
+                    .map(|i| match r.cells.get(i) {
+                        Some(Cell::Bool(b)) if is_toggle(r, &d.column_keys, i) => {
+                            Cell::Text(if *b { "☑" } else { "☐" }.into())
+                        }
+                        c => c.cloned().unwrap_or(Cell::Null),
+                    })
+                    .collect();
+                return grid(&cs, false, &row_targets(r, &d.column_keys));
             }
             let task = r.cells.first().map(format_cell).unwrap_or_default();
             let file = r.cells.get(1).map(format_cell).unwrap_or_default();

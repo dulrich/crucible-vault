@@ -23,6 +23,11 @@ pub enum Value {
         path: String,
         label: String,
     },
+    /// An external URL (`url(u, label)`, round-5 WP-11).
+    Url {
+        url: String,
+        label: String,
+    },
     List(Arc<Vec<Value>>),
     Object(Arc<BTreeMap<String, Value>>),
     File(Arc<FileInfo>),
@@ -60,7 +65,7 @@ impl Value {
             Self::Num(n) => fmt_num(*n),
             Self::Str(s) => s.clone(),
             Self::Date(d, date_only) => fmt_date(d, *date_only),
-            Self::Link { label, .. } => label.clone(),
+            Self::Link { label, .. } | Self::Url { label, .. } => label.clone(),
             Self::List(l) => l.iter().map(Self::to_text).collect::<Vec<_>>().join(", "),
             Self::Object(o) => serde_json::to_string(
                 &o.iter()
@@ -135,6 +140,10 @@ impl Value {
             },
             Self::Link { path, label } => Cell::Link {
                 path: path.clone(),
+                label: label.clone(),
+            },
+            Self::Url { url, label } => Cell::Url {
+                url: url.clone(),
                 label: label.clone(),
             },
             Self::List(l) => Cell::List {

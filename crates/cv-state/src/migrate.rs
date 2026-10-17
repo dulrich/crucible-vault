@@ -161,6 +161,12 @@ CREATE TABLE api_usage (
     PRIMARY KEY (service, day)
 );
 ",
+    // v6 (plan round-5-reading-pickers-intake WP-11): the intake view's done toggle
+    // (`done_ms`, NULL = not done) and a captured note's vault-relative path (`note` outcomes).
+    r"
+ALTER TABLE tracker_items ADD COLUMN done_ms INTEGER;
+ALTER TABLE tracker_items ADD COLUMN note_path TEXT;
+",
 ];
 
 /// Highest schema version this build knows.

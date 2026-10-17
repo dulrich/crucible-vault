@@ -694,6 +694,21 @@ impl Shared {
             Request::LookupGeocode(p) => to_value(&self.lookups.geocode(&p.query).await?),
             Request::LookupModels(p) => to_value(&self.lookups.models(&p.provider).await?),
             Request::LookupChannels(p) => to_value(&self.lookups.channels(&p.ids).await?),
+            Request::TrackerItemSetDone(p) => {
+                let matched = lock(&self.state)
+                    .set_tracker_item_done(&p.source_kind, &p.source_key, &p.item_id, p.done)
+                    .map_err(internal)?;
+                if !matched {
+                    return Err(rpc_err(
+                        error_codes::NOT_FOUND,
+                        format!(
+                            "no tracker item {}/{}/{}",
+                            p.source_kind, p.source_key, p.item_id
+                        ),
+                    ));
+                }
+                to_value(&())
+            }
         }
     }
 

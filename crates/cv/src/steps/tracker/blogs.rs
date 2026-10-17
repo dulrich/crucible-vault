@@ -204,23 +204,24 @@ fn note_path(
     }
 }
 
-/// Writes (or recovers) `post`'s captured note and lints it. Returns whether it was written.
+/// Writes (or recovers) `post`'s captured note and lints it. Returns whether it was written,
+/// and the note's vault-relative path.
 fn write_note(
     ctx: &mut StepCtx<'_>,
     row: &BlogSource,
     post: &BlogPost,
     out_paths: &mut Vec<String>,
     localize_failed: &mut usize,
-) -> Result<bool, StepError> {
+) -> Result<(bool, String), StepError> {
     let (folder, tags) = note_target(ctx, row)?;
     let (path, exists) = note_path(ctx, &folder, post)?;
     if exists {
-        return Ok(false);
+        return Ok((false, path));
     }
     let created = now().format("%Y-%m-%d").to_string();
     let text = policy::captured_note(post, &tags, &created);
     if !create_or_found(ctx, &path, text.into_bytes())? {
-        return Ok(false);
+        return Ok((false, path));
     }
     out_paths.push(path.clone());
     // Inline localize (plan usability-sprint-captures-links WP-1): remote images become local
@@ -235,7 +236,7 @@ fn write_note(
     }
     let mut t = toml::Table::new();
     t.insert("type".into(), "lint".into());
-    t.insert("path".into(), path.into());
+    t.insert("path".into(), path.clone().into());
     if kind_def(ctx.config, NOTE_KIND).is_ok() {
         t.insert("kind".into(), NOTE_KIND.into());
     }
@@ -245,7 +246,7 @@ fn write_note(
     if super::hook::fail_now() {
         return Err(StepError::failed("injected failure after note write"));
     }
-    Ok(true)
+    Ok((true, path))
 }
 
 /// Executes the step.
@@ -367,24 +368,29 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             if already {
                 // Replay: this run's own captured note (crash between write and record).
                 let mut outcome = TrackerOutcome::Skipped;
+                let mut path = None;
                 if auto {
                     let (folder, _) = note_target(ctx, row)?;
-                    if note_path(ctx, &folder, &post)?.1 {
+                    let (p, exists) = note_path(ctx, &folder, &post)?;
+                    if exists {
                         outcome = TrackerOutcome::Note;
+                        path = Some(p);
                     }
                 }
-                record_with(ctx, &cand, outcome, full, None)?;
+                record_with(ctx, &cand, outcome, full, None, path)?;
                 evidence.push_back(post.has_body());
                 continue;
             }
             new += 1;
             seen.insert(&post.post_id);
             if auto {
-                if write_note(ctx, row, &post, &mut out.output_paths, &mut localize_failed)? {
+                let (written, path) =
+                    write_note(ctx, row, &post, &mut out.output_paths, &mut localize_failed)?;
+                if written {
                     notes += 1;
                 }
                 let score = super::score_item(ctx, &cand);
-                record_with(ctx, &cand, TrackerOutcome::Note, full, score)?;
+                record_with(ctx, &cand, TrackerOutcome::Note, full, score, Some(path))?;
             } else if emit_line_with(ctx, &cand, full, &mut out.output_paths)?
                 != super::Emitted::AlreadyRecorded
             {
