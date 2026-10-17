@@ -37,7 +37,7 @@ pub use highlighter::{
 pub const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// The text editor's padding (middle-click points are mapped through it like iced's own clicks).
-const EDITOR_PADDING: f32 = 5.0;
+pub(crate) const EDITOR_PADDING: f32 = 5.0;
 
 /// Result of one save attempt (cloneable for the message bus; never carries note text).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,6 +326,14 @@ impl SourceBuffer {
     /// The undo history (read-only).
     pub fn history(&self) -> &UndoHistory {
         &self.history
+    }
+    /// Source line `line`'s text without its newline (plan round-5 WP-9; one line, no full
+    /// buffer copy when shaped).
+    pub fn line_text(&self, line: usize) -> Option<String> {
+        match &self.content {
+            Repr::Shaped(c) => c.line(line).map(|l| l.text.to_string()),
+            Repr::Plain { text, .. } => text.split('\n').nth(line).map(str::to_owned),
+        }
     }
     /// The iced cursor.
     pub fn cursor(&self) -> text_editor::Cursor {
@@ -1426,7 +1434,7 @@ pub fn update(
         },
         SourceMsg::KeepMine(_) => spawn_save(ctx.daemon, buf.keep_mine(read_only)),
         // Routed by the app (`App::update_inner`); never reaches here.
-        SourceMsg::Viewport { .. } => Task::none(),
+        SourceMsg::Viewport { .. } | SourceMsg::LinkKey(_) | SourceMsg::LinkPick(_) => Task::none(),
         SourceMsg::TakeTheirs(path) => {
             if let Some(d) = ctx.daemon {
                 match d.read_file(&path) {
@@ -1491,9 +1499,31 @@ pub fn file_changed(
 }
 
 /// Ctrl+S / Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, then iced's defaults.
-fn key_binding(kp: KeyPress, km: &crate::palette::Keymap) -> Option<Binding<Message>> {
+fn key_binding(
+    kp: KeyPress,
+    km: &crate::palette::Keymap,
+    link_open: bool,
+) -> Option<Binding<Message>> {
     if !matches!(kp.status, text_editor::Status::Focused { .. }) {
         return None;
+    }
+    // Plan round-5 WP-9: the open `[[` list takes Up/Down/Enter/Tab/Esc (never the buffer).
+    if link_open
+        && kp.modifiers.is_empty()
+        && let keyboard::Key::Named(named) = kp.key.as_ref()
+    {
+        use crate::message::LinkKey;
+        let k = match named {
+            key::Named::ArrowUp => Some(LinkKey::Up),
+            key::Named::ArrowDown => Some(LinkKey::Down),
+            key::Named::Enter => Some(LinkKey::Enter),
+            key::Named::Tab => Some(LinkKey::Tab),
+            key::Named::Escape => Some(LinkKey::Escape),
+            _ => None,
+        };
+        if let Some(k) = k {
+            return Some(Binding::Custom(Message::Source(SourceMsg::LinkKey(k))));
+        }
     }
     if let keyboard::Key::Named(named) = kp.key.as_ref() {
         let m = kp.modifiers;
@@ -1565,7 +1595,13 @@ fn key_binding(kp: KeyPress, km: &crate::palette::Keymap) -> Option<Binding<Mess
 /// `key_binding` for tests.
 #[cfg(test)]
 pub(crate) fn test_key_binding(kp: KeyPress) -> Option<Binding<Message>> {
-    key_binding(kp, &crate::palette::Keymap::default())
+    key_binding(kp, &crate::palette::Keymap::default(), false)
+}
+
+/// `key_binding` with the `[[` list open, for tests.
+#[cfg(test)]
+pub(crate) fn test_key_binding_link(kp: KeyPress) -> Option<Binding<Message>> {
+    key_binding(kp, &crate::palette::Keymap::default(), true)
 }
 
 /// `key_binding` under a given keymap, for tests.
@@ -1574,7 +1610,7 @@ pub(crate) fn test_key_binding_with(
     kp: KeyPress,
     km: &crate::palette::Keymap,
 ) -> Option<Binding<Message>> {
-    key_binding(kp, km)
+    key_binding(kp, km, false)
 }
 
 /// The source editor's widget id for `path` (find bar Escape refocuses it).
@@ -1601,14 +1637,17 @@ pub fn command_click_msg(path: &str, line: &str, col: usize) -> Option<Message> 
 
 /// Renders a tab's source buffer with its conflict bar / read-only marker; `font_size` is the
 /// `editor.toml` base text size (live, plan editor-settings-tab WP-2); `keymap` is the effective
-/// keymap its key bindings route by (WP-4).
+/// keymap its key bindings route by (WP-4). `link` is the open `[[` note list overlay (plan
+/// round-5 WP-9), already positioned; while it is `Some` its keys are intercepted.
 pub fn view<'a>(
     buf: &'a SourceBuffer,
     tokens: Tokens,
     mode: Mode,
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
+    link: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    let link_open = link.is_some();
     let editor: Element<'a, Message> = match &buf.content {
         Repr::Shaped(content) => crate::widget::middle_click::middle_click(
             text_editor::TextEditor::new(content)
@@ -1617,7 +1656,7 @@ pub fn view<'a>(
                 .height(Length::Fill)
                 .padding(EDITOR_PADDING)
                 .on_action(|a| Message::Source(SourceMsg::Action(a)))
-                .key_binding(move |kp| key_binding(kp, keymap))
+                .key_binding(move |kp| key_binding(kp, keymap, link_open))
                 .highlight_with::<MarkdownHighlighter>(
                     HighlightSettings {
                         colors: KindColors::from_tokens(&tokens),
@@ -1696,7 +1735,8 @@ pub fn view<'a>(
             lines: viewport_lines(s.height, font_size),
         })
     };
-    iced::widget::sensor(iced::widget::stack![editor, overlay])
+    let link: Element<'a, Message> = link.unwrap_or_else(|| Space::new().into());
+    iced::widget::sensor(iced::widget::stack![editor, overlay, link])
         .on_show(report)
         .on_resize(report)
         .into()

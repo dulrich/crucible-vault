@@ -1032,16 +1032,17 @@ pub fn tab_body<'a>(
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
     focused: bool,
+    link: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     use iced::Length;
     use iced::widget::{container, row};
     // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
     let scale = view::reading_scale(font_size);
     match store.mode(tab.path()) {
-        ViewMode::Source => crate::source::view(tab, t, mode, font_size, keymap),
+        ViewMode::Source => crate::source::view(tab, t, mode, font_size, keymap, link),
         ViewMode::Reading => view::reading(store, views, tab.path(), view, t, scale, focused),
         ViewMode::Split => row![
-            container(crate::source::view(tab, t, mode, font_size, keymap))
+            container(crate::source::view(tab, t, mode, font_size, keymap, link))
                 .width(Length::FillPortion(1)),
             container(view::reading(
                 store,

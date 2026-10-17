@@ -106,6 +106,20 @@ pub enum SourceMsg {
         path: String,
         outcome: crate::clipboard_image::PasteOutcome,
     },
+    /// Plan round-5 WP-9: a key intercepted while the `[[` note list is open.
+    LinkKey(LinkKey),
+    /// Plan round-5 WP-9: a `[[` list row was clicked (its vault path).
+    LinkPick(String),
+}
+
+/// Plan round-5 WP-9: keys the open `[[` note list takes from the source editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKey {
+    Up,
+    Down,
+    Enter,
+    Tab,
+    Escape,
 }
 
 /// WP-1 source keys routed through `SourceMsg::Key` (each one transaction or motion).

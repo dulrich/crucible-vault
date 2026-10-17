@@ -4,6 +4,7 @@ pub mod editing;
 pub mod find;
 pub mod highlight;
 pub mod link_at;
+pub mod link_form;
 pub mod outline;
 pub mod period;
 pub mod rank;

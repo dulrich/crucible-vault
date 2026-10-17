@@ -277,6 +277,8 @@ pub struct App {
     pub ui: UiState,
     pub explorer: Explorer,
     pub switcher: Switcher,
+    /// Plan round-5 WP-9: the open `[[` note list (focused source editor only).
+    pub link_ta: Option<crate::link_ta::LinkTa>,
     pub bookmarks: Bookmarks,
     /// Tests: run RPC calls inline instead of on the blocking pool.
     pub rpc_inline: bool,
@@ -293,7 +295,7 @@ pub struct App {
     pub panels: crate::panels::Panels,
     /// WP-7: `crucible-view` fence results, keyed by `(view id, embedding note)`.
     pub views: crate::views::ViewStore,
-    tokens: Tokens,
+    pub(crate) tokens: Tokens,
     notifications: NotifHandle,
     /// plan editor-data-safety WP-1: opens a fresh client (`None` = never reconnect).
     connector: Option<crate::daemon::Connector>,
@@ -485,6 +487,7 @@ impl App {
             ui,
             explorer: Explorer::default(),
             switcher: Switcher::default(),
+            link_ta: None,
             bookmarks: Bookmarks::default(),
             rpc_inline: false,
             today: None,
@@ -1088,6 +1091,7 @@ impl App {
             self.prefs.font_size,
             &self.palette.keymap,
             self.active_tab().is_some_and(|t| t.id == tab.id),
+            self.link_ta_overlay(&tab.path, tab.id),
         )
     }
 
@@ -1151,6 +1155,7 @@ impl App {
         let before = self.active_paths();
         let views_before = self.active_views();
         let task = self.update_inner(message);
+        self.link_ta_validate();
         if self.dialog.is_some() {
             // The dialog outranks the menu: never leave one open beneath it.
             self.context_menu = None;
@@ -1670,6 +1675,12 @@ impl App {
                     d.set_visible_lines(lines);
                 }
             }
+            Message::Source(SourceMsg::LinkKey(k)) => {
+                if let Some(next) = self.link_ta_key(k) {
+                    return self.update_inner(next);
+                }
+            }
+            Message::Source(SourceMsg::LinkPick(path)) => self.link_ta_accept(&path),
             Message::Source(m) => {
                 // plan editor-round-4 WP-2: Shift+click extends the selection.
                 let m = crate::source::shift_click(m, self.switcher.shift);
@@ -1692,6 +1703,14 @@ impl App {
                     let (p, id) = (t.path.clone(), t.id);
                     self.reading.note_source_selection(&p, id);
                 }
+                // Plan round-5 WP-9: an edit / motion re-evaluates the `[[` list after it lands.
+                let link_sync = matches!(&m, SourceMsg::Action(_) | SourceMsg::Key(_));
+                let typed_bracket = matches!(
+                    &m,
+                    SourceMsg::Action(iced::widget::text_editor::Action::Edit(
+                        iced::widget::text_editor::Edit::Insert('[')
+                    ))
+                );
                 let saved = match &m {
                     SourceMsg::Saved { path, outcome, .. } => Some((
                         path.clone(),
@@ -1720,6 +1739,9 @@ impl App {
                 );
                 if let Some(e) = src_err {
                     self.status.set_error(e);
+                }
+                if link_sync {
+                    self.link_ta_sync(typed_bracket);
                 }
                 // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this
                 // save was in flight resyncs now. A failed completion's queued `save_again` is
