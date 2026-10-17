@@ -3218,3 +3218,172 @@ mod find_return_leak {
         assert_eq!(text_of(&app), BODY, "Return leaked into the note");
     }
 }
+
+/// Plan usability-sprint-captures-links WP-5: `title` → filename sync.
+mod title_sync_wp5 {
+    use std::time::Instant;
+
+    use super::wp4::{app_over, fake_arc};
+    use super::*;
+    use crate::message::ExplorerMsg;
+
+    const OLD: &str = "---\ntitle: Old\n---\nx\n";
+
+    /// Opens `path` and rewrites the `title` value `Old` (line 1, cols 7..10) to `new`.
+    fn open_and_retitle(d: &Arc<FakeDaemon>, path: &str, new: &str) -> App {
+        d.create_note(path, OLD).expect("create");
+        let mut app = app_over(d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(path.into())));
+        let doc = app.doc_mut(path).expect("open");
+        doc.select_range((1, 7), (1, 10));
+        assert!(doc.paste(new.into(), false, Instant::now()));
+        app
+    }
+
+    fn save(app: &mut App, d: &FakeDaemon, path: &str) {
+        let job = app
+            .doc_mut(path)
+            .and_then(|t| t.begin_save(false))
+            .expect("save starts");
+        let outcome = job.run(d);
+        let _ = app.update(job.done(outcome));
+    }
+
+    fn gone(d: &FakeDaemon, path: &str) -> bool {
+        matches!(d.read_file(path), Err(DaemonError::NotFound(_)))
+    }
+
+    #[test]
+    fn title_edit_renames_a_note_named_after_its_title() {
+        let (_tmp, d) = fake_arc();
+        let mut app = open_and_retitle(&d, "ts/Old.md", "New? One");
+        save(&mut app, &d, "ts/Old.md");
+        assert!(gone(&d, "ts/Old.md"));
+        let (bytes, _) = d.read_file("ts/New One.md").expect("renamed");
+        assert_eq!(bytes, b"---\ntitle: New? One\n---\nx\n");
+        assert_eq!(app.open_paths(), ["ts/New One.md"], "the tab follows");
+        assert!(app.doc("ts/Old.md").is_none(), "doc key moved");
+        assert!(app.doc("ts/New One.md").is_some_and(|t| !t.is_dirty()));
+        assert!(app.explorer.contains("ts/New One.md"));
+        // A further save with the same title does not rename again.
+        let doc = app.doc_mut("ts/New One.md").expect("open");
+        doc.select_range((3, 0), (3, 1));
+        assert!(doc.paste("y".into(), false, Instant::now()));
+        save(&mut app, &d, "ts/New One.md");
+        assert_eq!(app.open_paths(), ["ts/New One.md"]);
+    }
+
+    #[test]
+    fn title_edit_leaves_a_note_with_another_name_alone() {
+        let (_tmp, d) = fake_arc();
+        let mut app = open_and_retitle(&d, "ts2/Custom.md", "New");
+        save(&mut app, &d, "ts2/Custom.md");
+        assert_eq!(app.open_paths(), ["ts2/Custom.md"]);
+        assert!(gone(&d, "ts2/New.md"));
+    }
+
+    #[test]
+    fn title_edit_onto_an_existing_file_does_not_rename() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("ts3/New.md", "other").expect("create");
+        let mut app = open_and_retitle(&d, "ts3/Old.md", "New");
+        save(&mut app, &d, "ts3/Old.md");
+        assert_eq!(app.open_paths(), ["ts3/Old.md"]);
+        assert_eq!(d.read_file("ts3/New.md").expect("kept").0, b"other");
+        assert!(
+            app.status
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("already exists")),
+            "{:?}",
+            app.status.error
+        );
+    }
+
+    /// Audit E2: edits typed after the save landed but before the rename completes follow the
+    /// tab to `to`, are kept (conflict bar), and nothing is ever written at `from`.
+    #[test]
+    fn edit_during_title_rename_is_kept_and_from_is_not_recreated() {
+        let (_tmp, d) = fake_arc();
+        let mut app = open_and_retitle(&d, "ts5/Old.md", "New");
+        app.rpc_inline = false; // hold the rename RPC; complete it by hand below.
+        save(&mut app, &d, "ts5/Old.md");
+        let doc = app.doc_mut("ts5/Old.md").expect("still at from");
+        assert!(doc.is_renaming());
+        let seq = doc.edit_seq();
+        doc.select_range((3, 0), (3, 1));
+        assert!(doc.paste("typed".into(), false, Instant::now()));
+        assert!(
+            doc.begin_save(false).is_none(),
+            "saves held during the rename"
+        );
+        let typed = doc.edit_seq();
+        d.rename("ts5/Old.md", "ts5/New.md").expect("rename");
+        let _ = app.update(Message::TitleRenamed {
+            from: "ts5/Old.md".into(),
+            to: "ts5/New.md".into(),
+            seq,
+            result: Ok("ts5/New.md".into()),
+        });
+        // The typed edit's autosave, addressed to `from`, is a no-op after the follow.
+        let _ = app.update(Message::Source(crate::message::SourceMsg::AutosaveDue {
+            path: "ts5/Old.md".into(),
+            seq: typed,
+        }));
+        assert_eq!(app.open_paths(), ["ts5/New.md"]);
+        let doc = app.doc("ts5/New.md").expect("followed");
+        assert_eq!(doc.text(), "---\ntitle: New\n---\ntyped\n");
+        assert!(doc.is_dirty());
+        assert!(gone(&d, "ts5/Old.md"));
+        // Keep mine saves the text at `to`.
+        let job = app
+            .doc_mut("ts5/New.md")
+            .and_then(|t| t.keep_mine(false))
+            .expect("keep mine");
+        let outcome = job.run(d.as_ref());
+        let _ = app.update(job.done(outcome));
+        assert_eq!(
+            d.read_file("ts5/New.md").expect("to").0,
+            b"---\ntitle: New\n---\ntyped\n"
+        );
+        assert!(gone(&d, "ts5/Old.md"));
+    }
+
+    /// A follow-up save in flight defers the rename until it lands.
+    #[test]
+    fn title_rename_waits_for_an_in_flight_follow_up_save() {
+        let (_tmp, d) = fake_arc();
+        let mut app = open_and_retitle(&d, "ts6/Old.md", "New");
+        let first = app
+            .doc_mut("ts6/Old.md")
+            .and_then(|t| t.begin_save(false))
+            .expect("save");
+        let doc = app.doc_mut("ts6/Old.md").expect("open");
+        doc.select_range((3, 0), (3, 1));
+        assert!(doc.paste("z".into(), false, Instant::now()));
+        assert!(doc.begin_save(false).is_none(), "queued as save_again");
+        let outcome = first.run(d.as_ref());
+        let _ = app.update(first.done(outcome));
+        assert_eq!(
+            app.open_paths(),
+            ["ts6/Old.md"],
+            "deferred while the follow-up saves"
+        );
+        assert!(app.doc("ts6/Old.md").is_some_and(|t| t.is_saving()));
+        // The follow-up's task is not run by the harness: land it by hand.
+        let doc = app.doc("ts6/Old.md").expect("open");
+        let (seq, text) = (doc.edit_seq(), doc.text());
+        let base = d.read_file("ts6/Old.md").expect("disk").1;
+        let h = d.write_note("ts6/Old.md", &text, &base).expect("write");
+        let _ = app.update(Message::Source(crate::message::SourceMsg::Saved {
+            path: "ts6/Old.md".into(),
+            seq,
+            outcome: crate::source::SaveOutcome::Saved(h),
+        }));
+        assert_eq!(app.open_paths(), ["ts6/New.md"]);
+        assert_eq!(
+            d.read_file("ts6/New.md").expect("to").0,
+            b"---\ntitle: New\n---\nz\n"
+        );
+    }
+}

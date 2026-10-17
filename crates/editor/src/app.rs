@@ -1416,12 +1416,26 @@ impl App {
                     }
                     _ => Task::none(),
                 };
-                let task = Task::batch([task, resync]);
+                // Plan usability-sprint-captures-links WP-5: a landed save that changed `title`.
+                let sync = match &saved {
+                    Some((path, true)) => {
+                        let path = path.clone();
+                        self.title_sync(&path)
+                    }
+                    _ => Task::none(),
+                };
+                let task = Task::batch([task, resync, sync]);
                 return match saved {
                     Some((path, ok)) => Task::batch([task, self.note_save_landed(&path, ok)]),
                     None => task,
                 };
             }
+            Message::TitleRenamed {
+                from,
+                to,
+                seq,
+                result,
+            } => return self.title_renamed(&from, &to, seq, result),
             Message::OpenUrl(url) => {
                 if let Err(e) = crate::open_url::open(&self.prefs.open_url_cmd, &url) {
                     self.status.error = Some(e);
@@ -2590,6 +2604,105 @@ impl App {
         self.persist();
     }
 
+    /// Plan usability-sprint-captures-links WP-5: after a save of `path` landed, renames the note
+    /// when its on-disk `title` changed and the filename was the old title's form. Not while
+    /// closing/quitting, in shadow mode (silently), or while a follow-up save or another rename
+    /// is in flight (the next landed save re-evaluates). A target that exists refuses the rename.
+    fn title_sync(&mut self, path: &str) -> Task<Message> {
+        if self.closing.contains_key(path)
+            || self.quit.is_some()
+            || self.status.mode == Mode::Shadow
+        {
+            return Task::none();
+        }
+        let Some(doc) = self.docs.get(path) else {
+            return Task::none();
+        };
+        if doc.is_saving() || doc.is_renaming() {
+            return Task::none();
+        }
+        let Some(to) = doc.title_rename() else {
+            return Task::none();
+        };
+        let Some(d) = self.daemon.clone() else {
+            return Task::none();
+        };
+        // Case-only renames target the same file on a case-insensitive disk: no collision check.
+        if to.to_lowercase() != path.to_lowercase()
+            && !matches!(d.read_file(&to), Err(DaemonError::NotFound(_)))
+        {
+            if let Some(doc) = self.docs.get_mut(path) {
+                doc.settle_title();
+            }
+            self.status.error = Some(format!("title changed; not renamed: {to} already exists"));
+            return Task::none();
+        }
+        let Some(doc) = self.docs.get_mut(path) else {
+            return Task::none();
+        };
+        doc.set_renaming(true);
+        let seq = doc.edit_seq();
+        self.explorer.expect_rename(path, &to);
+        let op = FileOp::Rename {
+            from: path.to_owned(),
+            to: to.clone(),
+        };
+        let from = path.to_owned();
+        self.rpc(
+            move |d| op.run(d),
+            move |result| Message::TitleRenamed {
+                from,
+                to,
+                seq,
+                result,
+            },
+        )
+    }
+
+    /// WP-5: a title rename finished. The tab follows (edits typed while it was in flight are
+    /// kept, behind the conflict bar); a failure leaves the tab and relaunches a held save.
+    fn title_renamed(
+        &mut self,
+        from: &str,
+        to: &str,
+        seq: u64,
+        result: Result<String, String>,
+    ) -> Task<Message> {
+        let held = self
+            .docs
+            .get_mut(from)
+            .is_some_and(|d| d.set_renaming(false));
+        match result {
+            Ok(final_path) => {
+                let indexed = self.indexed_fn();
+                let op = FileOp::Rename {
+                    from: from.to_owned(),
+                    to: to.to_owned(),
+                };
+                self.explorer
+                    .apply_op(&op, &final_path, &self.ui.expanded, &indexed);
+                let edited = self
+                    .docs
+                    .get(from)
+                    .is_some_and(|d| d.is_dirty() || d.edit_seq() != seq);
+                self.follow_moved(from, to, edited);
+                Task::none()
+            }
+            Err(e) => {
+                self.status.error = Some(format!("title changed; rename failed: {e}"));
+                let Some(doc) = self.docs.get_mut(from) else {
+                    return Task::none();
+                };
+                doc.settle_title();
+                if held {
+                    crate::source::autosave_timer(from.to_owned(), doc.edit_seq())
+                } else {
+                    Task::none()
+                }
+            }
+        }
+    }
+
     /// The Quick Switch placement from `editor.toml` `quick_switch_open` (plan
     /// editor-feedback-round-2 WP-7).
     fn quick_switch_place(&self) -> Place {
@@ -3103,10 +3216,18 @@ impl App {
             }
         }
         let edited = self.docs.get(&from).is_some_and(|d| d.edit_seq() != seq);
+        self.follow_moved(&from, to, edited);
+    }
+
+    /// The tail of a move follow ([`Self::follow_open`], WP-5 title renames): unedited →
+    /// [`Self::retarget`]; edited since the move was issued → the buffer follows to `to` keeping
+    /// its text, behind the conflict bar (audit M2 / usability-sprint audit E2).
+    fn follow_moved(&mut self, from: &str, to: &str, edited: bool) {
         if !edited {
-            self.retarget(&from, to);
+            self.retarget(from, to);
             return;
         }
+        let Some(d) = self.daemon.clone() else { return };
         let hash = match d.read_file(to) {
             Ok((_, h)) => h,
             Err(e) => {
@@ -3114,11 +3235,11 @@ impl App {
                 return;
             }
         };
-        let Some(mut doc) = self.docs.remove(&from) else {
+        let Some(mut doc) = self.docs.remove(from) else {
             return;
         };
         doc.follow_move(to, hash);
-        self.move_path_state(&from, to, doc);
+        self.move_path_state(from, to, doc);
         self.status.error = Some(format!(
             "{from} moved to {to} while you were editing: keep mine saves your text there"
         ));

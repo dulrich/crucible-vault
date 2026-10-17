@@ -35,6 +35,14 @@ pub enum Message {
     /// Plan usability-sprint-captures-links WP-3: open an external URL with `open_url_cmd`
     /// (scheme allowlist enforced in `open_url`).
     OpenUrl(String),
+    /// Plan usability-sprint-captures-links WP-5: a `title` → filename rename finished
+    /// (`seq` = the buffer's edit sequence when it was issued).
+    TitleRenamed {
+        from: String,
+        to: String,
+        seq: u64,
+        result: Result<String, String>,
+    },
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name

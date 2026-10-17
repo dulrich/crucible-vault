@@ -131,6 +131,17 @@ pub struct SourceBuffer {
     /// `Action::Scroll` and our own [`Self::scroll_to_line`] (iced 0.14's `text_editor` exposes
     /// no scroll offset); pulled up when the cursor moves above it. 0 for a fresh shaped buffer.
     top_line: usize,
+    /// Plan usability-sprint-captures-links WP-5: the frontmatter `title` of the text last known
+    /// on disk (`new`/`reload`/landed saves).
+    disk_title: Option<String>,
+    /// WP-5: the title the current filename was derived from — the pre-change disk title, kept
+    /// until a title rename happens (fresh buffer) or the title stops matching the filename.
+    name_title: Option<String>,
+    /// WP-5: the title of the text in the in-flight save.
+    pending_title: Option<String>,
+    /// WP-5 (audit E2): a title rename of this note is in flight; saves are held (queued as
+    /// `save_again`) so the old path is never written or recreated.
+    renaming: bool,
 }
 
 impl Clone for SourceBuffer {
@@ -152,6 +163,10 @@ impl Clone for SourceBuffer {
             find_all: self.find_all.clone(),
             resync_pending: self.resync_pending,
             top_line: self.top_line,
+            disk_title: self.disk_title.clone(),
+            name_title: self.name_title.clone(),
+            pending_title: self.pending_title.clone(),
+            renaming: self.renaming,
         }
     }
 }
@@ -184,10 +199,12 @@ impl SourceBuffer {
 
     /// As [`Self::new`] with an explicit undo byte cap.
     pub fn with_cap(path: &str, bytes: &[u8], hash: ContentHash, cap: usize) -> Self {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let title = crate::header::frontmatter_title(&text);
         Self {
             path: path.to_owned(),
             content: Repr::Plain {
-                text: String::from_utf8_lossy(bytes).into_owned(),
+                text,
                 cursor: undo::Cursor::default(),
             },
             base_hash: hash,
@@ -204,6 +221,10 @@ impl SourceBuffer {
             find_all: std::sync::Arc::from([]),
             resync_pending: false,
             top_line: 0,
+            disk_title: title.clone(),
+            name_title: title,
+            pending_title: None,
+            renaming: false,
         }
     }
 
@@ -864,6 +885,8 @@ impl SourceBuffer {
             anchor: None,
         };
         let shaped = self.is_shaped();
+        self.disk_title = crate::header::frontmatter_title(&text);
+        self.name_title.clone_from(&self.disk_title);
         self.content = Repr::Plain { text, cursor };
         if shaped {
             self.materialise();
@@ -882,11 +905,12 @@ impl SourceBuffer {
         if read_only || !self.dirty || self.conflict.is_some() {
             return None;
         }
-        if self.saving {
+        if self.saving || self.renaming {
             self.save_again = true;
             return None;
         }
         let text = self.text();
+        self.pending_title = crate::header::frontmatter_title(&text);
         self.saving = true;
         self.save_again = false;
         self.pending_hash = Some(ContentHash::of(text.as_bytes()));
@@ -902,9 +926,14 @@ impl SourceBuffer {
     pub fn finish_save(&mut self, seq: u64, outcome: SaveOutcome) -> Result<bool, String> {
         self.saving = false;
         self.pending_hash = None;
+        let title = self.pending_title.take();
         match outcome {
             SaveOutcome::Saved(h) => {
                 self.base_hash = h;
+                self.disk_title = title;
+                if self.title_rename().is_none() {
+                    self.name_title.clone_from(&self.disk_title);
+                }
                 if seq == self.edit_seq {
                     self.dirty = false;
                 }
@@ -956,6 +985,34 @@ impl SourceBuffer {
             Err(DaemonError::NotFound(_)) => Some("file deleted on disk".into()),
             Err(e) => Some(format!("reload failed: {e}")),
         }
+    }
+
+    /// WP-5: the title-sync rename target for the text on disk (the disk title changed from the
+    /// one the filename was derived from), per [`crate::title_sync::title_sync_target`].
+    pub fn title_rename(&self) -> Option<String> {
+        crate::title_sync::title_sync_target(
+            &self.path,
+            self.name_title.as_deref(),
+            self.disk_title.as_deref(),
+        )
+    }
+
+    /// WP-5: a title rename is in flight.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming
+    }
+
+    /// WP-5: marks a title rename in flight (saves are held) or finished (returns whether a held
+    /// save is waiting).
+    pub fn set_renaming(&mut self, on: bool) -> bool {
+        self.renaming = on;
+        !on && self.dirty && self.save_again
+    }
+
+    /// WP-5: stop syncing the current title change (rename refused or failed): the filename is
+    /// no longer derived from a pending title.
+    pub fn settle_title(&mut self) {
+        self.name_title.clone_from(&self.disk_title);
     }
 
     /// The note moved to `to` (whose on-disk hash is `disk`) while this buffer had edits the move
