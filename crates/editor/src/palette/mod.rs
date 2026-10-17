@@ -433,17 +433,27 @@ pub struct Toast {
     pub state: JobState,
     /// When the job reached a terminal state (expiry clock).
     pub ended: Option<Instant>,
+    /// plan round-5 WP-3: the job's failure reason on a non-Done terminal state.
+    pub message: Option<String>,
 }
 
 impl Toast {
     /// The status-bar text.
     pub fn line(&self) -> String {
-        let s = serde_json::to_value(self.state)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        format!("{}: {s}", self.title)
+        let s = state_label(self.state);
+        match &self.message {
+            Some(m) => format!("{}: {s} — {m}", self.title),
+            None => format!("{}: {s}", self.title),
+        }
     }
+}
+
+/// A job state's wire label (`failed`, `done`, …).
+pub fn state_label(s: JobState) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// Whether a job state is final.
@@ -1117,6 +1127,9 @@ impl Palette {
             title,
             state: j.status,
             ended: terminal(j.status).then_some(now),
+            message: (terminal(j.status) && j.status != JobState::Done)
+                .then(|| j.message.clone())
+                .flatten(),
         });
     }
 

@@ -294,7 +294,7 @@ fn app_open_file_adds_tab_and_status_updates() {
     assert_eq!(app.open_paths().len(), 1, "re-open focuses the tab");
     let _ = app.update(Message::Tabs(TabsMsg::Open("missing.md".into())));
     assert_eq!(app.open_paths().len(), 1);
-    assert_eq!(app.status.error.as_deref(), Some("file not found"));
+    assert_eq!(app.status.error_text(), Some("file not found"));
 
     let _ = app.update(Message::Status(StatusMsg::Notification(
         Notification::ModeChanged { mode: Mode::Shadow },
@@ -521,7 +521,7 @@ mod wp4 {
         )));
         let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
         assert!(d.read_file("wp4dirty/one.md").is_ok(), "not trashed");
-        assert!(app.status.error.is_some());
+        assert!(app.status.error_text().is_some());
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod wp4 {
         let _ = app.update(Message::Explorer(ExplorerMsg::BeginNew));
         assert!(app.explorer.edit.is_none());
         assert_eq!(
-            app.status.error.as_deref(),
+            app.status.error_text(),
             Some(crate::explorer::SHADOW_REASON)
         );
         let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
@@ -655,8 +655,7 @@ mod wp4 {
         let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Remove(0))));
         assert!(
             app.status
-                .error
-                .as_deref()
+                .error_text()
                 .is_some_and(|e| e.contains("changed on disk"))
         );
         let names: Vec<&str> = app
@@ -795,10 +794,7 @@ mod wp4 {
                 NaiveDate::from_ymd_opt(2026, 10, 14).expect("d"),
             ),
         }));
-        assert_eq!(
-            app.status.error.as_deref(),
-            Some("not materialized (shadow)")
-        );
+        assert_eq!(app.status.error_text(), Some("not materialized (shadow)"));
         assert_eq!(app.open_paths(), ["daily/day/2026-10-13.md"]);
     }
 
@@ -941,16 +937,16 @@ mod wp4 {
         let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
             path: "wp2err/one.md".into(),
         }));
-        assert!(app.status.error.is_some(), "daemon error surfaced");
+        assert!(app.status.error_text().is_some(), "daemon error surfaced");
         assert_eq!(app.open_paths(), ["wp2err/one.md"], "tab unchanged");
         assert_eq!(app.reading.title("wp2err/one.md"), "one");
         // A slash is refused before any RPC.
-        app.status.error = None;
+        app.status.notice = None;
         title(&mut app, "wp2err/one.md", "a/b");
         let _ = app.update(Message::Reading(ReadingMsg::TitleSubmit {
             path: "wp2err/one.md".into(),
         }));
-        assert_eq!(app.status.error.as_deref(), Some("invalid name"));
+        assert_eq!(app.status.error_text(), Some("invalid name"));
     }
 
     #[test]
@@ -1477,7 +1473,7 @@ mod usability_wp4 {
         // No actions registered: Ctrl+O / Ctrl+R do nothing, and no "Open today" entry exists.
         let _ = app.update(Message::Palette(PaletteMsg::Key(c("Ctrl+O"))));
         let _ = app.update(Message::Palette(PaletteMsg::Key(c("Ctrl+R"))));
-        assert!(app.status.error.is_none(), "{:?}", app.status.error);
+        assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
         assert!(!app.palette.entries.iter().any(|e| e.title == "Open today"));
         let periods = register_counting(&d, "period.open");
         let lints = register_counting(&d, "lint-note");
@@ -1801,7 +1797,7 @@ mod round2_wp3 {
         let seq = in_flight(&mut app, "w3q/a.md");
         let _ = app.update(Message::Tabs(TabsMsg::Quit));
         assert!(!app.exiting, "waits instead of refusing");
-        assert!(app.status.error.is_none(), "{:?}", app.status.error);
+        assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
         land(
             &mut app,
             "w3q/a.md",
@@ -1833,7 +1829,7 @@ mod round2_wp3 {
         let seq = in_flight(&mut app, "w3x/a.md");
         let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
         assert!(panes::find(&app.panes, "w3x/a.md").is_some(), "still open");
-        assert!(app.status.error.is_none(), "{:?}", app.status.error);
+        assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
         land(
             &mut app,
             "w3x/a.md",
@@ -3300,11 +3296,10 @@ mod title_sync_wp5 {
         assert_eq!(d.read_file("ts3/New.md").expect("kept").0, b"other");
         assert!(
             app.status
-                .error
-                .as_deref()
+                .error_text()
                 .is_some_and(|e| e.contains("already exists")),
             "{:?}",
-            app.status.error
+            app.status.notice
         );
     }
 
@@ -3468,7 +3463,7 @@ mod round4_wp4 {
         assert!(copy_image(d.as_ref(), &w, "att/missing.png").is_err());
         let mut app = app_over(&d, None);
         let _ = app.update(Message::Menu(MenuMsg::ImageCopied(Err("boom".into()))));
-        assert_eq!(app.status.error.as_deref(), Some("boom"));
+        assert_eq!(app.status.error_text(), Some("boom"));
     }
 
     #[test]

@@ -187,9 +187,10 @@ capture = "monthly-observation"
 
 # ---- WP-10: file-as-kind (kinds.toml) ---------------------------------------------------------
 
-# One action for Crucible's ten "Ingest as ..." chains: tag, move to the kind's folder (links
-# rewritten), lint at the new path (transcript cleanup for kinds that ask for it). The resource
-# key is the active note, which is the note being moved.
+# One action for Crucible's ten "Ingest as ..." chains: move to the kind's folder (links
+# rewritten), tag the moved note, lint at the new path (transcript cleanup for kinds that ask for
+# it). Move runs first so a destination collision fails the job before any write (plan round-5
+# WP-3; matches the live action). The resource key is the active note, which is the note moved.
 [[action]]
 id = "file-as-kind"
 label = "File as kind"
@@ -202,10 +203,10 @@ kind = "enum"
 choices = ["transcript", "fanfic", "blog", "3-2-1", "repo", "prompt-kit", "post", "news", "thread", "quote"]
 required = true
 [[action.steps]]
-type = "upsert_tags"
+type = "move"
 kind = "{param.kind}"
 [[action.steps]]
-type = "move"
+type = "upsert_tags"
 kind = "{param.kind}"
 [[action.steps]]
 type = "lint"

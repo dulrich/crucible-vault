@@ -414,11 +414,10 @@ fn save_conflict_aborts_the_run() {
     assert!(
         e.app
             .status
-            .error
-            .as_deref()
+            .error_text()
             .is_some_and(|s| s.contains("conflict")),
         "{:?}",
-        e.app.status.error
+        e.app.status.notice
     );
 }
 
@@ -989,8 +988,7 @@ fn move_note_collision_is_a_status_and_no_rename() {
     assert!(d.vault_root().join("a.md").exists());
     assert!(
         app.status
-            .error
-            .as_deref()
+            .error_text()
             .is_some_and(|e| e.contains("already exists"))
     );
 }
@@ -1004,8 +1002,7 @@ fn move_note_refuses_a_dirty_buffer() {
     assert!(d.vault_root().join("a.md").exists());
     assert!(
         app.status
-            .error
-            .as_deref()
+            .error_text()
             .is_some_and(|e| e.contains("save the open note first"))
     );
 }
@@ -1095,4 +1092,65 @@ fn enter_on_text_step_does_not_submit() {
     let pr = app.palette.prompt.as_ref().expect("still prompting");
     assert_eq!(pr.step, 0);
     assert!(app.palette.prompt_error.is_none());
+}
+
+/// Plan round-5 WP-3: a Failed job shows its step error in the toast and raises an Error notice
+/// naming the action (the File as kind collision reaches the bar this way).
+#[test]
+fn failed_job_message_reaches_toast_and_notice() {
+    let mut app = App::new(None, None);
+    app.palette
+        .job_titles
+        .insert("j1".into(), "File as kind".into());
+    let _ = app.update(Message::Status(StatusMsg::Notification(
+        Notification::JobUpdated(JobStatus {
+            job_id: "j1".into(),
+            status: JobState::Failed,
+            message: Some("already exists: stack/clip.md".into()),
+            output_paths: Vec::new(),
+            open_path: None,
+        }),
+    )));
+    let toast = app.palette.toast.clone().expect("toast");
+    assert_eq!(
+        toast.line(),
+        "File as kind: failed — already exists: stack/clip.md"
+    );
+    assert_eq!(
+        app.status.error_text(),
+        Some("File as kind failed: already exists: stack/clip.md")
+    );
+}
+
+/// Plan round-5 WP-3: notices expire by severity (info 5 s < error 30 s); a lower-severity notice
+/// does not displace a live error; the inline text is one truncated line.
+#[test]
+fn notice_expiry_and_severity_ordering() {
+    use crate::app::{NOTICE_INLINE_CHARS, Severity};
+    let mut app = App::new(None, None);
+    let t0 = Instant::now();
+    app.status.notify_at(Severity::Info, "hello", t0);
+    app.status.expire_notice(t0 + Duration::from_secs(4));
+    assert!(app.status.notice.is_some());
+    app.status.expire_notice(t0 + Duration::from_secs(5));
+    assert!(app.status.notice.is_none());
+    app.status.notify_at(Severity::Error, "bad\nthing", t0);
+    app.status
+        .notify_at(Severity::Warning, "meh", t0 + Duration::from_secs(1));
+    assert_eq!(app.status.error_text(), Some("bad\nthing"));
+    assert_eq!(
+        app.status.notice.as_ref().map(|n| n.inline()),
+        Some("bad thing".into())
+    );
+    app.status.expire_notice(t0 + Duration::from_secs(29));
+    assert!(app.status.notice.is_some());
+    app.status.notify_at(
+        Severity::Warning,
+        "x".repeat(200),
+        t0 + Duration::from_secs(31),
+    );
+    let n = app.status.notice.clone().expect("replaced after expiry");
+    assert_eq!(n.severity, Severity::Warning);
+    assert_eq!(n.inline().chars().count(), NOTICE_INLINE_CHARS);
+    assert!(n.inline().ends_with('…'));
 }

@@ -127,6 +127,8 @@ struct ResolverCache {
 /// All reading state.
 #[derive(Debug, Default)]
 pub struct ReadingStore {
+    /// plan round-5 WP-3: a notice for the status bar, taken by `App` after each update.
+    pub notice: Option<(crate::app::Severity, String)>,
     tabs: HashMap<String, TabReading>,
     pub images: ImageCache,
     resolver: Option<ResolverCache>,
@@ -892,6 +894,13 @@ pub fn update(
             if let Some(m) = store.click(&src, &target, daemon) {
                 return Task::done(m);
             }
+            // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing.
+            if daemon.is_some() && !render::is_remote(&target) {
+                store.notice = Some((
+                    crate::app::Severity::Warning,
+                    format!("unresolved link: {target}"),
+                ));
+            }
         }
         ReadingMsg::ImageShown {
             tab,
@@ -907,13 +916,22 @@ pub fn update(
                 .hide(&image_cache::view_owner(&tab, view), &key);
         }
         ReadingMsg::ImageLoaded { key, result } => {
-            if let Err(e) = &result {
-                tracing::debug!(error = %e, "image load failed");
-            }
+            let failed = result.as_ref().err().cloned();
             store.images.loaded(&key, result.ok());
+            if let Some(e) = failed {
+                tracing::debug!(error = %e, "image load failed");
+                store.notice = Some((crate::app::Severity::Warning, image_failure_text(&key, &e)));
+            }
         }
     }
     Task::none()
+}
+
+/// The image-failure notice: the image's basename and a one-line, short reason.
+pub fn image_failure_text(key: &str, err: &str) -> String {
+    let base = key.rsplit('/').next().unwrap_or(key);
+    let reason: String = err.lines().next().unwrap_or("").chars().take(60).collect();
+    format!("image failed to load: {base} ({reason})")
 }
 
 /// The active tab's body: source, reading, or split (source left, reading right). `view` is

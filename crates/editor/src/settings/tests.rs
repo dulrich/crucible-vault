@@ -402,7 +402,10 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
     assert_eq!(settings_tabs(&app), 1);
     assert!(app.active_tab().is_some_and(|t| t.is_settings()));
     assert!(app.active_note().is_none());
-    assert!(app.status.error.is_none(), "no daemon read of the sentinel");
+    assert!(
+        app.status.error_text().is_none(),
+        "no daemon read of the sentinel"
+    );
     // Open a note, then Ctrl+, again: the existing tab is focused, never a second one.
     let note = d
         .index()
@@ -444,7 +447,7 @@ fn settings_tab_persists_and_old_ui_state_loads() {
     }
     let app = app_over(&d, Some(state.clone()));
     assert_eq!(settings_tabs(&app), 1, "restored without a daemon read");
-    assert!(app.status.error.is_none());
+    assert!(app.status.error_text().is_none());
     // A pre-settings file (plain vault paths) still loads.
     std::fs::write(
         &state,
@@ -827,8 +830,7 @@ fn bookmarks_absent_then_appeared_is_a_conflict_not_a_copy() {
     );
     assert!(
         app.status
-            .error
-            .as_deref()
+            .error_text()
             .is_some_and(|e| e.contains("changed on disk"))
     );
     assert_eq!(app.bookmarks.items.len(), 1, "reloaded theirs");

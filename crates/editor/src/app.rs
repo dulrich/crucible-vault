@@ -112,8 +112,8 @@ pub struct StatusModel {
     pub generation: u64,
     /// Last job update (`id: state`), for the toast slot WP-5 grows.
     pub last_job: Option<String>,
-    /// Last error worth surfacing (no note text).
-    pub error: Option<String>,
+    /// plan round-5 WP-3: the current status notice (replaces the sticky error string).
+    pub notice: Option<Notice>,
     /// plan editor-data-safety WP-1: disconnected with a reconnect loop running.
     pub reconnecting: bool,
 }
@@ -137,11 +137,96 @@ impl StatusModel {
             s.push_str(" · job ");
             s.push_str(j);
         }
-        if let Some(e) = &self.error {
-            s.push_str(" · ");
-            s.push_str(e);
-        }
         s
+    }
+
+    /// Raises a notice of `severity`, expiring per [`Severity::ttl`].
+    pub fn notify(&mut self, severity: Severity, text: impl Into<String>) {
+        self.notify_at(severity, text, std::time::Instant::now());
+    }
+
+    /// [`Self::notify`] with an explicit clock (tests). A lower-severity notice does not
+    /// replace a live higher-severity one.
+    pub fn notify_at(
+        &mut self,
+        severity: Severity,
+        text: impl Into<String>,
+        now: std::time::Instant,
+    ) {
+        if let Some(n) = &self.notice
+            && n.severity > severity
+            && n.expires > now
+        {
+            return;
+        }
+        self.notice = Some(Notice {
+            text: text.into(),
+            severity,
+            expires: now + severity.ttl(),
+        });
+    }
+
+    /// An Error notice.
+    pub fn set_error(&mut self, text: String) {
+        self.notify(Severity::Error, text);
+    }
+
+    /// The current Error notice's text, if any.
+    pub fn error_text(&self) -> Option<&str> {
+        self.notice
+            .as_ref()
+            .filter(|n| n.severity == Severity::Error)
+            .map(|n| n.text.as_str())
+    }
+
+    /// Drops an expired notice.
+    pub fn expire_notice(&mut self, now: std::time::Instant) {
+        if self.notice.as_ref().is_some_and(|n| n.expires <= now) {
+            self.notice = None;
+        }
+    }
+}
+
+/// Notice severity, ordered Info < Warning < Error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    Info,
+    Warning,
+    Error,
+}
+
+impl Severity {
+    /// How long a notice of this severity stays: info 5 s, warning 10 s, error 30 s.
+    pub fn ttl(self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Severity::Info => 5,
+            Severity::Warning => 10,
+            Severity::Error => 30,
+        })
+    }
+}
+
+/// A status-bar notice (plan round-5 WP-3): text, severity and expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub severity: Severity,
+    pub expires: std::time::Instant,
+}
+
+/// Max chars of a notice shown inline; the full text is in the hover tooltip.
+pub const NOTICE_INLINE_CHARS: usize = 80;
+
+impl Notice {
+    /// The one-line, truncated bar text.
+    pub fn inline(&self) -> String {
+        let one: String = self.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one.chars().count() > NOTICE_INLINE_CHARS {
+            let cut: String = one.chars().take(NOTICE_INLINE_CHARS - 1).collect();
+            format!("{cut}…")
+        } else {
+            one
+        }
     }
 }
 
@@ -368,7 +453,7 @@ impl App {
                         mode: h.mode,
                         generation: h.generation,
                         last_job: None,
-                        error: None,
+                        notice: None,
                         reconnecting: false,
                     },
                     NotifHandle::new(rx),
@@ -380,7 +465,7 @@ impl App {
                     mode: Mode::Shadow,
                     generation: 0,
                     last_job: None,
-                    error: None,
+                    notice: None,
                     reconnecting: false,
                 },
                 NotifHandle::default(),
@@ -440,7 +525,7 @@ impl App {
         for (pane, paths, active) in plan {
             for p in &paths {
                 if let Err(e) = app.open_into(pane, p, Place::Restore) {
-                    app.status.error = Some(open_error(&e));
+                    app.status.set_error(open_error(&e));
                 }
             }
             if let Some(ps) = app.panes.get_mut(pane)
@@ -565,7 +650,7 @@ impl App {
         self.status.generation = h.generation;
         self.status.connected = true;
         self.status.reconnecting = false;
-        self.status.error = None;
+        self.status.notice = None;
         self.reconnect_attempt = 0;
         let epoch = self.notifications.epoch() + 1;
         self.notifications = NotifHandle::shared(conn.rx, epoch);
@@ -738,7 +823,7 @@ impl App {
     fn refresh_files(&mut self) {
         let Some(d) = &self.daemon else { return };
         if let Err(e) = self.explorer.build(d.index(), &self.ui.expanded) {
-            self.status.error = Some(e);
+            self.status.set_error(e);
         }
         if self.switcher.open {
             self.switcher.refresh(&self.explorer.paths, &self.ui.recent);
@@ -756,7 +841,7 @@ impl App {
             if let crate::settings::LoadState::Malformed(e) | crate::settings::LoadState::Error(e) =
                 &f.state
             {
-                self.status.error = Some(format!("bookmarks: {e}"));
+                self.status.set_error(format!("bookmarks: {e}"));
             }
         }
         self.sync_bookmarks();
@@ -769,7 +854,7 @@ impl App {
         done: impl FnOnce(Result<X, String>) -> Message + Send + 'static,
     ) -> Task<Message> {
         let Some(d) = self.daemon.clone() else {
-            self.status.error = Some("not connected".into());
+            self.status.set_error("not connected".into());
             return Task::none();
         };
         if self.rpc_inline {
@@ -795,7 +880,7 @@ impl App {
     /// [`Self::open`] with an explicit placement (Quick Switch modes).
     fn open_with(&mut self, path: &str, how: Place, persist: bool) {
         if let Err(e) = self.open_into(self.focus, path, how) {
-            self.status.error = Some(open_error(&e));
+            self.status.set_error(open_error(&e));
             return;
         }
         if persist {
@@ -924,7 +1009,7 @@ impl App {
         let r = self.open_into(pane, &path, Place::Focus);
         self.history_nav = false;
         if let Err(e) = r {
-            self.status.error = Some(open_error(&e));
+            self.status.set_error(open_error(&e));
         }
         self.persist();
     }
@@ -974,7 +1059,7 @@ impl App {
     fn reload_tab(&mut self, path: &str, hash: Option<&str>) {
         let daemon = self.daemon.as_ref();
         if let Some(e) = crate::source::file_changed(&mut self.docs, path, hash, daemon) {
-            self.status.error = Some(e);
+            self.status.set_error(e);
         }
     }
 
@@ -1001,7 +1086,7 @@ impl App {
 
     fn shadow_blocked(&mut self, reason: &str) -> bool {
         if self.status.mode == Mode::Shadow {
-            self.status.error = Some(reason.to_owned());
+            self.status.set_error(reason.to_owned());
             return true;
         }
         false
@@ -1086,7 +1171,7 @@ impl App {
             }
             MenuMsg::ImageCopied(r) => {
                 if let Err(e) = r {
-                    self.status.error = Some(e);
+                    self.status.set_error(e);
                 }
             }
         }
@@ -1150,7 +1235,8 @@ impl App {
                 #[cfg(test)]
                 self.copied_images.push(src.clone());
                 let Some(d) = self.daemon.clone() else {
-                    self.status.error = Some("copy image: no daemon connection".into());
+                    self.status
+                        .set_error("copy image: no daemon connection".into());
                     return Task::none();
                 };
                 let writer = self.clip_writer.clone();
@@ -1263,7 +1349,8 @@ impl App {
             return Task::none();
         }
         if self.doc_dirty(&path) {
-            self.status.error = Some("save the open note first (it has unsaved edits)".into());
+            self.status
+                .set_error("save the open note first (it has unsaved edits)".into());
             return Task::none();
         }
         let p = path.clone();
@@ -1284,7 +1371,8 @@ impl App {
             return Task::none();
         }
         if self.doc_dirty(&path) {
-            self.status.error = Some("save the open note first (it has unsaved edits)".into());
+            self.status
+                .set_error("save the open note first (it has unsaved edits)".into());
             return Task::none();
         }
         self.rpc(
@@ -1486,6 +1574,7 @@ impl App {
                     let ok = ok || !self.docs.contains_key(&p);
                     (p, ok)
                 });
+                let mut src_err = None;
                 let task = crate::source::update(
                     &mut self.docs,
                     active.as_deref(),
@@ -1493,9 +1582,12 @@ impl App {
                     crate::source::Ctx {
                         daemon: self.daemon.as_ref(),
                         mode: self.status.mode,
-                        error: &mut self.status.error,
+                        error: &mut src_err,
                     },
                 );
+                if let Some(e) = src_err {
+                    self.status.set_error(e);
+                }
                 // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this
                 // save was in flight resyncs now. A failed completion's queued `save_again` is
                 // not relaunched by `source::update`, so the resync's fresh save covers it; a
@@ -1534,7 +1626,7 @@ impl App {
             } => return self.title_renamed(&from, &to, seq, result),
             Message::OpenUrl(url) => {
                 if let Err(e) = crate::open_url::open(&self.prefs.open_url_cmd, &url) {
-                    self.status.error = Some(e);
+                    self.status.set_error(e);
                 }
             }
             Message::Reading(crate::message::ReadingMsg::ToggleTask { path, line }) => {
@@ -1586,6 +1678,9 @@ impl App {
                     active,
                     self.daemon.as_ref(),
                 );
+                if let Some((severity, text)) = self.reading.notice.take() {
+                    self.status.notify(severity, text);
+                }
                 if mode_change {
                     self.mode_menu = None;
                     self.persist();
@@ -2414,8 +2509,8 @@ impl App {
                         f.load(d.as_ref());
                     }
                 }
-                if err.is_some() {
-                    self.status.error = err;
+                if let Some(e) = err {
+                    self.status.set_error(e);
                 }
                 self.sync_bookmarks();
                 // WP-2: a Settings-page auto-save that fired during this write re-runs now.
@@ -2439,7 +2534,7 @@ impl App {
                     return Task::none();
                 }
                 if f.dirty {
-                    self.status.error = Some(
+                    self.status.set_error(
                         "bookmarks have unsaved edits on the Settings page (saving or invalid)"
                             .into(),
                     );
@@ -2456,7 +2551,7 @@ impl App {
                     return Task::none();
                 };
                 if let Err(err) = self.settings.edit(BOOKMARKS_PATH, &e) {
-                    self.status.error = Some(format!("bookmarks: {err}"));
+                    self.status.set_error(format!("bookmarks: {err}"));
                     return Task::none();
                 }
                 let job = self
@@ -2465,7 +2560,7 @@ impl App {
                     .and_then(crate::settings::ConfigFile::begin_save);
                 self.sync_bookmarks();
                 let Some(job) = job else {
-                    self.status.error = Some(
+                    self.status.set_error(
                         "bookmarks: the file has form errors; fix them on the Settings page".into(),
                     );
                     if let (Some(d), Some(f)) =
@@ -2490,7 +2585,8 @@ impl App {
     /// editor-ui-round-3 WP-9).
     fn open_bookmark(&mut self, path: &str) -> Task<Message> {
         if self.bookmarks.missing.contains(path) {
-            self.status.error = Some(format!("bookmark target missing: {path}"));
+            self.status
+                .set_error(format!("bookmark target missing: {path}"));
             return Task::none();
         }
         self.open(path, true);
@@ -2518,7 +2614,8 @@ impl App {
         if let Some(t) = target
             && self.doc_dirty(t)
         {
-            self.status.error = Some("save the open note first (it has unsaved edits)".into());
+            self.status
+                .set_error("save the open note first (it has unsaved edits)".into());
             return Task::none();
         }
         if let FileOp::Rename { from, to } = &op {
@@ -2558,7 +2655,7 @@ impl App {
                     _ => EditKind::Move,
                 };
                 if !self.explorer.begin(kind) {
-                    self.status.error = Some("select a file first".into());
+                    self.status.set_error("select a file first".into());
                 }
             }
             ExplorerMsg::Trash => {
@@ -2573,19 +2670,19 @@ impl App {
                 {
                     // plan editor-ui-round-3 WP-3: always through the delete dialog.
                     Some(path) => return self.begin_delete(path),
-                    None => self.status.error = Some("select a file first".into()),
+                    None => self.status.set_error("select a file first".into()),
                 }
             }
             ExplorerMsg::DeleteActive => match self.active_note().map(|t| t.path.clone()) {
                 Some(path) => return self.begin_delete(path),
-                None => self.status.error = Some("no active note".into()),
+                None => self.status.set_error("no active note".into()),
             },
             ExplorerMsg::DeletePreview { path, result } => match result {
                 Ok(items) => {
                     let c = crate::dialog::DeleteConfirm::new(path, self.prefs.delete_mode, items);
                     self.dialog = Some(crate::dialog::Dialog::delete(c));
                 }
-                Err(e) => self.status.error = Some(e),
+                Err(e) => self.status.set_error(e),
             },
             ExplorerMsg::NoteDeleted(result) => match result {
                 Ok(r) => {
@@ -2596,14 +2693,14 @@ impl App {
                         self.close_path(p);
                     }
                     if !r.skipped.is_empty() {
-                        self.status.error = Some(format!(
+                        self.status.set_error(format!(
                             "kept {} item(s) linked elsewhere: {}",
                             r.skipped.len(),
                             r.skipped.join(", ")
                         ));
                     }
                 }
-                Err(e) => self.status.error = Some(e),
+                Err(e) => self.status.set_error(e),
             },
             ExplorerMsg::Input(s) => {
                 if let Some(e) = &mut self.explorer.edit {
@@ -2618,7 +2715,7 @@ impl App {
                 match self.explorer.submit() {
                     Ok(Some(op)) => return self.dispatch_op(op),
                     Ok(None) => {}
-                    Err(e) => self.status.error = Some(e),
+                    Err(e) => self.status.set_error(e),
                 }
             }
             ExplorerMsg::Cancel => self.explorer.edit = None,
@@ -2633,7 +2730,7 @@ impl App {
                         FileOp::Delete { path } => self.close_path(path),
                     }
                 }
-                Err(e) => self.status.error = Some(e),
+                Err(e) => self.status.set_error(e),
             },
         }
         Task::none()
@@ -2649,7 +2746,8 @@ impl App {
             return Task::none();
         };
         if read_only {
-            self.status.error = Some("edits are disabled in shadow mode".into());
+            self.status
+                .set_error("edits are disabled in shadow mode".into());
             return Task::none();
         }
         if !doc.set_task_status(line, to, false, std::time::Instant::now()) {
@@ -2667,7 +2765,8 @@ impl App {
             return Task::none();
         };
         if read_only {
-            self.status.error = Some("edits are disabled in shadow mode".into());
+            self.status
+                .set_error("edits are disabled in shadow mode".into());
             return Task::none();
         }
         if !doc.toggle_task(line, false, std::time::Instant::now()) {
@@ -2687,7 +2786,8 @@ impl App {
             return Task::none();
         };
         if read_only {
-            self.status.error = Some("edits are disabled in shadow mode".into());
+            self.status
+                .set_error("edits are disabled in shadow mode".into());
             return Task::none();
         }
         if !doc.toggle_frontmatter_bool(key, false, std::time::Instant::now()) {
@@ -2708,7 +2808,7 @@ impl App {
             return Task::none();
         };
         if input.contains('/') {
-            self.status.error = Some("invalid name".into());
+            self.status.set_error("invalid name".into());
             return Task::none();
         }
         if self.shadow_blocked(explorer::SHADOW_REASON) {
@@ -2724,8 +2824,8 @@ impl App {
             });
         }
         let Some(job) = doc.begin_save(false) else {
-            self.status.error =
-                Some("rename not done (the note is saving or has a conflict)".into());
+            self.status
+                .set_error("rename not done (the note is saving or has a conflict)".into());
             return Task::none();
         };
         let seq = job.seq;
@@ -2757,11 +2857,12 @@ impl App {
         };
         let ok = matches!(outcome, SaveOutcome::Saved(_));
         if let Err(e) = doc.finish_save(seq, outcome) {
-            self.status.error = Some(format!("rename not done (save failed: {e})"));
+            self.status
+                .set_error(format!("rename not done (save failed: {e})"));
             return Task::none();
         }
         if !ok || doc.is_dirty() {
-            self.status.error = Some(if ok {
+            self.status.set_error(if ok {
                 "rename not done (the note changed while saving)".into()
             } else {
                 "rename not done (save conflict: the file changed on disk)".into()
@@ -2790,7 +2891,7 @@ impl App {
                 self.docs.remove(from);
                 self.move_path_state(from, to, doc);
             }
-            Err(e) => self.status.error = Some(open_error(&e)),
+            Err(e) => self.status.set_error(open_error(&e)),
         }
     }
 
@@ -2853,7 +2954,8 @@ impl App {
             if let Some(doc) = self.docs.get_mut(path) {
                 doc.settle_title();
             }
-            self.status.error = Some(format!("title changed; not renamed: {to} already exists"));
+            self.status
+                .set_error(format!("title changed; not renamed: {to} already exists"));
             return Task::none();
         }
         let Some(doc) = self.docs.get_mut(path) else {
@@ -2908,7 +3010,8 @@ impl App {
                 Task::none()
             }
             Err(e) => {
-                self.status.error = Some(format!("title changed; rename failed: {e}"));
+                self.status
+                    .set_error(format!("title changed; rename failed: {e}"));
                 let Some(doc) = self.docs.get_mut(from) else {
                     return Task::none();
                 };
@@ -3023,8 +3126,8 @@ impl App {
                     self.switcher.open = false;
                     self.open(&p, true);
                 }
-                Ok(None) => self.status.error = Some("note.create returned no path".into()),
-                Err(e) => self.status.error = Some(format!("note.create: {e}")),
+                Ok(None) => self.status.set_error("note.create returned no path".into()),
+                Err(e) => self.status.set_error(format!("note.create: {e}")),
             },
         }
         Task::none()
@@ -3037,7 +3140,7 @@ impl App {
             return Task::none();
         }
         let Some(from) = self.active_note().map(|t| t.path.clone()) else {
-            self.status.error = Some("move note: no active note".into());
+            self.status.set_error("move note: no active note".into());
             return Task::none();
         };
         let s = &mut self.switcher;
@@ -3065,13 +3168,14 @@ impl App {
             return Task::none();
         }
         let Some(d) = self.daemon.clone() else {
-            self.status.error = Some("move note: not connected".into());
+            self.status.set_error("move note: not connected".into());
             return Task::none();
         };
         match d.read_file(&to) {
             Err(DaemonError::NotFound(_)) => {}
             _ => {
-                self.status.error = Some(format!("move note: {to} already exists"));
+                self.status
+                    .set_error(format!("move note: {to} already exists"));
                 return Task::none();
             }
         }
@@ -3083,7 +3187,7 @@ impl App {
             NavMsg::Go { pane, target } => match target {
                 NavTarget::Path(p) => {
                     if let Err(e) = self.open_into(pane, p, Place::Replace) {
-                        self.status.error = Some(open_error(&e));
+                        self.status.set_error(open_error(&e));
                     }
                     self.persist();
                 }
@@ -3104,14 +3208,14 @@ impl App {
                     match self.open_into(pane, &p, Place::Replace) {
                         Ok(()) => {}
                         Err(DaemonError::NotFound(_)) if self.status.mode == Mode::Shadow => {
-                            self.status.error = Some("not materialized (shadow)".into());
+                            self.status.set_error("not materialized (shadow)".into());
                         }
-                        Err(e) => self.status.error = Some(open_error(&e)),
+                        Err(e) => self.status.set_error(open_error(&e)),
                     }
                     self.persist();
                 }
-                Ok(None) => self.status.error = Some("period.open returned no path".into()),
-                Err(e) => self.status.error = Some(format!("period.open: {e}")),
+                Ok(None) => self.status.set_error("period.open returned no path".into()),
+                Err(e) => self.status.set_error(format!("period.open: {e}")),
             },
         }
         Task::none()
@@ -3213,7 +3317,7 @@ impl App {
                 self.palette.loading = false;
                 match r {
                     Ok(a) => self.palette.set_actions(a),
-                    Err(e) => self.status.error = Some(format!("actions: {e}")),
+                    Err(e) => self.status.set_error(format!("actions: {e}")),
                 }
                 self.sync_hotkeys();
                 if let Some(c) = self.palette.pending_chord.take()
@@ -3247,9 +3351,13 @@ impl App {
                         self.palette.job_origins.insert(r.job_id, o);
                     }
                 }
-                Err(e) => self.status.error = Some(format!("{title}: {e}")),
+                Err(e) => self.status.set_error(format!("{title}: {e}")),
             },
-            PaletteMsg::Tick => self.palette.expire_toast(std::time::Instant::now()),
+            PaletteMsg::Tick => {
+                let now = std::time::Instant::now();
+                self.palette.expire_toast(now);
+                self.status.expire_notice(now);
+            }
             PaletteMsg::RunPreset(p) => return self.run_preset(p),
         }
         Task::none()
@@ -3336,7 +3444,7 @@ impl App {
     /// Invokes an action exactly as the palette does: prompt its params, then run.
     fn invoke_action(&mut self, id: &str) -> Task<Message> {
         let Some(info) = self.palette.action(id).cloned() else {
-            self.status.error = Some(format!("unknown action {id}"));
+            self.status.set_error(format!("unknown action {id}"));
             return Task::none();
         };
         if !info.params.is_empty() {
@@ -3364,7 +3472,8 @@ impl App {
             .filter(|&i| ps.tabs.get(i).is_some_and(|t| !t.is_settings()))
         else {
             if call.needs.iter().any(|n| n == "active_path") {
-                self.status.error = Some(format!("{}: open a note first", call.title));
+                self.status
+                    .set_error(format!("{}: open a note first", call.title));
                 return Task::none();
             }
             return self.dispatch_call(call);
@@ -3377,7 +3486,7 @@ impl App {
             return self.dispatch_call(call);
         }
         let Some(job) = doc.begin_save(false) else {
-            self.status.error = Some(format!(
+            self.status.set_error(format!(
                 "{}: not run (the note is saving or has a conflict)",
                 call.title
             ));
@@ -3406,19 +3515,21 @@ impl App {
     ) -> Task<Message> {
         use crate::source::SaveOutcome;
         let Some(tab) = self.docs.get_mut(path) else {
-            self.status.error = Some(format!("{}: not run (note closed)", call.title));
+            self.status
+                .set_error(format!("{}: not run (note closed)", call.title));
             return Task::none();
         };
         let ok = matches!(outcome, SaveOutcome::Saved(_));
         let again = match tab.finish_save(seq, outcome.clone()) {
             Ok(again) => again,
             Err(e) => {
-                self.status.error = Some(format!("{}: not run (save failed: {e})", call.title));
+                self.status
+                    .set_error(format!("{}: not run (save failed: {e})", call.title));
                 return Task::none();
             }
         };
         if !ok {
-            self.status.error = Some(format!(
+            self.status.set_error(format!(
                 "{}: not run (save conflict: the file changed on disk)",
                 call.title
             ));
@@ -3484,6 +3595,17 @@ impl App {
         }
         if j.status != cv_protocol::JobState::Done {
             self.palette.job_origins.remove(&j.job_id);
+            if j.status != cv_protocol::JobState::Deferred {
+                let title = self
+                    .palette
+                    .job_titles
+                    .get(&j.job_id)
+                    .cloned()
+                    .unwrap_or_else(|| j.job_id.clone());
+                let state = crate::palette::state_label(j.status);
+                let reason = j.message.as_deref().unwrap_or("no reason given");
+                self.status.set_error(format!("{title} {state}: {reason}"));
+            }
             return;
         }
         let Some(open) = j.open_path.clone() else {
@@ -3541,7 +3663,7 @@ impl App {
         let hash = match d.read_file(to) {
             Ok((_, h)) => h,
             Err(e) => {
-                self.status.error = Some(open_error(&e));
+                self.status.set_error(open_error(&e));
                 return;
             }
         };
@@ -3550,7 +3672,7 @@ impl App {
         };
         doc.follow_move(to, hash);
         self.move_path_state(from, to, doc);
-        self.status.error = Some(format!(
+        self.status.set_error(format!(
             "{from} moved to {to} while you were editing: keep mine saves your text there"
         ));
     }
@@ -3590,13 +3712,13 @@ impl App {
                     self.panels.backlinks = b;
                 }
                 Ok(_) => {}
-                Err(e) => self.status.error = Some(format!("backlinks: {e}")),
+                Err(e) => self.status.set_error(format!("backlinks: {e}")),
             },
             PanelsMsg::TagPick(tag) => {
                 if let Some(d) = self.daemon.clone()
                     && let Err(e) = self.panels.pick_tag(d.as_ref(), &tag)
                 {
-                    self.status.error = Some(format!("tags: {e}"));
+                    self.status.set_error(format!("tags: {e}"));
                 }
             }
             PanelsMsg::TagBack => self.panels.tag_files = None,
@@ -3657,7 +3779,7 @@ impl App {
         if let Some(d) = &d
             && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)
         {
-            self.status.error = Some(format!("tags: {e}"));
+            self.status.set_error(format!("tags: {e}"));
         }
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         if ms >= 1.0 {
@@ -3736,7 +3858,7 @@ impl App {
                         if let Some(d) = &self.daemon
                             && let Err(e) = d.index().on_generation(n)
                         {
-                            self.status.error = Some(format!("index: {e}"));
+                            self.status.set_error(format!("index: {e}"));
                         }
                         // WP-2 (audit B1): every generation re-reads membership from the index
                         // (a `.gitignore` rebuild drops/restores paths).
@@ -4106,7 +4228,7 @@ impl App {
                 let name = std::mem::take(&mut self.settings.new_view);
                 if let Err(e) = self.settings.new_view_file(&name) {
                     self.settings.new_view = name;
-                    self.status.error = Some(e);
+                    self.status.set_error(e);
                 }
             }
             SettingsMsg::Save(path) => {
@@ -4209,6 +4331,13 @@ impl App {
             iced::keyboard::listen().filter_map(|e| crate::dialog::key_event(&e)),
             self.reading.subscription(),
             crate::palette::subscription(&self.palette, self.panels.visible),
+            // plan round-5 WP-3: a 1 s expiry tick while a notice is up (shares PaletteMsg::Tick).
+            if self.status.notice.is_some() && self.palette.toast.is_none() {
+                iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::Palette(crate::message::PaletteMsg::Tick))
+            } else {
+                Subscription::none()
+            },
             crate::find::subscription(self.panes.iter().any(|(_, ps)| ps.find.is_some())),
             // Window close goes through Quit (dirty buffers flush first).
             iced::window::close_requests().map(|_| Message::Tabs(TabsMsg::Quit)),
@@ -4725,9 +4854,30 @@ impl App {
             .as_ref()
             .map(|t| format!("▸ {}", t.line()))
             .unwrap_or_default();
+        // plan round-5 WP-3: the notice — one truncated line, full text on hover.
+        let notice: Element<'_, Message> = match &self.status.notice {
+            Some(n) => {
+                let color = match n.severity {
+                    Severity::Info => t.accent_text,
+                    Severity::Warning => t.warn_text,
+                    Severity::Error => t.error_text,
+                };
+                iced::widget::tooltip(
+                    text(n.inline()).size(16).color(color.to_color()),
+                    container(text(n.text.clone()).size(13))
+                        .padding(6)
+                        .max_width(640)
+                        .style(crate::theme::seg_group_style(t)),
+                    iced::widget::tooltip::Position::Top,
+                )
+                .into()
+            }
+            None => Space::new().into(),
+        };
         let status = row![
             text(self.status.line()).size(16),
             text(toast).size(16).color(t.accent_text.to_color()),
+            notice,
             button(text(format!("Surround: {}", self.prefs.surround.label())).size(16))
                 .style(button::text)
                 .on_press(Message::Theme(ThemeMsg::Cycle)),

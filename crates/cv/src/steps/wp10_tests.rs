@@ -863,6 +863,24 @@ fn file_as_kind_tags_moves_and_lints() {
     assert_eq!(open, Some(format!("daily/day/{}/n.md", today())));
 }
 
+/// plan round-5 WP-3: the example `file-as-kind` moves first, so a destination collision fails
+/// with "already exists" and leaves the note (and its tags) untouched.
+#[test]
+fn file_as_kind_collision_fails_before_tagging() {
+    let src = "---\ntags: [clip]\n---\nbody\n";
+    let env = Env::new(&[("inbox/clip.md", src), ("stack/clip.md", "other\n")]);
+    let err = env
+        .run_action(
+            "file-as-kind",
+            json!({"kind": "repo"}),
+            active("inbox/clip.md"),
+        )
+        .expect_err("collision fails");
+    assert!(err.to_string().contains("already exists"), "{err}");
+    assert_eq!(env.read("inbox/clip.md").as_deref(), Some(src));
+    assert_eq!(env.read("stack/clip.md").as_deref(), Some("other\n"));
+}
+
 /// WP-8 (editor-feedback-round-2): the live `file-as-kind` orders `move` first; the following
 /// `upsert_tags` (no `path`) must target the moved note, not the dead pre-move path.
 #[test]

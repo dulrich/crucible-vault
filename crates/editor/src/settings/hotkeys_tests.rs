@@ -936,7 +936,7 @@ fn missing_bookmarks_on_load_and_after_delete() {
         crate::bookmarks::BookmarkMsg::Open("wp9/gone.md".into()),
     );
     assert_eq!(
-        app.status.error.as_deref(),
+        app.status.error_text(),
         Some("bookmark target missing: wp9/gone.md")
     );
     assert_eq!(tabs(&app), before);

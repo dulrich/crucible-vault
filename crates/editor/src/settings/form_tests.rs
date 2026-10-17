@@ -706,8 +706,7 @@ fn bookmarks_page_and_panel_share_one_hash() {
     let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
     assert!(
         app.status
-            .error
-            .as_deref()
+            .error_text()
             .is_some_and(|e| e.contains("unsaved"))
     );
     let _ = app.update(s(SettingsMsg::Save(BOOKMARKS_PATH.into())));
@@ -722,9 +721,9 @@ fn bookmarks_page_and_panel_share_one_hash() {
         "panel sees the page save"
     );
     // And the panel saves again on top of the page's save (no conflict).
-    app.status.error = None;
+    app.status.notice = None;
     let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
-    assert!(app.status.error.is_none(), "{:?}", app.status.error);
+    assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
     let items = crate::bookmarks::parse(&disk(&d).0).expect("parse");
     assert_eq!(items.len(), 2);
     assert_eq!(base(&app), Some(disk(&d).1));

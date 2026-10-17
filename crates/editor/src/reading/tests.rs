@@ -963,3 +963,36 @@ fn percent_decode_handles_every_escape() {
     assert_eq!(percent_decode("100%zz%2"), "100%zz%2");
     assert_eq!(percent_decode("bad%FF"), "bad%FF");
 }
+
+/// Plan round-5 WP-3: an image that fails to load raises a Warning notice (basename + reason).
+#[test]
+fn image_load_failure_raises_a_warning_notice() {
+    let (_tmp, d) = setup(&[("n.md", b"![[att/pic.png]]\n")]);
+    let mut app = app_on(&d, "n.md");
+    let _ = app.update(Message::Reading(ReadingMsg::ImageLoaded {
+        key: "att/pic.png".into(),
+        result: Err("unsupported format\nmore detail".into()),
+    }));
+    let n = app.status.notice.clone().expect("notice");
+    assert_eq!(n.severity, crate::app::Severity::Warning);
+    assert_eq!(n.text, "image failed to load: pic.png (unsupported format)");
+}
+
+/// Plan round-5 WP-3: clicking an unresolved link raises a notice naming the target; a URL does not.
+#[test]
+fn unresolved_link_click_raises_a_notice() {
+    let (_tmp, d) = setup(&[("A.md", b"see [[Nope]]\n")]);
+    let mut app = app_on(&d, "A.md");
+    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+        src: "A.md".into(),
+        target: "https://example.com/x".into(),
+    }));
+    assert!(app.status.notice.is_none());
+    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+        src: "A.md".into(),
+        target: "Nope".into(),
+    }));
+    let n = app.status.notice.clone().expect("notice");
+    assert_eq!(n.severity, crate::app::Severity::Warning);
+    assert_eq!(n.text, "unresolved link: Nope");
+}
