@@ -192,6 +192,29 @@ pub fn reading<'a>(
         },
         link_msg(path),
     )
+    // Plan round-5 WP-8: right press on a link / inside the selection → its context menu.
+    .on_right(move |link, inside, at| {
+        let target = match link {
+            Some(l) => {
+                let (target, external) = match l {
+                    LinkTarget::Vault(t) => (t, false),
+                    LinkTarget::External(u) => (u, true),
+                };
+                crate::context_menu::Target::Link {
+                    src: path.to_owned(),
+                    target,
+                    external,
+                    view,
+                    selection: inside,
+                }
+            }
+            None => crate::context_menu::Target::Selection {
+                path: path.to_owned(),
+                view,
+            },
+        };
+        Message::Menu(crate::context_menu::MenuMsg::Open(target, at))
+    })
     .into()
 }
 

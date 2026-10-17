@@ -886,15 +886,18 @@ pub fn apply_keys(entries: &mut [Entry], km: &Keymap) {
 }
 
 /// The invocation context for the active tab: path, 1-based cursor line and buffer hash always;
-/// the selection when non-empty.
-pub fn context(tab: Option<&SourceBuffer>) -> ActionContext {
+/// the selection when non-empty. Plan round-5 WP-8: `reading_sel` (the focused tab's Reading
+/// selection, when Reading is the most recent selecting side) wins over the buffer's.
+pub fn context(tab: Option<&SourceBuffer>, reading_sel: Option<String>) -> ActionContext {
     let Some(tab) = tab else {
         return ActionContext::default();
     };
     let line = u32::try_from(tab.cursor().position.line + 1).ok();
     ActionContext {
         active_path: Some(tab.path().to_owned()),
-        selection: tab.selection().filter(|s| !s.is_empty()),
+        selection: reading_sel
+            .filter(|s| !s.is_empty())
+            .or_else(|| tab.selection().filter(|s| !s.is_empty())),
         value: None,
         line,
         buffer_hash: Some(tab.base_hash().as_str().to_owned()),

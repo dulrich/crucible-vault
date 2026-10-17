@@ -1302,7 +1302,82 @@ impl App {
                     |r| Message::Menu(crate::context_menu::MenuMsg::ImageCopied(r)),
                 )
             }
-            (Target::Image { src, remote: true }, Item::CopyUrl)
+            // Plan round-5 WP-8: the Reading link / selection menu.
+            (
+                Target::Link {
+                    src,
+                    target,
+                    external: false,
+                    ..
+                },
+                Item::Open,
+            ) => self.update(Message::Reading(crate::message::ReadingMsg::OpenLink {
+                src,
+                target,
+            })),
+            (
+                Target::Link {
+                    target,
+                    external: true,
+                    ..
+                },
+                Item::Open,
+            ) => self.update(Message::OpenUrl(target)),
+            (
+                Target::Link {
+                    src,
+                    target,
+                    external: false,
+                    ..
+                },
+                item @ (Item::OpenInNewPane | Item::CopyPath),
+            ) => {
+                let Some(path) = self
+                    .reading
+                    .resolve_link(&src, &target, self.daemon.as_ref())
+                else {
+                    self.status
+                        .notify(Severity::Warning, format!("unresolved link: {target}"));
+                    return Task::none();
+                };
+                if item == Item::CopyPath {
+                    #[cfg(test)]
+                    self.copied.push(path.clone());
+                    return iced::clipboard::write(path);
+                }
+                if let Some((p, _)) = self.panes.split(
+                    panes::axis_of(SplitDir::Right),
+                    self.focus,
+                    PaneState::default(),
+                ) {
+                    self.focus = p;
+                }
+                self.open_with(&path, Place::Duplicate, true);
+                Task::none()
+            }
+            (
+                Target::Link {
+                    src: path, view, ..
+                }
+                | Target::Selection { path, view },
+                Item::Copy,
+            ) => match self.reading.selection_text(&path, view) {
+                Some(text) => {
+                    #[cfg(test)]
+                    self.copied.push(text.clone());
+                    iced::clipboard::write(text)
+                }
+                None => Task::none(),
+            },
+            (
+                Target::Link {
+                    target: src,
+                    external: true,
+                    ..
+                },
+                Item::CopyUrl,
+            )
+            | (Target::Image { src, remote: true }, Item::CopyUrl)
             | (Target::Image { src, remote: false }, Item::CopyPath)
             | (Target::Tab { path: src, .. } | Target::Row { path: src, .. }, Item::CopyPath) => {
                 #[cfg(test)]
@@ -1610,6 +1685,13 @@ impl App {
                         | SourceMsg::PasteResolved { .. }
                 );
                 let active = self.active_note().map(|t| t.path.clone());
+                // Plan round-5 WP-8: the Source side is now the most recent selecting side.
+                if matches!(&m, SourceMsg::Action(_) | SourceMsg::Key(_))
+                    && let Some(t) = self.active_note()
+                {
+                    let (p, id) = (t.path.clone(), t.id);
+                    self.reading.note_source_selection(&p, id);
+                }
                 let saved = match &m {
                     SourceMsg::Saved { path, outcome, .. } => Some((
                         path.clone(),
@@ -3545,7 +3627,7 @@ impl App {
     }
 
     /// Save-first (live mode, dirty active buffer), then `run_action`.
-    fn run_call(&mut self, call: crate::palette::Call) -> Task<Message> {
+    pub(crate) fn run_call(&mut self, call: crate::palette::Call) -> Task<Message> {
         let shadow = self.status.mode == Mode::Shadow;
         let Some(ps) = self.panes.get_mut(self.focus) else {
             return self.dispatch_call(call);
@@ -3597,6 +3679,11 @@ impl App {
         call: crate::palette::Call,
     ) -> Task<Message> {
         use crate::source::SaveOutcome;
+        let reading_sel = self
+            .active_note()
+            .is_some_and(|t| t.path == path)
+            .then(|| self.reading_selection())
+            .flatten();
         let Some(tab) = self.docs.get_mut(path) else {
             self.status
                 .set_error(format!("{}: not run (note closed)", call.title));
@@ -3618,7 +3705,7 @@ impl App {
             ));
             return Task::none();
         }
-        let ctx = crate::palette::context(Some(&*tab));
+        let ctx = crate::palette::context(Some(&*tab), reading_sel);
         let follow = if again { tab.begin_save(false) } else { None };
         let follow = match follow {
             Some(job) => {
@@ -3635,8 +3722,23 @@ impl App {
     }
 
     fn dispatch_call(&mut self, call: crate::palette::Call) -> Task<Message> {
-        let ctx = crate::palette::context(self.active_doc());
+        let reading_sel = self.reading_selection();
+        let ctx = crate::palette::context(self.active_doc(), reading_sel);
         self.dispatch_with(call, ctx)
+    }
+
+    /// Plan round-5 WP-8: the focused note's Reading selection text when its tab shows Reading
+    /// — in Split, only when the Reading side selected more recently than the Source side.
+    fn reading_selection(&self) -> Option<String> {
+        let tab = self.active_note()?;
+        let mode = self.reading.mode(&tab.path);
+        if !mode.shows_reading() {
+            return None;
+        }
+        if mode.shows_source() && self.reading.source_selected_last(&tab.path, tab.id) {
+            return None;
+        }
+        self.reading.selection_text(&tab.path, tab.id)
     }
 
     fn dispatch_with(

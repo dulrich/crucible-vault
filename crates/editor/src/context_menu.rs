@@ -25,6 +25,18 @@ pub enum Target {
     /// plan editor-round-4 WP-4: a Reading image — `src` is the vault path (resolved key) or,
     /// when `remote`, the URL.
     Image { src: String, remote: bool },
+    /// Plan round-5 WP-8: a Reading link in note `src` — `target` is the unresolved wiki target
+    /// / relative md URL, or (when `external`) the URL. `selection` = the press was inside the
+    /// tab's Reading selection (tab id `view`), which adds Copy.
+    Link {
+        src: String,
+        target: String,
+        external: bool,
+        view: u64,
+        selection: bool,
+    },
+    /// Plan round-5 WP-8: a right press inside tab `view`'s Reading selection of `path`.
+    Selection { path: String, view: u64 },
 }
 
 /// A menu entry.
@@ -47,6 +59,8 @@ pub enum Item {
     CopyImage,
     /// WP-4: copy a remote image's URL.
     CopyUrl,
+    /// Plan round-5 WP-8: copy the Reading selection.
+    Copy,
 }
 
 /// Menu messages.
@@ -129,6 +143,28 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
             (Item::CopyPath, "Copy path"),
         ]),
         Target::Image { remote: true, .. } => named(&[(Item::CopyUrl, "Copy URL")]),
+        Target::Link {
+            external,
+            selection,
+            ..
+        } => {
+            let mut v = if *selection {
+                named(&[(Item::Copy, "Copy")])
+            } else {
+                Vec::new()
+            };
+            v.extend(if *external {
+                named(&[(Item::Open, "Open"), (Item::CopyUrl, "Copy URL")])
+            } else {
+                named(&[
+                    (Item::Open, "Open"),
+                    (Item::OpenInNewPane, "Open in new pane"),
+                    (Item::CopyPath, "Copy path"),
+                ])
+            });
+            v
+        }
+        Target::Selection { .. } => named(&[(Item::Copy, "Copy")]),
         // Explorer ops rename / move / trash files only (no folder RPC): New note, Copy path.
         Target::Row { folder: true, .. } => {
             named(&[(Item::NewNote, "New note"), (Item::CopyPath, "Copy path")])

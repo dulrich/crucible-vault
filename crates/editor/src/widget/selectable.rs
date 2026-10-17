@@ -769,7 +769,12 @@ pub struct Root<'a, M, L> {
     on_change: Box<dyn Fn(Option<Selection>) -> M + 'a>,
     on_release: Box<dyn Fn() -> M + 'a>,
     on_link: Box<dyn Fn(L) -> M + 'a>,
+    /// Plan round-5 WP-8: right press → (link under the cursor, press inside the selection,
+    /// window point). Only published when there is a link or the press is inside the selection.
+    on_right: Option<RightFn<'a, M, L>>,
 }
+
+type RightFn<'a, M, L> = Box<dyn Fn(Option<L>, bool, Point) -> M + 'a>;
 
 /// Wraps `content` (which holds the scrollable `scroll` and the [`Run`]s). `selection` is the
 /// tab's `(anchor, focus)`; `keys` = this pane takes Shift+Arrows / Esc for the selection.
@@ -790,6 +795,16 @@ pub fn root<'a, M, L>(
         on_change: Box::new(on_change),
         on_release: Box::new(on_release),
         on_link: Box::new(on_link),
+        on_right: None,
+    }
+}
+
+impl<'a, M, L> Root<'a, M, L> {
+    /// Plan round-5 WP-8: sets the right-press callback (see [`Root`]'s `on_right`).
+    #[must_use]
+    pub fn on_right(mut self, f: impl Fn(Option<L>, bool, Point) -> M + 'a) -> Self {
+        self.on_right = Some(Box::new(f));
+        self
     }
 }
 
@@ -1098,6 +1113,26 @@ where
                     shell.publish((self.on_change)(None));
                 }
                 tree.state.downcast_mut::<RootState<L>>().press = Some(press);
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
+                if self.on_right.is_some() && !shell.is_event_captured() =>
+            {
+                let Some(at) = cursor.position_over(layout.bounds()) else {
+                    return;
+                };
+                let Some((pos, link)) = self.hit(tree, layout, r, at, Bias::Drag) else {
+                    return;
+                };
+                let inside = self
+                    .selection
+                    .is_some_and(|(a, f)| a != f && a.min(f) <= pos && pos <= a.max(f));
+                if link.is_none() && !inside {
+                    return;
+                }
+                if let Some(f) = &self.on_right {
+                    shell.publish(f(link, inside, at));
+                    shell.capture_event();
+                }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) if pressing => {
                 if let Some(at) = cursor.position() {

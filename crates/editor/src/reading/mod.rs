@@ -161,6 +161,9 @@ pub struct ReadingStore {
     /// Plan round-5 WP-7: the Reading selection `(anchor, focus)` per (path, tab id); never
     /// collapsed (an empty selection is absent). Cleared whenever the path's Doc is replaced.
     sel: HashMap<(String, u64), (SelPos, SelPos)>,
+    /// Plan round-5 WP-8: (path, tab id) pairs whose Source side changed its selection more
+    /// recently than the Reading side (Split: the most recent side feeds the action context).
+    source_newer: std::collections::HashSet<(String, u64)>,
 }
 
 /// The byte offset where 0-based `line` starts in `text` (`text.len()` past the end).
@@ -507,6 +510,7 @@ impl ReadingStore {
     pub fn set_selection(&mut self, path: &str, view: u64, sel: Option<(SelPos, SelPos)>) {
         match sel.filter(|(a, f)| a != f) {
             Some(s) => {
+                self.source_newer.remove(&(path.to_owned(), view));
                 self.sel.insert((path.to_owned(), view), s);
             }
             None => {
@@ -529,6 +533,37 @@ impl ReadingStore {
         let (a, f) = self.selection(path, view)?;
         let text = selection::copy_text(&self.doc(path)?.runs, a, f);
         (!text.is_empty()).then_some(text)
+    }
+
+    /// Plan round-5 WP-8: the Source side of tab `view` of `path` changed its selection (it is
+    /// now the most recent side in Split).
+    pub fn note_source_selection(&mut self, path: &str, view: u64) {
+        self.source_newer.insert((path.to_owned(), view));
+    }
+
+    /// Plan round-5 WP-8: true when the Source side selected more recently than the Reading
+    /// side of tab `view` of `path`.
+    pub fn source_selected_last(&self, path: &str, view: u64) -> bool {
+        self.source_newer.contains(&(path.to_owned(), view))
+    }
+
+    /// Plan round-5 WP-8: the vault path a link `target` in `src` resolves to (the
+    /// [`ReadingMsg::OpenLink`] resolver; `None` for remote / unresolved / no daemon).
+    pub fn resolve_link(
+        &mut self,
+        src: &str,
+        target: &str,
+        daemon: Option<&Arc<dyn DaemonClient>>,
+    ) -> Option<String> {
+        if render::is_remote(target) {
+            return None;
+        }
+        let d = daemon?;
+        self.refresh_resolver(d.as_ref());
+        let target = target.split('#').next().unwrap_or(target);
+        let target = percent_decode(target);
+        // `[[#h]]` resolves to the note itself; keep it (focuses the same tab).
+        self.resolve(src, &target)
     }
 
     /// Drops every tab's selection of `path` (its Doc was replaced or dropped).
@@ -768,15 +803,7 @@ impl ReadingStore {
         target: &str,
         daemon: Option<&Arc<dyn DaemonClient>>,
     ) -> Option<Message> {
-        if render::is_remote(target) {
-            return None;
-        }
-        let d = daemon?;
-        self.refresh_resolver(d.as_ref());
-        let target = target.split('#').next().unwrap_or(target);
-        let target = percent_decode(target);
-        // `[[#h]]` resolves to the note itself; keep it (focuses the same tab).
-        self.resolve(src, &target)
+        self.resolve_link(src, target, daemon)
             .map(|p| Message::Tabs(TabsMsg::Open(p)))
     }
 
@@ -1151,3 +1178,5 @@ pub fn probe(path: &str, view: u64, blocks: usize, scroll_to: Option<usize>) -> 
 mod selection_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wp8_tests;
