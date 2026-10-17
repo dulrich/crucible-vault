@@ -9,6 +9,10 @@
       "label": "Source"
     },
     {
+      "key": "formula.length",
+      "label": "Length"
+    },
+    {
       "key": "done",
       "label": "Done"
     }
@@ -19,13 +23,61 @@
         {
           "cells": [
             {
+              "label": "Teaser",
+              "t": "url",
+              "url": "https://c.example/2"
+            },
+            {
+              "t": "text",
+              "v": "Feed C"
+            },
+            {
+              "t": "text",
+              "v": ""
+            },
+            {
+              "t": "bool",
+              "v": false
+            }
+          ],
+          "key": "[\"blog\",\"https://c.example/feed\",\"p2\"]"
+        },
+        {
+          "cells": [
+            {
+              "label": "Short-ish",
+              "t": "url",
+              "url": "https://y.example/4"
+            },
+            {
+              "t": "text",
+              "v": "Chan A"
+            },
+            {
+              "t": "text",
+              "v": "1:05"
+            },
+            {
+              "t": "bool",
+              "v": false
+            }
+          ],
+          "key": "[\"youtube\",\"UC1\",\"v4\"]"
+        },
+        {
+          "cells": [
+            {
               "label": "A video",
               "t": "url",
               "url": "https://y.example/1"
             },
             {
               "t": "text",
-              "v": "YouTube"
+              "v": "Chan A"
+            },
+            {
+              "t": "text",
+              "v": "1:02:05"
             },
             {
               "t": "bool",
@@ -44,6 +96,10 @@
             {
               "t": "text",
               "v": "Blog"
+            },
+            {
+              "t": "text",
+              "v": "5 min"
             },
             {
               "t": "bool",

@@ -96,6 +96,9 @@ fn v4_database_migrates_to_v5_and_tracker_accessors_work() {
         score: None,
         full_body: Some(true),
         note_path: None,
+        source_name: None,
+        duration_s: None,
+        word_count: None,
     };
     assert!(s.insert_tracker_item(&item).unwrap());
     assert!(
@@ -143,9 +146,14 @@ fn v5_database_migrates_to_v6_preserving_tracker_rows() {
         .unwrap();
     }
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 6);
+    assert_eq!(s.schema_version().unwrap(), 7);
     let it = s.tracker_item("youtube", "UC1", "v1").unwrap().unwrap();
     assert_eq!((it.title.as_str(), it.note_path), ("T", None));
+    assert_eq!(
+        (it.source_name, it.duration_s, it.word_count),
+        (None, None, None),
+        "v7 columns are NULL on pre-v7 rows"
+    );
     assert_eq!(
         s.tracker_item_done("youtube", "UC1", "v1").unwrap(),
         Some(false)
@@ -168,6 +176,9 @@ fn set_tracker_item_done_round_trips_and_signals() {
         score: None,
         full_body: None,
         note_path: Some("notes/T.md".into()),
+        source_name: None,
+        duration_s: None,
+        word_count: None,
     };
     assert!(s.insert_tracker_item(&item).unwrap());
     assert_eq!(s.tracker_item("blog", "f", "p1").unwrap(), Some(item));
@@ -183,6 +194,51 @@ fn set_tracker_item_done_round_trips_and_signals() {
     assert_eq!(
         *seen.lock().unwrap(),
         vec!["tracker_items", "tracker_items"]
+    );
+}
+
+#[test]
+fn fill_tracker_source_name_fills_only_null_rows_of_that_source() {
+    use std::sync::{Arc, Mutex};
+    let (_d, mut s) = db();
+    let mk = |key: &str, id: &str, name: Option<&str>| TrackerItem {
+        source_kind: "blog".into(),
+        source_key: key.into(),
+        item_id: id.into(),
+        title: "T".into(),
+        url: "u".into(),
+        first_seen_ms: 1,
+        day: "2026-10-17".into(),
+        outcome: TrackerOutcome::Line,
+        score: None,
+        full_body: None,
+        note_path: None,
+        source_name: name.map(str::to_owned),
+        duration_s: Some(5),
+        word_count: Some(7),
+    };
+    for it in [
+        mk("f", "p1", None),
+        mk("f", "p2", Some("Kept")),
+        mk("g", "p3", None),
+    ] {
+        assert!(s.insert_tracker_item(&it).unwrap());
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    s.set_change_hook(Box::new(move |t| sink.lock().unwrap().push(t)));
+    assert_eq!(s.fill_tracker_source_name("blog", "f", "Feed").unwrap(), 1);
+    assert_eq!(s.fill_tracker_source_name("blog", "f", "Feed").unwrap(), 0);
+    let name = |k: &str, i: &str| s.tracker_item("blog", k, i).unwrap().unwrap().source_name;
+    assert_eq!(name("f", "p1").as_deref(), Some("Feed"));
+    assert_eq!(name("f", "p2").as_deref(), Some("Kept"));
+    assert_eq!(name("g", "p3"), None);
+    let it = s.tracker_item("blog", "f", "p1").unwrap().unwrap();
+    assert_eq!((it.duration_s, it.word_count), (Some(5), Some(7)));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["tracker_items"],
+        "signal only on change"
     );
 }
 

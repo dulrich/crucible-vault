@@ -69,10 +69,16 @@ pub struct TrackerItem {
     pub full_body: Option<bool>,
     /// Vault-relative path of the captured note (`Note` outcomes; migration v6).
     pub note_path: Option<String>,
+    /// Display name of the source at record time (migration v7).
+    pub source_name: Option<String>,
+    /// Item duration in seconds (YouTube; migration v7).
+    pub duration_s: Option<i64>,
+    /// Body word count (blogs with a full body; migration v7).
+    pub word_count: Option<i64>,
 }
 
 const COLS: &str = "source_kind, source_key, item_id, title, url, first_seen_ms, day, outcome, \
-                    score, full_body, note_path";
+                    score, full_body, note_path, source_name, duration_s, word_count";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
     let outcome: String = r.get(7)?;
@@ -88,6 +94,9 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
         score: r.get(8)?,
         full_body: r.get(9)?,
         note_path: r.get(10)?,
+        source_name: r.get(11)?,
+        duration_s: r.get(12)?,
+        word_count: r.get(13)?,
     })
 }
 
@@ -136,7 +145,7 @@ impl StateDb {
     pub fn insert_tracker_item(&mut self, item: &TrackerItem) -> Result<bool> {
         let n = self.conn().execute(
             &format!(
-                "INSERT INTO tracker_items ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO tracker_items ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT DO NOTHING"
             ),
             params![
@@ -151,12 +160,35 @@ impl StateDb {
                 item.score,
                 item.full_body,
                 item.note_path,
+                item.source_name,
+                item.duration_s,
+                item.word_count,
             ],
         )?;
         if n > 0 {
             self.changed("tracker_items");
         }
         Ok(n > 0)
+    }
+
+    /// Sets `source_name` on one source's rows where it is NULL (the name self-heal for rows
+    /// recorded before migration v7). Returns rows changed; raises the `tracker_items` change
+    /// signal only when some changed.
+    pub fn fill_tracker_source_name(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        source_name: &str,
+    ) -> Result<usize> {
+        let n = self.conn().execute(
+            "UPDATE tracker_items SET source_name = ?3
+             WHERE source_kind = ?1 AND source_key = ?2 AND source_name IS NULL",
+            params![source_kind, source_key, source_name],
+        )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n)
     }
 
     /// Marks one item done (`done_ms` = now) or not done (`done_ms` = NULL). Returns whether a

@@ -865,12 +865,13 @@ fn tracker_db(dir: &Path) -> PathBuf {
             item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
             first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
             score REAL, full_body INTEGER, done_ms INTEGER, note_path TEXT,
+            source_name TEXT, duration_s INTEGER, word_count INTEGER,
             PRIMARY KEY (source_kind, source_key, item_id));
          INSERT INTO tracker_items VALUES
-            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL),
-            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, NULL, 'notes/Post.md'),
-            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, 7, NULL),
-            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL);",
+            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, NULL, 'notes/Post.md', 'Feed B', NULL, 900),
+            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, 7, NULL, 'Chan', 125, NULL),
+            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL, NULL, NULL, NULL);",
     )
     .unwrap();
     p
@@ -947,6 +948,34 @@ fn tracker_records_expose_done_note_path_key_and_url_cells() {
     assert_eq!(crate::result::TrackerKey::decode("a.md"), None);
     let json = serde_json::to_value(&r).unwrap();
     assert_eq!(json["groups"][0]["rows"][2]["cells"][0]["t"], "url");
+}
+
+#[test]
+fn tracker_records_expose_source_name_duration_and_word_count() {
+    use crate::value::Value;
+    let dir = tempfile::tempdir().unwrap();
+    let c = rusqlite::Connection::open(tracker_db(dir.path())).unwrap();
+    let recs = crate::service::tracker_records(&c).unwrap();
+    let show = |v: &Value| match v {
+        Value::Null => "null".to_owned(),
+        Value::Str(s) => format!("s:{s}"),
+        Value::Num(n) => format!("n:{n}"),
+        _ => "other".to_owned(),
+    };
+    let get = |id: &str| {
+        let r = recs
+            .iter()
+            .find(|r| matches!(&r["item_id"], Value::Str(s) if s == id))
+            .unwrap();
+        [
+            show(&r["source_name"]),
+            show(&r["duration"]),
+            show(&r["word_count"]),
+        ]
+    };
+    assert_eq!(get("v2"), ["s:Chan", "n:125", "null"]);
+    assert_eq!(get("p1"), ["s:Feed B", "null", "n:900"]);
+    assert_eq!(get("v1"), ["null", "null", "null"]);
 }
 
 #[test]

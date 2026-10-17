@@ -853,6 +853,9 @@ mod wp11_tests {
             score: None,
             full_body: None,
             note_path: None,
+            source_name: None,
+            duration_s: None,
+            word_count: None,
         }
     }
 

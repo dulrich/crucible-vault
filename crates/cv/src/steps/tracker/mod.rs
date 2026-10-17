@@ -71,6 +71,10 @@ pub struct Candidate {
     pub title: String,
     /// Item URL.
     pub url: String,
+    /// Duration in seconds (YouTube), when known.
+    pub duration_s: Option<i64>,
+    /// Body word count (blogs with a full body), when known.
+    pub word_count: Option<i64>,
 }
 
 /// Records `c` with `outcome` (first sighting wins). Returns whether it was newly inserted.
@@ -105,8 +109,34 @@ pub(crate) fn record_with(
             score,
             full_body,
             note_path,
+            source_name: Some(c.source_name.clone()).filter(|n| !n.is_empty()),
+            duration_s: c.duration_s,
+            word_count: c.word_count,
         })
         .map_err(state_err)
+}
+
+/// Name self-heal (plan `intake-view-source-length` WP-1): fills `source_name` on every row of
+/// each configured `(source_key, source_name)` of `kind` where it is still NULL (rows recorded
+/// before state.db v7). Runs for every configured source on every tracker run — independent of
+/// fetch results and fresh items — and never counts as a new item. The store raises the
+/// `tracker_items` change signal only when rows changed.
+pub(crate) fn heal_source_names<'k>(
+    ctx: &StepCtx<'_>,
+    kind: &str,
+    sources: impl IntoIterator<Item = (&'k str, &'k str)>,
+) -> Result<usize, StepError> {
+    let mut db = lock(ctx);
+    let mut n = 0;
+    for (key, name) in sources {
+        if key.is_empty() || name.is_empty() {
+            continue;
+        }
+        n += db
+            .fill_tracker_source_name(kind, key, name)
+            .map_err(state_err)?;
+    }
+    Ok(n)
 }
 
 /// The tracker seen-set of one source kind.
@@ -143,6 +173,8 @@ impl SeenSet {
                     item_id: id,
                     title: String::new(),
                     url: String::new(),
+                    duration_s: None,
+                    word_count: None,
                 };
                 record(ctx, &c, TrackerOutcome::Skipped)?;
             }

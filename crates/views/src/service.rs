@@ -234,7 +234,9 @@ fn open_state<'c>(
 
 /// Every `tracker_items` row as a record, newest first (`first_seen_ms DESC, item_id`). Fields:
 /// `title`, `url`, `source_kind`, `source_key`, `item_id`, `day`, `outcome`, `score`,
-/// `full_body`, `first_seen`, `done` (bool, from `done_ms`) and `note_path` (text or null).
+/// `full_body`, `first_seen`, `done` (bool, from `done_ms`), `note_path` (text or null) and — from
+/// state.db v7 — `source_name` (text or null), `duration` (seconds or null) and `word_count` (or
+/// null).
 pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record>> {
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -242,7 +244,7 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
     use crate::value::Value;
     let mut stmt = conn.prepare_cached(
         "SELECT title, url, source_kind, source_key, item_id, day, outcome, score, full_body,
-                first_seen_ms, done_ms IS NOT NULL, note_path
+                first_seen_ms, done_ms IS NOT NULL, note_path, source_name, duration_s, word_count
          FROM tracker_items ORDER BY first_seen_ms DESC, item_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -275,6 +277,15 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
             "note_path".into(),
             note_path.map_or(Value::Null, Value::Str),
         );
+        let source_name: Option<String> = r.get(12)?;
+        m.insert(
+            "source_name".into(),
+            source_name.map_or(Value::Null, Value::Str),
+        );
+        #[allow(clippy::cast_precision_loss)]
+        let num = |n: Option<i64>| n.map_or(Value::Null, |n| Value::Num(n as f64));
+        m.insert("duration".into(), num(r.get(13)?));
+        m.insert("word_count".into(), num(r.get(14)?));
         Ok(Arc::new(m))
     })?;
     rows.collect()

@@ -274,6 +274,28 @@ fn snippet_posts_become_lines_and_rerun_is_a_noop() {
 }
 
 #[test]
+fn rows_record_body_word_count_and_source_name() {
+    let w = world(&[], ON, &[("Mix", "/a", "")]);
+    set(&w, "/a", 200, rss(&[("b", false), ("a", true)]));
+    run(&w).unwrap();
+    let key = format!("{}/a", w.base);
+    let row = |s: &str| {
+        w.state
+            .lock()
+            .unwrap()
+            .tracker_item(KIND, &key, &post_url(s))
+            .unwrap()
+            .unwrap()
+    };
+    let (a, b) = (row("a"), row("b"));
+    assert_eq!(a.word_count, Some(4), "\"Body of a here\"");
+    assert_eq!(b.word_count, None, "no body → no word count");
+    assert_eq!(a.source_name.as_deref(), Some("Mix"));
+    assert_eq!(b.source_name.as_deref(), Some("Mix"));
+    assert_eq!((a.duration_s, b.duration_s), (None, None));
+}
+
+#[test]
 fn full_source_post_becomes_a_linted_filed_blog_note() {
     let w = world(
         &[],

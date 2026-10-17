@@ -114,6 +114,12 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         .collect();
     let key = secret(API_KEY_SECRET).ok_or_else(no_key)?;
     let mut seen = SeenSet::load(ctx, KIND, PROP, seed)?;
+    super::heal_source_names(
+        ctx,
+        KIND,
+        rows.iter()
+            .map(|(r, _)| (r.id.as_str(), r.channel.as_str())),
+    )?;
     let shorts = ctx.config.pipelines().ignore_shorts.clone();
 
     let c = client()?;
@@ -205,6 +211,8 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 item_id: id.clone(),
                 title,
                 url: watch_url(&id),
+                duration_s: duration,
+                word_count: None,
             };
             seen.insert(&id);
             if !available {

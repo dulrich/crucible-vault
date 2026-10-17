@@ -167,6 +167,13 @@ CREATE TABLE api_usage (
 ALTER TABLE tracker_items ADD COLUMN done_ms INTEGER;
 ALTER TABLE tracker_items ADD COLUMN note_path TEXT;
 ",
+    // v7 (plan intake-view-source-length WP-1): the source's display name at record time and the
+    // item length (YouTube duration seconds / blog body word count) for the intake view.
+    r"
+ALTER TABLE tracker_items ADD COLUMN source_name TEXT;
+ALTER TABLE tracker_items ADD COLUMN duration_s INTEGER;
+ALTER TABLE tracker_items ADD COLUMN word_count INTEGER;
+",
 ];
 
 /// Highest schema version this build knows.

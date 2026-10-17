@@ -289,6 +289,11 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         .cloned()
         .collect();
     let mut seen = SeenSet::load(ctx, KIND, PROP, seed)?;
+    super::heal_source_names(
+        ctx,
+        KIND,
+        rows.iter().map(|r| (r.link.trim(), r.name.as_str())),
+    )?;
     let index = cv_index::Reader::open_current(ctx.index_db).ok();
     let source_seen = |url: &str| {
         index.as_ref().is_some_and(|r| {
@@ -349,6 +354,11 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 item_id: post.post_id.clone(),
                 title: post.title.clone(),
                 url: post.url.clone(),
+                duration_s: None,
+                word_count: post
+                    .body_html
+                    .as_deref()
+                    .map(|h| i64::try_from(cv_ingest::word_count(h)).unwrap_or(i64::MAX)),
             };
             let full = Some(post.has_body());
             let recorded = ctx

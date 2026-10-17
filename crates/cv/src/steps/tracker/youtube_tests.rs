@@ -400,6 +400,9 @@ fn url_already_in_daily_is_recorded_not_rewritten() {
             score: None,
             full_body: None,
             note_path: None,
+            source_name: None,
+            duration_s: None,
+            word_count: None,
         })
         .unwrap();
     let o = run(&w).unwrap();
@@ -424,6 +427,77 @@ fn configured_short_is_ignored_without_a_line() {
     let p = "[youtube]\nenabled = true\n[ignore_shorts]\nchannels = [\"chan a\"]\n";
     let w = world(&[], std_routes(), p, SOURCES);
     assert_eq!(n(&run(&w).unwrap(), "ignored"), json!(1));
+}
+
+fn row_of(w: &World, key: &str, id: &str) -> cv_state::TrackerItem {
+    w.state
+        .lock()
+        .unwrap()
+        .tracker_item(KIND, key, id)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn recorded_rows_carry_duration_and_source_name_incl_ignored_shorts() {
+    let p = "[youtube]\nenabled = true\n[ignore_shorts]\nchannels = [\"UCa\"]\n";
+    let w = world(&[], std_routes(), p, SOURCES);
+    run(&w).unwrap();
+    for (id, secs) in [(V1, 600), (V2, 30), (V3, 3600)] {
+        let r = row_of(&w, "UCa", id);
+        assert_eq!(r.duration_s, Some(secs), "{id}");
+        assert_eq!(r.source_name.as_deref(), Some("Chan A"));
+        assert_eq!(r.word_count, None);
+    }
+    assert_eq!(row_of(&w, "UCa", V2).outcome, TrackerOutcome::Ignored);
+}
+
+#[test]
+fn name_self_heal_fills_null_rows_of_configured_source_without_fresh_items() {
+    let w = world(&[], std_routes(), ON, SOURCES);
+    let mk = |key: &str, id: &str, name: Option<&str>| cv_state::TrackerItem {
+        source_kind: KIND.into(),
+        source_key: key.into(),
+        item_id: id.into(),
+        title: String::new(),
+        url: String::new(),
+        first_seen_ms: 0,
+        day: "2026-10-17".into(),
+        outcome: TrackerOutcome::Line,
+        score: None,
+        full_body: None,
+        note_path: None,
+        source_name: name.map(str::to_owned),
+        duration_s: None,
+        word_count: None,
+    };
+    {
+        let mut s = w.state.lock().unwrap();
+        // Every playlist id is already recorded: the run has no fresh items.
+        for it in [
+            mk("UCa", V1, None),
+            mk("UCa", V2, None),
+            mk("UCa", V3, Some("Old name")),
+            mk("UCb", "bbbbbbbbbb1", None),
+        ] {
+            assert!(s.insert_tracker_item(&it).unwrap());
+        }
+    }
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "new"), json!(0), "heal never counts as an item");
+    assert_eq!(n(&o, "lines"), json!(0));
+    assert_eq!(row_of(&w, "UCa", V1).source_name.as_deref(), Some("Chan A"));
+    assert_eq!(row_of(&w, "UCa", V2).source_name.as_deref(), Some("Chan A"));
+    assert_eq!(
+        row_of(&w, "UCa", V3).source_name.as_deref(),
+        Some("Old name"),
+        "non-null names untouched"
+    );
+    assert_eq!(
+        row_of(&w, "UCb", "bbbbbbbbbb1").source_name,
+        None,
+        "other sources untouched"
+    );
 }
 
 const TWO: &str = "[[youtube]]\nchannel = \"Chan A\"\nid = \"UCa\"\n\n[[youtube]]\nchannel = \"Chan B\"\nid = \"UCb\"\n";
