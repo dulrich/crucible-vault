@@ -442,3 +442,46 @@ fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
     reading(&mut app, p, ViewMode::Split);
     assert_eq!(app.reading.top_block(p), Some(2));
 }
+
+/// The live daemon indexes incrementally without bumping the generation, so a generation-keyed
+/// resolver never saw files created after the first render (localized attachments rendered as
+/// broken images until restart). Created/Deleted/Renamed drop the cache; Modified keeps it.
+#[test]
+fn file_membership_change_drops_cached_resolver() {
+    use cv_protocol::{ChangeKind, Notification, Origin};
+
+    use crate::message::StatusMsg;
+
+    let (_tmp, d) = setup(&[("A.md", b"![](att/late.png)\n")]);
+    let mut app = app_on(&d, "A.md");
+    reading(&mut app, "A.md", ViewMode::Reading);
+    let changed = |app: &mut App, path: &str, kind: ChangeKind| {
+        let _ = app.update(Message::Status(StatusMsg::Notification(
+            Notification::FileChanged {
+                path: path.to_owned(),
+                kind,
+                hash: None,
+                origin: Origin::Daemon,
+            },
+        )));
+    };
+    for kind in [
+        ChangeKind::Created,
+        ChangeKind::Deleted,
+        ChangeKind::Renamed,
+    ] {
+        app.reading.refresh_resolver(d.as_ref());
+        assert!(app.reading.resolver.is_some());
+        changed(&mut app, "att/late.png", kind);
+        assert!(
+            app.reading.resolver.is_none(),
+            "{kind:?} drops the resolver"
+        );
+    }
+    app.reading.refresh_resolver(d.as_ref());
+    changed(&mut app, "B.md", ChangeKind::Modified);
+    assert!(
+        app.reading.resolver.is_some(),
+        "Modified keeps the resolver"
+    );
+}

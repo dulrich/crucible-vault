@@ -3509,6 +3509,12 @@ impl App {
                     Notification::FileChanged {
                         path, kind, hash, ..
                     } => {
+                        if kind != cv_protocol::ChangeKind::Modified {
+                            // Before `reload_tab`: a localize pass creates the attachments,
+                            // then rewrites the note, whose re-lower must see them.
+                            self.reading.invalidate_resolver();
+                            self.panels.invalidate_resolver();
+                        }
                         self.reload_tab(&path, hash.as_deref());
                         self.panels.invalidate();
                         if path.starts_with(crate::palette::CONFIG_PREFIX) {

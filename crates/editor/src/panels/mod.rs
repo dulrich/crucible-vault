@@ -297,6 +297,12 @@ impl Panels {
         self.backlinks_key = None;
     }
 
+    /// Drops the cached resolver (a file was created, deleted or renamed; incremental indexing
+    /// keeps the generation, so the generation key alone never sees new files).
+    pub fn invalidate_resolver(&mut self) {
+        self.resolver = None;
+    }
+
     /// The scroll window of `id`.
     pub fn window(&self, id: ListId) -> ListWindow {
         self.windows.get(&list_key(id)).copied().unwrap_or_default()

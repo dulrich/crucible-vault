@@ -428,6 +428,13 @@ impl ReadingStore {
         }
     }
 
+    /// Drops the cached resolver: a file was created, deleted or renamed. Incremental indexing
+    /// keeps the generation, so a generation-keyed cache alone never sees new files (a
+    /// localized attachment written after the first render stayed unresolved = broken image).
+    pub fn invalidate_resolver(&mut self) {
+        self.resolver = None;
+    }
+
     fn refresh_resolver(&mut self, d: &dyn DaemonClient) {
         let generation = d.index().generation();
         if self
