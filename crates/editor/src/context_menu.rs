@@ -38,6 +38,9 @@ pub enum Target {
         /// "Create note".
         missing: bool,
     },
+    /// Plan round-6 WP-5: an Outline panel heading — an in-note anchor at source `line` of
+    /// `path` (Open / Open in new pane only).
+    Anchor { path: String, line: usize },
     /// Plan round-5 WP-8: a right press inside tab `view`'s Reading selection of `path`.
     Selection { path: String, view: u64 },
     /// Plan round-6 WP-3: a linked image `[![alt](src)](href)` — the link half (a
@@ -188,6 +191,10 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
             }
             v
         }
+        Target::Anchor { .. } => named(&[
+            (Item::Open, "Open"),
+            (Item::OpenInNewPane, "Open in new pane"),
+        ]),
         Target::Selection { .. } => named(&[(Item::Copy, "Copy")]),
         Target::LinkedImage { link, image } => {
             let mut v = items(link);

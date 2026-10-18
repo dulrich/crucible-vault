@@ -1314,3 +1314,52 @@ fn link_menu_create_note_under_warn_mode() {
     assert!(d.read_file("Nope.md").is_ok());
     assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("Nope.md"));
 }
+
+/// Plan round-6 WP-5: a Reading table-cell link (drawn through the same `run_el` spans as the
+/// body) yields the link menu from a right press — Create note when unresolved — and a
+/// frontmatter wikilink is marked unresolved too (dimmed like the body).
+#[test]
+fn table_cell_link_right_click_yields_the_link_menu() {
+    use crate::context_menu::{Target, items};
+    use crate::reading::view::LinkTarget;
+    let (_tmp, d) = setup(&[
+        (
+            "A.md",
+            b"---\nup: \"[[Gone]]\"\n---\n| a | b |\n| - | - |\n| [[B]] | [[Nope]] |\n",
+        ),
+        ("B.md", b"b\n"),
+    ]);
+    let mut app = app_on(&d, "A.md");
+    reading(&mut app, "A.md", ViewMode::Reading);
+    let doc = app.reading.doc("A.md").expect("doc");
+    let Some(Block::Table { rows, .. }) = doc
+        .model
+        .blocks
+        .iter()
+        .find(|b| matches!(b, Block::Table { .. }))
+    else {
+        panic!("no table");
+    };
+    assert!(matches!(rows[0][1].as_slice(), [Inline::WikiLink { target, .. }] if target == "Nope"));
+    let want: HashSet<String> = ["Nope", "Gone"].map(String::from).into();
+    assert_eq!(doc.unresolved, want);
+    let names = |t: &Target| -> Vec<String> { items(t).into_iter().map(|(_, l)| l).collect() };
+    let hit = |t: &str| {
+        crate::reading::view::press_target(
+            "A.md",
+            7,
+            &doc.unresolved,
+            Some(LinkTarget::Vault(t.into())),
+            false,
+        )
+    };
+    let b = hit("B");
+    assert!(
+        matches!(&b, Target::Link { src, target, missing: false, .. } if src == "A.md" && target == "B")
+    );
+    assert_eq!(names(&b), ["Open", "Open in new pane", "Copy path"]);
+    assert_eq!(
+        names(&hit("Nope")),
+        ["Open", "Open in new pane", "Copy path", "Create note"]
+    );
+}

@@ -196,30 +196,42 @@ pub fn reading<'a>(
     )
     // Plan round-5 WP-8: right press on a link / inside the selection → its context menu.
     .on_right(move |link, inside, at| {
-        let target = match link {
-            Some(l) => {
-                let (target, external) = match l {
-                    LinkTarget::Vault(t) => (t, false),
-                    LinkTarget::External(u) => (u, true),
-                };
-                let missing = !external && unresolved.contains(&target);
-                crate::context_menu::Target::Link {
-                    src: path.to_owned(),
-                    target,
-                    external,
-                    view,
-                    selection: inside,
-                    missing,
-                }
-            }
-            None => crate::context_menu::Target::Selection {
-                path: path.to_owned(),
-                view,
-            },
-        };
+        let target = press_target(path, view, unresolved, link, inside);
         Message::Menu(crate::context_menu::MenuMsg::Open(target, at))
     })
     .into()
+}
+
+/// The menu target of a right press in tab `view` of `path`: on a link span (body, table cell or
+/// frontmatter value alike — all are `run_el` spans) its link menu, else the selection menu.
+pub(crate) fn press_target(
+    path: &str,
+    view: u64,
+    unresolved: &std::collections::HashSet<String>,
+    link: Option<LinkTarget>,
+    inside: bool,
+) -> crate::context_menu::Target {
+    match link {
+        Some(l) => {
+            let (target, external) = match l {
+                LinkTarget::Vault(t) => (t, false),
+                LinkTarget::External(u) => (u, true),
+            };
+            let missing = !external && unresolved.contains(&target);
+            crate::context_menu::Target::Link {
+                src: path.to_owned(),
+                target,
+                external,
+                view,
+                selection: inside,
+                missing,
+            }
+        }
+        None => crate::context_menu::Target::Selection {
+            path: path.to_owned(),
+            view,
+        },
+    }
 }
 
 /// The read-only frontmatter block (an empty `Space` when there is none).
@@ -265,7 +277,7 @@ fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
                     fragment,
                     alias,
                 } => span(link_label(target, fragment.as_ref(), alias.as_ref()))
-                    .color(t.accent_ui.to_color())
+                    .color(link_color(cx, target))
                     .link(LinkTarget::Vault(target.clone())),
             });
         }

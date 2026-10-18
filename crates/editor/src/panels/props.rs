@@ -4,6 +4,7 @@
 //! orchestrator (WP-5 brief pin 8); agents never read that file (I1). Keys not in the map render
 //! by shape: a list as chips, anything else as text. Read-only: editing stays in source mode.
 
+use editor_model::render::{PropValue, prop_value};
 use ofm::frontmatter::{JsValue, js_number_to_string, json_stringify};
 
 /// An Obsidian property type.
@@ -70,6 +71,9 @@ pub enum Rendered {
     Chips(Vec<String>),
     /// The value does not fit its declared type (shown as-is, marked).
     Flagged(String),
+    /// Plan round-6 WP-5: a text / list value with at least one wikilink or URL element, in the
+    /// Reading render model's frontmatter parse (non-link elements are `PropValue::Text`).
+    Links(Vec<PropValue>),
 }
 
 impl Rendered {
@@ -85,6 +89,18 @@ impl Rendered {
                 .collect::<Vec<_>>()
                 .join(" "),
             Rendered::Flagged(s) => format!("⚠ {s}"),
+            Rendered::Links(v) => v
+                .iter()
+                .map(|p| match p {
+                    PropValue::Text(s) => s.clone(),
+                    PropValue::Bool(b) => b.to_string(),
+                    PropValue::Url { label, .. } => label.clone(),
+                    PropValue::Link { target, alias, .. } => {
+                        alias.clone().unwrap_or_else(|| target.clone())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 }
@@ -125,6 +141,28 @@ fn is_date(s: &str) -> bool {
         && b[8..10].iter().all(u8::is_ascii_digit)
 }
 
+/// Plan round-6 WP-5: a text / chips value whose elements include a wikilink or URL becomes
+/// [`Rendered::Links`] (parsed by the render model's `prop_value`, not a second link parser).
+fn linked(r: Rendered) -> Rendered {
+    let elems: Vec<String> = match &r {
+        Rendered::Text(s) => vec![s.clone()],
+        Rendered::Chips(v) => v.clone(),
+        _ => return r,
+    };
+    let parsed: Vec<PropValue> = elems
+        .into_iter()
+        .map(|e| match prop_value(&JsValue::Str(e.clone())) {
+            v @ (PropValue::Link { .. } | PropValue::Url { .. }) => v,
+            _ => PropValue::Text(e),
+        })
+        .collect();
+    if parsed.iter().any(|v| !matches!(v, PropValue::Text(_))) {
+        Rendered::Links(parsed)
+    } else {
+        r
+    }
+}
+
 /// Renders `value` for `key` per the type map.
 pub fn render(key: &str, value: &JsValue) -> Prop {
     let ty = type_of(key);
@@ -145,14 +183,13 @@ pub fn render(key: &str, value: &JsValue) -> Prop {
             JsValue::Null => Rendered::Text(String::new()),
             other => Rendered::Flagged(scalar(other)),
         },
-        Some(PropType::Tags | PropType::Aliases | PropType::Multitext) => {
-            Rendered::Chips(list(value))
-        }
-        Some(PropType::Text) => Rendered::Text(scalar(value)),
-        None => match value {
+        Some(PropType::Tags | PropType::Aliases) => Rendered::Chips(list(value)),
+        Some(PropType::Multitext) => linked(Rendered::Chips(list(value))),
+        Some(PropType::Text) => linked(Rendered::Text(scalar(value))),
+        None => linked(match value {
             JsValue::Arr(_) => Rendered::Chips(list(value)),
             other => Rendered::Text(scalar(other)),
-        },
+        }),
     };
     Prop {
         key: key.to_owned(),

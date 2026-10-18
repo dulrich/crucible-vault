@@ -906,7 +906,7 @@ fn properties(meta: &str) -> Vec<Property> {
         .collect()
 }
 
-fn prop_value(v: &ofm::frontmatter::JsValue) -> PropValue {
+pub fn prop_value(v: &ofm::frontmatter::JsValue) -> PropValue {
     use ofm::frontmatter::{JsValue, js_number_to_string, json_stringify};
     let s = match v {
         JsValue::Str(s) => s.clone(),
@@ -1091,6 +1091,16 @@ pub fn link_targets(model: &RenderModel) -> Vec<String> {
     collect_links(&model.blocks, &mut out);
     for f in &model.footnotes {
         collect_links(&f.blocks, &mut out);
+    }
+    // Plan round-6 WP-5: frontmatter wikilink values are links too (uniform styling).
+    for p in &model.properties {
+        for v in &p.values {
+            if let PropValue::Link { target, .. } = v
+                && !self_link(target)
+            {
+                out.push(target.clone());
+            }
+        }
     }
     out
 }

@@ -1453,6 +1453,22 @@ impl App {
                 self.explorer.selected = Some(path);
                 self.update_explorer(ExplorerMsg::BeginRename)
             }
+            // Plan round-6 WP-5: an Outline heading jumps in the active note, or opens the note
+            // in a new pane at that heading.
+            (Target::Anchor { line, .. }, Item::Open) => {
+                self.update(Message::Panels(PanelsMsg::OutlineJump(line)))
+            }
+            (Target::Anchor { path, line }, Item::OpenInNewPane) => {
+                if let Some((p, _)) = self.panes.split(
+                    panes::axis_of(SplitDir::Right),
+                    self.focus,
+                    PaneState::default(),
+                ) {
+                    self.focus = p;
+                }
+                self.open_with(&path, Place::Duplicate, true);
+                self.update(Message::Panels(PanelsMsg::OutlineJump(line)))
+            }
             (Target::Row { path, .. }, Item::NewNote) => {
                 self.explorer.selected = Some(path);
                 self.update_explorer(ExplorerMsg::BeginNew)

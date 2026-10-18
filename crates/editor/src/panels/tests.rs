@@ -103,7 +103,15 @@ fn outline_links_and_props_from_the_buffer() {
         get("mood"),
         (None, Rendered::Chips(vec!["calm".into(), "warm".into()]))
     );
-    assert_eq!(get("related").1, Rendered::Text("[[b]]".into()));
+    // Plan round-6 WP-5: a wikilink value renders as a link (render model's parse).
+    assert_eq!(
+        get("related").1,
+        Rendered::Links(vec![editor_model::render::PropValue::Link {
+            target: "b".into(),
+            fragment: None,
+            alias: None,
+        }])
+    );
     assert_eq!(Rendered::Check(false).display(), "☐");
 
     // Unsaved edits show up on the next tick; the outline click moves the cursor only.
@@ -262,4 +270,85 @@ fn panels_open_latency() {
         );
         let _ = app.update(Message::Panels(PanelsMsg::Toggle));
     }
+}
+
+/// Plan round-6 WP-5: a right-click on a panel link entry yields `Target::Link` in the active
+/// note (missing entries offer Create note; external ones the URL items); an Outline entry is an
+/// anchor with Open / Open in new pane only, and Open jumps the cursor.
+#[test]
+fn panel_entries_yield_the_link_menu_and_outline_anchors() {
+    use crate::context_menu::{Item, MenuMsg, Target, items};
+    let (_tmp, mut app) = env();
+    let names = |t: &Target| -> Vec<String> { items(t).into_iter().map(|(_, l)| l).collect() };
+    let resolved = link_target("a.md", "b.md", false, false);
+    assert_eq!(names(&resolved), ["Open", "Open in new pane", "Copy path"]);
+    assert_eq!(
+        names(&link_target("a.md", "nope", false, true)),
+        ["Open", "Open in new pane", "Copy path", "Create note"]
+    );
+    assert_eq!(
+        names(&link_target("a.md", "https://example.com", true, false)),
+        ["Open", "Copy URL"]
+    );
+    let anchor = anchor_target("a.md", 18);
+    assert_eq!(names(&anchor), ["Open", "Open in new pane"]);
+
+    let _ = app.update(Message::Menu(MenuMsg::Open(resolved, iced::Point::ORIGIN)));
+    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
+    assert_eq!(app.copied, ["b.md"]);
+    let _ = app.update(Message::Menu(MenuMsg::Open(anchor, iced::Point::ORIGIN)));
+    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::Open)));
+    assert_eq!(app.active_doc().expect("doc").cursor().position.line, 18);
+}
+
+/// Plan round-6 WP-5: sidebar link values — wikilinks and URLs, scalar or list — render as
+/// links; an unresolved wikilink is marked (dimmed, Create note); plain text stays text.
+#[test]
+fn sidebar_property_links_and_unresolved_marking() {
+    use editor_model::render::PropValue;
+    let r = props::render(
+        "rel",
+        &JsValue::Arr(vec![
+            JsValue::Str("[[b|Bee]]".into()),
+            JsValue::Str("plain".into()),
+            JsValue::Str("https://e.com".into()),
+        ]),
+    );
+    assert_eq!(
+        r.value,
+        Rendered::Links(vec![
+            PropValue::Link {
+                target: "b".into(),
+                fragment: None,
+                alias: Some("Bee".into()),
+            },
+            PropValue::Text("plain".into()),
+            PropValue::Url {
+                url: "https://e.com".into(),
+                label: "https://e.com".into(),
+            },
+        ])
+    );
+    assert_eq!(r.value.display(), "Bee, plain, https://e.com");
+    assert_eq!(
+        props::render("model", &JsValue::Str("gpt".into())).value,
+        Rendered::Text("gpt".into())
+    );
+
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vault = tmp.path().join("vault");
+    write(
+        &vault,
+        "a.md",
+        "---\nup: \"[[b]]\"\nx: \"[[gone]]\"\n---\nbody\n",
+    );
+    write(&vault, "b.md", B);
+    let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
+    let dc: Arc<dyn DaemonClient> = Arc::new(d);
+    let mut app = App::new(Some(dc), None);
+    app.rpc_inline = true;
+    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    let _ = app.update(Message::Panels(PanelsMsg::Show(PanelKind::Properties)));
+    let want: std::collections::HashSet<String> = ["gone".to_owned()].into();
+    assert_eq!(app.panels.prop_unresolved, want);
 }

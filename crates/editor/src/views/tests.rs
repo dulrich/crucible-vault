@@ -544,3 +544,33 @@ fn done_toggle_click_calls_the_rpc_with_the_decoded_identity() {
         app.status.error_text()
     );
 }
+
+/// Plan round-6 WP-5: a right-click on a view link cell yields the vault link menu (its path
+/// resolves to itself: Copy path copies it); a URL cell yields the external menu; text cells none.
+#[test]
+fn view_cell_right_click_yields_the_link_menu() {
+    use crate::context_menu::{Item, MenuMsg, Target, items};
+    let link = cell_menu_target(&Cell::Link {
+        path: "Linker.md".into(),
+        label: "Linker".into(),
+    })
+    .expect("link target");
+    assert!(
+        matches!(&link, Target::Link { target, external: false, missing: false, .. } if target == "Linker.md")
+    );
+    let names: Vec<String> = items(&link).into_iter().map(|(_, l)| l).collect();
+    assert_eq!(names, ["Open", "Open in new pane", "Copy path"]);
+    let url = cell_menu_target(&Cell::Url {
+        url: "https://e.com".into(),
+        label: "e".into(),
+    })
+    .expect("url target");
+    let names: Vec<String> = items(&url).into_iter().map(|(_, l)| l).collect();
+    assert_eq!(names, ["Open", "Copy URL"]);
+    assert!(cell_menu_target(&Cell::Text("x".into())).is_none());
+
+    let (_tmp, _d, mut app) = setup();
+    let _ = app.update(Message::Menu(MenuMsg::Open(link, iced::Point::ORIGIN)));
+    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
+    assert_eq!(app.copied, ["Linker.md"]);
+}

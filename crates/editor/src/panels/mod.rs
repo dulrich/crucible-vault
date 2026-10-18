@@ -10,14 +10,17 @@ pub mod props;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cv_index::{Resolver, TagCount};
 use editor_model::outline::{self, OutlineItem};
-use editor_model::render::is_remote;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use editor_model::render::{PropValue, is_remote};
+use iced::widget::span;
+use iced::widget::text::Span;
+use iced::widget::{button, column, container, rich_text, row, scrollable, text, text_input};
 use iced::{Element, Length};
 
+use crate::context_menu::{Target, on_right};
 use crate::daemon::DaemonClient;
 use crate::message::{Message, PanelsMsg};
 use crate::source::SourceBuffer;
@@ -152,6 +155,9 @@ pub struct Panels {
     pub outline: Vec<OutlineItem>,
     pub links: Links,
     pub props: Vec<Prop>,
+    /// Plan round-6 WP-5: sidebar property wikilink targets that do not resolve (dimmed; their
+    /// menu offers Create note). Empty without a resolver (no daemon), like Reading's.
+    pub prop_unresolved: HashSet<String>,
     pub backlinks: Vec<Backlink>,
     pub tags: Vec<TagCount>,
     /// The picked tag and its files.
@@ -419,6 +425,26 @@ impl Panels {
         let note = ofm::parse(&src);
         self.outline = outline::from_note(&src, &note);
         self.props = props::from_note(&note);
+        self.prop_unresolved = if self.resolver.is_some() {
+            self.props
+                .iter()
+                .filter_map(|p| match &p.value {
+                    Rendered::Links(v) => Some(v),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|v| match v {
+                    PropValue::Link { target, .. }
+                        if !target.is_empty() && self.resolve(tab.path(), target).is_none() =>
+                    {
+                        Some(target.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let mut links = Links::default();
         for w in &note.wikilinks {
             if !w.target.is_empty() {
@@ -508,43 +534,129 @@ fn pm(m: PanelsMsg) -> Message {
     Message::Panels(m)
 }
 
-fn link_button<'a>(label: String, open: Option<String>, t: Tokens) -> Element<'a, Message> {
-    let txt = text(label).size(13);
-    match open {
-        Some(p) => button(txt.color(t.accent_text.to_color()))
-            .style(button::text)
-            .padding(2)
-            .on_press(pm(PanelsMsg::Open(p)))
-            .into(),
-        None => container(txt.color(t.text_dim.to_color()))
-            .padding(2)
-            .into(),
+/// Plan round-6 WP-5: the link menu target of a panel entry in note `src` (`view` 0 is inert:
+/// no Reading selection here).
+pub(crate) fn link_target(src: &str, target: &str, external: bool, missing: bool) -> Target {
+    Target::Link {
+        src: src.to_owned(),
+        target: target.to_owned(),
+        external,
+        view: 0,
+        selection: false,
+        missing,
     }
+}
+
+/// A resolved entry (`open` = its vault path) opens it; a missing one (`None`) is dimmed and
+/// clicks through the Reading link path (WP-4 warn / create). Both carry the link menu.
+fn link_button<'a>(
+    src: &str,
+    label: String,
+    open: Option<String>,
+    t: Tokens,
+) -> Element<'a, Message> {
+    let txt = text(label.clone()).size(13);
+    let (el, target) = match open {
+        Some(p) => (
+            button(txt.color(t.accent_text.to_color()))
+                .style(button::text)
+                .padding(2)
+                .on_press(pm(PanelsMsg::Open(p.clone()))),
+            link_target(src, &p, false, false),
+        ),
+        None => (
+            button(txt.color(t.text_dim.to_color()))
+                .style(button::text)
+                .padding(2)
+                .on_press(Message::Reading(crate::message::ReadingMsg::OpenLink {
+                    src: src.to_owned(),
+                    target: label.clone(),
+                })),
+            link_target(src, &label, false, true),
+        ),
+    };
+    on_right(el, target)
+}
+
+/// An attachment / disallowed-scheme entry: dimmed and inert (no opener, no menu).
+fn inert<'a>(label: String, t: Tokens) -> Element<'a, Message> {
+    container(text(label).size(13).color(t.text_dim.to_color()))
+        .padding(2)
+        .into()
 }
 
 /// Plan usability-sprint-captures-links WP-3: an external entry that passes the opener's
 /// scheme allowlist opens in the browser; attachments and other schemes stay inert.
-fn external_button<'a>(target: String, t: Tokens) -> Element<'a, Message> {
+fn external_button<'a>(src: &str, target: String, t: Tokens) -> Element<'a, Message> {
     if crate::open_url::check_scheme(&target).is_err() {
-        return link_button(target, None, t);
+        return inert(target, t);
     }
-    button(
+    let menu = link_target(src, &target, true, false);
+    let b = button(
         text(target.clone())
             .size(13)
             .color(t.accent_text.to_color()),
     )
     .style(button::text)
     .padding(2)
-    .on_press(Message::OpenUrl(target))
-    .into()
+    .on_press(Message::OpenUrl(target));
+    on_right(b, menu)
+}
+
+/// Plan round-6 WP-5: one sidebar property element — a link / URL draws like Reading's
+/// frontmatter link (accent-ui, dimmed when unresolved), clicks like it and carries the link
+/// menu; other elements are plain text.
+fn prop_el<'a>(
+    src: &str,
+    v: &PropValue,
+    unresolved: &HashSet<String>,
+    t: Tokens,
+) -> Element<'a, Message> {
+    let (label, msg, target) = match v {
+        PropValue::Text(s) => return text(s.clone()).size(13).into(),
+        PropValue::Bool(b) => return text(b.to_string()).size(13).into(),
+        PropValue::Url { url, label } => (
+            label.clone(),
+            Message::OpenUrl(url.clone()),
+            link_target(src, url, true, false),
+        ),
+        PropValue::Link { target, alias, .. } => (
+            alias.clone().unwrap_or_else(|| target.clone()),
+            Message::Reading(crate::message::ReadingMsg::OpenLink {
+                src: src.to_owned(),
+                target: target.clone(),
+            }),
+            link_target(src, target, false, unresolved.contains(target)),
+        ),
+    };
+    let mut c = t.accent_ui.to_color();
+    if matches!(&target, Target::Link { missing: true, .. }) {
+        c.a *= 0.5;
+    }
+    let sp: Span<'a, ()> = span(label).color(c).link(());
+    on_right(
+        rich_text(vec![sp])
+            .size(13)
+            .on_link_click(move |()| msg.clone()),
+        target,
+    )
 }
 
 fn heading<'a>(s: String, t: Tokens) -> Element<'a, Message> {
     text(s).size(12).color(t.text_faint.to_color()).into()
 }
 
+/// Plan round-6 WP-5: an Outline heading's menu target (an in-note anchor).
+pub(crate) fn anchor_target(path: &str, line: usize) -> Target {
+    Target::Anchor {
+        path: path.to_owned(),
+        line,
+    }
+}
+
 /// The panels column.
 pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
+    let src: &'a str = p.path.as_deref().unwrap_or_default();
     let tabs = row(PanelKind::ALL.iter().map(|&k| {
         let mut l = text(k.label()).size(12);
         if k == p.kind {
@@ -561,32 +673,34 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
     let body: Element<'a, Message> = match p.kind {
         PanelKind::Outline => scrollable(column(p.outline.iter().map(|h| {
             let indent = "  ".repeat(usize::from(h.level.saturating_sub(1)));
-            button(text(format!("{indent}{}", h.text)).size(13))
-                .style(button::text)
-                .padding(2)
-                .on_press(pm(PanelsMsg::OutlineJump(h.line)))
-                .into()
+            on_right(
+                button(text(format!("{indent}{}", h.text)).size(13))
+                    .style(button::text)
+                    .padding(2)
+                    .on_press(pm(PanelsMsg::OutlineJump(h.line))),
+                anchor_target(src, h.line),
+            )
         })))
         .height(Length::Fill)
         .into(),
         PanelKind::Links => {
             let mut c = column![heading(format!("Linked ({})", p.links.resolved.len()), t)];
             for l in &p.links.resolved {
-                c = c.push(link_button(l.target.clone(), l.resolved.clone(), t));
+                c = c.push(link_button(src, l.target.clone(), l.resolved.clone(), t));
             }
             c = c.push(heading(
                 format!("Missing notes ({})", p.links.missing.len()),
                 t,
             ));
             for l in &p.links.missing {
-                c = c.push(link_button(l.target.clone(), None, t));
+                c = c.push(link_button(src, l.target.clone(), None, t));
             }
             c = c.push(heading(
                 format!("External / attachments ({})", p.links.external.len()),
                 t,
             ));
             for l in &p.links.external {
-                c = c.push(external_button(l.target.clone(), t));
+                c = c.push(external_button(src, l.target.clone(), t));
             }
             scrollable(c.spacing(2)).height(Length::Fill).into()
         }
@@ -599,17 +713,19 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
                     Some(l) => format!("{}:{l}", b.src),
                     None => b.src.clone(),
                 };
-                button(column![
-                    text(title).size(13).color(t.accent_text.to_color()),
-                    text(b.snippet.as_str())
-                        .size(12)
-                        .color(t.text_dim.to_color()),
-                ])
-                .style(button::text)
-                .padding(1)
-                .height(ROW2)
-                .on_press(pm(PanelsMsg::Open(b.src.clone())))
-                .into()
+                on_right(
+                    button(column![
+                        text(title).size(13).color(t.accent_text.to_color()),
+                        text(b.snippet.as_str())
+                            .size(12)
+                            .color(t.text_dim.to_color()),
+                    ])
+                    .style(button::text)
+                    .padding(1)
+                    .height(ROW2)
+                    .on_press(pm(PanelsMsg::Open(b.src.clone()))),
+                    link_target(src, &b.src, false, false),
+                )
             })
         }
         PanelKind::Tags => match &p.tag_files {
@@ -621,12 +737,14 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
                     pm(PanelsMsg::Scrolled(ListId::TagFiles, w))
                 })
                 .view(move |_, f| {
-                    button(text(f.as_str()).size(13))
-                        .style(button::text)
-                        .padding(1)
-                        .height(ROW)
-                        .on_press(pm(PanelsMsg::Open(f.clone())))
-                        .into()
+                    on_right(
+                        button(text(f.as_str()).size(13))
+                            .style(button::text)
+                            .padding(1)
+                            .height(ROW)
+                            .on_press(pm(PanelsMsg::Open(f.clone()))),
+                        link_target(src, f, false, false),
+                    )
                 }),
             ]
             .into(),
@@ -644,10 +762,24 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
         },
         PanelKind::Properties => scrollable(
             column(p.props.iter().map(|pr| {
-                let mut v = text(pr.value.display()).size(13);
-                if matches!(pr.value, Rendered::Flagged(_)) {
-                    v = v.color(t.warn_text.to_color());
-                }
+                let v: Element<'a, Message> = match &pr.value {
+                    Rendered::Links(vs) => row(vs.iter().enumerate().map(|(i, v)| {
+                        let el = prop_el(src, v, &p.prop_unresolved, t);
+                        if i + 1 < vs.len() {
+                            row![el, text(",").size(13).color(t.text_faint.to_color())].into()
+                        } else {
+                            el
+                        }
+                    }))
+                    .spacing(4)
+                    .wrap()
+                    .into(),
+                    Rendered::Flagged(_) => text(pr.value.display())
+                        .size(13)
+                        .color(t.warn_text.to_color())
+                        .into(),
+                    other => text(other.display()).size(13).into(),
+                };
                 column![
                     text(pr.key.as_str())
                         .size(12)

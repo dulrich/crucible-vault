@@ -571,3 +571,13 @@ fn link_targets_list_vault_links_only() {
     );
     assert_eq!(link_targets(&m), ["A", "b.md", "C", "D", "E.md"]);
 }
+
+/// Plan round-6 WP-5: frontmatter wikilink values are listed (body first), URLs and plain text
+/// are not.
+#[test]
+fn link_targets_cover_frontmatter_links() {
+    let m = lower(
+        "---\nup: \"[[Parent]]\"\nrel:\n  - \"[[X|x]]\"\n  - plain\nsrc: https://e.com\n---\n[[A]]\n",
+    );
+    assert_eq!(link_targets(&m), ["A", "Parent", "X"]);
+}

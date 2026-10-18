@@ -528,6 +528,29 @@ pub(crate) fn row_targets(r: &Row, keys: &[String]) -> Vec<Option<Message>> {
 
 /// One cell. `open` = its click message: drawn like a Reading-mode note link (accent-ui, no
 /// permanent underline; iced's rich-text link underlines it and shows a pointer while hovered).
+/// Plan round-6 WP-5: the right-click menu of a link / URL cell. A `Cell::Link` carries the
+/// vault path, which resolves to itself (so `src` = `target` = the path); `view` 0 is inert
+/// (`selection: false` — there is no Reading selection here).
+pub(crate) fn cell_menu_target(c: &Cell) -> Option<crate::context_menu::Target> {
+    let (target, external) = match c {
+        Cell::Link { path, .. } => (path.clone(), false),
+        Cell::Url { url, .. } => (url.clone(), true),
+        _ => return None,
+    };
+    Some(crate::context_menu::Target::Link {
+        src: if external {
+            String::new()
+        } else {
+            target.clone()
+        },
+        target,
+        external,
+        view: 0,
+        selection: false,
+        missing: false,
+    })
+}
+
 fn cell_view<'a>(c: &Cell, bold: bool, open: Option<Message>, t: Tokens) -> Element<'a, Message> {
     let font = Font {
         weight: if bold { Weight::Bold } else { Weight::Normal },
@@ -546,11 +569,14 @@ fn cell_view<'a>(c: &Cell, bold: bool, open: Option<Message>, t: Tokens) -> Elem
         Some(msg) => {
             let sp: iced::widget::text::Span<'a, ()> =
                 span(s).color(t.accent_ui.to_color()).link(());
-            rich_text(vec![sp])
+            let el = rich_text(vec![sp])
                 .size(13)
                 .font(font)
-                .on_link_click(move |()| msg.clone())
-                .into()
+                .on_link_click(move |()| msg.clone());
+            match cell_menu_target(c) {
+                Some(target) => crate::context_menu::on_right(el, target),
+                None => el.into(),
+            }
         }
         None => text(s).size(13).font(font).color(t.text.to_color()).into(),
     }
