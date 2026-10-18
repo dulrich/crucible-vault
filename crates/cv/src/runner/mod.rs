@@ -316,9 +316,8 @@ impl Runner {
         }
     }
 
-    /// The shared search index (WP-4's `Request::Search` handler queries through it, so feed
-    /// writes are visible without reopening).
-    #[allow(dead_code)] // first consumer: plan semsearch-crate WP-4
+    /// The shared search index (the `search` request queries through it, so feed writes are
+    /// visible without reopening).
     pub(crate) fn search_db(&self) -> &cv_search::SearchDb {
         &self.inner.search
     }

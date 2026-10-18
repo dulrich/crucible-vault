@@ -695,6 +695,7 @@ impl Shared {
             Request::LookupGeocode(p) => to_value(&self.lookups.geocode(&p.query).await?),
             Request::LookupModels(p) => to_value(&self.lookups.models(&p.provider).await?),
             Request::LookupChannels(p) => to_value(&self.lookups.channels(&p.ids).await?),
+            Request::Search(p) => to_value(&self.search(&p).await?),
             Request::TrackerItemSetDone(p) => self.set_tracker_status(
                 &p.source_kind,
                 &p.source_key,
@@ -705,6 +706,19 @@ impl Shared {
                 self.set_tracker_status(&p.source_kind, &p.source_key, &p.item_id, p.status)
             }
         }
+    }
+
+    /// `search` (plan semsearch-crate WP-4): hybrid search over the runner's shared index,
+    /// off the request loop ([`crate::search_query`]).
+    pub async fn search(
+        &self,
+        params: &cv_protocol::SearchParams,
+    ) -> Result<cv_protocol::SearchResult, RpcError> {
+        let runner = self.runner_or_err()?;
+        let mgr = crate::steps::agent::manager().map_err(|e| internal(e.to_string()))?;
+        crate::search_query::search(runner.search_db(), &runner.config(), mgr, params)
+            .await
+            .map_err(internal)
     }
 
     /// `tracker_item_set_status` (and its legacy `tracker_item_set_done` alias).

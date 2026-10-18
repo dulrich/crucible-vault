@@ -13,10 +13,17 @@ use cv_search::semsearch::{Index, IndexOptions};
 use crate::config::Config;
 
 /// `cv search` usage.
-pub const USAGE: &str = "usage:\n  cv search import --from <companion.sqlite> [--to <search.db>]   (daemon stopped; default --to is CV_SEARCH_DB)\n";
+pub const USAGE: &str = "usage:\n  cv search import --from <companion.sqlite> [--to <search.db>]   (daemon stopped; default --to is CV_SEARCH_DB)\n  cv search import --status [--to <search.db>]   exit 0 = import state present, 1 = absent\n";
 
-/// Runs `cv search <args>`; returns the exit code (0 ok, 1 error, 2 usage).
+/// Runs `cv search <args>`; returns the exit code (0 ok, 1 error, 2 usage). `import --status`
+/// is the migration probe (plan semsearch-crate WP-4): 0 = import state present, 1 = absent
+/// (a missing file is absent), 2 = usage or an unreadable index.
 pub fn run(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("import")
+        && args.get(1).map(String::as_str) == Some("--status")
+    {
+        return status_cmd(args.get(2..).unwrap_or_default());
+    }
     let (Some("import"), Some((from, to))) = (
         args.first().map(String::as_str),
         parse(args.get(1..).unwrap_or_default()),
@@ -34,6 +41,44 @@ pub fn run(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn status_cmd(rest: &[String]) -> i32 {
+    let to = match rest {
+        [] => Config::from_env().map(|c| c.search_db),
+        [k, v] if k == "--to" => Ok(PathBuf::from(v)),
+        _ => {
+            eprint!("{USAGE}");
+            return 2;
+        }
+    };
+    match to.and_then(|p| has_import_state(&p)) {
+        Ok(true) => {
+            println!("import state: present");
+            0
+        }
+        Ok(false) => {
+            println!("import state: absent");
+            1
+        }
+        Err(e) => {
+            eprintln!("cv: {e:#}");
+            2
+        }
+    }
+}
+
+/// Whether the index at `path` records a completed import, read-only (a missing file is
+/// `false`, never created).
+pub fn has_import_state(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let idx = Index::open_read_only(path, &IndexOptions::default())
+        .with_context(|| format!("opening {} read-only", path.display()))?;
+    Ok(cv_search::import_state(&idx)
+        .map_err(|e| anyhow!("{e}"))?
+        .is_some())
 }
 
 fn parse(rest: &[String]) -> Option<(PathBuf, Option<PathBuf>)> {
@@ -97,13 +142,13 @@ mod tests {
         }
     }
 
-    fn tmp() -> Tmp {
+    fn tmp(tag: &str) -> Tmp {
         let base = if Path::new("/dev/shm").is_dir() {
             PathBuf::from("/dev/shm")
         } else {
             std::env::temp_dir()
         };
-        let d = base.join(format!("cv-search-import-cli-{}", std::process::id()));
+        let d = base.join(format!("cv-search-import-cli-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         Tmp(d)
@@ -129,7 +174,7 @@ mod tests {
 
     #[test]
     fn import_refuses_while_a_daemon_socket_answers() {
-        let t = tmp();
+        let t = tmp("refuse");
         let cfg = config(&t.0);
         assert_eq!(cfg.search_db, t.0.join("state/search.db"));
         let comp = t.0.join("companion.sqlite");
@@ -158,6 +203,43 @@ mod tests {
         let idx = Index::open_read_only(&cfg.search_db, &IndexOptions::default()).unwrap();
         let st = cv_search::import_state(&idx).unwrap().unwrap();
         assert_eq!((st.sources, st.chunks, st.embedded), (1, 1, 0));
+    }
+
+    #[test]
+    fn status_probe_reports_import_state_read_only() {
+        let t = tmp("status");
+        let db = t.0.join("probe/search.db");
+        let arg = |p: &Path| {
+            vec![
+                "import".into(),
+                "--status".into(),
+                "--to".into(),
+                p.display().to_string(),
+            ]
+        };
+        assert_eq!(run(&arg(&db)), 1, "missing file = absent");
+        assert!(!db.exists(), "the probe never creates the index");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        drop(Index::open(&db, &IndexOptions::default()).unwrap());
+        assert_eq!(
+            run(&arg(&db)),
+            1,
+            "lexical-only index without import state = absent"
+        );
+        let comp = t.0.join("probe-companion.sqlite");
+        let row = CompanionRow {
+            id: "c1".into(),
+            vault: "default".into(),
+            path: "n.md".into(),
+            content_hash: "h".into(),
+            text: "synthetic words".into(),
+            metadata_json: "{}".into(),
+            ..CompanionRow::default()
+        };
+        write_companion_fixture(&comp, &[row]).unwrap();
+        import_into(&comp, &db).unwrap();
+        assert_eq!(run(&arg(&db)), 0);
+        assert_eq!(run(&["import".into(), "--status".into(), "--x".into()]), 2);
     }
 
     #[test]

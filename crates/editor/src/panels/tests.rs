@@ -24,18 +24,23 @@ fn write(root: &Path, rel: &str, body: &str) {
 }
 
 fn env() -> (tempfile::TempDir, App) {
+    let (tmp, _, app) = env_fake();
+    (tmp, app)
+}
+
+fn env_fake() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
     let tmp = tempfile::tempdir().expect("tmp");
     let vault = tmp.path().join("vault");
     write(&vault, "a.md", A);
     write(&vault, "b.md", B);
     write(&vault, "sub/c.md", C);
-    let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
-    let dc: Arc<dyn DaemonClient> = Arc::new(d);
+    let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
+    let dc: Arc<dyn DaemonClient> = d.clone();
     let mut app = App::new(Some(dc), None);
     app.rpc_inline = true;
     let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
     let _ = app.update(Message::Panels(PanelsMsg::Show(PanelKind::Outline)));
-    (tmp, app)
+    (tmp, d, app)
 }
 
 fn targets(v: &[OutLink]) -> Vec<&str> {
@@ -160,7 +165,26 @@ fn backlinks_tags_and_search_from_the_index() {
     );
     let _ = app.update(Message::Panels(PanelsMsg::Open("sub/c.md".into())));
     assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("sub/c.md"));
+}
 
+fn hit(path: &str, heading: &str, snippet: &str) -> cv_protocol::SearchHit {
+    cv_protocol::SearchHit {
+        path: path.into(),
+        title: String::new(),
+        heading: heading.into(),
+        snippet: snippet.into(),
+        score: 1.0,
+    }
+}
+
+#[test]
+fn search_goes_through_the_daemon_with_headings_and_a_seq_gate() {
+    let (_tmp, d, mut app) = env_fake();
+    d.set_search_result(cv_protocol::SearchResult {
+        hits: vec![hit("b.md", "B", "see  [[a]]\n here zebraword")],
+        semantic: true,
+    })
+    .unwrap();
     let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
     let seq = app.panels.search.seq;
     let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebraw".into())));
@@ -169,24 +193,57 @@ fn backlinks_tags_and_search_from_the_index() {
         app.panels.search.results.is_empty(),
         "stale debounce ignored"
     );
+    assert!(
+        d.search_calls().unwrap().is_empty(),
+        "no call for a stale seq"
+    );
     let _ = app.update(Message::Panels(PanelsMsg::SearchDue(seq + 1)));
     assert_eq!(
         app.panels.search.results,
         vec![SearchHit {
             path: "b.md".into(),
+            heading: "B".into(),
             snippet: "see [[a]] here zebraword".into(),
         }]
     );
-    let _ = app.update(Message::Panels(PanelsMsg::SearchInput(
-        "\"unbalanced (".into(),
-    )));
-    let s = app.panels.search.seq;
-    let _ = app.update(Message::Panels(PanelsMsg::SearchDue(s)));
-    assert!(
-        app.panels.search.error.is_none(),
-        "{:?}",
-        app.panels.search.error
+    let limit = u32::try_from(app.prefs.search_limit).unwrap();
+    assert_eq!(
+        d.search_calls().unwrap(),
+        vec![("zebraw".to_owned(), limit)]
     );
+    assert!(app.panels.search.error.is_none());
+
+    // A stale result (older seq) arriving late is dropped.
+    let _ = app.update(Message::Panels(PanelsMsg::SearchDone {
+        seq,
+        result: Ok(Vec::new()),
+    }));
+    assert_eq!(app.panels.search.results.len(), 1);
+    // The row renders (path + heading + snippet) without panicking.
+    let _ = app.update(Message::Panels(PanelsMsg::Show(PanelKind::Search)));
+    let _ = app.view();
+}
+
+#[test]
+fn search_with_the_daemon_disconnected_shows_unavailable_and_reads_no_index() {
+    let (tmp, d, mut app) = env_fake();
+    d.set_search_disconnected(true).unwrap();
+    // Remove the local index files: any fallback read of index.db would now fail loudly.
+    let _ = std::fs::remove_dir_all(tmp.path().join("data"));
+    let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
+    let seq = app.panels.search.seq;
+    let _ = app.update(Message::Panels(PanelsMsg::SearchDue(seq)));
+    assert_eq!(app.panels.search.error.as_deref(), Some(SEARCH_UNAVAILABLE));
+    assert!(app.panels.search.results.is_empty());
+    assert_eq!(d.search_calls().unwrap().len(), 1);
+
+    // No daemon at all: the same error line, no RPC.
+    let mut app = App::new(None, None);
+    app.rpc_inline = true;
+    let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
+    let seq = app.panels.search.seq;
+    let _ = app.update(Message::Panels(PanelsMsg::SearchDue(seq)));
+    assert_eq!(app.panels.search.error.as_deref(), Some(SEARCH_UNAVAILABLE));
 }
 
 #[test]
@@ -196,8 +253,6 @@ fn pure_helpers() {
     assert!(!is_externalish("notes/missing"));
     assert!(!is_externalish("v1.2 release"));
     assert!(!is_externalish("Note.md"));
-    assert_eq!(fts_query("  "), None);
-    assert_eq!(fts_query("a \"b"), Some("\"a\" \"\"\"b\"*".into()));
     let long = "x".repeat(200);
     assert_eq!(snippet(&long).chars().count(), SNIPPET_CHARS + 1);
     assert_eq!(props::TYPES.len(), 34);

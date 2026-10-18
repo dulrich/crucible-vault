@@ -8,7 +8,6 @@ Both directories must be outside the vault and outside every repo (`<code-root>`
 
 - `CV_SCRATCH` — the overlay root (default `~/.local/state/crucible-vault/scratch`); the overlay is `$CV_SCRATCH/vault/<vault-relative path>`.
 - `CV_CONFIG_DIR` — the TOML config (default `~/.config/crucible-vault` in shadow mode). Copy what you want armed from `config/examples/`.
-- Optional: `CV_SEARCH_URL` (default `http://127.0.0.1:4801`) and `CV_SEARCH_VAULT_ID` (default `default`, Crucible's `searchVaultId`) for parity P3.
 
 Set them in a drop-in (`systemctl --user edit crucible-vault-shadow`) rather than editing the unit file.
 
@@ -51,7 +50,6 @@ Prints `{generated_at, mode, criteria: {P1..P7: {status, metrics, notes}}}`. Sta
 
 - **P1 Index** — `build_ms` (fresh full build), `peak_rss_kb` (this process's `VmHWM` after the build; `peak_rss_kb_before` is the value before it), `daemon_pss_kb` (`/proc/<MainPID>/smaps_rollup`), `md_files`/`links`/`unresolved`/`tags` with `drift_pct` against the S2 baselines (8,008 / 17,913 / 5,293). `fail` when build > 10 s, RSS > 64 MB or PSS > 50 MB; `warn` when any drift exceeds 2 % — **categorizing the cause is manual**.
 - **P2 Lint/derived ids** — per field (`word_count`, `yt_video_id`, `post_id`) `{compared, agreed, rate}`, recomputed with `cv-lint` against what Crucible stored. Status `manual`: **you set the bar after the first run** (mismatches are expected: `lintOnSave` is off).
-- **P3 Search** — `match_rate` = matched / indexable paths, `pass` at ≥ 0.99; `mismatched` split into `note_drift`, `facet_drift`, `unexplained` (port-defect candidates, counted only) and `unclassified`; `missing_remote`/`missing_local`; `companion_mutations: "structural"`. The companion's `/v1/paths` carries no timestamp, so **note drift** uses the proxy "file mtime ≥ `--soak-start`" (without `--soak-start` it is `null` and those mismatches are `unclassified`); **facet drift** is a mismatched note whose hash folds at least one facet (an image description or linked document). Companion down → `unknown`.
 - **P4 Materialize** — overlay files written by materialize jobs whose live counterpart exists at the same path: frontmatter compared as parsed values (key order and YAML re-serialization ignored), body byte for byte. `{candidates, compared, equal}`; no candidates → `unknown`.
 - **P5 Intake** — overlay files from URI intake (direct creates) and capture jobs vs the live file, byte for byte. To produce candidates, re-send the clipper URLs to the daemon (`cv uri '<obsidian://new… url>'`) after Obsidian handled them, then re-run parity.
 - **P6 Safety** — `outside_overlay_rows` (0), `scratch_outside_vault_and_repos`, `config_dir_outside_vault_and_repos`, `landlock_denials` (journal lines with `permission denied` or a Landlock denial/failure; the startup `landlock` status line is not counted).

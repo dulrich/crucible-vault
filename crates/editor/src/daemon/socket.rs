@@ -329,6 +329,13 @@ impl DaemonClient for SocketDaemon {
         }))
     }
 
+    fn search(&self, query: &str, limit: u32) -> Result<cv_protocol::SearchResult> {
+        self.call_typed(Request::Search(cv_protocol::SearchParams {
+            query: query.to_owned(),
+            limit,
+        }))
+    }
+
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {
         self.call_typed(Request::LookupChannels(cv_protocol::LookupChannelsParams {
             ids: ids.to_vec(),

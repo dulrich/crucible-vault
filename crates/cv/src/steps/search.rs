@@ -6,8 +6,6 @@
 //!
 //! | Key | Default | Meaning |
 //! |---|---|---|
-//! | `companion_url` | — | Ignored since semsearch-crate WP-3; retired in WP-4 (still parsed, must be an http(s) URL). |
-//! | `vault_id` | — | Ignored since semsearch-crate WP-3; retired in WP-4 (still parsed). |
 //! | `embed` | absent | `"provider:model"` from `providers.toml`; absent = lexical-only (Crucible with semantic indexing off). The index space is [`cv_search::space_model`] of the model. |
 //! | `path` | `active_path` | Target note. `search_upsert` without one is the reconcile sweep (`search-refresh`). |
 //!
@@ -25,13 +23,9 @@
 //! (`isPathExcluded`/`isUserIgnored`); indexable = Crucible's default extensions (`md`, `qmd`,
 //! `txt`) outside the index's skipped dirs.
 
-use std::sync::{Arc, OnceLock};
-
 use cv_actions::{ConfigSet, Step};
 use cv_index::{LinkKind, Reader};
-use cv_providers::{
-    ProviderManager, ProvidersConfig, SystemSecrets, parse_model_ref, secrets::default_secrets_dir,
-};
+use cv_providers::{ProviderManager, ProvidersConfig, parse_model_ref};
 use cv_search::chunker::{DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
 use cv_search::feed::{self, EmbedTarget, FeedConfig, FeedReport, LocalNote, ShadowScope};
 use cv_search::{
@@ -46,7 +40,7 @@ use super::{DeferCause, StepCtx, StepError, StepOutcome};
 /// Deferral delay for an embedder outage.
 pub const RETRY_AFTER_MS: i64 = 60_000;
 
-const KEYS: [&str; 4] = ["companion_url", "vault_id", "embed", "path"];
+const KEYS: [&str; 2] = ["embed", "path"];
 
 #[derive(Debug, Default, PartialEq)]
 struct Params {
@@ -70,13 +64,6 @@ fn parse(step: &Step) -> Result<Params, String> {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("{kind}: {k} must be a non-empty string"))?;
         match k.as_str() {
-            // Ignored since semsearch-crate WP-3; retired in WP-4.
-            "companion_url" => {
-                if !(s.starts_with("http://") || s.starts_with("https://")) {
-                    return Err(format!("{kind}: companion_url must be an http(s) URL"));
-                }
-            }
-            "vault_id" => {}
             "embed" => {
                 let r = parse_model_ref(Some(s))
                     .filter(cv_providers::ProviderModelRef::is_complete)
@@ -94,19 +81,13 @@ pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
     parse(step).map(|_| ())
 }
 
-static MANAGER: OnceLock<Result<ProviderManager, String>> = OnceLock::new();
-
 /// Executes one step on the blocking thread, driving the async feed on the current runtime.
+/// Embedding goes through the process-wide [`super::agent::manager`] (shared with the daemon's
+/// `search` request).
 pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let handle =
         tokio::runtime::Handle::try_current().map_err(|_| StepError::failed("no async runtime"))?;
-    let mgr = MANAGER
-        .get_or_init(|| {
-            let dir = default_secrets_dir().unwrap_or_default();
-            ProviderManager::new(Arc::new(SystemSecrets { dir })).map_err(|e| e.to_string())
-        })
-        .as_ref()
-        .map_err(|e| StepError::failed(format!("provider manager: {e}")))?;
+    let mgr = super::agent::manager()?;
     run(step, ctx, &handle, mgr)
 }
 
@@ -128,17 +109,38 @@ fn embed_target(
     let Some((provider, model)) = embed else {
         return Ok(None);
     };
-    let text = toml::to_string(ctx.config.table("providers.toml"))
-        .map_err(|e| StepError::failed(format!("providers.toml: {e}")))?;
-    let cfg = ProvidersConfig::from_toml(&text).map_err(|e| StepError::failed(e.to_string()))?;
+    resolve_target(ctx.config, provider, model)
+        .map(Some)
+        .map_err(StepError::failed)
+}
+
+/// Resolves `provider:model` against the config's `providers.toml`.
+fn resolve_target(config: &ConfigSet, provider: &str, model: &str) -> Result<EmbedTarget, String> {
+    let text = toml::to_string(config.table("providers.toml"))
+        .map_err(|e| format!("providers.toml: {e}"))?;
+    let cfg = ProvidersConfig::from_toml(&text).map_err(|e| e.to_string())?;
     let p = cfg
         .get(provider)
         .cloned()
-        .ok_or_else(|| StepError::failed(format!("embed: unknown provider {provider:?}")))?;
-    Ok(Some(EmbedTarget {
+        .ok_or_else(|| format!("embed: unknown provider {provider:?}"))?;
+    Ok(EmbedTarget {
         provider: p,
-        model: model.clone(),
-    }))
+        model: model.to_owned(),
+    })
+}
+
+/// The query-side embed target for the daemon's `search` request (plan semsearch-crate WP-4):
+/// the `embed` of the first `search_upsert` step (armed actions in id order) — the same
+/// `provider:model` the feed writes with. `None` = no embed configured or it does not resolve.
+pub(crate) fn query_embed_target(config: &ConfigSet) -> Option<EmbedTarget> {
+    let (provider, model) = config
+        .armed_actions()
+        .flat_map(|a| a.steps.iter())
+        .filter(|s| matches!(s, Step::SearchUpsert(_)))
+        .find_map(|s| parse(s).ok().and_then(|p| p.embed))?;
+    resolve_target(config, &provider, &model)
+        .inspect_err(|e| tracing::warn!(error = %e, "search: query embed target unresolved"))
+        .ok()
 }
 
 /// Shadow unless the writer positively reports a live filesystem (fail-closed).
@@ -404,10 +406,32 @@ mod tests {
     fn param_less_step_validates_and_bad_values_disarm() {
         let c = ConfigSet::new();
         assert!(validate(&step(""), &c).is_ok());
-        assert!(validate(&step("embed = \"local:bge-m3\"\nvault_id = \"v\""), &c).is_ok());
+        assert!(validate(&step("embed = \"local:bge-m3\"\npath = \"n.md\""), &c).is_ok());
         assert!(validate(&step("nope = \"x\""), &c).is_err());
         assert!(validate(&step("embed = \"no-model\""), &c).is_err());
-        assert!(validate(&step("companion_url = \"ftp://x\""), &c).is_err());
+        // Retired in semsearch-crate WP-4: the old companion params now disarm (I5).
+        assert!(validate(&step("vault_id = \"v\""), &c).is_err());
         assert!(validate(&step("path = 3"), &c).is_err());
+    }
+
+    #[test]
+    fn query_embed_target_is_the_first_search_upsert_embed() {
+        let mut c = ConfigSet::new();
+        let actions = "[[action]]\nid = \"a\"\n[[action.steps]]\ntype = \"search_upsert\"\n\n[[action]]\nid = \"b\"\n[[action.steps]]\ntype = \"search_upsert\"\nembed = \"emb:bge-m3-f16\"\n";
+        let providers = "[[provider]]\nid = \"emb\"\nkind = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:9\"\n";
+        c.reload(
+            &std::collections::BTreeMap::from([
+                ("actions.toml".to_owned(), Some(actions.to_owned())),
+                ("providers.toml".to_owned(), Some(providers.to_owned())),
+            ]),
+            &super::super::validate,
+        );
+        assert!(c.errors().is_empty(), "{:?}", c.errors());
+        let t = query_embed_target(&c).unwrap();
+        assert_eq!(
+            (t.provider.id.as_str(), t.model.as_str()),
+            ("emb", "bge-m3-f16")
+        );
+        assert!(query_embed_target(&ConfigSet::new()).is_none());
     }
 }

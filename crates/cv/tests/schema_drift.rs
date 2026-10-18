@@ -169,15 +169,9 @@ const STEPS: &[(&str, &str)] = &[
     ("agent", "agent = \"a2\"\nmodel = \"{param.model}\""),
     ("mark_forwarded", "path = \"{path}\"\nline = 0"),
     ("run_action", "action = \"s\"\nparams = { x = \"y\" }"),
-    (
-        "search_upsert",
-        "companion_url = \"http://127.0.0.1:4801\"\nvault_id = \"v\"\nembed = \"local:e1\"\npath = \"a.md\"",
-    ),
+    ("search_upsert", "embed = \"local:e1\"\npath = \"a.md\""),
     ("search_upsert", ""),
-    (
-        "search_delete",
-        "companion_url = \"https://example.invalid\"\nvault_id = \"v\"\nembed = \"local:e1\"\npath = \"a.md\"",
-    ),
+    ("search_delete", "embed = \"local:e1\"\npath = \"a.md\""),
     // A2 stubs (plan v0-automation-pipelines WP-1): no params until their WPs define them.
     ("link_scan", ""),
     (

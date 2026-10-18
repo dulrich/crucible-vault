@@ -577,3 +577,150 @@ async fn durable_move_publishes_open_path_on_terminal_status() {
     assert_eq!(terminal.open_path.as_deref(), Some("archive/x.md"));
     d.shutdown().await.unwrap();
 }
+
+// --- `search` request (plan semsearch-crate WP-4) ------------------------------------------
+
+/// A one-thread fake OpenAI-compatible embedder: every `/embeddings` input gets [`SEARCH_VEC`].
+fn fake_embedder() -> String {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { return };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let (head_end, len) = loop {
+                let Ok(n) = s.read(&mut chunk) else {
+                    break (0, 0);
+                };
+                if n == 0 {
+                    break (0, 0);
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
+                    let len = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0usize);
+                    break (i + 4, len);
+                }
+            };
+            while head_end > 0 && buf.len() < head_end + len {
+                let Ok(n) = s.read(&mut chunk) else { break };
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let body: Value =
+                serde_json::from_slice(buf.get(head_end..).unwrap_or_default()).unwrap_or_default();
+            let n = body["input"].as_array().map_or(1, Vec::len);
+            let data: Vec<Value> = (0..n)
+                .map(|i| json!({"index": i, "embedding": SEARCH_VEC}))
+                .collect();
+            let out = json!({ "data": data }).to_string();
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}",
+                out.len()
+            );
+        }
+    });
+    format!("http://{addr}")
+}
+
+const SEARCH_VEC: [f32; 3] = [0.1, 0.2, 0.3];
+
+/// A feed stand-in: writes one embedded chunk for `notes/zebra.md` through the runner's shared
+/// handle (`StepCtx::search`), in the space the `embed = "emb:m1"` target maps to.
+fn feeding_exec() -> Arc<dyn StepExecutor> {
+    Arc::new(FnExec(Box::new(|_, ctx| {
+        let db = ctx
+            .search
+            .ok_or_else(|| StepError::failed("no search db"))?;
+        let shared = db.shared().map_err(|e| StepError::failed(e.to_string()))?;
+        let chunk = cv_search::semsearch::Chunk::new(
+            "c1",
+            "Zebra",
+            "Stripes",
+            "synthetic zebra stripes text",
+        )
+        .with_embedding(SEARCH_VEC.to_vec());
+        let space = cv_search::semsearch::Space::new(&cv_search::feed::space_model("m1"), 3);
+        cv_search::index::lock(&shared)
+            .upsert_source_in(&space, "notes/zebra.md", "h1", &[chunk])
+            .map_err(|e| StepError::failed(e.to_string()))?;
+        Ok(StepOutcome::default())
+    })))
+}
+
+fn search_env(embed_base: &str) -> Env {
+    let env = Env::new(
+        "[[action]]\nid = \"feed\"\ndurable = false\n[[action.steps]]\ntype = \"search_upsert\"\nembed = \"emb:m1\"\n",
+    );
+    std::fs::write(
+        env.root.join("config/providers.toml"),
+        format!(
+            "[[provider]]\nid = \"emb\"\nkind = \"openai-compatible\"\nbase_url = \"{embed_base}\"\nlocal = true\n"
+        ),
+    )
+    .unwrap();
+    env
+}
+
+fn search(c: &mut Client, q: &str) -> cv_protocol::SearchResult {
+    let v = c
+        .call(Request::Search(cv_protocol::SearchParams {
+            query: q.into(),
+            limit: 10,
+        }))
+        .unwrap();
+    serde_json::from_value(v).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_sees_a_feed_write_in_the_same_daemon_and_is_semantic_with_the_embedder_up() {
+    let env = search_env(&fake_embedder());
+    let d = start(&env, feeding_exec()).await;
+    let mut c = env.client();
+    assert!(
+        c.call(Request::Status).unwrap()["config_errors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let r = search(&mut c, "zebra");
+    assert!(r.hits.is_empty(), "nothing fed yet");
+    assert!(!r.semantic, "empty index: keyword-only");
+
+    c.call(run("feed", json!({}), ActionContext::default()))
+        .unwrap();
+    let r = search(&mut c, "zebra");
+    assert!(r.semantic, "embedder up, matching space");
+    assert_eq!(r.hits.len(), 1);
+    assert_eq!(r.hits[0].path, "notes/zebra.md");
+    assert_eq!(r.hits[0].heading, "Stripes");
+
+    let r = search(&mut c, "   ");
+    assert!(r.hits.is_empty() && !r.semantic);
+    d.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_falls_back_to_keyword_only_when_the_embedder_is_down() {
+    // Port 9 (discard) on loopback: connection refused → a transport error.
+    let env = search_env("http://127.0.0.1:9");
+    let d = start(&env, feeding_exec()).await;
+    let mut c = env.client();
+    c.call(run("feed", json!({}), ActionContext::default()))
+        .unwrap();
+    let r = search(&mut c, "zebra");
+    assert!(!r.semantic, "embedder down: keyword-only");
+    assert_eq!(r.hits.len(), 1, "hits still returned");
+    assert_eq!(r.hits[0].path, "notes/zebra.md");
+    d.shutdown().await.unwrap();
+}

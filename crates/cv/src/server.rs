@@ -41,6 +41,7 @@ const METHODS: &[&str] = &[
     "status",
     "views_list",
     "view_run",
+    "search",
 ];
 
 /// Binds `socket` (stale file removed; a live daemon is an error) with mode 0600.

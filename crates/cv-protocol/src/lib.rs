@@ -140,6 +140,9 @@ pub enum Request {
     LookupModels(LookupModelsParams),
     /// YouTube channel titles → `[LookupChannel]`.
     LookupChannels(LookupChannelsParams),
+    /// Hybrid search over the daemon's `semsearch` index (plan semsearch-crate WP-4) →
+    /// [`SearchResult`].
+    Search(SearchParams),
     /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake WP-11)
     /// → `null`; unknown rows are `NOT_FOUND`.
     TrackerItemSetDone(TrackerItemSetDoneParams),
@@ -595,6 +598,31 @@ pub struct LookupModelsResult {
     pub live: bool,
 }
 
+/// `search` params (plan semsearch-crate WP-4); the daemon clamps `limit` to `1..=1000`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchParams {
+    pub query: String,
+    pub limit: u32,
+}
+
+/// One `search` hit; `path` is the vault-relative note path (the index source).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub path: String,
+    pub title: String,
+    pub heading: String,
+    pub snippet: String,
+    pub score: f64,
+}
+
+/// `search` result. `semantic` is true only when the vector leg ran (the query was embedded in
+/// the index's recorded space); false means keyword-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub hits: Vec<SearchHit>,
+    pub semantic: bool,
+}
+
 /// `tracker_item_set_done` params: the row key plus the new state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackerItemSetDoneParams {
@@ -885,6 +913,33 @@ mod tests {
             }),
         };
         round_trip(&err);
+    }
+
+    #[test]
+    fn search_wire_shapes() {
+        let v = round_trip(&RpcRequest::new(
+            RpcId::Num(1),
+            Request::Search(SearchParams {
+                query: "dragons".into(),
+                limit: 50,
+            }),
+        ));
+        assert_eq!(v["method"], "search");
+        assert_eq!(v["params"], json!({"query": "dragons", "limit": 50}));
+        let v = round_trip(&SearchResult {
+            hits: vec![SearchHit {
+                path: "n/a.md".into(),
+                title: "A".into(),
+                heading: "H".into(),
+                snippet: "s".into(),
+                score: 0.5,
+            }],
+            semantic: true,
+        });
+        assert_eq!(
+            v,
+            json!({"hits": [{"path": "n/a.md", "title": "A", "heading": "H", "snippet": "s", "score": 0.5}], "semantic": true})
+        );
     }
 
     #[test]

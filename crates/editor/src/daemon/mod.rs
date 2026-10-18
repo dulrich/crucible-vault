@@ -125,6 +125,9 @@ pub trait DaemonClient: Send + Sync {
     fn lookup_models(&self, provider: &str) -> Result<LookupModelsResult>;
     /// YouTube channel titles for `ids` (unknown ids absent).
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<LookupChannel>>;
+    /// Hybrid search through the daemon's `semsearch` index (plan semsearch-crate WP-4); the
+    /// editor never opens the index itself.
+    fn search(&self, query: &str, limit: u32) -> Result<cv_protocol::SearchResult>;
     /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake
     /// WP-11); the refresh arrives as `views_invalidated`.
     fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()>;

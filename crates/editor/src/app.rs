@@ -4137,6 +4137,10 @@ impl App {
                     self.panels.search.results.clear();
                     return Task::none();
                 }
+                if self.daemon.is_none() {
+                    self.panels.search.error = Some(crate::panels::SEARCH_UNAVAILABLE.to_owned());
+                    return Task::none();
+                }
                 let limit = self.prefs.search_limit;
                 return self.rpc(
                     move |d| crate::panels::run_search(d, &q, limit),

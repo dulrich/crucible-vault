@@ -165,3 +165,4 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
   6. **Ranking:** the companion's `coverage` mode (pooled bm25 title 10 / heading 5 / text 1 / entities 8, title-match, vector, term coverage; RRF k = 60); bakeoff modes and Node workarounds not ported.
   7. **The daemon is the only writer and reader:** one shared `Index` handle per process, used by the job runner (feed) and the request path; the editor searches through a daemon request.
   8. **The companion is retired from cv:** no `:4801` calls, no HTTP client or remote compare, shadow P3 removed; its chunks/embeddings come over once via `cv search import`; removing the `crucible-search` container is a user step after soak.
+- WP-4: editor search goes through `Request::Search`; migration 0007 imports the companion once.

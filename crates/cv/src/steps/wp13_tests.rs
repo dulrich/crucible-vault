@@ -283,12 +283,8 @@ impl World {
         run(step, &mut ctx, self.rt.handle(), &self.mgr)
     }
 
-    /// `companion_url`/`vault_id` are still accepted (and ignored) through WP-3.
     fn upsert(&self, extra: &str) -> Step {
-        let t: toml::Table = toml::from_str(&format!(
-            "companion_url = \"http://127.0.0.1:9\"\nvault_id = \"vault-x\"\n{extra}"
-        ))
-        .unwrap();
+        let t: toml::Table = toml::from_str(extra).unwrap();
         Step::SearchUpsert(t)
     }
 

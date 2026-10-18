@@ -21,7 +21,7 @@ use iced::widget::{button, column, container, rich_text, row, scrollable, text, 
 use iced::{Element, Length};
 
 use crate::context_menu::{Target, on_right};
-use crate::daemon::DaemonClient;
+use crate::daemon::{DaemonClient, DaemonError};
 use crate::message::{Message, PanelsMsg};
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
@@ -115,12 +115,16 @@ pub struct Backlink {
     pub snippet: String,
 }
 
-/// One search hit.
+/// One search hit (a `semsearch` chunk: note path, its heading, a snippet).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
     pub path: String,
+    pub heading: String,
     pub snippet: String,
 }
+
+/// The search pane's error line when the daemon cannot answer.
+pub const SEARCH_UNAVAILABLE: &str = "daemon unavailable";
 
 /// The search pane.
 #[derive(Debug, Clone, Default)]
@@ -208,23 +212,6 @@ pub fn snippet(line: &str) -> String {
     }
 }
 
-/// The FTS5 `MATCH` string for user input: each whitespace term quoted (so punctuation is never
-/// FTS syntax), the last one a prefix match. `None` for blank input.
-pub fn fts_query(input: &str) -> Option<String> {
-    let terms: Vec<String> = input
-        .split_whitespace()
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect();
-    let (last, rest) = terms.split_last()?;
-    let mut q = rest.join(" ");
-    if !q.is_empty() {
-        q.push(' ');
-    }
-    q.push_str(last);
-    q.push('*');
-    Some(q)
-}
-
 /// Backlinks to `path` with one-line snippets (blocking: runs off the UI thread).
 pub fn load_backlinks(d: &dyn DaemonClient, path: &str) -> Result<Vec<Backlink>, String> {
     let rows = d
@@ -257,43 +244,31 @@ pub fn load_backlinks(d: &dyn DaemonClient, path: &str) -> Result<Vec<Backlink>,
         .collect())
 }
 
-/// FTS search with snippets, at most `limit` hits (blocking: runs off the UI thread).
+/// Hybrid search through the daemon's `search` request, at most `limit` hits (blocking: runs
+/// off the UI thread; plan semsearch-crate WP-4). The editor never opens the search index, and
+/// there is no fallback to `index.db`: a daemon that cannot answer is [`SEARCH_UNAVAILABLE`].
 pub fn run_search(
     d: &dyn DaemonClient,
     input: &str,
     limit: usize,
 ) -> Result<Vec<SearchHit>, String> {
-    let Some(q) = fts_query(input) else {
+    if input.trim().is_empty() {
         return Ok(Vec::new());
-    };
-    let hits = d
-        .index()
-        .with_query(|x| x.fts(&q, limit))
-        .map_err(|e| e.to_string())?;
-    let needle = input
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_lowercase();
-    Ok(hits
-        .into_iter()
-        .map(|h| {
-            let snip = d
-                .read_file(&h.path)
-                .ok()
-                .and_then(|(b, _)| {
-                    String::from_utf8_lossy(&b)
-                        .lines()
-                        .find(|l| l.to_lowercase().contains(&needle))
-                        .map(snippet)
-                })
-                .unwrap_or_default();
-            SearchHit {
+    }
+    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+    match d.search(input, limit) {
+        Ok(r) => Ok(r
+            .hits
+            .into_iter()
+            .map(|h| SearchHit {
                 path: h.path,
-                snippet: snip,
-            }
-        })
-        .collect())
+                heading: h.heading,
+                snippet: snippet(&h.snippet.split_whitespace().collect::<Vec<_>>().join(" ")),
+            })
+            .collect()),
+        Err(DaemonError::Disconnected | DaemonError::Io(_)) => Err(SEARCH_UNAVAILABLE.to_owned()),
+        Err(e) => Err(format!("search failed: {e}")),
+    }
 }
 
 impl Panels {
@@ -829,9 +804,15 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
                 })
                 .view(move |_, h| {
                     button(column![
-                        text(h.path.as_str())
-                            .size(13)
-                            .color(t.accent_text.to_color()),
+                        row![
+                            text(h.path.as_str())
+                                .size(13)
+                                .color(t.accent_text.to_color()),
+                            text(h.heading.as_str())
+                                .size(12)
+                                .color(t.text_dim.to_color()),
+                        ]
+                        .spacing(6),
                         text(h.snippet.as_str())
                             .size(12)
                             .color(t.text_dim.to_color()),

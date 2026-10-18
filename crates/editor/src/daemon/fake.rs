@@ -95,6 +95,11 @@ struct Inner {
     /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call (fails with
     /// `done_fail` too).
     status_calls: Vec<cv_protocol::TrackerItemSetStatusParams>,
+    /// Plan semsearch-crate WP-4: the canned `search` result, the "disconnected" mode, and
+    /// every `search` call `(query, limit)`.
+    search: cv_protocol::SearchResult,
+    search_disconnected: bool,
+    search_calls: Vec<(String, u32)>,
 }
 
 /// The fake daemon.
@@ -153,6 +158,12 @@ impl FakeDaemon {
                 done_calls: Vec::new(),
                 status_calls: Vec::new(),
                 done_fail: None,
+                search: cv_protocol::SearchResult {
+                    hits: Vec::new(),
+                    semantic: false,
+                },
+                search_disconnected: false,
+                search_calls: Vec::new(),
             }),
             hello,
             vault_root: vault_root.to_path_buf(),
@@ -238,6 +249,23 @@ impl FakeDaemon {
     /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call so far, in order.
     pub fn status_calls(&self) -> Result<Vec<cv_protocol::TrackerItemSetStatusParams>> {
         Ok(self.lock()?.status_calls.clone())
+    }
+
+    /// Plan semsearch-crate WP-4: the canned `search` answer.
+    pub fn set_search_result(&self, result: cv_protocol::SearchResult) -> Result<()> {
+        self.lock()?.search = result;
+        Ok(())
+    }
+
+    /// Plan semsearch-crate WP-4: `search` answers [`DaemonError::Disconnected`] while `on`.
+    pub fn set_search_disconnected(&self, on: bool) -> Result<()> {
+        self.lock()?.search_disconnected = on;
+        Ok(())
+    }
+
+    /// Plan semsearch-crate WP-4: every `search` call `(query, limit)` so far.
+    pub fn search_calls(&self) -> Result<Vec<(String, u32)>> {
+        Ok(self.lock()?.search_calls.clone())
     }
 
     /// Round-5 WP-11: makes `tracker_item_set_done` (and `tracker_item_set_status`) fail with `msg` (`None` = succeed).
@@ -616,6 +644,15 @@ impl DaemonClient for FakeDaemon {
             .models
             .remove(provider)
             .ok_or_else(|| DaemonError::NotFound(provider.to_owned()))
+    }
+
+    fn search(&self, query: &str, limit: u32) -> Result<cv_protocol::SearchResult> {
+        let mut g = self.lock()?;
+        g.search_calls.push((query.to_owned(), limit));
+        if g.search_disconnected {
+            return Err(DaemonError::Disconnected);
+        }
+        Ok(g.search.clone())
     }
 
     fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()> {

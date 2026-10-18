@@ -530,14 +530,6 @@ pub static RUN_ACTION: Record = Record {
 
 const SEARCH_FIELDS: &[Field] = &[
     field(
-        "companion_url",
-        "Companion URL",
-        "http(s) URL of the search companion",
-        Node::Str,
-    )
-    .dflt(D::Str("http://127.0.0.1:4801")),
-    field("vault_id", "Vault id", "Companion vault id", Node::Str).dflt(D::Str("default")),
-    field(
         "embed",
         "Embedder",
         "provider:model from providers.toml; absent = lexical only",
@@ -546,15 +538,15 @@ const SEARCH_FIELDS: &[Field] = &[
     PATH_FIELD,
 ];
 
-/// `search_upsert` — `crates/cv/src/steps/search.rs:97` (`validate` → `parse`; keys at
-/// `search.rs:51`). Every value must be a non-empty string.
+/// `search_upsert` — `crates/cv/src/steps/search.rs:83` (`validate` → `parse`; keys at
+/// `search.rs:46`). Every value must be a non-empty string.
 pub static SEARCH_UPSERT: Record = Record {
     name: "search_upsert",
     fields: SEARCH_FIELDS,
     rules: &[],
 };
 
-/// `search_delete` — `crates/cv/src/steps/search.rs:97`.
+/// `search_delete` — `crates/cv/src/steps/search.rs:83`.
 pub static SEARCH_DELETE: Record = Record {
     name: "search_delete",
     fields: SEARCH_FIELDS,
