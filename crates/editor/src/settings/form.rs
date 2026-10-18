@@ -654,6 +654,16 @@ pub fn summary(doc: &ConfigDoc, p: &Path, node: &Node, index: usize) -> String {
             break;
         }
     }
+    if parts.is_empty()
+        && let Node::Record(r) = node
+        && r.name == "fx"
+        && let (Some(b), Some(q)) = (doc.get_str(&p.key("base")), doc.get_str(&p.key("quote")))
+        && !b.is_empty()
+        && !q.is_empty()
+    {
+        // Crucible's empty-label format (orchestrationWorkflows.ts:56-61).
+        parts.push(format!("{b} \u{2192} {q}"));
+    }
     if parts.is_empty() {
         if let Some(i) = doc.get(p)
             && !i.is_table_like()

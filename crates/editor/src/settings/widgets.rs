@@ -190,10 +190,22 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                         }))
                     })
                     .flatten();
-                row![input, typeahead::clear_button(clear, t)]
+                let mut r = row![input, typeahead::clear_button(clear, t)]
                     .spacing(4)
-                    .align_y(Alignment::Center)
-                    .into()
+                    .align_y(Alignment::Center);
+                if let Some(pk @ (pickers::Picker::Model | pickers::Picker::ModelRef)) = picker {
+                    // Plan round-6-feedback-todos WP-8: re-fetch the live model list.
+                    r = r.push(
+                        button(text("\u{21bb}").size(14))
+                            .style(button::text)
+                            .padding([2, 6])
+                            .on_press_maybe(cx.on(cx.form(FormMsg::RefreshModels {
+                                path: path.clone(),
+                                picker: pk,
+                            }))),
+                    );
+                }
+                r.into()
             } else {
                 input.into()
             };
@@ -387,10 +399,13 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                         },
                     ))
                 }) {
+                    // One tree shape open or closed: swapping a bare input for a column moved
+                    // the input in the widget tree, dropping its focus and the press on a
+                    // candidate (plan round-6-feedback-todos WP-8).
                     Some(l) => column![input, container(l).width(Length::Fixed(FIELD_W))]
                         .spacing(2)
                         .into(),
-                    None => input.into(),
+                    None => column![input, container(Space::new())].spacing(0).into(),
                 }
             } else {
                 let left: Vec<String> = choices

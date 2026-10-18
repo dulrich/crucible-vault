@@ -161,17 +161,23 @@ impl Typeahead {
 }
 
 /// `cands` ranked against `query` (fuzzy over the label, best first; empty query keeps the
-/// given order), at most `limit`.
+/// given order), then the candidates whose stored value alone matches (a model shown by its
+/// label still matches its id), at most `limit`.
 pub fn filter(query: &str, cands: &[Candidate], limit: usize) -> Vec<Candidate> {
-    let labels: Vec<String> = cands.iter().map(|c| c.label.clone()).collect();
     let mut used = vec![false; cands.len()];
     let mut out = Vec::new();
-    for r in editor_model::rank::rank(query, &labels, &[], |_| false, cands.len()) {
-        if let Some(i) = (0..cands.len()).find(|&i| !used[i] && labels[i] == r.path) {
-            used[i] = true;
-            out.push(cands[i].clone());
+    for key in [0, 1] {
+        let keys: Vec<String> = cands
+            .iter()
+            .map(|c| if key == 0 { &c.label } else { &c.value }.clone())
+            .collect();
+        for r in editor_model::rank::rank(query, &keys, &[], |_| false, cands.len()) {
             if out.len() >= limit {
-                break;
+                return out;
+            }
+            if let Some(i) = (0..cands.len()).find(|&i| !used[i] && keys[i] == r.path) {
+                used[i] = true;
+                out.push(cands[i].clone());
             }
         }
     }

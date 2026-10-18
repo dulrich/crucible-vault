@@ -1193,3 +1193,91 @@ fn unknown_channel_ids_show_fetched_titles() {
     // Never auto-written.
     assert!(doc_text(st, SOURCES).contains("channel = \"\""));
 }
+
+/// Plan round-6-feedback-todos WP-8: an `fx` item with no label summarises as `BASE → QUOTE`.
+#[test]
+fn fx_rows_summarise_as_base_to_quote_without_a_label() {
+    let st = loaded(
+        PIPES,
+        "[[daily_brief.fx]]\nbase = \"USD\"\nquote = \"MXN\"\n\n[[daily_brief.fx]]\nbase = \"USD\"\nquote = \"EUR\"\nlabel = \"Euro\"\n",
+    );
+    let sums: Vec<String> = rows_of(&st, PIPES)
+        .iter()
+        .filter(|r| r.path.to_string().starts_with("daily_brief.fx["))
+        .filter_map(|r| match &r.kind {
+            Kind::Item { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sums, vec!["USD \u{2192} MXN", "Euro"]);
+}
+
+/// Plan round-6-feedback-todos WP-8: a failed model lookup is re-fetched when the field is
+/// re-opened (not on every keystroke while open) and on the refresh control; models show their
+/// label with the id beneath, and still filter by id.
+#[test]
+fn failed_model_lookup_refetches_on_reopen_and_refresh() {
+    use crate::widget::typeahead::Key;
+    let (_t, d) = fake();
+    d.set_lookups(crate::daemon::FakeLookups {
+        fail: Some("upstream down".into()),
+        ..Default::default()
+    })
+    .expect("lookups");
+    let mut app = app_over(&d);
+    put(
+        &mut app.settings,
+        PROVIDERS,
+        "[[provider]]\nid = \"local\"\nkind = \"lmstudio\"\n\n[[provider.models]]\nid = \"qwen-old\"\nlabel = \"Qwen (old)\"\n",
+    );
+    put(
+        &mut app.settings,
+        PIPES,
+        "[image_describe]\nprovider = \"local\"\nmodel = \"\"\n",
+    );
+    let failed = || Some(&lookups::Models::Failed);
+    type_in(&mut app, PIPES, "image_describe.model", "");
+    assert_eq!(app.settings.lookups.models.get("local"), failed());
+    let vis = app.settings.ta_visible(&[]);
+    assert_eq!(
+        (
+            vis[0].label.as_str(),
+            vis[0].secondary.as_str(),
+            vis[0].value.as_str()
+        ),
+        ("Qwen (old)", "qwen-old · declared", "qwen-old")
+    );
+    // The daemon recovers; keystrokes while the list is open do not refetch.
+    d.set_lookups(crate::daemon::FakeLookups::default())
+        .expect("lookups");
+    type_in(&mut app, PIPES, "image_describe.model", "qw");
+    assert_eq!(app.settings.lookups.models.get("local"), failed());
+    // Filtering still matches the id behind a label.
+    assert!(
+        app.settings
+            .ta_visible(&[])
+            .iter()
+            .any(|c| c.value == "qwen-old")
+    );
+    // Close and re-open: refetched.
+    let _ = app.update(s(SettingsMsg::Typeahead(Key::Escape)));
+    type_in(&mut app, PIPES, "image_describe.model", "");
+    assert!(matches!(
+        app.settings.lookups.models.get("local"),
+        Some(lookups::Models::Live(_))
+    ));
+    // The refresh control refetches too (here: back to failed).
+    d.set_lookups(crate::daemon::FakeLookups {
+        fail: Some("down again".into()),
+        ..Default::default()
+    })
+    .expect("lookups");
+    let _ = app.update(s(SettingsMsg::Form(
+        PIPES.to_owned(),
+        FormMsg::RefreshModels {
+            path: p("image_describe.model"),
+            picker: form::Picker::Model,
+        },
+    )));
+    assert_eq!(app.settings.lookups.models.get("local"), failed());
+}

@@ -3071,6 +3071,8 @@ mod find_return_leak {
     struct Ui {
         renderer: iced::Renderer,
         tree: Option<Tree>,
+        /// Window height (800 unless a test needs a tall page on screen).
+        height: f32,
     }
 
     impl Ui {
@@ -3092,7 +3094,7 @@ mod find_return_leak {
                 }
                 None => self.tree.insert(Tree::new(&el)),
             };
-            let limits = layout::Limits::new(Size::ZERO, Size::new(1200.0, 800.0));
+            let limits = layout::Limits::new(Size::ZERO, Size::new(1200.0, self.height));
             let node = el.as_widget_mut().layout(tree, &self.renderer, &limits);
             f(&mut el, tree, layout::Layout::new(&node), &self.renderer)
         }
@@ -3111,10 +3113,11 @@ mod find_return_leak {
         }
 
         fn send_at(&mut self, app: &mut App, event: &Event, cursor: mouse::Cursor) {
+            let height = self.height;
             let msgs = self.with(app, |el, tree, l, r| {
                 let mut msgs = Vec::new();
                 let mut shell = Shell::new(&mut msgs);
-                let viewport = Rectangle::with_size(Size::new(1200.0, 800.0));
+                let viewport = Rectangle::with_size(Size::new(1200.0, height));
                 el.as_widget_mut().update(
                     tree,
                     event,
@@ -3201,6 +3204,7 @@ mod find_return_leak {
         let mut ui = Ui {
             renderer: renderer(),
             tree: None,
+            height: 800.0,
         };
         ui.focus(&app, crate::source::editor_id(PATH));
         let _ = app.update(Message::Palette(PaletteMsg::Key(
@@ -3249,6 +3253,132 @@ mod find_return_leak {
             ui.send(&mut app, &press(Key::Named(key::Named::Enter), Some("\r")));
         }
         assert_eq!(text_of(&app), BODY, "Return leaked into the note");
+    }
+
+    /// Collects text and text-input bounds (headless locator for widgets without ids).
+    #[derive(Default)]
+    struct Spots {
+        texts: Vec<(Rectangle, String)>,
+        inputs: Vec<Rectangle>,
+    }
+
+    impl Operation<()> for Spots {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+        fn text(&mut self, _id: Option<&iced::widget::Id>, b: Rectangle, t: &str) {
+            self.texts.push((b, t.to_owned()));
+        }
+        fn text_input(
+            &mut self,
+            _id: Option<&iced::widget::Id>,
+            b: Rectangle,
+            _s: &mut dyn operation::TextInput,
+        ) {
+            self.inputs.push(b);
+        }
+    }
+
+    fn spots(ui: &mut Ui, app: &App) -> Spots {
+        ui.with(app, |el, tree, l, r| {
+            let mut op = Spots::default();
+            el.as_widget_mut()
+                .operate(tree, l, r, &mut op as &mut dyn Operation<()>);
+            op
+        })
+    }
+
+    /// Plan round-6-feedback-todos WP-8: a mouse click on an Ignore Shorts typeahead candidate
+    /// adds the chip, and the list stays open (chip adders keep it open for the next pick).
+    #[test]
+    fn ignore_shorts_candidate_click_adds_the_chip() {
+        use crate::settings::{Section, SettingsMsg};
+        const PIPES: &str = "_custom/crucible-vault/pipelines.toml";
+        const SOURCES: &str = "_custom/crucible-vault/sources.toml";
+        let (_tmp, d) = fake();
+        let d = Arc::new(d);
+        d.create_note(SOURCES, "[[youtube]]\nchannel = \"Chan\"\nid = \"UC123\"\n")
+            .expect("sources");
+        d.create_note(PIPES, "[ignore_shorts]\nchannels = []\n")
+            .expect("pipes");
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), None);
+        app.rpc_inline = true;
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(
+            crate::settings::SETTINGS_TAB.into(),
+        )));
+        let _ = app.update(Message::Settings(SettingsMsg::Section(Section::Pipelines)));
+        let mut ui = Ui {
+            renderer: renderer(),
+            tree: None,
+            height: 3000.0,
+        };
+        // The chip adder: the 160 px input level with the field's help text.
+        let s = spots(&mut ui, &app);
+        let help = s
+            .texts
+            .iter()
+            .find(|(_, t)| t == "Channel ids or names")
+            .map(|(b, _)| b.center_y())
+            .expect("channels help");
+        let input = s
+            .inputs
+            .iter()
+            .filter(|b| (b.width - 160.0).abs() < 0.5)
+            .min_by(|a, b| {
+                (a.center_y() - help)
+                    .abs()
+                    .total_cmp(&(b.center_y() - help).abs())
+            })
+            .copied()
+            .expect("chip adder input");
+        ui.click(&mut app, input.center());
+        ui.send(&mut app, &press(Key::Character("c".into()), Some("c")));
+        assert!(
+            app.settings
+                .form
+                .typeahead
+                .as_ref()
+                .is_some_and(|a| a.ta.open),
+            "typing opened the list"
+        );
+        // A second keystroke still reaches the input (focus survived the list appearing).
+        ui.send(&mut app, &press(Key::Character("h".into()), Some("h")));
+        let draft = app
+            .settings
+            .form
+            .draft(
+                PIPES,
+                &crate::settings::form::draft_key(
+                    "chip",
+                    &cv_schema::Path::parse("ignore_shorts.channels").expect("p"),
+                ),
+            )
+            .map(str::to_owned);
+        assert_eq!(draft.as_deref(), Some("ch"), "input kept focus");
+        let s = spots(&mut ui, &app);
+        let cand = s
+            .texts
+            .iter()
+            .find(|(_, t)| t == "Chan (UC123)")
+            .map(|(b, _)| *b)
+            .expect("candidate shown");
+        ui.click(&mut app, cand.center());
+        let doc = app
+            .settings
+            .file(PIPES)
+            .and_then(|f| f.doc.as_ref())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(doc.contains("\"UC123\""), "chip added: {doc}");
+        assert!(
+            app.settings
+                .form
+                .typeahead
+                .as_ref()
+                .is_some_and(|a| a.ta.open),
+            "chip adders keep the list open"
+        );
     }
 }
 

@@ -844,6 +844,7 @@ impl Settings {
             } => {
                 self.blur_other(file, path, paths);
                 let stored = self.stored_str(file, path);
+                self.lookups.reopened |= self.form.typeahead.as_ref().is_none_or(|a| !a.ta.open);
                 let a = self.form.typeahead.get_or_insert_with(|| form::ActiveTa {
                     file: file.to_owned(),
                     path: path.clone(),
@@ -863,6 +864,7 @@ impl Settings {
                 picker: Some(picker),
             } => {
                 self.blur_other(file, path, paths);
+                self.lookups.reopened |= self.form.typeahead.as_ref().is_none_or(|a| !a.ta.open);
                 let a = self.form.typeahead.get_or_insert_with(|| form::ActiveTa {
                     file: file.to_owned(),
                     path: path.clone(),
@@ -896,6 +898,19 @@ impl Settings {
                 self.apply_ta(&mut a, out, value);
                 return;
             }
+            FormMsg::RefreshModels { path, picker } => {
+                let text = self
+                    .form
+                    .typeahead
+                    .as_ref()
+                    .filter(|a| a.is(file, path))
+                    .map(|a| a.draft.clone())
+                    .unwrap_or_default();
+                if let Some(p) = pickers::model_provider(self, *picker, file, path, &text) {
+                    self.lookups.refresh_models(p);
+                }
+                return;
+            }
             FormMsg::Clear { path, required } => {
                 self.blur_other(file, path, paths);
                 self.form.typeahead = None;
@@ -917,7 +932,7 @@ impl Settings {
                 required,
                 ..
             } => Some(text_edit(&self.files, file, path, text, required)),
-            FormMsg::Pick { .. } | FormMsg::Clear { .. } => None,
+            FormMsg::Pick { .. } | FormMsg::Clear { .. } | FormMsg::RefreshModels { .. } => None,
             FormMsg::Number { path, text, float } => {
                 let key = draft_key("num", &path);
                 fs.set_draft(file, key, Some(text.clone()));
@@ -1155,6 +1170,12 @@ pub enum FormMsg {
         text: String,
         /// A typeahead chips field (plan round-5 WP-4).
         picker: Option<form::Picker>,
+    },
+    /// The refresh control beside a model field: re-fetch its provider's live list (plan
+    /// round-6-feedback-todos WP-8).
+    RefreshModels {
+        path: cv_schema::Path,
+        picker: form::Picker,
     },
     /// Add a chip (`None`: the draft).
     ChipAdd {

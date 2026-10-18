@@ -123,36 +123,46 @@ pub fn declared_models(s: &Settings, provider: Option<&str>) -> Vec<Candidate> {
             .unwrap_or(id);
         let mp = ip.key("models");
         for j in 0..doc.len(&mp) {
-            if let Some(m) = doc
-                .get_str(&mp.index(j).key("id"))
-                .filter(|v| !v.is_empty())
-            {
-                out.push(Candidate {
-                    label: m.to_owned(),
-                    secondary: if known.is_some() {
-                        "declared".to_owned()
-                    } else {
-                        format!("declared · {pname}")
-                    },
-                    value: m.to_owned(),
-                });
+            let mj = mp.index(j);
+            if let Some(m) = doc.get_str(&mj.key("id")).filter(|v| !v.is_empty()) {
+                let tag = if known.is_some() {
+                    "declared".to_owned()
+                } else {
+                    format!("declared · {pname}")
+                };
+                let label = doc.get_str(&mj.key("label")).filter(|v| !v.is_empty());
+                out.push(model_candidate(m, label, &tag));
             }
         }
     }
     out
 }
 
-/// Live models first (secondary = display name, else "live"), then the declared models not
+/// A model candidate (plan round-6-feedback-todos WP-8): shown by its label (providers.toml
+/// `label` / the live display name) with `id · tag` beneath, or by its id with `tag` beneath
+/// when it has no label. The stored value is always the id.
+fn model_candidate(id: &str, label: Option<&str>, tag: &str) -> Candidate {
+    match label.filter(|l| !l.is_empty() && *l != id) {
+        Some(l) => Candidate {
+            label: l.to_owned(),
+            secondary: format!("{id} · {tag}"),
+            value: id.to_owned(),
+        },
+        None => Candidate {
+            label: id.to_owned(),
+            secondary: tag.to_owned(),
+            value: id.to_owned(),
+        },
+    }
+}
+
+/// Live models first (shown by display name, see [`model_candidate`]), then the declared models not
 /// already listed (secondary "declared"), deduped by id.
 pub fn merged_models(s: &Settings, provider: Option<&str>) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = match provider.and_then(|p| s.lookups.models.get(p)) {
         Some(Models::Live(ms)) => ms
             .iter()
-            .map(|m| Candidate {
-                label: m.id.clone(),
-                secondary: m.display_name.clone().unwrap_or_else(|| "live".to_owned()),
-                value: m.id.clone(),
-            })
+            .map(|m| model_candidate(&m.id, m.display_name.as_deref(), "live"))
             .collect(),
         _ => Vec::new(),
     };

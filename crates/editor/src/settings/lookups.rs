@@ -67,8 +67,14 @@ pub struct Lookups {
     geo_seq: u64,
     /// The query in flight.
     geo_pending: Option<String>,
-    /// Live models per provider id.
+    /// Live models per provider id. A `Failed` entry is re-fetched when a model field's
+    /// typeahead is next opened ([`Lookups::reopened`]) or on the field's refresh control
+    /// ([`Lookups::refresh_models`]) (plan round-6-feedback-todos WP-8).
     pub models: BTreeMap<String, Models>,
+    /// A new typeahead was opened since the last [`Settings::lookup_wants`].
+    pub(super) reopened: bool,
+    /// Providers whose model list the refresh control asked for.
+    refresh: Vec<String>,
     /// Fetched channel titles (`None` = YouTube does not know the id).
     pub channels: BTreeMap<String, Option<String>>,
     channels_pending: BTreeSet<String>,
@@ -80,6 +86,13 @@ pub fn geo_key(q: &str) -> String {
 }
 
 impl Lookups {
+    /// The refresh control beside a model field: re-fetch `provider`'s live list.
+    pub fn refresh_models(&mut self, provider: String) {
+        if !self.refresh.contains(&provider) {
+            self.refresh.push(provider);
+        }
+    }
+
     /// A fetched title for channel `id`.
     pub fn channel_title(&self, id: &str) -> Option<&str> {
         self.channels.get(id).and_then(|t| t.as_deref())
@@ -159,6 +172,13 @@ impl Settings {
     /// not named in sources.toml. Marks each as pending.
     pub fn lookup_wants(&mut self) -> Vec<Want> {
         let mut out = Vec::new();
+        let reopened = std::mem::take(&mut self.lookups.reopened);
+        for p in std::mem::take(&mut self.lookups.refresh) {
+            if self.lookups.models.get(&p) != Some(&Models::Loading) {
+                self.lookups.models.insert(p.clone(), Models::Loading);
+                out.push(Want::Models(p));
+            }
+        }
         if let Some(a) = self.form.typeahead.as_ref() {
             let (picker, file, path) = (a.picker, a.file.clone(), a.path.clone());
             let text = a.draft.clone();
@@ -171,7 +191,11 @@ impl Settings {
                 }
                 Picker::Model | Picker::ModelRef => {
                     if let Some(p) = pickers::model_provider(self, picker, &file, &path, &text)
-                        && !self.lookups.models.contains_key(&p)
+                        && match self.lookups.models.get(&p) {
+                            None => true,
+                            Some(Models::Failed) => reopened,
+                            Some(_) => false,
+                        }
                     {
                         self.lookups.models.insert(p.clone(), Models::Loading);
                         out.push(Want::Models(p));
