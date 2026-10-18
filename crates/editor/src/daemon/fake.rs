@@ -92,6 +92,9 @@ struct Inner {
     /// Round-5 WP-11: every `tracker_item_set_done` call, and a scripted failure message.
     done_calls: Vec<cv_protocol::TrackerItemSetDoneParams>,
     done_fail: Option<String>,
+    /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call (fails with
+    /// `done_fail` too).
+    status_calls: Vec<cv_protocol::TrackerItemSetStatusParams>,
 }
 
 /// The fake daemon.
@@ -148,6 +151,7 @@ impl FakeDaemon {
                 deferred_ids: std::collections::BTreeSet::new(),
                 queued: Vec::new(),
                 done_calls: Vec::new(),
+                status_calls: Vec::new(),
                 done_fail: None,
             }),
             hello,
@@ -231,7 +235,12 @@ impl FakeDaemon {
         Ok(self.lock()?.done_calls.clone())
     }
 
-    /// Round-5 WP-11: makes `tracker_item_set_done` fail with `msg` (`None` = succeed).
+    /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call so far, in order.
+    pub fn status_calls(&self) -> Result<Vec<cv_protocol::TrackerItemSetStatusParams>> {
+        Ok(self.lock()?.status_calls.clone())
+    }
+
+    /// Round-5 WP-11: makes `tracker_item_set_done` (and `tracker_item_set_status`) fail with `msg` (`None` = succeed).
     pub fn set_done_failure(&self, msg: Option<&str>) -> Result<()> {
         self.lock()?.done_fail = msg.map(str::to_owned);
         Ok(())
@@ -612,6 +621,19 @@ impl DaemonClient for FakeDaemon {
     fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()> {
         let mut g = self.lock()?;
         g.done_calls.push(p.clone());
+        match &g.done_fail {
+            Some(msg) => Err(DaemonError::Rpc(cv_protocol::RpcError {
+                code: cv_protocol::error_codes::NOT_FOUND,
+                message: msg.clone(),
+                data: None,
+            })),
+            None => Ok(()),
+        }
+    }
+
+    fn tracker_item_set_status(&self, p: &cv_protocol::TrackerItemSetStatusParams) -> Result<()> {
+        let mut g = self.lock()?;
+        g.status_calls.push(p.clone());
         match &g.done_fail {
             Some(msg) => Err(DaemonError::Rpc(cv_protocol::RpcError {
                 code: cv_protocol::error_codes::NOT_FOUND,

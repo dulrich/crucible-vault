@@ -7,6 +7,10 @@
     {
       "key": "file",
       "label": "File"
+    },
+    {
+      "key": "status",
+      "label": "Status"
     }
   ],
   "groups": [
@@ -26,6 +30,10 @@
               "label": "2026-10-01",
               "path": "daily/day/2026-10-01.md",
               "t": "link"
+            },
+            {
+              "t": "text",
+              "v": " "
             }
           ],
           "line": 4,
@@ -50,6 +58,10 @@
               "label": "2026-10-01",
               "path": "daily/day/2026-10-01.md",
               "t": "link"
+            },
+            {
+              "t": "text",
+              "v": " "
             }
           ],
           "line": 9,
@@ -74,6 +86,10 @@
               "label": "2026-10-02",
               "path": "daily/day/2026-10-02.md",
               "t": "link"
+            },
+            {
+              "t": "text",
+              "v": " "
             }
           ],
           "line": 6,

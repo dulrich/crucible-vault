@@ -17,7 +17,7 @@
       "label": "Length"
     },
     {
-      "key": "done",
+      "key": "status",
       "label": "Done"
     }
   ],
@@ -44,8 +44,7 @@
               "v": ""
             },
             {
-              "t": "bool",
-              "v": false
+              "t": "null"
             }
           ],
           "key": "[\"blog\",\"https://c.example/feed\",\"p2\"]"
@@ -70,8 +69,7 @@
               "v": "1:05"
             },
             {
-              "t": "bool",
-              "v": false
+              "t": "null"
             }
           ],
           "key": "[\"youtube\",\"UC1\",\"v4\"]"
@@ -96,8 +94,8 @@
               "v": "1:02:05"
             },
             {
-              "t": "bool",
-              "v": true
+              "t": "text",
+              "v": "x"
             }
           ],
           "key": "[\"youtube\",\"UC1\",\"v1\"]"
@@ -122,8 +120,8 @@
               "v": "5 min"
             },
             {
-              "t": "bool",
-              "v": false
+              "t": "text",
+              "v": "/"
             }
           ],
           "key": "[\"blog\",\"https://b.example/feed\",\"p1\"]"

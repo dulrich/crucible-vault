@@ -10,10 +10,15 @@ use iced::widget::{
 use iced::{Border, Element, Font, Length, Theme};
 
 use super::{Doc, ReadingStore, link_label};
-use crate::icons::Icon;
 use crate::message::{Message, ReadingMsg};
+pub(crate) use crate::task_status::task_box;
 use crate::theme::{Rgb, Tokens};
 use crate::widget::selectable::{self, SelPos};
+#[cfg(test)]
+use crate::{
+    icons::Icon,
+    task_status::{TaskRole, task_mark},
+};
 use std::borrow::Cow;
 
 /// A clickable target inside rich text.
@@ -493,75 +498,6 @@ fn callout_color(kind: &str, t: Tokens) -> Rgb {
     }
 }
 
-/// The colour role of a task marker, resolved against `Tokens` at draw time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskRole {
-    Dim,
-    Faint,
-    Accent,
-    Red,
-    Orange,
-    Yellow,
-    Green,
-    Cyan,
-    Blue,
-    Purple,
-}
-
-impl TaskRole {
-    fn color(self, t: Tokens) -> Rgb {
-        match self {
-            Self::Dim => t.text_dim,
-            Self::Faint => t.text_faint,
-            Self::Accent => t.accent,
-            Self::Red => t.red,
-            Self::Orange => t.orange,
-            Self::Yellow => t.yellow,
-            Self::Green => t.green,
-            Self::Cyan => t.cyan,
-            Self::Blue => t.blue,
-            Self::Purple => t.purple,
-        }
-    }
-}
-
-/// The glyph and colour role of a task status char (plan editor-feedback-round-2 WP-5).
-///
-/// Source: Crucible theme alternate checkboxes, `https://github.com/dulrich/obsidian-crucible/blob/master/theme/theme.css`
-/// lines 447-744 (Block 4); the CSS `--color-*` / `--text-faint` roles map to the same-named
-/// `Tokens`, Obsidian's `--interactive-accent` (`x`, `/`) to `accent`. The inline SVG masks are
-/// replaced by the nearest lucide glyph. Obsidian-induced part dropped: the `input:checked` +
-/// `mask-image` / `::after` selector machinery (Obsidian renders tasks as HTML checkboxes); the
-/// box-filled variants (`?`, `"`, `i`, `S`) draw as a coloured glyph without the filled box.
-/// `' '` is an empty box; an unknown char (`None` glyph, not `' '`) is a box showing the char.
-fn task_mark(c: char) -> (Option<Icon>, TaskRole) {
-    match c {
-        ' ' => (None, TaskRole::Dim),
-        'x' | 'X' => (Some(Icon::Check), TaskRole::Accent),
-        '>' => (Some(Icon::ArrowRight), TaskRole::Faint),
-        '<' => (Some(Icon::Calendar), TaskRole::Faint),
-        '?' => (Some(Icon::CircleHelp), TaskRole::Yellow),
-        '/' => (Some(Icon::SquareSlash), TaskRole::Accent),
-        '!' => (Some(Icon::TriangleAlert), TaskRole::Orange),
-        '"' | '\u{201C}' => (Some(Icon::Quote), TaskRole::Cyan),
-        '-' => (Some(Icon::Minus), TaskRole::Faint),
-        '*' => (Some(Icon::Star), TaskRole::Yellow),
-        'l' => (Some(Icon::MapPin), TaskRole::Red),
-        'i' => (Some(Icon::Info), TaskRole::Blue),
-        'S' => (Some(Icon::DollarSign), TaskRole::Green),
-        'I' => (Some(Icon::Lightbulb), TaskRole::Yellow),
-        'f' => (Some(Icon::Flame), TaskRole::Red),
-        'k' => (Some(Icon::Key), TaskRole::Yellow),
-        'u' => (Some(Icon::TrendingUp), TaskRole::Green),
-        'd' => (Some(Icon::TrendingDown), TaskRole::Red),
-        'w' => (Some(Icon::Trophy), TaskRole::Purple),
-        'p' => (Some(Icon::ThumbsUp), TaskRole::Green),
-        'c' => (Some(Icon::ThumbsDown), TaskRole::Orange),
-        'b' => (Some(Icon::Bookmark), TaskRole::Orange),
-        _ => (None, TaskRole::Dim),
-    }
-}
-
 /// Whether a task's item text is struck through (Crucible theme.css ~616-621: `[-]` only).
 fn task_struck(c: char) -> bool {
     c == '-'
@@ -576,58 +512,6 @@ fn task_press(path: &str, task: Option<char>, line: Option<usize>) -> Option<Mes
             line,
         })),
         _ => None,
-    }
-}
-
-/// The drawn checkbox for status char `c`, `side` px square.
-pub(crate) fn task_box<'a>(c: char, side: f32, t: Tokens) -> Element<'a, Message> {
-    let (glyph, role) = task_mark(c);
-    let col = role.color(t);
-    let boxed_char = |inner: Element<'a, Message>, fill: Option<Rgb>, edge: Rgb| {
-        container(inner)
-            .width(side)
-            .height(side)
-            .center_x(side)
-            .center_y(side)
-            .style(move |_: &Theme| container::Style {
-                background: fill.map(|f| f.to_color().into()),
-                border: Border {
-                    color: edge.to_color(),
-                    width: 1.5,
-                    radius: 4.0.into(),
-                },
-                ..container::Style::default()
-            })
-            .into()
-    };
-    match (c, glyph) {
-        ('x' | 'X', Some(icon)) => boxed_char(
-            text(icon.glyph())
-                .font(crate::icons::FONT)
-                .size(side * 0.8)
-                .color(t.on_accent.to_color())
-                .into(),
-            Some(col),
-            col,
-        ),
-        (_, Some(icon)) => container(
-            text(icon.glyph())
-                .font(crate::icons::FONT)
-                .size(side)
-                .color(col.to_color()),
-        )
-        .center_x(side)
-        .center_y(side)
-        .into(),
-        (' ', None) => boxed_char(Space::new().into(), None, t.text_faint),
-        (_, None) => boxed_char(
-            text(c.to_string())
-                .size(side * 0.75)
-                .color(col.to_color())
-                .into(),
-            None,
-            t.text_faint,
-        ),
     }
 }
 

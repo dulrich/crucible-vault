@@ -118,7 +118,7 @@ fn fixture() -> Fx {
     }
 }
 
-/// A synthetic `state.db` `tracker_items` (the columns of `cv-state` `migrate.rs` v5 + v6 + v7)
+/// A synthetic `state.db` `tracker_items` (the columns of `cv-state` `migrate.rs` v5 + v6 + v7 + v8)
 /// for `daily-intake`: on 2026-10-01 a named YouTube line with an hour-plus duration (done), an
 /// unnamed blog note with a word count (kind-label fallback, reading minutes), a YouTube line
 /// under an hour, a named blog line without a body (blank length); a skipped row, another day.
@@ -129,15 +129,15 @@ fn tracker_fixture(p: &Path) {
             item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
             first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
             score REAL, full_body INTEGER, done_ms INTEGER, note_path TEXT,
-            source_name TEXT, duration_s INTEGER, word_count INTEGER,
+            source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
             PRIMARY KEY (source_kind, source_key, item_id));
          INSERT INTO tracker_items VALUES
-            ('youtube', 'UC1', 'v1', 'A video', 'https://y.example/1', 2, '2026-10-01', 'line', NULL, NULL, 9, NULL, 'Chan A', 3725, NULL),
-            ('blog', 'https://b.example/feed', 'p1', 'A post', 'https://b.example/1', 1, '2026-10-01', 'note', NULL, 1, NULL, 'core/works/A post.md', NULL, NULL, 1000),
-            ('youtube', 'UC1', 'v2', 'Skipped', 'https://y.example/2', 3, '2026-10-01', 'skipped', NULL, NULL, NULL, NULL, 'Chan A', 30, NULL),
-            ('youtube', 'UC1', 'v3', 'Other day', 'https://y.example/3', 4, '2026-10-02', 'line', NULL, NULL, NULL, NULL, 'Chan A', 60, NULL),
-            ('youtube', 'UC1', 'v4', 'Short-ish', 'https://y.example/4', 5, '2026-10-01', 'line', NULL, NULL, NULL, NULL, 'Chan A', 65, NULL),
-            ('blog', 'https://c.example/feed', 'p2', 'Teaser', 'https://c.example/2', 6, '2026-10-01', 'line', NULL, 0, NULL, NULL, 'Feed C', NULL, NULL);",
+            ('youtube', 'UC1', 'v1', 'A video', 'https://y.example/1', 2, '2026-10-01', 'line', NULL, NULL, 9, NULL, 'Chan A', 3725, NULL, 'x'),
+            ('blog', 'https://b.example/feed', 'p1', 'A post', 'https://b.example/1', 1, '2026-10-01', 'note', NULL, 1, NULL, 'core/works/A post.md', NULL, NULL, 1000, '/'),
+            ('youtube', 'UC1', 'v2', 'Skipped', 'https://y.example/2', 3, '2026-10-01', 'skipped', NULL, NULL, NULL, NULL, 'Chan A', 30, NULL, NULL),
+            ('youtube', 'UC1', 'v3', 'Other day', 'https://y.example/3', 4, '2026-10-02', 'line', NULL, NULL, NULL, NULL, 'Chan A', 60, NULL, NULL),
+            ('youtube', 'UC1', 'v4', 'Short-ish', 'https://y.example/4', 5, '2026-10-01', 'line', NULL, NULL, NULL, NULL, 'Chan A', 65, NULL, NULL),
+            ('blog', 'https://c.example/feed', 'p2', 'Teaser', 'https://c.example/2', 6, '2026-10-01', 'line', NULL, 0, NULL, NULL, 'Feed C', NULL, NULL, NULL);",
     )
     .unwrap();
 }

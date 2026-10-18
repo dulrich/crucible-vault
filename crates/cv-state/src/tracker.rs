@@ -260,24 +260,20 @@ impl StateDb {
         Ok(rows)
     }
 
-    /// Marks one item done (`done_ms` = now) or not done (`done_ms` = NULL). Returns whether a
-    /// row matched; raises the `tracker_items` change signal when one did.
-    pub fn set_tracker_item_done(
+    /// Sets one item's task status (`None` = open). Returns whether a row matched; raises the
+    /// `tracker_items` change signal when one did.
+    pub fn set_tracker_item_status(
         &mut self,
         source_kind: &str,
         source_key: &str,
         item_id: &str,
-        done: bool,
+        status: Option<char>,
     ) -> Result<bool> {
-        let done_ms = done.then(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        });
+        let status = status.map(String::from);
         let n = self.conn().execute(
-            "UPDATE tracker_items SET done_ms = ?4
+            "UPDATE tracker_items SET status = ?4
              WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
-            params![source_kind, source_key, item_id, done_ms],
+            params![source_kind, source_key, item_id, status],
         )?;
         if n > 0 {
             self.changed("tracker_items");
@@ -285,7 +281,37 @@ impl StateDb {
         Ok(n > 0)
     }
 
-    /// Whether one item is marked done (`None` when no such row).
+    /// Legacy alias of [`Self::set_tracker_item_status`]: `true` → `'x'`, `false` → open.
+    pub fn set_tracker_item_done(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        done: bool,
+    ) -> Result<bool> {
+        self.set_tracker_item_status(source_kind, source_key, item_id, done.then_some('x'))
+    }
+
+    /// One item's task status (`Ok(None)` when no such row; `Some(None)` = open).
+    pub fn tracker_item_status(
+        &self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+    ) -> Result<Option<Option<char>>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT status FROM tracker_items
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+                params![source_kind, source_key, item_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .map(|s| s.and_then(|s| s.chars().next())))
+    }
+
+    /// Whether one item is done (status `x`/`X`; `None` when no such row).
     pub fn tracker_item_done(
         &self,
         source_kind: &str,
@@ -293,14 +319,8 @@ impl StateDb {
         item_id: &str,
     ) -> Result<Option<bool>> {
         Ok(self
-            .conn()
-            .query_row(
-                "SELECT done_ms IS NOT NULL FROM tracker_items
-                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
-                params![source_kind, source_key, item_id],
-                |r| r.get(0),
-            )
-            .optional()?)
+            .tracker_item_status(source_kind, source_key, item_id)?
+            .map(|s| matches!(s, Some('x' | 'X'))))
     }
 
     /// The row for one key.

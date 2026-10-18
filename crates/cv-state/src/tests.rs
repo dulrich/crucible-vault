@@ -146,7 +146,7 @@ fn v5_database_migrates_to_v6_preserving_tracker_rows() {
         .unwrap();
     }
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 7);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     let it = s.tracker_item("youtube", "UC1", "v1").unwrap().unwrap();
     assert_eq!((it.title.as_str(), it.note_path), ("T", None));
     assert_eq!(
@@ -156,6 +156,55 @@ fn v5_database_migrates_to_v6_preserving_tracker_rows() {
     );
     assert_eq!(
         s.tracker_item_done("youtube", "UC1", "v1").unwrap(),
+        Some(false)
+    );
+}
+
+#[test]
+fn v7_database_migrates_to_v8_backfilling_status_from_done_ms() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        for (i, sql) in migrate::MIGRATIONS.iter().take(7).enumerate() {
+            let tx = c.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        for (id, done) in [("v1", "5"), ("v2", "NULL")] {
+            c.execute(
+                &format!(
+                    "INSERT INTO tracker_items (source_kind, source_key, item_id, title, url,
+                        first_seen_ms, day, outcome, done_ms)
+                     VALUES ('youtube', 'UC1', '{id}', 'T', 'u', 1, 'd', 'line', {done})"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+    }
+    let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 8);
+    assert_eq!(
+        s.tracker_item_status("youtube", "UC1", "v1").unwrap(),
+        Some(Some('x'))
+    );
+    assert_eq!(
+        s.tracker_item_status("youtube", "UC1", "v2").unwrap(),
+        Some(None)
+    );
+    assert!(
+        s.set_tracker_item_status("youtube", "UC1", "v2", Some('/'))
+            .unwrap()
+    );
+    assert_eq!(
+        s.tracker_item_status("youtube", "UC1", "v2").unwrap(),
+        Some(Some('/'))
+    );
+    assert_eq!(
+        s.tracker_item_done("youtube", "UC1", "v2").unwrap(),
         Some(false)
     );
 }

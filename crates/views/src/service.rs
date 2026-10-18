@@ -234,7 +234,8 @@ fn open_state<'c>(
 
 /// Every `tracker_items` row as a record, newest first (`first_seen_ms DESC, item_id`). Fields:
 /// `title`, `url`, `source_kind`, `source_key`, `item_id`, `day`, `outcome`, `score`,
-/// `full_body`, `first_seen`, `done` (bool, from `done_ms`), `note_path` (text or null) and — from
+/// `full_body`, `first_seen`, `status` (single-char task status, null = open; state.db v8), `done`
+/// (bool, `status` is `x`/`X` — the legacy alias column), `note_path` (text or null) and — from
 /// state.db v7 — `source_name` (text or null), `duration` (seconds or null) and `word_count` (or
 /// null).
 pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record>> {
@@ -244,7 +245,8 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
     use crate::value::Value;
     let mut stmt = conn.prepare_cached(
         "SELECT title, url, source_kind, source_key, item_id, day, outcome, score, full_body,
-                first_seen_ms, done_ms IS NOT NULL, note_path, source_name, duration_s, word_count
+                first_seen_ms, status IN ('x', 'X'), note_path, source_name, duration_s, word_count,
+                status
          FROM tracker_items ORDER BY first_seen_ms DESC, item_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -271,7 +273,12 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
             full_body.map_or(Value::Null, Value::Bool),
         );
         m.insert("first_seen".into(), crate::eval::ms_date(r.get(9)?));
-        m.insert("done".into(), Value::Bool(r.get(10)?));
+        m.insert(
+            "done".into(),
+            Value::Bool(r.get::<_, Option<bool>>(10)?.unwrap_or(false)),
+        );
+        let status: Option<String> = r.get(15)?;
+        m.insert("status".into(), status.map_or(Value::Null, Value::Str));
         let note_path: Option<String> = r.get(11)?;
         m.insert(
             "note_path".into(),

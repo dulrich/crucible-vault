@@ -1,7 +1,7 @@
 # Daily intake (plan round-5-reading-pickers-intake WP-11): the tracker items recorded for the
 # embedding day note when `pipelines.toml` `[intake] mode = "view"` replaces the daily intake lines.
 # `this` = the day note. Rows come from state.db `tracker_items`; `note` outcomes link to the
-# captured note, `line` outcomes to the item URL. The `done` column is the editor's toggle.
+# captured note, `line` outcomes to the item URL. The `status` column is the editor's task-status checkbox (state.db v8; plan round-6-feedback-todos).
 # Type = the kind label (YouTube / Blog / raw kind). Source = the source's display name
 # (`sources.toml` at record time, self-healed for older rows), blank when unknown. Length = the
 # YouTube duration (`h:mm:ss` / `m:ss`), else a blog body's reading minutes from its word count and
@@ -32,10 +32,10 @@ displayName = "Source"
 [properties."formula.length"]
 displayName = "Length"
 
-[properties.done]
+[properties.status]
 displayName = "Done"
 
 [[views]]
 type = "table"
 name = "Intake"
-order = ["formula.item", "formula.type", "formula.source", "formula.length", "done"]
+order = ["formula.item", "formula.type", "formula.source", "formula.length", "status"]

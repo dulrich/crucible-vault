@@ -374,11 +374,12 @@ pub enum ViewsMsg {
     },
     /// A row / link cell click: open `path`, cursor at 1-based `line` when set.
     Open { path: String, line: Option<i64> },
-    /// Round-5 WP-11: a done-toggle click on a `tracker_items` row (`key` = the row's opaque
-    /// `views::result::TrackerKey`): set it to `done`.
-    SetDone { key: String, done: bool },
-    /// `tracker_item_set_done` finished.
-    DoneSet(Result<(), String>),
+    /// Plan round-6-feedback-todos WP-6: a status-cell click / status-menu pick on a
+    /// `tracker_items` row (`key` = the row's opaque `views::result::TrackerKey`): set its task
+    /// status (`None` = open). The legacy `done` column routes here too (`true` → `'x'`).
+    SetStatus { key: String, status: Option<char> },
+    /// `tracker_item_set_status` finished.
+    StatusSet(Result<(), String>),
 }
 
 /// WP-4: day/month nav. The bar belongs to `pane`; results open in that pane's active tab.

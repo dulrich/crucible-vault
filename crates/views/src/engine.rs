@@ -622,6 +622,10 @@ fn tasks(
                         path: f.path.clone(),
                         label: f.name.clone(),
                     },
+                    // Plan round-6-feedback-todos WP-6: the task's status char (` ` = open).
+                    Cell::Text {
+                        v: task.status.clone(),
+                    },
                 ],
             };
             match groups.iter_mut().find(|g| g.0 == key) {
@@ -640,6 +644,10 @@ fn tasks(
             Column {
                 key: "file".into(),
                 label: "File".into(),
+            },
+            Column {
+                key: "status".into(),
+                label: "Status".into(),
             },
         ],
         groups: groups

@@ -650,7 +650,7 @@ fn tasks_overdue_grouped_by_heading() {
     assert_eq!(first.line, Some(1));
 
     let b = fx.run(&mut h, "monthly-tasks#Blocked", None);
-    assert_eq!(grid(&b), vec![vec!["ask one", "INITIATIVE"]]);
+    assert_eq!(grid(&b), vec![vec!["ask one", "INITIATIVE", " "]]);
     assert!(
         matches!(&b.groups[0].key, Some(Cell::Link { path, .. }) if path == "initiatives/alpha/INITIATIVE.md")
     );
@@ -865,13 +865,13 @@ fn tracker_db(dir: &Path) -> PathBuf {
             item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
             first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
             score REAL, full_body INTEGER, done_ms INTEGER, note_path TEXT,
-            source_name TEXT, duration_s INTEGER, word_count INTEGER,
+            source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
             PRIMARY KEY (source_kind, source_key, item_id));
          INSERT INTO tracker_items VALUES
-            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
-            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, NULL, 'notes/Post.md', 'Feed B', NULL, 900),
-            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, 7, NULL, 'Chan', 125, NULL),
-            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL, NULL, NULL, NULL);",
+            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, NULL, 'notes/Post.md', 'Feed B', NULL, 900, NULL),
+            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, 7, NULL, 'Chan', 125, NULL, 'x'),
+            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '/');",
     )
     .unwrap();
     p
@@ -903,7 +903,7 @@ fn tracker_items_view_filters_by_this_day() {
 
 #[test]
 fn tracker_records_expose_done_note_path_key_and_url_cells() {
-    const DONE: &str = "source = 'tracker_items'\n[formulas]\nt = 'if(outcome == \"note\" && note_path, link(note_path, title), url(url, title))'\n[[views]]\ntype='table'\nname='Day'\nfilters = { and = ['day == this.file.name'] }\norder = ['formula.t', 'done', 'note_path']\n";
+    const DONE: &str = "source = 'tracker_items'\n[formulas]\nt = 'if(outcome == \"note\" && note_path, link(note_path, title), url(url, title))'\n[[views]]\ntype='table'\nname='Day'\nfilters = { and = ['day == this.file.name'] }\norder = ['formula.t', 'done', 'note_path', 'status']\n";
     let fx = fixture(&[("intake.toml", DONE)]);
     let state = tracker_db(fx._tmp.path());
     let mut host = fx.host().with_state_db(&state);
@@ -922,8 +922,10 @@ fn tracker_records_expose_done_note_path_key_and_url_cells() {
             Cell::Text {
                 v: "notes/Post.md".into()
             },
+            Cell::Null,
         ]
     );
+    assert_eq!(rows[2].cells[3], Cell::Text { v: "x".into() });
     assert_eq!(
         rows[2].cells[..2],
         [

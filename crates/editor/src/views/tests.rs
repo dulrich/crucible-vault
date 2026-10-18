@@ -496,7 +496,10 @@ fn url_cells_open_in_the_browser_and_only_keyed_rows_toggle() {
     assert!(matches!(&t[0], Some(Message::OpenUrl(u)) if u == "https://y.example/1"));
     assert!(matches!(
         &t[1],
-        Some(Message::Views(ViewsMsg::SetDone { done: true, .. }))
+        Some(Message::Views(ViewsMsg::SetStatus {
+            status: Some('x'),
+            ..
+        }))
     ));
     // No key (an index row): the bool is plain, the link opens the note.
     let (plain, keys) = &rows[1];
@@ -519,12 +522,12 @@ fn done_toggle_click_calls_the_rpc_with_the_decoded_identity() {
     };
     let _ = app.update(click);
     assert_eq!(
-        d.done_calls().expect("calls"),
-        [cv_protocol::TrackerItemSetDoneParams {
+        d.status_calls().expect("calls"),
+        [cv_protocol::TrackerItemSetStatusParams {
             source_kind: "youtube".into(),
             source_key: "UC1".into(),
             item_id: "v1".into(),
-            done: true,
+            status: Some('x'),
         }]
     );
     assert!(app.status.error_text().is_none(), "success is silent");
@@ -535,7 +538,7 @@ fn done_toggle_click_calls_the_rpc_with_the_decoded_identity() {
         panic!("no toggle target");
     };
     let _ = app.update(click);
-    assert_eq!(d.done_calls().expect("calls").len(), 2);
+    assert_eq!(d.status_calls().expect("calls").len(), 2);
     assert!(
         app.status
             .error_text()
@@ -573,4 +576,125 @@ fn view_cell_right_click_yields_the_link_menu() {
     let _ = app.update(Message::Menu(MenuMsg::Open(link, iced::Point::ORIGIN)));
     let _ = app.update(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
     assert_eq!(app.copied, ["Linker.md"]);
+}
+
+/// Plan round-6-feedback-todos WP-6: a `status` cell of a keyed row — left click toggles `x` ↔
+/// open through `tracker_item_set_status`; right-click opens the status menu, whose pick sets that
+/// status (`[ ]` = open).
+#[test]
+fn status_cell_click_toggles_and_right_click_menu_sets_the_status() {
+    use crate::context_menu::{Item, MenuMsg, Target, items};
+    let key = |id: &str| {
+        views::result::TrackerKey {
+            source_kind: "youtube".into(),
+            source_key: "UC1".into(),
+            item_id: id.into(),
+        }
+        .encode()
+    };
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(
+        ID,
+        ViewResult(json!({
+            "kind": "table",
+            "columns": [{"key": "title", "label": "Title"}, {"key": "status", "label": "Done"}],
+            "groups": [{"rows": [
+                {"key": key("v1"), "cells": [{"t": "text", "v": "A"}, {"t": "text", "v": "x"}]},
+                {"key": key("v2"), "cells": [{"t": "text", "v": "B"}, {"t": "null"}]}
+            ], "summaries": []}],
+            "summaries": [],
+            "notices": []
+        })),
+    )
+    .expect("script");
+    need(&mut app);
+    let rows = intake_rows(&app);
+    let params = |id: &str, status: Option<char>| cv_protocol::TrackerItemSetStatusParams {
+        source_kind: "youtube".into(),
+        source_key: "UC1".into(),
+        item_id: id.into(),
+        status,
+    };
+    let (done, keys) = &rows[0];
+    assert_eq!(status_cell(done, keys, 1), Some(Some('x')));
+    assert_eq!(status_cell(done, keys, 0), None);
+    for (r, keys) in &rows {
+        let Some(click) = row_targets(r, keys).remove(1) else {
+            panic!("no status target");
+        };
+        let _ = app.update(click);
+    }
+    assert_eq!(
+        d.status_calls().expect("calls"),
+        [params("v1", None), params("v2", Some('x'))]
+    );
+    let target = status_menu_target(&rows[1].0).expect("menu target");
+    assert!(matches!(&target, Target::TrackerStatus { .. }));
+    assert_eq!(
+        items(&target).len(),
+        crate::task_status::TASK_STATUSES.len()
+    );
+    let _ = app.update(Message::Menu(MenuMsg::Open(
+        target.clone(),
+        iced::Point::ORIGIN,
+    )));
+    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::TaskStatus('/'))));
+    let _ = app.update(Message::Menu(MenuMsg::Open(target, iced::Point::ORIGIN)));
+    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::TaskStatus(' '))));
+    let calls = d.status_calls().expect("calls");
+    assert_eq!(calls[2..], [params("v2", Some('/')), params("v2", None)]);
+    assert!(app.status.error_text().is_none(), "success is silent");
+}
+
+/// Plan round-6-feedback-todos WP-6: a `Tasks` row carries its real status char (cell 2) and,
+/// with path + line, the Reading note-edit targets: the click toggles the task in the open
+/// buffer, the menu target is `Target::Task` at the 0-based line.
+#[test]
+fn tasks_row_shows_its_status_and_toggles_through_the_note_edit_path() {
+    let (_tmp, d, mut app) = setup();
+    d.create_note("wp6t/t.md", "- [ ] a\n- [/] b\n")
+        .expect("create");
+    let r = Row {
+        path: Some("wp6t/t.md".into()),
+        line: Some(2),
+        key: None,
+        cells: vec![
+            Cell::Text("b".into()),
+            Cell::Link {
+                path: "wp6t/t.md".into(),
+                label: "t".into(),
+            },
+            Cell::Text("/".into()),
+        ],
+    };
+    let (c, targets) = task_row_status(&r);
+    assert_eq!(c, '/');
+    let Some((click, menu)) = targets else {
+        panic!("no targets");
+    };
+    assert_eq!(
+        menu,
+        crate::context_menu::Target::Task {
+            path: "wp6t/t.md".into(),
+            line: 1,
+        }
+    );
+    // Not open: a notice, not a silent no-op.
+    let _ = app.update(click.clone());
+    assert!(
+        app.status
+            .error_text()
+            .is_some_and(|e| e.contains("wp6t/t.md"))
+    );
+    let _ = app.update(Message::Tabs(TabsMsg::Open("wp6t/t.md".into())));
+    let _ = app.update(click);
+    assert_eq!(app.active_doc().expect("doc").text(), "- [ ] a\n- [x] b\n");
+    // No path / line: display-only, open status for a missing cell.
+    let bare = Row {
+        path: None,
+        line: None,
+        key: None,
+        cells: vec![Cell::Text("t".into())],
+    };
+    assert!(matches!(task_row_status(&bare), (' ', None)));
 }

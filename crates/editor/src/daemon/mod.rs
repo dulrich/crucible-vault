@@ -128,6 +128,9 @@ pub trait DaemonClient: Send + Sync {
     /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake
     /// WP-11); the refresh arrives as `views_invalidated`.
     fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()>;
+    /// Sets one `tracker_items` row's task status (`None` = open; plan round-6-feedback-todos
+    /// WP-6); the refresh arrives as `views_invalidated`.
+    fn tracker_item_set_status(&self, p: &cv_protocol::TrackerItemSetStatusParams) -> Result<()>;
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;

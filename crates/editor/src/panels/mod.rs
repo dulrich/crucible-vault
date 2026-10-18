@@ -655,6 +655,15 @@ pub(crate) fn anchor_target(path: &str, line: usize) -> Target {
 }
 
 /// The panels column.
+/// Plan round-6-feedback-todos WP-6: the click message of a sidebar boolean property — the same
+/// `ToggleProp` Reading's frontmatter checkbox sends (`frontmatter_bool_toggle` on the buffer).
+pub(crate) fn check_press(src: &str, key: &str) -> Message {
+    Message::Reading(crate::message::ReadingMsg::ToggleProp {
+        path: src.to_owned(),
+        key: key.to_owned(),
+    })
+}
+
 pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
     let src: &'a str = p.path.as_deref().unwrap_or_default();
     let tabs = row(PanelKind::ALL.iter().map(|&k| {
@@ -778,6 +787,17 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
                         .size(13)
                         .color(t.warn_text.to_color())
                         .into(),
+                    // Plan round-6-feedback-todos WP-6: a boolean toggles through Reading's
+                    // frontmatter path (no status menu), drawn with the shared checkbox.
+                    Rendered::Check(b) => button(crate::task_status::task_box(
+                        if *b { 'x' } else { ' ' },
+                        14.0,
+                        t,
+                    ))
+                    .padding(0)
+                    .style(button::text)
+                    .on_press(check_press(src, &pr.key))
+                    .into(),
                     other => text(other.display()).size(13).into(),
                 };
                 column![

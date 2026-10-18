@@ -143,6 +143,10 @@ pub enum Request {
     /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake WP-11)
     /// → `null`; unknown rows are `NOT_FOUND`.
     TrackerItemSetDone(TrackerItemSetDoneParams),
+    /// Sets one `tracker_items` row's task status (`None` = open; plan round-6-feedback-todos
+    /// WP-6) → `null`; unknown rows are `NOT_FOUND`. Supersedes `tracker_item_set_done`, which
+    /// stays one release as an alias (`true` → `'x'`, `false` → open).
+    TrackerItemSetStatus(TrackerItemSetStatusParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -600,6 +604,15 @@ pub struct TrackerItemSetDoneParams {
     pub done: bool,
 }
 
+/// `tracker_item_set_status` params: the row key plus the new status (`None` = open).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerItemSetStatusParams {
+    pub source_kind: String,
+    pub source_key: String,
+    pub item_id: String,
+    pub status: Option<char>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupChannelsParams {
     pub ids: Vec<String>,
@@ -910,6 +923,30 @@ mod tests {
             v["params"],
             json!({"source_kind": "youtube", "source_key": "UC1", "item_id": "v1", "done": true})
         );
+        let v = round_trip(&RpcRequest::new(
+            RpcId::Num(5),
+            Request::TrackerItemSetStatus(TrackerItemSetStatusParams {
+                source_kind: "youtube".into(),
+                source_key: "UC1".into(),
+                item_id: "v1".into(),
+                status: Some('/'),
+            }),
+        ));
+        assert_eq!(v["method"], "tracker_item_set_status");
+        assert_eq!(
+            v["params"],
+            json!({"source_kind": "youtube", "source_key": "UC1", "item_id": "v1", "status": "/"})
+        );
+        let v = round_trip(&RpcRequest::new(
+            RpcId::Num(6),
+            Request::TrackerItemSetStatus(TrackerItemSetStatusParams {
+                source_kind: "youtube".into(),
+                source_key: "UC1".into(),
+                item_id: "v1".into(),
+                status: None,
+            }),
+        ));
+        assert_eq!(v["params"]["status"], json!(null));
         let r = round_trip(&LookupModelsResult {
             models: vec![LookupModel {
                 id: "m".into(),

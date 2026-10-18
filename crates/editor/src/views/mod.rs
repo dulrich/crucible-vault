@@ -160,10 +160,10 @@ pub enum Effect {
         path: String,
         line: Option<i64>,
     },
-    /// Round-5 WP-11: run `tracker_item_set_done` off the UI thread.
-    SetDone {
+    /// Plan round-6-feedback-todos WP-6: run `tracker_item_set_status` off the UI thread.
+    SetStatus {
         key: views::result::TrackerKey,
-        done: bool,
+        status: Option<char>,
     },
     /// A failure notice for the status bar.
     Notice(String),
@@ -261,13 +261,13 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
             Effect::None
         }
         ViewsMsg::Open { path, line } => Effect::Open { path, line },
-        ViewsMsg::SetDone { key, done } => match views::result::TrackerKey::decode(&key) {
-            Some(key) => Effect::SetDone { key, done },
-            None => Effect::Notice("done toggle: malformed row key".into()),
+        ViewsMsg::SetStatus { key, status } => match views::result::TrackerKey::decode(&key) {
+            Some(key) => Effect::SetStatus { key, status },
+            None => Effect::Notice("status toggle: malformed row key".into()),
         },
         // Success needs nothing: the refresh arrives as `views_invalidated`.
-        ViewsMsg::DoneSet(Ok(())) => Effect::None,
-        ViewsMsg::DoneSet(Err(e)) => Effect::Notice(format!("done toggle failed: {e}")),
+        ViewsMsg::StatusSet(Ok(())) => Effect::None,
+        ViewsMsg::StatusSet(Err(e)) => Effect::Notice(format!("status change failed: {e}")),
     }
 }
 
@@ -480,20 +480,70 @@ pub fn fence<'a>(store: &'a ViewStore, id: &str, host: &str, t: Tokens) -> Eleme
         .into()
 }
 
-/// The column key of the done toggle (round-5 WP-11, `defs/daily-intake.toml`).
+/// The column key of the legacy done toggle (round-5 WP-11). Plan round-6-feedback-todos WP-6:
+/// kept for a user-edited def (the `.0005-new` sidecar case) and routed to set-status.
 pub const DONE_KEY: &str = "done";
 
-/// Whether cell `i` of `r` is a done toggle: a bool under the `done` column of a keyed row.
+/// Plan round-6-feedback-todos WP-6: the column key of a free-form task-status cell
+/// (`tracker_items.status`, `defs/daily-intake.toml`).
+pub const STATUS_KEY: &str = "status";
+
+/// Whether cell `i` of `r` is a legacy done toggle: a bool under the `done` column of a keyed row.
 fn is_toggle(r: &Row, keys: &[String], i: usize) -> bool {
     r.key.is_some()
         && keys.get(i).is_some_and(|k| k == DONE_KEY)
         && matches!(r.cells.get(i), Some(Cell::Bool(_)))
 }
 
+/// Plan round-6-feedback-todos WP-6: the status of cell `i` of `r` when it is a status cell —
+/// text or null under the `status` column of a keyed row (`Some(None)` = open).
+pub(crate) fn status_cell(r: &Row, keys: &[String], i: usize) -> Option<Option<char>> {
+    if r.key.is_none() || keys.get(i).is_none_or(|k| k != STATUS_KEY) {
+        return None;
+    }
+    match r.cells.get(i) {
+        Some(Cell::Null) | None => Some(None),
+        Some(Cell::Text(s)) => Some(s.chars().next().filter(|c| *c != ' ')),
+        _ => None,
+    }
+}
+
+/// Plan round-6-feedback-todos WP-6: the right-click menu of a keyed row's status cell.
+pub(crate) fn status_menu_target(r: &Row) -> Option<crate::context_menu::Target> {
+    r.key
+        .as_ref()
+        .map(|key| crate::context_menu::Target::TrackerStatus { key: key.clone() })
+}
+
+/// Plan round-6-feedback-todos WP-6: a `Tasks` row's status char (its `status` cell, index 2;
+/// `' '` when absent) and its note-edit targets — the click (Reading's `ToggleTask`) and the
+/// status menu (`Target::Task`) — when the row carries `path` + 1-based `line`.
+pub(crate) fn task_row_status(r: &Row) -> (char, Option<(Message, crate::context_menu::Target)>) {
+    let c = match r.cells.get(2) {
+        Some(Cell::Text(s)) => s.chars().next().unwrap_or(' '),
+        _ => ' ',
+    };
+    let targets = match (&r.path, r.line.and_then(|l| usize::try_from(l - 1).ok())) {
+        (Some(path), Some(line)) => Some((
+            Message::Reading(crate::message::ReadingMsg::ToggleTask {
+                path: path.clone(),
+                line,
+            }),
+            crate::context_menu::Target::Task {
+                path: path.clone(),
+                line,
+            },
+        )),
+        _ => None,
+    };
+    (c, targets)
+}
+
 /// plan editor-round-4 WP-3: what each cell of a non-task row opens on click. Every link cell
 /// opens its own path; a row with a `path` but no link cell opens it (and `line`) from its first
 /// cell. There is no whole-row click target. Round-5 WP-11: a `url` cell opens in the browser;
-/// the done toggle of a keyed row (column key `done`, see `keys`) flips it.
+/// the done toggle of a keyed row (column key `done`, see `keys`) flips it. Round-6 WP-6: a
+/// status cell (column key `status`) toggles `x` ↔ open; the legacy `done` maps to set-status.
 pub(crate) fn row_targets(r: &Row, keys: &[String]) -> Vec<Option<Message>> {
     let mut out: Vec<Option<Message>> = r
         .cells
@@ -505,11 +555,16 @@ pub(crate) fn row_targets(r: &Row, keys: &[String]) -> Vec<Option<Message>> {
                 line: None,
             })),
             Cell::Url { url, .. } => Some(Message::OpenUrl(url.clone())),
-            Cell::Bool(v) if is_toggle(r, keys, i) => Some(Message::Views(ViewsMsg::SetDone {
+            Cell::Bool(v) if is_toggle(r, keys, i) => Some(Message::Views(ViewsMsg::SetStatus {
                 key: r.key.clone().unwrap_or_default(),
-                done: !v,
+                status: (!v).then_some('x'),
             })),
-            _ => None,
+            _ => status_cell(r, keys, i).map(|st| {
+                Message::Views(ViewsMsg::SetStatus {
+                    key: r.key.clone().unwrap_or_default(),
+                    status: crate::task_status::toggled(st),
+                })
+            }),
         })
         .collect();
     if let Some(p) = &r.path
@@ -621,30 +676,40 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
         }
         Line::Row(r) => {
             if d.kind != Kind::Tasks {
-                // The done toggle draws as the task checkbox (☐/☑) instead of ✓/✗.
-                let cs: Vec<Cell> = (0..r.cells.len())
-                    .map(|i| match r.cells.get(i) {
-                        Some(Cell::Bool(b)) if is_toggle(r, &d.column_keys, i) => {
-                            Cell::Text(if *b { "☑" } else { "☐" }.into())
-                        }
-                        c => c.cloned().unwrap_or(Cell::Null),
-                    })
-                    .collect();
-                return grid(&cs, false, &row_targets(r, &d.column_keys));
+                // The legacy done toggle and a status cell draw as the shared task checkbox.
+                let targets = row_targets(r, &d.column_keys);
+                return row((0..cols).map(|i| {
+                    let open = targets.get(i).cloned().flatten();
+                    let el: Element<'a, Message> =
+                        match (r.cells.get(i), status_cell(r, &d.column_keys, i)) {
+                            (Some(Cell::Bool(b)), _) if is_toggle(r, &d.column_keys, i) => {
+                                status_box(if *b { 'x' } else { ' ' }, open, None, t)
+                            }
+                            (_, Some(st)) => {
+                                status_box(st.unwrap_or(' '), open, status_menu_target(r), t)
+                            }
+                            (c, _) => cell_view(c.unwrap_or(&Cell::Null), false, open, t),
+                        };
+                    container(el).width(Length::FillPortion(1)).into()
+                }))
+                .spacing(8)
+                .into();
             }
             let task = r.cells.first().map(format_cell).unwrap_or_default();
             let file = r.cells.get(1).map(format_cell).unwrap_or_default();
-            let el: Element<'a, Message> = row![
-                text(format!("☐ {task}")).size(13).color(t.text.to_color()),
+            let (c, targets) = task_row_status(r);
+            let (press, menu) = targets.map_or((None, None), |(m, tg)| (Some(m), Some(tg)));
+            let label: Element<'a, Message> = row![
+                text(task).size(13).color(t.text.to_color()),
                 text(format!("— {file}"))
                     .size(13)
                     .color(t.text_dim.to_color()),
             ]
             .spacing(6)
             .into();
-            match &r.path {
-                // Tasks rows keep their whole-row button (plan editor-round-4 WP-3: unchanged).
-                Some(p) => button(el)
+            let label = match &r.path {
+                // Tasks rows keep their whole-row open button (plan editor-round-4 WP-3).
+                Some(p) => button(label)
                     .padding(0)
                     .width(Length::Fill)
                     .style(move |_, status| row_link_style(t, status))
@@ -653,9 +718,32 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                         line: r.line,
                     }))
                     .into(),
-                None => el,
-            }
+                None => label,
+            };
+            row![status_box(c, press, menu, t), label]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+                .into()
         }
+    }
+}
+
+/// Plan round-6-feedback-todos WP-6: a status checkbox (the shared glyph map) — a button when
+/// `press` is set, with the status menu on right-click when `menu` is set.
+fn status_box<'a>(
+    c: char,
+    press: Option<Message>,
+    menu: Option<crate::context_menu::Target>,
+    t: Tokens,
+) -> Element<'a, Message> {
+    let mark = crate::task_status::task_box(c, 14.0, t);
+    let Some(msg) = press else {
+        return mark;
+    };
+    let b = button(mark).padding(0).style(button::text).on_press(msg);
+    match menu {
+        Some(target) => crate::context_menu::on_right(b, target),
+        None => b.into(),
     }
 }
 

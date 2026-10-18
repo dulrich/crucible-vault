@@ -18,6 +18,9 @@ use crate::theme::Tokens;
 pub enum Target {
     /// A host-note task box in Reading (source `line` of `path`).
     Task { path: String, line: usize },
+    /// Plan round-6-feedback-todos WP-6: a view's `status` cell on the `tracker_items` row with
+    /// opaque key `key` (`views::result::TrackerKey`).
+    TrackerStatus { key: String },
     /// A tab header: the tab with [`crate::app::Tab::id`] `id` in `pane`.
     Tab { pane: Pane, id: u64, path: String },
     /// An explorer row (`folder` = a folder row).
@@ -106,32 +109,7 @@ pub struct ContextMenu {
     pub target: Target,
 }
 
-/// The themed task status set (plan editor-feedback-round-2 WP-5's glyph map, `reading/view.rs`
-/// `task_mark`): status char + short label.
-pub const TASK_STATUSES: &[(char, &str)] = &[
-    (' ', "To do"),
-    ('x', "Done"),
-    ('/', "In progress"),
-    ('-', "Cancelled"),
-    ('>', "Forwarded"),
-    ('<', "Scheduled"),
-    ('?', "Question"),
-    ('!', "Important"),
-    ('"', "Quote"),
-    ('*', "Star"),
-    ('l', "Location"),
-    ('i', "Information"),
-    ('S', "Savings"),
-    ('I', "Idea"),
-    ('f', "Fire"),
-    ('k', "Key"),
-    ('u', "Up"),
-    ('d', "Down"),
-    ('w', "Win"),
-    ('p', "Pro"),
-    ('c', "Con"),
-    ('b', "Bookmark"),
-];
+pub use crate::task_status::TASK_STATUSES;
 
 /// The items of `target`'s menu, in order.
 pub fn items(target: &Target) -> Vec<(Item, String)> {
@@ -139,7 +117,7 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
         list.iter().map(|(i, l)| (*i, (*l).to_owned())).collect()
     };
     match target {
-        Target::Task { .. } => TASK_STATUSES
+        Target::Task { .. } | Target::TrackerStatus { .. } => TASK_STATUSES
             .iter()
             .map(|(c, l)| (Item::TaskStatus(*c), format!("[{c}]  {l}")))
             .collect(),

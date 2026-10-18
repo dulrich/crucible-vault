@@ -28,6 +28,7 @@ pub mod reading;
 pub mod settings;
 pub mod source;
 pub mod switcher;
+pub mod task_status;
 pub mod theme;
 pub mod title_sync;
 pub mod ui_state;

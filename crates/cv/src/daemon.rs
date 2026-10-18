@@ -694,22 +694,36 @@ impl Shared {
             Request::LookupGeocode(p) => to_value(&self.lookups.geocode(&p.query).await?),
             Request::LookupModels(p) => to_value(&self.lookups.models(&p.provider).await?),
             Request::LookupChannels(p) => to_value(&self.lookups.channels(&p.ids).await?),
-            Request::TrackerItemSetDone(p) => {
-                let matched = lock(&self.state)
-                    .set_tracker_item_done(&p.source_kind, &p.source_key, &p.item_id, p.done)
-                    .map_err(internal)?;
-                if !matched {
-                    return Err(rpc_err(
-                        error_codes::NOT_FOUND,
-                        format!(
-                            "no tracker item {}/{}/{}",
-                            p.source_kind, p.source_key, p.item_id
-                        ),
-                    ));
-                }
-                to_value(&())
+            Request::TrackerItemSetDone(p) => self.set_tracker_status(
+                &p.source_kind,
+                &p.source_key,
+                &p.item_id,
+                p.done.then_some('x'),
+            ),
+            Request::TrackerItemSetStatus(p) => {
+                self.set_tracker_status(&p.source_kind, &p.source_key, &p.item_id, p.status)
             }
         }
+    }
+
+    /// `tracker_item_set_status` (and its legacy `tracker_item_set_done` alias).
+    fn set_tracker_status(
+        &self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        status: Option<char>,
+    ) -> Result<Value, RpcError> {
+        let matched = lock(&self.state)
+            .set_tracker_item_status(source_kind, source_key, item_id, status)
+            .map_err(internal)?;
+        if !matched {
+            return Err(rpc_err(
+                error_codes::NOT_FOUND,
+                format!("no tracker item {source_kind}/{source_key}/{item_id}"),
+            ));
+        }
+        to_value(&())
     }
 
     /// The `status` result.

@@ -993,6 +993,35 @@ mod wp4 {
         );
     }
 
+    /// Plan round-6-feedback-todos WP-6: a sidebar boolean property toggles through Reading's
+    /// frontmatter path and the panel re-renders it.
+    #[test]
+    fn sidebar_boolean_toggles_through_the_frontmatter_path() {
+        use crate::panels::props::Rendered;
+        let (_tmp, d) = fake_arc();
+        d.create_note("wp6prop/t.md", "---\nread: false\n---\nx\n")
+            .expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp6prop/t.md".into())));
+        app.panels.visible = true;
+        let _ = app.update(Message::Panels(crate::message::PanelsMsg::Tick));
+        let check = |app: &App| {
+            app.panels
+                .props
+                .iter()
+                .find(|p| p.key == "read")
+                .map(|p| p.value.clone())
+        };
+        assert_eq!(check(&app), Some(Rendered::Check(false)));
+        let _ = app.update(crate::panels::check_press("wp6prop/t.md", "read"));
+        assert_eq!(
+            app.active_doc().expect("tab").text(),
+            "---\nread: true\n---\nx\n"
+        );
+        let _ = app.update(Message::Panels(crate::message::PanelsMsg::Tick));
+        assert_eq!(check(&app), Some(Rendered::Check(true)));
+    }
+
     #[test]
     fn reading_task_toggle_edits_the_buffer_and_rerenders() {
         let (_tmp, d) = fake_arc();

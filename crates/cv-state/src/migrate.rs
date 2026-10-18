@@ -174,6 +174,12 @@ ALTER TABLE tracker_items ADD COLUMN source_name TEXT;
 ALTER TABLE tracker_items ADD COLUMN duration_s INTEGER;
 ALTER TABLE tracker_items ADD COLUMN word_count INTEGER;
 ",
+    // v8 (plan round-6-feedback-todos WP-6): the intake item's free-form task status (single
+    // char, NULL = open), backfilled from the legacy `done_ms` (kept, no writer).
+    r"
+ALTER TABLE tracker_items ADD COLUMN status TEXT;
+UPDATE tracker_items SET status = 'x' WHERE done_ms IS NOT NULL;
+",
 ];
 
 /// Highest schema version this build knows.

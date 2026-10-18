@@ -1283,6 +1283,13 @@ impl App {
             (Target::Task { path, line }, Item::TaskStatus(c)) => {
                 self.set_task_status(&path, line, c)
             }
+            // Plan round-6-feedback-todos WP-6: the intake status menu (`' '` = open).
+            (Target::TrackerStatus { key }, Item::TaskStatus(c)) => {
+                self.update(Message::Views(crate::message::ViewsMsg::SetStatus {
+                    key,
+                    status: (c != ' ').then_some(c),
+                }))
+            }
             (Target::Tab { pane, id, .. }, Item::Close) => {
                 match self
                     .panes
@@ -2988,6 +2995,10 @@ impl App {
     fn set_task_status(&mut self, path: &str, line: usize, to: char) -> Task<Message> {
         let read_only = self.status.mode == Mode::Shadow;
         let Some(doc) = self.docs.get_mut(path) else {
+            // Plan round-6-feedback-todos WP-6: a `Tasks` view row of a note with no open
+            // buffer — the edit path is the buffer's, so say so instead of a silent no-op.
+            self.status
+                .set_error(format!("open {path} to change its tasks"));
             return Task::none();
         };
         if read_only {
@@ -3007,6 +3018,10 @@ impl App {
     fn toggle_task(&mut self, path: &str, line: usize) -> Task<Message> {
         let read_only = self.status.mode == Mode::Shadow;
         let Some(doc) = self.docs.get_mut(path) else {
+            // Plan round-6-feedback-todos WP-6: a `Tasks` view row of a note with no open
+            // buffer — the edit path is the buffer's, so say so instead of a silent no-op.
+            self.status
+                .set_error(format!("open {path} to change its tasks"));
             return Task::none();
         };
         if read_only {
@@ -4111,16 +4126,16 @@ impl App {
                     },
                 )
             }
-            crate::views::Effect::SetDone { key, done } => {
-                let p = cv_protocol::TrackerItemSetDoneParams {
+            crate::views::Effect::SetStatus { key, status } => {
+                let p = cv_protocol::TrackerItemSetStatusParams {
                     source_kind: key.source_kind,
                     source_key: key.source_key,
                     item_id: key.item_id,
-                    done,
+                    status,
                 };
                 self.rpc(
-                    move |d| d.tracker_item_set_done(&p).map_err(|e| e.to_string()),
-                    |r| Message::Views(crate::message::ViewsMsg::DoneSet(r)),
+                    move |d| d.tracker_item_set_status(&p).map_err(|e| e.to_string()),
+                    |r| Message::Views(crate::message::ViewsMsg::StatusSet(r)),
                 )
             }
             crate::views::Effect::Notice(text) => {
