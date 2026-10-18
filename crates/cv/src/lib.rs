@@ -11,6 +11,7 @@ pub mod import;
 pub mod jobs;
 pub mod lookup;
 pub mod runner;
+pub mod search_import;
 pub mod server;
 pub mod shadow;
 pub mod signals;

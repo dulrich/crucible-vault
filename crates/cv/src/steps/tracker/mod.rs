@@ -355,6 +355,7 @@ pub(crate) fn emit_line_with(
         config: ctx.config,
         vault_root: ctx.vault_root,
         index_db: ctx.index_db,
+        search: ctx.search,
         state: ctx.state,
         writer: ctx.writer.clone(),
         children: ctx.children,

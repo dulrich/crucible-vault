@@ -1,27 +1,29 @@
-//! Step module `search`: `search_upsert`, `search_delete` — the search-companion feed (plan
-//! `v0-core-daemon` WP-13; bodies in [`cv_search::feed`]).
+//! Step module `search`: `search_upsert`, `search_delete` — the search feed into the daemon's
+//! in-process `semsearch` index (plan `v0-core-daemon` WP-13; plan semsearch-crate WP-3, D22;
+//! bodies in [`cv_search::feed`]).
 //!
 //! Params (all optional; unknown keys and malformed values disarm, I5):
 //!
 //! | Key | Default | Meaning |
 //! |---|---|---|
-//! | `companion_url` | `http://127.0.0.1:4801` | Companion base URL (Crucible `searchServiceUrl`). |
-//! | `vault_id` | `"default"` | Companion vault id — Crucible's own `searchVaultId` (default `'default'`, `https://github.com/dulrich/obsidian-crucible/blob/master/src/types.ts:911`), so cut-over inherits its index. |
-//! | `embed` | absent | `"provider:model"` from `providers.toml`; absent = lexical-only (Crucible with semantic indexing off). |
+//! | `companion_url` | — | Ignored since semsearch-crate WP-3; retired in WP-4 (still parsed, must be an http(s) URL). |
+//! | `vault_id` | — | Ignored since semsearch-crate WP-3; retired in WP-4 (still parsed). |
+//! | `embed` | absent | `"provider:model"` from `providers.toml`; absent = lexical-only (Crucible with semantic indexing off). The index space is [`cv_search::space_model`] of the model. |
 //! | `path` | `active_path` | Target note. `search_upsert` without one is the reconcile sweep (`search-refresh`). |
 //!
 //! **Mode is decided fail-closed** from the vault filesystem: writer unavailable or shadow →
-//! [`Mode::Shadow`] (read-only companion calls, no embedding call, outcome vars carry aggregate
-//! counts only). Only a live filesystem mints the [`LiveProof`] that unlocks `/v1/chunks/*`.
+//! shadow: a read-only open of `CV_SEARCH_DB` (a missing file counts as empty, never created),
+//! no embedding call, no write, outcome vars carry aggregate counts only. Only a live filesystem
+//! writes, through the runner's one shared index handle ([`StepCtx::search`]).
 //!
-//! Errors: companion down / `ok: false` → `Deferred{60 s, "search-companion"}`; embedder down →
-//! `Deferred{60 s, <provider id>}` (`SearchIndexWorkflow.ts:179-195`); schema ≠ 7, 4xx, config
-//! errors → `Failed`.
+//! Errors: embedder down → `Deferred{60 s, <provider id>}` (`SearchIndexWorkflow.ts:179-195`);
+//! an embedding-space mismatch with the index, an index open/SQL error, config errors →
+//! `Failed`.
 //!
 //! Dropped (Obsidian-induced): `metadataCache` (embeds, frontmatter stamps and link resolution
-//! come from `index.db`), the `CompanionAvailabilityGate` latch (the runner's service breaker),
-//! and Crucible's settings-driven exclusion list (`isPathExcluded`/`isUserIgnored`); indexable =
-//! Crucible's default extensions (`md`, `qmd`, `txt`) outside the index's skipped dirs.
+//! come from `index.db`), and Crucible's settings-driven exclusion list
+//! (`isPathExcluded`/`isUserIgnored`); indexable = Crucible's default extensions (`md`, `qmd`,
+//! `txt`) outside the index's skipped dirs.
 
 use std::sync::{Arc, OnceLock};
 
@@ -30,31 +32,24 @@ use cv_index::{LinkKind, Reader};
 use cv_providers::{
     ProviderManager, ProvidersConfig, SystemSecrets, parse_model_ref, secrets::default_secrets_dir,
 };
-use cv_search::UnavailableKind;
 use cv_search::chunker::{DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
-use cv_search::feed::{self, EmbedTarget, FeedConfig, FeedReport, LocalNote, Mode};
+use cv_search::feed::{self, EmbedTarget, FeedConfig, FeedReport, LocalNote, ShadowScope};
 use cv_search::{
-    DEFAULT_COMPANION_URL, EmbedRef, LinkedSource, LiveProof, PrepareHost, PrepareInput,
-    SearchError, is_search_indexable_path, prepare_search_file,
+    EmbedRef, LinkedSource, PrepareHost, PrepareInput, SearchError, is_search_indexable_path,
+    prepare_search_file,
 };
 use cv_state::{ImageDescription, ServiceFailureKind};
 use serde_json::{Map, Value};
 
 use super::{DeferCause, StepCtx, StepError, StepOutcome};
 
-/// Crucible's `searchVaultId` default.
-pub const DEFAULT_VAULT_ID: &str = "default";
-/// Deferral delay for a companion or embedder outage.
+/// Deferral delay for an embedder outage.
 pub const RETRY_AFTER_MS: i64 = 60_000;
-/// The companion's service name for deferral.
-pub const COMPANION_SERVICE: &str = "search-companion";
 
 const KEYS: [&str; 4] = ["companion_url", "vault_id", "embed", "path"];
 
 #[derive(Debug, Default, PartialEq)]
 struct Params {
-    companion_url: Option<String>,
-    vault_id: Option<String>,
     embed: Option<(String, String)>,
     path: Option<String>,
 }
@@ -75,13 +70,13 @@ fn parse(step: &Step) -> Result<Params, String> {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("{kind}: {k} must be a non-empty string"))?;
         match k.as_str() {
+            // Ignored since semsearch-crate WP-3; retired in WP-4.
             "companion_url" => {
                 if !(s.starts_with("http://") || s.starts_with("https://")) {
                     return Err(format!("{kind}: companion_url must be an http(s) URL"));
                 }
-                p.companion_url = Some(s.to_owned());
             }
-            "vault_id" => p.vault_id = Some(s.to_owned()),
+            "vault_id" => {}
             "embed" => {
                 let r = parse_model_ref(Some(s))
                     .filter(cv_providers::ProviderModelRef::is_complete)
@@ -117,17 +112,6 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
 
 fn map_err(e: SearchError) -> StepError {
     match e {
-        SearchError::Unavailable { kind, .. } => StepError::Deferred {
-            retry_after_ms: RETRY_AFTER_MS,
-            service: Some(COMPANION_SERVICE.to_owned()),
-            cause: DeferCause::Transient(match kind {
-                UnavailableKind::Refused => ServiceFailureKind::Refused,
-                UnavailableKind::Timeout => ServiceFailureKind::Timeout,
-                UnavailableKind::ServerError | UnavailableKind::NotOk => {
-                    ServiceFailureKind::ServerError
-                }
-            }),
-        },
         SearchError::EmbedderUnavailable { provider, .. } => StepError::Deferred {
             retry_after_ms: RETRY_AFTER_MS,
             service: Some(provider),
@@ -158,13 +142,11 @@ fn embed_target(
 }
 
 /// Shadow unless the writer positively reports a live filesystem (fail-closed).
-fn mode(ctx: &StepCtx<'_>) -> Mode {
-    let shadow = ctx
-        .writer()
+fn is_live(ctx: &StepCtx<'_>) -> bool {
+    !ctx.writer()
         .ok()
         .and_then(|w| w.call(|vw| vw.fs().is_shadow()).ok())
-        .unwrap_or(true);
-    LiveProof::from_shadow_flag(shadow).map_or(Mode::Shadow, Mode::Live)
+        .unwrap_or(true)
 }
 
 fn vars(report: &FeedReport, live: bool) -> Map<String, Value> {
@@ -173,7 +155,7 @@ fn vars(report: &FeedReport, live: bool) -> Map<String, Value> {
     for (k, n) in [
         ("matched", c.matched),
         ("mismatched", c.mismatched),
-        ("missing_remote", c.missing_remote),
+        ("missing_index", c.missing_index),
         ("missing_local", c.missing_local),
         ("embedding_mismatch", c.embedding_mismatch),
     ] {
@@ -183,6 +165,7 @@ fn vars(report: &FeedReport, live: bool) -> Map<String, Value> {
         v.insert("upserted".into(), Value::from(report.upserted));
         v.insert("deleted".into(), Value::from(report.deleted));
         v.insert("chunks".into(), Value::from(report.chunks));
+        v.insert("embedded".into(), Value::from(report.embedded));
     }
     v
 }
@@ -196,21 +179,18 @@ pub(crate) fn run(
 ) -> Result<StepOutcome, StepError> {
     let p = parse(step).map_err(StepError::failed)?;
     let cfg = FeedConfig {
-        companion_url: p
-            .companion_url
-            .clone()
-            .unwrap_or_else(|| DEFAULT_COMPANION_URL.to_owned()),
-        vault_id: p
-            .vault_id
-            .clone()
-            .unwrap_or_else(|| DEFAULT_VAULT_ID.to_owned()),
         embed: embed_target(ctx, p.embed.as_ref())?,
         max_chars: DEFAULT_MAX_CHARS,
         overlap_chars: DEFAULT_OVERLAP_CHARS,
     };
-    let mode = mode(ctx);
-    let live = matches!(mode, Mode::Live(_));
+    let live = is_live(ctx);
+    let search = ctx
+        .search
+        .ok_or_else(|| StepError::failed("search index unavailable outside the runner"))?;
     let target = p.path.clone().or_else(|| ctx.context.active_path.clone());
+    if matches!(step, Step::SearchDelete(_)) && target.is_none() {
+        return Err(StepError::failed("search_delete needs a path"));
+    }
     let reader = open_reader(ctx)?;
     let ctx_ref: &StepCtx<'_> = ctx;
     let host = NotePrep::new(
@@ -221,24 +201,40 @@ pub(crate) fn run(
             db.image_description(md5).ok().flatten()
         }),
     );
-    let report = match (step, target) {
-        (Step::SearchDelete(_), Some(path)) => {
-            handle.block_on(feed::delete_path(&cfg, mode, &path))
+    let report = if live {
+        let index = search.shared().map_err(map_err)?;
+        match (step, target) {
+            (Step::SearchDelete(_), Some(path)) => feed::delete_path(&index, &path),
+            (_, Some(path)) => {
+                let note = host.local_note(&path)?;
+                handle.block_on(feed::upsert_path(mgr, &cfg, &index, &path, note))
+            }
+            (_, None) => {
+                let local = host.local_hashes()?;
+                let load = |path: &str| {
+                    host.local_note(path)
+                        .map_err(|e| SearchError::Malformed(e.to_string()))
+                };
+                handle.block_on(feed::reconcile(mgr, &cfg, &index, &local, &load))
+            }
         }
-        (Step::SearchDelete(_), None) => {
-            return Err(StepError::failed("search_delete needs a path"));
-        }
-        (_, Some(path)) => {
-            let note = host.local_note(&path)?;
-            handle.block_on(feed::upsert_path(mgr, &cfg, mode, &path, note))
-        }
-        (_, None) => {
-            let local = host.local_hashes()?;
-            let load = |path: &str| {
-                host.local_note(path)
-                    .map_err(|e| SearchError::Malformed(e.to_string()))
-            };
-            handle.block_on(feed::reconcile(mgr, &cfg, mode, &local, &load))
+    } else {
+        match (step, target) {
+            (Step::SearchDelete(_), Some(path)) => {
+                feed::shadow_report(search.path(), &cfg, ShadowScope::Path(&path, None))
+            }
+            (_, Some(path)) => {
+                let hash = host.local_note(&path)?.map(|n| n.prepared.content_hash);
+                feed::shadow_report(
+                    search.path(),
+                    &cfg,
+                    ShadowScope::Path(&path, hash.as_deref()),
+                )
+            }
+            (_, None) => {
+                let local = host.local_hashes()?;
+                feed::shadow_report(search.path(), &cfg, ShadowScope::All(&local))
+            }
         }
     }
     .map_err(map_err)?;
@@ -246,7 +242,7 @@ pub(crate) fn run(
         mode = if live { "live" } else { "shadow" },
         matched = report.counts.matched,
         mismatched = report.counts.mismatched,
-        missing_remote = report.counts.missing_remote,
+        missing_index = report.counts.missing_index,
         missing_local = report.counts.missing_local,
         embedding_mismatch = report.counts.embedding_mismatch,
         "search feed step done"
@@ -272,9 +268,7 @@ pub(crate) type ReadFn<'r> = Box<dyn Fn(&str) -> Result<Option<Vec<u8>>, StepErr
 pub(crate) type DescribeFn<'r> = Box<dyn Fn(&str) -> Option<ImageDescription> + 'r>;
 
 /// File preparation's host: index queries, a vault read function and an image-description
-/// lookup. The feed step builds it over the overlay-aware writer and the daemon's `StateDb`;
-/// `cv shadow parity` (WP-14, P3) builds it over a fresh index, direct read-only vault reads and
-/// a `StateReader`, so both compute `contentHash` with exactly this code.
+/// lookup. The feed step builds it over the overlay-aware writer and the daemon's `StateDb`.
 pub(crate) struct NotePrep<'r> {
     read: ReadFn<'r>,
     reader: &'r Reader,

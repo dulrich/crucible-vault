@@ -204,6 +204,7 @@ fn run(w: &World, s: &Step, active: Option<&str>) -> Result<StepOutcome, StepErr
         config: &w.config,
         vault_root: &w.vault,
         index_db: &w.index,
+        search: None,
         state: &w.state,
         writer: Some(w.writer.clone()),
         children: &NoChildren,

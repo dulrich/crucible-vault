@@ -248,6 +248,8 @@ pub struct StepCtx<'a> {
     pub vault_root: &'a Path,
     /// The `CV_INDEX_DB` base (open a `cv_index::Reader` for queries).
     pub index_db: &'a Path,
+    /// The daemon's shared `semsearch` index (`None` outside a runner: search steps fail).
+    pub search: Option<&'a cv_search::SearchDb>,
     /// The daemon's `state.db` (e.g. image descriptions for the search feed). Lock briefly and
     /// never across a writer call; steps run on a blocking thread, so a std `Mutex` is fine.
     pub state: &'a Arc<Mutex<StateDb>>,

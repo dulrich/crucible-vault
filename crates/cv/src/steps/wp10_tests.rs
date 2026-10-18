@@ -169,6 +169,7 @@ impl Env {
             config: &self.config,
             vault_root: &self.vault,
             index_db: &self.index,
+            search: None,
             state: &self.state,
             writer: Some(self.writer.clone()),
             children: &NoChildren,

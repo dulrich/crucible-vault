@@ -1,30 +1,22 @@
-//! WP-14 tests: synthetic vaults under temp dirs, a hand-rolled fake companion on 127.0.0.1 that
-//! records every request, and an injected fake system probe (I1 — never the live vault, the real
-//! companion at :4801 or systemd).
+//! WP-14 tests: synthetic vaults under temp dirs and an injected fake system probe (I1 — never the
+//! live vault or systemd).
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use cv_actions::{ConfigSet, Step};
-use cv_protocol::{ActionContext, Mode};
-use cv_providers::{ProviderManager, SecretSource};
+use cv_protocol::Mode;
 use cv_state::{
     EnqueueOutcome, ImageDescription, Lane, NewJob, NewShadowWrite, QueueConfig, StateDb,
     StateReader,
 };
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 use super::parity::{self, CYCLE_GUARD_LINE, ParityOptions};
 use super::probe::SystemProbe;
 use super::replay::{self, ReplayRequest};
 use super::{import, report};
 use crate::config::Config;
-use crate::steps::{ChildSpawner, StepCtx};
 
 struct Tmp(PathBuf);
 impl Tmp {
@@ -67,6 +59,7 @@ fn config(root: &Path, mode: Mode) -> Config {
         mode,
         protected_vault: root.join("prot"),
         state_db: root.join("state/state.db"),
+        search_db: root.join("state/search.db"),
         index_db: root.join("cache/index.db"),
         scratch: root.join("scratch"),
         config_dir: root.join("config"),
@@ -77,133 +70,12 @@ fn config(root: &Path, mode: Mode) -> Config {
     }
 }
 
-// ---- fake companion -------------------------------------------------------------------------
-
-#[derive(Default)]
-struct FakeState {
-    store: BTreeMap<String, String>,
-    log: Vec<String>,
-}
-
-#[derive(Clone)]
-struct Fake {
-    base: String,
-    st: Arc<Mutex<FakeState>>,
-}
-
-impl Fake {
-    fn log(&self) -> Vec<String> {
-        self.st.lock().unwrap().log.clone()
-    }
-    fn set(&self, path: &str, hash: &str) {
-        self.st
-            .lock()
-            .unwrap()
-            .store
-            .insert(path.into(), hash.into());
-    }
-}
-
-fn handle(st: &mut FakeState, path: &str, body: &Value) -> (u16, Value) {
-    match path {
-        "/health" => (200, json!({"ok": true, "schemaVersion": 7})),
-        "/v1/paths" => {
-            let paths: Vec<Value> = st
-                .store
-                .iter()
-                .map(|(p, h)| json!({"path": p, "contentHash": h, "chunkCount": 1, "embeddedCount": 0}))
-                .collect();
-            (200, json!({"ok": true, "paths": paths}))
-        }
-        "/v1/files/state" => (200, json!({"ok": true, "files": []})),
-        "/v1/chunks/upsert" => {
-            for c in body["chunks"].as_array().cloned().unwrap_or_default() {
-                let p = c["path"].as_str().unwrap_or_default().to_owned();
-                let h = c["contentHash"].as_str().unwrap_or_default().to_owned();
-                st.store.insert(p, h);
-            }
-            (200, json!({"ok": true}))
-        }
-        "/v1/chunks/delete" => (200, json!({"ok": true})),
-        _ => (404, json!({})),
-    }
-}
-
-async fn serve(l: TcpListener, st: Arc<Mutex<FakeState>>) {
-    loop {
-        let Ok((mut s, _)) = l.accept().await else {
-            return;
-        };
-        let st = st.clone();
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 8192];
-            let head_end = loop {
-                let Ok(n) = s.read(&mut chunk).await else {
-                    return;
-                };
-                if n == 0 {
-                    return;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break i + 4;
-                }
-            };
-            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-            let path = head.split(' ').nth(1).unwrap_or("").to_owned();
-            let len: usize = head
-                .lines()
-                .filter_map(|l| l.split_once(':'))
-                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, v)| v.trim().parse().ok())
-                .unwrap_or(0);
-            while buf.len() < head_end + len {
-                let Ok(n) = s.read(&mut chunk).await else {
-                    return;
-                };
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let body: Value = serde_json::from_slice(&buf[head_end..]).unwrap_or(Value::Null);
-            let (status, out) = {
-                let mut g = st.lock().unwrap();
-                g.log.push(path.clone());
-                handle(&mut g, &path, &body)
-            };
-            let out = out.to_string();
-            let resp = format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}",
-                out.len()
-            );
-            let _ = s.write_all(resp.as_bytes()).await;
-            let _ = s.shutdown().await;
-        });
-    }
-}
-
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap()
-}
-
-/// A fake companion; `up = false` binds and drops the port (connection refused).
-fn fake(rt: &tokio::runtime::Runtime, up: bool) -> Fake {
-    let st = Arc::new(Mutex::new(FakeState::default()));
-    let base = rt.block_on(async {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        if up {
-            tokio::spawn(serve(l, st.clone()));
-        }
-        format!("http://{addr}")
-    });
-    Fake { base, st }
 }
 
 // ---- fake probe -----------------------------------------------------------------------------
@@ -237,10 +109,8 @@ fn quiet_probe() -> FakeProbe {
     }
 }
 
-fn opts(root: &Path, url: &str, soak_start_ms: Option<i64>) -> ParityOptions {
+fn opts(root: &Path, soak_start_ms: Option<i64>) -> ParityOptions {
     ParityOptions {
-        search_url: url.to_owned(),
-        vault_id: "default".into(),
         soak_start_ms,
         skip: Vec::new(),
         repo_roots: vec![root.join("repos")],
@@ -423,32 +293,6 @@ fn parity_world() -> ParityWorld {
     ParityWorld { t, cfg }
 }
 
-/// The local hashes parity computes (same `NotePrep` code), for seeding the fake.
-fn local_hashes(cfg: &Config) -> BTreeMap<String, String> {
-    let base = cfg.scratch.join("seed").join("index.db");
-    std::fs::create_dir_all(base.parent().unwrap()).unwrap();
-    drop(cv_index::Index::create(&cfg.vault, &base).unwrap());
-    let reader = cv_index::Reader::open_current(&base).unwrap();
-    let state = StateReader::open(&cfg.state_db).unwrap();
-    let vault = cfg.vault.clone();
-    let prep = crate::steps::search::NotePrep::new(
-        Box::new(move |p| Ok(std::fs::read(vault.join(p)).ok())),
-        &reader,
-        Box::new(move |m| {
-            state
-                .image_descriptions_for(&[m.to_owned()])
-                .ok()?
-                .into_iter()
-                .next()
-        }),
-    );
-    let out = prep.local_hashes().unwrap().into_iter().collect();
-    drop(prep);
-    drop(reader);
-    let _ = std::fs::remove_dir_all(cfg.scratch.join("seed"));
-    out
-}
-
 fn assert_no_fixture_text(out: &Value) {
     let s = serde_json::to_string(out).unwrap().to_lowercase();
     for needle in [
@@ -466,15 +310,6 @@ fn assert_no_fixture_text(out: &Value) {
 #[test]
 fn parity_reports_every_criterion_as_aggregates() {
     let w = parity_world();
-    let rt = runtime();
-    let f = fake(&rt, true);
-    let hashes = local_hashes(&w.cfg);
-    for (p, h) in &hashes {
-        let stale = ["drift", "facet", "unexplained"]
-            .iter()
-            .any(|k| p.contains(k));
-        f.set(p, if stale { "stale" } else { h });
-    }
     let now = crate::now_ms();
     let probe = FakeProbe {
         restarts: Some(2),
@@ -485,7 +320,7 @@ fn parity_reports_every_criterion_as_aggregates() {
             format!("DEBUG {CYCLE_GUARD_LINE}"),
         ]),
     };
-    let o = opts(&w.t.0, &f.base, Some(now - 86_400_000));
+    let o = opts(&w.t.0, Some(now - 86_400_000));
     let out = parity::run(&w.cfg, &o, &probe).unwrap();
     let c = &out["criteria"];
 
@@ -513,15 +348,8 @@ fn parity_reports_every_criterion_as_aggregates() {
     assert_eq!(p2["yt_video_id"]["agreed"], 2);
     assert_eq!(p2["post_id"]["compared"], 0);
 
-    let p3 = &c["P3"]["metrics"];
-    assert_eq!(p3["indexable"], 9);
-    assert_eq!(p3["matched"], 6);
-    assert_eq!(p3["mismatched"], 3);
-    assert_eq!(p3["note_drift"], 1);
-    assert_eq!(p3["facet_drift"], 1);
-    assert_eq!(p3["unexplained"], 1);
-    assert_eq!(p3["companion_mutations"], "structural");
-    assert_eq!(c["P3"]["status"], "fail");
+    // P3 (search-companion parity) is retired (plan semsearch-crate WP-3).
+    assert!(c.get("P3").is_none());
 
     let p4 = &c["P4"]["metrics"];
     assert_eq!(
@@ -555,9 +383,6 @@ fn parity_reports_every_criterion_as_aggregates() {
     assert_eq!(c["P7"]["status"], "fail");
 
     assert_no_fixture_text(&out);
-    let log = f.log();
-    assert!(log.iter().all(|p| !p.starts_with("/v1/chunks")), "{log:?}");
-    assert!(log.contains(&"/v1/paths".to_owned()));
     // The parity scratch base is gone; the vault is untouched.
     let left: Vec<_> = std::fs::read_dir(&w.cfg.scratch)
         .unwrap()
@@ -569,15 +394,12 @@ fn parity_reports_every_criterion_as_aggregates() {
 }
 
 #[test]
-fn parity_companion_down_is_unknown_and_skip_works() {
+fn parity_skip_works() {
     let w = parity_world();
-    let rt = runtime();
-    let f = fake(&rt, false);
-    let mut o = opts(&w.t.0, &f.base, None);
+    let mut o = opts(&w.t.0, None);
     o.skip = vec!["P7".into()];
     let out = parity::run(&w.cfg, &o, &quiet_probe()).unwrap();
     let c = &out["criteria"];
-    assert_eq!(c["P3"]["status"], "unknown");
     assert_eq!(c["P7"]["status"], "skipped");
     assert_eq!(c["P6"]["metrics"]["landlock_denials"], Value::Null);
     assert_no_fixture_text(&out);
@@ -586,83 +408,9 @@ fn parity_companion_down_is_unknown_and_skip_works() {
 #[test]
 fn parity_refuses_scratch_inside_a_repo_root() {
     let w = parity_world();
-    let mut o = opts(&w.t.0, "http://127.0.0.1:9", None);
+    let mut o = opts(&w.t.0, None);
     o.repo_roots = vec![w.t.0.clone()];
     assert!(parity::run(&w.cfg, &o, &quiet_probe()).is_err());
-}
-
-// ---- search refactor: parity's hash == the feed step's ---------------------------------------
-
-struct NoKids;
-impl ChildSpawner for NoKids {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
-}
-
-struct NoSecrets;
-impl SecretSource for NoSecrets {
-    fn env_var(&self, _: &str) -> Option<String> {
-        None
-    }
-    fn secret_file(&self, _: &str) -> Option<String> {
-        None
-    }
-}
-
-#[test]
-fn parity_local_hash_equals_the_feed_steps_hash() {
-    let w = parity_world();
-    let rt = runtime();
-    let f = fake(&rt, true);
-    // The live feed step upserts every note (reconcile) into the fake companion.
-    let fs = cv_vault::VaultFs::live(&w.cfg.vault, &w.cfg.protected_vault, &cv_vault::NoCutover)
-        .unwrap();
-    let index = w.t.0.join("feed-index").join("index.db");
-    std::fs::create_dir_all(index.parent().unwrap()).unwrap();
-    let vw = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(vw).unwrap();
-    let state = Arc::new(Mutex::new(
-        StateDb::open(&w.cfg.state_db, 1, QueueConfig::default()).unwrap(),
-    ));
-    let mut set = ConfigSet::new();
-    set.reload(
-        &BTreeMap::from([(
-            "actions.toml".to_owned(),
-            Some("[[action]]\nid = \"s\"\n[[action.steps]]\ntype = \"search_upsert\"\n".to_owned()),
-        )]),
-        &crate::steps::validate,
-    );
-    let step: toml::Table = toml::from_str(&format!("companion_url = \"{}\"", f.base)).unwrap();
-    let step = Step::SearchUpsert(step);
-    let (params, vars, context) = (Map::new(), Map::new(), ActionContext::default());
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: set.action("s").unwrap(),
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars: &vars,
-        config: &set,
-        vault_root: &w.cfg.vault,
-        index_db: &index,
-        state: &state,
-        writer: Some(writer.clone()),
-        children: &NoKids,
-        written: Vec::new(),
-    };
-    let mgr = ProviderManager::new(Arc::new(NoSecrets)).unwrap();
-    crate::steps::search::run(&step, &mut ctx, rt.handle(), &mgr).unwrap();
-    drop(writer);
-    drop(state);
-    assert!(f.log().iter().any(|p| p == "/v1/chunks/upsert"));
-    let upserted = f.st.lock().unwrap().store.len();
-    assert_eq!(upserted, 9);
-    let out = parity::run(&w.cfg, &opts(&w.t.0, &f.base, None), &quiet_probe()).unwrap();
-    let p3 = &out["criteria"]["P3"];
-    assert_eq!(p3["metrics"]["matched"], 9, "{p3}");
-    assert_eq!(p3["metrics"]["match_rate"], 1.0);
-    assert_eq!(p3["status"], "pass");
 }
 
 // ---- import-descriptions --------------------------------------------------------------------
@@ -767,7 +515,7 @@ fn replay_refuses_protected_repo_vault_and_search_actions() {
         ("prot/c", "make-note", "live root"),
         ("repos/c", "make-note", "repo root"),
         ("vault", "make-note", "CV_VAULT"),
-        ("corpus", "feed", "search companion"),
+        ("corpus", "feed", "search index"),
     ] {
         let err = rt
             .block_on(replay::run(&cfg, &req(&t, corpus, action)))

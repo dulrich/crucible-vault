@@ -275,6 +275,7 @@ fn run_with(
         config: &e.config,
         vault_root: &e.vault,
         index_db: &idx,
+        search: None,
         state: &e.state,
         writer: Some(e.writer.clone()),
         children: &NoChildren,

@@ -53,6 +53,7 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 
 - **Question:** Where does search live?
 - **Decision:** **Leave Crucible's search companion as-is** (`https://github.com/dulrich/obsidian-crucible/blob/master/scripts/search-companion/`, Docker, SQLite FTS5 + brute-force vectors + RRF), fed by the daemon, **unless its shape forces hacky workarounds in the daemon**. That is the integration-friction trigger for an own-vs-depend review. **End state:** a Rust search sidecar daemon alongside the main daemon. That is deferred, including whether SQLite stays its engine.
+- **Superseded (2026-10-17):** D22 replaces the "sidecar" end state with in-process search (the `semsearch` crate).
 
 ## D9 — Editor ambition for v0 (2026-10-13)
 
@@ -152,3 +153,15 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 - **Importance scorer:** a trait with a stub (items stay unscored) and a SystemOne-shaped HTTP client (`[scorer] url` + `model`). Its response shape `{"score": n}` is **provisional**: `../eval-tool/` must implement it before the scorer is configured.
 - **State:** link records, tracker items, ignored ids and API usage live in `state.db` v5 (D15); link records and ignored ids are imported once from Crucible (`cv import link-records|ignored`, daemon stopped).
 - **Secrets:** `YOUTUBE_API_KEY` via `secrets.rs` (D4), never from the vault.
+
+## D22 — In-process semantic search (2026-10-17; plan semsearch-crate)
+
+- **Decision (plan `semsearch-crate`, approved 2026-10-17; supersedes D8's sidecar end state):**
+  1. **Own crate:** `semsearch` in its own repo (`../semsearch`), the fleet's only semantic-search implementation; cv links it as a path dep of `cv-search`.
+  2. **SQLite stays:** one caller-pathed SQLite file (`busy_timeout`, WAL, `synchronous=NORMAL`), derived and rebuildable (D14 class).
+  3. **Sync and transport-free:** `rusqlite` (bundled, FTS5) + `thiserror`; callers pass pre-chunked documents and f32 vectors. Chunking (Crucible-compatible) and embedding (`cv-providers`) stay in `cv-search`.
+  4. **Embedding space lives in the index:** one model + dim; a write in another space is an error; queries embed in the recorded space; a space change is a rebuild. The serving id `bge-m3-f16` maps to the legacy companion space `bge-m3/f16`, so imported and fed vectors share one space.
+  5. **Vector retrieval:** in-memory sign-bit codes, Hamming scan, pool (800) rescored with exact f32 dot product read from SQLite.
+  6. **Ranking:** the companion's `coverage` mode (pooled bm25 title 10 / heading 5 / text 1 / entities 8, title-match, vector, term coverage; RRF k = 60); bakeoff modes and Node workarounds not ported.
+  7. **The daemon is the only writer and reader:** one shared `Index` handle per process, used by the job runner (feed) and the request path; the editor searches through a daemon request.
+  8. **The companion is retired from cv:** no `:4801` calls, no HTTP client or remote compare, shadow P3 removed; its chunks/embeddings come over once via `cv search import`; removing the `crucible-search` container is a user step after soak.

@@ -93,6 +93,7 @@ impl Env {
             config: cfg,
             vault_root: &vault,
             index_db: &index,
+            search: None,
             state: &self.state,
             writer: Some(self.writer.clone()),
             children: &NoChildren,

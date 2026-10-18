@@ -1,6 +1,8 @@
-//! `cv shadow parity`: evaluates the plan's shadow parity criteria P1–P7
+//! `cv shadow parity`: evaluates the plan's shadow parity criteria P1, P2 and P4–P7
 //! (`plans/v0-core-daemon.md` → Test Plan "Shadow parity criteria") and returns one aggregate
-//! JSON object. Never writes the vault, `state.db` or the companion: the P1 rebuild goes into a
+//! JSON object. P3 (search-companion parity) is retired by plan semsearch-crate WP-3 (cut-over is
+//! done; D22); the other criteria keep their numbers. Never writes the vault or `state.db`: the
+//! P1 rebuild goes into a
 //! fresh base under `$CV_SCRATCH/parity-<ts>/` that is deleted afterwards.
 //!
 //! Verdicts: `pass | fail | warn | unknown | manual | skipped`. The harness exits 0 regardless of
@@ -14,7 +16,6 @@ use anyhow::{Context, Result, anyhow};
 use cv_actions::{ConfigSet, StepKind};
 use cv_index::{Index, Reader};
 use cv_lint::{FrontmatterDoc, JsValue};
-use cv_search::{CompanionReader, RemoteEntry};
 use cv_state::{JobStatus, ListQuery, StateReader};
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -22,7 +23,6 @@ use serde_json::{Map, Value, json};
 use super::probe::{SystemProbe, proc_kb};
 use super::report;
 use crate::config::Config;
-use crate::steps::search::NotePrep;
 
 /// S2 baselines (`docs/assessment-2026-10-13.md`): markdown files, links, unresolved links.
 pub const BASELINE_FILES: u64 = 8_008;
@@ -38,8 +38,6 @@ pub const MAX_RSS_KB: u64 = 64 * 1024;
 pub const MAX_PSS_KB: u64 = 50 * 1024;
 /// P1 drift that warrants a manual cause categorization.
 pub const MAX_DRIFT_PCT: f64 = 2.0;
-/// P3 pass bar.
-pub const MIN_MATCH_RATE: f64 = 0.99;
 /// P7: a `running` job claimed longer ago than this is stuck.
 pub const STUCK_MS: i64 = 3_600_000;
 /// P7: required soak length.
@@ -47,13 +45,9 @@ pub const SOAK_MS: i64 = 7 * 86_400_000;
 /// Cycle-guard log line (`runner/events.rs`).
 pub const CYCLE_GUARD_LINE: &str = "cycle guard: daemon write does not re-trigger";
 
-/// Options (the CLI fills them from flags and `CV_SEARCH_URL`/`CV_SEARCH_VAULT_ID`).
+/// Options (the CLI fills them from flags).
 #[derive(Debug, Clone)]
 pub struct ParityOptions {
-    /// Companion base URL.
-    pub search_url: String,
-    /// Companion vault id.
-    pub vault_id: String,
     /// Soak start (epoch ms).
     pub soak_start_ms: Option<i64>,
     /// Criteria to skip (`P1`…`P7`).
@@ -125,7 +119,7 @@ pub fn run(config: &Config, opts: &ParityOptions, probe: &dyn SystemProbe) -> Re
     let _guard = ScratchGuard(base_dir.clone());
     let base = base_dir.join("index.db");
 
-    // P1 build (always: P2/P3 read the fresh index).
+    // P1 build (always: P2 reads the fresh index).
     let rss_before = proc_kb("/proc/self/status", "VmHWM");
     let t0 = Instant::now();
     let index = Index::create(&config.vault, &base)
@@ -152,7 +146,6 @@ pub fn run(config: &Config, opts: &ParityOptions, probe: &dyn SystemProbe) -> Re
         p1(&reader, &files, build_ms, rss_before, rss_after, probe)
     })?;
     put("P2", &mut || p2(&config.vault, &files))?;
-    put("P3", &mut || p3(config, opts, &reader, state.as_ref()))?;
     let p45 = || p4_p5(config, state.as_ref());
     let (p4v, p5v) = if skip.contains("P4") && skip.contains("P5") {
         (Value::Null, Value::Null)
@@ -325,131 +318,6 @@ fn p2(vault: &Path, files: &[cv_index::FileRow]) -> Result<Value> {
             "the user sets the agreement bar after the first run; lintOnSave is off, so notes edited after linting disagree by design".into(),
             "post-id is derived with default PostIdOptions (no blogs-registry host rules)".into(),
         ],
-    ))
-}
-
-fn p3(
-    config: &Config,
-    opts: &ParityOptions,
-    reader: &Reader,
-    state: Option<&StateReader>,
-) -> Result<Value> {
-    let mut notes = vec![
-        "companion_mutations is structural: shadow parity holds only a CompanionReader (no CompanionWriter), so no /v1/chunks request can be sent".to_owned(),
-        "the companion's /v1/paths and /v1/files/state carry no timestamp; note_drift uses the proxy `file mtime >= soak start` (without --soak-start it is null and those mismatches are unclassified)".to_owned(),
-        "facet_drift: a mismatched note whose contentHash folds >=1 facet (image description or linked document, filePreparation.ts:145-159,204-216,249-264)".to_owned(),
-    ];
-    if state.is_none() {
-        notes.push(
-            "state.db unreadable: image descriptions unavailable, facet hashes may differ".into(),
-        );
-    }
-    let vault = config.vault.clone();
-    let prep = NotePrep::new(
-        Box::new(move |p| {
-            read_vault(&vault, p)
-                .map_err(|e| crate::steps::StepError::failed(format!("read: {}", e.kind())))
-        }),
-        reader,
-        Box::new(move |md5| {
-            state?
-                .image_descriptions_for(&[md5.to_owned()])
-                .ok()?
-                .into_iter()
-                .next()
-        }),
-    );
-    let local = prep
-        .local_notes()
-        .map_err(|e| anyhow!("preparing notes: {e}"))?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("building the tokio runtime")?;
-    let client = CompanionReader::new(&opts.search_url, &opts.vault_id)
-        .map_err(|e| anyhow!("companion client: {e}"))?;
-    let remote = rt.block_on(async {
-        client.health().await?;
-        client.list_paths().await
-    });
-    let remote = match remote {
-        Ok(r) => r,
-        Err(e) => {
-            let kind = match e {
-                cv_search::SearchError::Unavailable { .. } => "unavailable",
-                cv_search::SearchError::Schema { .. } => "schema mismatch",
-                _ => "error",
-            };
-            notes.push(format!("companion {kind}: P3 not evaluated"));
-            return Ok(verdict(
-                "unknown",
-                json!({"indexable": local.len(), "companion_mutations": "structural"}),
-                notes,
-            ));
-        }
-    };
-    let remote: Vec<RemoteEntry> = remote
-        .into_iter()
-        .map(|p| RemoteEntry {
-            fully_embedded: p.chunk_count > 0 && p.embedded_count == p.chunk_count,
-            path: p.path,
-            content_hash: p.content_hash,
-            embedding_space: None,
-        })
-        .collect();
-    let hashes: Vec<(String, String)> = local
-        .iter()
-        .map(|(p, n)| (p.clone(), n.prepared.content_hash.clone()))
-        .collect();
-    let cmp = cv_search::compare(&hashes, &remote, None, true);
-    let by_path: HashMap<&str, &cv_search::LocalNote> =
-        local.iter().map(|(p, n)| (p.as_str(), n)).collect();
-    let (mut note_drift, mut facet_drift, mut unexplained, mut unclassified) = (0, 0, 0, 0);
-    for p in &cmp.mismatched {
-        let Some(n) = by_path.get(p.as_str()) else {
-            unexplained += 1;
-            continue;
-        };
-        match opts.soak_start_ms {
-            Some(s) if n.mtime >= s => note_drift += 1,
-            _ if !n.prepared.hash_facets.is_empty() => facet_drift += 1,
-            None => unclassified += 1,
-            Some(_) => unexplained += 1,
-        }
-    }
-    let c = cmp.counts();
-    let indexable = hashes.len();
-    let match_rate = if indexable == 0 {
-        None
-    } else {
-        Some(c.matched as f64 / indexable as f64)
-    };
-    let status = match match_rate {
-        None => "unknown",
-        Some(r) if r >= MIN_MATCH_RATE => "pass",
-        Some(_) => "fail",
-    };
-    if unexplained > 0 {
-        notes.push(
-            "unexplained mismatches are port-defect candidates (never folded into drift)".into(),
-        );
-    }
-    Ok(verdict(
-        status,
-        json!({
-            "indexable": indexable,
-            "matched": c.matched,
-            "mismatched": c.mismatched,
-            "missing_remote": c.missing_remote,
-            "missing_local": c.missing_local,
-            "match_rate": match_rate,
-            "note_drift": opts.soak_start_ms.map(|_| note_drift),
-            "facet_drift": facet_drift,
-            "unexplained": unexplained,
-            "unclassified": unclassified,
-            "companion_mutations": "structural",
-        }),
-        notes,
     ))
 }
 

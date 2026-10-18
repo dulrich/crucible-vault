@@ -254,6 +254,7 @@ impl Daemon {
             vault_root: shared.vault_root.clone(),
             index_db: shared.config.index_db.clone(),
             config_dir: shared.config.config_dir.clone(),
+            search_db: shared.config.search_db.clone(),
         });
         runner.reload_config();
         if shared.runner.set(runner.clone()).is_err() {

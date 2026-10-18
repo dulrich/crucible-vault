@@ -1,20 +1,16 @@
 //! `cv shadow …` (plan `v0-core-daemon` WP-14): the soak tooling.
 //!
 //! - `report` — aggregate would-be writes from `state.db` `shadow_writes` ([`report`]);
-//! - `parity` — evaluates the plan's shadow parity criteria P1–P7 ([`parity`]);
+//! - `parity` — evaluates the plan's shadow parity criteria P1, P2, P4–P7 ([`parity`]; P3 retired
+//!   by plan semsearch-crate WP-3);
 //! - `replay` — runs one action against a user scratch copy of the vault ([`replay`]);
 //! - `import-descriptions` — one-time import of Crucible's image descriptions ([`import`]).
 //!
 //! `report` and `parity` print aggregate JSON only (counts, rates, durations, sizes, verdicts —
 //! never a note path, title, frontmatter value or note text) and never write: `state.db` is
-//! opened through [`cv_state::StateReader`], the companion through
-//! [`cv_search::CompanionReader`].
+//! opened through [`cv_state::StateReader`].
 //!
-//! Crucible reference: Crucible has no shadow mode — the closest analogue is its search
-//! reconcile dry-run (`https://github.com/dulrich/obsidian-crucible/blob/master/src/search/SearchIndexWorkflow.ts`, the
-//! `/v1/paths` hash comparison) which the P3 criterion reuses through `cv_search::compare`. The
-//! Obsidian-induced part (driving the comparison from `metadataCache` inside the plugin) is
-//! dropped: hashes come from `index.db` and direct reads.
+//! Crucible reference: Crucible has no shadow mode.
 
 pub mod import;
 pub mod parity;
@@ -33,7 +29,7 @@ use serde_json::{Map, Value};
 use crate::config::Config;
 
 /// `cv shadow` usage.
-pub const USAGE: &str = "usage:\n  cv shadow report [--since <rfc3339|ms>]\n  cv shadow parity [--soak-start <rfc3339|ms>] [--skip p1,p3,...]\n  cv shadow replay <action-id> --corpus <dir> [--param k=v ...] [--active <path>]\n  cv shadow import-descriptions <dir>\n";
+pub const USAGE: &str = "usage:\n  cv shadow report [--since <rfc3339|ms>]\n  cv shadow parity [--soak-start <rfc3339|ms>] [--skip p1,p2,...]\n  cv shadow replay <action-id> --corpus <dir> [--param k=v ...] [--active <path>]\n  cv shadow import-descriptions <dir>\n";
 
 /// Runs `cv shadow <args>`; returns the exit code (0 ok, 1 harness error, 2 usage).
 pub fn run(args: &[String]) -> i32 {
@@ -121,15 +117,7 @@ fn cmd_parity(args: &[String]) -> Result<()> {
         i += 1;
     }
     let config = Config::from_env()?;
-    let env_or = |k: &str, d: &str| {
-        std::env::var(k)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| d.to_owned())
-    };
     let opts = parity::ParityOptions {
-        search_url: env_or("CV_SEARCH_URL", cv_search::DEFAULT_COMPANION_URL),
-        vault_id: env_or("CV_SEARCH_VAULT_ID", crate::steps::search::DEFAULT_VAULT_ID),
         soak_start_ms: soak_start,
         skip,
         repo_roots: default_repo_roots(),

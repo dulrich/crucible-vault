@@ -6,8 +6,9 @@
 //! - the corpus must exist and canonicalize outside `CV_PROTECTED_VAULT`, outside every repo
 //!   root (`cv_vault::validate_scratch`'s check), and must not overlap the configured `CV_VAULT`;
 //! - the action must exist in `CV_CONFIG_DIR` and contain no `search_upsert`/`search_delete`
-//!   step — the replay daemon runs in **live** mode, so such a step would mutate the real
-//!   companion's index;
+//!   step — the replay daemon runs in **live** mode, so such a step would write a search index
+//!   and may call the embedder (the replay's `CV_SEARCH_DB` is under its scratch base, so the
+//!   daemon's real index is never touched, but a search step is not a reviewable vault write);
 //! - the in-process daemon gets a fresh `state.db`, index and socket under
 //!   `$CV_SCRATCH/replay-<ts>/`, an **empty** config dir there, and `landlock: false`; the
 //!   runner's config is then replaced by `CV_CONFIG_DIR`'s config reduced to the one action with
@@ -89,7 +90,7 @@ pub fn filtered_config(config_dir: &Path, action_id: &str) -> Result<ConfigSet> 
         .any(|s| matches!(s.kind(), StepKind::SearchUpsert | StepKind::SearchDelete))
     {
         bail!(
-            "action {action_id:?} has a search_upsert/search_delete step; replay runs in live mode and would mutate the real search companion — refused"
+            "action {action_id:?} has a search_upsert/search_delete step; replay runs in live mode and would write a search index — refused"
         );
     }
     let mut files: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -202,6 +203,7 @@ pub async fn run(config: &Config, req: &ReplayRequest) -> Result<Value> {
         mode: Mode::Live,
         protected_vault: config.protected_vault.clone(),
         state_db: base.join("state").join("state.db"),
+        search_db: base.join("state").join("search.db"),
         index_db: base.join("index").join("index.db"),
         scratch: base.join("scratch"),
         config_dir: base.join("config"),

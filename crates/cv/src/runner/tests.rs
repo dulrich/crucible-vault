@@ -90,6 +90,7 @@ fn runner(
         vault_root: f._dir.path().to_path_buf(),
         index_db: f._dir.path().join("index.db"),
         config_dir: f._dir.path().join("config"),
+        search_db: f._dir.path().join("search.db"),
     });
     r.set_config(config(src));
     r

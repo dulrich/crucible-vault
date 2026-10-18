@@ -26,6 +26,9 @@ pub struct Config {
     pub protected_vault: PathBuf,
     /// `CV_STATE_DB`.
     pub state_db: PathBuf,
+    /// `CV_SEARCH_DB`: the `semsearch` index (default `search.db` beside `state.db`; plan
+    /// semsearch-crate WP-3).
+    pub search_db: PathBuf,
     /// `CV_INDEX_DB`: a base path that never exists as a file (cv-index generations).
     pub index_db: PathBuf,
     /// `CV_SCRATCH`: the shadow overlay root.
@@ -83,6 +86,10 @@ impl Config {
         let state_db = match get("CV_STATE_DB") {
             Some(v) => PathBuf::from(v),
             None => state_dir()?.join("state.db"),
+        };
+        let search_db = match get("CV_SEARCH_DB") {
+            Some(v) => PathBuf::from(v),
+            None => state_dir()?.join("search.db"),
         };
         let index_db = match get("CV_INDEX_DB") {
             Some(v) => PathBuf::from(v),
@@ -146,6 +153,7 @@ impl Config {
             mode,
             protected_vault,
             state_db,
+            search_db,
             index_db,
             scratch,
             config_dir,
@@ -329,6 +337,7 @@ mod tests {
         assert_eq!(c.mode, Mode::Live);
         assert_eq!(c.vault, PathBuf::from("/v"));
         assert_eq!(c.state_db, PathBuf::from("/s/crucible-vault/state.db"));
+        assert_eq!(c.search_db, PathBuf::from("/s/crucible-vault/search.db"));
         assert_eq!(c.index_db, PathBuf::from("/c/crucible-vault/index.db"));
         assert_eq!(c.socket, PathBuf::from("/sock/d.sock"));
         assert_eq!(c.open_cmd, Some(PathBuf::from("/bin/ed")));

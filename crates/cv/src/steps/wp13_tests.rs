@@ -1,28 +1,41 @@
-//! WP-13 step tests: synthetic notes in a temp vault, a temp `state.db`, and a hand-rolled fake
-//! companion + embedder on 127.0.0.1 that records every request (I1 — never the real companion
-//! at :4801 or any real provider).
+//! Search-step tests (plan `v0-core-daemon` WP-13; rewritten for plan semsearch-crate WP-3):
+//! synthetic notes in a temp vault, a temp `state.db`, a tmpfs `semsearch` index, and a
+//! hand-rolled fake embedder on 127.0.0.1 that counts every request (I1 — never a real index or
+//! any real provider).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cv_actions::{ConfigSet, Step};
 use cv_protocol::ActionContext;
 use cv_providers::{ProviderManager, SecretSource};
+use cv_search::js::lossy;
+use cv_search::semsearch::{Index, IndexOptions, Query, Space};
+use cv_search::{CompanionRow, SearchDb, import_companion, write_companion_fixture};
 use cv_state::{ImageDescription, QueueConfig, StateDb};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::search::run;
+use super::search::{NotePrep, run};
 use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
+
+/// tmpfs when available (project-setup "tmpfs test databases").
+fn tmp_base() -> PathBuf {
+    if Path::new("/dev/shm").is_dir() {
+        PathBuf::from("/dev/shm")
+    } else {
+        std::env::temp_dir()
+    }
+}
 
 struct Tmp(PathBuf);
 impl Tmp {
     fn new() -> Self {
         static N: AtomicUsize = AtomicUsize::new(0);
-        let p = std::env::temp_dir().join(format!(
+        let p = tmp_base().join(format!(
             "cv-wp13-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
@@ -38,14 +51,8 @@ impl Drop for Tmp {
     }
 }
 
-/// contentHash, chunk ids, embedding space per chunk.
-type Stored = (String, Vec<String>, Vec<Option<String>>);
-
 #[derive(Default)]
 struct FakeState {
-    /// path → (contentHash, chunk ids, embedding space per chunk)
-    store: BTreeMap<String, Stored>,
-    health: Value,
     embed_down: bool,
     log: Vec<(String, Value)>,
 }
@@ -57,95 +64,31 @@ struct Fake {
 }
 
 impl Fake {
-    fn paths(&self) -> Vec<String> {
+    fn embed_calls(&self) -> usize {
         self.st
             .lock()
             .unwrap()
             .log
             .iter()
-            .map(|(p, _)| p.clone())
-            .collect()
-    }
-    fn mutations(&self) -> usize {
-        self.paths()
-            .iter()
-            .filter(|p| p.starts_with("/v1/chunks/") || p.as_str() == "/embeddings")
+            .filter(|(p, _)| p == "/embeddings")
             .count()
     }
-    fn clear_log(&self) {
-        self.st.lock().unwrap().log.clear();
-    }
-    fn set_health(&self, h: Value) {
-        self.st.lock().unwrap().health = h;
-    }
 }
 
-fn health(model: Option<&str>, dim: Option<u64>) -> Value {
-    json!({"ok": true, "schemaVersion": 7, "embeddingModel": model, "embeddingDim": dim})
-}
+/// Every vector the fake embedder returns (3 dims).
+const VEC: [f32; 3] = [0.1, 0.2, 0.3];
 
 fn handle(st: &mut FakeState, path: &str, body: &Value) -> (u16, Value) {
-    let vault = body["vaultId"].as_str().unwrap_or("");
     match path {
-        "/health" => (200, st.health.clone()),
         "/embeddings" => {
             if st.embed_down {
                 return (503, json!({"error": "down"}));
             }
             let n = body["input"].as_array().map_or(0, Vec::len);
             let data: Vec<Value> = (0..n)
-                .map(|i| json!({"index": i, "embedding": [0.1, 0.2, 0.3]}))
+                .map(|i| json!({"index": i, "embedding": VEC}))
                 .collect();
             (200, json!({ "data": data }))
-        }
-        _ if vault != "vault-x" => (400, json!({"error": "wrong vault"})),
-        "/v1/paths" => {
-            let paths: Vec<Value> = st
-                .store
-                .iter()
-                .map(|(p, (h, ids, sp))| {
-                    json!({"path": p, "contentHash": h, "chunkCount": ids.len(),
-                        "embeddedCount": sp.iter().filter(|s| s.is_some()).count(), "mtime": 0})
-                })
-                .collect();
-            (200, json!({"ok": true, "paths": paths}))
-        }
-        "/v1/files/state" => {
-            let files: Vec<Value> = body["paths"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|p| {
-                    let p = p.as_str().unwrap();
-                    let (h, ids, sp) = st.store.get(p)?;
-                    let all = !ids.is_empty() && sp.iter().all(Option::is_some);
-                    let space = sp.first().cloned().flatten();
-                    Some(json!({"path": p, "contentHash": h, "chunkCount": ids.len(),
-                        "hasEmbeddings": all, "embeddingSpace": if all { space } else { None }}))
-                })
-                .collect();
-            (200, json!({"ok": true, "files": files}))
-        }
-        "/v1/chunks/upsert" => {
-            let mut seen: Vec<String> = Vec::new();
-            for c in body["chunks"].as_array().unwrap() {
-                let p = c["path"].as_str().unwrap().to_owned();
-                if !seen.contains(&p) {
-                    st.store.insert(p.clone(), (String::new(), vec![], vec![]));
-                    seen.push(p.clone());
-                }
-                let e = st.store.get_mut(&p).unwrap();
-                e.0 = c["contentHash"].as_str().unwrap().to_owned();
-                e.1.push(c["id"].as_str().unwrap().to_owned());
-                e.2.push(c["embeddingSpace"].as_str().map(str::to_owned));
-            }
-            (200, json!({"ok": true}))
-        }
-        "/v1/chunks/delete" => {
-            for p in body["paths"].as_array().unwrap() {
-                st.store.remove(p.as_str().unwrap());
-            }
-            (200, json!({"ok": true}))
         }
         _ => (404, json!({})),
     }
@@ -224,11 +167,12 @@ impl SecretSource for NoSecrets {
 }
 
 struct World {
-    _tmp: Tmp,
+    tmp: Tmp,
     rt: tokio::runtime::Runtime,
     fake: Fake,
     vault: PathBuf,
     index: PathBuf,
+    search: SearchDb,
     state: Arc<Mutex<StateDb>>,
     writer: cv_vault::WriterHandle,
     config: ConfigSet,
@@ -238,7 +182,7 @@ struct World {
 const NOTE_A: &str = "---\nauthor: Synthetic Author\n---\n# Alpha\nFirst synthetic note.\n\n![[0123456789abcdef0123456789abcdef_MD5.png]]";
 const NOTE_B: &str = "# Beta\nSecond synthetic note.";
 
-fn world(shadow: bool, companion_up: bool) -> World {
+fn world(shadow: bool) -> World {
     let tmp = Tmp::new();
     let vault = tmp.0.join("vault");
     std::fs::create_dir_all(vault.join("notes")).unwrap();
@@ -255,16 +199,11 @@ fn world(shadow: bool, companion_up: bool) -> World {
         .enable_all()
         .build()
         .unwrap();
-    let st = Arc::new(Mutex::new(FakeState {
-        health: health(None, None),
-        ..FakeState::default()
-    }));
+    let st = Arc::new(Mutex::new(FakeState::default()));
     let base = rt.block_on(async {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        if companion_up {
-            tokio::spawn(serve(l, st.clone()));
-        }
+        tokio::spawn(serve(l, st.clone()));
         format!("http://{addr}")
     });
     let fake = Fake { base, st };
@@ -301,12 +240,14 @@ fn world(shadow: bool, companion_up: bool) -> World {
         &super::validate,
     );
     assert!(config.errors().is_empty(), "{:?}", config.errors());
+    let search = SearchDb::new(tmp.0.join("state").join("search.db"));
     World {
-        _tmp: tmp,
+        tmp,
         rt,
         fake,
         vault,
         index,
+        search,
         state,
         writer,
         config,
@@ -333,6 +274,7 @@ impl World {
             config: &self.config,
             vault_root: &self.vault,
             index_db: &self.index,
+            search: Some(&self.search),
             state: &self.state,
             writer: Some(self.writer.clone()),
             children: &NoKids,
@@ -341,22 +283,40 @@ impl World {
         run(step, &mut ctx, self.rt.handle(), &self.mgr)
     }
 
+    /// `companion_url`/`vault_id` are still accepted (and ignored) through WP-3.
     fn upsert(&self, extra: &str) -> Step {
         let t: toml::Table = toml::from_str(&format!(
-            "companion_url = \"{}\"\nvault_id = \"vault-x\"\n{extra}",
-            self.fake.base
+            "companion_url = \"http://127.0.0.1:9\"\nvault_id = \"vault-x\"\n{extra}"
         ))
         .unwrap();
         Step::SearchUpsert(t)
     }
 
     fn delete(&self) -> Step {
-        let t: toml::Table = toml::from_str(&format!(
-            "companion_url = \"{}\"\nvault_id = \"vault-x\"",
-            self.fake.base
-        ))
-        .unwrap();
-        Step::SearchDelete(t)
+        Step::SearchDelete(toml::Table::new())
+    }
+
+    /// `(source, hash, chunks, embedded)` through the shared handle.
+    fn states(&self) -> Vec<(String, String, u64, u64)> {
+        let idx = self.search.shared().unwrap();
+        let g = idx.lock().unwrap();
+        g.source_states()
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.source, s.content_hash, s.chunks, s.embedded_chunks))
+            .collect()
+    }
+
+    /// Local notes prepared exactly as the feed step prepares them (no image descriptions).
+    fn local_notes(&self) -> Vec<(String, cv_search::LocalNote)> {
+        let reader = cv_index::Reader::open_current(&self.index).unwrap();
+        let vault = self.vault.clone();
+        let prep = NotePrep::new(
+            Box::new(move |p| Ok(std::fs::read(vault.join(p)).ok())),
+            &reader,
+            Box::new(|_| None),
+        );
+        prep.local_notes().unwrap()
     }
 }
 
@@ -379,54 +339,41 @@ fn assert_deferred(r: Result<StepOutcome, StepError>, service: &str) {
 }
 
 #[test]
-fn schema_other_than_7_fails_and_outages_defer() {
-    let w = world(false, true);
-    w.fake.set_health(json!({"ok": true, "schemaVersion": 6}));
-    let r = w.run(&w.upsert(""), Some("notes/b.md"));
-    assert!(matches!(r, Err(StepError::Failed { .. })), "{r:?}");
-    w.fake.set_health(json!({"ok": true}));
-    assert!(matches!(
-        w.run(&w.upsert(""), Some("notes/b.md")),
-        Err(StepError::Failed { .. })
-    ));
-    w.fake.set_health(json!({"ok": false, "schemaVersion": 7}));
-    assert_deferred(w.run(&w.upsert(""), Some("notes/b.md")), "search-companion");
-    // Embedder down → deferred on the embedder's provider id, nothing upserted.
-    w.fake.set_health(health(Some("m1"), Some(3)));
+fn embedder_outage_defers_and_writes_nothing() {
+    let w = world(false);
     w.fake.st.lock().unwrap().embed_down = true;
     assert_deferred(
         w.run(&w.upsert("embed = \"emb:m1\""), Some("notes/b.md")),
         "emb",
     );
-    assert!(!w.fake.paths().iter().any(|p| p.starts_with("/v1/chunks/")));
-
-    let down = world(false, false);
-    assert_deferred(
-        down.run(&down.upsert(""), Some("notes/b.md")),
-        "search-companion",
-    );
+    assert!(w.states().is_empty());
 }
 
 #[test]
 fn shadow_mode_never_mutates_or_embeds() {
-    let w = world(true, true);
-    {
-        let mut st = w.fake.st.lock().unwrap();
-        st.store.insert(
-            "notes/b.md".into(),
-            ("stale".into(), vec!["x".into()], vec![None]),
-        );
-        st.store
-            .insert("gone.md".into(), ("h".into(), vec!["y".into()], vec![None]));
-        st.health = health(Some("m1"), Some(3));
-    }
+    // A missing index is an empty one: counts, no error, no file created.
+    let w = world(true);
     let embed = "embed = \"emb:m1\"";
+    let rec = w.run(&w.upsert(embed), None).unwrap();
+    assert_eq!(var(&rec, "missing_index"), 2);
+    assert!(!w.search.path().exists());
+
+    // Pre-populate the index out of band: a stale b.md and an orphan.
+    std::fs::create_dir_all(w.search.path().parent().unwrap()).unwrap();
+    {
+        let mut idx = Index::open(w.search.path(), &IndexOptions::default()).unwrap();
+        let ch = |id: &str| cv_search::semsearch::Chunk::new(id, "t", "", "x");
+        idx.upsert_source("notes/b.md", "stale", &[ch("x")])
+            .unwrap();
+        idx.upsert_source("gone.md", "h", &[ch("y")]).unwrap();
+    }
+    let before = std::fs::read(w.search.path()).unwrap();
     let up = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
-    assert_eq!(var(&up, "missing_remote"), 1);
+    assert_eq!(var(&up, "missing_index"), 1);
     let del = w.run(&w.delete(), Some("gone.md")).unwrap();
     assert_eq!(var(&del, "missing_local"), 1);
     let rec = w.run(&w.upsert(embed), None).unwrap();
-    assert_eq!(var(&rec, "missing_remote"), 1);
+    assert_eq!(var(&rec, "missing_index"), 1);
     assert_eq!(var(&rec, "mismatched"), 1);
     assert_eq!(var(&rec, "missing_local"), 1);
     assert_eq!(var(&rec, "matched"), 0);
@@ -439,23 +386,27 @@ fn shadow_mode_never_mutates_or_embeds() {
             "embedding_mismatch",
             "matched",
             "mismatched",
-            "missing_local",
-            "missing_remote"
+            "missing_index",
+            "missing_local"
         ]
     );
-    assert_eq!(w.fake.mutations(), 0, "{:?}", w.fake.paths());
-    assert!(
-        w.fake
-            .paths()
-            .iter()
-            .all(|p| { ["/health", "/v1/paths", "/v1/files/state"].contains(&p.as_str()) })
-    );
-    assert!(w.fake.st.lock().unwrap().store.contains_key("gone.md"));
+    // No embed call, no write, and the shared writable handle was never opened.
+    assert_eq!(w.fake.embed_calls(), 0);
+    assert!(!w.search.is_open());
+    assert_eq!(std::fs::read(w.search.path()).unwrap(), before);
+    let idx = Index::open_read_only(w.search.path(), &IndexOptions::default()).unwrap();
+    let held: Vec<String> = idx
+        .source_states()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.source)
+        .collect();
+    assert_eq!(held, ["gone.md", "notes/b.md"]);
 }
 
 #[test]
-fn live_upserts_changed_skips_unchanged_and_reembeds_on_model_drift() {
-    let w = world(false, true);
+fn live_round_trip_skips_unchanged_and_fails_on_space_drift() {
+    let w = world(false);
     w.state
         .lock()
         .unwrap()
@@ -469,72 +420,48 @@ fn live_upserts_changed_skips_unchanged_and_reembeds_on_model_drift() {
             raw: "{}".into(),
         })
         .unwrap();
-    w.fake.st.lock().unwrap().store.insert(
-        "notes/a.md".into(),
-        ("old".into(), vec!["notes/a.md#9:stale".into()], vec![None]),
-    );
-    w.fake.set_health(health(Some("m1"), Some(3)));
     let embed = "embed = \"emb:m1\"";
 
-    // Changed note → upsert of exactly its chunks; the stale id is gone (full replace).
+    // Upsert → the source holds exactly its chunks, all embedded in Space { m1, 3 }.
     let o = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
-    assert_eq!(var(&o, "mismatched"), 1);
+    assert_eq!(var(&o, "missing_index"), 1);
     assert_eq!(var(&o, "upserted"), 1);
-    let ups: Vec<Value> = w
-        .fake
-        .st
-        .lock()
-        .unwrap()
-        .log
-        .iter()
-        .filter(|(p, _)| p == "/v1/chunks/upsert")
-        .map(|(_, b)| b.clone())
-        .collect();
-    assert_eq!(ups.len(), 1);
-    let chunks = ups[0]["chunks"].as_array().unwrap();
-    assert_eq!(ups[0]["vaultId"], "vault-x");
-    assert!(chunks.iter().all(|c| c["path"] == "notes/a.md"));
-    let headings: Vec<&str> = chunks
-        .iter()
-        .map(|c| c["heading"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        headings,
-        ["Alpha", "Image: 0123456789abcdef0123456789abcdef_MD5.png"]
-    );
-    assert_eq!(chunks[0]["entities"][0]["text"], "Synthetic Author");
-    assert_eq!(chunks[0]["embeddingModel"], "m1");
-    let stored = w.fake.st.lock().unwrap().store["notes/a.md"].1.clone();
-    assert!(!stored.contains(&"notes/a.md#9:stale".to_owned()));
-    assert_eq!(stored.len(), 2);
+    assert_eq!(var(&o, "chunks"), 2);
+    let st = w.states();
+    assert_eq!(st.len(), 1);
+    assert_eq!((st[0].0.as_str(), st[0].2, st[0].3), ("notes/a.md", 2, 2));
+    {
+        let idx = w.search.shared().unwrap();
+        let g = idx.lock().unwrap();
+        assert_eq!(g.space(), Some(&Space::new("m1", 3)));
+        let hits = g.search(&Query::new("synthetic author")).unwrap();
+        assert_eq!(hits[0].source, "notes/a.md");
+    }
 
-    // Unchanged and fully embedded → no mutation (only health, the dim probe, files/state).
-    w.fake.clear_log();
+    // Unchanged and fully embedded → no embed call, no write.
+    let calls = w.fake.embed_calls();
     let o = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
     assert_eq!(var(&o, "matched"), 1);
-    assert!(!w.fake.paths().iter().any(|p| p.starts_with("/v1/chunks/")));
-
-    // Lexical-only and unchanged → no request beyond the read half.
-    w.fake.clear_log();
+    assert_eq!(var(&o, "upserted"), 0);
+    assert_eq!(w.fake.embed_calls(), calls);
+    // Lexical-only and unchanged → matched too.
     let o = w.run(&w.upsert(""), Some("notes/a.md")).unwrap();
     assert_eq!(var(&o, "matched"), 1);
-    assert_eq!(w.fake.mutations(), 0);
 
-    // E3: hashes match but /health reports another model → re-upsert.
-    w.fake.set_health(health(Some("other-model"), Some(3)));
-    w.fake.clear_log();
-    let o = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
-    assert_eq!(var(&o, "embedding_mismatch"), 1);
-    assert_eq!(var(&o, "upserted"), 1);
-    // E3: same model, other dimension → re-upsert too.
-    w.fake.set_health(health(Some("m1"), Some(1024)));
-    let o = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
-    assert_eq!(var(&o, "embedding_mismatch"), 1);
+    // Another configured model: a Failed naming both spaces, before any embed call.
+    let r = w.run(&w.upsert("embed = \"emb:m2\""), Some("notes/a.md"));
+    match r {
+        Err(StepError::Failed { message, .. }) => {
+            assert!(
+                message.contains("m1/3d") && message.contains("m2"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(w.fake.embed_calls(), calls);
 
-    // A description change moves the hash → the note is mismatched again.
-    w.fake.set_health(health(Some("m1"), Some(3)));
-    let o = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
-    assert_eq!(var(&o, "matched"), 1);
+    // A description change moves the hash → mismatched.
     {
         let mut db = w.state.lock().unwrap();
         let mut d = db
@@ -547,22 +474,105 @@ fn live_upserts_changed_skips_unchanged_and_reembeds_on_model_drift() {
     let o = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
     assert_eq!(var(&o, "mismatched"), 1);
 
-    // Reconcile: b.md missing remotely gets upserted; an orphan is deleted.
-    w.fake.st.lock().unwrap().store.insert(
-        "orphan.md".into(),
-        ("h".into(), vec!["o".into()], vec![None]),
-    );
+    // Reconcile: b.md missing from the index gets upserted; an orphan is deleted.
+    {
+        let idx = w.search.shared().unwrap();
+        let ch = cv_search::semsearch::Chunk::new("o", "t", "", "x");
+        idx.lock()
+            .unwrap()
+            .upsert_source("orphan.md", "h", &[ch])
+            .unwrap();
+    }
     let o = w.run(&w.upsert(embed), None).unwrap();
-    assert_eq!(var(&o, "missing_remote"), 1);
+    assert_eq!(var(&o, "missing_index"), 1);
     assert_eq!(var(&o, "missing_local"), 1);
     assert_eq!(var(&o, "matched"), 1);
-    let store: Vec<String> = w.fake.st.lock().unwrap().store.keys().cloned().collect();
-    assert_eq!(store, ["notes/a.md", "notes/b.md"]);
+    let held: Vec<String> = w.states().into_iter().map(|s| s.0).collect();
+    assert_eq!(held, ["notes/a.md", "notes/b.md"]);
 
     // search_delete (live) drops the path.
     let o = w.run(&w.delete(), Some("notes/b.md")).unwrap();
     assert_eq!(var(&o, "deleted"), 1);
-    assert!(!w.fake.st.lock().unwrap().store.contains_key("notes/b.md"));
+    let held: Vec<String> = w.states().into_iter().map(|s| s.0).collect();
+    assert_eq!(held, ["notes/a.md"]);
+}
+
+#[test]
+fn steps_share_one_index_handle() {
+    let w = world(false);
+    let a = w.search.shared().unwrap();
+    // A write by one step is visible to a search through the same handle, without reopening.
+    w.run(&w.upsert(""), Some("notes/b.md")).unwrap();
+    assert!(Arc::ptr_eq(&a, &w.search.shared().unwrap()));
+    let hits = a.lock().unwrap().search(&Query::new("beta")).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].source, "notes/b.md");
+    w.run(&w.delete(), Some("notes/b.md")).unwrap();
+    assert!(
+        a.lock()
+            .unwrap()
+            .search(&Query::new("beta"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Writes a companion-schema DB holding `notes` chunked exactly as the feed chunks them, with
+/// every chunk embedded as [`VEC`] in the legacy space `bge-m3/f16`.
+fn synthetic_companion(path: &Path, notes: &[(String, cv_search::LocalNote)]) {
+    let mut rows = Vec::new();
+    for (_, n) in notes {
+        let chunks = cv_search::build_prepared_chunks(
+            &n.prepared,
+            cv_search::feed::DEFAULT_VAULT_ID,
+            &n.basename,
+            n.mtime,
+            cv_search::chunker::DEFAULT_MAX_CHARS,
+            cv_search::chunker::DEFAULT_OVERLAP_CHARS,
+        );
+        for c in chunks {
+            rows.push(CompanionRow {
+                metadata_json: c.metadata_json(),
+                id: c.id,
+                vault: "default".into(),
+                path: c.path,
+                content_hash: c.content_hash,
+                title: lossy(&c.title),
+                heading: lossy(&c.heading),
+                text: lossy(&c.text),
+                ordinal: i64::try_from(c.ordinal).unwrap(),
+                embedding: Some(VEC.to_vec()),
+                embedding_space: Some("bge-m3/f16".into()),
+            });
+        }
+    }
+    write_companion_fixture(path, &rows).unwrap();
+}
+
+#[test]
+fn imported_space_is_shared_with_the_feed_and_reconcile_does_not_reembed() {
+    let w = world(false);
+    let comp = w.tmp.0.join("companion.sqlite");
+    synthetic_companion(&comp, &w.local_notes());
+    {
+        let idx = w.search.shared().unwrap();
+        let mut g = idx.lock().unwrap();
+        let c = import_companion(&comp, &mut g).unwrap();
+        assert_eq!((c.sources, c.chunks, c.embedded, c.written), (2, 2, 2, 2));
+        assert_eq!(g.space(), Some(&Space::new("bge-m3/f16", 3)));
+        let hits = g
+            .search(&Query::new("synthetic").with_vector(VEC.to_vec()))
+            .unwrap();
+        assert!(hits.iter().any(|h| h.ranks.vector.is_some()));
+    }
+    // The serving id `bge-m3-f16` maps onto the imported space: nothing to re-embed or write.
+    let o = w
+        .run(&w.upsert("embed = \"emb:bge-m3-f16\""), None)
+        .unwrap();
+    assert_eq!(var(&o, "matched"), 2, "{:?}", o.vars);
+    assert_eq!(var(&o, "upserted"), 0);
+    assert_eq!(var(&o, "deleted"), 0);
+    assert_eq!(w.fake.embed_calls(), 0);
 }
 
 #[test]

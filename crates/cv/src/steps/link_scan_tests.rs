@@ -111,6 +111,7 @@ fn run(e: &Env, src: &str, active: Option<&str>) -> Result<StepOutcome, String> 
         config: &config,
         vault_root: &e.vault,
         index_db: &e.index,
+        search: None,
         state: &e.state,
         writer: Some(e.writer.clone()),
         children: &NoChildren,

@@ -251,6 +251,8 @@ pub struct RunnerDeps {
     pub index_db: PathBuf,
     /// `CV_CONFIG_DIR`.
     pub config_dir: PathBuf,
+    /// `CV_SEARCH_DB`: opened lazily by the first live search step (plan semsearch-crate WP-3).
+    pub search_db: PathBuf,
 }
 
 pub(crate) struct Inner {
@@ -263,6 +265,8 @@ pub(crate) struct Inner {
     vault_root: PathBuf,
     index_db: PathBuf,
     config_dir: PathBuf,
+    /// The one shared `semsearch` handle per process (Decision 7).
+    search: cv_search::SearchDb,
     config: RwLock<Arc<ConfigSet>>,
     wake: Notify,
     running: Mutex<HashSet<String>>,
@@ -301,6 +305,7 @@ impl Runner {
                 vault_root: deps.vault_root,
                 index_db: deps.index_db,
                 config_dir: deps.config_dir,
+                search: cv_search::SearchDb::new(deps.search_db),
                 config: RwLock::new(Arc::new(ConfigSet::new())),
                 wake: Notify::new(),
                 running: Mutex::new(HashSet::new()),
@@ -309,6 +314,13 @@ impl Runner {
                 cycle: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// The shared search index (WP-4's `Request::Search` handler queries through it, so feed
+    /// writes are visible without reopening).
+    #[allow(dead_code)] // first consumer: plan semsearch-crate WP-4
+    pub(crate) fn search_db(&self) -> &cv_search::SearchDb {
+        &self.inner.search
     }
 
     /// The current config snapshot.
@@ -905,6 +917,7 @@ fn execute_steps(
             config,
             vault_root: &inner.vault_root,
             index_db: &inner.index_db,
+            search: Some(&inner.search),
             state: &inner.state,
             writer: inner.writer.writer(),
             children: &spawner,

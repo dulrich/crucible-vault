@@ -236,6 +236,7 @@ fn exec(e: &Env, cfg: &ConfigSet, src: &str) -> Result<StepOutcome, StepError> {
         config: cfg,
         vault_root: &e.vault,
         index_db: &e.index,
+        search: None,
         state: &e.state,
         writer: Some(e.writer.clone()),
         children: &NoChildren,

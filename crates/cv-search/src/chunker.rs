@@ -209,6 +209,15 @@ pub struct SearchChunk {
 }
 
 impl SearchChunk {
+    /// The chunk's `metadata` object as `JSON.stringify` would emit it (the companion's
+    /// `metadata_json` column; stored as the `semsearch` chunk metadata).
+    #[must_use]
+    pub fn metadata_json(&self) -> String {
+        let mut o = String::with_capacity(256);
+        write_metadata(&mut o, &self.metadata);
+        o
+    }
+
     /// The chunk as `JSON.stringify` would emit it (key order as the TS object literal; lone
     /// surrogates escaped).
     #[must_use]
