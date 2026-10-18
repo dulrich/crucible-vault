@@ -30,6 +30,9 @@ use crate::widget::selectable::SelPos;
 
 /// Recompute debounce: a change is rendered once `edit_seq` has been stable for one tick.
 pub const TICK: Duration = Duration::from_millis(250);
+/// Plan round-6 WP-2: how long an armed restore guard waits for the re-created scrollable's
+/// first scroll report (it arrives within a frame or two of the activation).
+pub const RESTORE_GUARD: Duration = Duration::from_millis(1000);
 
 /// A tab's display mode (new tabs open in Reading; plan editor-cutover-blockers).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -154,7 +157,10 @@ pub struct ReadingStore {
     top: HashMap<(String, u64), usize>,
     /// Plan round-5 WP-1: tabs just (re)activated whose first `on_scroll` (iced reports offset
     /// 0 for a re-created scrollable) must re-apply the stored place instead of overwriting it.
-    restoring: std::collections::HashSet<u64>,
+    /// Plan round-6 WP-2: armed at an instant and honoured only within [`RESTORE_GUARD`] — iced
+    /// reports scrolling only when the content overflows, so an unexpired guard could otherwise
+    /// snap the view on a much later user wheel event.
+    restoring: HashMap<u64, std::time::Instant>,
     /// Plan round-6 WP-1: tabs (path, tab id) last sent to an edge by Ctrl+PgUp/PgDn (`true` =
     /// the end); a mode switch snaps the other mode to it. Cleared by the next user scroll.
     edge: HashMap<(String, u64), bool>,
@@ -506,13 +512,23 @@ impl ReadingStore {
         }
         let b = self.top_block(path, view)?;
         let blocks = self.doc(path)?.model.blocks.len();
-        self.restoring.insert(view);
+        self.restoring.insert(view, std::time::Instant::now());
         Some(probe(path, view, blocks, Some(b)))
     }
 
     /// Plan round-5 WP-1: the restore guard of tab `view` is armed.
     pub fn is_restoring(&self, view: u64) -> bool {
-        self.restoring.contains(&view)
+        self.restoring
+            .get(&view)
+            .is_some_and(|at| at.elapsed() < RESTORE_GUARD)
+    }
+
+    /// Test hook: backdates tab `view`'s restore guard by `by`.
+    #[cfg(test)]
+    pub(crate) fn age_restore_guard(&mut self, view: u64, by: std::time::Duration) {
+        if let Some(at) = self.restoring.get_mut(&view) {
+            *at = at.checked_sub(by).unwrap_or(*at);
+        }
     }
 
     pub fn doc(&self, path: &str) -> Option<&Doc> {
@@ -770,7 +786,12 @@ impl ReadingStore {
     pub fn invalidate_resolver(&mut self) {
         self.resolver = None;
         self.resolver_epoch += 1;
-        self.images.forget_dims();
+    }
+
+    /// Plan round-6 WP-2: vault file `path` changed (any kind) — only its own header-read size
+    /// is dropped; every other image keeps its placeholder size across resolver invalidation.
+    pub fn file_changed(&mut self, path: &str) {
+        self.images.forget_dims_of(path);
     }
 
     fn refresh_resolver(&mut self, d: &dyn DaemonClient) {
@@ -915,7 +936,7 @@ pub fn update(
             // Plan round-6 WP-1: a report away from the recorded edge (never the re-created
             // scrollable's first report, nor a snap landing on the edge) clears it. NaN (no
             // scroll range) keeps it.
-            if !store.restoring.contains(&view)
+            if !store.is_restoring(view)
                 && let Some(bottom) = store.edge(&path, view)
                 && (if bottom { y < 0.999 } else { y > 0.001 })
             {
@@ -924,9 +945,11 @@ pub fn update(
             if let Some(blocks) = store.doc(&path).map(|d| d.model.blocks.len()) {
                 // Plan round-5 WP-1: the first scroll report after a (re)activation is the
                 // re-created scrollable's offset 0 — re-apply the stored place instead.
+                // Plan round-6 WP-2: an expired guard is dropped without re-applying.
                 let again = store
                     .restoring
                     .remove(&view)
+                    .is_some_and(|at| at.elapsed() < RESTORE_GUARD)
                     .then(|| store.top_block(&path, view))
                     .flatten();
                 return probe(&path, view, blocks, again);

@@ -1069,3 +1069,161 @@ fn source_wheel_clears_the_edge() {
     })));
     assert_eq!(app.reading.edge(p, view), None);
 }
+
+/// Plan round-6 WP-2 (a): a create/delete/rename elsewhere invalidates the resolver but keeps
+/// every image's header-read size; only the changed file's own size is dropped.
+#[test]
+fn dims_survive_resolver_invalidation_for_an_unrelated_create() {
+    use cv_protocol::{ChangeKind, Notification, Origin};
+
+    use crate::message::StatusMsg;
+
+    let pic = png(300, 150);
+    let (_tmp, d) = setup(&[("A.md", b"![](pic.png)\n"), ("pic.png", &pic)]);
+    let mut app = app_on(&d, "A.md");
+    reading(&mut app, "A.md", ViewMode::Reading);
+    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let dims = |app: &App| {
+        app.reading
+            .images
+            .dims("pic.png")
+            .map(|d| (d.width, d.height))
+    };
+    assert_eq!(dims(&app), Some((300, 150)));
+    let changed = |path: &str, kind| {
+        Message::Status(StatusMsg::Notification(Notification::FileChanged {
+            path: path.to_owned(),
+            kind,
+            hash: None,
+            origin: Origin::Daemon,
+        }))
+    };
+    let epoch = app.reading.resolver_epoch;
+    let _ = app.update(changed("other.md", ChangeKind::Created));
+    assert!(app.reading.resolver_epoch > epoch, "resolver invalidated");
+    assert_eq!(dims(&app), Some((300, 150)), "unrelated churn keeps dims");
+    let _ = app.update(changed("pic.png", ChangeKind::Modified));
+    assert_eq!(dims(&app), None, "the changed file's own size is dropped");
+}
+
+/// A measuring renderer for layout tests: an RGBA handle measures as its pixel size.
+struct Measure;
+
+impl iced::advanced::Renderer for Measure {
+    fn start_layer(&mut self, _: iced::Rectangle) {}
+    fn end_layer(&mut self) {}
+    fn start_transformation(&mut self, _: iced::Transformation) {}
+    fn end_transformation(&mut self) {}
+    fn reset(&mut self, _: iced::Rectangle) {}
+    fn fill_quad(&mut self, _: iced::advanced::renderer::Quad, _: impl Into<iced::Background>) {}
+    fn allocate_image(
+        &mut self,
+        _: &Handle,
+        callback: impl FnOnce(Result<iced::advanced::image::Allocation, iced::advanced::image::Error>)
+        + Send
+        + 'static,
+    ) {
+        callback(Err(iced::advanced::image::Error::Unsupported));
+    }
+}
+
+impl iced::advanced::image::Renderer for Measure {
+    type Handle = Handle;
+    fn load_image(
+        &self,
+        _: &Handle,
+    ) -> Result<iced::advanced::image::Allocation, iced::advanced::image::Error> {
+        Err(iced::advanced::image::Error::Unsupported)
+    }
+    fn measure_image(&self, handle: &Handle) -> Option<iced::Size<u32>> {
+        match handle {
+            Handle::Rgba { width, height, .. } => Some(iced::Size::new(*width, *height)),
+            _ => None,
+        }
+    }
+    fn draw_image(
+        &mut self,
+        _: iced::advanced::image::Image,
+        _: iced::Rectangle,
+        _: iced::Rectangle,
+    ) {
+    }
+}
+
+/// Plan round-6 WP-2 (b): the placeholder and the decoded image lay out at the same height —
+/// with a `|width` beyond the natural width (the decode never upscales) and for a 1000×667
+/// image whose aspect the placeholder rounds.
+#[test]
+fn placeholder_height_equals_decoded_layout_height() {
+    use iced::advanced::layout::Limits;
+    use iced::advanced::widget::Tree;
+
+    let height = |el: iced::widget::Stack<'static, (), iced::Theme, Measure>, avail: f32| {
+        let mut el: iced::Element<'static, (), iced::Theme, Measure> = el.into();
+        let mut tree = Tree::new(el.as_widget());
+        let limits = Limits::new(iced::Size::ZERO, iced::Size::new(avail, f32::INFINITY));
+        el.as_widget_mut()
+            .layout(&mut tree, &Measure, &limits)
+            .size()
+            .height
+    };
+    // (natural w, natural h, `|width`, available column width)
+    for (w, h, width, avail) in [
+        (200, 100, Some(500), 800.0),
+        (1000, 667, None, 800.0),
+        (1000, 667, None, 1200.0),
+        (1000, 667, Some(400), 800.0),
+    ] {
+        let d = crate::image_cache::Dims::new(w, h).expect("dims");
+        let shown = width.map_or(w as f32, |x| x as f32).min(avail);
+        let decoded = decode(&png(w, h), decode_width(shown)).expect("decode");
+        let placeholder = height(super::view::sized_image(&d, width, None), avail);
+        let laid = height(
+            super::view::sized_image(&d, width, Some(decoded.handle)),
+            avail,
+        );
+        assert!(
+            (placeholder - laid).abs() <= 1.0,
+            "{w}x{h} |{width:?} in {avail}: placeholder {placeholder} vs decoded {laid}"
+        );
+        assert!(laid > 0.0);
+    }
+}
+
+/// Plan round-6 WP-2 (c): a restore guard the re-created scrollable never consumed (content
+/// not taller than the viewport → no scroll report) expires, so a later wheel event after the
+/// content grows does not snap back to the stored place.
+#[test]
+fn stale_restore_guard_does_not_snap_after_content_grows() {
+    let (a, b) = ("r6/a.md", "r6/b.md");
+    let body = long_note();
+    let (_t, d) = setup(&[(a, &body), (b, b"other\n")]);
+    let mut app = app_on(&d, a);
+    let view = app.view_of(a);
+    let blocks = app.reading.doc(a).expect("doc").model.blocks.len();
+    let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
+    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+        path: a.to_owned(),
+        view,
+        probe: Some(Probe {
+            offset_y: 40.0 * 20.0,
+            content_y: 0.0,
+            block_ys,
+        }),
+        scroll_to: None,
+    }));
+    let _ = app.update(Message::Tabs(TabsMsg::Open(b.to_owned())));
+    let pane = app.focus;
+    let _ = app.update(Message::Tabs(TabsMsg::Select(pane, 0)));
+    assert!(app.reading.is_restoring(view), "armed on activation");
+    // No scroll report arrives (content fits); later the content grows and the user wheels.
+    app.reading
+        .age_restore_guard(view, RESTORE_GUARD + std::time::Duration::from_millis(1));
+    assert!(!app.reading.is_restoring(view), "the guard expired");
+    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+        path: a.to_owned(),
+        view,
+        y: 0.3,
+    }));
+    assert!(!app.reading.is_restoring(view));
+}

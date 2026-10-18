@@ -4130,6 +4130,7 @@ impl App {
                     Notification::FileChanged {
                         path, kind, hash, ..
                     } => {
+                        self.reading.file_changed(&path);
                         if kind != cv_protocol::ChangeKind::Modified {
                             // Before `reload_tab`: a localize pass creates the attachments,
                             // then rewrites the note, whose re-lower must see them.

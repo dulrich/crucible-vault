@@ -699,22 +699,26 @@ fn image_block<'a>(
     // will be (a transparent same-aspect handle, `expand` + Contain), so nothing below jumps.
     let dims = cx.store.images.dims(key);
     let natural = |d: &crate::image_cache::Dims| width.unwrap_or(d.width) as f32;
+    let alt_text = || text(alt).size(cx.sz(13.0)).color(t.text_faint.to_color());
     let content: Element<'a, Message> = match (cx.store.images.get(key), dims) {
-        (Some(h), _) => {
+        // Plan round-6 WP-2: the placeholder stays the base layer once decoded, so the laid-out
+        // size never changes on decode (a `|width` beyond the natural width upscales).
+        (h, Some(d)) => {
+            let boxed = sized_image(d, width, h.cloned());
+            if h.is_some() {
+                boxed.into()
+            } else {
+                boxed.push(alt_text()).into()
+            }
+        }
+        (Some(h), None) => {
             let img = image(h.clone());
             match width {
                 Some(w) => img.width(Length::Fixed(w as f32)).into(),
                 None => img.into(),
             }
         }
-        (None, Some(d)) => iced::widget::stack![
-            image(d.placeholder.clone())
-                .width(Length::Fixed(natural(d)))
-                .expand(true),
-            text(alt).size(cx.sz(13.0)).color(t.text_faint.to_color()),
-        ]
-        .into(),
-        (None, None) => container(text(alt).size(cx.sz(13.0)).color(t.text_faint.to_color()))
+        (None, None) => container(alt_text())
             .height(Length::Fixed(120.0))
             .width(Length::Fill)
             .into(),
@@ -754,6 +758,32 @@ fn image_block<'a>(
         }));
     // plan editor-round-4 WP-4: right-click → Copy image / Copy path.
     crate::context_menu::on_right(sensed, menu_target)
+}
+
+/// Plan round-6 WP-2: an image of header size `d` shown `width` (or natural) wide: the
+/// same-aspect placeholder is the base layer and fixes the laid-out size; the decoded handle, if
+/// any, fills it. Placeholder and decoded layouts are therefore the same height by construction.
+pub(super) fn sized_image<'a, M: 'a, R>(
+    d: &crate::image_cache::Dims,
+    width: Option<u32>,
+    decoded: Option<image::Handle>,
+) -> iced::widget::Stack<'a, M, Theme, R>
+where
+    R: iced::advanced::image::Renderer<Handle = image::Handle> + 'a,
+{
+    let base = image(d.placeholder.clone())
+        .width(Length::Fixed(width.unwrap_or(d.width) as f32))
+        .expand(true);
+    let s = iced::widget::Stack::new().push(base);
+    match decoded {
+        Some(h) => s.push(
+            image(h)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::Fill),
+        ),
+        None => s,
+    }
 }
 
 fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {

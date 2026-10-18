@@ -213,9 +213,11 @@ impl ImageCache {
         self.dims.get(key)
     }
 
-    /// Forgets every header-read size (files were created, deleted or renamed).
-    pub fn forget_dims(&mut self) {
-        self.dims.clear();
+    /// Plan round-6 WP-2: forgets `key`'s header-read size (that file changed, was removed or
+    /// renamed away). Other files' sizes stay: dropping them all made every undecoded image
+    /// fall back to the 120 px box until the next tick, so the view jumped on any vault churn.
+    pub fn forget_dims_of(&mut self, key: &str) {
+        self.dims.remove(key);
     }
 
     /// The byte budget.
