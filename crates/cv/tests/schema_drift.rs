@@ -27,7 +27,7 @@ local = true
 max_tokens = 1000
 cwd = "/tmp"
 timeout_seconds = 30
-models = [{ id = "m1" }, { id = "e1", capabilities = ["embed", "rerank"] }, { id = "c1", capabilities = ["chat"] }]
+models = [{ id = "m1", label = "Model one" }, { id = "e1", capabilities = ["embed", "rerank"] }, { id = "c1", capabilities = ["chat"] }]
 "#,
     r#"
 [[provider]]

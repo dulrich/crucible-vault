@@ -11,8 +11,10 @@ name = "Local inference"
 base_url = "http://127.0.0.1:8080/v1"
 local = true
 
+# Optional `label`: the display name model pickers show (wins over the server's live name).
 [[provider.models]]
 id = "local-chat-model"
+# label = "Local chat model"
 
 [[provider.models]]
 id = "local-embed-model"

@@ -1392,6 +1392,7 @@ pub static MODEL: Record = Record {
     name: "model",
     fields: &[
         field("id", "Id", "Model id", Node::Str).req(),
+        field("label", "Label", "Display name in model pickers", Node::Str),
         field(
             "capabilities",
             "Capabilities",

@@ -64,6 +64,8 @@ pub enum Capability {
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     pub id: String,
+    /// Display label for pickers; wins over the server's live name for this declared model.
+    pub label: Option<String>,
     /// Absent means chat-only (Crucible's legacy default, `providerRefs.test.mjs:182`); an
     /// explicit empty list means no capability.
     pub capabilities: Option<Vec<Capability>>,
@@ -159,6 +161,27 @@ impl ProvidersConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_model_label() {
+        let cfg = ProvidersConfig::from_toml(
+            r#"
+[[provider]]
+id = "local"
+kind = "openai-compatible"
+models = [{ id = "gemma-4", label = "Gemma 4" }, { id = "bge", capabilities = ["embed"] }]
+"#,
+        )
+        .unwrap();
+        let local = cfg.get("local").unwrap();
+        assert_eq!(
+            local.model("gemma-4").unwrap().label.as_deref(),
+            Some("Gemma 4")
+        );
+        assert_eq!(local.model("bge").unwrap().label, None);
+        let typo = "[[provider]]\nid = \"x\"\nkind = \"ollama\"\nmodels = [{ id = \"m\", lable = \"t\" }]\n";
+        assert!(ProvidersConfig::from_toml(typo).is_err());
+    }
 
     #[test]
     fn parses_typed_providers() {

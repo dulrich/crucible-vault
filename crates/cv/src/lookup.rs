@@ -241,7 +241,7 @@ impl Lookups {
                 .iter()
                 .map(|m| LookupModel {
                     id: m.id.clone(),
-                    display_name: None,
+                    display_name: m.label.clone(),
                 })
                 .collect(),
             live: false,
@@ -252,9 +252,17 @@ impl Lookups {
             Ok(Some(list)) => {
                 let models: Vec<LookupModel> = list
                     .into_iter()
-                    .map(|m| LookupModel {
-                        id: m.id,
-                        display_name: m.display_name,
+                    .map(|m| {
+                        // A declared label wins over the server's live name.
+                        let label = p
+                            .models
+                            .iter()
+                            .find(|d| d.id == m.id)
+                            .and_then(|d| d.label.clone());
+                        LookupModel {
+                            display_name: label.or(m.display_name),
+                            id: m.id,
+                        }
                     })
                     .collect();
                 lock(&self.models).put(p.id.clone(), models.clone(), Instant::now());
