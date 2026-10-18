@@ -1,0 +1,13 @@
+[package]
+name = "search-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+
+[profile.release]
+debug = false

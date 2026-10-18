@@ -1,0 +1,10 @@
+vocab terms(len>=4,alpha)=103772
+1 term rare(<10 docs)                  n=40 p50=   0.04ms p90=   0.13ms max=   0.24ms
+1 term mid(100-1k)                     n=40 p50=   0.23ms p90=   0.55ms max=   1.85ms
+1 term common(>5k)                     n=40 p50=   4.49ms p90=  10.54ms max=  28.69ms
+2 terms AND (mid+common)               n=40 p50=   0.37ms p90=   0.73ms max=   2.03ms
+2 terms OR (mid+common)                n=40 p50=   4.07ms p90=  11.63ms max=  27.92ms
+3 common terms OR                      n=40 p50=  13.42ms p90=  24.22ms max=  35.05ms
+prefix 2 chars (typeahead)             n=40 p50=  24.84ms p90=  42.58ms max=  46.08ms
+prefix 3 chars (typeahead)             n=40 p50=   5.53ms p90=  22.39ms max=  44.66ms
+prefix 5 chars (no prefix idx)         n=40 p50=   1.29ms p90=   3.44ms max=   6.81ms

@@ -1,0 +1,9 @@
+real queries n=40 binary cand=100 f32 rescore: mean recall@10=0.875 min=0.3
+real queries n=40 binary cand=200 f32 rescore: mean recall@10=0.930 min=0.3
+real queries n=40 binary cand=400 f32 rescore: mean recall@10=0.978 min=0.9
+real queries asym cand=200: mean recall@10=0.978 min=0.7
+real queries asym cand=400: mean recall@10=0.990 min=0.9
+real queries asym cand=800: mean recall@10=0.995 min=0.9
+real queries sym  cand=200: mean recall@10=0.930 min=0.3
+real queries sym  cand=400: mean recall@10=0.978 min=0.9
+real queries sym  cand=800: mean recall@10=0.995 min=0.9

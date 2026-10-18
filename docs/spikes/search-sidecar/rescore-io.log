@@ -1,0 +1,3 @@
+fetch 100 f32 blobs by rowid: p50=0.18ms p90=0.23ms
+fetch 200 f32 blobs by rowid: p50=0.37ms p90=0.42ms
+fetch 400 f32 blobs by rowid: p50=0.99ms p90=1.14ms
