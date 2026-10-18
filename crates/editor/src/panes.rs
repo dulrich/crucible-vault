@@ -25,7 +25,7 @@ impl PaneState {
 
     /// The active tab when it is a note (never the Settings tab).
     pub fn active_note(&self) -> Option<&Tab> {
-        self.active_tab().filter(|t| !t.is_settings())
+        self.active_tab().filter(|t| !t.is_sentinel())
     }
 
     /// Removes tab `i`, fixing the active index; returns the removed tab.

@@ -28,6 +28,8 @@ pub enum Message {
     Find(FindMsg),
     /// plan editor-settings-tab WP-2: the Settings tab.
     Settings(crate::settings::SettingsMsg),
+    /// Plan round-6-feedback-todos WP-7: the Log tab.
+    Log(crate::log::LogMsg),
     /// plan editor-data-safety WP-2: the open modal dialog.
     Dialog(crate::dialog::DialogMsg),
     /// plan editor-ui-round-3 WP-4: the right-click context menu.

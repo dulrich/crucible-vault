@@ -87,6 +87,8 @@ pub enum ClientCmd {
     CommandPaletteKey,
     /// plan editor-settings-tab WP-2: open (or focus) the Settings tab (Ctrl+,).
     OpenSettings,
+    /// Plan round-6-feedback-todos WP-7: open (or focus) the Log tab (no default chord).
+    OpenLog,
     /// plan editor-ui-round-3 WP-3: delete the active note (confirm dialog with its orphans).
     DeleteNote,
     /// Plan usability-sprint-captures-links WP-6: move the active note to a picked folder.
@@ -237,6 +239,7 @@ impl ClientCmd {
             ClientCmd::FindInNote,
             ClientCmd::FocusSearch,
             ClientCmd::OpenSettings,
+            ClientCmd::OpenLog,
             ClientCmd::DeleteNote,
             ClientCmd::MoveNote,
             ClientCmd::GoToTop,
@@ -274,6 +277,7 @@ impl ClientCmd {
             ClientCmd::FocusSearch => "Search the vault",
             ClientCmd::CommandPaletteKey => "Command palette",
             ClientCmd::OpenSettings => "Open settings",
+            ClientCmd::OpenLog => "Open log",
             ClientCmd::DeleteNote => "Delete note…",
             ClientCmd::MoveNote => "Move note…",
             ClientCmd::GoToTop => "Go to top",
@@ -308,6 +312,7 @@ impl ClientCmd {
             ClientCmd::FocusSearch => "focus_search",
             ClientCmd::CommandPaletteKey => "command_palette",
             ClientCmd::OpenSettings => "open_settings",
+            ClientCmd::OpenLog => "open_log",
             ClientCmd::DeleteNote => "delete_note",
             ClientCmd::MoveNote => "move_note",
             ClientCmd::GoToTop => "go_to_top",
@@ -372,6 +377,7 @@ impl ClientCmd {
             ClientCmd::FocusSearch => Message::Panels(PanelsMsg::Show(PanelKind::Search)),
             ClientCmd::CommandPaletteKey => Message::Palette(PaletteMsg::Open),
             ClientCmd::OpenSettings => Message::Settings(crate::settings::SettingsMsg::Open),
+            ClientCmd::OpenLog => Message::Log(crate::log::LogMsg::Open),
             ClientCmd::DeleteNote => Message::Explorer(crate::message::ExplorerMsg::DeleteActive),
             ClientCmd::MoveNote => Message::Switcher(crate::message::SwitcherMsg::OpenMove),
             ClientCmd::GoToTop => Message::Reading(ReadingMsg::GoToEdge { bottom: false }),

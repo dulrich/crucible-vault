@@ -16,6 +16,7 @@ pub mod history;
 pub mod icons;
 pub mod image_cache;
 pub mod link_ta;
+pub mod log;
 pub mod message;
 pub mod migrate;
 pub mod nav;

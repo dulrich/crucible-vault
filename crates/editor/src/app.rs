@@ -73,6 +73,8 @@ pub enum TabKind<'a> {
     /// A vault note at this path.
     Note(&'a str),
     Settings,
+    /// Plan round-6-feedback-todos WP-7: the notice log ([`crate::log::LOG_TAB`]).
+    Log,
 }
 
 impl Tab {
@@ -80,6 +82,8 @@ impl Tab {
     pub fn kind(&self) -> TabKind<'_> {
         if self.is_settings() {
             TabKind::Settings
+        } else if self.is_log() {
+            TabKind::Log
         } else {
             TabKind::Note(&self.path)
         }
@@ -88,6 +92,21 @@ impl Tab {
     /// Whether this is the Settings tab.
     pub fn is_settings(&self) -> bool {
         self.path == crate::settings::SETTINGS_TAB
+    }
+
+    /// Whether this is the Log tab.
+    pub fn is_log(&self) -> bool {
+        self.path == crate::log::LOG_TAB
+    }
+
+    /// Whether this tab is a sentinel (Settings, Log): no document, never a note.
+    pub fn is_sentinel(&self) -> bool {
+        self.is_settings() || self.is_log()
+    }
+
+    /// Whether `path` is a sentinel tab path.
+    pub fn sentinel_path(path: &str) -> bool {
+        path == crate::settings::SETTINGS_TAB || path == crate::log::LOG_TAB
     }
 
     /// A new tab (fresh id) showing `path`.
@@ -116,6 +135,8 @@ pub struct StatusModel {
     pub notice: Option<Notice>,
     /// plan editor-data-safety WP-1: disconnected with a reconnect loop running.
     pub reconnecting: bool,
+    /// Plan round-6-feedback-todos WP-7: every notice, in a bounded ring (the Log tab).
+    pub log: crate::log::Log,
 }
 
 impl StatusModel {
@@ -153,6 +174,29 @@ impl StatusModel {
         text: impl Into<String>,
         now: std::time::Instant,
     ) {
+        self.notify_from_at(severity, text, None, now);
+    }
+
+    /// [`Self::notify`] with a source (job title/id, path) recorded in the log.
+    pub fn notify_from(
+        &mut self,
+        severity: Severity,
+        text: impl Into<String>,
+        source: impl Into<String>,
+    ) {
+        let now = std::time::Instant::now();
+        self.notify_from_at(severity, text, Some(source.into()), now);
+    }
+
+    fn notify_from_at(
+        &mut self,
+        severity: Severity,
+        text: impl Into<String>,
+        source: Option<String>,
+        now: std::time::Instant,
+    ) {
+        let text = text.into();
+        self.log.push(severity, text.clone(), source);
         if let Some(n) = &self.notice
             && n.severity > severity
             && n.expires > now
@@ -160,10 +204,16 @@ impl StatusModel {
             return;
         }
         self.notice = Some(Notice {
-            text: text.into(),
+            text,
             severity,
             expires: now + severity.ttl(),
         });
+    }
+
+    /// Logs without raising a notice (events with their own display: connection state,
+    /// the Settings file notice).
+    pub fn record(&mut self, severity: Severity, text: impl Into<String>, source: Option<String>) {
+        self.log.push(severity, text.into(), source);
     }
 
     /// An Error notice.
@@ -439,7 +489,7 @@ impl App {
             .as_deref()
             .map(ui_state::load)
             .unwrap_or_default();
-        let (status, notifications) = match &daemon {
+        let (mut status, notifications) = match &daemon {
             Some(d) => {
                 let h = d.hello();
                 let rx = match d.subscribe(&crate::daemon::ALL_TOPICS) {
@@ -457,6 +507,7 @@ impl App {
                         last_job: None,
                         notice: None,
                         reconnecting: false,
+                        log: crate::log::Log::default(),
                     },
                     NotifHandle::new(rx),
                 )
@@ -469,10 +520,18 @@ impl App {
                     last_job: None,
                     notice: None,
                     reconnecting: false,
+                    log: crate::log::Log::default(),
                 },
                 NotifHandle::default(),
             ),
         };
+        if !status.connected {
+            status.record(
+                Severity::Warning,
+                "started without a daemon connection",
+                None,
+            );
+        }
         let layout = ui
             .panes
             .clone()
@@ -654,6 +713,8 @@ impl App {
         self.status.connected = true;
         self.status.reconnecting = false;
         self.status.notice = None;
+        self.status
+            .record(Severity::Info, "reconnected to daemon", None);
         self.reconnect_attempt = 0;
         let epoch = self.notifications.epoch() + 1;
         self.notifications = NotifHandle::shared(conn.rx, epoch);
@@ -696,6 +757,11 @@ impl App {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "reconnect resync read failed");
+                self.status.notify_from(
+                    Severity::Warning,
+                    format!("re-reading after reconnect failed: {e}"),
+                    path.to_owned(),
+                );
                 Task::none()
             }
         }
@@ -725,7 +791,7 @@ impl App {
         self.panes
             .iter()
             .filter_map(|(_, ps)| ps.active_tab())
-            .map(|t| (t.id, (!t.is_settings()).then(|| t.path.clone())))
+            .map(|t| (t.id, (!t.is_sentinel()).then(|| t.path.clone())))
             .collect()
     }
 
@@ -982,6 +1048,10 @@ impl App {
             self.open_settings_into(pane);
             return Ok(());
         }
+        if path == crate::log::LOG_TAB {
+            self.open_log_into(pane);
+            return Ok(());
+        }
         let pane = if self.panes.get(pane).is_some() {
             pane
         } else {
@@ -1060,7 +1130,7 @@ impl App {
     /// Pushes `path` onto `pane`'s history (not while restoring or stepping back/forward; never
     /// the Settings tab).
     fn record_visit(&mut self, pane: Pane, path: &str) {
-        if self.restoring || self.history_nav || path == crate::settings::SETTINGS_TAB {
+        if self.restoring || self.history_nav || Tab::sentinel_path(path) {
             return;
         }
         if let Some(ps) = self.panes.get_mut(pane) {
@@ -1101,6 +1171,9 @@ impl App {
                 self.tokens,
                 self.status.mode,
             );
+        }
+        if tab.is_log() {
+            return crate::log::view(&self.status.log, self.tokens);
         }
         let Some(doc) = self.docs.get(&tab.path) else {
             return iced::widget::Space::new().into();
@@ -1153,13 +1226,15 @@ impl App {
             .panes
             .iter()
             .flat_map(|(_, ps)| ps.tabs.iter())
-            .filter(|t| !t.is_settings())
+            .filter(|t| !t.is_sentinel())
             .map(|t| (t.path.clone(), self.reading.mode(&t.path).into()))
             .collect();
         let Some(path) = &self.state_path else { return };
         let vault = self.daemon.as_ref().map(|d| d.vault_root().to_path_buf());
         if let Err(e) = ui_state::save(path, &self.ui, vault.as_deref()) {
             tracing::warn!(error = %e, "saving editor.json failed");
+            self.status
+                .notify(Severity::Warning, format!("saving editor.json failed: {e}"));
         }
     }
 
@@ -1723,6 +1798,7 @@ impl App {
                 self.set_surround(s);
             }
             Message::Settings(m) => return self.update_settings(m),
+            Message::Log(m) => return self.update_log(m),
             Message::Explorer(m) => return self.update_explorer(m),
             Message::Source(SourceMsg::TakeTheirs(path))
                 if self.docs.get(&path).is_some_and(|d| d.is_missing()) =>
@@ -2138,6 +2214,10 @@ impl App {
             // its save loops outlive the tab, so the writes land after the close).
             self.remove_tab(pane, i);
             return self.flush_settings().1;
+        }
+        if tab.is_log() {
+            self.remove_tab(pane, i);
+            return Task::none();
         }
         let Some(doc) = self.docs.get_mut(&tab.path) else {
             self.remove_tab(pane, i);
@@ -2602,6 +2682,7 @@ impl App {
             TabKind::Settings => {
                 Some((crate::settings::body_scroll_id(self.settings.section), None))
             }
+            TabKind::Log => None,
             TabKind::Note(path) => self.reading.mode(path).shows_reading().then(|| {
                 (
                     crate::find::reading_scroll_id(path, self.view_of(path)),
@@ -3761,7 +3842,7 @@ impl App {
         };
         let Some(i) = ps
             .active
-            .filter(|&i| ps.tabs.get(i).is_some_and(|t| !t.is_settings()))
+            .filter(|&i| ps.tabs.get(i).is_some_and(|t| !t.is_sentinel()))
         else {
             if call.needs.iter().any(|n| n == "active_path") {
                 self.status
@@ -3916,7 +3997,11 @@ impl App {
                     .unwrap_or_else(|| j.job_id.clone());
                 let state = crate::palette::state_label(j.status);
                 let reason = j.message.as_deref().unwrap_or("no reason given");
-                self.status.set_error(format!("{title} {state}: {reason}"));
+                self.status.notify_from(
+                    Severity::Error,
+                    format!("{title} {state}: {reason}"),
+                    format!("job {}", j.job_id),
+                );
             }
             return;
         }
@@ -4162,6 +4247,10 @@ impl App {
     fn update_status(&mut self, m: StatusMsg) -> Task<Message> {
         match m {
             StatusMsg::Disconnected => {
+                if self.status.connected {
+                    self.status
+                        .record(Severity::Warning, "daemon connection lost", None);
+                }
                 self.status.connected = false;
                 return self.start_reconnect();
             }
@@ -4425,6 +4514,43 @@ impl App {
         self.sync_view_files();
     }
 
+    /// Plan round-6-feedback-todos WP-7: opens the Log tab in `pane`, or focuses it where it is
+    /// already open (at most one). Opening resets the unread count.
+    fn open_log_into(&mut self, pane: Pane) {
+        self.status.log.unread = 0;
+        if let Some((p, i)) = panes::find(&self.panes, crate::log::LOG_TAB) {
+            self.focus = p;
+            if let Some(ps) = self.panes.get_mut(p) {
+                ps.active = Some(i);
+            }
+            return;
+        }
+        let pane = if self.panes.get(pane).is_some() {
+            pane
+        } else {
+            self.focus
+        };
+        if let Some(ps) = self.panes.get_mut(pane) {
+            ps.tabs.push(Tab::new(crate::log::LOG_TAB));
+            ps.active = Some(ps.tabs.len() - 1);
+        }
+        self.focus = pane;
+    }
+
+    fn update_log(&mut self, m: crate::log::LogMsg) -> Task<Message> {
+        use crate::log::LogMsg;
+        match m {
+            LogMsg::Open => {
+                self.open_log_into(self.focus);
+                self.persist();
+            }
+            LogMsg::Filter(f) => self.status.log.filter = f,
+            LogMsg::Clear => self.status.log.clear(),
+            LogMsg::Copy => return iced::clipboard::write(self.status.log.copy_text()),
+        }
+        Task::none()
+    }
+
     /// Registers the `views/*.toml` files the explorer knows and loads every unloaded page.
     fn sync_view_files(&mut self) {
         self.settings.sync_views(&self.explorer.paths);
@@ -4597,6 +4723,10 @@ impl App {
                 if let Some(f) = self.settings.file_mut(&path) {
                     let failed = !matches!(r, Ok(crate::settings::WriteOutcome::Saved(_)));
                     f.finish_save(r, d.as_deref());
+                    if failed && let Some(n) = &f.notice {
+                        self.status
+                            .record(Severity::Warning, n.clone(), Some(path.clone()));
+                    }
                     again = f.queued && f.can_save();
                     if !again {
                         f.queued = false;
@@ -4746,11 +4876,12 @@ impl App {
     pub fn tab_header_title(&self, ps: &PaneState, tab: &Tab) -> String {
         match tab.kind() {
             TabKind::Settings => "Settings".to_owned(),
+            TabKind::Log => "Log".to_owned(),
             TabKind::Note(p) => {
                 let siblings: Vec<&str> = ps
                     .tabs
                     .iter()
-                    .filter(|t| !t.is_settings())
+                    .filter(|t| !t.is_sentinel())
                     .map(|t| t.path.as_str())
                     .collect();
                 let fm = match self.prefs.tab_title {
@@ -4781,6 +4912,8 @@ impl App {
             };
             let (dirty, saving) = if tab.is_settings() {
                 (self.settings.any_dirty(), false)
+            } else if tab.is_log() {
+                (false, false)
             } else {
                 self.docs
                     .get(&tab.path)
@@ -4802,8 +4935,8 @@ impl App {
                 .padding([0, 6])
                 .style(button::text)
                 .on_press(Message::Tabs(TabsMsg::Select(pane, i)));
-            let hover = if tab.is_settings() {
-                "Settings".to_owned()
+            let hover = if tab.is_sentinel() {
+                self.tab_header_title(ps, tab)
             } else {
                 tab.path.clone()
             };
@@ -4826,7 +4959,7 @@ impl App {
             .height(BAR_HEIGHT)
             .align_y(iced::Alignment::Center);
             // WP-4: right-click a note tab for its context menu.
-            let chip: Element<'a, Message> = if tab.is_settings() {
+            let chip: Element<'a, Message> = if tab.is_sentinel() {
                 chip.into()
             } else {
                 crate::context_menu::on_right(
@@ -5229,7 +5362,24 @@ impl App {
             None => Space::new().into(),
         };
         let status = row![
-            text(self.status.line()).size(16),
+            // Plan round-6-feedback-todos WP-7: a click opens the Log tab; the badge counts
+            // unread warnings + errors.
+            button(
+                row![
+                    text(self.status.line()).size(16),
+                    text(if self.status.log.unread > 0 {
+                        format!("⚠ {}", self.status.log.unread)
+                    } else {
+                        String::new()
+                    })
+                    .size(16)
+                    .color(t.warn_text.to_color()),
+                ]
+                .spacing(8),
+            )
+            .padding(0)
+            .style(button::text)
+            .on_press(Message::Log(crate::log::LogMsg::Open)),
             text(toast).size(16).color(t.accent_text.to_color()),
             notice,
             button(text(format!("Surround: {}", self.prefs.surround.label())).size(16))
