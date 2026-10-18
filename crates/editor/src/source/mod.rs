@@ -273,10 +273,9 @@ impl SourceBuffer {
     fn shaped(&mut self) -> &mut Content {
         if let Repr::Plain { text, cursor } = &self.content {
             let mut c = Content::with_text(text);
-            c.move_to(to_iced(*cursor));
             // Plan round-5 WP-1: a fresh shaped buffer starts scrolled to the top; re-apply the
             // tracked top line (kept across dematerialise — tab blur/resume keeps its place).
-            scroll_content(&mut c, self.top_line);
+            fresh_view(&mut c, to_iced(*cursor), self.top_line);
             self.content = Repr::Shaped(c);
         }
         match &mut self.content {
@@ -428,8 +427,22 @@ impl SourceBuffer {
     /// to a block near the end shows the document's last viewport, never a past-the-end view.
     pub fn scroll_to_line(&mut self, line: usize) {
         let line = line.min(self.max_top());
-        scroll_content(self.shaped(), line);
+        // Plan round-6 WP-1: one delta from the tracked (pending) top — `shaped()` of a plain
+        // buffer has already queued the scroll to `top_line`.
+        let from = self.top_line;
+        scroll_content(self.shaped(), from, line);
         self.top_line = line;
+    }
+
+    /// Plan round-6 WP-1: scrolls to the document's start / end without moving the cursor (a
+    /// mode switch after Ctrl+PgUp/PgDn). The end overshoots by the line count: shaping clamps
+    /// the view to the last full viewport, wrapped lines included.
+    pub fn scroll_to_edge(&mut self, bottom: bool) {
+        let from = self.top_line;
+        let c = self.shaped();
+        let to = if bottom { c.line_count() } else { 0 };
+        scroll_content(c, from, to);
+        self.top_line = if bottom { self.max_top() } else { 0 };
     }
 
     /// plan editor-ui-round-3 WP-5: moves the cursor to the buffer's start (`false`) or end
@@ -1124,15 +1137,15 @@ impl SourceBuffer {
 /// `Content::move_to` that also clears a stale selection: iced's `move_to` leaves the old
 /// selection in place when `c.selection` is `None` (WP-4); a motion over an empty selection
 /// collapses it without moving the cursor.
-fn place(content: &mut Content, c: text_editor::Cursor) {
+fn place(content: &mut impl EditorOps, c: text_editor::Cursor) {
     if c.selection.is_some() {
-        content.move_to(c);
+        content.move_cursor(c);
     } else {
-        content.move_to(text_editor::Cursor {
+        content.move_cursor(text_editor::Cursor {
             position: c.position,
             selection: Some(c.position),
         });
-        content.perform(Action::Move(Motion::Left));
+        content.act(Action::Move(Motion::Left));
     }
 }
 
@@ -1472,18 +1485,49 @@ pub fn viewport_lines(height: f32, font_size: f32) -> usize {
     n.max(1)
 }
 
-/// Scrolls `content` so source `line` is at the top: fully up, then down by `line` lines
-/// (wrapped lines above `line` count once each).
-fn scroll_content(content: &mut Content, line: usize) {
-    let up = i32::try_from(content.line_count()).unwrap_or(i32::MAX / 2);
-    content.perform(Action::Scroll {
-        lines: -up.saturating_mul(4),
-    });
-    if line > 0 {
-        content.perform(Action::Scroll {
-            lines: i32::try_from(line).unwrap_or(i32::MAX),
-        });
+/// Plan round-6 WP-1: the two editor operations the place-keeping sequences issue, so the
+/// layout-backed tests drive an `iced_graphics` text editor (whose cosmic buffer is
+/// reachable) with exactly the production sequence ([`fresh_view`], [`scroll_content`]).
+pub(crate) trait EditorOps {
+    fn act(&mut self, action: Action);
+    /// The editor's raw `move_to`.
+    fn move_cursor(&mut self, cursor: text_editor::Cursor);
+}
+
+impl EditorOps for Content {
+    fn act(&mut self, action: Action) {
+        self.perform(action);
     }
+    fn move_cursor(&mut self, cursor: text_editor::Cursor) {
+        self.move_to(cursor);
+    }
+}
+
+/// Plan round-6 WP-1 (spike `docs/spikes/source-scroll/FINDINGS.md`): the single scroll that
+/// moves a view whose (pending) top source line is `from` to `to`. cosmic-text =0.15.0 sums
+/// every `Scroll` into one pixel offset that is only resolved at the next shaping (where a
+/// net-negative offset clamps to line 0), so the old "fully up, then down `line`" pair landed
+/// at the top; one relative delta from the tracked top lands on `to` (wrapped lines above
+/// count once each). `None` when already there.
+pub(crate) fn scroll_action(from: usize, to: usize) -> Option<Action> {
+    let delta = i64::try_from(to).unwrap_or(i64::MAX) - i64::try_from(from).unwrap_or(i64::MAX);
+    let lines = i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX });
+    (lines != 0).then_some(Action::Scroll { lines })
+}
+
+/// Scrolls an editor whose pending top source line is `from` so `to` is at the top.
+pub(crate) fn scroll_content(e: &mut impl EditorOps, from: usize, to: usize) {
+    if let Some(a) = scroll_action(from, to) {
+        e.act(a);
+    }
+}
+
+/// Plan round-6 WP-1: the sequence a freshly shaped editor (scroll at line 0) gets — the kept
+/// cursor, then the tracked top line (measured: a kept cursor outside the kept view does not
+/// pull the view back to it at the next shaping).
+pub(crate) fn fresh_view(e: &mut impl EditorOps, cursor: text_editor::Cursor, top: usize) {
+    place(e, cursor);
+    scroll_content(e, 0, top);
 }
 
 /// Handles `file_changed` for any open tab on `path`.

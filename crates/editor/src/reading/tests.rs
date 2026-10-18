@@ -505,10 +505,11 @@ fn long_note() -> Vec<u8> {
         .into_bytes()
 }
 
-/// plan editor-round-4 WP-2: Ctrl+PgDn in Source, then Source -> Reading lands in the final
-/// screen of blocks (the stale top line used to carry block 0).
+/// plan editor-round-4 WP-2: Ctrl+PgDn in Source tracks the last viewport. Plan round-6 WP-1:
+/// the Source -> Reading half (it carried the window's first block, para 81) is now an edge
+/// snap — see `source_go_to_end_then_reading_snaps_to_the_end`.
 #[test]
-fn go_to_bottom_then_source_to_reading_lands_at_the_bottom() {
+fn go_to_bottom_in_source_tracks_the_last_viewport() {
     let p = "r4/long.md";
     let body = long_note();
     let (_t, d) = setup(&[(p, &body)]);
@@ -519,16 +520,6 @@ fn go_to_bottom_then_source_to_reading_lands_at_the_bottom() {
     let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
     let top = app.active_doc().expect("doc").top_line();
     assert_eq!(top, 200 - 39, "the last 40 lines are the visible window");
-    reading(&mut app, p, ViewMode::Reading);
-    let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
-    let b = app
-        .reading
-        .top_block(p, app.view_of(p))
-        .expect("carried block");
-    // Line 161 (the blank after para 80) carries to para 81: the visible window's first block
-    // — the last ~20 blocks (= 40 lines) fill the final screen.
-    assert_eq!(b, 81, "block {b} of {blocks}");
-    assert!(b + 40 / 2 >= blocks);
 }
 
 /// plan editor-round-4 WP-2: Reading at its last block, then Reading -> Source lands on the
@@ -617,6 +608,7 @@ fn tab_resume_keeps_the_reading_place() {
     let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
         path: a.to_owned(),
         view,
+        y: 0.0,
     }));
     assert!(!app.reading.is_restoring(view));
     assert_eq!(app.reading.top_block(a, view), Some(40));
@@ -995,4 +987,85 @@ fn unresolved_link_click_raises_a_notice() {
     let n = app.status.notice.clone().expect("notice");
     assert_eq!(n.severity, crate::app::Severity::Warning);
     assert_eq!(n.text, "unresolved link: Nope");
+}
+
+/// Plan round-6 WP-1: Reading Ctrl+PgDn, then Reading -> Source shows the last lines (an edge
+/// snap, not a carried line estimate).
+#[test]
+fn reading_go_to_end_then_source_shows_the_end() {
+    let p = "r6/end.md";
+    let body = long_note();
+    let (_t, d) = setup(&[(p, &body)]);
+    let mut app = app_on(&d, p);
+    let view = app.view_of(p);
+    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
+    assert_eq!(app.reading.edge(p, view), Some(true));
+    // The snap's own scroll report at the end keeps the edge.
+    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+        path: p.to_owned(),
+        view,
+        y: 1.0,
+    }));
+    assert_eq!(app.reading.edge(p, view), Some(true));
+    viewport(&mut app, p, 40);
+    reading(&mut app, p, ViewMode::Source);
+    let doc = app.active_doc().expect("doc");
+    let lines = doc.text().matches('\n').count() + 1;
+    assert_eq!(doc.top_line(), lines - 40, "the last viewport");
+}
+
+/// Plan round-6 WP-1: Source Ctrl+PgDn, then Source -> Reading snaps Reading to its end
+/// (the edge state drives the switch; no line-estimate block is carried); a user scroll away
+/// from the edge clears it.
+#[test]
+fn source_go_to_end_then_reading_snaps_to_the_end() {
+    let p = "r6/send.md";
+    let body = long_note();
+    let (_t, d) = setup(&[(p, &body)]);
+    let mut app = app_on(&d, p);
+    reading(&mut app, p, ViewMode::Source);
+    viewport(&mut app, p, 40);
+    let view = app.view_of(p);
+    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
+    assert_eq!(app.reading.edge(p, view), Some(true));
+    app.reading.clear_top_block(p, view);
+    let task = app.update(Message::Reading(ReadingMsg::SetMode {
+        path: p.to_owned(),
+        mode: ViewMode::Reading,
+    }));
+    assert!(task.units() > 0, "the snap_to(1.0) task");
+    assert_eq!(
+        app.reading.top_block(p, view),
+        None,
+        "no carried line-estimate block"
+    );
+    assert_eq!(app.reading.edge(p, view), Some(true));
+    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+        path: p.to_owned(),
+        view,
+        y: 0.5,
+    }));
+    assert_eq!(
+        app.reading.edge(p, view),
+        None,
+        "a user scroll leaves the edge"
+    );
+}
+
+/// Plan round-6 WP-1: a source wheel scroll clears the edge, so the next switch carries the
+/// line again.
+#[test]
+fn source_wheel_clears_the_edge() {
+    let p = "r6/wheel.md";
+    let body = long_note();
+    let (_t, d) = setup(&[(p, &body)]);
+    let mut app = app_on(&d, p);
+    reading(&mut app, p, ViewMode::Source);
+    let view = app.view_of(p);
+    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: false }));
+    assert_eq!(app.reading.edge(p, view), Some(false));
+    let _ = app.update(Message::Source(SourceMsg::Action(Action::Scroll {
+        lines: 3,
+    })));
+    assert_eq!(app.reading.edge(p, view), None);
 }

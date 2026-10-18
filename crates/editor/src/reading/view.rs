@@ -163,10 +163,11 @@ pub fn reading<'a>(
     }
     let scroll = scrollable(container(column(items).spacing(10)).padding(8))
         .id(crate::find::reading_scroll_id(path, view))
-        .on_scroll(move |_| {
+        .on_scroll(move |v| {
             Message::Reading(ReadingMsg::Scrolled {
                 path: path.to_owned(),
                 view,
+                y: v.relative_offset().y,
             })
         })
         .width(Length::Fill)

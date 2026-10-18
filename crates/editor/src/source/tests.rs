@@ -1131,3 +1131,98 @@ fn top_line_survives_blur_and_uses_the_measured_viewport() {
     buf(&mut app).go_to_edge(true);
     assert_eq!(buf(&mut app).top_line(), 200 - 11);
 }
+
+/// Plan round-6 WP-1 (audit E1): a layout-backed harness — an `iced_graphics` text editor whose
+/// cosmic buffer is reachable (iced's `Content` hides it), driven by the production sequences.
+mod layout {
+    use iced::advanced::graphics::text::Editor as GEditor;
+    use iced::advanced::text::editor::Editor as _;
+    use iced::advanced::text::highlighter::PlainText;
+    use iced::advanced::text::{LineHeight, Wrapping};
+    use iced::widget::text_editor::{Action, Cursor, Position};
+    use iced::{Font, Pixels, Size};
+
+    use super::super::{EditorOps, fresh_view, scroll_content};
+
+    /// 30 lines of 18.2 px visible, as in the spike.
+    const LINE: f32 = 18.2;
+    const VISIBLE: usize = 30;
+
+    struct Harness(GEditor);
+
+    impl EditorOps for Harness {
+        fn act(&mut self, action: Action) {
+            self.0.perform(action);
+        }
+        fn move_cursor(&mut self, cursor: Cursor) {
+            self.0.move_to(cursor);
+        }
+    }
+
+    impl Harness {
+        fn new(lines: usize) -> Self {
+            let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+            let mut h = Self(GEditor::with_text(&text));
+            h.layout();
+            h
+        }
+        /// One layout pass (iced's `update` ends with `shape_as_needed`).
+        fn layout(&mut self) {
+            #[allow(clippy::cast_precision_loss)]
+            let height = LINE * VISIBLE as f32;
+            self.0.update(
+                Size::new(600.0, height),
+                Font::MONOSPACE,
+                Pixels(14.0),
+                LineHeight::Absolute(Pixels(LINE)),
+                Wrapping::None,
+                &mut PlainText,
+            );
+        }
+        /// The real top line after shaping.
+        fn top(&mut self) -> usize {
+            self.layout();
+            self.0.buffer().scroll().line
+        }
+    }
+
+    fn at(line: usize) -> Cursor {
+        Cursor {
+            position: Position { line, column: 0 },
+            selection: None,
+        }
+    }
+
+    #[test]
+    fn mid_document_carry_lands_within_one_line() {
+        let mut h = Harness::new(200);
+        fresh_view(&mut h, at(0), 0);
+        scroll_content(&mut h, 0, 50);
+        assert!(h.top().abs_diff(50) <= 1, "landed on {}", h.top());
+        // A second carry from the tracked top (back up) also lands.
+        scroll_content(&mut h, 50, 20);
+        assert!(h.top().abs_diff(20) <= 1, "landed on {}", h.top());
+    }
+
+    #[test]
+    fn fresh_view_restores_the_tracked_top() {
+        // Tab resume: a fresh editor with the kept cursor inside the kept view.
+        let mut h = Harness::new(200);
+        fresh_view(&mut h, at(60), 50);
+        assert!(h.top().abs_diff(50) <= 1, "landed on {}", h.top());
+        // The kept cursor out of the kept view (wheel-scrolled away) does not pull it back.
+        let mut h = Harness::new(200);
+        fresh_view(&mut h, at(5), 50);
+        assert!(h.top().abs_diff(50) <= 1, "landed on {}", h.top());
+    }
+
+    #[test]
+    fn go_to_end_carries_to_the_end() {
+        let mut h = Harness::new(200);
+        fresh_view(&mut h, at(0), 0);
+        // `scroll_to_edge(true)`: overshoot by the line count, clamped by shaping.
+        scroll_content(&mut h, 0, 201);
+        let top = h.top();
+        assert!(top.abs_diff(201 - VISIBLE) <= 1, "landed on {top}");
+    }
+}

@@ -1696,6 +1696,14 @@ impl App {
                         | SourceMsg::PasteResolved { .. }
                 );
                 let active = self.active_note().map(|t| t.path.clone());
+                // Plan round-6 WP-1: any user scroll, motion, edit or key in the source editor
+                // leaves the edge (Ctrl+PgUp/PgDn itself goes through `go_to_edge`, not here).
+                if matches!(&m, SourceMsg::Action(_) | SourceMsg::Key(_))
+                    && let Some(p) = &active
+                {
+                    let view = self.view_of(p);
+                    self.reading.clear_edge(p, view);
+                }
                 // Plan round-5 WP-8: the Source side is now the most recent selecting side.
                 if matches!(&m, SourceMsg::Action(_) | SourceMsg::Key(_))
                     && let Some(t) = self.active_note()
@@ -1901,6 +1909,25 @@ impl App {
             return Task::none();
         }
         let view = self.view_of(path);
+        // Plan round-6 WP-1: after Ctrl+PgUp/PgDn (not scrolled since) the new mode snaps to
+        // that edge instead of carrying a line estimate.
+        if let Some(bottom) = self.reading.edge(path, view) {
+            if new.shows_source()
+                && !old.shows_source()
+                && let Some(doc) = self.docs.get_mut(path)
+            {
+                doc.scroll_to_edge(bottom);
+            }
+            if new.shows_reading() {
+                let y = if bottom { 1.0 } else { 0.0 };
+                return iced::widget::operation::snap_to(
+                    crate::find::reading_scroll_id(path, view),
+                    iced::widget::scrollable::RelativeOffset { x: 0.0, y },
+                )
+                .chain(self.reprobe(path));
+            }
+            return Task::none();
+        }
         if new.shows_source()
             && !old.shows_source()
             && let Some(doc) = self.docs.get_mut(path)
@@ -2468,6 +2495,9 @@ impl App {
             return Task::none();
         };
         let mode = self.reading.mode(&path);
+        // Plan round-6 WP-1: a later mode switch snaps the other mode to this edge.
+        let view = self.view_of(&path);
+        self.reading.set_edge(&path, view, bottom);
         if mode.shows_source()
             && let Some(doc) = self.docs.get_mut(&path)
         {

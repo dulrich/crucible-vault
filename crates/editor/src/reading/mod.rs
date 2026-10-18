@@ -155,6 +155,9 @@ pub struct ReadingStore {
     /// Plan round-5 WP-1: tabs just (re)activated whose first `on_scroll` (iced reports offset
     /// 0 for a re-created scrollable) must re-apply the stored place instead of overwriting it.
     restoring: std::collections::HashSet<u64>,
+    /// Plan round-6 WP-1: tabs (path, tab id) last sent to an edge by Ctrl+PgUp/PgDn (`true` =
+    /// the end); a mode switch snaps the other mode to it. Cleared by the next user scroll.
+    edge: HashMap<(String, u64), bool>,
     /// plan editor-ui-round-3 WP-5: the active find match per tab path, as (top-level render
     /// block, nth query occurrence inside it).
     find_active: HashMap<String, (usize, usize)>,
@@ -471,6 +474,21 @@ impl ReadingStore {
     /// is in flight; its probe confirms it).
     pub fn set_top_block(&mut self, path: &str, view: u64, block: usize) {
         self.top.insert((path.to_owned(), view), block);
+    }
+
+    /// Plan round-6 WP-1: tab `view` on `path` went to its start (`false`) / end (`true`).
+    pub fn set_edge(&mut self, path: &str, view: u64, bottom: bool) {
+        self.edge.insert((path.to_owned(), view), bottom);
+    }
+
+    /// Plan round-6 WP-1: the edge tab `view` on `path` was last sent to, if not scrolled since.
+    pub fn edge(&self, path: &str, view: u64) -> Option<bool> {
+        self.edge.get(&(path.to_owned(), view)).copied()
+    }
+
+    /// Plan round-6 WP-1: a user scroll left the edge.
+    pub fn clear_edge(&mut self, path: &str, view: u64) {
+        self.edge.remove(&(path.to_owned(), view));
     }
 
     /// plan editor-ui-round-3 WP-6: the reading view is (being scrolled) at its top.
@@ -893,7 +911,16 @@ pub fn update(
                 store.set_mode(tab, mode, daemon);
             }
         }
-        ReadingMsg::Scrolled { path, view } => {
+        ReadingMsg::Scrolled { path, view, y } => {
+            // Plan round-6 WP-1: a report away from the recorded edge (never the re-created
+            // scrollable's first report, nor a snap landing on the edge) clears it. NaN (no
+            // scroll range) keeps it.
+            if !store.restoring.contains(&view)
+                && let Some(bottom) = store.edge(&path, view)
+                && (if bottom { y < 0.999 } else { y > 0.001 })
+            {
+                store.clear_edge(&path, view);
+            }
             if let Some(blocks) = store.doc(&path).map(|d| d.model.blocks.len()) {
                 // Plan round-5 WP-1: the first scroll report after a (re)activation is the
                 // re-created scrollable's offset 0 — re-apply the stored place instead.

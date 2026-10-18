@@ -152,7 +152,8 @@ pub enum ReadingMsg {
         mode: crate::reading::ViewMode,
     },
     /// plan editor-ui-round-3 WP-6: the reading scrollable scrolled (re-probe its top block).
-    Scrolled { path: String, view: u64 },
+    /// Plan round-6 WP-1: `y` = the relative vertical offset (clears an away-from-edge state).
+    Scrolled { path: String, view: u64, y: f32 },
     /// plan editor-ui-round-3 WP-6: a reading layout probe landed; `scroll_to` = then scroll
     /// that top-level block to the viewport top.
     Probed {
