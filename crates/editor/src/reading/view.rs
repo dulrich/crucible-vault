@@ -419,10 +419,15 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             alt,
             width,
             remote,
+            link,
         } => {
             // Plan round-5 WP-7: an image holds a run slot (its alt text is copy text).
             cx.next_run();
-            image_block(cx, src, alt, *width, *remote)
+            let img = image_block(cx, src, alt, *width, *remote, link.as_deref());
+            match link {
+                Some(href) => linked_image(cx, img, href, src, *remote),
+                None => img,
+            }
         }
         Block::Transclusion {
             target,
@@ -665,6 +670,7 @@ fn image_block<'a>(
     alt: &'a str,
     width: Option<u32>,
     remote: bool,
+    link: Option<&str>,
 ) -> Element<'a, Message> {
     let t = cx.t;
     let placeholder = |label: String| -> Element<'a, Message> {
@@ -681,15 +687,22 @@ fn image_block<'a>(
         // Never fetched: localization is the daemon's job (inventory #7).
         // WP-3: the placeholder opens the image URL in the browser.
         // plan editor-round-4 WP-4: right-click → Copy URL.
+        let target = crate::context_menu::Target::Image {
+            src: src.to_owned(),
+            remote: true,
+        };
+        let label = placeholder(format!("[remote image: {alt}]"));
+        // Plan round-6 WP-3: a linked remote image clicks through the outer href instead
+        // (the caller wraps it); the right-click target is the caller's linked-image menu.
+        if link.is_some() {
+            return label;
+        }
         return crate::context_menu::on_right(
-            button(placeholder(format!("[remote image: {alt}]")))
+            button(label)
                 .padding(0)
                 .style(button::text)
                 .on_press(Message::OpenUrl(src.to_owned())),
-            crate::context_menu::Target::Image {
-                src: src.to_owned(),
-                remote: true,
-            },
+            target,
         );
     }
     let Some(Some(key)) = cx.doc.images.get(src) else {
@@ -757,7 +770,75 @@ fn image_block<'a>(
             key: key.clone(),
         }));
     // plan editor-round-4 WP-4: right-click → Copy image / Copy path.
+    // Plan round-6 WP-3: a linked image's menu is attached by [`linked_image`] instead.
+    if link.is_some() {
+        return sensed.into();
+    }
     crate::context_menu::on_right(sensed, menu_target)
+}
+
+/// Plan round-6 WP-3: the open message for a Reading href in note `path` (external → URL
+/// opener, vault → OpenLink), as a [`LinkTarget`].
+fn href_target(href: &str) -> LinkTarget {
+    if editor_model::render::is_remote(href) {
+        LinkTarget::External(href.to_owned())
+    } else {
+        LinkTarget::Vault(href.to_owned())
+    }
+}
+
+/// Plan round-6 WP-3: the left-click message of a linked image with `href` in note `path`.
+fn linked_image_open(path: &str, href: &str) -> Message {
+    link_msg(path)(href_target(href))
+}
+
+/// Plan round-6 WP-3: wraps an image of `[![alt](src)](href)` so a left click opens `href`
+/// (no padding: layout unchanged) and a right click offers the link then the image items.
+fn linked_image<'a>(
+    cx: &Ctx<'a>,
+    img: Element<'a, Message>,
+    href: &str,
+    src: &str,
+    remote: bool,
+) -> Element<'a, Message> {
+    let open = linked_image_open(cx.path, href);
+    let (target, external) = match href_target(href) {
+        LinkTarget::Vault(t) => (t, false),
+        LinkTarget::External(u) => (u, true),
+    };
+    let link = crate::context_menu::Target::Link {
+        src: cx.path.to_owned(),
+        target,
+        external,
+        view: cx.view,
+        selection: false,
+    };
+    crate::context_menu::on_right(
+        button(img).padding(0).style(button::text).on_press(open),
+        linked_image_target(cx, link, src, remote),
+    )
+}
+
+/// Plan round-6 WP-3: the linked-image menu target — the link half plus the image half (the
+/// resolved vault key, or the URL when remote); a missing local image offers the link only.
+fn linked_image_target(
+    cx: &Ctx<'_>,
+    link: crate::context_menu::Target,
+    src: &str,
+    remote: bool,
+) -> crate::context_menu::Target {
+    let image = if remote {
+        Some(src.to_owned())
+    } else {
+        cx.doc.images.get(src).cloned().flatten()
+    };
+    match image {
+        Some(src) => crate::context_menu::Target::LinkedImage {
+            link: Box::new(link),
+            image: Box::new(crate::context_menu::Target::Image { src, remote }),
+        },
+        None => link,
+    }
 }
 
 /// Plan round-6 WP-2: an image of header size `d` shown `width` (or natural) wide: the
@@ -969,6 +1050,39 @@ mod task_tests {
             f(LinkTarget::Vault("b".into())),
             Message::Reading(ReadingMsg::OpenLink { .. })
         ));
+    }
+
+    /// Plan round-6 WP-3: a linked image clicks through its outer href.
+    #[test]
+    fn linked_image_click_opens_external_href() {
+        assert!(matches!(
+            linked_image_open("a.md", "https://x"),
+            Message::OpenUrl(u) if u == "https://x"
+        ));
+    }
+
+    /// Plan round-6 WP-3: a vault-path image inside a vault link opens the note link.
+    #[test]
+    fn vault_image_in_vault_link_opens_the_note() {
+        let m = editor_model::render::lower("[![](img/a.png)](Other.md)\n");
+        let [
+            Block::Image {
+                src,
+                link: Some(href),
+                remote: false,
+                ..
+            },
+        ] = m.blocks.as_slice()
+        else {
+            panic!("expected one linked local image: {:?}", m.blocks);
+        };
+        assert_eq!((src.as_str(), href.as_str()), ("img/a.png", "Other.md"));
+        let Message::Reading(ReadingMsg::OpenLink { src, target }) =
+            linked_image_open("n.md", href)
+        else {
+            panic!("vault href must OpenLink");
+        };
+        assert_eq!((src.as_str(), target.as_str()), ("n.md", "Other.md"));
     }
 
     #[test]

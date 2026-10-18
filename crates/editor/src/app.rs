@@ -1242,6 +1242,20 @@ impl App {
     ) -> Task<Message> {
         use crate::context_menu::{Item, Target};
         match (target, item) {
+            // Plan round-6 WP-3: a linked image routes image items to its image half (the
+            // distinct Copy image path → the image's Copy path / URL) and the rest to its link.
+            (Target::LinkedImage { link, image }, item) => {
+                if item.is_image_item() {
+                    let item = match (&*image, item) {
+                        (Target::Image { remote: true, .. }, Item::CopyImagePath) => Item::CopyUrl,
+                        (_, Item::CopyImagePath) => Item::CopyPath,
+                        (_, i) => i,
+                    };
+                    self.run_menu_item(*image, item)
+                } else {
+                    self.run_menu_item(*link, item)
+                }
+            }
             (Target::Task { path, line }, Item::TaskStatus(c)) => {
                 self.set_task_status(&path, line, c)
             }

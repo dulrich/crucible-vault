@@ -245,7 +245,8 @@ fn embed_vs_transclusion_and_images() {
                 src: "pic.png".into(),
                 alt: "pic.png".into(),
                 width: Some(300),
-                remote: false
+                remote: false,
+                link: None
             },
             Block::Paragraph(vec![t(" b")]),
             Block::Transclusion {
@@ -257,13 +258,15 @@ fn embed_vs_transclusion_and_images() {
                 src: "img/x.jpg".into(),
                 alt: "alt".into(),
                 width: Some(200),
-                remote: false
+                remote: false,
+                link: None
             },
             Block::Image {
                 src: "https://h/x.png".into(),
                 alt: "r".into(),
                 width: None,
-                remote: true
+                remote: true,
+                link: None
             },
         ]
     );
@@ -527,4 +530,34 @@ fn frontmatter_bools_and_urls_become_typed_values() {
         alias: None,
     };
     assert_eq!(m.properties[4].values, [link("A"), link("B")]);
+}
+
+#[test]
+fn linked_image_renders_as_image_with_link() {
+    let m = lower("[![](a.jpg)](https://x)\n");
+    assert_eq!(
+        m.blocks,
+        vec![Block::Image {
+            src: "a.jpg".into(),
+            alt: String::new(),
+            width: None,
+            remote: false,
+            link: Some("https://x".into()),
+        }]
+    );
+}
+
+#[test]
+fn linked_image_with_alt_keeps_alt() {
+    let m = lower("[![alt](a.jpg)](https://x)\n");
+    assert_eq!(
+        m.blocks,
+        vec![Block::Image {
+            src: "a.jpg".into(),
+            alt: "alt".into(),
+            width: None,
+            remote: false,
+            link: Some("https://x".into()),
+        }]
+    );
 }

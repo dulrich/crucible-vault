@@ -37,6 +37,12 @@ pub enum Target {
     },
     /// Plan round-5 WP-8: a right press inside tab `view`'s Reading selection of `path`.
     Selection { path: String, view: u64 },
+    /// Plan round-6 WP-3: a linked image `[![alt](src)](href)` — the link half (a
+    /// [`Target::Link`]) then the image half (a [`Target::Image`]).
+    LinkedImage {
+        link: Box<Target>,
+        image: Box<Target>,
+    },
 }
 
 /// A menu entry.
@@ -61,6 +67,15 @@ pub enum Item {
     CopyUrl,
     /// Plan round-5 WP-8: copy the Reading selection.
     Copy,
+    /// Plan round-6 WP-3: the image half of a linked image's Copy path (distinct from the link's).
+    CopyImagePath,
+}
+
+impl Item {
+    /// Plan round-6 WP-3: items the image half of a [`Target::LinkedImage`] owns.
+    pub fn is_image_item(self) -> bool {
+        matches!(self, Item::CopyImage | Item::CopyImagePath)
+    }
 }
 
 /// Menu messages.
@@ -165,6 +180,16 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
             v
         }
         Target::Selection { .. } => named(&[(Item::Copy, "Copy")]),
+        Target::LinkedImage { link, image } => {
+            let mut v = items(link);
+            v.extend(items(image).into_iter().map(|(i, l)| match i {
+                Item::CopyPath => (Item::CopyImagePath, "Copy image path".to_owned()),
+                // A remote image's URL vs the link's URL.
+                Item::CopyUrl => (Item::CopyImagePath, "Copy image URL".to_owned()),
+                _ => (i, l),
+            }));
+            v
+        }
         // Explorer ops rename / move / trash files only (no folder RPC): New note, Copy path.
         Target::Row { folder: true, .. } => {
             named(&[(Item::NewNote, "New note"), (Item::CopyPath, "Copy path")])
@@ -233,4 +258,39 @@ pub fn on_right<'a>(
 /// The right-press message for `target`: opens its menu at the press point.
 pub fn open_msg(target: Target) -> impl Fn(Point) -> Message {
     move |at| Message::Menu(MenuMsg::Open(target.clone(), at))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linked_image_menu_lists_link_items_then_image_items() {
+        let t = Target::LinkedImage {
+            link: Box::new(Target::Link {
+                src: "n.md".into(),
+                target: "Other.md".into(),
+                external: false,
+                view: 1,
+                selection: false,
+            }),
+            image: Box::new(Target::Image {
+                src: "img/a.png".into(),
+                remote: false,
+            }),
+        };
+        let got: Vec<(Item, String)> = items(&t);
+        let names: Vec<&str> = got.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Open",
+                "Open in new pane",
+                "Copy path",
+                "Copy image",
+                "Copy image path"
+            ]
+        );
+        assert_eq!(got[4].0, Item::CopyImagePath);
+    }
 }

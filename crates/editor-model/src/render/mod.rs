@@ -144,6 +144,8 @@ pub enum Block {
         alt: String,
         width: Option<u32>,
         remote: bool,
+        /// Outer link href for `[![alt](src)](href)`; `None` for a bare image.
+        link: Option<String>,
     },
     /// `![[note#frag]]`; `content` is filled by [`transclude`] (`None` = not loaded/unresolved).
     Transclusion {
@@ -548,6 +550,32 @@ impl Lower {
                 st,
                 out,
             ),
+            NodeValue::Link(l)
+                if n.children()
+                    .any(|c| matches!(c.data().value, NodeValue::Image(_))) =>
+            {
+                // `[![alt](src)](href)`: each child image renders as an image carrying the
+                // href; non-empty text children stay a plain link.
+                for c in n.children() {
+                    if matches!(c.data().value, NodeValue::Image(_)) {
+                        let start = out.len();
+                        self.inline(c, style, st, out);
+                        for p in &mut out[start..] {
+                            if let Piece::Block(Block::Image { link, .. }) = p {
+                                *link = Some(l.url.clone());
+                            }
+                        }
+                    } else {
+                        let label = plain_text(std::iter::once(c));
+                        if !label.trim().is_empty() {
+                            out.push(Piece::Span(Inline::Link {
+                                url: l.url.clone(),
+                                label,
+                            }));
+                        }
+                    }
+                }
+            }
             NodeValue::Link(l) => out.push(Piece::Span(Inline::Link {
                 url: l.url.clone(),
                 label: plain_text(n.children()),
@@ -560,6 +588,7 @@ impl Lower {
                     src: l.url.clone(),
                     alt: alt.to_owned(),
                     width,
+                    link: None,
                 }));
             }
             NodeValue::WikiLink(w) => {
@@ -611,6 +640,7 @@ impl Lower {
                 alt,
                 width,
                 remote: false,
+                link: None,
             }));
         } else if embed && self.opts.transclude {
             out.push(Piece::Block(Block::Transclusion {
