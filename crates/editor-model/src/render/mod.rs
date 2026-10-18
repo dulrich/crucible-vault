@@ -1081,6 +1081,67 @@ pub fn inline_text(inlines: &[Inline]) -> String {
     s
 }
 
+/// Plan round-6 WP-4: every vault link target in render order — `Inline::WikiLink` targets
+/// (the fragment is separate; self links `[[#h]]` skipped) and non-remote `Inline::Link` urls / linked-image
+/// hrefs, as the Reading view hands them to `OpenLink` — including inside lists, callouts,
+/// quotes, tables, transclusions and footnotes. The editor resolves each to mark unresolved
+/// links (dimmed, "Create note").
+pub fn link_targets(model: &RenderModel) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_links(&model.blocks, &mut out);
+    for f in &model.footnotes {
+        collect_links(&f.blocks, &mut out);
+    }
+    out
+}
+
+/// An empty or `#heading`-only target links the note itself (always resolves).
+fn self_link(target: &str) -> bool {
+    target.is_empty() || target.starts_with('#')
+}
+
+fn inline_links(inlines: &[Inline], out: &mut Vec<String>) {
+    for i in inlines {
+        match i {
+            Inline::WikiLink { target, .. } if !self_link(target) => out.push(target.clone()),
+            Inline::Link { url, .. } if !is_remote(url) && !self_link(url) => {
+                out.push(url.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_links(blocks: &[Block], out: &mut Vec<String>) {
+    for b in blocks {
+        match b {
+            Block::Heading { inlines, .. } | Block::Paragraph(inlines) => {
+                inline_links(inlines, out);
+            }
+            Block::Table { header, rows, .. } => {
+                for c in header.iter().chain(rows.iter().flatten()) {
+                    inline_links(c, out);
+                }
+            }
+            Block::Image {
+                link: Some(href), ..
+            } if !is_remote(href) && !self_link(href) => out.push(href.clone()),
+            Block::List { items, .. } => {
+                for i in items {
+                    collect_links(&i.children, out);
+                }
+            }
+            Block::Callout { children, .. } | Block::BlockQuote(children) => {
+                collect_links(children, out);
+            }
+            Block::Transclusion {
+                content: Some(c), ..
+            } => collect_links(c, out),
+            _ => {}
+        }
+    }
+}
+
 /// Every image block's `(src, remote)`, in document order, including inside transclusions.
 pub fn images(model: &RenderModel) -> Vec<(String, bool)> {
     let mut out = Vec::new();

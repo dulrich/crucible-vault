@@ -49,6 +49,7 @@ fn link(target: &str, external: bool, selection: bool) -> Target {
         external,
         view: 1,
         selection,
+        missing: false,
     }
 }
 

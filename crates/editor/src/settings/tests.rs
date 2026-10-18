@@ -214,6 +214,11 @@ fn prefs_defaults_fields_and_fallbacks() {
     assert_eq!(full.search_limit, 80);
     assert_eq!(full.search_debounce_ms, 120);
     assert_eq!(full.delete_mode, crate::daemon::DeleteMode::Permanent);
+    assert_eq!(
+        full.missing_link,
+        crate::settings::editor_prefs::MissingLink::Create
+    );
+    assert_eq!(legacy_missing(), editor_prefs::MissingLink::Warn);
     // plan editor-ui-round-3 WP-3: a legacy `confirm_trash` key is tolerated and ignored.
     let legacy = editor_prefs::parse("confirm_trash = true\n", Surround::Med).expect("parse");
     assert_eq!(legacy.delete_mode, crate::daemon::DeleteMode::Trash);
@@ -328,6 +333,7 @@ tab_title = "unambiguous"
 quick_switch_open = "duplicate"
 confirm_trash = true
 delete_mode = "permanent"
+missing_link = "create"
 focus_follows_mouse = true
 open_url_cmd = ["firefox", "--new-tab"]
 
@@ -342,6 +348,13 @@ hidden = ["quit", "my.action"]
 quick_switcher = ["Ctrl+P", "Ctrl+Alt+P"]
 quit = []
 "#;
+
+/// Plan round-6 WP-4: `missing_link` absent → `warn`.
+fn legacy_missing() -> editor_prefs::MissingLink {
+    editor_prefs::parse("", Surround::Med)
+        .expect("parse")
+        .missing_link
+}
 
 const BOOKMARKS_SAMPLE: &str = r#"[[bookmark]]
 name = "Home"

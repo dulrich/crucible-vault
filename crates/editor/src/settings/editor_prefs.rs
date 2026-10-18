@@ -51,6 +51,8 @@ pub struct Prefs {
     pub search_debounce_ms: u64,
     /// `delete_mode` (plan editor-ui-round-3 WP-3; replaces `confirm_trash`, now ignored).
     pub delete_mode: DeleteMode,
+    /// `missing_link` (plan round-6-feedback-todos WP-4): a click on an unresolved vault link.
+    pub missing_link: MissingLink,
     /// `focus_follows_mouse` (plan editor-round-4 WP-4): hovering a pane focuses it.
     pub focus_follows_mouse: bool,
     /// Command/action ids omitted from the palette list (their chords still work).
@@ -61,6 +63,26 @@ pub struct Prefs {
     /// usability-sprint-captures-links WP-3); the URL is appended last. Absent, mistyped or
     /// empty → [`default_open_url_cmd`].
     pub open_url_cmd: Vec<String>,
+}
+
+/// `missing_link`: what a click on a link to a missing note does (plan round-6-feedback-todos WP-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MissingLink {
+    /// Raise the `unresolved link: …` notice.
+    #[default]
+    Warn,
+    /// Create the note and open it.
+    Create,
+}
+
+impl MissingLink {
+    /// The `editor.toml` value.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Create => "create",
+        }
+    }
 }
 
 /// The default `open_url_cmd`: `["xdg-open"]`.
@@ -79,6 +101,7 @@ impl Default for Prefs {
             search_limit: DEFAULT_SEARCH_LIMIT,
             search_debounce_ms: DEFAULT_SEARCH_DEBOUNCE_MS,
             delete_mode: DeleteMode::Trash,
+            missing_link: MissingLink::Warn,
             focus_follows_mouse: false,
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
@@ -161,6 +184,11 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             Some("trash") => DeleteMode::Trash,
             _ => d.delete_mode,
         },
+        missing_link: match doc.get_str(&p("missing_link")) {
+            Some("create") => MissingLink::Create,
+            Some("warn") => MissingLink::Warn,
+            _ => d.missing_link,
+        },
         focus_follows_mouse: doc
             .get_bool(&p("focus_follows_mouse"))
             .unwrap_or(d.focus_follows_mouse),
@@ -226,6 +254,7 @@ pub enum PrefEdit {
     SearchLimit(i64),
     SearchDebounceMs(i64),
     DeleteMode(DeleteMode),
+    MissingLink(MissingLink),
     FocusFollowsMouse(bool),
     /// The comma-separated hidden-id list as typed.
     PaletteHidden(String),
@@ -249,6 +278,7 @@ pub fn apply(doc: &mut ConfigDoc, e: &PrefEdit) -> Result<(), DocError> {
                 DeleteMode::Permanent => "permanent",
             },
         ),
+        PrefEdit::MissingLink(m) => doc.set(&p("missing_link"), m.key()),
         PrefEdit::FocusFollowsMouse(b) => doc.set(&p("focus_follows_mouse"), *b),
         PrefEdit::PaletteHidden(s) => {
             let mut a = cv_schema::toml_edit::Array::new();
@@ -394,6 +424,39 @@ pub fn view<'a>(
         .spacing(6)
         .align_y(iced::Alignment::Center)
     };
+    let missing = {
+        let seg = |m: MissingLink, label: &'static str| {
+            button(crate::theme::control_label(label, 14.0))
+                .height(crate::theme::SEGMENT)
+                .padding([0, 12])
+                .style(crate::theme::segment_style(t, prefs.missing_link == m))
+                .on_press_maybe(
+                    on(PrefEdit::MissingLink(m)).map(|e| Message::Settings(SettingsMsg::Pref(e))),
+                )
+        };
+        column![
+            row![
+                text("Missing-note links")
+                    .size(14)
+                    .width(Length::Fixed(200.0)),
+                container(
+                    row![
+                        seg(MissingLink::Warn, "Warn"),
+                        seg(MissingLink::Create, "Create note"),
+                    ]
+                    .spacing(0)
+                )
+                .padding(1)
+                .style(crate::theme::seg_group_style(t)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+            text("A click on a link to a missing note: warn, or create it (New-note folder, or the link's folder path) and open it")
+                .size(13)
+                .color(t.text_faint.to_color()),
+        ]
+        .spacing(2)
+    };
     let follow = {
         let seg = |v: bool, label: &'static str| {
             button(crate::theme::control_label(label, 14.0))
@@ -489,6 +552,7 @@ pub fn view<'a>(
             t,
         ),
         confirm,
+        missing,
         follow,
         hidden,
         text(keys_line).size(13).color(t.text_faint.to_color()),

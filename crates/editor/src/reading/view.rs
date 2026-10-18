@@ -172,6 +172,7 @@ pub fn reading<'a>(
         })
         .width(Length::Fill)
         .height(Length::Fill);
+    let unresolved = &doc.unresolved;
     // Plan round-5 WP-7: the gesture root owns press/drag/keys; the selection is the tab's.
     selectable::root(
         scroll,
@@ -201,12 +202,14 @@ pub fn reading<'a>(
                     LinkTarget::Vault(t) => (t, false),
                     LinkTarget::External(u) => (u, true),
                 };
+                let missing = !external && unresolved.contains(&target);
                 crate::context_menu::Target::Link {
                     src: path.to_owned(),
                     target,
                     external,
                     view,
                     selection: inside,
+                    missing,
                 }
             }
             None => crate::context_menu::Target::Selection {
@@ -787,6 +790,17 @@ fn href_target(href: &str) -> LinkTarget {
     }
 }
 
+/// Plan round-6 WP-4: a link's color — the accent, dimmed (half alpha) when the vault target is
+/// in the Doc's `unresolved` set.
+fn link_color(cx: &Ctx<'_>, target: &str) -> iced::Color {
+    let c = cx.t.accent_ui.to_color();
+    if cx.doc.unresolved.contains(target) {
+        iced::Color { a: c.a * 0.5, ..c }
+    } else {
+        c
+    }
+}
+
 /// Plan round-6 WP-3: the left-click message of a linked image with `href` in note `path`.
 fn linked_image_open(path: &str, href: &str) -> Message {
     link_msg(path)(href_target(href))
@@ -806,12 +820,14 @@ fn linked_image<'a>(
         LinkTarget::Vault(t) => (t, false),
         LinkTarget::External(u) => (u, true),
     };
+    let missing = !external && cx.doc.unresolved.contains(&target);
     let link = crate::context_menu::Target::Link {
         src: cx.path.to_owned(),
         target,
         external,
         view: cx.view,
         selection: false,
+        missing,
     };
     crate::context_menu::on_right(
         button(img).padding(0).style(button::text).on_press(open),
@@ -976,10 +992,9 @@ fn inlines_view<'a>(
             Inline::WikiLink { target, .. } => {
                 // No permanent underline: the run widget underlines the hovered link itself.
                 let label = super::inline_visible(i).unwrap_or_default().into_owned();
+                let color = link_color(cx, target);
                 painted(cx, &mut spans, Cow::Owned(label), |p| {
-                    span(p)
-                        .color(t.accent_ui.to_color())
-                        .link(LinkTarget::Vault(target.clone()))
+                    span(p).color(color).link(LinkTarget::Vault(target.clone()))
                 });
             }
             Inline::Link { url, label } => {
@@ -988,8 +1003,9 @@ fn inlines_view<'a>(
                 } else {
                     LinkTarget::Vault(url.clone())
                 };
+                let color = link_color(cx, url);
                 painted(cx, &mut spans, Cow::Borrowed(label.as_str()), |p| {
-                    span(p).color(t.accent_ui.to_color()).link(l.clone())
+                    span(p).color(color).link(l.clone())
                 });
             }
             Inline::Tag(tag) => painted(cx, &mut spans, Cow::Owned(format!("#{tag}")), |p| {

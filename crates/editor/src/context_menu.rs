@@ -34,6 +34,9 @@ pub enum Target {
         external: bool,
         view: u64,
         selection: bool,
+        /// Plan round-6 WP-4: an unresolved vault link (the Doc's `unresolved`) — adds
+        /// "Create note".
+        missing: bool,
     },
     /// Plan round-5 WP-8: a right press inside tab `view`'s Reading selection of `path`.
     Selection { path: String, view: u64 },
@@ -69,6 +72,8 @@ pub enum Item {
     Copy,
     /// Plan round-6 WP-3: the image half of a linked image's Copy path (distinct from the link's).
     CopyImagePath,
+    /// Plan round-6 WP-4: create the note an unresolved link names.
+    CreateNote,
 }
 
 impl Item {
@@ -161,6 +166,7 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
         Target::Link {
             external,
             selection,
+            missing,
             ..
         } => {
             let mut v = if *selection {
@@ -177,6 +183,9 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
                     (Item::CopyPath, "Copy path"),
                 ])
             });
+            if *missing && !*external {
+                v.push((Item::CreateNote, "Create note".to_owned()));
+            }
             v
         }
         Target::Selection { .. } => named(&[(Item::Copy, "Copy")]),
@@ -273,6 +282,7 @@ mod tests {
                 external: false,
                 view: 1,
                 selection: false,
+                missing: false,
             }),
             image: Box::new(Target::Image {
                 src: "img/a.png".into(),

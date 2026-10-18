@@ -924,6 +924,30 @@ impl App {
         )
     }
 
+    /// Plan round-6 WP-4: an unresolved vault link was clicked — `missing_link = "warn"` raises
+    /// the notice naming it, `"create"` creates and opens the note.
+    fn missing_link_click(&mut self, target: &str) -> Task<Message> {
+        match self.prefs.missing_link {
+            crate::settings::editor_prefs::MissingLink::Warn => {
+                self.status
+                    .notify(Severity::Warning, format!("unresolved link: {target}"));
+                Task::none()
+            }
+            crate::settings::editor_prefs::MissingLink::Create => self.create_missing(target),
+        }
+    }
+
+    /// Plan round-6 WP-4: creates the note a missing link names ([`crate::reading::missing_note_path`]
+    /// in the explorer's New-note folder) through `CreateNote`; `ExplorerMsg::Done` opens it in
+    /// the focused (clicked) pane, a failure is an error notice.
+    fn create_missing(&mut self, target: &str) -> Task<Message> {
+        if self.shadow_blocked(explorer::SHADOW_REASON) {
+            return Task::none();
+        }
+        let path = crate::reading::missing_note_path(target, &self.explorer.target_folder());
+        self.dispatch_op(FileOp::Create { path })
+    }
+
     /// Opens `path` into the focused pane (focusing an existing tab anywhere). The read is a
     /// local disk read of one note, done inline; RPC calls never run here.
     fn open(&mut self, path: &str, persist: bool) {
@@ -1321,6 +1345,8 @@ impl App {
                     |r| Message::Menu(crate::context_menu::MenuMsg::ImageCopied(r)),
                 )
             }
+            // Plan round-6 WP-4: "Create note" on an unresolved vault link (any `missing_link`).
+            (Target::Link { target, .. }, Item::CreateNote) => self.create_missing(&target),
             // Plan round-5 WP-8: the Reading link / selection menu.
             (
                 Target::Link {
@@ -1858,6 +1884,10 @@ impl App {
                 if let Some((severity, text)) = self.reading.notice.take() {
                     self.status.notify(severity, text);
                 }
+                let created = match self.reading.unresolved_click.take() {
+                    Some((_, target)) => self.missing_link_click(&target),
+                    None => Task::none(),
+                };
                 if mode_change {
                     self.mode_menu = None;
                     self.persist();
@@ -1865,7 +1895,7 @@ impl App {
                 let carried = carry.map_or_else(Task::none, |(path, old, line)| {
                     self.carry_place(&path, old, line)
                 });
-                return Task::batch([task, carried]);
+                return Task::batch([task, carried, created]);
             }
             Message::Switcher(m) => return self.update_switcher(m),
             Message::Palette(m) => return self.update_palette(m),

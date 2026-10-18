@@ -112,6 +112,10 @@ pub struct Doc {
     pub images: HashMap<String, Option<String>>,
     /// Plan round-5 WP-7: the selectable runs in render order (copy text, select-all).
     pub runs: Vec<selection::RunInfo>,
+    /// Plan round-6 WP-4: link targets (as [`render::link_targets`] lists them, the string the
+    /// view hands to `OpenLink`) that do not resolve — drawn dimmed, menu offers "Create note".
+    /// Empty without a daemon (no resolver: nothing is known missing).
+    pub unresolved: HashSet<String>,
 }
 
 /// One tab's reading state.
@@ -136,6 +140,9 @@ struct ResolverCache {
 pub struct ReadingStore {
     /// plan round-5 WP-3: a notice for the status bar, taken by `App` after each update.
     pub notice: Option<(crate::app::Severity, String)>,
+    /// Plan round-6 WP-4: an unresolved vault link click `(src, target)`, taken by `App`, which
+    /// warns or creates per `editor.toml` `missing_link`.
+    pub unresolved_click: Option<(String, String)>,
     tabs: HashMap<String, TabReading>,
     pub images: ImageCache,
     resolver: Option<ResolverCache>,
@@ -718,6 +725,17 @@ impl ReadingStore {
                 (src, key)
             })
             .collect();
+        let unresolved: HashSet<String> = if daemon.is_some() {
+            render::link_targets(&model)
+                .into_iter()
+                .filter(|t| {
+                    let bare = t.split('#').next().unwrap_or(t);
+                    self.resolve(tab.path(), &percent_decode(bare)).is_none()
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let keep: HashSet<String> = images.values().flatten().cloned().collect();
         if let Some(d) = daemon {
             // Plan round-5 WP-2: header-read sizes so placeholders take the image's height.
@@ -739,6 +757,7 @@ impl ReadingStore {
             model,
             images,
             runs,
+            unresolved,
         });
     }
 
@@ -880,6 +899,25 @@ impl ReadingStore {
 
 /// Decodes every `%xx` escape in a link/image target (plan round-5 WP-2; was `%20`-only).
 /// Invalid escapes stay verbatim; a result that is not UTF-8 leaves the input unchanged.
+/// Plan round-6 WP-4: the vault path a missing link `target` creates — `#fragment` stripped and
+/// percent-decoded (as [`ReadingStore::resolve_link`]); a target with a `/` is a vault path, a
+/// bare one goes into `folder` (the explorer's New-note folder; `""` = vault root); `.md` is
+/// appended when missing.
+pub fn missing_note_path(target: &str, folder: &str) -> String {
+    let bare = target.split('#').next().unwrap_or(target);
+    let name = percent_decode(bare);
+    let name = name.trim().trim_start_matches('/');
+    let mut path = if name.contains('/') || folder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{}/{name}", folder.trim_end_matches('/'))
+    };
+    if !path.to_ascii_lowercase().ends_with(".md") {
+        path.push_str(".md");
+    }
+    path
+}
+
 pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let hex = |c: u8| (c as char).to_digit(16);
@@ -1029,12 +1067,10 @@ pub fn update(
             if let Some(m) = store.click(&src, &target, daemon) {
                 return Task::done(m);
             }
-            // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing.
+            // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing;
+            // plan round-6 WP-4: `App` warns or creates it per `missing_link`.
             if daemon.is_some() && !render::is_remote(&target) {
-                store.notice = Some((
-                    crate::app::Severity::Warning,
-                    format!("unresolved link: {target}"),
-                ));
+                store.unresolved_click = Some((src, target));
             }
         }
         ReadingMsg::ImageShown {

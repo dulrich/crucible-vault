@@ -561,3 +561,13 @@ fn linked_image_with_alt_keeps_alt() {
         }]
     );
 }
+
+/// Plan round-6 WP-4: vault link targets (wiki + relative md + linked-image href), nested
+/// included; remote URLs and `[[#h]]` excluded.
+#[test]
+fn link_targets_list_vault_links_only() {
+    let m = lower(
+        "see [[A]] and [[#h]] [x](b.md) [y](https://e.com)\n\n- [[C|alias]]\n\n> [[D#sec]]\n\n[![](i.png)](E.md)\n",
+    );
+    assert_eq!(link_targets(&m), ["A", "b.md", "C", "D", "E.md"]);
+}

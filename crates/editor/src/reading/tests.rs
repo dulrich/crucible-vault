@@ -1227,3 +1227,90 @@ fn stale_restore_guard_does_not_snap_after_content_grows() {
     }));
     assert!(!app.reading.is_restoring(view));
 }
+
+/// Plan round-6 WP-4: the Doc marks unresolved vault links (the view dims them and the link
+/// menu offers "Create note"); resolved, self and remote links are not marked.
+#[test]
+fn doc_marks_unresolved_vault_links() {
+    let (_tmp, d) = setup(&[
+        (
+            "A.md",
+            b"[[B]] [[Nope]] [[#h]] [m](Gone.md) [u](https://x.y)\n",
+        ),
+        ("B.md", b"b\n"),
+    ]);
+    let mut app = app_on(&d, "A.md");
+    reading(&mut app, "A.md", ViewMode::Reading);
+    let doc = app.reading.doc("A.md").expect("doc");
+    let want: HashSet<String> = ["Nope", "Gone.md"].map(String::from).into();
+    assert_eq!(doc.unresolved, want);
+}
+
+/// Plan round-6 WP-4: the missing-note path rule.
+#[test]
+fn missing_note_path_rule() {
+    assert_eq!(missing_note_path("Nope", ""), "Nope.md");
+    assert_eq!(missing_note_path("Nope", "inbox"), "inbox/Nope.md");
+    assert_eq!(missing_note_path("sub/Deep", "inbox"), "sub/Deep.md");
+    assert_eq!(missing_note_path("x/Done.md", "inbox"), "x/Done.md");
+    assert_eq!(missing_note_path("My%20Note#sec", ""), "My Note.md");
+}
+
+/// Plan round-6 WP-4: `missing_link = "create"` creates the note through `CreateNote` (the
+/// explorer's New-note folder for a bare target, the link's path otherwise) and opens it.
+#[test]
+fn unresolved_link_click_creates_under_create_mode() {
+    let (_tmp, d) = setup(&[("A.md", b"see [[Nope]] [[sub/Deep]]\n")]);
+    let mut app = app_on(&d, "A.md");
+    app.rpc_inline = true;
+    app.prefs.missing_link = crate::settings::editor_prefs::MissingLink::Create;
+    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+        src: "A.md".into(),
+        target: "Nope".into(),
+    }));
+    assert!(d.read_file("Nope.md").is_ok(), "created at the root");
+    assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("Nope.md"));
+    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+        src: "A.md".into(),
+        target: "sub/Deep".into(),
+    }));
+    assert!(
+        d.read_file("sub/Deep.md").is_ok(),
+        "created at the link's path"
+    );
+    assert_eq!(
+        app.active_tab().map(|t| t.path.as_str()),
+        Some("sub/Deep.md")
+    );
+    assert!(
+        app.status
+            .notice
+            .as_ref()
+            .is_none_or(|n| !n.text.starts_with("unresolved")),
+        "no warning in create mode"
+    );
+}
+
+/// Plan round-6 WP-4: the link menu offers "Create note" on an unresolved link under `warn`,
+/// and it creates the note.
+#[test]
+fn link_menu_create_note_under_warn_mode() {
+    use crate::context_menu::{Item, MenuMsg, Target, items};
+    let (_tmp, d) = setup(&[("A.md", b"see [[Nope]]\n")]);
+    let mut app = app_on(&d, "A.md");
+    app.rpc_inline = true;
+    let t = Target::Link {
+        src: "A.md".into(),
+        target: "Nope".into(),
+        external: false,
+        view: 1,
+        selection: false,
+        missing: true,
+    };
+    assert!(items(&t).iter().any(|(i, _)| *i == Item::CreateNote));
+    let at = iced::Point::new(1.0, 1.0);
+    let _ = app.update(Message::Menu(MenuMsg::Open(t, at)));
+    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::CreateNote)));
+    assert!(d.read_file("Nope.md").is_ok());
+    assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("Nope.md"));
+}

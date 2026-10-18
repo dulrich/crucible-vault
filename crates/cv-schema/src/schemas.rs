@@ -1798,6 +1798,13 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Str("trash")),
         field(
+            "missing_link",
+            "Missing-note links",
+            "Clicking a link to a note that does not exist: warn with a notice, or create the note (New-note folder, or the link's folder path) and open it",
+            Node::Enum(&["warn", "create"]),
+        )
+        .dflt(D::Str("warn")),
+        field(
             "focus_follows_mouse",
             "Focus follows mouse",
             "The pointer entering a pane focuses it (never while a modal or menu is open, or during a drag)",
