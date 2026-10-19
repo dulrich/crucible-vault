@@ -1,5 +1,5 @@
-//! `localize` step tests (was `wp11_tests.rs`): synthetic vaults in temp dirs with a temp
-//! protected root (I1, via [`super::testkit`]) and a `cv_testkit::MockHttp` on 127.0.0.1 (no real
+//! `localize` step tests (was `wp11_tests.rs`): synthetic vaults in temp dirs (via [`super::testkit`])
+//! and a `cv_testkit::MockHttp` on 127.0.0.1 (no real
 //! network).
 
 use std::collections::HashMap;

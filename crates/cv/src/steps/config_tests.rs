@@ -1,5 +1,5 @@
 //! Example-config load and step-param validation tests (was `wp10_tests.rs`). Synthetic notes in a temp
-//! vault with a temp protected root (I1), the example config from `config/examples/`, steps driven
+//! vault, the example config from `config/examples/`, steps driven
 //! through `steps::validate`/`steps::execute` via [`super::testkit`].
 
 use cv_actions::{ConfigSet, Step};

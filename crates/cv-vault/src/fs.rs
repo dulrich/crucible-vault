@@ -1,8 +1,7 @@
 //! [`VaultFs`]: the filesystem every vault mutation goes through.
 //!
-//! It reads and writes the vault root; it is refused when the root is (under) the protected
-//! live vault and the cut-over marker is absent (I1). Shadow mode was retired in plan
-//! tn-review-baseline-remediation WP-R6.
+//! It reads and writes the vault root. Writes through a symlinked note land on its target only
+//! when that target lies under the vault root or an allowlisted link-write root.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -12,38 +11,9 @@ use crate::error::{Result, VaultError, io};
 use crate::hash::ContentHash;
 use crate::path::{TMP_PREFIX, is_ignored, validate_rel_path};
 
-/// The live vault (I1). A parameter everywhere so tests use a temp dir as the protected root.
-pub const DEFAULT_PROTECTED_ROOT: &str = "~/vault";
-
-/// The cut-over check (I1), injected by the caller. `cv::cutover::StateCutover` implements it over
-/// `state.db` (plan `cut-over-now` WP-1); this crate ships only [`NoCutover`] and never creates a
-/// marker.
-pub trait CutoverMarker {
-    /// Whether the cut-over marker is present.
-    fn present(&self) -> Result<bool>;
-}
-
-/// The only non-test [`CutoverMarker`]: never present.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoCutover;
-
-impl CutoverMarker for NoCutover {
-    fn present(&self) -> Result<bool> {
-        Ok(false)
-    }
-}
-
-fn canon_or_self(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
 /// The vault filesystem; see the module docs.
 pub struct VaultFs {
     root: PathBuf,
-    /// The canonical protected root (I1), for the write-through-link destination check.
-    protected: PathBuf,
-    /// Whether the cut-over marker was present when live mode was opened.
-    marker_present: bool,
     /// Canonical roots outside the vault a write through a symlinked note may land under
     /// (`CV_LINK_WRITE_ROOTS`, audit B1). Empty by default.
     link_write_roots: Vec<PathBuf>,
@@ -113,25 +83,17 @@ fn relink_target(src: &Path, dest: &Path) -> Result<Option<PathBuf>> {
 pub(crate) static FAIL_BEFORE_PERSIST: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Test seam: `move_file`'s `remove_file(src)` fails (after the destination name was created).
+#[cfg(test)]
+pub(crate) static FAIL_REMOVE_SRC: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 impl VaultFs {
-    /// Live mode on `root`. Refused ([`VaultError::ProtectedRoot`]) when `root` canonicalizes to
-    /// or under the canonical `protected_root`, or is an ancestor of it, ([`DEFAULT_PROTECTED_ROOT`] in production) and
-    /// `marker` is not present (I1).
-    pub fn live(root: &Path, protected_root: &Path, marker: &dyn CutoverMarker) -> Result<Self> {
+    /// Live mode on `root` (canonicalized; it must exist).
+    pub fn live(root: &Path) -> Result<Self> {
         let root = std::fs::canonicalize(root).map_err(|e| io(root, e))?;
-        let protected = canon_or_self(protected_root);
-        // Either containing the other is refused: a root above the live vault reaches into it.
-        let marker_present = marker.present()?;
-        if (root.starts_with(&protected) || protected.starts_with(&root)) && !marker_present {
-            return Err(VaultError::ProtectedRoot {
-                root: root.display().to_string(),
-                protected: protected.display().to_string(),
-            });
-        }
         Ok(Self {
             root,
-            protected,
-            marker_present,
             link_write_roots: Vec::new(),
         })
     }
@@ -154,7 +116,7 @@ impl VaultFs {
 
     /// The file a live write of `path` lands on: `full` itself for a regular (or new) entry, or
     /// the canonical target of a symlinked entry when that target is a regular file under the
-    /// vault root or an allowlisted root, and not under the protected root without the marker.
+    /// vault root or an allowlisted root.
     /// Anything else is [`VaultError::LinkWriteRefused`]; the link is never replaced.
     fn write_target(&self, path: &str, full: &Path) -> Result<PathBuf> {
         let is_link = full
@@ -172,11 +134,6 @@ impl VaultFs {
         };
         if !target.is_file() {
             return Err(refuse("the link target is not a regular file"));
-        }
-        if target.starts_with(&self.protected) && !self.marker_present {
-            return Err(refuse(
-                "the link target is under the protected root and no cut-over marker is present",
-            ));
         }
         let allowed = target.starts_with(&self.root)
             || self.link_write_roots.iter().any(|r| target.starts_with(r));
@@ -355,7 +312,15 @@ impl VaultFs {
             }
             Err(e) => return Err(io(&dest, e)),
         }
-        if let Err(e) = std::fs::remove_file(&src) {
+        #[cfg(test)]
+        let removed = if FAIL_REMOVE_SRC.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(std::io::Error::other("injected failure"))
+        } else {
+            std::fs::remove_file(&src)
+        };
+        #[cfg(not(test))]
+        let removed = std::fs::remove_file(&src);
+        if let Err(e) = removed {
             // All-or-nothing: drop the new name so the vault is left as it was.
             let _ = std::fs::remove_file(&dest);
             return Err(io(&src, e));
@@ -409,8 +374,7 @@ mod tests {
     #[test]
     fn forced_failure_leaves_no_tmp() {
         let d = tempfile::tempdir().unwrap();
-        let prot = tempfile::tempdir().unwrap();
-        let mut fs = VaultFs::live(d.path(), prot.path(), &NoCutover).unwrap();
+        let mut fs = VaultFs::live(d.path()).unwrap();
         FAIL_BEFORE_PERSIST.store(true, Ordering::SeqCst);
         let r = fs.put("a.md", b"x", None);
         FAIL_BEFORE_PERSIST.store(false, Ordering::SeqCst);
@@ -423,10 +387,24 @@ mod tests {
     }
 
     #[test]
+    fn rename_undone_when_removing_the_source_fails() {
+        let d = tempfile::tempdir().unwrap();
+        let mut fs = VaultFs::live(d.path()).unwrap();
+        // Seeded directly: `put` shares the parallel `FAIL_BEFORE_PERSIST` seam.
+        std::fs::write(d.path().join("a.md"), b"x").unwrap();
+        let h = ContentHash::of(b"x");
+        FAIL_REMOVE_SRC.store(true, Ordering::SeqCst);
+        let r = fs.move_file("a.md", "sub/b.md", &h);
+        FAIL_REMOVE_SRC.store(false, Ordering::SeqCst);
+        assert!(r.is_err());
+        assert_eq!(fs.read("a.md").unwrap().as_deref(), Some(&b"x"[..]));
+        assert!(fs.read("sub/b.md").unwrap().is_none());
+    }
+
+    #[test]
     fn trash_slot_suffixes() {
         let d = tempfile::tempdir().unwrap();
-        let prot = tempfile::tempdir().unwrap();
-        let fs = VaultFs::live(d.path(), prot.path(), &NoCutover).unwrap();
+        let fs = VaultFs::live(d.path()).unwrap();
         assert_eq!(fs.trash_slot("f/a.md"), ".trash/f/a.md");
         std::fs::create_dir_all(d.path().join(".trash/f")).unwrap();
         std::fs::write(d.path().join(".trash/f/a.md"), "").unwrap();

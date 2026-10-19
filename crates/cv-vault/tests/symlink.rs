@@ -10,26 +10,17 @@ use std::time::{Duration, Instant};
 
 use common::h;
 use cv_vault::{
-    CutoverMarker, EventKind, NoCutover, Origin, VaultError, VaultEvent, VaultFs, VaultWriter,
-    WatchConfig, spawn_writer_with_watcher,
+    EventKind, Origin, VaultError, VaultEvent, VaultFs, VaultWriter, WatchConfig,
+    spawn_writer_with_watcher,
 };
 use tempfile::TempDir;
 
 const DEB: Duration = Duration::from_millis(50);
 
-struct Marker;
-
-impl CutoverMarker for Marker {
-    fn present(&self) -> cv_vault::Result<bool> {
-        Ok(true)
-    }
-}
-
 struct Lx {
     vault: TempDir,
     repo: TempDir,
     idx: TempDir,
-    prot: TempDir,
 }
 
 impl Lx {
@@ -40,7 +31,6 @@ impl Lx {
             vault: tempfile::tempdir().unwrap(),
             repo: tempfile::tempdir().unwrap(),
             idx: tempfile::tempdir().unwrap(),
-            prot: tempfile::tempdir().unwrap(),
         };
         std::fs::create_dir_all(lx.vault.path().join("f")).unwrap();
         std::fs::write(lx.vault.path().join("a.md"), "# A\n").unwrap();
@@ -75,9 +65,7 @@ impl Lx {
     }
 
     fn fs(&self, roots: Vec<PathBuf>) -> VaultFs {
-        VaultFs::live(self.vault.path(), self.prot.path(), &NoCutover)
-            .unwrap()
-            .with_link_write_roots(roots)
+        common::live_fs(self.vault.path()).with_link_write_roots(roots)
     }
 
     /// Live writer allowlisting the repo.
@@ -146,33 +134,6 @@ fn link_into_the_vault_root_is_writable_without_an_allowlist() {
         "# A2\n"
     );
     assert!(lx.is_link("alias.md"));
-}
-
-#[test]
-fn link_into_the_protected_root_is_refused_without_the_marker() {
-    let lx = Lx::new();
-    let ptarget = lx.prot.path().join("p.md");
-    std::fs::write(&ptarget, "P").unwrap();
-    lx.link(&ptarget, "p.md");
-    // Even allowlisting the protected root does not open it without the marker.
-    let fs = lx.fs(vec![lx.prot.path().to_path_buf()]);
-    let mut w = VaultWriter::open(fs, &lx.base()).unwrap();
-    let err = w.write("p.md", b"P2", Some(h("P"))).unwrap_err();
-    assert!(
-        matches!(&err, VaultError::LinkWriteRefused { reason, .. } if reason.contains("protected")),
-        "{err:?}"
-    );
-    assert_eq!(std::fs::read_to_string(&ptarget).unwrap(), "P");
-    assert!(lx.is_link("p.md"));
-    drop(w);
-    // With the marker present the allowlisted protected target is writable.
-    let fs = VaultFs::live(lx.vault.path(), lx.prot.path(), &Marker)
-        .unwrap()
-        .with_link_write_roots(vec![lx.prot.path().to_path_buf()]);
-    let mut w = VaultWriter::open(fs, &lx.base()).unwrap();
-    w.write("p.md", b"P2", Some(h("P"))).unwrap();
-    assert_eq!(std::fs::read_to_string(&ptarget).unwrap(), "P2");
-    assert!(lx.is_link("p.md"));
 }
 
 #[test]

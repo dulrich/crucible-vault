@@ -159,15 +159,90 @@ fn schema_dump(c: &rusqlite::Connection) -> String {
 /// D23: a fresh database gets exactly the schema the retired v1→v10 chain produced.
 #[test]
 fn fresh_baseline_matches_the_v10_chain_schema() {
-    let mut c = rusqlite::Connection::open_in_memory().unwrap();
-    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::BASELINE_VERSION);
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(migrate::BASELINE).unwrap();
+    c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
+        .unwrap();
     assert_eq!(
         schema_dump(&c),
         include_str!("../tests/fixtures/baseline-v10-schema.txt")
     );
 }
 
-/// D23: a database already at the baseline (the live state.db) opens with no write.
+/// D24: a v10 database carrying the retired objects migrates to v11 without them, keeping every
+/// other `tracker_items` column.
+#[test]
+fn v10_database_migrates_to_v11_dropping_the_retired_objects() {
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(migrate::BASELINE).unwrap();
+    c.pragma_update(None, "user_version", 10).unwrap();
+    c.execute_batch(
+        "INSERT INTO shadow_writes (op, path, at_ms) VALUES ('write', 'a.md', 1);
+         INSERT INTO cutover_marker (id, vault, created_at_ms, created_by) VALUES (1, '/v', 1, 'me');
+         INSERT INTO tracker_items (source_kind, source_key, item_id, title, url, first_seen_ms,
+             day, outcome, score, full_body, done_ms, note_path, source_name, duration_s,
+             word_count, status)
+         VALUES ('blog', 'f', 'i1', 'T', 'https://x', 5, '2026-10-19', 'note', 0.5, 1, 99,
+             'n.md', 'S', 60, 300, 'done');",
+    )
+    .unwrap();
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 11);
+    let objects: i64 = c
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name IN
+             ('shadow_writes', 'shadow_writes_at', 'cutover_marker')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(objects, 0);
+    let cols: Vec<String> = c
+        .prepare("SELECT name FROM pragma_table_info('tracker_items')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(std::result::Result::unwrap)
+        .collect();
+    assert!(!cols.iter().any(|n| n == "done_ms"), "{cols:?}");
+    let row: (String, String, f64, i64, String, String, i64, i64, String) = c
+        .query_row(
+            "SELECT title, url, score, full_body, note_path, source_name, duration_s, word_count,
+                 status FROM tracker_items WHERE item_id = 'i1'",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "T".into(),
+            "https://x".into(),
+            0.5,
+            1,
+            "n.md".into(),
+            "S".into(),
+            60,
+            300,
+            "done".into()
+        )
+    );
+    let mut fresh = rusqlite::Connection::open_in_memory().unwrap();
+    assert_eq!(migrate::migrate(&mut fresh).unwrap(), 11);
+}
+
+/// A database already at the latest version opens with no write.
 #[test]
 fn baseline_database_opens_without_a_schema_write() {
     let dir = tempfile::tempdir().unwrap();
@@ -183,7 +258,7 @@ fn baseline_database_opens_without_a_schema_write() {
     assert_eq!(schema_dump(&c), before, "no schema written");
     drop(c);
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), migrate::BASELINE_VERSION);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
 }
 
 /// D23: versions 1..=9 predate the 0.1.0 baseline and are refused, by writer and reader.
@@ -822,18 +897,6 @@ fn unparseable_resource_keys_fail_closed_at_claim() {
         "corrupt-keys job not claimed"
     );
     assert!(s.job(&bad).unwrap().is_some(), "still listed");
-}
-
-// ---- cut-over marker (plan cut-over-now WP-1) -------------------------------
-
-#[test]
-fn set_cutover_is_idempotent() {
-    let (_d, mut s) = db();
-    let a = s.set_cutover("/v", "me", 10).unwrap();
-    let b = s.set_cutover("/other", "you", 20).unwrap();
-    assert_eq!(a, b);
-    assert_eq!(a.vault, "/v");
-    assert_eq!(s.cutover().unwrap(), Some(a));
 }
 
 /// SR10: a scheduled enqueue writes the job and the `schedule_runs` row in one transaction —

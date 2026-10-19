@@ -1,5 +1,5 @@
 //! `search` step tests (was `wp13_tests.rs`; plan `v0-core-daemon` WP-13, rewritten for plan
-//! semsearch-crate WP-3): synthetic notes in a temp vault with a temp protected root (via
+//! semsearch-crate WP-3): synthetic notes in a temp vault (via
 //! [`super::testkit`]), a temp `state.db`, a temp `semsearch` index, and a `cv_testkit::MockHttp`
 //! fake embedder on 127.0.0.1 that records every request (I1 — never a real index or any real
 //! provider).

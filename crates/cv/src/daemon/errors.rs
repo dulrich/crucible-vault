@@ -28,9 +28,7 @@ pub(crate) fn rpc_from_vault(e: VaultError) -> RpcError {
         e @ (VaultError::InvalidPath(_) | VaultError::Exists(_)) => {
             rpc_err(c::INVALID_PARAMS, e.to_string())
         }
-        e @ (VaultError::ProtectedRoot { .. } | VaultError::LinkWriteRefused { .. }) => {
-            rpc_err(c::REFUSED, e.to_string())
-        }
+        e @ VaultError::LinkWriteRefused { .. } => rpc_err(c::REFUSED, e.to_string()),
         e @ VaultError::WriterGone => rpc_err(c::UNAVAILABLE, e.to_string()),
         e @ (VaultError::Io { .. }
         | VaultError::Index(_)
@@ -88,13 +86,6 @@ mod error_map_tests {
                 VaultError::LinkWriteRefused {
                     path: s("a.md"),
                     reason: s("r"),
-                },
-                c::REFUSED,
-            ),
-            (
-                VaultError::ProtectedRoot {
-                    root: s("r"),
-                    protected: s("p"),
                 },
                 c::REFUSED,
             ),

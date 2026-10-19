@@ -123,7 +123,7 @@ pub fn export(
         Some(p) => p.clone(),
         None => default_dir(lookup)?.join(export_file_name(today)),
     };
-    if within(&path, &config.vault) || within(&path, &config.protected_vault) {
+    if within(&path, &config.vault) {
         bail!(
             "{} is inside the vault; the export never writes there",
             path.display()
@@ -676,7 +676,6 @@ mod tests {
             "CV_SOCKET" => Some("/nonexistent.sock".into()),
             "CV_INDEX_DB" => Some(idx.clone()),
             "CV_VAULT" => Some(v.clone()),
-            "CV_PROTECTED_VAULT" => Some(v.clone()),
             _ => None,
         })
         .unwrap();

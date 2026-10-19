@@ -22,14 +22,8 @@ pub enum VaultError {
     /// Not a clean vault-relative `/` path (or a path the daemon never writes).
     #[error("invalid vault path: {0:?}")]
     InvalidPath(String),
-    /// Live mode under the protected live vault without the cut-over marker (I1).
-    #[error(
-        "live mode refused: {root} is under the protected root {protected} and no cut-over marker is present"
-    )]
-    ProtectedRoot { root: String, protected: String },
     /// A live write through a symlinked note was refused: the link's target is dangling, not a
-    /// regular file, under the protected root without the cut-over marker, or outside the vault
-    /// root and every `CV_LINK_WRITE_ROOTS` entry (audit B1). Nothing was written; the link is
+    /// regular file, or outside the vault root and every `CV_LINK_WRITE_ROOTS` entry (audit B1). Nothing was written; the link is
     /// never replaced.
     #[error("write through the symlinked note {path} refused: {reason}")]
     LinkWriteRefused { path: String, reason: String },

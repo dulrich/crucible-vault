@@ -88,7 +88,7 @@ pub mod error_codes {
     /// Content-hash CAS failure; `data` carries `{current_hash}`.
     pub const CONFLICT: i64 = 1003;
     pub const NOT_FOUND: i64 = 1004;
-    /// The vault refused the operation by policy (symlinked-note write, protected root, scratch).
+    /// The vault refused the operation by policy (e.g. a refused write through a symlinked note).
     pub const REFUSED: i64 = 1005;
     /// The daemon cannot serve the call right now (shutting down, writer gone, runner not up).
     pub const UNAVAILABLE: i64 = 1006;

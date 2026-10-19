@@ -1,5 +1,5 @@
-//! Runner ↔ daemon tests: an in-process live daemon on a synthetic temp vault (the temp
-//! `CV_PROTECTED_VAULT` is a sibling, so the I1 guard admits it), driven over its socket. Pattern from `tests/daemon.rs`.
+//! Runner ↔ daemon tests: an in-process live daemon on a synthetic temp vault (asserted under the
+//! temp dir), driven over its socket. Pattern from `tests/daemon.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,8 +30,9 @@ impl Env {
     fn new(actions: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let vault = root.join("prot").join("Synth");
+        let vault = root.join("vault").join("Synth");
         std::fs::create_dir_all(vault.join("inbox")).unwrap();
+        cv_vault::test_support::assert_temp_root(&vault);
         std::fs::write(vault.join("a.md"), "# A\n").unwrap();
         std::fs::write(vault.join("inbox/x.md"), "# X\n").unwrap();
         std::fs::create_dir_all(root.join("config")).unwrap();
@@ -40,7 +41,6 @@ impl Env {
         for (k, v) in [
             ("HOME", root.join("home")),
             ("CV_VAULT", vault),
-            ("CV_PROTECTED_VAULT", root.join("protected")),
             ("CV_STATE_DB", root.join("state/state.db")),
             ("CV_SEARCH_DB", root.join("state/search.db")),
             ("CV_INDEX_DB", root.join("cache/index.db")),

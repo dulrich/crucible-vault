@@ -5,7 +5,6 @@
 pub mod cli;
 pub mod client;
 pub mod config;
-pub mod cutover;
 pub mod daemon;
 pub mod jobs;
 pub mod lookup;

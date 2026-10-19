@@ -1,24 +1,22 @@
 //! Shared live-writer test fixture (plan tn-review-baseline-remediation WP-R14, M6), compiled for
 //! this crate's tests and, via the `test-support` feature, for downstream dev-dependencies only.
 //!
-//! [`LiveFixture`] builds a vault and a *temp* protected root under one [`TempDir`] (invariant I1:
-//! never the live vault), seeds files, opens a [`VaultWriter`] on a temp index and spawns its
-//! writer thread.
+//! [`LiveFixture`] builds a vault under one [`TempDir`] (asserted to lie under
+//! [`std::env::temp_dir`], so tests never touch the live vault), seeds files, opens a
+//! [`VaultWriter`] on a temp index and spawns its writer thread.
 
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use crate::{NoCutover, VaultFs, VaultWriter, WriterHandle, spawn_writer};
+use crate::{VaultFs, VaultWriter, WriterHandle, spawn_writer};
 
-/// A temp vault + protected root + index base + running writer thread.
+/// A temp vault + index base + running writer thread.
 pub struct LiveFixture {
     /// Owns every path below; removed on drop.
     pub dir: TempDir,
     /// `<dir>/vault`.
     pub vault: PathBuf,
-    /// `<dir>/protected`, the temp protected root the writer guards against.
-    pub protected: PathBuf,
     /// `<dir>/index/index.db`, the writer's index base.
     pub index_db: PathBuf,
     /// The spawned writer.
@@ -55,21 +53,20 @@ impl LiveFixtureBuilder {
     pub fn build(self) -> LiveFixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let vault = dir.path().join("vault");
-        let protected = dir.path().join("protected");
         let index_db = dir.path().join("index").join("index.db");
-        for d in [&vault, &protected, &dir.path().join("index")] {
+        assert_temp_root(&vault);
+        for d in [&vault, &dir.path().join("index")] {
             std::fs::create_dir_all(d).expect("fixture dir");
         }
         for (rel, bytes) in &self.files {
             write_file(&vault, rel, bytes);
         }
-        let fs = VaultFs::live(&vault, &protected, &NoCutover).expect("live fs");
+        let fs = VaultFs::live(&vault).expect("live fs");
         let w = VaultWriter::open(fs, &index_db).expect("writer");
         let (writer, _join) = spawn_writer(w).expect("spawn writer");
         LiveFixture {
             dir,
             vault,
-            protected,
             index_db,
             writer,
         }
@@ -87,7 +84,7 @@ impl LiveFixture {
         Self::builder().files(files).build()
     }
 
-    /// The temp root holding the vault, protected root and index.
+    /// The temp root holding the vault and index.
     pub fn root(&self) -> &Path {
         self.dir.path()
     }
@@ -114,6 +111,20 @@ impl LiveFixture {
     }
 }
 
+/// Panics unless `root` (canonicalized when it exists) lies under the canonical
+/// [`std::env::temp_dir`]: the guard that keeps live-writer test fixtures off the live vault.
+pub fn assert_temp_root(root: &Path) {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let tmp = canon(&std::env::temp_dir());
+    let root = canon(root);
+    assert!(
+        root.starts_with(&tmp) && root != tmp,
+        "test vault root {} is not under the temp dir {}",
+        root.display(),
+        tmp.display()
+    );
+}
+
 fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
     let p = root.join(rel);
     std::fs::create_dir_all(p.parent().expect("parent")).expect("parent dir");
@@ -125,13 +136,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixture_is_temp_and_never_the_live_vault() {
+    fn fixture_is_temp() {
         let fx = LiveFixture::builder().file("a/b.md", "hi\n").build();
-        let live = Path::new(crate::DEFAULT_PROTECTED_ROOT);
-        assert_eq!(live, Path::new("~/vault"));
-        for p in [&fx.vault, &fx.protected, &fx.index_db] {
+        for p in [&fx.vault, &fx.index_db] {
             assert!(p.starts_with(fx.root()), "{p:?}");
-            assert!(!p.starts_with(live) && !live.starts_with(p), "{p:?}");
         }
         assert!(fx.root().starts_with(std::env::temp_dir()));
         assert_eq!(fx.text("a/b.md"), "hi\n");
@@ -139,5 +147,11 @@ mod tests {
             fx.writer.read("a/b.md").unwrap().as_deref(),
             Some(&b"hi\n"[..])
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "is not under the temp dir")]
+    fn fixture_refuses_a_non_temp_root() {
+        assert_temp_root(Path::new("~/vault"));
     }
 }

@@ -1,10 +1,8 @@
 //! `state.db`: versioned migrations, the durable job queue and the service-health breaker
-//! (plan `v0-core-daemon` WP-2). The `shadow_writes` table stays in the schema with no API
-//! (shadow mode retired in plan tn-review-baseline-remediation WP-R6).
+//! (plan `v0-core-daemon` WP-2).
 //!
 //! Pure and synchronous: no async runtime. Every time-dependent API takes `now_ms`.
 
-mod cutover;
 mod error;
 pub mod health;
 mod id;
@@ -20,7 +18,6 @@ mod tracker;
 #[cfg(test)]
 mod tests;
 
-pub use cutover::CutoverRecord;
 pub use error::{Result, StateError};
 pub use health::{BreakerState, ServiceFailureKind, ServiceHealth};
 pub use id::new_job_id;

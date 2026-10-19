@@ -1,5 +1,5 @@
 //! `agent` step tests (was `wp12_tests.rs`): the agent step against a `cv_testkit::MockHttp` posing as an
-//! `openai-compatible` provider, synthetic notes in temp dirs and a temp protected root (I1).
+//! `openai-compatible` provider, synthetic notes in temp dirs.
 //! No real provider is ever called.
 
 use std::collections::{BTreeMap, HashMap};

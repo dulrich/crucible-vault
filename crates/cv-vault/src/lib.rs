@@ -1,7 +1,6 @@
 //! `cv-vault` — the vault writer, watcher and filesystem (WP-7 of `plans/v0-core-daemon.md`).
 //!
-//! - [`VaultFs`]: the only place that touches vault files. It writes the vault root (refused
-//!   under the protected live vault unless the cut-over marker is present, I1).
+//! - [`VaultFs`]: the only place that touches vault files; it writes the vault root.
 //! - [`VaultWriter`]: content-hash CAS writes (tmp+rename, I2), recoverable delete, rename with
 //!   inbound link rewrite; owns the `index.db` writer handle and keeps it in sync.
 //! - [`spawn_writer`] / [`spawn_writer_with_watcher`]: one std thread owns the writer (and so the
@@ -23,7 +22,7 @@ mod watcher;
 mod writer;
 
 pub use error::{Result, VaultError};
-pub use fs::{CutoverMarker, DEFAULT_PROTECTED_ROOT, NoCutover, VaultFs};
+pub use fs::VaultFs;
 pub use hash::ContentHash;
 pub use path::validate_rel_path;
 pub use thread::{WriterHandle, spawn_writer, spawn_writer_with_watcher};

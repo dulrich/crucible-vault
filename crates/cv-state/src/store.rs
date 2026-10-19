@@ -744,10 +744,6 @@ impl StateReader {
             .conn
             .query_row("SELECT count(*) FROM link_records", [], |r| r.get(0))?)
     }
-
-    pub(crate) fn conn(&self) -> &Connection {
-        &self.conn
-    }
 }
 
 #[cfg(test)]

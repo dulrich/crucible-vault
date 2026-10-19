@@ -77,6 +77,7 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 - **Decision:** **Shadow, then one switch.** Until v0 parity, the daemon runs against the live vault **read-only**: it indexes and logs the writes it would make, with real writes only to a scratch copy outside every repo. At cut-over, with the user's explicit go-ahead, it takes `x-scheme-handler/obsidian` and Crucible's automation is disabled in one step. There is never a dual-writer period.
 - **Implication:** v0 needs a shadow/dry-run mode in the action runner, plus parity criteria the user can check before the switch.
 - **Amendment (2026-10-19):** shadow mode is retired (plan `tn-review-baseline-remediation` WP-R6): the daemon has one (live) mode, `CV_MODE` is gone, and the protected-root + cut-over-marker guard (I1) is what keeps test and scratch runs off the live vault.
+- **Superseded by D24:** I1 is retired; test fixtures asserting a temp vault root now keep tests off the live vault.
 
 ## D12 — OFM tokenizer reuse (2026-10-13)
 
@@ -130,6 +131,7 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
   - Row 8 (taking `x-scheme-handler/obsidian`) was in scope ("clippings should be captured by cv now").
 - **Consequence:** Crucible's automation (YT/X enrichment, trackers, Daily Brief, image describe, link records) is dark until A2 lands; A1's own actions run live.
 - **Premise correction:** `plans/v0-core-daemon.md` assumed a Wayland host with `wl-paste`. The host is X11, so the default clipboard command now follows the session (`xclip -o -selection clipboard` without `WAYLAND_DISPLAY`, else `wl-paste --no-newline`; `CV_CLIPBOARD_CMD` overrides).
+- **Superseded by D24** for the cut-over marker: the guard it armed (I1) is retired.
 
 ## D20 — Settings tab over the vault config files (2026-10-14; reopens inventory #23, amends D18)
 
@@ -174,3 +176,11 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 - **Decision:** with every cut-over migration applied on this machine (deploy `0001`–`0011`, state.db at v10), the history collapses into a 0.1.0 baseline. The workspace version is `0.1.0` in `[workspace.package]`, inherited by every member (`Cargo.lock` unchanged — every member already was 0.1.0).
 - **state.db:** the v1→v10 chain is replaced by one baseline (`cv_state::migrate::BASELINE`, `BASELINE_VERSION = 10`) that creates the exact v10 schema on a fresh DB (pinned by `crates/cv-state/tests/fixtures/baseline-v10-schema.txt`, dumped from the retired chain). A DB at v10 opens with no write; a DB at v1–v9 is refused (`StateError::PreBaseline`, "predates the 0.1.0 baseline"); a newer DB is refused as before. Post-baseline steps append as v11+ in `MIGRATIONS`. `index.db` (no chain; mismatch → rebuild) and `search.db` are derived and unaffected.
 - **Deploy migrations:** `deploy/migrations/0001`–`0011` and their `crates/cv/tests/migration_*` tests are deleted, with the `cv search import` stub only 0007 used. Numbering restarts at `0001` after the baseline; a new id must not reuse a pre-baseline id (ledger keys are the full `<NNNN>-<slug>`). `install.sh` already ignores ledger lines for files that no longer exist.
+- **Superseded by D24:** state.db moves to v11 and the 0.1.1 baseline replaces this one.
+
+## D24 — Cut-over guard retired; 0.1.1 baseline (2026-10-19; plan tn-review-residue-cleanup)
+
+- **Decision:** I1 (the protected live-vault root plus the state.db cut-over marker) is retired. The configured vault (`CV_VAULT`) is the live vault; `CV_PROTECTED_VAULT` is gone and ignored if set. `VaultFs::live` takes only the root; writes through symlinked notes stay confined to the vault root and `CV_LINK_WRITE_ROOTS`, and `REFUSED` (1005) stays the policy-refusal code.
+- **Test safety:** live-writer test fixtures (`cv_vault::test_support::LiveFixture`, the cv-vault integration fixtures, the cv daemon test harnesses) assert their vault root lies under `std::env::temp_dir()`, panicking otherwise. This replaces I1 as the guard that keeps tests off the live vault.
+- **state.db v11:** one `MIGRATIONS` step drops `shadow_writes` (with `shadow_writes_at`), `cutover_marker` and `tracker_items.done_ms`. The daemon applies it at startup through `migrate()`; there is no deploy script.
+- **0.1.1 baseline:** the baseline collapse to v11 follows in plan tn-review-residue-cleanup WP-X6.

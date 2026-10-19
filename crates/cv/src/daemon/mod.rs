@@ -128,13 +128,9 @@ impl Daemon {
                 .with_context(|| format!("opening {}", config.state_db.display()))?,
         ));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
-        let fs = VaultFs::live(
-            &config.vault,
-            &config.protected_vault,
-            &crate::cutover::StateCutover::new(Arc::clone(&state), &config.protected_vault),
-        )
-        .context("live mode refused")?
-        .with_link_write_roots(config.link_write_roots.clone());
+        let fs = VaultFs::live(&config.vault)
+            .context("opening the vault")?
+            .with_link_write_roots(config.link_write_roots.clone());
         let vault_root = fs.root().to_path_buf();
         // `open` creates the index when absent and rebuilds on a schema/generation mismatch.
         let writer = VaultWriter::open(fs, &config.index_db).context("opening the index")?;

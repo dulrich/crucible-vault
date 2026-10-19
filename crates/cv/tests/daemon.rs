@@ -1,6 +1,5 @@
-//! In-process daemon tests on a synthetic temp vault (live mode; the temp `CV_PROTECTED_VAULT` is
-//! a sibling of the vault, so the I1 guard admits it — [`Env::guarded`] puts the vault under it).
-//! Never touches the live vault (I1), the real clipboard, or any scheme handler.
+//! In-process daemon tests on a synthetic temp vault (live mode; [`Env::new`] asserts the vault lies
+//! under the temp dir). Never touches the live vault, the real clipboard, or any scheme handler.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -23,12 +22,12 @@ struct Env {
 }
 
 impl Env {
-    /// Synthetic vault `<tmp>/prot/Synth` (protected root `<tmp>/protected`, a sibling) with two
-    /// notes.
+    /// Synthetic vault `<tmp>/vault/Synth` with two notes.
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let vault = tmp.path().join("prot").join("Synth");
+        let vault = tmp.path().join("vault").join("Synth");
         std::fs::create_dir_all(vault.join("notes")).unwrap();
+        cv_vault::test_support::assert_temp_root(&vault);
         std::fs::write(vault.join("a.md"), "# A\nsee [[b]]\n").unwrap();
         std::fs::write(vault.join("notes/b.md"), "# B\n").unwrap();
         let r = tmp.path();
@@ -36,7 +35,6 @@ impl Env {
         for (k, v) in [
             ("HOME", r.join("home")),
             ("CV_VAULT", vault.clone()),
-            ("CV_PROTECTED_VAULT", r.join("protected")),
             ("CV_STATE_DB", r.join("state/state.db")),
             ("CV_INDEX_DB", r.join("cache/index.db")),
             ("CV_CONFIG_DIR", r.join("config")),
@@ -45,14 +43,6 @@ impl Env {
             vars.insert(k.to_owned(), v.display().to_string());
         }
         Self { tmp, vars }
-    }
-    /// [`Env::new`] with the protected root `<tmp>/prot` *containing* the vault: live mode is
-    /// refused unless the cut-over marker is present (I1).
-    fn guarded() -> Self {
-        let mut e = Self::new();
-        let prot = e.tmp.path().join("prot").display().to_string();
-        e.set("CV_PROTECTED_VAULT", prot);
-        e
     }
     fn set(&mut self, k: &str, v: impl Into<String>) {
         self.vars.insert(k.to_owned(), v.into());
@@ -643,29 +633,11 @@ async fn spool_then_drain_and_clipboard_failure() {
     d.shutdown().await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn live_mode_refused_near_protected_root() {
-    for which in ["equal", "under", "above"] {
-        let mut env = Env::guarded();
-        let prot = PathBuf::from(&env.vars["CV_PROTECTED_VAULT"]);
-        let vault = match which {
-            "equal" => prot.clone(),
-            "under" => env.vault(),
-            _ => env.tmp.path().to_path_buf(),
-        };
-        env.set("CV_VAULT", vault.display().to_string());
-        let err = Daemon::start(env.config(), opts()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("live mode refused"),
-            "{which}: {err:#}"
-        );
-        assert!(!env.socket().exists());
-    }
-}
-
 #[test]
 fn binary_cli_contract() {
-    let env = Env::guarded();
+    let mut env = Env::new();
+    let missing = env.tmp.path().join("missing-vault").display().to_string();
+    env.set("CV_VAULT", missing);
     let bin = env!("CARGO_BIN_EXE_cv");
     let run = |args: &[&str]| {
         let mut cmd = std::process::Command::new(bin);
@@ -677,7 +649,7 @@ fn binary_cli_contract() {
     };
     let o = run(&["daemon"]);
     assert_eq!(o.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("live mode refused"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("opening the vault"));
     assert_eq!(run(&["bogus"]).status.code(), Some(2));
     assert_eq!(run(&["--help"]).status.code(), Some(0));
     // Status with no daemon falls back to state.db (created by the failed start above).
@@ -689,33 +661,6 @@ fn binary_cli_contract() {
         String::from_utf8_lossy(&o.stderr)
     );
     assert!(String::from_utf8_lossy(&o.stdout).contains("daemon: not running"));
-}
-
-// ---- cut-over marker (plan cut-over-now WP-1) -------------------------------
-
-fn state_db(env: &Env) -> cv_state::StateDb {
-    let p = PathBuf::from(&env.vars["CV_STATE_DB"]);
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    cv_state::StateDb::open(&p, 1, cv_state::QueueConfig::default()).unwrap()
-}
-
-fn prot(env: &Env) -> String {
-    env.vars["CV_PROTECTED_VAULT"].clone()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn live_mode_starts_with_marker() {
-    let env = Env::guarded();
-    {
-        let mut db = state_db(&env);
-        let canon = std::fs::canonicalize(prot(&env)).unwrap();
-        db.set_cutover(&canon.display().to_string(), "test", 1)
-            .unwrap();
-    }
-    let d = start(&env).await;
-    let st = client(&env).request(Request::Status).unwrap();
-    assert!(st["generation"].is_u64(), "{st}");
-    d.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -14,13 +14,14 @@ pub const DEFAULT_CLIPBOARD_CMD: &str = "wl-paste --no-newline";
 /// the host on X11, where `wl-paste` cannot read the clipboard).
 pub const DEFAULT_CLIPBOARD_CMD_X11: &str = "xclip -o -selection clipboard";
 
+/// The vault root when `CV_VAULT` is unset (the configured vault is the live vault, D24).
+pub const DEFAULT_VAULT: &str = "~/vault";
+
 /// Resolved daemon/CLI configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// `CV_VAULT`: the vault root (default `CV_PROTECTED_VAULT`).
+    /// `CV_VAULT`: the vault root (default [`DEFAULT_VAULT`]).
     pub vault: PathBuf,
-    /// `CV_PROTECTED_VAULT` (default [`cv_vault::DEFAULT_PROTECTED_ROOT`]).
-    pub protected_vault: PathBuf,
     /// `CV_STATE_DB`.
     pub state_db: PathBuf,
     /// `CV_SEARCH_DB`: the `semsearch` index (default `search.db` beside `state.db`; plan
@@ -64,12 +65,7 @@ impl Config {
                 None => Ok(home()?.join(fallback)),
             }
         };
-        let protected_vault = get("CV_PROTECTED_VAULT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(cv_vault::DEFAULT_PROTECTED_ROOT));
-        let vault = get("CV_VAULT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| protected_vault.clone());
+        let vault = get("CV_VAULT").map_or_else(|| PathBuf::from(DEFAULT_VAULT), PathBuf::from);
         let state_dir = || -> Result<PathBuf> {
             Ok(xdg("XDG_STATE_HOME", ".local/state")?.join("crucible-vault"))
         };
@@ -124,7 +120,6 @@ impl Config {
         }
         Ok(Self {
             vault,
-            protected_vault,
             state_db,
             search_db,
             index_db,
@@ -218,8 +213,7 @@ mod tests {
     #[test]
     fn defaults_follow_xdg_and_home() {
         let c = Config::resolve(env(&[("HOME", "/h"), ("XDG_RUNTIME_DIR", "/run/u")])).unwrap();
-        assert_eq!(c.vault, PathBuf::from(cv_vault::DEFAULT_PROTECTED_ROOT));
-        assert_eq!(c.protected_vault, c.vault);
+        assert_eq!(c.vault, PathBuf::from(DEFAULT_VAULT));
         assert_eq!(
             c.state_db,
             PathBuf::from("/h/.local/state/crucible-vault/state.db")
@@ -230,7 +224,7 @@ mod tests {
         );
         assert_eq!(
             c.config_dir,
-            PathBuf::from(cv_vault::DEFAULT_PROTECTED_ROOT).join("_custom/crucible-vault")
+            PathBuf::from(DEFAULT_VAULT).join("_custom/crucible-vault")
         );
         assert_eq!(c.socket, PathBuf::from("/run/u/crucible-vault/daemon.sock"));
         assert_eq!(

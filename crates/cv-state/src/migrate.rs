@@ -2,9 +2,9 @@
 //!
 //! The schema is keyed on SQLite's `PRAGMA user_version`. A fresh database (version 0) is
 //! created directly at [`BASELINE_VERSION`] from [`BASELINE`], the schema the retired v1→v10
-//! chain produced (fixture `tests/fixtures/baseline-v10-schema.txt`). A database at the
-//! baseline opens with no schema write. Versions `1..BASELINE_VERSION` predate the baseline and
-//! are refused with [`StateError::PreBaseline`]; a version newer than this build knows is
+//! chain produced (fixture `tests/fixtures/baseline-v10-schema.txt`), then brought forward by
+//! [`MIGRATIONS`]. A database at [`latest_version`] opens with no schema write. Versions
+//! `1..BASELINE_VERSION` predate the baseline and are refused with [`StateError::PreBaseline`]; a version newer than this build knows is
 //! refused with [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no
 //! down-migration and no "drop and rebuild" path. Later schema changes append to
 //! [`MIGRATIONS`]: entry `i` moves the database from `BASELINE_VERSION + i` to
@@ -143,7 +143,14 @@ CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key,
 ";
 
 /// Post-baseline steps (v11+). Later WPs append (never edit) entries.
-pub const MIGRATIONS: &[&str] = &[];
+pub const MIGRATIONS: &[&str] = &[
+    // v10 -> v11 (D24): drop the retired shadow-write log, the cut-over marker and the unused
+    // `tracker_items.done_ms` column. Nothing else is touched.
+    "DROP INDEX IF EXISTS shadow_writes_at;
+     DROP TABLE IF EXISTS shadow_writes;
+     DROP TABLE IF EXISTS cutover_marker;
+     ALTER TABLE tracker_items DROP COLUMN done_ms;",
+];
 
 /// Highest schema version this build knows.
 #[must_use]

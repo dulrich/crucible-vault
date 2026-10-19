@@ -1,5 +1,5 @@
 //! Shared step-test harness (plan tn-review-baseline-remediation WP-R14, M6): [`StepEnv`] owns a
-//! [`LiveFixture`] (temp vault + temp protected root + writer, I1), a temp `state.db` and the
+//! [`LiveFixture`] (temp vault + writer), a temp `state.db` and the
 //! config, and hands out [`StepCtx`]s; tests override single `StepCtx` fields where they differ.
 //! Also hosts the example-config harness the materialize/capture/file/lint tests share.
 
