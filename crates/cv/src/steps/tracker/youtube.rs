@@ -115,9 +115,7 @@ fn backfill_durations(
     key: &str,
 ) -> Result<(), StepError> {
     let missing = ctx
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
         .tracker_items_missing_duration(KIND, BACKFILL_LIMIT)
         .map_err(|e| StepError::failed(format!("state: {e}")))?;
     for chunk in missing.chunks(api::MAX_IDS) {
@@ -139,10 +137,7 @@ fn backfill_durations(
                 (v.id, d)
             })
             .collect();
-        let mut st = ctx
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut st = ctx.state();
         for (source_key, id) in chunk {
             let d = durations.get(id).copied().unwrap_or(0);
             st.fill_tracker_duration(KIND, source_key, id, d)
@@ -167,10 +162,7 @@ fn cancel_listed_shorts(
     if channels.iter().all(|c| c.trim().is_empty()) {
         return Ok(0);
     }
-    let mut st = ctx
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut st = ctx.state();
     let mut changed = 0;
     for (source_key, source_name) in st.tracker_sources(KIND).map_err(err)? {
         let names = [source_name.as_deref().unwrap_or("")];
@@ -327,9 +319,7 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 &shorts.channels,
                 shorts.max_seconds,
             ) {
-                ctx.state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                ctx.state()
                     .insert_ignored_id(KIND, &id, "short", now_ms())
                     .map_err(|e| StepError::failed(format!("state: {e}")))?;
                 emit_cancelled(ctx, &cand, &mut out.output_paths)?;

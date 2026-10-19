@@ -31,6 +31,18 @@ pub struct OEmbed {
     pub version: String,
 }
 
+impl From<OEmbed> for cv_ingest::x::XPost {
+    fn from(o: OEmbed) -> Self {
+        Self {
+            author_name: o.author_name,
+            author_url: o.author_url,
+            html: o.html,
+            kind: o.kind,
+            version: o.version,
+        }
+    }
+}
+
 /// 403 is a deleted/private post, like 404 (`xApi.ts:125-127`).
 fn classify(
     service: &str,

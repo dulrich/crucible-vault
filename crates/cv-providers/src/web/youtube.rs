@@ -125,6 +125,46 @@ impl Thumbnails {
     }
 }
 
+impl From<Video> for cv_ingest::youtube::VideoMeta {
+    /// The metadata note's fields (`video_id` is the item's `id`).
+    fn from(v: Video) -> Self {
+        Self {
+            video_id: v.id,
+            title: v.snippet.title,
+            description: v.snippet.description,
+            duration: v.content_details.duration,
+            channel_id: v.snippet.channel_id,
+            channel_title: v.snippet.channel_title,
+            published_at: v.snippet.published_at,
+            tags: v.snippet.tags,
+            category_id: v.snippet.category_id,
+            default_language: v.snippet.default_language,
+            live_broadcast_content: v.snippet.live_broadcast_content,
+            view_count: v.statistics.view_count,
+            like_count: v.statistics.like_count,
+            comment_count: v.statistics.comment_count,
+        }
+    }
+}
+
+impl From<Channel> for cv_ingest::youtube::ChannelMeta {
+    /// The about note's fields (thumbnail = [`Thumbnails::best`]).
+    fn from(ch: Channel) -> Self {
+        Self {
+            channel_id: ch.id,
+            thumbnail_url: ch.snippet.thumbnails.best().map(str::to_owned),
+            title: ch.snippet.title,
+            description: ch.snippet.description,
+            custom_url: ch.snippet.custom_url,
+            published_at: ch.snippet.published_at,
+            country: ch.snippet.country,
+            subscriber_count: ch.statistics.subscriber_count,
+            video_count: ch.statistics.video_count,
+            view_count: ch.statistics.view_count,
+        }
+    }
+}
+
 /// One thumbnail.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]

@@ -296,7 +296,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         KIND,
         rows.iter().map(|r| (r.link.trim(), r.name.as_str())),
     )?;
-    let index = cv_index::Reader::open_current(ctx.index_db).ok();
+    let index = ctx.index().ok();
     let source_seen = |url: &str| {
         index.as_ref().is_some_and(|r| {
             r.query()
@@ -338,9 +338,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         let posts = policy::posts_from_feed(&items, row.canon.method(), body_mode(row.body));
         // Stored evidence, oldest → newest.
         let mut evidence: VecDeque<bool> = ctx
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
             .tracker_items_for_source(KIND, &key, window.saturating_mul(4).max(64))
             .map_err(|e| StepError::failed(format!("state: {e}")))?
             .into_iter()
@@ -364,9 +362,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             };
             let full = Some(post.has_body());
             let recorded = ctx
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
                 .tracker_item(KIND, &key, &post.post_id)
                 .map_err(|e| StepError::failed(format!("state: {e}")))?
                 .is_some();
@@ -374,9 +370,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 // Length backfill for rows recorded before v7: the store fills only a NULL
                 // `word_count` of a `line`/`note` row (plan intake-type-column-length-backfill).
                 if let Some(wc) = cand.word_count {
-                    ctx.state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    ctx.state()
                         .fill_tracker_word_count(KIND, &key, &post.post_id, wc)
                         .map_err(|e| StepError::failed(format!("state: {e}")))?;
                 }

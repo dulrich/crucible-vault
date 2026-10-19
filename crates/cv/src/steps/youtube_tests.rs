@@ -465,3 +465,24 @@ fn persistent_race_on_the_source_note_defers() {
     assert_eq!(meta(&w, "n/a.md"), Err(StepError::conflict()));
     assert_eq!(read(&w, "n/a.md"), format!("{NOTE}x\nx\nx\n"));
 }
+
+#[test]
+fn non_utf8_note_is_read_lossily_like_x() {
+    // WP-R11 (SM7): youtube used to fail "note is not UTF-8"; already linked → done, no fetch.
+    let live = "_yt_metadata/synth-channel/dQw4w9WgXcQ.md";
+    let w = world(&[(live, "---\nvideoId: dQw4w9WgXcQ\n---\n")], vec![], "");
+    let mut bytes = format!(
+        "---\nyt-video-id: dQw4w9WgXcQ\nyt-metadata: \"[[{}]]\"\n---\n",
+        &live[..live.len() - 3]
+    )
+    .into_bytes();
+    bytes.push(0xff);
+    std::fs::create_dir_all(w.vault.join("n")).unwrap();
+    std::fs::write(w.vault.join("n/a.md"), &bytes).unwrap();
+    let o = meta(&w, "n/a.md").unwrap();
+    assert_eq!(
+        (o.vars["metadata_path"].clone(), o.vars["linked"].clone()),
+        (json!(live), json!(false))
+    );
+    assert_eq!(std::fs::read(w.vault.join("n/a.md")).unwrap(), bytes);
+}

@@ -40,6 +40,7 @@ pub mod link_scan;
 pub mod lint;
 pub mod localize;
 pub mod materialize;
+pub(crate) mod metadata;
 pub mod params;
 pub mod search;
 pub mod tracker;
@@ -262,6 +263,13 @@ impl From<VaultError> for StepError {
     }
 }
 
+impl From<cv_state::StateError> for StepError {
+    /// A `state.db` error fails the step (the one state-error mapping, L6).
+    fn from(e: cv_state::StateError) -> Self {
+        StepError::failed(format!("state: {e}"))
+    }
+}
+
 /// Enqueues a child run for [`Step::RunAction`] (implemented by the runner: same lane, chain
 /// depth limit, cycle check).
 pub trait ChildSpawner {
@@ -300,7 +308,20 @@ pub struct StepCtx<'a> {
     pub(crate) written: Vec<String>,
 }
 
-impl StepCtx<'_> {
+impl<'a> StepCtx<'a> {
+    /// The locked `state.db` with the one poison policy, recover (WP-R11, L6); hold it briefly.
+    pub fn state(&self) -> std::sync::MutexGuard<'a, StateDb> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The current index generation ([`cv_index::Reader::open_current`] owns the swap retry).
+    pub fn index(&self) -> Result<cv_index::Reader, StepError> {
+        cv_index::Reader::open_current(self.index_db)
+            .map_err(|e| StepError::failed(format!("index: {e}")))
+    }
+
     /// The single writer (I2); fails when the daemon is shutting down.
     pub fn writer(&self) -> Result<&WriterHandle, StepError> {
         self.writer

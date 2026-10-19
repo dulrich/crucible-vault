@@ -19,7 +19,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_index::Reader;
 use cv_state::LinkRecordInput;
 use cv_text::url_canon::CanonicalizedUrl;
 use serde_json::{Value, json};
@@ -114,16 +113,9 @@ struct Vars {
     candidates: u64,
 }
 
-fn open_reader(ctx: &StepCtx<'_>) -> Result<Reader, StepError> {
-    let open = || Reader::open_current(ctx.index_db);
-    open()
-        .or_else(|_| open())
-        .map_err(|e| StepError::failed(format!("index: {e}")))
-}
-
 /// Executes the step.
 fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let reader = open_reader(ctx)?;
+    let reader = ctx.index()?;
     let q = reader.query();
     let link_record_notes: BTreeSet<String> = q
         .files_with_prop("type", &json!("link-record"))
@@ -204,10 +196,7 @@ fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         };
         // Hold the state lock per upsert only, never across note reads.
         let outcome = {
-            let mut db = ctx
-                .state
-                .lock()
-                .map_err(|_| StepError::failed("state.db lock poisoned"))?;
+            let mut db = ctx.state();
             db.upsert_link_record(&input)
                 .map_err(|e| StepError::failed(format!("state.db: {e}")))?
         };

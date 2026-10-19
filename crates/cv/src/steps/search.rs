@@ -216,15 +216,12 @@ pub(crate) fn run(
     if p.delete && target.is_none() {
         return Err(StepError::failed("search_delete needs a path"));
     }
-    let reader = open_reader(ctx)?;
+    let reader = ctx.index()?;
     let ctx_ref: &StepCtx<'_> = ctx;
     let host = NotePrep::new(
         Box::new(move |p| ctx_ref.read(p).map(|o| o.map(|(b, _)| b))),
         &reader,
-        Box::new(move |md5| {
-            let db = ctx_ref.state.lock().ok()?;
-            db.image_description(md5).ok().flatten()
-        }),
+        Box::new(move |md5| ctx_ref.state().image_description(md5).ok().flatten()),
     );
     let report = if live {
         let index = search.shared().map_err(map_err)?;
@@ -273,15 +270,6 @@ pub(crate) fn run(
         "search feed step done"
     );
     Ok(vars(&report, live))
-}
-
-/// Opens the current index generation for the step (reopens once on a generation swap).
-fn open_reader(ctx: &StepCtx<'_>) -> Result<Reader, StepError> {
-    let open = || Reader::open_current(ctx.index_db);
-    // A generation swap between reading the pointer and opening the file: reopen once.
-    open()
-        .or_else(|_| open())
-        .map_err(|e| StepError::failed(format!("index: {e}")))
 }
 
 /// Vault read used by [`NotePrep`]: the bytes of a vault-relative path, `None` when absent.

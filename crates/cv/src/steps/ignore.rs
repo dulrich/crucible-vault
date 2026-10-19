@@ -134,10 +134,7 @@ fn run(mode: Mode, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     };
 
     if let Some(r) = reason {
-        let mut st = ctx
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut st = ctx.state();
         st.insert_ignored_id(KIND, &video_id, r, now_ms())
             .map_err(|e| StepError::failed(format!("state: {e}")))?;
         // Round-8 WP-1: an existing intake row becomes a cancelled intake (status `-`).

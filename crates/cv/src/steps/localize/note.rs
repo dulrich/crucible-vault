@@ -119,12 +119,7 @@ pub(super) struct VaultView {
 
 impl VaultView {
     pub(super) fn open(index_db: &std::path::Path, note: &str) -> Result<Self, cv_index::Error> {
-        let reader = match cv_index::Reader::open_current(index_db) {
-            Err(cv_index::Error::GenerationMissing { .. }) => {
-                cv_index::Reader::open_current(index_db)?
-            }
-            r => r?,
-        };
+        let reader = cv_index::Reader::open_current(index_db)?;
         let paths = cv_index::attachment_vault_paths(&reader.query())?;
         let mut resolver = cv_index::Resolver::default();
         let mut note_id = -1;

@@ -39,16 +39,6 @@ pub const INTAKE_FORMAT: &str = "- [ ] [{{vars.title}}]({{vars.url}}) — {{vars
 /// The daily-note section intake lines go into when the preset is not configured.
 pub const INTAKE_SECTION: &str = "# Intake";
 
-fn state_err(e: cv_state::StateError) -> StepError {
-    StepError::failed(format!("state: {e}"))
-}
-
-fn lock<'a>(ctx: &StepCtx<'a>) -> std::sync::MutexGuard<'a, cv_state::StateDb> {
-    ctx.state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// One tracked item about to be recorded / surfaced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -89,7 +79,7 @@ pub(crate) fn record_with(
     score: Option<f64>,
     note_path: Option<String>,
 ) -> Result<bool, StepError> {
-    lock(ctx)
+    ctx.state()
         .insert_tracker_item(&TrackerItem {
             source_kind: c.source_kind.clone(),
             source_key: c.source_key.clone(),
@@ -106,7 +96,7 @@ pub(crate) fn record_with(
             duration_s: c.duration_s,
             word_count: c.word_count,
         })
-        .map_err(state_err)
+        .map_err(StepError::from)
 }
 
 /// Name self-heal (plan `intake-view-source-length` WP-1): fills `source_name` on every row of
@@ -119,15 +109,13 @@ pub(crate) fn heal_source_names<'k>(
     kind: &str,
     sources: impl IntoIterator<Item = (&'k str, &'k str)>,
 ) -> Result<usize, StepError> {
-    let mut db = lock(ctx);
+    let mut db = ctx.state();
     let mut n = 0;
     for (key, name) in sources {
         if key.is_empty() || name.is_empty() {
             continue;
         }
-        n += db
-            .fill_tracker_source_name(kind, key, name)
-            .map_err(state_err)?;
+        n += db.fill_tracker_source_name(kind, key, name)?;
     }
     Ok(n)
 }
@@ -150,7 +138,7 @@ impl SeenSet {
         prop: &str,
         seed: impl FnOnce(&StepCtx<'_>) -> BTreeSet<String>,
     ) -> Result<Self, StepError> {
-        let first = !lock(ctx).has_tracker_items(kind).map_err(state_err)?;
+        let first = !ctx.state().has_tracker_items(kind)?;
         if first {
             let seeds = seed(ctx);
             tracing::info!(
@@ -173,14 +161,11 @@ impl SeenSet {
             }
         }
         let (mut ids, ignored) = {
-            let s = lock(ctx);
-            (
-                s.tracker_item_ids(kind).map_err(state_err)?,
-                s.ignored_ids(kind).map_err(state_err)?,
-            )
+            let s = ctx.state();
+            (s.tracker_item_ids(kind)?, s.ignored_ids(kind)?)
         };
         ids.extend(ignored);
-        let index = match cv_index::Reader::open_current(ctx.index_db) {
+        let index = match ctx.index() {
             Ok(r) => Some(r),
             Err(e) => {
                 tracing::warn!(error = %e, "tracker: index unavailable; seen-set without props");
@@ -314,9 +299,12 @@ fn record_emitted(
         return Ok(());
     }
     if record_with(ctx, c, TrackerOutcome::Ignored, full_body, None, None)? {
-        lock(ctx)
-            .set_tracker_item_status(&c.source_kind, &c.source_key, &c.item_id, Some('-'))
-            .map_err(state_err)?;
+        ctx.state().set_tracker_item_status(
+            &c.source_kind,
+            &c.source_key,
+            &c.item_id,
+            Some('-'),
+        )?;
     }
     Ok(())
 }
@@ -328,9 +316,9 @@ fn emit_inner(
     cancelled: bool,
     out_paths: &mut Vec<String>,
 ) -> Result<Emitted, StepError> {
-    let known = lock(ctx)
-        .tracker_item(&c.source_kind, &c.source_key, &c.item_id)
-        .map_err(state_err)?
+    let known = ctx
+        .state()
+        .tracker_item(&c.source_kind, &c.source_key, &c.item_id)?
         .is_some();
     if known {
         return Ok(Emitted::AlreadyRecorded);

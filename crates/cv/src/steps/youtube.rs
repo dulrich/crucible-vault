@@ -16,7 +16,7 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::youtube::{
     ChannelMeta, VideoMeta, channel_about_note, metadata_note, tombstone_note,
 };
-use cv_lint::{FrontmatterDoc, JsValue};
+use cv_lint::FrontmatterDoc;
 use cv_providers::web::FetchError;
 use cv_providers::web::youtube::{self as api, YoutubeApi};
 use cv_state::FailureReason;
@@ -24,11 +24,9 @@ use cv_text::slugify;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::metadata::{Ensured, MetadataKind, iso_now, link_metadata, str_prop};
 use super::params::{check_keys, check_placeholders, expand, get_bool, get_str};
-use super::web::{
-    append_link, block_on, client, create_or_found, find_in_subfolders, link_targets, record_usage,
-    secret,
-};
+use super::web::{block_on, client, create_or_found, find_in_subfolders, record_usage, secret};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// The secret name (env var or `~/.config/crucible-vault/YOUTUBE_API_KEY`).
@@ -97,19 +95,6 @@ impl StepModule for Youtube {
     }
 }
 
-/// `yt_metadata` outcome vars.
-#[derive(Serialize)]
-struct MetaVars {
-    video_id: String,
-    created: bool,
-    tombstone: bool,
-    linked: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    channel_id: Option<String>,
-}
-
 /// `yt_channel_enrich` outcome vars.
 #[derive(Serialize)]
 struct EnrichVars {
@@ -118,26 +103,17 @@ struct EnrichVars {
     about_path: Option<String>,
 }
 
+/// The YouTube [`MetadataKind`].
+const KIND: MetadataKind = MetadataKind {
+    id_var: "video_id",
+    anchor: "yt-video-id",
+    list_key: "yt-metadata",
+    default_root: "_yt_metadata",
+    valid: |id| !id.is_empty() && !id.contains('/') && !id.contains(".."),
+};
+
 pub(crate) fn metadata_root(ctx: &StepCtx<'_>) -> String {
-    let r = ctx
-        .config
-        .pipelines()
-        .youtube
-        .metadata_root
-        .trim_matches('/');
-    if r.is_empty() {
-        "_yt_metadata".to_owned()
-    } else {
-        r.to_owned()
-    }
-}
-
-fn utf8(b: Vec<u8>) -> Result<String, StepError> {
-    String::from_utf8(b).map_err(|_| StepError::failed("note is not UTF-8"))
-}
-
-fn fm_err(e: cv_lint::FmError) -> StepError {
-    StepError::failed(e.to_string())
+    KIND.root(&ctx.config.pipelines().youtube.metadata_root)
 }
 
 pub(crate) fn no_key() -> StepError {
@@ -145,13 +121,6 @@ pub(crate) fn no_key() -> StepError {
         message: format!("YouTube Data API key missing (set {API_KEY_SECRET})"),
         reason: Some(FailureReason::NoApiKey),
     }
-}
-
-/// Crucible `fetched_at` (`new Date().toISOString()`).
-fn iso_now() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
 }
 
 pub(crate) fn youtube() -> YoutubeApi {
@@ -175,22 +144,19 @@ fn channel_folder(ctx: &StepCtx<'_>, channel_id: &str, title: &str) -> String {
         .unwrap_or_else(|| "unknown-channel".to_owned())
 }
 
-fn str_prop(v: Option<JsValue>) -> Option<String> {
-    match v? {
-        JsValue::Str(s) => Some(s.trim().to_owned()).filter(|s| !s.is_empty()),
-        JsValue::Num(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-/// Ensures the metadata note for `id` exists: `(path, created, tombstone, channel_id)`. Reused by
-/// the tracker (WP-7).
-pub(crate) fn ensure_metadata_note(
+/// Ensures the metadata note for `id` exists (`extra` = the created video's channel id).
+fn ensure_metadata_note(
     ctx: &mut StepCtx<'_>,
     id: &str,
-) -> Result<(String, bool, bool, Option<String>), StepError> {
-    if let Some((p, tombstone)) = find_metadata_note(ctx, id)? {
-        return Ok((p, false, tombstone, None));
+) -> Result<Ensured<Option<String>>, StepError> {
+    if let Some((path, tombstone)) = find_metadata_note(ctx, id)? {
+        return Ok(Ensured {
+            path,
+            created: false,
+            tombstone,
+            output: tombstone,
+            extra: None,
+        });
     }
     let key = secret(API_KEY_SECRET).ok_or_else(no_key)?;
     let c = client()?;
@@ -206,7 +172,15 @@ pub(crate) fn ensure_metadata_note(
         }
         Err(e) => return Err(StepError::from_fetch(&e)),
     };
-    write_metadata_note(ctx, id, video)
+    let (path, created, tombstone, extra) = write_metadata_note(ctx, id, video)?;
+    let output = created || tombstone;
+    Ok(Ensured {
+        path,
+        created,
+        tombstone,
+        output,
+        extra,
+    })
 }
 
 /// Finds an existing metadata note for `id`: `(path, tombstone)`.
@@ -240,19 +214,7 @@ pub(crate) fn write_metadata_note(
     };
     let meta = VideoMeta {
         video_id: id.to_owned(),
-        title: v.snippet.title,
-        description: v.snippet.description,
-        duration: v.content_details.duration,
-        channel_id: v.snippet.channel_id,
-        channel_title: v.snippet.channel_title,
-        published_at: v.snippet.published_at,
-        tags: v.snippet.tags,
-        category_id: v.snippet.category_id,
-        default_language: v.snippet.default_language,
-        live_broadcast_content: v.snippet.live_broadcast_content,
-        view_count: v.statistics.view_count,
-        like_count: v.statistics.like_count,
-        comment_count: v.statistics.comment_count,
+        ..VideoMeta::from(v)
     };
     let folder = channel_folder(ctx, &meta.channel_id, &meta.channel_title);
     let path = format!("{root}/{folder}/{id}.md");
@@ -262,85 +224,32 @@ pub(crate) fn write_metadata_note(
 }
 
 fn metadata(video_id: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let active = ctx.context.active_path.clone();
-    let note = match &active {
-        Some(p) => ctx.read(p)?,
-        None => None,
-    };
-    let doc = match &note {
-        Some((b, _)) => Some(FrontmatterDoc::new(utf8(b.clone())?)),
-        None => None,
-    };
     let explicit = match video_id {
         Some(s) => expand(ctx, s)?.trim().to_owned(),
         None => String::new(),
     };
-    let id = if explicit.is_empty() {
-        let from_prop = doc
-            .as_ref()
-            .and_then(|d| d.get("yt-video-id").ok().flatten())
-            .and_then(|v| str_prop(Some(v)));
-        let from_source = || {
-            doc.as_ref()
-                .and_then(|d| str_prop(d.get("source").ok().flatten()))
-                .and_then(|s| cv_text::url_canon::extract_video_id_from_url(&s))
-        };
-        from_prop.or_else(from_source).unwrap_or_default()
-    } else {
-        explicit
-    };
     let mut out = StepOutcome::default();
-    let mut v = MetaVars {
-        video_id: id.clone(),
-        created: false,
-        tombstone: false,
-        linked: false,
-        metadata_path: None,
-        channel_id: None,
+    let resolve = |doc: Option<&FrontmatterDoc>| {
+        let id = if explicit.is_empty() {
+            let from_prop = doc
+                .and_then(|d| d.get(KIND.anchor).ok().flatten())
+                .and_then(|v| str_prop(Some(v)));
+            let from_source = || {
+                doc.and_then(|d| str_prop(d.get("source").ok().flatten()))
+                    .and_then(|s| cv_text::url_canon::extract_video_id_from_url(&s))
+            };
+            from_prop.or_else(from_source).unwrap_or_default()
+        } else {
+            explicit.clone()
+        };
+        (id, ())
     };
-    if id.is_empty() || id.contains('/') || id.contains("..") {
-        // Crucible `no-video-id`: nothing to do.
-        out.set_vars(&v);
-        return Ok(out);
+    let channel = link_metadata(&KIND, ctx, &mut out, resolve, |ctx, id, ()| {
+        ensure_metadata_note(ctx, id)
+    })?;
+    if let Some(c) = channel.flatten() {
+        out.vars.insert("channel_id".to_owned(), c.into());
     }
-
-    // (a) Already linked to a live metadata note for this video → done, no write.
-    if let Some(d) = &doc {
-        for target in link_targets(d.get("yt-metadata").map_err(fm_err)?.as_ref()) {
-            if target.rsplit('/').next() == Some(id.as_str())
-                && ctx.read(&format!("{target}.md"))?.is_some()
-            {
-                v.metadata_path = Some(format!("{target}.md"));
-                out.set_vars(&v);
-                return Ok(out);
-            }
-        }
-    }
-
-    // (b)/(c) Find or create.
-    let (path, created, tombstone, channel) = ensure_metadata_note(ctx, &id)?;
-    v.metadata_path = Some(path.clone());
-    v.created = created;
-    v.tombstone = tombstone;
-    v.channel_id = channel;
-    if created || tombstone {
-        out.push_output(path.clone());
-    }
-
-    // (d) Link onto the source note: re-read after the fetch and CAS-written through
-    // `modify` (SR7), so an edit made during the fetch is kept.
-    if let (Some(p), Some(_)) = (active, note) {
-        let link = format!("[[{}]]", path.strip_suffix(".md").unwrap_or(&path));
-        let linked = ctx.modify(&p, |cur| {
-            let mut d = FrontmatterDoc::new(cur.to_owned());
-            Ok(append_link(&mut d, "yt-video-id", "yt-metadata", &link)?.then(|| d.into_text()))
-        })?;
-        if linked.is_some() {
-            out.push_output(p);
-            v.linked = true;
-        }
-    }
-    out.set_vars(&v);
     Ok(out)
 }
 
@@ -385,23 +294,11 @@ fn channel_enrich(
         .into_iter()
         .next()
         .ok_or_else(|| StepError::failed(format!("YouTube channel {channel_id} not found")))?;
-    let id = if ch.id.is_empty() {
-        channel_id.clone()
-    } else {
-        ch.id.clone()
-    };
-    let meta = ChannelMeta {
-        channel_id: id.clone(),
-        thumbnail_url: ch.snippet.thumbnails.best().map(str::to_owned),
-        title: ch.snippet.title,
-        description: ch.snippet.description,
-        custom_url: ch.snippet.custom_url,
-        published_at: ch.snippet.published_at,
-        country: ch.snippet.country,
-        subscriber_count: ch.statistics.subscriber_count,
-        video_count: ch.statistics.video_count,
-        view_count: ch.statistics.view_count,
-    };
+    let mut meta = ChannelMeta::from(ch);
+    if meta.channel_id.is_empty() {
+        meta.channel_id.clone_from(&channel_id);
+    }
+    let id = meta.channel_id.clone();
     let body = channel_about_note(&meta, &iso_now());
     // The about note is regenerated whole after the fetch: written through `modify` (SR7) so
     // the CAS hash is the one read now, not the one read before the round-trip.

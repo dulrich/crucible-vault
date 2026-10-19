@@ -28,10 +28,10 @@ use cv_providers::web::x as api;
 use cv_text::url_canon::{canonical_x_status_url, extract_x_status_from_url};
 use serde::Serialize;
 
+use super::metadata::{Ensured, MetadataKind, iso_now, link_metadata, link_onto, str_prop};
 use super::params::{check_keys, check_placeholders, expand, get_str};
 use super::web::{
-    api_base, append_link, block_on, client, create_or_found, find_in_subfolders, link_targets,
-    record_usage,
+    api_base, block_on, client, create_or_found, find_in_subfolders, link_targets, record_usage,
 };
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
@@ -90,17 +90,6 @@ impl StepModule for X {
     }
 }
 
-/// `x_metadata` outcome vars.
-#[derive(Serialize)]
-struct MetaVars {
-    status_id: String,
-    created: bool,
-    tombstone: bool,
-    linked: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata_path: Option<String>,
-}
-
 /// `x_discover` outcome vars.
 #[derive(Serialize)]
 struct DiscoverVars {
@@ -116,23 +105,17 @@ struct BackfillVars {
     remaining: usize,
 }
 
+/// The X [`MetadataKind`].
+const KIND: MetadataKind = MetadataKind {
+    id_var: "status_id",
+    anchor: ANCHOR,
+    list_key: LIST_KEY,
+    default_root: "_x_metadata",
+    valid: valid_id,
+};
+
 fn metadata_root(ctx: &StepCtx<'_>) -> String {
-    let r = ctx.config.pipelines().x.metadata_root.trim_matches('/');
-    if r.is_empty() {
-        "_x_metadata".to_owned()
-    } else {
-        r.to_owned()
-    }
-}
-
-fn fm_err(e: cv_lint::FmError) -> StepError {
-    StepError::failed(e.to_string())
-}
-
-fn iso_now() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
+    KIND.root(&ctx.config.pipelines().x.metadata_root)
 }
 
 fn valid_id(id: &str) -> bool {
@@ -176,112 +159,43 @@ fn ensure_note(
         "{root}/{}/{id}.md",
         folder_slug(&o.author_url, canonical_url)
     );
-    let post = XPost {
-        author_name: o.author_name,
-        author_url: o.author_url,
-        html: o.html,
-        kind: o.kind,
-        version: o.version,
-    };
+    let post = XPost::from(o);
     let body = metadata_note(id, canonical_url, &post, &iso_now()).into_bytes();
     let created = create_or_found(ctx, &path, body)?;
     Ok((path, created, false))
 }
 
-/// Appends `[[metadata]]` to `note`'s `x-metadata` list (CAS). `false` = already linked, or the
-/// note is gone.
-fn stamp(ctx: &mut StepCtx<'_>, note: &str, metadata_path: &str) -> Result<bool, StepError> {
-    let Some((bytes, hash)) = ctx.read(note)? else {
-        return Ok(false);
-    };
-    let text = String::from_utf8(bytes).map_err(|_| StepError::failed("note is not UTF-8"))?;
-    let mut doc = FrontmatterDoc::new(text);
-    let link = format!(
-        "[[{}]]",
-        metadata_path.strip_suffix(".md").unwrap_or(metadata_path)
-    );
-    if !append_link(&mut doc, ANCHOR, LIST_KEY, &link)? {
-        return Ok(false);
-    }
-    ctx.write(note, doc.into_text().into_bytes(), Some(hash))?;
-    Ok(true)
-}
-
-fn str_prop(v: Option<JsValue>) -> Option<String> {
-    match v? {
-        JsValue::Str(s) => Some(s.trim().to_owned()).filter(|s| !s.is_empty()),
-        JsValue::Num(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
 fn metadata(status_id: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let active = ctx.context.active_path.clone();
-    let doc = match &active {
-        Some(p) => ctx
-            .read(p)?
-            .map(|(b, _)| FrontmatterDoc::new(String::from_utf8_lossy(&b).into_owned())),
-        None => None,
-    };
-    let source = doc
-        .as_ref()
-        .and_then(|d| str_prop(d.get("source").ok().flatten()))
-        .and_then(|s| extract_x_status_from_url(&s));
     let explicit = match status_id {
         Some(s) => expand(ctx, s)?.trim().to_owned(),
         None => String::new(),
     };
-    let id = if explicit.is_empty() {
-        doc.as_ref()
-            .and_then(|d| str_prop(d.get(ANCHOR).ok().flatten()))
-            .or_else(|| source.as_ref().map(|r| r.status_id.clone()))
-            .unwrap_or_default()
-    } else {
-        explicit
-    };
     let mut out = StepOutcome::default();
-    let mut v = MetaVars {
-        status_id: id.clone(),
-        created: false,
-        tombstone: false,
-        linked: false,
-        metadata_path: None,
+    let resolve = |doc: Option<&FrontmatterDoc>| {
+        let source = doc
+            .and_then(|d| str_prop(d.get("source").ok().flatten()))
+            .and_then(|s| extract_x_status_from_url(&s));
+        let id = if explicit.is_empty() {
+            doc.and_then(|d| str_prop(d.get(ANCHOR).ok().flatten()))
+                .or_else(|| source.as_ref().map(|r| r.status_id.clone()))
+                .unwrap_or_default()
+        } else {
+            explicit.clone()
+        };
+        (id, source)
     };
-    if !valid_id(&id) {
-        // Crucible `invalid` / no status: nothing to do.
-        out.set_vars(&v);
-        return Ok(out);
-    }
-
-    // Already linked to a live note for this status → done, no write.
-    if let Some(d) = &doc {
-        for target in link_targets(d.get(LIST_KEY).map_err(fm_err)?.as_ref()) {
-            if target.rsplit('/').next() == Some(id.as_str())
-                && ctx.read(&format!("{target}.md"))?.is_some()
-            {
-                v.metadata_path = Some(format!("{target}.md"));
-                out.set_vars(&v);
-                return Ok(out);
-            }
-        }
-    }
-
-    let handle = source.filter(|r| r.status_id == id).and_then(|r| r.handle);
-    let url = canonical_x_status_url(handle.as_deref(), &id);
-    let (path, created, tombstone) = ensure_note(ctx, &id, &url)?;
-    v.metadata_path = Some(path.clone());
-    v.created = created;
-    v.tombstone = tombstone;
-    if created {
-        out.push_output(path.clone());
-    }
-    if let Some(p) = active
-        && stamp(ctx, &p, &path)?
-    {
-        out.push_output(p);
-        v.linked = true;
-    }
-    out.set_vars(&v);
+    link_metadata(&KIND, ctx, &mut out, resolve, |ctx, id, source| {
+        let handle = source.filter(|r| r.status_id == id).and_then(|r| r.handle);
+        let url = canonical_x_status_url(handle.as_deref(), id);
+        let (path, created, tombstone) = ensure_note(ctx, id, &url)?;
+        Ok(Ensured {
+            path,
+            created,
+            tombstone,
+            output: created,
+            extra: (),
+        })
+    })?;
     Ok(out)
 }
 
@@ -330,7 +244,7 @@ fn discover(lim: usize, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
         if created {
             out.push_output(path.clone());
         }
-        if stamp(ctx, &note, &path)? {
+        if link_onto(&KIND, ctx, &note, &path)? {
             out.push_output(note.clone());
         }
         ensured += 1;
@@ -341,9 +255,7 @@ fn discover(lim: usize, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
 
 fn backfill(lim: usize, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let records = ctx
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
         .link_records_with_x()
         .map_err(|e| StepError::failed(format!("link records: {e}")))?;
     // Aggregate by status id: first record's URL, union of source notes.
@@ -392,7 +304,7 @@ fn backfill(lim: usize, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
             out.push_output(path.clone());
         }
         for s in sources {
-            if stamp(ctx, &s, &path)? {
+            if link_onto(&KIND, ctx, &s, &path)? {
                 out.push_output(s);
             }
         }

@@ -30,7 +30,6 @@ use std::sync::OnceLock;
 
 use base64::Engine as _;
 use cv_actions::{ConfigSet, StepKind};
-use cv_index::Reader;
 use cv_providers::{CompletionRequest, FinishReason, ImagePart, ProviderError, ProviderManager};
 use cv_search::prepare::localized_image_md5;
 use cv_state::ImageDescription;
@@ -288,10 +287,6 @@ fn index_err(e: impl std::fmt::Display) -> StepError {
     StepError::failed(format!("index: {e}"))
 }
 
-fn state_err(e: impl std::fmt::Display) -> StepError {
-    StepError::failed(format!("state: {e}"))
-}
-
 fn is_image(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, e)| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
@@ -299,8 +294,7 @@ fn is_image(path: &str) -> bool {
 
 /// Candidate image paths in deterministic order.
 fn candidates(ctx: &StepCtx<'_>, scope: Scope) -> Result<Vec<String>, StepError> {
-    let open = || Reader::open_current(ctx.index_db);
-    let reader = open().or_else(|_| open()).map_err(index_err)?;
+    let reader = ctx.index()?;
     let q = reader.query();
     let mut seen = BTreeSet::new();
     let paths: Vec<String> = match scope {
@@ -422,13 +416,9 @@ pub(crate) fn run(
 
     let mut n = Counts::default();
     if p.prune_transient {
-        let mut st = ctx.state.lock().map_err(|_| state_err("lock poisoned"))?;
-        let a = st
-            .prune_transient_failed_image_descriptions()
-            .map_err(state_err)?;
-        let b = st
-            .prune_degenerate_image_descriptions(DEGENERATE_MAX_EXTRACTION_CHARS)
-            .map_err(state_err)?;
+        let mut st = ctx.state();
+        let a = st.prune_transient_failed_image_descriptions()?;
+        let b = st.prune_degenerate_image_descriptions(DEGENERATE_MAX_EXTRACTION_CHARS)?;
         n.pruned = (a + b) as u64;
     }
 
@@ -436,15 +426,14 @@ pub(crate) fn run(
     let mut pending: Vec<(String, String)> = Vec::new();
     {
         let paths = candidates(ctx, p.scope)?;
-        let st = ctx.state.lock().map_err(|_| state_err("lock poisoned"))?;
+        let st = ctx.state();
         let mut md5s = BTreeSet::new();
         for path in paths {
             let Some((md5, _)) = localized_image_md5(&path) else {
                 n.skipped += 1;
                 continue;
             };
-            if !md5s.insert(md5.clone()) || st.image_description(&md5).map_err(state_err)?.is_some()
-            {
+            if !md5s.insert(md5.clone()) || st.image_description(&md5)?.is_some() {
                 n.skipped += 1;
                 continue;
             }
@@ -478,8 +467,8 @@ pub(crate) fn run(
                 }
             }
         };
-        let mut st = ctx.state.lock().map_err(|_| state_err("lock poisoned"))?;
-        st.put_image_description(&rec).map_err(state_err)?;
+        let mut st = ctx.state();
+        st.put_image_description(&rec)?;
     }
 
     let mut out = StepOutcome::default();

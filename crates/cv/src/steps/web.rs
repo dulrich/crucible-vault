@@ -79,11 +79,7 @@ pub(crate) fn local_day() -> String {
 /// (the fetch already happened).
 pub(crate) fn record_usage(ctx: &StepCtx<'_>, service: &str, units: i64) {
     let day = local_day();
-    let r = ctx
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .add_api_usage(service, &day, units);
+    let r = ctx.state().add_api_usage(service, &day, units);
     if let Err(e) = r {
         tracing::warn!(service, error = %e, "api_usage update failed");
     }

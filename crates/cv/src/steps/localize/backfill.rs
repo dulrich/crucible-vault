@@ -22,14 +22,6 @@ struct FolderVars {
     unattempted_remaining: u64,
 }
 
-fn lock_state<'c>(
-    ctx: &'c StepCtx<'_>,
-) -> Result<std::sync::MutexGuard<'c, cv_state::StateDb>, StepError> {
-    ctx.state
-        .lock()
-        .map_err(|_| StepError::failed("localize: state lock poisoned"))
-}
-
 /// Folder-scope backfill: candidates are `.md` under `folder` (sorted) with remote/data image
 /// refs that are not recorded under [`BACKFILL_KIND`]; at most `limit` are attempted. A note
 /// whose localize errs, or that still has such refs afterwards, is recorded (never re-selected).
@@ -47,7 +39,8 @@ pub(super) fn execute_folder(
     let scanned = files.len() as u64;
     let mut candidates = Vec::new();
     for f in files {
-        if lock_state(ctx)?
+        if ctx
+            .state()
             .is_ignored(BACKFILL_KIND, &f)
             .map_err(|e| StepError::failed(format!("localize: state: {e}")))?
         {
@@ -86,7 +79,7 @@ pub(super) fn execute_folder(
                 }
                 if left && failed_refs == 0 {
                     ineligible += 1;
-                    lock_state(ctx)?
+                    ctx.state()
                         .insert_ignored_id(
                             BACKFILL_KIND,
                             f,
@@ -115,7 +108,7 @@ pub(super) fn execute_folder(
             Some(r) => {
                 failed += 1;
                 let r: String = r.chars().take(200).collect();
-                lock_state(ctx)?
+                ctx.state()
                     .insert_ignored_id(BACKFILL_KIND, f, &r, crate::now_ms())
                     .map_err(|e| StepError::failed(format!("localize: state: {e}")))?;
             }

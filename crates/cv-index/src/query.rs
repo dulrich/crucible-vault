@@ -473,11 +473,19 @@ impl Reader {
         Ok(Self { conn, generation })
     }
 
-    /// Opens [`crate::current_generation`]; none → [`Error::NoIndex`].
+    /// Opens [`crate::current_generation`]; none → [`Error::NoIndex`]. A generation swap
+    /// between reading the pointer and opening the file ([`Error::GenerationMissing`]) re-reads
+    /// the pointer and reopens once — the one retry policy for every reader.
     pub fn open_current(base: &Path) -> Result<Self> {
-        let generation = generation::current_generation(base)?
-            .ok_or_else(|| Error::NoIndex(base.display().to_string()))?;
-        Self::open(base, generation)
+        let once = || {
+            let generation = generation::current_generation(base)?
+                .ok_or_else(|| Error::NoIndex(base.display().to_string()))?;
+            Self::open(base, generation)
+        };
+        match once() {
+            Err(Error::GenerationMissing { .. }) => once(),
+            r => r,
+        }
     }
 
     /// The generation this handle reads.
