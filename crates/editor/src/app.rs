@@ -1895,8 +1895,10 @@ impl App {
                 self.docs.remove(&path);
             }
             Message::Source(SourceMsg::Viewport { path, lines }) => {
-                if let Some(d) = self.docs.get_mut(&path) {
-                    d.set_visible_lines(lines);
+                if let Some(d) = self.docs.get_mut(&path)
+                    && d.set_visible_lines(lines)
+                {
+                    return crate::reading::ScrollIntent::SourceRelayout { path, lines }.task();
                 }
             }
             Message::Source(SourceMsg::LinkKey(k)) => {

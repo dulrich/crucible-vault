@@ -4370,6 +4370,14 @@ mod scroll_matrix {
                         op::scroll_by::<()>(id(&path, view), op::AbsoluteOffset { x: 0.0, y: dy });
                     self.operate(app, &mut o);
                 }
+                ScrollIntent::SourceRelayout { path, lines } => {
+                    // After the next layout (the caret move scrolls the editor there).
+                    self.with(app, |_, _, _, _| ());
+                    let _ = app.update(Message::Source(crate::message::SourceMsg::Viewport {
+                        path,
+                        lines,
+                    }));
+                }
                 ScrollIntent::Probe {
                     path,
                     view,
@@ -4499,6 +4507,15 @@ mod scroll_matrix {
     /// exactly) and caret as found.
     fn source_place(ui: &mut Ui, app: &mut App) -> Place {
         focus_source(ui, app);
+        // With a selection (find in Source) the editor reports the first *visible* selection
+        // rectangle to the input method — (0, 0) once the calibration scroll hides it
+        // (iced_widget 0.14.2 text_editor.rs:359-364) — so measure with it collapsed (the
+        // caret stays put, so the view does not move) and put the selection back below.
+        let saved = src(app).cursor();
+        src(app).move_to(iced::widget::text_editor::Cursor {
+            position: saved.position,
+            selection: None,
+        });
         let y_a = caret_y(&ui.redraw(app));
         // At the end when one more row down changes nothing.
         src(app).perform(Action::Scroll { lines: 1 });
@@ -4524,14 +4541,17 @@ mod scroll_matrix {
                 "source scroll restored: a {y_a} top {y_top} lh {lh} rows {rows} now {y}"
             );
         };
-        // Rows to source line: walk the caret `rows` visual rows down from the start.
-        let saved = src(app).cursor();
-        src(app).move_to(iced::widget::text_editor::Cursor {
-            position: iced::widget::text_editor::Position { line: 0, column: 0 },
-            selection: None,
-        });
-        for _ in 0..rows {
-            src(app).perform(Action::Move(Motion::Down));
+        // Rows to source line: walk the caret `rows` visual rows down from the start. Twice:
+        // lines cosmic has not shaped yet (a find jump skips them) count as one row each on
+        // the first walk, which shapes them; the second walk counts wrapped rows exactly.
+        for _ in 0..2 {
+            src(app).move_to(iced::widget::text_editor::Cursor {
+                position: iced::widget::text_editor::Position { line: 0, column: 0 },
+                selection: None,
+            });
+            for _ in 0..rows {
+                src(app).perform(Action::Move(Motion::Down));
+            }
         }
         let line = src(app).cursor().position.line;
         src(app).move_to(saved);
@@ -4804,7 +4824,6 @@ mod scroll_matrix {
     /// Reading → Source block carry after wheel, scrollbar drag, PageUp/PageDown, line steps
     /// and find navigation, both directions.
     #[test]
-    #[ignore = "structural: iced 0.14 text_editor drops a scroll issued before the editor is laid out at its size, and cannot place a wrapped source line at the top without moving the caret (see WP-4 report)"]
     fn reading_block_carries_to_source() {
         let mut cases = Vec::new();
         for input in [
@@ -4837,9 +4856,30 @@ mod scroll_matrix {
         run(&cases);
     }
 
+    /// Source/Wheel → Split: the source pane stays shown, so its top must not move (the
+    /// switch measures the Source top with a caret hit-test and puts the caret back).
+    #[test]
+    fn source_wheel_top_survives_switch_to_split() {
+        for down in [true, false] {
+            let (_tmp, mut app, mut ui) = setup(ViewMode::Source);
+            drive(&mut ui, &mut app, Input::Wheel, down);
+            let before = source_place(&mut ui, &mut app);
+            ui.update(
+                &mut app,
+                Message::Reading(ReadingMsg::SetMode {
+                    path: PATH.into(),
+                    mode: ViewMode::Split,
+                }),
+            );
+            let _ = ui.redraw(&mut app);
+            let _ = ui.redraw(&mut app);
+            let after = source_place(&mut ui, &mut app);
+            assert!(same(before, after), "down={down}: {before:?} -> {after:?}");
+        }
+    }
+
     /// Source find navigation, then find close and a switch to Reading.
     #[test]
-    #[ignore = "unresolved: the Reading top lands 20-60 blocks above the measured Source top (see WP-4 report)"]
     fn source_find_place_carries_to_reading() {
         run(&[
             (ViewMode::Source, Input::Find, true, true),

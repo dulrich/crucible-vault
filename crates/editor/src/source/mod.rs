@@ -135,6 +135,10 @@ pub struct SourceBuffer {
     /// layout. A scroll performed before the content is laid out at its size is lost (cosmic
     /// clamps an unsized buffer's scroll to the top), so it is applied on the sensor report.
     pending_edge: Option<bool>,
+    /// Plan round-7 WP-4 (attempt 2): a Reading → Source line carry waiting for layout — the
+    /// target source line, and whether pass 1 (caret to the document end) has run. Pass 2
+    /// moves the caret to the line's start, so cosmic scrolls back up with it at the top.
+    pending_line: Option<(usize, bool)>,
     /// Plan round-5 WP-1: the source lines the editor's viewport shows, measured from the laid
     /// out pane height (a `sensor` around the editor stack; [`viewport_lines`]); falls back to
     /// [`VISIBLE_LINES`] before the first measure.
@@ -172,6 +176,7 @@ impl Clone for SourceBuffer {
             resync_pending: self.resync_pending,
             top_line: self.top_line,
             pending_edge: self.pending_edge,
+            pending_line: self.pending_line,
             visible_lines: self.visible_lines,
             disk_title: self.disk_title.clone(),
             name_title: self.name_title.clone(),
@@ -232,6 +237,7 @@ impl SourceBuffer {
             resync_pending: false,
             top_line: 0,
             pending_edge: None,
+            pending_line: None,
             visible_lines: VISIBLE_LINES,
             disk_title: title.clone(),
             name_title: title,
@@ -418,12 +424,45 @@ impl SourceBuffer {
     }
 
     /// Plan round-5 WP-1: records the viewport's measured line count (at least 1).
-    pub fn set_visible_lines(&mut self, lines: usize) {
+    /// Plan round-7 WP-4: returns `true` when a pending line carry needs one more layout pass
+    /// — the caller re-sends the report after the next layout
+    /// ([`crate::reading::ScrollIntent::SourceRelayout`]).
+    pub fn set_visible_lines(&mut self, lines: usize) -> bool {
         self.visible_lines = lines.max(1);
-        // Plan round-7 WP-4: the editor is laid out now; a pending edge scroll lands exactly.
+        // Plan round-7 WP-4: the editor is laid out now; a pending edge scroll lands exactly
+        // (and wins over a line carry).
         if let Some(bottom) = self.pending_edge.take() {
+            self.pending_line = None;
             let lines = if bottom { 1_000_000 } else { -1_000_000 };
             self.shaped().perform(text_editor::Action::Scroll { lines });
+            return false;
+        }
+        match self.pending_line {
+            // Pass 1: the caret at the end scrolls the editor to the end on the next layout.
+            Some((line, false)) => {
+                let text = self.text();
+                let end = text_editor::Position {
+                    line: text.matches('\n').count(),
+                    column: text.rsplit('\n').next().map_or(0, str::len),
+                };
+                self.move_to(text_editor::Cursor {
+                    position: end,
+                    selection: None,
+                });
+                self.pending_line = Some((line, true));
+                true
+            }
+            // Pass 2: the caret moving up to the line scrolls it to the viewport top.
+            Some((line, true)) => {
+                self.pending_line = None;
+                self.move_to(text_editor::Cursor {
+                    position: text_editor::Position { line, column: 0 },
+                    selection: None,
+                });
+                self.top_line = line.min(self.max_top());
+                false
+            }
+            None => false,
         }
     }
 
@@ -431,13 +470,29 @@ impl SourceBuffer {
     /// hit-testing the viewport's top-left corner (exact with wrapped lines, unlike the
     /// [`Self::top_line`] estimate); the cursor and selection are put back. Records it as the
     /// tracked top. Only meaningful while the editor is shown.
+    ///
+    /// Plan round-7 WP-4 (attempt 2): restoring a caret that is off-screen (the view was
+    /// wheel-scrolled away from it) would make the next layout scroll back to it, moving the
+    /// still-shown view (Source → Split). Then the caret stays at the viewport's top-left.
     pub fn measure_top_line(&mut self) -> usize {
         if let Repr::Shaped(c) = &mut self.content {
             let saved = c.cursor();
             c.perform(text_editor::Action::Click(iced::Point::ORIGIN));
-            let line = c.cursor().position.line;
-            c.move_to(saved);
-            self.top_line = line;
+            let top = c.cursor().position;
+            // Past the last visible row: the hit clamps to the viewport's last position.
+            c.perform(text_editor::Action::Click(iced::Point::new(1.0e6, 1.0e6)));
+            let bottom = c.cursor().position;
+            let key = |p: text_editor::Position| (p.line, p.column);
+            let at = key(saved.position);
+            if key(top) <= at && at <= key(bottom) {
+                c.move_to(saved);
+            } else {
+                c.move_to(text_editor::Cursor {
+                    position: top,
+                    selection: None,
+                });
+            }
+            self.top_line = top.line;
         }
         self.top_line
     }
@@ -464,6 +519,10 @@ impl SourceBuffer {
         let from = self.top_line;
         scroll_content(self.shaped(), from, line);
         self.top_line = line;
+        // Plan round-7 WP-4 (attempt 2): the scroll above is lost when the editor is not laid
+        // out yet (a Reading → Source switch); the two-pass caret carry places it exactly.
+        self.pending_edge = None;
+        self.pending_line = Some((line, false));
     }
 
     /// Plan round-6 WP-1: scrolls to the document's start / end without moving the cursor (a
@@ -473,6 +532,7 @@ impl SourceBuffer {
         // Plan round-7 WP-4: deferred to the next layout ([`Self::set_visible_lines`]).
         self.materialise();
         self.pending_edge = Some(bottom);
+        self.pending_line = None;
         self.top_line = if bottom { self.max_top() } else { 0 };
     }
 

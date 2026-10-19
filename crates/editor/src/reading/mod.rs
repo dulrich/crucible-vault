@@ -1279,6 +1279,11 @@ pub enum ScrollIntent {
         blocks: usize,
         scroll_to: Option<usize>,
     },
+    /// Plan round-7 WP-4 (attempt 2): re-sends the source editor's viewport report after the
+    /// next layout (pass 2 of a Reading → Source line carry, [`SourceBuffer::set_visible_lines`]).
+    ///
+    /// [`SourceBuffer::set_visible_lines`]: crate::source::SourceBuffer::set_visible_lines
+    SourceRelayout { path: String, lines: usize },
 }
 
 #[cfg(test)]
@@ -1308,6 +1313,12 @@ impl ScrollIntent {
             ),
             Self::Page { path, view, down } => crate::page::page(id(&path, view), down),
             Self::Step { path, view, dy } => crate::page::step(id(&path, view), dy),
+            Self::SourceRelayout { path, lines } => {
+                Task::done(Message::Source(crate::message::SourceMsg::Viewport {
+                    path,
+                    lines,
+                }))
+            }
             Self::Probe {
                 path,
                 view,
