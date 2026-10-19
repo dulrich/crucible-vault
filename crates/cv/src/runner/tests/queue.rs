@@ -100,7 +100,7 @@ async fn breaker_opens_after_three_transient_deferrals_gates_claim_and_requeues_
             clock.set(now);
         }
     }
-    assert_eq!(health(&f).state, cv_state::BreakerState::Open);
+    assert_eq!(health(&f).state, cv_protocol::BreakerState::Open);
     // A ready job stamped S is gated while Open.
     let b = raw_id(
         f.state
@@ -140,7 +140,7 @@ async fn breaker_opens_after_three_transient_deferrals_gates_claim_and_requeues_
     );
     run_job(Arc::clone(r.inner()), probe).await;
     assert_eq!(status(&f, &a), DbStatus::Done);
-    assert_eq!(health(&f).state, cv_state::BreakerState::Closed);
+    assert_eq!(health(&f).state, cv_protocol::BreakerState::Closed);
     let fj = job(&f, &failed);
     assert_eq!(
         (fj.status, fj.attempts),
@@ -173,7 +173,7 @@ async fn transient_exhaustion_fails_service_and_permanent_never_retries() {
     }
     let j = job(&f, &a);
     assert_eq!(j.status, DbStatus::Failed);
-    assert_eq!(j.failure_kind, Some(cv_state::FailureKind::Service));
+    assert_eq!(j.failure_kind, Some(cv_protocol::FailureKind::Service));
     assert_eq!(j.attempts, TRANSIENT_MAX_ATTEMPTS);
 
     mode.store(2, Ordering::SeqCst);
@@ -185,7 +185,7 @@ async fn transient_exhaustion_fails_service_and_permanent_never_retries() {
     );
     let j = job(&f, &p);
     assert_eq!((j.status, j.attempts), (DbStatus::Failed, 1));
-    assert_ne!(j.failure_kind, Some(cv_state::FailureKind::Service));
+    assert_ne!(j.failure_kind, Some(cv_protocol::FailureKind::Service));
     clock.set(clock.now_ms() + 3_600_000);
     assert!(
         f.state

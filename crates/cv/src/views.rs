@@ -358,7 +358,7 @@ mod tests {
             url: "https://y/1".into(),
             first_seen_ms: 1,
             day: "2026-10-17".into(),
-            outcome: cv_state::TrackerOutcome::Line,
+            outcome: cv_protocol::TrackerOutcome::Line,
             score: None,
             full_body: None,
             note_path: None,

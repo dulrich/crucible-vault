@@ -32,7 +32,7 @@ use std::collections::{BTreeSet, VecDeque};
 use cv_actions::pipelines::{BlogSource, BodyMode};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::blogs::{self as policy, BlogPost};
-use cv_state::TrackerOutcome;
+use cv_protocol::TrackerOutcome;
 use serde::Serialize;
 
 use super::super::file::kind_def;

@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use cv_protocol::{ParamKind, ParamSpec};
+use cv_protocol::{ContextNeed, ParamKind, ParamSpec};
 use serde::Deserialize;
 
 use crate::model::{
@@ -406,7 +406,11 @@ fn parse_action(entry: toml::Value) -> Result<Action, String> {
         group: def.group,
         keys: def.keys,
         params: def.params,
-        needs: def.needs,
+        needs: def
+            .needs
+            .iter()
+            .map(|n| ContextNeed::parse(n).ok_or_else(|| format!("unknown need {n:?}")))
+            .collect::<Result<Vec<_>, _>>()?,
         lane: def.lane,
         durable: def.durable,
         steps,
@@ -431,11 +435,6 @@ fn check_action(a: &Action) -> Result<(), String> {
             if kinds.is_empty() {
                 return Err("event starter lists no kinds".into());
             }
-        }
-    }
-    for n in &a.needs {
-        if cv_protocol::ContextNeed::parse(n).is_none() {
-            return Err(format!("unknown need {n:?}"));
         }
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -551,6 +550,31 @@ type = "agent"
         assert!(c.disarm_reason("badstep").unwrap().contains("no agents"));
         assert!(c.armed("fine").is_some());
         assert_eq!(c.errors().len(), 2);
+    }
+
+    #[test]
+    fn needs_parse_typed_and_unknown_need_disarms() {
+        let src = r#"
+[[action]]
+id = "typed"
+needs = ["active_path", "line"]
+[[action.steps]]
+type = "lint"
+
+[[action]]
+id = "bogus"
+needs = ["active_path", "cursor"]
+[[action.steps]]
+type = "lint"
+"#;
+        let mut c = ConfigSet::new();
+        c.reload(&files(src), &ok);
+        assert_eq!(
+            c.armed("typed").unwrap().needs,
+            vec![ContextNeed::ActivePath, ContextNeed::Line]
+        );
+        assert!(c.armed("bogus").is_none());
+        assert_eq!(c.disarm_reason("bogus"), Some("unknown need \"cursor\""));
     }
 
     #[test]

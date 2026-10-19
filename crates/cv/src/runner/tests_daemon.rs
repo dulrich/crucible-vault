@@ -262,7 +262,7 @@ async fn run_action_end_to_end_over_the_socket() {
         .unwrap()
         .unwrap();
     assert_eq!(job.status, cv_state::JobStatus::Done);
-    assert_eq!(job.lane, cv_state::Lane::User);
+    assert_eq!(job.lane, cv_protocol::Lane::User);
     assert_eq!(job.resource_keys, vec!["a.md".to_owned()]);
     let jp: super::JobParams = serde_json::from_value(job.params).unwrap();
     assert_eq!(jp.params["mode"], "a", "ParamSpec default applied");
@@ -373,7 +373,7 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
         .list(&cv_state::ListQuery::default())
         .unwrap();
     assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].lane, cv_state::Lane::Background);
+    assert_eq!(jobs[0].lane, cv_protocol::Lane::Background);
     poll(|| {
         d.shared()
             .state()

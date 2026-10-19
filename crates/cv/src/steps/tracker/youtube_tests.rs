@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_protocol::TrackerOutcome;
 use cv_providers::secrets::SecretSource;
-use cv_state::{FailureReason, TrackerOutcome};
+use cv_state::FailureReason;
 use cv_testkit::{MockHttp, Reply};
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Value, json};

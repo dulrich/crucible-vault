@@ -21,8 +21,9 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, Step};
+use cv_protocol::Lane;
 use cv_protocol::{ActionContext, JobState, JobStatus, Notification};
-use cv_state::{BreakerFailure, EnqueueOutcome, JobResult, Lane, NewJob, StateDb};
+use cv_state::{BreakerFailure, EnqueueOutcome, JobResult, NewJob, StateDb};
 use cv_vault::WriterHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

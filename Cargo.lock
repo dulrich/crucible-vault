@@ -940,6 +940,7 @@ dependencies = [
 name = "cv-state"
 version = "0.1.0"
 dependencies = [
+ "cv-protocol",
  "rusqlite",
  "serde",
  "serde_json",

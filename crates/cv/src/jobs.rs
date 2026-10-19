@@ -7,11 +7,10 @@
 
 use anyhow::{Result, anyhow};
 use cv_protocol::{
-    ActionContext, BreakerState, FailureKind, IntakeItem, IntakeListParams, IntakeListResult,
-    JobIdParams, JobState, JobSummary, JobsListParams, JobsListResult, Lane, RunActionParams,
-    methods,
+    ActionContext, IntakeItem, IntakeListParams, IntakeListResult, JobIdParams, JobState,
+    JobSummary, JobsListParams, JobsListResult, RunActionParams, TrackerOutcome, methods,
 };
-use cv_state::{IntakeQuery, Job, ListQuery, TrackerItem, TrackerOutcome};
+use cv_state::{IntakeQuery, Job, ListQuery, TrackerItem};
 
 use crate::client::{Client, ClientError};
 use crate::config::Config;
@@ -73,37 +72,6 @@ pub fn job_state(j: &Job, now_ms: i64) -> JobState {
     }
 }
 
-/// The store lane on the wire.
-#[must_use]
-pub fn lane(l: cv_state::Lane) -> Lane {
-    match l {
-        cv_state::Lane::User => Lane::User,
-        cv_state::Lane::Background => Lane::Background,
-    }
-}
-
-/// The store tracker outcome on the wire.
-#[must_use]
-pub fn outcome(o: TrackerOutcome) -> cv_protocol::TrackerOutcome {
-    use cv_protocol::TrackerOutcome as W;
-    match o {
-        TrackerOutcome::Line => W::Line,
-        TrackerOutcome::Note => W::Note,
-        TrackerOutcome::Ignored => W::Ignored,
-        TrackerOutcome::Skipped => W::Skipped,
-    }
-}
-
-fn outcome_from_wire(o: cv_protocol::TrackerOutcome) -> TrackerOutcome {
-    use cv_protocol::TrackerOutcome as W;
-    match o {
-        W::Line => TrackerOutcome::Line,
-        W::Note => TrackerOutcome::Note,
-        W::Ignored => TrackerOutcome::Ignored,
-        W::Skipped => TrackerOutcome::Skipped,
-    }
-}
-
 fn enum_str<T: serde::Serialize>(v: T) -> String {
     serde_json::to_value(v)
         .ok()
@@ -117,7 +85,7 @@ pub fn job_summary(j: &Job, now_ms: i64) -> JobSummary {
     JobSummary {
         job_id: j.id.clone(),
         job_type: j.job_type.clone(),
-        lane: lane(j.lane),
+        lane: j.lane,
         status: job_state(j, now_ms),
         service: j.service.clone(),
         attempts: j.attempts,
@@ -125,10 +93,7 @@ pub fn job_summary(j: &Job, now_ms: i64) -> JobSummary {
         settled_at_ms: j.settled_at_ms,
         defer_until_ms: j.defer_until_ms,
         error: j.error.clone(),
-        failure_kind: j.failure_kind.map(|k| match k {
-            cv_state::FailureKind::Service => FailureKind::Service,
-            cv_state::FailureKind::Job => FailureKind::Job,
-        }),
+        failure_kind: j.failure_kind,
     }
 }
 
@@ -149,8 +114,7 @@ pub fn intake_query(p: &IntakeListParams) -> Result<IntakeQuery, String> {
     let outcome = match p.outcome.as_deref() {
         None => None,
         Some(o) => Some(
-            cv_protocol::TrackerOutcome::parse(o)
-                .map(outcome_from_wire)
+            TrackerOutcome::parse(o)
                 .ok_or_else(|| format!("unknown outcome {o:?} (line|note|ignored|skipped)"))?,
         ),
     };
@@ -175,7 +139,7 @@ pub fn intake_item(t: TrackerItem) -> IntakeItem {
         url: t.url,
         first_seen_ms: t.first_seen_ms,
         day: t.day,
-        outcome: outcome(t.outcome),
+        outcome: t.outcome,
         score: t.score,
         full_body: t.full_body,
     }
@@ -193,11 +157,7 @@ pub fn service_health(h: cv_state::ServiceHealth) -> cv_protocol::ServiceHealth 
     let failure_score = Some(h.failure_score as f64);
     cv_protocol::ServiceHealth {
         service: h.service,
-        state: match h.state {
-            cv_state::BreakerState::Closed => BreakerState::Closed,
-            cv_state::BreakerState::Open => BreakerState::Open,
-            cv_state::BreakerState::HalfOpen => BreakerState::HalfOpen,
-        },
+        state: h.state,
         failure_score,
         retry_at_ms: h.retry_at_ms,
         last_reason,

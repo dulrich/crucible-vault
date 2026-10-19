@@ -11,6 +11,7 @@
 //! carried (callers diff snapshots). Nothing Obsidian-induced was involved.
 
 use crate::error::{Result, StateError};
+use cv_protocol::BreakerState;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -27,37 +28,12 @@ pub const MIN_RETRY_AFTER_MS: i64 = 1_000;
 /// Unreported probe tokens are reclaimed after this (`SERVICE_PROBE_STALE_MS`).
 pub const PROBE_STALE_MS: i64 = 5 * 60_000;
 
-/// Breaker state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BreakerState {
-    /// Healthy; claim freely.
-    Closed,
-    /// Do not claim.
-    Open,
-    /// One probe may be claimed.
-    HalfOpen,
-}
-
-impl BreakerState {
-    fn as_str(self) -> &'static str {
-        match self {
-            BreakerState::Closed => "closed",
-            BreakerState::Open => "open",
-            BreakerState::HalfOpen => "half_open",
-        }
-    }
-    fn parse(s: &str) -> Result<Self> {
-        match s {
-            "closed" => Ok(BreakerState::Closed),
-            "open" => Ok(BreakerState::Open),
-            "half_open" => Ok(BreakerState::HalfOpen),
-            other => Err(StateError::Corrupt {
-                column: "service_health.state",
-                value: other.into(),
-            }),
-        }
-    }
+/// Parses a stored breaker state; an unknown string is `Corrupt`.
+fn parse_breaker_state(s: &str) -> Result<BreakerState> {
+    BreakerState::parse(s).ok_or_else(|| StateError::Corrupt {
+        column: "service_health.state",
+        value: s.into(),
+    })
 }
 
 /// Class of a service failure.
@@ -300,7 +276,7 @@ fn row_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<Raw> {
 fn from_raw(r: Raw) -> Result<ServiceHealth> {
     Ok(ServiceHealth {
         service: r.0,
-        state: BreakerState::parse(&r.1)?,
+        state: parse_breaker_state(&r.1)?,
         failure_score: r.2,
         open_count: r.3,
         last_kind: r.4.as_deref().map(ServiceFailureKind::parse).transpose()?,

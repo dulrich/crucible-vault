@@ -84,6 +84,7 @@ pub(crate) fn record_schedule_run(
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use cv_protocol::Lane;
     use serde_json::json;
 
     fn new_job() -> NewJob {

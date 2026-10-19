@@ -22,11 +22,7 @@ pub fn actions_list(runner: &Runner) -> Vec<ActionInfo> {
             group: a.group.clone(),
             keys: a.keys.clone(),
             params: a.params.clone(),
-            needs: a
-                .needs
-                .iter()
-                .filter_map(|n| ContextNeed::parse(n))
-                .collect(),
+            needs: a.needs.clone(),
             durable: a.durable,
         })
         .collect()
@@ -64,12 +60,11 @@ pub async fn run_action(
     }
     let ctx = &p.context;
     for need in &action.needs {
-        let present = match ContextNeed::parse(need) {
-            Some(ContextNeed::ActivePath) => ctx.active_path.is_some(),
-            Some(ContextNeed::Selection) => ctx.selection.is_some(),
-            Some(ContextNeed::Value) => ctx.value.is_some(),
-            Some(ContextNeed::Line) => ctx.line.is_some(),
-            None => false,
+        let present = match need {
+            ContextNeed::ActivePath => ctx.active_path.is_some(),
+            ContextNeed::Selection => ctx.selection.is_some(),
+            ContextNeed::Value => ctx.value.is_some(),
+            ContextNeed::Line => ctx.line.is_some(),
         };
         if !present {
             return Err(invalid(format!(

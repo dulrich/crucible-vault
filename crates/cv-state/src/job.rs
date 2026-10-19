@@ -1,40 +1,29 @@
 //! Job model: lanes, statuses, results, failure kinds.
 
 use crate::error::{Result, StateError};
+use cv_protocol::{FailureKind, Lane};
 use serde::{Deserialize, Serialize};
 
-/// Queue lane. `User` outranks `Background`.
+/// Claim rank of a [`Lane`], stored in the INTEGER `jobs.lane` column; lower is claimed first.
 ///
 /// Port of `https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/lanes.ts:3-6` (`LANE_RANK`). Crucible's
 /// separate `priority` axis is not carried: lanes are the only ordering beyond the id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Lane {
-    /// Interactive work the user is waiting on.
-    User,
-    /// Everything else.
-    Background,
+pub(crate) fn lane_rank(lane: Lane) -> i64 {
+    match lane {
+        Lane::User => 0,
+        Lane::Background => 1,
+    }
 }
 
-impl Lane {
-    /// Claim rank; lower is claimed first.
-    #[must_use]
-    pub fn rank(self) -> i64 {
-        match self {
-            Lane::User => 0,
-            Lane::Background => 1,
-        }
-    }
-
-    pub(crate) fn from_rank(rank: i64) -> Result<Self> {
-        match rank {
-            0 => Ok(Lane::User),
-            1 => Ok(Lane::Background),
-            other => Err(StateError::Corrupt {
-                column: "lane",
-                value: other.to_string(),
-            }),
-        }
+/// Inverse of [`lane_rank`]; any other value is `Corrupt`.
+pub(crate) fn lane_from_rank(rank: i64) -> Result<Lane> {
+    match rank {
+        0 => Ok(Lane::User),
+        1 => Ok(Lane::Background),
+        other => Err(StateError::Corrupt {
+            column: "lane",
+            value: other.to_string(),
+        }),
     }
 }
 
@@ -130,47 +119,23 @@ impl FailureReason {
     }
 }
 
-/// Failure kind stamped on the row at settle time (`failedJobRepair.ts:106-134`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailureKind {
-    /// A dependency outage — eligible for [`crate::StateDb::requeue_service_failures`].
-    Service,
-    /// The job failed on its own merits.
-    Job,
+/// The single classification point for the failure kind stamped on the row at settle time
+/// (`failedJobRepair.ts:106-134`): a failure is `Service` iff its typed reason is
+/// [`FailureReason::ServiceOutage`].
+pub(crate) fn failure_kind_for(reason: Option<FailureReason>) -> FailureKind {
+    if reason == Some(FailureReason::ServiceOutage) {
+        FailureKind::Service
+    } else {
+        FailureKind::Job
+    }
 }
 
-impl FailureKind {
-    /// Column text.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FailureKind::Service => "service",
-            FailureKind::Job => "job",
-        }
-    }
-
-    /// The single classification point: a failure is `Service` iff its typed reason is
-    /// [`FailureReason::ServiceOutage`].
-    #[must_use]
-    pub fn classify(reason: Option<FailureReason>) -> Self {
-        if reason == Some(FailureReason::ServiceOutage) {
-            FailureKind::Service
-        } else {
-            FailureKind::Job
-        }
-    }
-
-    pub(crate) fn parse(s: &str) -> Result<Self> {
-        match s {
-            "service" => Ok(FailureKind::Service),
-            "job" => Ok(FailureKind::Job),
-            other => Err(StateError::Corrupt {
-                column: "failure_kind",
-                value: other.into(),
-            }),
-        }
-    }
+/// Parses a stored `failure_kind`; an unknown string is `Corrupt`.
+pub(crate) fn parse_failure_kind(s: &str) -> Result<FailureKind> {
+    FailureKind::parse(s).ok_or_else(|| StateError::Corrupt {
+        column: "failure_kind",
+        value: s.into(),
+    })
 }
 
 /// Outcome of a run — a discriminated union; construct the variant you mean.

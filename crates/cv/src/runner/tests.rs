@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cv_actions::{ConfigSet, Step, StepKind};
+use cv_protocol::Lane;
 use cv_protocol::{ActionContext, JobState, Notification};
-use cv_state::{JobStatus as DbStatus, Lane, QueueConfig, StateDb};
+use cv_state::{JobStatus as DbStatus, QueueConfig, StateDb};
 use serde_json::Map;
 use tokio::sync::{broadcast, watch};
 

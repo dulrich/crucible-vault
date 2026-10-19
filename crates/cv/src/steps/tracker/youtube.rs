@@ -21,9 +21,9 @@ use std::collections::{BTreeSet, HashMap};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::tracker::{is_ignored_short, uploads_playlist_id, youtube_ids_in_text};
 use cv_ingest::youtube::{parse_iso8601_duration, watch_url};
+use cv_protocol::TrackerOutcome;
 use cv_providers::web::FetchError;
 use cv_providers::web::youtube::{self as api, PlaylistItem};
-use cv_state::TrackerOutcome;
 use serde::Serialize;
 
 use super::super::params::check_keys;

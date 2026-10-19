@@ -35,7 +35,7 @@ pub struct Action {
     /// Parameters the client prompts for.
     pub params: Vec<ParamSpec>,
     /// Context the client must supply (`active_path`, `selection`, `value`, `line`).
-    pub needs: Vec<String>,
+    pub needs: Vec<cv_protocol::ContextNeed>,
     /// Lane choice.
     pub lane: LaneChoice,
     /// `false`: `run_action` awaits completion (≤10 s) and returns `open_path`.

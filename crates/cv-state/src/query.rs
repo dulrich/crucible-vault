@@ -1,7 +1,7 @@
 //! Read-side queries shared by [`crate::StateDb`] and [`crate::StateReader`].
 
 use crate::error::Result;
-use crate::job::{FailureKind, FailureReason, Job, JobStatus, Lane};
+use crate::job::{FailureReason, Job, JobStatus, lane_from_rank, parse_failure_kind};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +60,7 @@ pub(crate) fn raw_to_job(r: RawJob) -> Result<Job> {
     Ok(Job {
         id: r.id,
         job_type: r.job_type,
-        lane: Lane::from_rank(r.lane)?,
+        lane: lane_from_rank(r.lane)?,
         status: JobStatus::parse(&r.status)?,
         dedupe_key: r.dedupe_key,
         params,
@@ -81,7 +81,7 @@ pub(crate) fn raw_to_job(r: RawJob) -> Result<Job> {
         failure_kind: r
             .failure_kind
             .as_deref()
-            .map(FailureKind::parse)
+            .map(parse_failure_kind)
             .transpose()?,
         notes: r.notes,
     })

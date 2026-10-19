@@ -25,7 +25,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use cv_actions::ConfigSet;
 use cv_actions::pipelines::IntakeMode;
-use cv_state::{TrackerItem, TrackerOutcome};
+use cv_protocol::TrackerOutcome;
+use cv_state::TrackerItem;
 use serde_json::{Value, json};
 
 use super::web::{block_on, local_day};

@@ -19,13 +19,10 @@ mod tracker;
 mod tests;
 
 pub use error::{Result, StateError};
-pub use health::{BreakerState, ServiceFailureKind, ServiceHealth};
+pub use health::{ServiceFailureKind, ServiceHealth};
 pub use id::new_job_id;
 pub use image_descriptions::ImageDescription;
-pub use job::{
-    EnqueueOutcome, FailureKind, FailureReason, Job, JobResult, JobStatus, Lane, NewJob,
-    namespaced_key,
-};
+pub use job::{EnqueueOutcome, FailureReason, Job, JobResult, JobStatus, NewJob, namespaced_key};
 pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
 pub use query::{ListQuery, StatusCount};
 pub use runner_state::StepCheckpoint;
@@ -33,4 +30,4 @@ pub use store::{
     BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, QueueConfig,
     RequeueBreakdown, RetryOutcome, StateDb, StateReader,
 };
-pub use tracker::{IntakeQuery, TrackerItem, TrackerOutcome};
+pub use tracker::{IntakeQuery, TrackerItem};

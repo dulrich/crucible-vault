@@ -15,12 +15,15 @@
 //! rename/rollback; the `NoteLockManager` is replaced by claim-time resource-key exclusion (I3).
 
 use crate::error::{Result, StateError};
-use crate::health::{self, BreakerState, ServiceFailureKind, ServiceHealth};
+use crate::health::{self, ServiceFailureKind, ServiceHealth};
 use crate::id::new_job_id;
 use crate::image_descriptions::ImageDescription;
-use crate::job::{EnqueueOutcome, FailureKind, Job, JobResult, JobStatus, NewJob, namespaced_key};
+use crate::job::{
+    EnqueueOutcome, Job, JobResult, JobStatus, NewJob, failure_kind_for, lane_rank, namespaced_key,
+};
 use crate::migrate;
 use crate::query::{self, ListQuery, StatusCount};
+use cv_protocol::BreakerState;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -198,7 +201,7 @@ impl StateDb {
             params![
                 id,
                 job.job_type,
-                job.lane.rank(),
+                lane_rank(job.lane),
                 key,
                 serde_json::to_string(&job.params)?,
                 serde_json::to_string(&job.resource_keys)?,
@@ -298,7 +301,7 @@ impl StateDb {
     /// Settle a job this handle holds the lease on.
     ///
     /// `Deferred` moves it back to queued with `defer_until_ms = now + retry_after_ms`;
-    /// `Failed` stamps `failure_kind` via [`FailureKind::classify`]. Breaker reporting stays
+    /// `Failed` stamps `failure_kind` via [`failure_kind_for`](crate::job::failure_kind_for). Breaker reporting stays
     /// with the runner (it knows the failure class); the store does not infer it.
     pub fn settle(&mut self, id: &str, result: &JobResult, now_ms: i64) -> Result<()> {
         let tx = self
@@ -392,7 +395,7 @@ impl StateDb {
             )?,
             JobResult::Failed { error, reason } => tx.execute(
                 &format!("UPDATE jobs SET status = 'failed', settled_at_ms = ?2, error = ?3, failure_reason = ?4, failure_kind = ?5, {CLEAR} WHERE id = ?1"),
-                params![id, now_ms, error, reason.map(|r| r.as_str()), FailureKind::classify(*reason).as_str()],
+                params![id, now_ms, error, reason.map(|r| r.as_str()), failure_kind_for(*reason).as_str()],
             )?,
             JobResult::Deferred { retry_after_ms, service_unhealthy } => {
                 let note = service_unhealthy.as_ref().map(|s| format!("deferred: service {s} unhealthy"));
@@ -756,6 +759,7 @@ impl StateReader {
 #[cfg(test)]
 mod wp11_tests {
     use crate::*;
+    use cv_protocol::{Lane, TrackerOutcome};
     use serde_json::json;
 
     fn new_job(key: &str) -> NewJob {

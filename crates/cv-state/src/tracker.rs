@@ -4,45 +4,8 @@
 
 use crate::error::Result;
 use crate::store::StateDb;
+use cv_protocol::TrackerOutcome;
 use rusqlite::{OptionalExtension, params};
-
-/// What a tracker did with an item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrackerOutcome {
-    /// A daily intake line was appended.
-    Line,
-    /// A captured note was created (automatable blog post).
-    Note,
-    /// Filtered by `ignored_ids` / Ignore Shorts.
-    Ignored,
-    /// Seen but not surfaced (already in the vault, skipped row, …).
-    Skipped,
-}
-
-impl TrackerOutcome {
-    /// The stored string.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TrackerOutcome::Line => "line",
-            TrackerOutcome::Note => "note",
-            TrackerOutcome::Ignored => "ignored",
-            TrackerOutcome::Skipped => "skipped",
-        }
-    }
-
-    /// Parses a stored string.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "line" => TrackerOutcome::Line,
-            "note" => TrackerOutcome::Note,
-            "ignored" => TrackerOutcome::Ignored,
-            "skipped" => TrackerOutcome::Skipped,
-            _ => return None,
-        })
-    }
-}
 
 /// One `tracker_items` row. Key: (`source_kind`, `source_key`, `item_id`).
 #[derive(Debug, Clone, PartialEq)]
