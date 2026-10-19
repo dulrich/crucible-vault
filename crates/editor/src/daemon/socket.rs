@@ -1,26 +1,16 @@
-//! The real client: newline-delimited JSON-RPC 2.0 over the daemon's Unix socket. Shaped after
-//! `crates/cv/src/client.rs` (handshake, `index_schema` check), but the editor never links the
-//! `cv` crate. A dedicated reader thread owns all socket reads and demultiplexes responses (by
-//! id) from notifications; callers block on a per-call channel, never on the socket itself.
+//! The real client: the shared [`cv_protocol::client::RpcClient`] (one framing, handshake and
+//! error-decode implementation with `cv`; std-only, a reader thread demultiplexes responses from
+//! notifications) behind the editor's [`DaemonClient`] seam. The editor never links `cv`.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::mpsc::Receiver;
 
+use cv_protocol::client::{ClientError, RpcClient};
 use cv_protocol::{
-    CreateNoteParams, CreateNoteResult, DeleteMode, DeleteNoteParams, DeleteNoteResult,
-    DeleteParams, DeletePreviewResult, HelloParams, HelloResult, JobIdParams, PROTOCOL_VERSION,
-    PathParams, RenameParams, Request, RpcError, RpcId, RpcNotification, RpcRequest,
-    SubscribeParams, ViewRunParams, WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams,
-    WriteNoteResult,
+    CreateNoteParams, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams, HelloResult,
+    JobIdParams, PathParams, RenameParams, SubscribeParams, ViewRunParams, WriteAttachmentParams,
+    WriteNoteParams, WriteNoteResult, methods as m,
 };
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 
 use super::{
     ActionInfo, ContentHash, DaemonClient, DaemonError, DeletePreviewItem, JobStatus, LocalIndex,
@@ -28,22 +18,24 @@ use super::{
     ViewsListResult,
 };
 
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
-
-type Reply = std::result::Result<Value, RpcError>;
-
-#[derive(Default)]
-struct Shared {
-    pending: Mutex<HashMap<u64, Sender<Reply>>>,
-    subscriber: Mutex<Option<Sender<Notification>>>,
+impl From<ClientError> for DaemonError {
+    /// The new `REFUSED`/`UNAVAILABLE` codes stay in [`DaemonError::Rpc`] (the code is carried).
+    fn from(e: ClientError) -> Self {
+        match e {
+            ClientError::Io(e) => Self::Io(e),
+            ClientError::Rpc(e) => Self::Rpc(e),
+            ClientError::SchemaMismatch { expected, found } => {
+                Self::SchemaMismatch { expected, found }
+            }
+            ClientError::Protocol(m) => Self::Protocol(m),
+            ClientError::Disconnected => Self::Disconnected,
+        }
+    }
 }
 
 /// A connected, greeted daemon client.
 pub struct SocketDaemon {
-    writer: Mutex<UnixStream>,
-    shared: Arc<Shared>,
-    next_id: AtomicU64,
-    hello: HelloResult,
+    rpc: RpcClient,
     vault_root: PathBuf,
     state_db: PathBuf,
     index: LocalIndex,
@@ -52,7 +44,7 @@ pub struct SocketDaemon {
 impl std::fmt::Debug for SocketDaemon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SocketDaemon")
-            .field("hello", &self.hello)
+            .field("hello", &self.rpc.hello)
             .finish_non_exhaustive()
     }
 }
@@ -75,133 +67,23 @@ impl SocketDaemon {
 
     /// [`Self::connect`] with an explicit expected schema (tests).
     pub fn connect_expecting(socket: &Path, expected_schema: u32) -> Result<Self> {
-        let stream = UnixStream::connect(socket)?;
-        let reader = BufReader::new(stream.try_clone()?);
-        let shared = Arc::new(Shared::default());
-        let rshared = Arc::clone(&shared);
-        std::thread::Builder::new()
-            .name("cv-daemon-reader".into())
-            .spawn(move || read_loop(reader, &rshared))?;
-        let mut me = Self {
-            writer: Mutex::new(stream),
-            shared,
-            next_id: AtomicU64::new(1),
-            hello: HelloResult {
-                protocol_version: 0,
-                index_schema: 0,
-                mode: cv_protocol::Mode::Shadow,
-                vault_root: String::new(),
-                index_db: String::new(),
-                state_db: String::new(),
-                generation: 0,
-            },
-            vault_root: PathBuf::new(),
-            state_db: PathBuf::new(),
-            index: LocalIndex::new(Path::new("")),
-        };
-        let hello: HelloResult = me.call_typed(Request::Hello(HelloParams {
-            protocol_version: PROTOCOL_VERSION,
-            client: "cvault-editor".into(),
-        }))?;
-        if hello.index_schema != expected_schema {
-            return Err(DaemonError::SchemaMismatch {
-                expected: expected_schema,
-                found: hello.index_schema,
-            });
-        }
-        me.vault_root = PathBuf::from(&hello.vault_root);
-        me.state_db = PathBuf::from(&hello.state_db);
-        me.index = LocalIndex::new(Path::new(&hello.index_db));
-        me.hello = hello;
-        Ok(me)
+        let rpc = RpcClient::connect(socket, "cvault-editor", expected_schema)?;
+        Ok(Self {
+            vault_root: PathBuf::from(&rpc.hello.vault_root),
+            state_db: PathBuf::from(&rpc.hello.state_db),
+            index: LocalIndex::new(Path::new(&rpc.hello.index_db)),
+            rpc,
+        })
     }
 
-    fn call(&self, req: Request) -> Result<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel();
-        self.shared
-            .pending
-            .lock()
-            .map_err(|_| DaemonError::Disconnected)?
-            .insert(id, tx);
-        let mut line = serde_json::to_string(&RpcRequest::new(RpcId::Num(id), req))
-            .map_err(|e| DaemonError::Protocol(e.to_string()))?;
-        line.push('\n');
-        {
-            let mut w = self.writer.lock().map_err(|_| DaemonError::Disconnected)?;
-            w.write_all(line.as_bytes())?;
-        }
-        match rx.recv_timeout(CALL_TIMEOUT) {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(DaemonError::Rpc(e)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Ok(mut p) = self.shared.pending.lock() {
-                    p.remove(&id);
-                }
-                Err(DaemonError::Protocol(format!("call {id} timed out")))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(DaemonError::Disconnected),
-        }
-    }
-
-    fn call_typed<T: DeserializeOwned>(&self, req: Request) -> Result<T> {
-        let v = self.call(req)?;
-        serde_json::from_value(v).map_err(|e| DaemonError::Protocol(e.to_string()))
-    }
-}
-
-fn read_loop(mut reader: BufReader<UnixStream>, shared: &Shared) {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            tracing::warn!("daemon sent a malformed line");
-            continue;
-        };
-        match v.get("id").and_then(Value::as_u64) {
-            Some(id) => {
-                let reply = match v.get("error") {
-                    Some(e) => Err(serde_json::from_value(e.clone()).unwrap_or(RpcError {
-                        code: cv_protocol::error_codes::INTERNAL_ERROR,
-                        message: "unparseable error".into(),
-                        data: None,
-                    })),
-                    None => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
-                };
-                let tx = shared.pending.lock().ok().and_then(|mut p| p.remove(&id));
-                if let Some(tx) = tx {
-                    let _ = tx.send(reply);
-                }
-            }
-            None => match serde_json::from_value::<RpcNotification>(v) {
-                Ok(n) => {
-                    if let Ok(mut s) = shared.subscriber.lock()
-                        && let Some(tx) = s.as_ref()
-                        && tx.send(n.event).is_err()
-                    {
-                        *s = None;
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, "unknown notification"),
-            },
-        }
-    }
-    // Connection gone: fail every waiting call and close the notification channel.
-    if let Ok(mut p) = shared.pending.lock() {
-        p.clear();
-    }
-    if let Ok(mut s) = shared.subscriber.lock() {
-        *s = None;
+    fn call<M: cv_protocol::Method>(&self, params: M::Params) -> Result<M::Result> {
+        Ok(self.rpc.call::<M>(params)?)
     }
 }
 
 impl DaemonClient for SocketDaemon {
     fn hello(&self) -> &HelloResult {
-        &self.hello
+        &self.rpc.hello
     }
 
     fn write_note(
@@ -210,11 +92,11 @@ impl DaemonClient for SocketDaemon {
         content: &str,
         base_hash: &ContentHash,
     ) -> Result<ContentHash> {
-        let r: WriteNoteResult = self.call_typed(Request::WriteNote(WriteNoteParams {
+        let r = self.call::<m::WriteNote>(WriteNoteParams {
             path: path.to_owned(),
             content: content.to_owned(),
             base_hash: base_hash.as_str().to_owned(),
-        }))?;
+        })?;
         match r {
             WriteNoteResult::Written { hash } => Ok(ContentHash::from_hex(hash)),
             WriteNoteResult::Conflict { current_hash } => Err(DaemonError::Conflict {
@@ -224,45 +106,36 @@ impl DaemonClient for SocketDaemon {
     }
 
     fn create_note(&self, path: &str, content: &str) -> Result<String> {
-        let r: CreateNoteResult = self.call_typed(Request::CreateNote(CreateNoteParams {
-            path: path.to_owned(),
-            content: content.to_owned(),
-        }))?;
-        Ok(r.path)
+        let (path, content) = (path.to_owned(), content.to_owned());
+        Ok(self
+            .call::<m::CreateNote>(CreateNoteParams { path, content })?
+            .path)
     }
 
     fn write_attachment(&self, note_path: &str, ext: &str, bytes: &[u8]) -> Result<String> {
         use base64::Engine as _;
-        let r: WriteAttachmentResult =
-            self.call_typed(Request::WriteAttachment(WriteAttachmentParams {
-                note_path: note_path.to_owned(),
-                ext: ext.to_owned(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-            }))?;
-        Ok(r.path)
+        let p = WriteAttachmentParams {
+            note_path: note_path.to_owned(),
+            ext: ext.to_owned(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        Ok(self.call::<m::WriteAttachment>(p)?.path)
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
-        self.call(Request::Rename(RenameParams {
-            from: from.to_owned(),
-            to: to.to_owned(),
-        }))
-        .map(drop)
+        let (from, to) = (from.to_owned(), to.to_owned());
+        self.call::<m::Rename>(RenameParams { from, to }).map(drop)
     }
 
     fn delete(&self, path: &str) -> Result<()> {
-        self.call(Request::Delete(DeleteParams {
-            path: path.to_owned(),
-            mode: DeleteMode::Trash,
-        }))
-        .map(drop)
+        let (path, mode) = (path.to_owned(), DeleteMode::Trash);
+        self.call::<m::Delete>(DeleteParams { path, mode })
+            .map(drop)
     }
 
     fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
-        let r: DeletePreviewResult = self.call_typed(Request::DeletePreview(PathParams {
-            path: path.to_owned(),
-        }))?;
-        Ok(r.items)
+        let path = path.to_owned();
+        Ok(self.call::<m::DeletePreview>(PathParams { path })?.items)
     }
 
     fn delete_note(
@@ -271,100 +144,85 @@ impl DaemonClient for SocketDaemon {
         attachments: &[String],
         mode: DeleteMode,
     ) -> Result<DeleteNoteResult> {
-        self.call_typed(Request::DeleteNote(DeleteNoteParams {
-            path: path.to_owned(),
-            attachments: attachments.to_vec(),
+        let (path, attachments) = (path.to_owned(), attachments.to_vec());
+        self.call::<m::DeleteNote>(DeleteNoteParams {
+            path,
+            attachments,
             mode,
-        }))
+        })
     }
 
     fn actions_list(&self) -> Result<Vec<ActionInfo>> {
-        self.call_typed(Request::ActionsList)
+        self.call::<m::ActionsList>(())
     }
 
     fn run_action(&self, params: RunActionParams) -> Result<RunActionResult> {
-        self.call_typed(Request::RunAction(params))
+        self.call::<m::RunAction>(params)
     }
 
     fn job(&self, job_id: &str) -> Result<JobStatus> {
-        self.call_typed(Request::Job(JobIdParams {
-            job_id: job_id.to_owned(),
-        }))
+        let job_id = job_id.to_owned();
+        self.call::<m::Job>(JobIdParams { job_id })
     }
 
     fn cancel(&self, job_id: &str) -> Result<JobStatus> {
-        self.call_typed(Request::Cancel(JobIdParams {
-            job_id: job_id.to_owned(),
-        }))
+        let job_id = job_id.to_owned();
+        self.call::<m::Cancel>(JobIdParams { job_id })
     }
 
     fn status(&self) -> Result<StatusResult> {
-        self.call_typed(Request::Status)
+        self.call::<m::Status>(())
     }
 
     fn views_list(&self) -> Result<ViewsListResult> {
-        self.call_typed(Request::ViewsList)
+        self.call::<m::ViewsList>(())
     }
 
     fn view_run(&self, view_id: &str, this_path: Option<&str>) -> Result<ViewResult> {
-        self.call_typed(Request::ViewRun(ViewRunParams {
-            view_id: view_id.to_owned(),
-            this_path: this_path.map(str::to_owned),
-        }))
+        let (view_id, this_path) = (view_id.to_owned(), this_path.map(str::to_owned));
+        self.call::<m::ViewRun>(ViewRunParams { view_id, this_path })
     }
 
     fn lookup_currencies(&self) -> Result<Vec<cv_protocol::LookupCurrency>> {
-        self.call_typed(Request::LookupCurrencies)
+        self.call::<m::LookupCurrencies>(())
     }
 
     fn lookup_geocode(&self, query: &str) -> Result<Vec<cv_protocol::LookupGeoResult>> {
-        self.call_typed(Request::LookupGeocode(cv_protocol::LookupGeocodeParams {
-            query: query.to_owned(),
-        }))
+        let query = query.to_owned();
+        self.call::<m::LookupGeocode>(cv_protocol::LookupGeocodeParams { query })
     }
 
     fn lookup_models(&self, provider: &str) -> Result<cv_protocol::LookupModelsResult> {
-        self.call_typed(Request::LookupModels(cv_protocol::LookupModelsParams {
-            provider: provider.to_owned(),
-        }))
+        let provider = provider.to_owned();
+        self.call::<m::LookupModels>(cv_protocol::LookupModelsParams { provider })
     }
 
     fn search(&self, query: &str, limit: u32) -> Result<cv_protocol::SearchResult> {
-        self.call_typed(Request::Search(cv_protocol::SearchParams {
-            query: query.to_owned(),
-            limit,
-        }))
+        let query = query.to_owned();
+        self.call::<m::Search>(cv_protocol::SearchParams { query, limit })
     }
 
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {
-        self.call_typed(Request::LookupChannels(cv_protocol::LookupChannelsParams {
-            ids: ids.to_vec(),
-        }))
+        let ids = ids.to_vec();
+        self.call::<m::LookupChannels>(cv_protocol::LookupChannelsParams { ids })
     }
 
     fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()> {
-        self.call_typed(Request::TrackerItemSetDone(p.clone()))
+        self.call::<m::TrackerItemSetDone>(p.clone())
     }
 
     fn tracker_item_set_status(&self, p: &cv_protocol::TrackerItemSetStatusParams) -> Result<()> {
-        self.call_typed(Request::TrackerItemSetStatus(p.clone()))
+        self.call::<m::TrackerItemSetStatus>(p.clone())
     }
 
     fn note_set_bool(&self, p: &cv_protocol::NoteSetBoolParams) -> Result<()> {
-        let _: cv_protocol::NoteSetBoolResult = self.call_typed(Request::NoteSetBool(p.clone()))?;
-        Ok(())
+        self.call::<m::NoteSetBool>(p.clone()).map(drop)
     }
 
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
-        let (tx, rx) = mpsc::channel();
-        *self
-            .shared
-            .subscriber
-            .lock()
-            .map_err(|_| DaemonError::Disconnected)? = Some(tx);
-        self.call(Request::Subscribe(SubscribeParams {
-            topics: topics.to_vec(),
-        }))?;
+        let rx = self.rpc.notifications()?;
+        let topics = topics.to_vec();
+        self.call::<m::Subscribe>(SubscribeParams { topics })?;
         Ok(rx)
     }
 

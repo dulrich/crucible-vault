@@ -174,7 +174,7 @@ fn poll(mut f: impl FnMut() -> bool) {
 async fn handshake_rules() {
     let env = Env::new();
     let d = start(&env).await;
-    let mut raw = Client::connect_raw(&env.socket()).unwrap();
+    let raw = Client::connect_raw(&env.socket()).unwrap();
     let r = raw
         .raw(r#"{"jsonrpc":"2.0","id":1,"method":"status"}"#)
         .unwrap();
@@ -204,6 +204,14 @@ async fn handshake_rules() {
         .raw(r#"{"jsonrpc":"2.0","id":6,"method":"delete","params":{}}"#)
         .unwrap();
     assert_eq!(r["error"]["code"], error_codes::INVALID_PARAMS);
+    // WP-R3 (SR5): every known method answers bad params with INVALID_PARAMS, never
+    // METHOD_NOT_FOUND — the known-method set is the protocol's own list.
+    for (i, method) in cv_protocol::METHOD_NAMES.iter().enumerate() {
+        let line = json!({"jsonrpc": "2.0", "id": 100 + i, "method": method, "params": "bogus"});
+        let r = raw.raw(&line.to_string()).unwrap();
+        assert_eq!(r["error"]["code"], error_codes::INVALID_PARAMS, "{method}");
+        assert_eq!(r["id"], 100 + i);
+    }
 
     // Client-side index_schema check: a mismatch is refused, never degraded.
     match Client::connect(&env.socket(), "t", cv_index::SCHEMA_VERSION + 1) {
@@ -225,14 +233,14 @@ async fn handshake_rules() {
 async fn write_note_cas_conflict_does_not_clobber() {
     let env = Env::new();
     let d = start(&env).await;
-    let mut c = client(&env);
+    let c = client(&env);
     let live_a = env.vault().join("a.md");
     let h0 = hash_of(&live_a);
     // External edit between the client's read and its write.
     std::fs::write(&live_a, "# A\nexternally changed\n").unwrap();
     let h1 = hash_of(&live_a);
     let v = c
-        .call(Request::WriteNote(WriteNoteParams {
+        .request(Request::WriteNote(WriteNoteParams {
             path: "a.md".into(),
             content: "client version".into(),
             base_hash: h0.clone(),
@@ -252,7 +260,7 @@ async fn write_note_cas_conflict_does_not_clobber() {
     assert_eq!(hash_of(&live_a), h1);
     // A correct base hash wins, in the overlay only.
     let v = c
-        .call(Request::WriteNote(WriteNoteParams {
+        .request(Request::WriteNote(WriteNoteParams {
             path: "a.md".into(),
             content: "client version".into(),
             base_hash: h1.clone(),
@@ -285,7 +293,7 @@ async fn note_set_bool_edits_frontmatter() {
     let d = start(&env).await;
     let mut c = client(&env);
     let set = |c: &mut Client, path: &str, value: bool| {
-        c.call(Request::NoteSetBool(NoteSetBoolParams {
+        c.request(Request::NoteSetBool(NoteSetBoolParams {
             path: path.into(),
             key: "read".into(),
             value,
@@ -337,13 +345,13 @@ async fn shadow_mutations_never_touch_live() {
     let before = snapshot(&env.vault());
     let d = start(&env).await;
     let mut sub = client(&env);
-    sub.call(Request::Subscribe(SubscribeParams {
+    sub.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::ShadowWrite],
     }))
     .unwrap();
-    let mut c = client(&env);
+    let c = client(&env);
     let v = c
-        .call(Request::CreateNote(CreateNoteParams {
+        .request(Request::CreateNote(CreateNoteParams {
             path: "a.md".into(),
             content: "dup".into(),
         }))
@@ -354,7 +362,7 @@ async fn shadow_mutations_never_touch_live() {
         |n| matches!(n, Notification::ShadowWrite { op: WriteOp::Create, path } if path == "a 1.md"),
     );
     let h = hash_of(&env.overlay().join("a 1.md"));
-    c.call(Request::WriteNote(WriteNoteParams {
+    c.request(Request::WriteNote(WriteNoteParams {
         path: "a 1.md".into(),
         content: "dup2".into(),
         base_hash: h,
@@ -369,7 +377,7 @@ async fn shadow_mutations_never_touch_live() {
             }
         )
     });
-    c.call(Request::Rename(RenameParams {
+    c.request(Request::Rename(RenameParams {
         from: "notes/b.md".into(),
         to: "notes/c.md".into(),
     }))
@@ -383,7 +391,7 @@ async fn shadow_mutations_never_touch_live() {
             }
         )
     });
-    c.call(Request::Delete(DeleteParams {
+    c.request(Request::Delete(DeleteParams {
         mode: DeleteMode::Trash,
         path: "a 1.md".into(),
     }))
@@ -398,7 +406,7 @@ async fn shadow_mutations_never_touch_live() {
         )
     });
     assert_eq!(
-        rpc_code(c.call(Request::Delete(DeleteParams {
+        rpc_code(c.request(Request::Delete(DeleteParams {
             mode: DeleteMode::Trash,
             path: "nope.md".into()
         }))),
@@ -419,13 +427,13 @@ async fn shadow_mutations_never_touch_live() {
     }
     // plan editor-ui-round-3 WP-3: the preview / delete_note RPCs are wired (shadow-safe).
     let pv = c
-        .call(Request::DeletePreview(PathParams {
+        .request(Request::DeletePreview(PathParams {
             path: "notes/c.md".into(),
         }))
         .unwrap();
     assert!(pv["items"].is_array(), "{pv}");
     let dn = c
-        .call(Request::DeleteNote(cv_protocol::DeleteNoteParams {
+        .request(Request::DeleteNote(cv_protocol::DeleteNoteParams {
             path: "notes/c.md".into(),
             attachments: vec!["missing.png".into()],
             mode: DeleteMode::Permanent,
@@ -443,11 +451,11 @@ async fn subscriptions_filter_topics() {
     let env = Env::new();
     let d = start(&env).await;
     let mut sub = client(&env);
-    sub.call(Request::Subscribe(SubscribeParams {
+    sub.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::FileChanged, Topic::IndexGeneration],
     }))
     .unwrap();
-    let mut other = client(&env);
+    let other = client(&env);
     let mut inproc = d.subscribe();
 
     std::fs::write(env.vault().join("ext.md"), "# external\n").unwrap();
@@ -486,7 +494,7 @@ async fn subscriptions_filter_topics() {
             .is_none()
     );
     // The status reflects the new generation.
-    let v = other.call(Request::Status).unwrap();
+    let v = other.request(Request::Status).unwrap();
     assert_eq!(v["generation"], n);
     std::fs::remove_file(env.vault().join("ext.md")).unwrap();
     drop((sub, other));
@@ -498,28 +506,31 @@ async fn a1_registry_and_stub_methods() {
     let env = Env::new();
     let d = start(&env).await;
     let mut c = client(&env);
-    assert_eq!(c.call(Request::ViewsList).unwrap(), json!({"view_ids": []}));
     assert_eq!(
-        rpc_code(c.call(Request::ViewRun(ViewRunParams {
+        c.request(Request::ViewsList).unwrap(),
+        json!({"view_ids": []})
+    );
+    assert_eq!(
+        rpc_code(c.request(Request::ViewRun(ViewRunParams {
             view_id: "x".into(),
             this_path: None
         }))),
         error_codes::NOT_FOUND
     );
-    assert_eq!(c.call(Request::ActionsList).unwrap(), json!([]));
+    assert_eq!(c.request(Request::ActionsList).unwrap(), json!([]));
     assert_eq!(
-        rpc_code(c.call(Request::Job(JobIdParams {
+        rpc_code(c.request(Request::Job(JobIdParams {
             job_id: "nope".into()
         }))),
         error_codes::NOT_FOUND
     );
     assert_eq!(
-        rpc_code(c.call(Request::Cancel(JobIdParams {
+        rpc_code(c.request(Request::Cancel(JobIdParams {
             job_id: "nope".into()
         }))),
         error_codes::NOT_FOUND
     );
-    let s = c.call(Request::Status).unwrap();
+    let s = c.request(Request::Status).unwrap();
     assert_eq!(s["mode"], "shadow");
     // A second daemon on the same socket refuses to start serving.
     let mut e2 = Env::new();
@@ -527,7 +538,7 @@ async fn a1_registry_and_stub_methods() {
     let second = Daemon::start(e2.config(), opts()).unwrap().spawn().await;
     assert!(second.unwrap_err().to_string().contains("already running"));
     // Config dir change → config_reloaded.
-    c.call(Request::Subscribe(SubscribeParams {
+    c.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::ConfigReloaded],
     }))
     .unwrap();
@@ -550,11 +561,11 @@ async fn two_concurrent_clients() {
         .map(|i| {
             let sock = sock.clone();
             std::thread::spawn(move || {
-                let mut c = Client::connect(&sock, "t", cv_index::SCHEMA_VERSION).unwrap();
+                let c = Client::connect(&sock, "t", cv_index::SCHEMA_VERSION).unwrap();
                 for _ in 0..5 {
-                    c.call(Request::Status).unwrap();
+                    c.request(Request::Status).unwrap();
                 }
-                c.call(Request::CreateNote(CreateNoteParams {
+                c.request(Request::CreateNote(CreateNoteParams {
                     path: format!("conc{i}.md"),
                     content: "x".into(),
                 }))
@@ -591,7 +602,7 @@ async fn uri_intake_over_rpc_and_cli() {
     let mut c = client(&env);
 
     let v = c
-        .call(Request::Uri(UriParams {
+        .request(Request::Uri(UriParams {
             url: "obsidian://new?vault=Synth&file=..%2F..%2Fescape&content=hi".into(),
         }))
         .unwrap();
@@ -606,19 +617,19 @@ async fn uri_intake_over_rpc_and_cli() {
         "hi"
     );
     assert_eq!(
-        rpc_code(c.call(Request::Uri(UriParams {
+        rpc_code(c.request(Request::Uri(UriParams {
             url: "obsidian://new?vault=Other&file=x".into()
         }))),
         error_codes::INVALID_PARAMS
     );
     assert_eq!(
-        rpc_code(c.call(Request::Uri(UriParams {
+        rpc_code(c.request(Request::Uri(UriParams {
             url: "obsidian://new?file=x&clipboard".into()
         }))),
         error_codes::INVALID_PARAMS
     );
     assert_eq!(
-        rpc_code(c.call(Request::Uri(UriParams {
+        rpc_code(c.request(Request::Uri(UriParams {
             url: "obsidian://search?q=x".into()
         }))),
         error_codes::INVALID_PARAMS
@@ -663,7 +674,7 @@ async fn uri_intake_over_rpc_and_cli() {
 
     // With a subscriber, open_requested is broadcast instead.
     std::fs::remove_file(&out).unwrap();
-    c.call(Request::Subscribe(SubscribeParams {
+    c.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::OpenRequested],
     }))
     .unwrap();
@@ -818,7 +829,7 @@ async fn live_mode_starts_with_marker() {
             .unwrap();
     }
     let d = start(&env).await;
-    let st = client(&env).call(Request::Status).unwrap();
+    let st = client(&env).request(Request::Status).unwrap();
     assert_eq!(st["mode"], "live", "{st}");
     d.shutdown().await.unwrap();
 }
@@ -955,7 +966,7 @@ async fn write_attachment_is_content_addressed_and_idempotent() {
     let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let env = Env::new();
     let d = start(&env).await;
-    let mut c = client(&env);
+    let c = client(&env);
     let bytes = b"\x89PNG fake image bytes";
     let req = |ext: &str, data: String| {
         Request::WriteAttachment(WriteAttachmentParams {
@@ -964,7 +975,7 @@ async fn write_attachment_is_content_addressed_and_idempotent() {
             data_base64: data,
         })
     };
-    let v = c.call(req("png", b64(bytes))).unwrap();
+    let v = c.request(req("png", b64(bytes))).unwrap();
     let path = v["path"].as_str().unwrap().to_owned();
     use md5::Digest as _;
     let md5 = hex::encode(md5::Md5::digest(bytes));
@@ -975,23 +986,23 @@ async fn write_attachment_is_content_addressed_and_idempotent() {
     assert!(!env.vault().join(&path).exists());
     // Tamper with the stored file: a second identical call must reuse it, not write again.
     std::fs::write(&on_disk, b"marker").unwrap();
-    let v2 = c.call(req("png", b64(bytes))).unwrap();
+    let v2 = c.request(req("png", b64(bytes))).unwrap();
     assert_eq!(v2["path"].as_str().unwrap(), path);
     assert_eq!(std::fs::read(&on_disk).unwrap(), b"marker");
     // Refusals.
     assert_eq!(
-        rpc_code(c.call(req("png", "!!not base64!!".into()))),
+        rpc_code(c.request(req("png", "!!not base64!!".into()))),
         error_codes::INVALID_PARAMS
     );
     for bad in ["", "PNG", "p.g", "toolongext"] {
         assert_eq!(
-            rpc_code(c.call(req(bad, b64(bytes)))),
+            rpc_code(c.request(req(bad, b64(bytes)))),
             error_codes::INVALID_PARAMS
         );
     }
     let big = vec![0u8; 25 * 1024 * 1024 + 1];
     assert_eq!(
-        rpc_code(c.call(req("png", b64(&big)))),
+        rpc_code(c.request(req("png", b64(&big)))),
         error_codes::INVALID_PARAMS
     );
     drop(c);
@@ -1005,7 +1016,7 @@ async fn gitignore_change_rebuilds_index() {
     std::fs::write(env.vault().join("drop/x.md"), "# x\n").unwrap();
     let d = start(&env).await;
     let mut sub = client(&env);
-    sub.call(Request::Subscribe(SubscribeParams {
+    sub.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::IndexGeneration],
     }))
     .unwrap();
@@ -1050,9 +1061,9 @@ async fn incremental_changes_invalidate_views_coalesced() {
     )
     .unwrap();
     let d = start(&env).await;
-    let mut c = client(&env);
+    let c = client(&env);
     let mut sub = client(&env);
-    sub.call(Request::Subscribe(SubscribeParams {
+    sub.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::ViewsInvalidated],
     }))
     .unwrap();
@@ -1061,7 +1072,7 @@ async fn incremental_changes_invalidate_views_coalesced() {
     let mut base = hash_of(&env.vault().join("a.md"));
     for body in ["# A\n- [ ] one\n", "# A\n- [ ] one\n- [ ] two\n"] {
         let v = c
-            .call(Request::WriteNote(WriteNoteParams {
+            .request(Request::WriteNote(WriteNoteParams {
                 path: "a.md".into(),
                 content: body.into(),
                 base_hash: base.clone(),
@@ -1108,23 +1119,23 @@ async fn lookup_models_round_trip_falls_back_to_declared() {
     )
     .unwrap();
     let d = start(&env).await;
-    let mut c = client(&env);
+    let c = client(&env);
     let v = c
-        .call(Request::LookupModels(cv_protocol::LookupModelsParams {
+        .request(Request::LookupModels(cv_protocol::LookupModelsParams {
             provider: "local".into(),
         }))
         .unwrap();
     assert_eq!(v, json!({"models": [{"id": "gemma-4"}], "live": false}));
     assert_eq!(
         rpc_code(
-            c.call(Request::LookupModels(cv_protocol::LookupModelsParams {
+            c.request(Request::LookupModels(cv_protocol::LookupModelsParams {
                 provider: "missing".into(),
             }))
         ),
         error_codes::NOT_FOUND
     );
     assert_eq!(
-        c.call(Request::LookupGeocode(cv_protocol::LookupGeocodeParams {
+        c.request(Request::LookupGeocode(cv_protocol::LookupGeocodeParams {
             query: " ".into(),
         }))
         .unwrap(),

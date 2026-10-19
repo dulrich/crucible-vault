@@ -1,6 +1,9 @@
 //! The Unix-socket JSON-RPC server (plan Public Interfaces "Transport and handshake").
 //!
-//! Newline-delimited JSON-RPC 2.0, one task per connection. Any call before a successful `hello`
+//! Newline-delimited JSON-RPC 2.0, one task per connection. `hello`/`subscribe` run inline (they
+//! change connection state); every other request runs in the connection's own task set and its
+//! reply goes back through the single writer, so a slow call never blocks the connection's other
+//! replies or notifications (ids are echoed; out-of-order replies are fine). Any call before a successful `hello`
 //! gets `HANDSHAKE_REQUIRED`; a `hello` with another `protocol_version` gets `VERSION_MISMATCH`
 //! (the connection stays usable for a retry, never a degraded session). Notifications go only to
 //! connections subscribed to their topic; a lagging subscriber skips (logged), never blocks.
@@ -13,36 +16,16 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use cv_protocol::{
-    JSONRPC_VERSION, PROTOCOL_VERSION, Request, RpcError, RpcId, RpcNotification, RpcOutcome,
-    RpcRequest, RpcResponse, Topic, error_codes,
+    JSONRPC_VERSION, METHOD_NAMES, PROTOCOL_VERSION, Request, RpcError, RpcId, RpcNotification,
+    RpcOutcome, RpcRequest, RpcResponse, SubscribeResult, Topic, error_codes,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
+use tokio::task::JoinSet;
 
 use crate::daemon::{Shared, clear_stale_socket, rpc_err};
-
-const METHODS: &[&str] = &[
-    "hello",
-    "subscribe",
-    "write_note",
-    "create_note",
-    "rename",
-    "delete",
-    "actions_list",
-    "run_action",
-    "job",
-    "cancel",
-    "jobs_list",
-    "job_retry",
-    "intake_list",
-    "uri",
-    "status",
-    "views_list",
-    "view_run",
-    "search",
-];
 
 /// Binds `socket` (stale file removed; a live daemon is an error) with mode 0600.
 pub fn bind(socket: &Path) -> Result<UnixListener> {
@@ -55,7 +38,7 @@ pub fn bind(socket: &Path) -> Result<UnixListener> {
 
 /// Accepts until `stop` flips, then waits for every connection task to end.
 pub async fn serve(listener: UnixListener, shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
-    let mut conns = tokio::task::JoinSet::new();
+    let mut conns = JoinSet::new();
     loop {
         tokio::select! {
             _ = stop.changed() => break,
@@ -100,6 +83,14 @@ fn null_id_error(code: i64, message: &str) -> Value {
     json!({"jsonrpc": JSONRPC_VERSION, "id": null, "error": {"code": code, "message": message}})
 }
 
+/// What one request line asks of the connection.
+enum Line {
+    /// Answer now (parse errors, `hello`, `subscribe`, handshake refusals).
+    Reply(Value),
+    /// Run through [`Shared::handle`] off the read loop.
+    Dispatch(RpcId, Request),
+}
+
 async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
@@ -107,9 +98,13 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
     let mut topics: HashSet<Topic> = HashSet::new();
     let mut greeted = false;
     let mut guard = OpenSubGuard(&shared, false);
+    let (reply_tx, mut replies) = mpsc::unbounded_channel::<Value>();
+    let mut calls = JoinSet::new();
     loop {
         let out: Value = tokio::select! {
             _ = stop.changed() => break,
+            Some(v) = replies.recv() => v,
+            Some(_) = calls.join_next(), if !calls.is_empty() => continue,
             ev = events.recv(), if !topics.is_empty() => match ev {
                 Ok(n) if topics.contains(&n.topic()) => match serde_json::to_value(RpcNotification::new(n)) {
                     Ok(v) => v,
@@ -126,14 +121,20 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
                 Ok(Some(l)) if l.trim().is_empty() => continue,
                 Ok(Some(l)) => {
                     let was_empty = topics.is_empty();
-                    let v = handle_line(&l, &shared, &mut greeted, &mut topics, &mut guard).await;
+                    let step = handle_line(&l, &shared, &mut greeted, &mut topics, &mut guard);
                     if was_empty && !topics.is_empty() {
                         // Start the feed at subscription time: no backlog from before it.
                         events = shared.subscribe();
                     }
-                    match v {
-                        Some(v) => v,
-                        None => continue,
+                    match step {
+                        Line::Reply(v) => v,
+                        Line::Dispatch(id, req) => {
+                            let (shared, tx) = (Arc::clone(&shared), reply_tx.clone());
+                            calls.spawn(async move {
+                                let _ = tx.send(response(id, shared.handle(req).await));
+                            });
+                            continue;
+                        }
                     }
                 }
                 Ok(None) => break,
@@ -149,16 +150,16 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
     }
 }
 
-async fn handle_line(
+fn handle_line(
     line: &str,
-    shared: &Arc<Shared>,
+    shared: &Shared,
     greeted: &mut bool,
     topics: &mut HashSet<Topic>,
     guard: &mut OpenSubGuard<'_>,
-) -> Option<Value> {
+) -> Line {
     let v: Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(e) => return Some(null_id_error(error_codes::PARSE_ERROR, &e.to_string())),
+        Err(e) => return Line::Reply(null_id_error(error_codes::PARSE_ERROR, &e.to_string())),
     };
     let req: RpcRequest = match serde_json::from_value(v.clone()) {
         Ok(r) => r,
@@ -167,10 +168,10 @@ async fn handle_line(
                 .get("id")
                 .and_then(|i| serde_json::from_value::<RpcId>(i.clone()).ok())
             else {
-                return Some(null_id_error(error_codes::INVALID_REQUEST, &e.to_string()));
+                return Line::Reply(null_id_error(error_codes::INVALID_REQUEST, &e.to_string()));
             };
             let method = v.get("method").and_then(Value::as_str).unwrap_or("");
-            let err = if METHODS.contains(&method) {
+            let err = if METHOD_NAMES.contains(&method) {
                 rpc_err(error_codes::INVALID_PARAMS, e.to_string())
             } else {
                 rpc_err(
@@ -178,7 +179,7 @@ async fn handle_line(
                     format!("unknown method {method:?}"),
                 )
             };
-            return Some(response(id, Err(err)));
+            return Line::Reply(response(id, Err(err)));
         }
     };
     let id = req.id;
@@ -206,9 +207,12 @@ async fn handle_line(
                 guard.1 = true;
                 shared.open_subscribers().fetch_add(1, Ordering::SeqCst);
             }
-            Ok(json!({ "topics": topics.iter().collect::<Vec<_>>() }))
+            serde_json::to_value(SubscribeResult {
+                topics: topics.iter().copied().collect(),
+            })
+            .map_err(|e| rpc_err(error_codes::INTERNAL_ERROR, e.to_string()))
         }
-        other => shared.handle(other).await,
+        other => return Line::Dispatch(id, other),
     };
-    Some(response(id, outcome))
+    Line::Reply(response(id, outcome))
 }

@@ -5,7 +5,7 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
-use cv_protocol::{Request, StatusResult, UriParams, UriResult};
+use cv_protocol::{StatusResult, UriParams, UriResult, methods};
 
 use crate::client::{Client, ClientError};
 use crate::config::Config;
@@ -123,7 +123,7 @@ pub fn uri_command(config: &Config, url: &str) -> Result<UriResult> {
     } else {
         url.to_owned()
     };
-    let mut client = match Client::connect(&config.socket, "cv-uri", cv_index::SCHEMA_VERSION) {
+    let client = match Client::connect(&config.socket, "cv-uri", cv_index::SCHEMA_VERSION) {
         Ok(c) => c,
         Err(ClientError::Io(e)) => {
             tracing::info!(error = %e, "daemon unreachable; spooling");
@@ -133,10 +133,9 @@ pub fn uri_command(config: &Config, url: &str) -> Result<UriResult> {
         }
         Err(e) => return Err(anyhow!("{e}")),
     };
-    let v = client
-        .call(Request::Uri(UriParams { url: resolved }))
-        .map_err(|e| anyhow!("{e}"))?;
-    Ok(serde_json::from_value(v)?)
+    client
+        .call::<methods::Uri>(UriParams { url: resolved })
+        .map_err(|e| anyhow!("{e}"))
 }
 
 fn render(s: &StatusResult, daemon: &str) -> String {
@@ -208,9 +207,8 @@ fn render(s: &StatusResult, daemon: &str) -> String {
 
 /// `cv status`: via the daemon, else read-only from `state.db` + the index generation.
 pub fn status_command(config: &Config) -> Result<String> {
-    if let Ok(mut c) = Client::connect(&config.socket, "cv-status", cv_index::SCHEMA_VERSION) {
-        let v = c.call(Request::Status).map_err(|e| anyhow!("{e}"))?;
-        let s: StatusResult = serde_json::from_value(v)?;
+    if let Ok(c) = Client::connect(&config.socket, "cv-status", cv_index::SCHEMA_VERSION) {
+        let s = c.call::<methods::Status>(()).map_err(|e| anyhow!("{e}"))?;
         return Ok(render(&s, "running"));
     }
     let reader = cv_state::StateReader::open(&config.state_db);

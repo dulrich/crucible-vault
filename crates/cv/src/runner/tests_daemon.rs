@@ -212,10 +212,10 @@ async fn run_action_end_to_end_over_the_socket() {
     let before = hashes(&env.vault());
     let calls = Arc::new(AtomicUsize::new(0));
     let d = start(&env, appending_exec(Arc::clone(&calls))).await;
-    let mut c = env.client();
+    let c = env.client();
 
     // actions_list: armed actions only, with their ParamSpecs.
-    let list = c.call(Request::ActionsList).unwrap();
+    let list = c.request(Request::ActionsList).unwrap();
     let ids: Vec<&str> = list
         .as_array()
         .unwrap()
@@ -228,7 +228,7 @@ async fn run_action_end_to_end_over_the_socket() {
     assert_eq!(list[1]["params"][0]["kind"], "enum");
     assert_eq!(list[1]["params"][0]["choices"], json!(["a", "b"]));
     assert_eq!(list[1]["params"][1]["required"], true);
-    let status = c.call(Request::Status).unwrap();
+    let status = c.request(Request::Status).unwrap();
     assert_eq!(
         status["config_errors"].as_array().unwrap().len(),
         1,
@@ -243,24 +243,24 @@ async fn run_action_end_to_end_over_the_socket() {
     };
     // Unknown / disarmed / missing param / missing context.
     assert_eq!(
-        rpc_code(c.call(run("nope", json!({}), ActionContext::default()))),
+        rpc_code(c.request(run("nope", json!({}), ActionContext::default()))),
         error_codes::NOT_FOUND
     );
     assert_eq!(
-        rpc_code(c.call(run("broken", json!({}), ActionContext::default()))),
+        rpc_code(c.request(run("broken", json!({}), ActionContext::default()))),
         error_codes::INVALID_PARAMS
     );
     assert_eq!(
-        rpc_code(c.call(run("touch", json!({}), ctx(&a_hash)))),
+        rpc_code(c.request(run("touch", json!({}), ctx(&a_hash)))),
         error_codes::INVALID_PARAMS
     );
     assert_eq!(
-        rpc_code(c.call(run("touch", json!({"why": "x"}), ActionContext::default()))),
+        rpc_code(c.request(run("touch", json!({"why": "x"}), ActionContext::default()))),
         error_codes::INVALID_PARAMS
     );
     // Stale buffer_hash → CONFLICT, nothing enqueued.
     assert_eq!(
-        rpc_code(c.call(run("touch", json!({"why": "x"}), ctx("deadbeef")))),
+        rpc_code(c.request(run("touch", json!({"why": "x"}), ctx("deadbeef")))),
         error_codes::CONFLICT
     );
     assert!(
@@ -276,7 +276,7 @@ async fn run_action_end_to_end_over_the_socket() {
 
     // Non-durable: returns after completion with open_path.
     let r = c
-        .call(run("touch", json!({"why": "x"}), ctx(&a_hash)))
+        .request(run("touch", json!({"why": "x"}), ctx(&a_hash)))
         .unwrap();
     assert_eq!(r["open_path"], "a.md");
     let job_id = r["job_id"].as_str().unwrap().to_owned();
@@ -297,7 +297,7 @@ async fn run_action_end_to_end_over_the_socket() {
 
     // Durable: job id at once; then completes.
     let r = c
-        .call(run(
+        .request(run(
             "bg",
             json!({}),
             ActionContext {
@@ -341,7 +341,7 @@ async fn run_action_end_to_end_over_the_socket() {
     );
 
     // Hot reload: a broken actions.toml keeps the old actions and reports the error.
-    c.call(Request::Subscribe(SubscribeParams {
+    c.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::ConfigReloaded],
     }))
     .unwrap();
@@ -360,7 +360,7 @@ async fn run_action_end_to_end_over_the_socket() {
         "{errors:?}"
     );
     assert_eq!(
-        c.call(Request::ActionsList)
+        c.request(Request::ActionsList)
             .unwrap()
             .as_array()
             .unwrap()
@@ -545,9 +545,9 @@ async fn durable_move_publishes_open_path_on_terminal_status() {
     .await
     .unwrap();
     let mut rx = d.subscribe();
-    let mut c = env.client();
+    let c = env.client();
     let r = c
-        .call(run(
+        .request(run(
             "file-away",
             json!({}),
             ActionContext {
@@ -673,7 +673,7 @@ fn search_env(embed_base: &str) -> Env {
 
 fn search(c: &mut Client, q: &str) -> cv_protocol::SearchResult {
     let v = c
-        .call(Request::Search(cv_protocol::SearchParams {
+        .request(Request::Search(cv_protocol::SearchParams {
             query: q.into(),
             limit: 10,
         }))
@@ -687,7 +687,7 @@ async fn search_sees_a_feed_write_in_the_same_daemon_and_is_semantic_with_the_em
     let d = start(&env, feeding_exec()).await;
     let mut c = env.client();
     assert!(
-        c.call(Request::Status).unwrap()["config_errors"]
+        c.request(Request::Status).unwrap()["config_errors"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -697,7 +697,7 @@ async fn search_sees_a_feed_write_in_the_same_daemon_and_is_semantic_with_the_em
     assert!(r.hits.is_empty(), "nothing fed yet");
     assert!(!r.semantic, "empty index: keyword-only");
 
-    c.call(run("feed", json!({}), ActionContext::default()))
+    c.request(run("feed", json!({}), ActionContext::default()))
         .unwrap();
     let r = search(&mut c, "zebra");
     assert!(r.semantic, "embedder up, matching space");
@@ -716,11 +716,58 @@ async fn search_falls_back_to_keyword_only_when_the_embedder_is_down() {
     let env = search_env("http://127.0.0.1:9");
     let d = start(&env, feeding_exec()).await;
     let mut c = env.client();
-    c.call(run("feed", json!({}), ActionContext::default()))
+    c.request(run("feed", json!({}), ActionContext::default()))
         .unwrap();
     let r = search(&mut c, "zebra");
     assert!(!r.semantic, "embedder down: keyword-only");
     assert_eq!(r.hits.len(), 1, "hits still returned");
     assert_eq!(r.hits[0].path, "notes/zebra.md");
+    d.shutdown().await.unwrap();
+}
+
+/// WP-R3 (SR6): a slow call runs off the connection's read loop, so a `status` sent after it on
+/// the same connection answers first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_call_does_not_block_its_connection() {
+    use cv_protocol::client::RpcClient;
+    use cv_protocol::methods;
+    const SLOW: &str = "[[action]]\nid = \"slow\"\nneeds = [\"active_path\"]\ndurable = false\n[[action.steps]]\ntype = \"set_props\"\n";
+    let env = Env::new(SLOW);
+    let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(|_, _| {
+        std::thread::sleep(Duration::from_millis(1500));
+        Ok(StepOutcome::default())
+    })));
+    let d = start(&env, exec).await;
+    let c = Arc::new(
+        RpcClient::connect(
+            Path::new(&env.vars["CV_SOCKET"]),
+            "test",
+            cv_index::SCHEMA_VERSION,
+        )
+        .unwrap(),
+    );
+    let slow = {
+        let c = Arc::clone(&c);
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            c.call::<methods::RunAction>(RunActionParams {
+                action_id: "slow".into(),
+                params: Map::new(),
+                context: ActionContext {
+                    active_path: Some("a.md".into()),
+                    ..ActionContext::default()
+                },
+            })
+            .unwrap();
+            t.elapsed()
+        })
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    let t = Instant::now();
+    c.call::<methods::Status>(()).unwrap();
+    let status_took = t.elapsed();
+    let slow_took = slow.join().unwrap();
+    assert!(slow_took >= Duration::from_millis(1200), "{slow_took:?}");
+    assert!(status_took < Duration::from_millis(800), "{status_took:?}");
     d.shutdown().await.unwrap();
 }

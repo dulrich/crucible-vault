@@ -6,6 +6,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod client;
+pub mod methods;
+pub use methods::{METHOD_NAMES, Method};
+
 /// Protocol version exchanged in `hello`; a mismatch is refused, never degraded.
 pub const PROTOCOL_VERSION: u32 = 1;
 /// JSON-RPC version string.
@@ -82,6 +86,10 @@ pub mod error_codes {
     /// Content-hash CAS failure; `data` carries `{current_hash}`.
     pub const CONFLICT: i64 = 1003;
     pub const NOT_FOUND: i64 = 1004;
+    /// The vault refused the operation by policy (symlinked-note write, protected root, scratch).
+    pub const REFUSED: i64 = 1005;
+    /// The daemon cannot serve the call right now (shutting down, writer gone, runner not up).
+    pub const UNAVAILABLE: i64 = 1006;
 }
 
 /// A daemon→client notification (no id), sent after `subscribe`.
@@ -162,14 +170,15 @@ pub struct HelloParams {
     pub client: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
+    #[default]
     Shadow,
     Live,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloResult {
     pub protocol_version: u32,
     pub index_schema: u32,
@@ -658,6 +667,23 @@ pub struct NoteSetBoolParams {
 pub struct NoteSetBoolResult {
     pub hash: String,
 }
+
+/// `subscribe` result: every topic the connection now receives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscribeResult {
+    pub topics: Vec<Topic>,
+}
+
+/// `rename` result: notes whose links were rewritten, and those skipped on a CAS conflict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameResult {
+    pub rewritten: Vec<String>,
+    pub skipped_conflicts: Vec<String>,
+}
+
+/// `delete` result (an empty object).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteResult {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupChannelsParams {
@@ -1217,5 +1243,185 @@ mod tests {
             assert_eq!(v["method"], serde_json::to_value(topic).expect("topic"));
             assert!(v.get("id").is_none());
         }
+    }
+
+    /// WP-R3: every marker builds its own variant, whose wire `method` is the marker's `NAME`
+    /// and is listed in `METHOD_NAMES` (the server's known-method set).
+    #[test]
+    fn method_markers_match_the_wire() {
+        fn check<M: Method>(p: M::Params, seen: &mut Vec<&'static str>) {
+            let req = M::request(p);
+            assert_eq!(req.method(), M::NAME);
+            let v = round_trip(&RpcRequest::new(RpcId::Num(1), req));
+            assert_eq!(v["method"], M::NAME);
+            seen.push(M::NAME);
+        }
+        use methods as m;
+        let id = || JobIdParams { job_id: "j".into() };
+        let mut seen = Vec::new();
+        let s = &mut seen;
+        check::<m::Hello>(
+            HelloParams {
+                protocol_version: 1,
+                client: "c".into(),
+            },
+            s,
+        );
+        check::<m::Subscribe>(
+            SubscribeParams {
+                topics: vec![Topic::FileChanged],
+            },
+            s,
+        );
+        check::<m::WriteNote>(
+            WriteNoteParams {
+                path: "a".into(),
+                content: "x".into(),
+                base_hash: String::new(),
+            },
+            s,
+        );
+        check::<m::CreateNote>(
+            CreateNoteParams {
+                path: "a".into(),
+                content: String::new(),
+            },
+            s,
+        );
+        check::<m::WriteAttachment>(
+            WriteAttachmentParams {
+                note_path: "a".into(),
+                ext: "png".into(),
+                data_base64: String::new(),
+            },
+            s,
+        );
+        check::<m::Rename>(
+            RenameParams {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            s,
+        );
+        check::<m::Delete>(
+            DeleteParams {
+                path: "a".into(),
+                mode: DeleteMode::Trash,
+            },
+            s,
+        );
+        check::<m::DeletePreview>(PathParams { path: "a".into() }, s);
+        check::<m::DeleteNote>(
+            DeleteNoteParams {
+                path: "a".into(),
+                attachments: vec![],
+                mode: DeleteMode::Trash,
+            },
+            s,
+        );
+        check::<m::ActionsList>((), s);
+        check::<m::RunAction>(
+            RunActionParams {
+                action_id: "x".into(),
+                params: serde_json::Map::new(),
+                context: ActionContext::default(),
+            },
+            s,
+        );
+        check::<m::Job>(id(), s);
+        check::<m::Cancel>(id(), s);
+        check::<m::JobsList>(JobsListParams::default(), s);
+        check::<m::JobRetry>(id(), s);
+        check::<m::IntakeList>(
+            IntakeListParams {
+                source_kind: None,
+                source_key: None,
+                day: None,
+                outcome: None,
+                limit: None,
+                offset: None,
+            },
+            s,
+        );
+        check::<m::Uri>(UriParams { url: "u".into() }, s);
+        check::<m::Status>((), s);
+        check::<m::ViewsList>((), s);
+        check::<m::ViewRun>(
+            ViewRunParams {
+                view_id: "v".into(),
+                this_path: None,
+            },
+            s,
+        );
+        check::<m::LookupCurrencies>((), s);
+        check::<m::LookupGeocode>(LookupGeocodeParams { query: "q".into() }, s);
+        check::<m::LookupModels>(
+            LookupModelsParams {
+                provider: "p".into(),
+            },
+            s,
+        );
+        check::<m::LookupChannels>(LookupChannelsParams { ids: vec![] }, s);
+        check::<m::Search>(
+            SearchParams {
+                query: "q".into(),
+                limit: 1,
+            },
+            s,
+        );
+        check::<m::TrackerItemSetDone>(
+            TrackerItemSetDoneParams {
+                source_kind: "k".into(),
+                source_key: "s".into(),
+                item_id: "i".into(),
+                done: true,
+            },
+            s,
+        );
+        check::<m::TrackerItemSetStatus>(
+            TrackerItemSetStatusParams {
+                source_kind: "k".into(),
+                source_key: "s".into(),
+                item_id: "i".into(),
+                status: None,
+            },
+            s,
+        );
+        check::<m::NoteSetBool>(
+            NoteSetBoolParams {
+                path: "a".into(),
+                key: "k".into(),
+                value: true,
+            },
+            s,
+        );
+        assert_eq!(seen, METHOD_NAMES);
+        // Unit methods carry no `params` key, exactly as the enum always serialised them.
+        let v = serde_json::to_value(RpcRequest::new(RpcId::Num(2), m::Status::request(())))
+            .expect("v");
+        assert_eq!(v, json!({"jsonrpc":"2.0","id":2,"method":"status"}));
+    }
+
+    /// WP-R3: the four results that were ad-hoc `json!` keep their wire shape.
+    #[test]
+    fn retyped_results_keep_their_wire_shape() {
+        let r = RenameResult {
+            rewritten: vec!["a.md".into()],
+            skipped_conflicts: vec![],
+        };
+        assert_eq!(
+            round_trip(&r),
+            json!({"rewritten": ["a.md"], "skipped_conflicts": []})
+        );
+        assert_eq!(round_trip(&DeleteResult {}), json!({}));
+        let t = SubscribeResult {
+            topics: vec![Topic::JobUpdated],
+        };
+        assert_eq!(round_trip(&t), json!({"topics": ["job_updated"]}));
+        assert_eq!(serde_json::to_value(()).expect("unit"), Value::Null);
+        assert_eq!(
+            (error_codes::REFUSED, error_codes::UNAVAILABLE),
+            (1005, 1006)
+        );
     }
 }

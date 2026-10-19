@@ -22,12 +22,12 @@ pub enum StateError {
     #[error("no such job: {0}")]
     NoSuchJob(String),
     /// The job exists but is not in the state the operation requires.
-    #[error("job {id} is {status}, expected {expected}")]
+    #[error("job {id} is {}, expected {expected}", .status.as_str())]
     WrongStatus {
         /// Job id.
         id: String,
         /// Actual status.
-        status: String,
+        status: crate::JobStatus,
         /// Status the operation required.
         expected: &'static str,
     },

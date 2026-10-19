@@ -4,7 +4,6 @@ use cv_protocol::{
     ActionInfo, JobState, Notification, RpcError, RunActionParams, RunActionResult, error_codes,
 };
 use cv_state::Lane;
-use cv_vault::VaultError;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -38,7 +37,7 @@ pub async fn run_action(
     shared: &Shared,
     runner: &Runner,
     p: RunActionParams,
-) -> Result<Value, RpcError> {
+) -> Result<RunActionResult, RpcError> {
     let config = runner.config();
     if !config.is_known(&p.action_id) {
         return Err(rpc_err(
@@ -92,10 +91,8 @@ pub async fn run_action(
             return Err(invalid("buffer_hash given without active_path"));
         };
         let current = shared
-            .with_writer(move |w| w.call(move |vw| vw.fs().hash(&path)))
-            .await?
-            .and_then(|r| r)
-            .map_err(|e: VaultError| rpc_err(error_codes::INTERNAL_ERROR, e.to_string()))?;
+            .writer_job(move |vw| Ok(vw.fs().hash(&path)?))
+            .await?;
         let cur = current.as_ref().map(|h| h.as_str().to_owned());
         if cur.as_deref() != Some(expected.as_str()) {
             return Err(RpcError {
@@ -131,7 +128,7 @@ pub async fn run_action(
             tracing::info!(%job_id, wait = ?NON_DURABLE_WAIT, "non-durable run still going; returning job id");
         }
     }
-    serde_json::to_value(&out).map_err(|e| rpc_err(error_codes::INTERNAL_ERROR, e.to_string()))
+    Ok(out)
 }
 
 async fn wait_terminal(rx: &mut broadcast::Receiver<Notification>, job_id: &str) {

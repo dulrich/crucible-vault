@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use cv_protocol::{
-    ChangeKind, CreateNoteResult, DeleteMode, DeleteNoteResult, DeletePreviewItem,
-    DeletePreviewResult, HelloResult, IntakeListResult, JobState, JobStatus, JobsListResult, Mode,
-    Notification, Origin, PROTOCOL_VERSION, Request, RpcError, StatusResult, UriResult,
-    ViewsListResult, WriteAttachmentParams, WriteAttachmentResult, WriteNoteResult, WriteOp,
+    ChangeKind, CreateNoteResult, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams,
+    DeletePreviewItem, DeletePreviewResult, DeleteResult, HelloResult, IntakeListResult, JobState,
+    JobStatus, JobsListResult, Method, Mode, Notification, Origin, PROTOCOL_VERSION, PathParams,
+    RenameParams, RenameResult, Request, RpcError, StatusResult, UriResult, ViewsListResult,
+    WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams, WriteNoteResult, WriteOp,
     error_codes,
 };
 use cv_state::{NewShadowWrite, QueueConfig, RetryOutcome, StateDb, StateError, StateReader};
@@ -351,23 +352,64 @@ fn internal(e: impl std::fmt::Display) -> RpcError {
     rpc_err(error_codes::INTERNAL_ERROR, e.to_string())
 }
 
-fn vault_err(e: VaultError) -> RpcError {
+/// Every [`VaultError`] → its RPC code (exhaustive by design: a new variant must pick one).
+pub(crate) fn rpc_from_vault(e: VaultError) -> RpcError {
+    use error_codes as c;
     match e {
         VaultError::Conflict { found, .. } => RpcError {
-            code: error_codes::CONFLICT,
+            code: c::CONFLICT,
             message: "content hash conflict".into(),
             data: Some(json!({ "current_hash": found.map(|h| h.as_str().to_owned()) })),
         },
-        VaultError::NotFound(p) => rpc_err(error_codes::NOT_FOUND, format!("not found: {p}")),
+        VaultError::State(s) => rpc_from_state(s),
+        e @ VaultError::NotFound(_) => rpc_err(c::NOT_FOUND, e.to_string()),
         e @ (VaultError::InvalidPath(_) | VaultError::Exists(_)) => {
-            rpc_err(error_codes::INVALID_PARAMS, e.to_string())
+            rpc_err(c::INVALID_PARAMS, e.to_string())
         }
-        e => internal(e),
+        e @ (VaultError::ProtectedRoot { .. }
+        | VaultError::LinkWriteRefused { .. }
+        | VaultError::ScratchRefused { .. }) => rpc_err(c::REFUSED, e.to_string()),
+        e @ VaultError::WriterGone => rpc_err(c::UNAVAILABLE, e.to_string()),
+        e @ (VaultError::Io { .. }
+        | VaultError::Index(_)
+        | VaultError::Watch(_)
+        | VaultError::Landlock(_)
+        | VaultError::Json(_)) => internal(e),
     }
 }
 
-fn to_value<T: serde::Serialize>(v: &T) -> Result<Value, RpcError> {
-    serde_json::to_value(v).map_err(internal)
+/// Every [`StateError`] → its RPC code (exhaustive by design).
+pub(crate) fn rpc_from_state(e: StateError) -> RpcError {
+    use error_codes as c;
+    match e {
+        StateError::NoSuchJob(id) => rpc_err(c::NOT_FOUND, format!("no job {id}")),
+        e @ StateError::WrongStatus { .. } => rpc_err(c::INVALID_PARAMS, e.to_string()),
+        e @ (StateError::Sqlite(_)
+        | StateError::Json(_)
+        | StateError::NewerSchema { .. }
+        | StateError::Corrupt { .. }) => internal(e),
+    }
+}
+
+fn unavailable(m: &str) -> RpcError {
+    rpc_err(error_codes::UNAVAILABLE, m)
+}
+
+/// A writer-job failure: the vault's, or a refusal of the request's own params.
+pub(crate) enum JobError {
+    Vault(VaultError),
+    Invalid(String),
+}
+
+impl From<VaultError> for JobError {
+    fn from(e: VaultError) -> Self {
+        Self::Vault(e)
+    }
+}
+
+/// Serialises method `M`'s typed result (ties each handler's return type to the contract).
+fn reply<M: Method>(r: Result<M::Result, RpcError>) -> Result<Value, RpcError> {
+    serde_json::to_value(r?).map_err(internal)
 }
 
 fn map_job(j: &cv_state::Job) -> JobStatus {
@@ -437,7 +479,8 @@ impl Shared {
     }
 
     fn runner_or_err(&self) -> Result<&Runner, RpcError> {
-        self.runner().ok_or_else(|| internal("runner not started"))
+        self.runner()
+            .ok_or_else(|| unavailable("runner not started"))
     }
 
     pub(crate) fn open_subscribers(&self) -> &AtomicUsize {
@@ -451,10 +494,23 @@ impl Shared {
     ) -> Result<T, RpcError> {
         let w = self
             .writer()
-            .ok_or_else(|| internal("daemon is shutting down"))?;
+            .ok_or_else(|| unavailable("daemon is shutting down"))?;
         tokio::task::spawn_blocking(move || f(w))
             .await
             .map_err(internal)
+    }
+
+    /// Runs `f` as one writer job; every layer's failure (shutdown, writer gone, the job's own
+    /// error) flattens into one [`RpcError`].
+    pub(crate) async fn writer_job<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut cv_vault::VaultWriter) -> Result<T, JobError> + Send + 'static,
+    ) -> Result<T, RpcError> {
+        match self.with_writer(move |w| w.call(f)).await? {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(JobError::Invalid(m))) => Err(rpc_err(error_codes::INVALID_PARAMS, m)),
+            Ok(Err(JobError::Vault(e))) | Err(e) => Err(rpc_from_vault(e)),
+        }
     }
 
     /// Rebuilds the index; on success broadcasts `index_generation{n}`. On failure the writer
@@ -467,7 +523,7 @@ impl Shared {
             }
             Err(e) => {
                 tracing::error!(error = %e, "index rebuild failed; writer reopened current");
-                Err(vault_err(e))
+                Err(rpc_from_vault(e))
             }
         }
     }
@@ -492,258 +548,245 @@ impl Shared {
             .unwrap_or(0)
     }
 
-    /// Handles every request except `hello`/`subscribe` (connection-level).
+    /// Handles every request except `hello`/`subscribe` (connection-level): one handler per
+    /// method, each returning that method's [`Method::Result`].
     pub async fn handle(&self, req: Request) -> Result<Value, RpcError> {
+        use cv_protocol::methods as m;
         match req {
             Request::Hello(_) | Request::Subscribe(_) => Err(rpc_err(
                 error_codes::INVALID_REQUEST,
                 "hello/subscribe are connection-level",
             )),
-            Request::WriteNote(p) => {
-                let expected =
-                    (!p.base_hash.is_empty()).then(|| ContentHash::from_hex(p.base_hash));
-                let res = self
-                    .with_writer(move |w| w.write(&p.path, p.content.into_bytes(), expected))
-                    .await?;
-                match res {
-                    Ok(h) => to_value(&WriteNoteResult::Written {
-                        hash: h.as_str().to_owned(),
-                    }),
-                    Err(VaultError::Conflict { found, .. }) => {
-                        to_value(&WriteNoteResult::Conflict {
-                            current_hash: found.map(|h| h.as_str().to_owned()).unwrap_or_default(),
-                        })
-                    }
-                    Err(e) => Err(vault_err(e)),
-                }
-            }
-            Request::CreateNote(p) => {
-                let path = self.create_suffixed(p.path, p.content).await?;
-                to_value(&CreateNoteResult { path })
-            }
-            Request::WriteAttachment(p) => self.write_attachment(p).await,
-            Request::Rename(p) => {
-                // Read the hash and rename in one writer job: the CAS token is the hash the writer
-                // itself just read, so no other writer job can interleave.
-                let res = self
-                    .with_writer(move |w| {
-                        w.call(move |vw| {
-                            let h = vw
-                                .fs()
-                                .hash(&p.from)?
-                                .ok_or_else(|| VaultError::NotFound(p.from.clone()))?;
-                            vw.rename(&p.from, &p.to, h)
-                        })
-                    })
-                    .await?;
-                let out = res.and_then(|r| r).map_err(vault_err)?;
-                Ok(
-                    json!({ "rewritten": out.rewritten, "skipped_conflicts": out.skipped_conflicts }),
-                )
-            }
-            Request::Delete(p) => {
-                let permanent = p.mode == DeleteMode::Permanent;
-                let res = self
-                    .with_writer(move |w| {
-                        w.call(move |vw| {
-                            let h = vw
-                                .fs()
-                                .hash(&p.path)?
-                                .ok_or_else(|| VaultError::NotFound(p.path.clone()))?;
-                            vw.delete_with(&p.path, h, permanent)
-                        })
-                    })
-                    .await?;
-                res.and_then(|r| r).map_err(vault_err)?;
-                Ok(json!({}))
-            }
-            Request::DeletePreview(p) => {
-                let res = self
-                    .with_writer(move |w| {
-                        w.call(move |vw| -> Result<Vec<(String, bool)>, VaultError> {
-                            Ok(cv_index::delete_preview(&vw.index().query(), &p.path)?)
-                        })
-                    })
-                    .await?;
-                let items = res.and_then(|r| r).map_err(vault_err)?;
-                to_value(&DeletePreviewResult {
-                    items: items
-                        .into_iter()
-                        .map(|(path, referenced_elsewhere)| DeletePreviewItem {
-                            path,
-                            referenced_elsewhere,
-                        })
-                        .collect(),
-                })
-            }
-            Request::DeleteNote(p) => {
-                // One writer job: the note's CAS delete, then each attachment re-checked against
-                // the index at that moment (never removes something referenced since the preview).
-                let permanent = p.mode == DeleteMode::Permanent;
-                let res = self
-                    .with_writer(move |w| {
-                        w.call(move |vw| vw.delete_note(&p.path, &p.attachments, permanent))
-                    })
-                    .await?;
-                let (removed, skipped) = res.and_then(|r| r).map_err(vault_err)?;
-                to_value(&DeleteNoteResult { removed, skipped })
-            }
-            Request::ActionsList => to_value(&crate::runner::actions_list(self.runner_or_err()?)),
-            Request::RunAction(p) => {
-                crate::runner::run_action(self, self.runner_or_err()?, p).await
-            }
-            Request::Job(p) => {
-                let job = lock(&self.state).job(&p.job_id).map_err(internal)?;
-                match job {
-                    Some(j) => to_value(&map_job(&j)),
-                    None => Err(rpc_err(
-                        error_codes::NOT_FOUND,
-                        format!("no job {}", p.job_id),
-                    )),
-                }
-            }
-            Request::Cancel(p) => {
-                let res = {
-                    let mut db = lock(&self.state);
-                    db.cancel(&p.job_id, now_ms())
-                        .and_then(|()| db.job(&p.job_id))
-                };
-                match res {
-                    Ok(Some(j)) => to_value(&map_job(&j)),
-                    Ok(None) | Err(StateError::NoSuchJob(_)) => Err(rpc_err(
-                        error_codes::NOT_FOUND,
-                        format!("no job {}", p.job_id),
-                    )),
-                    // A running job stops before its next step (WP-9 runner).
-                    Err(StateError::WrongStatus { .. })
-                        if self.runner().is_some_and(|r| r.request_cancel(&p.job_id)) =>
-                    {
-                        let job = lock(&self.state).job(&p.job_id).map_err(internal)?;
-                        match job {
-                            Some(j) => to_value(&map_job(&j)),
-                            None => Err(rpc_err(error_codes::NOT_FOUND, "job vanished")),
-                        }
-                    }
-                    Err(e @ StateError::WrongStatus { .. }) => {
-                        Err(rpc_err(error_codes::INVALID_PARAMS, e.to_string()))
-                    }
-                    Err(e) => Err(internal(e)),
-                }
-            }
-            Request::JobsList(p) => {
-                let now = now_ms();
-                let q = crate::jobs::list_query(&p, now)
-                    .map_err(|m| rpc_err(error_codes::INVALID_PARAMS, m))?;
-                let jobs = StateReader::open(&self.config.state_db)
-                    .and_then(|r| r.list(&q))
-                    .map_err(internal)?;
-                to_value(&JobsListResult {
-                    jobs: jobs
-                        .iter()
-                        .map(|j| crate::jobs::job_summary(j, now))
-                        .collect(),
-                })
-            }
-            Request::JobRetry(p) => {
-                let res = {
-                    let mut db = lock(&self.state);
-                    db.retry_job(&p.job_id, now_ms())
-                        .and_then(|o| Ok((o, db.job(&p.job_id)?)))
-                };
-                match res {
-                    Ok((RetryOutcome::Retried, Some(j))) => to_value(&map_job(&j)),
-                    Ok((RetryOutcome::Duplicate(other), _)) => Err(rpc_err(
-                        error_codes::CONFLICT,
-                        format!("job {other} with the same dedupe key is already pending"),
-                    )),
-                    Ok((_, None)) | Err(StateError::NoSuchJob(_)) => Err(rpc_err(
-                        error_codes::NOT_FOUND,
-                        format!("no job {}", p.job_id),
-                    )),
-                    Err(e @ StateError::WrongStatus { .. }) => {
-                        Err(rpc_err(error_codes::INVALID_PARAMS, e.to_string()))
-                    }
-                    Err(e) => Err(internal(e)),
-                }
-            }
-            Request::IntakeList(p) => {
-                let q = crate::jobs::intake_query(&p)
-                    .map_err(|m| rpc_err(error_codes::INVALID_PARAMS, m))?;
-                let items = StateReader::open(&self.config.state_db)
-                    .and_then(|r| r.tracker_items(&q))
-                    .map_err(internal)?;
-                to_value(&IntakeListResult {
-                    items: items.into_iter().map(crate::jobs::intake_item).collect(),
-                })
-            }
-            Request::Uri(p) => {
-                let r = self.intake(&p.url).await?;
-                to_value(&r)
-            }
-            Request::Status => to_value(&self.status()?),
-            Request::ViewsList => to_value(&ViewsListResult {
-                view_ids: self.views.view_ids(),
-            }),
-            Request::ViewRun(p) => match self.views.run(&p.view_id, p.this_path).await {
-                Ok(r) => to_value(&r),
-                Err(ViewError::NotFound(id)) => {
-                    Err(rpc_err(error_codes::NOT_FOUND, format!("no view {id}")))
-                }
-                Err(ViewError::Failed(m)) => Err(internal(m)),
-            },
-            Request::LookupCurrencies => to_value(&self.lookups.currencies().await?),
-            Request::LookupGeocode(p) => to_value(&self.lookups.geocode(&p.query).await?),
-            Request::LookupModels(p) => to_value(&self.lookups.models(&p.provider).await?),
-            Request::LookupChannels(p) => to_value(&self.lookups.channels(&p.ids).await?),
-            Request::Search(p) => to_value(&self.search(&p).await?),
-            Request::TrackerItemSetDone(p) => self.set_tracker_status(
-                &p.source_kind,
-                &p.source_key,
-                &p.item_id,
-                p.done.then_some('x'),
+            Request::WriteNote(p) => reply::<m::WriteNote>(self.write_note(p).await),
+            Request::CreateNote(p) => reply::<m::CreateNote>(
+                self.create_suffixed(p.path, p.content)
+                    .await
+                    .map(|path| CreateNoteResult { path }),
             ),
-            Request::TrackerItemSetStatus(p) => {
-                self.set_tracker_status(&p.source_kind, &p.source_key, &p.item_id, p.status)
+            Request::WriteAttachment(p) => {
+                reply::<m::WriteAttachment>(self.write_attachment(p).await)
             }
-            Request::NoteSetBool(p) => self.note_set_bool(p).await,
+            Request::Rename(p) => reply::<m::Rename>(self.rename(p).await),
+            Request::Delete(p) => reply::<m::Delete>(self.delete(p).await),
+            Request::DeletePreview(p) => reply::<m::DeletePreview>(self.delete_preview(p).await),
+            Request::DeleteNote(p) => reply::<m::DeleteNote>(self.delete_note(p).await),
+            Request::ActionsList => {
+                reply::<m::ActionsList>(self.runner_or_err().map(crate::runner::actions_list))
+            }
+            Request::RunAction(p) => reply::<m::RunAction>(
+                crate::runner::run_action(self, self.runner_or_err()?, p).await,
+            ),
+            Request::Job(p) => reply::<m::Job>(self.job(&p.job_id)),
+            Request::Cancel(p) => reply::<m::Cancel>(self.cancel(&p.job_id)),
+            Request::JobsList(p) => reply::<m::JobsList>(self.jobs_list(&p)),
+            Request::JobRetry(p) => reply::<m::JobRetry>(self.job_retry(&p.job_id)),
+            Request::IntakeList(p) => reply::<m::IntakeList>(self.intake_list(&p)),
+            Request::Uri(p) => reply::<m::Uri>(self.intake(&p.url).await),
+            Request::Status => reply::<m::Status>(self.status()),
+            Request::ViewsList => reply::<m::ViewsList>(Ok(ViewsListResult {
+                view_ids: self.views.view_ids(),
+            })),
+            Request::ViewRun(p) => {
+                reply::<m::ViewRun>(self.views.run(&p.view_id, p.this_path).await.map_err(|e| {
+                    match e {
+                        ViewError::NotFound(id) => {
+                            rpc_err(error_codes::NOT_FOUND, format!("no view {id}"))
+                        }
+                        ViewError::Failed(m) => internal(m),
+                    }
+                }))
+            }
+            Request::LookupCurrencies => {
+                reply::<m::LookupCurrencies>(self.lookups.currencies().await)
+            }
+            Request::LookupGeocode(p) => {
+                reply::<m::LookupGeocode>(self.lookups.geocode(&p.query).await)
+            }
+            Request::LookupModels(p) => {
+                reply::<m::LookupModels>(self.lookups.models(&p.provider).await)
+            }
+            Request::LookupChannels(p) => {
+                reply::<m::LookupChannels>(self.lookups.channels(&p.ids).await)
+            }
+            Request::Search(p) => reply::<m::Search>(self.search(&p).await),
+            Request::TrackerItemSetDone(p) => {
+                reply::<m::TrackerItemSetDone>(self.set_tracker_status(
+                    &p.source_kind,
+                    &p.source_key,
+                    &p.item_id,
+                    p.done.then_some('x'),
+                ))
+            }
+            Request::TrackerItemSetStatus(p) => reply::<m::TrackerItemSetStatus>(
+                self.set_tracker_status(&p.source_kind, &p.source_key, &p.item_id, p.status),
+            ),
+            Request::NoteSetBool(p) => reply::<m::NoteSetBool>(self.note_set_bool(p).await),
         }
+    }
+
+    /// `write_note`: a CAS write; a hash conflict is a result, not an error.
+    async fn write_note(&self, p: WriteNoteParams) -> Result<WriteNoteResult, RpcError> {
+        let expected = (!p.base_hash.is_empty()).then(|| ContentHash::from_hex(p.base_hash));
+        let res = self
+            .with_writer(move |w| w.write(&p.path, p.content.into_bytes(), expected))
+            .await?;
+        match res {
+            Ok(h) => Ok(WriteNoteResult::Written {
+                hash: h.as_str().to_owned(),
+            }),
+            Err(VaultError::Conflict { found, .. }) => Ok(WriteNoteResult::Conflict {
+                current_hash: found.map(|h| h.as_str().to_owned()).unwrap_or_default(),
+            }),
+            Err(e) => Err(rpc_from_vault(e)),
+        }
+    }
+
+    /// `rename`: read the hash and rename in one writer job, so the CAS token is the hash the
+    /// writer itself just read and no other writer job can interleave.
+    async fn rename(&self, p: RenameParams) -> Result<RenameResult, RpcError> {
+        let out = self
+            .writer_job(move |vw| {
+                let h = vw
+                    .fs()
+                    .hash(&p.from)?
+                    .ok_or_else(|| VaultError::NotFound(p.from.clone()))?;
+                Ok(vw.rename(&p.from, &p.to, h)?)
+            })
+            .await?;
+        Ok(RenameResult {
+            rewritten: out.rewritten,
+            skipped_conflicts: out.skipped_conflicts,
+        })
+    }
+
+    /// `delete`: hash read + CAS delete in one writer job.
+    async fn delete(&self, p: DeleteParams) -> Result<DeleteResult, RpcError> {
+        let permanent = p.mode == DeleteMode::Permanent;
+        self.writer_job(move |vw| {
+            let h = vw
+                .fs()
+                .hash(&p.path)?
+                .ok_or_else(|| VaultError::NotFound(p.path.clone()))?;
+            Ok(vw.delete_with(&p.path, h, permanent)?)
+        })
+        .await?;
+        Ok(DeleteResult {})
+    }
+
+    /// `delete_preview`: the note's embeds/attachments and whether anything else references them.
+    async fn delete_preview(&self, p: PathParams) -> Result<DeletePreviewResult, RpcError> {
+        let items = self
+            .writer_job(move |vw| {
+                Ok(cv_index::delete_preview(&vw.index().query(), &p.path)
+                    .map_err(VaultError::from)?)
+            })
+            .await?;
+        Ok(DeletePreviewResult {
+            items: items
+                .into_iter()
+                .map(|(path, referenced_elsewhere)| DeletePreviewItem {
+                    path,
+                    referenced_elsewhere,
+                })
+                .collect(),
+        })
+    }
+
+    /// `delete_note`: one writer job — the note's CAS delete, then each attachment re-checked
+    /// against the index at that moment (never removes something referenced since the preview).
+    async fn delete_note(&self, p: DeleteNoteParams) -> Result<DeleteNoteResult, RpcError> {
+        let permanent = p.mode == DeleteMode::Permanent;
+        let (removed, skipped) = self
+            .writer_job(move |vw| Ok(vw.delete_note(&p.path, &p.attachments, permanent)?))
+            .await?;
+        Ok(DeleteNoteResult { removed, skipped })
+    }
+
+    fn job(&self, id: &str) -> Result<JobStatus, RpcError> {
+        let job = lock(&self.state).job(id).map_err(rpc_from_state)?;
+        job.map(|j| map_job(&j))
+            .ok_or_else(|| rpc_from_state(StateError::NoSuchJob(id.to_owned())))
+    }
+
+    /// `cancel`: a queued job settles now; a running one stops before its next step (runner).
+    fn cancel(&self, id: &str) -> Result<JobStatus, RpcError> {
+        let res = lock(&self.state).cancel(id, now_ms());
+        match res {
+            Err(StateError::WrongStatus { .. })
+                if self.runner().is_some_and(|r| r.request_cancel(id)) =>
+            {
+                self.job(id)
+            }
+            r => r.map_err(rpc_from_state).and_then(|()| self.job(id)),
+        }
+    }
+
+    fn jobs_list(&self, p: &cv_protocol::JobsListParams) -> Result<JobsListResult, RpcError> {
+        let now = now_ms();
+        let q =
+            crate::jobs::list_query(p, now).map_err(|m| rpc_err(error_codes::INVALID_PARAMS, m))?;
+        let jobs = StateReader::open(&self.config.state_db)
+            .and_then(|r| r.list(&q))
+            .map_err(rpc_from_state)?;
+        Ok(JobsListResult {
+            jobs: jobs
+                .iter()
+                .map(|j| crate::jobs::job_summary(j, now))
+                .collect(),
+        })
+    }
+
+    fn job_retry(&self, id: &str) -> Result<JobStatus, RpcError> {
+        let outcome = lock(&self.state)
+            .retry_job(id, now_ms())
+            .map_err(rpc_from_state)?;
+        match outcome {
+            RetryOutcome::Retried => self.job(id),
+            RetryOutcome::Duplicate(other) => Err(rpc_err(
+                error_codes::CONFLICT,
+                format!("job {other} with the same dedupe key is already pending"),
+            )),
+        }
+    }
+
+    fn intake_list(&self, p: &cv_protocol::IntakeListParams) -> Result<IntakeListResult, RpcError> {
+        let q =
+            crate::jobs::intake_query(p).map_err(|m| rpc_err(error_codes::INVALID_PARAMS, m))?;
+        let items = StateReader::open(&self.config.state_db)
+            .and_then(|r| r.tracker_items(&q))
+            .map_err(rpc_from_state)?;
+        Ok(IntakeListResult {
+            items: items.into_iter().map(crate::jobs::intake_item).collect(),
+        })
     }
 
     /// `note_set_bool` (plan round-8-intake-views-anchor WP-3): read → frontmatter edit → CAS
     /// write in one writer job (the CAS token is the hash the writer itself read), so shadow mode
     /// and the writer's refusals apply. An already-equal value writes nothing.
-    async fn note_set_bool(&self, p: cv_protocol::NoteSetBoolParams) -> Result<Value, RpcError> {
-        let res = self
-            .with_writer(move |w| {
-                w.call(move |vw| -> Result<Result<String, RpcError>, VaultError> {
-                    let bytes = vw
-                        .fs()
-                        .read(&p.path)?
-                        .ok_or_else(|| VaultError::NotFound(p.path.clone()))?;
-                    let hash = ContentHash::of(&bytes);
-                    let Ok(text) = String::from_utf8(bytes) else {
-                        return Ok(Err(rpc_err(
-                            error_codes::INVALID_PARAMS,
-                            format!("{} is not UTF-8", p.path),
-                        )));
-                    };
-                    let mut doc = cv_lint::FrontmatterDoc::new(text);
-                    match doc.set(&p.key, &cv_lint::JsValue::Bool(p.value)) {
-                        Err(e) => Ok(Err(rpc_err(
-                            error_codes::INVALID_PARAMS,
-                            format!("{}: {e}", p.path),
-                        ))),
-                        Ok(false) => Ok(Ok(hash.as_str().to_owned())),
-                        Ok(true) => {
-                            let h = vw.write(&p.path, doc.text().as_bytes(), Some(hash))?;
-                            Ok(Ok(h.as_str().to_owned()))
-                        }
-                    }
-                })
+    async fn note_set_bool(
+        &self,
+        p: cv_protocol::NoteSetBoolParams,
+    ) -> Result<cv_protocol::NoteSetBoolResult, RpcError> {
+        let hash = self
+            .writer_job(move |vw| {
+                let bytes = vw
+                    .fs()
+                    .read(&p.path)?
+                    .ok_or_else(|| VaultError::NotFound(p.path.clone()))?;
+                let hash = ContentHash::of(&bytes);
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| JobError::Invalid(format!("{} is not UTF-8", p.path)))?;
+                let mut doc = cv_lint::FrontmatterDoc::new(text);
+                match doc.set(&p.key, &cv_lint::JsValue::Bool(p.value)) {
+                    Err(e) => Err(JobError::Invalid(format!("{}: {e}", p.path))),
+                    Ok(false) => Ok(hash),
+                    Ok(true) => Ok(vw.write(&p.path, doc.text().as_bytes(), Some(hash))?),
+                }
             })
             .await?;
-        let hash = res.and_then(|r| r).map_err(vault_err)??;
-        to_value(&cv_protocol::NoteSetBoolResult { hash })
+        Ok(cv_protocol::NoteSetBoolResult {
+            hash: hash.as_str().to_owned(),
+        })
     }
 
     /// `search` (plan semsearch-crate WP-4): hybrid search over the runner's shared index,
@@ -766,7 +809,7 @@ impl Shared {
         source_key: &str,
         item_id: &str,
         status: Option<char>,
-    ) -> Result<Value, RpcError> {
+    ) -> Result<(), RpcError> {
         let matched = lock(&self.state)
             .set_tracker_item_status(source_kind, source_key, item_id, status)
             .map_err(internal)?;
@@ -776,7 +819,7 @@ impl Shared {
                 format!("no tracker item {source_kind}/{source_key}/{item_id}"),
             ));
         }
-        to_value(&())
+        Ok(())
     }
 
     /// The `status` result.
@@ -809,7 +852,10 @@ impl Shared {
     /// `write_attachment`: validates, resolves the path with the `localize` default templates,
     /// reuses an existing file (content-MD5 name ⇒ identical bytes), else creates it through the
     /// writer.
-    async fn write_attachment(&self, p: WriteAttachmentParams) -> Result<Value, RpcError> {
+    async fn write_attachment(
+        &self,
+        p: WriteAttachmentParams,
+    ) -> Result<WriteAttachmentResult, RpcError> {
         use crate::steps::localize;
         use base64::Engine as _;
         let ext_ok = (1..=8).contains(&p.ext.len())
@@ -842,21 +888,17 @@ impl Shared {
             &md5,
         );
         let t = target.clone();
-        let res = self
-            .with_writer(move |w| {
-                w.call(move |vw| {
-                    if vw.fs().hash(&t)?.is_some() {
-                        return Ok(());
-                    }
-                    match vw.create(&t, &bytes) {
-                        Ok(_) | Err(VaultError::Exists(_)) => Ok(()),
-                        Err(e) => Err(e),
-                    }
-                })
-            })
-            .await?;
-        res.and_then(|r| r).map_err(vault_err)?;
-        to_value(&WriteAttachmentResult { path: target })
+        self.writer_job(move |vw| {
+            if vw.fs().hash(&t)?.is_none() {
+                match vw.create(&t, &bytes) {
+                    Ok(_) | Err(VaultError::Exists(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(WriteAttachmentResult { path: target })
     }
 
     /// Creates `path` with Obsidian's ` N` collision suffix; returns the final path.
@@ -874,7 +916,7 @@ impl Shared {
                 Err(VaultError::Exists(path))
             })
             .await?;
-        res.map_err(vault_err)
+        res.map_err(rpc_from_vault)
     }
 
     /// `obsidian://` intake (see [`crate::uri`]).
@@ -1128,4 +1170,74 @@ pub(crate) fn clear_stale_socket(socket: &Path) -> Result<()> {
         bail!("daemon already running at {}", socket.display());
     }
     std::fs::remove_file(socket).with_context(|| format!("removing stale {}", socket.display()))
+}
+
+#[cfg(test)]
+mod error_map_tests {
+    use super::*;
+
+    /// WP-R3 (B2): policy refusals and unavailability get their own codes, not INTERNAL_ERROR.
+    #[test]
+    fn vault_and_state_errors_map_to_their_codes() {
+        use error_codes as c;
+        let s = |s: &str| s.to_owned();
+        let cases = [
+            (
+                VaultError::LinkWriteRefused {
+                    path: s("a.md"),
+                    reason: s("r"),
+                },
+                c::REFUSED,
+            ),
+            (
+                VaultError::ProtectedRoot {
+                    root: s("r"),
+                    protected: s("p"),
+                },
+                c::REFUSED,
+            ),
+            (
+                VaultError::ScratchRefused {
+                    scratch: s("s"),
+                    reason: s("r"),
+                },
+                c::REFUSED,
+            ),
+            (VaultError::WriterGone, c::UNAVAILABLE),
+            (VaultError::NotFound(s("a.md")), c::NOT_FOUND),
+            (VaultError::Exists(s("a.md")), c::INVALID_PARAMS),
+            (VaultError::InvalidPath(s("../a")), c::INVALID_PARAMS),
+            (VaultError::Landlock(s("x")), c::INTERNAL_ERROR),
+            (
+                VaultError::State(StateError::NoSuchJob(s("j"))),
+                c::NOT_FOUND,
+            ),
+        ];
+        for (e, code) in cases {
+            let msg = e.to_string();
+            let r = rpc_from_vault(e);
+            assert_eq!(r.code, code, "{msg}");
+        }
+        let wrong = StateError::WrongStatus {
+            id: s("j"),
+            status: cv_state::JobStatus::Running,
+            expected: "queued",
+        };
+        let r = rpc_from_state(wrong);
+        assert_eq!(
+            (r.code, r.message.as_str()),
+            (c::INVALID_PARAMS, "job j is running, expected queued")
+        );
+        assert_eq!(
+            rpc_from_state(StateError::NoSuchJob(s("j"))).message,
+            "no job j"
+        );
+        let conflict = rpc_from_vault(VaultError::Conflict {
+            path: s("a"),
+            expected: None,
+            found: None,
+        });
+        assert_eq!(conflict.code, c::CONFLICT);
+        assert_eq!(conflict.data, Some(json!({ "current_hash": null })));
+    }
 }

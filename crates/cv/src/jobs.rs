@@ -7,11 +7,10 @@
 
 use anyhow::{Result, anyhow};
 use cv_protocol::{
-    ActionContext, IntakeItem, IntakeListParams, IntakeListResult, JobIdParams, JobStatus,
-    JobSummary, JobsListParams, JobsListResult, Request, RunActionParams, RunActionResult,
+    ActionContext, IntakeItem, IntakeListParams, IntakeListResult, JobIdParams, JobSummary,
+    JobsListParams, JobsListResult, RunActionParams, methods,
 };
 use cv_state::{IntakeQuery, Job, ListQuery, TrackerItem, TrackerOutcome};
-use serde_json::Value;
 
 use crate::client::{Client, ClientError};
 use crate::config::Config;
@@ -277,7 +276,7 @@ pub fn execute(config: &Config, cmd: &Command) -> i32 {
 }
 
 fn call(config: &Config, cmd: &Command) -> Result<String> {
-    let mut client = match Client::connect(&config.socket, "cv-jobs", cv_index::SCHEMA_VERSION) {
+    let client = match Client::connect(&config.socket, "cv-jobs", cv_index::SCHEMA_VERSION) {
         Ok(c) => c,
         Err(ClientError::Io(e)) => {
             return Err(anyhow!(
@@ -287,21 +286,21 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
         }
         Err(e) => return Err(anyhow!("{e}")),
     };
-    let mut rpc = |req: Request| -> Result<Value> { client.call(req).map_err(|e| anyhow!("{e}")) };
+    let e = |e: ClientError| anyhow!("{e}");
     let now = crate::now_ms();
     Ok(match cmd {
-        Command::JobsList(p) => {
-            let r: JobsListResult = serde_json::from_value(rpc(Request::JobsList(p.clone()))?)?;
-            render_jobs(&r, now)
-        }
+        Command::JobsList(p) => render_jobs(
+            &client.call::<methods::JobsList>(p.clone()).map_err(e)?,
+            now,
+        ),
         Command::JobRetry(id) | Command::JobCancel(id) => {
             let p = JobIdParams { job_id: id.clone() };
-            let req = if matches!(cmd, Command::JobRetry(_)) {
-                Request::JobRetry(p)
+            let s = if matches!(cmd, Command::JobRetry(_)) {
+                client.call::<methods::JobRetry>(p)
             } else {
-                Request::Cancel(p)
-            };
-            let s: JobStatus = serde_json::from_value(rpc(req)?)?;
+                client.call::<methods::Cancel>(p)
+            }
+            .map_err(e)?;
             let mut out = format!("{} {}", s.job_id, enum_str(s.status));
             if let Some(m) = s.message {
                 out.push_str(&format!("  {m}"));
@@ -310,19 +309,19 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
             out
         }
         Command::IntakeList(p) => {
-            let r: IntakeListResult = serde_json::from_value(rpc(Request::IntakeList(p.clone()))?)?;
-            render_intake(&r)
+            render_intake(&client.call::<methods::IntakeList>(p.clone()).map_err(e)?)
         }
         Command::Run { action_id, note } => {
-            let r: RunActionResult =
-                serde_json::from_value(rpc(Request::RunAction(RunActionParams {
+            let r = client
+                .call::<methods::RunAction>(RunActionParams {
                     action_id: action_id.clone(),
                     params: serde_json::Map::new(),
                     context: ActionContext {
                         active_path: note.clone(),
                         ..ActionContext::default()
                     },
-                }))?)?;
+                })
+                .map_err(e)?;
             let mut out = format!("job {}\n", r.job_id);
             if let Some(p) = r.open_path {
                 out.push_str(&format!("open {p}\n"));

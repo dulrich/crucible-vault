@@ -349,7 +349,7 @@ impl StateDb {
         {
             return Err(StateError::WrongStatus {
                 id: id.to_owned(),
-                status: job.status.as_str().to_owned(),
+                status: job.status,
                 expected: "running under this claim token",
             });
         }
@@ -391,7 +391,7 @@ impl StateDb {
                 None => Err(StateError::NoSuchJob(id.to_owned())),
                 Some(j) => Err(StateError::WrongStatus {
                     id: id.to_owned(),
-                    status: j.status.as_str().to_owned(),
+                    status: j.status,
                     expected: "queued",
                 }),
             };
@@ -415,7 +415,7 @@ impl StateDb {
         if !matches!(job.status, JobStatus::Failed | JobStatus::Cancelled) {
             return Err(StateError::WrongStatus {
                 id: id.to_owned(),
-                status: job.status.as_str().to_owned(),
+                status: job.status,
                 expected: "failed or cancelled",
             });
         }
