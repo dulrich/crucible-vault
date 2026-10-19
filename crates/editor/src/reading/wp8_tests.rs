@@ -62,7 +62,10 @@ fn select(app: &mut App, path: &str, view: u64, b: usize) {
     let _ = app.send(Message::Reading(ReadingMsg::Select {
         path: path.into(),
         view,
-        sel: Some((SelPos::new(0, 0), SelPos::new(0, b))),
+        sel: Some(crate::widget::selectable::Selection::new(
+            SelPos::new(0, 0),
+            SelPos::new(0, b),
+        )),
     }));
 }
 

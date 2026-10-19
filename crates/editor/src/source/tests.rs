@@ -31,6 +31,20 @@ fn buf(app: &mut App) -> &mut SourceBuffer {
     app.active_doc_mut().expect("active doc")
 }
 
+/// WP-R17 (SP6): the source find highlight the active tab paints — derived from the focused
+/// pane's find bar at view time.
+fn find_highlight(app: &mut App) -> Option<super::FindSpan> {
+    let tab = app.active_tab().map(|t| t.id)?;
+    let seq = buf(app).edit_seq();
+    app.find_bar_for(tab)?.source_paint(seq).0
+}
+
+/// WP-R17 (SP6): the find query the active tab's Reading side paints.
+fn find_query(app: &App) -> Option<&str> {
+    let tab = app.active_tab().map(|t| t.id)?;
+    Some(app.find_bar_for(tab)?.reading_paint()?.query)
+}
+
 fn type_text(app: &mut App, s: &str) {
     for c in s.chars() {
         let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
@@ -399,7 +413,7 @@ fn view_tree_position_stable_across_dirty_states() {
     fn shape(b: &SourceBuffer) -> Vec<iced::advanced::widget::tree::Tag> {
         let t = crate::theme::Surround::default().tokens().expect("tokens");
         let km = crate::palette::Keymap::default();
-        let el = view(b, t, crate::theme::BASE_TEXT_SIZE, &km, None);
+        let el = view(b, t, crate::theme::BASE_TEXT_SIZE, &km, None, None);
         Tree::new(&el).children.iter().map(|c| c.tag).collect()
     }
     let mut b = SourceBuffer::new("n.md", b"text\n", ContentHash::of(b"text\n"));
@@ -878,16 +892,16 @@ fn find_highlight_tracks_current_match_and_clears_on_close() {
     }));
     let _ = app.send(Message::Find(FindMsg::Open));
     let _ = app.send(Message::Find(FindMsg::Query("two".into())));
-    assert_eq!(buf(&mut app).find_highlight(), Some(((1, 5), (1, 8))));
-    assert_eq!(app.reading.find_query(&p), Some("two"));
+    assert_eq!(find_highlight(&mut app), Some(((1, 5), (1, 8))));
+    assert_eq!(find_query(&app), Some("two"));
     let _ = app.send(Message::Find(FindMsg::Query("zzz".into())));
-    assert_eq!(buf(&mut app).find_highlight(), None);
+    assert_eq!(find_highlight(&mut app), None);
     let _ = app.send(Message::Find(FindMsg::Query("line".into())));
-    assert!(buf(&mut app).find_highlight().is_some());
+    assert!(find_highlight(&mut app).is_some());
     let text = buf(&mut app).text();
     let _ = app.send(Message::Find(FindMsg::Close));
-    assert_eq!(buf(&mut app).find_highlight(), None);
-    assert_eq!(app.reading.find_query(&p), None);
+    assert_eq!(find_highlight(&mut app), None);
+    assert_eq!(find_query(&app), None);
     assert_eq!(buf(&mut app).text(), text, "find never mutates the buffer");
 }
 
@@ -911,7 +925,7 @@ fn find_after_non_ascii_selects_and_paints_exact_bytes() {
     assert_eq!(c.selection, Some(Position { line: 0, column: 6 }));
     assert_eq!(c.position, Position { line: 0, column: 9 });
     assert_eq!(&buf(&mut app).text()[6..9], "bar");
-    let span = buf(&mut app).find_highlight();
+    let span = find_highlight(&mut app);
     assert_eq!(span, Some(((0, 6), (0, 9))));
     let tokens = crate::theme::Surround::Med.tokens().expect("tokens");
     let s = HighlightSettings {

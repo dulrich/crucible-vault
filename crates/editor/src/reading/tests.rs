@@ -358,19 +358,19 @@ fn active_find_match_maps_to_its_block_and_occurrence() {
     assert!(app.reading.doc(p).is_some(), "rendered");
     let _ = app.send(Message::Find(FindMsg::Open));
     let _ = app.send(Message::Find(FindMsg::Query("foo".into())));
-    assert_eq!(app.reading.find_active(p), Some((0, 0)));
+    assert_eq!(strong_hit(&app, p), Some((0, 0)));
     let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(
-        app.reading.find_active(p),
+        strong_hit(&app, p),
         Some((1, 0)),
         "second block, first occurrence"
     );
     let _ = app.send(Message::Find(FindMsg::Next));
-    assert_eq!(app.reading.find_active(p), Some((1, 1)));
+    assert_eq!(strong_hit(&app, p), Some((1, 1)));
     // Painting: exactly one occurrence of the second block is the active one.
     drop(app.view());
     let _ = app.send(Message::Find(FindMsg::Close));
-    assert_eq!(app.reading.find_active(p), None);
+    assert_eq!(strong_hit(&app, p), None);
 }
 
 /// plan editor-ui-round-3 WP-6: the measured probe picks the block at the viewport top and the
@@ -718,6 +718,16 @@ fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir,
     (t, app)
 }
 
+/// WP-R17 (SP6): the strong Reading find occurrence the active tab of `p` paints, as (top-level
+/// block, nth occurrence inside it) — derived from the focused pane's bar at view time.
+fn strong_hit(app: &App, p: &str) -> Option<(usize, usize)> {
+    let tab = app.active_tab().map(|t| t.id)?;
+    let paint = app.find_bar_for(tab)?.reading_paint()?;
+    let occ = editor_model::visible::occurrences(&app.reading.doc(p)?.runs, paint.query);
+    let (part, n) = editor_model::visible::keyed(&occ)[paint.active?];
+    Some((part.block()?, n))
+}
+
 fn bar(app: &App) -> crate::find::FindBar {
     app.panes
         .get(app.focus)
@@ -729,18 +739,26 @@ fn bar(app: &App) -> crate::find::FindBar {
 fn code_span_and_link_labels_are_visible_text() {
     let m =
         render::lower("a `foo` b [[t|foo]] [foo](https://foo.example) #foo\n\n```foo\nfoo\n```\n");
-    let segs = visible_segments(&m.blocks[0]);
-    assert!(segs.iter().any(|s| s == "foo"), "code span: {segs:?}");
-    assert!(segs.iter().any(|s| s == "#foo"), "tag: {segs:?}");
+    let runs = editor_model::visible::visible_runs(&m);
+    // Block 0's find segments (WP-R17: the one walk's segments).
+    let segs: Vec<&str> = runs
+        .iter()
+        .filter(|r| r.part.block() == Some(0))
+        .flat_map(|r| r.segments.iter().map(|s| &r.text[s.clone()]))
+        .collect();
+    assert!(segs.contains(&"foo"), "code span: {segs:?}");
+    assert!(segs.contains(&"#foo"), "tag: {segs:?}");
     assert!(
         !segs.iter().any(|s| s.contains("example")),
         "no URL: {segs:?}"
     );
     // code span, alias, link label, tag; code block: text only (not the `foo` info string).
-    assert_eq!(
-        visible_occurrences(&m, "foo"),
-        vec![(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]
-    );
+    let occ = editor_model::visible::occurrences(&runs, "foo");
+    let keyed: Vec<(usize, usize)> = editor_model::visible::keyed(&occ)
+        .into_iter()
+        .filter_map(|(p, n)| Some((p.block()?, n)))
+        .collect();
+    assert_eq!(keyed, vec![(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]);
 }
 
 #[test]
@@ -748,7 +766,7 @@ fn reading_code_span_match_is_counted_and_painted() {
     let p = "r4/code.md";
     let (_t, app) = find_on(p, b"run `cargo foo` now\n", ViewMode::Reading, "foo");
     assert_eq!(bar(&app).count(), "1/1");
-    assert_eq!(app.reading.find_active(p), Some((0, 0)));
+    assert_eq!(strong_hit(&app, p), Some((0, 0)));
     drop(app.view());
 }
 
@@ -762,7 +780,7 @@ fn reading_url_only_query_counts_zero() {
         "zzz",
     );
     assert_eq!(bar(&app).count(), "0/0");
-    assert_eq!(app.reading.find_active(p), None);
+    assert_eq!(strong_hit(&app, p), None);
     let (_t2, app2) = find_on(p, b"see [[target|alias]]\n", ViewMode::Reading, "target");
     assert_eq!(
         bar(&app2).count(),
@@ -782,18 +800,18 @@ fn reading_next_steps_over_visible_occurrences() {
         "foo",
     );
     assert_eq!(bar(&app).count(), "1/3");
-    assert_eq!(app.reading.find_active(p), Some((0, 0)));
+    assert_eq!(strong_hit(&app, p), Some((0, 0)));
     let _ = app.send(Message::Find(FindMsg::Next));
-    assert_eq!(app.reading.find_active(p), Some((2, 0)));
+    assert_eq!(strong_hit(&app, p), Some((2, 0)));
     assert_eq!(
         app.reading.top_block(p, app.view_of(p)),
         Some(2),
         "scrolled to its block"
     );
     let _ = app.send(Message::Find(FindMsg::Next));
-    assert_eq!(app.reading.find_active(p), Some((2, 1)));
+    assert_eq!(strong_hit(&app, p), Some((2, 1)));
     let _ = app.send(Message::Find(FindMsg::Next));
-    assert_eq!(app.reading.find_active(p), Some((0, 0)), "wraps");
+    assert_eq!(strong_hit(&app, p), Some((0, 0)), "wraps");
     drop(app.view());
 }
 
@@ -804,14 +822,10 @@ fn split_active_match_inside_url_has_no_strong_occurrence() {
     let (_t, mut app) = find_on(p, b"[x](https://foo.example) foo\n", ViewMode::Split, "foo");
     // Source drives the bar: the cursor sits at 0, so the URL match is current.
     assert_eq!(bar(&app).count(), "1/2");
-    assert_eq!(
-        app.reading.find_active(p),
-        None,
-        "invisible: nothing strong"
-    );
+    assert_eq!(strong_hit(&app, p), None, "invisible: nothing strong");
     let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(
-        app.reading.find_active(p),
+        strong_hit(&app, p),
         Some((0, 0)),
         "the visible match after an invisible one is the block's first occurrence"
     );
@@ -1360,4 +1374,61 @@ fn table_cell_link_right_click_yields_the_link_menu() {
         names(&hit("Nope")),
         ["Open", "Open in new pane", "Copy path", "Create note"]
     );
+}
+
+/// WP-R17 (SR4): a find hit inside a footnote is counted, so Next/Prev reach it (it was painted
+/// by the view but missing from the bar's occurrence list).
+#[test]
+fn reading_find_counts_and_reaches_footnote_hits() {
+    use crate::message::FindMsg;
+    let p = "r17/fn.md";
+    let (_t, mut app) = find_on(
+        p,
+        b"body foo[^1]\n\n[^1]: the foo note\n",
+        ViewMode::Reading,
+        "foo",
+    );
+    assert_eq!(bar(&app).count(), "1/2", "the footnote hit is counted");
+    let _ = app.send(Message::Find(FindMsg::Next));
+    assert_eq!(bar(&app).count(), "2/2", "Next reaches the footnote hit");
+    drop(app.view());
+    let _ = app.send(Message::Find(FindMsg::Prev));
+    assert_eq!(bar(&app).count(), "1/2");
+}
+
+/// WP-R17 (SP6): find paint is derived at view time from the focused pane's bar — two panes on
+/// one note no longer share it: the pane without the bar paints nothing.
+#[test]
+fn find_paint_follows_the_focused_pane_only() {
+    use crate::context_menu::MenuMsg;
+    use crate::message::{FindMsg, PanesMsg};
+    let p = "r17/two.md";
+    let (_t, mut app) = find_on(p, b"alpha foo\n", ViewMode::Reading, "foo");
+    let first = app.focus;
+    let tab_a = app.active_tab().map(|t| t.id).expect("tab a");
+    // Explorer row → Open in new pane: a second tab on the note, in a new focused pane.
+    let row = crate::context_menu::Target::Row {
+        path: p.to_owned(),
+        folder: false,
+    };
+    let _ = app.send(Message::Menu(MenuMsg::Open(row, iced::Point::ORIGIN)));
+    let _ = app.send(Message::Menu(MenuMsg::Choose(
+        crate::context_menu::Item::OpenInNewPane,
+    )));
+    assert_ne!(app.focus, first);
+    let tab_b = app.active_tab().map(|t| t.id).expect("tab b");
+    assert_ne!(tab_a, tab_b, "two tabs on one note");
+    assert_eq!(app.active_tab().and_then(|t| t.path()), Some(p));
+    let _ = app.send(Message::Panes(PanesMsg::Focus(first)));
+    let _ = app.send(Message::Find(FindMsg::Next));
+    let paint = app
+        .find_bar_for(tab_a)
+        .and_then(crate::find::FindBar::reading_paint)
+        .expect("the focused pane paints");
+    assert_eq!((paint.query, paint.active), ("foo", Some(0)));
+    assert!(
+        app.find_bar_for(tab_b).is_none(),
+        "the other pane's view input carries no find paint"
+    );
+    drop(app.view());
 }

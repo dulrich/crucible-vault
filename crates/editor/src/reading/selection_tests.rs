@@ -8,11 +8,13 @@ use iced::advanced::{Shell, clipboard, layout, mouse};
 use iced::keyboard::{self, Key, Location, Modifiers, key};
 use iced::{Event, Font, Pixels, Point, Rectangle, Size};
 
-use super::selection::{self, copy_text, runs};
+use editor_model::visible::visible_runs as runs;
+
+use super::selection::{self, copy_text};
 use super::view::LinkTarget;
 use super::*;
 use crate::message::{Message, ReadingMsg};
-use crate::widget::selectable::{self, RunBox, SelPos};
+use crate::widget::selectable::{self, RunBox, SelPos, Selection};
 
 const PATH: &str = "sel/a.md";
 const VIEW: u64 = 7;
@@ -73,7 +75,7 @@ impl H {
         ) -> T,
     ) -> T {
         let t = crate::theme::Surround::Med.tokens().expect("tokens");
-        let mut el = view::reading(&self.store, &self.views, PATH, VIEW, t, 1.0, true);
+        let mut el = view::reading(&self.store, &self.views, PATH, VIEW, t, 1.0, true, None);
         let tree = match &mut self.tree {
             Some(tr) => {
                 tr.diff(&el);
@@ -207,7 +209,7 @@ fn cross_block_drag_selects_and_copies_with_a_blank_line() {
     let (a, b) = (SelPos::new(0, 6), SelPos::new(1, 6));
     let (pa, pb) = (h.pt(a), h.pt(b));
     h.drag(pa, pb);
-    assert_eq!(h.store.selection(PATH, VIEW), Some((a, b)));
+    assert_eq!(h.store.selection(PATH, VIEW), Some(Selection::new(a, b)));
     assert_eq!(h.text().as_deref(), Some("para here\n\nSecond"));
     assert_eq!(h.primary, 1, "release writes PRIMARY");
     // Dragging into the gap below the last block snaps to the document end.
@@ -236,14 +238,14 @@ fn copy_text_of_list_table_code_and_image() {
     let md = "- one\n- [x] two\n  1. sub\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nfn x() {\n    y\n}\n```\n\n![pic](https://e.x/i.png)\n";
     let model = render::lower(md);
     let rs = runs(&model);
-    let (a, f) = selection::all(&rs).expect("runs");
+    let all = selection::all(&rs).expect("runs");
     assert_eq!(
-        copy_text(&rs, a, f),
+        copy_text(&rs, all),
         "- one\n- [x] two\n  1. sub\n\na\tb\n1\t2\n\nfn x() {\n    y\n}\n\npic"
     );
     // A selection starting mid-item carries no marker for that item.
     assert_eq!(
-        copy_text(&rs, SelPos::new(0, 1), SelPos::new(1, 2)),
+        copy_text(&rs, Selection::new(SelPos::new(0, 1), SelPos::new(1, 2))),
         "ne\n- [x] tw"
     );
 }
@@ -260,7 +262,7 @@ fn multiline_code_block_maps_hard_lines_to_copy_offsets() {
     h.drag(pa, pb);
     assert_eq!(
         h.store.selection(PATH, VIEW),
-        Some((SelPos::new(0, a), SelPos::new(0, b)))
+        Some(Selection::new(SelPos::new(0, a), SelPos::new(0, b)))
     );
     assert_eq!(h.text().as_deref(), Some("b = 1;\nend"));
 }
@@ -297,7 +299,7 @@ fn shift_arrows_extend_and_escape_clears() {
     h.key(key::Named::ArrowRight, Modifiers::SHIFT);
     assert_eq!(h.text().as_deref(), Some("one "));
     h.key(key::Named::ArrowDown, Modifiers::SHIFT);
-    let (_, f) = h.store.selection(PATH, VIEW).expect("sel");
+    let f = h.store.selection(PATH, VIEW).expect("sel").focus;
     assert_eq!(f.run, 1, "Shift+Down moves into the next block");
     h.key(key::Named::Escape, Modifiers::empty());
     assert_eq!(h.store.selection(PATH, VIEW), None);
@@ -306,8 +308,11 @@ fn shift_arrows_extend_and_escape_clears() {
 #[test]
 fn selection_is_cleared_when_the_doc_re_renders() {
     let mut h = H::new("alpha beta\n");
-    h.store
-        .set_selection(PATH, VIEW, Some((SelPos::new(0, 0), SelPos::new(0, 5))));
+    h.store.set_selection(
+        PATH,
+        VIEW,
+        Some(Selection::new(SelPos::new(0, 0), SelPos::new(0, 5))),
+    );
     assert_eq!(h.text().as_deref(), Some("alpha"));
     h.store.recompute(&buffer("changed text\n"), None);
     assert_eq!(h.store.selection(PATH, VIEW), None);

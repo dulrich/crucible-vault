@@ -392,8 +392,6 @@ impl SourceBuffer {
     }
 
     fn mark_edited(&mut self) {
-        self.find_hl = None;
-        self.find_all = std::sync::Arc::from([]);
         self.save.dirty = true;
         self.edit_seq += 1;
     }

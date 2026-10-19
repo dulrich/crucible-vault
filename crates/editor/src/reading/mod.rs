@@ -10,8 +10,17 @@
 //! Image handles are pinned per tab in the [`ImageCache`]; see that module for the release points
 //! (audit E2) and the handle-release vs renderer-reclamation distinction.
 
+mod paths;
+mod place;
 pub mod selection;
+mod source_map;
 pub mod view;
+
+pub use paths::{missing_note_path, rename_target};
+#[cfg(test)]
+pub(crate) use place::{INTENTS, probe_op};
+pub use place::{Probe, ScrollIntent, probe};
+pub use source_map::{invisible_ranges, source_counterpart};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,7 +30,8 @@ use cv_index::Resolver;
 /// The note stem (breadcrumb filename input) and link-target decoding: the shared vault-path
 /// helpers (WP-R10).
 pub use cv_text::vpath::{percent_decode, stem};
-use editor_model::render::{self, Block, Inline, RenderModel};
+use editor_model::render::{self, RenderModel};
+use editor_model::visible::VisRun;
 use iced::{Element, Subscription, Task};
 
 use crate::daemon::DaemonClient;
@@ -29,7 +39,7 @@ use crate::image_cache::{self, ImageCache};
 use crate::message::{Message, ReadingMsg, TabsMsg};
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
-use crate::widget::selectable::SelPos;
+use crate::widget::selectable::Selection;
 
 /// Recompute debounce: a change is rendered once `edit_seq` has been stable for one tick.
 pub const TICK: Duration = Duration::from_millis(250);
@@ -95,8 +105,9 @@ pub struct Doc {
     pub model: RenderModel,
     /// Image `src` → resolved vault path (`None` = unresolved); remote images are absent.
     pub images: HashMap<String, Option<String>>,
-    /// Plan round-5 WP-7: the selectable runs in render order (copy text, select-all).
-    pub runs: Vec<selection::RunInfo>,
+    /// The visible runs in render order (WP-R17: the one walk — the view draws them, the
+    /// selection copies them, find counts over them).
+    pub runs: Vec<VisRun>,
     /// Plan round-6 WP-4: link targets (as [`render::link_targets`] lists them, the string the
     /// view hands to `OpenLink`) that do not resolve — drawn dimmed, menu offers "Create note".
     /// Empty without a daemon (no resolver: nothing is known missing).
@@ -113,14 +124,6 @@ pub struct DocReading {
     seen_seq: Option<u64>,
     /// The pending filename-input edit (absent = shows the stem).
     title: Option<String>,
-    /// The open find bar's query: its occurrences are painted in the reading view (plan
-    /// editor-feedback-round-2 WP-4). Render blocks carry source line ranges
-    /// (`RenderModel::block_lines`, plan editor-ui-round-3 WP-5) at block granularity only, so
-    /// matches are still found in the rendered text.
-    find: Option<String>,
-    /// plan editor-ui-round-3 WP-5: the active find match, as (top-level render block, nth
-    /// query occurrence inside it).
-    find_active: Option<(usize, usize)>,
     /// Plan round-5 WP-1: per-tab (view) place and selection — two tabs on one note keep
     /// their own; keyed by tab id.
     views: HashMap<u64, ViewPlace>,
@@ -142,9 +145,9 @@ struct ViewPlace {
     /// Plan round-6 WP-1: last sent to an edge by Ctrl+PgUp/PgDn (`true` = the end); a mode
     /// switch snaps the other mode to it. Cleared by the next user scroll.
     edge: Option<bool>,
-    /// Plan round-5 WP-7: the Reading selection `(anchor, focus)`; never collapsed. Cleared
-    /// whenever the Doc is replaced.
-    sel: Option<(SelPos, SelPos)>,
+    /// Plan round-5 WP-7: the Reading selection; never collapsed. Cleared whenever the Doc is
+    /// replaced.
+    sel: Option<Selection>,
     /// Plan round-5 WP-8: the Source side changed its selection more recently than the Reading
     /// side (Split: the most recent side feeds the action context).
     source_newer: bool,
@@ -177,206 +180,6 @@ pub struct ReadingStore {
     /// Plan round-8-intake-views-anchor WP-4: `editor.toml` `scroll_anchor` as a fraction of
     /// the viewport height (0 = top; set by `App::apply_prefs`).
     anchor: f32,
-}
-
-/// The byte offset where 0-based `line` starts in `text` (`text.len()` past the end).
-fn line_start(text: &str, line: usize) -> usize {
-    if line == 0 {
-        return 0;
-    }
-    text.match_indices('\n')
-        .nth(line - 1)
-        .map_or(text.len(), |(i, _)| i + 1)
-}
-
-/// A wiki-link's displayed label (alias, else `target#fragment`).
-pub fn link_label(target: &str, fragment: Option<&String>, alias: Option<&String>) -> String {
-    match (alias, fragment) {
-        (Some(a), _) => a.clone(),
-        (None, Some(f)) if target.is_empty() => format!("#{f}"),
-        (None, Some(f)) => format!("{target}#{f}"),
-        (None, None) => target.to_owned(),
-    }
-}
-
-/// plan editor-round-4 WP-3: the visible (painted) text of an inline, if any — text, code
-/// spans, wiki-link/link labels and tags. URLs and link targets are never displayed.
-pub fn inline_visible(i: &Inline) -> Option<std::borrow::Cow<'_, str>> {
-    use std::borrow::Cow;
-    match i {
-        Inline::Text { text, .. } | Inline::Code(text) => Some(Cow::Borrowed(text)),
-        Inline::WikiLink {
-            target,
-            fragment,
-            alias,
-        } => Some(Cow::Owned(link_label(
-            target,
-            fragment.as_ref(),
-            alias.as_ref(),
-        ))),
-        Inline::Link { label, .. } => Some(Cow::Borrowed(label)),
-        Inline::Tag(t) => Some(Cow::Owned(format!("#{t}"))),
-        Inline::FootnoteRef { .. } | Inline::LineBreak => None,
-    }
-}
-
-/// plan editor-round-4 WP-3: the find-painted text segments of block `b` in paint order (the
-/// order `view::block` draws them). Matches never cross a segment boundary.
-pub fn visible_segments(b: &Block) -> Vec<String> {
-    fn inl(out: &mut Vec<String>, is: &[Inline]) {
-        out.extend(is.iter().filter_map(inline_visible).map(|c| c.into_owned()));
-    }
-    fn go(out: &mut Vec<String>, b: &Block) {
-        match b {
-            Block::Heading { inlines, .. } | Block::Paragraph(inlines) => inl(out, inlines),
-            Block::List { items, .. } => {
-                for it in items {
-                    it.children.iter().for_each(|c| go(out, c));
-                }
-            }
-            Block::Table { header, rows, .. } => {
-                header.iter().for_each(|c| inl(out, c));
-                for r in rows {
-                    r.iter().for_each(|c| inl(out, c));
-                }
-            }
-            Block::Callout { children, .. } | Block::BlockQuote(children) => {
-                children.iter().for_each(|c| go(out, c));
-            }
-            Block::CodeBlock { text, .. } => out.push(text.clone()),
-            Block::Transclusion {
-                content: Some(bs), ..
-            } => bs.iter().for_each(|c| go(out, c)),
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    go(&mut out, b);
-    out
-}
-
-/// plan editor-round-4 WP-3: every visible occurrence of `q` in the reading view, in order, as
-/// (top-level block, nth occurrence inside it) — the Reading-mode find bar's match list.
-pub fn visible_occurrences(model: &RenderModel, q: &str) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    for (i, b) in model.blocks.iter().enumerate() {
-        let n: usize = visible_segments(b)
-            .iter()
-            .map(|s| editor_model::find::matches(s, q).len())
-            .sum();
-        out.extend((0..n).map(|k| (i, k)));
-    }
-    out
-}
-
-/// plan editor-round-4 WP-3: byte ranges of a block's source that Reading never displays —
-/// md-link destinations `](url "title")`, image `![alt](src)` wholes, wiki-link targets hidden
-/// by an alias (`[[target|`), `[[`/`]]` brackets, embeds `![[…]]` and code-fence lines.
-pub fn invisible_ranges(src: &str) -> Vec<std::ops::Range<usize>> {
-    let mut out = Vec::new();
-    let bytes = src.as_bytes();
-    // Code-fence lines (the info string is not painted; the fence is markup).
-    let mut at = 0;
-    for line in src.split_inclusive('\n') {
-        let t = line.trim_start();
-        let t = t.trim_start_matches(['>', ' ']);
-        if t.starts_with("```") || t.starts_with("~~~") {
-            out.push(at..at + line.len());
-        }
-        at += line.len();
-    }
-    // Wiki-links and embeds.
-    let mut i = 0;
-    while let Some(off) = src[i..].find("[[") {
-        let s = i + off;
-        let Some(len) = src[s..].find("]]") else {
-            break;
-        };
-        let e = s + len + 2;
-        let embed = s > 0 && bytes[s - 1] == b'!';
-        if embed {
-            out.push(s - 1..e);
-        } else {
-            match src[s..e].find('|') {
-                Some(p) => out.push(s..s + p + 1),
-                None => out.push(s..s + 2),
-            }
-            out.push(e - 2..e);
-        }
-        i = e;
-    }
-    // Md-link destinations (and whole images).
-    let mut i = 0;
-    while let Some(off) = src[i..].find("](") {
-        let s = i + off;
-        let mut depth = 0usize;
-        let mut end = src.len();
-        for (k, c) in src[s + 1..].char_indices() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = s + 1 + k + 1;
-                        break;
-                    }
-                }
-                '\n' => {
-                    end = s + 1 + k;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let open = src[..s].rfind('[');
-        match open {
-            Some(o) if o > 0 && bytes[o - 1] == b'!' => out.push(o - 1..end),
-            _ => out.push(s..end),
-        }
-        i = end.max(s + 2);
-    }
-    out
-}
-
-/// plan editor-round-4 WP-3: the rendered counterpart (top-level block, nth visible
-/// occurrence) of the source match `r` of `q` in `text`; `None` = outside every block, or an
-/// invisible match (no rendered counterpart).
-pub fn source_counterpart(
-    model: &RenderModel,
-    text: &str,
-    q: &str,
-    r: &std::ops::Range<usize>,
-) -> Option<(usize, usize)> {
-    let (line, _) = editor_model::find::line_col(text, r.start);
-    let b = model.block_at_line(line)?;
-    let lines = &model.block_lines[b];
-    let from = line_start(text, lines.start);
-    let to = line_start(text, lines.end).max(from);
-    let src = &text[from..to];
-    let rel = r.start.checked_sub(from)?;
-    let hidden = invisible_ranges(src);
-    let visible =
-        |m: &std::ops::Range<usize>| !hidden.iter().any(|h| m.start < h.end && h.start < m.end);
-    let ms = editor_model::find::matches(src, q);
-    let idx = ms.iter().position(|m| m.start >= rel)?;
-    if !visible(&ms[idx]) {
-        return None;
-    }
-    Some((b, ms[..idx].iter().filter(|m| visible(m)).count()))
-}
-
-/// The rename target for a submitted filename: `None` when unchanged or empty.
-pub fn rename_target(path: &str, input: &str) -> Option<String> {
-    let input = input.trim();
-    let input = input.strip_suffix(".md").unwrap_or(input);
-    if input.is_empty() || input == stem(path) {
-        return None;
-    }
-    let ext = if path.ends_with(".md") { ".md" } else { "" };
-    Some(match path.rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/{input}{ext}"),
-        None => format!("{input}{ext}"),
-    })
 }
 
 /// The widget id of `path`'s breadcrumb filename input (blur polling).
@@ -416,46 +219,6 @@ impl ReadingStore {
     /// `path`'s mode.
     pub fn mode(&self, path: &str) -> ViewMode {
         self.docs.get(path).map(|t| t.mode).unwrap_or_default()
-    }
-
-    /// Sets (or clears, `None`/empty) the find query painted in `path`'s reading view.
-    pub fn set_find(&mut self, path: &str, query: Option<String>) {
-        let e = self.entry(path);
-        e.find = query.filter(|q| !q.is_empty());
-        if e.find.is_none() {
-            e.find_active = None;
-        }
-    }
-
-    /// Sets (or clears) the active find match for `path`'s reading view from the current match's
-    /// source byte range `r` in `text` (Source/Split): the top-level block containing its first
-    /// line (block-granularity provenance, `RenderModel::block_lines`), and its rendered
-    /// counterpart's ordinal = the number of *visible* source matches before it in that block's
-    /// source lines (plan editor-round-4 WP-3). When the active source match is itself
-    /// invisible ([`invisible_ranges`]: a URL, link target, markup) it has no rendered
-    /// counterpart and nothing is drawn strong (audit E2).
-    pub fn set_find_active(&mut self, path: &str, text: &str, r: Option<std::ops::Range<usize>>) {
-        let hit = r.and_then(|r| {
-            let e = self.docs.get(path)?;
-            source_counterpart(&e.doc.as_ref()?.model, text, e.find.as_ref()?, &r)
-        });
-        self.set_find_active_at(path, hit);
-    }
-
-    /// Sets (or clears) the active find occurrence of `path`'s reading view directly (Reading
-    /// mode steps through visible occurrences, plan editor-round-4 WP-3).
-    pub fn set_find_active_at(&mut self, path: &str, hit: Option<(usize, usize)>) {
-        self.entry(path).find_active = hit;
-    }
-
-    /// The active find match of `path`'s reading view (block, nth occurrence in it).
-    pub fn find_active(&self, path: &str) -> Option<(usize, usize)> {
-        self.docs.get(path)?.find_active
-    }
-
-    /// The find query painted in `path`'s reading view.
-    pub fn find_query(&self, path: &str) -> Option<&str> {
-        self.docs.get(path)?.find.as_deref()
     }
 
     /// The filename input's current text for `path`.
@@ -596,14 +359,14 @@ impl ReadingStore {
         self.docs.get(path).and_then(|t| t.doc.as_ref())
     }
 
-    /// Plan round-5 WP-7: tab `view`'s Reading selection of `path` as `(anchor, focus)`.
-    pub fn selection(&self, path: &str, view: u64) -> Option<(SelPos, SelPos)> {
+    /// Plan round-5 WP-7: tab `view`'s Reading selection of `path`.
+    pub fn selection(&self, path: &str, view: u64) -> Option<Selection> {
         self.place(path, view)?.sel
     }
 
     /// Sets (or clears: `None` or collapsed) tab `view`'s Reading selection of `path`.
-    pub fn set_selection(&mut self, path: &str, view: u64, sel: Option<(SelPos, SelPos)>) {
-        let sel = sel.filter(|(a, f)| a != f);
+    pub fn set_selection(&mut self, path: &str, view: u64, sel: Option<Selection>) {
+        let sel = sel.filter(|s| !s.is_empty());
         let v = self.place_mut(path, view);
         if sel.is_some() {
             v.source_newer = false;
@@ -622,8 +385,8 @@ impl ReadingStore {
     /// Plan round-5 WP-7 (the WP-8 accessor): the copy text of tab `view`'s Reading selection
     /// of `path` — `None` when nothing (or only an empty range) is selected.
     pub fn selection_text(&self, path: &str, view: u64) -> Option<String> {
-        let (a, f) = self.selection(path, view)?;
-        let text = selection::copy_text(&self.doc(path)?.runs, a, f);
+        let sel = self.selection(path, view)?;
+        let text = selection::copy_text(&self.doc(path)?.runs, sel);
         (!text.is_empty()).then_some(text)
     }
 
@@ -801,7 +564,7 @@ impl ReadingStore {
         self.images.retain_owner(doc.path(), &keep);
         // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
         self.clear_selections(doc.path());
-        let runs = selection::runs(&model);
+        let runs = editor_model::visible::visible_runs(&model);
         let resolver_epoch = self.resolver_epoch;
         let entry = self.entry(doc.path());
         entry.seen_seq = Some(seq);
@@ -951,27 +714,6 @@ impl ReadingStore {
             Task::none()
         }
     }
-}
-
-/// Decodes every `%xx` escape in a link/image target (plan round-5 WP-2; was `%20`-only).
-/// Invalid escapes stay verbatim; a result that is not UTF-8 leaves the input unchanged.
-/// Plan round-6 WP-4: the vault path a missing link `target` creates — `#fragment` stripped and
-/// percent-decoded (as [`ReadingStore::resolve_link`]); a target with a `/` is a vault path, a
-/// bare one goes into `folder` (the explorer's New-note folder; `""` = vault root); `.md` is
-/// appended when missing.
-pub fn missing_note_path(target: &str, folder: &str) -> String {
-    let bare = target.split('#').next().unwrap_or(target);
-    let name = percent_decode(bare);
-    let name = name.trim().trim_start_matches('/');
-    let mut path = if name.contains('/') || folder.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{}/{name}", folder.trim_end_matches('/'))
-    };
-    if !path.to_ascii_lowercase().ends_with(".md") {
-        path.push_str(".md");
-    }
-    path
 }
 
 fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Message> {
@@ -1181,7 +923,9 @@ pub fn image_failure_text(key: &str, err: &str) -> String {
 }
 
 /// The active tab's body: source, reading, or split (source left, reading right). `view` is
-/// the showing tab's id (per-view image pins, plan editor-feedback-round-2 WP-7).
+/// the showing tab's id (per-view image pins, plan editor-feedback-round-2 WP-7). `find` is the
+/// focused pane's find bar when this is its active tab: both sides derive their find paint from
+/// it at view time (WP-R17 SP6).
 #[allow(clippy::too_many_arguments)] // one render site; a context struct would only rename these
 pub fn tab_body<'a>(
     store: &'a ReadingStore,
@@ -1192,28 +936,22 @@ pub fn tab_body<'a>(
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
     focused: bool,
+    find: Option<&'a crate::find::FindBar>,
     link: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     use iced::Length;
     use iced::widget::{container, row};
     // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
     let scale = view::reading_scale(font_size);
+    let paint = find.and_then(crate::find::FindBar::reading_paint);
+    let reading = || view::reading(store, views, doc.path(), view, t, scale, focused, paint);
     match store.mode(doc.path()) {
-        ViewMode::Source => crate::source::view(doc, t, font_size, keymap, link),
-        ViewMode::Reading => view::reading(store, views, doc.path(), view, t, scale, focused),
+        ViewMode::Source => crate::source::view(doc, t, font_size, keymap, find, link),
+        ViewMode::Reading => reading(),
         ViewMode::Split => row![
-            container(crate::source::view(doc, t, font_size, keymap, link))
+            container(crate::source::view(doc, t, font_size, keymap, find, link))
                 .width(Length::FillPortion(1)),
-            container(view::reading(
-                store,
-                views,
-                doc.path(),
-                view,
-                t,
-                scale,
-                focused
-            ))
-            .width(Length::FillPortion(1)),
+            container(reading()).width(Length::FillPortion(1)),
         ]
         .spacing(12)
         .into(),
@@ -1224,220 +962,6 @@ pub fn tab_body<'a>(
 /// `view` (plan round-5 WP-1: per tab, so a probe never mixes two panes showing one note).
 pub fn block_id(path: &str, view: u64, i: usize) -> iced::widget::Id {
     iced::widget::Id::from(format!("reading-block:{view}:{path}:{i}"))
-}
-
-/// plan editor-ui-round-3 WP-6: measured reading layout — the scrollable's offset and each
-/// top-level block's top, all in absolute layout coordinates (audit E1: measured, never a
-/// proportional estimate).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Probe {
-    /// The scrollable's vertical scroll offset.
-    pub offset_y: f32,
-    /// The top of the scrollable's content.
-    pub content_y: f32,
-    /// Plan round-8 WP-4: the scrollable's viewport height.
-    pub viewport_h: f32,
-    /// Plan round-8 WP-4: the scrollable's content height.
-    pub content_h: f32,
-    /// The top of each top-level block (`None` = not laid out / not found).
-    pub block_ys: Vec<Option<f32>>,
-}
-
-impl Probe {
-    /// Plan round-8 WP-4: the block under the anchor height `a` (fraction of the viewport;
-    /// `a = 0` is the block at the viewport top).
-    pub fn anchor_block(&self, a: f32) -> Option<usize> {
-        self.block_at(a * self.viewport_h)
-    }
-
-    /// The block `dy` px below the viewport top: the last block whose content-relative top is
-    /// at or above `offset + dy` (1px slack), else the first laid-out block.
-    fn block_at(&self, dy: f32) -> Option<usize> {
-        let rel = |y: f32| y - self.content_y;
-        let mut first = None;
-        let mut top = None;
-        for (i, y) in self.block_ys.iter().enumerate() {
-            let Some(y) = *y else { continue };
-            first.get_or_insert(i);
-            if rel(y) <= self.offset_y + dy + 1.0 {
-                top = Some(i);
-            }
-        }
-        top.or(first)
-    }
-
-    /// Plan round-8 WP-4: the scroll offset that puts content-relative `block_y` at the anchor
-    /// height `a`, clamped to `[0, content_h − viewport_h]`.
-    pub fn anchored_offset(&self, block_y: f32, a: f32) -> f32 {
-        let max = (self.content_h - self.viewport_h).max(0.0);
-        (block_y - a * self.viewport_h).clamp(0.0, max)
-    }
-
-    /// The scroll offset that puts block `b`'s top at the viewport top.
-    pub fn block_offset(&self, b: usize) -> Option<f32> {
-        let y = (*self.block_ys.get(b)?)?;
-        Some((y - self.content_y).max(0.0))
-    }
-}
-
-/// The widget operation behind [`Probe`]: reads the reading scrollable and the id'd block
-/// containers of one path.
-pub(crate) struct ProbeOp {
-    scroll: iced::widget::Id,
-    blocks: Vec<iced::widget::Id>,
-    out: Probe,
-    found: bool,
-}
-
-impl iced::advanced::widget::Operation<Probe> for ProbeOp {
-    fn traverse(
-        &mut self,
-        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<Probe>),
-    ) {
-        operate(self);
-    }
-
-    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle) {
-        if let Some(id) = id
-            && let Some(i) = self.blocks.iter().position(|b| b == id)
-        {
-            self.out.block_ys[i] = Some(bounds.y);
-        }
-    }
-
-    fn scrollable(
-        &mut self,
-        id: Option<&iced::widget::Id>,
-        bounds: iced::Rectangle,
-        content_bounds: iced::Rectangle,
-        translation: iced::Vector,
-        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
-    ) {
-        if id == Some(&self.scroll) {
-            self.out.offset_y = translation.y;
-            self.out.content_y = content_bounds.y;
-            self.out.viewport_h = bounds.height;
-            self.out.content_h = content_bounds.height;
-            self.found = true;
-        }
-    }
-
-    fn finish(&self) -> iced::advanced::widget::operation::Outcome<Probe> {
-        if self.found {
-            iced::advanced::widget::operation::Outcome::Some(self.out.clone())
-        } else {
-            iced::advanced::widget::operation::Outcome::None
-        }
-    }
-}
-
-/// Plan round-7 WP-4: builds the [`ProbeOp`] for `path`'s reading layout in tab `view`
-/// (`blocks` top-level blocks) — shared by [`probe`] and the headless test harness.
-pub(crate) fn probe_op(path: &str, view: u64, blocks: usize) -> ProbeOp {
-    ProbeOp {
-        scroll: crate::find::reading_scroll_id(path, view),
-        blocks: (0..blocks).map(|i| block_id(path, view, i)).collect(),
-        out: Probe {
-            block_ys: vec![None; blocks],
-            ..Probe::default()
-        },
-        found: false,
-    }
-}
-
-/// plan editor-ui-round-3 WP-6: probes `path`'s reading layout (`blocks` top-level blocks),
-/// answering with [`ReadingMsg::Probed`] (`scroll_to` passed through).
-pub fn probe(path: &str, view: u64, blocks: usize, scroll_to: Option<usize>) -> Task<Message> {
-    ScrollIntent::Probe {
-        path: path.to_owned(),
-        view,
-        blocks,
-        scroll_to,
-    }
-    .task()
-}
-
-/// Plan round-7 WP-4 (audit E1): one programmatic scroll or layout probe of tab `view`'s
-/// reading scrollable on `path`, as a plain value. Every editor-issued reading scroll goes
-/// through [`ScrollIntent::task`], so the headless tests can apply the same intents to a
-/// laid-out tree (the returned `Task` is opaque outside the runtime).
-#[derive(Debug, Clone, PartialEq)]
-pub enum ScrollIntent {
-    /// Snap to a relative vertical offset (0 = top, 1 = bottom).
-    SnapTo { path: String, view: u64, y: f32 },
-    /// Scroll to an absolute vertical offset.
-    ScrollTo { path: String, view: u64, y: f32 },
-    /// PageUp / PageDown ([`crate::page::page`]).
-    Page { path: String, view: u64, down: bool },
-    /// One line step of `dy` pixels ([`crate::page::step`]).
-    Step { path: String, view: u64, dy: f32 },
-    /// A layout probe answered by [`ReadingMsg::Probed`].
-    Probe {
-        path: String,
-        view: u64,
-        blocks: usize,
-        scroll_to: Option<usize>,
-    },
-    /// Plan round-7 WP-4 (attempt 2): re-sends the source editor's viewport report after the
-    /// next layout (the next pass of a Reading → Source line carry, [`SourceBuffer::on_layout`]
-    /// returned [`Relayout::Again`]).
-    ///
-    /// [`SourceBuffer::on_layout`]: crate::source::SourceBuffer::on_layout
-    /// [`Relayout::Again`]: crate::source::Relayout::Again
-    SourceRelayout { path: String, lines: usize },
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Test hook: every intent turned into a task on this thread, in order.
-    pub(crate) static INTENTS: std::cell::RefCell<Vec<ScrollIntent>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-impl ScrollIntent {
-    /// The runtime task carrying out this intent.
-    pub fn task(self) -> Task<Message> {
-        #[cfg(test)]
-        INTENTS.with(|i| i.borrow_mut().push(self.clone()));
-        let id = |path: &str, view| crate::find::reading_scroll_id(path, view);
-        match self {
-            Self::SnapTo { path, view, y } => iced::widget::operation::snap_to(
-                id(&path, view),
-                iced::widget::scrollable::RelativeOffset { x: 0.0, y },
-            ),
-            Self::ScrollTo { path, view, y } => iced::widget::operation::scroll_to(
-                id(&path, view),
-                iced::widget::scrollable::AbsoluteOffset {
-                    x: None,
-                    y: Some(y),
-                },
-            ),
-            Self::Page { path, view, down } => crate::page::page(id(&path, view), down),
-            Self::Step { path, view, dy } => crate::page::step(id(&path, view), dy),
-            Self::SourceRelayout { path, lines } => {
-                Task::done(Message::Source(crate::message::SourceMsg::Viewport {
-                    path,
-                    lines,
-                }))
-            }
-            Self::Probe {
-                path,
-                view,
-                blocks,
-                scroll_to,
-            } => {
-                let op = probe_op(&path, view, blocks);
-                iced::advanced::widget::operate(op).map(move |p: Probe| {
-                    Message::Reading(ReadingMsg::Probed {
-                        path: path.clone(),
-                        view,
-                        probe: Some(p),
-                        scroll_to,
-                    })
-                })
-            }
-        }
-    }
 }
 
 #[cfg(test)]

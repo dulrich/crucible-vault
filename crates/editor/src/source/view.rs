@@ -25,15 +25,22 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
 /// Renders a document's source buffer with its conflict bar; `font_size` is the
 /// `editor.toml` base text size (live, plan editor-settings-tab WP-2); `keymap` is the effective
 /// keymap its key bindings route by (WP-4). `link` is the open `[[` note list overlay (plan
-/// round-5 WP-9), already positioned; while it is `Some` its keys are intercepted.
+/// round-5 WP-9), already positioned; while it is `Some` its keys are intercepted. `find` is the
+/// focused pane's find bar when this is its active tab (WP-R17 SP6).
 pub fn view<'a>(
     doc: &'a SourceBuffer,
     tokens: Tokens,
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
+    find: Option<&crate::find::FindBar>,
     link: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let link_open = link.is_some();
+    // WP-R17 (SP6): the find paint comes from the focused pane's bar, at view time.
+    let (find, find_all) = find.map_or_else(
+        || (None, std::sync::Arc::from([])),
+        |b| b.source_paint(doc.edit_seq),
+    );
     let editor: Element<'a, Message> = match &doc.content {
         Repr::Shaped(content) => crate::widget::middle_click::middle_click(
             text_editor::TextEditor::new(content)
@@ -47,8 +54,8 @@ pub fn view<'a>(
                     HighlightSettings {
                         colors: KindColors::from_tokens(&tokens),
                         epoch: doc.epoch,
-                        find: doc.find_hl,
-                        find_all: doc.find_all.clone(),
+                        find,
+                        find_all,
                     },
                     highlighter::to_format,
                 ),

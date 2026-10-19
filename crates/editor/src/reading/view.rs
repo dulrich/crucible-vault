@@ -9,11 +9,16 @@ use iced::widget::{
 };
 use iced::{Border, Element, Font, Length, Theme};
 
-use super::{Doc, ReadingStore, link_label};
+use std::cell::Cell;
+
+use editor_model::visible::{Occurrence, VisRun, link_label};
+
+use super::{Doc, ReadingStore};
+use crate::find::ReadingPaint;
 use crate::message::{Message, ReadingMsg};
 pub(crate) use crate::task_status::task_box;
 use crate::theme::{Rgb, Tokens};
-use crate::widget::selectable::{self, SelPos};
+use crate::widget::selectable::{self, Selection};
 #[cfg(test)]
 use crate::{
     icons::Icon,
@@ -30,7 +35,8 @@ pub(crate) enum LinkTarget {
     External(String),
 }
 
-struct Ctx<'a> {
+/// The drawing context; `'c` borrows the per-frame locals (run cursor, find occurrences).
+struct Ctx<'a, 'c> {
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
     doc: &'a Doc,
@@ -42,39 +48,42 @@ struct Ctx<'a> {
     scale: f32,
     /// Inside a cancelled (`- [-]`) task: text is faint and struck through.
     strike: bool,
-    /// plan editor-ui-round-3 WP-5: the find bar's active match as (top-level block, nth
-    /// occurrence in it), the top-level block being drawn, and occurrences painted in it so far.
-    active: Option<(usize, usize)>,
-    cur_block: std::rc::Rc<std::cell::Cell<usize>>,
-    seen: std::rc::Rc<std::cell::Cell<usize>>,
-    /// Plan round-5 WP-7: the next selectable run's index (render order = `selection::runs`).
-    run: std::rc::Rc<std::cell::Cell<usize>>,
-    /// The tab's selection `(anchor, focus)`.
-    sel: Option<(SelPos, SelPos)>,
+    /// WP-R17 (SR4): the next [`VisRun`] of `doc.runs` to draw — the tree is drawn in the
+    /// order [`editor_model::visible::visible_runs`] walked it, so run `i` is `doc.runs[i]`.
+    cursor: &'c Cell<usize>,
+    /// The find query's occurrences over `doc.runs` (empty without find paint), and the index
+    /// of the strong one (WP-R17 SP6: the focused pane's bar, at view time).
+    occ: &'c [Occurrence],
+    active: Option<usize>,
+    /// The tab's selection.
+    sel: Option<Selection>,
 }
 
-impl<'a> Ctx<'a> {
-    /// Counts one painted find occurrence; true when it is the active match's (WP-5).
-    fn is_active_occurrence(&self) -> bool {
-        let n = self.seen.get();
-        self.seen.set(n + 1);
-        self.active == Some((self.cur_block.get(), n))
+impl<'a, 'c> Ctx<'a, 'c> {
+    /// Takes the next visible run: its index and table entry.
+    fn take_run(&self) -> (usize, Option<&'a VisRun>) {
+        let i = self.cursor.get();
+        self.cursor.set(i + 1);
+        (i, self.doc.runs.get(i))
     }
 
-    /// Takes the next run index (plan round-5 WP-7).
-    fn next_run(&self) -> usize {
-        let i = self.run.get();
-        self.run.set(i + 1);
-        i
-    }
-
-    /// A selectable text run of `spans` at `size` (plan round-5 WP-7; replaces `rich_text`).
-    fn run_el(&self, spans: Vec<RSpan<'a>>, size: f32) -> Element<'a, Message> {
-        let i = self.next_run();
+    /// Selectable text run `i` of `spans` at `size` (plan round-5 WP-7; replaces `rich_text`).
+    fn run_el(&self, i: usize, spans: Vec<RSpan<'a>>, size: f32) -> Element<'a, Message> {
         let len = spans.iter().map(|s| s.text.len()).sum();
         let mut c = self.t.accent_ui.to_color();
         c.a = 0.35;
-        selectable::run(i, spans, size, selectable::run_range(self.sel, i, len), c).into()
+        let range = self.sel.and_then(|s| s.run_range(i, len));
+        selectable::run(i, spans, size, range, c).into()
+    }
+
+    /// Run `i`'s find occurrences, with their indices over the whole document.
+    fn hits(&self, i: usize) -> impl Iterator<Item = (usize, &'c Occurrence)> + use<'c, '_> {
+        let from = self.occ.partition_point(|o| o.run < i);
+        self.occ[from..]
+            .iter()
+            .take_while(move |o| o.run == i)
+            .enumerate()
+            .map(move |(k, o)| (from + k, o))
     }
 
     /// A design size (px; paragraph = 16) scaled to the current font size.
@@ -109,7 +118,9 @@ pub fn block_size(heading: Option<u8>) -> f32 {
 }
 
 /// The reading pane for `path`; `scale` = [`reading_scale`]`(font_size)`; `keys` = the pane
-/// takes the selection keys (Shift+Arrows, Esc; plan round-5 WP-7).
+/// takes the selection keys (Shift+Arrows, Esc; plan round-5 WP-7); `find` = the focused pane's
+/// find paint when this is its active tab (WP-R17 SP6).
+#[allow(clippy::too_many_arguments)] // one render site
 pub fn reading<'a>(
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
@@ -118,10 +129,15 @@ pub fn reading<'a>(
     t: Tokens,
     scale: f32,
     keys: bool,
+    find: Option<ReadingPaint<'_>>,
 ) -> Element<'a, Message> {
     let Some(doc) = store.doc(path) else {
         return text("Rendering…").color(t.text_faint.to_color()).into();
     };
+    let cursor = Cell::new(0);
+    let occ = find.map_or_else(Vec::new, |f| {
+        editor_model::visible::occurrences(&doc.runs, f.query)
+    });
     let cx = Ctx {
         store,
         views,
@@ -131,10 +147,9 @@ pub fn reading<'a>(
         t,
         scale,
         strike: false,
-        active: store.find_active(path),
-        cur_block: std::rc::Rc::new(std::cell::Cell::new(usize::MAX)),
-        seen: std::rc::Rc::new(std::cell::Cell::new(0)),
-        run: std::rc::Rc::new(std::cell::Cell::new(0)),
+        cursor: &cursor,
+        occ: &occ,
+        active: find.and_then(|f| f.active),
         sel: store.selection(path, view),
     };
     // Fixed slot 0 (properties, `Space` when absent) keeps every body widget at a stable tree
@@ -142,15 +157,12 @@ pub fn reading<'a>(
     // control bar's breadcrumb (plan editor-feedback-round-2 WP-6).
     let mut items: Vec<Element<'a, Message>> = vec![properties(&cx, &doc.model.properties)];
     items.extend(doc.model.blocks.iter().enumerate().map(|(i, b)| {
-        cx.cur_block.set(i);
-        cx.seen.set(0);
         // plan editor-ui-round-3 WP-6: an id'd container per top-level block, so a widget
         // operation can read its layout bounds (place-keeping across mode switches).
         container(block(&cx, b))
             .id(super::block_id(path, view, i))
             .into()
     }));
-    cx.cur_block.set(usize::MAX);
     if !doc.model.footnotes.is_empty() {
         items.push(rule::horizontal(1).into());
         for (i, f) in doc.model.footnotes.iter().enumerate() {
@@ -240,7 +252,7 @@ pub(crate) fn press_target(
 }
 
 /// The read-only frontmatter block (an empty `Space` when there is none).
-fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
+fn properties<'a>(cx: &Ctx<'a, '_>, props: &'a [Property]) -> Element<'a, Message> {
     if props.is_empty() {
         return Space::new().into();
     }
@@ -293,7 +305,7 @@ fn properties<'a>(cx: &Ctx<'a>, props: &'a [Property]) -> Element<'a, Message> {
                     .color(t.text_dim.to_color())
             )
             .width(Length::Fixed(140.0)),
-            cx.run_el(spans, cx.sz(14.0)),
+            cx.run_el(cx.take_run().0, spans, cx.sz(14.0)),
         ]
         .spacing(8)
         .into()
@@ -310,7 +322,7 @@ fn prop_press(path: &str, key: &str) -> Message {
 }
 
 /// The `crucible-view` fence hook: the view `<file>#<name>` with `this` = the embedding note.
-fn view_fence<'a>(cx: &Ctx<'a>, file: &str, name: &str) -> Element<'a, Message> {
+fn view_fence<'a>(cx: &Ctx<'a, '_>, file: &str, name: &str) -> Element<'a, Message> {
     crate::views::fence(
         cx.views,
         &crate::views::view_id(file, name),
@@ -336,7 +348,7 @@ fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Mes
         .into()
 }
 
-fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
+fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
     let t = cx.t;
     match b {
         Block::Heading { level, inlines } => {
@@ -398,8 +410,11 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
                 title.clone().unwrap_or_else(|| capitalize(kind))
             );
             let edge = callout_color(kind, t);
-            let mut col: Vec<Element<'a, Message>> =
-                vec![cx.run_el(vec![span(head).color(edge.to_color())], cx.sz(16.0))];
+            let mut col: Vec<Element<'a, Message>> = vec![cx.run_el(
+                cx.take_run().0,
+                vec![span(head).color(edge.to_color())],
+                cx.sz(16.0),
+            )];
             // Folding is shown by the marker; the body stays readable (no fold state in v0).
             col.extend(children.iter().map(|c| block(cx, c)));
             boxed(column(col).spacing(6).into(), t, edge)
@@ -415,11 +430,12 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
                 );
             }
             // plan editor-round-4 WP-3: code-block text is visible text (find-painted).
+            let (i, _) = cx.take_run();
             let mut spans: Vec<RSpan<'a>> = Vec::new();
-            painted(cx, &mut spans, Cow::Borrowed(code.as_str()), |p| {
+            painted(cx, i, 0, &mut spans, Cow::Borrowed(code.as_str()), |p| {
                 span(p).font(Font::MONOSPACE).color(t.text.to_color())
             });
-            col.push(cx.run_el(spans, cx.sz(14.0)));
+            col.push(cx.run_el(i, spans, cx.sz(14.0)));
             boxed(column(col).spacing(4).into(), t, t.line)
         }
         Block::BlockQuote(children) => {
@@ -448,7 +464,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
             link,
         } => {
             // Plan round-5 WP-7: an image holds a run slot (its alt text is copy text).
-            cx.next_run();
+            cx.take_run();
             let img = image_block(cx, src, alt, *width, *remote, link.as_deref());
             match link {
                 Some(href) => linked_image(cx, img, href, src, *remote),
@@ -465,6 +481,7 @@ fn block<'a>(cx: &Ctx<'a>, b: &'a Block) -> Element<'a, Message> {
                 None => format!("↳ {target}"),
             };
             let head: Element<'a, Message> = cx.run_el(
+                cx.take_run().0,
                 vec![
                     span(label)
                         .color(t.accent_ui.to_color())
@@ -521,7 +538,12 @@ fn task_press(path: &str, task: Option<char>, line: Option<usize>) -> Option<Mes
     }
 }
 
-fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Element<'a, Message> {
+fn list_item<'a>(
+    cx: &Ctx<'a, '_>,
+    ordered: bool,
+    n: usize,
+    it: &'a ListItem,
+) -> Element<'a, Message> {
     // Paragraph text is `block_size(None)` at iced's default 1.3 line height: the marker sits in
     // a box one first-line tall so it centres on the first line, not on the whole item.
     let line_h = cx.sz(block_size(None)) * 1.3;
@@ -556,9 +578,6 @@ fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Ele
     };
     let child_cx = Ctx {
         strike: cx.strike || it.task.is_some_and(task_struck),
-        cur_block: cx.cur_block.clone(),
-        seen: cx.seen.clone(),
-        run: cx.run.clone(),
         ..*cx
     };
     row![
@@ -570,7 +589,7 @@ fn list_item<'a>(cx: &Ctx<'a>, ordered: bool, n: usize, it: &'a ListItem) -> Ele
 }
 
 fn image_block<'a>(
-    cx: &Ctx<'a>,
+    cx: &Ctx<'a, '_>,
     src: &'a str,
     alt: &'a str,
     width: Option<u32>,
@@ -694,7 +713,7 @@ fn href_target(href: &str) -> LinkTarget {
 
 /// Plan round-6 WP-4: a link's color — the accent, dimmed (half alpha) when the vault target is
 /// in the Doc's `unresolved` set.
-fn link_color(cx: &Ctx<'_>, target: &str) -> iced::Color {
+fn link_color(cx: &Ctx<'_, '_>, target: &str) -> iced::Color {
     let c = cx.t.accent_ui.to_color();
     if cx.doc.unresolved.contains(target) {
         iced::Color { a: c.a * 0.5, ..c }
@@ -711,7 +730,7 @@ fn linked_image_open(path: &str, href: &str) -> Message {
 /// Plan round-6 WP-3: wraps an image of `[![alt](src)](href)` so a left click opens `href`
 /// (no padding: layout unchanged) and a right click offers the link then the image items.
 fn linked_image<'a>(
-    cx: &Ctx<'a>,
+    cx: &Ctx<'a, '_>,
     img: Element<'a, Message>,
     href: &str,
     src: &str,
@@ -740,7 +759,7 @@ fn linked_image<'a>(
 /// Plan round-6 WP-3: the linked-image menu target — the link half plus the image half (the
 /// resolved vault key, or the URL when remote); a missing local image offers the link only.
 fn linked_image_target(
-    cx: &Ctx<'_>,
+    cx: &Ctx<'_, '_>,
     link: crate::context_menu::Target,
     src: &str,
     remote: bool,
@@ -808,27 +827,30 @@ fn sub<'a>(text: &Cow<'a, str>, r: std::ops::Range<usize>) -> Cow<'a, str> {
     }
 }
 
-/// Pushes visible `text` as spans built by `make`, split on the find query's occurrences: every
-/// occurrence light, the active one strong (plan editor-ui-round-3 WP-5; every visible segment,
-/// plan editor-round-4 WP-3). Occurrences are counted in the same order as
-/// [`super::visible_segments`].
+/// Pushes visible `text` — the piece of run `run` starting at byte `base` of its text — as
+/// spans built by `make`, split on the find occurrences inside it: every occurrence light, the
+/// active one strong (plan editor-ui-round-3 WP-5; every visible segment, plan editor-round-4
+/// WP-3). The occurrences come from the run table (WP-R17: the one walk), never re-counted here.
 fn painted<'a>(
-    cx: &Ctx<'a>,
+    cx: &Ctx<'a, '_>,
+    run: usize,
+    base: usize,
     spans: &mut Vec<RSpan<'a>>,
     text: Cow<'a, str>,
     make: impl Fn(Cow<'a, str>) -> RSpan<'a>,
 ) {
-    let Some(q) = cx.store.find_query(cx.path) else {
-        spans.push(make(text));
-        return;
-    };
     let t = cx.t;
+    let end = base + text.len();
     let mut at = 0;
-    for m in editor_model::find::matches(&text, q) {
+    for (k, o) in cx.hits(run) {
+        if o.range.start < base || o.range.end > end {
+            continue;
+        }
+        let m = o.range.start - base..o.range.end - base;
         if m.start > at {
             spans.push(make(sub(&text, at..m.start)));
         }
-        let (bg, fg) = if cx.is_active_occurrence() {
+        let (bg, fg) = if cx.active == Some(k) {
             (t.find_strong(), t.on_accent)
         } else {
             (t.find_light(), t.bg)
@@ -847,7 +869,7 @@ fn painted<'a>(
 }
 
 fn inlines_view<'a>(
-    cx: &Ctx<'a>,
+    cx: &Ctx<'a, '_>,
     inlines: &'a [Inline],
     size: f32,
     color: Option<Rgb>,
@@ -860,8 +882,11 @@ fn inlines_view<'a>(
     } else {
         color.unwrap_or(t.text)
     };
+    let (run, _) = cx.take_run();
     let mut spans: Vec<RSpan<'a>> = Vec::with_capacity(inlines.len());
     for i in inlines {
+        // The piece's byte offset in the run text (= `VisRun::text`).
+        let at: usize = spans.iter().map(|s| s.text.len()).sum();
         match i {
             Inline::Text { text, style } => {
                 let mut font = Font::DEFAULT;
@@ -881,11 +906,18 @@ fn inlines_view<'a>(
                     }
                     s
                 };
-                painted(cx, &mut spans, Cow::Borrowed(text.as_str()), style_span);
+                painted(
+                    cx,
+                    run,
+                    at,
+                    &mut spans,
+                    Cow::Borrowed(text.as_str()),
+                    style_span,
+                );
             }
             // plan editor-round-4 WP-3: code spans, link labels and tags are visible text too,
             // painted like `Text`; split link pieces keep their click target.
-            Inline::Code(c) => painted(cx, &mut spans, Cow::Borrowed(c.as_str()), |p| {
+            Inline::Code(c) => painted(cx, run, at, &mut spans, Cow::Borrowed(c.as_str()), |p| {
                 span(p)
                     .font(Font::MONOSPACE)
                     .background(t.inset.to_color())
@@ -893,9 +925,11 @@ fn inlines_view<'a>(
             }),
             Inline::WikiLink { target, .. } => {
                 // No permanent underline: the run widget underlines the hovered link itself.
-                let label = super::inline_visible(i).unwrap_or_default().into_owned();
+                let label = editor_model::visible::inline_visible(i)
+                    .unwrap_or_default()
+                    .into_owned();
                 let color = link_color(cx, target);
-                painted(cx, &mut spans, Cow::Owned(label), |p| {
+                painted(cx, run, at, &mut spans, Cow::Owned(label), |p| {
                     span(p).color(color).link(LinkTarget::Vault(target.clone()))
                 });
             }
@@ -906,13 +940,23 @@ fn inlines_view<'a>(
                     LinkTarget::Vault(url.clone())
                 };
                 let color = link_color(cx, url);
-                painted(cx, &mut spans, Cow::Borrowed(label.as_str()), |p| {
-                    span(p).color(color).link(l.clone())
-                });
+                painted(
+                    cx,
+                    run,
+                    at,
+                    &mut spans,
+                    Cow::Borrowed(label.as_str()),
+                    |p| span(p).color(color).link(l.clone()),
+                );
             }
-            Inline::Tag(tag) => painted(cx, &mut spans, Cow::Owned(format!("#{tag}")), |p| {
-                span(p).color(t.accent.to_color())
-            }),
+            Inline::Tag(tag) => painted(
+                cx,
+                run,
+                at,
+                &mut spans,
+                Cow::Owned(format!("#{tag}")),
+                |p| span(p).color(t.accent.to_color()),
+            ),
             Inline::FootnoteRef { ix, .. } => spans.push(
                 span(format!("[{ix}]"))
                     .size((size - 4.0).max(10.0))
@@ -924,108 +968,9 @@ fn inlines_view<'a>(
     if spans.is_empty() {
         spans.push(span(inline_text(inlines)));
     }
-    cx.run_el(spans, size)
+    cx.run_el(run, spans, size)
 }
 
 #[cfg(test)]
-mod task_tests {
-    use super::*;
-
-    const LISTED: &str = " x><?/!\"-*liSIfkudwpcb";
-
-    #[test]
-    fn every_listed_char_has_a_private_use_glyph_except_empty() {
-        for c in LISTED.chars() {
-            let (g, _) = task_mark(c);
-            if c == ' ' {
-                assert_eq!(g, None);
-            } else {
-                let g = g.unwrap_or_else(|| panic!("no glyph for {c:?}"));
-                assert!(('\u{e000}'..='\u{f8ff}').contains(&g.glyph()), "{c:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn roles_follow_the_crucible_css() {
-        assert_eq!(task_mark('x'), (Some(Icon::Check), TaskRole::Accent));
-        assert_eq!(task_mark('!').1, TaskRole::Orange);
-        assert_eq!(task_mark('w').1, TaskRole::Purple);
-        assert_eq!(task_mark('i').1, TaskRole::Blue);
-        assert_eq!(task_mark('-'), (Some(Icon::Minus), TaskRole::Faint));
-        assert_eq!(task_mark('>').1, TaskRole::Faint);
-    }
-
-    /// Plan usability-sprint-captures-links WP-3: external links reach the opener.
-    #[test]
-    fn external_link_maps_to_open_url() {
-        let f = link_msg("a.md");
-        assert!(matches!(
-            f(LinkTarget::External("https://x.y".into())),
-            Message::OpenUrl(u) if u == "https://x.y"
-        ));
-        assert!(matches!(
-            f(LinkTarget::Vault("b".into())),
-            Message::Reading(ReadingMsg::OpenLink { .. })
-        ));
-    }
-
-    /// Plan round-6 WP-3: a linked image clicks through its outer href.
-    #[test]
-    fn linked_image_click_opens_external_href() {
-        assert!(matches!(
-            linked_image_open("a.md", "https://x"),
-            Message::OpenUrl(u) if u == "https://x"
-        ));
-    }
-
-    /// Plan round-6 WP-3: a vault-path image inside a vault link opens the note link.
-    #[test]
-    fn vault_image_in_vault_link_opens_the_note() {
-        let m = editor_model::render::lower("[![](img/a.png)](Other.md)\n");
-        let [
-            Block::Image {
-                src,
-                link: Some(href),
-                remote: false,
-                ..
-            },
-        ] = m.blocks.as_slice()
-        else {
-            panic!("expected one linked local image: {:?}", m.blocks);
-        };
-        assert_eq!((src.as_str(), href.as_str()), ("img/a.png", "Other.md"));
-        let Message::Reading(ReadingMsg::OpenLink { src, target }) =
-            linked_image_open("n.md", href)
-        else {
-            panic!("vault href must OpenLink");
-        };
-        assert_eq!((src.as_str(), target.as_str()), ("n.md", "Other.md"));
-    }
-
-    #[test]
-    fn unknown_char_falls_back_to_a_plain_box() {
-        assert_eq!(task_mark('Z'), (None, TaskRole::Dim));
-        assert_eq!(task_mark('9'), (None, TaskRole::Dim));
-    }
-
-    #[test]
-    fn only_cancelled_is_struck() {
-        assert!(task_struck('-'));
-        for c in LISTED.chars().filter(|c| *c != '-') {
-            assert!(!task_struck(c), "{c:?}");
-        }
-    }
-
-    #[test]
-    fn host_tasks_toggle_and_transcluded_do_not() {
-        let Some(Message::Reading(ReadingMsg::ToggleTask { path, line })) =
-            task_press("a.md", Some(' '), Some(3))
-        else {
-            panic!("host task must toggle");
-        };
-        assert_eq!((path.as_str(), line), ("a.md", 3));
-        assert!(task_press("a.md", Some('x'), None).is_none());
-        assert!(task_press("a.md", None, Some(3)).is_none());
-    }
-}
+#[path = "view_tests.rs"]
+mod task_tests;

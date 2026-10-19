@@ -236,10 +236,7 @@ pub enum ReadingMsg {
     Select {
         path: String,
         view: u64,
-        sel: Option<(
-            crate::widget::selectable::SelPos,
-            crate::widget::selectable::SelPos,
-        )>,
+        sel: Option<crate::widget::selectable::Selection>,
     },
     /// Plan round-5 WP-7: a selection gesture ended (mouse release): copy to PRIMARY.
     SelectDone { path: String, view: u64 },

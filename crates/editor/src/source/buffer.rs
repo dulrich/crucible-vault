@@ -4,7 +4,6 @@ use editor_model::carry::Carry;
 use editor_model::undo::{self, UndoHistory};
 use iced::widget::text_editor::{self, Content};
 
-use super::FindSpan;
 use super::place::{VISIBLE_LINES, fresh_view};
 use super::save::SaveState;
 use crate::daemon::ContentHash;
@@ -38,11 +37,6 @@ pub struct SourceBuffer {
     pub(super) read_only: bool,
     /// The selection last written to PRIMARY (not re-written while unchanged).
     pub(super) primary: Option<String>,
-    /// The find bar's current match ((line, byte column) from..to), painted by the highlighter
-    /// while the find input holds focus (plan editor-feedback-round-2 WP-4).
-    pub(super) find_hl: Option<FindSpan>,
-    /// plan editor-ui-round-3 WP-5: every find match, painted light.
-    pub(super) find_all: std::sync::Arc<[FindSpan]>,
     /// plan editor-ui-round-3 WP-6: the top visible source line, tracked from the wheel's
     /// `Action::Scroll` and our own scrolls (iced 0.14's `text_editor` exposes no scroll
     /// offset); pulled up when the cursor moves above it. 0 for a fresh shaped buffer.
@@ -103,8 +97,6 @@ impl SourceBuffer {
             epoch: 0,
             read_only: false,
             primary: None,
-            find_hl: None,
-            find_all: std::sync::Arc::from([]),
             top_line: 0,
             carry: None,
             visible_lines: VISIBLE_LINES,
@@ -247,26 +239,6 @@ impl SourceBuffer {
             Repr::Shaped(content) => super::place::place(content, c),
             Repr::Plain { cursor, .. } => *cursor = to_model(c),
         }
-    }
-
-    /// The painted find match, if any.
-    pub fn find_highlight(&self) -> Option<FindSpan> {
-        self.find_hl
-    }
-
-    /// Sets (or clears) the painted find match; never touches the text.
-    pub fn set_find_highlight(&mut self, span: Option<FindSpan>) {
-        self.find_hl = span;
-    }
-
-    /// Every painted find match (plan editor-ui-round-3 WP-5).
-    pub fn find_matches(&self) -> &[FindSpan] {
-        &self.find_all
-    }
-
-    /// Sets (or clears, with an empty list) every painted find match; never touches the text.
-    pub fn set_find_matches(&mut self, all: Vec<FindSpan>) {
-        self.find_all = all.into();
     }
 
     /// The selection if it is non-empty and differs from what PRIMARY last received; records it.

@@ -1313,8 +1313,17 @@ impl App {
             self.prefs.font_size,
             &self.palette.keymap,
             self.active_tab().is_some_and(|t| t.id == tab.id),
+            self.find_bar_for(tab.id),
             self.link_ta_overlay(path, tab.id),
         )
+    }
+
+    /// WP-R17 (SP6): the find bar whose paint tab `tab` shows — the focused pane's, when `tab` is
+    /// its active tab (a second pane on the same note paints nothing).
+    pub(crate) fn find_bar_for(&self, tab: u64) -> Option<&crate::find::FindBar> {
+        let ps = self.panes.get(self.focus)?;
+        (ps.active_tab()?.id == tab).then_some(())?;
+        ps.find.as_ref()
     }
 
     /// Every tab removal funnels through here (button, pane close, replace, trash). A note's
@@ -2636,13 +2645,6 @@ impl App {
                 if ps.find.take().is_none() {
                     return Task::none();
                 }
-                for p in ps.tabs.iter().filter_map(Tab::path) {
-                    if let Some(d) = self.docs.get_mut(p) {
-                        d.buffer.set_find_highlight(None);
-                        d.buffer.set_find_matches(Vec::new());
-                    }
-                    self.reading.set_find(p, None);
-                }
                 // Plan round-7 WP-4: the reading view keeps the place find left it at (the
                 // bar's removal re-creates the scrollable, which reports offset 0).
                 let restore = self
@@ -2657,10 +2659,10 @@ impl App {
             }
             FindMsg::Focus(_) => {}
             FindMsg::Query(q) => {
-                let Some(text) = ps
+                let Some((text, seq)) = ps
                     .active_note()
                     .and_then(|t| buf(&self.docs, t.path))
-                    .map(crate::source::SourceBuffer::text)
+                    .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
                 };
@@ -2674,14 +2676,17 @@ impl App {
                 };
                 bar.query = q;
                 bar.current = None;
-                bar.search_in(&text, reading_find_model(&self.reading, &path));
+                bar.search_in(&text, seq, reading_find_runs(&self.reading, &path));
                 if bar.visible.is_some() {
                     // plan editor-round-4 WP-3: Reading starts at the first visible occurrence
                     // at or below the viewport's top block.
                     let top = self.reading.top_block(&path, view).unwrap_or(0);
                     let v = bar.visible.as_deref().unwrap_or_default();
-                    bar.current =
-                        (!v.is_empty()).then(|| v.iter().position(|&(b, _)| b >= top).unwrap_or(0));
+                    // A footnote hit (no block) sits below every block.
+                    let below = |o: &editor_model::visible::Occurrence| {
+                        o.part.block().is_none_or(|b| b >= top)
+                    };
+                    bar.current = (!v.is_empty()).then(|| v.iter().position(below).unwrap_or(0));
                     return self.show_match();
                 }
                 let at = ps
@@ -2706,10 +2711,10 @@ impl App {
                 let Some(ps) = self.panes.get_mut(pane) else {
                     return Task::none();
                 };
-                let Some(text) = ps
+                let Some((text, seq)) = ps
                     .active_note()
                     .and_then(|t| buf(&self.docs, t.path))
-                    .map(crate::source::SourceBuffer::text)
+                    .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
                 };
@@ -2720,7 +2725,7 @@ impl App {
                 let Some(bar) = &mut ps.find else {
                     return Task::none();
                 };
-                bar.search_in(&text, reading_find_model(&self.reading, &path));
+                bar.search_in(&text, seq, reading_find_runs(&self.reading, &path));
                 let n = bar.len();
                 bar.current = if back {
                     editor_model::find::prev(bar.current, n)
@@ -2734,67 +2739,53 @@ impl App {
     }
 
     /// Puts the focused pane's current match on screen: the source selection (Source/Split) —
-    /// whose cursor move scrolls the shaped editor to it — plus a painted find span (the
-    /// unfocused `text_editor` draws no selection; plan editor-feedback-round-2 WP-4), and in
-    /// Reading/Split the query's occurrences painted plus a proportional snap of the scrollable.
-    /// Positions are byte columns end to end (no char conversion).
+    /// whose cursor move scrolls the shaped editor to it — and in Reading/Split a scroll to the
+    /// match's block. Painting is derived from the bar at view time (WP-R17 SP6): this only
+    /// records the current source match's Reading counterpart on the bar. Positions are byte
+    /// columns end to end (no char conversion).
     fn show_match(&mut self) -> Task<Message> {
         let pane = self.focus;
         let Some(ps) = self.panes.get_mut(pane) else {
             return Task::none();
         };
-        let Some(i) = ps.active.filter(|&i| i < ps.tabs.len()) else {
+        let Some(tab) = ps.active.and_then(|i| ps.tabs.get(i)) else {
             return Task::none();
         };
-        let range = ps.find.as_ref().and_then(crate::find::FindBar::range);
-        let query = ps.find.as_ref().map(|b| b.query.clone());
+        let view = tab.id;
+        let Some(path) = tab.path().map(str::to_owned) else {
+            return Task::none();
+        };
+        let Some(bar) = ps.find.as_mut() else {
+            return Task::none();
+        };
         // plan editor-round-4 WP-3: Reading steps through visible occurrences — the active one
         // is drawn strong and its block scrolled to; invisible source matches never count.
-        let occurrence = ps
-            .find
-            .as_ref()
-            .filter(|b| b.visible.is_some())
-            .map(crate::find::FindBar::occurrence);
-        let all = ps
-            .find
-            .as_ref()
-            .map(|b| b.matches.clone())
-            .unwrap_or_default();
-        let Some(path) = ps.tabs[i].path().map(str::to_owned) else {
-            return Task::none();
-        };
-        let view = ps.tabs[i].id;
-        let Some(doc) = buf_mut(&mut self.docs, &path) else {
-            return Task::none();
-        };
-        let text = doc.text();
-        // plan editor-ui-round-3 WP-5: every match painted light (byte columns end to end).
-        let spans = all
-            .iter()
-            .map(|m| {
-                (
-                    editor_model::find::line_col(&text, m.start),
-                    editor_model::find::line_col(&text, m.end),
-                )
-            })
-            .collect();
-        doc.set_find_matches(spans);
-        if let Some(occ) = occurrence {
-            doc.set_find_highlight(None);
-            self.reading.set_find(&path, query);
-            self.reading.set_find_active_at(&path, occ);
-            let Some((b, _)) = occ else {
+        if bar.visible.is_some() {
+            bar.counterpart = None;
+            let Some(part) = bar.occurrence().map(|o| o.part) else {
                 return Task::none();
             };
-            let view = ps.tabs[i].id;
+            let Some(b) = part.block() else {
+                // WP-R17 (SR4): a footnote hit — the footnotes follow the last block.
+                return crate::reading::ScrollIntent::SnapTo { path, view, y: 1.0 }.task();
+            };
             self.reading.set_top_block(&path, view, b);
             let n = self.reading.doc(&path).map_or(0, |d| d.model.blocks.len());
             return crate::reading::probe(&path, view, n, Some(b));
         }
+        let range = bar.range();
+        let Some(doc) = buf_mut(&mut self.docs, &path) else {
+            return Task::none();
+        };
+        let text = doc.text();
+        // The rendered counterpart of the source match (none when it is invisible, audit E2).
+        bar.counterpart = range.as_ref().and_then(|r| {
+            let d = self.reading.doc(&path)?;
+            let (b, n) = crate::reading::source_counterpart(&d.model, &text, &bar.query, r)?;
+            let occ = editor_model::visible::occurrences(&d.runs, &bar.query);
+            editor_model::visible::ordinal(&occ, b, n)
+        });
         let Some(r) = range else {
-            doc.set_find_highlight(None);
-            self.reading.set_find(&path, query);
-            self.reading.set_find_active(&path, &text, None);
             return Task::none();
         };
         let (l0, c0) = editor_model::find::line_col(&text, r.start);
@@ -2803,9 +2794,6 @@ impl App {
         if mode.shows_source() {
             doc.select_range((l0, c0), (l1, c1));
         }
-        doc.set_find_highlight(Some(((l0, c0), (l1, c1))));
-        self.reading.set_find(&path, query);
-        self.reading.set_find_active(&path, &text, Some(r.clone()));
         if mode.shows_reading() {
             // Plan round-7 WP-4: the match's block goes to the top and becomes the stored top
             // (a bare proportional snap left it stale, so closing find / a mode switch
@@ -5564,11 +5552,11 @@ fn notification_stream(handle: &NotifHandle) -> impl iced::futures::Stream<Item 
 
 /// plan editor-round-4 WP-3: the rendered model the find bar counts visible occurrences in —
 /// `path` in Reading mode with a render; `None` (source matches drive the bar) otherwise.
-fn reading_find_model<'a>(
+fn reading_find_runs<'a>(
     reading: &'a crate::reading::ReadingStore,
     path: &str,
-) -> Option<&'a editor_model::render::RenderModel> {
+) -> Option<&'a [editor_model::visible::VisRun]> {
     (reading.mode(path) == crate::reading::ViewMode::Reading)
-        .then(|| reading.doc(path).map(|d| &d.model))
+        .then(|| reading.doc(path).map(|d| d.runs.as_slice()))
         .flatten()
 }

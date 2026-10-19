@@ -11,3 +11,4 @@ pub mod period;
 pub mod rank;
 pub mod render;
 pub mod undo;
+pub mod visible;

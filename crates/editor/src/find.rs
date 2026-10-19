@@ -9,6 +9,9 @@
 //! snaps to the match's relative line position (`line / lines`).
 
 use std::ops::Range;
+use std::sync::Arc;
+
+use editor_model::visible::{self, Occurrence, VisRun};
 
 use iced::widget::pane_grid::Pane;
 use iced::widget::{Space, row, text, text_input};
@@ -16,31 +19,39 @@ use iced::{Element, Length, Subscription};
 
 use crate::icons::Icon;
 use crate::message::{FindMsg, Message};
+use crate::source::FindSpan;
 use crate::theme::{Tokens, icon_button};
 
-/// One pane's find bar.
+/// One pane's find bar — the only home of find state (WP-R17 SP6): the Source highlighter and
+/// the Reading view derive their find paint from the focused pane's bar at view time.
 #[derive(Debug, Clone, Default)]
 pub struct FindBar {
     pub query: String,
     /// Byte ranges into the buffer text at the last search.
     pub matches: Vec<Range<usize>>,
+    /// `matches` as (line, byte column) spans, painted light by the Source highlighter.
+    pub spans: Arc<[FindSpan]>,
+    /// The buffer `edit_seq` of the last search: the Source side paints only while it holds (an
+    /// edit hides the stale spans until the next search).
+    pub seq: u64,
     pub current: Option<usize>,
-    /// plan editor-round-4 WP-3: in Reading mode, the visible occurrences (top-level block, nth
-    /// in it) the bar steps through instead of `matches` (`None` = Source/Split, or no render).
-    pub visible: Option<Vec<(usize, usize)>>,
+    /// plan editor-round-4 WP-3: in Reading mode, the visible occurrences the bar steps through
+    /// instead of `matches` (`None` = Source/Split, or no render).
+    pub visible: Option<Vec<Occurrence>>,
+    /// Source/Split: the occurrence index (over the rendered runs) of the current source match's
+    /// Reading counterpart — drawn strong; `None` when it is invisible (audit E2).
+    pub counterpart: Option<usize>,
 }
 
 impl FindBar {
-    /// Recomputes matches over `text`, keeping the current index when still valid.
-    pub fn search(&mut self, text: &str) {
-        self.search_in(text, None);
-    }
-
-    /// [`Self::search`], plus — when `reading` is a rendered Reading-mode model — the visible
+    /// Recomputes matches over `text` (buffer `edit_seq` `seq`), keeping the current index when
+    /// still valid; when `reading` holds a Reading-mode render's runs, also the visible
     /// occurrences the bar then counts and steps through (plan editor-round-4 WP-3).
-    pub fn search_in(&mut self, text: &str, reading: Option<&editor_model::render::RenderModel>) {
+    pub fn search_in(&mut self, text: &str, seq: u64, reading: Option<&[VisRun]>) {
         self.matches = editor_model::find::matches(text, &self.query);
-        self.visible = reading.map(|m| crate::reading::visible_occurrences(m, &self.query));
+        self.spans = line_cols(text, &self.matches).into();
+        self.seq = seq;
+        self.visible = reading.map(|r| visible::occurrences(r, &self.query));
         let n = self.len();
         self.current = self.current.filter(|&i| i < n);
     }
@@ -56,9 +67,8 @@ impl FindBar {
     }
 
     /// The current visible occurrence (Reading mode).
-    pub fn occurrence(&self) -> Option<(usize, usize)> {
-        self.current
-            .and_then(|i| self.visible.as_ref()?.get(i).copied())
+    pub fn occurrence(&self) -> Option<&Occurrence> {
+        self.visible.as_ref()?.get(self.current?)
     }
 
     /// The "n/m" label.
@@ -78,6 +88,58 @@ impl FindBar {
         }
         self.current.and_then(|i| self.matches.get(i).cloned())
     }
+
+    /// The Reading view's find paint: the query, and the strong occurrence (the current one in
+    /// Reading mode, the source match's counterpart in Split). `None` for an empty query.
+    pub fn reading_paint(&self) -> Option<ReadingPaint<'_>> {
+        (!self.query.is_empty()).then(|| ReadingPaint {
+            query: &self.query,
+            active: if self.visible.is_some() {
+                self.current
+            } else {
+                self.counterpart
+            },
+        })
+    }
+
+    /// The Source highlighter's find paint for a buffer at `edit_seq`: (current match, every
+    /// match) — nothing once the buffer was edited after the last search.
+    pub fn source_paint(&self, edit_seq: u64) -> (Option<FindSpan>, Arc<[FindSpan]>) {
+        if self.seq != edit_seq {
+            return (None, Arc::from([]));
+        }
+        let current = self
+            .range()
+            .and(self.current.and_then(|i| self.spans.get(i).copied()));
+        (current, self.spans.clone())
+    }
+}
+
+/// What the Reading view paints for find: every occurrence of `query` light, occurrence index
+/// `active` (over [`visible::occurrences`]) strong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadingPaint<'a> {
+    pub query: &'a str,
+    pub active: Option<usize>,
+}
+
+/// Byte ranges → (line, byte column) spans, in one pass over `text` (`ranges` in order).
+fn line_cols(text: &str, ranges: &[Range<usize>]) -> Vec<FindSpan> {
+    let mut line = 0;
+    let mut line_start = 0;
+    let mut scanned = 0;
+    let mut at = |byte: usize| {
+        let byte = byte.min(text.len());
+        if byte > scanned {
+            for (i, _) in text[scanned..byte].match_indices('\n') {
+                line += 1;
+                line_start = scanned + i + 1;
+            }
+            scanned = byte;
+        }
+        (line, byte - line_start)
+    };
+    ranges.iter().map(|r| (at(r.start), at(r.end))).collect()
 }
 
 /// The find input's widget id for `pane`.
@@ -137,5 +199,27 @@ fn key(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Me
         }) => Some(Message::Find(FindMsg::Close)),
         iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WP-R17: the one-pass span mapping agrees with `editor_model::find::line_col`.
+    #[test]
+    fn line_cols_match_line_col() {
+        let text = "ab foo\nfoo é foo\n\nfoo";
+        let ms = editor_model::find::matches(text, "foo");
+        let want: Vec<FindSpan> = ms
+            .iter()
+            .map(|m| {
+                (
+                    editor_model::find::line_col(text, m.start),
+                    editor_model::find::line_col(text, m.end),
+                )
+            })
+            .collect();
+        assert_eq!(line_cols(text, &ms), want);
     }
 }
