@@ -148,6 +148,9 @@ pub struct ViewDef {
     pub task_filter: Option<String>,
     #[serde(default)]
     pub task_group: TaskGroup,
+    /// Plan round-8 WP-2: height cap of the rendered list (px or `"none"`; absent = 480).
+    #[serde(rename = "maxHeight", alias = "max_height", default)]
+    pub max_height: Option<crate::result::MaxHeight>,
 }
 
 /// Where a definition file's rows come from (plan round-5-reading-pickers-intake WP-10).
@@ -292,6 +295,8 @@ pub struct View {
     /// Definition errors: shown as notices; a filter error empties the view.
     pub errors: Vec<String>,
     pub filter_error: bool,
+    /// Plan round-8 WP-2: `maxHeight` (`None` = the editor default).
+    pub max_height: Option<crate::result::MaxHeight>,
 }
 
 /// A compiled definition file.
@@ -455,6 +460,7 @@ fn compile_view(
         tasks,
         filter_error,
         errors,
+        max_height: v.max_height,
     }
 }
 
@@ -531,6 +537,38 @@ type = "tasks"
 name = "K"
 status = [" "]
 "#;
+
+    fn max_height_of(line: &str) -> Result<Option<crate::result::MaxHeight>, toml::de::Error> {
+        let src = format!("[[views]]\ntype = \"table\"\nname = \"T\"\n{line}\n");
+        toml::from_str::<BaseDef>(&src).map(|d| d.views[0].max_height)
+    }
+
+    #[test]
+    fn max_height_parses_and_rejects() {
+        use crate::result::MaxHeight;
+        assert_eq!(max_height_of("").unwrap(), None);
+        assert_eq!(
+            max_height_of("maxHeight = 600").unwrap(),
+            Some(MaxHeight::Px(600.0))
+        );
+        assert_eq!(
+            max_height_of("maxHeight = 600.5").unwrap(),
+            Some(MaxHeight::Px(600.5))
+        );
+        assert_eq!(
+            max_height_of("max_height = \"none\"").unwrap(),
+            Some(MaxHeight::Uncapped)
+        );
+        for bad in [
+            "maxHeight = \"tall\"",
+            "maxHeight = 0",
+            "maxHeight = -1",
+            "maxHeight = true",
+        ] {
+            let e = max_height_of(bad).unwrap_err().to_string();
+            assert!(e.contains("maxHeight"), "{bad}: {e}");
+        }
+    }
 
     #[test]
     fn parses_and_compiles() {

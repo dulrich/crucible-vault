@@ -261,7 +261,9 @@ pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewR
     };
     let mut notices = view.errors.clone();
     if view.filter_error {
-        return Ok(ViewResult::empty(kind, notices));
+        let mut res = ViewResult::empty(kind, notices);
+        res.max_height = view.max_height;
+        return Ok(res);
     }
     let rows: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)> = match records {
         Some(recs) => recs
@@ -302,6 +304,7 @@ pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewR
     };
     notices.extend(env.notices.borrow().iter().cloned());
     res.notices = notices;
+    res.max_height = view.max_height;
     Ok(res)
 }
 
@@ -430,6 +433,7 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
     }
     Ok(ViewResult {
         kind: Kind::Table,
+        max_height: None,
         columns: view
             .order
             .iter()
@@ -558,6 +562,7 @@ fn pivot(
     }
     Ok(ViewResult {
         kind: Kind::Pivot,
+        max_height: None,
         columns,
         groups: vec![Group {
             key: None,
@@ -636,6 +641,7 @@ fn tasks(
     }
     Ok(ViewResult {
         kind: Kind::Tasks,
+        max_height: None,
         columns: vec![
             Column {
                 key: "task".into(),

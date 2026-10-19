@@ -148,6 +148,22 @@ fn malformed_result_is_an_error_not_a_panic() {
     assert!(decode(&json!({"kind": "graph", "columns": [], "groups": []})).is_err());
 }
 
+/// Plan round-8 WP-2: the fence's list height follows the view's `maxHeight`.
+#[test]
+fn fence_height_follows_max_height() {
+    let with = |m: Option<serde_json::Value>| {
+        let mut v = result();
+        if let Some(m) = m {
+            v["max_height"] = m;
+        }
+        list_height(&decode(&v).expect("decodes"))
+    };
+    assert_eq!(with(None), Some(MAX_HEIGHT));
+    assert_eq!(with(Some(json!(600.0))), Some(600.0));
+    assert_eq!(with(Some(json!("none"))), None);
+    assert_eq!(with(Some(json!("bogus"))), Some(MAX_HEIGHT));
+}
+
 #[test]
 fn decoder_round_trips_every_cell_kind() {
     let cases = [

@@ -134,6 +134,67 @@ pub struct ViewResult {
     pub groups: Vec<Group>,
     pub summaries: Vec<Summary>,
     pub notices: Vec<String>,
+    /// Plan round-8 WP-2: the view's `maxHeight` (`None` = the editor default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<MaxHeight>,
+}
+
+/// Plan round-8 WP-2: a view's height cap — `Px(n)` (n > 0) or uncapped (`"none"`).
+///
+/// TOML/JSON form: a positive number, or the string `"none"`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MaxHeight {
+    Px(f32),
+    Uncapped,
+}
+
+impl Serialize for MaxHeight {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Px(v) => s.serialize_f32(*v),
+            Self::Uncapped => s.serialize_str("none"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MaxHeight {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = MaxHeight;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("maxHeight: a positive number of pixels or \"none\"")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<MaxHeight, E> {
+                if v == "none" {
+                    Ok(MaxHeight::Uncapped)
+                } else {
+                    Err(E::custom(format!(
+                        "maxHeight: expected a positive number or \"none\", got {v:?}"
+                    )))
+                }
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<MaxHeight, E> {
+                if v.is_finite() && v > 0.0 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    Ok(MaxHeight::Px(v as f32))
+                } else {
+                    Err(E::custom(format!(
+                        "maxHeight: expected a positive number or \"none\", got {v}"
+                    )))
+                }
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<MaxHeight, E> {
+                #[allow(clippy::cast_precision_loss)]
+                self.visit_f64(v as f64)
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<MaxHeight, E> {
+                #[allow(clippy::cast_precision_loss)]
+                self.visit_f64(v as f64)
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 impl ViewResult {
@@ -145,6 +206,7 @@ impl ViewResult {
             groups: Vec::new(),
             summaries: Vec::new(),
             notices,
+            max_height: None,
         }
     }
 
@@ -162,6 +224,23 @@ impl ViewResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_height_round_trips_and_defaults() {
+        let mut r = ViewResult::empty(Kind::Table, Vec::new());
+        let j = serde_json::to_value(&r).unwrap();
+        assert!(j.get("max_height").is_none(), "absent field = default");
+        assert_eq!(
+            serde_json::from_value::<ViewResult>(j).unwrap().max_height,
+            None
+        );
+        for m in [MaxHeight::Px(600.5), MaxHeight::Uncapped] {
+            r.max_height = Some(m);
+            let back: ViewResult =
+                serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+            assert_eq!(back.max_height, Some(m));
+        }
+    }
 
     #[test]
     fn cell_encoding_is_tagged() {

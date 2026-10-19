@@ -459,6 +459,19 @@ summaries = { "note.word-count" = "Sum" }
 limit = 10
 "##;
 
+/// Plan round-8 WP-2: `maxHeight` travels from the def to the `ViewResult`.
+#[test]
+fn max_height_reaches_the_result() {
+    let def = "[[views]]\ntype = \"table\"\nname = \"Capped\"\nmaxHeight = 600\norder = [\"file.name\"]\n\n[[views]]\ntype = \"table\"\nname = \"Open\"\nmaxHeight = \"none\"\norder = [\"file.name\"]\n\n[[views]]\ntype = \"table\"\nname = \"Plain\"\norder = [\"file.name\"]\n";
+    let fx = fixture(&[("mh.toml", def)]);
+    let mut h = fx.host();
+    assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());
+    let mut mh = |v: &str| fx.run(&mut h, &format!("mh#{v}"), None).max_height;
+    assert_eq!(mh("Capped"), Some(crate::result::MaxHeight::Px(600.0)));
+    assert_eq!(mh("Open"), Some(crate::result::MaxHeight::Uncapped));
+    assert_eq!(mh("Plain"), None);
+}
+
 #[test]
 fn table_view_end_to_end() {
     let fx = fixture(&[("daily-reading-list.toml", READING), ("month.toml", MONTH)]);

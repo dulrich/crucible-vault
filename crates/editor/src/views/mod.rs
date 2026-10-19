@@ -92,6 +92,18 @@ pub struct Decoded {
     pub column_keys: Vec<String>,
     pub lines: Vec<Line>,
     pub notices: Vec<String>,
+    /// Plan round-8 WP-2: the view's `maxHeight` (`None` = [`MAX_HEIGHT`]).
+    pub max_height: Option<views::result::MaxHeight>,
+}
+
+/// Plan round-8 WP-2: the fixed height of a virtual list for `d`, or `None` when the view is
+/// uncapped (`maxHeight = "none"`: all rows render as a plain column inside Reading's scroll).
+pub fn list_height(d: &Decoded) -> Option<f32> {
+    match d.max_height {
+        None => Some(MAX_HEIGHT),
+        Some(views::result::MaxHeight::Px(h)) => Some(h),
+        Some(views::result::MaxHeight::Uncapped) => None,
+    }
 }
 
 /// A cache entry's state.
@@ -385,12 +397,16 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
                 .collect()
         })
         .unwrap_or_default();
+    let max_height = v
+        .get("max_height")
+        .and_then(|m| serde_json::from_value(m.clone()).ok());
     Ok(Decoded {
         kind,
         columns,
         column_keys,
         lines,
         notices,
+        max_height,
     })
 }
 
@@ -859,7 +875,7 @@ fn result_view<'a>(
                 .color(t.text_faint.to_color())
                 .into(),
         );
-    } else if d.lines.len() > VIRTUAL_THRESHOLD {
+    } else if let Some(cap) = list_height(d).filter(|_| d.lines.len() > VIRTUAL_THRESHOLD) {
         let (sid, shost) = (id.to_owned(), host.to_owned());
         let list = VirtualList::new(&d.lines, row_height(scale), window, move |w| {
             Message::Views(ViewsMsg::Scrolled {
@@ -872,7 +888,7 @@ fn result_view<'a>(
         .view(move |_, l| line_view(d, l, t, scale));
         items.push(
             container(list)
-                .height(Length::Fixed(MAX_HEIGHT))
+                .height(Length::Fixed(cap))
                 .width(Length::Fill)
                 .into(),
         );
