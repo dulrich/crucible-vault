@@ -1,9 +1,14 @@
-//! Forward-only, versioned migrations for `state.db`.
+//! Forward-only, versioned migrations for `state.db`, from the 0.1.0 baseline (D23).
 //!
-//! The ladder is keyed on SQLite's `PRAGMA user_version`: step `i` (0-based) moves the
-//! database from version `i` to `i + 1`, each inside its own transaction. state.db is
-//! primary data (D14), so there is no down-migration and no "drop and rebuild" path;
-//! a version newer than [`MIGRATIONS`] knows is refused with [`StateError::NewerSchema`].
+//! The schema is keyed on SQLite's `PRAGMA user_version`. A fresh database (version 0) is
+//! created directly at [`BASELINE_VERSION`] from [`BASELINE`], the schema the retired v1→v10
+//! chain produced (fixture `tests/fixtures/baseline-v10-schema.txt`). A database at the
+//! baseline opens with no schema write. Versions `1..BASELINE_VERSION` predate the baseline and
+//! are refused with [`StateError::PreBaseline`]; a version newer than this build knows is
+//! refused with [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no
+//! down-migration and no "drop and rebuild" path. Later schema changes append to
+//! [`MIGRATIONS`]: entry `i` moves the database from `BASELINE_VERSION + i` to
+//! `BASELINE_VERSION + i + 1`, each inside its own transaction.
 //!
 //! Crucible's store self-migrates via a meta-table version cookie
 //! (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/AGENTS.md:55`, `db/SqliteJobStore.ts`); we use
@@ -12,10 +17,12 @@
 use crate::error::{Result, StateError};
 use rusqlite::Connection;
 
-/// Ordered migration steps. Later WPs append (never edit) entries.
-pub const MIGRATIONS: &[&str] = &[
-    // v1: jobs, service health, shadow writes.
-    r"
+/// `user_version` of the 0.1.0 baseline schema.
+pub const BASELINE_VERSION: i64 = 10;
+
+/// The 0.1.0 baseline schema (state.db v10). Byte-for-byte the `sqlite_master` the v1→v10
+/// chain produced, including the column order its `ALTER TABLE … ADD COLUMN` steps left.
+pub const BASELINE: &str = r"
 CREATE TABLE jobs (
     id              TEXT PRIMARY KEY,
     job_type        TEXT NOT NULL,
@@ -35,11 +42,7 @@ CREATE TABLE jobs (
     failure_reason  TEXT,
     failure_kind    TEXT,
     notes           TEXT
-);
-CREATE INDEX jobs_claim ON jobs(status, lane, id);
-CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL;
-CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL;
-
+, cancel_requested INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE service_health (
     service               TEXT PRIMARY KEY,
     state                 TEXT NOT NULL,
@@ -51,7 +54,6 @@ CREATE TABLE service_health (
     retry_at_ms           INTEGER,
     probe_acquired_at_ms  INTEGER
 );
-
 CREATE TABLE shadow_writes (
     seq          INTEGER PRIMARY KEY AUTOINCREMENT,
     op           TEXT NOT NULL,
@@ -61,10 +63,6 @@ CREATE TABLE shadow_writes (
     job_id       TEXT,
     at_ms        INTEGER NOT NULL
 );
-CREATE INDEX shadow_writes_at ON shadow_writes(at_ms);
-",
-    // v2 (WP-9): per-step checkpoints (audit E2) and schedule last-run bookkeeping.
-    r"
 CREATE TABLE job_step_checkpoints (
     job_id      TEXT NOT NULL,
     step_index  INTEGER NOT NULL,
@@ -72,15 +70,10 @@ CREATE TABLE job_step_checkpoints (
     at_ms       INTEGER NOT NULL,
     PRIMARY KEY (job_id, step_index)
 );
-
 CREATE TABLE schedule_runs (
     action_id    TEXT PRIMARY KEY,
     last_run_ms  INTEGER NOT NULL
 );
-",
-    // v3 (WP-13): image descriptions the search feed folds into chunk content and contentHash
-    // (Crucible `imageDescriptionStore.ts`; key = content md5; raw = the full record JSON).
-    r"
 CREATE TABLE image_descriptions (
     md5               TEXT PRIMARY KEY,
     kind              TEXT NOT NULL,
@@ -90,26 +83,12 @@ CREATE TABLE image_descriptions (
     described_at      TEXT NOT NULL,
     raw               TEXT NOT NULL
 );
-",
-    // v4 (plan cut-over-now WP-1): the single-row cut-over marker (its writer, `cv cutover mark`, was retired in WP-R5).
-    r"
 CREATE TABLE cutover_marker (
     id             INTEGER PRIMARY KEY CHECK (id = 1),
     vault          TEXT NOT NULL,
     created_at_ms  INTEGER NOT NULL,
     created_by     TEXT NOT NULL
 );
-",
-    // v5 (plan v0-automation-pipelines WP-1): every A2 table.
-    // - link_records: Crucible's columns verbatim (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/db/
-    //   sqlite.ts:147-166`; `source_notes` JSON array of `[[path]]`, `tracked_source` JSON scalar),
-    //   plus a `yt_video_id` index next to Crucible's `x_status_id` one.
-    // - tracker_items: one row per tracked item ever seen (outcome line|note|ignored|skipped);
-    //   `full_body` is the per-item automatable evidence (1/0, NULL = not a blog / unknown) the
-    //   blog tracker reads over a source's last N rows by `first_seen_ms`.
-    // - ignored_ids: ids the trackers must never surface (Ignore Shorts, user ignores).
-    // - api_usage: quota units per service per local day.
-    r"
 CREATE TABLE link_records (
     canonical_url        TEXT PRIMARY KEY,
     url                  TEXT NOT NULL,
@@ -127,9 +106,6 @@ CREATE TABLE link_records (
     yt_video_id          TEXT,
     x_status_id          TEXT
 );
-CREATE INDEX link_records_x_status_id ON link_records(x_status_id);
-CREATE INDEX link_records_yt_video_id ON link_records(yt_video_id);
-
 CREATE TABLE tracker_items (
     source_kind    TEXT NOT NULL,
     source_key     TEXT NOT NULL,
@@ -140,12 +116,9 @@ CREATE TABLE tracker_items (
     day            TEXT NOT NULL,
     outcome        TEXT NOT NULL CHECK (outcome IN ('line', 'note', 'ignored', 'skipped')),
     score          REAL,
-    full_body      INTEGER,
+    full_body      INTEGER, done_ms INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
     PRIMARY KEY (source_kind, source_key, item_id)
 );
-CREATE INDEX tracker_items_day ON tracker_items(day);
-CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key, first_seen_ms);
-
 CREATE TABLE ignored_ids (
     kind    TEXT NOT NULL,
     id      TEXT NOT NULL,
@@ -153,49 +126,29 @@ CREATE TABLE ignored_ids (
     at_ms   INTEGER NOT NULL,
     PRIMARY KEY (kind, id)
 );
-
 CREATE TABLE api_usage (
     service  TEXT NOT NULL,
     day      TEXT NOT NULL,
     units    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (service, day)
 );
-",
-    // v6 (plan round-5-reading-pickers-intake WP-11): the intake view's done toggle
-    // (`done_ms`, NULL = not done) and a captured note's vault-relative path (`note` outcomes).
-    r"
-ALTER TABLE tracker_items ADD COLUMN done_ms INTEGER;
-ALTER TABLE tracker_items ADD COLUMN note_path TEXT;
-",
-    // v7 (plan intake-view-source-length WP-1): the source's display name at record time and the
-    // item length (YouTube duration seconds / blog body word count) for the intake view.
-    r"
-ALTER TABLE tracker_items ADD COLUMN source_name TEXT;
-ALTER TABLE tracker_items ADD COLUMN duration_s INTEGER;
-ALTER TABLE tracker_items ADD COLUMN word_count INTEGER;
-",
-    // v8 (plan round-6-feedback-todos WP-6): the intake item's free-form task status (single
-    // char, NULL = open), backfilled from the legacy `done_ms` (kept, no writer).
-    r"
-ALTER TABLE tracker_items ADD COLUMN status TEXT;
-UPDATE tracker_items SET status = 'x' WHERE done_ms IS NOT NULL;
-",
-    // v9 (plan round-8-intake-views-anchor WP-1): data only — existing ignored rows (Ignore
-    // Shorts / ignored ids) become cancelled intakes; a set status is kept.
-    r"
-UPDATE tracker_items SET status = '-' WHERE outcome = 'ignored' AND status IS NULL;
-",
-    // v10 (plan tn-review-baseline-remediation WP-R4): durable cancellation — a cancel on a
-    // running (claimed) job sets this flag; the runner reads it before each step.
-    r"
-ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
-",
-];
+CREATE INDEX jobs_claim ON jobs(status, lane, id);
+CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL;
+CREATE INDEX link_records_x_status_id ON link_records(x_status_id);
+CREATE INDEX link_records_yt_video_id ON link_records(yt_video_id);
+CREATE INDEX shadow_writes_at ON shadow_writes(at_ms);
+CREATE INDEX tracker_items_day ON tracker_items(day);
+CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key, first_seen_ms);
+";
+
+/// Post-baseline steps (v11+). Later WPs append (never edit) entries.
+pub const MIGRATIONS: &[&str] = &[];
 
 /// Highest schema version this build knows.
 #[must_use]
 pub fn latest_version() -> i64 {
-    i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX)
+    BASELINE_VERSION + i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX - BASELINE_VERSION)
 }
 
 /// Current `user_version` of `conn`.
@@ -203,19 +156,42 @@ pub fn current_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
 }
 
-/// Apply every pending step. Returns the resulting version.
-pub fn migrate(conn: &mut Connection) -> Result<i64> {
-    let found = current_version(conn)?;
+/// Refuse a version this build cannot open: pre-baseline (`1..BASELINE_VERSION`) or newer than
+/// [`latest_version`]. Version 0 (fresh) passes.
+pub fn check_version(found: i64) -> Result<()> {
     let supported = latest_version();
     if found > supported {
         return Err(StateError::NewerSchema { found, supported });
     }
+    if (1..BASELINE_VERSION).contains(&found) {
+        return Err(StateError::PreBaseline {
+            found,
+            baseline: BASELINE_VERSION,
+        });
+    }
+    Ok(())
+}
+
+/// Create the baseline on a fresh database, then apply every pending post-baseline step.
+/// Returns the resulting version. A database already at [`latest_version`] is not written.
+pub fn migrate(conn: &mut Connection) -> Result<i64> {
+    let found = current_version(conn)?;
+    check_version(found)?;
+    if found == 0 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(BASELINE)?;
+        tx.pragma_update(None, "user_version", BASELINE_VERSION)?;
+        tx.commit()?;
+        tracing::info!(version = BASELINE_VERSION, "state.db created at baseline");
+    }
+    let applied = current_version(conn)? - BASELINE_VERSION;
     for (idx, sql) in MIGRATIONS
         .iter()
         .enumerate()
-        .skip(usize::try_from(found).unwrap_or(0))
+        .skip(usize::try_from(applied).unwrap_or(0))
     {
-        let target = i64::try_from(idx).unwrap_or(i64::MAX) + 1;
+        let target =
+            BASELINE_VERSION + i64::try_from(idx).unwrap_or(i64::MAX - BASELINE_VERSION) + 1;
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", target)?;

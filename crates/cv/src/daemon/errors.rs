@@ -48,6 +48,7 @@ pub(crate) fn rpc_from_state(e: StateError) -> RpcError {
         e @ (StateError::Sqlite(_)
         | StateError::Json(_)
         | StateError::NewerSchema { .. }
+        | StateError::PreBaseline { .. }
         | StateError::Corrupt { .. }) => internal(e),
     }
 }

@@ -52,163 +52,6 @@ fn migrations_reach_latest_and_reopen_is_idempotent() {
 }
 
 #[test]
-fn v4_database_migrates_to_v5_and_tracker_accessors_work() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.db");
-    {
-        let mut c = rusqlite::Connection::open(&p).unwrap();
-        for (i, sql) in migrate::MIGRATIONS.iter().take(4).enumerate() {
-            let tx = c.transaction().unwrap();
-            tx.execute_batch(sql).unwrap();
-            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
-                .unwrap();
-            tx.commit().unwrap();
-        }
-        c.execute(
-            "INSERT INTO cutover_marker (id, vault, created_at_ms, created_by) VALUES (1, 'v', 1, 't')",
-            [],
-        )
-        .unwrap();
-    }
-    let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
-    let n: i64 = s
-        .conn()
-        .query_row("SELECT COUNT(*) FROM cutover_marker", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 1, "v4 data survives");
-    s.conn()
-        .execute(
-            "INSERT INTO link_records (canonical_url, url, yt_video_id) VALUES ('c', 'u', 'y')",
-            [],
-        )
-        .unwrap();
-    let item = TrackerItem {
-        source_kind: "blog".into(),
-        source_key: "https://f.example/feed".into(),
-        item_id: "p1".into(),
-        title: "T".into(),
-        url: "https://f.example/p1".into(),
-        first_seen_ms: 10,
-        day: "2026-10-15".into(),
-        outcome: TrackerOutcome::Note,
-        score: None,
-        full_body: Some(true),
-        note_path: None,
-        source_name: None,
-        duration_s: None,
-        word_count: None,
-    };
-    assert!(s.insert_tracker_item(&item).unwrap());
-    assert!(
-        !s.insert_tracker_item(&item).unwrap(),
-        "first sighting wins"
-    );
-    assert_eq!(
-        s.tracker_item("blog", "https://f.example/feed", "p1")
-            .unwrap(),
-        Some(item.clone())
-    );
-    assert_eq!(
-        s.tracker_items_for_source("blog", "https://f.example/feed", 5)
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(s.insert_ignored_id("yt", "abc", "short", 1).unwrap());
-    assert!(!s.insert_ignored_id("yt", "abc", "short", 2).unwrap());
-    assert!(s.is_ignored("yt", "abc").unwrap());
-    assert_eq!(s.ignored_ids("yt").unwrap(), vec!["abc".to_owned()]);
-    assert_eq!(s.add_api_usage("youtube", "2026-10-15", 3).unwrap(), 3);
-    assert_eq!(s.add_api_usage("youtube", "2026-10-15", 2).unwrap(), 5);
-    assert_eq!(s.api_usage("youtube", "2026-10-16").unwrap(), 0);
-}
-
-#[test]
-fn v5_database_migrates_to_v6_preserving_tracker_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.db");
-    {
-        let mut c = rusqlite::Connection::open(&p).unwrap();
-        for (i, sql) in migrate::MIGRATIONS.iter().take(5).enumerate() {
-            let tx = c.transaction().unwrap();
-            tx.execute_batch(sql).unwrap();
-            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
-                .unwrap();
-            tx.commit().unwrap();
-        }
-        c.execute(
-            "INSERT INTO tracker_items (source_kind, source_key, item_id, title, url,
-                first_seen_ms, day, outcome) VALUES ('youtube', 'UC1', 'v1', 'T', 'u', 1, 'd', 'line')",
-            [],
-        )
-        .unwrap();
-    }
-    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
-    let it = s.tracker_item("youtube", "UC1", "v1").unwrap().unwrap();
-    assert_eq!((it.title.as_str(), it.note_path), ("T", None));
-    assert_eq!(
-        (it.source_name, it.duration_s, it.word_count),
-        (None, None, None),
-        "v7 columns are NULL on pre-v7 rows"
-    );
-    assert_eq!(
-        s.tracker_item_done("youtube", "UC1", "v1").unwrap(),
-        Some(false)
-    );
-}
-
-#[test]
-fn v7_database_migrates_to_v8_backfilling_status_from_done_ms() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.db");
-    {
-        let mut c = rusqlite::Connection::open(&p).unwrap();
-        for (i, sql) in migrate::MIGRATIONS.iter().take(7).enumerate() {
-            let tx = c.transaction().unwrap();
-            tx.execute_batch(sql).unwrap();
-            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
-                .unwrap();
-            tx.commit().unwrap();
-        }
-        for (id, done) in [("v1", "5"), ("v2", "NULL")] {
-            c.execute(
-                &format!(
-                    "INSERT INTO tracker_items (source_kind, source_key, item_id, title, url,
-                        first_seen_ms, day, outcome, done_ms)
-                     VALUES ('youtube', 'UC1', '{id}', 'T', 'u', 1, 'd', 'line', {done})"
-                ),
-                [],
-            )
-            .unwrap();
-        }
-    }
-    let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
-    assert_eq!(
-        s.tracker_item_status("youtube", "UC1", "v1").unwrap(),
-        Some(Some('x'))
-    );
-    assert_eq!(
-        s.tracker_item_status("youtube", "UC1", "v2").unwrap(),
-        Some(None)
-    );
-    assert!(
-        s.set_tracker_item_status("youtube", "UC1", "v2", Some('/'))
-            .unwrap()
-    );
-    assert_eq!(
-        s.tracker_item_status("youtube", "UC1", "v2").unwrap(),
-        Some(Some('/'))
-    );
-    assert_eq!(
-        s.tracker_item_done("youtube", "UC1", "v2").unwrap(),
-        Some(false)
-    );
-}
-
-#[test]
 fn set_tracker_item_done_round_trips_and_signals() {
     use std::sync::{Arc, Mutex};
     let (_d, mut s) = db();
@@ -288,6 +131,86 @@ fn fill_tracker_source_name_fills_only_null_rows_of_that_source() {
         vec!["tracker_items"],
         "signal only on change"
     );
+}
+
+/// `sqlite_master` + `user_version`, in the fixture's format.
+fn schema_dump(c: &rusqlite::Connection) -> String {
+    let mut st = c
+        .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+        .unwrap();
+    let rows: Vec<String> = st
+        .query_map([], |r| {
+            Ok(format!(
+                "{}|{}|{}|{}",
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "NULL".into())
+            ))
+        })
+        .unwrap()
+        .map(std::result::Result::unwrap)
+        .collect();
+    let v = migrate::current_version(c).unwrap();
+    format!("user_version={v}\n{}\n", rows.join("\n"))
+}
+
+/// D23: a fresh database gets exactly the schema the retired v1→v10 chain produced.
+#[test]
+fn fresh_baseline_matches_the_v10_chain_schema() {
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::BASELINE_VERSION);
+    assert_eq!(
+        schema_dump(&c),
+        include_str!("../tests/fixtures/baseline-v10-schema.txt")
+    );
+}
+
+/// D23: a database already at the baseline (the live state.db) opens with no write.
+#[test]
+fn baseline_database_opens_without_a_schema_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        migrate::migrate(&mut c).unwrap();
+    }
+    let mut c = rusqlite::Connection::open(&p).unwrap();
+    let before = schema_dump(&c);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::latest_version());
+    assert_eq!(c.total_changes(), 0, "no row written");
+    assert_eq!(schema_dump(&c), before, "no schema written");
+    drop(c);
+    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), migrate::BASELINE_VERSION);
+}
+
+/// D23: versions 1..=9 predate the 0.1.0 baseline and are refused, by writer and reader.
+#[test]
+fn pre_baseline_versions_are_refused() {
+    for v in 1..migrate::BASELINE_VERSION {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("state.db");
+        {
+            let c = rusqlite::Connection::open(&p).unwrap();
+            c.pragma_update(None, "user_version", v).unwrap();
+        }
+        let err = StateDb::open(&p, 1, QueueConfig::default()).unwrap_err();
+        assert!(
+            matches!(err, StateError::PreBaseline { found, baseline: 10 } if found == v),
+            "{err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("version {v} ")) && msg.contains("predates the 0.1.0 baseline"),
+            "{msg}"
+        );
+        assert!(matches!(
+            StateReader::open(&p),
+            Err(StateError::PreBaseline { .. })
+        ));
+    }
 }
 
 #[test]
@@ -904,30 +827,6 @@ fn unparseable_resource_keys_fail_closed_at_claim() {
 // ---- cut-over marker (plan cut-over-now WP-1) -------------------------------
 
 #[test]
-fn v3_to_v4_migration_keeps_rows_and_sets_no_marker() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.db");
-    {
-        let c = rusqlite::Connection::open(&p).unwrap();
-        for sql in &migrate::MIGRATIONS[..3] {
-            c.execute_batch(sql).unwrap();
-        }
-        c.pragma_update(None, "user_version", 3).unwrap();
-        c.execute(
-            "INSERT INTO jobs (id, job_type, lane, status, params, resource_keys, created_ms)
-             VALUES ('j1', 't', 1, 'queued', '{}', '[]', 1)",
-            [],
-        )
-        .unwrap();
-    }
-    assert_eq!(StateReader::open(&p).unwrap().cutover().unwrap(), None);
-    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
-    assert!(s.job("j1").unwrap().is_some());
-    assert_eq!(s.cutover().unwrap(), None);
-}
-
-#[test]
 fn set_cutover_is_idempotent() {
     let (_d, mut s) = db();
     let a = s.set_cutover("/v", "me", 10).unwrap();
@@ -935,74 +834,6 @@ fn set_cutover_is_idempotent() {
     assert_eq!(a, b);
     assert_eq!(a.vault, "/v");
     assert_eq!(s.cutover().unwrap(), Some(a));
-}
-
-#[test]
-fn v8_database_migrates_to_v9_cancelling_ignored_rows_without_a_status() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.db");
-    {
-        let mut c = rusqlite::Connection::open(&p).unwrap();
-        for (i, sql) in migrate::MIGRATIONS.iter().take(8).enumerate() {
-            let tx = c.transaction().unwrap();
-            tx.execute_batch(sql).unwrap();
-            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
-                .unwrap();
-            tx.commit().unwrap();
-        }
-        for (id, outcome, status) in [
-            ("i1", "ignored", "NULL"),
-            ("i2", "ignored", "' '"),
-            ("l1", "line", "NULL"),
-        ] {
-            c.execute(
-                &format!(
-                    "INSERT INTO tracker_items (source_kind, source_key, item_id, title, url,
-                        first_seen_ms, day, outcome, status)
-                     VALUES ('youtube', 'UC1', '{id}', 'T', 'u', 1, 'd', '{outcome}', {status})"
-                ),
-                [],
-            )
-            .unwrap();
-        }
-    }
-    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
-    let st = |id| s.tracker_item_status("youtube", "UC1", id).unwrap();
-    assert_eq!(st("i1"), Some(Some('-')));
-    assert_eq!(st("i2"), Some(Some(' ')), "a set (open) status is kept");
-    assert_eq!(st("l1"), Some(None));
-}
-
-/// WP-R4: v9 → v10 adds `jobs.cancel_requested` (default 0) without touching existing rows.
-#[test]
-fn v9_database_migrates_to_v10_adding_cancel_requested() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.db");
-    {
-        let mut c = rusqlite::Connection::open(&p).unwrap();
-        for (i, sql) in migrate::MIGRATIONS.iter().take(9).enumerate() {
-            let tx = c.transaction().unwrap();
-            tx.execute_batch(sql).unwrap();
-            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
-                .unwrap();
-            tx.commit().unwrap();
-        }
-    }
-    {
-        let c = rusqlite::Connection::open(&p).unwrap();
-        c.execute(
-            "INSERT INTO jobs (id, job_type, lane, status, params, resource_keys, created_ms)
-             VALUES ('j1', 't', 1, 'running', '{}', '[]', 1)",
-            [],
-        )
-        .unwrap();
-    }
-    let mut s = StateDb::open(&p, 3, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 10);
-    assert!(!s.cancel_requested("j1").unwrap());
-    s.cancel("j1", 4).unwrap();
-    assert!(s.cancel_requested("j1").unwrap());
 }
 
 /// SR10: a scheduled enqueue writes the job and the `schedule_runs` row in one transaction —

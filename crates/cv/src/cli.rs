@@ -1,5 +1,5 @@
 //! Hand-rolled CLI dispatch (no clap is pinned): `cv daemon`, `cv uri <url>`, `cv status`,
-//! `cv search import` (retired stub), `cv signals …`, `cv jobs|intake|run …`, `cv --help`.
+//! `cv signals …`, `cv jobs|intake|run …`, `cv --help`.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text (`{JOBS}` is replaced by [`crate::jobs::USAGE`]).
-const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print generation, queue counts, config errors, service health\n  cv search ...    import [...]: retired companion import, a no-op that exits 0 (kept for migration 0007)\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
+const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print generation, queue counts, config errors, service health\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
 
 /// Usage text.
 #[must_use]
@@ -38,13 +38,6 @@ pub fn run(args: &[String]) -> i32 {
             print!("{}", status_command(&c)?);
             Ok(())
         })),
-        // The companion import was retired (plan tn-review-baseline-remediation WP-R7); the verb
-        // stays an exit-0 stub until WP-R24 deletes migration 0007, which probes
-        // `cv search import --status` (exit 0 = "import state present — companion import skipped").
-        Some("search") if args.get(1).map(String::as_str) == Some("import") => {
-            println!("companion import retired (WP-R7); nothing to do");
-            0
-        }
         Some("signals") => crate::signals::run(&args[1..]),
         Some("jobs") => crate::jobs::run(args),
         Some("intake") => crate::jobs::run(args),

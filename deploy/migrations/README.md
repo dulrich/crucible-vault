@@ -1,5 +1,7 @@
 # Install migrations
 
+**Baseline 0.1.0 (D23, 2026-10-19).** Every migration shipped before the 0.1.0 baseline (`0001-vault-sweeps-config` … `0011-search-reembed`) was applied on this machine and folded into it; the files are deleted and `state.db` starts at the v10 baseline. Numbering restarts at `0001` after the baseline. A new migration's id (`<NNNN>-<slug>`) must not reuse a pre-baseline id: the ledger key is the full id, so `0001-<new-slug>` never collides with `0001-vault-sweeps-config`, but reusing an old slug with its old number would be skipped as already applied. Ledger lines for deleted pre-baseline files are ignored by `./install.sh`.
+
 `./install.sh` applies each `NNNN-<slug>.sh` here once, in name order, and records it in `${XDG_STATE_HOME:-~/.local/state}/crucible-vault/install.applied` (one `<id>:<phase> <date> <commit>` line per applied phase). A recorded phase never runs again, so re-running `./install.sh` only rebuilds and restarts.
 
 A migration is a bash file that defines one or both functions:

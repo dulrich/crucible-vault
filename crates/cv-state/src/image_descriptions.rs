@@ -280,35 +280,6 @@ mod tests {
     }
 
     #[test]
-    fn v2_database_migrates_to_v3_keeping_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("state.db");
-        {
-            let mut c = rusqlite::Connection::open(&p).unwrap();
-            let tx = c.transaction().unwrap();
-            tx.execute_batch(migrate::MIGRATIONS[0]).unwrap();
-            tx.execute_batch(migrate::MIGRATIONS[1]).unwrap();
-            tx.pragma_update(None, "user_version", 2).unwrap();
-            tx.execute(
-                "INSERT INTO jobs (id, job_type, lane, status, params, resource_keys, created_ms) VALUES ('j1','t',1,'queued','{}','[]',5)",
-                [],
-            )
-            .unwrap();
-            tx.execute(
-                "INSERT INTO job_step_checkpoints (job_id, step_index, outcome, at_ms) VALUES ('j1', 0, '{}', 6)",
-                [],
-            )
-            .unwrap();
-            tx.commit().unwrap();
-        }
-        let mut s = StateDb::open(&p, 10, QueueConfig::default()).unwrap();
-        assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
-        assert_eq!(s.job("j1").unwrap().unwrap().job_type, "t");
-        assert_eq!(s.checkpoints("j1").unwrap().len(), 1);
-        assert!(s.put_image_description(&rec("aa", "x")).unwrap());
-    }
-
-    #[test]
     fn put_get_and_batch() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = StateDb::open(&dir.path().join("s.db"), 1, QueueConfig::default()).unwrap();

@@ -18,6 +18,17 @@ pub enum StateError {
         /// Highest version this build knows.
         supported: i64,
     },
+    /// The database predates the 0.1.0 baseline (D23): its `user_version` is below the
+    /// baseline and the pre-baseline migration chain no longer ships.
+    #[error(
+        "state.db schema version {found} predates the 0.1.0 baseline (v{baseline}); upgrade it with a pre-0.1.0 cv build first"
+    )]
+    PreBaseline {
+        /// Version found on disk.
+        found: i64,
+        /// The baseline version this build creates and accepts.
+        baseline: i64,
+    },
     /// No job with this id exists.
     #[error("no such job: {0}")]
     NoSuchJob(String),

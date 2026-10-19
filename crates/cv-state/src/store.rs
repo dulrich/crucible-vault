@@ -694,11 +694,7 @@ impl StateReader {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let found = migrate::current_version(&conn)?;
-        let supported = migrate::latest_version();
-        if found > supported {
-            return Err(StateError::NewerSchema { found, supported });
-        }
+        migrate::check_version(migrate::current_version(&conn)?)?;
         Ok(Self { conn })
     }
 

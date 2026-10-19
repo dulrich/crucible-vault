@@ -1,0 +1,128 @@
+user_version=10
+index|jobs_claim|jobs|CREATE INDEX jobs_claim ON jobs(status, lane, id)
+index|jobs_dedupe|jobs|CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL
+index|jobs_settled|jobs|CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL
+index|link_records_x_status_id|link_records|CREATE INDEX link_records_x_status_id ON link_records(x_status_id)
+index|link_records_yt_video_id|link_records|CREATE INDEX link_records_yt_video_id ON link_records(yt_video_id)
+index|shadow_writes_at|shadow_writes|CREATE INDEX shadow_writes_at ON shadow_writes(at_ms)
+index|sqlite_autoindex_api_usage_1|api_usage|NULL
+index|sqlite_autoindex_ignored_ids_1|ignored_ids|NULL
+index|sqlite_autoindex_image_descriptions_1|image_descriptions|NULL
+index|sqlite_autoindex_job_step_checkpoints_1|job_step_checkpoints|NULL
+index|sqlite_autoindex_jobs_1|jobs|NULL
+index|sqlite_autoindex_link_records_1|link_records|NULL
+index|sqlite_autoindex_schedule_runs_1|schedule_runs|NULL
+index|sqlite_autoindex_service_health_1|service_health|NULL
+index|sqlite_autoindex_tracker_items_1|tracker_items|NULL
+index|tracker_items_day|tracker_items|CREATE INDEX tracker_items_day ON tracker_items(day)
+index|tracker_items_source_seen|tracker_items|CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key, first_seen_ms)
+table|api_usage|api_usage|CREATE TABLE api_usage (
+    service  TEXT NOT NULL,
+    day      TEXT NOT NULL,
+    units    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (service, day)
+)
+table|cutover_marker|cutover_marker|CREATE TABLE cutover_marker (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    vault          TEXT NOT NULL,
+    created_at_ms  INTEGER NOT NULL,
+    created_by     TEXT NOT NULL
+)
+table|ignored_ids|ignored_ids|CREATE TABLE ignored_ids (
+    kind    TEXT NOT NULL,
+    id      TEXT NOT NULL,
+    reason  TEXT NOT NULL DEFAULT '',
+    at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (kind, id)
+)
+table|image_descriptions|image_descriptions|CREATE TABLE image_descriptions (
+    md5               TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL,
+    narrative         TEXT NOT NULL,
+    extraction        TEXT NOT NULL,
+    description_hash  TEXT NOT NULL,
+    described_at      TEXT NOT NULL,
+    raw               TEXT NOT NULL
+)
+table|job_step_checkpoints|job_step_checkpoints|CREATE TABLE job_step_checkpoints (
+    job_id      TEXT NOT NULL,
+    step_index  INTEGER NOT NULL,
+    outcome     TEXT NOT NULL,
+    at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (job_id, step_index)
+)
+table|jobs|jobs|CREATE TABLE jobs (
+    id              TEXT PRIMARY KEY,
+    job_type        TEXT NOT NULL,
+    lane            INTEGER NOT NULL,
+    status          TEXT NOT NULL,
+    dedupe_key      TEXT,
+    params          TEXT NOT NULL,
+    resource_keys   TEXT NOT NULL,
+    service         TEXT,
+    created_ms      INTEGER NOT NULL,
+    claim_token     TEXT,
+    claimed_at_ms   INTEGER,
+    defer_until_ms  INTEGER,
+    settled_at_ms   INTEGER,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    error           TEXT,
+    failure_reason  TEXT,
+    failure_kind    TEXT,
+    notes           TEXT
+, cancel_requested INTEGER NOT NULL DEFAULT 0)
+table|link_records|link_records|CREATE TABLE link_records (
+    canonical_url        TEXT PRIMARY KEY,
+    url                  TEXT NOT NULL,
+    domain               TEXT NOT NULL DEFAULT '',
+    source_notes         TEXT NOT NULL DEFAULT '[]',
+    first_seen           TEXT,
+    last_seen            TEXT,
+    state                TEXT NOT NULL DEFAULT 'pending',
+    discovery_method     TEXT NOT NULL DEFAULT 'scan',
+    tracked_source       TEXT NOT NULL DEFAULT 'false',
+    tracked_source_type  TEXT,
+    tracked_source_note  TEXT,
+    referred_material    TEXT,
+    decision_reason      TEXT,
+    yt_video_id          TEXT,
+    x_status_id          TEXT
+)
+table|schedule_runs|schedule_runs|CREATE TABLE schedule_runs (
+    action_id    TEXT PRIMARY KEY,
+    last_run_ms  INTEGER NOT NULL
+)
+table|service_health|service_health|CREATE TABLE service_health (
+    service               TEXT PRIMARY KEY,
+    state                 TEXT NOT NULL,
+    failure_score         INTEGER NOT NULL,
+    open_count            INTEGER NOT NULL,
+    last_kind             TEXT,
+    last_reason           TEXT,
+    opened_at_ms          INTEGER,
+    retry_at_ms           INTEGER,
+    probe_acquired_at_ms  INTEGER
+)
+table|shadow_writes|shadow_writes|CREATE TABLE shadow_writes (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    op           TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    before_hash  TEXT,
+    after_hash   TEXT,
+    job_id       TEXT,
+    at_ms        INTEGER NOT NULL
+)
+table|sqlite_sequence|sqlite_sequence|CREATE TABLE sqlite_sequence(name,seq)
+table|tracker_items|tracker_items|CREATE TABLE tracker_items (
+    source_kind    TEXT NOT NULL,
+    source_key     TEXT NOT NULL,
+    item_id        TEXT NOT NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    url            TEXT NOT NULL DEFAULT '',
+    first_seen_ms  INTEGER NOT NULL,
+    day            TEXT NOT NULL,
+    outcome        TEXT NOT NULL CHECK (outcome IN ('line', 'note', 'ignored', 'skipped')),
+    score          REAL,
+    full_body      INTEGER, done_ms INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
+    PRIMARY KEY (source_kind, source_key, item_id)
+)
