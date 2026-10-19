@@ -698,3 +698,40 @@ fn tasks_row_shows_its_status_and_toggles_through_the_note_edit_path() {
     };
     assert!(matches!(task_row_status(&bare), (' ', None)));
 }
+
+/// Plan round-8-intake-views-anchor WP-1: a keyed row whose status cell is `-` is cancelled (its
+/// text cells draw struck + faint); other statuses, unkeyed rows and non-status columns are not.
+#[test]
+fn cancelled_status_row_draws_struck() {
+    let key = views::result::TrackerKey {
+        source_kind: "youtube".into(),
+        source_key: "UC1".into(),
+        item_id: "v1".into(),
+    }
+    .encode();
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(
+        ID,
+        ViewResult(json!({
+            "kind": "table",
+            "columns": [{"key": "title", "label": "Title"}, {"key": "status", "label": "Done"}],
+            "groups": [{"rows": [
+                {"key": key, "cells": [{"t": "text", "v": "A"}, {"t": "text", "v": "-"}]},
+                {"key": key, "cells": [{"t": "text", "v": "B"}, {"t": "text", "v": "x"}]},
+                {"key": key, "cells": [{"t": "text", "v": "C"}, {"t": "null"}]},
+                {"cells": [{"t": "text", "v": "D"}, {"t": "text", "v": "-"}]}
+            ], "summaries": []}],
+            "summaries": [],
+            "notices": []
+        })),
+    )
+    .expect("script");
+    need(&mut app);
+    let rows = intake_rows(&app);
+    let cancelled: Vec<bool> = rows.iter().map(|(r, k)| row_cancelled(r, k)).collect();
+    assert_eq!(cancelled, [true, false, false, false]);
+    let (r, k) = &rows[0];
+    let titles_only = vec!["title".to_owned(), "other".to_owned()];
+    assert!(!row_cancelled(r, &titles_only));
+    assert_eq!(status_cell(r, k, 1), Some(Some('-')));
+}

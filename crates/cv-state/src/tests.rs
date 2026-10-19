@@ -186,7 +186,7 @@ fn v7_database_migrates_to_v8_backfilling_status_from_done_ms() {
         }
     }
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 8);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     assert_eq!(
         s.tracker_item_status("youtube", "UC1", "v1").unwrap(),
         Some(Some('x'))
@@ -1059,4 +1059,41 @@ fn cancel_unfinished_covers_queued_deferred_running_and_keeps_rows() {
         assert_eq!(j.status, JobStatus::Cancelled, "{id}");
     }
     assert_eq!(s.cutover().unwrap(), None, "cancelling never marks");
+}
+
+#[test]
+fn v8_database_migrates_to_v9_cancelling_ignored_rows_without_a_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        for (i, sql) in migrate::MIGRATIONS.iter().take(8).enumerate() {
+            let tx = c.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        for (id, outcome, status) in [
+            ("i1", "ignored", "NULL"),
+            ("i2", "ignored", "' '"),
+            ("l1", "line", "NULL"),
+        ] {
+            c.execute(
+                &format!(
+                    "INSERT INTO tracker_items (source_kind, source_key, item_id, title, url,
+                        first_seen_ms, day, outcome, status)
+                     VALUES ('youtube', 'UC1', '{id}', 'T', 'u', 1, 'd', '{outcome}', {status})"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+    }
+    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 9);
+    let st = |id| s.tracker_item_status("youtube", "UC1", id).unwrap();
+    assert_eq!(st("i1"), Some(Some('-')));
+    assert_eq!(st("i2"), Some(Some(' ')), "a set (open) status is kept");
+    assert_eq!(st("l1"), Some(None));
 }

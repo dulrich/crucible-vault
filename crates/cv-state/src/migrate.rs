@@ -180,6 +180,11 @@ ALTER TABLE tracker_items ADD COLUMN word_count INTEGER;
 ALTER TABLE tracker_items ADD COLUMN status TEXT;
 UPDATE tracker_items SET status = 'x' WHERE done_ms IS NOT NULL;
 ",
+    // v9 (plan round-8-intake-views-anchor WP-1): data only — existing ignored rows (Ignore
+    // Shorts / ignored ids) become cancelled intakes; a set status is kept.
+    r"
+UPDATE tracker_items SET status = '-' WHERE outcome = 'ignored' AND status IS NULL;
+",
 ];
 
 /// Highest schema version this build knows.

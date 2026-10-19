@@ -120,10 +120,14 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     };
 
     if let Some(r) = reason {
-        ctx.state
+        let mut st = ctx
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert_ignored_id(KIND, &video_id, r, now_ms())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.insert_ignored_id(KIND, &video_id, r, now_ms())
+            .map_err(|e| StepError::failed(format!("state: {e}")))?;
+        // Round-8 WP-1: an existing intake row becomes a cancelled intake (status `-`).
+        st.cancel_tracker_items_by_id(KIND, &video_id)
             .map_err(|e| StepError::failed(format!("state: {e}")))?;
     }
 

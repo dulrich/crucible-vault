@@ -415,7 +415,7 @@ fn url_already_in_daily_is_recorded_not_rewritten() {
 }
 
 #[test]
-fn configured_short_is_ignored_without_a_line() {
+fn configured_short_is_ignored_with_a_cancelled_line() {
     let p = "[youtube]\nenabled = true\n[ignore_shorts]\nchannels = [\"UCa\"]\n";
     let w = world(&[], std_routes(), p, SOURCES);
     let o = run(&w).unwrap();
@@ -423,7 +423,9 @@ fn configured_short_is_ignored_without_a_line() {
     assert_eq!(n(&o, "lines"), json!(2));
     assert!(w.state.lock().unwrap().is_ignored(KIND, V2).unwrap());
     assert_eq!(outcome(&w, V2), Some(TrackerOutcome::Ignored));
-    assert_eq!(count(&daily(&w), &url(V2)), 0);
+    // Round-8 WP-1: `"lines"` mode writes the short as a cancelled `- [-]` line.
+    assert_eq!(count(&daily(&w), &url(V2)), 1);
+    assert_eq!(count(&daily(&w), "- [-] "), 1);
     // By channel name too.
     let p = "[youtube]\nenabled = true\n[ignore_shorts]\nchannels = [\"chan a\"]\n";
     let w = world(&[], std_routes(), p, SOURCES);
@@ -782,4 +784,140 @@ fn failed_duration_backfill_leaves_rows_null_and_a_later_run_fills_them() {
     assert_eq!(n(&o, "new"), json!(0));
     assert_eq!(row_of(&w, "UCa", V1).duration_s, Some(600));
     assert_eq!(row_of(&w, "UCa", V3).duration_s, Some(3600));
+}
+
+// Round-8 WP-1: ignored shorts are cancelled intakes; the retroactive pass.
+
+const SHORTS_UCA: &str =
+    "[youtube]\nenabled = true\n[ignore_shorts]\nchannels = [\"UCa\"]\nmax_seconds = 60\n";
+
+fn status_of(w: &World, key: &str, id: &str) -> Option<char> {
+    w.state
+        .lock()
+        .unwrap()
+        .tracker_item_status(KIND, key, id)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn view_mode_ignored_short_is_a_cancelled_intake_in_the_daily_intake_rows() {
+    let p = format!("{SHORTS_UCA}[intake]\nmode = \"view\"\n");
+    let w = world(&[], std_routes(), &p, SOURCES);
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "ignored"), json!(1));
+    assert!(daily(&w).is_empty(), "view mode writes no text");
+    assert_eq!(outcome(&w, V2), Some(TrackerOutcome::Ignored));
+    assert_eq!(status_of(&w, "UCa", V2), Some('-'));
+    assert_eq!(status_of(&w, "UCa", V1), None);
+    assert!(w.state.lock().unwrap().is_ignored(KIND, V2).unwrap());
+    // The daily-intake filter `outcome == "line" || "note" || "ignored"` over the day's rows.
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let rows = w
+        .state
+        .lock()
+        .unwrap()
+        .tracker_items_for_source(KIND, "UCa", 100)
+        .unwrap();
+    let shown: Vec<_> = rows
+        .iter()
+        .filter(|r| r.day == day)
+        .filter(|r| {
+            matches!(
+                r.outcome,
+                TrackerOutcome::Line | TrackerOutcome::Note | TrackerOutcome::Ignored
+            )
+        })
+        .map(|r| r.item_id.as_str())
+        .collect();
+    assert!(shown.contains(&V2), "{shown:?}");
+}
+
+#[test]
+fn lines_mode_ignored_short_writes_a_cancelled_line() {
+    let w = world(&[], std_routes(), SHORTS_UCA, SOURCES);
+    run(&w).unwrap();
+    let d = daily(&w);
+    let line = d.lines().find(|l| l.contains(&url(V2))).expect("V2 line");
+    assert!(line.starts_with("- [-] "), "{line}");
+    let v1 = d.lines().find(|l| l.contains(&url(V1))).expect("V1 line");
+    assert!(v1.starts_with("- [ ] "), "{v1}");
+    assert_eq!(status_of(&w, "UCa", V2), Some('-'));
+    assert_eq!(outcome(&w, V2), Some(TrackerOutcome::Ignored));
+}
+
+#[test]
+fn retroactive_pass_cancels_only_eligible_rows_once() {
+    let w = world(&[], std_routes(), SHORTS_UCA, SOURCES);
+    let mk = |key: &str, id: &str, dur: Option<i64>| cv_state::TrackerItem {
+        source_key: key.into(),
+        duration_s: dur,
+        ..legacy_row(id, TrackerOutcome::Line)
+    };
+    {
+        let mut s = w.state.lock().unwrap();
+        for it in [
+            mk("UCa", "eligible001", Some(30)),
+            mk("UCa", "zero0000001", Some(0)),
+            mk("UCa", "unknown0001", None), // the fake API omits it: the backfill marks it 0
+            mk("UCa", "done0000001", Some(30)),
+            mk("UCa", "space000001", Some(30)),
+            mk("UCa", "reopened001", Some(30)),
+            mk("UCz", "otherchan01", Some(30)),
+            mk("UCa", "longvideo01", Some(3000)),
+        ] {
+            assert!(s.insert_tracker_item(&it).unwrap());
+        }
+        s.set_tracker_item_status(KIND, "UCa", "done0000001", Some('x'))
+            .unwrap();
+        s.set_tracker_item_status(KIND, "UCa", "space000001", Some(' '))
+            .unwrap();
+        s.insert_ignored_id(KIND, "reopened001", "manual", 1)
+            .unwrap();
+    }
+    run(&w).unwrap();
+    assert_eq!(
+        row_of(&w, "UCa", "eligible001").outcome,
+        TrackerOutcome::Ignored
+    );
+    assert_eq!(status_of(&w, "UCa", "eligible001"), Some('-'));
+    assert!(
+        w.state
+            .lock()
+            .unwrap()
+            .is_ignored(KIND, "eligible001")
+            .unwrap()
+    );
+    for (key, id, st) in [
+        ("UCa", "zero0000001", None),
+        ("UCa", "unknown0001", None),
+        ("UCa", "done0000001", Some('x')),
+        ("UCa", "space000001", Some(' ')),
+        ("UCa", "reopened001", None),
+        ("UCz", "otherchan01", None),
+        ("UCa", "longvideo01", None),
+    ] {
+        assert_eq!(row_of(&w, key, id).outcome, TrackerOutcome::Line, "{id}");
+        assert_eq!(status_of(&w, key, id), st, "{id}");
+    }
+    assert_eq!(row_of(&w, "UCa", "unknown0001").duration_s, Some(0));
+    // A user reopen sticks: the ignored_ids row keeps the row ineligible; re-runs are no-ops.
+    w.state
+        .lock()
+        .unwrap()
+        .set_tracker_item_status(KIND, "UCa", "eligible001", None)
+        .unwrap();
+    let left = w
+        .state
+        .lock()
+        .unwrap()
+        .tracker_items_cancel_candidates(KIND, "UCa", 60, 500)
+        .unwrap();
+    assert!(left.is_empty(), "listed channel: none left {left:?}");
+    run(&w).unwrap();
+    assert_eq!(status_of(&w, "UCa", "eligible001"), None, "reopen sticks");
+    assert_eq!(
+        row_of(&w, "UCa", "eligible001").outcome,
+        TrackerOutcome::Ignored
+    );
 }

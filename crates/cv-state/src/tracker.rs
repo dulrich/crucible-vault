@@ -281,6 +281,103 @@ impl StateDb {
         Ok(n > 0)
     }
 
+    /// Distinct `(source_key, source_name)` pairs recorded for `source_kind` (round-8 WP-1: the
+    /// retroactive Ignore Shorts pass matches sources with the tracker's own predicate).
+    pub fn tracker_sources(&self, source_kind: &str) -> Result<Vec<(String, Option<String>)>> {
+        let mut st = self.conn().prepare(
+            "SELECT DISTINCT source_key, source_name FROM tracker_items
+             WHERE source_kind = ?1 ORDER BY source_key, source_name",
+        )?;
+        let rows = st
+            .query_map(params![source_kind], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// `(item_id, duration_s)` of up to `limit` rows of one source eligible for the retroactive
+    /// Ignore Shorts pass (round-8 WP-1): `outcome = 'line'`, NULL status, a known duration
+    /// (`> 0`; `0` is the backfill's "unavailable" sentinel) and no `ignored_ids` row for the
+    /// item, with `duration_s < below` (the Ignore Shorts cap). The caller applies the channel
+    /// predicate. Oldest first.
+    pub fn tracker_items_cancel_candidates(
+        &self,
+        source_kind: &str,
+        source_key: &str,
+        below: u32,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>> {
+        let mut st = self.conn().prepare(
+            "SELECT t.item_id, t.duration_s FROM tracker_items t
+             WHERE t.source_kind = ?1 AND t.source_key = ?2 AND t.outcome = 'line'
+               AND t.status IS NULL AND t.duration_s > 0 AND t.duration_s < ?4
+               AND NOT EXISTS (SELECT 1 FROM ignored_ids i
+                               WHERE i.kind = t.source_kind AND i.id = t.item_id)
+             ORDER BY t.first_seen_ms, t.item_id LIMIT ?3",
+        )?;
+        let rows = st
+            .query_map(
+                params![
+                    source_kind,
+                    source_key,
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                    i64::from(below)
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Cancels one still-eligible `line` row (round-8 WP-1): `outcome = 'ignored'`, status `-`,
+    /// plus an `ignored_ids` row (`reason`), in one transaction. A row whose status is non-NULL
+    /// or that is no longer a `line` is left alone. Returns whether the row changed.
+    pub fn cancel_tracker_item(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        reason: &str,
+        at_ms: i64,
+    ) -> Result<bool> {
+        let tx = self.conn().unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE tracker_items SET outcome = 'ignored', status = '-'
+             WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3
+               AND outcome = 'line' AND status IS NULL",
+            params![source_kind, source_key, item_id],
+        )?;
+        if n > 0 {
+            tx.execute(
+                "INSERT INTO ignored_ids (kind, id, reason, at_ms) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT DO NOTHING",
+                params![source_kind, item_id, reason, at_ms],
+            )?;
+        }
+        tx.commit()?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n > 0)
+    }
+
+    /// Sets status `-` on every row of `(source_kind, item_id)` (any source; the manual
+    /// `youtube-ignore-video` step, round-8 WP-1). Outcome is unchanged. Returns rows changed.
+    pub fn cancel_tracker_items_by_id(
+        &mut self,
+        source_kind: &str,
+        item_id: &str,
+    ) -> Result<usize> {
+        let n = self.conn().execute(
+            "UPDATE tracker_items SET status = '-'
+             WHERE source_kind = ?1 AND item_id = ?2 AND status IS NOT '-'",
+            params![source_kind, item_id],
+        )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n)
+    }
+
     /// Legacy alias of [`Self::set_tracker_item_status`]: `true` → `'x'`, `false` → open.
     pub fn set_tracker_item_done(
         &mut self,

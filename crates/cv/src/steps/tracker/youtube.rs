@@ -32,7 +32,9 @@ use super::super::youtube::{
     API_KEY_SECRET, find_metadata_note, metadata_root, no_key, write_metadata_note, youtube,
 };
 use super::super::{StepCtx, StepError, StepOutcome};
-use super::{Candidate, SeenSet, emit_line, fetch_bounded, md_files_under, now_ms, record};
+use super::{
+    Candidate, SeenSet, emit_cancelled, emit_line, fetch_bounded, md_files_under, now_ms, record,
+};
 
 /// `tracker_items.source_kind` and `ignored_ids.kind` of YouTube videos.
 pub const KIND: &str = "youtube";
@@ -134,6 +136,48 @@ fn backfill_durations(
         }
     }
     Ok(())
+}
+
+/// Retroactive Ignore Shorts (plan round-8-intake-views-anchor WP-1, "Decisions locked" 2): a
+/// `line` row with NULL status, a known duration (`> 0`), no `ignored_ids` row, and a channel +
+/// duration matching [`is_ignored_short`] (the tracker's own predicate, over the row's
+/// `source_key` and recorded `source_name`) becomes `ignored` with status `-` and gets an
+/// `ignored_ids` row (reason `short`), so it is never eligible again. At most
+/// [`BACKFILL_LIMIT`] candidates per source per run. Returns rows changed.
+fn cancel_listed_shorts(
+    ctx: &StepCtx<'_>,
+    channels: &[String],
+    max_seconds: u32,
+) -> Result<usize, StepError> {
+    let err = |e: cv_state::StateError| StepError::failed(format!("state: {e}"));
+    if channels.iter().all(|c| c.trim().is_empty()) {
+        return Ok(0);
+    }
+    let mut st = ctx
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut changed = 0;
+    for (source_key, source_name) in st.tracker_sources(KIND).map_err(err)? {
+        let names = [source_name.as_deref().unwrap_or("")];
+        // Channel match only (any duration under the cap); per-row durations are checked below.
+        if !is_ignored_short(&source_key, &names, Some(0), channels, max_seconds) {
+            continue;
+        }
+        let rows = st
+            .tracker_items_cancel_candidates(KIND, &source_key, max_seconds, BACKFILL_LIMIT)
+            .map_err(err)?;
+        for (id, duration) in rows {
+            if is_ignored_short(&source_key, &names, Some(duration), channels, max_seconds)
+                && st
+                    .cancel_tracker_item(KIND, &source_key, &id, "short", now_ms())
+                    .map_err(err)?
+            {
+                changed += 1;
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// Executes the step.
@@ -283,7 +327,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert_ignored_id(KIND, &id, "short", now_ms())
                     .map_err(|e| StepError::failed(format!("state: {e}")))?;
-                record(ctx, &cand, TrackerOutcome::Ignored)?;
+                emit_cancelled(ctx, &cand, &mut out.output_paths)?;
                 ignored += 1;
                 continue;
             }
@@ -293,6 +337,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         }
     }
     backfill_durations(ctx, c, &key)?;
+    cancel_listed_shorts(ctx, &shorts.channels, shorts.max_seconds)?;
     if !rows.is_empty()
         && failed == rows.len()
         && let Some(d) = deferred

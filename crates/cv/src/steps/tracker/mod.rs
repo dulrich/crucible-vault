@@ -253,14 +253,26 @@ where
 
 /// The `capture` step that writes intake lines: the `tracker-intake` preset when
 /// `captures.toml` defines it, else the same settings inline.
-fn intake_step(config: &ConfigSet) -> Result<Step, StepError> {
-    let has_preset = matches!(
-        config.table("captures.toml").get("capture"),
-        Some(toml::Value::Array(a)) if a.iter().any(|e| {
-            e.get("name").and_then(toml::Value::as_str) == Some(INTAKE_PRESET)
-        })
-    );
+fn intake_step(config: &ConfigSet, cancelled: bool) -> Result<Step, StepError> {
+    let preset = match config.table("captures.toml").get("capture") {
+        Some(toml::Value::Array(a)) => a
+            .iter()
+            .filter_map(toml::Value::as_table)
+            .find(|e| e.get("name").and_then(toml::Value::as_str) == Some(INTAKE_PRESET))
+            .cloned(),
+        _ => None,
+    };
+    let has_preset = preset.is_some();
     let mut t = toml::Table::new();
+    if cancelled {
+        // Round-8 WP-1: an ignored short's line is a cancelled task (`- [-] …`).
+        let format = preset
+            .as_ref()
+            .and_then(|p| p.get("format"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or(INTAKE_FORMAT);
+        t.insert("format".into(), cancelled_format(format).into());
+    }
     t.insert("type".into(), "capture".into());
     if has_preset {
         t.insert("capture".into(), INTAKE_PRESET.into());
@@ -271,6 +283,11 @@ fn intake_step(config: &ConfigSet) -> Result<Step, StepError> {
         t.insert("format".into(), INTAKE_FORMAT.into());
     }
     Step::from_table(t).map_err(StepError::failed)
+}
+
+/// `format` with its first open task box (`[ ]`) turned cancelled (`[-]`).
+fn cancelled_format(format: &str) -> String {
+    format.replacen("[ ]", "[-]", 1)
 }
 
 /// Today's daily note path (`captures.toml` `[periods.day]`).
@@ -304,11 +321,51 @@ pub fn emit_line(
     emit_line_with(ctx, c, None, out_paths)
 }
 
+/// [`emit_line`] for an ignored item (round-8 WP-1): recorded as `Ignored` with task status `-`
+/// (cancelled); in `[intake] mode = "lines"` its line is written as `- [-] …`. Never scored.
+pub fn emit_cancelled(
+    ctx: &mut StepCtx<'_>,
+    c: &Candidate,
+    out_paths: &mut Vec<String>,
+) -> Result<Emitted, StepError> {
+    emit_inner(ctx, c, None, true, out_paths)
+}
+
 /// [`emit_line`] recording the blog automatable evidence `full_body` on the row (WP-8).
 pub(crate) fn emit_line_with(
     ctx: &mut StepCtx<'_>,
     c: &Candidate,
     full_body: Option<bool>,
+    out_paths: &mut Vec<String>,
+) -> Result<Emitted, StepError> {
+    emit_inner(ctx, c, full_body, false, out_paths)
+}
+
+/// Records `c` as `Ignored` with status `-` (cancelled) or as `Line`.
+fn record_emitted(
+    ctx: &StepCtx<'_>,
+    c: &Candidate,
+    cancelled: bool,
+    full_body: Option<bool>,
+    score: Option<f64>,
+) -> Result<(), StepError> {
+    if !cancelled {
+        record_with(ctx, c, TrackerOutcome::Line, full_body, score, None)?;
+        return Ok(());
+    }
+    if record_with(ctx, c, TrackerOutcome::Ignored, full_body, None, None)? {
+        lock(ctx)
+            .set_tracker_item_status(&c.source_kind, &c.source_key, &c.item_id, Some('-'))
+            .map_err(state_err)?;
+    }
+    Ok(())
+}
+
+fn emit_inner(
+    ctx: &mut StepCtx<'_>,
+    c: &Candidate,
+    full_body: Option<bool>,
+    cancelled: bool,
     out_paths: &mut Vec<String>,
 ) -> Result<Emitted, StepError> {
     let known = lock(ctx)
@@ -320,8 +377,8 @@ pub(crate) fn emit_line_with(
     }
     if ctx.config.pipelines().intake.mode == IntakeMode::View {
         // `[intake] mode = "view"`: record only; the `daily-intake` view surfaces the item.
-        let score = score_item(ctx, c);
-        record_with(ctx, c, TrackerOutcome::Line, full_body, score, None)?;
+        let score = if cancelled { None } else { score_item(ctx, c) };
+        record_emitted(ctx, c, cancelled, full_body, score)?;
         return Ok(Emitted::Recorded);
     }
     let daily = daily_path(ctx)?;
@@ -329,11 +386,11 @@ pub(crate) fn emit_line_with(
         && !c.url.is_empty()
         && String::from_utf8_lossy(&bytes).contains(&c.url)
     {
-        record_with(ctx, c, TrackerOutcome::Line, full_body, None, None)?;
+        record_emitted(ctx, c, cancelled, full_body, None)?;
         return Ok(Emitted::Recovered);
     }
-    let score = score_item(ctx, c);
-    let step = intake_step(ctx.config)?;
+    let score = if cancelled { None } else { score_item(ctx, c) };
+    let step = intake_step(ctx.config, cancelled)?;
     let mut vars = ctx.vars.clone();
     vars.insert(
         "title".into(),
@@ -369,7 +426,7 @@ pub(crate) fn emit_line_with(
     if hook::fail_now() {
         return Err(StepError::failed("injected failure after line write"));
     }
-    record_with(ctx, c, TrackerOutcome::Line, full_body, score, None)?;
+    record_emitted(ctx, c, cancelled, full_body, score)?;
     Ok(Emitted::Written)
 }
 

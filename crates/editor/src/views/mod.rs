@@ -624,10 +624,17 @@ pub(crate) fn cell_menu_target(c: &Cell) -> Option<crate::context_menu::Target> 
     })
 }
 
+/// Plan round-8-intake-views-anchor WP-1: whether `r` is a cancelled row — a status cell
+/// (see [`status_cell`]) holding `-`. Its text cells draw struck-through and faint.
+pub(crate) fn row_cancelled(r: &Row, keys: &[String]) -> bool {
+    (0..r.cells.len().max(keys.len())).any(|i| status_cell(r, keys, i) == Some(Some('-')))
+}
+
 fn cell_view<'a>(
     c: &Cell,
     bold: bool,
     open: Option<Message>,
+    cancelled: bool,
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
@@ -636,13 +643,27 @@ fn cell_view<'a>(
         ..Font::default()
     };
     let s = format_cell(c);
-    if let Some(inner) = struck(&s) {
-        let sp: iced::widget::text::Span<'a, ()> = span(inner.to_owned()).strikethrough(true);
-        return rich_text(vec![sp])
+    let strike = struck(&s)
+        .map(str::to_owned)
+        .or_else(|| cancelled.then(|| s.clone()));
+    if let Some(inner) = strike {
+        let sp: iced::widget::text::Span<'a, ()> = span(inner).strikethrough(true);
+        let open = open.filter(|_| cancelled);
+        let sp = if open.is_some() { sp.link(()) } else { sp };
+        let el = rich_text(vec![sp])
             .size(px(13.0, scale))
             .font(font)
-            .color(t.text_faint.to_color())
-            .into();
+            .color(t.text_faint.to_color());
+        return match open {
+            Some(msg) => {
+                let el = el.on_link_click(move |()| msg.clone());
+                match cell_menu_target(c) {
+                    Some(target) => crate::context_menu::on_right(el, target),
+                    None => el.into(),
+                }
+            }
+            None => el.into(),
+        };
     }
     match open {
         Some(msg) => {
@@ -671,7 +692,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Me
         row((0..cols).map(|i| {
             let c = cs.get(i).unwrap_or(&Cell::Null);
             let open = targets.get(i).cloned().flatten();
-            let el = cell_view(c, bold, open, t, scale);
+            let el = cell_view(c, bold, open, false, t, scale);
             container(el).width(Length::FillPortion(1)).into()
         }))
         .spacing(8)
@@ -706,6 +727,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Me
             if d.kind != Kind::Tasks {
                 // The legacy done toggle and a status cell draw as the shared task checkbox.
                 let targets = row_targets(r, &d.column_keys);
+                let cancelled = row_cancelled(r, &d.column_keys);
                 return row((0..cols).map(|i| {
                     let open = targets.get(i).cloned().flatten();
                     let el: Element<'a, Message> =
@@ -716,7 +738,14 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Me
                             (_, Some(st)) => {
                                 status_box(st.unwrap_or(' '), open, status_menu_target(r), t, scale)
                             }
-                            (c, _) => cell_view(c.unwrap_or(&Cell::Null), false, open, t, scale),
+                            (c, _) => cell_view(
+                                c.unwrap_or(&Cell::Null),
+                                false,
+                                open,
+                                cancelled,
+                                t,
+                                scale,
+                            ),
                         };
                     container(el).width(Length::FillPortion(1)).into()
                 }))
