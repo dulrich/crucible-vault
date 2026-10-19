@@ -16,10 +16,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 
-use crate::fs::{is_file_or_file_link, rel_of, times};
+use crate::fs::is_file_or_file_link;
 use crate::hash::ContentHash;
 use crate::path::is_ignored;
 use crate::writer::VaultWriter;
+use cv_index::{file_times, rel_path};
 
 /// What happened to a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +185,7 @@ impl WatchState {
             if !ft.is_file() && !ft.is_symlink() {
                 continue;
             }
-            let Some(rel) = rel_of(root, entry.path()) else {
+            let Some(rel) = rel_path(root, entry.path()) else {
                 continue;
             };
             if is_ignored(&rel) {
@@ -270,7 +271,7 @@ impl WatchState {
     }
 
     fn rel(&self, p: &Path) -> Option<String> {
-        rel_of(&self.root, p).filter(|r| !is_ignored(r))
+        rel_path(&self.root, p).filter(|r| !is_ignored(r))
     }
 
     /// Records a raw notify event as hints.
@@ -385,7 +386,7 @@ impl WatchState {
         let daemon = w.echoes.take_match(to, Some(&h));
         w.echoes.take_match(from, None);
         if !daemon {
-            let (m, c) = times(&md);
+            let (m, c) = file_times(&md);
             let res = match w.index.rename_file(from, to) {
                 Ok(_) | Err(cv_index::Error::NotFound(_)) => {
                     w.index.upsert_file(to, &bytes, m, c).map(|_| ())
@@ -495,7 +496,7 @@ impl WatchState {
         }
         let daemon = w.echoes.take_match(path, Some(&h));
         if !daemon {
-            let (m, c) = times(&md);
+            let (m, c) = file_times(&md);
             if let Err(e) = w.index.upsert_file(path, &bytes, m, c) {
                 tracing::warn!(path, error = %e, "index update for external change failed");
             }

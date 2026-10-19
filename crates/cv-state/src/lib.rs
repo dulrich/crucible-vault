@@ -34,7 +34,8 @@ pub use link_records::{
 pub use query::{ListQuery, ShadowWrite, StatusCount};
 pub use runner_state::StepCheckpoint;
 pub use store::{
-    ChangeHook, DEFAULT_RESEED_WINDOW_MS, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS,
-    NewShadowWrite, QueueConfig, RequeueBreakdown, RetryOutcome, StateDb, StateReader,
+    BreakerFailure, ChangeHook, DEFAULT_RESEED_WINDOW_MS, DEFAULT_RETENTION_MS,
+    DEFAULT_STALE_LEASE_MS, NewShadowWrite, QueueConfig, RequeueBreakdown, RetryOutcome, StateDb,
+    StateReader,
 };
 pub use tracker::{IntakeQuery, TrackerItem, TrackerOutcome};

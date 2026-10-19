@@ -96,13 +96,9 @@ pub(super) fn tick(runner: &Runner) -> Vec<String> {
             default_lane: Lane::Background,
             dedupe_key: Some(format!("{}::schedule", action.id)),
         };
-        match runner.enqueue(action, req) {
-            Ok(id) => {
-                out.push(id);
-                if let Err(e) = lock(state).set_schedule_run(&action.id, now) {
-                    tracing::error!(action = %action.id, error = %e, "recording schedule run");
-                }
-            }
+        // The job and its schedule_runs row commit in one transaction (SR10).
+        match runner.inner().enqueue_scheduled(action, req) {
+            Ok(id) => out.push(id),
             Err(e) => {
                 tracing::warn!(action = %action.id, error = %e, "scheduled run refused");
                 // Record anyway: a run that cannot derive keys would otherwise retry every pass.

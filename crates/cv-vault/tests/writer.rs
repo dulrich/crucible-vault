@@ -131,6 +131,7 @@ fn rename_rewrites_inbound_links() {
                 "src4.md".into(),
             ],
             skipped_conflicts: vec!["stale.md".into()],
+            ..RenameOutcome::default()
         }
     );
     assert_eq!(
@@ -215,6 +216,30 @@ fn folder_rename_moves_every_file() {
     assert_eq!(fx.read("r.md"), "[[new/x]]");
     assert_eq!(fx.read("new/sub/y.md"), "[[x]]");
     assert!(w.index().query().file("new/sub/y.md").unwrap().is_some());
+}
+
+/// SR9: a collision mid-folder no longer aborts the rename — the other files still move and the
+/// merged outcome reports both the moved files and the one left in place.
+#[test]
+fn folder_rename_continues_past_a_mid_folder_conflict() {
+    let fx = Fx::new(&[
+        ("old/a.md", "A"),
+        ("old/b.md", "B"),
+        ("old/c.md", "C"),
+        ("new/b.md", "already here"),
+        ("r.md", "[[old/c]]"),
+    ]);
+    let mut w = fx.live();
+    let out = w.rename_folder("old", "new").unwrap();
+    assert_eq!(out.moved, vec!["new/a.md".to_string(), "new/c.md".into()]);
+    assert_eq!(out.failed.len(), 1);
+    assert_eq!(out.failed[0].0, "old/b.md");
+    assert_eq!(fx.read("new/a.md"), "A");
+    assert_eq!(fx.read("new/c.md"), "C");
+    assert_eq!(fx.read("new/b.md"), "already here");
+    assert_eq!(fx.read("old/b.md"), "B");
+    assert_eq!(fx.read("r.md"), "[[new/c]]");
+    assert!(out.rewritten.contains(&"r.md".to_string()));
 }
 
 const MOVED: &str = "rel [x](../t/x.md) img ![i](sub/y.png) wiki [[../t/x]] self [[m]] base [[x]] vault [[a/t/x]]\n";

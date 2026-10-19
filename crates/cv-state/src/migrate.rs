@@ -185,6 +185,11 @@ UPDATE tracker_items SET status = 'x' WHERE done_ms IS NOT NULL;
     r"
 UPDATE tracker_items SET status = '-' WHERE outcome = 'ignored' AND status IS NULL;
 ",
+    // v10 (plan tn-review-baseline-remediation WP-R4): durable cancellation — a cancel on a
+    // running (claimed) job sets this flag; the runner reads it before each step.
+    r"
+ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// Highest schema version this build knows.

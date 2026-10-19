@@ -63,6 +63,13 @@ fn ms(t: std::io::Result<SystemTime>) -> Option<i64> {
         .and_then(|d| i64::try_from(d.as_millis()).ok())
 }
 
+/// `(mtime_ms, ctime_ms)` as the index records them (ctime falls back to mtime). The single
+/// definition of the freshness contract: cv-vault compares against these exact values.
+pub fn file_times(md: &std::fs::Metadata) -> (i64, i64) {
+    let mtime = ms(md.modified()).unwrap_or(0);
+    (mtime, ms(md.created()).unwrap_or(mtime))
+}
+
 fn file_id(conn: &Connection, path: &str) -> Result<Option<i64>> {
     use rusqlite::OptionalExtension;
     Ok(conn
@@ -230,8 +237,8 @@ fn load_resolver(conn: &Connection) -> Result<Resolver> {
     Ok(r)
 }
 
-/// Vault-relative `/` path of `entry`, or `None` (root itself, non-UTF-8).
-fn rel_path(root: &Path, p: &Path) -> Option<String> {
+/// Vault-relative `/` path of `p` under `root`, or `None` (root itself, outside paths, non-UTF-8).
+pub fn rel_path(root: &Path, p: &Path) -> Option<String> {
     let rel = p.strip_prefix(root).ok()?;
     let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
     let s = parts?.join("/");
@@ -317,8 +324,7 @@ fn build(vault_root: &Path, building: &Path, generation: u64, rules: &IgnoreRule
     let mut ids = Vec::with_capacity(entries.len());
     // Pass 1: every file is a link target before any link resolves.
     for (rel, _, md) in &entries {
-        let mtime = ms(md.modified()).unwrap_or(0);
-        let ctime = ms(md.created()).unwrap_or(mtime);
+        let (mtime, ctime) = file_times(md);
         let size = i64::try_from(md.len()).unwrap_or(i64::MAX);
         let id = insert_file(&tx, rel, size, mtime, ctime, false)?;
         resolver.add(id, rel);

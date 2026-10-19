@@ -159,26 +159,11 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn ms(t: std::io::Result<SystemTime>) -> Option<i64> {
-    t.ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-}
-
-/// `(mtime_ms, ctime_ms)` as cv-index records them.
-pub(crate) fn times(md: &std::fs::Metadata) -> (i64, i64) {
-    let mtime = ms(md.modified()).unwrap_or(0);
-    (mtime, ms(md.created()).unwrap_or(mtime))
-}
-
-/// Vault-relative `/` path of `full` under `base` (`None` for non-UTF-8 or outside paths).
-pub(crate) fn rel_of(base: &Path, full: &Path) -> Option<String> {
-    let rel = full.strip_prefix(base).ok()?;
-    let mut parts = Vec::new();
-    for c in rel.components() {
-        parts.push(c.as_os_str().to_str()?);
-    }
-    (!parts.is_empty()).then(|| parts.join("/"))
+/// Fsyncs directory `dir` so a just-persisted rename/link inside it survives a crash.
+pub(crate) fn fsync_dir(dir: &Path) -> Result<()> {
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| io(dir, e))
 }
 
 fn read_opt(full: &Path) -> Result<Option<Vec<u8>>> {
@@ -438,7 +423,7 @@ impl VaultFs {
         tmp.as_file().sync_all().map_err(|e| io(&s.tomb_file, e))?;
         tmp.persist(&s.tomb_file)
             .map_err(|e| io(&s.tomb_file, e.error))?;
-        Ok(())
+        fsync_dir(dir)
     }
 
     fn set_tombstone(&mut self, path: &str, on: bool) -> Result<()> {
@@ -517,6 +502,7 @@ impl VaultFs {
             }
             return Err(io(&full, e.error));
         }
+        fsync_dir(&dir)?;
         let after = ContentHash::of(bytes);
         if self.is_shadow() {
             self.set_tombstone(path, false)?;
@@ -625,26 +611,32 @@ impl VaultFs {
         if let Some(d) = dest.parent() {
             std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
         }
-        self.check(from, Some(expected))?;
-        if let Some(link) = relink_target(&src, &dest)? {
-            // A symlinked note moves as a link (the target never moves). A relative link target
-            // is re-anchored so it still resolves from the new folder.
-            match std::os::unix::fs::symlink(&link, &dest) {
-                Ok(()) => std::fs::remove_file(&src).map_err(|e| io(&src, e))?,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return Err(VaultError::Exists(to.to_string()));
-                }
-                Err(e) => return Err(io(&dest, e)),
-            }
-            return Ok((expected.clone(), dest));
-        }
-        // hard_link is a no-clobber rename on one filesystem; then drop the old name.
-        match std::fs::hard_link(&src, &dest) {
-            Ok(()) => std::fs::remove_file(&src).map_err(|e| io(&src, e))?,
+        // A symlinked note moves as a link (the target never moves; a relative link target is
+        // re-anchored so it still resolves from the new folder). A regular file moves by
+        // hard_link (a no-clobber rename on one filesystem), then drops the old name.
+        let linked = match relink_target(&src, &dest)? {
+            Some(link) => std::os::unix::fs::symlink(&link, &dest),
+            None => std::fs::hard_link(&src, &dest),
+        };
+        match linked {
+            Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 return Err(VaultError::Exists(to.to_string()));
             }
             Err(e) => return Err(io(&dest, e)),
+        }
+        if let Err(e) = std::fs::remove_file(&src) {
+            // All-or-nothing: drop the new name so the vault is left as it was.
+            let _ = std::fs::remove_file(&dest);
+            return Err(io(&src, e));
+        }
+        if let Some(d) = dest.parent() {
+            fsync_dir(d)?;
+        }
+        if let Some(d) = src.parent()
+            && Some(d) != dest.parent()
+        {
+            fsync_dir(d)?;
         }
         Ok((expected.clone(), dest))
     }
@@ -674,7 +666,7 @@ impl VaultFs {
                 if !is_file_or_file_link(&entry) {
                     continue;
                 }
-                if let Some(rel) = rel_of(&base, entry.path())
+                if let Some(rel) = cv_index::rel_path(&base, entry.path())
                     && !is_ignored(&rel)
                 {
                     out.insert(rel);

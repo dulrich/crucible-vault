@@ -1091,9 +1091,93 @@ fn v8_database_migrates_to_v9_cancelling_ignored_rows_without_a_status() {
         }
     }
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 9);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     let st = |id| s.tracker_item_status("youtube", "UC1", id).unwrap();
     assert_eq!(st("i1"), Some(Some('-')));
     assert_eq!(st("i2"), Some(Some(' ')), "a set (open) status is kept");
     assert_eq!(st("l1"), Some(None));
+}
+
+/// WP-R4: v9 → v10 adds `jobs.cancel_requested` (default 0) without touching existing rows.
+#[test]
+fn v9_database_migrates_to_v10_adding_cancel_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        for (i, sql) in migrate::MIGRATIONS.iter().take(9).enumerate() {
+            let tx = c.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.pragma_update(None, "user_version", i64::try_from(i).unwrap() + 1)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+    {
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute(
+            "INSERT INTO jobs (id, job_type, lane, status, params, resource_keys, created_ms)
+             VALUES ('j1', 't', 1, 'running', '{}', '[]', 1)",
+            [],
+        )
+        .unwrap();
+    }
+    let mut s = StateDb::open(&p, 3, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 10);
+    assert!(!s.cancel_requested("j1").unwrap());
+    s.cancel("j1", 4).unwrap();
+    assert!(s.cancel_requested("j1").unwrap());
+}
+
+/// SR10: a scheduled enqueue writes the job and the `schedule_runs` row in one transaction —
+/// both on success, neither when the transaction fails (the "crash between them" window is gone).
+#[test]
+fn enqueue_scheduled_writes_job_and_schedule_run_atomically() {
+    let (dir, mut s) = db();
+    let id = id_of(
+        s.enqueue_scheduled(job("action:a", Some("a::schedule"), &[]), "a", 5)
+            .unwrap(),
+    );
+    assert!(s.job(&id).unwrap().is_some());
+    assert_eq!(s.schedule_last_run("a").unwrap(), Some(5));
+    // Make the schedule_runs write fail: the job insert must roll back with it.
+    rusqlite::Connection::open(dir.path().join("state.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE schedule_runs;")
+        .unwrap();
+    let before = s.list(&ListQuery::default()).unwrap().len();
+    assert!(
+        s.enqueue_scheduled(job("action:b", Some("b::schedule"), &[]), "b", 6)
+            .is_err()
+    );
+    assert_eq!(s.list(&ListQuery::default()).unwrap().len(), before);
+}
+
+/// SR10: a cancel arriving right after the claim (before the runner starts the steps) is
+/// accepted — no WrongStatus/INVALID_PARAMS — and is durable: the runner sees the flag, and
+/// even a deferral settles the job as cancelled.
+#[test]
+fn cancel_right_after_claim_is_durable_and_ends_cancelled() {
+    let (_d, mut s) = db();
+    let id = id_of(s.enqueue(job("t", None, &[]), 1_000).unwrap());
+    let claimed = s.claim(1_001).unwrap().expect("claimed");
+    assert_eq!(claimed.id, id);
+    s.cancel(&id, 1_002).unwrap();
+    assert!(s.cancel_requested(&id).unwrap());
+    s.settle(
+        &id,
+        &JobResult::Deferred {
+            retry_after_ms: 10,
+            service_unhealthy: None,
+        },
+        1_003,
+    )
+    .unwrap();
+    let j = s.job(&id).unwrap().unwrap();
+    assert_eq!(j.status, JobStatus::Cancelled);
+    assert!(!s.cancel_requested(&id).unwrap(), "flag cleared on settle");
+    assert!(matches!(
+        s.cancel(&id, 1_004),
+        Err(StateError::WrongStatus { .. })
+    ));
 }

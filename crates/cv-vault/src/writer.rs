@@ -8,11 +8,12 @@ use std::time::Duration;
 use cv_index::{Index, LinkRow};
 
 use crate::error::{Result, VaultError};
-use crate::fs::{VaultFs, times};
+use crate::fs::VaultFs;
 use crate::hash::ContentHash;
 use crate::path::validate_rel_path;
 use crate::rewrite::rewrite_note;
 use crate::watcher::Echoes;
+use cv_index::file_times;
 
 /// What a rename did to inbound links.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -21,6 +22,11 @@ pub struct RenameOutcome {
     pub rewritten: Vec<String>,
     /// Source notes skipped because they changed since the index saw them (never clobbered).
     pub skipped_conflicts: Vec<String>,
+    /// Folder renames only: files moved (post-rename paths), sorted.
+    pub moved: Vec<String>,
+    /// Folder renames only: `(source path, reason)` for files left in place (pre-flight
+    /// collision, hash read failure, or a per-file move error), sorted.
+    pub failed: Vec<(String, String)>,
 }
 
 impl RenameOutcome {
@@ -31,6 +37,10 @@ impl RenameOutcome {
         self.rewritten.dedup();
         self.skipped_conflicts.sort();
         self.skipped_conflicts.dedup();
+        self.moved.extend(other.moved);
+        self.moved.sort();
+        self.failed.extend(other.failed);
+        self.failed.sort();
     }
 }
 
@@ -135,7 +145,7 @@ impl VaultWriter {
         let res = std::fs::metadata(full)
             .map_err(|e| crate::error::io(full, e))
             .and_then(|md| {
-                let (m, c) = times(&md);
+                let (m, c) = file_times(&md);
                 Ok(self.index.upsert_file(path, bytes, m, c)?)
             });
         match res {
@@ -237,7 +247,7 @@ impl VaultWriter {
         };
         let full = self.fs.root().join(src);
         let md = std::fs::metadata(&full).map_err(|e| crate::error::io(&full, e))?;
-        let (m, _) = times(&md);
+        let (m, _) = file_times(&md);
         Ok(usize::try_from(row.size).ok() == Some(bytes.len()) && row.mtime == m)
     }
 
@@ -291,7 +301,7 @@ impl VaultWriter {
                     Err(e) => return Err(e.into()),
                 }
                 let md = std::fs::metadata(&full).map_err(|e| crate::error::io(&full, e))?;
-                let (m, c) = times(&md);
+                let (m, c) = file_times(&md);
                 self.index.upsert_file(to, &bytes, m, c)?;
                 Ok(())
             })();
@@ -375,21 +385,42 @@ impl VaultWriter {
     }
 
     /// Renames folder `from` to `to` by renaming every file under it (each with its current
-    /// hash, each rewriting inbound links). Empty live source folders are removed best-effort.
+    /// hash, each rewriting inbound links). Every target and source hash is pre-flighted before
+    /// anything moves; a file that fails pre-flight or its own move is reported in
+    /// [`RenameOutcome::failed`] and the rest still move, so the merged outcome always covers the
+    /// files already moved. Empty live source folders are removed best-effort.
     pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<RenameOutcome> {
         validate_rel_path(from)?;
         validate_rel_path(to)?;
         let mut outcome = RenameOutcome::default();
+        let mut plan = Vec::new();
         for f in self.fs.list_files(from)? {
             let Some(rest) = f.strip_prefix(&format!("{from}/")) else {
                 continue;
             };
-            let Some(h) = self.fs.hash(&f)? else {
-                continue;
-            };
-            let o = self.rename(&f, &format!("{to}/{rest}"), h)?;
-            outcome.merge(o);
+            let target = format!("{to}/{rest}");
+            match (self.fs.hash(&f), self.fs.read(&target)) {
+                (Ok(None), _) => {}
+                (Ok(Some(_)), Ok(Some(_))) => outcome
+                    .failed
+                    .push((f, VaultError::Exists(target).to_string())),
+                (Ok(Some(h)), Ok(None)) => plan.push((f, target, h)),
+                (Err(e), _) | (_, Err(e)) => outcome.failed.push((f, e.to_string())),
+            }
         }
+        for (f, target, h) in plan {
+            match self.rename(&f, &target, h) {
+                Ok(mut o) => {
+                    o.moved.push(target);
+                    outcome.merge(o);
+                }
+                Err(e) => {
+                    tracing::warn!(path = %f, error = %e, "folder rename: file left in place");
+                    outcome.failed.push((f, e.to_string()));
+                }
+            }
+        }
+        outcome.failed.sort();
         if !self.fs.is_shadow() {
             remove_empty_dirs(&self.fs.root().join(from));
         }

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, Step};
 use cv_protocol::{ActionContext, JobState, JobStatus, Notification};
-use cv_state::{EnqueueOutcome, JobResult, Lane, NewJob, StateDb};
+use cv_state::{BreakerFailure, EnqueueOutcome, JobResult, Lane, NewJob, StateDb};
 use cv_vault::WriterHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -270,7 +270,6 @@ pub(crate) struct Inner {
     config: RwLock<Arc<ConfigSet>>,
     wake: Notify,
     running: Mutex<HashSet<String>>,
-    cancel_requested: Mutex<HashSet<String>>,
     finished: Mutex<BTreeMap<String, RunSummary>>,
     cycle: Mutex<HashMap<(String, String), Instant>>,
 }
@@ -309,7 +308,6 @@ impl Runner {
                 config: RwLock::new(Arc::new(ConfigSet::new())),
                 wake: Notify::new(),
                 running: Mutex::new(HashSet::new()),
-                cancel_requested: Mutex::new(HashSet::new()),
                 finished: Mutex::new(BTreeMap::new()),
                 cycle: Mutex::new(HashMap::new()),
             }),
@@ -371,13 +369,12 @@ impl Runner {
     }
 
     /// Requests cancellation of a job running in this runner; it stops before its next step.
+    /// The request is the durable `cancel_requested` flag ([`cv_state::StateDb::cancel`]).
     pub fn request_cancel(&self, job_id: &str) -> bool {
-        if lock(&self.inner.running).contains(job_id) {
-            lock(&self.inner.cancel_requested).insert(job_id.to_owned());
-            true
-        } else {
-            false
-        }
+        lock(&self.inner.running).contains(job_id)
+            && lock(&self.inner.state)
+                .cancel(job_id, self.inner.clock.now_ms())
+                .is_ok()
     }
 
     /// The summary of a finished run (if remembered).
@@ -421,6 +418,15 @@ impl Runner {
 
 impl Inner {
     fn enqueue(&self, action: &Action, req: RunRequest) -> Result<String, EnqueueError> {
+        let job = self.new_job(action, req)?;
+        let out = lock(&self.state)
+            .enqueue(job, self.clock.now_ms())
+            .map_err(|e| EnqueueError::State(e.to_string()))?;
+        self.enqueued(out)
+    }
+
+    /// The queue row for a run of `action` (resource keys derived, lane resolved).
+    fn new_job(&self, action: &Action, req: RunRequest) -> Result<NewJob, EnqueueError> {
         let keys = action
             .resources
             .derive(req.context.active_path.as_deref(), &req.params)
@@ -453,9 +459,21 @@ impl Inner {
             resource_keys: keys,
             service: None,
         };
+        Ok(job)
+    }
+
+    /// [`Self::enqueue`] for a scheduled run: the job and `action`'s `schedule_runs` row commit in
+    /// one transaction (SR10).
+    fn enqueue_scheduled(&self, action: &Action, req: RunRequest) -> Result<String, EnqueueError> {
+        let job = self.new_job(action, req)?;
         let out = lock(&self.state)
-            .enqueue(job, self.clock.now_ms())
+            .enqueue_scheduled(job, &action.id, self.clock.now_ms())
             .map_err(|e| EnqueueError::State(e.to_string()))?;
+        self.enqueued(out)
+    }
+
+    /// Publishes and wakes for a fresh enqueue; maps the outcome to the job id.
+    fn enqueued(&self, out: EnqueueOutcome) -> Result<String, EnqueueError> {
         let id = match out {
             EnqueueOutcome::Enqueued(id) => {
                 self.publish_status(&id, JobState::Pending, None, Vec::new(), None);
@@ -497,18 +515,15 @@ impl Inner {
         tracing::info!(?own, ?foreign, ?stale, "runner recovered leases");
     }
 
-    /// Breaker feeding + bounded transient retry (plan WP-2), run after the steps and before
-    /// `settle`. Takes the `state` lock only for the short breaker/queue calls.
+    /// Breaker feeding + bounded transient retry (plan WP-2), run after the steps. Pure: returns
+    /// the final result plus the service failure to report; both are committed together with the
+    /// settle by [`Self::settle`] (SR10).
     pub(crate) fn apply_service_policy(
-        &self,
         job: &cv_state::Job,
         result: JobResult,
         cause: Option<DeferCause>,
-    ) -> JobResult {
-        let now = self.clock.now_ms();
-        let mut db = lock(&self.state);
-        let log = |e: cv_state::StateError| tracing::warn!(job_id = %job.id, error = %e, "service health update failed");
-        let result = match (result, cause) {
+    ) -> (JobResult, Option<BreakerFailure>) {
+        match (result, cause) {
             (
                 JobResult::Deferred {
                     retry_after_ms,
@@ -517,11 +532,13 @@ impl Inner {
                 Some(DeferCause::Transient(kind)),
             ) => {
                 // Transient: the breaker computes its own doubling window (no retry_after).
-                let reason = format!("transient {kind:?} (attempt {})", job.attempts);
-                if let Err(e) = db.report_service_failure(&svc, kind, &reason, None, now) {
-                    log(e);
-                }
-                if job.attempts >= TRANSIENT_MAX_ATTEMPTS {
+                let failure = BreakerFailure {
+                    service: svc.clone(),
+                    kind,
+                    reason: format!("transient {kind:?} (attempt {})", job.attempts),
+                    retry_after_ms: None,
+                };
+                let result = if job.attempts >= TRANSIENT_MAX_ATTEMPTS {
                     JobResult::Failed {
                         error: format!(
                             "service {svc} still failing after {} attempts",
@@ -538,7 +555,8 @@ impl Inner {
                         retry_after_ms: retry_after_ms.max(backoff),
                         service_unhealthy: Some(svc),
                     }
-                }
+                };
+                (result, Some(failure))
             }
             (
                 JobResult::Deferred {
@@ -547,54 +565,36 @@ impl Inner {
                 },
                 Some(DeferCause::Quota),
             ) => {
-                if let Err(e) = db.report_service_failure(
-                    &svc,
-                    cv_state::ServiceFailureKind::RateLimited,
-                    "quota exhausted",
-                    Some(retry_after_ms),
-                    now,
-                ) {
-                    log(e);
-                }
-                JobResult::Deferred {
-                    retry_after_ms,
-                    service_unhealthy: Some(svc),
-                }
+                let failure = BreakerFailure {
+                    service: svc.clone(),
+                    kind: cv_state::ServiceFailureKind::RateLimited,
+                    reason: "quota exhausted".into(),
+                    retry_after_ms: Some(retry_after_ms),
+                };
+                (
+                    JobResult::Deferred {
+                        retry_after_ms,
+                        service_unhealthy: Some(svc),
+                    },
+                    Some(failure),
+                )
             }
-            (r, _) => r,
-        };
-        let Some(svc) = job.service.as_deref() else {
-            return result;
-        };
-        match &result {
-            JobResult::Done => {
-                let before = db.service_health(svc).map(|h| h.state);
-                if let Err(e) = db.report_service_success(svc) {
-                    log(e);
-                } else if matches!(before, Ok(s) if s != cv_state::BreakerState::Closed) {
-                    match db.requeue_service_failures(false) {
-                        Ok(b) => tracing::info!(
-                            service = svc,
-                            requeued = b.requeued,
-                            "breaker closed; requeued service failures"
-                        ),
-                        Err(e) => log(e),
-                    }
-                }
-            }
-            _ => {
-                // A job that held the half-open probe and ended without a verdict returns it
-                // (a transient failure above already reopened the breaker, clearing it).
-                if let Ok(h) = db.service_health(svc)
-                    && h.state == cv_state::BreakerState::HalfOpen
-                    && h.probe_in_flight()
-                    && let Err(e) = db.release_probe(svc)
-                {
-                    log(e);
-                }
-            }
+            (r, _) => (r, None),
         }
-        result
+    }
+
+    /// Settles `job` with `result` and its breaker update in one state.db transaction.
+    fn settle(&self, job: &cv_state::Job, result: &JobResult, failure: Option<&BreakerFailure>) {
+        let now = self.clock.now_ms();
+        match lock(&self.state).settle_with_breaker(&job.id, result, failure, now) {
+            Ok(Some(requeued)) => tracing::info!(
+                service = job.service.as_deref().unwrap_or_default(),
+                requeued,
+                "breaker closed; requeued service failures"
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::error!(job_id = %job.id, error = %e, "settle failed"),
+        }
     }
 
     /// Periodic queue maintenance from the claim loop: stale-lease recovery every
@@ -739,13 +739,9 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
             }
         },
     };
-    let result = inner.apply_service_policy(&job, result, summary.defer_cause);
-    let settled = lock(&inner.state).settle(&id, &result, inner.clock.now_ms());
-    if let Err(e) = settled {
-        tracing::error!(job_id = %id, error = %e, "settle failed");
-    }
+    let (result, failure) = Inner::apply_service_policy(&job, result, summary.defer_cause);
+    inner.settle(&job, &result, failure.as_ref());
     lock(&inner.running).remove(&id);
-    lock(&inner.cancel_requested).remove(&id);
     let (state, message) = match &result {
         JobResult::Done => (JobState::Done, None),
         JobResult::Failed { error, .. } => (JobState::Failed, Some(error.clone())),
@@ -903,7 +899,7 @@ fn execute_steps(
             }
             continue;
         }
-        if lock(&inner.cancel_requested).contains(job_id) {
+        if lock(&inner.state).cancel_requested(job_id).unwrap_or(false) {
             return (JobResult::Cancelled, summary);
         }
         let mut ctx = StepCtx {

@@ -63,12 +63,22 @@ impl StateDb {
 
     /// Records that `action_id`'s schedule fired at `at_ms` (set at enqueue time).
     pub fn set_schedule_run(&mut self, action_id: &str, at_ms: i64) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO schedule_runs (action_id, last_run_ms) VALUES (?1, ?2) ON CONFLICT(action_id) DO UPDATE SET last_run_ms = excluded.last_run_ms",
-            params![action_id, at_ms],
-        )?;
-        Ok(())
+        record_schedule_run(self.conn(), action_id, at_ms)
     }
+}
+
+/// Upserts `schedule_runs` (shared by [`StateDb::set_schedule_run`] and
+/// [`StateDb::enqueue_scheduled`]'s transaction).
+pub(crate) fn record_schedule_run(
+    conn: &rusqlite::Connection,
+    action_id: &str,
+    at_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO schedule_runs (action_id, last_run_ms) VALUES (?1, ?2) ON CONFLICT(action_id) DO UPDATE SET last_run_ms = excluded.last_run_ms",
+        params![action_id, at_ms],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

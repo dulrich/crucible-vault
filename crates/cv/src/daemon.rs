@@ -708,17 +708,13 @@ impl Shared {
             .ok_or_else(|| rpc_from_state(StateError::NoSuchJob(id.to_owned())))
     }
 
-    /// `cancel`: a queued job settles now; a running one stops before its next step (runner).
+    /// `cancel`: a queued job settles now; a running (claimed) one gets the durable
+    /// `cancel_requested` flag and stops before its next step (no claim→running race, SR10).
     fn cancel(&self, id: &str) -> Result<JobStatus, RpcError> {
-        let res = lock(&self.state).cancel(id, now_ms());
-        match res {
-            Err(StateError::WrongStatus { .. })
-                if self.runner().is_some_and(|r| r.request_cancel(id)) =>
-            {
-                self.job(id)
-            }
-            r => r.map_err(rpc_from_state).and_then(|()| self.job(id)),
-        }
+        lock(&self.state)
+            .cancel(id, now_ms())
+            .map_err(rpc_from_state)
+            .and_then(|()| self.job(id))
     }
 
     fn jobs_list(&self, p: &cv_protocol::JobsListParams) -> Result<JobsListResult, RpcError> {

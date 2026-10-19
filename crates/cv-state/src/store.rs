@@ -68,6 +68,16 @@ pub struct RequeueBreakdown {
     pub requeued: i64,
 }
 
+/// A service failure the runner classified for one run, applied to the breaker in the same
+/// transaction as the job's settle ([`StateDb::settle_with_breaker`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakerFailure {
+    pub service: String,
+    pub kind: ServiceFailureKind,
+    pub reason: String,
+    pub retry_after_ms: Option<i64>,
+}
+
 /// A write to log in `shadow_writes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewShadowWrite {
@@ -193,22 +203,52 @@ impl StateDb {
         self.enqueue_inner(job, now_ms, true)
     }
 
+    /// A scheduled run: enqueues `job` and records `action_id`'s schedule run at `now_ms` in one
+    /// transaction, so a crash leaves both rows or neither (a duplicate or suppressed enqueue
+    /// still records the run). On error nothing is written.
+    pub fn enqueue_scheduled(
+        &mut self,
+        job: NewJob,
+        action_id: &str,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = Self::enqueue_tx(&tx, self.config.reseed_window_ms, job, now_ms, false)?;
+        crate::runner_state::record_schedule_run(&tx, action_id, now_ms)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
     fn enqueue_inner(
         &mut self,
         job: NewJob,
         now_ms: i64,
         suppress: bool,
     ) -> Result<EnqueueOutcome> {
-        let key = namespaced_key(&job.job_type, job.dedupe_key.as_deref());
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = Self::enqueue_tx(&tx, self.config.reseed_window_ms, job, now_ms, suppress)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    fn enqueue_tx(
+        tx: &rusqlite::Transaction<'_>,
+        reseed_window_ms: i64,
+        job: NewJob,
+        now_ms: i64,
+        suppress: bool,
+    ) -> Result<EnqueueOutcome> {
+        let key = namespaced_key(&job.job_type, job.dedupe_key.as_deref());
         if let Some(k) = &key {
-            if let Some(existing) = query::find_pending(&tx, k)? {
+            if let Some(existing) = query::find_pending(tx, k)? {
                 return Ok(EnqueueOutcome::Duplicate(existing));
             }
             if suppress {
-                let cutoff = now_ms - self.config.reseed_window_ms;
+                let cutoff = now_ms - reseed_window_ms;
                 let settled: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM jobs WHERE dedupe_key = ?1 AND settled_at_ms IS NOT NULL AND settled_at_ms >= ?2",
                     params![k, cutoff],
@@ -234,7 +274,6 @@ impl StateDb {
                 now_ms
             ],
         )?;
-        tx.commit()?;
         Ok(EnqueueOutcome::Enqueued(id))
     }
 
@@ -341,19 +380,83 @@ impl StateDb {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(job) = query::get(&tx, id)? else {
+        Self::settle_tx(&tx, &self.token, id, result, now_ms)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// [`Self::settle`] plus the job's service-breaker update, committed in one transaction (so
+    /// a crash never leaves a settled job with a stale breaker, or the reverse). `failure` is
+    /// a service failure the runner classified for this run (reported first). Then, for a job
+    /// with a `service`: `Done` reports success, and a breaker that was not closed requeues
+    /// service failures (their count is returned); any other result returns a held half-open
+    /// probe. Unknown services are never recorded on success/release.
+    pub fn settle_with_breaker(
+        &mut self,
+        id: &str,
+        result: &JobResult,
+        failure: Option<&BreakerFailure>,
+        now_ms: i64,
+    ) -> Result<Option<i64>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let service = Self::settle_tx(&tx, &self.token, id, result, now_ms)?;
+        if let Some(f) = failure {
+            let mut h =
+                health::load(&tx, &f.service)?.unwrap_or_else(|| ServiceHealth::fresh(&f.service));
+            h.report_failure(f.kind, &f.reason, f.retry_after_ms, now_ms);
+            health::store(&tx, &h)?;
+        }
+        let mut requeued = None;
+        if let Some(svc) = service
+            && let Some(mut h) = health::load(&tx, &svc)?
+        {
+            if matches!(result, JobResult::Done) {
+                let was_closed = h.state == BreakerState::Closed;
+                h.report_success();
+                health::store(&tx, &h)?;
+                if !was_closed {
+                    requeued = Some(Self::requeue_tx(&tx, false)?.requeued);
+                }
+            } else if h.state == BreakerState::HalfOpen && h.probe_in_flight() {
+                h.release_probe();
+                health::store(&tx, &h)?;
+            }
+        }
+        tx.commit()?;
+        Ok(requeued)
+    }
+
+    /// The settle write inside `tx`; returns the job's `service` (as claimed).
+    fn settle_tx(
+        tx: &rusqlite::Transaction<'_>,
+        token: &str,
+        id: &str,
+        result: &JobResult,
+        now_ms: i64,
+    ) -> Result<Option<String>> {
+        let Some(job) = query::get(tx, id)? else {
             return Err(StateError::NoSuchJob(id.to_owned()));
         };
-        if job.status != JobStatus::Running
-            || job.claim_token.as_deref() != Some(self.token.as_str())
-        {
+        if job.status != JobStatus::Running || job.claim_token.as_deref() != Some(token) {
             return Err(StateError::WrongStatus {
                 id: id.to_owned(),
                 status: job.status,
                 expected: "running under this claim token",
             });
         }
-        const CLEAR: &str = "claim_token = NULL, claimed_at_ms = NULL";
+        // A durable cancel request wins over a deferral (the job never goes back to queued).
+        let cancel_requested: bool = tx.query_row(
+            "SELECT cancel_requested FROM jobs WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        let result = match result {
+            JobResult::Deferred { .. } if cancel_requested => &JobResult::Cancelled,
+            r => r,
+        };
+        const CLEAR: &str = "claim_token = NULL, claimed_at_ms = NULL, cancel_requested = 0";
         match result {
             JobResult::Done => tx.execute(
                 &format!("UPDATE jobs SET status = 'done', settled_at_ms = ?2, error = NULL, failure_reason = NULL, failure_kind = NULL, {CLEAR} WHERE id = ?1"),
@@ -376,27 +479,48 @@ impl StateDb {
                 )?
             }
         };
-        tx.commit()?;
-        Ok(())
+        Ok(job.service)
     }
 
-    /// Cancel a queued job. Running jobs are cancelled by their runner via `settle`.
+    /// Cancel a job. A queued job settles `cancelled` now; a running (claimed) job gets the
+    /// durable `cancel_requested` flag, which its runner reads before each step and settles as
+    /// cancelled. Anything else is [`StateError::WrongStatus`].
     pub fn cancel(&mut self, id: &str, now_ms: i64) -> Result<()> {
         let n = self.conn.execute(
             "UPDATE jobs SET status = 'cancelled', settled_at_ms = ?2, defer_until_ms = NULL WHERE id = ?1 AND status = 'queued'",
             params![id, now_ms],
         )?;
-        if n == 0 {
-            return match query::get(&self.conn, id)? {
-                None => Err(StateError::NoSuchJob(id.to_owned())),
-                Some(j) => Err(StateError::WrongStatus {
-                    id: id.to_owned(),
-                    status: j.status,
-                    expected: "queued",
-                }),
-            };
+        if n > 0 {
+            return Ok(());
         }
-        Ok(())
+        let n = self.conn.execute(
+            "UPDATE jobs SET cancel_requested = 1 WHERE id = ?1 AND status = 'running'",
+            params![id],
+        )?;
+        if n > 0 {
+            return Ok(());
+        }
+        match query::get(&self.conn, id)? {
+            None => Err(StateError::NoSuchJob(id.to_owned())),
+            Some(j) => Err(StateError::WrongStatus {
+                id: id.to_owned(),
+                status: j.status,
+                expected: "queued or running",
+            }),
+        }
+    }
+
+    /// Whether a cancel was requested for (running) job `id`.
+    pub fn cancel_requested(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT cancel_requested FROM jobs WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     /// Retry one `failed` or `cancelled` job: back to `queued` with a fresh attempt budget
@@ -560,6 +684,12 @@ impl StateDb {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = Self::requeue_tx(&tx, dry_run)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    fn requeue_tx(tx: &rusqlite::Transaction<'_>, dry_run: bool) -> Result<RequeueBreakdown> {
         let mut out = RequeueBreakdown::default();
         {
             let mut stmt = tx.prepare(
@@ -580,7 +710,6 @@ impl StateDb {
             )?;
             out.requeued = i64::try_from(n).unwrap_or(i64::MAX);
         }
-        tx.commit()?;
         Ok(out)
     }
 
