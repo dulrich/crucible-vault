@@ -425,6 +425,53 @@ pub fn segment_style(
     }
 }
 
+pub(crate) fn tokens_for(s: Surround) -> Tokens {
+    match s.tokens() {
+        Ok(t) => t,
+        // Unreachable for the vendored blocks (unit-tested); fall back to Med, then to a
+        // hard-coded neutral so a vendoring slip never crashes the UI.
+        Err(_) => Surround::Med.tokens().unwrap_or_else(|_| neutral_tokens()),
+    }
+}
+
+fn neutral_tokens() -> Tokens {
+    use crate::theme::Rgb;
+    let g = Rgb(0x3a, 0x3a, 0x3b);
+    let w = Rgb(0xf3, 0xf3, 0xf4);
+    Tokens {
+        bg: g,
+        panel: g,
+        panel_2: g,
+        inset: g,
+        line: w,
+        text: w,
+        text_dim: w,
+        muted: w,
+        text_faint: w,
+        heading: w,
+        accent: w,
+        accent_hover: w,
+        accent_text: w,
+        on_accent: g,
+        sel_tint: g,
+        ok_text: w,
+        warn_text: w,
+        error_text: w,
+        info_text: w,
+        red: w,
+        orange: w,
+        yellow: w,
+        green: w,
+        cyan: w,
+        blue: w,
+        purple: w,
+        pink: w,
+        accent_ui: w,
+        accent_ui_hover: w,
+        on_accent_ui: g,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,13 +11,14 @@ use cv_testkit::{SyntheticVault, VaultSpec};
 use iced::keyboard::{Key, Modifiers, key::Physical};
 use iced::widget::text_editor::{Binding, KeyPress, Status};
 
-use crate::app::{App, CAPTURES_PATH, TabKind};
+use crate::app::{App, TabKind};
 use crate::daemon::FakeDaemon;
 use crate::message::Message;
 use crate::message::{ExplorerMsg, PaletteMsg, ReadingMsg};
 use crate::palette::chord::{self, Chord};
 use crate::palette::{Bound, ClientCmd, KeySource, Keymap, resolve};
 use crate::reading::ViewMode;
+use crate::settings::CAPTURES_PATH;
 use crate::settings::editor_prefs::EDITOR_PATH;
 use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg, Target};
 use crate::settings::*;

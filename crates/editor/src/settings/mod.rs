@@ -45,6 +45,7 @@
 //! Editor prefs (and the `[keys]` table the WP-4 keymap applies) are [`editor_prefs::Prefs`], held on the
 //! app as `App::prefs`.
 
+pub mod captures;
 pub mod edit;
 pub mod editor_prefs;
 pub mod form;
@@ -62,6 +63,7 @@ pub mod widgets;
 
 use std::collections::BTreeMap;
 
+pub use captures::{CAPTURES_PATH, period_folders};
 pub use edit::{DocEdit, ScalarValue};
 pub use input::{FormMsg, typeahead_key_event};
 pub use save_loop::{

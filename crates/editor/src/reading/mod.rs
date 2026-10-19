@@ -910,8 +910,8 @@ pub fn block_id(path: &str, view: u64, i: usize) -> iced::widget::Id {
 }
 
 #[cfg(test)]
+mod link_menu_tests;
+#[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod wp8_tests;

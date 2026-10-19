@@ -1,4 +1,4 @@
-//! Plan round-5 WP-8: link context menu and selection-taking commands (against `FakeDaemon`).
+//! Link context menu and selection-taking commands (against `FakeDaemon`).
 
 use std::sync::{Arc, Mutex};
 

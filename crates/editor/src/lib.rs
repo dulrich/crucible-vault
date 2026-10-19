@@ -34,6 +34,3 @@ pub mod title_sync;
 pub mod ui_state;
 pub mod views;
 pub mod widget;
-
-#[cfg(test)]
-mod tests;

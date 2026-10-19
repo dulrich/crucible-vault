@@ -118,7 +118,7 @@ pub static SECTIONS: [SectionInfo; 13] = [
         Section::Captures,
         "Captures & periods",
         Icon::CalendarDays,
-        Some(crate::app::CAPTURES_PATH),
+        Some(crate::settings::CAPTURES_PATH),
         "Period notes (day / week / month folders, formats, templates), then named capture presets.",
     ),
     sec(
