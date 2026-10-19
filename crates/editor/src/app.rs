@@ -316,6 +316,130 @@ pub fn reconnect_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(ms.min(5_000))
 }
 
+/// SR13: how [`App::rpc`] runs daemon calls.
+pub enum RpcExec {
+    /// Production: the call runs on the blocking pool; its completion arrives as a `Task`.
+    Pool,
+    /// Tests: the call runs synchronously and its completion `Message` is queued, never fed
+    /// back re-entrantly; tests drain the queue with `App::pump`.
+    Queue(std::collections::VecDeque<Message>),
+}
+
+/// SR13: observation points tests assert on (closed tabs, clipboard copies). Production
+/// installs [`NoopSink`]; tests a recording sink.
+pub trait TestSink: Send + Sync {
+    /// A tab showing `path` was removed.
+    fn closed(&self, _path: &str) {}
+    /// Text was written to the clipboard.
+    fn copied(&self, _text: &str) {}
+    /// A vault image was copied to the clipboard.
+    fn copied_image(&self, _path: &str) {}
+    /// Downcast hook for test accessors.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// The production sink: records nothing.
+pub struct NoopSink;
+
+impl TestSink for NoopSink {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Tests: records every sink event, in order.
+#[cfg(test)]
+#[derive(Default)]
+pub struct RecordingSink {
+    pub closed: Mutex<Vec<String>>,
+    pub copied: Mutex<Vec<String>>,
+    pub copied_images: Mutex<Vec<String>>,
+}
+
+#[cfg(test)]
+impl TestSink for RecordingSink {
+    fn closed(&self, path: &str) {
+        self.closed.lock().unwrap().push(path.to_owned());
+    }
+    fn copied(&self, text: &str) {
+        self.copied.lock().unwrap().push(text.to_owned());
+    }
+    fn copied_image(&self, path: &str) {
+        self.copied_images.lock().unwrap().push(path.to_owned());
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Tests: queue RPC completions (drained by [`App::pump`]) and record sink events.
+    pub fn queue_rpcs(&mut self) {
+        if !matches!(self.rpc_exec, RpcExec::Queue(_)) {
+            self.rpc_exec = RpcExec::Queue(std::collections::VecDeque::new());
+        }
+    }
+
+    /// Tests: feeds every queued RPC completion through `update` (in FIFO order, including
+    /// completions those updates queue) until the queue is empty.
+    pub fn pump(&mut self) {
+        for _ in 0..10_000 {
+            let next = match &mut self.rpc_exec {
+                RpcExec::Queue(q) => q.pop_front(),
+                RpcExec::Pool => None,
+            };
+            let Some(m) = next else { return };
+            let _ = self.update(m);
+        }
+        panic!("App::pump: RPC completions did not settle");
+    }
+
+    /// Tests: `update` followed by [`App::pump`] — the production ordering (the message and
+    /// its post-pass finish before any completion it started is delivered).
+    pub fn send(&mut self, m: Message) -> Task<Message> {
+        let t = self.update(m);
+        self.pump();
+        t
+    }
+
+    fn rec(&self) -> &RecordingSink {
+        self.sink
+            .as_any()
+            .downcast_ref::<RecordingSink>()
+            .expect("tests install a RecordingSink")
+    }
+
+    /// Tests: every `on_tab_closed` path, in order.
+    pub fn closed(&self) -> Vec<String> {
+        self.rec().closed.lock().unwrap().clone()
+    }
+
+    pub fn clear_closed(&self) {
+        self.rec().closed.lock().unwrap().clear();
+    }
+
+    /// Tests: every clipboard text copy, in order.
+    pub fn copied(&self) -> Vec<String> {
+        self.rec().copied.lock().unwrap().clone()
+    }
+
+    /// Tests: every "Copy image" vault path, in order.
+    pub fn copied_images(&self) -> Vec<String> {
+        self.rec().copied_images.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+fn default_sink() -> Arc<dyn TestSink> {
+    Arc::new(RecordingSink::default())
+}
+
+#[cfg(not(test))]
+fn default_sink() -> Arc<dyn TestSink> {
+    Arc::new(NoopSink)
+}
+
 /// The application.
 pub struct App {
     pub daemon: Option<Arc<dyn DaemonClient>>,
@@ -330,13 +454,13 @@ pub struct App {
     /// Plan round-5 WP-9: the open `[[` note list (focused source editor only).
     pub link_ta: Option<crate::link_ta::LinkTa>,
     pub bookmarks: Bookmarks,
-    /// Tests: run RPC calls inline instead of on the blocking pool.
-    pub rpc_inline: bool,
+    /// SR13: how `rpc` runs daemon calls — the blocking pool in production; tests queue the
+    /// completion `Message`s and drain them explicitly with `App::pump`.
+    pub rpc_exec: RpcExec,
+    /// SR13: test recorders (closed tabs, copies) behind an injected sink; no-op in production.
+    pub sink: Arc<dyn TestSink>,
     /// Tests: the injected "today" for nav (`None` = local date).
     pub today: Option<NaiveDate>,
-    /// Tests: every `on_tab_closed` path, in order.
-    #[cfg(test)]
-    pub closed: Vec<String>,
     /// WP-3: per-tab reading state (mode, render cache, image handles), keyed by path.
     pub reading: crate::reading::ReadingStore,
     /// WP-5: command palette, action invocation and the job toast.
@@ -387,12 +511,6 @@ pub struct App {
     fm_titles: std::cell::RefCell<FmTitleCache>,
     /// plan editor-ui-round-3 WP-4: the open right-click menu (one at a time).
     pub context_menu: Option<crate::context_menu::ContextMenu>,
-    /// Tests: every "Copy path" text, in order.
-    #[cfg(test)]
-    pub copied: Vec<String>,
-    /// Tests: every "Copy image" vault path, in order.
-    #[cfg(test)]
-    pub copied_images: Vec<String>,
     /// plan editor-round-4 WP-4: the image clipboard writer (`xclip` in production).
     pub clip_writer: Arc<dyn crate::clipboard_image::ClipboardWriter + Send + Sync>,
 }
@@ -548,10 +666,9 @@ impl App {
             switcher: Switcher::default(),
             link_ta: None,
             bookmarks: Bookmarks::default(),
-            rpc_inline: false,
+            rpc_exec: RpcExec::Pool,
+            sink: default_sink(),
             today: None,
-            #[cfg(test)]
-            closed: Vec::new(),
             reading: crate::reading::ReadingStore::new(),
             palette: crate::palette::Palette::default(),
             panels: crate::panels::Panels::default(),
@@ -575,10 +692,6 @@ impl App {
             period_folders: editor_model::period::PeriodFolders::default(),
             fm_titles: std::cell::RefCell::default(),
             context_menu: None,
-            #[cfg(test)]
-            copied: Vec::new(),
-            #[cfg(test)]
-            copied_images: Vec::new(),
             clip_writer: Arc::new(crate::clipboard_image::Xclip),
         };
         app.load_editor_prefs();
@@ -669,7 +782,7 @@ impl App {
     }
 
     fn schedule_reconnect(&mut self) -> Task<Message> {
-        if self.rpc_inline {
+        if matches!(self.rpc_exec, RpcExec::Queue(_)) {
             // Tests drive attempts with `StatusMsg::ReconnectDue`.
             return Task::none();
         }
@@ -686,9 +799,10 @@ impl App {
         if !self.status.reconnecting {
             return Task::none();
         }
-        if self.rpc_inline {
+        if let RpcExec::Queue(q) = &mut self.rpc_exec {
             let r = crate::daemon::connect(&c).map_err(|e| e.to_string());
-            return self.update_status(StatusMsg::Connected(r));
+            q.push_back(Message::Status(StatusMsg::Connected(r)));
+            return Task::none();
         }
         Task::perform(
             async move {
@@ -946,9 +1060,10 @@ impl App {
                     )
                 }
                 Want::GeoDebounce(seq) => {
-                    if self.rpc_inline {
-                        // Tests: the debounce elapses immediately.
-                        self.update(lm(LookupMsg::GeoDue(seq)))
+                    if let RpcExec::Queue(q) = &mut self.rpc_exec {
+                        // Tests: the debounce elapses at the next drain.
+                        q.push_back(lm(LookupMsg::GeoDue(seq)));
+                        Task::none()
                     } else {
                         Task::perform(
                             async move {
@@ -976,9 +1091,9 @@ impl App {
             self.status.set_error("not connected".into());
             return Task::none();
         };
-        if self.rpc_inline {
-            let r = call(d.as_ref());
-            return self.update(done(r));
+        if let RpcExec::Queue(q) = &mut self.rpc_exec {
+            q.push_back(done(call(d.as_ref())));
+            return Task::none();
         }
         Task::perform(
             async move {
@@ -1196,8 +1311,7 @@ impl App {
     /// document and its reading/view state are dropped only with the last tab showing `path`
     /// (plan editor-feedback-round-2 WP-7).
     fn on_tab_closed(&mut self, path: &str) {
-        #[cfg(test)]
-        self.closed.push(path.to_owned());
+        self.sink.closed(path);
         if self.path_open(path) {
             return;
         }
@@ -1360,7 +1474,7 @@ impl App {
             }
             // Plan round-6-feedback-todos WP-6: the intake status menu (`' '` = open).
             (Target::TrackerStatus { key }, Item::TaskStatus(c)) => {
-                self.update(Message::Views(crate::message::ViewsMsg::SetStatus {
+                self.update_inner(Message::Views(crate::message::ViewsMsg::SetStatus {
                     key,
                     status: (c != ' ').then_some(c),
                 }))
@@ -1408,8 +1522,7 @@ impl App {
                 Task::none()
             }
             (Target::Image { src, remote: false }, Item::CopyImage) => {
-                #[cfg(test)]
-                self.copied_images.push(src.clone());
+                self.sink.copied_image(&src);
                 let Some(d) = self.daemon.clone() else {
                     self.status
                         .set_error("copy image: no daemon connection".into());
@@ -1438,7 +1551,7 @@ impl App {
                     ..
                 },
                 Item::Open,
-            ) => self.update(Message::Reading(crate::message::ReadingMsg::OpenLink {
+            ) => self.update_inner(Message::Reading(crate::message::ReadingMsg::OpenLink {
                 src,
                 target,
             })),
@@ -1449,7 +1562,7 @@ impl App {
                     ..
                 },
                 Item::Open,
-            ) => self.update(Message::OpenUrl(target)),
+            ) => self.update_inner(Message::OpenUrl(target)),
             (
                 Target::Link {
                     src,
@@ -1468,8 +1581,7 @@ impl App {
                     return Task::none();
                 };
                 if item == Item::CopyPath {
-                    #[cfg(test)]
-                    self.copied.push(path.clone());
+                    self.sink.copied(&path);
                     return iced::clipboard::write(path);
                 }
                 if let Some((p, _)) = self.panes.split(
@@ -1490,8 +1602,7 @@ impl App {
                 Item::Copy,
             ) => match self.reading.selection_text(&path, view) {
                 Some(text) => {
-                    #[cfg(test)]
-                    self.copied.push(text.clone());
+                    self.sink.copied(&text);
                     iced::clipboard::write(text)
                 }
                 None => Task::none(),
@@ -1507,8 +1618,7 @@ impl App {
             | (Target::Image { src, remote: true }, Item::CopyUrl)
             | (Target::Image { src, remote: false }, Item::CopyPath)
             | (Target::Tab { path: src, .. } | Target::Row { path: src, .. }, Item::CopyPath) => {
-                #[cfg(test)]
-                self.copied.push(src.clone());
+                self.sink.copied(&src);
                 iced::clipboard::write(src)
             }
             (Target::Row { path, .. }, Item::Move) => {
@@ -1538,7 +1648,7 @@ impl App {
             // Plan round-6 WP-5: an Outline heading jumps in the active note, or opens the note
             // in a new pane at that heading.
             (Target::Anchor { line, .. }, Item::Open) => {
-                self.update(Message::Panels(PanelsMsg::OutlineJump(line)))
+                self.update_inner(Message::Panels(PanelsMsg::OutlineJump(line)))
             }
             (Target::Anchor { path, line }, Item::OpenInNewPane) => {
                 if let Some((p, _)) = self.panes.split(
@@ -1549,7 +1659,7 @@ impl App {
                     self.focus = p;
                 }
                 self.open_with(&path, Place::Duplicate, true);
-                self.update(Message::Panels(PanelsMsg::OutlineJump(line)))
+                self.update_inner(Message::Panels(PanelsMsg::OutlineJump(line)))
             }
             (Target::Row { path, .. }, Item::NewNote) => {
                 self.explorer.selected = Some(path);
@@ -3412,8 +3522,6 @@ impl App {
             }
             ps.history.retarget(from, to);
         }
-        #[cfg(test)]
-        self.closed.push(from.to_owned());
         if let Some(ids) = self.closing.remove(from) {
             self.closing.insert(to.to_owned(), ids);
         }
@@ -3887,7 +3995,7 @@ impl App {
             return self.capture_chord(c);
         }
         match self.palette.keymap.get(c).cloned() {
-            Some(Bound::Client(cmd)) => return self.update(cmd.message(self.focus)),
+            Some(Bound::Client(cmd)) => return self.update_inner(cmd.message(self.focus)),
             Some(Bound::Preset(preset)) => {
                 if self.palette.actions.is_none() {
                     self.palette.pending_chord = Some(c.clone());
@@ -3967,7 +4075,7 @@ impl App {
         match e.id {
             crate::palette::EntryId::Client(c) => {
                 self.palette.close();
-                self.update(c.message(self.focus))
+                self.update_inner(c.message(self.focus))
             }
             crate::palette::EntryId::Action(id) => self.invoke_action(&id),
             crate::palette::EntryId::Bookmark(p) => {

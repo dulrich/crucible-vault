@@ -26,7 +26,7 @@ fn fake() -> (tempfile::TempDir, Arc<FakeDaemon>) {
 fn app_over(d: &Arc<FakeDaemon>, state: Option<std::path::PathBuf>) -> App {
     let dc: Arc<dyn DaemonClient> = Arc::clone(d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), state);
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app
 }
 
@@ -35,7 +35,7 @@ fn s(m: SettingsMsg) -> Message {
 }
 
 fn changed(app: &mut App, path: &str, hash: Option<String>) {
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
             path: path.to_owned(),
             kind: ChangeKind::Modified,
@@ -413,7 +413,7 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
         crate::palette::routed(&comma),
         "passes through the source editor"
     );
-    let _ = app.update(Message::Palette(PaletteMsg::Key(comma.clone())));
+    let _ = app.send(Message::Palette(PaletteMsg::Key(comma.clone())));
     assert_eq!(settings_tabs(&app), 1);
     assert!(app.active_tab().is_some_and(|t| t.is_settings()));
     assert!(app.active_note().is_none());
@@ -430,8 +430,8 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
         .find(|f| f.is_md)
         .expect("note")
         .path;
-    let _ = app.update(Message::Tabs(TabsMsg::Open(note.clone())));
-    let _ = app.update(Message::Palette(PaletteMsg::Key(comma)));
+    let _ = app.send(Message::Tabs(TabsMsg::Open(note.clone())));
+    let _ = app.send(Message::Palette(PaletteMsg::Key(comma)));
     assert_eq!(settings_tabs(&app), 1);
     assert!(app.active_tab().is_some_and(|t| t.is_settings()));
     // Never in history or recent; files loaded for the pages.
@@ -456,7 +456,7 @@ fn settings_tab_persists_and_old_ui_state_loads() {
     let state = tmp.path().join("state/editor.json");
     {
         let mut app = app_over(&d, Some(state.clone()));
-        let _ = app.update(s(SettingsMsg::Open));
+        let _ = app.send(s(SettingsMsg::Open));
         assert_eq!(app.ui.tabs, [SETTINGS_TAB]);
         assert!(!app.ui.modes.contains_key(SETTINGS_TAB), "no mode entry");
     }
@@ -478,10 +478,10 @@ fn settings_tab_persists_and_old_ui_state_loads() {
 fn settings_tab_takes_no_note_commands() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(Message::Source(crate::message::SourceMsg::Save));
-    let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
-    let _ = app.update(Message::Find(crate::message::FindMsg::Open));
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(Message::Source(crate::message::SourceMsg::Save));
+    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+    let _ = app.send(Message::Find(crate::message::FindMsg::Open));
     assert!(
         app.bookmarks.items.is_empty(),
         "the sentinel is never bookmarked"
@@ -489,7 +489,7 @@ fn settings_tab_takes_no_note_commands() {
     assert!(app.panes.get(app.focus).is_some_and(|ps| ps.find.is_none()));
     assert!(d.read_file(BOOKMARKS_PATH).is_err());
     // Closing it is a plain removal.
-    let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+    let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
     assert_eq!(settings_tabs(&app), 0);
 }
 
@@ -503,13 +503,13 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert_eq!(f.state, LoadState::Absent);
     assert!(!f.dirty, "the surround seed alone is not an edit");
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
     assert!(d.read_file(EDITOR_PATH).is_err(), "no write before Save");
     assert!(
         (app.prefs.font_size - 30.0).abs() < f32::EPSILON,
         "applied live"
     );
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
     let (bytes, h) = d.read_file(EDITOR_PATH).expect("created");
     let text = String::from_utf8(bytes).expect("utf8");
     assert!(text.contains("font_size = 30"), "{text}");
@@ -531,11 +531,11 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
 fn editor_toml_appeared_since_load_is_a_conflict() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
     let theirs = "font_size = 12\n";
     d.write_note(EDITOR_PATH, theirs, &ContentHash::from_hex(""))
         .expect("external create");
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, theirs.as_bytes());
     assert_eq!(
         config_dir_entries(&d),
@@ -560,12 +560,12 @@ fn editor_toml_cas_conflict_reloads_without_overwrite() {
         .expect("seed");
     let mut app = app_over(&d, None);
     assert!((app.prefs.font_size - 20.0).abs() < f32::EPSILON);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::DeleteMode(
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::DeleteMode(
         crate::daemon::DeleteMode::Permanent,
     ))));
     d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
         .expect("external");
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, b"font_size = 26\n");
     assert_eq!(
         app.settings
@@ -595,7 +595,7 @@ fn external_edit_is_picked_up_live() {
     assert!((app.prefs.font_size - 40.0).abs() < f32::EPSILON);
     assert!((app.scale_factor() - 2.0).abs() < f32::EPSILON);
     // Our own write's echo (same hash) is not a reload.
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::UiScale(1.25))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::UiScale(1.25))));
     changed(&mut app, EDITOR_PATH, Some(h1.as_str().to_owned()));
     assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
 }
@@ -610,13 +610,13 @@ fn malformed_editor_toml_falls_back_and_is_kept() {
     assert_eq!(app.prefs, Prefs::default());
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert!(matches!(f.state, LoadState::Malformed(_)));
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, bad.as_bytes());
     // Start over + Save replaces it through CAS on the malformed content.
-    let _ = app.update(s(SettingsMsg::StartOver(EDITOR_PATH.into())));
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::StartOver(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
     let text = String::from_utf8(d.read_file(EDITOR_PATH).expect("r").0).expect("utf8");
     assert!(text.contains("font_size = 30"), "{text}");
 }
@@ -638,8 +638,8 @@ fn surround_migrates_once_from_ui_state() {
         Some("light")
     );
     // After a save, editor.toml is the source (the local copy no longer wins).
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::Surround(Surround::Dark))));
-    let _ = app.update(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::Surround(Surround::Dark))));
+    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
     std::fs::write(&state, br#"{"surround":"med"}"#).expect("state");
     let app = app_over(&d, Some(state));
     assert_eq!(app.prefs.surround, Surround::Dark);
@@ -649,7 +649,7 @@ fn surround_migrates_once_from_ui_state() {
 fn theme_cycle_edits_editor_toml_in_memory_only() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(Message::Theme(crate::message::ThemeMsg::Cycle));
+    let _ = app.send(Message::Theme(crate::message::ThemeMsg::Cycle));
     assert_eq!(app.prefs.surround, Surround::Light);
     assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
     assert!(d.read_file(EDITOR_PATH).is_err(), "no write without Save");
@@ -663,7 +663,7 @@ fn font_size_change_resizes_source_and_reading_live() {
         crate::reading::view::block_size(None),
         app.prefs.text_scale(),
     );
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(44.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(44.0))));
     assert!(
         (app.prefs.font_size - 44.0).abs() < f32::EPSILON,
         "source size"
@@ -674,7 +674,7 @@ fn font_size_change_resizes_source_and_reading_live() {
     );
     assert!((after - 2.0 * before).abs() < 1e-4, "{before} → {after}");
     // Revert drops the unsaved size.
-    let _ = app.update(s(SettingsMsg::Revert(EDITOR_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Revert(EDITOR_PATH.into())));
     assert_eq!(app.prefs, Prefs::default());
     // ui_scale is clamped for iced.
     app.prefs.ui_scale = 9.0;
@@ -720,12 +720,12 @@ fn explorer_trash_always_confirms_with_orphan_ticks() {
     d.create_note("wp3del/one.md", "![[own.png]] ![[shared.png]]\n")
         .expect("create");
     let mut app = app_over(&d, None);
-    let _ = app.update(Message::Explorer(ExplorerMsg::Refresh));
-    let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp3del/one.md".into())));
-    let _ = app.update(Message::Explorer(ExplorerMsg::Select(
+    let _ = app.send(Message::Explorer(ExplorerMsg::Refresh));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Open("wp3del/one.md".into())));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Select(
         "wp3del/one.md".into(),
     )));
-    let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Trash));
     let c = app
         .dialog
         .as_ref()
@@ -734,18 +734,18 @@ fn explorer_trash_always_confirms_with_orphan_ticks() {
     assert_eq!(c.ticked(), ["wp3del/own.png"]);
     assert_eq!(c.items.len(), 2);
     // Escape = Cancel: nothing deleted.
-    let _ = app.update(Message::Dialog(DialogMsg::Cancel));
+    let _ = app.send(Message::Dialog(DialogMsg::Cancel));
     assert!(app.dialog.is_none());
     assert!(d.read_file("wp3del/one.md").is_ok(), "not yet trashed");
     // Again, and the referenced item cannot be ticked.
-    let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Trash));
     let shared_ix = app
         .dialog
         .as_ref()
         .and_then(|d| d.delete_confirm())
         .and_then(|c| c.items.iter().position(|(i, _)| i.referenced_elsewhere))
         .expect("shared listed");
-    let _ = app.update(Message::Dialog(DialogMsg::Toggle(shared_ix)));
+    let _ = app.send(Message::Dialog(DialogMsg::Toggle(shared_ix)));
     assert_eq!(
         app.dialog
             .as_ref()
@@ -754,10 +754,10 @@ fn explorer_trash_always_confirms_with_orphan_ticks() {
         Some(vec!["wp3del/own.png".to_owned()])
     );
     // Enter is Cancel on this destructive dialog.
-    let _ = app.update(Message::Dialog(DialogMsg::Default));
+    let _ = app.send(Message::Dialog(DialogMsg::Default));
     assert!(d.read_file("wp3del/one.md").is_ok());
-    let _ = app.update(Message::Explorer(ExplorerMsg::Trash));
-    let _ = app.update(Message::Dialog(DialogMsg::Ok));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Trash));
+    let _ = app.send(Message::Dialog(DialogMsg::Ok));
     assert!(d.read_file("wp3del/one.md").is_err(), "deleted after OK");
     assert!(d.read_file("wp3del/own.png").is_err(), "orphan deleted");
     assert!(d.read_file("wp3del/shared.png").is_ok(), "shared kept");
@@ -782,9 +782,9 @@ fn delete_note_command_honours_permanent_mode() {
     .expect("seed");
     d.create_note("wp3perm/a.md", "x\n").expect("create");
     let mut app = app_over(&d, None);
-    let _ = app.update(Message::Explorer(ExplorerMsg::Open("wp3perm/a.md".into())));
-    let _ = app.update(Message::Explorer(ExplorerMsg::DeleteActive));
-    let _ = app.update(Message::Dialog(crate::dialog::DialogMsg::Ok));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Open("wp3perm/a.md".into())));
+    let _ = app.send(Message::Explorer(ExplorerMsg::DeleteActive));
+    let _ = app.send(Message::Dialog(crate::dialog::DialogMsg::Ok));
     assert!(d.read_file("wp3perm/a.md").is_err());
     assert!(
         !d.vault_root().join(".trash").exists(),
@@ -798,11 +798,11 @@ fn delete_note_command_honours_permanent_mode() {
 fn config_reloaded_errors_route_to_pages_and_status_refreshes() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(s(SettingsMsg::Section(Section::Status)));
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(s(SettingsMsg::Section(Section::Status)));
     assert!(app.settings.status.result.is_some(), "status on open");
     app.settings.status.result = None;
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::ConfigReloaded {
             errors: vec!["providers.toml: bad (line 2)".into(), "mystery".into()],
         },
@@ -835,8 +835,8 @@ fn bookmarks_absent_then_appeared_is_a_conflict_not_a_copy() {
     let theirs = "[[bookmark]]\nname = \"t\"\npath = \"t.md\"\n";
     d.write_note(BOOKMARKS_PATH, theirs, &ContentHash::from_hex(""))
         .expect("external");
-    let _ = app.update(Message::Tabs(TabsMsg::Open("wp2bm/a.md".into())));
-    let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("wp2bm/a.md".into())));
+    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
     assert_eq!(d.read_file(BOOKMARKS_PATH).expect("r").0, theirs.as_bytes());
     assert_eq!(
         config_dir_entries(&d),
@@ -862,8 +862,8 @@ fn settings_save_of_a_daemon_file_round_trips_comments() {
     )
     .expect("seed");
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(s(SettingsMsg::Edit(
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(s(SettingsMsg::Edit(
         kinds.into(),
         DocEdit::Set(
             Path::parse("kinds.book.folder").expect("p"),
@@ -871,7 +871,7 @@ fn settings_save_of_a_daemon_file_round_trips_comments() {
         ),
     )));
     assert!(app.settings.file(kinds).is_some_and(|f| f.dirty));
-    let _ = app.update(s(SettingsMsg::Save(kinds.into())));
+    let _ = app.send(s(SettingsMsg::Save(kinds.into())));
     let text = String::from_utf8(d.read_file(kinds).expect("r").0).expect("utf8");
     assert!(
         text.contains("# my kinds") && text.contains("# keep"),
@@ -888,7 +888,7 @@ fn seq(app: &App, path: &str) -> u64 {
 
 fn due(app: &mut App, path: &str) {
     let n = seq(app, path);
-    let _ = app.update(s(SettingsMsg::AutoSaveDue(path.into(), n)));
+    let _ = app.send(s(SettingsMsg::AutoSaveDue(path.into(), n)));
 }
 
 fn disk(d: &FakeDaemon, path: &str) -> Option<String> {
@@ -901,7 +901,7 @@ fn disk(d: &FakeDaemon, path: &str) -> Option<String> {
 fn autosave_valid_edit_writes_once_after_the_debounce() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert_eq!(f.scheduled_seq, f.edit_seq, "a debounce timer was armed");
     assert!(disk(&d, EDITOR_PATH).is_none(), "nothing before the timer");
@@ -920,13 +920,13 @@ fn autosave_valid_edit_writes_once_after_the_debounce() {
 fn autosave_rapid_edits_coalesce_into_one_write() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(20.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(20.0))));
     let first = seq(&app, EDITOR_PATH);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(22.0))));
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(24.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(22.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(24.0))));
     // The superseded timers fire: no write.
-    let _ = app.update(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first)));
-    let _ = app.update(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first + 1)));
+    let _ = app.send(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first)));
+    let _ = app.send(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first + 1)));
     assert!(disk(&d, EDITOR_PATH).is_none(), "stale timers never write");
     due(&mut app, EDITOR_PATH);
     let text = disk(&d, EDITOR_PATH).expect("written");
@@ -941,8 +941,8 @@ fn autosave_invalid_edit_never_writes() {
     d.write_note(kinds, seed, &ContentHash::from_hex(""))
         .expect("seed");
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(s(SettingsMsg::Edit(
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(s(SettingsMsg::Edit(
         kinds.into(),
         DocEdit::Set(
             Path::parse("kinds.book.folder").expect("p"),
@@ -959,8 +959,8 @@ fn autosave_invalid_edit_never_writes() {
         f.save_status()
     );
     due(&mut app, kinds);
-    let _ = app.update(s(SettingsMsg::Save(kinds.into())));
-    let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+    let _ = app.send(s(SettingsMsg::Save(kinds.into())));
+    let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
     assert_eq!(
         disk(&d, kinds).as_deref(),
         Some(seed),
@@ -972,21 +972,21 @@ fn autosave_invalid_edit_never_writes() {
 fn autosave_edit_during_an_inflight_write_requeues() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
     // The first write is in flight (not run inline).
-    app.rpc_inline = false;
+    app.rpc_exec = crate::app::RpcExec::Pool;
     due(&mut app, EDITOR_PATH);
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert!(f.saving);
     let first = f.doc.as_ref().expect("doc").to_string();
     let base = f.base.clone();
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(32.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(32.0))));
     due(&mut app, EDITOR_PATH);
     assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.queued));
     // The first write lands; the queued one runs right after.
-    app.rpc_inline = true;
+    app.queue_rpcs();
     let r = write_config(d.as_ref(), EDITOR_PATH, &first, base.as_ref());
-    let _ = app.update(s(SettingsMsg::Saved(EDITOR_PATH.into(), r)));
+    let _ = app.send(s(SettingsMsg::Saved(EDITOR_PATH.into(), r)));
     let text = disk(&d, EDITOR_PATH).expect("written");
     assert!(text.contains("font_size = 32"), "{text}");
     let f = app.settings.file(EDITOR_PATH).expect("f");
@@ -1000,7 +1000,7 @@ fn autosave_cas_conflict_reloads_without_overwrite() {
         .write_note(EDITOR_PATH, "font_size = 20\n", &ContentHash::from_hex(""))
         .expect("seed");
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
     d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
         .expect("external");
     due(&mut app, EDITOR_PATH);
@@ -1016,7 +1016,7 @@ fn autosave_views_parse_error_blocks_compile_warning_does_not() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
     let path = app.settings.new_view_file("mine").expect("new");
-    let _ = app.update(s(SettingsMsg::Edit(
+    let _ = app.send(s(SettingsMsg::Edit(
         path.clone(),
         DocEdit::Set(Path::root().key("invented"), ScalarValue::Int(1)),
     )));
@@ -1031,7 +1031,7 @@ fn autosave_views_parse_error_blocks_compile_warning_does_not() {
     if let Some(f) = app.settings.file_mut(&path) {
         f.doc = Some(ConfigDoc::parse(bad).expect("doc"));
     }
-    let _ = app.update(s(SettingsMsg::Edit(
+    let _ = app.send(s(SettingsMsg::Edit(
         path.clone(),
         DocEdit::Set(
             Path::parse("views[0].name").expect("p"),
@@ -1049,15 +1049,15 @@ fn autosave_views_parse_error_blocks_compile_warning_does_not() {
 fn autosave_flushes_on_settings_tab_close_and_quit() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
     assert!(disk(&d, EDITOR_PATH).is_none());
-    let _ = app.update(Message::Tabs(TabsMsg::CloseActive));
+    let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
     assert_eq!(settings_tabs(&app), 0);
     assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 30")));
     // Quit flushes a pending write before exiting.
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(34.0))));
-    let _ = app.update(Message::Tabs(TabsMsg::Quit));
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(34.0))));
+    let _ = app.send(Message::Tabs(TabsMsg::Quit));
     assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 34")));
     assert!(app.exiting);
 }
@@ -1082,8 +1082,8 @@ fn open_url_cmd_pref_default_and_override() {
 fn settings_save_failure_raises_an_error_notice() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
-    let _ = app.update(s(SettingsMsg::Saved(
+    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(s(SettingsMsg::Saved(
         EDITOR_PATH.into(),
         Err("disk full".into()),
     )));

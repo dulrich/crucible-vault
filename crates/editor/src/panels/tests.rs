@@ -37,9 +37,9 @@ fn env_fake() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
     let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
     let dc: Arc<dyn DaemonClient> = d.clone();
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
-    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
-    let _ = app.update(Message::Panels(PanelsMsg::Show(PanelKind::Outline)));
+    app.queue_rpcs();
+    let _ = app.send(Message::Tabs(TabsMsg::Open("a.md".into())));
+    let _ = app.send(Message::Panels(PanelsMsg::Show(PanelKind::Outline)));
     (tmp, d, app)
 }
 
@@ -120,14 +120,14 @@ fn outline_links_and_props_from_the_buffer() {
     assert_eq!(Rendered::Check(false).display(), "☐");
 
     // Unsaved edits show up on the next tick; the outline click moves the cursor only.
-    let _ = app.update(Message::Source(SourceMsg::Action(
+    let _ = app.send(Message::Source(SourceMsg::Action(
         iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(Arc::new(
             "# New top\n".into(),
         ))),
     )));
-    let _ = app.update(Message::Panels(PanelsMsg::Tick));
+    let _ = app.send(Message::Panels(PanelsMsg::Tick));
     assert_eq!(app.panels.outline[0].text, "New top");
-    let _ = app.update(Message::Panels(PanelsMsg::OutlineJump(10)));
+    let _ = app.send(Message::Panels(PanelsMsg::OutlineJump(10)));
     assert_eq!(app.active_doc().expect("doc").cursor().position.line, 10);
     let tab = app.active_tab().expect("tab");
     assert_eq!(tab.path, "a.md");
@@ -158,12 +158,12 @@ fn backlinks_tags_and_search_from_the_index() {
         .collect();
     assert_eq!(tags[0], ("alpha", 2), "{tags:?}");
     assert!(tags.contains(&("beta", 1)) && tags.contains(&("proj", 1)));
-    let _ = app.update(Message::Panels(PanelsMsg::TagPick("alpha".into())));
+    let _ = app.send(Message::Panels(PanelsMsg::TagPick("alpha".into())));
     assert_eq!(
         app.panels.tag_files,
         Some(("alpha".into(), vec!["a.md".into(), "sub/c.md".into()]))
     );
-    let _ = app.update(Message::Panels(PanelsMsg::Open("sub/c.md".into())));
+    let _ = app.send(Message::Panels(PanelsMsg::Open("sub/c.md".into())));
     assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("sub/c.md"));
 }
 
@@ -185,10 +185,10 @@ fn search_goes_through_the_daemon_with_headings_and_a_seq_gate() {
         semantic: true,
     })
     .unwrap();
-    let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
+    let _ = app.send(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
     let seq = app.panels.search.seq;
-    let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebraw".into())));
-    let _ = app.update(Message::Panels(PanelsMsg::SearchDue(seq)));
+    let _ = app.send(Message::Panels(PanelsMsg::SearchInput("zebraw".into())));
+    let _ = app.send(Message::Panels(PanelsMsg::SearchDue(seq)));
     assert!(
         app.panels.search.results.is_empty(),
         "stale debounce ignored"
@@ -197,7 +197,7 @@ fn search_goes_through_the_daemon_with_headings_and_a_seq_gate() {
         d.search_calls().unwrap().is_empty(),
         "no call for a stale seq"
     );
-    let _ = app.update(Message::Panels(PanelsMsg::SearchDue(seq + 1)));
+    let _ = app.send(Message::Panels(PanelsMsg::SearchDue(seq + 1)));
     assert_eq!(
         app.panels.search.results,
         vec![SearchHit {
@@ -214,13 +214,13 @@ fn search_goes_through_the_daemon_with_headings_and_a_seq_gate() {
     assert!(app.panels.search.error.is_none());
 
     // A stale result (older seq) arriving late is dropped.
-    let _ = app.update(Message::Panels(PanelsMsg::SearchDone {
+    let _ = app.send(Message::Panels(PanelsMsg::SearchDone {
         seq,
         result: Ok(Vec::new()),
     }));
     assert_eq!(app.panels.search.results.len(), 1);
     // The row renders (path + heading + snippet) without panicking.
-    let _ = app.update(Message::Panels(PanelsMsg::Show(PanelKind::Search)));
+    let _ = app.send(Message::Panels(PanelsMsg::Show(PanelKind::Search)));
     let _ = app.view();
 }
 
@@ -230,19 +230,19 @@ fn search_with_the_daemon_disconnected_shows_unavailable_and_reads_no_index() {
     d.set_search_disconnected(true).unwrap();
     // Remove the local index files: any fallback read of index.db would now fail loudly.
     let _ = std::fs::remove_dir_all(tmp.path().join("data"));
-    let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
+    let _ = app.send(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
     let seq = app.panels.search.seq;
-    let _ = app.update(Message::Panels(PanelsMsg::SearchDue(seq)));
+    let _ = app.send(Message::Panels(PanelsMsg::SearchDue(seq)));
     assert_eq!(app.panels.search.error.as_deref(), Some(SEARCH_UNAVAILABLE));
     assert!(app.panels.search.results.is_empty());
     assert_eq!(d.search_calls().unwrap().len(), 1);
 
     // No daemon at all: the same error line, no RPC.
     let mut app = App::new(None, None);
-    app.rpc_inline = true;
-    let _ = app.update(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
+    app.queue_rpcs();
+    let _ = app.send(Message::Panels(PanelsMsg::SearchInput("zebra".into())));
     let seq = app.panels.search.seq;
-    let _ = app.update(Message::Panels(PanelsMsg::SearchDue(seq)));
+    let _ = app.send(Message::Panels(PanelsMsg::SearchDue(seq)));
     assert_eq!(app.panels.search.error.as_deref(), Some(SEARCH_UNAVAILABLE));
 }
 
@@ -307,23 +307,23 @@ fn panels_open_latency() {
         .into_owned();
     let dc: Arc<dyn DaemonClient> = d;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
-    let _ = app.update(Message::Tabs(TabsMsg::Open(rel)));
+    app.queue_rpcs();
+    let _ = app.send(Message::Tabs(TabsMsg::Open(rel)));
     for round in 0..3 {
         // Each round: a new index generation (as after any save), then Toggle Panels open.
         app.status.generation += 1;
         let t = std::time::Instant::now();
-        let _ = app.update(Message::Panels(PanelsMsg::Toggle));
+        let _ = app.send(Message::Panels(PanelsMsg::Toggle));
         let open = t.elapsed();
         let t = std::time::Instant::now();
-        let _ = app.update(Message::Panels(PanelsMsg::Tick));
+        let _ = app.send(Message::Panels(PanelsMsg::Tick));
         let tick = t.elapsed();
         println!(
             "round {round}: toggle-open {:.1} ms, next tick {:.1} ms",
             open.as_secs_f64() * 1e3,
             tick.as_secs_f64() * 1e3
         );
-        let _ = app.update(Message::Panels(PanelsMsg::Toggle));
+        let _ = app.send(Message::Panels(PanelsMsg::Toggle));
     }
 }
 
@@ -348,11 +348,11 @@ fn panel_entries_yield_the_link_menu_and_outline_anchors() {
     let anchor = anchor_target("a.md", 18);
     assert_eq!(names(&anchor), ["Open", "Open in new pane"]);
 
-    let _ = app.update(Message::Menu(MenuMsg::Open(resolved, iced::Point::ORIGIN)));
-    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
-    assert_eq!(app.copied, ["b.md"]);
-    let _ = app.update(Message::Menu(MenuMsg::Open(anchor, iced::Point::ORIGIN)));
-    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::Open)));
+    let _ = app.send(Message::Menu(MenuMsg::Open(resolved, iced::Point::ORIGIN)));
+    let _ = app.send(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
+    assert_eq!(app.copied(), ["b.md"]);
+    let _ = app.send(Message::Menu(MenuMsg::Open(anchor, iced::Point::ORIGIN)));
+    let _ = app.send(Message::Menu(MenuMsg::Choose(Item::Open)));
     assert_eq!(app.active_doc().expect("doc").cursor().position.line, 18);
 }
 
@@ -401,9 +401,9 @@ fn sidebar_property_links_and_unresolved_marking() {
     let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
     let dc: Arc<dyn DaemonClient> = Arc::new(d);
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
-    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
-    let _ = app.update(Message::Panels(PanelsMsg::Show(PanelKind::Properties)));
+    app.queue_rpcs();
+    let _ = app.send(Message::Tabs(TabsMsg::Open("a.md".into())));
+    let _ = app.send(Message::Panels(PanelsMsg::Show(PanelKind::Properties)));
     let want: std::collections::HashSet<String> = ["gone".to_owned()].into();
     assert_eq!(app.panels.prop_unresolved, want);
 }

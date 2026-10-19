@@ -22,7 +22,7 @@ fn setup() -> (tempfile::TempDir, Arc<FakeDaemon>, App, String) {
         .expect("create");
     let dc: Arc<dyn DaemonClient> = d.clone();
     let mut app = App::new(Some(dc), None);
-    let _ = app.update(Message::Tabs(TabsMsg::Open(p.clone())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open(p.clone())));
     (tmp, d, app, p)
 }
 
@@ -32,7 +32,7 @@ fn buf(app: &mut App) -> &mut SourceBuffer {
 
 fn type_text(app: &mut App, s: &str) {
     for c in s.chars() {
-        let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+        let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
             Edit::Insert(c),
         ))));
     }
@@ -42,12 +42,12 @@ fn type_text(app: &mut App, s: &str) {
 fn save_now(app: &mut App, d: &FakeDaemon) -> SaveOutcome {
     let job = buf(app).begin_save(false).expect("a save job");
     let out = job.run(d);
-    let _ = app.update(job.done(out.clone()));
+    let _ = app.send(job.done(out.clone()));
     out
 }
 
 fn notify(app: &mut App, path: &str, hash: Option<String>) {
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
             path: path.to_owned(),
             kind: ChangeKind::Modified,
@@ -78,22 +78,22 @@ fn edits_route_through_undo_and_restore_cursor() {
         selection: Some(Position { line: 1, column: 7 }),
     });
     let sel = b.cursor();
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
         Edit::Enter,
     ))));
     assert_eq!(buf(&mut app).text(), "line one\nlineXY \n\nline three\n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     let b = buf(&mut app);
     assert_eq!(b.text(), "line one\nlineXY two\nline three\n");
     assert_eq!(b.cursor(), sel, "selection restored exactly");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
     assert_eq!(
         buf(&mut app).cursor().position,
         Position { line: 1, column: 4 }
     );
-    let _ = app.update(Message::Source(SourceMsg::Redo));
-    let _ = app.update(Message::Source(SourceMsg::Redo));
+    let _ = app.send(Message::Source(SourceMsg::Redo));
+    let _ = app.send(Message::Source(SourceMsg::Redo));
     assert_eq!(buf(&mut app).text(), "line one\nlineXY \n\nline three\n");
     // Backspace across a line join, then undo.
     let b = buf(&mut app);
@@ -101,15 +101,15 @@ fn edits_route_through_undo_and_restore_cursor() {
         position: Position { line: 2, column: 0 },
         selection: None,
     });
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
         Edit::Backspace,
     ))));
     assert_eq!(buf(&mut app).text(), "line one\nlineXY \nline three\n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nlineXY \n\nline three\n");
     // Navigation is not an edit.
     let seq = buf(&mut app).edit_seq();
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Move(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Move(
         Motion::Down,
     ))));
     assert_eq!(buf(&mut app).edit_seq(), seq);
@@ -147,7 +147,7 @@ fn echo_arriving_before_save_result_is_ignored() {
     };
     notify(&mut app, &p, Some(h.as_str().to_owned()));
     assert!(buf(&mut app).conflict().is_none(), "pending-save echo");
-    let _ = app.update(job.done(out));
+    let _ = app.send(job.done(out));
     assert!(!buf(&mut app).is_dirty());
 }
 
@@ -168,7 +168,7 @@ fn stale_base_conflicts_then_keep_mine_resaves() {
     // Keep mine: re-save against the new hash.
     let job = buf(&mut app).keep_mine(false).expect("job");
     let out = job.run(d.as_ref());
-    let _ = app.update(job.done(out));
+    let _ = app.send(job.done(out));
     assert!(buf(&mut app).conflict().is_none());
     assert!(!buf(&mut app).is_dirty());
     assert_eq!(
@@ -186,7 +186,7 @@ fn dirty_buffer_external_change_shows_bar_and_take_theirs_reloads() {
     notify(&mut app, &p, Some(theirs.as_str().to_owned()));
     assert_eq!(buf(&mut app).conflict(), Some(&theirs));
     assert!(buf(&mut app).text().starts_with('x'), "buffer kept");
-    let _ = app.update(Message::Source(SourceMsg::TakeTheirs(p.clone())));
+    let _ = app.send(Message::Source(SourceMsg::TakeTheirs(p.clone())));
     let b = buf(&mut app);
     assert_eq!(b.text(), "external\n");
     assert!(b.conflict().is_none() && !b.is_dirty());
@@ -221,18 +221,18 @@ fn clean_buffer_reloads_and_keeps_cursor_line() {
 #[test]
 fn shadow_mode_drops_edits_and_never_saves() {
     let (_t, d, mut app, p) = setup();
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::ModeChanged { mode: Mode::Shadow },
     )));
     type_text(&mut app, "nope");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
-    let _ = app.update(Message::Source(SourceMsg::Save));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Save));
     let b = buf(&mut app);
     assert_eq!(b.text(), "line one\nline two\nline three\n");
     assert!(!b.is_dirty() && !b.is_saving());
     assert!(b.begin_save(true).is_none());
     // Navigation still works.
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Move(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Move(
         Motion::Down,
     ))));
     assert_eq!(buf(&mut app).cursor().position.line, 1);
@@ -436,7 +436,7 @@ fn view_tree_position_stable_across_dirty_states() {
 }
 
 fn key(app: &mut App, k: crate::message::SourceKey) {
-    let _ = app.update(Message::Source(SourceMsg::Key(k)));
+    let _ = app.send(Message::Source(SourceMsg::Key(k)));
 }
 
 fn at(app: &mut App, line: usize, column: usize, sel: Option<(usize, usize)>) {
@@ -467,9 +467,9 @@ fn enter_continues_list_and_undoes_in_one_step() {
     // Enter on the empty item removes the marker instead.
     key(&mut app, SourceKey::Enter);
     assert_eq!(buf(&mut app).text(), "  - [x] done\n  \n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "  - [x] done\n  - [ ] \n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     let b = buf(&mut app);
     assert_eq!(b.text(), "  - [x] done\n");
     assert_eq!(
@@ -490,7 +490,7 @@ fn enter_numbered_replaces_selection_and_plain_lines_split() {
     at(&mut app, 0, 9, Some((0, 7)));
     key(&mut app, SourceKey::Enter);
     assert_eq!(buf(&mut app).text(), "> 3. ab\n> 4. ef\nplain\n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     let b = buf(&mut app);
     assert_eq!(b.text(), "> 3. abcdef\nplain\n");
     assert_eq!(b.cursor().selection, Some(Position { line: 0, column: 7 }));
@@ -506,7 +506,7 @@ fn word_delete_is_one_undoable_edit() {
     at(&mut app, 1, 8, None);
     key(&mut app, SourceKey::DeleteWordBack);
     assert_eq!(buf(&mut app).text(), "line one\nline \nline three\n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     let b = buf(&mut app);
     assert_eq!(b.text(), "line one\nline two\nline three\n");
     assert_eq!(b.cursor().position, Position { line: 1, column: 8 });
@@ -543,12 +543,12 @@ fn smart_home_end_on_unwrapped_lines() {
 fn primary_paste_inserts_as_one_edit() {
     let (_t, _d, mut app, p) = setup();
     at(&mut app, 0, 4, None);
-    let _ = app.update(Message::Source(SourceMsg::PastePrimary {
+    let _ = app.send(Message::Source(SourceMsg::PastePrimary {
         path: p,
         text: Some(" big".into()),
     }));
     assert_eq!(buf(&mut app).text(), "line big one\nline two\nline three\n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
 }
 
@@ -656,7 +656,7 @@ fn tab_without_selection_inserts_tab_and_undoes() {
         Position { line: 1, column: 5 }
     );
     assert!(buf(&mut app).is_dirty());
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
 }
 
@@ -687,7 +687,7 @@ fn tab_after_list_marker_indents_the_line() {
         buf(&mut app).cursor().position,
         Position { line: 0, column: 3 }
     );
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "- item\n");
 }
 
@@ -746,20 +746,20 @@ fn shift_click_extends_selection_from_the_cursor() {
     let (_t, _d, mut app, _p) = setup();
     buf(&mut app).materialise();
     sel(&mut app, (2, 3), (2, 3));
-    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
+    let _ = app.send(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
         Modifiers::SHIFT,
     )));
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Click(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Click(
         iced::Point::new(0.0, 0.0),
     ))));
     let c = buf(&mut app).cursor();
     assert_eq!(c.position, Position { line: 0, column: 0 });
     assert_eq!(c.selection, Some(Position { line: 2, column: 3 }));
     // Shift released: a click just moves the cursor.
-    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
+    let _ = app.send(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
         Modifiers::empty(),
     )));
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Click(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Click(
         iced::Point::new(0.0, 0.0),
     ))));
     assert_eq!(buf(&mut app).cursor().selection, None);
@@ -796,7 +796,7 @@ fn tab_multi_line_indents_every_line_in_one_undo_step() {
     let c = buf(&mut app).cursor();
     assert_eq!(c.position, Position { line: 2, column: 4 });
     assert_eq!(c.selection, Some(Position { line: 0, column: 3 }));
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
     let c = buf(&mut app).cursor();
     assert_eq!(c.position, Position { line: 2, column: 3 });
@@ -805,7 +805,7 @@ fn tab_multi_line_indents_every_line_in_one_undo_step() {
     sel(&mut app, (0, 0), (2, 0));
     key(&mut app, SourceKey::Indent);
     assert_eq!(buf(&mut app).text(), "\tline one\n\tline two\nline three\n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     sel(&mut app, (1, 0), (1, 8));
     key(&mut app, SourceKey::Indent);
     assert_eq!(buf(&mut app).text(), "line one\n\tline two\nline three\n");
@@ -821,7 +821,7 @@ fn shift_tab_removes_tab_or_spaces_or_nothing() {
     let c = buf(&mut app).cursor();
     assert_eq!(c.position, Position { line: 3, column: 1 });
     assert_eq!(c.selection, Some(Position { line: 0, column: 0 }));
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "\ta\n      b\n  c\nd\n");
     // Nothing to remove: no edit recorded.
     sel(&mut app, (3, 1), (3, 1));
@@ -891,20 +891,20 @@ fn find_highlight_tracks_current_match_and_clears_on_close() {
     let (_t, _d, mut app, p) = setup();
     // plan editor-round-4 WP-3: Reading steps visible occurrences (no source highlight), so
     // the source highlight is exercised in Source mode.
-    let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(crate::message::ReadingMsg::SetMode {
         path: p.clone(),
         mode: crate::reading::ViewMode::Source,
     }));
-    let _ = app.update(Message::Find(FindMsg::Open));
-    let _ = app.update(Message::Find(FindMsg::Query("two".into())));
+    let _ = app.send(Message::Find(FindMsg::Open));
+    let _ = app.send(Message::Find(FindMsg::Query("two".into())));
     assert_eq!(buf(&mut app).find_highlight(), Some(((1, 5), (1, 8))));
     assert_eq!(app.reading.find_query(&p), Some("two"));
-    let _ = app.update(Message::Find(FindMsg::Query("zzz".into())));
+    let _ = app.send(Message::Find(FindMsg::Query("zzz".into())));
     assert_eq!(buf(&mut app).find_highlight(), None);
-    let _ = app.update(Message::Find(FindMsg::Query("line".into())));
+    let _ = app.send(Message::Find(FindMsg::Query("line".into())));
     assert!(buf(&mut app).find_highlight().is_some());
     let text = buf(&mut app).text();
-    let _ = app.update(Message::Find(FindMsg::Close));
+    let _ = app.send(Message::Find(FindMsg::Close));
     assert_eq!(buf(&mut app).find_highlight(), None);
     assert_eq!(app.reading.find_query(&p), None);
     assert_eq!(buf(&mut app).text(), text, "find never mutates the buffer");
@@ -916,7 +916,7 @@ fn find_after_non_ascii_selects_and_paints_exact_bytes() {
     use iced::advanced::text::highlighter::Highlighter as _;
     let (_t, d, mut app, p) = setup();
     set_text(&mut app, &d, &p, "café bar\n");
-    let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(crate::message::ReadingMsg::SetMode {
         path: p.clone(),
         mode: crate::reading::ViewMode::Source,
     }));
@@ -924,8 +924,8 @@ fn find_after_non_ascii_selects_and_paints_exact_bytes() {
         position: Position { line: 0, column: 0 },
         selection: None,
     });
-    let _ = app.update(Message::Find(FindMsg::Open));
-    let _ = app.update(Message::Find(FindMsg::Query("bar".into())));
+    let _ = app.send(Message::Find(FindMsg::Open));
+    let _ = app.send(Message::Find(FindMsg::Query("bar".into())));
     let c = buf(&mut app).cursor();
     assert_eq!(c.selection, Some(Position { line: 0, column: 6 }));
     assert_eq!(c.position, Position { line: 0, column: 9 });
@@ -982,7 +982,7 @@ fn image_paste_stores_attachment_and_inserts_embed() {
         outcome
     );
     at(&mut app, 0, 4, None);
-    let _ = app.update(Message::Source(SourceMsg::PasteResolved {
+    let _ = app.send(Message::Source(SourceMsg::PasteResolved {
         path: p,
         outcome,
     }));
@@ -990,7 +990,7 @@ fn image_paste_stores_attachment_and_inserts_embed() {
         buf(&mut app).text(),
         format!("line![[{name}]] one\nline two\nline three\n")
     );
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
 }
 
@@ -1023,7 +1023,7 @@ fn ctrl_x_without_selection_cuts_the_line_as_one_undoable_edit() {
     assert!(changed);
     assert_eq!(clip.as_deref(), Some("line two\n"));
     assert_eq!(buf(&mut app).text(), "line one\nline three\n");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "line one\nline two\nline three\n");
     // Last line without a trailing newline: the line text; the preceding newline goes too.
     let (_t, d, mut app, p) = setup();
@@ -1032,7 +1032,7 @@ fn ctrl_x_without_selection_cuts_the_line_as_one_undoable_edit() {
     let (clip, _) = buf(&mut app).cut(false, Instant::now());
     assert_eq!(clip.as_deref(), Some("last"));
     assert_eq!(buf(&mut app).text(), "a");
-    let _ = app.update(Message::Source(SourceMsg::Undo));
+    let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "a\nlast");
     // With a selection: only the selection (as before).
     at(&mut app, 0, 1, Some((0, 0)));
@@ -1066,17 +1066,17 @@ fn ctrl_x_routes_to_cut() {
 fn go_to_top_and_bottom_move_the_source_cursor() {
     use crate::palette::ClientCmd;
     let (_t, _d, mut app, p) = setup();
-    let _ = app.update(Message::Reading(crate::message::ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(crate::message::ReadingMsg::SetMode {
         path: p.clone(),
         mode: crate::reading::ViewMode::Source,
     }));
     at(&mut app, 1, 3, Some((1, 0)));
     let focus = app.focus;
-    let _ = app.update(ClientCmd::GoToBottom.message(focus));
+    let _ = app.send(ClientCmd::GoToBottom.message(focus));
     let c = buf(&mut app).cursor();
     assert_eq!(c.position, Position { line: 3, column: 0 });
     assert_eq!(c.selection, None);
-    let _ = app.update(ClientCmd::GoToTop.message(focus));
+    let _ = app.send(ClientCmd::GoToTop.message(focus));
     assert_eq!(
         buf(&mut app).cursor().position,
         Position { line: 0, column: 0 }

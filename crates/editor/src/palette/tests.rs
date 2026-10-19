@@ -289,9 +289,9 @@ fn env() -> Env {
     }
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app.today = Some(today());
-    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("a.md".into())));
     Env {
         _tmp: tmp,
         d,
@@ -301,11 +301,11 @@ fn env() -> Env {
 }
 
 fn pal(app: &mut App, m: PaletteMsg) {
-    let _ = app.update(Message::Palette(m));
+    let _ = app.send(Message::Palette(m));
 }
 
 fn type_z(app: &mut App) {
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
         Edit::Insert('Z'),
     ))));
     assert!(app.active_doc().is_some_and(|t| t.is_dirty()));
@@ -381,7 +381,7 @@ fn palette_prompts_saves_first_and_runs_with_context() {
         .next()
         .cloned()
         .expect("job");
-    let _ = e.app.update(Message::Status(StatusMsg::Notification(
+    let _ = e.app.send(Message::Status(StatusMsg::Notification(
         Notification::JobUpdated(JobStatus {
             job_id: job,
             status: JobState::Done,
@@ -425,7 +425,7 @@ fn save_conflict_aborts_the_run() {
 fn shadow_skips_save_first() {
     let mut e = env();
     type_z(&mut e.app);
-    let _ = e.app.update(Message::Status(StatusMsg::Notification(
+    let _ = e.app.send(Message::Status(StatusMsg::Notification(
         Notification::ModeChanged { mode: Mode::Shadow },
     )));
     pal(
@@ -508,9 +508,9 @@ fn durable_move_env() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
     d.defer_action("file-as-kind").expect("defer");
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app.today = Some(today());
-    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("a.md".into())));
     (tmp, d, app)
 }
 
@@ -524,7 +524,7 @@ fn deliver_terminal(d: &FakeDaemon, app: &mut App) {
     for id in d.complete_deferred().expect("complete") {
         let j = d.job(&id).expect("job");
         assert_eq!(j.status, JobState::Done);
-        let _ = app.update(Message::Status(StatusMsg::Notification(
+        let _ = app.send(Message::Status(StatusMsg::Notification(
             Notification::JobUpdated(j),
         )));
     }
@@ -562,9 +562,9 @@ fn durable_file_as_kind_retargets_the_tab_on_terminal_status() {
 #[test]
 fn durable_file_as_kind_retargets_every_tab_of_the_origin() {
     let (_tmp, d, mut app) = durable_move_env();
-    let _ = app.update(Message::Panes(crate::message::PanesMsg::SplitRight));
+    let _ = app.send(Message::Panes(crate::message::PanesMsg::SplitRight));
     app.prefs.quick_switch_open = crate::header::QuickSwitchOpen::Duplicate;
-    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Pick(
+    let _ = app.send(Message::Switcher(crate::message::SwitcherMsg::Pick(
         "a.md".into(),
     )));
     assert_eq!(all_tabs(&app), ["a.md", "a.md"]);
@@ -604,7 +604,7 @@ fn terminal_status_before_the_reply_still_follows_and_original_kept_opens_new_ta
         output_paths: Vec::new(),
         open_path: Some("kinds/b.md".into()),
     };
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::JobUpdated(j),
     )));
     assert_eq!(
@@ -821,14 +821,14 @@ fn file_as_kind_live_env() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
     d.defer_action("file-as-kind").expect("defer");
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app.today = Some(today());
-    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("a.md".into())));
     (tmp, d, app)
 }
 
 fn notify(app: &mut App, n: Notification) {
-    let _ = app.update(Message::Status(StatusMsg::Notification(n)));
+    let _ = app.send(Message::Status(StatusMsg::Notification(n)));
 }
 
 fn job_status(id: &str, status: JobState, open: Option<&str>) -> JobStatus {
@@ -952,17 +952,17 @@ fn move_env() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
     let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app.today = Some(today());
-    let _ = app.update(Message::Tabs(TabsMsg::Open("a.md".into())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("a.md".into())));
     (tmp, d, app)
 }
 
 fn move_to(app: &mut App, folder: &str) {
-    let _ = app.update(ClientCmd::MoveNote.message(app.focus));
+    let _ = app.send(ClientCmd::MoveNote.message(app.focus));
     assert_eq!(app.switcher.move_from.as_deref(), Some("a.md"));
     assert_eq!(app.switcher.folders, ["notes"]);
-    let _ = app.update(Message::Switcher(crate::message::SwitcherMsg::Pick(
+    let _ = app.send(Message::Switcher(crate::message::SwitcherMsg::Pick(
         folder.into(),
     )));
     assert!(!app.switcher.open && app.switcher.move_from.is_none());
@@ -1102,7 +1102,7 @@ fn failed_job_message_reaches_toast_and_notice() {
     app.palette
         .job_titles
         .insert("j1".into(), "File as kind".into());
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::JobUpdated(JobStatus {
             job_id: "j1".into(),
             status: JobState::Failed,

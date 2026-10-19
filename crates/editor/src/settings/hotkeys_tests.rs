@@ -38,7 +38,7 @@ fn put(d: &FakeDaemon, path: &str, body: &str) {
 fn app_over(d: &Arc<FakeDaemon>) -> App {
     let dc: Arc<dyn DaemonClient> = Arc::clone(d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app
 }
 
@@ -47,19 +47,19 @@ fn c(s: &str) -> Chord {
 }
 
 fn key(app: &mut App, k: &str) {
-    let _ = app.update(Message::Palette(PaletteMsg::Key(c(k))));
+    let _ = app.send(Message::Palette(PaletteMsg::Key(c(k))));
 }
 
 fn hk(app: &mut App, m: HotkeyMsg) {
-    let _ = app.update(Message::Settings(SettingsMsg::Hotkey(m)));
+    let _ = app.send(Message::Settings(SettingsMsg::Hotkey(m)));
 }
 
 fn open(app: &mut App, p: &str) {
-    let _ = app.update(Message::Explorer(ExplorerMsg::Open(p.into())));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Open(p.into())));
 }
 
 fn set_mode(app: &mut App, p: &str, mode: ViewMode) {
-    let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(ReadingMsg::SetMode {
         path: p.into(),
         mode,
     }));
@@ -355,7 +355,7 @@ fn ctrl_e_is_an_ordinary_rebindable_command() {
     key(&mut app, "Ctrl+E");
     assert_eq!(app.reading.mode(NOTE), ViewMode::Reading);
     // Rebound live (no restart) through the Settings edit path.
-    let _ = app.update(Message::Settings(SettingsMsg::Edit(
+    let _ = app.send(Message::Settings(SettingsMsg::Edit(
         EDITOR_PATH.into(),
         DocEdit::Set(
             Path::root().key("keys").key("cycle_reading"),
@@ -419,8 +419,8 @@ fn palette_entries_show_effective_chords() {
 
 fn hotkeys_app(d: &Arc<FakeDaemon>) -> App {
     let mut app = app_over(d);
-    let _ = app.update(Message::Settings(SettingsMsg::Open));
-    let _ = app.update(Message::Settings(SettingsMsg::Section(Section::Hotkeys)));
+    let _ = app.send(Message::Settings(SettingsMsg::Open));
+    let _ = app.send(Message::Settings(SettingsMsg::Section(Section::Hotkeys)));
     app
 }
 
@@ -453,7 +453,7 @@ fn record_captures_the_next_chord_into_editor_toml_without_writing() {
         (vec!["Alt+K".into()], KeySource::EditorToml)
     );
     // Save writes it through the exact-name path.
-    let _ = app.update(Message::Settings(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(Message::Settings(SettingsMsg::Save(EDITOR_PATH.into())));
     let body = std::fs::read_to_string(d.vault_root().join(EDITOR_PATH)).expect("saved");
     assert!(body.contains("quit = [\"Alt+K\"]"), "{body}");
 }
@@ -528,8 +528,8 @@ fn binding_an_action_key_keeps_every_action_row() {
     assert_eq!(action_rows(&app), 2);
     hk(&mut app, HotkeyMsg::Record(Target::Action("a".into())));
     key(&mut app, "Alt+J");
-    let _ = app.update(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
-    let _ = app.update(Message::Status(crate::message::StatusMsg::Notification(
+    let _ = app.send(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
+    let _ = app.send(Message::Status(crate::message::StatusMsg::Notification(
         cv_protocol::Notification::ConfigReloaded { errors: vec![] },
     )));
     assert_eq!(action_rows(&app), 2, "after the reload");
@@ -547,7 +547,7 @@ fn escape_cancels_and_reserved_chords_are_refused() {
     let (_tmp, d) = fake();
     let mut app = hotkeys_app(&d);
     hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
-    let _ = app.update(Message::Palette(PaletteMsg::Close));
+    let _ = app.send(Message::Palette(PaletteMsg::Close));
     assert!(app.settings.hotkeys.recording.is_none());
     assert_eq!(keys_of(&app, "quit"), None);
     hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
@@ -613,7 +613,7 @@ fn config_action_chords_edit_actions_toml() {
         (r.chords.clone(), r.source),
         (vec!["Ctrl+J".into()], KeySource::ActionsToml)
     );
-    let _ = app.update(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
+    let _ = app.send(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
     let body = std::fs::read_to_string(d.vault_root().join(ACTIONS_PATH)).expect("file");
     assert!(
         body.contains("# my actions") && body.contains("\"Ctrl+J\""),
@@ -658,7 +658,7 @@ fn period_folders_come_from_captures_with_const_fallback() {
     assert_eq!(app.period_folders.day, "journal/d", "loaded at boot");
     assert_eq!(app.period_folders.month, editor_model::period::MONTH_FOLDER);
     // Live edit re-derives.
-    let _ = app.update(Message::Settings(SettingsMsg::Edit(
+    let _ = app.send(Message::Settings(SettingsMsg::Edit(
         CAPTURES_PATH.into(),
         DocEdit::Set(
             Path::root().key("periods").key("month").key("folder"),
@@ -800,7 +800,7 @@ fn bm_on_disk(d: &FakeDaemon) -> Vec<crate::bookmarks::Bookmark> {
 }
 
 fn bm_msg(app: &mut App, m: crate::bookmarks::BookmarkMsg) {
-    let _ = app.update(Message::Panes(crate::message::PanesMsg::Bookmark(m)));
+    let _ = app.send(Message::Panes(crate::message::PanesMsg::Bookmark(m)));
 }
 
 #[test]
@@ -914,7 +914,7 @@ fn missing_bookmarks_on_load_and_after_delete() {
     let set = |app: &App| app.bookmarks.missing.iter().cloned().collect::<Vec<_>>();
     assert_eq!(set(&app), ["wp9/gone.md"]);
     d.delete("wp9/b.md").expect("delete");
-    let _ = app.update(Message::Status(crate::message::StatusMsg::Notification(
+    let _ = app.send(Message::Status(crate::message::StatusMsg::Notification(
         cv_protocol::Notification::FileChanged {
             path: "wp9/b.md".into(),
             kind: cv_protocol::ChangeKind::Deleted,
@@ -924,7 +924,7 @@ fn missing_bookmarks_on_load_and_after_delete() {
     )));
     // The daemon's rebuild lands as a new generation (refreshed there too).
     let n = d.generation().expect("gen");
-    let _ = app.update(Message::Status(crate::message::StatusMsg::Notification(
+    let _ = app.send(Message::Status(crate::message::StatusMsg::Notification(
         cv_protocol::Notification::IndexGeneration { n },
     )));
     assert_eq!(set(&app), ["wp9/b.md", "wp9/gone.md"]);
@@ -948,8 +948,8 @@ fn missing_bookmarks_on_load_and_after_delete() {
 fn settings_sections_keep_their_body_offsets() {
     use crate::message::Message;
     let mut app = crate::app::App::new(None, None);
-    let _ = app.update(Message::Settings(SettingsMsg::Open));
-    let _ = app.update(Message::Settings(SettingsMsg::BodyScrolled(
+    let _ = app.send(Message::Settings(SettingsMsg::Open));
+    let _ = app.send(Message::Settings(SettingsMsg::BodyScrolled(
         Section::Hotkeys,
         120.0,
     )));
@@ -957,7 +957,7 @@ fn settings_sections_keep_their_body_offsets() {
         app.settings.body_offsets.get(&Section::Hotkeys),
         Some(&120.0)
     );
-    let t = app.update(Message::Settings(SettingsMsg::Section(Section::Editor)));
+    let t = app.send(Message::Settings(SettingsMsg::Section(Section::Editor)));
     assert!(t.units() > 0, "the section's offset is re-applied");
     assert_eq!(
         app.settings.body_offsets.get(&Section::Hotkeys),

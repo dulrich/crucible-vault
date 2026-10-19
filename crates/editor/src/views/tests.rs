@@ -29,8 +29,8 @@ fn setup() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
     let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
-    let _ = app.update(Message::Tabs(TabsMsg::Open(NOTE.to_owned())));
+    app.queue_rpcs();
+    let _ = app.send(Message::Tabs(TabsMsg::Open(NOTE.to_owned())));
     (tmp, d, app)
 }
 
@@ -48,7 +48,7 @@ fn result() -> serde_json::Value {
 }
 
 fn need(app: &mut App) {
-    let _ = app.update(Message::Views(ViewsMsg::Need {
+    let _ = app.send(Message::Views(ViewsMsg::Need {
         id: ID.into(),
         host: Some(NOTE.into()),
     }));
@@ -63,7 +63,7 @@ fn fence_needs_runs_with_this_and_becomes_ready() {
     let (_tmp, d, mut app) = setup();
     d.set_view_result(ID, ViewResult(result())).expect("script");
     // The note renders a view fence whose id the fence widget will ask for.
-    let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(ReadingMsg::SetMode {
         path: NOTE.into(),
         mode: ViewMode::Reading,
     }));
@@ -95,14 +95,14 @@ fn views_invalidated_re_requests_a_shown_view() {
     need(&mut app);
     let epoch = app.views.get(ID, Some(NOTE)).expect("entry").epoch;
     // Other ids leave it alone.
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::ViewsInvalidated {
             view_ids: vec!["hubs#Hub View B".into()],
         },
     )));
     need(&mut app);
     assert_eq!(d.view_calls().expect("calls").len(), 1);
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::ViewsInvalidated {
             view_ids: vec![ID.into()],
         },
@@ -121,7 +121,7 @@ fn views_invalidated_re_requests_a_shown_view() {
 #[test]
 fn row_click_opens_the_path_at_its_line() {
     let (_tmp, _d, mut app) = setup();
-    let _ = app.update(Message::Views(ViewsMsg::Open {
+    let _ = app.send(Message::Views(ViewsMsg::Open {
         path: "Linker.md".into(),
         line: Some(3),
     }));
@@ -262,7 +262,7 @@ fn closing_the_host_tab_drops_its_results() {
     d.set_view_result(ID, ViewResult(result())).expect("script");
     need(&mut app);
     assert!(app.views.get(ID, Some(NOTE)).is_some());
-    let _ = app.update(Message::Tabs(TabsMsg::Close(app.focus, 0)));
+    let _ = app.send(Message::Tabs(TabsMsg::Close(app.focus, 0)));
     assert!(app.views.get(ID, Some(NOTE)).is_none());
 }
 
@@ -341,7 +341,7 @@ fn file_changed_renamed_marks_every_view_stale() {
     d.set_view_result(ID, ViewResult(result())).expect("script");
     need(&mut app);
     let epoch = app.views.get(ID, Some(NOTE)).expect("entry").epoch;
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
             path: "Other.md".into(),
             kind: cv_protocol::ChangeKind::Renamed,
@@ -362,7 +362,7 @@ fn retarget_rehosts_view_entries_under_the_new_path() {
     d.set_view_result(ID, ViewResult(result())).expect("script");
     need(&mut app);
     d.rename(NOTE, "Moved.md").expect("rename");
-    let _ = app.update(Message::Explorer(crate::message::ExplorerMsg::Done(
+    let _ = app.send(Message::Explorer(crate::message::ExplorerMsg::Done(
         crate::explorer::FileOpDone {
             op: crate::explorer::FileOp::Rename {
                 from: NOTE.into(),
@@ -375,7 +375,7 @@ fn retarget_rehosts_view_entries_under_the_new_path() {
     let e = app.views.get(ID, Some("Moved.md")).expect("rehosted");
     assert!(e.stale && !e.in_flight);
     assert!(ready(&app, "Moved.md"), "no flash: the old rows stay up");
-    let _ = app.update(Message::Views(ViewsMsg::Need {
+    let _ = app.send(Message::Views(ViewsMsg::Need {
         id: ID.into(),
         host: Some("Moved.md".into()),
     }));
@@ -536,7 +536,7 @@ fn done_toggle_click_calls_the_rpc_with_the_decoded_identity() {
     let Some(click) = row_targets(&keyed, &keys).remove(1) else {
         panic!("no toggle target");
     };
-    let _ = app.update(click);
+    let _ = app.send(click);
     assert_eq!(
         d.status_calls().expect("calls"),
         [cv_protocol::TrackerItemSetStatusParams {
@@ -553,7 +553,7 @@ fn done_toggle_click_calls_the_rpc_with_the_decoded_identity() {
     let Some(click) = row_targets(&keyed, &keys).remove(1) else {
         panic!("no toggle target");
     };
-    let _ = app.update(click);
+    let _ = app.send(click);
     assert_eq!(d.status_calls().expect("calls").len(), 2);
     assert!(
         app.status
@@ -589,9 +589,9 @@ fn view_cell_right_click_yields_the_link_menu() {
     assert!(cell_menu_target(&Cell::Text("x".into())).is_none());
 
     let (_tmp, _d, mut app) = setup();
-    let _ = app.update(Message::Menu(MenuMsg::Open(link, iced::Point::ORIGIN)));
-    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
-    assert_eq!(app.copied, ["Linker.md"]);
+    let _ = app.send(Message::Menu(MenuMsg::Open(link, iced::Point::ORIGIN)));
+    let _ = app.send(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
+    assert_eq!(app.copied(), ["Linker.md"]);
 }
 
 /// Plan round-6-feedback-todos WP-6: a `status` cell of a keyed row — left click toggles `x` ↔
@@ -638,7 +638,7 @@ fn status_cell_click_toggles_and_right_click_menu_sets_the_status() {
         let Some(click) = row_targets(r, keys).remove(1) else {
             panic!("no status target");
         };
-        let _ = app.update(click);
+        let _ = app.send(click);
     }
     assert_eq!(
         d.status_calls().expect("calls"),
@@ -650,13 +650,13 @@ fn status_cell_click_toggles_and_right_click_menu_sets_the_status() {
         items(&target).len(),
         crate::task_status::TASK_STATUSES.len()
     );
-    let _ = app.update(Message::Menu(MenuMsg::Open(
+    let _ = app.send(Message::Menu(MenuMsg::Open(
         target.clone(),
         iced::Point::ORIGIN,
     )));
-    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::TaskStatus('/'))));
-    let _ = app.update(Message::Menu(MenuMsg::Open(target, iced::Point::ORIGIN)));
-    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::TaskStatus(' '))));
+    let _ = app.send(Message::Menu(MenuMsg::Choose(Item::TaskStatus('/'))));
+    let _ = app.send(Message::Menu(MenuMsg::Open(target, iced::Point::ORIGIN)));
+    let _ = app.send(Message::Menu(MenuMsg::Choose(Item::TaskStatus(' '))));
     let calls = d.status_calls().expect("calls");
     assert_eq!(calls[2..], [params("v2", Some('/')), params("v2", None)]);
     assert!(app.status.error_text().is_none(), "success is silent");
@@ -696,14 +696,14 @@ fn tasks_row_shows_its_status_and_toggles_through_the_note_edit_path() {
         }
     );
     // Not open: a notice, not a silent no-op.
-    let _ = app.update(click.clone());
+    let _ = app.send(click.clone());
     assert!(
         app.status
             .error_text()
             .is_some_and(|e| e.contains("wp6t/t.md"))
     );
-    let _ = app.update(Message::Tabs(TabsMsg::Open("wp6t/t.md".into())));
-    let _ = app.update(click);
+    let _ = app.send(Message::Tabs(TabsMsg::Open("wp6t/t.md".into())));
+    let _ = app.send(click);
     assert_eq!(app.active_doc().expect("doc").text(), "- [ ] a\n- [x] b\n");
     // No path / line: display-only, open status for a missing cell.
     let bare = Row {
@@ -797,14 +797,14 @@ fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
     assert!(checkbox_cell(&rows[0], &dec.column_keys, &dec.column_checkbox, 0).is_none());
     // Open note: the buffer gains `read: true`; no daemon call.
     let (_, click) = cb(&rows[0]).expect("checkbox");
-    let _ = app.update(click);
+    let _ = app.send(click);
     assert!(d.bool_calls().expect("calls").is_empty());
     let text = app.docs.get_mut(NOTE).expect("doc").text();
     assert!(text.starts_with("---\nread: true\n---\n# Host"), "{text}");
     // Closed note, checked: exactly one `note_set_bool` to false.
     let (checked, click) = cb(&rows[1]).expect("checkbox");
     assert!(checked);
-    let _ = app.update(click);
+    let _ = app.send(click);
     assert_eq!(
         d.bool_calls().expect("calls"),
         [cv_protocol::NoteSetBoolParams {

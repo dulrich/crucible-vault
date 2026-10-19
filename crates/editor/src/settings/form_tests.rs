@@ -28,7 +28,7 @@ fn fake() -> (tempfile::TempDir, Arc<FakeDaemon>) {
 fn app_over(d: &Arc<FakeDaemon>) -> App {
     let dc: Arc<dyn DaemonClient> = Arc::clone(d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app
 }
 
@@ -714,8 +714,8 @@ fn form_edit_round_trip_keeps_comment_and_unknown_key_in_saved_text() {
     d.write_note(ACTIONS, ONE_ACTION, &ContentHash::from_hex(""))
         .expect("seed");
     let mut app = app_over(&d);
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(s(SettingsMsg::Form(
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(s(SettingsMsg::Form(
         ACTIONS.into(),
         FormMsg::Text {
             path: p("action[0].title"),
@@ -724,7 +724,7 @@ fn form_edit_round_trip_keeps_comment_and_unknown_key_in_saved_text() {
             picker: None,
         },
     )));
-    let _ = app.update(s(SettingsMsg::Save(ACTIONS.into())));
+    let _ = app.send(s(SettingsMsg::Save(ACTIONS.into())));
     let text = String::from_utf8(d.read_file(ACTIONS).expect("r").0).expect("utf8");
     assert!(text.contains("# my actions"), "{text}");
     assert!(text.contains("mystery = 7 # unknown, kept"), "{text}");
@@ -819,13 +819,13 @@ fn sync_views_registers_view_files_from_the_path_list() {
 fn new_view_file_saves_at_the_exact_name() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d);
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(s(SettingsMsg::Section(Section::Views)));
-    let _ = app.update(s(SettingsMsg::NewViewName("fresh".into())));
-    let _ = app.update(s(SettingsMsg::NewViewCreate));
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(s(SettingsMsg::Section(Section::Views)));
+    let _ = app.send(s(SettingsMsg::NewViewName("fresh".into())));
+    let _ = app.send(s(SettingsMsg::NewViewCreate));
     let path = "_custom/crucible-vault/views/fresh.toml";
     assert_eq!(app.settings.view_selected.as_deref(), Some(path));
-    let _ = app.update(s(SettingsMsg::Edit(
+    let _ = app.send(s(SettingsMsg::Edit(
         path.into(),
         DocEdit::InsertRecord(
             p("views"),
@@ -836,7 +836,7 @@ fn new_view_file_saves_at_the_exact_name() {
             ],
         ),
     )));
-    let _ = app.update(s(SettingsMsg::Save(path.into())));
+    let _ = app.send(s(SettingsMsg::Save(path.into())));
     let text = String::from_utf8(d.read_file(path).expect("saved").0).expect("utf8");
     assert!(text.contains("name = \"All\""), "{text}");
     assert!(
@@ -852,8 +852,8 @@ fn bookmarks_page_and_panel_share_one_hash() {
     d.create_note("wp3bm/a.md", "a").expect("create");
     d.create_note("wp3bm/b.md", "b").expect("create");
     let mut app = app_over(&d);
-    let _ = app.update(Message::Tabs(TabsMsg::Open("wp3bm/a.md".into())));
-    let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("wp3bm/a.md".into())));
+    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
     let disk = |d: &FakeDaemon| d.read_file(BOOKMARKS_PATH).expect("r");
     let base = |app: &App| {
         app.settings
@@ -867,20 +867,20 @@ fn bookmarks_page_and_panel_share_one_hash() {
     );
     assert_eq!(app.bookmarks.items.len(), 1);
     // The page edits the same doc and saves without conflict.
-    let _ = app.update(s(SettingsMsg::Open));
-    let _ = app.update(s(SettingsMsg::Edit(
+    let _ = app.send(s(SettingsMsg::Open));
+    let _ = app.send(s(SettingsMsg::Edit(
         BOOKMARKS_PATH.into(),
         DocEdit::Set(p("bookmark[0].name"), ScalarValue::Str("Alpha".into())),
     )));
     // While the page is dirty the panel waits.
-    let _ = app.update(Message::Tabs(TabsMsg::Open("wp3bm/b.md".into())));
-    let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("wp3bm/b.md".into())));
+    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
     assert!(
         app.status
             .error_text()
             .is_some_and(|e| e.contains("unsaved"))
     );
-    let _ = app.update(s(SettingsMsg::Save(BOOKMARKS_PATH.into())));
+    let _ = app.send(s(SettingsMsg::Save(BOOKMARKS_PATH.into())));
     assert!(
         app.settings
             .file(BOOKMARKS_PATH)
@@ -893,7 +893,7 @@ fn bookmarks_page_and_panel_share_one_hash() {
     );
     // And the panel saves again on top of the page's save (no conflict).
     app.status.notice = None;
-    let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
     assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
     let items = crate::bookmarks::parse(&disk(&d).0).expect("parse");
     assert_eq!(items.len(), 2);
@@ -912,8 +912,8 @@ fn panel_edit_keeps_comments_in_bookmarks_toml() {
     .expect("seed");
     let mut app = app_over(&d);
     assert_eq!(app.bookmarks.items.len(), 1);
-    let _ = app.update(Message::Tabs(TabsMsg::Open("wp3bc/a.md".into())));
-    let _ = app.update(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("wp3bc/a.md".into())));
+    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
     let text = String::from_utf8(d.read_file(BOOKMARKS_PATH).expect("r").0).expect("utf8");
     assert!(text.contains("# mine") && text.contains("# keep"), "{text}");
     assert_eq!(app.bookmarks.items.len(), 2);
@@ -1009,7 +1009,7 @@ fn type_in(app: &mut App, file: &str, at: &str, text: &str) {
     let path = p(at);
     let picker = pickers::for_field(file, &path, &cv_schema::Node::Str);
     assert!(picker.is_some(), "{at}: no picker");
-    let _ = app.update(s(SettingsMsg::Form(
+    let _ = app.send(s(SettingsMsg::Form(
         file.to_owned(),
         FormMsg::Text {
             path,
@@ -1036,7 +1036,7 @@ fn currency_picker_shows_code_and_name_and_stores_the_code() {
     let vis = app.settings.ta_visible(&[]);
     assert_eq!(vis[0].label, "MXN — Mexican Peso");
     assert_eq!(vis[0].value, "MXN");
-    let _ = app.update(s(SettingsMsg::Typeahead(Key::Enter)));
+    let _ = app.send(s(SettingsMsg::Typeahead(Key::Enter)));
     assert!(doc_text(&app.settings, PIPES).contains("quote = \"MXN\""));
     assert_eq!(
         pickers::label_of(&app.settings, form::Picker::Currency, "USD").as_deref(),
@@ -1065,7 +1065,7 @@ fn weather_pick_writes_label_lat_lon_in_one_edit_and_short_queries_never_geocode
         ("Paris, FR", "Ile-de-France")
     );
     let before = app.settings.file(PIPES).expect("f").edit_seq;
-    let _ = app.update(s(SettingsMsg::Form(
+    let _ = app.send(s(SettingsMsg::Form(
         PIPES.to_owned(),
         FormMsg::Pick {
             path: p("daily_brief.weather[0].label"),
@@ -1154,12 +1154,12 @@ fn provider_model_reference_splits_and_writes_back_the_prefix() {
     let vis = app.settings.ta_visible(&[]);
     assert_eq!(vis[0].label, "bge-m3");
     assert_eq!(vis[0].value, "local:bge-m3");
-    let _ = app.update(s(SettingsMsg::Typeahead(Key::Enter)));
+    let _ = app.send(s(SettingsMsg::Typeahead(Key::Enter)));
     assert!(doc_text(&app.settings, AGENTS).contains("model = \"local:bge-m3\""));
     // `{param.…}` stays free text: no candidates, valid as typed.
     type_in(&mut app, AGENTS, "writer.model", "{param.m}");
     assert!(app.settings.ta_visible(&[]).is_empty());
-    let _ = app.update(s(SettingsMsg::Typeahead(Key::Enter)));
+    let _ = app.send(s(SettingsMsg::Typeahead(Key::Enter)));
     assert!(doc_text(&app.settings, AGENTS).contains("model = \"{param.m}\""));
 }
 
@@ -1177,7 +1177,7 @@ fn unknown_channel_ids_show_fetched_titles() {
         PIPES,
         "[ignore_shorts]\nchannels = [\"UC123\", \"UCfake\", \"UCnope\"]\n",
     );
-    let _ = app.update(s(SettingsMsg::Section(Section::Pipelines)));
+    let _ = app.send(s(SettingsMsg::Section(Section::Pipelines)));
     let st = &app.settings;
     let chans = pickers::channels(st);
     assert_eq!(pickers::chip_label(st, &chans, "UC123"), "Chan (UC123)");
@@ -1260,7 +1260,7 @@ fn failed_model_lookup_refetches_on_reopen_and_refresh() {
             .any(|c| c.value == "qwen-old")
     );
     // Close and re-open: refetched.
-    let _ = app.update(s(SettingsMsg::Typeahead(Key::Escape)));
+    let _ = app.send(s(SettingsMsg::Typeahead(Key::Escape)));
     type_in(&mut app, PIPES, "image_describe.model", "");
     assert!(matches!(
         app.settings.lookups.models.get("local"),
@@ -1272,7 +1272,7 @@ fn failed_model_lookup_refetches_on_reopen_and_refresh() {
         ..Default::default()
     })
     .expect("lookups");
-    let _ = app.update(s(SettingsMsg::Form(
+    let _ = app.send(s(SettingsMsg::Form(
         PIPES.to_owned(),
         FormMsg::RefreshModels {
             path: p("image_describe.model"),

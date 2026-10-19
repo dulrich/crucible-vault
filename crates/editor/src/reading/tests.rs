@@ -36,21 +36,21 @@ fn setup(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<dyn DaemonClient>) 
 
 fn app_on(d: &Arc<dyn DaemonClient>, path: &str) -> App {
     let mut app = App::new(Some(Arc::clone(d)), None);
-    let _ = app.update(Message::Tabs(TabsMsg::Open(path.to_owned())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open(path.to_owned())));
     assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some(path));
     app
 }
 
 /// Plan round-5 WP-1: the source editor of `path` measured `lines` visible lines.
 fn viewport(app: &mut App, path: &str, lines: usize) {
-    let _ = app.update(Message::Source(crate::message::SourceMsg::Viewport {
+    let _ = app.send(Message::Source(crate::message::SourceMsg::Viewport {
         path: path.to_owned(),
         lines,
     }));
 }
 
 fn reading(app: &mut App, path: &str, mode: ViewMode) {
-    let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(ReadingMsg::SetMode {
         path: path.to_owned(),
         mode,
     }));
@@ -114,10 +114,10 @@ fn modes_cycle_and_transclusion_is_depth_one() {
     reading(&mut app, "A.md", ViewMode::Split);
     assert_eq!(app.reading.mode("A.md"), ViewMode::Split);
     drop(app.view());
-    let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
+    let _ = app.send(Message::Reading(ReadingMsg::CycleMode));
     assert_eq!(app.reading.mode("A.md"), ViewMode::Source);
     assert!(app.reading.doc("A.md").is_none());
-    let _ = app.update(Message::Reading(ReadingMsg::CycleMode));
+    let _ = app.send(Message::Reading(ReadingMsg::CycleMode));
     assert_eq!(app.reading.mode("A.md"), ViewMode::Reading);
     assert!(app.reading.doc("A.md").is_some());
 }
@@ -129,23 +129,23 @@ fn recompute_only_when_edit_seq_moves() {
     reading(&mut app, "A.md", ViewMode::Split);
     assert_eq!(app.reading.recomputes, 1);
     for _ in 0..3 {
-        let _ = app.update(Message::Reading(ReadingMsg::Tick));
+        let _ = app.send(Message::Reading(ReadingMsg::Tick));
     }
     assert_eq!(
         app.reading.recomputes, 1,
         "unchanged edit_seq: cached model"
     );
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
         Edit::Insert('Z'),
     ))));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert_eq!(
         app.reading.recomputes, 1,
         "debounce: first tick only notes the seq"
     );
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert_eq!(app.reading.recomputes, 2);
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert_eq!(app.reading.recomputes, 2);
     let seq = app.active_doc().expect("tab").edit_seq();
     assert_eq!(app.reading.doc("A.md").expect("doc").seq, seq);
@@ -216,7 +216,7 @@ fn decode_downscales_to_display_width() {
 /// Shows `key` in `path` through the app and completes the load inline (the off-thread task is
 /// replaced by a direct decode, as the test has no executor).
 fn show_and_load(app: &mut App, d: &Arc<dyn DaemonClient>, path: &str, key: &str) {
-    let _ = app.update(Message::Reading(ReadingMsg::ImageShown {
+    let _ = app.send(Message::Reading(ReadingMsg::ImageShown {
         tab: path.to_owned(),
         view: 1,
         key: key.to_owned(),
@@ -225,7 +225,7 @@ fn show_and_load(app: &mut App, d: &Arc<dyn DaemonClient>, path: &str, key: &str
     assert_eq!(app.reading.images.pending_len(), 1, "a load started");
     let (bytes, _) = d.read_file(key).expect("read");
     let result = decode(&bytes, 320).map_err(|e| e.to_string());
-    let _ = app.update(Message::Reading(ReadingMsg::ImageLoaded {
+    let _ = app.send(Message::Reading(ReadingMsg::ImageLoaded {
         key: key.to_owned(),
         result,
     }));
@@ -250,7 +250,7 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
     assert!(!doc.images.contains_key("https://host/r.png"));
 
     // Remote URLs never trigger a load.
-    let _ = app.update(Message::Reading(ReadingMsg::ImageShown {
+    let _ = app.send(Message::Reading(ReadingMsg::ImageShown {
         tab: "A.md".into(),
         view: 1,
         key: "https://host/r.png".into(),
@@ -266,34 +266,34 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
     // Render-model replacement that drops the image releases.
     reading(&mut app, "A.md", ViewMode::Split);
     show_and_load(&mut app, &d, "A.md", "att/pic.png");
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::SelectAll)));
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::SelectAll)));
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
         Edit::Insert('z'),
     ))));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert!(app.reading.images.is_empty(), "image no longer referenced");
 
     // A replacement that keeps the image keeps its pin.
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::SelectAll)));
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::SelectAll)));
     for c in "![[pic.png]]".chars() {
-        let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+        let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
             Edit::Insert(c),
         ))));
     }
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     show_and_load(&mut app, &d, "A.md", "att/pic.png");
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Edit(
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
         Edit::Insert('\n'),
     ))));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert_eq!(app.reading.images.pins("att/pic.png"), 1);
 
     // Tab close releases (the dirty buffer is saved first — WP-4 — inline here).
-    app.rpc_inline = true;
-    let _ = app.update(Message::Tabs(TabsMsg::Close(app.focus, 0)));
+    app.queue_rpcs();
+    let _ = app.send(Message::Tabs(TabsMsg::Close(app.focus, 0)));
     assert!(app.reading.images.is_empty());
     assert_eq!(
         app.reading.mode("A.md"),
@@ -307,8 +307,8 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
     let (tmp, d) = setup(&[("A.md", b"# A\n"), ("B.md", b"# B\n")]);
     let state = tmp.path().join("state/editor.json");
     let mut app = App::new(Some(Arc::clone(&d)), Some(state.clone()));
-    let _ = app.update(Message::Tabs(TabsMsg::Open("A.md".into())));
-    let _ = app.update(Message::Tabs(TabsMsg::Open("B.md".into())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("A.md".into())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("B.md".into())));
     assert!(
         app.reading.doc("B.md").is_some(),
         "open path renders at once"
@@ -323,7 +323,7 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
     );
     reading(&mut app, "A.md", ViewMode::Source);
     assert!(!shaped(&app, "A.md"), "hidden Source tab stays plain");
-    let _ = app.update(Message::Tabs(TabsMsg::Select(app.focus, 0)));
+    let _ = app.send(Message::Tabs(TabsMsg::Select(app.focus, 0)));
     assert!(shaped(&app, "A.md") && !shaped(&app, "B.md"));
 
     let mut back = App::new(Some(Arc::clone(&d)), Some(state));
@@ -339,7 +339,7 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
         back.reading.doc("B.md").is_none(),
         "restore defers the render"
     );
-    let _ = back.update(Message::Reading(ReadingMsg::Tick));
+    let _ = back.send(Message::Reading(ReadingMsg::Tick));
     assert!(back.reading.doc("B.md").is_some(), "first tick renders it");
     assert!(back.reading.doc("A.md").is_none());
 }
@@ -352,23 +352,23 @@ fn active_find_match_maps_to_its_block_and_occurrence() {
     let (_t, d) = setup(&[(p, b"alpha foo\n\nbeta foo foo\n")]);
     let mut app = app_on(&d, p);
     reading(&mut app, p, ViewMode::Reading);
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert!(app.reading.doc(p).is_some(), "rendered");
-    let _ = app.update(Message::Find(FindMsg::Open));
-    let _ = app.update(Message::Find(FindMsg::Query("foo".into())));
+    let _ = app.send(Message::Find(FindMsg::Open));
+    let _ = app.send(Message::Find(FindMsg::Query("foo".into())));
     assert_eq!(app.reading.find_active(p), Some((0, 0)));
-    let _ = app.update(Message::Find(FindMsg::Next));
+    let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(
         app.reading.find_active(p),
         Some((1, 0)),
         "second block, first occurrence"
     );
-    let _ = app.update(Message::Find(FindMsg::Next));
+    let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(app.reading.find_active(p), Some((1, 1)));
     // Painting: exactly one occurrence of the second block is the active one.
     drop(app.view());
-    let _ = app.update(Message::Find(FindMsg::Close));
+    let _ = app.send(Message::Find(FindMsg::Close));
     assert_eq!(app.reading.find_active(p), None);
 }
 
@@ -410,7 +410,7 @@ fn source_to_reading_carries_top_line_to_its_block() {
     // Plan round-5 WP-1: a 3-line viewport, so line 11 is a reachable top.
     viewport(&mut app, p, 3);
     // Wheel down 11 lines: line 11 ("code") is at the top.
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Scroll {
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Scroll {
         lines: 11,
     })));
     assert_eq!(app.active_doc().expect("doc").top_line(), 11);
@@ -436,7 +436,7 @@ fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
     let mut block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 50.0)).collect();
     block_ys[0] = Some(30.0);
     let view = app.view_of(p);
-    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+    let _ = app.send(Message::Reading(ReadingMsg::Probed {
         path: p.to_owned(),
         view,
         probe: Some(Probe {
@@ -469,7 +469,7 @@ fn file_membership_change_drops_cached_resolver() {
     let mut app = app_on(&d, "A.md");
     reading(&mut app, "A.md", ViewMode::Reading);
     let changed = |app: &mut App, path: &str, kind: ChangeKind| {
-        let _ = app.update(Message::Status(StatusMsg::Notification(
+        let _ = app.send(Message::Status(StatusMsg::Notification(
             Notification::FileChanged {
                 path: path.to_owned(),
                 kind,
@@ -519,7 +519,7 @@ fn go_to_bottom_in_source_tracks_the_last_viewport() {
     reading(&mut app, p, ViewMode::Source);
     // Plan round-5 WP-1: the measured viewport (40 lines), not the 30-line estimate.
     viewport(&mut app, p, 40);
-    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
+    let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
     let top = app.active_doc().expect("doc").top_line();
     assert_eq!(top, 200 - 39, "the last 40 lines are the visible window");
 }
@@ -535,7 +535,7 @@ fn reading_at_bottom_then_source_lands_on_the_last_lines() {
     let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
     let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
     let view = app.view_of(p);
-    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+    let _ = app.send(Message::Reading(ReadingMsg::Probed {
         path: p.to_owned(),
         view,
         probe: Some(Probe {
@@ -594,22 +594,22 @@ fn tab_resume_keeps_the_reading_place() {
         block_ys: block_ys.clone(),
         ..Probe::default()
     };
-    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+    let _ = app.send(Message::Reading(ReadingMsg::Probed {
         path: a.to_owned(),
         view,
         probe: Some(probe(40.0 * 20.0)),
         scroll_to: None,
     }));
     assert_eq!(app.reading.top_block(a, view), Some(40));
-    let _ = app.update(Message::Tabs(TabsMsg::Open(b.to_owned())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open(b.to_owned())));
     assert!(!app.reading.is_restoring(view));
     let pane = app.focus;
-    let task = app.update(Message::Tabs(TabsMsg::Select(pane, 0)));
+    let task = app.send(Message::Tabs(TabsMsg::Select(pane, 0)));
     assert_eq!(app.view_of(a), view);
     assert!(task.units() > 0, "activation issues the restore probe");
     assert!(app.reading.is_restoring(view));
     // The re-created scrollable reports offset 0 first: the place is re-applied, not lost.
-    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+    let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: a.to_owned(),
         view,
         y: 0.0,
@@ -617,7 +617,7 @@ fn tab_resume_keeps_the_reading_place() {
     assert!(!app.reading.is_restoring(view));
     assert_eq!(app.reading.top_block(a, view), Some(40));
     // Afterwards scroll reports update the place normally.
-    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+    let _ = app.send(Message::Reading(ReadingMsg::Probed {
         path: a.to_owned(),
         view,
         probe: Some(probe(10.0 * 20.0)),
@@ -651,9 +651,9 @@ fn arrows_step_the_reading_pane_one_line() {
     let body = long_note();
     let (_t, d) = setup(&[(p, &body)]);
     let mut app = app_on(&d, p);
-    assert!(app.update(Message::Palette(PaletteMsg::Down)).units() > 0);
+    assert!(app.send(Message::Palette(PaletteMsg::Down)).units() > 0);
     reading(&mut app, p, ViewMode::Source);
-    assert_eq!(app.update(Message::Palette(PaletteMsg::Down)).units(), 0);
+    assert_eq!(app.send(Message::Palette(PaletteMsg::Down)).units(), 0);
 }
 
 /// plan editor-round-4 WP-2: plain PageDown (uncaptured) routes to the focused pane's
@@ -709,11 +709,11 @@ fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir,
     let (t, d) = setup(&[(p, body)]);
     let mut app = app_on(&d, p);
     reading(&mut app, p, mode);
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert!(app.reading.doc(p).is_some(), "rendered");
-    let _ = app.update(Message::Find(FindMsg::Open));
-    let _ = app.update(Message::Find(FindMsg::Query(q.into())));
+    let _ = app.send(Message::Find(FindMsg::Open));
+    let _ = app.send(Message::Find(FindMsg::Query(q.into())));
     (t, app)
 }
 
@@ -782,16 +782,16 @@ fn reading_next_steps_over_visible_occurrences() {
     );
     assert_eq!(bar(&app).count(), "1/3");
     assert_eq!(app.reading.find_active(p), Some((0, 0)));
-    let _ = app.update(Message::Find(FindMsg::Next));
+    let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(app.reading.find_active(p), Some((2, 0)));
     assert_eq!(
         app.reading.top_block(p, app.view_of(p)),
         Some(2),
         "scrolled to its block"
     );
-    let _ = app.update(Message::Find(FindMsg::Next));
+    let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(app.reading.find_active(p), Some((2, 1)));
-    let _ = app.update(Message::Find(FindMsg::Next));
+    let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(app.reading.find_active(p), Some((0, 0)), "wraps");
     drop(app.view());
 }
@@ -808,7 +808,7 @@ fn split_active_match_inside_url_has_no_strong_occurrence() {
         None,
         "invisible: nothing strong"
     );
-    let _ = app.update(Message::Find(FindMsg::Next));
+    let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(
         app.reading.find_active(p),
         Some((0, 0)),
@@ -911,7 +911,7 @@ fn late_attachment_re_renders_the_doc() {
     let (_tmp, d) = setup(&[("A.md", body.as_bytes())]);
     let mut app = app_on(&d, "A.md");
     reading(&mut app, "A.md", ViewMode::Reading);
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     let resolved = |app: &App| {
         app.reading
             .doc("A.md")
@@ -932,7 +932,7 @@ fn late_attachment_re_renders_the_doc() {
         .and_then(|t| t.doc.as_mut())
         .expect("doc");
     doc.generation = d.index().generation();
-    let _ = app.update(Message::Status(StatusMsg::Notification(
+    let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
             path: key.clone(),
             kind: ChangeKind::Created,
@@ -940,7 +940,7 @@ fn late_attachment_re_renders_the_doc() {
             origin: Origin::Daemon,
         },
     )));
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert_eq!(
         resolved(&app),
         Some(key.clone()),
@@ -965,7 +965,7 @@ fn percent_decode_handles_every_escape() {
 fn image_load_failure_raises_a_warning_notice() {
     let (_tmp, d) = setup(&[("n.md", b"![[att/pic.png]]\n")]);
     let mut app = app_on(&d, "n.md");
-    let _ = app.update(Message::Reading(ReadingMsg::ImageLoaded {
+    let _ = app.send(Message::Reading(ReadingMsg::ImageLoaded {
         key: "att/pic.png".into(),
         result: Err("unsupported format\nmore detail".into()),
     }));
@@ -979,12 +979,12 @@ fn image_load_failure_raises_a_warning_notice() {
 fn unresolved_link_click_raises_a_notice() {
     let (_tmp, d) = setup(&[("A.md", b"see [[Nope]]\n")]);
     let mut app = app_on(&d, "A.md");
-    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+    let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "https://example.com/x".into(),
     }));
     assert!(app.status.notice.is_none());
-    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+    let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "Nope".into(),
     }));
@@ -1002,10 +1002,10 @@ fn reading_go_to_end_then_source_shows_the_end() {
     let (_t, d) = setup(&[(p, &body)]);
     let mut app = app_on(&d, p);
     let view = app.view_of(p);
-    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
+    let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
     assert_eq!(app.reading.edge(p, view), Some(true));
     // The snap's own scroll report at the end keeps the edge.
-    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+    let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: p.to_owned(),
         view,
         y: 1.0,
@@ -1030,10 +1030,10 @@ fn source_go_to_end_then_reading_snaps_to_the_end() {
     reading(&mut app, p, ViewMode::Source);
     viewport(&mut app, p, 40);
     let view = app.view_of(p);
-    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
+    let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
     assert_eq!(app.reading.edge(p, view), Some(true));
     app.reading.clear_top_block(p, view);
-    let task = app.update(Message::Reading(ReadingMsg::SetMode {
+    let task = app.send(Message::Reading(ReadingMsg::SetMode {
         path: p.to_owned(),
         mode: ViewMode::Reading,
     }));
@@ -1044,7 +1044,7 @@ fn source_go_to_end_then_reading_snaps_to_the_end() {
         "no carried line-estimate block"
     );
     assert_eq!(app.reading.edge(p, view), Some(true));
-    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+    let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: p.to_owned(),
         view,
         y: 0.5,
@@ -1066,9 +1066,9 @@ fn source_wheel_clears_the_edge() {
     let mut app = app_on(&d, p);
     reading(&mut app, p, ViewMode::Source);
     let view = app.view_of(p);
-    let _ = app.update(Message::Reading(ReadingMsg::GoToEdge { bottom: false }));
+    let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: false }));
     assert_eq!(app.reading.edge(p, view), Some(false));
-    let _ = app.update(Message::Source(SourceMsg::Action(Action::Scroll {
+    let _ = app.send(Message::Source(SourceMsg::Action(Action::Scroll {
         lines: 3,
     })));
     assert_eq!(app.reading.edge(p, view), None);
@@ -1086,7 +1086,7 @@ fn dims_survive_resolver_invalidation_for_an_unrelated_create() {
     let (_tmp, d) = setup(&[("A.md", b"![](pic.png)\n"), ("pic.png", &pic)]);
     let mut app = app_on(&d, "A.md");
     reading(&mut app, "A.md", ViewMode::Reading);
-    let _ = app.update(Message::Reading(ReadingMsg::Tick));
+    let _ = app.send(Message::Reading(ReadingMsg::Tick));
     let dims = |app: &App| {
         app.reading
             .images
@@ -1103,10 +1103,10 @@ fn dims_survive_resolver_invalidation_for_an_unrelated_create() {
         }))
     };
     let epoch = app.reading.resolver_epoch;
-    let _ = app.update(changed("other.md", ChangeKind::Created));
+    let _ = app.send(changed("other.md", ChangeKind::Created));
     assert!(app.reading.resolver_epoch > epoch, "resolver invalidated");
     assert_eq!(dims(&app), Some((300, 150)), "unrelated churn keeps dims");
-    let _ = app.update(changed("pic.png", ChangeKind::Modified));
+    let _ = app.send(changed("pic.png", ChangeKind::Modified));
     assert_eq!(dims(&app), None, "the changed file's own size is dropped");
 }
 
@@ -1206,7 +1206,7 @@ fn stale_restore_guard_does_not_snap_after_content_grows() {
     let view = app.view_of(a);
     let blocks = app.reading.doc(a).expect("doc").model.blocks.len();
     let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
-    let _ = app.update(Message::Reading(ReadingMsg::Probed {
+    let _ = app.send(Message::Reading(ReadingMsg::Probed {
         path: a.to_owned(),
         view,
         probe: Some(Probe {
@@ -1217,15 +1217,15 @@ fn stale_restore_guard_does_not_snap_after_content_grows() {
         }),
         scroll_to: None,
     }));
-    let _ = app.update(Message::Tabs(TabsMsg::Open(b.to_owned())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open(b.to_owned())));
     let pane = app.focus;
-    let _ = app.update(Message::Tabs(TabsMsg::Select(pane, 0)));
+    let _ = app.send(Message::Tabs(TabsMsg::Select(pane, 0)));
     assert!(app.reading.is_restoring(view), "armed on activation");
     // No scroll report arrives (content fits); later the content grows and the user wheels.
     app.reading
         .age_restore_guard(view, RESTORE_GUARD + std::time::Duration::from_millis(1));
     assert!(!app.reading.is_restoring(view), "the guard expired");
-    let _ = app.update(Message::Reading(ReadingMsg::Scrolled {
+    let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: a.to_owned(),
         view,
         y: 0.3,
@@ -1267,15 +1267,15 @@ fn missing_note_path_rule() {
 fn unresolved_link_click_creates_under_create_mode() {
     let (_tmp, d) = setup(&[("A.md", b"see [[Nope]] [[sub/Deep]]\n")]);
     let mut app = app_on(&d, "A.md");
-    app.rpc_inline = true;
+    app.queue_rpcs();
     app.prefs.missing_link = crate::settings::editor_prefs::MissingLink::Create;
-    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+    let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "Nope".into(),
     }));
     assert!(d.read_file("Nope.md").is_ok(), "created at the root");
     assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("Nope.md"));
-    let _ = app.update(Message::Reading(ReadingMsg::OpenLink {
+    let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "sub/Deep".into(),
     }));
@@ -1303,7 +1303,7 @@ fn link_menu_create_note_under_warn_mode() {
     use crate::context_menu::{Item, MenuMsg, Target, items};
     let (_tmp, d) = setup(&[("A.md", b"see [[Nope]]\n")]);
     let mut app = app_on(&d, "A.md");
-    app.rpc_inline = true;
+    app.queue_rpcs();
     let t = Target::Link {
         src: "A.md".into(),
         target: "Nope".into(),
@@ -1314,8 +1314,8 @@ fn link_menu_create_note_under_warn_mode() {
     };
     assert!(items(&t).iter().any(|(i, _)| *i == Item::CreateNote));
     let at = iced::Point::new(1.0, 1.0);
-    let _ = app.update(Message::Menu(MenuMsg::Open(t, at)));
-    let _ = app.update(Message::Menu(MenuMsg::Choose(Item::CreateNote)));
+    let _ = app.send(Message::Menu(MenuMsg::Open(t, at)));
+    let _ = app.send(Message::Menu(MenuMsg::Choose(Item::CreateNote)));
     assert!(d.read_file("Nope.md").is_ok());
     assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("Nope.md"));
 }

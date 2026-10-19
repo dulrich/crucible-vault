@@ -237,7 +237,7 @@ mod tests {
         app.palette
             .job_titles
             .insert("j1".into(), "File as kind".into());
-        let _ = app.update(Message::Status(StatusMsg::Notification(
+        let _ = app.send(Message::Status(StatusMsg::Notification(
             Notification::JobUpdated(JobStatus {
                 job_id: "j1".into(),
                 status: JobState::Failed,
@@ -260,14 +260,14 @@ mod tests {
         app.status.notify(Severity::Warning, "w");
         assert!(app.status.log.unread >= 1);
         // The status bar's button emits `LogMsg::Open`.
-        let _ = app.update(Message::Log(LogMsg::Open));
+        let _ = app.send(Message::Log(LogMsg::Open));
         assert_eq!(log_tabs(&app), 1);
         assert!(app.active_tab().is_some_and(|t| t.is_log()));
         assert!(app.active_note().is_none(), "never a note");
         assert_eq!(app.status.log.unread, 0, "opening resets unread");
         // A second click (or the palette command) focuses the same tab.
         let m = crate::palette::ClientCmd::OpenLog.message(app.focus);
-        let _ = app.update(m);
+        let _ = app.send(m);
         assert_eq!(log_tabs(&app), 1);
         assert!(app.active_tab().is_some_and(|t| t.is_log()));
     }

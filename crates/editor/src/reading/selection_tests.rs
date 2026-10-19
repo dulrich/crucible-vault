@@ -323,16 +323,16 @@ fn ctrl_a_and_ctrl_c_take_the_focused_reading_view() {
     let d: Arc<dyn DaemonClient> =
         Arc::new(crate::daemon::FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
     let mut app = crate::app::App::new(Some(Arc::clone(&d)), None);
-    let _ = app.update(Message::Tabs(crate::message::TabsMsg::Open(
+    let _ = app.send(Message::Tabs(crate::message::TabsMsg::Open(
         PATH.to_owned(),
     )));
-    let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(ReadingMsg::SetMode {
         path: PATH.to_owned(),
         mode: ViewMode::Reading,
     }));
     let view = app.view_of(PATH);
     let chord = |s: &str| crate::palette::chord::parse(s).expect("chord");
-    let _ = app.update(Message::Palette(crate::message::PaletteMsg::Key(chord(
+    let _ = app.send(Message::Palette(crate::message::PaletteMsg::Key(chord(
         "Ctrl+A",
     ))));
     assert_eq!(
@@ -340,7 +340,7 @@ fn ctrl_a_and_ctrl_c_take_the_focused_reading_view() {
         Some("one\n\ntwo")
     );
     // Source mode: Ctrl+A is not a Reading chord.
-    let _ = app.update(Message::Reading(ReadingMsg::SetMode {
+    let _ = app.send(Message::Reading(ReadingMsg::SetMode {
         path: PATH.to_owned(),
         mode: ViewMode::Source,
     }));
