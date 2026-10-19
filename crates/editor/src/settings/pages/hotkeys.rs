@@ -30,7 +30,7 @@ use crate::settings::{DocEdit, ScalarValue, SettingsMsg, file_header, save_bar};
 use crate::theme::{Tokens, icon_button};
 
 /// The `actions.toml` vault path.
-pub const ACTIONS_PATH: &str = "_custom/crucible-vault/actions.toml";
+pub const ACTIONS_PATH: &str = cv_schema::config_path!("actions.toml");
 
 /// The page intro line.
 pub const INTRO: &str = "Every bindable command. Record: the next Ctrl/Alt chord becomes its chord (Esc cancels). Editor commands are stored in editor.toml [keys], config actions in their actions.toml keys, bookmarks in their bookmarks.toml keys; every change saves automatically.";

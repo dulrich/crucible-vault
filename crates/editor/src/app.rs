@@ -536,7 +536,7 @@ pub(crate) struct QuitState {
 }
 
 /// `captures.toml` (period folders, WP-4 audit E2).
-pub const CAPTURES_PATH: &str = "_custom/crucible-vault/captures.toml";
+pub const CAPTURES_PATH: &str = cv_schema::config_path!("captures.toml");
 
 /// The day / month note folders from the loaded `captures.toml` (`[periods.day].folder`,
 /// `[periods.month].folder`); constants when absent, unloaded, malformed or not a string.
@@ -988,7 +988,7 @@ impl App {
 
     /// The iced scale factor (`editor.toml` `ui_scale`, clamped 0.5–3.0).
     pub fn scale_factor(&self) -> f32 {
-        let (lo, hi) = crate::settings::editor_prefs::UI_SCALE_RANGE;
+        let (lo, hi) = crate::settings::editor_prefs::ui_scale_range();
         self.prefs.ui_scale.clamp(lo, hi)
     }
 
@@ -1298,12 +1298,7 @@ impl App {
     fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
         let path = match &tab.kind {
             TabKind::Settings => {
-                return crate::settings::view(
-                    &self.settings,
-                    &self.prefs,
-                    &self.explorer.paths,
-                    self.tokens,
-                );
+                return crate::settings::view(&self.settings, &self.explorer.paths, self.tokens);
             }
             TabKind::Log => return crate::log::view(&self.status.log, self.tokens),
             TabKind::Note(p) => p,
@@ -4503,17 +4498,29 @@ impl App {
     /// plan editor-feedback-round-2 WP-2) and keeps the local
     /// `UiState` copy in step.
     fn set_surround(&mut self, s: crate::theme::Surround) {
-        use crate::settings::editor_prefs::{self, EDITOR_PATH, PrefEdit};
-        let edit = PrefEdit::Surround(s);
+        use crate::settings::editor_prefs::{EDITOR_PATH, surround_key};
+        use crate::settings::{DocEdit, ScalarValue};
+        let edit = DocEdit::Set(
+            cv_schema::Path::root().key("surround"),
+            ScalarValue::Str(surround_key(s).to_owned()),
+        );
         let edited = self
             .settings
             .file_mut(EDITOR_PATH)
-            .is_some_and(|f| f.edit(|doc| editor_prefs::apply(doc, &edit)).is_ok());
+            .is_some_and(|f| f.edit(|doc| edit.apply(doc)).is_ok());
         if !edited {
             tracing::debug!("surround: editor.toml not editable; local state only");
         }
         self.ui.surround = s;
         self.apply_prefs();
+    }
+
+    /// A Settings edit of `editor.toml` (the generic Editor page, WP-R20): applies the prefs
+    /// live and keeps the local `UiState` surround in step with the file's (was the
+    /// hand page's surround mirror).
+    fn apply_editor_edit(&mut self) {
+        self.apply_prefs();
+        self.ui.surround = self.prefs.surround;
     }
 
     /// Opens the singleton tab `kind` (Settings, Log) in `pane`, or focuses it where it is
@@ -4604,7 +4611,6 @@ impl App {
             self.sync_bookmarks();
         }
         if reloaded && path == crate::settings::editor_prefs::EDITOR_PATH {
-            self.settings.hidden_draft = None;
             self.apply_prefs();
         }
         if reloaded && path == CAPTURES_PATH {
@@ -4635,7 +4641,7 @@ impl App {
     }
 
     fn update_settings(&mut self, m: crate::settings::SettingsMsg) -> Task<Message> {
-        use crate::settings::editor_prefs::{self, EDITOR_PATH};
+        use crate::settings::editor_prefs::EDITOR_PATH;
         use crate::settings::{Section, SettingsMsg};
         match m {
             SettingsMsg::Open => {
@@ -4666,24 +4672,10 @@ impl App {
             SettingsMsg::BodyScrolled(s, y) => {
                 self.settings.body_offsets.insert(s, y);
             }
-            SettingsMsg::Pref(e) => {
-                if let editor_prefs::PrefEdit::PaletteHidden(s) = &e {
-                    self.settings.hidden_draft = Some(s.clone());
-                }
-                if let Some(f) = self.settings.file_mut(EDITOR_PATH)
-                    && let Err(err) = f.edit(|doc| editor_prefs::apply(doc, &e))
-                {
-                    f.notice = Some(err);
-                }
-                if let editor_prefs::PrefEdit::Surround(s) = e {
-                    self.ui.surround = s;
-                }
-                self.apply_prefs();
-            }
             SettingsMsg::Edit(path, edit) => {
                 let _ = self.settings.edit(&path, &edit);
                 if path == EDITOR_PATH {
-                    self.apply_prefs();
+                    self.apply_editor_edit();
                 }
             }
             SettingsMsg::Typeahead(k) => {
@@ -4693,7 +4685,7 @@ impl App {
             SettingsMsg::Form(path, m) => {
                 self.settings.form_msg_paths(&path, m, &self.explorer.paths);
                 if path == EDITOR_PATH {
-                    self.apply_prefs();
+                    self.apply_editor_edit();
                 }
                 return self.settings_lookups();
             }
@@ -4771,7 +4763,6 @@ impl App {
                     tasks.push(self.quit_progress());
                 }
                 if path == EDITOR_PATH {
-                    self.settings.hidden_draft = None;
                     self.settings.editor_note = None;
                     self.apply_prefs();
                 }

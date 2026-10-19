@@ -41,7 +41,7 @@ pub const INPUT_ID: &str = "palette-input";
 /// Result rows shown.
 pub const SHOWN: usize = 14;
 /// Changes under this prefix invalidate the cached action list (definitions are hot-reloaded).
-pub const CONFIG_PREFIX: &str = "_custom/crucible-vault/";
+pub const CONFIG_PREFIX: &str = cv_schema::CONFIG_DIR;
 /// Path suggestions shown under a Path prompt.
 pub const SUGGESTIONS: usize = 8;
 

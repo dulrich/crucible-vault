@@ -581,6 +581,28 @@ impl ConfigDoc {
         };
         self.set_item(list, item)
     }
+
+    /// Switches the tagged union at `p` to the variant `tag` (B14, was the editor's
+    /// `DocEdit::SwitchVariant`): keys the old variant declares and the new one does not are
+    /// dropped; shared keys and keys neither declares stay. An unknown `tag` is an error.
+    pub fn switch_variant(
+        &mut self,
+        p: &Path,
+        u: &crate::Union,
+        tag: &str,
+    ) -> Result<(), DocError> {
+        let new = u
+            .variant(tag)
+            .ok_or_else(|| DocError::BadPath(format!("{p}: unknown kind `{tag}`")))?;
+        if let Some(old) = self.get_str(&p.key(u.tag)).and_then(|t| u.variant(t)) {
+            for k in self.keys(p) {
+                if k != u.tag && old.record.field(&k).is_some() && new.record.field(&k).is_none() {
+                    self.remove(&p.key(&k))?;
+                }
+            }
+        }
+        self.set(&p.key(u.tag), tag)
+    }
 }
 
 impl Default for ConfigDoc {

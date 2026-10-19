@@ -50,6 +50,45 @@ pub enum Node {
     Union(&'static Union),
 }
 
+impl Node {
+    /// The empty TOML item a new map entry / list item of this shape starts as (was the
+    /// editor's `NewValue::for_node`, B14): `false`, `0`, `""`, `[]` or `{}`.
+    #[must_use]
+    pub fn empty_item(&self) -> toml_edit::Item {
+        use toml_edit::{Array, Item, Table, Value};
+        match self {
+            Node::Bool => Item::Value(false.into()),
+            Node::Int { .. } | Node::Float { .. } => Item::Value(0.into()),
+            Node::StrList { .. } | Node::Chords | Node::List(_) => {
+                Item::Value(Value::Array(Array::new()))
+            }
+            Node::Str | Node::Path | Node::Folder | Node::Expr | Node::Enum(_) | Node::Filter => {
+                Item::Value("".into())
+            }
+            Node::FreeTable | Node::Map(_) | Node::Record(_) | Node::Union(_) => {
+                Item::Table(Table::new())
+            }
+        }
+    }
+
+    /// The inclusive bounds of a numeric node when both are set (a stepper applies).
+    #[must_use]
+    pub fn bounds(&self) -> Option<(f64, f64)> {
+        #[allow(clippy::cast_precision_loss)]
+        match *self {
+            Node::Int {
+                min: Some(lo),
+                max: Some(hi),
+            } => Some((lo as f64, hi as f64)),
+            Node::Float {
+                min: Some(lo),
+                max: Some(hi),
+            } => Some((lo, hi)),
+            _ => None,
+        }
+    }
+}
+
 /// A default value shown by a form (and documented by the schema). Never written implicitly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Default {
@@ -75,6 +114,38 @@ pub struct Field {
     pub default: Option<Default>,
     /// The key must be present.
     pub required: bool,
+    /// What the value refers to (a form offers matching candidates); `None` = a plain value.
+    pub hint: Option<RefKind>,
+    /// The stepper increment of a bounded [`Node::Int`] / [`Node::Float`] (`None`: 1 for an
+    /// integer, 0.1 for a number).
+    pub step: Option<f64>,
+}
+
+/// The semantic reference a string field holds (plan tn-review-baseline-remediation WP-R20,
+/// B13): forms choose a picker from it, never from the file name or key path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    /// A `providers.toml` provider id.
+    Provider,
+    /// A model id of the sibling `provider`.
+    Model,
+    /// A `provider:model` reference.
+    ModelRef,
+    /// A `sources.toml` YouTube channel id (or name).
+    Channel,
+    /// An ISO 4217 currency code.
+    Currency,
+    /// A place name (a geocoded pick also fills the sibling `lat` / `lon`).
+    Place,
+}
+
+/// How a list item / map entry of a record is summarized when none of the usual name keys is
+/// set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Summary {
+    /// `"{a} → {b}"` when both string keys are non-empty (Crucible's fx empty-label format,
+    /// `orchestrationWorkflows.ts:56-61`).
+    Arrow(&'static str, &'static str),
 }
 
 /// A cross-field rule over keys of one record.
@@ -106,6 +177,8 @@ pub struct Record {
     pub name: &'static str,
     pub fields: &'static [Field],
     pub rules: &'static [Rule],
+    /// The fallback item summary.
+    pub summary: Option<Summary>,
 }
 
 impl Record {
@@ -171,6 +244,8 @@ pub const fn field(
         node,
         default: None,
         required: false,
+        hint: None,
+        step: None,
     }
 }
 
@@ -179,6 +254,20 @@ impl Field {
     #[must_use]
     pub const fn req(mut self) -> Self {
         self.required = true;
+        self
+    }
+
+    /// Sets the reference hint.
+    #[must_use]
+    pub const fn hint(mut self, h: RefKind) -> Self {
+        self.hint = Some(h);
+        self
+    }
+
+    /// Sets the stepper increment.
+    #[must_use]
+    pub const fn step(mut self, s: f64) -> Self {
+        self.step = Some(s);
         self
     }
 

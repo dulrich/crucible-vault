@@ -16,7 +16,8 @@ pub static AGENT: Record = Record {
             "Model",
             "provider:model or {param.NAME}; default: the agent's",
             Node::Str,
-        ),
+        )
+        .hint(RefKind::ModelRef),
         field(
             "output_var",
             "Output var",
@@ -39,6 +40,7 @@ pub static AGENT: Record = Record {
         .dflt(D::Str("var")),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `mark_forwarded` — `cv::steps::file::parse`.
@@ -49,6 +51,7 @@ pub static MARK_FORWARDED: Record = Record {
         field("line", "Line", "0-based; default: the context line", UINT),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `run_action` — `cv_actions::model::Step::from_table` and the `RunAction` step module in
@@ -65,6 +68,7 @@ pub static RUN_ACTION: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 const SEARCH_FIELDS: &[Field] = &[
@@ -82,6 +86,7 @@ pub static SEARCH_UPSERT: Record = Record {
     name: "search_upsert",
     fields: SEARCH_FIELDS,
     rules: &[],
+    summary: None,
 };
 
 /// `search_delete` — `cv::steps::search::parse`.
@@ -89,6 +94,7 @@ pub static SEARCH_DELETE: Record = Record {
     name: "search_delete",
     fields: SEARCH_FIELDS,
     rules: &[],
+    summary: None,
 };
 
 /// `link_scan` — `crates/cv/src/steps/link_scan.rs` (`parse`; keys at `link_scan.rs` `KEYS`).
@@ -114,6 +120,7 @@ pub static LINK_SCAN: Record = Record {
         .dflt(D::StrList(&["_crucible"])),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `yt_metadata` — `crates/cv/src/steps/youtube.rs` (`validate`; keys at `META_KEYS`).
@@ -126,6 +133,7 @@ pub static YT_METADATA: Record = Record {
         Node::Str,
     )],
     rules: &[],
+    summary: None,
 };
 
 /// `yt_channel_enrich` — `crates/cv/src/steps/youtube.rs` (`validate`; keys at `ENRICH_KEYS`).
@@ -155,6 +163,7 @@ pub static YT_CHANNEL_ENRICH: Record = Record {
         .dflt(D::Int(30)),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `x_discover` — `crates/cv/src/steps/x.rs` (`validate`; keys at `BATCH_KEYS`).
@@ -168,6 +177,7 @@ pub static X_DISCOVER: Record = Record {
     )
     .dflt(D::Int(50))],
     rules: &[],
+    summary: None,
 };
 
 /// `x_metadata` — `crates/cv/src/steps/x.rs` (`validate`; keys at `META_KEYS`).
@@ -180,6 +190,7 @@ pub static X_METADATA: Record = Record {
         Node::Str,
     )],
     rules: &[],
+    summary: None,
 };
 
 /// `x_backfill` — `crates/cv/src/steps/x.rs` (`validate`; keys at `BATCH_KEYS`).
@@ -193,6 +204,7 @@ pub static X_BACKFILL: Record = Record {
     )
     .dflt(D::Int(50))],
     rules: &[],
+    summary: None,
 };
 
 /// `image_describe` — `crates/cv/src/steps/image_describe.rs` (`parse`; keys at
@@ -223,6 +235,7 @@ pub static IMAGE_DESCRIBE: Record = Record {
         .dflt(D::Bool(false)),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `track_youtube` — `crates/cv/src/steps/tracker/youtube.rs` (`limit`, `KEYS`).
@@ -239,6 +252,7 @@ pub static TRACK_YOUTUBE: Record = Record {
     )
     .dflt(D::Int(50))],
     rules: &[],
+    summary: None,
 };
 
 /// `track_blogs` — `crates/cv/src/steps/tracker/blogs.rs` (no params; config from `pipelines.toml` `[blogs]` + `sources.toml` `[[blog]]`).
@@ -246,6 +260,7 @@ pub static TRACK_BLOGS: Record = Record {
     name: "track_blogs",
     fields: &[],
     rules: &[],
+    summary: None,
 };
 
 /// `ignore_video` — `crates/cv/src/steps/ignore.rs` (`mode`, `KEYS`).
@@ -259,6 +274,7 @@ pub static IGNORE_VIDEO: Record = Record {
     )
     .dflt(D::Str("auto"))],
     rules: &[],
+    summary: None,
 };
 
 /// `daily_brief` — `crates/cv/src/steps/daily_brief.rs` (no params: `pipelines.toml`
@@ -267,6 +283,7 @@ pub static DAILY_BRIEF: Record = Record {
     name: "daily_brief",
     fields: &[],
     rules: &[],
+    summary: None,
 };
 
 /// `capture_repair` — `crates/cv/src/steps/capture_repair.rs` (`parse_params`). Not modelled:
@@ -288,4 +305,5 @@ pub static CAPTURE_REPAIR: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };

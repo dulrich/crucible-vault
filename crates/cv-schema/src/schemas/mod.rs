@@ -7,8 +7,8 @@
 //! errors are the second validation layer.
 
 use crate::node::{
-    Default as D, Field, INT, Node, POS_INT, POS_U32, Record, Rule, STR_LIST, STR_OR_LIST, U32,
-    UINT, Union, Variant, field,
+    Default as D, Field, INT, Node, POS_INT, POS_U32, Record, RefKind, Rule, STR_LIST, STR_OR_LIST,
+    Summary, U32, UINT, Union, Variant, field,
 };
 
 mod actions;
@@ -93,6 +93,19 @@ static EDITOR_NODE: Node = Node::Record(&EDITOR_FILE);
 static VIEW_NODE: Node = Node::Record(&VIEW_FILE);
 static PIPELINES_NODE: Node = Node::Record(&PIPELINES_FILE);
 static SOURCES_NODE: Node = Node::Record(&SOURCES_FILE);
+
+/// A vault-relative path inside the config folder, as a `&'static str` literal
+/// (`config_path!("actions.toml")` is the folder + `actions.toml`). The one
+/// definition of the folder name (plan tn-review-baseline-remediation WP-R20, SM11).
+#[macro_export]
+macro_rules! config_path {
+    ($name:literal) => {
+        concat!("_custom/crucible-vault/", $name)
+    };
+}
+
+/// The vault config folder, with its trailing `/` (the daemon's `config_dir`).
+pub const CONFIG_DIR: &str = config_path!("");
 
 /// Every config file name with a schema (the daemon's `CONFIG_FILES`, then `bookmarks.toml`,
 /// `editor.toml`). Views are per-file: see [`view_schema`].

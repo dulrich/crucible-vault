@@ -14,8 +14,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_schema::toml_edit::{Item, Value};
-use cv_schema::{ConfigDoc, Default as Dflt, FieldError, Node, Path, Record, Seg, Union};
+use cv_schema::{
+    ConfigDoc, Default as Dflt, Field, FieldError, Node, Path, Record, RefKind, Seg, Summary, Union,
+};
 
+use super::ScalarValue;
 pub use super::pickers::Picker;
 use crate::widget::typeahead::Typeahead;
 
@@ -129,43 +132,6 @@ impl FormState {
     }
 }
 
-/// A new map entry's initial value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NewValue {
-    Table,
-    Bool,
-    Int,
-    Str,
-    List,
-}
-
-impl NewValue {
-    /// The initial value for a map whose entries are `node`.
-    pub fn for_node(node: &Node) -> Self {
-        match node {
-            Node::Bool => Self::Bool,
-            Node::Int { .. } | Node::Float { .. } => Self::Int,
-            Node::StrList { .. } | Node::Chords | Node::List(_) => Self::List,
-            Node::Str | Node::Path | Node::Folder | Node::Expr | Node::Enum(_) | Node::Filter => {
-                Self::Str
-            }
-            Node::FreeTable | Node::Map(_) | Node::Record(_) | Node::Union(_) => Self::Table,
-        }
-    }
-
-    /// The TOML item.
-    pub fn item(self) -> Item {
-        use cv_schema::toml_edit::{Array, Table};
-        match self {
-            Self::Table => Item::Table(Table::new()),
-            Self::Bool => Item::Value(false.into()),
-            Self::Int => Item::Value(0.into()),
-            Self::Str => Item::Value("".into()),
-            Self::List => Item::Value(Value::Array(Array::new())),
-        }
-    }
-}
-
 /// What a row shows.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
@@ -183,11 +149,13 @@ pub enum Kind {
     Toggle {
         value: bool,
     },
-    /// A number field; `text` is the draft or the TOML value.
+    /// A number field; `text` is the draft or the TOML value. `step`: the −/+ stepper of a
+    /// bounded node (Decision 3).
     Number {
         text: String,
         placeholder: String,
         float: bool,
+        step: Option<Step>,
     },
     /// A closed choice: seg-group when ≤4 choices, else a pick list.
     Enum {
@@ -238,8 +206,70 @@ pub enum Kind {
     AddKey {
         map: Path,
         draft: String,
-        value: NewValue,
+        /// The map's entry node (a new key starts as its `empty_item`).
+        value: &'static Node,
     },
+}
+
+/// A bounded number's stepper: the value each button writes (`None` = disabled at a bound).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Step {
+    pub dec: Option<ScalarValue>,
+    pub inc: Option<ScalarValue>,
+}
+
+/// The stepper of a bounded `node` (`None` when unbounded) whose stored value is `item`:
+/// steps from the stored value (else the default, else the lower bound), clamped into the
+/// bounds first. An integer steps by `step` (default 1) and clamps; a number steps by `step`
+/// (default 0.1), rounds to hundredths and is disabled past a bound — the old Editor page's
+/// `step_i` / `step_f`.
+pub fn stepper(
+    node: &Node,
+    item: Option<&Item>,
+    dflt: Option<Dflt>,
+    step: Option<f64>,
+) -> Option<Step> {
+    let (lo, hi) = node.bounds()?;
+    #[allow(clippy::cast_precision_loss)]
+    let stored = item.and_then(|i| i.as_integer().map(|v| v as f64).or_else(|| i.as_float()));
+    #[allow(clippy::cast_precision_loss)]
+    let dflt = match dflt {
+        Some(Dflt::Int(v)) => Some(v as f64),
+        Some(Dflt::Float(v)) => Some(v),
+        _ => None,
+    };
+    let v = stored.or(dflt).unwrap_or(lo).clamp(lo, hi);
+    Some(match node {
+        Node::Int { .. } => {
+            #[allow(clippy::cast_possible_truncation)]
+            let (v, d) = (
+                v.round() as i64,
+                step.map_or(1, |s| (s.round() as i64).max(1)),
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            let (lo, hi) = (lo as i64, hi as i64);
+            let at = |n: i64| {
+                let n = n.clamp(lo, hi);
+                (n != v).then_some(ScalarValue::Int(n))
+            };
+            Step {
+                dec: at(v.saturating_sub(d)),
+                inc: at(v.saturating_add(d)),
+            }
+        }
+        _ => {
+            let d = step.unwrap_or(0.1);
+            let at = |n: f64| {
+                let n = (n * 100.0).round() / 100.0;
+                (n >= lo - 1e-4 && n <= hi + 1e-4 && (n - v).abs() > 1e-6)
+                    .then_some(ScalarValue::Float(n.clamp(lo, hi)))
+            };
+            Step {
+                dec: at(v - d),
+                inc: at(v + d),
+            }
+        }
+    })
 }
 
 /// One form row.
@@ -274,28 +304,13 @@ pub fn rows(cx: &Ctx<'_>, schema: &'static Node) -> Vec<Row> {
     out
 }
 
-/// The rows of the field `key` of the root record only (a page section).
-pub fn field_rows(cx: &Ctx<'_>, schema: &'static Node, key: &str) -> Vec<Row> {
-    let mut out = Vec::new();
-    if let Node::Record(r) = schema
-        && let Some(f) = r.field(key)
-    {
-        let leaf = Leaf {
-            label: f.label,
-            help: f.help,
-            default: f.default,
-            required: f.required,
-        };
-        node_rows(cx, &Path::root().key(key), &f.node, &leaf, 0, &mut out);
-    }
-    out
-}
-
 struct Leaf {
     label: &'static str,
     help: &'static str,
     default: Option<Dflt>,
     required: bool,
+    hint: Option<RefKind>,
+    step: Option<f64>,
 }
 
 impl Leaf {
@@ -305,6 +320,19 @@ impl Leaf {
             help: "",
             default: None,
             required: false,
+            hint: None,
+            step: None,
+        }
+    }
+
+    fn of(f: &Field) -> Self {
+        Self {
+            label: f.label,
+            help: f.help,
+            default: f.default,
+            required: f.required,
+            hint: f.hint,
+            step: f.step,
         }
     }
 }
@@ -452,7 +480,7 @@ fn node_rows(
                     value,
                     placeholder: dflt_text(leaf.default),
                     mono: matches!(node, Node::Expr | Node::Filter),
-                    picker: super::pickers::for_field(cx.file, p, node),
+                    picker: super::pickers::for_field(node, leaf.hint),
                     required: leaf.required,
                 },
             ));
@@ -498,6 +526,7 @@ fn node_rows(
                     placeholder: dflt_text(leaf.default),
                     float,
                     text: text.clone(),
+                    step: stepper(node, item, leaf.default, leaf.step),
                 },
             );
             if draft.is_some() && !text.trim().is_empty() && parse_number(&text, float).is_none() {
@@ -553,7 +582,7 @@ fn node_rows(
                     items,
                     choices,
                     draft,
-                    picker: super::pickers::for_field(cx.file, p, node),
+                    picker: super::pickers::for_field(node, leaf.hint),
                 },
             ));
         }
@@ -584,13 +613,7 @@ fn record_rows(
     out: &mut Vec<Row>,
 ) {
     for f in r.fields {
-        let leaf = Leaf {
-            label: f.label,
-            help: f.help,
-            default: f.default,
-            required: f.required,
-        };
-        node_rows(cx, &p.key(f.key), &f.node, &leaf, depth, out);
+        node_rows(cx, &p.key(f.key), &f.node, &Leaf::of(f), depth, out);
     }
     for k in cx.doc.keys(p) {
         if r.field(&k).is_some() || skip == Some(k.as_str()) {
@@ -656,13 +679,12 @@ pub fn summary(doc: &ConfigDoc, p: &Path, node: &Node, index: usize) -> String {
     }
     if parts.is_empty()
         && let Node::Record(r) = node
-        && r.name == "fx"
-        && let (Some(b), Some(q)) = (doc.get_str(&p.key("base")), doc.get_str(&p.key("quote")))
+        && let Some(Summary::Arrow(a, b)) = r.summary
+        && let (Some(a), Some(b)) = (doc.get_str(&p.key(a)), doc.get_str(&p.key(b)))
+        && !a.is_empty()
         && !b.is_empty()
-        && !q.is_empty()
     {
-        // Crucible's empty-label format (orchestrationWorkflows.ts:56-61).
-        parts.push(format!("{b} \u{2192} {q}"));
+        parts.push(format!("{a} \u{2192} {b}"));
     }
     if parts.is_empty() {
         if let Some(i) = doc.get(p)
@@ -790,7 +812,7 @@ fn map_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut 
         Kind::AddKey {
             map: p.clone(),
             draft,
-            value: NewValue::for_node(inner),
+            value: inner,
         },
     ));
 }

@@ -6,7 +6,7 @@
 //! WP-6 adds the network-backed pickers (currencies, geocode, live models, channel titles) over
 //! the [`super::lookups`] cache.
 
-use cv_schema::{ConfigDoc, Node, Path, Seg};
+use cv_schema::{ConfigDoc, Node, Path, RefKind, Seg};
 
 use super::Settings;
 use super::lookups::Models;
@@ -36,36 +36,20 @@ pub enum Picker {
 /// The separator of a [`Picker::Place`] candidate value: `label␟lat␟lon`.
 pub const PLACE_SEP: char = '\u{1f}';
 
-/// The picker of a field of `file` (vault path) at `p` with schema `node`.
-pub fn for_field(file: &str, p: &Path, node: &Node) -> Option<Picker> {
-    match node {
-        Node::Folder => return Some(Picker::Folder),
-        Node::Path => return Some(Picker::Path),
-        _ => {}
-    }
-    let name = file.rsplit('/').next().unwrap_or(file);
-    let keys: Vec<&str> =
-        p.0.iter()
-            .map(|s| match s {
-                Seg::Key(k) => k.as_str(),
-                Seg::Index(_) => "",
-            })
-            .collect();
-    match (name, keys.as_slice(), node) {
-        ("pipelines.toml", ["image_describe", "provider"], Node::Str) => Some(Picker::Provider),
-        ("pipelines.toml", ["image_describe", "model"], Node::Str) => Some(Picker::Model),
-        ("pipelines.toml", ["ignore_shorts", "channels"], Node::StrList { .. }) => {
-            Some(Picker::Channel)
-        }
-        ("pipelines.toml", ["daily_brief", "fx", "", "base" | "quote"], Node::Str) => {
-            Some(Picker::Currency)
-        }
-        ("pipelines.toml", ["daily_brief", "weather", "", "label"], Node::Str) => {
-            Some(Picker::Place)
-        }
-        ("agents.toml", [_, "model"], Node::Str)
-        | ("actions.toml", [.., "steps", "", "model"], Node::Str) => Some(Picker::ModelRef),
-        _ => None,
+/// The picker of a field: its schema reference hint (B13), else its node's vault-path kind.
+pub fn for_field(node: &Node, hint: Option<RefKind>) -> Option<Picker> {
+    match hint {
+        Some(RefKind::Provider) => Some(Picker::Provider),
+        Some(RefKind::Model) => Some(Picker::Model),
+        Some(RefKind::ModelRef) => Some(Picker::ModelRef),
+        Some(RefKind::Channel) => Some(Picker::Channel),
+        Some(RefKind::Currency) => Some(Picker::Currency),
+        Some(RefKind::Place) => Some(Picker::Place),
+        None => match node {
+            Node::Folder => Some(Picker::Folder),
+            Node::Path => Some(Picker::Path),
+            _ => None,
+        },
     }
 }
 

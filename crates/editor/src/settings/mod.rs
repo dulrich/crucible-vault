@@ -49,6 +49,7 @@ pub mod form;
 pub mod lookups;
 pub mod pages;
 pub mod pickers;
+pub mod sections;
 pub mod status;
 pub mod widgets;
 
@@ -63,132 +64,7 @@ use crate::icons::Icon;
 use crate::message::Message;
 use crate::theme::Tokens;
 
-/// The vault config folder (the daemon's `config_dir`, `crates/cv/src/config.rs:100`).
-pub const CONFIG_DIR: &str = "_custom/crucible-vault";
-
-/// One settings section (rail entry), in rail order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Section {
-    Editor,
-    Hotkeys,
-    Actions,
-    Schedules,
-    Pipelines,
-    Sources,
-    Captures,
-    Kinds,
-    Agents,
-    Providers,
-    Views,
-    Bookmarks,
-    Status,
-}
-
-impl Section {
-    /// Rail order.
-    pub const ALL: [Self; 13] = [
-        Self::Editor,
-        Self::Hotkeys,
-        Self::Actions,
-        Self::Schedules,
-        Self::Pipelines,
-        Self::Sources,
-        Self::Captures,
-        Self::Kinds,
-        Self::Agents,
-        Self::Providers,
-        Self::Views,
-        Self::Bookmarks,
-        Self::Status,
-    ];
-
-    /// The rail label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Editor => "Editor",
-            Self::Hotkeys => "Hotkeys",
-            Self::Actions => "Actions",
-            Self::Schedules => "Schedules",
-            Self::Pipelines => "Pipelines",
-            Self::Sources => "Sources",
-            Self::Captures => "Captures & periods",
-            Self::Kinds => "Kinds",
-            Self::Agents => "Agents",
-            Self::Providers => "Providers",
-            Self::Views => "Views",
-            Self::Bookmarks => "Bookmarks",
-            Self::Status => "Status",
-        }
-    }
-
-    /// The rail glyph.
-    pub fn icon(self) -> Icon {
-        match self {
-            Self::Editor => Icon::Type,
-            Self::Hotkeys => Icon::Keyboard,
-            Self::Actions => Icon::Zap,
-            Self::Schedules => Icon::Timer,
-            Self::Pipelines => Icon::TrendingUp,
-            Self::Sources => Icon::BookOpen,
-            Self::Captures => Icon::CalendarDays,
-            Self::Kinds => Icon::Tags,
-            Self::Agents => Icon::Bot,
-            Self::Providers => Icon::Server,
-            Self::Views => Icon::Table,
-            Self::Bookmarks => Icon::Bookmark,
-            Self::Status => Icon::Activity,
-        }
-    }
-
-    /// The rail group heading this section opens (Crucible's grouping), if any.
-    pub fn group(self) -> Option<&'static str> {
-        match self {
-            Self::Actions => Some("Automate"),
-            Self::Agents => Some("AI"),
-            _ => None,
-        }
-    }
-
-    /// The file name inside [`CONFIG_DIR`] this section edits (`None` for Hotkeys, Views — a
-    /// folder, WP-3 — and Status).
-    pub fn file_name(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Editor => "editor.toml",
-            Self::Actions => "actions.toml",
-            Self::Schedules => "schedules.toml",
-            Self::Pipelines => "pipelines.toml",
-            Self::Sources => "sources.toml",
-            Self::Captures => "captures.toml",
-            Self::Kinds => "kinds.toml",
-            Self::Agents => "agents.toml",
-            Self::Providers => "providers.toml",
-            Self::Bookmarks => "bookmarks.toml",
-            Self::Hotkeys | Self::Views | Self::Status => return None,
-        })
-    }
-
-    /// The vault-relative path this section edits.
-    pub fn file(self) -> Option<&'static str> {
-        Some(match self {
-            Self::Editor => editor_prefs::EDITOR_PATH,
-            Self::Actions => "_custom/crucible-vault/actions.toml",
-            Self::Schedules => "_custom/crucible-vault/schedules.toml",
-            Self::Pipelines => "_custom/crucible-vault/pipelines.toml",
-            Self::Sources => "_custom/crucible-vault/sources.toml",
-            Self::Captures => "_custom/crucible-vault/captures.toml",
-            Self::Kinds => "_custom/crucible-vault/kinds.toml",
-            Self::Agents => "_custom/crucible-vault/agents.toml",
-            Self::Providers => "_custom/crucible-vault/providers.toml",
-            Self::Bookmarks => crate::bookmarks::BOOKMARKS_PATH,
-            Self::Hotkeys | Self::Views | Self::Status => return None,
-        })
-    }
-
-    /// The section whose file is `name` (a bare file name such as `actions.toml`).
-    pub fn for_file_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|s| s.file_name() == Some(name))
-    }
-}
+pub use sections::{CONFIG_DIR, SECTIONS, Section, SectionInfo};
 
 /// The section a daemon config error names, from the error formats of
 /// `cv-actions/src/config.rs` (`"<file>: …"`, `"action \"id\" disarmed: …"`) as surfaced by
@@ -517,8 +393,6 @@ pub struct Settings {
     pub status: status::StatusPage,
     /// Malformed-`editor.toml` / migration notes shown on the Editor page.
     pub editor_note: Option<String>,
-    /// The hidden-commands field as typed (reset on load/revert).
-    pub hidden_draft: Option<String>,
     /// Form UI state (expansion, drafts) of every file page.
     pub form: form::FormState,
     /// The Views page's selected file (vault path).
@@ -541,7 +415,6 @@ impl Default for Settings {
             files: new_files(),
             status: status::StatusPage::default(),
             editor_note: None,
-            hidden_draft: None,
             form: form::FormState::default(),
             view_selected: None,
             new_view: String::new(),
@@ -954,6 +827,10 @@ impl Settings {
                     })
                 }
             }
+            FormMsg::Step { path, value } => {
+                fs.set_draft(file, draft_key("num", &path), None);
+                Some(DocEdit::Set(path, value))
+            }
             FormMsg::ChipDraft { path, text, .. } => {
                 fs.set_draft(file, draft_key("chip", &path), Some(text));
                 None
@@ -1065,7 +942,7 @@ impl Settings {
 }
 
 /// The views folder.
-pub const VIEWS_DIR: &str = "_custom/crucible-vault/views";
+pub const VIEWS_DIR: &str = cv_schema::config_path!("views");
 
 /// A direct `views/*.toml` child.
 pub fn is_view_path(p: &str) -> bool {
@@ -1080,19 +957,19 @@ fn view_file(path: &str) -> ConfigFile {
     f
 }
 
-/// The Views carve-out's local diagnostics: the `views` crate's own parse (blocking) and
-/// compile (notices → warnings), as the daemon's `views::def::load_dir` runs them.
+/// The Views carve-out's local diagnostics: `views::def::check_text`, the same parse (blocking)
+/// and compile (notices → warnings) the daemon's `views::def::load_dir` runs; per-view
+/// definition errors are warnings too.
 pub fn views_check(path: &str, text: &str) -> (Vec<String>, Vec<String>) {
     let stem = path
         .rsplit('/')
         .next()
         .and_then(|n| n.strip_suffix(".toml"))
         .unwrap_or("view");
-    match toml::from_str::<::views::def::BaseDef>(text) {
-        Err(e) => (vec![format!("views: {}", e.message().trim())], Vec::new()),
-        Ok(def) => {
-            let mut notices = Vec::new();
-            let base = ::views::def::Base::compile(stem, &def, &mut notices);
+    let mut notices = Vec::new();
+    match ::views::def::check_text(stem, text, &mut notices) {
+        Err(e) => (vec![e], Vec::new()),
+        Ok(base) => {
             for v in &base.views {
                 notices.extend(v.errors.iter().map(|e| format!("view `{}`: {e}", v.name)));
             }
@@ -1169,6 +1046,11 @@ pub enum FormMsg {
         text: String,
         float: bool,
     },
+    /// A stepper button of a bounded number: write `value`, drop the typed draft.
+    Step {
+        path: cv_schema::Path,
+        value: ScalarValue,
+    },
     ChipDraft {
         path: cv_schema::Path,
         text: String,
@@ -1196,7 +1078,8 @@ pub enum FormMsg {
     },
     NewKeyAdd {
         map: cv_schema::Path,
-        value: form::NewValue,
+        /// The map's entry node.
+        value: &'static Node,
     },
     RenameDraft {
         at: cv_schema::Path,
@@ -1219,8 +1102,6 @@ pub enum SettingsMsg {
     Section(Section),
     /// Plan round-5 WP-1: a section's body scrolled to vertical offset `.1` (px).
     BodyScrolled(Section, f32),
-    /// An Editor-page control changed.
-    Pref(editor_prefs::PrefEdit),
     /// A generic document edit on a file page (WP-3 forms emit these).
     Edit(String, DocEdit),
     /// A form UI message on a file page.
@@ -1262,8 +1143,8 @@ pub enum DocEdit {
     InsertRecord(cv_schema::Path, usize, Vec<(String, ScalarValue)>),
     /// Move a list item `from` → `to`.
     Move(cv_schema::Path, usize, usize),
-    /// Add a map key.
-    InsertKey(cv_schema::Path, String, form::NewValue),
+    /// Add a map key; its value starts as the entry node's `empty_item`.
+    InsertKey(cv_schema::Path, String, &'static Node),
     /// Rename a map key (position, value and comments kept).
     RenameKey(cv_schema::Path, String, String),
     /// Switch a tagged union's kind at a path: keys the old kind declares and the new one does
@@ -1315,24 +1196,9 @@ impl DocEdit {
                 doc.insert_record(list, *at, t)
             }
             DocEdit::Move(list, from, to) => doc.move_item(list, *from, *to),
-            DocEdit::InsertKey(map, key, v) => doc.insert_key(map, key, v.item()),
+            DocEdit::InsertKey(map, key, node) => doc.insert_key(map, key, node.empty_item()),
             DocEdit::RenameKey(map, from, to) => doc.rename_key(map, from, to),
-            DocEdit::SwitchVariant(p, u, tag) => {
-                let new = u
-                    .variant(tag)
-                    .ok_or_else(|| DocError::BadPath(format!("{p}: unknown kind `{tag}`")))?;
-                if let Some(old) = doc.get_str(&p.key(u.tag)).and_then(|t| u.variant(t)) {
-                    for k in doc.keys(p) {
-                        if k != u.tag
-                            && old.record.field(&k).is_some()
-                            && new.record.field(&k).is_none()
-                        {
-                            doc.remove(&p.key(&k))?;
-                        }
-                    }
-                }
-                doc.set(&p.key(u.tag), tag.as_str())
-            }
+            DocEdit::SwitchVariant(p, u, tag) => doc.switch_variant(p, u, tag),
         }
     }
 }
@@ -1348,12 +1214,7 @@ pub fn body_scroll_id(sec: Section) -> iced::widget::Id {
 }
 
 /// The rail + page.
-pub fn view<'a>(
-    s: &'a Settings,
-    prefs: &'a editor_prefs::Prefs,
-    paths: &'a [String],
-    t: Tokens,
-) -> Element<'a, Message> {
+pub fn view<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a, Message> {
     let mut rail = column![].spacing(2).width(Length::Fixed(220.0));
     for sec in Section::ALL {
         if let Some(g) = sec.group() {
@@ -1392,7 +1253,7 @@ pub fn view<'a>(
     let rail = container(rail)
         .padding(1)
         .style(crate::theme::seg_group_style(t));
-    let body = scrollable(container(page(s, prefs, paths, t)).padding([0, 16]))
+    let body = scrollable(container(page(s, paths, t)).padding([0, 16]))
         .id(body_scroll_id(s.section))
         .on_scroll({
             let sec = s.section;
@@ -1412,14 +1273,9 @@ pub fn view<'a>(
 
 /// One section's page (view build timed like `sync_buffers`: `CV_EDITOR_TRACE` debug line
 /// when it takes ≥1 ms).
-pub fn page<'a>(
-    s: &'a Settings,
-    prefs: &'a editor_prefs::Prefs,
-    paths: &'a [String],
-    t: Tokens,
-) -> Element<'a, Message> {
+pub fn page<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a, Message> {
     let t0 = std::time::Instant::now();
-    let el = page_inner(s, prefs, paths, t);
+    let el = page_inner(s, paths, t);
     let ms = t0.elapsed().as_secs_f64() * 1e3;
     if ms >= 1.0 {
         tracing::debug!(
@@ -1431,39 +1287,23 @@ pub fn page<'a>(
     el
 }
 
-fn page_inner<'a>(
-    s: &'a Settings,
-    prefs: &'a editor_prefs::Prefs,
-    paths: &'a [String],
-    t: Tokens,
-) -> Element<'a, Message> {
+fn page_inner<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a, Message> {
     let cx = pages::PageCx { s, paths, t };
     let heading = text(s.section.label()).size(20).color(t.heading.to_color());
     let body: Element<'a, Message> = match s.section {
-        Section::Editor => match s.file(editor_prefs::EDITOR_PATH) {
-            Some(f) => editor_prefs::view(
-                f,
-                prefs,
-                s.editor_note.as_deref(),
-                s.hidden_draft.as_deref(),
-                t,
-            ),
-            None => Space::new().into(),
-        },
         Section::Status => status::view(&s.status, t),
         Section::Hotkeys => pages::hotkeys::view(cx),
         Section::Views => pages::views::view(cx),
         sec => match sec.file().and_then(|p| s.file(p)) {
-            Some(f) => match sec {
-                Section::Actions => pages::actions::view(cx, f),
-                Section::Schedules => pages::schedules::view(cx, f),
-                Section::Captures => pages::captures::view(cx, f),
-                Section::Kinds => pages::kinds::view(cx, f),
-                Section::Agents => pages::agents::view(cx, f),
-                Section::Providers => pages::providers::view(cx, f),
-                Section::Bookmarks => pages::bookmarks::view(cx, f),
-                _ => pages::generic(cx, f, ""),
-            },
+            // The Editor page's intro is its migration / malformed note, when there is one.
+            Some(f) => pages::generic(
+                cx,
+                f,
+                match sec {
+                    Section::Editor => s.editor_note.as_deref().unwrap_or(sec.info().intro),
+                    _ => sec.info().intro,
+                },
+            ),
             None => Space::new().into(),
         },
     };

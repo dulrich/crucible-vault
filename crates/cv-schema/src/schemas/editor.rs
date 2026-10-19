@@ -16,6 +16,7 @@ pub static BOOKMARK: Record = Record {
         field("keys", "Keys", "Key chords", Node::Chords),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `bookmarks.toml`.
@@ -28,6 +29,7 @@ pub static BOOKMARKS_FILE: Record = Record {
         Node::List(&Node::Record(&BOOKMARK)),
     )],
     rules: &[],
+    summary: None,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -45,6 +47,7 @@ pub static PROPERTY_DEF: Record = Record {
         Node::Str,
     )],
     rules: &[],
+    summary: None,
 };
 
 const DIRECTION: Node = Node::Enum(&["ASC", "DESC", "asc", "desc"]);
@@ -57,6 +60,7 @@ pub static SORT: Record = Record {
         field("direction", "Direction", "Sort direction", DIRECTION).dflt(D::Str("ASC")),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `PivotColumn`.
@@ -72,6 +76,7 @@ pub static PIVOT_COLUMN: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// One `[[views]]` (`ViewDef`).
@@ -182,6 +187,7 @@ pub static VIEW: Record = Record {
         .dflt(D::Str("heading")),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// One `views/*.toml` (`BaseDef`).
@@ -217,6 +223,7 @@ pub static VIEW_FILE: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -238,7 +245,8 @@ pub static EDITOR_SEARCH: Record = Record {
                 max: Some(1000),
             },
         )
-        .dflt(D::Int(50)),
+        .dflt(D::Int(50))
+        .step(10.0),
         field(
             "debounce_ms",
             "Debounce (ms)",
@@ -248,9 +256,11 @@ pub static EDITOR_SEARCH: Record = Record {
                 max: Some(5000),
             },
         )
-        .dflt(D::Int(250)),
+        .dflt(D::Int(250))
+        .step(50.0),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[palette]`.
@@ -263,6 +273,7 @@ pub static EDITOR_PALETTE: Record = Record {
         STR_LIST,
     )],
     rules: &[],
+    summary: None,
 };
 
 /// `editor.toml`.
@@ -278,7 +289,8 @@ pub static EDITOR_FILE: Record = Record {
                 max: Some(64.0),
             },
         )
-        .dflt(D::Float(22.0)),
+        .dflt(D::Float(22.0))
+        .step(1.0),
         field(
             "ui_scale",
             "UI scale",
@@ -288,7 +300,8 @@ pub static EDITOR_FILE: Record = Record {
                 max: Some(3.0),
             },
         )
-        .dflt(D::Float(1.0)),
+        .dflt(D::Float(1.0))
+        .step(0.25),
         field(
             "surround",
             "Surround",
@@ -340,7 +353,8 @@ pub static EDITOR_FILE: Record = Record {
                 max: Some(100),
             },
         )
-        .dflt(D::Int(0)),
+        .dflt(D::Int(0))
+        .step(5.0),
         field(
             "open_url_cmd",
             "Open URL command",
@@ -368,4 +382,5 @@ pub static EDITOR_FILE: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };

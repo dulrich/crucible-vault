@@ -21,7 +21,7 @@ use crate::settings::{ConfigFile, DocEdit, ScalarValue};
 use crate::theme::Tokens;
 
 /// The vault file.
-pub const BOOKMARKS_PATH: &str = "_custom/crucible-vault/bookmarks.toml";
+pub const BOOKMARKS_PATH: &str = cv_schema::config_path!("bookmarks.toml");
 
 /// One bookmark.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

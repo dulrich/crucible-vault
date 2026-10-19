@@ -50,6 +50,7 @@ pub static GUARD: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `capture` — `cv::steps::capture` (`StepModule::parse`; keys via
@@ -121,6 +122,7 @@ pub static CAPTURE: Record = Record {
         field("label", "Label", "Descriptive", Node::Str),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// Every `target` value `capture.rs` `parse_target` accepts (canonical first, then aliases).
@@ -194,6 +196,7 @@ pub static MATERIALIZE: Record = Record {
         .dflt(D::Bool(false)),
     ],
     rules: &[Rule::AtLeastOneOf(&["period", "path", "target"])],
+    summary: None,
 };
 
 /// `move` — `cv::steps::file::parse`.
@@ -211,6 +214,7 @@ pub static MOVE: Record = Record {
         KIND_FIELD,
     ],
     rules: &[Rule::AtLeastOneOf(&["to", "kind"])],
+    summary: None,
 };
 
 /// `copy` — `cv::steps::file::parse`.
@@ -227,6 +231,7 @@ pub static COPY: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `set_props` — `cv::steps::file::parse`.
@@ -250,6 +255,7 @@ pub static SET_PROPS: Record = Record {
         KIND_FIELD,
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `remove_props` — `cv::steps::file::parse`.
@@ -260,6 +266,7 @@ pub static REMOVE_PROPS: Record = Record {
         field("props", "Properties", "Keys to remove", STR_OR_LIST),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `upsert_tags` — `cv::steps::file::parse`.
@@ -276,6 +283,7 @@ pub static UPSERT_TAGS: Record = Record {
         KIND_FIELD,
     ],
     rules: &[Rule::AtLeastOneOf(&["tags", "kind"])],
+    summary: None,
 };
 
 /// `lint` — `cv::steps::lint` (`StepModule::parse`; keys via `cv::steps::params::check_keys`). `steps` keys
@@ -334,6 +342,7 @@ pub static LINT: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `localize` — `cv::steps::localize::params::parse_params` (keys via
@@ -440,4 +449,5 @@ pub static LOCALIZE: Record = Record {
         .dflt(D::Int(50)),
     ],
     rules: &[],
+    summary: None,
 };

@@ -35,6 +35,7 @@ pub static PARAM: Record = Record {
         field("default", "Default", "Default value", Node::Str),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `PropSelector` (`crates/cv-actions/src/model.rs`).
@@ -50,6 +51,7 @@ pub static PROP_SELECTOR: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `Selector` (`crates/cv-actions/src/model.rs`); an all-empty selector disarms (I5).
@@ -71,6 +73,7 @@ pub static SELECTOR: Record = Record {
         ),
     ],
     rules: &[Rule::AtLeastOneOf(&["folder", "tag", "prop"])],
+    summary: None,
 };
 
 const DAILY: Field = field("daily", "Daily at", "HH:MM local time", Node::Str);
@@ -81,6 +84,7 @@ pub static STARTER_COMMAND: Record = Record {
     name: "command",
     fields: &[],
     rules: &[],
+    summary: None,
 };
 
 /// `StarterDef::Event`.
@@ -113,6 +117,7 @@ pub static STARTER_EVENT: Record = Record {
         .dflt(D::Str("external")),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `StarterDef::Schedule`.
@@ -120,6 +125,7 @@ pub static STARTER_SCHEDULE: Record = Record {
     name: "schedule",
     fields: &[DAILY, EVERY],
     rules: &[Rule::ExactlyOneOf(&["daily", "every"])],
+    summary: None,
 };
 
 /// `[[action.starters]]` (`cv_actions::config::StarterDef`).
@@ -152,6 +158,7 @@ pub static RESOURCES: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// One `[[action]]` (`cv_actions::config::ActionDef`).
@@ -217,6 +224,7 @@ pub static ACTION: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `actions.toml`.
@@ -229,6 +237,7 @@ pub static ACTIONS_FILE: Record = Record {
         Node::List(&Node::Record(&ACTION)),
     )],
     rules: &[],
+    summary: None,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -244,6 +253,7 @@ pub static SCHEDULE: Record = Record {
         EVERY,
     ],
     rules: &[Rule::ExactlyOneOf(&["daily", "every"])],
+    summary: None,
 };
 
 /// `schedules.toml`.
@@ -256,4 +266,5 @@ pub static SCHEDULES_FILE: Record = Record {
         Node::List(&Node::Record(&SCHEDULE)),
     )],
     rules: &[],
+    summary: None,
 };

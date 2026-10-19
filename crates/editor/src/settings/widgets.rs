@@ -249,6 +249,7 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
             text: value,
             placeholder,
             float,
+            step,
         } => {
             let file = cx.file.to_owned();
             let p2 = path.clone();
@@ -268,7 +269,28 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                     ))
                 });
             }
-            row![label_col(r.label, r.help), input].spacing(8).into()
+            let mut ctl = row![label_col(r.label, r.help)]
+                .spacing(8)
+                .align_y(Alignment::Center);
+            match step {
+                // Decision 3: a bounded number gets −/+ beside its field.
+                Some(st) => {
+                    let m = |v: Option<ScalarValue>| {
+                        v.and_then(|value| {
+                            cx.on(cx.form(FormMsg::Step {
+                                path: path.clone(),
+                                value,
+                            }))
+                        })
+                    };
+                    ctl = ctl
+                        .push(theme::icon_button(Icon::ChevronDown, m(st.dec), t))
+                        .push(input)
+                        .push(theme::icon_button(Icon::ChevronUp, m(st.inc), t));
+                }
+                None => ctl = ctl.push(input),
+            }
+            ctl.into()
         }
         Kind::Enum {
             choices,

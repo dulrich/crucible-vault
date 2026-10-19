@@ -695,3 +695,113 @@ fn scroll_anchor_is_a_percent() {
     assert_eq!(errs("scroll_anchor = 101\n", "editor.toml").len(), 1);
     assert_eq!(errs("scroll_anchor = -5\n", "editor.toml").len(), 1);
 }
+
+// ---- WP-R20 (B14): union variant switch and empty items, moved from the editor ----
+
+const ONE_ACTION: &str = r#"# my actions
+[[action]]
+id = "tidy"
+title = "Tidy"
+mystery = 7 # unknown, kept
+
+[[action.steps]]
+type = "move"
+path = "{file}"
+to = "archive"
+kind = "note"
+"#;
+
+#[test]
+fn step_kind_switch_keeps_shared_fields() {
+    let mut doc = ConfigDoc::parse(ONE_ACTION).unwrap();
+    let step = Path::parse("action[0].steps[0]").unwrap();
+    doc.switch_variant(&step, &crate::schemas::STEP, "copy")
+        .unwrap();
+    assert_eq!(doc.get_str(&step.key("type")), Some("copy"));
+    assert_eq!(doc.get_str(&step.key("to")), Some("archive"), "shared kept");
+    assert_eq!(
+        doc.get_str(&step.key("path")),
+        Some("{file}"),
+        "shared kept"
+    );
+    assert!(doc.get(&step.key("kind")).is_none(), "move-only dropped");
+    assert!(doc.to_string().contains("# my actions"));
+    assert!(
+        doc.switch_variant(&step, &crate::schemas::STEP, "nope")
+            .is_err()
+    );
+}
+
+#[test]
+fn step_kind_switch_keeps_unknown_keys() {
+    let text = "[[action]]\nid = \"a\"\n[[action.steps]]\ntype = \"move\"\nto = \"x\"\nzzz = 1\n";
+    let mut doc = ConfigDoc::parse(text).unwrap();
+    doc.switch_variant(
+        &Path::parse("action[0].steps[0]").unwrap(),
+        &crate::schemas::STEP,
+        "copy",
+    )
+    .unwrap();
+    assert!(doc.to_string().contains("zzz = 1"));
+}
+
+#[test]
+fn empty_items_follow_the_node_shape() {
+    let shown = |n: Node| match n.empty_item() {
+        Item::Table(t) => format!("table:{}", t.len()),
+        Item::Value(v) => v.to_string().trim().to_owned(),
+        _ => "other".to_owned(),
+    };
+    assert_eq!(shown(Node::Bool), "false");
+    assert_eq!(shown(crate::node::UINT), "0");
+    assert_eq!(
+        shown(Node::Float {
+            min: None,
+            max: None
+        }),
+        "0"
+    );
+    assert_eq!(shown(Node::Chords), "[]");
+    assert_eq!(shown(crate::node::STR_LIST), "[]");
+    assert_eq!(shown(Node::Expr), "\"\"");
+    assert_eq!(shown(Node::FreeTable), "table:0");
+    assert_eq!(shown(Node::Map(&Node::Str)), "table:0");
+}
+
+#[test]
+fn picker_hints_sit_on_the_referencing_fields() {
+    let rec = |n: &'static Node| match n {
+        Node::Record(r) => *r,
+        _ => panic!("record"),
+    };
+    let sub = |r: &'static Record, k: &str| match r.field(k).unwrap().node {
+        Node::Record(r) => r,
+        Node::List(Node::Record(r)) => r,
+        Node::Map(Node::Record(r)) => r,
+        n => panic!("{k}: {n:?}"),
+    };
+    let pipes = rec(schema_for("pipelines.toml").unwrap());
+    let img = sub(pipes, "image_describe");
+    assert_eq!(img.field("provider").unwrap().hint, Some(RefKind::Provider));
+    assert_eq!(img.field("model").unwrap().hint, Some(RefKind::Model));
+    let shorts = sub(pipes, "ignore_shorts");
+    assert_eq!(
+        shorts.field("channels").unwrap().hint,
+        Some(RefKind::Channel)
+    );
+    let brief = sub(pipes, "daily_brief");
+    let fx = sub(brief, "fx");
+    assert_eq!(fx.field("base").unwrap().hint, Some(RefKind::Currency));
+    assert_eq!(fx.field("quote").unwrap().hint, Some(RefKind::Currency));
+    assert_eq!(fx.summary, Some(Summary::Arrow("base", "quote")));
+    let weather = sub(brief, "weather");
+    assert_eq!(weather.field("label").unwrap().hint, Some(RefKind::Place));
+    let Node::Map(Node::Record(agent)) = schema_for("agents.toml").unwrap() else {
+        panic!("agents")
+    };
+    assert_eq!(agent.field("model").unwrap().hint, Some(RefKind::ModelRef));
+    let step = step_schema("agent").unwrap();
+    assert_eq!(step.field("model").unwrap().hint, Some(RefKind::ModelRef));
+    assert_eq!(CONFIG_DIR, "_custom/crucible-vault/");
+    assert_eq!(config_path!("x.toml"), "_custom/crucible-vault/x.toml");
+}

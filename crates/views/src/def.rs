@@ -512,15 +512,25 @@ pub fn load_dir(config_dir: &Path) -> (Vec<Base>, Vec<String>) {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let parsed = std::fs::read_to_string(&p)
-            .map_err(|e| e.to_string())
-            .and_then(|s| toml::from_str::<BaseDef>(&s).map_err(|e| e.to_string()));
-        match parsed {
-            Ok(def) => bases.push(Base::compile(&stem, &def, &mut notices)),
-            Err(e) => notices.push(format!("{stem}.toml: {}", e.trim())),
+        let checked = std::fs::read_to_string(&p)
+            .map_err(|e| format!("{stem}.toml: {}", e.to_string().trim()))
+            .and_then(|s| check_text(&stem, &s, &mut notices));
+        match checked {
+            Ok(base) => bases.push(base),
+            Err(e) => notices.push(e),
         }
     }
     (bases, notices)
+}
+
+/// Parses and compiles one view file's text — the one diagnosis shared by [`load_dir`] (the
+/// daemon) and the editor's Settings check (plan tn-review-baseline-remediation WP-R20, B14).
+/// `Err`: the parse error (`"<stem>.toml: …"`; the file yields no base). Compile notices are
+/// pushed to `notices`; per-view definition errors stay on the views ([`View::errors`]).
+pub fn check_text(stem: &str, text: &str, notices: &mut Vec<String>) -> Result<Base, String> {
+    let def = toml::from_str::<BaseDef>(text)
+        .map_err(|e| format!("{stem}.toml: {}", e.to_string().trim()))?;
+    Ok(Base::compile(stem, &def, notices))
 }
 
 #[cfg(test)]

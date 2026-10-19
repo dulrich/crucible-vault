@@ -3919,11 +3919,17 @@ mod round4_wp4 {
 
     #[test]
     fn focus_follows_mouse_pref_round_trips() {
-        use crate::settings::editor_prefs::{PrefEdit, apply, parse};
+        use crate::settings::editor_prefs::parse;
+        use crate::settings::{DocEdit, ScalarValue};
         let med = crate::theme::Surround::Med;
         assert!(!parse("", med).expect("p").focus_follows_mouse);
         let mut doc = cv_schema::ConfigDoc::parse("").expect("doc");
-        apply(&mut doc, &PrefEdit::FocusFollowsMouse(true)).expect("apply");
+        DocEdit::Set(
+            cv_schema::Path::root().key("focus_follows_mouse"),
+            ScalarValue::Bool(true),
+        )
+        .apply(&mut doc)
+        .expect("apply");
         let text = doc.to_string();
         assert!(text.contains("focus_follows_mouse = true"), "{text}");
         assert!(parse(&text, med).expect("p").focus_follows_mouse);

@@ -12,8 +12,8 @@ pub mod schemas;
 pub mod validate;
 
 pub use doc::{ConfigDoc, DocError, Path, Seg};
-pub use node::{Default, Field, Node, Record, Rule, Union, Variant};
-pub use schemas::{FILES, editor_schema, schema_for, step_schema, view_schema};
+pub use node::{Default, Field, Node, Record, RefKind, Rule, Summary, Union, Variant};
+pub use schemas::{CONFIG_DIR, FILES, editor_schema, schema_for, step_schema, view_schema};
 pub use toml_edit;
 pub use validate::{FieldError, covered_paths, schema_paths, validate, validate_item};
 

@@ -23,6 +23,7 @@ pub static MODEL: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `ProviderConfig`. Secrets are referenced by name only.
@@ -92,6 +93,7 @@ pub static PROVIDER: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `providers.toml`.
@@ -104,4 +106,5 @@ pub static PROVIDERS_FILE: Record = Record {
         Node::List(&Node::Record(&PROVIDER)),
     )],
     rules: &[],
+    summary: None,
 };

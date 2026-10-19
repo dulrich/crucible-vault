@@ -7,7 +7,7 @@ use cv_protocol::{ActionInfo, ChangeKind, Notification, Origin};
 use cv_schema::{ConfigDoc, Path};
 use cv_testkit::{SyntheticVault, VaultSpec};
 
-use super::editor_prefs::{self, EDITOR_PATH, PrefEdit, Prefs};
+use super::editor_prefs::{self, EDITOR_PATH, Prefs};
 use super::*;
 use crate::app::{App, TabKind};
 use crate::bookmarks::{BOOKMARKS_PATH, BookmarkMsg};
@@ -32,6 +32,18 @@ fn app_over(d: &Arc<FakeDaemon>, state: Option<std::path::PathBuf>) -> App {
 
 fn s(m: SettingsMsg) -> Message {
     Message::Settings(m)
+}
+
+/// An Editor-page edit through the generic form path (WP-R20: was the hand page message).
+fn pref(key: &str, v: ScalarValue) -> Message {
+    s(SettingsMsg::Edit(
+        EDITOR_PATH.into(),
+        DocEdit::Set(Path::parse(key).expect("path"), v),
+    ))
+}
+
+fn font(v: f64) -> Message {
+    pref("font_size", ScalarValue::Float(v))
 }
 
 fn changed(app: &mut App, path: &str, hash: Option<String>) {
@@ -238,17 +250,23 @@ fn prefs_defaults_fields_and_fallbacks() {
     assert!((int.font_size - 30.0).abs() < f32::EPSILON);
     assert_eq!(int.tab_title, crate::header::TabTitle::Title, "default");
     let mut doc = ConfigDoc::parse("").expect("doc");
-    editor_prefs::apply(&mut doc, &PrefEdit::TabTitle(crate::header::TabTitle::Path)).expect("set");
+    DocEdit::Set(
+        Path::root().key("tab_title"),
+        ScalarValue::Str("path".into()),
+    )
+    .apply(&mut doc)
+    .expect("set");
     assert!(doc.to_string().contains("tab_title = \"path\""));
     assert_eq!(
         int.quick_switch_open,
         crate::header::QuickSwitchOpen::Move,
         "default"
     );
-    editor_prefs::apply(
-        &mut doc,
-        &PrefEdit::QuickSwitchOpen(crate::header::QuickSwitchOpen::Switch),
+    DocEdit::Set(
+        Path::root().key("quick_switch_open"),
+        ScalarValue::Str("switch".into()),
     )
+    .apply(&mut doc)
     .expect("set");
     assert!(doc.to_string().contains("quick_switch_open = \"switch\""));
 }
@@ -256,8 +274,15 @@ fn prefs_defaults_fields_and_fallbacks() {
 #[test]
 fn pref_edits_keep_comments() {
     let mut doc = ConfigDoc::parse("# my prefs\nfont_size = 22 # base\n").expect("doc");
-    editor_prefs::apply(&mut doc, &PrefEdit::FontSize(24.0)).expect("set");
-    editor_prefs::apply(&mut doc, &PrefEdit::PaletteHidden("a, b ,".into())).expect("set");
+    DocEdit::Set(Path::root().key("font_size"), ScalarValue::Float(24.0))
+        .apply(&mut doc)
+        .expect("set");
+    DocEdit::Set(
+        Path::parse("palette.hidden").expect("p"),
+        ScalarValue::StrList(vec!["a".into(), "b".into()]),
+    )
+    .apply(&mut doc)
+    .expect("set");
     let out = doc.to_string();
     assert!(
         out.contains("# my prefs") && out.contains("# base"),
@@ -511,7 +536,7 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert_eq!(f.state, LoadState::Absent);
     assert!(!f.dirty, "the surround seed alone is not an edit");
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     assert!(d.read_file(EDITOR_PATH).is_err(), "no write before Save");
     assert!(
         (app.prefs.font_size - 30.0).abs() < f32::EPSILON,
@@ -539,7 +564,7 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
 fn editor_toml_appeared_since_load_is_a_conflict() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     let theirs = "font_size = 12\n";
     d.write_note(EDITOR_PATH, theirs, &ContentHash::from_hex(""))
         .expect("external create");
@@ -568,9 +593,7 @@ fn editor_toml_cas_conflict_reloads_without_overwrite() {
         .expect("seed");
     let mut app = app_over(&d, None);
     assert!((app.prefs.font_size - 20.0).abs() < f32::EPSILON);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::DeleteMode(
-        crate::daemon::DeleteMode::Permanent,
-    ))));
+    let _ = app.send(pref("delete_mode", ScalarValue::Str("permanent".into())));
     d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
         .expect("external");
     let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
@@ -603,7 +626,7 @@ fn external_edit_is_picked_up_live() {
     assert!((app.prefs.font_size - 40.0).abs() < f32::EPSILON);
     assert!((app.scale_factor() - 2.0).abs() < f32::EPSILON);
     // Our own write's echo (same hash) is not a reload.
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::UiScale(1.25))));
+    let _ = app.send(pref("ui_scale", ScalarValue::Float(1.25)));
     changed(&mut app, EDITOR_PATH, Some(h1.as_str().to_owned()));
     assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
 }
@@ -618,12 +641,12 @@ fn malformed_editor_toml_falls_back_and_is_kept() {
     assert_eq!(app.prefs, Prefs::default());
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert!(matches!(f.state, LoadState::Malformed(_)));
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, bad.as_bytes());
     // Start over + Save replaces it through CAS on the malformed content.
     let _ = app.send(s(SettingsMsg::StartOver(EDITOR_PATH.into())));
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     let text = String::from_utf8(d.read_file(EDITOR_PATH).expect("r").0).expect("utf8");
     assert!(text.contains("font_size = 30"), "{text}");
@@ -646,7 +669,7 @@ fn surround_migrates_once_from_ui_state() {
         Some("light")
     );
     // After a save, editor.toml is the source (the local copy no longer wins).
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::Surround(Surround::Dark))));
+    let _ = app.send(pref("surround", ScalarValue::Str("dark".into())));
     let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     std::fs::write(&state, br#"{"surround":"med"}"#).expect("state");
     let app = app_over(&d, Some(state));
@@ -671,7 +694,7 @@ fn font_size_change_resizes_source_and_reading_live() {
         crate::reading::view::block_size(None),
         app.prefs.text_scale(),
     );
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(44.0))));
+    let _ = app.send(font(44.0));
     assert!(
         (app.prefs.font_size - 44.0).abs() < f32::EPSILON,
         "source size"
@@ -911,7 +934,7 @@ fn disk(d: &FakeDaemon, path: &str) -> Option<String> {
 fn autosave_valid_edit_writes_once_after_the_debounce() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert_eq!(f.scheduled_seq, f.edit_seq, "a debounce timer was armed");
     assert!(disk(&d, EDITOR_PATH).is_none(), "nothing before the timer");
@@ -930,10 +953,10 @@ fn autosave_valid_edit_writes_once_after_the_debounce() {
 fn autosave_rapid_edits_coalesce_into_one_write() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(20.0))));
+    let _ = app.send(font(20.0));
     let first = seq(&app, EDITOR_PATH);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(22.0))));
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(24.0))));
+    let _ = app.send(font(22.0));
+    let _ = app.send(font(24.0));
     // The superseded timers fire: no write.
     let _ = app.send(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first)));
     let _ = app.send(s(SettingsMsg::AutoSaveDue(EDITOR_PATH.into(), first + 1)));
@@ -982,7 +1005,7 @@ fn autosave_invalid_edit_never_writes() {
 fn autosave_edit_during_an_inflight_write_requeues() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     // The first write is in flight (not run inline).
     app.rpc_exec = crate::app::RpcExec::Pool;
     due(&mut app, EDITOR_PATH);
@@ -990,7 +1013,7 @@ fn autosave_edit_during_an_inflight_write_requeues() {
     assert!(f.saving);
     let first = f.doc.as_ref().expect("doc").to_string();
     let base = f.base.clone();
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(32.0))));
+    let _ = app.send(font(32.0));
     due(&mut app, EDITOR_PATH);
     assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.queued));
     // The first write lands; the queued one runs right after.
@@ -1010,7 +1033,7 @@ fn autosave_cas_conflict_reloads_without_overwrite() {
         .write_note(EDITOR_PATH, "font_size = 20\n", &ContentHash::from_hex(""))
         .expect("seed");
     let mut app = app_over(&d, None);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
         .expect("external");
     due(&mut app, EDITOR_PATH);
@@ -1060,13 +1083,13 @@ fn autosave_flushes_on_settings_tab_close_and_quit() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
     let _ = app.send(s(SettingsMsg::Open));
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     assert!(disk(&d, EDITOR_PATH).is_none());
     let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
     assert_eq!(settings_tabs(&app), 0);
     assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 30")));
     // Quit flushes a pending write before exiting.
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(34.0))));
+    let _ = app.send(font(34.0));
     let _ = app.send(Message::Tabs(TabsMsg::Quit));
     assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 34")));
     assert!(app.exiting);
@@ -1092,7 +1115,7 @@ fn open_url_cmd_pref_default_and_override() {
 fn settings_save_failure_raises_an_error_notice() {
     let (_tmp, d) = fake();
     let mut app = app_over(&d, None);
-    let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.send(font(30.0));
     let _ = app.send(s(SettingsMsg::Saved(
         EDITOR_PATH.into(),
         Err("disk full".into()),

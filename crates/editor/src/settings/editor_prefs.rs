@@ -1,6 +1,7 @@
 //! Editor prefs: `_custom/crucible-vault/editor.toml` (plan `editor-settings-tab`, Decisions
 //! locked: prefs and the keymap live in the vault; machine-local window/tab session state stays
-//! in `UiState`). Schema: `cv_schema::editor_schema()`.
+//! in `UiState`). Schema: `cv_schema::editor_schema()`; the Settings page is the generic schema
+//! form (plan tn-review-baseline-remediation WP-R20), and this module is the typed reader.
 //!
 //! Parsing is field-wise and forgiving: a missing, mistyped or out-of-range value falls back to
 //! its default (the form-level `validate` errors say why), so a half-valid file still applies
@@ -12,26 +13,40 @@
 
 use std::collections::BTreeMap;
 
-use cv_schema::{ConfigDoc, DocError, Path};
-use iced::widget::{Space, button, column, container, row, text, text_input};
-use iced::{Element, Length};
+use cv_schema::{ConfigDoc, Node, Path};
 
-use super::{ConfigFile, LoadState, SettingsMsg, file_header, save_bar};
+use super::{ConfigFile, LoadState};
 use crate::daemon::DeleteMode;
 pub use crate::header::QuickSwitchOpen;
 use crate::header::TabTitle;
-use crate::message::Message;
-use crate::theme::{Surround, Tokens};
+use crate::theme::Surround;
 
 /// The vault file.
-pub const EDITOR_PATH: &str = "_custom/crucible-vault/editor.toml";
+pub const EDITOR_PATH: &str = cv_schema::config_path!("editor.toml");
 
 /// Default base text size (px) — `theme::BASE_TEXT_SIZE`.
 pub const DEFAULT_FONT_SIZE: f32 = crate::theme::BASE_TEXT_SIZE;
-/// `font_size` range (schema).
-pub const FONT_SIZE_RANGE: (f32, f32) = (8.0, 64.0);
+/// The inclusive bounds of the numeric `editor.toml` field at dotted `path`, read from the
+/// schema (`editor_schema()`; the one source of the ranges — WP-R20). Unbounded → the f64
+/// range.
+pub fn schema_bounds(path: &str) -> (f64, f64) {
+    let mut node = cv_schema::editor_schema();
+    for k in path.split('.') {
+        let Node::Record(r) = node else { break };
+        match r.field(k) {
+            Some(f) => node = &f.node,
+            None => break,
+        }
+    }
+    node.bounds().unwrap_or((f64::MIN, f64::MAX))
+}
+
 /// `ui_scale` range (schema; iced `scale_factor`).
-pub const UI_SCALE_RANGE: (f32, f32) = (0.5, 3.0);
+pub fn ui_scale_range() -> (f32, f32) {
+    let (lo, hi) = schema_bounds("ui_scale");
+    #[allow(clippy::cast_possible_truncation)]
+    (lo as f32, hi as f32)
+}
 /// Default search result cap (was `panels::SEARCH_LIMIT`).
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 /// Default search debounce (was `panels::SEARCH_DEBOUNCE`).
@@ -135,9 +150,10 @@ fn p(s: &str) -> Path {
     Path::parse(s).unwrap_or_default()
 }
 
-fn in_range(v: f64, (lo, hi): (f32, f32)) -> Option<f32> {
+fn in_range(v: f64, key: &str) -> Option<f32> {
+    let (lo, hi) = schema_bounds(key);
     #[allow(clippy::cast_possible_truncation)]
-    let f = v as f32;
+    let (f, lo, hi) = (v as f32, lo as f32, hi as f32);
     (f.is_finite() && f >= lo && f <= hi).then_some(f)
 }
 
@@ -160,15 +176,20 @@ pub fn surround_key(s: Surround) -> &'static str {
 /// the file has no `surround`.
 pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
     let d = Prefs::default();
-    let int_in = |k: &str, lo: i64, hi: i64| doc.get_int(&p(k)).filter(|v| (lo..=hi).contains(v));
+    #[allow(clippy::cast_precision_loss)]
+    let int_in = |k: &str| {
+        let (lo, hi) = schema_bounds(k);
+        doc.get_int(&p(k))
+            .filter(|v| (lo..=hi).contains(&(*v as f64)))
+    };
     Prefs {
         font_size: doc
             .get_float(&p("font_size"))
-            .and_then(|v| in_range(v, FONT_SIZE_RANGE))
+            .and_then(|v| in_range(v, "font_size"))
             .unwrap_or(d.font_size),
         ui_scale: doc
             .get_float(&p("ui_scale"))
-            .and_then(|v| in_range(v, UI_SCALE_RANGE))
+            .and_then(|v| in_range(v, "ui_scale"))
             .unwrap_or(d.ui_scale),
         surround: doc
             .get_str(&p("surround"))
@@ -182,10 +203,10 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             .get_str(&p("quick_switch_open"))
             .and_then(QuickSwitchOpen::of)
             .unwrap_or(d.quick_switch_open),
-        search_limit: int_in("search.limit", 1, 1000)
+        search_limit: int_in("search.limit")
             .and_then(|v| usize::try_from(v).ok())
             .unwrap_or(d.search_limit),
-        search_debounce_ms: int_in("search.debounce_ms", 0, 5000)
+        search_debounce_ms: int_in("search.debounce_ms")
             .and_then(|v| u64::try_from(v).ok())
             .unwrap_or(d.search_debounce_ms),
         delete_mode: match doc.get_str(&p("delete_mode")) {
@@ -201,7 +222,7 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
         focus_follows_mouse: doc
             .get_bool(&p("focus_follows_mouse"))
             .unwrap_or(d.focus_follows_mouse),
-        scroll_anchor: int_in("scroll_anchor", 0, 100)
+        scroll_anchor: int_in("scroll_anchor")
             .and_then(|v| u8::try_from(v).ok())
             .unwrap_or(d.scroll_anchor),
         palette_hidden: doc.get_str_list(&p("palette.hidden")).unwrap_or_default(),
@@ -253,322 +274,4 @@ pub fn seed_surround(f: &mut ConfigFile, s: Surround) -> bool {
         return false;
     }
     doc.set(&p("surround"), surround_key(s)).is_ok()
-}
-
-/// An Editor-page control edit.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PrefEdit {
-    FontSize(f32),
-    UiScale(f32),
-    Surround(Surround),
-    TabTitle(TabTitle),
-    QuickSwitchOpen(QuickSwitchOpen),
-    SearchLimit(i64),
-    SearchDebounceMs(i64),
-    DeleteMode(DeleteMode),
-    MissingLink(MissingLink),
-    FocusFollowsMouse(bool),
-    /// The comma-separated hidden-id list as typed.
-    PaletteHidden(String),
-}
-
-/// Applies `e` to the document.
-pub fn apply(doc: &mut ConfigDoc, e: &PrefEdit) -> Result<(), DocError> {
-    let round = |v: f32| f64::from((v * 100.0).round() / 100.0);
-    match e {
-        PrefEdit::FontSize(v) => doc.set(&p("font_size"), round(*v)),
-        PrefEdit::UiScale(v) => doc.set(&p("ui_scale"), round(*v)),
-        PrefEdit::Surround(s) => doc.set(&p("surround"), surround_key(*s)),
-        PrefEdit::TabTitle(m) => doc.set(&p("tab_title"), m.key()),
-        PrefEdit::QuickSwitchOpen(m) => doc.set(&p("quick_switch_open"), m.key()),
-        PrefEdit::SearchLimit(v) => doc.set(&p("search.limit"), *v),
-        PrefEdit::SearchDebounceMs(v) => doc.set(&p("search.debounce_ms"), *v),
-        PrefEdit::DeleteMode(m) => doc.set(
-            &p("delete_mode"),
-            match m {
-                DeleteMode::Trash => "trash",
-                DeleteMode::Permanent => "permanent",
-            },
-        ),
-        PrefEdit::MissingLink(m) => doc.set(&p("missing_link"), m.key()),
-        PrefEdit::FocusFollowsMouse(b) => doc.set(&p("focus_follows_mouse"), *b),
-        PrefEdit::PaletteHidden(s) => {
-            let mut a = cv_schema::toml_edit::Array::new();
-            for id in s.split(',').map(str::trim).filter(|x| !x.is_empty()) {
-                a.push(id);
-            }
-            doc.set(&p("palette.hidden"), a)
-        }
-    }
-}
-
-fn stepper<'a>(
-    label: &'a str,
-    value: String,
-    dec: Option<PrefEdit>,
-    inc: Option<PrefEdit>,
-    t: Tokens,
-) -> Element<'a, Message> {
-    use crate::icons::Icon;
-    use crate::theme::icon_button;
-    let m = |e: Option<PrefEdit>| e.map(|e| Message::Settings(SettingsMsg::Pref(e)));
-    row![
-        text(label).size(14).width(Length::Fixed(200.0)),
-        icon_button(Icon::ChevronDown, m(dec), t),
-        container(text(value).size(14))
-            .width(Length::Fixed(80.0))
-            .center_x(Length::Fixed(80.0)),
-        icon_button(Icon::ChevronUp, m(inc), t),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center)
-    .into()
-}
-
-fn step_f(v: f32, d: f32, (lo, hi): (f32, f32)) -> Option<f32> {
-    let n = ((v + d) * 100.0).round() / 100.0;
-    (n >= lo - 1e-4 && n <= hi + 1e-4 && (n - v).abs() > 1e-6).then_some(n.clamp(lo, hi))
-}
-
-fn step_i(v: i64, d: i64, lo: i64, hi: i64) -> Option<i64> {
-    let n = (v + d).clamp(lo, hi);
-    (n != v).then_some(n)
-}
-
-/// The Editor page: typed controls over `editor.toml` (WP-3 builds the generic renderer).
-pub fn view<'a>(
-    f: &'a ConfigFile,
-    prefs: &'a Prefs,
-    note: Option<&'a str>,
-    hidden_draft: Option<&'a str>,
-    t: Tokens,
-) -> Element<'a, Message> {
-    let editable = f.doc.is_some();
-    let on = |e: PrefEdit| editable.then_some(e);
-    let fs = prefs.font_size;
-    let us = prefs.ui_scale;
-    let lim = i64::try_from(prefs.search_limit).unwrap_or(50);
-    let deb = i64::try_from(prefs.search_debounce_ms).unwrap_or(250);
-    let surround = {
-        let seg = |s: Surround| {
-            let active = prefs.surround == s;
-            button(crate::theme::control_label(s.label(), 14.0))
-                .height(crate::theme::SEGMENT)
-                .padding([0, 12])
-                .style(crate::theme::segment_style(t, active))
-                .on_press_maybe(
-                    on(PrefEdit::Surround(s)).map(|e| Message::Settings(SettingsMsg::Pref(e))),
-                )
-        };
-        row![
-            text("Surround").size(14).width(Length::Fixed(200.0)),
-            container(row(Surround::ALL.into_iter().map(|s| seg(s).into())).spacing(0))
-                .padding(1)
-                .style(crate::theme::seg_group_style(t)),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-    };
-    let tab_title = {
-        let seg = |m: TabTitle| {
-            button(crate::theme::control_label(m.label(), 14.0))
-                .height(crate::theme::SEGMENT)
-                .padding([0, 12])
-                .style(crate::theme::segment_style(t, prefs.tab_title == m))
-                .on_press_maybe(
-                    on(PrefEdit::TabTitle(m)).map(|e| Message::Settings(SettingsMsg::Pref(e))),
-                )
-        };
-        row![
-            text("Tab title").size(14).width(Length::Fixed(200.0)),
-            container(row(TabTitle::ALL.into_iter().map(|m| seg(m).into())).spacing(0))
-                .padding(1)
-                .style(crate::theme::seg_group_style(t)),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-    };
-    let quick_switch = {
-        let seg = |m: QuickSwitchOpen| {
-            button(crate::theme::control_label(m.label(), 14.0))
-                .height(crate::theme::SEGMENT)
-                .padding([0, 12])
-                .style(crate::theme::segment_style(t, prefs.quick_switch_open == m))
-                .on_press_maybe(
-                    on(PrefEdit::QuickSwitchOpen(m))
-                        .map(|e| Message::Settings(SettingsMsg::Pref(e))),
-                )
-        };
-        row![
-            text("Quick Switch opens")
-                .size(14)
-                .width(Length::Fixed(200.0)),
-            container(row(QuickSwitchOpen::ALL.into_iter().map(|m| seg(m).into())).spacing(0))
-                .padding(1)
-                .style(crate::theme::seg_group_style(t)),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-    };
-    let confirm = {
-        let seg = |m: DeleteMode, label: &'static str| {
-            button(crate::theme::control_label(label, 14.0))
-                .height(crate::theme::SEGMENT)
-                .padding([0, 12])
-                .style(crate::theme::segment_style(t, prefs.delete_mode == m))
-                .on_press_maybe(
-                    on(PrefEdit::DeleteMode(m)).map(|e| Message::Settings(SettingsMsg::Pref(e))),
-                )
-        };
-        row![
-            text("Delete moves to").size(14).width(Length::Fixed(200.0)),
-            container(
-                row![
-                    seg(DeleteMode::Trash, ".trash/"),
-                    seg(DeleteMode::Permanent, "Permanent delete"),
-                ]
-                .spacing(0)
-            )
-            .padding(1)
-            .style(crate::theme::seg_group_style(t)),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-    };
-    let missing = {
-        let seg = |m: MissingLink, label: &'static str| {
-            button(crate::theme::control_label(label, 14.0))
-                .height(crate::theme::SEGMENT)
-                .padding([0, 12])
-                .style(crate::theme::segment_style(t, prefs.missing_link == m))
-                .on_press_maybe(
-                    on(PrefEdit::MissingLink(m)).map(|e| Message::Settings(SettingsMsg::Pref(e))),
-                )
-        };
-        column![
-            row![
-                text("Missing-note links")
-                    .size(14)
-                    .width(Length::Fixed(200.0)),
-                container(
-                    row![
-                        seg(MissingLink::Warn, "Warn"),
-                        seg(MissingLink::Create, "Create note"),
-                    ]
-                    .spacing(0)
-                )
-                .padding(1)
-                .style(crate::theme::seg_group_style(t)),
-            ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center),
-            text("A click on a link to a missing note: warn, or create it (New-note folder, or the link's folder path) and open it")
-                .size(13)
-                .color(t.text_faint.to_color()),
-        ]
-        .spacing(2)
-    };
-    let follow = {
-        let seg = |v: bool, label: &'static str| {
-            button(crate::theme::control_label(label, 14.0))
-                .height(crate::theme::SEGMENT)
-                .padding([0, 12])
-                .style(crate::theme::segment_style(
-                    t,
-                    prefs.focus_follows_mouse == v,
-                ))
-                .on_press_maybe(
-                    on(PrefEdit::FocusFollowsMouse(v))
-                        .map(|e| Message::Settings(SettingsMsg::Pref(e))),
-                )
-        };
-        row![
-            text("Focus follows mouse")
-                .size(14)
-                .width(Length::Fixed(200.0)),
-            container(row![seg(false, "Off"), seg(true, "On")].spacing(0))
-                .padding(1)
-                .style(crate::theme::seg_group_style(t)),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-    };
-    let joined;
-    let hidden_text = match hidden_draft {
-        Some(d) => d,
-        None => {
-            joined = prefs.palette_hidden.join(", ");
-            joined.as_str()
-        }
-    };
-    let mut hidden_in = text_input("command ids, comma-separated", hidden_text)
-        .size(14)
-        .width(Length::Fixed(420.0));
-    if editable {
-        hidden_in = hidden_in
-            .on_input(|s| Message::Settings(SettingsMsg::Pref(PrefEdit::PaletteHidden(s))));
-    }
-    let hidden = row![
-        text("Hidden palette commands")
-            .size(14)
-            .width(Length::Fixed(200.0)),
-        hidden_in,
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
-    let keys_line = if prefs.keys.is_empty() {
-        "no key overrides".to_owned()
-    } else {
-        format!(
-            "{} key override(s) (edited on the Hotkeys page)",
-            prefs.keys.len()
-        )
-    };
-    let note_el: Element<'a, Message> = match note {
-        Some(n) => text(n).size(13).color(t.text_faint.to_color()).into(),
-        None => Space::new().into(),
-    };
-    column![
-        file_header(f, t),
-        note_el,
-        stepper(
-            "Font size",
-            format!("{fs:.0}"),
-            step_f(fs, -1.0, FONT_SIZE_RANGE).and_then(|v| on(PrefEdit::FontSize(v))),
-            step_f(fs, 1.0, FONT_SIZE_RANGE).and_then(|v| on(PrefEdit::FontSize(v))),
-            t,
-        ),
-        stepper(
-            "UI scale",
-            format!("{us:.2}"),
-            step_f(us, -0.25, UI_SCALE_RANGE).and_then(|v| on(PrefEdit::UiScale(v))),
-            step_f(us, 0.25, UI_SCALE_RANGE).and_then(|v| on(PrefEdit::UiScale(v))),
-            t,
-        ),
-        surround,
-        tab_title,
-        quick_switch,
-        stepper(
-            "Search result limit",
-            lim.to_string(),
-            step_i(lim, -10, 1, 1000).and_then(|v| on(PrefEdit::SearchLimit(v))),
-            step_i(lim, 10, 1, 1000).and_then(|v| on(PrefEdit::SearchLimit(v))),
-            t,
-        ),
-        stepper(
-            "Search debounce (ms)",
-            deb.to_string(),
-            step_i(deb, -50, 0, 5000).and_then(|v| on(PrefEdit::SearchDebounceMs(v))),
-            step_i(deb, 50, 0, 5000).and_then(|v| on(PrefEdit::SearchDebounceMs(v))),
-            t,
-        ),
-        confirm,
-        missing,
-        follow,
-        hidden,
-        text(keys_line).size(13).color(t.text_faint.to_color()),
-        save_bar(f, t),
-    ]
-    .spacing(10)
-    .into()
 }

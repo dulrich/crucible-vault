@@ -612,3 +612,15 @@ fn step_parsers_accept_exactly_the_schema_keys() {
         );
     }
 }
+
+/// Plan tn-review-baseline-remediation WP-R20 (SM11): the daemon's `CONFIG_FILES` is the head of
+/// the schema file registry, in order (cv-actions has no cv-schema edge, so the two lists are
+/// held together here).
+#[test]
+fn daemon_config_files_are_the_schema_registry_head() {
+    assert_eq!(
+        cv_actions::CONFIG_FILES[..],
+        cv_schema::FILES[..cv_actions::CONFIG_FILES.len()]
+    );
+    assert_eq!(cv_actions::CONFIG_FILES.len(), 8);
+}

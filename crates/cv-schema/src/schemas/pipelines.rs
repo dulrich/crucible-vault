@@ -28,6 +28,7 @@ pub static PIPE_YOUTUBE: Record = Record {
         .dflt(D::Bool(false)),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[x]`.
@@ -50,6 +51,7 @@ pub static PIPE_X: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[blogs]`.
@@ -66,6 +68,7 @@ pub static PIPE_BLOGS: Record = Record {
         .dflt(D::Int(5)),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[image_describe]`.
@@ -78,28 +81,34 @@ pub static PIPE_IMAGE_DESCRIBE: Record = Record {
             "Provider",
             "providers.toml provider id",
             Node::Str,
-        ),
-        field("model", "Model", "Model id", Node::Str),
+        )
+        .hint(RefKind::Provider),
+        field("model", "Model", "Model id", Node::Str).hint(RefKind::Model),
         field("max_tokens", "Max tokens", "Response token cap", U32),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[[daily_brief.fx]]`.
 pub static PIPE_FX: Record = Record {
     name: "fx",
     fields: &[
-        field("base", "Base", "Base currency (ISO 4217 code)", Node::Str).req(),
+        field("base", "Base", "Base currency (ISO 4217 code)", Node::Str)
+            .req()
+            .hint(RefKind::Currency),
         field(
             "quote",
             "Quote",
             "Quote currency (ISO 4217 code)",
             Node::Str,
         )
-        .req(),
+        .req()
+        .hint(RefKind::Currency),
         field("label", "Label", "Default BASE/QUOTE", Node::Str),
     ],
     rules: &[],
+    summary: Some(Summary::Arrow("base", "quote")),
 };
 
 /// `[[daily_brief.weather]]`.
@@ -112,7 +121,8 @@ pub static PIPE_WEATHER: Record = Record {
             "Place name; a search pick also fills lat/lon",
             Node::Str,
         )
-        .req(),
+        .req()
+        .hint(RefKind::Place),
         field(
             "lat",
             "Latitude",
@@ -135,6 +145,7 @@ pub static PIPE_WEATHER: Record = Record {
         .req(),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[daily_brief]`.
@@ -163,6 +174,7 @@ pub static PIPE_DAILY_BRIEF: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[scorer]`.
@@ -183,13 +195,14 @@ pub static PIPE_SCORER: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[ignore_shorts]`.
 pub static PIPE_IGNORE_SHORTS: Record = Record {
     name: "ignore_shorts",
     fields: &[
-        field("channels", "Channels", "Channel ids or names", STR_LIST),
+        field("channels", "Channels", "Channel ids or names", STR_LIST).hint(RefKind::Channel),
         field(
             "max_seconds",
             "Max seconds",
@@ -199,6 +212,7 @@ pub static PIPE_IGNORE_SHORTS: Record = Record {
         .dflt(D::Int(120)),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[queue]`.
@@ -212,6 +226,7 @@ pub static PIPE_QUEUE: Record = Record {
     )
     .dflt(D::Int(30))],
     rules: &[],
+    summary: None,
 };
 
 /// `[intake]` (plan round-5-reading-pickers-intake WP-11).
@@ -225,6 +240,7 @@ pub static PIPE_INTAKE: Record = Record {
     )
     .dflt(D::Str("lines"))],
     rules: &[],
+    summary: None,
 };
 
 /// `pipelines.toml`.
@@ -277,6 +293,7 @@ pub static PIPELINES_FILE: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -301,6 +318,7 @@ pub static SOURCE_YOUTUBE: Record = Record {
         .dflt(D::Str("normal")),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// One `[[blog]]` feed.
@@ -340,6 +358,7 @@ pub static SOURCE_BLOG: Record = Record {
         .dflt(D::Str("auto")),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `sources.toml`.
@@ -360,4 +379,5 @@ pub static SOURCES_FILE: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };

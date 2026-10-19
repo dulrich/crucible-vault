@@ -1,16 +1,12 @@
 //! One page per config file (plan `editor-settings-tab` WP-3 "Pages"), each the WP-2 file
-//! header + a schema-driven form ([`super::form`], [`super::widgets`]) + the Save/Revert bar.
+//! header + a schema-driven form ([`super::form`], [`super::widgets`]) + the save status bar.
+//! Every file section — the Editor page included (plan tn-review-baseline-remediation WP-R20,
+//! Decision 3) — is [`generic`] over its schema, with its intro from [`super::SECTIONS`]; only
+//! Hotkeys and Views are pages of their own.
 //! Lint / localize / search settings are the `lint` / `localize` / `search_*` step forms inside
 //! Actions (no separate pages).
 
-pub mod actions;
-pub mod agents;
-pub mod bookmarks;
-pub mod captures;
 pub mod hotkeys;
-pub mod kinds;
-pub mod providers;
-pub mod schedules;
 pub mod views;
 
 use iced::Element;

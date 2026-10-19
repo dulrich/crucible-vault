@@ -38,6 +38,7 @@ pub static KIND: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `kinds.toml`.
@@ -50,6 +51,7 @@ pub static KINDS_FILE: Record = Record {
         Node::Map(&Node::Record(&KIND)),
     )],
     rules: &[],
+    summary: None,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -83,6 +85,7 @@ pub static PERIOD: Record = Record {
         .dflt(D::Bool(false)),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `[periods]`.
@@ -94,6 +97,7 @@ pub static PERIODS: Record = Record {
         field("month", "Month", "Monthly notes", Node::Record(&PERIOD)),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// One `[[capture]]` entry: the capture step's keys minus `capture` (`cv::steps::capture`).
@@ -147,6 +151,7 @@ pub static CAPTURE_ENTRY: Record = Record {
         field("value", "Value", "The captured value", Node::Str),
     ],
     rules: &[],
+    summary: None,
 };
 
 /// `captures.toml`.
@@ -167,6 +172,7 @@ pub static CAPTURES_FILE: Record = Record {
         ),
     ],
     rules: &[],
+    summary: None,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -203,13 +209,15 @@ pub static AGENT_DEF: Record = Record {
             "Model",
             "Default provider:model (live list per provider)",
             Node::Str,
-        ),
+        )
+        .hint(RefKind::ModelRef),
         field("max_tokens", "Max tokens", "Completion cap (> 0)", POS_U32).req(),
     ],
     rules: &[
         Rule::AtMostOneOf(&["system", "system_file"]),
         Rule::AtMostOneOf(&["prompt", "prompt_file"]),
     ],
+    summary: None,
 };
 
 /// `agents.toml`: agent id → definition at the root.
