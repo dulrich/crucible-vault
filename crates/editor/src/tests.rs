@@ -524,6 +524,119 @@ mod wp4 {
         assert!(app.status.error_text().is_some());
     }
 
+    /// Plan round-7-feedback-decisions WP-2: a dirty note's delete opens the unsaved-edits
+    /// dialog; Cancel keeps everything.
+    fn dirty_delete_app(d: &Arc<FakeDaemon>, path: &str) -> App {
+        use iced::widget::text_editor::{Action, Edit};
+        d.create_note(path, "body").expect("create");
+        let mut app = app_over(d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(path.into())));
+        let _ = app.update(Message::Source(crate::message::SourceMsg::Action(
+            Action::Edit(Edit::Insert('x')),
+        )));
+        let _ = app.update(Message::Explorer(ExplorerMsg::DeleteActive));
+        assert!(matches!(
+            app.dialog.as_ref().map(|d| &d.content),
+            Some(crate::dialog::Content::DeleteUnsaved(p)) if p == path
+        ));
+        app
+    }
+
+    fn confirm_shown(app: &App) -> bool {
+        app.dialog
+            .as_ref()
+            .and_then(|d| d.delete_confirm())
+            .is_some()
+    }
+
+    #[test]
+    fn dirty_delete_save_then_delete_writes_then_deletes() {
+        use crate::dialog::DialogMsg;
+        let (_tmp, d) = fake_arc();
+        let mut app = dirty_delete_app(&d, "r7del/s.md");
+        let _ = app.update(Message::Dialog(DialogMsg::Ok));
+        assert_eq!(
+            d.read_file("r7del/s.md").expect("file").0,
+            b"xbody",
+            "saved first"
+        );
+        assert!(confirm_shown(&app), "the delete confirm follows");
+        let _ = app.update(Message::Dialog(DialogMsg::Ok));
+        assert!(matches!(
+            d.read_file("r7del/s.md"),
+            Err(DaemonError::NotFound(_))
+        ));
+        assert!(app.open_paths().is_empty());
+    }
+
+    #[test]
+    fn dirty_delete_discard_then_delete() {
+        use crate::dialog::DialogMsg;
+        let (_tmp, d) = fake_arc();
+        let mut app = dirty_delete_app(&d, "r7del/d.md");
+        let _ = app.update(Message::Dialog(DialogMsg::Alt));
+        assert!(
+            app.doc("r7del/d.md").is_some_and(|t| !t.is_dirty()),
+            "edits dropped"
+        );
+        assert!(confirm_shown(&app));
+        let _ = app.update(Message::Dialog(DialogMsg::Ok));
+        assert!(matches!(
+            d.read_file("r7del/d.md"),
+            Err(DaemonError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn dirty_delete_cancel_keeps_note_and_edits() {
+        use crate::dialog::DialogMsg;
+        let (_tmp, d) = fake_arc();
+        let mut app = dirty_delete_app(&d, "r7del/c.md");
+        let _ = app.update(Message::Dialog(DialogMsg::Cancel));
+        assert!(app.dialog.is_none());
+        assert_eq!(d.read_file("r7del/c.md").expect("file").0, b"body");
+        assert!(
+            app.doc("r7del/c.md")
+                .is_some_and(|t| t.is_dirty() && t.text() == "xbody")
+        );
+    }
+
+    /// WP-2 (round 7): an explorer rename of a clean open note keeps cursor, selection, undo
+    /// depth and top_line, with no conflict.
+    #[test]
+    fn explorer_rename_of_a_clean_note_keeps_editor_state() {
+        let (_tmp, d) = fake_arc();
+        let body: String = (0..80).map(|i| format!("line {i}\n")).collect();
+        d.create_note("r7ren/one.md", &body).expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open("r7ren/one.md".into())));
+        let doc = app.doc_mut("r7ren/one.md").expect("open");
+        doc.select_range((2, 0), (2, 4));
+        assert!(doc.paste("LINE".into(), false, std::time::Instant::now()));
+        let job = doc.begin_save(false).expect("save");
+        let outcome = job.run(&*d);
+        let _ = app.update(job.done(outcome));
+        let doc = app.doc_mut("r7ren/one.md").expect("open");
+        doc.scroll_to_line(30);
+        doc.select_range((5, 1), (5, 3));
+        let before = (doc.cursor(), doc.history().undo_len(), doc.top_line());
+        assert!(!doc.is_dirty() && before.1 > 0);
+        let _ = app.update(Message::Explorer(ExplorerMsg::Select(
+            "r7ren/one.md".into(),
+        )));
+        let _ = app.update(Message::Explorer(ExplorerMsg::BeginRename));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Input("two.md".into())));
+        let _ = app.update(Message::Explorer(ExplorerMsg::Submit));
+        assert_eq!(app.open_paths(), ["r7ren/two.md"]);
+        let doc = app.doc("r7ren/two.md").expect("followed");
+        assert_eq!(
+            (doc.cursor(), doc.history().undo_len(), doc.top_line()),
+            before
+        );
+        assert_eq!(doc.path(), "r7ren/two.md");
+        assert!(!doc.is_dirty() && doc.conflict().is_none());
+    }
+
     #[test]
     fn shadow_mode_blocks_file_ops_but_not_navigation() {
         let (_tmp, d) = fake_arc();
@@ -3434,6 +3547,26 @@ mod title_sync_wp5 {
         assert!(doc.paste("y".into(), false, Instant::now()));
         save(&mut app, &d, "ts/New One.md");
         assert_eq!(app.open_paths(), ["ts/New One.md"]);
+    }
+
+    /// Plan round-7-feedback-decisions WP-2: the title-sync rename of a (now clean) note keeps
+    /// cursor, selection, undo depth and top_line, with no conflict.
+    #[test]
+    fn title_sync_rename_keeps_editor_state() {
+        let (_tmp, d) = fake_arc();
+        let mut app = open_and_retitle(&d, "r7ts/Old.md", "Fresh");
+        let doc = app.doc_mut("r7ts/Old.md").expect("open");
+        doc.select_range((3, 0), (3, 1));
+        let before = (doc.cursor(), doc.history().undo_len(), doc.top_line());
+        assert!(before.1 > 0);
+        save(&mut app, &d, "r7ts/Old.md");
+        assert_eq!(app.open_paths(), ["r7ts/Fresh.md"]);
+        let doc = app.doc("r7ts/Fresh.md").expect("followed");
+        assert_eq!(
+            (doc.cursor(), doc.history().undo_len(), doc.top_line()),
+            before
+        );
+        assert!(!doc.is_dirty() && doc.conflict().is_none());
     }
 
     #[test]

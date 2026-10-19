@@ -1089,6 +1089,13 @@ impl SourceBuffer {
         self.conflict = Some(disk);
     }
 
+    /// Plan round-7-feedback-decisions WP-2: a clean buffer whose file was renamed to `to` with
+    /// unchanged bytes is re-keyed in place, so cursor, selection, undo history and `top_line`
+    /// survive. Unlike [`Self::follow_move`] it neither dirties nor raises a conflict.
+    pub fn rename_clean(&mut self, to: &str) {
+        to.clone_into(&mut self.path);
+    }
+
     /// Keep mine: re-save against the on-disk hash.
     pub fn keep_mine(&mut self, read_only: bool) -> Option<SaveJob> {
         let current = self.conflict.take()?;

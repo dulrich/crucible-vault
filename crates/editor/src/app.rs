@@ -1585,9 +1585,15 @@ impl App {
         let Some(d) = self.dialog.take() else {
             return Task::none();
         };
+        if m == DialogMsg::Alt {
+            return match d.content {
+                crate::dialog::Content::DeleteUnsaved(path) => self.discard_then_delete(path),
+                _ => Task::none(),
+            };
+        }
         let ok = match m {
             DialogMsg::Ok => true,
-            DialogMsg::Cancel | DialogMsg::Toggle(_) => false,
+            DialogMsg::Cancel | DialogMsg::Toggle(_) | DialogMsg::Alt => false,
             DialogMsg::Default => d.enter_is_ok,
         };
         if !ok {
@@ -1607,6 +1613,86 @@ impl App {
                 Some(c) => self.run_delete_note(c.path.clone(), c.ticked(), c.mode),
                 None => Task::none(),
             },
+            OnOk::SaveThenDelete(path) => self.save_then_delete(path),
+        }
+    }
+
+    /// Unsaved-edits delete dialog, "Save then delete": save through the normal path; the
+    /// result ([`ExplorerMsg::DeleteSaved`]) continues into the delete preview on success.
+    fn save_then_delete(&mut self, path: String) -> Task<Message> {
+        if self.shadow_blocked(explorer::SHADOW_REASON) {
+            return Task::none();
+        }
+        let Some(doc) = self.docs.get_mut(&path) else {
+            return self.begin_delete(path);
+        };
+        if !doc.is_dirty() {
+            return self.begin_delete(path);
+        }
+        let Some(job) = doc.begin_save(false) else {
+            self.status
+                .set_error("delete not done (the note is saving or has a conflict)".into());
+            return Task::none();
+        };
+        let seq = job.seq;
+        self.rpc(
+            move |d| Ok(job.run(d)),
+            move |r| {
+                Message::Explorer(ExplorerMsg::DeleteSaved {
+                    path,
+                    seq,
+                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                })
+            },
+        )
+    }
+
+    /// The save-before-delete finished: delete preview on success, else notify and stop.
+    fn delete_saved(
+        &mut self,
+        path: String,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+    ) -> Task<Message> {
+        use crate::source::SaveOutcome;
+        let Some(doc) = self.docs.get_mut(&path) else {
+            return Task::none();
+        };
+        let ok = matches!(outcome, SaveOutcome::Saved(_));
+        if let Err(e) = doc.finish_save(seq, outcome) {
+            self.status
+                .set_error(format!("delete not done (save failed: {e})"));
+            return Task::none();
+        }
+        if !ok || doc.is_dirty() {
+            self.status.set_error(if ok {
+                "delete not done (the note changed while saving)".into()
+            } else {
+                "delete not done (save conflict: the file changed on disk)".into()
+            });
+            return Task::none();
+        }
+        self.begin_delete(path)
+    }
+
+    /// Unsaved-edits delete dialog, "Discard and delete": the buffer reloads from disk (edits
+    /// dropped), then the delete preview + confirm as usual.
+    fn discard_then_delete(&mut self, path: String) -> Task<Message> {
+        let Some(d) = self.daemon.clone() else {
+            self.status.set_error("daemon disconnected".into());
+            return Task::none();
+        };
+        match d.read_file(&path) {
+            Ok((bytes, hash)) => {
+                if let Some(doc) = self.docs.get_mut(&path) {
+                    doc.reload(&bytes, hash);
+                }
+                self.begin_delete(path)
+            }
+            Err(e) => {
+                self.status.set_error(open_error(&e));
+                Task::none()
+            }
         }
     }
 
@@ -1618,8 +1704,7 @@ impl App {
             return Task::none();
         }
         if self.doc_dirty(&path) {
-            self.status
-                .set_error("save the open note first (it has unsaved edits)".into());
+            self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path));
             return Task::none();
         }
         let p = path.clone();
@@ -1640,8 +1725,8 @@ impl App {
             return Task::none();
         }
         if self.doc_dirty(&path) {
-            self.status
-                .set_error("save the open note first (it has unsaved edits)".into());
+            // Edited between the confirm opening and OK: back through the unsaved-edits dialog.
+            self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path));
             return Task::none();
         }
         self.rpc(
@@ -2939,13 +3024,15 @@ impl App {
 
     fn dispatch_op(&mut self, op: FileOp) -> Task<Message> {
         // A rename/move/trash re-reads (or closes) the open tab, which would drop unsaved edits.
-        let target = match &op {
-            FileOp::Rename { from, .. } => Some(from.as_str()),
-            FileOp::Delete { path } => Some(path.as_str()),
-            _ => None,
-        };
-        if let Some(t) = target
-            && self.doc_dirty(t)
+        if let FileOp::Delete { path } = &op
+            && self.doc_dirty(path)
+        {
+            // WP-2 (round 7): Save / Discard / Cancel, then the delete preview + confirm.
+            self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path.clone()));
+            return Task::none();
+        }
+        if let FileOp::Rename { from, .. } = &op
+            && self.doc_dirty(from)
         {
             self.status
                 .set_error("save the open note first (it has unsaved edits)".into());
@@ -3017,6 +3104,9 @@ impl App {
                 }
                 Err(e) => self.status.set_error(e),
             },
+            ExplorerMsg::DeleteSaved { path, seq, outcome } => {
+                return self.delete_saved(path, seq, outcome);
+            }
             ExplorerMsg::NoteDeleted(result) => match result {
                 Ok(r) => {
                     let indexed = self.indexed_fn();
@@ -3228,8 +3318,15 @@ impl App {
         let Some(d) = &self.daemon else { return };
         match d.read_file(to) {
             Ok((bytes, hash)) => {
-                let doc = crate::source::SourceBuffer::new(to, &bytes, hash);
-                self.docs.remove(from);
+                // WP-2 (round 7): an unedited buffer whose bytes the move kept is re-keyed in
+                // place (cursor, selection, undo, top_line survive); otherwise rebuild from disk.
+                let doc = match self.docs.remove(from) {
+                    Some(mut doc) if !doc.is_dirty() && *doc.base_hash() == hash => {
+                        doc.rename_clean(to);
+                        doc
+                    }
+                    _ => crate::source::SourceBuffer::new(to, &bytes, hash),
+                };
                 self.move_path_state(from, to, doc);
             }
             Err(e) => self.status.set_error(open_error(&e)),

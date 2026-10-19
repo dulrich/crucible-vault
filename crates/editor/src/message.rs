@@ -251,6 +251,12 @@ pub enum ExplorerMsg {
         path: String,
         result: Result<Vec<crate::daemon::DeletePreviewItem>, String>,
     },
+    /// plan round-7-feedback-decisions WP-2: the save before a delete finished.
+    DeleteSaved {
+        path: String,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+    },
     /// `delete_note` finished.
     NoteDeleted(Result<crate::daemon::DeleteNoteResult, String>),
 }
