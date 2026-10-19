@@ -232,6 +232,7 @@ mod tests {
     fn job_failure_lands_in_the_ring_with_its_reason() {
         let mut app = App::new(None, None);
         app.palette
+            .jobs
             .job_titles
             .insert("j1".into(), "File as kind".into());
         let _ = app.send(Message::Status(StatusMsg::Notification(

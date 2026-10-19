@@ -377,6 +377,7 @@ fn palette_prompts_saves_first_and_runs_with_context() {
     let job = e
         .app
         .palette
+        .jobs
         .job_titles
         .keys()
         .next()
@@ -391,14 +392,15 @@ fn palette_prompts_saves_first_and_runs_with_context() {
             open_path: None,
         }),
     )));
-    let toast = e.app.palette.toast.clone().expect("toast");
+    let toast = e.app.palette.jobs.toast.clone().expect("toast");
     assert_eq!(toast.line(), "Title test.prompted: done");
-    e.app.palette.expire_toast(Instant::now());
-    assert!(e.app.palette.toast.is_some());
+    e.app.palette.jobs.expire_toast(Instant::now());
+    assert!(e.app.palette.jobs.toast.is_some());
     e.app
         .palette
+        .jobs
         .expire_toast(Instant::now() + Duration::from_secs(6));
-    assert!(e.app.palette.toast.is_none());
+    assert!(e.app.palette.jobs.toast.is_none());
 }
 
 #[test]
@@ -833,6 +835,7 @@ fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
     pal(app, PaletteMsg::Submit);
     let id = app
         .palette
+        .jobs
         .job_titles
         .keys()
         .next()
@@ -1053,7 +1056,7 @@ fn enter_submits_enum_step() {
     );
     pal(&mut app, PaletteMsg::Enter);
     assert!(app.palette.prompt.is_none(), "enum step submitted");
-    assert_eq!(app.palette.job_titles.len(), 1, "action ran once");
+    assert_eq!(app.palette.jobs.job_titles.len(), 1, "action ran once");
 }
 
 /// Enter on a text step is a no-op (its input's `on_submit` owns Enter): no double submit.
@@ -1079,6 +1082,7 @@ fn enter_on_text_step_does_not_submit() {
 fn failed_job_message_reaches_toast_and_notice() {
     let mut app = App::new(None, None);
     app.palette
+        .jobs
         .job_titles
         .insert("j1".into(), "File as kind".into());
     let _ = app.send(Message::Status(StatusMsg::Notification(
@@ -1090,7 +1094,7 @@ fn failed_job_message_reaches_toast_and_notice() {
             open_path: None,
         }),
     )));
-    let toast = app.palette.toast.clone().expect("toast");
+    let toast = app.palette.jobs.toast.clone().expect("toast");
     assert_eq!(
         toast.line(),
         "File as kind: failed — already exists: stack/clip.md"
@@ -1132,4 +1136,78 @@ fn notice_expiry_and_severity_ordering() {
     assert_eq!(n.severity, Severity::Warning);
     assert_eq!(n.inline().chars().count(), NOTICE_INLINE_CHARS);
     assert!(n.inline().ends_with('…'));
+}
+
+// ---- WP-R19: persisted ids are a wire contract ----
+
+/// Every persisted command id (`editor.toml` `[keys]`, `palette.hidden`, `ui_state`, bookmark
+/// ids), pinned as literals captured before the WP-R19 command-table refactor.
+#[test]
+fn persisted_command_ids_are_pinned() {
+    const CLIENT: &[&str] = &[
+        "cycle_reading",
+        "surround",
+        "split_right",
+        "split_down",
+        "close_pane",
+        "quick_switcher",
+        "save",
+        "undo",
+        "redo",
+        "toggle_panels",
+        "toggle_pane_borders",
+        "quit",
+        "close_tab",
+        "go_to_tab.1",
+        "go_to_tab.2",
+        "go_to_tab.3",
+        "go_to_tab.4",
+        "go_to_tab.5",
+        "go_to_tab.6",
+        "go_to_tab.7",
+        "go_to_tab.8",
+        "open_period.day",
+        "open_period.week",
+        "open_period.month",
+        "set_surround.dark",
+        "set_surround.med",
+        "set_surround.light",
+        "find_in_note",
+        "focus_search",
+        "open_settings",
+        "open_log",
+        "delete_note",
+        "move_note",
+        "go_to_top",
+        "go_to_bottom",
+        "panel.outline",
+        "panel.links",
+        "panel.backlinks",
+        "panel.tags",
+        "panel.properties",
+        "panel.search",
+    ];
+    let client: Vec<String> = ClientCmd::all().into_iter().map(ClientCmd::id).collect();
+    assert_eq!(client, CLIENT);
+    assert_eq!(ClientCmd::CommandPaletteKey.id(), "command_palette");
+    let mut all: Vec<&str> = CLIENT.to_vec();
+    all.extend(["command_palette", "preset.lint-note"]);
+    let bind: Vec<String> = bindables().into_iter().map(|b| b.id).collect();
+    assert_eq!(bind, all);
+    assert_eq!(all.len(), 43);
+    let preset = |action, period| Preset { action, period }.id();
+    assert_eq!(preset(PERIOD_OPEN, Some(PeriodSel::Day)), "open_period.day");
+    assert_eq!(
+        preset(PERIOD_OPEN, Some(PeriodSel::Week)),
+        "open_period.week"
+    );
+    assert_eq!(
+        preset(PERIOD_OPEN, Some(PeriodSel::Month)),
+        "open_period.month"
+    );
+    assert_eq!(preset("lint-note", None), "preset.lint-note");
+    let defaults: Vec<String> = DEFAULT_ACTIONS.iter().map(|(_, p)| p.id()).collect();
+    assert_eq!(defaults, ["open_period.day", "preset.lint-note"]);
+    assert_eq!(PERIOD_OPEN, "period.open");
+    assert_eq!(bookmark_id("a/b.md"), "bookmark:a/b.md");
 }

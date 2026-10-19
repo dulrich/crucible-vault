@@ -3770,19 +3770,19 @@ impl App {
                 result,
             } => match result {
                 Ok(r) => {
-                    self.palette.job_titles.insert(r.job_id.clone(), title);
-                    let early = self.palette.early_open.remove(&r.job_id);
+                    self.palette.jobs.job_titles.insert(r.job_id.clone(), title);
+                    let early = self.palette.jobs.early_open.remove(&r.job_id);
                     if let Some(p) = r.open_path.or(early) {
                         self.follow_open(origin, &p);
                     } else if let Some(o) = origin {
-                        self.palette.job_origins.insert(r.job_id, o);
+                        self.palette.jobs.job_origins.insert(r.job_id, o);
                     }
                 }
                 Err(e) => self.status.set_error(format!("{title}: {e}")),
             },
             PaletteMsg::Tick => {
                 let now = std::time::Instant::now();
-                self.palette.expire_toast(now);
+                self.palette.jobs.expire_toast(now);
                 self.status.expire_notice(now);
             }
             PaletteMsg::RunPreset(p) => return self.run_preset(p),
@@ -4007,10 +4007,11 @@ impl App {
             return;
         }
         if j.status != cv_protocol::JobState::Done {
-            self.palette.job_origins.remove(&j.job_id);
+            self.palette.jobs.job_origins.remove(&j.job_id);
             if j.status != cv_protocol::JobState::Deferred {
                 let title = self
                     .palette
+                    .jobs
                     .job_titles
                     .get(&j.job_id)
                     .cloned()
@@ -4026,20 +4027,20 @@ impl App {
             return;
         }
         let Some(open) = j.open_path.clone() else {
-            self.palette.job_origins.remove(&j.job_id);
+            self.palette.jobs.job_origins.remove(&j.job_id);
             return;
         };
-        if self.palette.job_titles.contains_key(&j.job_id) {
-            if let Some(origin) = self.palette.job_origins.remove(&j.job_id) {
+        if self.palette.jobs.job_titles.contains_key(&j.job_id) {
+            if let Some(origin) = self.palette.jobs.job_origins.remove(&j.job_id) {
                 self.follow_open(Some(origin), &open);
             }
             // A non-durable run already followed its reply's `open_path`; a durable run started
             // without a tab has no origin and does not open anything unasked.
         } else {
-            if self.palette.early_open.len() >= 64 {
-                self.palette.early_open.clear();
+            if self.palette.jobs.early_open.len() >= 64 {
+                self.palette.jobs.early_open.clear();
             }
-            self.palette.early_open.insert(j.job_id.clone(), open);
+            self.palette.jobs.early_open.insert(j.job_id.clone(), open);
         }
     }
 
@@ -4314,7 +4315,7 @@ impl App {
                             .and_then(|v| v.as_str().map(str::to_owned))
                             .unwrap_or_default();
                         self.status.last_job = Some(format!("{}: {state}", j.job_id));
-                        self.palette.job_updated(&j, std::time::Instant::now());
+                        self.palette.jobs.job_updated(&j, std::time::Instant::now());
                         self.job_finished(&j);
                     }
                     Notification::FileChanged {
@@ -4823,7 +4824,7 @@ impl App {
             self.reading.subscription(),
             crate::palette::subscription(&self.palette, self.panels.visible),
             // plan round-5 WP-3: a 1 s expiry tick while a notice is up (shares PaletteMsg::Tick).
-            if self.status.notice.is_some() && self.palette.toast.is_none() {
+            if self.status.notice.is_some() && self.palette.jobs.toast.is_none() {
                 iced::time::every(std::time::Duration::from_secs(1))
                     .map(|_| Message::Palette(crate::message::PaletteMsg::Tick))
             } else {
@@ -5321,6 +5322,7 @@ impl App {
 
         let toast = self
             .palette
+            .jobs
             .toast
             .as_ref()
             .map(|t| format!("▸ {}", t.line()))
