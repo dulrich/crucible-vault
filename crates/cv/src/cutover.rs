@@ -3,7 +3,7 @@
 //! retired (plan tn-review-baseline-remediation WP-R5); the marker row is seeded directly.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use cv_state::StateDb;
 use cv_vault::{CutoverMarker, VaultError};
@@ -29,7 +29,7 @@ impl StateCutover {
 
 impl CutoverMarker for StateCutover {
     fn present(&self) -> cv_vault::Result<bool> {
-        let db = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let db = crate::sync::lock(&self.state);
         let rec = db.cutover().map_err(|e| VaultError::Io {
             path: "state.db (cut-over marker)".to_owned(),
             source: std::io::Error::other(e),

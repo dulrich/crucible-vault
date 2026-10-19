@@ -12,7 +12,9 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
+
+use crate::sync::lock;
 use std::time::{Duration, Instant};
 
 use cv_protocol::{
@@ -91,10 +93,6 @@ impl Default for LookupBases {
             youtube: youtube::DEFAULT_BASE.to_owned(),
         }
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn upstream(e: &FetchError) -> RpcError {

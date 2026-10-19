@@ -1,254 +1,155 @@
-//! The `ViewService` seam (plan WP-8): hosted services answer `views_list` / `view_run`, each on
-//! its **own** thread with its **own** read-only [`cv_index::Reader`] (WAL reader, separate from
-//! the writer thread), so a view never blocks indexing. A1 registers nothing; plan B's WP-6 adds
-//! one line to [`register_views`].
+//! The view host (plan WP-8, WP-R12 SM15): one [`views::ViewHost`] on its **own** thread with its
+//! **own** read-only [`cv_index::Reader`] (WAL reader, separate from the writer thread), so a view
+//! never blocks indexing. Queries and invalidation signals are typed [`Cmd`]s on one channel, so
+//! they are processed in the order they were sent.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use cv_protocol::{Notification, ViewResult};
 use tokio::sync::{broadcast, oneshot};
 
-/// A hosted view evaluator.
-pub trait ViewService: Send {
-    /// The view ids this service answers.
-    fn view_ids(&self) -> Vec<String>;
-    /// Evaluates `view_id` against `reader` (`this_path`: the note the view is embedded in).
-    fn run(
-        &mut self,
-        reader: &cv_index::Reader,
-        view_id: &str,
-        this_path: Option<&str>,
-    ) -> Result<ViewResult, String>;
-    /// A new index generation `n` committed; returns the invalidated view ids.
-    fn on_index_generation(&mut self, n: u64) -> Vec<String>;
-    /// `CV_CONFIG_DIR` changed; returns the invalidated view ids.
-    fn on_config_changed(&mut self, config_dir: &Path) -> Vec<String>;
-    /// A `state.db` table changed (plan round-5-reading-pickers-intake WP-10); returns the
-    /// invalidated view ids (default: none).
-    fn on_state_changed(&mut self, _table: &str) -> Vec<String> {
-        Vec::new()
-    }
-}
+use crate::sync::lock;
 
-/// The A1 registration point. Plan B's WP-6 adds its one `reg.register(...)` line here.
-///
-/// `config_dir` is `CV_CONFIG_DIR` at startup, so a service loads its definitions when it is
-/// constructed (the config poller only reports later *changes* through
-/// [`ViewService::on_config_changed`]). [`ViewRegistry::index_base`] gives the index base path
-/// (`cv_index::generation_path(base, reader.generation())` is the generation file a service may
-/// open its own read-only connection on).
-pub fn register_views(reg: &mut ViewRegistry, config_dir: &Path) {
-    // `views` cannot depend on `cv`, so the trait impl for its host lives here.
-    struct Hosted(views::ViewHost);
-    impl ViewService for Hosted {
-        fn view_ids(&self) -> Vec<String> {
-            self.0.view_ids()
-        }
-        fn run(
-            &mut self,
-            reader: &cv_index::Reader,
-            view_id: &str,
-            this_path: Option<&str>,
-        ) -> Result<ViewResult, String> {
-            self.0.run(reader, view_id, this_path)
-        }
-        fn on_index_generation(&mut self, n: u64) -> Vec<String> {
-            self.0.on_index_generation(n)
-        }
-        fn on_config_changed(&mut self, config_dir: &Path) -> Vec<String> {
-            let ids = self.0.on_config_changed(config_dir);
-            for n in self.0.load_notices() {
-                tracing::warn!(notice = %n, "view definitions");
-            }
-            ids
-        }
-        fn on_state_changed(&mut self, table: &str) -> Vec<String> {
-            self.0.on_state_changed(table)
-        }
-    }
-    let mut host = views::ViewHost::new(config_dir, reg.index_base());
-    if let Some(p) = reg.state_db() {
-        host = host.with_state_db(p);
-    }
-    for n in host.load_notices() {
-        tracing::warn!(notice = %n, "view definitions");
-    }
-    if let Err(e) = reg.register(Box::new(Hosted(host))) {
-        tracing::warn!(error = %e, "registering the views service");
-    }
-}
-
+/// A command for the view-host thread.
 enum Cmd {
+    /// Evaluate `view_id` (`this_path`: the note the view is embedded in).
     Run {
         view_id: String,
         this_path: Option<String>,
         reply: oneshot::Sender<Result<ViewResult, String>>,
     },
+    /// A new index generation committed: reopen the reader.
     Generation(u64),
+    /// `CV_CONFIG_DIR` changed.
     Config(PathBuf),
     /// Notes changed incrementally (coalesced by the daemon): every view id goes stale.
     NotesChanged,
-    /// A `state.db` table changed (from [`ViewRegistry::state_notifier`]).
+    /// A `state.db` table changed (from [`ViewRegistry::change_hook`]).
     StateChanged(&'static str),
 }
 
-struct Host {
+/// The daemon's view host: one thread, one [`views::ViewHost`]; the thread exits when the
+/// registry (and every [`ViewRegistry::change_hook`]) is dropped.
+pub struct ViewRegistry {
     ids: Arc<Mutex<Vec<String>>>,
     tx: mpsc::Sender<Cmd>,
 }
 
-/// Hosts every registered [`ViewService`]; threads exit when the registry is dropped.
-pub struct ViewRegistry {
-    index_base: PathBuf,
-    state_db: Option<PathBuf>,
-    events: broadcast::Sender<Notification>,
-    hosts: Vec<Host>,
-}
-
 impl std::fmt::Debug for ViewRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ViewRegistry")
-            .field("services", &self.hosts.len())
-            .finish_non_exhaustive()
+        f.debug_struct("ViewRegistry").finish_non_exhaustive()
     }
 }
 
 /// Why `view_run` failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewError {
-    /// No service answers this id.
+    /// No view has this id.
     NotFound(String),
-    /// The service failed.
+    /// The host failed.
     Failed(String),
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl ViewRegistry {
-    /// An empty registry over the index at base path `index_base`; invalidations go to `events`.
-    pub fn new(index_base: &Path, events: broadcast::Sender<Notification>) -> Self {
-        Self {
-            index_base: index_base.to_path_buf(),
-            state_db: None,
-            events,
-            hosts: Vec::new(),
+    /// Starts the host over the index at base path `index_base`, loading definitions from
+    /// `config_dir` (`CV_CONFIG_DIR` at startup; later changes arrive via
+    /// [`ViewRegistry::notify_config`]); `state_db` feeds `source = "tracker_items"` views.
+    /// Invalidations go to `events`.
+    pub fn start(
+        config_dir: &Path,
+        index_base: &Path,
+        state_db: Option<&Path>,
+        events: broadcast::Sender<Notification>,
+    ) -> std::io::Result<Self> {
+        let mut host = views::ViewHost::new(config_dir, index_base);
+        if let Some(p) = state_db {
+            host = host.with_state_db(p);
         }
-    }
-
-    /// Sets the `state.db` path (`CV_STATE_DB`) handed to services registered afterwards.
-    #[must_use]
-    pub fn with_state_db(mut self, path: &Path) -> Self {
-        self.state_db = Some(path.to_path_buf());
-        self
-    }
-
-    /// The `state.db` path, when set.
-    pub fn state_db(&self) -> Option<&Path> {
-        self.state_db.as_deref()
-    }
-
-    /// The daemon-internal `state.db` change signal (install with
-    /// `StateDb::set_change_hook`): forwards a table name to every service registered so far.
-    pub fn state_notifier(&self) -> cv_state::ChangeHook {
-        let txs: Vec<mpsc::Sender<Cmd>> = self.hosts.iter().map(|h| h.tx.clone()).collect();
-        Box::new(move |table| {
-            for tx in &txs {
-                // A gone thread means shutdown; nothing to invalidate.
-                let _ = tx.send(Cmd::StateChanged(table));
-            }
-        })
-    }
-
-    /// The index base path (`CV_INDEX_DB`) this registry's readers open generations under.
-    pub fn index_base(&self) -> &Path {
-        &self.index_base
-    }
-
-    /// Hosts `service` on its own thread.
-    pub fn register(&mut self, service: Box<dyn ViewService>) -> std::io::Result<()> {
-        let ids = Arc::new(Mutex::new(service.view_ids()));
+        log_notices(&host);
+        let ids = Arc::new(Mutex::new(host.view_ids()));
         let (tx, rx) = mpsc::channel::<Cmd>();
-        let base = self.index_base.clone();
-        let events = self.events.clone();
+        let base = index_base.to_path_buf();
         let thread_ids = Arc::clone(&ids);
         std::thread::Builder::new()
             .name("cv-view".into())
-            .spawn(move || serve(service, rx, &base, &events, &thread_ids))?;
-        self.hosts.push(Host { ids, tx });
-        Ok(())
+            .spawn(move || serve(host, &rx, &base, &events, &thread_ids))?;
+        Ok(Self { ids, tx })
     }
 
-    /// Every registered view id, sorted.
+    /// The daemon-internal `state.db` change signal (install with `StateDb::set_change_hook`):
+    /// queues a [`Cmd::StateChanged`] behind every command already sent.
+    pub fn change_hook(&self) -> cv_state::ChangeHook {
+        let tx = self.tx.clone();
+        // A gone thread means shutdown; nothing to invalidate.
+        Box::new(move |table| drop(tx.send(Cmd::StateChanged(table))))
+    }
+
+    /// Every view id, sorted.
     pub fn view_ids(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .hosts
-            .iter()
-            .flat_map(|h| lock(&h.ids).clone())
-            .collect();
+        let mut v = lock(&self.ids).clone();
         v.sort();
         v
     }
 
-    /// Runs `view_id` on its service's thread.
+    /// Runs `view_id` on the host thread.
     pub async fn run(
         &self,
         view_id: &str,
         this_path: Option<String>,
     ) -> Result<ViewResult, ViewError> {
-        let host = self
-            .hosts
-            .iter()
-            .find(|h| lock(&h.ids).iter().any(|i| i == view_id))
-            .ok_or_else(|| ViewError::NotFound(view_id.to_owned()))?;
+        if !lock(&self.ids).iter().any(|i| i == view_id) {
+            return Err(ViewError::NotFound(view_id.to_owned()));
+        }
         let (reply, rx) = oneshot::channel();
-        host.tx
-            .send(Cmd::Run {
-                view_id: view_id.to_owned(),
-                this_path,
-                reply,
-            })
-            .map_err(|_| ViewError::Failed("view service thread is gone".into()))?;
+        self.send(Cmd::Run {
+            view_id: view_id.to_owned(),
+            this_path,
+            reply,
+        })
+        .map_err(|()| ViewError::Failed("view service thread is gone".into()))?;
         rx.await
             .map_err(|_| ViewError::Failed("view service dropped the request".into()))?
             .map_err(ViewError::Failed)
     }
 
-    /// Tells every service about index generation `n` (each reopens its reader).
+    /// Index generation `n` committed (the host reopens its reader).
     pub fn notify_generation(&self, n: u64) {
-        for h in &self.hosts {
-            if h.tx.send(Cmd::Generation(n)).is_err() {
-                tracing::warn!("view service thread is gone");
-            }
-        }
+        self.signal(Cmd::Generation(n));
     }
 
-    /// Tells every service that notes changed incrementally (plan editor-ui-round-3 WP-2): each
-    /// invalidates all of its view ids (no dependency tracking). The caller coalesces.
+    /// Notes changed incrementally (plan editor-ui-round-3 WP-2): every view id is invalidated
+    /// (no dependency tracking). The caller coalesces.
     pub fn notify_notes_changed(&self) {
-        for h in &self.hosts {
-            if h.tx.send(Cmd::NotesChanged).is_err() {
-                tracing::warn!("view service thread is gone");
-            }
-        }
+        self.signal(Cmd::NotesChanged);
     }
 
-    /// Tells every service the config dir changed.
+    /// The config dir changed.
     pub fn notify_config(&self, dir: &Path) {
-        for h in &self.hosts {
-            if h.tx.send(Cmd::Config(dir.to_path_buf())).is_err() {
-                tracing::warn!("view service thread is gone");
-            }
+        self.signal(Cmd::Config(dir.to_path_buf()));
+    }
+
+    fn send(&self, cmd: Cmd) -> Result<(), ()> {
+        self.tx.send(cmd).map_err(|_| ())
+    }
+
+    fn signal(&self, cmd: Cmd) {
+        if self.send(cmd).is_err() {
+            tracing::warn!("view service thread is gone");
         }
     }
 }
 
+fn log_notices(host: &views::ViewHost) {
+    for n in host.load_notices() {
+        tracing::warn!(notice = %n, "view definitions");
+    }
+}
+
 fn serve(
-    mut service: Box<dyn ViewService>,
-    rx: mpsc::Receiver<Cmd>,
+    mut host: views::ViewHost,
+    rx: &mpsc::Receiver<Cmd>,
     base: &Path,
     events: &broadcast::Sender<Notification>,
     ids: &Mutex<Vec<String>>,
@@ -277,7 +178,7 @@ fn serve(
                     }
                 }
                 let res = match reader.as_ref() {
-                    Some(r) => service.run(r, &view_id, this_path.as_deref()),
+                    Some(r) => host.run(r, &view_id, this_path.as_deref()),
                     None => Err("no index reader".into()),
                 };
                 let _ = reply.send(res);
@@ -290,14 +191,15 @@ fn serve(
                         cv_index::Reader::open_current(base).ok()
                     }
                 };
-                invalidate(service.on_index_generation(n));
-                *lock(ids) = service.view_ids();
+                invalidate(host.on_index_generation(n));
+                *lock(ids) = host.view_ids();
             }
-            Cmd::NotesChanged => invalidate(service.view_ids()),
-            Cmd::StateChanged(table) => invalidate(service.on_state_changed(table)),
+            Cmd::NotesChanged => invalidate(host.view_ids()),
+            Cmd::StateChanged(table) => invalidate(host.on_state_changed(table)),
             Cmd::Config(dir) => {
-                invalidate(service.on_config_changed(&dir));
-                *lock(ids) = service.view_ids();
+                invalidate(host.on_config_changed(&dir));
+                log_notices(&host);
+                *lock(ids) = host.view_ids();
             }
         }
     }
@@ -308,74 +210,23 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    struct Fake;
-    impl ViewService for Fake {
-        fn view_ids(&self) -> Vec<String> {
-            vec!["fake.count".into()]
-        }
-        fn run(
-            &mut self,
-            reader: &cv_index::Reader,
-            view_id: &str,
-            this_path: Option<&str>,
-        ) -> Result<ViewResult, String> {
-            let n = reader.query().file_count().map_err(|e| e.to_string())?;
-            Ok(ViewResult(serde_json::json!({
-                "view": view_id, "this": this_path, "files": n, "gen": reader.generation()
-            })))
-        }
-        fn on_index_generation(&mut self, _n: u64) -> Vec<String> {
-            vec!["fake.count".into()]
-        }
-        fn on_config_changed(&mut self, _dir: &Path) -> Vec<String> {
-            Vec::new()
-        }
-    }
-
+    /// No definitions: nothing is listed and an unknown id is `NotFound`.
     #[tokio::test]
-    async fn fake_service_listed_run_and_invalidated() {
+    async fn empty_host_lists_nothing() {
         let tmp = std::env::temp_dir().join(format!("cv-views-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let vault = tmp.join("vault");
         std::fs::create_dir_all(&vault).unwrap();
-        std::fs::write(vault.join("a.md"), "# a\n").unwrap();
         let base = tmp.join("idx").join("index.db");
         std::fs::create_dir_all(base.parent().unwrap()).unwrap();
-        let mut index = cv_index::Index::create(&vault, &base).unwrap();
-        let (tx, mut rx) = broadcast::channel(16);
-
-        let mut empty = ViewRegistry::new(&base, tx.clone());
-        register_views(&mut empty, &tmp);
+        let index = cv_index::Index::create(&vault, &base).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let empty = ViewRegistry::start(&tmp, &base, None, tx).unwrap();
         assert!(empty.view_ids().is_empty());
-        assert_eq!(empty.index_base(), base.as_path());
         assert_eq!(
             empty.run("x", None).await.unwrap_err(),
             ViewError::NotFound("x".into())
         );
-
-        let mut reg = ViewRegistry::new(&base, tx);
-        reg.register(Box::new(Fake)).unwrap();
-        assert_eq!(reg.view_ids(), vec!["fake.count".to_owned()]);
-        let r = reg.run("fake.count", Some("a.md".into())).await.unwrap();
-        assert_eq!(r.0["files"], 1);
-        assert_eq!(r.0["this"], "a.md");
-
-        std::fs::write(vault.join("b.md"), "# b\n").unwrap();
-        let g = index.rebuild(&vault).unwrap();
-        reg.notify_generation(g);
-        let n = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            n,
-            Notification::ViewsInvalidated {
-                view_ids: vec!["fake.count".into()]
-            }
-        );
-        let r = reg.run("fake.count", None).await.unwrap();
-        assert_eq!(r.0["files"], 2);
-        assert_eq!(r.0["gen"], g);
         drop(index);
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -402,8 +253,7 @@ mod tests {
         std::fs::create_dir_all(base.parent().unwrap()).unwrap();
         let mut index = cv_index::Index::create(&vault, &base).unwrap();
         let (tx, mut rx) = broadcast::channel(16);
-        let mut reg = ViewRegistry::new(&base, tx);
-        register_views(&mut reg, &config);
+        let reg = ViewRegistry::start(&config, &base, None, tx).unwrap();
         let names = |r: &ViewResult| -> Vec<String> {
             r.0["groups"]
                 .as_array()
@@ -494,9 +344,8 @@ mod tests {
         let mut state =
             cv_state::StateDb::open(&state_path, 1, cv_state::QueueConfig::default()).unwrap();
         let (tx, mut rx) = broadcast::channel(16);
-        let mut reg = ViewRegistry::new(&base, tx).with_state_db(&state_path);
-        register_views(&mut reg, &config);
-        state.set_change_hook(reg.state_notifier());
+        let reg = ViewRegistry::start(&config, &base, Some(&state_path), tx).unwrap();
+        state.set_change_hook(reg.change_hook());
         let id = "intake#Day".to_owned();
         let this = Some("daily/2026-10-17.md".to_owned());
         let rows = |r: &ViewResult| r.0["groups"][0]["rows"].as_array().map_or(0, Vec::len);
@@ -533,5 +382,49 @@ mod tests {
         // Nothing further was emitted (the duplicate raised no signal).
         let _ = reg.run(&id, None).await.unwrap();
         assert!(rx.try_recv().is_err());
+    }
+
+    /// WP-R12 (SM15): signals and queries share one channel, so a state change sent before a
+    /// query is handled before it, and one sent after is handled after it.
+    #[tokio::test]
+    async fn state_change_and_query_are_processed_in_send_order() {
+        let root = std::env::temp_dir().join(format!("cv-views-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tmp = TmpRoot(root);
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(config.join("views")).unwrap();
+        std::fs::write(
+            config.join("views/intake.toml"),
+            "source='tracker_items'\n[[views]]\ntype='table'\nname='Day'\norder=['title']\n",
+        )
+        .unwrap();
+        let base = tmp.path().join("idx").join("index.db");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        let _index = cv_index::Index::create(&vault, &base).unwrap();
+        let state_path = tmp.path().join("state.db");
+        drop(cv_state::StateDb::open(&state_path, 1, cv_state::QueueConfig::default()).unwrap());
+        let (tx, mut rx) = broadcast::channel(16);
+        let reg = ViewRegistry::start(&config, &base, Some(&state_path), tx).unwrap();
+        let hook = reg.change_hook();
+        let id = "intake#Day".to_owned();
+        let invalidated = Notification::ViewsInvalidated {
+            view_ids: vec![id.clone()],
+        };
+        // Before: the invalidation is already out when the query's reply arrives.
+        hook("tracker_items");
+        reg.run(&id, None).await.unwrap();
+        assert_eq!(rx.try_recv().unwrap(), invalidated);
+        assert!(rx.try_recv().is_err());
+        // After: the query's reply precedes the invalidation.
+        reg.run(&id, None).await.unwrap();
+        assert!(rx.try_recv().is_err());
+        hook("tracker_items");
+        let n = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, invalidated);
     }
 }

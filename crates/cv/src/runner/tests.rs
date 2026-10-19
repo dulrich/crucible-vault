@@ -97,16 +97,13 @@ fn runner(
 }
 
 fn req(path: Option<&str>, lane: Lane) -> RunRequest {
+    let context = ActionContext {
+        active_path: path.map(str::to_owned),
+        ..ActionContext::default()
+    };
     RunRequest {
-        params: Map::new(),
-        context: ActionContext {
-            active_path: path.map(str::to_owned),
-            ..ActionContext::default()
-        },
-        trigger: Trigger::Command,
-        chain: Vec::new(),
         default_lane: lane,
-        dedupe_key: None,
+        ..RunRequest::command(Map::new(), context)
     }
 }
 

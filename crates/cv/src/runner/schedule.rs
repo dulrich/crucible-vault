@@ -7,12 +7,10 @@
 use std::time::Duration;
 
 use cv_actions::Starter;
-use cv_protocol::ActionContext;
-use cv_state::Lane;
-use serde_json::Map;
 use tokio::sync::watch;
 
-use super::{RunRequest, Runner, Trigger, lock};
+use super::{RunRequest, Runner};
+use crate::sync::lock;
 
 /// Longest scheduler sleep (config reloads take effect within this).
 const MAX_SLEEP: Duration = Duration::from_secs(30);
@@ -86,16 +84,7 @@ pub(super) fn tick(runner: &Runner) -> Vec<String> {
         if due <= last {
             continue;
         }
-        let mut params = Map::new();
-        super::apply_defaults(action, &mut params);
-        let req = RunRequest {
-            params,
-            context: ActionContext::default(),
-            trigger: Trigger::Schedule { due_ms: due },
-            chain: Vec::new(),
-            default_lane: Lane::Background,
-            dedupe_key: Some(format!("{}::schedule", action.id)),
-        };
+        let req = RunRequest::schedule(action, due);
         // The job and its schedule_runs row commit in one transaction (SR10).
         match runner.inner().enqueue_scheduled(action, req) {
             Ok(id) => out.push(id),

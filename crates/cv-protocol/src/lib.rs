@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod client;
+mod enums;
 pub mod methods;
+pub use enums::{BreakerState, ContextNeed, FailureKind, Lane, TrackerOutcome};
 pub use methods::{METHOD_NAMES, Method};
 
 /// Protocol version exchanged in `hello`; a mismatch is refused, never degraded.
@@ -334,7 +336,7 @@ pub struct ActionInfo {
     pub params: Vec<ParamSpec>,
     /// Context the action needs from the client (e.g. `active_path`, `selection`).
     #[serde(default)]
-    pub needs: Vec<String>,
+    pub needs: Vec<ContextNeed>,
     pub durable: bool,
 }
 
@@ -391,6 +393,8 @@ pub struct JobStatus {
     pub status: JobState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Notification-only: the `job_updated` payload carries the run's written paths; the
+    /// `job` / `cancel` results always send `[]` (settled outputs are not stored).
     #[serde(default)]
     pub output_paths: Vec<String>,
     /// Terminal statuses only: the note the run asks the client to open (e.g. a `move`
@@ -421,10 +425,10 @@ pub struct JobsListParams {
 pub struct JobSummary {
     pub job_id: String,
     pub job_type: String,
-    /// `user` | `background` (the store lane name).
-    pub lane: String,
-    /// `queued|running|done|failed|cancelled|deferred`.
-    pub status: String,
+    pub lane: Lane,
+    /// `queued|running|done|failed|cancelled|deferred` ([`JobState::Pending`] is `queued`).
+    #[serde(with = "enums::queue_status")]
+    pub status: JobState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
     pub attempts: i64,
@@ -436,7 +440,15 @@ pub struct JobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_kind: Option<String>,
+    pub failure_kind: Option<FailureKind>,
+}
+
+impl JobSummary {
+    /// The wire word for [`JobSummary::status`] (`queued` for [`JobState::Pending`]).
+    #[must_use]
+    pub fn status_str(&self) -> &'static str {
+        enums::queue_status::as_str(self.status)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,7 +484,7 @@ pub struct IntakeItem {
     pub url: String,
     pub first_seen_ms: i64,
     pub day: String,
-    pub outcome: String,
+    pub outcome: TrackerOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,8 +517,7 @@ pub enum UriResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceHealth {
     pub service: String,
-    /// `closed` | `open` | `half_open`.
-    pub state: String,
+    pub state: BreakerState,
     /// Breaker detail (additive, WP-11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_score: Option<f64>,
@@ -676,7 +687,7 @@ pub struct LookupChannel {
 // Notifications
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     Created,
@@ -713,7 +724,7 @@ pub enum Notification {
     OpenRequested {
         path: String,
     },
-    /// Reserved for plan B's view evaluator (hosted via the `ViewService` seam).
+    /// Reserved for plan B's view evaluator (hosted on the daemon's view thread).
     ViewsInvalidated {
         view_ids: Vec<String>,
     },
@@ -1064,7 +1075,7 @@ mod tests {
                 choices: vec!["x".into()],
                 default: None,
             }],
-            needs: vec!["active_path".into()],
+            needs: vec![ContextNeed::ActivePath],
             durable: true,
         }]);
         round_trip(&RunActionResult {
@@ -1081,7 +1092,7 @@ mod tests {
             config_errors: vec![],
             services: vec![ServiceHealth {
                 service: "search".into(),
-                state: "open".into(),
+                state: BreakerState::Open,
                 failure_score: Some(3.0),
                 retry_at_ms: Some(42),
                 last_reason: Some("transient Timeout".into()),
@@ -1100,8 +1111,8 @@ mod tests {
             jobs: vec![JobSummary {
                 job_id: "j".into(),
                 job_type: "t".into(),
-                lane: "background".into(),
-                status: "deferred".into(),
+                lane: Lane::Background,
+                status: JobState::Deferred,
                 service: Some("x".into()),
                 attempts: 2,
                 created_ms: 1,
@@ -1120,7 +1131,7 @@ mod tests {
                 url: "u".into(),
                 first_seen_ms: 1,
                 day: "2026-10-15".into(),
-                outcome: "line".into(),
+                outcome: TrackerOutcome::Line,
                 score: Some(0.5),
                 full_body: Some(true),
             }],

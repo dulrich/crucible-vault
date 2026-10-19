@@ -265,7 +265,7 @@ mod tests {
             config_errors: vec![],
             services: vec![cv_protocol::ServiceHealth {
                 service: "youtube-api".into(),
-                state: "open".into(),
+                state: cv_protocol::BreakerState::Open,
                 failure_score: Some(3.0),
                 retry_at_ms: None,
                 last_reason: Some("transient Timeout".into()),

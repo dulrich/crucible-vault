@@ -15,6 +15,7 @@ pub mod server;
 pub mod signals;
 pub mod spool;
 pub mod steps;
+pub mod sync;
 pub mod uri;
 pub mod views;
 
@@ -22,7 +23,7 @@ pub use client::{Client, ClientError};
 pub use config::Config;
 pub use daemon::{Daemon, DaemonOptions, RunningDaemon, Shared};
 pub use runner::Runner;
-pub use views::{ViewRegistry, ViewService, register_views};
+pub use views::ViewRegistry;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {

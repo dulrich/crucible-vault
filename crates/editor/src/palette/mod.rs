@@ -387,7 +387,7 @@ pub struct Call {
     pub action_id: String,
     pub title: String,
     pub params: Map<String, Value>,
-    pub needs: Vec<String>,
+    pub needs: Vec<cv_protocol::ContextNeed>,
 }
 
 /// The job toast.

@@ -1,13 +1,13 @@
 //! `actions_list` and `run_action` (the command starter, pin 8).
 
 use cv_protocol::{
-    ActionInfo, JobState, Notification, RpcError, RunActionParams, RunActionResult, error_codes,
+    ActionInfo, ContextNeed, JobState, Notification, RpcError, RunActionParams, RunActionResult,
+    error_codes,
 };
-use cv_state::Lane;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-use super::{EnqueueError, NON_DURABLE_WAIT, RunRequest, Runner, Trigger};
+use super::{EnqueueError, NON_DURABLE_WAIT, RunRequest, Runner};
 use crate::daemon::{Shared, rpc_err};
 
 /// Armed actions that a client can start (have a command starter), as `ActionInfo`s.
@@ -22,7 +22,11 @@ pub fn actions_list(runner: &Runner) -> Vec<ActionInfo> {
             group: a.group.clone(),
             keys: a.keys.clone(),
             params: a.params.clone(),
-            needs: a.needs.clone(),
+            needs: a
+                .needs
+                .iter()
+                .filter_map(|n| ContextNeed::parse(n))
+                .collect(),
             durable: a.durable,
         })
         .collect()
@@ -60,12 +64,12 @@ pub async fn run_action(
     }
     let ctx = &p.context;
     for need in &action.needs {
-        let present = match need.as_str() {
-            "active_path" => ctx.active_path.is_some(),
-            "selection" => ctx.selection.is_some(),
-            "value" => ctx.value.is_some(),
-            "line" => ctx.line.is_some(),
-            _ => false,
+        let present = match ContextNeed::parse(need) {
+            Some(ContextNeed::ActivePath) => ctx.active_path.is_some(),
+            Some(ContextNeed::Selection) => ctx.selection.is_some(),
+            Some(ContextNeed::Value) => ctx.value.is_some(),
+            Some(ContextNeed::Line) => ctx.line.is_some(),
+            None => false,
         };
         if !present {
             return Err(invalid(format!(
@@ -104,14 +108,7 @@ pub async fn run_action(
     }
     let mut updates: Option<broadcast::Receiver<Notification>> =
         (!action.durable).then(|| shared.subscribe());
-    let req = RunRequest {
-        params,
-        context: p.context.clone(),
-        trigger: Trigger::Command,
-        chain: Vec::new(),
-        default_lane: Lane::User,
-        dedupe_key: None,
-    };
+    let req = RunRequest::command(params, p.context.clone());
     let job_id = runner.enqueue(action, req).map_err(|e| match e {
         EnqueueError::NoResourceKeys(m) => invalid(m),
         EnqueueError::State(m) => rpc_err(error_codes::INTERNAL_ERROR, m),

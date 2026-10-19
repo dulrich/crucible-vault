@@ -3920,7 +3920,7 @@ impl App {
             .active
             .filter(|&i| ps.tabs.get(i).is_some_and(|t| !t.is_sentinel()))
         else {
-            if call.needs.iter().any(|n| n == "active_path") {
+            if call.needs.contains(&cv_protocol::ContextNeed::ActivePath) {
                 self.status
                     .set_error(format!("{}: open a note first", call.title));
                 return Task::none();

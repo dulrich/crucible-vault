@@ -8,13 +8,12 @@
 //! `onLayoutReady` start (no startup replay exists, I4), and plugin-managed-path exclusion (the
 //! queue no longer lives in the vault).
 
-use cv_actions::{ChangeKindSel, OriginSel, Selector, Starter};
-use cv_protocol::{ActionContext, ChangeKind, Notification, Origin};
-use cv_state::Lane;
-use serde_json::{Map, Value};
+use cv_actions::{OriginSel, Selector, Starter};
+use cv_protocol::{ChangeKind, Notification, Origin};
+use serde_json::Value;
 use tokio::sync::{broadcast, watch};
 
-use super::{RunRequest, Runner, Trigger};
+use super::{RunRequest, Runner};
 
 pub(super) async fn event_loop(
     runner: Runner,
@@ -39,15 +38,6 @@ pub(super) async fn event_loop(
                 Err(broadcast::error::RecvError::Closed) => return,
             },
         }
-    }
-}
-
-fn kind_sel(k: ChangeKind) -> ChangeKindSel {
-    match k {
-        ChangeKind::Created => ChangeKindSel::Created,
-        ChangeKind::Modified => ChangeKindSel::Modified,
-        ChangeKind::Deleted => ChangeKindSel::Deleted,
-        ChangeKind::Renamed => ChangeKindSel::Renamed,
     }
 }
 
@@ -77,7 +67,7 @@ pub(crate) fn on_change(
                 kinds,
                 origin: o,
             } => {
-                kinds.contains(&kind_sel(kind))
+                kinds.contains(&kind)
                     && origin_ok(*o, origin)
                     && selector_matches(runner, selector, path, &mut reader)
             }
@@ -90,37 +80,13 @@ pub(crate) fn on_change(
             tracing::info!(action = %action.id, "cycle guard: daemon write does not re-trigger");
             continue;
         }
-        let mut params = Map::new();
-        super::apply_defaults(action, &mut params);
-        let req = RunRequest {
-            params,
-            context: ActionContext {
-                active_path: Some(path.to_owned()),
-                ..ActionContext::default()
-            },
-            trigger: Trigger::Event {
-                path: path.to_owned(),
-                change: kind_sel_str(kind).to_owned(),
-            },
-            chain: Vec::new(),
-            default_lane: Lane::Background,
-            dedupe_key: Some(format!("{}::{path}", action.id)),
-        };
+        let req = RunRequest::event(action, path, kind);
         match runner.enqueue(action, req) {
             Ok(id) => out.push(id),
             Err(e) => tracing::warn!(action = %action.id, error = %e, "event run refused"),
         }
     }
     out
-}
-
-fn kind_sel_str(k: ChangeKind) -> &'static str {
-    match k {
-        ChangeKind::Created => "created",
-        ChangeKind::Modified => "modified",
-        ChangeKind::Deleted => "deleted",
-        ChangeKind::Renamed => "renamed",
-    }
 }
 
 /// Every set selector field must match. Tag/prop look the note up in the index; an index error

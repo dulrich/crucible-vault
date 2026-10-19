@@ -1,6 +1,6 @@
 //! `views` — daemon-native view definitions (TOML under `_custom/crucible-vault/views/`) and the
 //! Bases-subset expression evaluator (plan `v0-editor.md` WP-6), hosted in the daemon through
-//! the `ViewService` seam (`crates/cv/src/views.rs` adapts [`ViewHost`]).
+//! its view-host thread (`crates/cv/src/views.rs` runs [`ViewHost`]).
 //!
 //! Pure: no iced/tokio/reqwest; the index is only ever opened read-only. Selection narrows by
 //! SQL ([`engine`]), everything else evaluates in Rust ([`eval`]). Definition problems become

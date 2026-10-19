@@ -216,16 +216,6 @@ impl Step {
     }
 }
 
-/// Event kinds an event starter listens to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChangeKindSel {
-    Created,
-    Modified,
-    Deleted,
-    Renamed,
-}
-
 /// Origin filter of an event starter (default `external`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -371,7 +361,7 @@ pub enum Starter {
         /// Selector (non-empty, I5).
         selector: Selector,
         /// Kinds listened to (non-empty).
-        kinds: Vec<ChangeKindSel>,
+        kinds: Vec<cv_protocol::ChangeKind>,
         /// Origin filter.
         origin: OriginSel,
     },

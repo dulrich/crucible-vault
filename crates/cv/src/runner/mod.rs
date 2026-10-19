@@ -17,7 +17,7 @@ mod schedule;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, Step};
@@ -32,6 +32,7 @@ use crate::steps::{
     self, ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome, TRANSIENT_BASE_MS,
     TRANSIENT_CAP_MS, TRANSIENT_MAX_ATTEMPTS,
 };
+use crate::sync::{lock, read, write};
 
 pub use config_load::load_config_dir;
 pub use rpc::{actions_list, run_action};
@@ -153,7 +154,7 @@ pub enum Trigger {
         /// Note path.
         path: String,
         /// `created|modified|deleted|renamed`.
-        change: String,
+        change: cv_protocol::ChangeKind,
     },
     /// A schedule (or its one catch-up).
     Schedule {
@@ -200,6 +201,77 @@ pub struct RunRequest {
     pub default_lane: Lane,
     /// Un-namespaced dedupe key.
     pub dedupe_key: Option<String>,
+}
+
+impl RunRequest {
+    /// A `run_action` RPC run (user lane, no dedupe).
+    #[must_use]
+    pub fn command(params: Map<String, Value>, context: ActionContext) -> Self {
+        Self {
+            params,
+            context,
+            trigger: Trigger::Command,
+            chain: Vec::new(),
+            default_lane: Lane::User,
+            dedupe_key: None,
+        }
+    }
+
+    /// A background run of `action` with its param defaults, deduped on `{action}::{key}`.
+    fn background(action: &Action, trigger: Trigger, context: ActionContext, key: &str) -> Self {
+        let mut params = Map::new();
+        apply_defaults(action, &mut params);
+        Self {
+            params,
+            context,
+            trigger,
+            chain: Vec::new(),
+            default_lane: Lane::Background,
+            dedupe_key: Some(format!("{}::{key}", action.id)),
+        }
+    }
+
+    /// An event-starter run on `path` (deduped per action and path).
+    #[must_use]
+    pub fn event(action: &Action, path: &str, change: cv_protocol::ChangeKind) -> Self {
+        let context = ActionContext {
+            active_path: Some(path.to_owned()),
+            ..ActionContext::default()
+        };
+        let trigger = Trigger::Event {
+            path: path.to_owned(),
+            change,
+        };
+        Self::background(action, trigger, context, path)
+    }
+
+    /// A schedule run due at `due_ms` (deduped per action).
+    #[must_use]
+    pub fn schedule(action: &Action, due_ms: i64) -> Self {
+        let trigger = Trigger::Schedule { due_ms };
+        Self::background(action, trigger, ActionContext::default(), "schedule")
+    }
+
+    /// A `run_action` step's child run (inherits the parent's context and lane).
+    #[must_use]
+    pub fn child(
+        params: Map<String, Value>,
+        context: ActionContext,
+        parent: &str,
+        chain: Vec<String>,
+        lane: Lane,
+    ) -> Self {
+        Self {
+            params,
+            context,
+            trigger: Trigger::Child {
+                parent: parent.to_owned(),
+            },
+            chain,
+            default_lane: lane,
+            dedupe_key: None,
+        }
+    }
 }
 
 /// Enqueue refusals.
@@ -274,10 +346,6 @@ pub(crate) struct Inner {
     cycle: Mutex<HashMap<(String, String), Instant>>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// The runner handle (cheap to clone).
 #[derive(Clone)]
 pub struct Runner {
@@ -322,22 +390,12 @@ impl Runner {
 
     /// The current config snapshot.
     pub fn config(&self) -> Arc<ConfigSet> {
-        Arc::clone(
-            &self
-                .inner
-                .config
-                .read()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
+        Arc::clone(&read(&self.inner.config))
     }
 
     /// Replaces the config snapshot (tests; the daemon uses [`Runner::reload_config`]).
     pub fn set_config(&self, c: ConfigSet) {
-        *self
-            .inner
-            .config
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Arc::new(c);
+        *write(&self.inner.config) = Arc::new(c);
     }
 
     /// Re-reads `CV_CONFIG_DIR` (hot reload, pin 2); returns the current errors.
@@ -603,13 +661,7 @@ impl Inner {
         }
         m.last_recover_ms = Some(now);
         let live = lock(&self.running).clone();
-        let retention_days = self
-            .config
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pipelines()
-            .queue
-            .retention_days;
+        let retention_days = read(&self.config).pipelines().queue.retention_days;
         let mut db = lock(&self.state);
         match db.recover_stale_leases_except(now, &live) {
             Ok(0) => {}
@@ -684,31 +736,33 @@ async fn claim_loop(inner: Arc<Inner>, mut stop: watch::Receiver<bool>) {
     }
 }
 
+/// A failure with no typed reason (classified `job`, never a service outage).
+fn failed(error: String) -> JobResult {
+    JobResult::Failed {
+        error,
+        reason: None,
+    }
+}
+
 /// Executes one claimed job end to end and settles it.
 async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
     let id = job.id.clone();
-    let config = Arc::clone(&inner.config.read().unwrap_or_else(PoisonError::into_inner));
+    let config = Arc::clone(&read(&inner.config));
     let parsed: Result<JobParams, _> = serde_json::from_value(job.params.clone());
     let (result, summary) = match parsed {
         Err(e) => (
-            JobResult::Failed {
-                error: format!("bad job params: {e}"),
-                reason: None,
-            },
+            failed(format!("bad job params: {e}")),
             RunSummary::default(),
         ),
         Ok(jp) => match config.armed(&jp.action_id).cloned() {
             None => (
-                JobResult::Failed {
-                    error: format!(
-                        "action {:?} is not armed: {}",
-                        jp.action_id,
-                        config
-                            .disarm_reason(&jp.action_id)
-                            .unwrap_or("unknown action")
-                    ),
-                    reason: None,
-                },
+                failed(format!(
+                    "action {:?} is not armed: {}",
+                    jp.action_id,
+                    config
+                        .disarm_reason(&jp.action_id)
+                        .unwrap_or("unknown action")
+                )),
                 RunSummary::default(),
             ),
             Some(action) => {
@@ -722,13 +776,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 .await
                 {
                     Ok(r) => r,
-                    Err(e) => (
-                        JobResult::Failed {
-                            error: format!("step panicked: {e}"),
-                            reason: None,
-                        },
-                        RunSummary::default(),
-                    ),
+                    Err(e) => (failed(format!("step panicked: {e}")), RunSummary::default()),
                 }
             }
         },
@@ -795,16 +843,13 @@ impl ChildSpawner for Spawner<'_> {
         self.inner
             .enqueue(
                 &target,
-                RunRequest {
-                    params: merged,
-                    context: self.parent.context.clone(),
-                    trigger: Trigger::Child {
-                        parent: self.parent_job.to_owned(),
-                    },
+                RunRequest::child(
+                    merged,
+                    self.parent.context.clone(),
+                    self.parent_job,
                     chain,
-                    default_lane: self.lane,
-                    dedupe_key: None,
-                },
+                    self.lane,
+                ),
             )
             .map_err(|e| e.to_string())
     }
@@ -834,13 +879,7 @@ fn execute_steps(
     let checkpoints = match lock(&inner.state).checkpoints(job_id) {
         Ok(c) => c,
         Err(e) => {
-            return (
-                JobResult::Failed {
-                    error: format!("reading checkpoints: {e}"),
-                    reason: None,
-                },
-                summary,
-            );
+            return (failed(format!("reading checkpoints: {e}")), summary);
         }
     };
     let mut done: BTreeMap<usize, StepOutcome> = BTreeMap::new();
@@ -852,10 +891,7 @@ fn execute_steps(
             .zip(serde_json::from_str::<StepOutcome>(&cp.outcome).ok());
         let Some((i, o)) = parsed else {
             return (
-                JobResult::Failed {
-                    error: format!("corrupt checkpoint for step {}", cp.step_index),
-                    reason: None,
-                },
+                failed(format!("corrupt checkpoint for step {}", cp.step_index)),
                 summary,
             );
         };
@@ -921,10 +957,7 @@ fn execute_steps(
                     Ok(t) => t,
                     Err(e) => {
                         return (
-                            JobResult::Failed {
-                                error: format!("step {} outcome not serializable: {e}", i + 1),
-                                reason: None,
-                            },
+                            failed(format!("step {} outcome not serializable: {e}", i + 1)),
                             summary,
                         );
                     }
@@ -934,10 +967,7 @@ fn execute_steps(
                     lock(&inner.state).put_checkpoint(job_id, idx, &text, inner.clock.now_ms());
                 if let Err(e) = put {
                     return (
-                        JobResult::Failed {
-                            error: format!("committing checkpoint of step {}: {e}", i + 1),
-                            reason: None,
-                        },
+                        failed(format!("committing checkpoint of step {}: {e}", i + 1)),
                         summary,
                     );
                 }

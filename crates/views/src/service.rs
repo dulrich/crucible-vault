@@ -1,5 +1,5 @@
-//! [`ViewHost`]: the daemon-hosted service. `crates/cv` adapts it to its `ViewService` trait
-//! (this crate cannot depend on `cv`). It owns its own read-only connection on the reader's
+//! [`ViewHost`]: the daemon-hosted service (`crates/cv/src/views.rs` runs it on its view thread).
+//! It owns its own read-only connection on the reader's
 //! generation file and reopens it when the generation changes. `source = "tracker_items"` views
 //! (plan round-5-reading-pickers-intake WP-10) also read `state.db` through a lazily opened
 //! read-only connection.
@@ -199,7 +199,7 @@ impl ViewHost {
         Ok(r)
     }
 
-    /// The `ViewService::run` body: evaluates on `reader`'s generation.
+    /// The daemon's `view_run` body: evaluates on `reader`'s generation.
     pub fn run(
         &mut self,
         reader: &cv_index::Reader,

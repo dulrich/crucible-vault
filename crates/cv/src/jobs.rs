@@ -7,8 +7,9 @@
 
 use anyhow::{Result, anyhow};
 use cv_protocol::{
-    ActionContext, IntakeItem, IntakeListParams, IntakeListResult, JobIdParams, JobSummary,
-    JobsListParams, JobsListResult, RunActionParams, methods,
+    ActionContext, BreakerState, FailureKind, IntakeItem, IntakeListParams, IntakeListResult,
+    JobIdParams, JobState, JobSummary, JobsListParams, JobsListResult, Lane, RunActionParams,
+    methods,
 };
 use cv_state::{IntakeQuery, Job, ListQuery, TrackerItem, TrackerOutcome};
 
@@ -56,6 +57,53 @@ pub fn list_query(p: &JobsListParams, now_ms: i64) -> Result<ListQuery, String> 
     })
 }
 
+/// The one displayed-status rule (`job`, `cancel`, `job_retry`, `jobs_list`): a queued job is
+/// `deferred` only while its `defer_until_ms` is still in the future — the same split the
+/// `jobs_list` `queued`/`deferred` filters ([`list_query`]) apply.
+#[must_use]
+pub fn job_state(j: &Job, now_ms: i64) -> JobState {
+    use cv_state::JobStatus as S;
+    match j.status {
+        S::Queued if j.defer_until_ms.is_some_and(|d| d > now_ms) => JobState::Deferred,
+        S::Queued => JobState::Pending,
+        S::Running => JobState::Running,
+        S::Done => JobState::Done,
+        S::Failed => JobState::Failed,
+        S::Cancelled => JobState::Cancelled,
+    }
+}
+
+/// The store lane on the wire.
+#[must_use]
+pub fn lane(l: cv_state::Lane) -> Lane {
+    match l {
+        cv_state::Lane::User => Lane::User,
+        cv_state::Lane::Background => Lane::Background,
+    }
+}
+
+/// The store tracker outcome on the wire.
+#[must_use]
+pub fn outcome(o: TrackerOutcome) -> cv_protocol::TrackerOutcome {
+    use cv_protocol::TrackerOutcome as W;
+    match o {
+        TrackerOutcome::Line => W::Line,
+        TrackerOutcome::Note => W::Note,
+        TrackerOutcome::Ignored => W::Ignored,
+        TrackerOutcome::Skipped => W::Skipped,
+    }
+}
+
+fn outcome_from_wire(o: cv_protocol::TrackerOutcome) -> TrackerOutcome {
+    use cv_protocol::TrackerOutcome as W;
+    match o {
+        W::Line => TrackerOutcome::Line,
+        W::Note => TrackerOutcome::Note,
+        W::Ignored => TrackerOutcome::Ignored,
+        W::Skipped => TrackerOutcome::Skipped,
+    }
+}
+
 fn enum_str<T: serde::Serialize>(v: T) -> String {
     serde_json::to_value(v)
         .ok()
@@ -66,25 +114,21 @@ fn enum_str<T: serde::Serialize>(v: T) -> String {
 /// One store job as a `jobs_list` row.
 #[must_use]
 pub fn job_summary(j: &Job, now_ms: i64) -> JobSummary {
-    let status = if j.status == cv_state::JobStatus::Queued
-        && j.defer_until_ms.is_some_and(|d| d > now_ms)
-    {
-        "deferred".to_owned()
-    } else {
-        j.status.as_str().to_owned()
-    };
     JobSummary {
         job_id: j.id.clone(),
         job_type: j.job_type.clone(),
-        lane: enum_str(j.lane),
-        status,
+        lane: lane(j.lane),
+        status: job_state(j, now_ms),
         service: j.service.clone(),
         attempts: j.attempts,
         created_ms: j.created_ms,
         settled_at_ms: j.settled_at_ms,
         defer_until_ms: j.defer_until_ms,
         error: j.error.clone(),
-        failure_kind: j.failure_kind.map(|k| k.as_str().to_owned()),
+        failure_kind: j.failure_kind.map(|k| match k {
+            cv_state::FailureKind::Service => FailureKind::Service,
+            cv_state::FailureKind::Job => FailureKind::Job,
+        }),
     }
 }
 
@@ -105,7 +149,8 @@ pub fn intake_query(p: &IntakeListParams) -> Result<IntakeQuery, String> {
     let outcome = match p.outcome.as_deref() {
         None => None,
         Some(o) => Some(
-            TrackerOutcome::parse(o)
+            cv_protocol::TrackerOutcome::parse(o)
+                .map(outcome_from_wire)
                 .ok_or_else(|| format!("unknown outcome {o:?} (line|note|ignored|skipped)"))?,
         ),
     };
@@ -130,7 +175,7 @@ pub fn intake_item(t: TrackerItem) -> IntakeItem {
         url: t.url,
         first_seen_ms: t.first_seen_ms,
         day: t.day,
-        outcome: t.outcome.as_str().to_owned(),
+        outcome: outcome(t.outcome),
         score: t.score,
         full_body: t.full_body,
     }
@@ -148,7 +193,11 @@ pub fn service_health(h: cv_state::ServiceHealth) -> cv_protocol::ServiceHealth 
     let failure_score = Some(h.failure_score as f64);
     cv_protocol::ServiceHealth {
         service: h.service,
-        state: enum_str(h.state),
+        state: match h.state {
+            cv_state::BreakerState::Closed => BreakerState::Closed,
+            cv_state::BreakerState::Open => BreakerState::Open,
+            cv_state::BreakerState::HalfOpen => BreakerState::HalfOpen,
+        },
         failure_score,
         retry_at_ms: h.retry_at_ms,
         last_reason,
@@ -371,7 +420,12 @@ fn render_jobs(r: &JobsListResult, now: i64) -> String {
         out.push_str(
             format!(
                 "{}  {:<9}  {}  {}  {}  {}",
-                j.job_id, j.status, j.job_type, j.attempts, when, detail
+                j.job_id,
+                j.status_str(),
+                j.job_type,
+                j.attempts,
+                when,
+                detail
             )
             .trim_end(),
         );

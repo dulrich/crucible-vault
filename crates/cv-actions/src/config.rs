@@ -20,7 +20,7 @@ use cv_protocol::{ParamKind, ParamSpec};
 use serde::Deserialize;
 
 use crate::model::{
-    Action, ChangeKindSel, LaneChoice, OriginSel, ResourceSpec, Schedule, Selector, Starter, Step,
+    Action, LaneChoice, OriginSel, ResourceSpec, Schedule, Selector, Starter, Step,
 };
 use crate::pipelines::{PipelinesConfig, SourcesConfig};
 
@@ -77,7 +77,7 @@ enum StarterDef {
         #[serde(default)]
         selector: Selector,
         #[serde(default)]
-        kinds: Vec<ChangeKindSel>,
+        kinds: Vec<cv_protocol::ChangeKind>,
         #[serde(default)]
         origin: OriginSel,
     },
@@ -98,8 +98,6 @@ struct ScheduleDef {
     #[serde(default)]
     every: Option<String>,
 }
-
-const KNOWN_NEEDS: [&str; 4] = ["active_path", "selection", "value", "line"];
 
 /// Loaded configuration: raw tables, parsed actions, disarm reasons and errors.
 #[derive(Debug, Clone, Default)]
@@ -436,7 +434,7 @@ fn check_action(a: &Action) -> Result<(), String> {
         }
     }
     for n in &a.needs {
-        if !KNOWN_NEEDS.contains(&n.as_str()) {
+        if cv_protocol::ContextNeed::parse(n).is_none() {
             return Err(format!("unknown need {n:?}"));
         }
     }

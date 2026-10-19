@@ -135,7 +135,7 @@ fn selection_action_gets_reading_selection_and_split_recency() {
             group: None,
             keys: vec![],
             params: vec![],
-            needs: vec!["selection".into()],
+            needs: vec![cv_protocol::ContextNeed::Selection],
             durable: false,
         },
         Arc::new(move |p: &RunActionParams| {
@@ -149,7 +149,7 @@ fn selection_action_gets_reading_selection_and_split_recency() {
         action_id: "sel.act".into(),
         title: "Sel".into(),
         params: serde_json::Map::new(),
-        needs: vec!["selection".into()],
+        needs: vec![cv_protocol::ContextNeed::Selection],
     };
     set_mode(&mut app, "A.md", ViewMode::Reading);
     let view = app.active_tab().expect("tab").id;

@@ -37,7 +37,7 @@ fn action(id: &str, params: Vec<ParamSpec>, keys: &[&str]) -> ActionInfo {
         group: Some("Capture".into()),
         keys: keys.iter().map(|k| (*k).to_owned()).collect(),
         params,
-        needs: vec!["active_path".into()],
+        needs: vec![cv_protocol::ContextNeed::ActivePath],
         durable: false,
     }
 }

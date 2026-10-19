@@ -311,9 +311,7 @@ pub struct StepCtx<'a> {
 impl<'a> StepCtx<'a> {
     /// The locked `state.db` with the one poison policy, recover (WP-R11, L6); hold it briefly.
     pub fn state(&self) -> std::sync::MutexGuard<'a, StateDb> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::sync::lock(self.state)
     }
 
     /// The current index generation ([`cv_index::Reader::open_current`] owns the swap retry).
@@ -575,10 +573,12 @@ pub(crate) mod race {
         times: usize,
         edit: impl FnMut(&str) -> String + Send + 'static,
     ) {
-        HOOKS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((root.to_path_buf(), path.to_owned(), times, Box::new(edit)));
+        crate::sync::lock(&HOOKS).push((
+            root.to_path_buf(),
+            path.to_owned(),
+            times,
+            Box::new(edit),
+        ));
     }
 
     pub(super) fn before_write(ctx: &StepCtx<'_>, path: &str) -> Result<(), StepError> {
@@ -586,9 +586,7 @@ pub(crate) mod race {
             return Ok(());
         };
         let next = {
-            let mut hooks = HOOKS
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut hooks = crate::sync::lock(&HOOKS);
             let Some(h) = hooks
                 .iter_mut()
                 .find(|h| h.0 == ctx.vault_root && h.1 == path && h.2 > 0)
