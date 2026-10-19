@@ -6,10 +6,11 @@
 # (`sources.toml` at record time, self-healed for older rows), blank when unknown. Length = the
 # YouTube duration (`h:mm:ss` / `m:ss`), else a blog body's reading minutes from its word count and
 # `Settings.md` `reading_wpm`, else blank. Plans intake-view-source-length, intake-type-column-length-backfill.
+# Round 8 (plan round-8-intake-views-anchor): `ignored` outcomes (ignored shorts) show as cancelled (`-`) rows.
 source = "tracker_items"
 
 [filters]
-and = ['day == this.file.name', 'outcome == "line" || outcome == "note"']
+and = ['day == this.file.name', 'outcome == "line" || outcome == "note" || outcome == "ignored"']
 
 [formulas]
 item = 'if(outcome == "note" && note_path, link(note_path, title), url(url, title))'

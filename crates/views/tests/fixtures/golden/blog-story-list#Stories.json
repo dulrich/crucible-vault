@@ -21,8 +21,9 @@
       "label": "created"
     },
     {
-      "key": "formula.read",
-      "label": "read"
+      "checkbox": true,
+      "key": "note.read",
+      "label": "Read"
     }
   ],
   "groups": [
@@ -52,8 +53,8 @@
               "v": "2026-10-01"
             },
             {
-              "t": "text",
-              "v": "✅"
+              "t": "bool",
+              "v": true
             }
           ],
           "path": "daily/day/2026-10-01/Alpha Post.md"
@@ -82,8 +83,8 @@
               "v": "2026-10-02"
             },
             {
-              "t": "text",
-              "v": "❌"
+              "t": "bool",
+              "v": false
             }
           ],
           "path": "daily/day/2026-10-02/Beta Post.md"
@@ -93,6 +94,7 @@
     }
   ],
   "kind": "table",
+  "max_height": "none",
   "notices": [],
   "summaries": [
     {

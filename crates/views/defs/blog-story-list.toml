@@ -17,6 +17,11 @@ and = [
 [[views]]
 type = "table"
 name = "Stories"
-order = ["file.name", "formula.tags", "note.word-count", "formula.minutes", "formula.created", "formula.read"]
+order = ["file.name", "formula.tags", "note.word-count", "formula.minutes", "formula.created", "note.read"]
+maxHeight = "none"
 sort = [{ property = "formula.created", direction = "ASC" }]
 summaries = { "note.word-count" = "Sum", "formula.minutes" = "Sum", "formula.unread_words" = "Sum" }
+
+[properties."note.read"]
+displayName = "Read"
+checkbox = true

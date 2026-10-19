@@ -14,6 +14,10 @@ read = 'if(note.read == true, "✅", "❌")'
 [[views]]
 type = "table"
 name = "Reading List"
-order = ["file.name", "formula.tags", "word-count", "formula.minutes", "formula.read", "formula.unread_words", "formula.unread_minutes"]
+order = ["file.name", "formula.tags", "word-count", "formula.minutes", "note.read", "formula.unread_words", "formula.unread_minutes"]
 summaries = { "word-count" = "Sum", "formula.minutes" = "Sum", "formula.unread_words" = "Sum", "formula.unread_minutes" = "Sum" }
-columnSize = { "formula.read" = 137, "formula.unread_words" = 204 }
+columnSize = { "note.read" = 137, "formula.unread_words" = 204 }
+
+[properties."note.read"]
+displayName = "Read"
+checkbox = true

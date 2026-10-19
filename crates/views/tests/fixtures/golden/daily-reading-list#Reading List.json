@@ -17,8 +17,9 @@
       "label": "minutes"
     },
     {
-      "key": "formula.read",
-      "label": "read"
+      "checkbox": true,
+      "key": "note.read",
+      "label": "Read"
     },
     {
       "key": "formula.unread_words",
@@ -52,8 +53,8 @@
               "v": 2.0
             },
             {
-              "t": "text",
-              "v": "✅"
+              "t": "bool",
+              "v": true
             },
             {
               "t": "number",
@@ -86,8 +87,8 @@
               "v": 5.0
             },
             {
-              "t": "text",
-              "v": "❌"
+              "t": "bool",
+              "v": false
             },
             {
               "t": "number",
