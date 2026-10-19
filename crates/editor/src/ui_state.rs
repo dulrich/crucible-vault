@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn wp3_layout_flags_default_off_and_round_trip() {
+    fn layout_flags_default_off_and_round_trip() {
         let tmp = tempfile::tempdir().expect("tmp");
         let path = tmp.path().join("editor.json");
         std::fs::write(&path, br#"{"tabs":["a.md"],"surround":"dark"}"#).expect("old");

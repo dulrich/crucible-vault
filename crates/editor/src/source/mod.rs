@@ -179,12 +179,11 @@ pub fn update(
             }
         }
         SourceMsg::Undo | SourceMsg::Redo => {
-            let changed = !buf.read_only
-                && if matches!(msg, SourceMsg::Undo) {
-                    buf.undo()
-                } else {
-                    buf.redo()
-                };
+            let changed = if matches!(msg, SourceMsg::Undo) {
+                buf.undo()
+            } else {
+                buf.redo()
+            };
             if changed {
                 autosave_timer(buf.path.clone(), buf.edit_seq)
             } else {

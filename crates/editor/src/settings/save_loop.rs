@@ -27,7 +27,7 @@ pub fn write_config(
     content: &str,
     base: Option<&ContentHash>,
 ) -> Result<WriteOutcome, String> {
-    let absent = ContentHash::from_hex("");
+    let absent = crate::daemon::no_base();
     match d.write_note(path, content, base.unwrap_or(&absent)) {
         Ok(h) => Ok(WriteOutcome::Saved(h)),
         Err(DaemonError::Conflict { .. }) => Ok(WriteOutcome::Conflict),

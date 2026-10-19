@@ -567,7 +567,7 @@ fn panes_split_open_close_and_persist() {
 }
 
 #[test]
-fn wp1_shaped_editor_json_loads_into_one_pane() {
+fn single_pane_era_editor_json_loads_into_one_pane() {
     let (tmp, d) = fake_arc();
     d.create_note("wp4old/a.md", "x").expect("create");
     d.create_note("wp4old/b.md", "y").expect("create");

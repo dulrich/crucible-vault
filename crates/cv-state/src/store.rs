@@ -757,7 +757,7 @@ impl StateReader {
 }
 
 #[cfg(test)]
-mod wp11_tests {
+mod retry_and_tracker_tests {
     use crate::*;
     use cv_protocol::{Lane, TrackerOutcome};
     use serde_json::json;

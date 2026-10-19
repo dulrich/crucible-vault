@@ -7,7 +7,7 @@ use std::time::Duration;
 use iced::Task;
 
 use super::SourceBuffer;
-use crate::daemon::{ContentHash, DaemonClient, DaemonError};
+use crate::daemon::{ContentHash, DaemonClient, DaemonError, is_no_base, no_base};
 use crate::message::{Message, SourceMsg};
 
 /// Autosave debounce after the last edit.
@@ -75,7 +75,7 @@ impl Conflict {
     fn base(self) -> ContentHash {
         match self {
             Self::Changed(h) => h,
-            Self::Missing => ContentHash::from_hex(String::new()),
+            Self::Missing => no_base(),
         }
     }
 }
@@ -195,10 +195,10 @@ impl SourceBuffer {
         self.save.save_again = false;
     }
 
-    /// Prepares a save, or `None` (clean, read-only, conflicted or already in flight — in the
+    /// Prepares a save, or `None` (clean, conflicted or already in flight — in the
     /// last case a follow-up save is queued).
     pub fn begin_save(&mut self) -> Option<SaveJob> {
-        if self.read_only || !self.save.dirty || self.save.conflict.is_some() {
+        if !self.save.dirty || self.save.conflict.is_some() {
             return None;
         }
         if self.save.in_flight.is_some() || self.save.renaming {
@@ -266,7 +266,7 @@ impl SourceBuffer {
                     Ok((_, h)) => h,
                     // WP-2 (audit E2a): deleted / moved away under edits → missing-file state.
                     Err(DaemonError::NotFound(_)) => {
-                        if !self.save.base_hash.as_str().is_empty() {
+                        if !is_no_base(&self.save.base_hash) {
                             self.save.conflict = Some(Conflict::Missing);
                         }
                         return None;

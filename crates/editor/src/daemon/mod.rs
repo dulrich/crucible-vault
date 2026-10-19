@@ -26,6 +26,17 @@ pub use fake::{ActionHandler, FakeDaemon, FakeLookups};
 pub use local::LocalIndex;
 pub use socket::SocketDaemon;
 
+/// The CAS "no base / create-only" sentinel: the empty hash. `write_note` with it creates a
+/// file that must not exist yet; a `Conflict` carrying it means the file is absent.
+pub fn no_base() -> ContentHash {
+    ContentHash::from_hex(String::new())
+}
+
+/// Whether `hash` is the [`no_base`] sentinel.
+pub fn is_no_base(hash: &ContentHash) -> bool {
+    hash.as_str().is_empty()
+}
+
 /// Every topic the editor listens to.
 pub const ALL_TOPICS: [Topic; 6] = [
     Topic::FileChanged,

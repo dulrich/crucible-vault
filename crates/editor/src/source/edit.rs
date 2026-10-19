@@ -23,9 +23,6 @@ impl SourceBuffer {
     /// a selection). A selection ending at column 0 of a later line does not touch that line.
     /// The selection keeps covering the same lines (columns shift by the bytes changed).
     pub fn indent(&mut self, outdent: bool, now: Instant) -> bool {
-        if self.read_only {
-            return false;
-        }
         let content = self.shaped();
         let before = content.cursor();
         let pos = before.position;
@@ -113,9 +110,6 @@ impl SourceBuffer {
             self.track_top(scroll, before);
             return false;
         }
-        if self.read_only {
-            return false;
-        }
         let before = self.shaped().cursor();
         let kind = match (&action, before.selection) {
             (Action::Edit(Edit::Insert(c)), None) => EditKind::Type(*c),
@@ -173,9 +167,6 @@ impl SourceBuffer {
             let changed = self.perform(Action::Edit(Edit::Delete), now);
             return (Some(sel), changed);
         }
-        if self.read_only {
-            return (None, false);
-        }
         let content = self.shaped();
         let before = content.cursor();
         let l = before.position.line;
@@ -212,9 +203,6 @@ impl SourceBuffer {
 
     /// Enter with list continuation (one edit; a selection is replaced first).
     pub fn enter(&mut self, now: Instant) -> bool {
-        if self.read_only {
-            return false;
-        }
         let before = self.shaped().cursor();
         self.transact(before, EditKind::Other, now, |c| {
             if c.cursor().selection.is_some() {
@@ -245,9 +233,6 @@ impl SourceBuffer {
     /// Ctrl+Backspace / Ctrl+Delete: delete to the previous / next word boundary (iced
     /// `WordLeft`/`WordRight`), or the selection, as one edit.
     pub fn delete_word(&mut self, forward: bool, now: Instant) -> bool {
-        if self.read_only {
-            return false;
-        }
         let content = self.shaped();
         let before = content.cursor();
         if before.selection.is_none() {
@@ -316,9 +301,6 @@ impl SourceBuffer {
         with: &str,
         now: Instant,
     ) -> bool {
-        if self.read_only {
-            return false;
-        }
         let text = self.text();
         let (Some(a), Some(b)) = (
             undo::offset_of(&text, undo::Pos::new(line, cols.start)),

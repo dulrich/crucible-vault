@@ -445,6 +445,100 @@ impl Panels {
     }
 }
 
+/// What [`update`] asks the app to do (as `source::Effect` / `views::Effect`).
+#[derive(Debug, PartialEq)]
+pub enum Effect {
+    /// Nothing more.
+    None,
+    /// Bring the panels up to date with the focused tab ([`Panels::sync_buffer`] and friends).
+    Sync,
+    /// [`Self::Sync`], then focus the search field.
+    SyncAndFocusSearch,
+    /// Move the active source cursor to this 0-based line.
+    OutlineJump(usize),
+    /// Open this path in the focused pane.
+    Open(String),
+    /// A notice for the status bar.
+    Error(String),
+    /// Pick this tag (a daemon query; an error goes to the status bar).
+    PickTag(String),
+    /// Arm the search debounce for keystroke `seq`.
+    SearchDebounce(u64),
+    /// Run the FTS query `q` off-thread; the answer is tagged with `seq`.
+    SearchRun { seq: u64, q: String },
+}
+
+/// Handles a [`PanelsMsg`] on the panel state; `has_daemon` says whether search can run.
+pub fn update(p: &mut Panels, m: PanelsMsg, has_daemon: bool) -> Effect {
+    match m {
+        PanelsMsg::Toggle => {
+            p.visible = !p.visible;
+            Effect::Sync
+        }
+        PanelsMsg::Show(k) => {
+            p.visible = true;
+            p.kind = k;
+            if k == PanelKind::Search {
+                Effect::SyncAndFocusSearch
+            } else {
+                Effect::Sync
+            }
+        }
+        PanelsMsg::Tick => Effect::Sync,
+        PanelsMsg::OutlineJump(line) => Effect::OutlineJump(line),
+        PanelsMsg::Open(path) => Effect::Open(path),
+        PanelsMsg::Backlinks { path, result } => match result {
+            Ok(b) if p.path.as_deref() == Some(path.as_str()) => {
+                p.backlinks = b;
+                Effect::None
+            }
+            Ok(_) => Effect::None,
+            Err(e) => Effect::Error(format!("backlinks: {e}")),
+        },
+        PanelsMsg::TagPick(tag) => Effect::PickTag(tag),
+        PanelsMsg::TagBack => {
+            p.tag_files = None;
+            Effect::None
+        }
+        PanelsMsg::SearchInput(q) => {
+            p.search.query = q;
+            p.search.seq += 1;
+            Effect::SearchDebounce(p.search.seq)
+        }
+        PanelsMsg::SearchDue(seq) => {
+            if seq != p.search.seq {
+                return Effect::None;
+            }
+            let q = p.search.query.clone();
+            if q.trim().is_empty() {
+                p.search.results.clear();
+                return Effect::None;
+            }
+            if !has_daemon {
+                p.search.error = Some(SEARCH_UNAVAILABLE.to_owned());
+                return Effect::None;
+            }
+            Effect::SearchRun { seq, q }
+        }
+        PanelsMsg::SearchDone { seq, result } => {
+            if seq == p.search.seq {
+                match result {
+                    Ok(r) => {
+                        p.search.results = r;
+                        p.search.error = None;
+                    }
+                    Err(e) => p.search.error = Some(e),
+                }
+            }
+            Effect::None
+        }
+        PanelsMsg::Scrolled(id, w) => {
+            p.set_window(id, w);
+            Effect::None
+        }
+    }
+}
+
 fn pm(m: PanelsMsg) -> Message {
     Message::Panels(m)
 }

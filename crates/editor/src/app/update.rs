@@ -300,90 +300,53 @@ impl App {
     }
 
     fn update_panels(&mut self, m: PanelsMsg) -> Task<Message> {
-        match m {
-            PanelsMsg::Toggle => {
-                self.panels.visible = !self.panels.visible;
-                return self.sync_panels();
-            }
-            PanelsMsg::Show(k) => {
-                self.panels.visible = true;
-                self.panels.kind = k;
-                let t = self.sync_panels();
-                if k == crate::panels::PanelKind::Search {
-                    return Task::batch([
-                        t,
-                        iced::widget::operation::focus(crate::panels::SEARCH_ID),
-                    ]);
-                }
-                return t;
-            }
-            PanelsMsg::Tick => return self.sync_panels(),
-            PanelsMsg::OutlineJump(line) => {
+        use crate::panels::Effect;
+        match crate::panels::update(&mut self.panels, m, self.daemon.is_some()) {
+            Effect::None => Task::none(),
+            Effect::Sync => self.sync_panels(),
+            Effect::SyncAndFocusSearch => Task::batch([
+                self.sync_panels(),
+                iced::widget::operation::focus(crate::panels::SEARCH_ID),
+            ]),
+            Effect::OutlineJump(line) => {
                 if let Some(doc) = self.active_doc_mut() {
                     doc.move_to(iced::widget::text_editor::Cursor {
                         position: iced::widget::text_editor::Position { line, column: 0 },
                         selection: None,
                     });
                 }
+                Task::none()
             }
-            PanelsMsg::Open(p) => self.open(&p),
-            PanelsMsg::Backlinks { path, result } => match result {
-                Ok(b) if self.panels.path.as_deref() == Some(path.as_str()) => {
-                    self.panels.backlinks = b;
-                }
-                Ok(_) => {}
-                Err(e) => self.status.set_error(format!("backlinks: {e}")),
-            },
-            PanelsMsg::TagPick(tag) => {
+            Effect::Open(p) => {
+                self.open(&p);
+                Task::none()
+            }
+            Effect::Error(e) => {
+                self.status.set_error(e);
+                Task::none()
+            }
+            Effect::PickTag(tag) => {
                 if let Some(d) = self.daemon.clone()
                     && let Err(e) = self.panels.pick_tag(d.as_ref(), &tag)
                 {
                     self.status.set_error(format!("tags: {e}"));
                 }
+                Task::none()
             }
-            PanelsMsg::TagBack => self.panels.tag_files = None,
-            PanelsMsg::SearchInput(q) => {
-                self.panels.search.query = q;
-                self.panels.search.seq += 1;
-                let seq = self.panels.search.seq;
+            Effect::SearchDebounce(seq) => {
                 let wait = self.prefs.search_debounce();
-                return Task::perform(async move { tokio::time::sleep(wait).await }, move |()| {
+                Task::perform(async move { tokio::time::sleep(wait).await }, move |()| {
                     Message::Panels(PanelsMsg::SearchDue(seq))
-                });
+                })
             }
-            PanelsMsg::SearchDue(seq) => {
-                if seq != self.panels.search.seq {
-                    return Task::none();
-                }
-                let q = self.panels.search.query.clone();
-                if q.trim().is_empty() {
-                    self.panels.search.results.clear();
-                    return Task::none();
-                }
-                if self.daemon.is_none() {
-                    self.panels.search.error = Some(crate::panels::SEARCH_UNAVAILABLE.to_owned());
-                    return Task::none();
-                }
+            Effect::SearchRun { seq, q } => {
                 let limit = self.prefs.search_limit;
-                return self.rpc(
+                self.rpc(
                     move |d| crate::panels::run_search(d, &q, limit),
                     move |result| Message::Panels(PanelsMsg::SearchDone { seq, result }),
-                );
+                )
             }
-            PanelsMsg::SearchDone { seq, result } => {
-                if seq == self.panels.search.seq {
-                    match result {
-                        Ok(r) => {
-                            self.panels.search.results = r;
-                            self.panels.search.error = None;
-                        }
-                        Err(e) => self.panels.search.error = Some(e),
-                    }
-                }
-            }
-            PanelsMsg::Scrolled(id, w) => self.panels.set_window(id, w),
         }
-        Task::none()
     }
 
     /// Brings the panels up to date with the focused pane's active tab (cheap when unchanged).

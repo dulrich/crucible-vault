@@ -561,9 +561,6 @@ fn toggle_frontmatter_bool_flips_only_the_scalar() {
     assert!(b.is_dirty());
     assert_eq!(b.edit_seq(), seq + 1);
     assert!(!b.set_frontmatter_bool("tags", None, Instant::now()));
-    b.set_read_only(true);
-    assert!(!b.set_frontmatter_bool("read", None, Instant::now()));
-    b.set_read_only(false);
     assert!(b.undo());
     assert_eq!(b.text(), src);
 }
@@ -607,9 +604,6 @@ fn toggle_task_on_plain_buffer_is_one_undoable_edit() {
     assert!(b.toggle_task(4, Instant::now()));
     assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [x] two\n");
     assert!(!b.toggle_task(1, Instant::now()), "not a task line");
-    b.set_read_only(true);
-    assert!(!b.toggle_task(3, Instant::now()), "read-only drops it");
-    b.set_read_only(false);
     assert!(b.undo());
     assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [/] two\n");
     assert!(b.undo());
@@ -839,19 +833,6 @@ fn shift_tab_without_selection_outdents_cursor_line() {
 }
 
 #[test]
-fn tab_and_shift_tab_are_noops_when_read_only() {
-    let (_t, d, mut app, p) = setup();
-    set_text(&mut app, &d, &p, "\tx\n");
-    let b = buf(&mut app);
-    let now = Instant::now();
-    b.set_read_only(true);
-    assert!(!b.indent(false, now));
-    assert!(!b.indent(true, now));
-    assert_eq!(b.text(), "\tx\n");
-    assert!(!b.is_dirty());
-}
-
-#[test]
 fn tab_keys_bind_only_when_focused() {
     use iced::keyboard::key::{Named, Physical};
     use iced::keyboard::{Key, Modifiers};
@@ -1034,10 +1015,6 @@ fn ctrl_x_without_selection_cuts_the_line_as_one_undoable_edit() {
     let (clip, _) = buf(&mut app).cut(Instant::now());
     assert_eq!(clip.as_deref(), Some("a"));
     assert_eq!(buf(&mut app).text(), "\nlast");
-    // Read-only: nothing is cut.
-    at(&mut app, 1, 0, None);
-    buf(&mut app).set_read_only(true);
-    assert_eq!(buf(&mut app).cut(Instant::now()), (None, false));
 }
 
 #[test]

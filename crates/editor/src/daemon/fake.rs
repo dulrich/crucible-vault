@@ -15,7 +15,8 @@ use cv_protocol::{ChangeKind, JobState, Origin};
 use super::{
     ActionInfo, ContentHash, DaemonClient, DaemonError, DeleteMode, DeleteNoteResult,
     DeletePreviewItem, HelloResult, JobStatus, LocalIndex, Notification, Result, RunActionParams,
-    RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult, vault_abs,
+    RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult, is_no_base, no_base,
+    vault_abs,
 };
 
 /// A scripted action: params in, `Ok(open_path)` or `Err(message)` out.
@@ -402,11 +403,11 @@ impl DaemonClient for FakeDaemon {
         let found = current_hash(&abs)?;
         let matches = match &found {
             Some(h) => h == base_hash,
-            None => base_hash.as_str().is_empty(),
+            None => is_no_base(base_hash),
         };
         if !matches {
             return Err(DaemonError::Conflict {
-                current_hash: found.unwrap_or_else(|| ContentHash::from_hex("")),
+                current_hash: found.unwrap_or_else(no_base),
             });
         }
         if let Some(parent) = abs.parent() {
@@ -428,7 +429,7 @@ impl DaemonClient for FakeDaemon {
         if abs.exists() {
             return Err(DaemonError::Protocol(format!("{path} exists")));
         }
-        self.write_note(path, content, &ContentHash::from_hex(""))?;
+        self.write_note(path, content, &no_base())?;
         Ok(path.to_owned())
     }
 

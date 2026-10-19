@@ -32,9 +32,6 @@ pub struct SourceBuffer {
     pub(super) save: SaveState,
     /// Highlighter epoch (bumped on wholesale content replacement).
     pub(super) epoch: u64,
-    /// Edits are dropped and saves never start. Shadow mode (the only read-only source) was
-    /// retired in plan tn-review-baseline-remediation WP-R6; set once here (WP-R16 L2).
-    pub(super) read_only: bool,
     /// The selection last written to PRIMARY (not re-written while unchanged).
     pub(super) primary: Option<String>,
     /// plan editor-ui-round-3 WP-6: the top visible source line, tracked from the wheel's
@@ -95,19 +92,12 @@ impl SourceBuffer {
             edit_seq: 0,
             save: SaveState::new(hash, title),
             epoch: 0,
-            read_only: false,
             primary: None,
             top_line: 0,
             carry: None,
             visible_lines: VISIBLE_LINES,
             title_cache: std::cell::RefCell::default(),
         }
-    }
-
-    /// Test hook: makes the buffer read-only (no production caller since WP-R6).
-    #[cfg(test)]
-    pub(crate) fn set_read_only(&mut self, on: bool) {
-        self.read_only = on;
     }
 
     /// The vault-relative path.
