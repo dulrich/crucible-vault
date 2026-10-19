@@ -21,7 +21,7 @@ use crate::daemon::{DaemonClient, DaemonError};
 use crate::explorer::{self, EditKind, Explorer, FileOp, FileOpDone};
 use crate::message::{
     AfterSave, ExplorerMsg, FindMsg, Message, NavMsg, PaletteMsg, PanelsMsg, PanesMsg, SourceMsg,
-    StatusMsg, SwitcherMsg, TabsMsg, ThemeMsg,
+    SourceTarget, StatusMsg, SwitcherMsg, TabsMsg, ThemeMsg,
 };
 use crate::nav;
 use crate::panes::{self, PaneState};
@@ -29,23 +29,57 @@ use crate::switcher::{self, Switcher};
 use crate::theme::{Surround, Tokens};
 use crate::ui_state::{self, SplitDir, UiState};
 
-/// One open tab: a view of the document at `path` (plan editor-feedback-round-2 WP-7). The
-/// [`crate::source::SourceBuffer`] lives in the path-keyed [`Docs`] store on [`App`], so two
-/// tabs of one note are mirrored views of one document (content, undo, dirty/saving, conflict,
-/// cursor). `id` is unique per tab for the session: it identifies the tab across async work
-/// (a close waiting on a save, audit E1) and keys per-view state (image pins). The Settings tab
-/// (plan editor-settings-tab WP-2) is a tab whose `path` is the reserved
-/// [`crate::settings::SETTINGS_TAB`] sentinel (not a valid vault path) and has no document;
-/// [`Tab::kind`] tells them apart, and it never reaches a daemon read or write.
+/// One open tab (plan editor-feedback-round-2 WP-7): a view of a note's document, or one of
+/// the singleton tabs (Settings, Log). A note's [`crate::source::SourceBuffer`] lives in the
+/// path-keyed [`OpenDoc`] store on [`App`], so two tabs of one note are mirrored views of one
+/// document (content, undo, dirty/saving, conflict, cursor). `id` is unique per tab for the
+/// session: it identifies the tab across async work (a close waiting on a save, audit E1) and
+/// keys per-view state (image pins, Reading place). WP-R15 (B4): the kind is a type, never a
+/// reserved path; singleton tabs never reach a daemon read or write.
 #[derive(Debug, Clone)]
 pub struct Tab {
-    pub path: String,
     pub id: u64,
+    pub kind: TabKind,
 }
 
-/// The document store: one source buffer per open note path (plan editor-feedback-round-2
-/// WP-7). A document lives while at least one tab shows its path.
-pub type Docs = std::collections::HashMap<String, crate::source::SourceBuffer>;
+pub use crate::ui_state::TabKind;
+
+/// One open document (WP-R15 SP2): everything per note path lives here, so a close is one
+/// `remove` and a rename one re-key. A document lives while at least one tab shows its path.
+/// Its Reading state ([`crate::reading::DocReading`]) is the same path's entry in
+/// [`crate::reading::ReadingStore`] (removed / re-keyed alongside this one).
+#[derive(Debug)]
+pub struct OpenDoc {
+    pub buffer: crate::source::SourceBuffer,
+    /// Tabs (by [`Tab::id`]) whose close waits on this note's in-flight normal save (WP-3
+    /// rework; audit E1: a close keeps its target tab identity across the save, so closing one
+    /// duplicate never closes the other).
+    pub close_waiters: Vec<u64>,
+}
+
+/// The document store: one [`OpenDoc`] per open note path (plan editor-feedback-round-2 WP-7).
+pub type Docs = std::collections::HashMap<String, OpenDoc>;
+
+/// The source buffer of the document open at `path` (a field-level borrow of [`App::docs`]).
+fn buf<'a>(docs: &'a Docs, path: &str) -> Option<&'a crate::source::SourceBuffer> {
+    docs.get(path).map(|d| &d.buffer)
+}
+
+/// [`buf`], mutably.
+fn buf_mut<'a>(docs: &'a mut Docs, path: &str) -> Option<&'a mut crate::source::SourceBuffer> {
+    docs.get_mut(path).map(|d| &mut d.buffer)
+}
+
+/// The `editor.json` write debounce (WP-R15 SM12): a burst of UI-state changes (hover focus,
+/// tab switches) is written once.
+pub const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A note tab, borrowed: its id and vault path ([`Tab::as_note`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoteRef<'a> {
+    pub id: u64,
+    pub path: &'a str,
+}
 
 /// The next [`Tab::id`].
 static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -67,59 +101,36 @@ pub(crate) enum Place {
     Duplicate,
 }
 
-/// What a tab shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabKind<'a> {
-    /// A vault note at this path.
-    Note(&'a str),
-    Settings,
-    /// Plan round-6-feedback-todos WP-7: the notice log ([`crate::log::LOG_TAB`]).
-    Log,
-}
-
 impl Tab {
-    /// The tab's kind.
-    pub fn kind(&self) -> TabKind<'_> {
-        if self.is_settings() {
-            TabKind::Settings
-        } else if self.is_log() {
-            TabKind::Log
-        } else {
-            TabKind::Note(&self.path)
-        }
-    }
-
-    /// Whether this is the Settings tab.
-    pub fn is_settings(&self) -> bool {
-        self.path == crate::settings::SETTINGS_TAB
-    }
-
-    /// Whether this is the Log tab.
-    pub fn is_log(&self) -> bool {
-        self.path == crate::log::LOG_TAB
-    }
-
-    /// Whether this tab is a sentinel (Settings, Log): no document, never a note.
-    pub fn is_sentinel(&self) -> bool {
-        self.is_settings() || self.is_log()
-    }
-
-    /// Whether `path` is a sentinel tab path.
-    pub fn sentinel_path(path: &str) -> bool {
-        path == crate::settings::SETTINGS_TAB || path == crate::log::LOG_TAB
-    }
-
-    /// A new tab (fresh id) showing `path`.
-    pub fn new(path: &str) -> Self {
+    /// A new tab (fresh id) of `kind`.
+    pub fn new(kind: TabKind) -> Self {
         Self {
-            path: path.to_owned(),
             id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            kind,
         }
     }
 
-    /// The Settings tab (no daemon read, no document).
-    pub fn settings() -> Self {
-        Self::new(crate::settings::SETTINGS_TAB)
+    /// A new note tab (fresh id) showing `path`.
+    pub fn note(path: &str) -> Self {
+        Self::new(TabKind::Note(path.to_owned()))
+    }
+
+    /// The note path, when this is a note tab.
+    pub fn path(&self) -> Option<&str> {
+        match &self.kind {
+            TabKind::Note(p) => Some(p),
+            TabKind::Settings | TabKind::Log => None,
+        }
+    }
+
+    /// This tab as a note (`None` for Settings / Log).
+    pub fn as_note(&self) -> Option<NoteRef<'_>> {
+        self.path().map(|path| NoteRef { id: self.id, path })
+    }
+
+    /// Whether this tab shows the note at `path`.
+    pub fn shows(&self, path: &str) -> bool {
+        self.path() == Some(path)
     }
 }
 
@@ -483,12 +494,14 @@ pub struct App {
     pub(crate) quit: Option<QuitState>,
     /// plan editor-data-safety WP-2: the open modal dialog (input priority while `Some`).
     pub dialog: Option<crate::dialog::Dialog>,
-    /// Notes whose close waits on an in-flight normal save (WP-3 rework).
-    /// Keyed by path; the values are the ids of the tabs to close (audit E1: a close keeps its
-    /// target tab identity across the save, so closing one duplicate never closes the other).
-    closing: std::collections::HashMap<String, Vec<u64>>,
-    /// Plan editor-feedback-round-2 WP-7: one source buffer per open note path.
+    /// Plan editor-feedback-round-2 WP-7 / WP-R15: one [`OpenDoc`] per open note path.
     pub docs: Docs,
+    /// WP-R15 (SM12): the UI state last written to `editor.json` (`None` = never written).
+    persisted: Option<UiState>,
+    /// WP-R15 (SM12): a debounced `editor.json` write is scheduled.
+    persist_pending: bool,
+    /// Tests: `editor.json` writes so far.
+    pub ui_writes: u64,
     /// The app asked iced to exit (tests observe it).
     pub exiting: bool,
     /// WP-R2 (SR3): the held keyboard modifiers (Shift+Enter in find / switcher, Shift+click).
@@ -500,18 +513,11 @@ pub struct App {
     /// plan editor-settings-tab WP-4 (audit E2): the day / month note folders from the loaded
     /// `captures.toml` (constants when absent / unloaded / malformed).
     pub period_folders: editor_model::period::PeriodFolders,
-    /// Frontmatter `title` per note path, keyed by the buffer's edit seq (plan
-    /// editor-feedback-round-2 WP-6: the `tab_title = "title"` source; recomputed only when the
-    /// buffer changed, so drawing the tab bar never re-parses an unchanged note).
-    fm_titles: std::cell::RefCell<FmTitleCache>,
     /// plan editor-ui-round-3 WP-4: the open right-click menu (one at a time).
     pub context_menu: Option<crate::context_menu::ContextMenu>,
     /// plan editor-round-4 WP-4: the image clipboard writer (`xclip` in production).
     pub clip_writer: Arc<dyn crate::clipboard_image::ClipboardWriter + Send + Sync>,
 }
-
-/// Frontmatter `title` per tab path, keyed by `(edit_seq, epoch)` (plan editor-feedback-round-2 WP-6).
-type FmTitleCache = std::collections::HashMap<String, ((u64, u64), Option<String>)>;
 
 /// A quit in progress: the saves it waits on, and whether one failed.
 #[derive(Debug, Default)]
@@ -676,24 +682,30 @@ impl App {
             history_nav: false,
             quit: None,
             dialog: None,
-            closing: std::collections::HashMap::new(),
             docs: Docs::new(),
+            persisted: None,
+            persist_pending: false,
+            ui_writes: 0,
             exiting: false,
             modifiers: iced::keyboard::Modifiers::empty(),
             settings: crate::settings::Settings::default(),
             prefs: crate::settings::editor_prefs::Prefs::default(),
             period_folders: editor_model::period::PeriodFolders::default(),
-            fm_titles: std::cell::RefCell::default(),
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::Xclip),
         };
         app.load_editor_prefs();
         app.refresh_files();
         app.load_bookmarks();
-        for (pane, paths, active) in plan {
-            for p in &paths {
-                if let Err(e) = app.open_into(pane, p, Place::Restore) {
-                    app.status.set_error(open_error(&e));
+        for (pane, tabs, active) in plan {
+            for kind in tabs {
+                match kind {
+                    TabKind::Note(p) => {
+                        if let Err(e) = app.open_into(pane, &p, Place::Restore) {
+                            app.status.set_error(open_error(&e));
+                        }
+                    }
+                    TabKind::Settings | TabKind::Log => app.open_singleton(kind, pane),
                 }
             }
             if let Some(ps) = app.panes.get_mut(pane)
@@ -705,11 +717,14 @@ impl App {
         app.focus = focus;
         app.restoring = false;
         for (_, ps) in app.panes.iter_mut() {
-            if let Some(p) = ps.active_note().map(|t| t.path.clone()) {
+            if let Some(p) = ps.active_note().map(|t| t.path.to_owned()) {
                 ps.history.push(&p);
             }
         }
         app.sync_buffers();
+        // The restored state is what is on disk: only a later change writes.
+        app.sync_ui_state();
+        app.persisted = Some(app.ui.clone());
         app
     }
 
@@ -724,11 +739,11 @@ impl App {
             .panes
             .iter()
             .filter_map(|(_, ps)| ps.active_note())
-            .filter(|t| self.reading.mode(&t.path).shows_source())
-            .map(|t| t.path.clone())
+            .filter(|t| self.reading.mode(t.path).shows_source())
+            .map(|t| t.path.to_owned())
             .collect();
         for (path, doc) in &mut self.docs {
-            doc.set_shaped(visible.contains(path));
+            doc.buffer.set_shaped(visible.contains(path));
         }
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         if ms >= 1.0 {
@@ -843,7 +858,7 @@ impl App {
         let Some(d) = self.daemon.clone() else {
             return Task::none();
         };
-        let Some(doc) = self.docs.get_mut(path) else {
+        let Some(doc) = buf_mut(&mut self.docs, path) else {
             return Task::none();
         };
         if doc.is_saving() {
@@ -891,12 +906,12 @@ impl App {
             .map_or(0, |t| t.id)
     }
 
-    /// Plan round-5 WP-1: every pane's active tab id (with its path; Settings = `None`).
-    fn active_views(&self) -> Vec<(u64, Option<String>)> {
+    /// Plan round-5 WP-1: every pane's active tab (id and kind).
+    fn active_views(&self) -> Vec<(u64, TabKind)> {
         self.panes
             .iter()
             .filter_map(|(_, ps)| ps.active_tab())
-            .map(|t| (t.id, (!t.is_sentinel()).then(|| t.path.clone())))
+            .map(|t| (t.id, t.kind.clone()))
             .collect()
     }
 
@@ -904,49 +919,51 @@ impl App {
     /// bodies are in the tree, so every tab that became active in this update gets its stored
     /// place re-applied explicitly — Reading (probe → `scroll_to`), Settings (body offset).
     /// Source re-applies its tracked top line on materialise (`SourceBuffer::shaped`).
-    fn restore_places(&mut self, before: &[(u64, Option<String>)]) -> Task<Message> {
+    fn restore_places(&mut self, before: &[(u64, TabKind)]) -> Task<Message> {
         let mut tasks = Vec::new();
-        for (id, path) in self.active_views() {
+        for (id, kind) in self.active_views() {
             if before.iter().any(|(b, _)| *b == id) {
                 continue;
             }
-            match path {
-                Some(p) => {
+            match kind {
+                TabKind::Note(p) => {
                     tasks.extend(self.reading.restore(&p, id));
                     if self.reading.mode(&p).shows_reading() {
                         tasks.extend(self.views.restore(&p));
                     }
                 }
-                None => tasks.push(self.settings.restore_scroll()),
+                TabKind::Settings => tasks.push(self.settings.restore_scroll()),
+                // WP-R15 (B4): the Log tab has no stored place (was Settings' restore).
+                TabKind::Log => {}
             }
         }
         Task::batch(tasks)
     }
 
     /// The focused pane's active tab when it is a note (never the Settings tab).
-    pub fn active_note(&self) -> Option<&Tab> {
+    pub fn active_note(&self) -> Option<NoteRef<'_>> {
         self.panes.get(self.focus).and_then(PaneState::active_note)
     }
 
     /// The document open at `path` (plan editor-feedback-round-2 WP-7).
     pub fn doc(&self, path: &str) -> Option<&crate::source::SourceBuffer> {
-        self.docs.get(path)
+        buf(&self.docs, path)
     }
 
     /// The document open at `path`, mutably.
     pub fn doc_mut(&mut self, path: &str) -> Option<&mut crate::source::SourceBuffer> {
-        self.docs.get_mut(path)
+        buf_mut(&mut self.docs, path)
     }
 
     /// The focused pane's active note's document.
     pub fn active_doc(&self) -> Option<&crate::source::SourceBuffer> {
-        self.active_note().and_then(|t| self.docs.get(&t.path))
+        self.active_note().and_then(|t| buf(&self.docs, t.path))
     }
 
     /// The focused pane's active note's document, mutably.
     pub fn active_doc_mut(&mut self) -> Option<&mut crate::source::SourceBuffer> {
-        let path = self.active_note()?.path.clone();
-        self.docs.get_mut(&path)
+        let path = self.active_note()?.path.to_owned();
+        buf_mut(&mut self.docs, &path)
     }
 
     /// Tests: the note saves a quit in progress waits on (started + in flight), per document.
@@ -959,7 +976,7 @@ impl App {
 
     /// Whether the document at `path` has unsaved edits (false when none is open).
     fn doc_dirty(&self, path: &str) -> bool {
-        self.docs.get(path).is_some_and(|d| d.is_dirty())
+        buf(&self.docs, path).is_some_and(|d| d.is_dirty())
     }
 
     /// Whether any tab shows `path`.
@@ -973,12 +990,12 @@ impl App {
         self.prefs.ui_scale.clamp(lo, hi)
     }
 
-    /// Every open tab path, pane by pane in layout order.
+    /// Every open note path, pane by pane in layout order.
     pub fn open_paths(&self) -> Vec<String> {
         panes::order(&self.panes)
             .into_iter()
             .filter_map(|p| self.panes.get(p))
-            .flat_map(|s| s.tabs.iter().map(|t| t.path.clone()))
+            .flat_map(|s| s.tabs.iter().filter_map(Tab::path).map(str::to_owned))
             .collect()
     }
 
@@ -1117,20 +1134,34 @@ impl App {
         self.dispatch_op(FileOp::Create { path })
     }
 
+    /// Splits the focused pane to the right and focuses the new pane (unchanged focus when the
+    /// split fails).
+    fn split_focused(&mut self) {
+        if let Some((p, _)) = self.panes.split(
+            panes::axis_of(SplitDir::Right),
+            self.focus,
+            PaneState::default(),
+        ) {
+            self.focus = p;
+        }
+    }
+
+    /// "Open in new pane": a second tab of `path` in a new pane right of the focused one.
+    fn open_in_new_pane(&mut self, path: &str) {
+        self.split_focused();
+        self.open_with(path, Place::Duplicate);
+    }
+
     /// Opens `path` into the focused pane (focusing an existing tab anywhere). The read is a
     /// local disk read of one note, done inline; RPC calls never run here.
-    fn open(&mut self, path: &str, persist: bool) {
-        self.open_with(path, Place::Focus, persist);
+    fn open(&mut self, path: &str) {
+        self.open_with(path, Place::Focus);
     }
 
     /// [`Self::open`] with an explicit placement (Quick Switch modes).
-    fn open_with(&mut self, path: &str, how: Place, persist: bool) {
+    fn open_with(&mut self, path: &str, how: Place) {
         if let Err(e) = self.open_into(self.focus, path, how) {
             self.status.set_error(open_error(&e));
-            return;
-        }
-        if persist {
-            self.persist();
         }
     }
 
@@ -1147,14 +1178,6 @@ impl App {
     /// document; a further tab of an open note shares its document (plan
     /// editor-feedback-round-2 WP-7).
     fn open_into(&mut self, pane: Pane, path: &str, how: Place) -> Result<(), DaemonError> {
-        if path == crate::settings::SETTINGS_TAB {
-            self.open_settings_into(pane);
-            return Ok(());
-        }
-        if path == crate::log::LOG_TAB {
-            self.open_log_into(pane);
-            return Ok(());
-        }
         let pane = if self.panes.get(pane).is_some() {
             pane
         } else {
@@ -1165,7 +1188,7 @@ impl App {
             let here = self
                 .panes
                 .get(pane)
-                .and_then(|ps| ps.tabs.iter().position(|t| t.path == path));
+                .and_then(|ps| ps.tabs.iter().position(|t| t.shows(path)));
             if let Some(i) = here {
                 self.focus_tab(pane, i, path);
                 return Ok(());
@@ -1199,21 +1222,27 @@ impl App {
             let mode = self.initial_mode(path);
             self.reading
                 .register(&doc, mode, !self.restoring, self.daemon.as_ref());
-            self.docs.insert(path.to_owned(), doc);
+            self.docs.insert(
+                path.to_owned(),
+                OpenDoc {
+                    buffer: doc,
+                    close_waiters: Vec::new(),
+                },
+            );
         }
-        let tab = Tab::new(path);
+        let tab = Tab::note(path);
         let mut replaced = None;
         if let Some(ps) = self.panes.get_mut(pane) {
             let active = ps.active.filter(|&i| i < ps.tabs.len());
             match active {
                 Some(i)
                     if how == Place::Replace
-                        && !self
-                            .docs
-                            .get(&ps.tabs[i].path)
-                            .is_some_and(|d| d.is_dirty()) =>
+                        && !ps.tabs[i]
+                            .path()
+                            .and_then(|p| self.docs.get(p))
+                            .is_some_and(|d| d.buffer.is_dirty()) =>
                 {
-                    replaced = Some(std::mem::replace(&mut ps.tabs[i], tab).path);
+                    replaced = Some(std::mem::replace(&mut ps.tabs[i], tab));
                 }
                 _ => {
                     ps.tabs.push(tab);
@@ -1230,10 +1259,10 @@ impl App {
         Ok(())
     }
 
-    /// Pushes `path` onto `pane`'s history (not while restoring or stepping back/forward; never
-    /// the Settings tab).
+    /// Pushes note `path` onto `pane`'s history (not while restoring or stepping
+    /// back/forward).
     fn record_visit(&mut self, pane: Pane, path: &str) {
-        if self.restoring || self.history_nav || Tab::sentinel_path(path) {
+        if self.restoring || self.history_nav {
             return;
         }
         if let Some(ps) = self.panes.get_mut(pane) {
@@ -1261,23 +1290,23 @@ impl App {
         if let Err(e) = r {
             self.status.set_error(open_error(&e));
         }
-        self.persist();
     }
 
     /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
     fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
-        if tab.is_settings() {
-            return crate::settings::view(
-                &self.settings,
-                &self.prefs,
-                &self.explorer.paths,
-                self.tokens,
-            );
-        }
-        if tab.is_log() {
-            return crate::log::view(&self.status.log, self.tokens);
-        }
-        let Some(doc) = self.docs.get(&tab.path) else {
+        let path = match &tab.kind {
+            TabKind::Settings => {
+                return crate::settings::view(
+                    &self.settings,
+                    &self.prefs,
+                    &self.explorer.paths,
+                    self.tokens,
+                );
+            }
+            TabKind::Log => return crate::log::view(&self.status.log, self.tokens),
+            TabKind::Note(p) => p,
+        };
+        let Some(doc) = buf(&self.docs, path) else {
             return iced::widget::Space::new().into();
         };
         crate::reading::tab_body(
@@ -1289,52 +1318,86 @@ impl App {
             self.prefs.font_size,
             &self.palette.keymap,
             self.active_tab().is_some_and(|t| t.id == tab.id),
-            self.link_ta_overlay(&tab.path, tab.id),
+            self.link_ta_overlay(path, tab.id),
         )
     }
 
-    /// Every tab removal funnels through here (button, pane close, replace, trash). The
-    /// document and its reading/view state are dropped only with the last tab showing `path`
-    /// (plan editor-feedback-round-2 WP-7).
-    fn on_tab_closed(&mut self, path: &str) {
+    /// Every tab removal funnels through here (button, pane close, replace, trash). A note's
+    /// document and its reading/view state are dropped (one `remove` each) only with the last
+    /// tab showing its path (plan editor-feedback-round-2 WP-7).
+    fn on_tab_closed(&mut self, tab: &Tab) {
+        let Some(path) = tab.path() else {
+            return;
+        };
         self.sink.closed(path);
         if self.path_open(path) {
             return;
         }
         self.docs.remove(path);
-        self.closing.remove(path);
-        self.reading.on_tab_closed(path);
+        self.reading.remove(path);
         self.views.on_tab_closed(path);
     }
 
     /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`).
     fn reload_tab(&mut self, path: &str, hash: Option<&str>) {
         let daemon = self.daemon.as_ref();
-        if let Some(e) = crate::source::file_changed(&mut self.docs, path, hash, daemon) {
+        let Some(doc) = self.docs.get_mut(path) else {
+            return;
+        };
+        if let Some(e) = crate::source::file_changed(&mut doc.buffer, hash, daemon) {
             self.status.set_error(e);
         }
     }
 
-    fn persist(&mut self) {
-        let layout = panes::snapshot(&self.panes, self.focus);
-        if let Some(ps) = self.panes.get(self.focus) {
-            self.ui.tabs = ps.tabs.iter().map(|t| t.path.clone()).collect();
-            self.ui.active_tab = ps.active;
-        }
-        self.ui.panes = Some(layout);
+    /// WP-R15 (SM12): folds the live pane grid and view modes into `self.ui`, the snapshot
+    /// `editor.json` holds (the WP-1 flat `tabs` / `active_tab` are read-only: never written).
+    fn sync_ui_state(&mut self) {
+        self.ui.panes = Some(panes::snapshot(&self.panes, self.focus));
+        self.ui.tabs.clear();
+        self.ui.active_tab = None;
         self.ui.modes = self
             .panes
             .iter()
-            .flat_map(|(_, ps)| ps.tabs.iter())
-            .filter(|t| !t.is_sentinel())
-            .map(|t| (t.path.clone(), self.reading.mode(&t.path).into()))
+            .flat_map(|(_, ps)| ps.tabs.iter().filter_map(Tab::path))
+            .map(|p| (p.to_owned(), self.reading.mode(p).into()))
             .collect();
+    }
+
+    /// WP-R15 (SM12): after every update, a UI-state snapshot that differs from the last one
+    /// written schedules one debounced write ([`PERSIST_DEBOUNCE`]; one pending at a time).
+    /// Tests drive the debounce with [`Message::PersistDue`].
+    fn schedule_persist(&mut self) -> Task<Message> {
+        self.sync_ui_state();
+        if self.persist_pending || self.persisted.as_ref() == Some(&self.ui) {
+            return Task::none();
+        }
+        self.persist_pending = true;
+        if matches!(self.rpc_exec, RpcExec::Queue(_)) {
+            return Task::none();
+        }
+        Task::perform(async { tokio::time::sleep(PERSIST_DEBOUNCE).await }, |()| {
+            Message::PersistDue
+        })
+    }
+
+    /// Writes the UI-state snapshot now (synchronously, on the UI thread) when it differs from
+    /// the last one written: the debounce tick and exit.
+    fn write_ui_state(&mut self) {
+        self.persist_pending = false;
+        self.sync_ui_state();
+        if self.persisted.as_ref() == Some(&self.ui) {
+            return;
+        }
         let Some(path) = &self.state_path else { return };
+        self.ui_writes += 1;
         let vault = self.daemon.as_ref().map(|d| d.vault_root().to_path_buf());
-        if let Err(e) = ui_state::save(path, &self.ui, vault.as_deref()) {
-            tracing::warn!(error = %e, "saving editor.json failed");
-            self.status
-                .notify(Severity::Warning, format!("saving editor.json failed: {e}"));
+        match ui_state::save(path, &self.ui, vault.as_deref()) {
+            Ok(()) => self.persisted = Some(self.ui.clone()),
+            Err(e) => {
+                tracing::warn!(error = %e, "saving editor.json failed");
+                self.status
+                    .notify(Severity::Warning, format!("saving editor.json failed: {e}"));
+            }
         }
     }
 
@@ -1355,7 +1418,8 @@ impl App {
         self.sync_buffers();
         let auto = self.schedule_settings_autosave();
         let restore = self.restore_places(&views_before);
-        let extra: Vec<Task<Message>> = [flush, auto, restore]
+        let persist = self.schedule_persist();
+        let extra: Vec<Task<Message>> = [flush, auto, restore, persist]
             .into_iter()
             .filter(|t| t.units() > 0)
             .collect();
@@ -1457,33 +1521,14 @@ impl App {
                     status: (c != ' ').then_some(c),
                 }))
             }
-            (Target::Tab { pane, id, .. }, Item::Close) => {
-                match self
-                    .panes
-                    .get(pane)
-                    .and_then(|ps| ps.tabs.iter().position(|t| t.id == id))
-                {
-                    Some(i) => self.close_tab(pane, i),
-                    None => Task::none(),
-                }
-            }
+            (Target::Tab { id, .. }, Item::Close) => self.close_tab(id),
             (Target::Tab { pane, id, .. }, Item::CloseOthers) => {
                 let others: Vec<u64> = self
                     .panes
                     .get(pane)
                     .map(|ps| ps.tabs.iter().map(|t| t.id).filter(|t| *t != id).collect())
                     .unwrap_or_default();
-                let mut tasks = Vec::new();
-                for other in others {
-                    let i = self
-                        .panes
-                        .get(pane)
-                        .and_then(|ps| ps.tabs.iter().position(|t| t.id == other));
-                    if let Some(i) = i {
-                        tasks.push(self.close_tab(pane, i));
-                    }
-                }
-                Task::batch(tasks)
+                Task::batch(others.into_iter().map(|o| self.close_tab(o)))
             }
             (Target::Tab { pane, id, path }, Item::Rename) => {
                 let i = self
@@ -1562,14 +1607,7 @@ impl App {
                     self.sink.copied(&path);
                     return iced::clipboard::write(path);
                 }
-                if let Some((p, _)) = self.panes.split(
-                    panes::axis_of(SplitDir::Right),
-                    self.focus,
-                    PaneState::default(),
-                ) {
-                    self.focus = p;
-                }
-                self.open_with(&path, Place::Duplicate, true);
+                self.open_in_new_pane(&path);
                 Task::none()
             }
             (
@@ -1609,14 +1647,7 @@ impl App {
             (Target::Row { path, .. }, Item::Open) => self.update_explorer(ExplorerMsg::Open(path)),
             (Target::Row { path, .. }, Item::OpenInNewPane) => {
                 self.explorer.selected = Some(path.clone());
-                if let Some((p, _)) = self.panes.split(
-                    panes::axis_of(SplitDir::Right),
-                    self.focus,
-                    PaneState::default(),
-                ) {
-                    self.focus = p;
-                }
-                self.open_with(&path, Place::Duplicate, true);
+                self.open_in_new_pane(&path);
                 Task::none()
             }
             (Target::Row { path, .. }, Item::Rename) => {
@@ -1629,14 +1660,7 @@ impl App {
                 self.update_inner(Message::Panels(PanelsMsg::OutlineJump(line)))
             }
             (Target::Anchor { path, line }, Item::OpenInNewPane) => {
-                if let Some((p, _)) = self.panes.split(
-                    panes::axis_of(SplitDir::Right),
-                    self.focus,
-                    PaneState::default(),
-                ) {
-                    self.focus = p;
-                }
-                self.open_with(&path, Place::Duplicate, true);
+                self.open_in_new_pane(&path);
                 self.update_inner(Message::Panels(PanelsMsg::OutlineJump(line)))
             }
             (Target::Row { path, .. }, Item::NewNote) => {
@@ -1658,14 +1682,13 @@ impl App {
         }
         self.explorer.selected = Some(path.to_owned());
         self.explorer.relayout(&self.ui.expanded);
-        self.persist();
     }
 
     /// The dialog's OK / Cancel.
     fn update_dialog(&mut self, m: crate::dialog::DialogMsg) -> Task<Message> {
-        use crate::dialog::{DialogMsg, OnOk};
+        use crate::dialog::{Dialog, DialogMsg, Discard};
         if let DialogMsg::Toggle(n) = m {
-            if let Some(c) = self.dialog.as_mut().and_then(|d| d.delete_confirm_mut()) {
+            if let Some(Dialog::DeleteConfirm(c)) = self.dialog.as_mut() {
                 c.toggle(n);
             }
             return Task::none();
@@ -1673,42 +1696,31 @@ impl App {
         let Some(d) = self.dialog.take() else {
             return Task::none();
         };
-        if m == DialogMsg::Alt {
-            return match d.content {
-                crate::dialog::Content::DeleteUnsaved(path) => self.discard_then_delete(path),
-                _ => Task::none(),
-            };
-        }
-        let ok = match m {
-            DialogMsg::Ok => true,
-            DialogMsg::Cancel | DialogMsg::Toggle(_) | DialogMsg::Alt => false,
-            DialogMsg::Default => d.enter_is_ok,
-        };
-        if !ok {
-            return Task::none();
-        }
-        match d.on_ok {
-            OnOk::Quit => self.exit(),
-            OnOk::CloseTabs(ids) => {
-                for id in ids {
-                    if let Some((p, i)) = panes::find_id(&self.panes, id) {
-                        self.remove_tab(p, i);
+        match (m, d) {
+            (DialogMsg::Alt, Dialog::DeleteUnsaved(path)) => self.discard_then_delete(path),
+            // Enter (Default) is Cancel in every dialog: all are destructive.
+            (DialogMsg::Ok, Dialog::Unsaved { then, .. }) => match then {
+                Discard::Quit => self.exit(),
+                Discard::CloseTabs(ids) => {
+                    for id in ids {
+                        self.remove_tab(id);
                     }
+                    Task::none()
                 }
-                Task::none()
-            }
-            OnOk::DeleteNote => match d.delete_confirm() {
-                Some(c) => self.run_delete_note(c.path.clone(), c.ticked(), c.mode),
-                None => Task::none(),
             },
-            OnOk::SaveThenDelete(path) => self.save_then_delete(path),
+            (DialogMsg::Ok, Dialog::DeleteConfirm(c)) => {
+                let ticked = c.ticked();
+                self.run_delete_note(c.path, ticked, c.mode)
+            }
+            (DialogMsg::Ok, Dialog::DeleteUnsaved(path)) => self.save_then_delete(path),
+            _ => Task::none(),
         }
     }
 
     /// Unsaved-edits delete dialog, "Save then delete": save first ([`AfterSave::Delete`]);
     /// the delete preview follows once it lands clean.
     fn save_then_delete(&mut self, path: String) -> Task<Message> {
-        if !self.docs.get(&path).is_some_and(|d| d.is_dirty()) {
+        if !buf(&self.docs, &path).is_some_and(|d| d.is_dirty()) {
             return self.begin_delete(path);
         }
         self.save_then(&path, Some(AfterSave::Delete))
@@ -1728,7 +1740,7 @@ impl App {
         };
         match d.read_file(&path) {
             Ok((bytes, hash)) => {
-                if let Some(doc) = self.docs.get_mut(&path) {
+                if let Some(doc) = buf_mut(&mut self.docs, &path) {
                     doc.reload(&bytes, hash);
                 }
                 self.begin_delete(path)
@@ -1745,7 +1757,7 @@ impl App {
     /// (save or close it first), so the delete never drops edits silently.
     fn begin_delete(&mut self, path: String) -> Task<Message> {
         if self.doc_dirty(&path) {
-            self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path));
+            self.dialog = Some(crate::dialog::Dialog::DeleteUnsaved(path));
             return Task::none();
         }
         let p = path.clone();
@@ -1764,7 +1776,7 @@ impl App {
     ) -> Task<Message> {
         if self.doc_dirty(&path) {
             // Edited between the confirm opening and OK: back through the unsaved-edits dialog.
-            self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path));
+            self.dialog = Some(crate::dialog::Dialog::DeleteUnsaved(path));
             return Task::none();
         }
         self.rpc(
@@ -1779,7 +1791,7 @@ impl App {
     /// Why `path`'s edits could not be saved (`fallback` when no conflict / outage explains it).
     fn loss_reason(&self, path: &str, fallback: &str) -> crate::dialog::LossReason {
         use crate::dialog::LossReason;
-        match self.docs.get(path) {
+        match buf(&self.docs, path) {
             Some(d) if d.is_missing() => LossReason::Missing,
             Some(d) if d.conflict().is_some() => LossReason::Conflict,
             _ if !self.status.connected => LossReason::Disconnected,
@@ -1791,17 +1803,17 @@ impl App {
     fn close_dialog(&mut self, path: &str, ids: Vec<u64>, fallback: &str) {
         let mut losses = crate::dialog::UnsavedEdits::default();
         losses.note(path, self.loss_reason(path, fallback));
-        self.dialog = Some(crate::dialog::Dialog::unsaved(
+        self.dialog = Some(crate::dialog::Dialog::Unsaved {
             losses,
-            crate::dialog::OnOk::CloseTabs(ids),
-        ));
+            then: crate::dialog::Discard::CloseTabs(ids),
+        });
     }
 
-    /// Each pane's active tab path (WP-3 tab-switch flush snapshot).
+    /// Each pane's active note path (WP-3 tab-switch flush snapshot).
     fn active_paths(&self) -> Vec<(Pane, String)> {
         self.panes
             .iter()
-            .filter_map(|(p, ps)| ps.active_tab().map(|t| (*p, t.path.clone())))
+            .filter_map(|(p, ps)| ps.active_note().map(|t| (*p, t.path.to_owned())))
             .collect()
     }
 
@@ -1816,7 +1828,7 @@ impl App {
                 self.panes
                     .get(*p)
                     .and_then(|ps| ps.active_tab())
-                    .is_none_or(|t| &t.path != path)
+                    .is_none_or(|t| !t.shows(path))
             })
             .map(|(_, path)| path.clone())
             .collect();
@@ -1826,7 +1838,7 @@ impl App {
     /// Flushes the note tab at `path` now (no-op when clean, saving — re-queued — conflicted,
     /// or not open).
     fn flush_note(&mut self, path: &str) -> Task<Message> {
-        match self.docs.get_mut(path) {
+        match buf_mut(&mut self.docs, path) {
             Some(doc) => crate::source::flush(doc, self.daemon.as_ref(), false),
             None => Task::none(),
         }
@@ -1837,7 +1849,7 @@ impl App {
         let dirty: Vec<String> = self
             .docs
             .iter()
-            .filter(|(_, d)| d.is_dirty())
+            .filter(|(_, d)| d.buffer.is_dirty())
             .map(|(p, _)| p.clone())
             .collect();
         Task::batch(dirty.iter().map(|path| self.flush_note(path)))
@@ -1890,7 +1902,7 @@ impl App {
             .files
             .values()
             .filter(|f| f.wants_save() || f.saving)
-            .map(|f| f.path.clone())
+            .map(|f| f.path.to_owned())
             .collect();
         let tasks: Vec<Task<Message>> = paths
             .iter()
@@ -1901,6 +1913,7 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::PersistDue => self.write_ui_state(),
             Message::Tabs(m) => return self.update_tabs(m),
             Message::Dialog(m) => return self.update_dialog(m),
             Message::Menu(m) => return self.update_menu(m),
@@ -1917,16 +1930,16 @@ impl App {
             Message::Log(m) => return self.update_log(m),
             Message::Explorer(m) => return self.update_explorer(m),
             Message::Source(SourceMsg::TakeTheirs(path))
-                if self.docs.get(&path).is_some_and(|d| d.is_missing()) =>
+                if buf(&self.docs, &path).is_some_and(|d| d.is_missing()) =>
             {
                 // plan editor-data-safety WP-2: the file is gone — discard and close its tabs.
-                while let Some((p, i)) = panes::find(&self.panes, &path) {
-                    self.remove_tab(p, i);
+                while let Some(id) = self.tab_at(panes::find(&self.panes, &path)).map(|t| t.id) {
+                    self.remove_tab(id);
                 }
                 self.docs.remove(&path);
             }
             Message::Source(SourceMsg::Viewport { path, lines }) => {
-                if let Some(d) = self.docs.get_mut(&path)
+                if let Some(d) = buf_mut(&mut self.docs, &path)
                     && d.set_visible_lines(lines)
                 {
                     return crate::reading::ScrollIntent::SourceRelayout { path, lines }.task();
@@ -1947,60 +1960,42 @@ impl App {
             Message::Source(m) => {
                 // plan editor-round-4 WP-2: Shift+click extends the selection.
                 let m = crate::source::shift_click(m, self.modifiers.shift());
-                let routed = matches!(
-                    &m,
-                    SourceMsg::AutosaveDue { .. }
-                        | SourceMsg::KeepMine(_)
-                        | SourceMsg::TakeTheirs(_)
-                        | SourceMsg::MiddleClick { .. }
-                        | SourceMsg::CommandClick { .. }
-                        | SourceMsg::PastePrimary { .. }
-                        | SourceMsg::PasteResolved { .. }
-                );
-                let active = self.active_note().map(|t| t.path.clone());
-                // Plan round-6 WP-1: any user scroll, motion, edit or key in the source editor
-                // leaves the edge (Ctrl+PgUp/PgDn itself goes through `go_to_edge`, not here).
-                if matches!(&m, SourceMsg::Action(_) | SourceMsg::Key(_))
-                    && let Some(p) = &active
-                {
-                    let view = self.view_of(p);
-                    self.reading.clear_edge(p, view);
-                }
-                // Plan round-5 WP-8: the Source side is now the most recent selecting side.
-                if matches!(&m, SourceMsg::Action(_) | SourceMsg::Key(_))
-                    && let Some(t) = self.active_note()
-                {
-                    let (p, id) = (t.path.clone(), t.id);
-                    self.reading.note_source_selection(&p, id);
+                let active = self.active_note().map(|t| (t.path.to_owned(), t.id));
+                let motion = m.is_user_motion();
+                if motion && let Some((p, id)) = &active {
+                    // Plan round-6 WP-1: any user scroll, motion, edit or key in the source
+                    // editor leaves the edge (Ctrl+PgUp/PgDn goes through `go_to_edge`).
+                    self.reading.clear_edge(p, self.view_of(p));
+                    // Plan round-5 WP-8: the Source side is now the most recent selecting side.
+                    self.reading.note_source_selection(p, *id);
                 }
                 // Plan round-5 WP-9: an edit / motion re-evaluates the `[[` list after it lands.
-                let link_sync = matches!(&m, SourceMsg::Action(_) | SourceMsg::Key(_));
                 let typed_bracket = matches!(
                     &m,
                     SourceMsg::Action(iced::widget::text_editor::Action::Edit(
                         iced::widget::text_editor::Edit::Insert('[')
                     ))
                 );
-                if !routed && active.is_none() {
+                let path = match m.target() {
+                    SourceTarget::Path(p) => Some(p.to_owned()),
+                    SourceTarget::Active => active.map(|(p, _)| p),
+                    SourceTarget::App => None,
+                };
+                let Some(buf) = path.and_then(|p| self.docs.get_mut(&p)) else {
                     return Task::none();
+                };
+                let fx = crate::source::update(&mut buf.buffer, m, self.daemon.as_ref());
+                let mut tasks = Vec::new();
+                for e in fx {
+                    match e {
+                        crate::source::Effect::Task(t) => tasks.push(t),
+                        crate::source::Effect::Error(e) => self.status.set_error(e),
+                    }
                 }
-                let mut src_err = None;
-                let task = crate::source::update(
-                    &mut self.docs,
-                    active.as_deref(),
-                    m,
-                    crate::source::Ctx {
-                        daemon: self.daemon.as_ref(),
-                        error: &mut src_err,
-                    },
-                );
-                if let Some(e) = src_err {
-                    self.status.set_error(e);
-                }
-                if link_sync {
+                if motion {
                     self.link_ta_sync(typed_bracket);
                 }
-                return task;
+                return Task::batch(tasks);
             }
             Message::Modifiers(m) => self.modifiers = m,
             Message::TitleRenamed {
@@ -2044,34 +2039,41 @@ impl App {
                 } else {
                     None
                 };
-                let docs: Vec<&crate::source::SourceBuffer> = self.docs.values().collect();
+                let docs: Vec<&crate::source::SourceBuffer> =
+                    self.docs.values().map(|d| &d.buffer).collect();
                 let active = self
                     .panes
                     .get(self.focus)
                     .and_then(PaneState::active_note)
-                    .and_then(|t| self.docs.get(&t.path));
-                let task = crate::reading::update(
+                    .and_then(|t| self.docs.get(t.path))
+                    .map(|d| &d.buffer);
+                let fx = crate::reading::update(
                     &mut self.reading,
                     m,
                     &docs,
                     active,
                     self.daemon.as_ref(),
                 );
-                if let Some((severity, text)) = self.reading.notice.take() {
-                    self.status.notify(severity, text);
+                let mut tasks = Vec::new();
+                for e in fx {
+                    tasks.push(match e {
+                        crate::reading::Effect::Task(t) => t,
+                        crate::reading::Effect::Notice(severity, text) => {
+                            self.status.notify(severity, text);
+                            continue;
+                        }
+                        crate::reading::Effect::MissingLink(target) => {
+                            self.missing_link_click(&target)
+                        }
+                    });
                 }
-                let created = match self.reading.unresolved_click.take() {
-                    Some((_, target)) => self.missing_link_click(&target),
-                    None => Task::none(),
-                };
                 if mode_change {
                     self.mode_menu = None;
-                    self.persist();
                 }
-                let carried = carry.map_or_else(Task::none, |(path, old, line)| {
-                    self.carry_place(&path, old, line)
-                });
-                return Task::batch([task, carried, created]);
+                if let Some((path, old, line)) = carry {
+                    tasks.push(self.carry_place(&path, old, line));
+                }
+                return Task::batch(tasks);
             }
             Message::Switcher(m) => return self.update_switcher(m),
             Message::Palette(m) => return self.update_palette(m),
@@ -2093,12 +2095,7 @@ impl App {
     ) -> Option<(String, crate::reading::ViewMode, usize)> {
         let path = match m {
             crate::message::ReadingMsg::SetMode { path, .. } => path.clone(),
-            _ => self
-                .panes
-                .get(self.focus)
-                .and_then(PaneState::active_note)?
-                .path
-                .clone(),
+            _ => self.active_note()?.path.to_owned(),
         };
         let old = self.reading.mode(&path);
         let view = self.view_of(&path);
@@ -2113,7 +2110,7 @@ impl App {
             // Plan round-7 WP-4: measured from the shown editor (wrapped lines made the
             // tracked estimate drift).
             let (a, fs) = (self.prefs.anchor(), self.prefs.font_size);
-            self.docs.get_mut(&path)?.measure_anchor_line(a, fs)
+            buf_mut(&mut self.docs, &path)?.measure_anchor_line(a, fs)
         };
         Some((path, old, line))
     }
@@ -2138,7 +2135,7 @@ impl App {
         if let Some(bottom) = self.reading.edge(path, view) {
             if new.shows_source()
                 && !old.shows_source()
-                && let Some(doc) = self.docs.get_mut(path)
+                && let Some(doc) = buf_mut(&mut self.docs, path)
             {
                 doc.scroll_to_edge(bottom);
             }
@@ -2156,7 +2153,7 @@ impl App {
         }
         if new.shows_source()
             && !old.shows_source()
-            && let Some(doc) = self.docs.get_mut(path)
+            && let Some(doc) = buf_mut(&mut self.docs, path)
         {
             doc.scroll_to_line_anchored(line, self.prefs.anchor());
         }
@@ -2187,7 +2184,7 @@ impl App {
 
     fn update_tabs(&mut self, m: TabsMsg) -> Task<Message> {
         match m {
-            TabsMsg::Open(p) => self.open(&p, true),
+            TabsMsg::Open(p) => self.open(&p),
             TabsMsg::Select(pane, i) => self.select_tab(pane, i),
             TabsMsg::GoTo(n) => {
                 let i = usize::from(n.saturating_sub(1));
@@ -2200,10 +2197,14 @@ impl App {
                     self.select_tab(self.focus, i);
                 }
             }
-            TabsMsg::Close(pane, i) => return self.close_tab(pane, i),
+            TabsMsg::Close(pane, i) => {
+                if let Some(id) = self.tab_at(Some((pane, i))).map(|t| t.id) {
+                    return self.close_tab(id);
+                }
+            }
             TabsMsg::CloseActive => {
-                if let Some(i) = self.panes.get(self.focus).and_then(|ps| ps.active) {
-                    return self.close_tab(self.focus, i);
+                if let Some(id) = self.active_tab().map(|t| t.id) {
+                    return self.close_tab(id);
                 }
             }
             TabsMsg::Quit => return self.quit(),
@@ -2223,10 +2224,10 @@ impl App {
             if losses.is_empty() {
                 return self.exit();
             }
-            self.dialog = Some(crate::dialog::Dialog::unsaved(
+            self.dialog = Some(crate::dialog::Dialog::Unsaved {
                 losses,
-                crate::dialog::OnOk::Quit,
-            ));
+                then: crate::dialog::Discard::Quit,
+            });
         }
         Task::none()
     }
@@ -2236,63 +2237,81 @@ impl App {
             && i < ps.tabs.len()
         {
             ps.active = Some(i);
-            let path = ps.tabs[i].path.clone();
+            let path = ps.tabs[i].path().map(str::to_owned);
             self.focus = pane;
-            self.record_visit(pane, &path);
-            self.persist();
+            if let Some(path) = path {
+                self.record_visit(pane, &path);
+            }
         }
     }
 
-    fn remove_tab(&mut self, pane: Pane, i: usize) {
-        if let Some(tab) = self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
-            self.on_tab_closed(&tab.path);
-            self.persist();
+    /// The tab at `at` (`(pane, index)`, e.g. from [`panes::find`]).
+    fn tab_at(&self, at: Option<(Pane, usize)>) -> Option<&Tab> {
+        let (pane, i) = at?;
+        self.panes.get(pane)?.tabs.get(i)
+    }
+
+    /// Removes the tab with id `id` now (no save; [`Self::on_tab_closed`] runs). False when
+    /// no tab has that id.
+    fn remove_tab(&mut self, id: u64) -> bool {
+        let Some((pane, i)) = panes::find_id(&self.panes, id) else {
+            return false;
+        };
+        match self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
+            Some(tab) => {
+                self.on_tab_closed(&tab);
+                true
+            }
+            None => false,
         }
     }
 
-    /// Close tab `i` of `pane`; a dirty buffer is flushed through the normal CAS save first and
-    /// the close happens only once that save lands with nothing newer typed (Decisions). Plan
-    /// editor-feedback-round-2 WP-7 (audit E1): the close is tracked by the tab's id, so with
-    /// two tabs of one note the save closes exactly the tab asked for.
-    fn close_tab(&mut self, pane: Pane, i: usize) -> Task<Message> {
-        let Some(tab) = self.panes.get(pane).and_then(|ps| ps.tabs.get(i)).cloned() else {
+    /// Close the tab with id `id`; a dirty buffer is flushed through the normal CAS save first
+    /// and the close happens only once that save lands with nothing newer typed (Decisions).
+    /// Plan editor-feedback-round-2 WP-7 (audit E1): the close is tracked by the tab's id, so
+    /// with two tabs of one note the save closes exactly the tab asked for.
+    fn close_tab(&mut self, id: u64) -> Task<Message> {
+        let Some(tab) = self.tab_at(panes::find_id(&self.panes, id)).cloned() else {
             return Task::none();
         };
-        if tab.is_settings() {
+        let path = match tab.kind {
             // WP-2: closing the Settings tab flushes pending settings writes (the model and
             // its save loops outlive the tab, so the writes land after the close).
-            self.remove_tab(pane, i);
-            return self.flush_settings().1;
-        }
-        if tab.is_log() {
-            self.remove_tab(pane, i);
-            return Task::none();
-        }
-        let Some(doc) = self.docs.get_mut(&tab.path) else {
-            self.remove_tab(pane, i);
+            TabKind::Settings => {
+                self.remove_tab(id);
+                return self.flush_settings().1;
+            }
+            TabKind::Log => {
+                self.remove_tab(id);
+                return Task::none();
+            }
+            TabKind::Note(p) => p,
+        };
+        let Some(doc) = buf_mut(&mut self.docs, &path) else {
+            self.remove_tab(id);
             return Task::none();
         };
         if !doc.is_dirty() {
-            self.remove_tab(pane, i);
+            self.remove_tab(id);
             return Task::none();
         }
         if doc.conflict().is_some() || !self.status.connected {
-            self.close_dialog(&tab.path, vec![tab.id], "not connected");
+            self.close_dialog(&path, vec![id], "not connected");
             return Task::none();
         }
-        if let Some(t) = self.save_then(&tab.path, Some(AfterSave::CloseTab(tab.id))) {
+        if let Some(t) = self.save_then(&path, Some(AfterSave::CloseTab(id))) {
             return t;
         }
         // WP-3 rework: a save is in flight (`begin_save` queued the follow-up); the close
         // completes when it lands clean (`note_save_landed`).
-        if self.docs.get(&tab.path).is_some_and(|d| d.is_saving()) {
-            let ids = self.closing.entry(tab.path.clone()).or_default();
-            if !ids.contains(&tab.id) {
-                ids.push(tab.id);
+        match self.docs.get_mut(&path) {
+            Some(d) if d.buffer.is_saving() => {
+                if !d.close_waiters.contains(&id) {
+                    d.close_waiters.push(id);
+                }
             }
-        } else {
             // A dirty buffer whose save cannot start.
-            self.close_dialog(&tab.path, vec![tab.id], "the save could not start");
+            _ => self.close_dialog(&path, vec![id], "the save could not start"),
         }
         Task::none()
     }
@@ -2301,11 +2320,11 @@ impl App {
     /// save; `after` (a save-first continuation) runs when it lands, `None` is a plain save.
     /// `None` back when no save can start (clean, in flight, renaming or conflicted).
     fn save_then(&mut self, path: &str, after: Option<AfterSave>) -> Option<Task<Message>> {
-        let job = self.docs.get_mut(path)?.begin_save(false)?;
+        let job = buf_mut(&mut self.docs, path)?.begin_save(false)?;
         let Some(after) = after else {
             return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));
         };
-        let (path, seq) = (job.path.clone(), job.seq);
+        let (path, seq) = (job.path.to_owned(), job.seq);
         Some(self.rpc(
             move |d| Ok(job.run(d)),
             move |r| {
@@ -2331,7 +2350,7 @@ impl App {
         after: Option<AfterSave>,
     ) -> Task<Message> {
         let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
-        let result = self.docs.get_mut(path).map(|d| d.finish_save(seq, outcome));
+        let result = buf_mut(&mut self.docs, path).map(|d| d.finish_save(seq, outcome));
         if after.is_none()
             && let Some(Err(e)) = &result
         {
@@ -2345,7 +2364,7 @@ impl App {
             None => Landed::Gone,
             Some(Err(e)) => Landed::Failed(e),
             Some(Ok(_)) if !ok => Landed::Conflict,
-            Some(Ok(_)) if self.docs.get(path).is_some_and(|d| d.is_dirty()) => Landed::Changed,
+            Some(Ok(_)) if buf(&self.docs, path).is_some_and(|d| d.is_dirty()) => Landed::Changed,
             Some(Ok(_)) => Landed::Clean,
         };
         // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this save was
@@ -2353,7 +2372,7 @@ impl App {
         let resync = if self
             .docs
             .get_mut(path)
-            .is_some_and(|d| d.take_resync_pending() && !d.is_saving())
+            .is_some_and(|d| d.buffer.take_resync_pending() && !d.buffer.is_saving())
         {
             self.resync_doc(path)
         } else {
@@ -2398,11 +2417,11 @@ impl App {
         };
         match after {
             // Audit E1: the close removes exactly the tab it was asked for (by id).
-            AfterSave::CloseTab(id) => match panes::find_id(&self.panes, id) {
-                Some((pane, i)) if clean => self.remove_tab(pane, i),
-                Some(_) => self.close_dialog(path, vec![id], &why),
-                _ => {}
-            },
+            AfterSave::CloseTab(id) => {
+                if panes::find_id(&self.panes, id).is_some() && !(clean && self.remove_tab(id)) {
+                    self.close_dialog(path, vec![id], &why);
+                }
+            }
             AfterSave::Quit => {
                 let reason = (!clean).then(|| self.loss_reason(path, &why));
                 let Some(q) = &mut self.quit else {
@@ -2438,7 +2457,7 @@ impl App {
                         .is_some_and(|t| t.path == path)
                         .then(|| self.reading_selection())
                         .flatten();
-                    let ctx = crate::palette::context(self.docs.get(path), reading_sel);
+                    let ctx = crate::palette::context(buf(&self.docs, path), reading_sel);
                     return self.dispatch_with(call, ctx);
                 }
                 Landed::Failed(_) | Landed::Conflict => self
@@ -2458,14 +2477,16 @@ impl App {
             .quit
             .as_ref()
             .is_some_and(|q| q.awaiting.contains(path));
-        let waiting_close = self.closing.contains_key(path);
+        let waiting_close = self
+            .docs
+            .get(path)
+            .is_some_and(|d| !d.close_waiters.is_empty());
         if !waiting_quit && !waiting_close {
             return Task::none();
         }
-        let (saving, dirty) = self
-            .docs
-            .get(path)
-            .map_or((false, false), |d| (d.is_saving(), d.is_dirty()));
+        let (saving, dirty) = self.docs.get(path).map_or((false, false), |d| {
+            (d.buffer.is_saving(), d.buffer.is_dirty())
+        });
         if ok && saving {
             return Task::none();
         }
@@ -2476,12 +2497,14 @@ impl App {
             "the note changed while saving"
         };
         if waiting_close {
-            let ids = self.closing.remove(path).unwrap_or_default();
+            let ids = self
+                .docs
+                .get_mut(path)
+                .map(|d| std::mem::take(&mut d.close_waiters))
+                .unwrap_or_default();
             if done {
                 for id in ids {
-                    if let Some((p, i)) = panes::find_id(&self.panes, id) {
-                        self.remove_tab(p, i);
-                    }
+                    self.remove_tab(id);
                 }
             } else {
                 let ids: Vec<u64> = ids
@@ -2515,7 +2538,7 @@ impl App {
         let dirty: Vec<String> = self
             .docs
             .iter()
-            .filter(|(_, d)| d.is_dirty())
+            .filter(|(_, d)| d.buffer.is_dirty())
             .map(|(p, _)| p.clone())
             .collect();
         let settings_pending = self
@@ -2546,7 +2569,7 @@ impl App {
             if let Some(t) = self.save_then(&path, Some(AfterSave::Quit)) {
                 saves.push(t);
                 pending.insert(path);
-            } else if self.docs.get(&path).is_some_and(|d| d.is_saving()) {
+            } else if buf(&self.docs, &path).is_some_and(|d| d.is_saving()) {
                 // WP-3 rework: in flight — `begin_save` queued the follow-up; await it.
                 awaiting.insert(path);
             } else {
@@ -2586,7 +2609,7 @@ impl App {
     }
 
     fn exit(&mut self) -> Task<Message> {
-        self.persist();
+        self.write_ui_state();
         self.exiting = true;
         iced::exit()
     }
@@ -2618,18 +2641,18 @@ impl App {
                 if ps.find.take().is_none() {
                     return Task::none();
                 }
-                for t in &ps.tabs {
-                    if let Some(d) = self.docs.get_mut(&t.path) {
-                        d.set_find_highlight(None);
-                        d.set_find_matches(Vec::new());
+                for p in ps.tabs.iter().filter_map(Tab::path) {
+                    if let Some(d) = self.docs.get_mut(p) {
+                        d.buffer.set_find_highlight(None);
+                        d.buffer.set_find_matches(Vec::new());
                     }
-                    self.reading.set_find(&t.path, None);
+                    self.reading.set_find(p, None);
                 }
                 // Plan round-7 WP-4: the reading view keeps the place find left it at (the
                 // bar's removal re-creates the scrollable, which reports offset 0).
                 let restore = self
                     .active_note()
-                    .map(|t| t.path.clone())
+                    .map(|t| t.path.to_owned())
                     .and_then(|p| {
                         let v = self.view_of(&p);
                         self.reading.restore(&p, v)
@@ -2640,13 +2663,16 @@ impl App {
             FindMsg::Focus(_) => {}
             FindMsg::Query(q) => {
                 let Some(text) = ps
-                    .active_tab()
-                    .and_then(|t| self.docs.get(&t.path))
+                    .active_note()
+                    .and_then(|t| buf(&self.docs, t.path))
                     .map(crate::source::SourceBuffer::text)
                 else {
                     return Task::none();
                 };
-                let path = ps.active_tab().map(|t| t.path.clone()).unwrap_or_default();
+                let path = ps
+                    .active_note()
+                    .map(|t| t.path.to_owned())
+                    .unwrap_or_default();
                 let view = ps.active_tab().map_or(0, |t| t.id);
                 let Some(bar) = &mut ps.find else {
                     return Task::none();
@@ -2664,8 +2690,8 @@ impl App {
                     return self.show_match();
                 }
                 let at = ps
-                    .active_tab()
-                    .and_then(|t| self.docs.get(&t.path))
+                    .active_note()
+                    .and_then(|t| buf(&self.docs, t.path))
                     .map_or(0, |d| {
                         let c = d.cursor().position;
                         editor_model::undo::offset_of(
@@ -2686,13 +2712,16 @@ impl App {
                     return Task::none();
                 };
                 let Some(text) = ps
-                    .active_tab()
-                    .and_then(|t| self.docs.get(&t.path))
+                    .active_note()
+                    .and_then(|t| buf(&self.docs, t.path))
                     .map(crate::source::SourceBuffer::text)
                 else {
                     return Task::none();
                 };
-                let path = ps.active_tab().map(|t| t.path.clone()).unwrap_or_default();
+                let path = ps
+                    .active_note()
+                    .map(|t| t.path.to_owned())
+                    .unwrap_or_default();
                 let Some(bar) = &mut ps.find else {
                     return Task::none();
                 };
@@ -2736,9 +2765,11 @@ impl App {
             .as_ref()
             .map(|b| b.matches.clone())
             .unwrap_or_default();
-        let path = ps.tabs[i].path.clone();
+        let Some(path) = ps.tabs[i].path().map(str::to_owned) else {
+            return Task::none();
+        };
         let view = ps.tabs[i].id;
-        let Some(doc) = self.docs.get_mut(&path) else {
+        let Some(doc) = buf_mut(&mut self.docs, &path) else {
             return Task::none();
         };
         let text = doc.text();
@@ -2809,7 +2840,7 @@ impl App {
     /// buffer's start / end (the shaped editor scrolls to its cursor; the selection drops);
     /// Reading/Split: the reading scrollable snaps to its top / bottom.
     fn go_to_edge(&mut self, bottom: bool) -> Task<Message> {
-        let Some(path) = self.active_note().map(|t| t.path.clone()) else {
+        let Some(path) = self.active_note().map(|t| t.path.to_owned()) else {
             return Task::none();
         };
         let mode = self.reading.mode(&path);
@@ -2817,7 +2848,7 @@ impl App {
         let view = self.view_of(&path);
         self.reading.set_edge(&path, view, bottom);
         if mode.shows_source()
-            && let Some(doc) = self.docs.get_mut(&path)
+            && let Some(doc) = buf_mut(&mut self.docs, &path)
         {
             doc.go_to_edge(bottom);
         }
@@ -2851,7 +2882,7 @@ impl App {
         if self.palette.open || self.switcher.open || self.dialog.is_some() {
             return None;
         }
-        match self.active_tab()?.kind() {
+        match &self.active_tab()?.kind {
             TabKind::Settings => {
                 Some((crate::settings::body_scroll_id(self.settings.section), None))
             }
@@ -2906,8 +2937,8 @@ impl App {
     /// Refocuses the focused pane's source editor (when it shows one).
     fn focus_editor(&self) -> Task<Message> {
         match self.active_note() {
-            Some(t) if self.reading.mode(&t.path).shows_source() => {
-                iced::widget::operation::focus(crate::source::editor_id(&t.path))
+            Some(t) if self.reading.mode(t.path).shows_source() => {
+                iced::widget::operation::focus(crate::source::editor_id(t.path))
             }
             _ => Task::none(),
         }
@@ -2934,9 +2965,8 @@ impl App {
             return Task::none();
         }
         self.focus = pane;
-        self.persist();
         match self.active_note() {
-            Some(t) if self.reading.mode(&t.path).shows_source() => self.focus_editor(),
+            Some(t) if self.reading.mode(t.path).shows_source() => self.focus_editor(),
             _ => iced::widget::operation::focus(iced::widget::Id::new("hover-focus-none")),
         }
     }
@@ -2955,7 +2985,6 @@ impl App {
                 {
                     self.focus = p;
                 }
-                self.persist();
             }
             PanesMsg::Close(pane) => {
                 let closed = if self.panes.len() > 1 {
@@ -2975,14 +3004,12 @@ impl App {
                     })
                 };
                 for t in &closed {
-                    self.on_tab_closed(&t.path);
+                    self.on_tab_closed(t);
                 }
-                self.persist();
             }
             PanesMsg::Focus(pane) => {
                 if self.focus != pane && self.panes.get(pane).is_some() {
                     self.focus = pane;
-                    self.persist();
                 }
             }
             PanesMsg::Hover(pane) => return self.hover_focus(pane),
@@ -2996,11 +3023,9 @@ impl App {
             PanesMsg::ForwardFocused => self.history_step(self.focus, true),
             PanesMsg::ToggleSide => {
                 self.ui.side_collapsed = !self.ui.side_collapsed;
-                self.persist();
             }
             PanesMsg::ToggleBorders => {
                 self.ui.pane_borders = !self.ui.pane_borders;
-                self.persist();
             }
             PanesMsg::ModeMenu(p) => self.mode_menu = p,
         }
@@ -3011,7 +3036,7 @@ impl App {
         match m {
             BookmarkMsg::Open(p) => return self.open_bookmark(&p),
             edit => {
-                let active = self.active_note().map(|t| t.path.clone());
+                let active = self.active_note().map(|t| t.path.to_owned());
                 let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) else {
                     return Task::none();
                 };
@@ -3072,7 +3097,7 @@ impl App {
                 .set_error(format!("bookmark target missing: {path}"));
             return Task::none();
         }
-        self.open(path, true);
+        self.open(path);
         Task::none()
     }
 
@@ -3093,7 +3118,7 @@ impl App {
             && self.doc_dirty(path)
         {
             // WP-2 (round 7): Save / Discard / Cancel, then the delete preview + confirm.
-            self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path.clone()));
+            self.dialog = Some(crate::dialog::Dialog::DeleteUnsaved(path.clone()));
             return Task::none();
         }
         if let FileOp::Rename { from, .. } = &op
@@ -3122,12 +3147,11 @@ impl App {
                 }
                 self.explorer.selected = Some(f);
                 self.explorer.relayout(&self.ui.expanded);
-                self.persist();
             }
             ExplorerMsg::Select(p) => self.explorer.selected = Some(p),
             ExplorerMsg::Open(p) => {
                 self.explorer.selected = Some(p.clone());
-                self.open(&p, true);
+                self.open(&p);
             }
             ExplorerMsg::Scrolled(w) => self.explorer.window = w,
             ExplorerMsg::BeginNew | ExplorerMsg::BeginRename | ExplorerMsg::BeginMove => {
@@ -3152,14 +3176,14 @@ impl App {
                     None => self.status.set_error("select a file first".into()),
                 }
             }
-            ExplorerMsg::DeleteActive => match self.active_note().map(|t| t.path.clone()) {
+            ExplorerMsg::DeleteActive => match self.active_note().map(|t| t.path.to_owned()) {
                 Some(path) => return self.begin_delete(path),
                 None => self.status.set_error("no active note".into()),
             },
             ExplorerMsg::DeletePreview { path, result } => match result {
                 Ok(items) => {
                     let c = crate::dialog::DeleteConfirm::new(path, self.prefs.delete_mode, items);
-                    self.dialog = Some(crate::dialog::Dialog::delete(c));
+                    self.dialog = Some(crate::dialog::Dialog::DeleteConfirm(c));
                 }
                 Err(e) => self.status.set_error(e),
             },
@@ -3198,7 +3222,7 @@ impl App {
                     self.explorer
                         .apply_op(&op, &final_path, &self.ui.expanded, &indexed);
                     match &op {
-                        FileOp::Create { .. } => self.open(&final_path, true),
+                        FileOp::Create { .. } => self.open(&final_path),
                         FileOp::Rename { from, to } => self.retarget(from, to),
                         FileOp::Delete { path } => self.close_path(path),
                     }
@@ -3211,73 +3235,68 @@ impl App {
 
     // ---- editor-usability-round WP-2: Reading-view edits ----
 
-    /// plan editor-ui-round-3 WP-4: sets a host-note task's status char in `path`'s buffer
-    /// (one undoable edit; normal autosave; the toggle's read-only rule).
-    fn set_task_status(&mut self, path: &str, line: usize, to: char) -> Task<Message> {
-        let Some(doc) = self.docs.get_mut(path) else {
-            // Plan round-6-feedback-todos WP-6: a `Tasks` view row of a note with no open
-            // buffer — the edit path is the buffer's, so say so instead of a silent no-op.
-            self.status
-                .set_error(format!("open {path} to change its tasks"));
-            return Task::none();
-        };
-        if !doc.set_task_status(line, to, false, std::time::Instant::now()) {
-            return Task::none();
+    /// WP-R15 (SM13): the one Reading-side buffer edit — applies `f` (one undoable edit; the
+    /// toggle's read-only rule) to `path`'s open buffer; when it changed the text, re-renders
+    /// now (not on the next debounce tick) and starts the normal autosave. `None` when `path`
+    /// has no open buffer (the caller decides: a notice, or the daemon path).
+    fn edit_buffer(
+        &mut self,
+        path: &str,
+        f: impl FnOnce(&mut crate::source::SourceBuffer, std::time::Instant) -> bool,
+    ) -> Option<Task<Message>> {
+        let doc = &mut self.docs.get_mut(path)?.buffer;
+        if !f(doc, std::time::Instant::now()) {
+            return Some(Task::none());
         }
         let seq = doc.edit_seq();
         self.reading.recompute(doc, self.daemon.as_ref());
-        crate::source::autosave_timer(path.to_owned(), seq)
+        Some(crate::source::autosave_timer(path.to_owned(), seq))
     }
 
-    /// Toggles a host-note task box in `path`'s buffer (one undoable edit; normal autosave).
+    /// [`Self::edit_buffer`] for a Reading / view control; a note with no open buffer says so
+    /// (plan round-6-feedback-todos WP-6: the edit path is the buffer's — never a silent
+    /// no-op).
+    fn edit_open_buffer(
+        &mut self,
+        path: &str,
+        f: impl FnOnce(&mut crate::source::SourceBuffer, std::time::Instant) -> bool,
+    ) -> Task<Message> {
+        self.edit_buffer(path, f).unwrap_or_else(|| {
+            self.status.set_error(format!("open {path} to change it"));
+            Task::none()
+        })
+    }
+
+    /// plan editor-ui-round-3 WP-4: sets a host-note task's status char in `path`'s buffer.
+    fn set_task_status(&mut self, path: &str, line: usize, to: char) -> Task<Message> {
+        self.edit_open_buffer(path, |d, now| d.set_task_status(line, to, false, now))
+    }
+
+    /// Toggles a host-note task box in `path`'s buffer.
     fn toggle_task(&mut self, path: &str, line: usize) -> Task<Message> {
-        let Some(doc) = self.docs.get_mut(path) else {
-            // Plan round-6-feedback-todos WP-6: a `Tasks` view row of a note with no open
-            // buffer — the edit path is the buffer's, so say so instead of a silent no-op.
-            self.status
-                .set_error(format!("open {path} to change its tasks"));
-            return Task::none();
-        };
-        if !doc.toggle_task(line, false, std::time::Instant::now()) {
-            return Task::none();
-        }
-        let seq = doc.edit_seq();
-        // Re-render now from the updated buffer (not on the next debounce tick).
-        self.reading.recompute(doc, self.daemon.as_ref());
-        crate::source::autosave_timer(path.to_owned(), seq)
+        self.edit_open_buffer(path, |d, now| d.toggle_task(line, false, now))
     }
 
     /// plan usability-sprint-captures-links WP-4: flips a frontmatter boolean in `path`'s
     /// buffer — the same edit → autosave → CAS-save path as `toggle_task`.
+    fn toggle_prop(&mut self, path: &str, key: &str) -> Task<Message> {
+        self.edit_open_buffer(path, |d, now| d.toggle_frontmatter_bool(key, false, now))
+    }
+
     /// Plan round-8-intake-views-anchor WP-3: a view checkbox cell. An open note's buffer gets
     /// the target value as one undoable edit (unsaved edits survive, autosave persists it); a
     /// closed note goes through the daemon's `note_set_bool`. No optimistic view state.
     fn set_note_bool(&mut self, path: String, key: String, value: bool) -> Task<Message> {
-        if let Some(doc) = self.docs.get_mut(&path) {
-            if !doc.set_frontmatter_bool(&key, Some(value), false, std::time::Instant::now()) {
-                return Task::none();
-            }
-            let seq = doc.edit_seq();
-            self.reading.recompute(doc, self.daemon.as_ref());
-            return crate::source::autosave_timer(path, seq);
+        if let Some(t) = self.edit_buffer(&path, |d, now| {
+            d.set_frontmatter_bool(&key, Some(value), false, now)
+        }) {
+            return t;
         }
         let p = cv_protocol::NoteSetBoolParams { path, key, value };
         self.rpc(
             move |d| d.note_set_bool(&p).map_err(|e| e.to_string()),
             |r| Message::Views(crate::message::ViewsMsg::BoolSet(r)),
         )
-    }
-
-    fn toggle_prop(&mut self, path: &str, key: &str) -> Task<Message> {
-        let Some(doc) = self.docs.get_mut(path) else {
-            return Task::none();
-        };
-        if !doc.toggle_frontmatter_bool(key, false, std::time::Instant::now()) {
-            return Task::none();
-        }
-        let seq = doc.edit_seq();
-        self.reading.recompute(doc, self.daemon.as_ref());
-        crate::source::autosave_timer(path.to_owned(), seq)
     }
 
     /// Enter / blur in the filename input: rename through the explorer path when changed,
@@ -3293,7 +3312,7 @@ impl App {
             self.status.set_error("invalid name".into());
             return Task::none();
         }
-        let Some(doc) = self.docs.get_mut(path) else {
+        let Some(doc) = buf_mut(&mut self.docs, path) else {
             return Task::none();
         };
         if !doc.is_dirty() {
@@ -3325,11 +3344,14 @@ impl App {
                 // WP-2 (round 7): an unedited buffer whose bytes the move kept is re-keyed in
                 // place (cursor, selection, undo, top_line survive); otherwise rebuild from disk.
                 let doc = match self.docs.remove(from) {
-                    Some(mut doc) if !doc.is_dirty() && *doc.base_hash() == hash => {
-                        doc.rename_clean(to);
+                    Some(mut doc) if !doc.buffer.is_dirty() && *doc.buffer.base_hash() == hash => {
+                        doc.buffer.rename_clean(to);
                         doc
                     }
-                    _ => crate::source::SourceBuffer::new(to, &bytes, hash),
+                    old => OpenDoc {
+                        buffer: crate::source::SourceBuffer::new(to, &bytes, hash),
+                        close_waiters: old.map(|d| d.close_waiters).unwrap_or_default(),
+                    },
                 };
                 self.move_path_state(from, to, doc);
             }
@@ -3342,26 +3364,23 @@ impl App {
     /// with the host and go stale (re-run against `to` while the old result stays shown — no
     /// flash), and every other view goes stale too, since a rename changes link targets they
     /// may list (WP-8).
-    fn move_path_state(&mut self, from: &str, to: &str, doc: crate::source::SourceBuffer) {
-        let mode = self.reading.mode(from);
+    fn move_path_state(&mut self, from: &str, to: &str, doc: OpenDoc) {
         for (_, ps) in self.panes.iter_mut() {
-            for t in ps.tabs.iter_mut().filter(|t| t.path == from) {
-                to.clone_into(&mut t.path);
+            for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
+                t.kind = TabKind::Note(to.to_owned());
             }
             ps.history.retarget(from, to);
         }
-        if let Some(ids) = self.closing.remove(from) {
-            self.closing.insert(to.to_owned(), ids);
-        }
-        self.fm_titles.borrow_mut().remove(from);
-        self.reading.on_tab_closed(from);
+        // One re-key each (WP-R15 SP2): the document (close waiters, title cache) and its
+        // Reading state; the new text renders now under `to`.
+        self.reading.rekey(from, to);
         self.views.rehost(from, to);
         self.views.invalidate(&[]);
-        self.reading
-            .register(&doc, mode, true, self.daemon.as_ref());
+        if self.reading.mode(to).shows_reading() {
+            self.reading.recompute(&doc.buffer, self.daemon.as_ref());
+        }
         self.docs.insert(to.to_owned(), doc);
         self.ui.touch_recent(to);
-        self.persist();
     }
 
     /// Plan usability-sprint-captures-links WP-5: after a save of `path` landed, renames the note
@@ -3369,10 +3388,15 @@ impl App {
     /// closing/quitting, or while a follow-up save or another rename
     /// is in flight (the next landed save re-evaluates). A target that exists refuses the rename.
     fn title_sync(&mut self, path: &str) -> Task<Message> {
-        if self.closing.contains_key(path) || self.quit.is_some() {
+        if self
+            .docs
+            .get(path)
+            .is_none_or(|d| !d.close_waiters.is_empty())
+            || self.quit.is_some()
+        {
             return Task::none();
         }
-        let Some(doc) = self.docs.get(path) else {
+        let Some(doc) = buf(&self.docs, path) else {
             return Task::none();
         };
         if doc.is_saving() || doc.is_renaming() {
@@ -3388,14 +3412,14 @@ impl App {
         if to.to_lowercase() != path.to_lowercase()
             && !matches!(d.read_file(&to), Err(DaemonError::NotFound(_)))
         {
-            if let Some(doc) = self.docs.get_mut(path) {
+            if let Some(doc) = buf_mut(&mut self.docs, path) {
                 doc.settle_title();
             }
             self.status
                 .set_error(format!("title changed; not renamed: {to} already exists"));
             return Task::none();
         }
-        let Some(doc) = self.docs.get_mut(path) else {
+        let Some(doc) = buf_mut(&mut self.docs, path) else {
             return Task::none();
         };
         doc.set_renaming(true);
@@ -3429,7 +3453,7 @@ impl App {
         let held = self
             .docs
             .get_mut(from)
-            .is_some_and(|d| d.set_renaming(false));
+            .is_some_and(|d| d.buffer.set_renaming(false));
         match result {
             Ok(final_path) => {
                 let indexed = self.indexed_fn();
@@ -3442,14 +3466,14 @@ impl App {
                 let edited = self
                     .docs
                     .get(from)
-                    .is_some_and(|d| d.is_dirty() || d.edit_seq() != seq);
+                    .is_some_and(|d| d.buffer.is_dirty() || d.buffer.edit_seq() != seq);
                 self.follow_moved(from, to, edited);
                 Task::none()
             }
             Err(e) => {
                 self.status
                     .set_error(format!("title changed; rename failed: {e}"));
-                let Some(doc) = self.docs.get_mut(from) else {
+                let Some(doc) = buf_mut(&mut self.docs, from) else {
                     return Task::none();
                 };
                 doc.settle_title();
@@ -3477,11 +3501,10 @@ impl App {
     fn close_path(&mut self, path: &str) {
         while let Some((pane, i)) = panes::find(&self.panes, path) {
             match self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
-                Some(t) => self.on_tab_closed(&t.path),
+                Some(t) => self.on_tab_closed(&t),
                 None => break,
             }
         }
-        self.persist();
     }
 
     fn update_switcher(&mut self, m: SwitcherMsg) -> Task<Message> {
@@ -3530,7 +3553,7 @@ impl App {
                 match s.current().map(str::to_owned) {
                     Some(p) if !self.modifiers.shift() => {
                         s.open = false;
-                        self.open_with(&p, self.quick_switch_place(), true);
+                        self.open_with(&p, self.quick_switch_place());
                     }
                     _ => return self.update_switcher(SwitcherMsg::Create),
                 }
@@ -3538,7 +3561,7 @@ impl App {
             SwitcherMsg::Pick(p) if s.move_from.is_some() => return self.move_note_to(&p),
             SwitcherMsg::Pick(p) => {
                 s.open = false;
-                self.open_with(&p, self.quick_switch_place(), true);
+                self.open_with(&p, self.quick_switch_place());
             }
             SwitcherMsg::Create if s.move_from.is_some() => {}
             SwitcherMsg::Create => {
@@ -3557,7 +3580,7 @@ impl App {
             SwitcherMsg::Created(r) => match r {
                 Ok(Some(p)) => {
                     self.switcher.open = false;
-                    self.open(&p, true);
+                    self.open(&p);
                 }
                 Ok(None) => self.status.set_error("note.create returned no path".into()),
                 Err(e) => self.status.set_error(format!("note.create: {e}")),
@@ -3569,7 +3592,7 @@ impl App {
     /// WP-6 (usability-sprint-captures-links): "Move note…" — the switcher in folder mode for
     /// the active note.
     fn open_move_note(&mut self) -> Task<Message> {
-        let Some(from) = self.active_note().map(|t| t.path.clone()) else {
+        let Some(from) = self.active_note().map(|t| t.path.to_owned()) else {
             self.status.set_error("move note: no active note".into());
             return Task::none();
         };
@@ -3616,7 +3639,6 @@ impl App {
                     if let Err(e) = self.open_into(pane, p, Place::Replace) {
                         self.status.set_error(open_error(&e));
                     }
-                    self.persist();
                 }
                 NavTarget::Period(period, date) => {
                     let params = nav::period_params(period, date);
@@ -3631,13 +3653,10 @@ impl App {
                 }
             },
             NavMsg::Opened { pane, result } => match result {
-                Ok(Some(p)) => {
-                    match self.open_into(pane, &p, Place::Replace) {
-                        Ok(()) => {}
-                        Err(e) => self.status.set_error(open_error(&e)),
-                    }
-                    self.persist();
-                }
+                Ok(Some(p)) => match self.open_into(pane, &p, Place::Replace) {
+                    Ok(()) => {}
+                    Err(e) => self.status.set_error(open_error(&e)),
+                },
                 Ok(None) => self.status.set_error("period.open returned no path".into()),
                 Err(e) => self.status.set_error(format!("period.open: {e}")),
             },
@@ -3837,7 +3856,7 @@ impl App {
             return None;
         }
         let tab = self.active_note()?;
-        let (path, view) = (tab.path.clone(), tab.id);
+        let (path, view) = (tab.path.to_owned(), tab.id);
         if !self.reading.mode(&path).shows_reading() {
             return None;
         }
@@ -3916,10 +3935,7 @@ impl App {
         let Some(ps) = self.panes.get_mut(self.focus) else {
             return self.dispatch_call(call);
         };
-        let Some(i) = ps
-            .active
-            .filter(|&i| ps.tabs.get(i).is_some_and(|t| !t.is_sentinel()))
-        else {
+        let Some(path) = ps.active_note().map(|t| t.path.to_owned()) else {
             if call.needs.contains(&cv_protocol::ContextNeed::ActivePath) {
                 self.status
                     .set_error(format!("{}: open a note first", call.title));
@@ -3927,8 +3943,7 @@ impl App {
             }
             return self.dispatch_call(call);
         };
-        let path = ps.tabs[i].path.clone();
-        let Some(doc) = self.docs.get_mut(&path) else {
+        let Some(doc) = buf_mut(&mut self.docs, &path) else {
             return self.dispatch_call(call);
         };
         if !doc.is_dirty() {
@@ -3954,14 +3969,14 @@ impl App {
     /// — in Split, only when the Reading side selected more recently than the Source side.
     fn reading_selection(&self) -> Option<String> {
         let tab = self.active_note()?;
-        let mode = self.reading.mode(&tab.path);
+        let mode = self.reading.mode(tab.path);
         if !mode.shows_reading() {
             return None;
         }
-        if mode.shows_source() && self.reading.source_selected_last(&tab.path, tab.id) {
+        if mode.shows_source() && self.reading.source_selected_last(tab.path, tab.id) {
             return None;
         }
-        self.reading.selection_text(&tab.path, tab.id)
+        self.reading.selection_text(tab.path, tab.id)
     }
 
     fn dispatch_with(
@@ -3979,7 +3994,7 @@ impl App {
             .context
             .active_path
             .as_ref()
-            .and_then(|p| Some((p.clone(), self.docs.get(p)?.edit_seq())));
+            .and_then(|p| Some((p.clone(), buf(&self.docs, p)?.edit_seq())));
         self.rpc(
             move |d| d.run_action(params).map_err(|e| e.to_string()),
             move |result| {
@@ -4044,22 +4059,22 @@ impl App {
     /// being replaced (audit M2). Otherwise `to` opens as a new tab.
     fn follow_open(&mut self, origin: Option<(String, u64)>, to: &str) {
         let Some((from, seq)) = origin.filter(|(p, _)| p != to) else {
-            self.open(to, true);
+            self.open(to);
             return;
         };
         if !self.path_open(&from) {
-            self.open(to, true);
+            self.open(to);
             return;
         }
         let Some(d) = self.daemon.clone() else { return };
         match d.read_file(&from) {
             Err(DaemonError::NotFound(_)) => {}
             _ => {
-                self.open(to, true);
+                self.open(to);
                 return;
             }
         }
-        let edited = self.docs.get(&from).is_some_and(|d| d.edit_seq() != seq);
+        let edited = buf(&self.docs, &from).is_some_and(|d| d.edit_seq() != seq);
         self.follow_moved(&from, to, edited);
     }
 
@@ -4082,7 +4097,7 @@ impl App {
         let Some(mut doc) = self.docs.remove(from) else {
             return;
         };
-        doc.follow_move(to, hash);
+        doc.buffer.follow_move(to, hash);
         self.move_path_state(from, to, doc);
         self.status.set_error(format!(
             "{from} moved to {to} while you were editing: keep mine saves your text there"
@@ -4118,7 +4133,7 @@ impl App {
                     });
                 }
             }
-            PanelsMsg::Open(p) => self.open(&p, true),
+            PanelsMsg::Open(p) => self.open(&p),
             PanelsMsg::Backlinks { path, result } => match result {
                 Ok(b) if self.panels.path.as_deref() == Some(path.as_str()) => {
                     self.panels.backlinks = b;
@@ -4190,7 +4205,7 @@ impl App {
             .panes
             .get(self.focus)
             .and_then(PaneState::active_note)
-            .and_then(|t| self.docs.get(&t.path));
+            .and_then(|t| buf(&self.docs, t.path));
         self.panels.sync_buffer(tab, d.as_deref(), generation);
         if let Some(d) = &d
             && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)
@@ -4250,11 +4265,11 @@ impl App {
                 Task::none()
             }
             crate::views::Effect::Open { path, line } => {
-                self.open(&path, true);
+                self.open(&path);
                 let line = line.and_then(|l| usize::try_from(l.saturating_sub(1)).ok());
                 if let Some(line) = line
                     && self.active_note().is_some_and(|t| t.path == path)
-                    && let Some(doc) = self.docs.get_mut(&path)
+                    && let Some(doc) = buf_mut(&mut self.docs, &path)
                 {
                     doc.move_to(iced::widget::text_editor::Cursor {
                         position: iced::widget::text_editor::Position { line, column: 0 },
@@ -4336,14 +4351,14 @@ impl App {
                         self.explorer
                             .file_changed(&path, kind, &self.ui.expanded, &indexed);
                         if crate::settings::is_view_path(&path)
-                            && panes::find(&self.panes, crate::settings::SETTINGS_TAB).is_some()
+                            && panes::find_kind(&self.panes, &TabKind::Settings).is_some()
                         {
                             self.sync_view_files();
                         }
                         self.settings_file_changed(&path, hash.as_deref());
                         self.refresh_bookmark_missing();
                     }
-                    Notification::OpenRequested { path } => self.open(&path, true),
+                    Notification::OpenRequested { path } => self.open(&path),
                     Notification::ViewsInvalidated { view_ids } => self.views.invalidate(&view_ids),
                     Notification::ConfigReloaded { errors } => {
                         self.palette.invalidate();
@@ -4509,13 +4524,25 @@ impl App {
         }
         self.ui.surround = s;
         self.apply_prefs();
-        self.persist();
     }
 
-    /// Opens the Settings tab in `pane`, or focuses it where it is already open (at most one).
-    fn open_settings_into(&mut self, pane: Pane) {
-        let sentinel = crate::settings::SETTINGS_TAB;
-        if let Some((p, i)) = panes::find(&self.panes, sentinel) {
+    /// Opens the singleton tab `kind` (Settings, Log) in `pane`, or focuses it where it is
+    /// already open (at most one of each; WP-R15 B4 — was `open_settings_into` /
+    /// `open_log_into`). Opening the Log resets its unread count; Settings re-syncs its view
+    /// file list. A note `kind` opens through [`Self::open_into`].
+    fn open_singleton(&mut self, kind: TabKind, pane: Pane) {
+        match &kind {
+            TabKind::Log => self.status.log.unread = 0,
+            TabKind::Settings => {}
+            TabKind::Note(p) => {
+                let p = p.clone();
+                if let Err(e) = self.open_into(pane, &p, Place::Focus) {
+                    self.status.set_error(open_error(&e));
+                }
+                return;
+            }
+        }
+        if let Some((p, i)) = panes::find_kind(&self.panes, &kind) {
             self.focus = p;
             if let Some(ps) = self.panes.get_mut(p) {
                 ps.active = Some(i);
@@ -4527,43 +4554,22 @@ impl App {
         } else {
             self.focus
         };
+        let settings = kind == TabKind::Settings;
         if let Some(ps) = self.panes.get_mut(pane) {
-            ps.tabs.push(Tab::settings());
+            ps.tabs.push(Tab::new(kind));
             ps.active = Some(ps.tabs.len() - 1);
         }
         self.focus = pane;
-        self.sync_view_files();
-    }
-
-    /// Plan round-6-feedback-todos WP-7: opens the Log tab in `pane`, or focuses it where it is
-    /// already open (at most one). Opening resets the unread count.
-    fn open_log_into(&mut self, pane: Pane) {
-        self.status.log.unread = 0;
-        if let Some((p, i)) = panes::find(&self.panes, crate::log::LOG_TAB) {
-            self.focus = p;
-            if let Some(ps) = self.panes.get_mut(p) {
-                ps.active = Some(i);
-            }
-            return;
+        if settings {
+            self.sync_view_files();
         }
-        let pane = if self.panes.get(pane).is_some() {
-            pane
-        } else {
-            self.focus
-        };
-        if let Some(ps) = self.panes.get_mut(pane) {
-            ps.tabs.push(Tab::new(crate::log::LOG_TAB));
-            ps.active = Some(ps.tabs.len() - 1);
-        }
-        self.focus = pane;
     }
 
     fn update_log(&mut self, m: crate::log::LogMsg) -> Task<Message> {
         use crate::log::LogMsg;
         match m {
             LogMsg::Open => {
-                self.open_log_into(self.focus);
-                self.persist();
+                self.open_singleton(TabKind::Log, self.focus);
             }
             LogMsg::Filter(f) => self.status.log.filter = f,
             LogMsg::Clear => self.status.log.clear(),
@@ -4618,7 +4624,7 @@ impl App {
 
     /// Fetches `status` off the UI thread when the Settings tab shows the Status page.
     fn refresh_status_if_open(&mut self) -> Task<Message> {
-        let open = panes::find(&self.panes, crate::settings::SETTINGS_TAB).is_some();
+        let open = panes::find_kind(&self.panes, &TabKind::Settings).is_some();
         if open && self.settings.section == crate::settings::Section::Status {
             return self.fetch_status();
         }
@@ -4643,8 +4649,7 @@ impl App {
         use crate::settings::{Section, SettingsMsg};
         match m {
             SettingsMsg::Open => {
-                self.open_settings_into(self.focus);
-                self.persist();
+                self.open_singleton(TabKind::Settings, self.focus);
                 if self.settings.section == Section::Hotkeys {
                     return self.fetch_actions();
                 }
@@ -4682,7 +4687,6 @@ impl App {
                 }
                 if let editor_prefs::PrefEdit::Surround(s) = e {
                     self.ui.surround = s;
-                    self.persist();
                 }
                 self.apply_prefs();
             }
@@ -4870,36 +4874,17 @@ impl App {
         }
     }
 
-    /// `tab`'s frontmatter `title` (cached per edit seq and reload epoch — an external reload
-    /// does not bump `edit_seq`).
-    pub fn frontmatter_title(&self, tab: &Tab) -> Option<String> {
-        let doc = self.docs.get(&tab.path)?;
-        let seq = (doc.edit_seq(), doc.epoch());
-        let mut cache = self.fm_titles.borrow_mut();
-        if let Some((s, t)) = cache.get(&tab.path)
-            && *s == seq
-        {
-            return t.clone();
-        }
-        let t = crate::header::frontmatter_title(&doc.text());
-        cache.insert(tab.path.clone(), (seq, t.clone()));
-        t
-    }
-
     /// The header text of `ps`'s tab `tab` under the `tab_title` pref.
     pub fn tab_header_title(&self, ps: &PaneState, tab: &Tab) -> String {
-        match tab.kind() {
+        match &tab.kind {
             TabKind::Settings => "Settings".to_owned(),
             TabKind::Log => "Log".to_owned(),
             TabKind::Note(p) => {
-                let siblings: Vec<&str> = ps
-                    .tabs
-                    .iter()
-                    .filter(|t| !t.is_sentinel())
-                    .map(|t| t.path.as_str())
-                    .collect();
+                let siblings: Vec<&str> = ps.tabs.iter().filter_map(Tab::path).collect();
                 let fm = match self.prefs.tab_title {
-                    crate::header::TabTitle::Title => self.frontmatter_title(tab),
+                    crate::header::TabTitle::Title => {
+                        buf(&self.docs, p).and_then(crate::source::SourceBuffer::frontmatter_title)
+                    }
                     _ => None,
                 };
                 crate::header::resolve(self.prefs.tab_title, p, &siblings, fm.as_deref())
@@ -4924,14 +4909,12 @@ impl App {
                 (true, false) => t.text,
                 _ => t.text_dim,
             };
-            let (dirty, saving) = if tab.is_settings() {
-                (self.settings.any_dirty(), false)
-            } else if tab.is_log() {
-                (false, false)
-            } else {
-                self.docs
-                    .get(&tab.path)
-                    .map_or((false, false), |d| (d.is_dirty(), d.is_saving()))
+            let (dirty, saving) = match &tab.kind {
+                TabKind::Settings => (self.settings.any_dirty(), false),
+                TabKind::Log => (false, false),
+                TabKind::Note(p) => {
+                    buf(&self.docs, p).map_or((false, false), |d| (d.is_dirty(), d.is_saving()))
+                }
             };
             let title = ellipsize(&self.tab_header_title(ps, tab), TITLE_MAX_CHARS);
             let lbl = control_label(title, 14.0)
@@ -4949,10 +4932,9 @@ impl App {
                 .padding([0, 6])
                 .style(button::text)
                 .on_press(Message::Tabs(TabsMsg::Select(pane, i)));
-            let hover = if tab.is_sentinel() {
-                self.tab_header_title(ps, tab)
-            } else {
-                tab.path.clone()
+            let hover = match tab.path() {
+                Some(p) => p.to_owned(),
+                None => self.tab_header_title(ps, tab),
             };
             let select = iced::widget::tooltip(
                 select,
@@ -4973,17 +4955,16 @@ impl App {
             .height(BAR_HEIGHT)
             .align_y(iced::Alignment::Center);
             // WP-4: right-click a note tab for its context menu.
-            let chip: Element<'a, Message> = if tab.is_sentinel() {
-                chip.into()
-            } else {
-                crate::context_menu::on_right(
+            let chip: Element<'a, Message> = match tab.path() {
+                None => chip.into(),
+                Some(p) => crate::context_menu::on_right(
                     chip,
                     crate::context_menu::Target::Tab {
                         pane,
                         id: tab.id,
-                        path: tab.path.clone(),
+                        path: p.to_owned(),
                     },
-                )
+                ),
             };
             container(chip)
                 .height(BAR_HEIGHT)
@@ -5024,7 +5005,7 @@ impl App {
         &'a self,
         pane: Pane,
         ps: &'a PaneState,
-        tab: &'a Tab,
+        tab: NoteRef<'a>,
         mode_btn: Element<'a, Message>,
     ) -> Element<'a, Message> {
         use crate::header::{BAR_HEIGHT, folders};
@@ -5065,7 +5046,7 @@ impl App {
         )
         .padding(1)
         .style(crate::theme::seg_group_style(t));
-        let path = tab.path.as_str();
+        let path = tab.path;
         let mut crumbs: Vec<Element<'a, Message>> = Vec::new();
         for f in folders(path) {
             crumbs.push(
@@ -5136,7 +5117,7 @@ impl App {
         use crate::theme::{icon_button_style, icon_text};
         let t = self.tokens;
         let focused = pane == self.focus;
-        let mode = ps.active_note().map(|tab| self.reading.mode(&tab.path));
+        let mode = ps.active_note().map(|tab| self.reading.mode(tab.path));
         let mode_icon = match mode {
             Some(crate::reading::ViewMode::Source) => Icon::Code,
             Some(crate::reading::ViewMode::Split) => Icon::Columns2,
@@ -5160,7 +5141,7 @@ impl App {
         };
         let nav_bar: Element<'a, Message> = ps
             .active_note()
-            .and_then(|tab| nav::bar(pane, &tab.path, self.today(), &self.period_folders, t))
+            .and_then(|tab| nav::bar(pane, tab.path, self.today(), &self.period_folders, t))
             .map_or_else(
                 || Space::new().into(),
                 |bar| {
@@ -5206,7 +5187,7 @@ impl App {
                     .style(crate::theme::segment_style(t, on))
                     .on_press(Message::Reading(
                         crate::message::ReadingMsg::SetMode {
-                            path: tab.path.clone(),
+                            path: tab.path.to_owned(),
                             mode: m,
                         },
                     ))

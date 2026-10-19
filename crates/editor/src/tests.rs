@@ -317,7 +317,8 @@ fn app_open_file_adds_tab_and_status_updates() {
     let _ = app.send(Message::Status(StatusMsg::Disconnected));
     assert!(app.status.line().starts_with("disconnected · gen"));
 
-    // Tabs persist and restore from editor.json.
+    // Tabs persist (the debounced write) and restore from editor.json.
+    let _ = app.send(Message::PersistDue);
     let restored = App::new(Some(d), Some(state));
     assert_eq!(restored.open_paths().len(), 1);
     assert_eq!(restored.ui.recent.first(), Some(&p));
@@ -465,7 +466,7 @@ mod wp4 {
         let _ = app.send(Message::Explorer(ExplorerMsg::Submit));
         assert!(app.explorer.contains("wp4moved/fresh.md"));
         assert_eq!(
-            app.active_tab().map(|t| t.path.as_str()),
+            app.active_tab().and_then(|t| t.path()),
             Some("wp4moved/fresh.md")
         );
 
@@ -524,8 +525,8 @@ mod wp4 {
         )));
         let _ = app.send(Message::Explorer(ExplorerMsg::DeleteActive));
         assert!(matches!(
-            app.dialog.as_ref().map(|d| &d.content),
-            Some(crate::dialog::Content::DeleteUnsaved(p)) if p == path
+            app.dialog.as_ref(),
+            Some(crate::dialog::Dialog::DeleteUnsaved(p)) if p == path
         ));
         app
     }
@@ -533,7 +534,10 @@ mod wp4 {
     fn confirm_shown(app: &App) -> bool {
         app.dialog
             .as_ref()
-            .and_then(|d| d.delete_confirm())
+            .and_then(|d| match d {
+                crate::dialog::Dialog::DeleteConfirm(c) => Some(c),
+                _ => None,
+            })
             .is_some()
     }
 
@@ -663,7 +667,7 @@ mod wp4 {
         let _ = app.send(Message::Switcher(SwitcherMsg::Submit));
         assert!(!app.switcher.open);
         assert_eq!(
-            app.active_tab().map(|t| t.path.as_str()),
+            app.active_tab().and_then(|t| t.path()),
             Some("wp4sw/Works.md")
         );
 
@@ -675,7 +679,7 @@ mod wp4 {
         let _ = app.send(Message::Switcher(SwitcherMsg::Submit));
         assert!(d.read_file("qqzz brand idea.md").is_ok(), "note.create ran");
         assert_eq!(
-            app.active_tab().map(|t| t.path.as_str()),
+            app.active_tab().and_then(|t| t.path()),
             Some("qqzz brand idea.md")
         );
 
@@ -822,7 +826,12 @@ mod wp4 {
         let tabs_of = |app: &App, p| -> Vec<String> {
             app.panes
                 .get(p)
-                .map(|s| s.tabs.iter().map(|t| t.path.clone()).collect())
+                .map(|s| {
+                    s.tabs
+                        .iter()
+                        .filter_map(|t| t.path().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         assert_eq!(
@@ -874,6 +883,7 @@ mod wp4 {
         let _ = app.send(Message::Panes(PanesMsg::Focus(second)));
 
         // Persist and reload the layout.
+        let _ = app.send(Message::PersistDue);
         let restored = app_over(&d, Some(state.clone()));
         assert_eq!(restored.panes.len(), 2);
         assert_eq!(
@@ -881,7 +891,7 @@ mod wp4 {
             ["wp4p/a.md", "wp4p/b.md", "wp4p/c.md"]
         );
         assert_eq!(
-            restored.active_tab().map(|t| t.path.as_str()),
+            restored.active_tab().and_then(|t| t.path()),
             Some("wp4p/c.md")
         );
         assert!(matches!(
@@ -918,10 +928,7 @@ mod wp4 {
         let app = app_over(&d, Some(state));
         assert_eq!(app.panes.len(), 1);
         assert_eq!(app.open_paths(), ["wp4old/a.md", "wp4old/b.md"]);
-        assert_eq!(
-            app.active_tab().map(|t| t.path.as_str()),
-            Some("wp4old/a.md")
-        );
+        assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4old/a.md"));
         let _ = panes::order(&app.panes);
     }
 
@@ -1126,7 +1133,7 @@ mod usability_wp3 {
     }
 
     fn active(app: &App) -> Option<String> {
-        app.active_tab().map(|t| t.path.clone())
+        app.active_tab().and_then(|t| t.path().map(str::to_owned))
     }
 
     fn history(app: &App) -> Vec<String> {
@@ -1270,6 +1277,7 @@ mod usability_wp3 {
         let _ = app.send(Message::Panes(PanesMsg::ToggleSide));
         let _ = app.send(Message::Panes(PanesMsg::ToggleBorders));
         drop(app.view());
+        let _ = app.send(Message::PersistDue);
         let dc: Arc<dyn DaemonClient> = d as Arc<dyn DaemonClient>;
         let again = App::new(Some(dc), Some(state));
         assert!(again.ui.side_collapsed && again.ui.pane_borders);
@@ -1637,11 +1645,11 @@ mod usability_wp4 {
         open(&mut app, "wp4g/a.md");
         open(&mut app, "wp4g/b.md");
         let _ = app.send(Message::Palette(PaletteMsg::Key(c("Alt+1"))));
-        assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("wp4g/a.md"));
+        assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4g/a.md"));
         let _ = app.send(Message::Tabs(TabsMsg::GoTo(2)));
-        assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("wp4g/b.md"));
+        assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4g/b.md"));
         let _ = app.send(Message::Tabs(TabsMsg::GoTo(5)));
-        assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("wp4g/b.md"));
+        assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4g/b.md"));
     }
 
     #[test]
@@ -1972,7 +1980,7 @@ mod round2_wp7 {
             .flat_map(|(p, ps)| {
                 ps.tabs
                     .iter()
-                    .filter(|t| t.path == path)
+                    .filter(|t| t.shows(path))
                     .map(move |t| (*p, t.id))
             })
             .collect()
@@ -1981,7 +1989,12 @@ mod round2_wp7 {
     fn tab_paths(app: &App, pane: Pane) -> Vec<String> {
         app.panes
             .get(pane)
-            .map(|ps| ps.tabs.iter().map(|t| t.path.clone()).collect())
+            .map(|ps| {
+                ps.tabs
+                    .iter()
+                    .filter_map(|t| t.path().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2103,7 +2116,7 @@ mod round2_wp7 {
             // Same pane, closed while a save is in flight (the close waits on it).
             let (_tmp, _d, mut app) = setup(&["w7s/a.md"]);
             let pane = app.focus;
-            let extra = Tab::new("w7s/a.md");
+            let extra = Tab::note("w7s/a.md");
             let extra_id = extra.id;
             let first_id = app.active_note().expect("tab").id;
             if let Some(ps) = app.panes.get_mut(pane) {
@@ -2200,7 +2213,7 @@ mod round2_wp7 {
             // Open nowhere: opens in the active pane.
             quick(&mut app, mode, "w7q/n.md");
             assert_eq!(
-                app.active_note().map(|t| t.path.as_str()),
+                app.active_note().map(|t| t.path),
                 Some("w7q/n.md"),
                 "{mode:?}"
             );
@@ -2212,7 +2225,7 @@ mod round2_wp7 {
             quick(&mut app2, mode, "w7q/a.md");
             assert_eq!(tab_paths(&app2, pane), ["w7q/a.md", "w7q/b.md"], "{mode:?}");
             assert_eq!(
-                app2.active_note().map(|t| t.path.as_str()),
+                app2.active_note().map(|t| t.path),
                 Some("w7q/a.md"),
                 "{mode:?}"
             );
@@ -2233,6 +2246,7 @@ mod round2_wp7 {
             split(&mut app);
             quick(&mut app, QuickSwitchOpen::Duplicate, "w7r/a.md");
             assert_eq!(views(&app, "w7r/a.md").len(), 2);
+            let _ = app.send(Message::PersistDue);
         }
         let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
         let app = App::new(Some(dc), Some(state));
@@ -2321,7 +2335,7 @@ mod data_safety_wp1 {
     }
 
     fn doc<'a>(app: &'a mut App, path: &str) -> &'a mut crate::source::SourceBuffer {
-        app.docs.get_mut(path).expect("doc")
+        app.doc_mut(path).expect("doc")
     }
 
     fn land(app: &mut App, path: &str, seq: u64, outcome: SaveOutcome) {
@@ -2466,7 +2480,7 @@ mod data_safety_wp2 {
     use iced::widget::text_editor::{Action, Edit};
 
     use super::*;
-    use crate::dialog::{DialogMsg, LossReason, OnOk};
+    use crate::dialog::{Dialog, DialogMsg, Discard, LossReason};
     use crate::header::QuickSwitchOpen;
     use crate::message::{ExplorerMsg, PaletteMsg, PanesMsg, SourceMsg, SwitcherMsg};
     use crate::source::SaveOutcome;
@@ -2495,7 +2509,10 @@ mod data_safety_wp2 {
     fn dialog_notes(app: &App) -> Vec<(String, LossReason)> {
         app.dialog
             .as_ref()
-            .and_then(|d| d.unsaved_edits())
+            .and_then(|d| match d {
+                crate::dialog::Dialog::Unsaved { losses, .. } => Some(losses),
+                _ => None,
+            })
             .map(|u| u.notes.clone())
             .unwrap_or_default()
     }
@@ -2585,7 +2602,13 @@ mod data_safety_wp2 {
         }));
         assert!(!app.exiting);
         assert_eq!(dialog_notes(&app).len(), 1);
-        assert_eq!(app.dialog.as_ref().map(|d| &d.on_ok), Some(&OnOk::Quit));
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Unsaved {
+                then: Discard::Quit,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2599,7 +2622,10 @@ mod data_safety_wp2 {
         let u = app
             .dialog
             .as_ref()
-            .and_then(|d| d.unsaved_edits())
+            .and_then(|d| match d {
+                crate::dialog::Dialog::Unsaved { losses, .. } => Some(losses),
+                _ => None,
+            })
             .expect("dialog");
         assert_eq!(u.settings, ["_custom/crucible-vault/x.toml"]);
         let _ = app.send(Message::Dialog(DialogMsg::Ok));
@@ -2616,7 +2642,7 @@ mod data_safety_wp2 {
             app.panes
                 .iter()
                 .flat_map(|(_, ps)| ps.tabs.iter())
-                .filter(|t| t.path == "d2c/a.md")
+                .filter(|t| t.shows("d2c/a.md"))
                 .count()
         };
         assert_eq!(count(&app), 2);
@@ -2934,7 +2960,7 @@ mod ui_round3_wp4 {
 
     fn tab_target(app: &App, path: &str) -> Target {
         let ps = app.panes.get(app.focus).expect("pane");
-        let tab = ps.tabs.iter().find(|t| t.path == path).expect("tab");
+        let tab = ps.tabs.iter().find(|t| t.shows(path)).expect("tab");
         Target::Tab {
             pane: app.focus,
             id: tab.id,
@@ -2945,7 +2971,12 @@ mod ui_round3_wp4 {
     fn tab_paths(app: &App) -> Vec<String> {
         app.panes
             .get(app.focus)
-            .map(|ps| ps.tabs.iter().map(|t| t.path.clone()).collect())
+            .map(|ps| {
+                ps.tabs
+                    .iter()
+                    .filter_map(|t| t.path().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2982,7 +3013,7 @@ mod ui_round3_wp4 {
         let _ = app.send(menu(MenuMsg::Open(row("m4/a.md", false), AT)));
         let _ = app.send(menu(MenuMsg::Choose(Item::Open)));
         assert!(app.context_menu.is_none());
-        assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("m4/a.md"));
+        assert_eq!(app.active_tab().and_then(|t| t.path()), Some("m4/a.md"));
         // Pane input is dropped while it is open.
         let _ = app.send(menu(MenuMsg::Open(row("m4/a.md", false), AT)));
         let _ = app.send(Message::Source(SourceMsg::Action(
@@ -3068,10 +3099,7 @@ mod ui_round3_wp4 {
         let _ = app.send(menu(MenuMsg::Choose(Item::OpenInNewPane)));
         assert_eq!(app.panes.len(), 2);
         assert_ne!(app.focus, first);
-        assert_eq!(
-            app.active_tab().map(|t| t.path.as_str()),
-            Some("m4row/a.md")
-        );
+        assert_eq!(app.active_tab().and_then(|t| t.path()), Some("m4row/a.md"));
 
         let _ = app.send(menu(MenuMsg::Open(row("m4row/b.md", false), AT)));
         let _ = app.send(menu(MenuMsg::Choose(Item::Rename)));
@@ -3353,9 +3381,7 @@ mod find_return_leak {
         let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
         let mut app = App::new(Some(dc), None);
         app.queue_rpcs();
-        let _ = app.send(Message::Explorer(ExplorerMsg::Open(
-            crate::settings::SETTINGS_TAB.into(),
-        )));
+        let _ = app.send(Message::Settings(SettingsMsg::Open));
         let _ = app.send(Message::Settings(SettingsMsg::Section(Section::Pipelines)));
         let mut ui = Ui {
             renderer: renderer(),
@@ -3451,9 +3477,7 @@ mod find_return_leak {
         let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
         let mut app = App::new(Some(dc), None);
         app.queue_rpcs();
-        let _ = app.send(Message::Explorer(ExplorerMsg::Open(
-            crate::settings::SETTINGS_TAB.into(),
-        )));
+        let _ = app.send(Message::Settings(SettingsMsg::Open));
         let _ = app.send(Message::Settings(SettingsMsg::Section(Section::Pipelines)));
         let mut ui = Ui {
             renderer: renderer(),
@@ -3546,7 +3570,7 @@ mod find_return_leak {
         assert!(text.contains("channels = [\"UC456\"]"), "{text}");
     }
 
-    /// Plan round-7 WP-3: the dedicated Log icon-button opens `/:log` and resets unread; a
+    /// Plan round-7 WP-3: the dedicated Log icon-button opens the Log tab and resets unread; a
     /// click on the notice text opens it too.
     #[test]
     fn log_button_and_notice_open_the_log() {
@@ -3569,11 +3593,17 @@ mod find_return_leak {
             .map(|(b, _)| b.center())
             .expect("log button");
         ui.click(&mut app, at);
-        assert!(app.active_tab().is_some_and(|t| t.is_log()));
+        assert!(
+            app.active_tab()
+                .is_some_and(|t| t.kind == crate::app::TabKind::Log)
+        );
         assert_eq!(app.status.log.unread, 0, "opening resets unread");
         // Back to no Log tab focused; the notice itself is clickable.
         let _ = app.send(Message::Tabs(crate::message::TabsMsg::CloseActive));
-        assert!(!app.active_tab().is_some_and(|t| t.is_log()));
+        assert!(
+            !app.active_tab()
+                .is_some_and(|t| t.kind == crate::app::TabKind::Log)
+        );
         app.status
             .notify(crate::app::Severity::Error, "second trouble");
         let s = spots(&mut ui, &app);
@@ -3584,7 +3614,10 @@ mod find_return_leak {
             .map(|(b, _)| b.center())
             .expect("notice text");
         ui.click(&mut app, at);
-        assert!(app.active_tab().is_some_and(|t| t.is_log()));
+        assert!(
+            app.active_tab()
+                .is_some_and(|t| t.kind == crate::app::TabKind::Log)
+        );
         assert_eq!(app.status.log.unread, 0);
     }
 }
@@ -3956,7 +3989,7 @@ mod round4_wp4 {
         let (first, _second) = two_panes(&mut app);
         let _ = app.send(Message::Panes(PanesMsg::Hover(first)));
         assert_eq!(app.focus, first);
-        assert_eq!(app.active_note().map(|t| t.path.as_str()), Some("r4h/a.md"));
+        assert_eq!(app.active_note().map(|t| t.path), Some("r4h/a.md"));
         let _ = app.send(Message::Source(SourceMsg::Action(Action::Edit(
             Edit::Insert('Z'),
         ))));
@@ -4430,7 +4463,7 @@ mod scroll_matrix {
     }
 
     fn src(app: &mut App) -> &mut iced::widget::text_editor::Content {
-        app.docs.get_mut(PATH).expect("doc").content_mut()
+        app.doc_mut(PATH).expect("doc").content_mut()
     }
 
     fn focus_source(ui: &mut Ui, app: &App) {
@@ -4535,7 +4568,7 @@ mod scroll_matrix {
             model: editor_model::render::RenderModel::default(),
         };
         ui.update(&mut app, Message::Tabs(TabsMsg::Open(PATH.into())));
-        assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some(PATH));
+        assert_eq!(app.active_tab().and_then(|t| t.path()), Some(PATH));
         // Rendered once in Reading, so every mode can map source lines to blocks.
         for m in [ViewMode::Reading, mode] {
             ui.update(
@@ -4825,7 +4858,7 @@ mod scroll_matrix {
     /// Source: the line half the measured viewport rows below the top).
     fn anchor_place(ui: &mut Ui, app: &mut App) -> Place {
         if app.reading.mode(PATH) == ViewMode::Source {
-            let rows = app.docs.get(PATH).map_or(0, |d| d.visible_lines());
+            let rows = app.doc(PATH).map_or(0, |d| d.visible_lines());
             let half = i32::try_from(crate::source::rows_at(0.5, rows)).unwrap_or(0);
             return source_place_at(ui, app, half);
         }
@@ -5001,10 +5034,10 @@ mod wp_r2 {
     }
 
     fn some_dialog() -> crate::dialog::Dialog {
-        crate::dialog::Dialog::unsaved(
-            crate::dialog::UnsavedEdits::default(),
-            crate::dialog::OnOk::Quit,
-        )
+        crate::dialog::Dialog::Unsaved {
+            losses: crate::dialog::UnsavedEdits::default(),
+            then: crate::dialog::Discard::Quit,
+        }
     }
 
     /// SR1: a bookmark write still in flight when quit starts lets the quit finish.
@@ -5055,7 +5088,10 @@ mod wp_r2 {
         assert!(
             app.dialog
                 .as_ref()
-                .and_then(|d| d.delete_confirm())
+                .and_then(|d| match d {
+                    crate::dialog::Dialog::DeleteConfirm(c) => Some(c),
+                    _ => None,
+                })
                 .is_some(),
             "the delete confirm follows"
         );
@@ -5072,7 +5108,7 @@ mod wp_r2 {
         app.pump();
         assert!(d.read_file("r2cr new.md").is_ok());
         assert_eq!(
-            app.active_tab().map(|t| t.path.as_str()),
+            app.active_tab().and_then(|t| t.path()),
             Some("r2cr new.md"),
             "the created note opened"
         );
@@ -5095,8 +5131,180 @@ mod wp_r2 {
         );
         assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
         assert_eq!(
-            app.active_tab().map(|t| t.path.as_str()),
+            app.active_tab().and_then(|t| t.path()),
             Some("r2sh/Works.md")
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// WP-R15: app state model (tab kind, per-document state, debounced persistence)
+// ---------------------------------------------------------------------------------------------
+
+mod wp_r15 {
+    use super::wp4::{app_over, fake_arc};
+    use super::*;
+    use crate::app::TabKind;
+    use crate::message::{ExplorerMsg, PanesMsg, ReadingMsg};
+
+    fn kinds(app: &App) -> Vec<TabKind> {
+        app.panes
+            .iter()
+            .flat_map(|(_, ps)| ps.tabs.iter().map(|t| t.kind.clone()))
+            .collect()
+    }
+
+    /// B4 defect: activating the Log tab must not re-apply the Settings body scroll. The
+    /// activation's `update` returns no task at all (the note left is clean, the persist
+    /// debounce is test-driven); before WP-R15 it carried `settings.restore_scroll()`.
+    #[test]
+    fn activating_the_log_tab_runs_no_settings_scroll_restore() {
+        let (_tmp, d) = fake_arc();
+        d.create_note("r15/a.md", "# A\n").expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.send(Message::Log(crate::log::LogMsg::Open));
+        let _ = app.send(Message::Tabs(TabsMsg::Open("r15/a.md".into())));
+        let pane = app.focus;
+        let log = app
+            .panes
+            .get(pane)
+            .and_then(|ps| ps.tabs.iter().position(|t| t.kind == TabKind::Log))
+            .expect("log tab");
+        assert!(app.active_note().is_some(), "the note is active");
+        let task = app.update(Message::Tabs(TabsMsg::Select(pane, log)));
+        assert!(app.active_tab().is_some_and(|t| t.kind == TabKind::Log));
+        assert_eq!(
+            task.units(),
+            0,
+            "no Settings restore_scroll on Log activation"
+        );
+        // Settings activation still restores its body offset.
+        let _ = app.send(Message::Settings(crate::settings::SettingsMsg::Open));
+        let _ = app.send(Message::Tabs(TabsMsg::Select(pane, log)));
+        let settings = app
+            .panes
+            .get(pane)
+            .and_then(|ps| ps.tabs.iter().position(|t| t.kind == TabKind::Settings))
+            .expect("settings tab");
+        let task = app.update(Message::Tabs(TabsMsg::Select(pane, settings)));
+        assert!(task.units() > 0, "Settings re-applies its place");
+    }
+
+    /// An `editor.json` written before WP-R15 (bare-string tabs, `/:settings` / `/:log`
+    /// sentinels, flat fields) restores its Settings, Log and note tabs.
+    #[test]
+    fn old_editor_json_restores_settings_log_and_note_tabs() {
+        let (tmp, d) = fake_arc();
+        d.create_note("r15/old.md", "# Old\n").expect("create");
+        let state = tmp.path().join("state/editor.json");
+        std::fs::create_dir_all(state.parent().expect("dir")).expect("mkdir");
+        std::fs::write(
+            &state,
+            br#"{"tabs":["r15/old.md","/:settings","/:log"],"active_tab":0,"modes":{"r15/old.md":"source"},"surround":"dark","recent":["r15/old.md"],"panes":{"root":{"kind":"leaf","tabs":["r15/old.md","/:settings","/:log"],"active":0},"focused":0},"expanded":[]}"#,
+        )
+        .expect("old");
+        let app = app_over(&d, Some(state.clone()));
+        assert_eq!(
+            kinds(&app),
+            [
+                TabKind::Note("r15/old.md".into()),
+                TabKind::Settings,
+                TabKind::Log
+            ]
+        );
+        assert_eq!(
+            app.reading.mode("r15/old.md"),
+            crate::reading::ViewMode::Source
+        );
+        assert!(app.status.error_text().is_none());
+        assert_eq!(app.ui_writes, 0, "restoring writes nothing");
+        // A flat-only (WP-1) file restores too.
+        std::fs::write(&state, br#"{"tabs":["/:log","r15/old.md"],"active_tab":1}"#).expect("flat");
+        let app = app_over(&d, Some(state));
+        assert_eq!(
+            kinds(&app),
+            [TabKind::Log, TabKind::Note("r15/old.md".into())]
+        );
+    }
+
+    /// SP2: closing and renaming a document leave no per-document state behind (the Reading
+    /// edge / source-selection / place entries leaked on close before WP-R15).
+    #[test]
+    fn close_and_rename_leave_no_residual_doc_state() {
+        let (_tmp, d) = fake_arc();
+        let body: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        d.create_note("r15/one.md", &body).expect("create");
+        let mut app = app_over(&d, None);
+        let _ = app.send(Message::Explorer(ExplorerMsg::Open("r15/one.md".into())));
+        let view = app.active_note().expect("tab").id;
+        let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
+        app.reading.note_source_selection("r15/one.md", view);
+        app.reading.set_top_block("r15/one.md", view, 3);
+        assert_eq!(app.reading.doc_entries(), 1);
+        // Rename: one re-key, nothing left under the old path.
+        let _ = app.send(Message::Explorer(ExplorerMsg::Select("r15/one.md".into())));
+        let _ = app.send(Message::Explorer(ExplorerMsg::BeginRename));
+        let _ = app.send(Message::Explorer(ExplorerMsg::Input("two.md".into())));
+        let _ = app.send(Message::Explorer(ExplorerMsg::Submit));
+        assert_eq!(app.open_paths(), ["r15/two.md"]);
+        assert_eq!(app.reading.doc_entries(), 1, "re-keyed, not duplicated");
+        assert!(app.doc("r15/one.md").is_none());
+        assert!(!app.reading.source_selected_last("r15/one.md", view));
+        assert!(app.reading.edge("r15/one.md", view).is_none());
+        // Close: one remove each.
+        let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
+        assert!(app.open_paths().is_empty());
+        assert!(app.docs.is_empty());
+        assert_eq!(app.reading.doc_entries(), 0, "no leaked reading state");
+        assert!(!app.reading.is_restoring(view));
+    }
+
+    /// SM12 (a, c): a burst of focus changes schedules one debounced write; the debounce
+    /// writes once, and an unchanged snapshot never writes.
+    #[test]
+    fn focus_burst_writes_once_after_the_debounce() {
+        let (tmp, d) = fake_arc();
+        let state = tmp.path().join("state/editor.json");
+        let mut app = app_over(&d, Some(state.clone()));
+        let first = app.focus;
+        let _ = app.send(Message::Panes(PanesMsg::SplitRight));
+        let second = app.focus;
+        assert_ne!(first, second);
+        for i in 0..20 {
+            let p = if i % 2 == 0 { first } else { second };
+            let _ = app.send(Message::Panes(PanesMsg::Focus(p)));
+        }
+        assert_eq!(
+            app.ui_writes, 0,
+            "nothing written before the debounce fires"
+        );
+        assert!(!state.exists());
+        let _ = app.send(Message::PersistDue);
+        assert_eq!(app.ui_writes, 1, "one write for the burst");
+        assert_eq!(crate::ui_state::load(&state), app.ui, "the latest snapshot");
+        // (c) unchanged: no write.
+        let _ = app.send(Message::Panes(PanesMsg::Focus(app.focus)));
+        let _ = app.send(Message::PersistDue);
+        assert_eq!(app.ui_writes, 1, "unchanged snapshot → no write");
+    }
+
+    /// SM12 (b): quit writes the latest state immediately, with no debounce pending.
+    #[test]
+    fn quit_writes_the_latest_state_immediately() {
+        let (tmp, d) = fake_arc();
+        let state = tmp.path().join("state/editor.json");
+        let mut app = app_over(&d, Some(state.clone()));
+        let _ = app.send(Message::Panes(PanesMsg::ToggleSide));
+        assert_eq!(app.ui_writes, 0);
+        let _ = app.send(Message::Tabs(TabsMsg::Quit));
+        assert!(app.exiting);
+        assert_eq!(app.ui_writes, 1, "written at exit");
+        assert!(
+            crate::ui_state::load(&state).side_collapsed,
+            "the latest state"
+        );
+        // A debounce tick arriving after the exit write has nothing left to write.
+        let _ = app.send(Message::PersistDue);
+        assert_eq!(app.ui_writes, 1);
     }
 }

@@ -37,7 +37,7 @@ fn setup(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<dyn DaemonClient>) 
 fn app_on(d: &Arc<dyn DaemonClient>, path: &str) -> App {
     let mut app = App::new(Some(Arc::clone(d)), None);
     let _ = app.send(Message::Tabs(TabsMsg::Open(path.to_owned())));
-    assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some(path));
+    assert_eq!(app.active_tab().and_then(|t| t.path()), Some(path));
     app
 }
 
@@ -326,6 +326,7 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
     let _ = app.send(Message::Tabs(TabsMsg::Select(app.focus, 0)));
     assert!(shaped(&app, "A.md") && !shaped(&app, "B.md"));
 
+    let _ = app.send(Message::PersistDue);
     let mut back = App::new(Some(Arc::clone(&d)), Some(state));
     assert_eq!(back.open_paths(), ["A.md", "B.md"]);
     assert_eq!(back.reading.mode("A.md"), ViewMode::Source);
@@ -925,12 +926,7 @@ fn late_attachment_re_renders_the_doc() {
     // only change left is the vault membership one (the race: before the fix nothing marked
     // the Doc stale and it kept the broken image).
     d.index().on_generation(u64::MAX).expect("reader");
-    let doc = app
-        .reading
-        .tabs
-        .get_mut("A.md")
-        .and_then(|t| t.doc.as_mut())
-        .expect("doc");
+    let doc = app.reading.doc_mut("A.md").expect("doc");
     doc.generation = d.index().generation();
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
@@ -1274,7 +1270,7 @@ fn unresolved_link_click_creates_under_create_mode() {
         target: "Nope".into(),
     }));
     assert!(d.read_file("Nope.md").is_ok(), "created at the root");
-    assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("Nope.md"));
+    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("Nope.md"));
     let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "sub/Deep".into(),
@@ -1283,10 +1279,7 @@ fn unresolved_link_click_creates_under_create_mode() {
         d.read_file("sub/Deep.md").is_ok(),
         "created at the link's path"
     );
-    assert_eq!(
-        app.active_tab().map(|t| t.path.as_str()),
-        Some("sub/Deep.md")
-    );
+    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("sub/Deep.md"));
     assert!(
         app.status
             .notice
@@ -1317,7 +1310,7 @@ fn link_menu_create_note_under_warn_mode() {
     let _ = app.send(Message::Menu(MenuMsg::Open(t, at)));
     let _ = app.send(Message::Menu(MenuMsg::Choose(Item::CreateNote)));
     assert!(d.read_file("Nope.md").is_ok());
-    assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("Nope.md"));
+    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("Nope.md"));
 }
 
 /// Plan round-6 WP-5: a Reading table-cell link (drawn through the same `run_el` spans as the

@@ -368,7 +368,7 @@ fn palette_prompts_saves_first_and_runs_with_context() {
     assert!(disk.starts_with('Z'), "dirty buffer saved first");
     assert!(!e.app.palette.open && e.app.palette.prompt.is_none());
     assert_eq!(
-        e.app.active_tab().map(|t| t.path.as_str()),
+        e.app.active_tab().and_then(|t| t.path()),
         Some("b.md"),
         "open_path opened in the focused pane"
     );
@@ -505,7 +505,7 @@ fn deliver_terminal(d: &FakeDaemon, app: &mut App) {
 fn all_tabs(app: &App) -> Vec<String> {
     app.panes
         .iter()
-        .flat_map(|(_, ps)| ps.tabs.iter().map(|t| t.path.clone()))
+        .flat_map(|(_, ps)| ps.tabs.iter().filter_map(|t| t.path().map(str::to_owned)))
         .collect()
 }
 

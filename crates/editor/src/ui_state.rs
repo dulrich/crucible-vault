@@ -22,13 +22,71 @@ pub enum Layout {
     Split,
 }
 
+/// What a tab shows (WP-R15 B4). Persisted as tagged JSON (`{"tab":"note","path":…}`,
+/// `{"tab":"settings"}`, `{"tab":"log"}`); a bare string (every `editor.json` before WP-R15)
+/// still reads: a vault path, or one of the old reserved sentinel paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "TabWire", from = "TabIn")]
+pub enum TabKind {
+    /// A vault note at this path.
+    Note(String),
+    /// Plan editor-settings-tab WP-2: the Settings tab.
+    Settings,
+    /// Plan round-6-feedback-todos WP-7: the notice log.
+    Log,
+}
+
+/// The pre-WP-R15 Settings / Log tab paths (read path only).
+const LEGACY_SETTINGS_TAB: &str = "/:settings";
+const LEGACY_LOG_TAB: &str = "/:log";
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "tab", rename_all = "snake_case")]
+enum TabWire {
+    Note { path: String },
+    Settings,
+    Log,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TabIn {
+    Legacy(String),
+    Tagged(TabWire),
+}
+
+impl From<TabKind> for TabWire {
+    fn from(k: TabKind) -> Self {
+        match k {
+            TabKind::Note(path) => Self::Note { path },
+            TabKind::Settings => Self::Settings,
+            TabKind::Log => Self::Log,
+        }
+    }
+}
+
+impl From<TabIn> for TabKind {
+    fn from(w: TabIn) -> Self {
+        match w {
+            TabIn::Legacy(p) if p == LEGACY_SETTINGS_TAB => Self::Settings,
+            TabIn::Legacy(p) if p == LEGACY_LOG_TAB => Self::Log,
+            TabIn::Legacy(p) | TabIn::Tagged(TabWire::Note { path: p }) => Self::Note(p),
+            TabIn::Tagged(TabWire::Settings) => Self::Settings,
+            TabIn::Tagged(TabWire::Log) => Self::Log,
+        }
+    }
+}
+
 /// Persisted editor state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiState {
-    /// Open tabs (vault-relative paths), in order.
-    pub tabs: Vec<String>,
-    /// Index into `tabs`.
+    /// A WP-1 file's open tabs, in order (read only: `panes` supersedes it and it is no
+    /// longer written).
+    #[serde(skip_serializing)]
+    pub tabs: Vec<TabKind>,
+    /// Index into `tabs` (read only, as `tabs`).
+    #[serde(skip_serializing)]
     pub active_tab: Option<usize>,
     /// Per-tab display mode of the open tabs (vault-relative path → mode); a path absent here
     /// opens in the default (Reading). Replaces the old global `layout` field, which was saved
@@ -60,10 +118,10 @@ pub enum SplitDir {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PaneNode {
-    /// One pane: its tab paths in order and the active index.
+    /// One pane: its tabs in order and the active index.
     Leaf {
         #[serde(default)]
-        tabs: Vec<String>,
+        tabs: Vec<TabKind>,
         #[serde(default)]
         active: Option<usize>,
     },
@@ -86,7 +144,7 @@ pub struct PaneLayout {
 
 impl PaneNode {
     /// Leaves in depth-first order.
-    pub fn leaves(&self) -> Vec<(&[String], Option<usize>)> {
+    pub fn leaves(&self) -> Vec<(&[TabKind], Option<usize>)> {
         let mut out = Vec::new();
         let mut stack = vec![self];
         while let Some(n) = stack.pop() {
@@ -191,8 +249,13 @@ mod tests {
         let path = state_path_from(Some(tmp.path().into()), None).expect("path");
         assert_eq!(load(&path), UiState::default(), "missing → defaults");
         let mut s = UiState {
-            tabs: vec!["a.md".into(), "b/c.md".into()],
-            active_tab: Some(1),
+            panes: Some(PaneLayout {
+                root: PaneNode::Leaf {
+                    tabs: vec![TabKind::Note("a.md".into()), TabKind::Note("b/c.md".into())],
+                    active: Some(1),
+                },
+                focused: 0,
+            }),
             modes: BTreeMap::from([("b/c.md".to_owned(), Layout::Split)]),
             surround: Surround::Light,
             recent: vec![],
@@ -222,6 +285,7 @@ mod tests {
         let s = load(&path);
         assert!(!s.side_collapsed && !s.pane_borders, "pre-WP-3 file → off");
         let mut s2 = s.clone();
+        s2.tabs.clear(); // read-only legacy field: never written
         s2.side_collapsed = true;
         s2.pane_borders = true;
         save(&path, &s2, None).expect("save");
@@ -239,7 +303,7 @@ mod tests {
         )
         .expect("old");
         let s = load(&path);
-        assert_eq!(s.tabs, vec!["a.md".to_owned()]);
+        assert_eq!(s.tabs, vec![TabKind::Note("a.md".into())]);
         assert!(s.panes.is_some(), "old panes still restore");
         assert!(s.modes.is_empty(), "no per-tab modes → defaults");
         assert_eq!(
@@ -251,6 +315,40 @@ mod tests {
         s2.modes.insert("b.md".into(), Layout::Split);
         save(&path, &s2, None).expect("save");
         assert_eq!(load(&path).modes, s2.modes);
+    }
+
+    /// WP-R15 (B4): tabs persist as tagged JSON, the WP-1 flat fields are no longer written,
+    /// and a file in the pre-WP-R15 shape (bare strings, sentinel paths) still reads.
+    #[test]
+    fn tabs_persist_tagged_and_legacy_sentinels_read() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("editor.json");
+        let old = br#"{"tabs":["a.md","/:settings"],"active_tab":1,"panes":{"root":{"kind":"split","dir":"right","ratio_milli":500,"a":{"kind":"leaf","tabs":["a.md","/:log"],"active":1},"b":{"kind":"leaf","tabs":["/:settings"],"active":0}},"focused":1}}"#;
+        std::fs::write(&path, old).expect("old");
+        let s = load(&path);
+        let note = TabKind::Note("a.md".into());
+        assert_eq!(s.tabs, vec![note.clone(), TabKind::Settings]);
+        let leaves: Vec<Vec<TabKind>> = s
+            .panes
+            .as_ref()
+            .expect("panes")
+            .root
+            .leaves()
+            .into_iter()
+            .map(|(t, _)| t.to_vec())
+            .collect();
+        assert_eq!(leaves, [vec![note, TabKind::Log], vec![TabKind::Settings]]);
+        let mut s2 = s.clone();
+        s2.tabs.clear();
+        s2.active_tab = None;
+        save(&path, &s2, None).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains(r#""tab": "note""#), "{text}");
+        assert!(text.contains(r#""tab": "settings""#), "{text}");
+        assert!(text.contains(r#""tab": "log""#), "{text}");
+        assert!(!text.contains("/:"), "no sentinel paths written: {text}");
+        assert!(!text.contains("active_tab"), "no flat dual-write: {text}");
+        assert_eq!(load(&path), s2, "the new format reads back");
     }
 
     #[test]

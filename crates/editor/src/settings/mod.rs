@@ -63,11 +63,6 @@ use crate::icons::Icon;
 use crate::message::Message;
 use crate::theme::Tokens;
 
-/// The Settings tab's persisted tab "path": starts with `/`, which `cv-vault`'s
-/// `validate_rel_path` rejects, so it can never collide with a vault note; old `UiState` files
-/// (plain vault paths) load unchanged.
-pub const SETTINGS_TAB: &str = "/:settings";
-
 /// The vault config folder (the daemon's `config_dir`, `crates/cv/src/config.rs:100`).
 pub const CONFIG_DIR: &str = "_custom/crucible-vault";
 

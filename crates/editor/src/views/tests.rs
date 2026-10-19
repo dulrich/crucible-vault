@@ -126,7 +126,7 @@ fn row_click_opens_the_path_at_its_line() {
         line: Some(3),
     }));
     let tab = app.active_tab().expect("tab");
-    assert_eq!(tab.path, "Linker.md");
+    assert_eq!(tab.path(), Some("Linker.md"));
     assert_eq!(app.active_doc().expect("doc").cursor().position.line, 2);
 }
 
@@ -799,7 +799,7 @@ fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
     let (_, click) = cb(&rows[0]).expect("checkbox");
     let _ = app.send(click);
     assert!(d.bool_calls().expect("calls").is_empty());
-    let text = app.docs.get_mut(NOTE).expect("doc").text();
+    let text = app.doc(NOTE).expect("doc").text();
     assert!(text.starts_with("---\nread: true\n---\n# Host"), "{text}");
     // Closed note, checked: exactly one `note_set_bool` to false.
     let (checked, click) = cb(&rows[1]).expect("checkbox");

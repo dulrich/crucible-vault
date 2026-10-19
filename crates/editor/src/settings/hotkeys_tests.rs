@@ -312,7 +312,7 @@ fn ctrl_comma_opens_settings_and_ctrl_shift_comma_cannot_be_bound() {
         .panes
         .iter()
         .flat_map(|(_, ps)| ps.tabs.iter())
-        .filter(|t| t.kind() == TabKind::Settings)
+        .filter(|t| t.kind == TabKind::Settings)
         .count();
     assert_eq!(n, 1);
 }
@@ -866,7 +866,7 @@ fn assigning_a_bookmark_chord_writes_keys_and_survives_reorder() {
     );
     // The chord opens it.
     key(&mut app, "Alt+9");
-    assert_eq!(app.active_tab().map(|t| t.path.as_str()), Some("wp9/a.md"));
+    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp9/a.md"));
     // Clear drops the keys.
     hk(
         &mut app,

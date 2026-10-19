@@ -23,7 +23,6 @@ use iced::widget::text_editor::{self, Action, Binding, Content, Edit, KeyPress, 
 use iced::widget::{Space, button, column, container, row, text};
 use iced::{Element, Length, Point, Task, clipboard};
 
-use crate::app::Docs;
 use crate::daemon::{ContentHash, DaemonClient, DaemonError};
 use crate::message::{Message, SourceKey, SourceMsg};
 use crate::theme::Tokens;
@@ -97,6 +96,9 @@ impl Clone for Repr {
     }
 }
 
+/// The frontmatter-title cache: `((edit_seq, epoch), title)` of the last parse.
+type TitleCache = std::cell::RefCell<Option<((u64, u64), Option<String>)>>;
+
 /// One open note's source buffer.
 #[derive(Debug)]
 pub struct SourceBuffer {
@@ -161,6 +163,11 @@ pub struct SourceBuffer {
     /// WP-5 (audit E2): a title rename of this note is in flight; saves are held (queued as
     /// `save_again`) so the old path is never written or recreated.
     renaming: bool,
+    /// WP-R15 (SP2): the frontmatter `title` of the current text, keyed by `(edit_seq, epoch)`
+    /// (an external reload does not bump `edit_seq`) — the `tab_title = "title"` source,
+    /// recomputed only when the buffer changed, so drawing the tab bar never re-parses an
+    /// unchanged note (plan editor-feedback-round-2 WP-6).
+    title_cache: TitleCache,
 }
 
 impl Clone for SourceBuffer {
@@ -191,6 +198,7 @@ impl Clone for SourceBuffer {
             name_title: self.name_title.clone(),
             pending_title: self.pending_title.clone(),
             renaming: self.renaming,
+            title_cache: self.title_cache.clone(),
         }
     }
 }
@@ -254,6 +262,7 @@ impl SourceBuffer {
             name_title: title,
             pending_title: None,
             renaming: false,
+            title_cache: std::cell::RefCell::default(),
         }
     }
 
@@ -350,6 +359,19 @@ impl SourceBuffer {
     /// The wholesale-replacement counter (bumped by [`SourceBuffer::reload`]).
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+    /// The text's frontmatter `title` (cached per edit seq and reload epoch).
+    pub fn frontmatter_title(&self) -> Option<String> {
+        let key = (self.edit_seq, self.epoch);
+        let mut cache = self.title_cache.borrow_mut();
+        if let Some((k, t)) = cache.as_ref()
+            && *k == key
+        {
+            return t.clone();
+        }
+        let t = crate::header::frontmatter_title(&self.text());
+        *cache = Some((key, t.clone()));
+        t
     }
     /// The undo history (read-only).
     pub fn history(&self) -> &UndoHistory {
@@ -1409,14 +1431,13 @@ fn window(content: &Content, a: usize, b: usize) -> String {
     s
 }
 
-fn find<'a>(docs: &'a mut Docs, path: &str) -> Option<&'a mut SourceBuffer> {
-    docs.get_mut(path)
-}
-
-/// What `update` needs from the app.
-pub struct Ctx<'a> {
-    pub daemon: Option<&'a Arc<dyn DaemonClient>>,
-    pub error: &'a mut Option<String>,
+/// What [`update`] asks the app to do (WP-R15 SP5: the one effect shape `App` drains, as
+/// `views::Effect`).
+pub enum Effect {
+    /// Run this task (saves, clipboard, timers, follow-up messages).
+    Task(Task<Message>),
+    /// An error notice for the status bar.
+    Error(String),
 }
 
 /// Plan editor-feedback-round-2 WP-3: flush `buf` now (tab switch away, window unfocus) through
@@ -1465,33 +1486,17 @@ pub(crate) fn autosave_timer(path: String, seq: u64) -> Task<Message> {
     )
 }
 
-/// Handles a [`SourceMsg`] (`Action`/`Undo`/`Redo`/`Save` target the `active` note's
-/// document; the rest are routed by path: one document per path, plan editor-feedback-round-2
-/// WP-7).
+/// Handles a [`SourceMsg`] for `buf`, the document [`SourceMsg::target`] names (one
+/// document per path, plan editor-feedback-round-2 WP-7).
 pub fn update(
-    tabs: &mut Docs,
-    active: Option<&str>,
+    buf: &mut SourceBuffer,
     msg: SourceMsg,
-    ctx: Ctx<'_>,
-) -> Task<Message> {
+    daemon: Option<&Arc<dyn DaemonClient>>,
+) -> Vec<Effect> {
     // Shadow mode (the only read-only source) was retired in plan tn-review-baseline-remediation
     // WP-R6; the buffer API keeps its `read_only` gate.
     let read_only = false;
-    let active_buf = active;
-    let buf = match &msg {
-        SourceMsg::AutosaveDue { path, .. }
-        | SourceMsg::Saved { path, .. }
-        | SourceMsg::KeepMine(path)
-        | SourceMsg::TakeTheirs(path)
-        | SourceMsg::MiddleClick { path, .. }
-        | SourceMsg::CommandClick { path, .. }
-        | SourceMsg::PastePrimary { path, .. }
-        | SourceMsg::PasteResolved { path, .. } => find(tabs, path),
-        _ => active_buf.and_then(|p| find(tabs, p)),
-    };
-    let Some(buf) = buf else {
-        return Task::none();
-    };
+    let mut fx = Vec::new();
     let edited = |buf: &mut SourceBuffer, changed: bool| {
         let primary = buf
             .take_new_primary()
@@ -1502,7 +1507,7 @@ pub fn update(
             primary
         }
     };
-    match msg {
+    let task = match msg {
         SourceMsg::Action(a) => {
             let changed = buf.perform(a, read_only, Instant::now());
             edited(buf, changed)
@@ -1563,12 +1568,8 @@ pub fn update(
             Task::batch([write, edited(buf, changed)])
         }
         SourceMsg::Paste => {
-            // Read-only buffers take no paste.
-            if read_only {
-                return Task::none();
-            }
             let path = buf.path.clone();
-            let daemon = ctx.daemon.map(Arc::clone);
+            let daemon = daemon.map(Arc::clone);
             let p = path.clone();
             Task::perform(
                 async move {
@@ -1602,13 +1603,11 @@ pub fn update(
                     edited(buf, changed)
                 }
                 PasteOutcome::Failed(e) => {
-                    *ctx.error = Some(e);
+                    fx.push(Effect::Error(e));
                     Task::none()
                 }
                 PasteOutcome::Text { notice } => {
-                    if notice.is_some() {
-                        *ctx.error = notice;
-                    }
+                    fx.extend(notice.map(Effect::Error));
                     clipboard::read().map(move |text| {
                         Message::Source(SourceMsg::PastePrimary {
                             path: path.clone(),
@@ -1626,34 +1625,37 @@ pub fn update(
                     buf.redo()
                 };
             if changed {
-                return autosave_timer(buf.path.clone(), buf.edit_seq);
-            }
-            Task::none()
-        }
-        SourceMsg::Save => spawn_save(ctx.daemon, buf.begin_save(read_only)),
-        SourceMsg::AutosaveDue { seq, .. } => {
-            if seq == buf.edit_seq {
-                spawn_save(ctx.daemon, buf.begin_save(read_only))
+                autosave_timer(buf.path.clone(), buf.edit_seq)
             } else {
                 Task::none()
             }
         }
-        SourceMsg::KeepMine(_) => spawn_save(ctx.daemon, buf.keep_mine(read_only)),
+        SourceMsg::Save => spawn_save(daemon, buf.begin_save(read_only)),
+        SourceMsg::AutosaveDue { seq, .. } => {
+            if seq == buf.edit_seq {
+                spawn_save(daemon, buf.begin_save(read_only))
+            } else {
+                Task::none()
+            }
+        }
+        SourceMsg::KeepMine(_) => spawn_save(daemon, buf.keep_mine(read_only)),
         // Routed by the app (`App::update_inner`); never reaches here.
         SourceMsg::Viewport { .. }
         | SourceMsg::Saved { .. }
         | SourceMsg::LinkKey(_)
         | SourceMsg::LinkPick(_) => Task::none(),
         SourceMsg::TakeTheirs(path) => {
-            if let Some(d) = ctx.daemon {
+            if let Some(d) = daemon {
                 match d.read_file(&path) {
                     Ok((bytes, h)) => buf.reload(&bytes, h),
-                    Err(e) => *ctx.error = Some(format!("reload failed: {e}")),
+                    Err(e) => fx.push(Effect::Error(format!("reload failed: {e}"))),
                 }
             }
             Task::none()
         }
-    }
+    };
+    fx.push(Effect::Task(task));
+    fx
 }
 
 /// plan editor-round-4 WP-2: iced maps a single click to `Action::Click` whatever the
@@ -1744,14 +1746,13 @@ pub(crate) fn fresh_view(e: &mut impl EditorOps, cursor: text_editor::Cursor, to
 
 /// Handles `file_changed` for any open tab on `path`.
 pub fn file_changed(
-    tabs: &mut Docs,
-    path: &str,
+    buf: &mut SourceBuffer,
     hash: Option<&str>,
     daemon: Option<&Arc<dyn DaemonClient>>,
 ) -> Option<String> {
     let d = daemon?;
-    let buf = find(tabs, path)?;
-    buf.external_change(hash, || d.read_file(path))
+    let path = buf.path.clone();
+    buf.external_change(hash, || d.read_file(&path))
 }
 
 /// Ctrl+S / Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, then iced's defaults.

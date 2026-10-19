@@ -1,10 +1,10 @@
 //! Modal dialogs (plan editor-data-safety WP-2).
 //!
 //! Two layers, kept apart so later dialogs reuse the shell (plan editor-ui-round-3 WP-3's
-//! delete-confirm): the **modal frame** ([`Dialog`], [`DialogMsg`], [`frame`], [`key_event`] —
+//! delete confirm): the **modal frame** ([`Dialog`], [`DialogMsg`], [`frame`], [`key_event`] —
 //! overlay card, title, OK / Cancel, Escape = Cancel, Enter = the default button; while a
 //! dialog is open `App::update` gives it input priority, see `App::modal_filter`) and the
-//! **content** ([`Content`] — here the unsaved-edits loss list).
+//! **content** (the [`Dialog`] variants — here the unsaved-edits loss list).
 
 use iced::keyboard::{self, Key};
 use iced::widget::{Space, button, checkbox, column, row, text};
@@ -39,39 +39,25 @@ pub fn key_event(ev: &keyboard::Event) -> Option<Message> {
     }
 }
 
-/// What OK does (the caller's continuation; Cancel always just closes).
+/// What the unsaved-edits dialog's OK discards into (Cancel always just closes).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OnOk {
+pub enum Discard {
     /// Exit without writing.
     Quit,
     /// Close these tabs (by [`crate::app::Tab::id`]) without writing.
     CloseTabs(Vec<u64>),
-    /// Delete the note in [`Content::Delete`] with its ticked items (plan editor-ui-round-3 WP-3).
-    DeleteNote,
-    /// Plan round-7-feedback-decisions WP-2: save this note, then the delete preview + confirm.
-    SaveThenDelete(String),
 }
 
-/// An open modal dialog.
+/// An open modal dialog (WP-R15 B6: one variant per valid content + continuation pairing;
+/// labels derive by `match`). Enter is Cancel in every dialog (all are destructive).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Dialog {
-    pub title: String,
-    pub ok_label: String,
-    /// Enter presses OK (`true`) or Cancel (`false`; the safe default for destructive dialogs).
-    pub enter_is_ok: bool,
-    pub content: Content,
-    pub on_ok: OnOk,
-    /// An optional third button between Cancel and OK (sends [`DialogMsg::Alt`]).
-    pub alt_label: Option<String>,
-}
-
-/// A dialog's body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Content {
-    UnsavedEdits(UnsavedEdits),
-    Delete(DeleteConfirm),
-    /// Plan round-7-feedback-decisions WP-2: delete requested for a note with unsaved edits
-    /// (Save then delete / Discard and delete / Cancel).
+pub enum Dialog {
+    /// "Unsaved edits will be lost": OK discards and continues per `then`.
+    Unsaved { losses: UnsavedEdits, then: Discard },
+    /// The delete-note confirm (plan editor-ui-round-3 WP-3): OK deletes with the ticked items.
+    DeleteConfirm(DeleteConfirm),
+    /// Plan round-7-feedback-decisions WP-2: delete requested for a note with unsaved edits —
+    /// OK = Save then delete, Alt = Discard and delete, Cancel.
     DeleteUnsaved(String),
 }
 
@@ -163,72 +149,39 @@ impl UnsavedEdits {
 }
 
 impl Dialog {
-    /// The "unsaved edits will be lost" dialog.
-    pub fn unsaved(losses: UnsavedEdits, on_ok: OnOk) -> Self {
-        let ok_label = match on_ok {
-            OnOk::Quit => "Quit without saving",
-            OnOk::CloseTabs(_) | OnOk::DeleteNote | OnOk::SaveThenDelete(_) => {
-                "Close without saving"
-            }
-        };
-        Self {
-            title: "Unsaved edits will be lost".into(),
-            ok_label: ok_label.into(),
-            enter_is_ok: false,
-            content: Content::UnsavedEdits(losses),
-            on_ok,
-            alt_label: None,
+    /// The title line.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Unsaved { .. } => "Unsaved edits will be lost".into(),
+            Self::DeleteConfirm(c) => format!("Delete {}?", c.path),
+            Self::DeleteUnsaved(path) => format!("{path} has unsaved edits"),
         }
     }
 
-    pub fn unsaved_edits(&self) -> Option<&UnsavedEdits> {
-        match &self.content {
-            Content::UnsavedEdits(u) => Some(u),
-            Content::Delete(_) | Content::DeleteUnsaved(_) => None,
+    /// The OK button's label.
+    pub fn ok_label(&self) -> &'static str {
+        match self {
+            Self::Unsaved {
+                then: Discard::Quit,
+                ..
+            } => "Quit without saving",
+            Self::Unsaved {
+                then: Discard::CloseTabs(_),
+                ..
+            } => "Close without saving",
+            Self::DeleteConfirm(c) => match c.mode {
+                DeleteMode::Trash => "Move to .trash",
+                DeleteMode::Permanent => "Delete permanently",
+            },
+            Self::DeleteUnsaved(_) => "Save then delete",
         }
     }
 
-    /// The delete-note confirm (Enter = Cancel: destructive).
-    pub fn delete(confirm: DeleteConfirm) -> Self {
-        let ok_label = match confirm.mode {
-            DeleteMode::Trash => "Move to .trash",
-            DeleteMode::Permanent => "Delete permanently",
-        };
-        Self {
-            title: format!("Delete {}?", confirm.path),
-            ok_label: ok_label.into(),
-            enter_is_ok: false,
-            content: Content::Delete(confirm),
-            on_ok: OnOk::DeleteNote,
-            alt_label: None,
-        }
-    }
-
-    /// Delete of a note with unsaved edits: OK = Save then delete, Alt = Discard and delete,
-    /// Cancel (Esc; also Enter — destructive). Either delete choice continues into
-    /// [`Self::delete`]'s confirm.
-    pub fn delete_unsaved(path: String) -> Self {
-        Self {
-            title: format!("{path} has unsaved edits"),
-            ok_label: "Save then delete".into(),
-            enter_is_ok: false,
-            content: Content::DeleteUnsaved(path.clone()),
-            on_ok: OnOk::SaveThenDelete(path),
-            alt_label: Some("Discard and delete".into()),
-        }
-    }
-
-    pub fn delete_confirm(&self) -> Option<&DeleteConfirm> {
-        match &self.content {
-            Content::Delete(c) => Some(c),
-            Content::UnsavedEdits(_) | Content::DeleteUnsaved(_) => None,
-        }
-    }
-
-    pub fn delete_confirm_mut(&mut self) -> Option<&mut DeleteConfirm> {
-        match &mut self.content {
-            Content::Delete(c) => Some(c),
-            Content::UnsavedEdits(_) | Content::DeleteUnsaved(_) => None,
+    /// The optional third button between Cancel and OK (sends [`DialogMsg::Alt`]).
+    pub fn alt_label(&self) -> Option<&'static str> {
+        match self {
+            Self::DeleteUnsaved(_) => Some("Discard and delete"),
+            Self::Unsaved { .. } | Self::DeleteConfirm(_) => None,
         }
     }
 }
@@ -236,20 +189,17 @@ impl Dialog {
 /// The modal frame: title, `body`, then Cancel / OK.
 pub fn frame<'a>(d: &'a Dialog, body: Element<'a, Message>, t: Tokens) -> Element<'a, Message> {
     column![
-        text(d.title.as_str())
-            .size(16)
-            .color(t.warn_text.to_color()),
+        text(d.title()).size(16).color(t.warn_text.to_color()),
         body,
         row![
             Space::new().width(Length::Fill),
             button(text("Cancel")).on_press(Message::Dialog(DialogMsg::Cancel)),
         ]
         .push(
-            d.alt_label
-                .as_deref()
+            d.alt_label()
                 .map(|l| button(text(l)).on_press(Message::Dialog(DialogMsg::Alt))),
         )
-        .push(button(text(d.ok_label.as_str())).on_press(Message::Dialog(DialogMsg::Ok)))
+        .push(button(text(d.ok_label())).on_press(Message::Dialog(DialogMsg::Ok)))
         .spacing(8),
     ]
     .spacing(10)
@@ -259,10 +209,10 @@ pub fn frame<'a>(d: &'a Dialog, body: Element<'a, Message>, t: Tokens) -> Elemen
 
 /// The dialog card (frame + content).
 pub fn view(d: &Dialog, t: Tokens) -> Element<'_, Message> {
-    let body: Element<'_, Message> = match &d.content {
-        Content::UnsavedEdits(u) => unsaved_view(u),
-        Content::Delete(c) => delete_view(c, t),
-        Content::DeleteUnsaved(_) => text("Save your edits before deleting, or discard them?")
+    let body: Element<'_, Message> = match d {
+        Dialog::Unsaved { losses, .. } => unsaved_view(losses),
+        Dialog::DeleteConfirm(c) => delete_view(c, t),
+        Dialog::DeleteUnsaved(_) => text("Save your edits before deleting, or discard them?")
             .size(14)
             .into(),
     };

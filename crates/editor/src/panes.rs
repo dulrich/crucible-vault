@@ -3,7 +3,7 @@
 
 use iced::widget::pane_grid::{self, Axis, Configuration, Node, Pane};
 
-use crate::app::Tab;
+use crate::app::{NoteRef, Tab, TabKind};
 use crate::ui_state::{PaneLayout, PaneNode, SplitDir};
 
 /// One pane: its tabs and the active index.
@@ -23,9 +23,9 @@ impl PaneState {
         self.active.and_then(|i| self.tabs.get(i))
     }
 
-    /// The active tab when it is a note (never the Settings tab).
-    pub fn active_note(&self) -> Option<&Tab> {
-        self.active_tab().filter(|t| !t.is_sentinel())
+    /// The active tab when it is a note (never Settings / Log).
+    pub fn active_note(&self) -> Option<NoteRef<'_>> {
+        self.active_tab().and_then(Tab::as_note)
     }
 
     /// Removes tab `i`, fixing the active index; returns the removed tab.
@@ -81,7 +81,7 @@ pub fn snapshot(state: &pane_grid::State<PaneState>, focus: Pane) -> PaneLayout 
             Node::Pane(p) => {
                 let (tabs, active) = state
                     .get(*p)
-                    .map(|s| (s.tabs.iter().map(|t| t.path.clone()).collect(), s.active))
+                    .map(|s| (s.tabs.iter().map(|t| t.kind.clone()).collect(), s.active))
                     .unwrap_or_default();
                 PaneNode::Leaf { tabs, active }
             }
@@ -118,11 +118,11 @@ fn milli_to_ratio(m: u16) -> f32 {
     (f32::from(m) / 1000.0).clamp(0.05, 0.95)
 }
 
-/// An empty grid shaped like `layout`, the tab paths to open into each pane (`(pane, paths,
+/// An empty grid shaped like `layout`, the tabs to open into each pane (`(pane, tabs,
 /// active)` in layout order) and the pane to focus.
 pub type Restore = (
     pane_grid::State<PaneState>,
-    Vec<(Pane, Vec<String>, Option<usize>)>,
+    Vec<(Pane, Vec<TabKind>, Option<usize>)>,
     Pane,
 );
 
@@ -163,7 +163,7 @@ pub fn restore(layout: &PaneLayout) -> Restore {
 }
 
 /// The single-pane layout a WP-1 `editor.json` describes.
-pub fn from_flat(tabs: &[String], active: Option<usize>) -> PaneLayout {
+pub fn from_flat(tabs: &[TabKind], active: Option<usize>) -> PaneLayout {
     PaneLayout {
         root: PaneNode::Leaf {
             tabs: tabs.to_vec(),
@@ -173,11 +173,18 @@ pub fn from_flat(tabs: &[String], active: Option<usize>) -> PaneLayout {
     }
 }
 
-/// The pane and index holding `path`, if open anywhere.
+/// The pane and index of the first tab showing `path`, if open anywhere.
 pub fn find(state: &pane_grid::State<PaneState>, path: &str) -> Option<(Pane, usize)> {
     state
         .iter()
-        .find_map(|(p, s)| s.tabs.iter().position(|t| t.path == path).map(|i| (*p, i)))
+        .find_map(|(p, s)| s.tabs.iter().position(|t| t.shows(path)).map(|i| (*p, i)))
+}
+
+/// The pane and index of the first tab of `kind` (the singleton Settings / Log tabs).
+pub fn find_kind(state: &pane_grid::State<PaneState>, kind: &TabKind) -> Option<(Pane, usize)> {
+    state
+        .iter()
+        .find_map(|(p, s)| s.tabs.iter().position(|t| t.kind == *kind).map(|i| (*p, i)))
 }
 
 /// The pane and index of the tab with id `id` (plan editor-feedback-round-2 WP-7).

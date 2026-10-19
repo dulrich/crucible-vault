@@ -54,11 +54,11 @@ impl crate::app::App {
     /// Re-evaluates the list after a source action / key; `typed_bracket` = the action inserted
     /// `[` (the only way the list opens).
     pub(crate) fn link_ta_sync(&mut self, typed_bracket: bool) {
-        let Some(tab) = self.active_note().cloned() else {
+        let Some(tab) = self.active_note().map(|t| (t.id, t.path.to_owned())) else {
             self.link_ta = None;
             return;
         };
-        let Some(doc) = self.docs.get(&tab.path) else {
+        let Some(doc) = self.doc(&tab.1) else {
             self.link_ta = None;
             return;
         };
@@ -75,7 +75,7 @@ impl crate::app::App {
                 let before = t.get(..col).unwrap_or("");
                 let same = ta
                     .as_ref()
-                    .is_some_and(|a| a.path == tab.path && a.tab == tab.id && a.line == line);
+                    .is_some_and(|a| a.path == tab.1 && a.tab == tab.0 && a.line == line);
                 if typed_bracket && before.ends_with("[[") && !before.ends_with("[[[") {
                     Sync::Open {
                         start: col,
@@ -103,8 +103,8 @@ impl crate::app::App {
             Sync::Close => self.link_ta = None,
             Sync::Open { start, query } => {
                 self.link_ta = Some(LinkTa {
-                    path: tab.path,
-                    tab: tab.id,
+                    path: tab.1,
+                    tab: tab.0,
                     line,
                     start,
                     query,
@@ -186,7 +186,7 @@ impl crate::app::App {
             return;
         };
         let link = editor_model::link_form::wikilink(path, &self.explorer.paths);
-        let Some(doc) = self.docs.get_mut(&a.path) else {
+        let Some(doc) = self.doc_mut(&a.path) else {
             return;
         };
         let Some(line) = doc.line_text(a.line) else {
@@ -216,7 +216,7 @@ impl crate::app::App {
         if a.path != path || a.tab != id || self.active_note().is_none_or(|t| t.id != id) {
             return None;
         }
-        let doc = self.docs.get(path)?;
+        let doc = self.doc(path)?;
         Some(overlay(
             a,
             doc.top_line(),

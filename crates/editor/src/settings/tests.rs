@@ -49,7 +49,7 @@ fn settings_tabs(app: &App) -> usize {
     app.panes
         .iter()
         .flat_map(|(_, ps)| ps.tabs.iter())
-        .filter(|t| t.kind() == TabKind::Settings)
+        .filter(|t| t.kind == TabKind::Settings)
         .count()
 }
 
@@ -415,11 +415,14 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
     );
     let _ = app.send(Message::Palette(PaletteMsg::Key(comma.clone())));
     assert_eq!(settings_tabs(&app), 1);
-    assert!(app.active_tab().is_some_and(|t| t.is_settings()));
+    assert!(
+        app.active_tab()
+            .is_some_and(|t| t.kind == crate::app::TabKind::Settings)
+    );
     assert!(app.active_note().is_none());
     assert!(
         app.status.error_text().is_none(),
-        "no daemon read of the sentinel"
+        "no daemon read for the Settings tab"
     );
     // Open a note, then Ctrl+, again: the existing tab is focused, never a second one.
     let note = d
@@ -433,11 +436,14 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
     let _ = app.send(Message::Tabs(TabsMsg::Open(note.clone())));
     let _ = app.send(Message::Palette(PaletteMsg::Key(comma)));
     assert_eq!(settings_tabs(&app), 1);
-    assert!(app.active_tab().is_some_and(|t| t.is_settings()));
+    assert!(
+        app.active_tab()
+            .is_some_and(|t| t.kind == crate::app::TabKind::Settings)
+    );
     // Never in history or recent; files loaded for the pages.
     let ps = app.panes.get(app.focus).expect("pane");
     assert!(!ps.history.can_forward());
-    assert!(!app.ui.recent.iter().any(|p| p == SETTINGS_TAB));
+    assert!(app.ui.recent.iter().all(|p| *p == note), "only the note");
     assert!(
         app.settings
             .files
@@ -457,8 +463,10 @@ fn settings_tab_persists_and_old_ui_state_loads() {
     {
         let mut app = app_over(&d, Some(state.clone()));
         let _ = app.send(s(SettingsMsg::Open));
-        assert_eq!(app.ui.tabs, [SETTINGS_TAB]);
-        assert!(!app.ui.modes.contains_key(SETTINGS_TAB), "no mode entry");
+        let _ = app.send(Message::PersistDue);
+        let leaves = app.ui.panes.as_ref().map(|l| l.root.leaves()[0].0.to_vec());
+        assert_eq!(leaves, Some(vec![crate::app::TabKind::Settings]));
+        assert!(app.ui.modes.is_empty(), "no mode entry");
     }
     let app = app_over(&d, Some(state.clone()));
     assert_eq!(settings_tabs(&app), 1, "restored without a daemon read");
@@ -484,7 +492,7 @@ fn settings_tab_takes_no_note_commands() {
     let _ = app.send(Message::Find(crate::message::FindMsg::Open));
     assert!(
         app.bookmarks.items.is_empty(),
-        "the sentinel is never bookmarked"
+        "the Settings tab is never bookmarked"
     );
     assert!(app.panes.get(app.focus).is_some_and(|ps| ps.find.is_none()));
     assert!(d.read_file(BOOKMARKS_PATH).is_err());
@@ -726,7 +734,10 @@ fn explorer_trash_always_confirms_with_orphan_ticks() {
     let c = app
         .dialog
         .as_ref()
-        .and_then(|d| d.delete_confirm())
+        .and_then(|d| match d {
+            crate::dialog::Dialog::DeleteConfirm(c) => Some(c),
+            _ => None,
+        })
         .expect("delete dialog (legacy confirm_trash = false is ignored)");
     assert_eq!(c.ticked(), ["wp3del/own.png"]);
     assert_eq!(c.items.len(), 2);
@@ -739,14 +750,20 @@ fn explorer_trash_always_confirms_with_orphan_ticks() {
     let shared_ix = app
         .dialog
         .as_ref()
-        .and_then(|d| d.delete_confirm())
+        .and_then(|d| match d {
+            crate::dialog::Dialog::DeleteConfirm(c) => Some(c),
+            _ => None,
+        })
         .and_then(|c| c.items.iter().position(|(i, _)| i.referenced_elsewhere))
         .expect("shared listed");
     let _ = app.send(Message::Dialog(DialogMsg::Toggle(shared_ix)));
     assert_eq!(
         app.dialog
             .as_ref()
-            .and_then(|d| d.delete_confirm())
+            .and_then(|d| match d {
+                crate::dialog::Dialog::DeleteConfirm(c) => Some(c),
+                _ => None,
+            })
             .map(crate::dialog::DeleteConfirm::ticked),
         Some(vec!["wp3del/own.png".to_owned()])
     );

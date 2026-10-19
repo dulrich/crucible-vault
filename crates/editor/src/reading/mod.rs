@@ -121,13 +121,55 @@ pub struct Doc {
     pub unresolved: HashSet<String>,
 }
 
-/// One tab's reading state.
+/// One document's Reading state (WP-R15 SP2): everything per note path, so a close is one
+/// `remove` and a rename one re-key ([`ReadingStore::remove`], [`ReadingStore::rekey`]).
 #[derive(Debug, Clone, Default)]
-pub struct TabReading {
+pub struct DocReading {
     pub mode: ViewMode,
     pub doc: Option<Doc>,
     /// The `edit_seq` seen at the previous tick (debounce).
     seen_seq: Option<u64>,
+    /// The pending filename-input edit (absent = shows the stem).
+    title: Option<String>,
+    /// The open find bar's query: its occurrences are painted in the reading view (plan
+    /// editor-feedback-round-2 WP-4). Render blocks carry source line ranges
+    /// (`RenderModel::block_lines`, plan editor-ui-round-3 WP-5) at block granularity only, so
+    /// matches are still found in the rendered text.
+    find: Option<String>,
+    /// plan editor-ui-round-3 WP-5: the active find match, as (top-level render block, nth
+    /// query occurrence inside it).
+    find_active: Option<(usize, usize)>,
+    /// Plan round-5 WP-1: per-tab (view) place and selection — two tabs on one note keep
+    /// their own; keyed by tab id.
+    views: HashMap<u64, ViewPlace>,
+}
+
+/// One tab's (view's) Reading place on a document (plan round-5 WP-1 "per-tab Reading
+/// state"; WP-R15 SP2: the per-(path, view) maps collapsed into one).
+#[derive(Debug, Clone, Default)]
+struct ViewPlace {
+    /// plan editor-ui-round-3 WP-6: the top-level block at the viewport's top, from the last
+    /// layout probe (`None` = scrolled to the top / not probed yet).
+    top: Option<usize>,
+    /// Plan round-8 WP-4: the block under the anchor height, from the last layout probe (only
+    /// kept while `anchor > 0`; at 0 it is `top`).
+    anchor_at: Option<usize>,
+    /// Plan round-8 WP-4: the in-flight `scroll_to` probe is a mode-switch carry — placed under
+    /// the anchor height instead of at the top.
+    carry: bool,
+    /// Plan round-6 WP-1: last sent to an edge by Ctrl+PgUp/PgDn (`true` = the end); a mode
+    /// switch snaps the other mode to it. Cleared by the next user scroll.
+    edge: Option<bool>,
+    /// Plan round-5 WP-7: the Reading selection `(anchor, focus)`; never collapsed. Cleared
+    /// whenever the Doc is replaced.
+    sel: Option<(SelPos, SelPos)>,
+    /// Plan round-5 WP-8: the Source side changed its selection more recently than the Reading
+    /// side (Split: the most recent side feeds the action context).
+    source_newer: bool,
+    /// Plan round-5 WP-1: just (re)activated — the first `on_scroll` (iced reports offset 0
+    /// for a re-created scrollable) must re-apply the stored place instead of overwriting it.
+    /// Plan round-6 WP-2: armed at an instant and honoured only within [`RESTORE_GUARD`].
+    restoring: Option<std::time::Instant>,
 }
 
 #[derive(Debug)]
@@ -141,12 +183,8 @@ struct ResolverCache {
 /// All reading state.
 #[derive(Debug, Default)]
 pub struct ReadingStore {
-    /// plan round-5 WP-3: a notice for the status bar, taken by `App` after each update.
-    pub notice: Option<(crate::app::Severity, String)>,
-    /// Plan round-6 WP-4: an unresolved vault link click `(src, target)`, taken by `App`, which
-    /// warns or creates per `editor.toml` `missing_link`.
-    pub unresolved_click: Option<(String, String)>,
-    tabs: HashMap<String, TabReading>,
+    /// WP-R15 (SP2): per-document state, one entry per open note path.
+    docs: HashMap<String, DocReading>,
     pub images: ImageCache,
     resolver: Option<ResolverCache>,
     /// Bumped by [`ReadingStore::invalidate_resolver`]; Docs resolved under an older epoch
@@ -154,44 +192,9 @@ pub struct ReadingStore {
     resolver_epoch: u64,
     /// Render-model recomputations so far (observability + tests).
     pub recomputes: u64,
-    /// Pending filename-input edits, keyed by tab path (absent = shows the stem).
-    titles: HashMap<String, String>,
-    /// The open find bar's query per tab path: its occurrences are painted in the reading view
-    /// (plan editor-feedback-round-2 WP-4). Render blocks carry source line ranges
-    /// (`RenderModel::block_lines`, plan editor-ui-round-3 WP-5) at block granularity only, so
-    /// matches are still found in the rendered text.
-    find: HashMap<String, String>,
-    /// plan editor-ui-round-3 WP-6: the top-level block at the reading viewport's top per tab
-    /// path, from the last layout probe (absent = scrolled to the top / not probed yet).
-    /// Plan round-5 WP-1: keyed by (path, tab id) — two tabs on one note keep their own place.
-    top: HashMap<(String, u64), usize>,
     /// Plan round-8-intake-views-anchor WP-4: `editor.toml` `scroll_anchor` as a fraction of
     /// the viewport height (0 = top; set by `App::apply_prefs`).
     anchor: f32,
-    /// Plan round-8 WP-4: the block under the anchor height per tab, from the last layout
-    /// probe (only kept while `anchor > 0`; at 0 it is [`Self::top_block`]).
-    anchor_at: HashMap<(String, u64), usize>,
-    /// Plan round-8 WP-4: tabs whose in-flight `scroll_to` probe is a mode-switch carry —
-    /// placed under the anchor height instead of at the top.
-    carry: HashSet<(String, u64)>,
-    /// Plan round-5 WP-1: tabs just (re)activated whose first `on_scroll` (iced reports offset
-    /// 0 for a re-created scrollable) must re-apply the stored place instead of overwriting it.
-    /// Plan round-6 WP-2: armed at an instant and honoured only within [`RESTORE_GUARD`] — iced
-    /// reports scrolling only when the content overflows, so an unexpired guard could otherwise
-    /// snap the view on a much later user wheel event.
-    restoring: HashMap<u64, std::time::Instant>,
-    /// Plan round-6 WP-1: tabs (path, tab id) last sent to an edge by Ctrl+PgUp/PgDn (`true` =
-    /// the end); a mode switch snaps the other mode to it. Cleared by the next user scroll.
-    edge: HashMap<(String, u64), bool>,
-    /// plan editor-ui-round-3 WP-5: the active find match per tab path, as (top-level render
-    /// block, nth query occurrence inside it).
-    find_active: HashMap<String, (usize, usize)>,
-    /// Plan round-5 WP-7: the Reading selection `(anchor, focus)` per (path, tab id); never
-    /// collapsed (an empty selection is absent). Cleared whenever the path's Doc is replaced.
-    sel: HashMap<(String, u64), (SelPos, SelPos)>,
-    /// Plan round-5 WP-8: (path, tab id) pairs whose Source side changed its selection more
-    /// recently than the Reading side (Split: the most recent side feeds the action context).
-    source_newer: std::collections::HashSet<(String, u64)>,
 }
 
 /// The byte offset where 0-based `line` starts in `text` (`text.len()` past the end).
@@ -413,21 +416,32 @@ impl ReadingStore {
         }
     }
 
+    /// `path`'s document state (created on first use).
+    fn entry(&mut self, path: &str) -> &mut DocReading {
+        self.docs.entry(path.to_owned()).or_default()
+    }
+
+    /// Tab `view`'s place on `path`.
+    fn place(&self, path: &str, view: u64) -> Option<&ViewPlace> {
+        self.docs.get(path)?.views.get(&view)
+    }
+
+    /// Tab `view`'s place on `path`, mutably (created on first use).
+    fn place_mut(&mut self, path: &str, view: u64) -> &mut ViewPlace {
+        self.entry(path).views.entry(view).or_default()
+    }
+
     /// `path`'s mode.
     pub fn mode(&self, path: &str) -> ViewMode {
-        self.tabs.get(path).map(|t| t.mode).unwrap_or_default()
+        self.docs.get(path).map(|t| t.mode).unwrap_or_default()
     }
 
     /// Sets (or clears, `None`/empty) the find query painted in `path`'s reading view.
     pub fn set_find(&mut self, path: &str, query: Option<String>) {
-        match query.filter(|q| !q.is_empty()) {
-            Some(q) => {
-                self.find.insert(path.to_owned(), q);
-            }
-            None => {
-                self.find.remove(path);
-                self.find_active.remove(path);
-            }
+        let e = self.entry(path);
+        e.find = query.filter(|q| !q.is_empty());
+        if e.find.is_none() {
+            e.find_active = None;
         }
     }
 
@@ -440,9 +454,8 @@ impl ReadingStore {
     /// counterpart and nothing is drawn strong (audit E2).
     pub fn set_find_active(&mut self, path: &str, text: &str, r: Option<std::ops::Range<usize>>) {
         let hit = r.and_then(|r| {
-            let q = self.find.get(path)?;
-            let model = &self.tabs.get(path)?.doc.as_ref()?.model;
-            source_counterpart(model, text, q, &r)
+            let e = self.docs.get(path)?;
+            source_counterpart(&e.doc.as_ref()?.model, text, e.find.as_ref()?, &r)
         });
         self.set_find_active_at(path, hit);
     }
@@ -450,43 +463,36 @@ impl ReadingStore {
     /// Sets (or clears) the active find occurrence of `path`'s reading view directly (Reading
     /// mode steps through visible occurrences, plan editor-round-4 WP-3).
     pub fn set_find_active_at(&mut self, path: &str, hit: Option<(usize, usize)>) {
-        match hit {
-            Some(h) => {
-                self.find_active.insert(path.to_owned(), h);
-            }
-            None => {
-                self.find_active.remove(path);
-            }
-        }
+        self.entry(path).find_active = hit;
     }
 
     /// The active find match of `path`'s reading view (block, nth occurrence in it).
     pub fn find_active(&self, path: &str) -> Option<(usize, usize)> {
-        self.find_active.get(path).copied()
+        self.docs.get(path)?.find_active
     }
 
     /// The find query painted in `path`'s reading view.
     pub fn find_query(&self, path: &str) -> Option<&str> {
-        self.find.get(path).map(String::as_str)
+        self.docs.get(path)?.find.as_deref()
     }
 
     /// The filename input's current text for `path`.
     pub fn title<'a>(&'a self, path: &'a str) -> &'a str {
-        self.titles
+        self.docs
             .get(path)
-            .map_or_else(|| stem(path), String::as_str)
+            .and_then(|d| d.title.as_deref())
+            .unwrap_or_else(|| stem(path))
     }
 
     /// Takes (clears) `path`'s pending filename edit.
     pub fn take_title(&mut self, path: &str) -> Option<String> {
-        self.titles.remove(path)
+        self.docs.get_mut(path)?.title.take()
     }
 
-    /// `path`'s rendered doc.
     /// plan editor-ui-round-3 WP-6: the top-level block at the reading viewport's top, from
     /// the last layout probe (`None` = at the top / not probed).
     pub fn top_block(&self, path: &str, view: u64) -> Option<usize> {
-        self.top.get(&(path.to_owned(), view)).copied()
+        self.place(path, view)?.top
     }
 
     /// Plan round-8 WP-4: sets the `scroll_anchor` fraction (clamped to 0–1).
@@ -497,7 +503,9 @@ impl ReadingStore {
             0.0
         };
         if self.anchor <= 0.0 {
-            self.anchor_at.clear();
+            for d in self.docs.values_mut() {
+                d.views.values_mut().for_each(|v| v.anchor_at = None);
+            }
         }
     }
 
@@ -505,9 +513,9 @@ impl ReadingStore {
     /// anchor 0 (or no anchored probe yet) exactly [`Self::top_block`].
     pub fn anchor_block(&self, path: &str, view: u64) -> Option<usize> {
         if self.anchor > 0.0
-            && let Some(b) = self.anchor_at.get(&(path.to_owned(), view))
+            && let Some(b) = self.place(path, view).and_then(|v| v.anchor_at)
         {
-            return Some(*b);
+            return Some(b);
         }
         self.top_block(path, view)
     }
@@ -521,37 +529,41 @@ impl ReadingStore {
         blocks: usize,
         block: usize,
     ) -> Task<Message> {
-        self.set_top_block(path, view, block);
-        if self.anchor > 0.0 {
-            self.carry.insert((path.to_owned(), view));
-        }
+        let anchored = self.anchor > 0.0;
+        let v = self.place_mut(path, view);
+        v.top = Some(block);
+        v.carry |= anchored;
         probe(path, view, blocks, Some(block))
     }
 
     /// plan editor-ui-round-3 WP-6: records the intended top block of a carry (the scroll task
     /// is in flight; its probe confirms it).
     pub fn set_top_block(&mut self, path: &str, view: u64, block: usize) {
-        self.top.insert((path.to_owned(), view), block);
+        self.place_mut(path, view).top = Some(block);
     }
 
     /// Plan round-6 WP-1: tab `view` on `path` went to its start (`false`) / end (`true`).
     pub fn set_edge(&mut self, path: &str, view: u64, bottom: bool) {
-        self.edge.insert((path.to_owned(), view), bottom);
+        self.place_mut(path, view).edge = Some(bottom);
     }
 
     /// Plan round-6 WP-1: the edge tab `view` on `path` was last sent to, if not scrolled since.
     pub fn edge(&self, path: &str, view: u64) -> Option<bool> {
-        self.edge.get(&(path.to_owned(), view)).copied()
+        self.place(path, view)?.edge
     }
 
     /// Plan round-6 WP-1: a user scroll left the edge.
     pub fn clear_edge(&mut self, path: &str, view: u64) {
-        self.edge.remove(&(path.to_owned(), view));
+        if let Some(v) = self.docs.get_mut(path).and_then(|d| d.views.get_mut(&view)) {
+            v.edge = None;
+        }
     }
 
     /// plan editor-ui-round-3 WP-6: the reading view is (being scrolled) at its top.
     pub fn clear_top_block(&mut self, path: &str, view: u64) {
-        self.top.remove(&(path.to_owned(), view));
+        if let Some(v) = self.docs.get_mut(path).and_then(|d| d.views.get_mut(&view)) {
+            v.top = None;
+        }
     }
 
     /// Plan round-5 WP-1: tab `view` showing `path` was (re)activated — restores its stored
@@ -564,45 +576,57 @@ impl ReadingStore {
         }
         let b = self.top_block(path, view)?;
         let blocks = self.doc(path)?.model.blocks.len();
-        self.restoring.insert(view, std::time::Instant::now());
+        self.place_mut(path, view).restoring = Some(std::time::Instant::now());
         Some(probe(path, view, blocks, Some(b)))
     }
 
     /// Plan round-5 WP-1: the restore guard of tab `view` is armed.
     pub fn is_restoring(&self, view: u64) -> bool {
-        self.restoring
-            .get(&view)
-            .is_some_and(|at| at.elapsed() < RESTORE_GUARD)
+        self.docs
+            .values()
+            .filter_map(|d| d.views.get(&view)?.restoring)
+            .any(|at| at.elapsed() < RESTORE_GUARD)
     }
 
     /// Test hook: backdates tab `view`'s restore guard by `by`.
     #[cfg(test)]
     pub(crate) fn age_restore_guard(&mut self, view: u64, by: std::time::Duration) {
-        if let Some(at) = self.restoring.get_mut(&view) {
-            *at = at.checked_sub(by).unwrap_or(*at);
+        for d in self.docs.values_mut() {
+            if let Some(at) = d.views.get_mut(&view).and_then(|v| v.restoring.as_mut()) {
+                *at = at.checked_sub(by).unwrap_or(*at);
+            }
         }
     }
 
+    /// Test hook: `path`'s rendered doc, mutably.
+    #[cfg(test)]
+    pub(crate) fn doc_mut(&mut self, path: &str) -> Option<&mut Doc> {
+        self.docs.get_mut(path)?.doc.as_mut()
+    }
+
+    /// Tests (WP-R15 SP2): per-document Reading entries held (open documents + leaks).
+    #[cfg(test)]
+    pub(crate) fn doc_entries(&self) -> usize {
+        self.docs.len()
+    }
+
     pub fn doc(&self, path: &str) -> Option<&Doc> {
-        self.tabs.get(path).and_then(|t| t.doc.as_ref())
+        self.docs.get(path).and_then(|t| t.doc.as_ref())
     }
 
     /// Plan round-5 WP-7: tab `view`'s Reading selection of `path` as `(anchor, focus)`.
     pub fn selection(&self, path: &str, view: u64) -> Option<(SelPos, SelPos)> {
-        self.sel.get(&(path.to_owned(), view)).copied()
+        self.place(path, view)?.sel
     }
 
     /// Sets (or clears: `None` or collapsed) tab `view`'s Reading selection of `path`.
     pub fn set_selection(&mut self, path: &str, view: u64, sel: Option<(SelPos, SelPos)>) {
-        match sel.filter(|(a, f)| a != f) {
-            Some(s) => {
-                self.source_newer.remove(&(path.to_owned(), view));
-                self.sel.insert((path.to_owned(), view), s);
-            }
-            None => {
-                self.sel.remove(&(path.to_owned(), view));
-            }
+        let sel = sel.filter(|(a, f)| a != f);
+        let v = self.place_mut(path, view);
+        if sel.is_some() {
+            v.source_newer = false;
         }
+        v.sel = sel;
     }
 
     /// Ctrl+A: selects `path`'s whole rendered document in tab `view`; false when nothing is
@@ -624,13 +648,13 @@ impl ReadingStore {
     /// Plan round-5 WP-8: the Source side of tab `view` of `path` changed its selection (it is
     /// now the most recent side in Split).
     pub fn note_source_selection(&mut self, path: &str, view: u64) {
-        self.source_newer.insert((path.to_owned(), view));
+        self.place_mut(path, view).source_newer = true;
     }
 
     /// Plan round-5 WP-8: true when the Source side selected more recently than the Reading
     /// side of tab `view` of `path`.
     pub fn source_selected_last(&self, path: &str, view: u64) -> bool {
-        self.source_newer.contains(&(path.to_owned(), view))
+        self.place(path, view).is_some_and(|v| v.source_newer)
     }
 
     /// Plan round-5 WP-8: the vault path a link `target` in `src` resolves to (the
@@ -654,23 +678,31 @@ impl ReadingStore {
 
     /// Drops every tab's selection of `path` (its Doc was replaced or dropped).
     fn clear_selections(&mut self, path: &str) {
-        self.sel.retain(|(p, _), _| p != path);
+        if let Some(d) = self.docs.get_mut(path) {
+            d.views.values_mut().for_each(|v| v.sel = None);
+        }
     }
 
-    /// A tab closed: forget its state and release its image pins (E2).
-    pub fn on_tab_closed(&mut self, path: &str) {
-        self.tabs.remove(path);
-        self.titles.remove(path);
-        self.find.remove(path);
-        self.find_active.remove(path);
-        self.top.retain(|(p, _), _| p != path);
-        self.clear_selections(path);
+    /// The last tab of `path` closed: forget its state (one `remove`) and release its image
+    /// pins (E2).
+    pub fn remove(&mut self, path: &str) {
+        self.docs.remove(path);
         self.images.release_owner(path);
+    }
+
+    /// `from` was renamed to `to`: its state moves (one re-key); the `from` image pins are
+    /// released (the next render re-pins under `to`).
+    pub fn rekey(&mut self, from: &str, to: &str) {
+        if let Some(mut d) = self.docs.remove(from) {
+            d.title = None;
+            self.docs.insert(to.to_owned(), d);
+        }
+        self.images.release_owner(from);
     }
 
     /// A filename edit is pending (the breadcrumb's input holds unsubmitted text).
     pub fn title_pending(&self) -> bool {
-        !self.titles.is_empty()
+        self.docs.values().any(|d| d.title.is_some())
     }
 
     /// The Escape listener runs: a filename edit is pending, in any view mode.
@@ -682,7 +714,7 @@ impl ReadingStore {
     /// pending (the breadcrumb's blur poll) — in any view mode, Source-only included (plan
     /// editor-feedback-round-2 WP-6).
     pub fn ticks(&self) -> bool {
-        self.title_pending() || self.tabs.values().any(|t| t.mode.shows_reading())
+        self.title_pending() || self.docs.values().any(|t| t.mode.shows_reading())
     }
 
     /// The debounce / blur-poll tick, plus the filename editor's Escape (see [`Self::ticks`],
@@ -716,8 +748,7 @@ impl ReadingStore {
         if render_now {
             self.set_mode(tab, mode, daemon);
         } else {
-            let entry = self.tabs.entry(tab.path().to_owned()).or_default();
-            entry.mode = mode;
+            self.entry(tab.path()).mode = mode;
         }
     }
 
@@ -727,19 +758,20 @@ impl ReadingStore {
         mode: ViewMode,
         daemon: Option<&Arc<dyn DaemonClient>>,
     ) {
-        let entry = self.tabs.entry(tab.path().to_owned()).or_default();
+        let entry = self.entry(tab.path());
         entry.mode = mode;
         if mode.shows_reading() {
             if entry.doc.is_none() {
                 self.recompute(tab, daemon);
             }
         } else {
-            // Leaving reading/split: drop the model and its image pins (E2).
+            // Leaving reading/split: drop the model, places, selections and image pins (E2).
             entry.doc = None;
-            let path = tab.path();
-            self.top.retain(|(p, _), _| p != path);
-            self.sel.retain(|(p, _), _| p != path);
             entry.seen_seq = None;
+            entry.views.values_mut().for_each(|v| {
+                v.top = None;
+                v.sel = None;
+            });
             self.images.release_owner(tab.path());
         }
     }
@@ -792,13 +824,14 @@ impl ReadingStore {
         // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
         self.clear_selections(tab.path());
         let runs = selection::runs(&model);
-        let entry = self.tabs.entry(tab.path().to_owned()).or_default();
+        let resolver_epoch = self.resolver_epoch;
+        let entry = self.entry(tab.path());
         entry.seen_seq = Some(seq);
         entry.doc = Some(Doc {
             seq,
             epoch: tab.epoch(),
             generation,
-            resolver_epoch: self.resolver_epoch,
+            resolver_epoch,
             model,
             images,
             runs,
@@ -809,7 +842,7 @@ impl ReadingStore {
     /// Debounce: re-render `tab` once its `edit_seq` held still for a tick (or the index moved).
     fn tick(&mut self, tab: &SourceBuffer, daemon: Option<&Arc<dyn DaemonClient>>) {
         let generation = daemon.and_then(|d| d.index().generation());
-        let Some(entry) = self.tabs.get_mut(tab.path()) else {
+        let Some(entry) = self.docs.get_mut(tab.path()) else {
             return;
         };
         if !entry.mode.shows_reading() {
@@ -973,6 +1006,18 @@ fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option
     }
 }
 
+/// What [`update`] asks the app to do (WP-R15 SP5: the one effect shape `App` drains, as
+/// `views::Effect`; replaces the store's outbox fields).
+pub enum Effect {
+    /// Run this task (probes, scrolls, image loads, clipboard, a resolved link's open).
+    Task(Task<Message>),
+    /// plan round-5 WP-3: a status-bar notice.
+    Notice(crate::app::Severity, String),
+    /// Plan round-6 WP-4: an unresolved vault link `target` was clicked; `App` warns or
+    /// creates it per `editor.toml` `missing_link`.
+    MissingLink(String),
+}
+
 /// The reading update.
 pub fn update(
     store: &mut ReadingStore,
@@ -980,6 +1025,20 @@ pub fn update(
     tabs: &[&SourceBuffer],
     active: Option<&SourceBuffer>,
     daemon: Option<&Arc<dyn DaemonClient>>,
+) -> Vec<Effect> {
+    let mut fx = Vec::new();
+    let task = update_store(store, msg, tabs, active, daemon, &mut fx);
+    fx.push(Effect::Task(task));
+    fx
+}
+
+fn update_store(
+    store: &mut ReadingStore,
+    msg: ReadingMsg,
+    tabs: &[&SourceBuffer],
+    active: Option<&SourceBuffer>,
+    daemon: Option<&Arc<dyn DaemonClient>>,
+    fx: &mut Vec<Effect>,
 ) -> Task<Message> {
     match msg {
         ReadingMsg::CycleMode => {
@@ -1007,11 +1066,12 @@ pub fn update(
                 // Plan round-5 WP-1: the first scroll report after a (re)activation is the
                 // re-created scrollable's offset 0 — re-apply the stored place instead.
                 // Plan round-6 WP-2: an expired guard is dropped without re-applying.
-                let again = store
+                let v = store.place_mut(&path, view);
+                let again = v
                     .restoring
-                    .remove(&view)
+                    .take()
                     .is_some_and(|at| at.elapsed() < RESTORE_GUARD)
-                    .then(|| store.top_block(&path, view))
+                    .then_some(v.top)
                     .flatten();
                 return probe(&path, view, blocks, again);
             }
@@ -1025,17 +1085,18 @@ pub fn update(
             let Some(p) = probe else {
                 return Task::none();
             };
+            let anchor = store.anchor;
+            let v = store.place_mut(&path, view);
             match scroll_to {
                 Some(b) => {
-                    store.top.insert((path.clone(), view), b);
-                    let key = (path.clone(), view);
-                    let carry = store.carry.remove(&key);
+                    v.top = Some(b);
+                    let carry = std::mem::take(&mut v.carry);
                     if let Some(y) = p.block_offset(b) {
                         // Plan round-8 WP-4: a carry puts the block under the anchor height,
                         // clamped to the scrollable's range here (anchor 0 = today's `y`).
-                        let y = if carry && store.anchor > 0.0 {
-                            store.anchor_at.insert(key, b);
-                            p.anchored_offset(y, store.anchor)
+                        let y = if carry && anchor > 0.0 {
+                            v.anchor_at = Some(b);
+                            p.anchored_offset(y, anchor)
                         } else {
                             y
                         };
@@ -1044,16 +1105,16 @@ pub fn update(
                 }
                 None => match p.top_block() {
                     Some(b) => {
-                        if store.anchor > 0.0
-                            && let Some(a) = p.anchor_block(store.anchor)
+                        if anchor > 0.0
+                            && let Some(a) = p.anchor_block(anchor)
                         {
-                            store.anchor_at.insert((path.clone(), view), a);
+                            v.anchor_at = Some(a);
                         }
-                        store.top.insert((path, view), b);
+                        v.top = Some(b);
                     }
                     None => {
-                        store.anchor_at.remove(&(path.clone(), view));
-                        store.top.remove(&(path, view));
+                        v.anchor_at = None;
+                        v.top = None;
                     }
                 },
             }
@@ -1064,9 +1125,10 @@ pub fn update(
             }
             // Blur poll: a pending filename edit whose input lost focus is submitted.
             let polls: Vec<Task<Message>> = store
-                .titles
-                .keys()
-                .map(|p| {
+                .docs
+                .iter()
+                .filter(|(_, d)| d.title.is_some())
+                .map(|(p, _)| {
                     let path = p.clone();
                     iced::widget::operation::is_focused(title_id(p)).map(move |focused| {
                         Message::Reading(ReadingMsg::TitleFocus {
@@ -1079,9 +1141,9 @@ pub fn update(
             return Task::batch(polls);
         }
         ReadingMsg::TitleInput { path, value } => {
-            store.titles.insert(path, value);
+            store.entry(&path).title = Some(value);
         }
-        ReadingMsg::TitleRevert => store.titles.clear(),
+        ReadingMsg::TitleRevert => store.docs.values_mut().for_each(|d| d.title = None),
         ReadingMsg::Select { path, view, sel } => store.set_selection(&path, view, sel),
         // Plan round-5 WP-7: a finished selection gesture goes to PRIMARY (as Source does).
         ReadingMsg::SelectDone { path, view } => {
@@ -1102,7 +1164,7 @@ pub fn update(
             // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing;
             // plan round-6 WP-4: `App` warns or creates it per `missing_link`.
             if daemon.is_some() && !render::is_remote(&target) {
-                store.unresolved_click = Some((src, target));
+                fx.push(Effect::MissingLink(target));
             }
         }
         ReadingMsg::ImageShown {
@@ -1123,7 +1185,10 @@ pub fn update(
             store.images.loaded(&key, result.ok());
             if let Some(e) = failed {
                 tracing::debug!(error = %e, "image load failed");
-                store.notice = Some((crate::app::Severity::Warning, image_failure_text(&key, &e)));
+                fx.push(Effect::Notice(
+                    crate::app::Severity::Warning,
+                    image_failure_text(&key, &e),
+                ));
             }
         }
     }

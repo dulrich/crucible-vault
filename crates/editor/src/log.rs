@@ -1,8 +1,8 @@
 //! Plan round-6-feedback-todos WP-7: the in-memory notice log behind the Log tab.
 //!
 //! Every status notice ([`crate::app::StatusModel::notify_at`]) also lands here, in a bounded
-//! ring (oldest dropped first). Not persisted across restarts. The Log tab is a sentinel-path
-//! tab ([`LOG_TAB`]), the same pattern as the Settings tab.
+//! ring (oldest dropped first). Not persisted across restarts. The Log tab is a singleton tab
+//! ([`crate::app::TabKind::Log`]), the same pattern as the Settings tab.
 
 use std::collections::VecDeque;
 
@@ -11,9 +11,6 @@ use iced::{Element, Length};
 
 use crate::app::Severity;
 use crate::message::Message;
-
-/// The Log tab's reserved path (not a valid vault path).
-pub const LOG_TAB: &str = "/:log";
 
 /// Ring capacity (plan: ≥ 200).
 pub const RING_CAP: usize = 500;
@@ -212,7 +209,7 @@ mod tests {
         app.panes
             .iter()
             .flat_map(|(_, ps)| ps.tabs.iter())
-            .filter(|t| t.kind() == TabKind::Log)
+            .filter(|t| t.kind == TabKind::Log)
             .count()
     }
 
@@ -262,14 +259,14 @@ mod tests {
         // The status bar's button emits `LogMsg::Open`.
         let _ = app.send(Message::Log(LogMsg::Open));
         assert_eq!(log_tabs(&app), 1);
-        assert!(app.active_tab().is_some_and(|t| t.is_log()));
+        assert!(app.active_tab().is_some_and(|t| t.kind == TabKind::Log));
         assert!(app.active_note().is_none(), "never a note");
         assert_eq!(app.status.log.unread, 0, "opening resets unread");
         // A second click (or the palette command) focuses the same tab.
         let m = crate::palette::ClientCmd::OpenLog.message(app.focus);
         let _ = app.send(m);
         assert_eq!(log_tabs(&app), 1);
-        assert!(app.active_tab().is_some_and(|t| t.is_log()));
+        assert!(app.active_tab().is_some_and(|t| t.kind == TabKind::Log));
     }
 
     #[test]

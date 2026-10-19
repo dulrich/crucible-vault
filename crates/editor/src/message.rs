@@ -12,6 +12,9 @@ use crate::widget::virtual_list::ListWindow;
 /// Every message the app handles.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// WP-R15 (SM12): the `editor.json` write debounce elapsed — write the latest UI-state
+    /// snapshot if it still differs from the last one written (an internal completion).
+    PersistDue,
     Source(SourceMsg),
     Reading(ReadingMsg),
     Explorer(ExplorerMsg),
@@ -505,7 +508,65 @@ pub enum ThemeMsg {
     Set(Surround),
 }
 
+/// Which document a [`SourceMsg`] acts on (WP-R15 SP5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceTarget<'a> {
+    /// The note at this path, wherever its tabs are.
+    Path(&'a str),
+    /// The focused pane's active note (the focused source editor).
+    Active,
+    /// Handled by `App` itself (never reaches `source::update`).
+    App,
+}
+
 impl SourceMsg {
+    /// The document this message acts on.
+    pub fn target(&self) -> SourceTarget<'_> {
+        match self {
+            Self::AutosaveDue { path, .. }
+            | Self::KeepMine(path)
+            | Self::TakeTheirs(path)
+            | Self::MiddleClick { path, .. }
+            | Self::CommandClick { path, .. }
+            | Self::PastePrimary { path, .. }
+            | Self::PasteResolved { path, .. } => SourceTarget::Path(path),
+            Self::Action(_)
+            | Self::Undo
+            | Self::Redo
+            | Self::Save
+            | Self::Key(_)
+            | Self::Cut
+            | Self::Paste => SourceTarget::Active,
+            Self::Viewport { .. } | Self::Saved { .. } | Self::LinkKey(_) | Self::LinkPick(_) => {
+                SourceTarget::App
+            }
+        }
+    }
+
+    /// A user motion, edit or key in the focused source editor: it leaves a Reading edge,
+    /// makes Source the most recent selecting side and re-evaluates the `[[` list.
+    pub fn is_user_motion(&self) -> bool {
+        match self {
+            Self::Action(_) | Self::Key(_) => true,
+            Self::Undo
+            | Self::Redo
+            | Self::Save
+            | Self::Viewport { .. }
+            | Self::AutosaveDue { .. }
+            | Self::Saved { .. }
+            | Self::KeepMine(_)
+            | Self::TakeTheirs(_)
+            | Self::MiddleClick { .. }
+            | Self::CommandClick { .. }
+            | Self::PastePrimary { .. }
+            | Self::Cut
+            | Self::Paste
+            | Self::PasteResolved { .. }
+            | Self::LinkKey(_)
+            | Self::LinkPick(_) => false,
+        }
+    }
+
     pub fn kind(&self) -> MsgKind {
         match self {
             Self::AutosaveDue { .. }
