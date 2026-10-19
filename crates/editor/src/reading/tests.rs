@@ -380,6 +380,7 @@ fn probe_maps_scroll_offset_to_blocks() {
         offset_y: 100.0,
         content_y: 40.0,
         block_ys: vec![Some(48.0), Some(90.0), Some(139.5), Some(240.0), None],
+        ..Probe::default()
     };
     assert_eq!(
         p.top_block(),
@@ -442,6 +443,7 @@ fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
             offset_y: 100.0,
             content_y: 0.0,
             block_ys,
+            ..Probe::default()
         }),
         scroll_to: None,
     }));
@@ -540,6 +542,7 @@ fn reading_at_bottom_then_source_lands_on_the_last_lines() {
             offset_y: (blocks - 1) as f32 * 20.0,
             content_y: 0.0,
             block_ys,
+            ..Probe::default()
         }),
         scroll_to: None,
     }));
@@ -589,6 +592,7 @@ fn tab_resume_keeps_the_reading_place() {
         offset_y,
         content_y: 0.0,
         block_ys: block_ys.clone(),
+        ..Probe::default()
     };
     let _ = app.update(Message::Reading(ReadingMsg::Probed {
         path: a.to_owned(),
@@ -1209,6 +1213,7 @@ fn stale_restore_guard_does_not_snap_after_content_grows() {
             offset_y: 40.0 * 20.0,
             content_y: 0.0,
             block_ys,
+            ..Probe::default()
         }),
         scroll_to: None,
     }));

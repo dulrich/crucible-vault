@@ -139,6 +139,13 @@ pub struct SourceBuffer {
     /// target source line, and whether pass 1 (caret to the document end) has run. Pass 2
     /// moves the caret to the line's start, so cosmic scrolls back up with it at the top.
     pending_line: Option<(usize, bool)>,
+    /// Plan round-8-intake-views-anchor WP-4: the `scroll_anchor` fraction of the pending line
+    /// carry (0 = the line lands at the top; `pending_line` then holds the unclamped target).
+    pending_anchor: f32,
+    /// Plan round-8 WP-4: pass 3 of an anchored carry — after pass 2's layout put the line at
+    /// the top, scroll up this many visual rows (the caret-follow of that layout would
+    /// otherwise undo a scroll performed with the caret move).
+    pending_shift: Option<usize>,
     /// Plan round-5 WP-1: the source lines the editor's viewport shows, measured from the laid
     /// out pane height (a `sensor` around the editor stack; [`viewport_lines`]); falls back to
     /// [`VISIBLE_LINES`] before the first measure.
@@ -177,6 +184,8 @@ impl Clone for SourceBuffer {
             top_line: self.top_line,
             pending_edge: self.pending_edge,
             pending_line: self.pending_line,
+            pending_anchor: self.pending_anchor,
+            pending_shift: self.pending_shift,
             visible_lines: self.visible_lines,
             disk_title: self.disk_title.clone(),
             name_title: self.name_title.clone(),
@@ -238,6 +247,8 @@ impl SourceBuffer {
             top_line: 0,
             pending_edge: None,
             pending_line: None,
+            pending_anchor: 0.0,
+            pending_shift: None,
             visible_lines: VISIBLE_LINES,
             disk_title: title.clone(),
             name_title: title,
@@ -433,6 +444,8 @@ impl SourceBuffer {
         // (and wins over a line carry).
         if let Some(bottom) = self.pending_edge.take() {
             self.pending_line = None;
+            self.pending_anchor = 0.0;
+            self.pending_shift = None;
             let lines = if bottom { 1_000_000 } else { -1_000_000 };
             self.shaped().perform(text_editor::Action::Scroll { lines });
             return false;
@@ -459,10 +472,29 @@ impl SourceBuffer {
                     position: text_editor::Position { line, column: 0 },
                     selection: None,
                 });
-                self.top_line = line.min(self.max_top());
+                // Plan round-8 WP-4 (audit M2): the line sits at the top (or the view at the
+                // end when it is past the last top); move it down to the anchor height by
+                // scrolling up `rows` visual rows from the unclamped target, clamped once here.
+                let max = self.max_top();
+                let at = line.min(max);
+                let target = line.saturating_sub(self.anchor_rows()).min(max);
+                self.pending_anchor = 0.0;
+                self.top_line = target;
+                if target == at {
+                    return false;
+                }
+                // Pass 3, after this layout has scrolled the caret line to the top.
+                self.pending_shift = Some(at - target);
+                true
+            }
+            None => {
+                if let Some(up) = self.pending_shift.take() {
+                    let up = i32::try_from(up).unwrap_or(i32::MAX);
+                    self.shaped()
+                        .perform(text_editor::Action::Scroll { lines: -up });
+                }
                 false
             }
-            None => false,
         }
     }
 
@@ -475,10 +507,31 @@ impl SourceBuffer {
     /// wheel-scrolled away from it) would make the next layout scroll back to it, moving the
     /// still-shown view (Source → Split). Then the caret stays at the viewport's top-left.
     pub fn measure_top_line(&mut self) -> usize {
+        self.measure_anchor_line(0.0, 0.0)
+    }
+
+    /// Plan round-8-intake-views-anchor WP-4: [`Self::measure_top_line`], also hit-testing
+    /// the row at `anchor` (fraction) of the viewport height (`visible_lines` rows at
+    /// `font_size`); returns the source line there (the top line at anchor 0). The tracked
+    /// top and the caret restore are unchanged.
+    pub fn measure_anchor_line(&mut self, anchor: f32, font_size: f32) -> usize {
+        // The middle of the anchor row (the row a carry here would place a line on).
+        let rows = rows_at(anchor, self.visible_lines);
+        #[allow(clippy::cast_precision_loss)]
+        let dy = if rows == 0 {
+            0.0
+        } else {
+            (rows as f32 + 0.5) * (font_size * 1.3).max(0.0)
+        };
+        let mut anchored = None;
         if let Repr::Shaped(c) = &mut self.content {
             let saved = c.cursor();
             c.perform(text_editor::Action::Click(iced::Point::ORIGIN));
             let top = c.cursor().position;
+            if dy > 0.0 {
+                c.perform(text_editor::Action::Click(iced::Point::new(0.0, dy)));
+                anchored = Some(c.cursor().position.line);
+            }
             // Past the last visible row: the hit clamps to the viewport's last position.
             c.perform(text_editor::Action::Click(iced::Point::new(1.0e6, 1.0e6)));
             let bottom = c.cursor().position;
@@ -494,7 +547,13 @@ impl SourceBuffer {
             }
             self.top_line = top.line;
         }
-        self.top_line
+        anchored.unwrap_or(self.top_line)
+    }
+
+    /// Plan round-8 WP-4: the visual rows between the viewport top and the anchor height of
+    /// the pending carry (at most one less than the viewport, so the caret stays visible).
+    fn anchor_rows(&self) -> usize {
+        rows_at(self.pending_anchor, self.visible_lines)
     }
 
     /// Plan round-5 WP-1: the largest top line — the editor never scrolls past the last line
@@ -513,16 +572,35 @@ impl SourceBuffer {
     /// Plan round-5 WP-1: clamped to the last reachable top ([`Self::max_top`]), so a carry
     /// to a block near the end shows the document's last viewport, never a past-the-end view.
     pub fn scroll_to_line(&mut self, line: usize) {
-        let line = line.min(self.max_top());
+        self.scroll_to_line_anchored(line, 0.0);
+    }
+
+    /// Plan round-8-intake-views-anchor WP-4: [`Self::scroll_to_line`] with source `line` at
+    /// `anchor` (fraction) of the viewport height instead of the top. Anchor 0 is exactly
+    /// `scroll_to_line`; otherwise the deferred carry keeps the **unclamped** line, and the
+    /// anchor shift + viewport clamp happen once in pass 2 (audit M2).
+    pub fn scroll_to_line_anchored(&mut self, line: usize, anchor: f32) {
+        self.pending_anchor = if anchor.is_finite() {
+            anchor.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let target = line.saturating_sub(self.anchor_rows()).min(self.max_top());
         // Plan round-6 WP-1: one delta from the tracked (pending) top — `shaped()` of a plain
         // buffer has already queued the scroll to `top_line`.
         let from = self.top_line;
-        scroll_content(self.shaped(), from, line);
-        self.top_line = line;
+        scroll_content(self.shaped(), from, target);
+        self.top_line = target;
         // Plan round-7 WP-4 (attempt 2): the scroll above is lost when the editor is not laid
         // out yet (a Reading → Source switch); the two-pass caret carry places it exactly.
         self.pending_edge = None;
-        self.pending_line = Some((line, false));
+        self.pending_shift = None;
+        let carried = if self.pending_anchor > 0.0 {
+            line
+        } else {
+            target
+        };
+        self.pending_line = Some((carried, false));
     }
 
     /// Plan round-6 WP-1: scrolls to the document's start / end without moving the cursor (a
@@ -1586,6 +1664,22 @@ pub fn shift_click(msg: SourceMsg, shift: bool) -> SourceMsg {
         SourceMsg::Action(Action::Click(p)) if shift => SourceMsg::Action(Action::Drag(p)),
         m => m,
     }
+}
+
+/// Plan round-8-intake-views-anchor WP-4: the visual rows from the viewport top to the anchor
+/// height `anchor` (fraction) of a `visible`-row viewport — rounded, and at most one less than
+/// the viewport so a caret on that row stays visible.
+pub fn rows_at(anchor: f32, visible: usize) -> usize {
+    let a = if anchor.is_finite() {
+        anchor.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let rows = (a * visible as f32).round();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rows = rows.max(0.0) as usize;
+    rows.min(visible.saturating_sub(1))
 }
 
 /// plan editor-round-4 WP-2: the visible source line count `top_line` tracking assumes before

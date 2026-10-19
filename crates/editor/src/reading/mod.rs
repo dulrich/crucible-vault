@@ -162,6 +162,15 @@ pub struct ReadingStore {
     /// path, from the last layout probe (absent = scrolled to the top / not probed yet).
     /// Plan round-5 WP-1: keyed by (path, tab id) — two tabs on one note keep their own place.
     top: HashMap<(String, u64), usize>,
+    /// Plan round-8-intake-views-anchor WP-4: `editor.toml` `scroll_anchor` as a fraction of
+    /// the viewport height (0 = top; set by `App::apply_prefs`).
+    anchor: f32,
+    /// Plan round-8 WP-4: the block under the anchor height per tab, from the last layout
+    /// probe (only kept while `anchor > 0`; at 0 it is [`Self::top_block`]).
+    anchor_at: HashMap<(String, u64), usize>,
+    /// Plan round-8 WP-4: tabs whose in-flight `scroll_to` probe is a mode-switch carry —
+    /// placed under the anchor height instead of at the top.
+    carry: HashSet<(String, u64)>,
     /// Plan round-5 WP-1: tabs just (re)activated whose first `on_scroll` (iced reports offset
     /// 0 for a re-created scrollable) must re-apply the stored place instead of overwriting it.
     /// Plan round-6 WP-2: armed at an instant and honoured only within [`RESTORE_GUARD`] — iced
@@ -481,6 +490,45 @@ impl ReadingStore {
     /// the last layout probe (`None` = at the top / not probed).
     pub fn top_block(&self, path: &str, view: u64) -> Option<usize> {
         self.top.get(&(path.to_owned(), view)).copied()
+    }
+
+    /// Plan round-8 WP-4: sets the `scroll_anchor` fraction (clamped to 0–1).
+    pub fn set_anchor(&mut self, a: f32) {
+        self.anchor = if a.is_finite() {
+            a.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if self.anchor <= 0.0 {
+            self.anchor_at.clear();
+        }
+    }
+
+    /// Plan round-8 WP-4: the block under the anchor height (the mode-switch origin); with
+    /// anchor 0 (or no anchored probe yet) exactly [`Self::top_block`].
+    pub fn anchor_block(&self, path: &str, view: u64) -> Option<usize> {
+        if self.anchor > 0.0
+            && let Some(b) = self.anchor_at.get(&(path.to_owned(), view))
+        {
+            return Some(*b);
+        }
+        self.top_block(path, view)
+    }
+
+    /// Plan round-8 WP-4: a mode-switch carry of `block` — probes, then scrolls the block to
+    /// the anchor height (the top at anchor 0, exactly as [`probe`] with `Some(block)`).
+    pub fn carry_to(
+        &mut self,
+        path: &str,
+        view: u64,
+        blocks: usize,
+        block: usize,
+    ) -> Task<Message> {
+        self.set_top_block(path, view, block);
+        if self.anchor > 0.0 {
+            self.carry.insert((path.to_owned(), view));
+        }
+        probe(path, view, blocks, Some(block))
     }
 
     /// plan editor-ui-round-3 WP-6: records the intended top block of a carry (the scroll task
@@ -1005,15 +1053,31 @@ pub fn update(
             match scroll_to {
                 Some(b) => {
                     store.top.insert((path.clone(), view), b);
+                    let key = (path.clone(), view);
+                    let carry = store.carry.remove(&key);
                     if let Some(y) = p.block_offset(b) {
+                        // Plan round-8 WP-4: a carry puts the block under the anchor height,
+                        // clamped to the scrollable's range here (anchor 0 = today's `y`).
+                        let y = if carry && store.anchor > 0.0 {
+                            store.anchor_at.insert(key, b);
+                            p.anchored_offset(y, store.anchor)
+                        } else {
+                            y
+                        };
                         return ScrollIntent::ScrollTo { path, view, y }.task();
                     }
                 }
                 None => match p.top_block() {
                     Some(b) => {
+                        if store.anchor > 0.0
+                            && let Some(a) = p.anchor_block(store.anchor)
+                        {
+                            store.anchor_at.insert((path.clone(), view), a);
+                        }
                         store.top.insert((path, view), b);
                     }
                     None => {
+                        store.anchor_at.remove(&(path.clone(), view));
                         store.top.remove(&(path, view));
                     }
                 },
@@ -1155,6 +1219,10 @@ pub struct Probe {
     pub offset_y: f32,
     /// The top of the scrollable's content.
     pub content_y: f32,
+    /// Plan round-8 WP-4: the scrollable's viewport height.
+    pub viewport_h: f32,
+    /// Plan round-8 WP-4: the scrollable's content height.
+    pub content_h: f32,
     /// The top of each top-level block (`None` = not laid out / not found).
     pub block_ys: Vec<Option<f32>>,
 }
@@ -1163,17 +1231,35 @@ impl Probe {
     /// The block at the viewport top: the last block whose top is at or above the offset
     /// (1px slack), else the first laid-out block.
     pub fn top_block(&self) -> Option<usize> {
+        self.block_at(0.0)
+    }
+
+    /// Plan round-8 WP-4: the block under the anchor height `a` (fraction of the viewport):
+    /// the last block whose content-relative top is at or above `offset + a × viewport_h`.
+    /// `a = 0` is exactly [`Self::top_block`].
+    pub fn anchor_block(&self, a: f32) -> Option<usize> {
+        self.block_at(a * self.viewport_h)
+    }
+
+    fn block_at(&self, dy: f32) -> Option<usize> {
         let rel = |y: f32| y - self.content_y;
         let mut first = None;
         let mut top = None;
         for (i, y) in self.block_ys.iter().enumerate() {
             let Some(y) = *y else { continue };
             first.get_or_insert(i);
-            if rel(y) <= self.offset_y + 1.0 {
+            if rel(y) <= self.offset_y + dy + 1.0 {
                 top = Some(i);
             }
         }
         top.or(first)
+    }
+
+    /// Plan round-8 WP-4: the scroll offset that puts content-relative `block_y` at the anchor
+    /// height `a`, clamped to `[0, content_h − viewport_h]`.
+    pub fn anchored_offset(&self, block_y: f32, a: f32) -> f32 {
+        let max = (self.content_h - self.viewport_h).max(0.0);
+        (block_y - a * self.viewport_h).clamp(0.0, max)
     }
 
     /// The scroll offset that puts block `b`'s top at the viewport top.
@@ -1211,7 +1297,7 @@ impl iced::advanced::widget::Operation<Probe> for ProbeOp {
     fn scrollable(
         &mut self,
         id: Option<&iced::widget::Id>,
-        _bounds: iced::Rectangle,
+        bounds: iced::Rectangle,
         content_bounds: iced::Rectangle,
         translation: iced::Vector,
         _state: &mut dyn iced::advanced::widget::operation::Scrollable,
@@ -1219,6 +1305,8 @@ impl iced::advanced::widget::Operation<Probe> for ProbeOp {
         if id == Some(&self.scroll) {
             self.out.offset_y = translation.y;
             self.out.content_y = content_bounds.y;
+            self.out.viewport_h = bounds.height;
+            self.out.content_h = content_bounds.height;
             self.found = true;
         }
     }

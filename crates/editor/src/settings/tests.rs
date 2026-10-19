@@ -213,6 +213,7 @@ fn prefs_defaults_fields_and_fallbacks() {
     );
     assert_eq!(full.search_limit, 80);
     assert_eq!(full.search_debounce_ms, 120);
+    assert_eq!(full.scroll_anchor, 40);
     assert_eq!(full.delete_mode, crate::daemon::DeleteMode::Permanent);
     assert_eq!(
         full.missing_link,
@@ -335,6 +336,7 @@ confirm_trash = true
 delete_mode = "permanent"
 missing_link = "create"
 focus_follows_mouse = true
+scroll_anchor = 40
 open_url_cmd = ["firefox", "--new-tab"]
 
 [search]
@@ -1091,4 +1093,24 @@ fn settings_save_failure_raises_an_error_notice() {
     let e = app.status.log.visible().next().expect("logged");
     assert_eq!(e.severity, crate::app::Severity::Error);
     assert_eq!(e.source.as_deref(), Some(EDITOR_PATH));
+}
+
+/// Plan round-8-intake-views-anchor WP-4: `scroll_anchor` parses 0–100 (default 0); out of
+/// range or mistyped falls back to the default.
+#[test]
+fn scroll_anchor_parses_with_default() {
+    let d = editor_prefs::parse("", Surround::Med).expect("parse");
+    assert_eq!(d.scroll_anchor, 0);
+    assert!(d.anchor().abs() < f32::EPSILON);
+    let p = editor_prefs::parse("scroll_anchor = 50\n", Surround::Med).expect("parse");
+    assert_eq!(p.scroll_anchor, 50);
+    assert!((p.anchor() - 0.5).abs() < f32::EPSILON);
+    for bad in [
+        "scroll_anchor = 101\n",
+        "scroll_anchor = -1\n",
+        "scroll_anchor = \"x\"\n",
+    ] {
+        let p = editor_prefs::parse(bad, Surround::Med).expect("parse");
+        assert_eq!(p.scroll_anchor, 0, "{bad}");
+    }
 }

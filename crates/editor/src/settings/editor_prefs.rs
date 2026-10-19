@@ -55,6 +55,9 @@ pub struct Prefs {
     pub missing_link: MissingLink,
     /// `focus_follows_mouse` (plan editor-round-4 WP-4): hovering a pane focuses it.
     pub focus_follows_mouse: bool,
+    /// `scroll_anchor` (plan round-8-intake-views-anchor WP-4): the viewport height, in percent
+    /// (0 = top), whose block/line a Reading ↔ Source switch carries.
+    pub scroll_anchor: u8,
     /// Command/action ids omitted from the palette list (their chords still work).
     pub palette_hidden: Vec<String>,
     /// `[keys]`: command id → chords (WP-4 consumes it).
@@ -103,6 +106,7 @@ impl Default for Prefs {
             delete_mode: DeleteMode::Trash,
             missing_link: MissingLink::Warn,
             focus_follows_mouse: false,
+            scroll_anchor: 0,
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
             open_url_cmd: default_open_url_cmd(),
@@ -114,6 +118,11 @@ impl Prefs {
     /// The Reading text scale: a paragraph renders at `font_size` (plan editor-ui-round-3 WP-6).
     pub fn text_scale(&self) -> f32 {
         crate::reading::view::reading_scale(self.font_size)
+    }
+
+    /// `scroll_anchor` as a fraction of the viewport height (0.0–1.0).
+    pub fn anchor(&self) -> f32 {
+        f32::from(self.scroll_anchor.min(100)) / 100.0
     }
 
     /// The search debounce.
@@ -192,6 +201,9 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
         focus_follows_mouse: doc
             .get_bool(&p("focus_follows_mouse"))
             .unwrap_or(d.focus_follows_mouse),
+        scroll_anchor: int_in("scroll_anchor", 0, 100)
+            .and_then(|v| u8::try_from(v).ok())
+            .unwrap_or(d.scroll_anchor),
         palette_hidden: doc.get_str_list(&p("palette.hidden")).unwrap_or_default(),
         keys: doc
             .keys(&p("keys"))

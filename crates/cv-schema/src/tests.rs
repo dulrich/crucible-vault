@@ -686,3 +686,12 @@ fn intake_mode_accepts_lines_and_view_and_rejects_others() {
     assert!(errs("[intake]\nmode = \"lines\"\n", "pipelines.toml").is_empty());
     assert!(!errs("[intake]\nmode = \"sidebar\"\n", "pipelines.toml").is_empty());
 }
+
+/// Plan round-8-intake-views-anchor WP-4: `scroll_anchor` is an integer percent 0–100.
+#[test]
+fn scroll_anchor_is_a_percent() {
+    assert!(errs("scroll_anchor = 0\n", "editor.toml").is_empty());
+    assert!(errs("scroll_anchor = 100\n", "editor.toml").is_empty());
+    assert_eq!(errs("scroll_anchor = 101\n", "editor.toml").len(), 1);
+    assert_eq!(errs("scroll_anchor = -5\n", "editor.toml").len(), 1);
+}

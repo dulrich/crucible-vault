@@ -1804,6 +1804,16 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Bool(false)),
         field(
+            "scroll_anchor",
+            "Scroll anchor (%)",
+            "Where a Reading ↔ Source switch keeps your place: the block/line this far down the viewport (0 = top, 50 = middle, 100 = bottom) stays under the same height",
+            Node::Int {
+                min: Some(0),
+                max: Some(100),
+            },
+        )
+        .dflt(D::Int(0)),
+        field(
             "open_url_cmd",
             "Open URL command",
             "Program + args that open an external http/https/mailto link; the URL is appended as the last argument (no shell). Empty = default",

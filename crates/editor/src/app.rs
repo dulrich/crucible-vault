@@ -2114,14 +2114,16 @@ impl App {
         let view = self.view_of(&path);
         let line = if old.shows_reading() {
             let doc = self.reading.doc(&path);
+            // Plan round-8 WP-4: the block under the `scroll_anchor` height (top at 0).
             self.reading
-                .top_block(&path, view)
+                .anchor_block(&path, view)
                 .and_then(|b| doc?.model.block_lines.get(b).map(|r| r.start))
                 .unwrap_or(0)
         } else {
             // Plan round-7 WP-4: measured from the shown editor (wrapped lines made the
             // tracked estimate drift).
-            self.docs.get_mut(&path)?.measure_top_line()
+            let (a, fs) = (self.prefs.anchor(), self.prefs.font_size);
+            self.docs.get_mut(&path)?.measure_anchor_line(a, fs)
         };
         Some((path, old, line))
     }
@@ -2166,7 +2168,7 @@ impl App {
             && !old.shows_source()
             && let Some(doc) = self.docs.get_mut(path)
         {
-            doc.scroll_to_line(line);
+            doc.scroll_to_line_anchored(line, self.prefs.anchor());
         }
         let above_first = self
             .reading
@@ -2188,8 +2190,7 @@ impl App {
             && let Some(b) = doc.model.block_for_line(line)
         {
             let blocks = doc.model.blocks.len();
-            self.reading.set_top_block(path, view, b);
-            return crate::reading::probe(path, view, blocks, Some(b));
+            return self.reading.carry_to(path, view, blocks, b);
         }
         Task::none()
     }
@@ -4547,6 +4548,7 @@ impl App {
         self.palette.set_hidden(prefs.palette_hidden.clone());
         // WP-4: `[keys]` overrides rebuild the effective keymap live (no restart).
         self.palette.set_keys(prefs.keys.clone());
+        self.reading.set_anchor(prefs.anchor());
         self.prefs = prefs;
         self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
         self.sync_hotkeys();

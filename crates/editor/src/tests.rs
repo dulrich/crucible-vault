@@ -4506,6 +4506,12 @@ mod scroll_matrix {
     /// line by walking visual rows down from the start). Leaves scroll (to the row; the end
     /// exactly) and caret as found.
     fn source_place(ui: &mut Ui, app: &mut App) -> Place {
+        source_place_at(ui, app, 0)
+    }
+
+    /// [`source_place`] of the line `extra` visual rows below the viewport top (plan
+    /// round-8 WP-4: the anchor height).
+    fn source_place_at(ui: &mut Ui, app: &mut App, extra: i32) -> Place {
         focus_source(ui, app);
         // With a selection (find in Source) the editor reports the first *visible* selection
         // rectangle to the input method — (0, 0) once the calibration scroll hides it
@@ -4549,7 +4555,7 @@ mod scroll_matrix {
                 position: iced::widget::text_editor::Position { line: 0, column: 0 },
                 selection: None,
             });
-            for _ in 0..rows {
+            for _ in 0..rows + extra {
                 src(app).perform(Action::Move(Motion::Down));
             }
         }
@@ -4875,6 +4881,84 @@ mod scroll_matrix {
             let _ = ui.redraw(&mut app);
             let after = source_place(&mut ui, &mut app);
             assert!(same(before, after), "down={down}: {before:?} -> {after:?}");
+        }
+    }
+
+    /// Plan round-8 WP-4: the place under the 50% anchor (Reading: the probe's anchor block;
+    /// Source: the line half the measured viewport rows below the top).
+    fn anchor_place(ui: &mut Ui, app: &mut App) -> Place {
+        if app.reading.mode(PATH) == ViewMode::Source {
+            let rows = app.docs.get(PATH).map_or(0, |d| d.visible_lines());
+            let half = i32::try_from(crate::source::rows_at(0.5, rows)).unwrap_or(0);
+            return source_place_at(ui, app, half);
+        }
+        let top = reading_place(ui, app);
+        let v = view(app);
+        let n = app.reading.doc(PATH).map_or(0, |d| d.model.blocks.len());
+        let mut p = crate::reading::probe_op(PATH, v, n);
+        ui.operate(app, &mut operation::black_box(&mut p));
+        let operation::Outcome::Some(probe) = p.finish() else {
+            panic!("probe found no scrollable");
+        };
+        Place {
+            block: probe.anchor_block(0.5).unwrap_or(0),
+            edge: top.edge,
+        }
+    }
+
+    /// Plan round-8 WP-4: with `scroll_anchor = 50`, wheels `n` steps down from `origin`, then
+    /// switches mode; returns the (before, after) anchor places.
+    fn anchored_switch(origin: ViewMode, n: usize) -> (Place, Place) {
+        let (_tmp, mut app, mut ui) = setup(origin);
+        app.prefs.scroll_anchor = 50;
+        app.reading.set_anchor(app.prefs.anchor());
+        wheel(&mut ui, &mut app, true, n);
+        let _ = ui.redraw(&mut app);
+        let before = anchor_place(&mut ui, &mut app);
+        let to = if origin == ViewMode::Source {
+            ViewMode::Reading
+        } else {
+            ViewMode::Source
+        };
+        ui.update(
+            &mut app,
+            Message::Reading(ReadingMsg::SetMode {
+                path: PATH.into(),
+                mode: to,
+            }),
+        );
+        let _ = ui.redraw(&mut app);
+        let _ = ui.redraw(&mut app);
+        (before, anchor_place(&mut ui, &mut app))
+    }
+
+    /// Plan round-8 WP-4: mid-document, the block under the 50% anchor survives Reading →
+    /// Source and Source → Reading.
+    #[test]
+    fn anchor_50_carries_mid_document_both_ways() {
+        // Wheel counts that put a short block (not a long wrapped paragraph spanning both the
+        // top and the anchor) under the anchor, so a top carry would fail here.
+        for (origin, n) in [(ViewMode::Reading, 16), (ViewMode::Source, 20)] {
+            let (before, after) = anchored_switch(origin, n);
+            assert!(before.edge.is_none(), "{origin:?}: mid-document {before:?}");
+            assert_eq!(
+                before.block, after.block,
+                "{origin:?}: {before:?} -> {after:?}"
+            );
+        }
+    }
+
+    /// Plan round-8 WP-4 (audit M2): a target past the last reachable top lands at the end —
+    /// the anchor shift is applied to the unclamped target, then clamped once.
+    #[test]
+    fn anchor_50_near_end_lands_at_the_end() {
+        for origin in [ViewMode::Reading, ViewMode::Source] {
+            let (before, after) = anchored_switch(origin, 400);
+            assert_eq!(before.edge, Some(true), "{origin:?}: wheeled to the end");
+            assert!(
+                after.edge == Some(true) || after.block == before.block,
+                "{origin:?}: {before:?} -> {after:?}"
+            );
         }
     }
 
