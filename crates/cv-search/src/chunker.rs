@@ -1,15 +1,14 @@
-//! Byte-compatible port of Crucible's search chunker
+//! Search chunker: a native-`str` port of Crucible's chunker
 //! (`https://github.com/dulrich/obsidian-crucible/blob/master/src/search/chunker.ts:158-408,496-558`).
 //!
-//! Byte compatibility is the point (plan "Decisions locked": the search feed is byte-compatible,
-//! so cut-over inherits the companion's index and embeddings under Crucible's `vaultId` with no
-//! re-embed): `stableChunkId`, `hashSearchContent` (+ `hashString`), the chunk text and the
-//! entity text must equal what the TS produces for the same input. Every string operation the TS
-//! performs on code units is reproduced on UTF-16 code units ([`crate::js`], audit item E4), and
-//! every regex is hand-ported with its exact JS backtracking result (no `u` flag, `\s` = the JS
-//! whitespace set, `.` excludes the four JS line terminators). A `slice` that splits a surrogate
-//! pair keeps the lone surrogate, exactly as the TS does — it is hashed as itself and serialized
-//! as a `\uXXXX` escape.
+//! The algorithm (frontmatter, title/tag metadata, frontmatter entities, heading sections,
+//! paragraph packing with overlap, image and linked-post chunks, the folded `contentHash`) is
+//! Crucible's. The strings are Rust `str`: lengths, `max_chars`/`overlap_chars` and slices count
+//! `char`s (so a slice never splits a code point), whitespace is [`char::is_whitespace`], facets
+//! sort in `str` order and [`hash_string`] runs over UTF-8 bytes. The UTF-16 compatibility layer
+//! that let cut-over inherit the retired Node companion's embeddings was dropped (plan
+//! tn-review-baseline-remediation WP-R7, D22 amendment); the change cost one re-embed
+//! (migration 0011).
 //!
 //! Dropped (Obsidian-induced or unused here): nothing in this module is Obsidian-induced; the
 //! TS module is already a pure, settings-free function of its input. `isImageChunkHeading` is a
@@ -18,14 +17,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::js::{
-    JsStr, is_term, is_ws, js, run, split_char, split_lines, split_runs, starts_with, to_lower,
-    trim, write_json_string,
-};
-
 /// `MAX_ENTITIES_PER_CHUNK` (`chunker.ts:27`).
 pub const MAX_ENTITIES_PER_CHUNK: usize = 32;
-/// `MAX_ENTITY_TEXT_CHARS` (`chunker.ts:28`), in UTF-16 code units.
+/// `MAX_ENTITY_TEXT_CHARS` (`chunker.ts:28`), in chars.
 pub const MAX_ENTITY_TEXT_CHARS: usize = 200;
 /// `IMAGE_CHUNK_HEADING_PREFIX` (`chunker.ts:45`).
 pub const IMAGE_CHUNK_HEADING_PREFIX: &str = "Image: ";
@@ -43,57 +37,75 @@ pub const SEARCH_EXTENSIONS: [&str; 3] = ["md", "qmd", "txt"];
 /// `FRONTMATTER_ENTITY_FIELDS` (`chunker.ts:20-22`).
 const FRONTMATTER_ENTITY_FIELDS: [(&str, &str); 1] = [("author", "person")];
 
+/// A line terminator (what `.` does not match in the TS regexes).
+fn is_term(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+}
+
+/// The byte offset of the `n`th char of `s` (or `s.len()`).
+fn char_offset(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)
+}
+
+/// The first `n` chars of `s`.
+#[must_use]
+pub fn take_chars(s: &str, n: usize) -> &str {
+    &s[..char_offset(s, n)]
+}
+
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
 /// One parsed `parseSimpleFrontmatter` value (`chunker.ts:509-539`): a scalar or a list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FmValue {
     /// A scalar string.
-    Str(JsStr),
+    Str(String),
     /// A list of strings.
-    List(Vec<JsStr>),
+    List(Vec<String>),
 }
 
 /// `parseSimpleFrontmatter`'s object, in JS own-property order (integer-like keys ascending
 /// first, then insertion order; a re-assigned key keeps its first position).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Frontmatter {
-    entries: Vec<(JsStr, FmValue)>,
+    entries: Vec<(String, FmValue)>,
 }
 
 impl Frontmatter {
     /// `frontmatter[key]`.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&FmValue> {
-        let k = js(key);
-        self.entries.iter().find(|(e, _)| *e == k).map(|(_, v)| v)
+        self.entries.iter().find(|(e, _)| e == key).map(|(_, v)| v)
     }
 
-    fn set(&mut self, key: JsStr, value: FmValue) {
+    fn set(&mut self, key: &str, value: FmValue) {
         // `out['__proto__'] = v` sets the prototype, never an own property.
-        if key == js("__proto__") {
+        if key == "__proto__" {
             return;
         }
-        if let Some(slot) = self.entries.iter_mut().find(|(e, _)| *e == key) {
+        if let Some(slot) = self.entries.iter_mut().find(|(e, _)| e == key) {
             slot.1 = value;
         } else {
-            self.entries.push((key, value));
+            self.entries.push((key.to_owned(), value));
         }
     }
 
     /// Entries in JS own-property enumeration order.
     #[must_use]
-    pub fn ordered(&self) -> Vec<&(JsStr, FmValue)> {
-        let index = |k: &JsStr| -> Option<u64> {
-            let s = String::from_utf16(k).ok()?;
-            let n: u64 = s.parse().ok()?;
-            (n.to_string() == s && n < 4_294_967_295).then_some(n)
+    pub fn ordered(&self) -> Vec<&(String, FmValue)> {
+        let index = |k: &str| -> Option<u64> {
+            let n: u64 = k.parse().ok()?;
+            (n.to_string() == k && n < 4_294_967_295).then_some(n)
         };
-        let mut ints: Vec<(u64, &(JsStr, FmValue))> = self
+        let mut ints: Vec<(u64, &(String, FmValue))> = self
             .entries
             .iter()
             .filter_map(|e| index(&e.0).map(|n| (n, e)))
             .collect();
         ints.sort_by_key(|(n, _)| *n);
-        let mut out: Vec<&(JsStr, FmValue)> = ints.into_iter().map(|(_, e)| e).collect();
+        let mut out: Vec<&(String, FmValue)> = ints.into_iter().map(|(_, e)| e).collect();
         out.extend(self.entries.iter().filter(|e| index(&e.0).is_none()));
         out
     }
@@ -102,8 +114,8 @@ impl Frontmatter {
 /// `SearchEntity` (`src/search/types.ts`): `{text, type, source: 'frontmatter'}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchEntity {
-    /// Normalized entity text (may end in a lone surrogate after the 200-unit cap).
-    pub text: JsStr,
+    /// Normalized entity text (capped at [`MAX_ENTITY_TEXT_CHARS`] chars).
+    pub text: String,
     /// Entity type (`person`).
     pub kind: String,
 }
@@ -112,15 +124,15 @@ pub struct SearchEntity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentMetadata {
     /// Title: `frontmatter.title` || first `# ` heading || basename.
-    pub title: JsStr,
+    pub title: String,
     /// `frontmatter.created`.
-    pub created: Option<JsStr>,
+    pub created: Option<String>,
     /// `frontmatter.modified`.
-    pub modified: Option<JsStr>,
+    pub modified: Option<String>,
     /// `frontmatter.source`.
-    pub source: Option<JsStr>,
+    pub source: Option<String>,
     /// Normalized tags.
-    pub tags: Vec<JsStr>,
+    pub tags: Vec<String>,
     /// The parsed frontmatter.
     pub frontmatter: Frontmatter,
 }
@@ -129,28 +141,28 @@ pub struct DocumentMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageDescriptionChunkInput {
     /// Attachment basename.
-    pub filename: JsStr,
+    pub filename: String,
     /// Narrative (may be empty).
-    pub narrative: JsStr,
+    pub narrative: String,
     /// Extraction (may be empty).
-    pub extraction: JsStr,
+    pub extraction: String,
 }
 
 /// One linked post reaching the chunker (`LinkedDocumentChunkInput`, `chunker.ts:93-105`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedDocumentChunkInput {
     /// Linked note's vault path.
-    pub path: JsStr,
+    pub path: String,
     /// Linked note's basename.
-    pub title: JsStr,
+    pub title: String,
     /// Linked note's body (frontmatter sliced off, trimmed, capped).
-    pub text: JsStr,
+    pub text: String,
 }
 
 /// `BuildChunksInput` (`chunker.ts:107-138`).
 #[derive(Debug, Clone, Default)]
 pub struct BuildChunksInput {
-    /// Companion vault id.
+    /// Vault id folded into chunk ids.
     pub vault_id: String,
     /// Note path.
     pub path: String,
@@ -159,7 +171,7 @@ pub struct BuildChunksInput {
     /// Note mtime (ms).
     pub mtime: i64,
     /// Note content.
-    pub content: JsStr,
+    pub content: String,
     /// Precomputed `contentHash` (else recomputed with `extra_hash_facets`).
     pub content_hash: Option<String>,
     /// `maxChars` (`0` = default, floored at 400).
@@ -171,7 +183,7 @@ pub struct BuildChunksInput {
     /// Linked posts, ordered by the caller.
     pub linked_documents: Vec<LinkedDocumentChunkInput>,
     /// Facets for the `contentHash` fallback.
-    pub extra_hash_facets: Vec<JsStr>,
+    pub extra_hash_facets: Vec<String>,
 }
 
 /// One chunk (`SearchChunk`, `src/search/types.ts`). `metadata`/`entities` are shared per note.
@@ -186,92 +198,39 @@ pub struct SearchChunk {
     /// Note `contentHash`.
     pub content_hash: String,
     /// Note title.
-    pub title: JsStr,
+    pub title: String,
     /// Section heading.
-    pub heading: JsStr,
+    pub heading: String,
     /// Trimmed chunk text.
-    pub text: JsStr,
+    pub text: String,
     /// Note mtime (ms).
     pub mtime: i64,
     /// Monotonic ordinal within the note.
     pub ordinal: usize,
     /// Note metadata.
     pub metadata: Arc<DocumentMetadata>,
-    /// Note entities (omitted from the payload when empty).
+    /// Note entities.
     pub entities: Arc<Vec<SearchEntity>>,
     /// Embedding vector, when semantic indexing is on.
     pub embedding: Option<Vec<f32>>,
     /// Model that produced `embedding`.
     pub embedding_model: Option<String>,
-    /// Vector space of `embedding` (`embeddingSpaceId(model)` = the bare model id when no
-    /// precision is known, `src/search/types.ts` `embeddingSpaceId`).
+    /// Vector space of `embedding`.
     pub embedding_space: Option<String>,
 }
 
 impl SearchChunk {
-    /// The chunk's `metadata` object as `JSON.stringify` would emit it (the companion's
-    /// `metadata_json` column; stored as the `semsearch` chunk metadata).
+    /// The chunk's `metadata` object as JSON (stored as the `semsearch` chunk metadata).
     #[must_use]
     pub fn metadata_json(&self) -> String {
         let mut o = String::with_capacity(256);
         write_metadata(&mut o, &self.metadata);
         o
     }
+}
 
-    /// The chunk as `JSON.stringify` would emit it (key order as the TS object literal; lone
-    /// surrogates escaped).
-    #[must_use]
-    pub fn to_json(&self) -> String {
-        let mut o = String::with_capacity(self.text.len() + 256);
-        let s = |o: &mut String, v: &str| write_json_string(o, &js(v));
-        o.push_str("{\"id\":");
-        s(&mut o, &self.id);
-        o.push_str(",\"vaultId\":");
-        s(&mut o, &self.vault_id);
-        o.push_str(",\"path\":");
-        s(&mut o, &self.path);
-        o.push_str(",\"contentHash\":");
-        s(&mut o, &self.content_hash);
-        o.push_str(",\"title\":");
-        write_json_string(&mut o, &self.title);
-        o.push_str(",\"heading\":");
-        write_json_string(&mut o, &self.heading);
-        o.push_str(",\"text\":");
-        write_json_string(&mut o, &self.text);
-        o.push_str(&format!(
-            ",\"mtime\":{},\"ordinal\":{},\"metadata\":",
-            self.mtime, self.ordinal
-        ));
-        write_metadata(&mut o, &self.metadata);
-        if !self.entities.is_empty() {
-            o.push_str(",\"entities\":[");
-            for (i, e) in self.entities.iter().enumerate() {
-                if i > 0 {
-                    o.push(',');
-                }
-                o.push_str("{\"text\":");
-                write_json_string(&mut o, &e.text);
-                o.push_str(",\"type\":");
-                s(&mut o, &e.kind);
-                o.push_str(",\"source\":\"frontmatter\"}");
-            }
-            o.push(']');
-        }
-        if let Some(v) = &self.embedding {
-            o.push_str(",\"embedding\":");
-            o.push_str(&serde_json::to_string(v).unwrap_or_else(|_| "[]".into()));
-        }
-        if let Some(m) = &self.embedding_model {
-            o.push_str(",\"embeddingModel\":");
-            s(&mut o, m);
-        }
-        if let Some(m) = &self.embedding_space {
-            o.push_str(",\"embeddingSpace\":");
-            s(&mut o, m);
-        }
-        o.push('}');
-        o
-    }
+fn write_json_string(o: &mut String, s: &str) {
+    o.push_str(&serde_json::Value::from(s).to_string());
 }
 
 fn write_metadata(o: &mut String, m: &DocumentMetadata) {
@@ -321,24 +280,24 @@ fn write_metadata(o: &mut String, m: &DocumentMetadata) {
 /// `isSearchIndexablePath` (`chunker.ts:147-156`) with the default extension list.
 #[must_use]
 pub fn is_search_indexable_path(path: &str) -> bool {
-    let name = js(path.rsplit('/').next().unwrap_or(""));
-    let Some(dot) = name.iter().rposition(|&c| c == u16::from(b'.')) else {
+    let name = path.rsplit('/').next().unwrap_or("");
+    let Some(dot) = name.rfind('.') else {
         return false;
     };
     if !(dot > 0 && dot < name.len() - 1) {
         return false;
     }
-    let ext = String::from_utf16_lossy(&name[dot + 1..]).to_lowercase();
+    let ext = name[dot + 1..].to_lowercase();
     SEARCH_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// `hashString` (`chunker.ts:500-507`): 32-bit FNV-1a over UTF-16 code units
-/// (`hash ^= charCodeAt(i); hash = Math.imul(hash, 0x01000193)`), as 8 lowercase hex digits.
+/// `hashString` (`chunker.ts:500-507`): 32-bit FNV-1a, here over UTF-8 bytes, as 8 lowercase
+/// hex digits.
 #[must_use]
-pub fn hash_string(value: &[u16]) -> String {
+pub fn hash_string(value: &str) -> String {
     let mut hash: u32 = 0x811c_9dc5;
-    for &c in value {
-        hash ^= u32::from(c);
+    for &b in value.as_bytes() {
+        hash ^= u32::from(b);
         hash = hash.wrapping_mul(0x0100_0193);
     }
     format!("{hash:08x}")
@@ -346,35 +305,41 @@ pub fn hash_string(value: &[u16]) -> String {
 
 /// `stableChunkId` (`chunker.ts:496-498`): `path#ordinal:hashString(vaultId\npath\nheading\nordinal)`.
 #[must_use]
-pub fn stable_chunk_id(vault_id: &str, path: &str, ordinal: usize, heading: &[u16]) -> String {
-    let mut key = js(&format!("{vault_id}\n{path}\n"));
-    key.extend_from_slice(heading);
-    key.extend(js(&format!("\n{ordinal}")));
+pub fn stable_chunk_id(vault_id: &str, path: &str, ordinal: usize, heading: &str) -> String {
+    let key = format!("{vault_id}\n{path}\n{heading}\n{ordinal}");
     format!("{path}#{ordinal}:{}", hash_string(&key))
 }
 
-/// `FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/` (`chunker.ts:3`), with JS
-/// backtracking: returns `(group_start, group_end, match_end)`.
+/// Byte length of the whitespace run of `s` starting at byte `from`.
+fn ws_run(s: &str, from: usize) -> usize {
+    s[from..]
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map_or(s.len() - from, |(i, _)| i)
+}
+
+/// `FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/` (`chunker.ts:3`), with regex
+/// backtracking: returns byte offsets `(group_start, group_end, match_end)`.
 #[must_use]
-pub fn match_frontmatter(c: &[u16]) -> Option<(usize, usize, usize)> {
-    if !starts_with(c, "---") {
+pub fn match_frontmatter(c: &str) -> Option<(usize, usize, usize)> {
+    if !c.starts_with("---") {
         return None;
     }
-    let nl = u16::from(b'\n');
-    let w0 = run(c, 3, is_ws);
+    let b = c.as_bytes();
+    let w0 = ws_run(c, 3);
     // Greedy `\s*` backtracks from the longest run to the last `\n` it can hand to the literal.
-    for p in (3..3 + w0).rev().filter(|&p| c[p] == nl) {
+    for p in (3..3 + w0).rev().filter(|&p| b[p] == b'\n') {
         let start = p + 1;
-        for g in start..c.len() {
-            if c[g] != nl || !starts_with(&c[g + 1..], "---") {
+        for g in start..b.len() {
+            if b[g] != b'\n' || !b[g + 1..].starts_with(b"---") {
                 continue;
             }
             let q = g + 4;
-            let w = run(c, q, is_ws);
-            if q + w == c.len() {
-                return Some((start, g, c.len()));
+            let w = ws_run(c, q);
+            if q + w == b.len() {
+                return Some((start, g, b.len()));
             }
-            if let Some(last) = (q..q + w).rev().find(|&i| c[i] == nl) {
+            if let Some(last) = (q..q + w).rev().find(|&i| b[i] == b'\n') {
                 return Some((start, g, last + 1));
             }
         }
@@ -384,7 +349,7 @@ pub fn match_frontmatter(c: &[u16]) -> Option<(usize, usize, usize)> {
 
 /// `stripFrontmatterBlock` (`chunker.ts:403-406`).
 #[must_use]
-pub fn strip_frontmatter_block(content: &[u16]) -> &[u16] {
+pub fn strip_frontmatter_block(content: &str) -> &str {
     match match_frontmatter(content) {
         Some((_, _, end)) => &content[end..],
         None => content,
@@ -392,60 +357,58 @@ pub fn strip_frontmatter_block(content: &[u16]) -> &[u16] {
 }
 
 /// `unquote` (`chunker.ts:553-558`).
-fn unquote(v: &[u16]) -> JsStr {
-    let (dq, sq) = (u16::from(b'"'), u16::from(b'\''));
-    if let (Some(&f), Some(&l)) = (v.first(), v.last())
-        && ((f == dq && l == dq) || (f == sq && l == sq))
-    {
-        // `value.slice(1, -1)`: a one-unit `"` yields "".
-        return v.get(1..v.len().saturating_sub(1)).unwrap_or(&[]).to_vec();
+fn unquote(v: &str) -> String {
+    for q in ['"', '\''] {
+        if let Some(inner) = v.strip_prefix(q).and_then(|r| r.strip_suffix(q)) {
+            return inner.to_owned();
+        }
     }
-    v.to_vec()
-}
-
-fn is_key_char(c: u16) -> bool {
-    c < 128 && {
-        let b = c as u8;
-        b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+    // A lone quote character (`"` sliced `(1, -1)`) yields "".
+    if v == "\"" || v == "'" {
+        return String::new();
     }
+    v.to_owned()
 }
 
 /// `/^([A-Za-z0-9_-]+):\s*(.*)$/` → `(key, rest)`.
-fn match_key_line(line: &[u16]) -> Option<(&[u16], &[u16])> {
-    let k = run(line, 0, is_key_char);
-    if k == 0 || line.get(k) != Some(&u16::from(b':')) {
+fn match_key_line(line: &str) -> Option<(&str, &str)> {
+    let k = line
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(line.len());
+    if k == 0 || !line[k..].starts_with(':') {
         return None;
     }
-    let w = run(line, k + 1, is_ws);
-    let rest = &line[k + 1 + w..];
-    if rest.iter().any(|&c| is_term(c)) {
+    let rest = line[k + 1..].trim_start();
+    if rest.contains(is_term) {
         return None;
     }
     Some((&line[..k], rest))
 }
 
-/// `/^\s*-\s+(.+)$/` → group 1.
-fn match_list_item(line: &[u16]) -> Option<&[u16]> {
-    let l = run(line, 0, is_ws);
-    if line.get(l) != Some(&u16::from(b'-')) {
+/// `/^\s*-\s+(.+)$/` → group 1, left-trimmed.
+fn match_list_item(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix('-')?;
+    if !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    let w = run(line, l + 1, is_ws);
-    if w == 0 {
-        return None;
+    let g = rest.trim_start();
+    (!g.is_empty() && !g.contains(is_term)).then_some(g)
+}
+
+/// `s.split(/\r?\n/)`.
+fn split_lines(s: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = s.split('\n').collect();
+    // Only a `\r` before a `\n` belongs to the separator; the last piece keeps its own.
+    let last = out.len() - 1;
+    for l in &mut out[..last] {
+        *l = l.strip_suffix('\r').unwrap_or(l);
     }
-    for s in (1..=w).rev() {
-        let g = &line[l + 1 + s..];
-        if !g.is_empty() && !g.iter().any(|&c| is_term(c)) {
-            return Some(g);
-        }
-    }
-    None
+    out
 }
 
 /// `parseSimpleFrontmatter` (`chunker.ts:509-539`).
 #[must_use]
-pub fn parse_simple_frontmatter(text: &[u16]) -> Frontmatter {
+pub fn parse_simple_frontmatter(text: &str) -> Frontmatter {
     let mut out = Frontmatter::default();
     if text.is_empty() {
         return out;
@@ -454,33 +417,31 @@ pub fn parse_simple_frontmatter(text: &[u16]) -> Frontmatter {
     let mut i = 0;
     while i < lines.len() {
         if let Some((key, rest)) = match_key_line(lines[i]) {
-            let raw = trim(rest);
+            let raw = rest.trim();
             if raw.is_empty() {
                 let mut values = Vec::new();
                 while i + 1 < lines.len() {
                     let Some(item) = match_list_item(lines[i + 1]) else {
                         break;
                     };
-                    values.push(unquote(trim(item)));
+                    values.push(unquote(item.trim()));
                     i += 1;
                 }
                 let v = if values.is_empty() {
-                    FmValue::Str(Vec::new())
+                    FmValue::Str(String::new())
                 } else {
                     FmValue::List(values)
                 };
-                out.set(key.to_vec(), v);
-            } else if raw.first() == Some(&u16::from(b'[')) && raw.last() == Some(&u16::from(b']'))
-            {
-                let inner = raw.get(1..raw.len().saturating_sub(1)).unwrap_or(&[]);
-                let items = split_char(inner, u16::from(b','))
-                    .into_iter()
-                    .map(|v| unquote(trim(v)))
+                out.set(key, v);
+            } else if let Some(inner) = raw.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+                let items = inner
+                    .split(',')
+                    .map(|v| unquote(v.trim()))
                     .filter(|v| !v.is_empty())
                     .collect();
-                out.set(key.to_vec(), FmValue::List(items));
+                out.set(key, FmValue::List(items));
             } else {
-                out.set(key.to_vec(), FmValue::Str(unquote(raw)));
+                out.set(key, FmValue::Str(unquote(raw)));
             }
         }
         i += 1;
@@ -488,43 +449,27 @@ pub fn parse_simple_frontmatter(text: &[u16]) -> Frontmatter {
     out
 }
 
-/// `normalizeEntityText` (`chunker.ts:338-343`): `String(v).replace(/\s+/g, ' ').trim().slice(0, 200)`.
-fn normalize_entity_text(v: &[u16]) -> JsStr {
-    let mut collapsed = Vec::with_capacity(v.len());
-    let mut i = 0;
-    while i < v.len() {
-        let n = run(v, i, is_ws);
-        if n > 0 {
-            collapsed.push(u16::from(b' '));
-            i += n;
-        } else {
-            collapsed.push(v[i]);
-            i += 1;
-        }
-    }
-    let t = trim(&collapsed);
-    t[..t.len().min(MAX_ENTITY_TEXT_CHARS)].to_vec()
+/// `normalizeEntityText` (`chunker.ts:338-343`): whitespace runs collapsed to one space,
+/// trimmed, capped at [`MAX_ENTITY_TEXT_CHARS`] chars.
+fn normalize_entity_text(v: &str) -> String {
+    let collapsed = v.split_whitespace().collect::<Vec<_>>().join(" ");
+    take_chars(&collapsed, MAX_ENTITY_TEXT_CHARS).to_owned()
 }
 
 /// `extractFrontmatterEntities` (`chunker.ts:287-307`).
 #[must_use]
 pub fn extract_frontmatter_entities(fm: &Frontmatter) -> Vec<SearchEntity> {
     let mut entities = Vec::new();
-    let mut seen: HashSet<JsStr> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for (key, kind) in FRONTMATTER_ENTITY_FIELDS {
-        let values: Vec<&[u16]> = match fm.get(key) {
-            Some(FmValue::List(items)) => items.iter().map(Vec::as_slice).collect(),
-            Some(FmValue::Str(s)) => vec![s.as_slice()],
+        let values: Vec<&str> = match fm.get(key) {
+            Some(FmValue::List(items)) => items.iter().map(String::as_str).collect(),
+            Some(FmValue::Str(s)) => vec![s.as_str()],
             None => Vec::new(),
         };
         for value in values {
             let text = normalize_entity_text(value);
-            if text.is_empty() {
-                continue;
-            }
-            let mut k = js(&format!("{kind}\n"));
-            k.extend(to_lower(&text));
-            if !seen.insert(k) {
+            if text.is_empty() || !seen.insert(format!("{kind}\n{}", text.to_lowercase())) {
                 continue;
             }
             entities.push(SearchEntity {
@@ -541,69 +486,62 @@ pub fn extract_frontmatter_entities(fm: &Frontmatter) -> Vec<SearchEntity> {
 
 /// `entityIndexText` (`chunker.ts:323-336`): deduplicated by lowercased text, joined by `\n`.
 #[must_use]
-pub fn entity_index_text(entities: &[SearchEntity]) -> JsStr {
-    let mut out: JsStr = Vec::new();
-    let mut seen: HashSet<JsStr> = HashSet::new();
-    let mut count = 0;
+pub fn entity_index_text(entities: &[SearchEntity]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for e in entities {
         let text = normalize_entity_text(&e.text);
-        if text.is_empty() || !seen.insert(to_lower(&text)) {
+        if text.is_empty() || !seen.insert(text.to_lowercase()) {
             continue;
         }
-        if count > 0 {
-            out.push(u16::from(b'\n'));
-        }
-        out.extend_from_slice(&text);
-        count += 1;
-        if count >= MAX_ENTITIES_PER_CHUNK {
+        out.push(text);
+        if out.len() >= MAX_ENTITIES_PER_CHUNK {
             break;
         }
     }
-    out
+    out.join("\n")
 }
 
 /// `hashSearchContent` (`chunker.ts:379-391`). Facets are trimmed, blank ones dropped,
-/// deduplicated and sorted in **code-unit** order (JS default sort).
+/// deduplicated and sorted.
 #[must_use]
-pub fn hash_search_content(content: &[u16], extra_facets: &[JsStr]) -> String {
-    let fm_text = match_frontmatter(content).map_or(&[][..], |(s, e, _)| &content[s..e]);
+pub fn hash_search_content(content: &str, extra_facets: &[String]) -> String {
+    let fm_text = match_frontmatter(content).map_or("", |(s, e, _)| &content[s..e]);
     let entities = extract_frontmatter_entities(&parse_simple_frontmatter(fm_text));
-    let mut base = content.to_vec();
-    base.extend(js("\nentities:"));
-    base.extend(entity_index_text(&entities));
-    let mut facets: Vec<JsStr> = extra_facets
+    let mut base = format!("{content}\nentities:{}", entity_index_text(&entities));
+    let mut facets: Vec<&str> = extra_facets
         .iter()
-        .map(|f| trim(f).to_vec())
+        .map(|f| f.trim())
         .filter(|f| !f.is_empty())
         .collect();
-    facets.sort();
+    facets.sort_unstable();
     facets.dedup();
-    if facets.is_empty() {
-        return hash_string(&base);
-    }
-    base.extend(js("\nfacets:"));
-    for (i, f) in facets.iter().enumerate() {
-        if i > 0 {
-            base.push(u16::from(b'\n'));
-        }
-        base.extend_from_slice(f);
+    if !facets.is_empty() {
+        base.push_str("\nfacets:");
+        base.push_str(&facets.join("\n"));
     }
     hash_string(&base)
 }
 
-/// `/^#\s+(.+)$/m` over the body → the trimmed group, if any (`chunker.ts:413`).
-fn first_h1(body: &[u16]) -> Option<JsStr> {
-    let hash = u16::from(b'#');
-    for i in 0..body.len() {
-        if body[i] != hash || (i > 0 && !is_term(body[i - 1])) {
+/// `/^#\s+(.+)$/m` over the body → the trimmed group, if any (`chunker.ts:413`). `\s+` may
+/// cross line ends, so `#` alone on a line titles the note with the next line.
+fn first_h1(body: &str) -> Option<String> {
+    let b = body.as_bytes();
+    for i in (0..b.len()).filter(|&i| b[i] == b'#') {
+        if i > 0 && !body[..i].ends_with(is_term) {
             continue;
         }
-        let w = run(body, i + 1, is_ws);
-        for s in (1..=w).rev() {
-            let st = i + 1 + s;
-            let n = run(body, st, |c| !is_term(c));
-            if n > 0 {
-                return Some(trim(&body[st..st + n]).to_vec());
+        let rest = &body[i + 1..];
+        // Every char boundary inside the leading whitespace run, longest first (backtracking).
+        let ws: Vec<usize> = rest
+            .char_indices()
+            .take_while(|(_, c)| c.is_whitespace())
+            .map(|(j, c)| j + c.len_utf8())
+            .collect();
+        for &st in ws.iter().rev() {
+            let line = rest[st..].split(is_term).next().unwrap_or("");
+            if !line.is_empty() {
+                return Some(line.trim().to_owned());
             }
         }
     }
@@ -611,31 +549,24 @@ fn first_h1(body: &[u16]) -> Option<JsStr> {
 }
 
 /// `stringValue` (`chunker.ts:549-551`).
-fn string_value(v: Option<&FmValue>) -> Option<JsStr> {
+fn string_value(v: Option<&FmValue>) -> Option<String> {
     match v {
-        Some(FmValue::Str(s)) if !trim(s).is_empty() => Some(trim(s).to_vec()),
+        Some(FmValue::Str(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
         _ => None,
     }
 }
 
 /// `normalizeTags` (`chunker.ts:541-547`).
-fn normalize_tags(v: Option<&FmValue>) -> Vec<JsStr> {
-    let strip = |t: &[u16]| -> JsStr {
-        let t = if t.first() == Some(&u16::from(b'#')) {
-            &t[1..]
-        } else {
-            t
-        };
-        trim(t).to_vec()
-    };
+fn normalize_tags(v: Option<&FmValue>) -> Vec<String> {
+    let strip = |t: &str| -> String { t.strip_prefix('#').unwrap_or(t).trim().to_owned() };
     match v {
         Some(FmValue::List(items)) => items
             .iter()
             .map(|t| strip(t))
             .filter(|t| !t.is_empty())
             .collect(),
-        Some(FmValue::Str(s)) => split_runs(s, 1, |c| c == u16::from(b',') || is_ws(c))
-            .into_iter()
+        Some(FmValue::Str(s)) => s
+            .split(|c: char| c == ',' || c.is_whitespace())
             .map(strip)
             .filter(|t| !t.is_empty())
             .collect(),
@@ -646,16 +577,16 @@ fn normalize_tags(v: Option<&FmValue>) -> Vec<JsStr> {
 /// `parseSearchDocument` (`chunker.ts:408-427`) → `(body, metadata)`.
 #[must_use]
 pub fn parse_search_document<'a>(
-    content: &'a [u16],
+    content: &'a str,
     fallback_title: &str,
-) -> (&'a [u16], DocumentMetadata) {
+) -> (&'a str, DocumentMetadata) {
     let m = match_frontmatter(content);
-    let fm_text = m.map_or(&[][..], |(s, e, _)| &content[s..e]);
+    let fm_text = m.map_or("", |(s, e, _)| &content[s..e]);
     let body = m.map_or(content, |(_, _, end)| &content[end..]);
     let fm = parse_simple_frontmatter(fm_text);
     let title = string_value(fm.get("title"))
-        .or_else(|| first_h1(body).filter(|h| !h.is_empty()))
-        .unwrap_or_else(|| js(fallback_title));
+        .or_else(|| first_h1(body))
+        .unwrap_or_else(|| fallback_title.to_owned());
     let meta = DocumentMetadata {
         title,
         created: string_value(fm.get("created")),
@@ -667,48 +598,40 @@ pub fn parse_search_document<'a>(
     (body, meta)
 }
 
-/// `HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/` on one line → group 2 (`chunker.ts:4`).
-fn match_heading(line: &[u16]) -> Option<&[u16]> {
-    let hash = u16::from(b'#');
-    let h = run(line, 0, |c| c == hash);
+/// `HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/` on one line → the trimmed heading text.
+fn match_heading(line: &str) -> Option<&str> {
+    let h = line.len() - line.trim_start_matches('#').len();
     if h == 0 || h > 6 {
         return None;
     }
-    let w = run(line, h, is_ws);
-    // The valid starts of the `\s*#*\s*$` tail form a contiguous suffix [m, len].
-    let len = line.len();
-    let mut m = len;
-    while m > 0 && is_ws(line[m - 1]) {
-        m -= 1;
+    let rest = &line[h..];
+    if !rest.starts_with(char::is_whitespace) || rest.contains(is_term) {
+        return None;
     }
-    while m > 0 && line[m - 1] == hash {
-        m -= 1;
+    let inner = rest.trim();
+    if inner.is_empty() {
+        return None;
     }
-    while m > 0 && is_ws(line[m - 1]) {
-        m -= 1;
+    // Lazy `(.+?)` then `\s*#*\s*$`: a closing `#` run is dropped, but the group keeps ≥1 char.
+    let stripped = inner.trim_end_matches('#').trim_end();
+    if stripped.is_empty() {
+        let first = inner.chars().next().map_or(0, char::len_utf8);
+        return Some(&inner[..first]);
     }
-    for s in (1..=w).rev() {
-        let gs = h + s;
-        let ge = (gs + 1).max(m);
-        if ge > len || line[gs..ge].iter().any(|&c| is_term(c)) {
-            continue;
-        }
-        return Some(&line[gs..ge]);
-    }
-    None
+    Some(stripped)
 }
 
 struct Section {
-    heading: JsStr,
-    text: JsStr,
+    heading: String,
+    text: String,
 }
 
 /// `splitSections` (`chunker.ts:429-443`).
-fn split_sections(body: &[u16]) -> Vec<Section> {
-    let mut sections: Vec<(JsStr, Vec<&[u16]>)> = vec![(Vec::new(), Vec::new())];
+fn split_sections(body: &str) -> Vec<Section> {
+    let mut sections: Vec<(String, Vec<&str>)> = vec![(String::new(), Vec::new())];
     for line in split_lines(body) {
         if let Some(h) = match_heading(line) {
-            sections.push((trim(h).to_vec(), vec![line]));
+            sections.push((h.to_owned(), vec![line]));
         } else if let Some(cur) = sections.last_mut() {
             cur.1.push(line);
         }
@@ -717,42 +640,59 @@ fn split_sections(body: &[u16]) -> Vec<Section> {
         .into_iter()
         .map(|(heading, lines)| Section {
             heading,
-            text: trim(&lines.join(&u16::from(b'\n'))).to_vec(),
+            text: lines.join("\n").trim().to_owned(),
         })
         .filter(|s| !s.text.is_empty())
         .collect()
 }
 
-/// `chunkText` (`chunker.ts:445-468`).
-fn chunk_text(text: &[u16], max: usize, overlap: usize) -> Vec<JsStr> {
-    if text.len() <= max {
-        return vec![text.to_vec()];
-    }
-    let sep: JsStr = js("\n\n");
-    let join = |a: &[u16], b: &[u16]| -> JsStr {
-        if a.is_empty() {
-            b.to_vec()
+/// Splits on runs of two or more `\n` (`/\n{2,}/`).
+fn split_paragraphs(text: &str) -> Vec<&str> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let (mut start, mut i) = (0, 0);
+    while i < b.len() {
+        let n = b[i..].iter().take_while(|&&c| c == b'\n').count();
+        if n >= 2 {
+            out.push(&text[start..i]);
+            i += n;
+            start = i;
         } else {
-            [a, &sep, b].concat()
+            i += n.max(1);
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
+/// `chunkText` (`chunker.ts:445-468`); lengths in chars.
+fn chunk_text(text: &str, max: usize, overlap: usize) -> Vec<String> {
+    if char_len(text) <= max {
+        return vec![text.to_owned()];
+    }
+    let join = |a: &str, b: &str| -> String {
+        if a.is_empty() {
+            b.to_owned()
+        } else {
+            format!("{a}\n\n{b}")
         }
     };
     let mut chunks = Vec::new();
-    let mut current: JsStr = Vec::new();
-    for paragraph in split_runs(text, 2, |c| c == u16::from(b'\n')) {
+    let mut current = String::new();
+    for paragraph in split_paragraphs(text) {
         let next = join(&current, paragraph);
-        if next.len() <= max {
+        if char_len(&next) <= max {
             current = next;
             continue;
         }
         if !current.is_empty() {
             chunks.push(current.clone());
         }
-        if paragraph.len() <= max {
-            current = tail_overlap(&current, overlap);
-            current = join(&current, paragraph);
+        if char_len(paragraph) <= max {
+            current = join(tail_overlap(&current, overlap), paragraph);
         } else {
             chunks.extend(slice_long_text(paragraph, max, overlap));
-            current = Vec::new();
+            current = String::new();
         }
     }
     if !current.is_empty() {
@@ -761,14 +701,20 @@ fn chunk_text(text: &[u16], max: usize, overlap: usize) -> Vec<JsStr> {
     chunks
 }
 
-/// `sliceLongText` (`chunker.ts:470-480`) — may split a surrogate pair, as the TS does.
-fn slice_long_text(text: &[u16], max: usize, overlap: usize) -> Vec<JsStr> {
+/// `sliceLongText` (`chunker.ts:470-480`), on char boundaries.
+fn slice_long_text(text: &str, max: usize, overlap: usize) -> Vec<String> {
+    let bounds: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([text.len()])
+        .collect();
+    let n = bounds.len() - 1;
     let mut chunks = Vec::new();
     let mut start = 0;
-    while start < text.len() {
-        let end = text.len().min(start + max);
-        chunks.push(text[start..end].to_vec());
-        if end == text.len() {
+    while start < n {
+        let end = n.min(start + max);
+        chunks.push(text[bounds[start]..bounds[end]].to_owned());
+        if end == n {
             break;
         }
         start = end.saturating_sub(overlap).max(start + 1);
@@ -776,12 +722,13 @@ fn slice_long_text(text: &[u16], max: usize, overlap: usize) -> Vec<JsStr> {
     chunks
 }
 
-/// `tailOverlap` (`chunker.ts:482-485`).
-fn tail_overlap(text: &[u16], overlap: usize) -> JsStr {
-    if text.is_empty() || overlap == 0 {
-        return Vec::new();
+/// `tailOverlap` (`chunker.ts:482-485`): the last `overlap` chars.
+fn tail_overlap(text: &str, overlap: usize) -> &str {
+    if overlap == 0 {
+        return "";
     }
-    text[text.len().saturating_sub(overlap)..].to_vec()
+    let n = char_len(text);
+    &text[char_offset(text, n.saturating_sub(overlap))..]
 }
 
 /// `buildSearchChunks` (`chunker.ts:158-275`).
@@ -804,9 +751,9 @@ pub fn build_search_chunks(input: &BuildChunksInput) -> Vec<SearchChunk> {
     let metadata = Arc::new(metadata);
     let mut chunks = Vec::new();
     let mut ordinal = 0usize;
-    let mut emit = |heading: &[u16], source: &[u16], chunks: &mut Vec<SearchChunk>| {
+    let mut emit = |heading: &str, source: &str, chunks: &mut Vec<SearchChunk>| {
         for text in chunk_text(source, max, overlap) {
-            let trimmed = trim(&text);
+            let trimmed = text.trim();
             if trimmed.is_empty() {
                 continue;
             }
@@ -816,8 +763,8 @@ pub fn build_search_chunks(input: &BuildChunksInput) -> Vec<SearchChunk> {
                 path: input.path.clone(),
                 content_hash: content_hash.clone(),
                 title: metadata.title.clone(),
-                heading: heading.to_vec(),
-                text: trimmed.to_vec(),
+                heading: heading.to_owned(),
+                text: trimmed.to_owned(),
                 mtime: input.mtime,
                 ordinal,
                 metadata: metadata.clone(),
@@ -833,19 +780,17 @@ pub fn build_search_chunks(input: &BuildChunksInput) -> Vec<SearchChunk> {
         emit(&section.heading, &section.text, &mut chunks);
     }
     for image in &input.image_descriptions {
-        let filename = trim(&image.filename);
+        let filename = image.filename.trim();
         if filename.is_empty() {
             continue;
         }
-        let mut narrative_heading = js(IMAGE_CHUNK_HEADING_PREFIX);
-        narrative_heading.extend_from_slice(filename);
-        let mut text_heading = narrative_heading.clone();
-        text_heading.extend(js(" (text)"));
+        let narrative_heading = format!("{IMAGE_CHUNK_HEADING_PREFIX}{filename}");
+        let text_heading = format!("{narrative_heading} (text)");
         for (heading, part) in [
             (narrative_heading, &image.narrative),
             (text_heading, &image.extraction),
         ] {
-            let source = trim(part);
+            let source = part.trim();
             if source.is_empty() {
                 continue;
             }
@@ -857,13 +802,15 @@ pub fn build_search_chunks(input: &BuildChunksInput) -> Vec<SearchChunk> {
         .iter()
         .take(MAX_LINKED_DOCUMENTS_PER_NOTE)
     {
-        let linked_text = trim(&doc.text);
+        let linked_text = doc.text.trim();
         if linked_text.is_empty() {
             continue;
         }
-        let title = trim(&doc.title);
-        let mut heading = js(LINKED_POST_HEADING_PREFIX);
-        heading.extend_from_slice(if title.is_empty() { &doc.path } else { title });
+        let title = doc.title.trim();
+        let heading = format!(
+            "{LINKED_POST_HEADING_PREFIX}{}",
+            if title.is_empty() { &doc.path } else { title }
+        );
         emit(&heading, linked_text, &mut chunks);
     }
     chunks

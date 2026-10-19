@@ -1,12 +1,11 @@
 //! Job bodies: `search_upsert` (one path), reconcile (the param-less `search-refresh` sweep) and
 //! `search_delete`, writing the local `semsearch` index (plan semsearch-crate WP-3, D22). The
-//! chunking and file preparation are the Crucible-compatible port (WP-13); the up-to-date rule is
+//! chunking and file preparation are the Crucible port (WP-13); the up-to-date rule is
 //! Crucible's (`SearchManager.indexFiles` + `embeddingCoverageSatisfied`,
 //! `src/search/SearchManager.ts:404-416,621-624`).
 //!
 //! **Writes.** A note is a `semsearch` source keyed by its vault-relative path; chunk ids are the
-//! stable chunk ids (vault id [`DEFAULT_VAULT_ID`], as the companion stored them, so an import
-//! and the feed agree) and the source hash is the prepared `contentHash`. A note with zero chunks
+//! stable chunk ids (vault id [`DEFAULT_VAULT_ID`]) and the source hash is the prepared `contentHash`. A note with zero chunks
 //! is deleted. With an embedder configured, chunks are embedded first and written with
 //! [`semsearch::Index::upsert_source_in`] in [`space_for`]'s space; otherwise keyword-only.
 //!
@@ -32,15 +31,13 @@ use semsearch::{Index, IndexOptions, SourceState, Space};
 use crate::chunker::SearchChunk;
 use crate::error::SearchError;
 use crate::index::lock;
-use crate::js::lossy;
 use crate::prepare::{PreparedFile, build_prepared_chunks};
 
 /// Texts per embedding request (Crucible's sub-batch bound, `SearchEmbeddingMismatchError` doc).
 pub const EMBED_BATCH: usize = 96;
 /// Notes prepared and embedded per write group in reconcile.
 pub const NOTE_BATCH: usize = 64;
-/// The vault id folded into stable chunk ids (Crucible's `searchVaultId` default; the companion
-/// import keeps its ids, so the feed must use the same one).
+/// The vault id folded into stable chunk ids (Crucible's `searchVaultId` default).
 pub const DEFAULT_VAULT_ID: &str = "default";
 
 /// Legacy companion space strings for serving model ids (audit E2): imported vectors and newly
@@ -207,7 +204,7 @@ async fn embed_chunks(
 ) -> Result<Option<usize>, SearchError> {
     let mut dim = expected_dim;
     for batch in chunks.chunks_mut(EMBED_BATCH) {
-        let texts: Vec<String> = batch.iter().map(|c| lossy(&c.text)).collect();
+        let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
         let out = mgr
             .embed(&t.provider, &t.model, &texts)
             .await
@@ -240,22 +237,22 @@ async fn embed_chunks(
     Ok(dim)
 }
 
-/// A built chunk as a `semsearch` chunk (title/heading/text lossy UTF-8, entities one per line,
-/// metadata the companion's `metadata_json`).
+/// A built chunk as a `semsearch` chunk (entities one per line,
+/// metadata [`SearchChunk::metadata_json`]).
 fn to_chunk(c: SearchChunk) -> semsearch::Chunk {
     let entities = c
         .entities
         .iter()
-        .map(|e| lossy(&e.text))
+        .map(|e| e.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
     semsearch::Chunk {
         metadata: Some(c.metadata_json()),
         id: c.id,
         ordinal: i64::try_from(c.ordinal).unwrap_or(i64::MAX),
-        title: lossy(&c.title),
-        heading: lossy(&c.heading),
-        text: lossy(&c.text),
+        title: c.title,
+        heading: c.heading,
+        text: c.text,
         entities,
         embedding: c.embedding,
     }

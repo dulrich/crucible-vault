@@ -11,15 +11,14 @@ use std::sync::{Arc, Mutex};
 use cv_actions::{ConfigSet, Step};
 use cv_protocol::ActionContext;
 use cv_providers::{ProviderManager, SecretSource};
-use cv_search::js::lossy;
+use cv_search::SearchDb;
 use cv_search::semsearch::{Query, Space};
-use cv_search::{CompanionRow, SearchDb, import_companion, write_companion_fixture};
 use cv_state::{ImageDescription, QueueConfig, StateDb};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::search::{NotePrep, run};
+use super::search::run;
 use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
 
 /// tmpfs when available (project-setup "tmpfs test databases").
@@ -167,7 +166,8 @@ impl SecretSource for NoSecrets {
 }
 
 struct World {
-    tmp: Tmp,
+    /// Held for its `Drop` (removes the temp tree).
+    _tmp: Tmp,
     rt: tokio::runtime::Runtime,
     fake: Fake,
     vault: PathBuf,
@@ -232,7 +232,7 @@ fn world() -> World {
     assert!(config.errors().is_empty(), "{:?}", config.errors());
     let search = SearchDb::new(tmp.0.join("state").join("search.db"));
     World {
-        tmp,
+        _tmp: tmp,
         rt,
         fake,
         vault,
@@ -291,18 +291,6 @@ impl World {
             .into_iter()
             .map(|s| (s.source, s.content_hash, s.chunks, s.embedded_chunks))
             .collect()
-    }
-
-    /// Local notes prepared exactly as the feed step prepares them (no image descriptions).
-    fn local_notes(&self) -> Vec<(String, cv_search::LocalNote)> {
-        let reader = cv_index::Reader::open_current(&self.index).unwrap();
-        let vault = self.vault.clone();
-        let prep = NotePrep::new(
-            Box::new(move |p| Ok(std::fs::read(vault.join(p)).ok())),
-            &reader,
-            Box::new(|_| None),
-        );
-        prep.local_notes().unwrap()
     }
 }
 
@@ -446,64 +434,6 @@ fn steps_share_one_index_handle() {
             .unwrap()
             .is_empty()
     );
-}
-
-/// Writes a companion-schema DB holding `notes` chunked exactly as the feed chunks them, with
-/// every chunk embedded as [`VEC`] in the legacy space `bge-m3/f16`.
-fn synthetic_companion(path: &Path, notes: &[(String, cv_search::LocalNote)]) {
-    let mut rows = Vec::new();
-    for (_, n) in notes {
-        let chunks = cv_search::build_prepared_chunks(
-            &n.prepared,
-            cv_search::feed::DEFAULT_VAULT_ID,
-            &n.basename,
-            n.mtime,
-            cv_search::chunker::DEFAULT_MAX_CHARS,
-            cv_search::chunker::DEFAULT_OVERLAP_CHARS,
-        );
-        for c in chunks {
-            rows.push(CompanionRow {
-                metadata_json: c.metadata_json(),
-                id: c.id,
-                vault: "default".into(),
-                path: c.path,
-                content_hash: c.content_hash,
-                title: lossy(&c.title),
-                heading: lossy(&c.heading),
-                text: lossy(&c.text),
-                ordinal: i64::try_from(c.ordinal).unwrap(),
-                embedding: Some(VEC.to_vec()),
-                embedding_space: Some("bge-m3/f16".into()),
-            });
-        }
-    }
-    write_companion_fixture(path, &rows).unwrap();
-}
-
-#[test]
-fn imported_space_is_shared_with_the_feed_and_reconcile_does_not_reembed() {
-    let w = world();
-    let comp = w.tmp.0.join("companion.sqlite");
-    synthetic_companion(&comp, &w.local_notes());
-    {
-        let idx = w.search.shared().unwrap();
-        let mut g = idx.lock().unwrap();
-        let c = import_companion(&comp, &mut g).unwrap();
-        assert_eq!((c.sources, c.chunks, c.embedded, c.written), (2, 2, 2, 2));
-        assert_eq!(g.space(), Some(&Space::new("bge-m3/f16", 3)));
-        let hits = g
-            .search(&Query::new("synthetic").with_vector(VEC.to_vec()))
-            .unwrap();
-        assert!(hits.iter().any(|h| h.ranks.vector.is_some()));
-    }
-    // The serving id `bge-m3-f16` maps onto the imported space: nothing to re-embed or write.
-    let o = w
-        .run(&w.upsert("embed = \"emb:bge-m3-f16\""), None)
-        .unwrap();
-    assert_eq!(var(&o, "matched"), 2, "{:?}", o.vars);
-    assert_eq!(var(&o, "upserted"), 0);
-    assert_eq!(var(&o, "deleted"), 0);
-    assert_eq!(w.fake.embed_calls(), 0);
 }
 
 #[test]

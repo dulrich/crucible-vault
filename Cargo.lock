@@ -923,7 +923,6 @@ dependencies = [
  "cv-providers",
  "cv-state",
  "regex",
- "rusqlite",
  "semsearch",
  "serde",
  "serde_json",

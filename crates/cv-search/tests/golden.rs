@@ -1,41 +1,36 @@
-//! Byte-compatibility against Crucible's own TypeScript chunker.
+//! Chunker regression goldens plus the vectors of Crucible's `tests/searchChunker.test.mjs`.
 //!
-//! `fixtures/golden.json` was produced by running `https://github.com/dulrich/obsidian-crucible/blob/master/src/search/chunker.ts`
-//! on synthetic inputs (`docs/spikes/wp13-golden/golden.ts`, see the report for the command).
-//! Strings are UTF-16 code-unit arrays so lone surrogates (E4) survive. Plus the vectors of
-//! Crucible's `tests/searchChunker.test.mjs`, ported.
+//! `fixtures/golden.json` holds synthetic inputs (carried over from the TS-generated fixture of
+//! `docs/spikes/wp13-golden/golden.ts`, lone surrogates replaced by U+FFFD) and the native
+//! chunker's output for them. Since WP-R7 (plan tn-review-baseline-remediation) the chunker is
+//! native `str`, so the expectations are this crate's own output, regenerated with
+//! `CV_REGEN_GOLDEN=1 cargo test -p cv-search --test golden golden_fixture_is_current` and
+//! reviewed by diff.
 
 use cv_search::chunker::{
     BuildChunksInput, ImageDescriptionChunkInput, LinkedDocumentChunkInput, build_search_chunks,
-    hash_search_content, hash_string, parse_search_document, strip_frontmatter_block,
+    hash_search_content, hash_string, parse_search_document, strip_frontmatter_block, take_chars,
 };
-use cv_search::js::{JsStr, js, lossy, trim};
 use cv_search::prepare::{LINKED_DOCUMENT_MAX_CHARS, combined_description_hash};
-use serde_json::Value;
+use serde_json::{Value, json};
 
-fn units(v: &Value) -> JsStr {
-    v.as_array()
-        .unwrap()
-        .iter()
-        .map(|x| u16::try_from(x.as_u64().unwrap()).unwrap())
-        .collect()
+const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/golden.json");
+
+fn st(v: &Value) -> String {
+    v.as_str().unwrap().to_owned()
 }
 
-fn list(v: &Value) -> Vec<JsStr> {
-    v.as_array().unwrap().iter().map(units).collect()
-}
-
-fn fixture() -> Value {
-    serde_json::from_str(include_str!("fixtures/golden.json")).unwrap()
+fn list(v: &Value) -> Vec<String> {
+    v.as_array().unwrap().iter().map(st).collect()
 }
 
 fn input_of(i: &Value) -> BuildChunksInput {
     BuildChunksInput {
-        vault_id: i["vaultId"].as_str().unwrap().into(),
-        path: i["path"].as_str().unwrap().into(),
-        basename: i["basename"].as_str().unwrap().into(),
+        vault_id: st(&i["vaultId"]),
+        path: st(&i["path"]),
+        basename: st(&i["basename"]),
         mtime: i["mtime"].as_i64().unwrap(),
-        content: units(&i["content"]),
+        content: st(&i["content"]),
         content_hash: None,
         max_chars: usize::try_from(i["maxChars"].as_u64().unwrap()).unwrap(),
         overlap_chars: usize::try_from(i["overlapChars"].as_u64().unwrap()).unwrap(),
@@ -44,9 +39,9 @@ fn input_of(i: &Value) -> BuildChunksInput {
             .unwrap()
             .iter()
             .map(|d| ImageDescriptionChunkInput {
-                filename: units(&d["filename"]),
-                narrative: units(&d["narrative"]),
-                extraction: units(&d["extraction"]),
+                filename: st(&d["filename"]),
+                narrative: st(&d["narrative"]),
+                extraction: st(&d["extraction"]),
             })
             .collect(),
         linked_documents: i["linkedDocuments"]
@@ -54,86 +49,57 @@ fn input_of(i: &Value) -> BuildChunksInput {
             .unwrap()
             .iter()
             .map(|d| LinkedDocumentChunkInput {
-                path: units(&d["path"]),
-                title: units(&d["title"]),
-                text: units(&d["text"]),
+                path: st(&d["path"]),
+                title: st(&d["title"]),
+                text: st(&d["text"]),
             })
             .collect(),
         extra_hash_facets: list(&i["extraHashFacets"]),
     }
 }
 
-#[test]
-fn golden_cases_match_crucible_exactly() {
-    let f = fixture();
-    let cases = f["cases"].as_array().unwrap();
-    assert!(cases.len() >= 20);
-    for case in cases {
-        let name = case["name"].as_str().unwrap();
-        let input = input_of(&case["input"]);
-        assert_eq!(
-            hash_search_content(&input.content, &input.extra_hash_facets),
-            case["hash"].as_str().unwrap(),
-            "{name}: hash"
-        );
-        let (_, meta) = parse_search_document(&input.content, &input.basename);
-        assert_eq!(meta.title, units(&case["title"]), "{name}: title");
-        assert_eq!(meta.tags, list(&case["tags"]), "{name}: tags");
-        let chunks = build_search_chunks(&input);
-        let want = case["chunks"].as_array().unwrap();
-        assert_eq!(chunks.len(), want.len(), "{name}: chunk count");
-        for (c, w) in chunks.iter().zip(want) {
-            assert_eq!(c.id, w["id"].as_str().unwrap(), "{name}: id");
-            assert_eq!(c.content_hash, w["contentHash"].as_str().unwrap(), "{name}");
-            assert_eq!(c.heading, units(&w["heading"]), "{name}: heading");
-            assert_eq!(c.text, units(&w["text"]), "{name}: text #{}", c.ordinal);
-            assert_eq!(c.ordinal as u64, w["ordinal"].as_u64().unwrap(), "{name}");
-            let ents: Vec<JsStr> = c.entities.iter().map(|e| e.text.clone()).collect();
-            assert_eq!(ents, list(&w["entities"]), "{name}: entities");
-            // The payload serializes (lone surrogates escaped) and stays valid JSON.
-            let json = c.to_json();
-            let back: Value = serde_json::from_str(&json)
-                .or_else(|_| serde_json::from_str(&json.replace("\\ud", "\\u00")))
-                .unwrap();
-            assert_eq!(back["id"], w["id"]);
-        }
-    }
-}
-
-#[test]
-fn golden_covers_lone_surrogates_at_chunk_boundaries() {
-    let f = fixture();
-    let case = f["cases"]
+/// The fixture with every expectation recomputed from its inputs.
+fn regenerate(f: &Value) -> Value {
+    let cases: Vec<Value> = f["cases"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["name"] == "surrogate-split")
+        .map(|case| {
+            let input = input_of(&case["input"]);
+            let (_, meta) = parse_search_document(&input.content, &input.basename);
+            let chunks: Vec<Value> = build_search_chunks(&input)
+                .iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "contentHash": c.content_hash,
+                        "heading": c.heading,
+                        "text": c.text,
+                        "ordinal": c.ordinal,
+                        "entities": c.entities.iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            json!({
+                "name": case["name"],
+                "input": case["input"],
+                "title": meta.title,
+                "tags": meta.tags,
+                "hash": hash_search_content(&input.content, &input.extra_hash_facets),
+                "chunks": chunks,
+            })
+        })
+        .collect();
+    let hashes: Vec<Value> = f["hashes"]
+        .as_array()
         .unwrap()
-        .clone();
-    let chunks = build_search_chunks(&input_of(&case["input"]));
-    // The TS slices code units: the first slice ends on a lone high surrogate.
-    let last = *chunks[0].text.last().unwrap();
-    assert!((0xD800..0xDC00).contains(&last));
-    assert!(chunks[0].to_json().contains("\\ud83d\""));
-}
-
-#[test]
-fn golden_hash_string_and_facet_helpers() {
-    let f = fixture();
-    for h in f["hashes"].as_array().unwrap() {
-        assert_eq!(
-            hash_string(&units(&h["input"])),
-            h["hash"].as_str().unwrap()
-        );
-    }
-    // Linked-document text: stripFrontmatterBlock + trim + slice(0, 4000) — ends mid-pair.
-    let raw = units(&f["linked"]["raw"]);
-    let text = trim(strip_frontmatter_block(&raw));
-    let text = &text[..text.len().min(LINKED_DOCUMENT_MAX_CHARS)];
-    assert_eq!(text, &units(&f["linked"]["text"])[..]);
-    assert_eq!(
-        hash_search_content(text, &[]),
-        f["linked"]["facetHash"].as_str().unwrap()
+        .iter()
+        .map(|h| json!({"input": h["input"], "hash": hash_string(h["input"].as_str().unwrap())}))
+        .collect();
+    let raw = st(&f["linked"]["raw"]);
+    let text = take_chars(
+        strip_frontmatter_block(&raw).trim(),
+        LINKED_DOCUMENT_MAX_CHARS,
     );
     let pairs: Vec<(String, String)> = f["combined"]["lines"]
         .as_array()
@@ -145,25 +111,77 @@ fn golden_hash_string_and_facet_helpers() {
             (m.to_owned(), h.to_owned())
         })
         .collect();
-    assert_eq!(
-        combined_description_hash(&pairs),
-        f["combined"]["hash"].as_str().unwrap()
-    );
+    json!({
+        "generator": f["generator"],
+        "cases": cases,
+        "hashes": hashes,
+        "linked": {"raw": raw, "text": text, "facetHash": hash_search_content(text, &[])},
+        "combined": {"lines": f["combined"]["lines"], "hash": combined_description_hash(&pairs)},
+    })
+}
+
+#[test]
+fn golden_fixture_is_current() {
+    let f: Value = serde_json::from_str(&std::fs::read_to_string(FIXTURE).unwrap()).unwrap();
+    assert!(f["cases"].as_array().unwrap().len() >= 20);
+    let fresh = regenerate(&f);
+    if std::env::var_os("CV_REGEN_GOLDEN").is_some() {
+        let mut out = serde_json::to_string_pretty(&fresh).unwrap();
+        out.push('\n');
+        std::fs::write(FIXTURE, out).unwrap();
+        return;
+    }
+    for (got, want) in fresh["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(f["cases"].as_array().unwrap())
+    {
+        assert_eq!(got, want, "case {}", want["name"]);
+    }
+    assert_eq!(fresh, f);
     assert_eq!(combined_description_hash(&[]), "");
 }
 
 #[test]
-fn facet_sort_is_code_unit_order() {
-    // U+1F600 is D83D DE00 in UTF-16, which sorts before U+E000 by code unit but after it by
-    // code point. Rust `str` order is code-point order, so it must not be used.
-    let a = js("linked:\u{E000}:1");
-    let b = js("linked:\u{1F600}:1");
-    assert!(b < a);
-    assert!("linked:\u{1F600}:1" > "linked:\u{E000}:1");
-    let content = js("sorted facets");
+fn astral_text_slices_on_char_boundaries() {
+    // Hand spot-check: 500 emoji (4 UTF-8 bytes each) with max 400 chars, overlap 50.
+    let content = "\u{1F600}".repeat(500);
+    let chunks = build_search_chunks(&BuildChunksInput {
+        path: "e.md".into(),
+        content: content.clone(),
+        max_chars: 400,
+        overlap_chars: 50,
+        ..BuildChunksInput::default()
+    });
+    let lens: Vec<usize> = chunks.iter().map(|c| c.text.chars().count()).collect();
+    assert_eq!(lens, [400, 150]);
+    assert!(
+        chunks
+            .iter()
+            .all(|c| c.text.chars().all(|ch| ch == '\u{1F600}'))
+    );
+    // Mixed widths (1-4 bytes) never panic at any max/overlap.
+    let mixed = "a\u{e9}\u{4e2d}\u{1F600}\u{301}".repeat(300);
+    for (max, overlap) in [(400, 0), (401, 133), (999, 7)] {
+        for c in build_search_chunks(&BuildChunksInput {
+            content: mixed.clone(),
+            max_chars: max,
+            overlap_chars: overlap,
+            ..BuildChunksInput::default()
+        }) {
+            assert!(c.text.chars().count() <= max);
+        }
+    }
+}
+
+#[test]
+fn facet_order_does_not_move_the_hash() {
+    let a = "linked:\u{E000}:1".to_owned();
+    let b = "linked:\u{1F600}:1".to_owned();
     assert_eq!(
-        hash_search_content(&content, &[a.clone(), b.clone()]),
-        hash_search_content(&content, &[b, a])
+        hash_search_content("sorted facets", &[a.clone(), b.clone()]),
+        hash_search_content("sorted facets", &[b, a])
     );
 }
 
@@ -178,7 +196,7 @@ fn chunk_input() -> BuildChunksInput {
         path: "notes/report.md".into(),
         basename: "report".into(),
         mtime: 7,
-        content: js(PROSE),
+        content: PROSE.into(),
         max_chars: 400,
         overlap_chars: 0,
         ..BuildChunksInput::default()
@@ -187,9 +205,9 @@ fn chunk_input() -> BuildChunksInput {
 
 fn img(f: &str, n: &str, e: &str) -> ImageDescriptionChunkInput {
     ImageDescriptionChunkInput {
-        filename: js(f),
-        narrative: js(n),
-        extraction: js(e),
+        filename: f.into(),
+        narrative: n.into(),
+        extraction: e.into(),
     }
 }
 
@@ -203,19 +221,13 @@ fn indexable_extensions() {
 
 #[test]
 fn frontmatter_metadata_and_heading_fallback() {
-    let c = js(
+    let c = String::from(
         "---\ntitle: Example Search Title\nsource: https://example.com/source\ntags:\n  - search\n  - agents\n---\n# Ignored fallback\nBody text",
     );
     let (_, m) = parse_search_document(&c, "fallback");
-    assert_eq!(lossy(&m.title), "Example Search Title");
-    assert_eq!(
-        lossy(m.source.as_deref().unwrap()),
-        "https://example.com/source"
-    );
-    assert_eq!(
-        m.tags.iter().map(|t| lossy(t)).collect::<Vec<_>>(),
-        ["search", "agents"]
-    );
+    assert_eq!(m.title, "Example Search Title");
+    assert_eq!(m.source.as_deref().unwrap(), "https://example.com/source");
+    assert_eq!(m.tags, ["search", "agents"]);
 }
 
 #[test]
@@ -230,7 +242,7 @@ fn chunks_are_stable_and_retain_headings() {
         path: "daily/example.md".into(),
         basename: "example".into(),
         mtime: 1,
-        content: js(&content),
+        content: content.clone(),
         max_chars: 80,
         overlap_chars: 10,
         ..BuildChunksInput::default()
@@ -242,30 +254,30 @@ fn chunks_are_stable_and_retain_headings() {
         first.iter().map(|c| &c.id).collect::<Vec<_>>(),
         second.iter().map(|c| &c.id).collect::<Vec<_>>()
     );
-    assert!(first.iter().any(|c| lossy(&c.heading) == "First"));
-    assert!(first.iter().any(|c| lossy(&c.heading) == "Second"));
+    assert!(first.iter().any(|c| c.heading == "First"));
+    assert!(first.iter().any(|c| c.heading == "Second"));
     assert_eq!(first[0].vault_id, "test");
-    assert_eq!(
-        first[0].content_hash,
-        hash_search_content(&js(&content), &[])
-    );
+    assert_eq!(first[0].content_hash, hash_search_content(&content, &[]));
     assert_ne!(
         first[0].content_hash,
-        hash_search_content(&js(&format!("{content}\nChanged")), &[])
+        hash_search_content(&format!("{content}\nChanged"), &[])
     );
 }
 
 #[test]
 fn no_images_is_byte_identical_to_pre_image_chunker() {
-    let p = js(PROSE);
-    assert_eq!(hash_search_content(&p, &[]), "f84cbaae");
+    let p = PROSE;
+    assert_eq!(hash_search_content(p, &[]), "f84cbaae");
     let chunks = build_search_chunks(&chunk_input());
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].id, "notes/report.md#0:347085ed");
     assert_eq!(chunks[0].content_hash, "f84cbaae");
     assert_eq!(chunks[0].ordinal, 0);
-    assert_eq!(lossy(&chunks[0].heading), "Findings");
-    assert_eq!(hash_search_content(&p, &[js(""), js("   ")]), "f84cbaae");
+    assert_eq!(chunks[0].heading, "Findings");
+    assert_eq!(
+        hash_search_content(p, &["".to_owned(), "   ".to_owned()]),
+        "f84cbaae"
+    );
 }
 
 #[test]
@@ -283,17 +295,17 @@ fn described_image_appends_two_chunks() {
         [0, 1, 2]
     );
     assert_eq!(
-        lossy(&chunks[1].heading),
+        chunks[1].heading,
         "Image: a1b2c3d4e5f60718293a4b5c6d7e8f90_MD5.png"
     );
     assert_eq!(
-        lossy(&chunks[2].heading),
+        chunks[2].heading,
         "Image: a1b2c3d4e5f60718293a4b5c6d7e8f90_MD5.png (text)"
     );
-    assert!(lossy(&chunks[2].text).contains("Q4 2.6M"));
+    assert!(chunks[2].text.contains("Q4 2.6M"));
     for c in &chunks {
         assert_eq!(c.path, "notes/report.md");
-        assert_eq!(lossy(&c.title), "Quarterly Report");
+        assert_eq!(c.title, "Quarterly Report");
     }
     assert_eq!(chunks[0].id, "notes/report.md#0:347085ed");
 }
@@ -308,7 +320,7 @@ fn svg_record_emits_one_chunk_and_blanks_nothing() {
     )];
     let chunks = build_search_chunks(&input);
     assert_eq!(chunks.len(), 2);
-    assert_eq!(lossy(&chunks[1].heading), "Image: diagram_MD5.svg (text)");
+    assert_eq!(chunks[1].heading, "Image: diagram_MD5.svg (text)");
     input.image_descriptions = vec![
         img("blank_MD5.png", "   ", ""),
         img("  ", "orphaned", "orphaned"),
@@ -328,7 +340,7 @@ fn long_extraction_packs_by_max_chars() {
     let chunks = build_search_chunks(&input);
     let packed: Vec<_> = chunks
         .iter()
-        .filter(|c| lossy(&c.heading) == "Image: table_MD5.webp (text)")
+        .filter(|c| c.heading == "Image: table_MD5.webp (text)")
         .collect();
     assert!(packed.len() > 3);
     assert!(packed.iter().all(|c| c.text.len() <= 400));
@@ -339,18 +351,25 @@ fn long_extraction_packs_by_max_chars() {
 
 #[test]
 fn extra_facet_fold_is_order_independent_and_deduped() {
-    let p = js(PROSE);
-    let with = hash_search_content(&p, &[js("image-desc:deadbeef")]);
-    assert_ne!(with, hash_search_content(&p, &[]));
-    assert_ne!(with, hash_search_content(&p, &[js("image-desc:cafebabe")]));
+    let p = PROSE;
+    let with = hash_search_content(p, &["image-desc:deadbeef".to_owned()]);
+    assert_ne!(with, hash_search_content(p, &[]));
+    assert_ne!(
+        with,
+        hash_search_content(p, &["image-desc:cafebabe".to_owned()])
+    );
     assert_eq!(
-        hash_search_content(&p, &[js("image-desc:deadbeef"), js("other:1")]),
+        hash_search_content(p, &["image-desc:deadbeef".to_owned(), "other:1".to_owned()]),
         hash_search_content(
-            &p,
-            &[js("other:1"), js("image-desc:deadbeef"), js("other:1")]
+            p,
+            &[
+                "other:1".to_owned(),
+                "image-desc:deadbeef".to_owned(),
+                "other:1".to_owned()
+            ]
         )
     );
     let mut input = chunk_input();
-    input.extra_hash_facets = vec![js("image-desc:deadbeef")];
+    input.extra_hash_facets = vec!["image-desc:deadbeef".to_owned()];
     assert_eq!(build_search_chunks(&input)[0].content_hash, with);
 }

@@ -10,7 +10,6 @@ pub mod daemon;
 pub mod jobs;
 pub mod lookup;
 pub mod runner;
-pub mod search_import;
 pub mod search_query;
 pub mod server;
 pub mod signals;

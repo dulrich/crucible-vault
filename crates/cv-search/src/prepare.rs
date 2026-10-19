@@ -9,7 +9,7 @@
 //!   `image-desc:<combinedDescriptionHash(emitted)>` (`imageDescriptionStore.ts:217-227`);
 //! - **linked posts** (`resolveLinkedDocuments`, `:186-220`): `x-metadata` then `yt-metadata`
 //!   stamps, capped at 8 *before* resolution, each read, frontmatter-stripped, trimmed and capped
-//!   at 4000 code units; the facet is `linked:<path>:<hashSearchContent(text)>`.
+//!   at 4000 chars; the facet is `linked:<path>:<hashSearchContent(text)>`.
 //!
 //! Dropped (Obsidian-induced): `metadataCache` (the host supplies embeds and frontmatter stamps
 //! from `index.db`), `getFirstLinkpathDest` (the host resolves links through the index),
@@ -25,11 +25,10 @@ use serde_json::Value;
 use crate::chunker::{
     BuildChunksInput, ImageDescriptionChunkInput, LinkedDocumentChunkInput,
     MAX_LINKED_DOCUMENTS_PER_NOTE, SearchChunk, build_search_chunks, hash_search_content,
-    hash_string, strip_frontmatter_block,
+    hash_string, strip_frontmatter_block, take_chars,
 };
-use crate::js::{JsStr, js, trim};
 
-/// `LINKED_DOCUMENT_MAX_CHARS` (`filePreparation.ts:20`), in UTF-16 code units.
+/// `LINKED_DOCUMENT_MAX_CHARS` (`filePreparation.ts:20`), in chars.
 pub const LINKED_DOCUMENT_MAX_CHARS: usize = 4000;
 
 /// One embed of the note (Obsidian `metadataCache.embeds[]`): the link text and, when the vault
@@ -81,8 +80,8 @@ pub struct PrepareInput {
 pub struct PreparedFile {
     /// Note path.
     pub path: String,
-    /// Content as UTF-16.
-    pub content: JsStr,
+    /// Note content.
+    pub content: String,
     /// The folded `contentHash`.
     pub content_hash: String,
     /// Image descriptions (md5 order).
@@ -90,7 +89,7 @@ pub struct PreparedFile {
     /// Linked documents (stamp order).
     pub linked_documents: Vec<LinkedDocumentChunkInput>,
     /// Facets folded into `content_hash`.
-    pub hash_facets: Vec<JsStr>,
+    pub hash_facets: Vec<String>,
 }
 
 /// `localizedImageInfo` → `(md5, basename)`: `([a-f0-9]{32})_MD5\.([A-Za-z0-9]+)$` on the
@@ -118,19 +117,19 @@ pub fn localized_image_md5(path: &str) -> Option<(String, String)> {
 #[must_use]
 pub fn combined_description_hash(pairs: &[(String, String)]) -> String {
     let mut sorted: Vec<&(String, String)> = pairs.iter().collect();
-    sorted.sort_by_key(|a| js(&a.0));
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
     sorted.dedup_by(|a, b| a.0 == b.0);
     if sorted.is_empty() {
         return String::new();
     }
     let lines: Vec<String> = sorted.iter().map(|(m, h)| format!("{m}:{h}")).collect();
-    hash_string(&js(&lines.join("\n")))
+    hash_string(&lines.join("\n"))
 }
 
 fn resolve_images(
     host: &dyn PrepareHost,
     input: &PrepareInput,
-) -> (Vec<ImageDescriptionChunkInput>, Vec<JsStr>) {
+) -> (Vec<ImageDescriptionChunkInput>, Vec<String>) {
     let mut md5s: Vec<(String, String)> = Vec::new();
     for embed in &input.embeds {
         let link = embed.link.as_str();
@@ -150,7 +149,7 @@ fn resolve_images(
         }
         md5s.push((md5, filename));
     }
-    md5s.sort_by_key(|a| js(&a.0));
+    md5s.sort_by(|a, b| a.0.cmp(&b.0));
     let mut descriptions = Vec::new();
     let mut emitted = Vec::new();
     for (md5, filename) in md5s {
@@ -160,13 +159,13 @@ fn resolve_images(
         if record.kind == "failed" {
             continue;
         }
-        let narrative = trim(&js(&record.narrative)).to_vec();
-        let extraction = trim(&js(&record.extraction)).to_vec();
+        let narrative = record.narrative.trim().to_owned();
+        let extraction = record.extraction.trim().to_owned();
         if narrative.is_empty() && extraction.is_empty() {
             continue;
         }
         descriptions.push(ImageDescriptionChunkInput {
-            filename: js(&filename),
+            filename,
             narrative,
             extraction,
         });
@@ -175,10 +174,7 @@ fn resolve_images(
     if descriptions.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    let facet = js(&format!(
-        "image-desc:{}",
-        combined_description_hash(&emitted)
-    ));
+    let facet = format!("image-desc:{}", combined_description_hash(&emitted));
     (descriptions, vec![facet])
 }
 
@@ -216,7 +212,7 @@ pub fn linked_metadata_linkpaths(x: Option<&Value>, yt: Option<&Value>) -> Vec<S
 fn resolve_linked(
     host: &dyn PrepareHost,
     input: &PrepareInput,
-) -> (Vec<LinkedDocumentChunkInput>, Vec<JsStr>) {
+) -> (Vec<LinkedDocumentChunkInput>, Vec<String>) {
     let mut documents = Vec::new();
     let mut facets = Vec::new();
     let paths = linked_metadata_linkpaths(input.x_metadata.as_ref(), input.yt_metadata.as_ref());
@@ -224,18 +220,19 @@ fn resolve_linked(
         let Some(dest) = host.resolve_linked(linkpath, &input.path) else {
             continue;
         };
-        let raw = js(&dest.content);
-        let body = trim(strip_frontmatter_block(&raw));
-        let text = body[..body.len().min(LINKED_DOCUMENT_MAX_CHARS)].to_vec();
+        let body = strip_frontmatter_block(&dest.content).trim();
+        let text = take_chars(body, LINKED_DOCUMENT_MAX_CHARS).to_owned();
         if text.is_empty() {
             continue;
         }
-        let mut facet = js(&format!("linked:{}:", dest.path));
-        facet.extend(js(&hash_search_content(&text, &[])));
-        facets.push(facet);
+        facets.push(format!(
+            "linked:{}:{}",
+            dest.path,
+            hash_search_content(&text, &[])
+        ));
         documents.push(LinkedDocumentChunkInput {
-            path: js(&dest.path),
-            title: js(&dest.basename),
+            path: dest.path,
+            title: dest.basename,
             text,
         });
     }
@@ -245,7 +242,7 @@ fn resolve_linked(
 /// `prepareSearchFile` (`filePreparation.ts:244-269`): images then linked, in that fixed order.
 #[must_use]
 pub fn prepare_search_file(host: &dyn PrepareHost, input: &PrepareInput) -> PreparedFile {
-    let content = js(&input.content);
+    let content = input.content.clone();
     let (images, image_facets) = resolve_images(host, input);
     let (linked, linked_facets) = resolve_linked(host, input);
     let mut hash_facets = image_facets;
@@ -367,10 +364,7 @@ mod tests {
         let b = format!("{MD5_B}_MD5.png");
         let plain = prepare_search_file(&host, &input(&[&a]));
         assert!(plain.hash_facets.is_empty());
-        assert_eq!(
-            plain.content_hash,
-            hash_search_content(&js("# N\nbody"), &[])
-        );
+        assert_eq!(plain.content_hash, hash_search_content("# N\nbody", &[]));
 
         host.desc
             .insert(MD5_A.into(), desc(MD5_A, "vision", "chart", "11111111"));
@@ -396,7 +390,7 @@ mod tests {
         let names: Vec<String> = two
             .image_descriptions
             .iter()
-            .map(|d| crate::js::lossy(&d.filename))
+            .map(|d| d.filename.clone())
             .collect();
         assert_eq!(names, [a.clone(), b.clone()]);
     }
@@ -422,7 +416,7 @@ mod tests {
         // 8 stamps considered (p0..p7), the tombstoned p1 dropped.
         assert_eq!(p.linked_documents.len(), 7);
         assert_eq!(p.hash_facets.len(), 7);
-        assert!(crate::js::lossy(&p.hash_facets[0]).starts_with("linked:x/p0.md:"));
+        assert!(p.hash_facets[0].starts_with("linked:x/p0.md:"));
         assert_eq!(
             linked_metadata_linkpaths(None, Some(&Value::from("  [[a#b|c]] "))),
             ["a"]

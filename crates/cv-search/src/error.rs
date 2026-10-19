@@ -1,4 +1,4 @@
-//! Error type for the search feed and the companion import.
+//! Error type for the search feed.
 
 /// Every failure of the feed. Messages carry no note text.
 #[derive(Debug, thiserror::Error)]
