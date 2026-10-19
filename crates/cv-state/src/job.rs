@@ -218,31 +218,6 @@ pub struct NewJob {
     pub service: Option<String>,
 }
 
-/// What an auto-enqueue source may supply: params (and a lane), never a key.
-///
-/// Port of `JobSeed { params, lane? }` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/AGENTS.md:75`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobSeed {
-    /// Step parameters.
-    pub params: serde_json::Value,
-    /// Lane (defaults to background).
-    pub lane: Option<Lane>,
-}
-
-/// How a job type derives its dedupe key, resource keys and service from params.
-pub trait JobTypeSpec {
-    /// Type name.
-    fn job_type(&self) -> &str;
-    /// Dedupe key derived from params (un-namespaced).
-    fn dedupe_key(&self, params: &serde_json::Value) -> Option<String>;
-    /// I3 resource keys derived from params.
-    fn resource_keys(&self, params: &serde_json::Value) -> Vec<String>;
-    /// Gating service, if any.
-    fn service(&self) -> Option<String> {
-        None
-    }
-}
-
 /// Result of an enqueue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnqueueOutcome {
@@ -250,8 +225,6 @@ pub enum EnqueueOutcome {
     Enqueued(String),
     /// A pending/running job with the same dedupe key exists; its id.
     Duplicate(String),
-    /// Auto-seed suppressed: the key settled within the re-seed window.
-    Suppressed,
 }
 
 /// A stored job row.

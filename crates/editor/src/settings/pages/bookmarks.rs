@@ -10,7 +10,7 @@ use crate::message::Message;
 use crate::settings::ConfigFile;
 
 /// The page intro line.
-pub const INTRO: &str = "Bookmarks shown in the side panel. The panel edits the same file (and saves at once); while this page has unsaved edits the panel waits for Save or Revert here.";
+pub const INTRO: &str = "Bookmarks shown in the side panel. The panel edits the same file; both save automatically, and while this page has an edit not yet saved the panel waits for it.";
 
 /// The page.
 pub fn view<'a>(cx: PageCx<'a>, f: &'a ConfigFile) -> Element<'a, Message> {

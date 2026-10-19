@@ -1,7 +1,7 @@
 //! `cv search import --from <companion.sqlite> [--to <search.db>]` (plan semsearch-crate WP-3):
 //! the one-shot import of the retired Node companion's chunks and embeddings into the daemon's
 //! `semsearch` index (`CV_SEARCH_DB`, or `--to`). Body in [`cv_search::import`]; structure and
-//! the daemon-socket refusal follow `cv import link-records` ([`crate::import::link_records`]).
+//! the daemon-socket refusal follow the retired `cv import link-records`.
 //! Prints aggregate counts only.
 
 use std::path::{Path, PathBuf};

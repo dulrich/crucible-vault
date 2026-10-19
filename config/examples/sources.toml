@@ -1,6 +1,6 @@
 # Example `sources.toml` (plan v0-automation-pipelines, D21): the tracked-source registry, which
-# replaces Crucible's `Tracked Channels.md` / `Tracked Feeds.md` tables. Generate yours with
-# `cv import sources --from <Tracked Channels.md> --from <Tracked Feeds.md>`.
+# replaces Crucible's `Tracked Channels.md` / `Tracked Feeds.md` tables (the one-shot
+# `cv import sources` generator was retired in plan tn-review-baseline-remediation WP-R5).
 #
 # [[youtube]]: channel (name), id (UC…), tags, priority (high | normal | low | skip | ignore).
 # [[blog]]: name, link (RSS/Atom feed), method (rss; others are skipped), tags, priority,

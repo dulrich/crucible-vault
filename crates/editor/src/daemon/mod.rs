@@ -2,10 +2,11 @@
 //!
 //! [`DaemonClient`] covers the `cv-protocol` RPC surface (the daemon is the sole writer) plus the
 //! local read API: note bytes straight from disk, a [`LocalIndex`] over `index.db` reopened on
-//! `index_generation`, and a read-only [`StateReader`] over `state.db`. Two implementations:
-//! [`SocketDaemon`] (the real Unix-socket client) and [`FakeDaemon`] (directory-backed, for
-//! building editor features without the daemon's action layer).
+//! `index_generation`, and the `state.db` path. Two implementations: [`SocketDaemon`] (the real
+//! Unix-socket client) and, behind the `fake` cargo feature (and in tests), `FakeDaemon`
+//! (directory-backed, for building editor features without the daemon's action layer).
 
+#[cfg(any(test, feature = "fake"))]
 mod fake;
 mod local;
 pub mod socket;
@@ -20,21 +21,20 @@ pub use cv_protocol::{
     Notification, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
     ViewsListResult,
 };
-pub use cv_state::StateReader;
 pub use cv_vault::ContentHash;
+#[cfg(any(test, feature = "fake"))]
 pub use fake::{ActionHandler, FakeDaemon, FakeLookups};
 pub use local::LocalIndex;
 pub use socket::SocketDaemon;
 
 /// Every topic the editor listens to.
-pub const ALL_TOPICS: [Topic; 8] = [
+pub const ALL_TOPICS: [Topic; 7] = [
     Topic::FileChanged,
     Topic::IndexGeneration,
     Topic::JobUpdated,
     Topic::ConfigReloaded,
     Topic::OpenRequested,
     Topic::ShadowWrite,
-    Topic::ModeChanged,
     Topic::ViewsInvalidated,
 ];
 
@@ -77,7 +77,7 @@ pub enum DaemonError {
 pub type Result<T> = std::result::Result<T, DaemonError>;
 
 /// The editor↔daemon seam. Methods block: callers in the iced app run them off the UI thread
-/// (`app::blocking`). Implementations are shared across threads (`Arc<dyn DaemonClient>`).
+/// (`tokio::task::spawn_blocking` inside `Task::perform`). Implementations are shared across threads (`Arc<dyn DaemonClient>`).
 pub trait DaemonClient: Send + Sync {
     /// The `hello` answer captured at connect time (mode/generation as of the handshake).
     fn hello(&self) -> &HelloResult;
@@ -107,10 +107,6 @@ pub trait DaemonClient: Send + Sync {
     fn actions_list(&self) -> Result<Vec<ActionInfo>>;
     /// Runs an action.
     fn run_action(&self, params: RunActionParams) -> Result<RunActionResult>;
-    /// One job's status.
-    fn job(&self, job_id: &str) -> Result<JobStatus>;
-    /// Cancels a job.
-    fn cancel(&self, job_id: &str) -> Result<JobStatus>;
     /// Daemon status (mode, generation, queue).
     fn status(&self) -> Result<StatusResult>;
     /// View ids.
@@ -128,9 +124,6 @@ pub trait DaemonClient: Send + Sync {
     /// Hybrid search through the daemon's `semsearch` index (plan semsearch-crate WP-4); the
     /// editor never opens the index itself.
     fn search(&self, query: &str, limit: u32) -> Result<cv_protocol::SearchResult>;
-    /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake
-    /// WP-11); the refresh arrives as `views_invalidated`.
-    fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()>;
     /// Sets one `tracker_items` row's task status (`None` = open; plan round-6-feedback-todos
     /// WP-6); the refresh arrives as `views_invalidated`.
     fn tracker_item_set_status(&self, p: &cv_protocol::TrackerItemSetStatusParams) -> Result<()>;
@@ -156,11 +149,6 @@ pub trait DaemonClient: Send + Sync {
         })?;
         let hash = ContentHash::of(&bytes);
         Ok((bytes, hash))
-    }
-
-    /// Opens `state.db` read-only.
-    fn state_reader(&self) -> Result<StateReader> {
-        Ok(StateReader::open(self.state_db())?)
     }
 }
 

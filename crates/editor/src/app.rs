@@ -4392,7 +4392,6 @@ impl App {
             StatusMsg::Notification(n) => {
                 self.status.connected = true;
                 match n {
-                    Notification::ModeChanged { mode } => self.status.mode = mode,
                     Notification::IndexGeneration { n } => {
                         self.status.generation = n;
                         if let Some(d) = &self.daemon
@@ -4829,12 +4828,6 @@ impl App {
                     self.status.set_error(e);
                 }
             }
-            SettingsMsg::Save(path) => {
-                if self.shadow_blocked("settings saves are disabled in shadow mode") {
-                    return Task::none();
-                }
-                return self.save_settings_file(path);
-            }
             SettingsMsg::AutoSaveDue(path, seq) => {
                 // Coalescing: only the timer of the latest edit writes.
                 if self.settings.file(&path).is_some_and(|f| f.edit_seq == seq) {
@@ -4895,20 +4888,6 @@ impl App {
                 }
                 self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
                 return Task::batch(tasks);
-            }
-            SettingsMsg::Revert(path) => {
-                if let (Some(d), Some(f)) = (self.daemon.clone(), self.settings.file_mut(&path)) {
-                    f.load(d.as_ref());
-                    f.notice = None;
-                }
-                self.settings.form.clear_drafts(&path);
-                if path == BOOKMARKS_PATH {
-                    self.sync_bookmarks();
-                }
-                if path == EDITOR_PATH {
-                    self.settings.hidden_draft = None;
-                    self.apply_prefs();
-                }
             }
             SettingsMsg::StartOver(path) => {
                 if let Some(f) = self.settings.file_mut(&path) {

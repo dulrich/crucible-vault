@@ -609,14 +609,6 @@ impl Shared {
                 reply::<m::LookupChannels>(self.lookups.channels(&p.ids).await)
             }
             Request::Search(p) => reply::<m::Search>(self.search(&p).await),
-            Request::TrackerItemSetDone(p) => {
-                reply::<m::TrackerItemSetDone>(self.set_tracker_status(
-                    &p.source_kind,
-                    &p.source_key,
-                    &p.item_id,
-                    p.done.then_some('x'),
-                ))
-            }
             Request::TrackerItemSetStatus(p) => reply::<m::TrackerItemSetStatus>(
                 self.set_tracker_status(&p.source_kind, &p.source_key, &p.item_id, p.status),
             ),
@@ -798,7 +790,7 @@ impl Shared {
             .map_err(internal)
     }
 
-    /// `tracker_item_set_status` (and its legacy `tracker_item_set_done` alias).
+    /// `tracker_item_set_status`.
     fn set_tracker_status(
         &self,
         source_kind: &str,

@@ -4,7 +4,7 @@
 //! [`theme::icon_button`], help and errors as stable lines under the control.
 //!
 //! Every control emits [`SettingsMsg::Edit`] (a [`DocEdit`] on the file) or
-//! [`SettingsMsg::Form`] (UI state / typed input); nothing is written until Save.
+//! [`SettingsMsg::Form`] (UI state / typed input); a valid edit is auto-saved after a short debounce.
 
 use iced::widget::{Space, button, column, container, pick_list, row, text, text_input, toggler};
 use iced::{Alignment, Element, Font, Length};

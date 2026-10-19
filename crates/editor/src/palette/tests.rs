@@ -183,7 +183,8 @@ fn bindings_report_conflicts() {
         action("one", vec![], &["Ctrl+Shift+K", "Ctrl+S", "Nope+Q"]),
         action("two", vec![], &["ctrl+shift+k", "Alt+J"]),
     ];
-    let (map, notes) = bindings(&acts);
+    let km = resolve(&std::collections::BTreeMap::new(), &acts);
+    let (map, notes) = (km.actions(), km.notices);
     // Plan editor-feedback-round-2 WP-1: a chord claimed by two actions is bound to neither.
     assert_eq!(map.get(&chord::parse("Ctrl+Shift+K").expect("p")), None);
     assert_eq!(
@@ -425,9 +426,7 @@ fn save_conflict_aborts_the_run() {
 fn shadow_skips_save_first() {
     let mut e = env();
     type_z(&mut e.app);
-    let _ = e.app.send(Message::Status(StatusMsg::Notification(
-        Notification::ModeChanged { mode: Mode::Shadow },
-    )));
+    e.app.status.mode = Mode::Shadow;
     pal(
         &mut e.app,
         PaletteMsg::Key(chord::parse("Alt+J").expect("p")),

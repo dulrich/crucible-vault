@@ -952,44 +952,6 @@ fn prop_url(t: &str) -> Option<(String, String)> {
         .then(|| (url.to_owned(), label.to_owned()))
 }
 
-/// plan usability-sprint-captures-links WP-4: the toggle of top-level frontmatter boolean
-/// `key` in `source`: `(line, byte-column range of the scalar within that line, negation)`.
-/// Only an unquoted `true`/`false` scalar (surrounding spaces and a trailing `# comment`
-/// allowed) qualifies; quoted, nested, missing or frontmatter-less → `None`.
-pub fn frontmatter_bool_toggle(
-    source: &str,
-    key: &str,
-) -> Option<(usize, std::ops::Range<usize>, &'static str)> {
-    let mut lines = source.split('\n');
-    if lines.next()?.trim_end_matches('\r') != "---" {
-        return None;
-    }
-    for (i, raw) in lines.enumerate() {
-        let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if line == "---" || line == "..." {
-            return None;
-        }
-        let Some(val) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) else {
-            continue;
-        };
-        let lead = val.len() - val.trim_start_matches([' ', '\t']).len();
-        let start = key.len() + 1 + lead;
-        let rest = &line[start..];
-        let word = rest.find([' ', '\t']).unwrap_or(rest.len());
-        let tail = rest[word..].trim();
-        if !(tail.is_empty() || tail.starts_with('#')) {
-            return None;
-        }
-        let next = match &rest[..word] {
-            "true" => "false",
-            "false" => "true",
-            _ => return None,
-        };
-        return Some((i + 1, start..start + word, next));
-    }
-    None
-}
-
 /// Plan round-8-intake-views-anchor WP-3: the edit that sets top-level frontmatter boolean
 /// `key` in `source` to `to` (`None` = toggle: `true` ↔ `false`, null/missing → `true`), as
 /// `(line, byte-column range within that line, replacement)` — the replacement may span new

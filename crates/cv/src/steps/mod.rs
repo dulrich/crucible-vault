@@ -56,7 +56,7 @@ pub mod youtube;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{Action, ConfigSet, Step, StepKind};
+use cv_actions::{Action, ConfigSet, Step};
 use cv_protocol::ActionContext;
 use cv_state::{FailureReason, ServiceFailureKind, StateDb};
 use cv_vault::{ContentHash, VaultError, WriterHandle};
@@ -196,11 +196,6 @@ impl StepError {
             reason: None,
         }
     }
-
-    /// The stub error of an unimplemented module.
-    pub fn not_implemented(kind: StepKind, wp: &str) -> Self {
-        Self::failed(format!("step {} not implemented ({wp})", kind.as_str()))
-    }
 }
 
 impl std::fmt::Display for StepError {
@@ -335,7 +330,8 @@ impl StepCtx<'_> {
     }
 }
 
-/// Rejects any param key (A2 stubs accept none until their WP defines them; I5 disarm).
+/// Rejects any param key: for steps that take no params (`daily_brief`, `tracker_blogs`); a
+/// stray key disarms the action at config load (I5).
 pub(crate) fn reject_params(step: &Step) -> Result<(), String> {
     match step.table().and_then(|t| t.keys().next()) {
         Some(k) => Err(format!("{} step: unknown key {k:?}", step.kind().as_str())),

@@ -89,8 +89,7 @@ struct Inner {
     /// terminal `JobUpdated` on [`FakeDaemon::complete_deferred`]), and the queued runs.
     deferred_ids: std::collections::BTreeSet<String>,
     queued: Vec<(String, RunActionParams)>,
-    /// Round-5 WP-11: every `tracker_item_set_done` call, and a scripted failure message.
-    done_calls: Vec<cv_protocol::TrackerItemSetDoneParams>,
+    /// A scripted `tracker_item_set_status` failure message.
     done_fail: Option<String>,
     /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call (fails with
     /// `done_fail` too).
@@ -122,6 +121,15 @@ impl std::fmt::Debug for FakeDaemon {
 }
 
 impl FakeDaemon {
+    /// One job's status (the fake's job table; tests only).
+    pub fn job(&self, job_id: &str) -> Result<JobStatus> {
+        self.lock()?
+            .jobs
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound(job_id.to_owned()))
+    }
+
     /// Serves `vault_root`, keeping `index.db`/`state.db` under `data_dir` (never in the vault).
     /// Starts in `live` mode so editing paths are exercisable.
     pub fn open(vault_root: &Path, data_dir: &Path) -> Result<Self> {
@@ -157,7 +165,6 @@ impl FakeDaemon {
                 view_calls: Vec::new(),
                 deferred_ids: std::collections::BTreeSet::new(),
                 queued: Vec::new(),
-                done_calls: Vec::new(),
                 status_calls: Vec::new(),
                 bool_calls: Vec::new(),
                 done_fail: None,
@@ -218,14 +225,6 @@ impl FakeDaemon {
         Ok(done)
     }
 
-    /// Switches the reported mode and emits `mode_changed`.
-    pub fn set_mode(&self, mode: Mode) -> Result<()> {
-        let mut g = self.lock()?;
-        g.mode = mode;
-        emit(&mut g, Notification::ModeChanged { mode });
-        Ok(())
-    }
-
     /// Emits an arbitrary notification (tests of the UI's reaction).
     pub fn emit(&self, n: Notification) -> Result<()> {
         let mut g = self.lock()?;
@@ -242,11 +241,6 @@ impl FakeDaemon {
     /// WP-7: every `view_run` call so far, `(view_id, this_path)` in order.
     pub fn view_calls(&self) -> Result<Vec<(String, Option<String>)>> {
         Ok(self.lock()?.view_calls.clone())
-    }
-
-    /// Round-5 WP-11: every `tracker_item_set_done` call so far, in order.
-    pub fn done_calls(&self) -> Result<Vec<cv_protocol::TrackerItemSetDoneParams>> {
-        Ok(self.lock()?.done_calls.clone())
     }
 
     /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call so far, in order.
@@ -276,7 +270,7 @@ impl FakeDaemon {
         Ok(self.lock()?.search_calls.clone())
     }
 
-    /// Round-5 WP-11: makes `tracker_item_set_done` (and `tracker_item_set_status`) fail with `msg` (`None` = succeed).
+    /// Round-5 WP-11: makes `tracker_item_set_status` fail with `msg` (`None` = succeed).
     pub fn set_done_failure(&self, msg: Option<&str>) -> Result<()> {
         self.lock()?.done_fail = msg.map(str::to_owned);
         Ok(())
@@ -581,26 +575,6 @@ impl DaemonClient for FakeDaemon {
         Ok(RunActionResult { job_id, open_path })
     }
 
-    fn job(&self, job_id: &str) -> Result<JobStatus> {
-        self.lock()?
-            .jobs
-            .get(job_id)
-            .cloned()
-            .ok_or_else(|| DaemonError::NotFound(job_id.to_owned()))
-    }
-
-    fn cancel(&self, job_id: &str) -> Result<JobStatus> {
-        let mut g = self.lock()?;
-        let job = g
-            .jobs
-            .get_mut(job_id)
-            .ok_or_else(|| DaemonError::NotFound(job_id.to_owned()))?;
-        if matches!(job.status, JobState::Pending | JobState::Running) {
-            job.status = JobState::Cancelled;
-        }
-        Ok(job.clone())
-    }
-
     fn status(&self) -> Result<StatusResult> {
         let g = self.lock()?;
         Ok(StatusResult {
@@ -661,19 +635,6 @@ impl DaemonClient for FakeDaemon {
             return Err(DaemonError::Disconnected);
         }
         Ok(g.search.clone())
-    }
-
-    fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()> {
-        let mut g = self.lock()?;
-        g.done_calls.push(p.clone());
-        match &g.done_fail {
-            Some(msg) => Err(DaemonError::Rpc(cv_protocol::RpcError {
-                code: cv_protocol::error_codes::NOT_FOUND,
-                message: msg.clone(),
-                data: None,
-            })),
-            None => Ok(()),
-        }
     }
 
     fn tracker_item_set_status(&self, p: &cv_protocol::TrackerItemSetStatusParams) -> Result<()> {

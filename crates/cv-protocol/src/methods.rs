@@ -80,7 +80,6 @@ methods! {
     LookupModels = "lookup_models" (LookupModelsParams) -> LookupModelsResult;
     LookupChannels = "lookup_channels" (LookupChannelsParams) -> Vec<LookupChannel>;
     Search = "search" (SearchParams) -> SearchResult;
-    TrackerItemSetDone = "tracker_item_set_done" (TrackerItemSetDoneParams) -> ();
     TrackerItemSetStatus = "tracker_item_set_status" (TrackerItemSetStatusParams) -> ();
     NoteSetBool = "note_set_bool" (NoteSetBoolParams) -> NoteSetBoolResult;
 }

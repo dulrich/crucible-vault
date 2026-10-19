@@ -724,7 +724,7 @@ fn form_edit_round_trip_keeps_comment_and_unknown_key_in_saved_text() {
             picker: None,
         },
     )));
-    let _ = app.send(s(SettingsMsg::Save(ACTIONS.into())));
+    let _ = app.send(s(app.settings.due_now(ACTIONS)));
     let text = String::from_utf8(d.read_file(ACTIONS).expect("r").0).expect("utf8");
     assert!(text.contains("# my actions"), "{text}");
     assert!(text.contains("mystery = 7 # unknown, kept"), "{text}");
@@ -836,7 +836,7 @@ fn new_view_file_saves_at_the_exact_name() {
             ],
         ),
     )));
-    let _ = app.send(s(SettingsMsg::Save(path.into())));
+    let _ = app.send(s(app.settings.due_now(path)));
     let text = String::from_utf8(d.read_file(path).expect("saved").0).expect("utf8");
     assert!(text.contains("name = \"All\""), "{text}");
     assert!(
@@ -880,7 +880,7 @@ fn bookmarks_page_and_panel_share_one_hash() {
             .error_text()
             .is_some_and(|e| e.contains("unsaved"))
     );
-    let _ = app.send(s(SettingsMsg::Save(BOOKMARKS_PATH.into())));
+    let _ = app.send(s(app.settings.due_now(BOOKMARKS_PATH)));
     assert!(
         app.settings
             .file(BOOKMARKS_PATH)

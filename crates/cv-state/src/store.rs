@@ -18,10 +18,7 @@ use crate::error::{Result, StateError};
 use crate::health::{self, BreakerState, ServiceFailureKind, ServiceHealth};
 use crate::id::new_job_id;
 use crate::image_descriptions::ImageDescription;
-use crate::job::{
-    EnqueueOutcome, FailureKind, Job, JobResult, JobSeed, JobStatus, JobTypeSpec, Lane, NewJob,
-    namespaced_key,
-};
+use crate::job::{EnqueueOutcome, FailureKind, Job, JobResult, JobStatus, NewJob, namespaced_key};
 use crate::migrate;
 use crate::query::{self, ListQuery, ShadowWrite, StatusCount};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -31,26 +28,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Default terminal retention: 30 days.
 pub const DEFAULT_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
-/// Default settled re-seed suppression window (Crucible `terminalRetentionMs` default, 60 s).
-pub const DEFAULT_RESEED_WINDOW_MS: i64 = 60_000;
 /// Default lease timeout for same-token (live) leases.
 pub const DEFAULT_STALE_LEASE_MS: i64 = 30 * 60_000;
 
 /// Queue tuning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueConfig {
-    /// Auto-seed suppression window after a key settles.
-    pub reseed_window_ms: i64,
     /// Terminal-row retention for [`StateDb::prune_terminal`]; `<= 0` keeps forever.
     pub retention_ms: i64,
-    /// Lease timeout for [`StateDb::recover_stale_leases`].
+    /// Lease timeout for [`StateDb::recover_stale_leases_except`].
     pub stale_lease_ms: i64,
 }
 
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            reseed_window_ms: DEFAULT_RESEED_WINDOW_MS,
             retention_ms: DEFAULT_RETENTION_MS,
             stale_lease_ms: DEFAULT_STALE_LEASE_MS,
         }
@@ -177,34 +169,18 @@ impl StateDb {
 
     // ---- enqueue / dedupe -------------------------------------------------
 
-    /// Enqueue an explicit job. Dedupes against queued+running rows with the same key.
-    /// Explicit (user) enqueues are never re-seed-suppressed.
+    /// Enqueue a job. Dedupes against queued+running rows with the same key.
     pub fn enqueue(&mut self, job: NewJob, now_ms: i64) -> Result<EnqueueOutcome> {
-        self.enqueue_inner(job, now_ms, false)
-    }
-
-    /// Auto-source enqueue: the key is derived by the type's own spec, never supplied by the
-    /// source, and a key settled within `reseed_window_ms` is suppressed
-    /// (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/AGENTS.md:75`).
-    pub fn enqueue_seed(
-        &mut self,
-        spec: &dyn JobTypeSpec,
-        seed: JobSeed,
-        now_ms: i64,
-    ) -> Result<EnqueueOutcome> {
-        let job = NewJob {
-            job_type: spec.job_type().to_owned(),
-            lane: seed.lane.unwrap_or(Lane::Background),
-            dedupe_key: spec.dedupe_key(&seed.params),
-            resource_keys: spec.resource_keys(&seed.params),
-            service: spec.service(),
-            params: seed.params,
-        };
-        self.enqueue_inner(job, now_ms, true)
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let out = Self::enqueue_tx(&tx, job, now_ms)?;
+        tx.commit()?;
+        Ok(out)
     }
 
     /// A scheduled run: enqueues `job` and records `action_id`'s schedule run at `now_ms` in one
-    /// transaction, so a crash leaves both rows or neither (a duplicate or suppressed enqueue
+    /// transaction, so a crash leaves both rows or neither (a duplicate enqueue
     /// still records the run). On error nothing is written.
     pub fn enqueue_scheduled(
         &mut self,
@@ -215,49 +191,22 @@ impl StateDb {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let out = Self::enqueue_tx(&tx, self.config.reseed_window_ms, job, now_ms, false)?;
+        let out = Self::enqueue_tx(&tx, job, now_ms)?;
         crate::runner_state::record_schedule_run(&tx, action_id, now_ms)?;
-        tx.commit()?;
-        Ok(out)
-    }
-
-    fn enqueue_inner(
-        &mut self,
-        job: NewJob,
-        now_ms: i64,
-        suppress: bool,
-    ) -> Result<EnqueueOutcome> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let out = Self::enqueue_tx(&tx, self.config.reseed_window_ms, job, now_ms, suppress)?;
         tx.commit()?;
         Ok(out)
     }
 
     fn enqueue_tx(
         tx: &rusqlite::Transaction<'_>,
-        reseed_window_ms: i64,
         job: NewJob,
         now_ms: i64,
-        suppress: bool,
     ) -> Result<EnqueueOutcome> {
         let key = namespaced_key(&job.job_type, job.dedupe_key.as_deref());
-        if let Some(k) = &key {
-            if let Some(existing) = query::find_pending(tx, k)? {
-                return Ok(EnqueueOutcome::Duplicate(existing));
-            }
-            if suppress {
-                let cutoff = now_ms - reseed_window_ms;
-                let settled: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM jobs WHERE dedupe_key = ?1 AND settled_at_ms IS NOT NULL AND settled_at_ms >= ?2",
-                    params![k, cutoff],
-                    |r| r.get(0),
-                )?;
-                if settled > 0 {
-                    return Ok(EnqueueOutcome::Suppressed);
-                }
-            }
+        if let Some(k) = &key
+            && let Some(existing) = query::find_pending(tx, k)?
+        {
+            return Ok(EnqueueOutcome::Duplicate(existing));
         }
         let id = new_job_id(now_ms);
         tx.execute(
@@ -275,14 +224,6 @@ impl StateDb {
             ],
         )?;
         Ok(EnqueueOutcome::Enqueued(id))
-    }
-
-    /// Exact dedupe probe: is a job with `"<job_type>::<key>"` queued or running?
-    pub fn has_pending(&self, job_type: &str, key: &str) -> Result<bool> {
-        match namespaced_key(job_type, Some(key)) {
-            Some(k) => Ok(query::find_pending(&self.conn, &k)?.is_some()),
-            None => Ok(false),
-        }
     }
 
     // ---- claim --------------------------------------------------------------
@@ -563,45 +504,7 @@ impl StateDb {
         Ok(RetryOutcome::Retried)
     }
 
-    /// Bulk-cancel every queued row in one statement; returns the count.
-    pub fn clear_queued(&mut self, now_ms: i64) -> Result<usize> {
-        Ok(self.conn.execute(
-            "UPDATE jobs SET status = 'cancelled', settled_at_ms = ?1, defer_until_ms = NULL,
-               notes = CASE WHEN notes IS NULL OR notes = '' THEN 'cleared' ELSE notes || char(10) || 'cleared' END
-             WHERE status = 'queued'",
-            params![now_ms],
-        )?)
-    }
-
-    /// Change a queued job's lane.
-    pub fn promote(&mut self, id: &str, lane: Lane) -> Result<bool> {
-        Ok(self.conn.execute(
-            "UPDATE jobs SET lane = ?2 WHERE id = ?1 AND status = 'queued'",
-            params![id, lane.rank()],
-        )? > 0)
-    }
-
-    /// Append run notes (newline-joined).
-    pub fn append_notes(&mut self, id: &str, text: &str) -> Result<()> {
-        let n = self.conn.execute(
-            "UPDATE jobs SET notes = CASE WHEN notes IS NULL OR notes = '' THEN ?2 ELSE notes || char(10) || ?2 END WHERE id = ?1",
-            params![id, text],
-        )?;
-        if n == 0 {
-            return Err(StateError::NoSuchJob(id.to_owned()));
-        }
-        Ok(())
-    }
-
     // ---- recovery / retention -----------------------------------------------
-
-    /// Requeue every running job leased by `token`, regardless of age (a dead process's token).
-    pub fn recover_own_leases(&mut self, token: &str) -> Result<usize> {
-        Ok(self.conn.execute(
-            "UPDATE jobs SET status = 'queued', claim_token = NULL, claimed_at_ms = NULL WHERE status = 'running' AND claim_token = ?1",
-            params![token],
-        )?)
-    }
 
     /// Requeue every running job leased by any token other than this handle's — at daemon
     /// start, every other token is dead (single writer).
@@ -612,16 +515,7 @@ impl StateDb {
         )?)
     }
 
-    /// Timeout recovery: requeue running jobs whose lease is older than `stale_lease_ms`.
-    pub fn recover_stale_leases(&mut self, now_ms: i64) -> Result<usize> {
-        let cutoff = now_ms - self.config.stale_lease_ms;
-        Ok(self.conn.execute(
-            "UPDATE jobs SET status = 'queued', claim_token = NULL, claimed_at_ms = NULL WHERE status = 'running' AND claimed_at_ms < ?1",
-            params![cutoff],
-        )?)
-    }
-
-    /// Like [`Self::recover_stale_leases`], but never requeues a row whose id is in `live`
+    /// Timeout recovery: requeues running jobs whose lease is older than `stale_lease_ms`, but never requeues a row whose id is in `live`
     /// (a job this process is still executing is long-running, not stale).
     pub fn recover_stale_leases_except(
         &mut self,
@@ -924,7 +818,6 @@ mod wp11_tests {
     fn enq(s: &mut StateDb, key: &str, now: i64) -> String {
         match s.enqueue(new_job(key), now).unwrap() {
             EnqueueOutcome::Enqueued(id) | EnqueueOutcome::Duplicate(id) => id,
-            EnqueueOutcome::Suppressed => panic!("suppressed"),
         }
     }
 

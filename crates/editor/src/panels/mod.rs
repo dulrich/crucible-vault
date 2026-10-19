@@ -631,7 +631,7 @@ pub(crate) fn anchor_target(path: &str, line: usize) -> Target {
 
 /// The panels column.
 /// Plan round-6-feedback-todos WP-6: the click message of a sidebar boolean property — the same
-/// `ToggleProp` Reading's frontmatter checkbox sends (`frontmatter_bool_toggle` on the buffer).
+/// `ToggleProp` Reading's frontmatter checkbox sends (`frontmatter_bool_set(.., None)` on the buffer).
 pub(crate) fn check_press(src: &str, key: &str) -> Message {
     Message::Reading(crate::message::ReadingMsg::ToggleProp {
         path: src.to_owned(),

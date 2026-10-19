@@ -459,44 +459,43 @@ fn place_keeping_maps_lines_to_blocks_and_back() {
 
 // ---- plan usability-sprint-captures-links WP-4: interactive frontmatter ----
 
-fn apply_bool_toggle(src: &str, key: &str) -> Option<String> {
-    let (line, cols, with) = frontmatter_bool_toggle(src, key)?;
-    let start: usize = src.split_inclusive('\n').take(line).map(str::len).sum();
-    let mut out = src.to_owned();
-    out.replace_range(start + cols.start..start + cols.end, with);
-    Some(out)
-}
-
 #[test]
 fn bool_toggle_rewrites_only_the_scalar() {
     let src = "---\ntitle: x\nread: false\nn: 1\n---\nbody read: false\n";
     assert_eq!(
-        apply_bool_toggle(src, "read").as_deref(),
+        apply_bool_set(src, "read", None).as_deref(),
         Some("---\ntitle: x\nread: true\nn: 1\n---\nbody read: false\n")
     );
     let src = "---\nread:   true   # done?\n---\n";
     assert_eq!(
-        apply_bool_toggle(src, "read").as_deref(),
+        apply_bool_set(src, "read", None).as_deref(),
         Some("---\nread:   false   # done?\n---\n")
     );
 }
 
 #[test]
 fn bool_toggle_refuses_non_boolean_shapes() {
-    assert!(frontmatter_bool_toggle("---\nread: \"true\"\n---\n", "read").is_none());
-    assert!(frontmatter_bool_toggle("---\nm:\n  read: true\n---\n", "read").is_none());
-    assert!(frontmatter_bool_toggle("---\nother: true\n---\n", "read").is_none());
-    assert!(frontmatter_bool_toggle("---\nreadx: true\n---\n", "read").is_none());
-    assert!(frontmatter_bool_toggle("read: true\n", "read").is_none());
-    assert!(frontmatter_bool_toggle("---\n---\nread: true\n", "read").is_none());
-    assert!(frontmatter_bool_toggle("---\nread: true yes\n---\n", "read").is_none());
+    // Ported from the retired `frontmatter_bool_toggle` (WP-R5): non-boolean scalars are
+    // refused; a nested or prefix-matching key is not `read`, so the setter upserts a new
+    // top-level key instead of touching it.
+    assert!(frontmatter_bool_set("---\nread: \"true\"\n---\n", "read", None).is_none());
+    assert!(frontmatter_bool_set("---\nread: true yes\n---\n", "read", None).is_none());
+    for src in [
+        "---\nm:\n  read: true\n---\n",
+        "---\nother: true\n---\n",
+        "---\nreadx: true\n---\n",
+    ] {
+        let out = apply_bool_set(src, "read", None).expect("upsert");
+        assert!(out.starts_with(&src[..src.len() - 4]), "{out:?}");
+        assert!(out.ends_with("read: true\n---\n"), "{out:?}");
+    }
 }
 
 #[test]
 fn bool_toggle_handles_crlf() {
     let src = "---\r\na: 1\r\nread: true\r\n---\r\n";
     assert_eq!(
-        apply_bool_toggle(src, "read").as_deref(),
+        apply_bool_set(src, "read", None).as_deref(),
         Some("---\r\na: 1\r\nread: false\r\n---\r\n")
     );
 }

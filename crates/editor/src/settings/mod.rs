@@ -575,6 +575,15 @@ impl Settings {
         self.files.get(path)
     }
 
+    /// Tests: the auto-save message for `path`'s latest edit, i.e. what its debounce timer
+    /// would deliver now.
+    #[cfg(test)]
+    pub(crate) fn due_now(&self, path: impl AsRef<str>) -> SettingsMsg {
+        let path = path.as_ref();
+        let seq = self.file(path).map_or(0, |f| f.edit_seq);
+        SettingsMsg::AutoSaveDue(path.to_owned(), seq)
+    }
+
     /// A file page's loop, mutably.
     pub fn file_mut(&mut self, path: &str) -> Option<&mut ConfigFile> {
         self.files.get_mut(path)
@@ -1229,12 +1238,9 @@ pub enum SettingsMsg {
     NewViewName(String),
     /// Views page: create the named file (absent until saved).
     NewViewCreate,
-    /// Write `path` now (a due auto-save or a flush); queued behind an in-flight write.
-    Save(String),
-    /// An auto-save debounce timer fired for `(path, edit_seq)`; stale sequences are ignored.
+    /// An auto-save debounce timer fired for `(path, edit_seq)`: writes `path` (queued behind
+    /// an in-flight write); stale sequences are ignored.
     AutoSaveDue(String, u64),
-    /// Reload from disk, dropping edits.
-    Revert(String),
     /// A malformed file: start from an empty doc.
     StartOver(String),
     /// A save finished.

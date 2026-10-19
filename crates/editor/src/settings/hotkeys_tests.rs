@@ -150,16 +150,29 @@ fn no_overrides_is_todays_keymap() {
             assert!(km.get(&ch).is_none(), "{k} stays with the text editor");
             continue;
         }
-        let want_client = crate::palette::client_chord(&ch).map(Bound::Client);
-        let want_preset = crate::palette::default_action(&ch).map(Bound::Preset);
-        let got = km.get(&ch).cloned();
-        if k == "Ctrl+E" {
-            assert_eq!(got, Some(Bound::Client(ClientCmd::CycleReading)));
-        } else {
-            assert_eq!(got, want_client.or(want_preset), "{k}");
-        }
-        assert_eq!(km.routed(&ch), crate::palette::routed(&ch) || k == "Ctrl+E");
+        assert!(
+            matches!(km.get(&ch), Some(Bound::Client(_) | Bound::Preset(_))),
+            "{k}"
+        );
+        assert!(km.routed(&ch), "{k}");
     }
+    let client = |k: &str| km.get(&c(k)).cloned();
+    assert_eq!(
+        client("Ctrl+E"),
+        Some(Bound::Client(ClientCmd::CycleReading))
+    );
+    assert_eq!(
+        client("Ctrl+P"),
+        Some(Bound::Client(ClientCmd::QuickSwitcher))
+    );
+    assert_eq!(
+        client("Ctrl+,"),
+        Some(Bound::Client(ClientCmd::OpenSettings))
+    );
+    assert_eq!(client("Alt+3"), Some(Bound::Client(ClientCmd::GoToTab(3))));
+    assert_eq!(client("Alt+9"), None);
+    assert!(matches!(client("Ctrl+O"), Some(Bound::Preset(p)) if p.action == "period.open"));
+    assert!(matches!(client("Ctrl+R"), Some(Bound::Preset(p)) if p.action == "lint-note"));
     assert!(km.notices.is_empty(), "{:?}", km.notices);
 }
 
@@ -453,7 +466,7 @@ fn record_captures_the_next_chord_into_editor_toml_without_writing() {
         (vec!["Alt+K".into()], KeySource::EditorToml)
     );
     // Save writes it through the exact-name path.
-    let _ = app.send(Message::Settings(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(Message::Settings(app.settings.due_now(EDITOR_PATH)));
     let body = std::fs::read_to_string(d.vault_root().join(EDITOR_PATH)).expect("saved");
     assert!(body.contains("quit = [\"Alt+K\"]"), "{body}");
 }
@@ -528,7 +541,7 @@ fn binding_an_action_key_keeps_every_action_row() {
     assert_eq!(action_rows(&app), 2);
     hk(&mut app, HotkeyMsg::Record(Target::Action("a".into())));
     key(&mut app, "Alt+J");
-    let _ = app.send(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
+    let _ = app.send(Message::Settings(app.settings.due_now(ACTIONS_PATH)));
     let _ = app.send(Message::Status(crate::message::StatusMsg::Notification(
         cv_protocol::Notification::ConfigReloaded { errors: vec![] },
     )));
@@ -613,7 +626,7 @@ fn config_action_chords_edit_actions_toml() {
         (r.chords.clone(), r.source),
         (vec!["Ctrl+J".into()], KeySource::ActionsToml)
     );
-    let _ = app.send(Message::Settings(SettingsMsg::Save(ACTIONS_PATH.into())));
+    let _ = app.send(Message::Settings(app.settings.due_now(ACTIONS_PATH)));
     let body = std::fs::read_to_string(d.vault_root().join(ACTIONS_PATH)).expect("file");
     assert!(
         body.contains("# my actions") && body.contains("\"Ctrl+J\""),

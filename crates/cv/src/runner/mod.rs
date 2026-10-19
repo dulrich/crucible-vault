@@ -480,9 +480,6 @@ impl Inner {
                 id
             }
             EnqueueOutcome::Duplicate(id) => id,
-            EnqueueOutcome::Suppressed => {
-                return Err(EnqueueError::State("enqueue suppressed".into()));
-            }
         };
         self.wake.notify_one();
         Ok(id)
@@ -506,13 +503,10 @@ impl Inner {
     }
 
     fn recover(&self) {
-        let mut db = lock(&self.state);
-        let now = self.clock.now_ms();
-        let token = db.claim_token().to_owned();
-        let own = db.recover_own_leases(&token);
-        let foreign = db.recover_foreign_leases();
-        let stale = db.recover_stale_leases(now);
-        tracing::info!(?own, ?foreign, ?stale, "runner recovered leases");
+        // At startup every other token is dead (single writer); this handle holds no lease yet,
+        // so foreign recovery covers every running row. The periodic pass handles stale leases.
+        let foreign = lock(&self.state).recover_foreign_leases();
+        tracing::info!(?foreign, "runner recovered leases");
     }
 
     /// Breaker feeding + bounded transient retry (plan WP-2), run after the steps. Pure: returns

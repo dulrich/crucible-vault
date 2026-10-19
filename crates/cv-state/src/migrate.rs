@@ -91,7 +91,7 @@ CREATE TABLE image_descriptions (
     raw               TEXT NOT NULL
 );
 ",
-    // v4 (plan cut-over-now WP-1): the single-row cut-over marker; only `cv cutover mark` writes it.
+    // v4 (plan cut-over-now WP-1): the single-row cut-over marker (its writer, `cv cutover mark`, was retired in WP-R5).
     r"
 CREATE TABLE cutover_marker (
     id             INTEGER PRIMARY KEY CHECK (id = 1),

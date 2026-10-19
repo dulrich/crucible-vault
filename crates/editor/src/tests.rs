@@ -122,7 +122,7 @@ fn fake_create_rename_delete() {
         Err(DaemonError::NotFound(_))
     ));
     assert!(
-        d.state_reader()
+        cv_state::StateReader::open(d.state_db())
             .expect("state")
             .counts()
             .expect("counts")
@@ -227,7 +227,7 @@ fn serve(sock: &Path, index_schema: u32) {
             // A notification interleaved before the response must not confuse the demux.
             if result.get("topics").is_some() {
                 writeln!(w, "{}", json!({"jsonrpc":"2.0","id":id,"result":result})).expect("write");
-                let n = RpcNotification::new(Notification::ModeChanged { mode: Mode::Live });
+                let n = RpcNotification::new(Notification::IndexGeneration { n: 8 });
                 writeln!(w, "{}", serde_json::to_string(&n).expect("n")).expect("write");
                 continue;
             }
@@ -247,7 +247,7 @@ fn socket_handshake_status_and_notification() {
     let rx = d.subscribe(&ALL_TOPICS).expect("subscribe");
     assert_eq!(
         rx.recv_timeout(WAIT).expect("notification"),
-        Notification::ModeChanged { mode: Mode::Live }
+        Notification::IndexGeneration { n: 8 }
     );
     assert_eq!(d.status().expect("status").generation, 7);
     match d.write_note("a.md", "x", &ContentHash::from_hex("h")) {
@@ -296,9 +296,7 @@ fn app_open_file_adds_tab_and_status_updates() {
     assert_eq!(app.open_paths().len(), 1);
     assert_eq!(app.status.error_text(), Some("file not found"));
 
-    let _ = app.send(Message::Status(StatusMsg::Notification(
-        Notification::ModeChanged { mode: Mode::Shadow },
-    )));
+    app.status.mode = Mode::Shadow;
     assert_eq!(app.status.mode, Mode::Shadow);
     let base = d.read_file(&p).expect("read").1;
     d.write_note(&p, "changed\n", &base).expect("write");
@@ -368,9 +366,7 @@ mod wp4 {
     }
 
     fn shadow(app: &mut App) {
-        let _ = app.send(Message::Status(StatusMsg::Notification(
-            Notification::ModeChanged { mode: Mode::Shadow },
-        )));
+        app.status.mode = Mode::Shadow;
     }
 
     fn row_paths(app: &App) -> Vec<String> {
@@ -1576,25 +1572,31 @@ mod usability_wp4 {
         }
         // plan editor-settings-tab WP-2: Ctrl+, left RESERVED for the Open settings command.
         assert!(!chord::reserved(&c("Ctrl+,")));
+        let km = crate::palette::Keymap::default();
+        let client = |k: &str| km.get(&c(k)).cloned();
+        use crate::palette::{Bound, ClientCmd};
         assert_eq!(
-            crate::palette::client_chord(&c("Ctrl+,")),
-            Some(crate::palette::ClientCmd::OpenSettings)
+            client("Ctrl+,"),
+            Some(Bound::Client(ClientCmd::OpenSettings))
         );
         assert_eq!(
-            crate::palette::client_chord(&c("Ctrl+P")),
-            Some(crate::palette::ClientCmd::QuickSwitcher)
+            client("Ctrl+P"),
+            Some(Bound::Client(ClientCmd::QuickSwitcher))
         );
         assert_eq!(
-            crate::palette::client_chord(&c("Ctrl+Shift+P")),
-            Some(crate::palette::ClientCmd::CommandPaletteKey)
+            client("Ctrl+Shift+P"),
+            Some(Bound::Client(ClientCmd::CommandPaletteKey))
         );
-        assert_eq!(crate::palette::client_chord(&c("Alt+9")), None);
+        assert_eq!(client("Alt+9"), None);
     }
 
     #[test]
     fn actions_toml_key_colliding_with_a_client_default_is_refused() {
-        let (map, notes) =
-            crate::palette::bindings(&[info("a", &["ctrl+w"]), info("b", &["ctrl+alt+l"])]);
+        let km = crate::palette::resolve(
+            &std::collections::BTreeMap::new(),
+            &[info("a", &["ctrl+w"]), info("b", &["ctrl+alt+l"])],
+        );
+        let (map, notes) = (km.actions(), km.notices);
         assert!(!map.contains_key(&c("Ctrl+W")));
         assert_eq!(map.get(&c("Ctrl+Alt+L")).map(String::as_str), Some("b"));
         // Plan editor-feedback-round-2 WP-1: the collision binds neither claimant.
@@ -1884,9 +1886,7 @@ mod round2_wp3 {
         assert!(!t.is_saving(), "a conflicted buffer is never auto-saved");
         assert!(t.is_dirty());
 
-        let _ = app.send(Message::Status(StatusMsg::Notification(
-            Notification::ModeChanged { mode: Mode::Shadow },
-        )));
+        app.status.mode = Mode::Shadow;
         dirty_in_place(&mut app, "w3c/b.md");
         select(&mut app, "w3c/a.md");
         let _ = app.send(Message::Tabs(TabsMsg::FlushAll));
@@ -3561,7 +3561,7 @@ mod find_return_leak {
             ui.click(app, cand.center());
         };
         let save = |app: &mut App| {
-            let _ = app.send(Message::Settings(SettingsMsg::Save(PIPES.into())));
+            let _ = app.send(Message::Settings(app.settings.due_now(PIPES)));
             let (bytes, h) = d.read_file(PIPES).expect("saved");
             let _ = app.send(Message::Status(StatusMsg::Notification(
                 Notification::FileChanged {

@@ -33,7 +33,7 @@ use crate::theme::{Tokens, icon_button};
 pub const ACTIONS_PATH: &str = "_custom/crucible-vault/actions.toml";
 
 /// The page intro line.
-pub const INTRO: &str = "Every bindable command. Record: the next Ctrl/Alt chord becomes its chord (Esc cancels). Editor commands are stored in editor.toml [keys], config actions in their actions.toml keys, bookmarks in their bookmarks.toml keys (written at once); the rest waits for Save.";
+pub const INTRO: &str = "Every bindable command. Record: the next Ctrl/Alt chord becomes its chord (Esc cancels). Editor commands are stored in editor.toml [keys], config actions in their actions.toml keys, bookmarks in their bookmarks.toml keys; every change saves automatically.";
 
 /// Which row a Hotkeys edit targets.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -31,7 +31,6 @@ fn job(t: &str, key: Option<&str>, keys: &[&str]) -> NewJob {
 fn id_of(o: EnqueueOutcome) -> String {
     match o {
         EnqueueOutcome::Enqueued(id) | EnqueueOutcome::Duplicate(id) => id,
-        EnqueueOutcome::Suppressed => panic!("suppressed"),
     }
 }
 
@@ -408,7 +407,7 @@ fn deferral_skips_until_due_and_reports_wake() {
     assert_eq!(j.attempts, 2);
 }
 
-// ---- dedupe / re-seed -------------------------------------------------------
+// ---- dedupe --------------------------------------------------------------
 
 #[test]
 fn dedupe_is_type_namespaced_exact_and_pending_only() {
@@ -422,74 +421,26 @@ fn dedupe_is_type_namespaced_exact_and_pending_only() {
         s.enqueue(job("u", Some("note:x"), &[]), 2).unwrap(),
         EnqueueOutcome::Enqueued(_)
     ));
-    assert!(s.has_pending("t", "note:x").unwrap());
-    assert!(!s.has_pending("t", "note:").unwrap(), "never prefix");
-    assert!(!s.has_pending("t", "note:x2").unwrap());
     assert_eq!(
         s.job(&a).unwrap().unwrap().dedupe_key.as_deref(),
         Some("t::note:x")
     );
     // running still counts as pending
     s.claim(3).unwrap();
-    assert!(s.has_pending("t", "note:x").unwrap());
+    assert_eq!(
+        s.enqueue(job("t", Some("note:x"), &[]), 3).unwrap(),
+        EnqueueOutcome::Duplicate(a.clone())
+    );
     s.settle(&a, &JobResult::Done, 4).unwrap();
-    assert!(!s.has_pending("t", "note:x").unwrap());
+    assert!(matches!(
+        s.enqueue(job("t", Some("note:x"), &[]), 4).unwrap(),
+        EnqueueOutcome::Enqueued(_)
+    ));
     // empty keys never collapse
     let e1 = id_of(s.enqueue(job("t", Some(""), &[]), 5).unwrap());
     let e2 = id_of(s.enqueue(job("t", Some(""), &[]), 5).unwrap());
     assert_ne!(e1, e2);
     assert_eq!(s.job(&e1).unwrap().unwrap().dedupe_key, None);
-}
-
-struct Spec;
-impl JobTypeSpec for Spec {
-    fn job_type(&self) -> &str {
-        "enrich"
-    }
-    fn dedupe_key(&self, p: &serde_json::Value) -> Option<String> {
-        p["path"].as_str().map(|s| format!("note:{s}"))
-    }
-    fn resource_keys(&self, p: &serde_json::Value) -> Vec<String> {
-        p["path"]
-            .as_str()
-            .map(|s| vec![s.to_owned()])
-            .unwrap_or_default()
-    }
-}
-
-#[test]
-fn settled_key_suppresses_auto_reseed_for_the_window_only() {
-    let (_d, mut s) = db_with(QueueConfig {
-        reseed_window_ms: 1_000,
-        ..QueueConfig::default()
-    });
-    let seed = || JobSeed {
-        params: json!({"path": "a.md"}),
-        lane: None,
-    };
-    let id = id_of(s.enqueue_seed(&Spec, seed(), 0).unwrap());
-    let j = s.job(&id).unwrap().unwrap();
-    assert_eq!(j.dedupe_key.as_deref(), Some("enrich::note:a.md"));
-    assert_eq!(j.resource_keys, vec!["a.md".to_owned()]);
-    assert_eq!(
-        s.enqueue_seed(&Spec, seed(), 1).unwrap(),
-        EnqueueOutcome::Duplicate(id.clone())
-    );
-    s.cancel(&id, 100).unwrap();
-    assert_eq!(
-        s.enqueue_seed(&Spec, seed(), 500).unwrap(),
-        EnqueueOutcome::Suppressed
-    );
-    // explicit (user) enqueue is never suppressed
-    let mut user = job("enrich", Some("note:a.md"), &[]);
-    user.lane = Lane::User;
-    let uid = id_of(s.enqueue(user, 600).unwrap());
-    s.cancel(&uid, 600).unwrap();
-    // window expires by design (measured from the latest settle)
-    assert!(matches!(
-        s.enqueue_seed(&Spec, seed(), 1_601).unwrap(),
-        EnqueueOutcome::Enqueued(_)
-    ));
 }
 
 // ---- settle / result union ----------------------------------------------------
@@ -564,34 +515,6 @@ fn settle_requires_this_handles_token() {
     a.settle(&id, &JobResult::Done, 3).unwrap();
 }
 
-// ---- queue control (queueControl, sqliteJobStore) -----------------------------
-
-#[test]
-fn clear_queued_cancels_only_queued_and_appends_notes() {
-    let (_d, mut s) = db();
-    let run = id_of(s.enqueue(job("t", None, &[]), 1).unwrap());
-    s.claim(2).unwrap();
-    let q = id_of(s.enqueue(job("t", None, &[]), 3).unwrap());
-    s.append_notes(&q, "first").unwrap();
-    s.enqueue(job("t", None, &[]), 4).unwrap();
-    assert_eq!(s.clear_queued(5).unwrap(), 2);
-    assert_eq!(s.job(&run).unwrap().unwrap().status, JobStatus::Running);
-    let jq = s.job(&q).unwrap().unwrap();
-    assert_eq!(jq.status, JobStatus::Cancelled);
-    assert_eq!(jq.notes.as_deref(), Some("first\ncleared"));
-}
-
-#[test]
-fn promote_changes_lane_of_queued_only() {
-    let (_d, mut s) = db();
-    let a = id_of(s.enqueue(job("t", None, &[]), 1).unwrap());
-    let b = id_of(s.enqueue(job("t", None, &[]), 2).unwrap());
-    assert!(s.promote(&b, Lane::User).unwrap());
-    assert_eq!(s.claim(3).unwrap().unwrap().id, b);
-    assert!(!s.promote(&b, Lane::Background).unwrap());
-    assert_eq!(s.claim(3).unwrap().unwrap().id, a);
-}
-
 // ---- recovery / retention -----------------------------------------------------
 
 #[test]
@@ -601,10 +524,9 @@ fn dead_token_leases_recover_regardless_of_age() {
     let mut dead = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
     let id = id_of(dead.enqueue(job("t", None, &["x"]), 1).unwrap());
     dead.claim(1_000).unwrap();
-    let token = dead.claim_token().to_owned();
     drop(dead);
     let mut live = StateDb::open(&p, 1_001, QueueConfig::default()).unwrap();
-    assert_eq!(live.recover_own_leases(&token).unwrap(), 1);
+    assert_eq!(live.recover_foreign_leases().unwrap(), 1);
     assert_eq!(live.job(&id).unwrap().unwrap().status, JobStatus::Queued);
     live.claim(1_002).unwrap();
     // foreign recovery leaves this handle's own lease alone
@@ -619,8 +541,13 @@ fn live_leases_recover_only_after_timeout() {
     });
     let id = id_of(s.enqueue(job("t", None, &[]), 1).unwrap());
     s.claim(1_000).unwrap();
-    assert_eq!(s.recover_stale_leases(1_100).unwrap(), 0, "boundary kept");
-    assert_eq!(s.recover_stale_leases(1_101).unwrap(), 1);
+    let none = std::collections::HashSet::new();
+    assert_eq!(
+        s.recover_stale_leases_except(1_100, &none).unwrap(),
+        0,
+        "boundary kept"
+    );
+    assert_eq!(s.recover_stale_leases_except(1_101, &none).unwrap(), 1);
     assert_eq!(s.job(&id).unwrap().unwrap().status, JobStatus::Queued);
 }
 
@@ -1031,34 +958,6 @@ fn set_cutover_is_idempotent() {
     assert_eq!(a, b);
     assert_eq!(a.vault, "/v");
     assert_eq!(s.cutover().unwrap(), Some(a));
-}
-
-#[test]
-fn cancel_unfinished_covers_queued_deferred_running_and_keeps_rows() {
-    let (_d, mut s) = db();
-    let deferred = id_of(s.enqueue(job("t", Some("d"), &[]), 1).unwrap());
-    let c = s.claim(2).unwrap().unwrap();
-    assert_eq!(c.id, deferred);
-    s.settle(
-        &deferred,
-        &JobResult::Deferred {
-            retry_after_ms: 1_000_000,
-            service_unhealthy: None,
-        },
-        3,
-    )
-    .unwrap();
-    let running = id_of(s.enqueue(job("t", Some("r"), &[]), 4).unwrap());
-    assert_eq!(s.claim(5).unwrap().unwrap().id, running);
-    let queued = id_of(s.enqueue(job("t", Some("q"), &[]), 6).unwrap());
-    let done = s.cancel_unfinished(7).unwrap();
-    assert_eq!(done.len(), 3);
-    assert!(s.unfinished_jobs().unwrap().is_empty());
-    for id in [&deferred, &running, &queued] {
-        let j = s.job(id).unwrap().expect("row kept");
-        assert_eq!(j.status, JobStatus::Cancelled, "{id}");
-    }
-    assert_eq!(s.cutover().unwrap(), None, "cancelling never marks");
 }
 
 #[test]

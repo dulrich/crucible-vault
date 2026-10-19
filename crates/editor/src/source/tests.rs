@@ -221,9 +221,7 @@ fn clean_buffer_reloads_and_keeps_cursor_line() {
 #[test]
 fn shadow_mode_drops_edits_and_never_saves() {
     let (_t, d, mut app, p) = setup();
-    let _ = app.send(Message::Status(StatusMsg::Notification(
-        Notification::ModeChanged { mode: Mode::Shadow },
-    )));
+    app.status.mode = Mode::Shadow;
     type_text(&mut app, "nope");
     let _ = app.send(Message::Source(SourceMsg::Undo));
     let _ = app.send(Message::Source(SourceMsg::Save));

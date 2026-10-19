@@ -410,7 +410,7 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
     let mut app = app_over(&d, None);
     let comma = crate::palette::chord::parse("Ctrl+,").expect("chord");
     assert!(
-        crate::palette::routed(&comma),
+        crate::palette::Keymap::default().routed(&comma),
         "passes through the source editor"
     );
     let _ = app.send(Message::Palette(PaletteMsg::Key(comma.clone())));
@@ -447,7 +447,7 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
     // Ctrl+Shift+, stays reserved and inert.
     let shift = crate::palette::chord::parse("Ctrl+Shift+,").expect("chord");
     assert!(crate::palette::chord::reserved(&shift));
-    assert_eq!(crate::palette::client_chord(&shift), None);
+    assert_eq!(crate::palette::Keymap::default().get(&shift), None);
 }
 
 #[test]
@@ -509,7 +509,7 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
         (app.prefs.font_size - 30.0).abs() < f32::EPSILON,
         "applied live"
     );
-    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     let (bytes, h) = d.read_file(EDITOR_PATH).expect("created");
     let text = String::from_utf8(bytes).expect("utf8");
     assert!(text.contains("font_size = 30"), "{text}");
@@ -535,7 +535,7 @@ fn editor_toml_appeared_since_load_is_a_conflict() {
     let theirs = "font_size = 12\n";
     d.write_note(EDITOR_PATH, theirs, &ContentHash::from_hex(""))
         .expect("external create");
-    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, theirs.as_bytes());
     assert_eq!(
         config_dir_entries(&d),
@@ -565,7 +565,7 @@ fn editor_toml_cas_conflict_reloads_without_overwrite() {
     ))));
     d.write_note(EDITOR_PATH, "font_size = 26\n", &h0)
         .expect("external");
-    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, b"font_size = 26\n");
     assert_eq!(
         app.settings
@@ -611,12 +611,12 @@ fn malformed_editor_toml_falls_back_and_is_kept() {
     let f = app.settings.file(EDITOR_PATH).expect("f");
     assert!(matches!(f.state, LoadState::Malformed(_)));
     let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
-    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, bad.as_bytes());
     // Start over + Save replaces it through CAS on the malformed content.
     let _ = app.send(s(SettingsMsg::StartOver(EDITOR_PATH.into())));
     let _ = app.send(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
-    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     let text = String::from_utf8(d.read_file(EDITOR_PATH).expect("r").0).expect("utf8");
     assert!(text.contains("font_size = 30"), "{text}");
 }
@@ -639,7 +639,7 @@ fn surround_migrates_once_from_ui_state() {
     );
     // After a save, editor.toml is the source (the local copy no longer wins).
     let _ = app.send(s(SettingsMsg::Pref(PrefEdit::Surround(Surround::Dark))));
-    let _ = app.send(s(SettingsMsg::Save(EDITOR_PATH.into())));
+    let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     std::fs::write(&state, br#"{"surround":"med"}"#).expect("state");
     let app = app_over(&d, Some(state));
     assert_eq!(app.prefs.surround, Surround::Dark);
@@ -673,9 +673,6 @@ fn font_size_change_resizes_source_and_reading_live() {
         app.prefs.text_scale(),
     );
     assert!((after - 2.0 * before).abs() < 1e-4, "{before} → {after}");
-    // Revert drops the unsaved size.
-    let _ = app.send(s(SettingsMsg::Revert(EDITOR_PATH.into())));
-    assert_eq!(app.prefs, Prefs::default());
     // ui_scale is clamped for iced.
     app.prefs.ui_scale = 9.0;
     assert!((app.scale_factor() - 3.0).abs() < f32::EPSILON);
@@ -871,7 +868,7 @@ fn settings_save_of_a_daemon_file_round_trips_comments() {
         ),
     )));
     assert!(app.settings.file(kinds).is_some_and(|f| f.dirty));
-    let _ = app.send(s(SettingsMsg::Save(kinds.into())));
+    let _ = app.send(s(app.settings.due_now(kinds)));
     let text = String::from_utf8(d.read_file(kinds).expect("r").0).expect("utf8");
     assert!(
         text.contains("# my kinds") && text.contains("# keep"),
@@ -959,7 +956,7 @@ fn autosave_invalid_edit_never_writes() {
         f.save_status()
     );
     due(&mut app, kinds);
-    let _ = app.send(s(SettingsMsg::Save(kinds.into())));
+    let _ = app.send(s(app.settings.due_now(kinds)));
     let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
     assert_eq!(
         disk(&d, kinds).as_deref(),

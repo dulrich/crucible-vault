@@ -1,26 +1,29 @@
 //! `cvault-editor [--fake <dir>]`: connects to the daemon at `$CV_SOCKET` (default
-//! `$XDG_RUNTIME_DIR/crucible-vault/daemon.sock`), or with `--fake <dir>` serves `<dir>` through
-//! the in-process `FakeDaemon` (an empty or missing `<dir>` is seeded with a synthetic vault).
+//! `$XDG_RUNTIME_DIR/crucible-vault/daemon.sock`), or with `--fake <dir>` (only when built with
+//! the `fake` cargo feature) serves `<dir>` through the in-process `FakeDaemon` (an empty or
+//! missing `<dir>` is seeded with a synthetic vault).
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, bail};
 use editor::app::App;
-use editor::daemon::{Connector, DaemonClient, FakeDaemon, SocketDaemon};
+use editor::daemon::{Connector, DaemonClient, SocketDaemon};
 
-fn usage() -> anyhow::Error {
-    anyhow::anyhow!("usage: cvault-editor [--fake <dir>]")
-}
+const USAGE: &str = if cfg!(feature = "fake") {
+    "usage: cvault-editor [--fake <dir>]"
+} else {
+    "usage: cvault-editor"
+};
 
-fn fake(dir: &Path) -> anyhow::Result<FakeDaemon> {
+#[cfg(feature = "fake")]
+fn fake(dir: &std::path::Path) -> anyhow::Result<editor::daemon::FakeDaemon> {
     let empty = std::fs::read_dir(dir).map_or(true, |mut d| d.next().is_none());
     if empty {
         cv_testkit::SyntheticVault::build(dir, &cv_testkit::VaultSpec::default())
             .context("seeding synthetic vault")?;
     }
     let data = std::env::temp_dir().join(format!("cvault-editor-fake-{}", std::process::id()));
-    FakeDaemon::open(dir, &data).context("starting FakeDaemon")
+    editor::daemon::FakeDaemon::open(dir, &data).context("starting FakeDaemon")
 }
 
 /// Caps glibc malloc arenas (plan editor-cutover-blockers WP-2): off-thread image decodes each
@@ -43,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut connector: Option<Connector> = None;
+    let connector: Option<Connector>;
     let daemon: Option<Arc<dyn DaemonClient>> = match args.as_slice() {
         [] => {
             let sock = editor::daemon::socket::default_socket()
@@ -66,12 +69,16 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        [flag, dir] if flag == "--fake" => Some(Arc::new(fake(&PathBuf::from(dir))?)),
+        #[cfg(feature = "fake")]
+        [flag, dir] if flag == "--fake" => {
+            connector = None;
+            Some(Arc::new(fake(std::path::Path::new(dir))?))
+        }
         [flag] if flag == "-h" || flag == "--help" => {
-            println!("usage: cvault-editor [--fake <dir>]");
+            println!("{USAGE}");
             return Ok(());
         }
-        _ => return Err(usage()),
+        _ => return Err(anyhow::anyhow!(USAGE)),
     };
     let mut app = App::new(daemon, editor::ui_state::default_path());
     if let Some(c) = connector {

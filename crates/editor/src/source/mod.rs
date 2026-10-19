@@ -1024,7 +1024,7 @@ impl SourceBuffer {
 
     /// plan usability-sprint-captures-links WP-4: flips top-level frontmatter boolean `key`
     /// as one edit that rewrites only its scalar (see
-    /// `editor_model::render::frontmatter_bool_toggle`). Plan round-8-intake-views-anchor WP-3:
+    /// `editor_model::render::frontmatter_bool_set`). Plan round-8-intake-views-anchor WP-3:
     /// upserts — a null / missing key or a frontmatter-less note becomes `key: true`.
     pub fn toggle_frontmatter_bool(&mut self, key: &str, read_only: bool, now: Instant) -> bool {
         self.set_frontmatter_bool(key, None, read_only, now)

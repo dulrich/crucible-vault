@@ -325,6 +325,10 @@ fn crash_mid_action_resumes_at_first_unapplied_step() {
     }
     assert_eq!(status(&f, &id), DbStatus::Running, "never settled: crashed");
     assert_eq!(f.state.lock().unwrap().checkpoints(&id).unwrap().len(), 1);
+    // The restarted process opens state.db afresh: a new claim token, so the dead lease is
+    // foreign and startup recovery requeues it.
+    *f.state.lock().unwrap() =
+        StateDb::open(&f._dir.path().join("state.db"), 2, QueueConfig::default()).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

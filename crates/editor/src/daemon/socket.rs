@@ -8,12 +8,12 @@ use std::sync::mpsc::Receiver;
 use cv_protocol::client::{ClientError, RpcClient};
 use cv_protocol::{
     CreateNoteParams, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams, HelloResult,
-    JobIdParams, PathParams, RenameParams, SubscribeParams, ViewRunParams, WriteAttachmentParams,
+    PathParams, RenameParams, SubscribeParams, ViewRunParams, WriteAttachmentParams,
     WriteNoteParams, WriteNoteResult, methods as m,
 };
 
 use super::{
-    ActionInfo, ContentHash, DaemonClient, DaemonError, DeletePreviewItem, JobStatus, LocalIndex,
+    ActionInfo, ContentHash, DaemonClient, DaemonError, DeletePreviewItem, LocalIndex,
     Notification, Result, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
     ViewsListResult,
 };
@@ -160,16 +160,6 @@ impl DaemonClient for SocketDaemon {
         self.call::<m::RunAction>(params)
     }
 
-    fn job(&self, job_id: &str) -> Result<JobStatus> {
-        let job_id = job_id.to_owned();
-        self.call::<m::Job>(JobIdParams { job_id })
-    }
-
-    fn cancel(&self, job_id: &str) -> Result<JobStatus> {
-        let job_id = job_id.to_owned();
-        self.call::<m::Cancel>(JobIdParams { job_id })
-    }
-
     fn status(&self) -> Result<StatusResult> {
         self.call::<m::Status>(())
     }
@@ -205,10 +195,6 @@ impl DaemonClient for SocketDaemon {
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {
         let ids = ids.to_vec();
         self.call::<m::LookupChannels>(cv_protocol::LookupChannelsParams { ids })
-    }
-
-    fn tracker_item_set_done(&self, p: &cv_protocol::TrackerItemSetDoneParams) -> Result<()> {
-        self.call::<m::TrackerItemSetDone>(p.clone())
     }
 
     fn tracker_item_set_status(&self, p: &cv_protocol::TrackerItemSetStatusParams) -> Result<()> {

@@ -19,14 +19,14 @@ mod tracker;
 #[cfg(test)]
 mod tests;
 
-pub use cutover::{CutoverRecord, UnfinishedJob};
+pub use cutover::CutoverRecord;
 pub use error::{Result, StateError};
 pub use health::{BreakerState, ServiceFailureKind, ServiceHealth};
 pub use id::new_job_id;
 pub use image_descriptions::{ImageDescription, ImportSummary};
 pub use job::{
-    EnqueueOutcome, FailureKind, FailureReason, Job, JobResult, JobSeed, JobStatus, JobTypeSpec,
-    Lane, NewJob, namespaced_key,
+    EnqueueOutcome, FailureKind, FailureReason, Job, JobResult, JobStatus, Lane, NewJob,
+    namespaced_key,
 };
 pub use link_records::{
     LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome, read_crucible_link_records,
@@ -34,8 +34,7 @@ pub use link_records::{
 pub use query::{ListQuery, ShadowWrite, StatusCount};
 pub use runner_state::StepCheckpoint;
 pub use store::{
-    BreakerFailure, ChangeHook, DEFAULT_RESEED_WINDOW_MS, DEFAULT_RETENTION_MS,
-    DEFAULT_STALE_LEASE_MS, NewShadowWrite, QueueConfig, RequeueBreakdown, RetryOutcome, StateDb,
-    StateReader,
+    BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, NewShadowWrite,
+    QueueConfig, RequeueBreakdown, RetryOutcome, StateDb, StateReader,
 };
 pub use tracker::{IntakeQuery, TrackerItem, TrackerOutcome};

@@ -151,12 +151,8 @@ pub enum Request {
     /// Hybrid search over the daemon's `semsearch` index (plan semsearch-crate WP-4) →
     /// [`SearchResult`].
     Search(SearchParams),
-    /// Marks one `tracker_items` row done / not done (plan round-5-reading-pickers-intake WP-11)
-    /// → `null`; unknown rows are `NOT_FOUND`.
-    TrackerItemSetDone(TrackerItemSetDoneParams),
     /// Sets one `tracker_items` row's task status (`None` = open; plan round-6-feedback-todos
-    /// WP-6) → `null`; unknown rows are `NOT_FOUND`. Supersedes `tracker_item_set_done`, which
-    /// stays one release as an alias (`true` → `'x'`, `false` → open).
+    /// WP-6) → `null`; unknown rows are `NOT_FOUND`.
     TrackerItemSetStatus(TrackerItemSetStatusParams),
     /// Sets one boolean frontmatter key of a note (plan round-8-intake-views-anchor WP-3) →
     /// [`NoteSetBoolResult`]; the key / frontmatter block is created if absent. Missing notes
@@ -198,7 +194,6 @@ pub enum Topic {
     ConfigReloaded,
     OpenRequested,
     ShadowWrite,
-    ModeChanged,
     ViewsInvalidated,
 }
 
@@ -636,15 +631,6 @@ pub struct SearchResult {
     pub semantic: bool,
 }
 
-/// `tracker_item_set_done` params: the row key plus the new state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrackerItemSetDoneParams {
-    pub source_kind: String,
-    pub source_key: String,
-    pub item_id: String,
-    pub done: bool,
-}
-
 /// `tracker_item_set_status` params: the row key plus the new status (`None` = open).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackerItemSetStatusParams {
@@ -751,9 +737,6 @@ pub enum Notification {
         op: WriteOp,
         path: String,
     },
-    ModeChanged {
-        mode: Mode,
-    },
     /// Reserved for plan B's view evaluator (hosted via the `ViewService` seam).
     ViewsInvalidated {
         view_ids: Vec<String>,
@@ -769,7 +752,6 @@ impl Notification {
             Self::ConfigReloaded { .. } => Topic::ConfigReloaded,
             Self::OpenRequested { .. } => Topic::OpenRequested,
             Self::ShadowWrite { .. } => Topic::ShadowWrite,
-            Self::ModeChanged { .. } => Topic::ModeChanged,
             Self::ViewsInvalidated { .. } => Topic::ViewsInvalidated,
         }
     }
@@ -1009,20 +991,6 @@ mod tests {
             }),
         ));
         let v = round_trip(&RpcRequest::new(
-            RpcId::Num(4),
-            Request::TrackerItemSetDone(TrackerItemSetDoneParams {
-                source_kind: "youtube".into(),
-                source_key: "UC1".into(),
-                item_id: "v1".into(),
-                done: true,
-            }),
-        ));
-        assert_eq!(v["method"], "tracker_item_set_done");
-        assert_eq!(
-            v["params"],
-            json!({"source_kind": "youtube", "source_key": "UC1", "item_id": "v1", "done": true})
-        );
-        let v = round_trip(&RpcRequest::new(
             RpcId::Num(5),
             Request::TrackerItemSetStatus(TrackerItemSetStatusParams {
                 source_kind: "youtube".into(),
@@ -1232,7 +1200,6 @@ mod tests {
                 op: WriteOp::Rename,
                 path: "a.md".into(),
             },
-            Notification::ModeChanged { mode: Mode::Shadow },
             Notification::ViewsInvalidated {
                 view_ids: vec!["v".into()],
             },
@@ -1366,15 +1333,6 @@ mod tests {
             SearchParams {
                 query: "q".into(),
                 limit: 1,
-            },
-            s,
-        );
-        check::<m::TrackerItemSetDone>(
-            TrackerItemSetDoneParams {
-                source_kind: "k".into(),
-                source_key: "s".into(),
-                item_id: "i".into(),
-                done: true,
             },
             s,
         );

@@ -147,48 +147,6 @@ pub const DEFAULT_ACTIONS: [(&str, Preset); 2] = [
     ),
 ];
 
-/// The preset a chord runs, if it is a default action chord.
-pub fn default_action(c: &Chord) -> Option<Preset> {
-    DEFAULT_ACTIONS
-        .iter()
-        .find(|(k, _)| chord::parse(k).as_ref() == Some(c))
-        .map(|&(_, p)| p)
-}
-
-/// The client command a chord runs through the palette's chord path (`on_chord`). Ctrl+E/S/Z
-/// keep their own listeners and `text_editor` bindings, so only the WP-4 chords route here.
-pub fn client_chord(c: &Chord) -> Option<ClientCmd> {
-    let simple = [
-        ("Ctrl+P", ClientCmd::QuickSwitcher),
-        ("Ctrl+Shift+P", ClientCmd::CommandPaletteKey),
-        ("Ctrl+W", ClientCmd::CloseTab),
-        ("Ctrl+Q", ClientCmd::Quit),
-        ("Ctrl+F", ClientCmd::FindInNote),
-        ("Ctrl+Shift+F", ClientCmd::FocusSearch),
-        ("Ctrl+,", ClientCmd::OpenSettings),
-        ("Ctrl+PageUp", ClientCmd::GoToTop),
-        ("Ctrl+PageDown", ClientCmd::GoToBottom),
-    ];
-    if let Some((_, cmd)) = simple
-        .iter()
-        .find(|(k, _)| chord::parse(k).as_ref() == Some(c))
-    {
-        return Some(*cmd);
-    }
-    if c.alt && !c.command && !c.shift {
-        let n: u8 = c.key.parse().ok()?;
-        return (1..=8).contains(&n).then_some(ClientCmd::GoToTab(n));
-    }
-    None
-}
-
-/// Whether the focused source editor must hand a chord to the app (`PaletteMsg::Key`) instead
-/// of handling it itself (Alt+digit would insert the digit): the WP-4 client chords, the default
-/// action chords, Ctrl+, (Open settings) and the inert reserved Ctrl+Shift+,.
-pub fn routed(c: &Chord) -> bool {
-    client_chord(c).is_some() || default_action(c).is_some() || (c.command && c.key == ",")
-}
-
 /// The full default keymap: (chord, what it runs), for display and the no-duplicate check.
 pub fn keymap() -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = ClientCmd::all()
@@ -696,7 +654,7 @@ impl Keymap {
         ) || (c.command && c.key == ",")
     }
 
-    /// Chord → config action id (the old `bindings` map).
+    /// Chord → config action id.
     pub fn actions(&self) -> HashMap<Chord, String> {
         self.map
             .iter()
@@ -858,14 +816,6 @@ pub fn resolve_all(
         }
     }
     km
-}
-
-/// Chord → action id for every parseable, non-conflicting `ActionInfo.keys`, plus a notice per
-/// conflict (a chord claimed by several bindables is bound to none) — [`resolve`]
-/// with no overrides.
-pub fn bindings(actions: &[ActionInfo]) -> (HashMap<Chord, String>, Vec<String>) {
-    let km = resolve(&std::collections::BTreeMap::new(), actions);
-    (km.actions(), km.notices)
 }
 
 /// `entries` with each entry's chords taken from the effective keymap (an action entry shows
@@ -1186,8 +1136,8 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
                 Key::Named(Named::PageDown)
             ))))
         }
-        // Ctrl+P / Ctrl+Shift+P and the other client chords resolve in `on_chord`
-        // (`client_chord`).
+        // Ctrl+P / Ctrl+Shift+P and the other client chords resolve in `on_chord` against the
+        // effective `Keymap`.
         _ if modifiers.command() || modifiers.alt() => {
             chord::from_event(&key, modifiers).map(|c| Message::Palette(PaletteMsg::Key(c)))
         }

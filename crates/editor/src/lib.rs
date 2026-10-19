@@ -18,7 +18,6 @@ pub mod image_cache;
 pub mod link_ta;
 pub mod log;
 pub mod message;
-pub mod migrate;
 pub mod nav;
 pub mod open_url;
 pub mod page;
