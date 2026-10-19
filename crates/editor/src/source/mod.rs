@@ -72,6 +72,7 @@ impl SaveJob {
             path: self.path.clone(),
             seq: self.seq,
             outcome,
+            after: None,
         })
     }
 }
@@ -1633,17 +1634,12 @@ pub fn update(
                 Task::none()
             }
         }
-        SourceMsg::Saved { seq, outcome, .. } => match buf.finish_save(seq, outcome) {
-            Ok(true) => spawn_save(ctx.daemon, buf.begin_save(read_only)),
-            Ok(false) => Task::none(),
-            Err(e) => {
-                *ctx.error = Some(format!("save failed: {e}"));
-                Task::none()
-            }
-        },
         SourceMsg::KeepMine(_) => spawn_save(ctx.daemon, buf.keep_mine(read_only)),
         // Routed by the app (`App::update_inner`); never reaches here.
-        SourceMsg::Viewport { .. } | SourceMsg::LinkKey(_) | SourceMsg::LinkPick(_) => Task::none(),
+        SourceMsg::Viewport { .. }
+        | SourceMsg::Saved { .. }
+        | SourceMsg::LinkKey(_)
+        | SourceMsg::LinkPick(_) => Task::none(),
         SourceMsg::TakeTheirs(path) => {
             if let Some(d) = ctx.daemon {
                 match d.read_file(&path) {

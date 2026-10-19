@@ -746,9 +746,7 @@ fn shift_click_extends_selection_from_the_cursor() {
     let (_t, _d, mut app, _p) = setup();
     buf(&mut app).materialise();
     sel(&mut app, (2, 3), (2, 3));
-    let _ = app.send(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
-        Modifiers::SHIFT,
-    )));
+    let _ = app.send(Message::Modifiers(Modifiers::SHIFT));
     let _ = app.send(Message::Source(SourceMsg::Action(Action::Click(
         iced::Point::new(0.0, 0.0),
     ))));
@@ -756,9 +754,7 @@ fn shift_click_extends_selection_from_the_cursor() {
     assert_eq!(c.position, Position { line: 0, column: 0 });
     assert_eq!(c.selection, Some(Position { line: 2, column: 3 }));
     // Shift released: a click just moves the cursor.
-    let _ = app.send(Message::Switcher(crate::message::SwitcherMsg::Modifiers(
-        Modifiers::empty(),
-    )));
+    let _ = app.send(Message::Modifiers(Modifiers::empty()));
     let _ = app.send(Message::Source(SourceMsg::Action(Action::Click(
         iced::Point::new(0.0, 0.0),
     ))));

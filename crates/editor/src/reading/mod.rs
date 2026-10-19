@@ -1119,8 +1119,7 @@ pub fn update(
         | ReadingMsg::ToggleProp { .. }
         | ReadingMsg::GoToEdge { .. }
         | ReadingMsg::TitleSubmit { .. }
-        | ReadingMsg::TitleFocus { .. }
-        | ReadingMsg::TitleSaved { .. } => {}
+        | ReadingMsg::TitleFocus { .. } => {}
         ReadingMsg::OpenLink { src, target } => {
             if let Some(m) = store.click(&src, &target, daemon) {
                 return Task::done(m);

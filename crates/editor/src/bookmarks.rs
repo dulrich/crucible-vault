@@ -54,8 +54,6 @@ pub enum BookmarkMsg {
     /// WP-9: set (`Some`) or drop (`None`) the `keys` of the bookmark at this path (Hotkeys
     /// page), written straight through the shared CAS write.
     SetKeys(String, Option<Vec<String>>),
-    /// A write finished.
-    Written(Result<WriteOutcome, String>),
 }
 
 /// The panel's list, derived from the shared `bookmarks.toml` settings [`ConfigFile`] — the one

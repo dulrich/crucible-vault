@@ -135,9 +135,7 @@ fn key(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Me
             key: Key::Named(Named::Escape),
             ..
         }) => Some(Message::Find(FindMsg::Close)),
-        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
-            Some(Message::Find(FindMsg::Shift(m.shift())))
-        }
+        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
         _ => None,
     }
 }

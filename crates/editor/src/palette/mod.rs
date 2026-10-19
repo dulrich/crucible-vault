@@ -6,7 +6,7 @@
 //! [`CONFIG_PREFIX`]). Ranking is `editor_model::rank` over `"title group"`. Invocation of an
 //! action: prompt each `ParamSpec` ([`prompt::Prompt`]), then — if the active buffer is dirty and
 //! the daemon is live — save it and dispatch `run_action` only on a successful save with the new
-//! hash (the app's `run_call`/`after_save_first`).
+//! hash (the app's `run_call`/`resume_after`).
 
 pub mod chord;
 pub mod hints;

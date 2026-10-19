@@ -7,7 +7,7 @@
 
 use cv_protocol::{ActionContext, Mode, RunActionParams};
 use editor_model::rank::{Ranked, rank};
-use iced::keyboard::{self, Key, Modifiers};
+use iced::keyboard::{self, Key};
 use iced::widget::{button, column, text, text_input};
 use iced::{Element, Length};
 
@@ -27,7 +27,6 @@ pub struct Switcher {
     pub query: String,
     pub results: Vec<Ranked>,
     pub selected: usize,
-    pub shift: bool,
     /// WP-6 (usability-sprint-captures-links): folder mode — the note being moved; results rank
     /// [`Self::folders`] instead of note paths, and a pick moves the note there.
     pub move_from: Option<String>,
@@ -138,7 +137,7 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
             Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::Switcher(SwitcherMsg::Up)),
             _ => None,
         },
-        keyboard::Event::ModifiersChanged(m) => Some(Message::Switcher(SwitcherMsg::Modifiers(m))),
+        keyboard::Event::ModifiersChanged(m) => Some(Message::Modifiers(m)),
         keyboard::Event::KeyReleased { .. } => None,
     }
 }
@@ -152,11 +151,6 @@ pub fn captured_escape(
 ) -> Option<Message> {
     crate::palette::is_captured_escape(&ev, status)
         .then_some(Message::Switcher(SwitcherMsg::Escape))
-}
-
-/// Whether Shift is held in `m`.
-pub fn shift(m: Modifiers) -> bool {
-    m.shift()
 }
 
 /// The switcher panel (shown above the panes while open).

@@ -45,6 +45,34 @@ pub enum Message {
         seq: u64,
         result: Result<String, String>,
     },
+    /// Plan tn-review-baseline-remediation WP-R2 (SR3): keyboard modifier state, tracked once
+    /// in `App.modifiers` and never dropped by a modal layer.
+    Modifiers(iced::keyboard::Modifiers),
+}
+
+/// Plan tn-review-baseline-remediation WP-R2 (SR3): how a modal layer treats a message —
+/// user `Input` is dropped while a dialog or menu is open; a `Completion` (async result,
+/// timer tick, modifier state) always runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgKind {
+    Input,
+    Completion,
+}
+
+/// Plan tn-review-baseline-remediation WP-R2 (SR2): what a save-first flow does once its save
+/// lands clean (`SourceMsg::Saved { after: Some(..) }`, handled by `App::on_save_landed`).
+#[derive(Debug, Clone)]
+pub enum AfterSave {
+    /// Close the tab with this [`crate::app::Tab::id`].
+    CloseTab(u64),
+    /// One save-before-quit.
+    Quit,
+    /// Continue into the delete preview.
+    Delete,
+    /// Rename the note to this path.
+    Rename(String),
+    /// Run the palette call.
+    RunCall(crate::palette::Call),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name
@@ -67,11 +95,12 @@ pub enum SourceMsg {
         path: String,
         seq: u64,
     },
-    /// A save finished.
+    /// A save finished; `after` is the save-first continuation, if any (WP-R2).
     Saved {
         path: String,
         seq: u64,
         outcome: crate::source::SaveOutcome,
+        after: Option<AfterSave>,
     },
     /// Conflict bar: re-save against the on-disk hash.
     KeepMine(String),
@@ -211,13 +240,6 @@ pub enum ReadingMsg {
     },
     /// Plan round-5 WP-7: a selection gesture ended (mouse release): copy to PRIMARY.
     SelectDone { path: String, view: u64 },
-    /// The save-before-rename finished.
-    TitleSaved {
-        path: String,
-        to: String,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-    },
 }
 
 /// WP-4: the file explorer.
@@ -251,12 +273,6 @@ pub enum ExplorerMsg {
         path: String,
         result: Result<Vec<crate::daemon::DeletePreviewItem>, String>,
     },
-    /// plan round-7-feedback-decisions WP-2: the save before a delete finished.
-    DeleteSaved {
-        path: String,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-    },
     /// `delete_note` finished.
     NoteDeleted(Result<crate::daemon::DeleteNoteResult, String>),
 }
@@ -280,8 +296,6 @@ pub enum SwitcherMsg {
     Create,
     /// Click on a result.
     Pick(String),
-    /// Modifier state (Shift+Enter detection).
-    Modifiers(iced::keyboard::Modifiers),
     /// `note.create` finished: `open_path` or an error.
     Created(Result<Option<String>, String>),
 }
@@ -313,13 +327,6 @@ pub enum PaletteMsg {
     Enter,
     /// Param prompt input.
     Prompt(crate::palette::PromptMsg),
-    /// The save-first write finished; `call` runs only on success.
-    SaveDone {
-        path: String,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-        call: crate::palette::Call,
-    },
     /// `run_action` returned.
     Ran {
         title: String,
@@ -466,26 +473,12 @@ pub enum TabsMsg {
     Close(Pane, usize),
     /// Ctrl+W: close the focused pane's active tab.
     CloseActive,
-    /// The save-before-close finished.
-    CloseSaved {
-        path: String,
-        /// The [`crate::app::Tab::id`] to close (audit E1: not "the first tab of `path`").
-        tab: u64,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-    },
     /// Alt+N: the focused pane's tab N (1-based; out of range = no-op).
     GoTo(u8),
     /// Ctrl+Q / window close: flush every dirty buffer, then exit.
     Quit,
     /// Window focus lost: flush every dirty note buffer (plan editor-feedback-round-2 WP-3).
     FlushAll,
-    /// One save-before-quit finished.
-    QuitSaved {
-        path: String,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-    },
 }
 
 /// editor-usability-round WP-4: the focused pane's find bar.
@@ -500,8 +493,6 @@ pub enum FindMsg {
     Submit,
     Next,
     Prev,
-    /// Shift state while the bar is open (Shift+Enter detection).
-    Shift(bool),
     /// A press on the pane's find input: make it the sole focused widget (the source editor
     /// would otherwise stay focused too and take the bar's keys; bug fix editor-find-return-leak).
     Focus(Pane),
@@ -512,4 +503,75 @@ pub enum FindMsg {
 pub enum ThemeMsg {
     Cycle,
     Set(Surround),
+}
+
+impl SourceMsg {
+    pub fn kind(&self) -> MsgKind {
+        match self {
+            Self::AutosaveDue { .. }
+            | Self::Saved { .. }
+            | Self::PastePrimary { .. }
+            | Self::PasteResolved { .. }
+            | Self::Viewport { .. } => MsgKind::Completion,
+            Self::Action(_)
+            | Self::Undo
+            | Self::Redo
+            | Self::Save
+            | Self::KeepMine(_)
+            | Self::TakeTheirs(_)
+            | Self::Key(_)
+            | Self::MiddleClick { .. }
+            | Self::CommandClick { .. }
+            | Self::Cut
+            | Self::Paste
+            | Self::LinkKey(_)
+            | Self::LinkPick(_) => MsgKind::Input,
+        }
+    }
+}
+
+impl SwitcherMsg {
+    pub fn kind(&self) -> MsgKind {
+        match self {
+            Self::Created(_) => MsgKind::Completion,
+            Self::Open
+            | Self::OpenMove
+            | Self::Close
+            | Self::Escape
+            | Self::Query(_)
+            | Self::Up
+            | Self::Down
+            | Self::Submit
+            | Self::Create
+            | Self::Pick(_) => MsgKind::Input,
+        }
+    }
+}
+
+impl TabsMsg {
+    pub fn kind(&self) -> MsgKind {
+        match self {
+            Self::Open(_)
+            | Self::Select(..)
+            | Self::Close(..)
+            | Self::CloseActive
+            | Self::GoTo(_)
+            | Self::Quit
+            | Self::FlushAll => MsgKind::Input,
+        }
+    }
+}
+
+impl FindMsg {
+    pub fn kind(&self) -> MsgKind {
+        match self {
+            Self::Open
+            | Self::Close
+            | Self::Query(_)
+            | Self::Submit
+            | Self::Next
+            | Self::Prev
+            | Self::Focus(_) => MsgKind::Input,
+        }
+    }
 }

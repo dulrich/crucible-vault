@@ -16,12 +16,12 @@ use iced::widget::pane_grid::{self, Pane};
 use iced::widget::{PaneGrid, Space, button, column, container, row, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 
-use crate::bookmarks::{self, BOOKMARKS_PATH, BookmarkMsg, Bookmarks, WriteOutcome};
+use crate::bookmarks::{self, BOOKMARKS_PATH, BookmarkMsg, Bookmarks};
 use crate::daemon::{DaemonClient, DaemonError};
 use crate::explorer::{self, EditKind, Explorer, FileOp, FileOpDone};
 use crate::message::{
-    ExplorerMsg, FindMsg, Message, NavMsg, PaletteMsg, PanelsMsg, PanesMsg, SourceMsg, StatusMsg,
-    SwitcherMsg, TabsMsg, ThemeMsg,
+    AfterSave, ExplorerMsg, FindMsg, Message, NavMsg, PaletteMsg, PanelsMsg, PanesMsg, SourceMsg,
+    StatusMsg, SwitcherMsg, TabsMsg, ThemeMsg,
 };
 use crate::nav;
 use crate::panes::{self, PaneState};
@@ -496,8 +496,8 @@ pub struct App {
     pub docs: Docs,
     /// The app asked iced to exit (tests observe it).
     pub exiting: bool,
-    /// Shift is held while a find bar is open (Shift+Enter = previous).
-    find_shift: bool,
+    /// WP-R2 (SR3): the held keyboard modifiers (Shift+Enter in find / switcher, Shift+click).
+    pub modifiers: iced::keyboard::Modifiers,
     /// plan editor-settings-tab WP-2: the Settings tab's model (file save loops, Status).
     pub settings: crate::settings::Settings,
     /// The effective `editor.toml` prefs (live; `prefs.keys` feeds the palette keymap).
@@ -686,7 +686,7 @@ impl App {
             closing: std::collections::HashMap::new(),
             docs: Docs::new(),
             exiting: false,
-            find_shift: false,
+            modifiers: iced::keyboard::Modifiers::empty(),
             settings: crate::settings::Settings::default(),
             prefs: crate::settings::editor_prefs::Prefs::default(),
             period_folders: editor_model::period::PeriodFolders::default(),
@@ -1727,62 +1727,21 @@ impl App {
         }
     }
 
-    /// Unsaved-edits delete dialog, "Save then delete": save through the normal path; the
-    /// result ([`ExplorerMsg::DeleteSaved`]) continues into the delete preview on success.
+    /// Unsaved-edits delete dialog, "Save then delete": save first ([`AfterSave::Delete`]);
+    /// the delete preview follows once it lands clean.
     fn save_then_delete(&mut self, path: String) -> Task<Message> {
         if self.shadow_blocked(explorer::SHADOW_REASON) {
             return Task::none();
         }
-        let Some(doc) = self.docs.get_mut(&path) else {
-            return self.begin_delete(path);
-        };
-        if !doc.is_dirty() {
+        if !self.docs.get(&path).is_some_and(|d| d.is_dirty()) {
             return self.begin_delete(path);
         }
-        let Some(job) = doc.begin_save(false) else {
-            self.status
-                .set_error("delete not done (the note is saving or has a conflict)".into());
-            return Task::none();
-        };
-        let seq = job.seq;
-        self.rpc(
-            move |d| Ok(job.run(d)),
-            move |r| {
-                Message::Explorer(ExplorerMsg::DeleteSaved {
-                    path,
-                    seq,
-                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
-                })
-            },
-        )
-    }
-
-    /// The save-before-delete finished: delete preview on success, else notify and stop.
-    fn delete_saved(
-        &mut self,
-        path: String,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-    ) -> Task<Message> {
-        use crate::source::SaveOutcome;
-        let Some(doc) = self.docs.get_mut(&path) else {
-            return Task::none();
-        };
-        let ok = matches!(outcome, SaveOutcome::Saved(_));
-        if let Err(e) = doc.finish_save(seq, outcome) {
-            self.status
-                .set_error(format!("delete not done (save failed: {e})"));
-            return Task::none();
-        }
-        if !ok || doc.is_dirty() {
-            self.status.set_error(if ok {
-                "delete not done (the note changed while saving)".into()
-            } else {
-                "delete not done (save conflict: the file changed on disk)".into()
-            });
-            return Task::none();
-        }
-        self.begin_delete(path)
+        self.save_then(&path, Some(AfterSave::Delete))
+            .unwrap_or_else(|| {
+                self.status
+                    .set_error("delete not done (the note is saving or has a conflict)".into());
+                Task::none()
+            })
     }
 
     /// Unsaved-edits delete dialog, "Discard and delete": the buffer reloads from disk (edits
@@ -2017,13 +1976,18 @@ impl App {
                 }
             }
             Message::Source(SourceMsg::LinkPick(path)) => self.link_ta_accept(&path),
+            Message::Source(SourceMsg::Saved {
+                path,
+                seq,
+                outcome,
+                after,
+            }) => return self.on_save_landed(&path, seq, outcome, after),
             Message::Source(m) => {
                 // plan editor-round-4 WP-2: Shift+click extends the selection.
-                let m = crate::source::shift_click(m, self.switcher.shift);
+                let m = crate::source::shift_click(m, self.modifiers.shift());
                 let routed = matches!(
                     &m,
                     SourceMsg::AutosaveDue { .. }
-                        | SourceMsg::Saved { .. }
                         | SourceMsg::KeepMine(_)
                         | SourceMsg::TakeTheirs(_)
                         | SourceMsg::MiddleClick { .. }
@@ -2055,21 +2019,9 @@ impl App {
                         iced::widget::text_editor::Edit::Insert('[')
                     ))
                 );
-                let saved = match &m {
-                    SourceMsg::Saved { path, outcome, .. } => Some((
-                        path.clone(),
-                        matches!(outcome, crate::source::SaveOutcome::Saved(_)),
-                    )),
-                    _ => None,
-                };
                 if !routed && active.is_none() {
                     return Task::none();
                 }
-                // A save for a document no longer open resolves any wait as landed.
-                let saved = saved.map(|(p, ok)| {
-                    let ok = ok || !self.docs.contains_key(&p);
-                    (p, ok)
-                });
                 let mut src_err = None;
                 let task = crate::source::update(
                     &mut self.docs,
@@ -2087,36 +2039,9 @@ impl App {
                 if link_sync {
                     self.link_ta_sync(typed_bracket);
                 }
-                // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this
-                // save was in flight resyncs now. A failed completion's queued `save_again` is
-                // not relaunched by `source::update`, so the resync's fresh save covers it; a
-                // follow-up save already started (success path) runs on the current client.
-                let resync = match &saved {
-                    Some((path, _))
-                        if self
-                            .docs
-                            .get_mut(path)
-                            .is_some_and(|d| d.take_resync_pending() && !d.is_saving()) =>
-                    {
-                        let path = path.clone();
-                        self.resync_doc(&path)
-                    }
-                    _ => Task::none(),
-                };
-                // Plan usability-sprint-captures-links WP-5: a landed save that changed `title`.
-                let sync = match &saved {
-                    Some((path, true)) => {
-                        let path = path.clone();
-                        self.title_sync(&path)
-                    }
-                    _ => Task::none(),
-                };
-                let task = Task::batch([task, resync, sync]);
-                return match saved {
-                    Some((path, ok)) => Task::batch([task, self.note_save_landed(&path, ok)]),
-                    None => task,
-                };
+                return task;
             }
+            Message::Modifiers(m) => self.modifiers = m,
             Message::TitleRenamed {
                 from,
                 to,
@@ -2145,12 +2070,6 @@ impl App {
                     return self.title_submit(&path);
                 }
             }
-            Message::Reading(crate::message::ReadingMsg::TitleSaved {
-                path,
-                to,
-                seq,
-                outcome,
-            }) => return self.title_saved(&path, &to, seq, outcome),
             Message::Reading(m) => {
                 let mode_change = matches!(
                     m,
@@ -2326,40 +2245,8 @@ impl App {
                     return self.close_tab(self.focus, i);
                 }
             }
-            TabsMsg::CloseSaved {
-                path,
-                tab,
-                seq,
-                outcome,
-            } => {
-                // Audit E1: the close removes exactly the tab it was asked for (by id).
-                match self.flushed(&path, seq, outcome) {
-                    Ok(()) => {
-                        if let Some((pane, i)) = panes::find_id(&self.panes, tab) {
-                            self.remove_tab(pane, i);
-                        }
-                    }
-                    Err(why) => {
-                        if panes::find_id(&self.panes, tab).is_some() {
-                            self.close_dialog(&path, vec![tab], &why);
-                        }
-                    }
-                }
-            }
             TabsMsg::Quit => return self.quit(),
             TabsMsg::FlushAll => return self.flush_all_notes(),
-            TabsMsg::QuitSaved { path, seq, outcome } => {
-                let r = self.flushed(&path, seq, outcome);
-                let reason = r.err().map(|why| self.loss_reason(&path, &why));
-                let Some(q) = &mut self.quit else {
-                    return Task::none();
-                };
-                q.pending.remove(&path);
-                if let Some(reason) = reason {
-                    q.losses.note(&path, reason);
-                }
-                return self.quit_progress();
-            }
         }
         Task::none()
     }
@@ -2432,32 +2319,174 @@ impl App {
             self.close_dialog(&tab.path, vec![tab.id], "not connected");
             return Task::none();
         }
-        let Some(job) = doc.begin_save(false) else {
-            // WP-3 rework: a save is in flight (`begin_save` queued the follow-up); the close
-            // completes when it lands clean (`note_save_landed`).
-            if doc.is_saving() {
-                let ids = self.closing.entry(tab.path.clone()).or_default();
-                if !ids.contains(&tab.id) {
-                    ids.push(tab.id);
-                }
-            } else {
-                // A dirty buffer whose save cannot start.
-                self.close_dialog(&tab.path, vec![tab.id], "the save could not start");
+        if let Some(t) = self.save_then(&tab.path, Some(AfterSave::CloseTab(tab.id))) {
+            return t;
+        }
+        // WP-3 rework: a save is in flight (`begin_save` queued the follow-up); the close
+        // completes when it lands clean (`note_save_landed`).
+        if self.docs.get(&tab.path).is_some_and(|d| d.is_saving()) {
+            let ids = self.closing.entry(tab.path.clone()).or_default();
+            if !ids.contains(&tab.id) {
+                ids.push(tab.id);
             }
-            return Task::none();
+        } else {
+            // A dirty buffer whose save cannot start.
+            self.close_dialog(&tab.path, vec![tab.id], "the save could not start");
+        }
+        Task::none()
+    }
+
+    /// Plan tn-review-baseline-remediation WP-R2 (SR2): the one save path. Starts `path`'s
+    /// save; `after` (a save-first continuation) runs when it lands, `None` is a plain save.
+    /// `None` back when no save can start (clean, in flight, renaming or conflicted).
+    fn save_then(&mut self, path: &str, after: Option<AfterSave>) -> Option<Task<Message>> {
+        let read_only = self.status.mode == Mode::Shadow;
+        let job = self.docs.get_mut(path)?.begin_save(read_only)?;
+        let Some(after) = after else {
+            return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));
         };
-        let (seq, path, id) = (job.seq, tab.path, tab.id);
-        self.rpc(
+        let (path, seq) = (job.path.clone(), job.seq);
+        Some(self.rpc(
             move |d| Ok(job.run(d)),
             move |r| {
-                Message::Tabs(TabsMsg::CloseSaved {
+                Message::Source(SourceMsg::Saved {
                     path,
-                    tab: id,
                     seq,
                     outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                    after: Some(after),
                 })
             },
-        )
+        ))
+    }
+
+    /// WP-R2 (SR2): every save completion (`SourceMsg::Saved`). Applies it, starts a queued
+    /// follow-up (the continuation moves onto it), runs a deferred reconnect resync, the
+    /// title sync (plain saves only — a continuation renames, deletes or acts on the note
+    /// itself) and the close/quit waiters, then resumes the continuation.
+    fn on_save_landed(
+        &mut self,
+        path: &str,
+        seq: u64,
+        outcome: crate::source::SaveOutcome,
+        after: Option<AfterSave>,
+    ) -> Task<Message> {
+        let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
+        let result = self.docs.get_mut(path).map(|d| d.finish_save(seq, outcome));
+        if after.is_none()
+            && let Some(Err(e)) = &result
+        {
+            self.status.set_error(format!("save failed: {e}"));
+        }
+        let follow = match result {
+            Some(Ok(true)) => self.save_then(path, after.clone()),
+            _ => None,
+        };
+        let landed = match result {
+            None => Landed::Gone,
+            Some(Err(e)) => Landed::Failed(e),
+            Some(Ok(_)) if !ok => Landed::Conflict,
+            Some(Ok(_)) if self.docs.get(path).is_some_and(|d| d.is_dirty()) => Landed::Changed,
+            Some(Ok(_)) => Landed::Clean,
+        };
+        // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this save was
+        // in flight resyncs now (a follow-up save already started runs on the current client).
+        let resync = if self
+            .docs
+            .get_mut(path)
+            .is_some_and(|d| d.take_resync_pending() && !d.is_saving())
+        {
+            self.resync_doc(path)
+        } else {
+            Task::none()
+        };
+        // Plan usability-sprint-captures-links WP-5: a landed save that changed `title`.
+        let sync = if ok && after.is_none() {
+            self.title_sync(path)
+        } else {
+            Task::none()
+        };
+        // A save for a document no longer open resolves any wait as landed.
+        let waiters = self.note_save_landed(path, ok || matches!(landed, Landed::Gone));
+        let resume = match after {
+            Some(a) if follow.is_none() => self.resume_after(path, a, &landed),
+            _ => Task::none(),
+        };
+        Task::batch([
+            follow.unwrap_or_else(Task::none),
+            resync,
+            sync,
+            waiters,
+            resume,
+        ])
+    }
+
+    /// WP-R2: a save-first continuation after its save landed. Only `Clean` (or a closed
+    /// document) proceeds; a failed save never closes, quits, deletes, renames or runs — except
+    /// a run, which today proceeds over a newer unsaved edit.
+    fn resume_after(&mut self, path: &str, after: AfterSave, landed: &Landed) -> Task<Message> {
+        let clean = matches!(landed, Landed::Clean | Landed::Gone);
+        let (why, refusal) = match landed {
+            Landed::Failed(e) => (e.clone(), format!("save failed: {e}")),
+            Landed::Conflict => (
+                "save conflict".to_owned(),
+                "save conflict: the file changed on disk".to_owned(),
+            ),
+            _ => (
+                "the note changed while saving".to_owned(),
+                "the note changed while saving".to_owned(),
+            ),
+        };
+        match after {
+            // Audit E1: the close removes exactly the tab it was asked for (by id).
+            AfterSave::CloseTab(id) => match panes::find_id(&self.panes, id) {
+                Some((pane, i)) if clean => self.remove_tab(pane, i),
+                Some(_) => self.close_dialog(path, vec![id], &why),
+                _ => {}
+            },
+            AfterSave::Quit => {
+                let reason = (!clean).then(|| self.loss_reason(path, &why));
+                let Some(q) = &mut self.quit else {
+                    return Task::none();
+                };
+                q.pending.remove(path);
+                if let Some(reason) = reason {
+                    q.losses.note(path, reason);
+                }
+                return self.quit_progress();
+            }
+            AfterSave::Delete | AfterSave::Rename(_) if matches!(landed, Landed::Gone) => {}
+            AfterSave::Delete if clean => return self.begin_delete(path.to_owned()),
+            AfterSave::Rename(to) if clean => {
+                return self.dispatch_op(FileOp::Rename {
+                    from: path.to_owned(),
+                    to,
+                });
+            }
+            AfterSave::Delete => self
+                .status
+                .set_error(format!("delete not done ({refusal})")),
+            AfterSave::Rename(_) => self
+                .status
+                .set_error(format!("rename not done ({refusal})")),
+            AfterSave::RunCall(call) => match landed {
+                Landed::Gone => self
+                    .status
+                    .set_error(format!("{}: not run (note closed)", call.title)),
+                Landed::Clean | Landed::Changed => {
+                    let reading_sel = self
+                        .active_note()
+                        .is_some_and(|t| t.path == path)
+                        .then(|| self.reading_selection())
+                        .flatten();
+                    let ctx = crate::palette::context(self.docs.get(path), reading_sel);
+                    return self.dispatch_with(call, ctx);
+                }
+                Landed::Failed(_) | Landed::Conflict => self
+                    .status
+                    .set_error(format!("{}: not run ({refusal})", call.title)),
+            },
+        }
+        Task::none()
     }
 
     /// WP-3 rework: a normal note save (`SourceMsg::Saved`, already applied to the buffer)
@@ -2517,29 +2546,6 @@ impl App {
         Task::none()
     }
 
-    /// A save-before-close/quit finished: `Ok` only when it saved and the buffer is clean;
-    /// otherwise why not (the caller turns it into a dialog entry).
-    fn flushed(
-        &mut self,
-        path: &str,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-    ) -> Result<(), String> {
-        use crate::source::SaveOutcome;
-        let Some(doc) = self.docs.get_mut(path) else {
-            return Ok(());
-        };
-        let ok = matches!(outcome, SaveOutcome::Saved(_));
-        doc.finish_save(seq, outcome)?;
-        if !ok {
-            return Err("save conflict".into());
-        }
-        if doc.is_dirty() {
-            return Err("the note changed while saving".into());
-        }
-        Ok(())
-    }
-
     /// Quit: flush every dirty document (once per document, however many tabs show it — plan
     /// editor-feedback-round-2 WP-7), exit once all saves land; any failure cancels the quit.
     fn quit(&mut self) -> Task<Message> {
@@ -2572,7 +2578,7 @@ impl App {
             return self.exit();
         }
         let connected = self.status.connected && self.daemon.is_some();
-        let mut jobs = Vec::new();
+        let (mut pending, mut saves) = (std::collections::HashSet::new(), Vec::new());
         let mut awaiting = std::collections::HashSet::new();
         for path in dirty {
             if !connected {
@@ -2580,16 +2586,15 @@ impl App {
                 continue;
             }
             let reason = self.loss_reason(&path, "the save could not start");
-            if let Some(doc) = self.docs.get_mut(&path) {
-                match doc.begin_save(false) {
-                    Some(job) => jobs.push((path, job)),
-                    // WP-3 rework: in flight — `begin_save` queued the follow-up; await it.
-                    None if doc.is_saving() => {
-                        awaiting.insert(path);
-                    }
-                    // Conflict / missing file (or a save that cannot start).
-                    None => losses.note(&path, reason),
-                }
+            if let Some(t) = self.save_then(&path, Some(AfterSave::Quit)) {
+                saves.push(t);
+                pending.insert(path);
+            } else if self.docs.get(&path).is_some_and(|d| d.is_saving()) {
+                // WP-3 rework: in flight — `begin_save` queued the follow-up; await it.
+                awaiting.insert(path);
+            } else {
+                // Conflict / missing file (or a save that cannot start).
+                losses.note(&path, reason);
             }
         }
         if !connected {
@@ -2600,7 +2605,7 @@ impl App {
             }
         }
         self.quit = Some(QuitState {
-            pending: jobs.iter().map(|(p, _)| p.clone()).collect(),
+            pending,
             settings: std::collections::HashSet::new(),
             awaiting,
             losses,
@@ -2620,19 +2625,7 @@ impl App {
             return settings_task;
         }
         let mut tasks: Vec<Task<Message>> = vec![settings_task, self.quit_progress()];
-        tasks.extend(jobs.into_iter().map(|(path, job)| {
-            let seq = job.seq;
-            self.rpc(
-                move |d| Ok(job.run(d)),
-                move |r| {
-                    Message::Tabs(TabsMsg::QuitSaved {
-                        path,
-                        seq,
-                        outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
-                    })
-                },
-            )
-        }));
+        tasks.extend(saves);
         Task::batch(tasks)
     }
 
@@ -2676,7 +2669,6 @@ impl App {
                     }
                     self.reading.set_find(&t.path, None);
                 }
-                self.find_shift = false;
                 // Plan round-7 WP-4: the reading view keeps the place find left it at (the
                 // bar's removal re-creates the scrollable, which reports offset 0).
                 let restore = self
@@ -2689,7 +2681,6 @@ impl App {
                     .unwrap_or_else(Task::none);
                 return Task::batch([restore, self.focus_editor()]);
             }
-            FindMsg::Shift(b) => self.find_shift = b,
             FindMsg::Focus(_) => {}
             FindMsg::Query(q) => {
                 let Some(text) = ps
@@ -2733,8 +2724,8 @@ impl App {
                 return self.show_match();
             }
             FindMsg::Submit | FindMsg::Next | FindMsg::Prev => {
-                let back =
-                    matches!(m, FindMsg::Prev) || (matches!(m, FindMsg::Submit) && self.find_shift);
+                let back = matches!(m, FindMsg::Prev)
+                    || (matches!(m, FindMsg::Submit) && self.modifiers.shift());
                 let Some(ps) = self.panes.get_mut(pane) else {
                     return Task::none();
                 };
@@ -3063,35 +3054,6 @@ impl App {
     fn update_bookmarks(&mut self, m: BookmarkMsg) -> Task<Message> {
         match m {
             BookmarkMsg::Open(p) => return self.open_bookmark(&p),
-            BookmarkMsg::Written(r) => {
-                let d = self.daemon.clone();
-                let err = match &r {
-                    Ok(WriteOutcome::Saved(_)) => None,
-                    Ok(WriteOutcome::Conflict) => {
-                        Some("bookmarks changed on disk; reloaded (edit not saved)".to_owned())
-                    }
-                    Err(e) => Some(format!("bookmarks: {e}")),
-                };
-                if let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) {
-                    let failed = r.is_err();
-                    f.finish_save(r, d.as_deref());
-                    if failed && let Some(d) = &d {
-                        f.load(d.as_ref());
-                    }
-                }
-                if let Some(e) = err {
-                    self.status.set_error(e);
-                }
-                self.sync_bookmarks();
-                // WP-2: a Settings-page auto-save that fired during this write re-runs now.
-                if self
-                    .settings
-                    .file(BOOKMARKS_PATH)
-                    .is_some_and(|f| f.queued && f.can_save())
-                {
-                    return self.save_settings_file(BOOKMARKS_PATH.to_owned());
-                }
-            }
             edit => {
                 if self.shadow_blocked("bookmark edits are disabled in shadow mode") {
                     return Task::none();
@@ -3124,27 +3086,25 @@ impl App {
                     self.status.set_error(format!("bookmarks: {err}"));
                     return Task::none();
                 }
-                let job = self
+                // WP-R2 (SR1): the shared settings write, landing in `SettingsMsg::Saved`.
+                if self
                     .settings
-                    .file_mut(BOOKMARKS_PATH)
-                    .and_then(crate::settings::ConfigFile::begin_save);
-                self.sync_bookmarks();
-                let Some(job) = job else {
-                    self.status.set_error(
-                        "bookmarks: the file has form errors; fix them on the Settings page".into(),
-                    );
-                    if let (Some(d), Some(f)) =
-                        (self.daemon.clone(), self.settings.file_mut(BOOKMARKS_PATH))
-                    {
-                        f.load(d.as_ref());
-                    }
+                    .file(BOOKMARKS_PATH)
+                    .is_some_and(crate::settings::ConfigFile::can_save)
+                {
+                    let task = self.save_settings_file(BOOKMARKS_PATH.to_owned());
                     self.sync_bookmarks();
-                    return Task::none();
-                };
-                return self.rpc(
-                    move |d| job.run(d),
-                    |r| Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Written(r))),
+                    return task;
+                }
+                self.status.set_error(
+                    "bookmarks: the file has form errors; fix them on the Settings page".into(),
                 );
+                if let (Some(d), Some(f)) =
+                    (self.daemon.clone(), self.settings.file_mut(BOOKMARKS_PATH))
+                {
+                    f.load(d.as_ref());
+                }
+                self.sync_bookmarks();
             }
         }
         Task::none()
@@ -3256,9 +3216,6 @@ impl App {
                 }
                 Err(e) => self.status.set_error(e),
             },
-            ExplorerMsg::DeleteSaved { path, seq, outcome } => {
-                return self.delete_saved(path, seq, outcome);
-            }
             ExplorerMsg::NoteDeleted(result) => match result {
                 Ok(r) => {
                     let indexed = self.indexed_fn();
@@ -3430,56 +3387,12 @@ impl App {
                 to,
             });
         }
-        let Some(job) = doc.begin_save(false) else {
-            self.status
-                .set_error("rename not done (the note is saving or has a conflict)".into());
-            return Task::none();
-        };
-        let seq = job.seq;
-        let from = path.to_owned();
-        self.rpc(
-            move |d| Ok(job.run(d)),
-            move |r| {
-                Message::Reading(crate::message::ReadingMsg::TitleSaved {
-                    path: from,
-                    to,
-                    seq,
-                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
-                })
-            },
-        )
-    }
-
-    /// The save-before-rename finished: rename on success, else abort and surface it.
-    fn title_saved(
-        &mut self,
-        path: &str,
-        to: &str,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-    ) -> Task<Message> {
-        use crate::source::SaveOutcome;
-        let Some(doc) = self.docs.get_mut(path) else {
-            return Task::none();
-        };
-        let ok = matches!(outcome, SaveOutcome::Saved(_));
-        if let Err(e) = doc.finish_save(seq, outcome) {
-            self.status
-                .set_error(format!("rename not done (save failed: {e})"));
-            return Task::none();
-        }
-        if !ok || doc.is_dirty() {
-            self.status.set_error(if ok {
-                "rename not done (the note changed while saving)".into()
-            } else {
-                "rename not done (save conflict: the file changed on disk)".into()
-            });
-            return Task::none();
-        }
-        self.dispatch_op(FileOp::Rename {
-            from: path.to_owned(),
-            to: to.to_owned(),
-        })
+        self.save_then(path, Some(AfterSave::Rename(to)))
+            .unwrap_or_else(|| {
+                self.status
+                    .set_error("rename not done (the note is saving or has a conflict)".into());
+                Task::none()
+            })
     }
 
     /// A renamed file's open tabs follow it (re-read at the new path). Plan
@@ -3692,7 +3605,6 @@ impl App {
                     s.selected += 1;
                 }
             }
-            SwitcherMsg::Modifiers(m) => s.shift = switcher::shift(m),
             SwitcherMsg::Submit => {
                 if !s.open {
                     return Task::none();
@@ -3704,7 +3616,7 @@ impl App {
                     };
                 }
                 match s.current().map(str::to_owned) {
-                    Some(p) if !s.shift => {
+                    Some(p) if !self.modifiers.shift() => {
                         s.open = false;
                         self.open_with(&p, self.quick_switch_place(), true);
                     }
@@ -3943,12 +3855,6 @@ impl App {
                 self.palette
                     .prompt_input(pm, &self.explorer.paths, &self.ui.recent);
             }
-            PaletteMsg::SaveDone {
-                path,
-                seq,
-                outcome,
-                call,
-            } => return self.after_save_first(&path, seq, outcome, call),
             PaletteMsg::Ran {
                 title,
                 origin,
@@ -4129,75 +4035,14 @@ impl App {
         if shadow || !doc.is_dirty() {
             return self.dispatch_call(call);
         }
-        let Some(job) = doc.begin_save(false) else {
-            self.status.set_error(format!(
-                "{}: not run (the note is saving or has a conflict)",
-                call.title
-            ));
-            return Task::none();
-        };
-        let seq = job.seq;
-        self.rpc(
-            move |d| Ok(job.run(d)),
-            move |r| {
-                Message::Palette(PaletteMsg::SaveDone {
-                    path,
-                    seq,
-                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
-                    call,
-                })
-            },
-        )
-    }
-
-    fn after_save_first(
-        &mut self,
-        path: &str,
-        seq: u64,
-        outcome: crate::source::SaveOutcome,
-        call: crate::palette::Call,
-    ) -> Task<Message> {
-        use crate::source::SaveOutcome;
-        let reading_sel = self
-            .active_note()
-            .is_some_and(|t| t.path == path)
-            .then(|| self.reading_selection())
-            .flatten();
-        let Some(tab) = self.docs.get_mut(path) else {
-            self.status
-                .set_error(format!("{}: not run (note closed)", call.title));
-            return Task::none();
-        };
-        let ok = matches!(outcome, SaveOutcome::Saved(_));
-        let again = match tab.finish_save(seq, outcome.clone()) {
-            Ok(again) => again,
-            Err(e) => {
-                self.status
-                    .set_error(format!("{}: not run (save failed: {e})", call.title));
-                return Task::none();
-            }
-        };
-        if !ok {
-            self.status.set_error(format!(
-                "{}: not run (save conflict: the file changed on disk)",
-                call.title
-            ));
-            return Task::none();
-        }
-        let ctx = crate::palette::context(Some(&*tab), reading_sel);
-        let follow = if again { tab.begin_save(false) } else { None };
-        let follow = match follow {
-            Some(job) => {
-                let done = job.clone();
-                self.rpc(
-                    move |d| Ok(job.run(d)),
-                    move |r| done.done(r.unwrap_or_else(SaveOutcome::Failed)),
-                )
-            }
-            None => Task::none(),
-        };
-        let run = self.dispatch_with(call, ctx);
-        Task::batch([follow, run])
+        let title = call.title.clone();
+        self.save_then(&path, Some(AfterSave::RunCall(call)))
+            .unwrap_or_else(|| {
+                self.status.set_error(format!(
+                    "{title}: not run (the note is saving or has a conflict)"
+                ));
+                Task::none()
+            })
     }
 
     fn dispatch_call(&mut self, call: crate::palette::Call) -> Task<Message> {
@@ -5003,12 +4848,19 @@ impl App {
                     let failed = !matches!(r, Ok(crate::settings::WriteOutcome::Saved(_)));
                     // Plan round-7 WP-3: a failed save reaches the bar (Error); a CAS
                     // conflict (reloaded from disk) is a Warning.
-                    let severity = if r.is_err() {
+                    // Bookmarks (panel edits): a conflict is an Error too, and a failed write
+                    // reloads the shared file (the panel shows what is on disk).
+                    let bookmarks = path == BOOKMARKS_PATH;
+                    let severity = if r.is_err() || bookmarks {
                         Severity::Error
                     } else {
                         Severity::Warning
                     };
+                    let reload = bookmarks && r.is_err();
                     f.finish_save(r, d.as_deref());
+                    if reload && let Some(d) = &d {
+                        f.load(d.as_ref());
+                    }
                     if failed && let Some(n) = &f.notice {
                         self.status.notify_from(severity, n.clone(), path.clone());
                     }
@@ -5783,18 +5635,34 @@ fn mouse_button_event(
     }
 }
 
-/// User input a modal layer (dialog, then context menu) drops: keys, chords, tab / editor /
-/// find / switcher messages, the focus-loss flush, a repeated close request. Async
-/// completions (saves, autosave ticks) still run.
+/// WP-R2: how a save-first save landed, for [`App::resume_after`].
+enum Landed {
+    /// Saved and the buffer is clean.
+    Clean,
+    /// The document is no longer open.
+    Gone,
+    Failed(String),
+    Conflict,
+    /// Saved, but an edit typed meanwhile left it dirty (no follow-up was queued).
+    Changed,
+}
+
+/// User input a modal layer (dialog, then context menu) drops: every [`MsgKind::Input`] of the
+/// tab / editor / find / switcher sub-enums, plus palette chords. Completions (saves, ticks,
+/// `Created`, pastes) and modifier state always run (WP-R2, SR3).
+///
+/// [`MsgKind::Input`]: crate::message::MsgKind::Input
 fn is_modal_blocked(m: &Message) -> bool {
-    match m {
-        Message::Switcher(_) | Message::Find(_) | Message::Palette(PaletteMsg::Key(_)) => true,
-        Message::Tabs(TabsMsg::QuitSaved { .. } | TabsMsg::CloseSaved { .. }) => false,
-        Message::Tabs(_) => true,
-        Message::Source(SourceMsg::Saved { .. } | SourceMsg::AutosaveDue { .. }) => false,
-        Message::Source(_) => true,
-        _ => false,
-    }
+    use crate::message::MsgKind;
+    let kind = match m {
+        Message::Switcher(m) => m.kind(),
+        Message::Find(m) => m.kind(),
+        Message::Tabs(m) => m.kind(),
+        Message::Source(m) => m.kind(),
+        Message::Palette(PaletteMsg::Key(_)) => MsgKind::Input,
+        _ => MsgKind::Completion,
+    };
+    kind == MsgKind::Input
 }
 
 fn open_error(e: &DaemonError) -> String {
