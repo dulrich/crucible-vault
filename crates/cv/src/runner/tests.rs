@@ -123,18 +123,20 @@ async fn user_lane_claimed_before_background_and_job_updated_published() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let o2 = Arc::clone(&order);
     let exec = FnExec(Box::new(move |_, ctx| {
-        o2.lock().unwrap().push(ctx.job_id.to_owned());
+        o2.lock()
+            .unwrap()
+            .push(ctx.context.active_path.clone().unwrap_or_default());
         Ok(StepOutcome::default())
     }));
     let r = runner(&f, Arc::new(exec), Arc::new(SystemClock), 1, ONE_STEP);
     let mut rx = f.events.subscribe();
-    let bg = enqueue(&r, "look", None, Lane::Background);
-    let user = enqueue(&r, "look", None, Lane::User);
+    let bg = enqueue(&r, "look", Some("bg.md"), Lane::Background);
+    let user = enqueue(&r, "look", Some("user.md"), Lane::User);
     let (_stop_tx, stop) = watch::channel(false);
     let _h = r.spawn_claim_loop(stop);
     assert_eq!(wait_terminal(&f, &bg).await, DbStatus::Done);
     assert_eq!(wait_terminal(&f, &user).await, DbStatus::Done);
-    assert_eq!(*order.lock().unwrap(), vec![user.clone(), bg.clone()]);
+    assert_eq!(*order.lock().unwrap(), vec!["user.md", "bg.md"]);
     let mut seen = Vec::new();
     while let Ok(n) = rx.try_recv() {
         if let Notification::JobUpdated(s) = n

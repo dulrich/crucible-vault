@@ -5,9 +5,7 @@
 //! no-op detection (`:137`): an upsert whose merged record equals the stored row performs no
 //! write. Nothing Obsidian-induced was carried (Crucible's store already lived in SQLite).
 
-use std::path::Path;
-
-use rusqlite::{OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 
 use crate::error::Result;
@@ -394,27 +392,6 @@ impl StateDb {
     }
 }
 
-/// Reads every `link_records` row of a Crucible `jobs.sqlite`, opened read-only and immutable
-/// (`file:<path>?mode=ro&immutable=1`) so the frozen file is never written or locked.
-pub fn read_crucible_link_records(path: &Path) -> Result<Vec<LinkRecord>> {
-    let uri = format!(
-        "file:{}?mode=ro&immutable=1",
-        path.to_string_lossy()
-            .replace('%', "%25")
-            .replace('?', "%3f")
-            .replace('#', "%23")
-    );
-    let conn = rusqlite::Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM link_records ORDER BY canonical_url"
-    ))?;
-    let rows = stmt.query_map([], row)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,59 +500,5 @@ mod tests {
         assert!(db.link_records_by_x("Y").unwrap().is_empty());
         let r = db.link_record("https://ex.com/p").unwrap().unwrap();
         assert_eq!(r.source_notes, vec!["[[a]]", "[[b]]"]);
-    }
-
-    #[test]
-    fn crucible_import_is_idempotent_and_read_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let jobs = dir.path().join("jobs.sqlite");
-        let c = rusqlite::Connection::open(&jobs).unwrap();
-        c.execute_batch(
-            "CREATE TABLE link_records (canonical_url TEXT PRIMARY KEY, url TEXT NOT NULL,
-             domain TEXT NOT NULL DEFAULT '', source_notes TEXT NOT NULL DEFAULT '[]',
-             first_seen TEXT, last_seen TEXT, state TEXT NOT NULL DEFAULT 'pending',
-             discovery_method TEXT NOT NULL DEFAULT 'scan', tracked_source TEXT NOT NULL DEFAULT 'false',
-             tracked_source_type TEXT, tracked_source_note TEXT, referred_material TEXT,
-             decision_reason TEXT, yt_video_id TEXT, x_status_id TEXT);
-             INSERT INTO link_records VALUES
-             ('https://youtube.com/@c', 'https://www.youtube.com/@c', 'youtube.com', '[\"[[a]]\"]',
-              '2026-01-01', '2026-02-01', 'pending', 'scan', '\"candidate\"', 'youtube-channel', NULL, NULL, NULL, NULL, NULL),
-             ('https://youtube.com/watch?v=abc', 'https://youtu.be/abc', 'youtube.com', '[\"[[a]]\",\"[[b]]\"]',
-              '2026-01-02', '2026-03-01', 'kept', 'scan', 'false', NULL, NULL, 'ref', 'why', 'abc', NULL),
-             ('https://x.com/u/status/42', 'https://x.com/u/status/42', 'x.com', '[\"[[c]]\"]',
-              '2026-01-03', '2026-01-03', 'pending', 'import', 'false', NULL, NULL, NULL, NULL, NULL, '42');",
-        )
-        .unwrap();
-        drop(c);
-        let before = std::fs::read(&jobs).unwrap();
-        let mut db = StateDb::open(&dir.path().join("s.db"), 0, Default::default()).unwrap();
-        let import = |db: &mut StateDb| {
-            read_crucible_link_records(&jobs)
-                .unwrap()
-                .into_iter()
-                .map(|r| db.upsert_link_record(&LinkRecordInput::from(r)).unwrap())
-                .collect::<Vec<_>>()
-        };
-        let first = import(&mut db);
-        assert_eq!(first.len(), 3);
-        assert!(first.iter().all(|o| o.created && o.changed));
-        let changes = db.conn().total_changes();
-        let second = import(&mut db);
-        assert!(second.iter().all(|o| !o.created && !o.changed));
-        assert_eq!(db.conn().total_changes(), changes);
-        assert_eq!(std::fs::read(&jobs).unwrap(), before, "source untouched");
-        let r = db.link_record("https://youtube.com/@c").unwrap().unwrap();
-        assert_eq!(r.tracked_source, json!("candidate"));
-        let v = db.link_records_by_yt("abc").unwrap();
-        assert_eq!(v[0].source_notes, vec!["[[a]]", "[[b]]"]);
-        assert_eq!(
-            (v[0].state.as_str(), v[0].decision_reason.as_deref()),
-            ("kept", Some("why"))
-        );
-        assert_eq!(
-            db.link_records_by_x("42").unwrap()[0].discovery_method,
-            "import"
-        );
-        assert_eq!(db.link_records_with_x().unwrap().len(), 1);
     }
 }

@@ -93,7 +93,9 @@ pub struct PreparedFile {
 }
 
 /// `localizedImageInfo` → `(md5, basename)`: `([a-f0-9]{32})_MD5\.([A-Za-z0-9]+)$` on the
-/// file name, case-insensitive.
+/// file name, case-insensitive. Kept apart from `cv_text::attachments::is_md5_name` on purpose:
+/// that predicate is case-sensitive (`_MD5.`) and does not extract or length-check the hash, and
+/// `cv-search` has no `cv-text` edge.
 #[must_use]
 pub fn localized_image_md5(path: &str) -> Option<(String, String)> {
     let normalized: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();

@@ -6,7 +6,7 @@
 //!
 //! | Key | Default | Meaning |
 //! |---|---|---|
-//! | `embed` | absent | `"provider:model"` from `providers.toml`; absent = lexical-only (Crucible with semantic indexing off). The index space is [`cv_search::space_model`] of the model. |
+//! | `embed` | absent | `"provider:model"` from `providers.toml`; absent = lexical-only (Crucible with semantic indexing off). The index space is the model id. |
 //! | `path` | `active_path` | Target note. `search_upsert` without one is the reconcile sweep (`search-refresh`). |
 //!
 //! **Mode is decided fail-closed** from the vault writer: writer unavailable → report-only:
@@ -27,7 +27,7 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_index::{LinkKind, Reader};
 use cv_providers::{ProviderManager, ProvidersConfig, parse_model_ref};
 use cv_search::chunker::{DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
-use cv_search::feed::{self, EmbedTarget, FeedConfig, FeedReport, LocalNote, ShadowScope};
+use cv_search::feed::{self, EmbedTarget, FeedConfig, FeedReport, LocalNote, ReportScope};
 use cv_search::{
     EmbedRef, LinkedSource, PrepareHost, PrepareInput, SearchError, is_search_indexable_path,
     prepare_search_file,
@@ -147,8 +147,8 @@ pub(crate) fn query_embed_target(config: &ConfigSet) -> Option<EmbedTarget> {
         .ok()
 }
 
-/// Live only when the writer thread positively answers (fail-closed; shadow mode was retired in
-/// plan tn-review-baseline-remediation WP-R6).
+/// Live only when the writer thread positively answers (fail-closed; otherwise the step only
+/// reports counts).
 fn is_live(ctx: &StepCtx<'_>) -> bool {
     ctx.writer()
         .ok()
@@ -243,25 +243,25 @@ pub(crate) fn run(
     } else {
         match (p.delete, target) {
             (true, Some(path)) => {
-                feed::shadow_report(search.path(), &cfg, ShadowScope::Path(&path, None))
+                feed::report_only(search.path(), &cfg, ReportScope::Path(&path, None))
             }
             (_, Some(path)) => {
                 let hash = host.local_note(&path)?.map(|n| n.prepared.content_hash);
-                feed::shadow_report(
+                feed::report_only(
                     search.path(),
                     &cfg,
-                    ShadowScope::Path(&path, hash.as_deref()),
+                    ReportScope::Path(&path, hash.as_deref()),
                 )
             }
             (_, None) => {
                 let local = host.local_hashes()?;
-                feed::shadow_report(search.path(), &cfg, ShadowScope::All(&local))
+                feed::report_only(search.path(), &cfg, ReportScope::All(&local))
             }
         }
     }
     .map_err(map_err)?;
     tracing::info!(
-        mode = if live { "live" } else { "shadow" },
+        mode = if live { "live" } else { "report_only" },
         matched = report.counts.matched,
         mismatched = report.counts.mismatched,
         missing_index = report.counts.missing_index,
@@ -278,7 +278,7 @@ pub(crate) type ReadFn<'r> = Box<dyn Fn(&str) -> Result<Option<Vec<u8>>, StepErr
 pub(crate) type DescribeFn<'r> = Box<dyn Fn(&str) -> Option<ImageDescription> + 'r>;
 
 /// File preparation's host: index queries, a vault read function and an image-description
-/// lookup. The feed step builds it over the overlay-aware writer and the daemon's `StateDb`.
+/// lookup. The feed step builds it over the daemon's writer and the daemon's `StateDb`.
 pub(crate) struct NotePrep<'r> {
     read: ReadFn<'r>,
     reader: &'r Reader,

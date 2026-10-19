@@ -296,8 +296,6 @@ pub trait ChildSpawner {
 
 /// Everything a step sees. Built per step by the runner.
 pub struct StepCtx<'a> {
-    /// The job id.
-    pub job_id: &'a str,
     /// The running action.
     pub action: &'a Action,
     /// 0-based index of this step.
@@ -445,7 +443,6 @@ impl<'a> StepCtx<'a> {
     /// with `vars` in place of this step's vars and its own (empty) written list.
     pub fn with_vars<'b>(&'b self, vars: &'b Map<String, Value>) -> StepCtx<'b> {
         StepCtx {
-            job_id: self.job_id,
             action: self.action,
             step_index: self.step_index,
             params: self.params,

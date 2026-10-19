@@ -5,10 +5,8 @@
 //! paragraph packing with overlap, image and linked-post chunks, the folded `contentHash`) is
 //! Crucible's. The strings are Rust `str`: lengths, `max_chars`/`overlap_chars` and slices count
 //! `char`s (so a slice never splits a code point), whitespace is [`char::is_whitespace`], facets
-//! sort in `str` order and [`hash_string`] runs over UTF-8 bytes. The UTF-16 compatibility layer
-//! that let cut-over inherit the retired Node companion's embeddings was dropped (plan
-//! tn-review-baseline-remediation WP-R7, D22 amendment); the change cost one re-embed
-//! (migration 0011).
+//! sort in `str` order and [`hash_string`] runs over UTF-8 bytes. Hashes and slice boundaries
+//! therefore differ from Crucible's UTF-16 ones, so vectors are not shared with Crucible's index.
 //!
 //! Dropped (Obsidian-induced or unused here): nothing in this module is Obsidian-induced; the
 //! TS module is already a pure, settings-free function of its input. `isImageChunkHeading` is a

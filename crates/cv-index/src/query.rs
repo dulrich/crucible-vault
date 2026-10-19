@@ -504,10 +504,7 @@ impl Reader {
                 .ok_or_else(|| Error::NoIndex(base.display().to_string()))?;
             Self::open(base, generation)
         };
-        match once() {
-            Err(Error::GenerationMissing { .. }) => once(),
-            r => r,
-        }
+        retry_generation_swap(once)
     }
 
     /// The generation this handle reads.
@@ -529,9 +526,42 @@ impl Reader {
     }
 }
 
+/// The reader retry policy: one `GenerationMissing` (a swap between reading the pointer and
+/// opening the file) is retried once; any other result, or a second miss, is returned as is.
+fn retry_generation_swap<T>(mut once: impl FnMut() -> Result<T>) -> Result<T> {
+    match once() {
+        Err(Error::GenerationMissing { .. }) => once(),
+        r => r,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn missing() -> Error {
+        Error::GenerationMissing {
+            generation: 1,
+            path: "index-1.db".into(),
+        }
+    }
+
+    #[test]
+    fn open_current_retries_one_generation_swap_only() {
+        let mut calls = 0;
+        let r = retry_generation_swap(|| {
+            calls += 1;
+            if calls == 1 { Err(missing()) } else { Ok(2) }
+        });
+        assert_eq!((r.ok(), calls), (Some(2), 2), "re-read + reopen succeeds");
+        let mut calls = 0;
+        let r: Result<u64> = retry_generation_swap(|| {
+            calls += 1;
+            Err(missing())
+        });
+        assert!(matches!(r, Err(Error::GenerationMissing { .. })));
+        assert_eq!(calls, 2, "a second miss is not retried again");
+    }
 
     #[test]
     fn file_paths_lists_every_file_sorted_and_matches_the_folder_walk() {

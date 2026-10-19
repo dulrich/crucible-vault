@@ -933,7 +933,6 @@ fn execute_steps(
             return (JobResult::Cancelled, summary);
         }
         let mut ctx = StepCtx {
-            job_id,
             action,
             step_index: i,
             params: &jp.params,

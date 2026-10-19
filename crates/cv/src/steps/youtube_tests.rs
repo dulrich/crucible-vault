@@ -225,7 +225,6 @@ fn second_note_finds_the_same_note_and_exists_counts_as_found() {
     // The concurrent-create invariant: the writer's Exists → found, one note.
     let _rt = w.rt.enter();
     let mut ctx = w.ctx();
-    ctx.job_id = "job-2";
     let p = "_yt_metadata/synth-channel/dQw4w9WgXcQ.md";
     assert!(!create_or_found(&mut ctx, p, b"other".to_vec()).unwrap());
     assert!(ctx.written.is_empty());

@@ -21,14 +21,12 @@ mod tests;
 pub use error::{Result, StateError};
 pub use health::{BreakerState, ServiceFailureKind, ServiceHealth};
 pub use id::new_job_id;
-pub use image_descriptions::{ImageDescription, ImportSummary};
+pub use image_descriptions::ImageDescription;
 pub use job::{
     EnqueueOutcome, FailureKind, FailureReason, Job, JobResult, JobStatus, Lane, NewJob,
     namespaced_key,
 };
-pub use link_records::{
-    LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome, read_crucible_link_records,
-};
+pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
 pub use query::{ListQuery, StatusCount};
 pub use runner_state::StepCheckpoint;
 pub use store::{

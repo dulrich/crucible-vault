@@ -656,7 +656,7 @@ pub fn ext_from_mime(mime: &str) -> Option<&'static str> {
 /// Crucible `extFromUrl`.
 pub fn ext_from_url(u: &str) -> Option<String> {
     let url = url::Url::parse(u).ok()?;
-    let last = url.path().rsplit('/').next()?;
+    let last = basename(url.path());
     let (_, ext) = last.rsplit_once('.')?;
     (!ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric()))
         .then(|| ext.to_ascii_lowercase())
@@ -772,7 +772,10 @@ pub fn has_remote_image_refs(content: &str) -> bool {
 }
 
 /// The number of managed (`<md5>_MD5.<image ext>`) image names in `content` (the `images`
-/// outcome var; plan `v0-automation-pipelines` WP-6: the image-describe trigger seam).
+/// outcome var; plan `v0-automation-pipelines` WP-6: the image-describe trigger seam). A regex
+/// scan over note text with an image-extension allowlist and a word boundary — not the
+/// name-level [`is_md5_name`] classification, which accepts any alphanumeric extension and
+/// matches only a whole name.
 #[must_use]
 pub fn count_managed_images(content: &str) -> u64 {
     managed_image_re().find_iter(content).count() as u64

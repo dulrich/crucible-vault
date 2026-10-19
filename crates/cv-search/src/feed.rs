@@ -10,13 +10,13 @@
 //! [`semsearch::Index::upsert_source_in`] in [`space_for`]'s space; otherwise keyword-only.
 //!
 //! **Embeddings.** A path is unchanged when its hash matches and, with an embedder configured,
-//! every chunk is embedded in the recorded space whose model is [`space_model`] of the configured
-//! one. Unchanged paths make no embed call. A recorded space with another model is
+//! every chunk is embedded in the recorded space whose model is the configured model id.
+//! Unchanged paths make no embed call. A recorded space with another model is
 //! [`SearchError::SpaceMismatch`] before any embed call (a space change is a rebuild). An
 //! embedder outage is [`SearchError::EmbedderUnavailable`] (→ deferred on the provider id), so a
 //! vector gap never gets recorded as done.
 //!
-//! **Shadow.** [`shadow_report`] opens the file read-only, makes no embed call and no write, and
+//! **Report only.** [`report_only`] opens the file read-only, makes no embed call and no write, and
 //! returns aggregate counts only.
 //!
 //! **Locking.** The shared index lock is held only around index calls, never across an embed.
@@ -40,25 +40,10 @@ pub const NOTE_BATCH: usize = 64;
 /// The vault id folded into stable chunk ids (Crucible's `searchVaultId` default).
 pub const DEFAULT_VAULT_ID: &str = "default";
 
-/// Legacy companion space strings for serving model ids (audit E2): imported vectors and newly
-/// fed vectors must share one `semsearch` space.
-const SPACE_MODELS: [(&str, &str); 1] = [("bge-m3-f16", "bge-m3/f16")];
-
-/// The `semsearch` [`Space::model`] for a configured embed model id: the legacy companion space
-/// string when one exists, else the id itself.
-#[must_use]
-pub fn space_model(model_id: &str) -> String {
-    SPACE_MODELS
-        .iter()
-        .find(|(m, _)| *m == model_id)
-        .map_or(model_id, |(_, s)| s)
-        .to_owned()
-}
-
 /// The write space for `model_id` at `dim` (the embedder's output width).
 #[must_use]
 pub fn space_for(model_id: &str, dim: usize) -> Space {
-    Space::new(&space_model(model_id), dim)
+    Space::new(model_id, dim)
 }
 
 /// A configured embedder.
@@ -66,7 +51,7 @@ pub fn space_for(model_id: &str, dim: usize) -> Space {
 pub struct EmbedTarget {
     /// Provider.
     pub provider: ProviderConfig,
-    /// Serving model id (mapped to the index space by [`space_model`]).
+    /// Serving model id (also the index space's model).
     pub model: String,
 }
 
@@ -92,7 +77,7 @@ pub struct LocalNote {
     pub mtime: i64,
 }
 
-/// Classification counts — what shadow mode may report.
+/// Classification counts — what a report-only call may report.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FeedCounts {
     /// Hash equal (and embeddings current when checked).
@@ -231,7 +216,7 @@ async fn embed_chunks(
             }
             c.embedding = Some(v);
             c.embedding_model = Some(t.model.clone());
-            c.embedding_space = Some(space_model(&t.model));
+            c.embedding_space = Some(t.model.clone());
         }
     }
     Ok(dim)
@@ -262,8 +247,8 @@ fn to_chunk(c: SearchChunk) -> semsearch::Chunk {
 fn check_space(index: &Mutex<Index>, cfg: &FeedConfig) -> Result<Option<Space>, SearchError> {
     let recorded = lock(index).space().cloned();
     if let (Some(r), Some(t)) = (&recorded, &cfg.embed) {
-        let want = space_model(&t.model);
-        if r.model != want {
+        let want = &t.model;
+        if r.model != *want {
             return Err(SearchError::SpaceMismatch {
                 recorded: format!("{}/{}d", r.model, r.dim),
                 configured: format!("{want}/?d"),
@@ -327,7 +312,7 @@ async fn write_notes(
 }
 
 fn want_model(cfg: &FeedConfig) -> Option<String> {
-    cfg.embed.as_ref().map(|t| space_model(&t.model))
+    cfg.embed.as_ref().map(|t| t.model.clone())
 }
 
 /// `search_upsert` for one path. `note = None` means the path is gone or not indexable: the
@@ -422,21 +407,21 @@ pub fn delete_path(index: &Mutex<Index>, path: &str) -> Result<FeedReport, Searc
     Ok(report)
 }
 
-/// What a shadow step classifies.
+/// What a report-only call classifies.
 #[derive(Debug, Clone, Copy)]
-pub enum ShadowScope<'a> {
+pub enum ReportScope<'a> {
     /// One path (`search_upsert`/`search_delete` with a target); `None` hash = gone locally.
     Path(&'a str, Option<&'a str>),
     /// The reconcile sweep over every indexable note.
     All(&'a [(String, String)]),
 }
 
-/// Shadow mode: a read-only open of `search_db` (a missing file is an empty index — never an
+/// Report-only mode: a read-only open of `search_db` (a missing file is an empty index — never an
 /// error, never a create), no embed call, no write; aggregate counts only.
-pub fn shadow_report(
+pub fn report_only(
     search_db: &Path,
     cfg: &FeedConfig,
-    scope: ShadowScope<'_>,
+    scope: ReportScope<'_>,
 ) -> Result<FeedReport, SearchError> {
     let (states, recorded) = match Index::open_read_only(search_db, &IndexOptions::default()) {
         Ok(idx) => (idx.source_states()?, idx.space().cloned()),
@@ -445,17 +430,17 @@ pub fn shadow_report(
     };
     let want = want_model(cfg);
     let counts = match scope {
-        ShadowScope::Path(path, Some(hash)) => {
+        ReportScope::Path(path, Some(hash)) => {
             let states: Vec<SourceState> =
                 states.into_iter().filter(|s| s.source == path).collect();
             let local = [(path.to_owned(), hash.to_owned())];
             classify(&local, &states, recorded.as_ref(), want.as_deref(), false).counts
         }
-        ShadowScope::Path(path, None) => FeedCounts {
+        ReportScope::Path(path, None) => FeedCounts {
             missing_local: usize::from(states.iter().any(|s| s.source == path)),
             ..FeedCounts::default()
         },
-        ShadowScope::All(local) => {
+        ReportScope::All(local) => {
             classify(local, &states, recorded.as_ref(), want.as_deref(), true).counts
         }
     };
@@ -479,12 +464,10 @@ mod tests {
     }
 
     #[test]
-    fn space_model_maps_legacy_ids_only() {
-        assert_eq!(space_model("bge-m3-f16"), "bge-m3/f16");
-        assert_eq!(space_model("nomic"), "nomic");
+    fn space_for_uses_the_configured_id() {
         assert_eq!(
             space_for("bge-m3-f16", 1024),
-            Space::new("bge-m3/f16", 1024)
+            Space::new("bge-m3-f16", 1024)
         );
     }
 

@@ -890,9 +890,8 @@ mod tests {
         assert!(!d.ensure_blank_line_after());
     }
 
-    // ---- B10: the canonical span + set_edit (cases ported from the retired detectors:
-    // `cv::steps::agent::split_frontmatter`, capture's `FRONTMATTER` regex and
-    // `editor_model::render::frontmatter_bool_set`).
+    // ---- the canonical span + set_edit (the cases every frontmatter detector in the workspace
+    // must agree on).
 
     fn split(t: &str) -> (&str, &str) {
         t.split_at(span(t).map_or(0, |r| r.end))

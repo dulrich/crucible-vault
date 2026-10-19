@@ -3,7 +3,7 @@
 //!
 //! **Query embedding (Decision 4).** The target is the `embed` of the first `search_upsert`
 //! step ([`crate::steps::search::query_embed_target`]). It is used only when
-//! [`cv_search::feed::space_model`] of its model equals the index's recorded space model and the
+//! its model id equals the index's recorded space model and the
 //! index holds embedded chunks. Otherwise — no `embed`, no recorded space, an empty index, a
 //! space mismatch, any embedder failure, or a width mismatch — the query is keyword-only and
 //! `semantic` is false; an embedder failure is a `warn` log, never an error.
@@ -47,7 +47,7 @@ pub async fn search(
 
     let mut vector = None;
     if let (Some(space), Some(t)) = (space, crate::steps::search::query_embed_target(config))
-        && cv_search::feed::space_model(&t.model) == space.model
+        && t.model == space.model
     {
         match mgr
             .embed(&t.provider, &t.model, std::slice::from_ref(&text))

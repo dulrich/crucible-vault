@@ -29,7 +29,6 @@ pub(crate) struct StepEnv {
     pub state: Arc<Mutex<StateDb>>,
     pub config: ConfigSet,
     pub action: Action,
-    pub job_id: &'static str,
     pub params: Map<String, Value>,
     pub context: ActionContext,
     pub vars: Map<String, Value>,
@@ -45,7 +44,6 @@ impl StepEnv {
             state: Arc::new(Mutex::new(state)),
             config,
             action,
-            job_id: "job-1",
             params: Map::new(),
             context: ActionContext::default(),
             vars: Map::new(),
@@ -60,7 +58,6 @@ impl StepEnv {
     /// A step context over this env's defaults (step 0, no search, no children).
     pub fn ctx(&self) -> StepCtx<'_> {
         StepCtx {
-            job_id: self.job_id,
             action: &self.action,
             step_index: 0,
             params: &self.params,
@@ -161,9 +158,7 @@ pub(crate) fn example_env(files: &[(&str, &str)]) -> StepEnv {
     let config = example_config();
     assert!(config.errors().is_empty(), "{:?}", config.errors());
     let action = config.action("lint-note").unwrap().clone();
-    let mut env = StepEnv::new(fx, config, action);
-    env.job_id = "job-wp10";
-    env
+    StepEnv::new(fx, config, action)
 }
 
 impl StepEnv {

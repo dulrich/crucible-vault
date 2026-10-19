@@ -4,16 +4,13 @@
 //! Ported from Crucible's `ImageDescriptionStore` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/search/
 //! imageDescriptionStore.ts`): one record per described image, keyed by the image's content
 //! MD5 — Crucible keys its index by the record file's basename (`<md5>.json`, `load()` at
-//! `:290-311`), and so does [`StateDb::import_image_descriptions_dir`]. `descriptionHash` is
+//! `:290-311`). `descriptionHash` is
 //! stored as written (never recomputed), because it is exactly the value Crucible folded into
 //! every note's `contentHash` (`combinedDescriptionHash`, `:217-227`).
 //!
 //! Dropped (Obsidian-induced): the per-file JSON storage under the plugin data dir, the lazy
 //! in-memory `md5 -> hash` index and the load-time corrupt-file purge — SQLite is the index. The
-//! import is one-time and **read-only on the source** (a corrupt record is counted, never
-//! deleted). The `pruneDegenerate`/`pruneFailed` hygiene belongs to A2's describe pipeline.
-
-use std::path::Path;
+//! `pruneDegenerate`/`pruneFailed` hygiene belongs to A2's describe pipeline.
 
 use crate::error::Result;
 use crate::store::StateDb;
@@ -37,38 +34,6 @@ pub struct ImageDescription {
     pub described_at: String,
     /// The full record JSON (provenance: provider/model ids, failure fields, schema version).
     pub raw: String,
-}
-
-/// Outcome of [`StateDb::import_image_descriptions_dir`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ImportSummary {
-    /// `*.json` entries read.
-    pub read: usize,
-    /// Records inserted or changed.
-    pub imported: usize,
-    /// Entries skipped: not `*.json`, or identical to the stored row.
-    pub skipped: usize,
-    /// Unreadable, unparseable or malformed records (Crucible `isValidRecord`).
-    pub errors: usize,
-}
-
-/// Crucible `isValidRecord` (`imageDescriptionStore.ts:129-142`).
-fn valid_record(v: &Value) -> bool {
-    let s = |k: &str| v.get(k).and_then(Value::as_str);
-    let opt_str = |k: &str| v.get(k).is_none_or(Value::is_string);
-    s("md5").is_some_and(|m| !m.is_empty())
-        && s("narrative").is_some()
-        && s("extraction").is_some()
-        && matches!(
-            s("kind"),
-            Some("vision" | "svg-text" | "imported" | "failed")
-        )
-        && s("describedAt").is_some()
-        && v.get("schemaVersion").is_some_and(Value::is_number)
-        && s("descriptionHash").is_some()
-        && opt_str("failure")
-        && v.get("failureClass")
-            .is_none_or(|c| matches!(c.as_str(), Some("transient" | "permanent")))
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageDescription> {
@@ -151,62 +116,6 @@ impl StateDb {
     /// Every stored record among `md5s`, ordered by md5 (unknown keys are skipped).
     pub fn image_descriptions_for(&self, md5s: &[String]) -> Result<Vec<ImageDescription>> {
         descriptions_for(self.conn(), md5s)
-    }
-
-    /// One-time import of Crucible's `image-descriptions/*.json` records. Read-only on `dir`;
-    /// idempotent (a re-run upserts and reports unchanged rows as skipped). The key is the file
-    /// basename, as Crucible's store index keys it. Not exposed on the CLI yet (WP-14).
-    pub fn import_image_descriptions_dir(&mut self, dir: &Path) -> Result<ImportSummary> {
-        let mut summary = ImportSummary::default();
-        let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "image description import: cannot list source dir");
-                summary.errors += 1;
-                return Ok(summary);
-            }
-        };
-        entries.sort();
-        let conn = self.conn();
-        let tx = conn.unchecked_transaction()?;
-        for path in entries {
-            let Some(md5) = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_suffix(".json"))
-                .filter(|m| !m.is_empty())
-                .map(str::to_owned)
-            else {
-                summary.skipped += 1;
-                continue;
-            };
-            summary.read += 1;
-            let parsed = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                .filter(valid_record);
-            let Some(v) = parsed else {
-                summary.errors += 1;
-                continue;
-            };
-            let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
-            let d = ImageDescription {
-                md5,
-                kind: s("kind"),
-                narrative: s("narrative"),
-                extraction: s("extraction"),
-                description_hash: s("descriptionHash"),
-                described_at: s("describedAt"),
-                raw: serde_json::to_string(&v)?,
-            };
-            if put_on(conn, &d)? {
-                summary.imported += 1;
-            } else {
-                summary.skipped += 1;
-            }
-        }
-        tx.commit()?;
-        Ok(summary)
     }
 
     /// Crucible `pruneFailed('transient')` (`imageDescriptionStore.ts:253-277`): deletes `failed`
@@ -302,64 +211,5 @@ mod tests {
             .image_descriptions_for(&["bb".into(), "zz".into(), "aa".into()])
             .unwrap();
         assert_eq!(via_reader, got);
-    }
-
-    #[test]
-    fn import_is_idempotent_and_counts_malformed() {
-        let src = tempfile::tempdir().unwrap();
-        let good = |n: &str, md5: &str| {
-            format!(
-                r#"{{"md5":"{md5}","narrative":"{n}","extraction":"","kind":"vision","describedAt":"t","schemaVersion":1,"descriptionHash":"1234abcd","providerId":"p","modelId":"m"}}"#
-            )
-        };
-        let a = "0123456789abcdef0123456789abcdef";
-        let b = "fedcba9876543210fedcba9876543210";
-        std::fs::write(
-            src.path().join(format!("{a}.json")),
-            good("synthetic one", a),
-        )
-        .unwrap();
-        std::fs::write(
-            src.path().join(format!("{b}.json")),
-            good("synthetic two", b),
-        )
-        .unwrap();
-        std::fs::write(src.path().join("bad.json"), r#"{"md5":"x","kind":"weird"}"#).unwrap();
-        std::fs::write(src.path().join("trunc.json"), "{").unwrap();
-        std::fs::write(src.path().join("notes.txt"), "ignored").unwrap();
-        let before: Vec<_> = std::fs::read_dir(src.path()).unwrap().collect();
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut s = StateDb::open(&dir.path().join("s.db"), 1, QueueConfig::default()).unwrap();
-        let first = s.import_image_descriptions_dir(src.path()).unwrap();
-        assert_eq!(
-            first,
-            ImportSummary {
-                read: 4,
-                imported: 2,
-                skipped: 1,
-                errors: 2
-            }
-        );
-        let second = s.import_image_descriptions_dir(src.path()).unwrap();
-        assert_eq!(
-            second,
-            ImportSummary {
-                read: 4,
-                imported: 0,
-                skipped: 3,
-                errors: 2
-            }
-        );
-        let d = s.image_description(a).unwrap().unwrap();
-        assert_eq!(d.narrative, "synthetic one");
-        assert_eq!(d.description_hash, "1234abcd");
-        assert!(d.raw.contains("\"modelId\""));
-        // Read-only on the source: nothing was deleted or added.
-        assert_eq!(std::fs::read_dir(src.path()).unwrap().count(), before.len());
-        let missing = s
-            .import_image_descriptions_dir(&src.path().join("nope"))
-            .unwrap();
-        assert_eq!(missing.errors, 1);
     }
 }

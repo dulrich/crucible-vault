@@ -563,7 +563,7 @@ fn feeding_exec() -> Arc<dyn StepExecutor> {
             "synthetic zebra stripes text",
         )
         .with_embedding(SEARCH_VEC.to_vec());
-        let space = cv_search::semsearch::Space::new(&cv_search::feed::space_model("m1"), 3);
+        let space = cv_search::semsearch::Space::new("m1", 3);
         cv_search::index::lock(&shared)
             .upsert_source_in(&space, "notes/zebra.md", "h1", &[chunk])
             .map_err(|e| StepError::failed(e.to_string()))?;
