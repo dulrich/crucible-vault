@@ -44,40 +44,156 @@ pub enum Want {
     Channels(Vec<String>),
 }
 
-/// One provider's live model list.
+/// One fetch's state (WP-R21 SM16: every source shares it).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Models {
-    Loading,
-    Live(Vec<LookupModel>),
-    /// RPC error or `live: false`: declared models only.
+pub enum Fetch<T> {
+    /// In flight.
+    Pending,
+    Ok(T),
+    /// The RPC failed (or, for models, the list is not live). Each source's status line names
+    /// its own failure; the error text is not shown.
     Failed,
 }
 
-/// The session cache.
-#[derive(Debug, Default)]
+/// One provider's live model list (`Failed`: declared models only).
+pub type Models = Fetch<Vec<LookupModel>>;
+
+/// When a failed entry is fetched again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    /// Never this session.
+    Never,
+    /// When the field's typeahead is next opened ([`Lookups::reopened`]); the explicit refresh
+    /// control ([`Lookups::refresh_models`]) refetches any settled entry.
+    OnReopen,
+}
+
+/// A keyed session cache of [`Fetch`]es with a retry policy and an optional bound (oldest
+/// settled entry evicted first).
+#[derive(Debug, Clone)]
+pub struct KeyedCache<K: Ord + Clone, T> {
+    entries: BTreeMap<K, Fetch<T>>,
+    /// Settled keys, oldest first (eviction order).
+    order: VecDeque<K>,
+    cap: usize,
+    retry: Retry,
+}
+
+impl<K: Ord + Clone, T> KeyedCache<K, T> {
+    pub fn new(retry: Retry, cap: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            order: VecDeque::new(),
+            cap,
+            retry,
+        }
+    }
+
+    pub fn get<Q: Ord + ?Sized>(&self, k: &Q) -> Option<&Fetch<T>>
+    where
+        K: std::borrow::Borrow<Q>,
+    {
+        self.entries.get(k)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether `k` has a settled (ok or failed) result.
+    pub fn settled<Q: Ord + ?Sized>(&self, k: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+    {
+        matches!(self.entries.get(k), Some(Fetch::Ok(_) | Fetch::Failed))
+    }
+
+    /// Whether `k` should be fetched now under the policy (`reopened`: a typeahead was opened).
+    pub fn wants<Q: Ord + ?Sized>(&self, k: &Q, reopened: bool) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+    {
+        match self.entries.get(k) {
+            None => true,
+            Some(Fetch::Failed) => self.retry == Retry::OnReopen && reopened,
+            Some(_) => false,
+        }
+    }
+
+    /// Marks `k` in flight (a settled entry keeps its eviction slot).
+    pub fn pending(&mut self, k: K) {
+        self.entries.insert(k, Fetch::Pending);
+    }
+
+    /// Lands a result for `k`, evicting the oldest settled entries past the bound.
+    pub fn settle(&mut self, k: K, v: Result<T, String>) {
+        let fresh = !self.settled(&k);
+        self.entries.insert(
+            k.clone(),
+            match v {
+                Ok(v) => Fetch::Ok(v),
+                Err(_) => Fetch::Failed,
+            },
+        );
+        if fresh {
+            self.order.push_back(k);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.entries.remove(&old);
+                }
+            }
+        }
+    }
+
+    /// The settled ok entries.
+    pub fn oks(&self) -> impl Iterator<Item = (&K, &T)> {
+        self.entries.iter().filter_map(|(k, v)| match v {
+            Fetch::Ok(t) => Some((k, t)),
+            _ => None,
+        })
+    }
+}
+
+/// The session cache. Per-source policy (unchanged by WP-R21): currencies and channel titles
+/// are never refetched; geocode never refetches a cached query and keeps the latest
+/// [`GEO_CACHE`] queries; a failed model list refetches when its typeahead re-opens and on the
+/// refresh control.
+#[derive(Debug)]
 pub struct Lookups {
-    /// `None` = never fetched; `Some(Err)` = failed (not retried this session).
-    pub currencies: Option<Result<Vec<LookupCurrency>, String>>,
-    currencies_pending: bool,
-    /// Geocode hits per normalized query (bounded, oldest evicted).
-    pub geo: BTreeMap<String, Result<Vec<LookupGeoResult>, String>>,
-    geo_order: VecDeque<String>,
+    /// The currency list (one key).
+    pub currencies: KeyedCache<(), Vec<LookupCurrency>>,
+    /// Geocode hits per normalized query (only settled queries are cached; bounded).
+    pub geo: KeyedCache<String, Vec<LookupGeoResult>>,
     /// The query the latest debounce tick is for, and its sequence.
     geo_wanted: Option<(u64, String)>,
     geo_seq: u64,
-    /// The query in flight.
-    geo_pending: Option<String>,
-    /// Live models per provider id. A `Failed` entry is re-fetched when a model field's
-    /// typeahead is next opened ([`Lookups::reopened`]) or on the field's refresh control
-    /// ([`Lookups::refresh_models`]) (plan round-6-feedback-todos WP-8).
-    pub models: BTreeMap<String, Models>,
+    /// Live models per provider id (plan round-6-feedback-todos WP-8).
+    pub models: KeyedCache<String, Vec<LookupModel>>,
     /// A new typeahead was opened since the last [`Settings::lookup_wants`].
     pub(super) reopened: bool,
     /// Providers whose model list the refresh control asked for.
     refresh: Vec<String>,
-    /// Fetched channel titles (`None` = YouTube does not know the id).
-    pub channels: BTreeMap<String, Option<String>>,
-    channels_pending: BTreeSet<String>,
+    /// Fetched channel titles (`Ok(None)` = YouTube does not know the id).
+    pub channels: KeyedCache<String, Option<String>>,
+}
+
+impl Default for Lookups {
+    fn default() -> Self {
+        Self {
+            currencies: KeyedCache::new(Retry::Never, usize::MAX),
+            geo: KeyedCache::new(Retry::Never, GEO_CACHE),
+            geo_wanted: None,
+            geo_seq: 0,
+            models: KeyedCache::new(Retry::OnReopen, usize::MAX),
+            reopened: false,
+            refresh: Vec::new(),
+            channels: KeyedCache::new(Retry::Never, usize::MAX),
+        }
+    }
 }
 
 /// The cache key of a geocode query.
@@ -95,48 +211,45 @@ impl Lookups {
 
     /// A fetched title for channel `id`.
     pub fn channel_title(&self, id: &str) -> Option<&str> {
-        self.channels.get(id).and_then(|t| t.as_deref())
+        match self.channels.get(id) {
+            Some(Fetch::Ok(t)) => t.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The fetched currency list (`None` until it lands ok).
+    pub fn currency_list(&self) -> Option<&[LookupCurrency]> {
+        match self.currencies.get(&()) {
+            Some(Fetch::Ok(v)) => Some(v),
+            _ => None,
+        }
     }
 
     /// The debounce tick for `seq` fired: the query to look up, when still current and not
     /// cached.
     pub fn geo_due(&mut self, seq: u64) -> Option<String> {
         let (s, q) = self.geo_wanted.as_ref()?;
-        if *s != seq || self.geo.contains_key(q) {
+        if *s != seq || self.geo.settled(q) {
             return None;
         }
         let q = q.clone();
-        self.geo_pending = Some(q.clone());
+        self.geo.pending(q.clone());
         Some(q)
     }
 
     /// Applies a result.
     pub fn apply(&mut self, m: LookupMsg) {
         match m {
-            LookupMsg::Currencies(r) => {
-                self.currencies_pending = false;
-                self.currencies = Some(r);
-            }
+            LookupMsg::Currencies(r) => self.currencies.settle((), r),
             LookupMsg::GeoDue(_) => {}
-            LookupMsg::Geo(q, r) => {
-                if self.geo_pending.as_deref() == Some(q.as_str()) {
-                    self.geo_pending = None;
-                }
-                if self.geo.insert(q.clone(), r).is_none() {
-                    self.geo_order.push_back(q);
-                    while self.geo_order.len() > GEO_CACHE {
-                        if let Some(old) = self.geo_order.pop_front() {
-                            self.geo.remove(&old);
-                        }
-                    }
-                }
-            }
+            LookupMsg::Geo(q, r) => self.geo.settle(q, r),
             LookupMsg::Models(p, r) => {
-                let e = match r {
-                    Ok(m) if m.live => Models::Live(m.models),
-                    _ => Models::Failed,
+                let r = match r {
+                    Ok(m) if m.live => Ok(m.models),
+                    Ok(_) => Err("not live".to_owned()),
+                    Err(e) => Err(e),
                 };
-                self.models.insert(p, e);
+                self.models.settle(p, r);
             }
             LookupMsg::Channels(ids, r) => {
                 let titles: BTreeMap<String, String> = r
@@ -145,9 +258,8 @@ impl Lookups {
                     .map(|c| (c.id, c.title))
                     .collect();
                 for id in ids {
-                    self.channels_pending.remove(&id);
                     let t = titles.get(&id).cloned();
-                    self.channels.insert(id, t);
+                    self.channels.settle(id, Ok(t));
                 }
             }
         }
@@ -156,7 +268,7 @@ impl Lookups {
     /// The geocode hits for `query` (empty when not cached).
     pub fn places(&self, query: &str) -> &[LookupGeoResult] {
         match self.geo.get(&geo_key(query)) {
-            Some(Ok(v)) => v,
+            Some(Fetch::Ok(v)) => v,
             _ => &[],
         }
     }
@@ -174,8 +286,8 @@ impl Settings {
         let mut out = Vec::new();
         let reopened = std::mem::take(&mut self.lookups.reopened);
         for p in std::mem::take(&mut self.lookups.refresh) {
-            if self.lookups.models.get(&p) != Some(&Models::Loading) {
-                self.lookups.models.insert(p.clone(), Models::Loading);
+            if self.lookups.models.get(&p) != Some(&Fetch::Pending) {
+                self.lookups.models.pending(p.clone());
                 out.push(Want::Models(p));
             }
         }
@@ -184,20 +296,16 @@ impl Settings {
             let text = a.draft.clone();
             match picker {
                 Picker::Currency => {
-                    if self.lookups.currencies.is_none() && !self.lookups.currencies_pending {
-                        self.lookups.currencies_pending = true;
+                    if self.lookups.currencies.wants(&(), reopened) {
+                        self.lookups.currencies.pending(());
                         out.push(Want::Currencies);
                     }
                 }
                 Picker::Model | Picker::ModelRef => {
                     if let Some(p) = pickers::model_provider(self, picker, &file, &path, &text)
-                        && match self.lookups.models.get(&p) {
-                            None => true,
-                            Some(Models::Failed) => reopened,
-                            Some(_) => false,
-                        }
+                        && self.lookups.models.wants(&p, reopened)
                     {
-                        self.lookups.models.insert(p.clone(), Models::Loading);
+                        self.lookups.models.pending(p.clone());
                         out.push(Want::Models(p));
                     }
                 }
@@ -205,7 +313,7 @@ impl Settings {
                     let q = geo_key(&text);
                     let current = self.lookups.geo_wanted.as_ref().map(|(_, w)| w.as_str());
                     if q.chars().count() >= 2
-                        && !self.lookups.geo.contains_key(&q)
+                        && !self.lookups.geo.settled(&q)
                         && current != Some(q.as_str())
                     {
                         self.lookups.geo_seq += 1;
@@ -219,13 +327,12 @@ impl Settings {
         let ids: Vec<String> = self
             .unknown_channel_ids()
             .into_iter()
-            .filter(|id| {
-                !self.lookups.channels.contains_key(id)
-                    && !self.lookups.channels_pending.contains(id)
-            })
+            .filter(|id| self.lookups.channels.wants(id, reopened))
             .collect();
         if !ids.is_empty() {
-            self.lookups.channels_pending.extend(ids.iter().cloned());
+            for id in &ids {
+                self.lookups.channels.pending(id.clone());
+            }
             out.push(Want::Channels(ids));
         }
         out

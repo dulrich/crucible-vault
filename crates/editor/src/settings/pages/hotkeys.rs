@@ -364,16 +364,18 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     let ed = cx.s.file(EDITOR_PATH);
     let ac = cx.s.file(ACTIONS_PATH);
     let bm = cx.s.file(crate::bookmarks::BOOKMARKS_PATH);
-    let editable = ed.is_some_and(|f| f.doc.is_some() && !f.saving);
+    let editable = ed.is_some_and(|f| f.doc().is_some() && !f.saving());
     // The capture note lives in [`notice_bar`], outside the scrollable (plan editor-ui-round-3
     // WP-7): setting or clearing it never changes the list's height or scroll offset.
     let mut col = column![text(INTRO).size(13).color(t.text_faint.to_color())].spacing(8);
-    for r in rows(st, ac.and_then(|f| f.doc.as_ref())) {
+    for r in rows(st, ac.and_then(|f| f.doc())) {
         let rec = st.recording.as_ref() == Some(&r.target);
         let ok = match &r.target {
             Target::Command(_) => editable,
-            Target::Action(_) => ac.is_some_and(|f| f.doc.is_some() && !f.saving),
-            Target::Bookmark(_) => bm.is_some_and(|f| f.doc.is_some() && !f.saving && !f.dirty),
+            Target::Action(_) => ac.is_some_and(|f| f.doc().is_some() && !f.saving()),
+            Target::Bookmark(_) => {
+                bm.is_some_and(|f| f.doc().is_some() && !f.saving() && !f.dirty())
+            }
         };
         col = col.push(row_view(r, rec, ok, t));
     }

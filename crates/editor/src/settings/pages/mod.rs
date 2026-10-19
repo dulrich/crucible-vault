@@ -28,12 +28,12 @@ pub struct PageCx<'a> {
 
 /// The rows of `f`'s whole form (empty when the file has no doc or schema).
 pub fn file_rows(s: &Settings, f: &ConfigFile) -> Vec<Row> {
-    match (&f.doc, f.schema) {
+    match (&f.doc(), f.schema()) {
         (Some(doc), Some(schema)) => form::rows(
             &Ctx {
-                file: &f.path,
+                file: f.path(),
                 doc,
-                errors: &f.errors,
+                errors: f.errors(),
                 form: &s.form,
             },
             schema,
@@ -45,12 +45,12 @@ pub fn file_rows(s: &Settings, f: &ConfigFile) -> Vec<Row> {
 /// The render context of `f`.
 pub fn rcx<'a>(cx: PageCx<'a>, f: &'a ConfigFile) -> Rcx<'a> {
     Rcx {
-        file: &f.path,
+        file: f.path(),
         t: cx.t,
-        editable: f.doc.is_some() && !f.saving,
+        editable: f.doc().is_some() && !f.saving(),
         paths: cx.paths,
         settings: cx.s,
-        active: cx.s.form.typeahead.as_ref().filter(|a| a.file == f.path),
+        active: cx.s.form.typeahead.as_ref().filter(|a| a.file == f.path()),
     }
 }
 
@@ -83,3 +83,6 @@ pub fn frame<'a>(
 pub fn generic<'a>(cx: PageCx<'a>, f: &'a ConfigFile, intro: &'a str) -> Element<'a, Message> {
     frame(cx, f, intro, file_rows(cx.s, f))
 }
+
+#[cfg(test)]
+mod hotkeys_tests;

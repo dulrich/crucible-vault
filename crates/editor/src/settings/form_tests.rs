@@ -11,8 +11,11 @@ use super::form::{self, Ctx, FormState, Kind, Row};
 use super::*;
 use crate::app::App;
 use crate::bookmarks::{BOOKMARKS_PATH, BookmarkMsg};
+use crate::daemon::ContentHash;
 use crate::daemon::FakeDaemon;
+use crate::message::Message;
 use crate::message::{PanesMsg, TabsMsg};
+use cv_schema::Node;
 
 const ACTIONS: &str = "_custom/crucible-vault/actions.toml";
 const KINDS: &str = "_custom/crucible-vault/kinds.toml";
@@ -60,7 +63,7 @@ fn rows_of(st: &Settings, file: &str) -> Vec<Row> {
 
 fn doc_text(st: &Settings, file: &str) -> String {
     st.file(file)
-        .and_then(|f| f.doc.as_ref())
+        .and_then(|f| f.doc())
         .map(ToString::to_string)
         .unwrap_or_default()
 }
@@ -143,7 +146,7 @@ fn record_list_add_move_remove_keeps_expansion_on_its_item() {
     )
     .expect("add");
     let ids = |st: &Settings| {
-        let d = st.file(ACTIONS).and_then(|f| f.doc.as_ref()).expect("doc");
+        let d = st.file(ACTIONS).and_then(|f| f.doc()).expect("doc");
         (0..d.len(&list))
             .map(|i| d.get_str(&list.index(i).key("id")).unwrap_or("").to_owned())
             .collect::<Vec<_>>()
@@ -167,7 +170,7 @@ fn record_list_add_move_remove_keeps_expansion_on_its_item() {
         st.form.is_expanded(ACTIONS, &p("action[1]")),
         "c shifted down"
     );
-    assert!(st.file(ACTIONS).is_some_and(|f| f.dirty));
+    assert!(st.file(ACTIONS).is_some_and(|f| f.dirty()));
 }
 
 #[test]
@@ -197,7 +200,7 @@ fn add_step_inserts_a_tagged_record() {
         ),
     )
     .expect("insert");
-    let d = st.file(ACTIONS).and_then(|f| f.doc.as_ref()).expect("doc");
+    let d = st.file(ACTIONS).and_then(|f| f.doc()).expect("doc");
     assert_eq!(d.get_str(&p("action[0].steps[0].type")), Some("lint"));
 }
 
@@ -248,11 +251,11 @@ fn map_add_and_remove_keys() {
             value: &Node::FreeTable,
         },
     );
-    let d = st.file(KINDS).and_then(|f| f.doc.as_ref()).expect("doc");
+    let d = st.file(KINDS).and_then(|f| f.doc()).expect("doc");
     assert_eq!(d.keys(&p("kinds")), ["book", "film"]);
     st.edit(KINDS, &DocEdit::Remove(p("kinds.book")))
         .expect("rm");
-    let d = st.file(KINDS).and_then(|f| f.doc.as_ref()).expect("doc");
+    let d = st.file(KINDS).and_then(|f| f.doc()).expect("doc");
     assert_eq!(d.keys(&p("kinds")), ["film"]);
     // A duplicate key is refused with a notice.
     assert!(
@@ -262,7 +265,7 @@ fn map_add_and_remove_keys() {
         )
         .is_err()
     );
-    assert!(st.file(KINDS).is_some_and(|f| f.notice.is_some()));
+    assert!(st.file(KINDS).is_some_and(|f| f.notice().is_some()));
 }
 
 #[test]
@@ -321,7 +324,7 @@ fn numbers_accept_int_for_float_and_keep_bad_drafts() {
         },
     );
     let f = st.file(ed).expect("f");
-    assert!(!f.errors.is_empty() && !f.can_save());
+    assert!(!f.errors().is_empty() && !f.can_save());
 }
 
 #[test]
@@ -371,7 +374,7 @@ fn chips_add_and_remove() {
     );
     let list = |st: &Settings| {
         st.file(ed)
-            .and_then(|f| f.doc.as_ref())
+            .and_then(|f| f.doc())
             .and_then(|d| d.get_str_list(&at))
     };
     assert_eq!(list(&st), Some(vec!["a".to_owned(), "b".to_owned()]));
@@ -663,7 +666,7 @@ fn form_edit_round_trip_keeps_comment_and_unknown_key_in_saved_text() {
     assert!(text.contains("# my actions"), "{text}");
     assert!(text.contains("mystery = 7 # unknown, kept"), "{text}");
     assert!(text.contains("title = \"Tidy up\""), "{text}");
-    assert!(app.settings.file(ACTIONS).is_some_and(|f| !f.dirty));
+    assert!(app.settings.file(ACTIONS).is_some_and(|f| !f.dirty()));
 }
 
 const BAD_FILTER_VIEW: &str = "[[views]]\ntype = \"table\"\nname = \"T\"\nfilters = \"((\"\n";
@@ -695,7 +698,7 @@ fn views_page_parse_error_blocks_save() {
         .expect("edit");
     let f = st.file(&path).expect("f");
     assert!(
-        !f.errors.is_empty() && !f.can_save(),
+        !f.errors().is_empty() && !f.can_save(),
         "parse error blocks Save"
     );
     st.edit(&path, &DocEdit::Remove(p("invented"))).expect("rm");
@@ -703,14 +706,17 @@ fn views_page_parse_error_blocks_save() {
     // A compile notice is a warning only.
     let mut st = loaded("_custom/crucible-vault/views/w.toml", BAD_FILTER_VIEW);
     let w = "_custom/crucible-vault/views/w.toml";
-    st.files.get_mut(w).expect("w").local_check = Some(views_check);
+    st.files
+        .get_mut(w)
+        .expect("w")
+        .set_local_check(Some(views_check));
     st.edit(
         w,
         &DocEdit::Set(p("views[0].name"), ScalarValue::Str("U".into())),
     )
     .expect("edit");
     let f = st.file(w).expect("f");
-    assert!(f.errors.is_empty() && !f.warnings.is_empty() && f.can_save());
+    assert!(f.errors().is_empty() && !f.warnings().is_empty() && f.can_save());
 }
 
 #[test]
@@ -745,7 +751,7 @@ fn sync_views_registers_view_files_from_the_path_list() {
     );
     assert!(
         st.file("_custom/crucible-vault/views/a.toml")
-            .is_some_and(|f| f.local_check.is_some())
+            .is_some_and(|f| f.local_check().is_some())
     );
 }
 
@@ -776,7 +782,7 @@ fn new_view_file_saves_at_the_exact_name() {
     assert!(
         app.settings
             .file(path)
-            .is_some_and(|f| !f.dirty && f.base.is_some())
+            .is_some_and(|f| !f.dirty() && f.base().is_some())
     );
 }
 
@@ -792,7 +798,7 @@ fn bookmarks_page_and_panel_share_one_hash() {
     let base = |app: &App| {
         app.settings
             .file(BOOKMARKS_PATH)
-            .and_then(|f| f.base.clone())
+            .and_then(|f| f.base().cloned())
     };
     assert_eq!(
         base(&app),
@@ -818,7 +824,7 @@ fn bookmarks_page_and_panel_share_one_hash() {
     assert!(
         app.settings
             .file(BOOKMARKS_PATH)
-            .is_some_and(|f| f.notice.is_none() && !f.dirty)
+            .is_some_and(|f| f.notice().is_none() && !f.dirty())
     );
     assert_eq!(base(&app), Some(disk(&d).1));
     assert_eq!(
@@ -1021,7 +1027,7 @@ fn weather_pick_writes_label_lat_lon_in_one_edit_and_short_queries_never_geocode
         (vis[0].label.as_str(), vis[0].secondary.as_str()),
         ("Paris, FR", "Ile-de-France")
     );
-    let before = app.settings.file(PIPES).expect("f").edit_seq;
+    let before = app.settings.file(PIPES).expect("f").edit_seq();
     let _ = app.send(s(SettingsMsg::Form(
         PIPES.to_owned(),
         FormMsg::Pick {
@@ -1033,7 +1039,7 @@ fn weather_pick_writes_label_lat_lon_in_one_edit_and_short_queries_never_geocode
     assert!(text.contains("label = \"Paris, FR\""), "{text}");
     assert!(text.contains("lat = 48.853"), "{text}");
     assert!(text.contains("lon = 2.349"), "{text}");
-    assert_eq!(app.settings.file(PIPES).expect("f").edit_seq, before + 1);
+    assert_eq!(app.settings.file(PIPES).expect("f").edit_seq(), before + 1);
 }
 
 #[test]
@@ -1221,7 +1227,7 @@ fn failed_model_lookup_refetches_on_reopen_and_refresh() {
     type_in(&mut app, PIPES, "image_describe.model", "");
     assert!(matches!(
         app.settings.lookups.models.get("local"),
-        Some(lookups::Models::Live(_))
+        Some(lookups::Fetch::Ok(_))
     ));
     // The refresh control refetches too (here: back to failed).
     d.set_lookups(crate::daemon::FakeLookups {
@@ -1348,7 +1354,7 @@ fn bounded_numbers_get_steppers_with_the_old_increments() {
         b"[[views]]\ntype = \"table\"\nname = \"T\"\nlimit = 3\n".to_vec(),
         ContentHash::from_hex("00"),
     )));
-    st.files.insert(f.path.clone(), f);
+    st.files.insert(f.path().to_owned(), f);
     st.form_msg(
         "_custom/crucible-vault/views/v.toml",
         FormMsg::Toggle(p("views[0]")),

@@ -9,7 +9,7 @@
 use cv_schema::{ConfigDoc, Node, Path, RefKind, Seg};
 
 use super::Settings;
-use super::lookups::Models;
+use super::lookups::Fetch;
 use crate::widget::typeahead::{self, Candidate, LIMIT, Status};
 
 /// Which candidate source a field uses.
@@ -33,8 +33,13 @@ pub enum Picker {
     ModelRef,
 }
 
-/// The separator of a [`Picker::Place`] candidate value: `label␟lat␟lon`.
-pub const PLACE_SEP: char = '\u{1f}';
+/// A committed typeahead value (WP-R21 SP4): a stored string, or a geocoded place whose pick
+/// writes `label` + sibling `lat`/`lon` in one edit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PickValue {
+    Str(String),
+    Place { label: String, lat: f64, lon: f64 },
+}
 
 /// The picker of a field: its schema reference hint (B13), else its node's vault-path kind.
 pub fn for_field(node: &Node, hint: Option<RefKind>) -> Option<Picker> {
@@ -56,8 +61,8 @@ pub fn for_field(node: &Node, hint: Option<RefKind>) -> Option<Picker> {
 pub(super) fn doc_named<'a>(s: &'a Settings, name: &str) -> Option<&'a ConfigDoc> {
     s.files
         .values()
-        .find(|f| f.path.rsplit('/').next() == Some(name))
-        .and_then(|f| f.doc.as_ref())
+        .find(|f| f.path().rsplit('/').next() == Some(name))
+        .and_then(|f| f.doc())
 }
 
 fn list_root(name: &str) -> Path {
@@ -144,7 +149,7 @@ fn model_candidate(id: &str, label: Option<&str>, tag: &str) -> Candidate {
 /// already listed (secondary "declared"), deduped by id.
 pub fn merged_models(s: &Settings, provider: Option<&str>) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = match provider.and_then(|p| s.lookups.models.get(p)) {
-        Some(Models::Live(ms)) => ms
+        Some(Fetch::Ok(ms)) => ms
             .iter()
             .map(|m| model_candidate(&m.id, m.display_name.as_deref(), "live"))
             .collect(),
@@ -215,7 +220,7 @@ fn all_channels(s: &Settings) -> Vec<Candidate> {
             c.label = format!("{t} ({})", c.value);
         }
     }
-    for (id, t) in &s.lookups.channels {
+    for (id, t) in s.lookups.channels.oks() {
         if let Some(t) = t
             && !out.iter().any(|c| c.value == *id)
         {
@@ -242,14 +247,14 @@ pub fn source_channel_placeholder(s: &Settings, file: &str, at: &Path) -> Option
     if !matches!(at.0[n - 2], Seg::Index(_)) {
         return None;
     }
-    let doc = s.file(file)?.doc.as_ref()?;
+    let doc = s.file(file)?.doc()?;
     let id = doc.get_str(&Path(at.0[..n - 1].to_vec()).key("id"))?;
     s.lookups.channel_title(id).map(str::to_owned)
 }
 
 /// The model picker's provider: `image_describe.provider` of the same file.
 fn sibling_provider<'a>(s: &'a Settings, file: &str, at: &Path) -> Option<&'a str> {
-    let doc = s.file(file)?.doc.as_ref()?;
+    let doc = s.file(file)?.doc()?;
     let mut p = Path(at.0[..at.0.len().saturating_sub(1)].to_vec());
     p = p.key("provider");
     doc.get_str(&p).filter(|v| !v.is_empty())
@@ -274,7 +279,7 @@ pub fn model_provider(
         Picker::ModelRef => {
             let stored = s
                 .file(file)
-                .and_then(|f| f.doc.as_ref())
+                .and_then(|f| f.doc())
                 .and_then(|d| d.get_str(at))
                 .unwrap_or_default();
             [text, stored]
@@ -292,22 +297,22 @@ pub fn status(s: &Settings, picker: Picker, file: &str, at: &Path, text: &str) -
     match picker {
         Picker::Model | Picker::ModelRef => {
             match model_provider(s, picker, file, at, text).and_then(|p| s.lookups.models.get(&p)) {
-                Some(Models::Loading) => Status::Loading,
-                Some(Models::Failed) => Status::Failed(super::lookups::MODELS_FAILED.to_owned()),
+                Some(Fetch::Pending) => Status::Loading,
+                Some(Fetch::Failed) => Status::Failed(super::lookups::MODELS_FAILED.to_owned()),
                 _ => Status::Ready,
             }
         }
-        Picker::Currency => match &s.lookups.currencies {
-            None => Status::Loading,
-            Some(Err(_)) => Status::Failed("currency list unavailable".to_owned()),
-            Some(Ok(_)) => Status::Ready,
+        Picker::Currency => match s.lookups.currencies.get(&()) {
+            None | Some(Fetch::Pending) => Status::Loading,
+            Some(Fetch::Failed) => Status::Failed("currency list unavailable".to_owned()),
+            Some(Fetch::Ok(_)) => Status::Ready,
         },
         Picker::Place => {
             let q = super::lookups::geo_key(text);
             match s.lookups.geo.get(&q) {
-                Some(Err(_)) => Status::Failed("place search unavailable".to_owned()),
-                Some(Ok(v)) if v.is_empty() => Status::Failed("no places found".to_owned()),
-                None if q.chars().count() >= 2 => Status::Loading,
+                Some(Fetch::Failed) => Status::Failed("place search unavailable".to_owned()),
+                Some(Fetch::Ok(v)) if v.is_empty() => Status::Failed("no places found".to_owned()),
+                None | Some(Fetch::Pending) if q.chars().count() >= 2 => Status::Loading,
                 _ => Status::Ready,
             }
         }
@@ -317,8 +322,8 @@ pub fn status(s: &Settings, picker: Picker, file: &str, at: &Path, text: &str) -
 
 /// Currency candidates (`CODE — Name`, value = code); empty until fetched.
 fn currencies(s: &Settings) -> Vec<Candidate> {
-    match &s.lookups.currencies {
-        Some(Ok(cs)) => cs
+    match s.lookups.currency_list() {
+        Some(cs) => cs
             .iter()
             .map(|c| Candidate {
                 label: format!("{} — {}", c.code, c.name),
@@ -330,25 +335,45 @@ fn currencies(s: &Settings) -> Vec<Candidate> {
     }
 }
 
-/// Place candidates for `query` (`City, CC`, admin1 secondary, value `label␟lat␟lon`).
+/// The candidate key of the `i`th place hit for a query: its label, made unique among the
+/// hits (`label #n` for a repeated label) — the key a pick resolves through [`place_pick`].
+fn place_keys(hits: &[cv_protocol::LookupGeoResult]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(hits.len());
+    for (i, g) in hits.iter().enumerate() {
+        let k = if out.contains(&g.label) {
+            format!("{} #{}", g.label, i + 1)
+        } else {
+            g.label.clone()
+        };
+        out.push(k);
+    }
+    out
+}
+
+/// Place candidates for `query` (`City, CC`, admin1 secondary, value = the hit's key).
 fn places(s: &Settings, query: &str) -> Vec<Candidate> {
-    s.lookups
-        .places(query)
-        .iter()
-        .take(LIMIT)
-        .map(|g| Candidate {
+    let hits = &s.lookups.places(query)[..s.lookups.places(query).len().min(LIMIT)];
+    hits.iter()
+        .zip(place_keys(hits))
+        .map(|(g, value)| Candidate {
             label: g.label.clone(),
             secondary: g.admin1.clone().unwrap_or_default(),
-            value: format!("{}{PLACE_SEP}{}{PLACE_SEP}{}", g.label, g.lat, g.lon),
+            value,
         })
         .collect()
 }
 
-/// Decodes a [`Picker::Place`] candidate value into `(label, lat, lon)`.
-pub fn decode_place(v: &str) -> Option<(String, f64, f64)> {
-    let mut it = v.split(PLACE_SEP);
-    let (l, a, o) = (it.next()?, it.next()?, it.next()?);
-    Some((l.to_owned(), a.parse().ok()?, o.parse().ok()?))
+/// The [`PickValue`] of a place candidate `value` picked for `query` (`None`: not one of its
+/// hits).
+pub fn place_pick(s: &Settings, query: &str, value: &str) -> Option<PickValue> {
+    let hits = &s.lookups.places(query)[..s.lookups.places(query).len().min(LIMIT)];
+    let i = place_keys(hits).iter().position(|k| k == value)?;
+    let g = &hits[i];
+    Some(PickValue::Place {
+        label: g.label.clone(),
+        lat: g.lat,
+        lon: g.lon,
+    })
 }
 
 /// `provider:model` candidates of the reference's provider (every declared provider's models
@@ -461,7 +486,7 @@ pub fn is_valid(
         // Free text: a place label alone, a `{param.…}` model, a currency before the list loads.
         Picker::Place => true,
         Picker::ModelRef if text.starts_with('{') => true,
-        Picker::Currency if !matches!(s.lookups.currencies, Some(Ok(_))) => true,
+        Picker::Currency if s.lookups.currency_list().is_none() => true,
         _ => typeahead::is_value(text, &small_set(s, picker, file, at, text)),
     }
 }

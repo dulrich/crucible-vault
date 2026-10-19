@@ -160,8 +160,8 @@ impl Bookmarks {
 
     /// Re-derives the list from the shared file.
     pub fn sync(&mut self, f: &ConfigFile) {
-        self.items = f.doc.as_ref().map(items_of).unwrap_or_default();
-        self.writing = f.saving;
+        self.items = f.doc().map(items_of).unwrap_or_default();
+        self.writing = f.saving();
     }
 }
 

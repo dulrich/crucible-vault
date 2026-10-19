@@ -26,7 +26,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     let mut list = row![].spacing(0);
     for p in &paths {
         let name = p.rsplit('/').next().unwrap_or(p).to_owned();
-        let dirty = s.file(p).is_some_and(|f| f.dirty);
+        let dirty = s.file(p).is_some_and(|f| f.dirty());
         let label = if dirty { format!("{name} •") } else { name };
         let on = s.view_selected.as_deref() == Some(p.as_str());
         list = list.push(

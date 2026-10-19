@@ -11,15 +11,16 @@ use cv_testkit::{SyntheticVault, VaultSpec};
 use iced::keyboard::{Key, Modifiers, key::Physical};
 use iced::widget::text_editor::{Binding, KeyPress, Status};
 
-use super::editor_prefs::EDITOR_PATH;
-use super::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg, Target};
-use super::*;
 use crate::app::{App, CAPTURES_PATH, TabKind};
 use crate::daemon::FakeDaemon;
+use crate::message::Message;
 use crate::message::{ExplorerMsg, PaletteMsg, ReadingMsg};
 use crate::palette::chord::{self, Chord};
 use crate::palette::{Bound, ClientCmd, KeySource, Keymap, resolve};
 use crate::reading::ViewMode;
+use crate::settings::editor_prefs::EDITOR_PATH;
+use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg, Target};
+use crate::settings::*;
 
 fn fake() -> (tempfile::TempDir, Arc<FakeDaemon>) {
     let tmp = tempfile::tempdir().expect("tmp");
@@ -123,7 +124,7 @@ fn routed(b: Option<Binding<Message>>) -> Option<String> {
 fn keys_of(app: &App, id: &str) -> Option<Vec<String>> {
     app.settings
         .file(EDITOR_PATH)?
-        .doc
+        .doc()
         .as_ref()?
         .get_str_list(&Path::root().key("keys").key(id))
 }
@@ -446,7 +447,7 @@ fn record_captures_the_next_chord_into_editor_toml_without_writing() {
     assert!(!app.exiting);
     assert_eq!(keys_of(&app, "quit"), Some(vec!["Alt+K".into()]));
     assert!(app.settings.hotkeys.recording.is_none());
-    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
+    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty()));
     assert!(
         !d.vault_root().join(EDITOR_PATH).exists(),
         "nothing written without Save"
@@ -504,10 +505,10 @@ fn assigning_a_chord_held_elsewhere_is_refused() {
     let doc = app
         .settings
         .file(ACTIONS_PATH)
-        .and_then(|f| f.doc.as_ref())
+        .and_then(|f| f.doc())
         .and_then(|d| d.get_str_list(&keys));
     assert_eq!(doc, Some(vec!["Ctrl+Shift+K".into()]), "unchanged");
-    assert!(!app.settings.file(ACTIONS_PATH).is_some_and(|f| f.dirty));
+    assert!(!app.settings.file(ACTIONS_PATH).is_some_and(|f| f.dirty()));
     // Re-recording its own chord is not a conflict.
     hk(&mut app, HotkeyMsg::Record(Target::Action("a".into())));
     key(&mut app, "Ctrl+Shift+K");
@@ -532,7 +533,7 @@ fn binding_an_action_key_keeps_every_action_row() {
     let action_rows = |app: &App| {
         hotkeys::rows(
             &app.settings.hotkeys,
-            app.settings.file(ACTIONS_PATH).and_then(|f| f.doc.as_ref()),
+            app.settings.file(ACTIONS_PATH).and_then(|f| f.doc()),
         )
         .into_iter()
         .filter(|r| matches!(r.target, Target::Action(_)))
@@ -610,13 +611,13 @@ fn config_action_chords_edit_actions_toml() {
     let doc = |app: &App| {
         app.settings
             .file(ACTIONS_PATH)
-            .and_then(|f| f.doc.as_ref())
+            .and_then(|f| f.doc())
             .and_then(|d| d.get_str_list(&keys))
     };
     assert_eq!(doc(&app), Some(vec!["Ctrl+J".into()]));
     let rows = hotkeys::rows(
         &app.settings.hotkeys,
-        app.settings.file(ACTIONS_PATH).and_then(|f| f.doc.as_ref()),
+        app.settings.file(ACTIONS_PATH).and_then(|f| f.doc()),
     );
     let r = rows
         .iter()

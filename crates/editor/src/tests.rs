@@ -701,7 +701,7 @@ mod wp4 {
                 && app
                     .settings
                     .file(BOOKMARKS_PATH)
-                    .is_some_and(|f| f.base.is_none())
+                    .is_some_and(|f| f.base().is_none())
         );
         let _ = app.send(Message::Tabs(TabsMsg::Open("wp4bm/a.md".into())));
         let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
@@ -715,9 +715,7 @@ mod wp4 {
             }]
         );
         assert_eq!(
-            app.settings
-                .file(BOOKMARKS_PATH)
-                .and_then(|f| f.base.as_ref()),
+            app.settings.file(BOOKMARKS_PATH).and_then(|f| f.base()),
             Some(&h1)
         );
 
@@ -2611,8 +2609,8 @@ mod data_safety_wp2 {
     fn quit_with_only_a_validation_blocked_settings_edit_shows_the_dialog() {
         let (_tmp, _d, mut app) = setup(&[]);
         let mut f = crate::settings::ConfigFile::new("_custom/crucible-vault/x.toml", None);
-        f.dirty = true; // `doc: None` → `wants_save()` is false: the flush can never write it.
-        app.settings.files.insert(f.path.clone(), f);
+        f.test_mark_dirty(); // `doc: None` → `wants_save()` is false: the flush can never write it.
+        app.settings.files.insert(f.path().to_owned(), f);
         let _ = app.send(Message::Tabs(TabsMsg::Quit));
         assert!(!app.exiting);
         let u = app
@@ -3434,7 +3432,7 @@ mod find_return_leak {
         let doc = app
             .settings
             .file(PIPES)
-            .and_then(|f| f.doc.as_ref())
+            .and_then(|f| f.doc())
             .map(ToString::to_string)
             .unwrap_or_default();
         assert!(doc.contains("\"UC123\""), "chip added: {doc}");

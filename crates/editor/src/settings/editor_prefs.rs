@@ -251,7 +251,7 @@ pub fn parse(text: &str, fallback_surround: Surround) -> Result<Prefs, String> {
 
 /// The effective prefs of the loaded file (defaults when malformed / not loaded).
 pub fn effective(f: &ConfigFile, fallback_surround: Surround) -> Prefs {
-    match &f.doc {
+    match &f.doc() {
         Some(doc) => from_doc(doc, fallback_surround),
         None => Prefs {
             surround: fallback_surround,
@@ -264,10 +264,10 @@ pub fn effective(f: &ConfigFile, fallback_surround: Surround) -> Prefs {
 /// takes the old `UiState.surround` into its doc, in memory only (persisted with the next
 /// Save; no write here). Returns whether it seeded.
 pub fn seed_surround(f: &mut ConfigFile, s: Surround) -> bool {
-    if !matches!(f.state, LoadState::Loaded | LoadState::Absent) {
+    if !matches!(f.state(), LoadState::Loaded | LoadState::Absent) {
         return false;
     }
-    let Some(doc) = &mut f.doc else {
+    let Some(doc) = f.seed_doc() else {
         return false;
     };
     if doc.get(&p("surround")).is_some() {

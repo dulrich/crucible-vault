@@ -38,21 +38,46 @@ pub struct FormState {
     pub typeahead: Option<ActiveTa>,
 }
 
+/// What the active typeahead edits (WP-R21 SP4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaTarget {
+    /// A text field: a commit writes the value (`required`: an empty commit keeps the key).
+    Text { required: bool },
+    /// A chips adder: a commit adds a chip.
+    Chips,
+}
+
 /// The active typeahead field: its file, path, picker, typed text and widget state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveTa {
     pub file: String,
     pub path: Path,
     pub picker: Picker,
-    /// A chips field (the typed text is the chip draft; commits add a chip).
-    pub chips: bool,
-    pub required: bool,
-    /// The typed text (text fields; chips use their chip draft).
+    pub target: TaTarget,
+    /// The typed text (the query; a chips adder mirrors it into its chip draft).
     pub draft: String,
     pub ta: Typeahead,
 }
 
 impl ActiveTa {
+    /// A typeahead on `(file, path)` whose committed value is `committed`, nothing typed yet.
+    pub fn new(
+        file: &str,
+        path: Path,
+        picker: Picker,
+        target: TaTarget,
+        committed: impl Into<String>,
+    ) -> Self {
+        Self {
+            file: file.to_owned(),
+            path,
+            picker,
+            target,
+            draft: String::new(),
+            ta: Typeahead::begin(committed),
+        }
+    }
+
     /// Whether this is the field at `(file, path)`.
     pub fn is(&self, file: &str, path: &Path) -> bool {
         self.file == file && self.path == *path

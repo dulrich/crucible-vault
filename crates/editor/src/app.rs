@@ -544,7 +544,7 @@ pub const CAPTURES_PATH: &str = cv_schema::config_path!("captures.toml");
 pub fn period_folders(
     f: Option<&crate::settings::ConfigFile>,
 ) -> editor_model::period::PeriodFolders {
-    let doc = f.and_then(|f| f.doc.as_ref());
+    let doc = f.and_then(|f| f.doc());
     let get = |p: &str| {
         let path = cv_schema::Path::parse(p).ok()?;
         doc?.get_str(&path)
@@ -1028,16 +1028,16 @@ impl App {
     fn load_bookmarks(&mut self) {
         let Some(d) = self.daemon.clone() else { return };
         if let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) {
-            if !f.dirty {
+            if !f.dirty() {
                 f.load(d.as_ref());
             }
             if let crate::settings::LoadState::Malformed(e) | crate::settings::LoadState::Error(e) =
-                &f.state
+                &f.state()
             {
                 self.status.set_error(format!("bookmarks: {e}"));
             }
         }
-        self.sync_bookmarks();
+        self.on_settings_content(BOOKMARKS_PATH);
     }
 
     /// Plan round-5 WP-6: issues the picker lookups Settings wants (each off the UI thread via
@@ -1887,11 +1887,7 @@ impl App {
         let Some(f) = self.settings.file_mut(&path) else {
             return Task::none();
         };
-        if f.saving {
-            f.queued |= f.wants_save();
-            return Task::none();
-        }
-        let Some(job) = f.begin_save() else {
+        let Some(job) = f.request_save() else {
             return Task::none();
         };
         self.rpc(
@@ -1907,8 +1903,8 @@ impl App {
             .settings
             .files
             .values()
-            .filter(|f| f.wants_save() || f.saving)
-            .map(|f| f.path.to_owned())
+            .filter(|f| f.wants_save() || f.saving())
+            .map(|f| f.path().to_owned())
             .collect();
         let tasks: Vec<Task<Message>> = paths
             .iter()
@@ -2551,13 +2547,13 @@ impl App {
             .settings
             .files
             .values()
-            .any(|f| f.wants_save() || f.saving);
+            .any(|f| f.wants_save() || f.saving());
         // plan editor-data-safety WP-2 (audit M1): dirty settings files the flush cannot
         // write (validation errors, malformed / unloaded) are losses, never written (D20).
         let mut losses = crate::dialog::UnsavedEdits::default();
         for f in self.settings.files.values() {
-            if f.dirty && !f.wants_save() && !f.saving {
-                losses.setting(&f.path);
+            if f.dirty() && !f.wants_save() && !f.saving() {
+                losses.setting(f.path());
             }
         }
         if dirty.is_empty() && losses.is_empty() && !settings_pending {
@@ -2585,8 +2581,8 @@ impl App {
         }
         if !connected {
             for f in self.settings.files.values() {
-                if f.wants_save() || f.saving {
-                    losses.setting(&f.path);
+                if f.wants_save() || f.saving() {
+                    losses.setting(f.path());
                 }
             }
         }
@@ -3025,10 +3021,10 @@ impl App {
                 let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) else {
                     return Task::none();
                 };
-                if f.saving {
+                if f.saving() {
                     return Task::none();
                 }
-                if f.dirty {
+                if f.dirty() {
                     self.status.set_error(
                         "bookmarks have unsaved edits on the Settings page (saving or invalid)"
                             .into(),
@@ -3037,8 +3033,7 @@ impl App {
                 }
                 let e = match &edit {
                     BookmarkMsg::SetKeys(path, keys) => f
-                        .doc
-                        .as_ref()
+                        .doc()
                         .and_then(|d| bookmarks::keys_edit(d, path, keys.as_deref())),
                     _ => bookmarks::doc_edit(&edit, &self.bookmarks.items, active.as_deref()),
                 };
@@ -3056,7 +3051,7 @@ impl App {
                     .is_some_and(crate::settings::ConfigFile::can_save)
                 {
                     let task = self.save_settings_file(BOOKMARKS_PATH.to_owned());
-                    self.sync_bookmarks();
+                    self.on_settings_content(BOOKMARKS_PATH);
                     return task;
                 }
                 self.status.set_error(
@@ -3067,7 +3062,7 @@ impl App {
                 {
                     f.load(d.as_ref());
                 }
-                self.sync_bookmarks();
+                self.on_settings_content(BOOKMARKS_PATH);
             }
         }
         Task::none()
@@ -4381,7 +4376,8 @@ impl App {
                 );
             }
         }
-        self.apply_prefs();
+        self.on_settings_content(CAPTURES_PATH);
+        self.on_settings_content(EDITOR_PATH);
     }
 
     /// Recomputes the effective prefs from the `editor.toml` doc and applies them live.
@@ -4400,8 +4396,29 @@ impl App {
         self.palette.set_keys(prefs.keys.clone());
         self.reading.set_anchor(prefs.anchor());
         self.prefs = prefs;
-        self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
         self.sync_hotkeys();
+    }
+
+    /// WP-R21 (SP3): the one fan-out after a settings file's doc changed (load, reload, edit,
+    /// save landed, conflict reload, external change) — re-derives what `path` feeds:
+    /// `editor.toml` → the live prefs and the local `UiState` surround mirror; `bookmarks.toml`
+    /// → the bookmarks panel / commands; `captures.toml` → the period folders; `actions.toml`
+    /// → the Hotkeys page snapshots.
+    fn on_settings_content(&mut self, path: &str) {
+        use crate::settings::editor_prefs::EDITOR_PATH;
+        use crate::settings::pages::hotkeys::ACTIONS_PATH;
+        match path {
+            EDITOR_PATH => {
+                self.apply_prefs();
+                self.ui.surround = self.prefs.surround;
+            }
+            BOOKMARKS_PATH => self.sync_bookmarks(),
+            CAPTURES_PATH => {
+                self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
+            }
+            ACTIONS_PATH => self.sync_hotkeys(),
+            _ => {}
+        }
     }
 
     /// Refreshes the Hotkeys page's keymap / action snapshots from the palette.
@@ -4429,10 +4446,7 @@ impl App {
         let Some(target) = self.settings.hotkeys.recording.take() else {
             return Task::none();
         };
-        let actions_doc = self
-            .settings
-            .file(ACTIONS_PATH)
-            .and_then(|f| f.doc.as_ref());
+        let actions_doc = self.settings.file(ACTIONS_PATH).and_then(|f| f.doc());
         if !chord::text_editing(c)
             && let Some(other) = hotkeys::owner(&self.settings.hotkeys, actions_doc, &target, c)
         {
@@ -4464,12 +4478,12 @@ impl App {
         if let Err(e) = self.settings.edit(file, edit) {
             self.settings.hotkeys.note = Some(e);
         }
-        self.apply_prefs();
+        self.on_settings_content(file);
     }
 
     fn update_hotkeys(&mut self, m: crate::settings::pages::hotkeys::HotkeyMsg) -> Task<Message> {
         use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, HotkeyMsg, Target};
-        let doc = |s: &crate::settings::Settings, p: &str| s.file(p).and_then(|f| f.doc.clone());
+        let doc = |s: &crate::settings::Settings, p: &str| s.file(p).and_then(|f| f.doc().cloned());
         match m {
             HotkeyMsg::Clear(Target::Bookmark(path)) => {
                 return self.update_bookmarks(BookmarkMsg::SetKeys(path, None));
@@ -4512,15 +4526,7 @@ impl App {
             tracing::debug!("surround: editor.toml not editable; local state only");
         }
         self.ui.surround = s;
-        self.apply_prefs();
-    }
-
-    /// A Settings edit of `editor.toml` (the generic Editor page, WP-R20): applies the prefs
-    /// live and keeps the local `UiState` surround in step with the file's (was the
-    /// hand page's surround mirror).
-    fn apply_editor_edit(&mut self) {
-        self.apply_prefs();
-        self.ui.surround = self.prefs.surround;
+        self.on_settings_content(EDITOR_PATH);
     }
 
     /// Opens the singleton tab `kind` (Settings, Log) in `pane`, or focuses it where it is
@@ -4606,15 +4612,7 @@ impl App {
             .is_some_and(|f| f.file_changed(hash, d.as_ref()));
         if reloaded {
             self.settings.form.clear_drafts(path);
-        }
-        if path == BOOKMARKS_PATH {
-            self.sync_bookmarks();
-        }
-        if reloaded && path == crate::settings::editor_prefs::EDITOR_PATH {
-            self.apply_prefs();
-        }
-        if reloaded && path == CAPTURES_PATH {
-            self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
+            self.on_settings_content(path);
         }
     }
 
@@ -4641,7 +4639,6 @@ impl App {
     }
 
     fn update_settings(&mut self, m: crate::settings::SettingsMsg) -> Task<Message> {
-        use crate::settings::editor_prefs::EDITOR_PATH;
         use crate::settings::{Section, SettingsMsg};
         match m {
             SettingsMsg::Open => {
@@ -4674,19 +4671,24 @@ impl App {
             }
             SettingsMsg::Edit(path, edit) => {
                 let _ = self.settings.edit(&path, &edit);
-                if path == EDITOR_PATH {
-                    self.apply_editor_edit();
-                }
+                self.on_settings_content(&path);
             }
             SettingsMsg::Typeahead(k) => {
+                let file = self
+                    .settings
+                    .form
+                    .typeahead
+                    .as_ref()
+                    .map(|a| a.file.clone());
                 self.settings.typeahead_key(k, &self.explorer.paths);
+                if let Some(file) = file {
+                    self.on_settings_content(&file);
+                }
                 return self.settings_lookups();
             }
             SettingsMsg::Form(path, m) => {
                 self.settings.form_msg_paths(&path, m, &self.explorer.paths);
-                if path == EDITOR_PATH {
-                    self.apply_editor_edit();
-                }
+                self.on_settings_content(&path);
                 return self.settings_lookups();
             }
             SettingsMsg::Lookup(crate::settings::lookups::LookupMsg::GeoDue(seq)) => {
@@ -4714,78 +4716,76 @@ impl App {
             }
             SettingsMsg::AutoSaveDue(path, seq) => {
                 // Coalescing: only the timer of the latest edit writes.
-                if self.settings.file(&path).is_some_and(|f| f.edit_seq == seq) {
+                if self
+                    .settings
+                    .file(&path)
+                    .is_some_and(|f| f.edit_seq() == seq)
+                {
                     return self.save_settings_file(path);
                 }
             }
-            SettingsMsg::Saved(path, r) => {
-                let d = self.daemon.clone();
-                let mut again = false;
-                if let Some(f) = self.settings.file_mut(&path) {
-                    let failed = !matches!(r, Ok(crate::settings::WriteOutcome::Saved(_)));
-                    // Plan round-7 WP-3: a failed save reaches the bar (Error); a CAS
-                    // conflict (reloaded from disk) is a Warning.
-                    // Bookmarks (panel edits): a conflict is an Error too, and a failed write
-                    // reloads the shared file (the panel shows what is on disk).
-                    let bookmarks = path == BOOKMARKS_PATH;
-                    let severity = if r.is_err() || bookmarks {
-                        Severity::Error
-                    } else {
-                        Severity::Warning
-                    };
-                    let reload = bookmarks && r.is_err();
-                    f.finish_save(r, d.as_deref());
-                    if reload && let Some(d) = &d {
-                        f.load(d.as_ref());
-                    }
-                    if failed && let Some(n) = &f.notice {
-                        self.status.notify_from(severity, n.clone(), path.clone());
-                    }
-                    again = f.queued && f.can_save();
-                    if !again {
-                        f.queued = false;
-                    }
-                    if let Some(q) = &mut self.quit
-                        && q.settings.contains(&path)
-                    {
-                        if failed && !again {
-                            q.losses.setting(&path);
-                        }
-                        if !again {
-                            q.settings.remove(&path);
-                        }
-                    }
-                }
-                let mut tasks = Vec::new();
-                if again {
-                    tasks.push(self.save_settings_file(path.clone()));
-                } else {
-                    tasks.push(self.quit_progress());
-                }
-                if path == EDITOR_PATH {
-                    self.settings.editor_note = None;
-                    self.apply_prefs();
-                }
-                if path == BOOKMARKS_PATH {
-                    self.sync_bookmarks();
-                }
-                self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
-                return Task::batch(tasks);
-            }
+            SettingsMsg::Saved(path, r) => return self.settings_saved(path, r),
             SettingsMsg::StartOver(path) => {
                 if let Some(f) = self.settings.file_mut(&path) {
                     f.start_over();
                 }
-                if path == EDITOR_PATH {
-                    self.apply_prefs();
-                }
+                self.on_settings_content(&path);
             }
             SettingsMsg::RefreshStatus => return self.fetch_status(),
             SettingsMsg::StatusLoaded(r) => self.settings.status.loaded(r),
         }
-        // WP-4 (audit E2): a captures.toml edit / save / revert re-derives the period folders.
-        self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
         Task::none()
+    }
+
+    /// A settings write landed: notices, the requeued follow-up ([`FinishOutcome`]), quit
+    /// progress and the derived-state fan-out.
+    ///
+    /// [`FinishOutcome`]: crate::settings::FinishOutcome
+    fn settings_saved(
+        &mut self,
+        path: String,
+        r: Result<crate::settings::WriteOutcome, String>,
+    ) -> Task<Message> {
+        use crate::settings::editor_prefs::EDITOR_PATH;
+        let d = self.daemon.clone();
+        let Some(f) = self.settings.file_mut(&path) else {
+            return self.quit_progress();
+        };
+        // Plan round-7 WP-3: a failed save reaches the bar (Error); a CAS conflict (reloaded
+        // from disk) is a Warning. Bookmarks (panel edits): a conflict is an Error too, and a
+        // failed write reloads the shared file (the panel shows what is on disk).
+        let bookmarks = path == BOOKMARKS_PATH;
+        let severity = if r.is_err() || bookmarks {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        let out = f.finish_save(r, d.as_deref(), bookmarks);
+        if out.failed
+            && let Some(n) = f.notice()
+        {
+            self.status
+                .notify_from(severity, n.to_owned(), path.clone());
+        }
+        if let Some(q) = &mut self.quit
+            && q.settings.contains(&path)
+            && !out.requeue
+        {
+            if out.failed {
+                q.losses.setting(&path);
+            }
+            q.settings.remove(&path);
+        }
+        let task = if out.requeue {
+            self.save_settings_file(path.clone())
+        } else {
+            self.quit_progress()
+        };
+        if path == EDITOR_PATH {
+            self.settings.editor_note = None;
+        }
+        self.on_settings_content(&path);
+        task
     }
 
     /// Daemon notifications and global keys as iced subscriptions.

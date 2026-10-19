@@ -12,6 +12,8 @@ use super::*;
 use crate::app::{App, TabKind};
 use crate::bookmarks::{BOOKMARKS_PATH, BookmarkMsg};
 use crate::daemon::FakeDaemon;
+use crate::daemon::{ContentHash, DaemonError};
+use crate::message::Message;
 use crate::message::{ExplorerMsg, PaletteMsg, PanesMsg, StatusMsg, TabsMsg};
 use crate::theme::Surround;
 
@@ -118,17 +120,17 @@ fn route_reload_errors_fills_pages_and_status() {
         "something odd".into(),
     ]);
     let actions = st.file(Section::Actions.file().expect("p")).expect("f");
-    assert_eq!(actions.reload_errors.len(), 2);
+    assert_eq!(actions.reload_errors().len(), 2);
     assert_eq!(
         st.file(Section::Kinds.file().expect("p"))
             .expect("f")
-            .reload_errors,
+            .reload_errors(),
         ["kinds.toml: y"]
     );
     assert_eq!(st.status.unrouted, ["something odd"]);
     // The next batch replaces the previous one.
     st.route_reload_errors(&[]);
-    assert!(st.files.values().all(|f| f.reload_errors.is_empty()));
+    assert!(st.files.values().all(|f| f.reload_errors().is_empty()));
     assert!(st.status.unrouted.is_empty());
 }
 
@@ -158,7 +160,7 @@ fn every_section_is_in_the_rail_with_its_file() {
         if let Some(p) = sec.file() {
             assert!(p.starts_with(CONFIG_DIR), "{p}");
             let f = st.file(p).expect("loop for every file page");
-            assert!(f.schema.is_some(), "{p} has a schema");
+            assert!(f.schema().is_some(), "{p} has a schema");
         }
     }
     assert_eq!(st.files.len(), 10);
@@ -170,8 +172,8 @@ fn malformed_file_is_not_editable_until_started_over() {
     let bytes = b"font_size = [unclosed".to_vec();
     let h = ContentHash::of(&bytes);
     f.apply_read(Ok((bytes, h.clone())));
-    assert!(matches!(f.state, LoadState::Malformed(_)));
-    assert!(f.doc.is_none() && !f.can_save());
+    assert!(matches!(f.state(), LoadState::Malformed(_)));
+    assert!(f.doc().is_none() && !f.can_save());
     assert!(
         f.edit(|d| d.set(&Path::root().key("font_size"), 20.0))
             .is_err()
@@ -192,14 +194,14 @@ fn malformed_file_is_not_editable_until_started_over() {
 fn form_errors_block_save() {
     let mut f = ConfigFile::new(EDITOR_PATH, Some(cv_schema::editor_schema()));
     f.apply_read(Err(DaemonError::NotFound(EDITOR_PATH.into())));
-    assert_eq!(f.state, LoadState::Absent);
-    assert!(f.base.is_none());
+    assert_eq!(*f.state(), LoadState::Absent);
+    assert!(f.base().is_none());
     f.edit(|d| d.set(&Path::root().key("font_size"), 200.0))
         .expect("edit");
-    assert!(f.dirty && !f.errors.is_empty() && !f.can_save());
+    assert!(f.dirty() && !f.errors().is_empty() && !f.can_save());
     f.edit(|d| d.set(&Path::root().key("font_size"), 20.0))
         .expect("edit");
-    assert!(f.errors.is_empty() && f.can_save());
+    assert!(f.errors().is_empty() && f.can_save());
 }
 
 #[test]
@@ -473,7 +475,7 @@ fn ctrl_comma_opens_settings_once_and_focuses_it() {
         app.settings
             .files
             .values()
-            .all(|f| f.state != LoadState::NotLoaded)
+            .all(|f| *f.state() != LoadState::NotLoaded)
     );
     // Ctrl+Shift+, stays reserved and inert.
     let shift = crate::palette::chord::parse("Ctrl+Shift+,").expect("chord");
@@ -534,8 +536,8 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
     let mut app = app_over(&d, None);
     assert_eq!(app.prefs, Prefs::default());
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert_eq!(f.state, LoadState::Absent);
-    assert!(!f.dirty, "the surround seed alone is not an edit");
+    assert_eq!(*f.state(), LoadState::Absent);
+    assert!(!f.dirty(), "the surround seed alone is not an edit");
     let _ = app.send(font(30.0));
     assert!(d.read_file(EDITOR_PATH).is_err(), "no write before Save");
     assert!(
@@ -556,8 +558,8 @@ fn absent_editor_toml_defaults_and_save_creates_exact_name() {
         "exact name, no copy"
     );
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert_eq!(f.base.as_ref(), Some(&h));
-    assert!(!f.dirty && f.state == LoadState::Loaded);
+    assert_eq!(f.base(), Some(&h));
+    assert!(!f.dirty() && *f.state() == LoadState::Loaded);
 }
 
 #[test]
@@ -576,8 +578,8 @@ fn editor_toml_appeared_since_load_is_a_conflict() {
         "never a suffixed copy"
     );
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert_eq!(f.notice.as_deref(), Some(CHANGED_ON_DISK));
-    assert!(!f.dirty, "reloaded");
+    assert_eq!(f.notice(), Some(CHANGED_ON_DISK));
+    assert!(!f.dirty(), "reloaded");
     assert!((app.prefs.font_size - 12.0).abs() < f32::EPSILON);
 }
 
@@ -599,9 +601,7 @@ fn editor_toml_cas_conflict_reloads_without_overwrite() {
     let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, b"font_size = 26\n");
     assert_eq!(
-        app.settings
-            .file(EDITOR_PATH)
-            .and_then(|f| f.notice.as_deref()),
+        app.settings.file(EDITOR_PATH).and_then(|f| f.notice()),
         Some(CHANGED_ON_DISK)
     );
     assert!((app.prefs.font_size - 26.0).abs() < f32::EPSILON);
@@ -628,7 +628,7 @@ fn external_edit_is_picked_up_live() {
     // Our own write's echo (same hash) is not a reload.
     let _ = app.send(pref("ui_scale", ScalarValue::Float(1.25)));
     changed(&mut app, EDITOR_PATH, Some(h1.as_str().to_owned()));
-    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
+    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty()));
 }
 
 #[test]
@@ -640,7 +640,7 @@ fn malformed_editor_toml_falls_back_and_is_kept() {
     let mut app = app_over(&d, None);
     assert_eq!(app.prefs, Prefs::default());
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert!(matches!(f.state, LoadState::Malformed(_)));
+    assert!(matches!(f.state(), LoadState::Malformed(_)));
     let _ = app.send(font(30.0));
     let _ = app.send(s(app.settings.due_now(EDITOR_PATH)));
     assert_eq!(d.read_file(EDITOR_PATH).expect("r").0, bad.as_bytes());
@@ -664,7 +664,7 @@ fn surround_migrates_once_from_ui_state() {
     assert_eq!(
         app.settings
             .file(EDITOR_PATH)
-            .and_then(|f| f.doc.as_ref())
+            .and_then(|f| f.doc())
             .and_then(|doc| doc.get_str(&Path::root().key("surround"))),
         Some("light")
     );
@@ -682,7 +682,7 @@ fn theme_cycle_edits_editor_toml_in_memory_only() {
     let mut app = app_over(&d, None);
     let _ = app.send(Message::Theme(crate::message::ThemeMsg::Cycle));
     assert_eq!(app.prefs.surround, Surround::Light);
-    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty));
+    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty()));
     assert!(d.read_file(EDITOR_PATH).is_err(), "no write without Save");
 }
 
@@ -848,7 +848,7 @@ fn config_reloaded_errors_route_to_pages_and_status_refreshes() {
         app.settings
             .file(Section::Providers.file().expect("p"))
             .expect("f")
-            .reload_errors,
+            .reload_errors(),
         ["providers.toml: bad (line 2)"]
     );
     assert_eq!(app.settings.status.unrouted, ["mystery"]);
@@ -863,7 +863,7 @@ fn bookmarks_absent_then_appeared_is_a_conflict_not_a_copy() {
     assert!(
         app.settings
             .file(BOOKMARKS_PATH)
-            .is_some_and(|f| f.base.is_none())
+            .is_some_and(|f| f.base().is_none())
     );
     let theirs = "[[bookmark]]\nname = \"t\"\npath = \"t.md\"\n";
     d.write_note(BOOKMARKS_PATH, theirs, &ContentHash::from_hex(""))
@@ -903,7 +903,7 @@ fn settings_save_of_a_daemon_file_round_trips_comments() {
             ScalarValue::Str("library".into()),
         ),
     )));
-    assert!(app.settings.file(kinds).is_some_and(|f| f.dirty));
+    assert!(app.settings.file(kinds).is_some_and(|f| f.dirty()));
     let _ = app.send(s(app.settings.due_now(kinds)));
     let text = String::from_utf8(d.read_file(kinds).expect("r").0).expect("utf8");
     assert!(
@@ -916,7 +916,7 @@ fn settings_save_of_a_daemon_file_round_trips_comments() {
 // ---- plan editor-feedback-round-2 WP-2: auto-save ----
 
 fn seq(app: &App, path: &str) -> u64 {
-    app.settings.file(path).map_or(0, |f| f.edit_seq)
+    app.settings.file(path).map_or(0, |f| f.edit_seq())
 }
 
 fn due(app: &mut App, path: &str) {
@@ -936,13 +936,17 @@ fn autosave_valid_edit_writes_once_after_the_debounce() {
     let mut app = app_over(&d, None);
     let _ = app.send(font(30.0));
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert_eq!(f.scheduled_seq, f.edit_seq, "a debounce timer was armed");
+    assert_eq!(
+        f.scheduled_seq(),
+        f.edit_seq(),
+        "a debounce timer was armed"
+    );
     assert!(disk(&d, EDITOR_PATH).is_none(), "nothing before the timer");
     due(&mut app, EDITOR_PATH);
     let (_, h) = d.read_file(EDITOR_PATH).expect("written");
     assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 30")));
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert!(!f.dirty && f.base.as_ref() == Some(&h));
+    assert!(!f.dirty() && f.base() == Some(&h));
     assert_eq!(f.save_status().map(|s| s.0).as_deref(), Some("saved"));
     // The same timer again writes nothing more.
     due(&mut app, EDITOR_PATH);
@@ -983,8 +987,12 @@ fn autosave_invalid_edit_never_writes() {
         ),
     )));
     let f = app.settings.file(kinds).expect("f");
-    assert!(f.dirty && !f.errors.is_empty(), "{:?}", f.errors);
-    assert_ne!(f.scheduled_seq, f.edit_seq, "no timer for an invalid state");
+    assert!(f.dirty() && !f.errors().is_empty(), "{:?}", f.errors());
+    assert_ne!(
+        f.scheduled_seq(),
+        f.edit_seq(),
+        "no timer for an invalid state"
+    );
     assert!(
         f.save_status()
             .is_some_and(|(l, warn)| warn && l.starts_with("not saved: ")),
@@ -1010,12 +1018,12 @@ fn autosave_edit_during_an_inflight_write_requeues() {
     app.rpc_exec = crate::app::RpcExec::Pool;
     due(&mut app, EDITOR_PATH);
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert!(f.saving);
-    let first = f.doc.as_ref().expect("doc").to_string();
-    let base = f.base.clone();
+    assert!(f.saving());
+    let first = f.doc().expect("doc").to_string();
+    let base = f.base().cloned();
     let _ = app.send(font(32.0));
     due(&mut app, EDITOR_PATH);
-    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.queued));
+    assert!(app.settings.file(EDITOR_PATH).is_some_and(|f| f.queued()));
     // The first write lands; the queued one runs right after.
     app.queue_rpcs();
     let r = write_config(d.as_ref(), EDITOR_PATH, &first, base.as_ref());
@@ -1023,7 +1031,77 @@ fn autosave_edit_during_an_inflight_write_requeues() {
     let text = disk(&d, EDITOR_PATH).expect("written");
     assert!(text.contains("font_size = 32"), "{text}");
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert!(!f.dirty && !f.saving && !f.queued);
+    assert!(!f.dirty() && !f.saving() && !f.queued());
+}
+
+/// The `Saved` completions waiting in the RPC queue (each is one write that ran).
+fn queued_saves(app: &App) -> usize {
+    match &app.rpc_exec {
+        crate::app::RpcExec::Queue(q) => q
+            .iter()
+            .filter(|m| matches!(m, Message::Settings(SettingsMsg::Saved(..))))
+            .count(),
+        crate::app::RpcExec::Pool => 0,
+    }
+}
+
+/// Pops the oldest queued `Saved` completion and lands it (without pumping).
+fn land_one_save(app: &mut App) {
+    let m = match &mut app.rpc_exec {
+        crate::app::RpcExec::Queue(q) => {
+            let i = q
+                .iter()
+                .position(|m| matches!(m, Message::Settings(SettingsMsg::Saved(..))))
+                .expect("a queued save");
+            q.remove(i).expect("save")
+        }
+        crate::app::RpcExec::Pool => panic!("queue mode"),
+    };
+    let _ = app.update(m);
+}
+
+#[test]
+fn edit_during_an_in_flight_write_requeues_exactly_once() {
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d, None);
+    let _ = app.send(font(30.0));
+    // Write 1 runs; its completion stays queued (the write is "in flight").
+    let _ = app.update(s(app.settings.due_now(EDITOR_PATH)));
+    assert_eq!(queued_saves(&app), 1);
+    assert!(
+        app.settings
+            .file(EDITOR_PATH)
+            .is_some_and(ConfigFile::saving)
+    );
+    // Two edits and their timers during the write: one requeue, no second write yet.
+    let _ = app.update(font(32.0));
+    let _ = app.update(s(app.settings.due_now(EDITOR_PATH)));
+    let _ = app.update(font(34.0));
+    let _ = app.update(s(app.settings.due_now(EDITOR_PATH)));
+    assert_eq!(
+        queued_saves(&app),
+        1,
+        "no write starts behind the in-flight one"
+    );
+    assert!(
+        app.settings
+            .file(EDITOR_PATH)
+            .is_some_and(ConfigFile::queued)
+    );
+    // Write 1 lands: exactly one follow-up write runs.
+    land_one_save(&mut app);
+    assert_eq!(queued_saves(&app), 1, "one requeued write");
+    assert!(
+        app.settings
+            .file(EDITOR_PATH)
+            .is_some_and(|f| f.saving() && !f.queued())
+    );
+    // The follow-up lands: nothing more.
+    land_one_save(&mut app);
+    assert_eq!(queued_saves(&app), 0, "not two");
+    let f = app.settings.file(EDITOR_PATH).expect("f");
+    assert!(!f.dirty() && !f.saving() && !f.queued());
+    assert!(disk(&d, EDITOR_PATH).is_some_and(|t| t.contains("font_size = 34")));
 }
 
 #[test]
@@ -1039,8 +1117,8 @@ fn autosave_cas_conflict_reloads_without_overwrite() {
     due(&mut app, EDITOR_PATH);
     assert_eq!(disk(&d, EDITOR_PATH).as_deref(), Some("font_size = 26\n"));
     let f = app.settings.file(EDITOR_PATH).expect("f");
-    assert_eq!(f.notice.as_deref(), Some(CHANGED_ON_DISK));
-    assert!(!f.dirty);
+    assert_eq!(f.notice(), Some(CHANGED_ON_DISK));
+    assert!(!f.dirty());
     assert!((app.prefs.font_size - 26.0).abs() < f32::EPSILON);
 }
 
@@ -1056,13 +1134,13 @@ fn autosave_views_parse_error_blocks_compile_warning_does_not() {
     assert!(
         app.settings
             .file(&path)
-            .is_some_and(|f| !f.errors.is_empty())
+            .is_some_and(|f| !f.errors().is_empty())
     );
     due(&mut app, &path);
     assert!(disk(&d, &path).is_none(), "a parse error blocks the write");
     let bad = "[[views]]\ntype = \"table\"\nname = \"T\"\nfilters = \"((\"\n";
     if let Some(f) = app.settings.file_mut(&path) {
-        f.doc = Some(ConfigDoc::parse(bad).expect("doc"));
+        f.test_set_doc(Some(ConfigDoc::parse(bad).expect("doc")));
     }
     let _ = app.send(s(SettingsMsg::Edit(
         path.clone(),
@@ -1072,7 +1150,7 @@ fn autosave_views_parse_error_blocks_compile_warning_does_not() {
         ),
     )));
     let f = app.settings.file(&path).expect("f");
-    assert!(f.errors.is_empty() && !f.warnings.is_empty());
+    assert!(f.errors().is_empty() && !f.warnings().is_empty());
     due(&mut app, &path);
     let text = disk(&d, &path).expect("a compile warning does not block");
     assert!(text.contains("name = \"U\""), "{text}");
