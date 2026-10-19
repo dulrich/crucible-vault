@@ -2096,7 +2096,7 @@ impl App {
     /// line, or the first source line of the Reading pane's probed top block (line 0 when the
     /// reading pane is at the top / never probed).
     fn mode_switch_origin(
-        &self,
+        &mut self,
         m: &crate::message::ReadingMsg,
     ) -> Option<(String, crate::reading::ViewMode, usize)> {
         let path = match m {
@@ -2117,7 +2117,9 @@ impl App {
                 .and_then(|b| doc?.model.block_lines.get(b).map(|r| r.start))
                 .unwrap_or(0)
         } else {
-            self.docs.get(&path)?.top_line()
+            // Plan round-7 WP-4: measured from the shown editor (wrapped lines made the
+            // tracked estimate drift).
+            self.docs.get_mut(&path)?.measure_top_line()
         };
         Some((path, old, line))
     }
@@ -2148,10 +2150,12 @@ impl App {
             }
             if new.shows_reading() {
                 let y = if bottom { 1.0 } else { 0.0 };
-                return iced::widget::operation::snap_to(
-                    crate::find::reading_scroll_id(path, view),
-                    iced::widget::scrollable::RelativeOffset { x: 0.0, y },
-                )
+                return crate::reading::ScrollIntent::SnapTo {
+                    path: path.to_owned(),
+                    view,
+                    y,
+                }
+                .task()
                 .chain(self.reprobe(path));
             }
             return Task::none();
@@ -2170,13 +2174,12 @@ impl App {
         if new.shows_reading() && above_first {
             // Frontmatter / leading lines: the properties panel heads the view.
             self.reading.clear_top_block(path, view);
-            return iced::widget::operation::scroll_to(
-                crate::find::reading_scroll_id(path, view),
-                iced::widget::scrollable::AbsoluteOffset {
-                    x: None,
-                    y: Some(0.0),
-                },
-            );
+            return crate::reading::ScrollIntent::ScrollTo {
+                path: path.to_owned(),
+                view,
+                y: 0.0,
+            }
+            .task();
         }
         if new.shows_reading()
             && let Some(doc) = self.reading.doc(path)
@@ -2561,7 +2564,17 @@ impl App {
                     self.reading.set_find(&t.path, None);
                 }
                 self.find_shift = false;
-                return self.focus_editor();
+                // Plan round-7 WP-4: the reading view keeps the place find left it at (the
+                // bar's removal re-creates the scrollable, which reports offset 0).
+                let restore = self
+                    .active_note()
+                    .map(|t| t.path.clone())
+                    .and_then(|p| {
+                        let v = self.view_of(&p);
+                        self.reading.restore(&p, v)
+                    })
+                    .unwrap_or_else(Task::none);
+                return Task::batch([restore, self.focus_editor()]);
             }
             FindMsg::Shift(b) => self.find_shift = b,
             FindMsg::Focus(_) => {}
@@ -2708,13 +2721,26 @@ impl App {
         self.reading.set_find(&path, query);
         self.reading.set_find_active(&path, &text, Some(r.clone()));
         if mode.shows_reading() {
+            // Plan round-7 WP-4: the match's block goes to the top and becomes the stored top
+            // (a bare proportional snap left it stale, so closing find / a mode switch
+            // restored an old place).
+            if let Some(d) = self.reading.doc(&path)
+                && let Some(b) = d.model.block_for_line(l0)
+            {
+                let n = d.model.blocks.len();
+                self.reading.set_top_block(&path, view, b);
+                return crate::reading::probe(&path, view, n, Some(b));
+            }
             let lines = text.matches('\n').count().max(1);
             #[allow(clippy::cast_precision_loss)]
             let y = (l0 as f32 / lines as f32).clamp(0.0, 1.0);
-            return iced::widget::operation::snap_to(
-                crate::find::reading_scroll_id(&path, view),
-                iced::widget::scrollable::RelativeOffset { x: 0.0, y },
-            );
+            return crate::reading::ScrollIntent::SnapTo {
+                path: path.clone(),
+                view,
+                y,
+            }
+            .task()
+            .chain(self.reprobe(&path));
         }
         Task::none()
     }
@@ -2739,10 +2765,12 @@ impl App {
             let y = if bottom { 1.0 } else { 0.0 };
             // plan editor-round-4 WP-2: a programmatic snap emits no `on_scroll`, so the stored
             // top block is re-probed after it (else a view switch carries a stale place).
-            return iced::widget::operation::snap_to(
-                crate::find::reading_scroll_id(&path, self.view_of(&path)),
-                iced::widget::scrollable::RelativeOffset { x: 0.0, y },
-            )
+            return crate::reading::ScrollIntent::SnapTo {
+                path: path.clone(),
+                view,
+                y,
+            }
+            .task()
             .chain(self.reprobe(&path));
         }
         Task::none()
@@ -2786,10 +2814,16 @@ impl App {
         let Some((id, note)) = self.page_target() else {
             return Task::none();
         };
-        let t = crate::page::step(id, crate::page::line_step(self.prefs.font_size, down));
+        let dy = crate::page::line_step(self.prefs.font_size, down);
         match note {
-            Some(p) => t.chain(self.reprobe(&p)),
-            None => t,
+            Some(p) => crate::reading::ScrollIntent::Step {
+                path: p.clone(),
+                view: self.view_of(&p),
+                dy,
+            }
+            .task()
+            .chain(self.reprobe(&p)),
+            None => crate::page::step(id, dy),
         }
     }
 
@@ -2797,10 +2831,15 @@ impl App {
         let Some((id, note)) = self.page_target() else {
             return Task::none();
         };
-        let t = crate::page::page(id, down);
         match note {
-            Some(p) => t.chain(self.reprobe(&p)),
-            None => t,
+            Some(p) => crate::reading::ScrollIntent::Page {
+                path: p.clone(),
+                view: self.view_of(&p),
+                down,
+            }
+            .task()
+            .chain(self.reprobe(&p)),
+            None => crate::page::page(id, down),
         }
     }
 

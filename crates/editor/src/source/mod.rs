@@ -131,6 +131,10 @@ pub struct SourceBuffer {
     /// `Action::Scroll` and our own [`Self::scroll_to_line`] (iced 0.14's `text_editor` exposes
     /// no scroll offset); pulled up when the cursor moves above it. 0 for a fresh shaped buffer.
     top_line: usize,
+    /// Plan round-7 WP-4: an edge scroll (`true` = the end) waiting for the editor's next
+    /// layout. A scroll performed before the content is laid out at its size is lost (cosmic
+    /// clamps an unsized buffer's scroll to the top), so it is applied on the sensor report.
+    pending_edge: Option<bool>,
     /// Plan round-5 WP-1: the source lines the editor's viewport shows, measured from the laid
     /// out pane height (a `sensor` around the editor stack; [`viewport_lines`]); falls back to
     /// [`VISIBLE_LINES`] before the first measure.
@@ -167,6 +171,7 @@ impl Clone for SourceBuffer {
             find_all: self.find_all.clone(),
             resync_pending: self.resync_pending,
             top_line: self.top_line,
+            pending_edge: self.pending_edge,
             visible_lines: self.visible_lines,
             disk_title: self.disk_title.clone(),
             name_title: self.name_title.clone(),
@@ -226,6 +231,7 @@ impl SourceBuffer {
             find_all: std::sync::Arc::from([]),
             resync_pending: false,
             top_line: 0,
+            pending_edge: None,
             visible_lines: VISIBLE_LINES,
             disk_title: title.clone(),
             name_title: title,
@@ -270,6 +276,12 @@ impl SourceBuffer {
             self.dematerialise();
         }
     }
+    /// Plan round-7 WP-4 test hook: the shaped editor content (measuring the laid-out view).
+    #[cfg(test)]
+    pub(crate) fn content_mut(&mut self) -> &mut Content {
+        self.shaped()
+    }
+
     fn shaped(&mut self) -> &mut Content {
         if let Repr::Plain { text, cursor } = &self.content {
             let mut c = Content::with_text(text);
@@ -408,6 +420,26 @@ impl SourceBuffer {
     /// Plan round-5 WP-1: records the viewport's measured line count (at least 1).
     pub fn set_visible_lines(&mut self, lines: usize) {
         self.visible_lines = lines.max(1);
+        // Plan round-7 WP-4: the editor is laid out now; a pending edge scroll lands exactly.
+        if let Some(bottom) = self.pending_edge.take() {
+            let lines = if bottom { 1_000_000 } else { -1_000_000 };
+            self.shaped().perform(text_editor::Action::Scroll { lines });
+        }
+    }
+
+    /// Plan round-7 WP-4: the source line at the laid-out editor's viewport top, measured by
+    /// hit-testing the viewport's top-left corner (exact with wrapped lines, unlike the
+    /// [`Self::top_line`] estimate); the cursor and selection are put back. Records it as the
+    /// tracked top. Only meaningful while the editor is shown.
+    pub fn measure_top_line(&mut self) -> usize {
+        if let Repr::Shaped(c) = &mut self.content {
+            let saved = c.cursor();
+            c.perform(text_editor::Action::Click(iced::Point::ORIGIN));
+            let line = c.cursor().position.line;
+            c.move_to(saved);
+            self.top_line = line;
+        }
+        self.top_line
     }
 
     /// Plan round-5 WP-1: the largest top line — the editor never scrolls past the last line
@@ -438,10 +470,9 @@ impl SourceBuffer {
     /// mode switch after Ctrl+PgUp/PgDn). The end overshoots by the line count: shaping clamps
     /// the view to the last full viewport, wrapped lines included.
     pub fn scroll_to_edge(&mut self, bottom: bool) {
-        let from = self.top_line;
-        let c = self.shaped();
-        let to = if bottom { c.line_count() } else { 0 };
-        scroll_content(c, from, to);
+        // Plan round-7 WP-4: deferred to the next layout ([`Self::set_visible_lines`]).
+        self.materialise();
+        self.pending_edge = Some(bottom);
         self.top_line = if bottom { self.max_top() } else { 0 };
     }
 
@@ -457,10 +488,17 @@ impl SourceBuffer {
             text_editor::Position { line: 0, column: 0 }
         };
         self.materialise();
+        // Plan round-7 WP-4: a caret already at the edge moves nothing, so the editor would
+        // not scroll (after a wheel scroll away); scroll explicitly then.
+        let still = self.cursor().position == at && self.cursor().selection.is_none();
         self.move_to(text_editor::Cursor {
             position: at,
             selection: None,
         });
+        if still {
+            let lines = if bottom { 1_000_000 } else { -1_000_000 };
+            self.shaped().perform(text_editor::Action::Scroll { lines });
+        }
         // plan editor-round-4 WP-2: the editor scrolls to the edge; place-keeping follows.
         self.top_line = if bottom {
             at.line.saturating_sub(self.visible_lines - 1)

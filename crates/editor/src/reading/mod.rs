@@ -1006,13 +1006,7 @@ pub fn update(
                 Some(b) => {
                     store.top.insert((path.clone(), view), b);
                     if let Some(y) = p.block_offset(b) {
-                        return iced::widget::operation::scroll_to(
-                            crate::find::reading_scroll_id(&path, view),
-                            iced::widget::scrollable::AbsoluteOffset {
-                                x: None,
-                                y: Some(y),
-                            },
-                        );
+                        return ScrollIntent::ScrollTo { path, view, y }.task();
                     }
                 }
                 None => match p.top_block() {
@@ -1191,7 +1185,7 @@ impl Probe {
 
 /// The widget operation behind [`Probe`]: reads the reading scrollable and the id'd block
 /// containers of one path.
-struct ProbeOp {
+pub(crate) struct ProbeOp {
     scroll: iced::widget::Id,
     blocks: Vec<iced::widget::Id>,
     out: Probe,
@@ -1238,10 +1232,10 @@ impl iced::advanced::widget::Operation<Probe> for ProbeOp {
     }
 }
 
-/// plan editor-ui-round-3 WP-6: probes `path`'s reading layout (`blocks` top-level blocks),
-/// answering with [`ReadingMsg::Probed`] (`scroll_to` passed through).
-pub fn probe(path: &str, view: u64, blocks: usize, scroll_to: Option<usize>) -> Task<Message> {
-    let op = ProbeOp {
+/// Plan round-7 WP-4: builds the [`ProbeOp`] for `path`'s reading layout in tab `view`
+/// (`blocks` top-level blocks) — shared by [`probe`] and the headless test harness.
+pub(crate) fn probe_op(path: &str, view: u64, blocks: usize) -> ProbeOp {
+    ProbeOp {
         scroll: crate::find::reading_scroll_id(path, view),
         blocks: (0..blocks).map(|i| block_id(path, view, i)).collect(),
         out: Probe {
@@ -1249,16 +1243,89 @@ pub fn probe(path: &str, view: u64, blocks: usize, scroll_to: Option<usize>) -> 
             ..Probe::default()
         },
         found: false,
-    };
-    let path = path.to_owned();
-    iced::advanced::widget::operate(op).map(move |p| {
-        Message::Reading(ReadingMsg::Probed {
-            path: path.clone(),
-            view,
-            probe: Some(p),
-            scroll_to,
-        })
-    })
+    }
+}
+
+/// plan editor-ui-round-3 WP-6: probes `path`'s reading layout (`blocks` top-level blocks),
+/// answering with [`ReadingMsg::Probed`] (`scroll_to` passed through).
+pub fn probe(path: &str, view: u64, blocks: usize, scroll_to: Option<usize>) -> Task<Message> {
+    ScrollIntent::Probe {
+        path: path.to_owned(),
+        view,
+        blocks,
+        scroll_to,
+    }
+    .task()
+}
+
+/// Plan round-7 WP-4 (audit E1): one programmatic scroll or layout probe of tab `view`'s
+/// reading scrollable on `path`, as a plain value. Every editor-issued reading scroll goes
+/// through [`ScrollIntent::task`], so the headless tests can apply the same intents to a
+/// laid-out tree (the returned `Task` is opaque outside the runtime).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScrollIntent {
+    /// Snap to a relative vertical offset (0 = top, 1 = bottom).
+    SnapTo { path: String, view: u64, y: f32 },
+    /// Scroll to an absolute vertical offset.
+    ScrollTo { path: String, view: u64, y: f32 },
+    /// PageUp / PageDown ([`crate::page::page`]).
+    Page { path: String, view: u64, down: bool },
+    /// One line step of `dy` pixels ([`crate::page::step`]).
+    Step { path: String, view: u64, dy: f32 },
+    /// A layout probe answered by [`ReadingMsg::Probed`].
+    Probe {
+        path: String,
+        view: u64,
+        blocks: usize,
+        scroll_to: Option<usize>,
+    },
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: every intent turned into a task on this thread, in order.
+    pub(crate) static INTENTS: std::cell::RefCell<Vec<ScrollIntent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl ScrollIntent {
+    /// The runtime task carrying out this intent.
+    pub fn task(self) -> Task<Message> {
+        #[cfg(test)]
+        INTENTS.with(|i| i.borrow_mut().push(self.clone()));
+        let id = |path: &str, view| crate::find::reading_scroll_id(path, view);
+        match self {
+            Self::SnapTo { path, view, y } => iced::widget::operation::snap_to(
+                id(&path, view),
+                iced::widget::scrollable::RelativeOffset { x: 0.0, y },
+            ),
+            Self::ScrollTo { path, view, y } => iced::widget::operation::scroll_to(
+                id(&path, view),
+                iced::widget::scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(y),
+                },
+            ),
+            Self::Page { path, view, down } => crate::page::page(id(&path, view), down),
+            Self::Step { path, view, dy } => crate::page::step(id(&path, view), dy),
+            Self::Probe {
+                path,
+                view,
+                blocks,
+                scroll_to,
+            } => {
+                let op = probe_op(&path, view, blocks);
+                iced::advanced::widget::operate(op).map(move |p: Probe| {
+                    Message::Reading(ReadingMsg::Probed {
+                        path: path.clone(),
+                        view,
+                        probe: Some(p),
+                        scroll_to,
+                    })
+                })
+            }
+        }
+    }
 }
 
 #[cfg(test)]
