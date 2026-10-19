@@ -360,6 +360,32 @@ fn discover_ignores_outside_inbox_and_dedupes() {
     assert_eq!(o.vars["found"], json!(0));
 }
 
+/// Round 7 WP-1: with `origin = "any"` x-discover re-fires on its own stamp write (after the
+/// cycle window); the second pass over the processed note must write nothing and fetch nothing.
+#[test]
+fn discover_second_pass_over_processed_note_writes_nothing() {
+    let body =
+        "---\nsource: https://x.com/synth/status/111\n---\nsee https://x.com/other/status/222\n";
+    let w = world(
+        &[("clips/c.md", body)],
+        vec![
+            ("status%2F111", 200, oembed("synth")),
+            ("status%2F222", 404, String::new()),
+        ],
+        PIPES,
+    );
+    let d = step("x_discover", "");
+    let first = run(&w, &d, Some("clips/c.md"), &Map::new()).unwrap();
+    assert!(first.output_paths.contains(&"clips/c.md".to_owned()));
+    let note = read(&w, "clips/c.md");
+    let hits = w.hits.load(Ordering::SeqCst);
+    let again = run(&w, &d, Some("clips/c.md"), &Map::new()).unwrap();
+    assert_eq!(again.vars["found"], json!(2));
+    assert!(again.output_paths.is_empty(), "{:?}", again.output_paths);
+    assert_eq!(read(&w, "clips/c.md"), note);
+    assert_eq!(w.hits.load(Ordering::SeqCst), hits);
+}
+
 #[test]
 fn backfill_skips_statuses_with_a_note_and_bounds_by_limit() {
     let w = world(

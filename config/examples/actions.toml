@@ -303,7 +303,7 @@ id = "x-discover"
 label = "X: discover clipped posts"
 group = "Ingest"
 starters = [
-  { type = "event", kinds = ["created", "modified"], selector = { folder = "Clippings" } },
+  { type = "event", kinds = ["created", "modified"], origin = "any", selector = { folder = "Clippings" } },
 ]
 resources = { note = true, keys = ["x::metadata"] }
 [[action.steps]]
@@ -334,7 +334,7 @@ id = "clip-images"
 label = "Clip: localize + describe images"
 group = "Ingest"
 starters = [
-  { type = "event", kinds = ["created"], selector = { folder = "Clippings" } },
+  { type = "event", kinds = ["created"], origin = "any", selector = { folder = "Clippings" } },
 ]
 [[action.steps]]
 type = "localize"
