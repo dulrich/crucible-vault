@@ -360,7 +360,7 @@ fn destination(
     };
     let name = match &p.name {
         Some(n) => expand(ctx, n)?,
-        None => src.rsplit('/').next().unwrap_or(src).to_owned(),
+        None => cv_text::vpath::basename(src).to_owned(),
     };
     let name = name.trim().to_owned();
     if name.is_empty() || name.contains('/') {

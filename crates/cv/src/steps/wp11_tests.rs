@@ -251,7 +251,7 @@ fn var(o: &StepOutcome, k: &str) -> u64 {
 #[test]
 fn downloads_names_by_md5_rewrites_with_empty_alt_and_dedupes() {
     let img = png(1);
-    let md5 = localize::md5_hex(&img);
+    let md5 = super::util::md5_hex(&img);
     let routes = HashMap::from([
         route("/a/1.png", "image/png", img.clone()),
         route("/b/other", "image/png", img.clone()),
@@ -303,7 +303,7 @@ fn converts_before_hashing_when_enabled() {
     let (converted, ext) =
         localize::convert_image(bmp.clone(), "bmp", localize::ImageFormat::Webp, None);
     assert_eq!(ext, "webp");
-    let md5 = localize::md5_hex(&converted);
+    let md5 = super::util::md5_hex(&converted);
     let routes = HashMap::from([route("/p.bmp", "image/bmp", bmp)]);
     let env = with_server(routes, None, move |port, _| {
         let note = format!("![](http://127.0.0.1:{port}/p.bmp)\n");
@@ -320,7 +320,7 @@ fn converts_before_hashing_when_enabled() {
 #[test]
 fn strips_data_image_placeholders_and_already_localized_note_is_untouched() {
     let img = png(2);
-    let md5 = localize::md5_hex(&img);
+    let md5 = super::util::md5_hex(&img);
     let local = format!("_attachments/n/{md5}_MD5.png");
     let note = format!("Lazy ![](data:image/gif;base64,R0lGODlhAQABAAAAACw=) ![]({local})\n");
     let env = env(&[("n.md", note.as_bytes()), (&local, &img)]);
@@ -358,7 +358,7 @@ fn concurrent_edit_during_download_is_kept_and_refs_reapplied() {
     });
     let out = res.unwrap();
     assert_eq!(out.vars.get("changed"), Some(&Value::Bool(true)));
-    let m = localize::md5_hex(&img);
+    let m = super::util::md5_hex(&img);
     assert_eq!(
         env.text("n.md"),
         format!("user edit\n![](_attachments/n/{m}_MD5.png)\n")
@@ -383,7 +383,7 @@ fn write_race_reapplies_then_persistent_race_defers() {
         let second = env.run(&step, "m.md");
         (env, first, second)
     });
-    let m = localize::md5_hex(&img);
+    let m = super::util::md5_hex(&img);
     assert!(first.is_ok(), "{first:?}");
     assert_eq!(
         env.text("n.md"),
@@ -412,7 +412,7 @@ fn one_failed_download_among_several_is_counted_and_left() {
     });
     assert_eq!(var(&out, "downloaded"), 2);
     assert_eq!(var(&out, "failed"), 1);
-    let (ma, mb) = (localize::md5_hex(&a), localize::md5_hex(&b));
+    let (ma, mb) = (super::util::md5_hex(&a), super::util::md5_hex(&b));
     assert_eq!(
         env.text("n.md"),
         format!(
@@ -458,7 +458,7 @@ fn no_runtime_fails_cleanly() {
 #[test]
 fn repair_repoints_broken_ref_and_counts_landed_write() {
     let img = png(7);
-    let md5 = localize::md5_hex(&img);
+    let md5 = super::util::md5_hex(&img);
     let kept = format!("_resources/keep/{md5}_MD5.png");
     let note = format!(
         "![](_resources/Clippings/gone/{md5}_MD5.png)\n[[old/doc_MD5.pdf|the doc]]\n![[nowhere.png]]\n"
@@ -485,7 +485,7 @@ fn repair_repoints_broken_ref_and_counts_landed_write() {
 #[test]
 fn local_attachment_is_rehomed_and_unshared_source_retired() {
     let img = png(8);
-    let md5 = localize::md5_hex(&img);
+    let md5 = super::util::md5_hex(&img);
     let env = env(&[
         ("n.md", b"![[pics/photo.png]] ![[pics/shared.png]]\n"),
         ("other.md", b"![[pics/shared.png]]\n"),
@@ -565,7 +565,7 @@ fn folder_backfill_is_bounded_resumes_and_records_failures() {
         ),
         (0, 0, 0)
     );
-    let md5 = localize::md5_hex(&img);
+    let md5 = super::util::md5_hex(&img);
     assert_eq!(
         env.text("Clippings/sub/c.md"),
         format!("![](Clippings/sub/_attachments/c/{md5}_MD5.png)\n")
@@ -676,9 +676,9 @@ fn embed_pages_are_not_attachments() {
         "https://x.com/someone/status/123",
         "https://twitter.com/i/status/123",
     ] {
-        assert!(localize::is_embed_page(u), "{u}");
+        assert!(cv_text::attachments::is_embed_page(u), "{u}");
         assert!(
-            !localize::has_remote_image_refs(&format!("![]({u})")),
+            !cv_text::attachments::has_remote_image_refs(&format!("![]({u})")),
             "{u}"
         );
     }
@@ -688,9 +688,9 @@ fn embed_pages_are_not_attachments() {
         "https://pbs.twimg.com/media/a.jpg",
         "https://x.com/someone",
     ] {
-        assert!(!localize::is_embed_page(u), "{u}");
+        assert!(!cv_text::attachments::is_embed_page(u), "{u}");
     }
-    assert!(localize::has_remote_image_refs(
+    assert!(cv_text::attachments::has_remote_image_refs(
         "![](https://www.youtube.com/watch?v=a)\n![](https://x.test/a.png)"
     ));
 }
@@ -777,14 +777,16 @@ fn folder_scope_params_validate() {
 
 #[test]
 fn remote_ref_predicate_skips_fences_and_sees_data_uris() {
-    assert!(localize::has_remote_image_refs("![](https://x.test/a.png)"));
-    assert!(localize::has_remote_image_refs(
+    assert!(cv_text::attachments::has_remote_image_refs(
+        "![](https://x.test/a.png)"
+    ));
+    assert!(cv_text::attachments::has_remote_image_refs(
         "![](data:image/gif;base64,AA)"
     ));
-    assert!(!localize::has_remote_image_refs(
+    assert!(!cv_text::attachments::has_remote_image_refs(
         "```\n![](https://x.test/a.png)\n```\n"
     ));
-    assert!(!localize::has_remote_image_refs(
+    assert!(!cv_text::attachments::has_remote_image_refs(
         "[link](https://x.test/a.png) ![](local.png)"
     ));
 }

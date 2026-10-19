@@ -38,9 +38,10 @@ use serde::Serialize;
 use super::super::file::kind_def;
 use super::super::materialize::{join, now};
 use super::super::params::{expand, get_str, get_str_list};
+use super::super::util::{fetch_bounded, md_files_under};
 use super::super::web::{client, create_or_found};
 use super::super::{StepCtx, StepError, StepModule, StepOutcome, lint, localize};
-use super::{Candidate, SeenSet, emit_line_with, fetch_bounded, md_files_under, record_with};
+use super::{Candidate, SeenSet, emit_line_with, record_with};
 
 /// `tracker_items.source_kind` / `ignored_ids.kind` of blog posts.
 pub const KIND: &str = "blog";

@@ -1,48 +1,21 @@
-//! Step module `localize` (plan `v0-core-daemon` WP-11): localize a note's attachments and repair
-//! its broken attachment refs.
+//! Attachment-ref domain: parsing, rewriting, repair planning and path templating of a note's
+//! attachment refs — the pure half of the daemon's `localize` step (plan
+//! tn-review-baseline-remediation WP-R10, finding F6), shared with the `write_attachment` RPC.
 //!
-//! Ported from Crucible `src/localizeAttachments.ts` (`AttachmentLocalizer.localizeNote`,
-//! `repairNote`, `processRemote`, `processLocal`, `writeAttachment`, `downloadRemote`,
-//! `convertImage`) and `src/attachmentRepair.ts` (the pure ref/repair domain, ported function by
-//! function below with the same names in snake case). Behaviours kept, with their Crucible
-//! source:
-//! - attachments are named by a deterministic MD5 of the *final, post-conversion* bytes through
-//!   the `{{md5}}_MD5.{{ext}}` name template (`src/AGENTS.md:23,49`); an existing file with that
-//!   name is reused, never rewritten (Crucible rewrote it with identical bytes via
-//!   `modifyBinary` — a no-op write, dropped);
-//! - the web clipper's `data:image` lazy placeholders are stripped (`src/AGENTS.md:24,51`);
-//! - rewritten markdown embeds carry an empty alt (`src/AGENTS.md:25,53`);
-//! - one `_MD5`-gated ref-rewrite chokepoint ([`rewrite_localized_attachment_refs`]); repair
-//!   counts only replacements that landed, and only when the note write itself landed (CAS
-//!   success) (`src/AGENTS.md:26`).
-//!
-//! Dropped (Obsidian-induced): the re-read-before-write and the spanning `withMaterializing`
-//! flag (`src/AGENTS.md:22,47`). Crucible needed both because `vault.modify` has no
-//! compare-and-swap and its own debounced auto-lint/auto-localize handlers had to be suppressed
-//! for the whole download window. Here the note is read once with its hash, every download and
-//! conversion happens, and the single note write is a CAS against that hash (I2): a concurrent
-//! edit yields a conflict and the step fails, never a clobber; the runner's cycle guard (I5)
-//! replaces the materializing flag. Also dropped: the metadata cache as the ref source
-//! (`parseAttachmentRefsFromCache`) — refs are parsed from the note text ([`parse_attachment_refs`],
-//! fenced code skipped as the cache does) and resolved through the index's file list with
-//! `cv_index::Resolver` (`getFirstLinkpathDest`'s replacement); notices/spinners/debug-log.
+//! Ported from Crucible `src/attachmentRepair.ts` (function by function, same names in snake
+//! case) and the pure helpers of `src/localizeAttachments.ts`; the `localize` step module
+//! (`crates/cv/src/steps/localize/mod.rs`) lists the behaviours kept and dropped. Folder slugs
+//! come from the one [`crate::template::slugify`] (WP-R10 moved localize's ASCII-only fold onto
+//! it; measured: no existing attachment folder changes name).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
-use std::time::Duration;
 
-use cv_actions::{ConfigSet, StepKind};
-use cv_providers::FailureKind;
-use cv_providers::web::{FetchError, FetchRequest, Limited, WebClient};
-use cv_vault::VaultError;
+use chrono::NaiveDateTime;
 use regex::Regex;
-use serde::Serialize;
 
-use super::{StepCtx, StepError, StepModule, StepOutcome};
-
-// ---------------------------------------------------------------------------------------------
-// Pure domain (port of src/attachmentRepair.ts)
-// ---------------------------------------------------------------------------------------------
+use crate::template::{AttachmentTemplateContext, apply_attachment_template};
+use crate::vpath::{basename, percent_decode, split};
 
 /// Crucible `MD5_NAME_RE` (`/_MD5\.[A-Za-z0-9]+$/`).
 pub fn is_md5_name(name: &str) -> bool {
@@ -157,20 +130,9 @@ fn extract_ref_link_target(r: &str) -> Option<&str> {
     None
 }
 
-fn percent_decode(s: &str) -> String {
-    match percent_encoding::percent_decode_str(s).decode_utf8() {
-        Ok(d) => d.into_owned(),
-        Err(_) => s.to_owned(),
-    }
-}
-
 fn strip_angle(s: &str) -> &str {
     let s = s.strip_prefix('<').unwrap_or(s);
     s.strip_suffix('>').unwrap_or(s)
-}
-
-fn basename(p: &str) -> &str {
-    p.rsplit('/').next().unwrap_or(p)
 }
 
 /// Crucible `isManagedAttachmentLink`: the gate that keeps ordinary note links out of the
@@ -472,7 +434,7 @@ fn fenced_ranges(content: &str) -> Vec<(usize, usize)> {
 /// A remote link Obsidian renders as an embedded page (YouTube video, X/Twitter post), not an
 /// attachment: never downloaded and never a backfill candidate.
 pub fn is_embed_page(link: &str) -> bool {
-    let Ok(u) = reqwest::Url::parse(link.trim()) else {
+    let Ok(u) = url::Url::parse(link.trim()) else {
         return false;
     };
     let host = u.host_str().unwrap_or("").to_ascii_lowercase();
@@ -601,12 +563,6 @@ pub fn clamp_image_quality(q: Option<f64>) -> f64 {
     v.clamp(30.0, 100.0) / 100.0
 }
 
-/// Crucible `md5HexForBytes` (deterministic content MD5, `src/AGENTS.md:23,49`).
-pub fn md5_hex(bytes: &[u8]) -> String {
-    use md5::Digest;
-    hex::encode(md5::Md5::digest(bytes))
-}
-
 /// Crucible `classifyLocalizeMediaType` (`src/utils.ts:145`, formats from `src/types.ts:33`).
 pub fn classify_media(ext: &str) -> Option<Media> {
     let e = ext.trim_start_matches('.').to_ascii_lowercase();
@@ -632,7 +588,9 @@ pub enum Media {
 }
 
 impl Media {
-    fn native(self) -> &'static [&'static str] {
+    /// The native extensions of this media type.
+    #[must_use]
+    pub fn native(self) -> &'static [&'static str] {
         match self {
             Media::Images => &["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"],
             Media::Audio => &["flac", "m4a", "mp3", "ogg", "wav", "webm", "3gp"],
@@ -640,7 +598,9 @@ impl Media {
             Media::Pdf => &["pdf"],
         }
     }
-    fn key(self) -> &'static str {
+    /// The params key (`images`, `audio`, …).
+    #[must_use]
+    pub fn key(self) -> &'static str {
         match self {
             Media::Images => "images",
             Media::Audio => "audio",
@@ -650,9 +610,8 @@ impl Media {
     }
 }
 
-/// Crucible `extFromMime`.
 /// A Content-Type naming a document page rather than a media file.
-fn is_page_mime(mime: &str) -> bool {
+pub fn is_page_mime(mime: &str) -> bool {
     let head = mime
         .split(';')
         .next()
@@ -662,7 +621,8 @@ fn is_page_mime(mime: &str) -> bool {
     head.starts_with("text/") || head == "application/xhtml+xml"
 }
 
-fn ext_from_mime(mime: &str) -> Option<&'static str> {
+/// Crucible `extFromMime`.
+pub fn ext_from_mime(mime: &str) -> Option<&'static str> {
     let head = mime
         .split(';')
         .next()
@@ -694,7 +654,7 @@ fn ext_from_mime(mime: &str) -> Option<&'static str> {
 }
 
 /// Crucible `extFromUrl`.
-fn ext_from_url(u: &str) -> Option<String> {
+pub fn ext_from_url(u: &str) -> Option<String> {
     let url = url::Url::parse(u).ok()?;
     let last = url.path().rsplit('/').next()?;
     let (_, ext) = last.rsplit_once('.')?;
@@ -703,7 +663,7 @@ fn ext_from_url(u: &str) -> Option<String> {
 }
 
 /// Crucible `guessRemoteOriginalName`: last path segment without its extension.
-fn guess_remote_original_name(u: &str) -> String {
+pub fn guess_remote_original_name(u: &str) -> String {
     let Ok(url) = url::Url::parse(u) else {
         return "remote".into();
     };
@@ -718,23 +678,6 @@ fn guess_remote_original_name(u: &str) -> String {
     }
 }
 
-/// Crucible `slugify` (`src/utils.ts:129`). Deviation: no NFKD fold (no Unicode-normalization
-/// crate pinned); non-ASCII letters become `-` like any other non-`[a-z0-9]` run.
-pub fn slugify(v: &str) -> String {
-    let mut out = String::new();
-    let mut dash = false;
-    for c in v.to_lowercase().chars() {
-        if c.is_ascii_lowercase() || c.is_ascii_digit() {
-            out.push(c);
-            dash = false;
-        } else if !dash {
-            out.push('-');
-            dash = true;
-        }
-    }
-    out.trim_matches('-').to_owned()
-}
-
 /// Obsidian `normalizePath` for a vault-relative path (`\`/`/` runs → `/`, no leading/trailing
 /// `/`, NBSP → space); the vault root is `""`.
 pub fn normalize_path(p: &str) -> String {
@@ -746,631 +689,73 @@ pub fn normalize_path(p: &str) -> String {
 }
 
 /// Default `folder_template` (Crucible `DEFAULT_SETTINGS`); shared with the `write_attachment` RPC.
-pub(crate) const DEFAULT_FOLDER_TEMPLATE: &str = "{{folder}}/_attachments/{{slug}}";
+pub const DEFAULT_FOLDER_TEMPLATE: &str = "{{folder}}/_attachments/{{slug}}";
 /// Default `name_template`; shared with the `write_attachment` RPC.
-pub(crate) const DEFAULT_NAME_TEMPLATE: &str = "{{md5}}_MD5.{{ext}}";
+pub const DEFAULT_NAME_TEMPLATE: &str = "{{md5}}_MD5.{{ext}}";
 
 /// Splits a note path into `(folder, basename-without-.md)`.
-pub(crate) fn note_folder_basename(path: &str) -> (&str, &str) {
-    let (folder, file) = path.rsplit_once('/').unwrap_or(("", path));
+pub fn note_folder_basename(path: &str) -> (&str, &str) {
+    let (folder, file) = split(path);
     (folder, file.strip_suffix(".md").unwrap_or(file))
 }
 
-/// Resolves the vault path of an attachment for `note_path` from the templates
-/// (folder template + name template, normalized). Shared by [`Run::write_attachment`] and the
-/// daemon's `write_attachment` RPC.
-pub(crate) fn resolve_attachment_path(
+/// Resolves an attachment folder for `note_path` from `folder_template` (normalized), at `now`.
+/// A template the engine rejects (a bad `{{datetime:…}}` format; params validation refuses
+/// `{{datetime:` up front) renders verbatim.
+#[must_use]
+pub fn resolve_attachment_folder(
+    folder_template: &str,
+    note_path: &str,
+    original: &str,
+    ext: &str,
+    now: NaiveDateTime,
+) -> String {
+    normalize_path(&render(
+        folder_template,
+        &ctx(note_path, original, ext, "", now),
+    ))
+}
+
+/// Resolves the vault path of an attachment for `note_path` from the folder and name templates
+/// (both through [`apply_attachment_template`], normalized). Shared by the `localize` step and
+/// the daemon's `write_attachment` RPC.
+#[must_use]
+pub fn resolve_attachment_path(
     folder_template: &str,
     name_template: &str,
     note_path: &str,
     original: &str,
     ext: &str,
     md5: &str,
+    now: NaiveDateTime,
 ) -> String {
-    let (note_folder, note_basename) = note_folder_basename(note_path);
-    let tc = TemplateCtx {
-        note_basename,
-        note_folder,
-        original,
-        ext,
-        md5,
-    };
-    let folder = normalize_path(&apply_template(folder_template, &tc));
-    let name = apply_template(name_template, &tc);
+    let c = ctx(note_path, original, ext, md5, now);
+    let folder = normalize_path(&render(folder_template, &c));
+    let name = render(name_template, &c);
     normalize_path(&format!("{folder}/{name}"))
 }
 
-/// Crucible `AttachmentTemplateContext`.
-struct TemplateCtx<'a> {
-    note_basename: &'a str,
-    note_folder: &'a str,
-    original: &'a str,
-    ext: &'a str,
-    md5: &'a str,
-}
-
-/// Crucible `applyAttachmentTemplate` (tokens `folder slug name title ext original md5 date time
-/// today now`). `{{datetime:…}}` (moment formats) is rejected at validation.
-fn apply_template(t: &str, c: &TemplateCtx<'_>) -> String {
-    let now = chrono::Local::now();
-    let tokens = [
-        ("folder", c.note_folder.to_owned()),
-        ("slug", slugify(c.note_basename)),
-        ("name", c.note_basename.to_owned()),
-        ("title", c.note_basename.to_owned()),
-        ("ext", c.ext.to_owned()),
-        ("original", c.original.to_owned()),
-        ("md5", c.md5.to_owned()),
-        ("date", now.format("%Y-%m-%d").to_string()),
-        ("time", now.format("%H:%M").to_string()),
-        ("today", now.format("%Y-%m-%d").to_string()),
-        ("now", now.format("%Y-%m-%dT%H:%M:%S").to_string()),
-    ];
-    let mut out = t.to_owned();
-    for (k, v) in tokens {
-        out = out.replace(&format!("{{{{{k}}}}}"), &v);
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------------------------
-// Params
-// ---------------------------------------------------------------------------------------------
-
-/// Target image format (Crucible `ImageConvertFormat`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageFormat {
-    /// WebP (the `image` crate encodes lossless WebP only — quality is ignored).
-    Webp,
-    /// JPEG at the clamped quality.
-    Jpeg,
-}
-
-/// Parsed step params (defaults = Crucible `DEFAULT_SETTINGS`, `src/types.ts:794-816`).
-#[derive(Debug, Clone)]
-pub(crate) struct Params {
-    path: Option<String>,
-    /// `Some(folder)` = folder scope (plan `usability-sprint-captures-links` WP-2 backfill).
-    folder_scope: Option<String>,
-    limit: u64,
-    repair: bool,
-    folder_template: String,
-    name_template: String,
-    enabled: Vec<Media>,
-    whitelists: HashMap<&'static str, Vec<String>>,
-    convert_images: bool,
-    image_format: ImageFormat,
-    image_quality: Option<f64>,
-    timeout: Duration,
-    max_bytes: u64,
-}
-
-fn parse_params(t: &toml::Table) -> Result<Params, String> {
-    if let Some(k) = super::params::unknown_key(StepKind::Localize, t) {
-        return Err(format!("localize: unknown param {k:?}"));
-    }
-    let s = |k: &str| -> Result<Option<String>, String> {
-        match t.get(k) {
-            None => Ok(None),
-            Some(toml::Value::String(v)) => Ok(Some(v.clone())),
-            Some(_) => Err(format!("localize: {k} must be a string")),
-        }
-    };
-    let b = |k: &str, d: bool| -> Result<bool, String> {
-        match t.get(k) {
-            None => Ok(d),
-            Some(toml::Value::Boolean(v)) => Ok(*v),
-            Some(_) => Err(format!("localize: {k} must be a bool")),
-        }
-    };
-    let u = |k: &str, d: u64| -> Result<u64, String> {
-        match t.get(k) {
-            None => Ok(d),
-            Some(toml::Value::Integer(v)) if *v > 0 => Ok(u64::try_from(*v).unwrap_or(d)),
-            Some(_) => Err(format!("localize: {k} must be a positive integer")),
-        }
-    };
-    let repair = match s("mode")?.as_deref() {
-        None | Some("localize") => false,
-        Some("repair") => true,
-        Some(o) => return Err(format!("localize: mode {o:?} (want localize|repair)")),
-    };
-    let folder_template = s("folder_template")?.unwrap_or_else(|| DEFAULT_FOLDER_TEMPLATE.into());
-    let name_template = s("name_template")?.unwrap_or_else(|| DEFAULT_NAME_TEMPLATE.into());
-    for tpl in [&folder_template, &name_template] {
-        if tpl.contains("{{datetime:") {
-            return Err("localize: {{datetime:…}} templates are not supported".into());
-        }
-    }
-    if !name_template.contains("{{md5}}") {
-        return Err("localize: name_template must contain {{md5}}".into());
-    }
-    let mut enabled = Vec::new();
-    let mut whitelists = HashMap::new();
-    for (m, d) in [
-        (Media::Images, true),
-        (Media::Audio, false),
-        (Media::Video, false),
-        (Media::Pdf, false),
-    ] {
-        if b(m.key(), d)? {
-            enabled.push(m);
-        }
-        let wk = format!("{}_whitelist", m.key());
-        let wl = match t.get(&wk) {
-            None => m.native().iter().map(|s| (*s).to_owned()).collect(),
-            Some(toml::Value::Array(a)) => a
-                .iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(str::to_ascii_lowercase)
-                        .ok_or_else(|| format!("localize: {wk} must be strings"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            Some(_) => return Err(format!("localize: {wk} must be an array")),
-        };
-        whitelists.insert(m.key(), wl);
-    }
-    let image_format = match s("image_format")?.as_deref() {
-        None | Some("webp") => ImageFormat::Webp,
-        Some("jpeg") => ImageFormat::Jpeg,
-        Some(o) => return Err(format!("localize: image_format {o:?} (want webp|jpeg)")),
-    };
-    let image_quality = match t.get("image_quality") {
-        None => None,
-        Some(toml::Value::Integer(v)) => Some(*v as f64),
-        Some(toml::Value::Float(v)) => Some(*v),
-        Some(_) => return Err("localize: image_quality must be a number".into()),
-    };
-    let folder = s("folder")?;
-    let folder_scope = match s("scope")?.as_deref() {
-        None | Some("note") => {
-            if folder.is_some() {
-                return Err("localize: folder requires scope = \"folder\"".into());
-            }
-            None
-        }
-        Some("folder") => Some(
-            folder
-                .map(|f| f.trim_matches('/').to_owned())
-                .ok_or("localize: scope = \"folder\" requires folder")?,
-        ),
-        Some(o) => return Err(format!("localize: scope {o:?} (want note|folder)")),
-    };
-    Ok(Params {
-        path: s("path")?,
-        folder_scope,
-        limit: u("limit", 50)?,
-        repair,
-        folder_template,
-        name_template,
-        enabled,
-        whitelists,
-        convert_images: b("convert_images", false)?,
-        image_format,
-        image_quality,
-        timeout: Duration::from_secs(u("timeout_secs", 30)?),
-        max_bytes: u("max_bytes", 50 * 1024 * 1024)?,
-    })
-}
-
-impl Params {
-    /// Crucible `isEligibleAttached`.
-    fn eligible(&self, ext: &str) -> bool {
-        let Some(m) = classify_media(ext) else {
-            return false;
-        };
-        self.enabled.contains(&m)
-            && self
-                .whitelists
-                .get(m.key())
-                .is_some_and(|w| w.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+fn ctx(
+    note_path: &str,
+    original: &str,
+    ext: &str,
+    md5: &str,
+    now: NaiveDateTime,
+) -> AttachmentTemplateContext {
+    let (note_folder, note_basename) = note_folder_basename(note_path);
+    AttachmentTemplateContext {
+        now,
+        note_basename: note_basename.to_owned(),
+        note_folder_path: note_folder.to_owned(),
+        original_name: original.to_owned(),
+        ext: ext.to_owned(),
+        md5: Some(md5.to_owned()),
     }
 }
 
-impl Params {
-    /// Default params localizing `path` (inline localize, e.g. the blog tracker's captures).
-    pub(crate) fn note(path: String) -> Self {
-        let mut p = parse_params(&toml::Table::new()).unwrap_or_else(|_| unreachable!());
-        p.path = Some(path);
-        p
-    }
+fn render(t: &str, c: &AttachmentTemplateContext) -> String {
+    apply_attachment_template(t, c).unwrap_or_else(|_| t.to_owned())
 }
-
-/// The `localize` step (params all optional; an empty table is valid).
-pub(crate) struct Localize;
-
-impl StepModule for Localize {
-    type Params = Params;
-
-    fn parse(_: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
-        parse_params(t)
-    }
-
-    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-        run(&p, ctx)
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// I/O: download + convert
-// ---------------------------------------------------------------------------------------------
-
-/// The breaker key of localize's attachment downloads (shared host gate, B8).
-pub(crate) const SERVICE: &str = "localize";
-
-/// Why one download failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DownloadError {
-    /// Connect/timeout: the network (or host) is unreachable.
-    Unreachable,
-    /// HTTP 429 / 5xx: the host asks us to come back later (not a property of the image).
-    Throttled(FetchError),
-    /// The response's type (Content-Type, else the URL extension) is not an eligible
-    /// attachment; the body was not read.
-    NotEligible,
-    /// Anything else (HTTP status, body error, too large).
-    Failed(String),
-}
-
-/// One attachment download through the shared [`WebClient::fetch_limited`] (host gate +
-/// breaker key [`SERVICE`]), keeping localize's decide-from-headers rule: a page
-/// (`text/*`, XHTML) is never an attachment, whatever the URL's extension says; otherwise the
-/// extension comes from the Content-Type, else the URL, and must be `eligible` — all before the
-/// body is read.
-fn download(
-    client: &WebClient,
-    handle: &tokio::runtime::Handle,
-    url: &str,
-    max_bytes: u64,
-    timeout: Duration,
-    eligible: impl Fn(&str) -> bool,
-) -> Result<(Vec<u8>, String), DownloadError> {
-    let mut req = FetchRequest::get(SERVICE, url);
-    req.timeout = Some(timeout);
-    let decide = |ctype: &str| {
-        if is_page_mime(ctype) {
-            return None;
-        }
-        let ext = ext_from_mime(ctype)
-            .map(str::to_owned)
-            .or_else(|| ext_from_url(url))
-            .unwrap_or_else(|| "bin".into());
-        eligible(&ext).then_some(ext)
-    };
-    match handle.block_on(client.fetch_limited(req, max_bytes, decide)) {
-        Ok(Limited::Body(bytes, ext)) => Ok((bytes, ext)),
-        Ok(Limited::Rejected) => Err(DownloadError::NotEligible),
-        Err(e) => Err(match e.failure().kind {
-            FailureKind::Connect | FailureKind::Timeout => DownloadError::Unreachable,
-            FailureKind::RateLimited | FailureKind::Server => DownloadError::Throttled(e),
-            _ => DownloadError::Failed(e.to_string()),
-        }),
-    }
-}
-
-/// Crucible `convertImage`: re-encode, and keep the result only when it is smaller; any decode
-/// or encode failure keeps the source bytes. Deviation: WebP output is lossless (the pinned
-/// `image` crate has no lossy WebP encoder), so `image_quality` applies to JPEG only.
-pub fn convert_image(
-    bytes: Vec<u8>,
-    src_ext: &str,
-    target: ImageFormat,
-    quality: Option<f64>,
-) -> (Vec<u8>, String) {
-    let Ok(img) = image::load_from_memory(&bytes) else {
-        return (bytes, src_ext.to_owned());
-    };
-    let mut out = Vec::new();
-    let (res, ext) = match target {
-        ImageFormat::Webp => {
-            let rgba = image::DynamicImage::ImageRgba8(img.to_rgba8());
-            let enc = image::codecs::webp::WebPEncoder::new_lossless(&mut out);
-            (rgba.write_with_encoder(enc), "webp")
-        }
-        ImageFormat::Jpeg => {
-            let q = (clamp_image_quality(quality) * 100.0).round() as u8;
-            let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
-            let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q);
-            (rgb.write_with_encoder(enc), "jpg")
-        }
-    };
-    if res.is_err() || out.is_empty() || out.len() >= bytes.len() {
-        return (bytes, src_ext.to_owned());
-    }
-    (out, ext.to_owned())
-}
-
-// ---------------------------------------------------------------------------------------------
-// The step
-// ---------------------------------------------------------------------------------------------
-
-/// The note being processed.
-struct Note<'a> {
-    path: &'a str,
-    basename: &'a str,
-    folder: &'a str,
-}
-
-impl<'a> Note<'a> {
-    fn new(path: &'a str) -> Self {
-        let (folder, basename) = note_folder_basename(path);
-        Self {
-            path,
-            basename,
-            folder,
-        }
-    }
-}
-
-/// Vault paths + a resolver, from the index (`getFirstLinkpathDest`'s replacement).
-struct VaultView {
-    paths: Vec<String>,
-    resolver: cv_index::Resolver,
-    note_id: i64,
-    /// For each attachment path: the set of notes linking to it (Crucible `resolvedLinks`).
-    reader: cv_index::Reader,
-}
-
-impl VaultView {
-    fn open(index_db: &std::path::Path, note: &str) -> Result<Self, cv_index::Error> {
-        let reader = match cv_index::Reader::open_current(index_db) {
-            Err(cv_index::Error::GenerationMissing { .. }) => {
-                cv_index::Reader::open_current(index_db)?
-            }
-            r => r?,
-        };
-        let paths = cv_index::attachment_vault_paths(&reader.query())?;
-        let mut resolver = cv_index::Resolver::default();
-        let mut note_id = -1;
-        for (i, p) in paths.iter().enumerate() {
-            let id = i as i64;
-            resolver.add(id, p);
-            if p == note {
-                note_id = id;
-            }
-        }
-        Ok(Self {
-            paths,
-            resolver,
-            note_id,
-            reader,
-        })
-    }
-
-    fn resolve(&self, note: &str, link: &str) -> Option<&str> {
-        let target = link.split('#').next().unwrap_or("");
-        let id = self.resolver.resolve(note, self.note_id, target)?;
-        if id == self.note_id {
-            return None;
-        }
-        usize::try_from(id)
-            .ok()
-            .and_then(|i| self.paths.get(i))
-            .map(String::as_str)
-    }
-
-    /// Crucible `hasOtherAttachmentReferrer`, from the index's backlinks.
-    fn has_other_referrer(&self, attachment: &str, note: &str) -> bool {
-        match self.reader.query().backlinks(attachment) {
-            Ok(rows) => rows.iter().any(|r| r.src_path != note),
-            // Unknown → keep the file (copy semantics are the safe side).
-            Err(_) => true,
-        }
-    }
-}
-
-/// Run counters (reported in `vars`).
-#[derive(Debug, Default)]
-struct Counts {
-    downloaded: u64,
-    reused: u64,
-    stripped: u64,
-    failed: u64,
-    unreachable: u64,
-    /// Downloads refused with 429/5xx (also counted in `failed`).
-    throttled: u64,
-    /// The first throttled download's failure (a note-scope run defers on it).
-    first_throttle: Option<FetchError>,
-    /// Remote refs left as-is because they are not eligible attachments (embed pages, or a
-    /// response type outside the whitelists) — not failures.
-    ineligible: u64,
-    remote_attempts: u64,
-    created: Vec<String>,
-}
-
-/// Per-run state shared by the remote/local processors.
-struct Run<'p> {
-    p: &'p Params,
-    client: Option<&'static WebClient>,
-    handle: Option<tokio::runtime::Handle>,
-    counts: Counts,
-}
-
-impl Run<'_> {
-    /// Crucible `writeAttachment`: md5 of the final bytes → templated folder/name; an existing
-    /// file of that name is reused (content-MD5 naming makes it byte-identical).
-    fn write_attachment(
-        &mut self,
-        ctx: &mut StepCtx<'_>,
-        note: &Note<'_>,
-        bytes: Vec<u8>,
-        ext: &str,
-        original: &str,
-    ) -> Result<String, StepError> {
-        let md5 = md5_hex(&bytes);
-        let target = resolve_attachment_path(
-            &self.p.folder_template,
-            &self.p.name_template,
-            note.path,
-            original,
-            ext,
-            &md5,
-        );
-        if ctx.read(&target)?.is_some() {
-            self.counts.reused += 1;
-            return Ok(target);
-        }
-        let t = target.clone();
-        match ctx.with_writer(&[target.as_str()], move |vw| vw.create(&t, &bytes))? {
-            Ok(_) => {
-                self.counts.created.push(target.clone());
-                Ok(target)
-            }
-            Err(VaultError::Exists(_)) => {
-                self.counts.reused += 1;
-                Ok(target)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn maybe_convert(&self, bytes: Vec<u8>, ext: &str) -> (Vec<u8>, String) {
-        if self.p.convert_images && classify_media(ext) == Some(Media::Images) {
-            convert_image(bytes, ext, self.p.image_format, self.p.image_quality)
-        } else {
-            (bytes, ext.to_owned())
-        }
-    }
-
-    /// Crucible `processRemote`. `Ok(None)` = left as-is (counted when it was a failure).
-    fn process_remote(
-        &mut self,
-        ctx: &mut StepCtx<'_>,
-        note: &Note<'_>,
-        m: &AttachmentMatch,
-    ) -> Result<Option<String>, StepError> {
-        let (Some(client), Some(handle)) = (self.client, self.handle.as_ref()) else {
-            return Err(StepError::failed("no async runtime"));
-        };
-        if is_embed_page(&m.link) {
-            self.counts.ineligible += 1;
-            return Ok(None);
-        }
-        self.counts.remote_attempts += 1;
-        let p = self.p;
-        let (bytes, ext) = match download(client, handle, &m.link, p.max_bytes, p.timeout, |e| {
-            p.eligible(e)
-        }) {
-            Ok(d) => d,
-            Err(DownloadError::NotEligible) => {
-                // Crucible: "ext not eligible (left as-is)" — not a failure.
-                self.counts.ineligible += 1;
-                return Ok(None);
-            }
-            Err(e) => {
-                tracing::debug!(error = ?e, "localize: download failed (left as-is)");
-                self.counts.failed += 1;
-                match e {
-                    DownloadError::Unreachable => self.counts.unreachable += 1,
-                    DownloadError::Throttled(f) => {
-                        self.counts.throttled += 1;
-                        self.counts.first_throttle.get_or_insert(f);
-                    }
-                    DownloadError::Failed(_) | DownloadError::NotEligible => {}
-                }
-                return Ok(None);
-            }
-        };
-        if !self.p.eligible(&ext) {
-            // Crucible: "ext not eligible (left as-is)" — not a failure.
-            self.counts.ineligible += 1;
-            return Ok(None);
-        }
-        let (bytes, ext) = self.maybe_convert(bytes, &ext);
-        let original = guess_remote_original_name(&m.link);
-        let before = self.counts.reused;
-        match self.write_attachment(ctx, note, bytes, &ext, &original) {
-            Ok(target) => {
-                if self.counts.reused == before {
-                    self.counts.downloaded += 1;
-                }
-                Ok(Some(format_ref(m, &target)))
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "localize: attachment write failed (left as-is)");
-                self.counts.failed += 1;
-                Ok(None)
-            }
-        }
-    }
-
-    /// Crucible `processLocal`: re-home an eligible local attachment under its `_MD5` name in the
-    /// note's attachment folder. Returns the new ref and the old path to retire. Deviation: the
-    /// old file is retired only after the note write landed (Crucible trashed it first).
-    fn process_local(
-        &mut self,
-        ctx: &mut StepCtx<'_>,
-        note: &Note<'_>,
-        m: &AttachmentMatch,
-        view: Option<&VaultView>,
-    ) -> Result<Option<(String, String)>, StepError> {
-        let Some(resolved) = view.and_then(|v| v.resolve(note.path, &m.link)) else {
-            return Ok(None); // UNRESOLVED (left as-is)
-        };
-        let resolved = resolved.to_owned();
-        let name = basename(&resolved);
-        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
-        let ext = ext.to_ascii_lowercase();
-        if !self.p.eligible(&ext) {
-            return Ok(None);
-        }
-        let expected = normalize_path(&apply_template(
-            &self.p.folder_template,
-            &TemplateCtx {
-                note_basename: note.basename,
-                note_folder: note.folder,
-                original: stem,
-                ext: &ext,
-                md5: "",
-            },
-        ));
-        let parent = resolved.rsplit_once('/').map_or("", |(f, _)| f);
-        if is_md5_name(name) && parent == expected {
-            return Ok(None); // already localized
-        }
-        let Some((bytes, _)) = ctx.read(&resolved)? else {
-            return Ok(None);
-        };
-        let (bytes, out_ext) = self.maybe_convert(bytes, &ext);
-        let stem = stem.to_owned();
-        let target = self.write_attachment(ctx, note, bytes, &out_ext, &stem)?;
-        Ok(Some((format_ref(m, &target), resolved)))
-    }
-}
-
-fn ctx_note_path(p: &Params, ctx: &StepCtx<'_>) -> Result<String, StepError> {
-    let from_params = ctx
-        .params
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    p.path
-        .clone()
-        .or(from_params)
-        .or_else(|| ctx.context.active_path.clone())
-        .ok_or_else(|| StepError::failed("localize: no target note (path or active_path)"))
-}
-
-/// Crucible `repairNote`'s count: `repaired = resolved − (planned − applied)`, and zero unless
-/// the note write landed (planned-not-landed replacements fold into `unrepairable`).
-fn repair_counts(
-    resolved: u64,
-    unrepairable: u64,
-    planned: u64,
-    applied: u64,
-    landed: bool,
-) -> (u64, u64) {
-    if !landed {
-        return (0, unrepairable + resolved);
-    }
-    let missed = planned.saturating_sub(applied);
-    (resolved.saturating_sub(missed), unrepairable + missed)
-}
-
-/// The `ignored_ids` kind recording notes a folder-scope backfill attempted and could not fully
-/// localize (audit M2 progress invariant: never re-selected, so repeated runs reach new notes).
-pub const BACKFILL_KIND: &str = "localize_backfill";
 
 /// Whether `content` has a remote markdown image or a `data:image` placeholder outside fenced
 /// code (the folder-scope candidate predicate).
@@ -1386,395 +771,12 @@ pub fn has_remote_image_refs(content: &str) -> bool {
         .any(|m| outside(m.start()))
 }
 
-/// Executes one `localize` step (mode `localize` or `repair`) on the target note, or — with
-/// `scope = "folder"` — on up to `limit` candidate notes under `folder`.
-pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    if let Some(folder) = p.folder_scope.clone() {
-        return execute_folder(p, &folder, ctx);
-    }
-    let path = ctx_note_path(p, ctx)?;
-    let (vars, output_paths) = execute_note(p, &path, ctx)?;
-    // A host that throttled (429/5xx) is a transient service failure (WP-R9 decision): what
-    // could be localized has landed; the step defers on the breaker key so the throttled refs
-    // are retried later.
-    if let Some(e) = &vars.throttle {
-        return Err(StepError::from_fetch(e));
-    }
-    let mut out = StepOutcome {
-        output_paths,
-        ..StepOutcome::default()
-    };
-    out.set_vars(&vars);
-    Ok(out)
+/// The number of managed (`<md5>_MD5.<image ext>`) image names in `content` (the `images`
+/// outcome var; plan `v0-automation-pipelines` WP-6: the image-describe trigger seam).
+#[must_use]
+pub fn count_managed_images(content: &str) -> u64 {
+    managed_image_re().find_iter(content).count() as u64
 }
-
-/// Outcome vars of a note-scope `localize` (counts are absent on a non-`.md` target; the
-/// repair counts only in `mode = "repair"`).
-#[derive(Debug, Default, Serialize)]
-struct NoteVars {
-    changed: bool,
-    images: u64,
-    #[serde(flatten)]
-    counts: Option<NoteCounts>,
-    /// The first throttled download (not a var).
-    #[serde(skip)]
-    throttle: Option<FetchError>,
-}
-
-/// The download/rewrite counts of a localized `.md` note.
-#[derive(Debug, Default, Serialize)]
-struct NoteCounts {
-    downloaded: u64,
-    reused: u64,
-    stripped: u64,
-    failed: u64,
-    throttled: u64,
-    ineligible: u64,
-    localized: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repaired: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    unrepairable: Option<u64>,
-}
-
-/// Outcome vars of a folder-scope `localize` backfill.
-#[derive(Serialize)]
-struct FolderVars {
-    scanned: u64,
-    localized: u64,
-    failed: u64,
-    throttled: u64,
-    ineligible: u64,
-    unattempted_remaining: u64,
-}
-
-fn lock_state<'c>(
-    ctx: &'c StepCtx<'_>,
-) -> Result<std::sync::MutexGuard<'c, cv_state::StateDb>, StepError> {
-    ctx.state
-        .lock()
-        .map_err(|_| StepError::failed("localize: state lock poisoned"))
-}
-
-/// Folder-scope backfill: candidates are `.md` under `folder` (sorted) with remote/data image
-/// refs that are not recorded under [`BACKFILL_KIND`]; at most `limit` are attempted. A note
-/// whose localize errs, or that still has such refs afterwards, is recorded (never re-selected).
-/// A note whose downloads were throttled (429/5xx) is neither recorded nor counted as attempted,
-/// and ends the batch: the host is rate-limiting, so a later run retries it (`throttled = 1`).
-/// A note left only with refs that are not eligible attachments (embed pages excluded up front;
-/// e.g. a URL serving HTML) is settled — recorded so it is not re-selected, counted `ineligible`,
-/// not `failed`.
-fn execute_folder(
-    p: &Params,
-    folder: &str,
-    ctx: &mut StepCtx<'_>,
-) -> Result<StepOutcome, StepError> {
-    let files = super::tracker::md_files_under(ctx, folder);
-    let scanned = files.len() as u64;
-    let mut candidates = Vec::new();
-    for f in files {
-        if lock_state(ctx)?
-            .is_ignored(BACKFILL_KIND, &f)
-            .map_err(|e| StepError::failed(format!("localize: state: {e}")))?
-        {
-            continue;
-        }
-        let Some((bytes, _)) = ctx.read(&f)? else {
-            continue;
-        };
-        if std::str::from_utf8(&bytes).is_ok_and(has_remote_image_refs) {
-            candidates.push(f);
-        }
-    }
-    let (mut localized, mut failed, mut attempted, mut throttled) = (0_u64, 0_u64, 0_u64, 0_u64);
-    let mut ineligible = 0_u64;
-    let mut out = StepOutcome::default();
-    for f in &candidates {
-        if attempted >= p.limit {
-            break;
-        }
-        attempted += 1;
-        let reason = match execute_note(p, f, ctx) {
-            Ok((v, paths)) => {
-                let c = v.counts.unwrap_or_default();
-                let hit_limit = c.throttled > 0;
-                let failed_refs = c.failed;
-                for op in paths {
-                    out.push_output(op);
-                }
-                let left = ctx
-                    .read(f)?
-                    .is_some_and(|(b, _)| std::str::from_utf8(&b).is_ok_and(has_remote_image_refs));
-                if left && hit_limit {
-                    attempted -= 1;
-                    throttled += 1;
-                    break;
-                }
-                if left && failed_refs == 0 {
-                    ineligible += 1;
-                    lock_state(ctx)?
-                        .insert_ignored_id(
-                            BACKFILL_KIND,
-                            f,
-                            "settled: remaining refs are not eligible attachments",
-                            super::tracker::now_ms(),
-                        )
-                        .map_err(|e| StepError::failed(format!("localize: state: {e}")))?;
-                    continue;
-                }
-                left.then(|| format!("{failed_refs} download(s) failed; refs remain"))
-            }
-            Err(StepError::Deferred {
-                cause: super::DeferCause::Wait,
-                ..
-            }) => {
-                // A CAS conflict (SR7): never recorded as ignored — the note stays eligible
-                // and a later run retries it.
-                attempted -= 1;
-                continue;
-            }
-            Err(e @ StepError::Deferred { .. }) => return Err(e),
-            Err(e) => Some(e.to_string()),
-        };
-        match reason {
-            None => localized += 1,
-            Some(r) => {
-                failed += 1;
-                let r: String = r.chars().take(200).collect();
-                lock_state(ctx)?
-                    .insert_ignored_id(BACKFILL_KIND, f, &r, super::tracker::now_ms())
-                    .map_err(|e| StepError::failed(format!("localize: state: {e}")))?;
-            }
-        }
-    }
-    let unattempted_remaining = candidates.len() as u64 - attempted;
-    tracing::info!(
-        folder,
-        scanned,
-        localized,
-        failed,
-        ineligible,
-        throttled,
-        unattempted_remaining,
-        "localize backfill"
-    );
-    out.set_vars(&FolderVars {
-        scanned,
-        localized,
-        failed,
-        throttled,
-        ineligible,
-        unattempted_remaining,
-    });
-    Ok(out)
-}
-
-/// Localizes one note: its outcome vars and output paths.
-fn execute_note(
-    p: &Params,
-    path: &str,
-    ctx: &mut StepCtx<'_>,
-) -> Result<(NoteVars, Vec<String>), StepError> {
-    let path = path.to_owned();
-    let p = p.clone();
-    if !path.ends_with(".md") {
-        return Ok((NoteVars::default(), Vec::new()));
-    }
-    let note = Note::new(&path);
-    let Some((bytes, _)) = ctx.read(&path)? else {
-        return Err(StepError::failed(format!("localize: {path} not found")));
-    };
-    let content = String::from_utf8(bytes)
-        .map_err(|_| StepError::failed(format!("localize: {path} is not UTF-8")))?;
-    let matches = parse_attachment_refs(&content);
-    let placeholders = if !p.repair && p.enabled.contains(&Media::Images) {
-        strip_data_uri_image_placeholders(&content).1
-    } else {
-        0
-    };
-    let mut run = Run {
-        p: &p,
-        client: None,
-        handle: tokio::runtime::Handle::try_current().ok(),
-        counts: Counts::default(),
-    };
-    if matches.iter().any(|m| m.is_remote) {
-        if run.handle.is_none() {
-            return Err(StepError::failed("no async runtime"));
-        }
-        run.client = Some(super::web::client()?);
-    }
-    let needs_view = p.repair || matches.iter().any(|m| !m.is_remote);
-    let view = if needs_view {
-        match VaultView::open(ctx.index_db, &path) {
-            Ok(v) => Some(v),
-            Err(e) if p.repair => return Err(StepError::failed(format!("localize: index: {e}"))),
-            Err(e) => {
-                tracing::debug!(error = %e, "localize: no index; local refs left as-is");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let mut replacements: Vec<Replacement> = Vec::new();
-    // (ref text replaced, old local path) for re-homed local attachments.
-    let mut retire: Vec<(String, String)> = Vec::new();
-    let (mut resolved_count, mut unrepairable) = (0_u64, 0_u64);
-    if p.repair {
-        let expected = normalize_path(&apply_template(
-            &p.folder_template,
-            &TemplateCtx {
-                note_basename: note.basename,
-                note_folder: note.folder,
-                original: "",
-                ext: "",
-                md5: "",
-            },
-        ));
-        let pix = view
-            .as_ref()
-            .map(|v| AttachmentPathIndex::build(&v.paths))
-            .unwrap_or_default();
-        for m in &matches {
-            if !m.is_remote
-                && view
-                    .as_ref()
-                    .and_then(|v| v.resolve(&path, &m.link))
-                    .is_some()
-            {
-                continue;
-            }
-            let new_ref = if m.is_remote {
-                run.process_remote(ctx, &note, m)?
-            } else {
-                resolve_local_attachment_repair(&m.link, &expected, &pix)
-                    .ok()
-                    .map(|t| format_ref(m, &t))
-            };
-            match new_ref {
-                Some(r) => {
-                    resolved_count += 1;
-                    if r != m.original {
-                        replacements.push(Replacement {
-                            from: m.original.clone(),
-                            to: r,
-                        });
-                    }
-                }
-                None => unrepairable += 1,
-            }
-        }
-    } else {
-        for m in &matches {
-            let new_ref = if m.is_remote {
-                run.process_remote(ctx, &note, m)?
-            } else {
-                match run.process_local(ctx, &note, m, view.as_ref())? {
-                    Some((r, old)) => {
-                        retire.push((m.original.clone(), old));
-                        Some(r)
-                    }
-                    None => None,
-                }
-            };
-            if let Some(r) = new_ref
-                && r != m.original
-            {
-                replacements.push(Replacement {
-                    from: m.original.clone(),
-                    to: r,
-                });
-            }
-        }
-    }
-
-    let c = &run.counts;
-    if c.remote_attempts > 0 && c.unreachable == c.remote_attempts {
-        return Err(StepError::Deferred {
-            retry_after_ms: 60_000,
-            service: Some("network".into()),
-            cause: super::DeferCause::Transient(cv_state::ServiceFailureKind::Timeout),
-        });
-    }
-
-    // The one note write (I2), after every download (SR7): `modify` re-reads the note and
-    // re-applies the ref replacements to its current text, so an edit made while downloading
-    // is kept, and a lost CAS race re-applies rather than fails.
-    let mut applied_from: Vec<String> = Vec::new();
-    let mut images = 0_u64;
-    let strip = placeholders > 0;
-    let written = ctx.modify(&path, |cur| {
-        let rewritten = rewrite_localized_attachment_refs(cur, &replacements);
-        let mut updated = rewritten.content;
-        if strip {
-            updated = strip_data_uri_image_placeholders(&updated).0;
-        }
-        // Managed image references left in the note after the pass (localized + reused +
-        // earlier).
-        images = managed_image_re().find_iter(&updated).count() as u64;
-        applied_from = rewritten.applied_from;
-        Ok((updated != cur).then_some(updated))
-    })?;
-    let changed = written.is_some();
-    let mut output_paths = run.counts.created.clone();
-    if changed {
-        output_paths.push(path.clone());
-        // Retire re-homed local sources no other note references (Crucible processLocal's
-        // trash, after the write so a conflict never strands the note's refs).
-        let applied: HashSet<&str> = applied_from.iter().map(String::as_str).collect();
-        for (from, old) in retire {
-            let keep = !applied.contains(from.as_str())
-                || view
-                    .as_ref()
-                    .is_none_or(|v| v.has_other_referrer(&old, &path));
-            if keep {
-                continue;
-            }
-            if let Some((_, h)) = ctx.read(&old)? {
-                let o = old.clone();
-                let r: Result<(), VaultError> =
-                    ctx.with_writer(&[old.as_str()], move |vw| vw.delete(&o, h))?;
-                if let Err(e) = r {
-                    tracing::debug!(error = %e, "localize: could not retire old attachment");
-                }
-            }
-        }
-    }
-    run.counts.stripped = if changed { placeholders as u64 } else { 0 };
-    let c = &run.counts;
-    let applied = applied_from.len() as u64;
-    let mut counts = NoteCounts {
-        downloaded: c.downloaded,
-        reused: c.reused,
-        stripped: c.stripped,
-        failed: c.failed,
-        throttled: c.throttled,
-        ineligible: c.ineligible,
-        localized: if changed { applied } else { 0 },
-        ..NoteCounts::default()
-    };
-    if p.repair {
-        let (repaired, unrep) = repair_counts(
-            resolved_count,
-            unrepairable,
-            replacements.len() as u64,
-            applied,
-            changed || replacements.is_empty(),
-        );
-        counts.repaired = Some(repaired);
-        counts.unrepairable = Some(unrep);
-    }
-    let vars = NoteVars {
-        changed,
-        images,
-        counts: Some(counts),
-        throttle: run.counts.first_throttle.take(),
-    };
-    Ok((vars, output_paths))
-}
-
 /// Ported vectors of Crucible `tests/localizeAttachments.edge.test.mjs` (names kept).
 #[cfg(test)]
 mod vectors {
@@ -1855,15 +857,6 @@ mod vectors {
         assert!((clamp_image_quality(Some(10.0)) - 0.3).abs() < 1e-9);
         assert!((clamp_image_quality(Some(120.0)) - 1.0).abs() < 1e-9);
         assert!((clamp_image_quality(Some(72.0)) - 0.72).abs() < 1e-9);
-    }
-
-    #[test]
-    fn md5_hex_handles_empty_and_numeric_bytes() {
-        assert_eq!(md5_hex(&[]), "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(
-            md5_hex(&[1, 2, 3, 4, 5]),
-            "7cfdd07889b3295d6a550914ab35e068"
-        );
     }
 
     #[test]
@@ -2408,43 +1401,25 @@ mod vectors {
     }
 
     #[test]
-    fn repair_counts_only_landed_writes() {
-        // Landed, all applied.
-        assert_eq!(repair_counts(2, 1, 2, 2, true), (2, 1));
-        // Landed, one planned replacement did not apply → folded into unrepairable.
-        assert_eq!(repair_counts(2, 0, 2, 1, true), (1, 1));
-        // CAS failed / nothing written → nothing repaired.
-        assert_eq!(repair_counts(2, 0, 2, 2, false), (0, 2));
-    }
-
-    #[test]
     fn templates_and_slug() {
-        assert_eq!(slugify("My Post: Ünïcode  2024!"), "my-post-n-code-2024");
+        // WP-R10: the one cv-text `slugify` — ASCII is unchanged, non-ASCII letters now fold
+        // (measured: no existing `_attachments/<slug>` folder changes name).
+        assert_eq!(crate::slugify("My Post: 2024!"), "my-post-2024");
+        assert_eq!(
+            crate::slugify("My Post: Ünïcode  2024!"),
+            "my-post-unicode-2024"
+        );
         assert_eq!(
             normalize_path("/_attachments//my-note/"),
             "_attachments/my-note"
         );
-        let c = TemplateCtx {
-            note_basename: "My Note",
-            note_folder: "",
-            original: "pic",
-            ext: "png",
-            md5: "abc",
-        };
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 10, 19)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .unwrap();
         assert_eq!(
-            normalize_path(&apply_template("{{folder}}/_attachments/{{slug}}", &c)),
+            resolve_attachment_folder(DEFAULT_FOLDER_TEMPLATE, "My Note.md", "pic", "png", now),
             "_attachments/my-note"
         );
-        assert_eq!(apply_template("{{md5}}_MD5.{{ext}}", &c), "abc_MD5.png");
-        assert!(is_md5_name("abc_MD5.png") && !is_md5_name("abc_MD5.") && !is_md5_name("abc.png"));
-    }
-
-    #[test]
-    fn validate_accepts_empty_and_rejects_bad_params() {
-        assert!(parse_params(&toml::Table::new()).is_ok());
-        let d = parse_params(&toml::Table::new()).unwrap();
-        assert_eq!(d.folder_template, DEFAULT_FOLDER_TEMPLATE);
-        assert_eq!(d.name_template, DEFAULT_NAME_TEMPLATE);
         assert_eq!(
             resolve_attachment_path(
                 DEFAULT_FOLDER_TEMPLATE,
@@ -2452,13 +1427,11 @@ mod vectors {
                 "notes/My Note.md",
                 "",
                 "png",
-                "abc"
+                "abc",
+                now
             ),
-            format!("notes/_attachments/{}/abc_MD5.png", slugify("My Note"))
+            "notes/_attachments/my-note/abc_MD5.png"
         );
-        let bad: toml::Table = toml::from_str("mode = \"nope\"").unwrap();
-        assert!(parse_params(&bad).is_err());
-        let unknown: toml::Table = toml::from_str("bogus = 1").unwrap();
-        assert!(parse_params(&unknown).is_err());
+        assert!(is_md5_name("abc_MD5.png") && !is_md5_name("abc_MD5.") && !is_md5_name("abc.png"));
     }
 }

@@ -24,8 +24,8 @@ use cv_lint::{FrontmatterDoc, JsValue};
 use serde::Serialize;
 
 use super::params::{check_keys, get_str};
-use super::tracker::now_ms;
 use super::{StepCtx, StepError, StepModule, StepOutcome};
+use crate::now_ms;
 
 /// The `ignored_ids` kind (shared with the WP-7 tracker).
 const KIND: &str = "youtube";

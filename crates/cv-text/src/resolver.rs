@@ -23,8 +23,8 @@ pub struct Resolver {
 }
 
 /// The case-folded basename key a file is found by (`.md` stripped for notes).
-pub(crate) fn file_key(path: &str) -> String {
-    let base = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+pub fn file_key(path: &str) -> String {
+    let base = crate::vpath::basename(path).to_lowercase();
     match base.strip_suffix(".md") {
         Some(stem) => stem.to_string(),
         None => base,
@@ -32,12 +32,12 @@ pub(crate) fn file_key(path: &str) -> String {
 }
 
 /// The basename key a link target looks up (same folding as [`file_key`]).
-pub(crate) fn target_key(target: &str) -> String {
+pub fn target_key(target: &str) -> String {
     file_key(target.trim().trim_end_matches('/'))
 }
 
 /// Collapses `.`/`..`/empty segments (`..` above the root is dropped).
-pub(crate) fn normalize(p: &str) -> String {
+pub fn normalize(p: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for seg in p.split('/') {
         match seg {
@@ -127,7 +127,7 @@ impl Resolver {
                 }
             }
         }
-        let dir = src_path.rsplit_once('/').map_or("", |(d, _)| d);
+        let dir = crate::vpath::parent(src_path);
         if !dir.is_empty() || explicit_rel {
             let rel = normalize(&format!("{dir}/{raw}"));
             if !rel.is_empty() {

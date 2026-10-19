@@ -287,32 +287,6 @@ pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     ("", text)
 }
 
-/// Substitutes `{{key}}` placeholders; unknown keys stay as written.
-pub(crate) fn render(template: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        match after.find("}}") {
-            Some(end) => {
-                let key = after[..end].trim();
-                match lookup(key) {
-                    Some(v) => out.push_str(&v),
-                    None => out.push_str(&rest[start..start + 2 + end + 2]),
-                }
-                rest = &after[end + 2..];
-            }
-            None => {
-                out.push_str(&rest[start..]);
-                rest = "";
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 fn var_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -456,6 +430,11 @@ pub(crate) fn run(
                 .strip_prefix("vars.")
                 .map(|n| vars.get(n).map(var_text).unwrap_or_default()),
         }
+    };
+    // `{{ key }}` placeholders (key trimmed) through the one cv-text engine; unknown keys stay
+    // as written. The lookup never errs, so the engine's error arm is unreachable.
+    let render = |t: &str, lookup: &dyn Fn(&str) -> Option<String>| {
+        cv_text::template::render(t, |k| Ok(lookup(k.trim()))).unwrap_or_default()
     };
     let value = match &def.input {
         Some(t) => render(t, &|k| match k {

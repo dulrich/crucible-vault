@@ -18,6 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cv_index::Resolver;
+/// The note stem (breadcrumb filename input) and link-target decoding: the shared vault-path
+/// helpers (WP-R10).
+pub use cv_text::vpath::{percent_decode, stem};
 use editor_model::render::{self, Block, Inline, RenderModel};
 use iced::{Element, Subscription, Task};
 
@@ -375,12 +378,6 @@ pub fn source_counterpart(
         return None;
     }
     Some((b, ms[..idx].iter().filter(|m| visible(m)).count()))
-}
-
-/// The note stem shown in the breadcrumb filename input (`a/b/Note.md` → `Note`).
-pub fn stem(path: &str) -> &str {
-    let leaf = path.rsplit('/').next().unwrap_or(path);
-    leaf.strip_suffix(".md").unwrap_or(leaf)
 }
 
 /// The rename target for a submitted filename: `None` when unchanged or empty.
@@ -964,28 +961,6 @@ pub fn missing_note_path(target: &str, folder: &str) -> String {
         path.push_str(".md");
     }
     path
-}
-
-pub fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let hex = |c: u8| (c as char).to_digit(16);
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && let (Some(h), Some(l)) = (
-                b.get(i + 1).copied().and_then(hex),
-                b.get(i + 2).copied().and_then(hex),
-            )
-        {
-            out.push(u8::try_from(h * 16 + l).unwrap_or(b'%'));
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
 }
 
 fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Message> {

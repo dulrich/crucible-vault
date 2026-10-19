@@ -282,16 +282,6 @@ pub fn build_prepared_chunks(
     })
 }
 
-/// Obsidian `TFile.basename`: the file name without its last extension.
-#[must_use]
-pub fn basename(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rfind('.') {
-        Some(i) if i > 0 => name[..i].to_owned(),
-        _ => name.to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +303,9 @@ mod tests {
         fn resolve_linked(&self, linkpath: &str, _from: &str) -> Option<LinkedSource> {
             let path = format!("{linkpath}.md");
             self.notes.get(&path).map(|c| LinkedSource {
-                basename: basename(&path),
+                // The host computes `TFile.basename` (`cv_text::vpath::stem_last_ext` in the
+                // daemon); this fake's paths are `<linkpath>.md`.
+                basename: linkpath.rsplit('/').next().unwrap_or(linkpath).to_owned(),
                 path,
                 content: c.clone(),
             })

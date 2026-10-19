@@ -55,6 +55,7 @@ use std::collections::BTreeMap;
 use chrono::{NaiveDate, NaiveDateTime};
 use cv_actions::{ConfigSet, StepKind};
 use cv_text::template::{TemplateContext, apply_template};
+use cv_text::vpath::{parent, stem};
 use cv_text::{format_moment, parse_moment_date_strict};
 use serde::Serialize;
 
@@ -78,17 +79,6 @@ pub(super) fn join(folder: &str, name: &str) -> String {
     } else {
         format!("{f}/{name}")
     }
-}
-
-/// The basename without extension.
-pub(super) fn stem(path: &str) -> &str {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    base.strip_suffix(".md").unwrap_or(base)
-}
-
-/// The parent folder ("" at the root).
-pub(super) fn parent(path: &str) -> &str {
-    path.rsplit_once('/').map_or("", |(p, _)| p)
 }
 
 /// Template extras: `vars.NAME`, `param.NAME`, `source_link` (`[[active stem]]`).

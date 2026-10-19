@@ -28,7 +28,9 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_lint::{LintContext, LintSettings, cleanup_youtube_transcript, lint_note};
 
 use super::file::{step_kind, target_path};
-use super::materialize::{now, stem};
+use cv_text::vpath::stem;
+
+use super::materialize::now;
 use super::params::{check_keys, check_placeholders, get_bool, get_str, get_str_list};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 

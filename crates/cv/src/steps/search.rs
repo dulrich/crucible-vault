@@ -378,7 +378,7 @@ impl<'r> NotePrep<'r> {
         };
         Ok(Some(LocalNote {
             prepared: prepare_search_file(self, &input),
-            basename: cv_search::prepare::basename(path),
+            basename: cv_text::vpath::stem_last_ext(path).to_owned(),
             mtime,
         }))
     }
@@ -406,7 +406,7 @@ impl PrepareHost for NotePrep<'_> {
             })?;
         let bytes = (self.read)(&resolved).ok()??;
         Some(LinkedSource {
-            basename: cv_search::prepare::basename(&resolved),
+            basename: cv_text::vpath::stem_last_ext(&resolved).to_owned(),
             path: resolved,
             content: String::from_utf8_lossy(&bytes).into_owned(),
         })

@@ -30,8 +30,11 @@ use cv_providers::web::weather::{self, WeatherApi};
 use cv_text::sections::{SectionInsertMode, insert_into_section, is_section_empty};
 use serde::Serialize;
 
-use super::materialize::{ensure_note, now, period, stem};
-use super::web::{api_base, block_on, client, record_usage};
+use cv_text::vpath::stem;
+
+use super::materialize::{ensure_note, now, period};
+use super::util::fetch_bounded;
+use super::web::{api_base, client, record_usage};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// The `daily_brief` step (no params; unknown keys disarm, I5).
@@ -123,13 +126,42 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         msg
     };
 
+    // Every fx pair and weather location is fetched concurrently through the shared bounded
+    // fetch loop (WP-R10, M4); results come back in config order.
+    enum Job {
+        Fx(String, String),
+        Wx(f64, f64),
+    }
+    enum Got {
+        Fx(Result<fx::FxRate, FetchError>),
+        Wx(Result<weather::DailyForecast, FetchError>),
+    }
+    let jobs: Vec<Job> = cfg
+        .fx
+        .iter()
+        .map(|p| Job::Fx(p.base.clone(), p.quote.clone()))
+        .chain(cfg.weather.iter().map(|w| Job::Wx(w.lat, w.lon)))
+        .collect();
+    let mut got = fetch_bounded(jobs, |job| {
+        let (fx_api, wx_api) = (fx_api.clone(), wx_api.clone());
+        async move {
+            match job {
+                Job::Fx(base, quote) => Got::Fx(fx_api.latest(c, &base, &quote).await),
+                Job::Wx(lat, lon) => Got::Wx(wx_api.today(c, lat, lon).await),
+            }
+        }
+    })?
+    .into_iter();
+
     let mut fx_entries: Vec<(String, Entry<FxLine>)> = Vec::new();
     for p in &cfg.fx {
         let label = p
             .label
             .clone()
             .unwrap_or_else(|| format!("{}/{}", p.base, p.quote));
-        let r = block_on(fx_api.latest(c, &p.base, &p.quote))?;
+        let Some(Got::Fx(r)) = got.next() else {
+            return Err(StepError::failed("daily brief: fetch results out of order"));
+        };
         record_usage(ctx, fx::SERVICE, 1);
         let e = r
             .map(|r| FxLine {
@@ -142,7 +174,9 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
     let mut wx_entries: Vec<(String, Entry<WeatherLine>)> = Vec::new();
     for w in &cfg.weather {
-        let r = block_on(wx_api.today(c, w.lat, w.lon))?;
+        let Some(Got::Wx(r)) = got.next() else {
+            return Err(StepError::failed("daily brief: fetch results out of order"));
+        };
         record_usage(ctx, weather::SERVICE, 1);
         let e = r
             .map(|f| WeatherLine {

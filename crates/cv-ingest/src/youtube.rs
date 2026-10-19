@@ -1,8 +1,8 @@
 //! YouTube metadata note builders (plan `v0-automation-pipelines` WP-4): pure, byte-compatible
 //! ports of Crucible's `https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/utils/youtubeApi.ts`
 //! (`buildMetadataNoteBody :408-435`, `buildYoutubeTombstoneNoteBody :454-468`,
-//! `buildChannelAboutNoteBody :780-794`, `parseIso8601Duration :852-861`) and `slugify`
-//! (`src/utils.ts:129-136`). The caller supplies `fetched_at` (Crucible's
+//! `buildChannelAboutNoteBody :780-794`, `parseIso8601Duration :852-861`); Crucible `slugify`
+//! is the one `cv_text::template::slugify` (WP-R10). The caller supplies `fetched_at` (Crucible's
 //! `new Date().toISOString()`), so output is deterministic. Nothing Obsidian-induced to drop.
 
 /// One video's metadata (Crucible `YoutubeVideoMetadata`).
@@ -96,46 +96,6 @@ pub fn parse_iso8601_duration(value: &str) -> Option<i64> {
     }
     // Crucible: `total > 0 || /PT0?S/.test(value)`.
     (total > 0 || value.contains("PT0S") || value.contains("PTS")).then_some(total)
-}
-
-/// Crucible `slugify`: lowercase, strip diacritics (NFKD + combining marks; approximated here
-/// by a Latin-1/Latin Extended-A fold, since no Unicode-normalization dependency exists), runs
-/// of non-`[a-z0-9]` → `-`, trim `-`.
-#[must_use]
-pub fn slugify(value: &str) -> String {
-    let mut out = String::new();
-    let mut dash = false;
-    for c in value.to_lowercase().chars() {
-        let c = fold(c);
-        if c.is_ascii_lowercase() || c.is_ascii_digit() {
-            if dash && !out.is_empty() {
-                out.push('-');
-            }
-            dash = false;
-            out.push(c);
-        } else {
-            dash = true;
-        }
-    }
-    out
-}
-
-fn fold(c: char) -> char {
-    match c {
-        'à'..='å' | 'ā' | 'ă' | 'ą' => 'a',
-        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
-        'ď' => 'd',
-        'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
-        'ĝ' | 'ğ' | 'ġ' | 'ģ' => 'g',
-        'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' => 'i',
-        'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
-        'ò'..='ö' | 'ō' | 'ŏ' | 'ő' => 'o',
-        'ś' | 'ŝ' | 'ş' | 'š' => 's',
-        'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
-        'ý' | 'ÿ' => 'y',
-        'ź' | 'ż' | 'ž' => 'z',
-        c => c,
-    }
 }
 
 fn body(fm: &[String], title: &str, description: &str) -> String {
@@ -296,8 +256,14 @@ mod tests {
         assert_eq!(parse_iso8601_duration("PT"), None);
         assert_eq!(parse_iso8601_duration("P1DT2H"), None);
         assert_eq!(parse_iso8601_duration(""), None);
-        assert_eq!(slugify("  Café Société -- Live! "), "cafe-societe-live");
-        assert_eq!(slugify("***"), "");
+        // WP-R10: channel slugs come from the one cv-text `slugify` (measured: no existing
+        // channel folder or `sources.toml` channel changes slug).
+        assert_eq!(
+            cv_text::slugify("  Café Société -- Live! "),
+            "cafe-societe-live"
+        );
+        assert_eq!(cv_text::slugify("Plain Channel 42"), "plain-channel-42");
+        assert_eq!(cv_text::slugify("***"), "");
         assert_eq!(json_string("a\u{1}b"), "\"a\\u0001b\"");
     }
 }

@@ -43,6 +43,7 @@ pub mod materialize;
 pub mod params;
 pub mod search;
 pub mod tracker;
+pub(crate) mod util;
 pub mod web;
 #[cfg(test)]
 mod wp10_tests;

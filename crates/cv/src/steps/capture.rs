@@ -47,7 +47,9 @@ use cv_text::sections::{SectionInsertMode, find_section_range, insert_into_secti
 use regex::Regex;
 use serde::Serialize;
 
-use super::materialize::{canonical_period, ensure_note, now, period, stem};
+use cv_text::vpath::stem;
+
+use super::materialize::{canonical_period, ensure_note, now, period};
 use super::params::{check_keys, check_placeholders, expand, get_str, value_text};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 

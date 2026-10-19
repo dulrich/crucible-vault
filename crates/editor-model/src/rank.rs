@@ -7,6 +7,7 @@
 //! `_resources/`). Paths that match neither path nor basename are dropped. Empty query: recent
 //! files first (most recent first), then the rest by path. Ties break by path.
 
+use cv_text::vpath::{basename, stem};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
@@ -24,15 +25,6 @@ pub const DERANK_DIV: i64 = 4;
 pub struct Ranked {
     pub path: String,
     pub score: i64,
-}
-
-fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-fn stem(path: &str) -> &str {
-    let b = basename(path);
-    b.strip_suffix(".md").unwrap_or(b)
 }
 
 /// Ranks `paths` against `query`, returning at most `limit` results best-first.

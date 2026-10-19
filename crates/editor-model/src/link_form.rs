@@ -1,18 +1,12 @@
 //! The wikilink text inserted for a picked note (plan round-5-reading-pickers-intake WP-9).
 //!
-//! Mirrors the daemon resolver's basename rule (`crates/cv-index/src/resolver.rs` header:
+//! Mirrors the daemon resolver's basename rule (`cv_text::resolver` header:
 //! unique basename case-insensitively, else the shortest path among namesakes, ties by byte
 //! order): the bare stem is inserted when it resolves to `path`, else the vault path. Notes drop
 //! `.md`; other files keep their extension.
 
-/// The case-folded basename key of `path` (`.md` stripped), as the resolver keys it.
-fn key(path: &str) -> String {
-    let base = path.rsplit('/').next().unwrap_or(path).to_lowercase();
-    match base.strip_suffix(".md") {
-        Some(s) => s.to_owned(),
-        None => base,
-    }
-}
+use cv_text::resolver::file_key as key;
+use cv_text::vpath;
 
 /// `path` without a trailing `.md`.
 fn strip_md(path: &str) -> &str {
@@ -28,7 +22,7 @@ pub fn wikilink_target(path: &str, paths: &[String]) -> String {
         .chain(std::iter::once(path))
         .filter(|p| key(p) == k)
         .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-    let stem = strip_md(path.rsplit('/').next().unwrap_or(path));
+    let stem = vpath::stem(path);
     if winner == Some(path) {
         stem.to_owned()
     } else {

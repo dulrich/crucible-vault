@@ -771,8 +771,10 @@ impl Shared {
         &self,
         p: WriteAttachmentParams,
     ) -> Result<WriteAttachmentResult, RpcError> {
-        use crate::steps::localize;
         use base64::Engine as _;
+        use cv_text::attachments::{
+            DEFAULT_FOLDER_TEMPLATE, DEFAULT_NAME_TEMPLATE, resolve_attachment_path,
+        };
         let ext_ok = (1..=8).contains(&p.ext.len())
             && p.ext
                 .bytes()
@@ -793,14 +795,15 @@ impl Shared {
         if bytes.len() > MAX_ATTACHMENT_BYTES {
             return Err(too_large());
         }
-        let md5 = localize::md5_hex(&bytes);
-        let target = localize::resolve_attachment_path(
-            localize::DEFAULT_FOLDER_TEMPLATE,
-            localize::DEFAULT_NAME_TEMPLATE,
+        let md5 = crate::steps::util::md5_hex(&bytes);
+        let target = resolve_attachment_path(
+            DEFAULT_FOLDER_TEMPLATE,
+            DEFAULT_NAME_TEMPLATE,
             &p.note_path,
             "",
             &p.ext,
             &md5,
+            chrono::Local::now().naive_local(),
         );
         let t = target.clone();
         self.writer_job(move |vw| {

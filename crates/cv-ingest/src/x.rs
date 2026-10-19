@@ -9,7 +9,8 @@
 use cv_text::url_canon::extract_x_status_from_url;
 
 use crate::html::html_to_markdown;
-use crate::youtube::{json_string, slugify};
+use crate::youtube::json_string;
+use cv_text::slugify;
 
 /// Crucible `source_command` stamped on every X metadata note.
 pub const SOURCE_COMMAND: &str = "x-fetch-post-metadata";

@@ -1,12 +1,15 @@
 //! Pure text helpers for crucible-vault: the template token engine, Moment-format translation,
-//! markdown section editing, next-daily-date resolution and URL canonicalization.
+//! markdown section editing, attachment-path planning, vault-path helpers and link resolution, next-daily-date resolution and URL canonicalization.
 //!
 //! Sync, I/O-free and clock-free: every time-dependent function takes its `now` as an argument.
 
+pub mod attachments;
 pub mod moment;
+pub mod resolver;
 pub mod sections;
 pub mod template;
 pub mod url_canon;
+pub mod vpath;
 
 pub use moment::{
     MomentFormatError, format_moment, moment_to_strftime, parse_moment_date_strict,

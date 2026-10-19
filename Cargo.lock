@@ -859,6 +859,7 @@ dependencies = [
 name = "cv-index"
 version = "0.1.0"
 dependencies = [
+ "cv-text",
  "ofm",
  "rusqlite",
  "serde",
@@ -1104,6 +1105,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "comrak",
+ "cv-text",
  "nucleo-matcher",
  "ofm",
  "serde",

@@ -14,12 +14,13 @@
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::youtube::{
-    ChannelMeta, VideoMeta, channel_about_note, metadata_note, slugify, tombstone_note,
+    ChannelMeta, VideoMeta, channel_about_note, metadata_note, tombstone_note,
 };
 use cv_lint::{FrontmatterDoc, JsValue};
 use cv_providers::web::FetchError;
 use cv_providers::web::youtube::{self as api, YoutubeApi};
 use cv_state::FailureReason;
+use cv_text::slugify;
 use serde::Serialize;
 use serde_json::Value;
 

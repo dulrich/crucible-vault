@@ -7,6 +7,7 @@
 //!
 //! The tab title text is a pure function of the `editor.toml` `tab_title` mode ([`TabTitle`],
 //! [`resolve`]).
+use cv_text::vpath;
 
 /// Height of each header bar (one `CONTROL` row).
 pub const BAR_HEIGHT: f32 = crate::theme::CONTROL;
@@ -100,11 +101,6 @@ impl TabTitle {
     }
 }
 
-/// The `.md`-less file stem (`a/b/Note.md` → `Note`).
-pub fn basename(path: &str) -> &str {
-    crate::reading::stem(path)
-}
-
 /// The frontmatter `title` property of a note's text (a non-empty string scalar), if any.
 pub fn frontmatter_title(text: &str) -> Option<String> {
     use ofm::frontmatter::{JsValue, parse_frontmatter, split_frontmatter};
@@ -135,8 +131,8 @@ pub fn resolve(mode: TabTitle, path: &str, siblings: &[&str], fm_title: Option<&
     match mode {
         TabTitle::Title => fm_title
             .filter(|t| !t.trim().is_empty())
-            .map_or_else(|| basename(path).to_owned(), str::to_owned),
-        TabTitle::Basename => basename(path).to_owned(),
+            .map_or_else(|| vpath::stem(path).to_owned(), str::to_owned),
+        TabTitle::Basename => vpath::stem(path).to_owned(),
         TabTitle::Path => path.to_owned(),
         TabTitle::Unambiguous => {
             let depth = path.split('/').count();

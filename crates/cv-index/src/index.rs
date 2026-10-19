@@ -22,8 +22,8 @@ use crate::extract::{self, Extracted, is_parsed_path, is_skipped_path};
 use crate::generation::{self as gen_files, generation_path, with_suffix};
 use crate::ignore::IgnoreRules;
 use crate::query::Query;
-use crate::resolver::{Resolver, file_key, normalize, target_key};
 use crate::schema;
+use cv_text::resolver::{Resolver, file_key, normalize, target_key};
 
 /// The writer handle on the current `index.db` generation.
 pub struct Index {

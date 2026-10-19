@@ -673,10 +673,13 @@ fn frontmatter_split_and_render() {
         agent::split_frontmatter("---\nunclosed\n"),
         ("", "---\nunclosed\n")
     );
-    let r = agent::render("{{a}} {{ b }} {{zz}} {{", &|k| match k {
-        "a" => Some("1".into()),
-        "b" => Some("2".into()),
-        _ => None,
-    });
+    let r = cv_text::template::render("{{a}} {{ b }} {{zz}} {{", |k| {
+        Ok(match k.trim() {
+            "a" => Some("1".into()),
+            "b" => Some("2".into()),
+            _ => None,
+        })
+    })
+    .unwrap();
     assert_eq!(r, "1 2 {{zz}} {{");
 }

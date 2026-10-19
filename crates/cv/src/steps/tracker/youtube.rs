@@ -27,14 +27,14 @@ use cv_state::TrackerOutcome;
 use serde::Serialize;
 
 use super::super::params::check_keys;
+use super::super::util::{fetch_bounded, md_files_under};
 use super::super::web::{block_on, client, record_usage, secret};
 use super::super::youtube::{
     API_KEY_SECRET, find_metadata_note, metadata_root, no_key, write_metadata_note, youtube,
 };
 use super::super::{StepCtx, StepError, StepModule, StepOutcome};
-use super::{
-    Candidate, SeenSet, emit_cancelled, emit_line, fetch_bounded, md_files_under, now_ms, record,
-};
+use super::{Candidate, SeenSet, emit_cancelled, emit_line, record};
+use crate::now_ms;
 
 /// `tracker_items.source_kind` and `ignored_ids.kind` of YouTube videos.
 pub const KIND: &str = "youtube";
@@ -88,7 +88,7 @@ struct Vars {
 fn seed(ctx: &StepCtx<'_>) -> BTreeSet<String> {
     let mut ids = BTreeSet::new();
     for p in md_files_under(ctx, &metadata_root(ctx)) {
-        let stem = p.rsplit('/').next().unwrap_or(&p).trim_end_matches(".md");
+        let stem = cv_text::vpath::stem(&p);
         if stem.len() == 11 {
             ids.insert(stem.to_owned());
         }

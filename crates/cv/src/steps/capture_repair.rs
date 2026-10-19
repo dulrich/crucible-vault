@@ -197,7 +197,7 @@ fn join(folder: &str, name: &str) -> String {
 
 /// Executes one `capture_repair` step.
 fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let files = super::tracker::md_files_under(ctx, &p.folder);
+    let files = super::util::md_files_under(ctx, &p.folder);
     let scanned = files.len() as u64;
     let (mut renamed, mut retagged, mut changed_notes) = (0_u64, 0_u64, 0_u64);
     let mut out = StepOutcome::default();
@@ -221,7 +221,7 @@ fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             touched = true;
             out.push_output(path.clone());
         }
-        let (dir, base) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+        let (dir, base) = cv_text::vpath::split(&path);
         let first = format!("{}.md", plan.name);
         let alt = format!(
             "{} {}.md",

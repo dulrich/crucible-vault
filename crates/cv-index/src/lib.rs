@@ -23,10 +23,10 @@ mod ignore;
 mod index;
 pub mod queries;
 mod query;
-mod resolver;
 mod schema;
 pub mod signals;
 
+pub use cv_text::resolver::Resolver;
 pub use error::{Error, Result};
 pub use extract::{is_parsed_path, is_skipped_path, is_target_only_path, note_tags};
 pub use generation::{current_generation, generation_path};
@@ -38,5 +38,4 @@ pub use queries::attachments::{
 pub use query::{
     BlockRow, FileRow, FtsHit, LinkKind, LinkRow, PropRow, Query, Reader, TagCount, TagRow, TaskRow,
 };
-pub use resolver::Resolver;
 pub use schema::SCHEMA_VERSION;
