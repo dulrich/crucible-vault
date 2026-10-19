@@ -3493,6 +3493,48 @@ mod find_return_leak {
             "chip adders keep the list open"
         );
     }
+
+    /// Plan round-7 WP-3: the dedicated Log icon-button opens `/:log` and resets unread; a
+    /// click on the notice text opens it too.
+    #[test]
+    fn log_button_and_notice_open_the_log() {
+        let mut app = App::new(None, None);
+        app.status
+            .notify(crate::app::Severity::Warning, "first trouble");
+        let unread = app.status.log.unread;
+        assert!(unread >= 1);
+        let mut ui = Ui {
+            renderer: renderer(),
+            tree: None,
+            height: 800.0,
+        };
+        let s = spots(&mut ui, &app);
+        let label = format!("☰ Log {unread}");
+        let at = s
+            .texts
+            .iter()
+            .find(|(_, t)| *t == label)
+            .map(|(b, _)| b.center())
+            .expect("log button");
+        ui.click(&mut app, at);
+        assert!(app.active_tab().is_some_and(|t| t.is_log()));
+        assert_eq!(app.status.log.unread, 0, "opening resets unread");
+        // Back to no Log tab focused; the notice itself is clickable.
+        let _ = app.update(Message::Tabs(crate::message::TabsMsg::CloseActive));
+        assert!(!app.active_tab().is_some_and(|t| t.is_log()));
+        app.status
+            .notify(crate::app::Severity::Error, "second trouble");
+        let s = spots(&mut ui, &app);
+        let at = s
+            .texts
+            .iter()
+            .find(|(_, t)| t.contains("second trouble"))
+            .map(|(b, _)| b.center())
+            .expect("notice text");
+        ui.click(&mut app, at);
+        assert!(app.active_tab().is_some_and(|t| t.is_log()));
+        assert_eq!(app.status.log.unread, 0);
+    }
 }
 
 /// Plan usability-sprint-captures-links WP-5: `title` → filename sync.

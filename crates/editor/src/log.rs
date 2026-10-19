@@ -117,6 +117,24 @@ pub enum LogMsg {
     Copy,
 }
 
+/// The colour of a severity, shared by the Log view and the status-bar notice.
+pub fn severity_color(s: Severity, t: crate::theme::Tokens) -> crate::theme::Rgb {
+    match s {
+        Severity::Info => t.text_dim,
+        Severity::Warning => t.warn_text,
+        Severity::Error => t.error_text,
+    }
+}
+
+/// The glyph prefixing a status-bar notice of a severity.
+pub fn severity_glyph(s: Severity) -> &'static str {
+    match s {
+        Severity::Info => "ℹ",
+        Severity::Warning => "⚠",
+        Severity::Error => "✖",
+    }
+}
+
 fn severity_label(s: Severity) -> &'static str {
     match s {
         Severity::Info => "INFO",
@@ -153,11 +171,7 @@ pub fn view(log: &Log, t: crate::theme::Tokens) -> Element<'_, Message> {
     .spacing(6)
     .align_y(iced::Alignment::Center);
     let rows = column(log.visible().map(|e| {
-        let color = match e.severity {
-            Severity::Info => t.text_dim,
-            Severity::Warning => t.warn_text,
-            Severity::Error => t.error_text,
-        };
+        let color = severity_color(e.severity, t);
         let src = e.source.clone().unwrap_or_default();
         row![
             text(e.at.format("%H:%M:%S").to_string())

@@ -1074,3 +1074,21 @@ fn open_url_cmd_pref_default_and_override() {
     let p = editor_prefs::parse("open_url_cmd = []\n", Surround::Med).expect("parse");
     assert_eq!(p.open_url_cmd, ["xdg-open"]);
 }
+
+/// Plan round-7 WP-3: a Settings save failure raises an Error notice in the bar and logs it.
+#[test]
+fn settings_save_failure_raises_an_error_notice() {
+    let (_tmp, d) = fake();
+    let mut app = app_over(&d, None);
+    let _ = app.update(s(SettingsMsg::Pref(PrefEdit::FontSize(30.0))));
+    let _ = app.update(s(SettingsMsg::Saved(
+        EDITOR_PATH.into(),
+        Err("disk full".into()),
+    )));
+    let n = app.status.notice.as_ref().expect("notice");
+    assert_eq!(n.severity, crate::app::Severity::Error);
+    assert_eq!(n.text, "save failed: disk full");
+    let e = app.status.log.visible().next().expect("logged");
+    assert_eq!(e.severity, crate::app::Severity::Error);
+    assert_eq!(e.source.as_deref(), Some(EDITOR_PATH));
+}

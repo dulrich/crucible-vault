@@ -4823,10 +4823,16 @@ impl App {
                 let mut again = false;
                 if let Some(f) = self.settings.file_mut(&path) {
                     let failed = !matches!(r, Ok(crate::settings::WriteOutcome::Saved(_)));
+                    // Plan round-7 WP-3: a failed save reaches the bar (Error); a CAS
+                    // conflict (reloaded from disk) is a Warning.
+                    let severity = if r.is_err() {
+                        Severity::Error
+                    } else {
+                        Severity::Warning
+                    };
                     f.finish_save(r, d.as_deref());
                     if failed && let Some(n) = &f.notice {
-                        self.status
-                            .record(Severity::Warning, n.clone(), Some(path.clone()));
+                        self.status.notify_from(severity, n.clone(), path.clone());
                     }
                     again = f.queued && f.can_save();
                     if !again {
@@ -5442,16 +5448,25 @@ impl App {
             .as_ref()
             .map(|t| format!("▸ {}", t.line()))
             .unwrap_or_default();
-        // plan round-5 WP-3: the notice — one truncated line, full text on hover.
+        // plan round-5 WP-3: the notice — one truncated line, full text on hover. Plan
+        // round-7 WP-3: the only place warnings/errors show, with a severity glyph + colour;
+        // a click opens the Log.
         let notice: Element<'_, Message> = match &self.status.notice {
             Some(n) => {
-                let color = match n.severity {
-                    Severity::Info => t.accent_text,
-                    Severity::Warning => t.warn_text,
-                    Severity::Error => t.error_text,
-                };
+                let color = crate::log::severity_color(n.severity, t).to_color();
                 iced::widget::tooltip(
-                    text(n.inline()).size(16).color(color.to_color()),
+                    button(
+                        row![
+                            text(crate::log::severity_glyph(n.severity))
+                                .size(16)
+                                .color(color),
+                            text(n.inline()).size(16).color(color),
+                        ]
+                        .spacing(6),
+                    )
+                    .padding(0)
+                    .style(button::text)
+                    .on_press(Message::Log(crate::log::LogMsg::Open)),
                     container(text(n.text.clone()).size(13))
                         .padding(6)
                         .max_width(640)
@@ -5462,25 +5477,27 @@ impl App {
             }
             None => Space::new().into(),
         };
+        // Plan round-7 WP-3: a dedicated Log icon-button carrying the Warning+ unread count.
+        let unread = self.status.log.unread;
+        let log_button = button(
+            text(if unread > 0 {
+                format!("☰ Log {unread}")
+            } else {
+                "☰ Log".to_owned()
+            })
+            .size(16)
+            .color(if unread > 0 {
+                t.warn_text.to_color()
+            } else {
+                t.text_dim.to_color()
+            }),
+        )
+        .padding(0)
+        .style(button::text)
+        .on_press(Message::Log(crate::log::LogMsg::Open));
         let status = row![
-            // Plan round-6-feedback-todos WP-7: a click opens the Log tab; the badge counts
-            // unread warnings + errors.
-            button(
-                row![
-                    text(self.status.line()).size(16),
-                    text(if self.status.log.unread > 0 {
-                        format!("⚠ {}", self.status.log.unread)
-                    } else {
-                        String::new()
-                    })
-                    .size(16)
-                    .color(t.warn_text.to_color()),
-                ]
-                .spacing(8),
-            )
-            .padding(0)
-            .style(button::text)
-            .on_press(Message::Log(crate::log::LogMsg::Open)),
+            log_button,
+            text(self.status.line()).size(16),
             text(toast).size(16).color(t.accent_text.to_color()),
             notice,
             button(text(format!("Surround: {}", self.prefs.surround.label())).size(16))
