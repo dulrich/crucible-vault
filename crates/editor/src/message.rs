@@ -391,7 +391,7 @@ pub enum ViewsMsg {
     Open { path: String, line: Option<i64> },
     /// Plan round-6-feedback-todos WP-6: a status-cell click / status-menu pick on a
     /// `tracker_items` row (`key` = the row's opaque `views::result::TrackerKey`): set its task
-    /// status (`None` = open). The legacy `done` column routes here too (`true` → `'x'`).
+    /// status (`None` = open).
     SetStatus { key: String, status: Option<char> },
     /// `tracker_item_set_status` finished.
     StatusSet(Result<(), String>),

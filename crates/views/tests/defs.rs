@@ -223,7 +223,7 @@ fn goldens() {
 
 fn text(c: &Cell) -> String {
     match c {
-        Cell::Null => String::new(),
+        Cell::Null | Cell::Unknown => String::new(),
         Cell::Bool { v } => v.to_string(),
         Cell::Number { v } => v.to_string(),
         Cell::Text { v } | Cell::Date { v } => v.clone(),

@@ -12,7 +12,10 @@ use crate::db::{FileInfo, like_escape};
 use crate::def::{Aggregate, Direction, Filter, SumFn, TaskGroup, View, ViewType};
 use crate::eval::{Env, RowCtx, task_value};
 use crate::expr::{BinOp, Expr, Meth};
-use crate::result::{Cell, Column, Group, Kind, Row, Summary, ViewResult};
+use crate::result::{Cell, Column, ColumnRole, Group, Kind, Row, Summary, ViewResult};
+
+/// The column id (as written in `order`) of a record source's task-status field.
+const STATUS_COLUMN: &str = "status";
 use crate::value::{Value, parse_date, sort_cmp};
 
 type R<T> = rusqlite::Result<T>;
@@ -302,6 +305,15 @@ pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewR
         (ViewType::Tasks, _, Some(t)) => tasks(env, t, view.limit, &kept)?,
         _ => table(view, kept)?,
     };
+    if records.is_some() && res.kind == Kind::Table {
+        // Plan tn-review-baseline-remediation WP-R22 (B12): a record source's `status` column is
+        // the task-status cell (`tracker_items.status` → set-status in the editor).
+        for c in &mut res.columns {
+            if c.key == STATUS_COLUMN && c.role.is_none() {
+                c.role = Some(ColumnRole::Status);
+            }
+        }
+    }
     notices.extend(env.notices.borrow().iter().cloned());
     res.notices = notices;
     res.max_height = view.max_height;
@@ -437,10 +449,12 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
         columns: view
             .order
             .iter()
-            .map(|(id, _, l)| Column {
-                key: id.clone(),
-                label: l.clone(),
-                checkbox: view.is_checkbox(id),
+            .map(|(id, _, l)| {
+                let col = Column::plain(id.clone(), l.clone());
+                match view.checkbox_key(id) {
+                    Some(key) => col.with_role(ColumnRole::Checkbox { key }),
+                    None => col,
+                }
             })
             .collect(),
         groups,
@@ -499,22 +513,14 @@ fn pivot(
             None => Ok(Value::Num(n).to_cell()),
         }
     };
-    let mut columns = vec![Column {
-        key: "rows".into(),
-        label: p.rows_label.clone(),
-        checkbox: false,
-    }];
-    columns.extend(p.columns.iter().map(|(l, _)| Column {
-        key: l.clone(),
-        label: l.clone(),
-        checkbox: false,
-    }));
+    let mut columns = vec![Column::plain("rows", p.rows_label.clone())];
+    columns.extend(
+        p.columns
+            .iter()
+            .map(|(l, _)| Column::plain(l.clone(), l.clone())),
+    );
     if let Some(t) = &p.total_column {
-        columns.push(Column {
-            key: "total".into(),
-            label: t.clone(),
-            checkbox: false,
-        });
+        columns.push(Column::plain("total", t.clone()));
     }
     let mut rows = Vec::with_capacity(keys.len());
     let mut col_tot = vec![0.0; ncol];
@@ -647,21 +653,9 @@ fn tasks(
         kind: Kind::Tasks,
         max_height: None,
         columns: vec![
-            Column {
-                key: "task".into(),
-                label: "Task".into(),
-                checkbox: false,
-            },
-            Column {
-                key: "file".into(),
-                label: "File".into(),
-                checkbox: false,
-            },
-            Column {
-                key: "status".into(),
-                label: "Status".into(),
-                checkbox: false,
-            },
+            Column::plain("task", "Task").with_role(ColumnRole::TaskText),
+            Column::plain("file", "File").with_role(ColumnRole::TaskFile),
+            Column::plain("status", "Status").with_role(ColumnRole::Status),
         ],
         groups: groups
             .into_iter()

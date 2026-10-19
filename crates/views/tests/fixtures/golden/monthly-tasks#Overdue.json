@@ -2,15 +2,24 @@
   "columns": [
     {
       "key": "task",
-      "label": "Task"
+      "label": "Task",
+      "role": {
+        "kind": "task_text"
+      }
     },
     {
       "key": "file",
-      "label": "File"
+      "label": "File",
+      "role": {
+        "kind": "task_file"
+      }
     },
     {
       "key": "status",
-      "label": "Status"
+      "label": "Status",
+      "role": {
+        "kind": "status"
+      }
     }
   ],
   "groups": [

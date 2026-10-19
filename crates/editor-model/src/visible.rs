@@ -13,7 +13,8 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::render::{Block, Fold, Inline, PropValue, Property, RenderModel};
+use crate::props::{PropValue, Property};
+use crate::render::{Block, Fold, Inline, RenderModel};
 
 /// What goes between a run and the run before it in the copy text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

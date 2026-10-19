@@ -1,6 +1,8 @@
 //! Render-model lowering vectors on synthetic OFM (one per assessment §2 syntax row).
 
 use super::*;
+use crate::edits::{frontmatter_bool_edit, task_set_status, task_toggle};
+use crate::props::PropValue;
 
 fn t(s: &str) -> Inline {
     Inline::Text {

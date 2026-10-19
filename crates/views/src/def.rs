@@ -306,10 +306,14 @@ pub struct View {
 }
 
 impl View {
-    /// Whether the column `id` (as written in `order`) is a frontmatter checkbox.
+    /// The frontmatter key (`note.` dropped) the checkbox column `id` (as written in `order`)
+    /// toggles; `None` when `id` is not a frontmatter checkbox.
     #[must_use]
-    pub fn is_checkbox(&self, id: &str) -> bool {
-        self.checkboxes.contains(&norm(id))
+    pub fn checkbox_key(&self, id: &str) -> Option<String> {
+        let n = norm(id);
+        self.checkboxes
+            .contains(&n)
+            .then(|| n.strip_prefix("note.").unwrap_or(&n).to_owned())
     }
 }
 

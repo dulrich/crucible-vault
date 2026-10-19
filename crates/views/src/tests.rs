@@ -119,7 +119,7 @@ fn day(y: i32, m: u32, d: u32) -> NaiveDate {
 
 fn text(c: &Cell) -> String {
     match c {
-        Cell::Null => String::new(),
+        Cell::Null | Cell::Unknown => String::new(),
         Cell::Bool { v } => v.to_string(),
         Cell::Number { v } => crate::value::fmt_num(*v),
         Cell::Text { v } | Cell::Date { v } => v.clone(),
@@ -640,6 +640,16 @@ fn tasks_overdue_grouped_by_heading() {
     let mut h = fx.host();
     let r = fx.run(&mut h, "monthly-tasks#Overdue", None);
     assert!(r.notices.is_empty(), "{:?}", r.notices);
+    // Plan tn-review-baseline-remediation WP-R22 (B12): the Tasks columns carry their roles.
+    let roles: Vec<_> = r.columns.iter().map(|c| c.role.clone()).collect();
+    assert_eq!(
+        roles,
+        [
+            Some(crate::result::ColumnRole::TaskText),
+            Some(crate::result::ColumnRole::TaskFile),
+            Some(crate::result::ColumnRole::Status),
+        ]
+    );
     let groups: Vec<(String, Vec<String>)> = r
         .groups
         .iter()
@@ -965,6 +975,29 @@ fn tracker_records_expose_done_note_path_key_and_url_cells() {
     assert_eq!(json["groups"][0]["rows"][2]["cells"][0]["t"], "url");
 }
 
+/// Plan tn-review-baseline-remediation WP-R22 (B12): a record source's `status` column carries
+/// `ColumnRole::Status` (nothing else does); it round-trips the wire and an index view's columns
+/// carry no role.
+#[test]
+fn record_status_column_carries_the_status_role() {
+    use crate::result::{ColumnRole, ViewResult};
+    const DONE: &str = "source = 'tracker_items'\n[[views]]\ntype='table'\nname='Day'\nfilters = { and = ['day == this.file.name'] }\norder = ['title', 'done', 'status']\n";
+    let fx = fixture(&[("intake.toml", DONE)]);
+    let state = tracker_db(fx._tmp.path());
+    let mut host = fx.host().with_state_db(&state);
+    let r = fx.run(&mut host, "intake#Day", Some("daily/day/2026-10-03.md"));
+    let roles: Vec<_> = r.columns.iter().map(|c| c.role.clone()).collect();
+    assert_eq!(roles, [None, None, Some(ColumnRole::Status)]);
+    let json = serde_json::to_value(&r).unwrap();
+    assert_eq!(
+        json["columns"][2]["role"],
+        serde_json::json!({"kind": "status"})
+    );
+    assert!(json["columns"][0].get("role").is_none(), "no role = absent");
+    let back: ViewResult = serde_json::from_value(json).unwrap();
+    assert_eq!(back.columns, r.columns);
+}
+
 #[test]
 fn tracker_records_expose_source_name_duration_and_word_count() {
     use crate::value::Value;
@@ -1026,6 +1059,13 @@ fn checkbox_property_reaches_the_column() {
     let mut h = fx.host();
     assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());
     let cols = fx.run(&mut h, "cb#T", None).columns;
-    let flags: Vec<bool> = cols.iter().map(|c| c.checkbox).collect();
+    let flags: Vec<bool> = cols
+        .iter()
+        .map(|c| matches!(c.role, Some(crate::result::ColumnRole::Checkbox { .. })))
+        .collect();
     assert_eq!(flags, [false, true, false]);
+    assert_eq!(
+        cols[1].role,
+        Some(crate::result::ColumnRole::Checkbox { key: "read".into() })
+    );
 }

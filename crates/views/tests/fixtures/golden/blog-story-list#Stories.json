@@ -21,9 +21,12 @@
       "label": "created"
     },
     {
-      "checkbox": true,
       "key": "note.read",
-      "label": "Read"
+      "label": "Read",
+      "role": {
+        "key": "read",
+        "kind": "checkbox"
+      }
     }
   ],
   "groups": [

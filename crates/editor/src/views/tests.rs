@@ -81,7 +81,8 @@ fn fence_needs_runs_with_this_and_becomes_ready() {
     let Some(State::Ready(dec)) = state(&app) else {
         panic!("not ready: {:?}", state(&app));
     };
-    assert_eq!(dec.columns, ["file name", "mtime"]);
+    let labels: Vec<&str> = dec.columns.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["file name", "mtime"]);
     assert_eq!(dec.lines.len(), 1);
     // A second sighting is served from the cache.
     need(&mut app);
@@ -168,22 +169,36 @@ fn fence_height_follows_max_height() {
 fn decoder_round_trips_every_cell_kind() {
     let cases = [
         (json!({"t": "null"}), Cell::Null, ""),
-        (json!({"t": "bool", "v": true}), Cell::Bool(true), "✓"),
+        (json!({"t": "bool", "v": true}), Cell::Bool { v: true }, "✓"),
         (
             json!({"t": "number", "v": 13.600000000000001}),
-            Cell::Number(13.600000000000001),
+            Cell::Number {
+                v: 13.600000000000001,
+            },
             "13.6",
         ),
-        (json!({"t": "number", "v": 2.0}), Cell::Number(2.0), "2"),
-        (json!({"t": "text", "v": "·"}), Cell::Text("·".into()), "·"),
+        (
+            json!({"t": "number", "v": 2.0}),
+            Cell::Number { v: 2.0 },
+            "2",
+        ),
+        (
+            json!({"t": "text", "v": "·"}),
+            Cell::Text { v: "·".into() },
+            "·",
+        ),
         (
             json!({"t": "date", "v": "2026-10-12"}),
-            Cell::Date("2026-10-12".into()),
+            Cell::Date {
+                v: "2026-10-12".into(),
+            },
             "2026-10-12",
         ),
         (
             json!({"t": "date", "v": "2026-10-12T08:30:00"}),
-            Cell::Date("2026-10-12T08:30:00".into()),
+            Cell::Date {
+                v: "2026-10-12T08:30:00".into(),
+            },
             "2026-10-12 08:30",
         ),
         (
@@ -196,18 +211,23 @@ fn decoder_round_trips_every_cell_kind() {
         ),
         (
             json!({"t": "list", "v": [{"t": "text", "v": "x"}, {"t": "number", "v": 1}]}),
-            Cell::List(vec![Cell::Text("x".into()), Cell::Number(1.0)]),
+            Cell::List {
+                v: vec![Cell::Text { v: "x".into() }, Cell::Number { v: 1.0 }],
+            },
             "x, 1",
         ),
+        (json!({"t": "hologram", "v": 1}), Cell::Unknown, ""),
         (
-            json!({"t": "hologram", "v": 1}),
-            Cell::Text("?".into()),
-            "?",
+            json!({"t": "url", "url": "https://e.com"}),
+            Cell::Url {
+                url: "https://e.com".into(),
+                label: String::new(),
+            },
+            "https://e.com",
         ),
-        (json!({"v": 1}), Cell::Text("?".into()), "?"),
     ];
     for (v, want, shown) in cases {
-        let c = decode_cell(&v);
+        let c: Cell = serde_json::from_value(v.clone()).expect("decodes");
         assert_eq!(c, want, "{v}");
         assert_eq!(format_cell(&c), shown, "{v}");
     }
@@ -243,7 +263,12 @@ fn decode_flattens_groups_and_summaries() {
     });
     let d = decode(&v).expect("decode");
     assert_eq!(d.lines.len(), 3);
-    assert_eq!(d.lines[0], Line::Group(Cell::Text("General".into())));
+    assert_eq!(
+        d.lines[0],
+        Line::Group(Cell::Text {
+            v: "General".into()
+        })
+    );
 }
 
 #[test]
@@ -427,7 +452,7 @@ fn row_link_cells_open_their_own_targets() {
                 path: "a.md".into(),
                 label: "A".into(),
             },
-            Cell::Text("x".into()),
+            Cell::Text { v: "x".into() },
             Cell::Link {
                 path: "b.md".into(),
                 label: "B".into(),
@@ -447,7 +472,7 @@ fn row_link_cells_open_their_own_targets() {
         path: Some("n.md".into()),
         line: Some(7),
         key: None,
-        cells: vec![Cell::Text("t".into()), Cell::Number(1.0)],
+        cells: vec![Cell::Text { v: "t".into() }, Cell::Number { v: 1.0 }],
     };
     let got: Vec<_> = row_targets(&plain, &[]).iter().map(open).collect();
     assert_eq!(got, vec![Some(("n.md".into(), Some(7))), None]);
@@ -455,13 +480,13 @@ fn row_link_cells_open_their_own_targets() {
         path: None,
         line: None,
         key: None,
-        cells: vec![Cell::Text("t".into())],
+        cells: vec![Cell::Text { v: "t".into() }],
     };
     assert!(row_targets(&none, &[]).iter().all(Option::is_none));
 }
 
-/// Round-5 WP-11: a `daily-intake`-shaped result (keyed tracker rows, `url` + `link` titles,
-/// the `done` column).
+/// Round-5 WP-11: a `daily-intake`-shaped result (keyed tracker rows, `url` + `link` titles, a
+/// plain bool column).
 fn intake_result() -> serde_json::Value {
     let key = views::result::TrackerKey {
         source_kind: "youtube".into(),
@@ -487,21 +512,21 @@ fn intake_result() -> serde_json::Value {
     })
 }
 
-fn intake_rows(app: &App) -> Vec<(Row, Vec<String>)> {
+fn intake_rows(app: &App) -> Vec<(Row, Vec<Column>)> {
     let Some(State::Ready(dec)) = state(app) else {
         panic!("not ready: {:?}", state(app));
     };
     dec.lines
         .iter()
         .filter_map(|l| match l {
-            Line::Row(r) => Some((r.clone(), dec.column_keys.clone())),
+            Line::Row(r) => Some((r.clone(), dec.columns.clone())),
             _ => None,
         })
         .collect()
 }
 
 #[test]
-fn url_cells_open_in_the_browser_and_only_keyed_rows_toggle() {
+fn url_cells_open_in_the_browser_and_link_cells_open_the_note() {
     let (_tmp, d, mut app) = setup();
     d.set_view_result(ID, ViewResult(intake_result()))
         .expect("script");
@@ -510,13 +535,6 @@ fn url_cells_open_in_the_browser_and_only_keyed_rows_toggle() {
     let (keyed, keys) = &rows[0];
     let t = row_targets(keyed, keys);
     assert!(matches!(&t[0], Some(Message::OpenUrl(u)) if u == "https://y.example/1"));
-    assert!(matches!(
-        &t[1],
-        Some(Message::Views(ViewsMsg::SetStatus {
-            status: Some('x'),
-            ..
-        }))
-    ));
     // No key (an index row): the bool is plain, the link opens the note.
     let (plain, keys) = &rows[1];
     let t = row_targets(plain, keys);
@@ -524,44 +542,6 @@ fn url_cells_open_in_the_browser_and_only_keyed_rows_toggle() {
         matches!(&t[0], Some(Message::Views(ViewsMsg::Open { path, .. })) if path == "notes/P.md")
     );
     assert!(t[1].is_none());
-}
-
-#[test]
-fn done_toggle_click_calls_the_rpc_with_the_decoded_identity() {
-    let (_tmp, d, mut app) = setup();
-    d.set_view_result(ID, ViewResult(intake_result()))
-        .expect("script");
-    need(&mut app);
-    let (keyed, keys) = intake_rows(&app).remove(0);
-    let Some(click) = row_targets(&keyed, &keys).remove(1) else {
-        panic!("no toggle target");
-    };
-    let _ = app.send(click);
-    assert_eq!(
-        d.status_calls().expect("calls"),
-        [cv_protocol::TrackerItemSetStatusParams {
-            source_kind: "youtube".into(),
-            source_key: "UC1".into(),
-            item_id: "v1".into(),
-            status: Some('x'),
-        }]
-    );
-    assert!(app.status.error_text().is_none(), "success is silent");
-    // No optimistic flip: the cell stays until `views_invalidated` re-runs the view.
-    assert_eq!(intake_rows(&app)[0].0.cells[1], Cell::Bool(false));
-    d.set_done_failure(Some("no tracker item")).expect("fail");
-    let Some(click) = row_targets(&keyed, &keys).remove(1) else {
-        panic!("no toggle target");
-    };
-    let _ = app.send(click);
-    assert_eq!(d.status_calls().expect("calls").len(), 2);
-    assert!(
-        app.status
-            .error_text()
-            .is_some_and(|e| e.contains("no tracker item")),
-        "{:?}",
-        app.status.error_text()
-    );
 }
 
 /// Plan round-6 WP-5: a right-click on a view link cell yields the vault link menu (its path
@@ -586,7 +566,7 @@ fn view_cell_right_click_yields_the_link_menu() {
     .expect("url target");
     let names: Vec<String> = items(&url).into_iter().map(|(_, l)| l).collect();
     assert_eq!(names, ["Open", "Copy URL"]);
-    assert!(cell_menu_target(&Cell::Text("x".into())).is_none());
+    assert!(cell_menu_target(&Cell::Text { v: "x".into() }).is_none());
 
     let (_tmp, _d, mut app) = setup();
     let _ = app.send(Message::Menu(MenuMsg::Open(link, iced::Point::ORIGIN)));
@@ -613,7 +593,7 @@ fn status_cell_click_toggles_and_right_click_menu_sets_the_status() {
         ID,
         ViewResult(json!({
             "kind": "table",
-            "columns": [{"key": "title", "label": "Title"}, {"key": "status", "label": "Done"}],
+            "columns": [{"key": "title", "label": "Title"}, {"key": "status", "label": "Done", "role": {"kind": "status"}}],
             "groups": [{"rows": [
                 {"key": key("v1"), "cells": [{"t": "text", "v": "A"}, {"t": "text", "v": "x"}]},
                 {"key": key("v2"), "cells": [{"t": "text", "v": "B"}, {"t": "null"}]}
@@ -662,6 +642,15 @@ fn status_cell_click_toggles_and_right_click_menu_sets_the_status() {
     assert!(app.status.error_text().is_none(), "success is silent");
 }
 
+/// The Tasks view's columns as the engine produces them.
+fn tasks_columns() -> Vec<Column> {
+    vec![
+        Column::plain("task", "Task").with_role(ColumnRole::TaskText),
+        Column::plain("file", "File").with_role(ColumnRole::TaskFile),
+        Column::plain("status", "Status").with_role(ColumnRole::Status),
+    ]
+}
+
 /// Plan round-6-feedback-todos WP-6: a `Tasks` row carries its real status char (cell 2) and,
 /// with path + line, the Reading note-edit targets: the click toggles the task in the open
 /// buffer, the menu target is `Target::Task` at the 0-based line.
@@ -675,15 +664,15 @@ fn tasks_row_shows_its_status_and_toggles_through_the_note_edit_path() {
         line: Some(2),
         key: None,
         cells: vec![
-            Cell::Text("b".into()),
+            Cell::Text { v: "b".into() },
             Cell::Link {
                 path: "wp6t/t.md".into(),
                 label: "t".into(),
             },
-            Cell::Text("/".into()),
+            Cell::Text { v: "/".into() },
         ],
     };
-    let (c, targets) = task_row_status(&r);
+    let (c, targets) = task_row_status(&r, &tasks_columns());
     assert_eq!(c, '/');
     let Some((click, menu)) = targets else {
         panic!("no targets");
@@ -710,9 +699,12 @@ fn tasks_row_shows_its_status_and_toggles_through_the_note_edit_path() {
         path: None,
         line: None,
         key: None,
-        cells: vec![Cell::Text("t".into())],
+        cells: vec![Cell::Text { v: "t".into() }],
     };
-    assert!(matches!(task_row_status(&bare), (' ', None)));
+    assert!(matches!(
+        task_row_status(&bare, &tasks_columns()),
+        (' ', None)
+    ));
 }
 
 /// Plan round-8-intake-views-anchor WP-1: a keyed row whose status cell is `-` is cancelled (its
@@ -730,7 +722,7 @@ fn cancelled_status_row_draws_struck() {
         ID,
         ViewResult(json!({
             "kind": "table",
-            "columns": [{"key": "title", "label": "Title"}, {"key": "status", "label": "Done"}],
+            "columns": [{"key": "title", "label": "Title"}, {"key": "status", "label": "Done", "role": {"kind": "status"}}],
             "groups": [{"rows": [
                 {"key": key, "cells": [{"t": "text", "v": "A"}, {"t": "text", "v": "-"}]},
                 {"key": key, "cells": [{"t": "text", "v": "B"}, {"t": "text", "v": "x"}]},
@@ -747,7 +739,7 @@ fn cancelled_status_row_draws_struck() {
     let cancelled: Vec<bool> = rows.iter().map(|(r, k)| row_cancelled(r, k)).collect();
     assert_eq!(cancelled, [true, false, false, false]);
     let (r, k) = &rows[0];
-    let titles_only = vec!["title".to_owned(), "other".to_owned()];
+    let titles_only = vec![Column::plain("title", ""), Column::plain("other", "")];
     assert!(!row_cancelled(r, &titles_only));
     assert_eq!(status_cell(r, k, 1), Some(Some('-')));
 }
@@ -758,7 +750,7 @@ fn checkbox_result() -> serde_json::Value {
         "kind": "table",
         "columns": [
             {"key": "file.name", "label": "name"},
-            {"key": "note.read", "label": "read", "checkbox": true}
+            {"key": "read", "label": "read", "role": {"kind": "checkbox", "key": "read"}}
         ],
         "groups": [{"rows": [
             {"path": NOTE, "cells": [{"t": "text", "v": "Host"}, {"t": "null"}]},
@@ -779,7 +771,12 @@ fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
     let Some(State::Ready(dec)) = state(&app).cloned() else {
         panic!("not ready");
     };
-    assert_eq!(dec.column_checkbox, [false, true]);
+    let flags: Vec<bool> = dec
+        .columns
+        .iter()
+        .map(|c| matches!(c.role, Some(ColumnRole::Checkbox { .. })))
+        .collect();
+    assert_eq!(flags, [false, true]);
     let rows: Vec<Row> = dec
         .lines
         .iter()
@@ -788,13 +785,13 @@ fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
             _ => None,
         })
         .collect();
-    let cb = |r: &Row| checkbox_cell(r, &dec.column_keys, &dec.column_checkbox, 1);
+    let cb = |r: &Row| checkbox_cell(r, &dec.columns, 1);
     assert!(
         cb(&rows[0]).is_some_and(|(c, _)| !c),
         "null draws unchecked"
     );
     assert!(cb(&rows[2]).is_none(), "no path, no checkbox");
-    assert!(checkbox_cell(&rows[0], &dec.column_keys, &dec.column_checkbox, 0).is_none());
+    assert!(checkbox_cell(&rows[0], &dec.columns, 0).is_none());
     // Open note: the buffer gains `read: true`; no daemon call.
     let (_, click) = cb(&rows[0]).expect("checkbox");
     let _ = app.send(click);

@@ -49,6 +49,7 @@ pub enum Cell {
     },
     Link {
         path: String,
+        #[serde(default)]
         label: String,
     },
     List {
@@ -57,18 +58,63 @@ pub enum Cell {
     /// An external URL (opened in the browser, never resolved in the vault).
     Url {
         url: String,
+        #[serde(default)]
         label: String,
     },
+    /// Plan tn-review-baseline-remediation WP-R22: a cell tag this build does not know (a newer
+    /// producer); decodes instead of failing the whole view and renders empty.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A column header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Column {
     pub key: String,
+    #[serde(default)]
     pub label: String,
-    /// Plan round-8 WP-3: a `note.<key>` column whose cells are frontmatter-toggling checkboxes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub checkbox: bool,
+    /// Plan tn-review-baseline-remediation WP-R22 (B12): the column's interactive behaviour, set
+    /// by the producer; `None` = a plain display column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ColumnRole>,
+}
+
+impl Column {
+    /// A plain display column.
+    #[must_use]
+    pub fn plain(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            role: None,
+        }
+    }
+
+    /// The same column with `role`.
+    #[must_use]
+    pub fn with_role(mut self, role: ColumnRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+}
+
+/// What a column's cells do in the editor (plan tn-review-baseline-remediation WP-R22, B12).
+///
+/// JSON: `{"kind": "checkbox", "key": "read"}`, `{"kind": "status"}`, `{"kind": "task_text"}`,
+/// `{"kind": "task_file"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ColumnRole {
+    /// Plan round-8 WP-3: a `checkbox = true` note-property column; a click sets frontmatter
+    /// boolean `key` (the bare property name) of the row's note.
+    Checkbox { key: String },
+    /// A task-status cell: a record row's `tracker_items.status` (click/menu → set-status) or a
+    /// Tasks row's status char.
+    Status,
+    /// A Tasks view's task text.
+    TaskText,
+    /// A Tasks view's file link.
+    TaskFile,
 }
 
 /// One row; `path`/`line` locate the source (a task row carries its 1-based line).
@@ -78,6 +124,7 @@ pub struct Row {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub line: Option<i64>,
+    #[serde(default)]
     pub cells: Vec<Cell>,
     /// Opaque row identity for record-sourced rows ([`TrackerKey::encode`]); `None` for index rows.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -116,7 +163,9 @@ impl TrackerKey {
 /// A footer row aligned with the columns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
+    #[serde(default)]
     pub label: String,
+    #[serde(default)]
     pub cells: Vec<Cell>,
 }
 
@@ -126,6 +175,7 @@ pub struct Group {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub key: Option<Cell>,
     pub rows: Vec<Row>,
+    #[serde(default)]
     pub summaries: Vec<Summary>,
 }
 
@@ -135,11 +185,25 @@ pub struct ViewResult {
     pub kind: Kind,
     pub columns: Vec<Column>,
     pub groups: Vec<Group>,
+    #[serde(default)]
     pub summaries: Vec<Summary>,
+    #[serde(default)]
     pub notices: Vec<String>,
-    /// Plan round-8 WP-2: the view's `maxHeight` (`None` = the editor default).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Plan round-8 WP-2: the view's `maxHeight` (`None` = the editor default). A malformed value
+    /// decodes as `None` rather than failing the view.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_max_height"
+    )]
     pub max_height: Option<MaxHeight>,
+}
+
+fn lenient_max_height<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<MaxHeight>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// Plan round-8 WP-2: a view's height cap — `Px(n)` (n > 0) or uncapped (`"none"`).

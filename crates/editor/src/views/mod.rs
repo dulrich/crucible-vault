@@ -7,8 +7,10 @@
 //! [`ViewsMsg::Loaded`]. `views_invalidated` marks matching entries stale and bumps their epoch,
 //! which is part of the sensor key, so a fence that is on screen fires `Need` again.
 //!
-//! The decoder is tolerant: an unknown cell tag decodes as text `?`; a malformed result becomes
-//! an [`State::Error`] entry shown in the fence. Text cells written `~~x~~` (missing initiative
+//! The result decodes with serde straight into `views::result` (plan tn-review-baseline-remediation
+//! WP-R22): an unknown cell tag decodes as `Cell::Unknown` and renders empty; a malformed result
+//! becomes an [`State::Error`] entry shown in the fence. Cell behaviour follows the producer-set
+//! [`ColumnRole`], never column-key strings. Text cells written `~~x~~` (missing initiative
 //! files, `defs/initiatives.toml`) render struck through and dimmed.
 
 use std::collections::HashMap;
@@ -16,6 +18,7 @@ use std::collections::HashMap;
 use iced::font::Weight;
 use iced::widget::{button, column, container, rich_text, row, sensor, span, text};
 use iced::{Border, Element, Font, Length, Theme};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::message::{Message, ViewsMsg};
@@ -32,43 +35,7 @@ pub const MAX_HEIGHT: f32 = 480.0;
 /// `(view_id, this_path)`.
 pub type Key = (String, Option<String>);
 
-/// The view kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Table,
-    Pivot,
-    Tasks,
-}
-
-/// One displayed value (`views::result::Cell`, decoded tolerantly).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Cell {
-    Null,
-    Bool(bool),
-    Number(f64),
-    Text(String),
-    Date(String),
-    Link {
-        path: String,
-        label: String,
-    },
-    List(Vec<Cell>),
-    /// An external URL (round-5 WP-11): opens in the browser.
-    Url {
-        url: String,
-        label: String,
-    },
-}
-
-/// A result row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Row {
-    pub path: Option<String>,
-    pub line: Option<i64>,
-    pub cells: Vec<Cell>,
-    /// Opaque row identity (record-sourced rows, round-5 WP-11), handed back verbatim.
-    pub key: Option<String>,
-}
+pub use views::result::{Cell, Column, ColumnRole, Kind, Row};
 
 /// A flattened display line: group headers, rows and footers in one list.
 #[derive(Debug, Clone, PartialEq)]
@@ -83,15 +50,12 @@ pub enum Line {
     },
 }
 
-/// A decoded `ViewResult`.
+/// A decoded `views::ViewResult`, its groups flattened into display [`Line`]s.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decoded {
     pub kind: Kind,
-    pub columns: Vec<String>,
-    /// The column keys (`file.name`, `done`, …), aligned with `columns`.
-    pub column_keys: Vec<String>,
-    /// Plan round-8 WP-3: which columns are `checkbox = true` frontmatter toggles.
-    pub column_checkbox: Vec<bool>,
+    /// The producer's columns (key, label, [`ColumnRole`]).
+    pub columns: Vec<Column>,
     pub lines: Vec<Line>,
     pub notices: Vec<String>,
     /// Plan round-8 WP-2: the view's `maxHeight` (`None` = [`MAX_HEIGHT`]).
@@ -192,7 +156,7 @@ pub enum Effect {
 /// A malformed `ViewResult`.
 #[derive(Debug, thiserror::Error)]
 #[error("malformed view result: {0}")]
-pub struct DecodeError(&'static str);
+pub struct DecodeError(#[from] serde_json::Error);
 
 impl ViewStore {
     /// The entry for `(id, host)`.
@@ -295,154 +259,51 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
     }
 }
 
-/// Decodes one cell; unknown tags become text `?`.
-pub fn decode_cell(v: &Value) -> Cell {
-    let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
-    match v.get("t").and_then(Value::as_str) {
-        Some("null") => Cell::Null,
-        Some("bool") => v
-            .get("v")
-            .and_then(Value::as_bool)
-            .map_or(Cell::Null, Cell::Bool),
-        Some("number") => v
-            .get("v")
-            .and_then(Value::as_f64)
-            .map_or(Cell::Null, Cell::Number),
-        Some("text") => s("v").map_or(Cell::Null, Cell::Text),
-        Some("date") => s("v").map_or(Cell::Null, Cell::Date),
-        Some("link") => match s("path") {
-            Some(path) => Cell::Link {
-                label: s("label").unwrap_or_else(|| path.clone()),
-                path,
-            },
-            None => Cell::Text("?".into()),
-        },
-        Some("url") => match s("url") {
-            Some(url) => Cell::Url {
-                label: s("label")
-                    .filter(|l| !l.is_empty())
-                    .unwrap_or_else(|| url.clone()),
-                url,
-            },
-            None => Cell::Text("?".into()),
-        },
-        Some("list") => Cell::List(
-            v.get("v")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().map(decode_cell).collect())
-                .unwrap_or_default(),
-        ),
-        _ => Cell::Text("?".into()),
-    }
-}
-
-fn cells(v: Option<&Value>) -> Vec<Cell> {
-    v.and_then(Value::as_array)
-        .map(|a| a.iter().map(decode_cell).collect())
-        .unwrap_or_default()
-}
-
-fn summaries(v: Option<&Value>, out: &mut Vec<Line>) {
-    for s in v.and_then(Value::as_array).into_iter().flatten() {
-        out.push(Line::Summary {
-            label: s
-                .get("label")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            cells: cells(s.get("cells")),
-        });
-    }
-}
-
-/// Decodes a `ViewResult` JSON value.
+/// Decodes a `ViewResult` JSON value (serde, `views::result`) and flattens its groups: group
+/// header, rows, group footers, then the result footers.
 pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
-    let kind = match v.get("kind").and_then(Value::as_str) {
-        Some("table") => Kind::Table,
-        Some("pivot") => Kind::Pivot,
-        Some("tasks") => Kind::Tasks,
-        _ => return Err(DecodeError("kind")),
-    };
-    let cols = v
-        .get("columns")
-        .and_then(Value::as_array)
-        .ok_or(DecodeError("columns"))?;
-    let field = |c: &Value, k: &str| {
-        c.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let columns = cols.iter().map(|c| field(c, "label")).collect();
-    let column_keys = cols.iter().map(|c| field(c, "key")).collect();
-    let column_checkbox = cols
-        .iter()
-        .map(|c| c.get("checkbox").and_then(Value::as_bool).unwrap_or(false))
-        .collect();
-    let groups = v
-        .get("groups")
-        .and_then(Value::as_array)
-        .ok_or(DecodeError("groups"))?;
+    let r = views::ViewResult::deserialize(v)?;
     let mut lines = Vec::new();
-    for g in groups {
-        if let Some(k) = g.get("key") {
-            lines.push(Line::Group(decode_cell(k)));
+    let summary = |s: views::result::Summary| Line::Summary {
+        label: s.label,
+        cells: s.cells,
+    };
+    for g in r.groups {
+        if let Some(k) = g.key {
+            lines.push(Line::Group(k));
         }
-        let rows = g
-            .get("rows")
-            .and_then(Value::as_array)
-            .ok_or(DecodeError("rows"))?;
-        for r in rows {
-            lines.push(Line::Row(Row {
-                path: r.get("path").and_then(Value::as_str).map(str::to_owned),
-                line: r.get("line").and_then(Value::as_i64),
-                cells: cells(r.get("cells")),
-                key: r.get("key").and_then(Value::as_str).map(str::to_owned),
-            }));
-        }
-        summaries(g.get("summaries"), &mut lines);
+        lines.extend(g.rows.into_iter().map(Line::Row));
+        lines.extend(g.summaries.into_iter().map(summary));
     }
-    summaries(v.get("summaries"), &mut lines);
-    let notices = v
-        .get("notices")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    let max_height = v
-        .get("max_height")
-        .and_then(|m| serde_json::from_value(m.clone()).ok());
+    lines.extend(r.summaries.into_iter().map(summary));
     Ok(Decoded {
-        kind,
-        columns,
-        column_keys,
-        column_checkbox,
+        kind: r.kind,
+        columns: r.columns,
         lines,
-        notices,
-        max_height,
+        notices: r.notices,
+        max_height: r.max_height,
     })
 }
 
 /// Display text of a cell.
 pub fn format_cell(c: &Cell) -> String {
     match c {
-        Cell::Null => String::new(),
-        Cell::Bool(b) => if *b { "✓" } else { "✗" }.to_owned(),
-        Cell::Number(n) => {
+        Cell::Null | Cell::Unknown => String::new(),
+        Cell::Bool { v } => if *v { "✓" } else { "✗" }.to_owned(),
+        Cell::Number { v: n } => {
             let s = format!("{n:.2}");
             s.trim_end_matches('0').trim_end_matches('.').to_owned()
         }
-        Cell::Text(s) => s.clone(),
-        Cell::Date(d) => match d.split_once('T') {
+        Cell::Text { v } => v.clone(),
+        Cell::Date { v: d } => match d.split_once('T') {
             Some((day, time)) => format!("{day} {}", time.get(..5).unwrap_or(time)),
             None => d.clone(),
         },
-        Cell::Link { label, .. } | Cell::Url { label, .. } => label.clone(),
-        Cell::List(l) => l.iter().map(format_cell).collect::<Vec<_>>().join(", "),
+        // An absent label shows the target.
+        Cell::Link { label, path: t } | Cell::Url { label, url: t } => {
+            if label.is_empty() { t } else { label }.clone()
+        }
+        Cell::List { v: l } => l.iter().map(format_cell).collect::<Vec<_>>().join(", "),
     }
 }
 
@@ -531,30 +392,25 @@ pub fn fence<'a>(
         .into()
 }
 
-/// The column key of the legacy done toggle (round-5 WP-11). Plan round-6-feedback-todos WP-6:
-/// kept for a user-edited def (the `.0005-new` sidecar case) and routed to set-status.
-pub const DONE_KEY: &str = "done";
+/// The role of column `i`.
+fn role(cols: &[Column], i: usize) -> Option<&ColumnRole> {
+    cols.get(i).and_then(|c| c.role.as_ref())
+}
 
-/// Plan round-6-feedback-todos WP-6: the column key of a free-form task-status cell
-/// (`tracker_items.status`, `defs/daily-intake.toml`).
-pub const STATUS_KEY: &str = "status";
-
-/// Whether cell `i` of `r` is a legacy done toggle: a bool under the `done` column of a keyed row.
-fn is_toggle(r: &Row, keys: &[String], i: usize) -> bool {
-    r.key.is_some()
-        && keys.get(i).is_some_and(|k| k == DONE_KEY)
-        && matches!(r.cells.get(i), Some(Cell::Bool(_)))
+/// The index of the first column with `want` role.
+fn role_index(cols: &[Column], want: &ColumnRole) -> Option<usize> {
+    cols.iter().position(|c| c.role.as_ref() == Some(want))
 }
 
 /// Plan round-6-feedback-todos WP-6: the status of cell `i` of `r` when it is a status cell —
-/// text or null under the `status` column of a keyed row (`Some(None)` = open).
-pub(crate) fn status_cell(r: &Row, keys: &[String], i: usize) -> Option<Option<char>> {
-    if r.key.is_none() || keys.get(i).is_none_or(|k| k != STATUS_KEY) {
+/// text or null under a [`ColumnRole::Status`] column of a keyed row (`Some(None)` = open).
+pub(crate) fn status_cell(r: &Row, cols: &[Column], i: usize) -> Option<Option<char>> {
+    if r.key.is_none() || role(cols, i) != Some(&ColumnRole::Status) {
         return None;
     }
     match r.cells.get(i) {
         Some(Cell::Null) | None => Some(None),
-        Some(Cell::Text(s)) => Some(s.chars().next().filter(|c| *c != ' ')),
+        Some(Cell::Text { v }) => Some(v.chars().next().filter(|c| *c != ' ')),
         _ => None,
     }
 }
@@ -566,12 +422,15 @@ pub(crate) fn status_menu_target(r: &Row) -> Option<crate::context_menu::Target>
         .map(|key| crate::context_menu::Target::TrackerStatus { key: key.clone() })
 }
 
-/// Plan round-6-feedback-todos WP-6: a `Tasks` row's status char (its `status` cell, index 2;
-/// `' '` when absent) and its note-edit targets — the click (Reading's `ToggleTask`) and the
-/// status menu (`Target::Task`) — when the row carries `path` + 1-based `line`.
-pub(crate) fn task_row_status(r: &Row) -> (char, Option<(Message, crate::context_menu::Target)>) {
-    let c = match r.cells.get(2) {
-        Some(Cell::Text(s)) => s.chars().next().unwrap_or(' '),
+/// Plan round-6-feedback-todos WP-6: a `Tasks` row's status char (its [`ColumnRole::Status`]
+/// cell; `' '` when absent) and its note-edit targets — the click (Reading's `ToggleTask`) and
+/// the status menu (`Target::Task`) — when the row carries `path` + 1-based `line`.
+pub(crate) fn task_row_status(
+    r: &Row,
+    cols: &[Column],
+) -> (char, Option<(Message, crate::context_menu::Target)>) {
+    let c = match role_index(cols, &ColumnRole::Status).and_then(|i| r.cells.get(i)) {
+        Some(Cell::Text { v }) => v.chars().next().unwrap_or(' '),
         _ => ' ',
     };
     let targets = match (&r.path, r.line.and_then(|l| usize::try_from(l - 1).ok())) {
@@ -592,10 +451,9 @@ pub(crate) fn task_row_status(r: &Row) -> (char, Option<(Message, crate::context
 
 /// plan editor-round-4 WP-3: what each cell of a non-task row opens on click. Every link cell
 /// opens its own path; a row with a `path` but no link cell opens it (and `line`) from its first
-/// cell. There is no whole-row click target. Round-5 WP-11: a `url` cell opens in the browser;
-/// the done toggle of a keyed row (column key `done`, see `keys`) flips it. Round-6 WP-6: a
-/// status cell (column key `status`) toggles `x` ↔ open; the legacy `done` maps to set-status.
-pub(crate) fn row_targets(r: &Row, keys: &[String]) -> Vec<Option<Message>> {
+/// cell. There is no whole-row click target. Round-5 WP-11: a `url` cell opens in the browser.
+/// Round-6 WP-6: a status cell ([`ColumnRole::Status`]) toggles `x` ↔ open.
+pub(crate) fn row_targets(r: &Row, cols: &[Column]) -> Vec<Option<Message>> {
     let mut out: Vec<Option<Message>> = r
         .cells
         .iter()
@@ -606,11 +464,7 @@ pub(crate) fn row_targets(r: &Row, keys: &[String]) -> Vec<Option<Message>> {
                 line: None,
             })),
             Cell::Url { url, .. } => Some(Message::OpenUrl(url.clone())),
-            Cell::Bool(v) if is_toggle(r, keys, i) => Some(Message::Views(ViewsMsg::SetStatus {
-                key: r.key.clone().unwrap_or_default(),
-                status: (!v).then_some('x'),
-            })),
-            _ => status_cell(r, keys, i).map(|st| {
+            _ => status_cell(r, cols, i).map(|st| {
                 Message::Views(ViewsMsg::SetStatus {
                     key: r.key.clone().unwrap_or_default(),
                     status: crate::task_status::toggled(st),
@@ -658,22 +512,16 @@ pub(crate) fn cell_menu_target(c: &Cell) -> Option<crate::context_menu::Target> 
 }
 
 /// Plan round-8-intake-views-anchor WP-3: cell `i` of `r` as a frontmatter checkbox — `(checked,
-/// click)` when column `i` is flagged `checkbox` and the row has a `path`. Only `Bool(true)` is
-/// checked (false / null / missing draw unchecked); the click sets the opposite value on the
-/// column's frontmatter key (`note.` prefix stripped).
-pub(crate) fn checkbox_cell(
-    r: &Row,
-    keys: &[String],
-    flags: &[bool],
-    i: usize,
-) -> Option<(bool, Message)> {
-    if !flags.get(i).copied().unwrap_or(false) {
+/// click)` when column `i` is a [`ColumnRole::Checkbox`] and the row has a `path`. Only
+/// `Bool(true)` is checked (false / null / missing draw unchecked); the click sets the opposite
+/// value on the role's frontmatter key.
+pub(crate) fn checkbox_cell(r: &Row, cols: &[Column], i: usize) -> Option<(bool, Message)> {
+    let Some(ColumnRole::Checkbox { key }) = role(cols, i) else {
         return None;
-    }
+    };
     let path = r.path.clone()?;
-    let col = keys.get(i)?;
-    let key = col.strip_prefix("note.").unwrap_or(col).to_owned();
-    let checked = matches!(r.cells.get(i), Some(Cell::Bool(true)));
+    let key = key.clone();
+    let checked = matches!(r.cells.get(i), Some(Cell::Bool { v: true }));
     Some((
         checked,
         Message::Views(ViewsMsg::SetBool {
@@ -686,8 +534,8 @@ pub(crate) fn checkbox_cell(
 
 /// Plan round-8-intake-views-anchor WP-1: whether `r` is a cancelled row — a status cell
 /// (see [`status_cell`]) holding `-`. Its text cells draw struck-through and faint.
-pub(crate) fn row_cancelled(r: &Row, keys: &[String]) -> bool {
-    (0..r.cells.len().max(keys.len())).any(|i| status_cell(r, keys, i) == Some(Some('-')))
+pub(crate) fn row_cancelled(r: &Row, cols: &[Column]) -> bool {
+    (0..r.cells.len().max(cols.len())).any(|i| status_cell(r, cols, i) == Some(Some('-')))
 }
 
 fn cell_view<'a>(
@@ -778,48 +626,47 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Me
                     if cs.is_empty() {
                         cs.push(Cell::Null);
                     }
-                    cs[0] = Cell::Text(label.clone());
+                    cs[0] = Cell::Text { v: label.clone() };
                 }
                 grid(&cs, true, &[])
             }
         }
         Line::Row(r) => {
             if d.kind != Kind::Tasks {
-                // The legacy done toggle and a status cell draw as the shared task checkbox.
-                let targets = row_targets(r, &d.column_keys);
-                let cancelled = row_cancelled(r, &d.column_keys);
+                // A status cell draws as the shared task checkbox.
+                let targets = row_targets(r, &d.columns);
+                let cancelled = row_cancelled(r, &d.columns);
                 return row((0..cols).map(|i| {
                     let open = targets.get(i).cloned().flatten();
-                    let el: Element<'a, Message> = if let Some((checked, msg)) =
-                        checkbox_cell(r, &d.column_keys, &d.column_checkbox, i)
-                    {
-                        status_box(if checked { 'x' } else { ' ' }, Some(msg), None, t, scale)
-                    } else {
-                        match (r.cells.get(i), status_cell(r, &d.column_keys, i)) {
-                            (Some(Cell::Bool(b)), _) if is_toggle(r, &d.column_keys, i) => {
-                                status_box(if *b { 'x' } else { ' ' }, open, None, t, scale)
-                            }
-                            (_, Some(st)) => {
-                                status_box(st.unwrap_or(' '), open, status_menu_target(r), t, scale)
-                            }
-                            (c, _) => cell_view(
-                                c.unwrap_or(&Cell::Null),
+                    let el: Element<'a, Message> =
+                        if let Some((checked, msg)) = checkbox_cell(r, &d.columns, i) {
+                            status_box(if checked { 'x' } else { ' ' }, Some(msg), None, t, scale)
+                        } else if let Some(st) = status_cell(r, &d.columns, i) {
+                            status_box(st.unwrap_or(' '), open, status_menu_target(r), t, scale)
+                        } else {
+                            cell_view(
+                                r.cells.get(i).unwrap_or(&Cell::Null),
                                 false,
                                 open,
                                 cancelled,
                                 t,
                                 scale,
-                            ),
-                        }
-                    };
+                            )
+                        };
                     container(el).width(Length::FillPortion(1)).into()
                 }))
                 .spacing(8)
                 .into();
             }
-            let task = r.cells.first().map(format_cell).unwrap_or_default();
-            let file = r.cells.get(1).map(format_cell).unwrap_or_default();
-            let (c, targets) = task_row_status(r);
+            let cell = |want: ColumnRole| {
+                role_index(&d.columns, &want)
+                    .and_then(|i| r.cells.get(i))
+                    .map(format_cell)
+                    .unwrap_or_default()
+            };
+            let task = cell(ColumnRole::TaskText);
+            let file = cell(ColumnRole::TaskFile);
+            let (c, targets) = task_row_status(r, &d.columns);
             let (press, menu) = targets.map_or((None, None), |(m, tg)| (Some(m), Some(tg)));
             let label: Element<'a, Message> = row![
                 text(task).size(px(13.0, scale)).color(t.text.to_color()),
@@ -906,7 +753,7 @@ fn result_view<'a>(
         items.push(
             row(d.columns.iter().map(|c| {
                 container(
-                    text(c.clone())
+                    text(c.label.clone())
                         .size(px(13.0, scale))
                         .color(t.text_dim.to_color()),
                 )

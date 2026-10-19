@@ -3,6 +3,7 @@
 pub mod carry;
 pub mod chord;
 pub mod editing;
+pub mod edits;
 pub mod find;
 pub mod highlight;
 pub mod hints;
@@ -13,6 +14,7 @@ pub mod outline;
 pub mod paths;
 pub mod period;
 pub mod place;
+pub mod props;
 pub mod rank;
 pub mod reading;
 pub mod render;

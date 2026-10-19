@@ -351,9 +351,9 @@ impl SourceBuffer {
         true
     }
 
-    /// Toggles the task checkbox at source `line` (see `editor_model::render::task_toggle`).
+    /// Toggles the task checkbox at source `line` (see `editor_model::edits::task_toggle`).
     pub fn toggle_task(&mut self, line: usize, now: Instant) -> bool {
-        let Some((cols, next)) = editor_model::render::task_toggle(&self.text(), line) else {
+        let Some((cols, next)) = editor_model::edits::task_toggle(&self.text(), line) else {
             return false;
         };
         self.replace_in_line(line, cols, &next.to_string(), now)
@@ -361,12 +361,11 @@ impl SourceBuffer {
 
     /// Plan round-8-intake-views-anchor WP-3: sets frontmatter boolean `key` to `to` (`None` =
     /// toggle) as one undoable edit that rewrites only its scalar (see
-    /// `editor_model::render::frontmatter_bool_edit`; plan usability-sprint-captures-links
+    /// `editor_model::edits::frontmatter_bool_edit`; plan usability-sprint-captures-links
     /// WP-4). Upserts — a null / missing key or a frontmatter-less note becomes `key: true`.
     pub fn set_frontmatter_bool(&mut self, key: &str, to: Option<bool>, now: Instant) -> bool {
         let text = self.text();
-        let Some((range, with)) = editor_model::render::frontmatter_bool_edit(&text, key, to)
-        else {
+        let Some((range, with)) = editor_model::edits::frontmatter_bool_edit(&text, key, to) else {
             return false;
         };
         // The splice is one line's scalar (or an inserted line): line + byte columns.
@@ -377,9 +376,9 @@ impl SourceBuffer {
     }
 
     /// Sets the task status at source `line` to `to` as one edit (plan editor-ui-round-3 WP-4;
-    /// see `editor_model::render::task_set_status`).
+    /// see `editor_model::edits::task_set_status`).
     pub fn set_task_status(&mut self, line: usize, to: char, now: Instant) -> bool {
-        let Some((cols, next)) = editor_model::render::task_set_status(&self.text(), line, to)
+        let Some((cols, next)) = editor_model::edits::task_set_status(&self.text(), line, to)
         else {
             return false;
         };

@@ -1043,7 +1043,7 @@ mod wp4 {
         assert_eq!(doc.seq, tab.edit_seq(), "re-rendered from the buffer");
         assert_eq!(
             doc.model.properties[0].values,
-            [editor_model::render::PropValue::Bool(true)]
+            [editor_model::props::PropValue::Bool(true)]
         );
     }
 
@@ -1051,7 +1051,6 @@ mod wp4 {
     /// frontmatter path and the panel re-renders it.
     #[test]
     fn sidebar_boolean_toggles_through_the_frontmatter_path() {
-        use crate::panels::props::Rendered;
         let (_tmp, d) = fake_arc();
         d.create_note("wp6prop/t.md", "---\nread: false\n---\nx\n")
             .expect("create");
@@ -1064,16 +1063,16 @@ mod wp4 {
                 .props
                 .iter()
                 .find(|p| p.key == "read")
-                .map(|p| p.value.clone())
+                .and_then(crate::panels::props::checked)
         };
-        assert_eq!(check(&app), Some(Rendered::Check(false)));
+        assert_eq!(check(&app), Some(false));
         let _ = app.send(crate::panels::check_press("wp6prop/t.md", "read"));
         assert_eq!(
             app.active_doc().expect("tab").text(),
             "---\nread: true\n---\nx\n"
         );
         let _ = app.send(Message::Panels(crate::message::PanelsMsg::Tick));
-        assert_eq!(check(&app), Some(Rendered::Check(true)));
+        assert_eq!(check(&app), Some(true));
     }
 
     #[test]

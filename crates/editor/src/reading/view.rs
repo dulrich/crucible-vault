@@ -1,8 +1,7 @@
 //! Drawing the render model with iced widgets (`rich_text`, `image`, `sensor`, containers).
 
-use editor_model::render::{
-    Align, Block, Fold, Inline, ListItem, PropValue, Property, inline_text,
-};
+use editor_model::props::{PropValue, Property};
+use editor_model::render::{Align, Block, Fold, Inline, ListItem, inline_text};
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{
     Space, button, column, container, image, row, rule, scrollable, sensor, span, text,

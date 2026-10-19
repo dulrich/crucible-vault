@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use ofm::frontmatter::JsValue;
 
-use super::props::{self, PropType, Rendered};
+use super::props;
 use super::*;
 use crate::app::App;
 use crate::daemon::{DaemonClient, FakeDaemon};
 use crate::message::{Message, PanelsMsg, SourceMsg, TabsMsg};
+use editor_model::props::PropType;
 
 const A: &str = "---\ntags: [proj, x]\ncreated: 2026-01-02\nread: true\nword-count: lots\ntopics: one\nmood: [calm, warm]\nrelated: \"[[b]]\"\n---\n# A title\n\nSee [[b]] and [[nope]] and [[scan.pdf]].\nWeb [site](https://example.com) and [local](b.md).\n\n```\n# not a heading\n```\n\n## Section #alpha\n";
 const B: &str = "# B\nsee [[a]] here zebraword\n";
@@ -75,49 +76,38 @@ fn outline_links_and_props_from_the_buffer() {
             .props
             .iter()
             .find(|p| p.key == k)
-            .map(|p| (p.ty, p.value.clone()))
+            .map(|p| (p.ty, props::display(p)))
             .expect(k)
     };
-    assert_eq!(
-        get("tags"),
-        (
-            Some(PropType::Tags),
-            Rendered::Chips(vec!["proj".into(), "x".into()])
-        )
-    );
+    assert_eq!(get("tags"), (Some(PropType::Tags), "[proj] [x]".to_owned()));
     assert_eq!(
         get("created"),
-        (Some(PropType::Date), Rendered::Text("2026-01-02".into()))
+        (Some(PropType::Date), "2026-01-02".to_owned())
     );
-    assert_eq!(
-        get("read"),
-        (Some(PropType::Checkbox), Rendered::Check(true))
-    );
+    assert_eq!(get("read"), (Some(PropType::Checkbox), "☑".to_owned()));
     assert_eq!(
         get("word-count"),
-        (Some(PropType::Number), Rendered::Flagged("lots".into()))
+        (Some(PropType::Number), "⚠ lots".to_owned())
     );
     assert_eq!(
         get("topics"),
-        (
-            Some(PropType::Multitext),
-            Rendered::Chips(vec!["one".into()])
+        (Some(PropType::Multitext), "[one]".to_owned())
+    );
+    assert_eq!(get("mood"), (None, "[calm] [warm]".to_owned()));
+    // Plan round-6 WP-5: a wikilink value renders as a link (render model's parse).
+    let related = app.panels.props.iter().find(|p| p.key == "related");
+    assert_eq!(
+        related.and_then(props::links),
+        Some(
+            &[editor_model::props::PropValue::Link {
+                target: "b".into(),
+                fragment: None,
+                alias: None,
+            }][..]
         )
     );
-    assert_eq!(
-        get("mood"),
-        (None, Rendered::Chips(vec!["calm".into(), "warm".into()]))
-    );
-    // Plan round-6 WP-5: a wikilink value renders as a link (render model's parse).
-    assert_eq!(
-        get("related").1,
-        Rendered::Links(vec![editor_model::render::PropValue::Link {
-            target: "b".into(),
-            fragment: None,
-            alias: None,
-        }])
-    );
-    assert_eq!(Rendered::Check(false).display(), "☐");
+    let unchecked = editor_model::props::Property::new("read", &JsValue::Bool(false));
+    assert_eq!(props::display(&unchecked), "☐");
 
     // Unsaved edits show up on the next tick; the outline click moves the cursor only.
     let _ = app.send(Message::Source(SourceMsg::Action(
@@ -255,19 +245,14 @@ fn pure_helpers() {
     assert!(!is_externalish("Note.md"));
     let long = "x".repeat(200);
     assert_eq!(snippet(&long).chars().count(), SNIPPET_CHARS + 1);
-    assert_eq!(props::TYPES.len(), 34);
+    assert_eq!(editor_model::props::TYPES.len(), 34);
+    let show = |k: &str, v: JsValue| props::display(&editor_model::props::Property::new(k, &v));
+    assert_eq!(show("TQ_show_tree", JsValue::Str("yes".into())), "⚠ yes");
     assert_eq!(
-        props::render("TQ_show_tree", &JsValue::Str("yes".into())).value,
-        Rendered::Flagged("yes".into())
+        show("created", JsValue::Str("2026-01-02T10:00".into())),
+        "2026-01-02T10:00"
     );
-    assert_eq!(
-        props::render("created", &JsValue::Str("2026-01-02T10:00".into())).value,
-        Rendered::Text("2026-01-02T10:00".into())
-    );
-    assert_eq!(
-        props::render("review-after-lines", &JsValue::Num(12.0)).value,
-        Rendered::Text("12".into())
-    );
+    assert_eq!(show("review-after-lines", JsValue::Num(12.0)), "12");
 }
 
 /// editor-usability-round WP-5 measurement harness (not a gate): Toggle Panels latency against a
@@ -360,8 +345,8 @@ fn panel_entries_yield_the_link_menu_and_outline_anchors() {
 /// links; an unresolved wikilink is marked (dimmed, Create note); plain text stays text.
 #[test]
 fn sidebar_property_links_and_unresolved_marking() {
-    use editor_model::render::PropValue;
-    let r = props::render(
+    use editor_model::props::PropValue;
+    let r = editor_model::props::Property::new(
         "rel",
         &JsValue::Arr(vec![
             JsValue::Str("[[b|Bee]]".into()),
@@ -370,25 +355,26 @@ fn sidebar_property_links_and_unresolved_marking() {
         ]),
     );
     assert_eq!(
-        r.value,
-        Rendered::Links(vec![
-            PropValue::Link {
-                target: "b".into(),
-                fragment: None,
-                alias: Some("Bee".into()),
-            },
-            PropValue::Text("plain".into()),
-            PropValue::Url {
-                url: "https://e.com".into(),
-                label: "https://e.com".into(),
-            },
-        ])
+        props::links(&r),
+        Some(
+            &[
+                PropValue::Link {
+                    target: "b".into(),
+                    fragment: None,
+                    alias: Some("Bee".into()),
+                },
+                PropValue::Text("plain".into()),
+                PropValue::Url {
+                    url: "https://e.com".into(),
+                    label: "https://e.com".into(),
+                },
+            ][..]
+        )
     );
-    assert_eq!(r.value.display(), "Bee, plain, https://e.com");
-    assert_eq!(
-        props::render("model", &JsValue::Str("gpt".into())).value,
-        Rendered::Text("gpt".into())
-    );
+    assert_eq!(props::display(&r), "Bee, plain, https://e.com");
+    let model = editor_model::props::Property::new("model", &JsValue::Str("gpt".into()));
+    assert!(props::links(&model).is_none());
+    assert_eq!(props::display(&model), "gpt");
 
     let tmp = tempfile::tempdir().expect("tmp");
     let vault = tmp.path().join("vault");

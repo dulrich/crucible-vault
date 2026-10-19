@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use cv_index::TagCount;
 use editor_model::outline::{self, OutlineItem};
-use editor_model::render::{PropValue, is_remote};
+use editor_model::props::{PropValue, Property};
+use editor_model::render::is_remote;
 use iced::widget::span;
 use iced::widget::text::Span;
 use iced::widget::{button, column, container, rich_text, row, scrollable, text, text_input};
@@ -29,8 +30,6 @@ use crate::reading::resolver::ResolverCache;
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
 use crate::widget::virtual_list::{ListWindow, VirtualList};
-
-pub use props::{Prop, PropType, Rendered};
 
 /// Snippet length cap (chars).
 pub const SNIPPET_CHARS: usize = 120;
@@ -157,7 +156,7 @@ pub struct Panels {
     pub path: Option<String>,
     pub outline: Vec<OutlineItem>,
     pub links: Links,
-    pub props: Vec<Prop>,
+    pub props: Vec<Property>,
     /// Plan round-6 WP-5: sidebar property wikilink targets that do not resolve (dimmed; their
     /// menu offers Create note). Empty without a resolver (no daemon), like Reading's.
     pub prop_unresolved: HashSet<String>,
@@ -347,10 +346,7 @@ impl Panels {
         self.prop_unresolved = if self.resolver.is_built() {
             self.props
                 .iter()
-                .filter_map(|p| match &p.value {
-                    Rendered::Links(v) => Some(v),
-                    _ => None,
-                })
+                .filter_map(props::links)
                 .flatten()
                 .filter_map(|v| match v {
                     PropValue::Link { target, .. }
@@ -690,8 +686,8 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
         },
         PanelKind::Properties => scrollable(
             column(p.props.iter().map(|pr| {
-                let v: Element<'a, Message> = match &pr.value {
-                    Rendered::Links(vs) => row(vs.iter().enumerate().map(|(i, v)| {
+                let v: Element<'a, Message> = if let Some(vs) = props::links(pr) {
+                    row(vs.iter().enumerate().map(|(i, v)| {
                         let el = prop_el(src, v, &p.prop_unresolved, t);
                         if i + 1 < vs.len() {
                             row![el, text(",").size(13).color(t.text_faint.to_color())].into()
@@ -701,23 +697,26 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
                     }))
                     .spacing(4)
                     .wrap()
-                    .into(),
-                    Rendered::Flagged(_) => text(pr.value.display())
+                    .into()
+                } else if pr.flagged {
+                    text(props::display(pr))
                         .size(13)
                         .color(t.warn_text.to_color())
-                        .into(),
+                        .into()
+                } else if let Some(b) = props::checked(pr) {
                     // Plan round-6-feedback-todos WP-6: a boolean toggles through Reading's
                     // frontmatter path (no status menu), drawn with the shared checkbox.
-                    Rendered::Check(b) => button(crate::task_status::task_box(
-                        if *b { 'x' } else { ' ' },
+                    button(crate::task_status::task_box(
+                        if b { 'x' } else { ' ' },
                         14.0,
                         t,
                     ))
                     .padding(0)
                     .style(button::text)
                     .on_press(check_press(src, &pr.key))
-                    .into(),
-                    other => text(other.display()).size(13).into(),
+                    .into()
+                } else {
+                    text(props::display(pr)).size(13).into()
                 };
                 column![
                     text(pr.key.as_str())
