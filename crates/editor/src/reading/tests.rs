@@ -373,31 +373,6 @@ fn active_find_match_maps_to_its_block_and_occurrence() {
     assert_eq!(strong_hit(&app, p), None);
 }
 
-/// plan editor-ui-round-3 WP-6: the measured probe picks the block at the viewport top and the
-/// offset that puts a block there (layout coordinates, never proportional).
-#[test]
-fn probe_maps_scroll_offset_to_blocks() {
-    let p = Probe {
-        offset_y: 100.0,
-        content_y: 40.0,
-        block_ys: vec![Some(48.0), Some(90.0), Some(139.5), Some(240.0), None],
-        ..Probe::default()
-    };
-    assert_eq!(
-        p.anchor_block(0.0),
-        Some(2),
-        "139.5 - 40 = 99.5 <= 100 (+1 slack)"
-    );
-    assert_eq!(p.block_offset(3), Some(200.0));
-    assert_eq!(p.block_offset(0), Some(8.0));
-    assert_eq!(p.block_offset(4), None, "not laid out");
-    let at_top = Probe {
-        offset_y: 0.0,
-        ..p.clone()
-    };
-    assert_eq!(at_top.anchor_block(0.0), Some(0));
-}
-
 const PLACE_NOTE: &[u8] =
     b"---\na: 1\n---\n# H\n\npara\n\n- x\n- y\n\n```\ncode\nmore\n```\n\nlast\n";
 
@@ -484,20 +459,51 @@ fn file_membership_change_drops_cached_resolver() {
         ChangeKind::Deleted,
         ChangeKind::Renamed,
     ] {
-        app.reading.refresh_resolver(d.as_ref());
-        assert!(app.reading.resolver.is_some());
+        app.resolver.refresh(d.as_ref());
+        assert!(app.resolver.is_built());
         changed(&mut app, "att/late.png", kind);
-        assert!(
-            app.reading.resolver.is_none(),
-            "{kind:?} drops the resolver"
-        );
+        assert!(!app.resolver.is_built(), "{kind:?} drops the resolver");
     }
-    app.reading.refresh_resolver(d.as_ref());
+    app.resolver.refresh(d.as_ref());
     changed(&mut app, "B.md", ChangeKind::Modified);
+    assert!(app.resolver.is_built(), "Modified keeps the resolver");
+}
+
+/// WP-R18 (M5): Reading and the panels share one resolver cache — one Created notification
+/// invalidates it for both (same `Arc`, one epoch/version bump), and a rebuild by either is
+/// seen by the other.
+#[test]
+fn one_vault_change_invalidates_the_shared_resolver_for_both_consumers() {
+    use cv_protocol::{ChangeKind, Notification, Origin};
+
+    use crate::message::StatusMsg;
+
+    let (_tmp, d) = setup(&[("A.md", b"[[B]]\n"), ("B.md", b"b\n")]);
+    let mut app = app_on(&d, "A.md");
+    assert!(Arc::ptr_eq(&app.reading.resolver, &app.resolver));
+    assert!(Arc::ptr_eq(&app.panels.resolver, &app.resolver));
+    app.reading.resolver.refresh(d.as_ref());
     assert!(
-        app.reading.resolver.is_some(),
-        "Modified keeps the resolver"
+        app.panels.resolver.is_built(),
+        "a Reading rebuild serves the panels"
     );
+    assert_eq!(
+        app.panels.resolver.resolve("A.md", "B").as_deref(),
+        Some("B.md")
+    );
+    let (epoch, version) = (app.resolver.epoch(), app.resolver.version());
+    let _ = app.send(Message::Status(StatusMsg::Notification(
+        Notification::FileChanged {
+            path: "C.md".to_owned(),
+            kind: ChangeKind::Created,
+            hash: None,
+            origin: Origin::Daemon,
+        },
+    )));
+    assert!(!app.reading.resolver.is_built(), "Reading sees the drop");
+    assert!(!app.panels.resolver.is_built(), "the panels see the drop");
+    assert_eq!(app.resolver.epoch(), epoch + 1, "one invalidation");
+    assert!(app.resolver.version() > version);
 }
 
 /// plan editor-round-4 WP-2: 100 one-line paragraphs (blocks), 200 source lines.
@@ -832,19 +838,6 @@ fn split_active_match_inside_url_has_no_strong_occurrence() {
     drop(app.view());
 }
 
-#[test]
-fn source_counterpart_skips_invisible_matches() {
-    let text = "intro\n\n[[foo|x]] ![[foo.png]] [a](foo) foo `foo`\n";
-    let m = render::lower(text);
-    let ms = editor_model::find::matches(text, "foo");
-    assert_eq!(ms.len(), 5);
-    let got: Vec<_> = ms
-        .iter()
-        .map(|r| source_counterpart(&m, text, "foo", r))
-        .collect();
-    assert_eq!(got, vec![None, None, None, Some((1, 0)), Some((1, 1))]);
-}
-
 /// Plan round-5 WP-2: the placeholder (header-read size) is exactly as tall as the decoded image
 /// displayed at the same width.
 #[test]
@@ -960,14 +953,6 @@ fn late_attachment_re_renders_the_doc() {
         app.reading.images.dims(&key).map(|d| (d.width, d.height)),
         Some((8, 4))
     );
-}
-
-#[test]
-fn percent_decode_handles_every_escape() {
-    assert_eq!(percent_decode("a%20b%5Fc"), "a b_c");
-    assert_eq!(percent_decode("caf%C3%A9.png"), "café.png");
-    assert_eq!(percent_decode("100%zz%2"), "100%zz%2");
-    assert_eq!(percent_decode("bad%FF"), "bad%FF");
 }
 
 /// Plan round-5 WP-3: an image that fails to load raises a Warning notice (basename + reason).
@@ -1112,9 +1097,9 @@ fn dims_survive_resolver_invalidation_for_an_unrelated_create() {
             origin: Origin::Daemon,
         }))
     };
-    let epoch = app.reading.resolver_epoch;
+    let epoch = app.resolver.epoch();
     let _ = app.send(changed("other.md", ChangeKind::Created));
-    assert!(app.reading.resolver_epoch > epoch, "resolver invalidated");
+    assert!(app.resolver.epoch() > epoch, "resolver invalidated");
     assert_eq!(dims(&app), Some((300, 150)), "unrelated churn keeps dims");
     let _ = app.send(changed("pic.png", ChangeKind::Modified));
     assert_eq!(dims(&app), None, "the changed file's own size is dropped");
@@ -1259,16 +1244,6 @@ fn doc_marks_unresolved_vault_links() {
     let doc = app.reading.doc("A.md").expect("doc");
     let want: HashSet<String> = ["Nope", "Gone.md"].map(String::from).into();
     assert_eq!(doc.unresolved, want);
-}
-
-/// Plan round-6 WP-4: the missing-note path rule.
-#[test]
-fn missing_note_path_rule() {
-    assert_eq!(missing_note_path("Nope", ""), "Nope.md");
-    assert_eq!(missing_note_path("Nope", "inbox"), "inbox/Nope.md");
-    assert_eq!(missing_note_path("sub/Deep", "inbox"), "sub/Deep.md");
-    assert_eq!(missing_note_path("x/Done.md", "inbox"), "x/Done.md");
-    assert_eq!(missing_note_path("My%20Note#sec", ""), "My Note.md");
 }
 
 /// Plan round-6 WP-4: `missing_link = "create"` creates the note through `CreateNote` (the

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use cv_protocol::{ActionContext, ActionInfo, JobState, JobStatus, ParamKind};
-use editor_model::rank::rank;
+use editor_model::rank::{RankMode, rank};
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::{button, column, pick_list, row, text, text_editor, text_input, toggler};
 use iced::{Element, Length, Subscription};
@@ -480,36 +480,22 @@ pub fn visible_entries(entries: Vec<Entry>, hidden: &[String]) -> Vec<Entry> {
 
 /// Ranks `entries` against `query` (fuzzy over `"title group"`), best first, as indices.
 pub fn rank_entries(query: &str, entries: &[Entry]) -> Vec<usize> {
-    let hays = haystacks(entries);
-    let by_hay: HashMap<String, usize> = hays
-        .iter()
-        .enumerate()
-        .map(|(i, h)| (h.clone(), i))
-        .collect();
     if query.trim().is_empty() {
         return (0..entries.len()).collect();
     }
-    rank(query, &hays, &[], |_| false, entries.len())
+    let hays = haystacks(entries);
+    rank(query, &hays, RankMode::Plain, &[], |_| false, entries.len())
         .into_iter()
-        .filter_map(|r| by_hay.get(&r.path).copied())
+        .map(|r| r.index)
         .collect()
 }
 
-/// The ranking haystacks of `entries` (parallel): `rank` scores path-like strings; '/' would
-/// split a "basename", so it is neutralized, and a per-entry suffix keeps haystacks unique.
+/// The ranking haystacks of `entries` (parallel, `"title group"`), ranked in
+/// [`RankMode::Plain`] — results are indices, so duplicates need no disambiguation.
 pub(crate) fn haystacks(entries: &[Entry]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
     entries
         .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let mut h = format!("{} {}", e.title, e.group).replace('/', " ");
-            if seen.contains(&h) {
-                h.push_str(&" ".repeat(i + 1));
-            }
-            seen.insert(h.clone());
-            h
-        })
+        .map(|e| editor_model::hints::haystack(&e.title, &e.group))
         .collect()
 }
 
@@ -1054,11 +1040,17 @@ impl Palette {
             PromptMsg::Text(s) | PromptMsg::Choice(s) | PromptMsg::Suggest(s) => {
                 let is_path = p.current().is_some_and(|s| s.kind == ParamKind::Path);
                 if is_path {
-                    self.suggestions =
-                        rank(&s, paths, recent, crate::switcher::deranked, SUGGESTIONS)
-                            .into_iter()
-                            .map(|r| r.path)
-                            .collect();
+                    self.suggestions = rank(
+                        &s,
+                        paths,
+                        RankMode::Path,
+                        recent,
+                        crate::switcher::deranked,
+                        SUGGESTIONS,
+                    )
+                    .into_iter()
+                    .map(|r| paths[r.index].clone())
+                    .collect();
                 }
                 p.set_text(s);
             }

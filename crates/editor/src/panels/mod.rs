@@ -12,7 +12,9 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use cv_index::{Resolver, TagCount};
+use std::sync::Arc;
+
+use cv_index::TagCount;
 use editor_model::outline::{self, OutlineItem};
 use editor_model::render::{PropValue, is_remote};
 use iced::widget::span;
@@ -23,6 +25,7 @@ use iced::{Element, Length};
 use crate::context_menu::{Target, on_right};
 use crate::daemon::{DaemonClient, DaemonError};
 use crate::message::{Message, PanelsMsg};
+use crate::reading::resolver::ResolverCache;
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
 use crate::widget::virtual_list::{ListWindow, VirtualList};
@@ -136,13 +139,6 @@ pub struct Search {
     pub error: Option<String>,
 }
 
-struct ResolverCache {
-    generation: u64,
-    resolver: Resolver,
-    ids: HashMap<String, i64>,
-    paths: HashMap<i64, String>,
-}
-
 /// Panel state.
 #[derive(Default)]
 pub struct Panels {
@@ -153,7 +149,10 @@ pub struct Panels {
     /// `(path, generation)` the backlinks were requested for.
     backlinks_key: Option<(String, u64)>,
     tags_gen: Option<u64>,
-    resolver: Option<ResolverCache>,
+    /// WP-R18 (M5): the App's shared resolver, and the [`ResolverCache::version`] the
+    /// buffer-derived panels were classified against.
+    pub(crate) resolver: Arc<ResolverCache>,
+    resolver_seen: u64,
     /// The path the panels currently describe.
     pub path: Option<String>,
     pub outline: Vec<OutlineItem>,
@@ -278,12 +277,6 @@ impl Panels {
         self.backlinks_key = None;
     }
 
-    /// Drops the cached resolver (a file was created, deleted or renamed; incremental indexing
-    /// keeps the generation, so the generation key alone never sees new files).
-    pub fn invalidate_resolver(&mut self) {
-        self.resolver = None;
-    }
-
     /// The scroll window of `id`.
     pub fn window(&self, id: ListId) -> ListWindow {
         self.windows.get(&list_key(id)).copied().unwrap_or_default()
@@ -294,50 +287,8 @@ impl Panels {
         self.windows.insert(list_key(id), w);
     }
 
-    fn refresh_resolver(&mut self, d: &dyn DaemonClient, generation: u64) {
-        if self
-            .resolver
-            .as_ref()
-            .is_some_and(|r| r.generation == generation)
-        {
-            return;
-        }
-        let t0 = std::time::Instant::now();
-        // One scan (editor-usability-round WP-5): the old per-folder `folder_files` +
-        // `subfolders` walk re-scanned every distinct folder per folder — ~1.2 s on a
-        // 2.7k-folder vault (docs/spikes/panels-lag/FINDINGS.md).
-        let rows = d.index().with_query(|q| q.file_paths());
-        match rows {
-            Ok(rows) => {
-                tracing::debug!(rows = rows.len(), "panels resolver rows");
-                let mut resolver = Resolver::default();
-                let mut ids = HashMap::new();
-                let mut paths = HashMap::new();
-                for (id, path) in rows {
-                    resolver.add(id, &path);
-                    ids.insert(path.clone(), id);
-                    paths.insert(id, path);
-                }
-                self.resolver = Some(ResolverCache {
-                    generation,
-                    resolver,
-                    ids,
-                    paths,
-                });
-            }
-            Err(e) => tracing::warn!(error = %e, "panels: resolver rebuild failed"),
-        }
-        tracing::debug!(
-            elapsed_ms = t0.elapsed().as_secs_f64() * 1e3,
-            "panels refresh_resolver"
-        );
-    }
-
     fn resolve(&self, src: &str, target: &str) -> Option<String> {
-        let rc = self.resolver.as_ref()?;
-        let src_id = rc.ids.get(src).copied().unwrap_or(-1);
-        let id = rc.resolver.resolve(src, src_id, target)?;
-        rc.paths.get(&id).cloned()
+        self.resolver.resolve(src, target)
     }
 
     fn classify(&self, src: &str, target: &str, links: &mut Links) {
@@ -360,12 +311,7 @@ impl Panels {
     }
 
     /// Recomputes outline, links and properties from `tab`'s live text when its key changed.
-    pub fn sync_buffer(
-        &mut self,
-        tab: Option<&SourceBuffer>,
-        d: Option<&dyn DaemonClient>,
-        generation: u64,
-    ) {
+    pub fn sync_buffer(&mut self, tab: Option<&SourceBuffer>, d: Option<&dyn DaemonClient>) {
         let Some(tab) = tab else {
             if self.path.take().is_some() {
                 self.buffer_key = None;
@@ -379,12 +325,10 @@ impl Panels {
         };
         let t0 = std::time::Instant::now();
         if let Some(d) = d {
-            let stale = self
-                .resolver
-                .as_ref()
-                .is_none_or(|r| r.generation != generation);
-            if stale {
-                self.refresh_resolver(d, generation);
+            self.resolver.refresh(d);
+            let v = self.resolver.version();
+            if v != self.resolver_seen {
+                self.resolver_seen = v;
                 self.buffer_key = None;
             }
         }
@@ -400,7 +344,7 @@ impl Panels {
         let note = ofm::parse(&src);
         self.outline = outline::from_note(&src, &note);
         self.props = props::from_note(&note);
-        self.prop_unresolved = if self.resolver.is_some() {
+        self.prop_unresolved = if self.resolver.is_built() {
             self.props
                 .iter()
                 .filter_map(|p| match &p.value {

@@ -15,6 +15,8 @@ serde_json = "=1.0.154"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 comrak = { version = "=0.56.0", default-features = false }
 nucleo-matcher = "=0.3.1"
+# WP-R18: word / grapheme boundaries of the Reading selection model (moved from the editor).
+unicode-segmentation = "=1.13.3"
 cv-text = { path = "../cv-text" }
 cv-note = { path = "../cv-note" }
 ofm = { path = "../../../crucible-tui/crates/ofm" }

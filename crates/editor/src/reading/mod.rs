@@ -10,23 +10,21 @@
 //! Image handles are pinned per tab in the [`ImageCache`]; see that module for the release points
 //! (audit E2) and the handle-release vs renderer-reclamation distinction.
 
-mod paths;
 mod place;
+pub mod resolver;
 pub mod selection;
-mod source_map;
 pub mod view;
 
-pub use paths::{missing_note_path, rename_target};
+pub use editor_model::paths::{missing_note_path, rename_target};
+pub use editor_model::reading::{invisible_ranges, source_counterpart};
 #[cfg(test)]
 pub(crate) use place::{INTENTS, probe_op};
 pub use place::{Probe, ScrollIntent, probe};
-pub use source_map::{invisible_ranges, source_counterpart};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cv_index::Resolver;
 /// The note stem (breadcrumb filename input) and link-target decoding: the shared vault-path
 /// helpers (WP-R10).
 pub use cv_text::vpath::{percent_decode, stem};
@@ -40,6 +38,7 @@ use crate::message::{Message, ReadingMsg, TabsMsg};
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
 use crate::widget::selectable::Selection;
+use resolver::ResolverCache;
 
 /// Recompute debounce: a change is rendered once `edit_seq` has been stable for one tick.
 pub const TICK: Duration = Duration::from_millis(250);
@@ -157,24 +156,15 @@ struct ViewPlace {
     restoring: Option<std::time::Instant>,
 }
 
-#[derive(Debug)]
-struct ResolverCache {
-    generation: Option<u64>,
-    resolver: Resolver,
-    ids: HashMap<String, i64>,
-    paths: HashMap<i64, String>,
-}
-
 /// All reading state.
 #[derive(Debug, Default)]
 pub struct ReadingStore {
     /// WP-R15 (SP2): per-document state, one entry per open note path.
     docs: HashMap<String, DocReading>,
     pub images: ImageCache,
-    resolver: Option<ResolverCache>,
-    /// Bumped by [`ReadingStore::invalidate_resolver`]; Docs resolved under an older epoch
-    /// re-render on the next tick (plan round-5 WP-2).
-    resolver_epoch: u64,
+    /// WP-R18 (M5): the App's shared resolver; Docs resolved under an older
+    /// [`ResolverCache::epoch`] re-render on the next tick (plan round-5 WP-2).
+    pub(crate) resolver: Arc<ResolverCache>,
     /// Render-model recomputations so far (observability + tests).
     pub recomputes: u64,
     /// Plan round-8-intake-views-anchor WP-4: `editor.toml` `scroll_anchor` as a fraction of
@@ -414,7 +404,7 @@ impl ReadingStore {
             return None;
         }
         let d = daemon?;
-        self.refresh_resolver(d.as_ref());
+        self.resolver.refresh(d.as_ref());
         let target = target.split('#').next().unwrap_or(target);
         let target = percent_decode(target);
         // `[[#h]]` resolves to the note itself; keep it (focuses the same tab).
@@ -523,7 +513,7 @@ impl ReadingStore {
         self.recomputes += 1;
         let seq = doc.edit_seq();
         if let Some(d) = daemon {
-            self.refresh_resolver(d.as_ref());
+            self.resolver.refresh(d.as_ref());
         }
         let generation = daemon.and_then(|d| d.index().generation());
         let mut model = render::lower(&doc.text());
@@ -565,7 +555,7 @@ impl ReadingStore {
         // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
         self.clear_selections(doc.path());
         let runs = editor_model::visible::visible_runs(&model);
-        let resolver_epoch = self.resolver_epoch;
+        let resolver_epoch = self.resolver.epoch();
         let entry = self.entry(doc.path());
         entry.seen_seq = Some(seq);
         entry.doc = Some(Doc {
@@ -590,7 +580,7 @@ impl ReadingStore {
             return;
         }
         let seq = doc.edit_seq();
-        let resolver_epoch = self.resolver_epoch;
+        let resolver_epoch = self.resolver.epoch();
         let stale = match &entry.doc {
             None => true,
             Some(d) => {
@@ -616,60 +606,15 @@ impl ReadingStore {
         }
     }
 
-    /// Drops the cached resolver: a file was created, deleted or renamed. Incremental indexing
-    /// keeps the generation, so a generation-keyed cache alone never sees new files (a
-    /// localized attachment written after the first render stayed unresolved = broken image).
-    /// Plan round-5 WP-2: it also marks every rendered Doc stale (a Doc rendered before its
-    /// attachment was resolvable re-renders with the image on the next tick).
-    pub fn invalidate_resolver(&mut self) {
-        self.resolver = None;
-        self.resolver_epoch += 1;
-    }
-
     /// Plan round-6 WP-2: vault file `path` changed (any kind) — only its own header-read size
     /// is dropped; every other image keeps its placeholder size across resolver invalidation.
     pub fn file_changed(&mut self, path: &str) {
         self.images.forget_dims_of(path);
     }
 
-    fn refresh_resolver(&mut self, d: &dyn DaemonClient) {
-        let generation = d.index().generation();
-        if self
-            .resolver
-            .as_ref()
-            .is_some_and(|r| r.generation == generation && generation.is_some())
-        {
-            return;
-        }
-        // One scan (the per-folder `subfolders` walk was quadratic over folders).
-        let rows = d.index().with_query(|q| q.file_paths());
-        match rows {
-            Ok(rows) => {
-                let mut resolver = Resolver::default();
-                let mut ids = HashMap::new();
-                let mut paths = HashMap::new();
-                for (id, path) in rows {
-                    resolver.add(id, &path);
-                    ids.insert(path.clone(), id);
-                    paths.insert(id, path);
-                }
-                self.resolver = Some(ResolverCache {
-                    generation,
-                    resolver,
-                    ids,
-                    paths,
-                });
-            }
-            Err(e) => tracing::warn!(error = %e, "reading: resolver rebuild failed"),
-        }
-    }
-
     /// Resolves `target` written in `src` to a vault path.
     fn resolve(&self, src: &str, target: &str) -> Option<String> {
-        let rc = self.resolver.as_ref()?;
-        let src_id = rc.ids.get(src).copied().unwrap_or(-1);
-        let id = rc.resolver.resolve(src, src_id, target)?;
-        rc.paths.get(&id).cloned()
+        self.resolver.resolve(src, target)
     }
 
     /// The message a link click produces: `TabsMsg::Open(path)` when it resolves, else `None`

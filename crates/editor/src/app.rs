@@ -473,6 +473,8 @@ pub struct App {
     pub palette: crate::palette::Palette,
     /// WP-5: the right-hand side panels.
     pub panels: crate::panels::Panels,
+    /// WP-R18 (M5): the one link-resolver cache, shared by Reading and the panels.
+    pub resolver: std::sync::Arc<crate::reading::resolver::ResolverCache>,
     /// WP-7: `crucible-view` fence results, keyed by `(view id, embedding note)`.
     pub views: crate::views::ViewStore,
     pub(crate) tokens: Tokens,
@@ -654,6 +656,8 @@ impl App {
             .clone()
             .unwrap_or_else(|| panes::from_flat(&ui.tabs, ui.active_tab));
         let (grid, plan, focus) = panes::restore(&layout);
+        let resolver = std::sync::Arc::new(crate::reading::resolver::ResolverCache::default());
+        let shared = resolver.clone();
         let mut app = Self {
             daemon,
             status,
@@ -671,6 +675,7 @@ impl App {
             reading: crate::reading::ReadingStore::new(),
             palette: crate::palette::Palette::default(),
             panels: crate::panels::Panels::default(),
+            resolver,
             views: crate::views::ViewStore::default(),
             notifications,
             connector: None,
@@ -694,6 +699,8 @@ impl App {
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::Xclip),
         };
+        app.reading.resolver = shared.clone();
+        app.panels.resolver = shared;
         app.load_editor_prefs();
         app.refresh_files();
         app.load_bookmarks();
@@ -4189,7 +4196,7 @@ impl App {
             .get(self.focus)
             .and_then(PaneState::active_note)
             .and_then(|t| buf(&self.docs, t.path));
-        self.panels.sync_buffer(tab, d.as_deref(), generation);
+        self.panels.sync_buffer(tab, d.as_deref());
         if let Some(d) = &d
             && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)
         {
@@ -4317,8 +4324,7 @@ impl App {
                         if kind != cv_protocol::ChangeKind::Modified {
                             // Before `reload_tab`: a localize pass creates the attachments,
                             // then rewrites the note, whose re-lower must see them.
-                            self.reading.invalidate_resolver();
-                            self.panels.invalidate_resolver();
+                            self.resolver.invalidate();
                         }
                         self.reload_tab(&path, hash.as_deref());
                         self.panels.invalidate();

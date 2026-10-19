@@ -6,7 +6,7 @@
 //! returned `open_path`.
 
 use cv_protocol::{ActionContext, RunActionParams};
-use editor_model::rank::{Ranked, rank};
+use editor_model::rank::{RankMode, rank};
 use iced::keyboard::{self, Key};
 use iced::widget::{button, column, text, text_input};
 use iced::{Element, Length};
@@ -25,7 +25,7 @@ pub const INPUT_ID: &str = "switcher-input";
 pub struct Switcher {
     pub open: bool,
     pub query: String,
-    pub results: Vec<Ranked>,
+    pub results: Vec<String>,
     pub selected: usize,
     /// WP-6 (usability-sprint-captures-links): folder mode — the note being moved; results rank
     /// [`Self::folders`] instead of note paths, and a pick moves the note there.
@@ -105,22 +105,34 @@ pub fn create_params(path: &str) -> RunActionParams {
 impl Switcher {
     /// Re-ranks against `paths`.
     pub fn refresh(&mut self, paths: &[String], recent: &[String]) {
-        self.results = if self.move_from.is_some() {
-            rank(&self.query, &self.folders, &[], |_| false, LIMIT)
+        let (list, recent): (&[String], &[String]) = if self.move_from.is_some() {
+            (&self.folders, &[])
         } else {
-            rank(&self.query, paths, recent, deranked, LIMIT)
+            (paths, recent)
         };
+        let derank = self.move_from.is_none();
+        self.results = rank(
+            &self.query,
+            list,
+            RankMode::Path,
+            recent,
+            |p| derank && deranked(p),
+            LIMIT,
+        )
+        .into_iter()
+        .map(|r| list[r.index].clone())
+        .collect();
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
     }
 
     /// The highlighted result.
     pub fn current(&self) -> Option<&str> {
-        self.results.get(self.selected).map(|r| r.path.as_str())
+        self.results.get(self.selected).map(String::as_str)
     }
 
     /// Whether the query names an existing result exactly (no "Create" offer then).
     pub fn exact_hit(&self) -> bool {
-        create_path(&self.query).is_some_and(|p| self.results.iter().any(|r| r.path == p))
+        create_path(&self.query).is_some_and(|p| self.results.contains(&p))
     }
 }
 
@@ -169,7 +181,7 @@ pub fn view<'a>(s: &'a Switcher, tokens: Tokens) -> Element<'a, Message> {
     .spacing(2)
     .width(Length::Fill);
     for (i, r) in s.results.iter().take(12).enumerate() {
-        let mut t = text(r.path.as_str()).size(14);
+        let mut t = text(r.as_str()).size(14);
         if i == s.selected {
             t = t.color(tokens.accent_text.to_color());
         }
@@ -177,7 +189,7 @@ pub fn view<'a>(s: &'a Switcher, tokens: Tokens) -> Element<'a, Message> {
             button(t)
                 .style(button::text)
                 .width(Length::Fill)
-                .on_press(Message::Switcher(SwitcherMsg::Pick(r.path.clone()))),
+                .on_press(Message::Switcher(SwitcherMsg::Pick(r.clone()))),
         );
     }
     if let Some(p) = create_path(&s.query).filter(|_| s.move_from.is_none() && !s.exact_hit()) {

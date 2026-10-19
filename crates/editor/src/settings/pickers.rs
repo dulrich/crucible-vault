@@ -427,10 +427,17 @@ pub fn visible(
     query: &str,
 ) -> Vec<Candidate> {
     let raw = |list: &[String]| -> Vec<Candidate> {
-        editor_model::rank::rank(query, list, &[], |_| false, LIMIT)
-            .into_iter()
-            .map(|r| Candidate::plain(r.path))
-            .collect()
+        editor_model::rank::rank(
+            query,
+            list,
+            editor_model::rank::RankMode::Path,
+            &[],
+            |_| false,
+            LIMIT,
+        )
+        .into_iter()
+        .map(|r| Candidate::plain(list[r.index].clone()))
+        .collect()
     };
     match picker {
         Picker::Folder => raw(&folders(paths)),

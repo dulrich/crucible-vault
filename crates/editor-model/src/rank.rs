@@ -20,17 +20,29 @@ pub const RECENCY_MAX: i64 = 30;
 /// Divisor applied to deranked paths.
 pub const DERANK_DIV: i64 = 4;
 
-/// One ranked candidate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How [`rank`] reads its candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RankMode {
+    /// Vault paths: basename-weighted scoring, stem-exact bonus (the switcher ranking).
+    Path,
+    /// Free text (palette titles, picker labels): no path semantics, one fuzzy score over the
+    /// whole string, exact bonus when the whole string equals the query.
+    Plain,
+}
+
+/// One ranked candidate: `index` into the slice given to [`rank`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ranked {
-    pub path: String,
+    pub index: usize,
     pub score: i64,
 }
 
-/// Ranks `paths` against `query`, returning at most `limit` results best-first.
-pub fn rank(
+/// Ranks `items` against `query`, returning at most `limit` results best-first, as indices
+/// into `items`. Ties break by text, then by index (duplicates keep their given order).
+pub fn rank<S: AsRef<str>>(
     query: &str,
-    paths: &[String],
+    items: &[S],
+    mode: RankMode,
     recent: &[String],
     deranked: impl Fn(&str) -> bool,
     limit: usize,
@@ -44,51 +56,63 @@ pub fn rank(
             .and_then(|i| i64::try_from(i).ok())
             .map_or(0, |i| RECENCY_MAX * (cap - i) / cap)
     };
+    let text = |i: usize| items[i].as_ref();
     let mut out: Vec<Ranked> = if query.is_empty() {
-        paths
-            .iter()
-            .map(|p| Ranked {
-                path: p.clone(),
-                score: recency(p),
+        (0..items.len())
+            .map(|index| {
+                let p = text(index);
+                let score = recency(p) - i64::from(deranked(p));
+                Ranked { index, score }
             })
             .collect()
     } else {
-        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let config = match mode {
+            RankMode::Path => Config::DEFAULT.match_paths(),
+            RankMode::Plain => Config::DEFAULT,
+        };
+        let mut matcher = Matcher::new(config);
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
         let q_lower = query.to_lowercase();
         let mut buf = Vec::new();
-        paths
-            .iter()
-            .filter_map(|p| {
+        (0..items.len())
+            .filter_map(|index| {
+                let p = text(index);
                 let full = pattern
                     .score(Utf32Str::new(p, &mut buf), &mut matcher)
                     .map(i64::from);
-                let base = pattern
-                    .score(Utf32Str::new(basename(p), &mut buf), &mut matcher)
-                    .map(|s| i64::from(s) + BASENAME_BONUS);
-                let mut score = full.max(base)?;
-                if stem(p).to_lowercase() == q_lower || basename(p).to_lowercase() == q_lower {
-                    score += EXACT_BONUS;
-                }
+                let mut score = match mode {
+                    RankMode::Path => {
+                        let base = pattern
+                            .score(Utf32Str::new(basename(p), &mut buf), &mut matcher)
+                            .map(|s| i64::from(s) + BASENAME_BONUS);
+                        let s = full.max(base)?;
+                        let exact = stem(p).to_lowercase() == q_lower
+                            || basename(p).to_lowercase() == q_lower;
+                        s + if exact { EXACT_BONUS } else { 0 }
+                    }
+                    RankMode::Plain => {
+                        let s = full?;
+                        s + if p.trim().to_lowercase() == q_lower {
+                            EXACT_BONUS
+                        } else {
+                            0
+                        }
+                    }
+                };
                 score += recency(p);
                 if deranked(p) {
                     score /= DERANK_DIV;
                 }
-                Some(Ranked {
-                    path: p.clone(),
-                    score,
-                })
+                Some(Ranked { index, score })
             })
             .collect()
     };
-    if query.is_empty() {
-        for r in &mut out {
-            if deranked(&r.path) {
-                r.score -= 1;
-            }
-        }
-    }
-    out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
+    out.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| text(a.index).cmp(text(b.index)))
+            .then_with(|| a.index.cmp(&b.index))
+    });
     out.truncate(limit);
     out
 }
@@ -96,6 +120,39 @@ pub fn rank(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ranked texts (Path mode).
+    fn rank(
+        q: &str,
+        paths: &[String],
+        recent: &[String],
+        d: impl Fn(&str) -> bool,
+        limit: usize,
+    ) -> Vec<Hit> {
+        super::rank(q, paths, RankMode::Path, recent, d, limit)
+            .into_iter()
+            .map(|r| Hit {
+                path: paths[r.index].clone(),
+                score: r.score,
+            })
+            .collect()
+    }
+
+    struct Hit {
+        path: String,
+        score: i64,
+    }
+
+    #[test]
+    fn plain_mode_has_no_path_semantics_and_dupes_keep_order() {
+        let items = ["Open file", "a/b open", "Open file"];
+        let r = super::rank("open file", &items, RankMode::Plain, &[], none, 10);
+        assert_eq!(r[0].index, 0);
+        assert_eq!(r[1].index, 2, "equal duplicates break by index");
+        assert!(r[0].score > EXACT_BONUS);
+        let r = super::rank("b", &["x/b"], RankMode::Plain, &[], none, 10);
+        assert!(r[0].score < EXACT_BONUS, "no basename exact bonus in Plain");
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| (*x).to_owned()).collect()

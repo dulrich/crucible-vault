@@ -2801,11 +2801,7 @@ mod ui_round3_wp2 {
     }
 
     fn candidates(app: &App) -> Vec<String> {
-        app.switcher
-            .results
-            .iter()
-            .map(|r| r.path.clone())
-            .collect()
+        app.switcher.results.clone()
     }
 
     fn file_changed(app: &mut App, path: &str, kind: ChangeKind, origin: Origin) {

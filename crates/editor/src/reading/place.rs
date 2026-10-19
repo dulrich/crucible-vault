@@ -6,59 +6,7 @@ use iced::Task;
 use super::block_id;
 use crate::message::{Message, ReadingMsg};
 
-/// plan editor-ui-round-3 WP-6: measured reading layout — the scrollable's offset and each
-/// top-level block's top, all in absolute layout coordinates (audit E1: measured, never a
-/// proportional estimate).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Probe {
-    /// The scrollable's vertical scroll offset.
-    pub offset_y: f32,
-    /// The top of the scrollable's content.
-    pub content_y: f32,
-    /// Plan round-8 WP-4: the scrollable's viewport height.
-    pub viewport_h: f32,
-    /// Plan round-8 WP-4: the scrollable's content height.
-    pub content_h: f32,
-    /// The top of each top-level block (`None` = not laid out / not found).
-    pub block_ys: Vec<Option<f32>>,
-}
-
-impl Probe {
-    /// Plan round-8 WP-4: the block under the anchor height `a` (fraction of the viewport;
-    /// `a = 0` is the block at the viewport top).
-    pub fn anchor_block(&self, a: f32) -> Option<usize> {
-        self.block_at(a * self.viewport_h)
-    }
-
-    /// The block `dy` px below the viewport top: the last block whose content-relative top is
-    /// at or above `offset + dy` (1px slack), else the first laid-out block.
-    fn block_at(&self, dy: f32) -> Option<usize> {
-        let rel = |y: f32| y - self.content_y;
-        let mut first = None;
-        let mut top = None;
-        for (i, y) in self.block_ys.iter().enumerate() {
-            let Some(y) = *y else { continue };
-            first.get_or_insert(i);
-            if rel(y) <= self.offset_y + dy + 1.0 {
-                top = Some(i);
-            }
-        }
-        top.or(first)
-    }
-
-    /// Plan round-8 WP-4: the scroll offset that puts content-relative `block_y` at the anchor
-    /// height `a`, clamped to `[0, content_h − viewport_h]`.
-    pub fn anchored_offset(&self, block_y: f32, a: f32) -> f32 {
-        let max = (self.content_h - self.viewport_h).max(0.0);
-        (block_y - a * self.viewport_h).clamp(0.0, max)
-    }
-
-    /// The scroll offset that puts block `b`'s top at the viewport top.
-    pub fn block_offset(&self, b: usize) -> Option<f32> {
-        let y = (*self.block_ys.get(b)?)?;
-        Some((y - self.content_y).max(0.0))
-    }
-}
+pub use editor_model::place::Probe;
 
 /// The widget operation behind [`Probe`]: reads the reading scrollable and the id'd block
 /// containers of one path.

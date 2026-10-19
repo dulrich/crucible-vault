@@ -171,13 +171,21 @@ pub fn filter(query: &str, cands: &[Candidate], limit: usize) -> Vec<Candidate> 
             .iter()
             .map(|c| if key == 0 { &c.label } else { &c.value }.clone())
             .collect();
-        for r in editor_model::rank::rank(query, &keys, &[], |_| false, cands.len()) {
+        let ranked = editor_model::rank::rank(
+            query,
+            &keys,
+            editor_model::rank::RankMode::Path,
+            &[],
+            |_| false,
+            cands.len(),
+        );
+        for r in ranked {
             if out.len() >= limit {
                 return out;
             }
-            if let Some(i) = (0..cands.len()).find(|&i| !used[i] && keys[i] == r.path) {
-                used[i] = true;
-                out.push(cands[i].clone());
+            if !used[r.index] {
+                used[r.index] = true;
+                out.push(cands[r.index].clone());
             }
         }
     }

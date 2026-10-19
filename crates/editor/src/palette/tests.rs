@@ -612,7 +612,14 @@ fn titled(id: &str, title: &str, group: &str) -> ActionInfo {
 /// Whether `q` ranks `i` strictly first (rank_entries' order, plus no equal-score runner-up).
 fn uniquely_first(q: &str, i: usize, entries: &[Entry]) -> bool {
     let hays = haystacks(entries);
-    let r = editor_model::rank::rank(q, &hays, &[], |_| false, 2);
+    let r = editor_model::rank::rank(
+        q,
+        &hays,
+        editor_model::rank::RankMode::Plain,
+        &[],
+        |_| false,
+        2,
+    );
     rank_entries(q, entries).first() == Some(&i) && (r.len() < 2 || r[0].score > r[1].score)
 }
 

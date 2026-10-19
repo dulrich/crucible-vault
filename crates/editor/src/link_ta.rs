@@ -130,15 +130,17 @@ impl crate::app::App {
         let Some(a) = self.link_ta.as_mut() else {
             return;
         };
+        let paths = &self.explorer.paths;
         a.visible = editor_model::rank::rank(
             &a.query,
-            &self.explorer.paths,
+            paths,
+            editor_model::rank::RankMode::Path,
             &self.ui.recent,
             crate::switcher::deranked,
             typeahead::LIMIT,
         )
         .into_iter()
-        .map(|r| Candidate::plain(r.path))
+        .map(|r| Candidate::plain(paths[r.index].clone()))
         .collect();
         a.highlight = a.highlight.min(a.visible.len().saturating_sub(1));
     }

@@ -235,14 +235,9 @@ impl SourceBuffer {
 }
 
 /// Plan round-5 WP-1: the source lines a laid-out editor `height` (px) shows at text size
-/// `font_size` — iced's default relative line height (1.3), minus the editor padding.
+/// `font_size` (the pure math is [`editor_model::place::viewport_lines`]).
 pub fn viewport_lines(height: f32, font_size: f32) -> usize {
-    let line = (font_size * 1.3).max(1.0);
-    let lines = ((height - 2.0 * EDITOR_PADDING).max(0.0) / line).floor();
-    // Truncation is the intent: a partly visible last line does not count.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let n = lines as usize;
-    n.max(1)
+    editor_model::place::viewport_lines(height, font_size, EDITOR_PADDING)
 }
 
 /// Plan round-6 WP-1: the two editor operations the place-keeping sequences issue, so the
@@ -278,16 +273,9 @@ pub(super) fn place(content: &mut impl EditorOps, c: text_editor::Cursor) {
     }
 }
 
-/// Plan round-6 WP-1 (spike `docs/spikes/source-scroll/FINDINGS.md`): the single scroll that
-/// moves a view whose (pending) top source line is `from` to `to`. cosmic-text =0.15.0 sums
-/// every `Scroll` into one pixel offset that is only resolved at the next shaping (where a
-/// net-negative offset clamps to line 0), so the old "fully up, then down `line`" pair landed
-/// at the top; one relative delta from the tracked top lands on `to` (wrapped lines above
-/// count once each). `None` when already there.
+/// The iced adapter of [`editor_model::place::scroll_lines`].
 fn scroll_action(from: usize, to: usize) -> Option<Action> {
-    let delta = i64::try_from(to).unwrap_or(i64::MAX) - i64::try_from(from).unwrap_or(i64::MAX);
-    let lines = i32::try_from(delta).unwrap_or(if delta < 0 { i32::MIN } else { i32::MAX });
-    (lines != 0).then_some(Action::Scroll { lines })
+    editor_model::place::scroll_lines(from, to).map(|lines| Action::Scroll { lines })
 }
 
 /// Scrolls an editor whose pending top source line is `from` so `to` is at the top.
