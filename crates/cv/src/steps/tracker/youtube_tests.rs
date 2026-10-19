@@ -2,29 +2,22 @@
 //! API (never the network, never the live vault, never env vars).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
-use cv_protocol::ActionContext;
 use cv_providers::secrets::SecretSource;
-use cv_state::{FailureReason, QueueConfig, StateDb, TrackerOutcome};
-use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use cv_state::{FailureReason, TrackerOutcome};
+use cv_testkit::{MockHttp, Reply};
+use cv_vault::test_support::LiveFixture;
+use serde_json::{Value, json};
 
 use super::super::hook;
 use super::KIND;
+use crate::steps::testkit::StepEnv;
 use crate::steps::web::{Overrides, test_overrides};
-use crate::steps::{ChildSpawner, StepCtx, StepError, StepOutcome};
+use crate::steps::{StepError, StepOutcome};
 use crate::steps::{execute, validate};
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
-}
 
 struct Keys(Option<&'static str>);
 impl SecretSource for Keys {
@@ -38,62 +31,44 @@ impl SecretSource for Keys {
     }
 }
 
-struct Tmp(std::path::PathBuf);
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 type Routes = Vec<(&'static str, u16, String)>;
 
 /// Route substring → (status, body); logs every request target.
-async fn serve(routes: Routes, log: Arc<Mutex<Vec<String>>>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut sock, _)) = listener.accept().await {
-            let (routes, log) = (routes.clone(), log.clone());
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                let head = String::from_utf8_lossy(&buf).into_owned();
-                let path = head.split(' ').nth(1).unwrap_or("/").to_owned();
-                log.lock().unwrap().push(path.clone());
-                let (status, body) = routes
-                    .iter()
-                    .find(|(p, _, _)| path.contains(p))
-                    .map_or((404, String::new()), |(_, s, b)| (*s, b.clone()));
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    format!("http://{addr}")
+fn serve(routes: Routes, log: Arc<Mutex<Vec<String>>>) -> MockHttp {
+    MockHttp::start(move |req| {
+        log.lock().unwrap().push(req.target.clone());
+        routes
+            .iter()
+            .find(|(p, _, _)| req.target.contains(p))
+            .map_or_else(
+                || Reply::new(404, Vec::new()),
+                |(_, s, b)| Reply::new(*s, b.clone()),
+            )
+    })
 }
 
 struct World {
-    _tmp: Tmp,
+    env: StepEnv,
     rt: tokio::runtime::Runtime,
-    vault: std::path::PathBuf,
-    index: std::path::PathBuf,
-    writer: cv_vault::WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-    config: ConfigSet,
+    vault: PathBuf,
     base: String,
     log: Arc<Mutex<Vec<String>>>,
     key: Option<&'static str>,
+    /// Every mock started for this world (kept alive with it).
+    servers: Vec<MockHttp>,
+}
+
+impl std::ops::Deref for World {
+    type Target = StepEnv;
+    fn deref(&self) -> &StepEnv {
+        &self.env
+    }
+}
+
+impl std::ops::DerefMut for World {
+    fn deref_mut(&mut self) -> &mut StepEnv {
+        &mut self.env
+    }
 }
 
 const V1: &str = "aaaaaaaaaa1";
@@ -142,35 +117,15 @@ const SOURCES: &str = "[[youtube]]\nchannel = \"Chan A\"\nid = \"UCa\"\n";
 const ON: &str = "[youtube]\nenabled = true\n";
 
 fn world(files: &[(&str, &str)], routes: Routes, pipelines: &str, sources: &str) -> World {
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "cv-wp7-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let tmp = Tmp(root.clone());
-    let vault = root.join("vault");
-    let protected = root.join("protected");
-    std::fs::create_dir_all(&protected).unwrap();
-    std::fs::create_dir_all(&vault).unwrap();
-    for (rel, text) in files {
-        let p = vault.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, text).unwrap();
-    }
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let index = root.join("index.db");
-    let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&root.join("state.db"), 1, QueueConfig::default()).unwrap();
+    let fx = LiveFixture::new(files.iter().copied());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     let log = Arc::new(Mutex::new(Vec::new()));
-    let base = rt.block_on(serve(routes, log.clone()));
+    let http = serve(routes, log.clone());
+    let base = http.url();
     let files = BTreeMap::from([
         ("pipelines.toml".to_owned(), Some(pipelines.to_owned())),
         ("sources.toml".to_owned(), Some(sources.to_owned())),
@@ -179,16 +134,13 @@ fn world(files: &[(&str, &str)], routes: Routes, pipelines: &str, sources: &str)
     let mut config = ConfigSet::new();
     config.reload(&files, &crate::steps::validate);
     World {
-        vault: std::fs::canonicalize(&vault).unwrap(),
-        _tmp: tmp,
+        vault: fx.vault.clone(),
+        env: StepEnv::new(fx, config, action()),
         rt,
-        index,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-        config,
         base,
         log,
         key: Some("TESTKEY"),
+        servers: vec![http],
     }
 }
 
@@ -219,26 +171,7 @@ fn run(w: &World) -> Result<StepOutcome, StepError> {
         bases: HashMap::from([("youtube-api".to_owned(), w.base.clone())]),
         secrets: Some(Arc::new(Keys(w.key))),
     });
-    let action = action();
-    let context = ActionContext::default();
-    let (params, vars) = (Map::new(), Map::new());
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: &action,
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars: &vars,
-        config: &w.config,
-        vault_root: &w.vault,
-        index_db: &w.index,
-        search: None,
-        state: &w.state,
-        writer: Some(w.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
-    execute(&step(""), &mut ctx)
+    execute(&step(""), &mut w.ctx())
 }
 
 fn daily(w: &World) -> String {
@@ -564,47 +497,11 @@ fn disabled_pipeline_does_nothing() {
 // ---------------------------------------------------------------- WP-10 scorer wiring
 
 /// A scorer endpoint that reads the whole POST body (logged) and answers `status`/`body`.
-async fn serve_scorer(status: u16, body: &'static str, log: Arc<Mutex<Vec<String>>>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut sock, _)) = listener.accept().await {
-            let log = log.clone();
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                loop {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    let text = String::from_utf8_lossy(&buf).into_owned();
-                    if let Some(end) = text.find("\r\n\r\n") {
-                        let len: usize = text
-                            .lines()
-                            .find_map(|l| {
-                                l.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|v| v.trim().parse().unwrap_or(0))
-                            })
-                            .unwrap_or(0);
-                        if buf.len() >= end + 4 + len {
-                            log.lock().unwrap().push(text[end + 4..].to_owned());
-                            break;
-                        }
-                    }
-                }
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    format!("http://{addr}/v1/systemone")
+fn serve_scorer(status: u16, body: &'static str, log: Arc<Mutex<Vec<String>>>) -> MockHttp {
+    MockHttp::start(move |req| {
+        log.lock().unwrap().push(req.body_str());
+        Reply::new(status, body)
+    })
 }
 
 const SCORED_CAPTURES: &str = "[periods.day]\nfolder = \"daily\"\nformat = \"YYYY-MM-DD\"\n\n[[capture]]\nname = \"tracker-intake\"\ntarget = \"daily\"\nmode = \"section\"\nsection = \"# Intake\"\nformat = \"- [ ] [{{vars.title}}]({{vars.url}}) — {{vars.source}} ({{vars.score}})\"\n";
@@ -620,7 +517,12 @@ fn scored_run(status: u16, body: &'static str, url: Option<&str>) -> (World, Vec
     let log = Arc::new(Mutex::new(Vec::new()));
     let scorer = match url {
         Some(u) => u.to_owned(),
-        None => w.rt.block_on(serve_scorer(status, body, log.clone())),
+        None => {
+            let m = serve_scorer(status, body, log.clone());
+            let u = format!("{}/v1/systemone", m.url());
+            w.servers.push(m);
+            u
+        }
     };
     let pipelines = format!("{ON}\n[scorer]\nurl = \"{scorer}\"\nmodel = \"local/scorer\"\n");
     let files = BTreeMap::from([
@@ -780,7 +682,9 @@ fn failed_duration_backfill_leaves_rows_null_and_a_later_run_fills_them() {
     assert_eq!(n(&o, "new"), json!(0));
     assert_eq!(n(&o, "lines"), json!(0));
     assert_eq!(row_of(&w, "UCa", V1).duration_s, None, "retryable");
-    w.base = w.rt.block_on(serve(std_routes(), w.log.clone()));
+    let m = serve(std_routes(), w.log.clone());
+    w.base = m.url();
+    w.servers.push(m);
     let o = run(&w).unwrap();
     assert_eq!(n(&o, "new"), json!(0));
     assert_eq!(row_of(&w, "UCa", V1).duration_s, Some(600));

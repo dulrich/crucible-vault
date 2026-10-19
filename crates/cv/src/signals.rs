@@ -618,20 +618,12 @@ mod tests {
 
     use super::*;
 
-    struct Tmp(PathBuf);
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     const CAPTURES: &str = "[periods.day]\nfolder = \"daily\"\n[periods.month]\nfolder = \"monthly\"\nformat = \"YYYY-MM\"\n";
     const SOURCES: &str = "[[youtube]]\nchannel = \"Chan A\"\nid = \"UCa\"\ntags = [\"AI\"]\npriority = \"high\"\n[[blog]]\nname = \"Blog B\"\nlink = \"https://b.example/feed\"\n";
 
-    fn setup() -> (Tmp, Config, ConfigSet) {
-        let root = std::env::temp_dir().join(format!("cv-wp10-signals-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let tmp = Tmp(root.clone());
+    fn setup() -> (tempfile::TempDir, Config, ConfigSet) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
         let vault = root.join("vault");
         let files: &[(&str, &str)] = &[
             (
@@ -710,13 +702,13 @@ mod tests {
     #[test]
     fn export_human_and_weak_rows_to_the_data_dir() {
         let (tmp, config, set) = setup();
-        let data = tmp.0.join("data").to_string_lossy().into_owned();
+        let data = tmp.path().join("data").to_string_lossy().into_owned();
         let env = |k: &str| (k == "XDG_DATA_HOME").then(|| data.clone());
         let today = "2026-10-15";
         let (path, count) = export(&config, &set, env, &ExportOpts::default(), today).unwrap();
         assert_eq!(
             path,
-            tmp.0
+            tmp.path()
                 .join("data/crucible-vault/source-eval/training-2026-10-15.jsonl")
         );
         assert_eq!(count, 1);
@@ -756,7 +748,7 @@ mod tests {
         );
 
         let weak = ExportOpts {
-            out: Some(tmp.0.join("out/w.jsonl")),
+            out: Some(tmp.path().join("out/w.jsonl")),
             weak: true,
         };
         let (path, count) = export(&config, &set, env, &weak, today).unwrap();
@@ -807,10 +799,9 @@ mod tests {
     /// Moved from `cv_index::signals` (M3).
     #[test]
     fn signals_and_observations_from_two_months() {
-        let root = std::env::temp_dir().join(format!("cv-m3-signals-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let tmp = Tmp(root.clone());
-        let vault = tmp.0.join("vault");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let vault = tmp.path().join("vault");
         let files: &[(&str, &str)] = &[
             (
                 "c/a.md",

@@ -1,67 +1,39 @@
-//! WP-11 `localize` step tests: synthetic vaults in temp dirs, a temp protected root (I1), and a
-//! hand-rolled HTTP responder on 127.0.0.1 (no real network).
+//! `localize` step tests (was `wp11_tests.rs`): synthetic vaults in temp dirs with a temp
+//! protected root (I1, via [`super::testkit`]) and a `cv_testkit::MockHttp` on 127.0.0.1 (no real
+//! network).
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cv_actions::{ConfigSet, Step};
 use cv_protocol::ActionContext;
-use cv_state::{QueueConfig, StateDb};
-use cv_vault::{NoCutover, VaultFs, VaultWriter, WriterHandle};
-use serde_json::{Map, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use cv_testkit::{MockHttp, Reply};
+use cv_vault::test_support::LiveFixture;
+use serde_json::Value;
 
-use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome, localize};
-
-struct Tmp(PathBuf);
-impl Tmp {
-    fn new() -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "cv-wp11-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-}
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children in tests".into())
-    }
-}
+use super::testkit::{StepEnv, config_of};
+use super::{DeferCause, StepError, StepOutcome, localize};
 
 /// A test vault + writer thread + state db.
-struct Env {
-    dir: Tmp,
-    writer: WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-    config: ConfigSet,
+struct Env(StepEnv);
+
+impl std::ops::Deref for Env {
+    type Target = StepEnv;
+    fn deref(&self) -> &StepEnv {
+        &self.0
+    }
 }
 
 impl Env {
     fn vault(&self) -> PathBuf {
-        self.dir.0.join("vault")
-    }
-    fn index(&self) -> PathBuf {
-        self.dir.0.join("index").join("index.db")
+        self.fx.vault.clone()
     }
     fn file(&self, rel: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.vault().join(rel)).ok()
+        self.fx.read(rel)
     }
     fn text(&self, rel: &str) -> String {
-        String::from_utf8(self.file(rel).unwrap()).unwrap()
+        self.fx.text(rel)
     }
     fn step(&self, toml_src: &str) -> Step {
         let t: toml::Table = toml::from_str(toml_src).unwrap();
@@ -73,72 +45,32 @@ impl Env {
     }
 
     fn run(&self, step: &Step, note: &str) -> Result<StepOutcome, StepError> {
-        let cfg = &self.config;
-        let action = cfg.armed("loc").unwrap();
-        let params = Map::new();
         let context = ActionContext {
             active_path: Some(note.to_owned()),
             ..ActionContext::default()
         };
-        let vars = Map::new();
-        let vault = self.vault();
-        let index = self.index();
-        let mut ctx = StepCtx {
-            job_id: "job-1",
-            action,
-            step_index: 0,
-            params: &params,
-            context: &context,
-            vars: &vars,
-            config: cfg,
-            vault_root: &vault,
-            index_db: &index,
-            search: None,
-            state: &self.state,
-            writer: Some(self.writer.clone()),
-            children: &NoChildren,
-            written: Vec::new(),
-        };
+        let mut ctx = self.ctx();
+        ctx.context = &context;
         crate::steps::execute(step, &mut ctx)
     }
 }
 
-fn write(root: &Path, rel: &str, bytes: &[u8]) {
-    let p = root.join(rel);
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, bytes).unwrap();
-}
-
 fn config() -> ConfigSet {
-    let mut c = ConfigSet::new();
-    let src = "[[action]]\nid = \"loc\"\n[[action.steps]]\ntype = \"localize\"\n";
-    let files = BTreeMap::from([("actions.toml".to_owned(), Some(src.to_owned()))]);
-    c.reload(&files, &crate::steps::validate);
-    assert!(c.errors().is_empty(), "{:?}", c.errors());
-    c
+    config_of(&[(
+        "actions.toml",
+        "[[action]]\nid = \"loc\"\n[[action.steps]]\ntype = \"localize\"\n",
+    )])
 }
 
 /// `files` are written into the vault before the writer (and its index) opens.
 fn env(files: &[(&str, &[u8])]) -> Env {
-    let dir = Tmp::new();
-    let vault = dir.0.join("vault");
-    let prot = dir.0.join("protected");
-    std::fs::create_dir_all(&vault).unwrap();
-    std::fs::create_dir_all(&prot).unwrap();
-    std::fs::create_dir_all(dir.0.join("index")).unwrap();
-    for (p, b) in files {
-        write(&vault, p, b);
-    }
-    let fs = VaultFs::live(&vault, &prot, &NoCutover).unwrap();
-    let w = VaultWriter::open(fs, &dir.0.join("index").join("index.db")).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&dir.0.join("state.db"), 1, QueueConfig::default()).unwrap();
-    Env {
-        dir,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-        config: config(),
-    }
+    let config = config();
+    let action = config.armed("loc").unwrap().clone();
+    Env(StepEnv::new(
+        LiveFixture::new(files.iter().copied()),
+        config,
+        action,
+    ))
 }
 
 fn png(seed: u8) -> Vec<u8> {
@@ -154,67 +86,19 @@ fn png(seed: u8) -> Vec<u8> {
 
 type Hook = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// A hand-rolled HTTP/1.1 responder: `routes` maps a request path to (content type, body);
-/// anything else is 404. `hook` runs before each response (e.g. to edit the note mid-download).
-struct Server {
-    port: u16,
-    hits: Arc<AtomicUsize>,
-}
-
-async fn serve(routes: HashMap<String, (String, Vec<u8>)>, hook: Option<Hook>) -> Server {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let routes = Arc::new(routes);
-    let h2 = Arc::clone(&hits);
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                return;
-            };
-            let routes = Arc::clone(&routes);
-            let hits = Arc::clone(&h2);
-            let hook = hook.clone();
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0_u8; 1024];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match sock.read(&mut chunk).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf).into_owned();
-                let path = head.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                hits.fetch_add(1, Ordering::SeqCst);
-                if let Some(h) = &hook {
-                    h(&path);
-                }
-                let resp = match routes.get(&path) {
-                    _ if path.starts_with("/throttle") => {
-                        b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_vec()
-                    }
-                    Some((ct, body)) => {
-                        let mut r = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        )
-                        .into_bytes();
-                        r.extend_from_slice(body);
-                        r
-                    }
-                    None => {
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_vec()
-                    }
-                };
-                let _ = sock.write_all(&resp).await;
-                let _ = sock.shutdown().await;
-            });
+/// `routes` maps a request target to (content type, body); `/throttle*` is 429, anything else
+/// 404. `hook` runs before each response (e.g. to edit the note mid-download).
+fn serve(routes: HashMap<String, (String, Vec<u8>)>, hook: Option<Hook>) -> MockHttp {
+    MockHttp::start(move |req| {
+        if let Some(h) = &hook {
+            h(&req.target);
         }
-    });
-    Server { port, hits }
+        match routes.get(&req.target) {
+            _ if req.target.starts_with("/throttle") => Reply::new(429, Vec::new()),
+            Some((ct, body)) => Reply::new(200, body.clone()).header("Content-Type", ct),
+            None => Reply::new(404, Vec::new()),
+        }
+    })
 }
 
 fn rt() -> tokio::runtime::Runtime {
@@ -229,12 +113,13 @@ fn rt() -> tokio::runtime::Runtime {
 fn with_server<T: Send + 'static>(
     routes: HashMap<String, (String, Vec<u8>)>,
     hook: Option<Hook>,
-    f: impl FnOnce(u16, Arc<AtomicUsize>) -> T + Send + 'static,
+    f: impl FnOnce(u16, Arc<MockHttp>) -> T + Send + 'static,
 ) -> T {
     let rt = rt();
+    let s = Arc::new(serve(routes, hook));
+    let port = s.addr().port();
     rt.block_on(async move {
-        let s = serve(routes, hook).await;
-        tokio::task::spawn_blocking(move || f(s.port, s.hits))
+        tokio::task::spawn_blocking(move || f(port, s))
             .await
             .unwrap()
     })
@@ -263,11 +148,11 @@ fn downloads_names_by_md5_rewrites_with_empty_alt_and_dedupes() {
         let env = env(&[("notes/My Post.md", note.as_bytes())]);
         let step = env.step("");
         let out = env.run(&step, "notes/My Post.md").unwrap();
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.hits(), 2);
         // Re-run converges: nothing downloaded, nothing written.
         let before = env.file("notes/My Post.md");
         let out2 = env.run(&step, "notes/My Post.md").unwrap();
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.hits(), 2);
         assert_eq!(env.file("notes/My Post.md"), before);
         (env, out, out2)
     });
@@ -423,10 +308,7 @@ fn one_failed_download_among_several_is_counted_and_left() {
 
 #[test]
 fn all_unreachable_defers() {
-    let port = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    }; // listener dropped: connection refused
+    let port = MockHttp::unused_port(); // nothing listens: connection refused
     let note = format!("![](http://127.0.0.1:{port}/a.png) ![](http://127.0.0.1:{port}/b.png)\n");
     let (env, res) = with_server(HashMap::new(), None, move |_, _| {
         let env = env(&[("n.md", note.as_bytes())]);

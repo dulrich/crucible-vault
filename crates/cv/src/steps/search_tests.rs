@@ -1,11 +1,10 @@
-//! Search-step tests (plan `v0-core-daemon` WP-13; rewritten for plan semsearch-crate WP-3):
-//! synthetic notes in a temp vault, a temp `state.db`, a tmpfs `semsearch` index, and a
-//! hand-rolled fake embedder on 127.0.0.1 that counts every request (I1 — never a real index or
-//! any real provider).
+//! `search` step tests (was `wp13_tests.rs`; plan `v0-core-daemon` WP-13, rewritten for plan
+//! semsearch-crate WP-3): synthetic notes in a temp vault with a temp protected root (via
+//! [`super::testkit`]), a temp `state.db`, a temp `semsearch` index, and a `cv_testkit::MockHttp`
+//! fake embedder on 127.0.0.1 that records every request (I1 — never a real index or any real
+//! provider).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cv_actions::{ConfigSet, Step, StepKind};
@@ -13,63 +12,31 @@ use cv_protocol::ActionContext;
 use cv_providers::{ProviderManager, SecretSource};
 use cv_search::SearchDb;
 use cv_search::semsearch::{Query, Space};
-use cv_state::{ImageDescription, QueueConfig, StateDb};
-use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use cv_state::ImageDescription;
+use cv_testkit::{MockHttp, Reply};
+use cv_vault::test_support::LiveFixture;
+use serde_json::{Value, json};
 
 use super::search::run;
-use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
-
-/// tmpfs when available (project-setup "tmpfs test databases").
-fn tmp_base() -> PathBuf {
-    if Path::new("/dev/shm").is_dir() {
-        PathBuf::from("/dev/shm")
-    } else {
-        std::env::temp_dir()
-    }
-}
-
-struct Tmp(PathBuf);
-impl Tmp {
-    fn new() -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let p = tmp_base().join(format!(
-            "cv-wp13-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-}
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use super::testkit::{StepEnv, config_of};
+use super::{DeferCause, StepError, StepOutcome};
 
 #[derive(Default)]
 struct FakeState {
     embed_down: bool,
-    log: Vec<(String, Value)>,
 }
 
-#[derive(Clone)]
 struct Fake {
-    base: String,
+    http: MockHttp,
     st: Arc<Mutex<FakeState>>,
 }
 
 impl Fake {
     fn embed_calls(&self) -> usize {
-        self.st
-            .lock()
-            .unwrap()
-            .log
+        self.http
+            .requests()
             .iter()
-            .filter(|(p, _)| p == "/embeddings")
+            .filter(|r| r.target == "/embeddings")
             .count()
     }
 }
@@ -77,7 +44,7 @@ impl Fake {
 /// Every vector the fake embedder returns (3 dims).
 const VEC: [f32; 3] = [0.1, 0.2, 0.3];
 
-fn handle(st: &mut FakeState, path: &str, body: &Value) -> (u16, Value) {
+fn handle(st: &FakeState, path: &str, body: &Value) -> (u16, Value) {
     match path {
         "/embeddings" => {
             if st.embed_down {
@@ -93,66 +60,15 @@ fn handle(st: &mut FakeState, path: &str, body: &Value) -> (u16, Value) {
     }
 }
 
-async fn serve(l: TcpListener, st: Arc<Mutex<FakeState>>) {
-    loop {
-        let Ok((mut s, _)) = l.accept().await else {
-            return;
-        };
-        let st = st.clone();
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 8192];
-            let head_end = loop {
-                let Ok(n) = s.read(&mut chunk).await else {
-                    return;
-                };
-                if n == 0 {
-                    return;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break i + 4;
-                }
-            };
-            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-            let path = head.split(' ').nth(1).unwrap_or("").to_owned();
-            let len: usize = head
-                .lines()
-                .filter_map(|l| l.split_once(':'))
-                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, v)| v.trim().parse().ok())
-                .unwrap_or(0);
-            while buf.len() < head_end + len {
-                let Ok(n) = s.read(&mut chunk).await else {
-                    return;
-                };
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let body: Value = serde_json::from_slice(&buf[head_end..]).unwrap_or(Value::Null);
-            let (status, out) = {
-                let mut g = st.lock().unwrap();
-                g.log.push((path.clone(), body.clone()));
-                handle(&mut g, &path, &body)
-            };
-            let out = out.to_string();
-            let resp = format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}",
-                out.len()
-            );
-            let _ = s.write_all(resp.as_bytes()).await;
-            let _ = s.shutdown().await;
-        });
-    }
-}
-
-struct NoKids;
-impl ChildSpawner for NoKids {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
+fn fake() -> Fake {
+    let st = Arc::new(Mutex::new(FakeState::default()));
+    let st2 = Arc::clone(&st);
+    let http = MockHttp::start(move |req| {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let (status, out) = handle(&st2.lock().unwrap(), &req.target, &body);
+        Reply::json(status, out.to_string())
+    });
+    Fake { http, st }
 }
 
 struct NoSecrets;
@@ -166,110 +82,61 @@ impl SecretSource for NoSecrets {
 }
 
 struct World {
-    /// Held for its `Drop` (removes the temp tree).
-    _tmp: Tmp,
+    env: StepEnv,
     rt: tokio::runtime::Runtime,
     fake: Fake,
-    vault: PathBuf,
-    index: PathBuf,
     search: SearchDb,
-    state: Arc<Mutex<StateDb>>,
-    writer: cv_vault::WriterHandle,
-    config: ConfigSet,
     mgr: ProviderManager,
+}
+
+impl std::ops::Deref for World {
+    type Target = StepEnv;
+    fn deref(&self) -> &StepEnv {
+        &self.env
+    }
 }
 
 const NOTE_A: &str = "---\nauthor: Synthetic Author\n---\n# Alpha\nFirst synthetic note.\n\n![[0123456789abcdef0123456789abcdef_MD5.png]]";
 const NOTE_B: &str = "# Beta\nSecond synthetic note.";
 
 fn world() -> World {
-    let tmp = Tmp::new();
-    let vault = tmp.0.join("vault");
-    std::fs::create_dir_all(vault.join("notes")).unwrap();
-    std::fs::create_dir_all(vault.join("att")).unwrap();
-    std::fs::write(vault.join("notes/a.md"), NOTE_A).unwrap();
-    std::fs::write(vault.join("notes/b.md"), NOTE_B).unwrap();
-    std::fs::write(
-        vault.join("att/0123456789abcdef0123456789abcdef_MD5.png"),
-        b"png",
-    )
-    .unwrap();
+    let fx = LiveFixture::builder()
+        .file("notes/a.md", NOTE_A)
+        .file("notes/b.md", NOTE_B)
+        .file("att/0123456789abcdef0123456789abcdef_MD5.png", b"png")
+        .build();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
-    let st = Arc::new(Mutex::new(FakeState::default()));
-    let base = rt.block_on(async {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(serve(l, st.clone()));
-        format!("http://{addr}")
-    });
-    let fake = Fake { base, st };
-    let protected = tmp.0.join("protected");
-    std::fs::create_dir_all(&protected).unwrap();
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let index = tmp.0.join("index.db");
-    let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = Arc::new(Mutex::new(
-        StateDb::open(&tmp.0.join("state.db"), 1, QueueConfig::default()).unwrap(),
-    ));
-    let mut config = ConfigSet::new();
+    let fake = fake();
     let actions = "[[action]]\nid = \"s\"\n[[action.steps]]\ntype = \"search_upsert\"\n";
     let providers = format!(
         "[[provider]]\nid = \"emb\"\nkind = \"openai-compatible\"\nbase_url = \"{}\"\n",
-        fake.base
+        fake.http.url()
     );
-    config.reload(
-        &BTreeMap::from([
-            ("actions.toml".to_owned(), Some(actions.to_owned())),
-            ("providers.toml".to_owned(), Some(providers)),
-        ]),
-        &super::validate,
-    );
-    assert!(config.errors().is_empty(), "{:?}", config.errors());
-    let search = SearchDb::new(tmp.0.join("state").join("search.db"));
+    let config = config_of(&[("actions.toml", actions), ("providers.toml", &providers)]);
+    let search = SearchDb::new(fx.root().join("state").join("search.db"));
+    let action = config.action("s").unwrap().clone();
     World {
-        _tmp: tmp,
+        env: StepEnv::new(fx, config, action),
         rt,
         fake,
-        vault,
-        index,
         search,
-        state,
-        writer,
-        config,
         mgr: ProviderManager::new(Arc::new(NoSecrets)).unwrap(),
     }
 }
 
 impl World {
     fn run(&self, step: &Step, active: Option<&str>) -> Result<StepOutcome, StepError> {
-        let params = Map::new();
-        let vars = Map::new();
         let context = ActionContext {
             active_path: active.map(str::to_owned),
             ..ActionContext::default()
         };
-        let action = self.config.action("s").unwrap();
-        let mut ctx = StepCtx {
-            job_id: "job-1",
-            action,
-            step_index: 0,
-            params: &params,
-            context: &context,
-            vars: &vars,
-            config: &self.config,
-            vault_root: &self.vault,
-            index_db: &self.index,
-            search: Some(&self.search),
-            state: &self.state,
-            writer: Some(self.writer.clone()),
-            children: &NoKids,
-            written: Vec::new(),
-        };
+        let mut ctx = self.ctx();
+        ctx.context = &context;
+        ctx.search = Some(&self.search);
         let p = super::search::parse(step.kind, &step.params).map_err(StepError::failed)?;
         run(&p, &mut ctx, self.rt.handle(), &self.mgr)
     }

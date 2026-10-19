@@ -18,5 +18,9 @@ toml = "=1.1.8"
 # Plan tn-review-baseline-remediation WP-R11 (B15): `From<wire>` for the cv-ingest metadata types.
 cv-ingest = { path = "../cv-ingest" }
 
+[dev-dependencies]
+# Plan tn-review-baseline-remediation WP-R14 (M6): the shared std-only `MockHttp`.
+cv-testkit = { path = "../cv-testkit" }
+
 [lints]
 workspace = true

@@ -1,77 +1,31 @@
 //! `capture_repair` step tests (plan `usability-sprint-captures-links` WP-2): synthetic vaults in
 //! temp dirs, the real writer thread (rename rewrites incoming links through the index).
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use cv_actions::Step;
+use cv_vault::test_support::LiveFixture;
+use serde_json::Value;
 
-use cv_actions::{ConfigSet, Step};
-use cv_protocol::ActionContext;
-use cv_state::{QueueConfig, StateDb};
-use cv_vault::{NoCutover, VaultFs, VaultWriter, WriterHandle};
-use serde_json::{Map, Value};
+use super::testkit::{StepEnv, config_of};
+use super::{StepOutcome, capture_repair};
 
-use super::{ChildSpawner, StepCtx, StepOutcome, capture_repair};
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children in tests".into())
-    }
-}
-
-struct Env {
-    dir: PathBuf,
-    writer: WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-    config: ConfigSet,
-}
-
-impl Drop for Env {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
+struct Env(StepEnv);
 
 impl Env {
     fn new(files: &[(&str, &str)]) -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "cv-capture-repair-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let vault = dir.join("vault");
-        let prot = dir.join("protected");
-        for d in [&vault, &prot, &dir.join("index")] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        for (p, b) in files {
-            let p = vault.join(p);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, b).unwrap();
-        }
-        let fs = VaultFs::live(&vault, &prot, &NoCutover).unwrap();
-        let w = VaultWriter::open(fs, &dir.join("index").join("index.db")).unwrap();
-        let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-        let state = StateDb::open(&dir.join("state.db"), 1, QueueConfig::default()).unwrap();
-        let mut config = ConfigSet::new();
-        let src = "[[action]]\nid = \"cr\"\n[[action.steps]]\ntype = \"capture_repair\"\nfolder = \"daily/day\"\n";
-        let cfgs = BTreeMap::from([("actions.toml".to_owned(), Some(src.to_owned()))]);
-        config.reload(&cfgs, &crate::steps::validate);
-        assert!(config.errors().is_empty(), "{:?}", config.errors());
-        Self {
-            dir,
-            writer,
-            state: Arc::new(Mutex::new(state)),
+        let config = config_of(&[(
+            "actions.toml",
+            "[[action]]\nid = \"cr\"\n[[action.steps]]\ntype = \"capture_repair\"\nfolder = \"daily/day\"\n",
+        )]);
+        let action = config.armed("cr").unwrap().clone();
+        Self(StepEnv::new(
+            LiveFixture::new(files.iter().copied()),
             config,
-        }
+            action,
+        ))
     }
 
     fn text(&self, rel: &str) -> Option<String> {
-        std::fs::read_to_string(self.dir.join("vault").join(rel)).ok()
+        std::fs::read_to_string(self.0.fx.path(rel)).ok()
     }
 
     fn run(&self) -> StepOutcome {
@@ -79,29 +33,8 @@ impl Env {
         t.insert("type".into(), "capture_repair".into());
         t.insert("folder".into(), "daily/day".into());
         let step = Step::from_table(t).unwrap();
-        crate::steps::validate(&step, &self.config).unwrap();
-        let action = self.config.armed("cr").unwrap();
-        let (params, vars) = (Map::new(), Map::new());
-        let context = ActionContext::default();
-        let vault = self.dir.join("vault");
-        let index = self.dir.join("index").join("index.db");
-        let mut ctx = StepCtx {
-            job_id: "job-1",
-            action,
-            step_index: 0,
-            params: &params,
-            context: &context,
-            vars: &vars,
-            config: &self.config,
-            vault_root: &vault,
-            index_db: &index,
-            search: None,
-            state: &self.state,
-            writer: Some(self.writer.clone()),
-            children: &NoChildren,
-            written: Vec::new(),
-        };
-        crate::steps::execute(&step, &mut ctx).unwrap()
+        crate::steps::validate(&step, &self.0.config).unwrap();
+        crate::steps::execute(&step, &mut self.0.ctx()).unwrap()
     }
 }
 

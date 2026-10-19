@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use cv::{Client, ClientError, Config, Daemon, DaemonOptions, RunningDaemon};
@@ -18,30 +17,8 @@ use cv_protocol::{
 use cv_vault::{ContentHash, WatchConfig};
 use serde_json::{Value, json};
 
-static N: AtomicU32 = AtomicU32::new(0);
-
-/// A temp dir removed on drop.
-struct Tmp(PathBuf);
-impl Tmp {
-    fn new() -> Self {
-        let p = std::env::temp_dir().join(format!(
-            "cv-it-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-}
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 struct Env {
-    tmp: Tmp,
+    tmp: tempfile::TempDir,
     vars: HashMap<String, String>,
 }
 
@@ -49,12 +26,12 @@ impl Env {
     /// Synthetic vault `<tmp>/prot/Synth` (protected root `<tmp>/protected`, a sibling) with two
     /// notes.
     fn new() -> Self {
-        let tmp = Tmp::new();
-        let vault = tmp.0.join("prot").join("Synth");
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("prot").join("Synth");
         std::fs::create_dir_all(vault.join("notes")).unwrap();
         std::fs::write(vault.join("a.md"), "# A\nsee [[b]]\n").unwrap();
         std::fs::write(vault.join("notes/b.md"), "# B\n").unwrap();
-        let r = &tmp.0;
+        let r = tmp.path();
         let mut vars = HashMap::new();
         for (k, v) in [
             ("HOME", r.join("home")),
@@ -73,7 +50,7 @@ impl Env {
     /// refused unless the cut-over marker is present (I1).
     fn guarded() -> Self {
         let mut e = Self::new();
-        let prot = e.tmp.0.join("prot").display().to_string();
+        let prot = e.tmp.path().join("prot").display().to_string();
         e.set("CV_PROTECTED_VAULT", prot);
         e
     }
@@ -92,7 +69,7 @@ impl Env {
     }
     /// An executable `/bin/sh` script in the temp dir.
     fn script(&self, name: &str, body: &str) -> PathBuf {
-        let p = self.tmp.0.join(name);
+        let p = self.tmp.path().join(name);
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
@@ -524,7 +501,7 @@ async fn uri_intake_over_rpc_and_cli() {
     let mut env = Env::new();
     let clip = env.script("clip.sh", "printf 'clip body \\303\\251'");
     env.set("CV_CLIPBOARD_CMD", clip.display().to_string());
-    let out = env.tmp.0.join("opened.txt");
+    let out = env.tmp.path().join("opened.txt");
     let open = env.script(
         "open.sh",
         &format!("printf '%s' \"$1\" > '{}'", out.display()),
@@ -674,7 +651,7 @@ async fn live_mode_refused_near_protected_root() {
         let vault = match which {
             "equal" => prot.clone(),
             "under" => env.vault(),
-            _ => env.tmp.0.clone(),
+            _ => env.tmp.path().to_path_buf(),
         };
         env.set("CV_VAULT", vault.display().to_string());
         let err = Daemon::start(env.config(), opts()).unwrap_err();

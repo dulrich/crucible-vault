@@ -128,50 +128,39 @@ pub async fn oembed(
 mod tests {
     use super::*;
     use crate::web::WebConfig;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use cv_testkit::{MockHttp, Reply};
 
-    async fn serve(status: u16, body: &'static str) -> String {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = l.accept().await {
-                let mut buf = [0u8; 4096];
-                let _ = sock.read(&mut buf).await;
-                let r = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(r.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            }
-        });
-        format!("http://{addr}/oembed")
+    fn serve(status: u16, body: &'static str) -> MockHttp {
+        MockHttp::fixed(Reply::new(status, body))
+    }
+
+    fn base(m: &MockHttp) -> String {
+        format!("{}/oembed", m.url())
     }
 
     #[tokio::test]
     async fn decodes_and_classifies() {
         let c = WebClient::new(WebConfig::default()).unwrap();
         let u = "https://x.com/a/status/1";
-        let base = serve(
+        let m = serve(
             200,
             r#"{"url":"https://x.com/a/status/1","author_name":"A","author_url":"https://x.com/a","html":"<p>hi</p>","type":"rich","version":"1.0","extra":3}"#,
-        )
-        .await;
-        let o = oembed(&c, &base, u).await.unwrap();
+        );
+        let o = oembed(&c, &base(&m), u).await.unwrap();
         assert_eq!((o.author_name.as_str(), o.kind.as_str()), ("A", "rich"));
         assert_eq!(o.html, "<p>hi</p>");
         for st in [403, 404] {
-            let e = oembed(&c, &serve(st, "").await, u).await.unwrap_err();
+            let m = serve(st, "");
+            let e = oembed(&c, &base(&m), u).await.unwrap_err();
             assert!(matches!(e, FetchError::NotFound { status, .. } if status == st));
         }
         for st in [429, 503] {
-            let e = oembed(&c, &serve(st, "").await, u).await.unwrap_err();
+            let m = serve(st, "");
+            let e = oembed(&c, &base(&m), u).await.unwrap_err();
             assert!(matches!(e, FetchError::Transient { .. }), "{st}");
         }
-        let e = oembed(&c, &serve(200, r#"{"html":"x"}"#).await, u)
-            .await
-            .unwrap_err();
+        let m = serve(200, r#"{"html":"x"}"#);
+        let e = oembed(&c, &base(&m), u).await.unwrap_err();
         assert!(matches!(e, FetchError::Transient { .. }));
     }
 }

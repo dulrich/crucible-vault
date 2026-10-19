@@ -1,34 +1,25 @@
-//! WP-6 `image_describe` tests: synthetic temp vault + temp `state.db`, and a hand-rolled local
-//! HTTP responder posing as an `openai-compatible` provider. No real provider is ever called.
+//! WP-6 `image_describe` tests: synthetic temp vault + temp `state.db`, and a `cv_testkit::MockHttp`
+//! responder posing as an `openai-compatible` provider. No real provider is ever called.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
-use cv_protocol::ActionContext;
 use cv_providers::{ProviderManager, SecretSource};
-use cv_state::{FailureReason, ImageDescription, QueueConfig, StateDb};
-use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use cv_state::{FailureReason, ImageDescription};
+use cv_testkit::{MockHttp, Reply};
+use cv_vault::test_support::LiveFixture;
+use serde_json::{Value, json};
 
 use super::{
     MAX_LONG_EDGE, extract_svg_text, fit_long_edge, fnv1a32_hex, parse, prepare_image, run,
 };
-use crate::steps::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
+use crate::steps::testkit::StepEnv;
+use crate::steps::{DeferCause, StepError, StepOutcome};
 
 const MD5_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MD5_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
-}
 
 struct TestSecrets;
 impl SecretSource for TestSecrets {
@@ -40,26 +31,6 @@ impl SecretSource for TestSecrets {
     }
 }
 
-struct Tmp(PathBuf);
-impl Tmp {
-    fn new() -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "cv-wp6-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-}
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn png(w: u32, h: u32) -> Vec<u8> {
     let img = image::DynamicImage::ImageLuma8(image::GrayImage::new(w, h));
     let mut out = Cursor::new(Vec::new());
@@ -67,57 +38,27 @@ fn png(w: u32, h: u32) -> Vec<u8> {
     out.into_inner()
 }
 
-/// Serves `replies[i]` to the i-th request (the last repeats); captures request bodies.
-async fn fake_provider(replies: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let seen2 = Arc::clone(&seen);
-    let n = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        while let Ok((mut s, _)) = l.accept().await {
-            let i = n.fetch_add(1, Ordering::SeqCst);
-            let (status, body) = replies[i.min(replies.len() - 1)].clone();
-            let seen = Arc::clone(&seen2);
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 65536];
-                let (head_end, len) = loop {
-                    let n = s.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
-                        let len = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse::<usize>().ok())
-                            .unwrap_or(0);
-                        break (i + 4, len);
-                    }
-                };
-                while buf.len() < head_end + len {
-                    let n = s.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                if let Ok(v) = serde_json::from_slice::<Value>(&buf[head_end..]) {
-                    seen.lock().unwrap().push(v);
-                }
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len(),
-                );
-                let _ = s.write_all(resp.as_bytes()).await;
-                let _ = s.shutdown().await;
-            });
-        }
-    });
-    (format!("http://{addr}/v1"), seen)
+/// Serves `replies[i]` to the i-th request (the last repeats); records requests.
+async fn fake_provider(replies: Vec<(u16, String)>) -> (String, Seen) {
+    let m = MockHttp::script(
+        replies
+            .into_iter()
+            .map(|(status, body)| Reply::json(status, body))
+            .collect(),
+    );
+    (format!("{}/v1", m.url()), Seen(m))
+}
+
+/// The JSON request bodies the fake provider received.
+struct Seen(MockHttp);
+impl Seen {
+    fn bodies(&self) -> Vec<Value> {
+        self.0
+            .requests()
+            .iter()
+            .filter_map(|r| serde_json::from_slice(&r.body).ok())
+            .collect()
+    }
 }
 
 fn ok(text: &str) -> (u16, String) {
@@ -160,53 +101,9 @@ id = "vl"
     c
 }
 
-struct Env {
-    _tmp: Tmp,
-    vault: PathBuf,
-    index: PathBuf,
-    writer: cv_vault::WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-}
+type Env = StepEnv;
 
 fn env(files: &[(&str, Vec<u8>)]) -> Env {
-    let tmp = Tmp::new();
-    let vault = tmp.0.join("vault");
-    let protected = tmp.0.join("protected");
-    std::fs::create_dir_all(&protected).unwrap();
-    std::fs::create_dir_all(&vault).unwrap();
-    for (rel, bytes) in files {
-        let p = vault.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, bytes).unwrap();
-    }
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let index = tmp.0.join("index.db");
-    let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&tmp.0.join("state.db"), 1, QueueConfig::default()).unwrap();
-    Env {
-        vault: std::fs::canonicalize(&vault).unwrap(),
-        index,
-        _tmp: tmp,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-    }
-}
-
-/// A note embedding one png (`MD5_A`) — plus whatever `extra` adds.
-fn clip_env(img: Vec<u8>, extra: &[(&str, Vec<u8>)]) -> Env {
-    let mut files = vec![
-        (
-            "Clip.md",
-            format!("# Clip\n![[{MD5_A}_MD5.png]]\n").into_bytes(),
-        ),
-        ("att/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_MD5.png", img),
-    ];
-    files.extend(extra.iter().cloned());
-    env(&files)
-}
-
-fn exec(e: &Env, cfg: &ConfigSet, src: &str) -> Result<StepOutcome, StepError> {
     let action = Action {
         id: "image-describe-note".into(),
         label: "Describe".into(),
@@ -223,27 +120,31 @@ fn exec(e: &Env, cfg: &ConfigSet, src: &str) -> Result<StepOutcome, StepError> {
             keys: vec![],
         },
     };
-    let context = ActionContext {
-        active_path: Some("Clip.md".into()),
-        ..ActionContext::default()
-    };
-    let (params, vars) = (Map::new(), Map::new());
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: &action,
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars: &vars,
-        config: cfg,
-        vault_root: &e.vault,
-        index_db: &e.index,
-        search: None,
-        state: &e.state,
-        writer: Some(e.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
+    let mut env = StepEnv::new(
+        LiveFixture::new(files.iter().map(|(r, b)| (*r, b))),
+        ConfigSet::new(),
+        action,
+    );
+    env.context.active_path = Some("Clip.md".into());
+    env
+}
+
+/// A note embedding one png (`MD5_A`) — plus whatever `extra` adds.
+fn clip_env(img: Vec<u8>, extra: &[(&str, Vec<u8>)]) -> Env {
+    let mut files = vec![
+        (
+            "Clip.md",
+            format!("# Clip\n![[{MD5_A}_MD5.png]]\n").into_bytes(),
+        ),
+        ("att/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_MD5.png", img),
+    ];
+    files.extend(extra.iter().cloned());
+    env(&files)
+}
+
+fn exec(e: &Env, cfg: &ConfigSet, src: &str) -> Result<StepOutcome, StepError> {
+    let mut ctx = e.ctx();
+    ctx.config = cfg;
     let t: toml::Table = format!("type = \"image_describe\"\n{src}").parse().unwrap();
     let mgr = ProviderManager::new(Arc::new(TestSecrets)).unwrap();
     run(
@@ -332,7 +233,7 @@ async fn describes_then_skips_recorded() {
     assert_eq!(raw["schemaVersion"], 1);
     assert!(!r.raw.contains("base64"));
     {
-        let bodies = seen.lock().unwrap();
+        let bodies = seen.bodies();
         assert_eq!(bodies.len(), 2);
         let msgs = bodies[0]["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1, "no system message");
@@ -345,7 +246,7 @@ async fn describes_then_skips_recorded() {
         .await
         .unwrap();
     assert_eq!((var(&out, "described"), var(&out, "skipped")), (0, 1));
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.bodies().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -362,13 +263,13 @@ async fn failed_record_is_poison_skipped() {
         .await
         .unwrap();
     assert_eq!(var(&out, "skipped"), 1);
-    assert!(seen.lock().unwrap().is_empty());
+    assert!(seen.bodies().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_failures_write_no_record() {
     for status in [500u16, 503, 429, 408] {
-        let (base, _) = fake_provider(vec![(status, "{}".into())]).await;
+        let (base, _mock) = fake_provider(vec![(status, "{}".into())]).await;
         let e = Arc::new(clip_env(png(8, 8), &[]));
         let r = exec_async(Arc::clone(&e), config(&base, true, "fake"), "").await;
         assert!(
@@ -432,11 +333,11 @@ async fn image_specific_failures_record_permanent() {
         (r.kind.as_str(), raw["failureClass"].as_str()),
         ("failed", Some("permanent"))
     );
-    assert!(seen.lock().unwrap().is_empty());
+    assert!(seen.bodies().is_empty());
 
     // Empty answer and a 400 → failed.
     for reply in [ok("  "), (400, "{\"error\":\"bad image\"}".to_owned())] {
-        let (base, _) = fake_provider(vec![reply]).await;
+        let (base, _mock) = fake_provider(vec![reply]).await;
         let e = Arc::new(clip_env(png(8, 8), &[]));
         let out = exec_async(Arc::clone(&e), config(&base, true, "fake"), "")
             .await
@@ -486,7 +387,7 @@ async fn svg_and_vault_scope_and_limit() {
         (r.kind.as_str(), r.extraction.as_str()),
         ("svg-text", "Hello")
     );
-    assert_eq!(seen.lock().unwrap().len(), 2, "svg made no model call");
+    assert_eq!(seen.bodies().len(), 2, "svg made no model call");
 }
 
 #[test]

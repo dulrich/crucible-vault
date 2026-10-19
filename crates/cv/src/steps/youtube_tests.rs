@@ -2,27 +2,21 @@
 //! a local fake Data API (never the network, never the live vault, never env vars).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
 use cv_protocol::ActionContext;
 use cv_providers::secrets::SecretSource;
-use cv_state::{FailureReason, QueueConfig, StateDb};
+use cv_state::FailureReason;
+use cv_testkit::{MockHttp, Reply};
+use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
+use crate::steps::testkit::StepEnv;
 use crate::steps::web::{Overrides, create_or_found, test_overrides};
-use crate::steps::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
+use crate::steps::{DeferCause, StepError, StepOutcome};
 use crate::steps::{execute, validate};
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
-}
 
 struct Keys(Option<&'static str>);
 impl SecretSource for Keys {
@@ -36,60 +30,20 @@ impl SecretSource for Keys {
     }
 }
 
-struct Tmp(std::path::PathBuf);
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Route prefix → (status, body); counts every request.
-async fn serve(routes: Vec<(&'static str, u16, String)>, hits: Arc<AtomicUsize>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut sock, _)) = listener.accept().await {
-            let (routes, hits) = (routes.clone(), hits.clone());
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                hits.fetch_add(1, Ordering::SeqCst);
-                let head = String::from_utf8_lossy(&buf).into_owned();
-                let path = head.split(' ').nth(1).unwrap_or("/").to_owned();
-                let (status, body) = routes
-                    .iter()
-                    .find(|(p, _, _)| path.starts_with(p))
-                    .map_or((500, String::new()), |(_, s, b)| (*s, b.clone()));
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    format!("http://{addr}")
-}
-
 struct World {
-    _tmp: Tmp,
+    env: StepEnv,
     rt: tokio::runtime::Runtime,
-    vault: std::path::PathBuf,
-    index: std::path::PathBuf,
-    writer: cv_vault::WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-    config: ConfigSet,
+    vault: PathBuf,
     base: String,
-    hits: Arc<AtomicUsize>,
+    http: MockHttp,
     key: Option<&'static str>,
+}
+
+impl std::ops::Deref for World {
+    type Target = StepEnv;
+    fn deref(&self) -> &StepEnv {
+        &self.env
+    }
 }
 
 const VIDEO: &str = r#"{"items":[{"id":"dQw4w9WgXcQ","snippet":{"title":"Synthetic","channelId":"UCsynth","channelTitle":"Synth Channel","publishedAt":"2020-01-01T00:00:00Z","categoryId":"10","liveBroadcastContent":"none"},"contentDetails":{"duration":"PT30S"},"statistics":{"viewCount":"5"}}]}"#;
@@ -100,36 +54,23 @@ fn world(
     routes: Vec<(&'static str, u16, String)>,
     pipelines: &str,
 ) -> World {
-    use std::sync::atomic::AtomicUsize as N;
-    static SEQ: N = N::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "cv-wp4-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let tmp = Tmp(root.clone());
-    let vault = root.join("vault");
-    let protected = root.join("protected");
-    std::fs::create_dir_all(&protected).unwrap();
-    std::fs::create_dir_all(&vault).unwrap();
-    for (rel, text) in files {
-        let p = vault.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, text).unwrap();
-    }
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let index = root.join("index.db");
-    let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&root.join("state.db"), 1, QueueConfig::default()).unwrap();
+    let fx = LiveFixture::new(files.iter().copied());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let base = rt.block_on(serve(routes, hits.clone()));
+    // Route prefix → (status, body); anything else is an empty 500.
+    let http = MockHttp::start(move |req| {
+        routes
+            .iter()
+            .find(|(p, _, _)| req.target.starts_with(p))
+            .map_or_else(
+                || Reply::new(500, Vec::new()),
+                |(_, s, b)| Reply::new(*s, b.clone()),
+            )
+    });
+    let base = http.url();
     let files = BTreeMap::from([
         ("pipelines.toml".to_owned(), Some(pipelines.to_owned())),
         (
@@ -140,15 +81,11 @@ fn world(
     let mut config = ConfigSet::new();
     config.reload(&files, &crate::steps::validate);
     World {
-        vault: std::fs::canonicalize(&vault).unwrap(),
-        _tmp: tmp,
+        vault: fx.vault.clone(),
+        env: StepEnv::new(fx, config, action()),
         rt,
-        index,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-        config,
         base,
-        hits,
+        http,
         key: Some("TESTKEY"),
     }
 }
@@ -188,28 +125,13 @@ fn run(
         bases: HashMap::from([("youtube-api".to_owned(), w.base.clone())]),
         secrets: Some(Arc::new(Keys(w.key))),
     });
-    let action = action();
     let context = ActionContext {
         active_path: active.map(str::to_owned),
         ..ActionContext::default()
     };
-    let params = Map::new();
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: &action,
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars,
-        config: &w.config,
-        vault_root: &w.vault,
-        index_db: &w.index,
-        search: None,
-        state: &w.state,
-        writer: Some(w.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
+    let mut ctx = w.ctx();
+    ctx.context = &context;
+    ctx.vars = vars;
     execute(s, &mut ctx)
 }
 
@@ -280,7 +202,7 @@ fn creates_links_after_video_id_counts_usage_then_rerun_is_a_noop() {
     let o = meta(&w, "n/a.md").unwrap();
     assert_eq!(o.vars["linked"], json!(false));
     assert!(o.output_paths.is_empty());
-    assert_eq!(w.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(w.http.hits(), 1);
     assert_eq!(read(&w, "n/a.md"), before);
 }
 
@@ -295,31 +217,15 @@ fn second_note_finds_the_same_note_and_exists_counts_as_found() {
     meta(&w, "n/a.md").unwrap();
     let o = meta(&w, "n/b.md").unwrap();
     assert_eq!(o.vars["created"], json!(false));
-    assert_eq!(w.hits.load(Ordering::SeqCst), 1, "found, not refetched");
+    assert_eq!(w.http.hits(), 1, "found, not refetched");
     // Scalar entry [0] is kept first (append-only).
     assert!(read(&w, "n/b.md").contains(
         "yt-metadata:\n  - \"[[other/x]]\"\n  - \"[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]\"\n"
     ));
     // The concurrent-create invariant: the writer's Exists → found, one note.
     let _rt = w.rt.enter();
-    let action = action();
-    let (params, vars, context) = (Map::new(), Map::new(), ActionContext::default());
-    let mut ctx = StepCtx {
-        job_id: "job-2",
-        action: &action,
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars: &vars,
-        config: &w.config,
-        vault_root: &w.vault,
-        index_db: &w.index,
-        search: None,
-        state: &w.state,
-        writer: Some(w.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
+    let mut ctx = w.ctx();
+    ctx.job_id = "job-2";
     let p = "_yt_metadata/synth-channel/dQw4w9WgXcQ.md";
     assert!(!create_or_found(&mut ctx, p, b"other".to_vec()).unwrap());
     assert!(ctx.written.is_empty());
@@ -341,11 +247,11 @@ fn empty_items_and_404_tombstone_settle_done() {
         assert!(read(&w, p).contains("state: unavailable\n"));
         assert!(read(&w, "n/a.md").contains("[[_yt_metadata/_unavailable/dQw4w9WgXcQ]]"));
         // A later run finds the tombstone; no refetch.
-        let n = w.hits.load(Ordering::SeqCst);
+        let n = w.http.hits();
         std::fs::write(w.vault.join("n/c.md"), NOTE).unwrap();
         let o = meta(&w, "n/c.md").unwrap();
         assert_eq!(o.vars["tombstone"], json!(true));
-        assert_eq!(w.hits.load(Ordering::SeqCst), n);
+        assert_eq!(w.http.hits(), n);
     }
 }
 
@@ -365,7 +271,7 @@ fn missing_key_fails_no_api_key_and_quota_defers() {
         StepError::Failed { reason, .. } => assert_eq!(reason, Some(FailureReason::NoApiKey)),
         e => panic!("{e:?}"),
     }
-    assert_eq!(w.hits.load(Ordering::SeqCst), 0);
+    assert_eq!(w.http.hits(), 0);
     w.key = Some("K");
     match meta(&w, "n/a.md").unwrap_err() {
         StepError::Deferred { cause, service, .. } => {
@@ -410,7 +316,7 @@ fn channel_enrich_gates_skips_fresh_and_refreshes_stale() {
         run(&w, &s, None, &not_created).unwrap().vars["enriched"],
         json!(false)
     );
-    assert_eq!(w.hits.load(Ordering::SeqCst), 0);
+    assert_eq!(w.http.hits(), 0);
     // Created → writes about.md.
     let o = run(&w, &s, None, &created).unwrap();
     assert_eq!(o.vars["enriched"], json!(true));
@@ -419,7 +325,7 @@ fn channel_enrich_gates_skips_fresh_and_refreshes_stale() {
     // Fresh → skipped, no call.
     let o = run(&w, &s, None, &created).unwrap();
     assert_eq!(o.vars["enriched"], json!(false));
-    assert_eq!(w.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(w.http.hits(), 1);
     // Stale (found by channelId under another folder) → refreshed in place.
     std::fs::remove_file(w.vault.join(about)).unwrap();
     std::fs::create_dir_all(w.vault.join("_yt_metadata/old")).unwrap();

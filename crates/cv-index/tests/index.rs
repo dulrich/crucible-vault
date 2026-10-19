@@ -1,32 +1,29 @@
 //! Integration tests over synthetic vaults in temp dirs (I1: never the live vault).
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::{Path, PathBuf};
 
 use cv_index::{
     Error, Index, LinkKind, Reader, SCHEMA_VERSION, current_generation, generation_path,
 };
 use serde_json::json;
 
-struct Tmp(PathBuf);
+/// A temp root holding `vault/` and the index files (removed on drop).
+struct Fx(tempfile::TempDir);
 
-impl Tmp {
+impl Fx {
     fn new() -> Self {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "cv-index-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::SeqCst)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(p.join("vault")).unwrap();
-        Self(p)
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("vault")).unwrap();
+        Self(d)
+    }
+    fn path(&self) -> &Path {
+        self.0.path()
     }
     fn vault(&self) -> PathBuf {
-        self.0.join("vault")
+        self.path().join("vault")
     }
     fn db(&self) -> PathBuf {
-        self.0.join("index.db")
+        self.path().join("index.db")
     }
     fn write(&self, rel: &str, content: &str) {
         let p = self.vault().join(rel);
@@ -35,15 +32,9 @@ impl Tmp {
     }
 }
 
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 const HUB: &str = "---\ntitle: Hub\ndone: true\ndone_str: \"true\"\ncount: 1\ncount_str: \"1\"\ntags: [project]\nup: \"[[Parent]]\"\n---\n# Hub\n\nLinks: [[Alpha]] and [[notes/Beta#Sec|b]] and ![[pic.png]] and [[Missing]] and [[#Hub]].\nAn image ![x](../_resources/pic.png) and [ext](https://example.org).\n\n## Todo\n- [ ] open task #work\n- [x] done task\n- [>] deferred task\n";
 
-fn fixture(t: &Tmp) {
+fn fixture(t: &Fx) {
     t.write("Hub.md", HUB);
     t.write(
         "Alpha.md",
@@ -59,7 +50,7 @@ fn fixture(t: &Tmp) {
 
 #[test]
 fn rebuild_indexes_the_synthetic_vault() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     let idx = Index::create(&t.vault(), &t.db()).unwrap();
     let q = idx.query();
@@ -185,8 +176,8 @@ fn rebuild_indexes_the_synthetic_vault() {
 }
 
 /// Names in the test dir other than `vault`, sorted.
-fn listing(t: &Tmp) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(&t.0)
+fn listing(t: &Fx) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(t.path())
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -198,7 +189,7 @@ fn listing(t: &Tmp) -> Vec<String> {
 
 #[test]
 fn rebuild_swaps_atomically_and_bumps_generation() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
     assert_eq!(idx.db_path(), generation_path(&t.db(), 1));
@@ -252,7 +243,7 @@ fn rebuild_swaps_atomically_and_bumps_generation() {
 
 #[test]
 fn writer_never_waits_on_a_reader() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
     let mut r = Reader::open(&t.db(), 1).unwrap();
@@ -284,7 +275,7 @@ fn writer_never_waits_on_a_reader() {
 
 #[test]
 fn reader_mid_read_across_two_swaps() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
     let mut r = Reader::open(&t.db(), 1).unwrap();
@@ -313,7 +304,7 @@ fn reader_mid_read_across_two_swaps() {
 
 #[test]
 fn no_stale_wal_pairing_or_leftovers() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
     for g in 2..=4 {
@@ -331,15 +322,15 @@ fn no_stale_wal_pairing_or_leftovers() {
     drop(idx);
 
     // Planted stale build + orphan WAL are swept by open; the next build numbers past them.
-    std::fs::write(t.0.join("index-9.db.building"), b"junk").unwrap();
-    std::fs::write(t.0.join("index-8.db-wal"), b"junk").unwrap();
+    std::fs::write(t.path().join("index-9.db.building"), b"junk").unwrap();
+    std::fs::write(t.path().join("index-8.db-wal"), b"junk").unwrap();
     let mut idx = Index::open(&t.db()).unwrap();
     assert_eq!(idx.generation().unwrap(), 4);
     let names = listing(&t);
     assert!(names.iter().all(|n| allowed(n)), "{names:?}");
     assert_eq!(current_generation(&t.db()).unwrap(), Some(4));
     // Plant again: the build must still number past every generation-shaped file.
-    std::fs::write(t.0.join("index-9.db.building"), b"junk").unwrap();
+    std::fs::write(t.path().join("index-9.db.building"), b"junk").unwrap();
     assert_eq!(idx.rebuild(&t.vault()).unwrap(), 10);
     let names = listing(&t);
     assert!(!names.iter().any(|n| n.contains(".building")), "{names:?}");
@@ -348,10 +339,10 @@ fn no_stale_wal_pairing_or_leftovers() {
 
 #[test]
 fn failed_build_keeps_current_generation_live() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
-    let missing = t.0.join("no-such-vault");
+    let missing = t.path().join("no-such-vault");
     assert!(matches!(idx.rebuild(&missing), Err(Error::Io { .. })));
     assert_eq!(idx.generation().unwrap(), 1);
     assert_eq!(idx.query().file_count().unwrap(), 6);
@@ -370,7 +361,7 @@ fn failed_build_keeps_current_generation_live() {
 
 #[test]
 fn schema_mismatch_is_refused() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     drop(Index::create(&t.vault(), &t.db()).unwrap());
     {
@@ -402,21 +393,21 @@ fn schema_mismatch_is_refused() {
     assert_eq!(idx.generation().unwrap(), 2);
     assert!(!generation_path(&t.db(), 1).exists());
 
-    let empty = t.0.join("empty.db");
+    let empty = t.path().join("empty.db");
     drop(rusqlite::Connection::open(generation_path(&empty, 1)).unwrap());
     assert!(matches!(
         Reader::open(&empty, 1),
         Err(Error::SchemaMismatch { found: None, .. })
     ));
     assert!(matches!(
-        Index::open(&t.0.join("none.db")),
+        Index::open(&t.path().join("none.db")),
         Err(Error::NoIndex(_))
     ));
 }
 
 #[test]
 fn generation_mismatch_is_refused() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     drop(Index::create(&t.vault(), &t.db()).unwrap());
     std::fs::copy(generation_path(&t.db(), 1), generation_path(&t.db(), 5)).unwrap();
@@ -447,7 +438,7 @@ fn resolved(idx: &Index, src: &str, target: &str) -> Option<String> {
 
 #[test]
 fn incremental_create_modify_delete_rename() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
     sync_check(&idx);
@@ -560,7 +551,7 @@ fn incremental_create_modify_delete_rename() {
 
 #[test]
 fn upsert_edge_cases() {
-    let t = Tmp::new();
+    let t = Fx::new();
     let mut idx = Index::create(&t.vault(), &t.db()).unwrap();
     assert_eq!(idx.query().file_count().unwrap(), 0);
     assert_eq!(
@@ -596,7 +587,7 @@ fn upsert_edge_cases() {
 
 #[test]
 fn reader_is_read_only() {
-    let t = Tmp::new();
+    let t = Fx::new();
     fixture(&t);
     drop(Index::create(&t.vault(), &t.db()).unwrap());
     let r = Reader::open(&t.db(), 1).unwrap();
@@ -615,9 +606,9 @@ fn reader_is_read_only() {
 
 #[test]
 fn symlinked_note_outside_the_root_is_indexed_under_its_vault_path() {
-    let t = Tmp::new();
+    let t = Fx::new();
     t.write("a.md", "# A\n");
-    let repo = t.0.join("repo");
+    let repo = t.path().join("repo");
     std::fs::create_dir_all(repo.join("sub")).unwrap();
     std::fs::write(
         repo.join("INITIATIVE.md"),
@@ -648,7 +639,7 @@ fn symlinked_note_outside_the_root_is_indexed_under_its_vault_path() {
 
 #[test]
 fn gitignore_excludes_and_rebuild_restores() {
-    let t = Tmp::new();
+    let t = Fx::new();
     t.write("keep.md", "# keep\n");
     t.write("drop/x.md", "# x\n");
     t.write("sub/a.log", "log");

@@ -4,6 +4,10 @@
 //! [`VaultSpec`] always yields byte-identical files: content derives only from the spec and a
 //! small xorshift PRNG seeded from it. No note text is ever copied from a real vault.
 
+pub mod http;
+
+pub use http::{MockHttp, Reply, Request};
+
 use std::fmt::Write as _;
 use std::fs;
 use std::io;

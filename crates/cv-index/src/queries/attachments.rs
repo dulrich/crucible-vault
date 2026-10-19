@@ -112,40 +112,30 @@ pub fn delete_preview(q: &Query<'_>, note: &str) -> Result<Vec<(String, bool)>> 
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
     use super::*;
     use crate::Index;
 
-    struct Tmp(PathBuf);
-    impl Tmp {
+    /// A temp root holding `vault/` and the index (removed on drop).
+    struct Fx(tempfile::TempDir);
+    impl Fx {
         fn new() -> Self {
-            static N: AtomicU32 = AtomicU32::new(0);
-            let p = std::env::temp_dir().join(format!(
-                "cv-index-attach-{}-{}",
-                std::process::id(),
-                N.fetch_add(1, Ordering::SeqCst)
-            ));
-            let _ = std::fs::remove_dir_all(&p);
-            std::fs::create_dir_all(p.join("vault")).unwrap();
-            Self(p)
+            let d = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(d.path().join("vault")).unwrap();
+            Self(d)
+        }
+        fn path(&self) -> &std::path::Path {
+            self.0.path()
         }
         fn write(&self, rel: &str, content: &str) {
-            let p = self.0.join("vault").join(rel);
+            let p = self.path().join("vault").join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, content).unwrap();
-        }
-    }
-    impl Drop for Tmp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
     #[test]
     fn orphans_are_unlinked_managed_media_in_path_order() {
-        let t = Tmp::new();
+        let t = Fx::new();
         t.write("a/_attachments/n/aaa_MD5.png", "png");
         t.write("z/zzz_MD5.webp", "webp-bytes");
         t.write("b/bbb_MD5.png", "png");
@@ -157,7 +147,7 @@ mod tests {
             "n.md",
             "---\ncover: \"[[cov_MD5.jpg]]\"\n---\n![[bbb_MD5.png]] [doc](c/ccc_MD5.pdf)\n",
         );
-        let idx = Index::create(&t.0.join("vault"), &t.0.join("index.db")).unwrap();
+        let idx = Index::create(&t.path().join("vault"), &t.path().join("index.db")).unwrap();
         let q = idx.query();
         let rows = orphaned_attachments(&q).unwrap();
         let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
@@ -173,7 +163,7 @@ mod tests {
 
     #[test]
     fn delete_preview_classifies_orphan_shared_missing() {
-        let t = Tmp::new();
+        let t = Fx::new();
         t.write("img/own.png", "png");
         t.write("img/shared.png", "png");
         t.write("doc.pdf", "pdf");
@@ -184,7 +174,7 @@ mod tests {
             "![[own.png]] ![[shared.png]] ![[gone.png]] [[other]] ![[emb]] [d](doc.pdf) ![[own.png]] [[n]]\n",
         );
         t.write("m.md", "uses ![[shared.png]]\n");
-        let idx = Index::create(&t.0.join("vault"), &t.0.join("index.db")).unwrap();
+        let idx = Index::create(&t.path().join("vault"), &t.path().join("index.db")).unwrap();
         let q = idx.query();
         let items = delete_preview(&q, "n.md").unwrap();
         assert_eq!(

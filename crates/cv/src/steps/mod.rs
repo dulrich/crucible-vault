@@ -28,32 +28,42 @@
 //! those calls record the path for the cycle guard (I5).
 
 pub mod agent;
+#[cfg(test)]
+mod agent_tests;
 pub mod capture;
 pub mod capture_repair;
 #[cfg(test)]
 mod capture_repair_tests;
+#[cfg(test)]
+mod capture_tests;
+#[cfg(test)]
+mod config_tests;
 pub mod daily_brief;
 pub mod file;
+#[cfg(test)]
+mod file_tests;
 pub mod ignore;
 pub mod image_describe;
 pub mod link_scan;
 pub mod lint;
+#[cfg(test)]
+mod lint_tests;
 pub mod localize;
+#[cfg(test)]
+mod localize_tests;
 pub mod materialize;
+#[cfg(test)]
+mod materialize_tests;
 pub(crate) mod metadata;
 pub mod params;
 pub mod search;
+#[cfg(test)]
+mod search_tests;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod tracker;
 pub(crate) mod util;
 pub mod web;
-#[cfg(test)]
-mod wp10_tests;
-#[cfg(test)]
-mod wp11_tests;
-#[cfg(test)]
-mod wp12_tests;
-#[cfg(test)]
-mod wp13_tests;
 pub mod x;
 pub mod youtube;
 

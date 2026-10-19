@@ -825,6 +825,7 @@ dependencies = [
  "cv-schema",
  "cv-search",
  "cv-state",
+ "cv-testkit",
  "cv-text",
  "cv-vault",
  "hex",
@@ -835,6 +836,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
@@ -864,6 +866,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "walkdir",
@@ -902,6 +905,7 @@ name = "cv-providers"
 version = "0.1.0"
 dependencies = [
  "cv-ingest",
+ "cv-testkit",
  "reqwest",
  "serde",
  "serde_json",

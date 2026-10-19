@@ -2,81 +2,32 @@
 //! local fake Frankfurter/Open-Meteo (never the network, never the live vault, never env vars).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
 use cv_protocol::ActionContext;
-use cv_state::{QueueConfig, StateDb};
-use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use cv_testkit::{MockHttp, Reply};
+use cv_vault::test_support::LiveFixture;
+use serde_json::json;
 
+use crate::steps::testkit::StepEnv;
 use crate::steps::web::{Overrides, test_overrides};
-use crate::steps::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
-}
-
-struct Tmp(std::path::PathBuf);
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use crate::steps::{DeferCause, StepError, StepOutcome};
 
 type Routes = Vec<(&'static str, u16, &'static str)>;
 
-/// Route prefix (path + query) → (status, body); counts every request.
-async fn serve(routes: Routes, hits: Arc<AtomicUsize>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut sock, _)) = listener.accept().await {
-            let (routes, hits) = (routes.clone(), hits.clone());
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                hits.fetch_add(1, Ordering::SeqCst);
-                let head = String::from_utf8_lossy(&buf).into_owned();
-                let path = head.split(' ').nth(1).unwrap_or("/").to_owned();
-                let (status, body) = routes
-                    .iter()
-                    .find(|(p, _, _)| path.starts_with(p))
-                    .map_or((404, ""), |(_, s, b)| (*s, *b));
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    format!("http://{addr}")
+struct World {
+    env: StepEnv,
+    rt: tokio::runtime::Runtime,
+    vault: PathBuf,
+    http: MockHttp,
 }
 
-struct World {
-    _tmp: Tmp,
-    rt: tokio::runtime::Runtime,
-    vault: std::path::PathBuf,
-    index: std::path::PathBuf,
-    writer: cv_vault::WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-    config: ConfigSet,
-    base: String,
-    hits: Arc<AtomicUsize>,
+impl std::ops::Deref for World {
+    type Target = StepEnv;
+    fn deref(&self) -> &StepEnv {
+        &self.env
+    }
 }
 
 const FX_OK: &str = r#"{"amount":1.0,"base":"USD","date":"2026-10-14","rates":{"MXN":18.2345}}"#;
@@ -100,35 +51,18 @@ lon = 2.0
 "#;
 
 fn world(files: &[(&str, &str)], routes: Routes, pipelines: &str) -> World {
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "cv-wp9-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let tmp = Tmp(root.clone());
-    let vault = root.join("vault");
-    let protected = root.join("protected");
-    std::fs::create_dir_all(&protected).unwrap();
-    std::fs::create_dir_all(&vault).unwrap();
-    for (rel, text) in files {
-        let p = vault.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, text).unwrap();
-    }
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let index = root.join("index.db");
-    let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&root.join("state.db"), 1, QueueConfig::default()).unwrap();
+    let fx = LiveFixture::new(files.iter().copied());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let base = rt.block_on(serve(routes, hits.clone()));
+    // Route prefix (path + query) → (status, body); every request is recorded.
+    let http = MockHttp::routes(
+        routes
+            .into_iter()
+            .map(|(p, status, body)| (p, Reply::new(status, body))),
+    );
     let cfg = BTreeMap::from([
         ("pipelines.toml".to_owned(), Some(pipelines.to_owned())),
         (
@@ -143,15 +77,10 @@ fn world(files: &[(&str, &str)], routes: Routes, pipelines: &str) -> World {
     let mut config = ConfigSet::new();
     config.reload(&cfg, &crate::steps::validate);
     World {
-        vault: std::fs::canonicalize(&vault).unwrap(),
-        _tmp: tmp,
+        vault: fx.vault.clone(),
+        env: StepEnv::new(fx, config, action()),
         rt,
-        index,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-        config,
-        base,
-        hits,
+        http,
     }
 }
 
@@ -183,33 +112,17 @@ fn run(w: &World, s: &Step, active: Option<&str>) -> Result<StepOutcome, StepErr
     let _rt = w.rt.enter();
     let _o = test_overrides(Overrides {
         bases: HashMap::from([
-            ("frankfurter".to_owned(), format!("{}/fx", w.base)),
-            ("open-meteo".to_owned(), format!("{}/wx", w.base)),
+            ("frankfurter".to_owned(), format!("{}/fx", w.http.url())),
+            ("open-meteo".to_owned(), format!("{}/wx", w.http.url())),
         ]),
         secrets: None,
     });
-    let action = action();
     let context = ActionContext {
         active_path: active.map(str::to_owned),
         ..ActionContext::default()
     };
-    let (params, vars) = (Map::new(), Map::new());
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: &action,
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars: &vars,
-        config: &w.config,
-        vault_root: &w.vault,
-        index_db: &w.index,
-        search: None,
-        state: &w.state,
-        writer: Some(w.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
+    let mut ctx = w.ctx();
+    ctx.context = &context;
     crate::steps::execute(s, &mut ctx)
 }
 
@@ -303,7 +216,7 @@ fn brief_disabled_is_noop() {
     let w = world(&[], vec![], "");
     let o = brief(&w).unwrap();
     assert_eq!(o.vars["disabled"], json!(true));
-    assert_eq!(w.hits.load(Ordering::SeqCst), 0);
+    assert_eq!(w.http.hits(), 0);
     assert!(!w.vault.join(today_path()).exists());
 }
 
@@ -314,7 +227,7 @@ fn brief_nonempty_section_skips_without_fetch() {
     let w = world(&[(&p, note)], vec![("/fx", 200, FX_OK)], BRIEF_CFG);
     let o = brief(&w).unwrap();
     assert_eq!(o.vars["skipped"], json!(true));
-    assert_eq!(w.hits.load(Ordering::SeqCst), 0);
+    assert_eq!(w.http.hits(), 0);
     assert_eq!(read(&w, &p), note);
 }
 
@@ -395,10 +308,10 @@ fn brief_absent_section_appended_once_then_skips() {
         text.ends_with(")_\n- USD/MXN: 18.23 _(as of 2026-10-14)_\n"),
         "{text}"
     );
-    let hits = w.hits.load(Ordering::SeqCst);
+    let hits = w.http.hits();
     let o = brief(&w).unwrap();
     assert_eq!(o.vars["skipped"], json!(true));
-    assert_eq!(w.hits.load(Ordering::SeqCst), hits);
+    assert_eq!(w.http.hits(), hits);
     assert_eq!(read(&w, &p), text);
 }
 

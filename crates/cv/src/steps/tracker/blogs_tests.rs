@@ -2,84 +2,38 @@
 //! (never the network, never the live vault, never env vars).
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
-use cv_protocol::ActionContext;
-use cv_state::{QueueConfig, StateDb, TrackerOutcome};
-use serde_json::{Map, Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use cv_state::TrackerOutcome;
+use cv_testkit::{MockHttp, Reply};
+use cv_vault::test_support::LiveFixture;
+use serde_json::{Value, json};
 
 use super::super::hook;
 use super::KIND;
-use crate::steps::{ChildSpawner, StepCtx, StepError, StepOutcome};
+use crate::steps::testkit::StepEnv;
+use crate::steps::{StepError, StepOutcome};
 use crate::steps::{execute, validate};
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
-}
-
-struct Tmp(std::path::PathBuf);
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// Path → (status, body); swappable between runs.
 type Routes = Arc<Mutex<Vec<(&'static str, u16, String)>>>;
 
-async fn serve(routes: Routes) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut sock, _)) = listener.accept().await {
-            let routes = routes.clone();
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                let head = String::from_utf8_lossy(&buf).into_owned();
-                let path = head.split(' ').nth(1).unwrap_or("/").to_owned();
-                let (status, body) = routes
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(p, _, _)| path == *p)
-                    .map_or((404, String::new()), |(_, s, b)| (*s, b.clone()));
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    format!("http://{addr}")
-}
-
 struct World {
-    _tmp: Tmp,
+    env: StepEnv,
     rt: tokio::runtime::Runtime,
-    vault: std::path::PathBuf,
-    index: std::path::PathBuf,
-    writer: cv_vault::WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-    config: ConfigSet,
+    vault: PathBuf,
     base: String,
     routes: Routes,
+    _http: MockHttp,
+}
+
+impl std::ops::Deref for World {
+    type Target = StepEnv;
+    fn deref(&self) -> &StepEnv {
+        &self.env
+    }
 }
 
 const CAPTURES: &str = "[periods.day]\nfolder = \"daily\"\nformat = \"YYYY-MM-DD\"\n";
@@ -110,35 +64,26 @@ fn post_url(s: &str) -> String {
 
 /// `sources` rows as (name, path, extra toml).
 fn world(files: &[(&str, &str)], pipelines: &str, rows: &[(&str, &str, &str)]) -> World {
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "cv-wp8-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let tmp = Tmp(root.clone());
-    let vault = root.join("vault");
-    let protected = root.join("protected");
-    std::fs::create_dir_all(&protected).unwrap();
-    std::fs::create_dir_all(&vault).unwrap();
-    for (rel, text) in files {
-        let p = vault.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, text).unwrap();
-    }
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let index = root.join("index.db");
-    let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&root.join("state.db"), 1, QueueConfig::default()).unwrap();
+    let fx = LiveFixture::new(files.iter().copied());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     let routes: Routes = Arc::new(Mutex::new(Vec::new()));
-    let base = rt.block_on(serve(routes.clone()));
+    let table = Arc::clone(&routes);
+    let http = MockHttp::start(move |req| {
+        table
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(p, _, _)| req.target == *p)
+            .map_or_else(
+                || Reply::new(404, Vec::new()),
+                |(_, s, b)| Reply::new(*s, b.clone()),
+            )
+    });
+    let base = http.url();
     let sources: String = rows
         .iter()
         .map(|(name, path, extra)| {
@@ -159,15 +104,12 @@ fn world(files: &[(&str, &str)], pipelines: &str, rows: &[(&str, &str, &str)]) -
     let mut config = ConfigSet::new();
     config.reload(&files, &crate::steps::validate);
     World {
-        vault: std::fs::canonicalize(&vault).unwrap(),
-        _tmp: tmp,
+        vault: fx.vault.clone(),
+        env: StepEnv::new(fx, config, action()),
         rt,
-        index,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-        config,
         base,
         routes,
+        _http: http,
     }
 }
 
@@ -200,26 +142,7 @@ fn action() -> Action {
 
 fn run(w: &World) -> Result<StepOutcome, StepError> {
     let _rt = w.rt.enter();
-    let action = action();
-    let context = ActionContext::default();
-    let (params, vars) = (Map::new(), Map::new());
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: &action,
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars: &vars,
-        config: &w.config,
-        vault_root: &w.vault,
-        index_db: &w.index,
-        search: None,
-        state: &w.state,
-        writer: Some(w.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
-    execute(&step(""), &mut ctx)
+    execute(&step(""), &mut w.ctx())
 }
 
 fn today() -> String {

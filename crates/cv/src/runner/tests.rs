@@ -24,38 +24,14 @@ impl StepExecutor for FnExec {
     }
 }
 
-/// A temp dir removed on drop (`cv` has no dev-dependencies).
-struct Tmp(std::path::PathBuf);
-impl Tmp {
-    fn new() -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "cv-runner-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 struct Fixture {
-    _dir: Tmp,
+    _dir: tempfile::TempDir,
     state: Arc<Mutex<StateDb>>,
     events: broadcast::Sender<Notification>,
 }
 
 fn fixture() -> Fixture {
-    let dir = Tmp::new();
+    let dir = tempfile::tempdir().unwrap();
     let state = StateDb::open(&dir.path().join("state.db"), 1, QueueConfig::default()).unwrap();
     let (events, _) = broadcast::channel(256);
     Fixture {

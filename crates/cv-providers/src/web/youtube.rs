@@ -332,45 +332,19 @@ impl YoutubeApi {
 mod tests {
     use super::*;
     use crate::web::WebConfig;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use cv_testkit::{MockHttp, Reply};
 
-    /// Serves `(status, body)` for the first path segment after the base, echoing nothing.
-    async fn serve(routes: Vec<(&'static str, u16, &'static str)>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    return;
-                };
-                let routes = routes.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                        let n = sock.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 {
-                            return;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
-                    }
-                    let head = String::from_utf8_lossy(&buf).into_owned();
-                    let path = head.split(' ').nth(1).unwrap_or("/");
-                    let (status, body) = routes
-                        .iter()
-                        .find(|(p, _, _)| path.starts_with(p))
-                        .map_or((500, ""), |(_, s, b)| (*s, *b));
-                    let resp = format!(
-                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                });
-            }
-        });
-        format!("http://{addr}")
+    /// Serves `(status, body)` for the first route prefix of the request target (else 500).
+    fn serve(routes: Vec<(&'static str, u16, &'static str)>) -> MockHttp {
+        MockHttp::start(move |req| {
+            routes
+                .iter()
+                .find(|(p, _, _)| req.target.starts_with(p))
+                .map_or_else(
+                    || Reply::new(500, Vec::new()),
+                    |(_, s, b)| Reply::new(*s, *b),
+                )
+        })
     }
 
     fn client() -> WebClient {
@@ -383,13 +357,12 @@ mod tests {
 
     #[tokio::test]
     async fn decodes_videos_channels_and_playlist_items() {
-        let base = serve(vec![
+        let m = serve(vec![
             ("/videos", 200, VIDEOS),
             ("/channels", 200, CHANNELS),
             ("/playlistItems", 200, PLAYLIST),
-        ])
-        .await;
-        let (api, c) = (YoutubeApi::new(base), client());
+        ]);
+        let (api, c) = (YoutubeApi::new(m.url()), client());
         let v = api.videos(&c, "K", &["v1"]).await.unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].statistics.view_count, Some(123));
@@ -405,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn quota_403_is_quota_other_403_is_permanent_and_key_is_redacted() {
-        let base = serve(vec![
+        let m = serve(vec![
             (
                 "/videos",
                 403,
@@ -417,9 +390,8 @@ mod tests {
                 r#"{"error":{"errors":[{"reason":"forbidden"}]}}"#,
             ),
             ("/playlistItems", 404, ""),
-        ])
-        .await;
-        let (api, c) = (YoutubeApi::new(base), client());
+        ]);
+        let (api, c) = (YoutubeApi::new(m.url()), client());
         let e = api.videos(&c, "SECRETKEY", &["v1"]).await.unwrap_err();
         assert!(matches!(e, FetchError::Quota { .. }), "{e:?}");
         let e = api.channels(&c, "SECRETKEY", &["UC1"]).await.unwrap_err();

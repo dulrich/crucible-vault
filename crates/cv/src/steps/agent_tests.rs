@@ -1,42 +1,22 @@
-//! WP-12 tests: the agent step against a hand-rolled local HTTP responder posing as an
+//! `agent` step tests (was `wp12_tests.rs`): the agent step against a `cv_testkit::MockHttp` posing as an
 //! `openai-compatible` provider, synthetic notes in temp dirs and a temp protected root (I1).
 //! No real provider is ever called.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
 use cv_protocol::{ActionContext, ParamKind, ParamSpec};
 use cv_providers::{ProviderManager, SecretSource};
-use cv_state::{FailureReason, QueueConfig, StateDb};
+use cv_state::FailureReason;
+use cv_testkit::MockHttp;
+use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 use super::agent;
-use super::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
-
-struct Tmp(PathBuf);
-impl Tmp {
-    fn new() -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "cv-wp12-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-}
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use super::testkit::StepEnv;
+use super::{DeferCause, StepError, StepOutcome};
 
 struct TestSecrets(HashMap<String, String>);
 impl SecretSource for TestSecrets {
@@ -52,13 +32,6 @@ fn mgr() -> ProviderManager {
     let mut m = HashMap::new();
     m.insert("CV_TEST_KEY".to_owned(), "test-key".to_owned());
     ProviderManager::new(Arc::new(TestSecrets(m))).unwrap()
-}
-
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
 }
 
 /// One canned reply; `hook` runs before replying (simulates an edit during the slow call).
@@ -80,60 +53,23 @@ fn ok_reply(text: &str, finish: &str) -> Reply {
     }
 }
 
-/// Serves `reply` on 127.0.0.1; returns the base URL and the captured request bodies.
-async fn fake_provider(reply: Reply) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let seen2 = Arc::clone(&seen);
-    tokio::spawn(async move {
-        while let Ok((mut s, _)) = l.accept().await {
-            let reply = reply.clone();
-            let seen = Arc::clone(&seen2);
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                let (head_end, len) = loop {
-                    let n = s.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
-                        let len = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse::<usize>().ok())
-                            .unwrap_or(0);
-                        break (i + 4, len);
-                    }
-                };
-                while buf.len() < head_end + len {
-                    let n = s.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                if let Ok(v) = serde_json::from_slice::<Value>(&buf[head_end..]) {
-                    seen.lock().unwrap().push(v);
-                }
-                if let Some(h) = &reply.hook {
-                    h();
-                }
-                let resp = format!(
-                    "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    reply.status,
-                    reply.body.len(),
-                    reply.body
-                );
-                let _ = s.write_all(resp.as_bytes()).await;
-                let _ = s.shutdown().await;
-            });
+/// Serves `reply` on 127.0.0.1; returns the base URL and the mock (its recorded requests).
+async fn fake_provider(reply: Reply) -> (String, MockHttp) {
+    let m = MockHttp::start(move |_| {
+        if let Some(h) = &reply.hook {
+            h();
         }
+        cv_testkit::Reply::json(reply.status, reply.body.clone())
     });
-    (format!("http://{addr}/v1"), seen)
+    (format!("{}/v1", m.url()), m)
+}
+
+/// The JSON request bodies the fake provider received.
+fn bodies(m: &MockHttp) -> Vec<Value> {
+    m.requests()
+        .iter()
+        .filter_map(|r| serde_json::from_slice(&r.body).ok())
+        .collect()
 }
 
 fn providers_toml(base: &str) -> String {
@@ -217,39 +153,16 @@ fn action() -> Action {
     }
 }
 
-struct Env {
-    _tmp: Tmp,
-    vault: PathBuf,
-    writer: cv_vault::WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-    config: ConfigSet,
-    action: Action,
-}
+type Env = StepEnv;
 
 fn env(config: ConfigSet) -> Env {
-    let tmp = Tmp::new();
-    let vault = tmp.0.join("vault");
-    let protected = tmp.0.join("protected");
-    std::fs::create_dir_all(vault.join("_custom/prompts")).unwrap();
-    std::fs::create_dir_all(&protected).unwrap();
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let w = cv_vault::VaultWriter::open(fs, &tmp.0.join("index.db")).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&tmp.0.join("state.db"), 1, QueueConfig::default()).unwrap();
-    Env {
-        vault: std::fs::canonicalize(&vault).unwrap(),
-        _tmp: tmp,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-        config,
-        action: action(),
-    }
+    let fx = LiveFixture::builder().build();
+    std::fs::create_dir_all(fx.path("_custom/prompts")).unwrap();
+    StepEnv::new(fx, config, action())
 }
 
 fn note(e: &Env, rel: &str, text: &str) {
-    let p = e.vault.join(rel);
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
+    e.fx.write(rel, text);
 }
 
 fn run_with(
@@ -263,24 +176,10 @@ fn run_with(
         active_path: path.map(str::to_owned),
         ..ActionContext::default()
     };
-    let vars = Map::new();
-    let idx = e.vault.join("idx");
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: &e.action,
-        step_index: 3,
-        params,
-        context: &context,
-        vars: &vars,
-        config: &e.config,
-        vault_root: &e.vault,
-        index_db: &idx,
-        search: None,
-        state: &e.state,
-        writer: Some(e.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
+    let mut ctx = e.ctx();
+    ctx.step_index = 3;
+    ctx.params = params;
+    ctx.context = &context;
     let p = agent::parse(&st.params, &e.config).map_err(StepError::failed)?;
     agent::run(&p, &mut ctx, m)
 }
@@ -300,7 +199,7 @@ async fn exec(
 }
 
 fn read(e: &Env, rel: &str) -> String {
-    std::fs::read_to_string(e.vault.join(rel)).unwrap()
+    e.fx.text(rel)
 }
 
 // ---- validate ----
@@ -398,7 +297,7 @@ async fn renders_content_into_var() {
     assert_eq!(out.vars["agent_model"], "m1");
     assert_eq!(out.vars["agent_provider"], "fake");
     assert!(out.output_paths.is_empty());
-    let req = seen.lock().unwrap()[0].clone();
+    let req = bodies(&seen)[0].clone();
     assert_eq!(req["model"], "m1");
     assert_eq!(req["max_tokens"], 100);
     assert_eq!(req["messages"][1]["content"], "Refine talk:\nraw words\n");
@@ -426,7 +325,7 @@ async fn prompt_file_and_param_model() {
     .await
     .unwrap();
     assert_eq!(out.vars["r"], "OUT");
-    let req = seen.lock().unwrap()[0].clone();
+    let req = bodies(&seen)[0].clone();
     assert_eq!(req["messages"][0]["content"], "sys");
     assert_eq!(req["messages"][1]["content"], "Body: hello");
     assert_eq!(req["max_tokens"], 7);
@@ -469,7 +368,7 @@ async fn prompt_file_and_param_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replace_mode_cas_write() {
-    let (base, _) = fake_provider(ok_reply("clean text", "stop")).await;
+    let (base, _mock) = fake_provider(ok_reply("clean text", "stop")).await;
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "t.md", "---\na: 1\n---\nmessy\n");
     let out = exec(
@@ -504,10 +403,10 @@ async fn replace_mode_conflict_defers_and_never_clobbers() {
             std::fs::write(p, "user edit\n").unwrap();
         }
     }));
-    let (base, _) = fake_provider(reply).await;
+    let (base, _mock) = fake_provider(reply).await;
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "c.md", "original\n");
-    *slot.lock().unwrap() = Some(e.vault.join("c.md"));
+    *slot.lock().unwrap() = Some(e.fx.path("c.md"));
     let err = exec(
         Arc::clone(&e),
         "agent = \"refine\"\noutput = \"replace\"",
@@ -530,7 +429,7 @@ async fn replace_mode_conflict_defers_and_never_clobbers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outage_is_deferred() {
-    let (base, _) = fake_provider(Reply {
+    let (base, _mock) = fake_provider(Reply {
         status: 503,
         body: "{}".into(),
         hook: None,
@@ -556,12 +455,10 @@ async fn outage_is_deferred() {
     );
 
     // server down: bind then drop to get a port nobody listens on
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    drop(l);
+    let port = MockHttp::unused_port();
     let e = Arc::new(env(config_with(
         AGENTS,
-        &providers_toml(&format!("http://{addr}/v1")),
+        &providers_toml(&format!("http://127.0.0.1:{port}/v1")),
     )));
     note(&e, "n.md", "x");
     let err = exec(
@@ -584,7 +481,7 @@ async fn outage_is_deferred() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_4xx_fails() {
-    let (base, _) = fake_provider(Reply {
+    let (base, _mock) = fake_provider(Reply {
         status: 400,
         body: "{}".into(),
         hook: None,
@@ -622,12 +519,12 @@ async fn missing_key_is_no_api_key() {
         ),
         "{err:?}"
     );
-    assert!(seen.lock().unwrap().is_empty());
+    assert!(bodies(&seen).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn truncation_fails_and_writes_nothing() {
-    let (base, _) = fake_provider(ok_reply("half", "length")).await;
+    let (base, _mock) = fake_provider(ok_reply("half", "length")).await;
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "n.md", "orig\n");
     let err = exec(

@@ -18,28 +18,18 @@ use serde_json::{Map, Value, json};
 use super::{StepExecutor, Trigger};
 use crate::steps::{StepCtx, StepError, StepOutcome};
 use crate::{Client, ClientError, Config, Daemon, DaemonOptions, RunningDaemon};
-
-static N: AtomicUsize = AtomicUsize::new(0);
+use cv_testkit::{MockHttp, Reply};
 
 struct Env {
     root: PathBuf,
     vars: HashMap<String, String>,
-}
-
-impl Drop for Env {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
+    _dir: tempfile::TempDir,
 }
 
 impl Env {
     fn new(actions: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "cv-run-it-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
         let vault = root.join("prot").join("Synth");
         std::fs::create_dir_all(vault.join("inbox")).unwrap();
         std::fs::write(vault.join("a.md"), "# A\n").unwrap();
@@ -59,7 +49,11 @@ impl Env {
         ] {
             vars.insert(k.to_owned(), v.display().to_string());
         }
-        Self { root, vars }
+        Self {
+            root,
+            vars,
+            _dir: dir,
+        }
     }
     fn config(&self) -> Config {
         let vars = self.vars.clone();
@@ -414,12 +408,8 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
 
 #[test]
 fn example_config_files_load_cleanly() {
-    let dir = std::env::temp_dir().join(format!(
-        "cv-run-ex-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
     std::fs::write(
         dir.join("actions.toml"),
         include_str!("../../../../config/examples/actions.toml"),
@@ -465,7 +455,7 @@ fn example_config_files_load_cleanly() {
     .unwrap();
     let mut set = cv_actions::ConfigSet::new();
     super::load_config_dir(&dir, &mut set);
-    let _ = std::fs::remove_dir_all(&dir);
+    drop(tmp);
     assert!(set.errors().is_empty(), "{:?}", set.errors());
     assert_eq!(set.armed_actions().count(), 31);
     assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
@@ -544,56 +534,16 @@ async fn durable_move_publishes_open_path_on_terminal_status() {
 
 // --- `search` request (plan semsearch-crate WP-4) ------------------------------------------
 
-/// A one-thread fake OpenAI-compatible embedder: every `/embeddings` input gets [`SEARCH_VEC`].
-fn fake_embedder() -> String {
-    use std::io::{Read, Write};
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = l.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for s in l.incoming() {
-            let Ok(mut s) = s else { return };
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 8192];
-            let (head_end, len) = loop {
-                let Ok(n) = s.read(&mut chunk) else {
-                    break (0, 0);
-                };
-                if n == 0 {
-                    break (0, 0);
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let head = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
-                    let len = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .and_then(|v| v.trim().parse().ok())
-                        .unwrap_or(0usize);
-                    break (i + 4, len);
-                }
-            };
-            while head_end > 0 && buf.len() < head_end + len {
-                let Ok(n) = s.read(&mut chunk) else { break };
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            let body: Value =
-                serde_json::from_slice(buf.get(head_end..).unwrap_or_default()).unwrap_or_default();
-            let n = body["input"].as_array().map_or(1, Vec::len);
-            let data: Vec<Value> = (0..n)
-                .map(|i| json!({"index": i, "embedding": SEARCH_VEC}))
-                .collect();
-            let out = json!({ "data": data }).to_string();
-            let _ = write!(
-                s,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}",
-                out.len()
-            );
-        }
-    });
-    format!("http://{addr}")
+/// A fake OpenAI-compatible embedder: every `/embeddings` input gets [`SEARCH_VEC`].
+fn fake_embedder() -> MockHttp {
+    MockHttp::start(|req| {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let n = body["input"].as_array().map_or(1, Vec::len);
+        let data: Vec<Value> = (0..n)
+            .map(|i| json!({"index": i, "embedding": SEARCH_VEC}))
+            .collect();
+        Reply::json(200, json!({ "data": data }).to_string())
+    })
 }
 
 const SEARCH_VEC: [f32; 3] = [0.1, 0.2, 0.3];
@@ -647,7 +597,8 @@ fn search(c: &mut Client, q: &str) -> cv_protocol::SearchResult {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn search_sees_a_feed_write_in_the_same_daemon_and_is_semantic_with_the_embedder_up() {
-    let env = search_env(&fake_embedder());
+    let embedder = fake_embedder();
+    let env = search_env(&embedder.url());
     let d = start(&env, feeding_exec()).await;
     let mut c = env.client();
     assert!(

@@ -16,6 +16,8 @@ mod fs;
 mod hash;
 mod path;
 mod rewrite;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod thread;
 mod watcher;
 mod writer;

@@ -1,85 +1,19 @@
 //! WP-3 `link_scan` tests: a synthetic temp vault and a temp `state.db` (never the live vault).
 
-use std::sync::{Arc, Mutex};
-
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
 use cv_protocol::ActionContext;
-use cv_state::{QueueConfig, StateDb};
-use serde_json::{Map, Value, json};
+use cv_state::StateDb;
+use cv_vault::test_support::LiveFixture;
+use serde_json::json;
 
 use super::{is_excluded, normalize_exclusions};
-use crate::steps::{ChildSpawner, StepCtx, StepOutcome};
+use crate::steps::StepOutcome;
+use crate::steps::testkit::StepEnv;
 use crate::steps::{execute, validate};
 
-struct NoChildren;
-impl ChildSpawner for NoChildren {
-    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children".into())
-    }
-}
-
-struct Tmp(std::path::PathBuf);
-impl Tmp {
-    fn new() -> Self {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "cv-wp3-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        Self(p)
-    }
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl Drop for Tmp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-struct Env {
-    _tmp: Tmp,
-    vault: std::path::PathBuf,
-    index: std::path::PathBuf,
-    writer: cv_vault::WriterHandle,
-    state: Arc<Mutex<StateDb>>,
-}
+type Env = StepEnv;
 
 fn env(files: &[(&str, &str)]) -> Env {
-    let tmp = Tmp::new();
-    let vault = tmp.path().join("vault");
-    let protected = tmp.path().join("protected");
-    std::fs::create_dir_all(&protected).unwrap();
-    for (rel, text) in files {
-        let p = vault.join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, text).unwrap();
-    }
-    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
-    let index = tmp.path().join("index.db");
-    let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
-    let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
-    let state = StateDb::open(&tmp.path().join("state.db"), 1, QueueConfig::default()).unwrap();
-    Env {
-        vault: std::fs::canonicalize(&vault).unwrap(),
-        index,
-        _tmp: tmp,
-        writer,
-        state: Arc::new(Mutex::new(state)),
-    }
-}
-
-fn step(src: &str) -> Step {
-    let t: toml::Table = format!("type = \"link_scan\"\n{src}").parse().unwrap();
-    Step::from_table(t).unwrap()
-}
-
-fn run(e: &Env, src: &str, active: Option<&str>) -> Result<StepOutcome, String> {
     let action = Action {
         id: "link-scan".into(),
         label: "Link scan".into(),
@@ -96,28 +30,25 @@ fn run(e: &Env, src: &str, active: Option<&str>) -> Result<StepOutcome, String> 
             keys: vec![],
         },
     };
+    StepEnv::new(
+        LiveFixture::new(files.iter().copied()),
+        ConfigSet::new(),
+        action,
+    )
+}
+
+fn step(src: &str) -> Step {
+    let t: toml::Table = format!("type = \"link_scan\"\n{src}").parse().unwrap();
+    Step::from_table(t).unwrap()
+}
+
+fn run(e: &Env, src: &str, active: Option<&str>) -> Result<StepOutcome, String> {
     let context = ActionContext {
         active_path: active.map(str::to_owned),
         ..ActionContext::default()
     };
-    let (params, vars) = (Map::new(), Map::new());
-    let config = ConfigSet::new();
-    let mut ctx = StepCtx {
-        job_id: "job-1",
-        action: &action,
-        step_index: 0,
-        params: &params,
-        context: &context,
-        vars: &vars,
-        config: &config,
-        vault_root: &e.vault,
-        index_db: &e.index,
-        search: None,
-        state: &e.state,
-        writer: Some(e.writer.clone()),
-        children: &NoChildren,
-        written: Vec::new(),
-    };
+    let mut ctx = e.ctx();
+    ctx.context = &context;
     execute(&step(src), &mut ctx).map_err(|e| format!("{e:?}"))
 }
 

@@ -39,5 +39,11 @@ cv-ingest = { path = "../cv-ingest" }
 # schema's step records (was a dev-only edge for `tests/schema_drift.rs`; lock unchanged).
 cv-schema = { path = "../cv-schema" }
 
+[dev-dependencies]
+# Plan tn-review-baseline-remediation WP-R14 (M6): shared test harness (dev edges only).
+tempfile = "=3.27.0"
+cv-testkit = { path = "../cv-testkit" }
+cv-vault = { path = "../cv-vault", features = ["test-support"] }
+
 [lints]
 workspace = true

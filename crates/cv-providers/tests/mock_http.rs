@@ -1,20 +1,18 @@
-//! Drives each HTTP provider kind against a local `tokio::net::TcpListener` mock — never the
+//! Drives each HTTP provider kind against the shared std-only `cv_testkit::MockHttp` — never the
 //! network or a real model. Asserts request shape (path, headers, `max_tokens`, body) and
 //! response parsing.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use cv_providers::{
     CompletionRequest, FinishReason, ProviderConfig, ProviderManager, ProvidersConfig, SecretSource,
 };
+use cv_testkit::{MockHttp, Reply};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
+/// One request as the assertions read it (target, lower-cased headers, JSON body).
 #[derive(Debug, Clone)]
 struct Recorded {
     path: String,
@@ -22,88 +20,60 @@ struct Recorded {
     body: Value,
 }
 
-type Handler =
-    Arc<dyn Fn(Recorded) -> Pin<Box<dyn Future<Output = (u16, Value)> + Send>> + Send + Sync>;
+impl From<&cv_testkit::Request> for Recorded {
+    fn from(r: &cv_testkit::Request) -> Self {
+        Self {
+            path: r.target.clone(),
+            headers: r.headers.iter().cloned().collect(),
+            body: serde_json::from_slice(&r.body).unwrap_or(Value::Null),
+        }
+    }
+}
+
+type Handler = Arc<dyn Fn(Recorded) -> (u16, Value) + Send + Sync>;
 
 struct Mock {
     base: String,
-    log: Arc<Mutex<Vec<Recorded>>>,
+    http: MockHttp,
 }
 
-async fn read_request(s: &mut tokio::net::TcpStream) -> Option<Recorded> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let head_end = loop {
-        let n = s.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break i + 4;
-        }
-    };
-    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-    let mut lines = head.split("\r\n");
-    let path = lines.next()?.split(' ').nth(1)?.to_owned();
-    let headers: HashMap<String, String> = lines
-        .filter_map(|l| l.split_once(':'))
-        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
-        .collect();
-    let len: usize = headers
-        .get("content-length")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    while buf.len() < head_end + len {
-        let n = s.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
+impl Mock {
+    /// Every request received so far.
+    fn log(&self) -> Vec<Recorded> {
+        self.http.requests().iter().map(Recorded::from).collect()
     }
-    let body = serde_json::from_slice(&buf[head_end..]).unwrap_or(Value::Null);
-    Some(Recorded {
-        path,
-        headers,
-        body,
-    })
 }
 
 async fn mock(handler: Handler) -> Mock {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let log2 = log.clone();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut s, _)) = l.accept().await else {
-                return;
-            };
-            let (h, log) = (handler.clone(), log2.clone());
-            tokio::spawn(async move {
-                let Some(req) = read_request(&mut s).await else {
-                    return;
-                };
-                log.lock().unwrap().push(req.clone());
-                let (status, body) = h(req).await;
-                let body = body.to_string();
-                let resp = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = s.write_all(resp.as_bytes()).await;
-                let _ = s.shutdown().await;
-            });
-        }
+    let http = MockHttp::start(move |req| {
+        let (status, body) = handler(Recorded::from(req));
+        Reply::json(status, body.to_string())
     });
-    Mock { base, log }
+    Mock {
+        base: http.url(),
+        http,
+    }
 }
 
 fn fixed(status: u16, body: Value) -> Handler {
-    Arc::new(move |_| {
-        let b = body.clone();
-        Box::pin(async move { (status, b) })
-    })
+    Arc::new(move |_| (status, body.clone()))
+}
+
+/// A blocking permit gate for the mock's handler threads (`Notify`-like: permits are stored).
+#[derive(Default)]
+struct Gate(Mutex<usize>, Condvar);
+impl Gate {
+    fn wait(&self) {
+        let mut n = self.0.lock().unwrap();
+        while *n == 0 {
+            n = self.1.wait(n).unwrap();
+        }
+        *n -= 1;
+    }
+    fn notify_one(&self) {
+        *self.0.lock().unwrap() += 1;
+        self.1.notify_one();
+    }
 }
 
 struct Secrets(HashMap<String, String>);
@@ -157,7 +127,7 @@ async fn openai_compatible_completion_shape_and_parse() {
     let c = manager().complete(&p, "gemma-4", req(None)).await.unwrap();
     assert_eq!(c.text, "hi");
     assert_eq!(c.finish_reason, FinishReason::Length);
-    let r = m.log.lock().unwrap()[0].clone();
+    let r = m.log()[0].clone();
     assert_eq!(r.path, "/v1/chat/completions");
     assert_eq!(r.headers["authorization"], "Bearer sk-test");
     assert_eq!(r.body["model"], "gemma-4");
@@ -182,7 +152,7 @@ async fn keyless_local_sends_no_auth_and_provider_max_tokens_applies() {
     let p = provider("openai-compatible", &m.base, "max_tokens = 512\n");
     manager().complete(&p, "m", req(None)).await.unwrap();
     manager().complete(&p, "m", req(Some(64))).await.unwrap();
-    let log = m.log.lock().unwrap();
+    let log = m.log();
     assert!(!log[0].headers.contains_key("authorization"));
     assert_eq!(log[0].body["max_tokens"], 512);
     assert_eq!(log[1].body["max_tokens"], 64);
@@ -204,7 +174,7 @@ async fn anthropic_shape() {
         (c.text.as_str(), c.finish_reason),
         ("ok", FinishReason::Stop)
     );
-    let r = m.log.lock().unwrap()[0].clone();
+    let r = m.log()[0].clone();
     assert_eq!(r.path, "/v1/messages");
     assert_eq!(r.headers["x-api-key"], "sk-test");
     assert_eq!(r.headers["anthropic-version"], "2023-06-01");
@@ -221,7 +191,7 @@ async fn anthropic_without_key_fails_before_any_request() {
     let m = mock(fixed(200, json!({}))).await;
     let p = provider("anthropic", &m.base, "");
     assert!(manager().complete(&p, "c", req(None)).await.is_err());
-    assert!(m.log.lock().unwrap().is_empty());
+    assert!(m.log().is_empty());
 }
 
 #[tokio::test]
@@ -230,7 +200,7 @@ async fn google_shape() {
     let p = provider("google", &m.base, "api_key_env = \"TEST_KEY\"\n");
     let c = manager().complete(&p, "gemini-x", req(None)).await.unwrap();
     assert_eq!(c.text, "ab");
-    let r = m.log.lock().unwrap()[0].clone();
+    let r = m.log()[0].clone();
     assert_eq!(r.path, "/v1beta/models/gemini-x:generateContent");
     assert_eq!(r.headers["x-goog-api-key"], "sk-test");
     assert_eq!(r.body["generationConfig"]["maxOutputTokens"], 4096);
@@ -241,16 +211,14 @@ async fn google_shape() {
 #[tokio::test]
 async fn ollama_completion_and_embed_shape() {
     let h: Handler = Arc::new(|r: Recorded| {
-        Box::pin(async move {
-            if r.path == "/api/embed" {
-                (200, json!({"embeddings": [[0.1, 0.2], [0.3, 0.4]]}))
-            } else {
-                (
-                    200,
-                    json!({"message": {"content": "o"}, "done_reason": "stop"}),
-                )
-            }
-        })
+        if r.path == "/api/embed" {
+            (200, json!({"embeddings": [[0.1, 0.2], [0.3, 0.4]]}))
+        } else {
+            (
+                200,
+                json!({"message": {"content": "o"}, "done_reason": "stop"}),
+            )
+        }
     });
     let m = mock(h).await;
     let p = provider("ollama", &m.base, "");
@@ -262,7 +230,7 @@ async fn ollama_completion_and_embed_shape() {
         .await
         .unwrap();
     assert_eq!(e.dimensions, Some(2));
-    let log = m.log.lock().unwrap();
+    let log = m.log();
     assert_eq!(log[0].path, "/api/chat");
     assert_eq!(log[0].body["stream"], false);
     assert_eq!(log[0].body["options"]["num_predict"], 4096);
@@ -283,7 +251,7 @@ async fn openai_embed_and_count_mismatch() {
         .await
         .unwrap();
     assert_eq!(e.vectors, vec![vec![1.0], vec![2.0]]);
-    assert_eq!(m.log.lock().unwrap()[0].path, "/embeddings");
+    assert_eq!(m.log()[0].path, "/embeddings");
     let err = mgr
         .embed(&p, "bge-m3", &["x".into()])
         .await
@@ -322,7 +290,7 @@ async fn native_rerank_request_and_index_mapping() {
         .unwrap();
     let get = |i| r.iter().find(|x| x.index == i).unwrap().relevance_score;
     assert_eq!((get(0), get(1), get(2)), (0.1, 0.5, 0.9));
-    let rec = m.log.lock().unwrap()[0].clone();
+    let rec = m.log()[0].clone();
     assert_eq!(rec.path, "/rerank");
     assert_eq!(rec.body["documents"], json!(docs));
     assert_eq!(rec.body["query"], "q");
@@ -338,7 +306,7 @@ async fn ollama_rerank_uses_completion_fallback() {
         .await
         .unwrap();
     assert_eq!(r.len(), 2);
-    let rec = m.log.lock().unwrap()[0].clone();
+    let rec = m.log()[0].clone();
     assert_eq!(rec.path, "/api/chat");
     assert!(
         rec.body["messages"][1]["content"]
@@ -365,18 +333,15 @@ async fn ollama_rerank_uses_completion_fallback() {
 // completions, while embed is never gated behind an in-flight completion.
 #[tokio::test]
 async fn local_completions_serialize_but_embed_is_exempt() {
-    let gate = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(Gate::default());
     let g2 = gate.clone();
     let h: Handler = Arc::new(move |r: Recorded| {
-        let g = g2.clone();
-        Box::pin(async move {
-            if r.path == "/chat/completions" {
-                g.notified().await;
-                (200, json!({"choices": [{"message": {"content": "done"}}]}))
-            } else {
-                (200, json!({"data": [{"index": 0, "embedding": [1.0]}]}))
-            }
-        })
+        if r.path == "/chat/completions" {
+            g2.wait();
+            (200, json!({"choices": [{"message": {"content": "done"}}]}))
+        } else {
+            (200, json!({"data": [{"index": 0, "embedding": [1.0]}]}))
+        }
     });
     let m = mock(h).await;
     let p = provider("openai-compatible", &m.base, "");
@@ -388,9 +353,7 @@ async fn local_completions_serialize_but_embed_is_exempt() {
     let second = tokio::spawn(async move { m2.complete(&p2, "m", req(None)).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let chat = |m: &Mock| {
-        m.log
-            .lock()
-            .unwrap()
+        m.log()
             .iter()
             .filter(|r| r.path == "/chat/completions")
             .count()
@@ -426,15 +389,8 @@ async fn http_error_display_drops_the_body() {
 // and classifies as `FailureKind::Timeout`.
 #[tokio::test]
 async fn http_request_times_out_per_provider_timeout() {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
-    tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Ok((s, _)) = l.accept().await {
-            held.push(s); // never respond
-        }
-    });
-    let p = provider("openai-compatible", &base, "timeout_seconds = 1\n");
+    let never = MockHttp::fixed(Reply::hang()); // accepts, never responds
+    let p = provider("openai-compatible", &never.url(), "timeout_seconds = 1\n");
     let started = std::time::Instant::now();
     let e = tokio::time::timeout(
         Duration::from_secs(10),
