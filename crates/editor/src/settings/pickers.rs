@@ -441,6 +441,16 @@ pub fn visible(
             let q = split_ref(query).map_or(query, |(_, m)| m);
             typeahead::filter(q, &small_set(s, picker, file, at, query), LIMIT)
         }
+        // Channels already in the list drop out of the adder's suggestions (plan
+        // round-7-feedback-decisions WP-5).
+        Picker::Channel => {
+            let listed = s.str_list(file, at);
+            let left: Vec<Candidate> = small_set(s, picker, file, at, query)
+                .into_iter()
+                .filter(|c| !listed.contains(&c.value))
+                .collect();
+            typeahead::filter(query, &left, LIMIT)
+        }
         _ => typeahead::filter(query, &small_set(s, picker, file, at, query), LIMIT),
     }
 }

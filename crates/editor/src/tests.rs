@@ -3494,6 +3494,122 @@ mod find_return_leak {
         );
     }
 
+    /// Plan round-7-feedback-decisions WP-5: Ignore Shorts is a vertical add/drop list. A picked
+    /// channel leaves the suggestions; after the save lands and its FileChanged echo arrives,
+    /// typing in the adder again and clicking a candidate still adds it; a remove round-trips to
+    /// the expected TOML string array.
+    #[test]
+    fn ignore_shorts_list_add_again_across_save_echo() {
+        use crate::settings::{FormMsg, Section, SettingsMsg};
+        const PIPES: &str = "_custom/crucible-vault/pipelines.toml";
+        const SOURCES: &str = "_custom/crucible-vault/sources.toml";
+        let (_tmp, d) = fake();
+        let d = Arc::new(d);
+        d.create_note(
+            SOURCES,
+            "[[youtube]]\nchannel = \"Chan\"\nid = \"UC123\"\n\n[[youtube]]\nchannel = \"Chao\"\nid = \"UC456\"\n",
+        )
+        .expect("sources");
+        d.create_note(PIPES, "[ignore_shorts]\nchannels = []\n")
+            .expect("pipes");
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), None);
+        app.rpc_inline = true;
+        let _ = app.update(Message::Explorer(ExplorerMsg::Open(
+            crate::settings::SETTINGS_TAB.into(),
+        )));
+        let _ = app.update(Message::Settings(SettingsMsg::Section(Section::Pipelines)));
+        let mut ui = Ui {
+            renderer: renderer(),
+            tree: None,
+            height: 3000.0,
+        };
+        let chans = cv_schema::Path::parse("ignore_shorts.channels").expect("p");
+        let adder = |ui: &mut Ui, app: &App| {
+            let s = spots(ui, app);
+            let help = s
+                .texts
+                .iter()
+                .find(|(_, t)| t == "Channel ids or names")
+                .map(|(b, _)| b.center_y())
+                .expect("channels help");
+            s.inputs
+                .iter()
+                .filter(|b| (b.width - 160.0).abs() < 0.5)
+                .min_by(|a, b| {
+                    (a.center_y() - help)
+                        .abs()
+                        .total_cmp(&(b.center_y() - help).abs())
+                })
+                .copied()
+                .expect("list adder input")
+        };
+        let pick = |ui: &mut Ui, app: &mut App, label: &str| {
+            let input = adder(ui, app);
+            ui.click(app, input.center());
+            ui.send(app, &press(Key::Character("c".into()), Some("c")));
+            let s = spots(ui, app);
+            let cand = s
+                .texts
+                .iter()
+                .find(|(_, t)| t == label)
+                .map(|(b, _)| *b)
+                .unwrap_or_else(|| panic!("candidate {label} shown"));
+            ui.click(app, cand.center());
+        };
+        let save = |app: &mut App| {
+            let _ = app.update(Message::Settings(SettingsMsg::Save(PIPES.into())));
+            let (bytes, h) = d.read_file(PIPES).expect("saved");
+            let _ = app.update(Message::Status(StatusMsg::Notification(
+                Notification::FileChanged {
+                    path: PIPES.to_owned(),
+                    kind: cv_protocol::ChangeKind::Modified,
+                    hash: Some(h.as_str().to_owned()),
+                    origin: cv_protocol::Origin::Daemon,
+                },
+            )));
+            String::from_utf8(bytes).expect("utf8")
+        };
+        pick(&mut ui, &mut app, "Chan (UC123)");
+        // The picked channel leaves the suggestions.
+        let left: Vec<String> = app
+            .settings
+            .ta_visible(&[])
+            .into_iter()
+            .map(|c| c.value)
+            .collect();
+        assert!(!left.iter().any(|v| v == "UC123"), "{left:?}");
+        assert!(left.iter().any(|v| v == "UC456"), "{left:?}");
+        let text = save(&mut app);
+        assert!(text.contains("channels = [\"UC123\"]"), "{text}");
+        // Across the save and its echo: pick again.
+        pick(&mut ui, &mut app, "Chao (UC456)");
+        let text = save(&mut app);
+        assert!(text.contains("channels = [\"UC123\", \"UC456\"]"), "{text}");
+        // The list shows one row per channel (vertical: distinct rows).
+        let s = spots(&mut ui, &app);
+        let ys: Vec<f32> = ["Chan (UC123)", "Chao (UC456)"]
+            .iter()
+            .map(|l| {
+                s.texts
+                    .iter()
+                    .find(|(_, t)| t == l)
+                    .map(|(b, _)| b.center_y())
+                    .expect("row")
+            })
+            .collect();
+        assert!(ys[1] > ys[0] + 10.0, "vertical rows: {ys:?}");
+        let _ = app.update(Message::Settings(SettingsMsg::Form(
+            PIPES.into(),
+            FormMsg::ChipRemove {
+                path: chans,
+                index: 0,
+            },
+        )));
+        let text = save(&mut app);
+        assert!(text.contains("channels = [\"UC456\"]"), "{text}");
+    }
+
     /// Plan round-7 WP-3: the dedicated Log icon-button opens `/:log` and resets unread; a
     /// click on the notice text opens it too.
     #[test]
@@ -4729,5 +4845,51 @@ mod scroll_matrix {
             (ViewMode::Source, Input::Find, true, true),
             (ViewMode::Source, Input::Find, false, true),
         ]);
+    }
+}
+
+/// Plan round-7-feedback-decisions WP-5: view-fence text and rows scale with `font_size`.
+mod view_font_scale {
+    use crate::reading::view::{block_size, reading_scale, scaled};
+    use crate::views::{MAX_HEIGHT, ROW_HEIGHT, VIRTUAL_THRESHOLD, px, row_height};
+    use crate::widget::virtual_list::{ListWindow, OVERSCAN, VirtualList};
+
+    /// View text keeps its design ratio to the Reading paragraph at every `font_size`.
+    #[test]
+    fn view_text_tracks_font_size() {
+        for fs in [8.0_f32, 16.0, 22.0, 40.0, 64.0] {
+            let s = reading_scale(fs);
+            let para = scaled(block_size(None), s);
+            assert!((para - fs).abs() < 1e-3, "paragraph = font_size at {fs}");
+            for design in [12.0_f32, 13.0, 14.0] {
+                assert!((px(design, s) - scaled(design, s)).abs() < 1e-3);
+                if fs >= 16.0 {
+                    assert!((px(design, s) / para - design / 16.0).abs() < 1e-3, "{fs}");
+                }
+            }
+            assert!((row_height(s) - ROW_HEIGHT * fs / 16.0).abs() < 1e-3);
+        }
+    }
+
+    /// Audit E4: a virtualized view at `font_size` 40 lays rows out at the scaled height and its
+    /// visible range covers exactly the window at that height (no clipped / overlapping rows).
+    #[test]
+    fn virtualized_view_rows_scale_at_large_font() {
+        let h = row_height(reading_scale(40.0));
+        assert!((h - 65.0).abs() < 1e-3, "{h}");
+        let lines: Vec<u32> = (0..200).collect();
+        assert!(lines.len() > VIRTUAL_THRESHOLD);
+        let window = ListWindow {
+            offset: 20.0 * h,
+            height: MAX_HEIGHT,
+        };
+        let r = VirtualList::new(&lines, h, window, |w| w).range();
+        assert_eq!(r.start, 20 - OVERSCAN);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let shown = (MAX_HEIGHT / h).ceil() as usize;
+        assert_eq!(r.end, 20 + shown + OVERSCAN);
+        // At the unscaled height the same window would build far more rows than fit.
+        let flat = VirtualList::new(&lines, ROW_HEIGHT, window, |w| w).range();
+        assert!(flat.len() > r.len());
     }
 }

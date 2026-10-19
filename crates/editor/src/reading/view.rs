@@ -311,7 +311,13 @@ fn prop_press(path: &str, key: &str) -> Message {
 
 /// The `crucible-view` fence hook: the view `<file>#<name>` with `this` = the embedding note.
 fn view_fence<'a>(cx: &Ctx<'a>, file: &str, name: &str) -> Element<'a, Message> {
-    crate::views::fence(cx.views, &crate::views::view_id(file, name), cx.path, cx.t)
+    crate::views::fence(
+        cx.views,
+        &crate::views::view_id(file, name),
+        cx.path,
+        cx.t,
+        cx.scale,
+    )
 }
 
 fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Message> {

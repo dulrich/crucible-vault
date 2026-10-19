@@ -432,24 +432,42 @@ pub fn struck(s: &str) -> Option<&str> {
 }
 
 /// The fence widget for `id` embedded in `host`.
-pub fn fence<'a>(store: &'a ViewStore, id: &str, host: &str, t: Tokens) -> Element<'a, Message> {
+/// Plan round-7-feedback-decisions WP-5: a view design size (px; Reading paragraph = 16) at the
+/// Reading text scale, so view text tracks `editor.toml` `font_size` like Reading text.
+pub fn px(design: f32, scale: f32) -> f32 {
+    crate::reading::view::scaled(design, scale)
+}
+
+/// Plan round-7-feedback-decisions WP-5 (audit E4): the virtual-list row height at `scale` —
+/// [`ROW_HEIGHT`] scaled with the text so large fonts neither clip nor overlap rows.
+pub fn row_height(scale: f32) -> f32 {
+    ROW_HEIGHT * scale
+}
+
+pub fn fence<'a>(
+    store: &'a ViewStore,
+    id: &str,
+    host: &str,
+    t: Tokens,
+    scale: f32,
+) -> Element<'a, Message> {
     let entry = store.get(id, Some(host));
     let body: Element<'a, Message> = match entry.map(|e| &e.state) {
         None | Some(State::Loading) => text("Loading…")
-            .size(13)
+            .size(px(13.0, scale))
             .color(t.text_faint.to_color())
             .into(),
         Some(State::Error(e)) => text(format!("view error: {e}"))
-            .size(13)
+            .size(px(13.0, scale))
             .color(t.error_text.to_color())
             .into(),
         Some(State::Ready(d)) => {
             let window = entry.map(|e| e.window).unwrap_or_default();
-            result_view(d, id, host, window, t)
+            result_view(d, id, host, window, t, scale)
         }
     };
     let title = text(id.to_owned())
-        .size(13)
+        .size(px(13.0, scale))
         .font(Font {
             weight: Weight::Bold,
             ..Font::default()
@@ -606,7 +624,13 @@ pub(crate) fn cell_menu_target(c: &Cell) -> Option<crate::context_menu::Target> 
     })
 }
 
-fn cell_view<'a>(c: &Cell, bold: bool, open: Option<Message>, t: Tokens) -> Element<'a, Message> {
+fn cell_view<'a>(
+    c: &Cell,
+    bold: bool,
+    open: Option<Message>,
+    t: Tokens,
+    scale: f32,
+) -> Element<'a, Message> {
     let font = Font {
         weight: if bold { Weight::Bold } else { Weight::Normal },
         ..Font::default()
@@ -615,7 +639,7 @@ fn cell_view<'a>(c: &Cell, bold: bool, open: Option<Message>, t: Tokens) -> Elem
     if let Some(inner) = struck(&s) {
         let sp: iced::widget::text::Span<'a, ()> = span(inner.to_owned()).strikethrough(true);
         return rich_text(vec![sp])
-            .size(13)
+            .size(px(13.0, scale))
             .font(font)
             .color(t.text_faint.to_color())
             .into();
@@ -625,7 +649,7 @@ fn cell_view<'a>(c: &Cell, bold: bool, open: Option<Message>, t: Tokens) -> Elem
             let sp: iced::widget::text::Span<'a, ()> =
                 span(s).color(t.accent_ui.to_color()).link(());
             let el = rich_text(vec![sp])
-                .size(13)
+                .size(px(13.0, scale))
                 .font(font)
                 .on_link_click(move |()| msg.clone());
             match cell_menu_target(c) {
@@ -633,17 +657,21 @@ fn cell_view<'a>(c: &Cell, bold: bool, open: Option<Message>, t: Tokens) -> Elem
                 None => el.into(),
             }
         }
-        None => text(s).size(13).font(font).color(t.text.to_color()).into(),
+        None => text(s)
+            .size(px(13.0, scale))
+            .font(font)
+            .color(t.text.to_color())
+            .into(),
     }
 }
 
-fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
+fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Message> {
     let cols = d.columns.len().max(1);
     let grid = |cs: &[Cell], bold: bool, targets: &[Option<Message>]| -> Element<'a, Message> {
         row((0..cols).map(|i| {
             let c = cs.get(i).unwrap_or(&Cell::Null);
             let open = targets.get(i).cloned().flatten();
-            let el = cell_view(c, bold, open, t);
+            let el = cell_view(c, bold, open, t, scale);
             container(el).width(Length::FillPortion(1)).into()
         }))
         .spacing(8)
@@ -651,7 +679,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
     };
     match l {
         Line::Group(k) => text(format_cell(k))
-            .size(14)
+            .size(px(14.0, scale))
             .font(Font {
                 weight: Weight::Bold,
                 ..Font::default()
@@ -683,12 +711,12 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                     let el: Element<'a, Message> =
                         match (r.cells.get(i), status_cell(r, &d.column_keys, i)) {
                             (Some(Cell::Bool(b)), _) if is_toggle(r, &d.column_keys, i) => {
-                                status_box(if *b { 'x' } else { ' ' }, open, None, t)
+                                status_box(if *b { 'x' } else { ' ' }, open, None, t, scale)
                             }
                             (_, Some(st)) => {
-                                status_box(st.unwrap_or(' '), open, status_menu_target(r), t)
+                                status_box(st.unwrap_or(' '), open, status_menu_target(r), t, scale)
                             }
-                            (c, _) => cell_view(c.unwrap_or(&Cell::Null), false, open, t),
+                            (c, _) => cell_view(c.unwrap_or(&Cell::Null), false, open, t, scale),
                         };
                     container(el).width(Length::FillPortion(1)).into()
                 }))
@@ -700,9 +728,9 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
             let (c, targets) = task_row_status(r);
             let (press, menu) = targets.map_or((None, None), |(m, tg)| (Some(m), Some(tg)));
             let label: Element<'a, Message> = row![
-                text(task).size(13).color(t.text.to_color()),
+                text(task).size(px(13.0, scale)).color(t.text.to_color()),
                 text(format!("— {file}"))
-                    .size(13)
+                    .size(px(13.0, scale))
                     .color(t.text_dim.to_color()),
             ]
             .spacing(6)
@@ -720,7 +748,7 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens) -> Element<'a, Message> {
                     .into(),
                 None => label,
             };
-            row![status_box(c, press, menu, t), label]
+            row![status_box(c, press, menu, t, scale), label]
                 .spacing(6)
                 .align_y(iced::Alignment::Center)
                 .into()
@@ -735,8 +763,9 @@ fn status_box<'a>(
     press: Option<Message>,
     menu: Option<crate::context_menu::Target>,
     t: Tokens,
+    scale: f32,
 ) -> Element<'a, Message> {
-    let mark = crate::task_status::task_box(c, 14.0, t);
+    let mark = crate::task_status::task_box(c, px(14.0, scale), t);
     let Some(msg) = press else {
         return mark;
     };
@@ -767,13 +796,14 @@ fn result_view<'a>(
     host: &str,
     window: ListWindow,
     t: Tokens,
+    scale: f32,
 ) -> Element<'a, Message> {
     let mut items: Vec<Element<'a, Message>> = d
         .notices
         .iter()
         .map(|n| {
             text(n.clone())
-                .size(12)
+                .size(px(12.0, scale))
                 .color(t.text_faint.to_color())
                 .into()
         })
@@ -781,9 +811,13 @@ fn result_view<'a>(
     if d.kind != Kind::Tasks && !d.columns.is_empty() {
         items.push(
             row(d.columns.iter().map(|c| {
-                container(text(c.clone()).size(13).color(t.text_dim.to_color()))
-                    .width(Length::FillPortion(1))
-                    .into()
+                container(
+                    text(c.clone())
+                        .size(px(13.0, scale))
+                        .color(t.text_dim.to_color()),
+                )
+                .width(Length::FillPortion(1))
+                .into()
             }))
             .spacing(8)
             .into(),
@@ -792,13 +826,13 @@ fn result_view<'a>(
     if d.lines.is_empty() {
         items.push(
             text("No results")
-                .size(13)
+                .size(px(13.0, scale))
                 .color(t.text_faint.to_color())
                 .into(),
         );
     } else if d.lines.len() > VIRTUAL_THRESHOLD {
         let (sid, shost) = (id.to_owned(), host.to_owned());
-        let list = VirtualList::new(&d.lines, ROW_HEIGHT, window, move |w| {
+        let list = VirtualList::new(&d.lines, row_height(scale), window, move |w| {
             Message::Views(ViewsMsg::Scrolled {
                 id: sid.clone(),
                 host: Some(shost.clone()),
@@ -806,7 +840,7 @@ fn result_view<'a>(
             })
         })
         .id(list_id(id, host))
-        .view(move |_, l| line_view(d, l, t));
+        .view(move |_, l| line_view(d, l, t, scale));
         items.push(
             container(list)
                 .height(Length::Fixed(MAX_HEIGHT))
@@ -815,7 +849,7 @@ fn result_view<'a>(
         );
     } else {
         items.push(
-            column(d.lines.iter().map(|l| line_view(d, l, t)))
+            column(d.lines.iter().map(|l| line_view(d, l, t, scale)))
                 .spacing(4)
                 .into(),
         );

@@ -433,6 +433,35 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
                     Space::new().into()
                 }
             };
+            if picker == Some(pickers::Picker::Channel) {
+                // An add/drop list like Daily Brief's record lists: one channel per row with a
+                // remove control, then the adder (plan round-7-feedback-decisions WP-5). The rows
+                // sit in their own column so the adder keeps one tree position as the list grows.
+                let mut rows = column![].spacing(2);
+                for (i, it) in items.iter().enumerate() {
+                    rows = rows.push(
+                        row![
+                            container(text(pickers::chip_label(cx.settings, &chans, it)).size(14))
+                                .width(Length::Fixed(FIELD_W - theme::CONTROL))
+                                .height(theme::CONTROL)
+                                .align_y(Alignment::Center),
+                            theme::icon_button(
+                                Icon::X,
+                                cx.on(cx.form(FormMsg::ChipRemove {
+                                    path: path.clone(),
+                                    index: i,
+                                })),
+                                t
+                            ),
+                        ]
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                    );
+                }
+                return row![label_col(r.label, r.help), column![rows, adder].spacing(4)]
+                    .spacing(8)
+                    .into();
+            }
             row![label_col(r.label, r.help), chips.push(adder)]
                 .spacing(8)
                 .align_y(Alignment::Center)
