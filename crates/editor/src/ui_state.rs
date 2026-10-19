@@ -9,18 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::reading::ViewMode;
 use crate::theme::Surround;
-
-/// A tab's persisted display mode: source / reading / split (D9). New tabs open in Reading
-/// (plan editor-cutover-blockers, Decisions locked).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layout {
-    Source,
-    #[default]
-    Reading,
-    Split,
-}
 
 /// What a tab shows (WP-R15 B4). Persisted as tagged JSON (`{"tab":"note","path":…}`,
 /// `{"tab":"settings"}`, `{"tab":"log"}`); a bare string (every `editor.json` before WP-R15)
@@ -91,7 +81,7 @@ pub struct UiState {
     /// Per-tab display mode of the open tabs (vault-relative path → mode); a path absent here
     /// opens in the default (Reading). Replaces the old global `layout` field, which was saved
     /// but never read; old files carrying it still load (the key is ignored).
-    pub modes: BTreeMap<String, Layout>,
+    pub modes: BTreeMap<String, ViewMode>,
     pub surround: Surround,
     /// Most recent first, capped at [`RECENT_CAP`].
     pub recent: Vec<String>,
@@ -256,7 +246,7 @@ mod tests {
                 },
                 focused: 0,
             }),
-            modes: BTreeMap::from([("b/c.md".to_owned(), Layout::Split)]),
+            modes: BTreeMap::from([("b/c.md".to_owned(), ViewMode::Split)]),
             surround: Surround::Light,
             recent: vec![],
             ..UiState::default()
@@ -308,13 +298,34 @@ mod tests {
         assert!(s.modes.is_empty(), "no per-tab modes → defaults");
         assert_eq!(
             s.modes.get("a.md").copied().unwrap_or_default(),
-            Layout::Reading
+            ViewMode::Reading
         );
         let mut s2 = s.clone();
-        s2.modes.insert("a.md".into(), Layout::Source);
-        s2.modes.insert("b.md".into(), Layout::Split);
+        s2.modes.insert("a.md".into(), ViewMode::Source);
+        s2.modes.insert("b.md".into(), ViewMode::Split);
         save(&path, &s2, None).expect("save");
         assert_eq!(load(&path).modes, s2.modes);
+    }
+
+    /// WP-R16 (L2): `ViewMode` replaced `ui_state::Layout`; the persisted mode spellings are
+    /// unchanged, so an existing `editor.json` reads and writes back the same strings.
+    #[test]
+    fn view_modes_keep_the_layout_spellings() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("editor.json");
+        let old = br#"{"panes":{"root":{"kind":"leaf","tabs":[{"tab":"note","path":"a.md"}],"active":0},"focused":0},"modes":{"a.md":"source","b.md":"reading","c.md":"split"}}"#;
+        std::fs::write(&path, old).expect("old");
+        let s = load(&path);
+        assert_eq!(
+            s.modes.values().copied().collect::<Vec<_>>(),
+            [ViewMode::Source, ViewMode::Reading, ViewMode::Split]
+        );
+        save(&path, &s, None).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        for (p, m) in [("a.md", "source"), ("b.md", "reading"), ("c.md", "split")] {
+            assert!(text.contains(&format!(r#""{p}": "{m}""#)), "{text}");
+        }
+        assert_eq!(load(&path), s);
     }
 
     /// WP-R15 (B4): tabs persist as tagged JSON, the WP-1 flat fields are no longer written,

@@ -604,12 +604,12 @@ mod wp4 {
         let _ = app.send(Message::Explorer(ExplorerMsg::Open("r7ren/one.md".into())));
         let doc = app.doc_mut("r7ren/one.md").expect("open");
         doc.select_range((2, 0), (2, 4));
-        assert!(doc.paste("LINE".into(), false, std::time::Instant::now()));
-        let job = doc.begin_save(false).expect("save");
+        assert!(doc.paste("LINE".into(), std::time::Instant::now()));
+        let job = doc.begin_save().expect("save");
         let outcome = job.run(&*d);
         let _ = app.send(job.done(outcome));
         let doc = app.doc_mut("r7ren/one.md").expect("open");
-        doc.scroll_to_line(30);
+        doc.scroll_to_line_anchored(30, 0.0);
         doc.select_range((5, 1), (5, 3));
         let before = (doc.cursor(), doc.history().undo_len(), doc.top_line());
         assert!(!doc.is_dirty() && before.1 > 0);
@@ -1348,11 +1348,11 @@ mod usability_wp3 {
             path: "wp6ren/one.md".into(),
             mode: ViewMode::Source,
         }));
-        assert!(!app.reading.ticks() && !app.reading.listens_escape());
+        assert!(!app.reading.ticks() && !app.reading.title_pending());
         title(&mut app, "wp6ren/one.md", "two");
         // Source-only, yet the blur poll and Escape listener run while the edit is pending.
         assert!(app.reading.ticks(), "blur-poll tick in Source mode");
-        assert!(app.reading.listens_escape(), "Escape in Source mode");
+        assert!(app.reading.title_pending(), "Escape in Source mode");
         drop(app.view());
         let _ = app.send(Message::Reading(ReadingMsg::TitleRevert));
         assert!(!app.reading.title_pending());
@@ -1773,11 +1773,7 @@ mod round2_wp3 {
     }
 
     fn dirty_in_place(app: &mut App, path: &str) {
-        let _ = tab(app, path).perform(
-            Action::Edit(Edit::Insert('y')),
-            false,
-            std::time::Instant::now(),
-        );
+        let _ = tab(app, path).perform(Action::Edit(Edit::Insert('y')), std::time::Instant::now());
     }
 
     fn select(app: &mut App, path: &str) {
@@ -1825,7 +1821,7 @@ mod round2_wp3 {
         select(&mut app, "w3c/a.md");
         type_x(&mut app);
         let t = tab(&mut app, "w3c/a.md");
-        let job = t.begin_save(false).expect("job");
+        let job = t.begin_save().expect("job");
         let _ = t.finish_save(job.seq, SaveOutcome::Conflict(ContentHash::from_hex("abc")));
         assert!(t.conflict().is_some());
         select(&mut app, "w3c/b.md");
@@ -2536,12 +2532,12 @@ mod data_safety_wp2 {
     }
 
     fn save(app: &mut App, d: &FakeDaemon, path: &str) {
-        let job = app.doc_mut(path).and_then(|t| t.begin_save(false));
+        let job = app.doc_mut(path).and_then(|t| t.begin_save());
         land(app, d, job);
     }
 
     fn keep_mine(app: &mut App, d: &FakeDaemon, path: &str) {
-        let job = app.doc_mut(path).and_then(|t| t.keep_mine(false));
+        let job = app.doc_mut(path).and_then(|t| t.keep_mine());
         land(app, d, job);
     }
 
@@ -2590,7 +2586,7 @@ mod data_safety_wp2 {
     fn quit_awaiting_a_save_that_failed_shows_the_dialog() {
         let (_tmp, _d, mut app) = setup(&["d2f/a.md"]);
         type_x(&mut app);
-        let job = app.doc_mut("d2f/a.md").and_then(|t| t.begin_save(false));
+        let job = app.doc_mut("d2f/a.md").and_then(|t| t.begin_save());
         let seq = job.expect("job").seq;
         let _ = app.send(Message::Tabs(TabsMsg::Quit));
         assert_eq!(app.quit_waits(), Some(1));
@@ -3639,14 +3635,14 @@ mod title_sync_wp5 {
         let _ = app.send(Message::Explorer(ExplorerMsg::Open(path.into())));
         let doc = app.doc_mut(path).expect("open");
         doc.select_range((1, 7), (1, 10));
-        assert!(doc.paste(new.into(), false, Instant::now()));
+        assert!(doc.paste(new.into(), Instant::now()));
         app
     }
 
     fn save(app: &mut App, d: &FakeDaemon, path: &str) {
         let job = app
             .doc_mut(path)
-            .and_then(|t| t.begin_save(false))
+            .and_then(|t| t.begin_save())
             .expect("save starts");
         let outcome = job.run(d);
         let _ = app.send(job.done(outcome));
@@ -3671,7 +3667,7 @@ mod title_sync_wp5 {
         // A further save with the same title does not rename again.
         let doc = app.doc_mut("ts/New One.md").expect("open");
         doc.select_range((3, 0), (3, 1));
-        assert!(doc.paste("y".into(), false, Instant::now()));
+        assert!(doc.paste("y".into(), Instant::now()));
         save(&mut app, &d, "ts/New One.md");
         assert_eq!(app.open_paths(), ["ts/New One.md"]);
     }
@@ -3734,11 +3730,8 @@ mod title_sync_wp5 {
         assert!(doc.is_renaming());
         let seq = doc.edit_seq();
         doc.select_range((3, 0), (3, 1));
-        assert!(doc.paste("typed".into(), false, Instant::now()));
-        assert!(
-            doc.begin_save(false).is_none(),
-            "saves held during the rename"
-        );
+        assert!(doc.paste("typed".into(), Instant::now()));
+        assert!(doc.begin_save().is_none(), "saves held during the rename");
         let typed = doc.edit_seq();
         d.rename("ts5/Old.md", "ts5/New.md").expect("rename");
         let _ = app.send(Message::TitleRenamed {
@@ -3760,7 +3753,7 @@ mod title_sync_wp5 {
         // Keep mine saves the text at `to`.
         let job = app
             .doc_mut("ts5/New.md")
-            .and_then(|t| t.keep_mine(false))
+            .and_then(|t| t.keep_mine())
             .expect("keep mine");
         let outcome = job.run(d.as_ref());
         let _ = app.send(job.done(outcome));
@@ -3778,12 +3771,12 @@ mod title_sync_wp5 {
         let mut app = open_and_retitle(&d, "ts6/Old.md", "New");
         let first = app
             .doc_mut("ts6/Old.md")
-            .and_then(|t| t.begin_save(false))
+            .and_then(|t| t.begin_save())
             .expect("save");
         let doc = app.doc_mut("ts6/Old.md").expect("open");
         doc.select_range((3, 0), (3, 1));
-        assert!(doc.paste("z".into(), false, Instant::now()));
-        assert!(doc.begin_save(false).is_none(), "queued as save_again");
+        assert!(doc.paste("z".into(), Instant::now()));
+        assert!(doc.begin_save().is_none(), "queued as save_again");
         let outcome = first.run(d.as_ref());
         let _ = app.send(first.done(outcome));
         assert_eq!(
@@ -4450,7 +4443,7 @@ mod scroll_matrix {
             None
         };
         Place {
-            block: probe.top_block().unwrap_or(0),
+            block: probe.anchor_block(0.0).unwrap_or(0),
             edge,
         }
     }

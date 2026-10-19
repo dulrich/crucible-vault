@@ -199,7 +199,7 @@ impl crate::app::App {
             caret
         };
         let from = a.start - 2;
-        if doc.replace_in_line(a.line, from..end, &link, false, std::time::Instant::now()) {
+        if doc.replace_in_line(a.line, from..end, &link, std::time::Instant::now()) {
             doc.move_to(iced::widget::text_editor::Cursor {
                 position: iced::widget::text_editor::Position {
                     line: a.line,

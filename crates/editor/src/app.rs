@@ -753,12 +753,7 @@ impl App {
 
     /// The mode a newly opened `path` starts in: its persisted mode, else Reading.
     fn initial_mode(&self, path: &str) -> crate::reading::ViewMode {
-        self.ui
-            .modes
-            .get(path)
-            .copied()
-            .map(crate::reading::ViewMode::from)
-            .unwrap_or_default()
+        self.ui.modes.get(path).copied().unwrap_or_default()
     }
 
     /// A disconnected app (used if boot cannot take the prepared one).
@@ -867,7 +862,7 @@ impl App {
         }
         match d.read_file(path) {
             Ok((bytes, hash)) => {
-                let job = doc.resync(&bytes, hash, false);
+                let job = doc.resync(&bytes, hash);
                 crate::source::spawn_save(Some(&d), job)
             }
             // plan editor-data-safety WP-2: a vanished file under edits → missing-file state.
@@ -1359,7 +1354,7 @@ impl App {
             .panes
             .iter()
             .flat_map(|(_, ps)| ps.tabs.iter().filter_map(Tab::path))
-            .map(|p| (p.to_owned(), self.reading.mode(p).into()))
+            .map(|p| (p.to_owned(), self.reading.mode(p)))
             .collect();
     }
 
@@ -1839,7 +1834,7 @@ impl App {
     /// or not open).
     fn flush_note(&mut self, path: &str) -> Task<Message> {
         match buf_mut(&mut self.docs, path) {
-            Some(doc) => crate::source::flush(doc, self.daemon.as_ref(), false),
+            Some(doc) => crate::source::flush(doc, self.daemon.as_ref()),
             None => Task::none(),
         }
     }
@@ -1940,7 +1935,7 @@ impl App {
             }
             Message::Source(SourceMsg::Viewport { path, lines }) => {
                 if let Some(d) = buf_mut(&mut self.docs, &path)
-                    && d.set_visible_lines(lines)
+                    && d.on_layout(lines) == crate::source::Relayout::Again
                 {
                     return crate::reading::ScrollIntent::SourceRelayout { path, lines }.task();
                 }
@@ -2320,7 +2315,7 @@ impl App {
     /// save; `after` (a save-first continuation) runs when it lands, `None` is a plain save.
     /// `None` back when no save can start (clean, in flight, renaming or conflicted).
     fn save_then(&mut self, path: &str, after: Option<AfterSave>) -> Option<Task<Message>> {
-        let job = buf_mut(&mut self.docs, path)?.begin_save(false)?;
+        let job = buf_mut(&mut self.docs, path)?.begin_save()?;
         let Some(after) = after else {
             return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));
         };
@@ -3269,18 +3264,18 @@ impl App {
 
     /// plan editor-ui-round-3 WP-4: sets a host-note task's status char in `path`'s buffer.
     fn set_task_status(&mut self, path: &str, line: usize, to: char) -> Task<Message> {
-        self.edit_open_buffer(path, |d, now| d.set_task_status(line, to, false, now))
+        self.edit_open_buffer(path, |d, now| d.set_task_status(line, to, now))
     }
 
     /// Toggles a host-note task box in `path`'s buffer.
     fn toggle_task(&mut self, path: &str, line: usize) -> Task<Message> {
-        self.edit_open_buffer(path, |d, now| d.toggle_task(line, false, now))
+        self.edit_open_buffer(path, |d, now| d.toggle_task(line, now))
     }
 
     /// plan usability-sprint-captures-links WP-4: flips a frontmatter boolean in `path`'s
     /// buffer — the same edit → autosave → CAS-save path as `toggle_task`.
     fn toggle_prop(&mut self, path: &str, key: &str) -> Task<Message> {
-        self.edit_open_buffer(path, |d, now| d.toggle_frontmatter_bool(key, false, now))
+        self.edit_open_buffer(path, |d, now| d.set_frontmatter_bool(key, None, now))
     }
 
     /// Plan round-8-intake-views-anchor WP-3: a view checkbox cell. An open note's buffer gets
@@ -3288,7 +3283,7 @@ impl App {
     /// closed note goes through the daemon's `note_set_bool`. No optimistic view state.
     fn set_note_bool(&mut self, path: String, key: String, value: bool) -> Task<Message> {
         if let Some(t) = self.edit_buffer(&path, |d, now| {
-            d.set_frontmatter_bool(&key, Some(value), false, now)
+            d.set_frontmatter_bool(&key, Some(value), now)
         }) {
             return t;
         }

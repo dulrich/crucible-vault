@@ -5,11 +5,12 @@ use std::time::Instant;
 
 use cv_protocol::{ChangeKind, Notification, Origin};
 use cv_testkit::{SyntheticVault, VaultSpec};
-use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
+use iced::keyboard;
+use iced::widget::text_editor::{self, Action, Binding, Cursor, Edit, KeyPress, Motion, Position};
 
 use super::*;
 use crate::app::App;
-use crate::daemon::FakeDaemon;
+use crate::daemon::{ContentHash, FakeDaemon};
 use crate::message::{Message, StatusMsg, TabsMsg};
 
 fn setup() -> (tempfile::TempDir, Arc<FakeDaemon>, App, String) {
@@ -40,7 +41,7 @@ fn type_text(app: &mut App, s: &str) {
 
 /// Runs the save the app would spawn, synchronously, and feeds the result back.
 fn save_now(app: &mut App, d: &FakeDaemon) -> SaveOutcome {
-    let job = buf(app).begin_save(false).expect("a save job");
+    let job = buf(app).begin_save().expect("a save job");
     let out = job.run(d);
     let _ = app.send(job.done(out.clone()));
     out
@@ -140,7 +141,7 @@ fn save_succeeds_and_updates_base_hash() {
 fn echo_arriving_before_save_result_is_ignored() {
     let (_t, d, mut app, p) = setup();
     type_text(&mut app, "Q");
-    let job = buf(&mut app).begin_save(false).expect("job");
+    let job = buf(&mut app).begin_save().expect("job");
     let out = job.run(d.as_ref());
     let SaveOutcome::Saved(h) = out.clone() else {
         panic!("saved")
@@ -160,13 +161,16 @@ fn stale_base_conflicts_then_keep_mine_resaves() {
     let theirs = d.write_note(&p, "theirs\n", &base).expect("write");
     let out = save_now(&mut app, &d);
     assert_eq!(out, SaveOutcome::Conflict(theirs.clone()));
-    assert_eq!(buf(&mut app).conflict(), Some(&theirs));
+    assert_eq!(
+        buf(&mut app).conflict(),
+        Some(&Conflict::Changed(theirs.clone()))
+    );
     assert!(
-        buf(&mut app).begin_save(false).is_none(),
+        buf(&mut app).begin_save().is_none(),
         "no save while conflicted"
     );
     // Keep mine: re-save against the new hash.
-    let job = buf(&mut app).keep_mine(false).expect("job");
+    let job = buf(&mut app).keep_mine().expect("job");
     let out = job.run(d.as_ref());
     let _ = app.send(job.done(out));
     assert!(buf(&mut app).conflict().is_none());
@@ -184,7 +188,10 @@ fn dirty_buffer_external_change_shows_bar_and_take_theirs_reloads() {
     let base = buf(&mut app).base_hash().clone();
     let theirs = d.write_note(&p, "external\n", &base).expect("write");
     notify(&mut app, &p, Some(theirs.as_str().to_owned()));
-    assert_eq!(buf(&mut app).conflict(), Some(&theirs));
+    assert_eq!(
+        buf(&mut app).conflict(),
+        Some(&Conflict::Changed(theirs.clone()))
+    );
     assert!(buf(&mut app).text().starts_with('x'), "buffer kept");
     let _ = app.send(Message::Source(SourceMsg::TakeTheirs(p.clone())));
     let b = buf(&mut app);
@@ -222,9 +229,9 @@ fn clean_buffer_reloads_and_keeps_cursor_line() {
 fn save_in_flight_queues_one_follow_up() {
     let (_t, d, mut app, _p) = setup();
     type_text(&mut app, "a");
-    let job = buf(&mut app).begin_save(false).expect("job");
+    let job = buf(&mut app).begin_save().expect("job");
     type_text(&mut app, "b");
-    assert!(buf(&mut app).begin_save(false).is_none(), "one in flight");
+    assert!(buf(&mut app).begin_save().is_none(), "one in flight");
     let out = job.run(d.as_ref());
     // Still dirty after the first save lands (edit `b` came later); a follow-up is due.
     assert_eq!(buf(&mut app).finish_save(job.seq, out), Ok(true));
@@ -247,7 +254,7 @@ fn undo_on_one_megabyte_buffer_timing() {
         selection: None,
     });
     let t = Instant::now();
-    assert!(b.perform(Action::Edit(Edit::Insert('Z')), false, Instant::now()));
+    assert!(b.perform(Action::Edit(Edit::Insert('Z')), Instant::now()));
     eprintln!("type one char {:?}", t.elapsed());
     let t = Instant::now();
     assert!(b.undo());
@@ -329,7 +336,7 @@ fn materialise_round_trip_keeps_text_cursor_undo_and_save_state() {
         selection: None,
     });
     for c in "XY".chars() {
-        assert!(b.perform(Action::Edit(Edit::Insert(c)), false, now));
+        assert!(b.perform(Action::Edit(Edit::Insert(c)), now));
     }
     assert!(b.is_shaped(), "editing materialises");
     b.move_to(Cursor {
@@ -398,10 +405,10 @@ fn view_tree_position_stable_across_dirty_states() {
     let mut b = SourceBuffer::new("n.md", b"text\n", ContentHash::of(b"text\n"));
     b.set_shaped(true);
     let clean = shape(&b);
-    assert!(b.perform(Action::Edit(Edit::Insert('x')), false, Instant::now()));
+    assert!(b.perform(Action::Edit(Edit::Insert('x')), Instant::now()));
     assert!(b.is_dirty());
     let dirty = shape(&b);
-    let _job = b.begin_save(false).expect("save job");
+    let _job = b.begin_save().expect("save job");
     assert!(b.is_saving());
     let saving = shape(&b);
     assert_eq!(clean.len(), dirty.len());
@@ -535,12 +542,14 @@ fn toggle_frontmatter_bool_flips_only_the_scalar() {
     let src = "---\nread: false # x\ntags: [a]\n---\nbody\n";
     let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
     let seq = b.edit_seq();
-    assert!(b.toggle_frontmatter_bool("read", false, Instant::now()));
+    assert!(b.set_frontmatter_bool("read", None, Instant::now()));
     assert_eq!(b.text(), "---\nread: true # x\ntags: [a]\n---\nbody\n");
     assert!(b.is_dirty());
     assert_eq!(b.edit_seq(), seq + 1);
-    assert!(!b.toggle_frontmatter_bool("tags", false, Instant::now()));
-    assert!(!b.toggle_frontmatter_bool("read", true, Instant::now()));
+    assert!(!b.set_frontmatter_bool("tags", None, Instant::now()));
+    b.set_read_only(true);
+    assert!(!b.set_frontmatter_bool("read", None, Instant::now()));
+    b.set_read_only(false);
     assert!(b.undo());
     assert_eq!(b.text(), src);
 }
@@ -562,7 +571,7 @@ fn toggle_frontmatter_bool_upserts_in_one_undo_step() {
     ] {
         let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
         let seq = b.edit_seq();
-        assert!(b.toggle_frontmatter_bool("read", false, Instant::now()));
+        assert!(b.set_frontmatter_bool("read", None, Instant::now()));
         assert_eq!(b.text(), want);
         assert_eq!(b.edit_seq(), seq + 1);
         assert!(b.undo());
@@ -576,18 +585,17 @@ fn toggle_task_on_plain_buffer_is_one_undoable_edit() {
     let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
     assert!(!b.is_shaped(), "a fresh buffer stays plain (Reading mode)");
     let seq = b.edit_seq();
-    assert!(b.toggle_task(3, false, Instant::now()));
+    assert!(b.toggle_task(3, Instant::now()));
     assert!(!b.is_shaped(), "the toggle does not shape the buffer");
     assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [/] two\n");
     assert!(b.is_dirty());
     assert_eq!(b.edit_seq(), seq + 1);
-    assert!(b.toggle_task(4, false, Instant::now()));
+    assert!(b.toggle_task(4, Instant::now()));
     assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [x] two\n");
-    assert!(!b.toggle_task(1, false, Instant::now()), "not a task line");
-    assert!(
-        !b.toggle_task(3, true, Instant::now()),
-        "read-only drops it"
-    );
+    assert!(!b.toggle_task(1, Instant::now()), "not a task line");
+    b.set_read_only(true);
+    assert!(!b.toggle_task(3, Instant::now()), "read-only drops it");
+    b.set_read_only(false);
     assert!(b.undo());
     assert_eq!(b.text(), "---\na: 1\n---\n- [x] one\n- [/] two\n");
     assert!(b.undo());
@@ -606,7 +614,7 @@ fn toggle_task_on_shaped_buffer_keeps_cursor_and_undoes() {
         selection: None,
     };
     b.move_to(at);
-    assert!(b.toggle_task(1, false, Instant::now()));
+    assert!(b.toggle_task(1, Instant::now()));
     assert!(b.is_shaped());
     assert_eq!(b.text(), "intro\n- [ ] done\n");
     assert_eq!(b.cursor().position, at.position, "cursor kept");
@@ -822,8 +830,9 @@ fn tab_and_shift_tab_are_noops_when_read_only() {
     set_text(&mut app, &d, &p, "\tx\n");
     let b = buf(&mut app);
     let now = Instant::now();
-    assert!(!b.indent(false, true, now));
-    assert!(!b.indent(true, true, now));
+    b.set_read_only(true);
+    assert!(!b.indent(false, now));
+    assert!(!b.indent(true, now));
     assert_eq!(b.text(), "\tx\n");
     assert!(!b.is_dirty());
 }
@@ -991,7 +1000,7 @@ fn ctrl_x_without_selection_cuts_the_line_as_one_undoable_edit() {
     let (_t, _d, mut app, _p) = setup();
     buf(&mut app).materialise();
     at(&mut app, 1, 3, None);
-    let (clip, changed) = buf(&mut app).cut(false, Instant::now());
+    let (clip, changed) = buf(&mut app).cut(Instant::now());
     assert!(changed);
     assert_eq!(clip.as_deref(), Some("line two\n"));
     assert_eq!(buf(&mut app).text(), "line one\nline three\n");
@@ -1001,19 +1010,20 @@ fn ctrl_x_without_selection_cuts_the_line_as_one_undoable_edit() {
     let (_t, d, mut app, p) = setup();
     set_text(&mut app, &d, &p, "a\nlast");
     at(&mut app, 1, 2, None);
-    let (clip, _) = buf(&mut app).cut(false, Instant::now());
+    let (clip, _) = buf(&mut app).cut(Instant::now());
     assert_eq!(clip.as_deref(), Some("last"));
     assert_eq!(buf(&mut app).text(), "a");
     let _ = app.send(Message::Source(SourceMsg::Undo));
     assert_eq!(buf(&mut app).text(), "a\nlast");
     // With a selection: only the selection (as before).
     at(&mut app, 0, 1, Some((0, 0)));
-    let (clip, _) = buf(&mut app).cut(false, Instant::now());
+    let (clip, _) = buf(&mut app).cut(Instant::now());
     assert_eq!(clip.as_deref(), Some("a"));
     assert_eq!(buf(&mut app).text(), "\nlast");
     // Read-only: nothing is cut.
     at(&mut app, 1, 0, None);
-    assert_eq!(buf(&mut app).cut(true, Instant::now()), (None, false));
+    buf(&mut app).set_read_only(true);
+    assert_eq!(buf(&mut app).cut(Instant::now()), (None, false));
 }
 
 #[test]
@@ -1118,12 +1128,12 @@ fn top_line_survives_blur_and_uses_the_measured_viewport() {
     set_text(&mut app, &d, &p, &text);
     assert_eq!(viewport_lines(5.0 * 2.0 + 20.8 * 12.5, 16.0), 12);
     buf(&mut app).set_visible_lines(12);
-    buf(&mut app).scroll_to_line(50);
+    buf(&mut app).scroll_to_line_anchored(50, 0.0);
     buf(&mut app).set_shaped(false);
     buf(&mut app).set_shaped(true);
     assert_eq!(buf(&mut app).top_line(), 50, "kept across blur/resume");
     // 201 lines, 12 visible: the last reachable top is 189.
-    buf(&mut app).scroll_to_line(199);
+    buf(&mut app).scroll_to_line_anchored(199, 0.0);
     assert_eq!(buf(&mut app).top_line(), 189);
     buf(&mut app).go_to_edge(true);
     assert_eq!(buf(&mut app).top_line(), 200 - 11);
@@ -1222,4 +1232,78 @@ mod layout {
         let top = h.top();
         assert!(top.abs_diff(201 - VISIBLE) <= 1, "landed on {top}");
     }
+}
+
+/// WP-R16 (B5): "the file is gone" is its own conflict state, never an empty hash; the conflict
+/// bar's Keep mine / Take theirs paths behave as before for both states.
+#[test]
+fn missing_file_conflict_is_missing_not_an_empty_hash() {
+    use crate::daemon::DaemonError;
+    let mut b = SourceBuffer::new("m.md", b"x\n", ContentHash::of(b"x\n"));
+    assert!(b.paste("y".into(), Instant::now()));
+    // A NotFound read under edits.
+    let gone = || Err(DaemonError::NotFound("m.md".into()));
+    assert_eq!(b.external_change(None, gone), None);
+    assert_eq!(b.conflict(), Some(&Conflict::Missing));
+    assert!(b.is_missing());
+    // Keep mine recreates the file: the save CASes against "no file".
+    let job = b.keep_mine().expect("job");
+    assert!(job.base.as_str().is_empty() && b.conflict().is_none());
+    // A save CAS conflict against no file is missing too.
+    assert_eq!(
+        b.finish_save(job.seq, SaveOutcome::Conflict(ContentHash::of(b"")))
+            .map(|_| b.is_missing()),
+        Ok(false),
+        "a real (empty-file) hash is a change"
+    );
+    assert!(matches!(b.conflict(), Some(Conflict::Changed(_))));
+    let job = b.keep_mine().expect("job");
+    let none = ContentHash::from_hex(String::new());
+    assert_eq!(
+        b.finish_save(job.seq, SaveOutcome::Conflict(none)),
+        Ok(false)
+    );
+    assert_eq!(b.conflict(), Some(&Conflict::Missing));
+    // Take theirs reloads and clears it.
+    b.reload(b"z\n", ContentHash::of(b"z\n"));
+    assert!(b.conflict().is_none() && !b.is_dirty());
+    // A changed file is `Changed` with the disk hash; Keep mine CASes against it.
+    assert!(b.paste("w".into(), Instant::now()));
+    assert_eq!(b.external_change(Some("ffff"), || unreachable!()), None);
+    assert_eq!(
+        b.conflict(),
+        Some(&Conflict::Changed(ContentHash::from_hex("ffff")))
+    );
+    assert!(!b.is_missing());
+    assert_eq!(b.keep_mine().expect("job").base.as_str(), "ffff");
+    // A clean buffer never enters the missing state.
+    let mut c = SourceBuffer::new("c.md", b"x\n", ContentHash::of(b"x\n"));
+    c.mark_missing();
+    assert!(c.conflict().is_none());
+}
+
+/// WP-R16 (SP1): `set_visible_lines` is a plain setter; `on_layout` runs the carry passes.
+#[test]
+fn on_layout_runs_the_carry_and_the_setter_does_not() {
+    let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let mut b = SourceBuffer::new("l.md", text.as_bytes(), ContentHash::of(text.as_bytes()));
+    b.materialise();
+    b.set_visible_lines(10);
+    b.scroll_to_line_anchored(40, 0.0);
+    b.set_visible_lines(10);
+    assert_eq!(b.cursor().position.line, 0, "the setter runs no pass");
+    assert_eq!(b.on_layout(10), Relayout::Again, "pass 1");
+    assert_eq!(b.cursor().position.line, 100, "caret at the end");
+    assert_eq!(b.on_layout(10), Relayout::Settled, "pass 2");
+    assert_eq!(b.cursor().position.line, 40);
+    assert_eq!(b.top_line(), 40);
+    assert_eq!(b.on_layout(10), Relayout::Settled, "nothing pending");
+    // An anchored carry takes a third pass; an edge scroll wins over it.
+    b.scroll_to_line_anchored(40, 0.5);
+    assert_eq!(b.on_layout(10), Relayout::Again);
+    assert_eq!(b.on_layout(10), Relayout::Again, "pass 3 pending");
+    assert_eq!(b.top_line(), 35);
+    b.scroll_to_edge(true);
+    assert_eq!(b.on_layout(10), Relayout::Settled);
+    assert_eq!(b.on_layout(10), Relayout::Settled);
 }

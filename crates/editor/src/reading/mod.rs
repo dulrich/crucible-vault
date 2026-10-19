@@ -37,8 +37,11 @@ pub const TICK: Duration = Duration::from_millis(250);
 /// first scroll report (it arrives within a frame or two of the activation).
 pub const RESTORE_GUARD: Duration = Duration::from_millis(1000);
 
-/// A tab's display mode (new tabs open in Reading; plan editor-cutover-blockers).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// A tab's display mode: source / reading / split (D9). New tabs open in Reading (plan
+/// editor-cutover-blockers). Persisted per path in `editor.json` (`ui_state::UiState::modes`)
+/// as `"source"` / `"reading"` / `"split"` (the spellings of the former `ui_state::Layout`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViewMode {
     Source,
     #[default]
@@ -72,27 +75,6 @@ impl ViewMode {
     /// The source buffer is on screen (Source or Split) and needs its shaped `Content`.
     pub fn shows_source(self) -> bool {
         self != Self::Reading
-    }
-}
-
-impl From<crate::ui_state::Layout> for ViewMode {
-    fn from(l: crate::ui_state::Layout) -> Self {
-        use crate::ui_state::Layout;
-        match l {
-            Layout::Source => Self::Source,
-            Layout::Reading => Self::Reading,
-            Layout::Split => Self::Split,
-        }
-    }
-}
-
-impl From<ViewMode> for crate::ui_state::Layout {
-    fn from(m: ViewMode) -> Self {
-        match m {
-            ViewMode::Source => Self::Source,
-            ViewMode::Reading => Self::Reading,
-            ViewMode::Split => Self::Split,
-        }
     }
 }
 
@@ -700,14 +682,10 @@ impl ReadingStore {
         self.images.release_owner(from);
     }
 
-    /// A filename edit is pending (the breadcrumb's input holds unsubmitted text).
+    /// A filename edit is pending (the breadcrumb's input holds unsubmitted text); the Escape
+    /// listener runs then, in any view mode.
     pub fn title_pending(&self) -> bool {
         self.docs.values().any(|d| d.title.is_some())
-    }
-
-    /// The Escape listener runs: a filename edit is pending, in any view mode.
-    pub fn listens_escape(&self) -> bool {
-        self.title_pending()
     }
 
     /// The tick runs: some tab shows a reading pane (render debounce) or a filename edit is
@@ -718,13 +696,13 @@ impl ReadingStore {
     }
 
     /// The debounce / blur-poll tick, plus the filename editor's Escape (see [`Self::ticks`],
-    /// [`Self::listens_escape`]). Ctrl+E is no longer listened to here (plan
+    /// [`Self::title_pending`]). Ctrl+E is no longer listened to here (plan
     /// editor-settings-tab WP-4, audit E1): "Toggle source / reading view" is an ordinary
     /// client command resolved by the effective keymap in `App::on_chord`, so it can be
     /// rebound.
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = Vec::new();
-        if self.listens_escape() {
+        if self.title_pending() {
             // The focused text input captures Escape, so listen to captured events too.
             subs.push(iced::event::listen_with(escape));
         }
@@ -740,29 +718,29 @@ impl ReadingStore {
     /// "Rendering…" without a Ctrl+E.
     pub fn register(
         &mut self,
-        tab: &SourceBuffer,
+        doc: &SourceBuffer,
         mode: ViewMode,
         render_now: bool,
         daemon: Option<&Arc<dyn DaemonClient>>,
     ) {
         if render_now {
-            self.set_mode(tab, mode, daemon);
+            self.set_mode(doc, mode, daemon);
         } else {
-            self.entry(tab.path()).mode = mode;
+            self.entry(doc.path()).mode = mode;
         }
     }
 
     fn set_mode(
         &mut self,
-        tab: &SourceBuffer,
+        doc: &SourceBuffer,
         mode: ViewMode,
         daemon: Option<&Arc<dyn DaemonClient>>,
     ) {
-        let entry = self.entry(tab.path());
+        let entry = self.entry(doc.path());
         entry.mode = mode;
         if mode.shows_reading() {
             if entry.doc.is_none() {
-                self.recompute(tab, daemon);
+                self.recompute(doc, daemon);
             }
         } else {
             // Leaving reading/split: drop the model, places, selections and image pins (E2).
@@ -772,23 +750,23 @@ impl ReadingStore {
                 v.top = None;
                 v.sel = None;
             });
-            self.images.release_owner(tab.path());
+            self.images.release_owner(doc.path());
         }
     }
 
-    /// Re-lowers `tab`'s buffer, fills transclusions (depth 1), resolves images, and releases
+    /// Re-lowers `doc`'s buffer, fills transclusions (depth 1), resolves images, and releases
     /// image pins the new model no longer references (E2).
-    pub fn recompute(&mut self, tab: &SourceBuffer, daemon: Option<&Arc<dyn DaemonClient>>) {
+    pub fn recompute(&mut self, doc: &SourceBuffer, daemon: Option<&Arc<dyn DaemonClient>>) {
         self.recomputes += 1;
-        let seq = tab.edit_seq();
+        let seq = doc.edit_seq();
         if let Some(d) = daemon {
             self.refresh_resolver(d.as_ref());
         }
         let generation = daemon.and_then(|d| d.index().generation());
-        let mut model = render::lower(&tab.text());
+        let mut model = render::lower(&doc.text());
         let mut fetch = |target: &str| {
             let d = daemon?;
-            let path = self.resolve(tab.path(), target)?;
+            let path = self.resolve(doc.path(), target)?;
             let (bytes, _) = d.read_file(&path).ok()?;
             Some(String::from_utf8_lossy(&bytes).into_owned())
         };
@@ -798,7 +776,7 @@ impl ReadingStore {
             .filter(|(_, remote)| !remote)
             .map(|(src, _)| {
                 let target = percent_decode(&src);
-                let key = self.resolve(tab.path(), &target);
+                let key = self.resolve(doc.path(), &target);
                 (src, key)
             })
             .collect();
@@ -807,7 +785,7 @@ impl ReadingStore {
                 .into_iter()
                 .filter(|t| {
                     let bare = t.split('#').next().unwrap_or(t);
-                    self.resolve(tab.path(), &percent_decode(bare)).is_none()
+                    self.resolve(doc.path(), &percent_decode(bare)).is_none()
                 })
                 .collect()
         } else {
@@ -820,16 +798,16 @@ impl ReadingStore {
                 self.images.note_dims(key, d.vault_root());
             }
         }
-        self.images.retain_owner(tab.path(), &keep);
+        self.images.retain_owner(doc.path(), &keep);
         // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
-        self.clear_selections(tab.path());
+        self.clear_selections(doc.path());
         let runs = selection::runs(&model);
         let resolver_epoch = self.resolver_epoch;
-        let entry = self.entry(tab.path());
+        let entry = self.entry(doc.path());
         entry.seen_seq = Some(seq);
         entry.doc = Some(Doc {
             seq,
-            epoch: tab.epoch(),
+            epoch: doc.epoch(),
             generation,
             resolver_epoch,
             model,
@@ -839,22 +817,22 @@ impl ReadingStore {
         });
     }
 
-    /// Debounce: re-render `tab` once its `edit_seq` held still for a tick (or the index moved).
-    fn tick(&mut self, tab: &SourceBuffer, daemon: Option<&Arc<dyn DaemonClient>>) {
+    /// Debounce: re-render `doc` once its `edit_seq` held still for a tick (or the index moved).
+    fn tick(&mut self, doc: &SourceBuffer, daemon: Option<&Arc<dyn DaemonClient>>) {
         let generation = daemon.and_then(|d| d.index().generation());
-        let Some(entry) = self.docs.get_mut(tab.path()) else {
+        let Some(entry) = self.docs.get_mut(doc.path()) else {
             return;
         };
         if !entry.mode.shows_reading() {
             return;
         }
-        let seq = tab.edit_seq();
+        let seq = doc.edit_seq();
         let resolver_epoch = self.resolver_epoch;
         let stale = match &entry.doc {
             None => true,
             Some(d) => {
                 d.seq != seq
-                    || d.epoch != tab.epoch()
+                    || d.epoch != doc.epoch()
                     || d.generation != generation
                     || d.resolver_epoch != resolver_epoch
             }
@@ -867,9 +845,9 @@ impl ReadingStore {
         let reloaded = entry
             .doc
             .as_ref()
-            .is_some_and(|d| d.epoch != tab.epoch() || d.resolver_epoch != resolver_epoch);
+            .is_some_and(|d| d.epoch != doc.epoch() || d.resolver_epoch != resolver_epoch);
         if reloaded || entry.seen_seq == Some(seq) || entry.doc.is_none() {
-            self.recompute(tab, daemon);
+            self.recompute(doc, daemon);
         } else {
             entry.seen_seq = Some(seq);
         }
@@ -1103,7 +1081,7 @@ fn update_store(
                         return ScrollIntent::ScrollTo { path, view, y }.task();
                     }
                 }
-                None => match p.top_block() {
+                None => match p.anchor_block(0.0) {
                     Some(b) => {
                         if anchor > 0.0
                             && let Some(a) = p.anchor_block(anchor)
@@ -1208,7 +1186,7 @@ pub fn image_failure_text(key: &str, err: &str) -> String {
 pub fn tab_body<'a>(
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
-    tab: &'a SourceBuffer,
+    doc: &'a SourceBuffer,
     view: u64,
     t: Tokens,
     font_size: f32,
@@ -1220,16 +1198,16 @@ pub fn tab_body<'a>(
     use iced::widget::{container, row};
     // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
     let scale = view::reading_scale(font_size);
-    match store.mode(tab.path()) {
-        ViewMode::Source => crate::source::view(tab, t, font_size, keymap, link),
-        ViewMode::Reading => view::reading(store, views, tab.path(), view, t, scale, focused),
+    match store.mode(doc.path()) {
+        ViewMode::Source => crate::source::view(doc, t, font_size, keymap, link),
+        ViewMode::Reading => view::reading(store, views, doc.path(), view, t, scale, focused),
         ViewMode::Split => row![
-            container(crate::source::view(tab, t, font_size, keymap, link))
+            container(crate::source::view(doc, t, font_size, keymap, link))
                 .width(Length::FillPortion(1)),
             container(view::reading(
                 store,
                 views,
-                tab.path(),
+                doc.path(),
                 view,
                 t,
                 scale,
@@ -1266,19 +1244,14 @@ pub struct Probe {
 }
 
 impl Probe {
-    /// The block at the viewport top: the last block whose top is at or above the offset
-    /// (1px slack), else the first laid-out block.
-    pub fn top_block(&self) -> Option<usize> {
-        self.block_at(0.0)
-    }
-
-    /// Plan round-8 WP-4: the block under the anchor height `a` (fraction of the viewport):
-    /// the last block whose content-relative top is at or above `offset + a × viewport_h`.
-    /// `a = 0` is exactly [`Self::top_block`].
+    /// Plan round-8 WP-4: the block under the anchor height `a` (fraction of the viewport;
+    /// `a = 0` is the block at the viewport top).
     pub fn anchor_block(&self, a: f32) -> Option<usize> {
         self.block_at(a * self.viewport_h)
     }
 
+    /// The block `dy` px below the viewport top: the last block whose content-relative top is
+    /// at or above `offset + dy` (1px slack), else the first laid-out block.
     fn block_at(&self, dy: f32) -> Option<usize> {
         let rel = |y: f32| y - self.content_y;
         let mut first = None;
@@ -1406,9 +1379,11 @@ pub enum ScrollIntent {
         scroll_to: Option<usize>,
     },
     /// Plan round-7 WP-4 (attempt 2): re-sends the source editor's viewport report after the
-    /// next layout (pass 2 of a Reading → Source line carry, [`SourceBuffer::set_visible_lines`]).
+    /// next layout (the next pass of a Reading → Source line carry, [`SourceBuffer::on_layout`]
+    /// returned [`Relayout::Again`]).
     ///
-    /// [`SourceBuffer::set_visible_lines`]: crate::source::SourceBuffer::set_visible_lines
+    /// [`SourceBuffer::on_layout`]: crate::source::SourceBuffer::on_layout
+    /// [`Relayout::Again`]: crate::source::Relayout::Again
     SourceRelayout { path: String, lines: usize },
 }
 

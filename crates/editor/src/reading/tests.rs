@@ -384,7 +384,7 @@ fn probe_maps_scroll_offset_to_blocks() {
         ..Probe::default()
     };
     assert_eq!(
-        p.top_block(),
+        p.anchor_block(0.0),
         Some(2),
         "139.5 - 40 = 99.5 <= 100 (+1 slack)"
     );
@@ -395,7 +395,7 @@ fn probe_maps_scroll_offset_to_blocks() {
         offset_y: 0.0,
         ..p.clone()
     };
-    assert_eq!(at_top.top_block(), Some(0));
+    assert_eq!(at_top.anchor_block(0.0), Some(0));
 }
 
 const PLACE_NOTE: &[u8] =
