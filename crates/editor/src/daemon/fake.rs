@@ -95,6 +95,8 @@ struct Inner {
     /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call (fails with
     /// `done_fail` too).
     status_calls: Vec<cv_protocol::TrackerItemSetStatusParams>,
+    /// Plan round-8-intake-views-anchor WP-3: every `note_set_bool` call.
+    bool_calls: Vec<cv_protocol::NoteSetBoolParams>,
     /// Plan semsearch-crate WP-4: the canned `search` result, the "disconnected" mode, and
     /// every `search` call `(query, limit)`.
     search: cv_protocol::SearchResult,
@@ -157,6 +159,7 @@ impl FakeDaemon {
                 queued: Vec::new(),
                 done_calls: Vec::new(),
                 status_calls: Vec::new(),
+                bool_calls: Vec::new(),
                 done_fail: None,
                 search: cv_protocol::SearchResult {
                     hits: Vec::new(),
@@ -249,6 +252,11 @@ impl FakeDaemon {
     /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call so far, in order.
     pub fn status_calls(&self) -> Result<Vec<cv_protocol::TrackerItemSetStatusParams>> {
         Ok(self.lock()?.status_calls.clone())
+    }
+
+    /// Plan round-8-intake-views-anchor WP-3: every `note_set_bool` call so far, in order.
+    pub fn bool_calls(&self) -> Result<Vec<cv_protocol::NoteSetBoolParams>> {
+        Ok(self.lock()?.bool_calls.clone())
     }
 
     /// Plan semsearch-crate WP-4: the canned `search` answer.
@@ -679,6 +687,11 @@ impl DaemonClient for FakeDaemon {
             })),
             None => Ok(()),
         }
+    }
+
+    fn note_set_bool(&self, p: &cv_protocol::NoteSetBoolParams) -> Result<()> {
+        self.lock()?.bool_calls.push(p.clone());
+        Ok(())
     }
 
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {

@@ -705,7 +705,45 @@ impl Shared {
             Request::TrackerItemSetStatus(p) => {
                 self.set_tracker_status(&p.source_kind, &p.source_key, &p.item_id, p.status)
             }
+            Request::NoteSetBool(p) => self.note_set_bool(p).await,
         }
+    }
+
+    /// `note_set_bool` (plan round-8-intake-views-anchor WP-3): read → frontmatter edit → CAS
+    /// write in one writer job (the CAS token is the hash the writer itself read), so shadow mode
+    /// and the writer's refusals apply. An already-equal value writes nothing.
+    async fn note_set_bool(&self, p: cv_protocol::NoteSetBoolParams) -> Result<Value, RpcError> {
+        let res = self
+            .with_writer(move |w| {
+                w.call(move |vw| -> Result<Result<String, RpcError>, VaultError> {
+                    let bytes = vw
+                        .fs()
+                        .read(&p.path)?
+                        .ok_or_else(|| VaultError::NotFound(p.path.clone()))?;
+                    let hash = ContentHash::of(&bytes);
+                    let Ok(text) = String::from_utf8(bytes) else {
+                        return Ok(Err(rpc_err(
+                            error_codes::INVALID_PARAMS,
+                            format!("{} is not UTF-8", p.path),
+                        )));
+                    };
+                    let mut doc = cv_lint::FrontmatterDoc::new(text);
+                    match doc.set(&p.key, &cv_lint::JsValue::Bool(p.value)) {
+                        Err(e) => Ok(Err(rpc_err(
+                            error_codes::INVALID_PARAMS,
+                            format!("{}: {e}", p.path),
+                        ))),
+                        Ok(false) => Ok(Ok(hash.as_str().to_owned())),
+                        Ok(true) => {
+                            let h = vw.write(&p.path, doc.text().as_bytes(), Some(hash))?;
+                            Ok(Ok(h.as_str().to_owned()))
+                        }
+                    }
+                })
+            })
+            .await?;
+        let hash = res.and_then(|r| r).map_err(vault_err)??;
+        to_value(&cv_protocol::NoteSetBoolResult { hash })
     }
 
     /// `search` (plan semsearch-crate WP-4): hybrid search over the runner's shared index,

@@ -751,3 +751,67 @@ fn cancelled_status_row_draws_struck() {
     assert!(!row_cancelled(r, &titles_only));
     assert_eq!(status_cell(r, k, 1), Some(Some('-')));
 }
+
+/// Plan round-8-intake-views-anchor WP-3: a `checkbox` column of `note.read`.
+fn checkbox_result() -> serde_json::Value {
+    json!({
+        "kind": "table",
+        "columns": [
+            {"key": "file.name", "label": "name"},
+            {"key": "note.read", "label": "read", "checkbox": true}
+        ],
+        "groups": [{"rows": [
+            {"path": NOTE, "cells": [{"t": "text", "v": "Host"}, {"t": "null"}]},
+            {"path": "Linker.md", "cells": [{"t": "text", "v": "Linker"}, {"t": "bool", "v": true}]},
+            {"cells": [{"t": "text", "v": "pathless"}, {"t": "bool", "v": false}]}
+        ], "summaries": []}],
+        "summaries": [],
+        "notices": []
+    })
+}
+
+#[test]
+fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ID, ViewResult(checkbox_result()))
+        .expect("script");
+    need(&mut app);
+    let Some(State::Ready(dec)) = state(&app).cloned() else {
+        panic!("not ready");
+    };
+    assert_eq!(dec.column_checkbox, [false, true]);
+    let rows: Vec<Row> = dec
+        .lines
+        .iter()
+        .filter_map(|l| match l {
+            Line::Row(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect();
+    let cb = |r: &Row| checkbox_cell(r, &dec.column_keys, &dec.column_checkbox, 1);
+    assert!(
+        cb(&rows[0]).is_some_and(|(c, _)| !c),
+        "null draws unchecked"
+    );
+    assert!(cb(&rows[2]).is_none(), "no path, no checkbox");
+    assert!(checkbox_cell(&rows[0], &dec.column_keys, &dec.column_checkbox, 0).is_none());
+    // Open note: the buffer gains `read: true`; no daemon call.
+    let (_, click) = cb(&rows[0]).expect("checkbox");
+    let _ = app.update(click);
+    assert!(d.bool_calls().expect("calls").is_empty());
+    let text = app.docs.get_mut(NOTE).expect("doc").text();
+    assert!(text.starts_with("---\nread: true\n---\n# Host"), "{text}");
+    // Closed note, checked: exactly one `note_set_bool` to false.
+    let (checked, click) = cb(&rows[1]).expect("checkbox");
+    assert!(checked);
+    let _ = app.update(click);
+    assert_eq!(
+        d.bool_calls().expect("calls"),
+        [cv_protocol::NoteSetBoolParams {
+            path: "Linker.md".into(),
+            key: "read".into(),
+            value: false,
+        }]
+    );
+    assert!(app.status.error_text().is_none());
+}

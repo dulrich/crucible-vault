@@ -26,6 +26,10 @@ pub enum FilterNode {
 pub struct PropertyDef {
     #[serde(rename = "displayName", alias = "display_name", default)]
     pub display_name: Option<String>,
+    /// Plan round-8 WP-3: render this `note.<key>` column as a checkbox that toggles the
+    /// frontmatter boolean. Ignored on `file.*` / `formula.*` ids.
+    #[serde(default)]
+    pub checkbox: bool,
 }
 
 /// Sort direction.
@@ -297,6 +301,16 @@ pub struct View {
     pub filter_error: bool,
     /// Plan round-8 WP-2: `maxHeight` (`None` = the editor default).
     pub max_height: Option<crate::result::MaxHeight>,
+    /// Plan round-8 WP-3: normalized `note.<key>` ids flagged `checkbox = true`.
+    pub checkboxes: std::collections::BTreeSet<String>,
+}
+
+impl View {
+    /// Whether the column `id` (as written in `order`) is a frontmatter checkbox.
+    #[must_use]
+    pub fn is_checkbox(&self, id: &str) -> bool {
+        self.checkboxes.contains(&norm(id))
+    }
 }
 
 /// A compiled definition file.
@@ -346,13 +360,22 @@ impl Base {
             .iter()
             .filter_map(|(k, p)| p.display_name.clone().map(|d| (norm(k), d)))
             .collect();
+        let checkboxes: std::collections::BTreeSet<String> = def
+            .properties
+            .iter()
+            .filter(|(_, p)| p.checkbox)
+            .map(|(k, _)| norm(k))
+            .filter(|k| k.starts_with("note."))
+            .collect();
         let mut views: Vec<View> = Vec::new();
         for v in &def.views {
             if views.iter().any(|x| x.name == v.name) {
                 load_notices.push(format!("{stem}: duplicate view name `{}` skipped", v.name));
                 continue;
             }
-            views.push(compile_view(v, def, &formula_errs, &labels));
+            let mut view = compile_view(v, def, &formula_errs, &labels);
+            view.checkboxes.clone_from(&checkboxes);
+            views.push(view);
         }
         Self {
             stem: stem.to_string(),
@@ -461,6 +484,7 @@ fn compile_view(
         filter_error,
         errors,
         max_height: v.max_height,
+        checkboxes: std::collections::BTreeSet::new(),
     }
 }
 

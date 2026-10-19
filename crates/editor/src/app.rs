@@ -3252,6 +3252,30 @@ impl App {
 
     /// plan usability-sprint-captures-links WP-4: flips a frontmatter boolean in `path`'s
     /// buffer — the same edit → autosave → CAS-save path as `toggle_task`.
+    /// Plan round-8-intake-views-anchor WP-3: a view checkbox cell. An open note's buffer gets
+    /// the target value as one undoable edit (unsaved edits survive, autosave persists it); a
+    /// closed note goes through the daemon's `note_set_bool`. No optimistic view state.
+    fn set_note_bool(&mut self, path: String, key: String, value: bool) -> Task<Message> {
+        if let Some(doc) = self.docs.get_mut(&path) {
+            if self.status.mode == Mode::Shadow {
+                self.status
+                    .set_error("edits are disabled in shadow mode".into());
+                return Task::none();
+            }
+            if !doc.set_frontmatter_bool(&key, Some(value), false, std::time::Instant::now()) {
+                return Task::none();
+            }
+            let seq = doc.edit_seq();
+            self.reading.recompute(doc, self.daemon.as_ref());
+            return crate::source::autosave_timer(path, seq);
+        }
+        let p = cv_protocol::NoteSetBoolParams { path, key, value };
+        self.rpc(
+            move |d| d.note_set_bool(&p).map_err(|e| e.to_string()),
+            |r| Message::Views(crate::message::ViewsMsg::BoolSet(r)),
+        )
+    }
+
     fn toggle_prop(&mut self, path: &str, key: &str) -> Task<Message> {
         let read_only = self.status.mode == Mode::Shadow;
         let Some(doc) = self.docs.get_mut(path) else {
@@ -4364,6 +4388,9 @@ impl App {
                     move |d| d.tracker_item_set_status(&p).map_err(|e| e.to_string()),
                     |r| Message::Views(crate::message::ViewsMsg::StatusSet(r)),
                 )
+            }
+            crate::views::Effect::SetBool { path, key, value } => {
+                self.set_note_bool(path, key, value)
             }
             crate::views::Effect::Notice(text) => {
                 self.status.set_error(text);

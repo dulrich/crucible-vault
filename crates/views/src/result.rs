@@ -66,6 +66,9 @@ pub enum Cell {
 pub struct Column {
     pub key: String,
     pub label: String,
+    /// Plan round-8 WP-3: a `note.<key>` column whose cells are frontmatter-toggling checkboxes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checkbox: bool,
 }
 
 /// One row; `path`/`line` locate the source (a task row carries its 1-based line).

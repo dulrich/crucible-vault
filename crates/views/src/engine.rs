@@ -440,6 +440,7 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
             .map(|(id, _, l)| Column {
                 key: id.clone(),
                 label: l.clone(),
+                checkbox: view.is_checkbox(id),
             })
             .collect(),
         groups,
@@ -501,15 +502,18 @@ fn pivot(
     let mut columns = vec![Column {
         key: "rows".into(),
         label: p.rows_label.clone(),
+        checkbox: false,
     }];
     columns.extend(p.columns.iter().map(|(l, _)| Column {
         key: l.clone(),
         label: l.clone(),
+        checkbox: false,
     }));
     if let Some(t) = &p.total_column {
         columns.push(Column {
             key: "total".into(),
             label: t.clone(),
+            checkbox: false,
         });
     }
     let mut rows = Vec::with_capacity(keys.len());
@@ -646,14 +650,17 @@ fn tasks(
             Column {
                 key: "task".into(),
                 label: "Task".into(),
+                checkbox: false,
             },
             Column {
                 key: "file".into(),
                 label: "File".into(),
+                checkbox: false,
             },
             Column {
                 key: "status".into(),
                 label: "Status".into(),
+                checkbox: false,
             },
         ],
         groups: groups

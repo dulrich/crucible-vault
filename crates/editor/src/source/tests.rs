@@ -569,6 +569,31 @@ fn toggle_frontmatter_bool_flips_only_the_scalar() {
     assert_eq!(b.text(), src);
 }
 
+/// Plan round-8-intake-views-anchor WP-3: missing / null keys and frontmatter-less notes upsert
+/// to `true` as one undoable edit.
+#[test]
+fn toggle_frontmatter_bool_upserts_in_one_undo_step() {
+    for (src, want) in [
+        (
+            "---\ntitle: x\n---\nbody\n",
+            "---\ntitle: x\nread: true\n---\nbody\n",
+        ),
+        (
+            "---\nread: null\n---\nbody\n",
+            "---\nread: true\n---\nbody\n",
+        ),
+        ("body\n", "---\nread: true\n---\nbody\n"),
+    ] {
+        let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+        let seq = b.edit_seq();
+        assert!(b.toggle_frontmatter_bool("read", false, Instant::now()));
+        assert_eq!(b.text(), want);
+        assert_eq!(b.edit_seq(), seq + 1);
+        assert!(b.undo());
+        assert_eq!(b.text(), src);
+    }
+}
+
 #[test]
 fn toggle_task_on_plain_buffer_is_one_undoable_edit() {
     let src = "---\na: 1\n---\n- [ ] one\n- [/] two\n";

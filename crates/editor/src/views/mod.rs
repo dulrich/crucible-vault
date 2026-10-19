@@ -90,6 +90,8 @@ pub struct Decoded {
     pub columns: Vec<String>,
     /// The column keys (`file.name`, `done`, …), aligned with `columns`.
     pub column_keys: Vec<String>,
+    /// Plan round-8 WP-3: which columns are `checkbox = true` frontmatter toggles.
+    pub column_checkbox: Vec<bool>,
     pub lines: Vec<Line>,
     pub notices: Vec<String>,
     /// Plan round-8 WP-2: the view's `maxHeight` (`None` = [`MAX_HEIGHT`]).
@@ -176,6 +178,12 @@ pub enum Effect {
     SetStatus {
         key: views::result::TrackerKey,
         status: Option<char>,
+    },
+    /// Plan round-8-intake-views-anchor WP-3: set frontmatter boolean `key` of `path`.
+    SetBool {
+        path: String,
+        key: String,
+        value: bool,
     },
     /// A failure notice for the status bar.
     Notice(String),
@@ -280,6 +288,10 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
         // Success needs nothing: the refresh arrives as `views_invalidated`.
         ViewsMsg::StatusSet(Ok(())) => Effect::None,
         ViewsMsg::StatusSet(Err(e)) => Effect::Notice(format!("status change failed: {e}")),
+        ViewsMsg::SetBool { path, key, value } => Effect::SetBool { path, key, value },
+        // Success needs nothing: the refresh arrives with the file change.
+        ViewsMsg::BoolSet(Ok(())) => Effect::None,
+        ViewsMsg::BoolSet(Err(e)) => Effect::Notice(format!("property change failed: {e}")),
     }
 }
 
@@ -363,6 +375,10 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
     };
     let columns = cols.iter().map(|c| field(c, "label")).collect();
     let column_keys = cols.iter().map(|c| field(c, "key")).collect();
+    let column_checkbox = cols
+        .iter()
+        .map(|c| c.get("checkbox").and_then(Value::as_bool).unwrap_or(false))
+        .collect();
     let groups = v
         .get("groups")
         .and_then(Value::as_array)
@@ -404,6 +420,7 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
         kind,
         columns,
         column_keys,
+        column_checkbox,
         lines,
         notices,
         max_height,
@@ -640,6 +657,33 @@ pub(crate) fn cell_menu_target(c: &Cell) -> Option<crate::context_menu::Target> 
     })
 }
 
+/// Plan round-8-intake-views-anchor WP-3: cell `i` of `r` as a frontmatter checkbox — `(checked,
+/// click)` when column `i` is flagged `checkbox` and the row has a `path`. Only `Bool(true)` is
+/// checked (false / null / missing draw unchecked); the click sets the opposite value on the
+/// column's frontmatter key (`note.` prefix stripped).
+pub(crate) fn checkbox_cell(
+    r: &Row,
+    keys: &[String],
+    flags: &[bool],
+    i: usize,
+) -> Option<(bool, Message)> {
+    if !flags.get(i).copied().unwrap_or(false) {
+        return None;
+    }
+    let path = r.path.clone()?;
+    let col = keys.get(i)?;
+    let key = col.strip_prefix("note.").unwrap_or(col).to_owned();
+    let checked = matches!(r.cells.get(i), Some(Cell::Bool(true)));
+    Some((
+        checked,
+        Message::Views(ViewsMsg::SetBool {
+            path,
+            key,
+            value: !checked,
+        }),
+    ))
+}
+
 /// Plan round-8-intake-views-anchor WP-1: whether `r` is a cancelled row — a status cell
 /// (see [`status_cell`]) holding `-`. Its text cells draw struck-through and faint.
 pub(crate) fn row_cancelled(r: &Row, keys: &[String]) -> bool {
@@ -746,7 +790,11 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Me
                 let cancelled = row_cancelled(r, &d.column_keys);
                 return row((0..cols).map(|i| {
                     let open = targets.get(i).cloned().flatten();
-                    let el: Element<'a, Message> =
+                    let el: Element<'a, Message> = if let Some((checked, msg)) =
+                        checkbox_cell(r, &d.column_keys, &d.column_checkbox, i)
+                    {
+                        status_box(if checked { 'x' } else { ' ' }, Some(msg), None, t, scale)
+                    } else {
                         match (r.cells.get(i), status_cell(r, &d.column_keys, i)) {
                             (Some(Cell::Bool(b)), _) if is_toggle(r, &d.column_keys, i) => {
                                 status_box(if *b { 'x' } else { ' ' }, open, None, t, scale)
@@ -762,7 +810,8 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Me
                                 t,
                                 scale,
                             ),
-                        };
+                        }
+                    };
                     container(el).width(Length::FillPortion(1)).into()
                 }))
                 .spacing(8)

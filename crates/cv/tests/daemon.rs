@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use cv::{Client, ClientError, Config, Daemon, DaemonOptions, RunningDaemon};
 use cv_protocol::{
-    ChangeKind, CreateNoteParams, DeleteMode, DeleteParams, JobIdParams, Notification, Origin,
-    PathParams, RenameParams, Request, SubscribeParams, Topic, UriParams, UriResult, ViewRunParams,
-    WriteAttachmentParams, WriteNoteParams, WriteNoteResult, WriteOp, error_codes,
+    ChangeKind, CreateNoteParams, DeleteMode, DeleteParams, JobIdParams, NoteSetBoolParams,
+    NoteSetBoolResult, Notification, Origin, PathParams, RenameParams, Request, SubscribeParams,
+    Topic, UriParams, UriResult, ViewRunParams, WriteAttachmentParams, WriteNoteParams,
+    WriteNoteResult, WriteOp, error_codes,
 };
 use cv_vault::{ContentHash, WatchConfig};
 use serde_json::{Value, json};
@@ -266,6 +267,66 @@ async fn write_note_cas_conflict_does_not_clobber() {
         "client version"
     );
     assert_eq!(hash_of(&live_a), h1);
+    drop(c);
+    d.shutdown().await.unwrap();
+}
+
+/// Plan round-8-intake-views-anchor WP-3: `note_set_bool` edits one frontmatter key through the
+/// writer (shadow overlay here), creating key / block as needed; equal values write nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn note_set_bool_edits_frontmatter() {
+    let env = Env::new();
+    std::fs::write(
+        env.vault().join("r.md"),
+        "---\nread: false\ntitle: R\n---\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(env.vault().join("k.md"), "---\ntitle: K\n---\nbody\n").unwrap();
+    let d = start(&env).await;
+    let mut c = client(&env);
+    let set = |c: &mut Client, path: &str, value: bool| {
+        c.call(Request::NoteSetBool(NoteSetBoolParams {
+            path: path.into(),
+            key: "read".into(),
+            value,
+        }))
+    };
+    let shadow = |p: &str| std::fs::read_to_string(env.overlay().join(p)).unwrap();
+    // Existing `false` → `true`; the returned hash is the written file's.
+    let r: NoteSetBoolResult = serde_json::from_value(set(&mut c, "r.md", true).unwrap()).unwrap();
+    assert_eq!(shadow("r.md"), "---\nread: true\ntitle: R\n---\nbody\n");
+    assert_eq!(r.hash, hash_of(&env.overlay().join("r.md")));
+    // Missing key → appended `true`.
+    set(&mut c, "k.md", true).unwrap();
+    assert_eq!(shadow("k.md"), "---\ntitle: K\nread: true\n---\nbody\n");
+    // No frontmatter → a new block.
+    set(&mut c, "notes/b.md", true).unwrap();
+    assert!(shadow("notes/b.md").starts_with("---\nread: true\n---\n"));
+    assert!(shadow("notes/b.md").ends_with("# B\n"));
+    // Unchanged value → no write, current hash returned.
+    let before = std::fs::metadata(env.overlay().join("r.md"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let r2: NoteSetBoolResult = serde_json::from_value(set(&mut c, "r.md", true).unwrap()).unwrap();
+    assert_eq!(r2.hash, r.hash);
+    assert_eq!(
+        std::fs::metadata(env.overlay().join("r.md"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+    assert!(!env.overlay().join("a.md").exists());
+    // Missing note → NOT_FOUND; live files untouched throughout.
+    assert_eq!(
+        rpc_code(set(&mut c, "nope.md", true)),
+        error_codes::NOT_FOUND
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.vault().join("r.md")).unwrap(),
+        "---\nread: false\ntitle: R\n---\nbody\n"
+    );
     drop(c);
     d.shutdown().await.unwrap();
 }

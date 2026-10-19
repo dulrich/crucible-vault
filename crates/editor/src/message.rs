@@ -388,6 +388,15 @@ pub enum ViewsMsg {
     SetStatus { key: String, status: Option<char> },
     /// `tracker_item_set_status` finished.
     StatusSet(Result<(), String>),
+    /// Plan round-8-intake-views-anchor WP-3: a `checkbox = true` cell click — set frontmatter
+    /// boolean `key` of note `path` to `value` (open buffer, else the daemon's `note_set_bool`).
+    SetBool {
+        path: String,
+        key: String,
+        value: bool,
+    },
+    /// `note_set_bool` finished.
+    BoolSet(Result<(), String>),
 }
 
 /// WP-4: day/month nav. The bar belongs to `pane`; results open in that pane's active tab.

@@ -1016,3 +1016,16 @@ fn state_change_invalidates_only_tracker_views() {
     assert!(host.on_state_changed("link_records").is_empty());
     assert_eq!(host.on_index_generation(99), vec!["notes#All"]);
 }
+
+/// Plan round-8 WP-3: `checkbox = true` reaches the result `Column` on `note.*` ids only;
+/// the default is false.
+#[test]
+fn checkbox_property_reaches_the_column() {
+    let def = "[properties.read]\ncheckbox = true\n\n[properties.\"file.name\"]\ncheckbox = true\n\n[[views]]\ntype = \"table\"\nname = \"T\"\norder = [\"file.name\", \"note.read\", \"word-count\"]\n";
+    let fx = fixture(&[("cb.toml", def)]);
+    let mut h = fx.host();
+    assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());
+    let cols = fx.run(&mut h, "cb#T", None).columns;
+    let flags: Vec<bool> = cols.iter().map(|c| c.checkbox).collect();
+    assert_eq!(flags, [false, true, false]);
+}

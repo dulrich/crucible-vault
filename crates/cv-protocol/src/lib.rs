@@ -150,6 +150,10 @@ pub enum Request {
     /// WP-6) → `null`; unknown rows are `NOT_FOUND`. Supersedes `tracker_item_set_done`, which
     /// stays one release as an alias (`true` → `'x'`, `false` → open).
     TrackerItemSetStatus(TrackerItemSetStatusParams),
+    /// Sets one boolean frontmatter key of a note (plan round-8-intake-views-anchor WP-3) →
+    /// [`NoteSetBoolResult`]; the key / frontmatter block is created if absent. Missing notes
+    /// are `NOT_FOUND`.
+    NoteSetBool(NoteSetBoolParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -641,6 +645,20 @@ pub struct TrackerItemSetStatusParams {
     pub status: Option<char>,
 }
 
+/// `note_set_bool` params: vault-relative note path, frontmatter key, new value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteSetBoolParams {
+    pub path: String,
+    pub key: String,
+    pub value: bool,
+}
+
+/// `note_set_bool` result: the note's hash after the call (unchanged when already set).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteSetBoolResult {
+    pub hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupChannelsParams {
     pub ids: Vec<String>,
@@ -1002,6 +1020,20 @@ mod tests {
             }),
         ));
         assert_eq!(v["params"]["status"], json!(null));
+        let v = round_trip(&RpcRequest::new(
+            RpcId::Num(7),
+            Request::NoteSetBool(NoteSetBoolParams {
+                path: "a.md".into(),
+                key: "read".into(),
+                value: true,
+            }),
+        ));
+        assert_eq!(v["method"], "note_set_bool");
+        assert_eq!(
+            v["params"],
+            json!({"path": "a.md", "key": "read", "value": true})
+        );
+        round_trip(&NoteSetBoolResult { hash: "h".into() });
         let r = round_trip(&LookupModelsResult {
             models: vec![LookupModel {
                 id: "m".into(),
