@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, Step, StepKind};
 use cv_protocol::ActionContext;
 use cv_providers::{ProviderManager, SecretSource};
 use cv_search::SearchDb;
@@ -270,16 +270,23 @@ impl World {
             children: &NoKids,
             written: Vec::new(),
         };
-        run(step, &mut ctx, self.rt.handle(), &self.mgr)
+        let p = super::search::parse(step.kind, &step.params).map_err(StepError::failed)?;
+        run(&p, &mut ctx, self.rt.handle(), &self.mgr)
     }
 
     fn upsert(&self, extra: &str) -> Step {
         let t: toml::Table = toml::from_str(extra).unwrap();
-        Step::SearchUpsert(t)
+        Step {
+            kind: StepKind::SearchUpsert,
+            params: t,
+        }
     }
 
     fn delete(&self) -> Step {
-        Step::SearchDelete(toml::Table::new())
+        Step {
+            kind: StepKind::SearchDelete,
+            params: toml::Table::new(),
+        }
     }
 
     /// `(source, hash, chunks, embedded)` through the shared handle.

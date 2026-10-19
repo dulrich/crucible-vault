@@ -42,30 +42,14 @@
 use std::sync::LazyLock;
 
 use chrono::NaiveDateTime;
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_text::sections::{SectionInsertMode, find_section_range, insert_into_section};
 use regex::Regex;
-use serde_json::Value;
+use serde::Serialize;
 
-use super::materialize::{
-    canonical_period, check_keys, check_placeholders, ensure_note, expand, get_str, now, period,
-    stem, table, value_text,
-};
-use super::{StepCtx, StepError, StepOutcome};
-
-const KEYS: &[&str] = &[
-    "capture",
-    "target",
-    "path",
-    "mode",
-    "section",
-    "section_mode",
-    "format",
-    "source",
-    "value",
-    "name",
-    "label",
-];
+use super::materialize::{canonical_period, ensure_note, now, period, stem};
+use super::params::{check_keys, check_placeholders, expand, get_str, value_text};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// Crucible `FRONTMATTER_REGEX` (`src/utils.ts:28`).
 static FRONTMATTER: LazyLock<Option<Regex>> = LazyLock::new(|| {
@@ -84,13 +68,8 @@ fn re(r: &LazyLock<Option<Regex>>) -> Result<&Regex, StepError> {
         .ok_or_else(|| StepError::failed("internal regex failed to compile"))
 }
 
-/// The effective params: the named `[[capture]]` entry overlaid by the step's keys.
-fn merged(step: &Step, config: &ConfigSet) -> Result<toml::Table, String> {
-    let t = table(step);
-    check_keys(&t, KEYS, "capture")?;
-    let Some(name) = get_str(&t, "capture")? else {
-        return Ok(t);
-    };
+/// The `[[capture]]` entry named `name` in `captures.toml`.
+fn preset_def<'c>(config: &'c ConfigSet, name: &str) -> Result<&'c toml::Table, String> {
     let entries = match config.table("captures.toml").get("capture") {
         None => &[][..],
         Some(toml::Value::Array(a)) => a.as_slice(),
@@ -99,25 +78,67 @@ fn merged(step: &Step, config: &ConfigSet) -> Result<toml::Table, String> {
     let def = entries
         .iter()
         .filter_map(toml::Value::as_table)
-        .find(|e| e.get("name").and_then(toml::Value::as_str) == Some(name.as_str()))
+        .find(|e| e.get("name").and_then(toml::Value::as_str) == Some(name))
         .ok_or_else(|| format!("capture {name:?} is not defined in captures.toml"))?;
-    check_keys(def, KEYS, "[[capture]]")?;
-    let mut out = def.clone();
-    for (k, v) in t {
-        out.insert(k, v);
+    check_keys(def, StepKind::Capture, "[[capture]]")?;
+    Ok(def)
+}
+
+/// Parsed `capture` params: the named `[[capture]]` entry overlaid by the step's keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Params {
+    pub target: Target,
+    pub mode: Mode,
+    pub path: Option<String>,
+    pub section: Option<String>,
+    /// `section_mode = "source"`.
+    pub section_from_source: bool,
+    /// `None` = `{{value}}`.
+    pub format: Option<String>,
+    /// `source = "line"`.
+    pub source_line: bool,
+    pub value: Option<String>,
+}
+
+impl Params {
+    /// The params of the `[[capture]]` preset `name` alone (inline captures, e.g. the tracker).
+    pub(crate) fn preset(config: &ConfigSet, name: &str) -> Result<Self, String> {
+        parse_merged(preset_def(config, name)?, config)
     }
-    Ok(out)
+}
+
+/// The `capture` step.
+pub(crate) struct Capture;
+
+impl StepModule for Capture {
+    type Params = Params;
+
+    fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
+        check_keys(t, kind, "capture")?;
+        let Some(name) = get_str(t, "capture")? else {
+            return parse_merged(t, config);
+        };
+        let mut merged = preset_def(config, &name)?.clone();
+        for (k, v) in t {
+            merged.insert(k.clone(), v.clone());
+        }
+        parse_merged(&merged, config)
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(&p, ctx)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Target {
+pub(crate) enum Target {
     Period(&'static str),
     DailyNext,
     Active,
     Path,
 }
 
-fn parse_target(s: &str) -> Result<Target, String> {
+pub(crate) fn parse_target(s: &str) -> Result<Target, String> {
     match s {
         "active" => Ok(Target::Active),
         "path" => Ok(Target::Path),
@@ -129,13 +150,13 @@ fn parse_target(s: &str) -> Result<Target, String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub(crate) enum Mode {
     Append,
     Prepend,
     Replace,
 }
 
-fn parse_mode(s: &str) -> Result<(Mode, bool), String> {
+pub(crate) fn parse_mode(s: &str) -> Result<(Mode, bool), String> {
     match s {
         "append" => Ok((Mode::Append, false)),
         "prepend" => Ok((Mode::Prepend, false)),
@@ -145,9 +166,8 @@ fn parse_mode(s: &str) -> Result<(Mode, bool), String> {
     }
 }
 
-/// Validates one step's params.
-pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
-    let t = merged(step, config)?;
+/// Parses the effective (preset-merged) params.
+fn parse_merged(t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
     for k in [
         "target",
         "path",
@@ -160,34 +180,49 @@ pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
         "name",
         "label",
     ] {
-        get_str(&t, k)?;
+        get_str(t, k)?;
     }
-    let target = parse_target(&get_str(&t, "target")?.unwrap_or_else(|| "active".into()))?;
+    let target = parse_target(&get_str(t, "target")?.unwrap_or_else(|| "active".into()))?;
+    let path = get_str(t, "path")?;
     match target {
         Target::Period(p) => period(config, p, None).map(|_| ())?,
         Target::DailyNext => period(config, "day", None).map(|_| ())?,
-        Target::Path => match get_str(&t, "path")? {
-            Some(p) if !p.trim().is_empty() => check_placeholders(&p)?,
+        Target::Path => match &path {
+            Some(p) if !p.trim().is_empty() => check_placeholders(p)?,
             _ => return Err("capture target=path needs `path`".into()),
         },
         Target::Active => {}
     }
-    let (_, needs_section) = parse_mode(&get_str(&t, "mode")?.unwrap_or_else(|| "append".into()))?;
-    if needs_section && get_str(&t, "section")?.is_none_or(|s| s.trim().is_empty()) {
+    let (mode, needs_section) =
+        parse_mode(&get_str(t, "mode")?.unwrap_or_else(|| "append".into()))?;
+    let section = get_str(t, "section")?;
+    if needs_section && section.as_deref().is_none_or(|s| s.trim().is_empty()) {
         return Err("capture mode=section needs `section`".into());
     }
-    match get_str(&t, "section_mode")?.as_deref() {
-        None | Some("fixed" | "source") => {}
+    let section_from_source = match get_str(t, "section_mode")?.as_deref() {
+        None | Some("fixed") => false,
+        Some("source") => true,
         Some(o) => return Err(format!("capture: unknown section_mode {o:?}")),
-    }
-    match get_str(&t, "source")?.as_deref() {
-        None | Some("value" | "line") => {}
+    };
+    let source_line = match get_str(t, "source")?.as_deref() {
+        None | Some("value") => false,
+        Some("line") => true,
         Some(o) => return Err(format!("capture: unknown source {o:?}")),
+    };
+    let value = get_str(t, "value")?;
+    if let Some(v) = &value {
+        check_placeholders(v)?;
     }
-    if let Some(v) = get_str(&t, "value")? {
-        check_placeholders(&v)?;
-    }
-    Ok(())
+    Ok(Params {
+        target,
+        mode,
+        path,
+        section,
+        section_from_source,
+        format: get_str(t, "format")?,
+        source_line,
+        value,
+    })
 }
 
 /// The task line at `(active_path, line)` and the heading above it.
@@ -318,23 +353,19 @@ fn apply(
 }
 
 /// Executes one capture step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let t = merged(step, ctx.config).map_err(StepError::failed)?;
-    let s = |k: &str| get_str(&t, k).map_err(StepError::failed);
-    let target = parse_target(&s("target")?.unwrap_or_else(|| "active".into()))
-        .map_err(StepError::failed)?;
-    let (mode, _) =
-        parse_mode(&s("mode")?.unwrap_or_else(|| "append".into())).map_err(StepError::failed)?;
-    let format = s("format")?.unwrap_or_else(|| "{{value}}".into());
+pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let target = p.target;
+    let mode = p.mode;
+    let format = p.format.clone().unwrap_or_else(|| "{{value}}".into());
 
     // Value.
     let mut source_heading = None;
-    let value = if s("source")?.as_deref() == Some("line") {
+    let value = if p.source_line {
         let (line, heading) = source_line(ctx)?;
         source_heading = heading;
         line
-    } else if let Some(v) = s("value")? {
-        expand(ctx, &v)?
+    } else if let Some(v) = &p.value {
+        expand(ctx, v)?
     } else {
         ctx.params
             .get("value")
@@ -356,12 +387,12 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             .filter(|p| !p.is_empty())
             .ok_or_else(|| StepError::failed("capture target=active needs an active path"))?,
         Target::Path => {
-            let p = expand(ctx, &s("path")?.unwrap_or_default())?;
-            let p = p.trim().trim_matches('/').to_owned();
-            if p.is_empty() {
+            let path = expand(ctx, p.path.as_deref().unwrap_or_default())?;
+            let path = path.trim().trim_matches('/').to_owned();
+            if path.is_empty() {
                 return Err(StepError::failed("capture: `path` expanded to nothing"));
             }
-            p
+            path
         }
         Target::Period(_) | Target::DailyNext => {
             let pname = match target {
@@ -386,8 +417,9 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     };
 
     let mut out = StepOutcome::default();
-    out.vars
-        .insert("captured_path".into(), Value::String(path.clone()));
+    out.set_vars(&Vars {
+        captured_path: path.clone(),
+    });
 
     let rendered = super::materialize::render(ctx, &format, template_date, stem(&path), &value)?;
     let content_raw = rendered.trim();
@@ -409,8 +441,8 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         .ok_or_else(|| StepError::failed("capture target note not found"))?;
     let existing =
         String::from_utf8(bytes).map_err(|_| StepError::failed("capture target is not UTF-8"))?;
-    let fixed = s("section")?.filter(|x| !x.trim().is_empty());
-    let section = if s("section_mode")?.as_deref() == Some("source") {
+    let fixed = p.section.clone().filter(|x| !x.trim().is_empty());
+    let section = if p.section_from_source {
         source_heading
             .filter(|h| find_section_range(&existing, h).is_some())
             .or(fixed)
@@ -419,7 +451,13 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     };
     if let Some(new) = apply(&existing, &content, content_raw, mode, section.as_deref()) {
         ctx.write(&path, new.into_bytes(), Some(hash))?;
-        out.output_paths.push(path);
+        out.push_output(path);
     }
     Ok(out)
+}
+
+/// `capture` outcome vars.
+#[derive(Serialize)]
+struct Vars {
+    captured_path: String,
 }

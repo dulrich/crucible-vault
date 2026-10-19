@@ -29,19 +29,19 @@ use std::io::Cursor;
 use std::sync::OnceLock;
 
 use base64::Engine as _;
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_index::Reader;
 use cv_providers::{CompletionRequest, FinishReason, ImagePart, ProviderError, ProviderManager};
 use cv_search::prepare::localized_image_md5;
 use cv_state::ImageDescription;
 use regex::Regex;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::json;
 
 use super::agent;
-use super::materialize::{check_keys, get_bool, table};
-use crate::steps::{StepCtx, StepError, StepOutcome};
+use super::params::{check_keys, get_bool, get_str};
+use crate::steps::{StepCtx, StepError, StepModule, StepOutcome};
 
-const KEYS: &[&str] = &["scope", "limit", "prune_transient"];
 const DEFAULT_LIMIT: usize = 100;
 /// Crucible `IMAGE_DESCRIBE_MAX_LONG_EDGE` (`imageDescribe.ts:43`).
 pub(crate) const MAX_LONG_EDGE: u32 = 1568;
@@ -60,21 +60,20 @@ const NARRATIVE_PROMPT: &str = "In one dense paragraph, describe what this image
 const EXTRACTION_PROMPT: &str = "Transcribe this image as structured plain text: its title, subtitle, axis labels and ranges, series names, data values, annotations, table content, and component labels, in that order where present. Plain text only, no JSON, no markdown formatting.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
+pub(crate) enum Scope {
     Note,
     Vault,
 }
 
-struct Params {
+pub(crate) struct Params {
     scope: Scope,
     limit: usize,
     prune_transient: bool,
 }
 
-fn parse(step: &Step) -> Result<Params, String> {
-    let t = table(step);
-    check_keys(&t, KEYS, "image_describe")?;
-    let scope = match super::materialize::get_str(&t, "scope")?.as_deref() {
+pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
+    check_keys(t, StepKind::ImageDescribe, "image_describe")?;
+    let scope = match get_str(t, "scope")?.as_deref() {
         None | Some("note") => Scope::Note,
         Some("vault") => Scope::Vault,
         Some(s) => {
@@ -91,28 +90,40 @@ fn parse(step: &Step) -> Result<Params, String> {
     Ok(Params {
         scope,
         limit,
-        prune_transient: get_bool(&t, "prune_transient")?.unwrap_or(false),
+        prune_transient: get_bool(t, "prune_transient")?.unwrap_or(false),
     })
 }
 
-/// Validates the step's params (unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    parse(step).map(|_| ())
-}
+/// The `image_describe` step (unknown keys disarm, I5), run through the shared provider manager.
+pub(crate) struct ImageDescribe;
 
-/// Executes the step through the shared provider manager.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    if !ctx.config.pipelines().image_describe.enabled {
-        parse(step).map_err(StepError::failed)?;
-        return Ok(disabled());
+impl StepModule for ImageDescribe {
+    type Params = Params;
+
+    fn parse(_: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        parse(t)
     }
-    run(step, ctx, agent::manager()?)
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        if !ctx.config.pipelines().image_describe.enabled {
+            return Ok(disabled());
+        }
+        run(&p, ctx, agent::manager()?)
+    }
 }
 
 fn disabled() -> StepOutcome {
     let mut out = StepOutcome::default();
-    out.vars.insert("skipped".into(), json!("disabled"));
+    out.set_vars(&Disabled {
+        skipped: "disabled",
+    });
     out
+}
+
+/// `image_describe` outcome vars when the pipeline is disabled.
+#[derive(Serialize)]
+struct Disabled {
+    skipped: &'static str,
 }
 
 /// Crucible `fnv1a` (`imageDescriptionStore.ts:114-121`): 32-bit FNV-1a over UTF-16 code units,
@@ -360,7 +371,8 @@ fn pass(
     }
 }
 
-#[derive(Default)]
+/// `image_describe` outcome vars.
+#[derive(Default, Serialize)]
 struct Counts {
     described: u64,
     svg: u64,
@@ -372,11 +384,10 @@ struct Counts {
 
 /// The step body, with the manager injected (tests pass one with a test `SecretSource`).
 pub(crate) fn run(
-    step: &Step,
+    p: &Params,
     ctx: &mut StepCtx<'_>,
     mgr: &ProviderManager,
 ) -> Result<StepOutcome, StepError> {
-    let p = parse(step).map_err(StepError::failed)?;
     let cfg = ctx.config.pipelines().image_describe.clone();
     if !cfg.enabled {
         return Ok(disabled());
@@ -472,16 +483,7 @@ pub(crate) fn run(
     }
 
     let mut out = StepOutcome::default();
-    for (k, v) in [
-        ("described", n.described),
-        ("svg", n.svg),
-        ("failed", n.failed),
-        ("skipped", n.skipped),
-        ("pruned", n.pruned),
-        ("remaining", n.remaining),
-    ] {
-        out.vars.insert(k.into(), Value::from(v));
-    }
+    out.set_vars(&n);
     Ok(out)
 }
 

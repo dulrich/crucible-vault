@@ -281,7 +281,8 @@ fn run_with(
         children: &NoChildren,
         written: Vec::new(),
     };
-    agent::run(st, &mut ctx, m)
+    let p = agent::parse(&st.params, &e.config).map_err(StepError::failed)?;
+    agent::run(&p, &mut ctx, m)
 }
 
 /// Runs the step on a blocking thread inside the runtime hosting the fake provider.

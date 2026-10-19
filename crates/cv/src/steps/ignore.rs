@@ -18,21 +18,20 @@
 //! Outcome vars: `video_id`, `ignored` (bool: the video is ignored after this step), `reason`
 //! (`short` | `manual` | `""` when not ignored).
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::tracker::is_ignored_short;
 use cv_lint::{FrontmatterDoc, JsValue};
-use serde_json::Value;
+use serde::Serialize;
 
-use super::materialize::{check_keys, get_str, table};
+use super::params::{check_keys, get_str};
 use super::tracker::now_ms;
-use super::{StepCtx, StepError, StepOutcome};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
-const KEYS: &[&str] = &["mode"];
 /// The `ignored_ids` kind (shared with the WP-7 tracker).
 const KIND: &str = "youtube";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub(crate) enum Mode {
     Auto,
     Manual,
 }
@@ -45,11 +44,28 @@ fn mode(t: &toml::Table) -> Result<Mode, String> {
     }
 }
 
-/// Validates the step's params (unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    let t = table(step);
-    check_keys(&t, KEYS, "ignore_video")?;
-    mode(&t).map(|_| ())
+/// The `ignore_video` step (unknown keys disarm, I5).
+pub(crate) struct IgnoreVideo;
+
+impl StepModule for IgnoreVideo {
+    type Params = Mode;
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Mode, String> {
+        check_keys(t, kind, "ignore_video")?;
+        mode(t)
+    }
+
+    fn run(mode: Mode, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(mode, ctx)
+    }
+}
+
+/// `ignore_video` outcome vars.
+#[derive(Serialize)]
+struct Vars {
+    video_id: String,
+    ignored: bool,
+    reason: String,
 }
 
 fn prop_str(doc: &FrontmatterDoc, key: &str) -> Result<String, StepError> {
@@ -73,9 +89,7 @@ fn prop_int(doc: &FrontmatterDoc, key: &str) -> Result<Option<i64>, StepError> {
 }
 
 /// Executes the step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    validate(step, ctx.config).map_err(StepError::failed)?;
-    let mode = mode(&table(step)).map_err(StepError::failed)?;
+fn run(mode: Mode, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let path = ctx
         .context
         .active_path
@@ -132,12 +146,10 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     }
 
     let mut out = StepOutcome::default();
-    out.vars.insert("video_id".into(), Value::String(video_id));
-    out.vars
-        .insert("ignored".into(), Value::Bool(reason.is_some()));
-    out.vars.insert(
-        "reason".into(),
-        Value::String(reason.unwrap_or_default().to_owned()),
-    );
+    out.set_vars(&Vars {
+        video_id,
+        ignored: reason.is_some(),
+        reason: reason.unwrap_or_default().to_owned(),
+    });
     Ok(out)
 }

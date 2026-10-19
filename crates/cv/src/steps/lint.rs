@@ -24,26 +24,13 @@
 //!
 //! Defaults are `cv_lint::LintSettings::default()` (Crucible's defaults).
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_lint::{LintContext, LintSettings, cleanup_youtube_transcript, lint_note};
 
 use super::file::{step_kind, target_path};
-use super::materialize::{
-    check_keys, check_placeholders, get_bool, get_str, get_str_list, now, stem, table,
-};
-use super::{StepCtx, StepError, StepOutcome};
-
-const KEYS: &[&str] = &[
-    "path",
-    "kind",
-    "cleanup_transcript",
-    "frontmatter_insert",
-    "created_key",
-    "modified_key",
-    "blank_line_after_yaml",
-    "yaml_key_priority",
-    "steps",
-];
+use super::materialize::{now, stem};
+use super::params::{check_keys, check_placeholders, get_bool, get_str, get_str_list};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 fn settings(t: &toml::Table) -> Result<LintSettings, String> {
     let mut s = LintSettings::default();
@@ -78,32 +65,63 @@ fn settings(t: &toml::Table) -> Result<LintSettings, String> {
     Ok(s)
 }
 
-/// Validates one step's params.
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    let t = table(step);
-    check_keys(&t, KEYS, "lint")?;
-    for k in ["path", "kind"] {
-        if let Some(s) = get_str(&t, k)? {
-            check_placeholders(&s)?;
+/// Parsed `lint` params.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Params {
+    path: Option<String>,
+    kind: Option<String>,
+    cleanup_transcript: bool,
+    settings: LintSettings,
+}
+
+impl Params {
+    /// Lints `path` with default settings, as note kind `kind` (inline lint, e.g. the blog
+    /// tracker's captured notes).
+    pub(crate) fn note(path: String, kind: Option<String>) -> Self {
+        Params {
+            path: Some(path),
+            kind,
+            ..Params::default()
         }
     }
-    get_bool(&t, "cleanup_transcript")?;
-    settings(&t).map(|_| ())
+}
+
+/// The `lint` step.
+pub(crate) struct Lint;
+
+impl StepModule for Lint {
+    type Params = Params;
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        check_keys(t, kind, "lint")?;
+        for k in ["path", "kind"] {
+            if let Some(s) = get_str(t, k)? {
+                check_placeholders(&s)?;
+            }
+        }
+        Ok(Params {
+            path: get_str(t, "path")?,
+            kind: get_str(t, "kind")?,
+            cleanup_transcript: get_bool(t, "cleanup_transcript")?.unwrap_or(false),
+            settings: settings(t)?,
+        })
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(&p, ctx)
+    }
 }
 
 /// Executes one lint step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let t = table(step);
-    let settings = settings(&t).map_err(StepError::failed)?;
-    let mut cleanup = get_bool(&t, "cleanup_transcript")
-        .map_err(StepError::failed)?
-        .unwrap_or(false);
-    if let Some(def) = step_kind(ctx, &t)? {
+pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let settings = &p.settings;
+    let mut cleanup = p.cleanup_transcript;
+    if let Some(def) = step_kind(ctx, p.kind.as_deref())? {
         cleanup |= get_bool(def, "cleanup_transcript")
             .map_err(StepError::failed)?
             .unwrap_or(false);
     }
-    let path = target_path(ctx, &t)?;
+    let path = target_path(ctx, p.path.as_deref())?;
     let (bytes, hash) = ctx
         .read(&path)?
         .ok_or_else(|| StepError::failed("lint target note not found"))?;
@@ -120,12 +138,11 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         today: today.clone(),
         created: today,
     };
-    let outcome =
-        lint_note(&input, &lc, &settings).map_err(|e| StepError::failed(e.to_string()))?;
+    let outcome = lint_note(&input, &lc, settings).map_err(|e| StepError::failed(e.to_string()))?;
     let mut out = StepOutcome::default();
     if outcome.text != original {
         ctx.write(&path, outcome.text.into_bytes(), Some(hash))?;
-        out.output_paths.push(path);
+        out.push_output(path);
     }
     Ok(out)
 }

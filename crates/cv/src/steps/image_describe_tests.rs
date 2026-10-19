@@ -15,7 +15,9 @@ use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::{MAX_LONG_EDGE, extract_svg_text, fit_long_edge, fnv1a32_hex, prepare_image, run};
+use super::{
+    MAX_LONG_EDGE, extract_svg_text, fit_long_edge, fnv1a32_hex, parse, prepare_image, run,
+};
 use crate::steps::{ChildSpawner, DeferCause, StepCtx, StepError, StepOutcome};
 
 const MD5_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -244,7 +246,11 @@ fn exec(e: &Env, cfg: &ConfigSet, src: &str) -> Result<StepOutcome, StepError> {
     };
     let t: toml::Table = format!("type = \"image_describe\"\n{src}").parse().unwrap();
     let mgr = ProviderManager::new(Arc::new(TestSecrets)).unwrap();
-    run(&Step::from_table(t).unwrap(), &mut ctx, &mgr)
+    run(
+        &parse(&Step::from_table(t).unwrap().params).unwrap(),
+        &mut ctx,
+        &mgr,
+    )
 }
 
 async fn exec_async(

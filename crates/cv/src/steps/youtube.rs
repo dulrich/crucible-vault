@@ -12,7 +12,7 @@
 //! `linked`. `yt_channel_enrich` runs only when `pipelines.toml` `[youtube] channel_enrich` is on
 //! and (`force` or the previous step set `created = true`).
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::youtube::{
     ChannelMeta, VideoMeta, channel_about_note, metadata_note, slugify, tombstone_note,
 };
@@ -20,20 +20,19 @@ use cv_lint::{FrontmatterDoc, JsValue};
 use cv_providers::web::FetchError;
 use cv_providers::web::youtube::{self as api, YoutubeApi};
 use cv_state::FailureReason;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 
-use super::materialize::{check_keys, check_placeholders, expand, get_bool, get_str, table};
+use super::params::{check_keys, check_placeholders, expand, get_bool, get_str};
 use super::web::{
     append_link, block_on, client, create_or_found, find_in_subfolders, link_targets, record_usage,
     secret,
 };
-use super::{StepCtx, StepError, StepOutcome, fetch_disposition};
+use super::{StepCtx, StepError, StepModule, StepOutcome, fetch_disposition};
 
 /// The secret name (env var or `~/.config/crucible-vault/YOUTUBE_API_KEY`).
 pub const API_KEY_SECRET: &str = "YOUTUBE_API_KEY";
 
-const META_KEYS: &[&str] = &["video_id"];
-const ENRICH_KEYS: &[&str] = &["channel_id", "force", "max_age_days"];
 const DEFAULT_MAX_AGE_DAYS: i64 = 30;
 
 fn templated(t: &toml::Table, key: &str) -> Result<Option<String>, String> {
@@ -52,30 +51,70 @@ fn max_age(t: &toml::Table) -> Result<i64, String> {
     }
 }
 
-/// Validates the step's params (unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    let t = table(step);
-    match step {
-        Step::YtChannelEnrich(_) => {
-            check_keys(&t, ENRICH_KEYS, "yt_channel_enrich")?;
-            templated(&t, "channel_id")?;
-            get_bool(&t, "force")?;
-            max_age(&t).map(|_| ())
-        }
-        _ => {
-            check_keys(&t, META_KEYS, "yt_metadata")?;
-            templated(&t, "video_id").map(|_| ())
+/// Parsed `yt_metadata` / `yt_channel_enrich` params.
+pub(crate) enum Params {
+    /// `yt_metadata`.
+    Metadata { video_id: Option<String> },
+    /// `yt_channel_enrich`.
+    ChannelEnrich {
+        channel_id: Option<String>,
+        force: bool,
+        max_age_days: i64,
+    },
+}
+
+/// `yt_metadata` / `yt_channel_enrich` (unknown keys disarm, I5).
+pub(crate) struct Youtube;
+
+impl StepModule for Youtube {
+    type Params = Params;
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        check_keys(t, kind, kind.as_str())?;
+        Ok(if kind == StepKind::YtChannelEnrich {
+            Params::ChannelEnrich {
+                channel_id: templated(t, "channel_id")?,
+                force: get_bool(t, "force")?.unwrap_or(false),
+                max_age_days: max_age(t)?,
+            }
+        } else {
+            Params::Metadata {
+                video_id: templated(t, "video_id")?,
+            }
+        })
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        match p {
+            Params::ChannelEnrich {
+                channel_id,
+                force,
+                max_age_days,
+            } => channel_enrich(channel_id.as_deref(), force, max_age_days, ctx),
+            Params::Metadata { video_id } => metadata(video_id.as_deref(), ctx),
         }
     }
 }
 
-/// Executes the step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    validate(step, ctx.config).map_err(StepError::failed)?;
-    match step {
-        Step::YtChannelEnrich(_) => channel_enrich(&table(step), ctx),
-        _ => metadata(&table(step), ctx),
-    }
+/// `yt_metadata` outcome vars.
+#[derive(Serialize)]
+struct MetaVars {
+    video_id: String,
+    created: bool,
+    tombstone: bool,
+    linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<String>,
+}
+
+/// `yt_channel_enrich` outcome vars.
+#[derive(Serialize)]
+struct EnrichVars {
+    enriched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    about_path: Option<String>,
 }
 
 pub(crate) fn metadata_root(ctx: &StepCtx<'_>) -> String {
@@ -221,7 +260,7 @@ pub(crate) fn write_metadata_note(
     Ok((path, created, false, channel))
 }
 
-fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+fn metadata(video_id: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let active = ctx.context.active_path.clone();
     let note = match &active {
         Some(p) => ctx.read(p)?,
@@ -231,8 +270,8 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
         Some((b, _)) => Some(FrontmatterDoc::new(utf8(b.clone())?)),
         None => None,
     };
-    let explicit = match get_str(t, "video_id").map_err(StepError::failed)? {
-        Some(s) => expand(ctx, &s)?.trim().to_owned(),
+    let explicit = match video_id {
+        Some(s) => expand(ctx, s)?.trim().to_owned(),
         None => String::new(),
     };
     let id = if explicit.is_empty() {
@@ -250,15 +289,17 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
         explicit
     };
     let mut out = StepOutcome::default();
-    let set = |out: &mut StepOutcome, k: &str, v: Value| {
-        out.vars.insert(k.to_owned(), v);
+    let mut v = MetaVars {
+        video_id: id.clone(),
+        created: false,
+        tombstone: false,
+        linked: false,
+        metadata_path: None,
+        channel_id: None,
     };
-    set(&mut out, "video_id", json!(id));
-    set(&mut out, "created", json!(false));
-    set(&mut out, "tombstone", json!(false));
-    set(&mut out, "linked", json!(false));
     if id.is_empty() || id.contains('/') || id.contains("..") {
         // Crucible `no-video-id`: nothing to do.
+        out.set_vars(&v);
         return Ok(out);
     }
 
@@ -268,7 +309,8 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
             if target.rsplit('/').next() == Some(id.as_str())
                 && ctx.read(&format!("{target}.md"))?.is_some()
             {
-                set(&mut out, "metadata_path", json!(format!("{target}.md")));
+                v.metadata_path = Some(format!("{target}.md"));
+                out.set_vars(&v);
                 return Ok(out);
             }
         }
@@ -276,14 +318,12 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
 
     // (b)/(c) Find or create.
     let (path, created, tombstone, channel) = ensure_metadata_note(ctx, &id)?;
-    set(&mut out, "metadata_path", json!(path));
-    set(&mut out, "created", json!(created));
-    set(&mut out, "tombstone", json!(tombstone));
-    if let Some(c) = channel {
-        set(&mut out, "channel_id", json!(c));
-    }
+    v.metadata_path = Some(path.clone());
+    v.created = created;
+    v.tombstone = tombstone;
+    v.channel_id = channel;
     if created || tombstone {
-        out.output_paths.push(path.clone());
+        out.push_output(path.clone());
     }
 
     // (d) Link onto the source note (CAS).
@@ -291,28 +331,31 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
         let link = format!("[[{}]]", path.strip_suffix(".md").unwrap_or(&path));
         if append_link(&mut d, "yt-video-id", "yt-metadata", &link)? {
             ctx.write(&p, d.into_text().into_bytes(), Some(hash))?;
-            out.output_paths.push(p);
-            set(&mut out, "linked", json!(true));
+            out.push_output(p);
+            v.linked = true;
         }
     }
+    out.set_vars(&v);
     Ok(out)
 }
 
-fn channel_enrich(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let force = get_bool(t, "force")
-        .map_err(StepError::failed)?
-        .unwrap_or(false);
-    let max_age_days = max_age(t).map_err(StepError::failed)?;
+fn channel_enrich(
+    channel_id: Option<&str>,
+    force: bool,
+    max_age_days: i64,
+    ctx: &mut StepCtx<'_>,
+) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
-    out.vars.insert("enriched".into(), json!(false));
+    out.set_vars(&EnrichVars {
+        enriched: false,
+        about_path: None,
+    });
     let created = ctx.vars.get("created") == Some(&Value::Bool(true));
     if !ctx.config.pipelines().youtube.channel_enrich || !(force || created) {
         return Ok(out);
     }
-    let tpl = get_str(t, "channel_id")
-        .map_err(StepError::failed)?
-        .unwrap_or_else(|| "{vars.channel_id}".to_owned());
-    let channel_id = expand(ctx, &tpl)?.trim().to_owned();
+    let tpl = channel_id.unwrap_or("{vars.channel_id}");
+    let channel_id = expand(ctx, tpl)?.trim().to_owned();
     if channel_id.is_empty() || channel_id.contains('/') {
         return Ok(out);
     }
@@ -322,7 +365,10 @@ fn channel_enrich(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome,
         && !force
         && age_days.is_some_and(|a| a < max_age_days)
     {
-        out.vars.insert("about_path".into(), json!(p));
+        out.set_vars(&EnrichVars {
+            enriched: false,
+            about_path: Some(p.clone()),
+        });
         return Ok(out);
     }
     let key = secret(API_KEY_SECRET).ok_or_else(no_key)?;
@@ -370,9 +416,11 @@ fn channel_enrich(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome,
             p
         }
     };
-    out.output_paths.push(path.clone());
-    out.vars.insert("about_path".into(), json!(path));
-    out.vars.insert("enriched".into(), json!(true));
+    out.push_output(path.clone());
+    out.set_vars(&EnrichVars {
+        enriched: true,
+        about_path: Some(path),
+    });
     Ok(out)
 }
 

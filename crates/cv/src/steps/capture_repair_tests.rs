@@ -79,7 +79,7 @@ impl Env {
         t.insert("type".into(), "capture_repair".into());
         t.insert("folder".into(), "daily/day".into());
         let step = Step::from_table(t).unwrap();
-        capture_repair::validate(&step, &self.config).unwrap();
+        crate::steps::validate(&step, &self.config).unwrap();
         let action = self.config.armed("cr").unwrap();
         let (params, vars) = (Map::new(), Map::new());
         let context = ActionContext::default();
@@ -101,7 +101,7 @@ impl Env {
             children: &NoChildren,
             written: Vec::new(),
         };
-        capture_repair::execute(&step, &mut ctx).unwrap()
+        crate::steps::execute(&step, &mut ctx).unwrap()
     }
 }
 

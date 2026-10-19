@@ -23,7 +23,7 @@
 //! (`isPathExcluded`/`isUserIgnored`); indexable = Crucible's default extensions (`md`, `qmd`,
 //! `txt`) outside the index's skipped dirs.
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_index::{LinkKind, Reader};
 use cv_providers::{ProviderManager, ProvidersConfig, parse_model_ref};
 use cv_search::chunker::{DEFAULT_MAX_CHARS, DEFAULT_OVERLAP_CHARS};
@@ -33,29 +33,28 @@ use cv_search::{
     prepare_search_file,
 };
 use cv_state::{ImageDescription, ServiceFailureKind};
-use serde_json::{Map, Value};
+use serde::Serialize;
 
-use super::{DeferCause, StepCtx, StepError, StepOutcome};
+use super::{DeferCause, StepCtx, StepError, StepModule, StepOutcome};
 
 /// Deferral delay for an embedder outage.
 pub const RETRY_AFTER_MS: i64 = 60_000;
 
-const KEYS: [&str; 2] = ["embed", "path"];
-
 #[derive(Debug, Default, PartialEq)]
-struct Params {
+pub(crate) struct Params {
+    delete: bool,
     embed: Option<(String, String)>,
     path: Option<String>,
 }
 
-fn parse(step: &Step) -> Result<Params, String> {
-    let kind = step.kind().as_str();
-    let Some(t) = step.table() else {
-        return Ok(Params::default());
+pub(crate) fn parse(step_kind: StepKind, t: &toml::Table) -> Result<Params, String> {
+    let kind = step_kind.as_str();
+    let mut p = Params {
+        delete: step_kind == StepKind::SearchDelete,
+        ..Params::default()
     };
-    let mut p = Params::default();
     for (k, v) in t {
-        if !KEYS.contains(&k.as_str()) {
+        if !super::params::is_param(step_kind, k) {
             return Err(format!("{kind}: unknown param {k:?}"));
         }
         let s = v
@@ -76,19 +75,24 @@ fn parse(step: &Step) -> Result<Params, String> {
     Ok(p)
 }
 
-/// Validates the step's params (an empty table is valid: `search-refresh`).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    parse(step).map(|_| ())
-}
+/// `search_upsert` / `search_delete` (an empty table is valid: `search-refresh`). Runs on the
+/// blocking thread, driving the async feed on the current runtime. Embedding goes through the
+/// process-wide [`super::agent::manager`] (shared with the daemon's `search` request).
+pub(crate) struct Search;
 
-/// Executes one step on the blocking thread, driving the async feed on the current runtime.
-/// Embedding goes through the process-wide [`super::agent::manager`] (shared with the daemon's
-/// `search` request).
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let handle =
-        tokio::runtime::Handle::try_current().map_err(|_| StepError::failed("no async runtime"))?;
-    let mgr = super::agent::manager()?;
-    run(step, ctx, &handle, mgr)
+impl StepModule for Search {
+    type Params = Params;
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        parse(kind, t)
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| StepError::failed("no async runtime"))?;
+        let mgr = super::agent::manager()?;
+        run(&p, ctx, &handle, mgr)
+    }
 }
 
 fn map_err(e: SearchError) -> StepError {
@@ -136,8 +140,8 @@ pub(crate) fn query_embed_target(config: &ConfigSet) -> Option<EmbedTarget> {
     let (provider, model) = config
         .armed_actions()
         .flat_map(|a| a.steps.iter())
-        .filter(|s| matches!(s, Step::SearchUpsert(_)))
-        .find_map(|s| parse(s).ok().and_then(|p| p.embed))?;
+        .filter(|s| s.kind == StepKind::SearchUpsert)
+        .find_map(|s| parse(s.kind, &s.params).ok().and_then(|p| p.embed))?;
     resolve_target(config, &provider, &model)
         .inspect_err(|e| tracing::warn!(error = %e, "search: query embed target unresolved"))
         .ok()
@@ -152,35 +156,53 @@ fn is_live(ctx: &StepCtx<'_>) -> bool {
         .is_some()
 }
 
-fn vars(report: &FeedReport, live: bool) -> Map<String, Value> {
+/// `search_upsert` / `search_delete` outcome vars (the write counts only when live).
+#[derive(Serialize)]
+struct Vars {
+    matched: usize,
+    mismatched: usize,
+    missing_index: usize,
+    missing_local: usize,
+    embedding_mismatch: usize,
+    #[serde(flatten)]
+    live: Option<LiveVars>,
+}
+
+/// The live feed's write counts.
+#[derive(Serialize)]
+struct LiveVars {
+    upserted: usize,
+    deleted: usize,
+    chunks: usize,
+    embedded: usize,
+}
+
+fn vars(report: &FeedReport, live: bool) -> StepOutcome {
     let c = report.counts;
-    let mut v = Map::new();
-    for (k, n) in [
-        ("matched", c.matched),
-        ("mismatched", c.mismatched),
-        ("missing_index", c.missing_index),
-        ("missing_local", c.missing_local),
-        ("embedding_mismatch", c.embedding_mismatch),
-    ] {
-        v.insert(k.into(), Value::from(n));
-    }
-    if live {
-        v.insert("upserted".into(), Value::from(report.upserted));
-        v.insert("deleted".into(), Value::from(report.deleted));
-        v.insert("chunks".into(), Value::from(report.chunks));
-        v.insert("embedded".into(), Value::from(report.embedded));
-    }
-    v
+    let mut out = StepOutcome::default();
+    out.set_vars(&Vars {
+        matched: c.matched,
+        mismatched: c.mismatched,
+        missing_index: c.missing_index,
+        missing_local: c.missing_local,
+        embedding_mismatch: c.embedding_mismatch,
+        live: live.then_some(LiveVars {
+            upserted: report.upserted,
+            deleted: report.deleted,
+            chunks: report.chunks,
+            embedded: report.embedded,
+        }),
+    });
+    out
 }
 
 /// The step body with an injected provider manager (tests use a fake secret source).
 pub(crate) fn run(
-    step: &Step,
+    p: &Params,
     ctx: &mut StepCtx<'_>,
     handle: &tokio::runtime::Handle,
     mgr: &ProviderManager,
 ) -> Result<StepOutcome, StepError> {
-    let p = parse(step).map_err(StepError::failed)?;
     let cfg = FeedConfig {
         embed: embed_target(ctx, p.embed.as_ref())?,
         max_chars: DEFAULT_MAX_CHARS,
@@ -191,7 +213,7 @@ pub(crate) fn run(
         .search
         .ok_or_else(|| StepError::failed("search index unavailable outside the runner"))?;
     let target = p.path.clone().or_else(|| ctx.context.active_path.clone());
-    if matches!(step, Step::SearchDelete(_)) && target.is_none() {
+    if p.delete && target.is_none() {
         return Err(StepError::failed("search_delete needs a path"));
     }
     let reader = open_reader(ctx)?;
@@ -206,8 +228,8 @@ pub(crate) fn run(
     );
     let report = if live {
         let index = search.shared().map_err(map_err)?;
-        match (step, target) {
-            (Step::SearchDelete(_), Some(path)) => feed::delete_path(&index, &path),
+        match (p.delete, target) {
+            (true, Some(path)) => feed::delete_path(&index, &path),
             (_, Some(path)) => {
                 let note = host.local_note(&path)?;
                 handle.block_on(feed::upsert_path(mgr, &cfg, &index, &path, note))
@@ -222,8 +244,8 @@ pub(crate) fn run(
             }
         }
     } else {
-        match (step, target) {
-            (Step::SearchDelete(_), Some(path)) => {
+        match (p.delete, target) {
+            (true, Some(path)) => {
                 feed::shadow_report(search.path(), &cfg, ShadowScope::Path(&path, None))
             }
             (_, Some(path)) => {
@@ -250,10 +272,7 @@ pub(crate) fn run(
         embedding_mismatch = report.counts.embedding_mismatch,
         "search feed step done"
     );
-    Ok(StepOutcome {
-        vars: vars(&report, live),
-        ..StepOutcome::default()
-    })
+    Ok(vars(&report, live))
 }
 
 /// Opens the current index generation for the step (reopens once on a generation swap).
@@ -398,21 +417,26 @@ impl PrepareHost for NotePrep<'_> {
 mod tests {
     use super::*;
 
-    fn step(src: &str) -> Step {
-        let t: toml::Table = toml::from_str(src).unwrap();
-        Step::SearchUpsert(t)
+    fn step(src: &str) -> cv_actions::Step {
+        let params: toml::Table = toml::from_str(src).unwrap();
+        cv_actions::Step {
+            kind: StepKind::SearchUpsert,
+            params,
+        }
     }
 
     #[test]
     fn param_less_step_validates_and_bad_values_disarm() {
         let c = ConfigSet::new();
-        assert!(validate(&step(""), &c).is_ok());
-        assert!(validate(&step("embed = \"local:bge-m3\"\npath = \"n.md\""), &c).is_ok());
-        assert!(validate(&step("nope = \"x\""), &c).is_err());
-        assert!(validate(&step("embed = \"no-model\""), &c).is_err());
+        assert!(super::super::validate(&step(""), &c).is_ok());
+        assert!(
+            super::super::validate(&step("embed = \"local:bge-m3\"\npath = \"n.md\""), &c).is_ok()
+        );
+        assert!(super::super::validate(&step("nope = \"x\""), &c).is_err());
+        assert!(super::super::validate(&step("embed = \"no-model\""), &c).is_err());
         // Retired in semsearch-crate WP-4: the old companion params now disarm (I5).
-        assert!(validate(&step("vault_id = \"v\""), &c).is_err());
-        assert!(validate(&step("path = 3"), &c).is_err());
+        assert!(super::super::validate(&step("vault_id = \"v\""), &c).is_err());
+        assert!(super::super::validate(&step("path = 3"), &c).is_err());
     }
 
     #[test]

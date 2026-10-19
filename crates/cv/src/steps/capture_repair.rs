@@ -7,24 +7,20 @@
 //! Tags are recovered from the **raw** frontmatter lines (audit E3): `  - blog #x #y` is a YAML
 //! comment after `blog`, so a parsed read would see only `blog` and lose `x`, `y`.
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_lint::{FrontmatterDoc, JsValue};
-use serde_json::Map;
+use serde::Serialize;
 
-use super::{StepCtx, StepError, StepOutcome};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
-struct Params {
+pub(crate) struct Params {
     folder: String,
     limit: Option<u64>,
 }
 
-fn parse_params(t: Option<&toml::Table>) -> Result<Params, String> {
-    let empty = toml::Table::new();
-    let t = t.unwrap_or(&empty);
-    for k in t.keys() {
-        if !["folder", "limit"].contains(&k.as_str()) {
-            return Err(format!("capture_repair: unknown param {k:?}"));
-        }
+fn parse_params(t: &toml::Table) -> Result<Params, String> {
+    if let Some(k) = super::params::unknown_key(StepKind::CaptureRepair, t) {
+        return Err(format!("capture_repair: unknown param {k:?}"));
     }
     let folder = match t.get("folder") {
         Some(toml::Value::String(s)) if !s.trim_matches('/').is_empty() => {
@@ -41,9 +37,28 @@ fn parse_params(t: Option<&toml::Table>) -> Result<Params, String> {
     Ok(Params { folder, limit })
 }
 
-/// Validates the step's params (`folder` required, `limit` optional).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    parse_params(step.table()).map(|_| ())
+/// The `capture_repair` step (`folder` required, `limit` optional).
+pub(crate) struct CaptureRepair;
+
+impl StepModule for CaptureRepair {
+    type Params = Params;
+
+    fn parse(_: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        parse_params(t)
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(&p, ctx)
+    }
+}
+
+/// `capture_repair` outcome vars.
+#[derive(Serialize)]
+struct Vars {
+    scanned: u64,
+    renamed: u64,
+    retagged: u64,
+    skipped: u64,
 }
 
 fn unquote(v: &str) -> &str {
@@ -181,8 +196,7 @@ fn join(folder: &str, name: &str) -> String {
 }
 
 /// Executes one `capture_repair` step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let p = parse_params(step.table()).map_err(StepError::failed)?;
+fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let files = super::tracker::md_files_under(ctx, &p.folder);
     let scanned = files.len() as u64;
     let (mut renamed, mut retagged, mut changed_notes) = (0_u64, 0_u64, 0_u64);
@@ -205,7 +219,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             hash = ctx.write(&path, new_text.into_bytes(), Some(hash))?;
             retagged += 1;
             touched = true;
-            out.output_paths.push(path.clone());
+            out.push_output(path.clone());
         }
         let (dir, base) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
         let first = format!("{}.md", plan.name);
@@ -229,8 +243,10 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 renamed += 1;
                 touched = true;
                 out.output_paths.retain(|o| o != &path);
-                out.output_paths.push(dst);
-                out.output_paths.extend(r.rewritten);
+                out.push_output(dst);
+                for w in r.rewritten {
+                    out.push_output(w);
+                }
             } else {
                 tracing::warn!("capture_repair: both rename targets taken; left as-is");
             }
@@ -248,13 +264,11 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         skipped,
         "capture repair"
     );
-    let mut seen = std::collections::HashSet::new();
-    out.output_paths.retain(|p| seen.insert(p.clone()));
-    let mut vars = Map::new();
-    vars.insert("scanned".into(), scanned.into());
-    vars.insert("renamed".into(), renamed.into());
-    vars.insert("retagged".into(), retagged.into());
-    vars.insert("skipped".into(), skipped.into());
-    out.vars = vars;
+    out.set_vars(&Vars {
+        scanned,
+        renamed,
+        retagged,
+        skipped,
+    });
     Ok(out)
 }

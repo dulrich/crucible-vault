@@ -20,23 +20,21 @@
 
 use std::collections::BTreeSet;
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::x::{XPost, folder_slug, metadata_note, tombstone_note};
 use cv_lint::{FrontmatterDoc, JsValue};
 use cv_providers::web::FetchError;
 use cv_providers::web::x as api;
 use cv_text::url_canon::{canonical_x_status_url, extract_x_status_from_url};
-use serde_json::json;
+use serde::Serialize;
 
-use super::materialize::{check_keys, check_placeholders, expand, get_str, table};
+use super::params::{check_keys, check_placeholders, expand, get_str};
 use super::web::{
     api_base, append_link, block_on, client, create_or_found, find_in_subfolders, link_targets,
     record_usage,
 };
-use super::{StepCtx, StepError, StepOutcome, fetch_disposition};
+use super::{StepCtx, StepError, StepModule, StepOutcome, fetch_disposition};
 
-const META_KEYS: &[&str] = &["status_id"];
-const BATCH_KEYS: &[&str] = &["limit"];
 /// Statuses ensured per `x_discover`/`x_backfill` run by default.
 pub const DEFAULT_LIMIT: i64 = 50;
 /// The frontmatter list stamped onto source notes.
@@ -52,37 +50,70 @@ fn limit(t: &toml::Table) -> Result<usize, String> {
     }
 }
 
-/// Validates the step's params (unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    let t = table(step);
-    match step {
-        Step::XMetadata(_) => {
-            check_keys(&t, META_KEYS, "x_metadata")?;
-            if let Some(s) = get_str(&t, "status_id")? {
-                check_placeholders(&s)?;
+/// Parsed `x_metadata` / `x_discover` / `x_backfill` params.
+pub(crate) enum Params {
+    /// `x_metadata`.
+    Metadata { status_id: Option<String> },
+    /// `x_discover`.
+    Discover { limit: usize },
+    /// `x_backfill`.
+    Backfill { limit: usize },
+}
+
+/// `x_metadata` / `x_discover` / `x_backfill` (unknown keys disarm, I5).
+pub(crate) struct X;
+
+impl StepModule for X {
+    type Params = Params;
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        check_keys(t, kind, kind.as_str())?;
+        Ok(match kind {
+            StepKind::XMetadata => {
+                let status_id = get_str(t, "status_id")?;
+                if let Some(s) = &status_id {
+                    check_placeholders(s)?;
+                }
+                Params::Metadata { status_id }
             }
-            Ok(())
-        }
-        Step::XDiscover(_) => {
-            check_keys(&t, BATCH_KEYS, "x_discover")?;
-            limit(&t).map(|_| ())
-        }
-        _ => {
-            check_keys(&t, BATCH_KEYS, "x_backfill")?;
-            limit(&t).map(|_| ())
+            StepKind::XDiscover => Params::Discover { limit: limit(t)? },
+            _ => Params::Backfill { limit: limit(t)? },
+        })
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        match p {
+            Params::Metadata { status_id } => metadata(status_id.as_deref(), ctx),
+            Params::Discover { limit } => discover(limit, ctx),
+            Params::Backfill { limit } => backfill(limit, ctx),
         }
     }
 }
 
-/// Executes the step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    validate(step, ctx.config).map_err(StepError::failed)?;
-    let t = table(step);
-    match step {
-        Step::XMetadata(_) => metadata(&t, ctx),
-        Step::XDiscover(_) => discover(&t, ctx),
-        _ => backfill(&t, ctx),
-    }
+/// `x_metadata` outcome vars.
+#[derive(Serialize)]
+struct MetaVars {
+    status_id: String,
+    created: bool,
+    tombstone: bool,
+    linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_path: Option<String>,
+}
+
+/// `x_discover` outcome vars.
+#[derive(Serialize)]
+struct DiscoverVars {
+    found: usize,
+    ensured: usize,
+}
+
+/// `x_backfill` outcome vars.
+#[derive(Serialize)]
+struct BackfillVars {
+    pending: usize,
+    ensured: usize,
+    remaining: usize,
 }
 
 fn metadata_root(ctx: &StepCtx<'_>) -> String {
@@ -184,7 +215,7 @@ fn str_prop(v: Option<JsValue>) -> Option<String> {
     }
 }
 
-fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+fn metadata(status_id: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let active = ctx.context.active_path.clone();
     let doc = match &active {
         Some(p) => ctx
@@ -196,8 +227,8 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
         .as_ref()
         .and_then(|d| str_prop(d.get("source").ok().flatten()))
         .and_then(|s| extract_x_status_from_url(&s));
-    let explicit = match get_str(t, "status_id").map_err(StepError::failed)? {
-        Some(s) => expand(ctx, &s)?.trim().to_owned(),
+    let explicit = match status_id {
+        Some(s) => expand(ctx, s)?.trim().to_owned(),
         None => String::new(),
     };
     let id = if explicit.is_empty() {
@@ -209,16 +240,16 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
         explicit
     };
     let mut out = StepOutcome::default();
-    for (k, v) in [
-        ("status_id", json!(id)),
-        ("created", json!(false)),
-        ("tombstone", json!(false)),
-        ("linked", json!(false)),
-    ] {
-        out.vars.insert(k.to_owned(), v);
-    }
+    let mut v = MetaVars {
+        status_id: id.clone(),
+        created: false,
+        tombstone: false,
+        linked: false,
+        metadata_path: None,
+    };
     if !valid_id(&id) {
         // Crucible `invalid` / no status: nothing to do.
+        out.set_vars(&v);
         return Ok(out);
     }
 
@@ -228,8 +259,8 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
             if target.rsplit('/').next() == Some(id.as_str())
                 && ctx.read(&format!("{target}.md"))?.is_some()
             {
-                out.vars
-                    .insert("metadata_path".into(), json!(format!("{target}.md")));
+                v.metadata_path = Some(format!("{target}.md"));
+                out.set_vars(&v);
                 return Ok(out);
             }
         }
@@ -238,18 +269,19 @@ fn metadata(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
     let handle = source.filter(|r| r.status_id == id).and_then(|r| r.handle);
     let url = canonical_x_status_url(handle.as_deref(), &id);
     let (path, created, tombstone) = ensure_note(ctx, &id, &url)?;
-    out.vars.insert("metadata_path".into(), json!(path));
-    out.vars.insert("created".into(), json!(created));
-    out.vars.insert("tombstone".into(), json!(tombstone));
+    v.metadata_path = Some(path.clone());
+    v.created = created;
+    v.tombstone = tombstone;
     if created {
-        out.output_paths.push(path.clone());
+        out.push_output(path.clone());
     }
     if let Some(p) = active
         && stamp(ctx, &p, &path)?
     {
-        out.output_paths.push(p);
-        out.vars.insert("linked".into(), json!(true));
+        out.push_output(p);
+        v.linked = true;
     }
+    out.set_vars(&v);
     Ok(out)
 }
 
@@ -274,11 +306,12 @@ fn collect_statuses(content: &str) -> Vec<(String, String)> {
     out
 }
 
-fn discover(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let lim = limit(t).map_err(StepError::failed)?;
+fn discover(lim: usize, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
-    out.vars.insert("found".into(), json!(0));
-    out.vars.insert("ensured".into(), json!(0));
+    out.set_vars(&DiscoverVars {
+        found: 0,
+        ensured: 0,
+    });
     let inbox = ctx.config.pipelines().x.inbox.clone().unwrap_or_default();
     let Some(note) = ctx.context.active_path.clone() else {
         return Ok(out);
@@ -290,24 +323,23 @@ fn discover(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
         return Ok(out);
     };
     let statuses = collect_statuses(&String::from_utf8_lossy(&bytes));
-    out.vars.insert("found".into(), json!(statuses.len()));
+    let found = statuses.len();
     let mut ensured = 0usize;
     for (id, url) in statuses.into_iter().take(lim) {
         let (path, created, _) = ensure_note(ctx, &id, &url)?;
         if created {
-            out.output_paths.push(path.clone());
+            out.push_output(path.clone());
         }
-        if stamp(ctx, &note, &path)? && !out.output_paths.contains(&note) {
-            out.output_paths.push(note.clone());
+        if stamp(ctx, &note, &path)? {
+            out.push_output(note.clone());
         }
         ensured += 1;
     }
-    out.vars.insert("ensured".into(), json!(ensured));
+    out.set_vars(&DiscoverVars { found, ensured });
     Ok(out)
 }
 
-fn backfill(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let lim = limit(t).map_err(StepError::failed)?;
+fn backfill(lim: usize, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let records = ctx
         .state
         .lock()
@@ -357,19 +389,20 @@ fn backfill(t: &toml::Table, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepE
     for (id, url, sources) in pending.into_iter().take(lim) {
         let (path, created, _) = ensure_note(ctx, &id, &url)?;
         if created {
-            out.output_paths.push(path.clone());
+            out.push_output(path.clone());
         }
         for s in sources {
-            if stamp(ctx, &s, &path)? && !out.output_paths.contains(&s) {
-                out.output_paths.push(s);
+            if stamp(ctx, &s, &path)? {
+                out.push_output(s);
             }
         }
         ensured += 1;
     }
-    out.vars.insert("pending".into(), json!(total));
-    out.vars.insert("ensured".into(), json!(ensured));
-    out.vars
-        .insert("remaining".into(), json!(total.saturating_sub(ensured)));
+    out.set_vars(&BackfillVars {
+        pending: total,
+        ensured,
+        remaining: total.saturating_sub(ensured),
+    });
     Ok(out)
 }
 

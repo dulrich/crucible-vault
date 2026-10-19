@@ -23,8 +23,8 @@ pub mod youtube;
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 
+use cv_actions::ConfigSet;
 use cv_actions::pipelines::IntakeMode;
-use cv_actions::{ConfigSet, Step};
 use cv_state::{TrackerItem, TrackerOutcome};
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
@@ -251,38 +251,36 @@ where
     })?
 }
 
-/// The `capture` step that writes intake lines: the `tracker-intake` preset when
+/// The `capture` params that write intake lines: the `tracker-intake` preset when
 /// `captures.toml` defines it, else the same settings inline.
-fn intake_step(config: &ConfigSet, cancelled: bool) -> Result<Step, StepError> {
-    let preset = match config.table("captures.toml").get("capture") {
+fn intake_capture(config: &ConfigSet, cancelled: bool) -> Result<capture::Params, StepError> {
+    let has_preset = match config.table("captures.toml").get("capture") {
         Some(toml::Value::Array(a)) => a
             .iter()
             .filter_map(toml::Value::as_table)
-            .find(|e| e.get("name").and_then(toml::Value::as_str) == Some(INTAKE_PRESET))
-            .cloned(),
-        _ => None,
+            .any(|e| e.get("name").and_then(toml::Value::as_str) == Some(INTAKE_PRESET)),
+        _ => false,
     };
-    let has_preset = preset.is_some();
-    let mut t = toml::Table::new();
+    let mut p = if has_preset {
+        capture::Params::preset(config, INTAKE_PRESET).map_err(StepError::failed)?
+    } else {
+        capture::Params {
+            target: capture::Target::Period("day"),
+            mode: capture::Mode::Append,
+            path: None,
+            section: Some(INTAKE_SECTION.into()),
+            section_from_source: false,
+            format: Some(INTAKE_FORMAT.into()),
+            source_line: false,
+            value: None,
+        }
+    };
     if cancelled {
         // Round-8 WP-1: an ignored short's line is a cancelled task (`- [-] …`).
-        let format = preset
-            .as_ref()
-            .and_then(|p| p.get("format"))
-            .and_then(toml::Value::as_str)
-            .unwrap_or(INTAKE_FORMAT);
-        t.insert("format".into(), cancelled_format(format).into());
+        let format = p.format.as_deref().unwrap_or(INTAKE_FORMAT);
+        p.format = Some(cancelled_format(format));
     }
-    t.insert("type".into(), "capture".into());
-    if has_preset {
-        t.insert("capture".into(), INTAKE_PRESET.into());
-    } else {
-        t.insert("target".into(), "daily".into());
-        t.insert("mode".into(), "section".into());
-        t.insert("section".into(), INTAKE_SECTION.into());
-        t.insert("format".into(), INTAKE_FORMAT.into());
-    }
-    Step::from_table(t).map_err(StepError::failed)
+    Ok(p)
 }
 
 /// `format` with its first open task box (`[ ]`) turned cancelled (`[-]`).
@@ -390,7 +388,7 @@ fn emit_inner(
         return Ok(Emitted::Recovered);
     }
     let score = if cancelled { None } else { score_item(ctx, c) };
-    let step = intake_step(ctx.config, cancelled)?;
+    let params = intake_capture(ctx.config, cancelled)?;
     let mut vars = ctx.vars.clone();
     vars.insert(
         "title".into(),
@@ -402,23 +400,8 @@ fn emit_inner(
         "score".into(),
         Value::String(score.map_or_else(String::new, score_text)),
     );
-    let mut sub = StepCtx {
-        job_id: ctx.job_id,
-        action: ctx.action,
-        step_index: ctx.step_index,
-        params: ctx.params,
-        context: ctx.context,
-        vars: &vars,
-        config: ctx.config,
-        vault_root: ctx.vault_root,
-        index_db: ctx.index_db,
-        search: ctx.search,
-        state: ctx.state,
-        writer: ctx.writer.clone(),
-        children: ctx.children,
-        written: Vec::new(),
-    };
-    let o = capture::execute(&step, &mut sub)?;
+    let mut sub = ctx.with_vars(&vars);
+    let o = capture::run(&params, &mut sub)?;
     let written = std::mem::take(&mut sub.written);
     ctx.written.extend(written);
     out_paths.extend(o.output_paths);

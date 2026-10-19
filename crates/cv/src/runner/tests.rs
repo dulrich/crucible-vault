@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, Step, StepKind};
 use cv_protocol::{ActionContext, JobState, Notification};
 use cv_state::{JobStatus as DbStatus, Lane, QueueConfig, StateDb};
 use serde_json::Map;
@@ -520,7 +520,7 @@ async fn run_action_step_enqueues_child_and_rejects_cycles() {
     let exec = FnExec(Box::new(move |step, ctx| {
         r2.lock().unwrap().push(ctx.action.id.clone());
         match step {
-            Step::RunAction { .. } => crate::steps::execute(step, ctx),
+            s if s.kind == StepKind::RunAction => crate::steps::execute(s, ctx),
             _ => Ok(StepOutcome::default()),
         }
     }));

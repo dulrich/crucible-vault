@@ -62,107 +62,73 @@ impl Action {
     }
 }
 
-/// Step kind tag (the TOML `type` value).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StepKind {
-    Guard,
-    Capture,
-    Materialize,
-    Move,
-    Copy,
-    SetProps,
-    RemoveProps,
-    UpsertTags,
-    Lint,
-    Localize,
-    Agent,
-    MarkForwarded,
-    RunAction,
-    SearchUpsert,
-    SearchDelete,
+/// Generates [`StepKind`] (variants, [`StepKind::ALL`], [`StepKind::as_str`],
+/// [`StepKind::mutates_note`]) from one table: `Variant = "toml_type", mutates;`.
+macro_rules! step_kinds {
+    ($( $(#[$doc:meta])* $v:ident = $name:literal, $mutates:literal; )*) => {
+        /// Step kind tag (the TOML `type` value).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum StepKind {
+            $( $(#[$doc])* #[serde(rename = $name)] $v, )*
+        }
+
+        impl StepKind {
+            /// Every kind.
+            pub const ALL: [StepKind; [$($name),*].len()] = [$(StepKind::$v),*];
+
+            /// The TOML `type` string.
+            #[must_use]
+            pub fn as_str(self) -> &'static str {
+                match self { $(StepKind::$v => $name,)* }
+            }
+
+            /// Whether a step of this kind may write a note (replaces Crucible's `mutating`
+            /// flag, `src/AGENTS.md:28`). Fails closed: anything that might write counts.
+            #[must_use]
+            pub fn mutates_note(self) -> bool {
+                match self { $(StepKind::$v => $mutates,)* }
+            }
+        }
+    };
+}
+
+// A2: every pipeline step mutates (fails closed) except `link_scan`, which writes only
+// `state.db`. `x_discover`/`x_backfill` ensure metadata inline and append to source notes'
+// `x-metadata` lists (plan `v0-automation-pipelines` WP-5), so they mutate.
+step_kinds! {
+    Guard = "guard", false;
+    Capture = "capture", true;
+    Materialize = "materialize", true;
+    Move = "move", true;
+    Copy = "copy", true;
+    SetProps = "set_props", true;
+    RemoveProps = "remove_props", true;
+    UpsertTags = "upsert_tags", true;
+    Lint = "lint", true;
+    Localize = "localize", true;
+    Agent = "agent", true;
+    MarkForwarded = "mark_forwarded", true;
+    /// Enqueue another action as a child job (replaces Crucible sub-chains, `src/chains.ts`).
+    RunAction = "run_action", false;
+    SearchUpsert = "search_upsert", false;
+    SearchDelete = "search_delete", false;
     // A2 (plan v0-automation-pipelines WP-1).
-    LinkScan,
-    YtMetadata,
-    YtChannelEnrich,
-    XDiscover,
-    XMetadata,
-    XBackfill,
-    ImageDescribe,
-    TrackYoutube,
-    TrackBlogs,
-    IgnoreVideo,
-    DailyBrief,
+    LinkScan = "link_scan", false;
+    YtMetadata = "yt_metadata", true;
+    YtChannelEnrich = "yt_channel_enrich", true;
+    XDiscover = "x_discover", true;
+    XMetadata = "x_metadata", true;
+    XBackfill = "x_backfill", true;
+    ImageDescribe = "image_describe", true;
+    TrackYoutube = "track_youtube", true;
+    TrackBlogs = "track_blogs", true;
+    IgnoreVideo = "ignore_video", true;
+    DailyBrief = "daily_brief", true;
     /// One-time blog-capture repair (plan `usability-sprint-captures-links` WP-2).
-    CaptureRepair,
+    CaptureRepair = "capture_repair", true;
 }
 
 impl StepKind {
-    /// Every kind.
-    pub const ALL: [StepKind; 27] = [
-        StepKind::Guard,
-        StepKind::Capture,
-        StepKind::Materialize,
-        StepKind::Move,
-        StepKind::Copy,
-        StepKind::SetProps,
-        StepKind::RemoveProps,
-        StepKind::UpsertTags,
-        StepKind::Lint,
-        StepKind::Localize,
-        StepKind::Agent,
-        StepKind::MarkForwarded,
-        StepKind::RunAction,
-        StepKind::SearchUpsert,
-        StepKind::SearchDelete,
-        StepKind::LinkScan,
-        StepKind::YtMetadata,
-        StepKind::YtChannelEnrich,
-        StepKind::XDiscover,
-        StepKind::XMetadata,
-        StepKind::XBackfill,
-        StepKind::ImageDescribe,
-        StepKind::TrackYoutube,
-        StepKind::TrackBlogs,
-        StepKind::IgnoreVideo,
-        StepKind::DailyBrief,
-        StepKind::CaptureRepair,
-    ];
-
-    /// The TOML `type` string.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StepKind::Guard => "guard",
-            StepKind::Capture => "capture",
-            StepKind::Materialize => "materialize",
-            StepKind::Move => "move",
-            StepKind::Copy => "copy",
-            StepKind::SetProps => "set_props",
-            StepKind::RemoveProps => "remove_props",
-            StepKind::UpsertTags => "upsert_tags",
-            StepKind::Lint => "lint",
-            StepKind::Localize => "localize",
-            StepKind::Agent => "agent",
-            StepKind::MarkForwarded => "mark_forwarded",
-            StepKind::RunAction => "run_action",
-            StepKind::SearchUpsert => "search_upsert",
-            StepKind::SearchDelete => "search_delete",
-            StepKind::LinkScan => "link_scan",
-            StepKind::YtMetadata => "yt_metadata",
-            StepKind::YtChannelEnrich => "yt_channel_enrich",
-            StepKind::XDiscover => "x_discover",
-            StepKind::XMetadata => "x_metadata",
-            StepKind::XBackfill => "x_backfill",
-            StepKind::ImageDescribe => "image_describe",
-            StepKind::TrackYoutube => "track_youtube",
-            StepKind::TrackBlogs => "track_blogs",
-            StepKind::IgnoreVideo => "ignore_video",
-            StepKind::DailyBrief => "daily_brief",
-            StepKind::CaptureRepair => "capture_repair",
-        }
-    }
-
     /// Parses a TOML `type` string.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
@@ -170,153 +136,67 @@ impl StepKind {
     }
 }
 
-/// A typed step. Every A1 variant is declared up front (WP-10..13 fill disjoint modules); A2 adds
-/// more. Each variant except [`Step::RunAction`] carries its params opaquely (the TOML table minus
-/// `type`), parsed and validated by its owning module in `cv`'s `steps/`.
+/// A typed step: its kind plus its params (the TOML table minus `type`), parsed and validated by
+/// the kind's owning module in `cv`'s `steps/`. `run_action` params are checked here at load and
+/// read through [`Step::run_action`].
 #[derive(Debug, Clone, PartialEq)]
-pub enum Step {
-    Guard(toml::Table),
-    Capture(toml::Table),
-    Materialize(toml::Table),
-    Move(toml::Table),
-    Copy(toml::Table),
-    SetProps(toml::Table),
-    RemoveProps(toml::Table),
-    UpsertTags(toml::Table),
-    Lint(toml::Table),
-    Localize(toml::Table),
-    Agent(toml::Table),
-    MarkForwarded(toml::Table),
-    /// Enqueue another action as a child job (replaces Crucible sub-chains, `src/chains.ts`).
-    RunAction {
-        /// Target action id.
-        action_id: String,
-        /// Params passed to the child run.
-        params: Map<String, Value>,
-    },
-    SearchUpsert(toml::Table),
-    SearchDelete(toml::Table),
-    // A2 pipeline steps (plan v0-automation-pipelines; bodies in WP-3..10).
-    LinkScan(toml::Table),
-    YtMetadata(toml::Table),
-    YtChannelEnrich(toml::Table),
-    XDiscover(toml::Table),
-    XMetadata(toml::Table),
-    XBackfill(toml::Table),
-    ImageDescribe(toml::Table),
-    TrackYoutube(toml::Table),
-    TrackBlogs(toml::Table),
-    IgnoreVideo(toml::Table),
-    DailyBrief(toml::Table),
-    /// `capture_repair`.
-    CaptureRepair(toml::Table),
+pub struct Step {
+    /// The kind (`type`).
+    pub kind: StepKind,
+    /// The params table.
+    pub params: toml::Table,
+}
+
+/// The parsed params of a `run_action` step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunAction {
+    /// Target action id.
+    pub action_id: String,
+    /// Params passed to the child run.
+    pub params: Map<String, Value>,
+}
+
+impl RunAction {
+    /// Parses a `run_action` step's params (`action`, optional `params` table).
+    pub fn parse(t: &toml::Table) -> Result<Self, String> {
+        let action_id = match t.get("action") {
+            Some(toml::Value::String(s)) if !s.is_empty() => s.clone(),
+            _ => return Err("run_action step needs a non-empty `action`".into()),
+        };
+        let params = match t.get("params") {
+            None => Map::new(),
+            Some(toml::Value::Table(p)) => match serde_json::to_value(p) {
+                Ok(Value::Object(m)) => m,
+                _ => return Err("run_action `params` is not representable".into()),
+            },
+            Some(_) => return Err("run_action `params` must be a table".into()),
+        };
+        if let Some(k) = t
+            .keys()
+            .find(|k| !matches!(k.as_str(), "action" | "params"))
+        {
+            return Err(format!("run_action step: unknown key {k:?}"));
+        }
+        Ok(RunAction { action_id, params })
+    }
 }
 
 impl Step {
     /// The step's kind.
     #[must_use]
     pub fn kind(&self) -> StepKind {
-        match self {
-            Step::Guard(_) => StepKind::Guard,
-            Step::Capture(_) => StepKind::Capture,
-            Step::Materialize(_) => StepKind::Materialize,
-            Step::Move(_) => StepKind::Move,
-            Step::Copy(_) => StepKind::Copy,
-            Step::SetProps(_) => StepKind::SetProps,
-            Step::RemoveProps(_) => StepKind::RemoveProps,
-            Step::UpsertTags(_) => StepKind::UpsertTags,
-            Step::Lint(_) => StepKind::Lint,
-            Step::Localize(_) => StepKind::Localize,
-            Step::Agent(_) => StepKind::Agent,
-            Step::MarkForwarded(_) => StepKind::MarkForwarded,
-            Step::RunAction { .. } => StepKind::RunAction,
-            Step::SearchUpsert(_) => StepKind::SearchUpsert,
-            Step::SearchDelete(_) => StepKind::SearchDelete,
-            Step::LinkScan(_) => StepKind::LinkScan,
-            Step::YtMetadata(_) => StepKind::YtMetadata,
-            Step::YtChannelEnrich(_) => StepKind::YtChannelEnrich,
-            Step::XDiscover(_) => StepKind::XDiscover,
-            Step::XMetadata(_) => StepKind::XMetadata,
-            Step::XBackfill(_) => StepKind::XBackfill,
-            Step::ImageDescribe(_) => StepKind::ImageDescribe,
-            Step::TrackYoutube(_) => StepKind::TrackYoutube,
-            Step::TrackBlogs(_) => StepKind::TrackBlogs,
-            Step::IgnoreVideo(_) => StepKind::IgnoreVideo,
-            Step::DailyBrief(_) => StepKind::DailyBrief,
-            Step::CaptureRepair(_) => StepKind::CaptureRepair,
-        }
+        self.kind
     }
 
-    /// The opaque params table (`None` for [`Step::RunAction`]).
-    #[must_use]
-    pub fn table(&self) -> Option<&toml::Table> {
-        match self {
-            Step::Guard(t)
-            | Step::Capture(t)
-            | Step::Materialize(t)
-            | Step::Move(t)
-            | Step::Copy(t)
-            | Step::SetProps(t)
-            | Step::RemoveProps(t)
-            | Step::UpsertTags(t)
-            | Step::Lint(t)
-            | Step::Localize(t)
-            | Step::Agent(t)
-            | Step::MarkForwarded(t)
-            | Step::SearchUpsert(t)
-            | Step::SearchDelete(t)
-            | Step::LinkScan(t)
-            | Step::YtMetadata(t)
-            | Step::YtChannelEnrich(t)
-            | Step::XDiscover(t)
-            | Step::XMetadata(t)
-            | Step::XBackfill(t)
-            | Step::ImageDescribe(t)
-            | Step::TrackYoutube(t)
-            | Step::TrackBlogs(t)
-            | Step::IgnoreVideo(t)
-            | Step::DailyBrief(t)
-            | Step::CaptureRepair(t) => Some(t),
-            Step::RunAction { .. } => None,
-        }
-    }
-
-    /// Whether the step may write a note (replaces Crucible's `mutating` flag, `src/AGENTS.md:28`).
-    /// Fails closed: anything that might write counts.
-    /// A2: every pipeline step mutates (fails closed) except `link_scan`, which writes only
-    /// `state.db`. `x_discover`/`x_backfill` ensure metadata inline and append to source notes'
-    /// `x-metadata` lists (plan `v0-automation-pipelines` WP-5), so they mutate.
+    /// Whether the step may write a note ([`StepKind::mutates_note`]).
     #[must_use]
     pub fn mutates_note(&self) -> bool {
-        match self.kind() {
-            StepKind::Guard
-            | StepKind::RunAction
-            | StepKind::SearchUpsert
-            | StepKind::SearchDelete
-            | StepKind::LinkScan => false,
-            StepKind::Capture
-            | StepKind::Materialize
-            | StepKind::Move
-            | StepKind::Copy
-            | StepKind::SetProps
-            | StepKind::RemoveProps
-            | StepKind::UpsertTags
-            | StepKind::Lint
-            | StepKind::Localize
-            | StepKind::Agent
-            | StepKind::MarkForwarded
-            | StepKind::YtMetadata
-            | StepKind::YtChannelEnrich
-            | StepKind::XDiscover
-            | StepKind::XMetadata
-            | StepKind::XBackfill
-            | StepKind::ImageDescribe
-            | StepKind::TrackYoutube
-            | StepKind::TrackBlogs
-            | StepKind::IgnoreVideo
-            | StepKind::DailyBrief
-            | StepKind::CaptureRepair => true,
-        }
+        self.kind.mutates_note()
+    }
+
+    /// The parsed `run_action` params.
+    pub fn run_action(&self) -> Result<RunAction, String> {
+        RunAction::parse(&self.params)
     }
 
     /// Parses one `[[action.steps]]` table (`type` + params).
@@ -328,52 +208,11 @@ impl Step {
             Some(_) => return Err("step `type` must be a string".into()),
             None => return Err("step is missing `type`".into()),
         };
-        Ok(match kind {
-            StepKind::Guard => Step::Guard(t),
-            StepKind::Capture => Step::Capture(t),
-            StepKind::Materialize => Step::Materialize(t),
-            StepKind::Move => Step::Move(t),
-            StepKind::Copy => Step::Copy(t),
-            StepKind::SetProps => Step::SetProps(t),
-            StepKind::RemoveProps => Step::RemoveProps(t),
-            StepKind::UpsertTags => Step::UpsertTags(t),
-            StepKind::Lint => Step::Lint(t),
-            StepKind::Localize => Step::Localize(t),
-            StepKind::Agent => Step::Agent(t),
-            StepKind::MarkForwarded => Step::MarkForwarded(t),
-            StepKind::SearchUpsert => Step::SearchUpsert(t),
-            StepKind::SearchDelete => Step::SearchDelete(t),
-            StepKind::LinkScan => Step::LinkScan(t),
-            StepKind::YtMetadata => Step::YtMetadata(t),
-            StepKind::YtChannelEnrich => Step::YtChannelEnrich(t),
-            StepKind::XDiscover => Step::XDiscover(t),
-            StepKind::XMetadata => Step::XMetadata(t),
-            StepKind::XBackfill => Step::XBackfill(t),
-            StepKind::ImageDescribe => Step::ImageDescribe(t),
-            StepKind::TrackYoutube => Step::TrackYoutube(t),
-            StepKind::TrackBlogs => Step::TrackBlogs(t),
-            StepKind::IgnoreVideo => Step::IgnoreVideo(t),
-            StepKind::DailyBrief => Step::DailyBrief(t),
-            StepKind::CaptureRepair => Step::CaptureRepair(t),
-            StepKind::RunAction => {
-                let action_id = match t.remove("action") {
-                    Some(toml::Value::String(s)) if !s.is_empty() => s,
-                    _ => return Err("run_action step needs a non-empty `action`".into()),
-                };
-                let params = match t.remove("params") {
-                    None => Map::new(),
-                    Some(toml::Value::Table(p)) => match serde_json::to_value(p) {
-                        Ok(Value::Object(m)) => m,
-                        _ => return Err("run_action `params` is not representable".into()),
-                    },
-                    Some(_) => return Err("run_action `params` must be a table".into()),
-                };
-                if let Some(k) = t.keys().next() {
-                    return Err(format!("run_action step: unknown key {k:?}"));
-                }
-                Step::RunAction { action_id, params }
-            }
-        })
+        let step = Step { kind, params: t };
+        if kind == StepKind::RunAction {
+            step.run_action()?;
+        }
+        Ok(step)
     }
 }
 
@@ -683,13 +522,13 @@ mod tests {
         let t: toml::Table = toml::from_str("type = \"set_props\"\nx = 1").unwrap();
         let s = Step::from_table(t).unwrap();
         assert_eq!(s.kind(), StepKind::SetProps);
-        assert!(s.table().unwrap().contains_key("x"));
+        assert!(s.params.contains_key("x"));
         let t: toml::Table =
             toml::from_str("type = \"run_action\"\naction = \"b\"\nparams = { k = \"v\" }")
                 .unwrap();
         assert_eq!(
-            Step::from_table(t).unwrap(),
-            Step::RunAction {
+            Step::from_table(t).unwrap().run_action().unwrap(),
+            RunAction {
                 action_id: "b".into(),
                 params: json!({"k": "v"}).as_object().unwrap().clone()
             }

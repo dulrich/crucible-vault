@@ -21,28 +21,52 @@
 //! Params: none (everything comes from `pipelines.toml`). Outcome vars: `fx`, `weather` (lines
 //! fetched), `failed` (lookups failed), `skipped`, plus `disabled` when off.
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::brief::{Entry, FxLine, WeatherLine, brief_body};
 use cv_providers::web::FetchError;
 use cv_providers::web::fx::{self, FxApi};
 use cv_providers::web::weather::{self, WeatherApi};
 use cv_text::sections::{SectionInsertMode, insert_into_section, is_section_empty};
-use serde_json::Value;
+use serde::Serialize;
 
 use super::materialize::{ensure_note, now, period, stem};
 use super::web::{api_base, block_on, client, record_usage};
-use super::{StepCtx, StepError, StepOutcome, fetch_disposition};
+use super::{StepCtx, StepError, StepModule, StepOutcome, fetch_disposition};
 
-/// Validates the step's params (none accepted; unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    crate::steps::reject_params(step)
+/// The `daily_brief` step (no params; unknown keys disarm, I5).
+pub(crate) struct DailyBrief;
+
+impl StepModule for DailyBrief {
+    type Params = ();
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<(), String> {
+        super::no_params(kind, t)
+    }
+
+    fn run((): (), ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(ctx)
+    }
+}
+
+/// `daily_brief` outcome vars.
+#[derive(Serialize)]
+struct Vars {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    disabled: bool,
+    fx: usize,
+    weather: usize,
+    failed: usize,
+    skipped: bool,
 }
 
 fn vars(out: &mut StepOutcome, fx: usize, weather: usize, failed: usize, skipped: bool) {
-    for (k, v) in [("fx", fx), ("weather", weather), ("failed", failed)] {
-        out.vars.insert(k.into(), Value::from(v));
-    }
-    out.vars.insert("skipped".into(), Value::Bool(skipped));
+    out.set_vars(&Vars {
+        disabled: false,
+        fx,
+        weather,
+        failed,
+        skipped,
+    });
 }
 
 /// Local stamp for the `**FX Rates** _(updated …)_` header (Crucible: `en-CA` + short zone name;
@@ -54,13 +78,17 @@ fn stamp() -> String {
 }
 
 /// Executes the step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    validate(step, ctx.config).map_err(StepError::failed)?;
+pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let cfg = ctx.config.pipelines().daily_brief.clone();
     let mut out = StepOutcome::default();
     if !cfg.enabled {
-        out.vars.insert("disabled".into(), Value::Bool(true));
-        vars(&mut out, 0, 0, 0, true);
+        out.set_vars(&Vars {
+            disabled: true,
+            fx: 0,
+            weather: 0,
+            failed: 0,
+            skipped: true,
+        });
         return Ok(out);
     }
 

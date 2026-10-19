@@ -31,12 +31,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_vault::VaultError;
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde::Serialize;
 
-use super::{StepCtx, StepError, StepOutcome};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 // ---------------------------------------------------------------------------------------------
 // Pure domain (port of src/attachmentRepair.ts)
@@ -826,7 +826,7 @@ pub enum ImageFormat {
 
 /// Parsed step params (defaults = Crucible `DEFAULT_SETTINGS`, `src/types.ts:794-816`).
 #[derive(Debug, Clone)]
-struct Params {
+pub(crate) struct Params {
     path: Option<String>,
     /// `Some(folder)` = folder scope (plan `usability-sprint-captures-links` WP-2 backfill).
     folder_scope: Option<String>,
@@ -843,36 +843,9 @@ struct Params {
     max_bytes: u64,
 }
 
-const KEYS: &[&str] = &[
-    "path",
-    "mode",
-    "folder_template",
-    "name_template",
-    "images",
-    "audio",
-    "video",
-    "pdf",
-    "images_whitelist",
-    "audio_whitelist",
-    "video_whitelist",
-    "pdf_whitelist",
-    "convert_images",
-    "image_format",
-    "image_quality",
-    "timeout_secs",
-    "max_bytes",
-    "scope",
-    "folder",
-    "limit",
-];
-
-fn parse_params(t: Option<&toml::Table>) -> Result<Params, String> {
-    let empty = toml::Table::new();
-    let t = t.unwrap_or(&empty);
-    for k in t.keys() {
-        if !KEYS.contains(&k.as_str()) {
-            return Err(format!("localize: unknown param {k:?}"));
-        }
+fn parse_params(t: &toml::Table) -> Result<Params, String> {
+    if let Some(k) = super::params::unknown_key(StepKind::Localize, t) {
+        return Err(format!("localize: unknown param {k:?}"));
     }
     let s = |k: &str| -> Result<Option<String>, String> {
         match t.get(k) {
@@ -993,9 +966,28 @@ impl Params {
     }
 }
 
-/// Validates the step's params (all optional; an empty table is valid).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    parse_params(step.table()).map(|_| ())
+impl Params {
+    /// Default params localizing `path` (inline localize, e.g. the blog tracker's captures).
+    pub(crate) fn note(path: String) -> Self {
+        let mut p = parse_params(&toml::Table::new()).unwrap_or_else(|_| unreachable!());
+        p.path = Some(path);
+        p
+    }
+}
+
+/// The `localize` step (params all optional; an empty table is valid).
+pub(crate) struct Localize;
+
+impl StepModule for Localize {
+    type Params = Params;
+
+    fn parse(_: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        parse_params(t)
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(&p, ctx)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1357,7 +1349,7 @@ fn ctx_note_path(p: &Params, ctx: &StepCtx<'_>) -> Result<String, StepError> {
     let from_params = ctx
         .params
         .get("path")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
     p.path
         .clone()
@@ -1402,13 +1394,55 @@ pub fn has_remote_image_refs(content: &str) -> bool {
 
 /// Executes one `localize` step (mode `localize` or `repair`) on the target note, or — with
 /// `scope = "folder"` — on up to `limit` candidate notes under `folder`.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let p = parse_params(step.table()).map_err(StepError::failed)?;
+pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     if let Some(folder) = p.folder_scope.clone() {
-        return execute_folder(&p, &folder, ctx);
+        return execute_folder(p, &folder, ctx);
     }
-    let path = ctx_note_path(&p, ctx)?;
-    execute_note(&p, &path, ctx)
+    let path = ctx_note_path(p, ctx)?;
+    let (vars, output_paths) = execute_note(p, &path, ctx)?;
+    let mut out = StepOutcome {
+        output_paths,
+        ..StepOutcome::default()
+    };
+    out.set_vars(&vars);
+    Ok(out)
+}
+
+/// Outcome vars of a note-scope `localize` (counts are absent on a non-`.md` target; the
+/// repair counts only in `mode = "repair"`).
+#[derive(Debug, Default, Serialize)]
+struct NoteVars {
+    changed: bool,
+    images: u64,
+    #[serde(flatten)]
+    counts: Option<NoteCounts>,
+}
+
+/// The download/rewrite counts of a localized `.md` note.
+#[derive(Debug, Default, Serialize)]
+struct NoteCounts {
+    downloaded: u64,
+    reused: u64,
+    stripped: u64,
+    failed: u64,
+    throttled: u64,
+    ineligible: u64,
+    localized: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repaired: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unrepairable: Option<u64>,
+}
+
+/// Outcome vars of a folder-scope `localize` backfill.
+#[derive(Serialize)]
+struct FolderVars {
+    scanned: u64,
+    localized: u64,
+    failed: u64,
+    throttled: u64,
+    ineligible: u64,
+    unattempted_remaining: u64,
 }
 
 fn lock_state<'c>(
@@ -1451,21 +1485,19 @@ fn execute_folder(
     }
     let (mut localized, mut failed, mut attempted, mut throttled) = (0_u64, 0_u64, 0_u64, 0_u64);
     let mut ineligible = 0_u64;
-    let mut output_paths = Vec::new();
+    let mut out = StepOutcome::default();
     for f in &candidates {
         if attempted >= p.limit {
             break;
         }
         attempted += 1;
         let reason = match execute_note(p, f, ctx) {
-            Ok(o) => {
-                let n = |k: &str| o.vars.get(k).and_then(Value::as_u64).unwrap_or(0);
-                let hit_limit = n("throttled") > 0;
-                let failed_refs = n("failed");
-                for op in o.output_paths {
-                    if !output_paths.contains(&op) {
-                        output_paths.push(op);
-                    }
+            Ok((v, paths)) => {
+                let c = v.counts.unwrap_or_default();
+                let hit_limit = c.throttled > 0;
+                let failed_refs = c.failed;
+                for op in paths {
+                    out.push_output(op);
                 }
                 let left = ctx
                     .read(f)?
@@ -1514,31 +1546,27 @@ fn execute_folder(
         unattempted_remaining,
         "localize backfill"
     );
-    let mut vars = Map::new();
-    vars.insert("scanned".into(), scanned.into());
-    vars.insert("localized".into(), localized.into());
-    vars.insert("failed".into(), failed.into());
-    vars.insert("throttled".into(), throttled.into());
-    vars.insert("ineligible".into(), ineligible.into());
-    vars.insert("unattempted_remaining".into(), unattempted_remaining.into());
-    Ok(StepOutcome {
-        output_paths,
-        vars,
-        ..StepOutcome::default()
-    })
+    out.set_vars(&FolderVars {
+        scanned,
+        localized,
+        failed,
+        throttled,
+        ineligible,
+        unattempted_remaining,
+    });
+    Ok(out)
 }
 
-fn execute_note(p: &Params, path: &str, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+/// Localizes one note: its outcome vars and output paths.
+fn execute_note(
+    p: &Params,
+    path: &str,
+    ctx: &mut StepCtx<'_>,
+) -> Result<(NoteVars, Vec<String>), StepError> {
     let path = path.to_owned();
     let p = p.clone();
-    let mut vars = Map::new();
     if !path.ends_with(".md") {
-        vars.insert("changed".into(), Value::Bool(false));
-        vars.insert("images".into(), 0u64.into());
-        return Ok(StepOutcome {
-            vars,
-            ..StepOutcome::default()
-        });
+        return Ok((NoteVars::default(), Vec::new()));
     }
     let note = Note::new(&path);
     let Some((bytes, hash)) = ctx.read(&path)? else {
@@ -1702,18 +1730,16 @@ fn execute_note(p: &Params, path: &str, ctx: &mut StepCtx<'_>) -> Result<StepOut
     run.counts.stripped = if changed { placeholders as u64 } else { 0 };
     let c = &run.counts;
     let applied = rewritten.applied_from.len() as u64;
-    vars.insert("changed".into(), Value::Bool(changed));
-    vars.insert("downloaded".into(), c.downloaded.into());
-    vars.insert("reused".into(), c.reused.into());
-    vars.insert("stripped".into(), c.stripped.into());
-    vars.insert("failed".into(), c.failed.into());
-    vars.insert("throttled".into(), c.throttled.into());
-    vars.insert("ineligible".into(), c.ineligible.into());
-    vars.insert("images".into(), images.into());
-    vars.insert(
-        "localized".into(),
-        (if changed { applied } else { 0 }).into(),
-    );
+    let mut counts = NoteCounts {
+        downloaded: c.downloaded,
+        reused: c.reused,
+        stripped: c.stripped,
+        failed: c.failed,
+        throttled: c.throttled,
+        ineligible: c.ineligible,
+        localized: if changed { applied } else { 0 },
+        ..NoteCounts::default()
+    };
     if p.repair {
         let (repaired, unrep) = repair_counts(
             resolved_count,
@@ -1722,14 +1748,15 @@ fn execute_note(p: &Params, path: &str, ctx: &mut StepCtx<'_>) -> Result<StepOut
             applied,
             changed || replacements.is_empty(),
         );
-        vars.insert("repaired".into(), repaired.into());
-        vars.insert("unrepairable".into(), unrep.into());
+        counts.repaired = Some(repaired);
+        counts.unrepairable = Some(unrep);
     }
-    Ok(StepOutcome {
-        output_paths,
-        vars,
-        ..StepOutcome::default()
-    })
+    let vars = NoteVars {
+        changed,
+        images,
+        counts: Some(counts),
+    };
+    Ok((vars, output_paths))
 }
 
 /// Ported vectors of Crucible `tests/localizeAttachments.edge.test.mjs` (names kept).
@@ -2398,8 +2425,8 @@ mod vectors {
 
     #[test]
     fn validate_accepts_empty_and_rejects_bad_params() {
-        assert!(parse_params(None).is_ok());
-        let d = parse_params(None).unwrap();
+        assert!(parse_params(&toml::Table::new()).is_ok());
+        let d = parse_params(&toml::Table::new()).unwrap();
         assert_eq!(d.folder_template, DEFAULT_FOLDER_TEMPLATE);
         assert_eq!(d.name_template, DEFAULT_NAME_TEMPLATE);
         assert_eq!(
@@ -2414,8 +2441,8 @@ mod vectors {
             format!("notes/_attachments/{}/abc_MD5.png", slugify("My Note"))
         );
         let bad: toml::Table = toml::from_str("mode = \"nope\"").unwrap();
-        assert!(parse_params(Some(&bad)).is_err());
+        assert!(parse_params(&bad).is_err());
         let unknown: toml::Table = toml::from_str("bogus = 1").unwrap();
-        assert!(parse_params(Some(&unknown)).is_err());
+        assert!(parse_params(&unknown).is_err());
     }
 }

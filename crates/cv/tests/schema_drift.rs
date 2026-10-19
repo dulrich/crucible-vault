@@ -456,21 +456,6 @@ fn assert_covered(file: &str, samples: &[String]) {
 }
 
 #[test]
-fn every_step_kind_has_a_schema() {
-    for k in StepKind::ALL {
-        assert!(step_schema(k.as_str()).is_some(), "{}", k.as_str());
-    }
-    assert_eq!(cv_schema::schemas::STEP.variants.len(), StepKind::ALL.len());
-    for v in cv_schema::schemas::STEP.variants {
-        assert!(
-            StepKind::parse(v.tag).is_some(),
-            "schema-only step kind {}",
-            v.tag
-        );
-    }
-}
-
-#[test]
 fn support_files_parse_and_validate() {
     for (file, samples) in [
         ("providers.toml", PROVIDERS),
@@ -553,8 +538,6 @@ fn invented_fields_are_rejected() {
         "[[action]]\nid = \"s\"\ninvented = 1\n[[action.steps]]\ntype = \"guard\"\n".into(),
     );
     assert!(reload(&files).iter().any(|e| e.contains("invented")));
-    files.insert("actions.toml", step_action("lint", "invented = 1"));
-    assert!(reload(&files).iter().any(|e| e.contains("invented")));
     files.insert("actions.toml", exercising_actions("agents.toml", AGENTS[0]));
     files.insert("agents.toml", format!("{}invented = 1\n", AGENTS[0]));
     assert!(reload(&files).iter().any(|e| e.contains("invented")));
@@ -570,4 +553,62 @@ fn invented_fields_are_rejected() {
     let mut files = support();
     files.insert("pipelines.toml", "[youtube]\nschedule = \"3h\"\n".into());
     assert!(reload(&files).iter().any(|e| e.contains("schedule")));
+}
+
+/// Plan tn-review-baseline-remediation WP-R8 (SM6): every step kind has exactly one schema record
+/// (no schema-only kinds), and every step parser's allowed-key set equals that record's field set —
+/// each schema key is accepted as a key, and a key outside the record is rejected as unknown.
+#[test]
+fn step_parsers_accept_exactly_the_schema_keys() {
+    assert_eq!(cv_schema::schemas::STEP.variants.len(), StepKind::ALL.len());
+    for v in cv_schema::schemas::STEP.variants {
+        assert!(
+            StepKind::parse(v.tag).is_some(),
+            "schema-only step kind {}",
+            v.tag
+        );
+    }
+    for k in StepKind::ALL {
+        let kind = k.as_str();
+        let base = if k == StepKind::RunAction {
+            "action = \"s\"\n"
+        } else {
+            ""
+        };
+        let record = step_schema(kind).unwrap();
+        for f in record.fields {
+            if k == StepKind::RunAction && f.key == "action" {
+                continue;
+            }
+            let mut files = support();
+            files.insert(
+                "actions.toml",
+                step_action(kind, &format!("{base}{} = \"x\"", f.key)),
+            );
+            let unknown = [
+                format!("unknown key {:?}", f.key),
+                format!("unknown param {:?}", f.key),
+                format!("unknown field `{}`", f.key),
+            ];
+            let errs = reload(&files);
+            assert!(
+                !errs.iter().any(|e| unknown.iter().any(|u| e.contains(u))),
+                "{kind}: schema key {} rejected: {errs:?}",
+                f.key
+            );
+        }
+        let mut files = support();
+        files.insert(
+            "actions.toml",
+            step_action(kind, &format!("{base}zz_invented = 1")),
+        );
+        let errs = reload(&files);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("unknown key \"zz_invented\"")
+                    || e.contains("unknown param \"zz_invented\"")
+                    || e.contains("unknown field `zz_invented`")),
+            "{kind}: invented key accepted: {errs:?}"
+        );
+    }
 }

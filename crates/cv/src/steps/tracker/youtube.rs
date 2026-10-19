@@ -18,20 +18,20 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::tracker::{is_ignored_short, uploads_playlist_id, youtube_ids_in_text};
 use cv_ingest::youtube::{parse_iso8601_duration, watch_url};
 use cv_providers::web::FetchError;
 use cv_providers::web::youtube::{self as api, PlaylistItem};
 use cv_state::TrackerOutcome;
-use serde_json::json;
+use serde::Serialize;
 
-use super::super::materialize::{check_keys, table};
+use super::super::params::check_keys;
 use super::super::web::{block_on, client, record_usage, secret};
 use super::super::youtube::{
     API_KEY_SECRET, find_metadata_note, metadata_root, no_key, write_metadata_note, youtube,
 };
-use super::super::{StepCtx, StepError, StepOutcome};
+use super::super::{StepCtx, StepError, StepModule, StepOutcome};
 use super::{
     Candidate, SeenSet, emit_cancelled, emit_line, fetch_bounded, md_files_under, now_ms, record,
 };
@@ -43,7 +43,6 @@ pub const PROP: &str = "yt-video-id";
 /// Crucible's orchestration folder (intake notes, `ignored.md`), read-only seeding input.
 pub const CRUCIBLE_ROOT: &str = "_crucible/orchestration";
 
-const KEYS: &[&str] = &["limit_per_source"];
 const DEFAULT_LIMIT: u32 = 50;
 
 fn limit(t: &toml::Table) -> Result<u32, String> {
@@ -56,11 +55,32 @@ fn limit(t: &toml::Table) -> Result<u32, String> {
     }
 }
 
-/// Validates the step's params (unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    let t = table(step);
-    check_keys(&t, KEYS, "track_youtube")?;
-    limit(&t).map(|_| ())
+/// The `track_youtube` step (param `limit_per_source`; unknown keys disarm, I5).
+pub(crate) struct TrackYoutube;
+
+impl StepModule for TrackYoutube {
+    type Params = u32;
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<u32, String> {
+        check_keys(t, kind, "track_youtube")?;
+        limit(t)
+    }
+
+    fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(max, ctx)
+    }
+}
+
+/// `track_youtube` outcome vars.
+#[derive(Default, Serialize)]
+struct Vars {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    disabled: bool,
+    sources: usize,
+    new: usize,
+    lines: usize,
+    ignored: usize,
+    failed: usize,
 }
 
 /// First-run seed: ids of existing `_yt_metadata/**/<id>.md` notes plus the video ids in
@@ -79,12 +99,6 @@ fn seed(ctx: &StepCtx<'_>) -> BTreeSet<String> {
         }
     }
     ids
-}
-
-fn vars(out: &mut StepOutcome, counts: [(&str, usize); 5]) {
-    for (k, v) in counts {
-        out.vars.insert(k.into(), json!(v));
-    }
 }
 
 /// Rows the duration backfill looks at per run (10 `videos.list` calls at most).
@@ -181,22 +195,13 @@ fn cancel_listed_shorts(
 }
 
 /// Executes the step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    validate(step, ctx.config).map_err(StepError::failed)?;
-    let max = limit(&table(step)).map_err(StepError::failed)?;
+pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
     if !ctx.config.pipelines().youtube.enabled {
-        out.vars.insert("disabled".into(), json!(true));
-        vars(
-            &mut out,
-            [
-                ("sources", 0),
-                ("new", 0),
-                ("lines", 0),
-                ("ignored", 0),
-                ("failed", 0),
-            ],
-        );
+        out.set_vars(&Vars {
+            disabled: true,
+            ..Vars::default()
+        });
         return Ok(out);
     }
     let rows: Vec<_> = ctx
@@ -346,16 +351,14 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     }
     out.output_paths.sort();
     out.output_paths.dedup();
-    vars(
-        &mut out,
-        [
-            ("sources", rows.len()),
-            ("new", new),
-            ("lines", lines),
-            ("ignored", ignored),
-            ("failed", failed),
-        ],
-    );
+    out.set_vars(&Vars {
+        disabled: false,
+        sources: rows.len(),
+        new,
+        lines,
+        ignored,
+        failed,
+    });
     Ok(out)
 }
 

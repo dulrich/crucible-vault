@@ -68,7 +68,7 @@ impl Env {
         let mut full = t.clone();
         full.insert("type".into(), toml::Value::String("localize".into()));
         let s = Step::from_table(full).unwrap();
-        localize::validate(&s, &self.config).unwrap();
+        crate::steps::validate(&s, &self.config).unwrap();
         s
     }
 
@@ -99,7 +99,7 @@ impl Env {
             children: &NoChildren,
             written: Vec::new(),
         };
-        localize::execute(step, &mut ctx)
+        crate::steps::execute(step, &mut ctx)
     }
 }
 
@@ -682,7 +682,7 @@ fn folder_scope_params_validate() {
     let mk = |src: &str| {
         let mut t: toml::Table = toml::from_str(src).unwrap();
         t.insert("type".into(), toml::Value::String("localize".into()));
-        localize::validate(&Step::from_table(t).unwrap(), &c)
+        crate::steps::validate(&Step::from_table(t).unwrap(), &c)
     };
     assert!(mk("scope = \"folder\"\nfolder = \"daily\"").is_ok());
     assert!(mk("scope = \"note\"").is_ok());

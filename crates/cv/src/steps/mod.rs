@@ -1,7 +1,8 @@
-//! Step dispatch: the one table mapping each [`Step`] variant to its owning module, plus the
-//! contract every module implements (plan `v0-core-daemon` WP-9; bodies in WP-10..13).
+//! Step dispatch: the one table mapping each [`StepKind`] to its owning module, plus the
+//! [`StepModule`] contract every module implements (plan `v0-core-daemon` WP-9; bodies in
+//! WP-10..13; typed params in plan `tn-review-baseline-remediation` WP-R8).
 //!
-//! | Variant | Module | Owner |
+//! | Kind | Module | Owner |
 //! |---|---|---|
 //! | `Materialize` | [`materialize`] | WP-10 |
 //! | `Capture` | [`capture`] | WP-10 |
@@ -10,7 +11,7 @@
 //! | `Localize` | [`localize`] | WP-11 |
 //! | `Agent` | [`agent`] | WP-12 |
 //! | `SearchUpsert`, `SearchDelete` | [`search`] | WP-13 |
-//! | `RunAction` | here → the runner's child enqueue | WP-9 |
+//! | `RunAction` | here ([`RunActionStep`]) → the runner's child enqueue | WP-9 |
 //! | `LinkScan` | [`link_scan`] | A2 WP-3 |
 //! | `YtMetadata`, `YtChannelEnrich` | [`youtube`] | A2 WP-4 |
 //! | `XDiscover`, `XMetadata`, `XBackfill` | [`x`] | A2 WP-5 |
@@ -21,7 +22,7 @@
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
 //!
-//! A module's `execute` runs on a blocking thread inside a claimed job (I3 holds for the job's
+//! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
 //! [`StepCtx::write`]/[`StepCtx::create`] with the hash it read (I2): those calls record the path for
 //! the cycle guard (I5).
@@ -39,6 +40,7 @@ pub mod link_scan;
 pub mod lint;
 pub mod localize;
 pub mod materialize;
+pub mod params;
 pub mod search;
 pub mod tracker;
 pub mod web;
@@ -56,7 +58,7 @@ pub mod youtube;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{Action, ConfigSet, Step};
+use cv_actions::{Action, ConfigSet, RunAction, Step, StepKind};
 use cv_protocol::ActionContext;
 use cv_state::{FailureReason, ServiceFailureKind, StateDb};
 use cv_vault::{ContentHash, VaultError, WriterHandle};
@@ -80,6 +82,23 @@ pub struct StepOutcome {
     /// Stop the action here, successfully (e.g. a guard that does not hold).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stop: bool,
+}
+
+impl StepOutcome {
+    /// Merges a step's typed outcome vars (B9): each serialized field becomes a var named by
+    /// the field (later keys win). A non-object serialization is ignored.
+    pub(crate) fn set_vars(&mut self, v: &impl Serialize) {
+        if let Ok(Value::Object(m)) = serde_json::to_value(v) {
+            self.vars.extend(m);
+        }
+    }
+
+    /// Appends `path` to `output_paths` unless already listed (the one dedupe).
+    pub(crate) fn push_output(&mut self, path: String) {
+        if !self.output_paths.contains(&path) {
+            self.output_paths.push(path);
+        }
+    }
 }
 
 /// The var a `move` step sets to the note it moved **from** (alongside `moved_path`).
@@ -313,90 +332,133 @@ impl StepCtx<'_> {
     pub fn written(&self) -> &[String] {
         &self.written
     }
-}
 
-/// Rejects any param key: for steps that take no params (`daily_brief`, `tracker_blogs`); a
-/// stray key disarms the action at config load (I5).
-pub(crate) fn reject_params(step: &Step) -> Result<(), String> {
-    match step.table().and_then(|t| t.keys().next()) {
-        Some(k) => Err(format!("{} step: unknown key {k:?}", step.kind().as_str())),
-        None => Ok(()),
+    /// A sub-context for an inline step call (e.g. the tracker's intake capture): the same run,
+    /// with `vars` in place of this step's vars and its own (empty) written list.
+    pub fn with_vars<'b>(&'b self, vars: &'b Map<String, Value>) -> StepCtx<'b> {
+        StepCtx {
+            job_id: self.job_id,
+            action: self.action,
+            step_index: self.step_index,
+            params: self.params,
+            context: self.context,
+            vars,
+            config: self.config,
+            vault_root: self.vault_root,
+            index_db: self.index_db,
+            search: self.search,
+            state: self.state,
+            writer: self.writer.clone(),
+            children: self.children,
+            written: Vec::new(),
+        }
     }
 }
 
-/// Validates one step (config load; a failure disarms the action, I5).
-pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
-    match step {
-        Step::Materialize(_) => materialize::validate(step, config),
-        Step::Capture(_) => capture::validate(step, config),
-        Step::Guard(_)
-        | Step::Move(_)
-        | Step::Copy(_)
-        | Step::SetProps(_)
-        | Step::RemoveProps(_)
-        | Step::UpsertTags(_)
-        | Step::MarkForwarded(_) => file::validate(step, config),
-        Step::Lint(_) => lint::validate(step, config),
-        Step::Localize(_) => localize::validate(step, config),
-        Step::Agent(_) => agent::validate(step, config),
-        Step::SearchUpsert(_) | Step::SearchDelete(_) => search::validate(step, config),
-        Step::LinkScan(_) => link_scan::validate(step, config),
-        Step::YtMetadata(_) | Step::YtChannelEnrich(_) => youtube::validate(step, config),
-        Step::XDiscover(_) | Step::XMetadata(_) | Step::XBackfill(_) => x::validate(step, config),
-        Step::ImageDescribe(_) => image_describe::validate(step, config),
-        Step::TrackYoutube(_) => tracker::youtube::validate(step, config),
-        Step::TrackBlogs(_) => tracker::blogs::validate(step, config),
-        Step::IgnoreVideo(_) => ignore::validate(step, config),
-        Step::DailyBrief(_) => daily_brief::validate(step, config),
-        Step::CaptureRepair(_) => capture_repair::validate(step, config),
-        Step::RunAction { action_id, .. } => {
-            if config.is_known(action_id) {
-                Ok(())
-            } else {
-                Err(format!("run_action names unknown action {action_id:?}"))
+/// The contract every step module implements (plan tn-review-baseline-remediation WP-R8, SM5):
+/// `parse` turns the step's TOML params into typed `Params` (config load: a failure disarms the
+/// action, I5; allowed keys come from the `cv_schema` step record), `run` executes them.
+/// [`validate`] is `parse` with the result dropped; [`execute`] parses once and runs.
+pub trait StepModule {
+    /// The typed params.
+    type Params;
+    /// Parses and validates the params of a `kind` step against `config`.
+    fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Self::Params, String>;
+    /// Runs the step.
+    fn run(p: Self::Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>;
+}
+
+/// Params of a step that takes none (`daily_brief`, `track_blogs`): a stray key disarms the
+/// action at config load (I5).
+pub(crate) fn no_params(kind: StepKind, t: &toml::Table) -> Result<(), String> {
+    params::check_keys(t, kind, kind.as_str())
+}
+
+/// `run_action`: enqueue another action as a child job (the runner's [`ChildSpawner`]).
+pub struct RunActionStep;
+
+impl StepModule for RunActionStep {
+    type Params = RunAction;
+
+    fn parse(_: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<RunAction, String> {
+        let r = RunAction::parse(t)?;
+        if config.is_known(&r.action_id) {
+            Ok(r)
+        } else {
+            Err(format!("run_action names unknown action {:?}", r.action_id))
+        }
+    }
+
+    fn run(p: RunAction, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        let child = ctx
+            .children
+            .spawn_child(&p.action_id, p.params)
+            .map_err(StepError::failed)?;
+        let mut out = StepOutcome::default();
+        out.set_vars(&RunActionVars {
+            child_job_id: child,
+        });
+        Ok(out)
+    }
+}
+
+/// `run_action` outcome vars.
+#[derive(Serialize)]
+struct RunActionVars {
+    child_job_id: String,
+}
+
+/// Generates [`validate`] and [`execute`] from one `kind => module` table.
+macro_rules! step_modules {
+    ($($kind:ident => $m:ty,)*) => {
+        /// Validates one step (config load; a failure disarms the action, I5).
+        pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
+            match step.kind {
+                $(StepKind::$kind => <$m>::parse(step.kind, &step.params, config).map(drop),)*
             }
         }
-    }
+
+        /// Executes one step (the production [`crate::runner::StepExecutor`]).
+        pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+            match step.kind {
+                $(StepKind::$kind => {
+                    let p = <$m>::parse(step.kind, &step.params, ctx.config)
+                        .map_err(StepError::failed)?;
+                    <$m>::run(p, ctx)
+                })*
+            }
+        }
+    };
 }
 
-/// Executes one step (the production [`crate::runner::StepExecutor`]).
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    match step {
-        Step::Materialize(_) => materialize::execute(step, ctx),
-        Step::Capture(_) => capture::execute(step, ctx),
-        Step::Guard(_)
-        | Step::Move(_)
-        | Step::Copy(_)
-        | Step::SetProps(_)
-        | Step::RemoveProps(_)
-        | Step::UpsertTags(_)
-        | Step::MarkForwarded(_) => file::execute(step, ctx),
-        Step::Lint(_) => lint::execute(step, ctx),
-        Step::Localize(_) => localize::execute(step, ctx),
-        Step::Agent(_) => agent::execute(step, ctx),
-        Step::SearchUpsert(_) | Step::SearchDelete(_) => search::execute(step, ctx),
-        Step::LinkScan(_) => link_scan::execute(step, ctx),
-        Step::YtMetadata(_) | Step::YtChannelEnrich(_) => youtube::execute(step, ctx),
-        Step::XDiscover(_) | Step::XMetadata(_) | Step::XBackfill(_) => x::execute(step, ctx),
-        Step::ImageDescribe(_) => image_describe::execute(step, ctx),
-        Step::TrackYoutube(_) => tracker::youtube::execute(step, ctx),
-        Step::TrackBlogs(_) => tracker::blogs::execute(step, ctx),
-        Step::IgnoreVideo(_) => ignore::execute(step, ctx),
-        Step::DailyBrief(_) => daily_brief::execute(step, ctx),
-        Step::CaptureRepair(_) => capture_repair::execute(step, ctx),
-        Step::RunAction { action_id, params } => {
-            let child = ctx
-                .children
-                .spawn_child(action_id, params.clone())
-                .map_err(StepError::failed)?;
-            let mut vars = Map::new();
-            vars.insert("child_job_id".into(), Value::String(child));
-            Ok(StepOutcome {
-                vars,
-                ..StepOutcome::default()
-            })
-        }
-    }
+step_modules! {
+    Materialize => materialize::Materialize,
+    Capture => capture::Capture,
+    Guard => file::File,
+    Move => file::File,
+    Copy => file::File,
+    SetProps => file::File,
+    RemoveProps => file::File,
+    UpsertTags => file::File,
+    MarkForwarded => file::File,
+    Lint => lint::Lint,
+    Localize => localize::Localize,
+    Agent => agent::Agent,
+    SearchUpsert => search::Search,
+    SearchDelete => search::Search,
+    LinkScan => link_scan::LinkScan,
+    YtMetadata => youtube::Youtube,
+    YtChannelEnrich => youtube::Youtube,
+    XDiscover => x::X,
+    XMetadata => x::X,
+    XBackfill => x::X,
+    ImageDescribe => image_describe::ImageDescribe,
+    TrackYoutube => tracker::youtube::TrackYoutube,
+    TrackBlogs => tracker::blogs::TrackBlogs,
+    IgnoreVideo => ignore::IgnoreVideo,
+    DailyBrief => daily_brief::DailyBrief,
+    CaptureRepair => capture_repair::CaptureRepair,
+    RunAction => RunActionStep,
 }
 
 #[cfg(test)]

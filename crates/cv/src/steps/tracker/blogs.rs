@@ -30,15 +30,16 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use cv_actions::pipelines::{BlogSource, BodyMode};
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::blogs::{self as policy, BlogPost};
 use cv_state::TrackerOutcome;
-use serde_json::json;
+use serde::Serialize;
 
 use super::super::file::kind_def;
-use super::super::materialize::{expand, get_str, get_str_list, join, now};
+use super::super::materialize::{join, now};
+use super::super::params::{expand, get_str, get_str_list};
 use super::super::web::{client, create_or_found};
-use super::super::{StepCtx, StepError, StepOutcome, lint, localize};
+use super::super::{StepCtx, StepError, StepModule, StepOutcome, lint, localize};
 use super::{Candidate, SeenSet, emit_line_with, fetch_bounded, md_files_under, record_with};
 
 /// `tracker_items.source_kind` / `ignored_ids.kind` of blog posts.
@@ -52,9 +53,33 @@ pub const METADATA_ROOT: &str = "_blog_metadata";
 /// The `kinds.toml` kind a captured post is filed as.
 pub const NOTE_KIND: &str = "blog";
 
-/// Validates the step's params (none accepted; unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    crate::steps::reject_params(step)
+/// The `track_blogs` step (no params; unknown keys disarm, I5).
+pub(crate) struct TrackBlogs;
+
+impl StepModule for TrackBlogs {
+    type Params = ();
+
+    fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<(), String> {
+        super::super::no_params(kind, t)
+    }
+
+    fn run((): (), ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(ctx)
+    }
+}
+
+/// `track_blogs` outcome vars.
+#[derive(Default, Serialize)]
+struct Vars {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    disabled: bool,
+    sources: usize,
+    new: usize,
+    lines: usize,
+    notes: usize,
+    failed: usize,
+    invalid: usize,
+    localize_failed: usize,
 }
 
 fn canon_opts() -> cv_text::url_canon::PostIdOptions {
@@ -124,12 +149,6 @@ fn row_is_valid(r: &BlogSource) -> Result<(), String> {
         return Err("link is not an http(s) URL".into());
     }
     Ok(())
-}
-
-fn vars(out: &mut StepOutcome, counts: [(&str, usize); 7]) {
-    for (k, v) in counts {
-        out.vars.insert(k.into(), json!(v));
-    }
 }
 
 /// Whether the source is automatable for its next post: `full` always; `auto` when the last
@@ -226,22 +245,14 @@ fn write_note(
     out_paths.push(path.clone());
     // Inline localize (plan usability-sprint-captures-links WP-1): remote images become local
     // `_MD5` attachments now; a failure leaves the remote refs and never fails the capture.
-    let mut t = toml::Table::new();
-    t.insert("type".into(), "localize".into());
-    t.insert("path".into(), path.clone().into());
-    let step = Step::from_table(t).map_err(StepError::failed)?;
-    if let Err(e) = localize::execute(&step, ctx) {
+    if let Err(e) = localize::run(&localize::Params::note(path.clone()), ctx) {
         *localize_failed += 1;
         tracing::warn!(path = %path, error = %e, "track_blogs: inline localize failed");
     }
-    let mut t = toml::Table::new();
-    t.insert("type".into(), "lint".into());
-    t.insert("path".into(), path.clone().into());
-    if kind_def(ctx.config, NOTE_KIND).is_ok() {
-        t.insert("kind".into(), NOTE_KIND.into());
-    }
-    let step = Step::from_table(t).map_err(StepError::failed)?;
-    lint::execute(&step, ctx)?;
+    let kind = kind_def(ctx.config, NOTE_KIND)
+        .is_ok()
+        .then(|| NOTE_KIND.to_owned());
+    lint::run(&lint::Params::note(path.clone(), kind), ctx)?;
     #[cfg(test)]
     if super::hook::fail_now() {
         return Err(StepError::failed("injected failure after note write"));
@@ -250,24 +261,14 @@ fn write_note(
 }
 
 /// Executes the step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    validate(step, ctx.config).map_err(StepError::failed)?;
+pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
     let cfg = ctx.config.pipelines().blogs.clone();
     if !cfg.enabled {
-        out.vars.insert("disabled".into(), json!(true));
-        vars(
-            &mut out,
-            [
-                ("sources", 0),
-                ("new", 0),
-                ("lines", 0),
-                ("notes", 0),
-                ("failed", 0),
-                ("invalid", 0),
-                ("localize_failed", 0),
-            ],
-        );
+        out.set_vars(&Vars {
+            disabled: true,
+            ..Vars::default()
+        });
         return Ok(out);
     }
     let window = usize::try_from(cfg.automatable_window.max(1)).unwrap_or(usize::MAX);
@@ -298,7 +299,7 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     let source_seen = |url: &str| {
         index.as_ref().is_some_and(|r| {
             r.query()
-                .files_with_prop("source", &json!(url))
+                .files_with_prop("source", &serde_json::json!(url))
                 .is_ok_and(|rows| !rows.is_empty())
         })
     };
@@ -426,18 +427,16 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     }
     out.output_paths.sort();
     out.output_paths.dedup();
-    vars(
-        &mut out,
-        [
-            ("sources", rows.len()),
-            ("new", new),
-            ("lines", lines),
-            ("notes", notes),
-            ("failed", failed),
-            ("invalid", invalid),
-            ("localize_failed", localize_failed),
-        ],
-    );
+    out.set_vars(&Vars {
+        disabled: false,
+        sources: rows.len(),
+        new,
+        lines,
+        notes,
+        failed,
+        invalid,
+        localize_failed,
+    });
     Ok(out)
 }
 

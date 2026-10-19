@@ -41,16 +41,15 @@
 
 use std::sync::LazyLock;
 
-use cv_actions::{ConfigSet, Step, StepKind};
+use cv_actions::{ConfigSet, StepKind};
 use cv_lint::{FrontmatterDoc, JsValue};
 use regex::Regex;
-use serde_json::Value;
+use serde::Serialize;
 
 use super::capture::{FORWARDED_TASK, OPEN_TASK};
-use super::materialize::{
-    check_keys, check_placeholders, expand, get_bool, get_str, get_str_list, join, table,
-};
-use super::{StepCtx, StepError, StepOutcome};
+use super::materialize::join;
+use super::params::{check_keys, check_placeholders, expand, get_bool, get_str, get_str_list};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 const KIND_KEYS: &[&str] = &["label", "tags", "folder", "cleanup_transcript", "props"];
 
@@ -63,19 +62,21 @@ pub(super) fn kind_def<'c>(config: &'c ConfigSet, name: &str) -> Result<&'c toml
         .and_then(|k| k.get(name))
         .and_then(toml::Value::as_table)
         .ok_or_else(|| format!("kind {name:?} is not defined in kinds.toml [kinds]"))?;
-    check_keys(def, KIND_KEYS, "[kinds]")?;
+    if let Some(k) = def.keys().find(|k| !KIND_KEYS.contains(&k.as_str())) {
+        return Err(format!("[kinds] step: unknown key {k:?}"));
+    }
     Ok(def)
 }
 
 /// Resolves the step's `kind` (expanded) to its table, if the step names one.
 pub(super) fn step_kind<'c>(
     ctx: &StepCtx<'c>,
-    t: &toml::Table,
+    kind: Option<&str>,
 ) -> Result<Option<&'c toml::Table>, StepError> {
-    let Some(k) = get_str(t, "kind").map_err(StepError::failed)? else {
+    let Some(k) = kind else {
         return Ok(None);
     };
-    let name = expand(ctx, &k)?;
+    let name = expand(ctx, k)?;
     if name.trim().is_empty() {
         return Err(StepError::failed("`kind` expanded to nothing"));
     }
@@ -85,9 +86,9 @@ pub(super) fn step_kind<'c>(
 }
 
 /// The step's target: `path` (expanded) or the active note.
-pub(super) fn target_path(ctx: &StepCtx<'_>, t: &toml::Table) -> Result<String, StepError> {
-    let p = match get_str(t, "path").map_err(StepError::failed)? {
-        Some(p) => expand(ctx, &p)?,
+pub(super) fn target_path(ctx: &StepCtx<'_>, path: Option<&str>) -> Result<String, StepError> {
+    let p = match path {
+        Some(p) => expand(ctx, p)?,
         None => ctx.context.active_path.clone().unwrap_or_default(),
     };
     let p = p.trim().trim_matches('/').to_owned();
@@ -107,41 +108,70 @@ fn fm_err(e: cv_lint::FmError) -> StepError {
     StepError::failed(e.to_string())
 }
 
-fn keys_for(kind: StepKind) -> &'static [&'static str] {
-    match kind {
-        StepKind::Guard => &[
-            "path",
-            "tag",
-            "not_tag",
-            "prop",
-            "not_prop",
-            "folder",
-            "not_folder",
-        ],
-        StepKind::Move => &["path", "to", "name", "kind"],
-        StepKind::Copy => &["path", "to", "name"],
-        StepKind::SetProps => &["path", "props", "if_empty", "kind"],
-        StepKind::RemoveProps => &["path", "props"],
-        StepKind::UpsertTags => &["path", "tags", "kind"],
-        StepKind::MarkForwarded => &["path", "line"],
-        _ => &[],
+/// Parsed params of the file steps (each kind reads its own subset).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Params {
+    kind: Option<StepKind>,
+    path: Option<String>,
+    to: Option<String>,
+    name: Option<String>,
+    /// `kind` (a `kinds.toml` entry name; placeholders ok).
+    note_kind: Option<String>,
+    tag: Vec<String>,
+    not_tag: Vec<String>,
+    prop: Vec<String>,
+    not_prop: Vec<String>,
+    folder: Vec<String>,
+    not_folder: Vec<String>,
+    /// `set_props` `props` (values expanded at run time).
+    set: toml::Table,
+    /// `remove_props` `props`.
+    remove: Vec<String>,
+    if_empty: bool,
+    tags: Vec<String>,
+    line: Option<usize>,
+}
+
+/// The file steps: `guard`, `move`, `copy`, `set_props`, `remove_props`, `upsert_tags`,
+/// `mark_forwarded`.
+pub(crate) struct File;
+
+impl StepModule for File {
+    type Params = Params;
+
+    fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
+        parse(kind, t, config)
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        match p.kind {
+            Some(StepKind::Guard) => guard(ctx, &p),
+            Some(StepKind::Move) => move_note(ctx, &p),
+            Some(StepKind::Copy) => copy_note(ctx, &p),
+            Some(StepKind::SetProps) => set_props(ctx, &p),
+            Some(StepKind::RemoveProps) => remove_props(ctx, &p),
+            Some(StepKind::UpsertTags) => upsert_tags(ctx, &p),
+            Some(StepKind::MarkForwarded) => mark_forwarded(ctx, &p),
+            k => Err(StepError::failed(format!(
+                "step {} is not a file step",
+                k.map_or("?", StepKind::as_str)
+            ))),
+        }
     }
 }
 
-/// Validates one step's params.
-pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
-    let t = table(step);
-    let kind = step.kind();
-    check_keys(&t, keys_for(kind), kind.as_str())?;
+fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
+    check_keys(t, kind, kind.as_str())?;
     for k in ["path", "to", "name"] {
-        if let Some(s) = get_str(&t, k)? {
+        if let Some(s) = get_str(t, k)? {
             check_placeholders(&s)?;
         }
     }
-    if let Some(k) = get_str(&t, "kind")? {
-        check_placeholders(&k)?;
+    let note_kind = get_str(t, "kind")?;
+    if let Some(k) = &note_kind {
+        check_placeholders(k)?;
         if !k.contains('{') {
-            kind_def(config, &k)?;
+            kind_def(config, k)?;
         }
         if let Some(kinds) = config.table("kinds.toml").get("kinds") {
             let kinds = kinds
@@ -157,71 +187,66 @@ pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
             }
         }
     }
+    let mut p = Params {
+        kind: Some(kind),
+        path: get_str(t, "path")?,
+        to: get_str(t, "to")?,
+        name: get_str(t, "name")?,
+        note_kind,
+        ..Params::default()
+    };
     match kind {
         StepKind::Guard => {
-            for k in ["tag", "not_tag", "prop", "not_prop", "folder", "not_folder"] {
-                get_str_list(&t, k)?;
-            }
+            p.tag = get_str_list(t, "tag")?;
+            p.not_tag = get_str_list(t, "not_tag")?;
+            p.prop = get_str_list(t, "prop")?;
+            p.not_prop = get_str_list(t, "not_prop")?;
+            p.folder = get_str_list(t, "folder")?;
+            p.not_folder = get_str_list(t, "not_folder")?;
         }
         StepKind::Move => {
-            if get_str(&t, "to")?.is_none() && get_str(&t, "kind")?.is_none() {
+            if p.to.is_none() && p.note_kind.is_none() {
                 return Err("move needs `to` or `kind`".into());
             }
         }
         StepKind::Copy => {
-            if get_str(&t, "to")?.is_none() {
+            if p.to.is_none() {
                 return Err("copy needs `to`".into());
             }
         }
         StepKind::SetProps => {
-            get_bool(&t, "if_empty")?;
+            p.if_empty = get_bool(t, "if_empty")?.unwrap_or(false);
             match t.get("props") {
                 None => {}
-                Some(toml::Value::Table(p)) => {
-                    for v in p.values() {
+                Some(toml::Value::Table(set)) => {
+                    for v in set.values() {
                         to_js_checked(v)?;
                     }
+                    p.set = set.clone();
                 }
                 Some(_) => return Err("set_props `props` must be a table".into()),
             }
         }
         StepKind::RemoveProps => {
-            get_str_list(&t, "props")?;
+            p.remove = get_str_list(t, "props")?;
         }
         StepKind::UpsertTags => {
-            let tags = get_str_list(&t, "tags")?;
-            for tg in &tags {
+            p.tags = get_str_list(t, "tags")?;
+            for tg in &p.tags {
                 check_placeholders(tg)?;
             }
-            if tags.is_empty() && get_str(&t, "kind")?.is_none() {
+            if p.tags.is_empty() && p.note_kind.is_none() {
                 return Err("upsert_tags needs `tags` or `kind`".into());
             }
         }
         StepKind::MarkForwarded => match t.get("line") {
-            None | Some(toml::Value::Integer(0..)) => {}
+            None => {}
+            Some(toml::Value::Integer(i @ 0..)) => p.line = usize::try_from(*i).ok(),
             Some(_) => return Err("mark_forwarded `line` must be a non-negative integer".into()),
         },
         _ => {}
     }
-    Ok(())
-}
-
-/// Executes one file step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let t = table(step);
-    match step.kind() {
-        StepKind::Guard => guard(ctx, &t),
-        StepKind::Move => move_note(ctx, &t),
-        StepKind::Copy => copy_note(ctx, &t),
-        StepKind::SetProps => set_props(ctx, &t),
-        StepKind::RemoveProps => remove_props(ctx, &t),
-        StepKind::UpsertTags => upsert_tags(ctx, &t),
-        StepKind::MarkForwarded => mark_forwarded(ctx, &t),
-        k => Err(StepError::failed(format!(
-            "step {} is not a file step",
-            k.as_str()
-        ))),
-    }
+    Ok(p)
 }
 
 // --- guard -----------------------------------------------------------------------------------
@@ -283,29 +308,25 @@ fn in_folder(path: &str, folder: &str) -> bool {
     f.is_empty() || path.strip_prefix(f).is_some_and(|r| r.starts_with('/'))
 }
 
-fn guard(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepError> {
+fn guard(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
     let stop = StepOutcome {
         stop: true,
         ..StepOutcome::default()
     };
-    let list = |k: &str| -> Result<Vec<String>, StepError> {
-        get_str_list(t, k)
-            .map_err(StepError::failed)?
-            .iter()
-            .map(|s| expand(ctx, s))
-            .collect()
+    let list = |l: &[String]| -> Result<Vec<String>, StepError> {
+        l.iter().map(|s| expand(ctx, s)).collect()
     };
     let (tag, not_tag, prop, not_prop, folder, not_folder) = (
-        list("tag")?,
-        list("not_tag")?,
-        list("prop")?,
-        list("not_prop")?,
-        list("folder")?,
-        list("not_folder")?,
+        list(&p.tag)?,
+        list(&p.not_tag)?,
+        list(&p.prop)?,
+        list(&p.not_prop)?,
+        list(&p.folder)?,
+        list(&p.not_folder)?,
     );
     let needs_note =
         !(tag.is_empty() && not_tag.is_empty() && prop.is_empty() && not_prop.is_empty());
-    let has_path = get_str(t, "path").map_err(StepError::failed)?.is_some()
+    let has_path = p.path.is_some()
         || ctx
             .context
             .active_path
@@ -316,7 +337,7 @@ fn guard(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepErro
         let any = needs_note || !folder.is_empty() || !not_folder.is_empty();
         return Ok(if any { stop } else { StepOutcome::default() });
     }
-    let path = target_path(ctx, t)?;
+    let path = target_path(ctx, p.path.as_deref())?;
     if folder.iter().any(|f| !in_folder(&path, f)) || not_folder.iter().any(|f| in_folder(&path, f))
     {
         return Ok(stop);
@@ -332,13 +353,13 @@ fn guard(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepErro
     if tag.iter().any(|w| !has_tag(&tags, w)) || not_tag.iter().any(|w| has_tag(&tags, w)) {
         return Ok(stop);
     }
-    for p in &prop {
-        if !has_prop(&text, p)? {
+    for k in &prop {
+        if !has_prop(&text, k)? {
             return Ok(stop);
         }
     }
-    for p in &not_prop {
-        if has_prop(&text, p)? {
+    for k in &not_prop {
+        if has_prop(&text, k)? {
             return Ok(stop);
         }
     }
@@ -349,21 +370,21 @@ fn guard(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepErro
 
 fn destination(
     ctx: &StepCtx<'_>,
-    t: &toml::Table,
+    p: &Params,
     src: &str,
     folder: Option<String>,
 ) -> Result<String, StepError> {
     let folder = match folder {
         Some(f) => f,
         None => {
-            let to = get_str(t, "to")
-                .map_err(StepError::failed)?
-                .ok_or_else(|| StepError::failed("no destination folder"))?;
-            expand(ctx, &to)?
+            let to =
+                p.to.as_deref()
+                    .ok_or_else(|| StepError::failed("no destination folder"))?;
+            expand(ctx, to)?
         }
     };
-    let name = match get_str(t, "name").map_err(StepError::failed)? {
-        Some(n) => expand(ctx, &n)?,
+    let name = match &p.name {
+        Some(n) => expand(ctx, n)?,
         None => src.rsplit('/').next().unwrap_or(src).to_owned(),
     };
     let name = name.trim().to_owned();
@@ -373,23 +394,25 @@ fn destination(
     Ok(join(folder.trim(), &name))
 }
 
-fn move_note(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepError> {
-    let src = target_path(ctx, t)?;
-    let folder = if get_str(t, "to").map_err(StepError::failed)?.is_some() {
+fn move_note(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
+    let src = target_path(ctx, p.path.as_deref())?;
+    let folder = if p.to.is_some() {
         None
     } else {
-        let def = step_kind(ctx, t)?.ok_or_else(|| StepError::failed("move needs `to`"))?;
+        let def = step_kind(ctx, p.note_kind.as_deref())?
+            .ok_or_else(|| StepError::failed("move needs `to`"))?;
         let f = get_str(def, "folder")
             .map_err(StepError::failed)?
             .ok_or_else(|| StepError::failed("kind has no `folder`"))?;
         Some(expand(ctx, &f)?)
     };
-    let dst = destination(ctx, t, &src, folder)?;
+    let dst = destination(ctx, p, &src, folder)?;
     let mut out = StepOutcome::default();
-    out.vars
-        .insert("moved_path".into(), Value::String(dst.clone()));
-    out.vars
-        .insert(super::MOVED_FROM.into(), Value::String(src.clone()));
+    out.set_vars(&MoveVars {
+        moved_path: dst.clone(),
+        moved_from: src.clone(),
+        link_conflicts: None,
+    });
     out.open_path = Some(dst.clone());
     if dst == src {
         return Ok(out);
@@ -408,17 +431,38 @@ fn move_note(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, Step
     out.output_paths.push(dst);
     out.output_paths.extend(r.rewritten);
     if !r.skipped_conflicts.is_empty() {
-        out.vars.insert(
-            "link_conflicts".into(),
-            Value::from(r.skipped_conflicts.len()),
-        );
+        out.set_vars(&LinkConflicts {
+            link_conflicts: r.skipped_conflicts.len(),
+        });
     }
     Ok(out)
 }
 
-fn copy_note(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepError> {
-    let src = target_path(ctx, t)?;
-    let dst = destination(ctx, t, &src, None)?;
+/// `move` outcome vars (`moved_from` = [`super::MOVED_FROM`]).
+#[derive(Serialize)]
+struct MoveVars {
+    moved_path: String,
+    moved_from: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_conflicts: Option<usize>,
+}
+
+/// `move`'s `link_conflicts` var (set only when the rename skipped some).
+#[derive(Serialize)]
+struct LinkConflicts {
+    link_conflicts: usize,
+}
+
+/// `copy` outcome vars.
+#[derive(Serialize)]
+struct CopyVars {
+    copied_path: String,
+    copied_link: String,
+}
+
+fn copy_note(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
+    let src = target_path(ctx, p.path.as_deref())?;
+    let dst = destination(ctx, p, &src, None)?;
     if dst == src {
         return Err(StepError::failed("copy destination equals the source"));
     }
@@ -426,12 +470,10 @@ fn copy_note(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, Step
         .read(&src)?
         .ok_or_else(|| StepError::failed("copy source note not found"))?;
     let mut out = StepOutcome::default();
-    out.vars
-        .insert("copied_path".into(), Value::String(dst.clone()));
-    out.vars.insert(
-        "copied_link".into(),
-        Value::String(format!("[[{}]]", dst.strip_suffix(".md").unwrap_or(&dst))),
-    );
+    out.set_vars(&CopyVars {
+        copied_path: dst.clone(),
+        copied_link: format!("[[{}]]", dst.strip_suffix(".md").unwrap_or(&dst)),
+    });
     match ctx.read(&dst)? {
         Some((existing, _)) if existing == bytes => {}
         Some(_) => {
@@ -494,27 +536,23 @@ fn edit_note(
     Ok(out)
 }
 
-fn set_props(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepError> {
-    let if_empty = get_bool(t, "if_empty")
-        .map_err(StepError::failed)?
-        .unwrap_or(false);
+fn set_props(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
+    let if_empty = p.if_empty;
     let mut props: Vec<(String, JsValue)> = Vec::new();
-    if let Some(def) = step_kind(ctx, t)?
-        && let Some(toml::Value::Table(p)) = def.get("props")
+    if let Some(def) = step_kind(ctx, p.note_kind.as_deref())?
+        && let Some(toml::Value::Table(kp)) = def.get("props")
     {
-        for (k, v) in p {
+        for (k, v) in kp {
             props.push((k.clone(), to_js(ctx, v)?));
         }
     }
-    if let Some(toml::Value::Table(p)) = t.get("props") {
-        for (k, v) in p {
-            props.push((k.clone(), to_js(ctx, v)?));
-        }
+    for (k, v) in &p.set {
+        props.push((k.clone(), to_js(ctx, v)?));
     }
     if props.is_empty() {
         return Ok(StepOutcome::default());
     }
-    let path = target_path(ctx, t)?;
+    let path = target_path(ctx, p.path.as_deref())?;
     edit_note(ctx, &path, |doc| {
         let mut changed = false;
         for (k, v) in &props {
@@ -529,12 +567,12 @@ fn set_props(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, Step
     })
 }
 
-fn remove_props(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepError> {
-    let keys = get_str_list(t, "props").map_err(StepError::failed)?;
+fn remove_props(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
+    let keys = p.remove.clone();
     if keys.is_empty() {
         return Ok(StepOutcome::default());
     }
-    let path = target_path(ctx, t)?;
+    let path = target_path(ctx, p.path.as_deref())?;
     edit_note(ctx, &path, |doc| {
         let mut changed = false;
         for k in &keys {
@@ -544,12 +582,12 @@ fn remove_props(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, S
     })
 }
 
-fn upsert_tags(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepError> {
+fn upsert_tags(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
     let mut tags = Vec::new();
-    if let Some(def) = step_kind(ctx, t)? {
+    if let Some(def) = step_kind(ctx, p.note_kind.as_deref())? {
         tags.extend(get_str_list(def, "tags").map_err(StepError::failed)?);
     }
-    tags.extend(get_str_list(t, "tags").map_err(StepError::failed)?);
+    tags.extend(p.tags.iter().cloned());
     let mut clean: Vec<String> = Vec::new();
     for tg in &tags {
         let e = expand(ctx, tg)?;
@@ -561,7 +599,7 @@ fn upsert_tags(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, St
     if clean.is_empty() {
         return Err(StepError::failed("upsert_tags: no tags to add"));
     }
-    let path = target_path(ctx, t)?;
+    let path = target_path(ctx, p.path.as_deref())?;
     edit_note(ctx, &path, |doc| {
         let mut changed = false;
         for tg in &clean {
@@ -575,13 +613,12 @@ fn upsert_tags(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, St
 
 // --- mark_forwarded --------------------------------------------------------------------------
 
-fn mark_forwarded(ctx: &mut StepCtx<'_>, t: &toml::Table) -> Result<StepOutcome, StepError> {
-    let path = target_path(ctx, t)?;
-    let line = match t.get("line") {
-        Some(toml::Value::Integer(i)) => usize::try_from(*i).ok(),
-        _ => ctx.context.line.and_then(|l| usize::try_from(l).ok()),
-    }
-    .ok_or_else(|| StepError::failed("mark_forwarded needs a line"))?;
+fn mark_forwarded(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
+    let path = target_path(ctx, p.path.as_deref())?;
+    let line = p
+        .line
+        .or_else(|| ctx.context.line.and_then(|l| usize::try_from(l).ok()))
+        .ok_or_else(|| StepError::failed("mark_forwarded needs a line"))?;
     let (bytes, hash) = ctx
         .read(&path)?
         .ok_or_else(|| StepError::failed("mark_forwarded note not found"))?;

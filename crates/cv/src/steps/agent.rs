@@ -44,16 +44,16 @@
 
 use std::sync::{Arc, OnceLock};
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_providers::{
     Capability, CompletionRequest, FinishReason, ProviderConfig, ProviderError, ProviderManager,
     ProvidersConfig, SystemSecrets, parse_model_ref,
 };
 use cv_state::{FailureReason, ServiceFailureKind};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{DeferCause, StepCtx, StepError, StepOutcome};
+use super::{DeferCause, StepCtx, StepError, StepModule, StepOutcome};
 
 /// Retry delay for an unhealthy provider.
 pub(crate) const OUTAGE_RETRY_MS: i64 = 60_000;
@@ -69,9 +69,10 @@ enum OutputMode {
     Replace,
 }
 
+/// Parsed `agent` step params.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StepParams {
+pub(crate) struct StepParams {
     agent: String,
     model: Option<String>,
     output_var: Option<String>,
@@ -122,10 +123,7 @@ fn model_spec(raw: &str) -> Result<ModelSpec, String> {
     Ok(ModelSpec::Literal(t.to_owned()))
 }
 
-fn params(step: &Step) -> Result<StepParams, String> {
-    let t = step
-        .table()
-        .ok_or_else(|| "agent step has no params".to_owned())?;
+fn params(t: &toml::Table) -> Result<StepParams, String> {
     toml::Value::Table(t.clone())
         .try_into::<StepParams>()
         .map_err(|e| format!("agent step: {}", e.message()))
@@ -192,9 +190,32 @@ fn check_ref<'p>(
     Ok((p, r.model_id))
 }
 
-/// Validates one step's params (a failure disarms the action, I5).
-pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
-    let sp = params(step)?;
+/// The `agent` step (a parse failure disarms the action, I5), run through the shared
+/// [`ProviderManager`].
+pub(crate) struct Agent;
+
+impl StepModule for Agent {
+    type Params = StepParams;
+
+    fn parse(_: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<StepParams, String> {
+        parse(t, config)
+    }
+
+    fn run(p: StepParams, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(&p, ctx, manager()?)
+    }
+}
+
+/// `agent` outcome vars (the completion text goes to the step's `output_var`).
+#[derive(Serialize)]
+struct Vars {
+    agent_model: String,
+    agent_provider: String,
+}
+
+/// Parses and checks one step's params against `agents.toml` / `providers.toml`.
+pub(crate) fn parse(t: &toml::Table, config: &ConfigSet) -> Result<StepParams, String> {
+    let sp = params(t)?;
     let def = agent_def(config, &sp.agent)?;
     if sp.max_tokens == Some(0) {
         return Err("agent step: `max_tokens` must be > 0".into());
@@ -226,7 +247,7 @@ pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
     if let Some(m) = &def.model {
         check_ref(&provs, m)?;
     }
-    Ok(())
+    Ok(sp)
 }
 
 /// The process-wide manager: completion calls share its per-provider concurrency limiter.
@@ -239,11 +260,6 @@ pub(crate) fn manager() -> Result<&'static ProviderManager, StepError> {
         })
         .as_ref()
         .map_err(|e| StepError::failed(format!("provider manager: {e}")))
-}
-
-/// Executes one step through the shared [`ProviderManager`].
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    run(step, ctx, manager()?)
 }
 
 /// Pointer identity of the shared manager (for the reuse test).
@@ -416,14 +432,13 @@ fn load_prompt(
 
 /// The step body, with the manager injected (tests pass one with a test `SecretSource`).
 pub(crate) fn run(
-    step: &Step,
+    sp: &StepParams,
     ctx: &mut StepCtx<'_>,
     mgr: &ProviderManager,
 ) -> Result<StepOutcome, StepError> {
-    let sp = params(step).map_err(StepError::failed)?;
     let def = agent_def(ctx.config, &sp.agent).map_err(StepError::failed)?;
     let provs = providers(ctx.config).map_err(StepError::failed)?;
-    let (provider, model) = resolve_model(&sp, &def, &provs, ctx)?;
+    let (provider, model) = resolve_model(sp, &def, &provs, ctx)?;
     let provider = provider.clone();
 
     // The target note, read (with its CAS hash) before the slow provider call (I2).
@@ -508,10 +523,10 @@ pub(crate) fn run(
     }
 
     let mut out = StepOutcome::default();
-    out.vars
-        .insert("agent_model".into(), Value::String(model.clone()));
-    out.vars
-        .insert("agent_provider".into(), Value::String(provider.id.clone()));
+    out.set_vars(&Vars {
+        agent_model: model.clone(),
+        agent_provider: provider.id.clone(),
+    });
     match sp.output {
         OutputMode::Var => {
             let name = sp

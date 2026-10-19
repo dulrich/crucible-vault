@@ -18,39 +18,40 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_index::Reader;
 use cv_state::LinkRecordInput;
 use cv_text::url_canon::CanonicalizedUrl;
 use serde_json::{Value, json};
 
-use super::materialize::{check_keys, get_str, get_str_list, now, table};
-use crate::steps::{StepCtx, StepError, StepOutcome};
+use serde::Serialize;
 
-const KEYS: &[&str] = &["scope", "exclude"];
+use super::materialize::now;
+use super::params::{check_keys, get_str, get_str_list};
+use crate::steps::{StepCtx, StepError, StepModule, StepOutcome};
+
 const DEFAULT_EXCLUDE: &[&str] = &["_crucible"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
+pub(crate) enum Scope {
     Note,
     Vault,
 }
 
-struct Params {
+pub(crate) struct Params {
     scope: Scope,
     exclude: Vec<String>,
 }
 
-fn parse(step: &Step) -> Result<Params, String> {
-    let t = table(step);
-    check_keys(&t, KEYS, "link_scan")?;
-    let scope = match get_str(&t, "scope")?.as_deref() {
+fn parse(t: &toml::Table) -> Result<Params, String> {
+    check_keys(t, StepKind::LinkScan, "link_scan")?;
+    let scope = match get_str(t, "scope")?.as_deref() {
         None | Some("note") => Scope::Note,
         Some("vault") => Scope::Vault,
         Some(s) => return Err(format!("link_scan step: `scope` {s:?} is not note|vault")),
     };
     let raw = if t.contains_key("exclude") {
-        get_str_list(&t, "exclude")?
+        get_str_list(t, "exclude")?
     } else {
         DEFAULT_EXCLUDE.iter().map(|s| (*s).to_owned()).collect()
     };
@@ -87,9 +88,30 @@ fn wikilink(path: &str) -> String {
     format!("[[{}]]", path.strip_suffix(".md").unwrap_or(path))
 }
 
-/// Validates the step's params (unknown keys disarm, I5).
-pub fn validate(step: &Step, _config: &ConfigSet) -> Result<(), String> {
-    parse(step).map(|_| ())
+/// The `link_scan` step (unknown keys disarm, I5).
+pub(crate) struct LinkScan;
+
+impl StepModule for LinkScan {
+    type Params = Params;
+
+    fn parse(_: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
+        parse(t)
+    }
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(&p, ctx)
+    }
+}
+
+/// `link_scan` outcome vars.
+#[derive(Serialize)]
+struct Vars {
+    scanned: u64,
+    records: usize,
+    created: u64,
+    updated: u64,
+    unchanged: u64,
+    candidates: u64,
 }
 
 fn open_reader(ctx: &StepCtx<'_>) -> Result<Reader, StepError> {
@@ -100,8 +122,7 @@ fn open_reader(ctx: &StepCtx<'_>) -> Result<Reader, StepError> {
 }
 
 /// Executes the step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let p = parse(step).map_err(StepError::failed)?;
+fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let reader = open_reader(ctx)?;
     let q = reader.query();
     let link_record_notes: BTreeSet<String> = q
@@ -208,17 +229,16 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         candidates = flagged,
         "link_scan"
     );
-    let mut vars = serde_json::Map::new();
-    vars.insert("scanned".into(), json!(scanned));
-    vars.insert("records".into(), json!(aggregate.len()));
-    vars.insert("created".into(), json!(created));
-    vars.insert("updated".into(), json!(updated));
-    vars.insert("unchanged".into(), json!(unchanged));
-    vars.insert("candidates".into(), json!(flagged));
-    Ok(StepOutcome {
-        vars,
-        ..StepOutcome::default()
-    })
+    let mut out = StepOutcome::default();
+    out.set_vars(&Vars {
+        scanned,
+        records: aggregate.len(),
+        created,
+        updated,
+        unchanged,
+        candidates: flagged,
+    });
+    Ok(out)
 }
 
 #[cfg(test)]

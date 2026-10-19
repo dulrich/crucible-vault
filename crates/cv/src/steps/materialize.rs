@@ -53,12 +53,13 @@
 use std::collections::BTreeMap;
 
 use chrono::{NaiveDate, NaiveDateTime};
-use cv_actions::{ConfigSet, Step};
+use cv_actions::{ConfigSet, StepKind};
 use cv_text::template::{TemplateContext, apply_template};
 use cv_text::{format_moment, parse_moment_date_strict};
-use serde_json::Value;
+use serde::Serialize;
 
-use super::{StepCtx, StepError, StepOutcome};
+use super::params::{check_keys, check_placeholders, expand, get_bool, get_str, value_text};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 // ---------------------------------------------------------------------------------------------
 // Shared helpers (used by `capture`, `file`, `lint`).
@@ -67,117 +68,6 @@ use super::{StepCtx, StepError, StepOutcome};
 /// Local wall-clock now.
 pub(super) fn now() -> NaiveDateTime {
     chrono::Local::now().naive_local()
-}
-
-/// Rejects keys outside `allowed` (fail closed on typos).
-pub(super) fn check_keys(t: &toml::Table, allowed: &[&str], what: &str) -> Result<(), String> {
-    match t.keys().find(|k| !allowed.contains(&k.as_str())) {
-        Some(k) => Err(format!("{what} step: unknown key {k:?}")),
-        None => Ok(()),
-    }
-}
-
-/// An optional string key.
-pub(super) fn get_str(t: &toml::Table, key: &str) -> Result<Option<String>, String> {
-    match t.get(key) {
-        None => Ok(None),
-        Some(toml::Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(format!("`{key}` must be a string")),
-    }
-}
-
-/// An optional bool key.
-pub(super) fn get_bool(t: &toml::Table, key: &str) -> Result<Option<bool>, String> {
-    match t.get(key) {
-        None => Ok(None),
-        Some(toml::Value::Boolean(b)) => Ok(Some(*b)),
-        Some(_) => Err(format!("`{key}` must be a boolean")),
-    }
-}
-
-/// An optional string-or-list-of-strings key.
-pub(super) fn get_str_list(t: &toml::Table, key: &str) -> Result<Vec<String>, String> {
-    match t.get(key) {
-        None => Ok(Vec::new()),
-        Some(toml::Value::String(s)) => Ok(vec![s.clone()]),
-        Some(toml::Value::Array(a)) => a
-            .iter()
-            .map(|v| match v {
-                toml::Value::String(s) => Ok(s.clone()),
-                _ => Err(format!("`{key}` must hold strings")),
-            })
-            .collect(),
-        Some(_) => Err(format!("`{key}` must be a string or a list of strings")),
-    }
-}
-
-/// The step's params table (empty for none).
-pub(super) fn table(step: &Step) -> toml::Table {
-    step.table().cloned().unwrap_or_default()
-}
-
-/// String form of a JSON value (`String` verbatim, anything else as JSON text).
-pub(super) fn value_text(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-/// Checks a single-brace placeholder template's syntax (validation time).
-pub(super) fn check_placeholders(s: &str) -> Result<(), String> {
-    let mut rest = s;
-    while let Some(start) = rest.find('{') {
-        let after = &rest[start + 1..];
-        let end = after
-            .find('}')
-            .ok_or_else(|| format!("{s:?}: unclosed `{{`"))?;
-        let name = &after[..end];
-        let ok = name == "path"
-            || name.strip_prefix("param.").is_some_and(|n| !n.is_empty())
-            || name.strip_prefix("vars.").is_some_and(|n| !n.is_empty())
-            || matches!(name, "period.day" | "period.week" | "period.month");
-        if !ok {
-            return Err(format!("{s:?}: unknown placeholder {{{name}}}"));
-        }
-        rest = &after[end + 1..];
-    }
-    Ok(())
-}
-
-/// Expands `{param.NAME}`, `{vars.NAME}`, `{path}`, `{period.P}` in a step string param. A
-/// missing value expands to `""`; an unknown placeholder fails.
-pub(super) fn expand(ctx: &StepCtx<'_>, s: &str) -> Result<String, StepError> {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(start) = rest.find('{') {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        let end = after
-            .find('}')
-            .ok_or_else(|| StepError::failed(format!("unclosed `{{` in {s:?}")))?;
-        let name = &after[..end];
-        let v = if name == "path" {
-            ctx.context.active_path.clone().unwrap_or_default()
-        } else if let Some(p) = name.strip_prefix("param.") {
-            ctx.params.get(p).map(value_text).unwrap_or_default()
-        } else if let Some(p) = name.strip_prefix("vars.") {
-            ctx.vars.get(p).map(value_text).unwrap_or_default()
-        } else if let Some(p) = name.strip_prefix("period.") {
-            let per = period(ctx.config, p, None).map_err(StepError::failed)?;
-            let today = now().date();
-            per.base_name(today).map(|n| join(&per.folder, &n))?
-        } else {
-            return Err(StepError::failed(format!(
-                "unknown placeholder {{{name}}} in {s:?}"
-            )));
-        };
-        out.push_str(&v);
-        rest = &after[end + 1..];
-    }
-    out.push_str(rest);
-    Ok(out)
 }
 
 /// `folder/name` with no doubled or leading slash.
@@ -234,6 +124,14 @@ pub(super) fn render(
     apply_template(template, &tc).map_err(|e| StepError::failed(e.to_string()))
 }
 
+/// Per-step period overrides (`folder`, `format`, `template`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Overrides {
+    pub folder: Option<String>,
+    pub format: Option<String>,
+    pub template: Option<String>,
+}
+
 /// Resolved settings of one period.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Period {
@@ -280,40 +178,42 @@ fn default_format(p: &str) -> &'static str {
 pub(super) fn period(
     config: &ConfigSet,
     name: &str,
-    overrides: Option<&toml::Table>,
+    overrides: Option<&Overrides>,
 ) -> Result<Period, String> {
     let p = canonical_period(name).ok_or_else(|| format!("unknown period {name:?}"))?;
     let empty = toml::Table::new();
+    let none = Overrides::default();
     let base = config
         .table("captures.toml")
         .get("periods")
         .and_then(toml::Value::as_table)
         .and_then(|t| t.get(p))
         .and_then(toml::Value::as_table);
-    let ov = overrides.unwrap_or(&empty);
-    let ov_folder = get_str(ov, "folder")?;
+    let ov = overrides.unwrap_or(&none);
+    let ov_folder = ov.folder.clone();
     if base.is_none() && ov_folder.is_none() {
         return Err(format!(
             "period {p:?} has no settings (captures.toml [periods.{p}])"
         ));
     }
     let base = base.unwrap_or(&empty);
-    check_keys(
-        base,
-        &["folder", "format", "template", "asset_folder"],
-        "[periods]",
-    )?;
+    if let Some(k) = base
+        .keys()
+        .find(|k| !["folder", "format", "template", "asset_folder"].contains(&k.as_str()))
+    {
+        return Err(format!("[periods] step: unknown key {k:?}"));
+    }
     let folder = match ov_folder {
         Some(f) => f,
         None => get_str(base, "folder")?
             .ok_or_else(|| format!("captures.toml [periods.{p}] needs `folder`"))?,
     };
-    let format = match get_str(ov, "format")? {
+    let format = match ov.format.clone() {
         Some(f) => f,
         None => get_str(base, "format")?.unwrap_or_else(|| default_format(p).to_owned()),
     };
     cv_text::moment_to_strftime(&format).map_err(|e| format!("period {p:?}: {e}"))?;
-    let template = match get_str(ov, "template")? {
+    let template = match ov.template.clone() {
         Some(t) => Some(t),
         None => get_str(base, "template")?,
     }
@@ -422,71 +322,94 @@ pub(super) fn ensure_note(
 // The step.
 // ---------------------------------------------------------------------------------------------
 
-const KEYS: &[&str] = &[
-    "period",
-    "date",
-    "path",
-    "template",
-    "folder",
-    "format",
-    "target",
-    "only_if_empty",
-];
+/// Parsed `materialize` params.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Params {
+    period: Option<String>,
+    date: Option<String>,
+    path: Option<String>,
+    target_active: bool,
+    only_if_empty: bool,
+    overrides: Overrides,
+}
 
-/// Validates one step's params (unknown period / period without settings disarm, I5).
-pub fn validate(step: &Step, config: &ConfigSet) -> Result<(), String> {
-    let t = table(step);
-    check_keys(&t, KEYS, "materialize")?;
-    for k in ["date", "path", "template", "folder", "format"] {
-        if let Some(s) = get_str(&t, k)? {
-            check_placeholders(&s)?;
+/// The `materialize` step.
+pub(crate) struct Materialize;
+
+impl StepModule for Materialize {
+    type Params = Params;
+
+    /// Unknown period / period without settings disarm (I5).
+    fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
+        check_keys(t, kind, "materialize")?;
+        for k in ["date", "path", "template", "folder", "format"] {
+            if let Some(s) = get_str(t, k)? {
+                check_placeholders(&s)?;
+            }
         }
+        let only_if_empty = get_bool(t, "only_if_empty")?.unwrap_or(false);
+        let target = get_str(t, "target")?;
+        if let Some(tg) = &target
+            && tg != "active"
+        {
+            return Err(format!(
+                "materialize: unknown target {tg:?} (only \"active\")"
+            ));
+        }
+        let p = Params {
+            period: get_str(t, "period")?,
+            date: get_str(t, "date")?,
+            path: get_str(t, "path")?,
+            target_active: target.is_some(),
+            only_if_empty,
+            overrides: Overrides {
+                folder: get_str(t, "folder")?,
+                format: get_str(t, "format")?,
+                template: get_str(t, "template")?,
+            },
+        };
+        match &p.period {
+            // A run-time period (`"{param.period}"`) is checked when the step runs.
+            Some(per) if per.contains('{') => check_placeholders(per)?,
+            Some(per) => period(config, per, Some(&p.overrides)).map(|_| ())?,
+            None if p.target_active => {}
+            None => match &p.path {
+                Some(path) if !path.trim().is_empty() => {}
+                _ => {
+                    return Err(
+                        "materialize needs `period`, `path` or `target = \"active\"`".into(),
+                    );
+                }
+            },
+        }
+        Ok(p)
     }
-    get_bool(&t, "only_if_empty")?;
-    let target = get_str(&t, "target")?;
-    if let Some(tg) = &target
-        && tg != "active"
-    {
-        return Err(format!(
-            "materialize: unknown target {tg:?} (only \"active\")"
-        ));
-    }
-    match get_str(&t, "period")? {
-        // A run-time period (`"{param.period}"`) is checked when the step runs.
-        Some(p) if p.contains('{') => check_placeholders(&p),
-        Some(p) => period(config, &p, Some(&t)).map(|_| ()),
-        None if target.is_some() => Ok(()),
-        None => match get_str(&t, "path")? {
-            Some(p) if !p.trim().is_empty() => Ok(()),
-            _ => Err("materialize needs `period`, `path` or `target = \"active\"`".into()),
-        },
+
+    fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        run(&p, ctx)
     }
 }
 
 /// Executes one materialize step.
-pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let t = table(step);
-    let s = |k: &str| get_str(&t, k).map_err(StepError::failed);
-    let only_if_empty = get_bool(&t, "only_if_empty")
-        .map_err(StepError::failed)?
-        .unwrap_or(false);
+fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let only_if_empty = p.only_if_empty;
     let today = now().date();
-    let date = parse_date(&expand(ctx, &s("date")?.unwrap_or_default())?, today)?;
-    let template_override = match s("template")? {
-        Some(tp) => Some(expand(ctx, &tp)?),
+    let date = parse_date(&expand(ctx, p.date.as_deref().unwrap_or_default())?, today)?;
+    let template_override = match &p.overrides.template {
+        Some(tp) => Some(expand(ctx, tp)?),
         None => None,
     };
 
-    let (path, template, date, title, asset) = if s("target")?.is_some() {
+    let (path, template, date, title, asset) = if p.target_active {
         let Some(path) = ctx.context.active_path.clone().filter(|p| !p.is_empty()) else {
             return Err(StepError::failed(
                 "materialize target=active needs an active path",
             ));
         };
-        let inferred = match s("period")? {
-            Some(p) => {
-                let p = expand(ctx, &p)?;
-                let per = period(ctx.config, &p, Some(&t)).map_err(StepError::failed)?;
+        let inferred = match &p.period {
+            Some(pn) => {
+                let pn = expand(ctx, pn)?;
+                let per = period(ctx.config, &pn, Some(&p.overrides)).map_err(StepError::failed)?;
                 (per.folder == parent(&path)).then(|| {
                     let d = parse_moment_date_strict(stem(&path), &per.format)
                         .ok()
@@ -521,16 +444,16 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         };
         let title = stem(&path).to_owned();
         (path, template, d, title, asset)
-    } else if let Some(p) = s("period")? {
-        let p = expand(ctx, &p)?;
-        let per = period(ctx.config, &p, Some(&t)).map_err(StepError::failed)?;
+    } else if let Some(pn) = &p.period {
+        let pn = expand(ctx, pn)?;
+        let per = period(ctx.config, &pn, Some(&p.overrides)).map_err(StepError::failed)?;
         let name = per.base_name(date)?;
         let path = join(&per.folder, &format!("{name}.md"));
         let asset = per.asset_folder.then(|| join(&per.folder, &name));
         let template = template_override.or(per.template);
         (path, template, date, name, asset)
     } else {
-        let mut path = expand(ctx, &s("path")?.unwrap_or_default())?;
+        let mut path = expand(ctx, p.path.as_deref().unwrap_or_default())?;
         path = path.trim().trim_matches('/').to_owned();
         if path.is_empty() {
             return Err(StepError::failed("materialize: empty `path`"));
@@ -556,13 +479,20 @@ pub fn execute(step: &Step, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         open_path: Some(path.clone()),
         ..StepOutcome::default()
     };
-    out.vars
-        .insert("materialized_path".into(), Value::String(path.clone()));
-    if let Some(a) = asset {
-        out.vars.insert("asset_folder".into(), Value::String(a));
-    }
+    out.set_vars(&Vars {
+        materialized_path: path.clone(),
+        asset_folder: asset,
+    });
     if done != Ensured::Untouched {
-        out.output_paths.push(path);
+        out.push_output(path);
     }
     Ok(out)
+}
+
+/// `materialize` outcome vars.
+#[derive(Serialize)]
+struct Vars {
+    materialized_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset_folder: Option<String>,
 }
