@@ -85,9 +85,9 @@ fn ctrl_e_toggles_source_and_reading_only() {
         mode: ViewMode::Split,
     }));
     let _ = app.send(Message::Reading(ReadingMsg::CycleMode));
-    assert_eq!(app.reading.mode("m3/a.md"), ViewMode::Source);
+    assert_eq!(app.reading.mode(&app.docs, "m3/a.md"), ViewMode::Source);
     let _ = app.send(Message::Reading(ReadingMsg::CycleMode));
-    assert_eq!(app.reading.mode("m3/a.md"), ViewMode::Reading);
+    assert_eq!(app.reading.mode(&app.docs, "m3/a.md"), ViewMode::Reading);
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn mode_menu_opens_and_closes_on_select() {
         mode: ViewMode::Split,
     }));
     assert_eq!(app.mode_menu, None);
-    assert_eq!(app.reading.mode("m3m/a.md"), ViewMode::Split);
+    assert_eq!(app.reading.mode(&app.docs, "m3m/a.md"), ViewMode::Split);
 }
 
 #[test]
@@ -238,14 +238,20 @@ fn breadcrumb_filename_edit_runs_in_source_mode_and_renames() {
         path: "wp6ren/one.md".into(),
         mode: ViewMode::Source,
     }));
-    assert!(!app.reading.ticks() && !app.reading.title_pending());
+    assert!(!app.reading.ticks(&app.docs) && !app.reading.title_pending(&app.docs));
     title(&mut app, "wp6ren/one.md", "two");
     // Source-only, yet the blur poll and Escape listener run while the edit is pending.
-    assert!(app.reading.ticks(), "blur-poll tick in Source mode");
-    assert!(app.reading.title_pending(), "Escape in Source mode");
+    assert!(
+        app.reading.ticks(&app.docs),
+        "blur-poll tick in Source mode"
+    );
+    assert!(
+        app.reading.title_pending(&app.docs),
+        "Escape in Source mode"
+    );
     drop(app.view());
     let _ = app.send(Message::Reading(ReadingMsg::TitleRevert));
-    assert!(!app.reading.title_pending());
+    assert!(!app.reading.title_pending(&app.docs));
     title(&mut app, "wp6ren/one.md", "two");
     let _ = app.send(Message::Reading(ReadingMsg::TitleSubmit {
         path: "wp6ren/one.md".into(),
@@ -255,7 +261,7 @@ fn breadcrumb_filename_edit_runs_in_source_mode_and_renames() {
         "renamed via the daemon"
     );
     assert_eq!(app.open_paths(), ["wp6ren/two.md"]);
-    assert!(!app.reading.ticks());
+    assert!(!app.reading.ticks(&app.docs));
 }
 
 #[test]

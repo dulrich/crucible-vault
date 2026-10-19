@@ -134,16 +134,19 @@ mod duplicates {
     #[test]
     fn closing_one_duplicate_keeps_the_others_document_and_reading_state() {
         let (_tmp, _d, mut app, left, right) = duplicated();
-        assert!(app.reading.doc("w7/a.md").is_some(), "rendered");
+        assert!(app.reading.doc(&app.docs, "w7/a.md").is_some(), "rendered");
         let _ = app.send(Message::Tabs(TabsMsg::Close(right, 0)));
         let v = views(&app, "w7/a.md");
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].0, left);
         assert!(app.doc("w7/a.md").is_some());
-        assert!(app.reading.doc("w7/a.md").is_some(), "reading state kept");
+        assert!(
+            app.reading.doc(&app.docs, "w7/a.md").is_some(),
+            "reading state kept"
+        );
         let _ = app.send(Message::Tabs(TabsMsg::Close(left, 0)));
         assert!(app.doc("w7/a.md").is_none(), "dropped with the last tab");
-        assert!(app.reading.doc("w7/a.md").is_none());
+        assert!(app.reading.doc(&app.docs, "w7/a.md").is_none());
     }
 
     #[test]
@@ -366,25 +369,38 @@ mod state_flush {
         let _ = app.send(Message::Explorer(ExplorerMsg::Open("r15/one.md".into())));
         let view = app.active_note().expect("tab").id;
         let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
-        app.reading.note_source_selection("r15/one.md", view);
-        app.reading.set_top_block("r15/one.md", view, 3);
-        assert_eq!(app.reading.doc_entries(), 1);
+        app.reading
+            .note_source_selection(&mut app.docs, "r15/one.md", view);
+        app.reading
+            .set_top_block(&mut app.docs, "r15/one.md", view, 3);
+        assert_eq!(app.reading.doc_entries(&app.docs), 1);
         // Rename: one re-key, nothing left under the old path.
         let _ = app.send(Message::Explorer(ExplorerMsg::Select("r15/one.md".into())));
         let _ = app.send(Message::Explorer(ExplorerMsg::BeginRename));
         let _ = app.send(Message::Explorer(ExplorerMsg::Input("two.md".into())));
         let _ = app.send(Message::Explorer(ExplorerMsg::Submit));
         assert_eq!(app.open_paths(), ["r15/two.md"]);
-        assert_eq!(app.reading.doc_entries(), 1, "re-keyed, not duplicated");
+        assert_eq!(
+            app.reading.doc_entries(&app.docs),
+            1,
+            "re-keyed, not duplicated"
+        );
         assert!(app.doc("r15/one.md").is_none());
-        assert!(!app.reading.source_selected_last("r15/one.md", view));
-        assert!(app.reading.edge("r15/one.md", view).is_none());
+        assert!(
+            !app.reading
+                .source_selected_last(&app.docs, "r15/one.md", view)
+        );
+        assert!(app.reading.edge(&app.docs, "r15/one.md", view).is_none());
         // Close: one remove each.
         let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
         assert!(app.open_paths().is_empty());
         assert!(app.docs.is_empty());
-        assert_eq!(app.reading.doc_entries(), 0, "no leaked reading state");
-        assert!(!app.reading.is_restoring(view));
+        assert_eq!(
+            app.reading.doc_entries(&app.docs),
+            0,
+            "no leaked reading state"
+        );
+        assert!(!app.reading.is_restoring(&app.docs, view));
     }
 
     /// SM12 (b): quit writes the latest state immediately, with no debounce pending.

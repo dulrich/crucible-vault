@@ -13,6 +13,7 @@ use editor_model::visible::visible_runs as runs;
 use super::selection::{self, copy_text};
 use super::view::LinkTarget;
 use super::*;
+use crate::app::{Docs, OpenDoc};
 use crate::message::{Message, ReadingMsg};
 use crate::widget::selectable::{self, RunBox, SelPos, Selection};
 
@@ -42,6 +43,7 @@ fn buffer(text: &str) -> SourceBuffer {
 
 struct H {
     store: ReadingStore,
+    docs: Docs,
     views: crate::views::ViewStore,
     r: iced::Renderer,
     tree: Option<Tree>,
@@ -54,9 +56,16 @@ struct H {
 impl H {
     fn new(text: &str) -> Self {
         let mut store = ReadingStore::new();
-        store.register(&buffer(text), ViewMode::Reading, true, None);
+        let mut od = OpenDoc {
+            buffer: buffer(text),
+            close_waiters: Vec::new(),
+            reading: DocReading::default(),
+        };
+        store.register(&mut od, ViewMode::Reading, true, None);
+        let docs = Docs::from([(PATH.to_owned(), od)]);
         Self {
             store,
+            docs,
             views: crate::views::ViewStore::default(),
             r: renderer(),
             tree: None,
@@ -75,7 +84,17 @@ impl H {
         ) -> T,
     ) -> T {
         let t = crate::theme::Surround::Med.tokens().expect("tokens");
-        let mut el = view::reading(&self.store, &self.views, PATH, VIEW, t, 1.0, true, None);
+        let mut el = view::reading(
+            &self.store,
+            &self.docs,
+            &self.views,
+            PATH,
+            VIEW,
+            t,
+            1.0,
+            true,
+            None,
+        );
         let tree = match &mut self.tree {
             Some(tr) => {
                 tr.diff(&el);
@@ -107,7 +126,7 @@ impl H {
         for m in msgs {
             match m {
                 Message::Reading(rm @ ReadingMsg::Select { .. }) => {
-                    let _ = update(&mut self.store, rm, &[], None, None);
+                    let _ = update(&mut self.store, rm, &mut self.docs, None, None);
                 }
                 Message::Reading(ReadingMsg::SelectDone { .. }) => self.primary += 1,
                 m => self.other.push(m),
@@ -179,11 +198,13 @@ impl H {
     }
 
     fn text(&self) -> Option<String> {
-        self.store.selection_text(PATH, VIEW)
+        self.store.selection_text(&self.docs, PATH, VIEW)
     }
 
     fn run_text(&self, run: usize) -> String {
-        self.store.doc(PATH).expect("doc").runs[run].text.clone()
+        self.store.doc(&self.docs, PATH).expect("doc").runs[run]
+            .text
+            .clone()
     }
 }
 
@@ -191,7 +212,7 @@ impl H {
 fn run_table_matches_the_drawn_runs() {
     let md = "---\ntags: [a, b]\ndone: true\n---\n# Head\n\nA [[Link|lbl]] `c` #t\n\n- one\n- [x] two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nx\ny\n```\n\n![alt](https://e.x/i.png)\n\n> [!note] Title\n> body\n";
     let mut h = H::new(md);
-    let table = h.store.doc(PATH).expect("doc").runs.clone();
+    let table = h.store.doc(&h.docs, PATH).expect("doc").runs.clone();
     let boxes = h.boxes();
     let drawn: Vec<(usize, usize)> = boxes.iter().map(|b| (b.run, b.len)).collect();
     let want: Vec<(usize, usize)> = table
@@ -209,7 +230,10 @@ fn cross_block_drag_selects_and_copies_with_a_blank_line() {
     let (a, b) = (SelPos::new(0, 6), SelPos::new(1, 6));
     let (pa, pb) = (h.pt(a), h.pt(b));
     h.drag(pa, pb);
-    assert_eq!(h.store.selection(PATH, VIEW), Some(Selection::new(a, b)));
+    assert_eq!(
+        h.store.selection(&h.docs, PATH, VIEW),
+        Some(Selection::new(a, b))
+    );
     assert_eq!(h.text().as_deref(), Some("para here\n\nSecond"));
     assert_eq!(h.primary, 1, "release writes PRIMARY");
     // Dragging into the gap below the last block snaps to the document end.
@@ -261,7 +285,7 @@ fn multiline_code_block_maps_hard_lines_to_copy_offsets() {
     assert!(pb.y > pa.y, "the end is on a later hard line");
     h.drag(pa, pb);
     assert_eq!(
-        h.store.selection(PATH, VIEW),
+        h.store.selection(&h.docs, PATH, VIEW),
         Some(Selection::new(SelPos::new(0, a), SelPos::new(0, b)))
     );
     assert_eq!(h.text().as_deref(), Some("b = 1;\nend"));
@@ -299,23 +323,26 @@ fn shift_arrows_extend_and_escape_clears() {
     h.key(key::Named::ArrowRight, Modifiers::SHIFT);
     assert_eq!(h.text().as_deref(), Some("one "));
     h.key(key::Named::ArrowDown, Modifiers::SHIFT);
-    let f = h.store.selection(PATH, VIEW).expect("sel").focus;
+    let f = h.store.selection(&h.docs, PATH, VIEW).expect("sel").focus;
     assert_eq!(f.run, 1, "Shift+Down moves into the next block");
     h.key(key::Named::Escape, Modifiers::empty());
-    assert_eq!(h.store.selection(PATH, VIEW), None);
+    assert_eq!(h.store.selection(&h.docs, PATH, VIEW), None);
 }
 
 #[test]
 fn selection_is_cleared_when_the_doc_re_renders() {
     let mut h = H::new("alpha beta\n");
     h.store.set_selection(
+        &mut h.docs,
         PATH,
         VIEW,
         Some(Selection::new(SelPos::new(0, 0), SelPos::new(0, 5))),
     );
     assert_eq!(h.text().as_deref(), Some("alpha"));
-    h.store.recompute(&buffer("changed text\n"), None);
-    assert_eq!(h.store.selection(PATH, VIEW), None);
+    let od = h.docs.get_mut(PATH).expect("doc");
+    od.buffer = buffer("changed text\n");
+    h.store.recompute(od, None);
+    assert_eq!(h.store.selection(&h.docs, PATH, VIEW), None);
     assert!(h.boxes().len() == 1);
 }
 
@@ -341,7 +368,7 @@ fn ctrl_a_and_ctrl_c_take_the_focused_reading_view() {
         "Ctrl+A",
     ))));
     assert_eq!(
-        app.reading.selection_text(PATH, view).as_deref(),
+        app.reading.selection_text(&app.docs, PATH, view).as_deref(),
         Some("one\n\ntwo")
     );
     // Source mode: Ctrl+A is not a Reading chord.
@@ -349,5 +376,5 @@ fn ctrl_a_and_ctrl_c_take_the_focused_reading_view() {
         path: PATH.to_owned(),
         mode: ViewMode::Source,
     }));
-    assert_eq!(app.reading.selection_text(PATH, view), None);
+    assert_eq!(app.reading.selection_text(&app.docs, PATH, view), None);
 }

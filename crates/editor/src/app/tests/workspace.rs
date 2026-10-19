@@ -602,9 +602,9 @@ fn filename_rename_dispatches_explorer_flow_and_retargets() {
     d.create_note("wp2ren/one.md", "body").expect("create");
     let mut app = app_over(&d, None);
     let _ = app.send(Message::Explorer(ExplorerMsg::Open("wp2ren/one.md".into())));
-    assert_eq!(app.reading.title("wp2ren/one.md"), "one");
+    assert_eq!(app.reading.title(&app.docs, "wp2ren/one.md"), "one");
     title(&mut app, "wp2ren/one.md", "two");
-    assert_eq!(app.reading.title("wp2ren/one.md"), "two");
+    assert_eq!(app.reading.title(&app.docs, "wp2ren/one.md"), "two");
     let _ = app.send(Message::Reading(ReadingMsg::TitleSubmit {
         path: "wp2ren/one.md".into(),
     }));
@@ -614,7 +614,7 @@ fn filename_rename_dispatches_explorer_flow_and_retargets() {
     );
     assert!(app.explorer.contains("wp2ren/two.md"));
     assert_eq!(app.open_paths(), ["wp2ren/two.md"], "the tab follows");
-    assert_eq!(app.reading.title("wp2ren/two.md"), "two");
+    assert_eq!(app.reading.title(&app.docs, "wp2ren/two.md"), "two");
     changed(&mut app, "wp2ren/two.md", ChangeKind::Renamed);
     assert!(!app.explorer.stale, "matched via expect_rename");
 
@@ -627,7 +627,7 @@ fn filename_rename_dispatches_explorer_flow_and_retargets() {
     assert_eq!(app.open_paths(), ["wp2ren/three.md"]);
     title(&mut app, "wp2ren/three.md", "four");
     let _ = app.send(Message::Reading(ReadingMsg::TitleRevert));
-    assert_eq!(app.reading.title("wp2ren/three.md"), "three");
+    assert_eq!(app.reading.title(&app.docs, "wp2ren/three.md"), "three");
     let _ = app.send(Message::Reading(ReadingMsg::TitleSubmit {
         path: "wp2ren/three.md".into(),
     }));
@@ -648,7 +648,7 @@ fn filename_rename_daemon_error_surfaces_and_keeps_tab() {
     }));
     assert!(app.status.error_text().is_some(), "daemon error surfaced");
     assert_eq!(app.open_paths(), ["wp2err/one.md"], "tab unchanged");
-    assert_eq!(app.reading.title("wp2err/one.md"), "one");
+    assert_eq!(app.reading.title(&app.docs, "wp2err/one.md"), "one");
     // A slash is refused before any RPC.
     app.status.notice = None;
     title(&mut app, "wp2err/one.md", "a/b");
@@ -694,7 +694,10 @@ fn reading_prop_toggle_edits_the_buffer_and_rerenders() {
     let tab = app.active_doc().expect("tab");
     assert_eq!(tab.text(), "---\nread: true\n---\nx\n");
     assert!(tab.is_dirty(), "saved by the normal autosave path");
-    let doc = app.reading.doc("wp4prop/t.md").expect("rendered");
+    let doc = app
+        .reading
+        .doc(&app.docs, "wp4prop/t.md")
+        .expect("rendered");
     assert_eq!(doc.seq, tab.edit_seq(), "re-rendered from the buffer");
     assert_eq!(
         doc.model.properties[0].values,
@@ -748,7 +751,10 @@ fn reading_task_toggle_edits_the_buffer_and_rerenders() {
         d.read_file("wp2task/t.md").expect("file").0,
         b"- [ ] a\n- [x] b\n"
     );
-    let doc = app.reading.doc("wp2task/t.md").expect("rendered");
+    let doc = app
+        .reading
+        .doc(&app.docs, "wp2task/t.md")
+        .expect("rendered");
     assert_eq!(doc.seq, tab.edit_seq(), "re-rendered from the buffer");
     assert_eq!(
         editor_model::render::task_lines(&doc.model),

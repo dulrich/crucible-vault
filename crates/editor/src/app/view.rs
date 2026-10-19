@@ -18,6 +18,7 @@ impl App {
         };
         crate::reading::tab_body(
             &self.reading,
+            &self.docs,
             &self.views,
             doc,
             tab.id,
@@ -249,7 +250,7 @@ impl App {
                     .into(),
             );
         }
-        let name = self.reading.title(path);
+        let name = self.reading.title(&self.docs, path);
         // Sized to its text (approximate advance) so the breadcrumb stays centred.
         #[allow(clippy::cast_precision_loss)]
         let name_w = (name.chars().count().max(4) as f32)
@@ -304,7 +305,9 @@ impl App {
         use crate::theme::{icon_button_style, icon_text};
         let t = self.tokens;
         let focused = pane == self.focus;
-        let mode = ps.active_note().map(|tab| self.reading.mode(tab.path));
+        let mode = ps
+            .active_note()
+            .map(|tab| self.reading.mode(&self.docs, tab.path));
         let mode_icon = match mode {
             Some(crate::reading::ViewMode::Source) => Icon::Code,
             Some(crate::reading::ViewMode::Split) => Icon::Columns2,

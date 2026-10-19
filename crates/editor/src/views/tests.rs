@@ -67,7 +67,7 @@ fn fence_needs_runs_with_this_and_becomes_ready() {
         path: NOTE.into(),
         mode: ViewMode::Reading,
     }));
-    let blocks = &app.reading.doc(NOTE).expect("doc").model.blocks;
+    let blocks = &app.reading.doc(&app.docs, NOTE).expect("doc").model.blocks;
     let fence = blocks.iter().find_map(|b| match b {
         Block::ViewFence { file, name } => Some(view_id(file, name)),
         _ => None,

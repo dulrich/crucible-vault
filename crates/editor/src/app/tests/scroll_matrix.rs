@@ -268,7 +268,10 @@ fn reading_place(ui: &mut Ui, app: &App) -> Place {
     let g = ui
         .geometry(app, PATH, v)
         .expect("reading scrollable laid out");
-    let n = app.reading.doc(PATH).map_or(0, |d| d.model.blocks.len());
+    let n = app
+        .reading
+        .doc(&app.docs, PATH)
+        .map_or(0, |d| d.model.blocks.len());
     let mut p = crate::reading::probe_op(PATH, v, n);
     ui.operate(app, &mut operation::black_box(&mut p));
     let operation::Outcome::Some(probe) = p.finish() else {
@@ -380,7 +383,7 @@ fn source_place_at(ui: &mut Ui, app: &mut App, extra: i32) -> Place {
 }
 
 fn place(ui: &mut Ui, app: &mut App) -> Place {
-    if app.reading.mode(PATH) == ViewMode::Source {
+    if app.reading.mode(&app.docs, PATH) == ViewMode::Source {
         source_place(ui, app)
     } else {
         reading_place(ui, app)
@@ -412,7 +415,7 @@ fn setup(mode: ViewMode) -> (tempfile::TempDir, App, Ui) {
             }),
         );
         ui.update(&mut app, Message::Reading(ReadingMsg::Tick));
-        if let Some(d) = app.reading.doc(PATH) {
+        if let Some(d) = app.reading.doc(&app.docs, PATH) {
             ui.model = d.model.clone();
         }
     }
@@ -477,7 +480,7 @@ enum Input {
 /// Applies `input` (`down` = towards the end) the way the user drives it in the current
 /// mode; "up" starts from well down the note.
 fn drive(ui: &mut Ui, app: &mut App, input: Input, down: bool) {
-    let source = app.reading.mode(PATH) == ViewMode::Source;
+    let source = app.reading.mode(&app.docs, PATH) == ViewMode::Source;
     if !down {
         wheel(ui, app, true, 40);
     }
@@ -690,14 +693,17 @@ fn source_wheel_top_survives_switch_to_split() {
 /// Plan round-8 WP-4: the place under the 50% anchor (Reading: the probe's anchor block;
 /// Source: the line half the measured viewport rows below the top).
 fn anchor_place(ui: &mut Ui, app: &mut App) -> Place {
-    if app.reading.mode(PATH) == ViewMode::Source {
+    if app.reading.mode(&app.docs, PATH) == ViewMode::Source {
         let rows = app.doc(PATH).map_or(0, |d| d.visible_lines());
         let half = i32::try_from(crate::source::rows_at(0.5, rows)).unwrap_or(0);
         return source_place_at(ui, app, half);
     }
     let top = reading_place(ui, app);
     let v = view(app);
-    let n = app.reading.doc(PATH).map_or(0, |d| d.model.blocks.len());
+    let n = app
+        .reading
+        .doc(&app.docs, PATH)
+        .map_or(0, |d| d.model.blocks.len());
     let mut p = crate::reading::probe_op(PATH, v, n);
     ui.operate(app, &mut operation::black_box(&mut p));
     let operation::Outcome::Some(probe) = p.finish() else {
@@ -714,7 +720,7 @@ fn anchor_place(ui: &mut Ui, app: &mut App) -> Place {
 fn anchored_switch(origin: ViewMode, n: usize) -> (Place, Place) {
     let (_tmp, mut app, mut ui) = setup(origin);
     app.prefs.scroll_anchor = 50;
-    app.reading.set_anchor(app.prefs.anchor());
+    app.reading.set_anchor(&mut app.docs, app.prefs.anchor());
     wheel(&mut ui, &mut app, true, n);
     let _ = ui.redraw(&mut app);
     let before = anchor_place(&mut ui, &mut app);

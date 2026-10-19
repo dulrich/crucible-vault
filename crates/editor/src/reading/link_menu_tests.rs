@@ -114,7 +114,10 @@ fn copy_url_and_selection_copy() {
     choose(&mut app, link("https://x.y/z", true, false), Item::CopyUrl);
     assert_eq!(app.copied(), ["https://x.y/z"]);
     select(&mut app, "A.md", view, 5);
-    let want = app.reading.selection_text("A.md", view).expect("selection");
+    let want = app
+        .reading
+        .selection_text(&app.docs, "A.md", view)
+        .expect("selection");
     choose(
         &mut app,
         Target::Selection {
@@ -157,7 +160,10 @@ fn selection_action_gets_reading_selection_and_split_recency() {
     set_mode(&mut app, "A.md", ViewMode::Reading);
     let view = app.active_tab().expect("tab").id;
     select(&mut app, "A.md", view, 5);
-    let rsel = app.reading.selection_text("A.md", view).expect("selection");
+    let rsel = app
+        .reading
+        .selection_text(&app.docs, "A.md", view)
+        .expect("selection");
     let _ = app.run_call(call());
     // Split: a later Source selection wins; a later Reading selection wins back.
     set_mode(&mut app, "A.md", ViewMode::Split);

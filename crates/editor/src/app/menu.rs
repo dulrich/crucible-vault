@@ -211,7 +211,7 @@ impl App {
                 }
                 | Target::Selection { path, view },
                 Item::Copy,
-            ) => match self.reading.selection_text(&path, view) {
+            ) => match self.reading.selection_text(&self.docs, &path, view) {
                 Some(text) => {
                     self.sink.copied(&text);
                     iced::clipboard::write(text)

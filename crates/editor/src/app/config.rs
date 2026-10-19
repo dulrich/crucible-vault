@@ -103,7 +103,7 @@ impl App {
             .panes
             .iter()
             .flat_map(|(_, ps)| ps.tabs.iter().filter_map(Tab::path))
-            .map(|p| (p.to_owned(), self.reading.mode(p)))
+            .map(|p| (p.to_owned(), self.reading.mode(&self.docs, p)))
             .collect();
     }
 
@@ -181,7 +181,7 @@ impl App {
         self.palette.set_hidden(prefs.palette_hidden.clone());
         // WP-4: `[keys]` overrides rebuild the effective keymap live (no restart).
         self.palette.set_keys(prefs.keys.clone());
-        self.reading.set_anchor(prefs.anchor());
+        self.reading.set_anchor(&mut self.docs, prefs.anchor());
         self.prefs = prefs;
         self.sync_hotkeys();
     }

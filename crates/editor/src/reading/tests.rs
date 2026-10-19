@@ -94,8 +94,8 @@ fn modes_cycle_and_transclusion_is_depth_one() {
     ]);
     let mut app = app_on(&d, "A.md");
     // New tabs open in Reading and render without a Ctrl+E (audit E1, open path).
-    assert_eq!(app.reading.mode("A.md"), ViewMode::Reading);
-    let doc = app.reading.doc("A.md").expect("rendered");
+    assert_eq!(app.reading.mode(&app.docs, "A.md"), ViewMode::Reading);
+    let doc = app.reading.doc(&app.docs, "A.md").expect("rendered");
     let Block::Transclusion {
         content: Some(c), ..
     } = &doc.model.blocks[1]
@@ -112,14 +112,14 @@ fn modes_cycle_and_transclusion_is_depth_one() {
     );
     drop(app.view());
     reading(&mut app, "A.md", ViewMode::Split);
-    assert_eq!(app.reading.mode("A.md"), ViewMode::Split);
+    assert_eq!(app.reading.mode(&app.docs, "A.md"), ViewMode::Split);
     drop(app.view());
     let _ = app.send(Message::Reading(ReadingMsg::CycleMode));
-    assert_eq!(app.reading.mode("A.md"), ViewMode::Source);
-    assert!(app.reading.doc("A.md").is_none());
+    assert_eq!(app.reading.mode(&app.docs, "A.md"), ViewMode::Source);
+    assert!(app.reading.doc(&app.docs, "A.md").is_none());
     let _ = app.send(Message::Reading(ReadingMsg::CycleMode));
-    assert_eq!(app.reading.mode("A.md"), ViewMode::Reading);
-    assert!(app.reading.doc("A.md").is_some());
+    assert_eq!(app.reading.mode(&app.docs, "A.md"), ViewMode::Reading);
+    assert!(app.reading.doc(&app.docs, "A.md").is_some());
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn recompute_only_when_edit_seq_moves() {
     let _ = app.send(Message::Reading(ReadingMsg::Tick));
     assert_eq!(app.reading.recomputes, 2);
     let seq = app.active_doc().expect("tab").edit_seq();
-    assert_eq!(app.reading.doc("A.md").expect("doc").seq, seq);
+    assert_eq!(app.reading.doc(&app.docs, "A.md").expect("doc").seq, seq);
 }
 
 #[test]
@@ -242,7 +242,7 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
     ]);
     let mut app = app_on(&d, "A.md");
     reading(&mut app, "A.md", ViewMode::Reading);
-    let doc = app.reading.doc("A.md").expect("doc");
+    let doc = app.reading.doc(&app.docs, "A.md").expect("doc");
     assert_eq!(
         doc.images.get("pic.png"),
         Some(&Some("att/pic.png".to_owned()))
@@ -296,7 +296,7 @@ fn e2_release_points_tab_close_mode_switch_model_replacement() {
     let _ = app.send(Message::Tabs(TabsMsg::Close(app.focus, 0)));
     assert!(app.reading.images.is_empty());
     assert_eq!(
-        app.reading.mode("A.md"),
+        app.reading.mode(&app.docs, "A.md"),
         ViewMode::default(),
         "closed tab: state forgotten"
     );
@@ -310,7 +310,7 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
     let _ = app.send(Message::Tabs(TabsMsg::Open("A.md".into())));
     let _ = app.send(Message::Tabs(TabsMsg::Open("B.md".into())));
     assert!(
-        app.reading.doc("B.md").is_some(),
+        app.reading.doc(&app.docs, "B.md").is_some(),
         "open path renders at once"
     );
     let shaped = |app: &App, p: &str| {
@@ -329,20 +329,23 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
     let _ = app.send(Message::PersistDue);
     let mut back = App::new(Some(Arc::clone(&d)), Some(state));
     assert_eq!(back.open_paths(), ["A.md", "B.md"]);
-    assert_eq!(back.reading.mode("A.md"), ViewMode::Source);
-    assert_eq!(back.reading.mode("B.md"), ViewMode::Reading);
+    assert_eq!(back.reading.mode(&back.docs, "A.md"), ViewMode::Source);
+    assert_eq!(back.reading.mode(&back.docs, "B.md"), ViewMode::Reading);
     assert!(
         shaped(&back, "A.md"),
         "active Source tab shaped after restore"
     );
     assert!(!shaped(&back, "B.md"));
     assert!(
-        back.reading.doc("B.md").is_none(),
+        back.reading.doc(&back.docs, "B.md").is_none(),
         "restore defers the render"
     );
     let _ = back.send(Message::Reading(ReadingMsg::Tick));
-    assert!(back.reading.doc("B.md").is_some(), "first tick renders it");
-    assert!(back.reading.doc("A.md").is_none());
+    assert!(
+        back.reading.doc(&back.docs, "B.md").is_some(),
+        "first tick renders it"
+    );
+    assert!(back.reading.doc(&back.docs, "A.md").is_none());
 }
 
 /// plan editor-ui-round-3 WP-5 (audit E1): the active find match maps to (block, nth occurrence).
@@ -355,7 +358,7 @@ fn active_find_match_maps_to_its_block_and_occurrence() {
     reading(&mut app, p, ViewMode::Reading);
     let _ = app.send(Message::Reading(ReadingMsg::Tick));
     let _ = app.send(Message::Reading(ReadingMsg::Tick));
-    assert!(app.reading.doc(p).is_some(), "rendered");
+    assert!(app.reading.doc(&app.docs, p).is_some(), "rendered");
     let _ = app.send(Message::Find(FindMsg::Open));
     let _ = app.send(Message::Find(FindMsg::Query("foo".into())));
     assert_eq!(strong_hit(&app, p), Some((0, 0)));
@@ -391,10 +394,10 @@ fn source_to_reading_carries_top_line_to_its_block() {
     })));
     assert_eq!(app.active_doc().expect("doc").top_line(), 11);
     reading(&mut app, p, ViewMode::Reading);
-    let model = &app.reading.doc(p).expect("doc").model;
+    let model = &app.reading.doc(&app.docs, p).expect("doc").model;
     assert_eq!(model.block_for_line(11), Some(3), "the code block");
     assert_eq!(
-        app.reading.top_block(p, app.view_of(p)),
+        app.reading.top_block(&app.docs, p, app.view_of(p)),
         Some(3),
         "the scroll task targets it"
     );
@@ -406,8 +409,14 @@ fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
     let p = "wp6/r.md";
     let (_t, d) = setup(&[(p, PLACE_NOTE)]);
     let mut app = app_on(&d, p);
-    assert_eq!(app.reading.mode(p), ViewMode::Reading);
-    let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
+    assert_eq!(app.reading.mode(&app.docs, p), ViewMode::Reading);
+    let blocks = app
+        .reading
+        .doc(&app.docs, p)
+        .expect("doc")
+        .model
+        .blocks
+        .len();
     // A probe lands with the list (block 2, source lines 7..9) at the viewport top.
     let mut block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 50.0)).collect();
     block_ys[0] = Some(30.0);
@@ -423,13 +432,13 @@ fn reading_to_source_scrolls_to_the_top_blocks_first_line() {
         }),
         scroll_to: None,
     }));
-    assert_eq!(app.reading.top_block(p, app.view_of(p)), Some(2));
+    assert_eq!(app.reading.top_block(&app.docs, p, app.view_of(p)), Some(2));
     viewport(&mut app, p, 3);
     reading(&mut app, p, ViewMode::Source);
     assert_eq!(app.active_doc().expect("doc").top_line(), 7);
     // And back: Source line 7 maps to the list again.
     reading(&mut app, p, ViewMode::Split);
-    assert_eq!(app.reading.top_block(p, app.view_of(p)), Some(2));
+    assert_eq!(app.reading.top_block(&app.docs, p, app.view_of(p)), Some(2));
 }
 
 /// The live daemon indexes incrementally without bumping the generation, so a generation-keyed
@@ -539,7 +548,13 @@ fn reading_at_bottom_then_source_lands_on_the_last_lines() {
     let body = long_note();
     let (_t, d) = setup(&[(p, &body)]);
     let mut app = app_on(&d, p);
-    let blocks = app.reading.doc(p).expect("doc").model.blocks.len();
+    let blocks = app
+        .reading
+        .doc(&app.docs, p)
+        .expect("doc")
+        .model
+        .blocks
+        .len();
     let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
     let view = app.view_of(p);
     let _ = app.send(Message::Reading(ReadingMsg::Probed {
@@ -553,7 +568,10 @@ fn reading_at_bottom_then_source_lands_on_the_last_lines() {
         }),
         scroll_to: None,
     }));
-    assert_eq!(app.reading.top_block(p, app.view_of(p)), Some(blocks - 1));
+    assert_eq!(
+        app.reading.top_block(&app.docs, p, app.view_of(p)),
+        Some(blocks - 1)
+    );
     // Plan round-5 WP-1: the last block starts at line 198, but the editor cannot scroll past
     // its end — the carry clamps to the last full viewport (cause B: it used to set 198 and
     // show two lines and blank space).
@@ -593,7 +611,13 @@ fn tab_resume_keeps_the_reading_place() {
     let (_t, d) = setup(&[(a, &body), (b, b"other\n")]);
     let mut app = app_on(&d, a);
     let view = app.view_of(a);
-    let blocks = app.reading.doc(a).expect("doc").model.blocks.len();
+    let blocks = app
+        .reading
+        .doc(&app.docs, a)
+        .expect("doc")
+        .model
+        .blocks
+        .len();
     let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
     let probe = |offset_y: f32| Probe {
         offset_y,
@@ -607,22 +631,22 @@ fn tab_resume_keeps_the_reading_place() {
         probe: Some(probe(40.0 * 20.0)),
         scroll_to: None,
     }));
-    assert_eq!(app.reading.top_block(a, view), Some(40));
+    assert_eq!(app.reading.top_block(&app.docs, a, view), Some(40));
     let _ = app.send(Message::Tabs(TabsMsg::Open(b.to_owned())));
-    assert!(!app.reading.is_restoring(view));
+    assert!(!app.reading.is_restoring(&app.docs, view));
     let pane = app.focus;
     let task = app.send(Message::Tabs(TabsMsg::Select(pane, 0)));
     assert_eq!(app.view_of(a), view);
     assert!(task.units() > 0, "activation issues the restore probe");
-    assert!(app.reading.is_restoring(view));
+    assert!(app.reading.is_restoring(&app.docs, view));
     // The re-created scrollable reports offset 0 first: the place is re-applied, not lost.
     let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: a.to_owned(),
         view,
         y: 0.0,
     }));
-    assert!(!app.reading.is_restoring(view));
-    assert_eq!(app.reading.top_block(a, view), Some(40));
+    assert!(!app.reading.is_restoring(&app.docs, view));
+    assert_eq!(app.reading.top_block(&app.docs, a, view), Some(40));
     // Afterwards scroll reports update the place normally.
     let _ = app.send(Message::Reading(ReadingMsg::Probed {
         path: a.to_owned(),
@@ -630,7 +654,7 @@ fn tab_resume_keeps_the_reading_place() {
         probe: Some(probe(10.0 * 20.0)),
         scroll_to: None,
     }));
-    assert_eq!(app.reading.top_block(a, view), Some(10));
+    assert_eq!(app.reading.top_block(&app.docs, a, view), Some(10));
 }
 
 /// Plan round-5 WP-1 (item 2): Up/Down with no palette open scroll the focused Reading pane
@@ -718,7 +742,7 @@ fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir,
     reading(&mut app, p, mode);
     let _ = app.send(Message::Reading(ReadingMsg::Tick));
     let _ = app.send(Message::Reading(ReadingMsg::Tick));
-    assert!(app.reading.doc(p).is_some(), "rendered");
+    assert!(app.reading.doc(&app.docs, p).is_some(), "rendered");
     let _ = app.send(Message::Find(FindMsg::Open));
     let _ = app.send(Message::Find(FindMsg::Query(q.into())));
     (t, app)
@@ -729,7 +753,7 @@ fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir,
 fn strong_hit(app: &App, p: &str) -> Option<(usize, usize)> {
     let tab = app.active_tab().map(|t| t.id)?;
     let paint = app.find_bar_for(tab)?.reading_paint()?;
-    let occ = editor_model::visible::occurrences(&app.reading.doc(p)?.runs, paint.query);
+    let occ = editor_model::visible::occurrences(&app.reading.doc(&app.docs, p)?.runs, paint.query);
     let (part, n) = editor_model::visible::keyed(&occ)[paint.active?];
     Some((part.block()?, n))
 }
@@ -810,7 +834,7 @@ fn reading_next_steps_over_visible_occurrences() {
     let _ = app.send(Message::Find(FindMsg::Next));
     assert_eq!(strong_hit(&app, p), Some((2, 0)));
     assert_eq!(
-        app.reading.top_block(p, app.view_of(p)),
+        app.reading.top_block(&app.docs, p, app.view_of(p)),
         Some(2),
         "scrolled to its block"
     );
@@ -922,7 +946,7 @@ fn late_attachment_re_renders_the_doc() {
     let _ = app.send(Message::Reading(ReadingMsg::Tick));
     let resolved = |app: &App| {
         app.reading
-            .doc("A.md")
+            .doc(&app.docs, "A.md")
             .and_then(|doc| doc.images.values().next().cloned().flatten())
     };
     assert_eq!(resolved(&app), None, "not resolvable yet");
@@ -933,7 +957,7 @@ fn late_attachment_re_renders_the_doc() {
     // only change left is the vault membership one (the race: before the fix nothing marked
     // the Doc stale and it kept the broken image).
     d.index().on_generation(u64::MAX).expect("reader");
-    let doc = app.reading.doc_mut("A.md").expect("doc");
+    let doc = app.reading.doc_mut(&mut app.docs, "A.md").expect("doc");
     doc.generation = d.index().generation();
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
@@ -998,14 +1022,14 @@ fn reading_go_to_end_then_source_shows_the_end() {
     let mut app = app_on(&d, p);
     let view = app.view_of(p);
     let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
-    assert_eq!(app.reading.edge(p, view), Some(true));
+    assert_eq!(app.reading.edge(&app.docs, p, view), Some(true));
     // The snap's own scroll report at the end keeps the edge.
     let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: p.to_owned(),
         view,
         y: 1.0,
     }));
-    assert_eq!(app.reading.edge(p, view), Some(true));
+    assert_eq!(app.reading.edge(&app.docs, p, view), Some(true));
     viewport(&mut app, p, 40);
     reading(&mut app, p, ViewMode::Source);
     let doc = app.active_doc().expect("doc");
@@ -1026,26 +1050,26 @@ fn source_go_to_end_then_reading_snaps_to_the_end() {
     viewport(&mut app, p, 40);
     let view = app.view_of(p);
     let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: true }));
-    assert_eq!(app.reading.edge(p, view), Some(true));
-    app.reading.clear_top_block(p, view);
+    assert_eq!(app.reading.edge(&app.docs, p, view), Some(true));
+    app.reading.clear_top_block(&mut app.docs, p, view);
     let task = app.send(Message::Reading(ReadingMsg::SetMode {
         path: p.to_owned(),
         mode: ViewMode::Reading,
     }));
     assert!(task.units() > 0, "the snap_to(1.0) task");
     assert_eq!(
-        app.reading.top_block(p, view),
+        app.reading.top_block(&app.docs, p, view),
         None,
         "no carried line-estimate block"
     );
-    assert_eq!(app.reading.edge(p, view), Some(true));
+    assert_eq!(app.reading.edge(&app.docs, p, view), Some(true));
     let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: p.to_owned(),
         view,
         y: 0.5,
     }));
     assert_eq!(
-        app.reading.edge(p, view),
+        app.reading.edge(&app.docs, p, view),
         None,
         "a user scroll leaves the edge"
     );
@@ -1062,11 +1086,11 @@ fn source_wheel_clears_the_edge() {
     reading(&mut app, p, ViewMode::Source);
     let view = app.view_of(p);
     let _ = app.send(Message::Reading(ReadingMsg::GoToEdge { bottom: false }));
-    assert_eq!(app.reading.edge(p, view), Some(false));
+    assert_eq!(app.reading.edge(&app.docs, p, view), Some(false));
     let _ = app.send(Message::Source(SourceMsg::Action(Action::Scroll {
         lines: 3,
     })));
-    assert_eq!(app.reading.edge(p, view), None);
+    assert_eq!(app.reading.edge(&app.docs, p, view), None);
 }
 
 /// Plan round-6 WP-2 (a): a create/delete/rename elsewhere invalidates the resolver but keeps
@@ -1199,7 +1223,13 @@ fn stale_restore_guard_does_not_snap_after_content_grows() {
     let (_t, d) = setup(&[(a, &body), (b, b"other\n")]);
     let mut app = app_on(&d, a);
     let view = app.view_of(a);
-    let blocks = app.reading.doc(a).expect("doc").model.blocks.len();
+    let blocks = app
+        .reading
+        .doc(&app.docs, a)
+        .expect("doc")
+        .model
+        .blocks
+        .len();
     let block_ys: Vec<Option<f32>> = (0..blocks).map(|i| Some(i as f32 * 20.0)).collect();
     let _ = app.send(Message::Reading(ReadingMsg::Probed {
         path: a.to_owned(),
@@ -1215,17 +1245,26 @@ fn stale_restore_guard_does_not_snap_after_content_grows() {
     let _ = app.send(Message::Tabs(TabsMsg::Open(b.to_owned())));
     let pane = app.focus;
     let _ = app.send(Message::Tabs(TabsMsg::Select(pane, 0)));
-    assert!(app.reading.is_restoring(view), "armed on activation");
+    assert!(
+        app.reading.is_restoring(&app.docs, view),
+        "armed on activation"
+    );
     // No scroll report arrives (content fits); later the content grows and the user wheels.
-    app.reading
-        .age_restore_guard(view, RESTORE_GUARD + std::time::Duration::from_millis(1));
-    assert!(!app.reading.is_restoring(view), "the guard expired");
+    app.reading.age_restore_guard(
+        &mut app.docs,
+        view,
+        RESTORE_GUARD + std::time::Duration::from_millis(1),
+    );
+    assert!(
+        !app.reading.is_restoring(&app.docs, view),
+        "the guard expired"
+    );
     let _ = app.send(Message::Reading(ReadingMsg::Scrolled {
         path: a.to_owned(),
         view,
         y: 0.3,
     }));
-    assert!(!app.reading.is_restoring(view));
+    assert!(!app.reading.is_restoring(&app.docs, view));
 }
 
 /// Plan round-6 WP-4: the Doc marks unresolved vault links (the view dims them and the link
@@ -1241,7 +1280,7 @@ fn doc_marks_unresolved_vault_links() {
     ]);
     let mut app = app_on(&d, "A.md");
     reading(&mut app, "A.md", ViewMode::Reading);
-    let doc = app.reading.doc("A.md").expect("doc");
+    let doc = app.reading.doc(&app.docs, "A.md").expect("doc");
     let want: HashSet<String> = ["Nope", "Gone.md"].map(String::from).into();
     assert_eq!(doc.unresolved, want);
 }
@@ -1318,7 +1357,7 @@ fn table_cell_link_right_click_yields_the_link_menu() {
     ]);
     let mut app = app_on(&d, "A.md");
     reading(&mut app, "A.md", ViewMode::Reading);
-    let doc = app.reading.doc("A.md").expect("doc");
+    let doc = app.reading.doc(&app.docs, "A.md").expect("doc");
     let Some(Block::Table { rows, .. }) = doc
         .model
         .blocks

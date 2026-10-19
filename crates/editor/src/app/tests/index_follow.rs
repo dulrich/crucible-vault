@@ -112,7 +112,8 @@ fn reading_relowers_after_daemon_rewrite_clean_and_dirty() {
             mode: ViewMode::Reading,
         }));
     }
-    let shown = |app: &App, p: &str| format!("{:?}", app.reading.doc(p).expect("doc").model);
+    let shown =
+        |app: &App, p: &str| format!("{:?}", app.reading.doc(&app.docs, p).expect("doc").model);
     assert!(shown(&app, "r3lint/a.md").contains("old"));
 
     // b is dirty (an in-memory edit; b is the active tab).

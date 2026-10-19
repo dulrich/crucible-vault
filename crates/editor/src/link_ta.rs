@@ -150,7 +150,7 @@ impl crate::app::App {
         let ok = self.link_ta.as_ref().is_some_and(|a| {
             self.active_note()
                 .is_some_and(|t| t.path == a.path && t.id == a.tab)
-                && self.reading.mode(&a.path) != crate::reading::ViewMode::Reading
+                && self.reading.mode(&self.docs, &a.path) != crate::reading::ViewMode::Reading
         });
         if !ok {
             self.link_ta = None;

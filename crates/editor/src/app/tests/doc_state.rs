@@ -70,7 +70,7 @@ fn old_editor_json_restores_settings_log_and_note_tabs() {
         ]
     );
     assert_eq!(
-        app.reading.mode("r15/old.md"),
+        app.reading.mode(&app.docs, "r15/old.md"),
         crate::reading::ViewMode::Source
     );
     assert!(app.status.error_text().is_none());

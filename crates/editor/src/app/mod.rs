@@ -67,8 +67,8 @@ pub use crate::ui_state::TabKind;
 
 /// One open document (WP-R15 SP2): everything per note path lives here, so a close is one
 /// `remove` and a rename one re-key. A document lives while at least one tab shows its path.
-/// Its Reading state ([`crate::reading::DocReading`]) is the same path's entry in
-/// [`crate::reading::ReadingStore`] (removed / re-keyed alongside this one).
+/// Its Reading state ([`crate::reading::DocReading`]) lives here too, so it closes and renames
+/// with the document.
 #[derive(Debug)]
 pub struct OpenDoc {
     pub buffer: crate::source::SourceBuffer,
@@ -76,6 +76,8 @@ pub struct OpenDoc {
     /// rework; audit E1: a close keeps its target tab identity across the save, so closing one
     /// duplicate never closes the other).
     pub close_waiters: Vec<u64>,
+    /// The document's Reading state (mode, rendered model, per-tab places).
+    pub reading: crate::reading::DocReading,
 }
 
 /// The document store: one [`OpenDoc`] per open note path (plan editor-feedback-round-2 WP-7).
@@ -456,7 +458,7 @@ impl App {
             .panes
             .iter()
             .filter_map(|(_, ps)| ps.active_note())
-            .filter(|t| self.reading.mode(t.path).shows_source())
+            .filter(|t| self.reading.mode(&self.docs, t.path).shows_source())
             .map(|t| t.path.to_owned())
             .collect();
         for (path, doc) in &mut self.docs {

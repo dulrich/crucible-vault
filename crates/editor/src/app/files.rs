@@ -212,12 +212,12 @@ impl App {
         path: &str,
         f: impl FnOnce(&mut crate::source::SourceBuffer, std::time::Instant) -> bool,
     ) -> Option<Task<Message>> {
-        let doc = &mut self.docs.get_mut(path)?.buffer;
-        if !f(doc, std::time::Instant::now()) {
+        let od = self.docs.get_mut(path)?;
+        if !f(&mut od.buffer, std::time::Instant::now()) {
             return Some(Task::none());
         }
-        let seq = doc.edit_seq();
-        self.reading.recompute(doc, self.daemon.as_ref());
+        let seq = od.buffer.edit_seq();
+        self.reading.recompute(od, self.daemon.as_ref());
         Some(crate::source::autosave_timer(path.to_owned(), seq))
     }
 
@@ -275,7 +275,7 @@ impl App {
     /// Enter / blur in the filename input: rename through the explorer path when changed,
     /// flushing a dirty buffer through the normal save first.
     pub(super) fn title_submit(&mut self, path: &str) -> Task<Message> {
-        let Some(input) = self.reading.take_title(path) else {
+        let Some(input) = self.reading.take_title(&mut self.docs, path) else {
             return Task::none();
         };
         let Some(to) = crate::reading::rename_target(path, &input) else {
@@ -323,7 +323,12 @@ impl App {
                     }
                     old => OpenDoc {
                         buffer: crate::source::SourceBuffer::new(to, &bytes, hash),
-                        close_waiters: old.map(|d| d.close_waiters).unwrap_or_default(),
+                        close_waiters: old
+                            .as_ref()
+                            .map(|d| d.close_waiters.clone())
+                            .unwrap_or_default(),
+                        // The Reading state moves with the rename even when the buffer is rebuilt.
+                        reading: old.map(|d| d.reading).unwrap_or_default(),
                     },
                 };
                 self.move_path_state(from, to, doc);
@@ -337,20 +342,22 @@ impl App {
     /// with the host and go stale (re-run against `to` while the old result stays shown — no
     /// flash), and every other view goes stale too, since a rename changes link targets they
     /// may list (WP-8).
-    pub(super) fn move_path_state(&mut self, from: &str, to: &str, doc: OpenDoc) {
+    pub(super) fn move_path_state(&mut self, from: &str, to: &str, mut doc: OpenDoc) {
         for (_, ps) in self.panes.iter_mut() {
             for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
                 t.kind = TabKind::Note(to.to_owned());
             }
             ps.history.retarget(from, to);
         }
-        // One re-key each (WP-R15 SP2): the document (close waiters, title cache) and its
-        // Reading state; the new text renders now under `to`.
-        self.reading.rekey(from, to);
+        // The document (close waiters, Reading state) moves as one; its pending filename edit
+        // is dropped, the `from` image pins are released, and the new text renders now under
+        // `to`.
+        doc.reading.clear_title();
+        self.reading.renamed(from);
         self.views.rehost(from, to);
         self.views.invalidate(&[]);
-        if self.reading.mode(to).shows_reading() {
-            self.reading.recompute(&doc.buffer, self.daemon.as_ref());
+        if doc.reading.mode.shows_reading() {
+            self.reading.recompute(&mut doc, self.daemon.as_ref());
         }
         self.docs.insert(to.to_owned(), doc);
         self.ui.touch_recent(to);

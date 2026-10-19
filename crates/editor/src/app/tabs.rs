@@ -43,8 +43,8 @@ impl App {
             }
             match kind {
                 TabKind::Note(p) => {
-                    tasks.extend(self.reading.restore(&p, id));
-                    if self.reading.mode(&p).shows_reading() {
+                    tasks.extend(self.reading.restore(&mut self.docs, &p, id));
+                    if self.reading.mode(&self.docs, &p).shows_reading() {
                         tasks.extend(self.views.restore(&p));
                     }
                 }
@@ -206,15 +206,14 @@ impl App {
             let (bytes, hash) = d.read_file(path)?;
             let doc = crate::source::SourceBuffer::new(path, &bytes, hash);
             let mode = self.initial_mode(path);
+            let mut od = OpenDoc {
+                buffer: doc,
+                close_waiters: Vec::new(),
+                reading: crate::reading::DocReading::default(),
+            };
             self.reading
-                .register(&doc, mode, !self.restoring, self.daemon.as_ref());
-            self.docs.insert(
-                path.to_owned(),
-                OpenDoc {
-                    buffer: doc,
-                    close_waiters: Vec::new(),
-                },
-            );
+                .register(&mut od, mode, !self.restoring, self.daemon.as_ref());
+            self.docs.insert(path.to_owned(), od);
         }
         let tab = Tab::note(path);
         let mut replaced = None;
@@ -290,7 +289,7 @@ impl App {
             return;
         }
         self.docs.remove(path);
-        self.reading.remove(path);
+        self.reading.closed(path);
         self.views.on_tab_closed(path);
     }
 

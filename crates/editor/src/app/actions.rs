@@ -194,16 +194,16 @@ impl App {
         }
         let tab = self.active_note()?;
         let (path, view) = (tab.path.to_owned(), tab.id);
-        if !self.reading.mode(&path).shows_reading() {
+        if !self.reading.mode(&self.docs, &path).shows_reading() {
             return None;
         }
         if c.key == "a" {
-            self.reading.select_all(&path, view);
+            self.reading.select_all(&mut self.docs, &path, view);
             return Some(Task::none());
         }
         Some(
             self.reading
-                .selection_text(&path, view)
+                .selection_text(&self.docs, &path, view)
                 .map_or_else(Task::none, iced::clipboard::write),
         )
     }
@@ -306,14 +306,18 @@ impl App {
     /// — in Split, only when the Reading side selected more recently than the Source side.
     pub(super) fn reading_selection(&self) -> Option<String> {
         let tab = self.active_note()?;
-        let mode = self.reading.mode(tab.path);
+        let mode = self.reading.mode(&self.docs, tab.path);
         if !mode.shows_reading() {
             return None;
         }
-        if mode.shows_source() && self.reading.source_selected_last(tab.path, tab.id) {
+        if mode.shows_source()
+            && self
+                .reading
+                .source_selected_last(&self.docs, tab.path, tab.id)
+        {
             return None;
         }
-        self.reading.selection_text(tab.path, tab.id)
+        self.reading.selection_text(&self.docs, tab.path, tab.id)
     }
 
     pub(super) fn dispatch_with(

@@ -366,9 +366,9 @@ fn ctrl_e_is_an_ordinary_rebindable_command() {
     set_mode(&mut app, NOTE, ViewMode::Reading);
     // Default: Ctrl+E through the keymap (no Reading listener anymore).
     key(&mut app, "Ctrl+E");
-    assert_eq!(app.reading.mode(NOTE), ViewMode::Source);
+    assert_eq!(app.reading.mode(&app.docs, NOTE), ViewMode::Source);
     key(&mut app, "Ctrl+E");
-    assert_eq!(app.reading.mode(NOTE), ViewMode::Reading);
+    assert_eq!(app.reading.mode(&app.docs, NOTE), ViewMode::Reading);
     // Rebound live (no restart) through the Settings edit path.
     let _ = app.send(Message::Settings(SettingsMsg::Edit(
         EDITOR_PATH.into(),
@@ -378,9 +378,13 @@ fn ctrl_e_is_an_ordinary_rebindable_command() {
         ),
     )));
     key(&mut app, "Ctrl+E");
-    assert_eq!(app.reading.mode(NOTE), ViewMode::Reading, "old chord inert");
+    assert_eq!(
+        app.reading.mode(&app.docs, NOTE),
+        ViewMode::Reading,
+        "old chord inert"
+    );
     key(&mut app, "Ctrl+Shift+E");
-    assert_eq!(app.reading.mode(NOTE), ViewMode::Source);
+    assert_eq!(app.reading.mode(&app.docs, NOTE), ViewMode::Source);
     // The focused source editor routes the new chord, not Ctrl+E.
     let km = Arc::clone(&app.palette.keymap);
     let cs = Modifiers::CTRL | Modifiers::SHIFT;

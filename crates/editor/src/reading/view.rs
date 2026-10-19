@@ -122,6 +122,7 @@ pub fn block_size(heading: Option<u8>) -> f32 {
 #[allow(clippy::too_many_arguments)] // one render site
 pub fn reading<'a>(
     store: &'a ReadingStore,
+    docs: &'a crate::app::Docs,
     views: &'a crate::views::ViewStore,
     path: &'a str,
     view: u64,
@@ -130,7 +131,7 @@ pub fn reading<'a>(
     keys: bool,
     find: Option<ReadingPaint<'_>>,
 ) -> Element<'a, Message> {
-    let Some(doc) = store.doc(path) else {
+    let Some(doc) = store.doc(docs, path) else {
         return text("Rendering…").color(t.text_faint.to_color()).into();
     };
     let cursor = Cell::new(0);
@@ -149,7 +150,7 @@ pub fn reading<'a>(
         cursor: &cursor,
         occ: &occ,
         active: find.and_then(|f| f.active),
-        sel: store.selection(path, view),
+        sel: store.selection(docs, path, view),
     };
     // Fixed slot 0 (properties, `Space` when absent) keeps every body widget at a stable tree
     // position whether or not the note has frontmatter. The filename edit moved to the note

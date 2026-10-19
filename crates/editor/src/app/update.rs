@@ -86,9 +86,10 @@ impl App {
                 if motion && let Some((p, id)) = &active {
                     // Plan round-6 WP-1: any user scroll, motion, edit or key in the source
                     // editor leaves the edge (Ctrl+PgUp/PgDn goes through `go_to_edge`).
-                    self.reading.clear_edge(p, self.view_of(p));
+                    let view = self.view_of(p);
+                    self.reading.clear_edge(&mut self.docs, p, view);
                     // Plan round-5 WP-8: the Source side is now the most recent selecting side.
-                    self.reading.note_source_selection(p, *id);
+                    self.reading.note_source_selection(&mut self.docs, p, *id);
                 }
                 // Plan round-5 WP-9: an edit / motion re-evaluates the `[[` list after it lands.
                 let typed_bracket = matches!(
@@ -160,18 +161,15 @@ impl App {
                 } else {
                     None
                 };
-                let docs: Vec<&crate::source::SourceBuffer> =
-                    self.docs.values().map(|d| &d.buffer).collect();
                 let active = self
                     .panes
                     .get(self.focus)
                     .and_then(PaneState::active_note)
-                    .and_then(|t| self.docs.get(t.path))
-                    .map(|d| &d.buffer);
+                    .map(|t| t.path);
                 let fx = crate::reading::update(
                     &mut self.reading,
                     m,
-                    &docs,
+                    &mut self.docs,
                     active,
                     self.daemon.as_ref(),
                 );
@@ -461,7 +459,7 @@ impl App {
                 Subscription::none()
             },
             iced::keyboard::listen().filter_map(|e| crate::dialog::key_event(&e)),
-            self.reading.subscription(),
+            self.reading.subscription(&self.docs),
             crate::palette::subscription(&self.palette, self.panels.visible),
             // plan round-5 WP-3: a 1 s expiry tick while a notice is up (shares PaletteMsg::Tick).
             if self.status.notice.is_some() && self.palette.jobs.toast.is_none() {

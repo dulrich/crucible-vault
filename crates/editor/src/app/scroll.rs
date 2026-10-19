@@ -15,13 +15,13 @@ impl App {
             crate::message::ReadingMsg::SetMode { path, .. } => path.clone(),
             _ => self.active_note()?.path.to_owned(),
         };
-        let old = self.reading.mode(&path);
+        let old = self.reading.mode(&self.docs, &path);
         let view = self.view_of(&path);
         let line = if old.shows_reading() {
-            let doc = self.reading.doc(&path);
+            let doc = self.reading.doc(&self.docs, &path);
             // Plan round-8 WP-4: the block under the `scroll_anchor` height (top at 0).
             self.reading
-                .anchor_block(&path, view)
+                .anchor_block(&self.docs, &path, view)
                 .and_then(|b| doc?.model.block_lines.get(b).map(|r| r.start))
                 .unwrap_or(0)
         } else {
@@ -43,14 +43,14 @@ impl App {
         old: crate::reading::ViewMode,
         line: usize,
     ) -> Task<Message> {
-        let new = self.reading.mode(path);
+        let new = self.reading.mode(&self.docs, path);
         if new == old {
             return Task::none();
         }
         let view = self.view_of(path);
         // Plan round-6 WP-1: after Ctrl+PgUp/PgDn (not scrolled since) the new mode snaps to
         // that edge instead of carrying a line estimate.
-        if let Some(bottom) = self.reading.edge(path, view) {
+        if let Some(bottom) = self.reading.edge(&self.docs, path, view) {
             if new.shows_source()
                 && !old.shows_source()
                 && let Some(doc) = buf_mut(&mut self.docs, path)
@@ -77,12 +77,12 @@ impl App {
         }
         let above_first = self
             .reading
-            .doc(path)
+            .doc(&self.docs, path)
             .and_then(|d| d.model.block_lines.first())
             .is_none_or(|r| line < r.start);
         if new.shows_reading() && above_first {
             // Frontmatter / leading lines: the properties panel heads the view.
-            self.reading.clear_top_block(path, view);
+            self.reading.clear_top_block(&mut self.docs, path, view);
             return crate::reading::ScrollIntent::ScrollTo {
                 path: path.to_owned(),
                 view,
@@ -91,11 +91,11 @@ impl App {
             .task();
         }
         if new.shows_reading()
-            && let Some(doc) = self.reading.doc(path)
+            && let Some(doc) = self.reading.doc(&self.docs, path)
             && let Some(b) = doc.model.block_for_line(line)
         {
             let blocks = doc.model.blocks.len();
-            return self.reading.carry_to(path, view, blocks, b);
+            return self.reading.carry_to(&mut self.docs, path, view, blocks, b);
         }
         Task::none()
     }
@@ -132,7 +132,7 @@ impl App {
                     .map(|t| t.path.to_owned())
                     .and_then(|p| {
                         let v = self.view_of(&p);
-                        self.reading.restore(&p, v)
+                        self.reading.restore(&mut self.docs, &p, v)
                     })
                     .unwrap_or_else(Task::none);
                 return Task::batch([restore, self.focus_editor()]);
@@ -156,11 +156,15 @@ impl App {
                 };
                 bar.query = q;
                 bar.current = None;
-                bar.search_in(&text, seq, reading_find_runs(&self.reading, &path));
+                bar.search_in(
+                    &text,
+                    seq,
+                    reading_find_runs(&self.reading, &self.docs, &path),
+                );
                 if bar.visible.is_some() {
                     // plan editor-round-4 WP-3: Reading starts at the first visible occurrence
                     // at or below the viewport's top block.
-                    let top = self.reading.top_block(&path, view).unwrap_or(0);
+                    let top = self.reading.top_block(&self.docs, &path, view).unwrap_or(0);
                     let v = bar.visible.as_deref().unwrap_or_default();
                     // A footnote hit (no block) sits below every block.
                     let below = |o: &editor_model::visible::Occurrence| {
@@ -205,7 +209,11 @@ impl App {
                 let Some(bar) = &mut ps.find else {
                     return Task::none();
                 };
-                bar.search_in(&text, seq, reading_find_runs(&self.reading, &path));
+                bar.search_in(
+                    &text,
+                    seq,
+                    reading_find_runs(&self.reading, &self.docs, &path),
+                );
                 let n = bar.len();
                 bar.current = if back {
                     editor_model::find::prev(bar.current, n)
@@ -249,18 +257,21 @@ impl App {
                 // WP-R17 (SR4): a footnote hit — the footnotes follow the last block.
                 return crate::reading::ScrollIntent::SnapTo { path, view, y: 1.0 }.task();
             };
-            self.reading.set_top_block(&path, view, b);
-            let n = self.reading.doc(&path).map_or(0, |d| d.model.blocks.len());
+            self.reading.set_top_block(&mut self.docs, &path, view, b);
+            let n = self
+                .reading
+                .doc(&self.docs, &path)
+                .map_or(0, |d| d.model.blocks.len());
             return crate::reading::probe(&path, view, n, Some(b));
         }
         let range = bar.range();
-        let Some(doc) = buf_mut(&mut self.docs, &path) else {
+        let Some(doc) = buf(&self.docs, &path) else {
             return Task::none();
         };
         let text = doc.text();
         // The rendered counterpart of the source match (none when it is invisible, audit E2).
         bar.counterpart = range.as_ref().and_then(|r| {
-            let d = self.reading.doc(&path)?;
+            let d = self.reading.doc(&self.docs, &path)?;
             let (b, n) = crate::reading::source_counterpart(&d.model, &text, &bar.query, r)?;
             let occ = editor_model::visible::occurrences(&d.runs, &bar.query);
             editor_model::visible::ordinal(&occ, b, n)
@@ -270,19 +281,22 @@ impl App {
         };
         let (l0, c0) = editor_model::find::line_col(&text, r.start);
         let (l1, c1) = editor_model::find::line_col(&text, r.end);
-        let mode = self.reading.mode(&path);
-        if mode.shows_source() {
+        let mode = self.reading.mode(&self.docs, &path);
+        if mode.shows_source()
+            && let Some(doc) = buf_mut(&mut self.docs, &path)
+        {
             doc.select_range((l0, c0), (l1, c1));
         }
         if mode.shows_reading() {
             // Plan round-7 WP-4: the match's block goes to the top and becomes the stored top
             // (a bare proportional snap left it stale, so closing find / a mode switch
             // restored an old place).
-            if let Some(d) = self.reading.doc(&path)
-                && let Some(b) = d.model.block_for_line(l0)
-            {
-                let n = d.model.blocks.len();
-                self.reading.set_top_block(&path, view, b);
+            let hit = self
+                .reading
+                .doc(&self.docs, &path)
+                .and_then(|d| Some((d.model.block_for_line(l0)?, d.model.blocks.len())));
+            if let Some((b, n)) = hit {
+                self.reading.set_top_block(&mut self.docs, &path, view, b);
                 return crate::reading::probe(&path, view, n, Some(b));
             }
             let lines = text.matches('\n').count().max(1);
@@ -306,10 +320,10 @@ impl App {
         let Some(path) = self.active_note().map(|t| t.path.to_owned()) else {
             return Task::none();
         };
-        let mode = self.reading.mode(&path);
+        let mode = self.reading.mode(&self.docs, &path);
         // Plan round-6 WP-1: a later mode switch snaps the other mode to this edge.
         let view = self.view_of(&path);
-        self.reading.set_edge(&path, view, bottom);
+        self.reading.set_edge(&mut self.docs, &path, view, bottom);
         if mode.shows_source()
             && let Some(doc) = buf_mut(&mut self.docs, &path)
         {
@@ -332,9 +346,11 @@ impl App {
 
     /// Re-probes `path`'s reading top block (after a programmatic scroll).
     fn reprobe(&self, path: &str) -> Task<Message> {
-        self.reading.doc(path).map_or_else(Task::none, |d| {
-            crate::reading::probe(path, self.view_of(path), d.model.blocks.len(), None)
-        })
+        self.reading
+            .doc(&self.docs, path)
+            .map_or_else(Task::none, |d| {
+                crate::reading::probe(path, self.view_of(path), d.model.blocks.len(), None)
+            })
     }
 
     /// plan editor-round-4 WP-2: the scrollable plain PageUp/PageDown pages in the focused
@@ -350,12 +366,16 @@ impl App {
                 Some((crate::settings::body_scroll_id(self.settings.section), None))
             }
             TabKind::Log => None,
-            TabKind::Note(path) => self.reading.mode(path).shows_reading().then(|| {
-                (
-                    crate::find::reading_scroll_id(path, self.view_of(path)),
-                    Some(path.to_owned()),
-                )
-            }),
+            TabKind::Note(path) => self
+                .reading
+                .mode(&self.docs, path)
+                .shows_reading()
+                .then(|| {
+                    (
+                        crate::find::reading_scroll_id(path, self.view_of(path)),
+                        Some(path.to_owned()),
+                    )
+                }),
         }
     }
 
@@ -400,7 +420,7 @@ impl App {
     /// Refocuses the focused pane's source editor (when it shows one).
     fn focus_editor(&self) -> Task<Message> {
         match self.active_note() {
-            Some(t) if self.reading.mode(t.path).shows_source() => {
+            Some(t) if self.reading.mode(&self.docs, t.path).shows_source() => {
                 iced::widget::operation::focus(crate::source::editor_id(t.path))
             }
             _ => Task::none(),
@@ -429,7 +449,7 @@ impl App {
         }
         self.focus = pane;
         match self.active_note() {
-            Some(t) if self.reading.mode(t.path).shows_source() => self.focus_editor(),
+            Some(t) if self.reading.mode(&self.docs, t.path).shows_source() => self.focus_editor(),
             _ => iced::widget::operation::focus(iced::widget::Id::new("hover-focus-none")),
         }
     }
@@ -439,9 +459,10 @@ impl App {
 /// `path` in Reading mode with a render; `None` (source matches drive the bar) otherwise.
 fn reading_find_runs<'a>(
     reading: &'a crate::reading::ReadingStore,
+    docs: &'a super::Docs,
     path: &str,
 ) -> Option<&'a [editor_model::visible::VisRun]> {
-    (reading.mode(path) == crate::reading::ViewMode::Reading)
-        .then(|| reading.doc(path).map(|d| d.runs.as_slice()))
+    (reading.mode(docs, path) == crate::reading::ViewMode::Reading)
+        .then(|| reading.doc(docs, path).map(|d| d.runs.as_slice()))
         .flatten()
 }
