@@ -546,6 +546,28 @@ fn capture_whole_note_modes_and_targets() {
     );
 }
 
+/// SR7: capture writes through `modify` — a concurrent edit between its read and CAS write is
+/// kept and the capture re-applied; a race on every attempt defers (`Wait`), never fails.
+#[test]
+fn capture_concurrent_edit_reapplies_and_persistent_race_defers() {
+    let env = Env::new(&[("b.md", "first\n"), ("c.md", "first\n")]);
+    let app = "type = \"capture\"\ntarget = \"active\"\nmode = \"append\"";
+    super::race::inject(&env.vault, "b.md", 1, |t| format!("{t}racer\n"));
+    let o = env
+        .run(app, json!({"value": "tail"}), active("b.md"))
+        .unwrap();
+    assert_eq!(o.output_paths, vec!["b.md".to_owned()]);
+    assert_eq!(env.read("b.md").unwrap(), "first\nracer\n\ntail");
+    super::race::inject(&env.vault, "c.md", super::MODIFY_ATTEMPTS, |t| {
+        format!("{t}x\n")
+    });
+    assert_eq!(
+        env.run(app, json!({"value": "tail"}), active("c.md")),
+        Err(StepError::conflict())
+    );
+    assert_eq!(env.read("c.md").unwrap(), "first\nx\nx\nx\n");
+}
+
 #[test]
 fn capture_monthly_observation_uses_selection_and_source_link() {
     let env = Env::new(&[("src/Idea.md", "text\n")]);

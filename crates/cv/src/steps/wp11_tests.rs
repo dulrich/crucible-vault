@@ -335,34 +335,63 @@ fn strips_data_image_placeholders_and_already_localized_note_is_untouched() {
     assert_eq!(env.file("n.md"), before);
 }
 
+/// SR7: the note is read for the write only after the download, so an edit made while
+/// downloading is kept and the ref rewrite applies on top of it (no CAS across the network).
 #[test]
-fn concurrent_edit_during_download_is_a_conflict_not_a_clobber() {
+fn concurrent_edit_during_download_is_kept_and_refs_reapplied() {
     let img = png(3);
-    let edited = b"user edit while downloading\n".to_vec();
-    let vault_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let vault_slot: Arc<Mutex<Option<(PathBuf, String)>>> = Arc::new(Mutex::new(None));
     let slot2 = Arc::clone(&vault_slot);
-    let edited2 = edited.clone();
     let hook: Hook = Arc::new(move |_| {
-        if let Some(v) = slot2.lock().unwrap().as_ref() {
-            std::fs::write(v.join("n.md"), &edited2).unwrap();
+        if let Some((v, note)) = slot2.lock().unwrap().as_ref() {
+            std::fs::write(v.join("n.md"), format!("user edit\n{note}")).unwrap();
         }
     });
-    let routes = HashMap::from([route("/x.png", "image/png", img)]);
+    let routes = HashMap::from([route("/x.png", "image/png", img.clone())]);
     let (env, res) = with_server(routes, Some(hook), move |port, _| {
         let note = format!("![](http://127.0.0.1:{port}/x.png)\n");
         let env = env(&[("n.md", note.as_bytes())]);
-        *vault_slot.lock().unwrap() = Some(env.vault());
+        *vault_slot.lock().unwrap() = Some((env.vault(), note));
         let step = env.step("");
         let res = env.run(&step, "n.md");
         (env, res)
     });
-    match res {
-        Err(StepError::Failed { message, .. }) => {
-            assert!(message.contains("conflict"), "{message}")
-        }
-        other => panic!("expected a conflict, got {other:?}"),
-    }
-    assert_eq!(env.file("n.md"), Some(edited));
+    let out = res.unwrap();
+    assert_eq!(out.vars.get("changed"), Some(&Value::Bool(true)));
+    let m = localize::md5_hex(&img);
+    assert_eq!(
+        env.text("n.md"),
+        format!("user edit\n![](_attachments/n/{m}_MD5.png)\n")
+    );
+}
+
+/// SR7: a CAS race between `modify`'s read and write re-applies the rewrite on the edited
+/// text; a race on every attempt defers (`Wait`) and never clobbers.
+#[test]
+fn write_race_reapplies_then_persistent_race_defers() {
+    let img = png(6);
+    let routes = HashMap::from([route("/y.png", "image/png", img.clone())]);
+    let (env, first, second) = with_server(routes, None, move |port, _| {
+        let note = format!("![](http://127.0.0.1:{port}/y.png)\n");
+        let env = env(&[("n.md", note.as_bytes()), ("m.md", note.as_bytes())]);
+        super::race::inject(&env.vault(), "n.md", 1, |t| format!("{t}racer\n"));
+        let step = env.step("");
+        let first = env.run(&step, "n.md");
+        super::race::inject(&env.vault(), "m.md", super::MODIFY_ATTEMPTS, |t| {
+            format!("{t}x\n")
+        });
+        let second = env.run(&step, "m.md");
+        (env, first, second)
+    });
+    let m = localize::md5_hex(&img);
+    assert!(first.is_ok(), "{first:?}");
+    assert_eq!(
+        env.text("n.md"),
+        format!("![](_attachments/n/{m}_MD5.png)\nracer\n")
+    );
+    assert_eq!(second, Err(StepError::conflict()));
+    assert!(env.text("m.md").ends_with("x\nx\nx\n"));
+    assert!(env.text("m.md").contains("http://127.0.0.1"));
 }
 
 #[test]
@@ -580,6 +609,60 @@ fn folder_backfill_throttle_is_not_a_permanent_failure() {
     // Run 2: b is re-selected (still throttled) — progress waits on the host, nothing is lost.
     assert_eq!((v(1, "throttled"), v(1, "unattempted_remaining")), (1, 2));
     assert!(env.text("daily/b.md").contains("throttle.png"));
+}
+
+/// SR7: a folder-scope note whose write keeps losing CAS races is never recorded as ignored —
+/// it stays eligible, and a later run localizes it.
+#[test]
+fn folder_backfill_conflict_is_not_recorded() {
+    let img = png(10);
+    let routes = HashMap::from([route("/ok.png", "image/png", img)]);
+    let (env, outs) = with_server(routes, None, move |port, _| {
+        let ok = format!("![](http://127.0.0.1:{port}/ok.png)\n");
+        let env = env(&[("daily/a.md", ok.as_bytes()), ("daily/b.md", ok.as_bytes())]);
+        super::race::inject(&env.vault(), "daily/a.md", super::MODIFY_ATTEMPTS, |t| {
+            format!("{t}edit\n")
+        });
+        let step = env.step("scope = \"folder\"\nfolder = \"daily\"\nlimit = 10");
+        let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
+        (env, outs)
+    });
+    assert!(
+        ignored(&env).is_empty(),
+        "a conflicted note is never recorded"
+    );
+    assert_eq!(
+        (var(&outs[0], "localized"), var(&outs[0], "failed")),
+        (1, 0)
+    );
+    assert_eq!(
+        (var(&outs[1], "localized"), var(&outs[1], "failed")),
+        (1, 0)
+    );
+    assert!(env.text("daily/a.md").contains("_MD5.png"));
+    assert!(env.text("daily/a.md").ends_with("edit\nedit\nedit\n"));
+}
+
+/// WP-R9 decision: a note-scope download the host throttles (429) is a transient failure on
+/// the `localize` breaker key — the step defers instead of succeeding with refs left.
+#[test]
+fn note_scope_throttle_defers_on_the_breaker_key() {
+    let (env, res) = with_server(HashMap::new(), None, move |port, _| {
+        let note = format!("![](http://127.0.0.1:{port}/throttle.png)\n");
+        let env = env(&[("n.md", note.as_bytes())]);
+        let step = env.step("");
+        let res = env.run(&step, "n.md");
+        (env, res)
+    });
+    assert_eq!(
+        res,
+        Err(StepError::Deferred {
+            retry_after_ms: super::TRANSIENT_BASE_MS,
+            service: Some(localize::SERVICE.into()),
+            cause: DeferCause::Transient(cv_state::ServiceFailureKind::RateLimited),
+        })
+    );
+    assert!(env.text("n.md").contains("throttle.png"));
 }
 
 #[test]

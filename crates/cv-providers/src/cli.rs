@@ -113,11 +113,10 @@ fn run_blocking(inv: &CliInvocation, cwd: Option<&str>, timeout: Duration) -> Re
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(ProviderError::Cli(format!(
-                    "{} timed out after {}ms",
-                    inv.command,
-                    timeout.as_millis()
-                )));
+                return Err(ProviderError::CliTimeout {
+                    command: inv.command.clone(),
+                    ms: timeout.as_millis(),
+                });
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => return Err(ProviderError::Cli(format!("wait: {e}"))),

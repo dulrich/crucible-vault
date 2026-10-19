@@ -22,7 +22,7 @@
 //!
 //! Failures: an invalid row (unsupported method, non-http(s) link) is counted `invalid` and
 //! logged; a feed failing (HTTP or parse) is counted `failed`; every feed failing with a service
-//! error settles deferred (`fetch_disposition`). Outcome vars: `sources`, `new`, `lines`,
+//! error settles deferred (`StepError::from_fetch`). Outcome vars: `sources`, `new`, `lines`,
 //! `notes`, `failed`, `invalid`, `localize_failed` (+ `disabled` when `[blogs] enabled = false`).
 //! No step params. A full-body captured note is localized inline (remote images → `_MD5`
 //! attachments); a localize failure is logged and counted, never fails the capture.
@@ -318,7 +318,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             Err(e) => {
                 failed += 1;
                 tracing::warn!(source = %row.name, error = %e, "track_blogs: feed failed");
-                let d = super::super::fetch_disposition(&e);
+                let d = StepError::from_fetch(&e);
                 if matches!(d, StepError::Deferred { .. }) && deferred.is_none() {
                     deferred = Some(d);
                 }

@@ -409,3 +409,40 @@ async fn local_completions_serialize_but_embed_is_exempt() {
     gate.notify_one();
     second.await.unwrap().unwrap();
 }
+
+// SR8: a non-200 body never reaches the error's Display (debug log only).
+#[tokio::test]
+async fn http_error_display_drops_the_body() {
+    let m = mock(fixed(503, json!({"error": "secret-echo"}))).await;
+    let p = provider("openai-compatible", &m.base, "");
+    let e = manager().complete(&p, "m", req(None)).await.unwrap_err();
+    let msg = e.to_string();
+    assert!(msg.contains("HTTP 503"), "{msg}");
+    assert!(!msg.contains("secret-echo"), "{msg}");
+    assert_eq!(e.failure().kind, cv_providers::FailureKind::Server);
+}
+
+// SR8: a server that accepts but never answers times out per the provider's `timeout_seconds`
+// and classifies as `FailureKind::Timeout`.
+#[tokio::test]
+async fn http_request_times_out_per_provider_timeout() {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = l.accept().await {
+            held.push(s); // never respond
+        }
+    });
+    let p = provider("openai-compatible", &base, "timeout_seconds = 1\n");
+    let started = std::time::Instant::now();
+    let e = tokio::time::timeout(
+        Duration::from_secs(10),
+        manager().complete(&p, "m", req(None)),
+    )
+    .await
+    .expect("the provider timeout fires first")
+    .unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(e.failure().kind, cv_providers::FailureKind::Timeout, "{e}");
+}

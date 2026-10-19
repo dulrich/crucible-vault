@@ -28,7 +28,7 @@ use super::web::{
     append_link, block_on, client, create_or_found, find_in_subfolders, link_targets, record_usage,
     secret,
 };
-use super::{StepCtx, StepError, StepModule, StepOutcome, fetch_disposition};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// The secret name (env var or `~/.config/crucible-vault/YOUTUBE_API_KEY`).
 pub const API_KEY_SECRET: &str = "YOUTUBE_API_KEY";
@@ -203,7 +203,7 @@ pub(crate) fn ensure_metadata_note(
             record_usage(ctx, api::SERVICE, 1);
             None
         }
-        Err(e) => return Err(fetch_disposition(&e)),
+        Err(e) => return Err(StepError::from_fetch(&e)),
     };
     write_metadata_note(ctx, id, video)
 }
@@ -326,11 +326,15 @@ fn metadata(video_id: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome
         out.push_output(path.clone());
     }
 
-    // (d) Link onto the source note (CAS).
-    if let (Some(p), Some((_, hash)), Some(mut d)) = (active, note, doc) {
+    // (d) Link onto the source note: re-read after the fetch and CAS-written through
+    // `modify` (SR7), so an edit made during the fetch is kept.
+    if let (Some(p), Some(_)) = (active, note) {
         let link = format!("[[{}]]", path.strip_suffix(".md").unwrap_or(&path));
-        if append_link(&mut d, "yt-video-id", "yt-metadata", &link)? {
-            ctx.write(&p, d.into_text().into_bytes(), Some(hash))?;
+        let linked = ctx.modify(&p, |cur| {
+            let mut d = FrontmatterDoc::new(cur.to_owned());
+            Ok(append_link(&mut d, "yt-video-id", "yt-metadata", &link)?.then(|| d.into_text()))
+        })?;
+        if linked.is_some() {
             out.push_output(p);
             v.linked = true;
         }
@@ -361,7 +365,7 @@ fn channel_enrich(
     }
     let root = metadata_root(ctx);
     let existing = find_about(ctx, &root, &channel_id)?;
-    if let Some((p, _, age_days)) = &existing
+    if let Some((p, age_days)) = &existing
         && !force
         && age_days.is_some_and(|a| a < max_age_days)
     {
@@ -374,7 +378,7 @@ fn channel_enrich(
     let key = secret(API_KEY_SECRET).ok_or_else(no_key)?;
     let c = client()?;
     let items = block_on(youtube().channels(c, &key, &[channel_id.as_str()]))?
-        .map_err(|e| fetch_disposition(&e))?;
+        .map_err(|e| StepError::from_fetch(&e))?;
     record_usage(ctx, api::SERVICE, 1);
     let ch = items
         .into_iter()
@@ -397,21 +401,20 @@ fn channel_enrich(
         video_count: ch.statistics.video_count,
         view_count: ch.statistics.view_count,
     };
-    let body = channel_about_note(&meta, &iso_now()).into_bytes();
+    let body = channel_about_note(&meta, &iso_now());
+    // The about note is regenerated whole after the fetch: written through `modify` (SR7) so
+    // the CAS hash is the one read now, not the one read before the round-trip.
     let path = match existing {
-        Some((p, hash, _)) => {
-            ctx.write(&p, body, Some(hash))?;
+        Some((p, _)) => {
+            ctx.modify(&p, |_| Ok(Some(body.clone())))?;
             p
         }
         None => {
             let p = format!("{root}/{}/about.md", channel_folder(ctx, &id, &meta.title));
-            match ctx.read(&p)? {
-                Some((_, hash)) => {
-                    ctx.write(&p, body, Some(hash))?;
-                }
-                None => {
-                    create_or_found(ctx, &p, body)?;
-                }
+            if ctx.read(&p)?.is_some() {
+                ctx.modify(&p, |_| Ok(Some(body.clone())))?;
+            } else {
+                create_or_found(ctx, &p, body.into_bytes())?;
             }
             p
         }
@@ -424,12 +427,12 @@ fn channel_enrich(
     Ok(out)
 }
 
-/// `findExistingChannelAboutNote` + `channelAboutAgeMs`: `(path, hash, age in whole days)`.
+/// `findExistingChannelAboutNote` + `channelAboutAgeMs`: `(path, age in whole days)`.
 fn find_about(
     ctx: &StepCtx<'_>,
     root: &str,
     channel_id: &str,
-) -> Result<Option<(String, cv_vault::ContentHash, Option<i64>)>, StepError> {
+) -> Result<Option<(String, Option<i64>)>, StepError> {
     let Ok(rd) = std::fs::read_dir(ctx.vault_root.join(root)) else {
         return Ok(None);
     };
@@ -441,7 +444,7 @@ fn find_about(
     dirs.sort();
     for d in dirs {
         let p = format!("{root}/{d}/about.md");
-        let Some((bytes, hash)) = ctx.read(&p)? else {
+        let Some((bytes, _)) = ctx.read(&p)? else {
             continue;
         };
         let doc = FrontmatterDoc::new(String::from_utf8_lossy(&bytes).into_owned());
@@ -451,7 +454,7 @@ fn find_about(
         let age = str_prop(doc.get("fetched_at").ok().flatten())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days());
-        return Ok(Some((p, hash, age)));
+        return Ok(Some((p, age)));
     }
     Ok(None)
 }

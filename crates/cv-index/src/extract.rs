@@ -37,6 +37,18 @@ pub fn is_parsed_path(path: &str) -> bool {
         })
 }
 
+/// The tag names of a note exactly as the index records them (ofm's parse, D12: frontmatter
+/// `tags` plus inline `#tags`, never inside code), in parse order. Used by the step guard's
+/// `tag`/`not_tag` so guards and views agree about a note's tags (SR11).
+#[must_use]
+pub fn note_tags(source: &str) -> Vec<String> {
+    ofm::parse(source)
+        .tags
+        .into_iter()
+        .map(|t| t.name)
+        .collect()
+}
+
 pub(crate) struct LinkIn {
     pub kind: LinkKind,
     pub raw: String,

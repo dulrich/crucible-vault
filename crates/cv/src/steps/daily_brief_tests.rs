@@ -401,3 +401,36 @@ fn brief_absent_section_appended_once_then_skips() {
     assert_eq!(w.hits.load(Ordering::SeqCst), hits);
     assert_eq!(read(&w, &p), text);
 }
+
+/// SR7: a concurrent edit between the brief's read and its CAS write is kept and the brief is
+/// re-applied on top of it.
+#[test]
+fn brief_concurrent_edit_is_kept_and_brief_reapplied() {
+    let p = today_path();
+    let w = world(
+        &[(&p, "# Day\n\n# Daily Brief\n\n# Notes\nkeep\n")],
+        vec![("/fx", 200, FX_OK), ("/wx/forecast", 200, WX_OK)],
+        BRIEF_CFG,
+    );
+    crate::steps::race::inject(&w.vault, &p, 1, |t| format!("{t}racer\n"));
+    let o = brief(&w).unwrap();
+    assert_eq!(o.vars["skipped"], json!(false));
+    let text = read(&w, &p);
+    assert!(text.contains("# Daily Brief\n\n**FX Rates**"), "{text}");
+    assert!(text.ends_with("# Notes\nkeep\nracer\n"), "{text}");
+}
+
+/// SR7: a section filled by a concurrent edit is not appended to a second time.
+#[test]
+fn brief_section_filled_meanwhile_skips() {
+    let p = today_path();
+    let w = world(
+        &[(&p, "# Day\n\n# Daily Brief\n")],
+        vec![("/fx", 200, FX_OK), ("/wx/forecast", 200, WX_OK)],
+        BRIEF_CFG,
+    );
+    crate::steps::race::inject(&w.vault, &p, 1, |t| format!("{t}filled\n"));
+    let o = brief(&w).unwrap();
+    assert_eq!(o.vars["skipped"], json!(true));
+    assert_eq!(read(&w, &p), "# Day\n\n# Daily Brief\nfilled\n");
+}

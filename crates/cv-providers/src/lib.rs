@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod failure;
 pub mod limiter;
 pub mod manager;
 pub mod refs;
@@ -17,6 +18,7 @@ pub mod wire;
 
 pub use config::{Capability, ModelConfig, ProviderConfig, ProviderKind, ProvidersConfig};
 pub use error::{ProviderError, Result};
+pub use failure::{Failure, FailureKind};
 pub use manager::{CompletionRequest, ImagePart, ProviderManager};
 pub use refs::{ProviderModelRef, parse_model_ref};
 pub use secrets::{SecretSource, SystemSecrets};

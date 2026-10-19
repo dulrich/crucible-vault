@@ -1451,7 +1451,12 @@ pub static PROVIDER: Record = Record {
         field("args", "Args", "CLI: prepended args", STR_LIST),
         field("extra_args", "Extra args", "CLI: appended args", STR_LIST),
         field("cwd", "Working dir", "CLI working directory", Node::Str),
-        field("timeout_seconds", "Timeout (s)", "CLI timeout", UINT),
+        field(
+            "timeout_seconds",
+            "Timeout (s)",
+            "Request timeout: CLI and HTTP providers (HTTP default 600)",
+            UINT,
+        ),
         field(
             "models",
             "Models",

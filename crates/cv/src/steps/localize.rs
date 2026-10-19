@@ -32,6 +32,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use cv_actions::{ConfigSet, StepKind};
+use cv_providers::FailureKind;
+use cv_providers::web::{FetchError, FetchRequest, Limited, WebClient};
 use cv_vault::VaultError;
 use regex::Regex;
 use serde::Serialize;
@@ -994,13 +996,16 @@ impl StepModule for Localize {
 // I/O: download + convert
 // ---------------------------------------------------------------------------------------------
 
+/// The breaker key of localize's attachment downloads (shared host gate, B8).
+pub(crate) const SERVICE: &str = "localize";
+
 /// Why one download failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DownloadError {
     /// Connect/timeout: the network (or host) is unreachable.
     Unreachable,
-    /// HTTP 429 / 503: the host asks us to come back later (not a property of the image).
-    Throttled,
+    /// HTTP 429 / 5xx: the host asks us to come back later (not a property of the image).
+    Throttled(FetchError),
     /// The response's type (Content-Type, else the URL extension) is not an eligible
     /// attachment; the body was not read.
     NotEligible,
@@ -1008,58 +1013,40 @@ enum DownloadError {
     Failed(String),
 }
 
+/// One attachment download through the shared [`WebClient::fetch_limited`] (host gate +
+/// breaker key [`SERVICE`]), keeping localize's decide-from-headers rule: a page
+/// (`text/*`, XHTML) is never an attachment, whatever the URL's extension says; otherwise the
+/// extension comes from the Content-Type, else the URL, and must be `eligible` — all before the
+/// body is read.
 fn download(
-    client: &reqwest::Client,
+    client: &WebClient,
     handle: &tokio::runtime::Handle,
     url: &str,
     max_bytes: u64,
+    timeout: Duration,
     eligible: impl Fn(&str) -> bool,
 ) -> Result<(Vec<u8>, String), DownloadError> {
-    let classify = |e: reqwest::Error| {
-        if e.is_connect() || e.is_timeout() {
-            DownloadError::Unreachable
-        } else {
-            DownloadError::Failed(e.to_string())
+    let mut req = FetchRequest::get(SERVICE, url);
+    req.timeout = Some(timeout);
+    let decide = |ctype: &str| {
+        if is_page_mime(ctype) {
+            return None;
         }
-    };
-    handle.block_on(async {
-        let resp = client.get(url).send().await.map_err(classify)?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-        {
-            return Err(DownloadError::Throttled);
-        }
-        if !status.is_success() {
-            return Err(DownloadError::Failed(format!("http {status}")));
-        }
-        if resp.content_length().is_some_and(|n| n > max_bytes) {
-            return Err(DownloadError::Failed("too large".into()));
-        }
-        let ctype = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_owned();
-        // Content-type aware: decide from the headers, before reading the body. A page
-        // (`text/*`, XHTML) is never an attachment, whatever the URL's extension says.
-        if is_page_mime(&ctype) {
-            return Err(DownloadError::NotEligible);
-        }
-        let ext = ext_from_mime(&ctype)
+        let ext = ext_from_mime(ctype)
             .map(str::to_owned)
             .or_else(|| ext_from_url(url))
             .unwrap_or_else(|| "bin".into());
-        if !eligible(&ext) {
-            return Err(DownloadError::NotEligible);
-        }
-        let bytes = resp.bytes().await.map_err(classify)?;
-        if bytes.len() as u64 > max_bytes {
-            return Err(DownloadError::Failed("too large".into()));
-        }
-        Ok((bytes.to_vec(), ext))
-    })
+        eligible(&ext).then_some(ext)
+    };
+    match handle.block_on(client.fetch_limited(req, max_bytes, decide)) {
+        Ok(Limited::Body(bytes, ext)) => Ok((bytes, ext)),
+        Ok(Limited::Rejected) => Err(DownloadError::NotEligible),
+        Err(e) => Err(match e.failure().kind {
+            FailureKind::Connect | FailureKind::Timeout => DownloadError::Unreachable,
+            FailureKind::RateLimited | FailureKind::Server => DownloadError::Throttled(e),
+            _ => DownloadError::Failed(e.to_string()),
+        }),
+    }
 }
 
 /// Crucible `convertImage`: re-encode, and keep the result only when it is smaller; any decode
@@ -1181,8 +1168,10 @@ struct Counts {
     stripped: u64,
     failed: u64,
     unreachable: u64,
-    /// Downloads refused with 429/503 (also counted in `failed`).
+    /// Downloads refused with 429/5xx (also counted in `failed`).
     throttled: u64,
+    /// The first throttled download's failure (a note-scope run defers on it).
+    first_throttle: Option<FetchError>,
     /// Remote refs left as-is because they are not eligible attachments (embed pages, or a
     /// response type outside the whitelists) — not failures.
     ineligible: u64,
@@ -1193,7 +1182,7 @@ struct Counts {
 /// Per-run state shared by the remote/local processors.
 struct Run<'p> {
     p: &'p Params,
-    client: Option<reqwest::Client>,
+    client: Option<&'static WebClient>,
     handle: Option<tokio::runtime::Handle>,
     counts: Counts,
 }
@@ -1251,7 +1240,7 @@ impl Run<'_> {
         note: &Note<'_>,
         m: &AttachmentMatch,
     ) -> Result<Option<String>, StepError> {
-        let (Some(client), Some(handle)) = (self.client.as_ref(), self.handle.as_ref()) else {
+        let (Some(client), Some(handle)) = (self.client, self.handle.as_ref()) else {
             return Err(StepError::failed("no async runtime"));
         };
         if is_embed_page(&m.link) {
@@ -1260,7 +1249,9 @@ impl Run<'_> {
         }
         self.counts.remote_attempts += 1;
         let p = self.p;
-        let (bytes, ext) = match download(client, handle, &m.link, p.max_bytes, |e| p.eligible(e)) {
+        let (bytes, ext) = match download(client, handle, &m.link, p.max_bytes, p.timeout, |e| {
+            p.eligible(e)
+        }) {
             Ok(d) => d,
             Err(DownloadError::NotEligible) => {
                 // Crucible: "ext not eligible (left as-is)" — not a failure.
@@ -1272,7 +1263,10 @@ impl Run<'_> {
                 self.counts.failed += 1;
                 match e {
                     DownloadError::Unreachable => self.counts.unreachable += 1,
-                    DownloadError::Throttled => self.counts.throttled += 1,
+                    DownloadError::Throttled(f) => {
+                        self.counts.throttled += 1;
+                        self.counts.first_throttle.get_or_insert(f);
+                    }
                     DownloadError::Failed(_) | DownloadError::NotEligible => {}
                 }
                 return Ok(None);
@@ -1400,6 +1394,12 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
     }
     let path = ctx_note_path(p, ctx)?;
     let (vars, output_paths) = execute_note(p, &path, ctx)?;
+    // A host that throttled (429/5xx) is a transient service failure (WP-R9 decision): what
+    // could be localized has landed; the step defers on the breaker key so the throttled refs
+    // are retried later.
+    if let Some(e) = &vars.throttle {
+        return Err(StepError::from_fetch(e));
+    }
     let mut out = StepOutcome {
         output_paths,
         ..StepOutcome::default()
@@ -1416,6 +1416,9 @@ struct NoteVars {
     images: u64,
     #[serde(flatten)]
     counts: Option<NoteCounts>,
+    /// The first throttled download (not a var).
+    #[serde(skip)]
+    throttle: Option<FetchError>,
 }
 
 /// The download/rewrite counts of a localized `.md` note.
@@ -1456,7 +1459,7 @@ fn lock_state<'c>(
 /// Folder-scope backfill: candidates are `.md` under `folder` (sorted) with remote/data image
 /// refs that are not recorded under [`BACKFILL_KIND`]; at most `limit` are attempted. A note
 /// whose localize errs, or that still has such refs afterwards, is recorded (never re-selected).
-/// A note whose downloads were throttled (429/503) is neither recorded nor counted as attempted,
+/// A note whose downloads were throttled (429/5xx) is neither recorded nor counted as attempted,
 /// and ends the batch: the host is rate-limiting, so a later run retries it (`throttled = 1`).
 /// A note left only with refs that are not eligible attachments (embed pages excluded up front;
 /// e.g. a URL serving HTML) is settled — recorded so it is not re-selected, counted `ineligible`,
@@ -1521,6 +1524,15 @@ fn execute_folder(
                 }
                 left.then(|| format!("{failed_refs} download(s) failed; refs remain"))
             }
+            Err(StepError::Deferred {
+                cause: super::DeferCause::Wait,
+                ..
+            }) => {
+                // A CAS conflict (SR7): never recorded as ignored — the note stays eligible
+                // and a later run retries it.
+                attempted -= 1;
+                continue;
+            }
             Err(e @ StepError::Deferred { .. }) => return Err(e),
             Err(e) => Some(e.to_string()),
         };
@@ -1569,7 +1581,7 @@ fn execute_note(
         return Ok((NoteVars::default(), Vec::new()));
     }
     let note = Note::new(&path);
-    let Some((bytes, hash)) = ctx.read(&path)? else {
+    let Some((bytes, _)) = ctx.read(&path)? else {
         return Err(StepError::failed(format!("localize: {path} not found")));
     };
     let content = String::from_utf8(bytes)
@@ -1590,13 +1602,7 @@ fn execute_note(
         if run.handle.is_none() {
             return Err(StepError::failed("no async runtime"));
         }
-        run.client = Some(
-            reqwest::Client::builder()
-                .timeout(p.timeout)
-                .connect_timeout(p.timeout)
-                .build()
-                .map_err(|e| StepError::failed(format!("http client: {e}")))?,
-        );
+        run.client = Some(super::web::client()?);
     }
     let needs_view = p.repair || matches.iter().any(|m| !m.is_remote);
     let view = if needs_view {
@@ -1693,22 +1699,31 @@ fn execute_note(
         });
     }
 
-    let rewritten = rewrite_localized_attachment_refs(&content, &replacements);
-    let mut updated = rewritten.content;
-    if placeholders > 0 {
-        updated = strip_data_uri_image_placeholders(&updated).0;
-    }
-    let changed = updated != content;
-    // Managed image references left in the note after the pass (localized + reused + earlier).
-    let images = managed_image_re().find_iter(&updated).count() as u64;
+    // The one note write (I2), after every download (SR7): `modify` re-reads the note and
+    // re-applies the ref replacements to its current text, so an edit made while downloading
+    // is kept, and a lost CAS race re-applies rather than fails.
+    let mut applied_from: Vec<String> = Vec::new();
+    let mut images = 0_u64;
+    let strip = placeholders > 0;
+    let written = ctx.modify(&path, |cur| {
+        let rewritten = rewrite_localized_attachment_refs(cur, &replacements);
+        let mut updated = rewritten.content;
+        if strip {
+            updated = strip_data_uri_image_placeholders(&updated).0;
+        }
+        // Managed image references left in the note after the pass (localized + reused +
+        // earlier).
+        images = managed_image_re().find_iter(&updated).count() as u64;
+        applied_from = rewritten.applied_from;
+        Ok((updated != cur).then_some(updated))
+    })?;
+    let changed = written.is_some();
     let mut output_paths = run.counts.created.clone();
     if changed {
-        // The one note write, CAS against the hash read at the start (I2).
-        ctx.write(&path, updated.into_bytes(), Some(hash))?;
         output_paths.push(path.clone());
         // Retire re-homed local sources no other note references (Crucible processLocal's
         // trash, after the write so a conflict never strands the note's refs).
-        let applied: HashSet<&str> = rewritten.applied_from.iter().map(String::as_str).collect();
+        let applied: HashSet<&str> = applied_from.iter().map(String::as_str).collect();
         for (from, old) in retire {
             let keep = !applied.contains(from.as_str())
                 || view
@@ -1729,7 +1744,7 @@ fn execute_note(
     }
     run.counts.stripped = if changed { placeholders as u64 } else { 0 };
     let c = &run.counts;
-    let applied = rewritten.applied_from.len() as u64;
+    let applied = applied_from.len() as u64;
     let mut counts = NoteCounts {
         downloaded: c.downloaded,
         reused: c.reused,
@@ -1755,6 +1770,7 @@ fn execute_note(
         changed,
         images,
         counts: Some(counts),
+        throttle: run.counts.first_throttle.take(),
     };
     Ok((vars, output_paths))
 }

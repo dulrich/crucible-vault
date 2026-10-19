@@ -33,7 +33,7 @@ use super::web::{
     api_base, append_link, block_on, client, create_or_found, find_in_subfolders, link_targets,
     record_usage,
 };
-use super::{StepCtx, StepError, StepModule, StepOutcome, fetch_disposition};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// Statuses ensured per `x_discover`/`x_backfill` run by default.
 pub const DEFAULT_LIMIT: i64 = 50;
@@ -170,7 +170,7 @@ fn ensure_note(
             )?;
             return Ok((path, made, true));
         }
-        Err(e) => return Err(fetch_disposition(&e)),
+        Err(e) => return Err(StepError::from_fetch(&e)),
     };
     let path = format!(
         "{root}/{}/{id}.md",

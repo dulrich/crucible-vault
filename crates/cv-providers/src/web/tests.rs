@@ -137,7 +137,8 @@ async fn statuses_classify_and_never_leak_the_url() {
         FetchError::Transient {
             service: "yt".into(),
             retry_after: Some(Duration::from_secs(7)),
-            detail: "HTTP 429".into()
+            kind: crate::failure::FailureKind::RateLimited,
+            detail: format!("HTTP {}", 429)
         }
     );
     // Network failure (nothing listens on port 1).
@@ -179,6 +180,7 @@ async fn classifier_overrides_and_timeout_is_transient() {
         FetchError::Transient {
             service: "svc".into(),
             retry_after: None,
+            kind: crate::failure::FailureKind::Timeout,
             detail: "timeout".into()
         }
     );

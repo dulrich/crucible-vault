@@ -436,21 +436,30 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
         return Ok(out);
     }
 
-    let (bytes, hash) = ctx
-        .read(&path)?
-        .ok_or_else(|| StepError::failed("capture target note not found"))?;
-    let existing =
-        String::from_utf8(bytes).map_err(|_| StepError::failed("capture target is not UTF-8"))?;
+    if ctx.read(&path)?.is_none() {
+        return Err(StepError::failed("capture target note not found"));
+    }
     let fixed = p.section.clone().filter(|x| !x.trim().is_empty());
-    let section = if p.section_from_source {
-        source_heading
-            .filter(|h| find_section_range(&existing, h).is_some())
-            .or(fixed)
-    } else {
-        fixed
-    };
-    if let Some(new) = apply(&existing, &content, content_raw, mode, section.as_deref()) {
-        ctx.write(&path, new.into_bytes(), Some(hash))?;
+    // Re-appliable on a concurrent edit (SR7): the section and the "already present" check
+    // are decided on the text read for each attempt.
+    let written = ctx.modify(&path, |existing| {
+        let section = if p.section_from_source {
+            source_heading
+                .clone()
+                .filter(|h| find_section_range(existing, h).is_some())
+                .or_else(|| fixed.clone())
+        } else {
+            fixed.clone()
+        };
+        Ok(apply(
+            existing,
+            &content,
+            content_raw,
+            mode,
+            section.as_deref(),
+        ))
+    })?;
+    if written.is_some() {
         out.push_output(path);
     }
     Ok(out)

@@ -495,7 +495,7 @@ async fn replace_mode_cas_write() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replace_mode_conflict_never_clobbers() {
+async fn replace_mode_conflict_defers_and_never_clobbers() {
     let slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let s2 = Arc::clone(&slot);
     let mut reply = ok_reply("clobber", "stop");
@@ -516,9 +516,14 @@ async fn replace_mode_conflict_never_clobbers() {
     )
     .await
     .unwrap_err();
-    assert!(
-        matches!(&err, StepError::Failed { message, .. } if message.to_lowercase().contains("conflict")),
-        "{err:?}"
+    // SR7: Replace keeps strict CAS (its output is not re-appliable) but a lost race defers.
+    assert_eq!(
+        err,
+        StepError::Deferred {
+            retry_after_ms: super::CONFLICT_RETRY_MS,
+            service: None,
+            cause: super::DeferCause::Wait,
+        }
     );
     assert_eq!(read(&e, "c.md"), "user edit\n");
 }

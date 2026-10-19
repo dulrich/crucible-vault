@@ -432,3 +432,36 @@ fn channel_enrich_gates_skips_fresh_and_refreshes_stale() {
     assert_eq!(o.vars["about_path"], json!("_yt_metadata/old/about.md"));
     assert!(read(&w, "_yt_metadata/old/about.md").contains("videoCount: 3\n"));
 }
+
+/// SR7: the source note is linked through `modify` after the API fetch — a concurrent edit
+/// between its read and the CAS write is kept and the link re-applied on top.
+#[test]
+fn concurrent_edit_of_the_source_note_is_kept_and_link_reapplied() {
+    let w = world(
+        &[("n/a.md", NOTE)],
+        vec![("/videos", 200, VIDEO.into())],
+        "",
+    );
+    crate::steps::race::inject(&w.vault, "n/a.md", 1, |t| format!("{t}racer\n"));
+    let o = meta(&w, "n/a.md").unwrap();
+    assert_eq!(o.vars["linked"], json!(true));
+    assert_eq!(
+        read(&w, "n/a.md"),
+        "---\ntitle: n\nyt-video-id: dQw4w9WgXcQ\nyt-metadata:\n  - \"[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]\"\nsource: x\n---\nBody\nracer\n"
+    );
+}
+
+/// SR7: a race on every attempt defers (`Wait`), never fails, never clobbers.
+#[test]
+fn persistent_race_on_the_source_note_defers() {
+    let w = world(
+        &[("n/a.md", NOTE)],
+        vec![("/videos", 200, VIDEO.into())],
+        "",
+    );
+    crate::steps::race::inject(&w.vault, "n/a.md", crate::steps::MODIFY_ATTEMPTS, |t| {
+        format!("{t}x\n")
+    });
+    assert_eq!(meta(&w, "n/a.md"), Err(StepError::conflict()));
+    assert_eq!(read(&w, "n/a.md"), format!("{NOTE}x\nx\nx\n"));
+}

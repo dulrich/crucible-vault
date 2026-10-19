@@ -12,9 +12,10 @@
 //!    (`skipped = true`). No pairs and no places → skip.
 //! 4. Fetch every FX pair (Frankfurter) and place (Open-Meteo), one `api_usage` unit per call.
 //!    Some fail → the successful lines plus Crucible's inline `*lookup failed (…)*` lines;
-//!    **all** fail → no write, the first error's [`super::fetch_disposition`] (deferred on
+//!    **all** fail → no write, the first error's [`StepError::from_fetch`] (deferred on
 //!    transient, failed otherwise).
-//! 5. Append the block to the section through one CAS write
+//! 5. Append the block to the section through [`StepCtx::modify`] (re-read after the fetches;
+//!    a section filled meanwhile skips)
 //!    ([`cv_text::sections::insert_into_section`], append mode, payload `\n<body>\n`); an absent
 //!    section is appended at the end of the note, as Crucible does.
 //!
@@ -31,7 +32,7 @@ use serde::Serialize;
 
 use super::materialize::{ensure_note, now, period, stem};
 use super::web::{api_base, block_on, client, record_usage};
-use super::{StepCtx, StepError, StepModule, StepOutcome, fetch_disposition};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// The `daily_brief` step (no params; unknown keys disarm, I5).
 pub(crate) struct DailyBrief;
@@ -99,7 +100,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     ensure_note(ctx, &path, per.template.as_deref(), today, &title)?;
     out.output_paths.push(path.clone());
 
-    let (bytes, hash) = ctx
+    let (bytes, _) = ctx
         .read(&path)?
         .ok_or_else(|| StepError::failed("daily note could not be materialized"))?;
     let content =
@@ -160,14 +161,30 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     if ok_fx + ok_wx == 0 {
         return Err(first_err.map_or_else(
             || StepError::failed("all daily brief sources failed"),
-            |e| fetch_disposition(&e),
+            |e| StepError::from_fetch(&e),
         ));
     }
 
     let body = brief_body(&stamp(), &fx_entries, &wx_entries);
     let payload = format!("\n{}\n", body.trim());
-    let next = insert_into_section(&content, section, &payload, SectionInsertMode::Append);
-    ctx.write(&path, next.into_bytes(), Some(hash))?;
+    // Fetched first; the write re-reads the note (SR7): a section filled meanwhile is kept.
+    let mut wrote = false;
+    ctx.modify(&path, |cur| {
+        wrote = section.is_empty() || is_section_empty(cur, section);
+        if !wrote {
+            return Ok(None);
+        }
+        Ok(Some(insert_into_section(
+            cur,
+            section,
+            &payload,
+            SectionInsertMode::Append,
+        )))
+    })?;
+    if !wrote {
+        vars(&mut out, 0, 0, 0, true);
+        return Ok(out);
+    }
     vars(&mut out, ok_fx, ok_wx, failed, false);
     Ok(out)
 }

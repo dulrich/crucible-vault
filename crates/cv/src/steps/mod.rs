@@ -24,8 +24,8 @@
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
-//! [`StepCtx::write`]/[`StepCtx::create`] with the hash it read (I2): those calls record the path for
-//! the cycle guard (I5).
+//! [`StepCtx::write`]/[`StepCtx::create`] with the hash it read, or [`StepCtx::modify`] (I2):
+//! those calls record the path for the cycle guard (I5).
 
 pub mod agent;
 pub mod capture;
@@ -160,52 +160,10 @@ pub(crate) const TRANSIENT_MAX_ATTEMPTS: i64 = 5;
 /// Default quota wait when the service names none.
 pub(crate) const QUOTA_DEFAULT_MS: i64 = 60 * 60_000;
 
-/// Maps an HTTP fetch failure to a step disposition (plan WP-2; used by WP-4..8).
-///
-/// `Transient` → `Deferred{Transient(kind)}` where kind is read from the detail: `"connect"`
-/// → `Refused`; `"HTTP 429"` → `RateLimited`; `"HTTP 5xx"` → `ServerError`; anything else
-/// (`"timeout"`, `"HTTP 408"`, `"network"`, client errors) → `Timeout`. Delay = server
-/// `retry_after` or [`TRANSIENT_BASE_MS`]. `Quota` → `Deferred{Quota}` with `retry_after` or
-/// 1 h. `NotFound`/`Permanent`/`Malformed` → `Failed` (never retried).
-pub(crate) fn fetch_disposition(e: &cv_providers::web::FetchError) -> StepError {
-    use cv_providers::web::FetchError;
-    let ms = |d: &Option<std::time::Duration>, default: i64| {
-        d.map_or(default, |d| {
-            i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
-        })
-    };
-    match e {
-        FetchError::Transient {
-            service,
-            retry_after,
-            detail,
-        } => {
-            let kind = if detail == "connect" {
-                ServiceFailureKind::Refused
-            } else if detail == "HTTP 429" {
-                ServiceFailureKind::RateLimited
-            } else if detail.starts_with("HTTP 5") {
-                ServiceFailureKind::ServerError
-            } else {
-                ServiceFailureKind::Timeout
-            };
-            StepError::Deferred {
-                retry_after_ms: ms(retry_after, TRANSIENT_BASE_MS),
-                service: Some(service.clone()),
-                cause: DeferCause::Transient(kind),
-            }
-        }
-        FetchError::Quota {
-            service,
-            retry_after,
-        } => StepError::Deferred {
-            retry_after_ms: ms(retry_after, QUOTA_DEFAULT_MS),
-            service: Some(service.clone()),
-            cause: DeferCause::Quota,
-        },
-        other => StepError::failed(other.to_string()),
-    }
-}
+/// Retry delay of a step whose CAS write kept conflicting with concurrent edits (SR7).
+pub(crate) const CONFLICT_RETRY_MS: i64 = 5_000;
+/// Read → transform → CAS-write attempts of [`StepCtx::modify`] before it defers (SR7).
+pub(crate) const MODIFY_ATTEMPTS: usize = 3;
 
 impl StepError {
     /// A plain failure.
@@ -213,6 +171,71 @@ impl StepError {
         StepError::Failed {
             message: message.into(),
             reason: None,
+        }
+    }
+
+    /// The one mapping of a typed HTTP/provider failure to a step disposition (B8):
+    ///
+    /// | `FailureKind` | disposition |
+    /// |---|---|
+    /// | `Connect` | `Deferred{Transient(Refused)}` |
+    /// | `Timeout` | `Deferred{Transient(Timeout)}` |
+    /// | `RateLimited` | `Deferred{Transient(RateLimited)}` |
+    /// | `Server` | `Deferred{Transient(ServerError)}` |
+    /// | `Quota` | `Deferred{Quota}`, `retry_after` or [`QUOTA_DEFAULT_MS`] |
+    /// | `Auth` | `Failed{NoApiKey}` |
+    /// | `Permanent` | `Failed` |
+    ///
+    /// A transient delay is the failure's `retry_after`, else `transient_default_ms` (web
+    /// fetches: [`TRANSIENT_BASE_MS`]; providers: the agent's 60 s outage defer). `message` is
+    /// the failure text (no note content) used when the step fails.
+    pub(crate) fn from_failure(
+        service: &str,
+        failure: cv_providers::Failure,
+        transient_default_ms: i64,
+        message: String,
+    ) -> Self {
+        use cv_providers::FailureKind as F;
+        let ms = |default: i64| {
+            failure.retry_after.map_or(default, |d| {
+                i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+            })
+        };
+        let transient = |kind| StepError::Deferred {
+            retry_after_ms: ms(transient_default_ms),
+            service: Some(service.to_owned()),
+            cause: DeferCause::Transient(kind),
+        };
+        match failure.kind {
+            F::Connect => transient(ServiceFailureKind::Refused),
+            F::Timeout => transient(ServiceFailureKind::Timeout),
+            F::RateLimited => transient(ServiceFailureKind::RateLimited),
+            F::Server => transient(ServiceFailureKind::ServerError),
+            F::Quota => StepError::Deferred {
+                retry_after_ms: ms(QUOTA_DEFAULT_MS),
+                service: Some(service.to_owned()),
+                cause: DeferCause::Quota,
+            },
+            F::Auth => StepError::Failed {
+                message,
+                reason: Some(FailureReason::NoApiKey),
+            },
+            F::Permanent => StepError::failed(message),
+        }
+    }
+
+    /// [`Self::from_failure`] of a web fetch (breaker key = the fetch's service).
+    pub(crate) fn from_fetch(e: &cv_providers::web::FetchError) -> Self {
+        Self::from_failure(e.service(), e.failure(), TRANSIENT_BASE_MS, e.to_string())
+    }
+
+    /// The deferral of a CAS write that lost to a concurrent edit (SR7): a plain wait, never a
+    /// failure and never a breaker report.
+    pub(crate) fn conflict() -> Self {
+        StepError::Deferred {
+            retry_after_ms: CONFLICT_RETRY_MS,
+            service: None,
+            cause: DeferCause::Wait,
         }
     }
 }
@@ -229,8 +252,12 @@ impl std::fmt::Display for StepError {
 }
 
 impl From<VaultError> for StepError {
+    /// A CAS conflict defers ([`StepError::conflict`], SR7); anything else fails.
     fn from(e: VaultError) -> Self {
-        StepError::failed(e.to_string())
+        match e {
+            VaultError::Conflict { .. } => StepError::conflict(),
+            e => StepError::failed(e.to_string()),
+        }
     }
 }
 
@@ -294,19 +321,63 @@ impl StepCtx<'_> {
     }
 
     /// CAS write: `expected` is the hash the step read (`None` = must not
-    /// exist). A mismatch is [`VaultError::Conflict`] and never clobbers.
+    /// exist). A mismatch is [`VaultError::Conflict`] — never a clobber — and maps to
+    /// [`StepError::conflict`] (a `Deferred{Wait}`).
     pub fn write(
         &mut self,
         path: &str,
         bytes: Vec<u8>,
         expected: Option<ContentHash>,
     ) -> Result<ContentHash, StepError> {
+        Ok(self.try_write(path, bytes, expected)??)
+    }
+
+    /// [`Self::write`] with the vault error unmapped (the outer error is the writer's).
+    fn try_write(
+        &mut self,
+        path: &str,
+        bytes: Vec<u8>,
+        expected: Option<ContentHash>,
+    ) -> Result<Result<ContentHash, VaultError>, StepError> {
+        #[cfg(test)]
+        race::before_write(self, path)?;
         let p = path.to_owned();
-        let h = self
+        let r = self
             .writer()?
-            .call(move |vw| vw.write(&p, &bytes, expected))??;
-        self.written.push(path.to_owned());
-        Ok(h)
+            .call(move |vw| vw.write(&p, &bytes, expected))?;
+        if r.is_ok() {
+            self.written.push(path.to_owned());
+        }
+        Ok(r)
+    }
+
+    /// Read → pure transform → CAS write, re-applied on a conflict (SR7). `f` gets the note's
+    /// current text and returns `Ok(None)` for no change or `Ok(Some(new))`; it may run up to
+    /// [`MODIFY_ATTEMPTS`] times (each on freshly read text), so it must be re-appliable. A
+    /// conflict on every attempt defers ([`StepError::conflict`]); a missing or non-UTF-8 note
+    /// fails. Returns the new hash, or `None` when `f` made no change. Steps that fetch over the
+    /// network do so **before** calling this, so no CAS hash is held across a round-trip.
+    pub fn modify(
+        &mut self,
+        path: &str,
+        mut f: impl FnMut(&str) -> Result<Option<String>, StepError>,
+    ) -> Result<Option<ContentHash>, StepError> {
+        for _ in 0..MODIFY_ATTEMPTS {
+            let (bytes, hash) = self
+                .read(path)?
+                .ok_or_else(|| StepError::failed(format!("{path} not found")))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| StepError::failed(format!("{path} is not UTF-8")))?;
+            let Some(new) = f(&text)? else {
+                return Ok(None);
+            };
+            match self.try_write(path, new.into_bytes(), Some(hash))? {
+                Ok(h) => return Ok(Some(h)),
+                Err(VaultError::Conflict { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(StepError::conflict())
     }
 
     /// Creates `path` (error if it exists).
@@ -461,19 +532,72 @@ step_modules! {
     RunAction => RunActionStep,
 }
 
+/// Test-only concurrent-edit injection (SR7 tests): [`race::inject`] registers `times` edits of
+/// one note; each of the next `times` CAS writes of that note through [`StepCtx::write`] /
+/// [`StepCtx::modify`] first lands the edit (a write by "someone else" after the step read).
 #[cfg(test)]
-mod fetch_disposition_tests {
+pub(crate) mod race {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use super::{StepCtx, StepError};
+
+    type Edit = Box<dyn FnMut(&str) -> String + Send>;
+
+    static HOOKS: Mutex<Vec<(PathBuf, String, usize, Edit)>> = Mutex::new(Vec::new());
+
+    /// Registers `times` concurrent edits of `path` in the vault at `root`.
+    pub(crate) fn inject(
+        root: &Path,
+        path: &str,
+        times: usize,
+        edit: impl FnMut(&str) -> String + Send + 'static,
+    ) {
+        HOOKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), path.to_owned(), times, Box::new(edit)));
+    }
+
+    pub(super) fn before_write(ctx: &StepCtx<'_>, path: &str) -> Result<(), StepError> {
+        let Some((bytes, hash)) = ctx.read(path)? else {
+            return Ok(());
+        };
+        let next = {
+            let mut hooks = HOOKS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(h) = hooks
+                .iter_mut()
+                .find(|h| h.0 == ctx.vault_root && h.1 == path && h.2 > 0)
+            else {
+                return Ok(());
+            };
+            h.2 -= 1;
+            (h.3)(&String::from_utf8_lossy(&bytes))
+        };
+        let p = path.to_owned();
+        ctx.writer()?
+            .call(move |vw| vw.write(&p, next.as_bytes(), Some(hash)))??;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
     use std::time::Duration;
 
     use cv_providers::web::FetchError;
-    use cv_state::ServiceFailureKind as K;
+    use cv_providers::{Failure, FailureKind as F, ProviderError};
+    use cv_state::{FailureReason, ServiceFailureKind as K};
 
-    use super::{DeferCause, QUOTA_DEFAULT_MS, StepError, TRANSIENT_BASE_MS, fetch_disposition};
+    use super::{DeferCause, QUOTA_DEFAULT_MS, StepError, TRANSIENT_BASE_MS};
 
-    fn transient(detail: &str, retry: Option<u64>) -> FetchError {
+    fn transient(kind: F, detail: &str, retry: Option<u64>) -> FetchError {
         FetchError::Transient {
             service: "svc".into(),
             retry_after: retry.map(Duration::from_millis),
+            kind,
             detail: detail.into(),
         }
     }
@@ -489,28 +613,14 @@ mod fetch_disposition_tests {
     #[test]
     fn maps_every_fetch_error() {
         let t = |k| deferred(TRANSIENT_BASE_MS, DeferCause::Transient(k));
+        let d = |e: FetchError| StepError::from_fetch(&e);
+        assert_eq!(d(transient(F::Connect, "connect", None)), t(K::Refused));
+        assert_eq!(d(transient(F::Timeout, "timeout", None)), t(K::Timeout));
+        assert_eq!(d(transient(F::Timeout, "network", None)), t(K::Timeout));
+        assert_eq!(d(transient(F::Timeout, "HTTP 408", None)), t(K::Timeout));
+        assert_eq!(d(transient(F::Server, "HTTP 503", None)), t(K::ServerError));
         assert_eq!(
-            fetch_disposition(&transient("connect", None)),
-            t(K::Refused)
-        );
-        assert_eq!(
-            fetch_disposition(&transient("timeout", None)),
-            t(K::Timeout)
-        );
-        assert_eq!(
-            fetch_disposition(&transient("network", None)),
-            t(K::Timeout)
-        );
-        assert_eq!(
-            fetch_disposition(&transient("HTTP 408", None)),
-            t(K::Timeout)
-        );
-        assert_eq!(
-            fetch_disposition(&transient("HTTP 503", None)),
-            t(K::ServerError)
-        );
-        assert_eq!(
-            fetch_disposition(&transient("HTTP 429", Some(5_000))),
+            d(transient(F::RateLimited, "rate limited", Some(5_000))),
             deferred(5_000, DeferCause::Transient(K::RateLimited))
         );
         let quota = |r| FetchError::Quota {
@@ -518,11 +628,11 @@ mod fetch_disposition_tests {
             retry_after: r,
         };
         assert_eq!(
-            fetch_disposition(&quota(None)),
+            d(quota(None)),
             deferred(QUOTA_DEFAULT_MS, DeferCause::Quota)
         );
         assert_eq!(
-            fetch_disposition(&quota(Some(Duration::from_secs(7)))),
+            d(quota(Some(Duration::from_secs(7)))),
             deferred(7_000, DeferCause::Quota)
         );
         for e in [
@@ -539,7 +649,75 @@ mod fetch_disposition_tests {
                 detail: "invalid JSON".into(),
             },
         ] {
-            assert!(matches!(fetch_disposition(&e), StepError::Failed { .. }));
+            assert!(matches!(d(e), StepError::Failed { reason: None, .. }));
         }
+    }
+
+    #[test]
+    fn classify_status_carries_the_kind() {
+        let k = |s| {
+            cv_providers::web::classify_status("svc", s, None)
+                .failure()
+                .kind
+        };
+        assert_eq!(
+            [k(408), k(429), k(500), k(503), k(404), k(400)],
+            [
+                F::Timeout,
+                F::RateLimited,
+                F::Server,
+                F::Server,
+                F::Permanent,
+                F::Permanent
+            ]
+        );
+    }
+
+    #[test]
+    fn maps_provider_failures() {
+        let m = |e: ProviderError| StepError::from_failure("p", e.failure(), 60_000, e.to_string());
+        let t = |k| StepError::Deferred {
+            retry_after_ms: 60_000,
+            service: Some("p".into()),
+            cause: DeferCause::Transient(k),
+        };
+        let http = |status| ProviderError::Http { api: "x", status };
+        assert_eq!(m(http(429)), t(K::RateLimited));
+        assert_eq!(m(http(408)), t(K::Timeout));
+        assert_eq!(m(http(502)), t(K::ServerError));
+        assert_eq!(
+            m(ProviderError::CliTimeout {
+                command: "c".into(),
+                ms: 5
+            }),
+            t(K::Timeout)
+        );
+        assert!(matches!(
+            m(http(400)),
+            StepError::Failed { reason: None, .. }
+        ));
+        assert!(matches!(
+            m(ProviderError::Secret("missing".into())),
+            StepError::Failed {
+                reason: Some(FailureReason::NoApiKey),
+                ..
+            }
+        ));
+        assert_eq!(
+            StepError::from_failure(
+                "p",
+                Failure {
+                    kind: F::Server,
+                    retry_after: Some(Duration::from_secs(2)),
+                },
+                60_000,
+                String::new()
+            ),
+            StepError::Deferred {
+                retry_after_ms: 2_000,
+                service: Some("p".into()),
+                cause: DeferCause::Transient(K::ServerError),
+            }
+        );
     }
 }

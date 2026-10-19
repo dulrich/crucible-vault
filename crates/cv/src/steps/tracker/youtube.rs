@@ -234,7 +234,7 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     let mut deferred = None;
     let mut fail = |e: &FetchError, failed: &mut usize| {
         *failed += 1;
-        let d = super::super::fetch_disposition(e);
+        let d = StepError::from_fetch(e);
         tracing::warn!(error = %e, "track_youtube: channel failed");
         if matches!(d, StepError::Deferred { .. }) && deferred.is_none() {
             deferred = Some(d);

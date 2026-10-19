@@ -8,6 +8,7 @@
 //! and catalog probes.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -37,8 +38,28 @@ pub struct ProviderManager {
     secrets: Arc<dyn SecretSource>,
 }
 
-async fn post(http: &reqwest::Client, api: &'static str, req: WireRequest) -> Result<Value> {
-    let mut b = http.post(&req.url).json(&req.body);
+/// Connect timeout of the provider HTTP client (SR8).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Per-request timeout of an HTTP provider whose `timeout_seconds` is unset (SR8).
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
+
+/// The per-request timeout of `p`: its `timeout_seconds`, else [`DEFAULT_REQUEST_TIMEOUT_SECS`].
+#[must_use]
+pub fn request_timeout(p: &ProviderConfig) -> Duration {
+    Duration::from_secs(
+        p.timeout_seconds
+            .filter(|s| *s > 0)
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS),
+    )
+}
+
+async fn post(
+    http: &reqwest::Client,
+    api: &'static str,
+    timeout: Duration,
+    req: WireRequest,
+) -> Result<Value> {
+    let mut b = http.post(&req.url).json(&req.body).timeout(timeout);
     for (k, v) in &req.headers {
         b = b.header(k, v);
     }
@@ -46,8 +67,10 @@ async fn post(http: &reqwest::Client, api: &'static str, req: WireRequest) -> Re
     let status = resp.status().as_u16();
     let text = resp.text().await?;
     if status != 200 {
+        // The body may echo the request (prompt/note text): debug log only, never the error.
         let body: String = text.chars().take(300).collect();
-        return Err(ProviderError::Http { api, status, body });
+        tracing::debug!(api, status, body = %body, "provider non-200");
+        return Err(ProviderError::Http { api, status });
     }
     serde_json::from_str(&text)
         .map_err(|e| ProviderError::Malformed(format!("{api} returned invalid JSON: {e}")))
@@ -55,7 +78,9 @@ async fn post(http: &reqwest::Client, api: &'static str, req: WireRequest) -> Re
 
 impl ProviderManager {
     pub fn new(secrets: Arc<dyn SecretSource>) -> Result<Self> {
-        let http = reqwest::Client::builder().build()?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()?;
         Ok(Self {
             http,
             limiter: Arc::new(ConcurrencyLimiter::new()),
@@ -111,8 +136,9 @@ impl ProviderManager {
         )?;
         let http = self.http.clone();
         let kind = p.kind;
+        let timeout = request_timeout(p);
         let fut = async move {
-            let v = post(&http, "completion API", wire).await?;
+            let v = post(&http, "completion API", timeout, wire).await?;
             wire::parse_completion(kind, &v)
         };
         self.limiter.run(&p.id, limit, fut).await
@@ -127,7 +153,7 @@ impl ProviderManager {
     ) -> Result<Embeddings> {
         let key = resolve_api_key(p, self.secrets.as_ref())?;
         let req = wire::build_embed(p, key.as_deref(), model, inputs)?;
-        let v = post(&self.http, "embeddings API", req).await?;
+        let v = post(&self.http, "embeddings API", request_timeout(p), req).await?;
         wire::parse_embed(p.kind, &v, inputs.len())
     }
 
@@ -143,7 +169,7 @@ impl ProviderManager {
         if p.kind == ProviderKind::OpenaiCompatible {
             let key = resolve_api_key(p, self.secrets.as_ref())?;
             let req = wire::build_rerank(p, key.as_deref(), model, query, documents);
-            let v = post(&self.http, "rerank API", req).await?;
+            let v = post(&self.http, "rerank API", request_timeout(p), req).await?;
             return wire::normalize_rerank(&v, documents.len());
         }
         let c = self

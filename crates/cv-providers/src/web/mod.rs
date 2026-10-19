@@ -21,6 +21,8 @@ use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::failure::{Failure, FailureKind};
+
 pub mod fx;
 pub mod scorer;
 pub mod weather;
@@ -40,7 +42,9 @@ pub enum FetchError {
         service: String,
         /// Server-requested delay, if any.
         retry_after: Option<Duration>,
-        /// Short cause (status or error kind).
+        /// The typed cause (B8): `Connect`, `Timeout`, `RateLimited` or `Server`.
+        kind: FailureKind,
+        /// Short cause for messages (status or error kind).
         detail: String,
     },
     /// The service's quota is exhausted (only via a [`Classifier`]).
@@ -89,6 +93,27 @@ impl FetchError {
             | FetchError::Malformed { service, .. } => service,
         }
     }
+
+    /// The typed failure (B8): `Transient` carries its kind, `Quota` → `Quota`,
+    /// `NotFound`/`Permanent`/`Malformed` → `Permanent`.
+    #[must_use]
+    pub fn failure(&self) -> Failure {
+        match self {
+            FetchError::Transient {
+                kind, retry_after, ..
+            } => Failure {
+                kind: *kind,
+                retry_after: *retry_after,
+            },
+            FetchError::Quota { retry_after, .. } => Failure {
+                kind: FailureKind::Quota,
+                retry_after: *retry_after,
+            },
+            FetchError::Permanent { .. }
+            | FetchError::NotFound { .. }
+            | FetchError::Malformed { .. } => Failure::new(FailureKind::Permanent),
+        }
+    }
 }
 
 /// Per-request classification override: given the service, status, parsed `Retry-After` and the
@@ -104,6 +129,7 @@ pub fn classify_status(service: &str, status: u16, retry_after: Option<Duration>
         408 | 429 | 500..=599 => FetchError::Transient {
             service,
             retry_after,
+            kind: FailureKind::of_status(status),
             detail: format!("HTTP {status}"),
         },
         _ => FetchError::Permanent { service, status },
@@ -294,25 +320,17 @@ impl WebClient {
         for (k, v) in &req.headers {
             b = b.header(k, v);
         }
-        let transient = |e: reqwest::Error| {
-            let kind = if e.is_timeout() {
-                "timeout"
-            } else if e.is_connect() {
-                "connect"
-            } else {
-                "network"
-            };
-            tracing::debug!(service, url = %redact_url(req.url), error = %e.without_url(), "fetch failed");
-            FetchError::Transient {
-                service: service.to_owned(),
-                retry_after: None,
-                detail: kind.to_owned(),
-            }
-        };
-        let resp = b.send().await.map_err(transient)?;
+        let resp = b
+            .send()
+            .await
+            .map_err(|e| transport_error(service, req.url, e))?;
         let status = resp.status().as_u16();
         let retry_after = retry_after_of(resp.headers());
-        let body = resp.bytes().await.map_err(transient)?.to_vec();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| transport_error(service, req.url, e))?
+            .to_vec();
         if (200..300).contains(&status) {
             return Ok(body);
         }
@@ -324,6 +342,71 @@ impl WebClient {
             return Err(e);
         }
         Err(classify_status(service, status, retry_after))
+    }
+
+    /// A size- and type-limited GET (localize's attachment download, WP-R9): goes through the
+    /// same host gate and breaker key (`service`) as [`Self::fetch`]. A non-2xx is classified
+    /// as in [`Self::fetch`]. On a 2xx, a `Content-Length` over `max_bytes` fails before the
+    /// body is read; `decide` sees the `Content-Type` header (`""` when absent) and returns
+    /// `None` to reject the response without reading its body ([`Limited::Rejected`]) or
+    /// `Some(t)` to read it; a body over `max_bytes` fails. "Too large" is
+    /// [`FetchError::Malformed`] (permanent).
+    pub async fn fetch_limited<T>(
+        &self,
+        req: FetchRequest<'_>,
+        max_bytes: u64,
+        decide: impl FnOnce(&str) -> Option<T>,
+    ) -> Result<Limited<T>, FetchError> {
+        let service = req.service;
+        let url = reqwest::Url::parse(req.url).map_err(|e| FetchError::Malformed {
+            service: service.to_owned(),
+            detail: format!("invalid url: {e}"),
+        })?;
+        self.gate(url.host_str().unwrap_or("")).await;
+        let mut b = self
+            .http
+            .get(url)
+            .timeout(req.timeout.unwrap_or(self.config.timeout));
+        for (k, v) in &req.headers {
+            b = b.header(k, v);
+        }
+        let resp = b
+            .send()
+            .await
+            .map_err(|e| transport_error(service, req.url, e))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            tracing::debug!(service, status, url = %redact_url(req.url), "fetch non-2xx");
+            return Err(classify_status(
+                service,
+                status,
+                retry_after_of(resp.headers()),
+            ));
+        }
+        let too_large = || FetchError::Malformed {
+            service: service.to_owned(),
+            detail: "response too large".into(),
+        };
+        if resp.content_length().is_some_and(|n| n > max_bytes) {
+            return Err(too_large());
+        }
+        let ctype = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let Some(t) = decide(&ctype) else {
+            return Ok(Limited::Rejected);
+        };
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| transport_error(service, req.url, e))?;
+        if body.len() as u64 > max_bytes {
+            return Err(too_large());
+        }
+        Ok(Limited::Body(body.to_vec(), t))
     }
 
     /// GET → UTF-8 text.
@@ -365,6 +448,34 @@ impl WebClient {
         req.json_body = Some(json);
         let b = self.fetch(req).await?;
         decode_json(service, &b)
+    }
+}
+
+/// The result of [`WebClient::fetch_limited`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Limited<T> {
+    /// The body (within the size limit) and the caller's decision value.
+    Body(Vec<u8>, T),
+    /// `decide` rejected the response from its headers; the body was not read.
+    Rejected,
+}
+
+/// A transport (reqwest) failure → `Transient`: connect → `Connect`, timeout and any other
+/// network error → `Timeout`. The error text is logged without its URL, never returned.
+fn transport_error(service: &str, url: &str, e: reqwest::Error) -> FetchError {
+    let (kind, detail) = if e.is_timeout() {
+        (FailureKind::Timeout, "timeout")
+    } else if e.is_connect() {
+        (FailureKind::Connect, "connect")
+    } else {
+        (FailureKind::Timeout, "network")
+    };
+    tracing::debug!(service, url = %redact_url(url), error = %e.without_url(), "fetch failed");
+    FetchError::Transient {
+        service: service.to_owned(),
+        retry_after: None,
+        kind,
+        detail: detail.to_owned(),
     }
 }
 

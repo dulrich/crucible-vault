@@ -49,11 +49,10 @@ use cv_providers::{
     Capability, CompletionRequest, FinishReason, ProviderConfig, ProviderError, ProviderManager,
     ProvidersConfig, SystemSecrets, parse_model_ref,
 };
-use cv_state::{FailureReason, ServiceFailureKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{DeferCause, StepCtx, StepError, StepModule, StepOutcome};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// Retry delay for an unhealthy provider.
 pub(crate) const OUTAGE_RETRY_MS: i64 = 60_000;
@@ -322,33 +321,15 @@ fn var_text(v: &Value) -> String {
     }
 }
 
-/// Maps a provider failure to the step disposition (Crucible `src/types.ts:83-109`).
-pub(crate) fn disposition(provider_id: &str, e: &ProviderError) -> StepError {
-    let deferred = |kind| StepError::Deferred {
-        retry_after_ms: OUTAGE_RETRY_MS,
-        service: Some(provider_id.to_owned()),
-        cause: DeferCause::Transient(kind),
-    };
-    match e {
-        ProviderError::Transport(t) => deferred(if t.is_connect() {
-            ServiceFailureKind::Refused
-        } else if t.is_timeout() {
-            ServiceFailureKind::Timeout
-        } else {
-            ServiceFailureKind::ServerError
-        }),
-        ProviderError::Http { status: 429, .. } => deferred(ServiceFailureKind::RateLimited),
-        ProviderError::Http { status: 408, .. } => deferred(ServiceFailureKind::Timeout),
-        ProviderError::Http { status, .. } if *status >= 500 => {
-            deferred(ServiceFailureKind::ServerError)
-        }
-        ProviderError::Cli(m) if m.contains("timed out") => deferred(ServiceFailureKind::Timeout),
-        ProviderError::Secret(_) => StepError::Failed {
-            message: format!("provider {provider_id:?}: {e}"),
-            reason: Some(FailureReason::NoApiKey),
-        },
-        _ => StepError::failed(format!("provider {provider_id:?}: {e}")),
-    }
+/// Maps a provider failure to the step disposition (Crucible `src/types.ts:83-109`) through
+/// the one typed mapping [`StepError::from_failure`] (B8; transient → the 60 s outage defer).
+pub(crate) fn provider_failure(provider_id: &str, e: &ProviderError) -> StepError {
+    StepError::from_failure(
+        provider_id,
+        e.failure(),
+        OUTAGE_RETRY_MS,
+        format!("provider {provider_id:?}: {e}"),
+    )
 }
 
 /// Resolves the step's model to `(provider, model id)`, checked against `providers.toml`.
@@ -508,7 +489,7 @@ pub(crate) fn run(
     };
     let completion = handle
         .block_on(mgr.complete(&provider, &model, req))
-        .map_err(|e| disposition(&provider.id, &e))?;
+        .map_err(|e| provider_failure(&provider.id, &e))?;
     if completion.finish_reason != FinishReason::Stop {
         let raw = completion.raw_finish_reason.as_deref().unwrap_or("missing");
         let what = if completion.finish_reason == FinishReason::Length {

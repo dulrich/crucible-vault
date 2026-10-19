@@ -367,7 +367,7 @@ fn pass(
             // The body is not kept: a server may echo the request (image bytes).
             Ok(Pass::ImageFailure(format!("{api} returned HTTP {status}")))
         }
-        Err(e) => Err(agent::disposition(&provider.id, &e)),
+        Err(e) => Err(agent::provider_failure(&provider.id, &e)),
     }
 }
 

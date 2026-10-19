@@ -39,11 +39,8 @@
 //! on `[>]` is a no-op; a `move` whose source is gone but whose destination exists succeeds; a
 //! `copy` whose destination already holds identical bytes succeeds.
 
-use std::sync::LazyLock;
-
 use cv_actions::{ConfigSet, StepKind};
 use cv_lint::{FrontmatterDoc, JsValue};
-use regex::Regex;
 use serde::Serialize;
 
 use super::capture::{FORWARDED_TASK, OPEN_TASK};
@@ -251,39 +248,17 @@ fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, 
 
 // --- guard -----------------------------------------------------------------------------------
 
-static INLINE_TAG: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?:^|\s)#([\p{L}\p{N}_/\-]+)").ok());
-
 fn norm_tag(s: &str) -> String {
     s.trim().trim_start_matches('#').to_lowercase()
 }
 
-fn note_tags(text: &str) -> Result<Vec<String>, StepError> {
-    let doc = FrontmatterDoc::new(text);
-    let mut out = Vec::new();
-    match doc.get("tags").map_err(fm_err)? {
-        Some(JsValue::Arr(items)) => {
-            for i in items {
-                if let JsValue::Str(s) = i {
-                    out.push(norm_tag(&s));
-                }
-            }
-        }
-        Some(JsValue::Str(s)) => out.extend(
-            s.split(|c: char| c == ',' || c.is_whitespace())
-                .filter(|x| !x.trim().is_empty())
-                .map(norm_tag),
-        ),
-        _ => {}
-    }
-    if let Some(re) = INLINE_TAG.as_ref() {
-        for c in re.captures_iter(doc.body()) {
-            if let Some(m) = c.get(1) {
-                out.push(norm_tag(m.as_str()));
-            }
-        }
-    }
-    Ok(out)
+/// The note's tags as the index records them ([`cv_index::note_tags`]: ofm's frontmatter +
+/// inline tags, never inside code — SR11), normalized for the guard's case-insensitive match.
+fn note_tags(text: &str) -> Vec<String> {
+    cv_index::note_tags(text)
+        .iter()
+        .map(|t| norm_tag(t))
+        .collect()
 }
 
 fn has_tag(tags: &[String], want: &str) -> bool {
@@ -349,7 +324,7 @@ fn guard(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError> {
         return Ok(stop);
     };
     let text = utf8(bytes)?;
-    let tags = note_tags(&text)?;
+    let tags = note_tags(&text);
     if tag.iter().any(|w| !has_tag(&tags, w)) || not_tag.iter().any(|w| has_tag(&tags, w)) {
         return Ok(stop);
     }
@@ -660,7 +635,7 @@ mod unit {
 
     #[test]
     fn tags_and_folders() {
-        let tags = note_tags("---\ntags: [a, B/c]\n---\nbody #inline and #x/y\n").unwrap();
+        let tags = note_tags("---\ntags: [a, B/c]\n---\nbody #inline and #x/y\n");
         assert!(has_tag(&tags, "#a"));
         assert!(has_tag(&tags, "b"));
         assert!(has_tag(&tags, "inline"));
@@ -668,5 +643,27 @@ mod unit {
         assert!(!has_tag(&tags, "refined"));
         assert!(in_folder("inbox/x.md", "inbox"));
         assert!(!in_folder("inboxes/x.md", "inbox"));
+    }
+
+    /// SR11: guard tags are the index's (ofm) tags — a `#tag` in a code fence or inline code
+    /// never matches; frontmatter and body tags do; nested `#a/b` matches `a` and `a/b` (the
+    /// index's `tagged` prefix rule) but not `b`.
+    #[test]
+    fn guard_tags_follow_the_index_parse() {
+        let text = "---\ntags: [fm]\n---\nbody #body and #a/b\n\n```\n#fenced\n```\n\nsee `#inline-code`\n";
+        let tags = note_tags(text);
+        assert_eq!(
+            tags,
+            cv_index::note_tags(text)
+                .iter()
+                .map(|t| norm_tag(t))
+                .collect::<Vec<_>>()
+        );
+        assert!(has_tag(&tags, "fm"));
+        assert!(has_tag(&tags, "body"));
+        assert!(has_tag(&tags, "a") && has_tag(&tags, "a/b"));
+        assert!(!has_tag(&tags, "b"));
+        assert!(!has_tag(&tags, "fenced"));
+        assert!(!has_tag(&tags, "inline-code"));
     }
 }
