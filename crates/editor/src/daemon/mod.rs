@@ -17,9 +17,8 @@ use std::sync::{Arc, Mutex};
 
 pub use cv_protocol::{
     ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, HelloResult, JobStatus,
-    LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult, Mode,
-    Notification, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
-    ViewsListResult,
+    LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult, Notification,
+    RunActionParams, RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult,
 };
 pub use cv_vault::ContentHash;
 #[cfg(any(test, feature = "fake"))]
@@ -28,13 +27,12 @@ pub use local::LocalIndex;
 pub use socket::SocketDaemon;
 
 /// Every topic the editor listens to.
-pub const ALL_TOPICS: [Topic; 7] = [
+pub const ALL_TOPICS: [Topic; 6] = [
     Topic::FileChanged,
     Topic::IndexGeneration,
     Topic::JobUpdated,
     Topic::ConfigReloaded,
     Topic::OpenRequested,
-    Topic::ShadowWrite,
     Topic::ViewsInvalidated,
 ];
 
@@ -79,7 +77,7 @@ pub type Result<T> = std::result::Result<T, DaemonError>;
 /// The editor↔daemon seam. Methods block: callers in the iced app run them off the UI thread
 /// (`tokio::task::spawn_blocking` inside `Task::perform`). Implementations are shared across threads (`Arc<dyn DaemonClient>`).
 pub trait DaemonClient: Send + Sync {
-    /// The `hello` answer captured at connect time (mode/generation as of the handshake).
+    /// The `hello` answer captured at connect time (generation as of the handshake).
     fn hello(&self) -> &HelloResult;
     /// CAS write: `Ok(new hash)` or [`DaemonError::Conflict`] with the on-disk hash.
     fn write_note(&self, path: &str, content: &str, base_hash: &ContentHash)
@@ -107,7 +105,7 @@ pub trait DaemonClient: Send + Sync {
     fn actions_list(&self) -> Result<Vec<ActionInfo>>;
     /// Runs an action.
     fn run_action(&self, params: RunActionParams) -> Result<RunActionResult>;
-    /// Daemon status (mode, generation, queue).
+    /// Daemon status (generation, queue).
     fn status(&self) -> Result<StatusResult>;
     /// View ids.
     fn views_list(&self) -> Result<ViewsListResult>;

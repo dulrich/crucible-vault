@@ -1,6 +1,6 @@
 //! `cv daemon`: startup, shared state, request handling, event bridge, spool drain, shutdown.
 //!
-//! Startup order (brief pin 4): config → (shadow) scratch + Landlock → `StateDb` → `VaultFs` →
+//! Startup order (brief pin 4): config → `StateDb` → `VaultFs` →
 //! `VaultWriter::open` → writer+watcher thread — all on the calling thread, before any tokio
 //! runtime exists ([`Daemon::start`]) — then, inside a runtime, bind the socket → drain the spool
 //! → serve ([`Daemon::spawn`]).
@@ -16,15 +16,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use cv_protocol::{
     ChangeKind, CreateNoteResult, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams,
     DeletePreviewItem, DeletePreviewResult, DeleteResult, HelloResult, IntakeListResult, JobState,
-    JobStatus, JobsListResult, Method, Mode, Notification, Origin, PROTOCOL_VERSION, PathParams,
+    JobStatus, JobsListResult, Method, Notification, Origin, PROTOCOL_VERSION, PathParams,
     RenameParams, RenameResult, Request, RpcError, StatusResult, UriResult, ViewsListResult,
-    WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams, WriteNoteResult, WriteOp,
-    error_codes,
+    WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams, WriteNoteResult, error_codes,
 };
-use cv_state::{NewShadowWrite, QueueConfig, RetryOutcome, StateDb, StateError, StateReader};
+use cv_state::{QueueConfig, RetryOutcome, StateDb, StateError, StateReader};
 use cv_vault::{
-    ContentHash, EventKind, ShadowLog, VaultError, VaultEvent, VaultFs, VaultWriter, WatchConfig,
-    WriterHandle,
+    ContentHash, EventKind, VaultError, VaultEvent, VaultFs, VaultWriter, WatchConfig, WriterHandle,
 };
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
@@ -53,9 +51,6 @@ fn too_large() -> RpcError {
 /// Daemon start options.
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonOptions {
-    /// Apply [`cv_vault::restrict_shadow`] in shadow mode (true from `cv daemon`; in-process
-    /// tests pass false because Landlock would restrict the whole test process).
-    pub landlock: bool,
     /// Watcher timings.
     pub watch: WatchConfig,
     /// `CV_CONFIG_DIR` poll interval (2 s in production).
@@ -65,7 +60,6 @@ pub struct DaemonOptions {
 impl Default for DaemonOptions {
     fn default() -> Self {
         Self {
-            landlock: true,
             watch: WatchConfig::default(),
             config_poll: Duration::from_secs(2),
         }
@@ -74,30 +68,6 @@ impl Default for DaemonOptions {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The writer's [`ShadowLog`]: appends through the daemon's single shared `StateDb` and broadcasts
-/// `shadow_write{op, path}`. The lock is held only for the append.
-struct SharedShadowLog {
-    db: Arc<Mutex<StateDb>>,
-    events: broadcast::Sender<Notification>,
-}
-
-impl ShadowLog for SharedShadowLog {
-    fn record(&mut self, w: &NewShadowWrite) -> cv_vault::Result<()> {
-        lock(&self.db).append_shadow_write(w)?;
-        let op = match w.op.as_str() {
-            "create" => WriteOp::Create,
-            "delete" => WriteOp::Delete,
-            "rename_from" | "rename_to" => WriteOp::Rename,
-            _ => WriteOp::Write,
-        };
-        let _ = self.events.send(Notification::ShadowWrite {
-            op,
-            path: w.path.clone(),
-        });
-        Ok(())
-    }
 }
 
 /// State shared by every connection and background task.
@@ -136,60 +106,21 @@ impl std::fmt::Debug for Daemon {
 }
 
 impl Daemon {
-    /// Synchronous startup (see the module docs). Must run before any tokio runtime or other
-    /// thread exists when `opts.landlock` is set.
+    /// Synchronous startup (see the module docs).
     pub fn start(config: Config, opts: DaemonOptions) -> Result<Self> {
         config.create_dirs()?;
-        if config.mode == Mode::Shadow {
-            let repo_roots: Vec<PathBuf> = cv_vault::DEFAULT_REPO_ROOTS
-                .iter()
-                .map(PathBuf::from)
-                .collect();
-            let scratch = cv_vault::validate_scratch(&config.scratch, &config.vault, &repo_roots)
-                .context("validating CV_SCRATCH")?;
-            if opts.landlock {
-                let writable = vec![
-                    scratch,
-                    config.state_dir(),
-                    config.index_dir(),
-                    config.socket_dir(),
-                    config.config_dir.clone(),
-                ];
-                let status = cv_vault::restrict_shadow(&config.vault, &writable)
-                    .context("applying Landlock")?;
-                tracing::info!(?status, "landlock");
-            }
-        }
         let state = Arc::new(Mutex::new(
             StateDb::open(&config.state_db, now_ms(), QueueConfig::default())
                 .with_context(|| format!("opening {}", config.state_db.display()))?,
         ));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
-        let fs = match config.mode {
-            Mode::Live => VaultFs::live(
-                &config.vault,
-                &config.protected_vault,
-                &crate::cutover::StateCutover::new(Arc::clone(&state), &config.protected_vault),
-            )
-            .context("live mode refused")?
-            .with_link_write_roots(config.link_write_roots.clone()),
-            Mode::Shadow => {
-                let repo_roots: Vec<PathBuf> = cv_vault::DEFAULT_REPO_ROOTS
-                    .iter()
-                    .map(PathBuf::from)
-                    .collect();
-                VaultFs::shadow(
-                    &config.vault,
-                    &config.scratch,
-                    &repo_roots,
-                    Box::new(SharedShadowLog {
-                        db: Arc::clone(&state),
-                        events: events.clone(),
-                    }),
-                )
-                .context("opening the shadow overlay")?
-            }
-        };
+        let fs = VaultFs::live(
+            &config.vault,
+            &config.protected_vault,
+            &crate::cutover::StateCutover::new(Arc::clone(&state), &config.protected_vault),
+        )
+        .context("live mode refused")?
+        .with_link_write_roots(config.link_write_roots.clone());
         let vault_root = fs.root().to_path_buf();
         // `open` creates the index when absent and rebuilds on a schema/generation mismatch.
         let writer = VaultWriter::open(fs, &config.index_db).context("opening the index")?;
@@ -275,7 +206,7 @@ impl Daemon {
             )),
         ]);
         let server = tokio::spawn(crate::server::serve(listener, Arc::clone(&shared), stop_rx));
-        tracing::info!(socket = %shared.config.socket.display(), mode = ?shared.config.mode, "daemon serving");
+        tracing::info!(socket = %shared.config.socket.display(), "daemon serving");
         Ok(RunningDaemon {
             shared,
             stop_tx,
@@ -361,19 +292,17 @@ pub(crate) fn rpc_from_vault(e: VaultError) -> RpcError {
             message: "content hash conflict".into(),
             data: Some(json!({ "current_hash": found.map(|h| h.as_str().to_owned()) })),
         },
-        VaultError::State(s) => rpc_from_state(s),
         e @ VaultError::NotFound(_) => rpc_err(c::NOT_FOUND, e.to_string()),
         e @ (VaultError::InvalidPath(_) | VaultError::Exists(_)) => {
             rpc_err(c::INVALID_PARAMS, e.to_string())
         }
-        e @ (VaultError::ProtectedRoot { .. }
-        | VaultError::LinkWriteRefused { .. }
-        | VaultError::ScratchRefused { .. }) => rpc_err(c::REFUSED, e.to_string()),
+        e @ (VaultError::ProtectedRoot { .. } | VaultError::LinkWriteRefused { .. }) => {
+            rpc_err(c::REFUSED, e.to_string())
+        }
         e @ VaultError::WriterGone => rpc_err(c::UNAVAILABLE, e.to_string()),
         e @ (VaultError::Io { .. }
         | VaultError::Index(_)
         | VaultError::Watch(_)
-        | VaultError::Landlock(_)
         | VaultError::Json(_)) => internal(e),
     }
 }
@@ -533,7 +462,6 @@ impl Shared {
         HelloResult {
             protocol_version: PROTOCOL_VERSION,
             index_schema: cv_index::SCHEMA_VERSION,
-            mode: self.config.mode,
             vault_root: self.vault_root.display().to_string(),
             index_db: self.config.index_db.display().to_string(),
             state_db: self.config.state_db.display().to_string(),
@@ -749,8 +677,8 @@ impl Shared {
     }
 
     /// `note_set_bool` (plan round-8-intake-views-anchor WP-3): read → frontmatter edit → CAS
-    /// write in one writer job (the CAS token is the hash the writer itself read), so shadow mode
-    /// and the writer's refusals apply. An already-equal value writes nothing.
+    /// write in one writer job (the CAS token is the hash the writer itself read), so the writer's
+    /// refusals apply. An already-equal value writes nothing.
     async fn note_set_bool(
         &self,
         p: cv_protocol::NoteSetBoolParams,
@@ -827,7 +755,6 @@ impl Shared {
             .collect();
         let (tracker_items, link_records) = crate::jobs::store_counts(&reader);
         Ok(StatusResult {
-            mode: self.config.mode,
             generation: self.generation(),
             queue,
             config_errors: self.runner().map(Runner::config_errors).unwrap_or_default(),
@@ -1064,8 +991,7 @@ async fn drain_spool(shared: &Shared) {
 pub(crate) const VIEWS_COALESCE: Duration = Duration::from_millis(150);
 
 /// Forwards `index_generation` to the view registry, and coalesces `file_changed` (daemon- and
-/// external-origin; the index is already updated when it is sent) and `shadow_write` into one
-/// [`ViewRegistry::notify_notes_changed`] per [`VIEWS_COALESCE`] window.
+/// external-origin; the index is already updated when it is sent) into one [`ViewRegistry::notify_notes_changed`] per [`VIEWS_COALESCE`] window.
 async fn generation_listener(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let mut rx = shared.subscribe();
     let mut due: Option<tokio::time::Instant> = None;
@@ -1088,9 +1014,7 @@ async fn generation_listener(shared: Arc<Shared>, mut stop: watch::Receiver<bool
                     due = None;
                     shared.views.notify_generation(n);
                 }
-                // Shadow mode: the writes land in the overlay the watcher does not see, so the
-                // shadow log's broadcast stands in for their `file_changed`.
-                Ok(Notification::FileChanged { .. } | Notification::ShadowWrite { .. }) => {
+                Ok(Notification::FileChanged { .. }) => {
                     due.get_or_insert_with(|| tokio::time::Instant::now() + VIEWS_COALESCE);
                 }
                 Ok(_) => {}
@@ -1184,22 +1108,10 @@ mod error_map_tests {
                 },
                 c::REFUSED,
             ),
-            (
-                VaultError::ScratchRefused {
-                    scratch: s("s"),
-                    reason: s("r"),
-                },
-                c::REFUSED,
-            ),
             (VaultError::WriterGone, c::UNAVAILABLE),
             (VaultError::NotFound(s("a.md")), c::NOT_FOUND),
             (VaultError::Exists(s("a.md")), c::INVALID_PARAMS),
             (VaultError::InvalidPath(s("../a")), c::INVALID_PARAMS),
-            (VaultError::Landlock(s("x")), c::INTERNAL_ERROR),
-            (
-                VaultError::State(StateError::NoSuchJob(s("j"))),
-                c::NOT_FOUND,
-            ),
         ];
         for (e, code) in cases {
             let msg = e.to_string();

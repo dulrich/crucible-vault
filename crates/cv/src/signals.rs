@@ -524,7 +524,6 @@ mod tests {
             "CV_INDEX_DB" => Some(idx.clone()),
             "CV_VAULT" => Some(v.clone()),
             "CV_PROTECTED_VAULT" => Some(v.clone()),
-            "CV_MODE" => Some("live".into()),
             _ => None,
         })
         .unwrap();

@@ -813,10 +813,6 @@ fn config_reloaded_errors_route_to_pages_and_status_refreshes() {
     );
     assert_eq!(app.settings.status.unrouted, ["mystery"]);
     assert!(app.settings.status.result.is_some(), "refreshed on reload");
-    assert_eq!(
-        app.settings.status.result.as_ref().map(|r| r.mode),
-        Some(app.status.mode)
-    );
 }
 
 #[test]

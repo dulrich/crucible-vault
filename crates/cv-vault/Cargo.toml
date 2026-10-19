@@ -15,11 +15,9 @@ tracing = "=0.1.44"
 sha2 = "=0.11.1"
 hex = "=0.4.3"
 notify = "=8.2.0"
-landlock = "=0.4.7"
 walkdir = "=2.5.0"
 tempfile = "=3.27.0"
 cv-index = { path = "../cv-index" }
-cv-state = { path = "../cv-state" }
 ofm = { path = "../../../crucible-tui/crates/ofm" }
 
 [lints]

@@ -1,5 +1,6 @@
-//! `state.db`: versioned migrations, the durable job queue, the service-health breaker,
-//! and the `shadow_writes` log (plan `v0-core-daemon` WP-2).
+//! `state.db`: versioned migrations, the durable job queue and the service-health breaker
+//! (plan `v0-core-daemon` WP-2). The `shadow_writes` table stays in the schema with no API
+//! (shadow mode retired in plan tn-review-baseline-remediation WP-R6).
 //!
 //! Pure and synchronous: no async runtime. Every time-dependent API takes `now_ms`.
 
@@ -31,10 +32,10 @@ pub use job::{
 pub use link_records::{
     LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome, read_crucible_link_records,
 };
-pub use query::{ListQuery, ShadowWrite, StatusCount};
+pub use query::{ListQuery, StatusCount};
 pub use runner_state::StepCheckpoint;
 pub use store::{
-    BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, NewShadowWrite,
-    QueueConfig, RequeueBreakdown, RetryOutcome, StateDb, StateReader,
+    BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, QueueConfig,
+    RequeueBreakdown, RetryOutcome, StateDb, StateReader,
 };
 pub use tracker::{IntakeQuery, TrackerItem, TrackerOutcome};

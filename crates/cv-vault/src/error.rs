@@ -33,9 +33,6 @@ pub enum VaultError {
     /// never replaced.
     #[error("write through the symlinked note {path} refused: {reason}")]
     LinkWriteRefused { path: String, reason: String },
-    /// The scratch directory failed validation.
-    #[error("scratch dir {scratch} refused: {reason}")]
-    ScratchRefused { scratch: String, reason: String },
     #[error("io at {path}: {source}")]
     Io {
         path: String,
@@ -44,12 +41,8 @@ pub enum VaultError {
     },
     #[error("index: {0}")]
     Index(#[from] cv_index::Error),
-    #[error("state: {0}")]
-    State(#[from] cv_state::StateError),
     #[error("watcher: {0}")]
     Watch(#[from] notify::Error),
-    #[error("landlock: {0}")]
-    Landlock(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
     /// The writer thread is gone (panicked or shut down).

@@ -942,11 +942,11 @@ fn actions_page_build_timing() {
     let paths: Vec<String> = Vec::new();
     let t = crate::theme::Surround::default().tokens().expect("tokens");
     // Warm once, then take the best of 5 builds (the open frame's view build).
-    drop(page(&st, &prefs, &paths, t, cv_protocol::Mode::Live));
+    drop(page(&st, &prefs, &paths, t));
     let mut best = f64::MAX;
     for _ in 0..5 {
         let t0 = std::time::Instant::now();
-        let el = page(&st, &prefs, &paths, t, cv_protocol::Mode::Live);
+        let el = page(&st, &prefs, &paths, t);
         best = best.min(t0.elapsed().as_secs_f64() * 1e3);
         drop(el);
     }
@@ -962,7 +962,7 @@ fn actions_page_build_timing() {
         }
     }
     let t0 = std::time::Instant::now();
-    drop(page(&st, &prefs, &paths, t, cv_protocol::Mode::Live));
+    drop(page(&st, &prefs, &paths, t));
     eprintln!(
         "actions page build (fully expanded): {:.3} ms",
         t0.elapsed().as_secs_f64() * 1e3

@@ -966,9 +966,7 @@ name = "cv-vault"
 version = "0.1.0"
 dependencies = [
  "cv-index",
- "cv-state",
  "hex",
- "landlock",
  "notify",
  "ofm",
  "rusqlite",
@@ -2373,17 +2371,6 @@ checksum = "1618d4ebd923e97d67e7cd363d80aef35fe961005cbbbb3d2dad8bdd1bc63440"
 dependencies = [
  "arrayvec",
  "smallvec",
-]
-
-[[package]]
-name = "landlock"
-version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
-dependencies = [
- "enumflags2",
- "libc",
- "thiserror 2.0.21",
 ]
 
 [[package]]

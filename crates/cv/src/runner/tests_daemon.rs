@@ -1,5 +1,5 @@
-//! Runner ↔ daemon tests: an in-process daemon in shadow mode on a synthetic temp vault under a
-//! temp `CV_PROTECTED_VAULT` (I1), driven over its socket. Pattern from `tests/daemon.rs`.
+//! Runner ↔ daemon tests: an in-process live daemon on a synthetic temp vault (the temp
+//! `CV_PROTECTED_VAULT` is a sibling, so the I1 guard admits it), driven over its socket. Pattern from `tests/daemon.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,11 +50,10 @@ impl Env {
         for (k, v) in [
             ("HOME", root.join("home")),
             ("CV_VAULT", vault),
-            ("CV_PROTECTED_VAULT", root.join("prot")),
+            ("CV_PROTECTED_VAULT", root.join("protected")),
             ("CV_STATE_DB", root.join("state/state.db")),
             ("CV_SEARCH_DB", root.join("state/search.db")),
             ("CV_INDEX_DB", root.join("cache/index.db")),
-            ("CV_SCRATCH", root.join("scratch")),
             ("CV_CONFIG_DIR", root.join("config")),
             ("CV_SOCKET", root.join("run/d.sock")),
         ] {
@@ -81,7 +80,6 @@ impl Env {
 
 async fn start(env: &Env, exec: Arc<dyn StepExecutor>) -> RunningDaemon {
     let opts = DaemonOptions {
-        landlock: false,
         watch: WatchConfig {
             debounce: Duration::from_millis(50),
             echo_ttl: Duration::from_secs(5),
@@ -131,24 +129,6 @@ fn rpc_code(r: Result<Value, ClientError>) -> i64 {
         Err(ClientError::Rpc(e)) => e.code,
         other => panic!("expected an RPC error, got {other:?}"),
     }
-}
-
-fn hashes(root: &Path) -> Vec<(PathBuf, String)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else {
-                let h = ContentHash::of(&std::fs::read(&p).unwrap());
-                out.push((p, h.as_str().to_owned()));
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 fn poll(mut f: impl FnMut() -> bool) {
@@ -209,7 +189,6 @@ action = "nowhere"
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_action_end_to_end_over_the_socket() {
     let env = Env::new(ACTIONS);
-    let before = hashes(&env.vault());
     let calls = Arc::new(AtomicUsize::new(0));
     let d = start(&env, appending_exec(Arc::clone(&calls))).await;
     let c = env.client();
@@ -321,22 +300,9 @@ async fn run_action_end_to_end_over_the_socket() {
     });
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
-    // Shadow invariant: the live vault is byte-identical; writes are attributed to the jobs.
-    assert_eq!(hashes(&env.vault()), before, "live vault untouched (I1)");
-    let writes = d
-        .shared()
-        .state()
-        .lock()
-        .unwrap()
-        .shadow_writes(0, 100)
-        .unwrap();
-    let ours: Vec<_> = writes.iter().filter(|w| w.path == "a.md").collect();
-    assert_eq!(ours.len(), 2);
-    assert_eq!(ours[0].job_id.as_deref(), Some(job_id.as_str()));
-    assert_eq!(ours[1].job_id.as_deref(), Some(bg.as_str()));
-    let overlay = PathBuf::from(&env.vars["CV_SCRATCH"]).join("vault/a.md");
+    // Both jobs' writes landed in the (temp) vault.
     assert_eq!(
-        std::fs::read_to_string(overlay).unwrap(),
+        std::fs::read_to_string(env.vault().join("a.md")).unwrap(),
         "# A\ntouched\ntouched\n"
     );
 
@@ -427,8 +393,7 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
     });
 
     // The action wrote its own trigger note; that write's daemon-origin echo must not re-start it
-    // (in shadow mode the overlay is not watched, so the echo is injected as the watcher would
-    // send it in live mode).
+    // (the echo is injected as the watcher would send it).
     let mut rx = d.subscribe();
     d.shared().publish(Notification::FileChanged {
         path: "inbox/x.md".into(),
@@ -532,7 +497,6 @@ async fn durable_move_publishes_open_path_on_terminal_status() {
     let d = Daemon::start(
         env.config(),
         DaemonOptions {
-            landlock: false,
             watch: WatchConfig {
                 debounce: Duration::from_millis(50),
                 echo_ttl: Duration::from_secs(5),

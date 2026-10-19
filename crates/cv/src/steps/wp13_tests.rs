@@ -12,7 +12,7 @@ use cv_actions::{ConfigSet, Step};
 use cv_protocol::ActionContext;
 use cv_providers::{ProviderManager, SecretSource};
 use cv_search::js::lossy;
-use cv_search::semsearch::{Index, IndexOptions, Query, Space};
+use cv_search::semsearch::{Query, Space};
 use cv_search::{CompanionRow, SearchDb, import_companion, write_companion_fixture};
 use cv_state::{ImageDescription, QueueConfig, StateDb};
 use serde_json::{Map, Value, json};
@@ -182,7 +182,7 @@ struct World {
 const NOTE_A: &str = "---\nauthor: Synthetic Author\n---\n# Alpha\nFirst synthetic note.\n\n![[0123456789abcdef0123456789abcdef_MD5.png]]";
 const NOTE_B: &str = "# Beta\nSecond synthetic note.";
 
-fn world(shadow: bool) -> World {
+fn world() -> World {
     let tmp = Tmp::new();
     let vault = tmp.0.join("vault");
     std::fs::create_dir_all(vault.join("notes")).unwrap();
@@ -209,17 +209,7 @@ fn world(shadow: bool) -> World {
     let fake = Fake { base, st };
     let protected = tmp.0.join("protected");
     std::fs::create_dir_all(&protected).unwrap();
-    let fs = if shadow {
-        cv_vault::VaultFs::shadow(
-            &vault,
-            &tmp.0.join("scratch"),
-            &[],
-            Box::new(cv_vault::MemoryShadowLog::default()),
-        )
-        .unwrap()
-    } else {
-        cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap()
-    };
+    let fs = cv_vault::VaultFs::live(&vault, &protected, &cv_vault::NoCutover).unwrap();
     let index = tmp.0.join("index.db");
     let w = cv_vault::VaultWriter::open(fs, &index).unwrap();
     let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
@@ -336,7 +326,7 @@ fn assert_deferred(r: Result<StepOutcome, StepError>, service: &str) {
 
 #[test]
 fn embedder_outage_defers_and_writes_nothing() {
-    let w = world(false);
+    let w = world();
     w.fake.st.lock().unwrap().embed_down = true;
     assert_deferred(
         w.run(&w.upsert("embed = \"emb:m1\""), Some("notes/b.md")),
@@ -346,63 +336,8 @@ fn embedder_outage_defers_and_writes_nothing() {
 }
 
 #[test]
-fn shadow_mode_never_mutates_or_embeds() {
-    // A missing index is an empty one: counts, no error, no file created.
-    let w = world(true);
-    let embed = "embed = \"emb:m1\"";
-    let rec = w.run(&w.upsert(embed), None).unwrap();
-    assert_eq!(var(&rec, "missing_index"), 2);
-    assert!(!w.search.path().exists());
-
-    // Pre-populate the index out of band: a stale b.md and an orphan.
-    std::fs::create_dir_all(w.search.path().parent().unwrap()).unwrap();
-    {
-        let mut idx = Index::open(w.search.path(), &IndexOptions::default()).unwrap();
-        let ch = |id: &str| cv_search::semsearch::Chunk::new(id, "t", "", "x");
-        idx.upsert_source("notes/b.md", "stale", &[ch("x")])
-            .unwrap();
-        idx.upsert_source("gone.md", "h", &[ch("y")]).unwrap();
-    }
-    let before = std::fs::read(w.search.path()).unwrap();
-    let up = w.run(&w.upsert(embed), Some("notes/a.md")).unwrap();
-    assert_eq!(var(&up, "missing_index"), 1);
-    let del = w.run(&w.delete(), Some("gone.md")).unwrap();
-    assert_eq!(var(&del, "missing_local"), 1);
-    let rec = w.run(&w.upsert(embed), None).unwrap();
-    assert_eq!(var(&rec, "missing_index"), 1);
-    assert_eq!(var(&rec, "mismatched"), 1);
-    assert_eq!(var(&rec, "missing_local"), 1);
-    assert_eq!(var(&rec, "matched"), 0);
-    // Only aggregate counts — no paths, no content, no live-only keys.
-    let mut keys: Vec<&str> = rec.vars.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(
-        keys,
-        [
-            "embedding_mismatch",
-            "matched",
-            "mismatched",
-            "missing_index",
-            "missing_local"
-        ]
-    );
-    // No embed call, no write, and the shared writable handle was never opened.
-    assert_eq!(w.fake.embed_calls(), 0);
-    assert!(!w.search.is_open());
-    assert_eq!(std::fs::read(w.search.path()).unwrap(), before);
-    let idx = Index::open_read_only(w.search.path(), &IndexOptions::default()).unwrap();
-    let held: Vec<String> = idx
-        .source_states()
-        .unwrap()
-        .into_iter()
-        .map(|s| s.source)
-        .collect();
-    assert_eq!(held, ["gone.md", "notes/b.md"]);
-}
-
-#[test]
 fn live_round_trip_skips_unchanged_and_fails_on_space_drift() {
-    let w = world(false);
+    let w = world();
     w.state
         .lock()
         .unwrap()
@@ -495,7 +430,7 @@ fn live_round_trip_skips_unchanged_and_fails_on_space_drift() {
 
 #[test]
 fn steps_share_one_index_handle() {
-    let w = world(false);
+    let w = world();
     let a = w.search.shared().unwrap();
     // A write by one step is visible to a search through the same handle, without reopening.
     w.run(&w.upsert(""), Some("notes/b.md")).unwrap();
@@ -547,7 +482,7 @@ fn synthetic_companion(path: &Path, notes: &[(String, cv_search::LocalNote)]) {
 
 #[test]
 fn imported_space_is_shared_with_the_feed_and_reconcile_does_not_reembed() {
-    let w = world(false);
+    let w = world();
     let comp = w.tmp.0.join("companion.sqlite");
     synthetic_companion(&comp, &w.local_notes());
     {

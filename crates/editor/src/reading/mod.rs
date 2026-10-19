@@ -1171,7 +1171,6 @@ pub fn tab_body<'a>(
     tab: &'a SourceBuffer,
     view: u64,
     t: Tokens,
-    mode: cv_protocol::Mode,
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
     focused: bool,
@@ -1182,10 +1181,10 @@ pub fn tab_body<'a>(
     // plan editor-settings-tab WP-2 (audit M1): `editor.toml` `font_size` drives both panes.
     let scale = view::reading_scale(font_size);
     match store.mode(tab.path()) {
-        ViewMode::Source => crate::source::view(tab, t, mode, font_size, keymap, link),
+        ViewMode::Source => crate::source::view(tab, t, font_size, keymap, link),
         ViewMode::Reading => view::reading(store, views, tab.path(), view, t, scale, focused),
         ViewMode::Split => row![
-            container(crate::source::view(tab, t, mode, font_size, keymap, link))
+            container(crate::source::view(tab, t, font_size, keymap, link))
                 .width(Length::FillPortion(1)),
             container(view::reading(
                 store,

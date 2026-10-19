@@ -827,29 +827,7 @@ fn breaker_persists_and_gates_claims_per_service() {
     assert_eq!(r.service_health().unwrap()[0].state, BreakerState::Closed);
 }
 
-// ---- shadow writes / read-only client ---------------------------------------------
-
-#[test]
-fn shadow_writes_append_and_list() {
-    let (_d, mut s) = db();
-    let w = |op: &str, at| NewShadowWrite {
-        op: op.into(),
-        path: "synthetic/a.md".into(),
-        before_hash: None,
-        after_hash: Some("h1".into()),
-        job_id: None,
-        at_ms: at,
-    };
-    let a = s.append_shadow_write(&w("create", 1)).unwrap();
-    let b = s.append_shadow_write(&w("modify", 2)).unwrap();
-    assert!(b > a);
-    let all = s.shadow_writes(0, 0).unwrap();
-    assert_eq!(
-        all.iter().map(|x| x.op.as_str()).collect::<Vec<_>>(),
-        ["create", "modify"]
-    );
-    assert_eq!(s.shadow_writes(a, 0).unwrap().len(), 1);
-}
+// ---- read-only client ---------------------------------------------
 
 #[test]
 fn reader_is_read_only_and_sees_queue_status() {
@@ -877,7 +855,6 @@ fn reader_is_read_only_and_sees_queue_status() {
     }));
     assert_eq!(r.job(&a).unwrap().unwrap().status, JobStatus::Running);
     assert_eq!(r.list(&ListQuery::default()).unwrap().len(), 2);
-    assert!(r.shadow_writes(0, 0).unwrap().is_empty());
     // writes through the read-only handle fail
     assert!(r.conn_for_test().execute("DELETE FROM jobs", []).is_err());
 }

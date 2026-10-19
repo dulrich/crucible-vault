@@ -5,7 +5,7 @@
 //! Enter / "Create <query>" on a miss, runs `note.create {path: "<query>.md"}` and opens the
 //! returned `open_path`.
 
-use cv_protocol::{ActionContext, Mode, RunActionParams};
+use cv_protocol::{ActionContext, RunActionParams};
 use editor_model::rank::{Ranked, rank};
 use iced::keyboard::{self, Key};
 use iced::widget::{button, column, text, text_input};
@@ -154,7 +154,7 @@ pub fn captured_escape(
 }
 
 /// The switcher panel (shown above the panes while open).
-pub fn view<'a>(s: &'a Switcher, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
+pub fn view<'a>(s: &'a Switcher, tokens: Tokens) -> Element<'a, Message> {
     let hint = if s.move_from.is_some() {
         "Move note to folder…"
     } else {
@@ -182,21 +182,11 @@ pub fn view<'a>(s: &'a Switcher, tokens: Tokens, mode: Mode) -> Element<'a, Mess
     }
     if let Some(p) = create_path(&s.query).filter(|_| s.move_from.is_none() && !s.exact_hit()) {
         let label = format!("Create {p}");
-        col = col.push(if mode == Mode::Shadow {
-            column![
-                button(text(label).size(14)).style(button::text),
-                text("creating notes is disabled in shadow mode")
-                    .size(12)
-                    .color(tokens.warn_text.to_color()),
-            ]
-            .into()
-        } else {
-            Element::from(
-                button(text(label).size(14))
-                    .style(button::text)
-                    .on_press(Message::Switcher(SwitcherMsg::Create)),
-            )
-        });
+        col = col.push(
+            button(text(label).size(14))
+                .style(button::text)
+                .on_press(Message::Switcher(SwitcherMsg::Create)),
+        );
     }
     col.into()
 }

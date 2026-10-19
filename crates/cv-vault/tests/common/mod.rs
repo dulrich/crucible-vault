@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cv_vault::{ContentHash, MemoryShadowLog, NoCutover, VaultFs, VaultWriter};
+use cv_vault::{ContentHash, NoCutover, VaultFs, VaultWriter};
 use tempfile::TempDir;
 
 pub struct Fx {
@@ -36,17 +36,6 @@ impl Fx {
 
     pub fn live(&self) -> VaultWriter {
         let fs = VaultFs::live(self.vault.path(), self.prot.path(), &NoCutover).unwrap();
-        VaultWriter::open(fs, &self.base()).unwrap()
-    }
-
-    pub fn shadow(&self, scratch: &Path, log: MemoryShadowLog) -> VaultWriter {
-        let fs = VaultFs::shadow(
-            self.vault.path(),
-            scratch,
-            &[self.prot.path().to_path_buf()],
-            Box::new(log),
-        )
-        .unwrap();
         VaultWriter::open(fs, &self.base()).unwrap()
     }
 

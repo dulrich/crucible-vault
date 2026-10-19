@@ -9,7 +9,6 @@
 //! `editor-settings-tab`, audit M6: never `create_note`, so a file that appeared since load is a
 //! conflict, never a suffixed copy).
 
-use cv_protocol::Mode;
 use iced::widget::{button, column, row, text};
 use iced::{Element, Length};
 use serde::{Deserialize, Serialize};
@@ -167,8 +166,8 @@ impl Bookmarks {
 }
 
 /// The bookmarks list (pane side).
-pub fn view<'a>(b: &'a Bookmarks, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
-    let editable = mode != Mode::Shadow && !b.writing;
+pub fn view<'a>(b: &'a Bookmarks, tokens: Tokens) -> Element<'a, Message> {
+    let editable = !b.writing;
     let msg = |m: BookmarkMsg| Message::Panes(PanesMsg::Bookmark(m));
     let small = |label: &'a str, m: BookmarkMsg| {
         let bt = button(text(label).size(13)).style(button::text);
@@ -188,13 +187,6 @@ pub fn view<'a>(b: &'a Bookmarks, tokens: Tokens, mode: Mode) -> Element<'a, Mes
         );
     }
     let mut col = column![head].spacing(2);
-    if mode == Mode::Shadow {
-        col = col.push(
-            text("bookmark edits are disabled in shadow mode")
-                .size(12)
-                .color(tokens.warn_text.to_color()),
-        );
-    }
     for (i, bm) in b.items.iter().enumerate() {
         col = col.push(
             row![

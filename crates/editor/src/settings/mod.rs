@@ -1358,7 +1358,6 @@ pub fn view<'a>(
     prefs: &'a editor_prefs::Prefs,
     paths: &'a [String],
     t: Tokens,
-    mode: cv_protocol::Mode,
 ) -> Element<'a, Message> {
     let mut rail = column![].spacing(2).width(Length::Fixed(220.0));
     for sec in Section::ALL {
@@ -1398,7 +1397,7 @@ pub fn view<'a>(
     let rail = container(rail)
         .padding(1)
         .style(crate::theme::seg_group_style(t));
-    let body = scrollable(container(page(s, prefs, paths, t, mode)).padding([0, 16]))
+    let body = scrollable(container(page(s, prefs, paths, t)).padding([0, 16]))
         .id(body_scroll_id(s.section))
         .on_scroll({
             let sec = s.section;
@@ -1423,10 +1422,9 @@ pub fn page<'a>(
     prefs: &'a editor_prefs::Prefs,
     paths: &'a [String],
     t: Tokens,
-    mode: cv_protocol::Mode,
 ) -> Element<'a, Message> {
     let t0 = std::time::Instant::now();
-    let el = page_inner(s, prefs, paths, t, mode);
+    let el = page_inner(s, prefs, paths, t);
     let ms = t0.elapsed().as_secs_f64() * 1e3;
     if ms >= 1.0 {
         tracing::debug!(
@@ -1443,9 +1441,8 @@ fn page_inner<'a>(
     prefs: &'a editor_prefs::Prefs,
     paths: &'a [String],
     t: Tokens,
-    mode: cv_protocol::Mode,
 ) -> Element<'a, Message> {
-    let cx = pages::PageCx { s, paths, t, mode };
+    let cx = pages::PageCx { s, paths, t };
     let heading = text(s.section.label()).size(20).color(t.heading.to_color());
     let body: Element<'a, Message> = match s.section {
         Section::Editor => match s.file(editor_prefs::EDITOR_PATH) {
@@ -1455,7 +1452,6 @@ fn page_inner<'a>(
                 s.editor_note.as_deref(),
                 s.hidden_draft.as_deref(),
                 t,
-                mode,
             ),
             None => Space::new().into(),
         },
@@ -1525,10 +1521,9 @@ pub fn file_header(f: &ConfigFile, t: Tokens) -> Element<'_, Message> {
 }
 
 /// The save status line (plan `editor-feedback-round-2` WP-2: replaces the Save / Revert bar):
-/// "saving…" / "saved" / "not saved: N errors", "Start from defaults" for a malformed file,
-/// and the shadow-mode note. Fixed height.
-pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'_, Message> {
-    let shadow = mode == cv_protocol::Mode::Shadow;
+/// "saving…" / "saved" / "not saved: N errors" and "Start from defaults" for a malformed
+/// file. Fixed height.
+pub fn save_bar(f: &ConfigFile, t: Tokens) -> Element<'_, Message> {
     let mut bar = row![].spacing(8).align_y(iced::Alignment::Center);
     if matches!(f.state, LoadState::Malformed(_)) && f.doc.is_none() {
         bar = bar.push(
@@ -1539,13 +1534,7 @@ pub fn save_bar(f: &ConfigFile, t: Tokens, mode: cv_protocol::Mode) -> Element<'
                 .on_press(msg(SettingsMsg::StartOver(f.path.clone()))),
         );
     }
-    if shadow {
-        bar = bar.push(
-            text("saving is disabled in shadow mode")
-                .size(13)
-                .color(t.warn_text.to_color()),
-        );
-    } else if let Some((label, warn)) = f.save_status() {
+    if let Some((label, warn)) = f.save_status() {
         let c = if warn { t.warn_text } else { t.text_faint };
         bar = bar.push(text(label).size(13).color(c.to_color()));
     }

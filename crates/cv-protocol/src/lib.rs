@@ -166,19 +166,10 @@ pub struct HelloParams {
     pub client: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    #[default]
-    Shadow,
-    Live,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloResult {
     pub protocol_version: u32,
     pub index_schema: u32,
-    pub mode: Mode,
     pub vault_root: String,
     pub index_db: String,
     pub state_db: String,
@@ -193,7 +184,6 @@ pub enum Topic {
     JobUpdated,
     ConfigReloaded,
     OpenRequested,
-    ShadowWrite,
     ViewsInvalidated,
 }
 
@@ -528,7 +518,6 @@ pub struct ServiceHealth {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusResult {
-    pub mode: Mode,
     pub generation: u64,
     #[serde(default)]
     pub queue: std::collections::BTreeMap<String, u64>,
@@ -703,15 +692,6 @@ pub enum Origin {
     External,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WriteOp {
-    Write,
-    Create,
-    Rename,
-    Delete,
-}
-
 /// Every notification with its params (`method` + `params`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -733,10 +713,6 @@ pub enum Notification {
     OpenRequested {
         path: String,
     },
-    ShadowWrite {
-        op: WriteOp,
-        path: String,
-    },
     /// Reserved for plan B's view evaluator (hosted via the `ViewService` seam).
     ViewsInvalidated {
         view_ids: Vec<String>,
@@ -751,7 +727,6 @@ impl Notification {
             Self::JobUpdated(_) => Topic::JobUpdated,
             Self::ConfigReloaded { .. } => Topic::ConfigReloaded,
             Self::OpenRequested { .. } => Topic::OpenRequested,
-            Self::ShadowWrite { .. } => Topic::ShadowWrite,
             Self::ViewsInvalidated { .. } => Topic::ViewsInvalidated,
         }
     }
@@ -1058,7 +1033,6 @@ mod tests {
         round_trip(&HelloResult {
             protocol_version: 1,
             index_schema: 1,
-            mode: Mode::Shadow,
             vault_root: "/v".into(),
             index_db: "/i.db".into(),
             state_db: "/s.db".into(),
@@ -1102,7 +1076,6 @@ mod tests {
             path: "n.md".into(),
         });
         round_trip(&StatusResult {
-            mode: Mode::Live,
             generation: 1,
             queue: [("pending".to_owned(), 2)].into_iter().collect(),
             config_errors: vec![],
@@ -1194,10 +1167,6 @@ mod tests {
             }),
             Notification::ConfigReloaded { errors: vec![] },
             Notification::OpenRequested {
-                path: "a.md".into(),
-            },
-            Notification::ShadowWrite {
-                op: WriteOp::Rename,
                 path: "a.md".into(),
             },
             Notification::ViewsInvalidated {

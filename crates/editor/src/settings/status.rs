@@ -1,9 +1,9 @@
-//! The Status page: the daemon's existing `status` RPC (mode, generation, queue counts, config
+//! The Status page: the daemon's existing `status` RPC (generation, queue counts, config
 //! errors, service health), read-only. Refreshed when the page opens and on every
 //! `ConfigReloaded`; the RPC runs off the UI thread like every daemon call. Config errors the
 //! settings router could not attribute to a file page are listed here too.
 
-use cv_protocol::{Mode, StatusResult};
+use cv_protocol::StatusResult;
 use iced::widget::{button, column, row, text};
 use iced::{Element, Length};
 
@@ -74,11 +74,6 @@ pub fn view(s: &StatusPage, t: Tokens) -> Element<'_, Message> {
     }
     match &s.result {
         Some(r) => {
-            let mode = match r.mode {
-                Mode::Shadow => "shadow",
-                Mode::Live => "live",
-            };
-            col = col.push(kv("Mode", mode.to_owned(), t));
             col = col.push(kv("Index generation", r.generation.to_string(), t));
             let queue = if r.queue.is_empty() {
                 "empty".to_owned()

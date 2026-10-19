@@ -30,7 +30,10 @@ impl StateCutover {
 impl CutoverMarker for StateCutover {
     fn present(&self) -> cv_vault::Result<bool> {
         let db = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let rec = db.cutover().map_err(VaultError::State)?;
+        let rec = db.cutover().map_err(|e| VaultError::Io {
+            path: "state.db (cut-over marker)".to_owned(),
+            source: std::io::Error::other(e),
+        })?;
         Ok(rec.is_some_and(|r| r.vault == self.protected))
     }
 }

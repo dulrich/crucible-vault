@@ -14,8 +14,8 @@ use cv_protocol::{ChangeKind, JobState, Origin};
 
 use super::{
     ActionInfo, ContentHash, DaemonClient, DaemonError, DeleteMode, DeleteNoteResult,
-    DeletePreviewItem, HelloResult, JobStatus, LocalIndex, Mode, Notification, Result,
-    RunActionParams, RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult, vault_abs,
+    DeletePreviewItem, HelloResult, JobStatus, LocalIndex, Notification, Result, RunActionParams,
+    RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult, vault_abs,
 };
 
 /// A scripted action: params in, `Ok(open_path)` or `Err(message)` out.
@@ -77,7 +77,6 @@ impl Default for FakeLookups {
 struct Inner {
     lookups: FakeLookups,
     index: Index,
-    mode: Mode,
     subscriber: Option<(Vec<Topic>, Sender<Notification>)>,
     actions: BTreeMap<String, (ActionInfo, ActionHandler)>,
     jobs: BTreeMap<String, JobStatus>,
@@ -131,7 +130,6 @@ impl FakeDaemon {
     }
 
     /// Serves `vault_root`, keeping `index.db`/`state.db` under `data_dir` (never in the vault).
-    /// Starts in `live` mode so editing paths are exercisable.
     pub fn open(vault_root: &Path, data_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let base = data_dir.join("index.db");
@@ -146,7 +144,6 @@ impl FakeDaemon {
         let hello = HelloResult {
             protocol_version: cv_protocol::PROTOCOL_VERSION,
             index_schema: cv_index::SCHEMA_VERSION,
-            mode: Mode::Live,
             vault_root: vault_root.display().to_string(),
             index_db: base.display().to_string(),
             state_db: state_db.display().to_string(),
@@ -156,7 +153,6 @@ impl FakeDaemon {
             inner: Mutex::new(Inner {
                 lookups: FakeLookups::default(),
                 index,
-                mode: Mode::Live,
                 subscriber: None,
                 actions: BTreeMap::new(),
                 jobs: BTreeMap::new(),
@@ -578,7 +574,6 @@ impl DaemonClient for FakeDaemon {
     fn status(&self) -> Result<StatusResult> {
         let g = self.lock()?;
         Ok(StatusResult {
-            mode: g.mode,
             generation: g.index.generation()?,
             queue: BTreeMap::new(),
             config_errors: vec![],

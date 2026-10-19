@@ -101,7 +101,7 @@ impl VaultWriter {
         &self.fs
     }
 
-    /// The filesystem, mutably (e.g. [`VaultFs::set_job_id`]).
+    /// The filesystem, mutably.
     pub fn fs_mut(&mut self) -> &mut VaultFs {
         &mut self.fs
     }
@@ -139,9 +139,6 @@ impl VaultWriter {
     /// Indexes a just-written live file and records its echo. An index failure is logged and
     /// the echo is *not* recorded, so the watcher re-applies the change.
     fn index_written(&mut self, path: &str, bytes: &[u8], full: &Path, hash: &ContentHash) {
-        if self.fs.is_shadow() {
-            return;
-        }
         let res = std::fs::metadata(full)
             .map_err(|e| crate::error::io(full, e))
             .and_then(|md| {
@@ -176,13 +173,13 @@ impl VaultWriter {
         self.write(path, bytes, None)
     }
 
-    /// Recoverable delete (Live: into `.trash/`; Shadow: tombstone). CAS on `expected`.
+    /// Recoverable delete (into `.trash/`). CAS on `expected`.
     pub fn delete(&mut self, path: &str, expected: ContentHash) -> Result<()> {
         self.delete_with(path, expected, false)
     }
 
-    /// [`Self::delete`] with a mode: `permanent` removes the file outright (Live) instead of the
-    /// `.trash/` move; Shadow behaviour (tombstone) is identical.
+    /// [`Self::delete`] with a mode: `permanent` removes the file outright instead of the
+    /// `.trash/` move.
     pub fn delete_with(
         &mut self,
         path: &str,
@@ -190,11 +187,9 @@ impl VaultWriter {
         permanent: bool,
     ) -> Result<()> {
         self.fs.remove_with(path, &expected, permanent)?;
-        if !self.fs.is_shadow() {
-            match self.index.remove_file(path) {
-                Ok(_) => self.echoes.register(path, None),
-                Err(e) => tracing::warn!(path, error = %e, "index update after delete failed"),
-            }
+        match self.index.remove_file(path) {
+            Ok(_) => self.echoes.register(path, None),
+            Err(e) => tracing::warn!(path, error = %e, "index update after delete failed"),
         }
         Ok(())
     }
@@ -236,12 +231,9 @@ impl VaultWriter {
         Ok((removed, skipped))
     }
 
-    /// Whether the index's view of `src` still matches what the filesystem holds (Live mode,
-    /// live-root files: size and mtime equal the indexed row).
-    fn fresh(&self, src: &str, bytes: &[u8], from_overlay: bool) -> Result<bool> {
-        if from_overlay {
-            return Ok(true); // the span check in rewrite_note is the guard for overlay copies
-        }
+    /// Whether the index's view of `src` still matches what the filesystem holds (size and mtime
+    /// equal the indexed row).
+    fn fresh(&self, src: &str, bytes: &[u8]) -> Result<bool> {
         let Some(row) = self.index.query().file(src)? else {
             return Ok(false);
         };
@@ -281,8 +273,8 @@ impl VaultWriter {
         let mut pre: BTreeMap<String, ContentHash> = BTreeMap::new();
         for src in groups.keys() {
             let new_src = if src == from { to } else { src.as_str() };
-            match self.fs.read_src(src)? {
-                Some((b, ov)) if self.fresh(src, &b, ov)? => {
+            match self.fs.read(src)? {
+                Some(b) if self.fresh(src, &b)? => {
                     pre.insert(src.clone(), ContentHash::of(&b));
                 }
                 _ => outcome.skipped_conflicts.push(new_src.to_string()),
@@ -290,37 +282,29 @@ impl VaultWriter {
         }
         let moved = self.index.query().file(from)?.map(|r| r.id);
         let (h, full) = self.fs.move_file(from, to, &expected)?;
-        if !self.fs.is_shadow() {
-            let bytes = self
-                .fs
-                .read(to)?
-                .ok_or_else(|| VaultError::NotFound(to.to_string()))?;
-            let res = (|| -> Result<()> {
-                match self.index.rename_file(from, to) {
-                    Ok(_) | Err(cv_index::Error::NotFound(_)) => {}
-                    Err(e) => return Err(e.into()),
-                }
-                let md = std::fs::metadata(&full).map_err(|e| crate::error::io(&full, e))?;
-                let (m, c) = file_times(&md);
-                self.index.upsert_file(to, &bytes, m, c)?;
-                Ok(())
-            })();
-            match res {
-                Ok(()) => {
-                    self.echoes.register(from, None);
-                    self.echoes.register(to, Some(h.clone()));
-                }
-                Err(e) => tracing::warn!(from, to, error = %e, "index update after rename failed"),
+        let bytes = self
+            .fs
+            .read(to)?
+            .ok_or_else(|| VaultError::NotFound(to.to_string()))?;
+        let res = (|| -> Result<()> {
+            match self.index.rename_file(from, to) {
+                Ok(_) | Err(cv_index::Error::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
             }
+            let md = std::fs::metadata(&full).map_err(|e| crate::error::io(&full, e))?;
+            let (m, c) = file_times(&md);
+            self.index.upsert_file(to, &bytes, m, c)?;
+            Ok(())
+        })();
+        match res {
+            Ok(()) => {
+                self.echoes.register(from, None);
+                self.echoes.register(to, Some(h.clone()));
+            }
+            Err(e) => tracing::warn!(from, to, error = %e, "index update after rename failed"),
         }
         // Resolver after the rename, and the same without the moved file (uniqueness check).
-        let mut with = self.index.resolver().clone();
-        if let Some(id) = moved
-            && self.fs.is_shadow()
-        {
-            with.remove(id, from);
-            with.add(id, to);
-        }
+        let with = self.index.resolver().clone();
         let mut without = with.clone();
         if let Some(id) = moved {
             without.remove(id, to);
@@ -421,9 +405,7 @@ impl VaultWriter {
             }
         }
         outcome.failed.sort();
-        if !self.fs.is_shadow() {
-            remove_empty_dirs(&self.fs.root().join(from));
-        }
+        remove_empty_dirs(&self.fs.root().join(from));
         Ok(outcome)
     }
 }

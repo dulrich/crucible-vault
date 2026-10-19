@@ -16,7 +16,6 @@ pub mod highlighter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cv_protocol::Mode;
 use editor_model::editing::{self, ListEnter};
 use editor_model::undo::{self, Change, EditKind, UndoHistory};
 use iced::keyboard::{self, key};
@@ -1413,12 +1412,11 @@ fn find<'a>(docs: &'a mut Docs, path: &str) -> Option<&'a mut SourceBuffer> {
 /// What `update` needs from the app.
 pub struct Ctx<'a> {
     pub daemon: Option<&'a Arc<dyn DaemonClient>>,
-    pub mode: Mode,
     pub error: &'a mut Option<String>,
 }
 
 /// Plan editor-feedback-round-2 WP-3: flush `buf` now (tab switch away, window unfocus) through
-/// the one save machine — `begin_save` is a no-op for clean, read-only (shadow) and conflicted
+/// the one save machine — `begin_save` is a no-op for clean, read-only and conflicted
 /// buffers and re-queues (`save_again`) behind an in-flight save.
 pub(crate) fn flush(
     buf: &mut SourceBuffer,
@@ -1472,7 +1470,9 @@ pub fn update(
     msg: SourceMsg,
     ctx: Ctx<'_>,
 ) -> Task<Message> {
-    let read_only = ctx.mode == Mode::Shadow;
+    // Shadow mode (the only read-only source) was retired in plan tn-review-baseline-remediation
+    // WP-R6; the buffer API keeps its `read_only` gate.
+    let read_only = false;
     let active_buf = active;
     let buf = match &msg {
         SourceMsg::AutosaveDue { path, .. }
@@ -1559,7 +1559,7 @@ pub fn update(
             Task::batch([write, edited(buf, changed)])
         }
         SourceMsg::Paste => {
-            // Read-only (shadow) notes take no paste, as before.
+            // Read-only buffers take no paste.
             if read_only {
                 return Task::none();
             }
@@ -1887,14 +1887,13 @@ pub fn command_click_msg(path: &str, line: &str, col: usize) -> Option<Message> 
     })
 }
 
-/// Renders a tab's source buffer with its conflict bar / read-only marker; `font_size` is the
+/// Renders a tab's source buffer with its conflict bar; `font_size` is the
 /// `editor.toml` base text size (live, plan editor-settings-tab WP-2); `keymap` is the effective
 /// keymap its key bindings route by (WP-4). `link` is the open `[[` note list overlay (plan
 /// round-5 WP-9), already positioned; while it is `Some` its keys are intercepted.
 pub fn view<'a>(
     buf: &'a SourceBuffer,
     tokens: Tokens,
-    mode: Mode,
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
     link: Option<Element<'a, Message>>,
@@ -1936,14 +1935,10 @@ pub fn view<'a>(
         Repr::Plain { text: t, .. } => text(t.as_str()).size(font_size).into(),
     };
     // The editor's widget state (focus, cursor scroll) is matched by tree position, so it is
-    // always layer 0 of a stack; the status and conflict slots float in layer 1 (an empty
-    // `Space` when unused). Plan editor-feedback-round-2 WP-6: they are out of the editor's
-    // vertical flow, so a shadow notice or a conflict bar never pushes the editor down (dirty /
-    // saving live on the tab header, see `crate::header`).
-    let status: Element<'a, Message> = match status_notice(mode) {
-        Some(s) => text(s).size(14).color(tokens.warn_text.to_color()).into(),
-        None => Space::new().into(),
-    };
+    // always layer 0 of a stack; the conflict slot floats in layer 1 (an empty `Space` when
+    // unused). Plan editor-feedback-round-2 WP-6: it is out of the editor's vertical flow, so a
+    // conflict bar never pushes the editor down (dirty / saving live on the tab header, see
+    // `crate::header`).
     let conflict: Element<'a, Message> = if buf.conflict.is_some() {
         let msg = if buf.is_missing() {
             "The file is gone from disk (deleted or moved away). Keep mine recreates it; Take theirs closes it."
@@ -1969,15 +1964,7 @@ pub fn view<'a>(
     } else {
         Space::new().into()
     };
-    let overlay = column![
-        container(status)
-            .align_x(iced::alignment::Horizontal::Right)
-            .width(Length::Fill),
-        conflict,
-    ]
-    .spacing(4)
-    .padding(4)
-    .width(Length::Fill);
+    let overlay = column![conflict].spacing(4).padding(4).width(Length::Fill);
     // Plan round-5 WP-1: the stack is always wrapped (stable tree shape); the sensor reports
     // the laid-out height so `top_line` tracking uses the real viewport line count.
     let path = buf.path.as_str();
@@ -1995,13 +1982,8 @@ pub fn view<'a>(
 }
 
 /// The source stack's slots, in order: the editor is always layer 0, whatever the dirty /
-/// shadow / conflict state; status and conflict float above it (each owns a fixed slot).
-pub const SLOTS: [&str; 3] = ["editor", "status", "conflict"];
-
-/// The status slot's text: only the shadow notice (dirty/saving live on the tab header).
-pub fn status_notice(mode: Mode) -> Option<&'static str> {
-    (mode == Mode::Shadow).then_some("read-only (shadow)")
-}
+/// conflict state; the conflict bar floats above it (a fixed slot).
+pub const SLOTS: [&str; 2] = ["editor", "conflict"];
 
 #[cfg(test)]
 mod tests;

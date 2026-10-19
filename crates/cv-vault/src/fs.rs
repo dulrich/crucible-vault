@@ -1,20 +1,12 @@
-//! [`VaultFs`]: the Live/Shadow filesystem every vault mutation goes through.
+//! [`VaultFs`]: the filesystem every vault mutation goes through.
 //!
-//! Live mode reads and writes the vault root; it is refused when the root is (under) the
-//! protected live vault and the cut-over marker is absent (I1). Shadow mode reads the live vault
-//! through a scratch overlay (`<scratch>/vault/`), applies every mutation to the overlay only and
-//! records it through a [`ShadowLog`] (ops `create`, `modify`, `delete`, and `rename_to` +
-//! `rename_from` for a rename); the live root is never written. Deletes in the overlay are
-//! tombstones kept in `<scratch>/.cv-tombstones.json` (outside the overlay tree, so they never
-//! look like vault content).
+//! It reads and writes the vault root; it is refused when the root is (under) the protected
+//! live vault and the cut-over marker is absent (I1). Shadow mode was retired in plan
+//! tn-review-baseline-remediation WP-R6.
 
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use cv_state::NewShadowWrite;
 
 use crate::error::{Result, VaultError, io};
 use crate::hash::ContentHash;
@@ -22,12 +14,6 @@ use crate::path::{TMP_PREFIX, is_ignored, validate_rel_path};
 
 /// The live vault (I1). A parameter everywhere so tests use a temp dir as the protected root.
 pub const DEFAULT_PROTECTED_ROOT: &str = "~/vault";
-
-/// Roots no scratch dir may live under (every repo on this machine).
-pub const DEFAULT_REPO_ROOTS: &[&str] = &["<code-root>"];
-
-const TOMBSTONES: &str = ".cv-tombstones.json";
-const OVERLAY: &str = "vault";
 
 /// The cut-over check (I1), injected by the caller. `cv::cutover::StateCutover` implements it over
 /// `state.db` (plan `cut-over-now` WP-1); this crate ships only [`NoCutover`] and never creates a
@@ -47,94 +33,15 @@ impl CutoverMarker for NoCutover {
     }
 }
 
-/// Where shadow-mode mutations are recorded (`state.db.shadow_writes`).
-pub trait ShadowLog: Send {
-    /// Appends one would-be write.
-    fn record(&mut self, w: &NewShadowWrite) -> Result<()>;
-}
-
-impl ShadowLog for cv_state::StateDb {
-    fn record(&mut self, w: &NewShadowWrite) -> Result<()> {
-        self.append_shadow_write(w)?;
-        Ok(())
-    }
-}
-
-/// An in-memory [`ShadowLog`] (tests, dry runs); clones share the same entries.
-#[derive(Debug, Clone, Default)]
-pub struct MemoryShadowLog(Arc<Mutex<Vec<NewShadowWrite>>>);
-
-impl MemoryShadowLog {
-    /// A snapshot of the recorded writes, oldest first.
-    pub fn entries(&self) -> Vec<NewShadowWrite> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-}
-
-impl ShadowLog for MemoryShadowLog {
-    fn record(&mut self, w: &NewShadowWrite) -> Result<()> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(w.clone());
-        Ok(())
-    }
-}
-
 fn canon_or_self(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Validates the shadow scratch dir: creates it if missing, canonicalizes, and refuses it when
-/// it is equal to/under/above `live_root`, equal to/under any `repo_roots` entry
-/// ([`DEFAULT_REPO_ROOTS`] in production), or when it or any ancestor contains a `.git` entry.
-/// Returns the canonical path.
-pub fn validate_scratch(
-    scratch: &Path,
-    live_root: &Path,
-    repo_roots: &[PathBuf],
-) -> Result<PathBuf> {
-    let refuse = |reason: String| VaultError::ScratchRefused {
-        scratch: scratch.display().to_string(),
-        reason,
-    };
-    std::fs::create_dir_all(scratch).map_err(|e| io(scratch, e))?;
-    let canon = std::fs::canonicalize(scratch).map_err(|e| io(scratch, e))?;
-    let live = canon_or_self(live_root);
-    if canon.starts_with(&live) || live.starts_with(&canon) {
-        return Err(refuse(format!("overlaps the live root {}", live.display())));
-    }
-    for repo in repo_roots {
-        let repo = canon_or_self(repo);
-        if canon.starts_with(&repo) {
-            return Err(refuse(format!("under the repo root {}", repo.display())));
-        }
-    }
-    for a in canon.ancestors() {
-        if a.join(".git").symlink_metadata().is_ok() {
-            return Err(refuse(format!("{} contains .git", a.display())));
-        }
-    }
-    Ok(canon)
-}
-
-struct Shadow {
-    overlay: PathBuf,
-    tomb_file: PathBuf,
-    tombstones: BTreeSet<String>,
-    log: Box<dyn ShadowLog>,
-}
-
-/// The vault filesystem (Live or Shadow); see the module docs.
+/// The vault filesystem; see the module docs.
 pub struct VaultFs {
     root: PathBuf,
-    shadow: Option<Shadow>,
-    job_id: Option<String>,
     /// The canonical protected root (I1), for the write-through-link destination check.
-    protected: Option<PathBuf>,
+    protected: PathBuf,
     /// Whether the cut-over marker was present when live mode was opened.
     marker_present: bool,
     /// Canonical roots outside the vault a write through a symlinked note may land under
@@ -146,17 +53,8 @@ impl std::fmt::Debug for VaultFs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VaultFs")
             .field("root", &self.root)
-            .field("overlay", &self.shadow.as_ref().map(|s| &s.overlay))
             .finish_non_exhaustive()
     }
-}
-
-pub(crate) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .unwrap_or(0)
 }
 
 /// Fsyncs directory `dir` so a just-persisted rename/link inside it survives a crash.
@@ -232,9 +130,7 @@ impl VaultFs {
         }
         Ok(Self {
             root,
-            shadow: None,
-            job_id: None,
-            protected: Some(protected),
+            protected,
             marker_present,
             link_write_roots: Vec::new(),
         })
@@ -277,10 +173,7 @@ impl VaultFs {
         if !target.is_file() {
             return Err(refuse("the link target is not a regular file"));
         }
-        if let Some(p) = &self.protected
-            && target.starts_with(p)
-            && !self.marker_present
-        {
+        if target.starts_with(&self.protected) && !self.marker_present {
             return Err(refuse(
                 "the link target is under the protected root and no cut-over marker is present",
             ));
@@ -295,80 +188,15 @@ impl VaultFs {
         Ok(target)
     }
 
-    /// Shadow mode: reads `live_root` (never writes it), mutations go to `<scratch>/vault/` and
-    /// `log`. `scratch` is validated by [`validate_scratch`] against `repo_roots`.
-    pub fn shadow(
-        live_root: &Path,
-        scratch: &Path,
-        repo_roots: &[PathBuf],
-        log: Box<dyn ShadowLog>,
-    ) -> Result<Self> {
-        let root = std::fs::canonicalize(live_root).map_err(|e| io(live_root, e))?;
-        let scratch = validate_scratch(scratch, &root, repo_roots)?;
-        let overlay = scratch.join(OVERLAY);
-        std::fs::create_dir_all(&overlay).map_err(|e| io(&overlay, e))?;
-        let tomb_file = scratch.join(TOMBSTONES);
-        let tombstones = match read_opt(&tomb_file)? {
-            Some(b) => serde_json::from_slice(&b)?,
-            None => BTreeSet::new(),
-        };
-        Ok(Self {
-            root,
-            shadow: Some(Shadow {
-                overlay,
-                tomb_file,
-                tombstones,
-                log,
-            }),
-            job_id: None,
-            protected: None,
-            marker_present: false,
-            link_write_roots: Vec::new(),
-        })
-    }
-
     /// The (canonical) live vault root.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Shadow mode?
-    pub fn is_shadow(&self) -> bool {
-        self.shadow.is_some()
-    }
-
-    /// The overlay dir in shadow mode.
-    pub fn overlay(&self) -> Option<&Path> {
-        self.shadow.as_ref().map(|s| s.overlay.as_path())
-    }
-
-    /// The job id recorded with subsequent shadow writes.
-    pub fn set_job_id(&mut self, job_id: Option<String>) {
-        self.job_id = job_id;
-    }
-
-    /// The directory mutations land in (live root, or the overlay).
-    fn write_base(&self) -> &Path {
-        self.shadow.as_ref().map_or(&self.root, |s| &s.overlay)
-    }
-
-    /// Reads `path` (overlay first, tombstones hide live files). `None` if absent.
+    /// Reads `path`. `None` if absent.
     pub fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.read_src(path)?.map(|(b, _)| b))
-    }
-
-    /// Like [`Self::read`], also telling whether the bytes came from the overlay.
-    pub(crate) fn read_src(&self, path: &str) -> Result<Option<(Vec<u8>, bool)>> {
         validate_rel_path(path)?;
-        if let Some(s) = &self.shadow {
-            if let Some(b) = read_opt(&s.overlay.join(path))? {
-                return Ok(Some((b, true)));
-            }
-            if s.tombstones.contains(path) {
-                return Ok(None);
-            }
-        }
-        Ok(read_opt(&self.root.join(path))?.map(|b| (b, false)))
+        read_opt(&self.root.join(path))
     }
 
     /// The current content hash of `path` (`None` if absent).
@@ -388,56 +216,6 @@ impl VaultFs {
         Ok(found)
     }
 
-    fn log(
-        &mut self,
-        op: &str,
-        path: &str,
-        before: Option<&ContentHash>,
-        after: Option<&ContentHash>,
-    ) -> Result<()> {
-        let job_id = self.job_id.clone();
-        if let Some(s) = &mut self.shadow {
-            s.log.record(&NewShadowWrite {
-                op: op.to_string(),
-                path: path.to_string(),
-                before_hash: before.map(|h| h.as_str().to_string()),
-                after_hash: after.map(|h| h.as_str().to_string()),
-                job_id,
-                at_ms: now_ms(),
-            })?;
-        }
-        Ok(())
-    }
-
-    fn save_tombstones(&self) -> Result<()> {
-        let Some(s) = &self.shadow else {
-            return Ok(());
-        };
-        let dir = s.tomb_file.parent().unwrap_or(Path::new("."));
-        let bytes = serde_json::to_vec(&s.tombstones)?;
-        let mut tmp = tempfile::Builder::new()
-            .prefix(TMP_PREFIX)
-            .tempfile_in(dir)
-            .map_err(|e| io(dir, e))?;
-        tmp.write_all(&bytes).map_err(|e| io(tmp.path(), e))?;
-        tmp.as_file().sync_all().map_err(|e| io(&s.tomb_file, e))?;
-        tmp.persist(&s.tomb_file)
-            .map_err(|e| io(&s.tomb_file, e.error))?;
-        fsync_dir(dir)
-    }
-
-    fn set_tombstone(&mut self, path: &str, on: bool) -> Result<()> {
-        let changed = match &mut self.shadow {
-            Some(s) if on => s.tombstones.insert(path.to_string()),
-            Some(s) => s.tombstones.remove(path),
-            None => false,
-        };
-        if changed {
-            self.save_tombstones()?;
-        }
-        Ok(())
-    }
-
     /// CAS write: `expected` is the hash the caller read (`None` = must not exist). Writes a
     /// `.cv-tmp-*` file in the target's directory, fsyncs it, re-checks the hash immediately
     /// before the rename, then renames over the target (no-clobber when `expected` is `None`).
@@ -448,33 +226,12 @@ impl VaultFs {
         bytes: &[u8],
         expected: Option<&ContentHash>,
     ) -> Result<(ContentHash, PathBuf)> {
-        let op = if expected.is_none() {
-            "create"
-        } else {
-            "modify"
-        };
-        self.put_op(path, bytes, expected, op)
-    }
-
-    /// [`Self::put`] logging shadow op `op`.
-    fn put_op(
-        &mut self,
-        path: &str,
-        bytes: &[u8],
-        expected: Option<&ContentHash>,
-        op: &str,
-    ) -> Result<(ContentHash, PathBuf)> {
         validate_rel_path(path)?;
-        let vault_full = self.write_base().join(path);
-        // Live mode writes through a symlinked note onto its (confined) target; shadow mode
-        // writes only regular overlay files.
-        let full = if self.is_shadow() {
-            vault_full.clone()
-        } else {
-            self.write_target(path, &vault_full)?
-        };
+        let vault_full = self.root.join(path);
+        // A write through a symlinked note lands on its (confined) target.
+        let full = self.write_target(path, &vault_full)?;
         self.check(path, expected)?;
-        let dir = full.parent().unwrap_or(self.write_base()).to_path_buf();
+        let dir = full.parent().unwrap_or(&self.root).to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
         let mut tmp = tempfile::Builder::new()
             .prefix(TMP_PREFIX)
@@ -503,19 +260,13 @@ impl VaultFs {
             return Err(io(&full, e.error));
         }
         fsync_dir(&dir)?;
-        let after = ContentHash::of(bytes);
-        if self.is_shadow() {
-            self.set_tombstone(path, false)?;
-            self.log(op, path, expected, Some(&after))?;
-        }
-        Ok((after, vault_full))
+        Ok((ContentHash::of(bytes), vault_full))
     }
 
-    /// Recoverable delete (CAS on `expected`). Live: moves the file to `.trash/<path>` (` (n)`
-    /// suffix on collision) and returns that vault-relative trash path. Shadow: drops the overlay
-    /// copy, tombstones the path and returns `None`.
-    /// `permanent` (plan editor-ui-round-3 WP-3) removes the live file outright instead of the
-    /// trash move (same CAS, same shadow tombstone) and returns `None`.
+    /// Recoverable delete (CAS on `expected`): moves the file to `.trash/<path>` (` (n)` suffix
+    /// on collision) and returns that vault-relative trash path.
+    /// `permanent` (plan editor-ui-round-3 WP-3) removes the file outright instead of the trash
+    /// move (same CAS) and returns `None`.
     pub(crate) fn remove_with(
         &mut self,
         path: &str,
@@ -527,16 +278,6 @@ impl VaultFs {
             return Err(VaultError::NotFound(path.to_string()));
         }
         self.check(path, Some(expected))?;
-        if let Some(s) = &self.shadow {
-            let ov = s.overlay.join(path);
-            if ov.exists() {
-                std::fs::remove_file(&ov).map_err(|e| io(&ov, e))?;
-            }
-            let live_has = self.root.join(path).is_file();
-            self.set_tombstone(path, live_has)?;
-            self.log("delete", path, Some(expected), None)?;
-            return Ok(None);
-        }
         if permanent {
             let src = self.root.join(path);
             std::fs::remove_file(&src).map_err(|e| io(&src, e))?;
@@ -588,24 +329,13 @@ impl VaultFs {
     ) -> Result<(ContentHash, PathBuf)> {
         validate_rel_path(from)?;
         validate_rel_path(to)?;
-        let Some(bytes) = self.read(from)? else {
+        if self.read(from)?.is_none() {
             return Err(VaultError::NotFound(from.to_string()));
-        };
+        }
         if self.read(to)?.is_some() {
             return Err(VaultError::Exists(to.to_string()));
         }
         self.check(from, Some(expected))?;
-        if self.is_shadow() {
-            let (h, full) = self.put_op(to, &bytes, None, "rename_to")?;
-            let ov = self.write_base().join(from);
-            if ov.exists() {
-                std::fs::remove_file(&ov).map_err(|e| io(&ov, e))?;
-            }
-            let live_has = self.root.join(from).is_file();
-            self.set_tombstone(from, live_has)?;
-            self.log("rename_from", from, Some(expected), None)?;
-            return Ok((h, full));
-        }
         let src = self.root.join(from);
         let dest = self.root.join(to);
         if let Some(d) = dest.parent() {
@@ -641,43 +371,30 @@ impl VaultFs {
         Ok((expected.clone(), dest))
     }
 
-    /// Every vault file under folder `dir` (`""` = whole vault) as this filesystem sees it
-    /// (overlay ∪ live, minus tombstones), skipping ignored paths. Sorted.
+    /// Every vault file under folder `dir` (`""` = whole vault), skipping ignored paths. Sorted.
     pub fn list_files(&self, dir: &str) -> Result<Vec<String>> {
         let mut out = BTreeSet::new();
-        let mut bases = vec![self.root.clone()];
-        if let Some(s) = &self.shadow {
-            bases.push(s.overlay.clone());
+        let base = &self.root;
+        let start = if dir.is_empty() {
+            base.clone()
+        } else {
+            base.join(dir)
+        };
+        if !start.is_dir() {
+            return Ok(Vec::new());
         }
-        for base in bases {
-            let start = if dir.is_empty() {
-                base.clone()
-            } else {
-                base.join(dir)
-            };
-            if !start.is_dir() {
+        for entry in walkdir::WalkDir::new(&start) {
+            let entry = entry.map_err(|e| VaultError::Io {
+                path: start.display().to_string(),
+                source: std::io::Error::other(e.to_string()),
+            })?;
+            if !is_file_or_file_link(&entry) {
                 continue;
             }
-            for entry in walkdir::WalkDir::new(&start) {
-                let entry = entry.map_err(|e| VaultError::Io {
-                    path: start.display().to_string(),
-                    source: std::io::Error::other(e.to_string()),
-                })?;
-                if !is_file_or_file_link(&entry) {
-                    continue;
-                }
-                if let Some(rel) = cv_index::rel_path(&base, entry.path())
-                    && !is_ignored(&rel)
-                {
-                    out.insert(rel);
-                }
-            }
-        }
-        if let Some(s) = &self.shadow {
-            for t in &s.tombstones {
-                if !s.overlay.join(t).is_file() {
-                    out.remove(t);
-                }
+            if let Some(rel) = cv_index::rel_path(base, entry.path())
+                && !is_ignored(&rel)
+            {
+                out.insert(rel);
             }
         }
         Ok(out.into_iter().collect())

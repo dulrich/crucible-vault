@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text (`{JOBS}` is replaced by [`crate::jobs::USAGE`]).
-const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon (CV_MODE=shadow|live)\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print mode, generation, queue counts, config errors, service health\n  cv search ...    import --from <companion.sqlite> [--to <search.db>] (daemon stopped)\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
+const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print generation, queue counts, config errors, service health\n  cv search ...    import --from <companion.sqlite> [--to <search.db>] (daemon stopped)\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
 
 /// Usage text.
 #[must_use]
@@ -62,7 +62,6 @@ fn report(r: Result<()>) -> i32 {
 
 fn cmd_daemon() -> Result<()> {
     let config = Config::from_env()?;
-    // Landlock (shadow) is applied here, before the runtime spawns any thread.
     let daemon = Daemon::start(config, DaemonOptions::default())?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -136,14 +135,7 @@ pub fn uri_command(config: &Config, url: &str) -> Result<UriResult> {
 }
 
 fn render(s: &StatusResult, daemon: &str) -> String {
-    let mode = serde_json::to_value(s.mode)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default();
-    let mut out = format!(
-        "daemon: {daemon}\nmode: {mode}\ngeneration: {}\n",
-        s.generation
-    );
+    let mut out = format!("daemon: {daemon}\ngeneration: {}\n", s.generation);
     let queue: Vec<String> = s.queue.iter().map(|(k, v)| format!("{k}={v}")).collect();
     out.push_str(&format!(
         "queue: {}\n",
@@ -217,7 +209,6 @@ pub fn status_command(config: &Config) -> Result<String> {
         );
     }
     let mut s = StatusResult {
-        mode: config.mode,
         generation: generation.ok().flatten().unwrap_or(0),
         queue: Default::default(),
         config_errors: Vec::new(),
@@ -263,7 +254,6 @@ mod tests {
         assert!(out.contains("daemon: not running"), "{out}");
         assert!(out.contains("tracker items: 0\nlink records: 0\n"), "{out}");
         let mut s = StatusResult {
-            mode: config.mode,
             generation: 0,
             queue: Default::default(),
             config_errors: vec![],

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use cv_protocol::{ChangeKind, Mode, Notification, Origin};
+use cv_protocol::{ChangeKind, Notification, Origin};
 use cv_testkit::{SyntheticVault, VaultSpec};
 use iced::widget::text_editor::{Action, Cursor, Edit, Motion, Position};
 
@@ -219,28 +219,6 @@ fn clean_buffer_reloads_and_keeps_cursor_line() {
 }
 
 #[test]
-fn shadow_mode_drops_edits_and_never_saves() {
-    let (_t, d, mut app, p) = setup();
-    app.status.mode = Mode::Shadow;
-    type_text(&mut app, "nope");
-    let _ = app.send(Message::Source(SourceMsg::Undo));
-    let _ = app.send(Message::Source(SourceMsg::Save));
-    let b = buf(&mut app);
-    assert_eq!(b.text(), "line one\nline two\nline three\n");
-    assert!(!b.is_dirty() && !b.is_saving());
-    assert!(b.begin_save(true).is_none());
-    // Navigation still works.
-    let _ = app.send(Message::Source(SourceMsg::Action(Action::Move(
-        Motion::Down,
-    ))));
-    assert_eq!(buf(&mut app).cursor().position.line, 1);
-    assert_eq!(
-        d.read_file(&p).expect("read").0,
-        b"line one\nline two\nline three\n"
-    );
-}
-
-#[test]
 fn save_in_flight_queues_one_follow_up() {
     let (_t, d, mut app, _p) = setup();
     type_text(&mut app, "a");
@@ -414,7 +392,7 @@ fn view_tree_position_stable_across_dirty_states() {
     fn shape(b: &SourceBuffer) -> Vec<iced::advanced::widget::tree::Tag> {
         let t = crate::theme::Surround::default().tokens().expect("tokens");
         let km = crate::palette::Keymap::default();
-        let el = view(b, t, Mode::Live, crate::theme::BASE_TEXT_SIZE, &km, None);
+        let el = view(b, t, crate::theme::BASE_TEXT_SIZE, &km, None);
         Tree::new(&el).children.iter().map(|c| c.tag).collect()
     }
     let mut b = SourceBuffer::new("n.md", b"text\n", ContentHash::of(b"text\n"));

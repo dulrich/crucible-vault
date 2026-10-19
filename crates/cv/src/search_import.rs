@@ -162,7 +162,6 @@ mod tests {
             ("CV_STATE_DB", root.join("state/state.db")),
             ("CV_SEARCH_DB", root.join("state/search.db")),
             ("CV_INDEX_DB", root.join("cache/index.db")),
-            ("CV_SCRATCH", root.join("scratch")),
             ("CV_CONFIG_DIR", root.join("config")),
             ("CV_SOCKET", root.join("run/d.sock")),
         ]

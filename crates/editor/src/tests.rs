@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cv_protocol::{
-    ActionContext, ActionInfo, ChangeKind, HelloResult, JobState, Mode, Notification, Origin,
-    Request, RpcNotification, RpcRequest, RunActionParams,
+    ActionContext, ActionInfo, ChangeKind, HelloResult, JobState, Notification, Origin, Request,
+    RpcNotification, RpcRequest, RunActionParams,
 };
 use cv_testkit::{SyntheticVault, VaultSpec};
 use serde_json::{Value, json};
@@ -207,7 +207,6 @@ fn serve(sock: &Path, index_schema: u32) {
                 Request::Hello(_) => serde_json::to_value(HelloResult {
                     protocol_version: 1,
                     index_schema,
-                    mode: Mode::Shadow,
                     vault_root: "/nonexistent-vault".into(),
                     index_db: "/nonexistent/index.db".into(),
                     state_db: "/nonexistent/state.db".into(),
@@ -215,7 +214,7 @@ fn serve(sock: &Path, index_schema: u32) {
                 })
                 .expect("hello"),
                 Request::Subscribe(s) => json!({ "topics": s.topics }),
-                Request::Status => json!({ "mode": "shadow", "generation": 7 }),
+                Request::Status => json!({ "generation": 7 }),
                 Request::WriteNote(_) => json!({ "conflict": { "current_hash": "abc" } }),
                 _ => {
                     let e =
@@ -284,7 +283,6 @@ fn app_open_file_adds_tab_and_status_updates() {
     let d: Arc<dyn DaemonClient> = Arc::new(d);
     let mut app = App::new(Some(Arc::clone(&d)), Some(state.clone()));
     assert!(app.status.connected);
-    assert_eq!(app.status.mode, Mode::Live);
     assert!(app.explorer.paths.contains(&p));
 
     let _ = app.send(Message::Tabs(TabsMsg::Open(p.clone())));
@@ -296,8 +294,6 @@ fn app_open_file_adds_tab_and_status_updates() {
     assert_eq!(app.open_paths().len(), 1);
     assert_eq!(app.status.error_text(), Some("file not found"));
 
-    app.status.mode = Mode::Shadow;
-    assert_eq!(app.status.mode, Mode::Shadow);
     let base = d.read_file(&p).expect("read").1;
     d.write_note(&p, "changed\n", &base).expect("write");
     let g = d.status().expect("status").generation;
@@ -319,7 +315,7 @@ fn app_open_file_adds_tab_and_status_updates() {
         Some("changed\n")
     );
     let _ = app.send(Message::Status(StatusMsg::Disconnected));
-    assert!(app.status.line().starts_with("disconnected · shadow"));
+    assert!(app.status.line().starts_with("disconnected · gen"));
 
     // Tabs persist and restore from editor.json.
     let restored = App::new(Some(d), Some(state));
@@ -363,10 +359,6 @@ mod wp4 {
                 origin: Origin::Daemon,
             },
         )));
-    }
-
-    fn shadow(app: &mut App) {
-        app.status.mode = Mode::Shadow;
     }
 
     fn row_paths(app: &App) -> Vec<String> {
@@ -633,33 +625,6 @@ mod wp4 {
         assert!(!doc.is_dirty() && doc.conflict().is_none());
     }
 
-    #[test]
-    fn shadow_mode_blocks_file_ops_but_not_navigation() {
-        let (_tmp, d) = fake_arc();
-        d.create_note("wp4sh/keep.md", "k").expect("create");
-        let mut app = app_over(&d, None);
-        shadow(&mut app);
-        let _ = app.send(Message::Explorer(ExplorerMsg::Open("wp4sh/keep.md".into())));
-        assert_eq!(app.open_paths(), ["wp4sh/keep.md"], "navigation works");
-        let _ = app.send(Message::Explorer(ExplorerMsg::BeginNew));
-        assert!(app.explorer.edit.is_none());
-        assert_eq!(
-            app.status.error_text(),
-            Some(crate::explorer::SHADOW_REASON)
-        );
-        let _ = app.send(Message::Explorer(ExplorerMsg::Trash));
-        assert!(d.read_file("wp4sh/keep.md").is_ok());
-        let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::AddActive)));
-        assert!(app.bookmarks.items.is_empty());
-        assert!(d.read_file(BOOKMARKS_PATH).is_err());
-        let _ = app.send(Message::Switcher(SwitcherMsg::Open));
-        let _ = app.send(Message::Switcher(SwitcherMsg::Query(
-            "nothing like it".into(),
-        )));
-        let _ = app.send(Message::Switcher(SwitcherMsg::Create));
-        assert!(d.read_file("nothing like it.md").is_err());
-    }
-
     pub(super) fn register_create(d: &Arc<FakeDaemon>) {
         let inner = Arc::clone(d);
         d.register_action(
@@ -880,29 +845,6 @@ mod wp4 {
             Some(&("month".to_owned(), "2027-01-01".to_owned()))
         );
         assert_eq!(tabs_of(&app, day_pane), ["daily/month/2027-01.md"]);
-    }
-
-    #[test]
-    fn nav_in_shadow_reports_not_materialized() {
-        let (_tmp, d) = fake_arc();
-        let _calls = register_period(&d, false);
-        d.create_note("daily/day/2026-10-13.md", "d")
-            .expect("create");
-        let mut app = app_over(&d, None);
-        let _ = app.send(Message::Tabs(TabsMsg::Open(
-            "daily/day/2026-10-13.md".into(),
-        )));
-        shadow(&mut app);
-        let pane = app.focus;
-        let _ = app.send(Message::Nav(NavMsg::Go {
-            pane,
-            target: NavTarget::Period(
-                Period::Day,
-                NaiveDate::from_ymd_opt(2026, 10, 14).expect("d"),
-            ),
-        }));
-        assert_eq!(app.status.error_text(), Some("not materialized (shadow)"));
-        assert_eq!(app.open_paths(), ["daily/day/2026-10-13.md"]);
     }
 
     #[test]
@@ -1355,8 +1297,6 @@ mod usability_wp3 {
             crate::source::SLOTS.iter().position(|s| *s == "editor"),
             Some(0)
         );
-        assert_eq!(crate::source::status_notice(Mode::Live), None);
-        assert!(crate::source::status_notice(Mode::Shadow).is_some());
         let (_tmp, _d, mut app) = app_with(&["d3/t.md"], None);
         let _ = app.send(Message::Explorer(ExplorerMsg::Open("d3/t.md".into())));
         let tab = app.active_tab().expect("tab");
@@ -1872,7 +1812,7 @@ mod round2_wp3 {
     }
 
     #[test]
-    fn flush_skips_conflicted_and_shadow_buffers() {
+    fn flush_skips_conflicted_buffers() {
         let (_tmp, _d, mut app) = setup(&["w3c/a.md", "w3c/b.md"]);
         select(&mut app, "w3c/a.md");
         type_x(&mut app);
@@ -1885,12 +1825,6 @@ mod round2_wp3 {
         let t = tab(&mut app, "w3c/a.md");
         assert!(!t.is_saving(), "a conflicted buffer is never auto-saved");
         assert!(t.is_dirty());
-
-        app.status.mode = Mode::Shadow;
-        dirty_in_place(&mut app, "w3c/b.md");
-        select(&mut app, "w3c/a.md");
-        let _ = app.send(Message::Tabs(TabsMsg::FlushAll));
-        assert!(!tab(&mut app, "w3c/b.md").is_saving(), "shadow: no-op");
     }
 
     #[test]
@@ -2438,7 +2372,6 @@ mod data_safety_wp1 {
         let _ = app.send(Message::Status(StatusMsg::ReconnectDue));
         assert!(app.daemon.is_some());
         assert!(app.status.connected);
-        assert_eq!(app.status.mode, Mode::Live);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(
             !app.explorer.paths.is_empty(),

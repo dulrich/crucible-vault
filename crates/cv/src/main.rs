@@ -1,5 +1,5 @@
-//! `cv` binary: logging + CLI dispatch. Deliberately not `#[tokio::main]` — `cv daemon` applies
-//! Landlock before any runtime thread exists (see `cv::daemon`).
+//! `cv` binary: logging + CLI dispatch. `cv daemon` builds its own tokio runtime (see
+//! `cv::cli`).
 
 fn main() {
     tracing_subscriber::fmt()

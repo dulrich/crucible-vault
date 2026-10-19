@@ -28,7 +28,6 @@ pub struct PageCx<'a> {
     pub s: &'a Settings,
     pub paths: &'a [String],
     pub t: Tokens,
-    pub mode: cv_protocol::Mode,
 }
 
 /// The rows of `f`'s whole form (empty when the file has no doc or schema).
@@ -78,7 +77,7 @@ pub fn frame<'a>(
         file_header(f, cx.t),
         intro,
         widgets::render(rows, rcx(cx, f)),
-        save_bar(f, cx.t, cx.mode),
+        save_bar(f, cx.t),
     ]
     .spacing(10)
     .into()

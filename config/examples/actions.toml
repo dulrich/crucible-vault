@@ -1,5 +1,5 @@
 # Example `actions.toml` (plan v0-core-daemon WP-9). Copy into CV_CONFIG_DIR.
-# Live mode reads <vault>/_custom/crucible-vault/; shadow mode must use a dir outside the vault.
+# The daemon reads <vault>/_custom/crucible-vault/ (override: CV_CONFIG_DIR).
 #
 # An action = id, label, typed steps, starters, resource keys, lane.
 #   durable = false  -> `run_action` waits (<=10 s) and returns `open_path`.

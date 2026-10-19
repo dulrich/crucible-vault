@@ -76,6 +76,7 @@ Settled with the user in the feature-planning stream. Questions come from `docs/
 
 - **Decision:** **Shadow, then one switch.** Until v0 parity, the daemon runs against the live vault **read-only**: it indexes and logs the writes it would make, with real writes only to a scratch copy outside every repo. At cut-over, with the user's explicit go-ahead, it takes `x-scheme-handler/obsidian` and Crucible's automation is disabled in one step. There is never a dual-writer period.
 - **Implication:** v0 needs a shadow/dry-run mode in the action runner, plus parity criteria the user can check before the switch.
+- **Amendment (2026-10-19):** shadow mode is retired (plan `tn-review-baseline-remediation` WP-R6): the daemon has one (live) mode, `CV_MODE` is gone, and the protected-root + cut-over-marker guard (I1) is what keeps test and scratch runs off the live vault.
 
 ## D12 — OFM tokenizer reuse (2026-10-13)
 

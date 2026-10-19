@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
             match first {
                 Ok(d) => {
                     let h = d.hello();
-                    tracing::info!(mode = ?h.mode, generation = h.generation, "connected to daemon");
+                    tracing::info!(generation = h.generation, "connected to daemon");
                     Some(d)
                 }
                 Err(e) => {

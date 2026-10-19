@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use cv_actions::{ConfigSet, Step};
 use cv_protocol::ActionContext;
 use cv_state::{QueueConfig, StateDb};
-use cv_vault::{ContentHash, MemoryShadowLog, NoCutover, VaultFs, VaultWriter, WriterHandle};
+use cv_vault::{NoCutover, VaultFs, VaultWriter, WriterHandle};
 use serde_json::{Map, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -118,9 +118,8 @@ fn config() -> ConfigSet {
     c
 }
 
-/// `files` are written into the vault before the writer (and its index) opens. `shadow`
-/// mounts the writer in shadow mode over that vault.
-fn env(files: &[(&str, &[u8])], shadow: bool) -> Env {
+/// `files` are written into the vault before the writer (and its index) opens.
+fn env(files: &[(&str, &[u8])]) -> Env {
     let dir = Tmp::new();
     let vault = dir.0.join("vault");
     let prot = dir.0.join("protected");
@@ -130,17 +129,7 @@ fn env(files: &[(&str, &[u8])], shadow: bool) -> Env {
     for (p, b) in files {
         write(&vault, p, b);
     }
-    let fs = if shadow {
-        VaultFs::shadow(
-            &vault,
-            &dir.0.join("scratch"),
-            std::slice::from_ref(&prot),
-            Box::new(MemoryShadowLog::default()),
-        )
-        .unwrap()
-    } else {
-        VaultFs::live(&vault, &prot, &NoCutover).unwrap()
-    };
+    let fs = VaultFs::live(&vault, &prot, &NoCutover).unwrap();
     let w = VaultWriter::open(fs, &dir.0.join("index").join("index.db")).unwrap();
     let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
     let state = StateDb::open(&dir.0.join("state.db"), 1, QueueConfig::default()).unwrap();
@@ -271,7 +260,7 @@ fn downloads_names_by_md5_rewrites_with_empty_alt_and_dedupes() {
         let note = format!(
             "# Post\nA ![1](http://127.0.0.1:{port}/a/1.png) and B ![x](http://127.0.0.1:{port}/b/other)\n"
         );
-        let env = env(&[("notes/My Post.md", note.as_bytes())], false);
+        let env = env(&[("notes/My Post.md", note.as_bytes())]);
         let step = env.step("");
         let out = env.run(&step, "notes/My Post.md").unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 2);
@@ -318,7 +307,7 @@ fn converts_before_hashing_when_enabled() {
     let routes = HashMap::from([route("/p.bmp", "image/bmp", bmp)]);
     let env = with_server(routes, None, move |port, _| {
         let note = format!("![](http://127.0.0.1:{port}/p.bmp)\n");
-        let env = env(&[("n.md", note.as_bytes())], false);
+        let env = env(&[("n.md", note.as_bytes())]);
         let step = env.step("convert_images = true");
         env.run(&step, "n.md").unwrap();
         env
@@ -334,7 +323,7 @@ fn strips_data_image_placeholders_and_already_localized_note_is_untouched() {
     let md5 = localize::md5_hex(&img);
     let local = format!("_attachments/n/{md5}_MD5.png");
     let note = format!("Lazy ![](data:image/gif;base64,R0lGODlhAQABAAAAACw=) ![]({local})\n");
-    let env = env(&[("n.md", note.as_bytes()), (&local, &img)], false);
+    let env = env(&[("n.md", note.as_bytes()), (&local, &img)]);
     let step = env.step("");
     let out = env.run(&step, "n.md").unwrap();
     assert_eq!(var(&out, "stripped"), 1);
@@ -361,7 +350,7 @@ fn concurrent_edit_during_download_is_a_conflict_not_a_clobber() {
     let routes = HashMap::from([route("/x.png", "image/png", img)]);
     let (env, res) = with_server(routes, Some(hook), move |port, _| {
         let note = format!("![](http://127.0.0.1:{port}/x.png)\n");
-        let env = env(&[("n.md", note.as_bytes())], false);
+        let env = env(&[("n.md", note.as_bytes())]);
         *vault_slot.lock().unwrap() = Some(env.vault());
         let step = env.step("");
         let res = env.run(&step, "n.md");
@@ -387,7 +376,7 @@ fn one_failed_download_among_several_is_counted_and_left() {
         let note = format!(
             "![](http://127.0.0.1:{port}/a.png)\n![](http://127.0.0.1:{port}/missing.png)\n![](http://127.0.0.1:{port}/b.png)\n"
         );
-        let env = env(&[("n.md", note.as_bytes())], false);
+        let env = env(&[("n.md", note.as_bytes())]);
         let step = env.step("");
         let out = env.run(&step, "n.md").unwrap();
         (env, out, port)
@@ -411,7 +400,7 @@ fn all_unreachable_defers() {
     }; // listener dropped: connection refused
     let note = format!("![](http://127.0.0.1:{port}/a.png) ![](http://127.0.0.1:{port}/b.png)\n");
     let (env, res) = with_server(HashMap::new(), None, move |_, _| {
-        let env = env(&[("n.md", note.as_bytes())], false);
+        let env = env(&[("n.md", note.as_bytes())]);
         let step = env.step("timeout_secs = 5");
         let res = env.run(&step, "n.md");
         (env, res)
@@ -429,47 +418,12 @@ fn all_unreachable_defers() {
 
 #[test]
 fn no_runtime_fails_cleanly() {
-    let env = env(&[("n.md", b"![](http://127.0.0.1:9/a.png)\n")], false);
+    let env = env(&[("n.md", b"![](http://127.0.0.1:9/a.png)\n")]);
     let step = env.step("");
     assert_eq!(
         env.run(&step, "n.md"),
         Err(StepError::failed("no async runtime"))
     );
-}
-
-#[test]
-fn shadow_mode_never_touches_live_files() {
-    let img = png(6);
-    let md5 = localize::md5_hex(&img);
-    let routes = HashMap::from([route("/s.png", "image/png", img.clone())]);
-    let (env, live_before, port) = with_server(routes, None, move |port, _| {
-        let note = format!("![](http://127.0.0.1:{port}/s.png) ![](data:image/gif;base64,AA)\n");
-        let other = b"untouched\n".to_vec();
-        let env = env(&[("n.md", note.as_bytes()), ("o.md", &other)], true);
-        let live_before: Vec<ContentHash> = ["n.md", "o.md"]
-            .iter()
-            .map(|p| ContentHash::of(&env.file(p).unwrap()))
-            .collect();
-        let step = env.step("");
-        let out = env.run(&step, "n.md").unwrap();
-        assert_eq!(var(&out, "downloaded"), 1);
-        (env, live_before, port)
-    });
-    let live_after: Vec<ContentHash> = ["n.md", "o.md"]
-        .iter()
-        .map(|p| ContentHash::of(&env.file(p).unwrap()))
-        .collect();
-    assert_eq!(live_before, live_after);
-    let target = format!("_attachments/n/{md5}_MD5.png");
-    assert!(env.file(&target).is_none(), "attachment must not land live");
-    // The overlay (what the writer sees) has the rewrite.
-    let seen = env.writer.read("n.md").unwrap().unwrap();
-    assert_eq!(
-        String::from_utf8(seen).unwrap(),
-        format!("![]({target}) \n")
-    );
-    assert!(env.writer.read(&target).unwrap().is_some());
-    let _ = port;
 }
 
 #[test]
@@ -480,14 +434,11 @@ fn repair_repoints_broken_ref_and_counts_landed_write() {
     let note = format!(
         "![](_resources/Clippings/gone/{md5}_MD5.png)\n[[old/doc_MD5.pdf|the doc]]\n![[nowhere.png]]\n"
     );
-    let env = env(
-        &[
-            ("n.md", note.as_bytes()),
-            (&kept, &img),
-            ("_resources/k/doc_MD5.pdf", b"%PDF"),
-        ],
-        false,
-    );
+    let env = env(&[
+        ("n.md", note.as_bytes()),
+        (&kept, &img),
+        ("_resources/k/doc_MD5.pdf", b"%PDF"),
+    ]);
     let step = env.step("mode = \"repair\"");
     let out = env.run(&step, "n.md").unwrap();
     assert_eq!(var(&out, "repaired"), 2);
@@ -506,15 +457,12 @@ fn repair_repoints_broken_ref_and_counts_landed_write() {
 fn local_attachment_is_rehomed_and_unshared_source_retired() {
     let img = png(8);
     let md5 = localize::md5_hex(&img);
-    let env = env(
-        &[
-            ("n.md", b"![[pics/photo.png]] ![[pics/shared.png]]\n"),
-            ("other.md", b"![[pics/shared.png]]\n"),
-            ("pics/photo.png", &img),
-            ("pics/shared.png", &img),
-        ],
-        false,
-    );
+    let env = env(&[
+        ("n.md", b"![[pics/photo.png]] ![[pics/shared.png]]\n"),
+        ("other.md", b"![[pics/shared.png]]\n"),
+        ("pics/photo.png", &img),
+        ("pics/shared.png", &img),
+    ]);
     let step = env.step("");
     let out = env.run(&step, "n.md").unwrap();
     let target = format!("_attachments/n/{md5}_MD5.png");
@@ -546,17 +494,14 @@ fn folder_backfill_is_bounded_resumes_and_records_failures() {
         let ok = format!("![](http://127.0.0.1:{port}/ok.png)\n");
         let bad = format!("![](http://127.0.0.1:{port}/gone.png)\n");
         let fenced = format!("```\n![](http://127.0.0.1:{port}/ok.png)\n```\n");
-        let env = env(
-            &[
-                ("Clippings/a.md", ok.as_bytes()),
-                ("Clippings/b.md", bad.as_bytes()),
-                ("Clippings/sub/c.md", ok.as_bytes()),
-                ("Clippings/d.md", b"no images\n"),
-                ("Clippings/e.md", fenced.as_bytes()),
-                ("other/x.md", ok.as_bytes()),
-            ],
-            false,
-        );
+        let env = env(&[
+            ("Clippings/a.md", ok.as_bytes()),
+            ("Clippings/b.md", bad.as_bytes()),
+            ("Clippings/sub/c.md", ok.as_bytes()),
+            ("Clippings/d.md", b"no images\n"),
+            ("Clippings/e.md", fenced.as_bytes()),
+            ("other/x.md", ok.as_bytes()),
+        ]);
         let step = env.step("scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 2");
         let outs: Vec<StepOutcome> = (0..3).map(|_| env.run(&step, "").unwrap()).collect();
         (env, outs)
@@ -608,14 +553,11 @@ fn folder_backfill_throttle_is_not_a_permanent_failure() {
     let (env, outs) = with_server(routes, None, move |port, _| {
         let ok = format!("![](http://127.0.0.1:{port}/ok.png)\n");
         let limited = format!("![](http://127.0.0.1:{port}/throttle.png)\n");
-        let env = env(
-            &[
-                ("daily/a.md", ok.as_bytes()),
-                ("daily/b.md", limited.as_bytes()),
-                ("daily/c.md", ok.as_bytes()),
-            ],
-            false,
-        );
+        let env = env(&[
+            ("daily/a.md", ok.as_bytes()),
+            ("daily/b.md", limited.as_bytes()),
+            ("daily/c.md", ok.as_bytes()),
+        ]);
         let step = env.step("scope = \"folder\"\nfolder = \"daily\"\nlimit = 10");
         let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
         (env, outs)
@@ -685,7 +627,7 @@ fn a_page_response_is_ineligible_not_failed() {
         let note = format!(
             "![](http://127.0.0.1:{port}/ok.png)\n![](http://127.0.0.1:{port}/page.png)\n![](https://www.youtube.com/watch?v=a)\n"
         );
-        let env = env(&[("n.md", note.as_bytes())], false);
+        let env = env(&[("n.md", note.as_bytes())]);
         let step = env.step("");
         let out = env.run(&step, "n.md").unwrap();
         (env, out)
@@ -708,13 +650,10 @@ fn folder_backfill_settles_ineligible_notes_and_skips_embed_only_notes() {
     let routes = HashMap::from([route("/page.png", "text/html", b"<html></html>".to_vec())]);
     let (env, outs) = with_server(routes, None, move |port, _| {
         let page = format!("![](http://127.0.0.1:{port}/page.png)\n");
-        let env = env(
-            &[
-                ("daily/a.md", page.as_bytes()),
-                ("daily/v.md", b"![](https://www.youtube.com/watch?v=a)\n"),
-            ],
-            false,
-        );
+        let env = env(&[
+            ("daily/a.md", page.as_bytes()),
+            ("daily/v.md", b"![](https://www.youtube.com/watch?v=a)\n"),
+        ]);
         let step = env.step("scope = \"folder\"\nfolder = \"daily\"\nlimit = 10");
         let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
         (env, outs)

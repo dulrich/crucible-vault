@@ -23,8 +23,8 @@
 //!
 //! A module's `execute` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
-//! [`StepCtx::write`]/[`StepCtx::create`] with the hash it read (I2): those calls set the shadow
-//! log's job id for exactly that write and record the path for the cycle guard (I5).
+//! [`StepCtx::write`]/[`StepCtx::create`] with the hash it read (I2): those calls record the path for
+//! the cycle guard (I5).
 
 pub mod agent;
 pub mod capture;
@@ -224,7 +224,7 @@ pub trait ChildSpawner {
 
 /// Everything a step sees. Built per step by the runner.
 pub struct StepCtx<'a> {
-    /// The job id (shadow writes are attributed to it).
+    /// The job id.
     pub job_id: &'a str,
     /// The running action.
     pub action: &'a Action,
@@ -239,7 +239,7 @@ pub struct StepCtx<'a> {
     /// The config snapshot the job runs against; read a module's file via
     /// `config.table("kinds.toml")` etc.
     pub config: &'a ConfigSet,
-    /// The vault root (live root, or the overlay root in shadow mode — read through the writer).
+    /// The vault root (read through the writer).
     pub vault_root: &'a Path,
     /// The `CV_INDEX_DB` base (open a `cv_index::Reader` for queries).
     pub index_db: &'a Path,
@@ -274,7 +274,7 @@ impl StepCtx<'_> {
         Ok(r)
     }
 
-    /// CAS write attributed to this job: `expected` is the hash the step read (`None` = must not
+    /// CAS write: `expected` is the hash the step read (`None` = must not
     /// exist). A mismatch is [`VaultError::Conflict`] and never clobbers.
     pub fn write(
         &mut self,
@@ -282,44 +282,29 @@ impl StepCtx<'_> {
         bytes: Vec<u8>,
         expected: Option<ContentHash>,
     ) -> Result<ContentHash, StepError> {
-        let (p, job) = (path.to_owned(), self.job_id.to_owned());
-        let h = self.writer()?.call(move |vw| {
-            vw.fs_mut().set_job_id(Some(job));
-            let r = vw.write(&p, &bytes, expected);
-            vw.fs_mut().set_job_id(None);
-            r
-        })??;
+        let p = path.to_owned();
+        let h = self
+            .writer()?
+            .call(move |vw| vw.write(&p, &bytes, expected))??;
         self.written.push(path.to_owned());
         Ok(h)
     }
 
-    /// Creates `path` (error if it exists), attributed to this job.
+    /// Creates `path` (error if it exists).
     pub fn create(&mut self, path: &str, bytes: Vec<u8>) -> Result<ContentHash, StepError> {
-        let (p, job) = (path.to_owned(), self.job_id.to_owned());
-        let h = self.writer()?.call(move |vw| {
-            vw.fs_mut().set_job_id(Some(job));
-            let r = vw.create(&p, &bytes);
-            vw.fs_mut().set_job_id(None);
-            r
-        })??;
+        let p = path.to_owned();
+        let h = self.writer()?.call(move |vw| vw.create(&p, &bytes))??;
         self.written.push(path.to_owned());
         Ok(h)
     }
 
-    /// Runs `f` on the writer thread with this job's id set for its writes (for multi-op steps
-    /// such as rename/delete); `touched` paths are recorded for the cycle guard.
+    /// Runs `f` on the writer thread (for multi-op steps such as rename/delete); `touched` paths are recorded for the cycle guard.
     pub fn with_writer<T: Send + 'static>(
         &mut self,
         touched: &[&str],
         f: impl FnOnce(&mut cv_vault::VaultWriter) -> T + Send + 'static,
     ) -> Result<T, StepError> {
-        let job = self.job_id.to_owned();
-        let out = self.writer()?.call(move |vw| {
-            vw.fs_mut().set_job_id(Some(job));
-            let r = f(vw);
-            vw.fs_mut().set_job_id(None);
-            r
-        })?;
+        let out = self.writer()?.call(f)?;
         self.written.extend(touched.iter().map(|s| (*s).to_owned()));
         Ok(out)
     }

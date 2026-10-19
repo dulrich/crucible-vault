@@ -342,7 +342,6 @@ pub fn view<'a>(
     note: Option<&'a str>,
     hidden_draft: Option<&'a str>,
     t: Tokens,
-    mode: cv_protocol::Mode,
 ) -> Element<'a, Message> {
     let editable = f.doc.is_some();
     let on = |e: PrefEdit| editable.then_some(e);
@@ -568,7 +567,7 @@ pub fn view<'a>(
         follow,
         hidden,
         text(keys_line).size(13).color(t.text_faint.to_color()),
-        save_bar(f, t, mode),
+        save_bar(f, t),
     ]
     .spacing(10)
     .into()

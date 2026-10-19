@@ -1,4 +1,5 @@
-//! In-process daemon tests on a synthetic temp vault (shadow mode, temp `CV_PROTECTED_VAULT`).
+//! In-process daemon tests on a synthetic temp vault (live mode; the temp `CV_PROTECTED_VAULT` is
+//! a sibling of the vault, so the I1 guard admits it — [`Env::guarded`] puts the vault under it).
 //! Never touches the live vault (I1), the real clipboard, or any scheme handler.
 
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use cv_protocol::{
     ChangeKind, CreateNoteParams, DeleteMode, DeleteParams, JobIdParams, NoteSetBoolParams,
     NoteSetBoolResult, Notification, Origin, PathParams, RenameParams, Request, SubscribeParams,
     Topic, UriParams, UriResult, ViewRunParams, WriteAttachmentParams, WriteNoteParams,
-    WriteNoteResult, WriteOp, error_codes,
+    WriteNoteResult, error_codes,
 };
 use cv_vault::{ContentHash, WatchConfig};
 use serde_json::{Value, json};
@@ -45,7 +46,8 @@ struct Env {
 }
 
 impl Env {
-    /// Synthetic vault `<tmp>/prot/Synth` (protected root `<tmp>/prot`) with two notes.
+    /// Synthetic vault `<tmp>/prot/Synth` (protected root `<tmp>/protected`, a sibling) with two
+    /// notes.
     fn new() -> Self {
         let tmp = Tmp::new();
         let vault = tmp.0.join("prot").join("Synth");
@@ -57,16 +59,23 @@ impl Env {
         for (k, v) in [
             ("HOME", r.join("home")),
             ("CV_VAULT", vault.clone()),
-            ("CV_PROTECTED_VAULT", r.join("prot")),
+            ("CV_PROTECTED_VAULT", r.join("protected")),
             ("CV_STATE_DB", r.join("state/state.db")),
             ("CV_INDEX_DB", r.join("cache/index.db")),
-            ("CV_SCRATCH", r.join("scratch")),
             ("CV_CONFIG_DIR", r.join("config")),
             ("CV_SOCKET", r.join("run/d.sock")),
         ] {
             vars.insert(k.to_owned(), v.display().to_string());
         }
         Self { tmp, vars }
+    }
+    /// [`Env::new`] with the protected root `<tmp>/prot` *containing* the vault: live mode is
+    /// refused unless the cut-over marker is present (I1).
+    fn guarded() -> Self {
+        let mut e = Self::new();
+        let prot = e.tmp.0.join("prot").display().to_string();
+        e.set("CV_PROTECTED_VAULT", prot);
+        e
     }
     fn set(&mut self, k: &str, v: impl Into<String>) {
         self.vars.insert(k.to_owned(), v.into());
@@ -77,9 +86,6 @@ impl Env {
     }
     fn vault(&self) -> PathBuf {
         PathBuf::from(&self.vars["CV_VAULT"])
-    }
-    fn overlay(&self) -> PathBuf {
-        PathBuf::from(&self.vars["CV_SCRATCH"]).join("vault")
     }
     fn socket(&self) -> PathBuf {
         PathBuf::from(&self.vars["CV_SOCKET"])
@@ -95,7 +101,6 @@ impl Env {
 
 fn opts() -> DaemonOptions {
     DaemonOptions {
-        landlock: false,
         watch: WatchConfig {
             debounce: Duration::from_millis(50),
             echo_ttl: Duration::from_secs(5),
@@ -127,23 +132,6 @@ fn hash_of(p: &Path) -> String {
     ContentHash::of(&std::fs::read(p).unwrap())
         .as_str()
         .to_owned()
-}
-
-fn snapshot(root: &Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else {
-                out.push((p.display().to_string(), hash_of(&p)));
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 /// Waits (bounded) for a notification matching `pred`.
@@ -194,7 +182,7 @@ async fn handshake_rules() {
         .raw(r#"{"jsonrpc":"2.0","id":4,"method":"hello","params":{"protocol_version":1,"client":"t"}}"#)
         .unwrap();
     assert_eq!(r["result"]["index_schema"], cv_index::SCHEMA_VERSION);
-    assert_eq!(r["result"]["mode"], "shadow");
+    assert!(r["result"].get("mode").is_none());
     let r = raw
         .raw(r#"{"jsonrpc":"2.0","id":5,"method":"frobnicate"}"#)
         .unwrap();
@@ -253,12 +241,8 @@ async fn write_note_cas_conflict_does_not_clobber() {
             current_hash: h1.clone()
         }
     );
-    assert!(
-        !env.overlay().join("a.md").exists(),
-        "losing write must not land"
-    );
-    assert_eq!(hash_of(&live_a), h1);
-    // A correct base hash wins, in the overlay only.
+    assert_eq!(hash_of(&live_a), h1, "losing write must not land");
+    // A correct base hash wins.
     let v = c
         .request(Request::WriteNote(WriteNoteParams {
             path: "a.md".into(),
@@ -270,17 +254,13 @@ async fn write_note_cas_conflict_does_not_clobber() {
         serde_json::from_value(v).unwrap(),
         WriteNoteResult::Written { .. }
     ));
-    assert_eq!(
-        std::fs::read_to_string(env.overlay().join("a.md")).unwrap(),
-        "client version"
-    );
-    assert_eq!(hash_of(&live_a), h1);
+    assert_eq!(std::fs::read_to_string(&live_a).unwrap(), "client version");
     drop(c);
     d.shutdown().await.unwrap();
 }
 
 /// Plan round-8-intake-views-anchor WP-3: `note_set_bool` edits one frontmatter key through the
-/// writer (shadow overlay here), creating key / block as needed; equal values write nothing.
+/// writer, creating key / block as needed; equal values write nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn note_set_bool_edits_frontmatter() {
     let env = Env::new();
@@ -299,56 +279,45 @@ async fn note_set_bool_edits_frontmatter() {
             value,
         }))
     };
-    let shadow = |p: &str| std::fs::read_to_string(env.overlay().join(p)).unwrap();
+    let on_disk = |p: &str| std::fs::read_to_string(env.vault().join(p)).unwrap();
     // Existing `false` → `true`; the returned hash is the written file's.
     let r: NoteSetBoolResult = serde_json::from_value(set(&mut c, "r.md", true).unwrap()).unwrap();
-    assert_eq!(shadow("r.md"), "---\nread: true\ntitle: R\n---\nbody\n");
-    assert_eq!(r.hash, hash_of(&env.overlay().join("r.md")));
+    assert_eq!(on_disk("r.md"), "---\nread: true\ntitle: R\n---\nbody\n");
+    assert_eq!(r.hash, hash_of(&env.vault().join("r.md")));
     // Missing key → appended `true`.
     set(&mut c, "k.md", true).unwrap();
-    assert_eq!(shadow("k.md"), "---\ntitle: K\nread: true\n---\nbody\n");
+    assert_eq!(on_disk("k.md"), "---\ntitle: K\nread: true\n---\nbody\n");
     // No frontmatter → a new block.
     set(&mut c, "notes/b.md", true).unwrap();
-    assert!(shadow("notes/b.md").starts_with("---\nread: true\n---\n"));
-    assert!(shadow("notes/b.md").ends_with("# B\n"));
+    assert!(on_disk("notes/b.md").starts_with("---\nread: true\n---\n"));
+    assert!(on_disk("notes/b.md").ends_with("# B\n"));
     // Unchanged value → no write, current hash returned.
-    let before = std::fs::metadata(env.overlay().join("r.md"))
+    let before = std::fs::metadata(env.vault().join("r.md"))
         .unwrap()
         .modified()
         .unwrap();
     let r2: NoteSetBoolResult = serde_json::from_value(set(&mut c, "r.md", true).unwrap()).unwrap();
     assert_eq!(r2.hash, r.hash);
     assert_eq!(
-        std::fs::metadata(env.overlay().join("r.md"))
+        std::fs::metadata(env.vault().join("r.md"))
             .unwrap()
             .modified()
             .unwrap(),
         before
     );
-    assert!(!env.overlay().join("a.md").exists());
-    // Missing note → NOT_FOUND; live files untouched throughout.
+    // Missing note → NOT_FOUND.
     assert_eq!(
         rpc_code(set(&mut c, "nope.md", true)),
         error_codes::NOT_FOUND
-    );
-    assert_eq!(
-        std::fs::read_to_string(env.vault().join("r.md")).unwrap(),
-        "---\nread: false\ntitle: R\n---\nbody\n"
     );
     drop(c);
     d.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shadow_mutations_never_touch_live() {
+async fn mutations_land_in_the_vault() {
     let env = Env::new();
-    let before = snapshot(&env.vault());
     let d = start(&env).await;
-    let mut sub = client(&env);
-    sub.request(Request::Subscribe(SubscribeParams {
-        topics: vec![Topic::ShadowWrite],
-    }))
-    .unwrap();
     let c = client(&env);
     let v = c
         .request(Request::CreateNote(CreateNoteParams {
@@ -357,54 +326,31 @@ async fn shadow_mutations_never_touch_live() {
         }))
         .unwrap();
     assert_eq!(v["path"], "a 1.md");
-    wait_for(
-        &mut sub,
-        |n| matches!(n, Notification::ShadowWrite { op: WriteOp::Create, path } if path == "a 1.md"),
-    );
-    let h = hash_of(&env.overlay().join("a 1.md"));
+    let h = hash_of(&env.vault().join("a 1.md"));
     c.request(Request::WriteNote(WriteNoteParams {
         path: "a 1.md".into(),
         content: "dup2".into(),
         base_hash: h,
     }))
     .unwrap();
-    wait_for(&mut sub, |n| {
-        matches!(
-            n,
-            Notification::ShadowWrite {
-                op: WriteOp::Write,
-                ..
-            }
-        )
-    });
+    assert_eq!(
+        std::fs::read_to_string(env.vault().join("a 1.md")).unwrap(),
+        "dup2"
+    );
     c.request(Request::Rename(RenameParams {
         from: "notes/b.md".into(),
         to: "notes/c.md".into(),
     }))
     .unwrap();
-    wait_for(&mut sub, |n| {
-        matches!(
-            n,
-            Notification::ShadowWrite {
-                op: WriteOp::Rename,
-                ..
-            }
-        )
-    });
+    assert!(!env.vault().join("notes/b.md").exists());
+    assert!(env.vault().join("notes/c.md").exists());
     c.request(Request::Delete(DeleteParams {
         mode: DeleteMode::Trash,
         path: "a 1.md".into(),
     }))
     .unwrap();
-    wait_for(&mut sub, |n| {
-        matches!(
-            n,
-            Notification::ShadowWrite {
-                op: WriteOp::Delete,
-                ..
-            }
-        )
-    });
+    assert!(!env.vault().join("a 1.md").exists());
+    assert!(env.vault().join(".trash/a 1.md").exists());
     assert_eq!(
         rpc_code(c.request(Request::Delete(DeleteParams {
             mode: DeleteMode::Trash,
@@ -412,20 +358,7 @@ async fn shadow_mutations_never_touch_live() {
         }))),
         error_codes::NOT_FOUND
     );
-
-    assert_eq!(snapshot(&env.vault()), before, "live vault changed");
-    assert!(env.overlay().join("notes/c.md").exists());
-    let r = cv_state::StateReader::open(Path::new(&env.vars["CV_STATE_DB"])).unwrap();
-    let ops: Vec<String> = r
-        .shadow_writes(0, 100)
-        .unwrap()
-        .into_iter()
-        .map(|w| w.op)
-        .collect();
-    for op in ["create", "modify", "rename_to", "rename_from", "delete"] {
-        assert!(ops.iter().any(|o| o == op), "{op} missing from {ops:?}");
-    }
-    // plan editor-ui-round-3 WP-3: the preview / delete_note RPCs are wired (shadow-safe).
+    // plan editor-ui-round-3 WP-3: the preview / delete_note RPCs are wired.
     let pv = c
         .request(Request::DeletePreview(PathParams {
             path: "notes/c.md".into(),
@@ -441,8 +374,8 @@ async fn shadow_mutations_never_touch_live() {
         .unwrap();
     assert_eq!(dn["removed"], json!(["notes/c.md"]), "{dn}");
     assert_eq!(dn["skipped"], json!(["missing.png"]), "{dn}");
-    assert_eq!(snapshot(&env.vault()), before, "live vault changed");
-    drop((c, sub));
+    assert!(!env.vault().join("notes/c.md").exists());
+    drop(c);
     d.shutdown().await.unwrap();
 }
 
@@ -531,7 +464,7 @@ async fn a1_registry_and_stub_methods() {
         error_codes::NOT_FOUND
     );
     let s = c.request(Request::Status).unwrap();
-    assert_eq!(s["mode"], "shadow");
+    assert!(s.get("mode").is_none(), "{s}");
     // A second daemon on the same socket refuses to start serving.
     let mut e2 = Env::new();
     e2.set("CV_SOCKET", env.vars["CV_SOCKET"].clone());
@@ -613,7 +546,7 @@ async fn uri_intake_over_rpc_and_cli() {
         }
     );
     assert_eq!(
-        std::fs::read_to_string(env.overlay().join("escape.md")).unwrap(),
+        std::fs::read_to_string(env.vault().join("escape.md")).unwrap(),
         "hi"
     );
     assert_eq!(
@@ -644,7 +577,7 @@ async fn uri_intake_over_rpc_and_cli() {
         }
     );
     assert_eq!(
-        std::fs::read_to_string(env.overlay().join("Clip.md")).unwrap(),
+        std::fs::read_to_string(env.vault().join("Clip.md")).unwrap(),
         "clip body é"
     );
     let r = cv::cli::uri_command(&cfg, "obsidian://new?file=Clip&content=x").unwrap();
@@ -720,7 +653,7 @@ async fn spool_then_drain_and_clipboard_failure() {
 
     let d = start(&env).await;
     assert_eq!(
-        std::fs::read_to_string(env.overlay().join("Spooled Clip.md")).unwrap(),
+        std::fs::read_to_string(env.vault().join("Spooled Clip.md")).unwrap(),
         "é"
     );
     assert!(cv::spool::pending(&spool).unwrap().is_empty());
@@ -736,14 +669,13 @@ async fn spool_then_drain_and_clipboard_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_mode_refused_near_protected_root() {
     for which in ["equal", "under", "above"] {
-        let mut env = Env::new();
+        let mut env = Env::guarded();
         let prot = PathBuf::from(&env.vars["CV_PROTECTED_VAULT"]);
         let vault = match which {
             "equal" => prot.clone(),
             "under" => env.vault(),
             _ => env.tmp.0.clone(),
         };
-        env.set("CV_MODE", "live");
         env.set("CV_VAULT", vault.display().to_string());
         let err = Daemon::start(env.config(), opts()).unwrap_err();
         assert!(
@@ -756,11 +688,7 @@ async fn live_mode_refused_near_protected_root() {
 
 #[test]
 fn binary_cli_contract() {
-    let env = {
-        let mut e = Env::new();
-        e.set("CV_MODE", "live");
-        e
-    };
+    let env = Env::guarded();
     let bin = env!("CARGO_BIN_EXE_cv");
     let run = |args: &[&str]| {
         let mut cmd = std::process::Command::new(bin);
@@ -774,7 +702,6 @@ fn binary_cli_contract() {
     assert_eq!(o.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&o.stderr).contains("live mode refused"));
     assert_eq!(run(&["bogus"]).status.code(), Some(2));
-    assert_eq!(run(&["shadow", "bogus"]).status.code(), Some(2));
     assert_eq!(run(&["--help"]).status.code(), Some(0));
     // Status with no daemon falls back to state.db (created by the failed start above).
     let o = run(&["status"]);
@@ -801,8 +728,7 @@ fn prot(env: &Env) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_mode_starts_with_marker() {
-    let mut env = Env::new();
-    env.set("CV_MODE", "live");
+    let env = Env::guarded();
     {
         let mut db = state_db(&env);
         let canon = std::fs::canonicalize(prot(&env)).unwrap();
@@ -811,7 +737,7 @@ async fn live_mode_starts_with_marker() {
     }
     let d = start(&env).await;
     let st = client(&env).request(Request::Status).unwrap();
-    assert_eq!(st["mode"], "live", "{st}");
+    assert!(st["generation"].is_u64(), "{st}");
     d.shutdown().await.unwrap();
 }
 
@@ -835,10 +761,8 @@ async fn write_attachment_is_content_addressed_and_idempotent() {
     use md5::Digest as _;
     let md5 = hex::encode(md5::Md5::digest(bytes));
     assert_eq!(path, format!("notes/_attachments/b/{md5}_MD5.png"));
-    // Shadow mode: the write lands in the overlay, never live.
-    let on_disk = env.overlay().join(&path);
+    let on_disk = env.vault().join(&path);
     assert_eq!(std::fs::read(&on_disk).unwrap(), bytes);
-    assert!(!env.vault().join(&path).exists());
     // Tamper with the stored file: a second identical call must reuse it, not write again.
     std::fs::write(&on_disk, b"marker").unwrap();
     let v2 = c.request(req("png", b64(bytes))).unwrap();

@@ -9,10 +9,10 @@
 //! | `embed` | absent | `"provider:model"` from `providers.toml`; absent = lexical-only (Crucible with semantic indexing off). The index space is [`cv_search::space_model`] of the model. |
 //! | `path` | `active_path` | Target note. `search_upsert` without one is the reconcile sweep (`search-refresh`). |
 //!
-//! **Mode is decided fail-closed** from the vault filesystem: writer unavailable or shadow →
-//! shadow: a read-only open of `CV_SEARCH_DB` (a missing file counts as empty, never created),
-//! no embedding call, no write, outcome vars carry aggregate counts only. Only a live filesystem
-//! writes, through the runner's one shared index handle ([`StepCtx::search`]).
+//! **Mode is decided fail-closed** from the vault writer: writer unavailable → report-only:
+//! a read-only open of `CV_SEARCH_DB` (a missing file counts as empty, never created),
+//! no embedding call, no write, outcome vars carry aggregate counts only. Only a reachable writer
+//! (live filesystem) writes, through the runner's one shared index handle ([`StepCtx::search`]).
 //!
 //! Errors: embedder down → `Deferred{60 s, <provider id>}` (`SearchIndexWorkflow.ts:179-195`);
 //! an embedding-space mismatch with the index, an index open/SQL error, config errors →
@@ -143,12 +143,13 @@ pub(crate) fn query_embed_target(config: &ConfigSet) -> Option<EmbedTarget> {
         .ok()
 }
 
-/// Shadow unless the writer positively reports a live filesystem (fail-closed).
+/// Live only when the writer thread positively answers (fail-closed; shadow mode was retired in
+/// plan tn-review-baseline-remediation WP-R6).
 fn is_live(ctx: &StepCtx<'_>) -> bool {
-    !ctx.writer()
+    ctx.writer()
         .ok()
-        .and_then(|w| w.call(|vw| vw.fs().is_shadow()).ok())
-        .unwrap_or(true)
+        .and_then(|w| w.call(|_| ()).ok())
+        .is_some()
 }
 
 fn vars(report: &FeedReport, live: bool) -> Map<String, Value> {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 use cv_protocol::{
-    ActionInfo, JobState, JobStatus, Mode, Notification, ParamKind, ParamSpec, RunActionParams,
+    ActionInfo, JobState, JobStatus, Notification, ParamKind, ParamSpec, RunActionParams,
 };
 use iced::widget::text_editor::{Action, Edit};
 use serde_json::{Value, json};
@@ -420,33 +420,6 @@ fn save_conflict_aborts_the_run() {
         "{:?}",
         e.app.status.notice
     );
-}
-
-#[test]
-fn shadow_skips_save_first() {
-    let mut e = env();
-    type_z(&mut e.app);
-    e.app.status.mode = Mode::Shadow;
-    pal(
-        &mut e.app,
-        PaletteMsg::Key(chord::parse("Alt+J").expect("p")),
-    );
-    let got = calls(&e);
-    assert_eq!(
-        got.len(),
-        1,
-        "chord invoked the action (actions fetched on demand)"
-    );
-    assert!(
-        got[0].1,
-        "context carries the base hash (still the on-disk one)"
-    );
-    assert!(
-        e.app.doc("a.md").is_some_and(|d| d.is_dirty()),
-        "buffer left dirty"
-    );
-    let disk = std::fs::read_to_string(e.d.vault_root().join("a.md")).expect("read");
-    assert_eq!(disk, "# A\n\nfirst line\n", "no save in shadow");
 }
 
 #[test]

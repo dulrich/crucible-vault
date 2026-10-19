@@ -379,7 +379,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     }
     for f in [ed, ac].into_iter().flatten() {
         col = col.push(file_header(f, t));
-        col = col.push(save_bar(f, t, cx.mode));
+        col = col.push(save_bar(f, t));
     }
     col.into()
 }

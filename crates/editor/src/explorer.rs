@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cv_protocol::{ChangeKind, Mode};
+use cv_protocol::ChangeKind;
 use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length};
 
@@ -20,9 +20,6 @@ use crate::widget::virtual_list::{ListWindow, VirtualList};
 
 /// Row height of the tree.
 pub const ROW_HEIGHT: f32 = 24.0;
-
-/// The reason shown when file operations are disabled.
-pub const SHADOW_REASON: &str = "file operations are disabled in shadow mode";
 
 /// A file operation dispatched over RPC.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,18 +377,10 @@ impl Explorer {
 }
 
 /// The explorer panel.
-pub fn view<'a>(ex: &'a Explorer, tokens: Tokens, mode: Mode) -> Element<'a, Message> {
-    let shadow = mode == Mode::Shadow;
+pub fn view<'a>(ex: &'a Explorer, tokens: Tokens) -> Element<'a, Message> {
     // plan editor-round-4 WP-4: no button row — New note / Rename / Move… / Delete live in the
     // row context menu (`context_menu::items`).
     let mut col = column![].spacing(4);
-    if shadow {
-        col = col.push(
-            text(SHADOW_REASON)
-                .size(13)
-                .color(tokens.warn_text.to_color()),
-        );
-    }
     if let Some(e) = &ex.edit {
         let hint = match e.kind {
             EditKind::New => "new note name",

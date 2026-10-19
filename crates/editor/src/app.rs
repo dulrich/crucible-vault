@@ -10,7 +10,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use chrono::NaiveDate;
-use cv_protocol::{Mode, Notification};
+use cv_protocol::Notification;
 use editor_model::period::NavTarget;
 use iced::widget::pane_grid::{self, Pane};
 use iced::widget::{PaneGrid, Space, button, column, container, row, text};
@@ -127,7 +127,6 @@ impl Tab {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusModel {
     pub connected: bool,
-    pub mode: Mode,
     pub generation: u64,
     /// Last job update (`id: state`), for the toast slot WP-5 grows.
     pub last_job: Option<String>,
@@ -149,11 +148,7 @@ impl StatusModel {
         } else {
             "disconnected"
         };
-        let mode = match self.mode {
-            Mode::Shadow => "shadow",
-            Mode::Live => "live",
-        };
-        let mut s = format!("{conn} · {mode} · gen {}", self.generation);
+        let mut s = format!("{conn} · gen {}", self.generation);
         if let Some(j) = &self.last_job {
             s.push_str(" · job ");
             s.push_str(j);
@@ -620,7 +615,6 @@ impl App {
                 (
                     StatusModel {
                         connected: rx.is_some(),
-                        mode: h.mode,
                         generation: h.generation,
                         last_job: None,
                         notice: None,
@@ -633,7 +627,6 @@ impl App {
             None => (
                 StatusModel {
                     connected: false,
-                    mode: Mode::Shadow,
                     generation: 0,
                     last_job: None,
                     notice: None,
@@ -821,8 +814,7 @@ impl App {
     /// Tasks still holding the old client fail with `Disconnected` and are not resurrected.
     fn install_connection(&mut self, conn: crate::daemon::Connection) -> Task<Message> {
         let h = conn.client.hello();
-        tracing::info!(mode = ?h.mode, generation = h.generation, "reconnected to daemon");
-        self.status.mode = h.mode;
+        tracing::info!(generation = h.generation, "reconnected to daemon");
         self.status.generation = h.generation;
         self.status.connected = true;
         self.status.reconnecting = false;
@@ -851,7 +843,6 @@ impl App {
         let Some(d) = self.daemon.clone() else {
             return Task::none();
         };
-        let read_only = self.status.mode == Mode::Shadow;
         let Some(doc) = self.docs.get_mut(path) else {
             return Task::none();
         };
@@ -861,7 +852,7 @@ impl App {
         }
         match d.read_file(path) {
             Ok((bytes, hash)) => {
-                let job = doc.resync(&bytes, hash, read_only);
+                let job = doc.resync(&bytes, hash, false);
                 crate::source::spawn_save(Some(&d), job)
             }
             // plan editor-data-safety WP-2: a vanished file under edits → missing-file state.
@@ -1122,9 +1113,6 @@ impl App {
     /// in the explorer's New-note folder) through `CreateNote`; `ExplorerMsg::Done` opens it in
     /// the focused (clicked) pane, a failure is an error notice.
     fn create_missing(&mut self, target: &str) -> Task<Message> {
-        if self.shadow_blocked(explorer::SHADOW_REASON) {
-            return Task::none();
-        }
         let path = crate::reading::missing_note_path(target, &self.explorer.target_folder());
         self.dispatch_op(FileOp::Create { path })
     }
@@ -1284,7 +1272,6 @@ impl App {
                 &self.prefs,
                 &self.explorer.paths,
                 self.tokens,
-                self.status.mode,
             );
         }
         if tab.is_log() {
@@ -1299,7 +1286,6 @@ impl App {
             doc,
             tab.id,
             self.tokens,
-            self.status.mode,
             self.prefs.font_size,
             &self.palette.keymap,
             self.active_tab().is_some_and(|t| t.id == tab.id),
@@ -1350,14 +1336,6 @@ impl App {
             self.status
                 .notify(Severity::Warning, format!("saving editor.json failed: {e}"));
         }
-    }
-
-    fn shadow_blocked(&mut self, reason: &str) -> bool {
-        if self.status.mode == Mode::Shadow {
-            self.status.set_error(reason.to_owned());
-            return true;
-        }
-        false
     }
 
     /// The update function.
@@ -1730,9 +1708,6 @@ impl App {
     /// Unsaved-edits delete dialog, "Save then delete": save first ([`AfterSave::Delete`]);
     /// the delete preview follows once it lands clean.
     fn save_then_delete(&mut self, path: String) -> Task<Message> {
-        if self.shadow_blocked(explorer::SHADOW_REASON) {
-            return Task::none();
-        }
         if !self.docs.get(&path).is_some_and(|d| d.is_dirty()) {
             return self.begin_delete(path);
         }
@@ -1769,9 +1744,6 @@ impl App {
     /// opens the always-confirm dialog. A note with unsaved edits is refused with a notice
     /// (save or close it first), so the delete never drops edits silently.
     fn begin_delete(&mut self, path: String) -> Task<Message> {
-        if self.shadow_blocked(explorer::SHADOW_REASON) {
-            return Task::none();
-        }
         if self.doc_dirty(&path) {
             self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path));
             return Task::none();
@@ -1790,9 +1762,6 @@ impl App {
         attachments: Vec<String>,
         mode: crate::daemon::DeleteMode,
     ) -> Task<Message> {
-        if self.shadow_blocked(explorer::SHADOW_REASON) {
-            return Task::none();
-        }
         if self.doc_dirty(&path) {
             // Edited between the confirm opening and OK: back through the unsaved-edits dialog.
             self.dialog = Some(crate::dialog::Dialog::delete_unsaved(path));
@@ -1855,11 +1824,10 @@ impl App {
     }
 
     /// Flushes the note tab at `path` now (no-op when clean, saving — re-queued — conflicted,
-    /// in shadow mode, or not open).
+    /// or not open).
     fn flush_note(&mut self, path: &str) -> Task<Message> {
-        let read_only = self.status.mode == Mode::Shadow;
         match self.docs.get_mut(path) {
-            Some(doc) => crate::source::flush(doc, self.daemon.as_ref(), read_only),
+            Some(doc) => crate::source::flush(doc, self.daemon.as_ref(), false),
             None => Task::none(),
         }
     }
@@ -1877,9 +1845,9 @@ impl App {
 
     /// Plan editor-feedback-round-2 WP-2: arms one debounce timer per settings file whose
     /// latest edit left it valid (every edit path — form, prefs, hotkeys, theme cycle — ends
-    /// here). Shadow mode and a missing daemon arm nothing (the file stays dirty).
+    /// here). A missing daemon arms nothing (the file stays dirty).
     fn schedule_settings_autosave(&mut self) -> Task<Message> {
-        if self.status.mode == Mode::Shadow || self.daemon.is_none() {
+        if self.daemon.is_none() {
             return Task::none();
         }
         let due = self.settings.due_autosaves();
@@ -1898,9 +1866,6 @@ impl App {
     /// is queued (re-run when that write lands).
     fn save_settings_file(&mut self, path: String) -> Task<Message> {
         use crate::settings::SettingsMsg;
-        if self.status.mode == Mode::Shadow {
-            return Task::none();
-        }
         let Some(f) = self.settings.file_mut(&path) else {
             return Task::none();
         };
@@ -1927,9 +1892,6 @@ impl App {
             .filter(|f| f.wants_save() || f.saving)
             .map(|f| f.path.clone())
             .collect();
-        if self.status.mode == Mode::Shadow {
-            return (Vec::new(), Task::none());
-        }
         let tasks: Vec<Task<Message>> = paths
             .iter()
             .map(|p| self.save_settings_file(p.clone()))
@@ -2029,7 +1991,6 @@ impl App {
                     m,
                     crate::source::Ctx {
                         daemon: self.daemon.as_ref(),
-                        mode: self.status.mode,
                         error: &mut src_err,
                     },
                 );
@@ -2340,8 +2301,7 @@ impl App {
     /// save; `after` (a save-first continuation) runs when it lands, `None` is a plain save.
     /// `None` back when no save can start (clean, in flight, renaming or conflicted).
     fn save_then(&mut self, path: &str, after: Option<AfterSave>) -> Option<Task<Message>> {
-        let read_only = self.status.mode == Mode::Shadow;
-        let job = self.docs.get_mut(path)?.begin_save(read_only)?;
+        let job = self.docs.get_mut(path)?.begin_save(false)?;
         let Some(after) = after else {
             return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));
         };
@@ -2571,10 +2531,7 @@ impl App {
                 losses.setting(&f.path);
             }
         }
-        if dirty.is_empty()
-            && losses.is_empty()
-            && (!settings_pending || self.status.mode == Mode::Shadow)
-        {
+        if dirty.is_empty() && losses.is_empty() && !settings_pending {
             return self.exit();
         }
         let connected = self.status.connected && self.daemon.is_some();
@@ -2614,8 +2571,7 @@ impl App {
             return self.quit_progress();
         }
         // WP-2: settings writes are flushed and awaited like note saves.
-        // Await exactly the paths the flush started or queued (none in shadow mode, so a
-        // shadow quit never waits on a settings write that cannot run).
+        // Await exactly the paths the flush started or queued.
         let (flushing, settings_task) = self.flush_settings();
         if let Some(q) = &mut self.quit {
             q.settings.extend(flushing);
@@ -3055,9 +3011,6 @@ impl App {
         match m {
             BookmarkMsg::Open(p) => return self.open_bookmark(&p),
             edit => {
-                if self.shadow_blocked("bookmark edits are disabled in shadow mode") {
-                    return Task::none();
-                }
                 let active = self.active_note().map(|t| t.path.clone());
                 let Some(f) = self.settings.file_mut(BOOKMARKS_PATH) else {
                     return Task::none();
@@ -3178,9 +3131,6 @@ impl App {
             }
             ExplorerMsg::Scrolled(w) => self.explorer.window = w,
             ExplorerMsg::BeginNew | ExplorerMsg::BeginRename | ExplorerMsg::BeginMove => {
-                if self.shadow_blocked(explorer::SHADOW_REASON) {
-                    return Task::none();
-                }
                 let kind = match m {
                     ExplorerMsg::BeginNew => EditKind::New,
                     ExplorerMsg::BeginRename => EditKind::Rename,
@@ -3191,9 +3141,6 @@ impl App {
                 }
             }
             ExplorerMsg::Trash => {
-                if self.shadow_blocked(explorer::SHADOW_REASON) {
-                    return Task::none();
-                }
                 match self
                     .explorer
                     .selected
@@ -3239,17 +3186,11 @@ impl App {
                     e.input = s;
                 }
             }
-            ExplorerMsg::Submit => {
-                if self.shadow_blocked(explorer::SHADOW_REASON) {
-                    self.explorer.edit = None;
-                    return Task::none();
-                }
-                match self.explorer.submit() {
-                    Ok(Some(op)) => return self.dispatch_op(op),
-                    Ok(None) => {}
-                    Err(e) => self.status.set_error(e),
-                }
-            }
+            ExplorerMsg::Submit => match self.explorer.submit() {
+                Ok(Some(op)) => return self.dispatch_op(op),
+                Ok(None) => {}
+                Err(e) => self.status.set_error(e),
+            },
             ExplorerMsg::Cancel => self.explorer.edit = None,
             ExplorerMsg::Done(FileOpDone { op, result }) => match result {
                 Ok(final_path) => {
@@ -3273,7 +3214,6 @@ impl App {
     /// plan editor-ui-round-3 WP-4: sets a host-note task's status char in `path`'s buffer
     /// (one undoable edit; normal autosave; the toggle's read-only rule).
     fn set_task_status(&mut self, path: &str, line: usize, to: char) -> Task<Message> {
-        let read_only = self.status.mode == Mode::Shadow;
         let Some(doc) = self.docs.get_mut(path) else {
             // Plan round-6-feedback-todos WP-6: a `Tasks` view row of a note with no open
             // buffer — the edit path is the buffer's, so say so instead of a silent no-op.
@@ -3281,11 +3221,6 @@ impl App {
                 .set_error(format!("open {path} to change its tasks"));
             return Task::none();
         };
-        if read_only {
-            self.status
-                .set_error("edits are disabled in shadow mode".into());
-            return Task::none();
-        }
         if !doc.set_task_status(line, to, false, std::time::Instant::now()) {
             return Task::none();
         }
@@ -3296,7 +3231,6 @@ impl App {
 
     /// Toggles a host-note task box in `path`'s buffer (one undoable edit; normal autosave).
     fn toggle_task(&mut self, path: &str, line: usize) -> Task<Message> {
-        let read_only = self.status.mode == Mode::Shadow;
         let Some(doc) = self.docs.get_mut(path) else {
             // Plan round-6-feedback-todos WP-6: a `Tasks` view row of a note with no open
             // buffer — the edit path is the buffer's, so say so instead of a silent no-op.
@@ -3304,11 +3238,6 @@ impl App {
                 .set_error(format!("open {path} to change its tasks"));
             return Task::none();
         };
-        if read_only {
-            self.status
-                .set_error("edits are disabled in shadow mode".into());
-            return Task::none();
-        }
         if !doc.toggle_task(line, false, std::time::Instant::now()) {
             return Task::none();
         }
@@ -3325,11 +3254,6 @@ impl App {
     /// closed note goes through the daemon's `note_set_bool`. No optimistic view state.
     fn set_note_bool(&mut self, path: String, key: String, value: bool) -> Task<Message> {
         if let Some(doc) = self.docs.get_mut(&path) {
-            if self.status.mode == Mode::Shadow {
-                self.status
-                    .set_error("edits are disabled in shadow mode".into());
-                return Task::none();
-            }
             if !doc.set_frontmatter_bool(&key, Some(value), false, std::time::Instant::now()) {
                 return Task::none();
             }
@@ -3345,15 +3269,9 @@ impl App {
     }
 
     fn toggle_prop(&mut self, path: &str, key: &str) -> Task<Message> {
-        let read_only = self.status.mode == Mode::Shadow;
         let Some(doc) = self.docs.get_mut(path) else {
             return Task::none();
         };
-        if read_only {
-            self.status
-                .set_error("edits are disabled in shadow mode".into());
-            return Task::none();
-        }
         if !doc.toggle_frontmatter_bool(key, false, std::time::Instant::now()) {
             return Task::none();
         }
@@ -3373,9 +3291,6 @@ impl App {
         };
         if input.contains('/') {
             self.status.set_error("invalid name".into());
-            return Task::none();
-        }
-        if self.shadow_blocked(explorer::SHADOW_REASON) {
             return Task::none();
         }
         let Some(doc) = self.docs.get_mut(path) else {
@@ -3451,13 +3366,10 @@ impl App {
 
     /// Plan usability-sprint-captures-links WP-5: after a save of `path` landed, renames the note
     /// when its on-disk `title` changed and the filename was the old title's form. Not while
-    /// closing/quitting, in shadow mode (silently), or while a follow-up save or another rename
+    /// closing/quitting, or while a follow-up save or another rename
     /// is in flight (the next landed save re-evaluates). A target that exists refuses the rename.
     fn title_sync(&mut self, path: &str) -> Task<Message> {
-        if self.closing.contains_key(path)
-            || self.quit.is_some()
-            || self.status.mode == Mode::Shadow
-        {
+        if self.closing.contains_key(path) || self.quit.is_some() {
             return Task::none();
         }
         let Some(doc) = self.docs.get(path) else {
@@ -3630,9 +3542,6 @@ impl App {
             }
             SwitcherMsg::Create if s.move_from.is_some() => {}
             SwitcherMsg::Create => {
-                if self.shadow_blocked("creating notes is disabled in shadow mode") {
-                    return Task::none();
-                }
                 let Some(path) = switcher::create_path(&self.switcher.query) else {
                     return Task::none();
                 };
@@ -3660,9 +3569,6 @@ impl App {
     /// WP-6 (usability-sprint-captures-links): "Move note…" — the switcher in folder mode for
     /// the active note.
     fn open_move_note(&mut self) -> Task<Message> {
-        if self.shadow_blocked(explorer::SHADOW_REASON) {
-            return Task::none();
-        }
         let Some(from) = self.active_note().map(|t| t.path.clone()) else {
             self.status.set_error("move note: no active note".into());
             return Task::none();
@@ -3684,9 +3590,6 @@ impl App {
             return Task::none();
         };
         self.switcher.open = false;
-        if self.shadow_blocked(explorer::SHADOW_REASON) {
-            return Task::none();
-        }
         let to = switcher::move_target(&from, folder);
         if to == from {
             return Task::none();
@@ -3731,9 +3634,6 @@ impl App {
                 Ok(Some(p)) => {
                     match self.open_into(pane, &p, Place::Replace) {
                         Ok(()) => {}
-                        Err(DaemonError::NotFound(_)) if self.status.mode == Mode::Shadow => {
-                            self.status.set_error("not materialized (shadow)".into());
-                        }
                         Err(e) => self.status.set_error(open_error(&e)),
                     }
                     self.persist();
@@ -4011,9 +3911,8 @@ impl App {
         })
     }
 
-    /// Save-first (live mode, dirty active buffer), then `run_action`.
+    /// Save-first (dirty active buffer), then `run_action`.
     pub(crate) fn run_call(&mut self, call: crate::palette::Call) -> Task<Message> {
-        let shadow = self.status.mode == Mode::Shadow;
         let Some(ps) = self.panes.get_mut(self.focus) else {
             return self.dispatch_call(call);
         };
@@ -4032,7 +3931,7 @@ impl App {
         let Some(doc) = self.docs.get_mut(&path) else {
             return self.dispatch_call(call);
         };
-        if shadow || !doc.is_dirty() {
+        if !doc.is_dirty() {
             return self.dispatch_call(call);
         }
         let title = call.title.clone();
@@ -4456,7 +4355,6 @@ impl App {
                         let fetch = self.fetch_actions();
                         return Task::batch([fetch, self.refresh_status_if_open()]);
                     }
-                    Notification::ShadowWrite { .. } => {}
                 }
             }
         }
@@ -5394,8 +5292,8 @@ impl App {
         ];
         let full = column![
             header,
-            container(explorer::view(&self.explorer, t, self.status.mode)).height(Length::Fill),
-            bookmarks::view(&self.bookmarks, t, self.status.mode),
+            container(explorer::view(&self.explorer, t)).height(Length::Fill),
+            bookmarks::view(&self.bookmarks, t),
         ]
         .spacing(8)
         .padding(4);
@@ -5555,7 +5453,7 @@ impl App {
                 if let Some(d) = &self.dialog {
                     card = card.push(crate::dialog::view(d, t));
                 } else if self.switcher.open {
-                    card = card.push(switcher::view(&self.switcher, t, self.status.mode));
+                    card = card.push(switcher::view(&self.switcher, t));
                 }
                 if self.palette.open && self.dialog.is_none() {
                     card = card.push(crate::palette::view(&self.palette, t));

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use cv_actions::{ConfigSet, Step};
 use cv_protocol::ActionContext;
 use cv_state::{QueueConfig, StateDb};
-use cv_vault::{ContentHash, MemoryShadowLog, NoCutover, VaultFs, VaultWriter, WriterHandle};
+use cv_vault::{NoCutover, VaultFs, VaultWriter, WriterHandle};
 use serde_json::{Map, Value, json};
 
 use super::{ChildSpawner, StepCtx, StepError, StepOutcome};
@@ -106,20 +106,6 @@ impl Env {
         Self::finish(root, vault, fs)
     }
 
-    fn shadow(files: &[(&str, &str)]) -> Self {
-        let root = mk_root();
-        let vault = root.join("vault");
-        seed(&vault, files);
-        let fs = VaultFs::shadow(
-            &vault,
-            &root.join("scratch"),
-            &[],
-            Box::new(MemoryShadowLog::default()),
-        )
-        .unwrap();
-        Self::finish(root, vault, fs)
-    }
-
     fn finish(root: PathBuf, vault: PathBuf, fs: VaultFs) -> Self {
         let index = root.join("cache/index.db");
         let w = VaultWriter::open(fs, &index).unwrap();
@@ -137,16 +123,12 @@ impl Env {
         }
     }
 
-    /// The note as the writer sees it (overlay-then-live in shadow mode).
+    /// The note as the writer sees it.
     fn read(&self, path: &str) -> Option<String> {
         self.writer
             .read(path)
             .unwrap()
             .map(|b| String::from_utf8(b).unwrap())
-    }
-
-    fn disk(&self, path: &str) -> Option<String> {
-        std::fs::read_to_string(self.vault.join(path)).ok()
     }
 
     fn exec(
@@ -658,22 +640,6 @@ fn capture_empty_body_guard_vectors() {
     assert_eq!(
         env.read("note.md").unwrap(),
         "---\ntitle: note\n---\n\nFresh replacement body."
-    );
-}
-
-#[test]
-fn capture_through_shadow_leaves_live_file_untouched() {
-    let env = Env::shadow(&[("live.md", "live body\n")]);
-    let before = ContentHash::of(env.disk("live.md").unwrap().as_bytes());
-    let step = "type = \"capture\"\ntarget = \"active\"\nmode = \"append\"";
-    let o = env
-        .run(step, json!({"value": "shadowed"}), active("live.md"))
-        .unwrap();
-    assert_eq!(o.output_paths, vec!["live.md".to_owned()]);
-    assert_eq!(env.read("live.md").unwrap(), "live body\n\nshadowed");
-    assert_eq!(
-        ContentHash::of(env.disk("live.md").unwrap().as_bytes()),
-        before
     );
 }
 

@@ -20,7 +20,7 @@ use crate::id::new_job_id;
 use crate::image_descriptions::ImageDescription;
 use crate::job::{EnqueueOutcome, FailureKind, Job, JobResult, JobStatus, NewJob, namespaced_key};
 use crate::migrate;
-use crate::query::{self, ListQuery, ShadowWrite, StatusCount};
+use crate::query::{self, ListQuery, StatusCount};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -68,23 +68,6 @@ pub struct BreakerFailure {
     pub kind: ServiceFailureKind,
     pub reason: String,
     pub retry_after_ms: Option<i64>,
-}
-
-/// A write to log in `shadow_writes`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewShadowWrite {
-    /// Operation.
-    pub op: String,
-    /// Vault-relative path.
-    pub path: String,
-    /// Hash before.
-    pub before_hash: Option<String>,
-    /// Hash after.
-    pub after_hash: Option<String>,
-    /// Producing job.
-    pub job_id: Option<String>,
-    /// When.
-    pub at_ms: i64,
 }
 
 static TOKEN_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -660,22 +643,6 @@ impl StateDb {
         Ok(health::load(&self.conn, service)?.unwrap_or_else(|| ServiceHealth::fresh(service)))
     }
 
-    // ---- shadow writes ------------------------------------------------------
-
-    /// Append a `shadow_writes` row; returns its sequence number.
-    pub fn append_shadow_write(&mut self, w: &NewShadowWrite) -> Result<i64> {
-        self.conn.execute(
-            "INSERT INTO shadow_writes (op, path, before_hash, after_hash, job_id, at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![w.op, w.path, w.before_hash, w.after_hash, w.job_id, w.at_ms],
-        )?;
-        Ok(self.conn.last_insert_rowid())
-    }
-
-    /// Shadow writes with `seq > since_seq`, oldest first (`limit` 0 = unlimited).
-    pub fn shadow_writes(&self, since_seq: i64, limit: u32) -> Result<Vec<ShadowWrite>> {
-        query::shadow_writes(&self.conn, since_seq, limit)
-    }
-
     // ---- reads ----------------------------------------------------------------
 
     /// One job.
@@ -753,11 +720,6 @@ impl StateReader {
     /// All breaker entries.
     pub fn service_health(&self) -> Result<Vec<ServiceHealth>> {
         health::load_all(&self.conn)
-    }
-
-    /// Shadow writes after `since_seq`.
-    pub fn shadow_writes(&self, since_seq: i64, limit: u32) -> Result<Vec<ShadowWrite>> {
-        query::shadow_writes(&self.conn, since_seq, limit)
     }
 
     /// Every stored image description among `md5s`, ordered by md5 (unknown keys skipped).
