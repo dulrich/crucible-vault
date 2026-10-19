@@ -953,75 +953,24 @@ fn prop_url(t: &str) -> Option<(String, String)> {
 }
 
 /// Plan round-8-intake-views-anchor WP-3: the edit that sets top-level frontmatter boolean
-/// `key` in `source` to `to` (`None` = toggle: `true` ↔ `false`, null/missing → `true`), as
-/// `(line, byte-column range within that line, replacement)` — the replacement may span new
-/// lines. Upserts: a null scalar (`key:`, `key: null`, `key: ~`) is rewritten, a missing key is
-/// inserted before the closing fence, a note without frontmatter gains a block at the top.
-/// `None` when nothing changes (already `to`) or the key holds a non-boolean / quoted /
-/// nested value, or the block is unterminated.
-pub fn frontmatter_bool_set(
+/// `key` in `source` to `to` (`None` = toggle: `true` ↔ `false`, null/missing → `true`), as one
+/// minimal splice `(byte range of source, replacement)` from the shared writer
+/// `cv_note::FrontmatterDoc::set_edit` (B10; the daemon's `NoteSetBool` uses it too). Upserts a
+/// null / missing key or a frontmatter-less note. `None` when nothing changes (already `to`),
+/// the key holds a non-boolean value, or the block is unterminated / unsupported.
+pub fn frontmatter_bool_edit(
     source: &str,
     key: &str,
     to: Option<bool>,
-) -> Option<(usize, std::ops::Range<usize>, String)> {
-    let lit = |b: bool| if b { "true" } else { "false" };
-    let mut lines = source.split('\n');
-    let first = lines.next()?;
-    let nl = if first.ends_with('\r') { "\r\n" } else { "\n" };
-    if first.trim_end_matches('\r') != "---" {
-        let v = to.unwrap_or(true);
-        return Some((0, 0..0, format!("---{nl}{key}: {}{nl}---{nl}", lit(v))));
+) -> Option<(std::ops::Range<usize>, String)> {
+    use cv_note::{FrontmatterDoc, JsValue};
+    let doc = FrontmatterDoc::new(source);
+    let cur = doc.get(key).ok()?;
+    if !matches!(cur, None | Some(JsValue::Null | JsValue::Bool(_))) {
+        return None;
     }
-    // The key's edit (`Some(None)` = refused / unchanged), returned only once the fence closes.
-    let mut found: Option<Option<(usize, std::ops::Range<usize>, String)>> = None;
-    for (i, raw) in lines.enumerate() {
-        let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if line == "---" || line == "..." {
-            let v = to.unwrap_or(true);
-            return found.unwrap_or_else(|| Some((i + 1, 0..0, format!("{key}: {}{nl}", lit(v)))));
-        }
-        if found.is_some() {
-            continue;
-        }
-        let Some(val) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) else {
-            continue;
-        };
-        let lead = val.len() - val.trim_start_matches([' ', '\t']).len();
-        let start = key.len() + 1 + lead;
-        let rest = &line[start..];
-        let word = rest.find([' ', '\t']).unwrap_or(rest.len());
-        let (scalar, tail) = if rest.starts_with('#') {
-            ("", rest)
-        } else {
-            (&rest[..word], rest[word..].trim())
-        };
-        if !(tail.is_empty() || tail.starts_with('#')) {
-            found = Some(None);
-            continue;
-        }
-        let cur = match scalar {
-            "true" => Some(true),
-            "false" => Some(false),
-            "" | "null" | "~" => None,
-            _ => return None,
-        };
-        let next = to.unwrap_or(cur != Some(true));
-        if cur == Some(next) {
-            found = Some(None);
-            continue;
-        }
-        found = Some(Some(if cur.is_some() {
-            (i + 1, start..start + word, lit(next).to_owned())
-        } else if scalar.is_empty() {
-            // `key:` (maybe `key:   # c`): insert after the colon, keep any comment.
-            let col = key.len() + 1;
-            let sep = if tail.is_empty() { "" } else { " " };
-            (i + 1, col..start, format!(" {}{sep}", lit(next)))
-        } else {
-            (i + 1, start..start + scalar.len(), lit(next).to_owned())
-        }));
-    }
-    None
+    let next = to.unwrap_or(cur != Some(JsValue::Bool(true)));
+    doc.set_edit(key, &JsValue::Bool(next)).ok()?
 }
 
 /// The toggle for the task at `line` of `source`: `[x]`/`[X]` → `[ ]`; `[ ]` and custom

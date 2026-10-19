@@ -26,7 +26,7 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 regex = "=1.13.1"
 cv-protocol = { path = "../cv-protocol" }
 cv-text = { path = "../cv-text" }
-cv-lint = { path = "../cv-lint" }
+cv-note = { path = "../cv-note" }
 cv-actions = { path = "../cv-actions" }
 cv-index = { path = "../cv-index" }
 views = { path = "../views" }

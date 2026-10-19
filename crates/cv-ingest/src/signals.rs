@@ -85,7 +85,7 @@ pub struct TrainingRow {
     pub rated: Option<String>,
 }
 
-/// The human eval label of a capture (from `cv_index::signals::EvalLabel`).
+/// The human eval label of a capture ([`parse_eval_label`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureLabel {
     /// `eval-importance`.
@@ -111,6 +111,61 @@ pub struct CaptureInput {
     pub eval_skip: bool,
     /// Monthly `# Observations` notes citing the capture.
     pub observed_months: u32,
+}
+
+/// One raw frontmatter value as the label rule reads it (the caller maps its JSON: a list
+/// keeps only its string items).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawProp<'a> {
+    /// A number.
+    Num(f64),
+    /// A string.
+    Str(&'a str),
+    /// A boolean.
+    Bool(bool),
+    /// A list's string items.
+    List(Vec<&'a str>),
+}
+
+/// Crucible `parseEvalLabel` (`src/sourceEval/signals.ts:4-15`) over the note's properties
+/// (`prop(key)`): `eval-importance` (0..=5, integral; number or numeric string),
+/// `eval-urgent === true`, trimmed non-empty `eval-rated`, `eval-tags` (list or comma string,
+/// `#` stripped, deduplicated in order). `None` when every field is empty.
+#[must_use]
+pub fn parse_eval_label<'a>(prop: impl Fn(&str) -> Option<RawProp<'a>>) -> Option<CaptureLabel> {
+    let importance = match prop("eval-importance") {
+        Some(RawProp::Num(n)) => Some(n),
+        Some(RawProp::Str(s)) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|n| n.is_finite() && (0.0..=5.0).contains(n) && n.fract() == 0.0)
+    .map(|n| n as i64);
+    let urgent = prop("eval-urgent") == Some(RawProp::Bool(true));
+    let rated = match prop("eval-rated") {
+        Some(RawProp::Str(s)) => Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_owned),
+        _ => None,
+    };
+    let raw: Vec<&str> = match prop("eval-tags") {
+        Some(RawProp::List(a)) => a,
+        Some(RawProp::Str(s)) => s.split(',').collect(),
+        _ => Vec::new(),
+    };
+    let mut tags: Vec<String> = Vec::new();
+    for t in raw {
+        let t = t.trim().trim_start_matches('#');
+        if !t.is_empty() && !tags.iter().any(|x| x == t) {
+            tags.push(t.to_owned());
+        }
+    }
+    if importance.is_none() && !urgent && rated.is_none() && tags.is_empty() {
+        return None;
+    }
+    Some(CaptureLabel {
+        importance,
+        urgent,
+        rated,
+        tags,
+    })
 }
 
 /// `normalizeTag`: trim, strip leading `#`s, lowercase.
@@ -233,6 +288,42 @@ pub fn export_file_name(today: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{RawProp, parse_eval_label};
+
+    fn label(props: &[(&str, RawProp<'static>)]) -> Option<super::CaptureLabel> {
+        parse_eval_label(|k| props.iter().find(|(p, _)| *p == k).map(|(_, v)| v.clone()))
+    }
+
+    /// Moved from `cv_index::signals` (M3).
+    #[test]
+    fn eval_label_parsing() {
+        assert_eq!(label(&[("title", RawProp::Str("x"))]), None);
+        assert_eq!(
+            label(&[
+                ("eval-urgent", RawProp::Str("true")),
+                ("eval-rated", RawProp::Str("  "))
+            ]),
+            None
+        );
+        let l = label(&[
+            ("eval-importance", RawProp::Str("3")),
+            ("eval-urgent", RawProp::Bool(true)),
+            ("eval-rated", RawProp::Str(" 2026-10-01 ")),
+            ("eval-tags", RawProp::Str("#gold, revisit,gold")),
+        ])
+        .unwrap();
+        assert_eq!(l.importance, Some(3));
+        assert!(l.urgent);
+        assert_eq!(l.rated.as_deref(), Some("2026-10-01"));
+        assert_eq!(l.tags, ["gold", "revisit"]);
+        let l = label(&[
+            ("eval-importance", RawProp::Num(9.0)),
+            ("eval-tags", RawProp::List(vec!["a"])),
+        ])
+        .unwrap();
+        assert_eq!((l.importance, l.tags.len()), (None, 1));
+    }
+
     use super::*;
 
     fn cap(id: &str, tags: &[&str], importance: Option<i64>, months: u32) -> CaptureInput {

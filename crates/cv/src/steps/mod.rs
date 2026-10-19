@@ -263,6 +263,13 @@ impl From<VaultError> for StepError {
     }
 }
 
+impl From<cv_note::FmError> for StepError {
+    /// A frontmatter edit/parse error fails the step (the one frontmatter-error mapping, M2).
+    fn from(e: cv_note::FmError) -> Self {
+        StepError::failed(e.to_string())
+    }
+}
+
 impl From<cv_state::StateError> for StepError {
     /// A `state.db` error fails the step (the one state-error mapping, L6).
     fn from(e: cv_state::StateError) -> Self {

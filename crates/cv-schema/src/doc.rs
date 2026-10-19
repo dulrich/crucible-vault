@@ -173,7 +173,7 @@ impl std::error::Error for DocError {}
 /// A TOML config file held as a `toml_edit` document.
 ///
 /// Every edit keeps comments, whitespace, key order and keys the schema does not know. Two
-/// `toml_edit` limits apply (`toml_edit` 0.25.17 `src/lib.rs:64-69`):
+/// `toml_edit` limits apply (`toml_edit` 0.25.17 crate-level docs):
 /// - the relative order of **dotted keys** (`a.b = 1` mixed with other keys) is not preserved
 ///   exactly when such a table is re-rendered;
 /// - a file **missing its trailing newline** may gain one.

@@ -15,6 +15,8 @@
 //! than edited blind.
 
 use ofm::frontmatter::{JsValue, json_stringify, parse_frontmatter, split_frontmatter};
+use std::ops::Range;
+
 use thiserror::Error;
 
 /// Why a frontmatter edit was refused.
@@ -44,6 +46,7 @@ struct Entry {
 /// newline), `close_end` is the byte after the closing `---` line (its newline included).
 #[derive(Debug, Clone)]
 struct Block {
+    open_start: usize,
     inner_start: usize,
     inner_end: usize,
     close_end: usize,
@@ -61,9 +64,39 @@ fn strip_cr(s: &str) -> &str {
     s.strip_suffix('\r').unwrap_or(s)
 }
 
+/// Byte length of a leading UTF-8 BOM (0 or 3).
+fn bom_len(text: &str) -> usize {
+    if text.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    }
+}
+
+/// The canonical frontmatter span (B10): the byte range from the opening `---` fence (after a
+/// leading BOM, if any) through the closing fence line, its newline included — so
+/// `&text[..r.end]` is the block (BOM included) and `&text[r.end..]` the body. The fence rule
+/// is ofm's `split_frontmatter` (exact `---` lines, CR tolerated, a YAML-looking first line),
+/// plus the empty `---\n---` block. `None` when there is no (closed) block.
+pub fn span(text: &str) -> Option<Range<usize>> {
+    locate(text).map(|b| b.open_start..b.close_end)
+}
+
+/// [`locate_at`] past a leading BOM, with offsets into `text`.
+fn locate(text: &str) -> Option<Block> {
+    let off = bom_len(text);
+    locate_at(&text[off..]).map(|b| Block {
+        open_start: off,
+        inner_start: b.inner_start + off,
+        inner_end: b.inner_end + off,
+        close_end: b.close_end + off,
+        newline: b.newline,
+    })
+}
+
 /// Locate the frontmatter block. An empty `---\n---` block (which ofm's split rejects, having
 /// no key line) is recognised so a first key is added inside it rather than in a second block.
-fn locate(text: &str) -> Option<Block> {
+fn locate_at(text: &str) -> Option<Block> {
     let newline = detect_newline(text);
     let first_nl = text.find('\n')?;
     if strip_cr(&text[..first_nl]) != "---" {
@@ -81,6 +114,7 @@ fn locate(text: &str) -> Option<Block> {
         };
         let close_start = before_close.rfind('\n').map_or(0, |i| i + 1);
         return Some(Block {
+            open_start: 0,
             inner_start,
             inner_end: close_start.max(inner_start),
             close_end,
@@ -92,6 +126,7 @@ fn locate(text: &str) -> Option<Block> {
     let line = rest[..line_end].trim_end_matches('\n');
     if strip_cr(line) == "---" {
         return Some(Block {
+            open_start: 0,
             inner_start,
             inner_end: inner_start,
             close_end: inner_start + line_end,
@@ -277,10 +312,96 @@ impl FrontmatterDoc {
             None => {
                 let nl = detect_newline(&self.text);
                 let head = format!("---{nl}{rendered}{nl}---{nl}");
-                self.text.insert_str(0, &head);
+                self.text.insert_str(bom_len(&self.text), &head);
                 true
             }
         }
+    }
+
+    /// [`Self::set`] as one minimal splice `(range of the current text, replacement)` instead of
+    /// an in-place edit, so an editor buffer applies it as a single undo step (B10: the
+    /// editor's frontmatter toggle and the daemon's `NoteSetBool` share this writer). A
+    /// one-line plain-scalar entry keeps its spacing and trailing `# comment` (only the scalar
+    /// token is replaced); any other edit is the common-prefix/suffix diff of [`Self::set`].
+    /// `Ok(None)` when nothing changes. A text that opens with a `---` line that is not a
+    /// closed block (see [`span`]) is refused rather than given a second block.
+    pub fn set_edit(
+        &self,
+        key: &str,
+        value: &JsValue,
+    ) -> Result<Option<(Range<usize>, String)>, FmError> {
+        let rest = &self.text[bom_len(&self.text)..];
+        let first = rest.split('\n').next().unwrap_or("");
+        if strip_cr(first) == "---" && span(&self.text).is_none() {
+            return Err(FmError::UnsupportedLayout(
+                "unterminated frontmatter".into(),
+            ));
+        }
+        let (_, entries) = self.scan()?;
+        if let Some(e) = entries.iter().find(|e| e.key == key.trim()) {
+            if self.get(key.trim())?.as_ref() == Some(value) {
+                return Ok(None);
+            }
+            if let Some(edit) = self.scalar_edit(e, value) {
+                return Ok(Some(edit));
+            }
+        }
+        let mut next = self.clone();
+        if !next.set(key, value)? {
+            return Ok(None);
+        }
+        let (a, b) = (self.text.as_bytes(), next.text.as_bytes());
+        let mut pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+        while !self.text.is_char_boundary(pre) {
+            pre -= 1;
+        }
+        let max_suf = a.len().min(b.len()) - pre;
+        let mut suf = a
+            .iter()
+            .rev()
+            .zip(b.iter().rev())
+            .take(max_suf)
+            .take_while(|(x, y)| x == y)
+            .count();
+        while !self.text.is_char_boundary(a.len() - suf) {
+            suf -= 1;
+        }
+        Ok(Some((
+            pre..a.len() - suf,
+            next.text[pre..b.len() - suf].to_owned(),
+        )))
+    }
+
+    /// The in-place scalar splice for a one-line `key: <plain token> [# comment]` entry whose
+    /// key is written unquoted; `None` for any other shape (the caller falls back to a diff).
+    fn scalar_edit(&self, e: &Entry, value: &JsValue) -> Option<(Range<usize>, String)> {
+        if matches!(value, JsValue::Arr(_) | JsValue::Obj(_) | JsValue::Null) {
+            return None;
+        }
+        let line = strip_cr(self.text[e.start..e.end].strip_suffix('\n')?);
+        let after = line.strip_prefix(e.key.as_str())?.strip_prefix(':')?;
+        let colon = e.start + e.key.len() + 1;
+        let lead = after.len() - after.trim_start_matches([' ', '\t']).len();
+        let tok = &after[lead..];
+        let word = if tok.starts_with('#') {
+            0
+        } else {
+            tok.find([' ', '\t']).unwrap_or(tok.len())
+        };
+        let tail = tok[word..].trim();
+        if !(tail.is_empty() || tail.starts_with('#'))
+            || tok[..word].starts_with(['"', '\'', '[', '{', '|', '>', '&', '*', '!'])
+        {
+            return None;
+        }
+        let rendered = render_scalar(value);
+        if word == 0 {
+            // `key:` / `key:   # c`: write ` value` after the colon, keep any comment.
+            let sep = if tail.is_empty() { "" } else { " " };
+            return Some((colon..colon + lead, format!(" {rendered}{sep}")));
+        }
+        let start = colon + lead;
+        Some((start..start + word, rendered))
     }
 
     /// Set `key` to `value`. An existing entry whose parsed value already equals `value` is left
@@ -397,7 +518,10 @@ impl FrontmatterDoc {
 
     /// True when ofm still reads the block, or it is an empty/blank-only block.
     fn still_frontmatter(&self) -> bool {
-        if split_frontmatter(&self.text).0.is_some() {
+        if split_frontmatter(&self.text[bom_len(&self.text)..])
+            .0
+            .is_some()
+        {
             return true;
         }
         locate(&self.text).is_some_and(|b| {
@@ -764,5 +888,107 @@ mod tests {
         assert!(d.ensure_blank_line_after());
         assert_eq!(d.text(), "---\na: 1\n---\n\nBody\n");
         assert!(!d.ensure_blank_line_after());
+    }
+
+    // ---- B10: the canonical span + set_edit (cases ported from the retired detectors:
+    // `cv::steps::agent::split_frontmatter`, capture's `FRONTMATTER` regex and
+    // `editor_model::render::frontmatter_bool_set`).
+
+    fn split(t: &str) -> (&str, &str) {
+        t.split_at(span(t).map_or(0, |r| r.end))
+    }
+
+    #[test]
+    fn span_splits_block_from_body() {
+        assert_eq!(
+            split("---\na: 1\n---\nbody\n"),
+            ("---\na: 1\n---\n", "body\n")
+        );
+        assert_eq!(split("no fm\n"), ("", "no fm\n"));
+        assert_eq!(split("---\nunclosed\n"), ("", "---\nunclosed\n"));
+        assert_eq!(split("---\na: 1\n---"), ("---\na: 1\n---", ""));
+        assert_eq!(split("---\n---\nb\n"), ("---\n---\n", "b\n"));
+    }
+
+    #[test]
+    fn span_handles_crlf_bom_and_body_rules() {
+        assert_eq!(span("---\r\na: 1\r\n---\r\nb\r\n"), Some(0..16));
+        // BOM: the range starts at the fence; `..end` keeps the BOM with the block.
+        let bom = "\u{feff}---\na: 1\n---\n\nbody\n";
+        assert_eq!(span(bom), Some(3..16));
+        assert_eq!(split(bom).1, "\nbody\n");
+        // A later `---` (thematic break) closes nothing when the block was already closed,
+        // and a body `---` never opens a block.
+        assert_eq!(split("---\na: 1\n---\nx\n---\ny\n").1, "x\n---\ny\n");
+        assert_eq!(span("text\n---\na: 1\n---\n"), None);
+        // ofm's rule: the first line must look like a YAML key; fences are exact lines.
+        assert_eq!(span("---\nsome prose\n---\n"), None);
+        assert_eq!(span("--- \na: 1\n---\n"), None);
+    }
+
+    fn apply(t: &str, key: &str, v: &JsValue) -> Option<String> {
+        let (r, with) = FrontmatterDoc::new(t).set_edit(key, v).unwrap()?;
+        let mut out = t.to_owned();
+        out.replace_range(r, &with);
+        Some(out)
+    }
+
+    #[test]
+    fn set_edit_is_a_minimal_splice() {
+        let t = JsValue::Bool(true);
+        let f = JsValue::Bool(false);
+        let doc = FrontmatterDoc::new("---\nread:   true   # done?\n---\n");
+        assert_eq!(
+            doc.set_edit("read", &f).unwrap(),
+            Some((12..16, "false".into()))
+        );
+        assert_eq!(
+            apply("---\nread: ~ # c\n---\n", "read", &t).as_deref(),
+            Some("---\nread: true # c\n---\n")
+        );
+        assert_eq!(
+            apply("---\nread:  # c\n---\n", "read", &t).as_deref(),
+            Some("---\nread: true # c\n---\n")
+        );
+        assert_eq!(
+            apply("---\nread:\n---\n", "read", &t).as_deref(),
+            Some("---\nread: true\n---\n")
+        );
+        assert_eq!(
+            apply("---\ntitle: x\n---\nb\n", "read", &t).as_deref(),
+            Some("---\ntitle: x\nread: true\n---\nb\n")
+        );
+        assert_eq!(
+            apply("body\n", "read", &t).as_deref(),
+            Some("---\nread: true\n---\nbody\n")
+        );
+        assert_eq!(
+            apply("---\r\nn: 1\r\n---\r\n", "read", &t).as_deref(),
+            Some("---\r\nn: 1\r\nread: true\r\n---\r\n")
+        );
+        assert_eq!(
+            apply("\u{feff}body\n", "read", &t).as_deref(),
+            Some("\u{feff}---\nread: true\n---\nbody\n")
+        );
+        assert_eq!(
+            apply("\u{feff}---\nread: false\n---\n", "read", &t).as_deref(),
+            Some("\u{feff}---\nread: true\n---\n")
+        );
+        assert_eq!(
+            FrontmatterDoc::new("---\nread: true\n---\n")
+                .set_edit("read", &t)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn set_edit_refuses_unterminated_block() {
+        for t in ["---\nread: true\n", "---\nsome prose\n---\n"] {
+            assert!(matches!(
+                FrontmatterDoc::new(t).set_edit("read", &JsValue::Bool(true)),
+                Err(FmError::UnsupportedLayout(_))
+            ));
+        }
     }
 }

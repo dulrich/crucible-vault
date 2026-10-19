@@ -144,11 +144,16 @@ impl Shared {
                 let hash = ContentHash::of(&bytes);
                 let text = String::from_utf8(bytes)
                     .map_err(|_| JobError::Invalid(format!("{} is not UTF-8", p.path)))?;
-                let mut doc = cv_lint::FrontmatterDoc::new(text);
-                match doc.set(&p.key, &cv_lint::JsValue::Bool(p.value)) {
+                // The editor's toggle shares this writer (B10): one minimal splice.
+                let doc = cv_note::FrontmatterDoc::new(text);
+                match doc.set_edit(&p.key, &cv_note::JsValue::Bool(p.value)) {
                     Err(e) => Err(JobError::Invalid(format!("{}: {e}", p.path))),
-                    Ok(false) => Ok(hash),
-                    Ok(true) => Ok(vw.write(&p.path, doc.text().as_bytes(), Some(hash))?),
+                    Ok(None) => Ok(hash),
+                    Ok(Some((range, with))) => {
+                        let mut text = doc.into_text();
+                        text.replace_range(range, &with);
+                        Ok(vw.write(&p.path, text.as_bytes(), Some(hash))?)
+                    }
                 }
             })
             .await?;

@@ -144,6 +144,18 @@ pub struct Variant {
     pub record: &'static Record,
 }
 
+impl Variant {
+    /// The variant for `record`, tagged by the record's name (F7: the tag is never repeated).
+    #[must_use]
+    pub const fn of(record: &'static Record, label: &'static str) -> Self {
+        Self {
+            tag: record.name,
+            label,
+            record,
+        }
+    }
+}
+
 /// Builds a [`Field`] (const-friendly).
 #[must_use]
 pub const fn field(

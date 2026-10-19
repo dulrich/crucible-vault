@@ -663,16 +663,8 @@ fn shared_manager_is_one_instance() {
 }
 
 #[test]
-fn frontmatter_split_and_render() {
-    assert_eq!(
-        agent::split_frontmatter("---\na: 1\n---\nbody\n"),
-        ("---\na: 1\n---\n", "body\n")
-    );
-    assert_eq!(agent::split_frontmatter("no fm\n"), ("", "no fm\n"));
-    assert_eq!(
-        agent::split_frontmatter("---\nunclosed\n"),
-        ("", "---\nunclosed\n")
-    );
+fn template_render() {
+    // The frontmatter split moved to `cv_note::span` (B10); its cases live there.
     let r = cv_text::template::render("{{a}} {{ b }} {{zz}} {{", |k| {
         Ok(match k.trim() {
             "a" => Some("1".into()),

@@ -40,7 +40,7 @@
 //! `copy` whose destination already holds identical bytes succeeds.
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_lint::{FrontmatterDoc, JsValue};
+use cv_note::{FrontmatterDoc, JsValue};
 use serde::Serialize;
 
 use super::capture::{FORWARDED_TASK, OPEN_TASK};
@@ -99,10 +99,6 @@ pub(super) fn target_path(ctx: &StepCtx<'_>, path: Option<&str>) -> Result<Strin
 
 fn utf8(bytes: Vec<u8>) -> Result<String, StepError> {
     String::from_utf8(bytes).map_err(|_| StepError::failed("note is not UTF-8"))
-}
-
-fn fm_err(e: cv_lint::FmError) -> StepError {
-    StepError::failed(e.to_string())
 }
 
 /// Parsed params of the file steps (each kind reads its own subset).
@@ -268,14 +264,12 @@ fn has_tag(tags: &[String], want: &str) -> bool {
 }
 
 fn has_prop(text: &str, key: &str) -> Result<bool, StepError> {
-    Ok(
-        match FrontmatterDoc::new(text).get(key.trim()).map_err(fm_err)? {
-            None | Some(JsValue::Null) => false,
-            Some(JsValue::Str(s)) => !s.trim().is_empty(),
-            Some(JsValue::Arr(a)) => !a.is_empty(),
-            Some(_) => true,
-        },
-    )
+    Ok(match FrontmatterDoc::new(text).get(key.trim())? {
+        None | Some(JsValue::Null) => false,
+        Some(JsValue::Str(s)) => !s.trim().is_empty(),
+        Some(JsValue::Arr(a)) => !a.is_empty(),
+        Some(_) => true,
+    })
 }
 
 fn in_folder(path: &str, folder: &str) -> bool {
@@ -535,8 +529,7 @@ fn set_props(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError
                 doc.set_if_empty(k, v)
             } else {
                 doc.set(k, v)
-            }
-            .map_err(fm_err)?;
+            }?;
         }
         Ok(changed)
     })
@@ -551,7 +544,7 @@ fn remove_props(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepEr
     edit_note(ctx, &path, |doc| {
         let mut changed = false;
         for k in &keys {
-            changed |= doc.remove(k).map_err(fm_err)?;
+            changed |= doc.remove(k)?;
         }
         Ok(changed)
     })
@@ -578,9 +571,7 @@ fn upsert_tags(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepErr
     edit_note(ctx, &path, |doc| {
         let mut changed = false;
         for tg in &clean {
-            changed |= doc
-                .append_to_list("tags", &JsValue::Str(tg.clone()))
-                .map_err(fm_err)?;
+            changed |= doc.append_to_list("tags", &JsValue::Str(tg.clone()))?;
         }
         Ok(changed)
     })

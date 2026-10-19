@@ -4,7 +4,7 @@
 //! note (the per-kind fetch), then link it onto the source note through [`StepCtx::modify`]
 //! (fetch first, CAS after, SR7). Only the id resolution and the fetch + note body stay per step.
 
-use cv_lint::{FrontmatterDoc, JsValue};
+use cv_note::{FrontmatterDoc, JsValue};
 use serde::Serialize;
 
 use super::web::{append_link, link_targets};
@@ -112,7 +112,7 @@ fn link<C, E>(
     // Already linked to a live metadata note for this id → done, no write.
     if let Some(d) = &doc {
         let list = d.get(kind.list_key);
-        for target in link_targets(list.map_err(|e| StepError::failed(e.to_string()))?.as_ref()) {
+        for target in link_targets(list?.as_ref()) {
             if target.rsplit('/').next() == Some(r.id.as_str())
                 && ctx.read(&format!("{target}.md"))?.is_some()
             {

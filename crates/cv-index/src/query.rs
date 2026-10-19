@@ -411,6 +411,28 @@ impl<'a> Query<'a> {
         Ok(all.into_iter().filter(|r| &r.value == value).collect())
     }
 
+    /// Markdown files carrying `key` as a frontmatter property (any value), by path.
+    pub fn md_paths_with_prop_key(&self, key: &str) -> Result<Vec<String>> {
+        collect(
+            self.conn,
+            "SELECT DISTINCT f.path FROM props p JOIN files f ON f.id = p.file_id WHERE p.key = ?1 AND f.is_md = 1 ORDER BY f.path",
+            [key],
+            |r| r.get(0),
+        )
+    }
+
+    /// Markdown files in `folder` or below it (`""` = the whole vault), by path.
+    pub fn md_files_under(&self, folder: &str) -> Result<Vec<FileRow>> {
+        collect(
+            self.conn,
+            &format!(
+                "SELECT {FILE_COLS} FROM files f WHERE f.is_md = 1 AND (?1 = '' OR f.folder = ?1 OR substr(f.folder, 1, length(?1) + 1) = ?1 || '/') ORDER BY f.path"
+            ),
+            [folder],
+            file_row,
+        )
+    }
+
     /// Block items of one file.
     pub fn blocks(&self, path: &str) -> Result<Vec<BlockRow>> {
         collect(

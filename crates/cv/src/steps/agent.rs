@@ -267,26 +267,6 @@ pub(crate) fn shared_manager_ptr() -> Result<*const ProviderManager, StepError> 
     manager().map(std::ptr::from_ref)
 }
 
-/// Splits `---` frontmatter (with its closing fence line) from the body.
-pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
-    let first_end = match text.find('\n') {
-        Some(i) => i + 1,
-        None => return ("", text),
-    };
-    if text[..first_end].trim_end() != "---" {
-        return ("", text);
-    }
-    let mut pos = first_end;
-    while pos < text.len() {
-        let end = text[pos..].find('\n').map_or(text.len(), |i| pos + i + 1);
-        if text[pos..end].trim_end() == "---" {
-            return (&text[..end], &text[end..]);
-        }
-        pos = end;
-    }
-    ("", text)
-}
-
 fn var_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -412,7 +392,7 @@ pub(crate) fn run(
             .map_err(|_| StepError::failed("agent step: target note is not UTF-8"))?,
         None => String::new(),
     };
-    let (frontmatter, body) = split_frontmatter(&note_text);
+    let (frontmatter, body) = note_text.split_at(cv_note::span(&note_text).map_or(0, |r| r.end));
     let title = target
         .as_deref()
         .and_then(|p| std::path::Path::new(p).file_stem())

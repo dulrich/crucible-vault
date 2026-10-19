@@ -1,9 +1,9 @@
-//! Step module `lint`: run `cv_lint::lint_note` on one note and write only when it changed.
+//! Step module `lint`: run `cv_note::lint_note` on one note and write only when it changed.
 //!
 //! Ported from Crucible's `obsidian-crucible:lint-note` command (`src/lint.ts`, settings
 //! `lintFrontmatterInsert`, `lintCreatedKey`, `lintModifiedKey`, `lintBlankLineAfterYaml`,
 //! `lintYamlKeyPriority`, `lintStepEnabled`) and `lint-cleanup-transcript` (the "Ingest as Post"
-//! chain's transcript cleanup, `cv_lint::cleanup_youtube_transcript`). Dropped
+//! chain's transcript cleanup, `cv_note::cleanup_youtube_transcript`). Dropped
 //! (Obsidian-induced): lint-on-save (an event action can run this step instead), the editor
 //! buffer round-trip, and reading `ctime` from Obsidian's `TFile.stat` — the created stamp uses
 //! today when the note has none (`created` is only ever set if empty). Not lint-all, no localize.
@@ -22,10 +22,10 @@
 //! | `yaml_key_priority` | list of strings | `[]` |
 //! | `steps` | table `{ step-id = bool }` | all enabled |
 //!
-//! Defaults are `cv_lint::LintSettings::default()` (Crucible's defaults).
+//! Defaults are `cv_note::LintSettings::default()` (Crucible's defaults).
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_lint::{LintContext, LintSettings, cleanup_youtube_transcript, lint_note};
+use cv_note::{LintContext, LintSettings, cleanup_youtube_transcript, lint_note};
 
 use super::file::{step_kind, target_path};
 use cv_text::vpath::stem;
@@ -56,7 +56,7 @@ fn settings(t: &toml::Table) -> Result<LintSettings, String> {
                 let b = v
                     .as_bool()
                     .ok_or_else(|| format!("lint `steps.{k}` must be a boolean"))?;
-                if !cv_lint::LINT_STEPS.iter().any(|st| st.id == k) {
+                if !cv_note::LINT_STEPS.iter().any(|st| st.id == k) {
                     return Err(format!("lint: unknown step id {k:?}"));
                 }
                 s.step_enabled.insert(k.clone(), b);

@@ -16,7 +16,7 @@
 use std::future::Future;
 use std::sync::OnceLock;
 
-use cv_lint::{FrontmatterDoc, JsValue};
+use cv_note::{FrontmatterDoc, JsValue};
 #[cfg(test)]
 use cv_providers::secrets::SecretSource;
 use cv_providers::secrets::{SystemSecrets, default_secrets_dir, resolve_secret};
@@ -141,19 +141,18 @@ pub(crate) fn append_link(
     key: &str,
     link: &str,
 ) -> Result<bool, StepError> {
-    let fm = |e: cv_lint::FmError| StepError::failed(e.to_string());
     let item = JsValue::Str(link.to_owned());
-    match doc.get(key).map_err(fm)? {
+    match doc.get(key).map_err(StepError::from)? {
         None | Some(JsValue::Null) => doc
             .insert_after(anchor, key, &JsValue::Arr(vec![item]))
-            .map_err(fm),
+            .map_err(StepError::from),
         Some(JsValue::Str(s)) if s.trim().is_empty() => doc
             .insert_after(anchor, key, &JsValue::Arr(vec![item]))
-            .map_err(fm),
-        Some(JsValue::Arr(a)) if a.is_empty() => {
-            doc.set(key, &JsValue::Arr(vec![item])).map_err(fm)
-        }
-        Some(_) => doc.append_to_list(key, &item).map_err(fm),
+            .map_err(StepError::from),
+        Some(JsValue::Arr(a)) if a.is_empty() => doc
+            .set(key, &JsValue::Arr(vec![item]))
+            .map_err(StepError::from),
+        Some(_) => doc.append_to_list(key, &item).map_err(StepError::from),
     }
 }
 

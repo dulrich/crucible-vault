@@ -24,7 +24,6 @@ mod index;
 pub mod queries;
 mod query;
 mod schema;
-pub mod signals;
 
 pub use cv_text::resolver::Resolver;
 pub use error::{Error, Result};

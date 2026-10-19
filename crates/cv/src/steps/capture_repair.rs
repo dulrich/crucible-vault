@@ -8,7 +8,7 @@
 //! comment after `blog`, so a parsed read would see only `blog` and lose `x`, `y`.
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_lint::{FrontmatterDoc, JsValue};
+use cv_note::{FrontmatterDoc, JsValue};
 use serde::Serialize;
 
 use super::{StepCtx, StepError, StepModule, StepOutcome};

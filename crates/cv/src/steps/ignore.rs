@@ -20,7 +20,7 @@
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::tracker::is_ignored_short;
-use cv_lint::{FrontmatterDoc, JsValue};
+use cv_note::{FrontmatterDoc, JsValue};
 use serde::Serialize;
 
 use super::params::{check_keys, get_str};
@@ -69,23 +69,19 @@ struct Vars {
 }
 
 fn prop_str(doc: &FrontmatterDoc, key: &str) -> Result<String, StepError> {
-    Ok(
-        match doc.get(key).map_err(|e| StepError::failed(e.to_string()))? {
-            Some(JsValue::Str(s)) => s.trim().to_owned(),
-            _ => String::new(),
-        },
-    )
+    Ok(match doc.get(key)? {
+        Some(JsValue::Str(s)) => s.trim().to_owned(),
+        _ => String::new(),
+    })
 }
 
 fn prop_int(doc: &FrontmatterDoc, key: &str) -> Result<Option<i64>, StepError> {
-    Ok(
-        match doc.get(key).map_err(|e| StepError::failed(e.to_string()))? {
-            #[allow(clippy::cast_possible_truncation)]
-            Some(JsValue::Num(n)) if n.is_finite() => Some(n as i64),
-            Some(JsValue::Str(s)) => s.trim().parse().ok(),
-            _ => None,
-        },
-    )
+    Ok(match doc.get(key)? {
+        #[allow(clippy::cast_possible_truncation)]
+        Some(JsValue::Num(n)) if n.is_finite() => Some(n as i64),
+        Some(JsValue::Str(s)) => s.trim().parse().ok(),
+        _ => None,
+    })
 }
 
 /// Executes the step.

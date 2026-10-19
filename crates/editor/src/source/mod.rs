@@ -1023,14 +1023,14 @@ impl SourceBuffer {
 
     /// plan usability-sprint-captures-links WP-4: flips top-level frontmatter boolean `key`
     /// as one edit that rewrites only its scalar (see
-    /// `editor_model::render::frontmatter_bool_set`). Plan round-8-intake-views-anchor WP-3:
+    /// `editor_model::render::frontmatter_bool_edit`). Plan round-8-intake-views-anchor WP-3:
     /// upserts — a null / missing key or a frontmatter-less note becomes `key: true`.
     pub fn toggle_frontmatter_bool(&mut self, key: &str, read_only: bool, now: Instant) -> bool {
         self.set_frontmatter_bool(key, None, read_only, now)
     }
 
     /// Plan round-8-intake-views-anchor WP-3: sets frontmatter boolean `key` to `to` (`None` =
-    /// toggle) as one undoable edit (see `editor_model::render::frontmatter_bool_set`).
+    /// toggle) as one undoable edit (see `editor_model::render::frontmatter_bool_edit`).
     pub fn set_frontmatter_bool(
         &mut self,
         key: &str,
@@ -1038,12 +1038,16 @@ impl SourceBuffer {
         read_only: bool,
         now: Instant,
     ) -> bool {
-        let Some((line, cols, with)) =
-            editor_model::render::frontmatter_bool_set(&self.text(), key, to)
+        let text = self.text();
+        let Some((range, with)) = editor_model::render::frontmatter_bool_edit(&text, key, to)
         else {
             return false;
         };
-        self.replace_in_line(line, cols, &with, read_only, now)
+        // The splice is one line's scalar (or an inserted line): line + byte columns.
+        let head = &text[..range.start];
+        let line = head.matches('\n').count();
+        let col = range.start - head.rfind('\n').map_or(0, |i| i + 1);
+        self.replace_in_line(line, col..col + range.len(), &with, read_only, now)
     }
 
     /// Sets the task status at source `line` to `to` as one edit (plan editor-ui-round-3 WP-4;

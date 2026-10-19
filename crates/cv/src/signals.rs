@@ -5,7 +5,8 @@
 //! `collectSourceEvalTrainingExamples` `:127-164`, `buildCaptureBaseExample` `:253-279`,
 //! `captureId` `:398-404`) and `captureIndex.ts` (`computeCaptureIndex` `:18-50`,
 //! `resolveCaptureSource` `:101-121`, `buildBlogSourceResolver` `:132-151`). The label rules and
-//! row type live in `cv_ingest::signals`; the per-note signals in `cv_index::signals`.
+//! row type live in `cv_ingest::signals`; the per-note and Observations signals are gathered
+//! here over `cv_index::Query` (moved from `cv-index`, M3).
 //!
 //! Read-only on the index (a `Reader`, so it works while the daemon runs) and on the vault
 //! (Observations text). **Never writes into the vault**: the default output is
@@ -27,10 +28,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use cv_actions::ConfigSet;
 use cv_actions::pipelines::{Priority, SourcesConfig};
-use cv_index::Query;
-use cv_index::signals::{NoteSignals, note_signals, notes_with_any_prop, observation_signals};
+use cv_index::{LinkKind, Query};
 use cv_ingest::signals::{
-    CaptureInput, CaptureLabel, RowBase, TrainingRow, build_rows, export_file_name,
+    CaptureInput, CaptureLabel, RawProp, RowBase, TrainingRow, build_rows, export_file_name,
     normalize_source_tags,
 };
 use serde_json::{Map, Value, json};
@@ -438,17 +438,178 @@ pub fn collect(
         caps.push(CaptureInput {
             base,
             observed_months: observations.get(&path).map_or(0, |o| o.months),
-            label: n.label.map(|l| CaptureLabel {
-                importance: l.importance,
-                urgent: l.urgent,
-                rated: l.rated,
-                tags: l.tags,
-            }),
+            label: n.label,
             eval_skip: n.eval_skip,
             tags: n.tags,
         });
     }
     Ok(build_rows(&caps, weak, today))
+}
+
+/// Per-note signals (Crucible `captureIndex.ts:36-48` `CaptureRecord` minus the source
+/// attribution): metadata-cache reads become index queries (`props`/`tags`).
+#[derive(Debug, Clone, PartialEq)]
+struct NoteSignals {
+    /// Folder (`""` = root).
+    folder: String,
+    /// Basename without extension.
+    name: String,
+    /// Frontmatter, key → JSON value.
+    props: Map<String, Value>,
+    /// Unique tags (frontmatter + inline), `#` stripped, in index order.
+    tags: Vec<String>,
+    /// `read === true`.
+    read: bool,
+    /// The parsed eval label.
+    label: Option<CaptureLabel>,
+    /// `eval-skip === true` (`captureIndex.ts:47`).
+    eval_skip: bool,
+}
+
+/// A frontmatter JSON value as `cv_ingest::signals::parse_eval_label` reads it.
+fn raw_prop(v: &Value) -> Option<RawProp<'_>> {
+    match v {
+        Value::Number(n) => n.as_f64().map(RawProp::Num),
+        Value::String(s) => Some(RawProp::Str(s)),
+        Value::Bool(b) => Some(RawProp::Bool(*b)),
+        Value::Array(a) => Some(RawProp::List(a.iter().filter_map(Value::as_str).collect())),
+        _ => None,
+    }
+}
+
+/// Signals of one indexed note (`None` when not indexed).
+fn note_signals(q: &Query<'_>, path: &str) -> Result<Option<NoteSignals>> {
+    let Some(file) = q.file(path)? else {
+        return Ok(None);
+    };
+    let mut props = Map::new();
+    for p in q.props(path)? {
+        props.insert(p.key, p.value);
+    }
+    let mut tags: Vec<String> = Vec::new();
+    for t in q.tags_of(path)? {
+        let t = t.tag.trim().trim_start_matches('#').to_owned();
+        if !t.is_empty() && !tags.contains(&t) {
+            tags.push(t);
+        }
+    }
+    let label = cv_ingest::signals::parse_eval_label(|k| props.get(k).and_then(raw_prop));
+    Ok(Some(NoteSignals {
+        folder: file.folder,
+        name: file.name,
+        read: props.get("read") == Some(&Value::Bool(true)),
+        eval_skip: props.get("eval-skip") == Some(&Value::Bool(true)),
+        props,
+        tags,
+        label,
+    }))
+}
+
+/// Markdown notes carrying any of `keys` as a frontmatter property, by path.
+fn notes_with_any_prop(q: &Query<'_>, keys: &[&str]) -> Result<Vec<String>> {
+    let mut out = BTreeSet::new();
+    for key in keys {
+        out.extend(q.md_paths_with_prop_key(key)?);
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// One note's observation signal: distinct monthly notes citing it, and nested quote bullets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ObservationSignal {
+    /// Monthly notes whose `# Observations` section links the note.
+    months: u32,
+    /// Nested bullets under those links.
+    quotes: u32,
+}
+
+/// Crucible `scanObservationSignals` (`src/sourceEval/signals.ts:17-79`) over every markdown
+/// note under `monthly_folder` (recursive): in the `# Observations` section
+/// (`cv_text::find_section_range`), a top-level bullet whose first wikilink resolves to a note
+/// sets the current note (one month per monthly note); an indented bullet counts one quote for
+/// it; a top-level bullet without a resolvable link clears it. `getFirstLinkpathDest` becomes
+/// the index's resolved `links` row for the bullet's line; the section text is read from the
+/// vault file (read-only; it is not indexed).
+fn observation_signals(
+    q: &Query<'_>,
+    vault_root: &Path,
+    monthly_folder: &str,
+) -> Result<BTreeMap<String, ObservationSignal>> {
+    let mut by_note: BTreeMap<String, (BTreeSet<String>, u32)> = BTreeMap::new();
+    for file in q.md_files_under(monthly_folder.trim_matches('/'))? {
+        let Ok(text) = std::fs::read_to_string(vault_root.join(&file.path)) else {
+            continue;
+        };
+        let Some(sec) = cv_text::find_section_range(&text, "# Observations") else {
+            continue;
+        };
+        // Line (1-based) → the first resolved wikilink on it.
+        let mut links: BTreeMap<i64, String> = BTreeMap::new();
+        for l in q.outgoing(&file.path)? {
+            if l.kind != LinkKind::Wikilink {
+                continue;
+            }
+            if let (Some(line), Some(dest)) = (l.line, l.resolved_path) {
+                links.entry(line).or_insert(dest);
+            }
+        }
+        let mut current: Option<String> = None;
+        let lines = text.split('\n').enumerate();
+        for (i, line) in lines.take(sec.end_index).skip(sec.header_index + 1) {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if is_nested_bullet(line) {
+                if let Some(c) = &current
+                    && let Some(e) = by_note.get_mut(c)
+                {
+                    e.1 += 1;
+                }
+                continue;
+            }
+            if !is_top_bullet(line) {
+                continue;
+            }
+            let lineno = i64::try_from(i + 1).unwrap_or(i64::MAX);
+            current = if line.contains("[[") {
+                links.get(&lineno).cloned()
+            } else {
+                None
+            };
+            if let Some(c) = &current {
+                by_note
+                    .entry(c.clone())
+                    .or_default()
+                    .0
+                    .insert(file.name.clone());
+            }
+        }
+    }
+    Ok(by_note
+        .into_iter()
+        .map(|(k, (months, quotes))| {
+            let months = u32::try_from(months.len()).unwrap_or(u32::MAX);
+            (k, ObservationSignal { months, quotes })
+        })
+        .collect())
+}
+
+/// `^(?: {2,}|\t+)[-*+]\s+`.
+fn is_nested_bullet(line: &str) -> bool {
+    let rest = if line.starts_with('\t') {
+        line.trim_start_matches('\t')
+    } else if line.starts_with("  ") {
+        line.trim_start_matches(' ')
+    } else {
+        return false;
+    };
+    is_top_bullet(rest)
+}
+
+/// `^[-*+]\s+.+`.
+fn is_top_bullet(line: &str) -> bool {
+    let mut c = line.chars();
+    matches!(c.next(), Some('-' | '*' | '+'))
+        && c.next().is_some_and(char::is_whitespace)
+        && !c.as_str().trim().is_empty()
 }
 
 #[cfg(test)]
@@ -641,5 +802,42 @@ mod tests {
             default_dir(home).unwrap(),
             PathBuf::from("/h/.local/share/crucible-vault/source-eval")
         );
+    }
+
+    /// Moved from `cv_index::signals` (M3).
+    #[test]
+    fn signals_and_observations_from_two_months() {
+        let root = std::env::temp_dir().join(format!("cv-m3-signals-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tmp = Tmp(root.clone());
+        let vault = tmp.0.join("vault");
+        let files: &[(&str, &str)] = &[
+            (
+                "c/a.md",
+                "---\nread: true\neval-skip: true\neval-importance: 2\ntags: [gold]\n---\nbody #x\n",
+            ),
+            ("c/b.md", "b\n"),
+            (
+                "m/2026-09.md",
+                "---\nk: v\n---\n# Observations\n- [[a]] said\n  - quote one\n  - quote two\n- no link\n  - orphan quote\n- [[b]]\n# Other\n- [[a]]\n",
+            ),
+            ("m/2026-10.md", "# Observations\n- see [[a]]\n\t- q\n"),
+        ];
+        for (rel, text) in files {
+            let p = vault.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        let idx = cv_index::Index::create(&vault, &root.join("index.db")).unwrap();
+        let q = idx.query();
+        let s = note_signals(&q, "c/a.md").unwrap().unwrap();
+        assert!(s.read && s.eval_skip);
+        assert_eq!(s.label.unwrap().importance, Some(2));
+        assert!(s.tags.contains(&"gold".to_owned()) && s.tags.contains(&"x".to_owned()));
+        assert_eq!(notes_with_any_prop(&q, &["read", "k"]).unwrap().len(), 2);
+        let obs = observation_signals(&q, &vault, "m").unwrap();
+        let sig = |months, quotes| ObservationSignal { months, quotes };
+        assert_eq!(obs["c/a.md"], sig(2, 3));
+        assert_eq!(obs["c/b.md"], sig(1, 0));
     }
 }

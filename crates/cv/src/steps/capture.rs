@@ -53,11 +53,6 @@ use super::materialize::{canonical_period, ensure_note, now, period};
 use super::params::{check_keys, check_placeholders, expand, get_str, value_text};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
-/// Crucible `FRONTMATTER_REGEX` (`src/utils.ts:28`).
-static FRONTMATTER: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"^\x{FEFF}?---\s*[^\S\r\n]*[\r\n]+([\s\S]*?)[\r\n]+---[^\S\r\n]*([\r\n]*)").ok()
-});
-
 /// Open checkbox (`src/markForwarded.ts:3`).
 pub(super) static OPEN_TASK: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"^(\s*[-*+]\s+\[) (\]\s+.*)$").ok());
@@ -312,13 +307,9 @@ fn apply(
         let out = insert_into_section(existing, sec, content, m);
         return (out != existing).then_some(out);
     }
-    let fm = FRONTMATTER.as_ref().and_then(|r| r.captures(existing));
-    // (block without its trailing newlines, full match length)
-    let yaml = fm.as_ref().and_then(|c| {
-        let all = c.get(0)?;
-        let nl = c.get(2).map_or(0, |m| m.as_str().len());
-        Some((&existing[..all.end() - nl], all.end()))
-    });
+    // (block through its closing fence line — BOM included, body offset); Crucible's
+    // `FRONTMATTER_REGEX` (`src/utils.ts:28`) is replaced by the canonical `cv_note::span` (B10).
+    let yaml = cv_note::span(existing).map(|r| (&existing[..r.end], r.end));
     let out = match mode {
         Mode::Replace => match yaml {
             Some((block, _)) => format!("{}\n\n{content}", block.trim_end()),
@@ -428,10 +419,9 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
     if content_raw.is_empty() {
         return Ok(out);
     }
-    let content = match FRONTMATTER.as_ref() {
-        Some(r) => r.replace(content_raw, "").trim().to_owned(),
-        None => content_raw.to_owned(),
-    };
+    let content = content_raw[cv_note::span(content_raw).map_or(0, |r| r.end)..]
+        .trim()
+        .to_owned();
     // Crucible's second guard (YAML-only value + replace = no-op, never blank the body). For
     // the other modes an empty body has nothing to insert either: no-op (deviation, see report).
     if content.is_empty() {

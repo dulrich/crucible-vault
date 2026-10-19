@@ -819,7 +819,7 @@ dependencies = [
  "cv-actions",
  "cv-index",
  "cv-ingest",
- "cv-lint",
+ "cv-note",
  "cv-protocol",
  "cv-providers",
  "cv-schema",
@@ -879,7 +879,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cv-lint"
+name = "cv-note"
 version = "0.1.0"
 dependencies = [
  "cv-text",
@@ -1106,6 +1106,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "comrak",
+ "cv-note",
  "cv-text",
  "nucleo-matcher",
  "ofm",

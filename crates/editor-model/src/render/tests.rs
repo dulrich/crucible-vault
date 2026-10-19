@@ -478,8 +478,8 @@ fn bool_toggle_refuses_non_boolean_shapes() {
     // Ported from the retired `frontmatter_bool_toggle` (WP-R5): non-boolean scalars are
     // refused; a nested or prefix-matching key is not `read`, so the setter upserts a new
     // top-level key instead of touching it.
-    assert!(frontmatter_bool_set("---\nread: \"true\"\n---\n", "read", None).is_none());
-    assert!(frontmatter_bool_set("---\nread: true yes\n---\n", "read", None).is_none());
+    assert!(frontmatter_bool_edit("---\nread: \"true\"\n---\n", "read", None).is_none());
+    assert!(frontmatter_bool_edit("---\nread: true yes\n---\n", "read", None).is_none());
     for src in [
         "---\nm:\n  read: true\n---\n",
         "---\nother: true\n---\n",
@@ -584,10 +584,9 @@ fn link_targets_cover_frontmatter_links() {
 // ---- plan round-8-intake-views-anchor WP-3: frontmatter boolean upsert ----
 
 fn apply_bool_set(src: &str, key: &str, to: Option<bool>) -> Option<String> {
-    let (line, cols, with) = frontmatter_bool_set(src, key, to)?;
-    let start: usize = src.split_inclusive('\n').take(line).map(str::len).sum();
+    let (range, with) = frontmatter_bool_edit(src, key, to)?;
     let mut out = src.to_owned();
-    out.replace_range(start + cols.start..start + cols.end, &with);
+    out.replace_range(range, &with);
     Some(out)
 }
 
@@ -627,12 +626,12 @@ fn bool_set_upserts_missing_null_and_blockless() {
         Some("---\nread: false\n---\n")
     );
     // Explicit target: equal → no edit; non-boolean shapes refused.
-    assert!(frontmatter_bool_set("---\nread: true\n---\n", "read", Some(true)).is_none());
+    assert!(frontmatter_bool_edit("---\nread: true\n---\n", "read", Some(true)).is_none());
     assert_eq!(
         apply_bool_set("---\nread: true\n---\n", "read", Some(false)).as_deref(),
         Some("---\nread: false\n---\n")
     );
-    assert!(frontmatter_bool_set("---\nread: \"true\"\n---\n", "read", None).is_none());
-    assert!(frontmatter_bool_set("---\nread: yes\n---\n", "read", None).is_none());
-    assert!(frontmatter_bool_set("---\nread: true\n", "read", None).is_none());
+    assert!(frontmatter_bool_edit("---\nread: \"true\"\n---\n", "read", None).is_none());
+    assert!(frontmatter_bool_edit("---\nread: yes\n---\n", "read", None).is_none());
+    assert!(frontmatter_bool_edit("---\nread: true\n", "read", None).is_none());
 }

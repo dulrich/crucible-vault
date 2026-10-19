@@ -20,7 +20,7 @@ use crate::wordcount::calculate_word_count;
 
 /// Whether a step edits frontmatter or the note body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepKind {
+pub enum LintTarget {
     Frontmatter,
     Content,
 }
@@ -30,7 +30,7 @@ pub enum StepKind {
 pub struct LintStep {
     pub id: &'static str,
     pub label: &'static str,
-    pub kind: StepKind,
+    pub kind: LintTarget,
     /// User-toggleable via [`LintSettings::step_enabled`] (absent = enabled).
     pub toggleable: bool,
     /// For non-toggleable gated steps: the setting that governs them.
@@ -40,7 +40,7 @@ pub struct LintStep {
 const fn step(
     id: &'static str,
     label: &'static str,
-    kind: StepKind,
+    kind: LintTarget,
     toggleable: bool,
     configured_by_setting: Option<&'static str>,
 ) -> LintStep {
@@ -58,56 +58,56 @@ pub const LINT_STEPS: &[LintStep] = &[
     step(
         "insert-keys",
         "Insert configured frontmatter keys",
-        StepKind::Frontmatter,
+        LintTarget::Frontmatter,
         false,
         Some("frontmatter_insert"),
     ),
     step(
         "created-date",
         "Stamp created date",
-        StepKind::Frontmatter,
+        LintTarget::Frontmatter,
         false,
         Some("created_key"),
     ),
     step(
         "title-stamp",
         "Stamp title",
-        StepKind::Frontmatter,
+        LintTarget::Frontmatter,
         true,
         None,
     ),
     step(
         "modified-date",
         "Stamp modified date",
-        StepKind::Frontmatter,
+        LintTarget::Frontmatter,
         false,
         Some("modified_key"),
     ),
     step(
         "word-count",
         "Write word count",
-        StepKind::Frontmatter,
+        LintTarget::Frontmatter,
         true,
         None,
     ),
     step(
         "derive-source-ids",
         "Derive source ID properties",
-        StepKind::Frontmatter,
+        LintTarget::Frontmatter,
         true,
         None,
     ),
     step(
         "sort-yaml",
         "Sort frontmatter keys",
-        StepKind::Frontmatter,
+        LintTarget::Frontmatter,
         true,
         None,
     ),
     step(
         "blank-line-after-yaml",
         "Ensure blank line after frontmatter",
-        StepKind::Content,
+        LintTarget::Content,
         false,
         Some("blank_line_after_yaml"),
     ),

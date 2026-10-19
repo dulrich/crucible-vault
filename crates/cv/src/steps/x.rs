@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::x::{XPost, folder_slug, metadata_note, tombstone_note};
-use cv_lint::{FrontmatterDoc, JsValue};
+use cv_note::{FrontmatterDoc, JsValue};
 use cv_providers::web::FetchError;
 use cv_providers::web::x as api;
 use cv_text::url_canon::{canonical_x_status_url, extract_x_status_from_url};

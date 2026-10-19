@@ -16,7 +16,7 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::youtube::{
     ChannelMeta, VideoMeta, channel_about_note, metadata_note, tombstone_note,
 };
-use cv_lint::FrontmatterDoc;
+use cv_note::FrontmatterDoc;
 use cv_providers::web::FetchError;
 use cv_providers::web::youtube::{self as api, YoutubeApi};
 use cv_state::FailureReason;
