@@ -16,7 +16,10 @@ path = "src/main.rs"
 # `image` pin below, matching `crates/cv`), `tokio` (executor), `advanced` (custom widgets: the
 # virtual list, the highlighter-driven editor). No `markdown` (plan "Dependency posture"), no
 # `highlighter` (syntect; WP-2 implements iced's `Highlighter` trait itself).
-iced = { version = "=0.14.0", features = ["image-without-codecs", "tokio", "advanced"] }
+# Plan memory-instrumentation-and-reduction WP-M5: the renderer is a build flag (`gpu`/`cpu` below), so
+# iced's `default-features` are off; the other iced defaults are kept explicitly: `crisp`,
+# `web-colors`, `thread-pool`, `linux-theme-detection`, `x11`, `wayland`.
+iced = { version = "=0.14.0", default-features = false, features = ["image-without-codecs", "tokio", "advanced", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland"] }
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 anyhow = "=1.0.104"
 thiserror = "=2.0.21"
@@ -52,6 +55,12 @@ ofm = { path = "../../../crucible-tui/crates/ofm" }
 unicode-segmentation = "=1.13.3"
 
 [features]
+# Renderer (plan memory-instrumentation-and-reduction WP-M5). `gpu` (default): wgpu with tiny-skia as
+# iced's runtime fallback. `cpu`: tiny-skia only, no wgpu compiled
+# (`--no-default-features --features cpu`).
+default = ["gpu"]
+gpu = ["iced/wgpu", "iced/tiny-skia"]
+cpu = ["iced/tiny-skia"]
 # `cvault-editor --fake <dir>`: the in-process `FakeDaemon` over a synthetic vault (dev only).
 fake = ["dep:cv-testkit"]
 

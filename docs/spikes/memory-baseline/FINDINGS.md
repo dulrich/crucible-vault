@@ -101,3 +101,23 @@ Targets (−50 % footprint = RSS + swap, KiB): daemon `refresh3` ≤ 94 940 (bas
 | **open15+30s** | **220 984** | 115 920 | 58 030 | 2 | 0 |
 
 The trim fires after the 5 s quiet period: `open15+30s` is 220 984 KiB vs the 282 412 baseline (−21.8 %), matching the spike's wgpu + `malloc_trim` row (219 828). Idle is unchanged; the renderer (M5) is the idle lever.
+
+## After WP-M5 (renderer build flags; default `gpu` build prefers Vulkan + radeon ICD) — final editor verification
+
+All runs below use `run-editor-load.sh` against the same scratch daemon (`m4d`, release `cv` at M3). KiB, RSS + swap (swap 0 throughout).
+
+**Today's environment differs from the spike's.** A pre-M2 editor (`e5f1bef`, built in a throwaway worktree) on this daemon peaks about 66 MiB higher than the spike rows did: tiny-skia `open15` 269 224 / 273 136 vs 204 884; default `open15+30s` 337 736–353 056 vs 275–282k. The editor code is not the cause; the likeliest cause is the cold-built index resolving more image embeds. Reductions are therefore stated against a same-environment baseline as well as the plan's absolute targets.
+
+| build | idle | `open15+30s` | runs |
+|---|---|---|---|
+| pre-M2, default (wgpu, all ICDs) | 153 976–154 788 | 337 736 / 339 216 / 353 056 | 3 |
+| pre-M2, `ICED_BACKEND=tiny-skia`, no trim | 80 036 / 80 268 | 269 044 / 272 916 | 2 |
+| **M5 default `gpu`** (Vulkan + radeon, trim) | **120 776 / 120 872** | 236 592 / 248 236 / 256 688 / 235 932 / 266 220 (two outliers 349 956 / 351 508) | 7 |
+| M5 `gpu` with defaults off (`ICED_BACKEND=wgpu`, all ICDs, trim) | — | 270 044 / 384 832 | 2 |
+| **M5 `cpu`** (tiny-skia only, trim) | **78 756–79 140** | 203 736 / 203 804 / 218 336 | 3 |
+
+- Against the same-environment baseline: `gpu` idle −21.8 %, load −24 % (median of 7, 256 688 vs 339 216); `cpu` idle −48.8 %, load −40 % (203 804 vs 339 216).
+- Against the plan's absolute targets: `gpu` idle ≤ 125 000 **met**; `gpu` load ≤ 200 000 **missed**; `cpu` idle ≤ 76 350 **missed by 2.8 MiB**; `cpu` load ≤ 145 000 **missed**. Daemon `refresh3` ≤ 94 940 **met** (74 252, M3 section).
+- The trim trigger works on its own: with the `mshim` shim (`shima`–`shimc`), a manual `malloc_trim(0)` at `open15+30s` releases ≤ 84 KiB more. glibc `in use` stays at 148–171 MiB of live data (incl. mmap). The remaining load is live memory: the 64 MiB decoded-image budget, shaped buffers and driver allocations. Lowering `CV_IMAGE_CACHE_MB` is the user-owned lever named in the plan's Assumptions.
+- The trim itself takes `cpu` load from 269 044 to 203 736 (−65 MiB), matching the spike's −61 MiB.
+- Two of seven `gpu` runs land near the untrimmed level (~350k). They are unexplained run-to-run variance in the wgpu path: the shim runs never reproduced them, and with defaults off (all ICDs) the variance is the same.

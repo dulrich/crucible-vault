@@ -29,6 +29,7 @@ fn fake(dir: &std::path::Path) -> anyhow::Result<editor::daemon::FakeDaemon> {
 fn main() -> anyhow::Result<()> {
     // Arena cap + glibc FFI live in `cv-malloc` (plan memory-instrumentation-and-reduction WP-M1).
     cv_malloc::cap_arenas();
+    gpu_defaults();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -105,3 +106,31 @@ fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(not(any(feature = "gpu", feature = "cpu")))]
+compile_error!(
+    "enable a renderer feature: `gpu` (default) or `cpu` (`--no-default-features --features cpu`)"
+);
+
+/// Plan memory-instrumentation-and-reduction WP-M5: the `gpu` build prefers Vulkan on the AMD
+/// radeon ICD (measured 116.7 vs 146-152 MiB idle). iced exposes no backend/adapter setting (wgpu
+/// reads `WGPU_BACKEND` and the Vulkan loader reads `VK_LOADER_DRIVERS_SELECT` itself), so these
+/// are environment defaults, skipped when the user set any backend/driver variable. Before any thread.
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+fn gpu_defaults() {
+    const USER_SET: [&str; 5] = [
+        "WGPU_BACKEND",
+        "VK_LOADER_DRIVERS_SELECT",
+        "VK_DRIVER_FILES",
+        "VK_ICD_FILENAMES",
+        "ICED_BACKEND",
+    ];
+    if USER_SET.iter().any(|k| std::env::var_os(k).is_some()) {
+        return;
+    }
+    cv_malloc::set_env_default("WGPU_BACKEND", "vulkan");
+    cv_malloc::set_env_default("VK_LOADER_DRIVERS_SELECT", "*radeon*");
+}
+
+#[cfg(not(all(feature = "gpu", target_os = "linux")))]
+fn gpu_defaults() {}

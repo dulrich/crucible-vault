@@ -1,5 +1,6 @@
 //! glibc allocator controls and statistics (plan memory-instrumentation-and-reduction WP-M1):
-//! the arena cap, `malloc_trim` and `mallinfo2`. This crate holds the workspace's only `unsafe`;
+//! the arena cap, `malloc_trim` and `mallinfo2`, plus process-start environment defaults
+//! (`set_env_default`). This crate holds the workspace's only `unsafe`;
 //! on non-Linux/non-glibc targets every function is a no-op or returns zeros.
 #![allow(unsafe_code)]
 
@@ -32,6 +33,17 @@ pub fn cap_arenas() {
     unsafe {
         libc::mallopt(libc::M_ARENA_MAX, 2);
         libc::mallopt(libc::M_TRIM_THRESHOLD, 131_072);
+    }
+}
+
+/// Sets the environment variable `key` to `value` only when it is unset (plan
+/// memory-instrumentation-and-reduction WP-M5: the editor's GPU driver defaults, which the Vulkan
+/// loader and wgpu read from the environment). Call first thing in `main`, before any thread exists.
+pub fn set_env_default(key: &str, value: &str) {
+    if std::env::var_os(key).is_none() {
+        // SAFETY: `set_var` is unsound only if another thread reads or writes the environment
+        // concurrently; this is called first in `main`, before any thread exists.
+        unsafe { std::env::set_var(key, value) };
     }
 }
 
