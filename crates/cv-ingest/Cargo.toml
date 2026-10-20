@@ -9,6 +9,7 @@ publish.workspace = true
 # Exact `=x.y.z` pins (plan `v0-automation-pipelines` WP-1). Pure crate: never tokio/reqwest/iced.
 quick-xml = "=0.41.0"
 htmd = "=0.5.6"
+mail-parser = { version = "=0.11.9", default-features = false, features = ["full_encoding"] }
 cv-text = { path = "../cv-text" }
 
 [lints]
