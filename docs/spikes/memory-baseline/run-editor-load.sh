@@ -9,7 +9,7 @@ env -i HOME=$HOME PATH=$PATH DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY XDG_RUNTIME
   XDG_STATE_HOME=$S/xdg CV_SOCKET=$sock RUST_LOG=info "$@" \
   <code-root>/crucible-vault/target/release/cvault-editor > $S/run/edload-$label.log 2>&1 &
 P=$!; sleep 8
-row(){ printf '%s\t%s\t' "$label" "$1"; awk '/^Rss:/{r=$2}/^Pss_Anon:/{a=$2}/^Pss_File:/{f=$2}END{printf "%d\t%d\t%d\t",r,a,f}' /proc/$P/smaps_rollup; awk '{printf "%d\n",($14+$15)/100}' /proc/$P/stat; }
+row(){ printf '%s\t%s\t' "$label" "$1"; awk '/^Rss:/{r=$2}/^Pss_Anon:/{a=$2}/^Pss_File:/{f=$2}END{printf "%d\t%d\t%d\t",r,a,f}' /proc/$P/smaps_rollup; awk '{printf "%d\t",($14+$15)/100}' /proc/$P/stat; awk '/VmSwap/{printf "%d\n",$2}' /proc/$P/status; }
 row idle
 n=0; while read -r f; do n=$((n+1)); enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$f"); CV_SOCKET=$sock cv uri "obsidian://open?vault=vault&file=$enc" >/dev/null 2>&1; sleep 3; [ $n = 5 ] && row open5; done < $S/run/imgnotes.txt
 sleep 3; row open15; sleep 30; row open15+30s

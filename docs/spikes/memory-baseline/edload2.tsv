@@ -1,0 +1,11 @@
+label	phase	rss_kb	anon_kb	file_kb	cpu_s	swap_kb
+tinyskia-trim	idle	72236	38924	18182	0	0
+tinyskia-trim	open5	131760	94676	20603	1	0
+tinyskia-trim	open15	204884	165916	21897	4	0
+tinyskia-trim	open15+30s	204636	165668	21897	5	0
+tinyskia-trim	trimmed	143260	104292	21897	5	0
+wgpu-trim	idle	152700	55128	54814	0	0
+wgpu-trim	open5	209400	108160	57140	0	0
+wgpu-trim	open15	282592	179468	58401	1	0
+wgpu-trim	open15+30s	282412	179288	58401	2	0
+wgpu-trim	trimmed	219828	116704	58401	2	0

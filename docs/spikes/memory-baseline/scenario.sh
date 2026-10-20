@@ -7,7 +7,7 @@ env -i HOME=$HOME PATH=$PATH CV_VAULT=$S/vault CV_SOCKET=$sock CV_STATE_DB=$S/st
   <code-root>/crucible-vault/target/release/cv daemon > $S/run/$label.log 2>&1 &
 P=$!; echo $P > $S/run/$label.pid
 until [ -S $sock ] && grep -q 'daemon serving' $S/run/$label.log; do sleep 0.5; done; sleep 3
-row(){ printf '%s\t%s\t' "$label" "$1"; awk '/^Rss:/{r=$2}/^Pss_Anon:/{a=$2}END{printf "%d\t%d\t",r,a}' /proc/$P/smaps_rollup; awk '/^[0-9a-f]+-/{n=$6}/^Size:/{z=$2}/^Rss:/{if(n==""&&z>=65000&&z<=65540)a+=$2; if(n=="[heap]")h+=$2}END{printf "%d\t%d\t",a,h}' /proc/$P/smaps; awk '/VmHWM/{printf "%d\n",$2}' /proc/$P/status; }
+row(){ printf '%s\t%s\t' "$label" "$1"; awk '/^Rss:/{r=$2}/^Pss_Anon:/{a=$2}END{printf "%d\t%d\t",r,a}' /proc/$P/smaps_rollup; awk '/^[0-9a-f]+-/{n=$6}/^Size:/{z=$2}/^Rss:/{if(n==""&&z>=65000&&z<=65540)a+=$2; if(n=="[heap]")h+=$2}END{printf "%d\t%d\t",a,h}' /proc/$P/smaps; awk '/VmHWM/{h=$2}/VmSwap/{w=$2}END{printf "%d\t%d\n",h,w}' /proc/$P/status; }
 run(){ CV_SOCKET=$sock cv run "$1" >/dev/null; sleep 1; until CV_SOCKET=$sock cv jobs list --status running | grep -qx "no jobs" && CV_SOCKET=$sock cv jobs list --status queued | grep -qx "no jobs"; do sleep 1; done; sleep 2; }
 row start
 for q in "project planning" "rust memory allocator" "garden notes" "travel"; do "$D/rpc.py" $sock search "{\"query\":\"$q\",\"limit\":50}" >/dev/null; done; sleep 1; row search4
