@@ -322,6 +322,7 @@ impl ImageCache {
     /// A load finished. Stored only if someone still waits for it; then evicts LRU entries
     /// until within budget (the new entry goes last). Returns whether it was stored.
     pub fn loaded(&mut self, key: &str, decoded: Option<Decoded>) -> bool {
+        crate::memory::touch();
         let owners = self.pending.remove(key).unwrap_or_default();
         let Some(d) = decoded else { return false };
         if owners.is_empty() {

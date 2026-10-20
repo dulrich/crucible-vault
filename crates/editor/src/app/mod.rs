@@ -258,6 +258,8 @@ pub struct App {
     pub views: crate::views::ViewStore,
     /// Plan memory-instrumentation-and-reduction WP-M2: the gauge registry behind `memory_report`.
     pub memory: Arc<crate::memory::Memory>,
+    /// Plan memory-instrumentation-and-reduction WP-M4: when the last quiet-period trim ran.
+    pub last_trim: Option<std::time::Instant>,
     pub(crate) tokens: Tokens,
     notifications: NotifHandle,
     /// plan editor-data-safety WP-1: opens a fresh client (`None` = never reconnect).
@@ -392,6 +394,7 @@ impl App {
             resolver,
             views: crate::views::ViewStore::default(),
             memory: Arc::new(crate::memory::Memory::new()),
+            last_trim: None,
             notifications,
             connector: None,
             reconnect_attempt: 0,

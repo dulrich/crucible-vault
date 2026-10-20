@@ -9,14 +9,53 @@
 //! 5 minutes — never per frame).
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cv_protocol::{GaugeValue, MemoryReport};
 use memstat::{GaugeKind, GaugeResult, Registry, Snapshot};
 
 /// The report period.
 pub const REPORT_EVERY: Duration = Duration::from_secs(300);
+
+/// Plan memory-instrumentation-and-reduction WP-M4: how long input and image decodes must be
+/// absent before a trim may run.
+pub const QUIET_PERIOD: Duration = Duration::from_secs(5);
+/// The maintenance tick period (it only compares clocks; it does no rendering work).
+pub const TRIM_TICK: Duration = Duration::from_secs(5);
+/// Retained-but-unused heap bytes above which a quiet-period trim runs (32 MiB).
+pub const TRIM_RETAINED_THRESHOLD: u64 = 32 * 1024 * 1024;
+
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+/// Milliseconds since [`EPOCH`] of the last user input or completed image decode.
+static LAST_ACTIVITY_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Records activity now (user input or a finished image decode). Cheap and lock-free.
+pub fn touch() {
+    let epoch = EPOCH.get_or_init(Instant::now);
+    let ms = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+    LAST_ACTIVITY_MS.store(ms, Ordering::Relaxed);
+}
+
+/// The instant of the last [`touch`] (the process's first clock read if none yet).
+pub fn last_activity() -> Instant {
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    epoch + Duration::from_millis(LAST_ACTIVITY_MS.load(Ordering::Relaxed))
+}
+
+/// Whether to trim now: quiet for [`QUIET_PERIOD`], retained above the threshold, and no trim
+/// yet since the last activity (at most once per quiet period).
+pub fn should_trim(
+    now: Instant,
+    last_activity: Instant,
+    last_trim: Option<Instant>,
+    retained: u64,
+) -> bool {
+    let quiet = now.saturating_duration_since(last_activity) >= QUIET_PERIOD;
+    let fresh = last_trim.is_none_or(|t| t <= last_activity);
+    quiet && fresh && retained > TRIM_RETAINED_THRESHOLD
+}
 
 /// App-owned counts, refreshed by [`Memory::capture`].
 #[derive(Debug, Default)]
@@ -160,6 +199,35 @@ pub fn to_report(snap: &Snapshot, malloc: cv_malloc::MallocInfo) -> MemoryReport
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trim_only_when_quiet_over_threshold_and_once() {
+        let t0 = Instant::now();
+        let big = TRIM_RETAINED_THRESHOLD + 1;
+        let quiet = t0 + QUIET_PERIOD;
+        assert!(should_trim(quiet, t0, None, big));
+        assert!(!should_trim(
+            quiet - Duration::from_millis(1),
+            t0,
+            None,
+            big
+        ));
+        assert!(!should_trim(quiet, t0, None, TRIM_RETAINED_THRESHOLD));
+        // Already trimmed this quiet period; new activity re-arms it.
+        assert!(!should_trim(
+            quiet,
+            t0,
+            Some(t0 + Duration::from_secs(6)),
+            big
+        ));
+        let t1 = t0 + Duration::from_secs(20);
+        assert!(should_trim(
+            t1 + QUIET_PERIOD,
+            t1,
+            Some(t0 + Duration::from_secs(6)),
+            big
+        ));
+    }
+
     use super::*;
 
     #[test]

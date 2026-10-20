@@ -17,6 +17,8 @@ pub enum Message {
     PersistDue,
     /// Plan memory-instrumentation-and-reduction WP-M2: the 5-minute `memory_report` tick.
     MemoryDue,
+    /// Plan memory-instrumentation-and-reduction WP-M4: the always-on quiet-period trim tick.
+    TrimTick,
     Source(SourceMsg),
     Reading(ReadingMsg),
     Explorer(ExplorerMsg),

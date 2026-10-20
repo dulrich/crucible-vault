@@ -36,6 +36,7 @@ impl App {
         match message {
             Message::PersistDue => self.write_ui_state(),
             Message::MemoryDue => return self.send_memory_report(),
+            Message::TrimTick => return self.maybe_trim(),
             Message::Tabs(m) => return self.update_tabs(m),
             Message::Dialog(m) => return self.update_dialog(m),
             Message::Menu(m) => return self.update_menu(m),
@@ -463,6 +464,13 @@ impl App {
             self.reading.subscription(&self.docs),
             // plan memory-instrumentation-and-reduction WP-M2: a snapshot to the daemon every 5 min.
             iced::time::every(crate::memory::REPORT_EVERY).map(|_| Message::MemoryDue),
+            // plan memory-instrumentation-and-reduction WP-M4: quiet-period trim, every mode.
+            iced::time::every(crate::memory::TRIM_TICK).map(|_| Message::TrimTick),
+            // Any input is activity (records a timestamp; emits no message).
+            iced::event::listen_with(|_, _, _| {
+                crate::memory::touch();
+                None
+            }),
             crate::palette::subscription(&self.palette, self.panels.visible),
             // plan round-5 WP-3: a 1 s expiry tick while a notice is up (shares PaletteMsg::Tick).
             if self.status.notice.is_some() && self.palette.jobs.toast.is_none() {

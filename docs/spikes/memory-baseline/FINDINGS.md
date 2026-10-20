@@ -88,3 +88,16 @@ Targets (−50 % footprint = RSS + swap, KiB): daemon `refresh3` ≤ 94 940 (bas
 | search24 | 81 744 | 65 452 | 23 916 | 110 516 | 0 |
 
 `refresh3` footprint 74 252 KiB vs target ≤ 94 940 (baseline 189 880): **−60.9 %**. VmHWM 95 520 at `refresh3` (≤ 112 640). The later 110 516 peak comes from `link-scan-all`, which is outside this WP's levers.
+
+## After WP-M4 (editor: quiet-period trim)
+
+`run-editor-load.sh m4gpu m4d` (release editor at M2–M4, default wgpu renderer with all ICDs, i.e. pre-M5; scratch daemon `m4d`). KiB: Rss, Pss_Anon, Pss_File, CPU s, swap.
+
+| phase | Rss | Pss_Anon | Pss_File | CPU s | swap |
+|---|---|---|---|---|---|
+| idle | 154 744 | 55 480 | 54 822 | 0 | 0 |
+| open5 | 211 356 | 108 220 | 57 139 | 1 | 0 |
+| open15 | 282 912 | 177 848 | 58 030 | 2 | 0 |
+| **open15+30s** | **220 984** | 115 920 | 58 030 | 2 | 0 |
+
+The trim fires after the 5 s quiet period: `open15+30s` is 220 984 KiB vs the 282 412 baseline (−21.8 %), matching the spike's wgpu + `malloc_trim` row (219 828). Idle is unchanged; the renderer (M5) is the idle lever.

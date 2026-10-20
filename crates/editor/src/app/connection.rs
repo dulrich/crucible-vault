@@ -211,6 +211,35 @@ impl App {
         .discard()
     }
 
+    /// Plan memory-instrumentation-and-reduction WP-M4: trims the glibc heap off the UI thread,
+    /// only after a quiet period (no input, no finished decode), above the retained threshold,
+    /// and at most once per quiet period.
+    pub fn maybe_trim(&mut self) -> Task<Message> {
+        let now = std::time::Instant::now();
+        let retained = cv_malloc::info().retained();
+        if !crate::memory::should_trim(
+            now,
+            crate::memory::last_activity(),
+            self.last_trim,
+            retained,
+        ) {
+            return Task::none();
+        }
+        self.last_trim = Some(now);
+        Task::future(async move {
+            match tokio::task::spawn_blocking(cv_malloc::trim).await {
+                Ok(released) => tracing::debug!(
+                    target: "cvault_editor::memory",
+                    retained_bytes = retained,
+                    released,
+                    "quiet-period malloc_trim"
+                ),
+                Err(e) => tracing::debug!(target: "cvault_editor::memory", error = %e, "trim task"),
+            }
+        })
+        .discard()
+    }
+
     /// Reconnect resync of one open document against the disk (audit E1: a document with a
     /// save in flight on the old connection waits for that save's completion).
     pub(super) fn resync_doc(&mut self, path: &str) -> Task<Message> {
