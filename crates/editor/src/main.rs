@@ -26,22 +26,9 @@ fn fake(dir: &std::path::Path) -> anyhow::Result<editor::daemon::FakeDaemon> {
     editor::daemon::FakeDaemon::open(dir, &data).context("starting FakeDaemon")
 }
 
-/// Caps glibc malloc arenas (plan editor-cutover-blockers WP-2): off-thread image decodes each
-/// grow their own arena and glibc keeps the freed pages, measured at 100–130 MiB of RSS.
-/// Equivalent to `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072`. Linux/glibc only.
-#[allow(unsafe_code)]
-fn cap_malloc_arenas() {
-    // SAFETY: `mallopt` only sets allocator tunables and is called first thing in `main`,
-    // before any other thread exists, so no allocation races the change; both parameters are
-    // valid glibc options with in-range values. A zero return (rejected) is harmless.
-    unsafe {
-        libc::mallopt(libc::M_ARENA_MAX, 2);
-        libc::mallopt(libc::M_TRIM_THRESHOLD, 131_072);
-    }
-}
-
 fn main() -> anyhow::Result<()> {
-    cap_malloc_arenas();
+    // Arena cap + glibc FFI live in `cv-malloc` (plan memory-instrumentation-and-reduction WP-M1).
+    cv_malloc::cap_arenas();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();

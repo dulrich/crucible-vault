@@ -1,0 +1,17 @@
+[package]
+name = "memstat"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "In-process memory snapshot (/proc/self) + named gauge registry for fleet Rust services"
+publish = false
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+# Standalone-build root for the canonical copy. A consumer workspace never lists
+# this crate in `members`; it adds it to `exclude` and uses it as a path dependency,
+# so this table stays byte-identical in vendored copies (see README).
+[workspace]

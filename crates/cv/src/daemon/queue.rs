@@ -118,6 +118,7 @@ impl Shared {
             services,
             tracker_items,
             link_records,
+            memory: None,
         })
     }
 }

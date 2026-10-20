@@ -190,7 +190,64 @@ fn render(s: &StatusResult, daemon: &str) -> String {
             }
         }
     }
+    if let Some(m) = &s.memory {
+        render_memory(&mut out, m);
+    }
     out
+}
+
+/// MiB with one decimal, `?` when absent.
+fn mib(v: Option<u64>) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    v.map_or_else(
+        || "?".to_owned(),
+        |b| format!("{:.1} MiB", b as f64 / 1_048_576.0),
+    )
+}
+
+/// The `cv status` memory block (plan memory-instrumentation-and-reduction WP-M1).
+fn render_memory(out: &mut String, m: &cv_protocol::MemoryStatus) {
+    let one = |out: &mut String, who: &str, r: &cv_protocol::MemoryReport, age: Option<u64>| {
+        let rss_swap = match (r.rss, r.swap) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
+        let retained = r
+            .malloc_system
+            .zip(r.malloc_in_use)
+            .map(|(s, u)| s.saturating_sub(u));
+        let age = age.map_or_else(String::new, |a| format!(" ({a}s ago)"));
+        out.push_str(&format!(
+            "{who}: rss+swap {}, anon {}, malloc live {} / retained {}, hwm {}{age}\n",
+            mib(rss_swap),
+            mib(r.anon),
+            mib(r.malloc_in_use),
+            mib(retained),
+            mib(r.hwm),
+        ));
+        let mut gauges: Vec<&cv_protocol::GaugeValue> = r.gauges.iter().collect();
+        gauges.sort_by_key(|g| std::cmp::Reverse(g.value.unwrap_or(0)));
+        let shown: Vec<String> = gauges
+            .iter()
+            .take(6)
+            .map(|g| match (&g.value, &g.error) {
+                (Some(v), _) => format!("{} {v}", g.name),
+                (None, Some(e)) => {
+                    format!("{} ({})", g.name, e.chars().take(40).collect::<String>())
+                }
+                (None, None) => format!("{} ?", g.name),
+            })
+            .collect();
+        if !shown.is_empty() {
+            out.push_str(&format!("  gauges: {}\n", shown.join(", ")));
+        }
+    };
+    out.push_str("memory:\n");
+    one(out, "  daemon", &m.daemon, None);
+    match &m.editor {
+        Some(e) => one(out, "  editor", &e.report, Some(e.age_secs)),
+        None => out.push_str("  editor: no report\n"),
+    }
 }
 
 /// `cv status`: via the daemon, else read-only from `state.db` + the index generation.
@@ -214,6 +271,7 @@ pub fn status_command(config: &Config) -> Result<String> {
         services: Vec::new(),
         tracker_items: None,
         link_records: None,
+        memory: None,
     };
     if let Ok(r) = reader {
         for c in r.counts()? {
@@ -265,6 +323,7 @@ mod tests {
             }],
             tracker_items: None,
             link_records: None,
+            memory: None,
         };
         assert!(
             render(&s, "running")

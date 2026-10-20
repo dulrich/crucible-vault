@@ -581,6 +581,7 @@ impl DaemonClient for FakeDaemon {
             services: vec![],
             tracker_items: None,
             link_records: None,
+            memory: None,
         })
     }
 

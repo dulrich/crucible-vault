@@ -845,3 +845,44 @@ async fn lookup_models_round_trip_falls_back_to_declared() {
     drop(c);
     d.shutdown().await.unwrap();
 }
+
+/// Plan memory-instrumentation-and-reduction WP-M1: `status.memory` carries the daemon snapshot
+/// and the latest `memory_report`, and `cv status` renders the memory block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_report_reaches_status() {
+    use cv_protocol::{GaugeValue, MemoryReport, methods as m};
+    let env = Env::new();
+    let d = start(&env).await;
+    let c = client(&env);
+    let s = c.call::<m::Status>(()).unwrap();
+    let mem = s.memory.expect("memory");
+    assert!(mem.daemon.rss.unwrap_or(0) > 0);
+    assert!(mem.editor.is_none());
+    let names: Vec<&str> = mem.daemon.gauges.iter().map(|g| g.name.as_str()).collect();
+    assert!(names.contains(&"resolver_entries"), "{names:?}");
+    c.call::<m::MemoryReport>(MemoryReport {
+        uptime_secs: 7,
+        rss: Some(64 << 20),
+        gauges: vec![GaugeValue {
+            name: "image_cache_bytes".into(),
+            value: Some(1 << 20),
+            error: None,
+        }],
+        ..MemoryReport::default()
+    })
+    .unwrap();
+    let e = c
+        .call::<m::Status>(())
+        .unwrap()
+        .memory
+        .expect("memory")
+        .editor
+        .expect("editor");
+    assert_eq!(e.report.uptime_secs, 7);
+    let out = cv::cli::status_command(&env.config()).unwrap();
+    println!("{out}");
+    assert!(out.contains("memory:\n  daemon: rss+swap "), "{out}");
+    assert!(out.contains("  editor: rss+swap 64.0 MiB"), "{out}");
+    drop(c);
+    d.shutdown().await.unwrap();
+}

@@ -160,6 +160,10 @@ pub enum Request {
     /// [`NoteSetBoolResult`]; the key / frontmatter block is created if absent. Missing notes
     /// are `NOT_FOUND`.
     NoteSetBool(NoteSetBoolParams),
+    /// A client's memory snapshot (plan memory-instrumentation-and-reduction WP-M1) → `null`;
+    /// the daemon keeps the latest one per process kind and reports it in `status`. An old
+    /// daemon answers `METHOD_NOT_FOUND`, which a client drops silently.
+    MemoryReport(MemoryReport),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +546,63 @@ pub struct StatusResult {
     /// `link_records` row count (additive, WP-11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_records: Option<u64>,
+    /// Memory snapshot (additive, plan memory-instrumentation-and-reduction WP-M1); boxed so
+    /// the status result stays small inside client message enums (serde-transparent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<Box<MemoryStatus>>,
+}
+
+/// One process's memory snapshot (plan memory-instrumentation-and-reduction WP-M1). The wire
+/// mirror of the vendored `memstat::Snapshot` (which is Serialize-only); all sizes in bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryReport {
+    #[serde(default)]
+    pub uptime_secs: u64,
+    /// `VmRSS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss: Option<u64>,
+    /// `Pss_Anon` (smaps_rollup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anon: Option<u64>,
+    /// `VmSwap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap: Option<u64>,
+    /// `VmHWM` (peak RSS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hwm: Option<u64>,
+    /// glibc `mallinfo2` live bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub malloc_in_use: Option<u64>,
+    /// glibc `mallinfo2` bytes held from the OS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub malloc_system: Option<u64>,
+    #[serde(default)]
+    pub gauges: Vec<GaugeValue>,
+}
+
+/// One named gauge reading: a value or the error that replaced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GaugeValue {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `status.memory`: the daemon's own snapshot plus the editor's latest report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryStatus {
+    pub daemon: MemoryReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<ReportedMemory>,
+}
+
+/// A client-reported snapshot and its age at the time of the `status` call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedMemory {
+    pub report: MemoryReport,
+    pub age_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1014,6 +1075,51 @@ mod tests {
             json!({"path": "a.md", "key": "read", "value": true})
         );
         round_trip(&NoteSetBoolResult { hash: "h".into() });
+        let report = MemoryReport {
+            uptime_secs: 60,
+            rss: Some(1 << 20),
+            anon: Some(512),
+            swap: None,
+            hwm: Some(2 << 20),
+            malloc_in_use: Some(100),
+            malloc_system: Some(300),
+            gauges: vec![
+                GaugeValue {
+                    name: "g".into(),
+                    value: Some(3),
+                    error: None,
+                },
+                GaugeValue {
+                    name: "bad".into(),
+                    value: None,
+                    error: Some("lock poisoned".into()),
+                },
+            ],
+        };
+        let v = round_trip(&RpcRequest::new(
+            RpcId::Num(8),
+            Request::MemoryReport(report.clone()),
+        ));
+        assert_eq!(v["method"], "memory_report");
+        assert_eq!(v["params"].get("swap"), None);
+        round_trip(&StatusResult {
+            generation: 1,
+            queue: std::collections::BTreeMap::new(),
+            config_errors: vec![],
+            services: vec![],
+            tracker_items: None,
+            link_records: None,
+            memory: Some(Box::new(MemoryStatus {
+                daemon: report.clone(),
+                editor: Some(ReportedMemory {
+                    report,
+                    age_secs: 5,
+                }),
+            })),
+        });
+        // A minimal report (future peer omitting everything optional) still parses.
+        let min: MemoryReport = serde_json::from_value(json!({})).expect("min report");
+        assert_eq!(min, MemoryReport::default());
         let r = round_trip(&LookupModelsResult {
             models: vec![LookupModel {
                 id: "m".into(),
@@ -1099,6 +1205,7 @@ mod tests {
             }],
             tracker_items: Some(4),
             link_records: Some(9),
+            memory: None,
         });
         // An older daemon's status (no WP-11 fields) still parses.
         let old: StatusResult = serde_json::from_value(json!({
@@ -1106,6 +1213,7 @@ mod tests {
         }))
         .expect("old status");
         assert_eq!(old.tracker_items, None);
+        assert_eq!(old.memory, None);
         assert_eq!(old.services[0].failure_score, None);
         round_trip(&JobsListResult {
             jobs: vec![JobSummary {
@@ -1333,6 +1441,7 @@ mod tests {
             },
             s,
         );
+        check::<m::MemoryReport>(MemoryReport::default(), s);
         assert_eq!(seen, METHOD_NAMES);
         // Unit methods carry no `params` key, exactly as the enum always serialised them.
         let v = serde_json::to_value(RpcRequest::new(RpcId::Num(2), m::Status::request(())))

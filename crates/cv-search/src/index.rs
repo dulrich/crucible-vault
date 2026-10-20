@@ -57,6 +57,17 @@ impl SearchDb {
         Ok(index)
     }
 
+    /// The shared handle if it is already open; never opens it (memory gauges, plan
+    /// memory-instrumentation-and-reduction WP-M1).
+    #[must_use]
+    pub fn if_open(&self) -> Option<SharedIndex> {
+        self.cell
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone)
+    }
+
     /// Whether the shared handle has been opened.
     #[must_use]
     pub fn is_open(&self) -> bool {

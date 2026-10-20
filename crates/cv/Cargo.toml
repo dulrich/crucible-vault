@@ -38,6 +38,9 @@ cv-ingest = { path = "../cv-ingest" }
 # Step parsers take their allowed keys from the
 # schema's step records (was a dev-only edge for `tests/schema_drift.rs`; lock unchanged).
 cv-schema = { path = "../cv-schema" }
+# Plan memory-instrumentation-and-reduction WP-M1: memory snapshot (vendored) + glibc stats.
+memstat = { path = "../memstat" }
+cv-malloc = { path = "../cv-malloc" }
 
 [dev-dependencies]
 # Shared test harness (dev edges only).

@@ -819,6 +819,7 @@ dependencies = [
  "cv-actions",
  "cv-index",
  "cv-ingest",
+ "cv-malloc",
  "cv-note",
  "cv-protocol",
  "cv-providers",
@@ -831,6 +832,7 @@ dependencies = [
  "hex",
  "image",
  "md-5",
+ "memstat",
  "percent-encoding",
  "regex",
  "reqwest",
@@ -879,6 +881,13 @@ dependencies = [
  "cv-text",
  "htmd",
  "quick-xml",
+]
+
+[[package]]
+name = "cv-malloc"
+version = "0.1.1"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1082,6 +1091,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "cv-index",
+ "cv-malloc",
  "cv-protocol",
  "cv-schema",
  "cv-state",
@@ -1091,7 +1101,6 @@ dependencies = [
  "editor-model",
  "iced",
  "image",
- "libc",
  "ofm",
  "serde",
  "serde_json",
@@ -2582,6 +2591,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "memstat"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

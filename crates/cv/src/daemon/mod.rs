@@ -42,6 +42,7 @@ use crate::{now_ms, spool};
 mod background;
 mod bridge;
 mod errors;
+mod memory;
 mod notes;
 mod queue;
 
@@ -95,6 +96,7 @@ pub struct Shared {
     open_subscribers: AtomicUsize,
     runner: OnceLock<Runner>,
     lookups: Lookups,
+    memory: memory::Memory,
 }
 
 impl std::fmt::Debug for Shared {
@@ -161,6 +163,7 @@ impl Daemon {
                 open_subscribers: AtomicUsize::new(0),
                 runner: OnceLock::new(),
                 lookups,
+                memory: memory::Memory::new(),
             }),
             writer_join,
             vault_events,
@@ -203,6 +206,7 @@ impl Daemon {
         if shared.runner.set(runner.clone()).is_err() {
             bail!("runner already started");
         }
+        memory::register_gauges(&shared);
         let mut tasks = vec![
             runner.spawn_claim_loop(stop_rx.clone()),
             runner.spawn_event_starter(stop_rx.clone()),
@@ -210,6 +214,7 @@ impl Daemon {
         ];
         tasks.extend([
             tokio::spawn(generation_listener(Arc::clone(&shared), stop_rx.clone())),
+            tokio::spawn(memory::memory_logger(Arc::clone(&shared), stop_rx.clone())),
             tokio::spawn(config_poller(
                 Arc::clone(&shared),
                 opts.config_poll,
@@ -388,7 +393,13 @@ impl Shared {
             Request::JobRetry(p) => reply::<m::JobRetry>(self.job_retry(&p.job_id)),
             Request::IntakeList(p) => reply::<m::IntakeList>(self.intake_list(&p)),
             Request::Uri(p) => reply::<m::Uri>(self.intake(&p.url).await),
-            Request::Status => reply::<m::Status>(self.status()),
+            Request::Status => reply::<m::Status>(match self.status() {
+                Ok(mut s) => {
+                    s.memory = Some(Box::new(self.memory_status().await));
+                    Ok(s)
+                }
+                Err(e) => Err(e),
+            }),
             Request::ViewsList => reply::<m::ViewsList>(Ok(ViewsListResult {
                 view_ids: self.views.view_ids(),
             })),
@@ -419,6 +430,10 @@ impl Shared {
                 self.set_tracker_status(&p.source_kind, &p.source_key, &p.item_id, p.status),
             ),
             Request::NoteSetBool(p) => reply::<m::NoteSetBool>(self.note_set_bool(p).await),
+            Request::MemoryReport(p) => {
+                self.memory_report(p);
+                reply::<m::MemoryReport>(Ok(()))
+            }
         }
     }
 }

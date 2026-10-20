@@ -82,4 +82,5 @@ methods! {
     Search = "search" (SearchParams) -> SearchResult;
     TrackerItemSetStatus = "tracker_item_set_status" (TrackerItemSetStatusParams) -> ();
     NoteSetBool = "note_set_bool" (NoteSetBoolParams) -> NoteSetBoolResult;
+    MemoryReport = "memory_report" (crate::MemoryReport) -> ();
 }
