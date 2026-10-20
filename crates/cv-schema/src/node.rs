@@ -121,8 +121,8 @@ pub struct Field {
     pub step: Option<f64>,
 }
 
-/// The semantic reference a string field holds (plan tn-review-baseline-remediation WP-R20,
-/// B13): forms choose a picker from it, never from the file name or key path.
+/// The semantic reference a string field holds:
+/// forms choose a picker from it, never from the file name or key path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefKind {
     /// A `providers.toml` provider id.

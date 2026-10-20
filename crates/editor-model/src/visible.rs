@@ -1,4 +1,4 @@
-//! The Reading view's visible runs (plan tn-review-baseline-remediation WP-R17, SR4): one walk
+//! The Reading view's visible runs: one walk
 //! of a [`RenderModel`] in exactly the order the Reading view draws its text runs — properties,
 //! blocks, footnotes. The view draws from it, the selection copies from it and find counts over
 //! it, so the three can no longer drift apart.

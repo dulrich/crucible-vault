@@ -12,7 +12,7 @@ use crate::widget::virtual_list::ListWindow;
 /// Every message the app handles.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// WP-R15 (SM12): the `editor.json` write debounce elapsed — write the latest UI-state
+    /// The `editor.json` write debounce elapsed — write the latest UI-state
     /// snapshot if it still differs from the last one written (an internal completion).
     PersistDue,
     Source(SourceMsg),
@@ -48,12 +48,12 @@ pub enum Message {
         seq: u64,
         result: Result<String, String>,
     },
-    /// Plan tn-review-baseline-remediation WP-R2 (SR3): keyboard modifier state, tracked once
+    /// Keyboard modifier state, tracked once
     /// in `App.modifiers` and never dropped by a modal layer.
     Modifiers(iced::keyboard::Modifiers),
 }
 
-/// Plan tn-review-baseline-remediation WP-R2 (SR3): how a modal layer treats a message —
+/// How a modal layer treats a message —
 /// user `Input` is dropped while a dialog or menu is open; a `Completion` (async result,
 /// timer tick, modifier state) always runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub enum MsgKind {
     Completion,
 }
 
-/// Plan tn-review-baseline-remediation WP-R2 (SR2): what a save-first flow does once its save
+/// What a save-first flow does once its save
 /// lands clean (`SourceMsg::Saved { after: Some(..) }`, handled by `App::on_save_landed`).
 #[derive(Debug, Clone)]
 pub enum AfterSave {
@@ -98,7 +98,7 @@ pub enum SourceMsg {
         path: String,
         seq: u64,
     },
-    /// A save finished; `after` is the save-first continuation, if any (WP-R2).
+    /// A save finished; `after` is the save-first continuation, if any.
     Saved {
         path: String,
         seq: u64,
@@ -505,7 +505,7 @@ pub enum ThemeMsg {
     Set(Surround),
 }
 
-/// Which document a [`SourceMsg`] acts on (WP-R15 SP5).
+/// Which document a [`SourceMsg`] acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceTarget<'a> {
     /// The note at this path, wherever its tabs are.

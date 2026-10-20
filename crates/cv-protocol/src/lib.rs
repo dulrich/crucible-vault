@@ -1192,7 +1192,7 @@ mod tests {
         }
     }
 
-    /// WP-R3: every marker builds its own variant, whose wire `method` is the marker's `NAME`
+    /// Every marker builds its own variant, whose wire `method` is the marker's `NAME`
     /// and is listed in `METHOD_NAMES` (the server's known-method set).
     #[test]
     fn method_markers_match_the_wire() {
@@ -1340,7 +1340,7 @@ mod tests {
         assert_eq!(v, json!({"jsonrpc":"2.0","id":2,"method":"status"}));
     }
 
-    /// WP-R3: the four results that were ad-hoc `json!` keep their wire shape.
+    /// The four results that were ad-hoc `json!` keep their wire shape.
     #[test]
     fn retyped_results_keep_their_wire_shape() {
         let r = RenameResult {

@@ -6,7 +6,7 @@
 //! Every control emits [`SettingsMsg::Edit`] (a [`DocEdit`] on the file) or
 //! [`SettingsMsg::Form`] (UI state / typed input); a valid edit is auto-saved after a short debounce.
 //!
-//! One function per [`Kind`] group (WP-R21 L4): [`text`] (text, number), [`choice`] (toggle,
+//! One function per [`Kind`] group: [`text`] (text, number), [`choice`] (toggle,
 //! enum, variant), [`chips`] and [`structure`] (heading, read-only, list items, map keys).
 //! [`Rcx::form_fn`] / [`Rcx::edit_fn`] build every message closure.
 //!

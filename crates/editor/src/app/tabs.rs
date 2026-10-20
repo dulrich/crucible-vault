@@ -49,7 +49,7 @@ impl App {
                     }
                 }
                 TabKind::Settings => tasks.push(self.settings.restore_scroll()),
-                // WP-R15 (B4): the Log tab has no stored place (was Settings' restore).
+                // The Log tab has no stored place (was Settings' restore).
                 TabKind::Log => {}
             }
         }
@@ -460,8 +460,8 @@ impl App {
     }
 
     /// Opens the singleton tab `kind` (Settings, Log) in `pane`, or focuses it where it is
-    /// already open (at most one of each; WP-R15 B4 — was `open_settings_into` /
-    /// `open_log_into`). Opening the Log resets its unread count; Settings re-syncs its view
+    /// already open (at most one of each).
+    /// Opening the Log resets its unread count; Settings re-syncs its view
     /// file list. A note `kind` opens through [`Self::open_into`].
     pub(super) fn open_singleton(&mut self, kind: TabKind, pane: Pane) {
         match &kind {

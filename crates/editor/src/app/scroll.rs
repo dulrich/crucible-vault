@@ -228,7 +228,7 @@ impl App {
 
     /// Puts the focused pane's current match on screen: the source selection (Source/Split) —
     /// whose cursor move scrolls the shaped editor to it — and in Reading/Split a scroll to the
-    /// match's block. Painting is derived from the bar at view time (WP-R17 SP6): this only
+    /// match's block. Painting is derived from the bar at view time: this only
     /// records the current source match's Reading counterpart on the bar. Positions are byte
     /// columns end to end (no char conversion).
     fn show_match(&mut self) -> Task<Message> {
@@ -254,7 +254,7 @@ impl App {
                 return Task::none();
             };
             let Some(b) = part.block() else {
-                // WP-R17 (SR4): a footnote hit — the footnotes follow the last block.
+                // A footnote hit — the footnotes follow the last block.
                 return crate::reading::ScrollIntent::SnapTo { path, view, y: 1.0 }.task();
             };
             self.reading.set_top_block(&mut self.docs, &path, view, b);

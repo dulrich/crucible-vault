@@ -1,4 +1,4 @@
-//! Key chords (WP-R19: moved from the editor palette; pure): the grammar `ActionInfo.keys` uses,
+//! Key chords (pure): the grammar `ActionInfo.keys` uses,
 //! the canonical spelling, and the editor's reserved defaults.
 //!
 //! Grammar: `Mod+…+Key`, `+`-separated, case-insensitive. Modifiers: `Ctrl`/`Control`/`Mod`/

@@ -226,7 +226,7 @@ impl App {
         (paths, Task::batch(tasks))
     }
 
-    /// Plan tn-review-baseline-remediation WP-R2 (SR2): the one save path. Starts `path`'s
+    /// The one save path. Starts `path`'s
     /// save; `after` (a save-first continuation) runs when it lands, `None` is a plain save.
     /// `None` back when no save can start (clean, in flight, renaming or conflicted).
     pub(super) fn save_then(
@@ -252,7 +252,7 @@ impl App {
         ))
     }
 
-    /// WP-R2 (SR2): every save completion (`SourceMsg::Saved`). Applies it, starts a queued
+    /// Every save completion (`SourceMsg::Saved`). Applies it, starts a queued
     /// follow-up (the continuation moves onto it), runs a deferred reconnect resync, the
     /// title sync (plain saves only — a continuation renames, deletes or acts on the note
     /// itself) and the close/quit waiters, then resumes the continuation.
@@ -313,7 +313,7 @@ impl App {
         ])
     }
 
-    /// WP-R2: a save-first continuation after its save landed. Only `Clean` (or a closed
+    /// A save-first continuation after its save landed. Only `Clean` (or a closed
     /// document) proceeds; a failed save never closes, quits, deletes, renames or runs — except
     /// a run, which today proceeds over a newer unsaved edit.
     fn resume_after(&mut self, path: &str, after: AfterSave, landed: &Landed) -> Task<Message> {
@@ -529,7 +529,7 @@ impl App {
     }
 }
 
-/// WP-R2: how a save-first save landed, for [`App::resume_after`].
+/// How a save-first save landed, for [`App::resume_after`].
 enum Landed {
     /// Saved and the buffer is clean.
     Clean,

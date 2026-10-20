@@ -44,7 +44,7 @@ pub(crate) use save::{autosave_timer, flush, spawn_save};
 pub(crate) use view::EDITOR_PADDING;
 pub use view::{SLOTS, editor_id, view};
 
-/// What [`update`] asks the app to do (WP-R15 SP5: the one effect shape `App` drains, as
+/// What [`update`] asks the app to do (the one effect shape `App` drains, as
 /// `views::Effect`).
 pub enum Effect {
     /// Run this task (saves, clipboard, timers, follow-up messages).

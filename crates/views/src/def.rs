@@ -528,7 +528,7 @@ pub fn load_dir(config_dir: &Path) -> (Vec<Base>, Vec<String>) {
 }
 
 /// Parses and compiles one view file's text — the one diagnosis shared by [`load_dir`] (the
-/// daemon) and the editor's Settings check (plan tn-review-baseline-remediation WP-R20, B14).
+/// daemon) and the editor's Settings check.
 /// `Err`: the parse error (`"<stem>.toml: …"`; the file yields no base). Compile notices are
 /// pushed to `notices`; per-view definition errors stay on the views ([`View::errors`]).
 pub fn check_text(stem: &str, text: &str, notices: &mut Vec<String>) -> Result<Base, String> {

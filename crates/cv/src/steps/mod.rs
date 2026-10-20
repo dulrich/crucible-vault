@@ -1,6 +1,6 @@
 //! Step dispatch: the one table mapping each [`StepKind`] to its owning module, plus the
 //! [`StepModule`] contract every module implements (plan `v0-core-daemon` WP-9; bodies in
-//! WP-10..13; typed params in plan `tn-review-baseline-remediation` WP-R8).
+//! WP-10..13).
 //!
 //! | Kind | Module | Owner |
 //! |---|---|---|
@@ -324,7 +324,7 @@ pub struct StepCtx<'a> {
 }
 
 impl<'a> StepCtx<'a> {
-    /// The locked `state.db` with the one poison policy, recover (WP-R11, L6); hold it briefly.
+    /// The locked `state.db` with the one poison policy, recover; hold it briefly.
     pub fn state(&self) -> std::sync::MutexGuard<'a, StateDb> {
         crate::sync::lock(self.state)
     }
@@ -460,7 +460,7 @@ impl<'a> StepCtx<'a> {
     }
 }
 
-/// The contract every step module implements (plan tn-review-baseline-remediation WP-R8, SM5):
+/// The contract every step module implements:
 /// `parse` turns the step's TOML params into typed `Params` (config load: a failure disarms the
 /// action, I5; allowed keys come from the `cv_schema` step record), `run` executes them.
 /// [`validate`] is `parse` with the result dropped; [`execute`] parses once and runs.

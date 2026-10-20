@@ -1,4 +1,4 @@
-//! Job tracking (WP-R19): the job toast, the invoking action's title per job, and the origin
+//! Job tracking: the job toast, the invoking action's title per job, and the origin
 //! bookkeeping a terminal `open_path` follows.
 
 use std::collections::HashMap;

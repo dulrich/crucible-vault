@@ -282,7 +282,7 @@ impl App {
 
 /// User input a modal layer (dialog, then context menu) drops: every [`MsgKind::Input`] of the
 /// tab / editor / find / switcher sub-enums, plus palette chords. Completions (saves, ticks,
-/// `Created`, pastes) and modifier state always run (WP-R2, SR3).
+/// `Created`, pastes) and modifier state always run.
 ///
 /// [`MsgKind::Input`]: crate::message::MsgKind::Input
 fn is_modal_blocked(m: &Message) -> bool {

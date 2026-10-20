@@ -640,7 +640,7 @@ fn tasks_overdue_grouped_by_heading() {
     let mut h = fx.host();
     let r = fx.run(&mut h, "monthly-tasks#Overdue", None);
     assert!(r.notices.is_empty(), "{:?}", r.notices);
-    // Plan tn-review-baseline-remediation WP-R22 (B12): the Tasks columns carry their roles.
+    // The Tasks columns carry their roles.
     let roles: Vec<_> = r.columns.iter().map(|c| c.role.clone()).collect();
     assert_eq!(
         roles,
@@ -975,7 +975,7 @@ fn tracker_records_expose_done_note_path_key_and_url_cells() {
     assert_eq!(json["groups"][0]["rows"][2]["cells"][0]["t"], "url");
 }
 
-/// Plan tn-review-baseline-remediation WP-R22 (B12): a record source's `status` column carries
+/// A record source's `status` column carries
 /// `ColumnRole::Status` (nothing else does); it round-trips the wire and an index view's columns
 /// carry no role.
 #[test]

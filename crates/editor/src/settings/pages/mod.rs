@@ -1,7 +1,7 @@
 //! One page per config file (plan `editor-settings-tab` WP-3 "Pages"), each the WP-2 file
 //! header + a schema-driven form ([`super::form`], [`super::widgets`]) + the save status bar.
-//! Every file section — the Editor page included (plan tn-review-baseline-remediation WP-R20,
-//! Decision 3) — is [`generic`] over its schema, with its intro from [`super::SECTIONS`]; only
+//! Every file section — the Editor page included
+//! — is [`generic`] over its schema, with its intro from [`super::SECTIONS`]; only
 //! Hotkeys and Views are pages of their own.
 //! Lint / localize / search settings are the `lint` / `localize` / `search_*` step forms inside
 //! Actions (no separate pages).

@@ -306,7 +306,7 @@ pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewR
         _ => table(view, kept)?,
     };
     if records.is_some() && res.kind == Kind::Table {
-        // Plan tn-review-baseline-remediation WP-R22 (B12): a record source's `status` column is
+        // A record source's `status` column is
         // the task-status cell (`tracker_items.status` → set-status in the editor).
         for c in &mut res.columns {
             if c.key == STATUS_COLUMN && c.role.is_none() {

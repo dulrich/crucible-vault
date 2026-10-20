@@ -1,4 +1,4 @@
-//! Pure Reading logic (WP-R18, moved from the editor): the source ↔ rendered mapping for find
+//! Pure Reading logic: the source ↔ rendered mapping for find
 //! (plan editor-round-4 WP-3) and the Reading selection model (`SelPos`, `Selection`, word /
 //! grapheme boundaries, hard lines).
 

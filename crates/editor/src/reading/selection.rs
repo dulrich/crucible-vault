@@ -1,6 +1,6 @@
 //! Plan round-5 WP-7: the Reading selection's copy text (pure; no iced).
 //!
-//! The run table is [`editor_model::visible::visible_runs`] (WP-R17: the one walk the view
+//! The run table is [`editor_model::visible::visible_runs`] (the one walk the view
 //! draws from and find counts over), so run `i` is the `i`-th
 //! [`crate::widget::selectable::Run`] on screen.
 

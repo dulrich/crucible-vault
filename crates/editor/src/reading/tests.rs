@@ -478,7 +478,7 @@ fn file_membership_change_drops_cached_resolver() {
     assert!(app.resolver.is_built(), "Modified keeps the resolver");
 }
 
-/// WP-R18 (M5): Reading and the panels share one resolver cache — one Created notification
+/// Reading and the panels share one resolver cache — one Created notification
 /// invalidates it for both (same `Arc`, one epoch/version bump), and a rebuild by either is
 /// seen by the other.
 #[test]
@@ -748,7 +748,7 @@ fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir,
     (t, app)
 }
 
-/// WP-R17 (SP6): the strong Reading find occurrence the active tab of `p` paints, as (top-level
+/// The strong Reading find occurrence the active tab of `p` paints, as (top-level
 /// block, nth occurrence inside it) — derived from the focused pane's bar at view time.
 fn strong_hit(app: &App, p: &str) -> Option<(usize, usize)> {
     let tab = app.active_tab().map(|t| t.id)?;
@@ -770,7 +770,7 @@ fn code_span_and_link_labels_are_visible_text() {
     let m =
         render::lower("a `foo` b [[t|foo]] [foo](https://foo.example) #foo\n\n```foo\nfoo\n```\n");
     let runs = editor_model::visible::visible_runs(&m);
-    // Block 0's find segments (WP-R17: the one walk's segments).
+    // Block 0's find segments (the one walk's segments).
     let segs: Vec<&str> = runs
         .iter()
         .filter(|r| r.part.block() == Some(0))
@@ -1390,7 +1390,7 @@ fn table_cell_link_right_click_yields_the_link_menu() {
     );
 }
 
-/// WP-R17 (SR4): a find hit inside a footnote is counted, so Next/Prev reach it (it was painted
+/// A find hit inside a footnote is counted, so Next/Prev reach it (it was painted
 /// by the view but missing from the bar's occurrence list).
 #[test]
 fn reading_find_counts_and_reaches_footnote_hits() {
@@ -1410,7 +1410,7 @@ fn reading_find_counts_and_reaches_footnote_hits() {
     assert_eq!(bar(&app).count(), "1/2");
 }
 
-/// WP-R17 (SP6): find paint is derived at view time from the focused pane's bar — two panes on
+/// Find paint is derived at view time from the focused pane's bar — two panes on
 /// one note no longer share it: the pane without the bar paints nothing.
 #[test]
 fn find_paint_follows_the_focused_pane_only() {

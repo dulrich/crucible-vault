@@ -76,7 +76,7 @@ pub(super) fn reply<M: Method>(r: Result<M::Result, RpcError>) -> Result<Value, 
 mod error_map_tests {
     use super::*;
 
-    /// WP-R3 (B2): policy refusals and unavailability get their own codes, not INTERNAL_ERROR.
+    /// Policy refusals and unavailability get their own codes, not INTERNAL_ERROR.
     #[test]
     fn vault_and_state_errors_map_to_their_codes() {
         use error_codes as c;

@@ -24,7 +24,7 @@ pub struct RunBox {
 }
 
 /// Every run's box plus the target scrollable's translation and viewport — collected once per
-/// event (WP-R17 F5).
+/// event.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Collected {
     pub translation: Vector,

@@ -148,7 +148,7 @@ pub struct Panels {
     /// `(path, generation)` the backlinks were requested for.
     backlinks_key: Option<(String, u64)>,
     tags_gen: Option<u64>,
-    /// WP-R18 (M5): the App's shared resolver, and the [`ResolverCache::version`] the
+    /// The App's shared resolver, and the [`ResolverCache::version`] the
     /// buffer-derived panels were classified against.
     pub(crate) resolver: Arc<ResolverCache>,
     resolver_seen: u64,

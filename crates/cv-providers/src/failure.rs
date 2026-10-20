@@ -1,5 +1,5 @@
-//! The one typed failure taxonomy of the HTTP stacks (plan `tn-review-baseline-remediation`
-//! WP-R9, B8): both [`crate::web::FetchError`] and [`crate::ProviderError`] report a
+//! The one typed failure taxonomy of the HTTP stacks:
+//! both [`crate::web::FetchError`] and [`crate::ProviderError`] report a
 //! [`Failure`], so callers map dispositions from types, never from formatted message text.
 
 use std::time::Duration;

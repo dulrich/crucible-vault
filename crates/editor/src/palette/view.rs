@@ -1,4 +1,4 @@
-//! The palette overlay view (WP-R19: split from `palette/mod.rs`).
+//! The palette overlay view.
 
 use cv_protocol::ParamKind;
 use iced::widget::{button, column, pick_list, row, text, text_editor, text_input, toggler};

@@ -31,7 +31,7 @@ impl App {
         )
     }
 
-    /// WP-R17 (SP6): the find bar whose paint tab `tab` shows — the focused pane's, when `tab` is
+    /// The find bar whose paint tab `tab` shows — the focused pane's, when `tab` is
     /// its active tab (a second pane on the same note paints nothing).
     pub(crate) fn find_bar_for(&self, tab: u64) -> Option<&crate::find::FindBar> {
         let ps = self.panes.get(self.focus)?;

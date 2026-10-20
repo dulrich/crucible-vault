@@ -1,4 +1,4 @@
-//! Step param helpers shared by every step module (plan tn-review-baseline-remediation WP-R8):
+//! Step param helpers shared by every step module:
 //! the schema-driven allowed-key check, typed key getters and `{…}` placeholder handling.
 
 use cv_actions::StepKind;

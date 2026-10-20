@@ -1,4 +1,4 @@
-//! The one frontmatter property model (plan tn-review-baseline-remediation WP-R22, SM10),
+//! The one frontmatter property model,
 //! built straight from the parsed `JsValue` and rendered by both Reading's properties block
 //! (`render::RenderModel::properties`) and the Properties sidebar.
 //!

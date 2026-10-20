@@ -96,7 +96,7 @@ static SOURCES_NODE: Node = Node::Record(&SOURCES_FILE);
 
 /// A vault-relative path inside the config folder, as a `&'static str` literal
 /// (`config_path!("actions.toml")` is the folder + `actions.toml`). The one
-/// definition of the folder name (plan tn-review-baseline-remediation WP-R20, SM11).
+/// definition of the folder name.
 #[macro_export]
 macro_rules! config_path {
     ($name:literal) => {

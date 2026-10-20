@@ -359,7 +359,7 @@ mod state_flush {
     use crate::message::{ExplorerMsg, PanesMsg, ReadingMsg};
 
     /// SP2: closing and renaming a document leave no per-document state behind (the Reading
-    /// edge / source-selection / place entries leaked on close before WP-R15).
+    /// edge / source-selection / place entries leaked on close).
     #[test]
     fn close_and_rename_leave_no_residual_doc_state() {
         let (_tmp, d) = fake_arc();

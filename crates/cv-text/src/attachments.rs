@@ -1,12 +1,12 @@
 //! Attachment-ref domain: parsing, rewriting, repair planning and path templating of a note's
-//! attachment refs — the pure half of the daemon's `localize` step (plan
-//! tn-review-baseline-remediation WP-R10, finding F6), shared with the `write_attachment` RPC.
+//! attachment refs — the pure half of the daemon's `localize` step,
+//! shared with the `write_attachment` RPC.
 //!
 //! Ported from Crucible `src/attachmentRepair.ts` (function by function, same names in snake
 //! case) and the pure helpers of `src/localizeAttachments.ts`; the `localize` step module
 //! (`crates/cv/src/steps/localize/mod.rs`) lists the behaviours kept and dropped. Folder slugs
-//! come from the one [`crate::template::slugify`] (WP-R10 moved localize's ASCII-only fold onto
-//! it; measured: no existing attachment folder changes name).
+//! come from the one [`crate::template::slugify`].
+//! Measured: no existing attachment folder changes name.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
@@ -1405,7 +1405,7 @@ mod vectors {
 
     #[test]
     fn templates_and_slug() {
-        // WP-R10: the one cv-text `slugify` — ASCII is unchanged, non-ASCII letters now fold
+        // The one cv-text `slugify` — ASCII is unchanged, non-ASCII letters now fold
         // (measured: no existing `_attachments/<slug>` folder changes name).
         assert_eq!(crate::slugify("My Post: 2024!"), "my-post-2024");
         assert_eq!(

@@ -51,7 +51,7 @@ impl SaveJob {
     }
 }
 
-/// Why the conflict bar is up (plan tn-review-baseline-remediation WP-R16, B5).
+/// Why the conflict bar is up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conflict {
     /// The file on disk changed under the buffer's edits; its current hash.

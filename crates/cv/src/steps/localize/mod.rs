@@ -29,7 +29,7 @@
 //! fenced code skipped as the cache does) and resolved through the index's file list with
 //! `cv_index::Resolver` (`getFirstLinkpathDest`'s replacement); notices/spinners/debug-log.
 //!
-//! Layout (plan tn-review-baseline-remediation WP-R10): the pure ref/repair/template domain is
+//! Layout: the pure ref/repair/template domain is
 //! `cv_text::attachments`; here are the step ([`params`], the I/O processors in `note`, the
 //! folder-scope `backfill`) and the one note pass ([`execute_note`]).
 
@@ -113,7 +113,7 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
     }
     let path = ctx_note_path(p, ctx)?;
     let (vars, output_paths) = execute_note(p, &path, ctx)?;
-    // A host that throttled (429/5xx) is a transient service failure (WP-R9 decision): what
+    // A host that throttled (429/5xx) is a transient service failure: what
     // could be localized has landed; the step defers on the breaker key so the throttled refs
     // are retried later.
     if let Some(e) = &vars.throttle {

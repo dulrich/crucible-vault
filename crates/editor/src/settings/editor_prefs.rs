@@ -1,7 +1,7 @@
 //! Editor prefs: `_custom/crucible-vault/editor.toml` (plan `editor-settings-tab`, Decisions
 //! locked: prefs and the keymap live in the vault; machine-local window/tab session state stays
 //! in `UiState`). Schema: `cv_schema::editor_schema()`; the Settings page is the generic schema
-//! form (plan tn-review-baseline-remediation WP-R20), and this module is the typed reader.
+//! form, and this module is the typed reader.
 //!
 //! Parsing is field-wise and forgiving: a missing, mistyped or out-of-range value falls back to
 //! its default (the form-level `validate` errors say why), so a half-valid file still applies
@@ -27,7 +27,7 @@ pub const EDITOR_PATH: &str = cv_schema::config_path!("editor.toml");
 /// Default base text size (px) — `theme::BASE_TEXT_SIZE`.
 pub const DEFAULT_FONT_SIZE: f32 = crate::theme::BASE_TEXT_SIZE;
 /// The inclusive bounds of the numeric `editor.toml` field at dotted `path`, read from the
-/// schema (`editor_schema()`; the one source of the ranges — WP-R20). Unbounded → the f64
+/// schema (`editor_schema()`; the one source of the ranges). Unbounded → the f64
 /// range.
 pub fn schema_bounds(path: &str) -> (f64, f64) {
     let mut node = cv_schema::editor_schema();

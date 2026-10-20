@@ -1,4 +1,4 @@
-//! Helpers shared by several step modules (plan tn-review-baseline-remediation WP-R10, M4):
+//! Helpers shared by several step modules:
 //! the bounded concurrent fetch loop, the vault `.md` walk and the content MD5 of attachments.
 
 use std::future::Future;

@@ -13,7 +13,7 @@ fn kinds(app: &App) -> Vec<TabKind> {
 
 /// B4 defect: activating the Log tab must not re-apply the Settings body scroll. The
 /// activation's `update` returns no task at all (the note left is clean, the persist
-/// debounce is test-driven); before WP-R15 it carried `settings.restore_scroll()`.
+/// debounce is test-driven).
 #[test]
 fn activating_the_log_tab_runs_no_settings_scroll_restore() {
     let (_tmp, d) = fake_arc();
@@ -47,7 +47,7 @@ fn activating_the_log_tab_runs_no_settings_scroll_restore() {
     assert!(task.units() > 0, "Settings re-applies its place");
 }
 
-/// An `editor.json` written before WP-R15 (bare-string tabs, `/:settings` / `/:log`
+/// An `editor.json` written by an earlier build (bare-string tabs, `/:settings` / `/:log`
 /// sentinels, flat fields) restores its Settings, Log and note tabs.
 #[test]
 fn old_editor_json_restores_settings_log_and_note_tabs() {

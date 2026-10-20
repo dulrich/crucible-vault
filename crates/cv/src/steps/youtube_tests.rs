@@ -373,7 +373,7 @@ fn persistent_race_on_the_source_note_defers() {
 
 #[test]
 fn non_utf8_note_is_read_lossily_like_x() {
-    // WP-R11 (SM7): youtube used to fail "note is not UTF-8"; already linked → done, no fetch.
+    // Youtube used to fail "note is not UTF-8"; already linked → done, no fetch.
     let live = "_yt_metadata/synth-channel/dQw4w9WgXcQ.md";
     let w = world(&[(live, "---\nvideoId: dQw4w9WgXcQ\n---\n")], vec![], "");
     let mut bytes = format!(

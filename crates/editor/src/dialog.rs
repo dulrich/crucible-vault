@@ -48,7 +48,7 @@ pub enum Discard {
     CloseTabs(Vec<u64>),
 }
 
-/// An open modal dialog (WP-R15 B6: one variant per valid content + continuation pairing;
+/// An open modal dialog (one variant per valid content + continuation pairing;
 /// labels derive by `match`). Enter is Cancel in every dialog (all are destructive).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dialog {

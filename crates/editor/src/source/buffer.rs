@@ -45,7 +45,7 @@ pub struct SourceBuffer {
     /// out pane height (a `sensor` around the editor stack; [`super::viewport_lines`]); falls
     /// back to [`VISIBLE_LINES`] before the first measure.
     pub(super) visible_lines: usize,
-    /// WP-R15 (SP2): the frontmatter `title` of the current text, keyed by `(edit_seq, epoch)`
+    /// The frontmatter `title` of the current text, keyed by `(edit_seq, epoch)`
     /// (an external reload does not bump `edit_seq`) — the `tab_title = "title"` source,
     /// recomputed only when the buffer changed, so drawing the tab bar never re-parses an
     /// unchanged note (plan editor-feedback-round-2 WP-6).

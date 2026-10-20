@@ -1,4 +1,4 @@
-//! Closed string sets on the wire as typed enums (WP-R12, B3). Each serializes to exactly the
+//! Closed string sets on the wire as typed enums. Each serializes to exactly the
 //! snake_case string the field carried when it was a `String`.
 
 use serde::{Deserialize, Serialize};

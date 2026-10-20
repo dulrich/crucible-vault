@@ -1,4 +1,4 @@
-//! Deferred source-editor placement (plan tn-review-baseline-remediation WP-R16, SP1): the
+//! Deferred source-editor placement: the
 //! state machine behind a Reading → Source line carry and an edge scroll, as plain data.
 //!
 //! A scroll performed before the source editor is laid out at its size is lost (cosmic clamps

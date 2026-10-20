@@ -7,8 +7,8 @@
 //! [`ViewsMsg::Loaded`]. `views_invalidated` marks matching entries stale and bumps their epoch,
 //! which is part of the sensor key, so a fence that is on screen fires `Need` again.
 //!
-//! The result decodes with serde straight into `views::result` (plan tn-review-baseline-remediation
-//! WP-R22): an unknown cell tag decodes as `Cell::Unknown` and renders empty; a malformed result
+//! The result decodes with serde straight into `views::result`:
+//! an unknown cell tag decodes as `Cell::Unknown` and renders empty; a malformed result
 //! becomes an [`State::Error`] entry shown in the fence. Cell behaviour follows the producer-set
 //! [`ColumnRole`], never column-key strings. Text cells written `~~x~~` (missing initiative
 //! files, `defs/initiatives.toml`) render struck through and dimmed.

@@ -1,4 +1,4 @@
-//! The one blocking daemon client (plan tn-review-baseline-remediation WP-R3, review SM14),
+//! The one blocking daemon client,
 //! shared by `cv` (CLI, tests) and the editor: std `UnixStream` only, no async runtime. A reader
 //! thread owns every socket read and demultiplexes responses (by id) from notifications; callers
 //! block on a per-call channel. Dropping the client shuts the socket down, ending the thread.

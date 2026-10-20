@@ -1,4 +1,4 @@
-//! The view host (plan WP-8, WP-R12 SM15): one [`views::ViewHost`] on its **own** thread with its
+//! The view host (plan WP-8): one [`views::ViewHost`] on its **own** thread with its
 //! **own** read-only [`cv_index::Reader`] (WAL reader, separate from the writer thread), so a view
 //! never blocks indexing. Queries and invalidation signals are typed [`Cmd`]s on one channel, so
 //! they are processed in the order they were sent.
@@ -384,7 +384,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// WP-R12 (SM15): signals and queries share one channel, so a state change sent before a
+    /// Signals and queries share one channel, so a state change sent before a
     /// query is handled before it, and one sent after is handled after it.
     #[tokio::test]
     async fn state_change_and_query_are_processed_in_send_order() {

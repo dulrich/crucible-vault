@@ -93,7 +93,7 @@ impl App {
         Task::batch(tasks)
     }
 
-    /// WP-R15 (SM12): folds the live pane grid and view modes into `self.ui`, the snapshot
+    /// Folds the live pane grid and view modes into `self.ui`, the snapshot
     /// `editor.json` holds (the WP-1 flat `tabs` / `active_tab` are read-only: never written).
     pub(super) fn sync_ui_state(&mut self) {
         self.ui.panes = Some(panes::snapshot(&self.panes, self.focus));
@@ -107,7 +107,7 @@ impl App {
             .collect();
     }
 
-    /// WP-R15 (SM12): after every update, a UI-state snapshot that differs from the last one
+    /// After every update, a UI-state snapshot that differs from the last one
     /// written schedules one debounced write ([`PERSIST_DEBOUNCE`]; one pending at a time).
     /// Tests drive the debounce with [`Message::PersistDue`].
     pub(super) fn schedule_persist(&mut self) -> Task<Message> {
@@ -186,7 +186,7 @@ impl App {
         self.sync_hotkeys();
     }
 
-    /// WP-R21 (SP3): the one fan-out after a settings file's doc changed (load, reload, edit,
+    /// The one fan-out after a settings file's doc changed (load, reload, edit,
     /// save landed, conflict reload, external change) — re-derives what `path` feeds:
     /// `editor.toml` → the live prefs and the local `UiState` surround mirror; `bookmarks.toml`
     /// → the bookmarks panel / commands; `captures.toml` → the period folders; `actions.toml`

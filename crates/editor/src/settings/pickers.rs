@@ -33,7 +33,7 @@ pub enum Picker {
     ModelRef,
 }
 
-/// A committed typeahead value (WP-R21 SP4): a stored string, or a geocoded place whose pick
+/// A committed typeahead value: a stored string, or a geocoded place whose pick
 /// writes `label` + sibling `lat`/`lon` in one edit.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PickValue {

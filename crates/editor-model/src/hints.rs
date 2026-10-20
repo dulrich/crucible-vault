@@ -1,5 +1,4 @@
-//! Palette minimum-subsequence hints (plan editor-ui-round-3 WP-8; WP-R18 moved the pure search
-//! here from the editor, which keeps a thin `Entry` adapter).
+//! Palette minimum-subsequence hints (plan editor-ui-round-3 WP-8).
 //!
 //! For each visible entry: the shortest lower-cased subsequence of its title (length ≤
 //! [`MAX_LEN`]) that makes the palette's own ranking (the editor's `palette::rank_entries` — `rank` over the

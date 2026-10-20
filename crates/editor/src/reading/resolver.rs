@@ -1,4 +1,4 @@
-//! WP-R18 (M5): the one whole-vault link resolver cache, shared (`Arc`) by Reading and the
+//! The one whole-vault link resolver cache, shared (`Arc`) by Reading and the
 //! panels. Built from one `file_paths` scan of the daemon index.
 //!
 //! Staleness rule (the stricter of the two former per-consumer rules): the cache is rebuilt

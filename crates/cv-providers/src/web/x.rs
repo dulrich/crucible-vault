@@ -80,7 +80,7 @@ pub fn parse(body: &[u8]) -> Result<OEmbed, FetchError> {
     let bad = || FetchError::Transient {
         service: SERVICE.to_owned(),
         retry_after: None,
-        // Retried like a network error (the pre-WP-R9 string fallback mapped it to Timeout).
+        // Retried like a network error.
         kind: crate::failure::FailureKind::Timeout,
         detail: "malformed oEmbed response".into(),
     };

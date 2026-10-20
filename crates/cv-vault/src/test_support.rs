@@ -1,4 +1,4 @@
-//! Shared live-writer test fixture (plan tn-review-baseline-remediation WP-R14, M6), compiled for
+//! Shared live-writer test fixture, compiled for
 //! this crate's tests and, via the `test-support` feature, for downstream dev-dependencies only.
 //!
 //! [`LiveFixture`] builds a vault under one [`TempDir`] (asserted to lie under

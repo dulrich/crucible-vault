@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The note stem (breadcrumb filename input) and link-target decoding: the shared vault-path
-/// helpers (WP-R10).
+/// helpers.
 pub use cv_text::vpath::{percent_decode, stem};
 use editor_model::render::{self, RenderModel};
 use editor_model::visible::VisRun;
@@ -105,7 +105,7 @@ pub struct Doc {
     pub model: RenderModel,
     /// Image `src` → resolved vault path (`None` = unresolved); remote images are absent.
     pub images: HashMap<String, Option<String>>,
-    /// The visible runs in render order (WP-R17: the one walk — the view draws them, the
+    /// The visible runs in render order (the one walk — the view draws them, the
     /// selection copies them, find counts over them).
     pub runs: Vec<VisRun>,
     /// Plan round-6 WP-4: link targets (as [`render::link_targets`] lists them, the string the
@@ -130,7 +130,7 @@ pub struct DocReading {
 }
 
 /// One tab's (view's) Reading place on a document (plan round-5 WP-1 "per-tab Reading
-/// state"; WP-R15 SP2: the per-(path, view) maps collapsed into one).
+/// state").
 #[derive(Debug, Clone, Default)]
 struct ViewPlace {
     /// plan editor-ui-round-3 WP-6: the top-level block at the viewport's top, from the last
@@ -712,7 +712,7 @@ fn escape(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option
     }
 }
 
-/// What [`update`] asks the app to do (WP-R15 SP5: the one effect shape `App` drains, as
+/// What [`update`] asks the app to do (the one effect shape `App` drains, as
 /// `views::Effect`; replaces the store's outbox fields).
 pub enum Effect {
     /// Run this task (probes, scrolls, image loads, clipboard, a resolved link's open).
@@ -919,7 +919,7 @@ pub fn image_failure_text(key: &str, err: &str) -> String {
 /// The active tab's body: source, reading, or split (source left, reading right). `view` is
 /// the showing tab's id (per-view image pins, plan editor-feedback-round-2 WP-7). `find` is the
 /// focused pane's find bar when this is its active tab: both sides derive their find paint from
-/// it at view time (WP-R17 SP6).
+/// it at view time.
 #[allow(clippy::too_many_arguments)] // one render site; a context struct would only rename these
 pub fn tab_body<'a>(
     store: &'a ReadingStore,

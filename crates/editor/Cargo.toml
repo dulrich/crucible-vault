@@ -35,7 +35,7 @@ cv-index = { path = "../cv-index" }
 cv-state = { path = "../cv-state" }
 cv-text = { path = "../cv-text" }
 cv-vault = { path = "../cv-vault" }
-# Plan tn-review-baseline-remediation WP-R5 (M7): only the `fake` feature (`--fake <dir>`)
+# Only the `fake` feature (`--fake <dir>`)
 # seeds a synthetic vault; the release binary carries neither it nor `FakeDaemon`.
 cv-testkit = { path = "../cv-testkit", optional = true }
 editor-model = { path = "../editor-model" }

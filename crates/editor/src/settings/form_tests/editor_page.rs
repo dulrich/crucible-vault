@@ -2,7 +2,7 @@
 
 use super::*;
 
-// ---- WP-R20: the Editor page is the generic schema form, with steppers ----
+// ---- The Editor page is the generic schema form, with steppers ----
 
 const EDITOR: &str = crate::settings::editor_prefs::EDITOR_PATH;
 

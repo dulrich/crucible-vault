@@ -1,5 +1,5 @@
-//! The one metadata-link algorithm shared by `yt_metadata` and `x_metadata` (plan
-//! tn-review-baseline-remediation WP-R11, SM7): read the active note (lossily), resolve the id,
+//! The one metadata-link algorithm shared by `yt_metadata` and `x_metadata`:
+//! read the active note (lossily), resolve the id,
 //! short-circuit when the note already links a live metadata note, find-or-create the metadata
 //! note (the per-kind fetch), then link it onto the source note through [`StepCtx::modify`]
 //! (fetch first, CAS after, SR7). Only the id resolution and the fetch + note body stay per step.

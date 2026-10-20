@@ -35,12 +35,12 @@ cv-vault = { path = "../cv-vault" }
 cv-providers = { path = "../cv-providers" }
 cv-search = { path = "../cv-search" }
 cv-ingest = { path = "../cv-ingest" }
-# Plan tn-review-baseline-remediation WP-R8: step parsers take their allowed keys from the
+# Step parsers take their allowed keys from the
 # schema's step records (was a dev-only edge for `tests/schema_drift.rs`; lock unchanged).
 cv-schema = { path = "../cv-schema" }
 
 [dev-dependencies]
-# Plan tn-review-baseline-remediation WP-R14 (M6): shared test harness (dev edges only).
+# Shared test harness (dev edges only).
 tempfile = "=3.27.0"
 cv-testkit = { path = "../cv-testkit" }
 cv-vault = { path = "../cv-vault", features = ["test-support"] }

@@ -26,7 +26,7 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
 /// `editor.toml` base text size (live, plan editor-settings-tab WP-2); `keymap` is the effective
 /// keymap its key bindings route by (WP-4). `link` is the open `[[` note list overlay (plan
 /// round-5 WP-9), already positioned; while it is `Some` its keys are intercepted. `find` is the
-/// focused pane's find bar when this is its active tab (WP-R17 SP6).
+/// focused pane's find bar when this is its active tab.
 pub fn view<'a>(
     doc: &'a SourceBuffer,
     tokens: Tokens,
@@ -36,7 +36,7 @@ pub fn view<'a>(
     link: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let link_open = link.is_some();
-    // WP-R17 (SP6): the find paint comes from the focused pane's bar, at view time.
+    // The find paint comes from the focused pane's bar, at view time.
     let (find, find_all) = find.map_or_else(
         || (None, std::sync::Arc::from([])),
         |b| b.source_paint(doc.edit_seq),

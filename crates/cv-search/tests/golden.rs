@@ -2,7 +2,7 @@
 //!
 //! `fixtures/golden.json` holds synthetic inputs (carried over from the TS-generated fixture of
 //! `docs/spikes/wp13-golden/golden.ts`, lone surrogates replaced by U+FFFD) and the native
-//! chunker's output for them. Since WP-R7 (plan tn-review-baseline-remediation) the chunker is
+//! chunker's output for them. The chunker is
 //! native `str`, so the expectations are this crate's own output, regenerated with
 //! `CV_REGEN_GOLDEN=1 cargo test -p cv-search --test golden golden_fixture_is_current` and
 //! reviewed by diff.

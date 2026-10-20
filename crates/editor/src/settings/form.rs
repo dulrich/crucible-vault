@@ -38,7 +38,7 @@ pub struct FormState {
     pub typeahead: Option<ActiveTa>,
 }
 
-/// What the active typeahead edits (WP-R21 SP4).
+/// What the active typeahead edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaTarget {
     /// A text field: a commit writes the value (`required`: an empty commit keeps the key).

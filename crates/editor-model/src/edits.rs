@@ -1,5 +1,5 @@
-//! Source-text edits shared by Source and Reading (moved out of `render`, plan
-//! tn-review-baseline-remediation WP-R22 / F9): each returns a minimal splice of the note text.
+//! Source-text edits shared by Source and Reading.
+//! Each returns a minimal splice of the note text.
 
 /// Plan round-8-intake-views-anchor WP-3: the edit that sets top-level frontmatter boolean
 /// `key` in `source` to `to` (`None` = toggle: `true` ↔ `false`, null/missing → `true`), as one

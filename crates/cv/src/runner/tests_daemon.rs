@@ -640,7 +640,7 @@ async fn search_falls_back_to_keyword_only_when_the_embedder_is_down() {
     d.shutdown().await.unwrap();
 }
 
-/// WP-R3 (SR6): a slow call runs off the connection's read loop, so a `status` sent after it on
+/// A slow call runs off the connection's read loop, so a `status` sent after it on
 /// the same connection answers first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_slow_call_does_not_block_its_connection() {

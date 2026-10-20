@@ -1,6 +1,6 @@
 //! Vault-path helpers (`/`-separated, vault-relative): one copy of the basename / stem / parent
 //! rules and URL percent-decoding the daemon steps, the index, the search prep and the editor
-//! share (plan tn-review-baseline-remediation WP-R10, finding B11).
+//! share.
 
 /// The last path segment (`a/b/Note.md` → `Note.md`).
 #[must_use]

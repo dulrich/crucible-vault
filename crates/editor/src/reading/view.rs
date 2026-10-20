@@ -47,11 +47,11 @@ struct Ctx<'a, 'c> {
     scale: f32,
     /// Inside a cancelled (`- [-]`) task: text is faint and struck through.
     strike: bool,
-    /// WP-R17 (SR4): the next [`VisRun`] of `doc.runs` to draw — the tree is drawn in the
+    /// The next [`VisRun`] of `doc.runs` to draw — the tree is drawn in the
     /// order [`editor_model::visible::visible_runs`] walked it, so run `i` is `doc.runs[i]`.
     cursor: &'c Cell<usize>,
     /// The find query's occurrences over `doc.runs` (empty without find paint), and the index
-    /// of the strong one (WP-R17 SP6: the focused pane's bar, at view time).
+    /// of the strong one (the focused pane's bar, at view time).
     occ: &'c [Occurrence],
     active: Option<usize>,
     /// The tab's selection.
@@ -118,7 +118,7 @@ pub fn block_size(heading: Option<u8>) -> f32 {
 
 /// The reading pane for `path`; `scale` = [`reading_scale`]`(font_size)`; `keys` = the pane
 /// takes the selection keys (Shift+Arrows, Esc; plan round-5 WP-7); `find` = the focused pane's
-/// find paint when this is its active tab (WP-R17 SP6).
+/// find paint when this is its active tab.
 #[allow(clippy::too_many_arguments)] // one render site
 pub fn reading<'a>(
     store: &'a ReadingStore,
@@ -830,7 +830,7 @@ fn sub<'a>(text: &Cow<'a, str>, r: std::ops::Range<usize>) -> Cow<'a, str> {
 /// Pushes visible `text` — the piece of run `run` starting at byte `base` of its text — as
 /// spans built by `make`, split on the find occurrences inside it: every occurrence light, the
 /// active one strong (plan editor-ui-round-3 WP-5; every visible segment, plan editor-round-4
-/// WP-3). The occurrences come from the run table (WP-R17: the one walk), never re-counted here.
+/// WP-3). The occurrences come from the run table (the one walk), never re-counted here.
 fn painted<'a>(
     cx: &Ctx<'a, '_>,
     run: usize,

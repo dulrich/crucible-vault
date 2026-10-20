@@ -1,4 +1,4 @@
-//! The keymap conflict-resolution core (WP-R19, from the editor palette; review M1 deferral):
+//! The keymap conflict-resolution core:
 //! generic over the bound payload `B`, fed a claimant list. The editor keeps its command type,
 //! its payload (`palette::Bound`) and the adapter that builds the claimants.
 //!

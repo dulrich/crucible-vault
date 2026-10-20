@@ -31,7 +31,7 @@ fn buf(app: &mut App) -> &mut SourceBuffer {
     app.active_doc_mut().expect("active doc")
 }
 
-/// WP-R17 (SP6): the source find highlight the active tab paints — derived from the focused
+/// The source find highlight the active tab paints — derived from the focused
 /// pane's find bar at view time.
 fn find_highlight(app: &mut App) -> Option<super::FindSpan> {
     let tab = app.active_tab().map(|t| t.id)?;
@@ -39,7 +39,7 @@ fn find_highlight(app: &mut App) -> Option<super::FindSpan> {
     app.find_bar_for(tab)?.source_paint(seq).0
 }
 
-/// WP-R17 (SP6): the find query the active tab's Reading side paints.
+/// The find query the active tab's Reading side paints.
 fn find_query(app: &App) -> Option<&str> {
     let tab = app.active_tab().map(|t| t.id)?;
     Some(app.find_bar_for(tab)?.reading_paint()?.query)
@@ -1225,7 +1225,7 @@ mod layout {
     }
 }
 
-/// WP-R16 (B5): "the file is gone" is its own conflict state, never an empty hash; the conflict
+/// "the file is gone" is its own conflict state, never an empty hash; the conflict
 /// bar's Keep mine / Take theirs paths behave as before for both states.
 #[test]
 fn missing_file_conflict_is_missing_not_an_empty_hash() {
@@ -1273,7 +1273,7 @@ fn missing_file_conflict_is_missing_not_an_empty_hash() {
     assert!(c.conflict().is_none());
 }
 
-/// WP-R16 (SP1): `set_visible_lines` is a plain setter; `on_layout` runs the carry passes.
+/// `set_visible_lines` is a plain setter; `on_layout` runs the carry passes.
 #[test]
 fn on_layout_runs_the_carry_and_the_setter_does_not() {
     let text: String = (0..100).map(|i| format!("line {i}\n")).collect();

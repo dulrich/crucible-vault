@@ -159,7 +159,7 @@ async fn handshake_rules() {
         .raw(r#"{"jsonrpc":"2.0","id":6,"method":"delete","params":{}}"#)
         .unwrap();
     assert_eq!(r["error"]["code"], error_codes::INVALID_PARAMS);
-    // WP-R3 (SR5): every known method answers bad params with INVALID_PARAMS, never
+    // Every known method answers bad params with INVALID_PARAMS, never
     // METHOD_NOT_FOUND — the known-method set is the protocol's own list.
     for (i, method) in cv_protocol::METHOD_NAMES.iter().enumerate() {
         let line = json!({"jsonrpc": "2.0", "id": 100 + i, "method": method, "params": "bogus"});

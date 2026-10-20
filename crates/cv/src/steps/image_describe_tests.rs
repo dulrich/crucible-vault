@@ -193,7 +193,7 @@ fn downscale_bound_and_passthrough() {
     assert_eq!(fit_long_edge(4000, 1000), (MAX_LONG_EDGE, 392));
     assert_eq!(fit_long_edge(1000, 4000), (392, MAX_LONG_EDGE));
     assert_eq!(fit_long_edge(1568, 10), (1568, 10));
-    // A real decode + resize, kept thin: the shadow parity test reads this binary's peak RSS.
+    // A real decode + resize, kept thin.
     let (mime, out) = prepare_image(&png(4000, 4)).unwrap();
     assert_eq!(mime, "image/png");
     let img = image::load_from_memory(&out).unwrap();

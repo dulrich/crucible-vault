@@ -1,4 +1,4 @@
-//! The effective keymap (WP-R19): the editor's bound payload ([`Bound`]), its bindables and the
+//! The effective keymap: the editor's bound payload ([`Bound`]), its bindables and the
 //! thin adapter over the pure conflict-resolution core ([`editor_model::keymap`]) — plan
 //! `editor-feedback-round-2` WP-1 "Hotkey conflict policy", which replaced `editor-settings-tab`'s
 //! "override > editor default > config action keys": every bindable claims its chords (an

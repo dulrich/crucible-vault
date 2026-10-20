@@ -1,4 +1,4 @@
-//! The Settings section table (plan tn-review-baseline-remediation WP-R20, SM11): one
+//! The Settings section table: one
 //! [`SectionInfo`] row per rail entry — label, glyph, group, file and intro — instead of a
 //! match per property. File paths derive from the one config dir (`cv_schema::config_path!`).
 

@@ -525,7 +525,7 @@ fn folder_backfill_conflict_is_not_recorded() {
     assert!(env.text("daily/a.md").ends_with("edit\nedit\nedit\n"));
 }
 
-/// WP-R9 decision: a note-scope download the host throttles (429) is a transient failure on
+/// A note-scope download the host throttles (429) is a transient failure on
 /// the `localize` breaker key — the step defers instead of succeeding with refs left.
 #[test]
 fn note_scope_throttle_defers_on_the_breaker_key() {

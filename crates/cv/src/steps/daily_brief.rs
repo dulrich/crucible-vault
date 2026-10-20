@@ -127,7 +127,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     };
 
     // Every fx pair and weather location is fetched concurrently through the shared bounded
-    // fetch loop (WP-R10, M4); results come back in config order.
+    // fetch loop; results come back in config order.
     enum Job {
         Fx(String, String),
         Wx(f64, f64),

@@ -1,4 +1,4 @@
-//! Pure note-path helpers of the Reading pane (WP-R18, moved from the editor): rename targets,
+//! Pure note-path helpers of the Reading pane: rename targets,
 //! missing-link note paths, and the shared vault-path stem / link-target decoding.
 
 pub use cv_text::vpath::{percent_decode, stem};

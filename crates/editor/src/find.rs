@@ -22,7 +22,7 @@ use crate::message::{FindMsg, Message};
 use crate::source::FindSpan;
 use crate::theme::{Tokens, icon_button};
 
-/// One pane's find bar — the only home of find state (WP-R17 SP6): the Source highlighter and
+/// One pane's find bar — the only home of find state: the Source highlighter and
 /// the Reading view derive their find paint from the focused pane's bar at view time.
 #[derive(Debug, Clone, Default)]
 pub struct FindBar {
@@ -206,7 +206,7 @@ fn key(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Me
 mod tests {
     use super::*;
 
-    /// WP-R17: the one-pass span mapping agrees with `editor_model::find::line_col`.
+    /// The one-pass span mapping agrees with `editor_model::find::line_col`.
     #[test]
     fn line_cols_match_line_col() {
         let text = "ab foo\nfoo é foo\n\nfoo";

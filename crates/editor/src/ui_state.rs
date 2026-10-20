@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::reading::ViewMode;
 use crate::theme::Surround;
 
-/// What a tab shows (WP-R15 B4). Persisted as tagged JSON (`{"tab":"note","path":…}`,
-/// `{"tab":"settings"}`, `{"tab":"log"}`); a bare string (every `editor.json` before WP-R15)
+/// What a tab shows. Persisted as tagged JSON (`{"tab":"note","path":…}`,
+/// `{"tab":"settings"}`, `{"tab":"log"}`); a bare string (every `editor.json` from an earlier build)
 /// still reads: a vault path, or one of the old reserved sentinel paths.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(into = "TabWire", from = "TabIn")]
@@ -26,7 +26,7 @@ pub enum TabKind {
     Log,
 }
 
-/// The pre-WP-R15 Settings / Log tab paths (read path only).
+/// The legacy Settings / Log tab paths (read path only).
 const LEGACY_SETTINGS_TAB: &str = "/:settings";
 const LEGACY_LOG_TAB: &str = "/:log";
 
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(load(&path).modes, s2.modes);
     }
 
-    /// WP-R16 (L2): `ViewMode` replaced `ui_state::Layout`; the persisted mode spellings are
+    /// `ViewMode` replaced `ui_state::Layout`; the persisted mode spellings are
     /// unchanged, so an existing `editor.json` reads and writes back the same strings.
     #[test]
     fn view_modes_keep_the_layout_spellings() {
@@ -328,8 +328,8 @@ mod tests {
         assert_eq!(load(&path), s);
     }
 
-    /// WP-R15 (B4): tabs persist as tagged JSON, the WP-1 flat fields are no longer written,
-    /// and a file in the pre-WP-R15 shape (bare strings, sentinel paths) still reads.
+    /// Tabs persist as tagged JSON, the WP-1 flat fields are no longer written,
+    /// and a file in the earlier shape (bare strings, sentinel paths) still reads.
     #[test]
     fn tabs_persist_tagged_and_legacy_sentinels_read() {
         let tmp = tempfile::tempdir().expect("tmp");

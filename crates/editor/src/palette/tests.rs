@@ -1138,10 +1138,10 @@ fn notice_expiry_and_severity_ordering() {
     assert!(n.inline().ends_with('…'));
 }
 
-// ---- WP-R19: persisted ids are a wire contract ----
+// ---- persisted ids are a wire contract ----
 
 /// Every persisted command id (`editor.toml` `[keys]`, `palette.hidden`, `ui_state`, bookmark
-/// ids), pinned as literals captured before the WP-R19 command-table refactor.
+/// ids), pinned as literals.
 #[test]
 fn persisted_command_ids_are_pinned() {
     const CLIENT: &[&str] = &[

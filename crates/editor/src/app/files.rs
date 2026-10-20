@@ -34,7 +34,7 @@ impl App {
                     self.status.set_error(format!("bookmarks: {err}"));
                     return Task::none();
                 }
-                // WP-R2 (SR1): the shared settings write, landing in `SettingsMsg::Saved`.
+                // The shared settings write, landing in `SettingsMsg::Saved`.
                 if self
                     .settings
                     .file(BOOKMARKS_PATH)
@@ -203,7 +203,7 @@ impl App {
         Task::none()
     }
 
-    /// WP-R15 (SM13): the one Reading-side buffer edit — applies `f` (one undoable edit; the
+    /// The one Reading-side buffer edit — applies `f` (one undoable edit; the
     /// toggle's read-only rule) to `path`'s open buffer; when it changed the text, re-renders
     /// now (not on the next debounce tick) and starts the normal autosave. `None` when `path`
     /// has no open buffer (the caller decides: a notice, or the daemon path).

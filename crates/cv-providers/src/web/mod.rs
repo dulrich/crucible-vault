@@ -344,7 +344,7 @@ impl WebClient {
         Err(classify_status(service, status, retry_after))
     }
 
-    /// A size- and type-limited GET (localize's attachment download, WP-R9): goes through the
+    /// A size- and type-limited GET (localize's attachment download): goes through the
     /// same host gate and breaker key (`service`) as [`Self::fetch`]. A non-2xx is classified
     /// as in [`Self::fetch`]. On a 2xx, a `Content-Length` over `max_bytes` fails before the
     /// body is read; `decide` sees the `Content-Type` header (`""` when absent) and returns

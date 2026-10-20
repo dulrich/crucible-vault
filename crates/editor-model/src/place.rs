@@ -1,4 +1,4 @@
-//! Pure place-keeping math (WP-R18, moved from the editor): the measured Reading layout
+//! Pure place-keeping math: the measured Reading layout
 //! [`Probe`], the Source viewport line count, and the Source relative scroll delta. The iced
 //! adapters (the probe operation, `Action::Scroll`) stay in the editor.
 

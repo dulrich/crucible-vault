@@ -555,7 +555,7 @@ fn invented_fields_are_rejected() {
     assert!(reload(&files).iter().any(|e| e.contains("schedule")));
 }
 
-/// Plan tn-review-baseline-remediation WP-R8 (SM6): every step kind has exactly one schema record
+/// Every step kind has exactly one schema record
 /// (no schema-only kinds), and every step parser's allowed-key set equals that record's field set —
 /// each schema key is accepted as a key, and a key outside the record is rejected as unknown.
 #[test]
@@ -613,7 +613,7 @@ fn step_parsers_accept_exactly_the_schema_keys() {
     }
 }
 
-/// Plan tn-review-baseline-remediation WP-R20 (SM11): the daemon's `CONFIG_FILES` is the head of
+/// The daemon's `CONFIG_FILES` is the head of
 /// the schema file registry, in order (cv-actions has no cv-schema edge, so the two lists are
 /// held together here).
 #[test]

@@ -61,7 +61,7 @@ pub enum Cell {
         #[serde(default)]
         label: String,
     },
-    /// Plan tn-review-baseline-remediation WP-R22: a cell tag this build does not know (a newer
+    /// A cell tag this build does not know (a newer
     /// producer); decodes instead of failing the whole view and renders empty.
     #[serde(other)]
     Unknown,
@@ -73,7 +73,7 @@ pub struct Column {
     pub key: String,
     #[serde(default)]
     pub label: String,
-    /// Plan tn-review-baseline-remediation WP-R22 (B12): the column's interactive behaviour, set
+    /// The column's interactive behaviour, set
     /// by the producer; `None` = a plain display column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<ColumnRole>,
@@ -98,7 +98,7 @@ impl Column {
     }
 }
 
-/// What a column's cells do in the editor (plan tn-review-baseline-remediation WP-R22, B12).
+/// What a column's cells do in the editor.
 ///
 /// JSON: `{"kind": "checkbox", "key": "read"}`, `{"kind": "status"}`, `{"kind": "task_text"}`,
 /// `{"kind": "task_file"}`.

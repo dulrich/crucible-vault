@@ -2,7 +2,7 @@
 //! ports of Crucible's `https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/utils/youtubeApi.ts`
 //! (`buildMetadataNoteBody :408-435`, `buildYoutubeTombstoneNoteBody :454-468`,
 //! `buildChannelAboutNoteBody :780-794`, `parseIso8601Duration :852-861`); Crucible `slugify`
-//! is the one `cv_text::template::slugify` (WP-R10). The caller supplies `fetched_at` (Crucible's
+//! is the one `cv_text::template::slugify`. The caller supplies `fetched_at` (Crucible's
 //! `new Date().toISOString()`), so output is deterministic. Nothing Obsidian-induced to drop.
 
 /// One video's metadata (Crucible `YoutubeVideoMetadata`).
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(parse_iso8601_duration("PT"), None);
         assert_eq!(parse_iso8601_duration("P1DT2H"), None);
         assert_eq!(parse_iso8601_duration(""), None);
-        // WP-R10: channel slugs come from the one cv-text `slugify` (measured: no existing
+        // Channel slugs come from the one cv-text `slugify` (measured: no existing
         // channel folder or `sources.toml` channel changes slug).
         assert_eq!(
             cv_text::slugify("  Café Société -- Live! "),

@@ -219,7 +219,7 @@ pub struct Palette {
     pub suggestions: Vec<String>,
     /// A chord pressed before the action list arrived.
     pub pending_chord: Option<Chord>,
-    /// WP-R19: the job toast and origin bookkeeping.
+    /// The job toast and origin bookkeeping.
     pub jobs: Jobs,
     /// `editor.toml` `palette.hidden`: ids left out of the list (chords still work).
     pub hidden: Vec<String>,

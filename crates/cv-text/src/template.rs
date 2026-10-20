@@ -205,7 +205,7 @@ pub fn rewrite_input_alias(template: &str) -> String {
 }
 
 /// Single-pass `{{token}}` scanner; `resolve` returns `None` to leave a token verbatim. The one
-/// exposed template engine (the agent step renders its prompts through it, WP-R10).
+/// exposed template engine (the agent step renders its prompts through it).
 pub fn render<F>(template: &str, mut resolve: F) -> Result<String, TemplateError>
 where
     F: FnMut(&str) -> Result<Option<String>, TemplateError>,

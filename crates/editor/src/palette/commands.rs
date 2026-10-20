@@ -1,4 +1,4 @@
-//! The client command registry (WP-R19, review F4): one [`CmdSpec`] table — id literal, title,
+//! The client command registry: one [`CmdSpec`] table — id literal, title,
 //! group, default chords, fixed, message — is the single source of [`ClientCmd`]'s id / title /
 //! keys / message, of [`ClientCmd::all`], of `bindables()` and of [`keymap`]. Adding a command
 //! touches the enum and one table row; a parameterised family (tabs, periods, surrounds,

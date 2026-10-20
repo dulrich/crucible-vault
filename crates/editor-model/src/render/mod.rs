@@ -11,7 +11,7 @@
 //! The model is a pure tree: no iced, no I/O. Transclusion content is filled by
 //! [`transclude`] with a caller-supplied fetch (the editor resolves + reads), depth 1 only.
 //!
-//! Layout (plan tn-review-baseline-remediation WP-R22, F9): [`model`] (the tree types),
+//! Layout: [`model`] (the tree types),
 //! [`lower`](mod@lower) (comrak → model), [`transclude`](mod@transclude) (depth-1 embeds),
 //! [`query`] (walks: tasks, links, images, inline text). Source-text edits live in
 //! [`crate::edits`].

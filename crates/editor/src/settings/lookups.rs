@@ -44,7 +44,7 @@ pub enum Want {
     Channels(Vec<String>),
 }
 
-/// One fetch's state (WP-R21 SM16: every source shares it).
+/// One fetch's state (every source shares it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fetch<T> {
     /// In flight.
@@ -158,7 +158,7 @@ impl<K: Ord + Clone, T> KeyedCache<K, T> {
     }
 }
 
-/// The session cache. Per-source policy (unchanged by WP-R21): currencies and channel titles
+/// The session cache. Per-source policy: currencies and channel titles
 /// are never refetched; geocode never refetches a cached query and keeps the latest
 /// [`GEO_CACHE`] queries; a failed model list refetches when its typeahead re-opens and on the
 /// refresh control.

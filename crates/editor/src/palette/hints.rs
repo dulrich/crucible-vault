@@ -1,5 +1,4 @@
-//! Palette hints: the thin `Entry` adapter over [`editor_model::hints`] (WP-R18 moved the pure
-//! minimum-subsequence search there).
+//! Palette hints: the thin `Entry` adapter over [`editor_model::hints`].
 
 pub use editor_model::hints::MAX_LEN;
 

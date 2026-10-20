@@ -55,7 +55,7 @@ pub use status::{NOTICE_INLINE_CHARS, Notice, Severity, StatusModel};
 /// path-keyed [`OpenDoc`] store on [`App`], so two tabs of one note are mirrored views of one
 /// document (content, undo, dirty/saving, conflict, cursor). `id` is unique per tab for the
 /// session: it identifies the tab across async work (a close waiting on a save, audit E1) and
-/// keys per-view state (image pins, Reading place). WP-R15 (B4): the kind is a type, never a
+/// keys per-view state (image pins, Reading place). The kind is a type, never a
 /// reserved path; singleton tabs never reach a daemon read or write.
 #[derive(Debug, Clone)]
 pub struct Tab {
@@ -65,7 +65,7 @@ pub struct Tab {
 
 pub use crate::ui_state::TabKind;
 
-/// One open document (WP-R15 SP2): everything per note path lives here, so a close is one
+/// One open document: everything per note path lives here, so a close is one
 /// `remove` and a rename one re-key. A document lives while at least one tab shows its path.
 /// Its Reading state ([`crate::reading::DocReading`]) lives here too, so it closes and renames
 /// with the document.
@@ -93,7 +93,7 @@ fn buf_mut<'a>(docs: &'a mut Docs, path: &str) -> Option<&'a mut crate::source::
     docs.get_mut(path).map(|d| &mut d.buffer)
 }
 
-/// The `editor.json` write debounce (WP-R15 SM12): a burst of UI-state changes (hover focus,
+/// The `editor.json` write debounce: a burst of UI-state changes (hover focus,
 /// tab switches) is written once.
 pub const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -252,7 +252,7 @@ pub struct App {
     pub palette: crate::palette::Palette,
     /// WP-5: the right-hand side panels.
     pub panels: crate::panels::Panels,
-    /// WP-R18 (M5): the one link-resolver cache, shared by Reading and the panels.
+    /// The one link-resolver cache, shared by Reading and the panels.
     pub resolver: std::sync::Arc<crate::reading::resolver::ResolverCache>,
     /// WP-7: `crucible-view` fence results, keyed by `(view id, embedding note)`.
     pub views: crate::views::ViewStore,
@@ -275,17 +275,17 @@ pub struct App {
     pub(crate) quit: Option<QuitState>,
     /// plan editor-data-safety WP-2: the open modal dialog (input priority while `Some`).
     pub dialog: Option<crate::dialog::Dialog>,
-    /// Plan editor-feedback-round-2 WP-7 / WP-R15: one [`OpenDoc`] per open note path.
+    /// Plan editor-feedback-round-2 WP-7: one [`OpenDoc`] per open note path.
     pub docs: Docs,
-    /// WP-R15 (SM12): the UI state last written to `editor.json` (`None` = never written).
+    /// The UI state last written to `editor.json` (`None` = never written).
     persisted: Option<UiState>,
-    /// WP-R15 (SM12): a debounced `editor.json` write is scheduled.
+    /// A debounced `editor.json` write is scheduled.
     persist_pending: bool,
     /// Tests: `editor.json` writes so far.
     pub ui_writes: u64,
     /// The app asked iced to exit (tests observe it).
     pub exiting: bool,
-    /// WP-R2 (SR3): the held keyboard modifiers (Shift+Enter in find / switcher, Shift+click).
+    /// The held keyboard modifiers (Shift+Enter in find / switcher, Shift+click).
     pub modifiers: iced::keyboard::Modifiers,
     /// plan editor-settings-tab WP-2: the Settings tab's model (file save loops, Status).
     pub settings: crate::settings::Settings,

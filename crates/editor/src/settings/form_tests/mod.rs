@@ -107,7 +107,7 @@ fn put(st: &mut Settings, file: &str, text: &str) {
 }
 
 /// The picker the form gives the field at `at` of `file`: walks the file's schema to the field
-/// and asks `pickers::for_field` with its node and reference hint (WP-R20, B13).
+/// and asks `pickers::for_field` with its node and reference hint.
 fn picker_of(file: &str, at: &Path) -> Option<form::Picker> {
     let name = file.rsplit('/').next().unwrap_or(file);
     let mut node = cv_schema::schema_for(name).expect("schema");

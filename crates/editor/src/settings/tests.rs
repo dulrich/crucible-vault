@@ -36,7 +36,7 @@ fn s(m: SettingsMsg) -> Message {
     Message::Settings(m)
 }
 
-/// An Editor-page edit through the generic form path (WP-R20: was the hand page message).
+/// An Editor-page edit through the generic form path.
 fn pref(key: &str, v: ScalarValue) -> Message {
     s(SettingsMsg::Edit(
         EDITOR_PATH.into(),

@@ -1,4 +1,4 @@
-//! The typed method contract (plan tn-review-baseline-remediation WP-R3, review SR5/B1): one
+//! The typed method contract: one
 //! uninhabited marker per [`Request`] variant binding the wire name, the params type and the
 //! result type. Clients call `call::<methods::X>(params)`; the daemon dispatches each variant to
 //! a handler whose return type is `X::Result`; [`METHOD_NAMES`] is the server's known-method set.

@@ -1,5 +1,5 @@
-//! A scripted, std-only HTTP/1.1 mock server on `127.0.0.1:0` (plan tn-review-baseline-remediation
-//! WP-R14, M6): one thread accepts, one thread per connection answers with the handler's
+//! A scripted, std-only HTTP/1.1 mock server on `127.0.0.1:0`:
+//! one thread accepts, one thread per connection answers with the handler's
 //! [`Reply`] and closes. Every request is recorded. No async runtime, no network beyond loopback.
 
 use std::io::{Read, Write};

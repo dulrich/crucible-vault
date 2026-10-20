@@ -696,7 +696,7 @@ fn scroll_anchor_is_a_percent() {
     assert_eq!(errs("scroll_anchor = -5\n", "editor.toml").len(), 1);
 }
 
-// ---- WP-R20 (B14): union variant switch and empty items, moved from the editor ----
+// ---- Union variant switch and empty items, moved from the editor ----
 
 const ONE_ACTION: &str = r#"# my actions
 [[action]]

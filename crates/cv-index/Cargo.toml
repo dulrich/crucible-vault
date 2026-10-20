@@ -18,7 +18,7 @@ cv-text = { path = "../cv-text" }
 ofm = { path = "../../../crucible-tui/crates/ofm" }
 
 [dev-dependencies]
-# Plan tn-review-baseline-remediation WP-R14 (M6): `TempDir` replaces hand-rolled temp dirs.
+# `TempDir` replaces hand-rolled temp dirs.
 tempfile = "=3.27.0"
 
 [lints]

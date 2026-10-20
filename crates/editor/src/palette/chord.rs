@@ -6,7 +6,7 @@
 //! `Backspace`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Up`/`Down`/`Left`/`Right`,
 //! `F1`…`F12`). Exactly one key; modifiers may repeat.
 //!
-//! WP-R19: the pure grammar lives in [`editor_model::chord`]; this module adds the iced key-event
+//! The pure grammar lives in [`editor_model::chord`]; this module adds the iced key-event
 //! conversion.
 
 use iced::keyboard::{Key, Modifiers, key::Named};

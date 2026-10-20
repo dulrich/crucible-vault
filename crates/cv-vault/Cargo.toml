@@ -21,7 +21,7 @@ cv-index = { path = "../cv-index" }
 ofm = { path = "../../../crucible-tui/crates/ofm" }
 
 [features]
-# Plan tn-review-baseline-remediation WP-R14 (M6): exposes `test_support::LiveFixture` to
+# Exposes `test_support::LiveFixture` to
 # downstream dev-dependencies; never enabled by a normal build.
 test-support = []
 

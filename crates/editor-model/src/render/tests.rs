@@ -477,7 +477,7 @@ fn bool_toggle_rewrites_only_the_scalar() {
 
 #[test]
 fn bool_toggle_refuses_non_boolean_shapes() {
-    // Ported from the retired `frontmatter_bool_toggle` (WP-R5): non-boolean scalars are
+    // Ported from the retired `frontmatter_bool_toggle`: non-boolean scalars are
     // refused; a nested or prefix-matching key is not `read`, so the setter upserts a new
     // top-level key instead of touching it.
     assert!(frontmatter_bool_edit("---\nread: \"true\"\n---\n", "read", None).is_none());
