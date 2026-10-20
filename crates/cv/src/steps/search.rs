@@ -305,33 +305,49 @@ impl<'r> NotePrep<'r> {
         is_search_indexable_path(path) && !cv_index::is_skipped_path(path)
     }
 
-    /// Every indexable note, prepared, in path order.
-    pub(crate) fn local_notes(&self) -> Result<Vec<(String, LocalNote)>, StepError> {
+    /// Calls `f` with every indexable path, folder by folder from the vault root.
+    fn for_each_indexable(
+        &self,
+        mut f: impl FnMut(String) -> Result<(), StepError>,
+    ) -> Result<(), StepError> {
         let q = self.reader.query();
-        let mut out = Vec::new();
         let mut folders = vec![String::new()];
         while let Some(folder) = folders.pop() {
-            for f in Self::idx(q.folder_files(&folder))? {
-                if !Self::indexable(&f.path) {
-                    continue;
-                }
-                if let Some(n) = self.local_note(&f.path)? {
-                    out.push((f.path, n));
+            for file in Self::idx(q.folder_files(&folder))? {
+                if Self::indexable(&file.path) {
+                    f(file.path)?;
                 }
             }
             folders.extend(Self::idx(q.subfolders(&folder))?);
         }
+        Ok(())
+    }
+
+    /// Every indexable note, prepared, in path order. Holds every note at once: only the
+    /// streaming [`Self::local_hashes`] runs in the daemon; this is the test oracle.
+    #[cfg(test)]
+    pub(crate) fn local_notes(&self) -> Result<Vec<(String, LocalNote)>, StepError> {
+        let mut out = Vec::new();
+        self.for_each_indexable(|path| {
+            if let Some(n) = self.local_note(&path)? {
+                out.push((path, n));
+            }
+            Ok(())
+        })?;
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
 
-    /// Every indexable note's `(path, contentHash)`.
+    /// Every indexable note's `(path, contentHash)`, streamed: each prepared note is dropped
+    /// before the next is read, so peak memory is one note, not the vault.
     pub(crate) fn local_hashes(&self) -> Result<Vec<(String, String)>, StepError> {
-        let mut out: Vec<(String, String)> = self
-            .local_notes()?
-            .into_iter()
-            .map(|(p, n)| (p, n.prepared.content_hash))
-            .collect();
+        let mut out = Vec::new();
+        self.for_each_indexable(|path| {
+            if let Some(n) = self.local_note(&path)? {
+                out.push((path, n.prepared.content_hash));
+            }
+            Ok(())
+        })?;
         out.sort();
         Ok(out)
     }
@@ -425,6 +441,33 @@ mod tests {
         // Retired in semsearch-crate WP-4: the old companion params now disarm (I5).
         assert!(super::super::validate(&step("vault_id = \"v\""), &c).is_err());
         assert!(super::super::validate(&step("path = 3"), &c).is_err());
+    }
+
+    #[test]
+    fn local_hashes_stream_equals_local_notes_hashes() {
+        use cv_vault::test_support::LiveFixture;
+        let fx = LiveFixture::new([
+            ("b.md", "# B\nbody b\n"),
+            ("a/z.md", "---\ntags: [x]\n---\nz\n"),
+            ("a/y.md", "y [[b]]\n"),
+            ("a/img.png", "not a note"),
+        ]);
+        let reader = cv_index::Reader::open_current(&fx.index_db).unwrap();
+        let vault = fx.vault.clone();
+        let host = NotePrep::new(
+            Box::new(move |p| Ok(std::fs::read(vault.join(p)).ok())),
+            &reader,
+            Box::new(|_| None),
+        );
+        let mut want: Vec<(String, String)> = host
+            .local_notes()
+            .unwrap()
+            .into_iter()
+            .map(|(p, n)| (p, n.prepared.content_hash))
+            .collect();
+        want.sort();
+        assert!(want.len() >= 3, "{want:?}");
+        assert_eq!(host.local_hashes().unwrap(), want);
     }
 
     #[test]

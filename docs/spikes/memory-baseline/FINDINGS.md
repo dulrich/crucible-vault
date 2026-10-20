@@ -73,3 +73,18 @@ None. No code reads its own memory. `cv status` has no memory fields. Editor std
 | arena cap only | daemon | −12 MiB (not worth a change) |
 
 Targets (−50 % footprint = RSS + swap, KiB): daemon `refresh3` ≤ 94 940 (baseline 189 880); editor idle ≤ 76 350 (baseline 152 700, `edload2.tsv`); editor `open15+30s` ≤ 141 206 (baseline 282 412). The measured tiny-skia + trim path reaches 143 260 KiB at load (−49.3 %): 2 MiB short of a strict half.
+
+## After WP-M3 (daemon: streamed `local_hashes` + trim after jobs over 32 MiB retained)
+
+`scenario.sh m3after` (release `cv` at M2 + M3, cold index build at start). Columns: label, phase, Rss, Pss_Anon, 64 MiB-arena Rss, heap Rss, VmHWM, VmSwap (KiB).
+
+| phase | Rss | Pss_Anon | heap | VmHWM | swap |
+|---|---|---|---|---|---|
+| start | 71 840 | 56 188 | 30 948 | 71 856 | 0 |
+| search4 | 86 472 | 70 372 | 30 948 | 86 472 | 0 |
+| refresh1 | 73 528 | 57 428 | 23 916 | 95 520 | 0 |
+| **refresh3** | **74 252** | 58 152 | 23 916 | **95 520** | 0 |
+| linkscan | 76 620 | 60 328 | 23 916 | 110 516 | 0 |
+| search24 | 81 744 | 65 452 | 23 916 | 110 516 | 0 |
+
+`refresh3` footprint 74 252 KiB vs target ≤ 94 940 (baseline 189 880): **−60.9 %**. VmHWM 95 520 at `refresh3` (≤ 112 640). The later 110 516 peak comes from `link-scan-all`, which is outside this WP's levers.

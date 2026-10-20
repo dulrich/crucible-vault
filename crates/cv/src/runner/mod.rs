@@ -48,6 +48,9 @@ pub const NON_DURABLE_WAIT: Duration = Duration::from_secs(10);
 const IDLE_POLL: Duration = Duration::from_secs(1);
 /// Remembered finished runs (for non-durable `open_path` replies).
 const FINISHED_CAP: usize = 256;
+/// Allocator bytes retained above live data after a job that triggers a `malloc_trim` (32 MiB);
+/// small jobs never cross it, so the threshold is the rate limiter.
+const TRIM_RETAINED_THRESHOLD: u64 = 32 * 1024 * 1024;
 /// Period of the claim loop's lease-recovery / prune maintenance (plan WP-2).
 pub(crate) const MAINTENANCE_EVERY_MS: i64 = 60_000;
 /// Terminal-row pruning runs at most this often.
@@ -745,6 +748,16 @@ fn failed(error: String) -> JobResult {
     }
 }
 
+/// Returns freed heap pages to the OS when the allocator retains more than
+/// [`TRIM_RETAINED_THRESHOLD`] above live data. Runs on the blocking pool, never a worker.
+fn trim_if_retained() {
+    let retained = cv_malloc::info().retained();
+    if retained > TRIM_RETAINED_THRESHOLD {
+        let trimmed = cv_malloc::trim();
+        tracing::debug!(target: "cv::memory", retained, trimmed, "trim after job");
+    }
+}
+
 /// Executes one claimed job end to end and settles it.
 async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
     let id = job.id.clone();
@@ -772,7 +785,9 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 let job_id = id.clone();
                 let lane = job.lane;
                 match tokio::task::spawn_blocking(move || {
-                    execute_steps(&inner2, &job_id, lane, &action, &jp, &config)
+                    let r = execute_steps(&inner2, &job_id, lane, &action, &jp, &config);
+                    trim_if_retained();
+                    r
                 })
                 .await
                 {
