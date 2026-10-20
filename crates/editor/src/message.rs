@@ -15,6 +15,8 @@ pub enum Message {
     /// The `editor.json` write debounce elapsed — write the latest UI-state
     /// snapshot if it still differs from the last one written (an internal completion).
     PersistDue,
+    /// Plan memory-instrumentation-and-reduction WP-M2: the 5-minute `memory_report` tick.
+    MemoryDue,
     Source(SourceMsg),
     Reading(ReadingMsg),
     Explorer(ExplorerMsg),

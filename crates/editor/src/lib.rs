@@ -17,6 +17,7 @@ pub mod icons;
 pub mod image_cache;
 pub mod link_ta;
 pub mod log;
+pub mod memory;
 pub mod message;
 pub mod nav;
 pub mod open_url;

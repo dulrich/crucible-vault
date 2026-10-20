@@ -26,6 +26,8 @@ toml = "=1.1.8"
 tracing = "=0.1.44"
 # Plan memory-instrumentation-and-reduction WP-M1: the arena cap moved to `cv-malloc` (all glibc FFI).
 cv-malloc = { path = "../cv-malloc" }
+# Plan memory-instrumentation-and-reduction WP-M2: the editor's gauge registry (vendored).
+memstat = { path = "../memstat" }
 # Plan editor-feedback-round-2 WP-9: image paste sends bytes to the `write_attachment` RPC.
 base64 = "=0.22.1"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }

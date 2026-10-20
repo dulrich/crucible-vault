@@ -183,7 +183,32 @@ impl App {
         let status = self.refresh_status_if_open();
         let paths: Vec<String> = self.docs.keys().cloned().collect();
         let saves: Vec<Task<Message>> = paths.iter().map(|p| self.resync_doc(p)).collect();
-        Task::batch([fetch, status].into_iter().chain(saves))
+        let memory = self.send_memory_report();
+        Task::batch([fetch, status, memory].into_iter().chain(saves))
+    }
+
+    /// Sends a `memory_report` to the daemon (plan memory-instrumentation-and-reduction WP-M2):
+    /// the app-owned counts are captured here, the snapshot and the call run on the blocking
+    /// pool, and every error (an old daemon's method-not-found included) is dropped with a
+    /// debug line — never a status message.
+    pub fn send_memory_report(&mut self) -> Task<Message> {
+        let Some(d) = self.daemon.clone() else {
+            return Task::none();
+        };
+        if !self.status.connected || !matches!(self.rpc_exec, RpcExec::Pool) {
+            return Task::none();
+        }
+        let memory = Arc::clone(&self.memory);
+        memory.capture(self);
+        Task::future(async move {
+            let sent = tokio::task::spawn_blocking(move || d.memory_report(&memory.report())).await;
+            match sent {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!(error = %e, "memory_report dropped"),
+                Err(e) => tracing::debug!(error = %e, "memory_report task"),
+            }
+        })
+        .discard()
     }
 
     /// Reconnect resync of one open document against the disk (audit E1: a document with a

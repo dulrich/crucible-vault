@@ -256,6 +256,8 @@ pub struct App {
     pub resolver: std::sync::Arc<crate::reading::resolver::ResolverCache>,
     /// WP-7: `crucible-view` fence results, keyed by `(view id, embedding note)`.
     pub views: crate::views::ViewStore,
+    /// Plan memory-instrumentation-and-reduction WP-M2: the gauge registry behind `memory_report`.
+    pub memory: Arc<crate::memory::Memory>,
     pub(crate) tokens: Tokens,
     notifications: NotifHandle,
     /// plan editor-data-safety WP-1: opens a fresh client (`None` = never reconnect).
@@ -389,6 +391,7 @@ impl App {
             panels: crate::panels::Panels::default(),
             resolver,
             views: crate::views::ViewStore::default(),
+            memory: Arc::new(crate::memory::Memory::new()),
             notifications,
             connector: None,
             reconnect_attempt: 0,

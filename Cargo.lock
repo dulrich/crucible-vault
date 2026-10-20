@@ -1101,6 +1101,7 @@ dependencies = [
  "editor-model",
  "iced",
  "image",
+ "memstat",
  "ofm",
  "serde",
  "serde_json",

@@ -652,6 +652,10 @@ impl DaemonClient for FakeDaemon {
         Ok(())
     }
 
+    fn memory_report(&self, _report: &cv_protocol::MemoryReport) -> Result<()> {
+        Ok(())
+    }
+
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {
         let l = self.lookups()?;
         Ok(ids

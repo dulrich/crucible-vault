@@ -139,6 +139,9 @@ pub trait DaemonClient: Send + Sync {
     /// Sets one boolean frontmatter key of a note the editor has not open (plan
     /// round-8-intake-views-anchor WP-3); the refresh arrives as a file change.
     fn note_set_bool(&self, p: &cv_protocol::NoteSetBoolParams) -> Result<()>;
+    /// Reports this process's memory snapshot to the daemon (plan memory-instrumentation-and-
+    /// reduction WP-M2); an old daemon answers method-not-found, which callers drop.
+    fn memory_report(&self, report: &cv_protocol::MemoryReport) -> Result<()>;
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;

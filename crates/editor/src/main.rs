@@ -73,10 +73,14 @@ fn main() -> anyhow::Result<()> {
     }
     let cell = Mutex::new(Some(app));
     let boot = move || {
-        cell.lock()
+        let mut app = cell
+            .lock()
             .ok()
             .and_then(|mut g| g.take())
-            .unwrap_or_else(App::disconnected)
+            .unwrap_or_else(App::disconnected);
+        // plan memory-instrumentation-and-reduction WP-M2: the on-connect report.
+        let first = app.send_memory_report();
+        (app, first)
     };
     let res = iced::application(boot, App::update, App::view)
         .title("crucible-vault")

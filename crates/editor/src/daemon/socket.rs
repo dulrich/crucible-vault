@@ -205,6 +205,10 @@ impl DaemonClient for SocketDaemon {
         self.call::<m::NoteSetBool>(p.clone()).map(drop)
     }
 
+    fn memory_report(&self, report: &cv_protocol::MemoryReport) -> Result<()> {
+        self.call::<m::MemoryReport>(report.clone()).map(drop)
+    }
+
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let rx = self.rpc.notifications()?;
         let topics = topics.to_vec();
