@@ -887,14 +887,14 @@ fn tracker_db(dir: &Path) -> PathBuf {
         "CREATE TABLE tracker_items (source_kind TEXT NOT NULL, source_key TEXT NOT NULL,
             item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
             first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
-            score REAL, full_body INTEGER, done_ms INTEGER, note_path TEXT,
+            score REAL, full_body INTEGER, note_path TEXT,
             source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
             PRIMARY KEY (source_kind, source_key, item_id));
          INSERT INTO tracker_items VALUES
-            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
-            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, NULL, 'notes/Post.md', 'Feed B', NULL, 900, NULL),
-            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, 7, NULL, 'Chan', 125, NULL, 'x'),
-            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '/');",
+            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, 'notes/Post.md', 'Feed B', NULL, 900, NULL),
+            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, NULL, 'Chan', 125, NULL, 'x'),
+            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL, NULL, NULL, '/');",
     )
     .unwrap();
     p

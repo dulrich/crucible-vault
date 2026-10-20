@@ -157,90 +157,17 @@ fn schema_dump(c: &rusqlite::Connection) -> String {
     format!("user_version={v}\n{}\n", rows.join("\n"))
 }
 
-/// D23: a fresh database gets exactly the schema the retired v1→v10 chain produced.
+/// D24: a fresh database gets exactly the schema the retired v1→v11 chain produced.
 #[test]
-fn fresh_baseline_matches_the_v10_chain_schema() {
+fn fresh_baseline_matches_the_v11_chain_schema() {
     let c = rusqlite::Connection::open_in_memory().unwrap();
     c.execute_batch(migrate::BASELINE).unwrap();
     c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
         .unwrap();
     assert_eq!(
         schema_dump(&c),
-        include_str!("../tests/fixtures/baseline-v10-schema.txt")
+        include_str!("../tests/fixtures/baseline-v11-schema.txt")
     );
-}
-
-/// D24: a v10 database carrying the retired objects migrates to v11 without them, keeping every
-/// other `tracker_items` column.
-#[test]
-fn v10_database_migrates_to_v11_dropping_the_retired_objects() {
-    let mut c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch(migrate::BASELINE).unwrap();
-    c.pragma_update(None, "user_version", 10).unwrap();
-    c.execute_batch(
-        "INSERT INTO shadow_writes (op, path, at_ms) VALUES ('write', 'a.md', 1);
-         INSERT INTO cutover_marker (id, vault, created_at_ms, created_by) VALUES (1, '/v', 1, 'me');
-         INSERT INTO tracker_items (source_kind, source_key, item_id, title, url, first_seen_ms,
-             day, outcome, score, full_body, done_ms, note_path, source_name, duration_s,
-             word_count, status)
-         VALUES ('blog', 'f', 'i1', 'T', 'https://x', 5, '2026-10-19', 'note', 0.5, 1, 99,
-             'n.md', 'S', 60, 300, 'done');",
-    )
-    .unwrap();
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 11);
-    let objects: i64 = c
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name IN
-             ('shadow_writes', 'shadow_writes_at', 'cutover_marker')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(objects, 0);
-    let cols: Vec<String> = c
-        .prepare("SELECT name FROM pragma_table_info('tracker_items')")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(std::result::Result::unwrap)
-        .collect();
-    assert!(!cols.iter().any(|n| n == "done_ms"), "{cols:?}");
-    let row: (String, String, f64, i64, String, String, i64, i64, String) = c
-        .query_row(
-            "SELECT title, url, score, full_body, note_path, source_name, duration_s, word_count,
-                 status FROM tracker_items WHERE item_id = 'i1'",
-            [],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        row,
-        (
-            "T".into(),
-            "https://x".into(),
-            0.5,
-            1,
-            "n.md".into(),
-            "S".into(),
-            60,
-            300,
-            "done".into()
-        )
-    );
-    let mut fresh = rusqlite::Connection::open_in_memory().unwrap();
-    assert_eq!(migrate::migrate(&mut fresh).unwrap(), 11);
 }
 
 /// A database already at the latest version opens with no write.
@@ -262,7 +189,7 @@ fn baseline_database_opens_without_a_schema_write() {
     assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
 }
 
-/// D23: versions 1..=9 predate the 0.1.0 baseline and are refused, by writer and reader.
+/// D24: versions 1..=10 predate the 0.1.1 baseline and are refused, by writer and reader.
 #[test]
 fn pre_baseline_versions_are_refused() {
     for v in 1..migrate::BASELINE_VERSION {
@@ -274,12 +201,12 @@ fn pre_baseline_versions_are_refused() {
         }
         let err = StateDb::open(&p, 1, QueueConfig::default()).unwrap_err();
         assert!(
-            matches!(err, StateError::PreBaseline { found, baseline: 10 } if found == v),
+            matches!(err, StateError::PreBaseline { found, baseline: 11 } if found == v),
             "{err}"
         );
         let msg = err.to_string();
         assert!(
-            msg.contains(&format!("version {v} ")) && msg.contains("predates the 0.1.0 baseline"),
+            msg.contains(&format!("version {v} ")) && msg.contains("predates the 0.1.1 baseline"),
             "{msg}"
         );
         assert!(matches!(

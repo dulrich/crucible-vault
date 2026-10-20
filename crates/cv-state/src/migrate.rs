@@ -1,8 +1,8 @@
-//! Forward-only, versioned migrations for `state.db`, from the 0.1.0 baseline (D23).
+//! Forward-only, versioned migrations for `state.db`, from the 0.1.1 baseline (D24).
 //!
 //! The schema is keyed on SQLite's `PRAGMA user_version`. A fresh database (version 0) is
-//! created directly at [`BASELINE_VERSION`] from [`BASELINE`], the schema the retired v1→v10
-//! chain produced (fixture `tests/fixtures/baseline-v10-schema.txt`), then brought forward by
+//! created directly at [`BASELINE_VERSION`] from [`BASELINE`], the schema the retired v1→v11
+//! chain produced (fixture `tests/fixtures/baseline-v11-schema.txt`), then brought forward by
 //! [`MIGRATIONS`]. A database at [`latest_version`] opens with no schema write. Versions
 //! `1..BASELINE_VERSION` predate the baseline and are refused with [`StateError::PreBaseline`]; a version newer than this build knows is
 //! refused with [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no
@@ -17,11 +17,13 @@
 use crate::error::{Result, StateError};
 use rusqlite::Connection;
 
-/// `user_version` of the 0.1.0 baseline schema.
-pub const BASELINE_VERSION: i64 = 10;
+/// `user_version` of the 0.1.1 baseline schema.
+pub const BASELINE_VERSION: i64 = 11;
 
-/// The 0.1.0 baseline schema (state.db v10). Byte-for-byte the `sqlite_master` the v1→v10
-/// chain produced, including the column order its `ALTER TABLE … ADD COLUMN` steps left.
+/// The 0.1.1 baseline schema (state.db v11). Byte-for-byte the `sqlite_master` the v1→v11
+/// chain produced, including the column order its `ALTER TABLE … ADD COLUMN` steps left —
+/// except the empty `sqlite_sequence` table a migrated database keeps after the chain dropped
+/// its only `AUTOINCREMENT` table (harmless; nothing reads it).
 pub const BASELINE: &str = r"
 CREATE TABLE jobs (
     id              TEXT PRIMARY KEY,
@@ -54,15 +56,6 @@ CREATE TABLE service_health (
     retry_at_ms           INTEGER,
     probe_acquired_at_ms  INTEGER
 );
-CREATE TABLE shadow_writes (
-    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
-    op           TEXT NOT NULL,
-    path         TEXT NOT NULL,
-    before_hash  TEXT,
-    after_hash   TEXT,
-    job_id       TEXT,
-    at_ms        INTEGER NOT NULL
-);
 CREATE TABLE job_step_checkpoints (
     job_id      TEXT NOT NULL,
     step_index  INTEGER NOT NULL,
@@ -82,12 +75,6 @@ CREATE TABLE image_descriptions (
     description_hash  TEXT NOT NULL,
     described_at      TEXT NOT NULL,
     raw               TEXT NOT NULL
-);
-CREATE TABLE cutover_marker (
-    id             INTEGER PRIMARY KEY CHECK (id = 1),
-    vault          TEXT NOT NULL,
-    created_at_ms  INTEGER NOT NULL,
-    created_by     TEXT NOT NULL
 );
 CREATE TABLE link_records (
     canonical_url        TEXT PRIMARY KEY,
@@ -116,7 +103,7 @@ CREATE TABLE tracker_items (
     day            TEXT NOT NULL,
     outcome        TEXT NOT NULL CHECK (outcome IN ('line', 'note', 'ignored', 'skipped')),
     score          REAL,
-    full_body      INTEGER, done_ms INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
+    full_body      INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
     PRIMARY KEY (source_kind, source_key, item_id)
 );
 CREATE TABLE ignored_ids (
@@ -137,20 +124,12 @@ CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL;
 CREATE INDEX link_records_x_status_id ON link_records(x_status_id);
 CREATE INDEX link_records_yt_video_id ON link_records(yt_video_id);
-CREATE INDEX shadow_writes_at ON shadow_writes(at_ms);
 CREATE INDEX tracker_items_day ON tracker_items(day);
 CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key, first_seen_ms);
 ";
 
-/// Post-baseline steps (v11+). Later WPs append (never edit) entries.
-pub const MIGRATIONS: &[&str] = &[
-    // v10 -> v11 (D24): drop the retired shadow-write log, the cut-over marker and the unused
-    // `tracker_items.done_ms` column. Nothing else is touched.
-    "DROP INDEX IF EXISTS shadow_writes_at;
-     DROP TABLE IF EXISTS shadow_writes;
-     DROP TABLE IF EXISTS cutover_marker;
-     ALTER TABLE tracker_items DROP COLUMN done_ms;",
-];
+/// Post-baseline steps (v12+). Later WPs append (never edit) entries.
+pub const MIGRATIONS: &[&str] = &[];
 
 /// Highest schema version this build knows.
 #[must_use]

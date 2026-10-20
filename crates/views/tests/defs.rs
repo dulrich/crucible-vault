@@ -128,16 +128,16 @@ fn tracker_fixture(p: &Path) {
         "CREATE TABLE tracker_items (source_kind TEXT NOT NULL, source_key TEXT NOT NULL,
             item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
             first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
-            score REAL, full_body INTEGER, done_ms INTEGER, note_path TEXT,
+            score REAL, full_body INTEGER, note_path TEXT,
             source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
             PRIMARY KEY (source_kind, source_key, item_id));
          INSERT INTO tracker_items VALUES
-            ('youtube', 'UC1', 'v1', 'A video', 'https://y.example/1', 2, '2026-10-01', 'line', NULL, NULL, 9, NULL, 'Chan A', 3725, NULL, 'x'),
-            ('blog', 'https://b.example/feed', 'p1', 'A post', 'https://b.example/1', 1, '2026-10-01', 'note', NULL, 1, NULL, 'core/works/A post.md', NULL, NULL, 1000, '/'),
-            ('youtube', 'UC1', 'v2', 'Skipped', 'https://y.example/2', 3, '2026-10-01', 'skipped', NULL, NULL, NULL, NULL, 'Chan A', 30, NULL, NULL),
-            ('youtube', 'UC1', 'v3', 'Other day', 'https://y.example/3', 4, '2026-10-02', 'line', NULL, NULL, NULL, NULL, 'Chan A', 60, NULL, NULL),
-            ('youtube', 'UC1', 'v4', 'Short-ish', 'https://y.example/4', 5, '2026-10-01', 'line', NULL, NULL, NULL, NULL, 'Chan A', 65, NULL, NULL),
-            ('blog', 'https://c.example/feed', 'p2', 'Teaser', 'https://c.example/2', 6, '2026-10-01', 'line', NULL, 0, NULL, NULL, 'Feed C', NULL, NULL, NULL);",
+            ('youtube', 'UC1', 'v1', 'A video', 'https://y.example/1', 2, '2026-10-01', 'line', NULL, NULL, NULL, 'Chan A', 3725, NULL, 'x'),
+            ('blog', 'https://b.example/feed', 'p1', 'A post', 'https://b.example/1', 1, '2026-10-01', 'note', NULL, 1, 'core/works/A post.md', NULL, NULL, 1000, '/'),
+            ('youtube', 'UC1', 'v2', 'Skipped', 'https://y.example/2', 3, '2026-10-01', 'skipped', NULL, NULL, NULL, 'Chan A', 30, NULL, NULL),
+            ('youtube', 'UC1', 'v3', 'Other day', 'https://y.example/3', 4, '2026-10-02', 'line', NULL, NULL, NULL, 'Chan A', 60, NULL, NULL),
+            ('youtube', 'UC1', 'v4', 'Short-ish', 'https://y.example/4', 5, '2026-10-01', 'line', NULL, NULL, NULL, 'Chan A', 65, NULL, NULL),
+            ('blog', 'https://c.example/feed', 'p2', 'Teaser', 'https://c.example/2', 6, '2026-10-01', 'line', NULL, 0, NULL, 'Feed C', NULL, NULL, NULL);",
     )
     .unwrap();
 }
