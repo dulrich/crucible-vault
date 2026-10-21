@@ -58,10 +58,14 @@ fn managed_image_re() -> &'static Regex {
     )
 }
 
-/// Crucible `REMOTE_MD_IMAGE_RE`.
+/// Crucible `REMOTE_MD_IMAGE_RE`, plus an optional CommonMark link title (`"t"` / `'t'`) after the
+/// URL — Substack clips title every image, and Crucible's pattern missed those.
 fn remote_md_image_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    re(&R, r"!\[([^\]]*)\]\((https?://[^)\s]+)\)")
+    re(
+        &R,
+        r#"!\[([^\]]*)\]\((https?://[^)\s]+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'))?[ \t]*\)"#,
+    )
 }
 
 /// Crucible `DATA_URI_IMAGE_RE` (placeholder plus trailing inline whitespace).
@@ -1436,5 +1440,27 @@ mod vectors {
             "notes/_attachments/my-note/abc_MD5.png"
         );
         assert!(is_md5_name("abc_MD5.png") && !is_md5_name("abc_MD5.") && !is_md5_name("abc.png"));
+    }
+
+    #[test]
+    fn titled_remote_images_are_refs() {
+        let src = "[![alt](https://cdn.example/a.png \"a title\")](https://cdn.example/a)\n![](https://cdn.example/b.png 't')\n![](https://cdn.example/c.png)\n";
+        let refs = parse_attachment_refs(src);
+        let links: Vec<&str> = refs.iter().map(|m| m.link.as_str()).collect();
+        assert_eq!(
+            links,
+            [
+                "https://cdn.example/a.png",
+                "https://cdn.example/b.png",
+                "https://cdn.example/c.png"
+            ]
+        );
+        assert_eq!(
+            refs[0].original,
+            "![alt](https://cdn.example/a.png \"a title\")"
+        );
+        assert!(has_remote_image_refs(
+            "![x](https://cdn.example/a.png \"t\")"
+        ));
     }
 }
