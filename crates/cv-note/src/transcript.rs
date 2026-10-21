@@ -6,7 +6,9 @@
 //! annotations removed and whitespace collapsed; trailing non-transcript paragraphs are kept.
 //! Deviations: the frontmatter is located with `ofm::frontmatter::split_frontmatter` instead of
 //! Crucible's `FRONTMATTER_REGEX`, the `(?!\()` look-ahead is checked by hand (the `regex` crate
-//! has none), and video-id recognition reuses `cv_text::extract_video_id_from_url`. Nothing
+//! has none), video-id recognition reuses `cv_text::extract_video_id_from_url`, and content between
+//! the embed and `## Transcript` (e.g. a clipped description) is tolerated and kept ahead of the
+//! cleaned transcript (Crucible required the header directly after the embed). Nothing
 //! Obsidian-induced to drop (the `vault.modify` write is the caller's).
 
 use std::sync::LazyLock;
@@ -20,7 +22,7 @@ fn re(p: &str) -> Option<Regex> {
 static YT_EMBED_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| re(r"^([ \t]*\r?\n)*[ \t]*!\[\]\(([^)\s]+)\)[ \t]*\r?\n"));
 static TRANSCRIPT_HEADER_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| re(r"^([ \t]*\r?\n)*[ \t]*##[ \t]+Transcript[ \t]*\r?\n"));
+    LazyLock::new(|| re(r"(?m)^[ \t]*##[ \t]+Transcript[ \t]*\r?\n"));
 static LEADING_BLANK_LINES_RE: LazyLock<Option<Regex>> = LazyLock::new(|| re(r"^([ \t]*\r?\n)+"));
 static TIMESTAMP_PARA_RE: LazyLock<Option<Regex>> = LazyLock::new(|| re(r"^\*\*\d+:\d+\*\*"));
 static TIMESTAMP_PREFIX_RE: LazyLock<Option<Regex>> =
@@ -97,6 +99,9 @@ pub fn cleanup_youtube_transcript(content: &str) -> String {
     let Some(header) = header_re.find(after_embed) else {
         return content.to_owned();
     };
+    // Content between the embed and `## Transcript` (e.g. a clipped description) is kept,
+    // verbatim, ahead of the cleaned transcript.
+    let preamble = after_embed[..header.start()].trim();
     let after_header = &after_embed[header.end()..];
     let after_header = match LEADING_BLANK_LINES_RE.as_ref() {
         Some(r) => r.replace(after_header, "").into_owned(),
@@ -120,7 +125,12 @@ pub fn cleanup_youtube_transcript(content: &str) -> String {
         .collect();
     let trailing = paragraphs[first_non..].join("\n\n");
     let trailing = trailing.trim_end();
-    let mut result = cleaned.join("\n\n");
+    let mut result = String::new();
+    if !preamble.is_empty() {
+        result.push_str(preamble);
+        result.push_str("\n\n");
+    }
+    result.push_str(&cleaned.join("\n\n"));
     if !trailing.is_empty() {
         result.push_str("\n\n");
         result.push_str(trailing);
@@ -139,6 +149,16 @@ mod tests {
         assert_eq!(
             out,
             "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\nhello there\n\nsecond [link](x) part\n\n## Notes\nmine\n"
+        );
+    }
+
+    #[test]
+    fn keeps_content_between_embed_and_transcript() {
+        let src = "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\n![](https://www.youtube.com/watch?v=dQw4w9WgXcQ)\n\nA description line.\n\n> a quote\n\n## Transcript\n\n**0:01** · hello \\[music\\] there\n\n**0:05** second\n";
+        let out = cleanup_youtube_transcript(src);
+        assert_eq!(
+            out,
+            "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\nA description line.\n\n> a quote\n\nhello there\n\nsecond\n"
         );
     }
 
