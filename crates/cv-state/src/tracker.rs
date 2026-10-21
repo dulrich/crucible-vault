@@ -503,6 +503,22 @@ impl StateDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Rows of `source_kind` whose `item_id` is `item_id`, any source key (plan
+    /// intake-followups-mail-youtube WP-4: a YouTube clip resolves its rows by video id), oldest
+    /// first.
+    pub fn tracker_items_for_item(
+        &self,
+        source_kind: &str,
+        item_id: &str,
+    ) -> Result<Vec<TrackerItem>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE source_kind = ?1 AND item_id = ?2
+             ORDER BY first_seen_ms, source_kind, source_key, item_id"
+        ))?;
+        let rows = stmt.query_map(params![source_kind, item_id], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// One source's rows, newest first, at most `limit`.
     pub fn tracker_items_for_source(
         &self,

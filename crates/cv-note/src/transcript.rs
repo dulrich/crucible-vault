@@ -10,6 +10,9 @@
 //! the embed and `## Transcript` (e.g. a clipped description) is tolerated and kept ahead of the
 //! cleaned transcript (Crucible required the header directly after the embed). Nothing
 //! Obsidian-induced to drop (the `vault.modify` write is the caller's).
+//!
+//! [`transcript_evidence`] (plan intake-followups-mail-youtube WP-4, cv's own — Crucible ticked
+//! tracker rows by hand) reuses these regexes to decide whether a note carries a transcript.
 
 use std::sync::LazyLock;
 
@@ -138,9 +141,115 @@ pub fn cleanup_youtube_transcript(content: &str) -> String {
     format!("{fm_text}{result}\n")
 }
 
+/// Fewest `**m:ss**` paragraphs under `## Transcript` that count as a transcript.
+const MIN_TIMESTAMP_PARAS: usize = 3;
+/// Fewest body words a lint-cleaned (legacy) transcript note needs.
+const MIN_LEGACY_WORDS: usize = 50;
+
+static ANY_EMBED_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| re(r"!\[[^\]]*\]\(<?([^)\s>]+)>?[^)]*\)|!\[\[([^\]|#]+)"));
+
+/// How a note shows that it carries a video's transcript (plan intake-followups-mail-youtube
+/// WP-4: "a clipping of the video, not a note that happens to embed it").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptEvidence {
+    /// A `## Transcript` heading followed (blank lines allowed) by at least three `**m:ss**`
+    /// paragraphs — the shape a fresh clip has before `lint` cleans it.
+    Structured,
+    /// An already-cleaned note: no `## Transcript` heading, no YouTube embed left, at least 50
+    /// body words, and a kind with `cleanup_transcript = true` (the caller's `cleanup_kind`).
+    LegacyCleaned,
+}
+
+/// Whether `content` carries transcript text (see [`TranscriptEvidence`]). Pure: the video
+/// identity (the note's own `source`) and the kind lookup are the caller's; `cleanup_kind` says
+/// whether one of the note's kinds has `cleanup_transcript = true`.
+#[must_use]
+pub fn transcript_evidence(content: &str, cleanup_kind: bool) -> Option<TranscriptEvidence> {
+    let (_, body) = ofm::frontmatter::split_frontmatter(content);
+    let (Some(header_re), Some(split_re)) =
+        (TRANSCRIPT_HEADER_RE.as_ref(), PARAGRAPH_SPLIT_RE.as_ref())
+    else {
+        return None;
+    };
+    if let Some(h) = header_re.find(body) {
+        let after = &body[h.end()..];
+        let after = match LEADING_BLANK_LINES_RE.as_ref() {
+            Some(r) => r.replace(after, "").into_owned(),
+            None => after.to_owned(),
+        };
+        let stamped = split_re
+            .split(&after)
+            .take_while(|p| is_timestamp_para(p))
+            .count();
+        return (stamped >= MIN_TIMESTAMP_PARAS).then_some(TranscriptEvidence::Structured);
+    }
+    if !cleanup_kind || has_youtube_embed(body) {
+        return None;
+    }
+    (crate::calculate_word_count(body) >= MIN_LEGACY_WORDS)
+        .then_some(TranscriptEvidence::LegacyCleaned)
+}
+
+/// Whether `body` embeds a YouTube video (`![…](url)` or `![[url]]`).
+fn has_youtube_embed(body: &str) -> bool {
+    let Some(r) = ANY_EMBED_RE.as_ref() else {
+        return false;
+    };
+    r.captures_iter(body).any(|c| {
+        c.get(1)
+            .or_else(|| c.get(2))
+            .is_some_and(|u| cv_text::extract_video_id_from_url(u.as_str().trim()).is_some())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn structured_transcript_needs_three_stamped_paragraphs() {
+        let clip = "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\n![](https://youtu.be/dQw4w9WgXcQ)\n\nA long description.\n\n## Transcript\n\n**0:01** a\n\n**0:05** b\n\n**1:10** c\n";
+        assert_eq!(
+            transcript_evidence(clip, false),
+            Some(TranscriptEvidence::Structured)
+        );
+        let two = "![](https://youtu.be/dQw4w9WgXcQ)\n## Transcript\n\n**0:01** a\n\n**0:05** b\n";
+        assert_eq!(transcript_evidence(two, true), None);
+        let desc_only = format!("![](https://youtu.be/dQw4w9WgXcQ)\n\n{}\n", words(200));
+        assert_eq!(transcript_evidence(&desc_only, false), None);
+    }
+
+    #[test]
+    fn legacy_cleaned_needs_kind_words_and_no_embed() {
+        let cleaned = format!("---\ntags: [post]\n---\n{}\n", words(60));
+        assert_eq!(
+            transcript_evidence(&cleaned, true),
+            Some(TranscriptEvidence::LegacyCleaned)
+        );
+        assert_eq!(transcript_evidence(&cleaned, false), None);
+        let short = format!("---\ntags: [post]\n---\n{}\n", words(49));
+        assert_eq!(transcript_evidence(&short, true), None);
+        let embed = format!(
+            "![](https://www.youtube.com/watch?v=dQw4w9WgXcQ)\n\n{}\n",
+            words(60)
+        );
+        assert_eq!(transcript_evidence(&embed, true), None);
+        let wiki = format!("![[https://youtu.be/dQw4w9WgXcQ]]\n\n{}\n", words(60));
+        assert_eq!(transcript_evidence(&wiki, true), None);
+        let image = format!("![](https://ex.test/a.png)\n\n{}\n", words(60));
+        assert_eq!(
+            transcript_evidence(&image, true),
+            Some(TranscriptEvidence::LegacyCleaned)
+        );
+    }
 
     #[test]
     fn cleans_timestamps_and_annotations() {

@@ -110,6 +110,50 @@ fn set_tracker_item_done_round_trips_and_signals() {
 }
 
 #[test]
+fn tracker_items_for_item_matches_kind_and_id_across_source_keys() {
+    let (_d, mut s) = db();
+    let mk = |kind: &str, key: &str, id: &str, ms: i64| TrackerItem {
+        source_kind: kind.into(),
+        source_key: key.into(),
+        item_id: id.into(),
+        title: "T".into(),
+        url: "u".into(),
+        first_seen_ms: ms,
+        day: "2026-10-21".into(),
+        outcome: TrackerOutcome::Note,
+        score: None,
+        full_body: None,
+        note_path: None,
+        source_name: None,
+        duration_s: None,
+        word_count: None,
+        access: None,
+        complete: None,
+        full_word_count: None,
+    };
+    for it in [
+        mk("youtube", "UC2", "vid", 2),
+        mk("youtube", "UC1", "vid", 1),
+        mk("youtube", "UC1", "other", 3),
+        mk("blog", "f", "vid", 4),
+    ] {
+        assert!(s.insert_tracker_item(&it).unwrap());
+    }
+    let got: Vec<String> = s
+        .tracker_items_for_item("youtube", "vid")
+        .unwrap()
+        .into_iter()
+        .map(|r| r.source_key)
+        .collect();
+    assert_eq!(got, vec!["UC1", "UC2"]);
+    assert!(
+        s.tracker_items_for_item("youtube", "none")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn fill_tracker_source_name_fills_only_null_rows_of_that_source() {
     use std::sync::{Arc, Mutex};
     let (_d, mut s) = db();

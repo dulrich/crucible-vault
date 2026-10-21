@@ -293,6 +293,14 @@ pub static INTAKE_RECONCILE: Record = Record {
     summary: None,
 };
 
+/// `intake_finalize` — `crates/cv/src/steps/intake_finalize.rs` (`path`; links and ticks the tracker rows a filed note satisfies).
+pub static INTAKE_FINALIZE: Record = Record {
+    name: "intake_finalize",
+    fields: &[super::PATH_FIELD],
+    rules: &[],
+    summary: None,
+};
+
 /// `ignore_video` — `crates/cv/src/steps/ignore.rs` (`mode`, `KEYS`).
 pub static IGNORE_VIDEO: Record = Record {
     name: "ignore_video",

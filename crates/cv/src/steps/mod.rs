@@ -21,6 +21,7 @@
 //! | `TrackMail` | [`mail`] | auto-intake-sprint WP-4 |
 //! | `AutoFile` | [`auto_file`] | auto-intake-sprint WP-5 |
 //! | `IntakeReconcile` | [`reconcile`] | auto-intake-sprint WP-6 |
+//! | `IntakeFinalize` | [`intake_finalize`] | intake-followups-mail-youtube WP-4 |
 //! | `IgnoreVideo` | [`ignore`] | A2 WP-9 |
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
@@ -50,6 +51,9 @@ pub mod file;
 mod file_tests;
 pub mod ignore;
 pub mod image_describe;
+pub mod intake_finalize;
+#[cfg(test)]
+mod intake_finalize_tests;
 pub mod link_scan;
 pub mod lint;
 #[cfg(test)]
@@ -575,6 +579,7 @@ step_modules! {
     TrackMail => mail::TrackMail,
     AutoFile => auto_file::AutoFile,
     IntakeReconcile => reconcile::IntakeReconcile,
+    IntakeFinalize => intake_finalize::IntakeFinalize,
     IgnoreVideo => ignore::IgnoreVideo,
     DailyBrief => daily_brief::DailyBrief,
     CaptureRepair => capture_repair::CaptureRepair,

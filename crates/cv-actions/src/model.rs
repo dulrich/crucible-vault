@@ -129,6 +129,9 @@ step_kinds! {
     /// One-shot reconcile of `note` tracker rows (plan `auto-intake-sprint` WP-6); writes
     /// `state.db` only, never a note.
     IntakeReconcile = "intake_reconcile", false;
+    /// Links and ticks the tracker rows a filed note satisfies (plan
+    /// `intake-followups-mail-youtube` WP-4); writes `state.db` only, never a note.
+    IntakeFinalize = "intake_finalize", false;
     IgnoreVideo = "ignore_video", true;
     DailyBrief = "daily_brief", true;
     /// One-time blog-capture repair (plan `usability-sprint-captures-links` WP-2).
@@ -155,7 +158,8 @@ impl StepKind {
             StepKind::TrackBlogs
             | StepKind::TrackMail
             | StepKind::AutoFile
-            | StepKind::IntakeReconcile => &[INTAKE_IDENTITY_KEY],
+            | StepKind::IntakeReconcile
+            | StepKind::IntakeFinalize => &[INTAKE_IDENTITY_KEY],
             _ => &[],
         }
     }

@@ -18,6 +18,6 @@ pub use lint::{
     lint_note,
 };
 pub use ofm::frontmatter::JsValue;
-pub use transcript::cleanup_youtube_transcript;
+pub use transcript::{TranscriptEvidence, cleanup_youtube_transcript, transcript_evidence};
 pub use vault::{PropertyOp, PropertyOpError, VaultEditError, VaultEditPlan, plan_vault_edits};
 pub use wordcount::{calculate_word_count, count_words, strip_non_prose_content};

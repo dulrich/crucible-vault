@@ -76,6 +76,7 @@ pub static STEP: Union = Union {
         Variant::of(&TRACK_MAIL, "Track mail"),
         Variant::of(&AUTO_FILE, "Auto-file clip"),
         Variant::of(&INTAKE_RECONCILE, "Reconcile intake"),
+        Variant::of(&INTAKE_FINALIZE, "Finalize intake"),
         Variant::of(&IGNORE_VIDEO, "Ignore video"),
         Variant::of(&DAILY_BRIEF, "Daily brief"),
         Variant::of(&CAPTURE_REPAIR, "Capture repair"),

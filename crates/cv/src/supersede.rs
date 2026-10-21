@@ -495,6 +495,18 @@ fn finalize(ctx: &StepCtx<'_>, path: &str, urls: &[String], r: &Resolved) -> Res
             rows.extend(db.tracker_items_for_url(u).map_err(st)?);
         }
     }
+    finalize_rows(&mut db, rows, r)
+}
+
+/// Finalize's evidence-then-tick write for an already-resolved row set (shared with
+/// `intake_finalize`, plan intake-followups-mail-youtube WP-4): every row gets `r`'s
+/// `access`/`complete` first, and is ticked only when `r.complete == Some(true)`.
+pub(crate) fn finalize_rows(
+    db: &mut cv_state::StateDb,
+    rows: Vec<cv_state::TrackerItem>,
+    r: &Resolved,
+) -> Result<(), StepError> {
+    let st = |e: cv_state::StateError| StepError::failed(format!("state: {e}"));
     for row in rows {
         let access = r.access.clone().or(row.access.clone());
         db.set_tracker_completeness(
