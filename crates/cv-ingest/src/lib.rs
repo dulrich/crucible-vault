@@ -10,6 +10,7 @@ pub mod brief;
 pub mod feed;
 pub mod html;
 pub mod signals;
+pub mod supersede;
 pub mod tracker;
 pub mod urls;
 pub mod x;

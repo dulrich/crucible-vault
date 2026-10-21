@@ -128,11 +128,26 @@ step_kinds! {
     CaptureRepair = "capture_repair", true;
 }
 
+/// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):
+/// no two intake jobs resolve and commit concurrently.
+pub const INTAKE_IDENTITY_KEY: &str = "intake::identity";
+
 impl StepKind {
     /// Parses a TOML `type` string.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// Queue resource keys the step itself always needs, whatever the action config says (plan
+    /// auto-intake-sprint WP-3, audit M3): every supersede-engine caller holds
+    /// [`INTAKE_IDENTITY_KEY`] from resolve through create/record.
+    #[must_use]
+    pub fn intrinsic_resource_keys(self) -> &'static [&'static str] {
+        match self {
+            StepKind::TrackBlogs => &[INTAKE_IDENTITY_KEY],
+            _ => &[],
+        }
     }
 }
 

@@ -446,6 +446,26 @@ impl StateDb {
             .optional()?)
     }
 
+    /// Rows whose `note_path` is `path` (plan auto-intake-sprint WP-3), oldest first.
+    pub fn tracker_items_for_note(&self, path: &str) -> Result<Vec<TrackerItem>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE note_path = ?1
+             ORDER BY first_seen_ms, source_kind, source_key, item_id"
+        ))?;
+        let rows = stmt.query_map(params![path], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Rows whose `url` is exactly `url` (plan auto-intake-sprint WP-3), oldest first.
+    pub fn tracker_items_for_url(&self, url: &str) -> Result<Vec<TrackerItem>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE url = ?1
+             ORDER BY first_seen_ms, source_kind, source_key, item_id"
+        ))?;
+        let rows = stmt.query_map(params![url], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// One source's rows, newest first, at most `limit`.
     pub fn tracker_items_for_source(
         &self,

@@ -36,6 +36,8 @@ pub struct PipelinesConfig {
     pub queue: QueuePipelineConfig,
     /// `[intake]` (plan round-5-reading-pickers-intake WP-11).
     pub intake: IntakeConfig,
+    /// `[supersede]` (plan auto-intake-sprint WP-3).
+    pub supersede: SupersedeConfig,
 }
 
 impl PipelinesConfig {
@@ -49,6 +51,9 @@ impl PipelinesConfig {
         }
         if c.blogs.complete_percent > 100 {
             return Err("blogs.complete_percent must be at most 100".into());
+        }
+        if c.supersede.threshold_percent > 100 {
+            return Err("supersede.threshold_percent must be at most 100".into());
         }
         for w in &c.daily_brief.weather {
             if !(-90.0..=90.0).contains(&w.lat) || !(-180.0..=180.0).contains(&w.lon) {
@@ -126,6 +131,25 @@ impl Default for BlogsPipeline {
             enabled: false,
             automatable_window: 5,
             complete_percent: 80,
+        }
+    }
+}
+
+/// `[supersede]`: the intake supersede engine (plan auto-intake-sprint WP-3).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SupersedeConfig {
+    /// Content candidates are notes dated within this many days of the incoming item (default 21).
+    pub window_days: u32,
+    /// Containment percent at or above which one text counts as contained in another (default 80).
+    pub threshold_percent: u32,
+}
+
+impl Default for SupersedeConfig {
+    fn default() -> Self {
+        Self {
+            window_days: 21,
+            threshold_percent: 80,
         }
     }
 }
@@ -394,6 +418,8 @@ mod tests {
         assert_eq!(p.x.metadata_root, "_x_metadata");
         assert_eq!(p.blogs.automatable_window, 5);
         assert_eq!(p.blogs.complete_percent, 80);
+        assert_eq!(p.supersede.window_days, 21);
+        assert_eq!(p.supersede.threshold_percent, 80);
         assert_eq!(p.daily_brief.section, "# Daily Brief");
         assert_eq!(p.ignore_shorts.max_seconds, 120);
         assert_eq!(p.queue.retention_days, 30);

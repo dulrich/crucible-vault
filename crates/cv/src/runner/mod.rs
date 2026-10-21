@@ -489,10 +489,20 @@ impl Inner {
 
     /// The queue row for a run of `action` (resource keys derived, lane resolved).
     fn new_job(&self, action: &Action, req: RunRequest) -> Result<NewJob, EnqueueError> {
-        let keys = action
+        let mut keys = action
             .resources
             .derive(req.context.active_path.as_deref(), &req.params)
             .map_err(EnqueueError::NoResourceKeys)?;
+        // Step-intrinsic keys (plan auto-intake-sprint WP-3): never named in user config.
+        keys.extend(
+            action
+                .steps
+                .iter()
+                .flat_map(|s| s.kind.intrinsic_resource_keys())
+                .map(|k| (*k).to_owned()),
+        );
+        keys.sort();
+        keys.dedup();
         if keys.is_empty() && action.mutates_note() {
             return Err(EnqueueError::NoResourceKeys(format!(
                 "action {:?} mutates a note but no resource key derives (no active path?)",

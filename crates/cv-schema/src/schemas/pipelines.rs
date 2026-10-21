@@ -81,6 +81,32 @@ pub static PIPE_BLOGS: Record = Record {
     summary: None,
 };
 
+/// `[supersede]` (plan auto-intake-sprint WP-3).
+pub static PIPE_SUPERSEDE: Record = Record {
+    name: "supersede",
+    fields: &[
+        field(
+            "window_days",
+            "Window days",
+            "Content candidates are notes dated within this many days of the incoming item",
+            U32,
+        )
+        .dflt(D::Int(21)),
+        field(
+            "threshold_percent",
+            "Threshold percent",
+            "Containment percent at or above which one text counts as contained in another",
+            Node::Int {
+                min: Some(0),
+                max: Some(100),
+            },
+        )
+        .dflt(D::Int(80)),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `[image_describe]`.
 pub static PIPE_IMAGE_DESCRIBE: Record = Record {
     name: "image_describe",
@@ -270,6 +296,12 @@ pub static PIPELINES_FILE: Record = Record {
             Node::Record(&PIPE_X),
         ),
         field("blogs", "Blogs", "Blog tracker", Node::Record(&PIPE_BLOGS)),
+        field(
+            "supersede",
+            "Supersede",
+            "Intake dedup and supersede",
+            Node::Record(&PIPE_SUPERSEDE),
+        ),
         field(
             "image_describe",
             "Image describe",

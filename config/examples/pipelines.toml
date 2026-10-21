@@ -19,6 +19,10 @@ enabled = false
 automatable_window = 5          # body = "auto" sources with N full-body posts in a row are captured
 complete_percent = 80           # a probed post is complete when the feed delivered >= this % of its words
 
+[supersede]
+window_days = 21               # content candidates are notes dated within this many days of the incoming item
+threshold_percent = 80          # containment percent at or above which a text counts as contained in another
+
 [image_describe]
 enabled = false
 # provider = "local"            # providers.toml provider id

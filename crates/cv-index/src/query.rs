@@ -411,6 +411,15 @@ impl<'a> Query<'a> {
         Ok(all.into_iter().filter(|r| &r.value == value).collect())
     }
 
+    /// Every markdown file's `key` property row (any value), by path (plan auto-intake-sprint
+    /// WP-3: the supersede index reads each key in one query).
+    pub fn md_props_with_key(&self, key: &str) -> Result<Vec<PropRow>> {
+        self.prop_rows(
+            "SELECT f.path, p.key, p.value FROM props p JOIN files f ON f.id = p.file_id WHERE p.key = ?1 AND f.is_md = 1 ORDER BY f.path, p.rowid",
+            [key],
+        )
+    }
+
     /// Markdown files carrying `key` as a frontmatter property (any value), by path.
     pub fn md_paths_with_prop_key(&self, key: &str) -> Result<Vec<String>> {
         collect(

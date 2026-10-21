@@ -636,3 +636,48 @@ fn paid_line_outcome_carries_access_and_is_never_auto_done() {
     assert_eq!(r.access.as_deref(), Some("paid"));
     assert_eq!(status(&w, "x"), None);
 }
+
+// ---- supersede engine (plan auto-intake-sprint WP-3) ----------------------------------------
+
+#[test]
+fn canonical_url_match_with_a_different_raw_source_is_not_captured_again() {
+    let files = [(
+        "notes/old.md",
+        "---\nsource: BASE/p/x/?utm_source=rss\naccess: free\ncomplete: true\n---\n\nBody of x here\n",
+    )];
+    let w = world(&files, ON, &[("Full", "/a", FULL)]);
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    let o = run(&w).unwrap();
+    assert_eq!((n(&o, "new"), n(&o, "notes")), (json!(0), json!(0)));
+    assert!(note(&w, "x").is_none());
+    let r = item(&w, "x");
+    assert_eq!(r.outcome, TrackerOutcome::Skipped);
+    assert_eq!(
+        (r.access.as_deref(), r.complete),
+        (Some("free"), Some(true))
+    );
+    assert!(
+        w.read("notes/old.md")
+            .unwrap()
+            .ends_with("\nBody of x here\n")
+    );
+}
+
+#[test]
+fn clipped_note_without_complete_is_kept_against_a_complete_feed_body() {
+    let files = [(
+        "notes/clip.md",
+        "---\nsource: BASE/two\n---\n\nMy own highlights and annotations of this article\n",
+    )];
+    let w = world(&files, ON, &[("Full", "/a", FULL)]);
+    let feed = format!(
+        "<rss><channel><title>B</title><item><title>Two</title><link>{}/two</link><description>d</description><content:encoded><![CDATA[<p>The feed delivered a completely different full body text</p>]]></content:encoded></item></channel></rss>",
+        w.base
+    );
+    set(&w, "/a", 200, feed);
+    let before = w.read("notes/clip.md").unwrap();
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "notes"), json!(0));
+    assert_eq!(w.read("notes/clip.md").unwrap(), before);
+    assert!(!w.fx.root().join("superseded").exists());
+}

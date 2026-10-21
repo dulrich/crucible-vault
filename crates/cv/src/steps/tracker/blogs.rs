@@ -50,6 +50,9 @@ use super::super::web::{client, create_or_found};
 use super::super::{StepCtx, StepError, StepModule, StepOutcome, lint, localize};
 use super::substack;
 use super::{Candidate, SeenSet, emit_line_with, record_with};
+use crate::supersede::{
+    self, Action as SupersedeAction, Incoming, Origin, Resolved, SupersedeIndex,
+};
 
 /// `tracker_items.source_kind` / `ignored_ids.kind` of blog posts.
 pub const KIND: &str = "blog";
@@ -366,6 +369,49 @@ fn evidence_for(
     }
 }
 
+/// Runs the supersede engine for a feed post whose identity matches an existing note (origin
+/// `Tracker`, no own path). The post was not probed (identity-matched posts are filtered out of
+/// the probe batch), so a probeable post's incoming `complete` is only ever `false` (marker or
+/// no body), never an unverified `true`.
+fn supersede_existing(
+    ctx: &mut StepCtx<'_>,
+    sidx: &SupersedeIndex,
+    cfg: &cv_actions::pipelines::SupersedeConfig,
+    row: &BlogSource,
+    key: &str,
+    post: &BlogPost,
+    complete_percent: u32,
+) -> Result<Resolved, StepError> {
+    let ev = evidence_for(post, None, row, complete_percent);
+    let complete = if substack::probe_url(&post.url).is_some() {
+        ev.complete.filter(|c| !*c)
+    } else {
+        ev.complete
+    };
+    let body_md = post
+        .body_html
+        .as_deref()
+        .map(cv_ingest::html_to_markdown)
+        .unwrap_or_default();
+    let inc = Incoming {
+        own_path: None,
+        urls: vec![post.url.clone()],
+        source: Some((KIND, key)),
+        authors: post.authors.clone(),
+        host: None,
+        published: chrono::NaiveDate::parse_from_str(
+            post.published.get(..10).unwrap_or(""),
+            "%Y-%m-%d",
+        )
+        .ok(),
+        body_md: &body_md,
+        access: None,
+        complete,
+        origin: Origin::Tracker,
+    };
+    supersede::resolve(ctx, sidx, cfg, &inc)
+}
+
 /// Executes the step.
 pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
@@ -401,14 +447,14 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         KIND,
         rows.iter().map(|r| (r.link.trim(), r.name.as_str())),
     )?;
-    let index = ctx.index().ok();
-    let source_seen = |url: &str| {
-        index.as_ref().is_some_and(|r| {
-            r.query()
-                .files_with_prop("source", &serde_json::json!(url))
-                .is_ok_and(|rows| !rows.is_empty())
-        })
-    };
+    // Canonical identity seen-check (plan auto-intake-sprint WP-3): an index note whose
+    // canonicalized `source`/`post-id` matches the post URL. Built once per run.
+    let sidx = SupersedeIndex::build(ctx).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "track_blogs: supersede index unavailable");
+        SupersedeIndex::default()
+    });
+    let sup_cfg = ctx.config.pipelines().supersede.clone();
+    let source_seen = |url: &str| sidx.has_identity(url);
 
     let c = client()?;
     let bodies = fetch_bounded(
@@ -496,7 +542,33 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 // Replay: this run's own captured note (crash between write and record).
                 let mut outcome = TrackerOutcome::Skipped;
                 let mut path = None;
-                if auto {
+                // Identity match (plan auto-intake-sprint WP-3): the supersede engine decides
+                // keep vs replace-in-place; the row carries the resolved body's evidence.
+                if source_seen(&post.url) {
+                    let r = supersede_existing(
+                        ctx,
+                        &sidx,
+                        &sup_cfg,
+                        row,
+                        &key,
+                        &post,
+                        cfg.complete_percent,
+                    )?;
+                    cand.access = r.access.clone();
+                    cand.complete = r.complete;
+                    if r.action == SupersedeAction::Replaced {
+                        outcome = TrackerOutcome::Note;
+                        path.clone_from(&r.path);
+                        if let Some(p) = &r.path {
+                            out.output_paths.push(p.clone());
+                            if let Err(e) = localize::run(&localize::Params::note(p.clone()), ctx) {
+                                localize_failed += 1;
+                                tracing::warn!(path = %p, error = %e, "track_blogs: inline localize failed");
+                            }
+                        }
+                    }
+                }
+                if path.is_none() && auto {
                     let (folder, _) = note_target(ctx, row)?;
                     let (p, exists) = note_path(ctx, &folder, &post)?;
                     if exists {
@@ -504,7 +576,12 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                         path = Some(p);
                     }
                 }
-                record_with(ctx, &cand, outcome, full, None, path)?;
+                let inserted = record_with(ctx, &cand, outcome, full, None, path)?;
+                // Ticked only on the resolved body's predicate (audit M2), never on a match alone.
+                if inserted && outcome == TrackerOutcome::Note && cand.complete == Some(true) {
+                    ctx.state()
+                        .set_tracker_item_status(KIND, &key, &post.post_id, Some('x'))?;
+                }
                 evidence.push_back(post.has_body());
                 continue;
             }

@@ -666,6 +666,15 @@ impl StateDb {
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
+
+    /// The `state.db` file path; `None` for an in-memory or temporary database (plan
+    /// auto-intake-sprint WP-3: the supersede engine keeps replaced bodies beside it).
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+    }
 }
 
 /// Result of [`StateDb::retry_job`].

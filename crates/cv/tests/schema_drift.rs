@@ -276,6 +276,10 @@ enabled = true
 automatable_window = 3
 complete_percent = 75
 
+[supersede]
+window_days = 14
+threshold_percent = 70
+
 [image_describe]
 enabled = true
 provider = "local"

@@ -216,6 +216,47 @@ async fn mutating_action_without_keys_is_refused() {
     assert!(f.state.lock().unwrap().counts().unwrap().is_empty());
 }
 
+const INTAKE: &str = r#"
+[[action]]
+id = "tb"
+resources = { note = false, keys = [] }
+[[action.steps]]
+type = "track_blogs"
+"#;
+
+/// Plan auto-intake-sprint WP-3 (audit M3): a `track_blogs` action with no configured keys still
+/// derives the step-intrinsic `intake::identity`, and two such jobs never run concurrently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn intake_identity_key_is_intrinsic_and_serializes() {
+    let f = fixture();
+    let live = Arc::new(AtomicUsize::new(0));
+    let max = Arc::new(AtomicUsize::new(0));
+    let (l2, m2) = (Arc::clone(&live), Arc::clone(&max));
+    let exec = FnExec(Box::new(move |_, _| {
+        let n = l2.fetch_add(1, Ordering::SeqCst) + 1;
+        m2.fetch_max(n, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(80));
+        l2.fetch_sub(1, Ordering::SeqCst);
+        Ok(StepOutcome::default())
+    }));
+    let r = runner(&f, Arc::new(exec), Arc::new(SystemClock), 2, INTAKE);
+    let ids: Vec<String> = (0..2)
+        .map(|_| enqueue(&r, "tb", None, Lane::Background))
+        .collect();
+    let job = f.state.lock().unwrap().job(&ids[0]).unwrap().unwrap();
+    assert_eq!(job.resource_keys, vec![cv_actions::INTAKE_IDENTITY_KEY]);
+    let (_stop_tx, stop) = watch::channel(false);
+    let _h = r.spawn_claim_loop(stop);
+    for id in &ids {
+        assert_eq!(wait_terminal(&f, id).await, DbStatus::Done);
+    }
+    assert_eq!(
+        max.load(Ordering::SeqCst),
+        1,
+        "intake jobs ran concurrently"
+    );
+}
+
 const THREE: &str = r#"
 [[action]]
 id = "three"

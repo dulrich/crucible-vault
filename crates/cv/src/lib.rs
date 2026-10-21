@@ -14,6 +14,7 @@ pub mod server;
 pub mod signals;
 pub mod spool;
 pub mod steps;
+pub mod supersede;
 pub mod sync;
 pub mod uri;
 pub mod views;
