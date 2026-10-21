@@ -201,6 +201,7 @@ const STEPS: &[(&str, &str)] = &[
     ("track_blogs", ""),
     ("track_mail", ""),
     ("auto_file", ""),
+    ("intake_reconcile", "dry_run = true"),
     ("ignore_video", "mode = \"manual\""),
     ("daily_brief", ""),
     ("capture_repair", "folder = \"daily/day\"\nlimit = 10"),

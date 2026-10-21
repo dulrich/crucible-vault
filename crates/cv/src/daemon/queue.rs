@@ -122,3 +122,95 @@ impl Shared {
         })
     }
 }
+
+/// Longest `reconcile_intake` waits for its job (plan auto-intake-sprint WP-6).
+pub(super) const RECONCILE_WAIT: Duration = Duration::from_secs(600);
+
+/// The step outcome vars of a job's checkpoints, merged in step order (later keys win).
+fn checkpoint_vars(cps: &[cv_state::StepCheckpoint]) -> serde_json::Map<String, Value> {
+    let mut vars = serde_json::Map::new();
+    for cp in cps {
+        if let Ok(Value::Object(o)) = serde_json::from_str::<Value>(&cp.outcome)
+            .map(|v| v.get("vars").cloned().unwrap_or(Value::Null))
+        {
+            vars.extend(o);
+        }
+    }
+    vars
+}
+
+impl Shared {
+    /// `reconcile_intake`: enqueues the `intake-reconcile` action, waits (at most
+    /// [`RECONCILE_WAIT`]) for it to settle and returns its outcome vars, read from the job's
+    /// step checkpoints (where the runner persists each step's outcome).
+    pub(super) async fn reconcile_intake(
+        &self,
+        p: cv_protocol::ReconcileIntakeParams,
+    ) -> Result<cv_protocol::ReconcileIntakeResult, RpcError> {
+        let mut params = serde_json::Map::new();
+        params.insert("dry_run".into(), Value::Bool(p.dry_run));
+        let started = crate::runner::run_action(
+            self,
+            self.runner_or_err()?,
+            cv_protocol::RunActionParams {
+                action_id: "intake-reconcile".into(),
+                params,
+                context: cv_protocol::ActionContext::default(),
+            },
+        )
+        .await?;
+        let deadline = std::time::Instant::now() + RECONCILE_WAIT;
+        let status = loop {
+            let s = self.job(&started.job_id)?;
+            let settled = matches!(
+                s.status,
+                cv_protocol::JobState::Done
+                    | cv_protocol::JobState::Failed
+                    | cv_protocol::JobState::Cancelled
+            );
+            if settled || std::time::Instant::now() >= deadline {
+                break s;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        let counts = if status.status == cv_protocol::JobState::Done {
+            let cps = lock(&self.state)
+                .checkpoints(&started.job_id)
+                .map_err(rpc_from_state)?;
+            checkpoint_vars(&cps)
+        } else {
+            serde_json::Map::new()
+        };
+        Ok(cv_protocol::ReconcileIntakeResult {
+            job_id: started.job_id,
+            status: status.status,
+            message: status.message,
+            counts,
+        })
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use cv_state::StepCheckpoint;
+
+    use super::checkpoint_vars;
+
+    #[test]
+    fn checkpoint_vars_merge_in_step_order_and_skip_garbage() {
+        let cp = |i, o: &str| StepCheckpoint {
+            step_index: i,
+            outcome: o.to_owned(),
+            at_ms: 0,
+        };
+        let vars = checkpoint_vars(&[
+            cp(0, r#"{"vars":{"linked":1,"ticked":9}}"#),
+            cp(1, "not json"),
+            cp(2, r#"{"output_paths":[]}"#),
+            cp(3, r#"{"vars":{"ticked":2}}"#),
+        ]);
+        assert_eq!(vars["linked"], 1);
+        assert_eq!(vars["ticked"], 2);
+        assert_eq!(vars.len(), 2);
+    }
+}

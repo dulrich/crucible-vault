@@ -143,13 +143,28 @@ impl RpcClient {
 
     /// Sends `req` and returns the raw `result` (untyped; tests and generic callers).
     pub fn request(&self, req: Request) -> Result<Value, ClientError> {
+        self.request_within(req, CALL_TIMEOUT)
+    }
+
+    /// Calls method `M`, waiting at most `timeout` for the reply (a long daemon-side wait such
+    /// as `reconcile_intake`).
+    pub fn call_within<M: Method>(
+        &self,
+        params: M::Params,
+        timeout: Duration,
+    ) -> Result<M::Result, ClientError> {
+        let v = self.request_within(M::request(params), timeout)?;
+        serde_json::from_value(v).map_err(|e| ClientError::Protocol(e.to_string()))
+    }
+
+    fn request_within(&self, req: Request, timeout: Duration) -> Result<Value, ClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         lock(&self.inbox.pending)?.insert(id, tx);
         let line = serde_json::to_string(&RpcRequest::new(RpcId::Num(id), req))
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         self.send(&line)?;
-        match rx.recv_timeout(CALL_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => Err(ClientError::Rpc(e)),
             Err(mpsc::RecvTimeoutError::Timeout) => {

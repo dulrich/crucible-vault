@@ -279,6 +279,20 @@ pub static AUTO_FILE: Record = Record {
     summary: None,
 };
 
+/// `intake_reconcile` — `crates/cv/src/steps/reconcile.rs` (`dry_run`; links NULL-path `note` rows, probes open blog rows, auto-ticks complete ones).
+pub static INTAKE_RECONCILE: Record = Record {
+    name: "intake_reconcile",
+    fields: &[field(
+        "dry_run",
+        "Dry run",
+        "Compute every count but write nothing (a job param dry_run = true also turns it on)",
+        Node::Bool,
+    )
+    .dflt(D::Bool(false))],
+    rules: &[],
+    summary: None,
+};
+
 /// `ignore_video` — `crates/cv/src/steps/ignore.rs` (`mode`, `KEYS`).
 pub static IGNORE_VIDEO: Record = Record {
     name: "ignore_video",

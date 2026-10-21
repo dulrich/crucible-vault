@@ -21,7 +21,7 @@ pub const DEFAULT_LIMIT: u32 = 50;
 pub const MAX_LIMIT: u32 = 500;
 
 /// Usage lines (also appended to the top-level `cv --help`).
-pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
+pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv intake reconcile [--dry-run]   link NULL-path note rows, probe + auto-tick the complete ones; prints counts as key=value\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
 
 fn page_limit(l: Option<u32>) -> u32 {
     l.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
@@ -182,6 +182,9 @@ pub enum Command {
     JobRetry(String),
     JobCancel(String),
     IntakeList(IntakeListParams),
+    IntakeReconcile {
+        dry_run: bool,
+    },
     Run {
         action_id: String,
         note: Option<String>,
@@ -230,6 +233,8 @@ pub fn parse(args: &[String]) -> Option<Command> {
             }
             Some(Command::IntakeList(p))
         }
+        ["intake", "reconcile"] => Some(Command::IntakeReconcile { dry_run: false }),
+        ["intake", "reconcile", "--dry-run"] => Some(Command::IntakeReconcile { dry_run: true }),
         ["run", action, rest @ ..] if !action.starts_with('-') => {
             let note = match rest {
                 [] => None,
@@ -320,6 +325,7 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
         Command::IntakeList(p) => {
             render_intake(&client.call::<methods::IntakeList>(p.clone()).map_err(e)?)
         }
+        Command::IntakeReconcile { dry_run } => reconcile(&client, *dry_run)?,
         Command::Run { action_id, note } => {
             let r = client
                 .call::<methods::RunAction>(RunActionParams {
@@ -338,6 +344,38 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
             out
         }
     })
+}
+
+/// How long `cv intake reconcile` waits for the daemon (its own bounded wait is 10 min).
+const RECONCILE_CALL_WAIT: std::time::Duration = std::time::Duration::from_secs(660);
+
+/// Runs the reconcile job through the daemon and renders its counts as `key=value` lines; a job
+/// that did not complete is an error (exit 1).
+fn reconcile(client: &Client, dry_run: bool) -> Result<String> {
+    let r = client
+        .call_within::<methods::ReconcileIntake>(
+            cv_protocol::ReconcileIntakeParams { dry_run },
+            RECONCILE_CALL_WAIT,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+    if r.status != JobState::Done {
+        return Err(anyhow!(
+            "reconcile job {} {}{}",
+            r.job_id,
+            enum_str(r.status),
+            r.message.map(|m| format!(": {m}")).unwrap_or_default()
+        ));
+    }
+    Ok(render_counts(&r.counts))
+}
+
+/// `key=value` lines (aggregate counts only; sorted by key).
+fn render_counts(counts: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut keys: Vec<&String> = counts.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|k| format!("{k}={}\n", counts[k]))
+        .collect()
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -455,6 +493,14 @@ mod tests {
             Some(Command::IntakeList(_))
         ));
         assert_eq!(
+            parse(&a(&["intake", "reconcile"])),
+            Some(Command::IntakeReconcile { dry_run: false })
+        );
+        assert_eq!(
+            parse(&a(&["intake", "reconcile", "--dry-run"])),
+            Some(Command::IntakeReconcile { dry_run: true })
+        );
+        assert_eq!(
             parse(&a(&["jobs", "retry", "j1"])),
             Some(Command::JobRetry("j1".into()))
         );
@@ -468,6 +514,9 @@ mod tests {
             &["run"],
             &["run", "x", "--note"],
             &["intake", "list", "stray", "x"],
+            &["intake", "reconcile", "stray"],
+            &["intake", "reconcile", "--dry-run", "x"],
+            &["intake", "reconcile", "--dryrun"],
         ] {
             assert_eq!(parse(&a(bad)), None, "{bad:?}");
             assert_eq!(run(&a(bad)), 2, "{bad:?}");

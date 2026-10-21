@@ -456,6 +456,43 @@ impl StateDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Sets one row's `note_path` (plan auto-intake-sprint WP-6 reconcile: a plain UPDATE, no
+    /// schema change). Returns whether a row matched; raises the `tracker_items` change signal
+    /// when one did.
+    pub fn set_tracker_note_path(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        note_path: &str,
+    ) -> Result<bool> {
+        let n = self.conn().execute(
+            "UPDATE tracker_items SET note_path = ?4
+             WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+            params![source_kind, source_key, item_id, note_path],
+        )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n > 0)
+    }
+
+    /// The `note`-outcome rows reconcile looks at (plan auto-intake-sprint WP-6): those with no
+    /// `note_path` or whose status is not done (`x`/`X`), each with its status, oldest first.
+    pub fn tracker_reconcile_rows(&self) -> Result<Vec<(TrackerItem, Option<char>)>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS}, status FROM tracker_items
+             WHERE outcome = 'note'
+               AND (note_path IS NULL OR status IS NULL OR status NOT IN ('x', 'X'))
+             ORDER BY first_seen_ms, source_kind, source_key, item_id"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            let status: Option<String> = r.get(17)?;
+            Ok((row(r)?, status.and_then(|s| s.chars().next())))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Rows whose `url` is exactly `url` (plan auto-intake-sprint WP-3), oldest first.
     pub fn tracker_items_for_url(&self, url: &str) -> Result<Vec<TrackerItem>> {
         let mut stmt = self.conn().prepare(&format!(

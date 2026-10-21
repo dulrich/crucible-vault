@@ -13,7 +13,7 @@
 # Step `type`s: guard, capture, materialize, move, copy, set_props, remove_props, upsert_tags,
 # lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete, link_scan,
 # yt_metadata, yt_channel_enrich, x_discover, x_metadata, x_backfill, image_describe,
-# track_youtube, track_blogs, track_mail, auto_file, ignore_video, daily_brief, capture_repair.
+# track_youtube, track_blogs, track_mail, auto_file, intake_reconcile, ignore_video, daily_brief, capture_repair.
 # Each step's other keys belong to its module (WP-10..13 document them; WP-10's in
 # crates/cv/src/steps/{materialize,capture,file,lint}.rs). Step string params take single-brace
 # placeholders {param.NAME}, {vars.NAME}, {path}, {period.day|week|month}; note/capture templates
@@ -359,6 +359,17 @@ group = "Ingest"
 needs = ["active_path"]
 [[action.steps]]
 type = "auto_file"
+
+# One-shot reconcile of existing `note` tracker rows (plan auto-intake-sprint WP-6): links NULL-path
+# rows to their notes, probes open blog rows and ticks complete ones. Run by `cv intake reconcile
+# [--dry-run]` (a job param `dry_run = true` writes nothing). The step holds `intake::identity`.
+[[action]]
+id = "intake-reconcile"
+label = "Reconcile intake rows"
+group = "Ingest"
+resources = { note = false, keys = ["tracker::reconcile"] }
+[[action.steps]]
+type = "intake_reconcile"
 
 [[action]]
 id = "image-describe-note"

@@ -164,6 +164,31 @@ pub enum Request {
     /// the daemon keeps the latest one per process kind and reports it in `status`. An old
     /// daemon answers `METHOD_NOT_FOUND`, which a client drops silently.
     MemoryReport(MemoryReport),
+    /// Runs the `intake-reconcile` action and waits (bounded) for it (plan auto-intake-sprint
+    /// WP-6) → [`ReconcileIntakeResult`]. An unknown action is `NOT_FOUND`.
+    ReconcileIntake(ReconcileIntakeParams),
+}
+
+/// `reconcile_intake` params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileIntakeParams {
+    /// Compute every count but write nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `reconcile_intake` result: the job's terminal (or, after the bounded wait, last) state and
+/// its aggregate outcome counts (never note text or paths).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileIntakeResult {
+    pub job_id: String,
+    pub status: JobState,
+    /// The failure text of a failed job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The step's outcome vars (`null_paths`, `linked`, …); empty unless the job completed.
+    #[serde(default)]
+    pub counts: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1442,6 +1467,7 @@ mod tests {
             s,
         );
         check::<m::MemoryReport>(MemoryReport::default(), s);
+        check::<m::ReconcileIntake>(ReconcileIntakeParams { dry_run: true }, s);
         assert_eq!(seen, METHOD_NAMES);
         // Unit methods carry no `params` key, exactly as the enum always serialised them.
         let v = serde_json::to_value(RpcRequest::new(RpcId::Num(2), m::Status::request(())))

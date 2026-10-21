@@ -126,6 +126,9 @@ step_kinds! {
     TrackMail = "track_mail", true;
     /// Clip dedup + kind auto-filing (plan `auto-intake-sprint` WP-5).
     AutoFile = "auto_file", true;
+    /// One-shot reconcile of `note` tracker rows (plan `auto-intake-sprint` WP-6); writes
+    /// `state.db` only, never a note.
+    IntakeReconcile = "intake_reconcile", false;
     IgnoreVideo = "ignore_video", true;
     DailyBrief = "daily_brief", true;
     /// One-time blog-capture repair (plan `usability-sprint-captures-links` WP-2).
@@ -149,9 +152,10 @@ impl StepKind {
     #[must_use]
     pub fn intrinsic_resource_keys(self) -> &'static [&'static str] {
         match self {
-            StepKind::TrackBlogs | StepKind::TrackMail | StepKind::AutoFile => {
-                &[INTAKE_IDENTITY_KEY]
-            }
+            StepKind::TrackBlogs
+            | StepKind::TrackMail
+            | StepKind::AutoFile
+            | StepKind::IntakeReconcile => &[INTAKE_IDENTITY_KEY],
             _ => &[],
         }
     }

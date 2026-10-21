@@ -392,6 +392,9 @@ impl Shared {
             Request::JobsList(p) => reply::<m::JobsList>(self.jobs_list(&p)),
             Request::JobRetry(p) => reply::<m::JobRetry>(self.job_retry(&p.job_id)),
             Request::IntakeList(p) => reply::<m::IntakeList>(self.intake_list(&p)),
+            Request::ReconcileIntake(p) => {
+                reply::<m::ReconcileIntake>(self.reconcile_intake(p).await)
+            }
             Request::Uri(p) => reply::<m::Uri>(self.intake(&p.url).await),
             Request::Status => reply::<m::Status>(match self.status() {
                 Ok(mut s) => {

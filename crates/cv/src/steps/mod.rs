@@ -20,6 +20,7 @@
 //! | `TrackBlogs` | [`tracker::blogs`] | A2 WP-8 |
 //! | `TrackMail` | [`mail`] | auto-intake-sprint WP-4 |
 //! | `AutoFile` | [`auto_file`] | auto-intake-sprint WP-5 |
+//! | `IntakeReconcile` | [`reconcile`] | auto-intake-sprint WP-6 |
 //! | `IgnoreVideo` | [`ignore`] | A2 WP-9 |
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
@@ -64,6 +65,9 @@ pub mod materialize;
 mod materialize_tests;
 pub(crate) mod metadata;
 pub mod params;
+pub mod reconcile;
+#[cfg(test)]
+mod reconcile_tests;
 pub mod search;
 #[cfg(test)]
 mod search_tests;
@@ -570,6 +574,7 @@ step_modules! {
     TrackBlogs => tracker::blogs::TrackBlogs,
     TrackMail => mail::TrackMail,
     AutoFile => auto_file::AutoFile,
+    IntakeReconcile => reconcile::IntakeReconcile,
     IgnoreVideo => ignore::IgnoreVideo,
     DailyBrief => daily_brief::DailyBrief,
     CaptureRepair => capture_repair::CaptureRepair,

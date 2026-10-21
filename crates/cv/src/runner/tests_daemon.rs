@@ -457,7 +457,7 @@ fn example_config_files_load_cleanly() {
     super::load_config_dir(&dir, &mut set);
     drop(tmp);
     assert!(set.errors().is_empty(), "{:?}", set.errors());
-    assert_eq!(set.armed_actions().count(), 33);
+    assert_eq!(set.armed_actions().count(), 34);
     assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
     assert_eq!(set.sources().blog.len(), 1);
     assert!(
