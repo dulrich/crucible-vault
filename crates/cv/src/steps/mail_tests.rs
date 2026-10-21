@@ -71,6 +71,10 @@ impl World {
 }
 
 fn world(files: &[(&str, String)]) -> World {
+    world_with(SOURCES, files)
+}
+
+fn world_with(sources: &str, files: &[(&str, String)]) -> World {
     let mail = tempfile::tempdir().unwrap();
     let pipelines = format!(
         "[mail]\nenabled = true\nmaildir = {:?}\n",
@@ -78,7 +82,7 @@ fn world(files: &[(&str, String)]) -> World {
     );
     let config = config_of(&[
         ("pipelines.toml", &pipelines),
-        ("sources.toml", SOURCES),
+        ("sources.toml", sources),
         ("kinds.toml", KINDS),
         ("captures.toml", CAPTURES),
     ]);
@@ -369,4 +373,150 @@ fn replaced_note_body_is_clean() {
             && !text.contains("utm_"),
         "{text}"
     );
+}
+
+const SUBSTACK_FEED: &str = "https://examplepub.substack.com/feed";
+const SUBSTACK_STUB: &str = "https://examplepub.substack.com/p/deep-dive";
+const SUBSTACK_SOURCES: &str = r#"
+[[blog]]
+name = "Example Pub"
+link = "https://examplepub.substack.com/feed"
+paywall_markers = ["Upgrade to paid"]
+"#;
+
+/// A Substack message: `From: <pub>@substack.com`, `List-Id: <pub>.substack.com`.
+fn substack_eml(mid: &str, pubname: &str, body: &str) -> Vec<u8> {
+    format!(
+        "From: Pub <{pubname}@substack.com>\nList-Id: <{pubname}.substack.com>\nSubject: Deep dive\nDate: Tue, 14 Oct 2026 10:00:00 +0000\nMessage-ID: <{mid}>\nMIME-Version: 1.0\nContent-Type: text/html; charset=utf-8\n\n{body}\n"
+    )
+    .replace('\n', "\r\n")
+    .into_bytes()
+}
+
+fn substack_world(sources: &str) -> World {
+    let stub = format!(
+        "---\ntitle: \"Deep dive\"\nsource: {SUBSTACK_STUB}\npost-id: \"deep-dive\"\npublished: 2026-10-14\nword-count: 30\naccess: paid\ncomplete: false\ntags:\n  - blog\nread: true\n---\n\n{}\n",
+        words("w", 0, 30)
+    );
+    let w = world_with(sources, &[("Letters/Deep dive.md", stub)]);
+    w.env
+        .state
+        .lock()
+        .unwrap()
+        .insert_tracker_item(&TrackerItem {
+            source_kind: "blog".into(),
+            source_key: SUBSTACK_FEED.into(),
+            item_id: SUBSTACK_STUB.into(),
+            title: "Deep dive".into(),
+            url: SUBSTACK_STUB.into(),
+            first_seen_ms: 1,
+            day: "2026-10-14".into(),
+            outcome: TrackerOutcome::Note,
+            score: None,
+            full_body: Some(true),
+            note_path: Some("Letters/Deep dive.md".into()),
+            source_name: Some("Example Pub".into()),
+            duration_s: None,
+            word_count: Some(30),
+            access: Some("paid".into()),
+            complete: Some(false),
+            full_word_count: Some(120),
+        })
+        .unwrap();
+    w
+}
+
+fn substack_body(n_words: usize) -> String {
+    format!(
+        "<p>{}</p><a href=\"{SUBSTACK_STUB}\">Read online</a>",
+        words("w", 0, n_words)
+    )
+}
+
+#[test]
+fn substack_mail_mirrors_its_blog_row_and_ticks_the_stub() {
+    let w = substack_world(SUBSTACK_SOURCES);
+    w.put(
+        "new/s",
+        &substack_eml("s1@substack.com", "examplepub", &substack_body(120)),
+    );
+    let o = w.run();
+    assert_eq!(
+        (n(&o, "replaced"), n(&o, "new"), n(&o, "kept")),
+        (json!(1), json!(0), json!(0))
+    );
+    let (mail, mstatus) = w.row("Example Pub", "s1@substack.com").unwrap();
+    assert_eq!(mail.outcome, TrackerOutcome::Skipped);
+    assert_eq!(mstatus, None);
+    assert!(w.row("unknown-sender", "s1@substack.com").is_none());
+    let db = w.env.state.lock().unwrap();
+    let r = db
+        .tracker_item("blog", SUBSTACK_FEED, SUBSTACK_STUB)
+        .unwrap()
+        .unwrap();
+    let st = db
+        .tracker_item_status("blog", SUBSTACK_FEED, SUBSTACK_STUB)
+        .unwrap()
+        .flatten();
+    assert_eq!((r.complete, st), (Some(true), Some('x')));
+}
+
+#[test]
+fn truncated_substack_mail_keeps_the_stub_by_the_blog_rows_markers() {
+    let w = substack_world(SUBSTACK_SOURCES);
+    let body = format!(
+        "<p>{}</p><p>Upgrade to paid</p><a href=\"{SUBSTACK_STUB}\">Read online</a>",
+        words("w", 0, 25)
+    );
+    w.put(
+        "new/c",
+        &substack_eml("s2@substack.com", "examplepub", &body),
+    );
+    let o = w.run();
+    assert_eq!((n(&o, "replaced"), n(&o, "kept")), (json!(0), json!(1)));
+    assert!(w.row("Example Pub", "s2@substack.com").is_some());
+}
+
+#[test]
+fn explicit_newsletter_row_wins_over_the_substack_match() {
+    let sources = format!(
+        "{SUBSTACK_SOURCES}\n[[newsletter]]\nname = \"Explicit Pub\"\nlist_id = \"examplepub.substack.com\"\nblog = \"Example Pub\"\n"
+    );
+    let w = substack_world(&sources);
+    w.put(
+        "new/e",
+        &substack_eml("s3@substack.com", "examplepub", &substack_body(120)),
+    );
+    w.run();
+    assert!(w.row("Explicit Pub", "s3@substack.com").is_some());
+    assert!(w.row("Example Pub", "s3@substack.com").is_none());
+}
+
+#[test]
+fn non_substack_unknown_sender_stays_unknown() {
+    let w = substack_world(SUBSTACK_SOURCES);
+    w.put(
+        "new/u",
+        &eml(
+            "u1@elsewhere.example",
+            "x@elsewhere.example",
+            "Hi",
+            "<p>hello</p>",
+        ),
+    );
+    w.run();
+    let (item, status) = w.row("unknown-sender", "u1@elsewhere.example").unwrap();
+    assert_eq!((item.outcome, status), (TrackerOutcome::Note, None));
+}
+
+#[test]
+fn substack_host_without_a_blog_row_stays_unknown() {
+    let w = substack_world(SUBSTACK_SOURCES);
+    w.put(
+        "new/o",
+        &substack_eml("s4@substack.com", "otherpub", "<p>hello there</p>"),
+    );
+    w.run();
+    assert!(w.row("unknown-sender", "s4@substack.com").is_some());
+    assert!(w.row("Example Pub", "s4@substack.com").is_none());
 }

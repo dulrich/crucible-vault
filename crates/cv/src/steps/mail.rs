@@ -26,9 +26,10 @@
 //! `unknown-sender`, row left open). Outcome vars: `scanned`, `new`, `kept`, `replaced`,
 //! `invalid`, `move_failed` (+ `disabled`).
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use cv_actions::pipelines::NewsletterSource;
+use cv_actions::pipelines::{BlogSource, NewsletterSource};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_ingest::mail::{self, MailPost};
@@ -287,6 +288,36 @@ enum Handled {
     Seen,
 }
 
+/// The newsletter row a message belongs to (plan intake-followups-mail-youtube WP-2): an explicit
+/// `[[newsletter]]` match always wins; otherwise a Substack message (`mail::substack_host`) mirrors
+/// the first `[[blog]]` row whose feed host equals it, as a synthesized row named for the blog
+/// (kind `blog`, no extra tags or markers; the blog row's own markers apply downstream).
+/// WP-5's reconcile re-match of already-recorded rows reuses this.
+pub(crate) fn resolve_newsletter<'a>(
+    post: &MailPost,
+    rows: &'a [NewsletterSource],
+    blogs: &[BlogSource],
+) -> Option<Cow<'a, NewsletterSource>> {
+    if let Some(r) =
+        mail::match_newsletter(post, rows, |r| (r.from.as_slice(), r.list_id.as_deref()))
+    {
+        return Some(Cow::Borrowed(r));
+    }
+    let host = mail::substack_host(post)?;
+    let blog = blogs
+        .iter()
+        .find(|b| mail::url_host(&b.link).is_some_and(|h| h == host))?;
+    Some(Cow::Owned(NewsletterSource {
+        name: blog.name.clone(),
+        from: Vec::new(),
+        list_id: None,
+        blog: Some(blog.name.clone()),
+        kind: "blog".into(),
+        tags: Vec::new(),
+        paywall_markers: Vec::new(),
+    }))
+}
+
 /// Records and (maybe) captures one parsed message. The caller holds `intake::identity`.
 fn handle(
     ctx: &mut StepCtx<'_>,
@@ -294,9 +325,8 @@ fn handle(
     post: &MailPost,
     out: &mut StepOutcome,
 ) -> Result<Handled, StepError> {
-    let nl = mail::match_newsletter(post, run.rows, |r| {
-        (r.from.as_slice(), r.list_id.as_deref())
-    });
+    let nl = resolve_newsletter(post, run.rows, &ctx.config.sources().blog);
+    let nl = nl.as_deref();
     let key = nl.map_or(UNKNOWN, |n| n.name.as_str()).to_owned();
     let st = |e: cv_state::StateError| StepError::failed(format!("state: {e}"));
     for k in [key.as_str(), UNKNOWN] {

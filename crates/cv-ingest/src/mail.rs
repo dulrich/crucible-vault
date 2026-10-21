@@ -152,6 +152,43 @@ pub fn match_newsletter<'a, T>(
     })
 }
 
+/// The lowercased host of an `http(s)` URL (userinfo, port, path, query and fragment dropped).
+#[must_use]
+pub fn url_host(url: &str) -> Option<String> {
+    let lower = url.trim().to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))?;
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = auth.rsplit('@').next().unwrap_or(auth);
+    let host = host.split(':').next().unwrap_or(host);
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
+/// The `<pub>.substack.com` host a message comes from (plan intake-followups-mail-youtube WP-2):
+/// the `List-Id` when it is exactly `<pub>.substack.com` (one non-empty label), else
+/// `<local>.substack.com` for a `<local>@substack.com` sender, else `None`.
+#[must_use]
+pub fn substack_host(post: &MailPost) -> Option<String> {
+    const SUFFIX: &str = ".substack.com";
+    let single_label = |h: &str| {
+        h.strip_suffix(SUFFIX)
+            .is_some_and(|l| !l.is_empty() && !l.contains('.'))
+    };
+    if let Some(l) = post.list_id.as_deref() {
+        let l = l.trim().to_ascii_lowercase();
+        if single_label(&l) {
+            return Some(l);
+        }
+    }
+    let (local, domain) = post.from_addr.trim().rsplit_once('@')?;
+    if domain.eq_ignore_ascii_case("substack.com") && !local.is_empty() {
+        let h = format!("{}{SUFFIX}", local.to_ascii_lowercase());
+        return single_label(&h).then_some(h);
+    }
+    None
+}
+
 /// Query keys whose value is a literal target URL.
 const REDIRECT_KEYS: [&str; 3] = ["url", "u", "redirect"];
 

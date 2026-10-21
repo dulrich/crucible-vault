@@ -162,3 +162,53 @@ fn from_matcher_is_exact_or_domain_suffix() {
     let hit = match_newsletter(&post, &rows, |r| (r.0.as_slice(), r.1.as_deref()));
     assert_eq!(hit, Some(&rows[1]));
 }
+
+fn bare(from: &str, list_id: Option<&str>) -> MailPost {
+    MailPost {
+        message_id: "m".into(),
+        from_addr: from.into(),
+        from_name: String::new(),
+        list_id: list_id.map(str::to_owned),
+        subject: String::new(),
+        date: None,
+        html: None,
+        text: None,
+        urls: vec![],
+    }
+}
+
+#[test]
+fn substack_host_from_list_id_or_sender() {
+    let h = |f, l| substack_host(&bare(f, l));
+    let want = Some("examplepub.substack.com".to_owned());
+    assert_eq!(h("x@y.example", Some("examplepub.substack.com")), want);
+    assert_eq!(h("examplepub@substack.com", None), want);
+    assert_eq!(h("ExamplePub@Substack.com", None), want);
+    // List-Id wins over the sender.
+    assert_eq!(
+        h("other@substack.com", Some("examplepub.substack.com")),
+        want
+    );
+}
+
+#[test]
+fn substack_host_rejects_non_substack_and_malformed() {
+    let h = |f, l| substack_host(&bare(f, l));
+    assert_eq!(h("ann@news.example", Some("ann.news.example")), None);
+    assert_eq!(h("ann@news.example", None), None);
+    assert_eq!(h("x@y.example", Some("substack.com")), None);
+    assert_eq!(h("x@y.example", Some(".substack.com")), None);
+    assert_eq!(h("x@y.example", Some("a.b.substack.com")), None);
+    assert_eq!(h("@substack.com", None), None);
+    assert_eq!(h("a.b@substack.com", None), None);
+}
+
+#[test]
+fn url_host_is_lowercased_and_bare() {
+    assert_eq!(
+        url_host("https://User@ExamplePub.Substack.com:8080/feed?x=1#f"),
+        Some("examplepub.substack.com".to_owned())
+    );
+    assert_eq!(url_host("ftp://a.example/"), None);
+    assert_eq!(url_host("https:///x"), None);
+}
