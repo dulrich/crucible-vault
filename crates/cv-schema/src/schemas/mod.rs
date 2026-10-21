@@ -73,6 +73,7 @@ pub static STEP: Union = Union {
         Variant::of(&IMAGE_DESCRIBE, "Describe images"),
         Variant::of(&TRACK_YOUTUBE, "Track YouTube"),
         Variant::of(&TRACK_BLOGS, "Track blogs"),
+        Variant::of(&TRACK_MAIL, "Track mail"),
         Variant::of(&IGNORE_VIDEO, "Ignore video"),
         Variant::of(&DAILY_BRIEF, "Daily brief"),
         Variant::of(&CAPTURE_REPAIR, "Capture repair"),

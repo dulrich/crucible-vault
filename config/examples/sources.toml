@@ -5,6 +5,10 @@
 # [[blog]]: name, link (RSS/Atom feed), method (rss; others are skipped), tags, priority,
 #   canon (auto | substack | strip-params | keep-params), body (auto | full | snippet),
 #   paywall_markers (body phrases marking a post incomplete; default none).
+# [[newsletter]] (Maildir intake, plan auto-intake-sprint): name, from (exact address or @domain,
+#   case-insensitive), list_id, blog (the name of a [[blog]] row it mirrors; must exist), kind
+#   (default blog), tags, paywall_markers (united with the linked blog row's). A row needs a
+#   `from` or a `list_id`. Mail from an unmatched sender is still captured (source "unknown-sender").
 # skip / ignore rows are kept but excluded from runs.
 
 [[youtube]]
@@ -21,3 +25,12 @@ tags = ["example"]
 priority = "normal"
 canon = "auto"
 body = "auto"
+
+# [[newsletter]]
+# name = "Example Letter"
+# from = ["writer@news.example"]      # or "@news.example"
+# list_id = "letter.news.example"
+# blog = "Example Blog"
+# kind = "blog"
+# tags = ["example"]
+# paywall_markers = ["Upgrade to read the rest"]

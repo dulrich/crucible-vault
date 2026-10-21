@@ -18,6 +18,7 @@
 //! | `ImageDescribe` | [`image_describe`] | A2 WP-6 |
 //! | `TrackYoutube` | [`tracker::youtube`] | A2 WP-7 |
 //! | `TrackBlogs` | [`tracker::blogs`] | A2 WP-8 |
+//! | `TrackMail` | [`mail`] | auto-intake-sprint WP-4 |
 //! | `IgnoreVideo` | [`ignore`] | A2 WP-9 |
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
@@ -51,6 +52,9 @@ mod lint_tests;
 pub mod localize;
 #[cfg(test)]
 mod localize_tests;
+pub mod mail;
+#[cfg(test)]
+mod mail_tests;
 pub mod materialize;
 #[cfg(test)]
 mod materialize_tests;
@@ -560,6 +564,7 @@ step_modules! {
     ImageDescribe => image_describe::ImageDescribe,
     TrackYoutube => tracker::youtube::TrackYoutube,
     TrackBlogs => tracker::blogs::TrackBlogs,
+    TrackMail => mail::TrackMail,
     IgnoreVideo => ignore::IgnoreVideo,
     DailyBrief => daily_brief::DailyBrief,
     CaptureRepair => capture_repair::CaptureRepair,

@@ -13,7 +13,7 @@
 # Step `type`s: guard, capture, materialize, move, copy, set_props, remove_props, upsert_tags,
 # lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete, link_scan,
 # yt_metadata, yt_channel_enrich, x_discover, x_metadata, x_backfill, image_describe,
-# track_youtube, track_blogs, ignore_video, daily_brief, capture_repair.
+# track_youtube, track_blogs, track_mail, ignore_video, daily_brief, capture_repair.
 # Each step's other keys belong to its module (WP-10..13 document them; WP-10's in
 # crates/cv/src/steps/{materialize,capture,file,lint}.rs). Step string params take single-brace
 # placeholders {param.NAME}, {vars.NAME}, {path}, {period.day|week|month}; note/capture templates
@@ -380,6 +380,16 @@ group = "Ingest"
 resources = { note = false, keys = ["tracker::blogs"] }
 [[action.steps]]
 type = "track_blogs"
+
+# Maildir newsletter intake (plan auto-intake-sprint WP-4): pipelines.toml [mail] + sources.toml
+# [[newsletter]] configure it. The step itself holds the `intake::identity` key.
+[[action]]
+id = "track-mail"
+label = "Track newsletters (Maildir)"
+group = "Ingest"
+resources = { note = false, keys = ["tracker::mail"] }
+[[action.steps]]
+type = "track_mail"
 
 # Ignore Shorts: a new metadata note from an [ignore_shorts] channel, at most max_seconds long,
 # is ignored. The folder selector cannot exclude `_yt_metadata/_unavailable/` tombstones; they

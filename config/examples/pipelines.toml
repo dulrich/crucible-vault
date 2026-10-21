@@ -23,6 +23,11 @@ complete_percent = 80           # a probed post is complete when the feed delive
 window_days = 21               # content candidates are notes dated within this many days of the incoming item
 threshold_percent = 80          # containment percent at or above which a text counts as contained in another
 
+[mail]
+enabled = false
+maildir = ""                    # Maildir root outside the vault (new/ and loose *.eml are scanned); empty = unset
+processed = "cur"               # a handled new/ message moves to <maildir>/<processed>/<name>:2,S; loose files to <maildir>/processed/
+
 [image_describe]
 enabled = false
 # provider = "local"            # providers.toml provider id

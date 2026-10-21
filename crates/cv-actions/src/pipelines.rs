@@ -38,6 +38,8 @@ pub struct PipelinesConfig {
     pub intake: IntakeConfig,
     /// `[supersede]` (plan auto-intake-sprint WP-3).
     pub supersede: SupersedeConfig,
+    /// `[mail]` (plan auto-intake-sprint WP-4).
+    pub mail: MailPipeline,
 }
 
 impl PipelinesConfig {
@@ -54,6 +56,12 @@ impl PipelinesConfig {
         }
         if c.supersede.threshold_percent > 100 {
             return Err("supersede.threshold_percent must be at most 100".into());
+        }
+        let pr = c.mail.processed.trim();
+        if pr.is_empty() || pr.contains(['/', '\\']) || matches!(pr, "." | ".." | "new") {
+            return Err(
+                "mail.processed must be a plain directory name (not new, ., .. or a path)".into(),
+            );
         }
         for w in &c.daily_brief.weather {
             if !(-90.0..=90.0).contains(&w.lat) || !(-180.0..=180.0).contains(&w.lon) {
@@ -107,6 +115,28 @@ impl Default for XPipeline {
             enabled: false,
             metadata_root: "_x_metadata".into(),
             inbox: None,
+        }
+    }
+}
+
+/// `[mail]`: the Maildir newsletter intake (plan auto-intake-sprint WP-4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MailPipeline {
+    /// Master switch (default off).
+    pub enabled: bool,
+    /// The Maildir root (outside the vault); empty = unset, so `track_mail` is a no-op.
+    pub maildir: String,
+    /// The directory (under the Maildir) a processed `new/` message moves to (default `cur`).
+    pub processed: String,
+}
+
+impl Default for MailPipeline {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            maildir: String::new(),
+            processed: "cur".into(),
         }
     }
 }
@@ -346,14 +376,35 @@ pub struct SourcesConfig {
     pub youtube: Vec<YoutubeSource>,
     /// `[[blog]]` feeds.
     pub blog: Vec<BlogSource>,
+    /// `[[newsletter]]` mail senders (plan auto-intake-sprint WP-4).
+    pub newsletter: Vec<NewsletterSource>,
 }
 
 impl SourcesConfig {
     /// Parses a `sources.toml` table.
     pub fn from_table(t: &toml::Table) -> Result<Self, String> {
-        toml::Value::Table(t.clone())
+        let c: Self = toml::Value::Table(t.clone())
             .try_into()
-            .map_err(|e: toml::de::Error| e.message().to_owned())
+            .map_err(|e: toml::de::Error| e.message().to_owned())?;
+        for n in &c.newsletter {
+            if n.from.iter().all(|f| f.trim().is_empty())
+                && n.list_id.as_deref().is_none_or(|l| l.trim().is_empty())
+            {
+                return Err(format!(
+                    "newsletter {:?}: needs a `from` or a `list_id` matcher",
+                    n.name
+                ));
+            }
+            if let Some(b) = n.blog.as_deref().filter(|b| !b.trim().is_empty())
+                && !c.blog.iter().any(|r| r.name == b)
+            {
+                return Err(format!(
+                    "newsletter {:?}: blog {b:?} names no [[blog]] row",
+                    n.name
+                ));
+            }
+        }
+        Ok(c)
     }
 }
 
@@ -405,9 +456,65 @@ fn rss() -> String {
     "rss".into()
 }
 
+/// One `[[newsletter]]` mail sender (plan auto-intake-sprint WP-4): matched by `from` (an exact
+/// address, or `@domain` suffix) or `list_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewsletterSource {
+    /// Display name (also the `tracker_items.source_key` of its mails).
+    pub name: String,
+    /// Sender matchers, case-insensitive: `a@b.example` or `@b.example`.
+    #[serde(default)]
+    pub from: Vec<String>,
+    /// `List-Id` matcher.
+    #[serde(default)]
+    pub list_id: Option<String>,
+    /// The name of the `[[blog]]` row this newsletter mirrors (access evidence and dedup source).
+    #[serde(default)]
+    pub blog: Option<String>,
+    /// The `kinds.toml` kind its mails are filed as (default `blog`).
+    #[serde(default = "blog_kind")]
+    pub kind: String,
+    /// Extra tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Body phrases (case-insensitive) marking an email incomplete (united with the linked blog row's).
+    #[serde(default)]
+    pub paywall_markers: Vec<String>,
+}
+
+fn blog_kind() -> String {
+    "blog".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newsletter_rows_and_mail_config_are_validated() {
+        let src = |extra: &str| {
+            let t: toml::Table = format!(
+                "[[blog]]\nname = \"B\"\nlink = \"https://b.example/feed\"\n[[newsletter]]\nname = \"N\"\n{extra}"
+            )
+            .parse()
+            .unwrap();
+            SourcesConfig::from_table(&t)
+        };
+        assert!(src("from = [\"@b.example\"]\nblog = \"B\"").is_ok());
+        assert!(src("list_id = \"l.b.example\"").is_ok());
+        assert!(src("blog = \"B\"").unwrap_err().contains("matcher"));
+        assert!(
+            src("from = [\"a@b.example\"]\nblog = \"Nope\"")
+                .unwrap_err()
+                .contains("names no [[blog]]")
+        );
+        let mail = |m: &str| PipelinesConfig::from_table(&format!("[mail]\n{m}").parse().unwrap());
+        assert_eq!(mail("").unwrap().mail.processed, "cur");
+        for bad in ["new", "..", "a/b", ""] {
+            assert!(mail(&format!("processed = {bad:?}")).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn empty_tables_mean_everything_off() {

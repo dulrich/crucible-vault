@@ -198,6 +198,7 @@ const STEPS: &[(&str, &str)] = &[
     ),
     ("track_youtube", "limit_per_source = 25"),
     ("track_blogs", ""),
+    ("track_mail", ""),
     ("ignore_video", "mode = \"manual\""),
     ("daily_brief", ""),
     ("capture_repair", "folder = \"daily/day\"\nlimit = 10"),
@@ -280,6 +281,11 @@ complete_percent = 75
 window_days = 14
 threshold_percent = 70
 
+[mail]
+enabled = true
+maildir = "/var/mail/example"
+processed = "cur"
+
 [image_describe]
 enabled = true
 provider = "local"
@@ -323,6 +329,15 @@ priority = "skip"
 canon = "strip-params"
 body = "full"
 paywall_markers = ["Subscribe to keep reading"]
+
+[[newsletter]]
+name = "Example Letter"
+from = ["writer@news.example", "@news.example"]
+list_id = "letter.news.example"
+blog = "Example"
+kind = "blog"
+tags = ["a"]
+paywall_markers = ["Upgrade to read on"]
 "#];
 
 const SCHEDULES: &[&str] = &[

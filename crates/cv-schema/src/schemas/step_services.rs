@@ -263,6 +263,14 @@ pub static TRACK_BLOGS: Record = Record {
     summary: None,
 };
 
+/// `track_mail` — `crates/cv/src/steps/mail.rs` (no params; config from `pipelines.toml` `[mail]` + `sources.toml` `[[newsletter]]`).
+pub static TRACK_MAIL: Record = Record {
+    name: "track_mail",
+    fields: &[],
+    rules: &[],
+    summary: None,
+};
+
 /// `ignore_video` — `crates/cv/src/steps/ignore.rs` (`mode`, `KEYS`).
 pub static IGNORE_VIDEO: Record = Record {
     name: "ignore_video",

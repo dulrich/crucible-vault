@@ -81,6 +81,29 @@ pub static PIPE_BLOGS: Record = Record {
     summary: None,
 };
 
+/// `[mail]` (plan auto-intake-sprint WP-4).
+pub static PIPE_MAIL: Record = Record {
+    name: "mail",
+    fields: &[
+        field("enabled", "Enabled", "Master switch", Node::Bool).dflt(D::Bool(false)),
+        field(
+            "maildir",
+            "Maildir",
+            "Maildir root outside the vault (empty = unset: track_mail does nothing)",
+            Node::Str,
+        ),
+        field(
+            "processed",
+            "Processed",
+            "Directory under the Maildir a handled new/ message moves to",
+            Node::Str,
+        )
+        .dflt(D::Str("cur")),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `[supersede]` (plan auto-intake-sprint WP-3).
 pub static PIPE_SUPERSEDE: Record = Record {
     name: "supersede",
@@ -303,6 +326,12 @@ pub static PIPELINES_FILE: Record = Record {
             Node::Record(&PIPE_SUPERSEDE),
         ),
         field(
+            "mail",
+            "Mail",
+            "Maildir newsletter intake",
+            Node::Record(&PIPE_MAIL),
+        ),
+        field(
             "image_describe",
             "Image describe",
             "Clip image descriptions",
@@ -409,6 +438,49 @@ pub static SOURCE_BLOG: Record = Record {
     summary: None,
 };
 
+/// One `[[newsletter]]` mail sender (plan auto-intake-sprint WP-4).
+pub static SOURCE_NEWSLETTER: Record = Record {
+    name: "newsletter",
+    fields: &[
+        field(
+            "name",
+            "Name",
+            "Display name (the Intake source)",
+            Node::Str,
+        )
+        .req(),
+        field(
+            "from",
+            "From",
+            "Sender matchers, case-insensitive: a@b.example or @b.example",
+            STR_LIST,
+        ),
+        field("list_id", "List-Id", "List-Id header matcher", Node::Str),
+        field(
+            "blog",
+            "Blog",
+            "Name of the [[blog]] row this newsletter mirrors",
+            Node::Str,
+        ),
+        field(
+            "kind",
+            "Kind",
+            "kinds.toml kind its mails are filed as",
+            Node::Str,
+        )
+        .dflt(D::Str("blog")),
+        field("tags", "Tags", "Extra tags", STR_LIST),
+        field(
+            "paywall_markers",
+            "Paywall markers",
+            "Body phrases (case-insensitive) that mark an email incomplete",
+            STR_LIST,
+        ),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `sources.toml`.
 pub static SOURCES_FILE: Record = Record {
     name: "sources.toml",
@@ -424,6 +496,12 @@ pub static SOURCES_FILE: Record = Record {
             "Blogs",
             "One [[blog]] each",
             Node::List(&Node::Record(&SOURCE_BLOG)),
+        ),
+        field(
+            "newsletter",
+            "Newsletters",
+            "One [[newsletter]] each",
+            Node::List(&Node::Record(&SOURCE_NEWSLETTER)),
         ),
     ],
     rules: &[],

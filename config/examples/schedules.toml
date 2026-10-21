@@ -16,5 +16,9 @@ action = "track-blogs"
 every = "3h"
 
 [[schedule]]
+action = "track-mail"
+every = "15m"
+
+[[schedule]]
 action = "daily-brief"
 daily = "06:00"

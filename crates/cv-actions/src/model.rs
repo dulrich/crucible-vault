@@ -122,6 +122,8 @@ step_kinds! {
     ImageDescribe = "image_describe", true;
     TrackYoutube = "track_youtube", true;
     TrackBlogs = "track_blogs", true;
+    /// Maildir newsletter intake (plan `auto-intake-sprint` WP-4).
+    TrackMail = "track_mail", true;
     IgnoreVideo = "ignore_video", true;
     DailyBrief = "daily_brief", true;
     /// One-time blog-capture repair (plan `usability-sprint-captures-links` WP-2).
@@ -145,7 +147,7 @@ impl StepKind {
     #[must_use]
     pub fn intrinsic_resource_keys(self) -> &'static [&'static str] {
         match self {
-            StepKind::TrackBlogs => &[INTAKE_IDENTITY_KEY],
+            StepKind::TrackBlogs | StepKind::TrackMail => &[INTAKE_IDENTITY_KEY],
             _ => &[],
         }
     }
