@@ -170,3 +170,211 @@ fn b64url_and_json_helpers() {
     );
     assert_eq!(json_e(r#"{"p":"x"}"#), None);
 }
+
+// ---- Round 2 (plan intake-round-2-clean-dedupe-reading WP-1) ----
+
+const AVATAR: &str = "https://substackcdn.com/image/fetch/$s_!eF!,w_40,c_scale,f_png,q_auto:good/https%3A%2F%2Fcdn.example%2Favatar.png";
+const BIG_URL: &str = "https://substackcdn.com/image/fetch/$s_!gH!,w_1100,c_limit,f_auto/https%3A%2F%2Fbucket.example%2Fchart-1100x733.png";
+
+fn html_fixture() -> String {
+    format!(
+        "<html><head><title>A Title</title><style>.x{{color:red;margin:0}}@media (max-width:600px){{.x{{width:1px}}}}</style></head>\
+         <body><script>var a = 1;</script><div style=\"display:none\">&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;</div>\
+         <p>First paragraph with <b>bold</b> text.</p>\
+         <a href=\"https://substack.com/@writer\"><img src=\"{AVATAR}\" width=\"32\" height=\"32\"></a>\
+         <a href=\"https://writer.example/p/first\"><img src=\"https://t.example/px.gif\" width=\"1\" height=\"1\"></a>\
+         <img src=\"https://cdn.example/logo.png\" width=\"183\" height=\"40\">\
+         <img src=\"https://cdn.example/dot.png\" style=\"width: 18px;height: 18px\">\
+         <img src=\"https://cdn.example/chart.png\" width=\"1100\" height=\"733\" alt=\"chart\">\
+         <p>Upgrade to paid to keep reading.</p></body></html>"
+    )
+}
+
+#[test]
+fn html_pass_removes_style_head_script_spacers_and_small_images() {
+    let out = strip_html_chrome(&html_fixture());
+    for gone in [
+        "<style",
+        "<head",
+        "<script",
+        "color:red",
+        "A Title",
+        "zwnj",
+        "avatar",
+        "px.gif",
+        "dot.png",
+    ] {
+        assert!(!out.contains(gone), "{gone} survived: {out}");
+    }
+    for kept in [
+        "logo.png",
+        "chart.png",
+        "First paragraph with <b>bold</b> text.",
+    ] {
+        assert!(out.contains(kept), "{kept} lost: {out}");
+    }
+}
+
+#[test]
+fn html_pass_keeps_paywall_marker_and_is_idempotent() {
+    let out = strip_html_chrome(&html_fixture());
+    assert!(out.contains("Upgrade to paid to keep reading."));
+    assert_eq!(strip_html_chrome(&out), out);
+    assert!(!strip_html_chrome("<header>Top</header><p>x</p>").is_empty());
+    assert_eq!(
+        strip_html_chrome("<header>Top</header>"),
+        "<header>Top</header>"
+    );
+}
+
+#[test]
+fn html_pass_drops_anchor_wrapping_only_a_pixel_but_keeps_text_anchors() {
+    let h = "<a href=\"https://w.example/\"><img src=\"https://t.example/o/abc\"></a>\
+             <a href=\"https://w.example/p\"><img src=\"https://cdn.example/i.png\" width=\"20\"> Read the post</a>\
+             <a href=\"https://w.example/q\"><img src=\"https://cdn.example/big.png\" width=\"600\"></a>";
+    let out = strip_html_chrome(h);
+    assert!(!out.contains("t.example"));
+    assert!(out.contains("<a href=\"https://w.example/p\"> Read the post</a>"));
+    assert!(out.contains("big.png"));
+    assert_eq!(out.matches("<a ").count(), 2);
+}
+
+#[test]
+fn spacer_lines_are_dropped_at_the_markdown_stage() {
+    let md =
+        "Real intro.\n\n\u{34f} \u{ad}\u{34f} \u{ad}\u{200c}\n\n\u{a0}\u{a0}\n\nSecond paragraph.";
+    assert_eq!(clean_body(md), "Real intro.\n\nSecond paragraph.");
+}
+
+#[test]
+fn referral_block_goes_with_its_paragraph_and_buttons() {
+    let md = format!(
+        "Prose before.\n\n#### Invite your friends and earn rewards\n\n\
+         If you enjoy Some Letter, share it with your friends and earn rewards when they subscribe.\n\n\
+         [Invite Friends](https://writer.example/leaderboard?utm_source=x)\n\
+         [![]({ICON})Subscribed](https://substack.com/redirect/2/{SUB_PAYLOAD}.sig)\n\n\
+         Prose after, about inviting friends to dinner."
+    );
+    assert_eq!(
+        clean_body(&md),
+        "Prose before.\n\nProse after, about inviting friends to dinner."
+    );
+}
+
+#[test]
+fn css_shaped_lines_are_dropped_but_code_prose_is_not() {
+    let css = "@media only screen and (max-width:639px){img.stretch{height:auto !important;width:100%}.cta{color:inherit;display:block}.hdr{margin:0;padding:0}.ftr{font-size:12px;color:#888}.btn{border:0;background:#fff;padding:4px 8px}}";
+    let prose = "In Rust a struct is `struct A { x: u32 }` and the closure `|a| { a + 1 }` returns a value; see the book.";
+    let md = format!("{css}\n\n{prose}");
+    assert_eq!(clean_body(&md), prose);
+}
+
+#[test]
+fn icon_shapes_are_widened() {
+    for src in [
+        "https://substackcdn.com/image/fetch/w_36,c_scale,f_png/https%3A%2F%2Fsubstack.com%2Ficon%2FLucideShare2%3Fv%3D4",
+        "https://substackcdn.com/image/fetch/$s_!x!,w_40,c_scale,f_png/https%3A%2F%2Fcdn.example%2Fcheck.png",
+        "https://hs.example/hubfs/Social%20Icons/light-facebook-icon.png",
+        "https://cdn.example/icon/arrow.svg",
+    ] {
+        assert!(is_icon(src), "{src}");
+        assert_eq!(
+            clean_body(&format!("Text.\n\n![x]({src}) tail text")),
+            "Text.\n\n tail text"
+        );
+    }
+    assert!(!is_icon(CONTENT_IMG));
+    assert!(!is_icon(BIG_URL));
+}
+
+#[test]
+fn avatar_in_profile_link_and_social_icon_runs_are_dropped_content_survives() {
+    let md = format!(
+        "[![]({AVATAR})](https://substack.com/@writer)\n\n\
+         [![By Writer]({AVATAR}) Writer](https://substack.com/@writer)\n\n\
+         [![](https://cdn.example/a.png)](https://substack.com/@writer)\n\n\
+         [![chart]({BIG_URL})](https://writer.example/p/first)\n\n\
+         [![]({ICON})](https://x.example/a) [![]({ICON})](https://x.example/b)"
+    );
+    let out = clean_body(&md);
+    assert_eq!(
+        out,
+        format!(
+            "[ Writer](https://substack.com/@writer)\n\n[![chart]({BIG_URL})](https://writer.example/p/first)"
+        )
+    );
+}
+
+#[test]
+fn dims_hook_drops_small_local_images_and_keeps_large() {
+    let md = "Intro.\n\n![](_attachments/a1.png)\n\n[![](_attachments/b2.png)](https://w.example/p)\n\n![chart](_attachments/c3.png)\n\n![](_attachments/d4.png)\n\nOutro.";
+    let dims = |u: &str| match u {
+        "_attachments/a1.png" => Some((36, 36)),
+        "_attachments/b2.png" => Some((1, 1)),
+        "_attachments/c3.png" => Some((1100, 611)),
+        _ => None,
+    };
+    let out = clean_body_with(md, &dims);
+    assert_eq!(
+        out,
+        "Intro.\n\n![chart](_attachments/c3.png)\n\n![](_attachments/d4.png)\n\nOutro."
+    );
+    assert_eq!(clean_body_with(&out, &dims), out);
+    assert_eq!(clean_body(md), clean_body_with(md, &|_| None));
+}
+
+#[test]
+fn full_round_two_pipeline_is_clean_prose_identical_and_idempotent() {
+    let md = crate_pipeline(&html_fixture());
+    assert!(!md.contains("color:red") && !md.contains("avatar") && !md.contains("px.gif"));
+    assert!(md.contains("First paragraph with **bold** text."));
+    assert!(md.contains("chart.png"));
+    assert!(md.contains("Upgrade to paid to keep reading."));
+    assert_eq!(clean_body(&md), md);
+}
+
+fn crate_pipeline(html: &str) -> String {
+    clean_body(&crate::html_to_markdown(&strip_html_chrome(html)))
+}
+
+#[test]
+fn resolve_link_is_the_wp2_seam() {
+    assert_eq!(
+        resolve_link(&format!(
+            "https://substack.com/redirect/2/{POST_PAYLOAD}.sig"
+        ))
+        .as_deref(),
+        Some("https://writer.example/p/first-post?r=abc&keep=1")
+    );
+    assert_eq!(
+        resolve_link("https://substack.com/redirect/2/!!bad.sig"),
+        None
+    );
+    assert_eq!(
+        resolve_link("https://writer.example/p/a?utm_source=x&k=1").as_deref(),
+        Some("https://writer.example/p/a?k=1")
+    );
+}
+
+#[test]
+fn small_hints_and_dims_thresholds() {
+    assert_eq!(
+        resize_hints("https://h/image/fetch/$s_!a!,w_36,h_36,c_fill/https%3A%2F%2Fo%2Fw_999.png"),
+        vec![36, 36]
+    );
+    assert!(is_icon(
+        "https://h/image/fetch/w_64,c_fill/https%3A%2F%2Fo%2Fa.png"
+    ));
+    assert!(!is_icon(
+        "https://h/image/fetch/w_65,c_fill/https%3A%2F%2Fo%2Fa.png"
+    ));
+    assert!(!is_icon(
+        "https://h/image/fetch/w_1100,h_618,c_fill/https%3A%2F%2Fo%2Fa.png"
+    ));
+}
+
+#[test]
+fn prose_quoting_inline_braces_code_survives() {
+    let prose = "The config example { a: 1; b: 2; } is shown inline in this long sentence that keeps going well past the old forty character floor, so it would once have matched, and it carries on with more ordinary words until it also clears the two hundred byte minimum.";
+    assert_eq!(clean_body(prose), prose);
+}

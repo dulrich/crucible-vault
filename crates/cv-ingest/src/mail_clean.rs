@@ -18,30 +18,157 @@
 //! `post_id`, `isFreemail`, `token` on Substack hosts). Prose paragraphs are never removed or
 //! altered other than link-target rewriting.
 //!
-//! The paywall-marker verdict must be taken on the **pre-cleanup** body by the caller (removing an
-//! "Upgrade to paid" line must never turn a partial message complete).
+//! Round 2 (plan `intake-round-2-clean-dedupe-reading` WP-1, measured on 32 newsletter messages)
+//! also removes the residue round 1 left: [`strip_html_chrome`] is an HTML-stage pre-pass that cuts
+//! `<head>`/`<style>`/`<script>` elements (the CSS that leaked into the body), preheader spacer
+//! elements (U+034F, soft hyphen, zero-width and NBSP runs of at least 4) and every `<img>` that is
+//! a tracking pixel, an icon or an avatar, with its wrapping `<a>` when the anchor held only that
+//! image. A pixel/icon/avatar is: a known tracker or icon URL (`substack.com/icon/…`, a filename
+//! containing `icon`), an image whose every known dimension is **at most 64 px** (`width`/`height`
+//! attributes, inline `style` `width`/`height`, or the `w_N`/`h_N` resize hints of an image-CDN
+//! URL; this includes 1x1), or any image inside a link to a profile (`substack.com/@…`,
+//! `/profile/…`, also behind a redirect wrapper). Avatars and icons are removed, never resized.
+//! Publication logos (for example 183x40) and post-body images are kept.
+//!
+//! At the markdown stage [`clean_body`] additionally drops preheader spacer-only lines, the
+//! referral block ("Invite your friends and earn rewards" heading, its paragraph and its
+//! `Invite Friends`/`Subscribed` link lines), a CSS-shaped line (`@media`/`@font-face`/rule runs,
+//! the backstop for style that leaked anyway), and the same pixel/icon/avatar images (by URL
+//! shape, with the 64 px threshold above). [`clean_body_with`] takes a caller-supplied
+//! `Fn(&str) -> Option<(u32, u32)>` giving the decoded size of an already-localized image, and
+//! drops a markdown image (and its wrapping link) reported at 64x64 or smaller; the hook keeps
+//! this crate free of I/O.
+//!
+//! The paywall-marker verdict must be taken on the **pre-cleanup** markdown by the caller (removing
+//! an "Upgrade to paid" line must never turn a partial message complete). `strip_html_chrome` only
+//! removes styling, spacers and small images, none of which can carry a paywall marker, so the
+//! caller may take the verdict on the markdown of the stripped HTML.
 //!
 //! Pure: no I/O, no async.
 
 use super::{percent_decode, unwrap_redirect};
 
+/// Looks up the decoded `(width, height)` of an already-localized image by its markdown target.
+pub type Dims<'a> = &'a dyn Fn(&str) -> Option<(u32, u32)>;
+
+/// Images at most this many pixels in every known dimension are pixels, icons or avatars.
+const SMALL_PX: u32 = 64;
+
 /// Cleans newsletter chrome out of `md` (see the module doc). Idempotent.
 #[must_use]
 pub fn clean_body(md: &str) -> String {
+    clean_body_with(md, &|_| None)
+}
+
+/// [`clean_body`] plus the image-dimension hook: a markdown image (and its wrapping link) whose
+/// target `dims` reports at 64x64 or smaller is dropped. Idempotent.
+#[must_use]
+pub fn clean_body_with(md: &str, dims: Dims<'_>) -> String {
     let lines: Vec<&str> = md.lines().collect();
     let fenced = fence_mask(&lines);
     let end = footer_start(&lines, &fenced).unwrap_or(lines.len());
+    let referral = referral_mask(&lines[..end], &fenced[..end]);
     let mut out: Vec<String> = Vec::with_capacity(end);
     for (i, line) in lines[..end].iter().enumerate() {
         if fenced[i] {
             out.push((*line).to_owned());
-        } else if is_chrome_line(line) {
+        } else if referral[i] || is_spacer_line(line) || is_css_line(line) || is_chrome_line(line) {
             out.push(String::new());
         } else {
-            out.push(rewrite_line(line));
+            out.push(rewrite_line(line, dims));
         }
     }
     collapse_blanks(&out, &fenced[..end])
+}
+
+/// Characters newsletters use as invisible preheader padding.
+fn is_spacer_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{034f}' | '\u{00ad}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{00a0}'
+    )
+}
+
+/// A non-blank line made only of whitespace and spacer characters.
+fn is_spacer_line(line: &str) -> bool {
+    !line.trim().is_empty() && line.chars().all(|c| c.is_whitespace() || is_spacer_char(c))
+}
+
+/// A long line that is structurally CSS: at least 200 bytes, no backtick or markdown link, and
+/// either an at-rule (`@media`/`@font-face`/`@import`) with a rule body, or at least 3
+/// `selector { prop: val; }` groups. Prose quoting inline code is never matched.
+fn is_css_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.len() < 200 || t.contains('`') || t.contains("](") {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    let at_rule = ["@media", "@font-face", "@import"]
+        .iter()
+        .any(|a| lower.contains(a));
+    let groups = t
+        .split('}')
+        .filter(|g| {
+            g.split_once('{')
+                .is_some_and(|(_, b)| b.contains(':') && b.contains(';'))
+        })
+        .count();
+    t.contains('{') && ((at_rule && groups >= 1) || groups >= 3)
+}
+
+/// The lines of the referral block: an "Invite your friends" heading, then the paragraph and
+/// link-only lines that follow it.
+fn referral_mask(lines: &[&str], fenced: &[bool]) -> Vec<bool> {
+    let mut mask = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        let heading = t.starts_with('#') || t.starts_with("**");
+        if fenced[i]
+            || !heading
+            || !norm_label(t.trim_start_matches('#')).starts_with("invite your friends")
+        {
+            i += 1;
+            continue;
+        }
+        mask[i] = true;
+        let mut j = i + 1;
+        loop {
+            while j < lines.len() && lines[j].trim().is_empty() {
+                j += 1;
+            }
+            let start = j;
+            while j < lines.len() && !lines[j].trim().is_empty() && !fenced[j] {
+                j += 1;
+            }
+            if start == j || !referral_block(&lines[start..j]) {
+                break;
+            }
+            mask[start..j].iter_mut().for_each(|m| *m = true);
+        }
+        i = j.max(i + 1);
+    }
+    mask
+}
+
+/// Whether a paragraph belongs to the referral block: the "earn rewards" blurb, or link-only
+/// lines labelled `Invite Friends`/`Subscribed`.
+fn referral_block(block: &[&str]) -> bool {
+    let flat = norm_label(&block.join(" "));
+    if flat.contains("earn rewards") || flat.contains("share it with your friends") {
+        return true;
+    }
+    block.iter().all(|l| {
+        only_items(l).is_some_and(|items| {
+            items.iter().all(|sp| {
+                !sp.image
+                    && matches!(
+                        norm_label(&l[sp.inner.0..sp.inner.1]).as_str(),
+                        "invite friends" | "subscribed" | "invite" | "refer a friend"
+                    )
+            })
+        })
+    })
 }
 
 /// Which lines sit inside (or on the delimiter of) a fenced code block.
@@ -259,10 +386,48 @@ const CHROME_LABELS: [&str; 17] = [
     "get the app",
 ];
 
-/// Substack's button icons are `substackcdn.com/image/fetch/…substack.com%2Ficon%2F…`.
+/// The `w_N`/`h_N` resize hints of an image-CDN URL (only the part before the embedded origin).
+fn resize_hints(src: &str) -> Vec<u32> {
+    let url = src.split_whitespace().next().unwrap_or("");
+    let lower = url.to_ascii_lowercase();
+    let cut = ["https%3a", "http%3a", "/https:", "/http:"]
+        .iter()
+        .filter_map(|m| lower.find(m))
+        .min()
+        .unwrap_or(lower.len());
+    lower[..cut]
+        .split([',', '/'])
+        .filter_map(|tok| {
+            let n = tok.strip_prefix("w_").or_else(|| tok.strip_prefix("h_"))?;
+            n.parse::<u32>().ok()
+        })
+        .collect()
+}
+
+/// Icons and avatars by URL shape: Substack's button icons (`…substack.com%2Ficon%2F…`), any
+/// `/icon/` path or `…icon….<ext>` filename, or an image-CDN resize hint of at most 64 px (`w_36`,
+/// `w_40`, `w_48`, `h_…`).
 fn is_icon(src: &str) -> bool {
-    let l = src.to_ascii_lowercase();
-    l.contains("substack.com%2ficon%2f") || l.contains("substack.com/icon/")
+    let url = src.split_whitespace().next().unwrap_or("");
+    let l = url.to_ascii_lowercase();
+    if l.contains("substack.com%2ficon%2f")
+        || l.contains("substack.com/icon/")
+        || l.contains("%2ficon%2f")
+    {
+        return true;
+    }
+    let path = l.split(['?', '#']).next().unwrap_or("");
+    if path.contains("/icon/") || path.rsplit('/').next().is_some_and(|f| f.contains("icon")) {
+        return true;
+    }
+    let hints = resize_hints(url);
+    !hints.is_empty() && hints.iter().all(|n| *n <= SMALL_PX)
+}
+
+/// A markdown image to drop: a pixel, icon or avatar by URL shape, or reported small by `dims`.
+fn is_small_image(dest: &str, dims: Dims<'_>) -> bool {
+    let url = dest.split_whitespace().next().unwrap_or("");
+    is_pixel(url) || is_icon(url) || dims(url).is_some_and(|(w, h)| w <= SMALL_PX && h <= SMALL_PX)
 }
 
 /// Whether a whole line is newsletter chrome (button row, CTA, or a "forwarded" prompt).
@@ -459,13 +624,31 @@ fn json_e(json: &str) -> Option<String> {
 }
 
 /// What a link target becomes.
-enum Target {
+pub(crate) enum Target {
     Keep(String),
     /// The target cannot be trusted or derived: keep the anchor text only.
     Drop,
 }
 
-fn resolve(url: &str) -> Target {
+/// The resolver seam (plan `intake-round-2-clean-dedupe-reading` WP-1, audit M3): `Some(url)` is
+/// the trusted target of `url` with tracking params stripped (a redirect wrapper unwrapped), `None`
+/// means the target cannot be trusted or derived and the link is dropped. WP-2 calls this from
+/// `crate::mail` to derive a post URL.
+pub(crate) fn resolve_link(url: &str) -> Option<String> {
+    match resolve(url) {
+        Target::Keep(k) => Some(k),
+        Target::Drop => None,
+    }
+}
+
+/// Whether `url` is a profile page (`substack.com/@handle`, `/profile/…`).
+fn is_profile_url(url: &str) -> bool {
+    split_url(url).is_some_and(|(host, path, _)| {
+        is_substack_host(&host) && (path.starts_with("/@") || path.starts_with("/profile/"))
+    })
+}
+
+pub(crate) fn resolve(url: &str) -> Target {
     let Some((host, path, query)) = split_url(url) else {
         return Target::Keep(url.to_owned());
     };
@@ -507,8 +690,9 @@ fn resolve(url: &str) -> Target {
     Target::Keep(strip_tracking(url))
 }
 
-/// Rewrites the links of one line (pixels removed, redirects unwrapped, tracking params dropped).
-fn rewrite_line(line: &str) -> String {
+/// Rewrites the links of one line (pixels, icons, avatars and `dims`-small images removed,
+/// redirects unwrapped, tracking params dropped).
+fn rewrite_line(line: &str, dims: Dims<'_>) -> String {
     let mut out = String::with_capacity(line.len());
     let mut i = 0;
     while i < line.len() {
@@ -518,25 +702,32 @@ fn rewrite_line(line: &str) -> String {
         {
             let dest = &line[sp.dest.0..sp.dest.1];
             if sp.image {
-                if !is_pixel(dest) {
+                if !is_small_image(dest, dims) {
                     out.push_str(&line[sp.start..sp.end]);
                 }
             } else {
-                let inner = rewrite_line(&line[sp.inner.0..sp.inner.1]);
+                let inner_src = &line[sp.inner.0..sp.inner.1];
+                let mut inner = rewrite_line(inner_src, dims);
                 let (url, title) = dest
                     .split_once(char::is_whitespace)
                     .map_or((dest, ""), |(u, t)| (u, t));
                 match resolve(url) {
                     Target::Keep(k) => {
-                        out.push('[');
-                        out.push_str(&inner);
-                        out.push_str("](");
-                        out.push_str(&k);
-                        if !title.is_empty() {
-                            out.push(' ');
-                            out.push_str(title);
+                        if is_profile_url(&k) {
+                            inner = strip_images(&inner);
                         }
-                        out.push(')');
+                        // A link that held only dropped images leaves nothing behind.
+                        if !(inner.trim().is_empty() && !inner_src.trim().is_empty()) {
+                            out.push('[');
+                            out.push_str(&inner);
+                            out.push_str("](");
+                            out.push_str(&k);
+                            if !title.is_empty() {
+                                out.push(' ');
+                                out.push_str(title);
+                            }
+                            out.push(')');
+                        }
                     }
                     Target::Drop => out.push_str(&inner),
                 }
@@ -548,6 +739,273 @@ fn rewrite_line(line: &str) -> String {
         i += c.len_utf8();
     }
     out
+}
+
+// ---- HTML-stage pre-pass ----
+
+/// Strips newsletter chrome from message HTML before conversion (see the module doc): `<head>`,
+/// `<style>` and `<script>` elements, preheader spacer elements, and pixel/icon/avatar `<img>`s
+/// (with their wrapping `<a>` when it held only that image). Idempotent; never touches text.
+#[must_use]
+pub fn strip_html_chrome(html: &str) -> String {
+    let mut s = html.to_owned();
+    for tag in ["head", "style", "script"] {
+        s = remove_elements(&s, tag);
+    }
+    for tag in ["span", "p", "div"] {
+        s = remove_spacer_elements(&s, tag);
+    }
+    strip_small_images(&s, false)
+}
+
+/// Whether the byte after `<name` ends the tag name (so `<head` does not match `<header`).
+fn tag_boundary(lower: &str, after: usize) -> bool {
+    matches!(
+        lower.as_bytes().get(after),
+        Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+    )
+}
+
+/// Byte offset of the next `<name` tag at or after `from` (name boundary respected).
+fn find_open(lower: &str, name: &str, from: usize) -> Option<usize> {
+    let open = format!("<{name}");
+    let mut i = from;
+    while let Some(rel) = lower.get(i..)?.find(&open) {
+        let at = i + rel;
+        if tag_boundary(lower, at + open.len()) {
+            return Some(at);
+        }
+        i = at + open.len();
+    }
+    None
+}
+
+/// Offset one past the `>` of the `</name …>` closing tag at or after `from`.
+fn find_close_end(lower: &str, name: &str, from: usize) -> Option<usize> {
+    let close = format!("</{name}");
+    let mut i = from;
+    while let Some(rel) = lower.get(i..)?.find(&close) {
+        let at = i + rel;
+        if tag_boundary(lower, at + close.len()) {
+            return lower[at..].find('>').map(|g| at + g + 1);
+        }
+        i = at + close.len();
+    }
+    None
+}
+
+/// Removes every `<name>…</name>` element (an unclosed one is left alone).
+fn remove_elements(s: &str, name: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while let Some(at) = find_open(&lower, name, i) {
+        let Some(end) = find_close_end(&lower, name, at) else {
+            break;
+        };
+        out.push_str(&s[i..at]);
+        i = end;
+    }
+    out.push_str(&s[i..]);
+    out
+}
+
+/// Number of spacer units (spacer chars and spacer entities) in `inner`, or `None` when it holds
+/// anything else than whitespace and spacers.
+fn spacer_units(inner: &str) -> Option<usize> {
+    let mut units = 0;
+    let mut it = inner.char_indices();
+    while let Some((i, c)) = it.next() {
+        if c == '&' {
+            let rest = &inner[i + 1..];
+            let semi = rest.find(';').filter(|&e| e <= 8)?;
+            let ent = rest[..semi].to_ascii_lowercase();
+            let ok = matches!(
+                ent.as_str(),
+                "nbsp"
+                    | "shy"
+                    | "zwnj"
+                    | "zwj"
+                    | "#847"
+                    | "#x34f"
+                    | "#173"
+                    | "#xad"
+                    | "#160"
+                    | "#xa0"
+                    | "#8203"
+                    | "#8204"
+                    | "#8205"
+                    | "#x200b"
+                    | "#x200c"
+                    | "#x200d"
+                    | "#65279"
+                    | "#xfeff"
+            );
+            if !ok {
+                return None;
+            }
+            units += 1;
+            for _ in 0..semi + 1 {
+                it.next();
+            }
+        } else if is_spacer_char(c) {
+            units += 1;
+        } else if !c.is_whitespace() {
+            return None;
+        }
+    }
+    Some(units)
+}
+
+/// Removes `<name>` elements holding only a run (at least 4) of preheader spacers.
+fn remove_spacer_elements(s: &str, name: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while let Some(at) = find_open(&lower, name, i) {
+        let Some(gt) = lower[at..].find('>').map(|g| at + g + 1) else {
+            break;
+        };
+        let inner_end = lower[gt..].find('<').map_or(lower.len(), |r| gt + r);
+        let removable = spacer_units(&s[gt..inner_end]).is_some_and(|n| n >= 4)
+            && lower[inner_end..].starts_with(&format!("</{name}"));
+        if let (true, Some(end)) = (removable, find_close_end(&lower, name, inner_end)) {
+            out.push_str(&s[i..at]);
+            i = end;
+        } else {
+            out.push_str(&s[i..gt]);
+            i = gt;
+        }
+    }
+    out.push_str(&s[i..]);
+    out
+}
+
+/// The value of attribute `name` in the open tag `tag` (quotes handled, entities left as is).
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let pat = format!("{name}=");
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(&pat) {
+        let at = from + rel;
+        from = at + pat.len();
+        let before = lower[..at].chars().next_back();
+        if !before.is_some_and(|c| c.is_whitespace() || c == '"' || c == '\'') {
+            continue;
+        }
+        let rest = &tag[from..];
+        return Some(match rest.chars().next()? {
+            q @ ('"' | '\'') => rest[1..].split(q).next().unwrap_or("").to_owned(),
+            _ => rest
+                .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                .next()
+                .unwrap_or("")
+                .to_owned(),
+        });
+    }
+    None
+}
+
+/// A pixel size: digits with an optional `px` (a percentage or `auto` is unknown).
+fn parse_px(v: &str) -> Option<u32> {
+    let v = v.trim().to_ascii_lowercase();
+    let v = v.trim_end_matches("!important").trim();
+    v.strip_suffix("px").unwrap_or(v).trim().parse().ok()
+}
+
+/// The pixel `width`/`height` an `<img>` tag declares (attribute and inline style).
+fn declared_dims(tag: &str) -> Vec<u32> {
+    let style = attr(tag, "style").unwrap_or_default();
+    let mut out = Vec::new();
+    for prop in ["width", "height"] {
+        if let Some(px) = attr(tag, prop).as_deref().and_then(parse_px) {
+            out.push(px);
+        }
+        for decl in style.split(';') {
+            if let Some((k, v)) = decl.split_once(':')
+                && k.trim().eq_ignore_ascii_case(prop)
+                && let Some(px) = parse_px(v)
+            {
+                out.push(px);
+            }
+        }
+    }
+    out
+}
+
+/// Whether an `<img>` open tag is a pixel, icon or avatar.
+fn is_chrome_img(tag: &str) -> bool {
+    let src = attr(tag, "src").unwrap_or_default().replace("&amp;", "&");
+    if is_pixel(&src) || is_icon(&src) {
+        return true;
+    }
+    let dims = declared_dims(tag);
+    !dims.is_empty() && dims.iter().all(|d| *d <= SMALL_PX)
+}
+
+/// `s` without its tags (rough: for the "anchor held nothing" test).
+fn text_of(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Drops chrome `<img>`s (all of them when `force`, inside a profile link); an anchor left with
+/// no text and no image is dropped with them.
+fn strip_small_images(s: &str, force: bool) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    loop {
+        let img = find_open(&lower, "img", i);
+        let a = find_open(&lower, "a", i);
+        let (at, is_img) = match (img, a) {
+            (Some(x), Some(y)) if y < x => (y, false),
+            (Some(x), _) => (x, true),
+            (None, Some(y)) => (y, false),
+            (None, None) => break,
+        };
+        let Some(gt) = lower[at..].find('>').map(|g| at + g + 1) else {
+            break;
+        };
+        out.push_str(&s[i..at]);
+        let tag = &s[at..gt];
+        if is_img {
+            if !(force || is_chrome_img(tag)) {
+                out.push_str(tag);
+            }
+            i = gt;
+        } else if let Some(end) = find_close_end(&lower, "a", gt) {
+            let close_at = lower[gt..end].rfind("</a").map_or(end, |r| gt + r);
+            let inner = &s[gt..close_at];
+            let href = attr(tag, "href").unwrap_or_default().replace("&amp;", "&");
+            let profile = resolve_link(&href).is_some_and(|t| is_profile_url(&t));
+            let kept = strip_small_images(inner, force || profile);
+            if kept == inner || !text_of(&kept).trim().is_empty() || lower_has_img(&kept) {
+                out.push_str(tag);
+                out.push_str(&kept);
+                out.push_str(&s[close_at..end]);
+            }
+            i = end;
+        } else {
+            out.push_str(tag);
+            i = gt;
+        }
+    }
+    out.push_str(&s[i..]);
+    out
+}
+
+fn lower_has_img(s: &str) -> bool {
+    find_open(&s.to_ascii_lowercase(), "img", 0).is_some()
 }
 
 #[cfg(test)]

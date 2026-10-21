@@ -18,7 +18,7 @@ use mail_parser::MessageParser;
 
 #[path = "mail_clean.rs"]
 mod clean;
-pub use clean::clean_body;
+pub use clean::{clean_body, clean_body_with, strip_html_chrome};
 
 /// One parsed newsletter message.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -319,7 +319,9 @@ pub(crate) fn resolve_newsletter<'a>(
 }
 
 /// The message body as markdown before any cleanup (the HTML part converted, else the trimmed
-/// plain text): the input of the paywall-marker verdict and of `clean_body`.
+/// plain text): the input of the paywall-marker verdict and of `clean_body`. The HTML passes
+/// through `strip_html_chrome` first (styling, spacers and small images only, none of which can
+/// carry a paywall marker), so the marker verdict sees the post-strip, pre-`clean_body` markdown.
 pub(crate) fn raw_markdown(post: &MailPost) -> String {
     let html = post
         .html
@@ -327,7 +329,7 @@ pub(crate) fn raw_markdown(post: &MailPost) -> String {
         .or_else(|| post.text.clone())
         .unwrap_or_default();
     if post.html.is_some() {
-        cv_ingest::html_to_markdown(&html)
+        cv_ingest::html_to_markdown(&cv_ingest::mail::strip_html_chrome(&html))
     } else {
         html.trim().to_owned()
     }
