@@ -66,6 +66,16 @@ pub static PIPE_BLOGS: Record = Record {
             POS_U32,
         )
         .dflt(D::Int(5)),
+        field(
+            "complete_percent",
+            "Complete percent",
+            "A post is complete when its delivered words reach this percent of the full count",
+            Node::Int {
+                min: Some(0),
+                max: Some(100),
+            },
+        )
+        .dflt(D::Int(80)),
     ],
     rules: &[],
     summary: None,
@@ -356,6 +366,12 @@ pub static SOURCE_BLOG: Record = Record {
             Node::Enum(&["auto", "full", "snippet"]),
         )
         .dflt(D::Str("auto")),
+        field(
+            "paywall_markers",
+            "Paywall markers",
+            "Body phrases (case-insensitive) that mark a post incomplete",
+            STR_LIST,
+        ),
     ],
     rules: &[],
     summary: None,

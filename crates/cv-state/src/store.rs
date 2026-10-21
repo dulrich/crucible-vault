@@ -836,6 +836,9 @@ mod retry_and_tracker_tests {
             source_name: None,
             duration_s: None,
             word_count: None,
+            access: None,
+            complete: None,
+            full_word_count: None,
         }
     }
 

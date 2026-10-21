@@ -71,8 +71,28 @@ fn set_tracker_item_done_round_trips_and_signals() {
         source_name: None,
         duration_s: None,
         word_count: None,
+        access: None,
+        complete: None,
+        full_word_count: None,
     };
     assert!(s.insert_tracker_item(&item).unwrap());
+    assert_eq!(
+        s.tracker_item("blog", "f", "p1").unwrap(),
+        Some(item.clone())
+    );
+    assert!(
+        s.set_tracker_completeness("blog", "f", "p1", Some("paid"), Some(false), Some(900))
+            .unwrap()
+    );
+    let got = s.tracker_item("blog", "f", "p1").unwrap().unwrap();
+    assert_eq!(
+        (got.access.as_deref(), got.complete, got.full_word_count),
+        (Some("paid"), Some(false), Some(900))
+    );
+    assert!(
+        s.set_tracker_completeness("blog", "f", "p1", None, None, None)
+            .unwrap()
+    );
     assert_eq!(s.tracker_item("blog", "f", "p1").unwrap(), Some(item));
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
@@ -108,6 +128,9 @@ fn fill_tracker_source_name_fills_only_null_rows_of_that_source() {
         source_name: name.map(str::to_owned),
         duration_s: Some(5),
         word_count: Some(7),
+        access: None,
+        complete: None,
+        full_word_count: None,
     };
     for it in [
         mk("f", "p1", None),
@@ -214,6 +237,38 @@ fn pre_baseline_versions_are_refused() {
             Err(StateError::PreBaseline { .. })
         ));
     }
+}
+
+/// v11 → v12 (plan auto-intake-sprint WP-2): the completeness columns land NULL on existing rows.
+#[test]
+fn v11_database_migrates_to_v12_with_null_completeness() {
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(migrate::BASELINE).unwrap();
+    c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
+        .unwrap();
+    c.execute_batch(
+        "INSERT INTO tracker_items (source_kind, source_key, item_id, first_seen_ms, day, outcome)
+         VALUES ('blog', 'k', 'p', 1, '2026-10-20', 'line')",
+    )
+    .unwrap();
+    assert_eq!(migrate::latest_version(), 12);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 12);
+    let row: (Option<String>, Option<bool>, Option<i64>) = c
+        .query_row(
+            "SELECT access, complete, full_word_count FROM tracker_items",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (None, None, None));
+    let idx: i64 = c
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'tracker_items_url'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx, 1);
 }
 
 #[test]
@@ -950,6 +1005,9 @@ fn protocol_enums_keep_stored_forms_and_corrupt_handling() {
             source_name: None,
             duration_s: None,
             word_count: None,
+            access: None,
+            complete: None,
+            full_word_count: None,
         };
         assert!(s.insert_tracker_item(&item).unwrap());
         let sql = "SELECT outcome FROM tracker_items WHERE item_id = ?1";

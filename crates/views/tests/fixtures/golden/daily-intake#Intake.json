@@ -17,6 +17,10 @@
       "label": "Length"
     },
     {
+      "key": "formula.access",
+      "label": "Access"
+    },
+    {
       "key": "status",
       "label": "Done",
       "role": {
@@ -47,6 +51,10 @@
               "v": ""
             },
             {
+              "t": "text",
+              "v": "🔒"
+            },
+            {
               "t": "null"
             }
           ],
@@ -70,6 +78,10 @@
             {
               "t": "text",
               "v": "1:05"
+            },
+            {
+              "t": "text",
+              "v": ""
             },
             {
               "t": "null"
@@ -98,6 +110,10 @@
             },
             {
               "t": "text",
+              "v": ""
+            },
+            {
+              "t": "text",
               "v": "x"
             }
           ],
@@ -121,6 +137,10 @@
             {
               "t": "text",
               "v": "5 min"
+            },
+            {
+              "t": "text",
+              "v": ""
             },
             {
               "t": "text",

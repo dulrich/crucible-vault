@@ -889,12 +889,13 @@ fn tracker_db(dir: &Path) -> PathBuf {
             first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
             score REAL, full_body INTEGER, note_path TEXT,
             source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
+            access TEXT, complete INTEGER, full_word_count INTEGER,
             PRIMARY KEY (source_kind, source_key, item_id));
          INSERT INTO tracker_items VALUES
-            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
-            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, 'notes/Post.md', 'Feed B', NULL, 900, NULL),
-            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, NULL, 'Chan', 125, NULL, 'x'),
-            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL, NULL, NULL, '/');",
+            ('youtube', 'UC1', 'v1', 'Old video', 'https://y/1', 1, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+            ('blog', 'b', 'p1', 'Post', 'https://b/1', 3, '2026-10-03', 'note', 0.5, 1, 'notes/Post.md', 'Feed B', NULL, 900, NULL, 'paid', 0, 9000),
+            ('youtube', 'UC1', 'v2', 'New video', 'https://y/2', 2, '2026-10-03', 'line', 2.0, NULL, NULL, 'Chan', 125, NULL, 'x', NULL, NULL, NULL),
+            ('youtube', 'UC1', 'v3', 'Skipped', 'https://y/3', 4, '2026-10-03', 'skipped', NULL, NULL, NULL, NULL, NULL, NULL, '/', NULL, NULL, NULL);",
     )
     .unwrap();
     p
@@ -1024,6 +1025,25 @@ fn tracker_records_expose_source_name_duration_and_word_count() {
     assert_eq!(get("v2"), ["s:Chan", "n:125", "null"]);
     assert_eq!(get("p1"), ["s:Feed B", "null", "n:900"]);
     assert_eq!(get("v1"), ["null", "null", "null"]);
+    let p1 = recs
+        .iter()
+        .find(|r| matches!(&r["item_id"], Value::Str(s) if s == "p1"))
+        .unwrap();
+    assert_eq!(show(&p1["access"]), "s:paid");
+    assert!(matches!(p1["complete"], Value::Bool(false)));
+    assert_eq!(show(&p1["full_word_count"]), "n:9000");
+    let v1 = recs
+        .iter()
+        .find(|r| matches!(&r["item_id"], Value::Str(s) if s == "v1"))
+        .unwrap();
+    assert_eq!(
+        [
+            show(&v1["access"]),
+            show(&v1["complete"]),
+            show(&v1["full_word_count"])
+        ],
+        ["null", "null", "null"]
+    );
 }
 
 #[test]

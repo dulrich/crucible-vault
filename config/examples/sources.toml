@@ -3,7 +3,8 @@
 #
 # [[youtube]]: channel (name), id (UC…), tags, priority (high | normal | low | skip | ignore).
 # [[blog]]: name, link (RSS/Atom feed), method (rss; others are skipped), tags, priority,
-#   canon (auto | substack | strip-params | keep-params), body (auto | full | snippet).
+#   canon (auto | substack | strip-params | keep-params), body (auto | full | snippet),
+#   paywall_markers (body phrases marking a post incomplete; default none).
 # skip / ignore rows are kept but excluded from runs.
 
 [[youtube]]

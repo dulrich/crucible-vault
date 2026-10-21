@@ -129,7 +129,13 @@ CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key,
 ";
 
 /// Post-baseline steps (v12+). Later WPs append (never edit) entries.
-pub const MIGRATIONS: &[&str] = &[];
+pub const MIGRATIONS: &[&str] = &[
+    // v12 (plan auto-intake-sprint WP-2): access/completeness per tracker item; url lookup.
+    "ALTER TABLE tracker_items ADD COLUMN access TEXT;
+     ALTER TABLE tracker_items ADD COLUMN complete INTEGER;
+     ALTER TABLE tracker_items ADD COLUMN full_word_count INTEGER;
+     CREATE INDEX tracker_items_url ON tracker_items(url);",
+];
 
 /// Highest schema version this build knows.
 #[must_use]

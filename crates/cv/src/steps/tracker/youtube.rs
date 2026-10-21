@@ -305,6 +305,9 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 url: watch_url(&id),
                 duration_s: duration,
                 word_count: None,
+                access: None,
+                complete: None,
+                full_word_count: None,
             };
             seen.insert(&id);
             if !available {

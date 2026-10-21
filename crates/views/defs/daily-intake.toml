@@ -7,6 +7,7 @@
 # YouTube duration (`h:mm:ss` / `m:ss`), else a blog body's reading minutes from its word count and
 # `Settings.md` `reading_wpm`, else blank. Plans intake-view-source-length, intake-type-column-length-backfill.
 # Round 8 (plan round-8-intake-views-anchor): `ignored` outcomes (ignored shorts) show as cancelled (`-`) rows.
+# Access (plan auto-intake-sprint WP-2): 🔒 when the post is paid/founding or its delivered body is incomplete (state.db v12).
 source = "tracker_items"
 
 [filters]
@@ -20,6 +21,7 @@ mins = '(duration % 3600 - duration % 60) / 60'
 secs = 'if(duration % 60 < 10, "0", "") + duration % 60'
 wpm = 'number(file("_custom/Settings.md").properties.reading_wpm)'
 length = 'if(duration, if(duration >= 3600, (duration - duration % 3600) / 3600 + ":" + if(formula.mins < 10, "0", "") + formula.mins + ":" + formula.secs, (duration - duration % 60) / 60 + ":" + formula.secs), if(word_count && formula.wpm > 0, (word_count / formula.wpm).round() + " min", ""))'
+access = 'if(access == "paid" || access == "founding" || complete == false, "🔒", "")'
 
 [properties."formula.item"]
 displayName = "Title"
@@ -33,10 +35,13 @@ displayName = "Source"
 [properties."formula.length"]
 displayName = "Length"
 
+[properties."formula.access"]
+displayName = "Access"
+
 [properties.status]
 displayName = "Done"
 
 [[views]]
 type = "table"
 name = "Intake"
-order = ["formula.item", "formula.type", "formula.source", "formula.length", "status"]
+order = ["formula.item", "formula.type", "formula.source", "formula.length", "formula.access", "status"]

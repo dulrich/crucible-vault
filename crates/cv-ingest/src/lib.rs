@@ -4,6 +4,7 @@
 //! WP-1 lays the foundations: URL extraction ([`urls`]), RSS/Atom feeds ([`feed`]) and
 //! HTML to Markdown ([`html`]). Later WPs add modules (one `mod` line each).
 
+pub mod access;
 pub mod blogs;
 pub mod brief;
 pub mod feed;

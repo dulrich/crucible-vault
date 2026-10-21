@@ -237,7 +237,8 @@ fn open_state<'c>(
 /// `full_body`, `first_seen`, `status` (single-char task status, null = open; state.db v8), `done`
 /// (bool, `status` is `x`/`X` — the legacy alias column), `note_path` (text or null) and — from
 /// state.db v7 — `source_name` (text or null), `duration` (seconds or null) and `word_count` (or
-/// null).
+/// null) — and from state.db v12 `access` (`free`/`paid`/`founding`/`unknown` or null), `complete`
+/// (bool or null = unknown) and `full_word_count` (num or null).
 pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record>> {
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -246,7 +247,7 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
     let mut stmt = conn.prepare_cached(
         "SELECT title, url, source_kind, source_key, item_id, day, outcome, score, full_body,
                 first_seen_ms, status IN ('x', 'X'), note_path, source_name, duration_s, word_count,
-                status
+                status, access, complete, full_word_count
          FROM tracker_items ORDER BY first_seen_ms DESC, item_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -293,6 +294,11 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
         let num = |n: Option<i64>| n.map_or(Value::Null, |n| Value::Num(n as f64));
         m.insert("duration".into(), num(r.get(13)?));
         m.insert("word_count".into(), num(r.get(14)?));
+        let access: Option<String> = r.get(16)?;
+        m.insert("access".into(), access.map_or(Value::Null, Value::Str));
+        let complete: Option<bool> = r.get(17)?;
+        m.insert("complete".into(), complete.map_or(Value::Null, Value::Bool));
+        m.insert("full_word_count".into(), num(r.get(18)?));
         Ok(Arc::new(m))
     })?;
     rows.collect()

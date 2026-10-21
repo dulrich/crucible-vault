@@ -47,6 +47,9 @@ impl PipelinesConfig {
         if c.blogs.automatable_window == 0 {
             return Err("blogs.automatable_window must be at least 1".into());
         }
+        if c.blogs.complete_percent > 100 {
+            return Err("blogs.complete_percent must be at most 100".into());
+        }
         for w in &c.daily_brief.weather {
             if !(-90.0..=90.0).contains(&w.lat) || !(-180.0..=180.0).contains(&w.lon) {
                 return Err(format!(
@@ -112,6 +115,9 @@ pub struct BlogsPipeline {
     /// `body = "auto"` sources are automatable when each of their last N posts had a full body
     /// (default 5).
     pub automatable_window: u32,
+    /// A post is complete when its delivered words reach this percent of the probed full word
+    /// count (default 80; plan auto-intake-sprint WP-2).
+    pub complete_percent: u32,
 }
 
 impl Default for BlogsPipeline {
@@ -119,6 +125,7 @@ impl Default for BlogsPipeline {
         Self {
             enabled: false,
             automatable_window: 5,
+            complete_percent: 80,
         }
     }
 }
@@ -365,6 +372,9 @@ pub struct BlogSource {
     /// Body mode.
     #[serde(default)]
     pub body: BodyMode,
+    /// Body phrases (case-insensitive) marking a post incomplete (plan auto-intake-sprint WP-2).
+    #[serde(default)]
+    pub paywall_markers: Vec<String>,
 }
 
 fn rss() -> String {
@@ -383,6 +393,7 @@ mod tests {
         assert_eq!(p.youtube.metadata_root, "_yt_metadata");
         assert_eq!(p.x.metadata_root, "_x_metadata");
         assert_eq!(p.blogs.automatable_window, 5);
+        assert_eq!(p.blogs.complete_percent, 80);
         assert_eq!(p.daily_brief.section, "# Daily Brief");
         assert_eq!(p.ignore_shorts.max_seconds, 120);
         assert_eq!(p.queue.retention_days, 30);

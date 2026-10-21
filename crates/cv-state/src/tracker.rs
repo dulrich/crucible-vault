@@ -38,10 +38,17 @@ pub struct TrackerItem {
     pub duration_s: Option<i64>,
     /// Body word count (blogs with a full body; migration v7).
     pub word_count: Option<i64>,
+    /// Probed access tier (`free` | `paid` | `founding` | `unknown`; migration v12).
+    pub access: Option<String>,
+    /// Whether the delivered body is the complete post (`None` = unknown; migration v12).
+    pub complete: Option<bool>,
+    /// Full post word count reported by the probe (migration v12).
+    pub full_word_count: Option<i64>,
 }
 
 const COLS: &str = "source_kind, source_key, item_id, title, url, first_seen_ms, day, outcome, \
-                    score, full_body, note_path, source_name, duration_s, word_count";
+                    score, full_body, note_path, source_name, duration_s, word_count, access, complete, \
+                    full_word_count";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
     let outcome: String = r.get(7)?;
@@ -60,6 +67,9 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
         source_name: r.get(11)?,
         duration_s: r.get(12)?,
         word_count: r.get(13)?,
+        access: r.get(14)?,
+        complete: r.get(15)?,
+        full_word_count: r.get(16)?,
     })
 }
 
@@ -108,7 +118,7 @@ impl StateDb {
     pub fn insert_tracker_item(&mut self, item: &TrackerItem) -> Result<bool> {
         let n = self.conn().execute(
             &format!(
-                "INSERT INTO tracker_items ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                "INSERT INTO tracker_items ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                  ON CONFLICT DO NOTHING"
             ),
             params![
@@ -126,6 +136,9 @@ impl StateDb {
                 item.source_name,
                 item.duration_s,
                 item.word_count,
+                item.access,
+                item.complete,
+                item.full_word_count,
             ],
         )?;
         if n > 0 {
@@ -221,6 +234,36 @@ impl StateDb {
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Sets the access/completeness evidence on one row (plan auto-intake-sprint WP-2; for the
+    /// re-probe and backfill paths). Returns whether a row matched; raises the `tracker_items`
+    /// change signal when one did.
+    pub fn set_tracker_completeness(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        item_id: &str,
+        access: Option<&str>,
+        complete: Option<bool>,
+        full_word_count: Option<i64>,
+    ) -> Result<bool> {
+        let n = self.conn().execute(
+            "UPDATE tracker_items SET access = ?4, complete = ?5, full_word_count = ?6
+             WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+            params![
+                source_kind,
+                source_key,
+                item_id,
+                access,
+                complete,
+                full_word_count
+            ],
+        )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n > 0)
     }
 
     /// Sets one item's task status (`None` = open). Returns whether a row matched; raises the

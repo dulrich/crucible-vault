@@ -274,6 +274,7 @@ inbox = "Clippings"
 [blogs]
 enabled = true
 automatable_window = 3
+complete_percent = 75
 
 [image_describe]
 enabled = true
@@ -317,6 +318,7 @@ tags = ["a"]
 priority = "skip"
 canon = "strip-params"
 body = "full"
+paywall_markers = ["Subscribe to keep reading"]
 "#];
 
 const SCHEDULES: &[&str] = &[

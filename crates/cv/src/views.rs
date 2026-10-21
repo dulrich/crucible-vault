@@ -365,6 +365,9 @@ mod tests {
             source_name: None,
             duration_s: None,
             word_count: None,
+            access: None,
+            complete: None,
+            full_word_count: None,
         };
         assert!(state.insert_tracker_item(&item).unwrap());
         let n = tokio::time::timeout(Duration::from_secs(5), rx.recv())

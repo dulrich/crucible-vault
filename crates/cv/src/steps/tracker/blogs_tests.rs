@@ -51,7 +51,8 @@ fn rss(items: &[(&str, bool)]) -> String {
                 String::new()
             };
             format!(
-                "<item><title>Post {s}</title><link>https://blog.example/p/{s}</link><dc:creator>Ann</dc:creator><pubDate>Tue, 14 Oct 2026 10:00:00 +0000</pubDate><description>About {s}</description>{content}</item>"
+                "<item><title>Post {s}</title><link>{}/p/{s}</link><dc:creator>Ann</dc:creator><pubDate>Tue, 14 Oct 2026 10:00:00 +0000</pubDate><description>About {s}</description>{content}</item>",
+                base()
             )
         })
         .collect();
@@ -59,12 +60,20 @@ fn rss(items: &[(&str, bool)]) -> String {
 }
 
 fn post_url(s: &str) -> String {
-    format!("https://blog.example/p/{s}")
+    format!("{}/p/{s}", base())
 }
 
-/// `sources` rows as (name, path, extra toml).
+thread_local! {
+    /// This test's local server base URL: post links (and so Substack probes) hit the same server.
+    static BASE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+fn base() -> String {
+    BASE.with(|b| b.borrow().clone())
+}
+
+/// `sources` rows as (name, path, extra toml). `BASE` in `files` is the server base URL.
 fn world(files: &[(&str, &str)], pipelines: &str, rows: &[(&str, &str, &str)]) -> World {
-    let fx = LiveFixture::new(files.iter().copied());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -84,6 +93,8 @@ fn world(files: &[(&str, &str)], pipelines: &str, rows: &[(&str, &str, &str)]) -
             )
     });
     let base = http.url();
+    BASE.with(|b| b.borrow_mut().clone_from(&base));
+    let fx = LiveFixture::new(files.iter().map(|(p, t)| (*p, t.replace("BASE", &base))));
     let sources: String = rows
         .iter()
         .map(|(name, path, extra)| {
@@ -240,6 +251,9 @@ fn recorded_posts_backfill_null_word_count_of_line_and_note_rows_only() {
         source_name: None,
         duration_s: None,
         word_count: wc,
+        access: None,
+        complete: None,
+        full_word_count: None,
     };
     {
         let mut s = w.state.lock().unwrap();
@@ -302,6 +316,7 @@ fn full_source_post_becomes_a_linted_filed_blog_note() {
             "created",
             "description",
             "word-count",
+            "access",
             "tags",
             "read"
         ]
@@ -381,11 +396,11 @@ fn seeding_from_existing_blog_notes_produces_nothing() {
     let files = [
         (
             "_blog_metadata/b/post-a.md",
-            "---\nsource: https://blog.example/p/a\npost-id: \"https://blog.example/p/a\"\n---\n",
+            "---\nsource: BASE/p/a\npost-id: \"BASE/p/a\"\n---\n",
         ),
         (
             "_crucible/orchestration/blogs/new-posts/2026-10-01.md",
-            "- [ ] [B](https://blog.example/p/b?utm_source=rss)\n",
+            "- [ ] [B](BASE/p/b?utm_source=rss)\n",
         ),
     ];
     let w = world(&files, ON, &[("Full", "/a", "body = \"full\"")]);
@@ -446,7 +461,8 @@ fn disabled_pipeline_does_nothing() {
 /// One full-body RSS item titled `title` whose body embeds the image at `img`.
 fn rss_with_image(title: &str, img: &str) -> String {
     format!(
-        "<rss><channel><title>B</title><item><title>{title}</title><link>https://blog.example/p/i</link><dc:creator>Ann</dc:creator><pubDate>Tue, 14 Oct 2026 10:00:00 +0000</pubDate><description>About</description><content:encoded><![CDATA[<p>Look</p><p><img src=\"{img}\" alt=\"pic\"></p>]]></content:encoded></item></channel></rss>"
+        "<rss><channel><title>B</title><item><title>{title}</title><link>{}/p/i</link><dc:creator>Ann</dc:creator><pubDate>Tue, 14 Oct 2026 10:00:00 +0000</pubDate><description>About</description><content:encoded><![CDATA[<p>Look</p><p><img src=\"{img}\" alt=\"pic\"></p>]]></content:encoded></item></channel></rss>",
+        base()
     )
 }
 
@@ -488,4 +504,135 @@ fn image_404_keeps_the_remote_ref_and_still_captures() {
     assert!(t.contains(&img), "{t}");
     let key = format!("{}/a", w.base);
     assert_eq!(outcome(&w, &key, "i"), Some(TrackerOutcome::Note));
+}
+
+// ---- access / completeness (plan auto-intake-sprint WP-2) ------------------------------------
+
+fn item(w: &World, s: &str) -> cv_state::TrackerItem {
+    let key = format!("{}/a", w.base);
+    w.state
+        .lock()
+        .unwrap()
+        .tracker_item(KIND, &key, &post_url(s))
+        .unwrap()
+        .expect("row")
+}
+
+fn status(w: &World, s: &str) -> Option<char> {
+    let key = format!("{}/a", w.base);
+    w.state
+        .lock()
+        .unwrap()
+        .tracker_item_status(KIND, &key, &post_url(s))
+        .unwrap()
+        .expect("row")
+}
+
+fn probe(audience: &str, wordcount: u32) -> String {
+    format!(r#"{{"id":7,"audience":"{audience}","wordcount":{wordcount},"title":"t"}}"#)
+}
+
+const FULL: &str = "body = \"full\"";
+
+#[test]
+fn free_probed_post_is_complete_and_auto_done() {
+    let w = world(&[], ON, &[("Full", "/a", FULL)]);
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    set(&w, "/api/v1/posts/x", 200, probe("everyone", 4));
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "notes"), json!(1));
+    assert_eq!(n(&o, "probe_failed"), json!(0));
+    let t = note(&w, "x").expect("note");
+    assert!(t.contains("access: free\ncomplete: true\n"), "{t}");
+    let r = item(&w, "x");
+    assert_eq!(
+        (r.access.as_deref(), r.complete, r.full_word_count),
+        (Some("free"), Some(true), Some(4))
+    );
+    assert_eq!(status(&w, "x"), Some('x'));
+}
+
+#[test]
+fn paid_probed_post_is_incomplete_and_stays_open() {
+    let w = world(&[], ON, &[("Full", "/a", FULL)]);
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    set(&w, "/api/v1/posts/x", 200, probe("only_paid", 40));
+    run(&w).unwrap();
+    let t = note(&w, "x").expect("note");
+    assert!(t.contains("access: paid\ncomplete: false\n"), "{t}");
+    let r = item(&w, "x");
+    assert_eq!(
+        (r.access.as_deref(), r.complete),
+        (Some("paid"), Some(false))
+    );
+    assert_eq!(status(&w, "x"), None);
+}
+
+#[test]
+fn failed_probe_records_unknown_and_still_writes_the_note() {
+    let w = world(&[], ON, &[("Full", "/a", FULL)]);
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    set(&w, "/api/v1/posts/x", 500, String::new());
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "probe_failed"), json!(1));
+    assert_eq!(n(&o, "notes"), json!(1));
+    let t = note(&w, "x").expect("note");
+    assert!(
+        t.contains("access: unknown\n") && !t.contains("complete:"),
+        "{t}"
+    );
+    let r = item(&w, "x");
+    assert_eq!((r.access.as_deref(), r.complete), (Some("unknown"), None));
+    assert_eq!(status(&w, "x"), None);
+}
+
+#[test]
+fn non_p_post_url_is_not_probed_and_complete_with_a_body() {
+    let w = world(&[], ON, &[("Full", "/a", FULL)]);
+    // A probe would 404 (no route) and count as failed; none must be made.
+    let feed = rss(&[("x", true)]).replace("/p/x<", "/2026/x<");
+    set(&w, "/a", 200, feed);
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "probe_failed"), json!(0));
+    assert_eq!(n(&o, "notes"), json!(1));
+    let key = format!("{}/a", w.base);
+    let rows = w
+        .state
+        .lock()
+        .unwrap()
+        .tracker_items_for_source(KIND, &key, 10)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].access.as_deref(), rows[0].complete),
+        (None, Some(true))
+    );
+}
+
+#[test]
+fn paywall_marker_marks_a_free_post_incomplete() {
+    let extra = "body = \"full\"\npaywall_markers = [\"BODY OF X\"]";
+    let w = world(&[], ON, &[("Full", "/a", extra)]);
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    set(&w, "/api/v1/posts/x", 200, probe("everyone", 4));
+    run(&w).unwrap();
+    let r = item(&w, "x");
+    assert_eq!(
+        (r.access.as_deref(), r.complete),
+        (Some("free"), Some(false))
+    );
+    assert_eq!(status(&w, "x"), None);
+}
+
+#[test]
+fn paid_line_outcome_carries_access_and_is_never_auto_done() {
+    let w = world(&[], ON, &[("Auto", "/a", "")]);
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    set(&w, "/api/v1/posts/x", 200, probe("only_paid", 4));
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "lines"), json!(1));
+    let r = item(&w, "x");
+    assert_eq!(r.outcome, TrackerOutcome::Line);
+    assert_eq!(r.access.as_deref(), Some("paid"));
+    assert_eq!(status(&w, "x"), None);
 }

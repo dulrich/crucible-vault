@@ -339,6 +339,9 @@ fn url_already_in_daily_is_recorded_not_rewritten() {
             source_name: None,
             duration_s: None,
             word_count: None,
+            access: None,
+            complete: None,
+            full_word_count: None,
         })
         .unwrap();
     let o = run(&w).unwrap();
@@ -408,6 +411,9 @@ fn name_self_heal_fills_null_rows_of_configured_source_without_fresh_items() {
         source_name: name.map(str::to_owned),
         duration_s: None,
         word_count: None,
+        access: None,
+        complete: None,
+        full_word_count: None,
     };
     {
         let mut s = w.state.lock().unwrap();
@@ -606,6 +612,9 @@ fn legacy_row(id: &str, outcome: TrackerOutcome) -> cv_state::TrackerItem {
         source_name: None,
         duration_s: None,
         word_count: None,
+        access: None,
+        complete: None,
+        full_word_count: None,
     }
 }
 

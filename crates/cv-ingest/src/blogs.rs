@@ -12,10 +12,11 @@
 //!
 //! The captured note mirrors a filed blog entry (Web Clipper + `file-as-kind blog` + lint):
 //! frontmatter keys `title, source, post-id, author, published, created, description,
-//! word-count, tags, read` in that order, `author` a block list of quoted wikilinks, `read: false`.
+//! word-count, tags, read` in that order (`access`/`complete` after `word-count` when known), `author` a block list of quoted wikilinks, `read: false`.
 
 use cv_text::url_canon::{CanonMethod, PostIdOptions, post_id_from_url};
 
+use crate::access::Access;
 use crate::feed::FeedItem;
 use crate::html::{html_to_markdown, html_to_text, word_count};
 use crate::youtube::json_string;
@@ -221,9 +222,16 @@ pub fn description(post: &BlogPost) -> String {
 }
 
 /// The captured blog note for `post` (a filed blog entry's shape; lint runs after the write).
-/// `tags` already include the kind's tags; `created` is `YYYY-MM-DD`.
+/// `tags` already include the kind's tags; `created` is `YYYY-MM-DD`. `access` (when probed) and
+/// `complete` (when known) follow `word-count` (plan auto-intake-sprint WP-2).
 #[must_use]
-pub fn captured_note(post: &BlogPost, tags: &[String], created: &str) -> String {
+pub fn captured_note(
+    post: &BlogPost,
+    tags: &[String],
+    created: &str,
+    access: Option<Access>,
+    complete: Option<bool>,
+) -> String {
     let body = post
         .body_html
         .as_deref()
@@ -254,6 +262,12 @@ pub fn captured_note(post: &BlogPost, tags: &[String], created: &str) -> String 
         "word-count: {}",
         post.body_html.as_deref().map_or(0, word_count)
     ));
+    if let Some(a) = access {
+        fm.push(format!("access: {}", a.as_str()));
+    }
+    if let Some(c) = complete {
+        fm.push(format!("complete: {c}"));
+    }
     fm.push("tags:".into());
     for t in tags {
         fm.push(format!("  - {t}"));
@@ -343,7 +357,13 @@ mod tests {
     #[test]
     fn captured_note_has_filed_blog_shape() {
         let p = &posts_from_feed(&parse_feed(RSS).unwrap(), CanonMethod::Auto, BodyMode::Auto)[0];
-        let n = captured_note(p, &["blog".into(), "research".into()], "2026-10-15");
+        let n = captured_note(
+            p,
+            &["blog".into(), "research".into()],
+            "2026-10-15",
+            None,
+            None,
+        );
         let keys: Vec<&str> = n
             .lines()
             .skip(1)
@@ -371,5 +391,10 @@ mod tests {
         assert!(n.contains("tags:\n  - blog\n  - research\nread: false\n---\n"));
         assert!(n.contains("Hello **world**"));
         assert_eq!(note_name(p), "Full One");
+        let n = captured_note(p, &[], "2026-10-15", Some(Access::Paid), Some(false));
+        assert!(
+            n.contains("word-count: 2\naccess: paid\ncomplete: false\ntags:\n"),
+            "{n}"
+        );
     }
 }

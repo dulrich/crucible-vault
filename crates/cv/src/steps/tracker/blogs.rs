@@ -23,14 +23,21 @@
 //! Failures: an invalid row (unsupported method, non-http(s) link) is counted `invalid` and
 //! logged; a feed failing (HTTP or parse) is counted `failed`; every feed failing with a service
 //! error settles deferred (`StepError::from_fetch`). Outcome vars: `sources`, `new`, `lines`,
-//! `notes`, `failed`, `invalid`, `localize_failed` (+ `disabled` when `[blogs] enabled = false`).
+//! `notes`, `failed`, `invalid`, `localize_failed`, `probe_failed` (+ `disabled` when `[blogs] enabled = false`).
 //! No step params. A full-body captured note is localized inline (remote images → `_MD5`
 //! attachments); a localize failure is logged and counted, never fails the capture.
+//!
+//! Access/completeness (plan `auto-intake-sprint` WP-2): each new `/p/<slug>` post is probed at
+//! `/api/v1/posts/<slug>` ([`PROBE_SERVICE`], one bounded batch per feed); the row and the captured
+//! note carry `access`/`complete` ([`cv_ingest::access::completeness`]), and a `note` outcome that
+//! is complete is recorded done (`status = x`). A probe failure is counted `probe_failed` and the
+//! post stays open (`access = unknown`); it never fails the step or holds back the line/note.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use cv_actions::pipelines::{BlogSource, BodyMode};
 use cv_actions::{ConfigSet, StepKind};
+use cv_ingest::access::{self, Access};
 use cv_ingest::blogs::{self as policy, BlogPost};
 use cv_protocol::TrackerOutcome;
 use serde::Serialize;
@@ -41,6 +48,7 @@ use super::super::params::{expand, get_str, get_str_list};
 use super::super::util::{fetch_bounded, md_files_under};
 use super::super::web::{client, create_or_found};
 use super::super::{StepCtx, StepError, StepModule, StepOutcome, lint, localize};
+use super::substack;
 use super::{Candidate, SeenSet, emit_line_with, record_with};
 
 /// `tracker_items.source_kind` / `ignored_ids.kind` of blog posts.
@@ -49,6 +57,8 @@ pub const KIND: &str = "blog";
 pub const PROP: &str = "post-id";
 /// Breaker / usage service of feed GETs.
 pub const SERVICE: &str = "blog-feed";
+/// Breaker / usage service of Substack post probes (plan auto-intake-sprint WP-2).
+pub const PROBE_SERVICE: &str = "substack-api";
 /// Crucible's blog metadata root (read-only seeding input).
 pub const METADATA_ROOT: &str = "_blog_metadata";
 /// The `kinds.toml` kind a captured post is filed as.
@@ -81,6 +91,7 @@ struct Vars {
     failed: usize,
     invalid: usize,
     localize_failed: usize,
+    probe_failed: usize,
 }
 
 fn canon_opts() -> cv_text::url_canon::PostIdOptions {
@@ -230,6 +241,7 @@ fn write_note(
     ctx: &mut StepCtx<'_>,
     row: &BlogSource,
     post: &BlogPost,
+    ev: &Evidence,
     out_paths: &mut Vec<String>,
     localize_failed: &mut usize,
 ) -> Result<(bool, String), StepError> {
@@ -239,7 +251,7 @@ fn write_note(
         return Ok((false, path));
     }
     let created = now().format("%Y-%m-%d").to_string();
-    let text = policy::captured_note(post, &tags, &created);
+    let text = policy::captured_note(post, &tags, &created, ev.access, ev.complete);
     if !create_or_found(ctx, &path, text.into_bytes())? {
         return Ok((false, path));
     }
@@ -259,6 +271,99 @@ fn write_note(
         return Err(StepError::failed("injected failure after note write"));
     }
     Ok((true, path))
+}
+
+/// A probe's result: `Some((access, full words))`, or `None` when it failed (error, non-200,
+/// unparseable body).
+type Probe = Option<(Access, Option<u32>)>;
+
+/// Probes, in one bounded batch (`fetch_bounded`, as for feeds), every `/p/<slug>` post of a
+/// feed that is neither recorded nor `seen` (plan auto-intake-sprint WP-2). Keyed by post id;
+/// posts without a probe URL are absent. A failure is a `None` value, never an error.
+fn probe_new_posts(
+    ctx: &StepCtx<'_>,
+    posts: &[BlogPost],
+    key: &str,
+    seen: impl Fn(&BlogPost) -> bool,
+) -> Result<HashMap<String, Probe>, StepError> {
+    let mut targets = Vec::new();
+    for p in posts {
+        let Some(u) = substack::probe_url(&p.url) else {
+            continue;
+        };
+        let recorded = ctx
+            .state()
+            .tracker_item(KIND, key, &p.post_id)
+            .map_err(|e| StepError::failed(format!("state: {e}")))?
+            .is_some();
+        if !recorded && !seen(p) {
+            targets.push((p.post_id.clone(), u));
+        }
+    }
+    if targets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let c = client()?;
+    let bodies = fetch_bounded(
+        targets.iter().map(|(_, u)| u.clone()).collect(),
+        |u| async move { c.get_text(PROBE_SERVICE, &u).await },
+    )?;
+    Ok(targets
+        .into_iter()
+        .zip(bodies)
+        .map(|((id, u), body)| {
+            let probe = match body {
+                Ok(b) => substack::parse_post_meta(&b)
+                    .map(|(aud, wc)| (Access::from_substack_audience(&aud), wc)),
+                Err(e) => {
+                    tracing::warn!(url = %u, error = %e, "track_blogs: post probe failed");
+                    None
+                }
+            };
+            (id, probe)
+        })
+        .collect())
+}
+
+/// A new post's access/completeness evidence.
+struct Evidence {
+    access: Option<Access>,
+    complete: Option<bool>,
+    full_words: Option<u32>,
+    probe_failed: bool,
+}
+
+/// The evidence of `post` from its probe (`None` = not probed) and the row's paywall markers.
+fn evidence_for(
+    post: &BlogPost,
+    probe: Option<&Probe>,
+    row: &BlogSource,
+    complete_percent: u32,
+) -> Evidence {
+    let (access, full_words, probe_failed) = match probe {
+        None => (None, None, false),
+        Some(None) => (Some(Access::Unknown), None, true),
+        Some(Some((a, wc))) => (Some(*a), *wc, false),
+    };
+    let delivered = post.body_html.as_deref().map_or(0, |h| {
+        u32::try_from(cv_ingest::word_count(h)).unwrap_or(u32::MAX)
+    });
+    let marker = post.body_html.as_deref().is_some_and(|h| {
+        access::marker_hit(&cv_ingest::html::html_to_text(h), &row.paywall_markers)
+    });
+    Evidence {
+        access,
+        complete: access::completeness(
+            access,
+            delivered,
+            full_words,
+            post.has_body(),
+            marker,
+            complete_percent,
+        ),
+        full_words,
+        probe_failed,
+    }
 }
 
 /// Executes the step.
@@ -312,6 +417,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     )?;
 
     let (mut new, mut lines, mut notes, mut failed, mut localize_failed) = (0, 0, 0, 0, 0);
+    let mut probe_failed = 0;
     let mut deferred = None;
     for (row, body) in rows.iter().zip(bodies) {
         let xml = match body {
@@ -345,9 +451,12 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             .rev()
             .filter_map(|r| r.full_body)
             .collect();
+        let probes = probe_new_posts(ctx, &posts, &key, |p| {
+            seen.contains(&p.post_id) || seen.contains(&p.url_id) || source_seen(&p.url)
+        })?;
         // Feeds list newest first; surface oldest first.
         for post in posts.into_iter().rev() {
-            let cand = Candidate {
+            let mut cand = Candidate {
                 source_kind: KIND.into(),
                 source_key: key.clone(),
                 source_name: row.name.clone(),
@@ -359,6 +468,9 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                     .body_html
                     .as_deref()
                     .map(|h| i64::try_from(cv_ingest::word_count(h)).unwrap_or(i64::MAX)),
+                access: None,
+                complete: None,
+                full_word_count: None,
             };
             let full = Some(post.has_body());
             let recorded = ctx
@@ -398,14 +510,31 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             }
             new += 1;
             seen.insert(&post.post_id);
+            let ev = evidence_for(&post, probes.get(&post.post_id), row, cfg.complete_percent);
+            probe_failed += usize::from(ev.probe_failed);
+            cand.access = ev.access.map(|a| a.as_str().to_owned());
+            cand.complete = ev.complete;
+            cand.full_word_count = ev.full_words.map(i64::from);
             if auto {
-                let (written, path) =
-                    write_note(ctx, row, &post, &mut out.output_paths, &mut localize_failed)?;
+                let (written, path) = write_note(
+                    ctx,
+                    row,
+                    &post,
+                    &ev,
+                    &mut out.output_paths,
+                    &mut localize_failed,
+                )?;
                 if written {
                     notes += 1;
                 }
                 let score = super::score_item(ctx, &cand);
-                record_with(ctx, &cand, TrackerOutcome::Note, full, score, Some(path))?;
+                let inserted =
+                    record_with(ctx, &cand, TrackerOutcome::Note, full, score, Some(path))?;
+                // Auto-done when complete (plan auto-intake-sprint Decisions locked).
+                if inserted && ev.complete == Some(true) {
+                    ctx.state()
+                        .set_tracker_item_status(KIND, &key, &post.post_id, Some('x'))?;
+                }
             } else if emit_line_with(ctx, &cand, full, &mut out.output_paths)?
                 != super::Emitted::AlreadyRecorded
             {
@@ -431,6 +560,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         failed,
         invalid,
         localize_failed,
+        probe_failed,
     });
     Ok(out)
 }

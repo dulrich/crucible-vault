@@ -19,6 +19,7 @@
 //! prop query replaces it).
 
 pub mod blogs;
+pub mod substack;
 pub mod youtube;
 
 use std::collections::{BTreeSet, HashSet};
@@ -59,6 +60,12 @@ pub struct Candidate {
     pub duration_s: Option<i64>,
     /// Body word count (blogs with a full body), when known.
     pub word_count: Option<i64>,
+    /// Probed access tier (`free`/`paid`/`founding`/`unknown`; blogs, plan auto-intake-sprint).
+    pub access: Option<String>,
+    /// Whether the delivered body is the complete post (`None` = unknown).
+    pub complete: Option<bool>,
+    /// The probe's full post word count.
+    pub full_word_count: Option<i64>,
 }
 
 /// Records `c` with `outcome` (first sighting wins). Returns whether it was newly inserted.
@@ -96,6 +103,9 @@ pub(crate) fn record_with(
             source_name: Some(c.source_name.clone()).filter(|n| !n.is_empty()),
             duration_s: c.duration_s,
             word_count: c.word_count,
+            access: c.access.clone(),
+            complete: c.complete,
+            full_word_count: c.full_word_count,
         })
         .map_err(StepError::from)
 }
@@ -157,6 +167,9 @@ impl SeenSet {
                     url: String::new(),
                     duration_s: None,
                     word_count: None,
+                    access: None,
+                    complete: None,
+                    full_word_count: None,
                 };
                 record(ctx, &c, TrackerOutcome::Skipped)?;
             }

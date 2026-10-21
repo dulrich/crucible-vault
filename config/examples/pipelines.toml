@@ -17,6 +17,7 @@ inbox = "Clippings"             # the clipper inbox x_discover watches (default 
 [blogs]
 enabled = false
 automatable_window = 5          # body = "auto" sources with N full-body posts in a row are captured
+complete_percent = 80           # a probed post is complete when the feed delivered >= this % of its words
 
 [image_describe]
 enabled = false
