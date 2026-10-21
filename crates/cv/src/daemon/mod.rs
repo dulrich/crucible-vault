@@ -42,6 +42,7 @@ use crate::{now_ms, spool};
 mod background;
 mod bridge;
 mod errors;
+mod mail_watch;
 mod memory;
 mod notes;
 mod queue;
@@ -211,6 +212,7 @@ impl Daemon {
             runner.spawn_claim_loop(stop_rx.clone()),
             runner.spawn_event_starter(stop_rx.clone()),
             runner.spawn_scheduler(stop_rx.clone()),
+            mail_watch::spawn(runner.clone(), stop_rx.clone()),
         ];
         tasks.extend([
             tokio::spawn(generation_listener(Arc::clone(&shared), stop_rx.clone())),

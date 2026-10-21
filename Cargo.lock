@@ -839,6 +839,7 @@ dependencies = [
  "image",
  "md-5",
  "memstat",
+ "notify",
  "percent-encoding",
  "regex",
  "reqwest",

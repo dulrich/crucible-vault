@@ -99,6 +99,13 @@ pub static PIPE_MAIL: Record = Record {
             Node::Str,
         )
         .dflt(D::Str("cur")),
+        field(
+            "watch",
+            "Watch",
+            "Enqueue track-mail as soon as a dropped message settles (the schedule stays the backstop)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(true)),
     ],
     rules: &[],
     summary: None,

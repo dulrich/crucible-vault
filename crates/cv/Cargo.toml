@@ -41,6 +41,8 @@ cv-schema = { path = "../cv-schema" }
 # Plan memory-instrumentation-and-reduction WP-M1: memory snapshot (vendored) + glibc stats.
 memstat = { path = "../memstat" }
 cv-malloc = { path = "../cv-malloc" }
+# Plan intake-followups-mail-youtube WP-3: the Maildir watch (same pin as cv-vault; lock = one cv edge).
+notify = "=8.2.0"
 
 [dev-dependencies]
 # Shared test harness (dev edges only).

@@ -29,9 +29,12 @@ In `pipelines.toml` (the migration `0001-auto-intake-config` adds this disabled)
 enabled = true
 maildir = "/home/you/Mail/newsletters"
 processed = "cur"               # a handled new/ message moves to <maildir>/cur/<name>:2,S; loose files to <maildir>/processed/
+watch = true                    # default: a dropped message enqueues track-mail once it settles (~5 s quiet, size stable)
 ```
 
 An empty `maildir` is "unset" and the step does nothing. Handled messages are moved, never deleted; an unparseable message stays where it is.
+
+With `watch = true` (the default) the daemon watches `<maildir>` and `<maildir>/new` (non-recursive) and enqueues `track-mail` once a dropped message has been quiet for about 5 seconds with an unchanged size; the 15-minute schedule stays as the backstop, and a missing directory is logged once and left to the schedule until the config changes.
 
 ## 4. Describe the senders: `[[newsletter]]` rows
 

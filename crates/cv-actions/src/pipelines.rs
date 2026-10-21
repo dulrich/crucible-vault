@@ -129,6 +129,10 @@ pub struct MailPipeline {
     pub maildir: String,
     /// The directory (under the Maildir) a processed `new/` message moves to (default `cur`).
     pub processed: String,
+    /// Watch `<maildir>` and `<maildir>/new` and enqueue `track-mail` once a dropped message
+    /// settles (default on; plan intake-followups-mail-youtube WP-3). The schedule stays the
+    /// backstop.
+    pub watch: bool,
 }
 
 impl Default for MailPipeline {
@@ -137,6 +141,7 @@ impl Default for MailPipeline {
             enabled: false,
             maildir: String::new(),
             processed: "cur".into(),
+            watch: true,
         }
     }
 }

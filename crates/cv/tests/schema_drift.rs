@@ -289,6 +289,7 @@ threshold_percent = 70
 enabled = true
 maildir = "/var/mail/example"
 processed = "cur"
+watch = false
 
 [image_describe]
 enabled = true
