@@ -21,7 +21,7 @@ pub const DEFAULT_LIMIT: u32 = 50;
 pub const MAX_LIMIT: u32 = 500;
 
 /// Usage lines (also appended to the top-level `cv --help`).
-pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv intake reconcile [--dry-run]   link NULL-path note rows, probe + auto-tick the complete ones; prints counts as key=value\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
+pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv intake reconcile [--dry-run]   link NULL-path rows, probe + auto-tick the complete ones, finalize youtube rows, re-match + re-clean mail; prints counts as key=value\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
 
 fn page_limit(l: Option<u32>) -> u32 {
     l.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)

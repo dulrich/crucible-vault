@@ -15,12 +15,26 @@
 //!    the evidence is written first (`set_tracker_completeness`), and the row is ticked only on
 //!    `Some(true)`. A link or a match alone never ticks.
 //!
-//! `dry_run` (step param, or a job param `dry_run = true`) computes every count and writes
-//! nothing to `state.db` or the vault (the probe is a read-only fetch). The step holds
+//! Plan `intake-followups-mail-youtube` WP-5 adds three backfill phases (detail and vars in
+//! [`super::reconcile_backfill`]), run after phase 3:
+//!
+//! 4. **YouTube finalize** (A): open `youtube` rows get the WP-4 finalize core (transcript
+//!    clippings of that video tick; bare embeds never do) — replaces their `skipped_kind`.
+//! 5. **Mail re-match** (B): `unknown-sender` mail rows re-resolve against the newsletter config
+//!    and are re-keyed (collision-safe), retagged and ticked by predicate; never a new note.
+//! 6. **Re-clean** (C): `via: email` note bodies go through `clean_body`, CAS-written only on a
+//!    change.
+//!
+//! The step now writes notes (tags, `complete`, cleaned bodies), so `IntakeReconcile` is
+//! note-mutating (`mutates_note`, audit M2).
+//!
+//! `dry_run` (step param, or a job param `dry_run = true`) computes every count of every phase and
+//! writes nothing to `state.db` or the vault (the probe is a read-only fetch). The step holds
 //! `intake::identity` (step-intrinsic). Outcome vars are aggregate counts only: `null_paths`,
 //! `linked`, `unresolved`, `ambiguous`, `probed`, `probe_failed`, `probe_skipped`, `ticked`,
-//! `left_open`, `skipped_kind` (open non-blog rows: linked in phase 1 but never probed or ticked;
-//! mail unknown-sender rows stay open by the WP-4 invariant), `dry_run`.
+//! `left_open`, `skipped_kind` (open rows of kinds other than blog and youtube: linked in phase 1
+//! but never probed or ticked; mail unknown-sender rows count here before phase 5 re-matches
+//! them), the backfill vars (`yt_*`, `x_ticked`, `mail_*`), `dry_run`.
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::{self, Access};
@@ -32,6 +46,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::params::{check_keys, get_bool};
+use super::reconcile_backfill as backfill;
 use super::tracker::blogs::PROBE_SERVICE;
 use super::tracker::substack;
 use super::util::fetch_bounded;
@@ -81,6 +96,8 @@ struct Vars {
     left_open: u32,
     skipped_kind: u32,
     dry_run: bool,
+    #[serde(flatten)]
+    backfill: backfill::Counts,
 }
 
 /// How a probe attempt ended.
@@ -163,8 +180,9 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         .collect();
 
     // 1. Link NULL-path rows.
+    let mut sidx: Option<SupersedeIndex> = None;
     if work.iter().any(|w| w.path.is_none()) {
-        let idx = SupersedeIndex::build(ctx)?;
+        let idx = backfill::index(&mut sidx, ctx)?;
         for w in work.iter_mut().filter(|w| w.path.is_none()) {
             v.null_paths += 1;
             let m = idx.identity_matches(std::slice::from_ref(&w.item.url), None);
@@ -196,7 +214,10 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let cfg = ctx.config.pipelines().blogs.clone();
     for w in work.iter_mut().filter(|w| w.open) {
         if w.item.source_kind != "blog" {
-            v.skipped_kind += 1;
+            // Open youtube rows are finalized by phase 4 instead.
+            if w.item.source_kind != "youtube" {
+                v.skipped_kind += 1;
+            }
             continue;
         }
         let (Some(path), false) = (w.path.clone(), w.blocked) else {
@@ -261,6 +282,29 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             v.left_open += 1;
         }
     }
+
+    // 4-6. Backfill phases (plan intake-followups-mail-youtube WP-5).
+    let mut sh = backfill::Shared {
+        dry,
+        pre_linked: std::collections::BTreeSet::new(),
+        paths: std::collections::HashMap::new(),
+    };
+    for w in &work {
+        if w.item.note_path.is_none()
+            && let Some(p) = &w.path
+        {
+            let k = (
+                w.item.source_kind.clone(),
+                w.item.source_key.clone(),
+                w.item.item_id.clone(),
+            );
+            sh.pre_linked.insert(k.clone());
+            sh.paths.insert(k, p.clone());
+        }
+    }
+    backfill::youtube(ctx, &sh, &mut sidx, &mut v.backfill)?;
+    backfill::mail(ctx, &sh, &mut v.backfill)?;
+    backfill::reclean(ctx, &sh, &mut v.backfill)?;
 
     let mut out = StepOutcome::default();
     out.set_vars(&v);

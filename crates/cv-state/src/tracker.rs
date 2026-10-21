@@ -73,6 +73,17 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackerItem> {
     })
 }
 
+/// What [`StateDb::rekey_tracker_item`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rekey {
+    /// No row at the new key: the old row's key was updated in place.
+    Moved,
+    /// A row already sat at the new key: it absorbed the old row's NULL fields; the old row is gone.
+    Merged,
+    /// No row at the old key (already moved) or the keys are equal: nothing changed.
+    Absent,
+}
+
 /// `tracker_items` listing filter (every field optional; `limit` 0 = unlimited).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IntakeQuery {
@@ -491,6 +502,108 @@ impl StateDb {
             Ok((row(r)?, status.and_then(|s| s.chars().next())))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every open row (`status IS NULL`) of `source_kind`, any outcome, oldest first (plan
+    /// intake-followups-mail-youtube WP-5: reconcile finalizes YouTube rows that never reached a
+    /// `note` outcome).
+    pub fn tracker_open_rows(&self, source_kind: &str) -> Result<Vec<TrackerItem>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE source_kind = ?1 AND status IS NULL
+             ORDER BY first_seen_ms, source_key, item_id"
+        ))?;
+        let rows = stmt.query_map(params![source_kind], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every row of one source, any outcome and status, oldest first (plan
+    /// intake-followups-mail-youtube WP-5: the `unknown-sender` mail re-match).
+    pub fn tracker_rows_of_source(
+        &self,
+        source_kind: &str,
+        source_key: &str,
+    ) -> Result<Vec<TrackerItem>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE source_kind = ?1 AND source_key = ?2
+             ORDER BY first_seen_ms, item_id"
+        ))?;
+        let rows = stmt.query_map(params![source_kind, source_key], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Moves one row from `old_key` to `new_key` (and sets its `source_name`) in one transaction
+    /// (plan intake-followups-mail-youtube WP-5, audit E2).
+    ///
+    /// No row at `new_key`: the key is updated in place (status, `note_path`, evidence kept).
+    /// A row already at `new_key` (collision): that row is kept, its NULL `note_path` / `access`
+    /// / `complete` / `full_word_count` / `status` are filled from the old row, and the old row
+    /// is deleted. No row at `old_key` (already moved: an interrupted run's re-run) or equal keys
+    /// is [`Rekey::Absent`], a no-op.
+    pub fn rekey_tracker_item(
+        &mut self,
+        source_kind: &str,
+        old_key: &str,
+        item_id: &str,
+        new_key: &str,
+        new_source_name: &str,
+    ) -> Result<Rekey> {
+        if old_key == new_key {
+            return Ok(Rekey::Absent);
+        }
+        let tx = self.conn().unchecked_transaction()?;
+        let exists = |key: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT 1 FROM tracker_items
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+                params![source_kind, key, item_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
+        };
+        if !exists(old_key)? {
+            return Ok(Rekey::Absent);
+        }
+        let out = if exists(new_key)? {
+            let fill = |col: &str| {
+                format!(
+                    "{col} = COALESCE({col}, (SELECT {col} FROM tracker_items
+                       WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3))"
+                )
+            };
+            let set = [
+                "note_path",
+                "access",
+                "complete",
+                "full_word_count",
+                "status",
+            ]
+            .map(fill)
+            .join(", ");
+            tx.execute(
+                &format!(
+                    "UPDATE tracker_items SET {set}
+                     WHERE source_kind = ?1 AND source_key = ?4 AND item_id = ?3"
+                ),
+                params![source_kind, old_key, item_id, new_key],
+            )?;
+            tx.execute(
+                "DELETE FROM tracker_items
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+                params![source_kind, old_key, item_id],
+            )?;
+            Rekey::Merged
+        } else {
+            tx.execute(
+                "UPDATE tracker_items SET source_key = ?4, source_name = ?5
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+                params![source_kind, old_key, item_id, new_key, new_source_name],
+            )?;
+            Rekey::Moved
+        };
+        tx.commit()?;
+        self.changed("tracker_items");
+        Ok(out)
     }
 
     /// Rows whose `url` is exactly `url` (plan auto-intake-sprint WP-3), oldest first.

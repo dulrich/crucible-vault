@@ -70,6 +70,9 @@ mod materialize_tests;
 pub(crate) mod metadata;
 pub mod params;
 pub mod reconcile;
+mod reconcile_backfill;
+#[cfg(test)]
+mod reconcile_backfill_tests;
 #[cfg(test)]
 mod reconcile_tests;
 pub mod search;

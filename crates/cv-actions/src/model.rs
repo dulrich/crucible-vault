@@ -126,9 +126,9 @@ step_kinds! {
     TrackMail = "track_mail", true;
     /// Clip dedup + kind auto-filing (plan `auto-intake-sprint` WP-5).
     AutoFile = "auto_file", true;
-    /// One-shot reconcile of `note` tracker rows (plan `auto-intake-sprint` WP-6); writes
-    /// `state.db` only, never a note.
-    IntakeReconcile = "intake_reconcile", false;
+    /// One-shot reconcile of tracker rows (plan `auto-intake-sprint` WP-6); plan
+    /// `intake-followups-mail-youtube` WP-5 widened it to retag, re-clean and re-key mail notes.
+    IntakeReconcile = "intake_reconcile", true;
     /// Links and ticks the tracker rows a filed note satisfies (plan
     /// `intake-followups-mail-youtube` WP-4); writes `state.db` only, never a note.
     IntakeFinalize = "intake_finalize", false;

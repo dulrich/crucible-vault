@@ -374,7 +374,7 @@ fn non_blog_open_rows_are_never_ticked() {
     let o = run(&w, "").unwrap();
     assert_eq!(
         (n(&o, "ticked"), n(&o, "skipped_kind")),
-        (json!(0), json!(2))
+        (json!(0), json!(1))
     );
     let db = w.state.lock().unwrap();
     for (k, key, id) in [("mail", "unknown-sender", "m1"), ("youtube", "UC1", "y1")] {

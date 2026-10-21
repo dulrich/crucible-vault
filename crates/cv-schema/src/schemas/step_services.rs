@@ -279,7 +279,7 @@ pub static AUTO_FILE: Record = Record {
     summary: None,
 };
 
-/// `intake_reconcile` — `crates/cv/src/steps/reconcile.rs` (`dry_run`; links NULL-path `note` rows, probes open blog rows, auto-ticks complete ones).
+/// `intake_reconcile` — `crates/cv/src/steps/reconcile.rs` (`dry_run`; links NULL-path `note` rows, probes open blog rows, auto-ticks complete ones, finalizes youtube rows, re-matches unknown-sender mail, re-cleans email notes).
 pub static INTAKE_RECONCILE: Record = Record {
     name: "intake_reconcile",
     fields: &[field(

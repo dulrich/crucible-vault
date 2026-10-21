@@ -34,7 +34,7 @@ watch = true                    # default: a dropped message enqueues track-mail
 
 An empty `maildir` is "unset" and the step does nothing. Handled messages are moved, never deleted; an unparseable message stays where it is.
 
-With `watch = true` (the default) the daemon watches `<maildir>` and `<maildir>/new` (non-recursive) and enqueues `track-mail` once a dropped message has been quiet for about 5 seconds with an unchanged size; the 15-minute schedule stays as the backstop, and a missing directory is logged once and left to the schedule until the config changes.
+With `watch = true` (the default) the daemon watches `<maildir>` and `<maildir>/new` (non-recursive) and enqueues `track-mail` once a dropped message has been quiet for about 5 seconds with an unchanged size; the 15-minute schedule stays as the backstop, and a missing directory is logged once and left to the schedule until the config changes. Migration `0002-intake-followups` writes the explicit `watch = true` into an existing `[mail]` block.
 
 ## 4. Describe the senders: `[[newsletter]]` rows
 
@@ -53,6 +53,12 @@ paywall_markers = ["Upgrade to read the rest"]
 
 A row needs a `from` or a `list_id`. Mail from a sender no row matches is still captured (source "unknown-sender") and left open in Intake; it is never dropped.
 
+**Substack auto-match (plan `intake-followups-mail-youtube` WP-2).** Mail whose `List-Id` (else sender local part) is `<pub>.substack.com` needs no `[[newsletter]]` row when a `[[blog]]` row's feed `link` host is `<pub>.substack.com`: it behaves as a newsletter of kind `blog` named for that blog row, mirroring it (RSS supersede, the blog row's paywall markers). An explicit `[[newsletter]]` row always wins over the auto-match. To follow a Substack publication you only need a `[[blog]]` row on `https://<pub>.substack.com/feed`.
+
+Migration `0002-intake-followups` adds the rows the 2026-10-21 mail dump needed (each only when absent): `[[newsletter]]` rows for the `news` senders Newsbit and Example News Report, the `blog` senders Example Weekly (example-creator) and Example Letter (beehiiv), and `blog`-linked rows for Example Newsletter and Example Author (custom-domain feeds the host auto-match cannot reach); plus `[[blog]]` rows on `<pub>.substack.com/feed` for pub-a, pub-b and pub-c, which the auto-match then covers. A new `[[blog]]` row makes `track-blogs` fetch that feed.
+
+**Body cleanup (WP-1).** Before the word count and the note are made, the markdown body is cleaned of newsletter chrome (`cv_ingest::mail::clean_body`): tracking redirects are unwrapped, `utm_*` parameters and tracking pixels dropped, share/like/restack rows and the unsubscribe footer removed. The paywall-marker verdict is taken on the body before cleanup, so removed chrome can never turn a partial message complete.
+
 ## What happens to a message
 
 1. The post URL is looked for in the HTML (Substack `/p/<slug>`, `open.substack.com/pub/<pub>/p/<slug>`, "view in browser" links). ESP tracking redirects are unwrapped only when the target is in the URL itself; nothing is fetched.
@@ -60,3 +66,13 @@ A row needs a `from` or a `list_id`. Mail from a sender no row matches is still 
 3. Otherwise a new captured note is written (`via: email`). An email body is complete unless a paywall marker matches (an email never inherits the RSS stub's `complete`); a complete one is recorded done, so the Reading list owns it. Partial ones stay open in Intake.
 
 Re-running is a no-op (the Message-ID is recorded).
+
+## Backfill: `cv intake reconcile` (plan `intake-followups-mail-youtube` WP-5)
+
+`cv intake reconcile [--dry-run]` also repairs mail already recorded. `--dry-run` prints every count and writes nothing; the output is aggregate `key=value` lines only.
+
+- **Re-match** (`mail_*`): each message recorded under `unknown-sender` is found again by Message-ID in `<maildir>/<processed>/` and `<maildir>/processed/` (a file that is gone counts `mail_missing` and the row stays as it is). When the newsletter resolver (explicit row, else the Substack auto-match) now matches, the row is re-keyed to the newsletter's name (`mail_rematched`; a row already at that key absorbs the old row's missing fields, `mail_collisions`). The note gets the newsletter's kind and extra tags and is **not moved** (a note in another kind's folder counts `mail_folder_mismatch`), a paywall marker of the newsletter in the original body marks it `complete: false`, and the row is ticked only when the note is complete (`mail_ticked`). No note is ever created.
+- **Re-clean**: every note with `via: email` has its body put through the same cleanup as new mail (frontmatter untouched, written only on a change, skipped when you edited the note meanwhile): `mail_recleaned`, `mail_clean_unchanged`, `mail_clean_conflict`. A second run changes nothing.
+- **YouTube** (`yt_*`): an open YouTube row ticks when its filed note is a clipping of that video with transcript text; a note that only embeds the video never does (`yt_no_evidence`).
+
+The `.eml` files must still sit in the processed folders for the re-match; rows whose message is gone stay `unknown-sender`.

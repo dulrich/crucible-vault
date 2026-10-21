@@ -147,7 +147,7 @@ fn sender_host(addr: &str) -> Option<String> {
 
 /// The note folder (the kind's `folder`, default `{period.day}`) and tags (kind tags, then the
 /// row's, deduplicated).
-fn note_target(
+pub(crate) fn note_target(
     ctx: &StepCtx<'_>,
     kind: &str,
     extra: &[String],
@@ -318,6 +318,21 @@ pub(crate) fn resolve_newsletter<'a>(
     }))
 }
 
+/// The message body as markdown before any cleanup (the HTML part converted, else the trimmed
+/// plain text): the input of the paywall-marker verdict and of `clean_body`.
+pub(crate) fn raw_markdown(post: &MailPost) -> String {
+    let html = post
+        .html
+        .clone()
+        .or_else(|| post.text.clone())
+        .unwrap_or_default();
+    if post.html.is_some() {
+        cv_ingest::html_to_markdown(&html)
+    } else {
+        html.trim().to_owned()
+    }
+}
+
 /// Records and (maybe) captures one parsed message. The caller holds `intake::identity`.
 fn handle(
     ctx: &mut StepCtx<'_>,
@@ -351,16 +366,7 @@ fn handle(
     if let Some(b) = &blog_row {
         markers.extend(b.paywall_markers.iter().cloned());
     }
-    let html = post
-        .html
-        .clone()
-        .or_else(|| post.text.clone())
-        .unwrap_or_default();
-    let body_md = if post.html.is_some() {
-        cv_ingest::html_to_markdown(&html)
-    } else {
-        html.trim().to_owned()
-    };
+    let body_md = raw_markdown(post);
     // The paywall-marker verdict is taken on the pre-cleanup body: removing an "Upgrade to paid"
     // chrome line must never turn a partial message complete (plan intake-followups-mail-youtube
     // WP-1, audit M1). Everything after (words, description, the captured or replacing body) is

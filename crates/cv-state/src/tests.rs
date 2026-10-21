@@ -1109,3 +1109,136 @@ fn protocol_enums_keep_stored_forms_and_corrupt_handling() {
     // `tracker_items.outcome` has a CHECK constraint, so a bad stored outcome cannot exist.
     assert_eq!(TrackerOutcome::parse("x"), None);
 }
+
+fn mail_row(key: &str, id: &str) -> TrackerItem {
+    TrackerItem {
+        source_kind: "mail".into(),
+        source_key: key.into(),
+        item_id: id.into(),
+        title: "T".into(),
+        url: "u".into(),
+        first_seen_ms: 1,
+        day: "2026-10-21".into(),
+        outcome: TrackerOutcome::Note,
+        score: None,
+        full_body: None,
+        note_path: None,
+        source_name: Some("Unknown sender a@b.example".into()),
+        duration_s: None,
+        word_count: None,
+        access: None,
+        complete: None,
+        full_word_count: None,
+    }
+}
+
+/// Plan intake-followups-mail-youtube WP-5 (audit E2): a re-key without a row at the new key
+/// updates it in place, keeping status, `note_path` and evidence; a second call is a no-op.
+#[test]
+fn rekey_moves_a_row_in_place_and_is_idempotent() {
+    let (_d, mut s) = db();
+    let mut it = mail_row("unknown-sender", "m1");
+    it.note_path = Some("n/a.md".into());
+    it.complete = Some(true);
+    s.insert_tracker_item(&it).unwrap();
+    s.set_tracker_item_status("mail", "unknown-sender", "m1", Some('x'))
+        .unwrap();
+    let r = s
+        .rekey_tracker_item("mail", "unknown-sender", "m1", "Newsbit", "Newsbit")
+        .unwrap();
+    assert_eq!(r, Rekey::Moved);
+    assert!(
+        s.tracker_item("mail", "unknown-sender", "m1")
+            .unwrap()
+            .is_none()
+    );
+    let got = s.tracker_item("mail", "Newsbit", "m1").unwrap().unwrap();
+    assert_eq!(
+        (
+            got.note_path.as_deref(),
+            got.complete,
+            got.source_name.as_deref()
+        ),
+        (Some("n/a.md"), Some(true), Some("Newsbit"))
+    );
+    assert_eq!(
+        s.tracker_item_status("mail", "Newsbit", "m1").unwrap(),
+        Some(Some('x'))
+    );
+    let again = s
+        .rekey_tracker_item("mail", "unknown-sender", "m1", "Newsbit", "Newsbit")
+        .unwrap();
+    assert_eq!(again, Rekey::Absent);
+    assert_eq!(
+        s.tracker_rows_of_source("mail", "Newsbit").unwrap().len(),
+        1
+    );
+}
+
+/// A collision keeps the new-key row, fills its NULL fields (and a NULL status) from the old
+/// row, never overwrites a set field, and deletes the old row.
+#[test]
+fn rekey_collision_merges_into_the_existing_row() {
+    let (_d, mut s) = db();
+    let mut old = mail_row("unknown-sender", "m1");
+    old.note_path = Some("n/old.md".into());
+    old.access = Some("free".into());
+    old.complete = Some(true);
+    old.full_word_count = Some(900);
+    let mut new = mail_row("Newsbit", "m1");
+    new.note_path = Some("n/new.md".into());
+    new.complete = Some(false);
+    s.insert_tracker_item(&old).unwrap();
+    s.insert_tracker_item(&new).unwrap();
+    s.set_tracker_item_status("mail", "unknown-sender", "m1", Some('x'))
+        .unwrap();
+    let r = s
+        .rekey_tracker_item("mail", "unknown-sender", "m1", "Newsbit", "Newsbit")
+        .unwrap();
+    assert_eq!(r, Rekey::Merged);
+    assert!(
+        s.tracker_item("mail", "unknown-sender", "m1")
+            .unwrap()
+            .is_none()
+    );
+    let got = s.tracker_item("mail", "Newsbit", "m1").unwrap().unwrap();
+    assert_eq!(got.note_path.as_deref(), Some("n/new.md"), "set field kept");
+    assert_eq!(got.complete, Some(false), "set field kept");
+    assert_eq!(got.access.as_deref(), Some("free"), "NULL filled");
+    assert_eq!(got.full_word_count, Some(900), "NULL filled");
+    assert_eq!(
+        s.tracker_item_status("mail", "Newsbit", "m1").unwrap(),
+        Some(Some('x')),
+        "NULL status taken from the old row"
+    );
+}
+
+#[test]
+fn tracker_open_rows_and_rows_of_source_ignore_outcome() {
+    let (_d, mut s) = db();
+    for (id, outcome) in [
+        ("a", TrackerOutcome::Line),
+        ("b", TrackerOutcome::Note),
+        ("c", TrackerOutcome::Skipped),
+    ] {
+        let mut it = mail_row("unknown-sender", id);
+        it.source_kind = "youtube".into();
+        it.outcome = outcome;
+        s.insert_tracker_item(&it).unwrap();
+    }
+    s.set_tracker_item_status("youtube", "unknown-sender", "b", Some('x'))
+        .unwrap();
+    let open: Vec<String> = s
+        .tracker_open_rows("youtube")
+        .unwrap()
+        .into_iter()
+        .map(|r| r.item_id)
+        .collect();
+    assert_eq!(open, vec!["a", "c"]);
+    assert_eq!(
+        s.tracker_rows_of_source("youtube", "unknown-sender")
+            .unwrap()
+            .len(),
+        3
+    );
+}

@@ -22,7 +22,8 @@
 //!    - Other kinds are linked only. The live tracker has no X rows, so no `x` arm exists.
 //!
 //! Writes `state.db` only, never a note; holds `intake::identity` (step-intrinsic). A note with
-//! no resolvable row is a no-op success. Outcome vars are aggregates only: `rows`, `linked`,
+//! no resolvable row is a no-op success. The per-note core is [`finalize_note`] (also run by
+//! `intake_reconcile`, with a dry-run flag and a one-kind filter). Outcome vars are aggregates only: `rows`, `linked`,
 //! `ticked`, `no_evidence`. Nothing here is adopted from Crucible (its tracker ticks were manual).
 
 use std::collections::BTreeSet;
@@ -62,11 +63,11 @@ impl StepModule for IntakeFinalize {
 
 /// Outcome vars (aggregates only).
 #[derive(Default, Serialize)]
-struct Vars {
-    rows: u32,
-    linked: u32,
-    ticked: u32,
-    no_evidence: u32,
+pub(crate) struct Vars {
+    pub(crate) rows: u32,
+    pub(crate) linked: u32,
+    pub(crate) ticked: u32,
+    pub(crate) no_evidence: u32,
 }
 
 fn st(e: cv_state::StateError) -> StepError {
@@ -173,21 +174,50 @@ fn run(path: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         .read(&path)?
         .ok_or_else(|| StepError::failed("intake_finalize target note not found"))?;
     let text = String::from_utf8(bytes).map_err(|_| StepError::failed("note is not UTF-8"))?;
-    let doc = FrontmatterDoc::new(text.as_str());
+    let v = finalize_note(ctx, &path, &text, None, false, &BTreeSet::new())?;
+    let mut out = StepOutcome::default();
+    out.set_vars(&v);
+    Ok(out)
+}
+
+/// A tracker row's key: `(source_kind, source_key, item_id)`.
+pub(crate) type RowKey = (String, String, String);
+
+/// The finalize core, shared with `intake_reconcile` (plan intake-followups-mail-youtube WP-5):
+/// resolves the rows `text` (the note at `path`) satisfies, links them and ticks them per the
+/// module doc.
+///
+/// - `only_kind` limits the rows to one `source_kind` (reconcile attributes counts per phase);
+///   `None` takes every resolved row (the step).
+/// - `dry` computes every count and writes nothing.
+/// - `pre_linked` lists rows an earlier reconcile phase already counted as linked (so a dry run,
+///   whose database still shows a NULL `note_path`, counts the same as a real run).
+pub(crate) fn finalize_note(
+    ctx: &StepCtx<'_>,
+    path: &str,
+    text: &str,
+    only_kind: Option<&str>,
+    dry: bool,
+    pre_linked: &BTreeSet<RowKey>,
+) -> Result<Vars, StepError> {
+    let doc = FrontmatterDoc::new(text);
     let sources = strings(&doc, "source");
     let video = own_video_id(&sources, &doc);
-    let rows = resolve_rows(
+    let mut rows = resolve_rows(
         ctx,
-        &path,
+        path,
         &sources,
         &strings(&doc, "post-id"),
         video.as_deref(),
     )?;
+    if let Some(k) = only_kind {
+        rows.retain(|r| r.source_kind == k);
+    }
     let mut v = Vars {
         rows: u32::try_from(rows.len()).unwrap_or(u32::MAX),
         ..Vars::default()
     };
-    let evidence = transcript_evidence(&text, cleanup_kind(ctx.config, &strings(&doc, "tags")));
+    let evidence = transcript_evidence(text, cleanup_kind(ctx.config, &strings(&doc, "tags")));
     let note_access = match doc.get("access") {
         Ok(Some(JsValue::Str(s))) => Some(s),
         _ => None,
@@ -201,10 +231,15 @@ fn run(path: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         let (kind, key, id) = (&row.source_kind, &row.source_key, &row.item_id);
         let status = {
             let mut db = ctx.state();
-            if row.note_path.is_none()
-                && db.set_tracker_note_path(kind, key, id, &path).map_err(st)?
-            {
-                v.linked += 1;
+            if row.note_path.is_none() {
+                let counted = pre_linked.contains(&(kind.clone(), key.clone(), id.clone()));
+                if dry {
+                    if !counted {
+                        v.linked += 1;
+                    }
+                } else if db.set_tracker_note_path(kind, key, id, path).map_err(st)? {
+                    v.linked += 1;
+                }
             }
             db.tracker_item_status(kind, key, id).map_err(st)?
         };
@@ -214,19 +249,21 @@ fn run(path: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         match kind.as_str() {
             "youtube" => {
                 if video.as_deref() == Some(id.as_str()) && evidence.is_some() {
-                    let mut db = ctx.state();
-                    // Evidence first, tick second (finalize's order).
-                    db.set_tracker_completeness(
-                        kind,
-                        key,
-                        id,
-                        row.access.as_deref(),
-                        Some(true),
-                        row.full_word_count,
-                    )
-                    .map_err(st)?;
-                    db.set_tracker_item_status(kind, key, id, Some('x'))
+                    if !dry {
+                        let mut db = ctx.state();
+                        // Evidence first, tick second (finalize's order).
+                        db.set_tracker_completeness(
+                            kind,
+                            key,
+                            id,
+                            row.access.as_deref(),
+                            Some(true),
+                            row.full_word_count,
+                        )
                         .map_err(st)?;
+                        db.set_tracker_item_status(kind, key, id, Some('x'))
+                            .map_err(st)?;
+                    }
                     v.ticked += 1;
                 } else {
                     v.no_evidence += 1;
@@ -251,13 +288,15 @@ fn run(path: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
                         complete_percent,
                     )
                 });
-                let r = Resolved {
-                    path: Some(path.clone()),
-                    action: Action::Kept,
-                    access,
-                    complete,
-                };
-                finalize_rows(&mut ctx.state(), vec![row.clone()], &r)?;
+                if !dry {
+                    let r = Resolved {
+                        path: Some(path.to_owned()),
+                        action: Action::Kept,
+                        access,
+                        complete,
+                    };
+                    finalize_rows(&mut ctx.state(), vec![row.clone()], &r)?;
+                }
                 if complete == Some(true) {
                     v.ticked += 1;
                 } else {
@@ -267,7 +306,5 @@ fn run(path: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
             _ => v.no_evidence += 1,
         }
     }
-    let mut out = StepOutcome::default();
-    out.set_vars(&v);
-    Ok(out)
+    Ok(v)
 }
