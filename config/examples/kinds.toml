@@ -8,6 +8,7 @@
 #                       {period.day} = today's daily asset folder, {param.NAME}, {vars.NAME}
 #   cleanup_transcript  run the transcript cleanup before lint (`lint { kind = … }`)
 #   props               extra properties for `set_props { kind = … }`
+#   hosts               optional: clip hosts (www. ignored) that `auto_file` files under this kind
 # The kind names must match the `kind` param's enum choices in actions.toml.
 
 [kinds.transcript]
@@ -19,6 +20,7 @@ folder = "{period.day}"
 label = "Fanfic"
 tags = ["fanfic"]
 folder = "{period.day}"
+hosts = ["archiveofourown.org", "forums.spacebattles.com", "www.fanfiction.net"]
 
 [kinds.blog]
 label = "Blog"

@@ -48,7 +48,14 @@ use super::materialize::join;
 use super::params::{check_keys, check_placeholders, expand, get_bool, get_str, get_str_list};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
-const KIND_KEYS: &[&str] = &["label", "tags", "folder", "cleanup_transcript", "props"];
+const KIND_KEYS: &[&str] = &[
+    "label",
+    "tags",
+    "folder",
+    "cleanup_transcript",
+    "props",
+    "hosts",
+];
 
 /// The `[kinds.NAME]` table of `kinds.toml`.
 pub(super) fn kind_def<'c>(config: &'c ConfigSet, name: &str) -> Result<&'c toml::Table, String> {
@@ -177,6 +184,7 @@ fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, 
                 }
                 get_str_list(def, "tags")?;
                 get_bool(def, "cleanup_transcript")?;
+                get_str_list(def, "hosts")?;
             }
         }
     }

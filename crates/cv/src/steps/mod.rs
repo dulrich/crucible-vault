@@ -19,6 +19,7 @@
 //! | `TrackYoutube` | [`tracker::youtube`] | A2 WP-7 |
 //! | `TrackBlogs` | [`tracker::blogs`] | A2 WP-8 |
 //! | `TrackMail` | [`mail`] | auto-intake-sprint WP-4 |
+//! | `AutoFile` | [`auto_file`] | auto-intake-sprint WP-5 |
 //! | `IgnoreVideo` | [`ignore`] | A2 WP-9 |
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
@@ -31,6 +32,9 @@
 pub mod agent;
 #[cfg(test)]
 mod agent_tests;
+pub mod auto_file;
+#[cfg(test)]
+mod auto_file_tests;
 pub mod capture;
 pub mod capture_repair;
 #[cfg(test)]
@@ -565,6 +569,7 @@ step_modules! {
     TrackYoutube => tracker::youtube::TrackYoutube,
     TrackBlogs => tracker::blogs::TrackBlogs,
     TrackMail => mail::TrackMail,
+    AutoFile => auto_file::AutoFile,
     IgnoreVideo => ignore::IgnoreVideo,
     DailyBrief => daily_brief::DailyBrief,
     CaptureRepair => capture_repair::CaptureRepair,

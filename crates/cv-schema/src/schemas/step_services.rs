@@ -271,6 +271,14 @@ pub static TRACK_MAIL: Record = Record {
     summary: None,
 };
 
+/// `auto_file` — `crates/cv/src/steps/auto_file.rs` (no params; dedups the active clip through the supersede engine, then files it by kind).
+pub static AUTO_FILE: Record = Record {
+    name: "auto_file",
+    fields: &[],
+    rules: &[],
+    summary: None,
+};
+
 /// `ignore_video` — `crates/cv/src/steps/ignore.rs` (`mode`, `KEYS`).
 pub static IGNORE_VIDEO: Record = Record {
     name: "ignore_video",

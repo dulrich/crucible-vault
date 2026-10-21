@@ -66,6 +66,7 @@ tags = ["one", "two"]
 folder = "{period.day}"
 cleanup_transcript = true
 props = { source = "web", rank = 1 }
+hosts = ["one.example", "www.two.example"]
 
 [kinds.k2]
 tags = "single"
@@ -199,6 +200,7 @@ const STEPS: &[(&str, &str)] = &[
     ("track_youtube", "limit_per_source = 25"),
     ("track_blogs", ""),
     ("track_mail", ""),
+    ("auto_file", ""),
     ("ignore_video", "mode = \"manual\""),
     ("daily_brief", ""),
     ("capture_repair", "folder = \"daily/day\"\nlimit = 10"),

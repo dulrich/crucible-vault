@@ -36,6 +36,12 @@ pub static KIND: Record = Record {
             "Applied by set_props { kind }",
             Node::FreeTable,
         ),
+        field(
+            "hosts",
+            "Hosts",
+            "Clip hosts auto_file files under this kind (www. ignored)",
+            STR_LIST,
+        ),
     ],
     rules: &[],
     summary: None,
