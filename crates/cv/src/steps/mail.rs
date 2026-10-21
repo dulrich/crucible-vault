@@ -331,8 +331,13 @@ fn handle(
     } else {
         html.trim().to_owned()
     };
-    let words = body_md.split_whitespace().count();
+    // The paywall-marker verdict is taken on the pre-cleanup body: removing an "Upgrade to paid"
+    // chrome line must never turn a partial message complete (plan intake-followups-mail-youtube
+    // WP-1, audit M1). Everything after (words, description, the captured or replacing body) is
+    // the cleaned markdown.
     let marker = access::marker_hit(&body_md, &markers);
+    let body_md = mail::clean_body(&body_md);
+    let words = body_md.split_whitespace().count();
     let complete = access::completeness(
         None,
         u32::try_from(words).unwrap_or(u32::MAX),

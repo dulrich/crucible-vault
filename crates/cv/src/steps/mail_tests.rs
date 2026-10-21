@@ -26,7 +26,7 @@ name = "Paid Letter"
 from = ["@paid.example"]
 blog = "Paid Blog"
 tags = ["letters"]
-paywall_markers = ["Subscribe to keep reading"]
+paywall_markers = ["Subscribe to keep reading", "Upgrade to paid"]
 
 [[newsletter]]
 name = "Plain Letter"
@@ -323,5 +323,50 @@ fn truncated_email_does_not_replace_or_tick_the_stub() {
     assert_eq!(
         w.row("Paid Letter", "t1@paid.example").unwrap().0.outcome,
         TrackerOutcome::Skipped
+    );
+}
+
+#[test]
+fn marker_only_in_removed_chrome_still_blocks_the_replace() {
+    let w = stub_world();
+    // Without the marker this same-size email is complete and replaces the stub; "Upgrade to paid" (a configured marker) sits only in a chrome
+    // line that `clean_body` removes, so the verdict must come from the pre-cleanup body.
+    let body = format!(
+        "<p>{}</p><p><a href=\"https://substack.com/redirect/2/bad.sig\">Upgrade to paid</a></p><a href=\"{STUB_URL}\">Read online</a>",
+        words("w", 0, 30)
+    );
+    w.put(
+        "new/chrome",
+        &eml("c1@paid.example", "news@paid.example", "Deep dive", &body),
+    );
+    let o = w.run();
+    assert_eq!(
+        (n(&o, "replaced"), n(&o, "kept"), n(&o, "new")),
+        (json!(0), json!(1), json!(0))
+    );
+    let (r, status) = blog_row(&w);
+    assert_eq!((r.complete, status), (Some(false), None));
+}
+
+#[test]
+fn replaced_note_body_is_clean() {
+    let w = stub_world();
+    let body = format!(
+        "<p>{}</p><p><a href=\"https://substack.com/redirect/2/bad.sig\">Share this post</a></p><p>Read <a href=\"{STUB_URL}?utm_source=email\">online</a></p>",
+        words("w", 0, 120)
+    );
+    w.put(
+        "new/clean",
+        &eml("c2@paid.example", "news@paid.example", "Deep dive", &body),
+    );
+    let o = w.run();
+    assert_eq!(n(&o, "replaced"), json!(1));
+    let text = w.env.read("Letters/Deep dive.md").unwrap();
+    assert!(
+        text.contains("w119")
+            && !text.contains("Share this post")
+            && !text.contains("substack.com/redirect")
+            && !text.contains("utm_"),
+        "{text}"
     );
 }

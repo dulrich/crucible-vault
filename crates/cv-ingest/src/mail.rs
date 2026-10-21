@@ -9,9 +9,16 @@
 //! (`?url=`/`?u=`/`?redirect=`); nothing is ever fetched, so an ESP redirect with an opaque token
 //! yields no URL and the supersede engine's containment pass is the dedup path.
 //!
+//! [`clean_body`] (plan `intake-followups-mail-youtube` WP-1) strips newsletter chrome from the
+//! converted markdown.
+//!
 //! Pure: no I/O, no async.
 
 use mail_parser::MessageParser;
+
+#[path = "mail_clean.rs"]
+mod clean;
+pub use clean::clean_body;
 
 /// One parsed newsletter message.
 #[derive(Debug, Clone, PartialEq, Eq)]
