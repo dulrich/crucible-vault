@@ -229,6 +229,47 @@ impl FakeDaemon {
         Ok(())
     }
 
+    /// Round 9 WP-3: a daemon-side move (an auto-file action), not initiated by the editor:
+    /// renames on disk, rebuilds the index, and reports the bridge's pair (`Renamed { from }`,
+    /// then the source `Deleted`) to the subscriber and in the return value (tests feed it to
+    /// the app).
+    pub fn daemon_move(&self, from: &str, to: &str) -> Result<Vec<Notification>> {
+        let (a, b) = (
+            vault_abs(&self.vault_root, from)?,
+            vault_abs(&self.vault_root, to)?,
+        );
+        let mut g = self.lock()?;
+        if !a.exists() {
+            return Err(DaemonError::NotFound(from.to_owned()));
+        }
+        if let Some(parent) = b.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&a, &b)?;
+        let n = g.index.rebuild(&self.vault_root)?;
+        let pair = vec![
+            Notification::FileChanged {
+                path: to.to_owned(),
+                kind: ChangeKind::Renamed,
+                hash: None,
+                origin: Origin::Daemon,
+                from: Some(from.to_owned()),
+            },
+            Notification::FileChanged {
+                path: from.to_owned(),
+                kind: ChangeKind::Deleted,
+                hash: None,
+                origin: Origin::Daemon,
+                from: None,
+            },
+            Notification::IndexGeneration { n },
+        ];
+        for p in &pair {
+            emit(&mut g, p.clone());
+        }
+        Ok(pair)
+    }
+
     /// WP-7: scripts `view_run(id, _)` to return `result` (and lists `id` in `views_list`).
     pub fn set_view_result(&self, id: &str, result: ViewResult) -> Result<()> {
         self.lock()?.views.insert(id.to_owned(), result);
@@ -348,6 +389,7 @@ impl FakeDaemon {
                 kind,
                 hash,
                 origin: Origin::Daemon,
+                from: None,
             },
         );
         emit(g, Notification::IndexGeneration { n });

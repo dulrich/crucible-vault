@@ -95,8 +95,6 @@ pub struct Explorer {
     pub window: ListWindow,
     pub selected: Option<String>,
     pub edit: Option<Edit>,
-    /// A delta could not be applied: rebuild on the next `index_generation`.
-    pub stale: bool,
     /// Renames this editor dispatched (`from`, `to`), matched against `file_changed`.
     renames: Vec<(String, String)>,
 }
@@ -140,7 +138,6 @@ impl Explorer {
         let (files, folders) = tree_of(all.into_iter().map(|(_, p)| p));
         self.files = files;
         self.folders = folders;
-        self.stale = false;
         self.relayout(expanded);
         Ok(())
     }
@@ -214,6 +211,7 @@ impl Explorer {
         &mut self,
         path: &str,
         kind: ChangeKind,
+        from: Option<&str>,
         expanded: &BTreeSet<String>,
         indexed: &dyn Fn(&str) -> bool,
     ) {
@@ -226,12 +224,13 @@ impl Explorer {
                 }
             }
             ChangeKind::Renamed => {
-                if let Some(i) = self.renames.iter().position(|(_, to)| to == path) {
+                if let Some(from) = from {
+                    // Round 9 WP-3: the daemon names the source.
+                    self.remove(from);
+                    self.renames.retain(|(_, to)| to != path);
+                } else if let Some(i) = self.renames.iter().position(|(_, to)| to == path) {
                     let (from, _) = self.renames.remove(i);
                     self.remove(&from);
-                } else if !self.files.contains(path) {
-                    // Only the destination is known: the source lingers until a rebuild.
-                    self.stale = true;
                 }
                 self.insert(path, indexed);
             }

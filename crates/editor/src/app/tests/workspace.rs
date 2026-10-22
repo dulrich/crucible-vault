@@ -17,6 +17,7 @@ fn changed(app: &mut App, path: &str, kind: ChangeKind) {
             kind,
             hash: None,
             origin: Origin::Daemon,
+            from: None,
         },
     )));
 }
@@ -73,18 +74,15 @@ fn explorer_tree_build_and_incremental() {
     d.delete("wp4tree/a.md").expect("delete");
     changed(&mut app, "wp4tree/a.md", ChangeKind::Deleted);
     assert!(!app.explorer.contains("wp4tree/a.md"));
-    assert!(!app.explorer.stale);
 
-    // An external rename names only its destination: stale until the next generation.
+    // A rename without `from` names only its destination: the source lingers until the next generation.
     d.rename("wp4tree/B.md", "wp4tree/C.md").expect("rename");
     changed(&mut app, "wp4tree/C.md", ChangeKind::Renamed);
-    assert!(app.explorer.stale);
     assert!(app.explorer.contains("wp4tree/B.md"));
     let g = d.generation().expect("gen");
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::IndexGeneration { n: g },
     )));
-    assert!(!app.explorer.stale);
     assert!(!app.explorer.contains("wp4tree/B.md"));
     assert!(app.explorer.contains("wp4tree/C.md"));
 }
@@ -112,7 +110,6 @@ fn explorer_rename_move_new_trash_via_rpc() {
     assert!(!app.explorer.contains("wp4ops/one.md"));
     assert_eq!(app.open_paths(), ["wp4ops/two.md"], "the tab follows");
     changed(&mut app, "wp4ops/two.md", ChangeKind::Renamed);
-    assert!(!app.explorer.stale, "own rename is matched");
 
     let _ = app.send(Message::Explorer(ExplorerMsg::BeginMove));
     let _ = app.send(Message::Explorer(ExplorerMsg::Input("wp4moved".into())));
@@ -616,7 +613,6 @@ fn filename_rename_dispatches_explorer_flow_and_retargets() {
     assert_eq!(app.open_paths(), ["wp2ren/two.md"], "the tab follows");
     assert_eq!(app.reading.title(&app.docs, "wp2ren/two.md"), "two");
     changed(&mut app, "wp2ren/two.md", ChangeKind::Renamed);
-    assert!(!app.explorer.stale, "matched via expect_rename");
 
     // Blur (focus-loss poll) submits; Escape reverts.
     title(&mut app, "wp2ren/two.md", "three");
@@ -796,6 +792,7 @@ fn app_open_file_adds_tab_and_status_updates() {
             kind: ChangeKind::Modified,
             hash: None,
             origin: Origin::External,
+            from: None,
         },
     )));
     assert_eq!(

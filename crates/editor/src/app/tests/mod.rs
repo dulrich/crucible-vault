@@ -56,6 +56,7 @@ mod close_quit;
 mod commands;
 mod context_menu;
 mod daemon_client;
+mod daemon_move;
 mod doc_state;
 mod find_keys;
 mod image_menu;

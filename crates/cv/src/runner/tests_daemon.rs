@@ -394,6 +394,7 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
         kind: ChangeKind::Modified,
         hash: None,
         origin: Origin::Daemon,
+        from: None,
     });
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(calls.load(Ordering::SeqCst), 1, "cycle guard: no self-feed");

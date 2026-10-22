@@ -105,10 +105,11 @@ pub(super) async fn generation_listener(shared: Arc<Shared>, mut stop: watch::Re
     }
 }
 
-/// One vault event's `file_changed` notifications. A rename (daemon or external) first reports
-/// its source as `Deleted`, so clients without a rename record (the editor's explorer and tabs)
-/// drop the old path; no starter lists `deleted` (plan intake-round-2-clean-dedupe-reading
-/// WP-5a, proposal 1).
+/// One vault event's `file_changed` notifications. A rename (daemon or external) reports the
+/// destination as `Renamed { from }` first, then its source as `Deleted`: a client that follows
+/// moves (the editor's tabs) re-keys on the first and finds nothing open for the second, while
+/// clients without a rename record (no starter lists `deleted`) still drop the old path (plan
+/// intake-round-2-clean-dedupe-reading WP-5a proposal 1; plan round-9-feedback-todos WP-3).
 fn file_changes(
     path: String,
     ev_kind: &EventKind,
@@ -116,21 +117,27 @@ fn file_changes(
     hash: Option<String>,
     origin: Origin,
 ) -> Vec<Notification> {
+    let from = match ev_kind {
+        EventKind::Renamed { from } => Some(from.clone()),
+        _ => None,
+    };
     let mut out = Vec::with_capacity(2);
-    if let EventKind::Renamed { from } = ev_kind {
-        out.push(Notification::FileChanged {
-            path: from.clone(),
-            kind: ChangeKind::Deleted,
-            hash: None,
-            origin,
-        });
-    }
     out.push(Notification::FileChanged {
         path,
         kind,
         hash,
         origin,
+        from: from.clone(),
     });
+    if let Some(from) = from {
+        out.push(Notification::FileChanged {
+            path: from,
+            kind: ChangeKind::Deleted,
+            hash: None,
+            origin,
+            from: None,
+        });
+    }
     out
 }
 
@@ -139,7 +146,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rename_reports_source_deleted_then_destination_renamed() {
+    fn rename_reports_destination_with_from_then_source_deleted() {
         let ev = EventKind::Renamed {
             from: "a.md".into(),
         };
@@ -154,16 +161,18 @@ mod tests {
             got,
             vec![
                 Notification::FileChanged {
-                    path: "a.md".into(),
-                    kind: ChangeKind::Deleted,
-                    hash: None,
-                    origin: Origin::Daemon,
-                },
-                Notification::FileChanged {
                     path: "b.md".into(),
                     kind: ChangeKind::Renamed,
                     hash: None,
                     origin: Origin::Daemon,
+                    from: Some("a.md".into()),
+                },
+                Notification::FileChanged {
+                    path: "a.md".into(),
+                    kind: ChangeKind::Deleted,
+                    hash: None,
+                    origin: Origin::Daemon,
+                    from: None,
                 },
             ]
         );

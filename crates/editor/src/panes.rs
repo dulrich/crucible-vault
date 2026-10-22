@@ -15,6 +15,8 @@ pub struct PaneState {
     pub history: crate::history::History,
     /// editor-usability-round WP-4: the find bar (`None` = closed).
     pub find: Option<crate::find::FindBar>,
+    /// Round 9 WP-3: tab ids, least to most recently activated (not persisted).
+    mru: Vec<u64>,
 }
 
 impl PaneState {
@@ -28,17 +30,39 @@ impl PaneState {
         self.active_tab().and_then(Tab::as_note)
     }
 
-    /// Removes tab `i`, fixing the active index; returns the removed tab.
+    /// Makes tab `i` active and the most recently used (an out-of-range `i` is ignored).
+    pub fn activate(&mut self, i: usize) {
+        let Some(id) = self.tabs.get(i).map(|t| t.id) else {
+            return;
+        };
+        self.active = Some(i);
+        self.mru.retain(|&m| m != id);
+        self.mru.push(id);
+    }
+
+    /// Removes tab `i`, fixing the active index; returns the removed tab. Closing the active
+    /// tab activates the most recently used surviving tab (else the right-neighbour rule).
     pub fn remove(&mut self, i: usize) -> Option<Tab> {
         if i >= self.tabs.len() {
             return None;
         }
+        let was_active = self.active == Some(i);
         let tab = self.tabs.remove(i);
+        self.mru.retain(|&m| m != tab.id);
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
             Some(a) if a > i || a >= self.tabs.len() => Some(a.saturating_sub(1)),
             other => other,
         };
+        if was_active
+            && let Some(j) = self
+                .mru
+                .iter()
+                .rev()
+                .find_map(|id| self.tabs.iter().position(|t| t.id == *id))
+        {
+            self.active = Some(j);
+        }
         Some(tab)
     }
 }

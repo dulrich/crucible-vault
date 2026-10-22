@@ -799,6 +799,9 @@ pub enum Notification {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hash: Option<String>,
         origin: Origin,
+        /// Round 9 WP-3: on the `Renamed` half of a rename pair, the old path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
     IndexGeneration {
         n: u64,
@@ -1293,6 +1296,31 @@ mod tests {
     }
 
     #[test]
+    fn file_changed_from_is_optional_both_ways() {
+        let old = r#"{"method":"file_changed","params":{"path":"a.md","kind":"renamed","origin":"daemon"}}"#;
+        let n: Notification = serde_json::from_str(old).expect("old json parses");
+        assert!(matches!(
+            n,
+            Notification::FileChanged {
+                from: None,
+                hash: None,
+                ..
+            }
+        ));
+        assert!(!serde_json::to_string(&n).expect("ser").contains("from"));
+        let with = Notification::FileChanged {
+            path: "b.md".into(),
+            kind: ChangeKind::Renamed,
+            hash: None,
+            origin: Origin::Daemon,
+            from: Some("a.md".into()),
+        };
+        let v = serde_json::to_value(&with).expect("ser");
+        assert_eq!(v["params"]["from"], "a.md");
+        assert_eq!(serde_json::from_value::<Notification>(v).expect("de"), with);
+    }
+
+    #[test]
     fn notifications_round_trip_and_topic() {
         let all = vec![
             Notification::FileChanged {
@@ -1300,6 +1328,7 @@ mod tests {
                 kind: ChangeKind::Modified,
                 hash: Some("h".into()),
                 origin: Origin::External,
+                from: None,
             },
             Notification::IndexGeneration { n: 3 },
             Notification::JobUpdated(JobStatus {

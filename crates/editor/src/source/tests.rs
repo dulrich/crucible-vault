@@ -68,6 +68,7 @@ fn notify(app: &mut App, path: &str, hash: Option<String>) {
             kind: ChangeKind::Modified,
             hash,
             origin: Origin::Daemon,
+            from: None,
         },
     )));
 }

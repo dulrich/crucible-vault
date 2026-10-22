@@ -302,6 +302,26 @@ impl App {
             })
     }
 
+    /// Round 9 WP-3 (Decision 4): a daemon-side move of `from` to `to` (the `Renamed { from }`
+    /// notification) retargets every open tab. Bytes unchanged → re-keyed in place, dirty text
+    /// and all, with no deleted / missing state; bytes changed under unsaved edits → the
+    /// edited-move path (text kept behind the conflict bar).
+    pub(super) fn follow_daemon_move(&mut self, from: &str, to: &str) {
+        if from == to || !self.path_open(from) {
+            return;
+        }
+        let base = buf(&self.docs, from)
+            .filter(|b| b.is_dirty())
+            .map(|b| b.base_hash().clone());
+        let edited_elsewhere = base.is_some_and(|base| {
+            self.daemon
+                .as_ref()
+                .and_then(|d| d.read_file(to).ok())
+                .is_some_and(|(_, h)| h != base)
+        });
+        self.follow_moved(from, to, edited_elsewhere);
+    }
+
     /// A renamed file's open tabs follow it (re-read at the new path). Plan
     /// editor-feedback-round-2 WP-7: the document key and every tab of `from` move to `to`
     /// (tab ids kept); `from`'s reading / title / image-pin state is torn down. Plan
@@ -317,7 +337,7 @@ impl App {
                 // WP-2 (round 7): an unedited buffer whose bytes the move kept is re-keyed in
                 // place (cursor, selection, undo, top_line survive); otherwise rebuild from disk.
                 let doc = match self.docs.remove(from) {
-                    Some(mut doc) if !doc.buffer.is_dirty() && *doc.buffer.base_hash() == hash => {
+                    Some(mut doc) if *doc.buffer.base_hash() == hash => {
                         doc.buffer.rename_clean(to);
                         doc
                     }

@@ -436,7 +436,7 @@ impl App {
             if let Some(ps) = app.panes.get_mut(pane)
                 && let Some(i) = active.filter(|&i| i < ps.tabs.len())
             {
-                ps.active = Some(i);
+                ps.activate(i);
             }
         }
         app.focus = focus;

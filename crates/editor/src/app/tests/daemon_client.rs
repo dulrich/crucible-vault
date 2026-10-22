@@ -37,6 +37,7 @@ fn fake_write_cas_notifies_and_reindexes() {
             kind,
             hash,
             origin,
+            ..
         } => {
             assert_eq!(path, p);
             assert_eq!(kind, ChangeKind::Modified);

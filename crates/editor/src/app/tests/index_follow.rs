@@ -26,6 +26,7 @@ fn file_changed(app: &mut App, path: &str, kind: ChangeKind, origin: Origin) {
             kind,
             hash: None,
             origin,
+            from: None,
         },
     )));
 }
@@ -44,7 +45,6 @@ fn ignore_rebuild_removes_and_restores_in_explorer_and_switcher() {
     std::fs::write(vault.join(".gitignore"), "r3ign/\n").expect("ignore");
     d.create_note("r3other/a.md", "a").expect("rebuild");
     generation(&mut app, &d);
-    assert!(!app.explorer.stale);
     assert!(!app.explorer.contains("r3ign/x.md"), "ignored: dropped");
     assert!(!candidates(&app).contains(&"r3ign/x.md".to_owned()));
 

@@ -150,7 +150,7 @@ impl App {
     pub(super) fn focus_tab(&mut self, pane: Pane, i: usize, path: &str) {
         self.focus = pane;
         if let Some(ps) = self.panes.get_mut(pane) {
-            ps.active = Some(i);
+            ps.activate(i);
         }
         self.record_visit(pane, path);
     }
@@ -228,10 +228,11 @@ impl App {
                             .is_some_and(|d| d.buffer.is_dirty()) =>
                 {
                     replaced = Some(std::mem::replace(&mut ps.tabs[i], tab));
+                    ps.activate(i);
                 }
                 _ => {
                     ps.tabs.push(tab);
-                    ps.active = Some(ps.tabs.len() - 1);
+                    ps.activate(ps.tabs.len() - 1);
                 }
             }
         }
@@ -358,7 +359,7 @@ impl App {
         if let Some(ps) = self.panes.get_mut(pane)
             && i < ps.tabs.len()
         {
-            ps.active = Some(i);
+            ps.activate(i);
             let path = ps.tabs[i].path().map(str::to_owned);
             self.focus = pane;
             if let Some(path) = path {
@@ -478,7 +479,7 @@ impl App {
         if let Some((p, i)) = panes::find_kind(&self.panes, &kind) {
             self.focus = p;
             if let Some(ps) = self.panes.get_mut(p) {
-                ps.active = Some(i);
+                ps.activate(i);
             }
             return;
         }
@@ -490,7 +491,7 @@ impl App {
         let settings = kind == TabKind::Settings;
         if let Some(ps) = self.panes.get_mut(pane) {
             ps.tabs.push(Tab::new(kind));
-            ps.active = Some(ps.tabs.len() - 1);
+            ps.activate(ps.tabs.len() - 1);
         }
         self.focus = pane;
         if settings {

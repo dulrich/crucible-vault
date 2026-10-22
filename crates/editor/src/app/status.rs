@@ -202,8 +202,17 @@ impl App {
                         self.job_finished(&j);
                     }
                     Notification::FileChanged {
-                        path, kind, hash, ..
+                        path,
+                        kind,
+                        hash,
+                        from,
+                        ..
                     } => {
+                        if let Some(from) = from.as_deref() {
+                            // Round 9 WP-3 (Decision 4): a daemon move re-keys the open tabs
+                            // (the bridge sends this before the source `Deleted`).
+                            self.follow_daemon_move(from, &path);
+                        }
                         self.reading.file_changed(&path);
                         if kind != cv_protocol::ChangeKind::Modified {
                             // Before `reload_tab`: a localize pass creates the attachments,
@@ -221,8 +230,13 @@ impl App {
                             self.views.invalidate(&[]);
                         }
                         let indexed = self.indexed_fn();
-                        self.explorer
-                            .file_changed(&path, kind, &self.ui.expanded, &indexed);
+                        self.explorer.file_changed(
+                            &path,
+                            kind,
+                            from.as_deref(),
+                            &self.ui.expanded,
+                            &indexed,
+                        );
                         if crate::settings::is_view_path(&path)
                             && panes::find_kind(&self.panes, &TabKind::Settings).is_some()
                         {
