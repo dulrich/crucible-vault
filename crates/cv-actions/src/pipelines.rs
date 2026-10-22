@@ -419,6 +419,9 @@ impl SourcesConfig {
 pub struct YoutubeSource {
     /// Display name.
     pub channel: String,
+    /// Publication name shown in the Author column (default: `channel`; plan intake-round-2 WP-3).
+    #[serde(default)]
+    pub short: Option<String>,
     /// Channel id (`UC…`).
     pub id: String,
     /// Tags.
@@ -435,6 +438,9 @@ pub struct YoutubeSource {
 pub struct BlogSource {
     /// Display name.
     pub name: String,
+    /// Publication name shown in the Author column (default: `name`; plan intake-round-2 WP-3).
+    #[serde(default)]
+    pub short: Option<String>,
     /// RSS/Atom feed URL.
     pub link: String,
     /// Fetch method (`rss`; other values are skipped by the tracker, as in Crucible).
@@ -468,6 +474,9 @@ fn rss() -> String {
 pub struct NewsletterSource {
     /// Display name (also the `tracker_items.source_key` of its mails).
     pub name: String,
+    /// Publication name shown in the Author column (default: `name`; plan intake-round-2 WP-3).
+    #[serde(default)]
+    pub short: Option<String>,
     /// Sender matchers, case-insensitive: `a@b.example` or `@b.example`.
     #[serde(default)]
     pub from: Vec<String>,
@@ -490,6 +499,40 @@ pub struct NewsletterSource {
 
 fn blog_kind() -> String {
     "blog".into()
+}
+
+/// The `publication` frontmatter value of a source row: the trimmed `short` when non-empty, else
+/// `name` (`channel` for YouTube). Plan intake-round-2-clean-dedupe-reading WP-3.
+#[must_use]
+pub fn publication_of<'a>(short: Option<&'a str>, name: &'a str) -> &'a str {
+    match short.map(str::trim) {
+        Some(s) if !s.is_empty() => s,
+        _ => name,
+    }
+}
+
+impl YoutubeSource {
+    /// The `publication` value for this channel's notes (`short`, else `channel`).
+    #[must_use]
+    pub fn publication(&self) -> &str {
+        publication_of(self.short.as_deref(), &self.channel)
+    }
+}
+
+impl BlogSource {
+    /// The `publication` value for this feed's notes (`short`, else `name`).
+    #[must_use]
+    pub fn publication(&self) -> &str {
+        publication_of(self.short.as_deref(), &self.name)
+    }
+}
+
+impl NewsletterSource {
+    /// The `publication` value for this sender's notes (`short`, else `name`).
+    #[must_use]
+    pub fn publication(&self) -> &str {
+        publication_of(self.short.as_deref(), &self.name)
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +562,24 @@ mod tests {
         for bad in ["new", "..", "a/b", ""] {
             assert!(mail(&format!("processed = {bad:?}")).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn short_parses_defaults_to_name_and_unknown_keys_still_fail() {
+        let parse = |s: &str| SourcesConfig::from_table(&s.parse::<toml::Table>().unwrap());
+        let c = parse(
+            "[[blog]]\nname = \"B\"\nlink = \"https://b.example/feed\"\nshort = \" BB \"\n[[blog]]\nname = \"C\"\nlink = \"https://c.example/feed\"\nshort = \"  \"\n[[newsletter]]\nname = \"N\"\nfrom = [\"@n.example\"]\n[[youtube]]\nchannel = \"Y\"\nid = \"UCy\"\nshort = \"YY\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.blog[0].publication(), "BB");
+        assert_eq!(c.blog[1].publication(), "C");
+        assert_eq!(c.newsletter[0].publication(), "N");
+        assert_eq!(c.youtube[0].publication(), "YY");
+        assert!(
+            parse("[[blog]]\nname = \"B\"\nlink = \"https://b.example/feed\"\nshrot = \"x\"\n")
+                .is_err()
+        );
+        assert!(parse("[[youtube]]\nchannel = \"Y\"\nid = \"UCy\"\nname = \"x\"\n").is_err());
     }
 
     #[test]

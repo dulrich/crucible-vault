@@ -385,6 +385,12 @@ pub static SOURCE_YOUTUBE: Record = Record {
     name: "youtube",
     fields: &[
         field("channel", "Channel", "Display name", Node::Str).req(),
+        field(
+            "short",
+            "Short",
+            "Publication name shown in the Author column; default = the row's name/channel",
+            Node::Str,
+        ),
         field("id", "Id", "Channel id (UC…)", Node::Str).req(),
         field("tags", "Tags", "Tags", STR_LIST),
         field(
@@ -404,6 +410,12 @@ pub static SOURCE_BLOG: Record = Record {
     name: "blog",
     fields: &[
         field("name", "Name", "Display name", Node::Str).req(),
+        field(
+            "short",
+            "Short",
+            "Publication name shown in the Author column; default = the row's name/channel",
+            Node::Str,
+        ),
         field("link", "Feed", "RSS/Atom feed URL", Node::Str).req(),
         field(
             "method",
@@ -456,6 +468,12 @@ pub static SOURCE_NEWSLETTER: Record = Record {
             Node::Str,
         )
         .req(),
+        field(
+            "short",
+            "Short",
+            "Publication name shown in the Author column; default = the row's name/channel",
+            Node::Str,
+        ),
         field(
             "from",
             "From",

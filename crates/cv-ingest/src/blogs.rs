@@ -231,6 +231,7 @@ pub fn captured_note(
     created: &str,
     access: Option<Access>,
     complete: Option<bool>,
+    publication: Option<&str>,
 ) -> String {
     let body = post
         .body_html
@@ -250,6 +251,9 @@ pub fn captured_note(
         for a in &post.authors {
             fm.push(format!("  - {}", json_string(&format!("[[{a}]]"))));
         }
+    }
+    if let Some(p) = publication {
+        fm.push(crate::youtube::publication_line(p));
     }
     fm.push(if post.published.is_empty() {
         "published:".into()
@@ -363,6 +367,7 @@ mod tests {
             "2026-10-15",
             None,
             None,
+            Some("Synth Weekly"),
         );
         let keys: Vec<&str> = n
             .lines()
@@ -378,6 +383,7 @@ mod tests {
                 "source",
                 "post-id",
                 "author",
+                "publication",
                 "published",
                 "created",
                 "description",
@@ -386,12 +392,12 @@ mod tests {
                 "read"
             ]
         );
-        assert!(n.contains("author:\n  - \"[[Ann]]\"\n"));
+        assert!(n.contains("author:\n  - \"[[Ann]]\"\npublication: \"Synth Weekly\"\npublished:"));
         assert!(n.contains("description: \"Short & sweet\"\n"));
         assert!(n.contains("tags:\n  - blog\n  - research\nread: false\n---\n"));
         assert!(n.contains("Hello **world**"));
         assert_eq!(note_name(p), "Full One");
-        let n = captured_note(p, &[], "2026-10-15", Some(Access::Paid), Some(false));
+        let n = captured_note(p, &[], "2026-10-15", Some(Access::Paid), Some(false), None);
         assert!(
             n.contains("word-count: 2\naccess: paid\ncomplete: false\ntags:\n"),
             "{n}"

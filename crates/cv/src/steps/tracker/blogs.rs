@@ -254,7 +254,14 @@ fn write_note(
         return Ok((false, path));
     }
     let created = now().format("%Y-%m-%d").to_string();
-    let text = policy::captured_note(post, &tags, &created, ev.access, ev.complete);
+    let text = policy::captured_note(
+        post,
+        &tags,
+        &created,
+        ev.access,
+        ev.complete,
+        Some(row.publication()),
+    );
     if !create_or_found(ctx, &path, text.into_bytes())? {
         return Ok((false, path));
     }
@@ -407,6 +414,7 @@ fn supersede_existing(
         body_md: &body_md,
         access: None,
         complete,
+        publication: Some(row.publication()),
         origin: Origin::Tracker,
     };
     supersede::resolve(ctx, sidx, cfg, &inc)

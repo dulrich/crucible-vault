@@ -52,6 +52,13 @@ pub fn channel_url(channel_id: &str) -> String {
     format!("https://www.youtube.com/channel/{channel_id}")
 }
 
+/// The `publication: <json string>` frontmatter line (plan intake-round-2-clean-dedupe-reading WP-3):
+/// the one formatter every intake writer uses.
+#[must_use]
+pub fn publication_line(p: &str) -> String {
+    format!("publication: {}", json_string(p))
+}
+
 /// Crucible's `yamlString` = `JSON.stringify` of a string.
 #[must_use]
 pub fn json_string(s: &str) -> String {
@@ -111,7 +118,7 @@ fn opt_json(v: Option<&str>) -> String {
 
 /// `buildMetadataNoteBody`.
 #[must_use]
-pub fn metadata_note(m: &VideoMeta, fetched_at: &str) -> String {
+pub fn metadata_note(m: &VideoMeta, fetched_at: &str, publication: Option<&str>) -> String {
     let live = if m.live_broadcast_content.is_empty() {
         "none"
     } else {
@@ -136,6 +143,10 @@ pub fn metadata_note(m: &VideoMeta, fetched_at: &str) -> String {
         ),
         format!("liveBroadcastContent: {live}"),
     ];
+    if let Some(p) = publication {
+        // No `author` here: `publication` follows `channelTitle`, the channel's own name.
+        fm.insert(5, publication_line(p));
+    }
     if !m.tags.is_empty() {
         fm.push("tags:".into());
         fm.extend(m.tags.iter().map(|t| format!("  - {}", json_string(t))));
@@ -215,12 +226,17 @@ mod tests {
             comment_count: Some(0),
         };
         let want = "---\nvideoId: dQw4w9WgXcQ\ntitle: \"A \\\"quoted\\\" title\"\nurl: https://www.youtube.com/watch?v=dQw4w9WgXcQ\nchannelId: UCabc\nchannelTitle: \"Chan\"\npublishedAt: 2020-01-02T03:04:05Z\nduration: PT1H2M3S\nduration_seconds: 3723\ncategoryId: \"10\"\ndefaultLanguage: null\nliveBroadcastContent: none\ntags:\n  - \"t1\"\n  - \"t\\\\2\"\nviewCount: 12\nlikeCount: null\ncommentCount: 0\nfetched_at: 2026-10-15T00:00:00.000Z\nsource_command: youtube-fetch-video-metadata\n---\n# A \"quoted\" title\n\n## Description\n\nLine 1\nLine 2\n";
-        assert_eq!(metadata_note(&m, "2026-10-15T00:00:00.000Z"), want);
+        assert_eq!(metadata_note(&m, "2026-10-15T00:00:00.000Z", None), want);
+        let with = metadata_note(&m, "2026-10-15T00:00:00.000Z", Some("Synth Chan"));
+        assert!(
+            with.contains("channelTitle: \"Chan\"\npublication: \"Synth Chan\"\npublishedAt:"),
+            "{with}"
+        );
         let bare = VideoMeta {
             video_id: "x".into(),
             ..VideoMeta::default()
         };
-        let t = metadata_note(&bare, "F");
+        let t = metadata_note(&bare, "F", None);
         assert!(!t.contains("tags:") && t.contains("---\n# x\n"), "{t}");
     }
 

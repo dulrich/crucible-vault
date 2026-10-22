@@ -80,6 +80,9 @@ pub struct Incoming<'a> {
     pub access: Option<Access>,
     /// Whether `body_md` is the whole item (`None` = unknown).
     pub complete: Option<bool>,
+    /// The source row's `publication` (plan intake-round-2-clean-dedupe-reading WP-3): set on a
+    /// replaced note only when it has none, never overwritten.
+    pub publication: Option<&'a str>,
     /// Where the item came from.
     pub origin: Origin,
 }
@@ -431,6 +434,13 @@ fn replaced_text(old: &str, inc: &Incoming<'_>, words: u64) -> Result<String, St
         &JsValue::Str(inc.origin.via().to_owned()),
     )
     .map_err(fm_err)?;
+    if let Some(p) = inc.publication
+        && doc.get("publication").map_err(fm_err)?.is_none()
+    {
+        // After `author`; `insert_after` appends at the block end when `author` is absent.
+        doc.insert_after("author", "publication", &JsValue::Str(p.to_owned()))
+            .map_err(fm_err)?;
+    }
     Ok(doc.into_text())
 }
 

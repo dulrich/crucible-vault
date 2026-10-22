@@ -153,6 +153,10 @@ fn unknown_sender_is_captured_and_left_open() {
         text.contains("via: email\n") && text.contains("message-id: \"u1@x.example\""),
         "{text}"
     );
+    assert!(
+        !text.contains("publication:"),
+        "an unknown sender has no publication: {text}"
+    );
     assert!(text.contains("alpha beta gamma"), "{text}");
 }
 
@@ -605,4 +609,79 @@ fn tracker_only_mail_note_has_no_source_line() {
         !text.contains("source:") && !text.contains("post-id:"),
         "{text}"
     );
+}
+
+// --- plan intake-round-2-clean-dedupe-reading WP-3: `publication` ---
+
+#[test]
+fn explicit_row_note_carries_its_short_publication_after_author() {
+    let sources = SOURCES.replace(
+        "name = \"Plain Letter\"\n",
+        "name = \"Plain Letter\"\nshort = \"  Plain  \"\n",
+    );
+    let w = world_with(&sources, &[]);
+    w.put(
+        "new/p",
+        &eml(
+            "p1@plain.example",
+            "hello@plain.example",
+            "Plainly",
+            "<p>one two three</p>",
+        ),
+    );
+    w.run();
+    let (r, _) = w.row("Plain Letter", "p1@plain.example").unwrap();
+    let text = w.env.read(&r.note_path.unwrap()).unwrap();
+    assert!(
+        text.contains("author:\n  - \"[[Sender]]\"\npublication: \"Plain\"\npublished:"),
+        "{text}"
+    );
+}
+
+#[test]
+fn explicit_row_without_short_publishes_its_name() {
+    let w = world(&[]);
+    w.put(
+        "new/q",
+        &eml(
+            "q1@plain.example",
+            "hello@plain.example",
+            "Named",
+            "<p>one two three</p>",
+        ),
+    );
+    w.run();
+    let (r, _) = w.row("Plain Letter", "q1@plain.example").unwrap();
+    let text = w.env.read(&r.note_path.unwrap()).unwrap();
+    assert!(text.contains("publication: \"Plain Letter\"\n"), "{text}");
+}
+
+#[test]
+fn substack_auto_match_note_publishes_the_blog_rows_short() {
+    let sources = SUBSTACK_SOURCES.replace(
+        "name = \"Example Pub\"\n",
+        "name = \"Example Pub\"\nshort = \"EP\"\n",
+    );
+    let w = world_with(&sources, &[]);
+    w.put(
+        "new/n",
+        &substack_eml("s9@substack.com", "examplepub", "<p>fresh words here</p>"),
+    );
+    w.run();
+    let (r, _) = w.row("Example Pub", "s9@substack.com").unwrap();
+    let text = w.env.read(&r.note_path.unwrap()).unwrap();
+    assert!(text.contains("publication: \"EP\"\n"), "{text}");
+    assert!(!text.contains("Example Pub"), "{text}");
+}
+
+#[test]
+fn substack_replace_fills_the_stubs_absent_publication() {
+    let w = substack_world(SUBSTACK_SOURCES);
+    w.put(
+        "new/s",
+        &substack_eml("s1@substack.com", "examplepub", &substack_body(120)),
+    );
+    w.run();
+    let text = w.env.read("Letters/Deep dive.md").unwrap();
+    assert!(text.contains("\npublication: Example Pub\n"), "{text}");
 }

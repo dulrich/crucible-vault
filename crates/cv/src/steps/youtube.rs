@@ -172,7 +172,7 @@ fn ensure_metadata_note(
         }
         Err(e) => return Err(StepError::from_fetch(&e)),
     };
-    let (path, created, tombstone, extra) = write_metadata_note(ctx, id, video)?;
+    let (path, created, tombstone, extra) = write_metadata_note(ctx, id, video, None)?;
     let output = created || tombstone;
     Ok(Ensured {
         path,
@@ -200,11 +200,13 @@ pub(crate) fn find_metadata_note(
 /// Writes the metadata note for `id` from an already fetched `videos.list` item (`None` = the
 /// video is unavailable → tombstone), find-or-create, no refetch: `(path, created, tombstone,
 /// channel_id)` (`channel_id` only when created). The tracker (WP-7) calls this with batched
-/// results.
+/// results. `publication` is the tracked channel row's (`None` outside the tracker; plan
+/// intake-round-2-clean-dedupe-reading WP-3).
 pub(crate) fn write_metadata_note(
     ctx: &mut StepCtx<'_>,
     id: &str,
     video: Option<api::Video>,
+    publication: Option<&str>,
 ) -> Result<(String, bool, bool, Option<String>), StepError> {
     let root = metadata_root(ctx);
     let Some(v) = video else {
@@ -218,7 +220,11 @@ pub(crate) fn write_metadata_note(
     };
     let folder = channel_folder(ctx, &meta.channel_id, &meta.channel_title);
     let path = format!("{root}/{folder}/{id}.md");
-    let created = create_or_found(ctx, &path, metadata_note(&meta, &iso_now()).into_bytes())?;
+    let created = create_or_found(
+        ctx,
+        &path,
+        metadata_note(&meta, &iso_now(), publication).into_bytes(),
+    )?;
     let channel = Some(meta.channel_id).filter(|c| created && !c.is_empty());
     Ok((path, created, false, channel))
 }

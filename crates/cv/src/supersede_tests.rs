@@ -60,6 +60,7 @@ fn incoming<'a>(urls: &[&str], body: &'a str) -> Incoming<'a> {
         body_md: body,
         access: None,
         complete: None,
+        publication: None,
         origin: Origin::Mail,
     }
 }
@@ -230,4 +231,43 @@ fn larger_partial_content_match_replaces_but_stays_open() {
     );
     assert!(e.read("notes/a.md").unwrap().contains(&larger));
     assert_eq!(row_state(&e, url), (Some(false), None));
+}
+
+// --- plan intake-round-2-clean-dedupe-reading WP-3: `publication` ---
+
+fn replace_with_publication(extra: &str) -> String {
+    let (stub, full) = (words("w", 0, 30), words("w", 0, 100));
+    let url = "https://ex.substack.com/p/s";
+    let e = env(&[(
+        "notes/a.md",
+        note(
+            url,
+            &format!("{extra}word-count: 30\ncomplete: false\n"),
+            &stub,
+        ),
+    )]);
+    row(&e, "notes/a.md", url);
+    let mut inc = incoming(&[url], &full);
+    inc.complete = Some(true);
+    inc.publication = Some("Synth Pub");
+    let r = run(&e, &inc);
+    assert_eq!(r.action, Verdict::Replaced);
+    e.read("notes/a.md").unwrap()
+}
+
+#[test]
+fn replaced_fills_an_absent_publication_after_author() {
+    let t = replace_with_publication("");
+    assert!(
+        t.contains("author:\n  - \"[[Ann]]\"\npublication: Synth Pub\npublished:")
+            || t.contains("author:\n  - \"[[Ann]]\"\npublication: \"Synth Pub\"\npublished:"),
+        "{t}"
+    );
+}
+
+#[test]
+fn replaced_keeps_an_existing_publication() {
+    let t = replace_with_publication("publication: Old Pub\n");
+    assert!(t.contains("publication: Old Pub\n"), "{t}");
+    assert!(!t.contains("Synth Pub"), "{t}");
 }

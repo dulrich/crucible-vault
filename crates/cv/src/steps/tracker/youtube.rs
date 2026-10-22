@@ -294,7 +294,7 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 .unwrap_or(feed_title);
             let available = video.is_some();
             if find_metadata_note(ctx, &id)?.is_none() {
-                write_metadata_note(ctx, &id, video)?;
+                write_metadata_note(ctx, &id, video, Some(row.publication()))?;
             }
             let cand = Candidate {
                 source_kind: KIND.into(),

@@ -321,12 +321,14 @@ mode = "view"
 const SOURCES: &[&str] = &[r#"
 [[youtube]]
 channel = "Example"
+short = "Ex"
 id = "UCxxxxxxxxxxxxxxxxxxxxxx"
 tags = ["a"]
 priority = "high"
 
 [[blog]]
 name = "Example"
+short = "Ex Blog"
 link = "https://example.com/feed.xml"
 method = "rss"
 tags = ["a"]
@@ -337,6 +339,7 @@ paywall_markers = ["Subscribe to keep reading"]
 
 [[newsletter]]
 name = "Example Letter"
+short = "Ex Letter"
 from = ["writer@news.example", "@news.example"]
 list_id = "letter.news.example"
 blog = "Example"

@@ -312,6 +312,7 @@ fn full_source_post_becomes_a_linted_filed_blog_note() {
             "source",
             "post-id",
             "author",
+            "publication",
             "published",
             "created",
             "description",
@@ -323,7 +324,10 @@ fn full_source_post_becomes_a_linted_filed_blog_note() {
     );
     assert!(t.contains("tags:\n  - blog\n  - research\n"), "{t}");
     assert!(t.contains("read: false"));
-    assert!(t.contains("author:\n  - \"[[Ann]]\""));
+    assert!(
+        t.contains("author:\n  - \"[[Ann]]\"\npublication: \"Full\"\n"),
+        "{t}"
+    );
     // Lint recomputed the word count from the Markdown body ("Body of x here").
     assert!(t.contains("word-count: 4"), "{t}");
     let key = format!("{}/a", w.base);
@@ -680,4 +684,17 @@ fn clipped_note_without_complete_is_kept_against_a_complete_feed_body() {
     assert_eq!(n(&o, "notes"), json!(0));
     assert_eq!(w.read("notes/clip.md").unwrap(), before);
     assert!(!w.fx.root().join("superseded").exists());
+}
+
+#[test]
+fn blog_note_publication_prefers_the_rows_short() {
+    let w = world(
+        &[],
+        ON,
+        &[("Full", "/a", "body = \"full\"\nshort = \"FB\"")],
+    );
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    run(&w).unwrap();
+    let t = note(&w, "x").expect("note");
+    assert!(t.contains("publication: \"FB\"\n"), "{t}");
 }

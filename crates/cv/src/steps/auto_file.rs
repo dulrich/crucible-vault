@@ -347,6 +347,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         body_md: &body,
         access: None,
         complete,
+        publication: None,
         origin: Origin::Clip,
     };
     let resolved = supersede::resolve(ctx, &idx, &sup_cfg, &inc)?;

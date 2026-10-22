@@ -173,10 +173,17 @@ pub(crate) fn note_target(
     Ok((expand(ctx, &folder)?, tags, defined))
 }
 
+/// Where a captured mail note points: its canonical `source` and its row's `publication`.
+#[derive(Clone, Copy)]
+struct NoteRefs<'a> {
+    source: Option<&'a str>,
+    publication: Option<&'a str>,
+}
+
 /// The captured note's text (the filed-blog frontmatter order, plus `via` and `message-id`).
 fn captured_note(
     post: &MailPost,
-    source: Option<&str>,
+    refs: NoteRefs<'_>,
     title: &str,
     body_md: &str,
     tags: &[String],
@@ -187,7 +194,7 @@ fn captured_note(
     // `words` is the cleaned body's word count (the same count `handle` records).
     let words = body_md.split_whitespace().count();
     let mut fm = vec!["---".to_owned(), format!("title: {}", json_string(title))];
-    if let Some(u) = source {
+    if let Some(u) = refs.source {
         fm.push(format!("source: {u}"));
     }
     fm.push(format!("message-id: {}", json_string(&post.message_id)));
@@ -199,6 +206,9 @@ fn captured_note(
             "  - {}",
             json_string(&format!("[[{}]]", post.from_name))
         ));
+    }
+    if let Some(p) = refs.publication {
+        fm.push(cv_ingest::youtube::publication_line(p));
     }
     fm.push(match post.date.as_deref().and_then(|d| d.get(..10)) {
         Some(d) => format!("published: {d}"),
@@ -311,6 +321,7 @@ pub(crate) fn resolve_newsletter<'a>(
         .find(|b| mail::url_host(&b.link).is_some_and(|h| h == host))?;
     Some(Cow::Owned(NewsletterSource {
         name: blog.name.clone(),
+        short: blog.short.clone(),
         from: Vec::new(),
         list_id: None,
         blog: Some(blog.name.clone()),
@@ -412,6 +423,7 @@ fn handle(
         body_md: &body_md,
         access: None,
         complete,
+        publication: nl.map(NewsletterSource::publication),
         origin: Origin::Mail,
     };
     let resolved = supersede::resolve(ctx, &run.sidx, &run.sup_cfg, &inc)?;
@@ -463,9 +475,13 @@ fn handle(
     let (path, exists) = note_path(ctx, &folder, &title, &post.message_id)?;
     if !exists {
         let created = now().format("%Y-%m-%d").to_string();
+        let refs = NoteRefs {
+            source: canon.as_deref(),
+            publication: nl.map(NewsletterSource::publication),
+        };
         let text = captured_note(
             post,
-            canon.as_deref(),
+            refs,
             &title,
             &body_md,
             &tags,

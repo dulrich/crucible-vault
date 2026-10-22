@@ -255,6 +255,11 @@ fn new_uploads_land_as_lines_with_metadata_and_rerun_is_a_noop() {
     assert!(d.find(&url(V1)).unwrap() < d.find(&url(V3)).unwrap());
     assert!(w.vault.join("_yt_metadata/chan-a/aaaaaaaaaa1.md").exists());
     assert_eq!(outcome(&w, V1), Some(TrackerOutcome::Line));
+    let meta = std::fs::read_to_string(w.vault.join("_yt_metadata/chan-a/aaaaaaaaaa1.md")).unwrap();
+    assert!(
+        meta.contains("channelTitle: \"Chan A\"\npublication: \"Chan A\"\n"),
+        "{meta}"
+    );
     // 1 playlist + 1 videos batch.
     let day = chrono::Local::now().format("%Y-%m-%d").to_string();
     assert_eq!(
@@ -835,4 +840,13 @@ fn retroactive_pass_cancels_only_eligible_rows_once() {
         row_of(&w, "UCa", "eligible001").outcome,
         TrackerOutcome::Ignored
     );
+}
+
+#[test]
+fn metadata_note_publication_prefers_the_rows_short() {
+    let sources = "[[youtube]]\nchannel = \"Chan A\"\nid = \"UCa\"\nshort = \"CA\"\n";
+    let w = world(&[], std_routes(), ON, sources);
+    run(&w).unwrap();
+    let meta = std::fs::read_to_string(w.vault.join("_yt_metadata/chan-a/aaaaaaaaaa1.md")).unwrap();
+    assert!(meta.contains("publication: \"CA\"\n"), "{meta}");
 }
