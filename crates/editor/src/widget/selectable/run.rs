@@ -156,6 +156,22 @@ impl<P: text::Paragraph, L: Clone> RunState<P, L> {
         (line.start + byte, link)
     }
 
+    /// The run-text byte range of the visual line holding `byte`.
+    pub fn visual_line(&self, byte: usize) -> (usize, usize) {
+        let i = self
+            .lines
+            .iter()
+            .rposition(|l| l.start <= byte)
+            .unwrap_or(0);
+        let Some(line) = self.lines.get(i) else {
+            return (0, 0);
+        };
+        let local = byte.saturating_sub(line.start).min(line.text.len());
+        let ranges = line_ranges(&line.paragraph, self.lh);
+        let (s, e) = super::line_containing(&ranges, local).unwrap_or((0, line.text.len()));
+        (line.start + s, line.start + e)
+    }
+
     /// Run-local centre-left point of the caret at `byte`.
     pub fn caret(&self, byte: usize) -> Point {
         let i = self

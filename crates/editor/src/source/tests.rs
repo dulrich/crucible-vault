@@ -1299,3 +1299,53 @@ fn on_layout_runs_the_carry_and_the_setter_does_not() {
     assert_eq!(b.on_layout(10), Relayout::Settled);
     assert_eq!(b.on_layout(10), Relayout::Settled);
 }
+
+// ---- plan round-9-feedback-todos WP-4 ----
+
+#[test]
+fn shift_motion_keys_extend_the_source_selection() {
+    use iced::keyboard::key::{Named, Physical};
+    use iced::keyboard::{Key, Modifiers};
+    use iced::widget::text_editor::Status;
+    let bind = |named: Named, m: Modifiers| {
+        test_key_binding(KeyPress {
+            key: Key::Named(named),
+            modified_key: Key::Named(named),
+            physical_key: Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
+            modifiers: m,
+            text: None,
+            status: Status::Focused { is_hovered: false },
+        })
+    };
+    let ctrl = Modifiers::CTRL | Modifiers::SHIFT;
+    let sel = |b: Option<Binding<Message>>| match b {
+        Some(Binding::Select(m)) => Some(m),
+        _ => None,
+    };
+    for (n, m) in [
+        (Named::ArrowLeft, Motion::Left),
+        (Named::ArrowRight, Motion::Right),
+        (Named::ArrowUp, Motion::Up),
+        (Named::ArrowDown, Motion::Down),
+    ] {
+        assert_eq!(sel(bind(n, Modifiers::SHIFT)), Some(m), "{n:?}");
+    }
+    for (n, m) in [
+        (Named::ArrowLeft, Motion::WordLeft),
+        (Named::ArrowRight, Motion::WordRight),
+        (Named::Home, Motion::DocumentStart),
+        (Named::End, Motion::DocumentEnd),
+    ] {
+        assert_eq!(sel(bind(n, ctrl)), Some(m), "ctrl {n:?}");
+    }
+    // Shift+Home / Shift+End go through the smart-home/end key, which selects.
+    for (n, k) in [
+        (Named::Home, SourceKey::Home { select: true }),
+        (Named::End, SourceKey::End { select: true }),
+    ] {
+        assert!(matches!(
+            bind(n, Modifiers::SHIFT),
+            Some(Binding::Custom(Message::Source(SourceMsg::Key(got)))) if got == k
+        ));
+    }
+}

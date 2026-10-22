@@ -204,6 +204,30 @@ pub fn next_grapheme(text: &str, byte: usize) -> usize {
         .map_or(text.len(), |g| byte + g.len())
 }
 
+/// The start of the word before `byte` (skips whitespace/punctuation; 0 at the start).
+pub fn prev_word_boundary(text: &str, byte: usize) -> usize {
+    let byte = byte.min(text.len());
+    text.split_word_bound_indices()
+        .take_while(|(i, _)| *i < byte)
+        .filter(|(_, w)| w.chars().any(char::is_alphanumeric))
+        .last()
+        .map_or(0, |(i, _)| i)
+}
+
+/// The end of the word at or after `byte` (skips whitespace/punctuation; `text.len()` at the end).
+pub fn next_word_boundary(text: &str, byte: usize) -> usize {
+    let byte = byte.min(text.len());
+    text.split_word_bound_indices()
+        .find(|(i, w)| i + w.len() > byte && w.chars().any(char::is_alphanumeric))
+        .map_or(text.len(), |(i, w)| i + w.len())
+}
+
+/// The visual line of `ranges` (line-local byte ranges) holding `local`.
+pub fn line_containing(ranges: &[(usize, usize)], local: usize) -> Option<(usize, usize)> {
+    let k = ranges.iter().rposition(|(s, _)| *s <= local).unwrap_or(0);
+    ranges.get(k).copied()
+}
+
 /// Hard-line start offsets of `text` (always starts with 0).
 pub fn hard_lines(text: &str) -> Vec<usize> {
     std::iter::once(0)
@@ -226,6 +250,29 @@ mod tests {
             .map(|r| source_counterpart(&m, text, "foo", r))
             .collect();
         assert_eq!(got, vec![None, None, None, Some((1, 0)), Some((1, 1))]);
+    }
+
+    #[test]
+    fn word_boundaries_skip_space_and_punctuation() {
+        let t = "hello, brave world";
+        assert_eq!(next_word_boundary(t, 0), 5);
+        assert_eq!(next_word_boundary(t, 5), 12);
+        assert_eq!(next_word_boundary(t, 12), 18);
+        assert_eq!(next_word_boundary(t, 18), 18);
+        assert_eq!(prev_word_boundary(t, 18), 13);
+        assert_eq!(prev_word_boundary(t, 13), 7);
+        assert_eq!(prev_word_boundary(t, 7), 0);
+        assert_eq!(prev_word_boundary(t, 0), 0);
+        assert_eq!(prev_word_boundary(t, 9), 7);
+    }
+
+    #[test]
+    fn line_containing_picks_the_visual_line() {
+        let r = [(0, 10), (10, 21), (21, 25)];
+        assert_eq!(line_containing(&r, 0), Some((0, 10)));
+        assert_eq!(line_containing(&r, 15), Some((10, 21)));
+        assert_eq!(line_containing(&r, 25), Some((21, 25)));
+        assert_eq!(line_containing(&[], 3), None);
     }
 
     #[test]

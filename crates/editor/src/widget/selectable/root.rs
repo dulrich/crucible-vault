@@ -9,7 +9,10 @@ use iced::{Element, Event, Length, Point, Rectangle, Size, Vector, window};
 
 use super::ops::{Bias, Collected, Para, collect, on_run, pick};
 use super::run::RunState;
-use super::{SelPos, Selection, next_grapheme, prev_grapheme, word_at};
+use super::{
+    SelPos, Selection, next_grapheme, next_word_boundary, prev_grapheme, prev_word_boundary,
+    word_at,
+};
 
 /// An in-progress press.
 struct Press<L> {
@@ -182,18 +185,34 @@ where
         }
     }
 
-    /// Shift+Arrow: moves the focus by a grapheme (Left/Right) or a visual line (Up/Down).
+    /// Shift+motion: moves the focus by a grapheme (Left/Right), a word (Ctrl+Left/Right), a
+    /// visual line (Up/Down), to the visual line's edge (Home/End) or to the document's edge
+    /// (Ctrl+Home/End).
     fn step(
         &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         r: &iced::Renderer,
         named: Named,
+        ctrl: bool,
     ) -> Option<Selection> {
         let Selection { anchor, focus } = self.selection?;
         let c = self.collect(tree, layout, r);
         let i = c.runs.iter().position(|b| b.run == focus.run)?;
         let new = match named {
+            Named::Home | Named::End if ctrl => {
+                let p = if named == Named::Home {
+                    c.runs.first()?
+                } else {
+                    c.runs.last()?
+                };
+                SelPos::new(p.run, if named == Named::Home { 0 } else { p.len })
+            }
+            Named::Home | Named::End => {
+                let (s, e) =
+                    self.on_run(tree, layout, r, focus.run, |s, _| s.visual_line(focus.byte));
+                SelPos::new(focus.run, if named == Named::Home { s } else { e })
+            }
             Named::ArrowLeft | Named::ArrowRight => {
                 let left = named == Named::ArrowLeft;
                 let text = self.on_run(tree, layout, r, focus.run, |s, _| s.text().to_owned());
@@ -203,6 +222,10 @@ where
                 } else if !left && focus.byte >= text.len() {
                     let n = c.runs.get(i + 1)?;
                     SelPos::new(n.run, 0)
+                } else if left && ctrl {
+                    SelPos::new(focus.run, prev_word_boundary(&text, focus.byte))
+                } else if ctrl {
+                    SelPos::new(focus.run, next_word_boundary(&text, focus.byte))
                 } else if left {
                     SelPos::new(focus.run, prev_grapheme(&text, focus.byte))
                 } else {
@@ -423,10 +446,18 @@ where
                         shell.publish((self.on_change)(None));
                         shell.capture_event();
                     }
-                    Named::ArrowLeft | Named::ArrowRight | Named::ArrowUp | Named::ArrowDown
+                    Named::ArrowLeft | Named::ArrowRight | Named::Home | Named::End
+                        if modifiers.shift() && !modifiers.alt() =>
+                    {
+                        if let Some(s) = self.step(tree, layout, r, *named, modifiers.command()) {
+                            self.publish(shell, s);
+                        }
+                        shell.capture_event();
+                    }
+                    Named::ArrowUp | Named::ArrowDown
                         if modifiers.shift() && !modifiers.command() && !modifiers.alt() =>
                     {
-                        if let Some(s) = self.step(tree, layout, r, *named) {
+                        if let Some(s) = self.step(tree, layout, r, *named, false) {
                             self.publish(shell, s);
                         }
                         shell.capture_event();

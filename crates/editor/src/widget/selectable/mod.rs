@@ -30,7 +30,8 @@ pub use root::{Root, root};
 pub use run::{Run, RunState, line_ranges, run};
 
 pub use editor_model::reading::{
-    SelPos, Selection, hard_lines, next_grapheme, prev_grapheme, word_at,
+    SelPos, Selection, hard_lines, line_containing, next_grapheme, next_word_boundary,
+    prev_grapheme, prev_word_boundary, word_at,
 };
 
 #[cfg(test)]
