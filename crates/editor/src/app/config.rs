@@ -97,6 +97,7 @@ impl App {
     /// `editor.json` holds (the WP-1 flat `tabs` / `active_tab` are read-only: never written).
     pub(super) fn sync_ui_state(&mut self) {
         self.ui.panes = Some(panes::snapshot(&self.panes, self.focus));
+        self.ui.view_filters.clone_from(&self.views.filters);
         self.ui.tabs.clear();
         self.ui.active_tab = None;
         self.ui.modes = self

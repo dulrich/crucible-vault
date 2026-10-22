@@ -408,6 +408,8 @@ pub enum ViewsMsg {
     },
     /// `note_set_bool` finished.
     BoolSet(Result<(), String>),
+    /// Plan round-9-feedback-todos WP-5: flip the "Only open" toggle of view `id`.
+    ToggleOpenOnly { id: String },
 }
 
 /// WP-4: day/month nav. The bar belongs to `pane`; results open in that pane's active tab.

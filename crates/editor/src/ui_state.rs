@@ -94,6 +94,8 @@ pub struct UiState {
     pub side_collapsed: bool,
     /// editor-usability-round WP-3: debug pane borders (off by default).
     pub pane_borders: bool,
+    /// Plan round-9-feedback-todos WP-5: ids of the views whose "Only open" toggle is on.
+    pub view_filters: BTreeSet<String>,
 }
 
 /// Split direction: `Right` = side by side, `Down` = stacked.
@@ -280,6 +282,18 @@ mod tests {
         s2.pane_borders = true;
         save(&path, &s2, None).expect("save");
         assert_eq!(load(&path), s2);
+    }
+
+    #[test]
+    fn view_filters_default_empty_for_old_files_and_round_trip() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("editor.json");
+        std::fs::write(&path, br#"{"surround":"dark","expanded":[]}"#).expect("old");
+        let mut s = load(&path);
+        assert!(s.view_filters.is_empty(), "old file → no filters");
+        s.view_filters.insert("daily#Reading".into());
+        save(&path, &s, None).expect("save");
+        assert_eq!(load(&path).view_filters, s.view_filters);
     }
 
     #[test]

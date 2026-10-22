@@ -13,11 +13,11 @@
 //! [`ColumnRole`], never column-key strings. Text cells written `~~x~~` (missing initiative
 //! files, `defs/initiatives.toml`) render struck through and dimmed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use iced::font::Weight;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, rich_text, row, sensor, span, text};
+use iced::widget::{button, column, container, rich_text, row, sensor, space, span, text};
 use iced::{Border, Element, Font, Length, Theme};
 use serde::Deserialize;
 use serde_json::Value;
@@ -61,6 +61,75 @@ pub struct Decoded {
     pub notices: Vec<String>,
     /// Plan round-8 WP-2: the view's `maxHeight` (`None` = [`MAX_HEIGHT`]).
     pub max_height: Option<views::result::MaxHeight>,
+    /// Plan round-9-feedback-todos WP-5: `lines` with only the open/unread rows (see
+    /// [`open_only_lines`]); `None` when the result has no Checkbox / Status column (no toggle).
+    pub open_lines: Option<Vec<Line>>,
+}
+
+/// Plan round-9-feedback-todos WP-5 (audit E1): whether `cell` is checked — only `Bool(true)`;
+/// false / null / missing are unchecked. Shared by [`checkbox_cell`] and [`row_is_open`].
+fn cell_checked(cell: Option<&Cell>) -> bool {
+    matches!(cell, Some(Cell::Bool { v: true }))
+}
+
+/// The status of a status cell: text or null (`Some(None)` = open), `None` for any other cell
+/// kind. Shared by [`status_cell`] and [`row_is_open`].
+fn cell_status(cell: Option<&Cell>) -> Option<Option<char>> {
+    match cell {
+        Some(Cell::Null) | None => Some(None),
+        Some(Cell::Text { v }) => Some(v.chars().next().filter(|c| *c != ' ')),
+        _ => None,
+    }
+}
+
+/// Plan round-9-feedback-todos WP-5: whether `r` is open/unread — any Checkbox cell unchecked
+/// or any Status cell open (null / missing count as unchecked / open, as the cells draw).
+pub fn row_is_open(r: &Row, cols: &[Column]) -> bool {
+    cols.iter().enumerate().any(|(i, c)| match &c.role {
+        Some(ColumnRole::Checkbox { .. }) => !cell_checked(r.cells.get(i)),
+        Some(ColumnRole::Status) => cell_status(r.cells.get(i)) == Some(None),
+        _ => false,
+    })
+}
+
+/// Whether a result with `cols` offers the "Only open" toggle.
+pub fn has_open_columns(cols: &[Column]) -> bool {
+    cols.iter().any(|c| {
+        matches!(
+            c.role,
+            Some(ColumnRole::Checkbox { .. } | ColumnRole::Status)
+        )
+    })
+}
+
+/// Plan round-9-feedback-todos WP-5: `lines` without the rows that are not open
+/// ([`row_is_open`]) and without the group headers left with no row. Summaries are kept as is.
+pub fn open_only_lines(lines: &[Line], cols: &[Column]) -> Vec<Line> {
+    let kept: Vec<Line> = lines
+        .iter()
+        .filter(|l| match l {
+            Line::Row(r) => row_is_open(r, cols),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    drop_empty_groups(kept)
+}
+
+/// Drops every [`Line::Group`] not directly followed by a [`Line::Row`].
+fn drop_empty_groups(lines: Vec<Line>) -> Vec<Line> {
+    let keep: Vec<bool> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            !matches!(l, Line::Group(_)) || matches!(lines.get(i + 1), Some(Line::Row(_)))
+        })
+        .collect();
+    lines
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(l, k)| k.then_some(l))
+        .collect()
 }
 
 /// Plan round-8 WP-2: the fixed height of a virtual list for `d`, or `None` when the view is
@@ -103,6 +172,9 @@ pub fn list_id(id: &str, host: &str) -> iced::widget::Id {
 #[derive(Debug, Default)]
 pub struct ViewStore {
     pub entries: HashMap<Key, Entry>,
+    /// Plan round-9-feedback-todos WP-5: ids of the views whose "Only open" toggle is on
+    /// (persisted as `UiState.view_filters`).
+    pub filters: BTreeSet<String>,
 }
 
 impl ViewStore {
@@ -256,6 +328,12 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
         ViewsMsg::SetBool { path, key, value } => Effect::SetBool { path, key, value },
         // Success needs nothing: the refresh arrives with the file change.
         ViewsMsg::BoolSet(Ok(())) => Effect::None,
+        ViewsMsg::ToggleOpenOnly { id } => {
+            if !store.filters.remove(&id) {
+                store.filters.insert(id);
+            }
+            Effect::None
+        }
         ViewsMsg::BoolSet(Err(e)) => Effect::Notice(format!("property change failed: {e}")),
     }
 }
@@ -277,12 +355,14 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
         lines.extend(g.summaries.into_iter().map(summary));
     }
     lines.extend(r.summaries.into_iter().map(summary));
+    let open_lines = has_open_columns(&r.columns).then(|| open_only_lines(&lines, &r.columns));
     Ok(Decoded {
         kind: r.kind,
         columns: r.columns,
         lines,
         notices: r.notices,
         max_height: r.max_height,
+        open_lines,
     })
 }
 
@@ -358,7 +438,7 @@ pub fn fence<'a>(
             .into(),
         Some(State::Ready(d)) => {
             let window = entry.map(|e| e.window).unwrap_or_default();
-            result_view(d, id, host, window, t, scale)
+            result_view(d, id, host, window, store.filters.contains(id), t, scale)
         }
     };
     let title = text(id.to_owned())
@@ -368,7 +448,17 @@ pub fn fence<'a>(
             ..Font::default()
         })
         .color(t.heading.to_color());
-    let content = container(column![title, body].spacing(6))
+    let toggle = match entry.map(|e| &e.state) {
+        Some(State::Ready(d)) if d.open_lines.is_some() => {
+            Some(open_toggle(id, store.filters.contains(id), t, scale))
+        }
+        _ => None,
+    };
+    let head = row![title, space::horizontal()]
+        .push(toggle)
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+    let content = container(column![head, body].spacing(6))
         .padding(8)
         .width(Length::Fill)
         .style(move |_: &Theme| container::Style {
@@ -393,6 +483,31 @@ pub fn fence<'a>(
         .into()
 }
 
+/// Plan round-9-feedback-todos WP-5: the "Only open" toggle of the fence header; its tooltip
+/// says counts and summaries stay the unfiltered totals.
+fn open_toggle<'a>(id: &str, on: bool, t: Tokens, scale: f32) -> Element<'a, Message> {
+    let nid = id.to_owned();
+    let cb = iced::widget::checkbox(on)
+        .label("Only open")
+        .on_toggle(move |_| Message::Views(ViewsMsg::ToggleOpenOnly { id: nid.clone() }))
+        .size(px(13.0, scale))
+        .text_size(px(12.0, scale));
+    iced::widget::tooltip(
+        cb,
+        container(
+            text(
+                "Hides rows that are checked or done. Counts and summaries stay unfiltered totals.",
+            )
+            .size(px(12.0, scale)),
+        )
+        .padding(6)
+        .style(crate::theme::seg_group_style(t)),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .delay(std::time::Duration::from_millis(400))
+    .into()
+}
+
 /// The role of column `i`.
 fn role(cols: &[Column], i: usize) -> Option<&ColumnRole> {
     cols.get(i).and_then(|c| c.role.as_ref())
@@ -409,11 +524,7 @@ pub(crate) fn status_cell(r: &Row, cols: &[Column], i: usize) -> Option<Option<c
     if r.key.is_none() || role(cols, i) != Some(&ColumnRole::Status) {
         return None;
     }
-    match r.cells.get(i) {
-        Some(Cell::Null) | None => Some(None),
-        Some(Cell::Text { v }) => Some(v.chars().next().filter(|c| *c != ' ')),
-        _ => None,
-    }
+    cell_status(r.cells.get(i))
 }
 
 /// Plan round-6-feedback-todos WP-6: the right-click menu of a keyed row's status cell.
@@ -522,7 +633,7 @@ pub(crate) fn checkbox_cell(r: &Row, cols: &[Column], i: usize) -> Option<(bool,
     };
     let path = r.path.clone()?;
     let key = key.clone();
-    let checked = matches!(r.cells.get(i), Some(Cell::Bool { v: true }));
+    let checked = cell_checked(r.cells.get(i));
     Some((
         checked,
         Message::Views(ViewsMsg::SetBool {
@@ -849,9 +960,14 @@ fn result_view<'a>(
     id: &str,
     host: &str,
     window: ListWindow,
+    only_open: bool,
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
+    let lines: &'a [Line] = match &d.open_lines {
+        Some(open) if only_open => open,
+        _ => &d.lines,
+    };
     let lengths = column_lengths(d, scale);
     let mut items: Vec<Element<'a, Message>> = d
         .notices
@@ -880,16 +996,16 @@ fn result_view<'a>(
             .into(),
         );
     }
-    if d.lines.is_empty() {
+    if lines.is_empty() {
         items.push(
             text("No results")
                 .size(px(13.0, scale))
                 .color(t.text_faint.to_color())
                 .into(),
         );
-    } else if let Some(cap) = list_height(d).filter(|_| d.lines.len() > VIRTUAL_THRESHOLD) {
+    } else if let Some(cap) = list_height(d).filter(|_| lines.len() > VIRTUAL_THRESHOLD) {
         let (sid, shost) = (id.to_owned(), host.to_owned());
-        let list = VirtualList::new(&d.lines, row_height(scale), window, move |w| {
+        let list = VirtualList::new(lines, row_height(scale), window, move |w| {
             Message::Views(ViewsMsg::Scrolled {
                 id: sid.clone(),
                 host: Some(shost.clone()),
@@ -907,7 +1023,7 @@ fn result_view<'a>(
     } else {
         items.push(
             column(
-                d.lines
+                lines
                     .iter()
                     .map(|l| line_view(d, l, &lengths, false, t, scale)),
             )
