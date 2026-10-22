@@ -140,6 +140,20 @@ fn set_youtube_watch(u: &mut Url, id: &str) -> Option<()> {
     Some(())
 }
 
+/// Forum post identity (XenForo shape, host-agnostic): a thread-page URL whose fragment is
+/// exactly `post-<digits>`, or a `/posts/<digits>` path, keys as `/posts/<digits>`. Call before
+/// the fragment is dropped; returns the replacement path.
+fn forum_post_path(u: &Url) -> Option<String> {
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let path = u.path();
+    if let Some(id) = path.strip_prefix("/posts/") {
+        let id = id.strip_suffix('/').unwrap_or(id);
+        return all_digits(id).then(|| format!("/posts/{id}"));
+    }
+    let id = u.fragment()?.strip_prefix("post-")?;
+    (all_digits(id) && path.split('/').any(|seg| seg == "threads")).then(|| format!("/posts/{id}"))
+}
+
 /// Canonicalize an http(s) URL: lowercase host, drop fragment, YouTube → `www.youtube.com/watch?v=`,
 /// arXiv pdf → abs, X status → `x.com`, tracking params stripped, trailing slashes trimmed.
 pub fn canonicalize_url(raw: &str) -> Option<CanonicalizedUrl> {
@@ -151,7 +165,11 @@ pub fn canonicalize_url(raw: &str) -> Option<CanonicalizedUrl> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
+    let forum_path = forum_post_path(&parsed);
     parsed.set_fragment(None);
+    if let Some(p) = forum_path {
+        parsed.set_path(&p);
+    }
     let host = parsed.host_str()?.to_owned();
     let mut youtube_video_id = None;
     let mut x_status_id = None;
@@ -385,7 +403,11 @@ pub fn post_id_from_url(url: &str, opts: &PostIdOptions) -> String {
         .filter(|m| *m != CanonMethod::Auto)
         .or_else(|| u.host_str().and_then(|h| opts.host_rules.get(h).copied()))
         .unwrap_or_default();
+    let forum_path = forum_post_path(&u);
     u.set_fragment(None);
+    if let Some(p) = forum_path {
+        u.set_path(&p);
+    }
     match method {
         CanonMethod::KeepParams => strip_trailing_slash(u.as_str()),
         CanonMethod::StripParams | CanonMethod::Substack => bare_slug(&u),
@@ -657,6 +679,43 @@ mod tests {
             "https://blog.example.org/post"
         );
         assert_eq!(pid("  not a url "), "not a url");
+    }
+
+    const FORUM_A: &str = "https://Forums.Example.com/threads/some-story.123/page-16#post-1001";
+    const FORUM_B: &str = "https://forums.example.com/threads/some-story.123/page-16#post-1002";
+
+    #[test]
+    fn forum_post_fragment_keys_per_post() {
+        let canon = |u: &str| canonicalize_url(u).map(|c| c.canonical);
+        assert_ne!(canon(FORUM_A), canon(FORUM_B));
+        assert_ne!(pid(FORUM_A), pid(FORUM_B));
+        assert_eq!(
+            canon(FORUM_A).as_deref(),
+            Some("https://forums.example.com/posts/1001")
+        );
+        assert_eq!(pid(FORUM_A), "https://forums.example.com/posts/1001");
+        let posts = "https://forums.example.com/posts/1001/";
+        assert_eq!(canon(posts), canon(FORUM_A));
+        assert_eq!(pid(posts), pid(FORUM_A));
+    }
+
+    #[test]
+    fn forum_post_rule_is_narrow() {
+        let reply = "https://forums.example.com/threads/some-story.123/page-16#reply";
+        assert_eq!(
+            canonicalize_url(reply).map(|c| c.canonical).as_deref(),
+            Some("https://forums.example.com/threads/some-story.123/page-16")
+        );
+        assert_eq!(
+            pid(reply),
+            "https://forums.example.com/threads/some-story.123/page-16"
+        );
+        let other = "https://blog.example.org/post/x#post-5";
+        assert_eq!(
+            canonicalize_url(other).map(|c| c.canonical).as_deref(),
+            Some("https://blog.example.org/post/x")
+        );
+        assert_eq!(pid(other), "https://blog.example.org/post/x");
     }
 
     #[test]

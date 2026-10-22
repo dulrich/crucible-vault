@@ -324,6 +324,22 @@ fn dims_hook_drops_small_local_images_and_keeps_large() {
 }
 
 #[test]
+fn chrome_link_wrapping_localized_icon_is_removed_in_one_pass() {
+    let md = "Intro.\n\n[![](attachments/b3f9.png) Read in app](https://x.example/app)\n\nOutro.";
+    let dims = |u: &str| (u == "attachments/b3f9.png").then_some((24, 24));
+    let once = clean_body_with(md, &dims);
+    assert_eq!(once, "Intro.\n\nOutro.");
+    assert_eq!(clean_body_with(&once, &dims), once);
+    // A large localized image in a chrome link still reads as content.
+    let big = |_: &str| Some((600, 400));
+    assert!(clean_body_with(md, &big).contains("Read in app"));
+    // Idempotence on an existing representative fixture.
+    let fx = substack_fixture();
+    let c = clean_body_with(&fx, &dims);
+    assert_eq!(clean_body_with(&c, &dims), c);
+}
+
+#[test]
 fn full_round_two_pipeline_is_clean_prose_identical_and_idempotent() {
     let md = crate_pipeline(&html_fixture());
     assert!(!md.contains("color:red") && !md.contains("avatar") && !md.contains("px.gif"));

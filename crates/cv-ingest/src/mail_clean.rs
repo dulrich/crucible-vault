@@ -72,7 +72,11 @@ pub fn clean_body_with(md: &str, dims: Dims<'_>) -> String {
     for (i, line) in lines[..end].iter().enumerate() {
         if fenced[i] {
             out.push((*line).to_owned());
-        } else if referral[i] || is_spacer_line(line) || is_css_line(line) || is_chrome_line(line) {
+        } else if referral[i]
+            || is_spacer_line(line)
+            || is_css_line(line)
+            || is_chrome_line(line, dims)
+        {
             out.push(String::new());
         } else {
             out.push(rewrite_line(line, dims));
@@ -427,11 +431,18 @@ fn is_icon(src: &str) -> bool {
 /// A markdown image to drop: a pixel, icon or avatar by URL shape, or reported small by `dims`.
 fn is_small_image(dest: &str, dims: Dims<'_>) -> bool {
     let url = dest.split_whitespace().next().unwrap_or("");
-    is_pixel(url) || is_icon(url) || dims(url).is_some_and(|(w, h)| w <= SMALL_PX && h <= SMALL_PX)
+    is_pixel(url) || is_icon(url) || dims_small(url, dims)
+}
+
+/// Whether the `dims` hook reports the image at 64x64 or smaller (the one threshold shared by
+/// [`rewrite_line`] and [`is_chrome_line`], so a localized icon reads the same in both).
+fn dims_small(src: &str, dims: Dims<'_>) -> bool {
+    let url = src.split_whitespace().next().unwrap_or("");
+    dims(url).is_some_and(|(w, h)| w <= SMALL_PX && h <= SMALL_PX)
 }
 
 /// Whether a whole line is newsletter chrome (button row, CTA, or a "forwarded" prompt).
-fn is_chrome_line(line: &str) -> bool {
+fn is_chrome_line(line: &str, dims: Dims<'_>) -> bool {
     let flat = norm_label(line);
     if flat.starts_with("forwarded this email") || flat.starts_with("view this post on the web") {
         return true;
@@ -443,17 +454,18 @@ fn is_chrome_line(line: &str) -> bool {
     for sp in &items {
         if sp.image {
             // A bare tracking pixel / icon image on an otherwise chrome line.
-            if is_pixel(&line[sp.dest.0..sp.dest.1]) || is_icon(&line[sp.dest.0..sp.dest.1]) {
+            if is_small_image(&line[sp.dest.0..sp.dest.1], dims) {
                 continue;
             }
             return false;
         }
         let inner = &line[sp.inner.0..sp.inner.1];
         let label = norm_label(inner);
-        let has_icon = inner_images(inner).iter().any(|s| is_icon(s));
+        let is_icon_like = |s: &str| is_icon(s) || dims_small(s, dims);
+        let has_icon = inner_images(inner).iter().any(|s| is_icon_like(s));
         let has_content_img = inner_images(inner)
             .iter()
-            .any(|s| !is_icon(s) && !is_pixel(s));
+            .any(|s| !is_icon_like(s) && !is_pixel(s));
         if has_content_img {
             return false;
         }

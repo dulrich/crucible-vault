@@ -44,7 +44,7 @@ fn attachment_ref_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     re(
         &R,
-        r"!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\n]+\)|\[\[[^\]\n]+\]\]|\[[^\[\]\n]*\]\([^)\n]+\)",
+        r"!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\((?:\\.|[^)\\\n])+\)|\[\[[^\]\n]+\]\]|\[[^\[\]\n]*\]\((?:\\.|[^)\\\n])+\)",
     )
 }
 
@@ -64,7 +64,7 @@ fn remote_md_image_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     re(
         &R,
-        r#"!\[([^\]]*)\]\((https?://[^)\s]+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'))?[ \t]*\)"#,
+        r#"!\[([^\]]*)\]\((https?://(?:\\.|[^)\s\\])+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'))?[ \t]*\)"#,
     )
 }
 
@@ -132,6 +132,26 @@ fn extract_ref_link_target(r: &str) -> Option<&str> {
         return (!t.is_empty()).then_some(t);
     }
     None
+}
+
+/// Unescapes a CommonMark backslash-escaped URL for download: `\(`/`\)` become `%28`/`%29`
+/// (so the URL stays one token), any other `\x` becomes `x`.
+fn unescape_md_url(u: &str) -> String {
+    let mut out = String::with_capacity(u.len());
+    let mut it = u.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('(') => out.push_str("%28"),
+            Some(')') => out.push_str("%29"),
+            Some(x) => out.push(x),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn strip_angle(s: &str) -> &str {
@@ -482,7 +502,7 @@ fn ref_parts(original: &str) -> Option<(String, Option<String>, Syntax)> {
         dest.split_whitespace().next().unwrap_or("")
     };
     let link = if is_remote(dest) {
-        dest.to_owned()
+        unescape_md_url(dest)
     } else {
         percent_decode(dest)
     };
@@ -548,7 +568,7 @@ pub fn parse_attachment_refs(content: &str) -> Vec<AttachmentMatch> {
         }
         out.push(AttachmentMatch {
             original: all.as_str().to_owned(),
-            link: url.as_str().to_owned(),
+            link: unescape_md_url(url.as_str()),
             syntax: Syntax::Md,
             is_remote: true,
             is_embed: true,
@@ -1462,5 +1482,27 @@ mod vectors {
         assert!(has_remote_image_refs(
             "![x](https://cdn.example/a.png \"t\")"
         ));
+    }
+
+    #[test]
+    fn escaped_paren_image_url_is_unescaped_and_fully_matched() {
+        let src = "x ![](https://h.example/a\\(b\\).png) y\n![](https://h.example/plain.png)\n";
+        let refs = parse_attachment_refs(src);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].link, "https://h.example/a%28b%29.png");
+        assert_eq!(refs[0].original, "![](https://h.example/a\\(b\\).png)");
+        assert_eq!(refs[1].link, "https://h.example/plain.png");
+        assert!(has_remote_image_refs(src));
+        let out = rewrite_localized_attachment_refs(
+            src,
+            &[Replacement {
+                from: refs[0].original.clone(),
+                to: "![[local_MD5.png]]".into(),
+            }],
+        );
+        assert_eq!(
+            out.content,
+            "x ![[local_MD5.png]] y\n![](https://h.example/plain.png)\n"
+        );
     }
 }
