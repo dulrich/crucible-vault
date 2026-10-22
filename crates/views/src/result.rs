@@ -77,6 +77,10 @@ pub struct Column {
     /// by the producer; `None` = a plain display column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<ColumnRole>,
+    /// Plan intake-round-2 WP-4: the definition's `columnSize` (logical px) for this column;
+    /// `None` = size by role. Old payloads omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
 }
 
 impl Column {
@@ -87,6 +91,7 @@ impl Column {
             key: key.into(),
             label: label.into(),
             role: None,
+            width: None,
         }
     }
 

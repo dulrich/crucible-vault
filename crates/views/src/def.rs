@@ -109,7 +109,7 @@ pub struct ViewDef {
     pub summaries: BTreeMap<String, String>,
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Accepted for 1:1 migration; display hint only (unused by the evaluator).
+    /// Logical px per `order` property id; carried to the editor as `Column::width` (evaluator ignores it).
     #[serde(rename = "columnSize", alias = "column_size", default)]
     pub column_size: BTreeMap<String, i64>,
     // --- pivot ---
@@ -303,6 +303,9 @@ pub struct View {
     pub max_height: Option<crate::result::MaxHeight>,
     /// Plan round-8 WP-3: normalized `note.<key>` ids flagged `checkbox = true`.
     pub checkboxes: std::collections::BTreeSet<String>,
+    /// Plan intake-round-2 WP-4: `columnSize` (positive px only) keyed by the `order` id as
+    /// written (the definition's keys are matched through the same `note.` normalization).
+    pub column_widths: BTreeMap<String, f32>,
 }
 
 impl View {
@@ -422,6 +425,16 @@ fn compile_view(
         .iter()
         .map(|id| (id.clone(), expr::property(id), label(id)))
         .collect();
+    let sizes: BTreeMap<String, i64> = v.column_size.iter().map(|(k, w)| (norm(k), *w)).collect();
+    #[allow(clippy::cast_precision_loss)]
+    let column_widths = v
+        .order
+        .iter()
+        .filter_map(|id| {
+            let w = *sizes.get(&norm(id))?;
+            (w > 0).then(|| (id.clone(), w as f32))
+        })
+        .collect();
     let sort = v
         .sort
         .iter()
@@ -489,6 +502,7 @@ fn compile_view(
         errors,
         max_height: v.max_height,
         checkboxes: std::collections::BTreeSet::new(),
+        column_widths,
     }
 }
 

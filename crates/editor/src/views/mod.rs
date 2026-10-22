@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use iced::font::Weight;
+use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, rich_text, row, sensor, span, text};
 use iced::{Border, Element, Font, Length, Theme};
 use serde::Deserialize;
@@ -538,14 +539,91 @@ pub(crate) fn row_cancelled(r: &Row, cols: &[Column]) -> bool {
     (0..r.cells.len().max(cols.len())).any(|i| status_cell(r, cols, i) == Some(Some('-')))
 }
 
+/// Approximate glyph advance as a fraction of the font size (proportional UI font average).
+const CHAR_ADVANCE: f32 = 0.6;
+/// Cell font design size (see [`cell_view`]).
+const CELL_FONT: f32 = 13.0;
+/// Horizontal slack added to a role-sized column's measured text (design px).
+const FIXED_PAD: f32 = 8.0;
+/// Clamp of a role-sized (number/checkbox/status) column width (design px).
+const FIXED_MIN: f32 = 28.0;
+const FIXED_MAX: f32 = 120.0;
+/// `FillPortion` of the file/link column versus other text columns.
+const NAME_PORTION: u16 = 4;
+const TEXT_PORTION: u16 = 2;
+
+/// Plan intake-round-2 WP-4: the width of every column of `d` at `scale`, shared by the header,
+/// data and summary rows so they align. A `columnSize` column is `Fixed(width * scale)`; an
+/// unsized column of numbers, booleans, or a checkbox/status role is `Fixed` from its header and
+/// widest formatted cell (about [`CHAR_ADVANCE`] em per char, clamped to
+/// [`FIXED_MIN`]..=[`FIXED_MAX`]); every other column is a `FillPortion`, [`NAME_PORTION`] for
+/// `file.name` or a link column and [`TEXT_PORTION`] otherwise.
+pub fn column_lengths(d: &Decoded, scale: f32) -> Vec<Length> {
+    if d.columns.is_empty() {
+        return vec![Length::FillPortion(1)];
+    }
+    let cell_at = |i: usize| {
+        d.lines.iter().flat_map(move |l| match l {
+            Line::Row(r) => r.cells.get(i).into_iter().collect::<Vec<_>>(),
+            Line::Summary { cells, .. } => cells.get(i).into_iter().collect::<Vec<_>>(),
+            Line::Group(_) => Vec::new(),
+        })
+    };
+    d.columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if let Some(w) = c.width.filter(|w| *w > 0.0) {
+                return Length::Fixed(w * scale);
+            }
+            let role_fixed = matches!(
+                c.role,
+                Some(ColumnRole::Checkbox { .. } | ColumnRole::Status)
+            );
+            let mut any = false;
+            let mut compact = true;
+            let mut link = c.key == "file.name";
+            let mut widest = c.label.chars().count();
+            for cell in cell_at(i) {
+                match cell {
+                    Cell::Null | Cell::Unknown => {}
+                    Cell::Number { .. } | Cell::Bool { .. } => any = true,
+                    Cell::Link { .. } => {
+                        compact = false;
+                        link = true;
+                    }
+                    _ => compact = false,
+                }
+                widest = widest.max(format_cell(cell).chars().count());
+            }
+            if role_fixed || (any && compact) {
+                #[allow(clippy::cast_precision_loss)]
+                let w = (widest as f32 * CELL_FONT * CHAR_ADVANCE + FIXED_PAD)
+                    .clamp(FIXED_MIN, FIXED_MAX);
+                Length::Fixed(w * scale)
+            } else if link {
+                Length::FillPortion(NAME_PORTION)
+            } else {
+                Length::FillPortion(TEXT_PORTION)
+            }
+        })
+        .collect()
+}
+
 fn cell_view<'a>(
     c: &Cell,
     bold: bool,
     open: Option<Message>,
     cancelled: bool,
+    nowrap: bool,
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
+    let wrap = if nowrap {
+        Wrapping::None
+    } else {
+        Wrapping::default()
+    };
     let font = Font {
         weight: if bold { Weight::Bold } else { Weight::Normal },
         ..Font::default()
@@ -561,6 +639,7 @@ fn cell_view<'a>(
         let el = rich_text(vec![sp])
             .size(px(13.0, scale))
             .font(font)
+            .wrapping(wrap)
             .color(t.text_faint.to_color());
         return match open {
             Some(msg) => {
@@ -580,6 +659,7 @@ fn cell_view<'a>(
             let el = rich_text(vec![sp])
                 .size(px(13.0, scale))
                 .font(font)
+                .wrapping(wrap)
                 .on_link_click(move |()| msg.clone());
             match cell_menu_target(c) {
                 Some(target) => crate::context_menu::on_right(el, target),
@@ -589,19 +669,51 @@ fn cell_view<'a>(
         None => text(s)
             .size(px(13.0, scale))
             .font(font)
+            .wrapping(wrap)
             .color(t.text.to_color())
             .into(),
     }
 }
 
-fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Message> {
+/// Plan intake-round-2 WP-4: one display line. `single` (the virtual-list path, whose row height
+/// is fixed) renders every cell on one clipped line so a row never exceeds its height; otherwise
+/// rows grow to fit wrapped text.
+fn line_view<'a>(
+    d: &Decoded,
+    l: &Line,
+    lengths: &[Length],
+    single: bool,
+    t: Tokens,
+    scale: f32,
+) -> Element<'a, Message> {
+    let el = line_inner(d, l, lengths, single, t, scale);
+    if single {
+        container(el)
+            .height(Length::Fixed(row_height(scale)))
+            .width(Length::Fill)
+            .clip(true)
+            .into()
+    } else {
+        el
+    }
+}
+
+fn line_inner<'a>(
+    d: &Decoded,
+    l: &Line,
+    lengths: &[Length],
+    single: bool,
+    t: Tokens,
+    scale: f32,
+) -> Element<'a, Message> {
     let cols = d.columns.len().max(1);
+    let len = |i: usize| lengths.get(i).copied().unwrap_or(Length::FillPortion(1));
     let grid = |cs: &[Cell], bold: bool, targets: &[Option<Message>]| -> Element<'a, Message> {
         row((0..cols).map(|i| {
             let c = cs.get(i).unwrap_or(&Cell::Null);
             let open = targets.get(i).cloned().flatten();
-            let el = cell_view(c, bold, open, false, t, scale);
-            container(el).width(Length::FillPortion(1)).into()
+            let el = cell_view(c, bold, open, false, single, t, scale);
+            container(el).width(len(i)).clip(single).into()
         }))
         .spacing(8)
         .into()
@@ -649,11 +761,12 @@ fn line_view<'a>(d: &Decoded, l: &Line, t: Tokens, scale: f32) -> Element<'a, Me
                                 false,
                                 open,
                                 cancelled,
+                                single,
                                 t,
                                 scale,
                             )
                         };
-                    container(el).width(Length::FillPortion(1)).into()
+                    container(el).width(len(i)).clip(single).into()
                 }))
                 .spacing(8)
                 .into();
@@ -739,6 +852,7 @@ fn result_view<'a>(
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
+    let lengths = column_lengths(d, scale);
     let mut items: Vec<Element<'a, Message>> = d
         .notices
         .iter()
@@ -751,13 +865,15 @@ fn result_view<'a>(
         .collect();
     if d.kind != Kind::Tasks && !d.columns.is_empty() {
         items.push(
-            row(d.columns.iter().map(|c| {
+            row(d.columns.iter().enumerate().map(|(i, c)| {
                 container(
                     text(c.label.clone())
                         .size(px(13.0, scale))
+                        .wrapping(Wrapping::None)
                         .color(t.text_dim.to_color()),
                 )
-                .width(Length::FillPortion(1))
+                .width(lengths.get(i).copied().unwrap_or(Length::FillPortion(1)))
+                .clip(true)
                 .into()
             }))
             .spacing(8)
@@ -781,7 +897,7 @@ fn result_view<'a>(
             })
         })
         .id(list_id(id, host))
-        .view(move |_, l| line_view(d, l, t, scale));
+        .view(move |_, l| line_view(d, l, &lengths, true, t, scale));
         items.push(
             container(list)
                 .height(Length::Fixed(cap))
@@ -790,9 +906,13 @@ fn result_view<'a>(
         );
     } else {
         items.push(
-            column(d.lines.iter().map(|l| line_view(d, l, t, scale)))
-                .spacing(4)
-                .into(),
+            column(
+                d.lines
+                    .iter()
+                    .map(|l| line_view(d, l, &lengths, false, t, scale)),
+            )
+            .spacing(4)
+            .into(),
         );
     }
     column(items).spacing(4).into()

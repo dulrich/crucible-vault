@@ -812,3 +812,86 @@ fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
     );
     assert!(app.status.error_text().is_none());
 }
+
+fn dec(cols: Vec<Column>, rows: Vec<Vec<Cell>>) -> Decoded {
+    Decoded {
+        kind: Kind::Table,
+        columns: cols,
+        lines: rows
+            .into_iter()
+            .map(|cells| {
+                Line::Row(Row {
+                    path: None,
+                    line: None,
+                    cells,
+                    key: None,
+                })
+            })
+            .collect(),
+        notices: Vec::new(),
+        max_height: None,
+    }
+}
+
+fn link(s: &str) -> Cell {
+    Cell::Link {
+        path: format!("{s}.md"),
+        label: s.to_owned(),
+    }
+}
+
+fn fixed(l: Length) -> f32 {
+    match l {
+        Length::Fixed(w) => w,
+        other => panic!("expected Fixed, got {other:?}"),
+    }
+}
+
+/// Plan intake-round-2 WP-4: sized, numeric, checkbox and name columns get their lengths.
+#[test]
+fn column_lengths_by_role() {
+    let mut sized = Column::plain("note.x", "X");
+    sized.width = Some(137.0);
+    let d = dec(
+        vec![
+            Column::plain("file.name", "file name"),
+            Column::plain("note.words", "Words"),
+            Column::plain("note.read", "Read")
+                .with_role(ColumnRole::Checkbox { key: "read".into() }),
+            Column::plain("note.author", "Author"),
+            sized,
+        ],
+        vec![vec![
+            link("A long note title"),
+            Cell::Number { v: 12345.0 },
+            Cell::Bool { v: true },
+            Cell::Text { v: "Ann".into() },
+            Cell::Text { v: "x".into() },
+        ]],
+    );
+    let ls = column_lengths(&d, 1.0);
+    assert!(
+        matches!(ls[0], Length::FillPortion(n) if n > 2),
+        "{:?}",
+        ls[0]
+    );
+    assert!(fixed(ls[1]) < 120.1 && fixed(ls[1]) >= 28.0);
+    assert!(fixed(ls[2]) < 120.1);
+    assert!(matches!(ls[3], Length::FillPortion(2)), "{:?}", ls[3]);
+    assert_eq!(fixed(ls[4]), 137.0);
+}
+
+#[test]
+fn column_lengths_scale_and_narrow_numbers() {
+    let mut sized = Column::plain("a", "A");
+    sized.width = Some(100.0);
+    let d = dec(
+        vec![sized, Column::plain("n", "n")],
+        vec![vec![Cell::Null, Cell::Number { v: 7.0 }]],
+    );
+    let (one, two) = (column_lengths(&d, 1.0), column_lengths(&d, 2.0));
+    assert_eq!(fixed(two[0]), 200.0);
+    assert!((fixed(two[1]) - 2.0 * fixed(one[1])).abs() < 1e-3);
+    assert!(fixed(one[1]) < 100.0, "a number column is narrow");
+    assert_eq!(column_lengths(&dec(Vec::new(), Vec::new()), 1.0).len(), 1);
+}

@@ -22,11 +22,13 @@
       "role": {
         "key": "read",
         "kind": "checkbox"
-      }
+      },
+      "width": 137.0
     },
     {
       "key": "formula.unread_words",
-      "label": "unread_words"
+      "label": "unread_words",
+      "width": 204.0
     },
     {
       "key": "formula.unread_minutes",

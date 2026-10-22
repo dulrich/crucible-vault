@@ -1089,3 +1089,27 @@ fn checkbox_property_reaches_the_column() {
         Some(crate::result::ColumnRole::Checkbox { key: "read".into() })
     );
 }
+
+/// Plan intake-round-2 WP-4: `columnSize` travels def → compiled view → result JSON → decode;
+/// non-positive sizes are ignored and an old payload without `width` still decodes.
+#[test]
+fn column_size_reaches_the_result() {
+    let def = "[[views]]\ntype = \"table\"\nname = \"Sized\"\norder = [\"file.name\", \"word-count\", \"note.author\"]\ncolumnSize = { \"note.word-count\" = 90, \"author\" = 0 }\n";
+    let fx = fixture(&[("cs.toml", def)]);
+    let mut h = fx.host();
+    assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());
+    let r = fx.run(&mut h, "cs#Sized", None);
+    let w: Vec<Option<f32>> = r.columns.iter().map(|c| c.width).collect();
+    assert_eq!(w, vec![None, Some(90.0), None]);
+    let j = serde_json::to_value(&r).unwrap();
+    assert!(
+        j["columns"][0].get("width").is_none(),
+        "unsized omits width"
+    );
+    let back: ViewResult = serde_json::from_value(j).unwrap();
+    assert_eq!(back.columns[1].width, Some(90.0));
+    let old =
+        serde_json::json!({"kind": "table", "columns": [{"key": "a", "label": "A"}], "groups": []});
+    let old: ViewResult = serde_json::from_value(old).unwrap();
+    assert_eq!(old.columns[0].width, None);
+}

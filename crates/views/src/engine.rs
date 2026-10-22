@@ -450,7 +450,8 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
             .order
             .iter()
             .map(|(id, _, l)| {
-                let col = Column::plain(id.clone(), l.clone());
+                let mut col = Column::plain(id.clone(), l.clone());
+                col.width = view.column_widths.get(id).copied();
                 match view.checkbox_key(id) {
                     Some(key) => col.with_role(ColumnRole::Checkbox { key }),
                     None => col,
