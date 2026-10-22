@@ -364,6 +364,7 @@ confirm_trash = true
 delete_mode = "permanent"
 missing_link = "create"
 focus_follows_mouse = true
+auto_lint = false
 scroll_anchor = 40
 open_url_cmd = ["firefox", "--new-tab"]
 
@@ -417,6 +418,7 @@ fn editor_and_bookmarks_schemas_match_the_editor_parsers() {
     // The real parsers take every field.
     let p = editor_prefs::parse(EDITOR_SAMPLE, Surround::Med).expect("editor parse");
     assert_ne!(p, Prefs::default(), "every field read");
+    assert!(!p.auto_lint, "auto_lint is read (default true)");
     let b = crate::bookmarks::parse(BOOKMARKS_SAMPLE.as_bytes()).expect("bookmarks parse");
     assert_eq!(b.len(), 2);
     // Round trip: the bookmarks renderer's output validates against the schema.

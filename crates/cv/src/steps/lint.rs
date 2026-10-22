@@ -31,40 +31,24 @@ use super::file::{step_kind, target_path};
 use cv_text::vpath::stem;
 
 use super::materialize::now;
-use super::params::{check_keys, check_placeholders, get_bool, get_str, get_str_list};
+use super::params::{check_keys, check_placeholders, get_bool, get_str};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
-fn settings(t: &toml::Table) -> Result<LintSettings, String> {
-    let mut s = LintSettings::default();
-    if let Some(v) = get_str(t, "frontmatter_insert")? {
-        s.frontmatter_insert = v;
-    }
-    if let Some(v) = get_str(t, "created_key")? {
-        s.created_key = v;
-    }
-    if let Some(v) = get_str(t, "modified_key")? {
-        s.modified_key = v;
-    }
-    if let Some(v) = get_bool(t, "blank_line_after_yaml")? {
-        s.blank_line_after_yaml = v;
-    }
-    s.yaml_key_priority = get_str_list(t, "yaml_key_priority")?;
-    match t.get("steps") {
-        None => {}
-        Some(toml::Value::Table(m)) => {
-            for (k, v) in m {
-                let b = v
-                    .as_bool()
-                    .ok_or_else(|| format!("lint `steps.{k}` must be a boolean"))?;
-                if !cv_note::LINT_STEPS.iter().any(|st| st.id == k) {
-                    return Err(format!("lint: unknown step id {k:?}"));
-                }
-                s.step_enabled.insert(k.clone(), b);
-            }
+fn param_value(v: &toml::Value) -> cv_note::ParamValue {
+    use cv_note::ParamValue;
+    match v {
+        toml::Value::String(s) => ParamValue::Str(s.clone()),
+        toml::Value::Boolean(b) => ParamValue::Bool(*b),
+        toml::Value::Array(a) => ParamValue::List(a.iter().map(param_value).collect()),
+        toml::Value::Table(m) => {
+            ParamValue::Table(m.iter().map(|(k, v)| (k.clone(), param_value(v))).collect())
         }
-        Some(_) => return Err("lint `steps` must be a table".into()),
+        _ => ParamValue::Other,
     }
-    Ok(s)
+}
+
+fn settings(t: &toml::Table) -> Result<LintSettings, String> {
+    LintSettings::from_params(&|k| t.get(k).map(param_value))
 }
 
 /// Parsed `lint` params.

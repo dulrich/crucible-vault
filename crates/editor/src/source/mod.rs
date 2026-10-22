@@ -11,6 +11,7 @@
 //! line, dirty buffer shows a conflict bar. The Obsidian-induced part (polling the open editor
 //! after a plugin write) is dropped.
 
+pub mod autolint;
 mod buffer;
 mod edit;
 pub mod highlighter;
@@ -220,3 +221,5 @@ pub fn update(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_autolint;

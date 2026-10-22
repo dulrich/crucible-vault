@@ -8,6 +8,30 @@ impl App {
             .unwrap_or_else(|| chrono::Local::now().date_naive())
     }
 
+    /// Plan round-9 WP-6 (D26): the auto-lint inputs from the loaded `actions.toml` (the
+    /// `lint-note` action's params) and `captures.toml` (template folders). `None` when
+    /// `auto_lint` is off or the params are malformed (auto-lint then skips, never lints with
+    /// settings the user did not write).
+    pub(super) fn auto_lint_cfg(&self) -> Option<crate::source::autolint::AutoLint> {
+        use crate::settings::pages::hotkeys::ACTIONS_PATH;
+        use crate::source::autolint::{AutoLint, lint_settings, template_paths};
+        if !self.prefs.auto_lint {
+            return None;
+        }
+        let body = |p: &str| {
+            self.settings
+                .file(p)
+                .and_then(|f| f.doc())
+                .map(|d| d.document().to_string())
+        };
+        Some(AutoLint {
+            enabled: true,
+            settings: lint_settings(body(ACTIONS_PATH).as_deref()).ok()?,
+            templates: template_paths(body(CAPTURES_PATH).as_deref()),
+            today: self.today().format("%Y-%m-%d").to_string(),
+        })
+    }
+
     /// Index membership for explorer inserts (plan editor-ui-round-3 WP-2, audit B1). Without
     /// a daemon (tests without one) nothing is held.
     pub(super) fn indexed_fn(&self) -> impl Fn(&str) -> bool + use<> {
@@ -152,6 +176,15 @@ impl App {
         // WP-4 (audit E2): `captures.toml` is loaded at boot too — navigation reads its period
         // folders, not only the Captures page.
         if let (Some(d), Some(f)) = (&self.daemon, self.settings.files.get_mut(CAPTURES_PATH)) {
+            f.load(d.as_ref());
+        }
+        // Plan round-9 WP-6: auto-lint reads the `lint-note` action's params from it.
+        if let (Some(d), Some(f)) = (
+            &self.daemon,
+            self.settings
+                .files
+                .get_mut(crate::settings::pages::hotkeys::ACTIONS_PATH),
+        ) {
             f.load(d.as_ref());
         }
         if let (Some(d), Some(f)) = (&self.daemon, self.settings.files.get_mut(EDITOR_PATH)) {

@@ -372,7 +372,7 @@ impl SourceBuffer {
         self.perform(Action::Edit(Edit::Paste(Arc::new(text))), now)
     }
 
-    fn mark_edited(&mut self) {
+    pub(super) fn mark_edited(&mut self) {
         self.save.dirty = true;
         self.edit_seq += 1;
     }
@@ -433,7 +433,7 @@ fn span(content: &Content, from: undo::Pos, to: undo::Pos) -> Option<String> {
 /// Applies one recorded change in place (select the removed span, paste/delete). In-place
 /// application costs microseconds; `Content::with_text` on a 1 MB buffer measured ~650 ms
 /// (report). Returns `false` if the buffer no longer matches the record.
-fn apply_change(content: &mut Content, c: &Change) -> bool {
+pub(super) fn apply_change(content: &mut Content, c: &Change) -> bool {
     let end = c.removed_end();
     if span(content, c.at, end).as_deref() != Some(c.removed.as_str()) {
         return false;

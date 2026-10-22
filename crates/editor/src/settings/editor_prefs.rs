@@ -70,6 +70,8 @@ pub struct Prefs {
     pub missing_link: MissingLink,
     /// `focus_follows_mouse` (plan editor-round-4 WP-4): hovering a pane focuses it.
     pub focus_follows_mouse: bool,
+    /// `auto_lint` (plan round-9-feedback-todos WP-6, D26): lint the open note at autosave.
+    pub auto_lint: bool,
     /// `scroll_anchor` (plan round-8-intake-views-anchor WP-4): the viewport height, in percent
     /// (0 = top), whose block/line a Reading ↔ Source switch carries.
     pub scroll_anchor: u8,
@@ -121,6 +123,7 @@ impl Default for Prefs {
             delete_mode: DeleteMode::Trash,
             missing_link: MissingLink::Warn,
             focus_follows_mouse: false,
+            auto_lint: true,
             scroll_anchor: 0,
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
@@ -222,6 +225,7 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
         focus_follows_mouse: doc
             .get_bool(&p("focus_follows_mouse"))
             .unwrap_or(d.focus_follows_mouse),
+        auto_lint: doc.get_bool(&p("auto_lint")).unwrap_or(d.auto_lint),
         scroll_anchor: int_in("scroll_anchor")
             .and_then(|v| u8::try_from(v).ok())
             .unwrap_or(d.scroll_anchor),

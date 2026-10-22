@@ -105,10 +105,30 @@ impl App {
                     SourceTarget::Active => active.map(|(p, _)| p),
                     SourceTarget::App => None,
                 };
+                // Plan round-9 WP-6 (D26): the autosave point lints the buffer first.
+                let lint_cfg = matches!(&m, SourceMsg::AutosaveDue { .. })
+                    .then(|| self.auto_lint_cfg())
+                    .flatten();
                 let Some(buf) = path.and_then(|p| self.docs.get_mut(&p)) else {
                     return Task::none();
                 };
+                let mut relint = false;
+                let m = match m {
+                    SourceMsg::AutosaveDue { path, seq } => {
+                        if let Some(cfg) = lint_cfg.filter(|_| seq == buf.buffer.edit_seq()) {
+                            relint = buf.buffer.auto_lint(&cfg, std::time::Instant::now());
+                        }
+                        // The lint edit bumps the seq; this tick is still the live one.
+                        let seq = if relint { buf.buffer.edit_seq() } else { seq };
+                        SourceMsg::AutosaveDue { path, seq }
+                    }
+                    m => m,
+                };
                 let fx = crate::source::update(&mut buf.buffer, m, self.daemon.as_ref());
+                if relint {
+                    // The frontmatter changed: re-render Reading now, not on its next tick.
+                    self.reading.recompute(buf, self.daemon.as_ref());
+                }
                 let mut tasks = Vec::new();
                 for e in fx {
                     match e {

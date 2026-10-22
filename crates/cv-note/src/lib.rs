@@ -14,8 +14,8 @@ pub mod wordcount;
 
 pub use frontmatter::{FmError, FrontmatterDoc, span};
 pub use lint::{
-    LINT_STEPS, LintContext, LintOutcome, LintSettings, LintStep, LintTarget, derive_source_ids,
-    lint_note,
+    LINT_STEPS, LintContext, LintOutcome, LintSettings, LintStep, LintTarget, ParamValue,
+    derive_source_ids, lint_note,
 };
 pub use ofm::frontmatter::JsValue;
 pub use transcript::{TranscriptEvidence, cleanup_youtube_transcript, transcript_evidence};

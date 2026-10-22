@@ -316,6 +316,34 @@ impl UndoHistory {
         self.enforce_cap();
     }
 
+    /// Whether [`Self::record_joined`] can merge into the latest group: there is one, and
+    /// nothing is undone (joining an older group under a pending redo would reorder history).
+    pub fn can_join(&self) -> bool {
+        !self.undo.is_empty() && self.redo.is_empty()
+    }
+
+    /// Records a programmatic follow-up edit (auto-lint, plan round-9 WP-6 / audit E2) into the
+    /// latest group, so ONE undo reverts the user's edit together with it: the group's `before`
+    /// cursor is kept, its `after` becomes `after`, and it never coalesces further typing.
+    /// When [`Self::can_join`] is false this records `change` as its own group instead.
+    pub fn record_joined(&mut self, change: Change, before: Cursor, after: Cursor, now: Instant) {
+        if !self.can_join() {
+            self.record(change, EditKind::Other, before, after, now);
+            return;
+        }
+        let cost = change.cost();
+        if let Some(g) = self.undo.back_mut() {
+            g.changes.push(change);
+            g.after = after;
+            g.kind = GroupKind::Other;
+            g.last = now;
+            g.bytes += cost;
+        }
+        self.bytes += cost;
+        self.open = false;
+        self.enforce_cap();
+    }
+
     fn enforce_cap(&mut self) {
         while self.bytes > self.cap {
             match self.undo.pop_front() {

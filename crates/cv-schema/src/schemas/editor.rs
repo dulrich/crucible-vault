@@ -345,6 +345,13 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Bool(false)),
         field(
+            "auto_lint",
+            "Auto-lint on autosave",
+            "Lint the open note's frontmatter when it autosaves after your edit (the lint-note action's settings; never on open, while the cursor is in the frontmatter, in _custom/ or template folders, or for notes without frontmatter)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(true)),
+        field(
             "scroll_anchor",
             "Scroll anchor (%)",
             "Where a Reading ↔ Source switch keeps your place: the block/line this far down the viewport (0 = top, 50 = middle, 100 = bottom) stays under the same height",

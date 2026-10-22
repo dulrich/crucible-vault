@@ -74,6 +74,48 @@ fn diff_is_minimal_and_multiline() {
 }
 
 #[test]
+fn record_joined_merges_into_the_users_group_for_one_undo() {
+    let mut d = Doc::new("---\na: 1\n---\nbody", DEFAULT_CAP_BYTES);
+    d.cursor = Cursor::caret(3, 4);
+    d.type_str("X");
+    let (before_bytes, user_after) = (d.h.bytes(), d.cursor);
+    assert_eq!(d.h.undo_len(), 1);
+    assert!(d.h.can_join());
+    // The follow-up edit: the frontmatter grows by a line and the cursor shifts down.
+    let lint = Change::diff(0, "---\na: 1\n---\n", "---\na: 1\nb: 2\n---\n").unwrap();
+    let mut text = d.text.clone();
+    lint.apply(&mut text).unwrap();
+    let after = Cursor::caret(user_after.pos.line + 1, user_after.pos.col);
+    d.h.record_joined(lint, user_after, after, d.t);
+    d.text = text;
+    d.cursor = after;
+    assert_eq!(d.h.undo_len(), 1, "joined, not a new group");
+    assert!(d.h.bytes() > before_bytes);
+    // One undo reverts both and restores the cursor from before the user's edit.
+    assert!(d.undo());
+    assert_eq!(d.text, "---\na: 1\n---\nbody");
+    assert_eq!(d.cursor, Cursor::caret(3, 4));
+    assert_eq!((d.h.undo_len(), d.h.redo_len()), (0, 1));
+    // Redo re-applies both and restores the shifted cursor.
+    assert!(d.redo());
+    assert_eq!(d.text, "---\na: 1\nb: 2\n---\nbodyX");
+    assert_eq!(d.cursor, after);
+}
+
+#[test]
+fn record_joined_without_a_group_or_under_redo_is_its_own_group() {
+    let mut d = Doc::new("a\nb", DEFAULT_CAP_BYTES);
+    assert!(!d.h.can_join());
+    let ch = Change::diff(0, "a\nb", "a\nb\nc").unwrap();
+    d.h.record_joined(ch, Cursor::default(), Cursor::default(), d.t);
+    assert_eq!(d.h.undo_len(), 1);
+    // After an undo the redo stack is pending: no joining into the older group.
+    d.text = "a\nb\nc".into();
+    assert!(d.undo());
+    assert!(!d.h.can_join());
+}
+
+#[test]
 fn undo_redo_restore_text_cursor_and_selection_exactly() {
     let mut d = Doc::new("hello\nworld\n", DEFAULT_CAP_BYTES);
     let s0 = (d.text.clone(), d.cursor);

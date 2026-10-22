@@ -146,6 +146,79 @@ impl Default for LintSettings {
     }
 }
 
+/// A value-neutral step-param value (no `toml`/`serde` in this crate): the daemon's `lint` step
+/// and the editor's auto-lint both adapt their `toml` values to it, so one parser
+/// ([`LintSettings::from_params`]) serves both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamValue {
+    Str(String),
+    Bool(bool),
+    List(Vec<ParamValue>),
+    /// Entries in iteration order (errors name the first offender in that order).
+    Table(Vec<(String, ParamValue)>),
+    /// Any other type (integer, float, datetime): always a type error where a typed value is
+    /// expected.
+    Other,
+}
+
+impl LintSettings {
+    /// Lint settings from `lint` step params: `get(key)` yields the raw param (`None` = absent).
+    /// Keys: `frontmatter_insert`, `created_key`, `modified_key`, `blank_line_after_yaml`,
+    /// `yaml_key_priority`, `steps` (the daemon's `steps/lint.rs` documents them).
+    pub fn from_params(get: &dyn Fn(&str) -> Option<ParamValue>) -> Result<Self, String> {
+        let str_of = |key: &str| match get(key) {
+            None => Ok(None),
+            Some(ParamValue::Str(s)) => Ok(Some(s)),
+            Some(_) => Err(format!("`{key}` must be a string")),
+        };
+        let mut s = Self::default();
+        if let Some(v) = str_of("frontmatter_insert")? {
+            s.frontmatter_insert = v;
+        }
+        if let Some(v) = str_of("created_key")? {
+            s.created_key = v;
+        }
+        if let Some(v) = str_of("modified_key")? {
+            s.modified_key = v;
+        }
+        match get("blank_line_after_yaml") {
+            None => {}
+            Some(ParamValue::Bool(b)) => s.blank_line_after_yaml = b,
+            Some(_) => return Err("`blank_line_after_yaml` must be a boolean".into()),
+        }
+        s.yaml_key_priority = match get("yaml_key_priority") {
+            None => Vec::new(),
+            Some(ParamValue::Str(v)) => vec![v],
+            Some(ParamValue::List(a)) => a
+                .into_iter()
+                .map(|v| match v {
+                    ParamValue::Str(v) => Ok(v),
+                    _ => Err("`yaml_key_priority` must hold strings".to_owned()),
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => {
+                return Err("`yaml_key_priority` must be a string or a list of strings".into());
+            }
+        };
+        match get("steps") {
+            None => {}
+            Some(ParamValue::Table(m)) => {
+                for (k, v) in m {
+                    let ParamValue::Bool(b) = v else {
+                        return Err(format!("lint `steps.{k}` must be a boolean"));
+                    };
+                    if !LINT_STEPS.iter().any(|st| st.id == k) {
+                        return Err(format!("lint: unknown step id {k:?}"));
+                    }
+                    s.step_enabled.insert(k, b);
+                }
+            }
+            Some(_) => return Err("lint `steps` must be a table".into()),
+        }
+        Ok(s)
+    }
+}
+
 /// Per-note inputs; time-dependent values are explicit (no clock reads).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LintContext {
