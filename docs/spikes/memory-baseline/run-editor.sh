@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # usage: run-editor.sh <label> <daemon-label> <seconds> [ENV=VAL ...] — scratch editor + sampler at 1 s
+for _a in "$@"; do case "$_a" in --help|-h)
+  printf 'usage: %s %s\n' "${0##*/}" '<label> <daemon-label> <seconds> [ENV=VAL ...]'
+  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+  exit 0;; esac; done
+
 label=$1; dl=$2; secs=$3; shift 3
 S=~/.local/share/cv-mem-scratch; D=$(dirname "$0")
 cp $S/xdg/crucible-vault/editor.json.orig $S/xdg/crucible-vault/editor.json 2>/dev/null

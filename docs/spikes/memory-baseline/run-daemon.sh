@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # usage: run-daemon.sh <label> <seconds> [ENV=VAL ...] — scratch daemon + sampler at 1 s
+for _a in "$@"; do case "$_a" in --help|-h)
+  printf 'usage: %s %s\n' "${0##*/}" '<label> <seconds> [ENV=VAL ...]'
+  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+  exit 0;; esac; done
+
 label=$1; secs=$2; shift 2
 S=~/.local/share/cv-mem-scratch; D=$(dirname "$0")
 env -i HOME=$HOME PATH=$PATH CV_VAULT=$S/vault CV_SOCKET=$S/run/$label.sock \

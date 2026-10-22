@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # usage: scenario.sh <label> [ENV=VAL ...] — warm start on index-cold-default.db, then a fixed workload; prints one row per phase
+for _a in "$@"; do case "$_a" in --help|-h)
+  printf 'usage: %s %s\n' "${0##*/}" '<label> [ENV=VAL ...]'
+  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+  exit 0;; esac; done
+
 label=$1; shift; S=~/.local/share/cv-mem-scratch; D=$(dirname "$0"); sock=$S/run/$label.sock
 cp $S/state/index-cold-default.db $S/state/index-$label.db 2>/dev/null
 env -i HOME=$HOME PATH=$PATH CV_VAULT=$S/vault CV_SOCKET=$sock CV_STATE_DB=$S/state/state.db \

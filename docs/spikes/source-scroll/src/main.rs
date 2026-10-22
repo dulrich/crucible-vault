@@ -11,6 +11,11 @@ fn run(label: &str, steps: &[i32]) {
     ed.with_buffer(|b| println!("{label}: scroll = {:?}", b.scroll()));
 }
 fn main() {
+    // Help is answered before anything is created or read.
+    if std::env::args().skip(1).any(|a| a == "--help" || a == "-h") {
+        println!("usage: source-scroll-spike\n\nSource-view scroll_content measurement. Takes no arguments.");
+        return;
+    }
     let lh = 18.2f32; let n = 200f32;
     run("up 4n then down 50 (current scroll_content)", &[(-4.0*n*lh) as i32, (50.0*lh) as i32]);
     run("single down 50", &[(50.0*lh) as i32]);

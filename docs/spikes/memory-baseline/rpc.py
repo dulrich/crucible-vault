@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """usage: rpc.py <socket> <method> '<params-json>' — prints only aggregates (result size, latency)."""
 import json, socket, sys, time
+if any(a in ("-h", "--help") for a in sys.argv[1:]):
+    print(__doc__.strip())
+    sys.exit(0)
 sock, method, params = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
 s = socket.socket(socket.AF_UNIX); s.connect(sock)
 def call(m, prm, i):

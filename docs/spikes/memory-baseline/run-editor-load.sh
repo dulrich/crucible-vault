@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # usage: run-editor-load.sh <label> <daemon-label> [ENV=VAL ...] — editor + open the 15 scratch notes
 # with the most image embeds (paths stay in the scratch dir, never printed); prints aggregate rows.
+for _a in "$@"; do case "$_a" in --help|-h)
+  printf 'usage: %s %s\n' "${0##*/}" '<label> <daemon-label> [ENV=VAL ...]'
+  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+  exit 0;; esac; done
+
 label=$1; dl=$2; shift 2
 S=~/.local/share/cv-mem-scratch; sock=$S/run/$dl.sock
 [ -f $S/run/imgnotes.txt ] || (cd $S/vault && grep -rcE '!\[\[[^]]*\.(png|jpe?g|webp|gif)|!\[[^]]*\]\([^)]*\.(png|jpe?g|webp|gif)' --include='*.md' . | sort -t: -k2 -rn | head -15 | cut -d: -f1 | sed 's|^\./||' > $S/run/imgnotes.txt)

@@ -3,6 +3,11 @@
 # same checkpoints (t=5/12/40 s, idle CPU t=280–340 s, t=340 s) and the same mem.sh/cpu.sh, against
 # the WP-8 scratch daemon; the workload is driver.sh (S3 picks opened through `cv uri`).
 # Needs the scratch env (CV_VAULT, CV_SOCKET, XDG_STATE_HOME, …) exported and CV_BIN/EDITOR_BIN set.
+for _a in "$@"; do case "$_a" in --help|-h)
+  printf 'usage: %s %s\n' "${0##*/}" '<label>'
+  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+  exit 0;; esac; done
+
 set -u
 label=$1; S=${SCRATCH:?SCRATCH unset}; title=crucible-vault
 here=$(dirname "$(readlink -f "$0")"); g=<code-root>/crucible-vault/runs/spike/gui-rss

@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # run.sh <label> <title-substring> <cmd...>  — one scripted measurement run (~6 min)
+for _a in "$@"; do case "$_a" in --help|-h)
+  printf 'usage: %s %s\n' "${0##*/}" '<label> <title-substring> <cmd...>'
+  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+  exit 0;; esac; done
+
 set -u
 label=$1; title=$2; shift 2
 here=$(dirname "$(readlink -f "$0")"); out=$here/results; mkdir -p $out

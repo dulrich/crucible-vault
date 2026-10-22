@@ -183,6 +183,11 @@ fn check(name: &str, got: &str, want: &str) {
 }
 
 fn main() {
+    // Help is answered before anything is created or read.
+    if std::env::args().skip(1).any(|a| a == "--help" || a == "-h") {
+        println!("usage: reading-select-spike\n\nHeadless selection/copy harness for the Reading view spike (writes PNGs to ./out). Takes no arguments.");
+        return;
+    }
     std::fs::create_dir_all("out").unwrap();
     let mut h = Harness::new();
     h.events(&[]);

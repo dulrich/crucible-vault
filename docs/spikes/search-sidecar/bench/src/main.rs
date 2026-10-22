@@ -46,6 +46,11 @@ fn par<T: Send>(n: usize, threads: usize, f: impl Fn(std::ops::Range<usize>) -> 
 }
 
 fn main() {
+    // Help is answered before anything is created or read.
+    if std::env::args().skip(1).any(|a| a == "--help" || a == "-h") {
+        println!("usage: search-bench <db-path> [n-queries]\n\nBrute-force vector search benchmark over the `chunks` table of a search index (opened read-only). n-queries defaults to 200.");
+        return;
+    }
     let db = std::env::args().nth(1).expect("db path");
     let nq: usize = std::env::args().nth(2).map(|s| s.parse().unwrap()).unwrap_or(200);
     let t0 = Instant::now();

@@ -27,6 +27,12 @@ fn fake(dir: &std::path::Path) -> anyhow::Result<editor::daemon::FakeDaemon> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Help wins over every other argument (`--fake --help` must not seed a vault in `./--help`)
+    // and is answered before the arena cap, the GPU defaults or the tracing subscriber.
+    if std::env::args().skip(1).any(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}");
+        return Ok(());
+    }
     // Arena cap + glibc FFI live in `cv-malloc` (plan memory-instrumentation-and-reduction WP-M1).
     cv_malloc::cap_arenas();
     gpu_defaults();
@@ -61,10 +67,6 @@ fn main() -> anyhow::Result<()> {
         [flag, dir] if flag == "--fake" => {
             connector = None;
             Some(Arc::new(fake(std::path::Path::new(dir))?))
-        }
-        [flag] if flag == "-h" || flag == "--help" => {
-            println!("{USAGE}");
-            return Ok(());
         }
         _ => return Err(anyhow::anyhow!(USAGE)),
     };

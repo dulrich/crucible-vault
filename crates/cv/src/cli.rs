@@ -23,11 +23,15 @@ pub fn usage() -> String {
 
 /// Runs the CLI with `args` (without argv[0]); returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
+    // Help wins over every command (`cv uri --help` must not spool "--help", `cv daemon --help`
+    // must not start a daemon) and is answered before any config, socket or spool is touched.
+    if args.first().map(String::as_str) == Some("help")
+        || args.iter().any(|a| a == "--help" || a == "-h")
+    {
+        print!("{}", usage());
+        return 0;
+    }
     match args.first().map(String::as_str) {
-        Some("--help" | "-h" | "help") => {
-            print!("{}", usage());
-            0
-        }
         Some("daemon") if args.len() == 1 => report(cmd_daemon()),
         Some("uri") if args.len() == 2 => report(Config::from_env().and_then(|c| {
             let r = uri_command(&c, &args[1])?;

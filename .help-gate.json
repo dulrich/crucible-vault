@@ -1,0 +1,35 @@
+{
+  "entrypoints": [
+    {
+      "path": "crates/cv/src/main.rs",
+      "subcommands": [
+        "daemon",
+        "uri",
+        "status",
+        "signals",
+        "jobs",
+        "intake",
+        "run"
+      ]
+    },
+    {
+      "path": "crates/editor/src/main.rs",
+      "subcommands": [
+        "--fake"
+      ]
+    },
+    {
+      "path": "docs/spikes/reading-select/src/main.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/reading-select/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/search-sidecar/bench/src/main.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/search-sidecar/bench/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/source-scroll/src/main.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/source-scroll/Cargo.toml"
+    }
+  ],
+  "exclude": []
+}
