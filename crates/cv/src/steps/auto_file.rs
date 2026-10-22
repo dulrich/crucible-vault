@@ -20,7 +20,10 @@
 //!    as a child (move + tags + lint); no match leaves the clip in place.
 //!
 //! The step never moves the clip itself. Outcome vars: `action` (`replaced|merged|duplicate|new|
-//! missing`), `target`, `kind`, `child_job_id`.
+//! missing`), `target`, `kind`, `child_job_id`. A clip that already sits in its kind's folder with
+//! all of the kind's tags spawns no child and reports `kind` with `filed = "already"` (`action`
+//! unchanged). A matched `[[blog]]` row's `publication` is written to the clip when absent, before
+//! the child is spawned.
 
 use cv_actions::pipelines::SourcesConfig;
 use cv_actions::{ConfigSet, StepKind};
@@ -29,7 +32,7 @@ use cv_note::{FrontmatterDoc, JsValue};
 use serde::Serialize;
 
 use super::file::kind_def;
-use super::params::get_str_list;
+use super::params::{expand, get_str, get_str_list};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
 
@@ -61,6 +64,8 @@ struct Vars {
     target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filed: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     child_job_id: Option<String>,
 }
@@ -162,6 +167,9 @@ pub(in crate::steps) struct HostRow {
     pub(in crate::steps) kind: Option<String>,
     /// Paywall markers of the matched rows.
     pub(in crate::steps) markers: Vec<String>,
+    /// The matched `[[blog]]` row's `publication` (`short`, else `name`; plan
+    /// intake-round-2-clean-dedupe-reading WP-5b).
+    pub(in crate::steps) publication: Option<String>,
 }
 
 /// Matches the clip host against the `[[newsletter]]` rows' linked blog host and the `[[blog]]`
@@ -175,6 +183,7 @@ pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<
         blog: Some((blog.name.clone(), blog.link.trim().to_owned())),
         kind: Some("blog".into()),
         markers: blog.paywall_markers.clone(),
+        publication: Some(blog.publication().to_owned()),
     };
     if let Some(n) = sources
         .newsletter
@@ -271,6 +280,51 @@ fn trash(ctx: &mut StepCtx<'_>, path: &str, hash: cv_vault::ContentHash) -> Resu
     Ok(())
 }
 
+/// Sets `publication` on the clip when absent (one CAS modify; never overwrites).
+fn set_publication(ctx: &mut StepCtx<'_>, path: &str, p: &str) -> Result<(), StepError> {
+    ctx.modify(path, |old| {
+        let mut d = FrontmatterDoc::new(old);
+        if d.get("publication").ok().flatten().is_some() {
+            return Ok(None);
+        }
+        d.insert_after("author", "publication", &JsValue::Str(p.to_owned()))?;
+        Ok(Some(d.into_text()))
+    })?;
+    Ok(())
+}
+
+/// Whether the clip already sits in `kind`'s folder (expanded as `file-as-kind`'s `move` does)
+/// and carries all of the kind's tags, so filing it would change nothing.
+fn already_filed(ctx: &StepCtx<'_>, path: &str, kind: &str) -> Result<bool, StepError> {
+    let def = kind_def(ctx.config, kind).map_err(StepError::failed)?;
+    let Some(folder) = get_str(def, "folder").map_err(StepError::failed)? else {
+        return Ok(false);
+    };
+    let folder = expand(ctx, &folder)?;
+    if cv_text::vpath::parent(path) != folder.trim().trim_matches('/') {
+        return Ok(false);
+    }
+    let want = get_str_list(def, "tags").map_err(StepError::failed)?;
+    let Some((bytes, _)) = ctx.read(path)? else {
+        return Ok(false);
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(false);
+    };
+    let have: Vec<String> = js_list(
+        FrontmatterDoc::new(text.as_str())
+            .get("tags")
+            .ok()
+            .flatten(),
+    )
+    .iter()
+    .map(|t| t.trim().trim_start_matches('#').to_owned())
+    .collect();
+    Ok(want
+        .iter()
+        .all(|w| have.iter().any(|h| h == w.trim().trim_start_matches('#'))))
+}
+
 /// Executes the step.
 fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
@@ -347,7 +401,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         body_md: &body,
         access: None,
         complete,
-        publication: None,
+        publication: row.as_ref().and_then(|r| r.publication.as_deref()),
         origin: Origin::Clip,
     };
     let resolved = supersede::resolve(ctx, &idx, &sup_cfg, &inc)?;
@@ -424,6 +478,15 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         .is_some_and(|p| p.choices.contains(&kind));
     if !allowed {
         tracing::info!(%kind, "auto_file: kind is not a file-as-kind choice; clip left in place");
+        out.set_vars(&vars);
+        return Ok(out);
+    }
+    if let Some(p) = row.as_ref().and_then(|r| r.publication.as_deref()) {
+        set_publication(ctx, &clip_path, p)?;
+    }
+    if already_filed(ctx, &clip_path, &kind)? {
+        vars.filed = Some("already");
+        vars.kind = Some(kind);
         out.set_vars(&vars);
         return Ok(out);
     }

@@ -643,6 +643,29 @@ fn no_example_starter_fires_on_a_rename_source_deleted() {
         1,
         EVENTED,
     );
+    load_examples(&r);
+    for p in [
+        "Clippings/x.md",
+        "inbox/x.md",
+        "daily/x.md",
+        "_yt_metadata/x.md",
+        "x.md",
+    ] {
+        for o in [Origin::Daemon, Origin::External] {
+            assert!(
+                events::on_change(&r, p, ChangeKind::Deleted, o).is_empty(),
+                "{p}"
+            );
+        }
+    }
+    // Sanity: the same config does fire on a create in Clippings.
+    assert!(
+        !events::on_change(&r, "Clippings/y.md", ChangeKind::Created, Origin::Daemon).is_empty()
+    );
+}
+
+/// Loads every `config/examples/*.toml` into `r`.
+fn load_examples(r: &Runner) {
     let mut c = ConfigSet::new();
     let files: BTreeMap<String, Option<String>> = [
         (
@@ -684,22 +707,101 @@ fn no_example_starter_fires_on_a_rename_source_deleted() {
     c.reload(&files, &crate::steps::validate);
     assert!(c.errors().is_empty(), "{:?}", c.errors());
     r.set_config(c);
-    for p in [
-        "Clippings/x.md",
-        "inbox/x.md",
-        "daily/x.md",
-        "_yt_metadata/x.md",
-        "x.md",
-    ] {
-        for o in [Origin::Daemon, Origin::External] {
-            assert!(
-                events::on_change(&r, p, ChangeKind::Deleted, o).is_empty(),
-                "{p}"
-            );
-        }
+}
+
+/// Writes `files` (path, text) under the fixture root and builds its `index.db` so tag selectors resolve.
+fn index_notes(f: &Fixture, files: &[(&str, &str)]) {
+    let root = f._dir.path();
+    for (p, t) in files {
+        let abs = root.join(p);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(abs, t).unwrap();
     }
-    // Sanity: the same config does fire on a create in Clippings.
-    assert!(
-        !events::on_change(&r, "Clippings/y.md", ChangeKind::Created, Origin::Daemon).is_empty()
+    cv_index::Index::create(root, &root.join("index.db")).unwrap();
+}
+
+/// Plan intake-round-2-clean-dedupe-reading WP-5b: the example `clip-images` fires on a
+/// `clippings`-tagged note in a day folder, once (not twice) for one in `Clippings/`, and
+/// `clip-auto-file` has no event starter.
+#[test]
+fn clip_images_tag_starter_fires_once_and_clip_auto_file_never() {
+    use cv_protocol::{ChangeKind, Origin};
+    let f = fixture();
+    let tagged = "---\ntags:\n  - clippings\n---\nbody\n";
+    index_notes(
+        &f,
+        &[
+            ("Clippings/a.md", tagged),
+            ("daily/day/2026-10-21/b.md", tagged),
+            (
+                "daily/day/2026-10-21/c.md",
+                "---\ntags:\n  - other\n---\nbody\n",
+            ),
+        ],
     );
+    let r = runner(
+        &f,
+        Arc::new(ProductionExecutor),
+        Arc::new(SystemClock),
+        1,
+        EVENTED,
+    );
+    load_examples(&r);
+    let ids = |p: &str| events::on_change(&r, p, ChangeKind::Created, Origin::Daemon);
+    let jobs = |ids: &[String]| -> Vec<String> {
+        ids.iter()
+            .map(|id| {
+                f.state
+                    .lock()
+                    .unwrap()
+                    .job(id)
+                    .unwrap()
+                    .unwrap()
+                    .dedupe_key
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+    // Matches both starters, one `clip-images` run (plus the folder-only `x-discover`).
+    let both = jobs(&ids("Clippings/a.md"));
+    assert_eq!(
+        both.iter().filter(|a| a.contains("clip-images::")).count(),
+        1
+    );
+    assert!(both.iter().all(|a| !a.contains("clip-auto-file")));
+    let day = jobs(&ids("daily/day/2026-10-21/b.md"));
+    assert_eq!(
+        day.iter().filter(|a| a.contains("clip-images::")).count(),
+        1
+    );
+    assert!(jobs(&ids("daily/day/2026-10-21/c.md")).is_empty());
+}
+
+/// WP-5b no-event-loop proof: `file-as-kind`'s daemon move arrives as `Renamed` (WP-5a:
+/// `crates/cv-vault/src/watcher.rs` move-echo classification, bridge `file_changes`), so the
+/// `["created"]` tag starter does not re-fire `clip-images` for the filed note, while a genuine
+/// create still does.
+#[test]
+fn clip_images_tag_starter_ignores_the_daemon_move_that_files_the_clip() {
+    use cv_protocol::{ChangeKind, Origin};
+    let f = fixture();
+    index_notes(
+        &f,
+        &[(
+            "daily/day/2026-10-21/f.md",
+            "---\ntags:\n  - clippings\n  - fanfic\n---\nbody\n",
+        )],
+    );
+    let r = runner(
+        &f,
+        Arc::new(ProductionExecutor),
+        Arc::new(SystemClock),
+        1,
+        EVENTED,
+    );
+    load_examples(&r);
+    let p = "daily/day/2026-10-21/f.md";
+    assert!(events::on_change(&r, p, ChangeKind::Renamed, Origin::Daemon).is_empty());
+    assert!(events::on_change(&r, p, ChangeKind::Deleted, Origin::Daemon).is_empty());
+    assert!(!events::on_change(&r, p, ChangeKind::Created, Origin::Daemon).is_empty());
 }

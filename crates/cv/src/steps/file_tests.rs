@@ -308,3 +308,18 @@ fn copy_set_props_upsert_tags_are_idempotent() {
             .is_empty()
     );
 }
+
+/// WP-5b (audit E1): `file-as-kind` on a note already at its destination succeeds and moves
+/// nothing (the `dst == src` guard).
+#[test]
+fn file_as_kind_on_a_note_already_at_its_destination_is_a_noop() {
+    let p = format!("daily/day/{}/n.md", today());
+    let src = "---\ntags: [news]\n---\nbody\n";
+    let env = example_env(&[(p.as_str(), src)]);
+    let (open, vars) = env
+        .run_action("file-as-kind", json!({"kind": "news"}), active(&p))
+        .expect("same-path move is not an error");
+    assert_eq!(open.as_deref(), Some(p.as_str()));
+    assert_eq!(vars["moved_path"], json!(p));
+    assert_eq!(vars["moved_from"], json!(p));
+}

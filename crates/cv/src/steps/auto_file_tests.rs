@@ -427,3 +427,133 @@ fn kinds_hosts_key_parses_and_rejects_non_strings() {
     c2.reload(&files, &crate::steps::validate);
     assert!(crate::steps::validate(&step, &c2).is_err());
 }
+
+fn day_clip_path(name: &str) -> String {
+    format!("daily/day/{}/{name}", crate::steps::testkit::today())
+}
+
+/// WP-5b: a clip already in its kind's folder with the kind's tags is not filed again, and a
+/// re-run changes nothing (no child, no trash, identical bytes).
+#[test]
+fn clip_already_in_its_kind_folder_is_a_noop_and_rerun_is_stable() {
+    let p = day_clip_path("Ch1.md");
+    let clip = doc(
+        "source: https://www.fanfiction.net/s/1\ntags:\n  - clippings\n  - fanfic\n",
+        &words("k", 0, 30),
+    );
+    let e = world(&[(p.as_str(), clip.clone())]);
+    for _ in 0..2 {
+        let rec = Rec::default();
+        let o = run(&e, &p, &rec);
+        assert!(rec.kinds().is_empty(), "no child");
+        assert_eq!(var(&o, "kind"), Some("fanfic"));
+        assert_eq!(var(&o, "filed"), Some("already"));
+        assert_eq!(var(&o, "action"), Some("new"));
+        assert!(var(&o, "child_job_id").is_none());
+        assert!(!trashed(&e));
+        assert_eq!(e.read(&p).as_deref(), Some(clip.as_str()));
+    }
+}
+
+/// WP-5b: in the folder but missing a kind tag (or tagged but elsewhere) still files.
+#[test]
+fn clip_in_folder_without_the_kind_tag_or_tagged_elsewhere_still_files() {
+    let p = day_clip_path("Ch2.md");
+    let untagged = doc(
+        "source: https://www.fanfiction.net/s/2\ntags:\n  - clippings\n",
+        &words("m", 0, 30),
+    );
+    let e = world(&[(p.as_str(), untagged)]);
+    let rec = Rec::default();
+    let o = run(&e, &p, &rec);
+    assert_eq!(rec.kinds(), ["file-as-kind:fanfic"]);
+    assert!(var(&o, "filed").is_none());
+    let tagged = doc(
+        "source: https://www.fanfiction.net/s/3\ntags:\n  - clippings\n  - fanfic\n",
+        &words("n", 0, 30),
+    );
+    let e = world(&[("Clippings/Ch3.md", tagged)]);
+    let rec = Rec::default();
+    run(&e, "Clippings/Ch3.md", &rec);
+    assert_eq!(rec.kinds(), ["file-as-kind:fanfic"]);
+}
+
+/// WP-5b: a blog-row match writes `publication` once (never overwrites); Works and hosts-only
+/// matches get none.
+#[test]
+fn host_row_match_sets_publication_only_when_absent() {
+    let body = words("p", 0, 30);
+    let clip = doc("source: https://plain.example/p/1\nauthor: Ann\n", &body);
+    let e = world(&[("Clippings/A.md", clip)]);
+    let rec = Rec::default();
+    run(&e, "Clippings/A.md", &rec);
+    assert_eq!(rec.kinds(), ["file-as-kind:blog"]);
+    let t = e.read("Clippings/A.md").unwrap();
+    assert!(t.contains("author: Ann\npublication: Plain Blog\n"), "{t}");
+    // Existing value kept; a re-run is byte-stable.
+    let have = doc(
+        "source: https://plain.example/p/2\npublication: \"Mine\"\n",
+        &body,
+    );
+    let e = world(&[("Clippings/B.md", have.clone())]);
+    run(&e, "Clippings/B.md", &Rec::default());
+    assert_eq!(e.read("Clippings/B.md").as_deref(), Some(have.as_str()));
+    // Works match (no host row) and hosts-only match: no publication.
+    let w = work(None, &["https://saga.example/"], &["fanfic"]);
+    let c = doc("source: https://saga.example/ch1\n", &body);
+    let e = world(&[("core/works/Saga.md", w), ("Clippings/C.md", c)]);
+    run(&e, "Clippings/C.md", &Rec::default());
+    assert!(!e.read("Clippings/C.md").unwrap().contains("publication"));
+    let h = doc("source: https://www.fanfiction.net/s/9\n", &body);
+    let e = world(&[("Clippings/D.md", h)]);
+    run(&e, "Clippings/D.md", &Rec::default());
+    assert!(!e.read("Clippings/D.md").unwrap().contains("publication"));
+}
+
+/// WP-5b acceptance: a `clippings`-tagged clip created in a day folder whose source matches a
+/// fanfic Work spawns `file-as-kind { fanfic }`, and that child files it with no move error.
+#[test]
+fn fanfic_clip_in_a_day_folder_files_without_a_move_error() {
+    use serde_json::json;
+    let p = day_clip_path("Ch9.md");
+    let w = work(None, &["https://saga.example/"], &["fanfic"]);
+    let clip = doc(
+        "source: https://saga.example/ch9\ntags:\n  - clippings\n",
+        &words("f", 0, 30),
+    );
+    let e = world(&[("core/works/Saga.md", w), (p.as_str(), clip)]);
+    let rec = Rec::default();
+    run(&e, &p, &rec);
+    assert_eq!(rec.kinds(), ["file-as-kind:fanfic"]);
+    let (open, vars) = e
+        .run_action("file-as-kind", json!({"kind": "fanfic"}), active(&p))
+        .expect("child files with no move error");
+    assert_eq!(open.as_deref(), Some(p.as_str()));
+    assert_eq!(vars["moved_path"], json!(p));
+    let t = e.read(&p).unwrap();
+    assert!(t.contains("fanfic"), "{t}");
+    // Now filed in place: a second auto_file run is the no-op.
+    let rec = Rec::default();
+    let o = run(&e, &p, &rec);
+    assert!(rec.kinds().is_empty());
+    assert_eq!(var(&o, "filed"), Some("already"));
+}
+
+/// WP-5b: the tag starter lives on `clip-images` next to the folder starter.
+#[test]
+fn clip_images_has_folder_and_tag_starters() {
+    use cv_actions::Starter;
+    let c = example_config();
+    let images = c.armed("clip-images").expect("armed");
+    let sels: Vec<(Option<&str>, Option<&str>)> = images
+        .starters
+        .iter()
+        .filter_map(|s| match s {
+            Starter::Event { selector, .. } => {
+                Some((selector.folder.as_deref(), selector.tag.as_deref()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sels, [(Some("Clippings"), None), (None, Some("clippings"))]);
+}

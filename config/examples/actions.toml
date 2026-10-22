@@ -335,6 +335,7 @@ label = "Clip: localize + describe images"
 group = "Ingest"
 starters = [
   { type = "event", kinds = ["created"], origin = "any", selector = { folder = "Clippings" } },
+  { type = "event", kinds = ["created"], origin = "any", selector = { tag = "clippings" } },
 ]
 [[action.steps]]
 type = "localize"
