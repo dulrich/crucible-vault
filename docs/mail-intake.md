@@ -74,6 +74,16 @@ Migration `0002-intake-followups` adds the rows the 2026-10-21 mail dump needed 
 - **Merge** (`dup_merged`, `dup_marked`, `dup_other`, `dup_distinct`, `dup_conflict`): a mail note whose canonical identity now matches a `via: rss` note is resolved against it by the supersede engine, and **only mail and RSS twins are merged**. A match with a clip or any other note is `dup_other` and untouched. The mail note moves to `.trash/` (recoverable) only when it is redundant, by the same rule as clip filing: the RSS note was replaced by the fuller mail body, or it was kept and already contains the mail body (containment at or above `[supersede] threshold_percent`). Otherwise both stay and the mail note gets `duplicate-of: [[<rss note>]]`. Before the trash, every tracker row pointing at the mail note is re-pointed to the surviving note and the survivor's rows are finalized on its resolved body, so an interrupted run never leaves a row pointing at a missing note and a rerun finishes the pair.
 - **Publication** (`publication_backfilled`, `publication_no_row`, `publication_conflict`): each note linked from a tracker row and lacking `publication` gets its source row's value, after `author`. A note whose rows match no source row counts `publication_no_row`.
 
+**Round 9 phases (plan `round-9-feedback-todos` WP-2).** The reconcile also runs:
+
+- **Description repair** (`mail_description_repaired`): when the re-clean changes a body, `description` is recomputed from the cleaned body (its first 40 words, as capture does); a `description` that carries CSS (an `@media`/`@import`/`@font-face`/`@keyframes` at-rule, `!important`, or a `{ property: … }` block) is recomputed even when the body is already clean. Any other description is left.
+- **RSS origin** (merge): a note with no `via: email` that a `blog` tracker row points at (pre-D25 RSS notes have no `via`) now counts as the RSS twin of a mail note.
+- **Forum re-key** (`forum_rekeyed`, `forum_rekey_conflict`): a forum post `source` (`…/threads/…#post-<P>`) whose stored `post-id` is still the page-level key gets `https://<host>/posts/<P>`.
+- **Spurious duplicate-of** (`dup_of_removed`, `dup_of_kept`, `dup_of_conflict`): removed only when the note and its target shared the old page key, share no identity after the re-key, and have no content match; every other `duplicate-of` stays.
+- **Fanfic publication** (`fanfic_publication_backfilled`, `fanfic_publication_no_work`, `fanfic_publication_conflict`): a `fanfic`-tagged note without `publication` gets the matched Work's `title` (the `auto_file` Works match).
+
+The deploy migration `0004-round-9-identity-repair` runs the reconcile once, then the localize folder backfills; a note excluded from the backfill before escaped-paren image URLs were matched (`\(`/`\)` in a remote image URL) gets one retry, every other excluded note stays excluded.
+
 The historical same-id duplicates that are not a mail/RSS pair stay as they are. The deploy migration `0003-intake-round-2` also adds the `tag = "clippings"` starter to `clip-images` and the Author column, `maxHeight = "none"` and numeric column widths to the Reading List view, then runs the reconcile once.
 
 ## What happens to a message

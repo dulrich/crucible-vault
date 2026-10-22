@@ -23,13 +23,19 @@
 //!   core ticks by predicate (`mail_ticked`; never on a match alone). No note is ever created.
 //!   A CAS conflict on the tag write is `mail_tag_conflict` (skipped, not retried).
 //! - **C. Re-clean r2** ([`reclean`], plan intake-round-2-clean-dedupe-reading WP-6): every note
-//!   with frontmatter `via: email` has its body (the frontmatter stays byte-for-byte) put through
+//!   with frontmatter `via: email` has its body (the frontmatter stays byte-for-byte, except
+//!   `description`, below) put through
 //!   [`cv_ingest::mail::clean_body_with`], whose dimension hook decodes the header of a
 //!   localized `_attachments/…` image from the vault so small icons and avatars drop; written
 //!   (CAS) only when it changes — `mail_recleaned_r2`, `mail_clean_unchanged`,
 //!   `mail_clean_conflict` (skipped, not retried). Idempotent: a second run writes nothing.
-//!   `word-count` and `description` in the frontmatter are left as captured. (Round 1 counted
-//!   this phase as `mail_recleaned`; the var was renamed, the phase is the same one.)
+//!   `word-count` is left as captured. (Round 1 counted this phase as `mail_recleaned`; the var
+//!   was renamed, the phase is the same one.) Plan round-9-feedback-todos WP-2 (audit M4): when
+//!   the body changes, `description` is recomputed from the cleaned body as capture does; and,
+//!   independently, a `description` that carries CSS ([`has_css`]) is recomputed from the
+//!   current body even when the body is already clean (`mail_description_repaired`; a
+//!   description-only write counts `mail_clean_unchanged` for the body). Any other description
+//!   is never touched; a second run writes nothing.
 //!
 //! The round-2 repair phases (re-key, mail↔RSS merge, publication) live in
 //! [`super::reconcile_repair`].
@@ -75,6 +81,7 @@ pub(super) struct Counts {
     mail_recleaned_r2: u32,
     mail_clean_unchanged: u32,
     mail_clean_conflict: u32,
+    mail_description_repaired: u32,
 }
 
 /// Facts the earlier reconcile phases hand to the backfill phases.
@@ -395,19 +402,87 @@ pub(super) fn reclean(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Res
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
-        let Some(new) = recleaned(&text, &dims) else {
+        let body_new = recleaned(&text, &dims);
+        let base = body_new.as_deref().unwrap_or(&text);
+        let desc_new = redescribed(base, body_new.is_some());
+        let Some(new) = desc_new.clone().or(body_new.clone()) else {
             c.mail_clean_unchanged += 1;
             continue;
         };
-        if sh.dry {
+        let (body_changed, desc_changed) = (body_new.is_some(), desc_new.is_some());
+        if !sh.dry {
+            match ctx.write(&path, new.into_bytes(), Some(hash)) {
+                Ok(_) => {}
+                Err(e) if is_conflict(&e) => {
+                    c.mail_clean_conflict += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if body_changed {
             c.mail_recleaned_r2 += 1;
-            continue;
+        } else {
+            c.mail_clean_unchanged += 1;
         }
-        match ctx.write(&path, new.into_bytes(), Some(hash)) {
-            Ok(_) => c.mail_recleaned_r2 += 1,
-            Err(e) if is_conflict(&e) => c.mail_clean_conflict += 1,
-            Err(e) => return Err(e),
-        }
+        c.mail_description_repaired += u32::from(desc_changed);
     }
     Ok(())
+}
+
+/// Whether a captured `description` carries CSS (plan round-9-feedback-todos WP-2, audit M4): an
+/// at-rule (`@media`, `@import`, `@font-face`, `@keyframes`), `!important`, or a declaration
+/// block — a `{` … `}` whose inside starts with a lowercase property name (letters and `-`)
+/// followed by `:`. Prose with braces (`{name}`, `{ x }`) does not match.
+pub(super) fn has_css(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    if [
+        "@media",
+        "@import",
+        "@font-face",
+        "@keyframes",
+        "!important",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
+    {
+        return true;
+    }
+    let mut rest = s;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            return false;
+        };
+        let inner = &after[..close];
+        if let Some((prop, _)) = inner.split_once(':') {
+            let prop = prop.trim();
+            if !prop.is_empty() && prop.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
+                return true;
+            }
+        }
+        rest = &after[close + 1..];
+    }
+    false
+}
+
+/// `text` with its `description` recomputed from its body the way mail capture does
+/// ([`super::mail::mail_description`]) — when `body_changed` (the re-clean rewrote the body), or
+/// when the current description carries CSS ([`has_css`]). `None` when the note has no
+/// `description` or it already holds; a description that is neither is never touched.
+pub(super) fn redescribed(text: &str, body_changed: bool) -> Option<String> {
+    let mut doc = FrontmatterDoc::new(text);
+    let current = match doc.get("description") {
+        Ok(Some(JsValue::Str(s))) => s,
+        _ => return None,
+    };
+    if !body_changed && !has_css(&current) {
+        return None;
+    }
+    let fresh = super::mail::mail_description(doc.body());
+    if fresh == current {
+        return None;
+    }
+    doc.set("description", &JsValue::Str(fresh)).ok()?;
+    Some(doc.into_text())
 }

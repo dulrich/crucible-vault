@@ -180,6 +180,16 @@ struct NoteRefs<'a> {
     publication: Option<&'a str>,
 }
 
+/// A mail note's captured `description`: the cleaned body's first 40 words (reconcile's
+/// description repair recomputes it the same way).
+pub(crate) fn mail_description(body_md: &str) -> String {
+    body_md
+        .split_whitespace()
+        .take(40)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The captured note's text (the filed-blog frontmatter order, plus `via` and `message-id`).
 fn captured_note(
     post: &MailPost,
@@ -215,12 +225,10 @@ fn captured_note(
         None => "published:".into(),
     });
     fm.push(format!("created: {created}"));
-    let desc: String = body_md
-        .split_whitespace()
-        .take(40)
-        .collect::<Vec<_>>()
-        .join(" ");
-    fm.push(format!("description: {}", json_string(&desc)));
+    fm.push(format!(
+        "description: {}",
+        json_string(&mail_description(body_md))
+    ));
     fm.push(format!("word-count: {words}"));
     fm.push(format!("complete: {complete}"));
     fm.push("via: email".into());

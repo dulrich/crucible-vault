@@ -11,6 +11,36 @@ use super::params::Params;
 /// localize (audit M2 progress invariant: never re-selected, so repeated runs reach new notes).
 pub const BACKFILL_KIND: &str = "localize_backfill";
 
+/// The `ignored_ids` kind recording that a [`BACKFILL_KIND`]-excluded note has had its one
+/// escaped-paren retry (plan round-9-feedback-todos WP-2, audit M1). Every exclusion made from
+/// this round on records it too, so only exclusions older than the escaped-paren matcher retry.
+pub const RETRY_KIND: &str = "localize_backfill_retry";
+
+/// Whether `text` has a remote markdown image whose URL carries a backslash-escaped parenthesis
+/// (`![](https://h/a\(1\).png)`): the URL shape the reference regexes truncated before WP-1.
+pub(crate) fn has_escaped_paren_image(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(i) = rest.find("](http") {
+        let line_start = rest[..i].rfind('\n').map_or(0, |n| n + 1);
+        let is_image = rest[line_start..i].contains("![");
+        let url = &rest[i + 2..];
+        let mut it = url.chars();
+        while let Some(c) = it.next() {
+            match c {
+                '\\' => {
+                    if matches!(it.next(), Some('(' | ')')) && is_image {
+                        return true;
+                    }
+                }
+                ')' | '\n' | ' ' | '\t' => break,
+                _ => {}
+            }
+        }
+        rest = &rest[i + 2..];
+    }
+    false
+}
+
 /// Outcome vars of a folder-scope `localize` backfill.
 #[derive(Serialize)]
 struct FolderVars {
@@ -38,21 +68,42 @@ pub(super) fn execute_folder(
     let files = super::super::util::md_files_under(ctx, folder);
     let scanned = files.len() as u64;
     let mut candidates = Vec::new();
+    let state_err = |e: cv_state::StateError| StepError::failed(format!("localize: state: {e}"));
     for f in files {
-        if ctx
+        let excluded = ctx
             .state()
             .is_ignored(BACKFILL_KIND, &f)
-            .map_err(|e| StepError::failed(format!("localize: state: {e}")))?
-        {
+            .map_err(state_err)?;
+        if excluded && ctx.state().is_ignored(RETRY_KIND, &f).map_err(state_err)? {
             continue;
         }
         let Some((bytes, _)) = ctx.read(&f)? else {
             continue;
         };
-        if std::str::from_utf8(&bytes).is_ok_and(has_remote_image_refs) {
-            candidates.push(f);
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if !has_remote_image_refs(text) {
+            continue;
         }
+        // Plan round-9-feedback-todos WP-2 (audit M1): a note excluded before escaped-paren image
+        // URLs were matched gets one retry; when it is excluded again, [`RETRY_KIND`] records the
+        // spent retry so it never loops. Every other excluded note stays skipped.
+        if excluded && !has_escaped_paren_image(text) {
+            continue;
+        }
+        candidates.push(f);
     }
+    // Records a settled or failed note: excluded, and its escaped-paren retry spent (an exclusion
+    // made with the WP-1 matcher has already seen the unescaped URL).
+    let exclude = |ctx: &StepCtx<'_>, f: &str, r: &str| -> Result<(), StepError> {
+        let mut db = ctx.state();
+        db.insert_ignored_id(BACKFILL_KIND, f, r, crate::now_ms())
+            .map_err(state_err)?;
+        db.insert_ignored_id(RETRY_KIND, f, "retry spent", crate::now_ms())
+            .map_err(state_err)?;
+        Ok(())
+    };
     let (mut localized, mut failed, mut attempted, mut throttled) = (0_u64, 0_u64, 0_u64, 0_u64);
     let mut ineligible = 0_u64;
     let mut out = StepOutcome::default();
@@ -79,14 +130,11 @@ pub(super) fn execute_folder(
                 }
                 if left && failed_refs == 0 {
                     ineligible += 1;
-                    ctx.state()
-                        .insert_ignored_id(
-                            BACKFILL_KIND,
-                            f,
-                            "settled: remaining refs are not eligible attachments",
-                            crate::now_ms(),
-                        )
-                        .map_err(|e| StepError::failed(format!("localize: state: {e}")))?;
+                    exclude(
+                        ctx,
+                        f,
+                        "settled: remaining refs are not eligible attachments",
+                    )?;
                     continue;
                 }
                 left.then(|| format!("{failed_refs} download(s) failed; refs remain"))
@@ -108,9 +156,7 @@ pub(super) fn execute_folder(
             Some(r) => {
                 failed += 1;
                 let r: String = r.chars().take(200).collect();
-                ctx.state()
-                    .insert_ignored_id(BACKFILL_KIND, f, &r, crate::now_ms())
-                    .map_err(|e| StepError::failed(format!("localize: state: {e}")))?;
+                exclude(ctx, f, &r)?;
             }
         }
     }

@@ -14,7 +14,7 @@ use crate::steps::testkit::{StepEnv, config_of};
 use crate::steps::{StepOutcome, execute};
 
 const VID: &str = "dQw4w9WgXcQ";
-const KINDS: &str = "[kinds.blog]\ntags = [\"blog\"]\nfolder = \"Letters\"\n[kinds.news]\ntags = [\"news\"]\nfolder = \"News\"\n[kinds.post]\ncleanup_transcript = true\n";
+const KINDS: &str = "[kinds.fanfic]\ntags = [\"fanfic\"]\nfolder = \"Fanfic\"\n[kinds.blog]\ntags = [\"blog\"]\nfolder = \"Letters\"\n[kinds.news]\ntags = [\"news\"]\nfolder = \"News\"\n[kinds.post]\ncleanup_transcript = true\n";
 const CAPTURES: &str = "[periods.day]\nfolder = \"daily\"\nformat = \"YYYY-MM-DD\"\n";
 /// Newsbit: an explicit row for the sender the first run did not know.
 const HEATMAP: &str = "[[newsletter]]\nname = \"Newsbit\"\nfrom = [\"hello@plain.example\"]\nkind = \"news\"\ntags = [\"extra\"]\n";
@@ -792,4 +792,195 @@ fn reclean_r2_drops_a_small_localized_image_by_its_decoded_size() {
             .contains("Real prose paragraph one.")
     );
     assert_eq!(n(&w.reconcile(false), "mail_recleaned_r2"), 0);
+}
+
+// ---- round-9 repair (plan round-9-feedback-todos WP-2) ----------------------------------------
+
+const PAGE: &str = "https://forum.example/threads/saga.1/page-2";
+
+fn identity_vars(o: &StepOutcome) -> Vec<(String, Value)> {
+    let names = serde_json::to_value(super::reconcile_identity::Counts::default()).unwrap();
+    names
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| (k.clone(), o.vars[k].clone()))
+        .collect()
+}
+
+fn chapter(post: u32, dup: Option<&str>, body: &str) -> String {
+    let dup = dup.map_or(String::new(), |d| format!("duplicate-of: \"[[{d}]]\"\n"));
+    format!(
+        "---\ntitle: \"Ch {post}\"\nsource: {PAGE}#post-{post}\npost-id: {PAGE}\n{dup}---\n\n{body}\n"
+    )
+}
+
+#[test]
+fn forum_chapters_are_rekeyed_and_only_the_spurious_duplicate_of_goes() {
+    let other = "Entirely different words appear here describing harbors lighthouses and migrating geese over cold northern water at dawn.";
+    let w = world(&[
+        ("Fic/b.md", chapter(12, None, LONG)),
+        ("Fic/a.md", chapter(11, Some("Fic/b"), other)),
+        // Same page, but the content matches: the marker is real evidence and stays.
+        ("Fic/c.md", chapter(13, Some("Fic/b"), LONG)),
+        // A non-forum duplicate-of is never touched.
+        (
+            "Fic/d.md",
+            format!("---\nsource: {ZED}\nduplicate-of: \"[[Fic/b]]\"\n---\n\n{other}\n"),
+        ),
+        // A stored post-id that is not the obsolete page key is left alone.
+        (
+            "Fic/e.md",
+            format!("---\nsource: {PAGE}#post-14\npost-id: custom\n---\n\nx\n"),
+        ),
+    ]);
+    let before: Vec<String> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|f| w.env.read(&format!("Fic/{f}.md")).unwrap())
+        .collect();
+    let dry = w.reconcile(true);
+    assert_eq!(
+        (
+            n(&dry, "forum_rekeyed"),
+            n(&dry, "dup_of_removed"),
+            n(&dry, "dup_of_kept")
+        ),
+        (3, 1, 1)
+    );
+    for (f, t) in ["a", "b", "c", "d", "e"].iter().zip(&before) {
+        assert_eq!(&w.env.read(&format!("Fic/{f}.md")).unwrap(), t, "dry: {f}");
+    }
+    let real = w.reconcile(false);
+    assert_eq!(identity_vars(&dry), identity_vars(&real));
+    let a = w.env.read("Fic/a.md").unwrap();
+    assert!(
+        a.contains("post-id: https://forum.example/posts/11\n"),
+        "{a}"
+    );
+    assert!(!a.contains("duplicate-of"), "{a}");
+    assert!(w.env.read("Fic/c.md").unwrap().contains("duplicate-of"));
+    assert_eq!(w.env.read("Fic/d.md").unwrap(), before[3]);
+    assert_eq!(w.env.read("Fic/e.md").unwrap(), before[4]);
+    assert!(
+        w.env
+            .read("Fic/b.md")
+            .unwrap()
+            .contains("post-id: https://forum.example/posts/12\n")
+    );
+    let again = w.reconcile(false);
+    assert_eq!(
+        (n(&again, "forum_rekeyed"), n(&again, "dup_of_removed")),
+        (0, 0)
+    );
+}
+
+#[test]
+fn fanfic_notes_get_the_matched_work_title_once() {
+    let work = "---\ntitle: \"The Saga\"\nsource-prefix-filter: [\"https://saga.example/\"]\ntags: [\"fanfic\"]\n---\n\nA work.\n";
+    let w = world(&[
+        ("core/works/Saga.md", work.to_owned()),
+        (
+            "Fanfic/a.md",
+            "---\nsource: https://saga.example/ch1\nauthor:\n  - \"[[Ann]]\"\ntags:\n  - fanfic\n---\n\nx\n".to_owned(),
+        ),
+        (
+            "Fanfic/b.md",
+            "---\nsource: https://saga.example/ch2\npublication: Mine\ntags:\n  - fanfic\n---\n\nx\n".to_owned(),
+        ),
+        (
+            "Fanfic/c.md",
+            "---\nsource: https://elsewhere.example/1\ntags:\n  - fanfic\n---\n\nx\n".to_owned(),
+        ),
+    ]);
+    let b0 = w.env.read("Fanfic/b.md").unwrap();
+    let dry = w.reconcile(true);
+    assert_eq!(
+        (
+            n(&dry, "fanfic_publication_backfilled"),
+            n(&dry, "fanfic_publication_no_work")
+        ),
+        (1, 1)
+    );
+    let o = w.reconcile(false);
+    assert_eq!(identity_vars(&dry), identity_vars(&o));
+    let a = w.env.read("Fanfic/a.md").unwrap();
+    assert!(
+        a.contains("author:\n  - \"[[Ann]]\"\npublication: The Saga\n"),
+        "{a}"
+    );
+    assert_eq!(w.env.read("Fanfic/b.md").unwrap(), b0);
+    assert!(!w.env.read("Fanfic/c.md").unwrap().contains("publication"));
+    assert_eq!(n(&w.reconcile(false), "fanfic_publication_backfilled"), 0);
+}
+
+/// A pre-D25 RSS note carries no `via`; its `blog` tracker row makes it RSS-origin, so its mail
+/// twin merges.
+#[test]
+fn a_pre_d25_rss_note_with_a_blog_row_merges_with_its_mail_twin() {
+    let rss =
+        format!("---\ntitle: \"Slug One\"\nsource: {ZED}\ncomplete: false\n---\n\nA teaser.\n");
+    let w = zed_world(rss, mail_note(true, LONG));
+    add_row(
+        &w,
+        "blog",
+        "https://zed.substack.com/feed",
+        "z1",
+        TrackerOutcome::Note,
+        Some("Letters/rss.md"),
+    );
+    let o = w.reconcile(false);
+    assert_eq!((n(&o, "dup_merged"), n(&o, "dup_other")), (1, 0));
+    assert!(!w.env.vault().join("mailnotes/m.md").exists());
+    assert!(w.env.read("Letters/rss.md").unwrap().contains(LONG));
+}
+
+#[test]
+fn description_is_recomputed_on_reclean_and_css_only_when_it_carries_css() {
+    let css = "---\ntitle: \"T\"\ndescription: \"@media (max-width:600px){.x{display:none}} Hello\"\nvia: email\n---\n\nHello there reader.\n";
+    let plain = "---\ntitle: \"T\"\ndescription: \"My own words\"\nvia: email\n---\n\nHello there reader.\n";
+    let chrome = format!("---\ntitle: \"T\"\ndescription: \"stale\"\nvia: email\n---\n\n{CHROME}");
+    let w = world(&[
+        ("mailnotes/css.md", css.to_owned()),
+        ("mailnotes/plain.md", plain.to_owned()),
+        ("mailnotes/chrome.md", chrome),
+    ]);
+    let o = w.reconcile(false);
+    assert_eq!(
+        (
+            n(&o, "mail_description_repaired"),
+            n(&o, "mail_recleaned_r2")
+        ),
+        (2, 1)
+    );
+    let c = w.env.read("mailnotes/css.md").unwrap();
+    assert!(
+        c.contains("description: \"Hello there reader.\"\n")
+            || c.contains("description: Hello there reader.\n"),
+        "{c}"
+    );
+    assert_eq!(w.env.read("mailnotes/plain.md").unwrap(), plain);
+    let ch = w.env.read("mailnotes/chrome.md").unwrap();
+    assert!(
+        !ch.contains("stale") && ch.contains("Real prose paragraph one."),
+        "{ch}"
+    );
+    let again = w.reconcile(false);
+    assert_eq!(
+        (
+            n(&again, "mail_description_repaired"),
+            n(&again, "mail_recleaned_r2")
+        ),
+        (0, 0)
+    );
+}
+
+#[test]
+fn css_predicate_is_narrow() {
+    use super::reconcile_backfill::has_css;
+    assert!(has_css("@media screen { a { color: red } } hi"));
+    assert!(has_css(".btn{display:none} Read more"));
+    assert!(has_css("p { margin-top: 0; }"));
+    assert!(!has_css("Hello {name}, welcome { to the list }"));
+    assert!(!has_css("A note about JSON {\"Key\": 1} values"));
+    assert!(!has_css("Plain prose: no braces at all."));
 }

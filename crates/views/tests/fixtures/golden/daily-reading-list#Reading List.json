@@ -5,16 +5,22 @@
       "label": "file name"
     },
     {
+      "key": "note.publication",
+      "label": "Author"
+    },
+    {
       "key": "formula.tags",
       "label": "tags"
     },
     {
       "key": "word-count",
-      "label": "word-count"
+      "label": "word-count",
+      "width": 80.0
     },
     {
       "key": "formula.minutes",
-      "label": "minutes"
+      "label": "minutes",
+      "width": 80.0
     },
     {
       "key": "note.read",
@@ -32,7 +38,8 @@
     },
     {
       "key": "formula.unread_minutes",
-      "label": "unread_minutes"
+      "label": "unread_minutes",
+      "width": 80.0
     }
   ],
   "groups": [
@@ -44,6 +51,9 @@
               "label": "Alpha Post",
               "path": "daily/day/2026-10-01/Alpha Post.md",
               "t": "link"
+            },
+            {
+              "t": "null"
             },
             {
               "t": "text",
@@ -80,6 +90,9 @@
               "t": "link"
             },
             {
+              "t": "null"
+            },
+            {
               "t": "text",
               "v": "news"
             },
@@ -111,10 +124,14 @@
     }
   ],
   "kind": "table",
+  "max_height": "none",
   "notices": [],
   "summaries": [
     {
       "cells": [
+        {
+          "t": "null"
+        },
         {
           "t": "null"
         },

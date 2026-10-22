@@ -73,6 +73,7 @@ pub mod reconcile;
 mod reconcile_backfill;
 #[cfg(test)]
 mod reconcile_backfill_tests;
+mod reconcile_identity;
 mod reconcile_repair;
 #[cfg(test)]
 mod reconcile_tests;

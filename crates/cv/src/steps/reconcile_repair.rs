@@ -14,7 +14,8 @@
 //! - **E. Merge** (same loop, per re-keyed or already canonical note): the canonical identity is
 //!   matched in the supersede index (kept current with the re-keyed identities). **Only a
 //!   mail↔RSS pair is merged**: when every match is RSS-origin (`via: rss`, or `via: email` with
-//!   no `message-id`, i.e. an RSS note the supersede engine already rewrote) the pair goes
+//!   no `message-id`, i.e. an RSS note the supersede engine already rewrote, or — round 9 — a
+//!   note with no `via: email`/`via: rss` that a `blog` tracker row points at) the pair goes
 //!   through [`crate::supersede`]; a match with any other note (a clip, another mail note) is
 //!   `dup_other` and left untouched. The resolved pair follows `auto_file`'s containment rule
 //!   (D25 item 2): `Replaced`, or `Kept` with the mail body contained in the RSS note
@@ -71,8 +72,10 @@ fn str_of(doc: &FrontmatterDoc, key: &str) -> Option<String> {
 }
 
 /// An RSS-origin note: `via: rss`, or `via: email` with no `message-id` (an RSS note a mail
-/// replaced in place: the engine rewrites `via` but never adds a message id).
-fn is_rss_origin(text: &str) -> bool {
+/// replaced in place: the engine rewrites `via` but never adds a message id), or — plan
+/// round-9-feedback-todos WP-2, pre-D25 RSS notes carry no `via` — any other note with a `blog`
+/// tracker row (`has_blog_row`).
+fn is_rss_origin(text: &str, has_blog_row: bool) -> bool {
     let doc = FrontmatterDoc::new(text);
     match str_of(&doc, "via")
         .map(|v| v.trim().to_ascii_lowercase())
@@ -80,8 +83,18 @@ fn is_rss_origin(text: &str) -> bool {
     {
         Some("rss") => true,
         Some("email") => doc.get("message-id").ok().flatten().is_none(),
-        _ => false,
+        _ => has_blog_row,
     }
+}
+
+/// Whether a `blog` tracker row points at `path`.
+fn has_blog_row(ctx: &StepCtx<'_>, path: &str) -> Result<bool, StepError> {
+    Ok(ctx
+        .state()
+        .tracker_items_for_note(path)
+        .map_err(st)?
+        .iter()
+        .any(|r| r.source_kind == "blog"))
 }
 
 /// The note text with `source` set to `canon` (and `post-id` too when the note has one);
@@ -215,7 +228,7 @@ fn merge(
     for m in idx.identity_matches(&[canon.to_owned()], Some(path)) {
         match read_text(ctx, &m)? {
             None => {}
-            Some(t) if is_rss_origin(&t) => rss += 1,
+            Some(t) if is_rss_origin(&t, has_blog_row(ctx, &m)?) => rss += 1,
             Some(_) => {
                 c.dup_other += 1;
                 return Ok(());

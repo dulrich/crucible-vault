@@ -9,7 +9,7 @@ use cv_state::TrackerItem;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value};
 
-use super::auto_file::{Clip, Work, host_row, works_kind, works_match};
+use super::auto_file::{Clip, Work, host_row, works_hit, works_match};
 use crate::steps::testkit::{StepEnv, active, config_of, example_config};
 use crate::steps::{ChildSpawner, StepOutcome, execute};
 
@@ -292,6 +292,7 @@ fn works_pure_rules() {
         author_filter: a.map(str::to_owned),
         source_prefixes: p.iter().map(|s| (*s).to_owned()).collect(),
         tags: t.iter().map(|s| (*s).to_owned()).collect(),
+        title: None,
     };
     assert!(works_match(&w(Some("[[Ann]]"), &[], &[]), &clip));
     assert!(
@@ -316,7 +317,9 @@ fn works_pure_rules() {
     let mut b = w(None, &["https://saga.example"], &["fanfic"]);
     b.path = "core/works/B.md".into();
     assert_eq!(
-        works_kind(&[b, a], &clip, |k| k == "fanfic").as_deref(),
+        works_hit(&[b, a], &clip, |k| k == "fanfic")
+            .map(|(_, k)| k)
+            .as_deref(),
         Some("fanfic")
     );
 }
@@ -508,6 +511,31 @@ fn host_row_match_sets_publication_only_when_absent() {
     let e = world(&[("Clippings/D.md", h)]);
     run(&e, "Clippings/D.md", &Rec::default());
     assert!(!e.read("Clippings/D.md").unwrap().contains("publication"));
+}
+
+/// Round 9 Decision 2: a clip filed as fanfic by a Work takes the Work's `title` as
+/// `publication`; an existing value is never overwritten.
+#[test]
+fn fanfic_clip_takes_the_matched_work_title_as_publication() {
+    let body = words("q", 0, 30);
+    let w = doc(
+        "title: \"The Saga\"\nsource-prefix-filter: [\"https://saga.example/\"]\ntags: [\"fanfic\"]\n",
+        "A work.",
+    );
+    let c = doc("source: https://saga.example/ch2\nauthor: Ann\n", &body);
+    let e = world(&[("core/works/Saga.md", w.clone()), ("Clippings/F.md", c)]);
+    let rec = Rec::default();
+    run(&e, "Clippings/F.md", &rec);
+    assert_eq!(rec.kinds(), ["file-as-kind:fanfic"]);
+    let t = e.read("Clippings/F.md").unwrap();
+    assert!(t.contains("author: Ann\npublication: The Saga\n"), "{t}");
+    let have = doc(
+        "source: https://saga.example/ch3\npublication: \"Mine\"\n",
+        &body,
+    );
+    let e = world(&[("core/works/Saga.md", w), ("Clippings/G.md", have.clone())]);
+    run(&e, "Clippings/G.md", &Rec::default());
+    assert_eq!(e.read("Clippings/G.md").as_deref(), Some(have.as_str()));
 }
 
 /// WP-5b acceptance: a `clippings`-tagged clip created in a day folder whose source matches a

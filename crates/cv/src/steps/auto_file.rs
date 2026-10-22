@@ -39,7 +39,7 @@ use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
 /// The action a kind match spawns.
 const FILE_ACTION: &str = "file-as-kind";
 /// The folder whose notes are the Works index.
-const WORKS_FOLDER: &str = "core/works";
+pub(in crate::steps) const WORKS_FOLDER: &str = "core/works";
 
 /// The `auto_file` step (no params; unknown keys disarm, I5).
 pub(crate) struct AutoFile;
@@ -88,7 +88,13 @@ pub(in crate::steps) struct Work {
     pub(in crate::steps) author_filter: Option<String>,
     pub(in crate::steps) source_prefixes: Vec<String>,
     pub(in crate::steps) tags: Vec<String>,
+    /// The Works note's `title` (plan round-9-feedback-todos Decision 2: the `publication` of a
+    /// fanfic clip it files).
+    pub(in crate::steps) title: Option<String>,
 }
+
+/// The kind whose clips take the matched Work's `title` as `publication` (Decision 2).
+pub(in crate::steps) const FANFIC_KIND: &str = "fanfic";
 
 fn js_text(v: &JsValue) -> String {
     match v {
@@ -196,13 +202,13 @@ pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<
     Some(row)
 }
 
-/// The kind of the first Works note (sorted by path) that matches the clip and carries a tag
-/// that `is_kind`.
-pub(in crate::steps) fn works_kind(
-    works: &[Work],
+/// The first Works note (sorted by path) that matches the clip and carries a tag that `is_kind`,
+/// with that kind.
+pub(in crate::steps) fn works_hit<'a>(
+    works: &'a [Work],
     clip: &Clip,
     is_kind: impl Fn(&str) -> bool,
-) -> Option<String> {
+) -> Option<(&'a Work, String)> {
     let mut sorted: Vec<&Work> = works.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     sorted
@@ -213,8 +219,17 @@ pub(in crate::steps) fn works_kind(
                 .iter()
                 .map(|t| t.trim().trim_start_matches('#'))
                 .find(|t| is_kind(t))
-                .map(str::to_owned)
+                .map(|k| (w, k.to_owned()))
         })
+}
+
+/// The `publication` a Works match gives a clip: the Work's `title`, for the fanfic kind only.
+pub(in crate::steps) fn work_publication(work: &Work, kind: &str) -> Option<String> {
+    (kind == FANFIC_KIND)
+        .then(|| work.title.as_deref().map(str::trim))
+        .flatten()
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
 }
 
 /// The kind whose `hosts` holds `host` (kinds in key order).
@@ -244,7 +259,7 @@ pub(in crate::steps) fn hosts_kind(
 }
 
 /// The Works notes: markdown files directly in `core/works`.
-fn read_works(ctx: &StepCtx<'_>) -> Result<Vec<Work>, StepError> {
+pub(in crate::steps) fn read_works(ctx: &StepCtx<'_>) -> Result<Vec<Work>, StepError> {
     let rows = ctx
         .index()?
         .query()
@@ -268,6 +283,9 @@ fn read_works(ctx: &StepCtx<'_>) -> Result<Vec<Work>, StepError> {
             author_filter,
             source_prefixes: js_list(get("source-prefix-filter")),
             tags: js_list(get("tags")),
+            title: get("title")
+                .map(|v| js_text(&v).trim().to_owned())
+                .filter(|s| !s.is_empty()),
         });
     }
     Ok(out)
@@ -453,7 +471,10 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
 
     // ---- kind ---------------------------------------------------------------------------------
     let is_kind = |k: &str| kind_def(ctx.config, k).is_ok();
-    let kind = if let Some(k) = works_kind(&read_works(ctx)?, &clip, is_kind) {
+    let works = read_works(ctx)?;
+    let mut work_pub = None;
+    let kind = if let Some((w, k)) = works_hit(&works, &clip, is_kind) {
+        work_pub = work_publication(w, &k);
         Some(k)
     } else if let Some(k) = row.as_ref().and_then(|r| r.kind.clone()) {
         Some(k)
@@ -481,7 +502,11 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         out.set_vars(&vars);
         return Ok(out);
     }
-    if let Some(p) = row.as_ref().and_then(|r| r.publication.as_deref()) {
+    // A fanfic Work's title wins over a host row's publication (Decision 2); never overwrites.
+    if let Some(p) = work_pub
+        .as_deref()
+        .or_else(|| row.as_ref().and_then(|r| r.publication.as_deref()))
+    {
         set_publication(ctx, &clip_path, p)?;
     }
     if already_filed(ctx, &clip_path, &kind)? {

@@ -38,6 +38,17 @@
 //! 9. **Publication** (F): notes linked from tracker rows get their source row's `publication`
 //!    where absent (`publication_backfilled`, `publication_no_row`, `publication_conflict`).
 //!
+//! Plan `round-9-feedback-todos` WP-2 adds three identity phases (detail and vars in
+//! [`super::reconcile_identity`]), and widens E (a note with a `blog` tracker row and no
+//! `via: email` is RSS-origin) and C (description repair, see [`super::reconcile_backfill`]):
+//!
+//! 10. **Forum re-key** (G): a stored page-level `post-id` of a forum post `source` becomes the
+//!     `/posts/<P>` key (`forum_rekeyed`).
+//! 11. **Spurious duplicate-of** (H): removed only for a forum pair that shared the obsolete page
+//!     key and has neither identity nor content evidence left (`dup_of_removed`, `dup_of_kept`).
+//! 12. **Fanfic publication** (I): the matched Work's `title`, never overwriting
+//!     (`fanfic_publication_backfilled`).
+//!
 //! The step now writes notes (tags, `complete`, cleaned bodies), so `IntakeReconcile` is
 //! note-mutating (`mutates_note`, audit M2).
 //!
@@ -61,6 +72,7 @@ use serde_json::Value;
 
 use super::params::{check_keys, get_bool};
 use super::reconcile_backfill as backfill;
+use super::reconcile_identity as identity;
 use super::reconcile_repair as repair;
 use super::tracker::blogs::PROBE_SERVICE;
 use super::tracker::substack;
@@ -115,6 +127,8 @@ struct Vars {
     backfill: backfill::Counts,
     #[serde(flatten)]
     repair: repair::Counts,
+    #[serde(flatten)]
+    identity: identity::Counts,
 }
 
 /// How a probe attempt ended.
@@ -326,6 +340,12 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     // 7-9. Round-2 repair (plan intake-round-2-clean-dedupe-reading WP-6): re-key, merge, publication.
     repair::rekey_and_merge(ctx, &sh, &mut sidx, &mut v.repair)?;
     repair::publication(ctx, &sh, &mut v.repair)?;
+
+    // 10-12. Round-9 repair (plan round-9-feedback-todos WP-2): forum post-id re-key, spurious
+    // forum `duplicate-of`, fanfic publication.
+    identity::forum_rekey(ctx, &sh, &mut v.identity)?;
+    identity::forum_duplicates(ctx, &sh, &mut v.identity)?;
+    identity::fanfic_publication(ctx, &sh, &mut v.identity)?;
 
     let mut out = StepOutcome::default();
     out.set_vars(&v);
