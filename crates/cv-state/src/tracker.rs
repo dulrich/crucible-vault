@@ -467,6 +467,17 @@ impl StateDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every row that has a `note_path`, oldest first (plan intake-round-2-clean-dedupe-reading
+    /// WP-6: the publication backfill walks `note_path` → source row).
+    pub fn tracker_items_with_note(&self) -> Result<Vec<TrackerItem>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {COLS} FROM tracker_items WHERE note_path IS NOT NULL
+             ORDER BY first_seen_ms, source_kind, source_key, item_id"
+        ))?;
+        let rows = stmt.query_map([], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Sets one row's `note_path` (plan auto-intake-sprint WP-6 reconcile: a plain UPDATE, no
     /// schema change). Returns whether a row matched; raises the `tracker_items` change signal
     /// when one did.

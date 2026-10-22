@@ -1242,3 +1242,21 @@ fn tracker_open_rows_and_rows_of_source_ignore_outcome() {
         3
     );
 }
+
+/// Plan intake-round-2-clean-dedupe-reading WP-6: the note-linked rows, and nothing else.
+#[test]
+fn tracker_items_with_note_lists_only_linked_rows() {
+    let (_d, mut s) = db();
+    for (id, path) in [("a", Some("n/a.md")), ("b", None), ("c", Some("n/c.md"))] {
+        let mut it = mail_row("Newsbit", id);
+        it.note_path = path.map(str::to_owned);
+        s.insert_tracker_item(&it).unwrap();
+    }
+    let got: Vec<String> = s
+        .tracker_items_with_note()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.item_id)
+        .collect();
+    assert_eq!(got, vec!["a", "c"]);
+}

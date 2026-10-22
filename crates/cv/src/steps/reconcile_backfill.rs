@@ -22,11 +22,17 @@
 //!   to false (`mail_marker_incomplete`: a fresh run would have judged it partial), and the finalize
 //!   core ticks by predicate (`mail_ticked`; never on a match alone). No note is ever created.
 //!   A CAS conflict on the tag write is `mail_tag_conflict` (skipped, not retried).
-//! - **C. Re-clean** ([`reclean`]): every note with frontmatter `via: email` has its body (the
-//!   frontmatter stays byte-for-byte) put through [`cv_ingest::mail::clean_body`]; written (CAS)
-//!   only when it changes — `mail_recleaned`, `mail_clean_unchanged`, `mail_clean_conflict`
-//!   (skipped, not retried). Idempotent: a second run writes nothing. `word-count` and
-//!   `description` in the frontmatter are left as captured.
+//! - **C. Re-clean r2** ([`reclean`], plan intake-round-2-clean-dedupe-reading WP-6): every note
+//!   with frontmatter `via: email` has its body (the frontmatter stays byte-for-byte) put through
+//!   [`cv_ingest::mail::clean_body_with`], whose dimension hook decodes the header of a
+//!   localized `_attachments/…` image from the vault so small icons and avatars drop; written
+//!   (CAS) only when it changes — `mail_recleaned_r2`, `mail_clean_unchanged`,
+//!   `mail_clean_conflict` (skipped, not retried). Idempotent: a second run writes nothing.
+//!   `word-count` and `description` in the frontmatter are left as captured. (Round 1 counted
+//!   this phase as `mail_recleaned`; the var was renamed, the phase is the same one.)
+//!
+//! The round-2 repair phases (re-key, mail↔RSS merge, publication) live in
+//! [`super::reconcile_repair`].
 //!
 //! A re-run after an interrupted run is the recovery path: a re-keyed row is no longer
 //! `unknown-sender`, so only the rows still under it are finished.
@@ -66,7 +72,7 @@ pub(super) struct Counts {
     mail_tag_conflict: u32,
     mail_folder_mismatch: u32,
     mail_marker_incomplete: u32,
-    mail_recleaned: u32,
+    mail_recleaned_r2: u32,
     mail_clean_unchanged: u32,
     mail_clean_conflict: u32,
 }
@@ -80,12 +86,12 @@ pub(super) struct Shared {
     pub(super) paths: HashMap<RowKey, String>,
 }
 
-fn st(e: cv_state::StateError) -> StepError {
+pub(super) fn st(e: cv_state::StateError) -> StepError {
     StepError::failed(format!("state: {e}"))
 }
 
 /// A CAS-conflict deferral (`StepCtx::write` maps a lost race to it).
-fn is_conflict(e: &StepError) -> bool {
+pub(super) fn is_conflict(e: &StepError) -> bool {
     matches!(
         e,
         StepError::Deferred {
@@ -116,7 +122,7 @@ pub(super) fn index<'a>(
         .ok_or_else(|| StepError::failed("supersede index unavailable"))
 }
 
-fn read_text(ctx: &StepCtx<'_>, path: &str) -> Result<Option<String>, StepError> {
+pub(super) fn read_text(ctx: &StepCtx<'_>, path: &str) -> Result<Option<String>, StepError> {
     Ok(ctx.read(path)?.and_then(|(b, _)| String::from_utf8(b).ok()))
 }
 
@@ -170,7 +176,7 @@ pub(super) fn youtube(
 }
 
 /// Message-ID → file, over the two processed directories (read-only; first file wins).
-fn message_map(root: &Path, processed: &str) -> HashMap<String, PathBuf> {
+pub(super) fn message_map(root: &Path, processed: &str) -> HashMap<String, PathBuf> {
     let mut dirs = vec![root.join(processed.trim()), root.join("processed")];
     dirs.dedup();
     let mut map = HashMap::new();
@@ -326,8 +332,30 @@ pub(super) fn mail(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result
     Ok(())
 }
 
+/// The decoded `(width, height)` of a localized image `target` (vault-relative), read from the
+/// file header only. `None` for remote, absolute, `..` or unreadable targets.
+pub(super) fn image_dims(root: &Path, target: &str) -> Option<(u32, u32)> {
+    let t = target.trim().trim_matches(['<', '>']);
+    let rel = Path::new(t);
+    if t.is_empty()
+        || t.contains("://")
+        || rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    image::ImageReader::open(root.join(rel))
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 /// `text` with its body (after the frontmatter) cleaned; `None` when nothing changes.
-pub(super) fn recleaned(text: &str) -> Option<String> {
+pub(super) fn recleaned(text: &str, dims: &dyn Fn(&str) -> Option<(u32, u32)>) -> Option<String> {
     let doc = FrontmatterDoc::new(text);
     let body = doc.body();
     let prefix = &text[..text.len() - body.len()];
@@ -338,13 +366,15 @@ pub(super) fn recleaned(text: &str) -> Option<String> {
     }
     let lead = &body[..body.len() - body.trim_start_matches(newline).len()];
     let trail = &body[body.trim_end_matches(newline).len()..];
-    let cleaned = cv_ingest::mail::clean_body(core);
+    let cleaned = cv_ingest::mail::clean_body_with(core, dims);
     let out = format!("{prefix}{lead}{cleaned}{trail}");
     (out != text).then_some(out)
 }
 
 /// Phase C.
 pub(super) fn reclean(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<(), StepError> {
+    let root = ctx.vault_root.to_path_buf();
+    let dims = |t: &str| image_dims(&root, t);
     let paths: BTreeSet<String> = {
         let reader = ctx.index()?;
         reader
@@ -365,16 +395,16 @@ pub(super) fn reclean(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Res
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
-        let Some(new) = recleaned(&text) else {
+        let Some(new) = recleaned(&text, &dims) else {
             c.mail_clean_unchanged += 1;
             continue;
         };
         if sh.dry {
-            c.mail_recleaned += 1;
+            c.mail_recleaned_r2 += 1;
             continue;
         }
         match ctx.write(&path, new.into_bytes(), Some(hash)) {
-            Ok(_) => c.mail_recleaned += 1,
+            Ok(_) => c.mail_recleaned_r2 += 1,
             Err(e) if is_conflict(&e) => c.mail_clean_conflict += 1,
             Err(e) => return Err(e),
         }

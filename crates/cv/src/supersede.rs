@@ -329,19 +329,18 @@ fn content_candidates(
     Ok(out)
 }
 
-/// Resolves `inc` against the vault (see the module doc). Replaces in place on `Replace`, and
-/// finalizes the resolved note's tracker rows. The caller holds `intake::identity`.
-pub fn resolve(
-    ctx: &mut StepCtx<'_>,
+/// The note an item resolves to and the decision taken on it (identity first, then content).
+fn choose(
+    ctx: &StepCtx<'_>,
     idx: &SupersedeIndex,
     cfg: &SupersedeConfig,
     inc: &Incoming<'_>,
-) -> Result<Resolved, StepError> {
-    let incoming = Side::new(words(inc.body_md), inc.complete, inc.body_md);
+    incoming: &Side,
+) -> Result<Option<(String, Existing, Decision)>, StepError> {
     let mut chosen: Option<(String, Existing, Decision)> = None;
     for p in idx.identity_matches(&inc.urls, inc.own_path) {
         if let Some(e) = load(ctx, &p)? {
-            let d = decide(&e.side, &incoming, true, cfg.threshold_percent);
+            let d = decide(&e.side, incoming, true, cfg.threshold_percent);
             chosen = Some((p, e, d));
             break;
         }
@@ -358,10 +357,44 @@ pub fn resolve(
             }
         }
         if let Some((_, p, e)) = best {
-            let d = decide(&e.side, &incoming, false, cfg.threshold_percent);
+            let d = decide(&e.side, incoming, false, cfg.threshold_percent);
             chosen = Some((p, e, d));
         }
     }
+    Ok(chosen)
+}
+
+/// What [`resolve`] would answer for `inc`, with no write and no tracker change (a dry run's
+/// view; a `Replace` that [`resolve`] could not save the old body for would really be `Kept`).
+pub fn preview(
+    ctx: &StepCtx<'_>,
+    idx: &SupersedeIndex,
+    cfg: &SupersedeConfig,
+    inc: &Incoming<'_>,
+) -> Result<Resolved, StepError> {
+    let incoming = Side::new(words(inc.body_md), inc.complete, inc.body_md);
+    Ok(match choose(ctx, idx, cfg, inc, &incoming)? {
+        None | Some((_, _, Decision::Distinct)) => Resolved::new_item(),
+        Some((p, e, Decision::Keep)) => kept(p, &e),
+        Some((p, e, Decision::Replace)) => Resolved {
+            path: Some(p),
+            action: Action::Replaced,
+            access: inc.access.map(|a| a.as_str().to_owned()).or(e.access),
+            complete: inc.complete,
+        },
+    })
+}
+
+/// Resolves `inc` against the vault (see the module doc). Replaces in place on `Replace`, and
+/// finalizes the resolved note's tracker rows. The caller holds `intake::identity`.
+pub fn resolve(
+    ctx: &mut StepCtx<'_>,
+    idx: &SupersedeIndex,
+    cfg: &SupersedeConfig,
+    inc: &Incoming<'_>,
+) -> Result<Resolved, StepError> {
+    let incoming = Side::new(words(inc.body_md), inc.complete, inc.body_md);
+    let chosen = choose(ctx, idx, cfg, inc, &incoming)?;
     let resolved = match chosen {
         None | Some((_, _, Decision::Distinct)) => Resolved::new_item(),
         Some((p, e, Decision::Keep)) => kept(p, &e),

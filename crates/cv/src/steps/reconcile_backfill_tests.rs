@@ -207,7 +207,7 @@ fn dry_run_reports_each_phase_and_writes_nothing_then_the_real_run_matches() {
             n(&dry, "mail_rematched"),
             n(&dry, "mail_ticked"),
             n(&dry, "mail_retagged"),
-            n(&dry, "mail_recleaned"),
+            n(&dry, "mail_recleaned_r2"),
             n(&dry, "x_ticked")
         ),
         (1, 1, 1, 1, 1, 1, 0)
@@ -242,7 +242,7 @@ fn dry_run_reports_each_phase_and_writes_nothing_then_the_real_run_matches() {
         "mail_rematched",
         "mail_ticked",
         "mail_retagged",
-        "mail_recleaned",
+        "mail_recleaned_r2",
     ] {
         assert_eq!(n(&again, k), 0, "{k}");
     }
@@ -443,7 +443,7 @@ fn reclean_rewrites_a_chrome_note_once_and_keeps_the_frontmatter() {
     ]);
     let o = w.reconcile(false);
     assert_eq!(
-        (n(&o, "mail_recleaned"), n(&o, "mail_clean_unchanged")),
+        (n(&o, "mail_recleaned_r2"), n(&o, "mail_clean_unchanged")),
         (1, 1)
     );
     let after = w.env.read("mailnotes/c.md").unwrap();
@@ -459,7 +459,7 @@ fn reclean_rewrites_a_chrome_note_once_and_keeps_the_frontmatter() {
     let again = w.reconcile(false);
     assert_eq!(
         (
-            n(&again, "mail_recleaned"),
+            n(&again, "mail_recleaned_r2"),
             n(&again, "mail_clean_unchanged")
         ),
         (0, 2)
@@ -470,14 +470,326 @@ fn reclean_rewrites_a_chrome_note_once_and_keeps_the_frontmatter() {
 #[test]
 fn recleaned_is_pure_and_idempotent() {
     let text = format!("---\nvia: email\n---\n\n{CHROME}");
-    let once = recleaned(&text).expect("changes");
+    let once = recleaned(&text, &|_| None).expect("changes");
     assert!(once.starts_with("---\nvia: email\n---\n"));
-    assert_eq!(recleaned(&once), None);
-    assert_eq!(recleaned("---\nvia: email\n---\n"), None, "empty body");
+    assert_eq!(recleaned(&once, &|_| None), None);
+    assert_eq!(
+        recleaned("---\nvia: email\n---\n", &|_| None),
+        None,
+        "empty body"
+    );
 }
 
 #[test]
 fn intake_reconcile_is_a_note_mutating_step() {
     assert!(cv_actions::StepKind::IntakeReconcile.mutates_note());
     assert!(!cv_actions::StepKind::IntakeFinalize.mutates_note());
+}
+
+// ---- round-2 repair (plan intake-round-2-clean-dedupe-reading WP-6) ---------------------------
+
+const ZED: &str = "https://zed.substack.com/p/slug-one";
+const ZED_BLOG: &str =
+    "[[blog]]\nname = \"Zed\"\nshort = \"ZZ\"\nlink = \"https://zed.substack.com/feed\"\n";
+
+fn zed_eml() -> Vec<u8> {
+    eml(
+        "m1@zed.example",
+        "zed@substack.com",
+        &format!("<a href=\"{ZED}?token=abc\">Slug One</a><p>body</p>"),
+    )
+}
+
+/// A mail note as `track_mail` writes it, but with a token `source` the way round 1 left it.
+fn mail_note(complete: bool, body: &str) -> String {
+    format!(
+        "---\ntitle: \"Slug One\"\nsource: {ZED}?token=abc\nmessage-id: \"m1@zed.example\"\nauthor:\n  - \"[[Pub]]\"\ncomplete: {complete}\nvia: email\ntags:\n  - blog\n---\n\n{body}\n"
+    )
+}
+
+fn rss_note(complete: bool, body: &str) -> String {
+    format!(
+        "---\ntitle: \"Slug One\"\nsource: {ZED}\nauthor:\n  - \"[[Pub]]\"\ncomplete: {complete}\nvia: rss\n---\n\n{body}\n"
+    )
+}
+
+const LONG: &str = "The quick brown fox jumps over the lazy dog while seven wizards quietly box jars of old pickled plums for the winter market stalls.";
+
+fn zed_world(rss: String, mail: String) -> World {
+    let w = world(&[("Letters/rss.md", rss), ("mailnotes/m.md", mail)]);
+    w.put("processed/m1", &zed_eml());
+    add_row(
+        &w,
+        "mail",
+        "Zed",
+        "m1@zed.example",
+        TrackerOutcome::Note,
+        Some("mailnotes/m.md"),
+    );
+    w
+}
+
+fn repair_vars(o: &StepOutcome) -> Vec<(String, Value)> {
+    let names = serde_json::to_value(super::reconcile_repair::Counts::default()).unwrap();
+    names
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| (k.clone(), o.vars[k].clone()))
+        .collect()
+}
+
+fn trashed(w: &World) -> usize {
+    fn count(p: &std::path::Path) -> usize {
+        std::fs::read_dir(p)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| {
+                let p = e.path();
+                if p.is_dir() { count(&p) } else { 1 }
+            })
+            .sum()
+    }
+    count(&w.env.vault().join(".trash"))
+}
+
+#[test]
+fn dry_run_repair_writes_nothing_and_the_real_run_merges_the_pair() {
+    let w = zed_world(rss_note(false, "A teaser."), mail_note(true, LONG));
+    let (mail0, rss0) = (
+        w.env.read("mailnotes/m.md").unwrap(),
+        w.env.read("Letters/rss.md").unwrap(),
+    );
+    let dry = w.reconcile(true);
+    assert_eq!(
+        (
+            n(&dry, "mail_rekeyed"),
+            n(&dry, "dup_merged"),
+            n(&dry, "dup_marked")
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!(w.env.read("mailnotes/m.md").unwrap(), mail0);
+    assert_eq!(w.env.read("Letters/rss.md").unwrap(), rss0);
+    assert_eq!(trashed(&w), 0);
+    let row = w.row("mail", "Zed", "m1@zed.example").unwrap();
+    assert_eq!(
+        (row.0.note_path.as_deref(), row.1),
+        (Some("mailnotes/m.md"), None)
+    );
+
+    let real = w.reconcile(false);
+    assert_eq!(repair_vars(&dry), repair_vars(&real));
+    assert!(
+        !w.env.vault().join("mailnotes/m.md").exists(),
+        "loser trashed"
+    );
+    assert_eq!(trashed(&w), 1);
+    let survivor = w.env.read("Letters/rss.md").unwrap();
+    assert!(
+        survivor.contains(LONG),
+        "the fuller mail body replaced the stub"
+    );
+    let row = w.row("mail", "Zed", "m1@zed.example").unwrap();
+    assert_eq!(
+        (row.0.note_path.as_deref(), row.1),
+        (Some("Letters/rss.md"), Some('x')),
+        "re-pointed to the survivor and finalized"
+    );
+
+    let again = w.reconcile(false);
+    for k in [
+        "mail_rekeyed",
+        "mail_token_stripped",
+        "dup_merged",
+        "dup_marked",
+        "dup_other",
+        "publication_backfilled",
+    ] {
+        assert_eq!(n(&again, k), 0, "{k}");
+    }
+    assert_eq!(trashed(&w), 1);
+}
+
+#[test]
+fn a_contained_kept_mail_note_is_trashed() {
+    let w = zed_world(
+        rss_note(true, &format!("{LONG} And more text after it.")),
+        mail_note(true, LONG),
+    );
+    let o = w.reconcile(false);
+    assert_eq!((n(&o, "dup_merged"), n(&o, "dup_marked")), (1, 0));
+    assert!(!w.env.vault().join("mailnotes/m.md").exists());
+    assert_eq!(
+        w.row("mail", "Zed", "m1@zed.example")
+            .unwrap()
+            .0
+            .note_path
+            .as_deref(),
+        Some("Letters/rss.md")
+    );
+}
+
+#[test]
+fn a_kept_mail_note_that_is_not_contained_is_marked_and_nothing_is_trashed() {
+    let other = "Entirely different words appear here describing harbors lighthouses and migrating geese over cold northern water at dawn.";
+    let w = zed_world(rss_note(true, other), mail_note(true, LONG));
+    let rss0 = w.env.read("Letters/rss.md").unwrap();
+    let o = w.reconcile(false);
+    assert_eq!((n(&o, "dup_merged"), n(&o, "dup_marked")), (0, 1));
+    assert_eq!(trashed(&w), 0);
+    let mail = w.env.read("mailnotes/m.md").unwrap();
+    assert!(
+        mail.contains("duplicate-of: \"[[Letters/rss]]\"")
+            || mail.contains("duplicate-of: [[Letters/rss]]"),
+        "{mail}"
+    );
+    assert!(
+        mail.contains(&format!("source: {ZED}\n")),
+        "re-keyed: {mail}"
+    );
+    assert_eq!(w.env.read("Letters/rss.md").unwrap(), rss0);
+    let again = w.reconcile(false);
+    assert_eq!((n(&again, "dup_marked"), n(&again, "dup_merged")), (0, 0));
+}
+
+#[test]
+fn an_identity_match_with_a_clip_is_counted_and_left_alone() {
+    let clip =
+        format!("---\ntitle: \"C\"\nsource: {ZED}\nvia: clip\ncomplete: false\n---\n\nA clip.\n");
+    let w = zed_world(clip, mail_note(true, LONG));
+    let o = w.reconcile(false);
+    assert_eq!(
+        (n(&o, "dup_other"), n(&o, "dup_merged"), n(&o, "dup_marked")),
+        (1, 0, 0)
+    );
+    assert_eq!(trashed(&w), 0);
+    assert!(
+        w.env
+            .read("mailnotes/m.md")
+            .unwrap()
+            .contains(&format!("source: {ZED}\n"))
+    );
+}
+
+#[test]
+fn a_token_source_with_no_canonical_url_is_stripped_and_a_missing_message_is_skipped() {
+    let tracker = "https://track.example/v2/c/abc?token=zzz";
+    let note = |mid: &str| {
+        format!(
+            "---\ntitle: \"T\"\nsource: {tracker}\npost-id: {tracker}\nmessage-id: \"{mid}\"\nvia: email\n---\n\nSome prose here.\n"
+        )
+    };
+    let w = world(&[
+        ("mailnotes/a.md", note("a@x.example")),
+        ("mailnotes/b.md", note("gone@x.example")),
+    ]);
+    w.put(
+        "processed/a",
+        &eml(
+            "a@x.example",
+            "n@plain.example",
+            "<a href=\"https://track.example/v2/c/abc\">x</a>",
+        ),
+    );
+    let dry = w.reconcile(true);
+    assert_eq!(
+        (n(&dry, "mail_token_stripped"), n(&dry, "rekey_skipped")),
+        (1, 1)
+    );
+    assert!(w.env.read("mailnotes/a.md").unwrap().contains("token=zzz"));
+    let o = w.reconcile(false);
+    assert_eq!(repair_vars(&dry), repair_vars(&o));
+    let a = w.env.read("mailnotes/a.md").unwrap();
+    assert!(
+        !a.contains("source:") && !a.contains("post-id:") && !a.contains("token="),
+        "{a}"
+    );
+    assert!(
+        w.env.read("mailnotes/b.md").unwrap().contains("token=zzz"),
+        "skipped note unchanged"
+    );
+    assert_eq!(n(&w.reconcile(false), "mail_token_stripped"), 0);
+}
+
+#[test]
+fn publication_is_backfilled_once_and_never_overwritten() {
+    let mut w = world(&[
+        ("Letters/a.md", "---\ntitle: \"A\"\nauthor:\n  - \"[[P]]\"\nvia: rss\n---\n\nBody a.\n".to_owned()),
+        ("Letters/b.md", "---\ntitle: \"B\"\nauthor:\n  - \"[[P]]\"\npublication: Mine\nvia: rss\n---\n\nBody b.\n".to_owned()),
+        ("Letters/c.md", "---\ntitle: \"C\"\nvia: rss\n---\n\nBody c.\n".to_owned()),
+    ]);
+    w.sources(ZED_BLOG);
+    for (id, p) in [("a", "Letters/a.md"), ("b", "Letters/b.md")] {
+        add_row(
+            &w,
+            "blog",
+            "https://zed.substack.com/feed",
+            id,
+            TrackerOutcome::Note,
+            Some(p),
+        );
+    }
+    add_row(
+        &w,
+        "blog",
+        "https://other.example/feed",
+        "c",
+        TrackerOutcome::Note,
+        Some("Letters/c.md"),
+    );
+    let b0 = w.env.read("Letters/b.md").unwrap();
+    let dry = w.reconcile(true);
+    assert_eq!(
+        (
+            n(&dry, "publication_backfilled"),
+            n(&dry, "publication_no_row")
+        ),
+        (1, 1)
+    );
+    assert!(!w.env.read("Letters/a.md").unwrap().contains("publication"));
+    let o = w.reconcile(false);
+    assert_eq!(repair_vars(&dry), repair_vars(&o));
+    let a = w.env.read("Letters/a.md").unwrap();
+    assert!(
+        a.contains("author:\n  - \"[[P]]\"\npublication: ZZ\n"),
+        "{a}"
+    );
+    assert_eq!(w.env.read("Letters/b.md").unwrap(), b0, "never overwritten");
+    let again = w.reconcile(false);
+    assert_eq!(n(&again, "publication_backfilled"), 0);
+    assert_eq!(w.env.read("Letters/a.md").unwrap(), a);
+}
+
+#[test]
+fn reclean_r2_drops_a_small_localized_image_by_its_decoded_size() {
+    let note = |name: &str| {
+        format!(
+            "---\nvia: email\n---\n\n![](_attachments/{name}.png)\n\nReal prose paragraph one.\n"
+        )
+    };
+    let w = world(&[
+        ("mailnotes/s.md", note("small")),
+        ("mailnotes/l.md", note("large")),
+    ]);
+    let dir = w.env.vault().join("_attachments");
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbImage::new(36, 36)
+        .save(dir.join("small.png"))
+        .unwrap();
+    image::RgbImage::new(300, 200)
+        .save(dir.join("large.png"))
+        .unwrap();
+    let o = w.reconcile(false);
+    assert_eq!(n(&o, "mail_recleaned_r2"), 1);
+    assert!(!w.env.read("mailnotes/s.md").unwrap().contains("small.png"));
+    assert!(w.env.read("mailnotes/l.md").unwrap().contains("large.png"));
+    assert!(
+        w.env
+            .read("mailnotes/s.md")
+            .unwrap()
+            .contains("Real prose paragraph one.")
+    );
+    assert_eq!(n(&w.reconcile(false), "mail_recleaned_r2"), 0);
 }
