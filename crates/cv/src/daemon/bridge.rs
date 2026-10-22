@@ -41,12 +41,9 @@ pub(super) fn start_event_bridge(
                     cv_vault::Origin::Daemon => Origin::Daemon,
                     cv_vault::Origin::External => Origin::External,
                 };
-                let _ = events.send(Notification::FileChanged {
-                    path: ev.path,
-                    kind,
-                    hash,
-                    origin,
-                });
+                for n in file_changes(ev.path, &ev.kind, kind, hash, origin) {
+                    let _ = events.send(n);
+                }
                 if ignore_changed
                     && let Some(w) = weak.upgrade().and_then(|s| s.writer())
                 {
@@ -105,5 +102,78 @@ pub(super) async fn generation_listener(shared: Arc<Shared>, mut stop: watch::Re
                 Err(broadcast::error::RecvError::Closed) => return,
             },
         }
+    }
+}
+
+/// One vault event's `file_changed` notifications. A rename (daemon or external) first reports
+/// its source as `Deleted`, so clients without a rename record (the editor's explorer and tabs)
+/// drop the old path; no starter lists `deleted` (plan intake-round-2-clean-dedupe-reading
+/// WP-5a, proposal 1).
+fn file_changes(
+    path: String,
+    ev_kind: &EventKind,
+    kind: ChangeKind,
+    hash: Option<String>,
+    origin: Origin,
+) -> Vec<Notification> {
+    let mut out = Vec::with_capacity(2);
+    if let EventKind::Renamed { from } = ev_kind {
+        out.push(Notification::FileChanged {
+            path: from.clone(),
+            kind: ChangeKind::Deleted,
+            hash: None,
+            origin,
+        });
+    }
+    out.push(Notification::FileChanged {
+        path,
+        kind,
+        hash,
+        origin,
+    });
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_reports_source_deleted_then_destination_renamed() {
+        let ev = EventKind::Renamed {
+            from: "a.md".into(),
+        };
+        let got = file_changes(
+            "b.md".into(),
+            &ev,
+            ChangeKind::Renamed,
+            None,
+            Origin::Daemon,
+        );
+        assert_eq!(
+            got,
+            vec![
+                Notification::FileChanged {
+                    path: "a.md".into(),
+                    kind: ChangeKind::Deleted,
+                    hash: None,
+                    origin: Origin::Daemon,
+                },
+                Notification::FileChanged {
+                    path: "b.md".into(),
+                    kind: ChangeKind::Renamed,
+                    hash: None,
+                    origin: Origin::Daemon,
+                },
+            ]
+        );
+        let one = file_changes(
+            "c.md".into(),
+            &EventKind::Created,
+            ChangeKind::Created,
+            None,
+            Origin::External,
+        );
+        assert_eq!(one.len(), 1);
     }
 }

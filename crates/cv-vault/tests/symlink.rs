@@ -356,3 +356,23 @@ fn link_added_in_the_vault_refreshes_the_watch_set() {
         1
     );
 }
+
+#[test]
+fn daemon_move_of_a_linked_note_is_one_renamed() {
+    let lx = Lx::new();
+    let (wh, rx, _j) = spawn_writer_with_watcher(lx.writer(), cfg()).unwrap();
+    wh.rename("f/linked.md", "g/moved.md", h("T [[a]]"))
+        .unwrap();
+    let evs = until(&rx, "g/moved.md");
+    assert_eq!(
+        evs,
+        vec![VaultEvent {
+            path: "g/moved.md".into(),
+            kind: EventKind::Renamed {
+                from: "f/linked.md".into()
+            },
+            origin: Origin::Daemon,
+        }]
+    );
+    assert!(lx.is_link("g/moved.md"));
+}

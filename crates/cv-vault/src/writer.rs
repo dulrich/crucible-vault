@@ -300,6 +300,7 @@ impl VaultWriter {
             Ok(()) => {
                 self.echoes.register(from, None);
                 self.echoes.register(to, Some(h.clone()));
+                self.echoes.register_move(from, to);
             }
             Err(e) => tracing::warn!(from, to, error = %e, "index update after rename failed"),
         }

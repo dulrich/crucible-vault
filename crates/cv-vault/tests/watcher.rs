@@ -117,9 +117,25 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
     let (wh, rx, _j) = spawn_writer_with_watcher(fx.live(), cfg()).unwrap();
     wh.rename("a.md", "c.md", h("A")).unwrap();
     wh.delete("b.md", h("B")).unwrap();
-    let evs = first_then_tail(&rx);
-    assert!(evs.iter().all(|e| e.origin == Origin::Daemon), "{evs:?}");
-    assert!(evs.iter().all(|e| !e.path.starts_with(".trash")), "{evs:?}");
+    let mut evs = first_then_tail(&rx);
+    evs.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(
+        evs,
+        vec![
+            VaultEvent {
+                path: "b.md".into(),
+                kind: EventKind::Deleted,
+                origin: Origin::Daemon
+            },
+            VaultEvent {
+                path: "c.md".into(),
+                kind: EventKind::Renamed {
+                    from: "a.md".into()
+                },
+                origin: Origin::Daemon
+            },
+        ]
+    );
 
     std::fs::rename(fx.vault.path().join("c.md"), fx.vault.path().join("d.md")).unwrap();
     let evs = first_then_tail(&rx);
@@ -161,5 +177,58 @@ fn tmp_names_never_surface() {
         !common::all_names(fx.vault.path())
             .iter()
             .any(|n| n.starts_with(".cv-tmp-") && n != ".cv-tmp-foreign")
+    );
+}
+
+#[test]
+fn daemon_folder_rename_is_one_renamed_per_file() {
+    let fx = Fx::new(&[("f/a.md", "A"), ("f/b.md", "B")]);
+    let (wh, rx, _j) = spawn_writer_with_watcher(fx.live(), cfg()).unwrap();
+    wh.rename_folder("f", "g").unwrap();
+    let mut evs = first_then_tail(&rx);
+    evs.sort_by(|a, b| a.path.cmp(&b.path));
+    let want: Vec<VaultEvent> = ["a", "b"]
+        .iter()
+        .map(|n| VaultEvent {
+            path: format!("g/{n}.md"),
+            kind: EventKind::Renamed {
+                from: format!("f/{n}.md"),
+            },
+            origin: Origin::Daemon,
+        })
+        .collect();
+    assert_eq!(evs, want);
+}
+
+#[test]
+fn expired_move_echo_degrades_to_delete_and_create() {
+    let fx = Fx::new(&[("a.md", "A")]);
+    let quick = WatchConfig {
+        debounce: DEB,
+        echo_ttl: Duration::from_millis(1),
+    };
+    let (wh, rx, _j) = spawn_writer_with_watcher(fx.live(), quick).unwrap();
+    wh.rename("a.md", "c.md", h("A")).unwrap();
+    let mut evs = first_then_tail(&rx);
+    evs.sort_by(|a, b| a.path.cmp(&b.path));
+    // Echoes expired: both halves surface (as external), nothing is lost or paired.
+    assert_eq!(
+        evs,
+        vec![
+            VaultEvent {
+                path: "a.md".into(),
+                kind: EventKind::Deleted,
+                origin: Origin::External
+            },
+            VaultEvent {
+                path: "c.md".into(),
+                kind: EventKind::Created,
+                origin: Origin::External
+            },
+        ]
+    );
+    assert!(
+        wh.call(|w| w.index().query().file("c.md").unwrap().is_some())
+            .unwrap()
     );
 }

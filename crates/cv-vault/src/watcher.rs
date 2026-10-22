@@ -76,6 +76,12 @@ const ECHO_CAP: usize = 4096;
 #[derive(Debug)]
 pub(crate) struct Echoes {
     map: HashMap<String, (Option<ContentHash>, Instant)>,
+    /// The writer's own moves: destination → (source, when). The vault fs moves by hard link +
+    /// unlink (or a fresh symlink), never `rename(2)`, so notify never pairs them; this record
+    /// lets the watcher collapse the source's removal and the destination's appearance into one
+    /// `Renamed` (plan intake-round-2-clean-dedupe-reading WP-5a). Unmatched or expired, the two
+    /// path echoes above still classify both halves as before (`Deleted` + `Created`).
+    moves: HashMap<String, (String, Instant)>,
     ttl: Duration,
 }
 
@@ -83,6 +89,7 @@ impl Echoes {
     pub(crate) fn new(ttl: Duration) -> Self {
         Self {
             map: HashMap::new(),
+            moves: HashMap::new(),
             ttl,
         }
     }
@@ -90,6 +97,39 @@ impl Echoes {
     fn expire(&mut self, now: Instant) {
         let ttl = self.ttl;
         self.map.retain(|_, (_, at)| now.duration_since(*at) < ttl);
+        self.moves
+            .retain(|_, (_, at)| now.duration_since(*at) < ttl);
+    }
+
+    /// Records the writer's move `from → to` (alongside the two path echoes).
+    pub(crate) fn register_move(&mut self, from: &str, to: &str) {
+        let now = Instant::now();
+        self.expire(now);
+        if self.moves.len() >= ECHO_CAP
+            && let Some(oldest) = self
+                .moves
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(k, _)| k.clone())
+        {
+            self.moves.remove(&oldest);
+        }
+        self.moves.insert(to.to_string(), (from.to_string(), now));
+    }
+
+    /// The destination of a live move echo whose source is `from` (not consumed).
+    fn move_dest(&mut self, from: &str) -> Option<String> {
+        self.expire(Instant::now());
+        self.moves
+            .iter()
+            .find(|(_, (f, _))| f == from)
+            .map(|(t, _)| t.clone())
+    }
+
+    /// Consumes the live move echo landing at `to`, returning its source.
+    fn take_move(&mut self, to: &str) -> Option<String> {
+        self.expire(Instant::now());
+        self.moves.remove(to).map(|(f, _)| f)
     }
 
     pub(crate) fn register(&mut self, path: &str, after: Option<ContentHash>) {
@@ -454,8 +494,21 @@ impl WatchState {
             Ok(md) if md.is_file() => md,
             Ok(_) => return,
             Err(_) => {
-                if self.seen.remove(path).is_none() {
+                let Some(prev) = self.seen.remove(path) else {
                     return; // created and gone between hints: nothing to report
+                };
+                // The source of a daemon move: examine its destination now, which claims this
+                // path (`seen` entry consumed) when it classifies the move as one `Renamed`.
+                if let Some(to) = w.echoes.move_dest(path)
+                    && to != path
+                    && self.root.join(&to).exists()
+                {
+                    self.seen.insert(path.to_string(), prev);
+                    self.pending.remove(&to);
+                    self.examine_file(w, &to, out);
+                    if self.seen.remove(path).is_none() {
+                        return;
+                    }
                 }
                 let daemon = w.echoes.take_match(path, None);
                 if !daemon && let Err(e) = w.index.remove_file(path) {
@@ -500,6 +553,23 @@ impl WatchState {
             if let Err(e) = w.index.upsert_file(path, &bytes, m, c) {
                 tracing::warn!(path, error = %e, "index update for external change failed");
             }
+        }
+        // A daemon move's destination, its source gone and not yet reported: one `Renamed`.
+        if daemon
+            && prev.is_none()
+            && let Some(from) = w.echoes.take_move(path)
+            && self.root.join(&from).symlink_metadata().is_err()
+            && self.seen.remove(&from).is_some()
+        {
+            w.echoes.take_match(&from, None);
+            self.pending.remove(&from);
+            self.refresh_link(&from);
+            out.push(VaultEvent {
+                path: path.to_string(),
+                kind: EventKind::Renamed { from },
+                origin: Origin::Daemon,
+            });
+            return;
         }
         out.push(VaultEvent {
             path: path.to_string(),

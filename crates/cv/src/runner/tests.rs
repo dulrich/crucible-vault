@@ -598,5 +598,108 @@ fn event_selector_origin_and_cycle_guard() {
         "an external edit still fires"
     );
 }
+const CREATED_ONLY: &str = r#"
+[[action]]
+id = "clip"
+starters = [{ type = "event", kinds = ["created"], origin = "any", selector = { folder = "Clippings" } }]
+[[action.steps]]
+type = "set_props"
+"#;
+
+/// Plan intake-round-2-clean-dedupe-reading WP-5a: a daemon move into a `["created"]` starter's
+/// folder arrives as `Renamed` and does not fire it; a genuine create still does.
+#[test]
+fn created_starter_ignores_a_daemon_move_into_its_folder() {
+    use cv_protocol::{ChangeKind, Origin};
+    let f = fixture();
+    let r = runner(
+        &f,
+        Arc::new(ProductionExecutor),
+        Arc::new(SystemClock),
+        1,
+        CREATED_ONLY,
+    );
+    assert!(
+        events::on_change(&r, "Clippings/m.md", ChangeKind::Renamed, Origin::Daemon).is_empty()
+    );
+    assert_eq!(
+        events::on_change(&r, "Clippings/n.md", ChangeKind::Created, Origin::Daemon).len(),
+        1
+    );
+}
 
 mod queue;
+
+/// WP-5a proposal 1: the bridge reports a rename's source as `Deleted`; no example starter
+/// listens to `deleted`, so that extra event fires nothing.
+#[test]
+fn no_example_starter_fires_on_a_rename_source_deleted() {
+    use cv_protocol::{ChangeKind, Origin};
+    let f = fixture();
+    let r = runner(
+        &f,
+        Arc::new(ProductionExecutor),
+        Arc::new(SystemClock),
+        1,
+        EVENTED,
+    );
+    let mut c = ConfigSet::new();
+    let files: BTreeMap<String, Option<String>> = [
+        (
+            "actions.toml",
+            include_str!("../../../../config/examples/actions.toml"),
+        ),
+        (
+            "captures.toml",
+            include_str!("../../../../config/examples/captures.toml"),
+        ),
+        (
+            "agents.toml",
+            include_str!("../../../../config/examples/agents.toml"),
+        ),
+        (
+            "kinds.toml",
+            include_str!("../../../../config/examples/kinds.toml"),
+        ),
+        (
+            "providers.toml",
+            include_str!("../../../../config/examples/providers.toml"),
+        ),
+        (
+            "pipelines.toml",
+            include_str!("../../../../config/examples/pipelines.toml"),
+        ),
+        (
+            "schedules.toml",
+            include_str!("../../../../config/examples/schedules.toml"),
+        ),
+        (
+            "sources.toml",
+            include_str!("../../../../config/examples/sources.toml"),
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), Some(v.to_owned())))
+    .collect();
+    c.reload(&files, &crate::steps::validate);
+    assert!(c.errors().is_empty(), "{:?}", c.errors());
+    r.set_config(c);
+    for p in [
+        "Clippings/x.md",
+        "inbox/x.md",
+        "daily/x.md",
+        "_yt_metadata/x.md",
+        "x.md",
+    ] {
+        for o in [Origin::Daemon, Origin::External] {
+            assert!(
+                events::on_change(&r, p, ChangeKind::Deleted, o).is_empty(),
+                "{p}"
+            );
+        }
+    }
+    // Sanity: the same config does fire on a create in Clippings.
+    assert!(
+        !events::on_change(&r, "Clippings/y.md", ChangeKind::Created, Origin::Daemon).is_empty()
+    );
+}
