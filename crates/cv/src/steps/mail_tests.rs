@@ -520,3 +520,89 @@ fn substack_host_without_a_blog_row_stays_unknown() {
     assert!(w.row("unknown-sender", "s4@substack.com").is_some());
     assert!(w.row("Example Pub", "s4@substack.com").is_none());
 }
+
+// --- plan intake-round-2-clean-dedupe-reading WP-2: canonical post URL ---
+
+const CUSTOM_FEED: &str = "https://custom.example/feed";
+const CUSTOM_POST: &str = "https://custom.example/p/deep-dive";
+
+#[test]
+fn restack_only_mail_meets_its_custom_domain_rss_note() {
+    let sources = format!(
+        "[[blog]]\nname = \"Custom Blog\"\nlink = \"{CUSTOM_FEED}\"\n\n[[newsletter]]\nname = \"Custom Letter\"\nfrom = [\"custompub@substack.com\"]\nblog = \"Custom Blog\"\n"
+    );
+    let note = format!(
+        "---\ntitle: \"Deep dive\"\nsource: {CUSTOM_POST}\npost-id: \"deep-dive\"\npublished: 2026-10-14\nword-count: 120\ncomplete: true\ntags:\n  - blog\nread: false\n---\n\n{}\n",
+        words("w", 0, 120)
+    );
+    let w = world_with(&sources, &[("Letters/Deep dive.md", note)]);
+    w.env
+        .state
+        .lock()
+        .unwrap()
+        .insert_tracker_item(&TrackerItem {
+            source_kind: "blog".into(),
+            source_key: CUSTOM_FEED.into(),
+            item_id: CUSTOM_POST.into(),
+            title: "Deep dive".into(),
+            url: CUSTOM_POST.into(),
+            first_seen_ms: 1,
+            day: "2026-10-14".into(),
+            outcome: TrackerOutcome::Note,
+            score: None,
+            full_body: Some(true),
+            note_path: Some("Letters/Deep dive.md".into()),
+            source_name: Some("Custom Blog".into()),
+            duration_s: None,
+            word_count: Some(120),
+            access: None,
+            complete: Some(true),
+            full_word_count: None,
+        })
+        .unwrap();
+    let body = format!(
+        "<p>{}</p><a href=\"https://open.substack.com/pub/custompub/p/deep-dive?action=restack-comment&amp;r=abc&amp;token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJyZWFkZXIifQ.c2lnbmF0dXJlX29mX2p3dA\">Restack</a>",
+        words("m", 0, 120)
+    );
+    w.put(
+        "new/k",
+        &eml(
+            "k1@substack.com",
+            "custompub@substack.com",
+            "Deep dive",
+            &body,
+        ),
+    );
+    let o = w.run();
+    assert_eq!(n(&o, "new"), json!(0), "{o:?}");
+    assert_eq!(
+        n(&o, "kept").as_u64().unwrap() + n(&o, "replaced").as_u64().unwrap(),
+        1
+    );
+    assert_eq!(w.notes("Letters").len(), 1, "no second note");
+    let (mail, _) = w.row("Custom Letter", "k1@substack.com").unwrap();
+    assert_eq!(mail.note_path.as_deref(), Some("Letters/Deep dive.md"));
+    let text = w.env.read("Letters/Deep dive.md").unwrap();
+    assert!(
+        !text.contains("token=") && !text.contains("open.substack.com"),
+        "{text}"
+    );
+}
+
+#[test]
+fn tracker_only_mail_note_has_no_source_line() {
+    let w = world(&[]);
+    let body = "<p>some words here</p><a href=\"https://link.mail.beehiiv.com/ss/c/u001.opaque/abc\">View in browser</a><a href=\"https://elsewhere.example/p/linked\">a linked post</a>";
+    w.put(
+        "new/t",
+        &eml("t1@plain.example", "hello@plain.example", "Tracked", body),
+    );
+    w.run();
+    let (r, _) = w.row("Plain Letter", "t1@plain.example").unwrap();
+    assert_eq!(r.url, "");
+    let text = w.env.read(&r.note_path.unwrap()).unwrap();
+    assert!(
+        !text.contains("source:") && !text.contains("post-id:"),
+        "{text}"
+    );
+}

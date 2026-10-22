@@ -44,7 +44,7 @@ fn multipart_alternative_quoted_printable() {
     );
     assert!(m.html.as_deref().unwrap().contains("Html café body"));
     assert!(m.text.as_deref().unwrap().contains("Plain café body"));
-    assert_eq!(m.urls, vec!["https://ann.example/p/first-post?utm=1"]);
+    assert_eq!(m.urls, vec!["https://ann.example/p/first-post"]);
 }
 
 #[test]
@@ -74,7 +74,7 @@ Content-Transfer-Encoding: base64
     );
     let m = parse_eml(&crlf(&eml)).unwrap();
     assert!(m.html.as_deref().unwrap().contains("Sealed body text"));
-    assert_eq!(m.urls, vec!["https://open.substack.com/pub/zed/p/slug-one"]);
+    assert_eq!(m.urls, vec!["https://zed.substack.com/p/slug-one"]);
 }
 
 fn base64_of(b: &[u8]) -> String {
@@ -131,13 +131,7 @@ fn redirects_are_unwrapped_only_with_an_inline_target() {
 <a href="https://track.esp.example/r/opaque2">View in browser</a>
 <a href="https://track.esp.example/c?u=not-a-url">read</a>"#;
     let urls = extract_post_urls(html);
-    assert_eq!(
-        urls,
-        vec![
-            "https://ann.example/p/wrapped",
-            "https://track.esp.example/r/opaque2"
-        ]
-    );
+    assert_eq!(urls, vec!["https://ann.example/p/wrapped"]);
 }
 
 #[test]
@@ -211,4 +205,159 @@ fn url_host_is_lowercased_and_bare() {
     );
     assert_eq!(url_host("ftp://a.example/"), None);
     assert_eq!(url_host("https:///x"), None);
+}
+
+// --- plan intake-round-2-clean-dedupe-reading WP-2: canonical post URL ---
+
+const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJyZWFkZXIifQ.c2lnbmF0dXJlX29mX2p3dA";
+
+/// A Substack-sender post with `html` as its body (urls extracted like `parse_eml`).
+fn sub_post(pubname: &str, subject: &str, html: &str) -> MailPost {
+    MailPost {
+        message_id: "m@substack.com".into(),
+        from_addr: format!("{pubname}@substack.com"),
+        from_name: "Pub".into(),
+        list_id: Some(format!("{pubname}.substack.com")),
+        subject: subject.into(),
+        date: None,
+        html: Some(html.into()),
+        text: None,
+        urls: extract_post_urls_for(html, subject),
+    }
+}
+
+fn b64url(s: &str) -> String {
+    base64_of(s.as_bytes())
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
+}
+
+fn variant_bodies() -> Vec<String> {
+    let redirect = b64url(r#"{"e":"https://zed.substack.com/p/slug-one?r=abc&utm_source=x"}"#);
+    vec![
+        format!(
+            "<a href=\"https://open.substack.com/pub/zed/p/slug-one?action=restack-comment&amp;r=abc&amp;token={JWT}\">Restack</a>"
+        ),
+        format!("<a href=\"https://substack.com/redirect/2/{redirect}.sig\">Read</a>"),
+        "<a href=\"https://track.esp.example/r?url=https%3A%2F%2Fzed.substack.com%2Fp%2Fslug-one%3Fr%3Dabc\">Go</a>".into(),
+        "<a href=\"https://ZED.substack.com/p/slug-one/?utm_source=email#top\">Read</a>".into(),
+    ]
+}
+
+#[test]
+fn every_link_variant_converges_on_one_canonical_url() {
+    for body in variant_bodies() {
+        let p = sub_post("zed", "S", &body);
+        assert_eq!(
+            canonical_post_url(&p, None).as_deref(),
+            Some("https://zed.substack.com/p/slug-one"),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn opaque_tracker_only_mail_has_no_identity() {
+    let body = "<a href=\"https://link.mail.beehiiv.com/ss/c/u001.opaque/4f2/h1/abc\">View in browser</a>\
+                <a href=\"https://zed.substack.com/redirect/2/bm90LWpzb24\">Read</a>\
+                <a href=\"https://substack.com/redirect/2/bm90LWpzb24\">x</a>\
+                <a href=\"https://esp.example/v2/c/abc\">y</a>";
+    let p = sub_post("zed", "S", body);
+    assert!(p.urls.is_empty(), "{:?}", p.urls);
+    assert_eq!(canonical_post_url(&p, None), None);
+}
+
+#[test]
+fn a_link_to_another_publication_is_never_the_identity() {
+    let body = "<a href=\"https://other.substack.com/p/their-post\">A post I liked</a>\
+                <a href=\"https://open.substack.com/pub/other/p/x?r=1\">restack</a>\
+                <a href=\"https://blog.other.example/p/y\">y</a>";
+    let p = sub_post("zed", "S", body);
+    assert!(!p.urls.is_empty());
+    assert_eq!(canonical_post_url(&p, None), None);
+    assert_eq!(
+        canonical_post_url(&p, Some("https://custom.example/feed")),
+        None,
+        "an unproven link is never rebased"
+    );
+}
+
+#[test]
+fn a_proven_candidate_rebases_onto_the_custom_domain_blog() {
+    let body = format!(
+        "<a href=\"https://open.substack.com/pub/zed/p/slug-one?action=restack-comment&amp;r=abc&amp;token={JWT}\">Restack</a>"
+    );
+    let p = sub_post("zed", "S", &body);
+    assert_eq!(
+        canonical_post_url(&p, Some("https://www.custom.example/feed")).as_deref(),
+        Some("https://www.custom.example/p/slug-one")
+    );
+    // Evidence by the blog host alone (a custom-domain sender without a Substack host).
+    let mut q = sub_post(
+        "zed",
+        "S",
+        "<a href=\"https://custom.example/p/two?token=1\">x</a>",
+    );
+    q.from_addr = "news@custom.example".into();
+    q.list_id = None;
+    assert_eq!(
+        canonical_post_url(&q, Some("https://custom.example/feed")).as_deref(),
+        Some("https://custom.example/p/two")
+    );
+}
+
+#[test]
+fn the_messages_own_post_comes_first() {
+    let body = "<a href=\"https://zed.substack.com/p/older\">Older post</a>\
+                <a href=\"https://zed.substack.com/p/today\">Today Title</a>";
+    let p = sub_post("zed", "Today Title", body);
+    assert_eq!(p.urls[0], "https://zed.substack.com/p/today");
+    assert_eq!(
+        canonical_post_url(&p, None).as_deref(),
+        Some("https://zed.substack.com/p/today")
+    );
+}
+
+#[test]
+fn odd_hrefs_never_panic_and_never_leak_tokens() {
+    let body = "<a href=\"\">e</a><a href=\"mailto:x@y.example\">m</a><a href=\"/p/rel\">r</a>\
+                <a href=\"https://zed.substack.com/p/%E0%A4\">bad pct</a><a href=\"https://%zz/p/q\">h</a>\
+                <a href=\"https://track.esp.example/r?url=%\">w</a><a href=https://zed.substack.com/p/>no slug</a>";
+    let p = sub_post("zed", "S", body);
+    let _ = canonical_post_url(&p, Some("not a url"));
+    let mut all: Vec<String> = variant_bodies()
+        .iter()
+        .flat_map(|b| {
+            let p = sub_post("zed", "S", b);
+            let mut v = p.urls.clone();
+            v.extend(canonical_post_url(&p, Some("https://custom.example/")));
+            v
+        })
+        .collect();
+    all.extend(p.urls);
+    for u in &all {
+        assert!(
+            !u.contains("token=") && !u.contains("r=") && !u.contains('?'),
+            "{u}"
+        );
+    }
+}
+
+#[test]
+fn the_identity_guard_rejects_tokens_jwts_and_trackers() {
+    assert!(is_clean_identity("https://zed.substack.com/p/slug-one"));
+    for bad in [
+        "https://zed.substack.com/p/x?token=abc",
+        "https://zed.substack.com/p/x?a=1&r=2",
+        &format!("https://zed.substack.com/p/{JWT}"),
+        "https://substack.com/redirect/2/abc",
+        "https://link.mail.beehiiv.com/ss/c/abc",
+        "https://esp.example/v2/c/abc",
+        "https://esp.example/view/abc",
+        "https://t.hubspotlinks.com/p/x",
+        "mailto:x@y.example",
+    ] {
+        assert!(!is_clean_identity(bad), "{bad}");
+    }
 }

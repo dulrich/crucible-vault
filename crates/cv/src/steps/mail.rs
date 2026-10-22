@@ -176,16 +176,18 @@ pub(crate) fn note_target(
 /// The captured note's text (the filed-blog frontmatter order, plus `via` and `message-id`).
 fn captured_note(
     post: &MailPost,
+    source: Option<&str>,
     title: &str,
     body_md: &str,
-    words: usize,
     tags: &[String],
     created: &str,
     complete: bool,
 ) -> String {
     use cv_ingest::youtube::json_string;
+    // `words` is the cleaned body's word count (the same count `handle` records).
+    let words = body_md.split_whitespace().count();
     let mut fm = vec!["---".to_owned(), format!("title: {}", json_string(title))];
-    if let Some(u) = post.urls.first() {
+    if let Some(u) = source {
         fm.push(format!("source: {u}"));
     }
     fm.push(format!("message-id: {}", json_string(&post.message_id)));
@@ -364,6 +366,9 @@ fn handle(
             .find(|r| r.name == b)
             .cloned()
     });
+    // The one post identity (plan intake-round-2-clean-dedupe-reading WP-2): publication-proven,
+    // token-free, rebased onto the blog row's host. `None` leaves the Message-ID as the identity.
+    let canon = mail::canonical_post_url(post, blog_row.as_ref().map(|b| b.link.as_str()));
     let mut markers: Vec<String> = nl.map(|n| n.paywall_markers.clone()).unwrap_or_default();
     if let Some(b) = &blog_row {
         markers.extend(b.paywall_markers.iter().cloned());
@@ -392,7 +397,7 @@ fn handle(
     let blog_key = blog_row.as_ref().map(|b| b.link.trim().to_owned());
     let inc = Incoming {
         own_path: None,
-        urls: post.urls.clone(),
+        urls: canon.iter().cloned().collect(),
         source: blog_key.as_deref().map(|k| ("blog", k)),
         authors: Some(post.from_name.clone())
             .filter(|n| !n.is_empty())
@@ -423,7 +428,7 @@ fn handle(
         ),
         item_id: post.message_id.clone(),
         title: title.clone(),
-        url: post.urls.first().cloned().unwrap_or_default(),
+        url: canon.clone().unwrap_or_default(),
         duration_s: None,
         word_count: i64::try_from(words).ok(),
         access: resolved.access.clone(),
@@ -460,9 +465,9 @@ fn handle(
         let created = now().format("%Y-%m-%d").to_string();
         let text = captured_note(
             post,
+            canon.as_deref(),
             &title,
             &body_md,
-            words,
             &tags,
             &created,
             complete.unwrap_or(false),
@@ -478,7 +483,7 @@ fn handle(
             )?;
         }
     }
-    for u in &post.urls {
+    if let Some(u) = &canon {
         run.sidx.insert_identity(&path, u);
     }
     cand.access = None;

@@ -3,11 +3,17 @@
 //! [`parse_eml`] turns raw message bytes into a [`MailPost`] (over `mail-parser`: MIME multipart,
 //! quoted-printable/base64 and non-UTF-8 charsets are decoded there). [`match_newsletter`] picks
 //! the configured `[[newsletter]]` row for a message by `From` (exact address or `@domain`
-//! suffix) or `List-Id`. Candidate post URLs are read from the HTML: Substack `/p/<slug>`,
-//! `open.substack.com/pub/<pub>/p/<slug>` and a "view in browser/online" anchor. A tracking
-//! redirect is unwrapped **only** when the target URL is literally in its query
-//! (`?url=`/`?u=`/`?redirect=`); nothing is ever fetched, so an ESP redirect with an opaque token
-//! yields no URL and the supersede engine's containment pass is the dedup path.
+//! suffix) or `List-Id`. Candidate post URLs (`MailPost.urls`) are read from the HTML: every href
+//! goes through the mail-clean link resolver (Substack `/redirect/2/<b64>` decoded, `?url=`/`?u=`/
+//! `?redirect=` wrappers unwrapped, tracking params stripped; an untrustworthy target is rejected),
+//! and only post shapes survive, normalized without query or fragment: `<host>/p/<slug>`, and
+//! `open.substack.com/pub/<pub>/p/<slug>` mapped to `https://<pub>.substack.com/p/<slug>`. The
+//! message's own post (its title or "view in browser" link) comes first, then body order.
+//! Nothing is ever fetched. [`canonical_post_url`] (plan intake-round-2-clean-dedupe-reading WP-2)
+//! picks the identity: the first candidate with publication evidence (the mail's Substack host or
+//! the matched blog row's host), rebased onto the blog row's host, and passed through the
+//! [`is_clean_identity`] guard (no `token=`/`r=`, JWT segment or tracker host). An unproven
+//! third-party link is never the identity; with none, the Message-ID is the identity.
 //!
 //! [`clean_body`] (plan `intake-followups-mail-youtube` WP-1) strips newsletter chrome from the
 //! converted markdown.
@@ -92,13 +98,17 @@ pub fn parse_eml(bytes: &[u8]) -> Option<MailPost> {
         .unwrap_or_else(|| format!("sha:{}", digest(bytes)));
     let html = msg.body_html(0).map(|c| c.into_owned());
     let text = msg.body_text(0).map(|c| c.into_owned());
-    let urls = html.as_deref().map(extract_post_urls).unwrap_or_default();
+    let subject = msg.subject().unwrap_or("").trim().to_owned();
+    let urls = html
+        .as_deref()
+        .map(|h| extract_post_urls_for(h, &subject))
+        .unwrap_or_default();
     Some(MailPost {
         message_id,
         from_addr,
         from_name,
         list_id,
-        subject: msg.subject().unwrap_or("").trim().to_owned(),
+        subject,
         date: msg.date().map(mail_parser::DateTime::to_rfc3339),
         html,
         text,
@@ -312,37 +322,154 @@ fn is_view_in_browser(text: &str) -> bool {
     .any(|p| t.contains(p))
 }
 
-/// Whether `url` is a Substack-style post URL: `https://<host>/p/<slug>` (a host serving
-/// `/p/<slug>` with nothing after the slug) or `open.substack.com/pub/<pub>/p/<slug>`.
-fn is_post_url(url: &str) -> bool {
-    let Some((_, rest)) = url.split_once("://") else {
-        return false;
-    };
+/// `(host, slug)` of a post URL in any accepted shape, query and fragment ignored:
+/// `https://<host>/p/<slug>`, `open.substack.com/pub/<pub>/p/<slug>` (host `<pub>.substack.com`)
+/// and `substack.com/@<handle>/p/<slug>` (host `substack.com`: the handle does not name the
+/// publication's subdomain, so this shape is kept but never proven).
+fn post_parts(url: &str) -> Option<(String, String)> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return None;
+    }
+    let (_, rest) = url.split_once("://")?;
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     let mut parts = rest.split('/');
-    let host = parts.next().unwrap_or("").to_ascii_lowercase();
-    let segs: Vec<&str> = parts.filter(|s| !s.is_empty()).collect();
-    if host == "open.substack.com" {
-        return matches!(segs.as_slice(), ["pub", _, "p", slug] if !slug.is_empty());
+    let auth = parts.next().unwrap_or("");
+    let host = auth.rsplit('@').next().unwrap_or(auth);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
     }
-    matches!(segs.as_slice(), ["p", slug] if !slug.is_empty()) && !host.is_empty()
+    let segs: Vec<&str> = parts.filter(|s| !s.is_empty()).collect();
+    let ok = |s: &str| !s.is_empty();
+    match segs.as_slice() {
+        ["pub", publ, "p", slug] if host == "open.substack.com" && ok(slug) => {
+            let publ = publ.to_ascii_lowercase();
+            (!publ.is_empty() && !publ.contains('.'))
+                .then(|| (format!("{publ}.substack.com"), (*slug).to_owned()))
+        }
+        [h, "p", slug] if host == "substack.com" && h.starts_with('@') && ok(slug) => {
+            Some((host, format!("{h}/p/{slug}")))
+        }
+        ["p", slug] if host != "open.substack.com" && ok(slug) => Some((host, (*slug).to_owned())),
+        _ => None,
+    }
 }
 
-/// Candidate post URLs of an HTML body (see the module docs), document order, deduplicated.
+/// The one clean form of a post URL: `https://<host>/p/<slug>` (no query, no fragment).
+fn normalize_post_url(url: &str) -> Option<String> {
+    let (host, slug) = post_parts(url)?;
+    Some(if slug.starts_with('@') {
+        format!("https://{host}/{slug}")
+    } else {
+        format!("https://{host}/p/{slug}")
+    })
+}
+
+/// Candidate post URLs of an HTML body (see the module docs), the message's own post first,
+/// deduplicated. Same as [`extract_post_urls_for`] with no subject.
 #[must_use]
 pub fn extract_post_urls(html: &str) -> Vec<String> {
+    extract_post_urls_for(html, "")
+}
+
+/// Candidate post URLs of an HTML body: every href resolved through the mail-clean link resolver
+/// (an untrustworthy target is rejected) and normalized to `https://<host>/p/<slug>`. The first
+/// title link (anchor text equal to `subject`) or "view in browser" link that is a post comes
+/// first, the rest follow in body order; deduplicated.
+#[must_use]
+pub fn extract_post_urls_for(html: &str, subject: &str) -> Vec<String> {
+    let subject = subject.trim().to_lowercase();
+    let mut own: Option<String> = None;
     let mut out: Vec<String> = Vec::new();
     for (href, text) in anchors(html) {
-        let url = unwrap_redirect(&href);
-        let lower = url.to_ascii_lowercase();
-        if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        let Some(url) = clean::resolve_link(&unwrap_redirect(&href)) else {
             continue;
+        };
+        let Some(url) = normalize_post_url(&url) else {
+            continue;
+        };
+        let t = text.trim().to_lowercase();
+        if own.is_none() && (is_view_in_browser(&t) || (!subject.is_empty() && t == subject)) {
+            own = Some(url.clone());
         }
-        if (is_post_url(&url) || is_view_in_browser(&text)) && !out.contains(&url) {
+        if !out.contains(&url) {
             out.push(url);
         }
     }
+    if let Some(o) = own
+        && let Some(i) = out.iter().position(|u| *u == o)
+    {
+        let u = out.remove(i);
+        out.insert(0, u);
+    }
     out
+}
+
+/// The canonical post identity of a message (plan intake-round-2-clean-dedupe-reading WP-2): the
+/// first candidate with **publication evidence** (its host is the mail's `substack_host`, which
+/// the mapped `open.substack.com/pub/<pub>` form also meets, or the blog row's host), rebased onto
+/// `https://<blog host>/p/<slug>` when a blog row is known. An unproven candidate is never the
+/// identity. The result passes [`is_clean_identity`]; `None` when no candidate survives.
+#[must_use]
+pub fn canonical_post_url(post: &MailPost, blog_link: Option<&str>) -> Option<String> {
+    let bare = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_owned();
+    let sub = substack_host(post).map(|h| bare(&h));
+    let blog_host = blog_link.and_then(url_host);
+    let blog_bare = blog_host.as_deref().map(bare);
+    post.urls.iter().find_map(|c| {
+        let (host, slug) = post_parts(c)?;
+        if slug.starts_with('@') {
+            return None;
+        }
+        let h = bare(&host);
+        let proven = sub.as_deref() == Some(h.as_str()) || blog_bare.as_deref() == Some(h.as_str());
+        if !proven {
+            return None;
+        }
+        let url = match &blog_host {
+            Some(b) => format!("https://{b}/p/{slug}"),
+            None => format!("https://{host}/p/{slug}"),
+        };
+        is_clean_identity(&url).then_some(url)
+    })
+}
+
+/// Defense in depth for an identity URL: rejects a query or fragment carrying `token=`/`r=`, a
+/// JWT-shaped path segment (three base64url segments joined by `.`), and tracker hosts and paths
+/// (`/redirect/`, beehiiv `/ss/c/`, `/v2/c/`, `/view/`, `/app-link/`, `link.mail.beehiiv.com`,
+/// hubspot and list-manage links).
+#[must_use]
+pub fn is_clean_identity(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let Some(host) = url_host(&lower) else {
+        return false;
+    };
+    let rest = lower.split_once("://").map_or("", |(_, r)| r);
+    let path = rest.find('/').map_or("", |i| &rest[i..]);
+    let (path, query) = path.split_once(['?', '#']).unwrap_or((path, ""));
+    let query_bad = query
+        .split(['&', '?', '#', ';'])
+        .any(|p| p.starts_with("token=") || p.starts_with("r="));
+    let tracker_host = host == "link.mail.beehiiv.com"
+        || host.contains("hubspot")
+        || host.ends_with("list-manage.com")
+        || host.starts_with("click.")
+        || host.starts_with("links.");
+    let tracker_path = ["/redirect/", "/ss/c/", "/v2/c/", "/app-link/"]
+        .iter()
+        .any(|p| path.contains(p))
+        || path.starts_with("/view/");
+    let jwt = path.split('/').any(|seg| {
+        let parts: Vec<&str> = seg.split('.').collect();
+        parts.len() == 3
+            && parts.iter().all(|p| {
+                p.len() >= 8
+                    && p.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+    });
+    !(lower.contains("token=") || query_bad || tracker_host || tracker_path || jwt)
 }
 
 #[cfg(test)]
