@@ -207,6 +207,8 @@ pub enum Kind {
         len: usize,
         summary: String,
         expanded: bool,
+        /// Whether up/down controls show (`false` for the display-sorted Sources lists).
+        reorder: bool,
     },
     /// "Add" under a list (`union`: pick the new item's kind).
     AddItem {
@@ -754,9 +756,46 @@ fn compound(node: &Node) -> bool {
     )
 }
 
+/// The Sources lists shown sorted by name with no reorder controls (plan round-10 Decision 7):
+/// the file's row order carries first-match semantics, so the sort is display-only.
+const SORTED_SOURCE_LISTS: [&str; 2] = ["blog", "newsletter"];
+
+/// The `sources.toml` vault path.
+const SOURCES_PATH: &str = cv_schema::config_path!("sources.toml");
+
+/// Whether the list at `p` in `file` is display-sorted without reorder controls.
+pub fn sorted_list(file: &str, p: &Path) -> bool {
+    file == SOURCES_PATH
+        && SORTED_SOURCE_LISTS
+            .iter()
+            .any(|k| *p == Path::root().key(k))
+}
+
+/// The order list items are shown in: file order, or (`sorted`) case-insensitive by each item's
+/// name (`names[i]`), ties by file index. Entries are file indices.
+pub fn display_order(names: &[String], sorted: bool) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..names.len()).collect();
+    if sorted {
+        order.sort_by_cached_key(|&i| (names[i].to_lowercase(), i));
+    }
+    order
+}
+
 fn list_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut Vec<Row>) {
     let len = cx.doc.len(p);
-    for i in 0..len {
+    let sorted = sorted_list(cx.file, p);
+    let summaries: Vec<String> = (0..len)
+        .map(|i| summary(cx.doc, &p.index(i), inner, i))
+        .collect();
+    let names: Vec<String> = (0..len)
+        .map(|i| {
+            cx.doc
+                .get_str(&p.index(i).key("name"))
+                .filter(|s| !s.is_empty())
+                .map_or_else(|| summaries[i].clone(), str::to_owned)
+        })
+        .collect();
+    for i in display_order(&names, sorted) {
         let ip = p.index(i);
         let expanded = cx.form.is_expanded(cx.file, &ip);
         out.push(row(
@@ -769,8 +808,9 @@ fn list_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut
                 list: p.clone(),
                 index: i,
                 len,
-                summary: summary(cx.doc, &ip, inner, i),
+                summary: summaries[i].clone(),
                 expanded,
+                reorder: !sorted,
             },
         ));
         if expanded {

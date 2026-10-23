@@ -188,3 +188,56 @@ fn map_add_and_remove_keys() {
     );
     assert!(st.file(KINDS).is_some_and(|f| f.notice().is_some()));
 }
+
+const TWO_SOURCES: &str = "[[blog]]\nname = \"zeta\"\nlink = \"https://z.example/feed\"\n\n[[blog]]\nname = \"Alpha\"\nlink = \"https://a.example/feed\"\n\n[[newsletter]]\nname = \"mid\"\n\n[[newsletter]]\nname = \"Beta\"\n\n[[youtube]]\nchannel = \"UC2\"\n\n[[youtube]]\nchannel = \"UC1\"\n";
+
+fn items_of(st: &Settings, list: &str) -> Vec<(usize, String, bool)> {
+    rows_of(st, SOURCES)
+        .into_iter()
+        .filter_map(|r| match r.kind {
+            Kind::Item {
+                list: l,
+                index,
+                summary,
+                reorder,
+                ..
+            } if l == p(list) => Some((index, summary, reorder)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn sources_lists_show_sorted_by_name_without_reorder_controls() {
+    let st = loaded(SOURCES, TWO_SOURCES);
+    assert_eq!(
+        items_of(&st, "blog"),
+        vec![(1, "Alpha".into(), false), (0, "zeta".into(), false)]
+    );
+    assert_eq!(
+        items_of(&st, "newsletter"),
+        vec![(1, "Beta".into(), false), (0, "mid".into(), false)]
+    );
+    // Another list keeps file order and its up/down controls.
+    assert_eq!(
+        items_of(&st, "youtube"),
+        vec![(0, "UC2".into(), true), (1, "UC1".into(), true)]
+    );
+    assert_eq!(
+        form::display_order(&["b".into(), "A".into()], true),
+        vec![1, 0]
+    );
+}
+
+#[test]
+fn removing_the_displayed_first_source_removes_that_file_row_and_keeps_order() {
+    let mut st = loaded(SOURCES, TWO_SOURCES);
+    // Displayed first is "Alpha" = file row 1.
+    let first = items_of(&st, "blog")[0].0;
+    st.edit(SOURCES, &DocEdit::Remove(p(&format!("blog[{first}]"))))
+        .expect("remove");
+    let text = doc_text(&st, SOURCES);
+    assert!(!text.contains("Alpha") && text.contains("zeta"), "{text}");
+    // The remaining file rows keep their order (newsletters untouched).
+    assert!(text.find("mid").expect("mid") < text.find("Beta").expect("Beta"));
+}

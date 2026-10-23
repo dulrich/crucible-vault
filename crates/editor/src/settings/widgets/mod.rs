@@ -186,7 +186,8 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
             len,
             summary,
             expanded,
-        } => structure::item(&h, cx, &list, index, len, summary, expanded),
+            reorder,
+        } => structure::item(&h, cx, &list, index, len, summary, expanded, reorder),
         Kind::AddItem { list, len, union } => structure::add_item(cx, list, len, union),
         Kind::Variant { union, tag } => choice::variant(&h, cx, union, tag),
         Kind::MapKey {

@@ -264,6 +264,12 @@ impl App {
     pub(super) fn capture_chord(&mut self, c: &crate::palette::chord::Chord) -> Task<Message> {
         use crate::palette::chord;
         use crate::settings::pages::hotkeys::{self, ACTIONS_PATH, Target};
+        if self.settings.hotkeys.searching {
+            // Round-10 WP-5: "Find by chord" — the chord only filters the list; it never reaches
+            // the owner-reject / write path below.
+            self.settings.hotkeys.search_chord(c);
+            return Task::none();
+        }
         let Some(target) = self.settings.hotkeys.recording.take() else {
             return Task::none();
         };
@@ -311,6 +317,9 @@ impl App {
             }
             HotkeyMsg::Record(t) => self.settings.hotkeys.record(t),
             HotkeyMsg::Cancel => self.settings.hotkeys.cancel(),
+            HotkeyMsg::Filter(q) => self.settings.hotkeys.filter = q,
+            HotkeyMsg::FindChord => self.settings.hotkeys.find_chord(),
+            HotkeyMsg::ClearFilter => self.settings.hotkeys.clear_filter(),
             HotkeyMsg::Clear(t) => {
                 let ad = doc(&self.settings, ACTIONS_PATH);
                 match hotkeys::clear_edit(&t, ad.as_ref()) {

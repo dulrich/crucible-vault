@@ -41,7 +41,8 @@ fn chevron(expanded: bool) -> Icon {
     }
 }
 
-/// One list item's summary row.
+/// One list item's summary row (`reorder`: show the up/down controls).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn item<'a>(
     h: &Head,
     cx: Rcx<'_>,
@@ -50,10 +51,11 @@ pub(super) fn item<'a>(
     len: usize,
     summary: String,
     expanded: bool,
+    reorder: bool,
 ) -> Element<'a, Message> {
     let (t, path) = (cx.t, &h.path);
     let mv = |to: usize| cx.on(cx.edit(DocEdit::Move(list.clone(), index, to)));
-    row![
+    let mut r = row![
         theme::icon_button(
             chevron(expanded),
             Some(cx.form(FormMsg::Toggle(path.clone()))),
@@ -64,18 +66,25 @@ pub(super) fn item<'a>(
             .height(theme::CONTROL)
             .width(Length::Fill)
             .on_press(cx.form(FormMsg::Toggle(path.clone()))),
-        theme::icon_button(
-            Icon::ChevronUp,
-            (index > 0).then(|| mv(index - 1)).flatten(),
-            t
-        ),
-        theme::icon_button(
-            Icon::ChevronDown,
-            (index + 1 < len).then(|| mv(index + 1)).flatten(),
-            t
-        ),
-        theme::icon_button(Icon::X, cx.on(cx.edit(DocEdit::Remove(path.clone()))), t),
-    ]
+    ];
+    if reorder {
+        r = r
+            .push(theme::icon_button(
+                Icon::ChevronUp,
+                (index > 0).then(|| mv(index - 1)).flatten(),
+                t,
+            ))
+            .push(theme::icon_button(
+                Icon::ChevronDown,
+                (index + 1 < len).then(|| mv(index + 1)).flatten(),
+                t,
+            ));
+    }
+    r.push(theme::icon_button(
+        Icon::X,
+        cx.on(cx.edit(DocEdit::Remove(path.clone()))),
+        t,
+    ))
     .spacing(4)
     .align_y(Alignment::Center)
     .into()

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use cv_protocol::ActionInfo;
 use cv_schema::{ConfigDoc, Path};
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row, text, text_input};
 use iced::{Element, Length};
 
 use super::PageCx;
@@ -68,6 +68,12 @@ pub enum HotkeyMsg {
     Clear(Target),
     /// Drop the command's `[keys]` override (back to the editor default).
     Reset(String),
+    /// Plan round-10 WP-5: the text filter's new value.
+    Filter(String),
+    /// Start "Find by chord": the next Ctrl/Alt chord becomes the chord filter (never an edit).
+    FindChord,
+    /// Clear both the text and the chord filter.
+    ClearFilter,
 }
 
 /// The Hotkeys page state: the capture, its last note, and snapshots of the effective keymap
@@ -80,19 +86,83 @@ pub struct HotkeyState {
     pub actions: Vec<ActionInfo>,
     /// WP-9: the bookmarks snapshot (their rows follow the config actions).
     pub bookmarks: Vec<crate::bookmarks::Bookmark>,
+    /// Round-10 WP-5: the text filter (command title / id, case-insensitive substring).
+    pub filter: String,
+    /// The chord filter: only rows bound to this chord show.
+    pub chord_filter: Option<Chord>,
+    /// "Find by chord" is waiting for a chord (distinct from per-row `recording`: the chord
+    /// is routed to the filter and never reaches the owner-reject / write path).
+    pub searching: bool,
 }
 
 impl HotkeyState {
     /// Starts a capture.
     pub fn record(&mut self, t: Target) {
         self.recording = Some(t);
+        self.searching = false;
         self.note = None;
     }
 
-    /// Cancels a capture.
+    /// Cancels a capture (per-row or the chord search).
     pub fn cancel(&mut self) {
         self.recording = None;
+        self.searching = false;
     }
+
+    /// Starts "Find by chord".
+    pub fn find_chord(&mut self) {
+        self.recording = None;
+        self.searching = true;
+        self.note = None;
+    }
+
+    /// Whether any capture (per-row or chord search) is waiting for a chord.
+    pub fn capturing(&self) -> bool {
+        self.recording.is_some() || self.searching
+    }
+
+    /// The chord search receives `c`: it becomes the chord filter.
+    pub fn search_chord(&mut self, c: &Chord) {
+        self.searching = false;
+        self.chord_filter = Some(c.clone());
+    }
+
+    /// Clears the text and chord filters.
+    pub fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.chord_filter = None;
+        self.searching = false;
+    }
+}
+
+/// The rows the filters leave: the text filter (title or id, case-insensitive substring) and,
+/// when set, only rows bound to the chord filter (its effective chords, unsaved edits or claims).
+pub fn filtered(st: &HotkeyState, rows: Vec<HotkeyRow>) -> Vec<HotkeyRow> {
+    let q = st.filter.trim().to_lowercase();
+    let claimed = st
+        .chord_filter
+        .as_ref()
+        .and_then(|c| st.keymap.claims.get(c));
+    rows.into_iter()
+        .filter(|r| {
+            q.is_empty()
+                || r.title.to_lowercase().contains(&q)
+                || r.target.id().to_lowercase().contains(&q)
+        })
+        .filter(|r| {
+            let Some(c) = &st.chord_filter else {
+                return true;
+            };
+            claimed.is_some_and(|ids| ids.contains(&r.target.id()))
+                || r.chords.iter().any(|k| chord::parse(k).as_ref() == Some(c))
+        })
+        .collect()
+}
+
+/// The "unbound" line shown when a chord filter leaves no row.
+pub fn unbound_line(st: &HotkeyState, shown: &[HotkeyRow]) -> Option<String> {
+    let c = st.chord_filter.as_ref()?;
+    shown.is_empty().then(|| format!("{c}: unbound"))
 }
 
 /// One table row.
@@ -357,6 +427,38 @@ pub fn notice_bar(st: &HotkeyState, t: Tokens) -> Element<'_, Message> {
     .into()
 }
 
+/// The search strip above the list: text filter, "Find by chord", the active chord and clear.
+fn search_bar<'a>(st: &HotkeyState, t: Tokens) -> Element<'a, Message> {
+    let find = if st.searching {
+        text("press a chord… (Esc cancels)")
+            .size(14)
+            .color(t.accent_text.to_color())
+            .into()
+    } else {
+        text_button("Find by chord", Some(hk(HotkeyMsg::FindChord)), t)
+    };
+    let mut r = row![
+        text_input("filter commands", &st.filter)
+            .size(14)
+            .padding([8, 10])
+            .width(Length::Fixed(260.0))
+            .on_input(|v| hk(HotkeyMsg::Filter(v))),
+        find,
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if let Some(c) = &st.chord_filter {
+        r = r.push(text(c.to_string()).size(14));
+    }
+    r.push(icon_button(
+        Icon::X,
+        (st.chord_filter.is_some() || !st.filter.is_empty() || st.searching)
+            .then(|| hk(HotkeyMsg::ClearFilter)),
+        t,
+    ))
+    .into()
+}
+
 /// The page.
 pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     let t = cx.t;
@@ -368,7 +470,12 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     // The capture note lives in [`notice_bar`], outside the scrollable (plan editor-ui-round-3
     // WP-7): setting or clearing it never changes the list's height or scroll offset.
     let mut col = column![text(INTRO).size(13).color(t.text_faint.to_color())].spacing(8);
-    for r in rows(st, ac.and_then(|f| f.doc())) {
+    col = col.push(search_bar(st, t));
+    let shown = filtered(st, rows(st, ac.and_then(|f| f.doc())));
+    if let Some(u) = unbound_line(st, &shown) {
+        col = col.push(text(u).size(14).color(t.text_faint.to_color()));
+    }
+    for r in shown {
         let rec = st.recording.as_ref() == Some(&r.target);
         let ok = match &r.target {
             Target::Command(_) => editable,

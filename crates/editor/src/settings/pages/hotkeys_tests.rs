@@ -984,3 +984,89 @@ fn settings_sections_keep_their_body_offsets() {
         Some(&120.0)
     );
 }
+
+/// Plan round-10 WP-5: "Find by chord" routes the next chord to the filter, never to an edit.
+#[test]
+fn chord_search_shows_the_owning_row_and_edits_nothing() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    hk(&mut app, HotkeyMsg::FindChord);
+    assert!(app.settings.hotkeys.searching);
+    key(&mut app, "Ctrl+W");
+    let st = &app.settings.hotkeys;
+    assert!(!st.searching && st.recording.is_none());
+    assert_eq!(st.chord_filter, Some(c("Ctrl+W")));
+    assert_eq!(
+        st.note, None,
+        "no owner-reject note: the search is not an assignment"
+    );
+    let shown = hotkeys::filtered(st, hotkeys::rows(st, None));
+    assert!(!shown.is_empty());
+    assert!(shown.iter().all(|r| r.chords.iter().any(|k| k == "Ctrl+W")));
+    assert_eq!(hotkeys::unbound_line(st, &shown), None);
+    assert!(
+        !app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty()),
+        "the search edits no document"
+    );
+    assert!(!app.exiting);
+    // The clear button restores the list.
+    hk(&mut app, HotkeyMsg::ClearFilter);
+    let st = &app.settings.hotkeys;
+    assert_eq!(
+        hotkeys::filtered(st, hotkeys::rows(st, None)).len(),
+        hotkeys::rows(st, None).len()
+    );
+}
+
+#[test]
+fn chord_search_of_an_unbound_chord_says_unbound() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    hk(&mut app, HotkeyMsg::FindChord);
+    key(&mut app, "Alt+Shift+J");
+    let st = &app.settings.hotkeys;
+    let shown = hotkeys::filtered(st, hotkeys::rows(st, None));
+    assert!(shown.is_empty());
+    assert_eq!(
+        hotkeys::unbound_line(st, &shown).as_deref(),
+        Some("Shift+Alt+J: unbound")
+    );
+    assert!(!app.settings.file(EDITOR_PATH).is_some_and(|f| f.dirty()));
+}
+
+#[test]
+fn escape_cancels_the_chord_search_and_per_row_record_still_works() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    hk(&mut app, HotkeyMsg::FindChord);
+    let _ = app.send(Message::Palette(PaletteMsg::Escape));
+    assert!(!app.settings.hotkeys.searching);
+    assert_eq!(app.settings.hotkeys.chord_filter, None);
+    // A chord after the cancel is an ordinary key again, not a search.
+    key(&mut app, "Alt+Shift+J");
+    assert_eq!(app.settings.hotkeys.chord_filter, None);
+    // Per-row Record is unchanged.
+    hk(&mut app, HotkeyMsg::Record(Target::Command("quit".into())));
+    assert!(!app.settings.hotkeys.searching);
+    key(&mut app, "Alt+K");
+    assert_eq!(keys_of(&app, "quit"), Some(vec!["Alt+K".into()]));
+}
+
+#[test]
+fn text_filter_narrows_rows_by_title_or_id_case_insensitively() {
+    let (_tmp, d) = fake();
+    let mut app = hotkeys_app(&d);
+    let all = hotkeys::rows(&app.settings.hotkeys, None);
+    hk(&mut app, HotkeyMsg::Filter("QUIT".into()));
+    let st = &app.settings.hotkeys;
+    let shown = hotkeys::filtered(st, all.clone());
+    assert!(!shown.is_empty() && shown.len() < all.len());
+    assert!(
+        shown
+            .iter()
+            .any(|r| r.target == Target::Command("quit".into()))
+    );
+    assert!(shown.iter().all(|r| {
+        r.title.to_lowercase().contains("quit") || r.target.id().to_lowercase().contains("quit")
+    }));
+}

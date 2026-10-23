@@ -15,7 +15,7 @@ impl App {
                 ]);
             }
             PaletteMsg::Escape
-                if self.settings.hotkeys.recording.is_none()
+                if !self.settings.hotkeys.capturing()
                     && self.palette.open
                     && self.palette.prompt.is_none()
                     && !self.palette.query.is_empty() =>
@@ -25,7 +25,7 @@ impl App {
                 // plan editor-round-4 WP-1: iced unfocused the input on Escape.
                 return iced::widget::operation::focus(crate::palette::INPUT_ID);
             }
-            PaletteMsg::Close | PaletteMsg::Escape if self.settings.hotkeys.recording.is_some() => {
+            PaletteMsg::Close | PaletteMsg::Escape if self.settings.hotkeys.capturing() => {
                 self.settings.hotkeys.cancel();
             }
             PaletteMsg::Close | PaletteMsg::Escape => self.palette.close(),
@@ -153,7 +153,7 @@ impl App {
     /// recording, the chord goes to the capture instead.
     fn on_chord(&mut self, c: &crate::palette::chord::Chord) -> Task<Message> {
         use crate::palette::Bound;
-        if self.settings.hotkeys.recording.is_some() {
+        if self.settings.hotkeys.capturing() {
             return self.capture_chord(c);
         }
         match self.palette.keymap.get(c).cloned() {
