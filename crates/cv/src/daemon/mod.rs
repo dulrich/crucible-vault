@@ -46,6 +46,7 @@ mod mail_watch;
 mod memory;
 mod notes;
 mod queue;
+mod read_sync;
 
 pub(crate) use background::clear_stale_socket;
 use background::{config_poller, drain_spool};

@@ -1,5 +1,6 @@
 //! The notification bridge: vault events → `file_changed`, and notifications → view invalidation.
 
+use super::read_sync::ReadSync;
 use super::*;
 
 /// Bridges the writer's std receiver into the broadcast channel on a dedicated thread. Exits when
@@ -10,6 +11,7 @@ pub(super) fn start_event_bridge(
 ) -> Result<()> {
     let weak = Arc::downgrade(shared);
     let events = shared.events.clone();
+    let mut read_sync = seed_read_sync(shared);
     std::thread::Builder::new()
         .name("cv-events".into())
         .spawn(move || {
@@ -37,6 +39,9 @@ pub(super) fn start_event_bridge(
                 } else {
                     None
                 };
+                if let Some(s) = weak.upgrade() {
+                    sync_read(&s, &mut read_sync, &ev.path, &ev.kind);
+                }
                 let origin = match ev.origin {
                     cv_vault::Origin::Daemon => Origin::Daemon,
                     cv_vault::Origin::External => Origin::External,
@@ -61,6 +66,54 @@ pub(super) fn start_event_bridge(
         })
         .context("spawning event bridge")?;
     Ok(())
+}
+
+/// The last-seen `read` map, seeded from the index (an unreadable index logs and starts empty).
+fn seed_read_sync(shared: &Arc<Shared>) -> ReadSync {
+    let seeded = shared
+        .writer()
+        .ok_or_else(|| anyhow!("writer gone"))
+        .and_then(|w| {
+            w.call(|vw| read_sync::seed_map(&vw.index().query()))
+                .map_err(Into::into)
+                .and_then(|r| r)
+        });
+    match seeded {
+        Ok(m) => ReadSync::seeded(m),
+        Err(e) => {
+            tracing::warn!(error = %e, "read-sync seed failed; starting empty");
+            ReadSync::default()
+        }
+    }
+}
+
+/// Folds one vault event into the read-sync map and ticks the note's open tracker rows on a
+/// not-true → `true` transition. Never fails the bridge: errors are logged. The tick raises the
+/// `tracker_items` change signal on the state db (`set_tracker_item_status`), which is also what
+/// the Intake UI tick relies on to refresh views.
+fn sync_read(shared: &Arc<Shared>, rs: &mut ReadSync, path: &str, kind: &EventKind) {
+    let read_now = || {
+        let p = path.to_owned();
+        let w = shared.writer()?;
+        match w.call(move |vw| read_sync::read_of(&vw.index().query(), &p)) {
+            Ok(Ok(v)) => Some(v),
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "read-sync: index read failed");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "read-sync: writer gone");
+                None
+            }
+        }
+    };
+    if rs.observe(path, kind, read_now) {
+        match read_sync::tick_open_rows(&shared.state, path) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "read-sync: ticked open tracker rows"),
+            Err(e) => tracing::warn!(error = %e, "read-sync: tick failed"),
+        }
+    }
 }
 
 /// Coalescing window for incremental note changes → one `views_invalidated` (plan
