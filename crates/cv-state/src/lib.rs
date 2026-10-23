@@ -31,4 +31,4 @@ pub use store::{
     BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, QueueConfig,
     RequeueBreakdown, RetryOutcome, StateDb, StateReader,
 };
-pub use tracker::{IntakeQuery, Rekey, TrackerItem};
+pub use tracker::{IntakeQuery, Rekey, TrackerEvidence, TrackerItem};

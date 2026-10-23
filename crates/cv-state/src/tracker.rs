@@ -7,6 +7,18 @@ use crate::store::StateDb;
 use cv_protocol::TrackerOutcome;
 use rusqlite::{OptionalExtension, params};
 
+/// The access/completeness evidence [`StateDb::finalize_tracker_item`] writes (each value as the
+/// caller computed it; `None` clears the column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TrackerEvidence<'a> {
+    /// `access` (`free`/`paid`/...).
+    pub access: Option<&'a str>,
+    /// `complete`.
+    pub complete: Option<bool>,
+    /// `full_word_count`.
+    pub full_word_count: Option<i64>,
+}
+
 /// One `tracker_items` row. Key: (`source_kind`, `source_key`, `item_id`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackerItem {
@@ -247,34 +259,46 @@ impl StateDb {
         Ok(rows)
     }
 
-    /// Sets the access/completeness evidence on one row (plan auto-intake-sprint WP-2; for the
-    /// re-probe and backfill paths). Returns whether a row matched; raises the `tracker_items`
-    /// change signal when one did.
-    pub fn set_tracker_completeness(
+    /// Finalizes one row in one transaction (plan tn-review-2026-10-23-remediation WP-R1): writes
+    /// `evidence` when given, and — only when the caller's own rule authorizes `tick` — sets the
+    /// status to `x` where it is NULL (D-a: a done `x` or cancelled `-` row keeps its status).
+    /// Never infers a tick from stored completeness. Returns whether the row was ticked; raises
+    /// the `tracker_items` change signal when anything changed.
+    pub fn finalize_tracker_item(
         &mut self,
         source_kind: &str,
         source_key: &str,
         item_id: &str,
-        access: Option<&str>,
-        complete: Option<bool>,
-        full_word_count: Option<i64>,
+        evidence: Option<TrackerEvidence<'_>>,
+        tick: bool,
     ) -> Result<bool> {
-        let n = self.conn().execute(
-            "UPDATE tracker_items SET access = ?4, complete = ?5, full_word_count = ?6
-             WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
-            params![
-                source_kind,
-                source_key,
-                item_id,
-                access,
-                complete,
-                full_word_count
-            ],
-        )?;
-        if n > 0 {
+        let tx = self.conn().unchecked_transaction()?;
+        let mut changed = 0;
+        if let Some(ev) = evidence {
+            changed += tx.execute(
+                "UPDATE tracker_items SET access = ?4, complete = ?5, full_word_count = ?6
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3",
+                params![
+                    source_kind,
+                    source_key,
+                    item_id,
+                    ev.access,
+                    ev.complete,
+                    ev.full_word_count
+                ],
+            )?;
+        }
+        let ticked = tick
+            && tx.execute(
+                "UPDATE tracker_items SET status = 'x'
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3 AND status IS NULL",
+                params![source_kind, source_key, item_id],
+            )? > 0;
+        tx.commit()?;
+        if changed > 0 || ticked {
             self.changed("tracker_items");
         }
-        Ok(n > 0)
+        Ok(ticked)
     }
 
     /// Sets one item's task status (`None` = open). Returns whether a row matched; raises the

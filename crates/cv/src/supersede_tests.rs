@@ -271,3 +271,31 @@ fn replaced_keeps_an_existing_publication() {
     assert!(t.contains("publication: Old Pub\n"), "{t}");
     assert!(!t.contains("Synth Pub"), "{t}");
 }
+
+/// WP-R1 / D-a: a complete supersede resolve writes the evidence but never overwrites a
+/// cancelled `-` row's status.
+#[test]
+fn cancelled_row_survives_a_complete_resolve() {
+    let (stub, full) = (words("w", 0, 30), words("w", 0, 100));
+    let url = "https://ex.substack.com/p/c";
+    let e = env(&[(
+        "notes/a.md",
+        note(
+            url,
+            "word-count: 30\naccess: paid\ncomplete: false\n",
+            &stub,
+        ),
+    )]);
+    row(&e, "notes/a.md", url);
+    e.state
+        .lock()
+        .unwrap()
+        .set_tracker_item_status("blog", "feed", url, Some('-'))
+        .unwrap();
+    let mut inc = incoming(&[url], &full);
+    inc.access = Some(Access::Free);
+    inc.complete = Some(true);
+    let r = run(&e, &inc);
+    assert_eq!(r.action, Verdict::Replaced);
+    assert_eq!(row_state(&e, url), (Some(true), Some('-')));
+}

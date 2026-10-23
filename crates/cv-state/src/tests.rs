@@ -52,6 +52,78 @@ fn migrations_reach_latest_and_reopen_is_idempotent() {
     );
 }
 
+/// WP-R1 / D-a: the finalize op ticks only NULL rows and only when `tick` is set; evidence
+/// always writes.
+#[test]
+fn finalize_tracker_item_ticks_only_open_rows_when_authorized() {
+    let (_d, mut s) = db();
+    let mk = |id: &str| TrackerItem {
+        source_kind: "blog".into(),
+        source_key: "f".into(),
+        item_id: id.into(),
+        title: "T".into(),
+        url: format!("u/{id}"),
+        first_seen_ms: 1,
+        day: "2026-10-17".into(),
+        outcome: TrackerOutcome::Note,
+        score: None,
+        full_body: None,
+        note_path: None,
+        source_name: None,
+        duration_s: None,
+        word_count: None,
+        access: None,
+        complete: None,
+        full_word_count: None,
+    };
+    for id in ["open", "done", "cancel", "untick"] {
+        assert!(s.insert_tracker_item(&mk(id)).unwrap());
+    }
+    s.set_tracker_item_status("blog", "f", "done", Some('x'))
+        .unwrap();
+    s.set_tracker_item_status("blog", "f", "cancel", Some('-'))
+        .unwrap();
+    let ev = TrackerEvidence {
+        access: Some("free"),
+        complete: Some(true),
+        full_word_count: Some(42),
+    };
+    assert!(
+        s.finalize_tracker_item("blog", "f", "open", Some(ev), true)
+            .unwrap()
+    );
+    assert!(
+        !s.finalize_tracker_item("blog", "f", "done", Some(ev), true)
+            .unwrap()
+    );
+    assert!(
+        !s.finalize_tracker_item("blog", "f", "cancel", Some(ev), true)
+            .unwrap()
+    );
+    assert!(
+        !s.finalize_tracker_item("blog", "f", "untick", Some(ev), false)
+            .unwrap()
+    );
+    for (id, want) in [
+        ("open", Some(Some('x'))),
+        ("done", Some(Some('x'))),
+        ("cancel", Some(Some('-'))),
+        ("untick", Some(None)),
+    ] {
+        assert_eq!(
+            s.tracker_item_status("blog", "f", id).unwrap(),
+            want,
+            "{id}"
+        );
+        let got = s.tracker_item("blog", "f", id).unwrap().unwrap();
+        assert_eq!(
+            (got.access.as_deref(), got.complete, got.full_word_count),
+            (Some("free"), Some(true), Some(42)),
+            "{id} evidence"
+        );
+    }
+}
+
 #[test]
 fn set_tracker_item_done_round_trips_and_signals() {
     use std::sync::{Arc, Mutex};
@@ -80,8 +152,13 @@ fn set_tracker_item_done_round_trips_and_signals() {
         s.tracker_item("blog", "f", "p1").unwrap(),
         Some(item.clone())
     );
+    let ev = TrackerEvidence {
+        access: Some("paid"),
+        complete: Some(false),
+        full_word_count: Some(900),
+    };
     assert!(
-        s.set_tracker_completeness("blog", "f", "p1", Some("paid"), Some(false), Some(900))
+        !s.finalize_tracker_item("blog", "f", "p1", Some(ev), false)
             .unwrap()
     );
     let got = s.tracker_item("blog", "f", "p1").unwrap().unwrap();
@@ -90,7 +167,7 @@ fn set_tracker_item_done_round_trips_and_signals() {
         (Some("paid"), Some(false), Some(900))
     );
     assert!(
-        s.set_tracker_completeness("blog", "f", "p1", None, None, None)
+        !s.finalize_tracker_item("blog", "f", "p1", Some(TrackerEvidence::default()), false)
             .unwrap()
     );
     assert_eq!(s.tracker_item("blog", "f", "p1").unwrap(), Some(item));

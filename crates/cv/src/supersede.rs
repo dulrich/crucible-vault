@@ -372,16 +372,42 @@ pub fn preview(
     cfg: &SupersedeConfig,
     inc: &Incoming<'_>,
 ) -> Result<Resolved, StepError> {
+    Ok(planned(ctx, idx, cfg, inc)?.resolved)
+}
+
+/// The one Decision → [`Resolved`] mapping, plus what [`resolve`]'s apply step needs: the
+/// `Kept` fallback for a `Replace` whose old body could not be saved, and the incoming words.
+struct Planned {
+    resolved: Resolved,
+    fallback: Option<Resolved>,
+    words: u64,
+}
+
+fn planned(
+    ctx: &StepCtx<'_>,
+    idx: &SupersedeIndex,
+    cfg: &SupersedeConfig,
+    inc: &Incoming<'_>,
+) -> Result<Planned, StepError> {
     let incoming = Side::new(words(inc.body_md), inc.complete, inc.body_md);
-    Ok(match choose(ctx, idx, cfg, inc, &incoming)? {
-        None | Some((_, _, Decision::Distinct)) => Resolved::new_item(),
-        Some((p, e, Decision::Keep)) => kept(p, &e),
-        Some((p, e, Decision::Replace)) => Resolved {
-            path: Some(p),
-            action: Action::Replaced,
-            access: inc.access.map(|a| a.as_str().to_owned()).or(e.access),
-            complete: inc.complete,
-        },
+    let (resolved, fallback) = match choose(ctx, idx, cfg, inc, &incoming)? {
+        None | Some((_, _, Decision::Distinct)) => (Resolved::new_item(), None),
+        Some((p, e, Decision::Keep)) => (kept(p, &e), None),
+        Some((p, e, Decision::Replace)) => {
+            let fallback = kept(p.clone(), &e);
+            let r = Resolved {
+                path: Some(p),
+                action: Action::Replaced,
+                access: inc.access.map(|a| a.as_str().to_owned()).or(e.access),
+                complete: inc.complete,
+            };
+            (r, Some(fallback))
+        }
+    };
+    Ok(Planned {
+        resolved,
+        fallback,
+        words: incoming.words,
     })
 }
 
@@ -393,24 +419,16 @@ pub fn resolve(
     cfg: &SupersedeConfig,
     inc: &Incoming<'_>,
 ) -> Result<Resolved, StepError> {
-    let incoming = Side::new(words(inc.body_md), inc.complete, inc.body_md);
-    let chosen = choose(ctx, idx, cfg, inc, &incoming)?;
-    let resolved = match chosen {
-        None | Some((_, _, Decision::Distinct)) => Resolved::new_item(),
-        Some((p, e, Decision::Keep)) => kept(p, &e),
-        Some((p, e, Decision::Replace)) => {
-            if replace(ctx, &p, inc, incoming.words)? {
-                Resolved {
-                    path: Some(p),
-                    action: Action::Replaced,
-                    access: inc.access.map(|a| a.as_str().to_owned()).or(e.access),
-                    complete: inc.complete,
-                }
-            } else {
-                kept(p, &e)
-            }
-        }
-    };
+    let Planned {
+        mut resolved,
+        fallback,
+        words: n_words,
+    } = planned(ctx, idx, cfg, inc)?;
+    if let (Some(p), Some(fallback)) = (resolved.path.clone(), fallback)
+        && !replace(ctx, &p, inc, n_words)?
+    {
+        resolved = fallback;
+    }
     debug_assert!(
         resolved.path.is_none() || resolved.path.as_deref() != inc.own_path,
         "supersede resolved an item to its own path"
@@ -541,9 +559,9 @@ fn finalize(ctx: &StepCtx<'_>, path: &str, urls: &[String], r: &Resolved) -> Res
     finalize_rows(&mut db, rows, r)
 }
 
-/// Finalize's evidence-then-tick write for an already-resolved row set (shared with
-/// `intake_finalize`, plan intake-followups-mail-youtube WP-4): every row gets `r`'s
-/// `access`/`complete` first, and is ticked only when `r.complete == Some(true)`.
+/// Finalize's write for an already-resolved row set: every row gets `r`'s `access`/`complete`
+/// (else its own) and, in the same transaction, is ticked only when `r.complete == Some(true)`
+/// and its status is still open (D-a).
 pub(crate) fn finalize_rows(
     db: &mut cv_state::StateDb,
     rows: Vec<cv_state::TrackerItem>,
@@ -552,19 +570,19 @@ pub(crate) fn finalize_rows(
     let st = |e: cv_state::StateError| StepError::failed(format!("state: {e}"));
     for row in rows {
         let access = r.access.clone().or(row.access.clone());
-        db.set_tracker_completeness(
+        let ev = cv_state::TrackerEvidence {
+            access: access.as_deref(),
+            complete: r.complete.or(row.complete),
+            full_word_count: row.full_word_count,
+        };
+        db.finalize_tracker_item(
             &row.source_kind,
             &row.source_key,
             &row.item_id,
-            access.as_deref(),
-            r.complete.or(row.complete),
-            row.full_word_count,
+            Some(ev),
+            r.complete == Some(true),
         )
         .map_err(st)?;
-        if r.complete == Some(true) {
-            db.set_tracker_item_status(&row.source_kind, &row.source_key, &row.item_id, Some('x'))
-                .map_err(st)?;
-        }
     }
     Ok(())
 }

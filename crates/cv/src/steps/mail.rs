@@ -524,7 +524,7 @@ fn handle(
     // Auto-done when complete; an unknown sender is left open for a human to look at.
     if inserted && nl.is_some() && complete == Some(true) {
         ctx.state()
-            .set_tracker_item_status(KIND, &key, &post.message_id, Some('x'))?;
+            .finalize_tracker_item(KIND, &key, &post.message_id, None, true)?;
     }
     Ok(Handled::New)
 }

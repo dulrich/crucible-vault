@@ -74,17 +74,14 @@ pub(super) fn tick_open_rows(state: &Mutex<StateDb>, path: &str) -> Result<usize
     let mut db = lock(state);
     let mut ticked = 0;
     for item in db.tracker_items_for_note(path)? {
-        let open = db
-            .tracker_item_status(&item.source_kind, &item.source_key, &item.item_id)?
-            .is_some_and(|s| s.is_none());
-        if open
-            && db.set_tracker_item_status(
-                &item.source_kind,
-                &item.source_key,
-                &item.item_id,
-                Some('x'),
-            )?
-        {
+        // The op's NULL-status guard leaves cancelled and done rows alone.
+        if db.finalize_tracker_item(
+            &item.source_kind,
+            &item.source_key,
+            &item.item_id,
+            None,
+            true,
+        )? {
             ticked += 1;
         }
     }

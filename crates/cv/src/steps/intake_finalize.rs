@@ -14,9 +14,9 @@
 //!    never undone):
 //!    - `youtube`: only when the note's **own** `source` (else `yt-video-id`) is that video and
 //!      [`cv_note::transcript_evidence`] holds — a clipping of the video, not a note that embeds
-//!      it (user decision, 2026-10-21). Evidence first (`complete = true`), then the tick.
-//!    - `blog` / `mail`: the supersede engine's finalize write ([`crate::supersede::finalize_rows`],
-//!      evidence before tick, audit M2 of plan auto-intake-sprint) with the note's `complete`
+//!      it (user decision, 2026-10-21). Evidence (`complete = true`) and the tick in one transaction.
+//!    - `blog` / `mail`: the same evidence + tick write as the supersede engine (`finalize_tracker_item`,
+//!      one transaction, audit M2 of plan auto-intake-sprint) with the note's `complete`
 //!      frontmatter, else the completeness predicate of the note body
 //!      ([`super::reconcile::body_verdict`], `cv_ingest::access::completeness`).
 //!    - Other kinds are linked only. The live tracker has no X rows, so no `x` arm exists.
@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::Access;
 use cv_note::{FrontmatterDoc, JsValue, transcript_evidence};
-use cv_state::TrackerItem;
+use cv_state::{TrackerEvidence, TrackerItem};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -39,7 +39,6 @@ use super::file::target_path;
 use super::params::{check_keys, check_placeholders, get_str};
 use super::reconcile::body_verdict;
 use super::{StepCtx, StepError, StepModule, StepOutcome};
-use crate::supersede::{Action, Resolved, finalize_rows};
 
 /// The `intake_finalize` step.
 pub(crate) struct IntakeFinalize;
@@ -250,18 +249,14 @@ pub(crate) fn finalize_note(
             "youtube" => {
                 if video.as_deref() == Some(id.as_str()) && evidence.is_some() {
                     if !dry {
-                        let mut db = ctx.state();
-                        // Evidence first, tick second (finalize's order).
-                        db.set_tracker_completeness(
-                            kind,
-                            key,
-                            id,
-                            row.access.as_deref(),
-                            Some(true),
-                            row.full_word_count,
-                        )
-                        .map_err(st)?;
-                        db.set_tracker_item_status(kind, key, id, Some('x'))
+                        // Evidence and tick in one transaction.
+                        let ev = TrackerEvidence {
+                            access: row.access.as_deref(),
+                            complete: Some(true),
+                            full_word_count: row.full_word_count,
+                        };
+                        ctx.state()
+                            .finalize_tracker_item(kind, key, id, Some(ev), true)
                             .map_err(st)?;
                     }
                     v.ticked += 1;
@@ -289,13 +284,15 @@ pub(crate) fn finalize_note(
                     )
                 });
                 if !dry {
-                    let r = Resolved {
-                        path: Some(path.to_owned()),
-                        action: Action::Kept,
-                        access,
-                        complete,
+                    let access = access.or_else(|| row.access.clone());
+                    let ev = TrackerEvidence {
+                        access: access.as_deref(),
+                        complete: complete.or(row.complete),
+                        full_word_count: row.full_word_count,
                     };
-                    finalize_rows(&mut ctx.state(), vec![row.clone()], &r)?;
+                    ctx.state()
+                        .finalize_tracker_item(kind, key, id, Some(ev), complete == Some(true))
+                        .map_err(st)?;
                 }
                 if complete == Some(true) {
                     v.ticked += 1;

@@ -588,7 +588,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 // Ticked only on the resolved body's predicate (audit M2), never on a match alone.
                 if inserted && outcome == TrackerOutcome::Note && cand.complete == Some(true) {
                     ctx.state()
-                        .set_tracker_item_status(KIND, &key, &post.post_id, Some('x'))?;
+                        .finalize_tracker_item(KIND, &key, &post.post_id, None, true)?;
                 }
                 evidence.push_back(post.has_body());
                 continue;
@@ -618,7 +618,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 // Auto-done when complete (plan auto-intake-sprint Decisions locked).
                 if inserted && ev.complete == Some(true) {
                     ctx.state()
-                        .set_tracker_item_status(KIND, &key, &post.post_id, Some('x'))?;
+                        .finalize_tracker_item(KIND, &key, &post.post_id, None, true)?;
                 }
             } else if emit_line_with(ctx, &cand, full, &mut out.output_paths)?
                 != super::Emitted::AlreadyRecorded

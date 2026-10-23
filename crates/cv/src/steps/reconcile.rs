@@ -12,7 +12,7 @@
 //! 3. **Auto-done** each open row with a resolved note: the completeness predicate
 //!    ([`cv_ingest::access::completeness`]) is applied to the *resolved body* (its own word
 //!    count, the row's probed `access`/`full_word_count`, the `[[blog]]` row's paywall markers),
-//!    the evidence is written first (`set_tracker_completeness`), and the row is ticked only on
+//!    the evidence and the tick go in one transaction (`finalize_tracker_item`), ticked only on
 //!    `Some(true)`. A link or a match alone never ticks.
 //!
 //! Plan `intake-followups-mail-youtube` WP-5 adds three backfill phases (detail and vars in
@@ -294,26 +294,21 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         );
         let complete = verdict.or(w.item.complete);
         if !dry {
-            // Evidence first, tick second (never tick on a match alone).
-            let mut db = ctx.state();
-            db.set_tracker_completeness(
-                &w.item.source_kind,
-                &w.item.source_key,
-                &w.item.item_id,
-                access_s.as_deref(),
+            // Evidence and tick in one transaction (never tick on a match alone).
+            let ev = cv_state::TrackerEvidence {
+                access: access_s.as_deref(),
                 complete,
-                w.full_wc,
-            )
-            .map_err(st)?;
-            if verdict == Some(true) {
-                db.set_tracker_item_status(
+                full_word_count: w.full_wc,
+            };
+            ctx.state()
+                .finalize_tracker_item(
                     &w.item.source_kind,
                     &w.item.source_key,
                     &w.item.item_id,
-                    Some('x'),
+                    Some(ev),
+                    verdict == Some(true),
                 )
                 .map_err(st)?;
-            }
         }
         if verdict == Some(true) {
             v.ticked += 1;
@@ -397,14 +392,18 @@ fn probe(ctx: &StepCtx<'_>, work: &mut [Work], dry: bool, v: &mut Vars) -> Resul
                 w.access = Some(a.as_str().to_owned());
                 w.full_wc = wc.map(i64::from);
                 if !dry {
+                    let ev = cv_state::TrackerEvidence {
+                        access: w.access.as_deref(),
+                        complete: w.item.complete,
+                        full_word_count: w.full_wc,
+                    };
                     ctx.state()
-                        .set_tracker_completeness(
+                        .finalize_tracker_item(
                             &w.item.source_kind,
                             &w.item.source_key,
                             &w.item.item_id,
-                            w.access.as_deref(),
-                            w.item.complete,
-                            w.full_wc,
+                            Some(ev),
+                            false,
                         )
                         .map_err(st)?;
                 }
