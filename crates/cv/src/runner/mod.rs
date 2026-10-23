@@ -789,8 +789,9 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 let inner2 = Arc::clone(&inner);
                 let job_id = id.clone();
                 let lane = job.lane;
+                let retry = job.attempts > 1;
                 match tokio::task::spawn_blocking(move || {
-                    let r = execute_steps(&inner2, &job_id, lane, &action, &jp, &config);
+                    let r = execute_steps(&inner2, &job_id, lane, retry, &action, &jp, &config);
                     trim_after_job();
                     r
                 })
@@ -891,6 +892,7 @@ fn execute_steps(
     inner: &Inner,
     job_id: &str,
     lane: Lane,
+    retry: bool,
     action: &Action,
     jp: &JobParams,
     config: &ConfigSet,
@@ -1002,6 +1004,29 @@ fn execute_steps(
                     JobResult::Failed {
                         error: format!("step {} ({}): {message}", i + 1, step.kind().as_str()),
                         reason,
+                    },
+                    summary,
+                );
+            }
+            Err(StepError::NoteGone { path }) => {
+                // A retried job whose note was moved or deleted since the first attempt settles
+                // quietly (plan round-11 Decision 3); a first attempt still fails.
+                if retry {
+                    tracing::info!(
+                        job = job_id,
+                        step = i + 1,
+                        "note moved or deleted; job skipped"
+                    );
+                    return (JobResult::Done, summary);
+                }
+                return (
+                    JobResult::Failed {
+                        error: format!(
+                            "step {} ({}): {path} not found",
+                            i + 1,
+                            step.kind().as_str()
+                        ),
+                        reason: None,
                     },
                     summary,
                 );

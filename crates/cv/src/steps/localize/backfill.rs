@@ -123,6 +123,12 @@ pub(super) fn execute_folder(
                 let left = ctx
                     .read(f)?
                     .is_some_and(|(b, _)| std::str::from_utf8(&b).is_ok_and(has_remote_image_refs));
+                if left && v.all_unreachable {
+                    // The network is down: not recorded, so a later run retries the note;
+                    // ends the batch like the former network deferral.
+                    attempted -= 1;
+                    break;
+                }
                 if left && hit_limit {
                     attempted -= 1;
                     throttled += 1;

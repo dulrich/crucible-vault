@@ -307,7 +307,7 @@ fn one_failed_download_among_several_is_counted_and_left() {
 }
 
 #[test]
-fn all_unreachable_defers() {
+fn all_unreachable_succeeds_and_leaves_the_refs() {
     let port = MockHttp::unused_port(); // nothing listens: connection refused
     let note = format!("![](http://127.0.0.1:{port}/a.png) ![](http://127.0.0.1:{port}/b.png)\n");
     let (env, res) = with_server(HashMap::new(), None, move |_, _| {
@@ -316,15 +316,33 @@ fn all_unreachable_defers() {
         let res = env.run(&step, "n.md");
         (env, res)
     });
-    assert_eq!(
-        res,
-        Err(StepError::Deferred {
-            retry_after_ms: 60_000,
-            service: Some("network".into()),
-            cause: DeferCause::Transient(cv_state::ServiceFailureKind::Timeout)
-        })
-    );
+    // Plan round-11 Decision 2: success, so the chain goes on to describe and auto-file.
+    let out = res.unwrap();
+    assert!(!out.stop);
+    assert_eq!(out.vars.get("changed"), Some(&Value::Bool(false)));
     assert!(env.text("n.md").contains("http://127.0.0.1"));
+}
+
+#[test]
+fn folder_backfill_leaves_an_all_unreachable_note_unrecorded() {
+    let port = MockHttp::unused_port();
+    let note = format!("![](http://127.0.0.1:{port}/a.png)\n");
+    let (env, out) = with_server(HashMap::new(), None, move |_, _| {
+        let env = env(&[("Clippings/n.md", note.as_bytes())]);
+        let step = env.step("scope = \"folder\"\nfolder = \"Clippings\"\ntimeout_secs = 5");
+        let out = env.run(&step, "").unwrap();
+        (env, out)
+    });
+    assert_eq!(var(&out, "failed"), 0);
+    assert_eq!(var(&out, "ineligible"), 0);
+    assert!(ignored(&env).is_empty(), "not in the exclusion set");
+    assert!(
+        !env.state
+            .lock()
+            .unwrap()
+            .is_ignored(localize::RETRY_KIND, "Clippings/n.md")
+            .unwrap()
+    );
 }
 
 #[test]

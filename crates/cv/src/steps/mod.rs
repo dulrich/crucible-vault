@@ -162,6 +162,12 @@ pub enum StepError {
         /// Typed cause.
         reason: Option<FailureReason>,
     },
+    /// The step's target note no longer exists. A retried job settles this as skipped ("note
+    /// moved or deleted", no Error notification); a first attempt fails as before.
+    NoteGone {
+        /// The vault path that was not found.
+        path: String,
+    },
     /// Not finishable now; the job is requeued after `retry_after_ms` and resumes at this step.
     Deferred {
         /// Delay.
@@ -289,6 +295,7 @@ impl std::fmt::Display for StepError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StepError::Failed { message, .. } => f.write_str(message),
+            StepError::NoteGone { path } => write!(f, "{path} not found"),
             StepError::Deferred { retry_after_ms, .. } => {
                 write!(f, "deferred for {retry_after_ms} ms")
             }

@@ -299,6 +299,32 @@ async fn cancel_stops_before_next_step() {
     assert!(!r.request_cancel(&id), "no longer running");
 }
 
+/// Plan round-11 Decision 3: a retried job whose note is gone settles quietly, never Failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retry_after_the_note_is_gone_settles_done_not_failed() {
+    let f = fixture();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c2 = Arc::clone(&calls);
+    let exec = FnExec(Box::new(move |_, _| {
+        if c2.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(StepError::Deferred {
+                retry_after_ms: 20,
+                service: None,
+                cause: crate::steps::DeferCause::Wait,
+            });
+        }
+        Err(StepError::NoteGone {
+            path: "Clippings/old.md".into(),
+        })
+    }));
+    let r = runner(&f, Arc::new(exec), Arc::new(SystemClock), 1, ONE_STEP);
+    let id = enqueue(&r, "look", Some("Clippings/old.md"), Lane::User);
+    let (_stop_tx, stop) = watch::channel(false);
+    let _h = r.spawn_claim_loop(stop);
+    assert_eq!(wait_terminal(&f, &id).await, DbStatus::Done);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
 /// Audit E2 (pin 6): a crash mid-action never re-runs an applied step.
 #[test]
 fn crash_mid_action_resumes_at_first_unapplied_step() {

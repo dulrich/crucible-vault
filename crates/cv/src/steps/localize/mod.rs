@@ -140,6 +140,9 @@ pub(super) struct NoteVars {
     /// The first throttled download (not a var).
     #[serde(skip)]
     pub(super) throttle: Option<FetchError>,
+    /// Every remote ref was unreachable (not a var).
+    #[serde(skip)]
+    pub(super) all_unreachable: bool,
 }
 
 /// The download/rewrite counts of a localized `.md` note.
@@ -170,7 +173,7 @@ pub(super) fn execute_note(
         return Ok((NoteVars::default(), Vec::new()));
     }
     let Some((bytes, _)) = ctx.read(&path)? else {
-        return Err(StepError::failed(format!("localize: {path} not found")));
+        return Err(StepError::NoteGone { path });
     };
     let content = String::from_utf8(bytes)
         .map_err(|_| StepError::failed(format!("localize: {path} is not UTF-8")))?;
@@ -256,13 +259,13 @@ pub(super) fn execute_note(
         }
     }
 
+    // Every remote ref unreachable: the refs stay as they are and the step succeeds so the
+    // chain goes on (describe, auto-file); the backfill re-attempts the note later (it is in
+    // neither exclusion set) at whatever path it then has (plan round-11 Decision 2).
     let c = &run.counts;
-    if c.remote_attempts > 0 && c.unreachable == c.remote_attempts {
-        return Err(StepError::Deferred {
-            retry_after_ms: 60_000,
-            service: Some("network".into()),
-            cause: super::DeferCause::Transient(cv_state::ServiceFailureKind::Timeout),
-        });
+    let all_unreachable = c.remote_attempts > 0 && c.unreachable == c.remote_attempts;
+    if all_unreachable {
+        tracing::warn!(note = %path, refs = c.remote_attempts, "localize: every remote image unreachable; left for the backfill");
     }
 
     // The one note write (I2), after every download (SR7): `modify` re-reads the note and
@@ -337,6 +340,7 @@ pub(super) fn execute_note(
         images,
         counts: Some(counts),
         throttle: run.counts.first_throttle.take(),
+        all_unreachable,
     };
     Ok((vars, output_paths))
 }
