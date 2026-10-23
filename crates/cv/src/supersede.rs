@@ -33,6 +33,7 @@ use cv_ingest::access::Access;
 use cv_ingest::supersede::{Decision, Side, decide, identity_keys, overlap};
 use cv_note::{FrontmatterDoc, JsValue, calculate_word_count};
 use cv_text::similar::Shingles;
+use cv_text::url_canon::canonical_bare_host;
 
 use crate::steps::{StepCtx, StepError};
 
@@ -151,12 +152,6 @@ fn norm_author(a: &str) -> String {
     a.split('|').next().unwrap_or(a).trim().to_lowercase()
 }
 
-fn host_of(url: &str) -> Option<String> {
-    cv_text::canonicalize_url(url)
-        .map(|c| c.domain.trim_start_matches("www.").to_lowercase())
-        .filter(|d| !d.is_empty())
-}
-
 fn parse_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s.trim().get(..10)?, "%Y-%m-%d").ok()
 }
@@ -175,7 +170,7 @@ impl SupersedeIndex {
         for r in rows("source")? {
             for s in json_strings(&r.value) {
                 idx.insert_identity(&r.path, &s);
-                if let Some(h) = host_of(&s) {
+                if let Some(h) = canonical_bare_host(&s) {
                     idx.notes.entry(r.path.clone()).or_default().host = Some(h);
                 }
             }
@@ -281,7 +276,7 @@ fn content_candidates(
     let host = inc
         .host
         .clone()
-        .or_else(|| inc.urls.iter().find_map(|u| host_of(u)));
+        .or_else(|| inc.urls.iter().find_map(|u| canonical_bare_host(u)));
     let authors: BTreeSet<String> = inc
         .authors
         .iter()

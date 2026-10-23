@@ -10,6 +10,9 @@ publish.workspace = true
 quick-xml = "=0.41.0"
 htmd = "=0.5.6"
 mail-parser = { version = "=0.11.9", default-features = false, features = ["full_encoding"] }
+# Plan tn-review-2026-10-23-remediation WP-R4 (packages already locked; edge lines only).
+base64 = "=0.22.1"
+serde_json = "=1.0.154"
 cv-text = { path = "../cv-text" }
 
 [lints]

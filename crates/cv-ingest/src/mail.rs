@@ -20,9 +20,12 @@
 //!
 //! Pure: no I/O, no async.
 
+#[cfg(test)]
+use cv_text::url_canon::http_host as url_host;
+use cv_text::url_canon::{bare_host_name, http_host, http_parts};
 use mail_parser::MessageParser;
 
-#[path = "mail_clean.rs"]
+#[path = "mail_clean/mod.rs"]
 mod clean;
 pub use clean::{clean_body, clean_body_with, strip_html_chrome};
 
@@ -162,19 +165,6 @@ pub fn match_newsletter<'a, T>(
     })
 }
 
-/// The lowercased host of an `http(s)` URL (userinfo, port, path, query and fragment dropped).
-#[must_use]
-pub fn url_host(url: &str) -> Option<String> {
-    let lower = url.trim().to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))?;
-    let auth = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let host = auth.rsplit('@').next().unwrap_or(auth);
-    let host = host.split(':').next().unwrap_or(host);
-    (!host.is_empty()).then(|| host.to_owned())
-}
-
 /// The `<pub>.substack.com` host a message comes from (plan intake-followups-mail-youtube WP-2):
 /// the `List-Id` when it is exactly `<pub>.substack.com` (one non-empty label), else
 /// `<local>.substack.com` for a `<local>@substack.com` sender, else `None`.
@@ -202,34 +192,15 @@ pub fn substack_host(post: &MailPost) -> Option<String> {
 /// Query keys whose value is a literal target URL.
 const REDIRECT_KEYS: [&str; 3] = ["url", "u", "redirect"];
 
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
-        {
-            out.push(h * 16 + l);
-            i += 3;
-            continue;
-        }
-        out.push(if b[i] == b'+' { b' ' } else { b[i] });
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex(c: u8) -> Option<u8> {
-    char::from(c)
-        .to_digit(16)
-        .and_then(|d| u8::try_from(d).ok())
+/// A query-string value decoded: `cv_text::vpath::percent_decode` plus the form-encoding rule
+/// that a literal `+` is a space (an encoded `%2B` stays `+`).
+pub(crate) fn decode_query_value(s: &str) -> String {
+    cv_text::vpath::percent_decode(&s.replace('+', " "))
 }
 
 /// The literal target of a redirect wrapper (`?url=`/`?u=`/`?redirect=` holding an http(s) URL),
 /// else `href` itself.
-fn unwrap_redirect(href: &str) -> String {
+pub(crate) fn unwrap_redirect(href: &str) -> String {
     let Some((_, query)) = href.split_once('?') else {
         return href.to_owned();
     };
@@ -238,7 +209,7 @@ fn unwrap_redirect(href: &str) -> String {
         if let Some((k, v)) = pair.split_once('=')
             && REDIRECT_KEYS.contains(&k.to_ascii_lowercase().as_str())
         {
-            let target = percent_decode(v);
+            let target = decode_query_value(v);
             let lower = target.to_ascii_lowercase();
             if lower.starts_with("https://") || lower.starts_with("http://") {
                 return target;
@@ -266,7 +237,7 @@ fn anchors(html: &str) -> Vec<(String, String)> {
             let close = lower[tag_end..]
                 .find("</a")
                 .map_or(html.len(), |c| tag_end + c);
-            if let Some(href) = attr(attrs, "href") {
+            if let Some(href) = href_attr(attrs) {
                 let text = crate::html::html_to_text(&html[tag_end + 1..close]);
                 out.push((href, text));
             }
@@ -278,35 +249,10 @@ fn anchors(html: &str) -> Vec<(String, String)> {
     out
 }
 
-/// The value of attribute `name` in a tag's attribute text.
-fn attr(attrs: &str, name: &str) -> Option<String> {
-    let lower = attrs.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(rel) = lower[from..].find(name) {
-        let at = from + rel;
-        from = at + name.len();
-        let before_ok = at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace();
-        let rest = attrs[from..].trim_start();
-        if !before_ok || !rest.starts_with('=') {
-            continue;
-        }
-        let rest = rest[1..].trim_start();
-        let (val, _) = match rest.chars().next()? {
-            q @ ('"' | '\'') => {
-                let inner = &rest[1..];
-                let end = inner.find(q)?;
-                (&inner[..end], ())
-            }
-            _ => {
-                let end = rest
-                    .find(|c: char| c.is_ascii_whitespace())
-                    .unwrap_or(rest.len());
-                (&rest[..end], ())
-            }
-        };
-        return Some(val.replace("&amp;", "&").trim().to_owned());
-    }
-    None
+/// The `href` of an anchor's attribute text (`crate::html::attr`, then `&amp;` decoded and
+/// trimmed).
+fn href_attr(attrs: &str) -> Option<String> {
+    crate::html::attr(attrs, "href", &[]).map(|v| v.replace("&amp;", "&").trim().to_owned())
 }
 
 fn is_view_in_browser(text: &str) -> bool {
@@ -325,22 +271,15 @@ fn is_view_in_browser(text: &str) -> bool {
 /// `(host, slug)` of a post URL in any accepted shape, query and fragment ignored:
 /// `https://<host>/p/<slug>`, `open.substack.com/pub/<pub>/p/<slug>` (host `<pub>.substack.com`)
 /// and `substack.com/@<handle>/p/<slug>` (host `substack.com`: the handle does not name the
-/// publication's subdomain, so this shape is kept but never proven).
+/// publication's subdomain, so this shape is kept but never proven). The host is the raw
+/// lowercased host (`www.` kept, audit E2): a rebuilt URL keeps it; only comparisons strip it.
 fn post_parts(url: &str) -> Option<(String, String)> {
-    let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        return None;
-    }
-    let (_, rest) = url.split_once("://")?;
-    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-    let mut parts = rest.split('/');
-    let auth = parts.next().unwrap_or("");
-    let host = auth.rsplit('@').next().unwrap_or(auth);
-    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    let parts = http_parts(url)?;
+    let host = parts.host;
     if host.is_empty() {
         return None;
     }
-    let segs: Vec<&str> = parts.filter(|s| !s.is_empty()).collect();
+    let segs: Vec<&str> = parts.path.split('/').filter(|s| !s.is_empty()).collect();
     let ok = |s: &str| !s.is_empty();
     match segs.as_slice() {
         ["pub", publ, "p", slug] if host == "open.substack.com" && ok(slug) => {
@@ -413,17 +352,16 @@ pub fn extract_post_urls_for(html: &str, subject: &str) -> Vec<String> {
 /// identity. The result passes [`is_clean_identity`]; `None` when no candidate survives.
 #[must_use]
 pub fn canonical_post_url(post: &MailPost, blog_link: Option<&str>) -> Option<String> {
-    let bare = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_owned();
-    let sub = substack_host(post).map(|h| bare(&h));
-    let blog_host = blog_link.and_then(url_host);
-    let blog_bare = blog_host.as_deref().map(bare);
+    let sub = substack_host(post).and_then(|h| bare_host_name(&h));
+    let blog_host = blog_link.and_then(http_host);
+    let blog_bare = blog_host.as_deref().and_then(bare_host_name);
     post.urls.iter().find_map(|c| {
         let (host, slug) = post_parts(c)?;
         if slug.starts_with('@') {
             return None;
         }
-        let h = bare(&host);
-        let proven = sub.as_deref() == Some(h.as_str()) || blog_bare.as_deref() == Some(h.as_str());
+        let h = bare_host_name(&host);
+        let proven = h.is_some() && (sub == h || blog_bare == h);
         if !proven {
             return None;
         }
@@ -442,14 +380,13 @@ pub fn canonical_post_url(post: &MailPost, blog_link: Option<&str>) -> Option<St
 #[must_use]
 pub fn is_clean_identity(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
-    let Some(host) = url_host(&lower) else {
+    let Some(parts) = http_parts(&lower).filter(|p| !p.host.is_empty()) else {
         return false;
     };
-    let rest = lower.split_once("://").map_or("", |(_, r)| r);
-    let path = rest.find('/').map_or("", |i| &rest[i..]);
-    let (path, query) = path.split_once(['?', '#']).unwrap_or((path, ""));
-    let query_bad = query
-        .split(['&', '?', '#', ';'])
+    let (host, path) = (parts.host.as_str(), parts.path);
+    let query_bad = [parts.query, parts.fragment.unwrap_or("")]
+        .iter()
+        .flat_map(|q| q.split(['&', '?', '#', ';']))
         .any(|p| p.starts_with("token=") || p.starts_with("r="));
     let tracker_host = host == "link.mail.beehiiv.com"
         || host.contains("hubspot")

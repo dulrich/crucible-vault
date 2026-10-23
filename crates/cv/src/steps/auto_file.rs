@@ -29,6 +29,7 @@ use cv_actions::pipelines::SourcesConfig;
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_note::{FrontmatterDoc, JsValue};
+use cv_text::url_canon::{bare_host_name, canonical_bare_host};
 use serde::Serialize;
 
 use super::file::kind_def;
@@ -96,20 +97,14 @@ pub(in crate::steps) struct Work {
 /// The kind whose clips take the matched Work's `title` as `publication` (Decision 2).
 pub(in crate::steps) const FANFIC_KIND: &str = "fanfic";
 
-/// Canonical host of `url`, lowercase, leading `www.` stripped.
-fn host_of(url: &str) -> Option<String> {
-    cv_text::canonicalize_url(url)
-        .map(|c| c.domain.trim_start_matches("www.").to_lowercase())
-        .filter(|d| !d.is_empty())
-}
-
-/// A configured host (`www.fanfiction.net`, or a full URL) in the same form as [`host_of`].
-fn config_host(s: &str) -> Option<String> {
+/// A configured host (`www.fanfiction.net`, or a full URL) in the same form as
+/// [`canonical_bare_host`]: a full URL goes through it, a bare host through `bare_host_name`.
+fn configured_host(s: &str) -> Option<String> {
     let s = s.trim();
     if s.contains("://") {
-        host_of(s)
+        canonical_bare_host(s)
     } else {
-        Some(s.trim_start_matches("www.").to_lowercase()).filter(|h| !h.is_empty())
+        bare_host_name(s)
     }
 }
 
@@ -165,7 +160,7 @@ pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<
     let blog = sources
         .blog
         .iter()
-        .find(|b| host_of(&b.link).as_deref() == Some(host))?;
+        .find(|b| canonical_bare_host(&b.link).as_deref() == Some(host))?;
     let mut row = HostRow {
         blog: Some((blog.name.clone(), blog.link.trim().to_owned())),
         kind: Some("blog".into()),
@@ -230,7 +225,7 @@ pub(in crate::steps) fn hosts_kind(
         let hosts = get_str_list(def, "hosts").map_err(StepError::failed)?;
         if hosts
             .iter()
-            .filter_map(|h| config_host(h))
+            .filter_map(|h| configured_host(h))
             .any(|h| h == host)
         {
             return Ok(Some(name.clone()));
@@ -350,7 +345,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         .trim()
         .to_owned();
     let clip = Clip {
-        host: host_of(&source),
+        host: canonical_bare_host(&source),
         authors: doc.get_texts("author"),
         source,
     };

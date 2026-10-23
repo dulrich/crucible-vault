@@ -64,8 +64,9 @@ impl LineSet {
     }
 }
 
-/// Which lines sit inside (or on the delimiter of) a fenced code block.
-fn fence_mask(lines: &[&str]) -> Vec<bool> {
+/// Which lines sit inside (or on the delimiter of) a fenced code block (also the mail-clean pass's
+/// fence mask: one copy in the crate).
+pub(crate) fn fence_mask(lines: &[&str]) -> Vec<bool> {
     let mut open: Option<&str> = None;
     lines
         .iter()

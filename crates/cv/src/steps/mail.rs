@@ -326,7 +326,7 @@ pub(crate) fn resolve_newsletter<'a>(
     let host = mail::substack_host(post)?;
     let blog = blogs
         .iter()
-        .find(|b| mail::url_host(&b.link).is_some_and(|h| h == host))?;
+        .find(|b| cv_text::url_canon::http_host(&b.link).is_some_and(|h| h == host))?;
     Some(Cow::Owned(NewsletterSource {
         name: blog.name.clone(),
         short: blog.short.clone(),

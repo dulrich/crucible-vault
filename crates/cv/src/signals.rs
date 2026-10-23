@@ -33,6 +33,7 @@ use cv_ingest::signals::{
     CaptureInput, CaptureLabel, RawProp, RowBase, TrainingRow, build_rows, export_file_name,
     normalize_source_tags,
 };
+use cv_text::url_canon::bare_host;
 use serde_json::{Map, Value, json};
 
 use crate::config::Config;
@@ -250,13 +251,6 @@ fn video_id(v: &str) -> Option<String> {
     cv_text::url_canon::extract_video_id_from_url(v)
 }
 
-fn host(u: &str) -> Option<String> {
-    url::Url::parse(u)
-        .ok()?
-        .host_str()
-        .map(|h| h.trim_start_matches("www.").to_ascii_lowercase())
-}
-
 struct SourceInfo {
     key: String,
     name: String,
@@ -319,7 +313,7 @@ fn base_row(
             (None, None) => return Ok(None),
         };
         let blog_name = str_prop(fm, "blog").map(|s| s.to_lowercase());
-        let src_host = source.and_then(host).or_else(|| host(&id));
+        let src_host = source.and_then(bare_host).or_else(|| bare_host(&id));
         let configured = sources
             .blog
             .iter()
@@ -328,7 +322,7 @@ fn base_row(
                 sources
                     .blog
                     .iter()
-                    .find(|b| src_host.is_some() && host(&b.link) == src_host)
+                    .find(|b| src_host.is_some() && bare_host(&b.link) == src_host)
             });
         let info = match configured {
             Some(b) => SourceInfo {

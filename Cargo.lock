@@ -885,10 +885,12 @@ dependencies = [
 name = "cv-ingest"
 version = "0.1.1"
 dependencies = [
+ "base64 0.22.1",
  "cv-text",
  "htmd",
  "mail-parser",
  "quick-xml",
+ "serde_json",
 ]
 
 [[package]]

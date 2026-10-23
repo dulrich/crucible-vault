@@ -6,6 +6,39 @@
 //! constraint, not the behaviour. If the output starts needing repeated post-processing shims,
 //! that is the own-vs-depend trigger (principle #7), not a reason to add more shims here.
 
+/// The raw value of attribute `name` (lowercase) in a tag's text — the whole open tag or just its
+/// attribute run. `name` matches case-insensitively when it starts the text or follows whitespace
+/// or a quote, with optional whitespace around `=`. A quoted value runs to its closing quote (an
+/// unclosed one yields `None`); an unquoted value ends at whitespace or any of `stops`. Entities
+/// are left as is. The one attribute reader of the crate's string-level HTML scans (the mail
+/// anchors and the mail-clean `<img>`/`<a>` pre-pass); callers decode or trim on top.
+pub(crate) fn attr<'a>(tag: &'a str, name: &str, stops: &[char]) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(name) {
+        let at = from + rel;
+        from = at + name.len();
+        let before_ok = lower[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace() || c == '"' || c == '\'');
+        let rest = tag[from..].trim_start();
+        let Some(rest) = rest.strip_prefix('=').filter(|_| before_ok) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        return match rest.chars().next()? {
+            q @ ('"' | '\'') => rest[1..].find(q).map(|end| &rest[1..1 + end]),
+            _ => Some(
+                rest.split(|c: char| c.is_whitespace() || stops.contains(&c))
+                    .next()
+                    .unwrap_or(""),
+            ),
+        };
+    }
+    None
+}
+
 /// Converts `html` to Markdown. A converter failure falls back to the tag-stripped text, so a
 /// body is never silently dropped.
 #[must_use]

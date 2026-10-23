@@ -161,14 +161,17 @@ fn clean_body_is_idempotent() {
 
 #[test]
 fn b64url_and_json_helpers() {
-    assert_eq!(b64url_decode("aGk_").as_deref(), Some(&b"hi?"[..]));
-    assert_eq!(b64url_decode("aGk=").as_deref(), Some(&b"hi"[..]));
-    assert_eq!(b64url_decode("a*b"), None);
     assert_eq!(
-        json_e(r#"{"e":"https:\/\/a.example\/p?x=1&y=2","p":1}"#).as_deref(),
+        decode_redirect_payload("aGk_").as_deref(),
+        Some(&b"hi?"[..])
+    );
+    assert_eq!(decode_redirect_payload("aGk=").as_deref(), Some(&b"hi"[..]));
+    assert_eq!(decode_redirect_payload("a*b"), None);
+    assert_eq!(
+        redirect_payload_target(r#"{"e":"https:\/\/a.example\/p?x=1&y=2","p":1}"#).as_deref(),
         Some("https://a.example/p?x=1&y=2")
     );
-    assert_eq!(json_e(r#"{"p":"x"}"#), None);
+    assert_eq!(redirect_payload_target(r#"{"p":"x"}"#), None);
 }
 
 // ---- Round 2 (plan intake-round-2-clean-dedupe-reading WP-1) ----

@@ -324,6 +324,111 @@ pub fn slug_for_canonical(canonical: &str) -> String {
     slug.to_lowercase()
 }
 
+// ---------------------------------------------------------------- hosts, URL parts, link tracking
+
+/// Host, path, query and fragment of an `http(s)` URL, split on the raw (trimmed) text with no
+/// normalization: the host is lowercased with userinfo and port dropped (`www.` kept); path,
+/// query and fragment keep their case and encoding. The one splitter for callers that rebuild or
+/// pattern-match the original text (`url::Url` would re-encode it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpParts<'a> {
+    pub host: String,
+    /// From the first `/` after the host (empty when there is none).
+    pub path: &'a str,
+    /// After the first `?` (empty when absent).
+    pub query: &'a str,
+    /// After the first `#`.
+    pub fragment: Option<&'a str>,
+}
+
+/// Splits an `http(s)` URL into [`HttpParts`] (`None` for any other scheme). The host may be
+/// empty (`https:///x`); [`http_host`] rejects that.
+#[must_use]
+pub fn http_parts(url: &str) -> Option<HttpParts<'_>> {
+    let url = url.trim();
+    let scheme = |p: &str| {
+        url.get(..p.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(p))
+    };
+    let rest = if scheme("https://") {
+        &url[8..]
+    } else if scheme("http://") {
+        &url[7..]
+    } else {
+        return None;
+    };
+    let (rest, fragment) = rest
+        .split_once('#')
+        .map_or((rest, None), |(r, f)| (r, Some(f)));
+    let (auth_path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let (auth, path) = auth_path
+        .find('/')
+        .map_or((auth_path, ""), |i| (&auth_path[..i], &auth_path[i..]));
+    let host = auth.rsplit('@').next().unwrap_or(auth);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    Some(HttpParts {
+        host,
+        path,
+        query,
+        fragment,
+    })
+}
+
+/// The lowercased host of an `http(s)` URL (userinfo, port, path, query and fragment dropped;
+/// `www.` kept); `None` when the scheme is not http(s) or the host is empty.
+#[must_use]
+pub fn http_host(url: &str) -> Option<String> {
+    http_parts(url).map(|p| p.host).filter(|h| !h.is_empty())
+}
+
+/// A host name in comparison form: trimmed, lowercased, leading `www.` stripped; `None` when
+/// empty.
+#[must_use]
+pub fn bare_host_name(host: &str) -> Option<String> {
+    let h = host.trim().to_lowercase();
+    Some(h.trim_start_matches("www.").to_owned()).filter(|h| !h.is_empty())
+}
+
+/// The comparison host of a URL (any scheme with a host), parsed with `url::Url`: lowercased,
+/// leading `www.` stripped. For comparison only, never for rebuilding a URL.
+#[must_use]
+pub fn bare_host(url: &str) -> Option<String> {
+    bare_host_name(Url::parse(url.trim()).ok()?.host_str()?)
+}
+
+/// [`bare_host`] of the [`canonicalize_url`] form, so host aliases converge (`youtu.be` and
+/// `www.youtube.com`, `twitter.com` and `x.com`, …).
+#[must_use]
+pub fn canonical_bare_host(url: &str) -> Option<String> {
+    canonicalize_url(url).and_then(|c| bare_host_name(&c.domain))
+}
+
+/// Whether `host` (lowercased) is Substack's: `substack.com` or a subdomain.
+#[must_use]
+pub fn is_substack_host(host: &str) -> bool {
+    host == "substack.com" || host.ends_with(".substack.com")
+}
+
+/// The share/session params Substack appends to its links (lowercased keys).
+pub const SUBSTACK_SESSION_PARAMS: &[&str] = &[
+    "r",
+    "s",
+    "triedredirect",
+    "publication_id",
+    "post_id",
+    "isfreemail",
+    "token",
+];
+
+/// The link-rewrite tracking policy (mail intake): any `utm_*` key, plus
+/// [`SUBSTACK_SESSION_PARAMS`] when the link is on a Substack host. Case-insensitive. (The
+/// identity form [`canonicalize_url`] strips its own explicit list, `TRACKING_PARAMS`.)
+#[must_use]
+pub fn is_link_tracking_param(key: &str, on_substack: bool) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.starts_with("utm_") || (on_substack && SUBSTACK_SESSION_PARAMS.contains(&k.as_str()))
+}
+
 // ---------------------------------------------------------------- blog post-id
 
 /// How a post URL is reduced to a stable post-id (per-blog Canon override).
@@ -753,5 +858,50 @@ mod tests {
             CanonMethod::StripParams
         );
         assert_eq!(CanonMethod::normalize("bogus"), CanonMethod::Auto);
+    }
+
+    #[test]
+    fn http_parts_split_the_raw_text() {
+        let p = http_parts(" HTTPS://User@Www.Ex.COM:8080/P/Slug?A=1&b=2#Frag ");
+        assert_eq!(
+            p,
+            Some(HttpParts {
+                host: "www.ex.com".into(),
+                path: "/P/Slug",
+                query: "A=1&b=2",
+                fragment: Some("Frag"),
+            })
+        );
+        assert_eq!(http_parts("ftp://a.example/"), None);
+        assert_eq!(http_host("https:///x"), None);
+        assert_eq!(http_host("http://a.example?x"), Some("a.example".into()));
+    }
+
+    #[test]
+    fn bare_host_forms() {
+        assert_eq!(bare_host("https://WWW.Ex.com/x"), Some("ex.com".into()));
+        assert_eq!(bare_host("not a url"), None);
+        assert_eq!(
+            bare_host_name(" Www.Fanfiction.net "),
+            Some("fanfiction.net".into())
+        );
+        assert_eq!(bare_host_name("www."), None);
+        assert_eq!(
+            canonical_bare_host("https://youtu.be/dQw4w9WgXcQ"),
+            Some("youtube.com".into())
+        );
+        assert_eq!(
+            canonical_bare_host("https://twitter.com/a/status/1"),
+            Some("x.com".into())
+        );
+    }
+
+    #[test]
+    fn link_tracking_policy() {
+        assert!(is_link_tracking_param("UTM_Source", false));
+        assert!(!is_link_tracking_param("r", false));
+        assert!(is_link_tracking_param("isFreemail", true));
+        assert!(!is_link_tracking_param("keep", true));
+        assert!(is_substack_host("a.substack.com") && !is_substack_host("notsubstack.com"));
     }
 }
