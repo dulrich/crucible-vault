@@ -6,6 +6,7 @@ use super::*;
 impl App {
     /// The update function.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        self.sync_menu_bar();
         let Some(message) = self.modal_filter(message) else {
             return Task::none();
         };
@@ -32,11 +33,25 @@ impl App {
         Task::batch(std::iter::once(task).chain(extra))
     }
 
+    /// Plan round-10 WP-7: the session menu-bar state follows a changed `menu_bar` pref; an
+    /// unchanged pref leaves a toggled state alone.
+    pub(super) fn sync_menu_bar(&mut self) {
+        if self.prefs.menu_bar_shown != self.menu_bar_pref {
+            self.menu_bar_pref = self.prefs.menu_bar_shown;
+            self.menu_bar_shown = self.menu_bar_pref;
+        }
+    }
+
     pub(super) fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::PersistDue => self.write_ui_state(),
             Message::MemoryDue => return self.send_memory_report(),
             Message::TrimTick => return self.maybe_trim(),
+            Message::AltKey(i) => {
+                if self.alt_tap.feed(i) {
+                    self.menu_bar_shown = !self.menu_bar_shown;
+                }
+            }
             Message::Tabs(m) => return self.update_tabs(m),
             Message::Dialog(m) => return self.update_dialog(m),
             Message::Menu(m) => return self.update_menu(m),
@@ -473,6 +488,9 @@ impl App {
             } else {
                 Subscription::none()
             },
+            // plan round-10 WP-7: every key/mouse press + Alt release feeds the bare-Alt tracker
+            // (captured or not; a bare Alt has no chord, so the palette keymap never sees a tap).
+            iced::event::listen_with(super::alt_tap::input_of),
             iced::keyboard::listen().filter_map(switcher::key_event),
             // plan round-5 WP-4: Up/Down/Escape (captured or not) for an open form typeahead.
             if self.settings.form.typeahead.is_some() && !self.switcher.open {

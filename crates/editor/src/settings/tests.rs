@@ -364,6 +364,7 @@ confirm_trash = true
 delete_mode = "permanent"
 missing_link = "create"
 focus_follows_mouse = true
+menu_bar = "hidden"
 auto_lint = false
 scroll_anchor = 40
 open_url_cmd = ["firefox", "--new-tab"]

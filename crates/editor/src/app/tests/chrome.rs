@@ -314,3 +314,48 @@ fn ctrl_alt_arrows_step_the_focused_pane() {
         Some(Message::Panes(_))
     ));
 }
+
+#[test]
+fn menu_bar_pref_parses_and_defaults_to_shown() {
+    use crate::settings::editor_prefs::parse;
+    let med = crate::theme::Surround::Med;
+    assert!(parse("", med).expect("p").menu_bar_shown);
+    assert!(
+        !parse("menu_bar = \"hidden\"\n", med)
+            .expect("p")
+            .menu_bar_shown
+    );
+    assert!(
+        parse("menu_bar = \"shown\"\n", med)
+            .expect("p")
+            .menu_bar_shown
+    );
+}
+
+#[test]
+fn menu_bar_session_state_seeds_toggles_and_follows_only_pref_changes() {
+    use crate::app::alt_tap::AltInput;
+    let (_tmp, _d, mut app) = app_with(&[], None);
+    assert!(app.menu_bar_shown, "default shown");
+    // A reload that changes the pref to hidden hides the bar.
+    app.prefs.menu_bar_shown = false;
+    let _ = app.send(Message::AltKey(AltInput::Other));
+    assert!(!app.menu_bar_shown);
+    // A bare-Alt tap flips it.
+    let _ = app.send(Message::AltKey(AltInput::AltDown { others_held: false }));
+    let _ = app.send(Message::AltKey(AltInput::AltUp));
+    assert!(app.menu_bar_shown);
+    // A reload with the pref unchanged leaves the toggled state alone.
+    let _ = app.send(Message::AltKey(AltInput::Other));
+    assert!(app.menu_bar_shown);
+    // Alt + a key never toggles.
+    let _ = app.send(Message::AltKey(AltInput::AltDown { others_held: false }));
+    let _ = app.send(Message::AltKey(AltInput::Other));
+    let _ = app.send(Message::AltKey(AltInput::AltUp));
+    assert!(app.menu_bar_shown);
+    // A pref change back to shown while toggled hidden follows the new value.
+    app.menu_bar_shown = false;
+    app.prefs.menu_bar_shown = true;
+    let _ = app.send(Message::AltKey(AltInput::Other));
+    assert!(app.menu_bar_shown);
+}

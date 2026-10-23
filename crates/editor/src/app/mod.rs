@@ -31,6 +31,7 @@ use crate::theme::{Surround, Tokens, tokens_for};
 use crate::ui_state::{self, SplitDir, UiState};
 
 mod actions;
+pub mod alt_tap;
 mod config;
 mod connection;
 mod files;
@@ -273,6 +274,12 @@ pub struct App {
     pub mode_menu: Option<Pane>,
     /// plan editor-round-4 WP-4: a mouse button is held (hover focus is suppressed).
     pub mouse_down: bool,
+    /// Plan round-10 WP-7: the menu bar (top button row) is shown this session. Seeded from
+    /// `prefs.menu_bar_shown`; a bare-Alt tap toggles it; a pref change on reload resets it.
+    pub menu_bar_shown: bool,
+    /// The last `prefs.menu_bar_shown` the session state was synced to.
+    pub(super) menu_bar_pref: bool,
+    pub(super) alt_tap: alt_tap::AltTap,
     /// A back/forward step is opening a path: it must not push onto the history.
     history_nav: bool,
     /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
@@ -406,6 +413,9 @@ impl App {
             restoring: true,
             mode_menu: None,
             mouse_down: false,
+            menu_bar_shown: true,
+            menu_bar_pref: true,
+            alt_tap: alt_tap::AltTap::default(),
             history_nav: false,
             quit: None,
             dialog: None,
@@ -424,6 +434,7 @@ impl App {
         app.reading.resolver = shared.clone();
         app.panels.resolver = shared;
         app.load_editor_prefs();
+        app.sync_menu_bar();
         app.refresh_files();
         app.load_bookmarks();
         for (pane, tabs, active) in plan {

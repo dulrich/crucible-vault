@@ -375,6 +375,13 @@ pub static EDITOR_FILE: Record = Record {
         )
         .dflt(D::Bool(false)),
         field(
+            "menu_bar",
+            "Menu bar",
+            "Whether the top button row (Quick switch, Command palette, Panels, Split, Settings) starts shown or hidden; a bare Alt tap toggles it for the session",
+            Node::Enum(&["shown", "hidden"]),
+        )
+        .dflt(D::Str("shown")),
+        field(
             "auto_lint",
             "Auto-lint on autosave",
             "Lint the open note's frontmatter when it autosaves after your edit (the lint-note action's settings; never on open, while the cursor is in the frontmatter, in _custom/ or template folders, or for notes without frontmatter)",

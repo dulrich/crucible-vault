@@ -585,7 +585,11 @@ impl App {
         ]
         .spacing(16);
 
-        let main = column![container(top).padding(4).width(Length::Fill).style(panel)];
+        // plan round-10 WP-7: the whole header row is omitted while the menu bar is hidden.
+        let mut main = column![];
+        if self.menu_bar_shown {
+            main = main.push(container(top).padding(4).width(Length::Fill).style(panel));
+        }
         let side_width = if self.ui.side_collapsed {
             Length::Fixed(46.0)
         } else {
