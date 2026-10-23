@@ -37,8 +37,7 @@
 //!   description-only write counts `mail_clean_unchanged` for the body). Any other description
 //!   is never touched; a second run writes nothing.
 //!
-//! The round-2 repair phases (re-key, mail↔RSS merge, publication) live in
-//! [`super::reconcile_repair`].
+//! The repair phases (mail↔RSS merge, publication) live in [`super::reconcile_repair`].
 //!
 //! A re-run after an interrupted run is the recovery path: a re-keyed row is no longer
 //! `unknown-sender`, so only the rows still under it are finished.

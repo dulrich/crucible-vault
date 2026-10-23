@@ -1,70 +1,36 @@
-//! `intake_reconcile` (plan `auto-intake-sprint` WP-6): the one-shot fix-up of existing `note`
-//! tracker rows, run by `cv intake reconcile [--dry-run]` through the `intake-reconcile` action.
+//! `intake_reconcile` (plan `auto-intake-sprint` WP-6): the fix-up of existing `note` tracker
+//! rows and intake notes, run by `cv intake reconcile [--dry-run]` through the `intake-reconcile`
+//! action. It is note-mutating (`mutates_note`, audit M2).
 //!
-//! 1. **Link** every `note` row whose `note_path` is NULL: the row URL resolves against the
-//!    supersede index ([`SupersedeIndex::identity_matches`], canonical `source` / `post-id`).
-//!    Exactly one note links (`set_tracker_note_path`); none is `unresolved`; several is
-//!    `ambiguous` and the row stays NULL.
-//! 2. **Probe** the open blog rows that were never probed (`access IS NULL`, a `/p/<slug>` URL)
-//!    through the WP-2 Substack probe (`substack-api`, one bounded batch, the service's own
-//!    breaker/quota). A quota stop or rate limit counts `probe_skipped`, any other failure
-//!    `probe_failed`; either leaves the row open, untouched.
-//! 3. **Auto-done** each open row with a resolved note: the completeness predicate
-//!    ([`cv_ingest::access::completeness`]) is applied to the *resolved body* (its own word
-//!    count, the row's probed `access`/`full_word_count`, the `[[blog]]` row's paywall markers),
-//!    the evidence and the tick go in one transaction (`finalize_tracker_item`), ticked only on
-//!    `Some(true)`. A link or a match alone never ticks.
+//! Phases run in this order. Phases 1–3 work on the tracker rows in [`run`]; the rest form the
+//! [`PHASES`] table and share one [`Pass`] (the dry flag, the rows phase 1 linked and the lazily
+//! built supersede index). Vars per phase:
 //!
-//! Plan `intake-followups-mail-youtube` WP-5 adds three backfill phases (detail and vars in
-//! [`super::reconcile_backfill`]), run after phase 3:
-//!
-//! 4. **YouTube finalize** (A): open `youtube` rows get the WP-4 finalize core (transcript
-//!    clippings of that video tick; bare embeds never do) — replaces their `skipped_kind`.
-//! 5. **Mail re-match** (B): `unknown-sender` mail rows re-resolve against the newsletter config
-//!    and are re-keyed (collision-safe), retagged and ticked by predicate; never a new note.
-//! 6. **Re-clean** (C): `via: email` note bodies go through `clean_body`, CAS-written only on a
-//!    change.
-//!    Then **boilerplate** (plan `round-10-feedback-todos` WP-2, detail in
-//!    [`super::reconcile_boilerplate`]): per-sender learned sets are seeded from the processed
-//!    `.eml` files (once per Message-ID), then known-sender `via: email` notes have their
-//!    anchored head/tail boilerplate stripped, CAS-written only on a change, `description`
-//!    recomputed (`bp_learned`, `bp_stripped`, `bp_guarded`, `bp_conflict`).
-//!
-//! Plan `intake-round-2-clean-dedupe-reading` WP-6 adds the repair phases (detail and vars in
-//! [`super::reconcile_repair`]), after the re-clean (which now drops small localized images by
-//! decoded dimensions, `mail_recleaned_r2`):
-//!
-//! 7. **Re-key** (D): `via: email` notes recompute `source`/`post-id` from the processed `.eml`
-//!    (`mail_rekeyed`, `mail_token_stripped`, `rekey_skipped`, `rekey_conflict`).
-//! 8. **Merge** (E): a mail note whose canonical identity matches a `via: rss` note (only RSS-origin
-//!    twins) is resolved by the supersede engine under the `auto_file` containment rule; rows are
-//!    re-pointed to the survivor before the redundant note moves to `.trash/` (`dup_merged`,
-//!    `dup_marked`, `dup_other`, `dup_distinct`, `dup_conflict`).
-//! 9. **Publication** (F): notes linked from tracker rows get their source row's `publication`
-//!    where absent (`publication_backfilled`, `publication_no_row`, `publication_conflict`).
-//!
-//! Plan `round-9-feedback-todos` WP-2 adds three identity phases (detail and vars in
-//! [`super::reconcile_identity`]), and widens E (a note with a `blog` tracker row and no
-//! `via: email` is RSS-origin) and C (description repair, see [`super::reconcile_backfill`]):
-//!
-//! 10. **Forum re-key** (G): a stored page-level `post-id` of a forum post `source` becomes the
-//!     `/posts/<P>` key (`forum_rekeyed`).
-//! 11. **Spurious duplicate-of** (H): removed only for a forum pair that shared the obsolete page
-//!     key and has neither identity nor content evidence left (`dup_of_removed`, `dup_of_kept`).
-//! 12. **Fanfic publication** (I): the matched Work's `title`, never overwriting
-//!     (`fanfic_publication_backfilled`).
-//!
-//! The step now writes notes (tags, `complete`, cleaned bodies), so `IntakeReconcile` is
-//! note-mutating (`mutates_note`, audit M2).
+//! 1. **Link** NULL-path rows by row URL against the supersede index — exactly one note links,
+//!    none is unresolved, several stay NULL (`null_paths`, `linked`, `unresolved`, `ambiguous`).
+//! 2. **Probe** open never-probed Substack blog rows, one bounded batch (`probed`,
+//!    `probe_failed`, `probe_skipped`; a failed or skipped row stays open, untouched).
+//! 3. **Tick** open blog rows with a resolved note by the completeness predicate on the resolved
+//!    body, evidence and tick in one transaction; a match alone never ticks (`ticked`,
+//!    `left_open`, `skipped_kind` for open rows of kinds other than blog and youtube).
+//! 4. **YouTube finalize** (A, [`super::reconcile_backfill`]): `yt_ticked`, `yt_linked`,
+//!    `yt_no_note`, `yt_ambiguous`, `yt_no_evidence`, `x_ticked`.
+//! 5. **Mail re-match** (B, [`super::reconcile_backfill`]): `mail_rematched`,
+//!    `mail_collisions`, `mail_missing`, `mail_unmatched`, `mail_ticked`, `mail_retagged`,
+//!    `mail_tag_conflict`, `mail_folder_mismatch`, `mail_marker_incomplete`.
+//! 6. **Re-clean** (C, [`super::reconcile_backfill`]): `mail_recleaned_r2`,
+//!    `mail_clean_unchanged`, `mail_clean_conflict`, `mail_description_repaired`.
+//! 7. **Boilerplate** ([`super::reconcile_boilerplate`]): `bp_learned`, `bp_stripped`,
+//!    `bp_guarded`, `bp_conflict`.
+//! 8. **Mail↔RSS merge** (E, [`super::reconcile_repair`]): `dup_merged`, `dup_marked`,
+//!    `dup_other`, `dup_distinct`, `dup_conflict`.
+//! 9. **Publication** (F, [`super::reconcile_repair`]): `publication_backfilled`,
+//!    `publication_no_row`, `publication_conflict`.
 //!
 //! `dry_run` (step param, or a job param `dry_run = true`) computes every count of every phase and
-//! writes nothing to `state.db` or the vault (the probe is a read-only fetch). The step holds
-//! `intake::identity` (step-intrinsic). Outcome vars are aggregate counts only: `null_paths`,
-//! `linked`, `unresolved`, `ambiguous`, `probed`, `probe_failed`, `probe_skipped`, `ticked`,
-//! `left_open`, `skipped_kind` (open rows of kinds other than blog and youtube: linked in phase 1
-//! but never probed or ticked; mail unknown-sender rows count here before phase 5 re-matches
-//! them), the backfill vars (`yt_*`, `x_ticked`, `mail_*`), the repair vars (`mail_rekeyed`, `mail_token_stripped`,
-//! `rekey_*`, `dup_*`, `publication_*`), the identity vars, the boilerplate vars (`bp_*`), `dry_run`.
+//! writes nothing to `state.db` or the vault (the probe is a read-only fetch); it is echoed as the
+//! `dry_run` var. Outcome vars are aggregate counts only. The step holds `intake::identity`
+//! (step-intrinsic).
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::{self, Access};
@@ -78,7 +44,6 @@ use serde_json::Value;
 use super::params::{check_keys, get_bool};
 use super::reconcile_backfill as backfill;
 use super::reconcile_boilerplate as boilerplate;
-use super::reconcile_identity as identity;
 use super::reconcile_repair as repair;
 use super::tracker::blogs::PROBE_SERVICE;
 use super::tracker::substack;
@@ -133,8 +98,6 @@ struct Vars {
     backfill: backfill::Counts,
     #[serde(flatten)]
     repair: repair::Counts,
-    #[serde(flatten)]
-    identity: identity::Counts,
     #[serde(flatten)]
     boilerplate: boilerplate::Counts,
 }
@@ -195,6 +158,40 @@ struct Work {
     /// The probe failed or was skipped: the row is left open, untouched.
     blocked: bool,
 }
+
+/// The context phases 4–9 share.
+struct Pass {
+    /// The dry flag and the rows phase 1 linked.
+    sh: backfill::Shared,
+    /// The supersede index, built on first use (phase 1 may already have built it).
+    sidx: Option<SupersedeIndex>,
+}
+
+/// One table phase: reads and writes through the step context, counts into the aggregate vars.
+type Phase = fn(&mut StepCtx<'_>, &mut Pass, &mut Vars) -> Result<(), StepError>;
+
+/// Phases 4–9, in run order (see the module doc for their vars).
+const PHASES: &[(&str, Phase)] = &[
+    ("youtube", |ctx, p, v| {
+        backfill::youtube(ctx, &p.sh, &mut p.sidx, &mut v.backfill)
+    }),
+    ("mail", |ctx, p, v| {
+        backfill::mail(ctx, &p.sh, &mut v.backfill)
+    }),
+    ("reclean", |ctx, p, v| {
+        backfill::reclean(ctx, &p.sh, &mut v.backfill)
+    }),
+    // After the re-clean so it strips cleaned bodies.
+    ("boilerplate", |ctx, p, v| {
+        boilerplate::run(ctx, &p.sh, &mut v.boilerplate)
+    }),
+    ("merge", |ctx, p, v| {
+        repair::merge_mail_twins(ctx, &p.sh, &mut p.sidx, &mut v.repair)
+    }),
+    ("publication", |ctx, p, v| {
+        repair::publication(ctx, &p.sh, &mut v.repair)
+    }),
+];
 
 fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut v = Vars {
@@ -306,11 +303,14 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         }
     }
 
-    // 4-6. Backfill phases (plan intake-followups-mail-youtube WP-5).
-    let mut sh = backfill::Shared {
-        dry,
-        pre_linked: std::collections::BTreeSet::new(),
-        paths: std::collections::HashMap::new(),
+    // 4-9. The phase table, sharing one pass context.
+    let mut pass = Pass {
+        sh: backfill::Shared {
+            dry,
+            pre_linked: std::collections::BTreeSet::new(),
+            paths: std::collections::HashMap::new(),
+        },
+        sidx,
     };
     for w in &work {
         if w.item.note_path.is_none()
@@ -321,26 +321,14 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 w.item.source_key.clone(),
                 w.item.item_id.clone(),
             );
-            sh.pre_linked.insert(k.clone());
-            sh.paths.insert(k, p.clone());
+            pass.sh.pre_linked.insert(k.clone());
+            pass.sh.paths.insert(k, p.clone());
         }
     }
-    backfill::youtube(ctx, &sh, &mut sidx, &mut v.backfill)?;
-    backfill::mail(ctx, &sh, &mut v.backfill)?;
-    backfill::reclean(ctx, &sh, &mut v.backfill)?;
-    // 6b. Per-sender boilerplate seed + strip (plan round-10-feedback-todos WP-2), after the
-    // re-clean so it strips cleaned bodies; it recomputes `description` on every strip.
-    boilerplate::run(ctx, &sh, &mut v.boilerplate)?;
-
-    // 7-9. Round-2 repair (plan intake-round-2-clean-dedupe-reading WP-6): re-key, merge, publication.
-    repair::rekey_and_merge(ctx, &sh, &mut sidx, &mut v.repair)?;
-    repair::publication(ctx, &sh, &mut v.repair)?;
-
-    // 10-12. Round-9 repair (plan round-9-feedback-todos WP-2): forum post-id re-key, spurious
-    // forum `duplicate-of`, fanfic publication.
-    identity::forum_rekey(ctx, &sh, &mut v.identity)?;
-    identity::forum_duplicates(ctx, &sh, &mut v.identity)?;
-    identity::fanfic_publication(ctx, &sh, &mut v.identity)?;
+    for (name, phase) in PHASES {
+        tracing::debug!(phase = name, "intake_reconcile: phase");
+        phase(ctx, &mut pass, &mut v)?;
+    }
 
     let mut out = StepOutcome::default();
     out.set_vars(&v);

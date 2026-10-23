@@ -1,20 +1,14 @@
-//! The round-2 repair phases of `intake_reconcile` (plan `intake-round-2-clean-dedupe-reading`
-//! WP-6), run after the backfill phases in [`super::reconcile_backfill`] (phase C there is the
-//! re-clean r2). Every phase is dry-aware: with `dry` it computes the same counts and writes
-//! nothing to `state.db` or the vault.
+//! The repair phases of `intake_reconcile`, run after the backfill phases in
+//! [`super::reconcile_backfill`] and the boilerplate phase. Every phase is dry-aware: with `dry`
+//! it computes the same counts and writes nothing to `state.db` or the vault.
 //!
-//! - **D. Re-key** ([`rekey_and_merge`]): each `via: email` note with a `message-id` finds its
-//!   `.eml` (processed Maildir, matched by Message-ID) and recomputes the one post identity with
+//! - **E. Merge** ([`merge_mail_twins`]): each `via: email` note with a `message-id` finds its
+//!   `.eml` (processed Maildir, matched by Message-ID) and derives the one post identity with
 //!   [`cv_ingest::mail::canonical_post_url`] (blog row link from the resolver, as `track_mail`
-//!   does). A differing `source` (and `post-id`, when the note has one) is rewritten to it
-//!   (`mail_rekeyed`). With no canonical URL, a current `source` that fails
-//!   [`cv_ingest::mail::is_clean_identity`] is removed together with `post-id`
-//!   (`mail_token_stripped`). A note whose message is gone or unparseable counts `rekey_skipped`
-//!   and nothing else changes for it. A CAS conflict is `rekey_conflict` (skipped, not retried).
-//! - **E. Merge** (same loop, per re-keyed or already canonical note): the canonical identity is
-//!   matched in the supersede index (kept current with the re-keyed identities). **Only a
+//!   does); a note whose message is gone, unparseable or yields no canonical URL is skipped. The
+//!   canonical identity is matched in the supersede index (kept current with the derived identities). **Only a
 //!   mail↔RSS pair is merged**: when every match is RSS-origin (`via: rss`, or `via: email` with
-//!   no `message-id`, i.e. an RSS note the supersede engine already rewrote, or — round 9 — a
+//!   no `message-id`, i.e. an RSS note the supersede engine already rewrote, or a
 //!   note with no `via: email`/`via: rss` that a `blog` tracker row points at) the pair goes
 //!   through [`crate::supersede`]; a match with any other note (a clip, another mail note) is
 //!   `dup_other` and left untouched. The resolved pair follows `auto_file`'s containment rule
@@ -50,10 +44,6 @@ use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
 /// The repair phases' outcome vars (aggregates only; flattened into the reconcile vars).
 #[derive(Default, Serialize)]
 pub(super) struct Counts {
-    mail_rekeyed: u32,
-    mail_token_stripped: u32,
-    rekey_skipped: u32,
-    rekey_conflict: u32,
     dup_merged: u32,
     dup_marked: u32,
     dup_other: u32,
@@ -90,28 +80,9 @@ fn has_blog_row(ctx: &StepCtx<'_>, path: &str) -> Result<bool, StepError> {
         .any(|r| r.source_kind == "blog"))
 }
 
-/// The note text with `source` set to `canon` (and `post-id` too when the note has one);
-/// `None` when it already holds.
-fn rekeyed_text(text: &str, canon: &str) -> Option<String> {
-    let mut doc = FrontmatterDoc::new(text);
-    let v = JsValue::Str(canon.to_owned());
-    let mut changed = doc.insert_after("title", "source", &v).ok()?;
-    if doc.get("post-id").ok().flatten().is_some() {
-        changed |= doc.set("post-id", &v).ok()?;
-    }
-    changed.then(|| doc.into_text())
-}
-
-/// The note text without `source` and `post-id`; `None` when it has neither.
-fn stripped_text(text: &str) -> Option<String> {
-    let mut doc = FrontmatterDoc::new(text);
-    let a = doc.remove("source").ok()?;
-    let b = doc.remove("post-id").ok()?;
-    (a || b).then(|| doc.into_text())
-}
-
-/// Phases D and E.
-pub(super) fn rekey_and_merge(
+/// Phase E: each `via: email` note whose `.eml` yields a canonical identity is merged with its
+/// RSS twin. A note with no `.eml` or no canonical URL is skipped.
+pub(super) fn merge_mail_twins(
     ctx: &mut StepCtx<'_>,
     sh: &Shared,
     sidx: &mut Option<SupersedeIndex>,
@@ -144,10 +115,7 @@ pub(super) fn rekey_and_merge(
     let sup_cfg = ctx.config.pipelines().supersede.clone();
     super::reconcile_backfill::index(sidx, ctx)?;
     for path in paths {
-        let Some((bytes, hash)) = ctx.read(&path)? else {
-            continue;
-        };
-        let Ok(text) = String::from_utf8(bytes) else {
+        let Some(text) = read_text(ctx, &path)? else {
             continue;
         };
         let doc = FrontmatterDoc::new(text.as_str());
@@ -157,48 +125,14 @@ pub(super) fn rekey_and_merge(
             .and_then(|f| std::fs::read(f).ok())
             .and_then(|b| mail::parse_eml(&b));
         let Some(post) = post else {
-            c.rekey_skipped += 1;
             continue;
         };
         let blog_link = resolve_newsletter(&post, &newsletters, &blogs)
             .and_then(|n| n.blog.clone())
             .and_then(|b| blogs.iter().find(|r| r.name == b).map(|r| r.link.clone()));
-        let current = doc.get_str("source");
         let Some(canon) = mail::canonical_post_url(&post, blog_link.as_deref()) else {
-            if current
-                .as_deref()
-                .is_some_and(|u| !mail::is_clean_identity(u))
-                || (current.is_none() && doc.get("post-id").ok().flatten().is_some())
-            {
-                let Some(new) = stripped_text(&text) else {
-                    continue;
-                };
-                if sh.dry {
-                    c.mail_token_stripped += 1;
-                    continue;
-                }
-                match ctx.write(&path, new.into_bytes(), Some(hash)) {
-                    Ok(_) => c.mail_token_stripped += 1,
-                    Err(e) if e.is_conflict() => c.rekey_conflict += 1,
-                    Err(e) => return Err(e),
-                }
-            }
             continue;
         };
-        if let Some(new) = rekeyed_text(&text, &canon) {
-            if sh.dry {
-                c.mail_rekeyed += 1;
-            } else {
-                match ctx.write(&path, new.into_bytes(), Some(hash)) {
-                    Ok(_) => c.mail_rekeyed += 1,
-                    Err(e) if e.is_conflict() => {
-                        c.rekey_conflict += 1;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
         if let Some(idx) = sidx.as_mut() {
             idx.insert_identity(&path, &canon);
         }

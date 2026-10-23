@@ -500,10 +500,10 @@ fn zed_eml() -> Vec<u8> {
     )
 }
 
-/// A mail note as `track_mail` writes it, but with a token `source` the way round 1 left it.
+/// A mail note as `track_mail` writes it (canonical `source`).
 fn mail_note(complete: bool, body: &str) -> String {
     format!(
-        "---\ntitle: \"Slug One\"\nsource: {ZED}?token=abc\nmessage-id: \"m1@zed.example\"\nauthor:\n  - \"[[Pub]]\"\ncomplete: {complete}\nvia: email\ntags:\n  - blog\n---\n\n{body}\n"
+        "---\ntitle: \"Slug One\"\nsource: {ZED}\nmessage-id: \"m1@zed.example\"\nauthor:\n  - \"[[Pub]]\"\ncomplete: {complete}\nvia: email\ntags:\n  - blog\n---\n\n{body}\n"
     )
 }
 
@@ -562,14 +562,7 @@ fn dry_run_repair_writes_nothing_and_the_real_run_merges_the_pair() {
         w.env.read("Letters/rss.md").unwrap(),
     );
     let dry = w.reconcile(true);
-    assert_eq!(
-        (
-            n(&dry, "mail_rekeyed"),
-            n(&dry, "dup_merged"),
-            n(&dry, "dup_marked")
-        ),
-        (1, 1, 0)
-    );
+    assert_eq!((n(&dry, "dup_merged"), n(&dry, "dup_marked")), (1, 0));
     assert_eq!(w.env.read("mailnotes/m.md").unwrap(), mail0);
     assert_eq!(w.env.read("Letters/rss.md").unwrap(), rss0);
     assert_eq!(trashed(&w), 0);
@@ -600,8 +593,6 @@ fn dry_run_repair_writes_nothing_and_the_real_run_merges_the_pair() {
 
     let again = w.reconcile(false);
     for k in [
-        "mail_rekeyed",
-        "mail_token_stripped",
         "dup_merged",
         "dup_marked",
         "dup_other",
@@ -647,7 +638,7 @@ fn a_kept_mail_note_that_is_not_contained_is_marked_and_nothing_is_trashed() {
     );
     assert!(
         mail.contains(&format!("source: {ZED}\n")),
-        "re-keyed: {mail}"
+        "source untouched: {mail}"
     );
     assert_eq!(w.env.read("Letters/rss.md").unwrap(), rss0);
     let again = w.reconcile(false);
@@ -671,46 +662,6 @@ fn an_identity_match_with_a_clip_is_counted_and_left_alone() {
             .unwrap()
             .contains(&format!("source: {ZED}\n"))
     );
-}
-
-#[test]
-fn a_token_source_with_no_canonical_url_is_stripped_and_a_missing_message_is_skipped() {
-    let tracker = "https://track.example/v2/c/abc?token=zzz";
-    let note = |mid: &str| {
-        format!(
-            "---\ntitle: \"T\"\nsource: {tracker}\npost-id: {tracker}\nmessage-id: \"{mid}\"\nvia: email\n---\n\nSome prose here.\n"
-        )
-    };
-    let w = world(&[
-        ("mailnotes/a.md", note("a@x.example")),
-        ("mailnotes/b.md", note("gone@x.example")),
-    ]);
-    w.put(
-        "processed/a",
-        &eml(
-            "a@x.example",
-            "n@plain.example",
-            "<a href=\"https://track.example/v2/c/abc\">x</a>",
-        ),
-    );
-    let dry = w.reconcile(true);
-    assert_eq!(
-        (n(&dry, "mail_token_stripped"), n(&dry, "rekey_skipped")),
-        (1, 1)
-    );
-    assert!(w.env.read("mailnotes/a.md").unwrap().contains("token=zzz"));
-    let o = w.reconcile(false);
-    assert_eq!(repair_vars(&dry), repair_vars(&o));
-    let a = w.env.read("mailnotes/a.md").unwrap();
-    assert!(
-        !a.contains("source:") && !a.contains("post-id:") && !a.contains("token="),
-        "{a}"
-    );
-    assert!(
-        w.env.read("mailnotes/b.md").unwrap().contains("token=zzz"),
-        "skipped note unchanged"
-    );
-    assert_eq!(n(&w.reconcile(false), "mail_token_stripped"), 0);
 }
 
 #[test]
@@ -792,125 +743,6 @@ fn reclean_r2_drops_a_small_localized_image_by_its_decoded_size() {
             .contains("Real prose paragraph one.")
     );
     assert_eq!(n(&w.reconcile(false), "mail_recleaned_r2"), 0);
-}
-
-// ---- round-9 repair (plan round-9-feedback-todos WP-2) ----------------------------------------
-
-const PAGE: &str = "https://forum.example/threads/saga.1/page-2";
-
-fn identity_vars(o: &StepOutcome) -> Vec<(String, Value)> {
-    let names = serde_json::to_value(super::reconcile_identity::Counts::default()).unwrap();
-    names
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(|k| (k.clone(), o.vars[k].clone()))
-        .collect()
-}
-
-fn chapter(post: u32, dup: Option<&str>, body: &str) -> String {
-    let dup = dup.map_or(String::new(), |d| format!("duplicate-of: \"[[{d}]]\"\n"));
-    format!(
-        "---\ntitle: \"Ch {post}\"\nsource: {PAGE}#post-{post}\npost-id: {PAGE}\n{dup}---\n\n{body}\n"
-    )
-}
-
-#[test]
-fn forum_chapters_are_rekeyed_and_only_the_spurious_duplicate_of_goes() {
-    let other = "Entirely different words appear here describing harbors lighthouses and migrating geese over cold northern water at dawn.";
-    let w = world(&[
-        ("Fic/b.md", chapter(12, None, LONG)),
-        ("Fic/a.md", chapter(11, Some("Fic/b"), other)),
-        // Same page, but the content matches: the marker is real evidence and stays.
-        ("Fic/c.md", chapter(13, Some("Fic/b"), LONG)),
-        // A non-forum duplicate-of is never touched.
-        (
-            "Fic/d.md",
-            format!("---\nsource: {ZED}\nduplicate-of: \"[[Fic/b]]\"\n---\n\n{other}\n"),
-        ),
-        // A stored post-id that is not the obsolete page key is left alone.
-        (
-            "Fic/e.md",
-            format!("---\nsource: {PAGE}#post-14\npost-id: custom\n---\n\nx\n"),
-        ),
-    ]);
-    let before: Vec<String> = ["a", "b", "c", "d", "e"]
-        .iter()
-        .map(|f| w.env.read(&format!("Fic/{f}.md")).unwrap())
-        .collect();
-    let dry = w.reconcile(true);
-    assert_eq!(
-        (
-            n(&dry, "forum_rekeyed"),
-            n(&dry, "dup_of_removed"),
-            n(&dry, "dup_of_kept")
-        ),
-        (3, 1, 1)
-    );
-    for (f, t) in ["a", "b", "c", "d", "e"].iter().zip(&before) {
-        assert_eq!(&w.env.read(&format!("Fic/{f}.md")).unwrap(), t, "dry: {f}");
-    }
-    let real = w.reconcile(false);
-    assert_eq!(identity_vars(&dry), identity_vars(&real));
-    let a = w.env.read("Fic/a.md").unwrap();
-    assert!(
-        a.contains("post-id: https://forum.example/posts/11\n"),
-        "{a}"
-    );
-    assert!(!a.contains("duplicate-of"), "{a}");
-    assert!(w.env.read("Fic/c.md").unwrap().contains("duplicate-of"));
-    assert_eq!(w.env.read("Fic/d.md").unwrap(), before[3]);
-    assert_eq!(w.env.read("Fic/e.md").unwrap(), before[4]);
-    assert!(
-        w.env
-            .read("Fic/b.md")
-            .unwrap()
-            .contains("post-id: https://forum.example/posts/12\n")
-    );
-    let again = w.reconcile(false);
-    assert_eq!(
-        (n(&again, "forum_rekeyed"), n(&again, "dup_of_removed")),
-        (0, 0)
-    );
-}
-
-#[test]
-fn fanfic_notes_get_the_matched_work_title_once() {
-    let work = "---\ntitle: \"The Saga\"\nsource-prefix-filter: [\"https://saga.example/\"]\ntags: [\"fanfic\"]\n---\n\nA work.\n";
-    let w = world(&[
-        ("core/works/Saga.md", work.to_owned()),
-        (
-            "Fanfic/a.md",
-            "---\nsource: https://saga.example/ch1\nauthor:\n  - \"[[Ann]]\"\ntags:\n  - fanfic\n---\n\nx\n".to_owned(),
-        ),
-        (
-            "Fanfic/b.md",
-            "---\nsource: https://saga.example/ch2\npublication: Mine\ntags:\n  - fanfic\n---\n\nx\n".to_owned(),
-        ),
-        (
-            "Fanfic/c.md",
-            "---\nsource: https://elsewhere.example/1\ntags:\n  - fanfic\n---\n\nx\n".to_owned(),
-        ),
-    ]);
-    let b0 = w.env.read("Fanfic/b.md").unwrap();
-    let dry = w.reconcile(true);
-    assert_eq!(
-        (
-            n(&dry, "fanfic_publication_backfilled"),
-            n(&dry, "fanfic_publication_no_work")
-        ),
-        (1, 1)
-    );
-    let o = w.reconcile(false);
-    assert_eq!(identity_vars(&dry), identity_vars(&o));
-    let a = w.env.read("Fanfic/a.md").unwrap();
-    assert!(
-        a.contains("author:\n  - \"[[Ann]]\"\npublication: The Saga\n"),
-        "{a}"
-    );
-    assert_eq!(w.env.read("Fanfic/b.md").unwrap(), b0);
-    assert!(!w.env.read("Fanfic/c.md").unwrap().contains("publication"));
-    assert_eq!(n(&w.reconcile(false), "fanfic_publication_backfilled"), 0);
 }
 
 /// A pre-D25 RSS note carries no `via`; its `blog` tracker row makes it RSS-origin, so its mail
