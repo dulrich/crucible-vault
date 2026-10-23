@@ -1,5 +1,6 @@
 //! Rendering: the tab body, tab bar, note bar, panes, side column and the root `view`.
 
+use super::tab_drag::DropTarget;
 use super::*;
 use iced::widget::column;
 
@@ -80,6 +81,22 @@ impl App {
         }
     }
 
+    /// Plan round-10 WP-8: `content` as a tab-drop target. The enter/exit handlers exist only
+    /// while a drag is live (stable widget tree, no per-move message churn otherwise).
+    fn drop_area<'a>(
+        &self,
+        content: impl Into<Element<'a, Message>>,
+        target: DropTarget,
+    ) -> Element<'a, Message> {
+        let mut area = iced::widget::mouse_area(content);
+        if self.tab_drag.active() {
+            area = area
+                .on_enter(Message::Tabs(TabsMsg::DragEnter(target)))
+                .on_exit(Message::Tabs(TabsMsg::DragLeave(target)));
+        }
+        area.into()
+    }
+
     /// The tab bar: the pane's tab headers (fixed height, clipped), then the close-pane button.
     fn tab_bar<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> Element<'a, Message> {
         use crate::header::{BAR_HEIGHT, MARKER_WIDTH, TITLE_MAX_CHARS, ellipsize, marker};
@@ -115,11 +132,15 @@ impl App {
                     .width(MARKER_WIDTH)
                     .height(BAR_HEIGHT)
                     .center_x(MARKER_WIDTH);
-            let select = button(row![lbl, mark].spacing(2).height(BAR_HEIGHT))
-                .height(BAR_HEIGHT)
-                .padding([0, 6])
-                .style(button::text)
-                .on_press(Message::Tabs(TabsMsg::Select(pane, i)));
+            // Plan round-10 WP-8: a press (not a click) activates the tab and arms a drag, so the
+            // header is a `mouse_area`, not a `button` (a button fires on release and captures).
+            let select = iced::widget::mouse_area(
+                container(row![lbl, mark].spacing(2).height(BAR_HEIGHT))
+                    .height(BAR_HEIGHT)
+                    .padding([0, 6]),
+            )
+            .interaction(iced::mouse::Interaction::Pointer)
+            .on_press(Message::Tabs(TabsMsg::DragPress(pane, i)));
             let hover = match tab.path() {
                 Some(p) => p.to_owned(),
                 None => self.tab_header_title(ps, tab),
@@ -154,18 +175,26 @@ impl App {
                     },
                 ),
             };
-            container(chip)
+            // The hovered drop slot shows an accent edge (only while a drag is live).
+            let slot = DropTarget::Slot(pane, i);
+            let drop_here = self.tab_drag.hover() == Some(slot);
+            let chip = container(chip)
                 .height(BAR_HEIGHT)
                 .clip(true)
                 .style(move |_: &Theme| container::Style {
                     background: active.then(|| t.panel_2.to_color().into()),
                     border: iced::Border {
+                        color: if drop_here {
+                            t.accent_ui.to_color()
+                        } else {
+                            iced::Color::TRANSPARENT
+                        },
+                        width: if drop_here { 1.0 } else { 0.0 },
                         radius: crate::theme::RADIUS.into(),
-                        ..iced::Border::default()
                     },
                     ..container::Style::default()
-                })
-                .into()
+                });
+            self.drop_area(chip, slot)
         }))
         .spacing(4)
         .height(BAR_HEIGHT)
@@ -174,6 +203,7 @@ impl App {
             .width(Length::Fill)
             .height(BAR_HEIGHT)
             .clip(true);
+        let headers = self.drop_area(headers, DropTarget::End(pane));
         // The close-pane button is pane-level, so it lives at the tab bar's right end.
         let close: Element<'a, Message> = if self.panes.len() > 1 {
             icon_button(Icon::X, Some(Message::Panes(PanesMsg::Close(pane))), t).into()
@@ -420,7 +450,11 @@ impl App {
         // plan editor-round-4 WP-4: the pointer entering a pane may focus it. The wrapper is
         // always present (stable widget tree); only its `on_enter` follows the pref.
         let mut hover = iced::widget::mouse_area(container(body).padding(8).height(Length::Fill));
-        if self.prefs.focus_follows_mouse && !focused {
+        if self.tab_drag.active() {
+            hover = hover
+                .on_enter(Message::Tabs(TabsMsg::DragEnter(DropTarget::Body(pane))))
+                .on_exit(Message::Tabs(TabsMsg::DragLeave(DropTarget::Body(pane))));
+        } else if self.prefs.focus_follows_mouse && !focused {
             hover = hover.on_enter(Message::Panes(PanesMsg::Hover(pane)));
         }
         pane_grid::Content::new(hover).style(move |_: &Theme| container::Style {

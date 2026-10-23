@@ -487,6 +487,18 @@ pub enum TabsMsg {
     Quit,
     /// Window focus lost: flush every dirty note buffer (plan editor-feedback-round-2 WP-3).
     FlushAll,
+    /// Plan round-10 WP-8: a tab header was pressed (activates it and arms a drag).
+    DragPress(Pane, usize),
+    /// The cursor moved while a press is armed.
+    DragMove(iced::Point),
+    /// The cursor entered a drop target.
+    DragEnter(crate::app::tab_drag::DropTarget),
+    /// The cursor left a drop target.
+    DragLeave(crate::app::tab_drag::DropTarget),
+    /// The left button went up while a press is armed.
+    DragRelease,
+    /// Esc while a press is armed.
+    DragCancel,
 }
 
 /// editor-usability-round WP-4: the focused pane's find bar.
@@ -623,7 +635,13 @@ impl TabsMsg {
             | Self::CloseActive
             | Self::GoTo(_)
             | Self::Quit
-            | Self::FlushAll => MsgKind::Input,
+            | Self::FlushAll
+            | Self::DragPress(..)
+            | Self::DragMove(_)
+            | Self::DragEnter(_)
+            | Self::DragLeave(_)
+            | Self::DragRelease
+            | Self::DragCancel => MsgKind::Input,
         }
     }
 }

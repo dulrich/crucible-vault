@@ -39,6 +39,7 @@ mod menu;
 mod saves;
 mod scroll;
 mod status;
+pub mod tab_drag;
 mod tabs;
 mod update;
 mod view;
@@ -280,6 +281,8 @@ pub struct App {
     /// The last `prefs.menu_bar_shown` the session state was synced to.
     pub(super) menu_bar_pref: bool,
     pub(super) alt_tap: alt_tap::AltTap,
+    /// Plan round-10 WP-8: the tab-drag tracker.
+    pub(super) tab_drag: tab_drag::TabDrag,
     /// A back/forward step is opening a path: it must not push onto the history.
     history_nav: bool,
     /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
@@ -416,6 +419,7 @@ impl App {
             menu_bar_shown: true,
             menu_bar_pref: true,
             alt_tap: alt_tap::AltTap::default(),
+            tab_drag: tab_drag::TabDrag::default(),
             history_nav: false,
             quit: None,
             dialog: None,

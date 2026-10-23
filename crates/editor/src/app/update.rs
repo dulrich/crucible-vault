@@ -491,6 +491,13 @@ impl App {
             // plan round-10 WP-7: every key/mouse press + Alt release feeds the bare-Alt tracker
             // (captured or not; a bare Alt has no chord, so the palette keymap never sees a tap).
             iced::event::listen_with(super::alt_tap::input_of),
+            // plan round-10 WP-8: cursor moves, the left-button release and Esc, only while a
+            // tab header is pressed (no per-move churn otherwise).
+            if self.tab_drag.armed() {
+                iced::event::listen_with(tab_drag_event)
+            } else {
+                Subscription::none()
+            },
             iced::keyboard::listen().filter_map(switcher::key_event),
             // plan round-5 WP-4: Up/Down/Escape (captured or not) for an open form typeahead.
             if self.settings.form.typeahead.is_some() && !self.switcher.open {
@@ -541,6 +548,26 @@ fn mouse_button_event(
         }
         iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => {
             Some(Message::Panes(PanesMsg::MouseButton(false)))
+        }
+        _ => None,
+    }
+}
+
+/// Plan round-10 WP-8: cursor move / left release / Esc → the tab-drag messages (any status).
+fn tab_drag_event(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -> Option<Message> {
+    use iced::keyboard::{Event as K, Key, key::Named};
+    use iced::mouse::{Button, Event as M};
+    match e {
+        iced::Event::Mouse(M::CursorMoved { position }) => {
+            Some(Message::Tabs(TabsMsg::DragMove(position)))
+        }
+        iced::Event::Mouse(M::ButtonReleased(Button::Left)) => {
+            Some(Message::Tabs(TabsMsg::DragRelease))
+        }
+        iced::Event::Keyboard(K::KeyPressed { key, .. })
+            if key.as_ref() == Key::Named(Named::Escape) =>
+        {
+            Some(Message::Tabs(TabsMsg::DragCancel))
         }
         _ => None,
     }

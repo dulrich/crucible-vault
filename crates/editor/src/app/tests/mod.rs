@@ -66,6 +66,7 @@ mod reconnect;
 mod save_continue;
 mod scroll_matrix;
 mod shared_docs;
+mod tab_drag;
 mod title_sync;
 mod unsaved_dialog;
 mod view_scale;

@@ -155,6 +155,57 @@ impl App {
         self.record_visit(pane, path);
     }
 
+    /// Plan round-10 WP-8: moves the tab at `from` into pane `to` — at index `at` (clamped; for
+    /// the tab's own pane, its index once removed) or appended — and focuses it. The `Tab` value
+    /// (id, kind) moves, so its shared document (dirty buffer, undo) and id-keyed view state
+    /// travel with it. A source pane left empty stays (as after a close). False when `from` or
+    /// `to` is missing.
+    pub(super) fn move_tab(&mut self, from: (Pane, usize), to: Pane, at: Option<usize>) -> bool {
+        if self.panes.get(to).is_none() {
+            return false;
+        }
+        let Some(tab) = self.panes.get_mut(from.0).and_then(|ps| ps.remove(from.1)) else {
+            return false;
+        };
+        let path = tab.path().map(str::to_owned);
+        let Some(ps) = self.panes.get_mut(to) else {
+            return false;
+        };
+        let n = at.map_or(ps.tabs.len(), |a| a.min(ps.tabs.len()));
+        ps.tabs.insert(n, tab);
+        self.focus = to;
+        if let Some(ps) = self.panes.get_mut(to) {
+            ps.activate(n);
+        }
+        if let Some(path) = path {
+            self.record_visit(to, &path);
+        }
+        true
+    }
+
+    /// Plan round-10 WP-8: the tab-drag messages (see [`tab_drag`]).
+    fn update_tab_drag(&mut self, m: TabsMsg) {
+        use super::tab_drag::Outcome;
+        match m {
+            TabsMsg::DragPress(pane, i) => {
+                self.select_tab(pane, i);
+                self.tab_drag.press((pane, i));
+            }
+            TabsMsg::DragMove(p) => {
+                self.tab_drag.moved(p);
+            }
+            TabsMsg::DragEnter(t) => self.tab_drag.enter(t),
+            TabsMsg::DragLeave(t) => self.tab_drag.leave(t),
+            TabsMsg::DragCancel => self.tab_drag.cancel(),
+            TabsMsg::DragRelease => {
+                if let Outcome::Drop { from, to, at } = self.tab_drag.release() {
+                    self.move_tab(from, to, at);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Opens `path` in `pane` per `how` (see [`Place`]). A note open nowhere is read into a new
     /// document; a further tab of an open note shares its document (plan
     /// editor-feedback-round-2 WP-7).
@@ -186,14 +237,7 @@ impl App {
                 }
                 (Place::Move, Some((p, i))) => {
                     // The tab (and so its shared document: edits, undo) moves pane.
-                    let Some(tab) = self.panes.get_mut(p).and_then(|ps| ps.remove(i)) else {
-                        return Ok(());
-                    };
-                    if let Some(ps) = self.panes.get_mut(pane) {
-                        ps.tabs.push(tab);
-                        let n = ps.tabs.len() - 1;
-                        self.focus_tab(pane, n, path);
-                    }
+                    self.move_tab((p, i), pane, None);
                     return Ok(());
                 }
                 _ => {}
@@ -332,6 +376,7 @@ impl App {
             }
             TabsMsg::Quit => return self.quit(),
             TabsMsg::FlushAll => return self.flush_all_notes(),
+            m => self.update_tab_drag(m),
         }
         Task::none()
     }
