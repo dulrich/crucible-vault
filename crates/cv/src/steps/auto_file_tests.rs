@@ -9,7 +9,7 @@ use cv_state::TrackerItem;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value};
 
-use super::auto_file::{Clip, Work, host_row, works_hit, works_match};
+use super::auto_file::host_row;
 use crate::steps::testkit::{StepEnv, active, config_of, example_config};
 use crate::steps::{ChildSpawner, StepOutcome, execute};
 
@@ -32,6 +32,28 @@ name = "Letter"
 from = ["@letter.example"]
 blog = "Letter Blog"
 kind = "news"
+
+[[newsletter]]
+name = "Beehive"
+short = "Bee"
+hosts = ["bee.example"]
+kind = "news"
+
+[[serial]]
+name = "Odd"
+prefix = ["https://saga.example/odd/"]
+kind = "not-a-kind"
+
+[[serial]]
+name = "The Saga"
+prefix = ["https://saga.example/"]
+
+[[serial]]
+name = "Ann Posts"
+short = "Ann P"
+author = "Ann Poster"
+prefix = ["https://posts.example/"]
+kind = "post"
 "#;
 
 /// Records the children a step spawns.
@@ -219,109 +241,70 @@ fn identity_match_without_containment_keeps_the_clip_with_duplicate_of() {
     assert!(rec.kinds().is_empty(), "no kind matches other.example");
 }
 
-fn work(author: Option<&str>, prefixes: &[&str], tags: &[&str]) -> String {
-    let mut fm = String::new();
-    if let Some(a) = author {
-        fm.push_str(&format!("author-filter: \"{a}\"\n"));
-    }
-    if !prefixes.is_empty() {
-        fm.push_str(&format!(
-            "source-prefix-filter: {}\n",
-            serde_json::to_string(prefixes).unwrap()
-        ));
-    }
-    fm.push_str(&format!("tags: {}\n", serde_json::to_string(tags).unwrap()));
-    doc(&fm, "A work.")
-}
-
+/// Round 11 Decision 4: `[[serial]]` rows (config order) file a matching clip as their `kind`
+/// with their publication (any kind); a row whose kind is undefined is skipped and matching
+/// continues; a clip matching no row files by the later rules or not at all.
 #[test]
-fn works_match_files_the_clip_under_the_works_kind() {
-    let cases: [(&str, String, bool); 4] = [
+fn serial_rows_file_the_clip_with_their_kind_and_publication() {
+    type Case = (
+        &'static str,
+        &'static str,
+        Option<(&'static str, &'static str)>,
+    );
+    let cases: [Case; 5] = [
         (
-            "author and prefix",
-            work(
-                Some("[[Ann Writer]]"),
-                &["https://saga.example/"],
-                &["fanfic"],
-            ),
-            true,
+            "https://saga.example/ch1",
+            "Ann",
+            Some(("fanfic", "The Saga")),
+        ),
+        // The undefined-kind row matches first and is skipped; The Saga still matches.
+        (
+            "https://saga.example/odd/1",
+            "Ann",
+            Some(("fanfic", "The Saga")),
         ),
         (
-            "prefix only",
-            work(None, &["https://saga.example/"], &["#fanfic"]),
-            true,
+            "https://posts.example/a",
+            "\"[[Ann Poster|AP]]\"",
+            Some(("post", "Ann P")),
         ),
-        (
-            "author mismatch",
-            work(Some("[[Bob]]"), &["https://saga.example/"], &["fanfic"]),
-            false,
-        ),
-        ("no filters", work(None, &[], &["fanfic"]), false),
+        ("https://posts.example/a", "Bob", None),
+        ("https://nowhere.example/a", "\"[[Ann Poster]]\"", None),
     ];
-    for (name, w, hit) in cases {
+    for (url, author, want) in cases {
         let clip = doc(
-            "source: https://saga.example/ch1\nauthor:\n  - \"[[Ann Writer]]\"\n",
+            &format!("source: {url}\nauthor:\n  - {author}\n"),
             &words("k", 0, 30),
         );
-        let e = world(&[("core/works/Saga.md", w), ("Clippings/Ch1.md", clip)]);
+        let e = world(&[("Clippings/Ch1.md", clip)]);
         let rec = Rec::default();
         let o = run(&e, "Clippings/Ch1.md", &rec);
-        if hit {
-            assert_eq!(rec.kinds(), ["file-as-kind:fanfic"], "{name}");
-            assert_eq!(var(&o, "kind"), Some("fanfic"), "{name}");
-            assert_eq!(var(&o, "child_job_id"), Some("job-1"), "{name}");
-        } else {
-            assert!(rec.kinds().is_empty(), "{name}");
+        let t = e.read("Clippings/Ch1.md").expect("never moved by the step");
+        match want {
+            Some((kind, publication)) => {
+                assert_eq!(rec.kinds(), [format!("file-as-kind:{kind}")], "{url}");
+                assert_eq!(var(&o, "kind"), Some(kind), "{url}");
+                assert!(t.contains(&format!("publication: {publication}\n")), "{t}");
+            }
+            None => {
+                assert!(rec.kinds().is_empty(), "{url} {author}");
+                assert!(!t.contains("publication"), "{t}");
+            }
         }
-        assert!(
-            e.read("Clippings/Ch1.md").is_some(),
-            "{name}: never moved by the step"
-        );
     }
 }
 
+/// Round 11 Decision 7 (step 2b): a `[[newsletter]]` row's `hosts` files a clip as that row's
+/// kind with its publication, with no `[[blog]]` row.
 #[test]
-fn works_pure_rules() {
-    let clip = Clip {
-        source: "https://saga.example/ch1".into(),
-        authors: vec![" [[Ann]] ".into(), "#tagged".into()],
-        host: Some("saga.example".into()),
-    };
-    let w = |a: Option<&str>, p: &[&str], t: &[&str]| Work {
-        path: "core/works/W.md".into(),
-        author_filter: a.map(str::to_owned),
-        source_prefixes: p.iter().map(|s| (*s).to_owned()).collect(),
-        tags: t.iter().map(|s| (*s).to_owned()).collect(),
-        title: None,
-    };
-    assert!(works_match(&w(Some("[[Ann]]"), &[], &[]), &clip));
-    assert!(
-        works_match(&w(Some("tagged"), &[], &[]), &clip),
-        "# removed"
-    );
-    assert!(!works_match(
-        &w(Some("[[Ann]]"), &["https://elsewhere.example"], &[]),
-        &clip
-    ));
-    assert!(works_match(
-        &w(None, &["", " https://saga.example "], &[]),
-        &clip
-    ));
-    assert!(
-        !works_match(&w(Some("  "), &["  "], &[]), &clip),
-        "empty filters match nothing"
-    );
-    // The first matching work with a kind tag wins, in path order.
-    let mut a = w(None, &["https://saga.example"], &["notakind"]);
-    a.path = "core/works/A.md".into();
-    let mut b = w(None, &["https://saga.example"], &["fanfic"]);
-    b.path = "core/works/B.md".into();
-    assert_eq!(
-        works_hit(&[b, a], &clip, |k| k == "fanfic")
-            .map(|(_, k)| k)
-            .as_deref(),
-        Some("fanfic")
-    );
+fn newsletter_hosts_file_the_clip_as_that_rows_kind() {
+    let clip = doc("source: https://www.bee.example/p/1\n", &words("b", 0, 30));
+    let e = world(&[("Clippings/B.md", clip)]);
+    let rec = Rec::default();
+    run(&e, "Clippings/B.md", &rec);
+    assert_eq!(rec.kinds(), ["file-as-kind:news"]);
+    let t = e.read("Clippings/B.md").unwrap();
+    assert!(t.contains("publication: Bee\n"), "{t}");
 }
 
 #[test]
@@ -481,8 +464,8 @@ fn clip_in_folder_without_the_kind_tag_or_tagged_elsewhere_still_files() {
     assert_eq!(rec.kinds(), ["file-as-kind:fanfic"]);
 }
 
-/// WP-5b: a blog-row match writes `publication` once (never overwrites); Works and hosts-only
-/// matches get none.
+/// WP-5b: a blog-row match writes `publication` once (never overwrites); a kinds.toml
+/// hosts-only match gets none.
 #[test]
 fn host_row_match_sets_publication_only_when_absent() {
     let body = words("p", 0, 30);
@@ -501,29 +484,20 @@ fn host_row_match_sets_publication_only_when_absent() {
     let e = world(&[("Clippings/B.md", have.clone())]);
     run(&e, "Clippings/B.md", &Rec::default());
     assert_eq!(e.read("Clippings/B.md").as_deref(), Some(have.as_str()));
-    // Works match (no host row) and hosts-only match: no publication.
-    let w = work(None, &["https://saga.example/"], &["fanfic"]);
-    let c = doc("source: https://saga.example/ch1\n", &body);
-    let e = world(&[("core/works/Saga.md", w), ("Clippings/C.md", c)]);
-    run(&e, "Clippings/C.md", &Rec::default());
-    assert!(!e.read("Clippings/C.md").unwrap().contains("publication"));
+    // A kinds.toml hosts-only match: no publication.
     let h = doc("source: https://www.fanfiction.net/s/9\n", &body);
     let e = world(&[("Clippings/D.md", h)]);
     run(&e, "Clippings/D.md", &Rec::default());
     assert!(!e.read("Clippings/D.md").unwrap().contains("publication"));
 }
 
-/// Round 9 Decision 2: a clip filed as fanfic by a Work takes the Work's `title` as
-/// `publication`; an existing value is never overwritten.
+/// Round 9 Decision 2 / round 11 Decision 4: a clip filed by a serial row takes the row's
+/// publication; an existing value is never overwritten.
 #[test]
-fn fanfic_clip_takes_the_matched_work_title_as_publication() {
+fn fanfic_clip_takes_the_matched_serial_publication() {
     let body = words("q", 0, 30);
-    let w = doc(
-        "title: \"The Saga\"\nsource-prefix-filter: [\"https://saga.example/\"]\ntags: [\"fanfic\"]\n",
-        "A work.",
-    );
     let c = doc("source: https://saga.example/ch2\nauthor: Ann\n", &body);
-    let e = world(&[("core/works/Saga.md", w.clone()), ("Clippings/F.md", c)]);
+    let e = world(&[("Clippings/F.md", c)]);
     let rec = Rec::default();
     run(&e, "Clippings/F.md", &rec);
     assert_eq!(rec.kinds(), ["file-as-kind:fanfic"]);
@@ -533,23 +507,22 @@ fn fanfic_clip_takes_the_matched_work_title_as_publication() {
         "source: https://saga.example/ch3\npublication: \"Mine\"\n",
         &body,
     );
-    let e = world(&[("core/works/Saga.md", w), ("Clippings/G.md", have.clone())]);
+    let e = world(&[("Clippings/G.md", have.clone())]);
     run(&e, "Clippings/G.md", &Rec::default());
     assert_eq!(e.read("Clippings/G.md").as_deref(), Some(have.as_str()));
 }
 
 /// WP-5b acceptance: a `clippings`-tagged clip created in a day folder whose source matches a
-/// fanfic Work spawns `file-as-kind { fanfic }`, and that child files it with no move error.
+/// fanfic serial row spawns `file-as-kind { fanfic }`, and that child files it with no move error.
 #[test]
 fn fanfic_clip_in_a_day_folder_files_without_a_move_error() {
     use serde_json::json;
     let p = day_clip_path("Ch9.md");
-    let w = work(None, &["https://saga.example/"], &["fanfic"]);
     let clip = doc(
         "source: https://saga.example/ch9\ntags:\n  - clippings\n",
         &words("f", 0, 30),
     );
-    let e = world(&[("core/works/Saga.md", w), (p.as_str(), clip)]);
+    let e = world(&[(p.as_str(), clip)]);
     let rec = Rec::default();
     run(&e, &p, &rec);
     assert_eq!(rec.kinds(), ["file-as-kind:fanfic"]);

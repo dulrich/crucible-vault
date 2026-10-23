@@ -25,6 +25,11 @@
 //!   no `publication` gets its source row's (`short`, else name; `channel` for YouTube),
 //!   inserted after `author`, never overwriting (`publication_backfilled`). A note none of whose
 //!   rows maps to a source row is `publication_no_row`; a lost CAS race `publication_conflict`.
+//!   Tracker rows never carry a `[[serial]]` source, so serial rows join separately (round 11
+//!   E1): an indexed note (outside `.trash/`) that matches a `[[serial]]` row by
+//!   `SerialSource::matches` (its `author` list + `source`) and has no `publication` gets the
+//!   first matching row's, through the same write; a tracker-linked note's own row wins, and
+//!   each note is written at most once per pass.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -281,6 +286,72 @@ fn publication_of_row(ctx: &StepCtx<'_>, r: &TrackerItem) -> Option<String> {
     }
 }
 
+/// The text of an indexed property value (a list comma-joined, as [`cv_note::js_text`]).
+fn index_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a.iter().map(index_text).collect::<Vec<_>>().join(","),
+        serde_json::Value::Null | serde_json::Value::Object(_) => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Notes (outside `.trash/`) whose indexed `source` and `author` match some `[[serial]]` row:
+/// the index prefilter for phase F's serial half (the note's own frontmatter is re-checked).
+fn serial_candidates(
+    ctx: &StepCtx<'_>,
+    serial: &[cv_actions::pipelines::SerialSource],
+) -> Result<Vec<String>, StepError> {
+    if serial.is_empty() {
+        return Ok(Vec::new());
+    }
+    let reader = ctx.index()?;
+    let q = reader.query();
+    let ix = |e| StepError::failed(format!("index: {e}"));
+    let mut authors: HashMap<String, Vec<String>> = HashMap::new();
+    for r in q.md_props_with_key("author").map_err(ix)? {
+        let a = authors.entry(r.path).or_default();
+        match r.value {
+            serde_json::Value::Array(v) => a.extend(v.iter().map(index_text)),
+            v => a.push(index_text(&v)),
+        }
+    }
+    let mut out = Vec::new();
+    for r in q.md_props_with_key("source").map_err(ix)? {
+        if r.path.starts_with(".trash/") {
+            continue;
+        }
+        let a: Vec<&str> = authors
+            .get(&r.path)
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let source = index_text(&r.value);
+        if serial.iter().any(|s| s.matches(&a, &source)) {
+            out.push(r.path);
+        }
+    }
+    Ok(out)
+}
+
+/// The publication of the first `[[serial]]` row (config order) the note matches.
+fn serial_publication(
+    serial: &[cv_actions::pipelines::SerialSource],
+    doc: &FrontmatterDoc,
+) -> Option<String> {
+    let authors = doc.get_texts("author");
+    let authors: Vec<&str> = authors.iter().map(String::as_str).collect();
+    let source = doc
+        .get("source")
+        .ok()
+        .flatten()
+        .map(|v| cv_note::js_text(&v))
+        .unwrap_or_default();
+    serial
+        .iter()
+        .find(|s| s.matches(&authors, &source))
+        .map(|s| s.publication().to_owned())
+}
+
 /// Phase F.
 pub(super) fn publication(
     ctx: &mut StepCtx<'_>,
@@ -294,20 +365,24 @@ pub(super) fn publication(
             by_note.entry(p).or_default().push(r);
         }
     }
-    for (path, rows) in by_note {
+    // Round 11 E1: notes matching a `[[serial]]` row join the candidates (each note once).
+    let serial = ctx.config.sources().serial.clone();
+    let mut paths: BTreeSet<String> = by_note.keys().cloned().collect();
+    paths.extend(serial_candidates(ctx, &serial)?);
+    for path in paths {
         let Some(text) = read_text(ctx, &path)? else {
             continue;
         };
-        if FrontmatterDoc::new(text.as_str())
-            .get("publication")
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        let doc = FrontmatterDoc::new(text.as_str());
+        if doc.get("publication").ok().flatten().is_some() {
             continue;
         }
-        let Some(p) = rows.iter().find_map(|r| publication_of_row(ctx, r)) else {
-            c.publication_no_row += 1;
+        let rows = by_note.get(&path);
+        let tracked = rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r)));
+        let Some(p) = tracked.or_else(|| serial_publication(&serial, &doc)) else {
+            if rows.is_some() {
+                c.publication_no_row += 1;
+            }
             continue;
         };
         if sh.dry {

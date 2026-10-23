@@ -336,6 +336,8 @@ pub(crate) fn resolve_newsletter<'a>(
         kind: "blog".into(),
         tags: Vec::new(),
         paywall_markers: Vec::new(),
+        hosts: Vec::new(),
+        works: false,
     }))
 }
 

@@ -713,6 +713,27 @@ fn publication_is_backfilled_once_and_never_overwritten() {
     assert_eq!(w.env.read("Letters/a.md").unwrap(), a);
 }
 
+/// Round 11 E1: a note matching a `[[serial]]` row gets its publication with no tracker row;
+/// one with a publication is untouched.
+#[test]
+fn serial_matched_note_without_a_tracker_row_gets_the_publication() {
+    let mut w = world(&[
+        ("Stories/a.md", "---\ntitle: \"A\"\nsource: https://saga.example/s/1\nauthor:\n  - \"[[Ann|A]]\"\n---\n\nBody a.\n".to_owned()),
+        ("Stories/b.md", "---\ntitle: \"B\"\nsource: https://saga.example/s/2\nauthor:\n  - \"[[Ann]]\"\npublication: Mine\n---\n\nBody b.\n".to_owned()),
+        ("Stories/c.md", "---\ntitle: \"C\"\nsource: https://saga.example/s/3\nauthor:\n  - Bob\n---\n\nBody c.\n".to_owned()),
+    ]);
+    w.sources("[[serial]]\nname = \"The Saga\"\nshort = \"Saga\"\nauthor = \"Ann\"\nprefix = [\"https://saga.example/\"]\n");
+    let b0 = w.env.read("Stories/b.md").unwrap();
+    let c0 = w.env.read("Stories/c.md").unwrap();
+    let o = w.reconcile(false);
+    assert_eq!(n(&o, "publication_backfilled"), 1);
+    let a = w.env.read("Stories/a.md").unwrap();
+    assert!(a.contains("  - \"[[Ann|A]]\"\npublication: Saga\n"), "{a}");
+    assert_eq!(w.env.read("Stories/b.md").unwrap(), b0, "never overwritten");
+    assert_eq!(w.env.read("Stories/c.md").unwrap(), c0, "author mismatch");
+    assert_eq!(n(&w.reconcile(false), "publication_backfilled"), 0);
+}
+
 #[test]
 fn reclean_r2_drops_a_small_localized_image_by_its_decoded_size() {
     let note = |name: &str| {

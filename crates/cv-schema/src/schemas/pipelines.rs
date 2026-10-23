@@ -400,6 +400,7 @@ pub static SOURCE_YOUTUBE: Record = Record {
             PRIORITY,
         )
         .dflt(D::Str("normal")),
+        WORKS_FIELD,
     ],
     rules: &[],
     summary: None,
@@ -452,6 +453,7 @@ pub static SOURCE_BLOG: Record = Record {
             "Body phrases (case-insensitive) that mark a post incomplete",
             STR_LIST,
         ),
+        WORKS_FIELD,
     ],
     rules: &[],
     summary: None,
@@ -501,10 +503,69 @@ pub static SOURCE_NEWSLETTER: Record = Record {
             "Body phrases (case-insensitive) that mark an email incomplete",
             STR_LIST,
         ),
+        field(
+            "hosts",
+            "Clip hosts",
+            "Web-clip hosts (www. ignored) filed as this row's kind with its publication; a hosts-only row needs no mail matcher",
+            STR_LIST,
+        ),
+        WORKS_FIELD,
     ],
     rules: &[],
     summary: None,
 };
+
+/// One `[[serial]]` work (plan round-11-feedback-todos Decision 4).
+pub static SOURCE_SERIAL: Record = Record {
+    name: "serial",
+    fields: &[
+        field("name", "Name", "Display name (unique)", Node::Str).req(),
+        field(
+            "short",
+            "Short",
+            "Publication name shown in the Author column; default = the row's name/channel",
+            Node::Str,
+        ),
+        field(
+            "author",
+            "Author",
+            "Bare author name a clip's author list must contain ([[ ]] and # ignored)",
+            Node::Str,
+        ),
+        field(
+            "prefix",
+            "Source prefixes",
+            "Source-URL prefixes; ANDed with the author; neither set matches nothing",
+            STR_LIST,
+        ),
+        field(
+            "kind",
+            "Kind",
+            "kinds.toml kind its clips are filed as",
+            Node::Str,
+        )
+        .dflt(D::Str("fanfic")),
+        field(
+            "status",
+            "Status",
+            "Works-view status; filing ignores it",
+            Node::Enum(&["active", "complete", "ignored"]),
+        )
+        .dflt(D::Str("active")),
+        WORKS_FIELD,
+    ],
+    rules: &[],
+    summary: None,
+};
+
+/// The `works` flag every sources row accepts (Decision 5).
+const WORKS_FIELD: Field = field(
+    "works",
+    "In Works",
+    "List this row in the Works view",
+    Node::Bool,
+)
+.dflt(D::Bool(false));
 
 /// `sources.toml`.
 pub static SOURCES_FILE: Record = Record {
@@ -527,6 +588,12 @@ pub static SOURCES_FILE: Record = Record {
             "Newsletters",
             "One [[newsletter]] each",
             Node::List(&Node::Record(&SOURCE_NEWSLETTER)),
+        ),
+        field(
+            "serial",
+            "Serials",
+            "One [[serial]] each",
+            Node::List(&Node::Record(&SOURCE_SERIAL)),
         ),
     ],
     rules: &[],

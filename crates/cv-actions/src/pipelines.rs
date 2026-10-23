@@ -383,6 +383,9 @@ pub struct SourcesConfig {
     pub blog: Vec<BlogSource>,
     /// `[[newsletter]]` mail senders (plan auto-intake-sprint WP-4).
     pub newsletter: Vec<NewsletterSource>,
+    /// `[[serial]]` works (plan round-11-feedback-todos Decision 4; replaces the `core/works`
+    /// notes).
+    pub serial: Vec<SerialSource>,
 }
 
 impl SourcesConfig {
@@ -391,12 +394,24 @@ impl SourcesConfig {
         let c: Self = toml::Value::Table(t.clone())
             .try_into()
             .map_err(|e: toml::de::Error| e.message().to_owned())?;
+        for (i, s) in c.serial.iter().enumerate() {
+            if s.name.trim().is_empty() {
+                return Err(format!("serial #{}: needs a non-empty `name`", i + 1));
+            }
+            if c.serial[..i].iter().any(|o| o.name.trim() == s.name.trim()) {
+                return Err(format!("serial {:?}: duplicate name", s.name));
+            }
+            if s.kind.trim().is_empty() {
+                return Err(format!("serial {:?}: `kind` is empty", s.name));
+            }
+        }
         for n in &c.newsletter {
             if n.from.iter().all(|f| f.trim().is_empty())
                 && n.list_id.as_deref().is_none_or(|l| l.trim().is_empty())
+                && n.hosts.iter().all(|h| h.trim().is_empty())
             {
                 return Err(format!(
-                    "newsletter {:?}: needs a `from` or a `list_id` matcher",
+                    "newsletter {:?}: needs a `from`, `list_id` or `hosts` matcher",
                     n.name
                 ));
             }
@@ -430,6 +445,9 @@ pub struct YoutubeSource {
     /// Priority.
     #[serde(default)]
     pub priority: Priority,
+    /// Listed in the Works view (plan round-11-feedback-todos Decision 5).
+    #[serde(default)]
+    pub works: bool,
 }
 
 /// One tracked blog feed.
@@ -461,6 +479,9 @@ pub struct BlogSource {
     /// Body phrases (case-insensitive) marking a post incomplete (plan auto-intake-sprint WP-2).
     #[serde(default)]
     pub paywall_markers: Vec<String>,
+    /// Listed in the Works view (plan round-11-feedback-todos Decision 5).
+    #[serde(default)]
+    pub works: bool,
 }
 
 fn rss() -> String {
@@ -495,10 +516,112 @@ pub struct NewsletterSource {
     /// Body phrases (case-insensitive) marking an email incomplete (united with the linked blog row's).
     #[serde(default)]
     pub paywall_markers: Vec<String>,
+    /// Clip hosts (kinds.toml `hosts` forms) whose clips file as this row's `kind` with its
+    /// publication (plan round-11-feedback-todos Decision 7); a hosts-only row needs no mail
+    /// matcher.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// Listed in the Works view (plan round-11-feedback-todos Decision 5).
+    #[serde(default)]
+    pub works: bool,
 }
 
 fn blog_kind() -> String {
     "blog".into()
+}
+
+/// A `[[serial]]` row's status (a view concern; filing ignores it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SerialStatus {
+    #[default]
+    Active,
+    Complete,
+    Ignored,
+}
+
+/// One `[[serial]]` work (plan round-11-feedback-todos Decision 4): a clip matches it by
+/// `author` AND `prefix` ([`SerialSource::matches`]) and files as its `kind` with its
+/// publication.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialSource {
+    /// Display name (unique among serial rows).
+    pub name: String,
+    /// Publication name (default: `name`).
+    #[serde(default)]
+    pub short: Option<String>,
+    /// The bare author name a clip's `author` list must contain.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Source-URL prefixes; some non-empty one must start the clip's `source`.
+    #[serde(default)]
+    pub prefix: Vec<String>,
+    /// The `kinds.toml` kind its clips file as (default `fanfic`).
+    #[serde(default = "fanfic_kind")]
+    pub kind: String,
+    /// `active`, `complete` or `ignored`.
+    #[serde(default)]
+    pub status: SerialStatus,
+    /// Listed in the Works view (every serial row is; accepted for uniformity, Decision 5).
+    #[serde(default)]
+    pub works: bool,
+}
+
+fn fanfic_kind() -> String {
+    "fanfic".into()
+}
+
+/// An author for comparison: trimmed, a `[[…]]` wrapper stripped (a link's `|alias` and
+/// `#heading` dropped, so the link target names the author), `#` removed, trimmed again.
+fn author_key(a: &str) -> String {
+    let t = a.trim();
+    let inner = t
+        .strip_prefix("[[")
+        .and_then(|r| r.strip_suffix("]]"))
+        .map_or(t, |inner| {
+            let inner = inner.split('|').next().unwrap_or(inner);
+            inner.split('#').next().unwrap_or(inner)
+        });
+    inner.replace('#', "").trim().to_owned()
+}
+
+impl SerialSource {
+    /// The `publication` value for this work's notes (`short`, else `name`).
+    #[must_use]
+    pub fn publication(&self) -> &str {
+        publication_of(self.short.as_deref(), &self.name)
+    }
+
+    /// Whether a note with these `author` entries and `source` belongs to this work: a row with
+    /// neither an author nor a non-empty prefix matches nothing; the row's author must equal one
+    /// of the note's authors (both normalized by [`author_key`]); some non-empty trimmed prefix
+    /// must start the trimmed `source`; both are ANDed when both are set. `status` does not
+    /// affect matching.
+    #[must_use]
+    pub fn matches(&self, authors: &[&str], source: &str) -> bool {
+        let want = self
+            .author
+            .as_deref()
+            .map(author_key)
+            .filter(|a| !a.is_empty());
+        let prefixes: Vec<&str> = self
+            .prefix
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if want.is_none() && prefixes.is_empty() {
+            return false;
+        }
+        if let Some(w) = want
+            && !authors.iter().any(|c| author_key(c) == w)
+        {
+            return false;
+        }
+        let source = source.trim();
+        prefixes.is_empty() || prefixes.iter().any(|p| source.starts_with(p))
+    }
 }
 
 /// The `publication` frontmatter value of a source row: the trimmed `short` when non-empty, else
@@ -552,6 +675,9 @@ mod tests {
         assert!(src("from = [\"@b.example\"]\nblog = \"B\"").is_ok());
         assert!(src("list_id = \"l.b.example\"").is_ok());
         assert!(src("blog = \"B\"").unwrap_err().contains("matcher"));
+        // A hosts-only row (beehiiv) validates; blank hosts are no matcher.
+        assert!(src("hosts = [\"n.example\"]").is_ok());
+        assert!(src("hosts = [\" \"]").unwrap_err().contains("matcher"));
         assert!(
             src("from = [\"a@b.example\"]\nblog = \"Nope\"")
                 .unwrap_err()
@@ -562,6 +688,62 @@ mod tests {
         for bad in ["new", "..", "a/b", ""] {
             assert!(mail(&format!("processed = {bad:?}")).is_err(), "{bad}");
         }
+    }
+
+    fn serial(author: Option<&str>, prefix: &[&str]) -> SerialSource {
+        SerialSource {
+            name: "W".into(),
+            short: None,
+            author: author.map(str::to_owned),
+            prefix: prefix.iter().map(|p| (*p).to_owned()).collect(),
+            kind: "fanfic".into(),
+            status: SerialStatus::Active,
+            works: false,
+        }
+    }
+
+    #[test]
+    fn serial_matches_carries_the_works_match_cases() {
+        let src = "https://ff.example/s/1/2";
+        // Neither filter (or blank filters) matches nothing.
+        assert!(!serial(None, &[]).matches(&["Ann"], src));
+        assert!(!serial(Some("  "), &[" "]).matches(&["Ann"], src));
+        // Author only.
+        assert!(serial(Some("#Ann"), &[]).matches(&[" Ann "], src));
+        assert!(!serial(Some("Ann"), &[]).matches(&["Bob"], src));
+        // Prefix only (trimmed both sides).
+        assert!(serial(None, &[" https://ff.example/s/1 "]).matches(&[], &format!(" {src}")));
+        assert!(!serial(None, &["https://ff.example/s/9"]).matches(&[], src));
+        // Both ANDed.
+        let both = serial(Some("Ann"), &["https://ff.example/s/1"]);
+        assert!(both.matches(&["Ann"], src));
+        assert!(!both.matches(&["Bob"], src));
+        assert!(!both.matches(&["Ann"], "https://other.example/"));
+        // Link authors compare by target; a bracketed row author is bare-compared too.
+        for a in ["[[Ann]]", "[[Ann|A]]", "[[Ann#Bio]]", " [[ Ann ]] "] {
+            assert!(serial(Some("Ann"), &[]).matches(&[a], src), "{a}");
+        }
+        assert!(serial(Some("[[Ann]]"), &[]).matches(&["Ann"], src));
+        assert!(!serial(Some("Ann"), &[]).matches(&["[[Annie]]"], src));
+    }
+
+    #[test]
+    fn serial_rows_parse_validate_and_reject_bad_status() {
+        let parse = |s: &str| SourcesConfig::from_table(&s.parse::<toml::Table>().unwrap());
+        let c = parse("[[serial]]\nname = \"W\"\nauthor = \"Ann\"\n[[serial]]\nname = \"X\"\nshort = \"XX\"\nkind = \"book\"\nstatus = \"complete\"\nworks = true\nprefix = [\"https://x.example/\"]\n").unwrap();
+        assert_eq!(c.serial[0].kind, "fanfic");
+        assert_eq!(c.serial[0].status, SerialStatus::Active);
+        assert_eq!(c.serial[0].publication(), "W");
+        assert_eq!(c.serial[1].publication(), "XX");
+        assert_eq!(c.serial[1].status, SerialStatus::Complete);
+        assert!(c.serial[1].works);
+        assert!(parse("[[serial]]\nname = \"W\"\nstatus = \"done\"\n").is_err());
+        assert!(parse("[[serial]]\nname = \" \"\n").is_err());
+        assert!(
+            parse("[[serial]]\nname = \"W\"\n[[serial]]\nname = \"W\"\n")
+                .unwrap_err()
+                .contains("duplicate")
+        );
     }
 
     #[test]

@@ -13,19 +13,27 @@
 //!
 //!    The clip is removed only in the first two cases; anything ambiguous keeps it. The engine owns
 //!    finalizing and ticking tracker rows; this step never ticks.
-//! 2. **Kind** (first match wins): a Works note (`core/works`, the `works.toml` `matchClause`
-//!    semantics, see [`works_match`]) whose tags hold a `kinds.toml` key; a `[[newsletter]]` row's
-//!    linked blog host or a `[[blog]]` row host (`kind` of the newsletter row, else `blog`); a
-//!    `kinds.toml` kind whose `hosts` holds the clip host. A match spawns `file-as-kind { kind }`
-//!    as a child (move + tags + lint); no match leaves the clip in place.
+//! 2. **Kind** (first match wins):
+//!    1. a `sources.toml` `[[serial]]` row, in config order, that matches the clip
+//!       ([`cv_actions::pipelines::SerialSource::matches`]: author AND prefix) and whose `kind` is
+//!       a `kinds.toml` key (a row with an undefined kind is skipped with a warning; plan
+//!       round-11-feedback-todos Decision 4);
+//!    2. a `[[newsletter]]` row's linked blog host or a `[[blog]]` row host (`kind` of the
+//!       newsletter row, else `blog`);
+//!    3. (2b) a `[[newsletter]]` row whose `hosts` lists the clip host (that row's `kind`;
+//!       Decision 7);
+//!    4. a `kinds.toml` kind whose `hosts` holds the clip host.
+//!
+//!    A match spawns `file-as-kind { kind }` as a child (move + tags + lint); no match leaves the
+//!    clip in place.
 //!
 //! The step never moves the clip itself. Outcome vars: `action` (`replaced|merged|duplicate|new|
 //! missing`), `target`, `kind`, `child_job_id`. A clip that already sits in its kind's folder with
 //! all of the kind's tags spawns no child and reports `kind` with `filed = "already"` (`action`
-//! unchanged). A matched `[[blog]]` row's `publication` is written to the clip when absent, before
-//! the child is spawned.
+//! unchanged). The matched serial row's `publication()` (any kind), else the matched host row's,
+//! is written to the clip when absent, before the child is spawned.
 
-use cv_actions::pipelines::SourcesConfig;
+use cv_actions::pipelines::{SerialSource, SourcesConfig};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_note::{FrontmatterDoc, JsValue};
@@ -39,8 +47,6 @@ use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
 
 /// The action a kind match spawns.
 const FILE_ACTION: &str = "file-as-kind";
-/// The folder whose notes are the Works index.
-pub(in crate::steps) const WORKS_FOLDER: &str = "core/works";
 
 /// The `auto_file` step (no params; unknown keys disarm, I5).
 pub(crate) struct AutoFile;
@@ -82,21 +88,6 @@ pub(in crate::steps) struct Clip {
     pub(in crate::steps) host: Option<String>,
 }
 
-/// One Works note's filters and tags.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(in crate::steps) struct Work {
-    pub(in crate::steps) path: String,
-    pub(in crate::steps) author_filter: Option<String>,
-    pub(in crate::steps) source_prefixes: Vec<String>,
-    pub(in crate::steps) tags: Vec<String>,
-    /// The Works note's `title` (plan round-9-feedback-todos Decision 2: the `publication` of a
-    /// fanfic clip it files).
-    pub(in crate::steps) title: Option<String>,
-}
-
-/// The kind whose clips take the matched Work's `title` as `publication` (Decision 2).
-pub(in crate::steps) const FANFIC_KIND: &str = "fanfic";
-
 /// A configured host (`www.fanfiction.net`, or a full URL) in the same form as
 /// [`canonical_bare_host`]: a full URL goes through it, a bare host through `bare_host_name`.
 fn configured_host(s: &str) -> Option<String> {
@@ -106,38 +97,6 @@ fn configured_host(s: &str) -> Option<String> {
     } else {
         bare_host_name(s)
     }
-}
-
-/// The `works.toml` `matchClause` semantics, as raw string comparisons: a work with neither
-/// filter matches nothing; the author filter (trimmed, `#` removed) must be among the clip's
-/// authors (each trimmed, `#` removed); some non-empty prefix must start the trimmed `source`;
-/// both are ANDed when both are set.
-pub(in crate::steps) fn works_match(work: &Work, clip: &Clip) -> bool {
-    let author_filter = work
-        .author_filter
-        .as_deref()
-        .map(str::trim)
-        .filter(|a| !a.is_empty());
-    let prefixes: Vec<&str> = work
-        .source_prefixes
-        .iter()
-        .map(|p| p.trim())
-        .filter(|p| !p.is_empty())
-        .collect();
-    if author_filter.is_none() && prefixes.is_empty() {
-        return false;
-    }
-    if let Some(a) = author_filter {
-        let want = a.replace('#', "");
-        if !clip
-            .authors
-            .iter()
-            .any(|c| c.trim().replace('#', "") == want)
-        {
-            return false;
-        }
-    }
-    prefixes.is_empty() || prefixes.iter().any(|p| clip.source.starts_with(p))
 }
 
 /// The row a clip host matched in `sources.toml`.
@@ -155,12 +114,27 @@ pub(in crate::steps) struct HostRow {
 }
 
 /// Matches the clip host against the `[[newsletter]]` rows' linked blog host and the `[[blog]]`
-/// rows' host (feed URL host).
+/// rows' host (feed URL host); failing those, step (2b): the first `[[newsletter]]` row whose
+/// `hosts` lists it (its `kind`, markers and publication; no blog key).
 pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<HostRow> {
-    let blog = sources
+    let Some(blog) = sources
         .blog
         .iter()
-        .find(|b| canonical_bare_host(&b.link).as_deref() == Some(host))?;
+        .find(|b| canonical_bare_host(&b.link).as_deref() == Some(host))
+    else {
+        let n = sources.newsletter.iter().find(|n| {
+            n.hosts
+                .iter()
+                .filter_map(|h| configured_host(h))
+                .any(|h| h == host)
+        })?;
+        return Some(HostRow {
+            blog: None,
+            kind: Some(n.kind.clone()),
+            markers: n.paywall_markers.clone(),
+            publication: Some(n.publication().to_owned()),
+        });
+    };
     let mut row = HostRow {
         blog: Some((blog.name.clone(), blog.link.trim().to_owned())),
         kind: Some("blog".into()),
@@ -178,34 +152,24 @@ pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<
     Some(row)
 }
 
-/// The first Works note (sorted by path) that matches the clip and carries a tag that `is_kind`,
-/// with that kind.
-pub(in crate::steps) fn works_hit<'a>(
-    works: &'a [Work],
+/// The first `[[serial]]` row (config order) that matches the clip and whose `kind` `is_kind`;
+/// a matching row with an undefined kind is skipped with a warning (never coerced).
+pub(in crate::steps) fn serial_hit<'a>(
+    serial: &'a [SerialSource],
     clip: &Clip,
     is_kind: impl Fn(&str) -> bool,
-) -> Option<(&'a Work, String)> {
-    let mut sorted: Vec<&Work> = works.iter().collect();
-    sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    sorted
-        .into_iter()
-        .filter(|w| works_match(w, clip))
-        .find_map(|w| {
-            w.tags
-                .iter()
-                .map(|t| t.trim().trim_start_matches('#'))
-                .find(|t| is_kind(t))
-                .map(|k| (w, k.to_owned()))
+) -> Option<&'a SerialSource> {
+    let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
+    serial
+        .iter()
+        .filter(|s| s.matches(&authors, &clip.source))
+        .find(|s| {
+            let ok = is_kind(s.kind.trim());
+            if !ok {
+                tracing::warn!(serial = %s.name, kind = %s.kind, "auto_file: serial row kind is not defined in kinds.toml; row skipped");
+            }
+            ok
         })
-}
-
-/// The `publication` a Works match gives a clip: the Work's `title`, for the fanfic kind only.
-pub(in crate::steps) fn work_publication(work: &Work, kind: &str) -> Option<String> {
-    (kind == FANFIC_KIND)
-        .then(|| work.title.as_deref().map(str::trim))
-        .flatten()
-        .filter(|t| !t.is_empty())
-        .map(str::to_owned)
 }
 
 /// The kind whose `hosts` holds `host` (kinds in key order).
@@ -232,39 +196,6 @@ pub(in crate::steps) fn hosts_kind(
         }
     }
     Ok(None)
-}
-
-/// The Works notes: markdown files directly in `core/works`.
-pub(in crate::steps) fn read_works(ctx: &StepCtx<'_>) -> Result<Vec<Work>, StepError> {
-    let rows = ctx
-        .index()?
-        .query()
-        .md_files_under(WORKS_FOLDER)
-        .map_err(|e| StepError::failed(format!("index: {e}")))?;
-    let mut out = Vec::new();
-    for r in rows.into_iter().filter(|r| r.folder == WORKS_FOLDER) {
-        let Some((bytes, _)) = ctx.read(&r.path)? else {
-            continue;
-        };
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue;
-        };
-        let doc = FrontmatterDoc::new(text);
-        let get = |k: &str| doc.get(k).ok().flatten();
-        let author_filter = get("author-filter")
-            .map(|v| cv_note::js_text(&v))
-            .filter(|s| !s.trim().is_empty());
-        out.push(Work {
-            path: r.path.clone(),
-            author_filter,
-            source_prefixes: doc.get_texts("source-prefix-filter"),
-            tags: doc.get_texts("tags"),
-            title: get("title")
-                .map(|v| cv_note::js_text(&v).trim().to_owned())
-                .filter(|s| !s.is_empty()),
-        });
-    }
-    Ok(out)
 }
 
 /// Moves `path` to `.trash/` (recoverable, CAS on `hash`), recording that `by` absorbed it so
@@ -449,11 +380,10 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
 
     // ---- kind ---------------------------------------------------------------------------------
     let is_kind = |k: &str| kind_def(ctx.config, k).is_ok();
-    let works = read_works(ctx)?;
     let mut work_pub = None;
-    let kind = if let Some((w, k)) = works_hit(&works, &clip, is_kind) {
-        work_pub = work_publication(w, &k);
-        Some(k)
+    let kind = if let Some(s) = serial_hit(&sources.serial, &clip, is_kind) {
+        work_pub = Some(s.publication().trim().to_owned()).filter(|p| !p.is_empty());
+        Some(s.kind.trim().to_owned())
     } else if let Some(k) = row.as_ref().and_then(|r| r.kind.clone()) {
         Some(k)
     } else if let Some(h) = &clip.host {
@@ -480,7 +410,8 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         out.set_vars(&vars);
         return Ok(out);
     }
-    // A fanfic Work's title wins over a host row's publication (Decision 2); never overwrites.
+    // A serial row's publication (any kind, round-11 Decision 4) wins over a host row's; never
+    // overwrites.
     if let Some(p) = work_pub
         .as_deref()
         .or_else(|| row.as_ref().and_then(|r| r.publication.as_deref()))

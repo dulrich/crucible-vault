@@ -8,7 +8,16 @@
 # [[newsletter]] (Maildir intake, plan auto-intake-sprint): name, from (exact address or @domain,
 #   case-insensitive), list_id, blog (the name of a [[blog]] row it mirrors; must exist), kind
 #   (default blog), tags, paywall_markers (united with the linked blog row's). A row needs a
-#   `from` or a `list_id`. Mail from an unmatched sender is still captured (source "unknown-sender").
+#   `from`, a `list_id` or `hosts`. Mail from an unmatched sender is still captured (source
+#   "unknown-sender"). hosts (web-clip hosts, www. ignored) files a clip from that host as the row's
+#   kind with its publication (auto-file step 2b, after the [[blog]]-row host match).
+# [[serial]] (plan round-11-feedback-todos, replaces the core/works notes): name (unique), short
+#   (publication; default name), author (bare name; [[ ]] and # ignored), prefix (source-URL
+#   prefixes), kind (kinds.toml key; default fanfic), status (active | complete | ignored; the Works
+#   view's, filing ignores it). A clip matches when its author list holds `author` AND some prefix
+#   starts its source (a row with neither matches nothing); the first matching row in file order
+#   files it as `kind` and gives it the row's publication.
+# Every row kind accepts works = true (listed in the Works view; default false).
 # skip / ignore rows are kept but excluded from runs.
 
 [[youtube]]
@@ -34,3 +43,11 @@ body = "auto"
 # kind = "blog"
 # tags = ["example"]
 # paywall_markers = ["Upgrade to read the rest"]
+
+# [[serial]]
+# name = "Example Serial"
+# short = "Example"
+# author = "Example Author"
+# prefix = ["https://stories.example/s/1/"]
+# kind = "fanfic"
+# status = "active"

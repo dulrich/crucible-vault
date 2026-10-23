@@ -325,6 +325,7 @@ short = "Ex"
 id = "UCxxxxxxxxxxxxxxxxxxxxxx"
 tags = ["a"]
 priority = "high"
+works = true
 
 [[blog]]
 name = "Example"
@@ -336,6 +337,7 @@ priority = "skip"
 canon = "strip-params"
 body = "full"
 paywall_markers = ["Subscribe to keep reading"]
+works = false
 
 [[newsletter]]
 name = "Example Letter"
@@ -346,6 +348,17 @@ blog = "Example"
 kind = "blog"
 tags = ["a"]
 paywall_markers = ["Upgrade to read on"]
+hosts = ["letter.news.example"]
+works = true
+
+[[serial]]
+name = "Example Serial"
+short = "Ex Serial"
+author = "Ann"
+prefix = ["https://serial.example/s/1/"]
+kind = "fanfic"
+status = "complete"
+works = true
 "#];
 
 const SCHEDULES: &[&str] = &[

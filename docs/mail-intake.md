@@ -51,7 +51,7 @@ tags = ["example"]
 paywall_markers = ["Upgrade to read the rest"]
 ```
 
-A row needs a `from` or a `list_id`. Mail from a sender no row matches is still captured (source "unknown-sender") and left open in Intake; it is never dropped.
+A row needs a `from`, a `list_id` or a `hosts` list. `hosts = ["letter.example"]` (kinds.toml `hosts` forms, `www.` ignored; plan round-11-feedback-todos Decision 7) files a web clip from that host as the row's `kind` with its publication, with no `[[blog]]` row needed; this is auto-file step (2b), after the `[[blog]]`-row host match and before kinds.toml `hosts`. A hosts-only row (e.g. a beehiiv publication clipped from the web) matches no mail. `works = true` on any sources row lists it in the Works view. Mail from a sender no row matches is still captured (source "unknown-sender") and left open in Intake; it is never dropped.
 
 **Substack auto-match (plan `intake-followups-mail-youtube` WP-2).** Mail whose `List-Id` (else sender local part) is `<pub>.substack.com` needs no `[[newsletter]]` row when a `[[blog]]` row's feed `link` host is `<pub>.substack.com`: it behaves as a newsletter of kind `blog` named for that blog row, mirroring it (RSS supersede, the blog row's paywall markers). An explicit `[[newsletter]]` row always wins over the auto-match. To follow a Substack publication you only need a `[[blog]]` row on `https://<pub>.substack.com/feed`.
 
