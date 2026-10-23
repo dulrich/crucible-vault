@@ -802,6 +802,11 @@ pub enum Notification {
         /// Round 9 WP-3: on the `Renamed` half of a rename pair, the old path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<String>,
+        /// Round 11 WP-1 (Decision 1): on a `Deleted`, the note that absorbed this one (an
+        /// auto-file replacement or containment trash); a client re-points the deleted path's
+        /// views at it instead of reporting a deletion. Old peers ignore / omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced_by: Option<String>,
     },
     IndexGeneration {
         n: u64,

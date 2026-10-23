@@ -56,6 +56,7 @@ fn changed(app: &mut App, path: &str, hash: Option<String>) {
             hash,
             origin: Origin::Daemon,
             from: None,
+            replaced_by: None,
         },
     )));
 }

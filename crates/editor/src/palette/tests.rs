@@ -858,6 +858,7 @@ fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
             hash: Some(ContentHash::of(&tagged).as_str().to_owned()),
             origin: cv_protocol::Origin::Daemon,
             from: None,
+            replaced_by: None,
         },
     );
     for (path, kind) in [
@@ -872,6 +873,7 @@ fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
                 hash: None,
                 origin: cv_protocol::Origin::Daemon,
                 from: None,
+                replaced_by: None,
             },
         );
     }

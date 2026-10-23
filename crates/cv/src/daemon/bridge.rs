@@ -42,11 +42,21 @@ pub(super) fn start_event_bridge(
                 if let Some(s) = weak.upgrade() {
                     sync_read(&s, &mut read_sync, &ev.path, &ev.kind);
                 }
+                // Round 11 WP-1 (Decision 1): a delete the writer recorded as absorbed by another
+                // note (auto-file's trash) reports that note as `replaced_by`.
+                let replaced_by = if matches!(ev.kind, EventKind::Deleted) {
+                    weak.upgrade().and_then(|s| s.writer()).and_then(|w| {
+                        let p = ev.path.clone();
+                        w.call(move |vw| vw.take_replaced_by(&p)).ok().flatten()
+                    })
+                } else {
+                    None
+                };
                 let origin = match ev.origin {
                     cv_vault::Origin::Daemon => Origin::Daemon,
                     cv_vault::Origin::External => Origin::External,
                 };
-                for n in file_changes(ev.path, &ev.kind, kind, hash, origin) {
+                for n in file_changes(ev.path, &ev.kind, kind, hash, origin, replaced_by) {
                     let _ = events.send(n);
                 }
                 if ignore_changed
@@ -169,6 +179,7 @@ fn file_changes(
     kind: ChangeKind,
     hash: Option<String>,
     origin: Origin,
+    replaced_by: Option<String>,
 ) -> Vec<Notification> {
     let from = match ev_kind {
         EventKind::Renamed { from } => Some(from.clone()),
@@ -181,6 +192,7 @@ fn file_changes(
         hash,
         origin,
         from: from.clone(),
+        replaced_by,
     });
     if let Some(from) = from {
         out.push(Notification::FileChanged {
@@ -189,6 +201,7 @@ fn file_changes(
             hash: None,
             origin,
             from: None,
+            replaced_by: None,
         });
     }
     out
@@ -209,6 +222,7 @@ mod tests {
             ChangeKind::Renamed,
             None,
             Origin::Daemon,
+            None,
         );
         assert_eq!(
             got,
@@ -219,6 +233,7 @@ mod tests {
                     hash: None,
                     origin: Origin::Daemon,
                     from: Some("a.md".into()),
+                    replaced_by: None,
                 },
                 Notification::FileChanged {
                     path: "a.md".into(),
@@ -226,6 +241,7 @@ mod tests {
                     hash: None,
                     origin: Origin::Daemon,
                     from: None,
+                    replaced_by: None,
                 },
             ]
         );
@@ -235,6 +251,7 @@ mod tests {
             ChangeKind::Created,
             None,
             Origin::External,
+            None,
         );
         assert_eq!(one.len(), 1);
     }

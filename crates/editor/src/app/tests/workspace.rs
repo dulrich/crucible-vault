@@ -18,6 +18,7 @@ fn changed(app: &mut App, path: &str, kind: ChangeKind) {
             hash: None,
             origin: Origin::Daemon,
             from: None,
+            replaced_by: None,
         },
     )));
 }
@@ -793,6 +794,7 @@ fn app_open_file_adds_tab_and_status_updates() {
             hash: None,
             origin: Origin::External,
             from: None,
+            replaced_by: None,
         },
     )));
     assert_eq!(

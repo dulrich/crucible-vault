@@ -373,6 +373,7 @@ fn file_changed_renamed_marks_every_view_stale() {
             hash: None,
             origin: cv_protocol::Origin::External,
             from: None,
+            replaced_by: None,
         },
     )));
     let e = app.views.get(ID, Some(NOTE)).expect("entry");

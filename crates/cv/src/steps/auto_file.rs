@@ -267,10 +267,16 @@ pub(in crate::steps) fn read_works(ctx: &StepCtx<'_>) -> Result<Vec<Work>, StepE
     Ok(out)
 }
 
-/// Moves `path` to `.trash/` (recoverable, CAS on `hash`).
-fn trash(ctx: &mut StepCtx<'_>, path: &str, hash: cv_vault::ContentHash) -> Result<(), StepError> {
-    let p = path.to_owned();
-    ctx.with_writer(&[path], move |w| w.delete(&p, hash))??;
+/// Moves `path` to `.trash/` (recoverable, CAS on `hash`), recording that `by` absorbed it so
+/// the `deleted` notification carries `replaced_by` (round 11 WP-1, Decision 1).
+fn trash(
+    ctx: &mut StepCtx<'_>,
+    path: &str,
+    hash: cv_vault::ContentHash,
+    by: &str,
+) -> Result<(), StepError> {
+    let (p, by) = (path.to_owned(), by.to_owned());
+    ctx.with_writer(&[path], move |w| w.delete_replaced(&p, hash, &by))??;
     Ok(())
 }
 
@@ -408,7 +414,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     vars.target.clone_from(&resolved.path);
     match (resolved.action, resolved.path) {
         (Action::Replaced, Some(target)) => {
-            trash(ctx, &clip_path, clip_hash)?;
+            trash(ctx, &clip_path, clip_hash, &target)?;
             out.push_output(target);
             vars.action = "replaced";
             out.set_vars(&vars);
@@ -424,7 +430,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                     >= f64::from(sup_cfg.threshold_percent.min(100))
             });
             if contained {
-                trash(ctx, &clip_path, clip_hash)?;
+                trash(ctx, &clip_path, clip_hash, &target)?;
                 vars.action = "merged";
                 out.set_vars(&vars);
                 return Ok(out);

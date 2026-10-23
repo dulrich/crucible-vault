@@ -395,6 +395,7 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
         hash: None,
         origin: Origin::Daemon,
         from: None,
+        replaced_by: None,
     });
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(calls.load(Ordering::SeqCst), 1, "cycle guard: no self-feed");
@@ -404,6 +405,40 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
             "no new job"
         );
     }
+    d.shutdown().await.unwrap();
+}
+
+/// Round 11 WP-1 (Decision 1): a writer delete recorded as absorbed (auto-file's `trash`) reaches
+/// clients as `file_changed { deleted, replaced_by }` through the watcher's echo path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replaced_delete_reports_the_absorbing_note() {
+    let env = Env::new("");
+    let d = start(&env, appending_exec(Arc::new(AtomicUsize::new(0)))).await;
+    let mut rx = d.subscribe();
+    let w = d.shared().writer().expect("writer");
+    w.call(|vw| {
+        let h = vw.fs().hash("inbox/x.md")?.expect("present");
+        vw.delete_replaced("inbox/x.md", h, "a.md")
+    })
+    .unwrap()
+    .unwrap();
+    drop(w); // a live handle would keep the writer thread (and shutdown) waiting
+    assert!(!env.vault().join("inbox/x.md").exists());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = None;
+    while got.is_none() && Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(Notification::FileChanged {
+                path,
+                kind: ChangeKind::Deleted,
+                replaced_by,
+                ..
+            }) if path == "inbox/x.md" => got = Some(replaced_by),
+            Ok(_) => {}
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+    assert_eq!(got, Some(Some("a.md".to_owned())));
     d.shutdown().await.unwrap();
 }
 

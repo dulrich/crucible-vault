@@ -69,6 +69,7 @@ fn notify(app: &mut App, path: &str, hash: Option<String>) {
             hash,
             origin: Origin::Daemon,
             from: None,
+            replaced_by: None,
         },
     )));
 }

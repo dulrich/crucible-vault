@@ -461,6 +461,7 @@ fn file_membership_change_drops_cached_resolver() {
                 hash: None,
                 origin: Origin::Daemon,
                 from: None,
+                replaced_by: None,
             },
         )));
     };
@@ -509,6 +510,7 @@ fn one_vault_change_invalidates_the_shared_resolver_for_both_consumers() {
             hash: None,
             origin: Origin::Daemon,
             from: None,
+            replaced_by: None,
         },
     )));
     assert!(!app.reading.resolver.is_built(), "Reading sees the drop");
@@ -968,6 +970,7 @@ fn late_attachment_re_renders_the_doc() {
             hash: None,
             origin: Origin::Daemon,
             from: None,
+            replaced_by: None,
         },
     )));
     let _ = app.send(Message::Reading(ReadingMsg::Tick));
@@ -1123,6 +1126,7 @@ fn dims_survive_resolver_invalidation_for_an_unrelated_create() {
             hash: None,
             origin: Origin::Daemon,
             from: None,
+            replaced_by: None,
         }))
     };
     let epoch = app.resolver.epoch();

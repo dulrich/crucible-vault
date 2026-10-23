@@ -479,6 +479,7 @@ fn file_changed_from_is_optional_both_ways() {
         hash: None,
         origin: Origin::Daemon,
         from: Some("a.md".into()),
+        replaced_by: None,
     };
     let v = serde_json::to_value(&with).expect("ser");
     assert_eq!(v["params"]["from"], "a.md");
@@ -494,6 +495,7 @@ fn notifications_round_trip_and_topic() {
             hash: Some("h".into()),
             origin: Origin::External,
             from: None,
+            replaced_by: None,
         },
         Notification::IndexGeneration { n: 3 },
         Notification::JobUpdated(JobStatus {

@@ -178,6 +178,21 @@ impl VaultWriter {
         self.delete_with(path, expected, false)
     }
 
+    /// Round 11 WP-1 (Decision 1): [`Self::delete`] of a note absorbed by `by` (auto-file's
+    /// replacement / containment trash). The watcher still reports a plain `Deleted`; the
+    /// recorded `path → by` is what the event bridge reads back via [`Self::take_replaced_by`]
+    /// to send `file_changed { kind: deleted, replaced_by }`, so clients retarget instead.
+    pub fn delete_replaced(&mut self, path: &str, expected: ContentHash, by: &str) -> Result<()> {
+        self.delete_with(path, expected, false)?;
+        self.echoes.register_replaced(path, by);
+        Ok(())
+    }
+
+    /// Consumes the live [`Self::delete_replaced`] record for `path` (the absorbing note).
+    pub fn take_replaced_by(&mut self, path: &str) -> Option<String> {
+        self.echoes.take_replaced(path)
+    }
+
     /// [`Self::delete`] with a mode: `permanent` removes the file outright instead of the
     /// `.trash/` move.
     pub fn delete_with(

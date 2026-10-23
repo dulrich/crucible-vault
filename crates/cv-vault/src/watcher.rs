@@ -82,6 +82,9 @@ pub(crate) struct Echoes {
     /// `Renamed` (plan intake-round-2-clean-dedupe-reading WP-5a). Unmatched or expired, the two
     /// path echoes above still classify both halves as before (`Deleted` + `Created`).
     moves: HashMap<String, (String, Instant)>,
+    /// Round 11 WP-1 (Decision 1): the writer's own replacement deletes, deleted path →
+    /// (absorbing note, when). Read by the event bridge when it reports that path's `Deleted`.
+    replaced: HashMap<String, (String, Instant)>,
     ttl: Duration,
 }
 
@@ -90,6 +93,7 @@ impl Echoes {
         Self {
             map: HashMap::new(),
             moves: HashMap::new(),
+            replaced: HashMap::new(),
             ttl,
         }
     }
@@ -98,6 +102,8 @@ impl Echoes {
         let ttl = self.ttl;
         self.map.retain(|_, (_, at)| now.duration_since(*at) < ttl);
         self.moves
+            .retain(|_, (_, at)| now.duration_since(*at) < ttl);
+        self.replaced
             .retain(|_, (_, at)| now.duration_since(*at) < ttl);
     }
 
@@ -115,6 +121,24 @@ impl Echoes {
             self.moves.remove(&oldest);
         }
         self.moves.insert(to.to_string(), (from.to_string(), now));
+    }
+
+    /// Records that the writer deleted `path` because `by` absorbed it (bounded like the
+    /// other echo records).
+    pub(crate) fn register_replaced(&mut self, path: &str, by: &str) {
+        let now = Instant::now();
+        self.expire(now);
+        if self.replaced.len() >= ECHO_CAP {
+            self.replaced.clear();
+        }
+        self.replaced
+            .insert(path.to_string(), (by.to_string(), now));
+    }
+
+    /// Consumes the live replacement record for `path`, returning the absorbing note.
+    pub(crate) fn take_replaced(&mut self, path: &str) -> Option<String> {
+        self.expire(Instant::now());
+        self.replaced.remove(path).map(|(b, _)| b)
     }
 
     /// The destination of a live move echo whose source is `from` (not consumed).

@@ -322,6 +322,30 @@ impl App {
         self.follow_moved(from, to, edited_elsewhere);
     }
 
+    /// Round 11 WP-1 (Decision 1): `from` was deleted because `to` absorbed it (the
+    /// `file_changed { deleted, replaced_by }` of auto-file's trash). Unless `from` has unsaved
+    /// edits (left to the deleted-on-disk conflict path), a tab of `from` in a pane already
+    /// showing `to` is closed and every other tab of `from` retargets to `to`; an open `to`
+    /// document is kept as is (see [`Self::move_path_state`]).
+    pub(super) fn follow_replaced(&mut self, from: &str, to: &str) {
+        if from == to
+            || !self.path_open(from)
+            || buf(&self.docs, from).is_some_and(|b| b.is_dirty())
+        {
+            return;
+        }
+        let dup: Vec<u64> = self
+            .panes
+            .iter()
+            .filter(|(_, ps)| ps.tabs.iter().any(|t| t.shows(to)))
+            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.shows(from)).map(|t| t.id))
+            .collect();
+        for id in dup {
+            self.remove_tab(id);
+        }
+        self.retarget(from, to);
+    }
+
     /// A renamed file's open tabs follow it (re-read at the new path). Plan
     /// editor-feedback-round-2 WP-7: the document key and every tab of `from` move to `to`
     /// (tab ids kept); `from`'s reading / title / image-pin state is torn down. Plan
@@ -376,6 +400,12 @@ impl App {
         self.reading.renamed(from);
         self.views.rehost(from, to);
         self.views.invalidate(&[]);
+        if self.docs.contains_key(to) {
+            // Round 11 WP-1 (audit E2): `to` is already open (possibly dirty, e.g. the note that
+            // absorbed `from`): its document stays; `from`'s tabs now just show it.
+            self.ui.touch_recent(to);
+            return;
+        }
         if doc.reading.mode.shows_reading() {
             self.reading.recompute(&mut doc, self.daemon.as_ref());
         }

@@ -254,6 +254,7 @@ impl FakeDaemon {
                 hash: None,
                 origin: Origin::Daemon,
                 from: Some(from.to_owned()),
+                replaced_by: None,
             },
             Notification::FileChanged {
                 path: from.to_owned(),
@@ -261,6 +262,7 @@ impl FakeDaemon {
                 hash: None,
                 origin: Origin::Daemon,
                 from: None,
+                replaced_by: None,
             },
             Notification::IndexGeneration { n },
         ];
@@ -390,6 +392,7 @@ impl FakeDaemon {
                 hash,
                 origin: Origin::Daemon,
                 from: None,
+                replaced_by: None,
             },
         );
         emit(g, Notification::IndexGeneration { n });

@@ -206,12 +206,20 @@ impl App {
                         kind,
                         hash,
                         from,
+                        replaced_by,
                         ..
                     } => {
                         if let Some(from) = from.as_deref() {
                             // Round 9 WP-3 (Decision 4): a daemon move re-keys the open tabs
                             // (the bridge sends this before the source `Deleted`).
                             self.follow_daemon_move(from, &path);
+                        }
+                        if kind == cv_protocol::ChangeKind::Deleted
+                            && let Some(by) = replaced_by.as_deref()
+                        {
+                            // Round 11 WP-1 (Decision 1): an absorbed note's tabs land on the
+                            // note that absorbed it (a dirty one keeps the conflict path below).
+                            self.follow_replaced(&path, by);
                         }
                         self.reading.file_changed(&path);
                         if kind != cv_protocol::ChangeKind::Modified {
