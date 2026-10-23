@@ -223,11 +223,7 @@ fn summarize(f: SumFn, vals: &[&Value]) -> Value {
 }
 
 fn same_prop(a: &str, b: &str) -> bool {
-    let n = |s: &str| match s.split_once('.') {
-        Some(("file" | "note" | "formula", _)) => s.to_string(),
-        _ => format!("note.{s}"),
-    };
-    n(a) == n(b)
+    crate::def::norm(a) == crate::def::norm(b)
 }
 
 struct Rec {
@@ -236,6 +232,8 @@ struct Rec {
     cells: Vec<Value>,
     sort: Vec<Value>,
     group: Value,
+    /// Per `view.summary_rows` entry: does this row match its filter.
+    flags: Vec<bool>,
 }
 
 fn ordered(dir: Direction, o: std::cmp::Ordering) -> std::cmp::Ordering {
@@ -335,6 +333,10 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
             Some((e, _)) => ctx.eval(e)?,
             None => Value::Null,
         };
+        let mut flags = Vec::with_capacity(view.summary_rows.len());
+        for r in &view.summary_rows {
+            flags.push(ctx.eval(&r.filter)?.truthy());
+        }
         let key = ctx.record_key();
         recs.push(Rec {
             file,
@@ -342,6 +344,7 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
             cells,
             sort,
             group,
+            flags,
         });
     }
     recs.sort_by(|a, b| {
@@ -384,8 +387,23 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
             fns.push(*f);
         }
     }
+    // Filtered rows: per summary row, the aggregate of each displayed column (plan round-10 WP-4).
+    let row_fns: Vec<Vec<Option<SumFn>>> = view
+        .summary_rows
+        .iter()
+        .map(|sr| {
+            (0..view.order.len())
+                .map(|c| {
+                    sr.summaries
+                        .iter()
+                        .find_map(|(k, f)| same_prop(&view.order[c].0, k).then_some(*f))
+                })
+                .collect()
+        })
+        .collect();
     let footer = |rs: &[&Rec]| -> Vec<Summary> {
-        fns.iter()
+        let plain = fns
+            .iter()
             .map(|f| Summary {
                 label: f.label().to_string(),
                 cells: (0..view.order.len())
@@ -400,7 +418,27 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
                     })
                     .collect(),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // An empty filter match yields null cells (never the plain footer's Sum/Count zeros).
+        let filtered = view.summary_rows.iter().enumerate().map(|(i, sr)| {
+            let matched: Vec<&Rec> = rs.iter().copied().filter(|r| r.flags[i]).collect();
+            Summary {
+                label: sr.label.clone(),
+                cells: row_fns[i]
+                    .iter()
+                    .enumerate()
+                    .map(|(c, f)| match f {
+                        Some(f) if !matched.is_empty() => {
+                            let vals: Vec<&Value> =
+                                matched.iter().filter_map(|r| r.cells.get(c)).collect();
+                            summarize(*f, &vals).to_cell()
+                        }
+                        _ => Cell::Null,
+                    })
+                    .collect(),
+            }
+        });
+        plain.into_iter().chain(filtered).collect()
     };
     let to_row = |r: &Rec| Row {
         path: r.file.as_ref().map(|f| f.path.clone()),

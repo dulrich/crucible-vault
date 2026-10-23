@@ -370,6 +370,7 @@ order = ["file.name", "note.status"]
 sort = [{ property = "file.name", direction = "DESC" }]
 groupBy = { property = "note.status", direction = "asc" }
 summaries = { "note.words" = "Sum" }
+summary_rows = [{ label = "Unread", filter = 'note.status != "done"', summaries = { "note.words" = "Sum" } }]
 limit = 10
 columnSize = { "file.name" = 200 }
 

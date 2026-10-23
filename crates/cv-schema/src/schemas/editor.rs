@@ -79,6 +79,30 @@ pub static PIVOT_COLUMN: Record = Record {
     summary: None,
 };
 
+/// `SummaryRowDef` (`[[views.summary_rows]]`, plan round-10 WP-4; the parser also accepts the
+/// `summaryRows` key alias).
+pub static SUMMARY_ROW: Record = Record {
+    name: "summary row",
+    fields: &[
+        field("label", "Label", "Footer row label", Node::Str).req(),
+        field(
+            "filter",
+            "Filter",
+            "Row predicate; the row aggregates only matching rows (null cells when none match)",
+            Node::Expr,
+        )
+        .req(),
+        field(
+            "summaries",
+            "Summaries",
+            "Property id → Sum | Average | Count | Min | Max",
+            Node::Map(&Node::Str),
+        ),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// One `[[views]]` (`ViewDef`).
 pub static VIEW: Record = Record {
     name: "view",
@@ -105,6 +129,12 @@ pub static VIEW: Record = Record {
             "Summaries",
             "Property id → Sum | Average | Count | Min | Max",
             Node::Map(&Node::Str),
+        ),
+        field(
+            "summary_rows",
+            "Summary rows",
+            "Extra footer rows over the rows matching a filter, after the plain summaries row",
+            Node::List(&Node::Record(&SUMMARY_ROW)),
         ),
         field("limit", "Limit", "Row cap", UINT),
         field(

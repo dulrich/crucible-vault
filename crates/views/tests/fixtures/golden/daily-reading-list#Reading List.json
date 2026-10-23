@@ -30,16 +30,6 @@
         "kind": "checkbox"
       },
       "width": 137.0
-    },
-    {
-      "key": "formula.unread_words",
-      "label": "unread_words",
-      "width": 204.0
-    },
-    {
-      "key": "formula.unread_minutes",
-      "label": "unread_minutes",
-      "width": 80.0
     }
   ],
   "groups": [
@@ -70,14 +60,6 @@
             {
               "t": "bool",
               "v": true
-            },
-            {
-              "t": "number",
-              "v": 0.0
-            },
-            {
-              "t": "number",
-              "v": 0.0
             }
           ],
           "path": "daily/day/2026-10-01/Alpha Post.md"
@@ -107,14 +89,6 @@
             {
               "t": "bool",
               "v": false
-            },
-            {
-              "t": "number",
-              "v": 1000.0
-            },
-            {
-              "t": "number",
-              "v": 5.0
             }
           ],
           "path": "daily/day/2026-10-01/World News.md"
@@ -148,6 +122,20 @@
         },
         {
           "t": "null"
+        }
+      ],
+      "label": "Sum"
+    },
+    {
+      "cells": [
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
         },
         {
           "t": "number",
@@ -156,9 +144,12 @@
         {
           "t": "number",
           "v": 5.0
+        },
+        {
+          "t": "null"
         }
       ],
-      "label": "Sum"
+      "label": "Unread"
     }
   ]
 }

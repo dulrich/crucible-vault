@@ -107,6 +107,9 @@ pub struct ViewDef {
     /// Property id → `Sum` | `Average` | `Count` | `Min` | `Max`.
     #[serde(default)]
     pub summaries: BTreeMap<String, String>,
+    /// Filtered footer rows, shown after the plain `summaries` row (plan round-10 WP-4).
+    #[serde(default, alias = "summaryRows")]
+    pub summary_rows: Vec<SummaryRowDef>,
     #[serde(default)]
     pub limit: Option<usize>,
     /// Logical px per `order` property id; carried to the editor as `Column::width` (evaluator ignores it).
@@ -155,6 +158,19 @@ pub struct ViewDef {
     /// Plan round-8 WP-2: height cap of the rendered list (px or `"none"`; absent = 480).
     #[serde(rename = "maxHeight", alias = "max_height", default)]
     pub max_height: Option<crate::result::MaxHeight>,
+}
+
+/// `[[views.summary_rows]]` (plan round-10 WP-4): an extra footer row computed over the rows
+/// matching `filter`, with its own property → aggregate map.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryRowDef {
+    pub label: String,
+    /// Row predicate, compiled like a view filter expression.
+    pub filter: String,
+    /// Property id → `Sum` | `Average` | `Count` | `Min` | `Max` (ids normalized like `summaries`).
+    #[serde(default)]
+    pub summaries: BTreeMap<String, String>,
 }
 
 /// Where a definition file's rows come from (plan round-5-reading-pickers-intake WP-10).
@@ -257,6 +273,14 @@ impl SumFn {
     }
 }
 
+/// A compiled `[[views.summary_rows]]` entry.
+#[derive(Debug, Clone)]
+pub struct SummaryRow {
+    pub label: String,
+    pub filter: Expr,
+    pub summaries: Vec<(String, SumFn)>,
+}
+
 /// A compiled pivot.
 #[derive(Debug, Clone)]
 pub struct Pivot {
@@ -293,6 +317,8 @@ pub struct View {
     pub sort: Vec<(Expr, Direction)>,
     pub group: Option<(Expr, Direction)>,
     pub summaries: Vec<(String, SumFn)>,
+    /// Filtered footer rows (plan round-10 WP-4).
+    pub summary_rows: Vec<SummaryRow>,
     pub limit: Option<usize>,
     pub pivot: Option<Pivot>,
     pub tasks: Option<Tasks>,
@@ -337,8 +363,30 @@ fn default_label(id: &str) -> String {
     }
 }
 
-/// Normalizes a property id for display-name lookup (`word-count` ≡ `note.word-count`).
-fn norm(id: &str) -> String {
+/// `note["k"]` / `note['k']` / `formula["k"]` → `note.k` / `formula.k`; anything else is `None`.
+fn unbracket(id: &str) -> Option<String> {
+    for prefix in ["note", "formula"] {
+        let Some(inner) = id
+            .strip_prefix(prefix)
+            .and_then(|r| r.strip_prefix('['))
+            .and_then(|r| r.strip_suffix(']'))
+        else {
+            continue;
+        };
+        let key = ['"', '\'']
+            .iter()
+            .find_map(|q| inner.strip_prefix(*q)?.strip_suffix(*q))?;
+        return Some(format!("{prefix}.{key}"));
+    }
+    None
+}
+
+/// Normalizes a property id for display-name lookup (`word-count` ≡ `note.word-count`;
+/// `note["word-count"]` ≡ `note.word-count`).
+pub(crate) fn norm(id: &str) -> String {
+    if let Some(dotted) = unbracket(id) {
+        return dotted;
+    }
     match id.split_once('.') {
         Some(("file" | "note" | "formula", _)) => id.to_string(),
         _ => format!("note.{id}"),
@@ -451,6 +499,27 @@ fn compile_view(
             None => errors.push(format!("summaries: unknown summary `{f}` for `{k}`")),
         }
     }
+    let mut summary_rows = Vec::new();
+    for r in &v.summary_rows {
+        let Some(filter) = compile_opt(Some(&r.filter), &mut errors, "summary_rows.filter") else {
+            continue;
+        };
+        let mut sums = Vec::new();
+        for (k, f) in &r.summaries {
+            match SumFn::parse(f) {
+                Some(s) => sums.push((k.clone(), s)),
+                None => errors.push(format!(
+                    "summary_rows `{}`: unknown summary `{f}` for `{k}`",
+                    r.label
+                )),
+            }
+        }
+        summary_rows.push(SummaryRow {
+            label: r.label.clone(),
+            filter,
+            summaries: sums,
+        });
+    }
     let pivot = if v.kind == ViewType::Pivot {
         let rows = compile_opt(v.rows.as_ref(), &mut errors, "rows");
         let value = compile_opt(v.value.as_ref(), &mut errors, "value");
@@ -495,6 +564,7 @@ fn compile_view(
         sort,
         group,
         summaries,
+        summary_rows,
         limit: v.limit,
         pivot,
         tasks,

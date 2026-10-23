@@ -1113,3 +1113,81 @@ fn column_size_reaches_the_result() {
     let old: ViewResult = serde_json::from_value(old).unwrap();
     assert_eq!(old.columns[0].width, None);
 }
+
+/// Plan round-10 WP-4: filtered summary rows (totals, empty match → nulls, per group), and the
+/// bracket id form keying a display name.
+#[test]
+fn filtered_summary_rows_and_bracket_ids() {
+    let def = r#"
+[properties.'note["word-count"]']
+displayName = "Words"
+
+[[views]]
+type = "table"
+name = "T"
+filters = 'file.inFolder("daily/day/2026-10-01") || file.inFolder("daily/day/2026-10-02")'
+order = ["file.name", "word-count", "note.read"]
+sort = [{ property = "file.name", direction = "ASC" }]
+summaries = { "word-count" = "Sum" }
+columnSize = { 'note["word-count"]' = 90 }
+
+[[views.summary_rows]]
+label = "Unread"
+filter = 'note.read == false'
+summaries = { "word-count" = "Sum", 'note["read"]' = "Count" }
+
+[[views.summary_rows]]
+label = "None"
+filter = 'note.read == "never"'
+summaries = { "word-count" = "Sum" }
+"#;
+    let fx = fixture(&[("sr.toml", def)]);
+    let mut h = fx.host();
+    assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());
+    let r = fx.run(&mut h, "sr#T", None);
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    assert_eq!(r.columns[1].label, "Words");
+    assert_eq!(r.columns[1].width, Some(90.0));
+    let labels: Vec<&str> = r.summaries.iter().map(|s| s.label.as_str()).collect();
+    assert_eq!(labels, ["Sum", "Unread", "None"]);
+    let cells = |i: usize| r.summaries[i].cells.iter().map(text).collect::<Vec<_>>();
+    assert_eq!(cells(0), ["", "2200", ""]);
+    // b (1000) and c (600) are `read: false`; a is true and d has no `read`.
+    assert_eq!(cells(1), ["", "1600", "2"]);
+    // No match: null cells, not the plain footer's zero.
+    assert_eq!(cells(2), ["", "", ""]);
+    assert!(matches!(r.summaries[2].cells[1], Cell::Null));
+}
+
+/// Plan round-10 WP-4: the migration-0006 output parses and its `Unread` row totals the
+/// not-read rows' words and minutes.
+#[test]
+fn migrated_reading_list_has_an_unread_row() {
+    let migrated = include_str!(
+        "../../../deploy/migrations/fixtures/0006-expected/views/daily-reading-list.toml"
+    );
+    let fx = fixture(&[("daily-reading-list.toml", migrated)]);
+    let mut h = fx.host();
+    assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());
+    let r = fx.run(
+        &mut h,
+        "daily-reading-list#Reading List",
+        Some("daily/day/2026-10-01.md"),
+    );
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    assert_eq!(
+        r.columns
+            .iter()
+            .find(|c| c.key == "word-count")
+            .unwrap()
+            .label,
+        "Words"
+    );
+    let unread = r
+        .summaries
+        .iter()
+        .find(|s| s.label == "Unread")
+        .expect("Unread row");
+    let cells: Vec<String> = unread.cells.iter().map(text).collect();
+    assert_eq!(cells, ["", "", "", "1000", "5", ""]);
+}
