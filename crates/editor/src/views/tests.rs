@@ -982,8 +982,12 @@ fn open_only_drops_empty_groups_and_keeps_summaries() {
         sum(),
         sum(),
     ];
+    let visible: Vec<Line> = open_only_lines(&lines, &cols)
+        .into_iter()
+        .map(|i| lines[i].clone())
+        .collect();
     assert_eq!(
-        open_only_lines(&lines, &cols),
+        visible,
         vec![sum(), g("b"), open(), sum(), sum()],
         "group a dropped, group b kept, every summary kept"
     );

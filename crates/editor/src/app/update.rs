@@ -127,28 +127,21 @@ impl App {
                 let Some(buf) = path.and_then(|p| self.docs.get_mut(&p)) else {
                     return Task::none();
                 };
-                let mut relint = false;
-                let m = match m {
-                    SourceMsg::AutosaveDue { path, seq } => {
-                        if let Some(cfg) = lint_cfg.filter(|_| seq == buf.buffer.edit_seq()) {
-                            relint = buf.buffer.auto_lint(&cfg, std::time::Instant::now());
-                        }
-                        // The lint edit bumps the seq; this tick is still the live one.
-                        let seq = if relint { buf.buffer.edit_seq() } else { seq };
-                        SourceMsg::AutosaveDue { path, seq }
-                    }
-                    m => m,
-                };
-                let fx = crate::source::update(&mut buf.buffer, m, self.daemon.as_ref());
-                if relint {
-                    // The frontmatter changed: re-render Reading now, not on its next tick.
-                    self.reading.recompute(buf, self.daemon.as_ref());
-                }
+                let fx = crate::source::update(
+                    &mut buf.buffer,
+                    m,
+                    self.daemon.as_ref(),
+                    lint_cfg.as_ref(),
+                );
                 let mut tasks = Vec::new();
                 for e in fx {
                     match e {
                         crate::source::Effect::Task(t) => tasks.push(t),
                         crate::source::Effect::Error(e) => self.status.set_error(e),
+                        // The frontmatter changed: re-render Reading now, not on its next tick.
+                        crate::source::Effect::Relinted => {
+                            self.reading.recompute(buf, self.daemon.as_ref());
+                        }
                     }
                 }
                 if motion {

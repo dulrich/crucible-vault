@@ -52,6 +52,8 @@ pub enum Effect {
     Task(Task<Message>),
     /// An error notice for the status bar.
     Error(String),
+    /// The autosave lint edited the buffer (frontmatter changed): the app re-renders Reading now.
+    Relinted,
 }
 
 /// Handles a [`SourceMsg`] for `buf`, the document [`SourceMsg::target`] names (one
@@ -60,6 +62,7 @@ pub fn update(
     buf: &mut SourceBuffer,
     msg: SourceMsg,
     daemon: Option<&Arc<dyn DaemonClient>>,
+    lint: Option<&autolint::AutoLint>,
 ) -> Vec<Effect> {
     let mut fx = Vec::new();
     let edited = |buf: &mut SourceBuffer, changed: bool| {
@@ -193,6 +196,15 @@ pub fn update(
         }
         SourceMsg::Save => spawn_save(daemon, buf.begin_save()),
         SourceMsg::AutosaveDue { seq, .. } => {
+            // Plan round-9 WP-6 (D26): the autosave point lints the live buffer first; the
+            // lint edit bumps the seq, and this tick is still the live one.
+            let mut seq = seq;
+            if let Some(cfg) = lint.filter(|_| seq == buf.edit_seq)
+                && buf.auto_lint(cfg, Instant::now())
+            {
+                seq = buf.edit_seq;
+                fx.push(Effect::Relinted);
+            }
             if seq == buf.edit_seq {
                 spawn_save(daemon, buf.begin_save())
             } else {

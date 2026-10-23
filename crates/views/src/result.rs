@@ -136,6 +136,46 @@ pub struct Row {
     pub key: Option<String>,
 }
 
+/// Plan round-9-feedback-todos WP-5 (audit E1): whether `cell` is checked — only `Bool(true)`;
+/// false / null / missing are unchecked. Used by the checkbox cell and [`row_is_open`].
+#[must_use]
+pub fn cell_checked(cell: Option<&Cell>) -> bool {
+    matches!(cell, Some(Cell::Bool { v: true }))
+}
+
+/// The status of a status cell: text or null (`Some(None)` = open), `None` for any other cell
+/// kind. Used by the status cell and [`row_is_open`].
+#[must_use]
+pub fn cell_status(cell: Option<&Cell>) -> Option<Option<char>> {
+    match cell {
+        Some(Cell::Null) | None => Some(None),
+        Some(Cell::Text { v }) => Some(v.chars().next().filter(|c| *c != ' ')),
+        _ => None,
+    }
+}
+
+/// Plan round-9-feedback-todos WP-5: whether `r` is open/unread — any Checkbox cell unchecked
+/// or any Status cell open (null / missing count as unchecked / open, as the cells draw).
+#[must_use]
+pub fn row_is_open(r: &Row, cols: &[Column]) -> bool {
+    cols.iter().enumerate().any(|(i, c)| match &c.role {
+        Some(ColumnRole::Checkbox { .. }) => !cell_checked(r.cells.get(i)),
+        Some(ColumnRole::Status) => cell_status(r.cells.get(i)) == Some(None),
+        _ => false,
+    })
+}
+
+/// Whether a result with `cols` offers the "Only open" toggle.
+#[must_use]
+pub fn has_open_columns(cols: &[Column]) -> bool {
+    cols.iter().any(|c| {
+        matches!(
+            c.role,
+            Some(ColumnRole::Checkbox { .. } | ColumnRole::Status)
+        )
+    })
+}
+
 /// The identity of one `tracker_items` row, carried in [`Row::key`] as a JSON array
 /// `["<source_kind>","<source_key>","<item_id>"]` (unambiguous for any string content).
 #[derive(Debug, Clone, PartialEq, Eq)]
