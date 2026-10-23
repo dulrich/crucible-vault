@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 # glibc allocator FFI (plan memory-instrumentation-and-reduction WP-M1); exact pin as elsewhere.
 libc = "=0.2.190"
+# The one memory-report mapping (plan tn-review-2026-10-23-remediation WP-R8).
+memstat = { path = "../memstat" }
+cv-protocol = { path = "../cv-protocol" }
 
 [lints]
 workspace = true

@@ -6,8 +6,8 @@
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use cv_protocol::{GaugeValue, MemoryReport, MemoryStatus, ReportedMemory};
-use memstat::{GaugeKind, Registry, Snapshot};
+use cv_protocol::{MemoryReport, MemoryStatus, ReportedMemory};
+use memstat::{GaugeKind, Registry};
 use tokio::sync::watch;
 
 use super::Shared;
@@ -122,51 +122,12 @@ fn upgrade(w: &Weak<Shared>) -> Result<Arc<Shared>, String> {
     w.upgrade().ok_or_else(|| "daemon stopped".to_owned())
 }
 
-/// Maps a `memstat` snapshot (Serialize-only) plus `mallinfo2` onto the wire type.
-pub(crate) fn to_report(snap: &Snapshot, malloc: cv_malloc::MallocInfo) -> MemoryReport {
-    let status = snap.status.as_ref();
-    let mut gauges: Vec<GaugeValue> = snap
-        .gauges
-        .iter()
-        .map(|g| GaugeValue {
-            name: g.name.clone(),
-            value: g.value,
-            error: g.error.clone(),
-        })
-        .collect();
-    if let Some(e) = &snap.registry_error {
-        gauges.push(GaugeValue {
-            name: "registry".into(),
-            value: None,
-            error: Some(e.clone()),
-        });
-    }
-    let nonzero = |v: u64| (v > 0).then_some(v);
-    MemoryReport {
-        uptime_secs: if snap.uptime_secs.is_finite() && snap.uptime_secs > 0.0 {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            {
-                snap.uptime_secs as u64
-            }
-        } else {
-            0
-        },
-        rss: status.and_then(|s| s.vm_rss),
-        anon: snap.smaps_rollup.as_ref().and_then(|r| r.pss_anon),
-        swap: status.and_then(|s| s.vm_swap),
-        hwm: status.and_then(|s| s.vm_hwm),
-        malloc_in_use: nonzero(malloc.in_use),
-        malloc_system: nonzero(malloc.system),
-        gauges,
-    }
-}
-
 impl Shared {
     /// Takes the daemon snapshot off the async threads (the resolver gauge waits on the writer).
     async fn daemon_report(&self) -> MemoryReport {
         let reg = Arc::clone(&self.memory.registry);
         match tokio::task::spawn_blocking(move || (reg.snapshot(), cv_malloc::info())).await {
-            Ok((snap, malloc)) => to_report(&snap, malloc),
+            Ok((snap, malloc)) => cv_malloc::to_report(&snap, malloc),
             Err(e) => {
                 tracing::warn!(target: "cv::memory", error = %e, "memory snapshot task");
                 MemoryReport::default()
@@ -245,27 +206,4 @@ fn log_report(process: &str, r: &MemoryReport, delta: Option<i128>, age_secs: Op
         gauges = %gauges.join(" "),
         "memory"
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn report_maps_snapshot_and_survives_unreadable_proc() {
-        let reg = Registry::new();
-        reg.register("ok", GaugeKind::Count, || Ok(3))
-            .expect("register");
-        reg.register("bad", GaugeKind::Count, || Err("unreadable".into()))
-            .expect("register");
-        let mut snap = reg.snapshot();
-        // `/proc/self/smaps_rollup` (and status) unreadable: absent fields, no panic.
-        snap.status = None;
-        snap.smaps_rollup = None;
-        let r = to_report(&snap, cv_malloc::MallocInfo::default());
-        assert_eq!((r.rss, r.anon, r.swap, r.hwm), (None, None, None, None));
-        assert_eq!(r.malloc_in_use, None);
-        assert_eq!(r.gauges[0].value, Some(3));
-        assert_eq!(r.gauges[1].error.as_deref(), Some("unreadable"));
-    }
 }

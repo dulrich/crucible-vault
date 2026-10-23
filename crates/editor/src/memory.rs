@@ -13,8 +13,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use cv_protocol::{GaugeValue, MemoryReport};
-use memstat::{GaugeKind, GaugeResult, Registry, Snapshot};
+use cv_protocol::MemoryReport;
+use memstat::{GaugeKind, GaugeResult, Registry};
 
 /// The report period.
 pub const REPORT_EVERY: Duration = Duration::from_secs(300);
@@ -24,8 +24,6 @@ pub const REPORT_EVERY: Duration = Duration::from_secs(300);
 pub const QUIET_PERIOD: Duration = Duration::from_secs(5);
 /// The maintenance tick period (it only compares clocks; it does no rendering work).
 pub const TRIM_TICK: Duration = Duration::from_secs(5);
-/// Retained-but-unused heap bytes above which a quiet-period trim runs (32 MiB).
-pub const TRIM_RETAINED_THRESHOLD: u64 = 32 * 1024 * 1024;
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 /// Milliseconds since [`EPOCH`] of the last user input or completed image decode.
@@ -54,7 +52,7 @@ pub fn should_trim(
 ) -> bool {
     let quiet = now.saturating_duration_since(last_activity) >= QUIET_PERIOD;
     let fresh = last_trim.is_none_or(|t| t <= last_activity);
-    quiet && fresh && retained > TRIM_RETAINED_THRESHOLD
+    quiet && fresh && retained > cv_malloc::TRIM_RETAINED_THRESHOLD
 }
 
 /// App-owned counts, refreshed by [`Memory::capture`].
@@ -153,47 +151,7 @@ impl Memory {
 
     /// Builds the report (blocking: reads `/proc`; call off the UI thread).
     pub fn report(&self) -> MemoryReport {
-        to_report(&self.registry.snapshot(), cv_malloc::info())
-    }
-}
-
-/// Maps a `memstat` snapshot (Serialize-only) plus `mallinfo2` onto the wire type (the same
-/// mapping as the daemon's `to_report`; `cv-protocol` must not depend on `memstat`).
-pub fn to_report(snap: &Snapshot, malloc: cv_malloc::MallocInfo) -> MemoryReport {
-    let status = snap.status.as_ref();
-    let mut gauges: Vec<GaugeValue> = snap
-        .gauges
-        .iter()
-        .map(|g| GaugeValue {
-            name: g.name.clone(),
-            value: g.value,
-            error: g.error.clone(),
-        })
-        .collect();
-    if let Some(e) = &snap.registry_error {
-        gauges.push(GaugeValue {
-            name: "registry".into(),
-            value: None,
-            error: Some(e.clone()),
-        });
-    }
-    let nonzero = |v: u64| (v > 0).then_some(v);
-    MemoryReport {
-        uptime_secs: if snap.uptime_secs.is_finite() && snap.uptime_secs > 0.0 {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            {
-                snap.uptime_secs as u64
-            }
-        } else {
-            0
-        },
-        rss: status.and_then(|s| s.vm_rss),
-        anon: snap.smaps_rollup.as_ref().and_then(|r| r.pss_anon),
-        swap: status.and_then(|s| s.vm_swap),
-        hwm: status.and_then(|s| s.vm_hwm),
-        malloc_in_use: nonzero(malloc.in_use),
-        malloc_system: nonzero(malloc.system),
-        gauges,
+        cv_malloc::to_report(&self.registry.snapshot(), cv_malloc::info())
     }
 }
 
@@ -202,7 +160,7 @@ mod tests {
     #[test]
     fn trim_only_when_quiet_over_threshold_and_once() {
         let t0 = Instant::now();
-        let big = TRIM_RETAINED_THRESHOLD + 1;
+        let big = cv_malloc::TRIM_RETAINED_THRESHOLD + 1;
         let quiet = t0 + QUIET_PERIOD;
         assert!(should_trim(quiet, t0, None, big));
         assert!(!should_trim(
@@ -211,7 +169,12 @@ mod tests {
             None,
             big
         ));
-        assert!(!should_trim(quiet, t0, None, TRIM_RETAINED_THRESHOLD));
+        assert!(!should_trim(
+            quiet,
+            t0,
+            None,
+            cv_malloc::TRIM_RETAINED_THRESHOLD
+        ));
         // Already trimmed this quiet period; new activity re-arms it.
         assert!(!should_trim(
             quiet,

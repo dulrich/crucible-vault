@@ -83,6 +83,58 @@ pub fn info() -> MallocInfo {
     }
 }
 
+/// Allocator bytes retained above live data beyond which a trim is worthwhile (32 MiB); small
+/// workloads never cross it, so the threshold is the rate limiter.
+pub const TRIM_RETAINED_THRESHOLD: u64 = 32 * 1024 * 1024;
+
+/// Trims when retained bytes exceed [`TRIM_RETAINED_THRESHOLD`]; returns `(retained, trimmed)`
+/// when it did, `None` otherwise (the caller owns any logging).
+pub fn trim_if_retained() -> Option<(u64, bool)> {
+    let retained = info().retained();
+    (retained > TRIM_RETAINED_THRESHOLD).then(|| (retained, trim()))
+}
+
+/// The one mapping of a `memstat` snapshot (Serialize-only) plus `mallinfo2` onto the wire type (shared by the daemon and the editor; `cv-protocol` must not depend on
+/// `memstat`).
+#[must_use]
+pub fn to_report(snap: &memstat::Snapshot, malloc: MallocInfo) -> cv_protocol::MemoryReport {
+    let status = snap.status.as_ref();
+    let mut gauges: Vec<cv_protocol::GaugeValue> = snap
+        .gauges
+        .iter()
+        .map(|g| cv_protocol::GaugeValue {
+            name: g.name.clone(),
+            value: g.value,
+            error: g.error.clone(),
+        })
+        .collect();
+    if let Some(e) = &snap.registry_error {
+        gauges.push(cv_protocol::GaugeValue {
+            name: "registry".into(),
+            value: None,
+            error: Some(e.clone()),
+        });
+    }
+    let nonzero = |v: u64| (v > 0).then_some(v);
+    cv_protocol::MemoryReport {
+        uptime_secs: if snap.uptime_secs.is_finite() && snap.uptime_secs > 0.0 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                snap.uptime_secs as u64
+            }
+        } else {
+            0
+        },
+        rss: status.and_then(|s| s.vm_rss),
+        anon: snap.smaps_rollup.as_ref().and_then(|r| r.pss_anon),
+        swap: status.and_then(|s| s.vm_swap),
+        hwm: status.and_then(|s| s.vm_hwm),
+        malloc_in_use: nonzero(malloc.in_use),
+        malloc_system: nonzero(malloc.system),
+        gauges,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +148,27 @@ mod tests {
         drop(buf);
         let _ = trim();
         assert!(info().system > 0);
+    }
+
+    #[test]
+    fn report_maps_snapshot_and_survives_unreadable_proc() {
+        let reg = memstat::Registry::new();
+        reg.register("ok", memstat::GaugeKind::Count, || Ok(3))
+            .expect("register");
+        reg.register(
+            "bad",
+            memstat::GaugeKind::Count,
+            || Err("unreadable".into()),
+        )
+        .expect("register");
+        let mut snap = reg.snapshot();
+        // `/proc/self/smaps_rollup` (and status) unreadable: absent fields, no panic.
+        snap.status = None;
+        snap.smaps_rollup = None;
+        let r = to_report(&snap, MallocInfo::default());
+        assert_eq!((r.rss, r.anon, r.swap, r.hwm), (None, None, None, None));
+        assert_eq!(r.malloc_in_use, None);
+        assert_eq!(r.gauges[0].value, Some(3));
+        assert_eq!(r.gauges[1].error.as_deref(), Some("unreadable"));
     }
 }
