@@ -24,6 +24,11 @@
 //!    and are re-keyed (collision-safe), retagged and ticked by predicate; never a new note.
 //! 6. **Re-clean** (C): `via: email` note bodies go through `clean_body`, CAS-written only on a
 //!    change.
+//!    Then **boilerplate** (plan `round-10-feedback-todos` WP-2, detail in
+//!    [`super::reconcile_boilerplate`]): per-sender learned sets are seeded from the processed
+//!    `.eml` files (once per Message-ID), then known-sender `via: email` notes have their
+//!    anchored head/tail boilerplate stripped, CAS-written only on a change, `description`
+//!    recomputed (`bp_learned`, `bp_stripped`, `bp_guarded`, `bp_conflict`).
 //!
 //! Plan `intake-round-2-clean-dedupe-reading` WP-6 adds the repair phases (detail and vars in
 //! [`super::reconcile_repair`]), after the re-clean (which now drops small localized images by
@@ -59,7 +64,7 @@
 //! `left_open`, `skipped_kind` (open rows of kinds other than blog and youtube: linked in phase 1
 //! but never probed or ticked; mail unknown-sender rows count here before phase 5 re-matches
 //! them), the backfill vars (`yt_*`, `x_ticked`, `mail_*`), the repair vars (`mail_rekeyed`, `mail_token_stripped`,
-//! `rekey_*`, `dup_*`, `publication_*`), `dry_run`.
+//! `rekey_*`, `dup_*`, `publication_*`), the identity vars, the boilerplate vars (`bp_*`), `dry_run`.
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::{self, Access};
@@ -72,6 +77,7 @@ use serde_json::Value;
 
 use super::params::{check_keys, get_bool};
 use super::reconcile_backfill as backfill;
+use super::reconcile_boilerplate as boilerplate;
 use super::reconcile_identity as identity;
 use super::reconcile_repair as repair;
 use super::tracker::blogs::PROBE_SERVICE;
@@ -129,6 +135,8 @@ struct Vars {
     repair: repair::Counts,
     #[serde(flatten)]
     identity: identity::Counts,
+    #[serde(flatten)]
+    boilerplate: boilerplate::Counts,
 }
 
 /// How a probe attempt ended.
@@ -336,6 +344,9 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     backfill::youtube(ctx, &sh, &mut sidx, &mut v.backfill)?;
     backfill::mail(ctx, &sh, &mut v.backfill)?;
     backfill::reclean(ctx, &sh, &mut v.backfill)?;
+    // 6b. Per-sender boilerplate seed + strip (plan round-10-feedback-todos WP-2), after the
+    // re-clean so it strips cleaned bodies; it recomputes `description` on every strip.
+    boilerplate::run(ctx, &sh, &mut v.boilerplate)?;
 
     // 7-9. Round-2 repair (plan intake-round-2-clean-dedupe-reading WP-6): re-key, merge, publication.
     repair::rekey_and_merge(ctx, &sh, &mut sidx, &mut v.repair)?;

@@ -135,6 +135,19 @@ pub const MIGRATIONS: &[&str] = &[
      ALTER TABLE tracker_items ADD COLUMN complete INTEGER;
      ALTER TABLE tracker_items ADD COLUMN full_word_count INTEGER;
      CREATE INDEX tracker_items_url ON tracker_items(url);",
+    // v13 (plan round-10-feedback-todos WP-2): per-sender learned newsletter boilerplate lines
+    // (`line_key` = the cv-ingest FNV-1a 64 key as a signed integer) and the messages learned.
+    "CREATE TABLE mail_boilerplate (
+         source_key  TEXT NOT NULL,
+         line_key    INTEGER NOT NULL,
+         count       INTEGER NOT NULL,
+         PRIMARY KEY (source_key, line_key)
+     );
+     CREATE TABLE mail_boilerplate_seen (
+         source_key  TEXT NOT NULL,
+         message_id  TEXT NOT NULL,
+         PRIMARY KEY (source_key, message_id)
+     );",
 ];
 
 /// Highest schema version this build knows.

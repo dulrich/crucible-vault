@@ -9,6 +9,7 @@ mod id;
 mod image_descriptions;
 mod job;
 pub mod link_records;
+mod mail_boilerplate;
 pub mod migrate;
 mod query;
 mod runner_state;

@@ -295,8 +295,7 @@ fn v11_database_migrates_to_v12_with_null_completeness() {
          VALUES ('blog', 'k', 'p', 1, '2026-10-20', 'line')",
     )
     .unwrap();
-    assert_eq!(migrate::latest_version(), 12);
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 12);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::latest_version());
     let row: (Option<String>, Option<bool>, Option<i64>) = c
         .query_row(
             "SELECT access, complete, full_word_count FROM tracker_items",
@@ -1259,4 +1258,21 @@ fn tracker_items_with_note_lists_only_linked_rows() {
         .map(|r| r.item_id)
         .collect();
     assert_eq!(got, vec!["a", "c"]);
+}
+
+/// v11 → v13 (plan round-10-feedback-todos WP-2): the boilerplate tables land empty.
+#[test]
+fn v11_database_migrates_to_v13_with_boilerplate_tables() {
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(migrate::BASELINE).unwrap();
+    c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
+        .unwrap();
+    assert_eq!(migrate::latest_version(), 13);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 13);
+    for t in ["mail_boilerplate", "mail_boilerplate_seen"] {
+        let n: i64 = c
+            .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "{t}");
+    }
 }
