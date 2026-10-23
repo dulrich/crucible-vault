@@ -196,8 +196,22 @@ fn row_el<'a>(r: Row, cx: Rcx<'_>) -> Element<'a, Message> {
             draft,
             collapsible,
             expanded,
-        } => structure::map_key(&h, cx, &map, &key, &draft, collapsible, expanded),
-        Kind::AddKey { map, draft, value } => structure::add_key(cx, &map, &draft, value),
+            picker,
+        } => structure::map_key(
+            &h,
+            cx,
+            &map,
+            &key,
+            &draft,
+            collapsible.then_some(expanded),
+            picker,
+        ),
+        Kind::AddKey {
+            map,
+            draft,
+            picker,
+            value,
+        } => structure::add_key(cx, &map, &draft, picker, value),
     };
     let mut c = column![body].spacing(2);
     for e in r.errors {

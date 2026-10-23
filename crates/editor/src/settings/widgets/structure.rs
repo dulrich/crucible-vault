@@ -6,8 +6,9 @@ use iced::{Alignment, Element, Font, Length};
 use super::{FIELD_W, Head, LABEL_W, Rcx, small, text_button};
 use crate::icons::Icon;
 use crate::message::Message;
-use crate::settings::{DocEdit, FormMsg, ScalarValue};
+use crate::settings::{DocEdit, FormMsg, ScalarValue, SettingsMsg, pickers};
 use crate::theme::{self, Tokens};
+use crate::widget::typeahead;
 
 pub(super) fn heading<'a>(h: &Head, t: Tokens) -> Element<'a, Message> {
     let mut c = column![text(h.label.clone()).size(15).color(t.heading.to_color())].spacing(2);
@@ -126,15 +127,15 @@ pub(super) fn add_item<'a>(
     .into()
 }
 
-/// One map entry's key row (rename / remove; `collapsible` for compound values).
+/// One map entry's key row (rename / remove; `fold`: `Some(expanded)` for compound values).
 pub(super) fn map_key<'a>(
     h: &Head,
     cx: Rcx<'_>,
     map: &cv_schema::Path,
     key: &str,
     draft: &str,
-    collapsible: bool,
-    expanded: bool,
+    fold: Option<bool>,
+    picker: Option<pickers::Picker>,
 ) -> Element<'a, Message> {
     let (t, path) = (cx.t, &h.path);
     let commit = || {
@@ -149,14 +150,25 @@ pub(super) fn map_key<'a>(
         .width(Length::Fixed(LABEL_W));
     if cx.editable {
         let p = path.clone();
-        input = input
-            .on_input(cx.form_fn(move |text| FormMsg::RenameDraft {
-                at: p.clone(),
-                text,
-            }))
-            .on_submit(commit());
+        input = match picker {
+            Some(picker) => input
+                .on_input(cx.form_fn(move |text| FormMsg::RenameTa {
+                    at: p.clone(),
+                    text,
+                    picker,
+                }))
+                .on_submit(Message::Settings(SettingsMsg::Typeahead(
+                    typeahead::Key::Enter,
+                ))),
+            None => input
+                .on_input(cx.form_fn(move |text| FormMsg::RenameDraft {
+                    at: p.clone(),
+                    text,
+                }))
+                .on_submit(commit()),
+        };
     }
-    let lead: Element<'a, Message> = if collapsible {
+    let lead: Element<'a, Message> = if let Some(expanded) = fold {
         theme::icon_button(
             chevron(expanded),
             Some(cx.form(FormMsg::Toggle(path.clone()))),
@@ -171,14 +183,48 @@ pub(super) fn map_key<'a>(
     } else {
         Space::new().into()
     };
-    row![
+    let line = row![
         lead,
         input,
         rename,
         theme::icon_button(Icon::X, cx.on(cx.edit(DocEdit::Remove(path.clone()))), t),
     ]
     .spacing(4)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Center);
+    with_key_list(cx, line, path, picker)
+}
+
+/// `line` with the open key-typeahead list under it (one tree shape open or closed, so the
+/// input keeps focus as the list appears).
+fn with_key_list<'a>(
+    cx: Rcx<'_>,
+    line: iced::widget::Row<'a, Message>,
+    map_or_entry: &cv_schema::Path,
+    picker: Option<pickers::Picker>,
+) -> Element<'a, Message> {
+    if picker.is_none() {
+        return line.into();
+    }
+    let ta_path = pickers::key_ta_path(map_or_entry);
+    let p = ta_path.clone();
+    let list: Element<'a, Message> = cx
+        .ta_list(
+            &ta_path,
+            cx.form_fn(move |value| FormMsg::Pick {
+                path: p.clone(),
+                value,
+            }),
+        )
+        .unwrap_or_else(|| Space::new().into());
+    column![
+        line,
+        row![
+            Space::new().width(theme::CONTROL),
+            container(list).width(Length::Fixed(LABEL_W)),
+        ]
+        .spacing(4)
+    ]
+    .spacing(2)
     .into()
 }
 
@@ -187,6 +233,7 @@ pub(super) fn add_key<'a>(
     cx: Rcx<'_>,
     map: &cv_schema::Path,
     draft: &str,
+    picker: Option<pickers::Picker>,
     value: &'static cv_schema::Node,
 ) -> Element<'a, Message> {
     let add = cx.form(FormMsg::NewKeyAdd {
@@ -199,19 +246,31 @@ pub(super) fn add_key<'a>(
         .width(Length::Fixed(LABEL_W));
     if cx.editable {
         let m = map.clone();
-        input = input
-            .on_input(cx.form_fn(move |text| FormMsg::NewKeyDraft {
-                map: m.clone(),
-                text,
-            }))
-            .on_submit(add.clone());
+        input = match picker {
+            Some(picker) => input
+                .on_input(cx.form_fn(move |text| FormMsg::NewKeyTa {
+                    map: m.clone(),
+                    text,
+                    picker,
+                    value,
+                }))
+                .on_submit(Message::Settings(SettingsMsg::Typeahead(
+                    typeahead::Key::Enter,
+                ))),
+            None => input
+                .on_input(cx.form_fn(move |text| FormMsg::NewKeyDraft {
+                    map: m.clone(),
+                    text,
+                }))
+                .on_submit(add.clone()),
+        };
     }
-    row![
+    let line = row![
         Space::new().width(theme::CONTROL),
         input,
         text_button("Add", cx.on(add).filter(|_| !draft.trim().is_empty()), cx.t),
     ]
     .spacing(4)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    with_key_list(cx, line, map, picker)
 }

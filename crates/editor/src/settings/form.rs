@@ -39,12 +39,18 @@ pub struct FormState {
 }
 
 /// What the active typeahead edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TaTarget {
     /// A text field: a commit writes the value (`required`: an empty commit keeps the key).
     Text { required: bool },
     /// A chips adder: a commit adds a chip.
     Chips,
+    /// A map entry's key input (the active path is the entry's [`pickers::key_ta_path`]): a
+    /// commit renames the key.
+    RenameKey,
+    /// A map's "new key" input (the active path is the map's [`pickers::key_ta_path`]): a commit
+    /// adds the key with the map's entry node.
+    NewKey(&'static Node),
 }
 
 /// The active typeahead field: its file, path, picker, typed text and widget state.
@@ -228,11 +234,15 @@ pub enum Kind {
         draft: String,
         collapsible: bool,
         expanded: bool,
+        /// A typeahead source for the key (round-10 WP-6).
+        picker: Option<Picker>,
     },
     /// "Add key" under a map.
     AddKey {
         map: Path,
         draft: String,
+        /// A typeahead source for the new key (round-10 WP-6).
+        picker: Option<Picker>,
         /// The map's entry node (a new key starts as its `empty_item`).
         value: &'static Node,
     },
@@ -507,7 +517,8 @@ fn node_rows(
                     value,
                     placeholder: dflt_text(leaf.default),
                     mono: matches!(node, Node::Expr | Node::Filter),
-                    picker: super::pickers::for_field(node, leaf.hint),
+                    picker: super::pickers::view_value_picker(cx.file, p)
+                        .or_else(|| super::pickers::for_field(node, leaf.hint)),
                     required: leaf.required,
                 },
             ));
@@ -609,7 +620,8 @@ fn node_rows(
                     items,
                     choices,
                     draft,
-                    picker: super::pickers::for_field(node, leaf.hint),
+                    picker: super::pickers::view_value_picker(cx.file, p)
+                        .or_else(|| super::pickers::for_field(node, leaf.hint)),
                 },
             ));
         }
@@ -837,6 +849,7 @@ fn list_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut
 
 fn map_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut Vec<Row>) {
     let collapsible = compound(inner);
+    let picker = super::pickers::view_key_picker(cx.file, p);
     for k in cx.doc.keys(p) {
         let kp = p.key(&k);
         let expanded = !collapsible || cx.form.is_expanded(cx.file, &kp);
@@ -857,6 +870,7 @@ fn map_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut 
                 draft,
                 collapsible,
                 expanded,
+                picker,
             },
         ));
         if expanded {
@@ -877,6 +891,7 @@ fn map_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut 
         Kind::AddKey {
             map: p.clone(),
             draft,
+            picker,
             value: inner,
         },
     ));

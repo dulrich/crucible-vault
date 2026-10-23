@@ -7,6 +7,7 @@ mod editor_page;
 mod fields;
 mod network_pickers;
 mod records;
+mod view_pickers;
 mod views_bookmarks;
 
 use std::sync::Arc;

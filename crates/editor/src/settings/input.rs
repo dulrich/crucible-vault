@@ -79,6 +79,14 @@ impl Settings {
     /// Writes a typeahead outcome (`from_candidate`: a commit of a listed candidate).
     fn apply_ta(&mut self, a: &mut ActiveTa, out: Outcome, from_candidate: bool) {
         let file = a.file.clone();
+        if matches!(a.target, TaTarget::RenameKey | TaTarget::NewKey(_)) {
+            // Map-key inputs write only on a commit (a pick or Enter); free text commits
+            // through the Rename / Add buttons from the mirrored form draft.
+            if let Outcome::Commit(v) = out {
+                self.key_commit(a, v);
+            }
+            return;
+        }
         if a.target == TaTarget::Chips {
             let add = |s: &mut Self, a: &mut ActiveTa, value| {
                 a.ta.committed.clear();
@@ -135,6 +143,37 @@ impl Settings {
         }
     }
 
+    /// A committed map-key candidate: rename the entry / add the key (round-10 WP-6).
+    fn key_commit(&mut self, a: &mut ActiveTa, v: String) {
+        let file = a.file.clone();
+        // The active path is the entry's (or the map's) path + the synthetic key segment.
+        let base = cv_schema::Path(a.path.0[..a.path.0.len().saturating_sub(1)].to_vec());
+        a.draft.clear();
+        match a.target {
+            TaTarget::RenameKey => {
+                let Some((cv_schema::Seg::Key(from), head)) = base.0.split_last() else {
+                    return;
+                };
+                let map = cv_schema::Path(head.to_vec());
+                self.form
+                    .set_draft(&file, draft_key("rename", &base), Some(v));
+                self.form_msg(
+                    &file,
+                    FormMsg::RenameCommit {
+                        map,
+                        from: from.clone(),
+                    },
+                );
+            }
+            TaTarget::NewKey(value) => {
+                self.form
+                    .set_draft(&file, draft_key("newkey", &base), Some(v));
+                self.form_msg(&file, FormMsg::NewKeyAdd { map: base, value });
+            }
+            TaTarget::Text { .. } | TaTarget::Chips => {}
+        }
+    }
+
     /// Typing into a typeahead field: (re)opens it on `(file, path)` with `text` as its draft.
     fn ta_typed(
         &mut self,
@@ -148,7 +187,7 @@ impl Settings {
         self.blur_other(file, &path, paths);
         let committed = match target {
             TaTarget::Text { .. } => self.stored_str(file, &path),
-            TaTarget::Chips => String::new(),
+            TaTarget::Chips | TaTarget::RenameKey | TaTarget::NewKey(_) => String::new(),
         };
         self.lookups.reopened |= self.form.typeahead.as_ref().is_none_or(|a| !a.ta.open);
         let a = self
@@ -265,6 +304,25 @@ impl Settings {
                     items.remove(index);
                     DocEdit::Set(path, ScalarValue::StrList(items))
                 })
+            }
+            FormMsg::RenameTa { at, text, picker } => {
+                self.form
+                    .set_draft(file, draft_key("rename", &at), Some(text.clone()));
+                let path = pickers::key_ta_path(&at);
+                self.ta_typed(file, path, picker, TaTarget::RenameKey, text, paths);
+                None
+            }
+            FormMsg::NewKeyTa {
+                map,
+                text,
+                picker,
+                value,
+            } => {
+                self.form
+                    .set_draft(file, draft_key("newkey", &map), Some(text.clone()));
+                let path = pickers::key_ta_path(&map);
+                self.ta_typed(file, path, picker, TaTarget::NewKey(value), text, paths);
+                None
             }
             FormMsg::NewKeyDraft { map, text } => {
                 self.form
@@ -401,5 +459,18 @@ pub enum FormMsg {
     RenameCommit {
         map: cv_schema::Path,
         from: String,
+    },
+    /// [`Self::RenameDraft`] on a typeahead key input (round-10 WP-6): also a query.
+    RenameTa {
+        at: cv_schema::Path,
+        text: String,
+        picker: Picker,
+    },
+    /// [`Self::NewKeyDraft`] on a typeahead key input (round-10 WP-6): also a query.
+    NewKeyTa {
+        map: cv_schema::Path,
+        text: String,
+        picker: Picker,
+        value: &'static Node,
     },
 }

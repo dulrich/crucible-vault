@@ -31,6 +31,11 @@ pub enum Picker {
     Place,
     /// WP-6: a `provider:model` reference (the list edits the part after the first `:`).
     ModelRef,
+    /// Round-10 WP-6: a views property id (`file.*`, `formula.<name>`, `note.<key>`); free text
+    /// stays valid.
+    PropertyId,
+    /// Round-10 WP-6: a views summary aggregate (`Sum`, `Average`, `Count`, `Min`, `Max`).
+    Aggregate,
 }
 
 /// A committed typeahead value: a stored string, or a geocoded place whose pick
@@ -56,6 +61,155 @@ pub fn for_field(node: &Node, hint: Option<RefKind>) -> Option<Picker> {
             _ => None,
         },
     }
+}
+
+/// The `file.*` property ids the views evaluator knows (`crates/views/src/eval.rs`).
+const FILE_IDS: [&str; 10] = [
+    "file.name",
+    "file.basename",
+    "file.path",
+    "file.folder",
+    "file.ext",
+    "file.size",
+    "file.mtime",
+    "file.ctime",
+    "file.tags",
+    "file.links",
+];
+
+/// The summary aggregates (`views::def::SumFn`, stored capitalized).
+const AGGREGATES: [&str; 5] = ["Sum", "Average", "Count", "Min", "Max"];
+
+/// The synthetic last path segment of a map-key typeahead (`kp.key(KEY_SEG)`): keeps a key
+/// input's active typeahead apart from the entry's value row, which shares the entry's path.
+pub const KEY_SEG: &str = "\u{1}key";
+
+/// The active-typeahead path of the key input of the map entry (or adder) at `p`.
+pub fn key_ta_path(p: &Path) -> Path {
+    p.key(KEY_SEG)
+}
+
+fn shape(p: &Path) -> Vec<Option<&str>> {
+    p.0.iter()
+        .map(|s| match s {
+            Seg::Key(k) => Some(k.as_str()),
+            Seg::Index(_) => None,
+        })
+        .collect()
+}
+
+/// The picker of a views-file value at `p` (a Text or chips row), by schema path: property ids
+/// for `order`, `sort.property`, `groupBy.property`; aggregates for the values of `summaries`
+/// and `summary_rows.summaries`. `None` for non-view files and other paths.
+pub fn view_value_picker(file: &str, p: &Path) -> Option<Picker> {
+    if !super::is_view_path(file) {
+        return None;
+    }
+    match shape(p).as_slice() {
+        [Some("views"), None, Some("order")]
+        | [Some("views"), None, Some("sort"), None, Some("property")]
+        | [Some("views"), None, Some("groupBy"), Some("property")] => Some(Picker::PropertyId),
+        [Some("views"), None, Some("summaries"), Some(_)]
+        | [
+            Some("views"),
+            None,
+            Some("summary_rows"),
+            None,
+            Some("summaries"),
+            Some(_),
+        ] => Some(Picker::Aggregate),
+        _ => None,
+    }
+}
+
+/// The picker of the keys of the views-file map at `map`: property ids for `summaries`,
+/// `summary_rows.summaries`, `columnSize` and top-level `properties`.
+pub fn view_key_picker(file: &str, map: &Path) -> Option<Picker> {
+    if !super::is_view_path(file) {
+        return None;
+    }
+    match shape(map).as_slice() {
+        [Some("views"), None, Some("summaries" | "columnSize")]
+        | [
+            Some("views"),
+            None,
+            Some("summary_rows"),
+            None,
+            Some("summaries"),
+        ]
+        | [Some("properties")] => Some(Picker::PropertyId),
+        _ => None,
+    }
+}
+
+/// The canonical dotted form of a property id (the rule of `views::def::norm`, which is
+/// crate-private): `note["k"]` / `note['k']` / `formula["k"]` fold to dotted; `file.`/`note.`/
+/// `formula.` ids pass through; a bare id is `note.<id>`.
+pub fn canonical_property_id(id: &str) -> String {
+    for prefix in ["note", "formula"] {
+        let Some(inner) = id
+            .strip_prefix(prefix)
+            .and_then(|r| r.strip_prefix('['))
+            .and_then(|r| r.strip_suffix(']'))
+        else {
+            continue;
+        };
+        if let Some(key) = ['"', '\'']
+            .iter()
+            .find_map(|q| inner.strip_prefix(*q)?.strip_suffix(*q))
+        {
+            return format!("{prefix}.{key}");
+        }
+    }
+    match id.split_once('.') {
+        Some(("file" | "note" | "formula", _)) => id.to_owned(),
+        _ => format!("note.{id}"),
+    }
+}
+
+/// Property-id candidates of a view file: `file.*`, `formula.<name>` per top-level formula, and
+/// `note.<key>` for every note property the file already references (`properties` keys, each
+/// view's `order`, `sort.property` and `groupBy.property`), canonical and deduplicated.
+pub fn property_ids(s: &Settings, file: &str) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    let mut add = |id: String, tag: &str| {
+        if !id.is_empty() && !out.iter().any(|c| c.value == id) {
+            out.push(Candidate {
+                label: id.clone(),
+                secondary: tag.to_owned(),
+                value: id,
+            });
+        }
+    };
+    for id in FILE_IDS {
+        add(id.to_owned(), "file");
+    }
+    let Some(doc) = s.file(file).and_then(|f| f.doc()) else {
+        return out;
+    };
+    for k in doc.keys(&Path::root().key("formulas")) {
+        add(format!("formula.{k}"), "formula");
+    }
+    let mut seen: Vec<String> = doc.keys(&Path::root().key("properties"));
+    let views = list_root("views");
+    for i in 0..doc.len(&views) {
+        let vp = views.index(i);
+        seen.extend(doc.get_str_list(&vp.key("order")).unwrap_or_default());
+        let sp = vp.key("sort");
+        for j in 0..doc.len(&sp) {
+            seen.extend(doc.get_str(&sp.index(j).key("property")).map(str::to_owned));
+        }
+        seen.extend(
+            doc.get_str(&vp.key("groupBy").key("property"))
+                .map(str::to_owned),
+        );
+    }
+    for id in seen {
+        let id = canonical_property_id(id.trim());
+        let tag = id.split('.').next().unwrap_or("note").to_owned();
+        add(id, &tag);
+    }
+    out
 }
 
 pub(super) fn doc_named<'a>(s: &'a Settings, name: &str) -> Option<&'a ConfigDoc> {
@@ -417,6 +571,8 @@ fn small_set(s: &Settings, picker: Picker, file: &str, at: &Path, text: &str) ->
         Picker::Currency => currencies(s),
         Picker::Place => places(s, text),
         Picker::ModelRef => model_refs(s, file, at, text),
+        Picker::PropertyId => property_ids(s, file),
+        Picker::Aggregate => AGGREGATES.iter().map(|a| Candidate::plain(*a)).collect(),
         Picker::Folder | Picker::Path => Vec::new(),
     }
 }
@@ -484,7 +640,7 @@ pub fn is_valid(
         Picker::Folder => folders(paths).iter().any(|f| f == text),
         Picker::Path => paths.iter().any(|p| p == text),
         // Free text: a place label alone, a `{param.…}` model, a currency before the list loads.
-        Picker::Place => true,
+        Picker::Place | Picker::PropertyId | Picker::Aggregate => true,
         Picker::ModelRef if text.starts_with('{') => true,
         Picker::Currency if s.lookups.currency_list().is_none() => true,
         _ => typeahead::is_value(text, &small_set(s, picker, file, at, text)),
