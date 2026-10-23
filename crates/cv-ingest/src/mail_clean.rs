@@ -114,10 +114,26 @@ fn is_css_line(line: &str) -> bool {
         .split('}')
         .filter(|g| {
             g.split_once('{')
-                .is_some_and(|(_, b)| b.contains(':') && b.contains(';'))
+                .is_some_and(|(_, b)| (b.contains(':') && b.contains(';')) || has_declaration(b))
         })
         .count();
     t.contains('{') && ((at_rule && groups >= 1) || groups >= 3)
+}
+
+/// Whether a block body holds a `prop: value` declaration (a `:` directly after a word
+/// character, followed by a value), so minified CSS without a `;` still counts.
+fn has_declaration(body: &str) -> bool {
+    let b = body.as_bytes();
+    b.iter().enumerate().any(|(i, &c)| {
+        c == b':'
+            && i > 0
+            && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'-')
+            && body[i + 1..]
+                .trim_start()
+                .chars()
+                .next()
+                .is_some_and(|n| !matches!(n, '}' | '{'))
+    })
 }
 
 /// The lines of the referral block: an "Invite your friends" heading, then the paragraph and

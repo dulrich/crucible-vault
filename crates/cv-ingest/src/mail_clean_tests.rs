@@ -394,3 +394,20 @@ fn prose_quoting_inline_braces_code_survives() {
     let prose = "The config example { a: 1; b: 2; } is shown inline in this long sentence that keeps going well past the old forty character floor, so it would once have matched, and it carries on with more ordinary words until it also clears the two hundred byte minimum.";
     assert_eq!(clean_body(prose), prose);
 }
+
+#[test]
+fn semicolon_free_minified_css_is_dropped() {
+    let css = "@media screen and (max-width:600px){.x .y a{font-size: 9px}.w{margin: 0 auto}.v .u{border: 1px solid red}}@media (min-width:700px){.x{padding: 9px 9 9 9}.z .q{color: #333}}@media print{.k{display: none}.j{width: 100%}.i{height: 50px}}";
+    assert!(css.len() >= 200 && !css.contains(';'));
+    let x = format!("First paragraph.\n\n{css}\n\nSecond paragraph.");
+    let out = clean_body(&x);
+    assert_eq!(out, "First paragraph.\n\nSecond paragraph.");
+    assert_eq!(clean_body(&out), out);
+}
+
+#[test]
+fn prose_with_one_brace_pair_and_colon_is_not_css() {
+    let prose = "The snippet { total: 5 } appears inline in this long sentence of ordinary prose, and the note: it keeps going well past the minimum length so that only the structural rules can decide, with more plain words to clear two hundred bytes easily.";
+    assert!(prose.len() >= 200);
+    assert_eq!(clean_body(prose), prose);
+}
