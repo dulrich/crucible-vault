@@ -229,6 +229,53 @@ impl FrontmatterDoc {
             .map(|(_, v)| v))
     }
 
+    /// The string value of `key` (a `Str` only, untrimmed); absent, any other type or a parse error is `None`.
+    pub fn get_str(&self, key: &str) -> Option<String> {
+        match self.get(key) {
+            Ok(Some(JsValue::Str(s))) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// [`Self::get_str`] trimmed, an empty result being `None`.
+    pub fn get_str_trimmed(&self, key: &str) -> Option<String> {
+        self.get_str(key)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The boolean value of `key` (a `Bool` only); absent, any other type or a parse error is `None`.
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        match self.get(key) {
+            Ok(Some(JsValue::Bool(b))) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// `key` as strings: an array's `Str` items (others dropped) or a scalar `Str` as one item; anything else (or a parse error) is empty.
+    pub fn get_strings(&self, key: &str) -> Vec<String> {
+        match self.get(key) {
+            Ok(Some(JsValue::Arr(a))) => a
+                .into_iter()
+                .filter_map(|x| match x {
+                    JsValue::Str(s) => Some(s),
+                    _ => None,
+                })
+                .collect(),
+            Ok(Some(JsValue::Str(s))) => vec![s],
+            _ => Vec::new(),
+        }
+    }
+
+    /// `key` as stringified entries: an array's every item, a scalar as one item, null/absent/parse error as none.
+    pub fn get_texts(&self, key: &str) -> Vec<String> {
+        match self.get(key) {
+            Ok(None | Some(JsValue::Null)) | Err(_) => Vec::new(),
+            Ok(Some(JsValue::Arr(a))) => a.iter().map(js_text).collect(),
+            Ok(Some(other)) => vec![js_text(&other)],
+        }
+    }
+
     /// Top-level keys in written order.
     pub fn keys(&self) -> Result<Vec<String>, FmError> {
         Ok(self.scan()?.1.into_iter().map(|e| e.key).collect())
@@ -668,6 +715,17 @@ fn render_key(key: &str) -> String {
 
 /// Render a scalar as YAML: plain when ofm parses it back to the same value, else JSON
 /// (JSON is valid YAML flow syntax, so strings get double quotes).
+/// A scalar stringified (`Str` as is, numbers and booleans by `to_string`, arrays joined with `,`, null/objects empty).
+pub fn js_text(v: &JsValue) -> String {
+    match v {
+        JsValue::Str(s) => s.clone(),
+        JsValue::Num(n) => n.to_string(),
+        JsValue::Bool(b) => b.to_string(),
+        JsValue::Arr(a) => a.iter().map(js_text).collect::<Vec<_>>().join(","),
+        JsValue::Null | JsValue::Obj(_) => String::new(),
+    }
+}
+
 fn render_scalar(value: &JsValue) -> String {
     match value {
         JsValue::Str(s) => {
@@ -720,6 +778,61 @@ mod tests {
     }
 
     const DOC: &str = "---\ntitle: 'Quoted Title'   # trailing\n# own-line comment\n\ntags:\n  - a\n  - b\nn: 0x1F\n---\n\nBody text.\n";
+
+    #[test]
+    fn get_str_is_string_only_and_untrimmed() {
+        let d = FrontmatterDoc::new("---\na: '  x  '\nb: 5\nc: true\nd: ''\n---\n");
+        assert_eq!(d.get_str("a").as_deref(), Some("  x  "));
+        assert_eq!(d.get_str("b"), None);
+        assert_eq!(d.get_str("c"), None);
+        assert_eq!(d.get_str("d").as_deref(), Some(""));
+        assert_eq!(d.get_str("missing"), None);
+        assert_eq!(FrontmatterDoc::new("---\n- a\n---\n").get_str("a"), None);
+    }
+
+    #[test]
+    fn get_str_trimmed_drops_empty() {
+        let d = FrontmatterDoc::new("---\na: '  x  '\nb: '   '\nc: 5\n---\n");
+        assert_eq!(d.get_str_trimmed("a").as_deref(), Some("x"));
+        assert_eq!(d.get_str_trimmed("b"), None);
+        assert_eq!(d.get_str_trimmed("c"), None);
+        assert_eq!(d.get_str_trimmed("missing"), None);
+    }
+
+    #[test]
+    fn get_bool_is_bool_only() {
+        let d = FrontmatterDoc::new("---\na: true\nb: false\nc: 'true'\nd: 1\n---\n");
+        assert_eq!(d.get_bool("a"), Some(true));
+        assert_eq!(d.get_bool("b"), Some(false));
+        assert_eq!(d.get_bool("c"), None);
+        assert_eq!(d.get_bool("d"), None);
+        assert_eq!(d.get_bool("missing"), None);
+    }
+
+    #[test]
+    fn get_strings_keeps_strings_only() {
+        let d = FrontmatterDoc::new("---\na: [x, 1, true, y]\nb: solo\nc: 5\nd: []\ne:\n---\n");
+        assert_eq!(d.get_strings("a"), vec!["x", "y"]);
+        assert_eq!(d.get_strings("b"), vec!["solo"]);
+        assert!(d.get_strings("c").is_empty());
+        assert!(d.get_strings("d").is_empty());
+        assert!(d.get_strings("e").is_empty());
+        assert!(d.get_strings("missing").is_empty());
+    }
+
+    #[test]
+    fn get_texts_stringifies_every_item() {
+        let d = FrontmatterDoc::new(
+            "---\na: [x, 1, true, [p, q]]\nb: solo\nc: 5\nd: false\ne:\nf: []\n---\n",
+        );
+        assert_eq!(d.get_texts("a"), vec!["x", "1", "true", "p,q"]);
+        assert_eq!(d.get_texts("b"), vec!["solo"]);
+        assert_eq!(d.get_texts("c"), vec!["5"]);
+        assert_eq!(d.get_texts("d"), vec!["false"]);
+        assert!(d.get_texts("e").is_empty());
+        assert!(d.get_texts("f").is_empty());
+        assert!(d.get_texts("missing").is_empty());
+    }
 
     #[test]
     fn set_existing_touches_only_that_entry() {

@@ -272,6 +272,18 @@ impl StepError {
             cause: DeferCause::Wait,
         }
     }
+
+    /// Whether this is the [`Self::conflict`] deferral (a CAS write that lost a race).
+    pub(crate) fn is_conflict(&self) -> bool {
+        matches!(
+            self,
+            StepError::Deferred {
+                cause: DeferCause::Wait,
+                service: None,
+                ..
+            }
+        )
+    }
 }
 
 impl std::fmt::Display for StepError {

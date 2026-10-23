@@ -56,7 +56,7 @@ use serde::Serialize;
 
 use super::intake_finalize::{RowKey, finalize_note};
 use super::mail::{KIND, UNKNOWN, note_target, raw_markdown, resolve_newsletter};
-use super::{DeferCause, StepCtx, StepError};
+use super::{StepCtx, StepError};
 use crate::supersede::SupersedeIndex;
 
 /// The backfill phases' outcome vars (aggregates only; flattened into the reconcile vars).
@@ -93,22 +93,6 @@ pub(super) struct Shared {
     pub(super) paths: HashMap<RowKey, String>,
 }
 
-pub(super) fn st(e: cv_state::StateError) -> StepError {
-    StepError::failed(format!("state: {e}"))
-}
-
-/// A CAS-conflict deferral (`StepCtx::write` maps a lost race to it).
-pub(super) fn is_conflict(e: &StepError) -> bool {
-    matches!(
-        e,
-        StepError::Deferred {
-            cause: DeferCause::Wait,
-            service: None,
-            ..
-        }
-    )
-}
-
 fn key_of(r: &TrackerItem) -> RowKey {
     (
         r.source_kind.clone(),
@@ -140,7 +124,7 @@ pub(super) fn youtube(
     sidx: &mut Option<SupersedeIndex>,
     c: &mut Counts,
 ) -> Result<(), StepError> {
-    let rows = ctx.state().tracker_open_rows("youtube").map_err(st)?;
+    let rows = ctx.state().tracker_open_rows("youtube")?;
     let mut done: BTreeSet<String> = BTreeSet::new();
     for r in rows {
         let path = if let Some(p) = r
@@ -252,7 +236,7 @@ fn retag(
             c.mail_retagged += 1;
             Ok(Some(new))
         }
-        Err(e) if is_conflict(&e) => {
+        Err(e) if e.is_conflict() => {
             c.mail_tag_conflict += 1;
             Ok(Some(text))
         }
@@ -262,10 +246,7 @@ fn retag(
 
 /// Phase B.
 pub(super) fn mail(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<(), StepError> {
-    let rows = ctx
-        .state()
-        .tracker_rows_of_source(KIND, UNKNOWN)
-        .map_err(st)?;
+    let rows = ctx.state().tracker_rows_of_source(KIND, UNKNOWN)?;
     if rows.is_empty() {
         return Ok(());
     }
@@ -297,15 +278,13 @@ pub(super) fn mail(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result
         if sh.dry {
             let exists = ctx
                 .state()
-                .tracker_item(KIND, &nl.name, &r.item_id)
-                .map_err(st)?
+                .tracker_item(KIND, &nl.name, &r.item_id)?
                 .is_some();
             c.mail_collisions += u32::from(exists);
         } else {
             let moved = ctx
                 .state()
-                .rekey_tracker_item(KIND, UNKNOWN, &r.item_id, &nl.name, &nl.name)
-                .map_err(st)?;
+                .rekey_tracker_item(KIND, UNKNOWN, &r.item_id, &nl.name, &nl.name)?;
             c.mail_collisions += u32::from(moved == Rekey::Merged);
         }
         let Some(path) = r
@@ -413,7 +392,7 @@ pub(super) fn reclean(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Res
         if !sh.dry {
             match ctx.write(&path, new.into_bytes(), Some(hash)) {
                 Ok(_) => {}
-                Err(e) if is_conflict(&e) => {
+                Err(e) if e.is_conflict() => {
                     c.mail_clean_conflict += 1;
                     continue;
                 }
@@ -472,10 +451,7 @@ pub(super) fn has_css(s: &str) -> bool {
 /// `description` or it already holds; a description that is neither is never touched.
 pub(super) fn redescribed(text: &str, body_changed: bool) -> Option<String> {
     let mut doc = FrontmatterDoc::new(text);
-    let current = match doc.get("description") {
-        Ok(Some(JsValue::Str(s))) => s,
-        _ => return None,
-    };
+    let current = doc.get_str("description")?;
     if !body_changed && !has_css(&current) {
         return None;
     }

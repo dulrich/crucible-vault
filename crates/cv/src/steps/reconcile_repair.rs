@@ -43,7 +43,7 @@ use cv_vault::VaultError;
 use serde::Serialize;
 
 use super::mail::resolve_newsletter;
-use super::reconcile_backfill::{Shared, is_conflict, message_map, read_text, st};
+use super::reconcile_backfill::{Shared, message_map, read_text};
 use super::{StepCtx, StepError};
 use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
 
@@ -64,20 +64,14 @@ pub(super) struct Counts {
     publication_conflict: u32,
 }
 
-fn str_of(doc: &FrontmatterDoc, key: &str) -> Option<String> {
-    match doc.get(key) {
-        Ok(Some(JsValue::Str(s))) => Some(s),
-        _ => None,
-    }
-}
-
 /// An RSS-origin note: `via: rss`, or `via: email` with no `message-id` (an RSS note a mail
 /// replaced in place: the engine rewrites `via` but never adds a message id), or — plan
 /// round-9-feedback-todos WP-2, pre-D25 RSS notes carry no `via` — any other note with a `blog`
 /// tracker row (`has_blog_row`).
 fn is_rss_origin(text: &str, has_blog_row: bool) -> bool {
     let doc = FrontmatterDoc::new(text);
-    match str_of(&doc, "via")
+    match doc
+        .get_str("via")
         .map(|v| v.trim().to_ascii_lowercase())
         .as_deref()
     {
@@ -91,8 +85,7 @@ fn is_rss_origin(text: &str, has_blog_row: bool) -> bool {
 fn has_blog_row(ctx: &StepCtx<'_>, path: &str) -> Result<bool, StepError> {
     Ok(ctx
         .state()
-        .tracker_items_for_note(path)
-        .map_err(st)?
+        .tracker_items_for_note(path)?
         .iter()
         .any(|r| r.source_kind == "blog"))
 }
@@ -158,7 +151,8 @@ pub(super) fn rekey_and_merge(
             continue;
         };
         let doc = FrontmatterDoc::new(text.as_str());
-        let post = str_of(&doc, "message-id")
+        let post = doc
+            .get_str("message-id")
             .and_then(|m| map.get(&m).cloned())
             .and_then(|f| std::fs::read(f).ok())
             .and_then(|b| mail::parse_eml(&b));
@@ -169,7 +163,7 @@ pub(super) fn rekey_and_merge(
         let blog_link = resolve_newsletter(&post, &newsletters, &blogs)
             .and_then(|n| n.blog.clone())
             .and_then(|b| blogs.iter().find(|r| r.name == b).map(|r| r.link.clone()));
-        let current = str_of(&doc, "source");
+        let current = doc.get_str("source");
         let Some(canon) = mail::canonical_post_url(&post, blog_link.as_deref()) else {
             if current
                 .as_deref()
@@ -185,7 +179,7 @@ pub(super) fn rekey_and_merge(
                 }
                 match ctx.write(&path, new.into_bytes(), Some(hash)) {
                     Ok(_) => c.mail_token_stripped += 1,
-                    Err(e) if is_conflict(&e) => c.rekey_conflict += 1,
+                    Err(e) if e.is_conflict() => c.rekey_conflict += 1,
                     Err(e) => return Err(e),
                 }
             }
@@ -197,7 +191,7 @@ pub(super) fn rekey_and_merge(
             } else {
                 match ctx.write(&path, new.into_bytes(), Some(hash)) {
                     Ok(_) => c.mail_rekeyed += 1,
-                    Err(e) if is_conflict(&e) => {
+                    Err(e) if e.is_conflict() => {
                         c.rekey_conflict += 1;
                         continue;
                     }
@@ -246,11 +240,8 @@ fn merge(
         return Ok(());
     }
     let body = doc.body().trim().to_owned();
-    let publication = str_of(&doc, "publication");
-    let complete = match doc.get("complete") {
-        Ok(Some(JsValue::Bool(b))) => Some(b),
-        _ => None,
-    };
+    let publication = doc.get_str("publication");
+    let complete = doc.get_bool("complete");
     let inc = Incoming {
         own_path: Some(path),
         urls: vec![canon.to_owned()],
@@ -297,7 +288,7 @@ fn merge(
         }) {
             Ok(Some(_)) => c.dup_marked += 1,
             Ok(None) => {}
-            Err(e) if is_conflict(&e) => c.dup_conflict += 1,
+            Err(e) if e.is_conflict() => c.dup_conflict += 1,
             Err(e) => return Err(e),
         }
         return Ok(());
@@ -309,11 +300,10 @@ fn merge(
     // Re-associate before trash (audit M1): no row may ever point at a missing note.
     {
         let mut db = ctx.state();
-        for r in db.tracker_items_for_note(path).map_err(st)? {
-            db.set_tracker_note_path(&r.source_kind, &r.source_key, &r.item_id, &survivor)
-                .map_err(st)?;
+        for r in db.tracker_items_for_note(path)? {
+            db.set_tracker_note_path(&r.source_kind, &r.source_key, &r.item_id, &survivor)?;
         }
-        let rows = db.tracker_items_for_note(&survivor).map_err(st)?;
+        let rows = db.tracker_items_for_note(&survivor)?;
         supersede::finalize_rows(&mut db, rows, &resolved)?;
     }
     let Some((_, hash)) = ctx.read(path)? else {
@@ -363,7 +353,7 @@ pub(super) fn publication(
     sh: &Shared,
     c: &mut Counts,
 ) -> Result<(), StepError> {
-    let rows = ctx.state().tracker_items_with_note().map_err(st)?;
+    let rows = ctx.state().tracker_items_with_note()?;
     let mut by_note: BTreeMap<String, Vec<TrackerItem>> = BTreeMap::new();
     for r in rows {
         if let Some(p) = r.note_path.clone() {
@@ -400,7 +390,7 @@ pub(super) fn publication(
         }) {
             Ok(Some(_)) => c.publication_backfilled += 1,
             Ok(None) => {}
-            Err(e) if is_conflict(&e) => c.publication_conflict += 1,
+            Err(e) if e.is_conflict() => c.publication_conflict += 1,
             Err(e) => return Err(e),
         }
     }

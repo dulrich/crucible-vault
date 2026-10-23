@@ -366,12 +366,10 @@ fn handle(
     let nl = resolve_newsletter(post, run.rows, &ctx.config.sources().blog);
     let nl = nl.as_deref();
     let key = nl.map_or(UNKNOWN, |n| n.name.as_str()).to_owned();
-    let st = |e: cv_state::StateError| StepError::failed(format!("state: {e}"));
     for k in [key.as_str(), UNKNOWN] {
         if ctx
             .state()
-            .tracker_item(KIND, k, &post.message_id)
-            .map_err(st)?
+            .tracker_item(KIND, k, &post.message_id)?
             .is_some()
         {
             return Ok(Handled::Seen);

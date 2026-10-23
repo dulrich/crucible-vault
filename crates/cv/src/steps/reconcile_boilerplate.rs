@@ -27,7 +27,7 @@ use cv_note::FrontmatterDoc;
 use serde::Serialize;
 
 use super::mail::{KIND, UNKNOWN, raw_markdown, resolve_newsletter};
-use super::reconcile_backfill::{Shared, is_conflict, message_map, redescribed, st};
+use super::reconcile_backfill::{Shared, message_map, redescribed};
 use super::{StepCtx, StepError};
 
 /// The boilerplate phase's outcome vars (aggregates only; flattened into the reconcile vars).
@@ -58,9 +58,8 @@ pub(super) fn learn_and_strip(
     body: &str,
 ) -> Result<String, StepError> {
     let mut db = ctx.state();
-    db.learn_mail_boilerplate(source_key, message_id, &line_keys(body))
-        .map_err(st)?;
-    let set = LineSet::from_entries(db.mail_boilerplate_lines(source_key).map_err(st)?);
+    db.learn_mail_boilerplate(source_key, message_id, &line_keys(body))?;
+    let set = LineSet::from_entries(db.mail_boilerplate_lines(source_key)?);
     Ok(boilerplate::strip(body, &set))
 }
 
@@ -74,7 +73,7 @@ struct Sets {
 impl Sets {
     fn set(&mut self, ctx: &StepCtx<'_>, key: &str) -> Result<&mut LineSet, StepError> {
         if !self.sets.contains_key(key) {
-            let entries = ctx.state().mail_boilerplate_lines(key).map_err(st)?;
+            let entries = ctx.state().mail_boilerplate_lines(key)?;
             self.sets
                 .insert(key.to_owned(), LineSet::from_entries(entries));
         }
@@ -90,15 +89,14 @@ impl Sets {
         body: &str,
     ) -> Result<bool, StepError> {
         let id = (key.to_owned(), mid.to_owned());
-        if self.seen.contains(&id) || ctx.state().mail_boilerplate_seen(key, mid).map_err(st)? {
+        if self.seen.contains(&id) || ctx.state().mail_boilerplate_seen(key, mid)? {
             return Ok(false);
         }
         // Load the set before persisting, so the in-memory copy counts this message once.
         boilerplate::learn(self.set(ctx, key)?, body);
         if !self.dry {
             ctx.state()
-                .learn_mail_boilerplate(key, mid, &line_keys(body))
-                .map_err(st)?;
+                .learn_mail_boilerplate(key, mid, &line_keys(body))?;
         }
         self.seen.insert(id);
         Ok(true)
@@ -134,15 +132,9 @@ fn anchored_boiler(body: &str, set: &LineSet) -> bool {
         .any(|n| set.count(&n) >= 2)
 }
 
-fn str_of(doc: &FrontmatterDoc, key: &str) -> Option<String> {
-    match doc.get(key) {
-        Ok(Some(cv_note::JsValue::Str(s))) => Some(s),
-        _ => None,
-    }
-}
-
 fn is_email(doc: &FrontmatterDoc) -> bool {
-    str_of(doc, "via").is_some_and(|v| v.trim().eq_ignore_ascii_case("email"))
+    doc.get_str("via")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("email"))
 }
 
 /// The boilerplate phase (after the re-clean, before the repair phases).
@@ -176,8 +168,7 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
     // Known-sender notes: learn the ones without an `.eml` from their current body, then strip.
     let rows: Vec<_> = ctx
         .state()
-        .tracker_items_with_note()
-        .map_err(st)?
+        .tracker_items_with_note()?
         .into_iter()
         .filter(|r| r.source_kind == KIND && r.source_key != UNKNOWN)
         .collect();
@@ -219,7 +210,7 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
         if !sh.dry {
             match ctx.write(&path, new.into_bytes(), Some(hash)) {
                 Ok(_) => {}
-                Err(e) if is_conflict(&e) => {
+                Err(e) if e.is_conflict() => {
                     c.bp_conflict += 1;
                     continue;
                 }

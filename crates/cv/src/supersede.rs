@@ -248,14 +248,8 @@ fn load(ctx: &StepCtx<'_>, path: &str) -> Result<Option<Existing>, StepError> {
         return Ok(None);
     };
     let doc = FrontmatterDoc::new(text.as_str());
-    let access = match doc.get("access") {
-        Ok(Some(JsValue::Str(s))) => Some(s),
-        _ => None,
-    };
-    let complete = match doc.get("complete") {
-        Ok(Some(JsValue::Bool(b))) => Some(b),
-        _ => None,
-    };
+    let access = doc.get_str("access");
+    let complete = doc.get_bool("complete");
     let body = doc.body();
     let side = Side {
         words: words(body),
@@ -450,7 +444,6 @@ fn kept(path: String, e: &Existing) -> Resolved {
 
 /// The note text with its body replaced and the engine-owned keys set.
 fn replaced_text(old: &str, inc: &Incoming<'_>, words: u64) -> Result<String, StepError> {
-    let fm_err = |e: cv_note::FmError| StepError::failed(format!("frontmatter: {e}"));
     let doc = FrontmatterDoc::new(old);
     let head_len = old.len() - doc.body().len();
     let mut text = old[..head_len].to_owned();
@@ -459,38 +452,33 @@ fn replaced_text(old: &str, inc: &Incoming<'_>, words: u64) -> Result<String, St
     text.push('\n');
     let mut doc = FrontmatterDoc::new(text);
     #[allow(clippy::cast_precision_loss)]
-    doc.set("word-count", &JsValue::Num(words as f64))
-        .map_err(fm_err)?;
+    doc.set("word-count", &JsValue::Num(words as f64))?;
     if let Some(a) = inc.access {
-        doc.insert_after("word-count", "access", &JsValue::Str(a.as_str().to_owned()))
-            .map_err(fm_err)?;
+        doc.insert_after("word-count", "access", &JsValue::Str(a.as_str().to_owned()))?;
     }
     match inc.complete {
         Some(c) => {
-            let anchor = if doc.get("access").map_err(fm_err)?.is_some() {
+            let anchor = if doc.get("access")?.is_some() {
                 "access"
             } else {
                 "word-count"
             };
-            doc.insert_after(anchor, "complete", &JsValue::Bool(c))
-                .map_err(fm_err)?;
+            doc.insert_after(anchor, "complete", &JsValue::Bool(c))?;
         }
         None => {
-            doc.remove("complete").map_err(fm_err)?;
+            doc.remove("complete")?;
         }
     }
     doc.insert_after(
         "complete",
         "via",
         &JsValue::Str(inc.origin.via().to_owned()),
-    )
-    .map_err(fm_err)?;
+    )?;
     if let Some(p) = inc.publication
-        && doc.get("publication").map_err(fm_err)?.is_none()
+        && doc.get("publication")?.is_none()
     {
         // After `author`; `insert_after` appends at the block end when `author` is absent.
-        doc.insert_after("author", "publication", &JsValue::Str(p.to_owned()))
-            .map_err(fm_err)?;
+        doc.insert_after("author", "publication", &JsValue::Str(p.to_owned()))?;
     }
     Ok(doc.into_text())
 }
@@ -548,12 +536,11 @@ fn save_old_with(s: &StateProbe<'_>, path: &str, text: &str) -> std::io::Result<
 /// Writes the resolved evidence to the resolved note's tracker rows (by `note_path`, else by
 /// URL), then ticks them only when the resolved body is complete (audit M2).
 fn finalize(ctx: &StepCtx<'_>, path: &str, urls: &[String], r: &Resolved) -> Result<(), StepError> {
-    let st = |e: cv_state::StateError| StepError::failed(format!("state: {e}"));
     let mut db = ctx.state();
-    let mut rows = db.tracker_items_for_note(path).map_err(st)?;
+    let mut rows = db.tracker_items_for_note(path)?;
     if rows.is_empty() {
         for u in urls {
-            rows.extend(db.tracker_items_for_url(u).map_err(st)?);
+            rows.extend(db.tracker_items_for_url(u)?);
         }
     }
     finalize_rows(&mut db, rows, r)
@@ -567,7 +554,6 @@ pub(crate) fn finalize_rows(
     rows: Vec<cv_state::TrackerItem>,
     r: &Resolved,
 ) -> Result<(), StepError> {
-    let st = |e: cv_state::StateError| StepError::failed(format!("state: {e}"));
     for row in rows {
         let access = r.access.clone().or(row.access.clone());
         let ev = cv_state::TrackerEvidence {
@@ -581,8 +567,7 @@ pub(crate) fn finalize_rows(
             &row.item_id,
             Some(ev),
             r.complete == Some(true),
-        )
-        .map_err(st)?;
+        )?;
     }
     Ok(())
 }

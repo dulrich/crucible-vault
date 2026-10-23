@@ -12,7 +12,7 @@ pub mod transcript;
 pub mod vault;
 pub mod wordcount;
 
-pub use frontmatter::{FmError, FrontmatterDoc, span};
+pub use frontmatter::{FmError, FrontmatterDoc, js_text, span};
 pub use lint::{
     LINT_STEPS, LintContext, LintOutcome, LintSettings, LintStep, LintTarget, ParamValue,
     derive_source_ids, lint_note,

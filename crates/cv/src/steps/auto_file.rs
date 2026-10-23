@@ -96,25 +96,6 @@ pub(in crate::steps) struct Work {
 /// The kind whose clips take the matched Work's `title` as `publication` (Decision 2).
 pub(in crate::steps) const FANFIC_KIND: &str = "fanfic";
 
-fn js_text(v: &JsValue) -> String {
-    match v {
-        JsValue::Str(s) => s.clone(),
-        JsValue::Num(n) => n.to_string(),
-        JsValue::Bool(b) => b.to_string(),
-        JsValue::Arr(a) => a.iter().map(js_text).collect::<Vec<_>>().join(","),
-        JsValue::Null | JsValue::Obj(_) => String::new(),
-    }
-}
-
-/// `list(v)`: an array's entries, a scalar as one entry, null as none.
-fn js_list(v: Option<JsValue>) -> Vec<String> {
-    match v {
-        None | Some(JsValue::Null) => Vec::new(),
-        Some(JsValue::Arr(a)) => a.iter().map(js_text).collect(),
-        Some(other) => vec![js_text(&other)],
-    }
-}
-
 /// Canonical host of `url`, lowercase, leading `www.` stripped.
 fn host_of(url: &str) -> Option<String> {
     cv_text::canonicalize_url(url)
@@ -276,15 +257,15 @@ pub(in crate::steps) fn read_works(ctx: &StepCtx<'_>) -> Result<Vec<Work>, StepE
         let doc = FrontmatterDoc::new(text);
         let get = |k: &str| doc.get(k).ok().flatten();
         let author_filter = get("author-filter")
-            .map(|v| js_text(&v))
+            .map(|v| cv_note::js_text(&v))
             .filter(|s| !s.trim().is_empty());
         out.push(Work {
             path: r.path.clone(),
             author_filter,
-            source_prefixes: js_list(get("source-prefix-filter")),
-            tags: js_list(get("tags")),
+            source_prefixes: doc.get_texts("source-prefix-filter"),
+            tags: doc.get_texts("tags"),
             title: get("title")
-                .map(|v| js_text(&v).trim().to_owned())
+                .map(|v| cv_note::js_text(&v).trim().to_owned())
                 .filter(|s| !s.is_empty()),
         });
     }
@@ -329,15 +310,11 @@ fn already_filed(ctx: &StepCtx<'_>, path: &str, kind: &str) -> Result<bool, Step
     let Ok(text) = String::from_utf8(bytes) else {
         return Ok(false);
     };
-    let have: Vec<String> = js_list(
-        FrontmatterDoc::new(text.as_str())
-            .get("tags")
-            .ok()
-            .flatten(),
-    )
-    .iter()
-    .map(|t| t.trim().trim_start_matches('#').to_owned())
-    .collect();
+    let have: Vec<String> = FrontmatterDoc::new(text.as_str())
+        .get_texts("tags")
+        .iter()
+        .map(|t| t.trim().trim_start_matches('#').to_owned())
+        .collect();
     Ok(want
         .iter()
         .all(|w| have.iter().any(|h| h == w.trim().trim_start_matches('#'))))
@@ -368,17 +345,17 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let doc = FrontmatterDoc::new(text.as_str());
     let get = |k: &str| doc.get(k).ok().flatten();
     let source = get("source")
-        .map(|v| js_text(&v))
+        .map(|v| cv_note::js_text(&v))
         .unwrap_or_default()
         .trim()
         .to_owned();
     let clip = Clip {
         host: host_of(&source),
-        authors: js_list(get("author")),
+        authors: doc.get_texts("author"),
         source,
     };
     let published = get("published")
-        .map(|v| js_text(&v))
+        .map(|v| cv_note::js_text(&v))
         .and_then(|s| s.trim().get(..10).map(str::to_owned))
         .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
     let body = doc.body().to_owned();

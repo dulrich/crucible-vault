@@ -68,7 +68,7 @@
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::{self, Access};
-use cv_note::{FrontmatterDoc, JsValue, calculate_word_count};
+use cv_note::{FrontmatterDoc, calculate_word_count};
 use cv_providers::FailureKind;
 use cv_providers::web::FetchError;
 use cv_state::TrackerItem;
@@ -196,16 +196,12 @@ struct Work {
     blocked: bool,
 }
 
-fn st(e: cv_state::StateError) -> StepError {
-    StepError::failed(format!("state: {e}"))
-}
-
 fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut v = Vars {
         dry_run: dry,
         ..Vars::default()
     };
-    let rows = ctx.state().tracker_reconcile_rows().map_err(st)?;
+    let rows = ctx.state().tracker_reconcile_rows()?;
     let mut work: Vec<Work> = rows
         .into_iter()
         .map(|(item, status)| Work {
@@ -230,14 +226,12 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 [p] => {
                     v.linked += 1;
                     if !dry {
-                        ctx.state()
-                            .set_tracker_note_path(
-                                &w.item.source_kind,
-                                &w.item.source_key,
-                                &w.item.item_id,
-                                p,
-                            )
-                            .map_err(st)?;
+                        ctx.state().set_tracker_note_path(
+                            &w.item.source_kind,
+                            &w.item.source_key,
+                            &w.item.item_id,
+                            p,
+                        )?;
                     }
                     w.path = Some(p.clone());
                 }
@@ -272,10 +266,7 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             continue;
         };
         let doc = FrontmatterDoc::new(text.as_str());
-        let note_access = match doc.get("access") {
-            Ok(Some(JsValue::Str(s))) => Some(s),
-            _ => None,
-        };
+        let note_access = doc.get_str("access");
         let access_s = w.access.clone().or(note_access);
         let markers: Vec<String> = ctx
             .config
@@ -300,15 +291,13 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 complete,
                 full_word_count: w.full_wc,
             };
-            ctx.state()
-                .finalize_tracker_item(
-                    &w.item.source_kind,
-                    &w.item.source_key,
-                    &w.item.item_id,
-                    Some(ev),
-                    verdict == Some(true),
-                )
-                .map_err(st)?;
+            ctx.state().finalize_tracker_item(
+                &w.item.source_kind,
+                &w.item.source_key,
+                &w.item.item_id,
+                Some(ev),
+                verdict == Some(true),
+            )?;
         }
         if verdict == Some(true) {
             v.ticked += 1;
@@ -397,15 +386,13 @@ fn probe(ctx: &StepCtx<'_>, work: &mut [Work], dry: bool, v: &mut Vars) -> Resul
                         complete: w.item.complete,
                         full_word_count: w.full_wc,
                     };
-                    ctx.state()
-                        .finalize_tracker_item(
-                            &w.item.source_kind,
-                            &w.item.source_key,
-                            &w.item.item_id,
-                            Some(ev),
-                            false,
-                        )
-                        .map_err(st)?;
+                    ctx.state().finalize_tracker_item(
+                        &w.item.source_kind,
+                        &w.item.source_key,
+                        &w.item.item_id,
+                        Some(ev),
+                        false,
+                    )?;
                 }
             }
             ProbeOutcome::Failed => {

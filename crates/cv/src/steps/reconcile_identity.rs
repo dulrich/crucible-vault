@@ -28,7 +28,7 @@ use serde::Serialize;
 
 use super::auto_file::{Clip, FANFIC_KIND, WORKS_FOLDER, read_works, work_publication, works_hit};
 use super::file::kind_def;
-use super::reconcile_backfill::{Shared, is_conflict, read_text};
+use super::reconcile_backfill::{Shared, read_text};
 use super::{StepCtx, StepError};
 
 /// The round-9 phases' outcome vars (aggregates only; flattened into the reconcile vars).
@@ -42,13 +42,6 @@ pub(super) struct Counts {
     fanfic_publication_backfilled: u32,
     fanfic_publication_no_work: u32,
     fanfic_publication_conflict: u32,
-}
-
-fn str_of(doc: &FrontmatterDoc, key: &str) -> Option<String> {
-    match doc.get(key) {
-        Ok(Some(JsValue::Str(s))) => Some(s.trim().to_owned()).filter(|s| !s.is_empty()),
-        _ => None,
-    }
 }
 
 /// `(obsolete page-level key, post key)` of a forum post `source`; `None` when Decision 3 does
@@ -87,10 +80,10 @@ pub(super) fn forum_rekey(
             continue;
         };
         let mut doc = FrontmatterDoc::new(text.as_str());
-        let Some((old, new)) = str_of(&doc, "source").and_then(|s| forum_keys(&s)) else {
+        let Some((old, new)) = doc.get_str_trimmed("source").and_then(|s| forum_keys(&s)) else {
             continue;
         };
-        if str_of(&doc, "post-id").as_deref() != Some(old.as_str()) {
+        if doc.get_str_trimmed("post-id").as_deref() != Some(old.as_str()) {
             continue;
         }
         if sh.dry {
@@ -102,7 +95,7 @@ pub(super) fn forum_rekey(
         }
         match ctx.write(&path, doc.into_text().into_bytes(), Some(hash)) {
             Ok(_) => c.forum_rekeyed += 1,
-            Err(e) if is_conflict(&e) => c.forum_rekey_conflict += 1,
+            Err(e) if e.is_conflict() => c.forum_rekey_conflict += 1,
             Err(e) => return Err(e),
         }
     }
@@ -135,17 +128,22 @@ pub(super) fn forum_duplicates(
             continue;
         };
         let doc = FrontmatterDoc::new(text.as_str());
-        let Some(target) = str_of(&doc, "duplicate-of").and_then(|v| link_target(&v)) else {
+        let Some(target) = doc
+            .get_str_trimmed("duplicate-of")
+            .and_then(|v| link_target(&v))
+        else {
             continue;
         };
-        let Some((a_old, a_new)) = str_of(&doc, "source").and_then(|s| forum_keys(&s)) else {
+        let Some((a_old, a_new)) = doc.get_str_trimmed("source").and_then(|s| forum_keys(&s))
+        else {
             continue;
         };
         let Some(t_text) = read_text(ctx, &target)? else {
             continue;
         };
         let t_doc = FrontmatterDoc::new(t_text.as_str());
-        let Some((t_old, t_new)) = str_of(&t_doc, "source").and_then(|s| forum_keys(&s)) else {
+        let Some((t_old, t_new)) = t_doc.get_str_trimmed("source").and_then(|s| forum_keys(&s))
+        else {
             continue;
         };
         if a_old != t_old {
@@ -164,35 +162,21 @@ pub(super) fn forum_duplicates(
             c.dup_of_removed += 1;
             continue;
         }
-        let want = str_of(&doc, "duplicate-of");
+        let want = doc.get_str_trimmed("duplicate-of");
         match ctx.modify(&path, |old| {
             let mut d = FrontmatterDoc::new(old);
-            if str_of(&d, "duplicate-of") != want {
+            if d.get_str_trimmed("duplicate-of") != want {
                 return Ok(None);
             }
             Ok(d.remove("duplicate-of")?.then(|| d.into_text()))
         }) {
             Ok(Some(_)) => c.dup_of_removed += 1,
             Ok(None) => {}
-            Err(e) if is_conflict(&e) => c.dup_of_conflict += 1,
+            Err(e) if e.is_conflict() => c.dup_of_conflict += 1,
             Err(e) => return Err(e),
         }
     }
     Ok(())
-}
-
-fn js_list(v: Option<JsValue>) -> Vec<String> {
-    match v {
-        Some(JsValue::Arr(a)) => a
-            .into_iter()
-            .filter_map(|x| match x {
-                JsValue::Str(s) => Some(s),
-                _ => None,
-            })
-            .collect(),
-        Some(JsValue::Str(s)) => vec![s],
-        _ => Vec::new(),
-    }
 }
 
 /// Phase I.
@@ -226,10 +210,10 @@ pub(super) fn fanfic_publication(
         if doc.get("publication").ok().flatten().is_some() {
             continue;
         }
-        let source = str_of(&doc, "source").unwrap_or_default();
+        let source = doc.get_str_trimmed("source").unwrap_or_default();
         let clip = Clip {
             host: None,
-            authors: js_list(doc.get("author").ok().flatten()),
+            authors: doc.get_strings("author"),
             source,
         };
         let is_kind = |k: &str| kind_def(ctx.config, k).is_ok();
@@ -253,7 +237,7 @@ pub(super) fn fanfic_publication(
         }) {
             Ok(Some(_)) => c.fanfic_publication_backfilled += 1,
             Ok(None) => {}
-            Err(e) if is_conflict(&e) => c.fanfic_publication_conflict += 1,
+            Err(e) if e.is_conflict() => c.fanfic_publication_conflict += 1,
             Err(e) => return Err(e),
         }
     }

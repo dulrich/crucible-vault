@@ -69,10 +69,6 @@ pub(crate) struct Vars {
     pub(crate) no_evidence: u32,
 }
 
-fn st(e: cv_state::StateError) -> StepError {
-    StepError::failed(format!("state: {e}"))
-}
-
 /// A frontmatter value as strings (a scalar string or a list of them).
 fn strings(doc: &FrontmatterDoc, key: &str) -> Vec<String> {
     match doc.get(key) {
@@ -138,7 +134,7 @@ fn resolve_rows(
     video: Option<&str>,
 ) -> Result<Vec<TrackerItem>, StepError> {
     let db = ctx.state();
-    let mut rows = db.tracker_items_for_note(path).map_err(st)?;
+    let mut rows = db.tracker_items_for_note(path)?;
     if rows.is_empty() {
         let mut urls = BTreeSet::new();
         for u in sources.iter().chain(post_ids) {
@@ -148,13 +144,13 @@ fn resolve_rows(
             }
         }
         for u in &urls {
-            rows.extend(db.tracker_items_for_url(u).map_err(st)?);
+            rows.extend(db.tracker_items_for_url(u)?);
         }
     }
     if rows.is_empty()
         && let Some(id) = video
     {
-        rows = db.tracker_items_for_item("youtube", id).map_err(st)?;
+        rows = db.tracker_items_for_item("youtube", id)?;
     }
     let mut seen = BTreeSet::new();
     rows.retain(|r| {
@@ -217,14 +213,8 @@ pub(crate) fn finalize_note(
         ..Vars::default()
     };
     let evidence = transcript_evidence(text, cleanup_kind(ctx.config, &strings(&doc, "tags")));
-    let note_access = match doc.get("access") {
-        Ok(Some(JsValue::Str(s))) => Some(s),
-        _ => None,
-    };
-    let note_complete = match doc.get("complete") {
-        Ok(Some(JsValue::Bool(b))) => Some(b),
-        _ => None,
-    };
+    let note_access = doc.get_str("access");
+    let note_complete = doc.get_bool("complete");
     let complete_percent = ctx.config.pipelines().blogs.complete_percent;
     for row in rows {
         let (kind, key, id) = (&row.source_kind, &row.source_key, &row.item_id);
@@ -236,11 +226,11 @@ pub(crate) fn finalize_note(
                     if !counted {
                         v.linked += 1;
                     }
-                } else if db.set_tracker_note_path(kind, key, id, path).map_err(st)? {
+                } else if db.set_tracker_note_path(kind, key, id, path)? {
                     v.linked += 1;
                 }
             }
-            db.tracker_item_status(kind, key, id).map_err(st)?
+            db.tracker_item_status(kind, key, id)?
         };
         if matches!(status, Some(Some(_)) | None) {
             continue;
@@ -256,8 +246,7 @@ pub(crate) fn finalize_note(
                             full_word_count: row.full_word_count,
                         };
                         ctx.state()
-                            .finalize_tracker_item(kind, key, id, Some(ev), true)
-                            .map_err(st)?;
+                            .finalize_tracker_item(kind, key, id, Some(ev), true)?;
                     }
                     v.ticked += 1;
                 } else {
@@ -290,9 +279,13 @@ pub(crate) fn finalize_note(
                         complete: complete.or(row.complete),
                         full_word_count: row.full_word_count,
                     };
-                    ctx.state()
-                        .finalize_tracker_item(kind, key, id, Some(ev), complete == Some(true))
-                        .map_err(st)?;
+                    ctx.state().finalize_tracker_item(
+                        kind,
+                        key,
+                        id,
+                        Some(ev),
+                        complete == Some(true),
+                    )?;
                 }
                 if complete == Some(true) {
                     v.ticked += 1;
