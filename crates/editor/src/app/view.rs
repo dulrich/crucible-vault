@@ -1,6 +1,6 @@
 //! Rendering: the tab body, tab bar, note bar, panes, side column and the root `view`.
 
-use super::tab_drag::DropTarget;
+use super::tab_drag::{Cell, DropTarget};
 use super::*;
 use iced::widget::column;
 
@@ -104,8 +104,22 @@ impl App {
         use crate::theme::{FONT_FAMILY, control_label, icon_button};
         let t = self.tokens;
         let focused = pane == self.focus;
-        let headers = row(ps.tabs.iter().enumerate().map(|(i, tab)| {
-            let active = ps.active == Some(i);
+        // Plan round-11 WP-6: mid-drag the strip is drawn from the previewed layout. `i` is the
+        // slot (the drop index); `(tp, ti)` the tab's real home, so presses/closes address it.
+        let cells = self.tab_drag.layout(pane, ps.tabs.len());
+        let items = cells.iter().enumerate().filter_map(|(slot_i, c)| match *c {
+            Cell::Tab(ti) => ps
+                .tabs
+                .get(ti)
+                .map(|tab| (slot_i, pane, ti, ps, tab, false)),
+            Cell::Dragged => {
+                let (fp, fi) = self.tab_drag.dragged()?;
+                let fps = self.panes.get(fp)?;
+                fps.tabs.get(fi).map(|tab| (slot_i, fp, fi, fps, tab, true))
+            }
+        });
+        let headers = row(items.map(|(i, tp, ti, ps, tab, dragged)| {
+            let active = if dragged { true } else { ps.active == Some(ti) };
             // Focus cue (borders are debug-only): the focused pane's active tab is an
             // `accent_text` label on a `panel_2` block; an unfocused pane's active tab keeps the
             // block with a `text` label; inactive tabs are `text_dim`.
@@ -140,7 +154,7 @@ impl App {
                     .padding([0, 6]),
             )
             .interaction(iced::mouse::Interaction::Pointer)
-            .on_press(Message::Tabs(TabsMsg::DragPress(pane, i)));
+            .on_press(Message::Tabs(TabsMsg::DragPress(tp, ti)));
             let hover = match tab.path() {
                 Some(p) => p.to_owned(),
                 None => self.tab_header_title(ps, tab),
@@ -158,7 +172,7 @@ impl App {
                     .height(BAR_HEIGHT)
                     .padding([0, 4])
                     .style(button::text)
-                    .on_press(Message::Tabs(TabsMsg::Close(pane, i))),
+                    .on_press(Message::Tabs(TabsMsg::Close(tp, ti))),
             ]
             .spacing(0)
             .height(BAR_HEIGHT)
@@ -169,7 +183,7 @@ impl App {
                 Some(p) => crate::context_menu::on_right(
                     chip,
                     crate::context_menu::Target::Tab {
-                        pane,
+                        pane: tp,
                         id: tab.id,
                         path: p.to_owned(),
                     },
@@ -177,7 +191,7 @@ impl App {
             };
             // The hovered drop slot shows an accent edge (only while a drag is live).
             let slot = DropTarget::Slot(pane, i);
-            let drop_here = self.tab_drag.hover() == Some(slot);
+            let drop_here = dragged;
             let chip = container(chip)
                 .height(BAR_HEIGHT)
                 .clip(true)

@@ -113,6 +113,89 @@ fn cancel_by_esc_release_elsewhere_or_own_body_changes_nothing() {
     assert!(paths(&app, right).is_empty());
 }
 
+/// Plan round-11 WP-6: the strip `pane` as previewed mid-drag, as note paths (the dragged tab by
+/// its home path).
+fn preview(app: &App, pane: Pane) -> Vec<String> {
+    use crate::app::tab_drag::Cell;
+    let from = app.tab_drag.dragged();
+    let own = |p: Pane, i: usize| -> String {
+        app.panes
+            .get(p)
+            .and_then(|ps| ps.tabs.get(i))
+            .and_then(|t| t.path().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let len = app.panes.get(pane).map_or(0, |ps| ps.tabs.len());
+    app.tab_drag
+        .layout(pane, len)
+        .into_iter()
+        .map(|c| match c {
+            Cell::Tab(i) => own(pane, i),
+            Cell::Dragged => {
+                let (fp, fi) = from.expect("dragged cell needs a drag");
+                own(fp, fi)
+            }
+        })
+        .collect()
+}
+
+/// Starts a drag of `from` and hovers `target`, leaving it live.
+fn hold(app: &mut App, from: (Pane, usize), target: DropTarget) {
+    tab(app, TabsMsg::DragPress(from.0, from.1));
+    tab(app, TabsMsg::DragMove(Point::new(0.0, 0.0)));
+    tab(app, TabsMsg::DragMove(Point::new(40.0, 0.0)));
+    tab(app, TabsMsg::DragEnter(target));
+}
+
+#[test]
+fn rightward_move_lands_on_the_previewed_slot() {
+    let (_tmp, _d, mut app, left, _right) = two_panes();
+    hold(&mut app, (left, 0), DropTarget::Slot(left, 2));
+    let shown = preview(&app, left);
+    assert_eq!(shown, ["td/b.md", "td/c.md", "td/a.md"]);
+    tab(&mut app, TabsMsg::DragRelease);
+    assert_eq!(paths(&app, left), shown, "release commits the preview");
+}
+
+#[test]
+fn leftward_move_lands_on_the_previewed_slot() {
+    let (_tmp, _d, mut app, left, _right) = two_panes();
+    hold(&mut app, (left, 2), DropTarget::Slot(left, 0));
+    let shown = preview(&app, left);
+    assert_eq!(shown, ["td/c.md", "td/a.md", "td/b.md"]);
+    tab(&mut app, TabsMsg::DragRelease);
+    assert_eq!(paths(&app, left), shown);
+}
+
+#[test]
+fn cross_pane_insert_in_the_middle_closes_the_origin_gap() {
+    let (_tmp, _d, mut app, left, right) = two_panes();
+    drag(&mut app, (left, 0), Some(DropTarget::End(right)));
+    drag(&mut app, (left, 0), Some(DropTarget::End(right)));
+    // left = [c], right = [a, b]; drag c into the middle of right.
+    hold(&mut app, (left, 0), DropTarget::Slot(right, 1));
+    let shown = preview(&app, right);
+    assert_eq!(shown, ["td/a.md", "td/c.md", "td/b.md"]);
+    assert!(
+        preview(&app, left).is_empty(),
+        "origin strip closes the gap"
+    );
+    tab(&mut app, TabsMsg::DragRelease);
+    assert_eq!(paths(&app, right), shown);
+}
+
+#[test]
+fn esc_restores_the_original_order() {
+    let (_tmp, _d, mut app, left, right) = two_panes();
+    hold(&mut app, (left, 0), DropTarget::Slot(left, 2));
+    assert_ne!(preview(&app, left), paths(&app, left));
+    tab(&mut app, TabsMsg::DragCancel);
+    assert_eq!(preview(&app, left), paths(&app, left));
+    tab(&mut app, TabsMsg::DragRelease);
+    assert_eq!(paths(&app, left), ["td/a.md", "td/b.md", "td/c.md"]);
+    assert!(paths(&app, right).is_empty());
+}
+
 #[test]
 fn press_release_under_threshold_selects_without_moving() {
     let (_tmp, _d, mut app, left, right) = two_panes();

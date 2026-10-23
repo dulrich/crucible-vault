@@ -125,27 +125,62 @@ impl TabDrag {
         match phase {
             Phase::Idle => Outcome::None,
             Phase::Pressed { .. } => Outcome::Click,
-            Phase::Dragging { from } => match hover {
+            Phase::Dragging { from } => match Self::drop_for(from, hover) {
+                Some((to, at)) => Outcome::Drop { from, to, at },
                 None => Outcome::Cancel,
-                Some(DropTarget::Slot(p, i)) => Outcome::Drop {
-                    from,
-                    to: p,
-                    at: Some(i),
-                },
-                Some(DropTarget::End(p)) => Outcome::Drop {
-                    from,
-                    to: p,
-                    at: None,
-                },
-                Some(DropTarget::Body(p)) if p == from.0 => Outcome::Cancel,
-                Some(DropTarget::Body(p)) => Outcome::Drop {
-                    from,
-                    to: p,
-                    at: None,
-                },
             },
         }
     }
+
+    /// Where a release over `hover` would land the tab at `from`: the destination pane and the
+    /// insert index in that strip once the tab is removed (`None` = append); `None` = no drop.
+    fn drop_for(from: (Pane, usize), hover: Option<DropTarget>) -> Option<(Pane, Option<usize>)> {
+        match hover? {
+            DropTarget::Slot(p, i) => Some((p, Some(i))),
+            DropTarget::End(p) => Some((p, None)),
+            DropTarget::Body(p) if p == from.0 => None,
+            DropTarget::Body(p) => Some((p, None)),
+        }
+    }
+
+    /// Plan round-11 WP-6: the strip of `pane` (holding `len` tabs) as it is drawn mid-drag. The
+    /// dragged tab sits at its would-land slot in the hovered strip; its origin strip closes the
+    /// gap, or keeps it when no drop is pending. Outside a drag it is the plain order. The drop
+    /// commits exactly this layout (the same index feeds [`Outcome::Drop`]).
+    pub fn layout(&self, pane: Pane, len: usize) -> Vec<Cell> {
+        let Phase::Dragging { from } = self.phase else {
+            return (0..len).map(Cell::Tab).collect();
+        };
+        let mut cells: Vec<Cell> = (0..len)
+            .filter(|i| !(pane == from.0 && *i == from.1))
+            .map(Cell::Tab)
+            .collect();
+        let at = match Self::drop_for(from, self.hover) {
+            Some((to, at)) if to == pane => Some(at.map_or(cells.len(), |a| a.min(cells.len()))),
+            Some(_) => None,
+            None if pane == from.0 => Some(from.1.min(cells.len())),
+            None => None,
+        };
+        if let Some(at) = at {
+            cells.insert(at, Cell::Dragged);
+        }
+        cells
+    }
+
+    /// The tab being dragged (past the threshold), as `(pane, index)` in the original order.
+    pub fn dragged(&self) -> Option<(Pane, usize)> {
+        match self.phase {
+            Phase::Dragging { from } => Some(from),
+            _ => None,
+        }
+    }
+}
+
+/// One drawn slot of a strip mid-drag: an original tab by index, or the dragged tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cell {
+    Tab(usize),
+    Dragged,
 }
 
 #[cfg(test)]
