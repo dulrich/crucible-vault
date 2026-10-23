@@ -200,7 +200,7 @@ fn captured_note(
     created: &str,
     complete: bool,
 ) -> String {
-    use cv_ingest::youtube::json_string;
+    use cv_ingest::fm::json_string;
     // `words` is the cleaned body's word count (the same count `handle` records).
     let words = body_md.split_whitespace().count();
     let mut fm = vec!["---".to_owned(), format!("title: {}", json_string(title))];
@@ -218,7 +218,7 @@ fn captured_note(
         ));
     }
     if let Some(p) = refs.publication {
-        fm.push(cv_ingest::youtube::publication_line(p));
+        fm.push(cv_ingest::fm::publication_line(p));
     }
     fm.push(match post.date.as_deref().and_then(|d| d.get(..10)) {
         Some(d) => format!("published: {d}"),
@@ -256,7 +256,7 @@ fn is_message_note(
 ) -> Result<Option<bool>, StepError> {
     Ok(ctx.read(path)?.map(|(b, _)| {
         let t = String::from_utf8_lossy(&b);
-        let want = cv_ingest::youtube::json_string(message_id);
+        let want = cv_ingest::fm::json_string(message_id);
         t.lines().any(|l| {
             l.strip_prefix("message-id:")
                 .is_some_and(|v| v.trim() == want)

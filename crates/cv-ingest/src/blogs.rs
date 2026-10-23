@@ -18,8 +18,8 @@ use cv_text::url_canon::{CanonMethod, PostIdOptions, post_id_from_url};
 
 use crate::access::Access;
 use crate::feed::FeedItem;
+use crate::fm::json_string;
 use crate::html::{html_to_markdown, html_to_text, word_count};
-use crate::youtube::json_string;
 
 /// Per-source body mode (`sources.toml` `body`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -253,7 +253,7 @@ pub fn captured_note(
         }
     }
     if let Some(p) = publication {
-        fm.push(crate::youtube::publication_line(p));
+        fm.push(crate::fm::publication_line(p));
     }
     fm.push(if post.published.is_empty() {
         "published:".into()

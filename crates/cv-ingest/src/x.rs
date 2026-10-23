@@ -8,8 +8,8 @@
 
 use cv_text::url_canon::extract_x_status_from_url;
 
+use crate::fm::json_string;
 use crate::html::html_to_markdown;
-use crate::youtube::json_string;
 use cv_text::slugify;
 
 /// Crucible `source_command` stamped on every X metadata note.

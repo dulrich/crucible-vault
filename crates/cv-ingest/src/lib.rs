@@ -9,6 +9,7 @@ pub mod blogs;
 pub mod boilerplate;
 pub mod brief;
 pub mod feed;
+pub mod fm;
 pub mod html;
 pub mod mail;
 pub mod signals;
