@@ -335,7 +335,7 @@ pub fn rows(cx: &Ctx<'_>, schema: &'static Node) -> Vec<Row> {
     let mut out = Vec::new();
     match schema {
         Node::Record(r) => record_rows(cx, &Path::root(), r, None, 0, &mut out),
-        Node::Map(inner) => map_rows(cx, &Path::root(), inner, 0, &mut out),
+        Node::Map(inner) => map_rows(cx, &Path::root(), inner, &Leaf::bare(""), 0, &mut out),
         n => node_rows(cx, &Path::root(), n, &Leaf::bare("File"), 0, &mut out),
     }
     out
@@ -347,6 +347,7 @@ struct Leaf {
     default: Option<Dflt>,
     required: bool,
     hint: Option<RefKind>,
+    key_hint: Option<RefKind>,
     step: Option<f64>,
 }
 
@@ -358,6 +359,7 @@ impl Leaf {
             default: None,
             required: false,
             hint: None,
+            key_hint: None,
             step: None,
         }
     }
@@ -369,6 +371,7 @@ impl Leaf {
             default: f.default,
             required: f.required,
             hint: f.hint,
+            key_hint: f.key_hint,
             step: f.step,
         }
     }
@@ -496,7 +499,7 @@ fn node_rows(
                 return read_only(cx, p, leaf, depth, out);
             }
             out.push(row(cx, depth, p, label(), leaf.help, Kind::Heading));
-            map_rows(cx, p, inner, depth + 1, out);
+            map_rows(cx, p, inner, leaf, depth + 1, out);
         }
         Node::FreeTable => read_only(cx, p, leaf, depth, out),
         Node::Str | Node::Path | Node::Folder | Node::Expr | Node::Filter => {
@@ -517,8 +520,7 @@ fn node_rows(
                     value,
                     placeholder: dflt_text(leaf.default),
                     mono: matches!(node, Node::Expr | Node::Filter),
-                    picker: super::pickers::view_value_picker(cx.file, p)
-                        .or_else(|| super::pickers::for_field(node, leaf.hint)),
+                    picker: super::pickers::for_field(node, leaf.hint),
                     required: leaf.required,
                 },
             ));
@@ -620,8 +622,7 @@ fn node_rows(
                     items,
                     choices,
                     draft,
-                    picker: super::pickers::view_value_picker(cx.file, p)
-                        .or_else(|| super::pickers::for_field(node, leaf.hint)),
+                    picker: super::pickers::for_field(node, leaf.hint),
                 },
             ));
         }
@@ -740,24 +741,24 @@ fn children(
     cx: &Ctx<'_>,
     p: &Path,
     node: &'static Node,
-    label: &'static str,
+    leaf: &Leaf,
     depth: u16,
     out: &mut Vec<Row>,
 ) {
     match node {
         Node::Record(r) => {
             if cx.doc.get(p).is_some_and(|i| !is_table(i)) {
-                return read_only(cx, p, &Leaf::bare(label), depth, out);
+                return read_only(cx, p, leaf, depth, out);
             }
             record_rows(cx, p, r, None, depth, out);
         }
         Node::Union(u) => {
             if cx.doc.get(p).is_some_and(|i| !is_table(i)) {
-                return read_only(cx, p, &Leaf::bare(label), depth, out);
+                return read_only(cx, p, leaf, depth, out);
             }
             union_rows(cx, p, u, depth, out);
         }
-        n => node_rows(cx, p, n, &Leaf::bare(label), depth, out),
+        n => node_rows(cx, p, n, leaf, depth, out),
     }
 }
 
@@ -826,7 +827,7 @@ fn list_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut
             },
         ));
         if expanded {
-            children(cx, &ip, inner, "Item", depth + 1, out);
+            children(cx, &ip, inner, &Leaf::bare("Item"), depth + 1, out);
         }
     }
     let union = match inner {
@@ -847,9 +848,22 @@ fn list_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut
     ));
 }
 
-fn map_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut Vec<Row>) {
+fn map_rows(
+    cx: &Ctx<'_>,
+    p: &Path,
+    inner: &'static Node,
+    leaf: &Leaf,
+    depth: u16,
+    out: &mut Vec<Row>,
+) {
     let collapsible = compound(inner);
-    let picker = super::pickers::view_key_picker(cx.file, p);
+    let picker = leaf
+        .key_hint
+        .and_then(|h| super::pickers::for_field(&Node::Str, Some(h)));
+    let value_leaf = Leaf {
+        hint: leaf.hint,
+        ..Leaf::bare("Value")
+    };
     for k in cx.doc.keys(p) {
         let kp = p.key(&k);
         let expanded = !collapsible || cx.form.is_expanded(cx.file, &kp);
@@ -874,7 +888,7 @@ fn map_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut 
             },
         ));
         if expanded {
-            children(cx, &kp, inner, "Value", depth + 1, out);
+            children(cx, &kp, inner, &value_leaf, depth + 1, out);
         }
     }
     let draft = cx

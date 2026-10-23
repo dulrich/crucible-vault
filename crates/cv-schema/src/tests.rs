@@ -805,3 +805,30 @@ fn picker_hints_sit_on_the_referencing_fields() {
     assert_eq!(CONFIG_DIR, "_custom/crucible-vault/");
     assert_eq!(config_path!("x.toml"), "_custom/crucible-vault/x.toml");
 }
+
+/// WP-R6: the view-file schema carries the property-id / aggregate hints the editor's view
+/// pickers read (value hints on `order`, `sort`/`groupBy.property`, the `summaries` values; key
+/// hints on the `properties`, `summaries`, `summary_rows.summaries` and `columnSize` maps).
+#[test]
+fn view_schema_carries_picker_hints() {
+    let Node::Record(file) = view_schema() else {
+        panic!("record")
+    };
+    let sub = |r: &'static Record, k: &str| match r.field(k).unwrap().node {
+        Node::Record(r) => r,
+        Node::List(Node::Record(r)) => r,
+        n => panic!("{k}: {n:?}"),
+    };
+    let (pid, agg) = (Some(RefKind::PropertyId), Some(RefKind::Aggregate));
+    assert_eq!(file.field("properties").unwrap().key_hint, pid);
+    let view = sub(file, "views");
+    assert_eq!(view.field("order").unwrap().hint, pid);
+    assert_eq!(sub(view, "sort").field("property").unwrap().hint, pid);
+    assert_eq!(sub(view, "groupBy").field("property").unwrap().hint, pid);
+    let sums = view.field("summaries").unwrap();
+    assert_eq!((sums.hint, sums.key_hint), (agg, pid));
+    let row_sums = sub(view, "summary_rows").field("summaries").unwrap();
+    assert_eq!((row_sums.hint, row_sums.key_hint), (agg, pid));
+    let sizes = view.field("columnSize").unwrap();
+    assert_eq!((sizes.hint, sizes.key_hint), (None, pid));
+}

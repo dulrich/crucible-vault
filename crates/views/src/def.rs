@@ -251,6 +251,10 @@ pub enum SumFn {
 }
 
 impl SumFn {
+    /// Every aggregate, in display order (the editor's summary picker lists their
+    /// [`SumFn::label`]s).
+    pub const ALL: [Self; 5] = [Self::Sum, Self::Average, Self::Count, Self::Min, Self::Max];
+
     fn parse(s: &str) -> Option<Self> {
         Some(match s.to_ascii_lowercase().as_str() {
             "sum" => Self::Sum,
@@ -382,8 +386,9 @@ fn unbracket(id: &str) -> Option<String> {
 }
 
 /// Normalizes a property id for display-name lookup (`word-count` ≡ `note.word-count`;
-/// `note["word-count"]` ≡ `note.word-count`).
-pub(crate) fn norm(id: &str) -> String {
+/// `note["word-count"]` ≡ `note.word-count`). Re-exported as [`crate::canonical_property_id`]:
+/// the canonical dotted form the editor's property-id picker offers.
+pub fn norm(id: &str) -> String {
     if let Some(dotted) = unbracket(id) {
         return dotted;
     }

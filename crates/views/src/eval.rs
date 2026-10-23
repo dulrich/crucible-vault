@@ -14,6 +14,22 @@ use crate::value::{Value, loose_eq, parse_date, partial_cmp};
 
 type R<T> = rusqlite::Result<T>;
 
+/// The `file.*` property ids offered as view columns, in display order — each resolves in the
+/// `Value::File` arm of `Ev::member` below (the editor's property-id picker lists these; a test
+/// pins that every one resolves).
+pub const FILE_PROPERTY_IDS: [&str; 10] = [
+    "file.name",
+    "file.basename",
+    "file.path",
+    "file.folder",
+    "file.ext",
+    "file.size",
+    "file.mtime",
+    "file.ctime",
+    "file.tags",
+    "file.links",
+];
+
 /// Per-run environment shared by every row.
 pub struct Env<'a> {
     pub db: &'a Db<'a>,

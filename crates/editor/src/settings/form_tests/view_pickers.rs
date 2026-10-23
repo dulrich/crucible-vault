@@ -1,5 +1,5 @@
 //! Round-10 WP-6: the Views page's value-set typeaheads (property ids, aggregates), by schema
-//! path, on view files only; free text still commits.
+//! reference hint (WP-R6), on view files only; free text still commits.
 
 use super::*;
 use crate::settings::pickers::{self, Picker};
@@ -67,11 +67,7 @@ fn sort_property_has_the_property_picker_only_in_view_files() {
         picker_at(&rows, "views[0].order"),
         Some(Some(Picker::PropertyId))
     );
-    // A non-view file's Str row carries no such picker.
-    assert_eq!(
-        pickers::view_value_picker(KINDS, &p("views[0].order")),
-        None
-    );
+    // A non-view file's Str row carries no such picker (its schema has no such hint).
     let st = loaded(KINDS, "[kinds.book]\nfolder = \"b\"\n");
     let rows = rows_of(&st, KINDS);
     assert!(rows.iter().all(|r| !matches!(

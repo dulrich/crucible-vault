@@ -1191,3 +1191,20 @@ fn migrated_reading_list_has_an_unread_row() {
     let cells: Vec<String> = unread.cells.iter().map(text).collect();
     assert_eq!(cells, ["", "", "", "1000", "5", ""]);
 }
+
+/// WP-R6: the vocabulary the editor's view pickers list — `file.*` ids (each resolves to a
+/// non-null value on a real file), the aggregates in display order, the canonical id rule.
+#[test]
+fn exported_picker_vocabulary() {
+    let fx = fixture(&[]);
+    for id in crate::FILE_PROPERTY_IDS {
+        assert!(!matches!(ev(&fx, A, None, id), Value::Null), "{id}");
+    }
+    let labels: Vec<&str> = crate::SumFn::ALL.iter().map(|f| f.label()).collect();
+    assert_eq!(labels, ["Sum", "Average", "Count", "Min", "Max"]);
+    let c = crate::canonical_property_id;
+    assert_eq!(c("word-count"), "note.word-count");
+    assert_eq!(c("note[\"rating\"]"), "note.rating");
+    assert_eq!(c("formula['age']"), "formula.age");
+    assert_eq!(c("file.name"), "file.name");
+}

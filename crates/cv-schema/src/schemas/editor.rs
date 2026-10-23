@@ -56,7 +56,9 @@ const DIRECTION: Node = Node::Enum(&["ASC", "DESC", "asc", "desc"]);
 pub static SORT: Record = Record {
     name: "sort",
     fields: &[
-        field("property", "Property", "Property id", Node::Str).req(),
+        field("property", "Property", "Property id", Node::Str)
+            .req()
+            .hint(RefKind::PropertyId),
         field("direction", "Direction", "Sort direction", DIRECTION).dflt(D::Str("ASC")),
     ],
     rules: &[],
@@ -97,7 +99,9 @@ pub static SUMMARY_ROW: Record = Record {
             "Summaries",
             "Property id → Sum | Average | Count | Min | Max",
             Node::Map(&Node::Str),
-        ),
+        )
+        .hint(RefKind::Aggregate)
+        .key_hint(RefKind::PropertyId),
     ],
     rules: &[],
     summary: None,
@@ -116,7 +120,8 @@ pub static VIEW: Record = Record {
         .req(),
         field("name", "Name", "View name", Node::Str).req(),
         field("filters", "Filters", "Per-view filter tree", Node::Filter),
-        field("order", "Columns", "Property ids in column order", STR_LIST),
+        field("order", "Columns", "Property ids in column order", STR_LIST)
+            .hint(RefKind::PropertyId),
         field(
             "sort",
             "Sort",
@@ -129,7 +134,9 @@ pub static VIEW: Record = Record {
             "Summaries",
             "Property id → Sum | Average | Count | Min | Max",
             Node::Map(&Node::Str),
-        ),
+        )
+        .hint(RefKind::Aggregate)
+        .key_hint(RefKind::PropertyId),
         field(
             "summary_rows",
             "Summary rows",
@@ -142,7 +149,8 @@ pub static VIEW: Record = Record {
             "Column sizes",
             "Display hint only",
             Node::Map(&INT),
-        ),
+        )
+        .key_hint(RefKind::PropertyId),
         field("rows", "Rows", "Pivot row key expression", Node::Expr),
         field(
             "rows_label",
@@ -244,7 +252,8 @@ pub static VIEW_FILE: Record = Record {
             "Properties",
             "Property id → display settings",
             Node::Map(&Node::Record(&PROPERTY_DEF)),
-        ),
+        )
+        .key_hint(RefKind::PropertyId),
         field(
             "views",
             "Views",

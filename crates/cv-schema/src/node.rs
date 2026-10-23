@@ -114,15 +114,20 @@ pub struct Field {
     pub default: Option<Default>,
     /// The key must be present.
     pub required: bool,
-    /// What the value refers to (a form offers matching candidates); `None` = a plain value.
+    /// What the value refers to (a form offers matching candidates); `None` = a plain value. On a
+    /// list or map field it applies to each item / entry value.
     pub hint: Option<RefKind>,
+    /// What the keys of a [`Node::Map`] field refer to (the map-key input's picker); `None` =
+    /// plain keys.
+    pub key_hint: Option<RefKind>,
     /// The stepper increment of a bounded [`Node::Int`] / [`Node::Float`] (`None`: 1 for an
     /// integer, 0.1 for a number).
     pub step: Option<f64>,
 }
 
-/// The semantic reference a string field holds:
-/// forms choose a picker from it, never from the file name or key path.
+/// The semantic reference a string field (or a list item, map value or map key — see
+/// [`Field::hint`] / [`Field::key_hint`]) holds: forms choose a picker from it, never from the
+/// file name or key path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefKind {
     /// A `providers.toml` provider id.
@@ -137,6 +142,10 @@ pub enum RefKind {
     Currency,
     /// A place name (a geocoded pick also fills the sibling `lat` / `lon`).
     Place,
+    /// A views property id (`file.*`, `formula.<name>`, `note.<key>`; free text stays valid).
+    PropertyId,
+    /// A views summary aggregate (`Sum`, `Average`, `Count`, `Min`, `Max`).
+    Aggregate,
 }
 
 /// How a list item / map entry of a record is summarized when none of the usual name keys is
@@ -245,6 +254,7 @@ pub const fn field(
         default: None,
         required: false,
         hint: None,
+        key_hint: None,
         step: None,
     }
 }
@@ -261,6 +271,13 @@ impl Field {
     #[must_use]
     pub const fn hint(mut self, h: RefKind) -> Self {
         self.hint = Some(h);
+        self
+    }
+
+    /// Sets the map-key reference hint.
+    #[must_use]
+    pub const fn key_hint(mut self, h: RefKind) -> Self {
+        self.key_hint = Some(h);
         self
     }
 
