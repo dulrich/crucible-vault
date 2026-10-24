@@ -354,6 +354,19 @@ pub static DUPES_RESOLVE: Record = Record {
     summary: None,
 };
 
+/// `blog_metadata_backfill` — `crates/cv/src/steps/blog_metadata_backfill.rs` (`dry_run`, default `true`: writes only with an explicit `dry_run = false`, step or job param).
+pub static BLOG_METADATA_BACKFILL: Record = Record {
+    name: "blog_metadata_backfill",
+    fields: &[field(
+        "dry_run",
+        "Dry run",
+        "Compute every count but write nothing (default true; a job param dry_run = false applies)",
+        Node::Bool,
+    )],
+    rules: &[],
+    summary: None,
+};
+
 /// `dupes_scan` — `crates/cv/src/steps/dupes.rs` (`dry_run`; labels duplicate candidates, identity or shingle containment >= 0.7, in both notes' `possible-duplicate`).
 pub static DUPES_SCAN: Record = Record {
     name: "dupes_scan",

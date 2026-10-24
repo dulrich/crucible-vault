@@ -126,18 +126,7 @@ impl Shared {
 /// Longest `reconcile_intake` waits for its job (plan auto-intake-sprint WP-6).
 pub(super) const RECONCILE_WAIT: Duration = Duration::from_secs(600);
 
-/// The step outcome vars of a job's checkpoints, merged in step order (later keys win).
-fn checkpoint_vars(cps: &[cv_state::StepCheckpoint]) -> serde_json::Map<String, Value> {
-    let mut vars = serde_json::Map::new();
-    for cp in cps {
-        if let Ok(Value::Object(o)) = serde_json::from_str::<Value>(&cp.outcome)
-            .map(|v| v.get("vars").cloned().unwrap_or(Value::Null))
-        {
-            vars.extend(o);
-        }
-    }
-    vars
-}
+use crate::jobs::checkpoint_vars;
 
 impl Shared {
     /// `reconcile_intake`: enqueues the `intake-reconcile` action, waits (at most

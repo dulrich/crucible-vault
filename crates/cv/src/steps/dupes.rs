@@ -59,7 +59,7 @@ pub(crate) const POSSIBLE_KEY: &str = "possible-duplicate";
 pub(crate) const NOT_DUP_KEY: &str = "not-duplicate-of";
 
 /// Top folders never scanned (Decision 1).
-const EXCLUDED_TOPS: [&str; 5] = [
+pub(crate) const EXCLUDED_TOPS: [&str; 5] = [
     ".trash",
     "initiatives",
     "_yt_metadata",
@@ -189,12 +189,12 @@ struct Note {
 }
 
 /// The top folder of `path` (`""` at the vault root).
-fn top_of(path: &str) -> &str {
+pub(crate) fn top_of(path: &str) -> &str {
     path.split_once('/').map_or("", |(t, _)| t)
 }
 
 /// A wikilink (or bare path) entry's target: `[[a/b|alias]]` → `a/b`.
-fn link_target(s: &str) -> &str {
+pub(crate) fn link_target(s: &str) -> &str {
     let t = s.trim();
     let t = t.strip_prefix("[[").unwrap_or(t);
     let t = t.strip_suffix("]]").unwrap_or(t);

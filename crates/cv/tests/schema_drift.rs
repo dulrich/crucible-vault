@@ -208,6 +208,7 @@ const STEPS: &[(&str, &str)] = &[
     ("capture_repair", "folder = \"daily/day\"\nlimit = 10"),
     ("dupes_scan", "dry_run = true"),
     ("dupes_resolve", ""),
+    ("blog_metadata_backfill", "dry_run = false"),
 ];
 
 const ACTION_FULL: &str = r#"

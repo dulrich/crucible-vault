@@ -523,6 +523,37 @@ impl StateDb {
         Ok(n > 0)
     }
 
+    /// Sets one row's intake placement (plan round-12-feedback-todos WP-8, the `_blog_metadata`
+    /// backfill): `day`, `outcome` and `note_path` in one UPDATE. Returns whether the row changed
+    /// (an identical row is left alone); raises the `tracker_items` change signal when it did.
+    /// `status` is never touched.
+    pub fn set_tracker_intake(
+        &mut self,
+        key: (&str, &str, &str),
+        day: &str,
+        outcome: TrackerOutcome,
+        note_path: &str,
+    ) -> Result<bool> {
+        let (source_kind, source_key, item_id) = key;
+        let n = self.conn().execute(
+            "UPDATE tracker_items SET day = ?4, outcome = ?5, note_path = ?6
+             WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3
+               AND (day IS NOT ?4 OR outcome IS NOT ?5 OR note_path IS NOT ?6)",
+            params![
+                source_kind,
+                source_key,
+                item_id,
+                day,
+                outcome.as_str(),
+                note_path
+            ],
+        )?;
+        if n > 0 {
+            self.changed("tracker_items");
+        }
+        Ok(n > 0)
+    }
+
     /// The `note`-outcome rows reconcile looks at (plan auto-intake-sprint WP-6): those with no
     /// `note_path` or whose status is not done (`x`/`X`), each with its status, oldest first.
     pub fn tracker_reconcile_rows(&self) -> Result<Vec<(TrackerItem, Option<char>)>> {

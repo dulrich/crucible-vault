@@ -411,6 +411,20 @@ required = true
 [[action.steps]]
 type = "dupes_resolve"
 
+# One-shot `_blog_metadata` backfill into intake (plan round-12-feedback-todos WP-8): re-keys stale
+# post-ids, trashes metadata notes whose capture certainly holds them (rows re-pointed first),
+# labels uncertain twins `possible-duplicate`, and files the rest as `blog` captures in the day
+# folder of their `published` date; matched blog rows are re-dated and made visible. DRY RUN unless
+# the job param `dry_run = false` is given (`cv intake backfill-blog-metadata --apply`). The step
+# holds `intake::identity`.
+[[action]]
+id = "blog-metadata-backfill"
+label = "Backfill _blog_metadata into intake"
+group = "Maintenance"
+resources = { note = false, keys = ["intake::identity"] }
+[[action.steps]]
+type = "blog_metadata_backfill"
+
 [[action]]
 id = "image-describe-note"
 label = "Describe images in note"

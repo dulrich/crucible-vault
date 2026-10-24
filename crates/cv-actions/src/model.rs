@@ -140,6 +140,8 @@ step_kinds! {
     DupesScan = "dupes_scan", true;
     /// One duplicate-pair verdict (`not-duplicates` | `keep`) (plan `round-12-feedback-todos` WP-7).
     DupesResolve = "dupes_resolve", true;
+    /// One-shot `_blog_metadata` backfill into intake (plan `round-12-feedback-todos` WP-8).
+    BlogMetadataBackfill = "blog_metadata_backfill", true;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):
@@ -163,7 +165,8 @@ impl StepKind {
             | StepKind::TrackMail
             | StepKind::AutoFile
             | StepKind::IntakeReconcile
-            | StepKind::IntakeFinalize => &[INTAKE_IDENTITY_KEY],
+            | StepKind::IntakeFinalize
+            | StepKind::BlogMetadataBackfill => &[INTAKE_IDENTITY_KEY],
             _ => &[],
         }
     }
