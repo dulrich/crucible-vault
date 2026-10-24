@@ -136,6 +136,8 @@ step_kinds! {
     DailyBrief = "daily_brief", true;
     /// One-time blog-capture repair (plan `usability-sprint-captures-links` WP-2).
     CaptureRepair = "capture_repair", true;
+    /// On-demand duplicate scan writing `possible-duplicate` (plan `round-12-feedback-todos` WP-6).
+    DupesScan = "dupes_scan", true;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

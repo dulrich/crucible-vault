@@ -206,6 +206,7 @@ const STEPS: &[(&str, &str)] = &[
     ("ignore_video", "mode = \"manual\""),
     ("daily_brief", ""),
     ("capture_repair", "folder = \"daily/day\"\nlimit = 10"),
+    ("dupes_scan", "dry_run = true"),
 ];
 
 const ACTION_FULL: &str = r#"

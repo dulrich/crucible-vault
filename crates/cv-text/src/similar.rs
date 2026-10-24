@@ -155,6 +155,12 @@ impl Shingles {
         self.comparable().len()
     }
 
+    /// The hashed set [`Self::len`] counts (shingles, or tokens for a text shorter than
+    /// [`SHINGLE_WORDS`]), in no particular order: for callers that index many texts compactly.
+    pub fn hashes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.comparable().iter().copied()
+    }
+
     /// True when the text had no word tokens at all.
     pub fn is_empty(&self) -> bool {
         self.token_count == 0

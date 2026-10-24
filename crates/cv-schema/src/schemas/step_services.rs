@@ -345,3 +345,17 @@ pub static CAPTURE_REPAIR: Record = Record {
     rules: &[],
     summary: None,
 };
+
+/// `dupes_scan` — `crates/cv/src/steps/dupes.rs` (`dry_run`; labels duplicate candidates, identity or shingle containment >= 0.7, in both notes' `possible-duplicate`).
+pub static DUPES_SCAN: Record = Record {
+    name: "dupes_scan",
+    fields: &[field(
+        "dry_run",
+        "Dry run",
+        "Compute every count but write nothing (a job param dry_run = true also turns it on)",
+        Node::Bool,
+    )
+    .dflt(D::Bool(false))],
+    rules: &[],
+    summary: None,
+};
