@@ -197,6 +197,8 @@ impl App {
             TabsMsg::DragEnter(t) => self.tab_drag.enter(t),
             TabsMsg::DragLeave(t) => self.tab_drag.leave(t),
             TabsMsg::DragCancel => self.tab_drag.cancel(),
+            TabsMsg::HeaderEnter(id) => self.tab_drag.header_enter(id),
+            TabsMsg::HeaderLeave(id) => self.tab_drag.header_leave(id),
             TabsMsg::DragRelease => {
                 if let Outcome::Drop { from, to, at } = self.tab_drag.release() {
                     self.move_tab(from, to, at);

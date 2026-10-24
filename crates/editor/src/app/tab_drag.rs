@@ -52,17 +52,26 @@ enum Phase {
 }
 
 /// The tab-drag tracker.
+///
+/// The drop targets nest (a slot inside its strip, the strip possibly inside the pane body), and
+/// iced reports an outer area's enter after the inner one's, so each layer is tracked on its
+/// own and the most specific wins: entering a strip over its first tab lands on that slot, not
+/// at the end.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct TabDrag {
     phase: Phase,
-    hover: Option<DropTarget>,
+    slot: Option<DropTarget>,
+    strip: Option<DropTarget>,
+    body: Option<DropTarget>,
+    /// The tab header under the cursor (by tab id), for the rollover fill.
+    header: Option<u64>,
 }
 
 impl TabDrag {
     /// A header was pressed.
     pub fn press(&mut self, from: (Pane, usize)) {
         self.phase = Phase::Pressed { from, origin: None };
-        self.hover = None;
+        self.clear_targets();
     }
 
     /// The cursor moved to `p`; true when this move started the drag.
@@ -87,15 +96,45 @@ impl TabDrag {
     /// The cursor entered `t`.
     pub fn enter(&mut self, t: DropTarget) {
         if self.active() {
-            self.hover = Some(t);
+            *self.layer(t) = Some(t);
         }
+    }
+
+    fn layer(&mut self, t: DropTarget) -> &mut Option<DropTarget> {
+        match t {
+            DropTarget::Slot(..) => &mut self.slot,
+            DropTarget::End(_) => &mut self.strip,
+            DropTarget::Body(_) => &mut self.body,
+        }
+    }
+
+    fn clear_targets(&mut self) {
+        (self.slot, self.strip, self.body) = (None, None, None);
     }
 
     /// The cursor left `t` (a stale exit after entering the next target is ignored).
     pub fn leave(&mut self, t: DropTarget) {
-        if self.hover == Some(t) {
-            self.hover = None;
+        let layer = self.layer(t);
+        if *layer == Some(t) {
+            *layer = None;
         }
+    }
+
+    /// The cursor entered tab header `id` (rollover fill).
+    pub fn header_enter(&mut self, id: u64) {
+        self.header = Some(id);
+    }
+
+    /// The cursor left tab header `id` (a stale exit after entering the next one is ignored).
+    pub fn header_leave(&mut self, id: u64) {
+        if self.header == Some(id) {
+            self.header = None;
+        }
+    }
+
+    /// The tab header under the cursor, outside a drag.
+    pub fn header_hover(&self) -> Option<u64> {
+        if self.active() { None } else { self.header }
     }
 
     /// Something is pressed or dragging (the cursor/release subscriptions are live).
@@ -110,18 +149,19 @@ impl TabDrag {
 
     /// The target a release would drop on.
     pub fn hover(&self) -> Option<DropTarget> {
-        self.hover
+        self.slot.or(self.strip).or(self.body)
     }
 
     /// Esc / abort: back to idle.
     pub fn cancel(&mut self) {
-        *self = Self::default();
+        self.phase = Phase::Idle;
+        self.clear_targets();
     }
 
     /// The button was released.
     pub fn release(&mut self) -> Outcome {
-        let (phase, hover) = (self.phase, self.hover);
-        *self = Self::default();
+        let (phase, hover) = (self.phase, self.hover());
+        self.cancel();
         match phase {
             Phase::Idle => Outcome::None,
             Phase::Pressed { .. } => Outcome::Click,
@@ -155,7 +195,7 @@ impl TabDrag {
             .filter(|i| !(pane == from.0 && *i == from.1))
             .map(Cell::Tab)
             .collect();
-        let at = match Self::drop_for(from, self.hover) {
+        let at = match Self::drop_for(from, self.hover()) {
             Some((to, at)) if to == pane => Some(at.map_or(cells.len(), |a| a.min(cells.len()))),
             Some(_) => None,
             None if pane == from.0 => Some(from.1.min(cells.len())),
@@ -242,6 +282,56 @@ mod tests {
         assert_eq!(d.hover(), Some(DropTarget::Slot(p, 0)));
         d.leave(DropTarget::Slot(p, 0));
         assert_eq!(d.release(), Outcome::Cancel);
+    }
+
+    /// Entering another pane's strip over its first tab: iced reports the inner slot, then the
+    /// strip and body around it. The slot wins (the tab lands first, not last); leaving the slot
+    /// for the strip's empty area falls back to the end.
+    #[test]
+    fn nested_targets_prefer_the_slot_over_strip_and_body() {
+        let (mut state, a) = iced::widget::pane_grid::State::new(());
+        let (b, _) = state
+            .split(iced::widget::pane_grid::Axis::Vertical, a, ())
+            .expect("split");
+        let mut d = TabDrag::default();
+        d.press((a, 0));
+        d.moved(pt(0.0, 0.0));
+        d.moved(pt(30.0, 0.0));
+        d.enter(DropTarget::End(a));
+        d.enter(DropTarget::Slot(b, 0));
+        d.enter(DropTarget::End(b));
+        d.enter(DropTarget::Body(b));
+        d.leave(DropTarget::End(a));
+        assert_eq!(d.hover(), Some(DropTarget::Slot(b, 0)));
+        d.leave(DropTarget::Slot(b, 0));
+        assert_eq!(d.hover(), Some(DropTarget::End(b)));
+        d.enter(DropTarget::Slot(b, 0));
+        assert_eq!(
+            d.release(),
+            Outcome::Drop {
+                from: (a, 0),
+                to: b,
+                at: Some(0)
+            }
+        );
+        assert_eq!(d.hover(), None);
+    }
+
+    #[test]
+    fn header_rollover_ignores_stale_exit_and_hides_mid_drag() {
+        let p = pane();
+        let mut d = TabDrag::default();
+        d.header_enter(1);
+        d.header_enter(2);
+        d.header_leave(1);
+        assert_eq!(d.header_hover(), Some(2));
+        d.press((p, 0));
+        d.moved(pt(0.0, 0.0));
+        d.moved(pt(30.0, 0.0));
+        assert_eq!(d.header_hover(), None, "no rollover while dragging");
+        d.header_leave(2);
+        d.release();
+        assert_eq!(d.header_hover(), None);
     }
 
     #[test]

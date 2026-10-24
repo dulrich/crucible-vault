@@ -506,6 +506,10 @@ pub enum TabsMsg {
     DragRelease,
     /// Esc while a press is armed.
     DragCancel,
+    /// The cursor entered a tab header (by tab id): its rollover fill.
+    HeaderEnter(u64),
+    /// The cursor left a tab header.
+    HeaderLeave(u64),
 }
 
 /// editor-usability-round WP-4: the focused pane's find bar.
@@ -648,7 +652,9 @@ impl TabsMsg {
             | Self::DragEnter(_)
             | Self::DragLeave(_)
             | Self::DragRelease
-            | Self::DragCancel => MsgKind::Input,
+            | Self::DragCancel
+            | Self::HeaderEnter(_)
+            | Self::HeaderLeave(_) => MsgKind::Input,
         }
     }
 }

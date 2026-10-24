@@ -154,7 +154,12 @@ impl App {
                     .padding([0, 6]),
             )
             .interaction(iced::mouse::Interaction::Pointer)
-            .on_press(Message::Tabs(TabsMsg::DragPress(tp, ti)));
+            .on_press(Message::Tabs(TabsMsg::DragPress(tp, ti)))
+            .on_enter(Message::Tabs(TabsMsg::HeaderEnter(tab.id)))
+            .on_exit(Message::Tabs(TabsMsg::HeaderLeave(tab.id)));
+            // The rollover fill a `button` header used to give (lost when headers became
+            // `mouse_area`s for drag); the active block keeps `panel_2`.
+            let hovered = !active && self.tab_drag.header_hover() == Some(tab.id);
             let hover = match tab.path() {
                 Some(p) => p.to_owned(),
                 None => self.tab_header_title(ps, tab),
@@ -196,7 +201,13 @@ impl App {
                 .height(BAR_HEIGHT)
                 .clip(true)
                 .style(move |_: &Theme| container::Style {
-                    background: active.then(|| t.panel_2.to_color().into()),
+                    background: if active {
+                        Some(t.panel_2.to_color().into())
+                    } else if hovered {
+                        Some(t.panel_2.to_color().scale_alpha(0.5).into())
+                    } else {
+                        None
+                    },
                     border: iced::Border {
                         color: if drop_here {
                             t.accent_ui.to_color()
