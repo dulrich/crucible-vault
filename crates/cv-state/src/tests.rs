@@ -1344,12 +1344,42 @@ fn v11_database_migrates_to_v13_with_boilerplate_tables() {
     c.execute_batch(migrate::BASELINE).unwrap();
     c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
         .unwrap();
-    assert_eq!(migrate::latest_version(), 13);
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 13);
+    assert_eq!(migrate::latest_version(), 14);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 14);
     for t in ["mail_boilerplate", "mail_boilerplate_seen"] {
         let n: i64 = c
             .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "{t}");
     }
+}
+
+/// v13 → v14 (plan round-12-feedback-todos WP-7): `dup_labels` lands and round-trips a row.
+#[test]
+fn v13_database_migrates_to_v14_and_dup_labels_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(migrate::BASELINE).unwrap();
+        for sql in &migrate::MIGRATIONS[..2] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", 13).unwrap();
+        assert_eq!(migrate::migrate(&mut c).unwrap(), 14);
+    }
+    let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    let l = crate::DupLabel {
+        keep_path: "a.md".into(),
+        other_path: "b.md".into(),
+        keep_identity: Some("id".into()),
+        other_identity: None,
+        containment_keep_in_other: 0.5,
+        containment_other_in_keep: 0.75,
+        identity_match: false,
+        verdict: "keep".into(),
+        at_ms: 7,
+    };
+    s.insert_dup_label(&l).unwrap();
+    assert_eq!(s.dup_labels().unwrap(), vec![l]);
 }

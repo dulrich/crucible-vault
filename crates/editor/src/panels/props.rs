@@ -13,6 +13,26 @@ pub fn checked(p: &Property) -> Option<bool> {
         .then_some(matches!(p.values.as_slice(), [PropValue::Bool(true)]))
 }
 
+/// Plan round-12-feedback-todos WP-7: the frontmatter key whose link entries get the duplicate
+/// verdict buttons (the daemon's `dupes_scan` writes it).
+pub const POSSIBLE_DUPLICATE: &str = "possible-duplicate";
+
+/// Plan round-12-feedback-todos WP-7: the `dupes-resolve` call one verdict button sends —
+/// `keep` = the panel's note, `other` = the entry's resolved path.
+pub fn dup_call(keep: &str, other: &str, verdict: &str) -> crate::palette::Call {
+    let s = |v: &str| serde_json::Value::String(v.to_owned());
+    crate::palette::Call {
+        action_id: "dupes-resolve".into(),
+        title: "Resolve duplicate".into(),
+        params: serde_json::Map::from_iter([
+            ("keep".to_owned(), s(keep)),
+            ("other".to_owned(), s(other)),
+            ("verdict".to_owned(), s(verdict)),
+        ]),
+        needs: Vec::new(),
+    }
+}
+
 /// Plan round-6 WP-5: the values of a property drawn as links — a text / multitext / untyped
 /// value with at least one wikilink or URL element (tags and aliases stay chips).
 pub fn links(p: &Property) -> Option<&[PropValue]> {

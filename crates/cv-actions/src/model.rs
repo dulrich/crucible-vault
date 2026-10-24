@@ -138,6 +138,8 @@ step_kinds! {
     CaptureRepair = "capture_repair", true;
     /// On-demand duplicate scan writing `possible-duplicate` (plan `round-12-feedback-todos` WP-6).
     DupesScan = "dupes_scan", true;
+    /// One duplicate-pair verdict (`not-duplicates` | `keep`) (plan `round-12-feedback-todos` WP-7).
+    DupesResolve = "dupes_resolve", true;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

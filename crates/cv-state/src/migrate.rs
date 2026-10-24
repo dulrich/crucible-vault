@@ -148,6 +148,19 @@ pub const MIGRATIONS: &[&str] = &[
          message_id  TEXT NOT NULL,
          PRIMARY KEY (source_key, message_id)
      );",
+    // v14 (plan round-12-feedback-todos WP-7): one row per duplicate verdict, with its scores.
+    "CREATE TABLE dup_labels (
+         id                         INTEGER PRIMARY KEY,
+         keep_path                  TEXT NOT NULL,
+         other_path                 TEXT NOT NULL,
+         keep_identity              TEXT,
+         other_identity             TEXT,
+         containment_keep_in_other  REAL NOT NULL,
+         containment_other_in_keep  REAL NOT NULL,
+         identity_match             INTEGER NOT NULL,
+         verdict                    TEXT NOT NULL CHECK (verdict IN ('not-duplicates', 'keep')),
+         at_ms                      INTEGER NOT NULL
+     );",
 ];
 
 /// Highest schema version this build knows.

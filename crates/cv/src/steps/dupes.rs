@@ -134,10 +134,6 @@ pub(crate) fn identity(doc: &FrontmatterDoc, opts: &PostIdOptions) -> Option<Str
     nonempty("post-id")
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "WP-8 (the _blog_metadata backfill) calls it")
-)]
 /// Scores one pair of notes from their full texts (frontmatter is split off; containment is
 /// over the bodies, exact `u64` shingles).
 pub(crate) fn score(a_text: &str, b_text: &str, opts: &PostIdOptions) -> PairScore {

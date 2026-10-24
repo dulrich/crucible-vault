@@ -378,6 +378,13 @@ pub enum PanelsMsg {
         result: Result<Vec<crate::panels::SearchHit>, String>,
     },
     Scrolled(crate::panels::ListId, ListWindow),
+    /// Plan round-12-feedback-todos WP-7: a `possible-duplicate` button — run `dupes-resolve`
+    /// with `keep` (the panel's note), `other` (the entry's resolved path) and `verdict`.
+    ResolveDup {
+        keep: String,
+        other: String,
+        verdict: String,
+    },
 }
 
 /// WP-7: view fences, keyed by `(view id, embedding note)`.

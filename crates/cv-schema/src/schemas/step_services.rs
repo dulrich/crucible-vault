@@ -346,6 +346,14 @@ pub static CAPTURE_REPAIR: Record = Record {
     summary: None,
 };
 
+/// `dupes_resolve` — `crates/cv/src/steps/dupes_resolve.rs` (no step params; job params `keep`, `other`, `verdict` = `not-duplicates` | `keep`).
+pub static DUPES_RESOLVE: Record = Record {
+    name: "dupes_resolve",
+    fields: &[],
+    rules: &[],
+    summary: None,
+};
+
 /// `dupes_scan` — `crates/cv/src/steps/dupes.rs` (`dry_run`; labels duplicate candidates, identity or shingle containment >= 0.7, in both notes' `possible-duplicate`).
 pub static DUPES_SCAN: Record = Record {
     name: "dupes_scan",

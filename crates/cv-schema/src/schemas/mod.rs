@@ -81,6 +81,7 @@ pub static STEP: Union = Union {
         Variant::of(&DAILY_BRIEF, "Daily brief"),
         Variant::of(&CAPTURE_REPAIR, "Capture repair"),
         Variant::of(&DUPES_SCAN, "Duplicate scan"),
+        Variant::of(&DUPES_RESOLVE, "Duplicate resolve"),
     ],
 };
 

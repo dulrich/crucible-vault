@@ -384,6 +384,33 @@ resources = { note = false, keys = ["dupes::scan"] }
 [[action.steps]]
 type = "dupes_scan"
 
+# Duplicate verdict (plan round-12-feedback-todos WP-7), sent by the Properties panel's
+# possible-duplicate buttons: `not-duplicates` moves the pair to both notes' `not-duplicate-of`;
+# `keep` re-points tracker rows from `other` to `keep`, then trashes `other`. One dup_labels row each.
+[[action]]
+id = "dupes-resolve"
+label = "Resolve a duplicate pair"
+group = "Maintenance"
+resources = { note = false, keys = ["{param.keep}", "{param.other}"] }
+[[action.params]]
+name = "keep"
+label = "Keep"
+kind = "path"
+required = true
+[[action.params]]
+name = "other"
+label = "Other"
+kind = "path"
+required = true
+[[action.params]]
+name = "verdict"
+label = "Verdict"
+kind = "enum"
+choices = ["not-duplicates", "keep"]
+required = true
+[[action.steps]]
+type = "dupes_resolve"
+
 [[action]]
 id = "image-describe-note"
 label = "Describe images in note"

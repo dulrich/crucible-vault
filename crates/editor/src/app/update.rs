@@ -376,6 +376,7 @@ impl App {
                 }
                 Task::none()
             }
+            Effect::RunCall(call) => self.run_call(call),
             Effect::Open(p) => {
                 self.open(&p);
                 Task::none()

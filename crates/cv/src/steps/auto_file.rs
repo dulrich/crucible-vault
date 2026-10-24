@@ -200,7 +200,7 @@ pub(in crate::steps) fn hosts_kind(
 
 /// Moves `path` to `.trash/` (recoverable, CAS on `hash`), recording that `by` absorbed it so
 /// the `deleted` notification carries `replaced_by` (round 11 WP-1, Decision 1).
-fn trash(
+pub(crate) fn trash(
     ctx: &mut StepCtx<'_>,
     path: &str,
     hash: cv_vault::ContentHash,

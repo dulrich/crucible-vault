@@ -288,7 +288,7 @@ impl Panels {
         self.windows.insert(list_key(id), w);
     }
 
-    fn resolve(&self, src: &str, target: &str) -> Option<String> {
+    pub(crate) fn resolve(&self, src: &str, target: &str) -> Option<String> {
         self.resolver.resolve(src, target)
     }
 
@@ -468,6 +468,8 @@ pub enum Effect {
     SearchDebounce(u64),
     /// Run the FTS query `q` off-thread; the answer is tagged with `seq`.
     SearchRun { seq: u64, q: String },
+    /// Plan round-12-feedback-todos WP-7: run this action call (a duplicate verdict button).
+    RunCall(crate::palette::Call),
 }
 
 /// Handles a [`PanelsMsg`] on the panel state; `has_daemon` says whether search can run.
@@ -540,7 +542,42 @@ pub fn update(p: &mut Panels, m: PanelsMsg, has_daemon: bool) -> Effect {
             p.set_window(id, w);
             Effect::None
         }
+        PanelsMsg::ResolveDup {
+            keep,
+            other,
+            verdict,
+        } => Effect::RunCall(props::dup_call(&keep, &other, &verdict)),
     }
+}
+
+/// Plan round-12-feedback-todos WP-7: one `possible-duplicate` entry — its link plus the two
+/// verdict buttons (only when the entry resolves to a note).
+fn dup_entry<'a>(p: &Panels, src: &str, v: &PropValue, t: Tokens) -> Element<'a, Message> {
+    let el = prop_el(src, v, &p.prop_unresolved, t);
+    let PropValue::Link { target, .. } = v else {
+        return el;
+    };
+    let Some(other) = p.resolve(src, target) else {
+        return el;
+    };
+    let press = |verdict: &str| {
+        pm(PanelsMsg::ResolveDup {
+            keep: src.to_owned(),
+            other: other.clone(),
+            verdict: verdict.to_owned(),
+        })
+    };
+    row![
+        el,
+        button(text("Not duplicates").size(12))
+            .padding([0, 4])
+            .on_press(press("not-duplicates")),
+        button(text("Keep this version").size(12))
+            .padding([0, 4])
+            .on_press(press("keep")),
+    ]
+    .spacing(4)
+    .into()
 }
 
 fn pm(m: PanelsMsg) -> Message {
@@ -784,7 +821,13 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
         },
         PanelKind::Properties => scrollable(
             column(p.props.iter().map(|pr| {
-                let v: Element<'a, Message> = if let Some(vs) = props::links(pr) {
+                let v: Element<'a, Message> = if pr.key == props::POSSIBLE_DUPLICATE
+                    && let Some(vs) = props::links(pr)
+                {
+                    column(vs.iter().map(|v| dup_entry(p, src, v, t)))
+                        .spacing(2)
+                        .into()
+                } else if let Some(vs) = props::links(pr) {
                     row(vs.iter().enumerate().map(|(i, v)| {
                         let el = prop_el(src, v, &p.prop_unresolved, t);
                         if i + 1 < vs.len() {

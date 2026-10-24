@@ -26,6 +26,7 @@
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
 //! | `DupesScan` | [`dupes`] | round-12-feedback-todos WP-6 |
+//! | `DupesResolve` | [`dupes_resolve`] | round-12-feedback-todos WP-7 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -48,6 +49,9 @@ mod capture_tests;
 mod config_tests;
 pub mod daily_brief;
 pub mod dupes;
+pub mod dupes_resolve;
+#[cfg(test)]
+mod dupes_resolve_tests;
 #[cfg(test)]
 mod dupes_tests;
 pub mod file;
@@ -612,6 +616,7 @@ step_modules! {
     DailyBrief => daily_brief::DailyBrief,
     CaptureRepair => capture_repair::CaptureRepair,
     DupesScan => dupes::DupesScan,
+    DupesResolve => dupes_resolve::DupesResolve,
     RunAction => RunActionStep,
 }
 

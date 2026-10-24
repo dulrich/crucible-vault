@@ -251,3 +251,51 @@ fn source_key_binding_passes_client_chords_through() {
         Some(Binding::Insert('9'))
     ));
 }
+
+/// Plan round-12-feedback-todos WP-7: both `possible-duplicate` buttons run `dupes-resolve` with
+/// `keep` = the panel's note, `other` = the entry's resolved path and their verdict.
+#[test]
+fn duplicate_buttons_dispatch_dupes_resolve_params() {
+    let (_t, d, mut app) = app_with(&[
+        (
+            "wp7d/a.md",
+            "---\npossible-duplicate:\n  - \"[[b]]\"\n---\nA\n",
+        ),
+        ("wp7d/b.md", "B\n"),
+    ]);
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&calls);
+    d.register_action(
+        info("dupes-resolve", &[]),
+        Arc::new(move |p: &RunActionParams| {
+            let g = |k: &str| {
+                p.params
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            if let Ok(mut v) = seen.lock() {
+                v.push((g("keep"), g("other"), g("verdict")));
+            }
+            Ok(None)
+        }),
+    )
+    .expect("register");
+    open(&mut app, "wp7d/a.md");
+    for verdict in ["not-duplicates", "keep"] {
+        let _ = app.send(Message::Panels(crate::message::PanelsMsg::ResolveDup {
+            keep: "wp7d/a.md".into(),
+            other: "wp7d/b.md".into(),
+            verdict: verdict.into(),
+        }));
+    }
+    let got = calls.lock().expect("lock").clone();
+    let want = |v: &str| ("wp7d/a.md".to_owned(), "wp7d/b.md".to_owned(), v.to_owned());
+    assert_eq!(got, vec![want("not-duplicates"), want("keep")]);
+    // The panel resolves the entry to the path the buttons send.
+    assert_eq!(
+        app.panels.resolve("wp7d/a.md", "b").as_deref(),
+        Some("wp7d/b.md")
+    );
+}

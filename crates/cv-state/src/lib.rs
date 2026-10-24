@@ -3,6 +3,7 @@
 //!
 //! Pure and synchronous: no async runtime. Every time-dependent API takes `now_ms`.
 
+mod dup_labels;
 mod error;
 pub mod health;
 mod id;
@@ -19,6 +20,7 @@ mod tracker;
 #[cfg(test)]
 mod tests;
 
+pub use dup_labels::DupLabel;
 pub use error::{Result, StateError};
 pub use health::{ServiceFailureKind, ServiceHealth};
 pub use id::new_job_id;
