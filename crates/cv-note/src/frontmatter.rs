@@ -520,6 +520,19 @@ impl FrontmatterDoc {
         }
     }
 
+    /// Set only when the key is absent. Unlike [`Self::set_if_empty`], a present `null` or empty
+    /// string is a value and is left untouched.
+    pub fn set_if_absent(&mut self, key: &str, value: &JsValue) -> Result<bool, FmError> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Ok(false);
+        }
+        match self.get(key)? {
+            None => self.set(key, value),
+            Some(_) => Ok(false),
+        }
+    }
+
     /// Remove `key`'s lines (its trailing comments/blank lines stay). Absent key → no change.
     ///
     /// ofm's split only reads a block whose first non-blank YAML line is a key, so removing the

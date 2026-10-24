@@ -178,6 +178,8 @@ pub(crate) fn note_target(
 struct NoteRefs<'a> {
     source: Option<&'a str>,
     publication: Option<&'a str>,
+    /// The note's kind (decides the unticked `trim-label`).
+    kind: &'a str,
 }
 
 /// A mail note's captured `description`: the cleaned body's first 40 words (reconcile's
@@ -232,6 +234,10 @@ fn captured_note(
     fm.push(format!("word-count: {words}"));
     fm.push(format!("complete: {complete}"));
     fm.push("via: email".into());
+    if super::file::wants_trim_label(refs.kind) {
+        // A fresh note never has the key: unticked, for the user to tick once trimmed.
+        fm.push("trim-label: false".into());
+    }
     fm.push("tags:".into());
     for t in tags {
         fm.push(format!("  - {t}"));
@@ -494,6 +500,7 @@ fn handle(
         let refs = NoteRefs {
             source: canon.as_deref(),
             publication: nl.map(NewsletterSource::publication),
+            kind,
         };
         let text = captured_note(
             post,

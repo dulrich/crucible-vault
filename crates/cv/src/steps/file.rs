@@ -24,7 +24,7 @@
 //! | `copy` | `to` (folder template), `name` | create a copy; `vars.copied_path`, `vars.copied_link` (`[[path]]`), `output_paths` |
 //! | `set_props` | `props = { key = value }`, `if_empty` (bool) | set-semantics; string values expand placeholders |
 //! | `remove_props` | `props = ["key", …]` | |
-//! | `upsert_tags` | `tags` (string or list, placeholders ok) and/or `kind` | append to `tags` unless present (leading `#` stripped) |
+//! | `upsert_tags` | `tags` (string or list, placeholders ok) and/or `kind` | append to `tags` unless present (leading `#` stripped); with `kind` = `blog`/`newsletter`, also `trim-label: false` when that key is absent (round-12 WP-5) |
 //! | `mark_forwarded` | `line` (0-based; default `context.line`) | `- [ ] x` → `- [>] x`; already `[>]` = no-op; anything else fails closed |
 //!
 //! Kinds (`kinds.toml`): `[kinds.NAME]` with `label`, `tags` (list), `folder` (destination
@@ -87,6 +87,23 @@ pub(super) fn step_kind<'c>(
     kind_def(ctx.config, name.trim())
         .map(Some)
         .map_err(StepError::failed)
+}
+
+/// The kinds whose new captures start with an unticked `trim-label` (plan round-12 WP-5).
+pub(crate) fn wants_trim_label(kind: &str) -> bool {
+    matches!(kind.trim(), "blog" | "newsletter")
+}
+
+/// The one shared absent-key write: `trim-label: false` for [`wants_trim_label`] kinds. An
+/// existing value (`true`, `null`, `""` included) is never touched.
+pub(crate) fn apply_trim_label(
+    doc: &mut FrontmatterDoc,
+    kind: &str,
+) -> Result<bool, cv_note::FmError> {
+    if !wants_trim_label(kind) {
+        return Ok(false);
+    }
+    doc.set_if_absent("trim-label", &JsValue::Bool(false))
 }
 
 /// The step's target: `path` (expanded) or the active note.
@@ -575,11 +592,18 @@ fn upsert_tags(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepErr
     if clean.is_empty() {
         return Err(StepError::failed("upsert_tags: no tags to add"));
     }
+    let kind = match p.note_kind.as_deref() {
+        Some(k) => Some(expand(ctx, k)?),
+        None => None,
+    };
     let path = target_path(ctx, p.path.as_deref())?;
     edit_note(ctx, &path, |doc| {
         let mut changed = false;
         for tg in &clean {
             changed |= doc.append_to_list("tags", &JsValue::Str(tg.clone()))?;
+        }
+        if let Some(k) = &kind {
+            changed |= apply_trim_label(doc, k)?;
         }
         Ok(changed)
     })

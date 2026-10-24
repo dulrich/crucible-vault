@@ -2,7 +2,7 @@
 //! built straight from the parsed `JsValue` and rendered by both Reading's properties block
 //! (`render::RenderModel::properties`) and the Properties sidebar.
 //!
-//! [`TYPES`] is transcribed from the live vault's `.obsidian/types.json` (34 keys) by the
+//! [`TYPES`] is transcribed from the live vault's `.obsidian/types.json` (34 keys, plus `trim-label`) by the
 //! orchestrator (plan `v0-editor.md` WP-5 brief pin 8); agents never read that file (I1). A value
 //! that does not fit its declared type is [`Property::flagged`].
 
@@ -82,7 +82,7 @@ pub enum PropType {
 }
 
 /// The vault's property type map.
-pub const TYPES: [(&str, PropType); 34] = [
+pub const TYPES: [(&str, PropType); 35] = [
     ("aliases", PropType::Aliases),
     ("tags", PropType::Tags),
     ("created", PropType::Date),
@@ -90,6 +90,7 @@ pub const TYPES: [(&str, PropType); 34] = [
     ("review-after-commits", PropType::Number),
     ("review-after-lines", PropType::Number),
     ("read", PropType::Checkbox),
+    ("trim-label", PropType::Checkbox),
     ("model", PropType::Text),
     ("TQ_extra_instructions", PropType::Text),
     ("cssclasses", PropType::Multitext),

@@ -568,3 +568,35 @@ fn clip_images_has_folder_and_tag_starters() {
         .collect();
     assert_eq!(sels, [(Some("Clippings"), None), (None, Some("clippings"))]);
 }
+
+/// Plan round-12 WP-5: a blog clip filed through the spawned `file-as-kind` child gets an
+/// unticked `trim-label`; an existing value is left alone.
+#[test]
+fn auto_filed_blog_clip_gets_an_unticked_trim_label_via_the_child() {
+    use serde_json::json;
+    for (fm, want) in [
+        ("", "trim-label: false\n"),
+        ("trim-label: true\n", "trim-label: true\n"),
+    ] {
+        let clip = doc(
+            &format!("source: https://plain.example/p/1\n{fm}"),
+            &words("p", 0, 30),
+        );
+        let e = world(&[("Clippings/T.md", clip)]);
+        let rec = Rec::default();
+        run(&e, "Clippings/T.md", &rec);
+        assert_eq!(rec.kinds(), ["file-as-kind:blog"]);
+        let (open, _) = e
+            .run_action(
+                "file-as-kind",
+                json!({"kind": "blog"}),
+                active("Clippings/T.md"),
+            )
+            .expect("child files");
+        let t = e.read(&open.expect("moved path")).unwrap();
+        assert!(
+            t.contains(want) && t.matches("trim-label").count() == 1,
+            "{t}"
+        );
+    }
+}

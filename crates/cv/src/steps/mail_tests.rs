@@ -685,3 +685,22 @@ fn substack_replace_fills_the_stubs_absent_publication() {
     let text = w.env.read("Letters/Deep dive.md").unwrap();
     assert!(text.contains("\npublication: Example Pub\n"), "{text}");
 }
+
+/// Plan round-12 WP-5: a newly captured blog-kind mail note starts with `trim-label: false`.
+#[test]
+fn new_mail_note_of_blog_kind_has_an_unticked_trim_label() {
+    let w = world(&[]);
+    w.put(
+        "new/1.eml",
+        &eml(
+            "t1@x.example",
+            "who@stranger.example",
+            "Odd letter",
+            "<p>alpha beta gamma</p>",
+        ),
+    );
+    w.run();
+    let (r, _) = w.row("unknown-sender", "t1@x.example").unwrap();
+    let text = w.env.read(&r.note_path.unwrap()).unwrap();
+    assert!(text.contains("\ntrim-label: false\n"), "{text}");
+}

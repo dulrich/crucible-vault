@@ -330,3 +330,25 @@ fn set_edit_refuses_unterminated_block() {
         ));
     }
 }
+
+#[test]
+fn set_if_absent_writes_only_a_missing_key() {
+    let mut d = FrontmatterDoc::new("---\na: 1\n---\nb\n");
+    assert!(d.set_if_absent("k", &JsValue::Bool(false)).unwrap());
+    assert_eq!(d.get("k").unwrap(), Some(JsValue::Bool(false)));
+    for (line, want) in [
+        ("k: true", JsValue::Bool(true)),
+        ("k: false", JsValue::Bool(false)),
+        ("k:", JsValue::Null),
+        ("k: \"\"", s("")),
+    ] {
+        let text = format!("---\n{line}\n---\nb\n");
+        let mut d = FrontmatterDoc::new(&text);
+        assert!(
+            !d.set_if_absent("k", &JsValue::Bool(false)).unwrap(),
+            "{line}"
+        );
+        assert_eq!(d.get("k").unwrap(), Some(want), "{line}");
+        assert_eq!(d.text(), text, "{line}: byte-identical");
+    }
+}

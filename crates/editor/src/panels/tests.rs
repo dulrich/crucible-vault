@@ -245,7 +245,7 @@ fn pure_helpers() {
     assert!(!is_externalish("Note.md"));
     let long = "x".repeat(200);
     assert_eq!(snippet(&long).chars().count(), SNIPPET_CHARS + 1);
-    assert_eq!(editor_model::props::TYPES.len(), 34);
+    assert_eq!(editor_model::props::TYPES.len(), 35);
     let show = |k: &str, v: JsValue| props::display(&editor_model::props::Property::new(k, &v));
     assert_eq!(show("TQ_show_tree", JsValue::Str("yes".into())), "⚠ yes");
     assert_eq!(

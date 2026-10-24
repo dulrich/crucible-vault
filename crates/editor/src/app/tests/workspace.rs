@@ -730,6 +730,33 @@ fn sidebar_boolean_toggles_through_the_frontmatter_path() {
     assert_eq!(check(&app), Some(true));
 }
 
+/// Plan round-12 WP-5: `trim-label: false` is a declared checkbox in the sidebar and toggles.
+#[test]
+fn trim_label_renders_as_a_checkbox_and_toggles() {
+    let (_tmp, d) = fake_arc();
+    d.create_note("wp5trim/t.md", "---\ntrim-label: false\n---\nx\n")
+        .expect("create");
+    let mut app = app_over(&d, None);
+    let _ = app.send(Message::Explorer(ExplorerMsg::Open("wp5trim/t.md".into())));
+    app.panels.visible = true;
+    let _ = app.send(Message::Panels(crate::message::PanelsMsg::Tick));
+    let check = |app: &App| {
+        app.panels
+            .props
+            .iter()
+            .find(|p| p.key == "trim-label")
+            .and_then(crate::panels::props::checked)
+    };
+    assert_eq!(check(&app), Some(false));
+    let _ = app.send(crate::panels::check_press("wp5trim/t.md", "trim-label"));
+    assert_eq!(
+        app.active_doc().expect("tab").text(),
+        "---\ntrim-label: true\n---\nx\n"
+    );
+    let _ = app.send(Message::Panels(crate::message::PanelsMsg::Tick));
+    assert_eq!(check(&app), Some(true));
+}
+
 #[test]
 fn reading_task_toggle_edits_the_buffer_and_rerenders() {
     let (_tmp, d) = fake_arc();

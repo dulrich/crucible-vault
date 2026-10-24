@@ -323,3 +323,34 @@ fn file_as_kind_on_a_note_already_at_its_destination_is_a_noop() {
     assert_eq!(vars["moved_path"], json!(p));
     assert_eq!(vars["moved_from"], json!(p));
 }
+
+/// Plan round-12 WP-5: `file-as-kind` (via `upsert_tags { kind }`) writes `trim-label: false` for
+/// `blog` only when the key is absent, and never for other kinds.
+#[test]
+fn upsert_tags_kind_blog_writes_an_absent_trim_label_only() {
+    let up = "type = \"upsert_tags\"\nkind = \"{param.kind}\"";
+    let env = example_env(&[
+        ("a.md", "---\ntags: [x]\n---\nb\n"),
+        ("t.md", "---\ntrim-label: true\n---\nb\n"),
+        ("n.md", "---\ntrim-label:\n---\nb\n"),
+        ("e.md", "---\ntrim-label: \"\"\n---\nb\n"),
+        ("r.md", "---\ntags: [x]\n---\nb\n"),
+    ]);
+    let blog = json!({"kind": "blog"});
+    env.run(up, blog.clone(), active("a.md")).unwrap();
+    let a = env.read("a.md").unwrap();
+    assert!(a.contains("trim-label: false\n"), "{a}");
+    for (p, line) in [
+        ("t.md", "trim-label: true\n"),
+        ("n.md", "trim-label:\n"),
+        ("e.md", "trim-label: \"\"\n"),
+    ] {
+        env.run(up, blog.clone(), active(p)).unwrap();
+        let after = env.read(p).unwrap();
+        assert_eq!(after.matches("trim-label").count(), 1, "{p}: {after}");
+        assert!(after.contains(line), "{p}: value untouched: {after}");
+    }
+    env.run(up, json!({"kind": "repo"}), active("r.md"))
+        .unwrap();
+    assert!(!env.read("r.md").unwrap().contains("trim-label"));
+}
