@@ -1,24 +1,24 @@
 {
   "columns": [
     {
-      "key": "file.name",
-      "label": "file name"
+      "key": "note.name",
+      "label": "Name"
     },
     {
-      "key": "note.work-status",
-      "label": "work-status"
+      "key": "note.status",
+      "label": "Status"
     },
     {
-      "key": "note.author-filter",
-      "label": "author-filter"
+      "key": "note.author",
+      "label": "Author"
     },
     {
-      "key": "note.source-prefix-filter",
-      "label": "source-prefix-filter"
+      "key": "note.prefix",
+      "label": "Prefix"
     },
     {
-      "key": "note.tags",
-      "label": "tags"
+      "key": "note.kind",
+      "label": "Kind"
     },
     {
       "key": "formula.entries",
@@ -29,7 +29,7 @@
       "label": "Unread"
     },
     {
-      "key": "formula.last_update",
+      "key": "note.last_update",
       "label": "Last Update"
     }
   ],
@@ -39,24 +39,28 @@
         {
           "cells": [
             {
-              "label": "Bob News",
-              "path": "core/works/Bob News.md",
-              "t": "link"
+              "t": "text",
+              "v": "Bob News"
             },
             {
               "t": "text",
               "v": "complete"
             },
             {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "text",
-              "v": "https://news.example/"
-            },
-            {
               "t": "null"
+            },
+            {
+              "t": "list",
+              "v": [
+                {
+                  "t": "text",
+                  "v": "https://blog.example/"
+                }
+              ]
+            },
+            {
+              "t": "text",
+              "v": "fanfic"
             },
             {
               "t": "number",
@@ -70,8 +74,7 @@
               "t": "date",
               "v": "2026-10-01"
             }
-          ],
-          "path": "core/works/Bob News.md"
+          ]
         }
       ],
       "summaries": []

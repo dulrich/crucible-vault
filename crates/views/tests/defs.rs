@@ -190,6 +190,7 @@ fn defs_load_without_notices_and_yield_the_22_ids() {
 fn goldens() {
     let fx = fixture();
     let mut host = fx.host();
+    inject_sources(&mut host);
     let update = std::env::var_os("UPDATE_GOLDENS").is_some();
     let dir = crate_dir().join("tests/fixtures/golden");
     let mut failures = Vec::new();
@@ -296,84 +297,129 @@ fn overdue_excludes_today_future_blank_and_other_months() {
     assert_eq!(first.line, Some(4));
 }
 
-#[test]
-fn works_unread_cross_file_match() {
-    let fx = fixture();
-    let mut host = fx.host();
-    let r = fx.run(&mut host, "works#Unread", None);
-    let names: Vec<String> = r.rows().map(|row| text(&row.cells[0])).collect();
-    // Ann Blog (author AND prefix): Beta Post, not Other Post (wrong prefix) nor Alpha Post (read).
-    // Bob News (prefix only): World News + Old News. Cy Story (`#Cy` author only): Story Ch 1.
-    // Paused Work (author Ann only; every status counts, as in the generator): Other Post.
-    // Empty Work (no filter) matches nothing — Misc Notes stays out; nested works are not listed.
-    assert_eq!(
-        names,
-        [
-            "Old News",
-            "World News",
-            "Beta Post",
-            "Other Post",
-            "Story Ch 1"
-        ]
-    );
+/// Synthetic `source = "sources"` rows and `file.serial` set (plan round-11-feedback-todos
+/// Decision 5): in the daemon these come from `sources.toml` + the shared serial matcher
+/// (`crates/cv/src/views.rs`); here they are injected as given.
+fn inject_sources(host: &mut ViewHost) {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use views::value::Value;
+    let s = |v: &str| Value::Str(v.into());
+    let row = |row: &str,
+               name: &str,
+               author: Option<&str>,
+               status: &str,
+               entries: f64,
+               unread: f64,
+               last: Option<NaiveDate>| {
+        let mut m = BTreeMap::new();
+        m.insert("row".to_owned(), s(row));
+        m.insert("name".to_owned(), s(name));
+        m.insert("publication".to_owned(), s(name));
+        m.insert("author".to_owned(), author.map_or(Value::Null, s));
+        m.insert(
+            "prefix".to_owned(),
+            Value::list(vec![s("https://blog.example/")]),
+        );
+        m.insert("kind".to_owned(), s("fanfic"));
+        m.insert("status".to_owned(), s(status));
+        m.insert("entries".to_owned(), Value::Num(entries));
+        m.insert("unread".to_owned(), Value::Num(unread));
+        m.insert(
+            "last_update".to_owned(),
+            last.map_or(Value::Null, Value::date),
+        );
+        Arc::new(m)
+    };
+    let d = |m, d| NaiveDate::from_ymd_opt(2026, m, d);
+    let records = vec![
+        row(
+            "serial",
+            "Ann Blog",
+            Some("Ann"),
+            "active",
+            2.0,
+            1.0,
+            d(10, 2),
+        ),
+        row("serial", "Cy Story", Some("Cy"), "active", 0.0, 0.0, None),
+        row("serial", "Bob News", None, "complete", 2.0, 2.0, d(10, 1)),
+        row(
+            "serial",
+            "Gone Work",
+            Some("Gus"),
+            "ignored",
+            1.0,
+            1.0,
+            d(9, 30),
+        ),
+        row("blog", "Feed Row", None, "active", 1.0, 0.0, d(10, 3)),
+    ];
+    let serial: BTreeMap<String, String> = [
+        ("daily/day/2026-10-02/Beta Post.md", "Ann Blog"),
+        ("daily/day/2026-10-01/Alpha Post.md", "Ann Blog"),
+        ("daily/day/2026-09-30/Old News.md", "Bob News"),
+        ("core/works/Ann Blog.md", "Ann Blog"),
+    ]
+    .into_iter()
+    .map(|(p, n)| (p.to_owned(), n.to_owned()))
+    .collect();
+    host.set_sources(records, serial);
 }
 
 #[test]
-fn works_no_filter_matches_nothing() {
+fn works_views_read_injected_sources_rows() {
     let fx = fixture();
     let mut host = fx.host();
+    inject_sources(&mut host);
     let r = fx.run(&mut host, "works#Active", None);
-    let entries = column(&r, "Entries");
-    assert!(
-        entries.contains(&("Empty Work".into(), "·".into())),
-        "{entries:?}"
-    );
-    // Stories on a filterless work: nothing.
-    let r = fx.run(
-        &mut host,
-        "blog-story-list#Stories",
-        Some("core/works/Empty Work.md"),
-    );
-    assert_eq!(r.rows().count(), 0);
-}
-
-#[test]
-fn works_entries_unread_last_update_columns() {
-    let fx = fixture();
-    let mut host = fx.host();
-    let r = fx.run(&mut host, "works#Active", None);
-    let row = |label| column(&r, label);
     assert_eq!(
-        row("Entries"),
+        column(&r, "Entries"),
         [
             ("Ann Blog".into(), "2".into()),
-            ("Cy Story".into(), "1".into()),
-            ("Empty Work".into(), "·".into()),
+            ("Cy Story".into(), "·".into()),
+            ("Feed Row".into(), "1".into()),
         ]
     );
     assert_eq!(
-        row("Unread"),
+        column(&r, "Unread"),
         [
             ("Ann Blog".into(), "1".into()),
-            ("Cy Story".into(), "1".into()),
-            ("Empty Work".into(), "·".into()),
+            ("Cy Story".into(), "·".into()),
+            ("Feed Row".into(), "·".into()),
         ]
     );
-    assert_eq!(
-        row("Last Update"),
-        [
-            ("Ann Blog".into(), "2026-10-02".into()),
-            ("Cy Story".into(), "2026-10-03".into()),
-            ("Empty Work".into(), String::new()),
-        ]
-    );
-    let r = fx.run(&mut host, "works#Complete", None);
-    assert_eq!(column(&r, "Entries"), [("Bob News".into(), "2".into())]);
-    assert_eq!(column(&r, "Unread"), [("Bob News".into(), "2".into())]);
     assert_eq!(
         column(&r, "Last Update"),
-        [("Bob News".into(), "2026-10-01".into())]
+        [
+            ("Ann Blog".into(), "2026-10-02".into()),
+            ("Cy Story".into(), String::new()),
+            ("Feed Row".into(), "2026-10-03".into()),
+        ]
     );
+    // The Author column is the bare name (FEEDBACK:13); `ignored` rows are in neither view.
+    assert_eq!(column(&r, "Author")[0], ("Ann Blog".into(), "Ann".into()));
+    let r = fx.run(&mut host, "works#Complete", None);
+    assert_eq!(column(&r, "Entries"), [("Bob News".into(), "2".into())]);
+    // A record `status` column bound as `note.status` is plain text, not a task-status cell.
+    assert!(
+        r.columns.iter().all(|c| c.role.is_none()),
+        "{:?}",
+        r.columns
+    );
+}
+
+#[test]
+fn works_unread_uses_the_injected_serial_match_set() {
+    let fx = fixture();
+    let mut host = fx.host();
+    // Without match data nothing matches.
+    assert_eq!(fx.run(&mut host, "works#Unread", None).rows().count(), 0);
+    inject_sources(&mut host);
+    let r = fx.run(&mut host, "works#Unread", None);
+    let names: Vec<String> = r.rows().map(|row| text(&row.cells[0])).collect();
+    // Alpha Post is read; the Work note itself is outside daily/day.
+    assert_eq!(names, ["Old News", "Beta Post"]);
 }
 
 #[test]

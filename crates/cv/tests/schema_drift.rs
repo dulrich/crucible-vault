@@ -365,7 +365,8 @@ const SCHEDULES: &[&str] = &[
     "[[schedule]]\naction = \"s\"\ndaily = \"06:00\"\n\n[[schedule]]\naction = \"s\"\nevery = \"2h\"\n",
 ];
 
-const VIEWS: &[&str] = &[r#"
+const VIEWS: &[&str] = &[
+    r#"
 source = "index"
 filters = 'file.inFolder("daily/day")'
 
@@ -378,6 +379,7 @@ displayName = "Status"
 [[views]]
 type = "table"
 name = "Table"
+source = "sources"
 filters = { and = ['note.status == "done"', { or = ["note.a", { not = ["note.b"] }] }] }
 order = ["file.name", "note.status"]
 sort = [{ property = "file.name", direction = "DESC" }]
@@ -408,7 +410,10 @@ status = [" "]
 require_text = false
 task_filter = 'value.text != ""'
 task_group = "file"
-"#];
+"#,
+    // Plan round-11-feedback-todos WP-4: the bundled (and migrated, 0007) Works view saves.
+    include_str!("../../views/defs/works.toml"),
+];
 
 /// Runs the real loader + step validators; returns every error.
 fn reload(files: &BTreeMap<&str, String>) -> Vec<String> {

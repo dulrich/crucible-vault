@@ -42,6 +42,10 @@ pub struct ViewHost {
     state_db: Option<PathBuf>,
     state_conn: Option<Connection>,
     today: Option<NaiveDate>,
+    /// `source = "sources"` rows, as last set by [`Self::set_sources`].
+    sources: Vec<engine::Record>,
+    /// Note path → first matching `[[serial]]` row name (`file.serial`), from [`Self::set_sources`].
+    serial: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl std::fmt::Debug for ViewHost {
@@ -66,6 +70,8 @@ impl ViewHost {
             state_db: None,
             state_conn: None,
             today: None,
+            sources: Vec::new(),
+            serial: None,
         }
     }
 
@@ -77,13 +83,18 @@ impl ViewHost {
         self
     }
 
-    /// The ids of the views whose definition file has `source`.
+    /// The ids of the views whose effective `source` (the view's override, else its file's) is
+    /// `source`.
     pub fn view_ids_for(&self, source: Source) -> Vec<String> {
         let mut v: Vec<String> = self
             .bases
             .iter()
-            .filter(|b| b.source == source)
-            .flat_map(|b| b.views.iter().map(|v| b.id(v)))
+            .flat_map(|b| {
+                b.views
+                    .iter()
+                    .filter(move |v| v.source == source)
+                    .map(|v| b.id(v))
+            })
             .collect();
         v.sort();
         v
@@ -95,6 +106,30 @@ impl ViewHost {
             "tracker_items" => self.view_ids_for(Source::TrackerItems),
             _ => Vec::new(),
         }
+    }
+
+    /// Sets the `source = "sources"` rows and the `file.serial` match set (plan
+    /// round-11-feedback-todos Decision 5). The daemon (`crates/cv/src/views.rs`) computes both
+    /// from `sources.toml` and the index with `cv_actions`' serial matcher, so this crate never
+    /// restates it. Records bind `name`, `publication`, `author`, `prefix`, `kind`, `status`,
+    /// `row`, `entries`, `unread` and `last_update`.
+    pub fn set_sources(
+        &mut self,
+        records: Vec<engine::Record>,
+        serial: std::collections::BTreeMap<String, String>,
+    ) {
+        self.sources = records;
+        self.serial = Some(serial);
+    }
+
+    /// Whether running `view_id` reads [`Self::set_sources`] data: its effective source is
+    /// `sources`, or its definition file mentions `file.serial` ([`Base::uses_serial`]).
+    pub fn needs_sources(&self, view_id: &str) -> bool {
+        self.bases.iter().any(|b| {
+            b.views
+                .iter()
+                .any(|v| b.id(v) == view_id && (v.source == Source::Sources || b.uses_serial))
+        })
     }
 
     /// Pins `today()` (tests); default is the local date at run time.
@@ -120,13 +155,17 @@ impl ViewHost {
         v
     }
 
-    /// A new index generation: every index-sourced view is invalidated (coarse; `tracker_items`
-    /// views are not — they change on [`Self::on_state_changed`]); the connection reopens lazily.
+    /// A new index generation: every index- and sources-sourced view is invalidated (coarse;
+    /// `sources` counts are over index notes; `tracker_items` views are not — they change on
+    /// [`Self::on_state_changed`]); the connection reopens lazily.
     pub fn on_index_generation(&mut self, n: u64) -> Vec<String> {
         if self.conn.as_ref().is_some_and(|(g, _)| *g != n) {
             self.conn = None;
         }
-        self.view_ids_for(Source::Index)
+        let mut v = self.view_ids_for(Source::Index);
+        v.extend(self.view_ids_for(Source::Sources));
+        v.sort();
+        v
     }
 
     /// Reloads definitions from `config_dir`; returns the old and new ids (deduplicated).
@@ -162,7 +201,12 @@ impl ViewHost {
             .ok_or_else(|| ViewsError::UnknownView(view_id.to_string()))?;
         let today = self.today.unwrap_or_else(|| Local::now().date_naive());
         let load_notices = self.load_notices.clone();
-        let records = match self.bases.get(bi).map(|b| b.source) {
+        let source = self
+            .bases
+            .get(bi)
+            .and_then(|b| b.views.get(vi))
+            .map(|v| v.source);
+        let records = match source {
             Some(Source::TrackerItems) => {
                 let path = self
                     .state_db
@@ -171,6 +215,7 @@ impl ViewHost {
                 let sc = open_state(&mut self.state_conn, &path)?;
                 Some(tracker_records(sc).map_err(ViewsError::State)?)
             }
+            Some(Source::Sources) => Some(self.sources.clone()),
             _ => None,
         };
         let conn = open_conn(&mut self.conn, &self.index_base, generation)?;
@@ -192,6 +237,7 @@ impl ViewHost {
             today,
             now: today.and_time(Local::now().time()),
             notices: RefCell::default(),
+            serial: self.serial.as_ref(),
         };
         let mut r = engine::run_on(&env, view, records.as_deref())?;
         r.notices

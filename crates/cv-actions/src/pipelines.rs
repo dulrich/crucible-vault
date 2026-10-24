@@ -662,6 +662,37 @@ impl NewsletterSource {
 mod tests {
     use super::*;
 
+    /// Plan round-11-feedback-todos WP-4: deploy migration 0007's output (its test fixture's
+    /// expected `sources.toml`) parses, with the migrated serial rows intact.
+    #[test]
+    fn migration_0007_output_parses() {
+        let text = include_str!("../../../deploy/migrations/fixtures/0007-expected/sources.toml");
+        let c = SourcesConfig::from_table(&text.parse::<toml::Table>().unwrap()).unwrap();
+        let names: Vec<&str> = c.serial.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Alpha Saga",
+                "Beta Tale",
+                "Delta Empty",
+                "Gamma",
+                "Theta Shared",
+                "Zeta"
+            ]
+        );
+        // `name` is the filename stem; `short` is the title, which two Works may share.
+        assert_eq!(c.serial[4].publication(), c.serial[1].publication());
+        assert_eq!(c.serial[5].publication(), "Zeta \"Q\" \\ T");
+        let a = &c.serial[0];
+        assert_eq!(a.author.as_deref(), Some("Ann Writer"));
+        assert_eq!(a.prefix.len(), 2);
+        assert!(a.matches(&["[[Ann Writer]]"], "https://a.example/s/1b/ch-2"));
+        assert_eq!(c.serial[1].kind, "blog");
+        assert_eq!(c.serial[3].status, SerialStatus::Complete);
+        assert_eq!(c.serial[5].status, SerialStatus::Ignored);
+        assert!(!c.serial[2].matches(&["x"], "https://x"));
+    }
+
     #[test]
     fn newsletter_rows_and_mail_config_are_validated() {
         let src = |extra: &str| {

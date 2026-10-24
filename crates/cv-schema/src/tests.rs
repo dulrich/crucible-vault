@@ -529,6 +529,14 @@ fn validate_view_source() {
     let t = "[[views]]\ntype = \"table\"\nname = \"T\"\n";
     assert!(errs(&format!("source = \"tracker_items\"\n{t}"), "views/x.toml").is_empty());
     assert!(errs(&format!("source = \"index\"\n{t}"), "views/x.toml").is_empty());
+    // Plan round-11-feedback-todos WP-4: `sources`, and the per-view override.
+    assert!(errs(&format!("source = \"sources\"\n{t}"), "views/x.toml").is_empty());
+    assert!(errs(&format!("{t}source = \"sources\"\n"), "views/x.toml").is_empty());
+    let e = errs(&format!("{t}source = \"links\"\n"), "views/x.toml");
+    assert!(
+        e.len() == 1 && e[0].contains("\"links\" is not one of"),
+        "{e:?}"
+    );
     let e = errs(&format!("source = \"links\"\n{t}"), "views/x.toml");
     assert!(
         e.len() == 1 && e[0].starts_with("source: \"links\" is not one of"),

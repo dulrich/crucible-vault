@@ -1,26 +1,40 @@
-# Migrated from vault-repo `_custom/bases/works.base` (Active, Complete, Unread).
-# - Active/Complete: expressions verbatim from `scripts/generate-works-base.mjs`, plus the per-work
-#   Entries / Unread / Last Update columns restored from the deleted Dataview `works-by-status.js`
-#   (zero renders `·`; Last Update = latest `created ?? file.ctime` among the matched entries).
-# - Unread: the generated per-work literal OR-clause list is replaced by one cross-file query over
-#   `files("core/works")` (works directly in that folder, as the generator listed them), with the
-#   generator's `matchClause` semantics: a work with neither filter matches nothing; author AND
-#   prefix when both are set; any prefix matches.
-# Entry match against the row work (`note` = the work, `value` = the entry, `outer` = the entry
-# inside the prefix lambda) is the same `matchClause` with the roles swapped.
+# Works over `sources.toml` (plan round-11-feedback-todos Decision 5; replaces the `core/works`
+# notes, migrated by deploy migration 0007).
+# - Active/Complete read `source = "sources"`: every `[[serial]]` row plus every `[[blog]]`,
+#   `[[newsletter]]` and `[[youtube]]` row with `works = true` (`ignored` serial rows are in
+#   neither view). The daemon computes each row's fields: `name`, `publication`, `author` (bare),
+#   `prefix`, `kind`, `status`, `row` (serial|blog|newsletter|youtube) and the per-row counts over
+#   `daily/day` notes — `entries`, `unread` (`read != true`) and `last_update` (latest
+#   `created ?? file.ctime`). Serial rows count notes matched by the shared serial matcher
+#   (`cv_actions::pipelines::SerialSource::matches`: author AND prefix; a row with neither
+#   matches nothing); other rows count notes whose `publication` equals the row's. Zero renders
+#   `·` (the `entries`/`unread` formulas below).
+# - Unread stays an index view of unread `daily/day` notes; `file.serial` is the name of the first
+#   `[[serial]]` row (config order) the note matches by that same matcher (null when none),
+#   supplied by the daemon — never restated as an expression here.
 
 [formulas]
 tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "using").join(", ")'
 minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
 read = 'if(note.read == true, "✅", "❌")'
 created = 'if(note.created, note.created, file.ctime)'
-matched = 'files("daily/day").filter((note["author-filter"] && note["author-filter"].toString().trim() != "" || list(note["source-prefix-filter"]).filter(value.toString().trim() != "").length > 0) && (!(note["author-filter"] && note["author-filter"].toString().trim() != "") || list(value.properties.author).map(value.toString().trim().replace("#", "")).contains(note["author-filter"].toString().trim().replace("#", ""))) && (list(note["source-prefix-filter"]).filter(value.toString().trim() != "").length == 0 || list(note["source-prefix-filter"]).filter(value.toString().trim() != "").filter(outer.properties.source.toString().trim().startsWith(value.toString().trim())).length > 0))'
-entries_n = 'formula.matched.length'
-entries = 'if(formula.entries_n > 0, formula.entries_n, "·")'
-unread_n = 'formula.matched.filter(value.properties.read != true).length'
-unread = 'if(formula.unread_n > 0, formula.unread_n, "·")'
-dates = 'formula.matched.map(if(value.properties.created, value.properties.created, value.ctime))'
-last_update = 'formula.dates.filter(formula.dates.filter(value > outer).length == 0)[0]'
+entries = 'if(note.entries > 0, note.entries, "·")'
+unread = 'if(note.unread > 0, note.unread, "·")'
+
+[properties."note.name"]
+displayName = "Name"
+
+[properties."note.status"]
+displayName = "Status"
+
+[properties."note.author"]
+displayName = "Author"
+
+[properties."note.prefix"]
+displayName = "Prefix"
+
+[properties."note.kind"]
+displayName = "Kind"
 
 [properties."formula.entries"]
 displayName = "Entries"
@@ -28,22 +42,24 @@ displayName = "Entries"
 [properties."formula.unread"]
 displayName = "Unread"
 
-[properties."formula.last_update"]
+[properties."note.last_update"]
 displayName = "Last Update"
 
 [[views]]
 type = "table"
 name = "Active"
-filters = { and = ['file.folder == "core/works"', 'if(note["work-status"], note["work-status"].toString().trim() == "active", true)'] }
-order = ["file.name", "note.work-status", "note.author-filter", "note.source-prefix-filter", "note.tags", "formula.entries", "formula.unread", "formula.last_update"]
-sort = [{ property = "file.name", direction = "ASC" }]
+source = "sources"
+filters = 'note.status == "active"'
+order = ["note.name", "note.status", "note.author", "note.prefix", "note.kind", "formula.entries", "formula.unread", "note.last_update"]
+sort = [{ property = "note.name", direction = "ASC" }]
 
 [[views]]
 type = "table"
 name = "Complete"
-filters = { and = ['file.folder == "core/works"', 'note["work-status"] == "complete"'] }
-order = ["file.name", "note.work-status", "note.author-filter", "note.source-prefix-filter", "note.tags", "formula.entries", "formula.unread", "formula.last_update"]
-sort = [{ property = "file.name", direction = "ASC" }]
+source = "sources"
+filters = 'note.status == "complete"'
+order = ["note.name", "note.status", "note.author", "note.prefix", "note.kind", "formula.entries", "formula.unread", "note.last_update"]
+sort = [{ property = "note.name", direction = "ASC" }]
 
 [[views]]
 type = "table"
@@ -51,7 +67,7 @@ name = "Unread"
 filters = { and = [
   'file.inFolder("daily/day")',
   'note.read != true',
-  'files("core/works").filter(value.folder == "core/works" && (value.properties["author-filter"] && value.properties["author-filter"].toString().trim() != "" || list(value.properties["source-prefix-filter"]).filter(value.toString().trim() != "").length > 0) && (!(value.properties["author-filter"] && value.properties["author-filter"].toString().trim() != "") || list(note.author).map(value.toString().trim().replace("#", "")).contains(value.properties["author-filter"].toString().trim().replace("#", ""))) && (list(value.properties["source-prefix-filter"]).filter(value.toString().trim() != "").length == 0 || list(value.properties["source-prefix-filter"]).filter(value.toString().trim() != "").filter(note.source.toString().trim().startsWith(value.toString().trim())).length > 0)).length > 0',
+  'file.serial',
 ] }
 order = ["file.name", "formula.tags", "note.word-count", "formula.minutes", "formula.created"]
 sort = [{ property = "formula.created", direction = "ASC" }]

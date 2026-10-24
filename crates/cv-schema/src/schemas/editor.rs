@@ -119,6 +119,13 @@ pub static VIEW: Record = Record {
         )
         .req(),
         field("name", "Name", "View name", Node::Str).req(),
+        // Plan round-11-feedback-todos Decision 5: a view may override its file's `source`.
+        field(
+            "source",
+            "Source",
+            "Overrides the file's row source for this view",
+            Node::Enum(&["index", "tracker_items", "sources"]),
+        ),
         field("filters", "Filters", "Per-view filter tree", Node::Filter),
         field("order", "Columns", "Property ids in column order", STR_LIST)
             .hint(RefKind::PropertyId),
@@ -236,8 +243,8 @@ pub static VIEW_FILE: Record = Record {
         field(
             "source",
             "Source",
-            "Row source: index notes or state.db tracker items",
-            Node::Enum(&["index", "tracker_items"]),
+            "Row source: index notes, state.db tracker items or sources.toml rows",
+            Node::Enum(&["index", "tracker_items", "sources"]),
         )
         .dflt(D::Str("index")),
         field("filters", "Filters", "Base filter tree", Node::Filter),

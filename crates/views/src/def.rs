@@ -96,6 +96,9 @@ pub struct ViewDef {
     #[serde(rename = "type")]
     pub kind: ViewType,
     pub name: String,
+    /// Overrides the file's `source` for this view (plan round-11-feedback-todos Decision 5).
+    #[serde(default)]
+    pub source: Option<Source>,
     #[serde(default)]
     pub filters: Option<FilterNode>,
     #[serde(default)]
@@ -182,6 +185,10 @@ pub enum Source {
     Index,
     /// `state.db` `tracker_items` rows (fields bound as bare identifiers and on `note`).
     TrackerItems,
+    /// The daemon-supplied `sources.toml` rows (plan round-11-feedback-todos Decision 5): every
+    /// `[[serial]]` row plus every other row with `works = true`, with per-row daily-note counts
+    /// (fields bound as bare identifiers and on `note`; see `ViewHost::set_sources`).
+    Sources,
 }
 
 /// One definition file.
@@ -314,6 +321,8 @@ pub struct Tasks {
 pub struct View {
     pub name: String,
     pub kind: ViewType,
+    /// Effective row source: the view's `source`, else its file's.
+    pub source: Source,
     /// Base-level and view-level filters (all must hold).
     pub filters: Vec<Filter>,
     /// `(property id, expression, label)`.
@@ -357,6 +366,9 @@ pub struct Base {
     pub source: Source,
     pub formulas: BTreeMap<String, Result<Expr, String>>,
     pub views: Vec<View>,
+    /// Some filter or formula text mentions `file.serial` (the daemon-supplied serial match
+    /// set; `ViewHost::needs_sources`). A textual check: a false positive only costs a recompute.
+    pub uses_serial: bool,
 }
 
 fn default_label(id: &str) -> String {
@@ -442,6 +454,7 @@ impl Base {
             source: def.source,
             formulas,
             views,
+            uses_serial: format!("{def:?}").contains("file.serial"),
         }
     }
 
@@ -564,6 +577,7 @@ fn compile_view(
     View {
         name: v.name.clone(),
         kind: v.kind,
+        source: v.source.unwrap_or(def.source),
         filters,
         order,
         sort,
@@ -725,5 +739,12 @@ status = [" "]
         assert_eq!(d.source, Source::TrackerItems);
         let d: BaseDef = toml::from_str("").unwrap();
         assert_eq!(d.source, Source::Index);
+        let d: BaseDef =
+            toml::from_str("source='sources'\n[[views]]\ntype='table'\nname='x'\nsource='index'\n")
+                .unwrap();
+        assert_eq!(
+            (d.source, d.views[0].source),
+            (Source::Sources, Some(Source::Index))
+        );
     }
 }

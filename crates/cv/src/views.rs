@@ -3,10 +3,12 @@
 //! never blocks indexing. Queries and invalidation signals are typed [`Cmd`]s on one channel, so
 //! they are processed in the order they were sent.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use cv_actions::pipelines::{SerialStatus, SourcesConfig};
 use cv_protocol::{Notification, ViewResult};
 use tokio::sync::{broadcast, oneshot};
 
@@ -72,9 +74,10 @@ impl ViewRegistry {
         let (tx, rx) = mpsc::channel::<Cmd>();
         let base = index_base.to_path_buf();
         let thread_ids = Arc::clone(&ids);
+        let sources = load_sources(config_dir).unwrap_or_default();
         std::thread::Builder::new()
             .name("cv-view".into())
-            .spawn(move || serve(host, &rx, &base, &events, &thread_ids))?;
+            .spawn(move || serve(host, sources, &rx, &base, &events, &thread_ids))?;
         Ok(Self { ids, tx })
     }
 
@@ -141,20 +144,246 @@ impl ViewRegistry {
     }
 }
 
+/// `<config_dir>/sources.toml` typed (absent = no sources); `None` = unreadable or invalid (the
+/// caller keeps its last valid value, as `ConfigSet` does).
+fn load_sources(config_dir: &Path) -> Option<SourcesConfig> {
+    let path = config_dir.join("sources.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(SourcesConfig::default()),
+        Err(e) => {
+            tracing::warn!(error = %e, "view host: reading sources.toml");
+            return None;
+        }
+    };
+    match text
+        .parse::<toml::Table>()
+        .map_err(|e| e.message().to_owned())
+        .and_then(|t| SourcesConfig::from_table(&t))
+    {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "view host: sources.toml is invalid; keeping the last valid rows");
+            None
+        }
+    }
+}
+
+/// An index prop value as text (lists joined by `,`), as the serial matcher's callers read it.
+fn prop_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a.iter().map(prop_text).collect::<Vec<_>>().join(","),
+        serde_json::Value::Null | serde_json::Value::Object(_) => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// One `daily/day` note as the source-row counts read it.
+#[derive(Default)]
+struct Entry {
+    authors: Vec<String>,
+    source: String,
+    publication: String,
+    read: bool,
+    created: Option<views::value::Value>,
+    ctime: i64,
+}
+
+/// The `source = "sources"` records and the `file.serial` match set (plan round-11-feedback-todos
+/// Decision 5), over the `daily/day` notes of `q`:
+/// - one record per `[[serial]]` row plus per `[[blog]]`/`[[newsletter]]`/`[[youtube]]` row with
+///   `works = true` (config order), binding `name`, `publication`, `author` (bare; null when
+///   unset), `prefix` (list), `kind` (serial/newsletter: its `kind`; blog/youtube: the row type),
+///   `status` (serial: its status; others `active`), `row`, `entries`, `unread` (`read != true`)
+///   and `last_update` (latest `created`, else file ctime; null without entries). Serial rows
+///   count the notes [`SerialSource::matches`] accepts (the auto-file matcher, shared — never
+///   restated as a view expression); other rows count notes whose `publication` equals theirs;
+/// - note path → name of the first serial row (config order) matching it.
+fn source_data(
+    q: &cv_index::Query<'_>,
+    cfg: &SourcesConfig,
+) -> Result<(Vec<views::engine::Record>, BTreeMap<String, String>), String> {
+    use views::value::Value;
+    let ix = |e: cv_index::Error| format!("index: {e}");
+    let mut notes: BTreeMap<String, Entry> = q
+        .md_files_under("daily/day")
+        .map_err(ix)?
+        .into_iter()
+        .map(|f| {
+            (
+                f.path,
+                Entry {
+                    ctime: f.ctime,
+                    ..Entry::default()
+                },
+            )
+        })
+        .collect();
+    for key in ["author", "source", "publication", "read", "created"] {
+        for r in q.md_props_with_key(key).map_err(ix)? {
+            let Some(e) = notes.get_mut(&r.path) else {
+                continue;
+            };
+            match key {
+                "author" => match &r.value {
+                    serde_json::Value::Array(v) => e.authors.extend(v.iter().map(prop_text)),
+                    v => e.authors.push(prop_text(v)),
+                },
+                "source" => e.source = prop_text(&r.value),
+                "publication" => e.publication = prop_text(&r.value).trim().to_owned(),
+                "read" => e.read = r.value == serde_json::Value::Bool(true),
+                _ => {
+                    let v = Value::from_json(&r.value);
+                    e.created = matches!(v, Value::Date(..)).then_some(v);
+                }
+            }
+        }
+    }
+    let mut serial_of = BTreeMap::new();
+    for (path, e) in &notes {
+        let a: Vec<&str> = e.authors.iter().map(String::as_str).collect();
+        if let Some(s) = cfg.serial.iter().find(|s| s.matches(&a, &e.source)) {
+            serial_of.insert(path.clone(), s.name.clone());
+        }
+    }
+    let counts = |accept: &dyn Fn(&Entry) -> bool| {
+        let (mut n, mut unread, mut last) = (0.0, 0.0, None::<Value>);
+        for e in notes.values().filter(|e| accept(e)) {
+            n += 1.0;
+            if !e.read {
+                unread += 1.0;
+            }
+            let d = e
+                .created
+                .clone()
+                .unwrap_or_else(|| views::eval::ms_date(e.ctime));
+            if last.as_ref().is_none_or(|l| {
+                views::value::partial_cmp(&d, l).is_some_and(std::cmp::Ordering::is_gt)
+            }) {
+                last = Some(d);
+            }
+        }
+        (n, unread, last.unwrap_or(Value::Null))
+    };
+    let text = |s: &str| Value::Str(s.to_owned());
+    let mut out = Vec::new();
+    let mut push = |row: &str,
+                    name: &str,
+                    publication: &str,
+                    author: Option<&str>,
+                    prefix: &[String],
+                    kind: &str,
+                    status: &str,
+                    accept: &dyn Fn(&Entry) -> bool| {
+        let (n, unread, last) = counts(accept);
+        let mut m = BTreeMap::new();
+        m.insert("row".to_owned(), text(row));
+        m.insert("name".to_owned(), text(name));
+        m.insert("publication".to_owned(), text(publication));
+        m.insert(
+            "author".to_owned(),
+            author
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .map_or(Value::Null, text),
+        );
+        m.insert(
+            "prefix".to_owned(),
+            Value::list(prefix.iter().map(|p| text(p)).collect()),
+        );
+        m.insert("kind".to_owned(), text(kind));
+        m.insert("status".to_owned(), text(status));
+        m.insert("entries".to_owned(), Value::Num(n));
+        m.insert("unread".to_owned(), Value::Num(unread));
+        m.insert("last_update".to_owned(), last);
+        out.push(std::sync::Arc::new(m));
+    };
+    let by_pub = |p: &str| {
+        let p = p.trim().to_owned();
+        move |e: &Entry| e.publication == p
+    };
+    for s in &cfg.serial {
+        let status = match s.status {
+            SerialStatus::Active => "active",
+            SerialStatus::Complete => "complete",
+            SerialStatus::Ignored => "ignored",
+        };
+        push(
+            "serial",
+            &s.name,
+            s.publication(),
+            s.author.as_deref(),
+            &s.prefix,
+            &s.kind,
+            status,
+            &|e: &Entry| {
+                let a: Vec<&str> = e.authors.iter().map(String::as_str).collect();
+                s.matches(&a, &e.source)
+            },
+        );
+    }
+    for b in cfg.blog.iter().filter(|b| b.works) {
+        let f = by_pub(b.publication());
+        push(
+            "blog",
+            &b.name,
+            b.publication(),
+            None,
+            &[],
+            "blog",
+            "active",
+            &f,
+        );
+    }
+    for n in cfg.newsletter.iter().filter(|n| n.works) {
+        let f = by_pub(n.publication());
+        push(
+            "newsletter",
+            &n.name,
+            n.publication(),
+            None,
+            &[],
+            &n.kind,
+            "active",
+            &f,
+        );
+    }
+    for y in cfg.youtube.iter().filter(|y| y.works) {
+        let f = by_pub(y.publication());
+        push(
+            "youtube",
+            &y.channel,
+            y.publication(),
+            None,
+            &[],
+            "youtube",
+            "active",
+            &f,
+        );
+    }
+    Ok((out, serial_of))
+}
+
 fn log_notices(host: &views::ViewHost) {
     for n in host.load_notices() {
         tracing::warn!(notice = %n, "view definitions");
     }
 }
 
+/// The host loop. `sources` is the typed `sources.toml`; the `source = "sources"` rows and the
+/// `file.serial` set are recomputed lazily — on the first run of a view that reads them after a
+/// generation, notes change or config change ([`views::ViewHost::needs_sources`]).
 fn serve(
     mut host: views::ViewHost,
+    mut sources: SourcesConfig,
     rx: &mpsc::Receiver<Cmd>,
     base: &Path,
     events: &broadcast::Sender<Notification>,
     ids: &Mutex<Vec<String>>,
 ) {
     let mut reader: Option<cv_index::Reader> = None;
+    let mut sources_stale = true;
     let invalidate = |v: Vec<String>| {
         if !v.is_empty() {
             // No receivers is fine (no subscribers yet).
@@ -177,6 +406,18 @@ fn serve(
                         }
                     }
                 }
+                if sources_stale
+                    && host.needs_sources(&view_id)
+                    && let Some(r) = reader.as_ref()
+                {
+                    match source_data(&r.query(), &sources) {
+                        Ok((records, serial)) => {
+                            host.set_sources(records, serial);
+                            sources_stale = false;
+                        }
+                        Err(e) => tracing::warn!(error = %e, "view host: computing source rows"),
+                    }
+                }
                 let res = match reader.as_ref() {
                     Some(r) => host.run(r, &view_id, this_path.as_deref()),
                     None => Err("no index reader".into()),
@@ -191,12 +432,20 @@ fn serve(
                         cv_index::Reader::open_current(base).ok()
                     }
                 };
+                sources_stale = true;
                 invalidate(host.on_index_generation(n));
                 *lock(ids) = host.view_ids();
             }
-            Cmd::NotesChanged => invalidate(host.view_ids()),
+            Cmd::NotesChanged => {
+                sources_stale = true;
+                invalidate(host.view_ids());
+            }
             Cmd::StateChanged(table) => invalidate(host.on_state_changed(table)),
             Cmd::Config(dir) => {
+                if let Some(s) = load_sources(&dir) {
+                    sources = s;
+                }
+                sources_stale = true;
                 invalidate(host.on_config_changed(&dir));
                 log_notices(&host);
                 *lock(ids) = host.view_ids();
@@ -429,5 +678,122 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(n, invalidated);
+    }
+
+    /// `(name, entries, unread, last_update)` per row of a sources view.
+    fn source_rows(r: &ViewResult) -> Vec<(String, String, String, String)> {
+        let cell = |c: &serde_json::Value| match &c["v"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => c["label"].as_str().unwrap_or_default().to_owned(),
+            serde_json::Value::Number(n) => n.as_f64().unwrap_or_default().to_string(),
+            v => v.to_string(),
+        };
+        r.0["groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|g| g["rows"].as_array().cloned().unwrap_or_default())
+            .map(|row| {
+                let c = &row["cells"];
+                (cell(&c[0]), cell(&c[1]), cell(&c[2]), cell(&c[3]))
+            })
+            .collect()
+    }
+
+    /// Plan round-11-feedback-todos WP-4: `source = "sources"` rows are every `[[serial]]` row
+    /// plus the `works = true` rows, counted over `daily/day` notes (serial rows by the shared
+    /// matcher, others by `publication`); a config change re-computes the rows, an index
+    /// generation re-computes the counts, and `file.serial` feeds an index view.
+    #[tokio::test]
+    async fn sources_rows_follow_config_and_notes() {
+        let root = std::env::temp_dir().join(format!("cv-views-sources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tmp = TmpRoot(root);
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(vault.join("daily/day/2026-10-01")).unwrap();
+        let note = |name: &str, fm: &str| {
+            std::fs::write(
+                vault.join(format!("daily/day/2026-10-01/{name}.md")),
+                format!("---\n{fm}\n---\n"),
+            )
+            .unwrap();
+        };
+        note(
+            "c1",
+            "author: \"[[Ann]]\"\nsource: https://s.example/w/1/c1\ncreated: 2026-10-01\nread: true",
+        );
+        note(
+            "c2",
+            "author: [Ann]\nsource: https://s.example/w/1/c2\ncreated: 2026-10-03",
+        );
+        note("off", "author: Ann\nsource: https://other.example/x");
+        note("p1", "publication: Feed\ncreated: 2026-09-30");
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(config.join("views")).unwrap();
+        std::fs::write(
+            config.join("views/works.toml"),
+            "[[views]]\ntype='table'\nname='All'\nsource='sources'\norder=['name','entries','unread','last_update']\nsort=[{property='name',direction='ASC'}]\n\
+             [[views]]\ntype='table'\nname='Matched'\nfilters={and=['file.inFolder(\"daily/day\")','file.serial == \"Saga\"']}\norder=['file.name']\nsort=[{property='file.name',direction='ASC'}]\n",
+        )
+        .unwrap();
+        let sources = "[[serial]]\nname='Saga'\nauthor='Ann'\nprefix=['https://s.example/w/1/']\n\
+                       [[blog]]\nname='Feed'\nlink='https://f.example/rss'\nworks=true\n\
+                       [[blog]]\nname='Hidden'\nlink='https://h.example/rss'\n";
+        std::fs::write(config.join("sources.toml"), sources).unwrap();
+        let base = tmp.path().join("idx").join("index.db");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        let mut index = cv_index::Index::create(&vault, &base).unwrap();
+        let (tx, _rx) = broadcast::channel(64);
+        let reg = ViewRegistry::start(&config, &base, None, tx).unwrap();
+        let all = "works#All".to_owned();
+        let s = |a: &str, b: &str, c: &str, d: &str| {
+            (a.to_owned(), b.to_owned(), c.to_owned(), d.to_owned())
+        };
+        assert_eq!(
+            source_rows(&reg.run(&all, None).await.unwrap()),
+            [
+                s("Feed", "1", "1", "2026-09-30"),
+                s("Saga", "2", "1", "2026-10-03")
+            ]
+        );
+        let matched = |r: &ViewResult| {
+            source_rows(r)
+                .into_iter()
+                .map(|(n, ..)| n)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            matched(&reg.run("works#Matched", None).await.unwrap()),
+            ["c1", "c2"]
+        );
+        // Config change: a second serial row appears and the blog row loses `works`.
+        std::fs::write(
+            config.join("sources.toml"),
+            format!("{sources}[[serial]]\nname='Other'\nprefix=['https://other.example/']\n")
+                .replace("works=true\n", ""),
+        )
+        .unwrap();
+        reg.notify_config(&config);
+        let rows = source_rows(&reg.run(&all, None).await.unwrap());
+        let counts: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|(n, e, u, _)| (n.as_str(), e.as_str(), u.as_str()))
+            .collect();
+        assert_eq!(counts, [("Other", "1", "1"), ("Saga", "2", "1")]);
+        // `off` has no `created`: its last update falls back to the file ctime (a date-time).
+        assert!(rows[0].3.contains('T'), "{rows:?}");
+        // Notes change: c2 is read now, a new chapter arrives.
+        note(
+            "c2",
+            "author: [Ann]\nsource: https://s.example/w/1/c2\ncreated: 2026-10-03\nread: true",
+        );
+        note(
+            "c3",
+            "author: Ann\nsource: https://s.example/w/1/c3\ncreated: 2026-10-04",
+        );
+        let g = index.rebuild(&vault).unwrap();
+        reg.notify_generation(g);
+        let rows = source_rows(&reg.run(&all, None).await.unwrap());
+        assert_eq!(rows[1], s("Saga", "3", "1", "2026-10-04"));
     }
 }

@@ -39,6 +39,11 @@ pub struct Env<'a> {
     pub today: NaiveDate,
     pub now: NaiveDateTime,
     pub notices: RefCell<Vec<String>>,
+    /// Note path → the name of the first `[[serial]]` sources row (config order) the note matches,
+    /// supplied by the daemon (plan round-11-feedback-todos Decision 5; the matcher is
+    /// `cv_actions::pipelines::SerialSource::matches`, never restated here). Exposed as
+    /// `file.serial` (the row name, or null); `None` = no data (every `file.serial` is null).
+    pub serial: Option<&'a BTreeMap<String, String>>,
 }
 
 impl Env<'_> {
@@ -353,6 +358,11 @@ impl<'a> RowCtx<'a> {
                 "size" => Value::Num(f.size as f64),
                 "mtime" => ms_date(f.mtime),
                 "ctime" => ms_date(f.ctime),
+                "serial" => self
+                    .env
+                    .serial
+                    .and_then(|m| m.get(&f.path))
+                    .map_or(Value::Null, |n| Value::Str(n.clone())),
                 "tags" => Value::list(
                     db.tags(f)?
                         .iter()
