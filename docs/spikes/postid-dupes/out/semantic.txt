@@ -1,0 +1,7 @@
+sources=8738 chunks=94487 dim=1024 pairs_scanned=38171953
+cosine>=0.85: pairs=199873
+cosine>=0.9: pairs=38039
+cosine>=0.95: pairs=12903
+cosine>=0.98: pairs=2807
+sources_with_a_neighbour>=0.95: 2564
+time_load_mean=181.727985ms time_allpairs_4threads=5.288081892s total=6.419470892s

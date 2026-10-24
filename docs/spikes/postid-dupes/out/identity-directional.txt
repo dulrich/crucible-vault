@@ -1,0 +1,58 @@
+md_notes_excl_trash=9585 trash_md=14
+== key presence (count, %) overall
+source: 4824 (50.3%)
+post-id: 4787 (49.9%)
+yt-video-id: 1159 (12.1%)
+via: 38 (0.4%)
+duplicate-of: 0 (0.0%)
+created: 4647 (48.5%)
+published: 4841 (50.5%)
+date: 173 (1.8%)
+updated: 253 (2.6%)
+modified: 4205 (43.9%)
+pub_date: 0 (0.0%)
+release-date: 0 (0.0%)
+== notes by kind
+{"Clippings": 9, "_blog_metadata": 1255, "_raw_transcript": 460, "_x_metadata": 637, "_yt_metadata": 2663, "core": 27, "daily": 3177, "initiatives": 944, "other": 413}
+== source / post-id presence by kind (n, source, post-id, yt-video-id, ident)
+Clippings: n=9 source=9 post-id=8 yt-video-id=0 ident=9
+_blog_metadata: n=1255 source=1255 post-id=1255 yt-video-id=0 ident=1255
+_raw_transcript: n=460 source=459 post-id=443 yt-video-id=416 ident=459
+_x_metadata: n=637 source=0 post-id=0 yt-video-id=0 ident=0
+_yt_metadata: n=2663 source=0 post-id=0 yt-video-id=4 ident=0
+core: n=27 source=0 post-id=0 yt-video-id=0 ident=0
+daily: n=3177 source=2945 post-id=2925 yt-video-id=739 ident=2945
+initiatives: n=944 source=0 post-id=0 yt-video-id=0 ident=0
+other: n=413 source=156 post-id=156 yt-video-id=0 ident=156
+== (1) identity groups (stored post-id first)
+notes_with_ident=4824 groups_total=3919 groups>=2=824 notes_in_them=1729 max_group=7
+group folder-kind sets (groups): [_raw_transcript + daily]=431 [_blog_metadata + daily]=347 [_blog_metadata + _raw_transcript + daily]=27 [daily]=19
+within-group note pairs by folder pair: [_raw_transcript x daily]=495 [_blog_metadata x daily]=405 [daily x daily]=89 [_blog_metadata x _raw_transcript]=28 [_raw_transcript x _raw_transcript]=1
+notes_with_both_post-id_and_source=4787 stored!=recomputed=787 (16.4%) (of those stored!=canonical-source too: 556)
+groups with recomputed-first identity: groups>=2=1135 notes_in_them=2355
+groups (member-sets) present under stored-first but not recomputed-first=4 ; present under recomputed-first only=315
+== (2) _blog_metadata
+notes=1255 source=1255 post-id=1255 ident=1255 (100.0%)
+DIRECTIONAL meta-in-capture: >=0.9=347 0.5-0.9=20 <0.5=7; small-in-large>=0.9 but directional<0.9: 8
+with_identity_twin_in_non-metadata_note=374 no_twin=881 (of which share identity with another _blog_metadata note only: 0); without any identity=0
+twin capture folder kinds: {"_raw_transcript+daily": 27, "daily": 347}
+containment(metadata body vs best capture body, small-in-large): >=0.9=354 0.5-0.9=13 <0.5=7 (n=374)
+-- date-ish frontmatter keys on _blog_metadata (count of 1255)
+fetched_at: filled=1255 (100.0%) shapes=[("9999-99-99T99:99:99.999Z", 1255)]
+published: filled=1255 (100.0%) shapes=[("9999-99-99", 883), ("9999-99-99T99:99:99+99:99", 305), ("9999-99-99T99:99:99Z", 45)]
+-- all frontmatter keys on _blog_metadata: [("blog", 1255), ("fetched_at", 1255), ("has-body", 1255), ("kind", 1255), ("post-id", 1255), ("published", 1255), ("source", 1255), ("source_command", 1255), ("word-count", 1255), ("authors", 790), ("categories", 324), ("audio_url", 160), ("x-metadata", 113)]
+== (3) coverage of content-similarity candidates
+containment>=0.9: total_pairs=2785 excluded: daily x daily=189 touching initiatives=669 touching _yt_metadata=884 (in that precedence) (trash/unresolved=31); remaining=1012
+  explained by identity (same stored-first OR recomputed-first ident)=670 (66.2% of remaining); unexplained=342
+  explained by folder pair: [_blog_metadata x daily]=643 [_raw_transcript x daily]=24 [_blog_metadata x _raw_transcript]=2 [_raw_transcript x _raw_transcript]=1
+  unexplained by folder pair: [_blog_metadata x daily]=196 [other x other]=66 [_blog_metadata x _blog_metadata]=27 [_raw_transcript x other]=22 [daily x other]=20 [_raw_transcript x daily]=9 [_blog_metadata x _raw_transcript]=1 [_x_metadata x daily]=1
+  unexplained with >=1 side lacking `source`=107 (31.3%): both lack=65, exactly one lacks=42
+BOTH(cont>=0.7 & cos>=0.95): total_pairs=902 excluded: daily x daily=31 touching initiatives=3 touching _yt_metadata=33 (in that precedence) (trash/unresolved=0); remaining=835
+  explained by identity (same stored-first OR recomputed-first ident)=647 (77.5% of remaining); unexplained=188
+  explained by folder pair: [_blog_metadata x daily]=502 [_raw_transcript x daily]=142 [_blog_metadata x _raw_transcript]=2 [_raw_transcript x _raw_transcript]=1
+  unexplained by folder pair: [other x other]=78 [_blog_metadata x daily]=51 [_blog_metadata x _blog_metadata]=23 [_x_metadata x daily]=10 [Clippings x Clippings]=9 [daily x other]=6 [_blog_metadata x _x_metadata]=5 [_raw_transcript x daily]=4
+  unexplained with >=1 side lacking `source`=98 (52.1%): both lack=83, exactly one lacks=15
+== (4) re-clips: identity groups with >=2 notes outside _blog_metadata
+groups=488 folder-kind sets: [("_raw_transcript+daily", 458), ("daily", 30)]
+groups with a member in Clippings=0; groups with members in >=2 different daily/day/<date> folders=2; in either=n/a (see above)
+groups with date known for all members=488 (date from created/date/published fm=1019, else daily folder date=0): spread same-day=486 <=7d=2 more=0

@@ -1,0 +1,29 @@
+A pairs(cont>=0.5)=11364 B pairs(cos>=0.85)=200057
+overlap cont>=0.5 vs cos>=0.9: A=11364 B=38279 both=1834 A_only=9530 B_only=36445 jaccard_of_sets=0.038 (A pairs whose both notes appear in some B>=0.85 pair: 7550)
+overlap cont>=0.7 vs cos>=0.95: A=8726 B=13147 both=902 A_only=7824 B_only=12245 jaccard_of_sets=0.043 (A pairs whose both notes appear in some B>=0.85 pair: 6232)
+overlap cont>=0.9 vs cos>=0.98: A=2785 B=3048 both=467 A_only=2318 B_only=2581 jaccard_of_sets=0.087 (A pairs whose both notes appear in some B>=0.85 pair: 1845)
+A band containment [0.5,0.7): also_cos>=0.90=501
+  proxy A[0.5,0.7): pairs=2638 same_dir=61.6% same_top_folder=81.2% both_have_source_host=413 of_which_same_host=93.2% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=1 same_filename_stem=4.4%
+  top folder-pair kinds: [_yt_metadata x _yt_metadata]=1427 [initiatives x initiatives]=308 [_raw_transcript x _yt_metadata]=168 [_blog_metadata x _blog_metadata]=167 [daily x daily]=160
+A band containment [0.7,0.9): also_cos>=0.90=439
+  proxy A[0.7,0.9): pairs=5941 same_dir=73.3% same_top_folder=88.6% both_have_source_host=399 of_which_same_host=69.7% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=2 same_filename_stem=6.3%
+  top folder-pair kinds: [_yt_metadata x _yt_metadata]=4859 [initiatives x initiatives]=247 [_raw_transcript x _yt_metadata]=209 [_raw_transcript x daily]=172 [_blog_metadata x daily]=132
+A band containment [0.9,1.01): also_cos>=0.90=894
+  proxy A[0.9,1.01): pairs=2785 same_dir=22.8% same_top_folder=58.4% both_have_source_host=1122 of_which_same_host=67.4% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=31 same_filename_stem=26.1%
+  top folder-pair kinds: [_blog_metadata x daily]=839 [_yt_metadata x _yt_metadata]=675 [initiatives x initiatives]=669 [daily x daily]=189 [_raw_transcript x _yt_metadata]=156
+B band cosine [0.9,0.95): also_cont>=0.5=612
+  proxy B[0.9,0.95): pairs=25132 same_dir=45.6% same_top_folder=78.8% both_have_source_host=15191 of_which_same_host=56.7% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=0 same_filename_stem=1.4%
+  top folder-pair kinds: [daily x daily]=15091 [_blog_metadata x daily]=3733 [_crucible x _crucible]=1947 [_blog_metadata x _blog_metadata]=1442 [_raw_transcript x daily]=904
+B band cosine [0.95,0.98): also_cont>=0.5=592
+  proxy B[0.95,0.98): pairs=10099 same_dir=89.2% same_top_folder=93.4% both_have_source_host=1293 of_which_same_host=98.0% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=0 same_filename_stem=3.1%
+  top folder-pair kinds: [daily x daily]=9136 [_raw_transcript x daily]=308 [_blog_metadata x daily]=280 [_blog_metadata x _blog_metadata]=155 [_crucible x _crucible]=57
+B band cosine [0.98,1.01): also_cont>=0.5=630
+  proxy B[0.98,1.01): pairs=3048 same_dir=80.6% same_top_folder=83.6% both_have_source_host=498 of_which_same_host=93.6% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=0 same_filename_stem=3.8%
+  top folder-pair kinds: [daily x daily]=2069 [_blog_metadata x daily]=383 [core x core]=210 [_yt_metadata x _yt_metadata]=138 [_crucible x _crucible]=84
+  proxy BOTH(cont>=0.7 & cos>=0.95): pairs=902 same_dir=14.7% same_top_folder=18.5% both_have_source_host=762 of_which_same_host=93.6% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=0 same_filename_stem=18.1%
+  top folder-pair kinds: [_blog_metadata x daily]=553 [_raw_transcript x daily]=146 [_crucible x _crucible]=77 [daily x daily]=31 [_blog_metadata x _blog_metadata]=23
+  proxy A_only(cont>=0.7, not cos>=0.95): pairs=7824 same_dir=62.1% same_top_folder=85.9% both_have_source_host=759 of_which_same_host=42.3% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=33 same_filename_stem=12.0%
+  top folder-pair kinds: [_yt_metadata x _yt_metadata]=5512 [initiatives x initiatives]=913 [_blog_metadata x daily]=418 [_raw_transcript x _yt_metadata]=365 [daily x daily]=221
+  proxy B_only(cos>=0.95, not cont>=0.7): pairs=12245 same_dir=92.5% same_top_folder=96.5% both_have_source_host=1029 of_which_same_host=99.1% linked_via_duplicate_of=0 (0.0%) either_has_duplicate_of=0 (0.0%) one_side_in_trash=0 same_filename_stem=2.1%
+  top folder-pair kinds: [daily x daily]=11174 [_raw_transcript x daily]=239 [core x core]=210 [_blog_metadata x _blog_metadata]=149 [_yt_metadata x _yt_metadata]=132
+notes_touched=5954 of_which_with_duplicate_of=0
