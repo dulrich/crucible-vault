@@ -65,6 +65,8 @@ pub struct Prefs {
     pub quick_switch_open: QuickSwitchOpen,
     pub search_limit: usize,
     pub search_debounce_ms: u64,
+    /// `search.location` (plan round-12-feedback-todos WP-3).
+    pub search_location: SearchLocation,
     /// `delete_mode` (plan editor-ui-round-3 WP-3; replaces `confirm_trash`, now ignored).
     pub delete_mode: DeleteMode,
     /// `missing_link` (plan round-6-feedback-todos WP-4): a click on an unresolved vault link.
@@ -112,6 +114,16 @@ fn nav_links_of(doc: &ConfigDoc) -> Vec<NavLink> {
         .collect()
 }
 
+/// `search.location`: where the search command opens (plan round-12-feedback-todos WP-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchLocation {
+    /// The side panel's Search tab.
+    #[default]
+    Panel,
+    /// A centre modal card.
+    Modal,
+}
+
 /// `missing_link`: what a click on a link to a missing note does (plan round-6-feedback-todos WP-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MissingLink {
@@ -147,6 +159,7 @@ impl Default for Prefs {
             quick_switch_open: QuickSwitchOpen::default(),
             search_limit: DEFAULT_SEARCH_LIMIT,
             search_debounce_ms: DEFAULT_SEARCH_DEBOUNCE_MS,
+            search_location: SearchLocation::Panel,
             delete_mode: DeleteMode::Trash,
             missing_link: MissingLink::Warn,
             focus_follows_mouse: false,
@@ -241,6 +254,10 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
         search_debounce_ms: int_in("search.debounce_ms")
             .and_then(|v| u64::try_from(v).ok())
             .unwrap_or(d.search_debounce_ms),
+        search_location: match doc.get_str(&p("search.location")) {
+            Some("modal") => SearchLocation::Modal,
+            _ => d.search_location,
+        },
         delete_mode: match doc.get_str(&p("delete_mode")) {
             Some("permanent") => DeleteMode::Permanent,
             Some("trash") => DeleteMode::Trash,

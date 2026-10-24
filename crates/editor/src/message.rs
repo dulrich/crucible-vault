@@ -351,6 +351,10 @@ pub enum PaletteMsg {
 pub enum PanelsMsg {
     /// Show/hide the column.
     Toggle,
+    /// The search command: opens the side panel or the centre modal per `search.location`.
+    Search,
+    /// Close the search modal.
+    CloseSearchModal,
     /// Show the column on a panel.
     Show(crate::panels::PanelKind),
     /// Recompute tick (buffer-keyed; cheap when nothing changed).

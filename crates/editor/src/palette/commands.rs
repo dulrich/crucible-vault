@@ -317,7 +317,7 @@ static TABLE: LazyLock<Vec<CmdSpec>> = LazyLock::new(|| {
             "focus_search",
             "Search the vault",
             &["Ctrl+Shift+F"],
-            |_| Message::Panels(PanelsMsg::Show(PanelKind::Search)),
+            |_| Message::Panels(PanelsMsg::Search),
         ),
         cmd(
             C::OpenSettings,

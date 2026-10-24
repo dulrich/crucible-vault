@@ -378,6 +378,7 @@ path = "core/Inbox.md"
 [search]
 limit = 80
 debounce_ms = 120
+location = "modal"
 
 [palette]
 hidden = ["quit", "my.action"]
@@ -1254,4 +1255,29 @@ fn scroll_anchor_parses_with_default() {
         let p = editor_prefs::parse(bad, Surround::Med).expect("parse");
         assert_eq!(p.scroll_anchor, 0, "{bad}");
     }
+}
+
+/// Plan round-12-feedback-todos WP-3: `search.location` parses forgivingly.
+#[test]
+fn search_location_parses_modal_panel_and_unknown_falls_back_to_panel() {
+    use editor_prefs::SearchLocation;
+    let loc = |s: &str| {
+        editor_prefs::parse(s, Surround::Med)
+            .expect("parse")
+            .search_location
+    };
+    assert_eq!(
+        loc("[search]\nlocation = \"modal\"\n"),
+        SearchLocation::Modal
+    );
+    assert_eq!(
+        loc("[search]\nlocation = \"panel\"\n"),
+        SearchLocation::Panel
+    );
+    assert_eq!(
+        loc("[search]\nlocation = \"popup\"\n"),
+        SearchLocation::Panel
+    );
+    assert_eq!(loc("[search]\nlocation = 3\n"), SearchLocation::Panel);
+    assert_eq!(loc(""), SearchLocation::Panel);
 }

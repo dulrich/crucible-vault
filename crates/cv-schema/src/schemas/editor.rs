@@ -315,6 +315,13 @@ pub static EDITOR_SEARCH: Record = Record {
         )
         .dflt(D::Int(250))
         .step(50.0),
+        field(
+            "location",
+            "Location",
+            "Where vault search opens: the side panel or a centre modal",
+            Node::Enum(&["panel", "modal"]),
+        )
+        .dflt(D::Str("panel")),
     ],
     rules: &[],
     summary: None,

@@ -44,6 +44,8 @@ pub const ROW: f32 = 24.0;
 pub const ROW2: f32 = 44.0;
 /// The search field's widget id.
 pub const SEARCH_ID: &str = "panels-search";
+/// The search modal's field id (distinct from [`SEARCH_ID`]: both can be on screen).
+pub const SEARCH_MODAL_ID: &str = "panels-search-modal";
 
 /// Which panel the column shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -484,6 +486,8 @@ pub fn update(p: &mut Panels, m: PanelsMsg, has_daemon: bool) -> Effect {
                 Effect::Sync
             }
         }
+        // Routed by `App::update_panels` (it owns the prefs and the modal flag).
+        PanelsMsg::Search | PanelsMsg::CloseSearchModal => Effect::None,
         PanelsMsg::Tick => Effect::Sync,
         PanelsMsg::OutlineJump(line) => Effect::OutlineJump(line),
         PanelsMsg::Open(path) => Effect::Open(path),
@@ -825,44 +829,48 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
         )
         .height(Length::Fill)
         .into(),
-        PanelKind::Search => {
-            let mut c = column![
-                text_input("Search the vault…", &p.search.query)
-                    .id(SEARCH_ID)
-                    .on_input(|q| pm(PanelsMsg::SearchInput(q)))
-            ]
-            .spacing(4);
-            if let Some(e) = &p.search.error {
-                c = c.push(text(e.as_str()).size(12).color(t.warn_text.to_color()));
-            }
-            c.push(
-                VirtualList::new(&p.search.results, ROW2, p.window(ListId::Search), |w| {
-                    pm(PanelsMsg::Scrolled(ListId::Search, w))
-                })
-                .view(move |_, h| {
-                    button(column![
-                        row![
-                            text(h.path.as_str())
-                                .size(13)
-                                .color(t.accent_text.to_color()),
-                            text(h.heading.as_str())
-                                .size(12)
-                                .color(t.text_dim.to_color()),
-                        ]
-                        .spacing(6),
-                        text(h.snippet.as_str())
-                            .size(12)
-                            .color(t.text_dim.to_color()),
-                    ])
-                    .style(button::text)
-                    .padding(1)
-                    .height(ROW2)
-                    .on_press(pm(PanelsMsg::Open(h.path.clone())))
-                    .into()
-                }),
-            )
-            .into()
-        }
+        PanelKind::Search => search_view(p, t, SEARCH_ID),
     };
     column![tabs, body].spacing(6).padding(4).into()
+}
+
+/// The search field and result list, shared by the side panel and the centre modal (`id` is the
+/// field's widget id).
+pub fn search_view<'a>(p: &'a Panels, t: Tokens, id: &'static str) -> Element<'a, Message> {
+    let mut c = column![
+        text_input("Search the vault…", &p.search.query)
+            .id(id)
+            .on_input(|q| pm(PanelsMsg::SearchInput(q)))
+    ]
+    .spacing(4);
+    if let Some(e) = &p.search.error {
+        c = c.push(text(e.as_str()).size(12).color(t.warn_text.to_color()));
+    }
+    c.push(
+        VirtualList::new(&p.search.results, ROW2, p.window(ListId::Search), |w| {
+            pm(PanelsMsg::Scrolled(ListId::Search, w))
+        })
+        .view(move |_, h| {
+            button(column![
+                row![
+                    text(h.path.as_str())
+                        .size(13)
+                        .color(t.accent_text.to_color()),
+                    text(h.heading.as_str())
+                        .size(12)
+                        .color(t.text_dim.to_color()),
+                ]
+                .spacing(6),
+                text(h.snippet.as_str())
+                    .size(12)
+                    .color(t.text_dim.to_color()),
+            ])
+            .style(button::text)
+            .padding(1)
+            .height(ROW2)
+            .on_press(pm(PanelsMsg::Open(h.path.clone())))
+            .into()
+        }),
+    )
+    .into()
 }

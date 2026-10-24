@@ -58,6 +58,8 @@ impl App {
             Some(Message::Switcher(SwitcherMsg::Close))
         } else if self.palette.open {
             Some(Message::Palette(PaletteMsg::Close))
+        } else if self.search_modal {
+            Some(Message::Panels(crate::message::PanelsMsg::CloseSearchModal))
         } else {
             None
         }
@@ -700,6 +702,12 @@ impl App {
                     card = card.push(switcher::view(&self.switcher, t));
                 } else if self.palette.open {
                     card = card.push(crate::palette::view(&self.palette, t));
+                } else if self.search_modal {
+                    card = card.push(crate::panels::search_view(
+                        &self.panels,
+                        t,
+                        crate::panels::SEARCH_MODAL_ID,
+                    ));
                 }
                 let card = container(card)
                     .padding(10)

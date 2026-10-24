@@ -339,6 +339,27 @@ impl App {
 
     fn update_panels(&mut self, m: PanelsMsg) -> Task<Message> {
         use crate::panels::Effect;
+        match m {
+            PanelsMsg::Search
+                if self.prefs.search_location
+                    == crate::settings::editor_prefs::SearchLocation::Modal =>
+            {
+                // Decision 9/10 (round-12): one centre modal at a time.
+                self.switcher.open = false;
+                self.palette.close();
+                self.search_modal = true;
+                return iced::widget::operation::focus(crate::panels::SEARCH_MODAL_ID);
+            }
+            PanelsMsg::Search => {
+                return self.update_panels(PanelsMsg::Show(crate::panels::PanelKind::Search));
+            }
+            PanelsMsg::CloseSearchModal => {
+                self.search_modal = false;
+                return Task::none();
+            }
+            PanelsMsg::Open(_) => self.search_modal = false,
+            _ => {}
+        }
         match crate::panels::update(&mut self.panels, m, self.daemon.is_some()) {
             Effect::None => Task::none(),
             Effect::Sync => self.sync_panels(),
