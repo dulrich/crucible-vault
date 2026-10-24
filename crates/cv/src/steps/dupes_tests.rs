@@ -250,3 +250,24 @@ fn scratch_dry_run() {
     eprintln!("after: {} | {}", status("VmRSS"), status("VmHWM"));
     eprintln!("{}", serde_json::to_string_pretty(&o.vars).unwrap());
 }
+
+#[test]
+fn custom_and_crucible_folders_are_not_scanned() {
+    // User decision 2026-10-23: vault machinery under `_custom/` and `_crucible/` is excluded.
+    let src = "source: \"https://blog.example/p/one\"\n";
+    let env = Env::new(&[
+        ("_custom/templates/t.md", note(src, &words("a", 60))),
+        ("daily/day/d.md", note(src, &words("b", 60))),
+        ("_crucible/x.md", note("", &words("c", 60))),
+        ("_crucible/y.md", note("", &words("c", 60))),
+    ]);
+    let o = env.run();
+    assert_eq!(var(&o, "pairs"), 0, "{:?}", o.vars);
+    assert_eq!(
+        var(&o, "notes"),
+        1,
+        "_custom/ and _crucible/ are not scanned"
+    );
+    assert!(env.labels("_custom/templates/t.md").is_empty());
+    assert!(env.labels("daily/day/d.md").is_empty());
+}

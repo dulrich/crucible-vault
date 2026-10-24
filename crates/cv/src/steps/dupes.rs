@@ -9,9 +9,10 @@
 //! directions. [`score`] is the one-pair scorer WP-8 reuses; [`PairScore::keep`] is the scan's
 //! aggressive threshold (identity match, or max directional containment >= [`KEEP_CONTAINMENT`]).
 //!
-//! **Exclusions (Decision 1).** Notes under `.trash/`, `initiatives/` and `_yt_metadata/` are not
-//! scanned; `daily × daily` is never a pair; a `_raw_transcript × daily` pair with matching
-//! identity (the designed pairing) is dropped; a pair already carrying each other in
+//! **Exclusions (Decision 1).** Notes under `.trash/`, `initiatives/`, `_yt_metadata/`, `_custom/`
+//! and `_crucible/` (vault machinery; user decision 2026-10-23) are not scanned; `daily × daily`
+//! is never a pair; a `_raw_transcript × daily` pair with matching identity (the designed
+//! pairing) is dropped; a pair already carrying each other in
 //! `not-duplicate-of` (WP-7) is `suppressed`.
 //!
 //! **Candidates, exact and uncapped.** Containment pairs are found by prefix filtering, which is
@@ -58,7 +59,13 @@ pub(crate) const POSSIBLE_KEY: &str = "possible-duplicate";
 pub(crate) const NOT_DUP_KEY: &str = "not-duplicate-of";
 
 /// Top folders never scanned (Decision 1).
-const EXCLUDED_TOPS: [&str; 3] = [".trash", "initiatives", "_yt_metadata"];
+const EXCLUDED_TOPS: [&str; 5] = [
+    ".trash",
+    "initiatives",
+    "_yt_metadata",
+    "_custom",
+    "_crucible",
+];
 
 /// The `dupes_scan` step.
 pub(crate) struct DupesScan;

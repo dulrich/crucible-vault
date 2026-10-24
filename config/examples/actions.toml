@@ -374,7 +374,7 @@ type = "intake_reconcile"
 
 # Duplicate scan (plan round-12-feedback-todos WP-6): labels candidate pairs (same recomputed
 # identity, or shingle containment >= 0.7) in both notes' `possible-duplicate`; never removes.
-# Excludes daily x daily, initiatives/, _yt_metadata/, .trash/ and the _raw_transcript x daily
+# Excludes daily x daily, initiatives/, _yt_metadata/, _custom/, _crucible/, .trash/ and the _raw_transcript x daily
 # identity pairing; pairs in `not-duplicate-of` are suppressed. Job param `dry_run = true` counts only.
 [[action]]
 id = "dupes-scan"
