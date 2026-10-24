@@ -268,6 +268,12 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         out.set_vars(&vars);
         return Ok(out);
     };
+    // Only notes are filed: an attachment (a clipped `.webp`, say) is a no-op, not a UTF-8 failure.
+    if !clip_path.ends_with(".md") {
+        vars.action = "skipped";
+        out.set_vars(&vars);
+        return Ok(out);
+    }
     let Some((bytes, clip_hash)) = ctx.read(&clip_path)? else {
         out.set_vars(&vars);
         return Ok(out);

@@ -654,6 +654,33 @@ fn created_starter_ignores_a_daemon_move_into_its_folder() {
     );
 }
 
+/// Round-12 WP-1: an attachment create under a folder selector starts nothing; a note still does.
+#[test]
+fn folder_selector_ignores_non_note_paths() {
+    use cv_protocol::{ChangeKind, Origin};
+    let f = fixture();
+    let r = runner(
+        &f,
+        Arc::new(ProductionExecutor),
+        Arc::new(SystemClock),
+        1,
+        CREATED_ONLY,
+    );
+    assert!(
+        events::on_change(
+            &r,
+            "Clippings/p.webp",
+            ChangeKind::Created,
+            Origin::External
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        events::on_change(&r, "Clippings/p.md", ChangeKind::Created, Origin::External).len(),
+        1
+    );
+}
+
 mod queue;
 
 /// WP-5a proposal 1: the bridge reports a rename's source as `Deleted`; no example starter

@@ -97,7 +97,8 @@ fn selector_matches(
     path: &str,
     reader: &mut Option<cv_index::Reader>,
 ) -> bool {
-    if sel.is_empty() || !sel.folder_matches(path) {
+    // Event starters fire for notes only: attachment events (`.webp`, `.png`, ...) start nothing.
+    if !path.ends_with(".md") || sel.is_empty() || !sel.folder_matches(path) {
         return false;
     }
     let tag = sel

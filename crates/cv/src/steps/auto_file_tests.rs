@@ -352,6 +352,15 @@ fn clip_without_source_or_frontmatter_stays_and_missing_note_succeeds() {
 }
 
 #[test]
+fn non_note_target_is_a_noop_not_an_error() {
+    let e = world(&[("Clippings/pic.webp", String::new())]);
+    let rec = Rec::default();
+    let out = run(&e, "Clippings/pic.webp", &rec);
+    assert_eq!(var(&out, "action"), Some("skipped"));
+    assert!(rec.kinds().is_empty());
+}
+
+#[test]
 fn host_row_matches_blog_and_newsletter() {
     let c = config_of(&[("sources.toml", SOURCES)]);
     let s = c.sources();
