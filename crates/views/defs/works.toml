@@ -6,9 +6,9 @@
 #   `prefix`, `kind`, `status`, `row` (serial|blog|newsletter|youtube) and the per-row counts over
 #   `daily/day` notes — `entries`, `unread` (`read != true`) and `last_update` (latest
 #   `created ?? file.ctime`). Serial rows count notes matched by the shared serial matcher
-#   (`cv_actions::pipelines::SerialSource::matches`: author AND prefix; a row with neither
-#   matches nothing); other rows count notes whose `publication` equals the row's. Zero renders
-#   `·` (the `entries`/`unread` formulas below).
+#   (`cv_actions::pipelines::SerialSource::matches`: a row with a prefix matches by prefix alone,
+#   else by author; a row with neither matches nothing); other rows count notes whose
+#   `publication` equals the row's. Zero renders `·` (the `entries`/`unread` formulas below).
 # - Unread stays an index view of unread `daily/day` notes; `file.serial` is the name of the first
 #   `[[serial]]` row (config order) the note matches by that same matcher (null when none),
 #   supplied by the daemon — never restated as an expression here.
@@ -50,7 +50,7 @@ type = "table"
 name = "Active"
 source = "sources"
 filters = 'note.status == "active"'
-order = ["note.name", "note.status", "note.author", "note.prefix", "note.kind", "formula.entries", "formula.unread", "note.last_update"]
+order = ["note.name", "note.status", "note.author", "note.kind", "formula.entries", "formula.unread", "note.last_update"]
 sort = [{ property = "note.name", direction = "ASC" }]
 
 [[views]]
@@ -58,7 +58,7 @@ type = "table"
 name = "Complete"
 source = "sources"
 filters = 'note.status == "complete"'
-order = ["note.name", "note.status", "note.author", "note.prefix", "note.kind", "formula.entries", "formula.unread", "note.last_update"]
+order = ["note.name", "note.status", "note.author", "note.kind", "formula.entries", "formula.unread", "note.last_update"]
 sort = [{ property = "note.name", direction = "ASC" }]
 
 [[views]]
@@ -72,3 +72,14 @@ filters = { and = [
 order = ["file.name", "formula.tags", "note.word-count", "formula.minutes", "formula.created"]
 sort = [{ property = "formula.created", direction = "ASC" }]
 summaries = { "note.word-count" = "Sum", "formula.minutes" = "Sum" }
+
+[[views]]
+type = "table"
+name = "Entries"
+filters = { and = [
+  'file.inFolder("daily/day")',
+  'file.serial',
+] }
+order = ["file.name", "formula.tags", "note.word-count", "formula.read", "formula.created"]
+sort = [{ property = "formula.created", direction = "ASC" }]
+groupBy = { property = "file.serial", direction = "ASC" }

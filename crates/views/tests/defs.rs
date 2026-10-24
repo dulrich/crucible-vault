@@ -33,6 +33,7 @@ const IDS: &[&str] = &[
     "monthly-tasks#Overdue",
     "works#Active",
     "works#Complete",
+    "works#Entries",
     "works#Unread",
 ];
 
@@ -177,7 +178,7 @@ fn mask(v: &mut Json) {
 }
 
 #[test]
-fn defs_load_without_notices_and_yield_the_22_ids() {
+fn defs_load_without_notices_and_yield_the_23_ids() {
     let fx = fixture();
     let host = fx.host();
     assert!(host.load_notices().is_empty(), "{:?}", host.load_notices());

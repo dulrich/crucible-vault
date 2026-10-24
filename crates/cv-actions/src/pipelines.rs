@@ -541,7 +541,7 @@ pub enum SerialStatus {
 }
 
 /// One `[[serial]]` work (plan round-11-feedback-todos Decision 4): a clip matches it by
-/// `author` AND `prefix` ([`SerialSource::matches`]) and files as its `kind` with its
+/// `prefix`, else by `author` ([`SerialSource::matches`]) and files as its `kind` with its
 /// publication.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -593,11 +593,11 @@ impl SerialSource {
         publication_of(self.short.as_deref(), &self.name)
     }
 
-    /// Whether a note with these `author` entries and `source` belongs to this work: a row with
-    /// neither an author nor a non-empty prefix matches nothing; the row's author must equal one
-    /// of the note's authors (both normalized by [`author_key`]); some non-empty trimmed prefix
-    /// must start the trimmed `source`; both are ANDed when both are set. `status` does not
-    /// affect matching.
+    /// Whether a note with these `author` entries and `source` belongs to this work (plan
+    /// round-12-feedback-todos Decision 7): a row with any non-blank (trimmed) prefix matches by
+    /// prefix alone — some prefix must start the trimmed `source`, the author is ignored; a row
+    /// with only an author matches when it equals one of the note's authors (both normalized by
+    /// [`author_key`]); a row with neither matches nothing. `status` does not affect matching.
     #[must_use]
     pub fn matches(&self, authors: &[&str], source: &str) -> bool {
         let want = self
@@ -611,16 +611,11 @@ impl SerialSource {
             .map(|p| p.trim())
             .filter(|p| !p.is_empty())
             .collect();
-        if want.is_none() && prefixes.is_empty() {
-            return false;
+        if !prefixes.is_empty() {
+            let source = source.trim();
+            return prefixes.iter().any(|p| source.starts_with(p));
         }
-        if let Some(w) = want
-            && !authors.iter().any(|c| author_key(c) == w)
-        {
-            return false;
-        }
-        let source = source.trim();
-        prefixes.is_empty() || prefixes.iter().any(|p| source.starts_with(p))
+        want.is_some_and(|w| authors.iter().any(|c| author_key(c) == w))
     }
 }
 
@@ -745,10 +740,11 @@ mod tests {
         // Prefix only (trimmed both sides).
         assert!(serial(None, &[" https://ff.example/s/1 "]).matches(&[], &format!(" {src}")));
         assert!(!serial(None, &["https://ff.example/s/9"]).matches(&[], src));
-        // Both ANDed.
+        // A prefix decides alone: the author is ignored either way.
         let both = serial(Some("Ann"), &["https://ff.example/s/1"]);
         assert!(both.matches(&["Ann"], src));
-        assert!(!both.matches(&["Bob"], src));
+        assert!(both.matches(&["Bob"], src));
+        assert!(both.matches(&[], src));
         assert!(!both.matches(&["Ann"], "https://other.example/"));
         // Link authors compare by target; a bracketed row author is bare-compared too.
         for a in ["[[Ann]]", "[[Ann|A]]", "[[Ann#Bio]]", " [[ Ann ]] "] {

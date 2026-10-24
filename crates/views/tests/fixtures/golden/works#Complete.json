@@ -13,10 +13,6 @@
       "label": "Author"
     },
     {
-      "key": "note.prefix",
-      "label": "Prefix"
-    },
-    {
       "key": "note.kind",
       "label": "Kind"
     },
@@ -48,15 +44,6 @@
             },
             {
               "t": "null"
-            },
-            {
-              "t": "list",
-              "v": [
-                {
-                  "t": "text",
-                  "v": "https://blog.example/"
-                }
-              ]
             },
             {
               "t": "text",

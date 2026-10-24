@@ -15,7 +15,7 @@
 //!    finalizing and ticking tracker rows; this step never ticks.
 //! 2. **Kind** (first match wins):
 //!    1. a `sources.toml` `[[serial]]` row, in config order, that matches the clip
-//!       ([`cv_actions::pipelines::SerialSource::matches`]: author AND prefix) and whose `kind` is
+//!       ([`cv_actions::pipelines::SerialSource::matches`]: prefix, else author) and whose `kind` is
 //!       a `kinds.toml` key (a row with an undefined kind is skipped with a warning; plan
 //!       round-11-feedback-todos Decision 4);
 //!    2. a `[[newsletter]]` row's linked blog host or a `[[blog]]` row host (`kind` of the

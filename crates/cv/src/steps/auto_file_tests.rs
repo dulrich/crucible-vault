@@ -268,7 +268,8 @@ fn serial_rows_file_the_clip_with_their_kind_and_publication() {
             "\"[[Ann Poster|AP]]\"",
             Some(("post", "Ann P")),
         ),
-        ("https://posts.example/a", "Bob", None),
+        // A prefix decides alone (plan round-12 Decision 7): the row's author is not consulted.
+        ("https://posts.example/a", "Bob", Some(("post", "Ann P"))),
         ("https://nowhere.example/a", "\"[[Ann Poster]]\"", None),
     ];
     for (url, author, want) in cases {

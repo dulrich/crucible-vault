@@ -1,0 +1,125 @@
+{
+  "columns": [
+    {
+      "key": "file.name",
+      "label": "file name"
+    },
+    {
+      "key": "formula.tags",
+      "label": "tags"
+    },
+    {
+      "key": "note.word-count",
+      "label": "word-count"
+    },
+    {
+      "key": "formula.read",
+      "label": "read"
+    },
+    {
+      "key": "formula.created",
+      "label": "created"
+    }
+  ],
+  "groups": [
+    {
+      "key": {
+        "t": "text",
+        "v": "Ann Blog"
+      },
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "Alpha Post",
+              "path": "daily/day/2026-10-01/Alpha Post.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "blog"
+            },
+            {
+              "t": "number",
+              "v": 400.0
+            },
+            {
+              "t": "text",
+              "v": "✅"
+            },
+            {
+              "t": "date",
+              "v": "2026-10-01"
+            }
+          ],
+          "path": "daily/day/2026-10-01/Alpha Post.md"
+        },
+        {
+          "cells": [
+            {
+              "label": "Beta Post",
+              "path": "daily/day/2026-10-02/Beta Post.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "blog"
+            },
+            {
+              "t": "number",
+              "v": 600.0
+            },
+            {
+              "t": "text",
+              "v": "❌"
+            },
+            {
+              "t": "date",
+              "v": "2026-10-02"
+            }
+          ],
+          "path": "daily/day/2026-10-02/Beta Post.md"
+        }
+      ],
+      "summaries": []
+    },
+    {
+      "key": {
+        "t": "text",
+        "v": "Bob News"
+      },
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "Old News",
+              "path": "daily/day/2026-09-30/Old News.md",
+              "t": "link"
+            },
+            {
+              "t": "text",
+              "v": "news"
+            },
+            {
+              "t": "number",
+              "v": 500.0
+            },
+            {
+              "t": "text",
+              "v": "❌"
+            },
+            {
+              "t": "date",
+              "v": "2026-09-30"
+            }
+          ],
+          "path": "daily/day/2026-09-30/Old News.md"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": []
+}

@@ -720,7 +720,7 @@ fn serial_matched_note_without_a_tracker_row_gets_the_publication() {
     let mut w = world(&[
         ("Stories/a.md", "---\ntitle: \"A\"\nsource: https://saga.example/s/1\nauthor:\n  - \"[[Ann|A]]\"\n---\n\nBody a.\n".to_owned()),
         ("Stories/b.md", "---\ntitle: \"B\"\nsource: https://saga.example/s/2\nauthor:\n  - \"[[Ann]]\"\npublication: Mine\n---\n\nBody b.\n".to_owned()),
-        ("Stories/c.md", "---\ntitle: \"C\"\nsource: https://saga.example/s/3\nauthor:\n  - Bob\n---\n\nBody c.\n".to_owned()),
+        ("Stories/c.md", "---\ntitle: \"C\"\nsource: https://elsewhere.example/s/3\nauthor:\n  - Bob\n---\n\nBody c.\n".to_owned()),
     ]);
     w.sources("[[serial]]\nname = \"The Saga\"\nshort = \"Saga\"\nauthor = \"Ann\"\nprefix = [\"https://saga.example/\"]\n");
     let b0 = w.env.read("Stories/b.md").unwrap();
@@ -730,7 +730,11 @@ fn serial_matched_note_without_a_tracker_row_gets_the_publication() {
     let a = w.env.read("Stories/a.md").unwrap();
     assert!(a.contains("  - \"[[Ann|A]]\"\npublication: Saga\n"), "{a}");
     assert_eq!(w.env.read("Stories/b.md").unwrap(), b0, "never overwritten");
-    assert_eq!(w.env.read("Stories/c.md").unwrap(), c0, "author mismatch");
+    assert_eq!(
+        w.env.read("Stories/c.md").unwrap(),
+        c0,
+        "prefix mismatch (a prefix decides alone, Decision 7)"
+    );
     assert_eq!(n(&w.reconcile(false), "publication_backfilled"), 0);
 }
 

@@ -529,13 +529,13 @@ pub static SOURCE_SERIAL: Record = Record {
         field(
             "author",
             "Author",
-            "Bare author name a clip's author list must contain ([[ ]] and # ignored)",
+            "Display author; matches by author only when no prefix is set (a clip's author list must contain it; [[ ]] and # ignored)",
             Node::Str,
         ),
         field(
             "prefix",
             "Source prefixes",
-            "Source-URL prefixes; ANDed with the author; neither set matches nothing",
+            "Source-URL prefixes; when any is set the row matches by prefix alone (author ignored); neither prefix nor author matches nothing",
             STR_LIST,
         ),
         field(

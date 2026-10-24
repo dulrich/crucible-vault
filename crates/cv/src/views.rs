@@ -737,7 +737,8 @@ mod tests {
         std::fs::write(
             config.join("views/works.toml"),
             "[[views]]\ntype='table'\nname='All'\nsource='sources'\norder=['name','entries','unread','last_update']\nsort=[{property='name',direction='ASC'}]\n\
-             [[views]]\ntype='table'\nname='Matched'\nfilters={and=['file.inFolder(\"daily/day\")','file.serial == \"Saga\"']}\norder=['file.name']\nsort=[{property='file.name',direction='ASC'}]\n",
+             [[views]]\ntype='table'\nname='Matched'\nfilters={and=['file.inFolder(\"daily/day\")','file.serial == \"Saga\"']}\norder=['file.name']\nsort=[{property='file.name',direction='ASC'}]\n\
+             [[views]]\ntype='table'\nname='Grouped'\nfilters='file.serial'\norder=['file.name']\nsort=[{property='file.name',direction='ASC'}]\ngroupBy={property='file.serial',direction='ASC'}\n",
         )
         .unwrap();
         let sources = "[[serial]]\nname='Saga'\nauthor='Ann'\nprefix=['https://s.example/w/1/']\n\
@@ -770,6 +771,12 @@ mod tests {
             matched(&reg.run("works#Matched", None, None).await.unwrap()),
             ["c1", "c2"]
         );
+        // `groupBy` accepts the daemon-supplied `file.serial` (plan round-12 WP-4).
+        let grouped = reg.run("works#Grouped", None, None).await.unwrap();
+        let groups = grouped.0["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert!(groups[0]["key"].to_string().contains("Saga"), "{groups:?}");
+        assert_eq!(groups[0]["rows"].as_array().unwrap().len(), 2);
         // Config change: a second serial row appears and the blog row loses `works`.
         std::fs::write(
             config.join("sources.toml"),
