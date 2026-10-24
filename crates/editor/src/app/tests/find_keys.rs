@@ -582,3 +582,80 @@ fn serial_prefix_adder_keeps_focus_across_keystrokes() {
         "input kept focus after a chip was added"
     );
 }
+
+/// The prefix adder of `serial[0]` as laid out (the width-160 input nearest the prefix help).
+fn serial_prefix_adder(ui: &mut Ui, app: &App) -> Option<Rectangle> {
+    let s = spots(ui, app);
+    let help = s
+        .texts
+        .iter()
+        .find(|(_, t)| t.starts_with("Source-URL prefixes"))
+        .map(|(b, _)| b.center_y())?;
+    s.inputs
+        .iter()
+        .filter(|b| (b.width - 160.0).abs() < 0.5 || b.height < 1.0)
+        .min_by(|a, b| {
+            (a.center_y() - help)
+                .abs()
+                .total_cmp(&(b.center_y() - help).abs())
+        })
+        .copied()
+}
+
+fn assert_on_screen(b: Rectangle, what: &str) {
+    assert!(
+        b.width >= 100.0 && b.height >= 20.0 && b.x >= 0.0 && b.x + b.width <= 1200.0,
+        "{what}: prefix adder not visible: {b:?}"
+    );
+}
+
+/// User report 2026-10-24 (after round-12 WP-2): an existing serial with prefixes shows no adder
+/// to add another, and in a new serial the adder disappears once Return adds the first chip.
+#[test]
+fn serial_prefix_adder_stays_visible_with_chips() {
+    use crate::settings::{Section, SettingsMsg};
+    const SOURCES: &str = "_custom/crucible-vault/sources.toml";
+    let (_tmp, d) = fake();
+    let d = Arc::new(d);
+    d.create_note(
+        SOURCES,
+        "[[serial]]\nname = \"Old\"\nprefix = [\"https://www.example-serial-host.com/stories/a-long-story-name/\", \"https://forums.example.net/threads/another-long-thread-title.12345/\"]\n\n[[serial]]\nname = \"New\"\n",
+    )
+    .expect("sources");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.queue_rpcs();
+    let _ = app.send(Message::Settings(SettingsMsg::Open));
+    let _ = app.send(Message::Settings(SettingsMsg::Section(Section::Sources)));
+    let mut ui = Ui {
+        renderer: renderer(),
+        tree: None,
+        height: 3000.0,
+    };
+    // Existing serial with two prefixes (sorted display: "New" is row 0 on screen, file index 1).
+    app.settings.form.expanded.insert((
+        SOURCES.to_owned(),
+        cv_schema::Path::parse("serial[0]").expect("p"),
+    ));
+    let b = serial_prefix_adder(&mut ui, &app).expect("adder (existing)");
+    assert_on_screen(b, "existing serial with prefixes");
+    app.settings.form.expanded.clear();
+    // New serial: type a prefix, Return.
+    app.settings.form.expanded.insert((
+        SOURCES.to_owned(),
+        cv_schema::Path::parse("serial[1]").expect("p"),
+    ));
+    let b = serial_prefix_adder(&mut ui, &app).expect("adder (new)");
+    assert_on_screen(b, "new serial, no chips");
+    ui.click(&mut app, b.center());
+    for c in "https://www.example-serial-host.com/stories/x/".chars() {
+        let s = c.to_string();
+        ui.send(
+            &mut app,
+            &press(Key::Character(s.as_str().into()), Some(&s)),
+        );
+    }
+    ui.send(&mut app, &press(Key::Named(key::Named::Enter), Some("\r")));
+    let b = serial_prefix_adder(&mut ui, &app).expect("adder (after Return)");
+    assert_on_screen(b, "new serial after Return");
+}

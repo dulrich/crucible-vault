@@ -61,10 +61,18 @@ pub(super) fn chips<'a>(
             container(
                 row![
                     text(pickers::channel_label(&chans, it)).size(13),
-                    button(theme::icon_text(Icon::X).size(12))
-                        .style(button::text)
-                        .padding(2)
-                        .on_press_maybe(remove(i)),
+                    button(
+                        // `icon_text` is Fill x Fill: inside a chip it made the whole field row
+                        // Fill-height, which the settings column lays out at zero height
+                        // (user report 2026-10-24: the prefix adder vanished once a chip existed).
+                        theme::icon_text(Icon::X)
+                            .size(12)
+                            .width(Length::Fixed(14.0))
+                            .height(Length::Fixed(14.0)),
+                    )
+                    .style(button::text)
+                    .padding(2)
+                    .on_press_maybe(remove(i)),
                 ]
                 .spacing(4)
                 .align_y(Alignment::Center),
@@ -73,11 +81,14 @@ pub(super) fn chips<'a>(
             .style(theme::seg_group_style(t)),
         );
     }
-    // The chips sit in their own row so the adder keeps one tree position as chips are added or
-    // removed (a growing strip shifted it, dropping its focus; plan round-12-feedback-todos WP-2).
+    // The chips wrap within the field width and the adder sits on its own line below them: it
+    // keeps one tree position as chips are added or removed (a growing strip shifted it, dropping
+    // its focus; plan round-12-feedback-todos WP-2), and long chips can never push it off the
+    // right edge, where it was laid out at zero height (user report 2026-10-24).
+    let body = column![strip.wrap().vertical_spacing(4), adder];
     row![
         h.label_col(t),
-        row![strip, adder].spacing(4).align_y(Alignment::Center)
+        body.spacing(4).width(Length::Fixed(FIELD_W))
     ]
     .spacing(8)
     .align_y(Alignment::Center)
