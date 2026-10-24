@@ -359,3 +359,20 @@ fn menu_bar_session_state_seeds_toggles_and_follows_only_pref_changes() {
     let _ = app.send(Message::AltKey(AltInput::Other));
     assert!(app.menu_bar_shown);
 }
+
+/// Plan round-12-feedback-todos Decision 9: opening the switcher closes the palette and vice versa.
+#[test]
+fn centre_modals_are_exclusive() {
+    let (_tmp, _d, mut app) = app_with(&[], None);
+    let _ = app.send(Message::Palette(PaletteMsg::Open));
+    let _ = app.send(Message::Switcher(SwitcherMsg::Open));
+    assert!(app.switcher.open && !app.palette.open);
+    drop(app.view());
+    let _ = app.send(Message::Palette(PaletteMsg::Open));
+    assert!(app.palette.open && !app.switcher.open);
+    assert!(matches!(
+        app.overlay_close(),
+        Some(Message::Palette(PaletteMsg::Close))
+    ));
+    drop(app.view());
+}

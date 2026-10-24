@@ -698,8 +698,7 @@ impl App {
                     card = card.push(crate::dialog::view(d, t));
                 } else if self.switcher.open {
                     card = card.push(switcher::view(&self.switcher, t));
-                }
-                if self.palette.open && self.dialog.is_none() {
+                } else if self.palette.open {
                     card = card.push(crate::palette::view(&self.palette, t));
                 }
                 let card = container(card)

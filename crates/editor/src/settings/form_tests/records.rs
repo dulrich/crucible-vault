@@ -189,7 +189,7 @@ fn map_add_and_remove_keys() {
     assert!(st.file(KINDS).is_some_and(|f| f.notice().is_some()));
 }
 
-const TWO_SOURCES: &str = "[[blog]]\nname = \"zeta\"\nlink = \"https://z.example/feed\"\n\n[[blog]]\nname = \"Alpha\"\nlink = \"https://a.example/feed\"\n\n[[newsletter]]\nname = \"mid\"\n\n[[newsletter]]\nname = \"Beta\"\n\n[[youtube]]\nchannel = \"UC2\"\n\n[[youtube]]\nchannel = \"UC1\"\n";
+const TWO_SOURCES: &str = "[[blog]]\nname = \"zeta\"\nlink = \"https://z.example/feed\"\n\n[[blog]]\nname = \"Alpha\"\nlink = \"https://a.example/feed\"\n\n[[newsletter]]\nname = \"mid\"\n\n[[newsletter]]\nname = \"Beta\"\n\n[[serial]]\nname = \"Zed\"\n\n[[serial]]\nname = \"abc\"\n\n[[youtube]]\nchannel = \"UC2\"\n\n[[youtube]]\nchannel = \"UC1\"\n";
 
 fn items_of(st: &Settings, list: &str) -> Vec<(usize, String, bool)> {
     rows_of(st, SOURCES)
@@ -217,6 +217,10 @@ fn sources_lists_show_sorted_by_name_without_reorder_controls() {
     assert_eq!(
         items_of(&st, "newsletter"),
         vec![(1, "Beta".into(), false), (0, "mid".into(), false)]
+    );
+    assert_eq!(
+        items_of(&st, "serial"),
+        vec![(1, "abc".into(), false), (0, "Zed".into(), false)]
     );
     // Another list keeps file order and its up/down controls.
     assert_eq!(

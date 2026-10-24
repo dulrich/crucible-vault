@@ -7,6 +7,8 @@ impl App {
         use crate::palette::prompt::Step;
         match m {
             PaletteMsg::Open => {
+                // Decision 9 (round-12): one centre modal at a time.
+                self.switcher.open = false;
                 self.palette.show();
                 let fetch = self.fetch_actions();
                 return Task::batch([

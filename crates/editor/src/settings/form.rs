@@ -771,7 +771,7 @@ fn compound(node: &Node) -> bool {
 
 /// The Sources lists shown sorted by name with no reorder controls (plan round-10 Decision 7):
 /// the file's row order carries first-match semantics, so the sort is display-only.
-const SORTED_SOURCE_LISTS: [&str; 2] = ["blog", "newsletter"];
+const SORTED_SOURCE_LISTS: [&str; 3] = ["blog", "newsletter", "serial"];
 
 /// The `sources.toml` vault path.
 const SOURCES_PATH: &str = cv_schema::config_path!("sources.toml");

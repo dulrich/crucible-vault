@@ -520,6 +520,8 @@ impl App {
         let s = &mut self.switcher;
         match m {
             SwitcherMsg::Open => {
+                // Decision 9 (round-12): one centre modal at a time.
+                self.palette.close();
                 s.open = true;
                 s.move_from = None;
                 s.query.clear();
@@ -605,6 +607,7 @@ impl App {
             self.status.set_error("move note: no active note".into());
             return Task::none();
         };
+        self.palette.close();
         let s = &mut self.switcher;
         s.folders = switcher::folder_candidates(&self.explorer.paths, &from);
         s.move_from = Some(from);

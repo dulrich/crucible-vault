@@ -73,10 +73,15 @@ pub(super) fn chips<'a>(
             .style(theme::seg_group_style(t)),
         );
     }
-    row![h.label_col(t), strip.push(adder)]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+    // The chips sit in their own row so the adder keeps one tree position as chips are added or
+    // removed (a growing strip shifted it, dropping its focus; plan round-12-feedback-todos WP-2).
+    row![
+        h.label_col(t),
+        row![strip, adder].spacing(4).align_y(Alignment::Center)
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// The adder: a (typeahead) text input, or a pick list over the choices left.

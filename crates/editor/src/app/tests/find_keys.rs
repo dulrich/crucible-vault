@@ -503,3 +503,82 @@ fn log_button_and_notice_open_the_log() {
     );
     assert_eq!(app.status.log.unread, 0);
 }
+
+/// Plan round-12-feedback-todos WP-2: the `[[serial]]` prefix adder keeps focus across
+/// keystrokes, and after Enter adds a chip (the strip grows; the input must not move in the tree).
+#[test]
+fn serial_prefix_adder_keeps_focus_across_keystrokes() {
+    use crate::settings::{Section, SettingsMsg};
+    const SOURCES: &str = "_custom/crucible-vault/sources.toml";
+    let (_tmp, d) = fake();
+    let d = Arc::new(d);
+    d.create_note(SOURCES, "[[serial]]\nname = \"Work\"\n")
+        .expect("sources");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.queue_rpcs();
+    let _ = app.send(Message::Settings(SettingsMsg::Open));
+    let _ = app.send(Message::Settings(SettingsMsg::Section(Section::Sources)));
+    app.settings.form.expanded.insert((
+        SOURCES.to_owned(),
+        cv_schema::Path::parse("serial[0]").expect("p"),
+    ));
+    let mut ui = Ui {
+        renderer: renderer(),
+        tree: None,
+        height: 3000.0,
+    };
+    let s = spots(&mut ui, &app);
+    let help = s
+        .texts
+        .iter()
+        .find(|(_, t)| t.starts_with("Source-URL prefixes"))
+        .map(|(b, _)| b.center_y())
+        .expect("prefix help");
+    let input = s
+        .inputs
+        .iter()
+        .filter(|b| (b.width - 160.0).abs() < 0.5)
+        .min_by(|a, b| {
+            (a.center_y() - help)
+                .abs()
+                .total_cmp(&(b.center_y() - help).abs())
+        })
+        .copied()
+        .expect("prefix adder input");
+    ui.click(&mut app, input.center());
+    ui.send(&mut app, &press(Key::Character("h".into()), Some("h")));
+    ui.send(&mut app, &press(Key::Character("t".into()), Some("t")));
+    let draft = app
+        .settings
+        .form
+        .draft(
+            SOURCES,
+            &crate::settings::form::draft_key(
+                "chip",
+                &cv_schema::Path::parse("serial[0].prefix").expect("p"),
+            ),
+        )
+        .map(str::to_owned);
+    assert_eq!(draft.as_deref(), Some("ht"), "input kept focus");
+    // Enter adds the chip (the strip grows), and the next keystroke still reaches the input.
+    ui.send(&mut app, &press(Key::Named(key::Named::Enter), Some("\r")));
+    ui.send(&mut app, &press(Key::Character("x".into()), Some("x")));
+    ui.send(&mut app, &press(Key::Character("y".into()), Some("y")));
+    let draft = app
+        .settings
+        .form
+        .draft(
+            SOURCES,
+            &crate::settings::form::draft_key(
+                "chip",
+                &cv_schema::Path::parse("serial[0].prefix").expect("p"),
+            ),
+        )
+        .map(str::to_owned);
+    assert_eq!(
+        draft.as_deref(),
+        Some("xy"),
+        "input kept focus after a chip was added"
+    );
+}
