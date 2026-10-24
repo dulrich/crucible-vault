@@ -19,6 +19,14 @@
       ]
     },
     {
+      "path": "docs/spikes/dupes/src/main.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/dupes/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/postid-dupes/src/main.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/postid-dupes/Cargo.toml"
+    },
+    {
       "path": "docs/spikes/reading-select/src/main.rs",
       "build": "cargo build --offline --manifest-path docs/spikes/reading-select/Cargo.toml"
     },
