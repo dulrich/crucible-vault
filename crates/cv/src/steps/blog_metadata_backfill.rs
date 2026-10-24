@@ -11,7 +11,8 @@
 //! step never rewrites: the post id under the configured and the default `PostIdOptions`, the
 //! raw and canonical source URL, plus the stored `post-id` while present. Blog tracker rows
 //! match by `item_id` or `url`; twins (captures outside `_blog_metadata/`, Decision 1 folders
-//! excluded) match by recomputed identity ([`dupes::identity`]) equal to the configured id.
+//! and `_raw_transcript/` excluded) match by recomputed identity ([`dupes::identity`]) equal to
+//! the configured id.
 //!
 //! **Phases.**
 //! 1. Re-key a stale `post-id` (stored ≠ configured recomputed) on metadata notes and their twins
@@ -57,6 +58,9 @@ use crate::now_ms;
 
 /// The folder this step folds into intake.
 pub(crate) const META_TOP: &str = "_blog_metadata";
+/// Folders whose notes are never a blog capture (user decision 2026-10-23: a transcript is not a
+/// twin, so its metadata note is never trashed in favour of it).
+const NOT_TWIN_TOPS: [&str; 1] = ["_raw_transcript"];
 /// Decision 5: the metadata body must be contained in the capture at least this much.
 pub(crate) const CERTAIN_CONTAINMENT: f64 = 0.9;
 const KIND: &str = "blog";
@@ -299,6 +303,7 @@ pub(crate) fn run(dry: bool, stop: Stop, ctx: &mut StepCtx<'_>) -> Result<StepOu
         if top == META_TOP {
             metas.push(p);
         } else if !EXCLUDED_TOPS.contains(&top)
+            && !NOT_TWIN_TOPS.contains(&top)
             && let Some((text, _)) = read_text(ctx, &p)?
             && let Some(id) = identity(&FrontmatterDoc::new(text.as_str()), &opts)
         {

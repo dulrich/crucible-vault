@@ -452,3 +452,30 @@ fn scratch_dry_apply_apply() {
     }
     eprintln!("skipped blog rows on 2026-10-16 after: {}", skipped_1016());
 }
+
+#[test]
+fn a_raw_transcript_note_is_never_a_twin() {
+    // User decision 2026-10-23: a transcript sharing the post's identity is not a capture, so the
+    // metadata note is not trashed in its favour; with no other twin it is filed as no-twin.
+    let a = words("a", 60);
+    let e = env(&[
+        (
+            "_blog_metadata/a.md",
+            note(&src("a"), "published: 2026-01-02\n", &a),
+        ),
+        (
+            "_raw_transcript/t.md",
+            note(&src("a"), "", &format!("{a} {}", words("extra", 10))),
+        ),
+    ]);
+    let o = apply(&e);
+    assert_eq!(n(&o, "certain"), 0, "{:?}", o.vars);
+    assert_eq!(n(&o, "uncertain"), 0);
+    assert_eq!(n(&o, "no_twin"), 1);
+    assert!(e.read("daily/day/2026-01-02/a.md").is_some());
+    assert!(
+        !e.read("_raw_transcript/t.md")
+            .unwrap()
+            .contains(POSSIBLE_KEY)
+    );
+}
