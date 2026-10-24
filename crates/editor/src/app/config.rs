@@ -122,6 +122,7 @@ impl App {
     pub(super) fn sync_ui_state(&mut self) {
         self.ui.panes = Some(panes::snapshot(&self.panes, self.focus));
         self.ui.view_filters.clone_from(&self.views.filters);
+        self.ui.view_sorts.clone_from(&self.views.sorts);
         self.ui.tabs.clear();
         self.ui.active_tab = None;
         self.ui.modes = self

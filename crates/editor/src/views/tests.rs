@@ -817,3 +817,57 @@ fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
 
 #[path = "tests_layout.rs"]
 mod layout;
+
+fn sort_by(app: &mut App, column: &str) {
+    let _ = app.send(Message::Views(ViewsMsg::SortBy {
+        id: ID.into(),
+        host: Some(NOTE.into()),
+        column: column.into(),
+    }));
+}
+
+fn active(app: &App) -> Option<(String, bool)> {
+    app.views
+        .sort_of(ID, Some(NOTE))
+        .map(|s| (s.column.clone(), s.desc))
+}
+
+/// Plan round-11 WP-5: a header click cycles ASC → DESC → cleared and re-runs with the sort;
+/// another header replaces the active one at ASC.
+#[test]
+fn header_click_cycles_and_switching_columns_restarts_at_asc() {
+    use cv_protocol::{
+        ViewSort,
+        ViewSortDir::{Asc, Desc},
+    };
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ID, ViewResult(result())).expect("script");
+    need(&mut app);
+    let sort = |p: &str, dir| {
+        Some(ViewSort {
+            property: p.into(),
+            direction: dir,
+        })
+    };
+    sort_by(&mut app, "file.name");
+    assert_eq!(active(&app), Some(("file.name".into(), false)));
+    sort_by(&mut app, "file.name");
+    assert_eq!(active(&app), Some(("file.name".into(), true)));
+    sort_by(&mut app, "file.mtime");
+    assert_eq!(active(&app), Some(("file.mtime".into(), false)));
+    sort_by(&mut app, "file.mtime");
+    sort_by(&mut app, "file.mtime");
+    assert_eq!(active(&app), None);
+    // The fake saw: the initial unsorted run, then each click's sort.
+    assert_eq!(
+        d.view_sorts().expect("sorts"),
+        [
+            None,
+            sort("file.name", Asc),
+            sort("file.name", Desc),
+            sort("file.mtime", Asc),
+            sort("file.mtime", Desc),
+            None,
+        ]
+    );
+}

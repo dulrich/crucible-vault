@@ -85,6 +85,8 @@ struct Inner {
     /// WP-7: scripted view results, and every `view_run` call `(view_id, this_path)` in order.
     views: BTreeMap<String, ViewResult>,
     view_calls: Vec<(String, Option<String>)>,
+    /// The UI sort sent with each `view_run`, parallel to `view_calls`.
+    view_sorts: Vec<Option<cv_protocol::ViewSort>>,
     /// editor-usability-round WP-5: actions run as durable jobs (job id now, handler and
     /// terminal `JobUpdated` on [`FakeDaemon::complete_deferred`]), and the queued runs.
     deferred_ids: std::collections::BTreeSet<String>,
@@ -160,6 +162,7 @@ impl FakeDaemon {
                 next_job: 1,
                 views: BTreeMap::new(),
                 view_calls: Vec::new(),
+                view_sorts: Vec::new(),
                 deferred_ids: std::collections::BTreeSet::new(),
                 queued: Vec::new(),
                 status_calls: Vec::new(),
@@ -279,6 +282,11 @@ impl FakeDaemon {
     }
 
     /// WP-7: every `view_run` call so far, `(view_id, this_path)` in order.
+    /// The sort each `view_run` carried, parallel to [`Self::view_calls`].
+    pub fn view_sorts(&self) -> Result<Vec<Option<cv_protocol::ViewSort>>> {
+        Ok(self.lock()?.view_sorts.clone())
+    }
+
     pub fn view_calls(&self) -> Result<Vec<(String, Option<String>)>> {
         Ok(self.lock()?.view_calls.clone())
     }
@@ -636,10 +644,16 @@ impl DaemonClient for FakeDaemon {
         })
     }
 
-    fn view_run(&self, view_id: &str, this_path: Option<&str>) -> Result<ViewResult> {
+    fn view_run(
+        &self,
+        view_id: &str,
+        this_path: Option<&str>,
+        sort: Option<&cv_protocol::ViewSort>,
+    ) -> Result<ViewResult> {
         let mut g = self.lock()?;
         g.view_calls
             .push((view_id.to_owned(), this_path.map(str::to_owned)));
+        g.view_sorts.push(sort.cloned());
         g.views
             .get(view_id)
             .cloned()

@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use cv_actions::pipelines::{SerialStatus, SourcesConfig};
-use cv_protocol::{Notification, ViewResult};
+use cv_protocol::{Notification, ViewResult, ViewSort};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::sync::lock;
@@ -20,6 +20,7 @@ enum Cmd {
     Run {
         view_id: String,
         this_path: Option<String>,
+        sort: Option<ViewSort>,
         reply: oneshot::Sender<Result<ViewResult, String>>,
     },
     /// A new index generation committed: reopen the reader.
@@ -101,6 +102,7 @@ impl ViewRegistry {
         &self,
         view_id: &str,
         this_path: Option<String>,
+        sort: Option<ViewSort>,
     ) -> Result<ViewResult, ViewError> {
         if !lock(&self.ids).iter().any(|i| i == view_id) {
             return Err(ViewError::NotFound(view_id.to_owned()));
@@ -109,6 +111,7 @@ impl ViewRegistry {
         self.send(Cmd::Run {
             view_id: view_id.to_owned(),
             this_path,
+            sort,
             reply,
         })
         .map_err(|()| ViewError::Failed("view service thread is gone".into()))?;
@@ -395,6 +398,7 @@ fn serve(
             Cmd::Run {
                 view_id,
                 this_path,
+                sort,
                 reply,
             } => {
                 if reader.is_none() {
@@ -419,7 +423,7 @@ fn serve(
                     }
                 }
                 let res = match reader.as_ref() {
-                    Some(r) => host.run(r, &view_id, this_path.as_deref()),
+                    Some(r) => host.run_with_sort(r, &view_id, this_path.as_deref(), sort.as_ref()),
                     None => Err("no index reader".into()),
                 };
                 let _ = reply.send(res);
@@ -473,7 +477,7 @@ mod tests {
         let empty = ViewRegistry::start(&tmp, &base, None, tx).unwrap();
         assert!(empty.view_ids().is_empty());
         assert_eq!(
-            empty.run("x", None).await.unwrap_err(),
+            empty.run("x", None, None).await.unwrap_err(),
             ViewError::NotFound("x".into())
         );
         drop(index);
@@ -520,7 +524,7 @@ mod tests {
                 .collect()
         };
         let id = "hubs#On".to_owned();
-        assert_eq!(names(&reg.run(&id, None).await.unwrap()), ["t1"]);
+        assert_eq!(names(&reg.run(&id, None, None).await.unwrap()), ["t1"]);
         let mut step = async |change: &dyn Fn()| {
             change();
             let g = index.rebuild(&vault).unwrap();
@@ -533,7 +537,7 @@ mod tests {
                 panic!("expected views_invalidated, got {n:?}");
             };
             assert!(view_ids.contains(&id));
-            names(&reg.run(&id, None).await.unwrap())
+            names(&reg.run(&id, None, None).await.unwrap())
         };
         // Rename: the row follows the new name.
         let rows = step(&|| {
@@ -598,7 +602,7 @@ mod tests {
         let id = "intake#Day".to_owned();
         let this = Some("daily/2026-10-17.md".to_owned());
         let rows = |r: &ViewResult| r.0["groups"][0]["rows"].as_array().map_or(0, Vec::len);
-        assert_eq!(rows(&reg.run(&id, this.clone()).await.unwrap()), 0);
+        assert_eq!(rows(&reg.run(&id, this.clone(), None).await.unwrap()), 0);
         let item = cv_state::TrackerItem {
             source_kind: "youtube".into(),
             source_key: "UC1".into(),
@@ -629,10 +633,10 @@ mod tests {
                 view_ids: vec![id.clone()]
             }
         );
-        assert_eq!(rows(&reg.run(&id, this).await.unwrap()), 1);
+        assert_eq!(rows(&reg.run(&id, this, None).await.unwrap()), 1);
         assert!(!state.insert_tracker_item(&item).unwrap());
         // Nothing further was emitted (the duplicate raised no signal).
-        let _ = reg.run(&id, None).await.unwrap();
+        let _ = reg.run(&id, None, None).await.unwrap();
         assert!(rx.try_recv().is_err());
     }
 
@@ -666,11 +670,11 @@ mod tests {
         };
         // Before: the invalidation is already out when the query's reply arrives.
         hook("tracker_items");
-        reg.run(&id, None).await.unwrap();
+        reg.run(&id, None, None).await.unwrap();
         assert_eq!(rx.try_recv().unwrap(), invalidated);
         assert!(rx.try_recv().is_err());
         // After: the query's reply precedes the invalidation.
-        reg.run(&id, None).await.unwrap();
+        reg.run(&id, None, None).await.unwrap();
         assert!(rx.try_recv().is_err());
         hook("tracker_items");
         let n = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -750,7 +754,7 @@ mod tests {
             (a.to_owned(), b.to_owned(), c.to_owned(), d.to_owned())
         };
         assert_eq!(
-            source_rows(&reg.run(&all, None).await.unwrap()),
+            source_rows(&reg.run(&all, None, None).await.unwrap()),
             [
                 s("Feed", "1", "1", "2026-09-30"),
                 s("Saga", "2", "1", "2026-10-03")
@@ -763,7 +767,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            matched(&reg.run("works#Matched", None).await.unwrap()),
+            matched(&reg.run("works#Matched", None, None).await.unwrap()),
             ["c1", "c2"]
         );
         // Config change: a second serial row appears and the blog row loses `works`.
@@ -774,7 +778,7 @@ mod tests {
         )
         .unwrap();
         reg.notify_config(&config);
-        let rows = source_rows(&reg.run(&all, None).await.unwrap());
+        let rows = source_rows(&reg.run(&all, None, None).await.unwrap());
         let counts: Vec<(&str, &str, &str)> = rows
             .iter()
             .map(|(n, e, u, _)| (n.as_str(), e.as_str(), u.as_str()))
@@ -793,7 +797,7 @@ mod tests {
         );
         let g = index.rebuild(&vault).unwrap();
         reg.notify_generation(g);
-        let rows = source_rows(&reg.run(&all, None).await.unwrap());
+        let rows = source_rows(&reg.run(&all, None, None).await.unwrap());
         assert_eq!(rows[1], s("Saga", "3", "1", "2026-10-04"));
     }
 }

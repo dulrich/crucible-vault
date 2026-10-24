@@ -188,6 +188,17 @@ impl ViewHost {
         view_id: &str,
         this_path: Option<&str>,
     ) -> Result<ViewResult, ViewsError> {
+        self.run_sorted(generation, view_id, this_path, None)
+    }
+
+    /// [`Self::run_typed`] with the editor's column-header sort.
+    pub fn run_sorted(
+        &mut self,
+        generation: u64,
+        view_id: &str,
+        this_path: Option<&str>,
+        ui_sort: Option<&cv_protocol::ViewSort>,
+    ) -> Result<ViewResult, ViewsError> {
         let (bi, vi) = self
             .bases
             .iter()
@@ -239,7 +250,7 @@ impl ViewHost {
             notices: RefCell::default(),
             serial: self.serial.as_ref(),
         };
-        let mut r = engine::run_on(&env, view, records.as_deref())?;
+        let mut r = engine::run_sorted(&env, view, records.as_deref(), ui_sort)?;
         r.notices
             .extend(load_notices.into_iter().map(|n| format!("load: {n}")));
         Ok(r)
@@ -252,7 +263,18 @@ impl ViewHost {
         view_id: &str,
         this_path: Option<&str>,
     ) -> Result<cv_protocol::ViewResult, String> {
-        self.run_typed(reader.generation(), view_id, this_path)
+        self.run_with_sort(reader, view_id, this_path, None)
+    }
+
+    /// [`Self::run`] with the editor's column-header sort.
+    pub fn run_with_sort(
+        &mut self,
+        reader: &cv_index::Reader,
+        view_id: &str,
+        this_path: Option<&str>,
+        ui_sort: Option<&cv_protocol::ViewSort>,
+    ) -> Result<cv_protocol::ViewResult, String> {
+        self.run_sorted(reader.generation(), view_id, this_path, ui_sort)
             .and_then(|r| r.into_protocol().map_err(ViewsError::from))
             .map_err(|e| e.to_string())
     }

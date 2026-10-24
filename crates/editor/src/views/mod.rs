@@ -15,7 +15,7 @@
 
 mod layout;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use iced::font::Weight;
 use iced::widget::text::Wrapping;
@@ -29,6 +29,7 @@ use layout::line_view;
 
 use crate::message::{Message, ViewsMsg};
 use crate::theme::Tokens;
+use crate::ui_state::{ViewSortPref, view_sort_key};
 use crate::widget::virtual_list::{ListWindow, VirtualList};
 
 /// Row height of the result table.
@@ -138,9 +139,44 @@ pub struct ViewStore {
     /// Plan round-9-feedback-todos WP-5: ids of the views whose "Only open" toggle is on
     /// (persisted as `UiState.view_filters`).
     pub filters: BTreeSet<String>,
+    /// Plan round-11 WP-5: column-header sorts keyed by [`view_sort_key`]
+    /// (persisted as `UiState.view_sorts`).
+    pub sorts: BTreeMap<String, ViewSortPref>,
+}
+
+/// The next header-click state of a column: none/other → ASC, ASC → DESC, DESC → cleared.
+pub fn next_sort(current: Option<&ViewSortPref>, column: &str) -> Option<ViewSortPref> {
+    match current {
+        Some(c) if c.column == column && c.desc => None,
+        Some(c) if c.column == column => Some(ViewSortPref {
+            column: column.to_owned(),
+            desc: true,
+        }),
+        _ => Some(ViewSortPref {
+            column: column.to_owned(),
+            desc: false,
+        }),
+    }
 }
 
 impl ViewStore {
+    /// The active header sort of `(id, host)`.
+    pub fn sort_of(&self, id: &str, host: Option<&str>) -> Option<&ViewSortPref> {
+        self.sorts.get(&view_sort_key(id, host))
+    }
+
+    /// [`Self::sort_of`] as the wire type.
+    fn wire_sort(&self, id: &str, host: Option<&str>) -> Option<cv_protocol::ViewSort> {
+        self.sort_of(id, host).map(|s| cv_protocol::ViewSort {
+            property: s.column.clone(),
+            direction: if s.desc {
+                cv_protocol::ViewSortDir::Desc
+            } else {
+                cv_protocol::ViewSortDir::Asc
+            },
+        })
+    }
+
     /// Plan round-5 WP-1: re-applies the stored scroll window of every virtual list hosted in
     /// note `host` (its scrollable state is positional and lost while the tab was hidden).
     pub fn restore<T: Send + 'static>(&self, host: &str) -> Vec<iced::Task<T>> {
@@ -168,6 +204,8 @@ pub enum Effect {
     Run {
         id: String,
         host: Option<String>,
+        /// The column-header sort to send with the request.
+        sort: Option<cv_protocol::ViewSort>,
     },
     /// Open `path` in the focused pane, cursor at 1-based `line` when set.
     Open {
@@ -257,7 +295,28 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
             }
             e.in_flight = true;
             e.stale = false;
-            Effect::Run { id, host }
+            let sort = store.wire_sort(&id, host.as_deref());
+            Effect::Run { id, host, sort }
+        }
+        ViewsMsg::SortBy { id, host, column } => {
+            let key = view_sort_key(&id, host.as_deref());
+            match next_sort(store.sorts.get(&key), &column) {
+                Some(s) => store.sorts.insert(key, s),
+                None => store.sorts.remove(&key),
+            };
+            let sort = store.wire_sort(&id, host.as_deref());
+            let Some(e) = store.entries.get_mut(&(id.clone(), host.clone())) else {
+                return Effect::None;
+            };
+            e.stale = true;
+            e.epoch = e.epoch.wrapping_add(1);
+            if e.in_flight {
+                // `Loaded` re-bumps the epoch of a stale entry, so the fence asks again.
+                return Effect::None;
+            }
+            e.in_flight = true;
+            e.stale = false;
+            Effect::Run { id, host, sort }
         }
         ViewsMsg::Loaded { id, host, result } => {
             if let Some(e) = store.entries.get_mut(&(id, host)) {
@@ -401,7 +460,7 @@ pub fn fence<'a>(
             .into(),
         Some(State::Ready(d)) => {
             let window = entry.map(|e| e.window).unwrap_or_default();
-            result_view(d, id, host, window, store.filters.contains(id), t, scale)
+            result_view(d, id, host, window, store, t, scale)
         }
     };
     let title = text(id.to_owned())
@@ -618,10 +677,12 @@ fn result_view<'a>(
     id: &str,
     host: &str,
     window: ListWindow,
-    only_open: bool,
+    store: &ViewStore,
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
+    let only_open = store.filters.contains(id);
+    let sort = store.sort_of(id, Some(host));
     // Plan tn-review-2026-10-23-remediation WP-R7: "Only open" walks the index list into
     // `d.lines` — no cloned lines.
     let open: Option<&'a [usize]> = match &d.open_lines {
@@ -643,15 +704,37 @@ fn result_view<'a>(
     if d.kind != Kind::Tasks && !d.columns.is_empty() {
         items.push(
             row(d.columns.iter().enumerate().map(|(i, c)| {
-                container(
-                    text(c.label.clone())
-                        .size(px(13.0, scale))
-                        .wrapping(Wrapping::None)
-                        .color(t.text_dim.to_color()),
-                )
-                .width(lengths.get(i).copied().unwrap_or(Length::FillPortion(1)))
-                .clip(true)
-                .into()
+                let mark = match sort {
+                    Some(s) if s.column == c.key => {
+                        if s.desc {
+                            " \u{25bc}"
+                        } else {
+                            " \u{25b2}"
+                        }
+                    }
+                    _ => "",
+                };
+                let label = text(format!("{}{mark}", c.label))
+                    .size(px(13.0, scale))
+                    .wrapping(Wrapping::None)
+                    .color(t.text_dim.to_color());
+                let header: Element<'a, Message> = if d.kind == Kind::Table {
+                    iced::widget::button(label)
+                        .padding(0)
+                        .style(|_, _| iced::widget::button::Style::default())
+                        .on_press(Message::Views(ViewsMsg::SortBy {
+                            id: id.to_owned(),
+                            host: Some(host.to_owned()),
+                            column: c.key.clone(),
+                        }))
+                        .into()
+                } else {
+                    label.into()
+                };
+                container(header)
+                    .width(lengths.get(i).copied().unwrap_or(Length::FillPortion(1)))
+                    .clip(true)
+                    .into()
             }))
             .spacing(8)
             .into(),

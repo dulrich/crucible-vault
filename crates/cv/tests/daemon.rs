@@ -413,7 +413,8 @@ async fn a1_registry_and_stub_methods() {
     assert_eq!(
         rpc_code(c.request(Request::ViewRun(ViewRunParams {
             view_id: "x".into(),
-            this_path: None
+            this_path: None,
+            sort: None
         }))),
         error_codes::NOT_FOUND
     );

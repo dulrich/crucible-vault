@@ -113,6 +113,7 @@ fn all_requests_round_trip() {
         Request::ViewRun(ViewRunParams {
             view_id: "v".into(),
             this_path: None,
+            sort: None,
         }),
     ];
     for (i, call) in calls.into_iter().enumerate() {
@@ -626,6 +627,10 @@ fn method_markers_match_the_wire() {
         ViewRunParams {
             view_id: "v".into(),
             this_path: None,
+            sort: Some(ViewSort {
+                property: "p".into(),
+                direction: ViewSortDir::Desc,
+            }),
         },
         s,
     );

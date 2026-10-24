@@ -203,7 +203,8 @@ fn summarize(f: SumFn, vals: &[&Value]) -> Value {
         .collect();
     #[allow(clippy::cast_precision_loss)]
     match f {
-        SumFn::Sum => Value::Num(nums.iter().sum()),
+        // fold from +0.0: an empty f64 `Sum` is -0.0 and would render `-0`.
+        SumFn::Sum => Value::Num(nums.iter().fold(0.0, |a, n| a + n)),
         SumFn::Count => {
             Value::Num(vals.iter().filter(|v| !matches!(v, Value::Null)).count() as f64)
         }
@@ -255,6 +256,17 @@ pub fn run(env: &Env<'_>, view: &View) -> R<ViewResult> {
 /// Runs `view` over `records` when given (no SQL narrowing; filters evaluate per record),
 /// otherwise over index files.
 pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewResult> {
+    run_sorted(env, view, records, None)
+}
+
+/// [`run_on`] with the editor's column-header sort as the primary key of a table view
+/// (an unknown column is ignored; pivot and tasks views ignore it).
+pub fn run_sorted(
+    env: &Env<'_>,
+    view: &View,
+    records: Option<&[Record]>,
+    ui_sort: Option<&cv_protocol::ViewSort>,
+) -> R<ViewResult> {
     let kind = match view.kind {
         ViewType::Table => Kind::Table,
         ViewType::Pivot => Kind::Pivot,
@@ -301,7 +313,7 @@ pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewR
         (ViewType::Pivot, Some(p), _) => pivot(env, p, &kept)?,
         (ViewType::Pivot, None, _) => ViewResult::empty(kind, Vec::new()),
         (ViewType::Tasks, _, Some(t)) => tasks(env, t, view.limit, &kept)?,
-        _ => table(view, kept)?,
+        _ => table(view, kept, ui_sort)?,
     };
     if records.is_some() && res.kind == Kind::Table {
         // A record source's `status` column is
@@ -318,7 +330,21 @@ pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewR
     Ok(res)
 }
 
-fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewResult> {
+fn table(
+    view: &View,
+    kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>,
+    ui_sort: Option<&cv_protocol::ViewSort>,
+) -> R<ViewResult> {
+    let ui = ui_sort.and_then(|s| {
+        let dir = match s.direction {
+            cv_protocol::ViewSortDir::Asc => Direction::ASC,
+            cv_protocol::ViewSortDir::Desc => Direction::DESC,
+        };
+        view.order
+            .iter()
+            .position(|(id, _, _)| *id == s.property)
+            .map(|i| (i, dir))
+    });
     let mut recs = Vec::with_capacity(kept.len());
     for (file, ctx) in kept {
         let mut cells = Vec::with_capacity(view.order.len());
@@ -348,6 +374,14 @@ fn table(view: &View, kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)>) -> R<ViewR
         });
     }
     recs.sort_by(|a, b| {
+        if let Some((c, dir)) = ui
+            && let (Some(x), Some(y)) = (a.cells.get(c), b.cells.get(c))
+        {
+            let o = ordered(dir, sort_cmp(x, y));
+            if o.is_ne() {
+                return o;
+            }
+        }
         for (i, (_, dir)) in view.sort.iter().enumerate() {
             let o = match (a.sort.get(i), b.sort.get(i)) {
                 (Some(x), Some(y)) => ordered(*dir, sort_cmp(x, y)),
@@ -570,7 +604,7 @@ fn pivot(
             cells.push(if has[c] { disp(sums[c])? } else { Cell::Null });
         }
         if p.total_column.is_some() {
-            cells.push(disp(sums.iter().sum())?);
+            cells.push(disp(sums.iter().fold(0.0, |a, n| a + n))?);
         }
         rows.push(Row {
             path: None,
@@ -579,7 +613,7 @@ fn pivot(
             cells,
         });
     }
-    let grand: f64 = col_tot.iter().sum();
+    let grand: f64 = col_tot.iter().fold(0.0, |a, n| a + n);
     let mut summaries = Vec::new();
     let summary_row = |label: &str, div: f64| -> R<Summary> {
         let mut cells = vec![Cell::Text { v: label.into() }];

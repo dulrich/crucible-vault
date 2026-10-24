@@ -379,6 +379,13 @@ pub enum PanelsMsg {
 /// WP-7: view fences, keyed by `(view id, embedding note)`.
 #[derive(Debug, Clone)]
 pub enum ViewsMsg {
+    /// Plan round-11 WP-5: a table column header click (`column` = the column key): cycles
+    /// that column ASC → DESC → cleared and re-runs the view.
+    SortBy {
+        id: String,
+        host: Option<String>,
+        column: String,
+    },
     /// A fence came into view (or was invalidated while shown): request its result.
     Need { id: String, host: Option<String> },
     /// `view_run` finished: the raw `ViewResult` JSON or an error.

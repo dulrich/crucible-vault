@@ -640,6 +640,24 @@ pub struct ViewRunParams {
     pub view_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub this_path: Option<String>,
+    /// The editor's column-header sort (plan round-11 WP-5): the primary key of a table view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ViewSort>,
+}
+
+/// A UI sort over one table column: `property` is the column key (its `order` id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewSort {
+    pub property: String,
+    pub direction: ViewSortDir,
+}
+
+/// Direction of a [`ViewSort`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewSortDir {
+    Asc,
+    Desc,
 }
 
 /// Reserved: the `view_run` result. Plan B (`v0-editor`, Public Interfaces) defines the

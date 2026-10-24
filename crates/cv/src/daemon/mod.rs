@@ -409,16 +409,17 @@ impl Shared {
             Request::ViewsList => reply::<m::ViewsList>(Ok(ViewsListResult {
                 view_ids: self.views.view_ids(),
             })),
-            Request::ViewRun(p) => {
-                reply::<m::ViewRun>(self.views.run(&p.view_id, p.this_path).await.map_err(|e| {
-                    match e {
+            Request::ViewRun(p) => reply::<m::ViewRun>(
+                self.views
+                    .run(&p.view_id, p.this_path, p.sort)
+                    .await
+                    .map_err(|e| match e {
                         ViewError::NotFound(id) => {
                             rpc_err(error_codes::NOT_FOUND, format!("no view {id}"))
                         }
                         ViewError::Failed(m) => internal(m),
-                    }
-                }))
-            }
+                    }),
+            ),
             Request::LookupCurrencies => {
                 reply::<m::LookupCurrencies>(self.lookups.currencies().await)
             }

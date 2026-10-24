@@ -337,6 +337,7 @@ impl App {
             .map(ui_state::load)
             .unwrap_or_default();
         let view_filters = ui.view_filters.clone();
+        let view_sorts = ui.view_sorts.clone();
         let (mut status, notifications) = match &daemon {
             Some(d) => {
                 let h = d.hello();
@@ -405,6 +406,7 @@ impl App {
             resolver,
             views: crate::views::ViewStore {
                 filters: view_filters,
+                sorts: view_sorts,
                 ..Default::default()
             },
             memory: Arc::new(crate::memory::Memory::new()),

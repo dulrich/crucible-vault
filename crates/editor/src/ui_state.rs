@@ -96,6 +96,21 @@ pub struct UiState {
     pub pane_borders: bool,
     /// Plan round-9-feedback-todos WP-5: ids of the views whose "Only open" toggle is on.
     pub view_filters: BTreeSet<String>,
+    /// Plan round-11 WP-5: the column-header sort of each table view, keyed by
+    /// [`view_sort_key`] (`"<host>\u{1f}<view id>"`, empty host for a hostless view).
+    pub view_sorts: BTreeMap<String, ViewSortPref>,
+}
+
+/// One persisted column-header sort: the column key and whether it runs descending.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewSortPref {
+    pub column: String,
+    pub desc: bool,
+}
+
+/// The `view_sorts` map key for view `id` hosted in note `host`.
+pub fn view_sort_key(id: &str, host: Option<&str>) -> String {
+    format!("{}\u{1f}{id}", host.unwrap_or_default())
 }
 
 /// Split direction: `Right` = side by side, `Down` = stacked.
@@ -294,6 +309,24 @@ mod tests {
         s.view_filters.insert("daily#Reading".into());
         save(&path, &s, None).expect("save");
         assert_eq!(load(&path).view_filters, s.view_filters);
+    }
+
+    #[test]
+    fn view_sorts_default_empty_for_old_files_and_round_trip() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("editor.json");
+        std::fs::write(&path, br#"{"surround":"dark","expanded":[]}"#).expect("old");
+        let mut s = load(&path);
+        assert!(s.view_sorts.is_empty(), "old file → no sorts");
+        s.view_sorts.insert(
+            view_sort_key("daily#Reading", Some("Host.md")),
+            ViewSortPref {
+                column: "file.name".into(),
+                desc: true,
+            },
+        );
+        save(&path, &s, None).expect("save");
+        assert_eq!(load(&path).view_sorts, s.view_sorts);
     }
 
     #[test]

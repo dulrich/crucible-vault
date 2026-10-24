@@ -168,9 +168,18 @@ impl DaemonClient for SocketDaemon {
         self.call::<m::ViewsList>(())
     }
 
-    fn view_run(&self, view_id: &str, this_path: Option<&str>) -> Result<ViewResult> {
+    fn view_run(
+        &self,
+        view_id: &str,
+        this_path: Option<&str>,
+        sort: Option<&cv_protocol::ViewSort>,
+    ) -> Result<ViewResult> {
         let (view_id, this_path) = (view_id.to_owned(), this_path.map(str::to_owned));
-        self.call::<m::ViewRun>(ViewRunParams { view_id, this_path })
+        self.call::<m::ViewRun>(ViewRunParams {
+            view_id,
+            this_path,
+            sort: sort.cloned(),
+        })
     }
 
     fn lookup_currencies(&self) -> Result<Vec<cv_protocol::LookupCurrency>> {
