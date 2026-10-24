@@ -299,8 +299,18 @@ impl App {
         match m {
             NavMsg::Go { pane, target } => match target {
                 NavTarget::Path(p) => {
-                    if let Err(e) = self.open_into(pane, p, Place::Replace) {
-                        self.status.set_error(open_error(&e));
+                    match self.open_into(pane, &p, Place::Replace) {
+                        Ok(()) => {}
+                        // Plan round-11 WP-7: a link to a missing note creates it (the
+                        // configured path is already a full vault path) and `Done` opens it
+                        // in the focused pane.
+                        Err(DaemonError::NotFound(_)) => {
+                            if self.panes.get(pane).is_some() {
+                                self.focus = pane;
+                            }
+                            return self.dispatch_op(FileOp::Create { path: p });
+                        }
+                        Err(e) => self.status.set_error(open_error(&e)),
                     }
                 }
                 NavTarget::Period(period, date) => {

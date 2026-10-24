@@ -75,7 +75,28 @@ pub enum NavTarget {
     /// `run_action period.open {period, date}` (month: first of month).
     Period(Period, NaiveDate),
     /// Opens a fixed vault path directly.
-    Path(&'static str),
+    Path(String),
+}
+
+/// One configured nav link (editor.toml `nav_links`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavLink {
+    pub label: String,
+    pub path: String,
+}
+
+/// The default links: Sample Charts and Works.
+pub fn default_nav_links() -> Vec<NavLink> {
+    vec![
+        NavLink {
+            label: "Sample Charts".into(),
+            path: CONTROL_PLANE.into(),
+        },
+        NavLink {
+            label: "Works".into(),
+            path: WORKS.into(),
+        },
+    ]
 }
 
 /// One bar button.
@@ -159,10 +180,24 @@ pub fn iso(d: NaiveDate) -> String {
 }
 
 /// The nav bar for a tab on `path`, or `None` when the path gets no bar.
-pub fn bar_for(path: &str, today: NaiveDate, folders: &PeriodFolders) -> Option<Vec<NavItem>> {
+///
+/// Day note: ← yesterday, month, Today, the links, tomorrow →. Month note: ← Last Month, Today,
+/// the links, Next Month →. Any other markdown note: Today plus the links. Else `None`.
+pub fn bar_for(
+    path: &str,
+    today: NaiveDate,
+    folders: &PeriodFolders,
+    links: &[NavLink],
+) -> Option<Vec<NavItem>> {
     let item = |label: String, target| NavItem { label, target };
+    let link_items = || {
+        links.iter().map(|l| NavItem {
+            label: l.label.clone(),
+            target: NavTarget::Path(l.path.clone()),
+        })
+    };
     if let Some(d) = day_note_date(path, folders) {
-        return Some(vec![
+        let mut bar = vec![
             item(
                 "← yesterday".into(),
                 NavTarget::Period(Period::Day, yesterday(d)),
@@ -172,26 +207,33 @@ pub fn bar_for(path: &str, today: NaiveDate, folders: &PeriodFolders) -> Option<
                 NavTarget::Period(Period::Month, month_start(d)),
             ),
             item("Today".into(), NavTarget::Period(Period::Day, today)),
-            item("Sample Charts".into(), NavTarget::Path(CONTROL_PLANE)),
-            item("Works".into(), NavTarget::Path(WORKS)),
-            item(
-                "tomorrow →".into(),
-                NavTarget::Period(Period::Day, tomorrow(d)),
-            ),
-        ]);
+        ];
+        bar.extend(link_items());
+        bar.push(item(
+            "tomorrow →".into(),
+            NavTarget::Period(Period::Day, tomorrow(d)),
+        ));
+        return Some(bar);
     }
     if let Some(m) = month_note_date(path, folders) {
-        return Some(vec![
+        let mut bar = vec![
             item(
                 "← Last Month".into(),
                 NavTarget::Period(Period::Month, prev_month(m)),
             ),
             item("Today".into(), NavTarget::Period(Period::Day, today)),
-            item(
-                "Next Month →".into(),
-                NavTarget::Period(Period::Month, next_month(m)),
-            ),
-        ]);
+        ];
+        bar.extend(link_items());
+        bar.push(item(
+            "Next Month →".into(),
+            NavTarget::Period(Period::Month, next_month(m)),
+        ));
+        return Some(bar);
+    }
+    if path.ends_with(".md") {
+        let mut bar = vec![item("Today".into(), NavTarget::Period(Period::Day, today))];
+        bar.extend(link_items());
+        return Some(bar);
     }
     None
 }
@@ -254,7 +296,8 @@ mod tests {
     #[test]
     fn bars() {
         let today = d(2026, 10, 13);
-        let day = bar_for("daily/day/2026-12-31.md", today, &F).expect("day bar");
+        let links = default_nav_links();
+        let day = bar_for("daily/day/2026-12-31.md", today, &F, &links).expect("day bar");
         let labels: Vec<&str> = day.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -268,24 +311,66 @@ mod tests {
             ]
         );
         assert_eq!(day[5].target, NavTarget::Period(Period::Day, d(2027, 1, 1)));
+        assert_eq!(day[3].target, NavTarget::Path(CONTROL_PLANE.into()));
         assert_eq!(
             day[1].target,
             NavTarget::Period(Period::Month, d(2026, 12, 1))
         );
         assert_eq!(day[2].target, NavTarget::Period(Period::Day, today));
-        let month = bar_for("daily/month/2026-01.md", today, &F).expect("month bar");
-        assert_eq!(month.len(), 3);
+        let month = bar_for("daily/month/2026-01.md", today, &F, &links).expect("month bar");
+        let labels: Vec<&str> = month.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "← Last Month",
+                "Today",
+                "Sample Charts",
+                "Works",
+                "Next Month →"
+            ]
+        );
         assert_eq!(
             month[0].target,
             NavTarget::Period(Period::Month, d(2025, 12, 1))
         );
         assert_eq!(month[1].target, NavTarget::Period(Period::Day, today));
         assert_eq!(
-            month[2].target,
+            month[4].target,
             NavTarget::Period(Period::Month, d(2026, 2, 1))
         );
-        assert!(bar_for("daily/day/2026-10-13/entry.md", today, &F).is_none());
-        assert!(bar_for("notes/a.md", today, &F).is_none());
+        // A reading entry under the day folder is an ordinary markdown note.
+        let entry = bar_for("daily/day/2026-10-13/entry.md", today, &F, &links).expect("bar");
+        assert_eq!(entry[0].label, "Today");
+        assert_eq!(entry.len(), 3);
+    }
+
+    #[test]
+    fn ordinary_note_gets_today_plus_links() {
+        let today = d(2026, 10, 13);
+        let bar = bar_for("notes/a.md", today, &F, &default_nav_links()).expect("bar");
+        let labels: Vec<&str> = bar.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Today", "Sample Charts", "Works"]);
+        assert_eq!(bar[0].target, NavTarget::Period(Period::Day, today));
+        assert_eq!(bar[2].target, NavTarget::Path(WORKS.into()));
+    }
+
+    #[test]
+    fn custom_links_and_non_markdown() {
+        let today = d(2026, 10, 13);
+        let links = [NavLink {
+            label: "Inbox".into(),
+            path: "core/Inbox.md".into(),
+        }];
+        let bar = bar_for("notes/a.md", today, &F, &links).expect("bar");
+        assert_eq!(bar.len(), 2);
+        assert_eq!(bar[1].label, "Inbox");
+        assert_eq!(bar[1].target, NavTarget::Path("core/Inbox.md".into()));
+        let day = bar_for("daily/day/2026-10-13.md", today, &F, &links).expect("bar");
+        assert_eq!(day.len(), 5);
+        assert_eq!(day[3].label, "Inbox");
+        // No links: just Today.
+        assert_eq!(bar_for("notes/a.md", today, &F, &[]).expect("bar").len(), 1);
+        assert!(bar_for("images/a.png", today, &F, &links).is_none());
     }
 
     #[test]
@@ -302,7 +387,7 @@ mod tests {
             month_note_date("journal/months/2026-10.md", &f),
             Some(d(2026, 10, 1))
         );
-        assert!(bar_for("journal/days/2026-10-13.md", d(2026, 10, 14), &f).is_some());
+        assert!(bar_for("journal/days/2026-10-13.md", d(2026, 10, 14), &f, &[]).is_some());
         // ISO basenames stay required (a non-ISO `format` is not honoured).
         assert_eq!(day_note_date("journal/days/13-10-2026.md", &f), None);
     }

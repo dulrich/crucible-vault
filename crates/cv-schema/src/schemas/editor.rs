@@ -19,6 +19,17 @@ pub static BOOKMARK: Record = Record {
     summary: None,
 };
 
+/// One `[[nav_links]]` entry of `editor.toml` (plan round-11 WP-7).
+pub static NAV_LINK: Record = Record {
+    name: "nav_link",
+    fields: &[
+        field("label", "Label", "Button text", Node::Str).req(),
+        field("path", "Path", "Vault path of the note", Node::Path).req(),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `bookmarks.toml`.
 pub static BOOKMARKS_FILE: Record = Record {
     name: "bookmarks.toml",
@@ -422,6 +433,12 @@ pub static EDITOR_FILE: Record = Record {
             STR_LIST,
         )
         .dflt(D::StrList(&["xdg-open"])),
+        field(
+            "nav_links",
+            "Nav links",
+            "Links shown after Today on the note nav bar (every markdown note; day/month notes keep their period buttons). A link to a missing note creates it. Absent = Sample Charts and Works; [] = none",
+            Node::List(&Node::Record(&NAV_LINK)),
+        ),
         field(
             "search",
             "Search panel",

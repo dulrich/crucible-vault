@@ -230,6 +230,7 @@ fn prefs_defaults_fields_and_fallbacks() {
     assert_eq!(full.search_limit, 80);
     assert_eq!(full.search_debounce_ms, 120);
     assert_eq!(full.scroll_anchor, 40);
+    assert_eq!(full.nav_links.len(), 1);
     assert_eq!(full.delete_mode, crate::daemon::DeleteMode::Permanent);
     assert_eq!(
         full.missing_link,
@@ -370,6 +371,10 @@ auto_lint = false
 scroll_anchor = 40
 open_url_cmd = ["firefox", "--new-tab"]
 
+[[nav_links]]
+label = "Inbox"
+path = "core/Inbox.md"
+
 [search]
 limit = 80
 debounce_ms = 120
@@ -381,6 +386,26 @@ hidden = ["quit", "my.action"]
 quick_switcher = ["Ctrl+P", "Ctrl+Alt+P"]
 quit = []
 "#;
+
+/// Plan round-11 WP-7: `nav_links` absent → the defaults, `[]` → none, a malformed entry is
+/// skipped.
+#[test]
+fn nav_links_pref_default_empty_and_malformed() {
+    let defaults = editor_model::period::default_nav_links();
+    assert_eq!(editor_prefs::Prefs::default().nav_links, defaults);
+    let p = editor_prefs::parse("", Surround::Med).expect("parse");
+    assert_eq!(p.nav_links, defaults);
+    let p = editor_prefs::parse("nav_links = []\n", Surround::Med).expect("parse");
+    assert!(p.nav_links.is_empty());
+    let p = editor_prefs::parse(
+        "[[nav_links]]\nlabel = \"Inbox\"\npath = \"core/Inbox.md\"\n\n[[nav_links]]\nlabel = \"No path\"\n\n[[nav_links]]\npath = \"x.md\"\n",
+        Surround::Med,
+    )
+    .expect("parse");
+    assert_eq!(p.nav_links.len(), 1);
+    assert_eq!(p.nav_links[0].label, "Inbox");
+    assert_eq!(p.nav_links[0].path, "core/Inbox.md");
+}
 
 /// Plan round-6 WP-4: `missing_link` absent → `warn`.
 fn legacy_missing() -> editor_prefs::MissingLink {

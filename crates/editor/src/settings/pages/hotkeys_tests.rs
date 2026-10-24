@@ -689,7 +689,8 @@ fn period_folders_come_from_captures_with_const_fallback() {
         editor_model::period::bar_for(
             "journal/d/2026-10-13.md",
             chrono::NaiveDate::from_ymd_opt(2026, 10, 14).expect("d"),
-            &app.period_folders
+            &app.period_folders,
+            &[]
         )
         .is_some()
     );

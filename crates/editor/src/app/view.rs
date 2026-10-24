@@ -375,7 +375,16 @@ impl App {
         };
         let nav_bar: Element<'a, Message> = ps
             .active_note()
-            .and_then(|tab| nav::bar(pane, tab.path, self.today(), &self.period_folders, t))
+            .and_then(|tab| {
+                nav::bar(
+                    pane,
+                    tab.path,
+                    self.today(),
+                    &self.period_folders,
+                    &self.prefs.nav_links,
+                    t,
+                )
+            })
             .map_or_else(
                 || Space::new().into(),
                 |bar| {

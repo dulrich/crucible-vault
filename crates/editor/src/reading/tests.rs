@@ -1325,6 +1325,26 @@ fn unresolved_link_click_creates_under_create_mode() {
     );
 }
 
+/// Plan round-11 WP-7: a nav link to a missing note creates it at exactly the configured vault
+/// path (no New-note-folder rewrite) and opens it in the clicked pane.
+#[test]
+fn nav_link_to_missing_note_creates_and_opens_it() {
+    use editor_model::period::NavTarget;
+    let (_tmp, d) = setup(&[("A.md", b"a\n")]);
+    let mut app = app_on(&d, "A.md");
+    app.queue_rpcs();
+    let pane = app.focus;
+    let _ = app.send(Message::Nav(crate::message::NavMsg::Go {
+        pane,
+        target: NavTarget::Path("core/Inbox.md".into()),
+    }));
+    assert!(d.read_file("core/Inbox.md").is_ok(), "created at the path");
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path()),
+        Some("core/Inbox.md")
+    );
+}
+
 /// Plan round-6 WP-4: the link menu offers "Create note" on an unresolved link under `warn`,
 /// and it creates the note.
 #[test]

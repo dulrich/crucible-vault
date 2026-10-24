@@ -20,6 +20,7 @@ use crate::daemon::DeleteMode;
 pub use crate::header::QuickSwitchOpen;
 use crate::header::TabTitle;
 use crate::theme::Surround;
+use editor_model::period::{NavLink, default_nav_links};
 
 /// The vault file.
 pub const EDITOR_PATH: &str = cv_schema::config_path!("editor.toml");
@@ -85,6 +86,30 @@ pub struct Prefs {
     /// usability-sprint-captures-links WP-3); the URL is appended last. Absent, mistyped or
     /// empty → [`default_open_url_cmd`].
     pub open_url_cmd: Vec<String>,
+    /// `nav_links` (plan round-11 WP-7): the nav-bar links after Today. Key absent (or not a
+    /// list) → [`default_nav_links`]; an explicit `[]` → none; entries without a `label` or
+    /// `path` are skipped.
+    pub nav_links: Vec<NavLink>,
+}
+
+/// The `nav_links` list of a doc (see [`Prefs::nav_links`]).
+fn nav_links_of(doc: &ConfigDoc) -> Vec<NavLink> {
+    let list = p("nav_links");
+    if !doc
+        .get(&list)
+        .is_some_and(|i| i.is_array() || i.is_array_of_tables())
+    {
+        return default_nav_links();
+    }
+    (0..doc.len(&list))
+        .filter_map(|i| {
+            let e = list.index(i);
+            Some(NavLink {
+                label: doc.get_str(&e.key("label"))?.to_owned(),
+                path: doc.get_str(&e.key("path"))?.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// `missing_link`: what a click on a link to a missing note does (plan round-6-feedback-todos WP-4).
@@ -131,6 +156,7 @@ impl Default for Prefs {
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
             open_url_cmd: default_open_url_cmd(),
+            nav_links: default_nav_links(),
         }
     }
 }
@@ -250,6 +276,7 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             .get_str_list(&p("open_url_cmd"))
             .filter(|v| v.first().is_some_and(|c| !c.trim().is_empty()))
             .unwrap_or(d.open_url_cmd),
+        nav_links: nav_links_of(doc),
     }
 }
 
