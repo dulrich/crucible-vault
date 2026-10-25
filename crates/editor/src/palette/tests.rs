@@ -362,7 +362,11 @@ fn palette_prompts_saves_first_and_runs_with_context() {
         json!({"title": "Hello", "flag": true, "when": "2026-10-13", "kind": "y"})
     );
     assert_eq!(p.context.active_path.as_deref(), Some("a.md"));
-    assert_eq!(p.context.line, Some(1));
+    assert_eq!(
+        p.context.line,
+        Some(0),
+        "0-based: the cursor sits on the first line"
+    );
     assert!(*fresh, "the action saw the post-save hash");
     let disk = std::fs::read_to_string(e.d.vault_root().join("a.md")).expect("read");
     assert!(disk.starts_with('Z'), "dirty buffer saved first");
@@ -1214,4 +1218,25 @@ fn persisted_command_ids_are_pinned() {
     assert_eq!(defaults, ["open_period.day", "preset.lint-note"]);
     assert_eq!(PERIOD_OPEN, "period.open");
     assert_eq!(bookmark_id("a/b.md"), "bookmark:a/b.md");
+}
+
+/// FEEDBACK 2026-10-25 "forward task fails: capture line is not a task": the editor sent a 1-based
+/// line while the daemon's `capture source=line` / `mark_forwarded` index 0-based, so Forward task
+/// read the line below the cursor. The context line is the cursor's 0-based index.
+#[test]
+fn context_line_is_the_cursors_zero_based_index() {
+    use iced::widget::text_editor::{Cursor, Position};
+    let text = "# Today\n\n- [ ] forward me\n- [ ] not me\n";
+    let mut b = SourceBuffer::new("d.md", text.as_bytes(), ContentHash::of(text.as_bytes()));
+    b.move_to(Cursor {
+        position: Position { line: 2, column: 4 },
+        selection: None,
+    });
+    let line = context(Some(&b), None).line.expect("line");
+    let at = text.split('\n').nth(usize::try_from(line).expect("usize"));
+    assert_eq!(
+        at,
+        Some("- [ ] forward me"),
+        "the daemon reads the cursor's own line"
+    );
 }

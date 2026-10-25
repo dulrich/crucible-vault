@@ -377,6 +377,7 @@ pub struct ActionContext {
     pub selection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// The cursor's line in `active_path`, **0-based** (the first line is 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
