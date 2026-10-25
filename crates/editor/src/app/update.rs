@@ -535,6 +535,12 @@ impl App {
             } else {
                 Subscription::none()
             },
+            // plan round-13 WP-2: Tab / Shift+Tab between Settings inputs, only on the Settings tab.
+            if self.settings_traversal_active() {
+                iced::keyboard::listen().filter_map(|e| crate::settings::traverse_key_event(&e))
+            } else {
+                Subscription::none()
+            },
             iced::keyboard::listen().filter_map(|e| crate::dialog::key_event(&e)),
             self.reading.subscription(&self.docs),
             // plan memory-instrumentation-and-reduction WP-M2: a snapshot to the daemon every 5 min.

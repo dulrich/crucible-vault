@@ -417,6 +417,17 @@ impl App {
         )
     }
 
+    /// Plan round-13 WP-2: Tab traversal is live only while the focused pane shows Settings and no
+    /// dialog, switcher, palette or search modal is open.
+    pub fn settings_traversal_active(&self) -> bool {
+        self.active_tab()
+            .is_some_and(|t| t.kind == TabKind::Settings)
+            && self.dialog.is_none()
+            && !self.switcher.open
+            && !self.palette.open
+            && !self.search_modal
+    }
+
     pub(super) fn update_settings(&mut self, m: crate::settings::SettingsMsg) -> Task<Message> {
         use crate::settings::{Section, SettingsMsg};
         match m {
@@ -452,6 +463,20 @@ impl App {
             SettingsMsg::Edit(path, edit) => {
                 let _ = self.settings.edit(&path, &edit);
                 self.on_settings_content(&path);
+            }
+            SettingsMsg::Traverse(back) => {
+                // An open typeahead closes as a blur (Escape) first; the WP-1 order pins are
+                // untouched (no toggle / unpin), so the sorted rows stay put.
+                if self.settings.form.typeahead.is_some() {
+                    self.settings
+                        .typeahead_key(crate::widget::typeahead::Key::Escape, &self.explorer.paths);
+                    self.settings.form.typeahead = None;
+                }
+                return if back {
+                    iced::widget::operation::focus_previous()
+                } else {
+                    iced::widget::operation::focus_next()
+                };
             }
             SettingsMsg::Typeahead(k) => {
                 let file = self

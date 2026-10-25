@@ -388,6 +388,26 @@ pub fn typeahead_key_event(
     Some(Message::Settings(SettingsMsg::Typeahead(k)))
 }
 
+/// Plan round-13 WP-2: Tab / Shift+Tab (no Ctrl/Alt/Logo) → [`SettingsMsg::Traverse`]. Pure
+/// mapping; the subscription that feeds it exists only while the Settings tab is active
+/// (`App::settings_traversal_active`). A focused `text_input` does not capture Tab
+/// (iced_widget-0.14.2 `text_input.rs:1051-1235` handles no Tab), so no status check is needed.
+pub fn traverse_key_event(ev: &iced::keyboard::Event) -> Option<Message> {
+    use iced::keyboard::{self, key::Named};
+    let keyboard::Event::KeyPressed {
+        key: keyboard::Key::Named(Named::Tab),
+        modifiers,
+        ..
+    } = ev
+    else {
+        return None;
+    };
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    Some(Message::Settings(SettingsMsg::Traverse(modifiers.shift())))
+}
+
 /// Form UI messages (typing, expansion); see [`Settings::form_msg`].
 #[derive(Debug, Clone)]
 pub enum FormMsg {

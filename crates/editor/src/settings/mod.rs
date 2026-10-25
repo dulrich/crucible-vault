@@ -65,7 +65,7 @@ use std::collections::BTreeMap;
 
 pub use captures::{CAPTURES_PATH, period_folders};
 pub use edit::{DocEdit, ScalarValue};
-pub use input::{FormMsg, typeahead_key_event};
+pub use input::{FormMsg, traverse_key_event, typeahead_key_event};
 pub use save_loop::{
     AUTOSAVE_DELAY, CHANGED_ON_DISK, ConfigFile, FinishOutcome, LoadState, LocalCheck, Phase,
     SaveJob, WriteOutcome, write_config,
@@ -146,6 +146,9 @@ pub enum SettingsMsg {
     Open,
     /// Plan round-5 WP-4: a key for the active form typeahead.
     Typeahead(crate::widget::typeahead::Key),
+    /// Plan round-13 WP-2: Tab (`false`) / Shift+Tab (`true`) moves focus to the next / previous
+    /// input of the Settings page.
+    Traverse(bool),
     /// Select a rail section.
     Section(Section),
     /// Plan round-5 WP-1: a section's body scrolled to vertical offset `.1` (px).

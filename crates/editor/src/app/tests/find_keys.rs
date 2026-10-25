@@ -751,3 +751,113 @@ fn serial_name_typing_keeps_position_and_focus() {
         "only the edited serial changed"
     );
 }
+
+/// Plan round-13-feedback-todos WP-2 (E1): the subscription's mapping yields the traversal
+/// message and the harness runs the focus operation itself (`Ui::send` discards Tasks and runs
+/// no subscriptions).
+fn traverse(ui: &mut Ui, app: &mut App, back: bool) {
+    let mods = if back {
+        Modifiers::SHIFT
+    } else {
+        Modifiers::empty()
+    };
+    let ev = keyboard::Event::KeyPressed {
+        key: Key::Named(key::Named::Tab),
+        modified_key: Key::Named(key::Named::Tab),
+        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+        location: Location::Standard,
+        modifiers: mods,
+        text: None,
+        repeat: false,
+    };
+    assert!(app.settings_traversal_active(), "listener is subscribed");
+    let m = crate::settings::traverse_key_event(&ev).expect("Tab maps to Traverse");
+    let _ = app.send(m);
+    ui.with(app, |el, tree, l, r| {
+        let mut op: Box<dyn Operation<()>> = if back {
+            Box::new(operation::focusable::focus_previous::<()>())
+        } else {
+            Box::new(operation::focusable::focus_next::<()>())
+        };
+        // The runtime's loop: a `Chain` outcome (count pass, then focus pass) runs again.
+        loop {
+            el.as_widget_mut().operate(tree, l, r, op.as_mut());
+            match op.finish() {
+                operation::Outcome::Chain(next) => op = next,
+                _ => break,
+            }
+        }
+    });
+}
+
+#[test]
+fn settings_tab_and_shift_tab_move_between_inputs() {
+    use crate::settings::{Section, SettingsMsg};
+    const SOURCES: &str = "_custom/crucible-vault/sources.toml";
+    let (_tmp, d) = fake();
+    let d = Arc::new(d);
+    d.create_note(
+        SOURCES,
+        "[[serial]]\nname = \"Alpha\"\n\n[[serial]]\nname = \"Mid\"\n",
+    )
+    .expect("sources");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.queue_rpcs();
+    let _ = app.send(Message::Settings(SettingsMsg::Open));
+    let _ = app.send(Message::Settings(SettingsMsg::Section(Section::Sources)));
+    app.settings.form.expanded.insert((
+        SOURCES.to_owned(),
+        cv_schema::Path::parse("serial[0]").expect("p"),
+    ));
+    let mut ui = Ui {
+        renderer: renderer(),
+        tree: None,
+        height: 3000.0,
+    };
+    let find = |ui: &mut Ui, app: &App, v: &str| {
+        input_values(ui, app)
+            .into_iter()
+            .find(|(_, t)| t == v)
+            .map(|(b, _)| b)
+    };
+    let start = find(&mut ui, &app, "Alpha").expect("name input");
+    ui.click(&mut app, start.center());
+    traverse(&mut ui, &mut app, false);
+    ui.send(&mut app, &press(Key::Character("q".into()), Some("q")));
+    assert!(
+        find(&mut ui, &app, "Alpha").is_some(),
+        "Tab left the name input: it is unchanged {:?}",
+        input_values(&mut ui, &app)
+            .iter()
+            .map(|x| x.1.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        input_values(&mut ui, &app)
+            .iter()
+            .any(|(_, t)| t.contains('q')),
+        "the next input received the typed character"
+    );
+    traverse(&mut ui, &mut app, true);
+    ui.send(&mut app, &press(Key::Character("z".into()), Some("z")));
+    assert!(
+        find(&mut ui, &app, "Alphaz").is_some(),
+        "Shift+Tab returned to the name input"
+    );
+}
+
+#[test]
+fn settings_tab_listener_is_off_for_notes() {
+    use crate::settings::SettingsMsg;
+    let (_tmp, app, _ui) = setup();
+    assert!(
+        !app.settings_traversal_active(),
+        "a note tab keeps Tab (indent / typeahead)"
+    );
+    let mut app = app;
+    let _ = app.send(Message::Settings(SettingsMsg::Open));
+    assert!(app.settings_traversal_active());
+    let _ = app.send(Message::Palette(PaletteMsg::Open));
+    assert!(!app.settings_traversal_active(), "palette keeps Tab");
+}
