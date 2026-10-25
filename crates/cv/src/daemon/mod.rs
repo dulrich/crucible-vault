@@ -411,7 +411,7 @@ impl Shared {
             })),
             Request::ViewRun(p) => reply::<m::ViewRun>(
                 self.views
-                    .run(&p.view_id, p.this_path, p.sort)
+                    .run(&p.view_id, p.this_path, p.sort, p.select)
                     .await
                     .map_err(|e| match e {
                         ViewError::NotFound(id) => {

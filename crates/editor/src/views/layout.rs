@@ -8,8 +8,8 @@ use iced::{Element, Font, Length};
 
 use super::{
     Cell, ColumnRole, Decoded, Kind, Line, cell_menu_target, checkbox_cell, format_cell, px,
-    role_index, row_cancelled, row_height, row_targets, status_cell, status_menu_target, struck,
-    task_row_status,
+    role_index, row_cancelled, row_height, row_targets, select_cell, status_cell,
+    status_menu_target, struck, task_row_status,
 };
 use crate::message::{Message, ViewsMsg};
 use crate::theme::Tokens;
@@ -158,10 +158,11 @@ pub(super) fn line_view<'a>(
     l: &Line,
     lengths: &[Length],
     single: bool,
+    select_host: Option<&str>,
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
-    let el = line_inner(d, l, lengths, single, t, scale);
+    let el = line_inner(d, l, lengths, single, select_host, t, scale);
     if single {
         container(el)
             .height(Length::Fixed(row_height(scale)))
@@ -178,6 +179,7 @@ pub(super) fn line_inner<'a>(
     l: &Line,
     lengths: &[Length],
     single: bool,
+    select_host: Option<&str>,
     t: Tokens,
     scale: f32,
 ) -> Element<'a, Message> {
@@ -221,7 +223,14 @@ pub(super) fn line_inner<'a>(
         Line::Row(r) => {
             if d.kind != Kind::Tasks {
                 // A status cell draws as the shared task checkbox.
-                let targets = row_targets(r, &d.columns);
+                let mut targets = row_targets(r, &d.columns);
+                // Plan round-13 WP-4: a serial row's Name cell selects in the host's
+                // `select_by` sections.
+                if let Some((i, msg)) = select_host.and_then(|h| select_cell(r, &d.columns, h))
+                    && let Some(slot) = targets.get_mut(i)
+                {
+                    *slot = Some(msg);
+                }
                 let cancelled = row_cancelled(r, &d.columns);
                 return row((0..cols).map(|i| {
                     let open = targets.get(i).cloned().flatten();

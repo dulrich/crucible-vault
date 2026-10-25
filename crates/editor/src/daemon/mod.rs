@@ -120,12 +120,13 @@ pub trait DaemonClient: Send + Sync {
     fn status(&self) -> Result<StatusResult>;
     /// View ids.
     fn views_list(&self) -> Result<ViewsListResult>;
-    /// Evaluates one view.
+    /// Evaluates one view. `select` = the host's in-place selection (plan round-13 WP-4).
     fn view_run(
         &self,
         view_id: &str,
         this_path: Option<&str>,
         sort: Option<&cv_protocol::ViewSort>,
+        select: Option<&cv_protocol::ViewSelect>,
     ) -> Result<ViewResult>;
     /// Supported currencies, sorted by code (plan round-5-reading-pickers-intake WP-5).
     fn lookup_currencies(&self) -> Result<Vec<LookupCurrency>>;

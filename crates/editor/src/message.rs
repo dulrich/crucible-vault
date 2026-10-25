@@ -430,6 +430,9 @@ pub enum ViewsMsg {
     BoolSet(Result<(), String>),
     /// Plan round-9-feedback-todos WP-5: flip the "Only open" toggle of view `id`.
     ToggleOpenOnly { id: String },
+    /// Plan round-13 WP-4: a serial row's Name click in a `sources` section of note `host` —
+    /// selects `value` for the host's `select_by` sections (the same value again clears).
+    Select { host: String, value: String },
 }
 
 /// WP-4: day/month nav. The bar belongs to `pane`; results open in that pane's active tab.

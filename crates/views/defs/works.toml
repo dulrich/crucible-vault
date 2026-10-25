@@ -12,6 +12,8 @@
 # - Unread stays an index view of unread `daily/day` notes; `file.serial` is the name of the first
 #   `[[serial]]` row (config order) the note matches by that same matcher (null when none),
 #   supplied by the daemon — never restated as an expression here.
+# - Entries `select_by = "file.serial"` (plan round-13 WP-4): clicking a `[[serial]]` row's Name in
+#   Active/Complete on the same note filters Entries to that work; clicking it again clears.
 
 [formulas]
 tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "using").join(", ")'
@@ -83,3 +85,4 @@ filters = { and = [
 order = ["file.name", "formula.tags", "note.word-count", "formula.read", "formula.created"]
 sort = [{ property = "formula.created", direction = "ASC" }]
 groupBy = { property = "file.serial", direction = "ASC" }
+select_by = "file.serial"

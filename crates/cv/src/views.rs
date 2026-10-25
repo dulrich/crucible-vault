@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use cv_actions::pipelines::{SerialStatus, SourcesConfig};
-use cv_protocol::{Notification, ViewResult, ViewSort};
+use cv_protocol::{Notification, ViewResult, ViewSelect, ViewSort};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::sync::lock;
@@ -21,6 +21,8 @@ enum Cmd {
         view_id: String,
         this_path: Option<String>,
         sort: Option<ViewSort>,
+        /// Plan round-13 WP-4: the host's in-place selection.
+        select: Option<ViewSelect>,
         reply: oneshot::Sender<Result<ViewResult, String>>,
     },
     /// A new index generation committed: reopen the reader.
@@ -103,6 +105,7 @@ impl ViewRegistry {
         view_id: &str,
         this_path: Option<String>,
         sort: Option<ViewSort>,
+        select: Option<ViewSelect>,
     ) -> Result<ViewResult, ViewError> {
         if !lock(&self.ids).iter().any(|i| i == view_id) {
             return Err(ViewError::NotFound(view_id.to_owned()));
@@ -112,6 +115,7 @@ impl ViewRegistry {
             view_id: view_id.to_owned(),
             this_path,
             sort,
+            select,
             reply,
         })
         .map_err(|()| ViewError::Failed("view service thread is gone".into()))?;
@@ -399,6 +403,7 @@ fn serve(
                 view_id,
                 this_path,
                 sort,
+                select,
                 reply,
             } => {
                 if reader.is_none() {
@@ -423,7 +428,13 @@ fn serve(
                     }
                 }
                 let res = match reader.as_ref() {
-                    Some(r) => host.run_with_sort(r, &view_id, this_path.as_deref(), sort.as_ref()),
+                    Some(r) => host.run_with_select(
+                        r,
+                        &view_id,
+                        this_path.as_deref(),
+                        sort.as_ref(),
+                        select.as_ref(),
+                    ),
                     None => Err("no index reader".into()),
                 };
                 let _ = reply.send(res);
@@ -477,7 +488,7 @@ mod tests {
         let empty = ViewRegistry::start(&tmp, &base, None, tx).unwrap();
         assert!(empty.view_ids().is_empty());
         assert_eq!(
-            empty.run("x", None, None).await.unwrap_err(),
+            empty.run("x", None, None, None).await.unwrap_err(),
             ViewError::NotFound("x".into())
         );
         drop(index);
@@ -524,7 +535,10 @@ mod tests {
                 .collect()
         };
         let id = "hubs#On".to_owned();
-        assert_eq!(names(&reg.run(&id, None, None).await.unwrap()), ["t1"]);
+        assert_eq!(
+            names(&reg.run(&id, None, None, None).await.unwrap()),
+            ["t1"]
+        );
         let mut step = async |change: &dyn Fn()| {
             change();
             let g = index.rebuild(&vault).unwrap();
@@ -537,7 +551,7 @@ mod tests {
                 panic!("expected views_invalidated, got {n:?}");
             };
             assert!(view_ids.contains(&id));
-            names(&reg.run(&id, None, None).await.unwrap())
+            names(&reg.run(&id, None, None, None).await.unwrap())
         };
         // Rename: the row follows the new name.
         let rows = step(&|| {
@@ -602,7 +616,10 @@ mod tests {
         let id = "intake#Day".to_owned();
         let this = Some("daily/2026-10-17.md".to_owned());
         let rows = |r: &ViewResult| r.0["groups"][0]["rows"].as_array().map_or(0, Vec::len);
-        assert_eq!(rows(&reg.run(&id, this.clone(), None).await.unwrap()), 0);
+        assert_eq!(
+            rows(&reg.run(&id, this.clone(), None, None).await.unwrap()),
+            0
+        );
         let item = cv_state::TrackerItem {
             source_kind: "youtube".into(),
             source_key: "UC1".into(),
@@ -633,10 +650,10 @@ mod tests {
                 view_ids: vec![id.clone()]
             }
         );
-        assert_eq!(rows(&reg.run(&id, this, None).await.unwrap()), 1);
+        assert_eq!(rows(&reg.run(&id, this, None, None).await.unwrap()), 1);
         assert!(!state.insert_tracker_item(&item).unwrap());
         // Nothing further was emitted (the duplicate raised no signal).
-        let _ = reg.run(&id, None, None).await.unwrap();
+        let _ = reg.run(&id, None, None, None).await.unwrap();
         assert!(rx.try_recv().is_err());
     }
 
@@ -670,11 +687,11 @@ mod tests {
         };
         // Before: the invalidation is already out when the query's reply arrives.
         hook("tracker_items");
-        reg.run(&id, None, None).await.unwrap();
+        reg.run(&id, None, None, None).await.unwrap();
         assert_eq!(rx.try_recv().unwrap(), invalidated);
         assert!(rx.try_recv().is_err());
         // After: the query's reply precedes the invalidation.
-        reg.run(&id, None, None).await.unwrap();
+        reg.run(&id, None, None, None).await.unwrap();
         assert!(rx.try_recv().is_err());
         hook("tracker_items");
         let n = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -755,7 +772,7 @@ mod tests {
             (a.to_owned(), b.to_owned(), c.to_owned(), d.to_owned())
         };
         assert_eq!(
-            source_rows(&reg.run(&all, None, None).await.unwrap()),
+            source_rows(&reg.run(&all, None, None, None).await.unwrap()),
             [
                 s("Feed", "1", "1", "2026-09-30"),
                 s("Saga", "2", "1", "2026-10-03")
@@ -768,15 +785,44 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            matched(&reg.run("works#Matched", None, None).await.unwrap()),
+            matched(&reg.run("works#Matched", None, None, None).await.unwrap()),
             ["c1", "c2"]
         );
         // `groupBy` accepts the daemon-supplied `file.serial` (plan round-12 WP-4).
-        let grouped = reg.run("works#Grouped", None, None).await.unwrap();
+        let grouped = reg.run("works#Grouped", None, None, None).await.unwrap();
         let groups = grouped.0["groups"].as_array().unwrap();
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert!(groups[0]["key"].to_string().contains("Saga"), "{groups:?}");
         assert_eq!(groups[0]["rows"].as_array().unwrap().len(), 2);
+        // Plan round-13 WP-4: the selection filters before grouping; only `[[serial]]` rows are
+        // selectable (their `name` is the `file.serial` value).
+        let pick = |v: &str| {
+            Some(ViewSelect {
+                property: "file.serial".into(),
+                value: v.into(),
+            })
+        };
+        let saga = reg
+            .run("works#Grouped", None, None, pick("Saga"))
+            .await
+            .unwrap();
+        assert_eq!(saga.0["groups"][0]["rows"].as_array().unwrap().len(), 2);
+        let none = reg
+            .run("works#Grouped", None, None, pick("Nope"))
+            .await
+            .unwrap();
+        assert!(none.0["groups"].as_array().unwrap().is_empty(), "{none:?}");
+        let rows = reg.run(&all, None, None, None).await.unwrap();
+        let selects: Vec<&serde_json::Value> = rows.0["groups"][0]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| &r["select"])
+            .collect();
+        assert_eq!(
+            selects,
+            [&serde_json::Value::Null, &serde_json::json!("Saga")]
+        );
         // Config change: a second serial row appears and the blog row loses `works`.
         std::fs::write(
             config.join("sources.toml"),
@@ -785,7 +831,7 @@ mod tests {
         )
         .unwrap();
         reg.notify_config(&config);
-        let rows = source_rows(&reg.run(&all, None, None).await.unwrap());
+        let rows = source_rows(&reg.run(&all, None, None, None).await.unwrap());
         let counts: Vec<(&str, &str, &str)> = rows
             .iter()
             .map(|(n, e, u, _)| (n.as_str(), e.as_str(), u.as_str()))
@@ -804,7 +850,7 @@ mod tests {
         );
         let g = index.rebuild(&vault).unwrap();
         reg.notify_generation(g);
-        let rows = source_rows(&reg.run(&all, None, None).await.unwrap());
+        let rows = source_rows(&reg.run(&all, None, None, None).await.unwrap());
         assert_eq!(rows[1], s("Saga", "3", "1", "2026-10-04"));
     }
 }

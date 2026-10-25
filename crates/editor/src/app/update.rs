@@ -448,11 +448,16 @@ impl App {
     fn update_views(&mut self, m: crate::message::ViewsMsg) -> Task<Message> {
         match crate::views::update(&mut self.views, m) {
             crate::views::Effect::None => Task::none(),
-            crate::views::Effect::Run { id, host, sort } => {
+            crate::views::Effect::Run {
+                id,
+                host,
+                sort,
+                select,
+            } => {
                 let (rid, rhost) = (id.clone(), host.clone());
                 self.rpc(
                     move |d| {
-                        d.view_run(&rid, rhost.as_deref(), sort.as_ref())
+                        d.view_run(&rid, rhost.as_deref(), sort.as_ref(), select.as_ref())
                             .map(|r| r.0)
                             .map_err(|e| e.to_string())
                     },

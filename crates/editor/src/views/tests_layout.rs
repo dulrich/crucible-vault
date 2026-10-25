@@ -14,12 +14,14 @@ fn dec(cols: Vec<Column>, rows: Vec<Vec<Cell>>) -> Decoded {
                     line: None,
                     cells,
                     key: None,
+                    select: None,
                 })
             })
             .collect(),
         notices: Vec::new(),
         max_height: None,
         open_lines: None,
+        select_by: None,
     }
 }
 
@@ -111,6 +113,7 @@ fn open_row(cb: Option<Cell>, st: Option<Cell>) -> Row {
         line: None,
         cells,
         key: None,
+        select: None,
     }
 }
 

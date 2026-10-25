@@ -134,6 +134,11 @@ pub struct Row {
     /// Opaque row identity for record-sourced rows ([`TrackerKey::encode`]); `None` for index rows.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub key: Option<String>,
+    /// Plan round-13 WP-4: the selection value of a selectable row — a `sources` record whose
+    /// `row` is `serial` carries its `name` (the `file.serial` value of its entries). `None` for
+    /// every other row; old payloads omit it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub select: Option<String>,
 }
 
 /// Plan round-9-feedback-todos WP-5 (audit E1): whether `cell` is checked — only `Bool(true)`;
@@ -242,6 +247,9 @@ pub struct ViewResult {
         deserialize_with = "lenient_max_height"
     )]
     pub max_height: Option<MaxHeight>,
+    /// Plan round-13 WP-4: the view's `select_by` property (`None` = not selectable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_by: Option<String>,
 }
 
 fn lenient_max_height<'de, D: serde::Deserializer<'de>>(
@@ -319,6 +327,7 @@ impl ViewResult {
             summaries: Vec::new(),
             notices,
             max_height: None,
+            select_by: None,
         }
     }
 

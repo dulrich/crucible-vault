@@ -199,6 +199,18 @@ impl ViewHost {
         this_path: Option<&str>,
         ui_sort: Option<&cv_protocol::ViewSort>,
     ) -> Result<ViewResult, ViewsError> {
+        self.run_selected(generation, view_id, this_path, ui_sort, None)
+    }
+
+    /// [`Self::run_sorted`] with the host's in-place selection (plan round-13 WP-4).
+    pub fn run_selected(
+        &mut self,
+        generation: u64,
+        view_id: &str,
+        this_path: Option<&str>,
+        ui_sort: Option<&cv_protocol::ViewSort>,
+        select: Option<&cv_protocol::ViewSelect>,
+    ) -> Result<ViewResult, ViewsError> {
         let (bi, vi) = self
             .bases
             .iter()
@@ -250,7 +262,7 @@ impl ViewHost {
             notices: RefCell::default(),
             serial: self.serial.as_ref(),
         };
-        let mut r = engine::run_sorted(&env, view, records.as_deref(), ui_sort)?;
+        let mut r = engine::run_selected(&env, view, records.as_deref(), ui_sort, select)?;
         r.notices
             .extend(load_notices.into_iter().map(|n| format!("load: {n}")));
         Ok(r)
@@ -274,7 +286,19 @@ impl ViewHost {
         this_path: Option<&str>,
         ui_sort: Option<&cv_protocol::ViewSort>,
     ) -> Result<cv_protocol::ViewResult, String> {
-        self.run_sorted(reader.generation(), view_id, this_path, ui_sort)
+        self.run_with_select(reader, view_id, this_path, ui_sort, None)
+    }
+
+    /// [`Self::run_with_sort`] with the host's in-place selection (plan round-13 WP-4).
+    pub fn run_with_select(
+        &mut self,
+        reader: &cv_index::Reader,
+        view_id: &str,
+        this_path: Option<&str>,
+        ui_sort: Option<&cv_protocol::ViewSort>,
+        select: Option<&cv_protocol::ViewSelect>,
+    ) -> Result<cv_protocol::ViewResult, String> {
+        self.run_selected(reader.generation(), view_id, this_path, ui_sort, select)
             .and_then(|r| r.into_protocol().map_err(ViewsError::from))
             .map_err(|e| e.to_string())
     }

@@ -644,6 +644,17 @@ pub struct ViewRunParams {
     /// The editor's column-header sort (plan round-11 WP-5): the primary key of a table view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<ViewSort>,
+    /// Plan round-13 WP-4: the host's in-place selection (`property == value`), ANDed with the
+    /// view's filters before grouping, sorting, paging and summaries. Absent = unfiltered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<ViewSelect>,
+}
+
+/// A UI selection filter (plan round-13 WP-4): rows whose `property` equals `value`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewSelect {
+    pub property: String,
+    pub value: String,
 }
 
 /// A UI sort over one table column: `property` is the column key (its `order` id).

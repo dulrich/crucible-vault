@@ -414,7 +414,8 @@ async fn a1_registry_and_stub_methods() {
         rpc_code(c.request(Request::ViewRun(ViewRunParams {
             view_id: "x".into(),
             this_path: None,
-            sort: None
+            sort: None,
+            select: None,
         }))),
         error_codes::NOT_FOUND
     );

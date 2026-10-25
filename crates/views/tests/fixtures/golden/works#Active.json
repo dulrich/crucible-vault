@@ -62,7 +62,8 @@
               "t": "date",
               "v": "2026-10-02"
             }
-          ]
+          ],
+          "select": "Ann Blog"
         },
         {
           "cells": [
@@ -93,7 +94,8 @@
             {
               "t": "null"
             }
-          ]
+          ],
+          "select": "Cy Story"
         },
         {
           "cells": [

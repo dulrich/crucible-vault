@@ -230,6 +230,8 @@ fn same_prop(a: &str, b: &str) -> bool {
 struct Rec {
     file: Option<Arc<FileInfo>>,
     key: Option<String>,
+    /// Plan round-13 WP-4: [`Row::select`].
+    select: Option<String>,
     cells: Vec<Value>,
     sort: Vec<Value>,
     group: Value,
@@ -267,6 +269,19 @@ pub fn run_sorted(
     records: Option<&[Record]>,
     ui_sort: Option<&cv_protocol::ViewSort>,
 ) -> R<ViewResult> {
+    run_selected(env, view, records, ui_sort, None)
+}
+
+/// [`run_sorted`] with the host's in-place selection (plan round-13 WP-4): rows whose
+/// `select.property` evaluates to the text `select.value`, ANDed with the view's filters before
+/// grouping, sorting, the limit and summaries.
+pub fn run_selected(
+    env: &Env<'_>,
+    view: &View,
+    records: Option<&[Record]>,
+    ui_sort: Option<&cv_protocol::ViewSort>,
+    select: Option<&cv_protocol::ViewSelect>,
+) -> R<ViewResult> {
     let kind = match view.kind {
         ViewType::Table => Kind::Table,
         ViewType::Pivot => Kind::Pivot,
@@ -276,6 +291,7 @@ pub fn run_sorted(
     if view.filter_error {
         let mut res = ViewResult::empty(kind, notices);
         res.max_height = view.max_height;
+        res.select_by.clone_from(&view.select_by);
         return Ok(res);
     }
     let rows: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)> = match records {
@@ -296,6 +312,7 @@ pub fn run_sorted(
                 .collect()
         }
     };
+    let selected = select.map(|s| (crate::expr::property(&s.property), s.value.as_str()));
     let mut kept: Vec<(Option<Arc<FileInfo>>, RowCtx<'_>)> = Vec::new();
     for (f, ctx) in rows {
         let mut ok = true;
@@ -304,6 +321,9 @@ pub fn run_sorted(
                 ok = false;
                 break;
             }
+        }
+        if ok && let Some((e, want)) = &selected {
+            ok = matches!(ctx.eval(e)?, Value::Str(ref v) if v.as_str() == *want);
         }
         if ok {
             kept.push((f, ctx));
@@ -327,6 +347,7 @@ pub fn run_sorted(
     notices.extend(env.notices.borrow().iter().cloned());
     res.notices = notices;
     res.max_height = view.max_height;
+    res.select_by.clone_from(&view.select_by);
     Ok(res)
 }
 
@@ -364,9 +385,11 @@ fn table(
             flags.push(ctx.eval(&r.filter)?.truthy());
         }
         let key = ctx.record_key();
+        let select = ctx.select_value();
         recs.push(Rec {
             file,
             key,
+            select,
             cells,
             sort,
             group,
@@ -478,6 +501,7 @@ fn table(
         path: r.file.as_ref().map(|f| f.path.clone()),
         line: None,
         key: r.key.clone(),
+        select: r.select.clone(),
         cells: r
             .cells
             .iter()
@@ -518,6 +542,7 @@ fn table(
     Ok(ViewResult {
         kind: Kind::Table,
         max_height: None,
+        select_by: None,
         columns: view
             .order
             .iter()
@@ -610,6 +635,7 @@ fn pivot(
             path: None,
             line: None,
             key: None,
+            select: None,
             cells,
         });
     }
@@ -646,6 +672,7 @@ fn pivot(
     Ok(ViewResult {
         kind: Kind::Pivot,
         max_height: None,
+        select_by: None,
         columns,
         groups: vec![Group {
             key: None,
@@ -702,6 +729,7 @@ fn tasks(
                 path: Some(f.path.clone()),
                 line: Some(task.line),
                 key: None,
+                select: None,
                 cells: vec![
                     Cell::Text {
                         v: task.text.clone(),
@@ -725,6 +753,7 @@ fn tasks(
     Ok(ViewResult {
         kind: Kind::Tasks,
         max_height: None,
+        select_by: None,
         columns: vec![
             Column::plain("task", "Task").with_role(ColumnRole::TaskText),
             Column::plain("file", "File").with_role(ColumnRole::TaskFile),

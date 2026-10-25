@@ -1217,6 +1217,7 @@ fn row_of(cells: Vec<Cell>) -> crate::result::Row {
         line: None,
         cells,
         key: None,
+        select: None,
     }
 }
 
@@ -1315,6 +1316,13 @@ limit = 2
 
 [[views]]
 type = "table"
+name = "Sel"
+order = ["file.name", "note.word-count"]
+summaries = { "file.name" = "Count" }
+select_by = "file.name"
+
+[[views]]
+type = "table"
 name = "Empty"
 filters = 'file.name == "zzz-none"'
 order = ["file.name", "note.word-count"]
@@ -1378,4 +1386,37 @@ fn empty_sum_renders_zero() {
     let mut h = fx.host();
     let r = fx.run(&mut h, "us#Empty", None);
     assert_eq!(text(&r.summaries[0].cells[1]), "0");
+}
+
+/// Plan round-13 WP-4: the selection reduces rows and summaries; absent = unchanged; the
+/// result carries the definition's `select_by`.
+#[test]
+fn ui_select_filters_rows_and_summaries() {
+    let fx = fixture(&[("us.toml", UI_SORT)]);
+    let mut h = fx.host();
+    let g = fx.reader().generation();
+    let all = h.run_sorted(g, "us#Sel", None, None).unwrap();
+    assert_eq!(all.select_by.as_deref(), Some("file.name"));
+    let first = names(&all)[0].clone();
+    assert!(names(&all).len() > 1);
+    let count = |r: &ViewResult| text(&r.summaries[0].cells[0]);
+    assert_eq!(count(&all), names(&all).len().to_string());
+    let sel = cv_protocol::ViewSelect {
+        property: "file.name".into(),
+        value: first.clone(),
+    };
+    let one = h.run_selected(g, "us#Sel", None, None, Some(&sel)).unwrap();
+    assert_eq!(names(&one), [first]);
+    assert_eq!(count(&one), "1");
+    let none = cv_protocol::ViewSelect {
+        property: "file.name".into(),
+        value: "zzz-none".into(),
+    };
+    assert!(
+        names(
+            &h.run_selected(g, "us#Sel", None, None, Some(&none))
+                .unwrap()
+        )
+        .is_empty()
+    );
 }

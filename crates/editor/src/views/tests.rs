@@ -449,6 +449,7 @@ fn row_link_cells_open_their_own_targets() {
         path: Some("INITIATIVE.md".into()),
         line: Some(3),
         key: None,
+        select: None,
         cells: vec![
             Cell::Link {
                 path: "a.md".into(),
@@ -474,6 +475,7 @@ fn row_link_cells_open_their_own_targets() {
         path: Some("n.md".into()),
         line: Some(7),
         key: None,
+        select: None,
         cells: vec![Cell::Text { v: "t".into() }, Cell::Number { v: 1.0 }],
     };
     let got: Vec<_> = row_targets(&plain, &[]).iter().map(open).collect();
@@ -482,6 +484,7 @@ fn row_link_cells_open_their_own_targets() {
         path: None,
         line: None,
         key: None,
+        select: None,
         cells: vec![Cell::Text { v: "t".into() }],
     };
     assert!(row_targets(&none, &[]).iter().all(Option::is_none));
@@ -665,6 +668,7 @@ fn tasks_row_shows_its_status_and_toggles_through_the_note_edit_path() {
         path: Some("wp6t/t.md".into()),
         line: Some(2),
         key: None,
+        select: None,
         cells: vec![
             Cell::Text { v: "b".into() },
             Cell::Link {
@@ -701,6 +705,7 @@ fn tasks_row_shows_its_status_and_toggles_through_the_note_edit_path() {
         path: None,
         line: None,
         key: None,
+        select: None,
         cells: vec![Cell::Text { v: "t".into() }],
     };
     assert!(matches!(
@@ -870,4 +875,106 @@ fn header_click_cycles_and_switching_columns_restarts_at_asc() {
             None,
         ]
     );
+}
+
+const ACTIVE: &str = "works#Active";
+const ENTRIES: &str = "works#Entries";
+
+fn sources_result() -> serde_json::Value {
+    json!({
+        "kind": "table",
+        "columns": [{"key": "note.name", "label": "Name"}, {"key": "note.kind", "label": "Kind"}],
+        "groups": [{"rows": [
+            {"cells": [{"t": "text", "v": "Feed"}, {"t": "text", "v": "blog"}]},
+            {"cells": [{"t": "text", "v": "Saga"}, {"t": "text", "v": "fanfic"}], "select": "Saga"}
+        ], "summaries": []}],
+        "summaries": [],
+        "notices": []
+    })
+}
+
+fn entries_result() -> serde_json::Value {
+    let mut v = result();
+    v["select_by"] = json!("file.serial");
+    v
+}
+
+fn load(app: &mut App, id: &str) {
+    let _ = app.send(Message::Views(ViewsMsg::Need {
+        id: id.into(),
+        host: Some(NOTE.into()),
+    }));
+}
+
+fn source_rows(app: &App) -> Vec<Row> {
+    let Some(State::Ready(d)) = app.views.get(ACTIVE, Some(NOTE)).map(|e| &e.state) else {
+        panic!("active not loaded");
+    };
+    d.lines
+        .iter()
+        .filter_map(|l| match l {
+            Line::Row(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Plan round-13 WP-4: a serial row's Name click selects (the `select_by` section re-runs with
+/// `select`, its header shows the name); clicking it again clears; a non-serial row is inert.
+#[test]
+fn serial_row_click_selects_and_reclick_clears() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ACTIVE, ViewResult(sources_result()))
+        .expect("script");
+    d.set_view_result(ENTRIES, ViewResult(entries_result()))
+        .expect("script");
+    load(&mut app, ACTIVE);
+    load(&mut app, ENTRIES);
+    assert!(app.views.host_selects(NOTE));
+    let rows = source_rows(&app);
+    let cols = [
+        Column::plain("note.name", "Name"),
+        Column::plain("note.kind", "Kind"),
+    ];
+    assert!(
+        select_cell(&rows[0], &cols, NOTE).is_none(),
+        "non-serial row inert"
+    );
+    let (i, click) = select_cell(&rows[1], &cols, NOTE).expect("serial row selects");
+    assert_eq!(i, 0);
+    assert_eq!(selection_chip(&app.views, ENTRIES, NOTE), None);
+    let _ = app.send(click.clone());
+    let saga = Some(cv_protocol::ViewSelect {
+        property: "file.serial".into(),
+        value: "Saga".into(),
+    });
+    assert_eq!(d.view_selects().expect("selects").last(), Some(&saga));
+    assert_eq!(
+        d.view_calls().expect("calls").last().map(|c| c.0.as_str()),
+        Some(ENTRIES)
+    );
+    assert_eq!(
+        selection_chip(&app.views, ENTRIES, NOTE).as_deref(),
+        Some("Saga")
+    );
+    // The sources section never carries the selection.
+    assert_eq!(selection_chip(&app.views, ACTIVE, NOTE), None);
+    let _ = app.send(click);
+    assert_eq!(d.view_selects().expect("selects").last(), Some(&None));
+    assert_eq!(selection_chip(&app.views, ENTRIES, NOTE), None);
+    assert!(app.views.selections.is_empty());
+}
+
+/// Plan round-13 WP-4: without a `select_by` section on the host, serial rows are not clickable;
+/// the selection is dropped with the host's tab.
+#[test]
+fn selection_needs_a_select_by_host_and_drops_with_the_tab() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ACTIVE, ViewResult(sources_result()))
+        .expect("script");
+    load(&mut app, ACTIVE);
+    assert!(!app.views.host_selects(NOTE));
+    app.views.selections.insert(NOTE.into(), "Saga".into());
+    app.views.on_tab_closed(NOTE);
+    assert!(app.views.selections.is_empty());
 }

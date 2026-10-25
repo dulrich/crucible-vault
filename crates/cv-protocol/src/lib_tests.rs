@@ -114,6 +114,7 @@ fn all_requests_round_trip() {
             view_id: "v".into(),
             this_path: None,
             sort: None,
+            select: None,
         }),
     ];
     for (i, call) in calls.into_iter().enumerate() {
@@ -631,6 +632,10 @@ fn method_markers_match_the_wire() {
                 property: "p".into(),
                 direction: ViewSortDir::Desc,
             }),
+            select: Some(ViewSelect {
+                property: "file.serial".into(),
+                value: "Saga".into(),
+            }),
         },
         s,
     );
@@ -696,5 +701,26 @@ fn retyped_results_keep_their_wire_shape() {
     assert_eq!(
         (error_codes::REFUSED, error_codes::UNAVAILABLE),
         (1005, 1006)
+    );
+}
+
+/// Plan round-13 WP-4: `select` round-trips, and its absence keeps the old wire bytes.
+#[test]
+fn view_run_select_is_optional_and_additive() {
+    let old = json!({"view_id": "works#Entries", "this_path": "core/Works.md"});
+    let p: ViewRunParams = serde_json::from_value(old.clone()).unwrap();
+    assert_eq!(p.select, None);
+    assert_eq!(serde_json::to_value(&p).unwrap(), old);
+    let with = ViewRunParams {
+        select: Some(ViewSelect {
+            property: "file.serial".into(),
+            value: "Saga".into(),
+        }),
+        ..p
+    };
+    let v = round_trip(&with);
+    assert_eq!(
+        v["select"],
+        json!({"property": "file.serial", "value": "Saga"})
     );
 }

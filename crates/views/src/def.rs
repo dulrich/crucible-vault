@@ -161,6 +161,10 @@ pub struct ViewDef {
     /// Plan round-8 WP-2: height cap of the rendered list (px or `"none"`; absent = 480).
     #[serde(rename = "maxHeight", alias = "max_height", default)]
     pub max_height: Option<crate::result::MaxHeight>,
+    /// Plan round-13 WP-4: rows clicked in a `source = "sources"` section embedded in the same
+    /// host note filter this view to `<select_by> == <clicked row's name>` (e.g. `file.serial`).
+    #[serde(default, alias = "selectBy")]
+    pub select_by: Option<String>,
 }
 
 /// `[[views.summary_rows]]` (plan round-10 WP-4): an extra footer row computed over the rows
@@ -345,6 +349,8 @@ pub struct View {
     /// Plan intake-round-2 WP-4: `columnSize` (positive px only) keyed by the `order` id as
     /// written (the definition's keys are matched through the same `note.` normalization).
     pub column_widths: BTreeMap<String, f32>,
+    /// Plan round-13 WP-4: the definition's `select_by` property (carried to the editor).
+    pub select_by: Option<String>,
 }
 
 impl View {
@@ -592,6 +598,7 @@ fn compile_view(
         max_height: v.max_height,
         checkboxes: std::collections::BTreeSet::new(),
         column_widths,
+        select_by: v.select_by.clone(),
     }
 }
 

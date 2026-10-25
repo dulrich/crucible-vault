@@ -121,5 +121,6 @@
   ],
   "kind": "table",
   "notices": [],
+  "select_by": "file.serial",
   "summaries": []
 }

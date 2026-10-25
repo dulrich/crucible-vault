@@ -173,12 +173,14 @@ impl DaemonClient for SocketDaemon {
         view_id: &str,
         this_path: Option<&str>,
         sort: Option<&cv_protocol::ViewSort>,
+        select: Option<&cv_protocol::ViewSelect>,
     ) -> Result<ViewResult> {
         let (view_id, this_path) = (view_id.to_owned(), this_path.map(str::to_owned));
         self.call::<m::ViewRun>(ViewRunParams {
             view_id,
             this_path,
             sort: sort.cloned(),
+            select: select.cloned(),
         })
     }
 

@@ -61,7 +61,8 @@
               "t": "date",
               "v": "2026-10-01"
             }
-          ]
+          ],
+          "select": "Bob News"
         }
       ],
       "summaries": []

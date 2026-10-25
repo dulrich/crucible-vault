@@ -204,6 +204,17 @@ impl<'a> RowCtx<'a> {
         )
     }
 
+    /// Plan round-13 WP-4 (Decision 1, audit M1): the selection value of a `sources` record
+    /// row — its `name` when its `row` is `serial` (the daemon's `[[serial]]` rows, whose name
+    /// is exactly the `file.serial` value of their entries); `None` for every other row.
+    pub fn select_value(&self) -> Option<String> {
+        let rec = self.rec.as_ref()?;
+        match (rec.get("row"), rec.get("name")) {
+            (Some(Value::Str(r)), Some(Value::Str(n))) if r == "serial" => Some(n.clone()),
+            _ => None,
+        }
+    }
+
     /// Evaluates `e` for this row.
     pub fn eval(&self, e: &Expr) -> R<Value> {
         self.ev(e, None)

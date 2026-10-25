@@ -72,6 +72,8 @@ pub struct Decoded {
     /// Plan round-9-feedback-todos WP-5: the indices into `lines` kept by "Only open" (see
     /// [`open_only_lines`]); `None` when the result has no Checkbox / Status column (no toggle).
     pub open_lines: Option<Vec<usize>>,
+    /// Plan round-13 WP-4: the view's `select_by` property (`None` = not selectable).
+    pub select_by: Option<String>,
 }
 
 /// Plan round-9-feedback-todos WP-5: the indices into `lines` that stay visible with "Only
@@ -142,6 +144,9 @@ pub struct ViewStore {
     /// Plan round-11 WP-5: column-header sorts keyed by [`view_sort_key`]
     /// (persisted as `UiState.view_sorts`).
     pub sorts: BTreeMap<String, ViewSortPref>,
+    /// Plan round-13 WP-4: the in-place selection of each host note (the clicked serial row's
+    /// name). In memory only; dropped with the host's tab.
+    pub selections: BTreeMap<String, String>,
 }
 
 /// The next header-click state of a column: none/other → ASC, ASC → DESC, DESC → cleared.
@@ -177,6 +182,80 @@ impl ViewStore {
         })
     }
 
+    /// Plan round-13 WP-4: the `select_by` property of the loaded view `(id, host)`.
+    fn select_by(&self, id: &str, host: Option<&str>) -> Option<&str> {
+        match self.get(id, host).map(|e| &e.state) {
+            Some(State::Ready(d)) => d.select_by.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Plan round-13 WP-4: the selection to send with `view_run(id, host)` — the host's selected
+    /// value under the view's `select_by` property; `None` for any other view.
+    fn wire_select(&self, id: &str, host: Option<&str>) -> Option<cv_protocol::ViewSelect> {
+        let property = self.select_by(id, host)?;
+        let value = self.selections.get(host?)?;
+        Some(cv_protocol::ViewSelect {
+            property: property.to_owned(),
+            value: value.clone(),
+        })
+    }
+
+    /// Plan round-13 WP-4: whether note `host` embeds a loaded `select_by` view (its sources
+    /// sections' serial rows are then clickable).
+    pub fn host_selects(&self, host: &str) -> bool {
+        self.entries.iter().any(|((_, h), e)| {
+            h.as_deref() == Some(host)
+                && matches!(&e.state, State::Ready(d) if d.select_by.is_some())
+        })
+    }
+
+    /// Plan round-13 WP-4: toggles `host`'s selection to `value` (the same value clears it) and
+    /// re-runs its `select_by` views: the first idle one now, the rest through their bumped
+    /// epoch (a shown fence asks again).
+    fn select(&mut self, host: String, value: String) -> Effect {
+        if self.selections.get(&host) == Some(&value) {
+            self.selections.remove(&host);
+        } else {
+            self.selections.insert(host.clone(), value);
+        }
+        let mut ids: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|((_, h), e)| {
+                h.as_deref() == Some(host.as_str())
+                    && matches!(&e.state, State::Ready(d) if d.select_by.is_some())
+            })
+            .map(|((id, _), _)| id.clone())
+            .collect();
+        ids.sort();
+        let mut run = None;
+        for id in ids {
+            let Some(e) = self.entries.get_mut(&(id.clone(), Some(host.clone()))) else {
+                continue;
+            };
+            e.stale = true;
+            e.epoch = e.epoch.wrapping_add(1);
+            if run.is_none() && !e.in_flight {
+                e.in_flight = true;
+                e.stale = false;
+                run = Some(id);
+            }
+        }
+        match run {
+            Some(id) => {
+                let h = Some(host.as_str());
+                Effect::Run {
+                    sort: self.wire_sort(&id, h),
+                    select: self.wire_select(&id, h),
+                    id,
+                    host: Some(host),
+                }
+            }
+            None => Effect::None,
+        }
+    }
+
     /// Plan round-5 WP-1: re-applies the stored scroll window of every virtual list hosted in
     /// note `host` (its scrollable state is positional and lost while the tab was hidden).
     pub fn restore<T: Send + 'static>(&self, host: &str) -> Vec<iced::Task<T>> {
@@ -206,6 +285,8 @@ pub enum Effect {
         host: Option<String>,
         /// The column-header sort to send with the request.
         sort: Option<cv_protocol::ViewSort>,
+        /// Plan round-13 WP-4: the host's selection, for a `select_by` view.
+        select: Option<cv_protocol::ViewSelect>,
     },
     /// Open `path` in the focused pane, cursor at 1-based `line` when set.
     Open {
@@ -268,11 +349,15 @@ impl ViewStore {
                 self.entries.insert((k.0, Some(to.to_owned())), e);
             }
         }
+        if let Some(v) = self.selections.remove(from) {
+            self.selections.insert(to.to_owned(), v);
+        }
     }
 
     /// A tab closed: drop the results it hosted.
     pub fn on_tab_closed(&mut self, path: &str) {
         self.entries.retain(|(_, h), _| h.as_deref() != Some(path));
+        self.selections.remove(path);
     }
 }
 
@@ -296,7 +381,13 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
             e.in_flight = true;
             e.stale = false;
             let sort = store.wire_sort(&id, host.as_deref());
-            Effect::Run { id, host, sort }
+            let select = store.wire_select(&id, host.as_deref());
+            Effect::Run {
+                id,
+                host,
+                sort,
+                select,
+            }
         }
         ViewsMsg::SortBy { id, host, column } => {
             let key = view_sort_key(&id, host.as_deref());
@@ -305,6 +396,7 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
                 None => store.sorts.remove(&key),
             };
             let sort = store.wire_sort(&id, host.as_deref());
+            let select = store.wire_select(&id, host.as_deref());
             let Some(e) = store.entries.get_mut(&(id.clone(), host.clone())) else {
                 return Effect::None;
             };
@@ -316,7 +408,12 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
             }
             e.in_flight = true;
             e.stale = false;
-            Effect::Run { id, host, sort }
+            Effect::Run {
+                id,
+                host,
+                sort,
+                select,
+            }
         }
         ViewsMsg::Loaded { id, host, result } => {
             if let Some(e) = store.entries.get_mut(&(id, host)) {
@@ -357,6 +454,7 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
             Effect::None
         }
         ViewsMsg::BoolSet(Err(e)) => Effect::Notice(format!("property change failed: {e}")),
+        ViewsMsg::Select { host, value } => store.select(host, value),
     }
 }
 
@@ -385,6 +483,7 @@ pub fn decode(v: &Value) -> Result<Decoded, DecodeError> {
         notices: r.notices,
         max_height: r.max_height,
         open_lines,
+        select_by: r.select_by,
     })
 }
 
@@ -476,7 +575,27 @@ pub fn fence<'a>(
         }
         _ => None,
     };
-    let head = row![title, space::horizontal()]
+    let chip = selection_chip(store, id, host).map(|value| {
+        let msg = Message::Views(ViewsMsg::Select {
+            host: host.to_owned(),
+            value: value.clone(),
+        });
+        let clear = iced::widget::button(text("\u{d7}").size(px(13.0, scale)))
+            .padding([0, 6])
+            .style(iced::widget::button::text)
+            .on_press(msg);
+        let name = text(value)
+            .size(px(12.0, scale))
+            .color(t.accent_ui.to_color());
+        Element::from(
+            row![name, clear]
+                .spacing(2)
+                .align_y(iced::Alignment::Center),
+        )
+    });
+    let head = row![title]
+        .push(chip)
+        .push(space::horizontal())
         .push(toggle)
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -503,6 +622,13 @@ pub fn fence<'a>(
             })
         })
         .into()
+}
+
+/// Plan round-13 WP-4: the selected name shown in the header of `select_by` view `(id, host)`
+/// (with a clear control), when the host has a selection.
+pub(crate) fn selection_chip(store: &ViewStore, id: &str, host: &str) -> Option<String> {
+    store.select_by(id, Some(host))?;
+    store.selections.get(host).cloned()
 }
 
 /// Plan round-9-feedback-todos WP-5: the "Only open" toggle of the fence header; its tooltip
@@ -620,6 +746,25 @@ pub(crate) fn row_targets(r: &Row, cols: &[Column]) -> Vec<Option<Message>> {
     out
 }
 
+/// Plan round-13 WP-4 (Decision 1): the Name cell of a selectable row of a section in note
+/// `host` that embeds a `select_by` view — `(column index, click)`. Only rows the producer marks
+/// with [`Row::select`] (a `sources` `[[serial]]` row) qualify; the Name cell is the `note.name`
+/// / `name` column, else the first. The click toggles the host's selection to the row's name.
+pub(crate) fn select_cell(r: &Row, cols: &[Column], host: &str) -> Option<(usize, Message)> {
+    let value = r.select.clone()?;
+    let i = cols
+        .iter()
+        .position(|c| c.key == "note.name" || c.key == "name")
+        .unwrap_or(0);
+    Some((
+        i,
+        Message::Views(ViewsMsg::Select {
+            host: host.to_owned(),
+            value,
+        }),
+    ))
+}
+
 /// One cell. `open` = its click message: drawn like a Reading-mode note link (accent-ui, no
 /// permanent underline; iced's rich-text link underlines it and shows a pointer while hovered).
 /// Plan round-6 WP-5: the right-click menu of a link / URL cell. A `Cell::Link` carries the
@@ -682,6 +827,8 @@ fn result_view<'a>(
     scale: f32,
 ) -> Element<'a, Message> {
     let only_open = store.filters.contains(id);
+    // Plan round-13 WP-4: serial rows select only on a host that embeds a `select_by` view.
+    let select_host: Option<&str> = store.host_selects(host).then_some(host);
     let sort = store.sort_of(id, Some(host));
     // Plan tn-review-2026-10-23-remediation WP-R7: "Only open" walks the index list into
     // `d.lines` — no cloned lines.
@@ -759,10 +906,12 @@ fn result_view<'a>(
         let list = match open {
             Some(idx) => VirtualList::new(idx, row_height(scale), window, on_scroll)
                 .id(list_id(id, host))
-                .view(move |_, &i| line_view(d, &d.lines[i], &lengths, true, t, scale)),
+                .view(move |_, &i| {
+                    line_view(d, &d.lines[i], &lengths, true, select_host, t, scale)
+                }),
             None => VirtualList::new(&d.lines, row_height(scale), window, on_scroll)
                 .id(list_id(id, host))
-                .view(move |_, l| line_view(d, l, &lengths, true, t, scale)),
+                .view(move |_, l| line_view(d, l, &lengths, true, select_host, t, scale)),
         };
         items.push(
             container(list)
@@ -776,7 +925,7 @@ fn result_view<'a>(
             None => Box::new(d.lines.iter()),
         };
         items.push(
-            column(lines.map(|l| line_view(d, l, &lengths, false, t, scale)))
+            column(lines.map(|l| line_view(d, l, &lengths, false, select_host, t, scale)))
                 .spacing(4)
                 .into(),
         );
