@@ -22,7 +22,12 @@ impl Settings {
             Seg::Key(_) => None,
         };
         match edit {
-            DocEdit::Set(..) | DocEdit::SetMany(..) => {}
+            DocEdit::Set(p, _) => pin_sorted(fs, file, p),
+            DocEdit::SetMany(items) => {
+                for (p, _) in items {
+                    pin_sorted(fs, file, p);
+                }
+            }
             DocEdit::Remove(p) => {
                 fs.clear_drafts(file);
                 if let Some((Seg::Index(gone), parent)) = p.0.split_last() {
@@ -185,6 +190,17 @@ impl DocEdit {
             DocEdit::InsertKey(map, key, node) => doc.insert_key(map, key, node.empty_item()),
             DocEdit::RenameKey(map, from, to) => doc.rename_key(map, from, to),
             DocEdit::SwitchVariant(p, u, tag) => doc.switch_variant(p, u, tag),
+        }
+    }
+}
+
+/// Pins the shown order of the display-sorted list that holds the item `p` edits (round-13 WP-1):
+/// the edited row stays where the user is typing until the edit ends.
+fn pin_sorted(fs: &mut super::form::FormState, file: &str, p: &cv_schema::Path) {
+    if let [Seg::Key(k), Seg::Index(_), ..] = p.0.as_slice() {
+        let list = cv_schema::Path::root().key(k);
+        if super::form::sorted_list(file, &list) {
+            fs.pin_order(file, &list);
         }
     }
 }

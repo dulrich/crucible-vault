@@ -11,6 +11,7 @@
 //! and unknown keys survive); typing-level UI state (number drafts, chip/new-key/rename drafts,
 //! the path field showing suggestions) lives in [`FormState`] and never reaches the file.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_schema::toml_edit::{Item, Value};
@@ -36,6 +37,16 @@ pub struct FormState {
     pub drafts: BTreeMap<(String, String), String>,
     /// The field whose typeahead is active (plan round-5 WP-4).
     pub typeahead: Option<ActiveTa>,
+    /// The display order last shown per display-sorted list (round-13 WP-1), see
+    /// [`Self::list_order`]. Interior mutability: the render pass records what it showed.
+    orders: RefCell<BTreeMap<(String, Path), ListOrder>>,
+}
+
+/// The shown order of one display-sorted list; `pinned` keeps it across edits.
+#[derive(Debug, Clone)]
+struct ListOrder {
+    order: Vec<usize>,
+    pinned: bool,
 }
 
 /// What the active typeahead edits.
@@ -101,8 +112,63 @@ impl FormState {
         self.expanded.contains(&(file.to_owned(), path.clone()))
     }
 
-    /// Expands or collapses the item at `path`.
+    /// The order to show a display-sorted list's items in. While the list is pinned (an item of
+    /// it was edited, see [`Self::pin_order`]) the order last shown is kept, so the edited item
+    /// neither jumps under the cursor nor takes the widget focus to another row (iced keeps
+    /// focus by tree position); otherwise it is the fresh sort of `names` and is remembered.
+    pub fn list_order(
+        &self,
+        file: &str,
+        list: &Path,
+        names: &[String],
+        sorted: bool,
+    ) -> Vec<usize> {
+        if !sorted {
+            return display_order(names, false);
+        }
+        let key = (file.to_owned(), list.clone());
+        let mut orders = self.orders.borrow_mut();
+        if let Some(o) = orders.get(&key)
+            && o.pinned
+            && o.order.len() == names.len()
+        {
+            return o.order.clone();
+        }
+        let order = display_order(names, true);
+        orders.insert(
+            key,
+            ListOrder {
+                order: order.clone(),
+                pinned: false,
+            },
+        );
+        order
+    }
+
+    /// Pins the shown order of the list at `list` (an item of it is being edited).
+    pub fn pin_order(&mut self, file: &str, list: &Path) {
+        if let Some(o) = self
+            .orders
+            .get_mut()
+            .get_mut(&(file.to_owned(), list.clone()))
+        {
+            o.pinned = true;
+        }
+    }
+
+    /// Releases every pinned list order of `file`: the next render sorts afresh.
+    pub fn unpin_orders(&mut self, file: &str) {
+        self.orders.get_mut().retain(|(f, _), _| f != file);
+    }
+
+    /// Releases every pinned list order of every file (a section switch).
+    pub fn unpin_all(&mut self) {
+        self.orders.get_mut().clear();
+    }
+
+    /// Expands or collapses the item at `path` (navigating away from an edit: re-sorts).
     pub fn toggle(&mut self, file: &str, path: &Path) {
+        self.unpin_orders(file);
         let k = (file.to_owned(), path.clone());
         if !self.expanded.remove(&k) {
             self.expanded.insert(k);
@@ -132,6 +198,7 @@ impl FormState {
     /// Drops every draft of `file` (a reload, or a structural edit that shifts paths).
     pub fn clear_drafts(&mut self, file: &str) {
         self.drafts.retain(|(f, _), _| f != file);
+        self.unpin_orders(file);
         if self.typeahead.as_ref().is_some_and(|a| a.file == file) {
             self.typeahead = None;
         }
@@ -808,7 +875,7 @@ fn list_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut
                 .map_or_else(|| summaries[i].clone(), str::to_owned)
         })
         .collect();
-    for i in display_order(&names, sorted) {
+    for i in cx.form.list_order(cx.file, p, &names, sorted) {
         let ip = p.index(i);
         let expanded = cx.form.is_expanded(cx.file, &ip);
         out.push(row(

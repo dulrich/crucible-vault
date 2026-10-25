@@ -430,6 +430,7 @@ impl App {
             SettingsMsg::Hotkey(m) => return self.update_hotkeys(m),
             SettingsMsg::Section(s) => {
                 self.settings.section = s;
+                self.settings.form.unpin_all();
                 self.settings.hotkeys.cancel();
                 // Plan round-5 WP-1: the section's own body offset, re-applied explicitly.
                 let restore = self.settings.restore_scroll();

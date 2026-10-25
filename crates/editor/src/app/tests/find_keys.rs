@@ -659,3 +659,95 @@ fn serial_prefix_adder_stays_visible_with_chips() {
     let b = serial_prefix_adder(&mut ui, &app).expect("adder (after Return)");
     assert_on_screen(b, "new serial after Return");
 }
+
+/// The text inputs of the Settings page as `(bounds, value)` via the headless locator.
+fn input_values(ui: &mut Ui, app: &App) -> Vec<(Rectangle, String)> {
+    struct Vals(Vec<(Rectangle, String)>);
+    impl Operation<()> for Vals {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+        fn text_input(
+            &mut self,
+            _id: Option<&iced::widget::Id>,
+            b: Rectangle,
+            s: &mut dyn operation::TextInput,
+        ) {
+            self.0.push((b, s.text().to_owned()));
+        }
+    }
+    ui.with(app, |el, tree, l, r| {
+        let mut op = Vals(Vec::new());
+        el.as_widget_mut()
+            .operate(tree, l, r, &mut op as &mut dyn Operation<()>);
+        op.0
+    })
+}
+
+/// Plan round-13-feedback-todos WP-1 (user report 2026-10-25: Settings "flashing" while editing
+/// Serials): typing a name that changes its sort position must neither move the edited item on
+/// screen nor move focus to another item's input, keystroke to keystroke.
+#[test]
+fn serial_name_typing_keeps_position_and_focus() {
+    use crate::settings::{Section, SettingsMsg};
+    const SOURCES: &str = "_custom/crucible-vault/sources.toml";
+    let (_tmp, d) = fake();
+    let d = Arc::new(d);
+    d.create_note(
+        SOURCES,
+        "[[serial]]\nname = \"Alpha\"\n\n[[serial]]\nname = \"Mid\"\n\n[[serial]]\nname = \"A\"\n",
+    )
+    .expect("sources");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.queue_rpcs();
+    let _ = app.send(Message::Settings(SettingsMsg::Open));
+    let _ = app.send(Message::Settings(SettingsMsg::Section(Section::Sources)));
+    // The third serial ("A", displayed first) is open; "Ax..." sorts after "Alpha".
+    app.settings.form.expanded.insert((
+        SOURCES.to_owned(),
+        cv_schema::Path::parse("serial[2]").expect("p"),
+    ));
+    let mut ui = Ui {
+        renderer: renderer(),
+        tree: None,
+        height: 3000.0,
+    };
+    let name_input = |ui: &mut Ui, app: &App, v: &str| {
+        input_values(ui, app)
+            .into_iter()
+            .find(|(_, t)| t == v)
+            .map(|(b, _)| b)
+    };
+    let start = name_input(&mut ui, &app, "A").expect("name input");
+    ui.click(&mut app, start.center());
+    for (i, c) in ["x", "y", "z"].into_iter().enumerate() {
+        ui.send(&mut app, &press(Key::Character(c.into()), Some(c)));
+        let want = format!("A{}", "xyz".split_at(i + 1).0);
+        let b = name_input(&mut ui, &app, &want)
+            .unwrap_or_else(|| panic!("keystroke {i}: no input shows {want:?} (focus moved?)"));
+        assert!(
+            (b.y - start.y).abs() < 0.5,
+            "keystroke {i}: the edited serial moved from y={} to y={}",
+            start.y,
+            b.y
+        );
+    }
+    let doc = app
+        .settings
+        .file(SOURCES)
+        .and_then(|f| f.doc())
+        .expect("doc");
+    let names: Vec<_> = (0..3)
+        .map(|i| {
+            doc.get_str(&cv_schema::Path::parse(&format!("serial[{i}].name")).expect("p"))
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["Alpha", "Mid", "Axyz"],
+        "only the edited serial changed"
+    );
+}
