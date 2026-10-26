@@ -192,3 +192,58 @@ fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
     );
     assert_eq!(kinds(&app), [TabKind::Note("A.md".into())]);
 }
+
+/// Plan round-15 WP-2: a daemon-side rename of an image under an open image tab keeps it an
+/// image tab (same id) at the new path, moves its history entry, its pin and its cached failure.
+#[test]
+fn renaming_an_image_keeps_its_tab_an_image_tab() {
+    let (_tmp, d, mut app) = setup(&[("att/p.png", &png(8, 4))], false);
+    open(&mut app, "att/p.png");
+    let id = app.active_tab().expect("tab").id;
+    drop(app.view());
+    let _ = app.send(Message::ImageTab(ImageTabMsg::Shown {
+        path: "att/p.png".into(),
+        view: id,
+        width: 320.0,
+    }));
+    let decoded = crate::image_cache::decode(&png(8, 4), 320).map_err(|e| e.to_string());
+    let _ = app.send(Message::ImageTab(ImageTabMsg::Loaded {
+        key: "att/p.png".into(),
+        result: decoded,
+    }));
+    assert_eq!(app.reading.images.pins("att/p.png"), 1);
+    app.image_errors.insert("att/p.png".into(), "stale".into());
+    let moved = d.daemon_move("att/p.png", "att/q.png").expect("move");
+    for n in moved {
+        let _ = app.send(Message::Status(StatusMsg::Notification(n)));
+    }
+    assert_eq!(kinds(&app), [TabKind::Image("att/q.png".into())]);
+    assert_eq!(app.active_tab().expect("tab").id, id, "same tab");
+    assert!(app.docs.is_empty(), "still no document");
+    let ps = app.panes.get(app.focus).expect("pane");
+    assert_eq!(ps.history.current(), Some("att/q.png"));
+    assert_eq!(app.reading.images.pins("att/p.png"), 0, "old pin released");
+    assert!(!app.image_errors.contains_key("att/p.png"));
+    assert!(app.image_errors.contains_key("att/q.png"));
+}
+
+/// Plan round-15 WP-2: an opener that exits non-zero reaches the status bar once its exit is
+/// observed (the channel stands in for the subscription).
+#[test]
+fn a_failing_opener_exit_becomes_a_status_error() {
+    let (_tmp, _d, mut app) = setup(&[("doc.pdf", b"%PDF")], false);
+    app.prefs.open_url_cmd = vec!["false".into()];
+    open(&mut app, "doc.pdf");
+    assert!(app.status.error_text().is_none(), "spawn succeeded");
+    let msg = app
+        .opener_notices
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the reaper reports the exit");
+    assert!(msg.starts_with("open file: false exited with"), "{msg}");
+    let _ = app.send(Message::Status(StatusMsg::OpenerFailed(msg)));
+    assert!(
+        app.status
+            .error_text()
+            .is_some_and(|e| e.contains("exited with"))
+    );
+}

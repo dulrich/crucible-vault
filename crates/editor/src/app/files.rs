@@ -355,6 +355,11 @@ impl App {
         if !self.path_open(from) {
             return;
         }
+        if !self.docs.contains_key(from) {
+            // Plan round-15 WP-2: only image tabs show a path without a document.
+            self.retarget_image(from, to);
+            return;
+        }
         let Some(d) = &self.daemon else { return };
         match d.read_file(to) {
             Ok((bytes, hash)) => {
@@ -389,7 +394,7 @@ impl App {
     pub(super) fn move_path_state(&mut self, from: &str, to: &str, mut doc: OpenDoc) {
         for (_, ps) in self.panes.iter_mut() {
             for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
-                t.kind = TabKind::Note(to.to_owned());
+                t.retarget(to);
             }
             ps.history.retarget(from, to);
         }

@@ -50,7 +50,7 @@ mod tests;
 
 #[cfg(test)]
 pub use connection::RecordingSink;
-pub use connection::{NoopSink, NotifHandle, RpcExec, TestSink, reconnect_delay};
+pub use connection::{NoopSink, NotifHandle, OpenerNotices, RpcExec, TestSink, reconnect_delay};
 pub use status::{NOTICE_INLINE_CHARS, Notice, Severity, StatusModel};
 
 /// One open tab (plan editor-feedback-round-2 WP-7): a view of a note's document, or one of
@@ -163,6 +163,16 @@ impl Tab {
     /// This tab as a note (`None` for Settings / Log).
     pub fn as_note(&self) -> Option<NoteRef<'_>> {
         self.path().map(|path| NoteRef { id: self.id, path })
+    }
+
+    /// Plan round-15 WP-2: this tab's file moved to `to`. The one retarget rule: a file tab
+    /// keeps its kind (a note stays a note, an image an image — a later PDF tab joins here);
+    /// Settings / Log show no file and are untouched.
+    pub fn retarget(&mut self, to: &str) {
+        match &mut self.kind {
+            TabKind::Note(p) | TabKind::Image(p) => to.clone_into(p),
+            TabKind::Settings | TabKind::Log => {}
+        }
     }
 
     /// Whether this tab shows the note (or, plan round-14 WP-3, the image) at `path`.
@@ -283,6 +293,8 @@ pub struct App {
     pub last_trim: Option<std::time::Instant>,
     pub(crate) tokens: Tokens,
     notifications: NotifHandle,
+    /// Plan round-15 WP-2: system-opener failures, delivered by a subscription.
+    opener_notices: OpenerNotices,
     /// plan editor-data-safety WP-1: opens a fresh client (`None` = never reconnect).
     connector: Option<crate::daemon::Connector>,
     /// Failed reconnect attempts since the last disconnect (the backoff exponent).
@@ -434,6 +446,7 @@ impl App {
             memory: Arc::new(crate::memory::Memory::new()),
             last_trim: None,
             notifications,
+            opener_notices: OpenerNotices::default(),
             connector: None,
             reconnect_attempt: 0,
             state_path,

@@ -32,6 +32,72 @@ impl Hash for NotifHandle {
     }
 }
 
+/// Plan round-15 WP-2: failures of the system opener's reaper thread (a non-zero exit), as
+/// status-bar messages. The sender is cloned into each `open_file`; the receiver is handed once
+/// to the iced subscription ([`opener_stream`]).
+#[derive(Clone)]
+pub struct OpenerNotices {
+    pub tx: std::sync::mpsc::Sender<String>,
+    rx: Arc<Mutex<Option<Receiver<String>>>>,
+}
+
+impl Default for OpenerNotices {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            tx,
+            rx: Arc::new(Mutex::new(Some(rx))),
+        }
+    }
+}
+
+impl Hash for OpenerNotices {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "opener-notices".hash(state);
+    }
+}
+
+impl OpenerNotices {
+    /// Tests: waits up to `timeout` for the next failure message (the subscription is not
+    /// running headless, so this stands in for it).
+    #[cfg(test)]
+    pub fn recv_timeout(&self, timeout: std::time::Duration) -> Option<String> {
+        let g = self.rx.lock().ok()?;
+        g.as_ref()?.recv_timeout(timeout).ok()
+    }
+}
+
+pub(super) fn opener_stream(
+    handle: &OpenerNotices,
+) -> impl iced::futures::Stream<Item = Message> + use<> {
+    use iced::futures::{SinkExt, StreamExt};
+    let rx = handle.rx.lock().ok().and_then(|mut g| g.take());
+    iced::stream::channel(8, async move |mut out| {
+        let Some(rx) = rx else { return };
+        let (tx, mut arx) = iced::futures::channel::mpsc::unbounded();
+        let spawned = std::thread::Builder::new()
+            .name("cv-opener-bridge".into())
+            .spawn(move || {
+                while let Ok(m) = rx.recv() {
+                    if tx.unbounded_send(m).is_err() {
+                        break;
+                    }
+                }
+            });
+        if spawned.is_ok() {
+            while let Some(m) = arx.next().await {
+                if out
+                    .send(Message::Status(StatusMsg::OpenerFailed(m)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    })
+}
+
 /// Reconnect backoff (plan editor-data-safety WP-1): 0.5 s doubling, capped at 5 s.
 pub fn reconnect_delay(attempt: u32) -> std::time::Duration {
     let ms = 500u64.saturating_mul(1u64 << attempt.min(4));

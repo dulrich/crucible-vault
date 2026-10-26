@@ -1,6 +1,6 @@
 //! The top-level `update` dispatcher, panes, nav, panels, views and the subscription.
 
-use super::connection::notification_stream;
+use super::connection::{notification_stream, opener_stream};
 use super::*;
 
 impl App {
@@ -537,6 +537,7 @@ impl App {
         };
         Subscription::batch([
             Subscription::run_with(self.notifications.clone(), notification_stream),
+            Subscription::run_with(self.opener_notices.clone(), opener_stream),
             captured_esc,
             // WP-4: track held mouse buttons only while hover focus is on (drag guard).
             if self.prefs.focus_follows_mouse {

@@ -166,6 +166,7 @@ impl App {
                 return self.start_reconnect();
             }
             StatusMsg::ReconnectDue => return self.try_reconnect(),
+            StatusMsg::OpenerFailed(msg) => self.status.set_error(msg),
             StatusMsg::Connected(Ok(conn)) => {
                 if !self.status.reconnecting {
                     return Task::none();

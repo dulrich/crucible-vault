@@ -81,9 +81,14 @@ pub fn file_argv(cmd: &[String], abs: &std::path::Path) -> Result<Vec<String>, S
 }
 
 /// Opens the local file `abs` with `cmd` (the `open_url_cmd` pref). A spawn failure is the
-/// `Err` status-bar message; a non-zero exit of the opener is logged (`tracing::warn!`) by the
-/// reaper thread — it lands after the GUI moved on, so it is not routed back as a notice.
-pub fn open_file(cmd: &[String], abs: &std::path::Path) -> Result<(), String> {
+/// `Err` status-bar message. Plan round-15 WP-2: a non-zero exit (or failed wait) of the opener
+/// is logged (`tracing::warn!`) and sent as a status-bar message on `failed` by the reaper
+/// thread; the app drains that channel through a subscription.
+pub fn open_file(
+    cmd: &[String],
+    abs: &std::path::Path,
+    failed: &std::sync::mpsc::Sender<String>,
+) -> Result<(), String> {
     let argv = file_argv(cmd, abs)?;
     let (prog, args) = argv.split_first().ok_or("open_url_cmd is empty")?;
     let mut child: Child = Command::new(prog)
@@ -94,10 +99,17 @@ pub fn open_file(cmd: &[String], abs: &std::path::Path) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("open file: {prog}: {e}"))?;
     let prog = prog.clone();
+    let failed = failed.clone();
     std::thread::spawn(move || match child.wait() {
-        Ok(s) if !s.success() => tracing::warn!(opener = %prog, status = %s, "open file failed"),
+        Ok(s) if !s.success() => {
+            tracing::warn!(opener = %prog, status = %s, "open file failed");
+            let _ = failed.send(format!("open file: {prog} exited with {s}"));
+        }
         Ok(_) => {}
-        Err(e) => tracing::warn!(opener = %prog, error = %e, "open file: wait failed"),
+        Err(e) => {
+            tracing::warn!(opener = %prog, error = %e, "open file: wait failed");
+            let _ = failed.send(format!("open file: {prog}: wait failed: {e}"));
+        }
     });
     Ok(())
 }
@@ -116,8 +128,9 @@ mod tests {
         assert!(file_argv(&cmd(&["xdg-open"]), std::path::Path::new("rel.pdf")).is_err());
         assert!(file_argv(&[], abs).is_err());
         // `false` spawns fine (its non-zero exit is only logged); a missing opener is an Err.
-        assert!(open_file(&cmd(&["false"]), abs).is_ok());
-        let e = open_file(&cmd(&["/nonexistent/cv-open-file"]), abs).unwrap_err();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        assert!(open_file(&cmd(&["false"]), abs, &tx).is_ok());
+        let e = open_file(&cmd(&["/nonexistent/cv-open-file"]), abs, &tx).unwrap_err();
         assert!(e.starts_with("open file:"), "{e}");
     }
 

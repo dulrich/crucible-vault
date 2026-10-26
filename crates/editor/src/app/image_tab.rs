@@ -44,7 +44,9 @@ impl App {
         };
         let abs = d.vault_root().join(path);
         self.sink.opened_file(&abs.to_string_lossy());
-        if let Err(e) = crate::open_url::open_file(&self.prefs.open_url_cmd, &abs) {
+        if let Err(e) =
+            crate::open_url::open_file(&self.prefs.open_url_cmd, &abs, &self.opener_notices.tx)
+        {
             self.status.set_error(e);
         }
     }
@@ -86,6 +88,32 @@ impl App {
             },
         }
         Task::none()
+    }
+
+    /// Plan round-15 WP-2: the image shown at `from` moved to `to`. Every tab of `from` keeps
+    /// its kind and id ([`Tab::retarget`]) and its history entries move; the `from` pins are
+    /// released and a cached decode failure moves with the file. The new pin and decode come
+    /// from the tab's sensor (its key is the path, so the path change re-fires `Shown`).
+    pub(super) fn retarget_image(&mut self, from: &str, to: &str) {
+        let ids: Vec<u64> = self
+            .panes
+            .iter()
+            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.shows(from)).map(|t| t.id))
+            .collect();
+        for (_, ps) in self.panes.iter_mut() {
+            for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
+                t.retarget(to);
+            }
+            ps.history.retarget(from, to);
+        }
+        for id in ids {
+            self.reading
+                .images
+                .hide(&image_cache::view_owner(from, id), from);
+        }
+        if let Some(e) = self.image_errors.remove(from) {
+            self.image_errors.insert(to.to_owned(), e);
+        }
     }
 
     /// An image tab closed: its pin goes (and a cached failure, when no tab shows it any more).

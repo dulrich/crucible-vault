@@ -507,6 +507,8 @@ pub enum StatusMsg {
     Disconnected,
     /// plan editor-data-safety WP-1: the reconnect backoff elapsed; try the connector.
     ReconnectDue,
+    /// Plan round-15 WP-2: the system opener exited non-zero (status-bar error text).
+    OpenerFailed(String),
     /// A reconnect attempt's result (`Err` = failed; retry after the next backoff).
     Connected(Result<crate::daemon::Connection, String>),
 }
