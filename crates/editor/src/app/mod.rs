@@ -482,6 +482,9 @@ impl App {
             {
                 ps.activate(i);
             }
+            if let Some(ps) = app.panes.get_mut(pane) {
+                ps.reset_mru_to_active();
+            }
         }
         app.focus = focus;
         app.restoring = false;

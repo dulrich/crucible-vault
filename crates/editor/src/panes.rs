@@ -40,6 +40,16 @@ impl PaneState {
         self.mru.push(id);
     }
 
+    /// Session restore (round 14 WP-4): opening the tabs one by one made the strip order the
+    /// visit order, so closing the active tab jumped to the right-most one. A restored session
+    /// has no visit history: only the active tab is "recent".
+    pub fn reset_mru_to_active(&mut self) {
+        self.mru.clear();
+        if let Some(id) = self.active_tab().map(|t| t.id) {
+            self.mru.push(id);
+        }
+    }
+
     /// Removes tab `i`, fixing the active index; returns the removed tab. Closing the active
     /// tab activates the most recently used surviving tab (else the right-neighbour rule).
     pub fn remove(&mut self, i: usize) -> Option<Tab> {

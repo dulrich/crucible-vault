@@ -69,3 +69,43 @@ fn closing_the_active_tab_focuses_the_most_recently_used_one() {
     let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
     assert_eq!(active_path(&app).as_deref(), Some("mru/a.md"));
 }
+
+/// Round 14 WP-4: a restored session has no visit history, so only the persisted active tab
+/// is "recent"; closing it falls back to the right neighbour, not the right-most tab.
+#[test]
+fn closing_the_active_tab_after_a_restore_does_not_jump_to_the_rightmost() {
+    let (tmp, d) = fake();
+    let d = Arc::new(d);
+    let notes = ["r14m/a.md", "r14m/b.md", "r14m/c.md", "r14m/d.md"];
+    for p in notes {
+        d.create_note(p, "body").expect("create");
+    }
+    let state = tmp.path().join("editor.json");
+    {
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), Some(state.clone()));
+        app.queue_rpcs();
+        for p in notes {
+            let _ = app.send(Message::Explorer(ExplorerMsg::Open(p.to_owned())));
+        }
+        let pane = app.focus;
+        let _ = app.send(Message::Tabs(TabsMsg::Select(pane, 1)));
+        let _ = app.send(Message::PersistDue);
+    }
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), Some(state));
+    assert_eq!(active_path(&app).as_deref(), Some("r14m/b.md"));
+    let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
+    assert_eq!(active_path(&app).as_deref(), Some("r14m/c.md"));
+}
+
+/// Plain-session control: a visit to a tab is remembered across a later close.
+#[test]
+fn plain_session_close_follows_visit_order() {
+    let (_tmp, _d, mut app) = setup(&["r14c/a.md", "r14c/b.md", "r14c/c.md", "r14c/d.md"]);
+    let pane = app.focus;
+    let _ = app.send(Message::Tabs(TabsMsg::Select(pane, 1)));
+    let _ = app.send(Message::Tabs(TabsMsg::Select(pane, 0)));
+    let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
+    assert_eq!(active_path(&app).as_deref(), Some("r14c/b.md"));
+}
