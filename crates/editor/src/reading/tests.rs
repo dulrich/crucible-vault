@@ -72,17 +72,17 @@ fn wikilink_click_resolves_through_index() {
         ("sub/Target.md", b"target\n"),
     ]);
     let mut store = ReadingStore::new();
-    let m = store.click("A.md", "Target", Some(&d));
+    let m = store.click("A.md", "Target", false, Some(&d));
     assert!(matches!(m, Some(Message::Tabs(TabsMsg::Open(p))) if p == "sub/Target.md"));
-    let m = store.click("A.md", "sub/Target#Heading", Some(&d));
+    let m = store.click("A.md", "sub/Target#Heading", false, Some(&d));
     assert!(matches!(m, Some(Message::Tabs(TabsMsg::Open(p))) if p == "sub/Target.md"));
-    assert!(store.click("A.md", "Nope", Some(&d)).is_none());
+    assert!(store.click("A.md", "Nope", false, Some(&d)).is_none());
     assert!(
         store
-            .click("A.md", "https://example.com/x", Some(&d))
+            .click("A.md", "https://example.com/x", false, Some(&d))
             .is_none()
     );
-    assert!(store.click("A.md", "Target", None).is_none());
+    assert!(store.click("A.md", "Target", false, None).is_none());
 }
 
 #[test]

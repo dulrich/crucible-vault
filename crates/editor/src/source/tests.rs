@@ -1099,11 +1099,11 @@ fn command_click_routes_links() {
     ));
     assert!(matches!(
         super::command_click_msg("a.md", line, at("Note")),
-        Some(Message::Reading(ReadingMsg::OpenLink { src, target })) if src == "a.md" && target == "Note"
+        Some(Message::Reading(ReadingMsg::OpenLinkNew { src, target })) if src == "a.md" && target == "Note"
     ));
     assert!(matches!(
         super::command_click_msg("a.md", line, at("[l]")),
-        Some(Message::Reading(ReadingMsg::OpenLink { target, .. })) if target == "sub/n.md"
+        Some(Message::Reading(ReadingMsg::OpenLinkNew { target, .. })) if target == "sub/n.md"
     ));
     assert!(matches!(
         super::command_click_msg("a.md", line, at("[w]")),

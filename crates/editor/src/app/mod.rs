@@ -110,7 +110,7 @@ pub struct NoteRef<'a> {
 static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Where [`App::open_into`] puts a path (plan editor-feedback-round-2 WP-7). In every mode but
-/// `Restore`, a tab of the path already in the target pane is just focused, and a path open
+/// `Restore` and `NewTab`, a tab of the path already in the target pane is just focused, and a path open
 /// nowhere opens a new tab there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Place {
@@ -124,6 +124,9 @@ pub(crate) enum Place {
     Move,
     /// Quick Switch `duplicate`: a second tab of the note opens in the target pane.
     Duplicate,
+    /// Ctrl/Cmd+click on a link (plan round-14 WP-2): always add a new tab in the target pane,
+    /// even when the note is already open there or elsewhere (it then shares that document).
+    NewTab,
 }
 
 impl Tab {

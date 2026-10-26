@@ -456,6 +456,7 @@ fn nav_runs_period_open_and_opens_in_the_same_pane() {
     d.create_note("wp4nav/other.md", "o").expect("create");
     let mut app = app_over(&d, None);
     app.today = NaiveDate::from_ymd_opt(2026, 10, 13);
+    app.prefs.nav_open = crate::settings::editor_prefs::NavOpen::Replace;
     let _ = app.send(Message::Tabs(TabsMsg::Open(
         "daily/day/2026-12-31.md".into(),
     )));
@@ -836,4 +837,135 @@ fn app_open_file_adds_tab_and_status_updates() {
     let restored = App::new(Some(d), Some(state));
     assert_eq!(restored.open_paths().len(), 1);
     assert_eq!(restored.ui.recent.first(), Some(&p));
+}
+
+/// The paths of `pane`'s tabs, in order.
+fn pane_paths(app: &App, pane: iced::widget::pane_grid::Pane) -> Vec<String> {
+    app.panes
+        .get(pane)
+        .map(|s| {
+            s.tabs
+                .iter()
+                .filter_map(|t| t.path().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Plan round-14 WP-2: `nav_open` defaults to a new tab (the wikilink placement); `"replace"`
+/// keeps the active clean tab replaced; Ctrl/Cmd+click on a nav button always adds a tab.
+#[test]
+fn nav_open_placement_default_replace_and_ctrl_click() {
+    let (_tmp, d) = fake_arc();
+    for p in ["r14n/a.md", "r14n/b.md", "r14n/c.md"] {
+        d.create_note(p, "x").expect("create");
+    }
+    let go = |app: &mut App, p: &str| {
+        let pane = app.focus;
+        let _ = app.send(Message::Nav(NavMsg::Go {
+            pane,
+            target: NavTarget::Path(p.to_owned()),
+        }));
+    };
+    let mut app = app_over(&d, None);
+    assert_eq!(
+        app.prefs.nav_open,
+        crate::settings::editor_prefs::NavOpen::NewTab
+    );
+    let _ = app.send(Message::Tabs(TabsMsg::Open("r14n/a.md".into())));
+    let pane = app.focus;
+    go(&mut app, "r14n/b.md");
+    assert_eq!(
+        pane_paths(&app, pane),
+        ["r14n/a.md", "r14n/b.md"],
+        "default: new tab"
+    );
+
+    app.prefs.nav_open = crate::settings::editor_prefs::NavOpen::Replace;
+    go(&mut app, "r14n/c.md");
+    assert_eq!(
+        pane_paths(&app, pane),
+        ["r14n/a.md", "r14n/c.md"],
+        "replace: active tab"
+    );
+
+    // Ctrl+click on the button for a note already open in the pane: a second tab, active.
+    let _ = app.send(Message::Modifiers(iced::keyboard::Modifiers::CTRL));
+    go(&mut app, "r14n/c.md");
+    assert_eq!(
+        pane_paths(&app, pane),
+        ["r14n/a.md", "r14n/c.md", "r14n/c.md"]
+    );
+    assert_eq!(app.panes.get(pane).and_then(|s| s.active), Some(2));
+}
+
+/// Plan round-14 WP-2: the wikilink click decides its placement from the modifiers (pure
+/// `new_tab_link`), `TabsMsg::OpenNew` adds a second tab of a note already open in the pane
+/// (active), a plain `Open` focuses the existing tab, a view link cell with Ctrl held adds a
+/// tab, keyboard-driven opens keep their placement, and Quick Switch `duplicate` is untouched.
+#[test]
+fn ctrl_click_on_links_adds_a_tab_plain_click_focuses() {
+    use crate::message::ReadingMsg;
+    use crate::reading::new_tab_link;
+    let link = || ReadingMsg::OpenLink {
+        src: "r14l/a.md".into(),
+        target: "b".into(),
+    };
+    assert!(matches!(
+        new_tab_link(link(), false),
+        ReadingMsg::OpenLink { .. }
+    ));
+    assert!(matches!(
+        new_tab_link(link(), true),
+        ReadingMsg::OpenLinkNew { .. }
+    ));
+    assert!(matches!(
+        new_tab_link(ReadingMsg::Tick, true),
+        ReadingMsg::Tick
+    ));
+
+    let (_tmp, d) = fake_arc();
+    for p in ["r14l/a.md", "r14l/b.md"] {
+        d.create_note(p, "x").expect("create");
+    }
+    let mut app = app_over(&d, None);
+    let _ = app.send(Message::Tabs(TabsMsg::Open("r14l/b.md".into())));
+    let _ = app.send(Message::Tabs(TabsMsg::Open("r14l/a.md".into())));
+    let pane = app.focus;
+    let active = |app: &App| app.panes.get(pane).and_then(|s| s.active);
+
+    // Plain click: the existing tab is focused.
+    let _ = app.send(Message::Tabs(TabsMsg::Open("r14l/b.md".into())));
+    assert_eq!(pane_paths(&app, pane), ["r14l/b.md", "r14l/a.md"]);
+    assert_eq!(active(&app), Some(0));
+
+    // Ctrl+click on the wikilink: a second tab of the already-open note, active.
+    let _ = app.send(Message::Tabs(TabsMsg::OpenNew("r14l/b.md".into())));
+    assert_eq!(
+        pane_paths(&app, pane),
+        ["r14l/b.md", "r14l/a.md", "r14l/b.md"]
+    );
+    assert_eq!(active(&app), Some(2));
+
+    // A plain view link cell focuses; with Ctrl held it adds a tab.
+    let cell = || {
+        Message::Views(crate::message::ViewsMsg::Open {
+            path: "r14l/a.md".into(),
+            line: None,
+        })
+    };
+    let _ = app.send(cell());
+    assert_eq!(pane_paths(&app, pane).len(), 3);
+    assert_eq!(active(&app), Some(1));
+    let _ = app.send(Message::Modifiers(iced::keyboard::Modifiers::CTRL));
+    let _ = app.send(cell());
+    assert_eq!(pane_paths(&app, pane).len(), 4);
+    assert_eq!(active(&app), Some(3));
+
+    // Keyboard-driven opens with Ctrl held keep their placement (focus the existing tab).
+    let _ = app.send(Message::Tabs(TabsMsg::Open("r14l/b.md".into())));
+    assert_eq!(pane_paths(&app, pane).len(), 4);
+    // Quick Switch duplicate: unchanged (a tab already in the target pane is focused).
+    app.open_with("r14l/a.md", crate::app::Place::Duplicate);
+    assert_eq!(pane_paths(&app, pane).len(), 4);
 }

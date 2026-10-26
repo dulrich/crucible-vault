@@ -447,6 +447,13 @@ pub static EDITOR_FILE: Record = Record {
             Node::List(&Node::Record(&NAV_LINK)),
         ),
         field(
+            "nav_open",
+            "Nav bar opens in",
+            "Where a nav-bar button (Today, day/month, your links) puts its note: a new tab (an already-open tab is focused), or replacing the active tab when it has no unsaved edits",
+            Node::Enum(&["new-tab", "replace"]),
+        )
+        .dflt(D::Str("new-tab")),
+        field(
             "search",
             "Search panel",
             "Search panel tuning",

@@ -370,6 +370,7 @@ menu_bar = "hidden"
 auto_lint = false
 scroll_anchor = 40
 open_url_cmd = ["firefox", "--new-tab"]
+nav_open = "replace"
 
 [[nav_links]]
 label = "Inbox"
@@ -1286,4 +1287,28 @@ fn search_location_parses_modal_panel_and_unknown_falls_back_to_panel() {
     );
     assert_eq!(loc("[search]\nlocation = 3\n"), SearchLocation::Panel);
     assert_eq!(loc(""), SearchLocation::Panel);
+}
+
+/// Plan round-14 WP-2: `nav_open` absent → `new-tab`; `"replace"` parses; an unknown value falls
+/// back to the default (the config page's schema validation raises the notice).
+#[test]
+fn nav_open_pref_default_replace_and_unknown() {
+    let of = |body: &str| {
+        editor_prefs::parse(body, Surround::Med)
+            .expect("parse")
+            .nav_open
+    };
+    assert_eq!(of(""), editor_prefs::NavOpen::NewTab);
+    assert_eq!(
+        of("nav_open = \"new-tab\"\n"),
+        editor_prefs::NavOpen::NewTab
+    );
+    assert_eq!(
+        of("nav_open = \"replace\"\n"),
+        editor_prefs::NavOpen::Replace
+    );
+    assert_eq!(
+        of("nav_open = \"sideways\"\n"),
+        editor_prefs::NavOpen::NewTab
+    );
 }

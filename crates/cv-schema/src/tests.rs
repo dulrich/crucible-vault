@@ -840,3 +840,25 @@ fn view_schema_carries_picker_hints() {
     let sizes = view.field("columnSize").unwrap();
     assert_eq!((sizes.hint, sizes.key_hint), (None, pid));
 }
+
+#[test]
+fn editor_nav_open_enum_default_new_tab() {
+    // plan round-14 WP-2: an unknown value is a validation error (the config notice).
+    for v in ["new-tab", "replace"] {
+        assert!(
+            errs(&format!("nav_open = \"{v}\"\n"), "editor.toml").is_empty(),
+            "{v}"
+        );
+    }
+    let e = errs("nav_open = \"sideways\"\n", "editor.toml");
+    assert_eq!(e.len(), 1, "{e:?}");
+    let Node::Record(r) = editor_schema() else {
+        panic!("editor schema is a record");
+    };
+    let f = r
+        .fields
+        .iter()
+        .find(|f| f.key == "nav_open")
+        .expect("field");
+    assert!(matches!(f.default, Some(node::Default::Str("new-tab"))));
+}

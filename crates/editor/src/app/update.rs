@@ -178,6 +178,14 @@ impl App {
                     return self.title_submit(&path);
                 }
             }
+            // Plan round-14 WP-2: a link click with Ctrl/Cmd held opens a new tab (decided here,
+            // on the click-originated message only; `TabsMsg::Open` keeps its placement).
+            Message::Reading(m @ crate::message::ReadingMsg::OpenLink { .. })
+                if self.modifiers.command() =>
+            {
+                let m = crate::reading::new_tab_link(m, true);
+                return self.update_inner(Message::Reading(m));
+            }
             Message::Reading(m) => {
                 let mode_change = matches!(
                     m,
@@ -299,7 +307,7 @@ impl App {
         match m {
             NavMsg::Go { pane, target } => match target {
                 NavTarget::Path(p) => {
-                    match self.open_into(pane, &p, Place::Replace) {
+                    match self.open_into(pane, &p, self.nav_place(self.modifiers.command())) {
                         Ok(()) => {}
                         // Plan round-11 WP-7: a link to a missing note creates it (the
                         // configured path is already a full vault path) and `Done` opens it
@@ -315,18 +323,29 @@ impl App {
                 }
                 NavTarget::Period(period, date) => {
                     let params = nav::period_params(period, date);
+                    let new_tab = self.modifiers.command();
                     return self.rpc(
                         move |d| {
                             d.run_action(params)
                                 .map(|r| r.open_path)
                                 .map_err(|e| e.to_string())
                         },
-                        move |result| Message::Nav(NavMsg::Opened { pane, result }),
+                        move |result| {
+                            Message::Nav(NavMsg::Opened {
+                                pane,
+                                new_tab,
+                                result,
+                            })
+                        },
                     );
                 }
             },
-            NavMsg::Opened { pane, result } => match result {
-                Ok(Some(p)) => match self.open_into(pane, &p, Place::Replace) {
+            NavMsg::Opened {
+                pane,
+                new_tab,
+                result,
+            } => match result {
+                Ok(Some(p)) => match self.open_into(pane, &p, self.nav_place(new_tab)) {
                     Ok(()) => {}
                     Err(e) => self.status.set_error(open_error(&e)),
                 },
@@ -486,7 +505,13 @@ impl App {
                 Task::none()
             }
             crate::views::Effect::Open { path, line } => {
-                self.open(&path);
+                // Plan round-14 WP-2: Ctrl/Cmd+click on a link cell adds a new tab.
+                let how = if self.modifiers.command() {
+                    Place::NewTab
+                } else {
+                    Place::Focus
+                };
+                self.open_with(&path, how);
                 let line = line.and_then(|l| usize::try_from(l.saturating_sub(1)).ok());
                 if let Some(line) = line
                     && self.active_note().is_some_and(|t| t.path == path)

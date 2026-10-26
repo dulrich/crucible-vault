@@ -139,6 +139,19 @@ impl App {
         self.open_with(path, Place::Focus);
     }
 
+    /// The nav bar's placement (plan round-14 WP-2): Ctrl/Cmd+click always adds a tab, else the
+    /// `nav_open` pref.
+    pub(super) fn nav_place(&self, new_tab: bool) -> Place {
+        use crate::settings::editor_prefs::NavOpen;
+        if new_tab {
+            return Place::NewTab;
+        }
+        match self.prefs.nav_open {
+            NavOpen::NewTab => Place::Focus,
+            NavOpen::Replace => Place::Replace,
+        }
+    }
+
     /// [`Self::open`] with an explicit placement (Quick Switch modes).
     pub(super) fn open_with(&mut self, path: &str, how: Place) {
         if let Err(e) = self.open_into(self.focus, path, how) {
@@ -222,8 +235,8 @@ impl App {
         } else {
             self.focus
         };
-        if how != Place::Restore {
-            // In every mode a tab already in the target pane is just focused.
+        if !matches!(how, Place::Restore | Place::NewTab) {
+            // In every other mode a tab already in the target pane is just focused.
             let here = self
                 .panes
                 .get(pane)
@@ -354,6 +367,7 @@ impl App {
     pub(super) fn update_tabs(&mut self, m: TabsMsg) -> Task<Message> {
         match m {
             TabsMsg::Open(p) => self.open(&p),
+            TabsMsg::OpenNew(p) => self.open_with(&p, Place::NewTab),
             TabsMsg::Select(pane, i) => self.select_tab(pane, i),
             TabsMsg::GoTo(n) => {
                 let i = usize::from(n.saturating_sub(1));

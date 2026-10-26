@@ -663,10 +663,16 @@ impl ReadingStore {
         &mut self,
         src: &str,
         target: &str,
+        new_tab: bool,
         daemon: Option<&Arc<dyn DaemonClient>>,
     ) -> Option<Message> {
-        self.resolve_link(src, target, daemon)
-            .map(|p| Message::Tabs(TabsMsg::Open(p)))
+        self.resolve_link(src, target, daemon).map(|p| {
+            Message::Tabs(if new_tab {
+                TabsMsg::OpenNew(p)
+            } else {
+                TabsMsg::Open(p)
+            })
+        })
     }
 
     /// `tab` shows image `key`: pins it, and starts an off-thread load on a miss.
@@ -736,6 +742,26 @@ pub fn update(
     let task = update_store(store, msg, docs, active, daemon, &mut fx);
     fx.push(Effect::Task(task));
     fx
+}
+
+/// A link click: opens the resolved note (a new tab when `new_tab`), else flags it missing.
+fn open_link(
+    store: &mut ReadingStore,
+    src: String,
+    target: String,
+    new_tab: bool,
+    daemon: Option<&Arc<dyn DaemonClient>>,
+    fx: &mut Vec<Effect>,
+) -> Task<Message> {
+    if let Some(m) = store.click(&src, &target, new_tab, daemon) {
+        return Task::done(m);
+    }
+    // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing;
+    // plan round-6 WP-4: `App` warns or creates it per `missing_link`.
+    if daemon.is_some() && !render::is_remote(&target) {
+        fx.push(Effect::MissingLink(target));
+    }
+    Task::none()
 }
 
 fn update_store(
@@ -872,14 +898,11 @@ fn update_store(
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. } => {}
         ReadingMsg::OpenLink { src, target } => {
-            if let Some(m) = store.click(&src, &target, daemon) {
-                return Task::done(m);
-            }
-            // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing;
-            // plan round-6 WP-4: `App` warns or creates it per `missing_link`.
-            if daemon.is_some() && !render::is_remote(&target) {
-                fx.push(Effect::MissingLink(target));
-            }
+            return open_link(store, src, target, false, daemon, fx);
+        }
+        // plan round-14 WP-2: Ctrl/Cmd held — the same link, as a new tab.
+        ReadingMsg::OpenLinkNew { src, target } => {
+            return open_link(store, src, target, true, daemon, fx);
         }
         ReadingMsg::ImageShown {
             tab,
@@ -977,3 +1000,12 @@ mod link_menu_tests;
 mod selection_tests;
 #[cfg(test)]
 mod tests;
+
+/// Plan round-14 WP-2: a link click with Ctrl/Cmd held (`new_tab`) opens the note in a new tab;
+/// any other message, or a plain click, is unchanged.
+pub(crate) fn new_tab_link(m: ReadingMsg, new_tab: bool) -> ReadingMsg {
+    match m {
+        ReadingMsg::OpenLink { src, target } if new_tab => ReadingMsg::OpenLinkNew { src, target },
+        m => m,
+    }
+}

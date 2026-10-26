@@ -92,6 +92,19 @@ pub struct Prefs {
     /// list) → [`default_nav_links`]; an explicit `[]` → none; entries without a `label` or
     /// `path` are skipped.
     pub nav_links: Vec<NavLink>,
+    /// `nav_open` (plan round-14 WP-2): whether a nav-bar button opens in a new tab (the
+    /// wikilink placement) or replaces the active clean tab.
+    pub nav_open: NavOpen,
+}
+
+/// `nav_open`: where a nav-bar button puts its note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NavOpen {
+    /// Focus an existing tab anywhere, else add a tab (the wikilink placement).
+    #[default]
+    NewTab,
+    /// Replace the pane's active clean tab.
+    Replace,
 }
 
 /// The `nav_links` list of a doc (see [`Prefs::nav_links`]).
@@ -170,6 +183,7 @@ impl Default for Prefs {
             keys: BTreeMap::new(),
             open_url_cmd: default_open_url_cmd(),
             nav_links: default_nav_links(),
+            nav_open: NavOpen::NewTab,
         }
     }
 }
@@ -294,6 +308,11 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             .filter(|v| v.first().is_some_and(|c| !c.trim().is_empty()))
             .unwrap_or(d.open_url_cmd),
         nav_links: nav_links_of(doc),
+        nav_open: match doc.get_str(&p("nav_open")) {
+            Some("replace") => NavOpen::Replace,
+            Some("new-tab") => NavOpen::NewTab,
+            _ => d.nav_open,
+        },
     }
 }
 
