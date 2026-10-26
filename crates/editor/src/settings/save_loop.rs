@@ -227,6 +227,13 @@ impl ConfigFile {
         self.edit_seq != self.saved_seq
     }
 
+    /// The form may take edits: the doc is loaded. A write in flight does not lock it: an edit
+    /// made meanwhile stays dirty and requeues (gating on [`Self::saving`] drew every input of
+    /// the file disabled for the length of each autosave — the Settings flash, round 13).
+    pub fn editable(&self) -> bool {
+        self.doc.is_some()
+    }
+
     /// A write is in flight.
     pub fn saving(&self) -> bool {
         matches!(self.phase, Phase::Writing { .. })

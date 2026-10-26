@@ -1104,6 +1104,12 @@ fn edit_during_an_in_flight_write_requeues_exactly_once() {
             .file(EDITOR_PATH)
             .is_some_and(ConfigFile::saving)
     );
+    // The form stays editable during the write (no disabled-style flash per autosave).
+    assert!(
+        app.settings
+            .file(EDITOR_PATH)
+            .is_some_and(ConfigFile::editable)
+    );
     // Two edits and their timers during the write: one requeue, no second write yet.
     let _ = app.update(font(32.0));
     let _ = app.update(s(app.settings.due_now(EDITOR_PATH)));
