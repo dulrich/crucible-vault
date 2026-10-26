@@ -37,6 +37,18 @@
     {
       "path": "docs/spikes/source-scroll/src/main.rs",
       "build": "cargo build --offline --manifest-path docs/spikes/source-scroll/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/pdf-render/src/base.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/pdf-render/src/r_hayro.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/pdf-render/src/r_pdfium.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
     }
   ],
   "exclude": []
