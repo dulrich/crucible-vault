@@ -1,0 +1,76 @@
+{
+  "columns": [
+    {
+      "key": "file.name",
+      "label": "file name"
+    },
+    {
+      "key": "note.possible-duplicate",
+      "label": "possible-duplicate"
+    },
+    {
+      "key": "formula.created",
+      "label": "created"
+    }
+  ],
+  "groups": [
+    {
+      "rows": [
+        {
+          "cells": [
+            {
+              "label": "Dupe Beta",
+              "path": "notes/Dupe Beta.md",
+              "t": "link"
+            },
+            {
+              "t": "list",
+              "v": [
+                {
+                  "t": "text",
+                  "v": "[[Dupe Alpha]]"
+                },
+                {
+                  "t": "text",
+                  "v": "[[Tagged]]"
+                }
+              ]
+            },
+            {
+              "t": "date",
+              "v": "2026-10-09"
+            }
+          ],
+          "path": "notes/Dupe Beta.md"
+        },
+        {
+          "cells": [
+            {
+              "label": "Dupe Alpha",
+              "path": "notes/Dupe Alpha.md",
+              "t": "link"
+            },
+            {
+              "t": "list",
+              "v": [
+                {
+                  "t": "text",
+                  "v": "[[Dupe Beta]]"
+                }
+              ]
+            },
+            {
+              "t": "date",
+              "v": "2026-10-08"
+            }
+          ],
+          "path": "notes/Dupe Alpha.md"
+        }
+      ],
+      "summaries": []
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": []
+}

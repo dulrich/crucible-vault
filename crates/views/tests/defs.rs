@@ -20,6 +20,7 @@ const IDS: &[&str] = &[
     "hubs#Project Alpha",
     "hubs#Hub View B",
     "hubs#Hub View C",
+    "ingestion#Possible duplicates",
     "ingestion#Unprocessed clippings",
     "ingestion#Unrefined transcripts",
     "ingestion#X posts",
@@ -178,7 +179,7 @@ fn mask(v: &mut Json) {
 }
 
 #[test]
-fn defs_load_without_notices_and_yield_the_23_ids() {
+fn defs_load_without_notices_and_yield_the_24_ids() {
     let fx = fixture();
     let host = fx.host();
     assert!(host.load_notices().is_empty(), "{:?}", host.load_notices());

@@ -57,3 +57,16 @@ filters = { and = [
 ] }
 order = ["file.name", "note.status-id", "note.url", "note.state"]
 sort = [{ property = "note.status-id", direction = "DESC" }]
+
+# Notes the dupes step flagged (`crates/cv/src/steps/dupes.rs` writes `possible-duplicate`, a list of
+# `[[wikilink]]` strings, into both notes; plan round-14-dupes-view-links-files WP-1). The list column
+# renders as comma-joined text; the note column is the clickable link.
+[[views]]
+type = "table"
+name = "Possible duplicates"
+filters = { and = [
+  'note["possible-duplicate"]',
+  'list(note["possible-duplicate"]).length > 0',
+] }
+order = ["file.name", "note.possible-duplicate", "formula.created"]
+sort = [{ property = "formula.created", direction = "DESC" }]
