@@ -134,8 +134,8 @@ pub static VIEW: Record = Record {
         field(
             "source",
             "Source",
-            "Overrides the file's row source for this view",
-            Node::Enum(&["index", "tracker_items", "sources"]),
+            "Overrides the file's row source for this view (index, tracker_items, sources or trash)",
+            Node::Enum(&["index", "tracker_items", "sources", "trash"]),
         ),
         field("filters", "Filters", "Per-view filter tree", Node::Filter),
         field("order", "Columns", "Property ids in column order", STR_LIST)
@@ -254,8 +254,8 @@ pub static VIEW_FILE: Record = Record {
         field(
             "source",
             "Source",
-            "Row source: index notes, state.db tracker items or sources.toml rows",
-            Node::Enum(&["index", "tracker_items", "sources"]),
+            "Row source: index notes, state.db tracker items, sources.toml rows or state.db trash ledger entries",
+            Node::Enum(&["index", "tracker_items", "sources", "trash"]),
         )
         .dflt(D::Str("index")),
         field("filters", "Filters", "Base filter tree", Node::Filter),

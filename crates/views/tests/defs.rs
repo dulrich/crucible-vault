@@ -21,6 +21,7 @@ const IDS: &[&str] = &[
     "hubs#Hub View B",
     "hubs#Hub View C",
     "ingestion#Possible duplicates",
+    "ingestion#Trash",
     "ingestion#Unprocessed clippings",
     "ingestion#Unrefined transcripts",
     "ingestion#X posts",
@@ -111,6 +112,7 @@ fn fixture() -> Fx {
     let index = cv_index::Index::create(&vault, &base).unwrap();
     let state = tmp.path().join("state.db");
     tracker_fixture(&state);
+    trash_fixture(&state);
     Fx {
         _tmp: tmp,
         config,
@@ -141,6 +143,23 @@ fn tracker_fixture(p: &Path) {
             ('youtube', 'UC1', 'v3', 'Other day', 'https://y.example/3', 4, '2026-10-02', 'line', NULL, NULL, NULL, 'Chan A', 60, NULL, NULL, NULL, NULL, NULL),
             ('youtube', 'UC1', 'v4', 'Short-ish', 'https://y.example/4', 5, '2026-10-01', 'line', NULL, NULL, NULL, 'Chan A', 65, NULL, NULL, NULL, NULL, NULL),
             ('blog', 'https://c.example/feed', 'p2', 'Teaser', 'https://c.example/2', 6, '2026-10-01', 'line', NULL, 0, NULL, 'Feed C', NULL, NULL, NULL, 'paid', 0, NULL);",
+    )
+    .unwrap();
+}
+
+/// Synthetic `trash_entries` rows (the v15 columns that matter to the view): three reasons, two
+/// locations, a nested path (basename), a fractional MiB size. Trashed times are fixed UTC ms.
+fn trash_fixture(p: &Path) {
+    let c = rusqlite::Connection::open(p).unwrap();
+    c.execute_batch(
+        "CREATE TABLE trash_entries (id INTEGER PRIMARY KEY, location TEXT NOT NULL,
+            trash_path TEXT NOT NULL, original_path TEXT NOT NULL, trashed_ms INTEGER NOT NULL,
+            bytes INTEGER NOT NULL, reason TEXT NOT NULL, mtime_ms INTEGER, inode INTEGER,
+            info_name TEXT);
+         INSERT INTO trash_entries (id, location, trash_path, original_path, trashed_ms, bytes, reason) VALUES
+            (1, 'vault', '.trash/a.png', 'attachments/a.png', 1790000000000, 1048576, 'orphan'),
+            (2, 'vault', '.trash/b.md', 'core/notes/b.md', 1790086400000, 524288, 'deleted'),
+            (3, 'system', 'files/c.txt', 'inbox/c.txt', 1789913600000, 3145728, 'orphan');",
     )
     .unwrap();
 }
@@ -179,7 +198,7 @@ fn mask(v: &mut Json) {
 }
 
 #[test]
-fn defs_load_without_notices_and_yield_the_24_ids() {
+fn defs_load_without_notices_and_yield_the_25_ids() {
     let fx = fixture();
     let host = fx.host();
     assert!(host.load_notices().is_empty(), "{:?}", host.load_notices());
@@ -459,4 +478,17 @@ fn backlinks_here() {
     let names: Vec<String> = r.rows().map(|row| text(&row.cells[0])).collect();
     // mtime DESC: stack/ sorts after notes/ so gets the later mtime.
     assert_eq!(names, ["Tool Two", "Linker"]);
+}
+
+#[test]
+fn trash_section_orders_by_expiry_groups_by_reason_and_sums_size() {
+    let fx = fixture();
+    let mut host = fx.host();
+    let r = fx.run(&mut host, "ingestion#Trash", None);
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    let names: Vec<_> = column(&r, "name").into_iter().map(|(n, _)| n).collect();
+    // Groups ascend by reason (deleted, orphan); within a group, soonest expiry first (c before a).
+    assert_eq!(names, ["b.md", "c.txt", "a.png"]);
+    let sizes: Vec<_> = column(&r, "size_mib").into_iter().map(|(_, v)| v).collect();
+    assert_eq!(sizes, ["0.5", "3", "1"]);
 }

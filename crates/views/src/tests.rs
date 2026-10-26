@@ -1420,3 +1420,135 @@ fn ui_select_filters_rows_and_summaries() {
         .is_empty()
     );
 }
+
+const TRASH_DEF: &str = "source = 'trash'\n[[views]]\ntype='table'\nname='T'\norder=['name', 'reason', 'expires', 'bytes']\n";
+
+fn trash_db(dir: &Path) -> PathBuf {
+    let p = dir.join("trash-state.db");
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch(
+        "CREATE TABLE trash_entries (id INTEGER PRIMARY KEY, location TEXT NOT NULL,
+            trash_path TEXT NOT NULL, original_path TEXT NOT NULL, trashed_ms INTEGER NOT NULL,
+            bytes INTEGER NOT NULL, reason TEXT NOT NULL, mtime_ms INTEGER, inode INTEGER,
+            info_name TEXT);
+         INSERT INTO trash_entries (id, location, trash_path, original_path, trashed_ms, bytes, reason) VALUES
+            (1, 'vault', '.trash/b.md', 'core/notes/b.md', 1790000000000, 2097152, 'deleted'),
+            (2, 'system', 'files/a.txt', 'a.txt', 1789000000000, 10, 'orphan');",
+    )
+    .unwrap();
+    p
+}
+
+#[test]
+fn state_change_signals_the_trash_views() {
+    let fx = fixture(&[("intake.toml", INTAKE), ("trash.toml", TRASH_DEF)]);
+    let mut host = fx.host();
+    assert_eq!(host.on_state_changed("trash_entries"), vec!["trash#T"]);
+    assert_eq!(host.on_state_changed("tracker_items"), vec!["intake#Day"]);
+}
+
+#[test]
+fn trash_view_needs_a_state_db() {
+    let fx = fixture(&[("trash.toml", TRASH_DEF)]);
+    let mut host = fx.host();
+    let g = fx.reader().generation();
+    let e = host.run_typed(g, "trash#T", None).unwrap_err();
+    assert!(e.to_string().contains("no state.db"), "{e}");
+}
+
+#[test]
+fn trash_records_bind_name_expiry_and_size() {
+    use crate::value::Value;
+    let dir = tempfile::tempdir().unwrap();
+    let c = rusqlite::Connection::open(trash_db(dir.path())).unwrap();
+    let recs = crate::service::trash_records(&c, 30).unwrap();
+    // Oldest first.
+    assert_eq!(
+        format!("{:?}", recs[0]["name"]),
+        format!("{:?}", Value::Str("a.txt".into()))
+    );
+    assert_eq!(
+        format!("{:?}", recs[1]["name"]),
+        format!("{:?}", Value::Str("b.md".into()))
+    );
+    assert_eq!(
+        format!("{:?}", recs[1]["original_path"]),
+        format!("{:?}", Value::Str("core/notes/b.md".into()))
+    );
+    assert_eq!(
+        format!("{:?}", recs[1]["location"]),
+        format!("{:?}", Value::Str("vault".into()))
+    );
+    assert_eq!(
+        format!("{:?}", recs[1]["reason"]),
+        format!("{:?}", Value::Str("deleted".into()))
+    );
+    assert_eq!(
+        format!("{:?}", recs[1]["bytes"]),
+        format!("{:?}", Value::Num(2_097_152.0))
+    );
+    assert_eq!(
+        format!("{:?}", recs[1]["size_mib"]),
+        format!("{:?}", Value::Num(2.0))
+    );
+    // Expiry is trashed + 30 days exactly.
+    assert_eq!(
+        format!("{:?}", recs[1]["expires"]),
+        format!(
+            "{:?}",
+            crate::eval::ms_date(1_790_000_000_000 + 30 * 86_400_000)
+        )
+    );
+    assert!(matches!(recs[1]["trashed"], Value::Date(..)));
+}
+
+#[test]
+fn trash_retention_zero_means_no_expiry() {
+    use crate::value::Value;
+    let dir = tempfile::tempdir().unwrap();
+    let c = rusqlite::Connection::open(trash_db(dir.path())).unwrap();
+    let recs = crate::service::trash_records(&c, 0).unwrap();
+    assert!(recs.iter().all(|r| matches!(r["expires"], Value::Null)));
+}
+
+#[test]
+fn trash_retention_days_reads_vault_toml_with_a_default_of_30() {
+    let dir = tempfile::tempdir().unwrap();
+    let days = |body: Option<&str>| {
+        let f = dir.path().join("vault.toml");
+        match body {
+            Some(b) => std::fs::write(&f, b).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&f);
+            }
+        }
+        crate::service::trash_retention_days(dir.path())
+    };
+    assert_eq!(days(None), 30);
+    assert_eq!(days(Some("[trash]\nretention_days = 7\n")), 7);
+    assert_eq!(days(Some("[trash]\nretention_days = 0\n")), 0);
+    assert_eq!(days(Some("[trash]\nlocation = \"x\"\n")), 30);
+    assert_eq!(days(Some("[trash]\nretention_days = -3\n")), 30);
+    assert_eq!(days(Some("[trash]\nretention_days = \"soon\"\n")), 30);
+    assert_eq!(days(Some("not = [valid")), 30);
+}
+
+#[test]
+fn trash_view_runs_end_to_end_and_follows_vault_toml() {
+    let fx = fixture(&[("trash.toml", TRASH_DEF)]);
+    let state = trash_db(fx._tmp.path());
+    let mut host = fx.host().with_state_db(&state);
+    let r = fx.run(&mut host, "trash#T", None);
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    assert!(
+        r.rows()
+            .all(|row| matches!(row.cells[2], Cell::Date { .. }))
+    );
+    std::fs::write(
+        fx.config.join("vault.toml"),
+        "[trash]\nretention_days = 0\n",
+    )
+    .unwrap();
+    let r = fx.run(&mut host, "trash#T", None);
+    assert!(r.rows().all(|row| row.cells[2] == Cell::Null));
+}

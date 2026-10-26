@@ -1,0 +1,317 @@
+{
+  "columns": [
+    {
+      "key": "name",
+      "label": "name"
+    },
+    {
+      "key": "original_path",
+      "label": "original_path"
+    },
+    {
+      "key": "reason",
+      "label": "reason"
+    },
+    {
+      "key": "location",
+      "label": "location"
+    },
+    {
+      "key": "trashed",
+      "label": "trashed"
+    },
+    {
+      "key": "expires",
+      "label": "expires"
+    },
+    {
+      "key": "size_mib",
+      "label": "size_mib",
+      "width": 80.0
+    }
+  ],
+  "groups": [
+    {
+      "key": {
+        "t": "text",
+        "v": "deleted"
+      },
+      "rows": [
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "b.md"
+            },
+            {
+              "t": "text",
+              "v": "core/notes/b.md"
+            },
+            {
+              "t": "text",
+              "v": "deleted"
+            },
+            {
+              "t": "text",
+              "v": "vault"
+            },
+            {
+              "t": "date",
+              "v": "<datetime>"
+            },
+            {
+              "t": "date",
+              "v": "<datetime>"
+            },
+            {
+              "t": "number",
+              "v": 0.5
+            }
+          ]
+        }
+      ],
+      "summaries": [
+        {
+          "cells": [
+            {
+              "t": "number",
+              "v": 1.0
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            }
+          ],
+          "label": "Count"
+        },
+        {
+          "cells": [
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "number",
+              "v": 0.5
+            }
+          ],
+          "label": "Sum"
+        }
+      ]
+    },
+    {
+      "key": {
+        "t": "text",
+        "v": "orphan"
+      },
+      "rows": [
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "c.txt"
+            },
+            {
+              "t": "text",
+              "v": "inbox/c.txt"
+            },
+            {
+              "t": "text",
+              "v": "orphan"
+            },
+            {
+              "t": "text",
+              "v": "system"
+            },
+            {
+              "t": "date",
+              "v": "<datetime>"
+            },
+            {
+              "t": "date",
+              "v": "<datetime>"
+            },
+            {
+              "t": "number",
+              "v": 3.0
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "t": "text",
+              "v": "a.png"
+            },
+            {
+              "t": "text",
+              "v": "attachments/a.png"
+            },
+            {
+              "t": "text",
+              "v": "orphan"
+            },
+            {
+              "t": "text",
+              "v": "vault"
+            },
+            {
+              "t": "date",
+              "v": "<datetime>"
+            },
+            {
+              "t": "date",
+              "v": "<datetime>"
+            },
+            {
+              "t": "number",
+              "v": 1.0
+            }
+          ]
+        }
+      ],
+      "summaries": [
+        {
+          "cells": [
+            {
+              "t": "number",
+              "v": 2.0
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            }
+          ],
+          "label": "Count"
+        },
+        {
+          "cells": [
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "number",
+              "v": 4.0
+            }
+          ],
+          "label": "Sum"
+        }
+      ]
+    }
+  ],
+  "kind": "table",
+  "notices": [],
+  "summaries": [
+    {
+      "cells": [
+        {
+          "t": "number",
+          "v": 3.0
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        }
+      ],
+      "label": "Count"
+    },
+    {
+      "cells": [
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
+        {
+          "t": "number",
+          "v": 4.5
+        }
+      ],
+      "label": "Sum"
+    }
+  ]
+}

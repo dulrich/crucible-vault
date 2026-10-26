@@ -70,3 +70,16 @@ filters = { and = [
 ] }
 order = ["file.name", "note.possible-duplicate", "formula.created"]
 sort = [{ property = "formula.created", direction = "DESC" }]
+
+# Files the vault-tidy sweep and the trash seam moved to the trash, newest-expiring last (plan
+# tidiness-trash-orphans WP-3). Rows come from the state.db `trash_entries` ledger
+# (`source = "trash"`); `expires` is blank when `vault.toml` `[trash] retention_days = 0`.
+[[views]]
+type = "table"
+name = "Trash"
+source = "trash"
+order = ["name", "original_path", "reason", "location", "trashed", "expires", "size_mib"]
+sort = [{ property = "expires", direction = "ASC" }]
+groupBy = { property = "reason", direction = "ASC" }
+summaries = { "name" = "Count", "size_mib" = "Sum" }
+columnSize = { "size_mib" = 80 }

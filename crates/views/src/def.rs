@@ -193,6 +193,10 @@ pub enum Source {
     /// `[[serial]]` row plus every other row with `works = true`, with per-row daily-note counts
     /// (fields bound as bare identifiers and on `note`; see `ViewHost::set_sources`).
     Sources,
+    /// `state.db` `trash_entries` rows (plan tidiness-trash-orphans WP-3): the daemon's trash
+    /// ledger, read-only. Fields bind as bare identifiers: `original_path`, `name`, `location`,
+    /// `reason`, `trashed`, `expires` (null when retention is off), `bytes`, `size_mib`.
+    Trash,
 }
 
 /// One definition file.
@@ -744,6 +748,8 @@ status = [" "]
         assert!(toml::from_str::<BaseDef>("source='links'\n").is_err());
         let d: BaseDef = toml::from_str("source='tracker_items'\n").unwrap();
         assert_eq!(d.source, Source::TrackerItems);
+        let d: BaseDef = toml::from_str("source='trash'\n").unwrap();
+        assert_eq!(d.source, Source::Trash);
         let d: BaseDef = toml::from_str("").unwrap();
         assert_eq!(d.source, Source::Index);
         let d: BaseDef =

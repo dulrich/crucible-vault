@@ -104,6 +104,7 @@ impl ViewHost {
     pub fn on_state_changed(&mut self, table: &str) -> Vec<String> {
         match table {
             "tracker_items" => self.view_ids_for(Source::TrackerItems),
+            "trash_entries" => self.view_ids_for(Source::Trash),
             _ => Vec::new(),
         }
     }
@@ -237,6 +238,15 @@ impl ViewHost {
                     .ok_or_else(|| ViewsError::NoStateDb(view_id.to_string()))?;
                 let sc = open_state(&mut self.state_conn, &path)?;
                 Some(tracker_records(sc).map_err(ViewsError::State)?)
+            }
+            Some(Source::Trash) => {
+                let path = self
+                    .state_db
+                    .clone()
+                    .ok_or_else(|| ViewsError::NoStateDb(view_id.to_string()))?;
+                let days = trash_retention_days(&self.config_dir);
+                let sc = open_state(&mut self.state_conn, &path)?;
+                Some(trash_records(sc, days).map_err(ViewsError::State)?)
             }
             Some(Source::Sources) => Some(self.sources.clone()),
             _ => None,
@@ -391,6 +401,65 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
         let complete: Option<bool> = r.get(17)?;
         m.insert("complete".into(), complete.map_or(Value::Null, Value::Bool));
         m.insert("full_word_count".into(), num(r.get(18)?));
+        Ok(Arc::new(m))
+    })?;
+    rows.collect()
+}
+
+/// Default `vault.toml` `[trash] retention_days`.
+const DEFAULT_TRASH_RETENTION_DAYS: u32 = 30;
+
+/// `[trash] retention_days` from `<config_dir>/vault.toml` (`0` = never expire). Absent file or
+/// key, or an invalid value (not a non-negative integer), gives the default 30.
+pub fn trash_retention_days(config_dir: &Path) -> u32 {
+    std::fs::read_to_string(config_dir.join("vault.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .and_then(|t| t.get("trash")?.get("retention_days")?.as_integer())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(DEFAULT_TRASH_RETENTION_DAYS)
+}
+
+/// Every `trash_entries` row as a record, soonest-trashed first (`trashed_ms, id`). Fields:
+/// `original_path`, `name` (its basename), `location`, `reason`, `trashed` (date), `expires`
+/// (date = trashed + `retention_days`; null when `retention_days` is 0), `bytes` and `size_mib`
+/// (bytes / 2^20, numbers).
+pub fn trash_records(
+    conn: &Connection,
+    retention_days: u32,
+) -> rusqlite::Result<Vec<engine::Record>> {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crate::value::Value;
+    let mut stmt = conn.prepare_cached(
+        "SELECT original_path, location, reason, trashed_ms, bytes
+         FROM trash_entries ORDER BY trashed_ms ASC, id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let original: String = r.get(0)?;
+        let trashed_ms: i64 = r.get(3)?;
+        let bytes: i64 = r.get(4)?;
+        let mut m = BTreeMap::new();
+        let name = original.rsplit('/').next().unwrap_or(&original).to_string();
+        m.insert("original_path".to_string(), Value::Str(original));
+        m.insert("name".into(), Value::Str(name));
+        m.insert("location".into(), Value::Str(r.get(1)?));
+        m.insert("reason".into(), Value::Str(r.get(2)?));
+        m.insert("trashed".into(), crate::eval::ms_date(trashed_ms));
+        let expires = if retention_days == 0 {
+            Value::Null
+        } else {
+            trashed_ms
+                .checked_add(i64::from(retention_days) * 86_400_000)
+                .map_or(Value::Null, crate::eval::ms_date)
+        };
+        m.insert("expires".into(), expires);
+        #[allow(clippy::cast_precision_loss)]
+        {
+            m.insert("bytes".into(), Value::Num(bytes as f64));
+            m.insert("size_mib".into(), Value::Num(bytes as f64 / 1_048_576.0));
+        }
         Ok(Arc::new(m))
     })?;
     rows.collect()
