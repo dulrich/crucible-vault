@@ -111,26 +111,26 @@ fn image_tab_round_trips_as_a_note_tab() {
     assert!(!back.docs.contains_key("att/p.png"));
 }
 
-/// A PDF goes to the system opener by its absolute vault path and opens no tab; a `.txt` and an
+/// An office document (round-15 WP-3: no longer a PDF, which opens a PDF tab) goes to the system opener by its absolute vault path and opens no tab; a `.txt` and an
 /// unknown extension without NUL bytes open as text; one with a NUL byte goes to the opener.
 #[test]
 fn external_files_go_to_the_opener_and_text_stays_text() {
     let (_tmp, d, mut app) = setup(
         &[
-            ("doc.pdf", b"%PDF-1.4\0binary"),
+            ("doc.docx", b"PK\0binary"),
             ("n.txt", b"plain\n"),
             ("t.qqq", b"also plain\n"),
             ("b.qqq", b"bin\0ary"),
         ],
         false,
     );
-    open(&mut app, "doc.pdf");
+    open(&mut app, "doc.docx");
     assert!(kinds(&app).is_empty(), "no tab for an external file");
     assert!(app.docs.is_empty());
     let root = d.vault_root().to_path_buf();
     assert_eq!(
         app.opened_files(),
-        [root.join("doc.pdf").to_string_lossy().into_owned()]
+        [root.join("doc.docx").to_string_lossy().into_owned()]
     );
     assert!(app.status.error_text().is_none());
     open(&mut app, "n.txt");
@@ -145,7 +145,7 @@ fn external_files_go_to_the_opener_and_text_stays_text() {
     assert_eq!(app.opened_files().len(), 2);
     // A missing opener is a status-bar error.
     app.prefs.open_url_cmd = vec!["/nonexistent/cv-opener".into()];
-    open(&mut app, "doc.pdf");
+    open(&mut app, "doc.docx");
     assert!(
         app.status
             .error_text()
@@ -153,7 +153,7 @@ fn external_files_go_to_the_opener_and_text_stays_text() {
     );
 }
 
-/// `![[doc.pdf]]` lowers to a file card that opens through the opener; `![[B]]` stays a
+/// `![[doc.pdf]]` lowers to a file card (round-15 WP-3: its click opens the PDF tab); `![[B]]` stays a
 /// transclusion.
 #[test]
 fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
@@ -178,19 +178,16 @@ fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
         editor_model::render::Block::Transclusion { .. }
     ));
     drop(app.view());
-    // The card's click is the link route: it resolves to an open, which hands the PDF over.
+    // The card's click is the link route: it resolves to an open, which opens the PDF tab.
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let click = app.reading.click("A.md", "doc.pdf", false, Some(&dc));
     assert!(matches!(&click, Some(Message::Tabs(TabsMsg::Open(p))) if p == "doc.pdf"));
     let _ = app.send(click.expect("resolved"));
+    assert!(app.opened_files().is_empty(), "no opener for a PDF");
     assert_eq!(
-        app.opened_files(),
-        [d.vault_root()
-            .join("doc.pdf")
-            .to_string_lossy()
-            .into_owned()]
+        kinds(&app),
+        [TabKind::Note("A.md".into()), TabKind::Pdf("doc.pdf".into())]
     );
-    assert_eq!(kinds(&app), [TabKind::Note("A.md".into())]);
 }
 
 /// Plan round-15 WP-2: a daemon-side rename of an image under an open image tab keeps it an
@@ -231,9 +228,9 @@ fn renaming_an_image_keeps_its_tab_an_image_tab() {
 /// observed (the channel stands in for the subscription).
 #[test]
 fn a_failing_opener_exit_becomes_a_status_error() {
-    let (_tmp, _d, mut app) = setup(&[("doc.pdf", b"%PDF")], false);
+    let (_tmp, _d, mut app) = setup(&[("doc.docx", b"%PDF")], false);
     app.prefs.open_url_cmd = vec!["false".into()];
-    open(&mut app, "doc.pdf");
+    open(&mut app, "doc.docx");
     assert!(app.status.error_text().is_none(), "spawn succeeded");
     let msg = app
         .opener_notices
@@ -246,4 +243,132 @@ fn a_failing_opener_exit_becomes_a_status_error() {
             .error_text()
             .is_some_and(|e| e.contains("exited with"))
     );
+}
+
+/// Plan round-15 WP-3: feeds the open the tab body asks for (tasks do not run here).
+fn pdf_opened(app: &mut App, path: &str, bytes: &[u8]) {
+    use crate::message::PdfTabMsg;
+    drop(app.view());
+    let _ = app.send(Message::PdfTab(PdfTabMsg::Open { path: path.into() }));
+    let bytes = Arc::new(bytes.to_vec());
+    let result = crate::pdf::open(&bytes).map(|s| (bytes, s));
+    let _ = app.send(Message::PdfTab(PdfTabMsg::Opened {
+        path: path.into(),
+        result,
+    }));
+}
+
+/// Plan round-15 WP-3: a PDF opens a PDF tab (no document, no opener), renders a shown page
+/// through the shared cache under a page key, releases it on close, and persists as a plain
+/// `note` tab that restores as a PDF tab.
+#[test]
+fn pdf_opens_a_pdf_tab_and_round_trips_as_a_note_tab() {
+    use crate::message::PdfTabMsg;
+    let pdf = crate::pdf::synthetic_pdf(3, 200, 100);
+    let (tmp, d, mut app) = setup(&[("doc.pdf", &pdf), ("a.md", b"# A\n")], true);
+    open(&mut app, "a.md");
+    open(&mut app, "doc.pdf");
+    assert_eq!(
+        kinds(&app),
+        [TabKind::Note("a.md".into()), TabKind::Pdf("doc.pdf".into())]
+    );
+    assert!(
+        !app.docs.contains_key("doc.pdf"),
+        "no SourceBuffer for a PDF"
+    );
+    assert!(app.opened_files().is_empty(), "no opener call");
+    let id = app.active_tab().expect("tab").id;
+    pdf_opened(&mut app, "doc.pdf", &pdf);
+    drop(app.view());
+    let _ = app.send(Message::PdfTab(PdfTabMsg::PageShown {
+        path: "doc.pdf".into(),
+        view: id,
+        page: 0,
+        width: 300.0,
+    }));
+    let key = crate::app::pdf_tab::page_key("doc.pdf", 0, 320);
+    assert_eq!(key, "doc.pdf#page=1@320");
+    assert_eq!(app.reading.images.pending_len(), 1, "a render started");
+    assert!(app.pdf.reserved_bytes() > 0, "projected bytes reserved");
+    let bytes = Arc::new(pdf.clone());
+    let _ = app.send(Message::PdfTab(PdfTabMsg::Rendered {
+        path: "doc.pdf".into(),
+        view: id,
+        page: 0,
+        key: key.clone(),
+        result: crate::pdf::render_page(&bytes, 0, 320),
+    }));
+    assert_eq!(app.reading.images.pins(&key), 1);
+    assert!(
+        !app.reading.images.contains("doc.pdf"),
+        "no image-key collision"
+    );
+    drop(app.view());
+    // Session round-trip: the wire stays `note`.
+    let _ = app.send(Message::PersistDue);
+    let state = tmp.path().join("state/editor.json");
+    let json: String = std::fs::read_to_string(&state)
+        .expect("written")
+        .split_whitespace()
+        .collect();
+    assert!(
+        json.contains(r#"{"tab":"note","path":"doc.pdf"}"#),
+        "{json}"
+    );
+    assert!(!json.contains(r#""tab":"pdf""#), "no new wire tag: {json}");
+    let back = app_over(&d, Some(state));
+    assert_eq!(
+        kinds(&back),
+        [TabKind::Note("a.md".into()), TabKind::Pdf("doc.pdf".into())]
+    );
+    // Closing the PDF tab releases its page pin and reservation.
+    let _ = app.send(Message::Tabs(TabsMsg::Close(app.focus, 1)));
+    assert_eq!(app.reading.images.pins(&key), 0);
+    assert_eq!(app.pdf.reserved_bytes(), 0);
+    assert!(app.pdf.docs.is_empty());
+}
+
+/// Plan round-15 WP-3: a corrupt PDF shows the error state in its tab (with "Open externally").
+#[test]
+fn a_corrupt_pdf_shows_the_error_state() {
+    let (_tmp, _d, mut app) = setup(&[("bad.pdf", b"%PDF-1.4\0garbage")], false);
+    open(&mut app, "bad.pdf");
+    assert_eq!(kinds(&app), [TabKind::Pdf("bad.pdf".into())]);
+    pdf_opened(&mut app, "bad.pdf", b"%PDF-1.4\0garbage");
+    assert!(matches!(
+        app.pdf.docs.get("bad.pdf"),
+        Some(crate::app::pdf_tab::PdfDoc::Failed(_))
+    ));
+    drop(app.view());
+    let _ = app.send(Message::PdfTab(crate::message::PdfTabMsg::OpenExternal(
+        "bad.pdf".into(),
+    )));
+    assert_eq!(app.opened_files().len(), 1, "Open externally hands it over");
+}
+
+/// Plan round-15 WP-3: a renamed PDF keeps its PDF tab (same id); its page pins are released
+/// and the parsed document moves with the file.
+#[test]
+fn renaming_a_pdf_keeps_its_tab_a_pdf_tab() {
+    use crate::message::PdfTabMsg;
+    let pdf = crate::pdf::synthetic_pdf(1, 200, 100);
+    let (_tmp, d, mut app) = setup(&[("doc.pdf", &pdf)], false);
+    open(&mut app, "doc.pdf");
+    let id = app.active_tab().expect("tab").id;
+    pdf_opened(&mut app, "doc.pdf", &pdf);
+    let _ = app.send(Message::PdfTab(PdfTabMsg::PageShown {
+        path: "doc.pdf".into(),
+        view: id,
+        page: 0,
+        width: 300.0,
+    }));
+    assert!(app.pdf.reserved_bytes() > 0);
+    let moved = d.daemon_move("doc.pdf", "d2.pdf").expect("move");
+    for n in moved {
+        let _ = app.send(Message::Status(StatusMsg::Notification(n)));
+    }
+    assert_eq!(kinds(&app), [TabKind::Pdf("d2.pdf".into())]);
+    assert_eq!(app.active_tab().expect("tab").id, id, "same tab");
+    assert_eq!(app.pdf.reserved_bytes(), 0, "old page pins released");
+    assert!(app.pdf.docs.contains_key("d2.pdf") && !app.pdf.docs.contains_key("doc.pdf"));
 }

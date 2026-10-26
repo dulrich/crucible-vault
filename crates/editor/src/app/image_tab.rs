@@ -106,7 +106,7 @@ impl App {
             }
             ps.history.retarget(from, to);
         }
-        for id in ids {
+        for &id in &ids {
             self.reading
                 .images
                 .hide(&image_cache::view_owner(from, id), from);
@@ -114,6 +114,7 @@ impl App {
         if let Some(e) = self.image_errors.remove(from) {
             self.image_errors.insert(to.to_owned(), e);
         }
+        self.retarget_pdf(from, to, &ids);
     }
 
     /// An image tab closed: its pin goes (and a cached failure, when no tab shows it any more).
@@ -121,8 +122,10 @@ impl App {
         self.reading
             .images
             .hide(&image_cache::view_owner(path, view), path);
+        self.pdf_view_closed(path, view);
         if !self.path_open(path) {
             self.image_errors.remove(path);
+            self.pdf.docs.remove(path);
         }
     }
 

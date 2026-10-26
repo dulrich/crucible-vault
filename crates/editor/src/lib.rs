@@ -25,6 +25,7 @@ pub mod page;
 pub mod palette;
 pub mod panels;
 pub mod panes;
+pub mod pdf;
 pub mod reading;
 pub mod settings;
 pub mod source;

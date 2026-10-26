@@ -250,6 +250,11 @@ impl ImageCache {
         self.entries.get(key).map_or(0, |e| e.owners.len())
     }
 
+    /// Plan round-15 WP-3: whether a load of `key` is in flight with someone still waiting.
+    pub fn waiting(&self, key: &str) -> bool {
+        self.pending.get(key).is_some_and(|w| !w.is_empty())
+    }
+
     /// Whether `key` is cached.
     pub fn contains(&self, key: &str) -> bool {
         self.entries.contains_key(key)

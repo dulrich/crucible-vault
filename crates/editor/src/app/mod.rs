@@ -37,6 +37,7 @@ mod connection;
 mod files;
 mod image_tab;
 mod menu;
+pub mod pdf_tab;
 mod saves;
 mod scroll;
 mod status;
@@ -148,14 +149,14 @@ impl Tab {
     pub fn path(&self) -> Option<&str> {
         match &self.kind {
             TabKind::Note(p) => Some(p),
-            TabKind::Image(_) | TabKind::Settings | TabKind::Log => None,
+            TabKind::Image(_) | TabKind::Pdf(_) | TabKind::Settings | TabKind::Log => None,
         }
     }
 
-    /// Plan round-14 WP-3: the vault path an image tab shows.
+    /// Plan round-14 WP-3: the vault path an image (or, round-15 WP-3, a PDF) tab shows.
     pub fn image_path(&self) -> Option<&str> {
         match &self.kind {
-            TabKind::Image(p) => Some(p),
+            TabKind::Image(p) | TabKind::Pdf(p) => Some(p),
             _ => None,
         }
     }
@@ -170,7 +171,7 @@ impl Tab {
     /// Settings / Log show no file and are untouched.
     pub fn retarget(&mut self, to: &str) {
         match &mut self.kind {
-            TabKind::Note(p) | TabKind::Image(p) => to.clone_into(p),
+            TabKind::Note(p) | TabKind::Image(p) | TabKind::Pdf(p) => to.clone_into(p),
             TabKind::Settings | TabKind::Log => {}
         }
     }
@@ -345,6 +346,8 @@ pub struct App {
     pub clip_writer: Arc<dyn crate::clipboard_image::ClipboardWriter + Send + Sync>,
     /// Plan round-14 WP-3: image-tab decode failures by vault path (shown in the tab).
     pub image_errors: std::collections::HashMap<String, String>,
+    /// Plan round-15 WP-3: PDF tab documents and per-tab page state (only `Send` data).
+    pub pdf: pdf_tab::PdfTabs,
 }
 
 /// A quit in progress: the saves it waits on, and whether one failed.
@@ -472,6 +475,7 @@ impl App {
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::Xclip),
             image_errors: std::collections::HashMap::new(),
+            pdf: pdf_tab::PdfTabs::default(),
         };
         app.reading.resolver = shared.clone();
         app.panels.resolver = shared;
@@ -482,7 +486,7 @@ impl App {
         for (pane, tabs, active) in plan {
             for kind in tabs {
                 match kind {
-                    TabKind::Note(p) | TabKind::Image(p) => {
+                    TabKind::Note(p) | TabKind::Image(p) | TabKind::Pdf(p) => {
                         if let Err(e) = app.open_into(pane, &p, Place::Restore) {
                             app.status.set_error(open_error(&e));
                         }

@@ -33,6 +33,9 @@ cv-malloc = { path = "../cv-malloc" }
 memstat = { path = "../memstat" }
 # Plan editor-feedback-round-2 WP-9: image paste sends bytes to the `write_attachment` RPC.
 base64 = "=0.22.1"
+# Plan round-15-relative-images-pdf-viewer WP-3: the PDF tab renders pages with hayro (pure Rust;
+# only `src/pdf.rs` imports it). Default features (embedded fonts/cmaps, simd).
+hayro = "=0.8.0"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 tokio = { version = "=1.53.2", features = ["rt-multi-thread", "sync"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }

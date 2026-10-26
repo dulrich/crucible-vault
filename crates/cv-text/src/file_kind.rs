@@ -2,7 +2,8 @@
 //! editor's tab router and the Reading embed lowering).
 //!
 //! By extension first: markdown and known text extensions are [`FileKind::Text`]; the image
-//! formats the editor decodes are [`FileKind::Image`]; PDFs, the image formats it cannot decode
+//! formats the editor decodes are [`FileKind::Image`]; `pdf` is [`FileKind::Pdf`] (plan round-15
+//! WP-3); the image formats it cannot decode
 //! (`svg`, `avif`) and known binary/media/archive/office formats are [`FileKind::External`]. An
 //! extensionless path is `Text` (a note link target); an unknown extension is `Text` unless
 //! [`sniff`] finds a NUL byte in its first [`SNIFF_LEN`] bytes.
@@ -14,6 +15,8 @@ pub enum FileKind {
     Text,
     /// Opens in an image tab (decodable by the editor).
     Image,
+    /// Plan round-15 WP-3: opens in a PDF tab (pages rendered by the editor).
+    Pdf,
     /// Opens with the system opener; never loaded into a text buffer.
     External,
 }
@@ -31,7 +34,7 @@ pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 /// Extensions always handed to the system opener.
 pub const EXTERNAL_EXTS: &[&str] = &[
     // Documents the editor cannot render.
-    "pdf", "epub", "djvu", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp",
+    "epub", "djvu", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp",
     // Images it does not decode.
     "svg", "avif", "heic", "heif", "tif", "tiff", "ico", "psd", "xcf", "raw", "cr2", "nef",
     // Audio / video.
@@ -61,6 +64,8 @@ pub fn by_extension(path: &str) -> Option<FileKind> {
         Some(FileKind::Text)
     } else if IMAGE_EXTS.contains(&e) {
         Some(FileKind::Image)
+    } else if e == "pdf" {
+        Some(FileKind::Pdf)
     } else if EXTERNAL_EXTS.contains(&e) {
         Some(FileKind::External)
     } else {
@@ -98,7 +103,9 @@ mod tests {
             ("att/p.PNG", Some(FileKind::Image)),
             ("att/p.jpeg", Some(FileKind::Image)),
             ("att/p.webp", Some(FileKind::Image)),
-            ("doc.pdf", Some(FileKind::External)),
+            ("doc.pdf", Some(FileKind::Pdf)),
+            ("x/Doc.PDF", Some(FileKind::Pdf)),
+            ("doc.docx", Some(FileKind::External)),
             ("i.svg", Some(FileKind::External)),
             ("i.avif", Some(FileKind::External)),
             ("song.mp3", Some(FileKind::External)),

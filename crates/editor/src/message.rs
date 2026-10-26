@@ -48,6 +48,8 @@ pub enum Message {
     OpenUrl(String),
     /// Plan round-14 WP-3: an image tab's view / decode events.
     ImageTab(ImageTabMsg),
+    /// Plan round-15 WP-3: a PDF tab.
+    PdfTab(PdfTabMsg),
     /// Plan usability-sprint-captures-links WP-5: a `title` → filename rename finished
     /// (`seq` = the buffer's edit sequence when it was issued).
     TitleRenamed {
@@ -195,6 +197,41 @@ pub enum ImageTabMsg {
         key: String,
         result: Result<crate::image_cache::Decoded, String>,
     },
+}
+
+/// Plan round-15 WP-3: a PDF tab (vault path `path`, tab id `view`, 0-based `page`).
+#[derive(Debug, Clone)]
+pub enum PdfTabMsg {
+    /// The tab body came into view: read and parse the file once.
+    Open { path: String },
+    /// The off-thread read + parse finished: shared bytes and page sizes, or the failure.
+    Opened {
+        path: String,
+        result: Result<(std::sync::Arc<Vec<u8>>, crate::pdf::PageSizes), String>,
+    },
+    /// Page `page` came within the near window at laid-out `width`.
+    PageShown {
+        path: String,
+        view: u64,
+        page: usize,
+        width: f32,
+    },
+    /// Page `page` left the near window: unpin.
+    PageHidden {
+        path: String,
+        view: u64,
+        page: usize,
+    },
+    /// An off-thread page render finished.
+    Rendered {
+        path: String,
+        view: u64,
+        page: usize,
+        key: String,
+        result: Result<crate::image_cache::Decoded, String>,
+    },
+    /// "Open externally": hand the file to the system opener.
+    OpenExternal(String),
 }
 
 /// WP-3: reading pane.

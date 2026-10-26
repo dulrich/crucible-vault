@@ -430,10 +430,13 @@ impl Lower {
         out: &mut Vec<Piece>,
     ) {
         // Plan round-14 WP-3 (audit M2): a file the editor cannot show (pdf, svg, avif, other
-        // binaries) embeds as a file card that opens externally.
+        // binaries) embeds as a file card that opens externally. Plan round-15 WP-3 (audit B1):
+        // a PDF embed stays that card (its click now opens the PDF tab) until WP-4.
         if embed
-            && cv_text::file_kind::by_extension(&target)
-                == Some(cv_text::file_kind::FileKind::External)
+            && matches!(
+                cv_text::file_kind::by_extension(&target),
+                Some(cv_text::file_kind::FileKind::External | cv_text::file_kind::FileKind::Pdf)
+            )
         {
             out.push(Piece::Block(Block::FileEmbed { target }));
         } else if embed && is_image_target(&target) {
