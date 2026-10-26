@@ -20,6 +20,10 @@ use crate::theme::Surround;
 pub enum TabKind {
     /// A vault note at this path.
     Note(String),
+    /// Plan round-14 WP-3: a decodable vault image at this path (read-only view, no document).
+    /// Persists as a `note` tab (no new wire tag, so older builds still load the file) and is
+    /// re-classified by extension when restored.
+    Image(String),
     /// Plan editor-settings-tab WP-2: the Settings tab.
     Settings,
     /// Plan round-6-feedback-todos WP-7: the notice log.
@@ -48,7 +52,7 @@ enum TabIn {
 impl From<TabKind> for TabWire {
     fn from(k: TabKind) -> Self {
         match k {
-            TabKind::Note(path) => Self::Note { path },
+            TabKind::Note(path) | TabKind::Image(path) => Self::Note { path },
             TabKind::Settings => Self::Settings,
             TabKind::Log => Self::Log,
         }

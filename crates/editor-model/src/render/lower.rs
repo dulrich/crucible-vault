@@ -429,7 +429,14 @@ impl Lower {
         embed: bool,
         out: &mut Vec<Piece>,
     ) {
-        if embed && is_image_target(&target) {
+        // Plan round-14 WP-3 (audit M2): a file the editor cannot show (pdf, svg, avif, other
+        // binaries) embeds as a file card that opens externally.
+        if embed
+            && cv_text::file_kind::by_extension(&target)
+                == Some(cv_text::file_kind::FileKind::External)
+        {
+            out.push(Piece::Block(Block::FileEmbed { target }));
+        } else if embed && is_image_target(&target) {
             let width = alias.as_deref().and_then(parse_width);
             let alt = match (&alias, width) {
                 (Some(a), None) => a.clone(),

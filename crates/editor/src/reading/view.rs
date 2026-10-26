@@ -332,6 +332,32 @@ fn view_fence<'a>(cx: &Ctx<'a, '_>, file: &str, name: &str) -> Element<'a, Messa
     )
 }
 
+/// Plan round-14 WP-3: the card for an embedded file the editor cannot show — its name and an
+/// "open externally" button (both open it).
+fn file_card<'a>(cx: &Ctx<'a, '_>, target: &'a str) -> Element<'a, Message> {
+    let t = cx.t;
+    let name = target.rsplit('/').next().unwrap_or(target);
+    let open = Message::Reading(ReadingMsg::OpenLink {
+        src: cx.path.to_owned(),
+        target: target.to_owned(),
+    });
+    let card = row![
+        text(name).size(cx.sz(14.0)).color(t.text.to_color()),
+        Space::new().width(Length::Fill),
+        text("Open externally ↗")
+            .size(cx.sz(12.0))
+            .color(t.accent_ui.to_color()),
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    let btn = button(card)
+        .padding(0)
+        .style(button::text)
+        .width(Length::Fill)
+        .on_press(open);
+    boxed(btn.into(), t, t.text_faint)
+}
+
 fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Message> {
     container(content)
         .padding(8)
@@ -498,6 +524,12 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
             boxed(column![head, body].spacing(6).into(), t, t.accent_ui)
         }
         Block::ViewFence { file, name } => view_fence(cx, file, name),
+        Block::FileEmbed { target } => {
+            // Plan round-14 WP-3 (audit M2): a file card; a click resolves the target like a
+            // link, and `open_into` hands the external file to the system opener.
+            cx.take_run();
+            file_card(cx, target)
+        }
     }
 }
 

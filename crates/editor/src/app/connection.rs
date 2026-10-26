@@ -56,6 +56,8 @@ pub trait TestSink: Send + Sync {
     fn copied(&self, _text: &str) {}
     /// A vault image was copied to the clipboard.
     fn copied_image(&self, _path: &str) {}
+    /// Plan round-14 WP-3: the system opener was asked to open this absolute path.
+    fn opened_file(&self, _abs: &str) {}
     /// Downcast hook for test accessors.
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -76,6 +78,7 @@ pub struct RecordingSink {
     pub closed: Mutex<Vec<String>>,
     pub copied: Mutex<Vec<String>>,
     pub copied_images: Mutex<Vec<String>>,
+    pub opened_files: Mutex<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -88,6 +91,9 @@ impl TestSink for RecordingSink {
     }
     fn copied_image(&self, path: &str) {
         self.copied_images.lock().unwrap().push(path.to_owned());
+    }
+    fn opened_file(&self, abs: &str) {
+        self.opened_files.lock().unwrap().push(abs.to_owned());
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

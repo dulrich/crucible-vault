@@ -46,6 +46,8 @@ pub enum Message {
     /// Plan usability-sprint-captures-links WP-3: open an external URL with `open_url_cmd`
     /// (scheme allowlist enforced in `open_url`).
     OpenUrl(String),
+    /// Plan round-14 WP-3: an image tab's view / decode events.
+    ImageTab(ImageTabMsg),
     /// Plan usability-sprint-captures-links WP-5: a `title` → filename rename finished
     /// (`seq` = the buffer's edit sequence when it was issued).
     TitleRenamed {
@@ -179,6 +181,20 @@ pub enum SourceKey {
     Indent,
     /// Shift+Tab: outdent the selected lines (or the cursor's line).
     Outdent,
+}
+
+/// Plan round-14 WP-3: an image tab (vault path `path`, tab id `view`).
+#[derive(Debug, Clone)]
+pub enum ImageTabMsg {
+    /// The tab body came into view at laid-out `width`: pin the image, decode on a miss.
+    Shown { path: String, view: u64, width: f32 },
+    /// The tab body left view: unpin.
+    Hidden { path: String, view: u64 },
+    /// The off-thread decode finished.
+    Loaded {
+        key: String,
+        result: Result<crate::image_cache::Decoded, String>,
+    },
 }
 
 /// WP-3: reading pane.

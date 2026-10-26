@@ -35,6 +35,7 @@ pub mod alt_tap;
 mod config;
 mod connection;
 mod files;
+mod image_tab;
 mod menu;
 mod saves;
 mod scroll;
@@ -147,7 +148,15 @@ impl Tab {
     pub fn path(&self) -> Option<&str> {
         match &self.kind {
             TabKind::Note(p) => Some(p),
-            TabKind::Settings | TabKind::Log => None,
+            TabKind::Image(_) | TabKind::Settings | TabKind::Log => None,
+        }
+    }
+
+    /// Plan round-14 WP-3: the vault path an image tab shows.
+    pub fn image_path(&self) -> Option<&str> {
+        match &self.kind {
+            TabKind::Image(p) => Some(p),
+            _ => None,
         }
     }
 
@@ -156,9 +165,9 @@ impl Tab {
         self.path().map(|path| NoteRef { id: self.id, path })
     }
 
-    /// Whether this tab shows the note at `path`.
+    /// Whether this tab shows the note (or, plan round-14 WP-3, the image) at `path`.
     pub fn shows(&self, path: &str) -> bool {
-        self.path() == Some(path)
+        self.path().or_else(|| self.image_path()) == Some(path)
     }
 }
 
@@ -217,6 +226,11 @@ impl App {
     /// Tests: every "Copy image" vault path, in order.
     pub fn copied_images(&self) -> Vec<String> {
         self.rec().copied_images.lock().unwrap().clone()
+    }
+
+    /// Tests: every absolute path handed to the system opener, in order.
+    pub fn opened_files(&self) -> Vec<String> {
+        self.rec().opened_files.lock().unwrap().clone()
     }
 }
 
@@ -317,6 +331,8 @@ pub struct App {
     pub context_menu: Option<crate::context_menu::ContextMenu>,
     /// plan editor-round-4 WP-4: the image clipboard writer (`xclip` in production).
     pub clip_writer: Arc<dyn crate::clipboard_image::ClipboardWriter + Send + Sync>,
+    /// Plan round-14 WP-3: image-tab decode failures by vault path (shown in the tab).
+    pub image_errors: std::collections::HashMap<String, String>,
 }
 
 /// A quit in progress: the saves it waits on, and whether one failed.
@@ -442,6 +458,7 @@ impl App {
             period_folders: editor_model::period::PeriodFolders::default(),
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::Xclip),
+            image_errors: std::collections::HashMap::new(),
         };
         app.reading.resolver = shared.clone();
         app.panels.resolver = shared;
@@ -452,7 +469,7 @@ impl App {
         for (pane, tabs, active) in plan {
             for kind in tabs {
                 match kind {
-                    TabKind::Note(p) => {
+                    TabKind::Note(p) | TabKind::Image(p) => {
                         if let Err(e) = app.open_into(pane, &p, Place::Restore) {
                             app.status.set_error(open_error(&e));
                         }

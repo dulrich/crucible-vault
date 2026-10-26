@@ -4,6 +4,7 @@
 //! Sync, I/O-free and clock-free: every time-dependent function takes its `now` as an argument.
 
 pub mod attachments;
+pub mod file_kind;
 pub mod moment;
 pub mod resolver;
 pub mod sections;

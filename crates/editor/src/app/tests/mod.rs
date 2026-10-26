@@ -58,6 +58,7 @@ mod context_menu;
 mod daemon_client;
 mod daemon_move;
 mod doc_state;
+mod file_kinds;
 mod find_keys;
 mod image_menu;
 mod index_follow;

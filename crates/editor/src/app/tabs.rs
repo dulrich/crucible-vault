@@ -50,7 +50,8 @@ impl App {
                 }
                 TabKind::Settings => tasks.push(self.settings.restore_scroll()),
                 // The Log tab has no stored place (was Settings' restore).
-                TabKind::Log => {}
+                // Plan round-14 WP-3: an image tab's sensor re-pins on show.
+                TabKind::Log | TabKind::Image(_) => {}
             }
         }
         Task::batch(tasks)
@@ -235,6 +236,16 @@ impl App {
         } else {
             self.focus
         };
+        // Plan round-14 WP-3: no binary file is read into a text buffer. An external file goes
+        // to the system opener (no tab; skipped on restore); an image opens an image tab.
+        let (file_kind, prefetched) = self.classify_open(path)?;
+        if file_kind == cv_text::file_kind::FileKind::External {
+            if how != Place::Restore {
+                self.open_external(path);
+            }
+            return Ok(());
+        }
+        let is_image = file_kind == cv_text::file_kind::FileKind::Image;
         if !matches!(how, Place::Restore | Place::NewTab) {
             // In every other mode a tab already in the target pane is just focused.
             let here = self
@@ -258,11 +269,14 @@ impl App {
                 _ => {}
             }
         }
-        if !self.docs.contains_key(path) {
+        if !is_image && !self.docs.contains_key(path) {
             let Some(d) = &self.daemon else {
                 return Err(DaemonError::Disconnected);
             };
-            let (bytes, hash) = d.read_file(path)?;
+            let (bytes, hash) = match prefetched {
+                Some(read) => read,
+                None => d.read_file(path)?,
+            };
             let doc = crate::source::SourceBuffer::new(path, &bytes, hash);
             let mode = self.initial_mode(path);
             let mut od = OpenDoc {
@@ -274,7 +288,11 @@ impl App {
                 .register(&mut od, mode, !self.restoring, self.daemon.as_ref());
             self.docs.insert(path.to_owned(), od);
         }
-        let tab = Tab::note(path);
+        let tab = if is_image {
+            Tab::new(TabKind::Image(path.to_owned()))
+        } else {
+            Tab::note(path)
+        };
         let mut replaced = None;
         if let Some(ps) = self.panes.get_mut(pane) {
             let active = ps.active.filter(|&i| i < ps.tabs.len());
@@ -341,6 +359,12 @@ impl App {
     /// document and its reading/view state are dropped (one `remove` each) only with the last
     /// tab showing its path (plan editor-feedback-round-2 WP-7).
     pub(super) fn on_tab_closed(&mut self, tab: &Tab) {
+        if let Some(p) = tab.image_path() {
+            self.sink.closed(p);
+            let p = p.to_owned();
+            self.image_tab_closed(&p, tab.id);
+            return;
+        }
         let Some(path) = tab.path() else {
             return;
         };
@@ -465,7 +489,8 @@ impl App {
                 self.remove_tab(id);
                 return self.flush_settings().1;
             }
-            TabKind::Log => {
+            // An image tab holds nothing unsaved.
+            TabKind::Log | TabKind::Image(_) => {
                 self.remove_tab(id);
                 return Task::none();
             }
@@ -529,7 +554,7 @@ impl App {
         match &kind {
             TabKind::Log => self.status.log.unread = 0,
             TabKind::Settings => {}
-            TabKind::Note(p) => {
+            TabKind::Note(p) | TabKind::Image(p) => {
                 let p = p.clone();
                 if let Err(e) = self.open_into(pane, &p, Place::Focus) {
                     self.status.set_error(open_error(&e));

@@ -283,6 +283,11 @@ impl Walk {
                     self.block(c, depth);
                 }
             }
+            // The card's file name is its copy text (a non-text slot, as an image's alt).
+            Block::FileEmbed { target } => {
+                let name = target.rsplit('/').next().unwrap_or(target).to_owned();
+                self.push(name, Vec::new(), sep, true);
+            }
             Block::ThematicBreak | Block::ViewFence { .. } => {}
         }
     }

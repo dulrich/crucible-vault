@@ -53,6 +53,7 @@ impl App {
                 }
             }
             Message::Tabs(m) => return self.update_tabs(m),
+            Message::ImageTab(m) => return self.update_image_tab(m),
             Message::Dialog(m) => return self.update_dialog(m),
             Message::Menu(m) => return self.update_menu(m),
             Message::Find(m) => return self.update_find(m),

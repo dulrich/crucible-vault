@@ -365,7 +365,7 @@ impl App {
             TabKind::Settings => {
                 Some((crate::settings::body_scroll_id(self.settings.section), None))
             }
-            TabKind::Log => None,
+            TabKind::Log | TabKind::Image(_) => None,
             TabKind::Note(path) => self
                 .reading
                 .mode(&self.docs, path)

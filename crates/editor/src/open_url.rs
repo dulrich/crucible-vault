@@ -63,9 +63,63 @@ pub fn open(cmd: &[String], url: &str) -> Result<(), String> {
     spawn_detached(&build_argv(cmd, url)?)
 }
 
+/// Plan round-14 WP-3 (audit E2): the argv opening the local file `abs` (an absolute path inside
+/// the vault root) with `cmd` — the path last, no URL scheme check (it is not a URL).
+pub fn file_argv(cmd: &[String], abs: &std::path::Path) -> Result<Vec<String>, String> {
+    if cmd.first().is_none_or(|c| c.trim().is_empty()) {
+        return Err("open_url_cmd is empty".into());
+    }
+    if !abs.is_absolute() {
+        return Err(format!(
+            "open file: not an absolute path: {}",
+            abs.display()
+        ));
+    }
+    let mut argv = cmd.to_vec();
+    argv.push(abs.to_string_lossy().into_owned());
+    Ok(argv)
+}
+
+/// Opens the local file `abs` with `cmd` (the `open_url_cmd` pref). A spawn failure is the
+/// `Err` status-bar message; a non-zero exit of the opener is logged (`tracing::warn!`) by the
+/// reaper thread — it lands after the GUI moved on, so it is not routed back as a notice.
+pub fn open_file(cmd: &[String], abs: &std::path::Path) -> Result<(), String> {
+    let argv = file_argv(cmd, abs)?;
+    let (prog, args) = argv.split_first().ok_or("open_url_cmd is empty")?;
+    let mut child: Child = Command::new(prog)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("open file: {prog}: {e}"))?;
+    let prog = prog.clone();
+    std::thread::spawn(move || match child.wait() {
+        Ok(s) if !s.success() => tracing::warn!(opener = %prog, status = %s, "open file failed"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(opener = %prog, error = %e, "open file: wait failed"),
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_file_bypasses_the_allowlist_and_reports_spawn_failure() {
+        let abs = std::path::Path::new("/vault/att/doc file.pdf");
+        assert_eq!(
+            file_argv(&cmd(&["xdg-open"]), abs).expect("argv"),
+            cmd(&["xdg-open", "/vault/att/doc file.pdf"])
+        );
+        assert!(file_argv(&cmd(&["xdg-open"]), std::path::Path::new("rel.pdf")).is_err());
+        assert!(file_argv(&[], abs).is_err());
+        // `false` spawns fine (its non-zero exit is only logged); a missing opener is an Err.
+        assert!(open_file(&cmd(&["false"]), abs).is_ok());
+        let e = open_file(&cmd(&["/nonexistent/cv-open-file"]), abs).unwrap_err();
+        assert!(e.starts_with("open file:"), "{e}");
+    }
 
     fn cmd(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()

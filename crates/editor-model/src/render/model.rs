@@ -112,6 +112,11 @@ pub enum Block {
         fragment: Option<String>,
         content: Option<Vec<Block>>,
     },
+    /// Plan round-14 WP-3: `![[file.pdf]]` (any embed classified external) — a file card that
+    /// opens the file with the system opener.
+    FileEmbed {
+        target: String,
+    },
     /// A `crucible-view` fence (one-line body `<file>#<name>`), rendered by WP-7's hook.
     ViewFence {
         file: String,
