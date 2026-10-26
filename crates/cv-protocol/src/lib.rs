@@ -279,8 +279,9 @@ pub struct PathParams {
     pub path: String,
 }
 
-/// How a delete removes a file: `trash` moves it to `<vault>/.trash/<same path>` (` (n)` suffix
-/// on collision; the default and the pre-WP-3 behaviour), `permanent` removes it outright.
+/// How a delete removes a file: `trash` moves it to the trash `vault.toml` `[trash] location`
+/// names (default `<vault>/.trash/<same path>`, ` (n)` suffix on collision; or the system trash),
+/// `permanent` removes it outright.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteMode {

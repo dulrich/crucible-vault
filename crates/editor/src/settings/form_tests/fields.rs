@@ -344,6 +344,25 @@ fn enums_free_tables_and_mistyped_values_render() {
     assert!(rows.iter().any(|r| matches!(&r.kind, Kind::Enum { .. })));
 }
 
+/// Plan tidiness-trash-orphans WP-1: the Vault section edits `vault.toml`; `location` is an enum.
+#[test]
+fn vault_section_binds_vault_toml_with_location_enum() {
+    let vault = Section::Vault.file().expect("file");
+    assert_eq!(Section::Vault.file_name(), Some("vault.toml"));
+    assert_eq!(Section::for_file_name("vault.toml"), Some(Section::Vault));
+    assert!(super::super::save_loop::new_files().contains_key(vault));
+    let st = loaded(
+        vault,
+        "[trash]\nlocation = \"system\"\nretention_days = 7\n",
+    );
+    let rows = rows_of(&st, vault);
+    let loc = rows
+        .iter()
+        .find(|r| r.path == p("trash.location"))
+        .expect("location row");
+    assert!(matches!(&loc.kind, Kind::Enum { .. }), "{:?}", loc.kind);
+}
+
 #[test]
 fn captures_page_puts_periods_first() {
     let text = "[[capture]]\nid = \"c\"\n\n[periods.day]\nfolder = \"daily\"\n";

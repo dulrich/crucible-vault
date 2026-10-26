@@ -84,6 +84,7 @@ pub(super) async fn config_poller(
                     shared.views.notify_config(&dir);
                     shared.lookups.invalidate_models();
                     let errors = shared.runner().map(Runner::reload_config).unwrap_or_default();
+                    super::trash::apply_trash_config(&shared);
                     shared.publish(Notification::ConfigReloaded { errors });
                 }
             }

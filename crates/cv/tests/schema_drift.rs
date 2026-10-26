@@ -677,5 +677,5 @@ fn daemon_config_files_are_the_schema_registry_head() {
         cv_actions::CONFIG_FILES[..],
         cv_schema::FILES[..cv_actions::CONFIG_FILES.len()]
     );
-    assert_eq!(cv_actions::CONFIG_FILES.len(), 8);
+    assert_eq!(cv_actions::CONFIG_FILES.len(), 9);
 }

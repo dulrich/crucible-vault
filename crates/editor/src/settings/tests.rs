@@ -143,6 +143,7 @@ fn every_section_is_in_the_rail_with_its_file() {
         labels,
         [
             "Editor",
+            "Vault",
             "Hotkeys",
             "Actions",
             "Schedules",
@@ -165,7 +166,7 @@ fn every_section_is_in_the_rail_with_its_file() {
             assert!(f.schema().is_some(), "{p} has a schema");
         }
     }
-    assert_eq!(st.files.len(), 10);
+    assert_eq!(st.files.len(), 11);
 }
 
 #[test]

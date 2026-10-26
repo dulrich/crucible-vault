@@ -390,7 +390,7 @@ pub static EDITOR_FILE: Record = Record {
         field(
             "delete_mode",
             "Delete mode",
-            "How Delete note removes files: move to .trash/ or delete permanently (the confirm dialog always asks)",
+            "How Delete note removes files: move to the trash (vault.toml sets where) or delete permanently (the confirm dialog always asks)",
             Node::Enum(&["trash", "permanent"]),
         )
         .dflt(D::Str("trash")),

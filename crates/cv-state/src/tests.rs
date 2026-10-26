@@ -1344,8 +1344,8 @@ fn v11_database_migrates_to_v13_with_boilerplate_tables() {
     c.execute_batch(migrate::BASELINE).unwrap();
     c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
         .unwrap();
-    assert_eq!(migrate::latest_version(), 14);
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 14);
+    assert_eq!(migrate::latest_version(), 15);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 15);
     for t in ["mail_boilerplate", "mail_boilerplate_seen"] {
         let n: i64 = c
             .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
@@ -1366,7 +1366,7 @@ fn v13_database_migrates_to_v14_and_dup_labels_roundtrip() {
             c.execute_batch(sql).unwrap();
         }
         c.pragma_update(None, "user_version", 13).unwrap();
-        assert_eq!(migrate::migrate(&mut c).unwrap(), 14);
+        assert_eq!(migrate::migrate(&mut c).unwrap(), 15);
     }
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
     let l = crate::DupLabel {
@@ -1382,4 +1382,82 @@ fn v13_database_migrates_to_v14_and_dup_labels_roundtrip() {
     };
     s.insert_dup_label(&l).unwrap();
     assert_eq!(s.dup_labels().unwrap(), vec![l]);
+}
+
+fn trash_entry(path: &str, reason: &str, at: i64) -> NewTrashEntry {
+    NewTrashEntry {
+        location: "vault".into(),
+        trash_path: format!(".trash/{path}"),
+        original_path: path.into(),
+        trashed_ms: at,
+        bytes: 3,
+        reason: reason.into(),
+        mtime_ms: Some(10),
+        inode: Some(42),
+        info_name: None,
+    }
+}
+
+/// v14 → v15 (plan tidiness-trash-orphans WP-1): `trash_entries` lands empty from a v14 database.
+#[test]
+fn v14_database_migrates_to_v15_with_trash_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    {
+        let mut c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(migrate::BASELINE).unwrap();
+        for sql in &migrate::MIGRATIONS[..3] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", 14).unwrap();
+        assert_eq!(migrate::migrate(&mut c).unwrap(), 15);
+    }
+    let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 15);
+    assert!(s.trash_entries().unwrap().is_empty());
+}
+
+/// The ledger accessors round-trip, refuse unknown spellings, and every mutation signals.
+#[test]
+fn trash_entries_roundtrip_and_signal() {
+    use std::sync::{Arc, Mutex};
+    let (_d, mut s) = db();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sn = Arc::clone(&seen);
+    s.set_change_hook(Box::new(move |t| sn.lock().unwrap().push(t)));
+    let a = trash_entry("a.md", "deleted", 5);
+    let mut b = trash_entry("b.png", "note-attachment", 2);
+    b.location = "system".into();
+    b.trash_path = "b.png".into();
+    b.info_name = Some("b.png.trashinfo".into());
+    let ia = s.insert_trash_entry(&a).unwrap();
+    let ib = s.insert_trash_entry(&b).unwrap();
+    let all = s.trash_entries().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!((all[0].id, &all[0].entry), (ib, &b), "oldest first");
+    assert_eq!(
+        s.trash_entry_by_path("vault", ".trash/a.md")
+            .unwrap()
+            .map(|e| e.id),
+        Some(ia)
+    );
+    assert!(
+        s.trash_entry_by_path("system", ".trash/a.md")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        s.insert_trash_entry(&trash_entry("c.md", "lost", 1))
+            .is_err()
+    );
+    let mut bad = trash_entry("c.md", "deleted", 1);
+    bad.location = "bin".into();
+    assert!(s.insert_trash_entry(&bad).is_err());
+    assert!(s.delete_trash_entry(ia).unwrap());
+    assert!(!s.delete_trash_entry(ia).unwrap());
+    assert_eq!(s.trash_entries().unwrap().len(), 1);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["trash_entries", "trash_entries", "trash_entries"]
+    );
 }

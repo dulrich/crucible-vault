@@ -161,6 +161,24 @@ pub const MIGRATIONS: &[&str] = &[
          verdict                    TEXT NOT NULL CHECK (verdict IN ('not-duplicates', 'keep')),
          at_ms                      INTEGER NOT NULL
      );",
+    // v15 (plan tidiness-trash-orphans WP-1): one row per trash move. `trash_path` is
+    // vault-relative (`.trash/…`) for `vault`, the name inside `Trash/files/` for `system`;
+    // `mtime_ms`/`inode`/`info_name` are the object identity checked before expiry (audit E1).
+    "CREATE TABLE trash_entries (
+         id             INTEGER PRIMARY KEY,
+         location       TEXT NOT NULL CHECK (location IN ('vault', 'system')),
+         trash_path     TEXT NOT NULL,
+         original_path  TEXT NOT NULL,
+         trashed_ms     INTEGER NOT NULL,
+         bytes          INTEGER NOT NULL,
+         reason         TEXT NOT NULL
+             CHECK (reason IN ('deleted', 'replaced', 'note-attachment', 'orphan', 'seeded')),
+         mtime_ms       INTEGER,
+         inode          INTEGER,
+         info_name      TEXT
+     );
+     CREATE INDEX trash_entries_path ON trash_entries(location, trash_path);
+     CREATE INDEX trash_entries_trashed ON trash_entries(trashed_ms);",
 ];
 
 /// Highest schema version this build knows.

@@ -14,6 +14,7 @@ pub use cv_schema::CONFIG_DIR;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Section {
     Editor,
+    Vault,
     Hotkeys,
     Actions,
     Schedules,
@@ -68,13 +69,20 @@ const fn grouped(mut i: SectionInfo, group: &'static str) -> SectionInfo {
 }
 
 /// The section table, in rail order (index = `Section as usize`).
-pub static SECTIONS: [SectionInfo; 13] = [
+pub static SECTIONS: [SectionInfo; 14] = [
     sec(
         Section::Editor,
         "Editor",
         Icon::Type,
         Some(editor_prefs::EDITOR_PATH),
         "",
+    ),
+    sec(
+        Section::Vault,
+        "Vault",
+        Icon::Folder,
+        Some(cv_schema::config_path!("vault.toml")),
+        "Vault housekeeping: where recoverable deletes go (the vault .trash/ folder or the system trash) and how long trashed files are kept.",
     ),
     sec(
         Section::Hotkeys,
@@ -164,8 +172,9 @@ pub static SECTIONS: [SectionInfo; 13] = [
 
 impl Section {
     /// Rail order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Editor,
+        Self::Vault,
         Self::Hotkeys,
         Self::Actions,
         Self::Schedules,

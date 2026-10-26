@@ -144,6 +144,14 @@ fn keep_repoints_rows_trashes_other_and_counts_user_inbound_only() {
     }
     assert!(e.read("b/dup.md").is_none());
     assert!(e.vault().join(".trash/b/dup.md").exists());
+    // Plan tidiness-trash-orphans WP-1: the step's trash move yields a record.
+    let recs =
+        e.fx.writer
+            .call(cv_vault::VaultWriter::take_trash_records)
+            .unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].original_path, "b/dup.md");
+    assert_eq!(recs[0].moved.trash_path, ".trash/b/dup.md");
     assert!(keys(&e, "a/keep.md", POSSIBLE_KEY).is_empty());
     assert!(keys(&e, "a/keep.md", NOT_DUP_KEY).is_empty());
     // Idempotent rerun: stale, no new row.

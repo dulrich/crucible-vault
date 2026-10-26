@@ -23,9 +23,10 @@ use crate::model::{
     Action, LaneChoice, OriginSel, ResourceSpec, Schedule, Selector, Starter, Step,
 };
 use crate::pipelines::{PipelinesConfig, SourcesConfig};
+use crate::vault::VaultConfig;
 
 /// Every config file name WP-9 loads, in load order.
-pub const CONFIG_FILES: [&str; 8] = [
+pub const CONFIG_FILES: [&str; 9] = [
     "actions.toml",
     "schedules.toml",
     "kinds.toml",
@@ -34,6 +35,7 @@ pub const CONFIG_FILES: [&str; 8] = [
     "providers.toml",
     "pipelines.toml",
     "sources.toml",
+    "vault.toml",
 ];
 
 /// Step validation callback (`cv`'s `steps::validate`): `Err(reason)` disarms the action.
@@ -110,6 +112,7 @@ pub struct ConfigSet {
     empty: toml::Table,
     pipelines: PipelinesConfig,
     sources: SourcesConfig,
+    vault: VaultConfig,
     typed_errors: BTreeMap<String, String>,
 }
 
@@ -173,6 +176,22 @@ impl ConfigSet {
                     .insert("sources.toml".into(), format!("sources.toml: {e}"));
             }
         }
+        match VaultConfig::from_table(self.table("vault.toml")) {
+            Ok(v) => {
+                self.vault = v;
+                self.typed_errors.remove("vault.toml");
+            }
+            Err(e) => {
+                self.typed_errors
+                    .insert("vault.toml".into(), format!("vault.toml: {e}"));
+            }
+        }
+    }
+
+    /// The typed `vault.toml` (default = vault `.trash/`, 30-day retention).
+    #[must_use]
+    pub fn vault(&self) -> &VaultConfig {
+        &self.vault
     }
 
     /// The typed `pipelines.toml` (default = every pipeline off).
@@ -629,6 +648,34 @@ type = "lint"
         c.reload(&BTreeMap::new(), &ok);
         assert!(!c.pipelines().youtube.enabled);
         assert!(c.sources().youtube.is_empty());
+        assert!(c.errors().is_empty());
+    }
+
+    /// Plan tidiness-trash-orphans WP-1: `vault.toml` absent = defaults; invalid keeps the
+    /// last valid value and reports.
+    #[test]
+    fn vault_toml_absent_valid_invalid() {
+        use crate::vault::TrashLocation;
+        let mut c = ConfigSet::new();
+        assert_eq!(c.vault().trash.location, TrashLocation::Vault);
+        let mut f = BTreeMap::new();
+        f.insert(
+            "vault.toml".to_owned(),
+            Some("[trash]\nlocation = \"system\"\nretention_days = 7\n".to_owned()),
+        );
+        c.reload(&f, &ok);
+        assert!(c.errors().is_empty(), "{:?}", c.errors());
+        assert_eq!(c.vault().trash.location, TrashLocation::System);
+        f.insert(
+            "vault.toml".to_owned(),
+            Some("[trash]\nlocation = \"bin\"\n".to_owned()),
+        );
+        c.reload(&f, &ok);
+        assert_eq!(c.vault().trash.location, TrashLocation::System);
+        assert_eq!(c.vault().trash.retention_days, 7);
+        assert!(c.errors().iter().any(|e| e.starts_with("vault.toml:")));
+        c.reload(&BTreeMap::new(), &ok);
+        assert_eq!(c.vault().trash.location, TrashLocation::Vault);
         assert!(c.errors().is_empty());
     }
 }

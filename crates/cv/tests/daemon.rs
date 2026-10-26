@@ -346,6 +346,72 @@ async fn mutations_land_in_the_vault() {
     d.shutdown().await.unwrap();
 }
 
+/// Plan tidiness-trash-orphans WP-1: a daemon delete lands a `trash_entries` row; a
+/// `vault.toml` `location = "system"` reload sends the next delete to the (temp) XDG trash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trash_moves_reach_the_ledger_and_follow_vault_toml() {
+    let mut env = Env::new();
+    let data_home = env.tmp.path().join("data");
+    env.set("XDG_DATA_HOME", data_home.display().to_string());
+    let d = start(&env).await;
+    let c = client(&env);
+    let rows = || lock_rows(&d);
+    c.request(Request::Delete(DeleteParams {
+        mode: DeleteMode::Trash,
+        path: "a.md".into(),
+    }))
+    .unwrap();
+    poll(|| rows().len() == 1);
+    let r = &rows()[0];
+    assert_eq!(
+        (
+            r.location.as_str(),
+            r.trash_path.as_str(),
+            r.original_path.as_str()
+        ),
+        ("vault", ".trash/a.md", "a.md")
+    );
+    assert_eq!(r.reason, "deleted");
+    let mut sub = client(&env);
+    sub.request(Request::Subscribe(SubscribeParams {
+        topics: vec![Topic::ConfigReloaded],
+    }))
+    .unwrap();
+    let cfg = PathBuf::from(&env.vars["CV_CONFIG_DIR"]);
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("vault.toml"), "[trash]\nlocation = \"system\"\n").unwrap();
+    wait_for(&mut sub, |n| {
+        matches!(n, Notification::ConfigReloaded { .. })
+    });
+    c.request(Request::Delete(DeleteParams {
+        mode: DeleteMode::Trash,
+        path: "notes/b.md".into(),
+    }))
+    .unwrap();
+    poll(|| rows().len() == 2);
+    let r = &rows()[1];
+    assert_eq!(
+        (r.location.as_str(), r.trash_path.as_str()),
+        ("system", "b.md")
+    );
+    assert!(data_home.join("Trash/files/b.md").exists());
+    assert!(data_home.join("Trash/info/b.md.trashinfo").exists());
+    drop((c, sub));
+    d.shutdown().await.unwrap();
+}
+
+fn lock_rows(d: &RunningDaemon) -> Vec<cv_state::NewTrashEntry> {
+    d.shared()
+        .state()
+        .lock()
+        .unwrap()
+        .trash_entries()
+        .unwrap()
+        .into_iter()
+        .map(|e| e.entry)
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subscriptions_filter_topics() {
     let env = Env::new();

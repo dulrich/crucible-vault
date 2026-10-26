@@ -16,6 +16,7 @@
 mod config;
 mod model;
 pub mod pipelines;
+pub mod vault;
 
 pub use config::{CONFIG_FILES, ConfigSet, StepValidator};
 pub use cv_protocol::{ParamKind, ParamSpec};
@@ -24,3 +25,4 @@ pub use model::{
     Schedule, Selector, Starter, Step, StepKind,
 };
 pub use pipelines::{PipelinesConfig, SourcesConfig};
+pub use vault::{TrashConfig, TrashLocation, VaultConfig};

@@ -47,6 +47,7 @@ mod memory;
 mod notes;
 mod queue;
 mod read_sync;
+mod trash;
 
 pub(crate) use background::clear_stale_socket;
 use background::{config_poller, drain_spool};
@@ -137,7 +138,9 @@ impl Daemon {
             .with_link_write_roots(config.link_write_roots.clone());
         let vault_root = fs.root().to_path_buf();
         // `open` creates the index when absent and rebuilds on a schema/generation mismatch.
-        let writer = VaultWriter::open(fs, &config.index_db).context("opening the index")?;
+        let mut writer = VaultWriter::open(fs, &config.index_db).context("opening the index")?;
+        // Plan tidiness-trash-orphans WP-1: every trash move reaches `trash_entries`.
+        trash::install_ledger(&mut writer, Arc::clone(&state));
         let (handle, vault_events, writer_join) =
             cv_vault::spawn_writer_with_watcher(writer, opts.watch).context("starting writer")?;
         let views = ViewRegistry::start(
@@ -208,6 +211,7 @@ impl Daemon {
         if shared.runner.set(runner.clone()).is_err() {
             bail!("runner already started");
         }
+        trash::apply_trash_config(&shared);
         memory::register_gauges(&shared);
         let mut tasks = vec![
             runner.spawn_claim_loop(stop_rx.clone()),

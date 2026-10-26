@@ -170,7 +170,7 @@ impl Dialog {
                 ..
             } => "Close without saving",
             Self::DeleteConfirm(c) => match c.mode {
-                DeleteMode::Trash => "Move to .trash",
+                DeleteMode::Trash => "Move to trash",
                 DeleteMode::Permanent => "Delete permanently",
             },
             Self::DeleteUnsaved(_) => "Save then delete",

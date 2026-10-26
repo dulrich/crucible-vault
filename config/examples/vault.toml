@@ -1,0 +1,8 @@
+# Example `vault.toml` (plan tidiness-trash-orphans WP-1). Copy into CV_CONFIG_DIR
+# (live: <vault>/_custom/crucible-vault/). An absent file or key means the default shown.
+
+[trash]
+location = "vault"              # "vault" = <vault>/.trash/<path>; "system" = the desktop (XDG) trash,
+                                # $XDG_DATA_HOME/Trash (default ~/.local/share/Trash); a cross-device
+                                # system move falls back to the vault .trash/ with a warning
+retention_days = 30             # trashed files are deleted permanently after N days; 0 = never

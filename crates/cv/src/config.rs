@@ -43,6 +43,10 @@ pub struct Config {
     /// through a symlinked note may land under (plan editor-cutover-blockers WP-1, audit B1).
     /// Unset or empty means none.
     pub link_write_roots: Vec<PathBuf>,
+    /// `XDG_DATA_HOME` (default `$HOME/.local/share`): the system trash is `<data_home>/Trash` (plan
+    /// tidiness-trash-orphans WP-1; used only when `vault.toml` `[trash] location = "system"`).
+    /// `None` when neither is set (a `system` location then falls back to the vault `.trash/`).
+    pub data_home: Option<PathBuf>,
 }
 
 impl Config {
@@ -128,6 +132,7 @@ impl Config {
             open_cmd: get("CV_OPEN_CMD").map(PathBuf::from),
             clipboard_cmd,
             link_write_roots,
+            data_home: xdg("XDG_DATA_HOME", ".local/share").ok(),
         })
     }
 

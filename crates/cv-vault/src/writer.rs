@@ -12,6 +12,7 @@ use crate::fs::VaultFs;
 use crate::hash::ContentHash;
 use crate::path::validate_rel_path;
 use crate::rewrite::rewrite_note;
+use crate::trash::{TrashReason, TrashRecord};
 use crate::watcher::Echoes;
 use cv_index::file_times;
 
@@ -49,7 +50,14 @@ pub struct VaultWriter {
     pub(crate) fs: VaultFs,
     pub(crate) index: Index,
     pub(crate) echoes: Echoes,
+    /// Trash records not yet handed to a sink (plan tidiness-trash-orphans WP-1).
+    trash_records: Vec<TrashRecord>,
+    trash_sink: Option<TrashSink>,
 }
+
+/// Receives each [`TrashRecord`] right after its move (the daemon persists it to `trash_entries`).
+/// Runs on the writer thread: it must only hand the record off (e.g. a channel send), never block.
+pub type TrashSink = Box<dyn FnMut(TrashRecord) + Send>;
 
 impl std::fmt::Debug for VaultWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,6 +77,8 @@ impl VaultWriter {
             fs,
             index,
             echoes: Echoes::new(DEFAULT_ECHO_TTL),
+            trash_records: Vec::new(),
+            trash_sink: None,
         }
     }
 
@@ -203,9 +213,32 @@ impl VaultWriter {
     /// recorded `path → by` is what the event bridge reads back via [`Self::take_replaced_by`]
     /// to send `file_changed { kind: deleted, replaced_by }`, so clients retarget instead.
     pub fn delete_replaced(&mut self, path: &str, expected: ContentHash, by: &str) -> Result<()> {
-        self.delete_with(path, expected, false)?;
+        self.remove(path, expected, false, TrashReason::Replaced)?;
         self.echoes.register_replaced(path, by);
         Ok(())
+    }
+
+    /// Recoverable delete recorded with `reason` (WP-2's sweep passes [`TrashReason::Orphan`]).
+    pub fn trash_with_reason(
+        &mut self,
+        path: &str,
+        expected: ContentHash,
+        reason: TrashReason,
+    ) -> Result<()> {
+        self.remove(path, expected, false, reason)
+    }
+
+    /// Installs the trash-record sink; records queued before it are handed over now.
+    pub fn set_trash_sink(&mut self, mut sink: TrashSink) {
+        for r in self.trash_records.drain(..) {
+            sink(r);
+        }
+        self.trash_sink = Some(sink);
+    }
+
+    /// Drains the queued trash records (only filled while no sink is installed).
+    pub fn take_trash_records(&mut self) -> Vec<TrashRecord> {
+        std::mem::take(&mut self.trash_records)
     }
 
     /// Consumes the live [`Self::delete_replaced`] record for `path` (the absorbing note).
@@ -221,7 +254,33 @@ impl VaultWriter {
         expected: ContentHash,
         permanent: bool,
     ) -> Result<()> {
-        self.fs.remove_with(path, &expected, permanent)?;
+        self.remove(path, expected, permanent, TrashReason::Deleted)
+    }
+
+    /// The one delete path: CAS remove, then a [`TrashRecord`] for a recoverable move (only
+    /// after the move succeeded, so a record never names a file that was not moved).
+    fn remove(
+        &mut self,
+        path: &str,
+        expected: ContentHash,
+        permanent: bool,
+        reason: TrashReason,
+    ) -> Result<()> {
+        if let Some(moved) = self.fs.remove_with(path, &expected, permanent)? {
+            let trashed_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+            let rec = TrashRecord {
+                moved,
+                original_path: path.to_string(),
+                trashed_ms,
+                reason,
+            };
+            match &mut self.trash_sink {
+                Some(s) => s(rec),
+                None => self.trash_records.push(rec),
+            }
+        }
         match self.index.remove_file(path) {
             Ok(_) => self.echoes.register(path, None),
             Err(e) => tracing::warn!(path, error = %e, "index update after delete failed"),
@@ -255,7 +314,7 @@ impl VaultWriter {
                 skipped.push(a.clone());
                 continue;
             };
-            match self.delete_with(a, ah, permanent) {
+            match self.remove(a, ah, permanent, TrashReason::NoteAttachment) {
                 Ok(()) => removed.push(a.clone()),
                 Err(e) => {
                     tracing::warn!(path = %a, error = %e, "delete_note: attachment kept");

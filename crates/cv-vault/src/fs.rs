@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, VaultError, io};
 use crate::hash::ContentHash;
 use crate::path::{TMP_PREFIX, is_ignored, validate_rel_path};
+use crate::trash::{TrashMove, TrashTarget, TrashedIn, identity};
 
 /// The vault filesystem; see the module docs.
 pub struct VaultFs {
@@ -17,6 +18,8 @@ pub struct VaultFs {
     /// Canonical roots outside the vault a write through a symlinked note may land under
     /// (`CV_LINK_WRITE_ROOTS`, audit B1). Empty by default.
     link_write_roots: Vec<PathBuf>,
+    /// Where recoverable deletes go (plan tidiness-trash-orphans WP-1; default the vault `.trash/`).
+    trash: TrashTarget,
 }
 
 impl std::fmt::Debug for VaultFs {
@@ -95,6 +98,7 @@ impl VaultFs {
         Ok(Self {
             root,
             link_write_roots: Vec::new(),
+            trash: TrashTarget::Vault,
         })
     }
 
@@ -112,6 +116,16 @@ impl VaultFs {
     /// The canonical link-write roots in effect.
     pub fn link_write_roots(&self) -> &[PathBuf] {
         &self.link_write_roots
+    }
+
+    /// Sets where recoverable deletes go (the daemon applies `vault.toml` `[trash] location`).
+    pub fn set_trash_target(&mut self, target: TrashTarget) {
+        self.trash = target;
+    }
+
+    /// Where recoverable deletes go.
+    pub fn trash_target(&self) -> &TrashTarget {
+        &self.trash
     }
 
     /// The file a live write of `path` lands on: `full` itself for a regular (or new) entry, or
@@ -220,8 +234,9 @@ impl VaultFs {
         Ok((ContentHash::of(bytes), vault_full))
     }
 
-    /// Recoverable delete (CAS on `expected`): moves the file to `.trash/<path>` (` (n)` suffix
-    /// on collision) and returns that vault-relative trash path.
+    /// Recoverable delete (CAS on `expected`): moves the file into the configured trash
+    /// ([`TrashTarget`]) and returns the move. The vault target is `.trash/<path>` (` (n)` suffix
+    /// on collision); a system move that cannot rename falls back to it.
     /// `permanent` (plan editor-ui-round-3 WP-3) removes the file outright instead of the trash
     /// move (same CAS) and returns `None`.
     pub(crate) fn remove_with(
@@ -229,7 +244,7 @@ impl VaultFs {
         path: &str,
         expected: &ContentHash,
         permanent: bool,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<TrashMove>> {
         validate_rel_path(path)?;
         if self.hash(path)?.is_none() {
             return Err(VaultError::NotFound(path.to_string()));
@@ -240,14 +255,32 @@ impl VaultFs {
             std::fs::remove_file(&src).map_err(|e| io(&src, e))?;
             return Ok(None);
         }
+        let src = self.root.join(path);
+        let (bytes, mtime_ms, inode) = identity(&src).map_err(|e| io(&src, e))?;
+        if let TrashTarget::System(sys) = &self.trash
+            && let Some(name) = sys.move_in(&src, path).map_err(|e| io(&src, e))?
+        {
+            return Ok(Some(TrashMove {
+                location: TrashedIn::System,
+                trash_path: name,
+                bytes,
+                mtime_ms,
+                inode,
+            }));
+        }
         let trash_rel = self.trash_slot(path);
         let dest = self.root.join(&trash_rel);
         if let Some(d) = dest.parent() {
             std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
         }
-        let src = self.root.join(path);
         std::fs::rename(&src, &dest).map_err(|e| io(&src, e))?;
-        Ok(Some(trash_rel))
+        Ok(Some(TrashMove {
+            location: TrashedIn::Vault,
+            trash_path: trash_rel,
+            bytes,
+            mtime_ms,
+            inode,
+        }))
     }
 
     /// The first free `.trash/<path>` slot: `name.ext`, then `name (1).ext`, `name (2).ext`, ….

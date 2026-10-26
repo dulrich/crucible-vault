@@ -18,6 +18,7 @@ mod pipelines;
 mod providers;
 mod step_notes;
 mod step_services;
+mod vault;
 
 pub use actions::*;
 pub use captures::*;
@@ -26,6 +27,7 @@ pub use pipelines::*;
 pub use providers::*;
 pub use step_notes::*;
 pub use step_services::*;
+pub use vault::*;
 
 // ---------------------------------------------------------------------------------------------
 // Shared field helpers
@@ -100,6 +102,7 @@ static EDITOR_NODE: Node = Node::Record(&EDITOR_FILE);
 static VIEW_NODE: Node = Node::Record(&VIEW_FILE);
 static PIPELINES_NODE: Node = Node::Record(&PIPELINES_FILE);
 static SOURCES_NODE: Node = Node::Record(&SOURCES_FILE);
+static VAULT_NODE: Node = Node::Record(&VAULT_FILE);
 
 /// A vault-relative path inside the config folder, as a `&'static str` literal
 /// (`config_path!("actions.toml")` is the folder + `actions.toml`). The one
@@ -116,7 +119,7 @@ pub const CONFIG_DIR: &str = config_path!("");
 
 /// Every config file name with a schema (the daemon's `CONFIG_FILES`, then `bookmarks.toml`,
 /// `editor.toml`). Views are per-file: see [`view_schema`].
-pub const FILES: [&str; 10] = [
+pub const FILES: [&str; 11] = [
     "actions.toml",
     "schedules.toml",
     "kinds.toml",
@@ -125,6 +128,7 @@ pub const FILES: [&str; 10] = [
     "providers.toml",
     "pipelines.toml",
     "sources.toml",
+    "vault.toml",
     "bookmarks.toml",
     "editor.toml",
 ];
@@ -141,6 +145,7 @@ pub fn schema_for(file: &str) -> Option<&'static Node> {
         "providers.toml" => &PROVIDERS_NODE,
         "pipelines.toml" => &PIPELINES_NODE,
         "sources.toml" => &SOURCES_NODE,
+        "vault.toml" => &VAULT_NODE,
         "bookmarks.toml" => &BOOKMARKS_NODE,
         "editor.toml" => &EDITOR_NODE,
         f if f.starts_with("views/") && f.ends_with(".toml") => &VIEW_NODE,

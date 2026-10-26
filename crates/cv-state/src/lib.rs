@@ -16,6 +16,7 @@ mod query;
 mod runner_state;
 mod store;
 mod tracker;
+mod trash;
 
 #[cfg(test)]
 mod tests;
@@ -34,3 +35,4 @@ pub use store::{
     RequeueBreakdown, RetryOutcome, StateDb, StateReader,
 };
 pub use tracker::{IntakeQuery, Rekey, TrackerEvidence, TrackerItem};
+pub use trash::{NewTrashEntry, TrashEntry};
