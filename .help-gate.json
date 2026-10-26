@@ -49,6 +49,10 @@
     {
       "path": "docs/spikes/pdf-render/src/r_pdfium.rs",
       "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/pdf-render/src/fidelity.rs",
+      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
     }
   ],
   "exclude": []

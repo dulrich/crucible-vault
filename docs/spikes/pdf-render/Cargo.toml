@@ -15,6 +15,9 @@ path = "src/r_hayro.rs"
 [[bin]]
 name = "r_pdfium"
 path = "src/r_pdfium.rs"
+[[bin]]
+name = "fidelity"
+path = "src/fidelity.rs"
 
 [dependencies]
 hayro = "0.8.0"

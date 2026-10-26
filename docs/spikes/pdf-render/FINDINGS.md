@@ -53,3 +53,17 @@ Caveats: the Rust 6.9/19.1 ms are in-process render only (no PNG encode, no outp
 - Size with `hayro` `default-features = false` plus an own font resolver (to trim the 5.7 MB).
 - Does the editor want text selection/search in PDFs (needs a text layer, not provided by a pure rasterizer)?
 - Peak RSS inside the real editor process with hayro's thread pool and the arena cap.
+
+## Fidelity follow-up (orchestrator, 2026-10-25, planning round 15)
+
+Pixel agreement with no image kept or viewed: `cargo build --release --offline --bin fidelity && ./fidelity.sh` → `results-fidelity.tsv`. Each of the 57 PDFs has page 1 and its mid page rendered at 96 dpi by hayro, pdfium and poppler (`pdftoppm -gray` at the same pixel size, in a temp dir deleted per page). Metric: mean absolute gray difference (0–255) per page, and the share of pixels differing by more than 64. All 114 hayro/pdfium page pairs had identical dimensions.
+
+| pair | mean diff median / p95 / max | >64 share % median / p95 / max |
+|---|---|---|
+| pdfium vs poppler (two mature renderers, control) | 7.12 / 13.52 / 36.79 | 3.35 / 6.12 / 8.59 |
+| hayro vs poppler | 10.95 / 17.88 / 21.06 | 6.94 / 11.85 / 12.62 |
+| hayro vs pdfium | 10.40 / 16.01 / 35.93 | 5.99 / 9.75 / 12.73 |
+
+- hayro is further from poppler than pdfium on 95 of 114 pages, by a mean ratio of 1.56×.
+- 0 pages are outliers (hayro vs poppler more than 2× the pdfium vs poppler difference and more than 10 levels above it). hayro's worst page (21.06) is milder than the control pair's worst (36.79).
+- **Reading:** the difference is systematic and moderate, not page-specific. That fits a different text antialiasing/gamma/hinting style rather than missing content. A wrong or missing page element would show up as an outlier, and none does. Whether the style is acceptable to the eye is a user hand-check on the in-app viewer.
