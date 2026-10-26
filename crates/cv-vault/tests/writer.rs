@@ -292,3 +292,26 @@ fn moved_note_with_only_vault_links_unchanged_but_self() {
     w.rename("a/b/m.md", "z/n.md", h(text)).unwrap();
     assert_eq!(fx.read("z/n.md"), text.replace("[[m#h]]", "[[n#h]]"));
 }
+
+#[test]
+fn open_reconciles_files_created_while_stopped() {
+    let t = Fx::new(&[("Desktop.md", "[[Ingestion]]\n"), ("Old.md", "old\n")]);
+    let generation = t.live().index().generation().unwrap();
+    // Changes while the daemon is down.
+    std::fs::create_dir_all(t.vault.path().join("core")).unwrap();
+    std::fs::write(t.vault.path().join("core/Ingestion.md"), "# Ingestion\n").unwrap();
+    std::fs::remove_file(t.vault.path().join("Old.md")).unwrap();
+    // Reopen: the existing generation is reused and reconciled in place. Opening the writer
+    // never emits watcher events (the watcher is a separate component seeded afterwards), so
+    // this asserts the index content.
+    let w = t.live();
+    let idx = w.index();
+    assert_eq!(idx.generation().unwrap(), generation);
+    let q = idx.query();
+    let ing = q.file("core/Ingestion.md").unwrap().expect("indexed");
+    assert!(q.file("Old.md").unwrap().is_none());
+    assert_eq!(
+        idx.resolver().resolve("Desktop.md", 0, "Ingestion"),
+        Some(ing.id)
+    );
+}

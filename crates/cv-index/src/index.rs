@@ -25,6 +25,19 @@ use crate::query::Query;
 use crate::schema;
 use cv_text::resolver::{Resolver, file_key, normalize, target_key};
 
+/// What [`Index::reconcile`] changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconcileCounts {
+    /// Files on disk with no row.
+    pub added: usize,
+    /// Files whose `(size, mtime)` differed from their row.
+    pub updated: usize,
+    /// Rows with no indexable file on disk.
+    pub removed: usize,
+    /// Files whose row already matched (stat only).
+    pub unchanged: usize,
+}
+
 /// The writer handle on the current `index.db` generation.
 pub struct Index {
     conn: Connection,
@@ -262,13 +275,14 @@ fn open_writer(base: &Path, generation: u64) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Builds a complete index of `vault_root` at `building` in one transaction, then switches it to
-/// WAL and closes it.
-fn build(vault_root: &Path, building: &Path, generation: u64, rules: &IgnoreRules) -> Result<()> {
-    let mut conn = Connection::open(building)?;
-    schema::configure_build(&conn)?;
-    schema::create(&conn, generation)?;
-    let mut entries: Vec<(String, PathBuf, std::fs::Metadata)> = Vec::new();
+/// One walked vault file: vault-relative path, full path, metadata (a symlink's target's).
+type WalkEntry = (String, PathBuf, std::fs::Metadata);
+
+/// Every indexable file under `vault_root`, sorted by vault path: excluded directories (dot
+/// components, `.gitignore` matches) are pruned, never descended. The one walk `build` and
+/// [`Index::reconcile`] share. Stats only — no file is read.
+fn walk_vault(vault_root: &Path, rules: &IgnoreRules) -> Result<Vec<WalkEntry>> {
+    let mut entries: Vec<WalkEntry> = Vec::new();
     let mut dangling = 0_usize;
     let walker = WalkDir::new(vault_root)
         .follow_links(false)
@@ -318,6 +332,16 @@ fn build(vault_root: &Path, building: &Path, generation: u64, rules: &IgnoreRule
         tracing::info!(dangling, "skipped dangling symlinks while indexing");
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
+}
+
+/// Builds a complete index of `vault_root` at `building` in one transaction, then switches it to
+/// WAL and closes it.
+fn build(vault_root: &Path, building: &Path, generation: u64, rules: &IgnoreRules) -> Result<()> {
+    let mut conn = Connection::open(building)?;
+    schema::configure_build(&conn)?;
+    schema::create(&conn, generation)?;
+    let entries = walk_vault(vault_root, rules)?;
 
     let tx = conn.transaction()?;
     let mut resolver = Resolver::default();
@@ -466,6 +490,47 @@ impl Index {
     /// [`Index::open`], which has no vault root; create/rebuild load them themselves).
     pub fn load_ignore(&mut self, vault_root: &Path) {
         self.ignore = IgnoreRules::load(vault_root);
+    }
+
+    /// Brings a reopened generation in line with `vault_root` on disk, in place (the generation
+    /// number is unchanged): walks the vault with the same exclusions as a build, upserts files
+    /// that are new or whose `(size, mtime)` differs from their row, and removes rows whose path
+    /// is no longer an indexable file. Unchanged files are only stat'ed, never read. Uses the
+    /// rules from [`Index::load_ignore`]; call it after that. Emits nothing — callers decide.
+    pub fn reconcile(&mut self, vault_root: &Path) -> Result<ReconcileCounts> {
+        let entries = walk_vault(vault_root, &self.ignore)?;
+        let mut rows: std::collections::HashMap<String, (i64, i64)> = Query::new(&self.conn)
+            .file_stats()?
+            .into_iter()
+            .map(|(path, size, mtime)| (path, (size, mtime)))
+            .collect();
+        let mut counts = ReconcileCounts::default();
+        for (rel, full, md) in &entries {
+            let (mtime, ctime) = file_times(md);
+            let size = i64::try_from(md.len()).unwrap_or(i64::MAX);
+            let known = rows.remove(rel);
+            if known == Some((size, mtime)) {
+                counts.unchanged += 1;
+                continue;
+            }
+            let bytes = std::fs::read(full).map_err(|e| io(full, e))?;
+            if self.upsert_file(rel, &bytes, mtime, ctime)?.is_some() {
+                if known.is_some() {
+                    counts.updated += 1;
+                } else {
+                    counts.added += 1;
+                }
+            }
+        }
+        // Whatever is left has no indexable file on disk any more.
+        let mut gone: Vec<String> = rows.into_keys().collect();
+        gone.sort();
+        for path in gone {
+            if self.remove_file(&path)? {
+                counts.removed += 1;
+            }
+        }
+        Ok(counts)
     }
 
     /// `path` is never indexed: a skipped folder, a dot-prefixed component or a `.gitignore`

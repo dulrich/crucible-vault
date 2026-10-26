@@ -78,7 +78,27 @@ impl VaultWriter {
         let index = match Index::open(index_base) {
             Ok(mut i) => {
                 i.load_ignore(fs.root());
-                i
+                // Catch up with changes made while the daemon was stopped (I4: no events).
+                let started = std::time::Instant::now();
+                match i.reconcile(fs.root()) {
+                    Ok(c) => {
+                        tracing::info!(
+                            added = c.added,
+                            updated = c.updated,
+                            removed = c.removed,
+                            unchanged = c.unchanged,
+                            elapsed_ms =
+                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                            "index reconciled with the vault"
+                        );
+                        i
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "index reconcile failed; rebuilding");
+                        drop(i);
+                        Index::create(fs.root(), index_base)?
+                    }
+                }
             }
             Err(
                 cv_index::Error::NoIndex(_)

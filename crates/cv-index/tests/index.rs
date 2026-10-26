@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use cv_index::{
-    Error, Index, LinkKind, Reader, SCHEMA_VERSION, current_generation, generation_path,
+    Error, Index, LinkKind, Reader, ReconcileCounts, SCHEMA_VERSION, current_generation,
+    generation_path,
 };
 use serde_json::json;
 
@@ -691,4 +692,63 @@ fn gitignore_excludes_and_rebuild_restores() {
     let mut idx = Index::open(&t.db()).unwrap();
     idx.load_ignore(&t.vault());
     assert_eq!(idx.upsert_file("drop/z.md", b"# z", 0, 0).unwrap(), None);
+}
+
+#[test]
+fn reconcile_catches_up_with_changes_made_while_closed() {
+    let t = Fx::new();
+    fixture(&t);
+    t.write(".gitignore", "private/\n");
+    let generation = {
+        let idx = Index::create(&t.vault(), &t.db()).unwrap();
+        idx.generation().unwrap()
+    };
+    // "Daemon stopped": add, modify, delete, plus excluded additions.
+    t.write("core/Fresh.md", "# Fresh\n[[Alpha]]\n");
+    t.write("Alpha.md", "# Alpha\nrewritten and longer than before\n");
+    std::fs::remove_file(t.vault().join("Parent.md")).unwrap();
+    t.write(".hidden/Secret.md", "x");
+    t.write("private/Skip.md", "x");
+
+    let mut idx = Index::open(&t.db()).unwrap();
+    idx.load_ignore(&t.vault());
+    let c = idx.reconcile(&t.vault()).unwrap();
+    assert_eq!(
+        c,
+        ReconcileCounts {
+            added: 1,
+            updated: 1,
+            removed: 1,
+            unchanged: 4,
+        }
+    );
+    assert_eq!(idx.generation().unwrap(), generation);
+    let paths: Vec<String> = idx
+        .query()
+        .file_paths()
+        .unwrap()
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    assert!(paths.iter().any(|p| p == "core/Fresh.md"));
+    assert!(!paths.iter().any(|p| p == "Parent.md"));
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.contains("Secret") || p.contains("Skip"))
+    );
+    let fresh = idx.query().file("core/Fresh.md").unwrap().unwrap();
+    assert_eq!(idx.resolver().resolve("Hub.md", 0, "Fresh"), Some(fresh.id));
+    assert_eq!(idx.resolver().resolve("Hub.md", 0, "Parent"), None);
+    assert!(!idx.query().fts("rewritten", 10).unwrap().is_empty());
+
+    // A second pass over an unchanged vault touches nothing.
+    let again = idx.reconcile(&t.vault()).unwrap();
+    assert_eq!(
+        again,
+        ReconcileCounts {
+            unchanged: 6,
+            ..ReconcileCounts::default()
+        }
+    );
 }

@@ -289,6 +289,13 @@ impl<'a> Query<'a> {
         Ok(out)
     }
 
+    /// `(path, size, mtime)` of every file row (what a startup reconcile compares).
+    pub fn file_stats(&self) -> Result<Vec<(String, i64, i64)>> {
+        collect(self.conn, "SELECT path, size, mtime FROM files", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+    }
+
     /// Every indexed file as `(id, path)`, by path — one scan for whole-tree builds (the
     /// editor's explorer and resolver) instead of a `subfolders` call per folder.
     pub fn file_paths(&self) -> Result<Vec<(i64, String)>> {
