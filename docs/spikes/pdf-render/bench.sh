@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# usage: bench.sh <hayro|pdfium|poppler> [outfile.tsv]   (run from docs/spikes/pdf-render/)
+# Renders page 1 and the middle page (index n/2) of every non-.trash PDF in the live vault, read-only, at 96 and 192 dpi.
+# Output is aggregate-only: PDFs are identified by their sorted index, never by name or path.
+set -u
+if [ "${1:-}" = "--help" ] || [ $# -lt 1 ]; then
+  echo "usage: bench.sh <hayro|pdfium|poppler> [outfile.tsv]  (run from docs/spikes/pdf-render/; needs target/release bins and, for pdfium, vendor/pdfium/lib)"
+  exit 0
+fi
+cand=$1; out=${2:-results-$cand.tsv}
+VAULT=${VAULT:-~/vault}
+HERE=$(cd "$(dirname "$0")" && pwd)
+export PDFIUM_LIB_DIR=$HERE/vendor/pdfium/lib
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+printf 'idx\tdpi\tstatus\tpages\tp1_ms\tmid_ms\twall_ms\trss_kb\tp1_nonwhite\tmid_nonwhite\n' > "$out"
+i=0
+while IFS= read -r -d '' f; do
+  i=$((i+1))
+  for dpi in 96 192; do
+    scale=$(awk -v d=$dpi 'BEGIN{printf "%.6f", d/72}')
+    s=$EPOCHREALTIME
+    case $cand in
+      hayro|pdfium)
+        line=$(/usr/bin/time -f '%M' -o "$tmp/rss" timeout 120 "$HERE/target/release/r_$cand" "$f" "$scale" 2>/dev/null | tail -1)
+        e=$EPOCHREALTIME; rss=$(tail -1 "$tmp/rss" 2>/dev/null)
+        [ -z "$line" ] && line="CRASH"
+        status=${line%% *}
+        pages=$(sed -n 's/.*pages=\([0-9]*\).*/\1/p' <<<"$line")
+        p1=$(sed -n 's/.*p1_ms=\([0-9.]*\).*/\1/p' <<<"$line"); mid=$(sed -n 's/.*mid_ms=\([0-9.]*\).*/\1/p' <<<"$line")
+        n1=$(sed -n 's/.*p1_nonwhite=\([0-9]*\).*/\1/p' <<<"$line"); nm=$(sed -n 's/.*mid_nonwhite=\([0-9]*\).*/\1/p' <<<"$line")
+        ;;
+      poppler)
+        pages=$(timeout 60 pdfinfo "$f" 2>/dev/null | sed -n 's/^Pages: *//p')
+        status=OK; p1=; mid=; n1=; nm=; rss=0
+        if [ -z "$pages" ] || [ "$pages" = 0 ]; then status=ERR; else
+          mp=$((pages/2+1)); k=0
+          for pg in 1 $mp; do
+            a=$EPOCHREALTIME
+            timeout 120 /usr/bin/time -f "%M" -o "$tmp/rss" pdftoppm -png -singlefile -r $dpi -f $pg -l $pg "$f" "$tmp/pg" >/dev/null 2>&1; sz=$(stat -c %s "$tmp/pg.png" 2>/dev/null || echo 0); rm -f "$tmp/pg.png"
+            b=$EPOCHREALTIME; r=$(tail -1 "$tmp/rss" 2>/dev/null); [ "${r:-0}" -gt "$rss" ] && rss=$r
+            ms=$(awk -v a=$a -v b=$b 'BEGIN{printf "%.1f",(b-a)*1000}')
+            [ "$sz" -lt 100 ] && status=ERR
+            # poppler column "nonwhite" holds PNG bytes (blank-page heuristic: tiny PNG)
+            if [ $k = 0 ]; then p1=$ms; n1=$sz; else mid=$ms; nm=$sz; fi; k=$((k+1))
+          done
+        fi
+        e=$EPOCHREALTIME
+        ;;
+    esac
+    wall=$(awk -v a=$s -v b=$e 'BEGIN{printf "%.1f",(b-a)*1000}')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$dpi" "$status" "${pages:-}" "${p1:-}" "${mid:-}" "$wall" "${rss:-}" "${n1:-}" "${nm:-}" >> "$out"
+  done
+done < <(find "$VAULT" -name '*.pdf' -not -path '*/.trash/*' -print0 | sort -z)
+echo "done: $i pdfs -> $out"
