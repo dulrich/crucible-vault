@@ -75,9 +75,41 @@ pub(crate) fn md5_hex(bytes: &[u8]) -> String {
     hex::encode(md5::Md5::digest(bytes))
 }
 
+/// Bumps the mtime of the vault file `rel` under `root` to now (plan tidiness-trash-orphans WP-2,
+/// audit B4): an editor-paste attachment reuse is not a queue job, so the `tidy` step's
+/// `min_age_hours` grace period is what protects a reused-but-unreferenced file. Best effort.
+pub(crate) fn touch_now(root: &std::path::Path, rel: &str) {
+    let bumped = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join(rel))
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    if let Err(e) = bumped {
+        tracing::warn!(error = %e, "bumping a reused attachment's mtime");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn touch_now_bumps_an_old_mtime() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.png");
+        std::fs::write(&p, "x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        touch_now(d.path(), "a.png");
+        let age = std::time::SystemTime::now()
+            .duration_since(p.metadata().unwrap().modified().unwrap())
+            .unwrap();
+        assert!(age < std::time::Duration::from_secs(60));
+    }
 
     #[test]
     fn md5_hex_handles_empty_and_numeric_bytes() {

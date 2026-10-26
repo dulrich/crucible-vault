@@ -223,6 +223,10 @@ impl Shared {
                     Ok(_) | Err(VaultError::Exists(_)) => {}
                     Err(e) => return Err(e.into()),
                 }
+            } else {
+                // Reuse: bump the mtime so the `tidy` sweep's grace period protects the file
+                // until the pasted note links it (plan tidiness-trash-orphans WP-2, audit B4).
+                crate::steps::util::touch_now(vw.fs().root(), &t);
             }
             Ok(())
         })

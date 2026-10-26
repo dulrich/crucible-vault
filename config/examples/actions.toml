@@ -559,3 +559,15 @@ resources = { note = false, keys = ["capture-repair::daily/day"] }
 [[action.steps]]
 type = "capture_repair"
 folder = "daily/day"
+
+# Vault tidiness (plan tidiness-trash-orphans WP-2): trashes orphaned managed attachments older
+# than `min_age_hours`, gives every unrecorded `.trash/` file (and cv-owned system-trash entry) a
+# ledger row, and deletes entries past `vault.toml` `[trash] retention_days`. Daily at 04:30.
+[[action]]
+id = "vault-tidy"
+label = "Vault tidy: orphaned attachments and trash"
+group = "Maintenance"
+resources = { note = false, keys = [] }
+[[action.steps]]
+type = "tidy"
+min_age_hours = 24

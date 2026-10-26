@@ -380,3 +380,20 @@ pub static DUPES_SCAN: Record = Record {
     rules: &[],
     summary: None,
 };
+
+/// `tidy` — `crates/cv/src/steps/tidy.rs` (`min_age_hours`; the trash location and retention come from `vault.toml`).
+pub static TIDY: Record = Record {
+    name: "tidy",
+    fields: &[field(
+        "min_age_hours",
+        "Minimum age (hours)",
+        "An orphaned attachment is trashed only when its file is at least this old",
+        Node::Int {
+            min: Some(1),
+            max: None,
+        },
+    )
+    .dflt(D::Int(24))],
+    rules: &[],
+    summary: None,
+};

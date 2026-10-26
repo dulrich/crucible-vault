@@ -85,6 +85,7 @@ pub static STEP: Union = Union {
         Variant::of(&DUPES_SCAN, "Duplicate scan"),
         Variant::of(&DUPES_RESOLVE, "Duplicate resolve"),
         Variant::of(&BLOG_METADATA_BACKFILL, "Blog metadata backfill"),
+        Variant::of(&TIDY, "Vault tidy"),
     ],
 };
 

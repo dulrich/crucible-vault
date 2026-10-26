@@ -213,6 +213,7 @@ const STEPS: &[(&str, &str)] = &[
     ("dupes_scan", "dry_run = true"),
     ("dupes_resolve", ""),
     ("blog_metadata_backfill", "dry_run = false"),
+    ("tidy", "min_age_hours = 48"),
 ];
 
 const ACTION_FULL: &str = r#"

@@ -225,7 +225,7 @@ type = "track_blogs"
 "#;
 
 /// Plan auto-intake-sprint WP-3 (audit M3): a `track_blogs` action with no configured keys still
-/// derives the step-intrinsic `intake::identity`, and two such jobs never run concurrently.
+/// derives the step-intrinsic `intake::identity` (plus `vault::attachments`), and two such jobs never run concurrently.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn intake_identity_key_is_intrinsic_and_serializes() {
     let f = fixture();
@@ -244,7 +244,10 @@ async fn intake_identity_key_is_intrinsic_and_serializes() {
         .map(|_| enqueue(&r, "tb", None, Lane::Background))
         .collect();
     let job = f.state.lock().unwrap().job(&ids[0]).unwrap().unwrap();
-    assert_eq!(job.resource_keys, vec![cv_actions::INTAKE_IDENTITY_KEY]);
+    assert_eq!(
+        job.resource_keys,
+        vec![cv_actions::INTAKE_IDENTITY_KEY, cv_actions::ATTACHMENTS_KEY]
+    );
     let (_stop_tx, stop) = watch::channel(false);
     let _h = r.spawn_claim_loop(stop);
     for id in &ids {

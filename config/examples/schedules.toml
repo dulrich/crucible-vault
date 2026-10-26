@@ -22,3 +22,8 @@ every = "15m"
 [[schedule]]
 action = "daily-brief"
 daily = "06:00"
+
+# plan tidiness-trash-orphans (WP-2): runs after the 04:00 localize sweep of the live config.
+[[schedule]]
+action = "vault-tidy"
+daily = "04:30"

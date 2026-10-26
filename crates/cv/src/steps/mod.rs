@@ -94,6 +94,7 @@ pub mod search;
 mod search_tests;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub mod tidy;
 pub mod tracker;
 pub(crate) mod util;
 pub mod web;
@@ -622,6 +623,7 @@ step_modules! {
     DupesScan => dupes::DupesScan,
     DupesResolve => dupes_resolve::DupesResolve,
     BlogMetadataBackfill => blog_metadata_backfill::BlogMetadataBackfill,
+    Tidy => tidy::Tidy,
     RunAction => RunActionStep,
 }
 

@@ -755,9 +755,21 @@ async fn write_attachment_is_content_addressed_and_idempotent() {
     assert_eq!(std::fs::read(&on_disk).unwrap(), bytes);
     // Tamper with the stored file: a second identical call must reuse it, not write again.
     std::fs::write(&on_disk, b"marker").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&on_disk)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     let v2 = c.request(req("png", b64(bytes))).unwrap();
     assert_eq!(v2["path"].as_str().unwrap(), path);
     assert_eq!(std::fs::read(&on_disk).unwrap(), b"marker");
+    // The reuse bumped the mtime (the tidy sweep's grace period protects it).
+    let age = std::time::SystemTime::now()
+        .duration_since(on_disk.metadata().unwrap().modified().unwrap())
+        .unwrap();
+    assert!(age < std::time::Duration::from_secs(60), "{age:?}");
     // Refusals.
     assert_eq!(
         rpc_code(c.request(req("png", "!!not base64!!".into()))),

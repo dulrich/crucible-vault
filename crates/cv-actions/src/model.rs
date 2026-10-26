@@ -142,11 +142,20 @@ step_kinds! {
     DupesResolve = "dupes_resolve", true;
     /// One-shot `_blog_metadata` backfill into intake (plan `round-12-feedback-todos` WP-8).
     BlogMetadataBackfill = "blog_metadata_backfill", true;
+    /// Daily vault tidiness: orphaned-attachment sweep, trash ledger seed and retention expiry
+    /// (plan `tidiness-trash-orphans` WP-2). Trashes files, so it counts as mutating.
+    Tidy = "tidy", true;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):
 /// no two intake jobs resolve and commit concurrently.
 pub const INTAKE_IDENTITY_KEY: &str = "intake::identity";
+
+/// The shared queue resource key of every attachment writer and the orphan sweep (plan
+/// tidiness-trash-orphans WP-2, audit B4): `tidy` never interleaves with a localize run between
+/// its attachment selection and its note commit. Held by `tidy`, `localize`, `track_mail` and
+/// `track_blogs` (the steps that run the localize attachment writer).
+pub const ATTACHMENTS_KEY: &str = "vault::attachments";
 
 impl StepKind {
     /// Parses a TOML `type` string.
@@ -157,13 +166,14 @@ impl StepKind {
 
     /// Queue resource keys the step itself always needs, whatever the action config says (plan
     /// auto-intake-sprint WP-3, audit M3): every supersede-engine caller holds
-    /// [`INTAKE_IDENTITY_KEY`] from resolve through create/record.
+    /// [`INTAKE_IDENTITY_KEY`] from resolve through create/record; every attachment writer and
+    /// the orphan sweep hold [`ATTACHMENTS_KEY`].
     #[must_use]
     pub fn intrinsic_resource_keys(self) -> &'static [&'static str] {
         match self {
-            StepKind::TrackBlogs
-            | StepKind::TrackMail
-            | StepKind::AutoFile
+            StepKind::TrackBlogs | StepKind::TrackMail => &[ATTACHMENTS_KEY, INTAKE_IDENTITY_KEY],
+            StepKind::Localize | StepKind::Tidy => &[ATTACHMENTS_KEY],
+            StepKind::AutoFile
             | StepKind::IntakeReconcile
             | StepKind::IntakeFinalize
             | StepKind::BlogMetadataBackfill => &[INTAKE_IDENTITY_KEY],

@@ -223,7 +223,7 @@ impl TrashRecord {
 }
 
 /// Identity fields of `p` (no follow): `(bytes, mtime_ms, inode)`.
-pub(crate) fn identity(p: &Path) -> std::io::Result<(u64, i64, u64)> {
+pub fn identity(p: &Path) -> std::io::Result<(u64, i64, u64)> {
     let md = p.symlink_metadata()?;
     let mtime_ms = md.mtime() * 1000 + md.mtime_nsec() / 1_000_000;
     Ok((md.len(), mtime_ms, md.ino()))
