@@ -483,6 +483,29 @@ fn is_remote(link: &str) -> bool {
     l.starts_with("http://") || l.starts_with("https://")
 }
 
+/// The raw (still percent-encoded, `<>` stripped) destination of an inline markdown link or
+/// image `body` (without a leading `!`).
+fn md_raw_dest(body: &str) -> Option<&str> {
+    let close = body.find("](")?;
+    let dest = body.get(close + 2..body.len() - 1)?.trim();
+    Some(if let Some(rest) = dest.strip_prefix('<') {
+        rest.split_once('>').map_or(rest, |(d, _)| d)
+    } else {
+        dest.split_whitespace().next().unwrap_or("")
+    })
+}
+
+/// The original, still percent-encoded destination of a markdown ref's source text
+/// (`![a](x%23y.png "t")` gives `x%23y.png`); `None` for a wiki ref. [`AttachmentMatch::link`]
+/// holds the decoded form for vault lookups; a URL join needs this one (plan round-15 audit E2).
+pub fn md_ref_raw_destination(original: &str) -> Option<String> {
+    let body = original.strip_prefix('!').unwrap_or(original);
+    if body.starts_with("[[") {
+        return None;
+    }
+    md_raw_dest(body).map(str::to_owned)
+}
+
 /// Splits a matched ref into (link, display text).
 fn ref_parts(original: &str) -> Option<(String, Option<String>, Syntax)> {
     let body = original.strip_prefix('!').unwrap_or(original);
@@ -495,12 +518,7 @@ fn ref_parts(original: &str) -> Option<(String, Option<String>, Syntax)> {
     }
     let close = body.find("](")?;
     let text = &body[1..close];
-    let dest = body.get(close + 2..body.len() - 1)?.trim();
-    let dest = if let Some(rest) = dest.strip_prefix('<') {
-        rest.split_once('>').map_or(rest, |(d, _)| d)
-    } else {
-        dest.split_whitespace().next().unwrap_or("")
-    };
+    let dest = md_raw_dest(body)?;
     let link = if is_remote(dest) {
         unescape_md_url(dest)
     } else {

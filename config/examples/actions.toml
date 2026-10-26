@@ -425,6 +425,23 @@ resources = { note = false, keys = ["intake::identity"] }
 [[action.steps]]
 type = "blog_metadata_backfill"
 
+# One-shot source-relative image backfill (plan round-15-relative-images-pdf-viewer WP-1): notes
+# with an http(s) frontmatter `source` and page-relative image refs (`![](/img/a.png)`,
+# `![](a.png)`) get them downloaded against the source URL and localized. `folder = ""` is the
+# whole vault. Each note is attempted once (ignored_ids kind `localize_relative_backfill`), so a
+# re-run changes nothing.
+[[action]]
+id = "localize-relative-sources-backfill"
+label = "Localize backfill: source-relative images"
+group = "Maintenance"
+resources = { note = false, keys = ["localize-backfill::relative-sources"] }
+[[action.steps]]
+type = "localize"
+scope = "folder"
+folder = ""
+relative_sources = true
+limit = 200
+
 [[action]]
 id = "image-describe-note"
 label = "Describe images in note"

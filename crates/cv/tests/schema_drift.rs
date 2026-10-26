@@ -164,6 +164,10 @@ const STEPS: &[(&str, &str)] = &[
         "scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 50",
     ),
     (
+        "localize",
+        "scope = \"folder\"\nfolder = \"\"\nrelative_sources = true\nlimit = 200",
+    ),
+    (
         "agent",
         "agent = \"a1\"\nmodel = \"local:m1\"\noutput_var = \"out\"\nmax_tokens = 10\noutput = \"replace\"",
     ),

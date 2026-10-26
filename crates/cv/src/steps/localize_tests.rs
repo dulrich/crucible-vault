@@ -767,3 +767,97 @@ fn folder_backfill_spent_retry_is_not_repeated() {
         ["Clippings/esc.md"]
     );
 }
+
+/// Plan round-15 WP-1: page-relative image refs resolve against the note's `source` URL
+/// (root-relative, bare file, encoded reserved character), download through the remote path
+/// and are rewritten to managed `_MD5` attachments; a 404 stays as it is.
+#[test]
+fn relative_image_refs_resolve_against_the_source_url() {
+    let (a, b, c) = (png(21), png(22), png(23));
+    let routes = HashMap::from([
+        route("/img/a.png", "image/png", a.clone()),
+        route("/blog/b.png", "image/png", b.clone()),
+        // `x%23y.png` is the file `x#y.png`: requested encoded, never as a fragment.
+        route("/blog/x%23y.png", "image/png", c.clone()),
+    ]);
+    let (env, out, port) = with_server(routes, None, move |port, _| {
+        let note = format!(
+            "---\nsource: http://127.0.0.1:{port}/blog/post?id=1#top\n---\n![](/img/a.png)\n![alt](b.png)\n![](x%23y.png)\n![](gone.png)\n"
+        );
+        let env = env(&[("n.md", note.as_bytes())]);
+        let step = env.step("");
+        let out = env.run(&step, "n.md").unwrap();
+        (env, out, port)
+    });
+    assert_eq!(var(&out, "downloaded"), 3);
+    assert_eq!(var(&out, "failed"), 1);
+    let m = |x: &Vec<u8>| super::util::md5_hex(x);
+    assert_eq!(
+        env.text("n.md"),
+        format!(
+            "---\nsource: http://127.0.0.1:{port}/blog/post?id=1#top\n---\n![](_attachments/n/{}_MD5.png)\n![](_attachments/n/{}_MD5.png)\n![](_attachments/n/{}_MD5.png)\n![](gone.png)\n",
+            m(&a),
+            m(&b),
+            m(&c)
+        )
+    );
+    assert!(
+        env.file(&format!("_attachments/n/{}_MD5.png", m(&c)))
+            .is_some()
+    );
+}
+
+#[test]
+fn relative_image_refs_without_an_http_source_are_untouched() {
+    let routes = HashMap::from([route("/a.png", "image/png", png(24))]);
+    let (note_a, note_b) = with_server(routes, None, |port, _| {
+        let none = "![](/a.png)\n".to_owned();
+        let ftp = format!("---\nsource: ftp://127.0.0.1:{port}/p\n---\n![](/a.png)\n");
+        let env = env(&[("a.md", none.as_bytes()), ("b.md", ftp.as_bytes())]);
+        let step = env.step("");
+        env.run(&step, "a.md").unwrap();
+        env.run(&step, "b.md").unwrap();
+        ((none, env.text("a.md")), (ftp, env.text("b.md")))
+    });
+    assert_eq!(note_a.0, note_a.1);
+    assert_eq!(note_b.0, note_b.1);
+}
+
+#[test]
+fn relative_source_backfill_selects_notes_without_remote_refs_and_is_idempotent() {
+    let img = png(25);
+    let routes = HashMap::from([route("/img/a.png", "image/png", img.clone())]);
+    let (env, outs, port) = with_server(routes, None, move |port, _| {
+        let rel = format!("---\nsource: http://127.0.0.1:{port}/p/post\n---\n![](/img/a.png)\n");
+        let gone =
+            format!("---\nsource: http://127.0.0.1:{port}/p/post\n---\n![](/img/gone.png)\n");
+        let plain = "---\nsource: http://example.invalid/p\n---\n![](_attachments/z/abc_MD5.png)\n";
+        let env = env(&[
+            ("a.md", rel.as_bytes()),
+            ("b.md", gone.as_bytes()),
+            ("c.md", plain.as_bytes()),
+            ("d.md", b"![](/img/a.png)\n"),
+        ]);
+        let step =
+            env.step("scope = \"folder\"\nfolder = \"\"\nrelative_sources = true\nlimit = 10");
+        let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
+        (env, outs, port)
+    });
+    assert_eq!(
+        (var(&outs[0], "localized"), var(&outs[0], "failed")),
+        (1, 1)
+    );
+    assert_eq!(
+        (var(&outs[1], "localized"), var(&outs[1], "failed")),
+        (0, 0)
+    );
+    assert_eq!(
+        env.text("a.md"),
+        format!(
+            "---\nsource: http://127.0.0.1:{port}/p/post\n---\n![](_attachments/a/{}_MD5.png)\n",
+            super::util::md5_hex(&img)
+        )
+    );
+    assert!(env.text("b.md").contains("/img/gone.png"));
+    assert_eq!(env.text("d.md"), "![](/img/a.png)\n");
+}

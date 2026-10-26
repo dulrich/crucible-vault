@@ -36,6 +36,7 @@
 mod backfill;
 mod note;
 mod params;
+mod relative;
 #[cfg(test)]
 mod tests;
 
@@ -189,12 +190,6 @@ pub(super) fn execute_note(
         handle: tokio::runtime::Handle::try_current().ok(),
         counts: Counts::default(),
     };
-    if matches.iter().any(|m| m.is_remote) {
-        if run.handle.is_none() {
-            return Err(StepError::failed("no async runtime"));
-        }
-        run.client = Some(super::web::client()?);
-    }
     let needs_view = p.repair || matches.iter().any(|m| !m.is_remote);
     let view = if needs_view {
         match VaultView::open(ctx.index_db, &path) {
@@ -209,6 +204,28 @@ pub(super) fn execute_note(
         None
     };
 
+    // Page-relative markdown images (plan round-15 WP-1): in a note whose frontmatter `source` is
+    // an http(s) URL, a non-remote image ref that does not resolve to a vault file is joined to
+    // that URL and handled as a remote ref (`rel[i]` is the remote form of `matches[i]`).
+    let source = relative::source_url(&content);
+    let rel: Vec<Option<AttachmentMatch>> = matches
+        .iter()
+        .map(|m| {
+            let source = source.as_ref()?;
+            let v = view.as_ref()?;
+            if v.resolve(&path, &m.link).is_some() {
+                return None;
+            }
+            relative::as_remote(m, source)
+        })
+        .collect();
+    if matches.iter().any(|m| m.is_remote) || rel.iter().any(Option::is_some) {
+        if run.handle.is_none() {
+            return Err(StepError::failed("no async runtime"));
+        }
+        run.client = Some(super::web::client()?);
+    }
+
     let mut replacements: Vec<Replacement> = Vec::new();
     // (ref text replaced, old local path) for re-homed local attachments.
     let mut retire: Vec<(String, String)> = Vec::new();
@@ -220,7 +237,7 @@ pub(super) fn execute_note(
             .as_ref()
             .map(|v| AttachmentPathIndex::build(&v.paths))
             .unwrap_or_default();
-        for m in &matches {
+        for (m, r) in matches.iter().zip(&rel) {
             if !m.is_remote
                 && view
                     .as_ref()
@@ -229,12 +246,18 @@ pub(super) fn execute_note(
             {
                 continue;
             }
-            let new_ref = if m.is_remote {
-                run.process_remote(ctx, &path, m)?
-            } else {
+            let local = || {
                 resolve_local_attachment_repair(&m.link, &expected, &pix)
                     .ok()
                     .map(|t| format_ref(m, &t))
+            };
+            let new_ref = if m.is_remote {
+                run.process_remote(ctx, &path, m)?
+            } else if let Some(rm) = r {
+                // A failed download keeps the local repair as before (never a worse note).
+                run.process_remote(ctx, &path, rm)?.or_else(local)
+            } else {
+                local()
             };
             if plan_replacement(&mut replacements, m, new_ref) {
                 resolved_count += 1;
@@ -243,9 +266,11 @@ pub(super) fn execute_note(
             }
         }
     } else {
-        for m in &matches {
+        for (m, r) in matches.iter().zip(&rel) {
             let new_ref = if m.is_remote {
                 run.process_remote(ctx, &path, m)?
+            } else if let Some(rm) = r {
+                run.process_remote(ctx, &path, rm)?
             } else {
                 match run.process_local(ctx, &path, m, view.as_ref())? {
                     Some((r, old)) => {
