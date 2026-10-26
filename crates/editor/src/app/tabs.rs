@@ -367,6 +367,7 @@ impl App {
             self.sink.closed(p);
             let p = p.to_owned();
             self.image_tab_closed(&p, tab.id);
+            self.sweep_pdf_docs();
             return;
         }
         let Some(path) = tab.path() else {
@@ -379,6 +380,7 @@ impl App {
         self.docs.remove(path);
         self.reading.closed(path);
         self.views.on_tab_closed(path);
+        self.sweep_pdf_docs();
     }
 
     /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`).

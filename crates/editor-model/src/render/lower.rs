@@ -431,14 +431,16 @@ impl Lower {
     ) {
         // Plan round-14 WP-3 (audit M2): a file the editor cannot show (pdf, svg, avif, other
         // binaries) embeds as a file card that opens externally. Plan round-15 WP-3 (audit B1):
-        // a PDF embed stays that card (its click now opens the PDF tab) until WP-4.
-        if embed
-            && matches!(
-                cv_text::file_kind::by_extension(&target),
-                Some(cv_text::file_kind::FileKind::External | cv_text::file_kind::FileKind::Pdf)
-            )
-        {
+        // WP-4: a PDF embed is its own block (`PdfEmbed`, the page rendered inline).
+        let kind = cv_text::file_kind::by_extension(&target);
+        if embed && kind == Some(cv_text::file_kind::FileKind::External) {
             out.push(Piece::Block(Block::FileEmbed { target }));
+        } else if embed && kind == Some(cv_text::file_kind::FileKind::Pdf) {
+            out.push(Piece::Block(Block::PdfEmbed {
+                target,
+                page: fragment.as_deref().map_or(1, parse_page),
+                width: alias.as_deref().and_then(parse_width).filter(|w| *w > 0),
+            }));
         } else if embed && is_image_target(&target) {
             let width = alias.as_deref().and_then(parse_width);
             let alt = match (&alias, width) {
@@ -598,6 +600,17 @@ fn plain_text<'a>(nodes: impl Iterator<Item = N<'a>>) -> String {
         }
     }
     s
+}
+
+/// Plan round-15 WP-4: the 1-based page of a `page=N` embed fragment (also inside
+/// `page=N&…`); a missing, non-numeric or `0` page is 1.
+fn parse_page(fragment: &str) -> u32 {
+    fragment
+        .split('&')
+        .find_map(|p| p.trim().strip_prefix("page="))
+        .and_then(|n| n.trim().parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
 }
 
 /// `300` / `300x200` → 300.

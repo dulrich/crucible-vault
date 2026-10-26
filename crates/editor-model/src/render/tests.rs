@@ -637,3 +637,45 @@ fn bool_set_upserts_missing_null_and_blockless() {
     assert!(frontmatter_bool_edit("---\nread: yes\n---\n", "read", None).is_none());
     assert!(frontmatter_bool_edit("---\nread: true\n", "read", None).is_none());
 }
+
+/// Plan round-15 WP-4: a PDF embed is its own block carrying the 1-based page and the alias
+/// width; other external kinds stay file cards.
+#[test]
+fn pdf_embeds_lower_to_pdf_embed_blocks() {
+    let pdf = |target: &str, page: u32, width: Option<u32>| Block::PdfEmbed {
+        target: target.into(),
+        page,
+        width,
+    };
+    assert_eq!(lower("![[x.pdf]]\n").blocks, vec![pdf("x.pdf", 1, None)]);
+    assert_eq!(
+        lower("![[x.pdf#page=3]]\n").blocks,
+        vec![pdf("x.pdf", 3, None)]
+    );
+    assert_eq!(
+        lower("![[x.pdf|300]]\n").blocks,
+        vec![pdf("x.pdf", 1, Some(300))]
+    );
+    assert_eq!(
+        lower("![[x.pdf#page=2|300]]\n").blocks,
+        vec![pdf("x.pdf", 2, Some(300))]
+    );
+    assert_eq!(
+        lower("![[x.pdf#page=0]]\n").blocks,
+        vec![pdf("x.pdf", 1, None)]
+    );
+    assert_eq!(
+        lower("![[x.pdf#page=abc]]\n").blocks,
+        vec![pdf("x.pdf", 1, None)]
+    );
+    assert_eq!(
+        lower("![[x.docx]]\n").blocks,
+        vec![Block::FileEmbed {
+            target: "x.docx".into()
+        }]
+    );
+    assert_eq!(
+        crate::render::pdf_embeds(&lower("![[a.pdf#page=2]]\n\n![[b.pdf]]\n")),
+        vec![("a.pdf".to_owned(), 2), ("b.pdf".to_owned(), 1)]
+    );
+}

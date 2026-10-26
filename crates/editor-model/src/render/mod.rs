@@ -23,7 +23,7 @@ pub mod transclude;
 
 pub use lower::{is_image_target, is_remote, lower, lower_with};
 pub use model::*;
-pub use query::{images, inline_text, link_targets, task_lines};
+pub use query::{images, inline_text, link_targets, pdf_embeds, task_lines};
 pub use transclude::transclude;
 
 #[cfg(test)]

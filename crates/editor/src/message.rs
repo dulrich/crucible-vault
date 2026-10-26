@@ -232,6 +232,33 @@ pub enum PdfTabMsg {
     },
     /// "Open externally": hand the file to the system opener.
     OpenExternal(String),
+    /// Plan round-15 WP-4: the inline embed of 0-based `page` of vault file `pdf` in note
+    /// `note` (tab `view`) came within the near window at laid-out `width`.
+    EmbedShown {
+        note: String,
+        view: u64,
+        pdf: String,
+        page: usize,
+        width: f32,
+    },
+    /// The inline embed left the near window: unpin.
+    EmbedHidden {
+        note: String,
+        view: u64,
+        pdf: String,
+        page: usize,
+    },
+    /// An off-thread embed page render finished.
+    EmbedRendered {
+        note: String,
+        view: u64,
+        pdf: String,
+        page: usize,
+        key: String,
+        result: Result<crate::image_cache::Decoded, String>,
+    },
+    /// A click on an inline embed: open the PDF tab scrolled to 0-based `page`.
+    EmbedOpen { path: String, page: usize },
 }
 
 /// WP-3: reading pane.

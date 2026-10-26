@@ -14,7 +14,7 @@ use editor_model::visible::{Occurrence, VisRun, link_label};
 
 use super::{Doc, ReadingStore};
 use crate::find::ReadingPaint;
-use crate::message::{Message, ReadingMsg};
+use crate::message::{Message, PdfTabMsg, ReadingMsg};
 pub(crate) use crate::task_status::task_box;
 use crate::theme::{Rgb, Tokens};
 use crate::widget::selectable::{self, Selection};
@@ -358,6 +358,100 @@ fn file_card<'a>(cx: &Ctx<'a, '_>, target: &'a str) -> Element<'a, Message> {
     boxed(btn.into(), t, t.text_faint)
 }
 
+/// Plan round-15 WP-4: `![[x.pdf#page=N|W]]` — page `N` rendered inline (the pane width, or `W`
+/// clamped to it) through the PDF seam and the shared cache, lazily like an image embed. A click
+/// opens the PDF tab at that page. An unresolved file, an out-of-range page, a parse failure or
+/// a render failure/refusal shows the round-14 file card instead.
+fn pdf_embed<'a>(
+    cx: &Ctx<'a, '_>,
+    target: &'a str,
+    page: u32,
+    width: Option<u32>,
+) -> Element<'a, Message> {
+    use crate::reading::PdfInfo;
+    let Some(Some(pdf)) = cx.doc.pdfs.get(target) else {
+        return file_card(cx, target);
+    };
+    let page0 = (page as usize).saturating_sub(1);
+    if cx.store.pdf_embed_failed(cx.path, pdf, page0) {
+        return file_card(cx, target);
+    }
+    let info = cx.store.pdf_info.get(pdf);
+    let size = match info {
+        Some(PdfInfo::Failed) => return file_card(cx, target),
+        Some(PdfInfo::Ready { pages, .. }) => match pages.get(page0) {
+            Some(&size) => Some(size),
+            None => return file_card(cx, target),
+        },
+        None => None,
+    };
+    let pinned = cx
+        .store
+        .pdf_embeds
+        .get(&(cx.path.to_owned(), cx.view))
+        .and_then(|v| v.pins.get(&(pdf.clone(), page0)))
+        .and_then(|k| cx.store.images.get(k));
+    let placeholder = match info {
+        Some(PdfInfo::Ready { placeholders, .. }) => placeholders.get(page0),
+        _ => None,
+    };
+    let fill = |h: &iced::widget::image::Handle| -> Element<'a, Message> {
+        let img = image(h.clone()).width(Length::Fill);
+        let mut c = container(img).width(Length::Fill);
+        if let Some(w) = width {
+            c = c.max_width(w as f32);
+        }
+        c.into()
+    };
+    let body: Element<'a, Message> = match pinned.or(placeholder) {
+        Some(h) => fill(h),
+        None => container(
+            text("PDF")
+                .size(cx.sz(13.0))
+                .color(cx.t.text_faint.to_color()),
+        )
+        .height(Length::Fixed(120.0))
+        .width(Length::Fill)
+        .into(),
+    };
+    let est_w = width.map_or(crate::image_cache::MAX_WIDTH as f32, |w| w as f32);
+    let est_h = size.map_or(
+        120.0,
+        |(pw, ph)| if pw > 0.0 { est_w * ph / pw } else { est_w },
+    );
+    let (note, view) = (cx.path.to_owned(), cx.view);
+    let shown = (note.clone(), pdf.clone());
+    let hidden = shown.clone();
+    let clicked = Message::PdfTab(PdfTabMsg::EmbedOpen {
+        path: pdf.clone(),
+        page: page0,
+    });
+    let card = button(body)
+        .padding(0)
+        .style(button::text)
+        .width(Length::Fill)
+        .on_press(clicked);
+    sensor(card)
+        .key(format!("{note}\u{1}{view}\u{1}{pdf}#page={page}"))
+        .anticipate(crate::image_cache::sensor_margin(est_w, est_h))
+        .on_show(move |size| {
+            Message::PdfTab(PdfTabMsg::EmbedShown {
+                note: shown.0.clone(),
+                view,
+                pdf: shown.1.clone(),
+                page: page0,
+                width: size.width,
+            })
+        })
+        .on_hide(Message::PdfTab(PdfTabMsg::EmbedHidden {
+            note: hidden.0,
+            view,
+            pdf: hidden.1,
+            page: page0,
+        }))
+        .into()
+}
+
 fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Message> {
     container(content)
         .padding(8)
@@ -529,6 +623,14 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
             // link, and `open_into` hands the external file to the system opener.
             cx.take_run();
             file_card(cx, target)
+        }
+        Block::PdfEmbed {
+            target,
+            page,
+            width,
+        } => {
+            cx.take_run();
+            pdf_embed(cx, target, *page, *width)
         }
     }
 }

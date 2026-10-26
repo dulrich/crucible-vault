@@ -153,8 +153,9 @@ fn external_files_go_to_the_opener_and_text_stays_text() {
     );
 }
 
-/// `![[doc.pdf]]` lowers to a file card (round-15 WP-3: its click opens the PDF tab); `![[B]]` stays a
-/// transclusion.
+/// `![[doc.pdf]]` lowers to a PDF embed block (round-15 WP-4; it was a file card in round-14 and
+/// WP-3 -- the expectation changed with the new block); the fallback card's click still opens
+/// the PDF tab; `![[B]]` stays a transclusion.
 #[test]
 fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
     let (_tmp, d, mut app) = setup(
@@ -169,8 +170,10 @@ fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
     let doc = app.reading.doc(&app.docs, "A.md").expect("rendered");
     assert_eq!(
         doc.model.blocks[0],
-        editor_model::render::Block::FileEmbed {
-            target: "doc.pdf".into()
+        editor_model::render::Block::PdfEmbed {
+            target: "doc.pdf".into(),
+            page: 1,
+            width: None,
         }
     );
     assert!(matches!(
@@ -178,7 +181,7 @@ fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
         editor_model::render::Block::Transclusion { .. }
     ));
     drop(app.view());
-    // The card's click is the link route: it resolves to an open, which opens the PDF tab.
+    // The fallback card's click is the link route: it resolves to an open, which opens the PDF tab.
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let click = app.reading.click("A.md", "doc.pdf", false, Some(&dc));
     assert!(matches!(&click, Some(Message::Tabs(TabsMsg::Open(p))) if p == "doc.pdf"));
@@ -371,4 +374,174 @@ fn renaming_a_pdf_keeps_its_tab_a_pdf_tab() {
     assert_eq!(app.active_tab().expect("tab").id, id, "same tab");
     assert_eq!(app.pdf.reserved_bytes(), 0, "old page pins released");
     assert!(app.pdf.docs.contains_key("d2.pdf") && !app.pdf.docs.contains_key("doc.pdf"));
+}
+
+/// Plan round-15 WP-4: A.md embeds page 2 of a three-page PDF; returns the app with the note
+/// open and the document parsed (tasks do not run here, so their results are fed by hand).
+fn embed_setup(note: &[u8]) -> (tempfile::TempDir, Arc<FakeDaemon>, App, Vec<u8>, u64) {
+    let pdf = crate::pdf::synthetic_pdf(3, 200, 100);
+    let (tmp, d, mut app) = setup(&[("A.md", note), ("doc.pdf", &pdf)], false);
+    open(&mut app, "A.md");
+    let view = app.active_tab().expect("tab").id;
+    drop(app.view());
+    (tmp, d, app, pdf, view)
+}
+
+fn embed_shown(app: &mut App, view: u64, page: usize, width: f32) {
+    use crate::message::PdfTabMsg;
+    let _ = app.send(Message::PdfTab(PdfTabMsg::EmbedShown {
+        note: "A.md".into(),
+        view,
+        pdf: "doc.pdf".into(),
+        page,
+        width,
+    }));
+}
+
+fn embed_doc_opened(app: &mut App, pdf: &[u8]) {
+    use crate::message::PdfTabMsg;
+    let bytes = Arc::new(pdf.to_vec());
+    let result = crate::pdf::open(&bytes).map(|s| (bytes, s));
+    let _ = app.send(Message::PdfTab(PdfTabMsg::Opened {
+        path: "doc.pdf".into(),
+        result,
+    }));
+}
+
+/// Plan round-15 WP-4: an embed sensor opens the shared document, pins its page under the
+/// `page_key` through the E1 reservation, survives a recompute (audit E4), and is released when
+/// the embed leaves the model; a click opens the PDF tab and scrolls it to the page.
+#[test]
+fn a_pdf_embed_renders_pins_survives_recompute_and_opens_the_tab_at_its_page() {
+    use crate::message::PdfTabMsg;
+    let (_tmp, _d, mut app, pdf, view) = embed_setup(b"![[doc.pdf#page=2]]\n");
+    embed_shown(&mut app, view, 1, 300.0);
+    assert!(
+        matches!(
+            app.pdf.docs.get("doc.pdf"),
+            Some(crate::app::pdf_tab::PdfDoc::Loading)
+        ),
+        "the embed asks for the document"
+    );
+    embed_doc_opened(&mut app, &pdf);
+    let width = crate::image_cache::decode_width(300.0);
+    let key = crate::app::pdf_tab::page_key("doc.pdf", 1, width);
+    assert_eq!(key, format!("doc.pdf#page=2@{width}"));
+    assert!(app.reading.images.waiting(&key), "pinned, load in flight");
+    assert!(
+        app.pdf.reserved.contains_key(&key),
+        "one E1 reservation map"
+    );
+    let bytes = Arc::new(pdf.clone());
+    let _ = app.send(Message::PdfTab(PdfTabMsg::EmbedRendered {
+        note: "A.md".into(),
+        view,
+        pdf: "doc.pdf".into(),
+        page: 1,
+        key: key.clone(),
+        result: crate::pdf::render_page(&bytes, 1, width),
+    }));
+    assert!(
+        app.reading.images.contains(&key),
+        "rendered into the shared cache"
+    );
+
+    // Audit E4: a recompute keeps the embed's page pin.
+    let dc = app.daemon.clone();
+    let mut od = app.docs.remove("A.md").expect("open");
+    app.reading.recompute(&mut od, dc.as_ref());
+    assert_eq!(app.reading.images.pins(&key), 1, "survives recompute");
+    // The embed leaves the model: the recompute releases it.
+    od.buffer
+        .reload(b"gone\n", crate::daemon::ContentHash::of(b"gone\n"));
+    app.reading.recompute(&mut od, dc.as_ref());
+    app.docs.insert("A.md".into(), od);
+    assert_eq!(
+        app.reading.images.pins(&key),
+        0,
+        "released when the embed is gone"
+    );
+    assert!(!app.reading.images.contains(&key));
+}
+
+/// Plan round-15 WP-4: a click on the rendered page opens the PDF tab (existing rules) and the
+/// tab scrolls to that page once it has a width.
+#[test]
+fn clicking_a_pdf_embed_opens_the_pdf_tab_at_the_page() {
+    use crate::message::PdfTabMsg;
+    let (_tmp, _d, mut app, pdf, view) = embed_setup(b"![[doc.pdf#page=3]]\n");
+    embed_shown(&mut app, view, 2, 300.0);
+    embed_doc_opened(&mut app, &pdf);
+    let _ = app.send(Message::PdfTab(PdfTabMsg::EmbedOpen {
+        path: "doc.pdf".into(),
+        page: 2,
+    }));
+    assert_eq!(
+        kinds(&app),
+        [TabKind::Note("A.md".into()), TabKind::Pdf("doc.pdf".into())]
+    );
+    assert_eq!(app.pdf.goto.get("doc.pdf"), Some(&2), "waits for a width");
+    let tab = app.active_tab().expect("tab").id;
+    drop(app.view());
+    let _ = app.send(Message::PdfTab(PdfTabMsg::PageShown {
+        path: "doc.pdf".into(),
+        view: tab,
+        page: 0,
+        width: 400.0,
+    }));
+    assert!(app.pdf.goto.is_empty(), "scroll request consumed");
+    let pages = vec![(200.0, 100.0); 3];
+    assert_eq!(crate::app::pdf_tab::pdf_page_offset(&pages, 400.0, 0), 8.0);
+    assert_eq!(
+        crate::app::pdf_tab::pdf_page_offset(&pages, 400.0, 2),
+        8.0 + 2.0 * 208.0
+    );
+}
+
+/// Plan round-15 WP-4: an out-of-range page, a failed render and an unparseable file all fall
+/// back to the file card (the failed marker / failed document), never a pin.
+#[test]
+fn a_pdf_embed_falls_back_to_the_card() {
+    use crate::message::PdfTabMsg;
+    let (_tmp, _d, mut app, pdf, view) = embed_setup(b"![[doc.pdf#page=9]]\n");
+    embed_shown(&mut app, view, 8, 300.0);
+    embed_doc_opened(&mut app, &pdf);
+    assert!(
+        app.reading.pdf_embed_failed("A.md", "doc.pdf", 8),
+        "page 9 of 3"
+    );
+    assert!(app.pdf.reserved.is_empty(), "nothing reserved");
+    drop(app.view());
+
+    // A render failure marks the page failed and releases its pin.
+    embed_shown(&mut app, view, 0, 300.0);
+    let width = crate::image_cache::decode_width(300.0);
+    let key = crate::app::pdf_tab::page_key("doc.pdf", 0, width);
+    assert!(app.reading.images.waiting(&key));
+    let _ = app.send(Message::PdfTab(PdfTabMsg::EmbedRendered {
+        note: "A.md".into(),
+        view,
+        pdf: "doc.pdf".into(),
+        page: 0,
+        key: key.clone(),
+        result: Err("boom".into()),
+    }));
+    assert!(app.reading.pdf_embed_failed("A.md", "doc.pdf", 0));
+    assert!(!app.reading.images.contains(&key));
+    assert!(app.pdf.reserved.is_empty());
+    drop(app.view());
+}
+
+/// Plan round-15 WP-4: an unparseable PDF shows the card.
+#[test]
+fn an_unparseable_pdf_embed_shows_the_card() {
+    let (_tmp, _d, mut app, _pdf, view) = embed_setup(b"![[doc.pdf]]\n");
+    embed_shown(&mut app, view, 0, 300.0);
+    embed_doc_opened(&mut app, b"%PDF-1.4\0garbage");
+    assert!(matches!(
+        app.reading.pdf_info.get("doc.pdf"),
+        Some(crate::reading::PdfInfo::Failed)
+    ));
+    assert!(app.pdf.reserved.is_empty());
+    drop(app.view());
 }

@@ -117,6 +117,13 @@ pub enum Block {
     FileEmbed {
         target: String,
     },
+    /// Plan round-15 WP-4: `![[file.pdf#page=N|width]]` — page `page` (1-based) rendered
+    /// inline; `width` is the `|<width>` alias, as for an image embed.
+    PdfEmbed {
+        target: String,
+        page: u32,
+        width: Option<u32>,
+    },
     /// A `crucible-view` fence (one-line body `<file>#<name>`), rendered by WP-7's hook.
     ViewFence {
         file: String,

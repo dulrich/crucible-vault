@@ -284,7 +284,7 @@ impl Walk {
                 }
             }
             // The card's file name is its copy text (a non-text slot, as an image's alt).
-            Block::FileEmbed { target } => {
+            Block::FileEmbed { target } | Block::PdfEmbed { target, .. } => {
                 let name = target.rsplit('/').next().unwrap_or(target).to_owned();
                 self.push(name, Vec::new(), sep, true);
             }

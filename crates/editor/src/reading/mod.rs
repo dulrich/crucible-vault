@@ -105,6 +105,8 @@ pub struct Doc {
     pub model: RenderModel,
     /// Image `src` → resolved vault path (`None` = unresolved); remote images are absent.
     pub images: HashMap<String, Option<String>>,
+    /// Plan round-15 WP-4: PDF embed `target` → resolved vault path (`None` = unresolved).
+    pub pdfs: HashMap<String, Option<String>>,
     /// The visible runs in render order (the one walk — the view draws them, the
     /// selection copies them, find counts over them).
     pub runs: Vec<VisRun>,
@@ -112,6 +114,27 @@ pub struct Doc {
     /// view hands to `OpenLink`) that do not resolve — drawn dimmed, menu offers "Create note".
     /// Empty without a daemon (no resolver: nothing is known missing).
     pub unresolved: HashSet<String>,
+}
+
+/// Plan round-15 WP-4: what Reading knows of a PDF an embed shows — a mirror of the parsed
+/// document in `App.pdf.docs` (a path with no entry is still loading). Only sizes and handles,
+/// never bytes.
+#[derive(Debug, Clone)]
+pub enum PdfInfo {
+    Ready {
+        pages: crate::pdf::PageSizes,
+        placeholders: Vec<iced::widget::image::Handle>,
+    },
+    Failed,
+}
+
+/// Plan round-15 WP-4: one tab's inline PDF embeds, keyed `(pdf path, 0-based page)`.
+#[derive(Debug, Default)]
+pub struct EmbedView {
+    /// Embeds within the near window, and their laid-out width.
+    pub shown: std::collections::BTreeMap<(String, usize), f32>,
+    /// Embeds pinned (or loading) for this tab, and their cache key.
+    pub pins: std::collections::BTreeMap<(String, usize), String>,
 }
 
 /// One document's Reading state: everything per note path, owned by its [`OpenDoc`] — a close
@@ -172,6 +195,13 @@ pub struct ReadingStore {
     /// Plan round-8-intake-views-anchor WP-4: `editor.toml` `scroll_anchor` as a fraction of
     /// the viewport height (0 = top; set by `App::apply_prefs`).
     anchor: f32,
+    /// Plan round-15 WP-4: parsed PDFs by vault path (see [`PdfInfo`]).
+    pub pdf_info: HashMap<String, PdfInfo>,
+    /// Plan round-15 WP-4: inline PDF embeds per `(note path, tab id)`.
+    pub pdf_embeds: HashMap<(String, u64), EmbedView>,
+    /// Plan round-15 WP-4: per note, embeds `(pdf, page)` that failed to render, were refused
+    /// by admission or are out of range — drawn as the file card.
+    pub pdf_failed: HashMap<String, HashSet<(String, usize)>>,
 }
 
 /// The widget id of `path`'s breadcrumb filename input (blur polling).
@@ -466,6 +496,49 @@ impl ReadingStore {
     /// [`crate::app::OpenDoc`]; release its image pins (E2).
     pub fn closed(&mut self, path: &str) {
         self.images.release_owner(path);
+        self.release_embeds(path);
+    }
+
+    /// Plan round-15 WP-4: forgets every inline PDF embed state of note `path` (its cache pins
+    /// go with [`ImageCache::release_owner`]).
+    fn release_embeds(&mut self, path: &str) {
+        self.pdf_embeds.retain(|(n, _), _| n != path);
+        self.pdf_failed.remove(path);
+    }
+
+    /// Plan round-15 WP-4 (audit E4): note `path` was re-lowered and now embeds exactly the
+    /// `live` `(pdf, page)` pairs: state of embeds that left the model is dropped (their cache
+    /// pins then fall to `retain_owner`), and the cache keys still pinned are returned so the
+    /// caller keeps them.
+    fn prune_embeds(&mut self, path: &str, live: &HashSet<(String, usize)>) -> HashSet<String> {
+        let mut keep = HashSet::new();
+        for ((n, _), v) in &mut self.pdf_embeds {
+            if n == path {
+                v.shown.retain(|k, _| live.contains(k));
+                v.pins.retain(|k, _| live.contains(k));
+                keep.extend(v.pins.values().cloned());
+            }
+        }
+        if let Some(f) = self.pdf_failed.get_mut(path) {
+            f.retain(|k| live.contains(k));
+        }
+        keep
+    }
+
+    /// Whether note `path` currently embeds `pdf` in a Reading view (the `known` check for an
+    /// embed sensor, as [`Self::image_shown`] does for images).
+    pub fn pdf_embed_known(&self, docs: &Docs, path: &str, pdf: &str) -> bool {
+        self.mode(docs, path).shows_reading()
+            && self
+                .doc(docs, path)
+                .is_some_and(|d| d.pdfs.values().flatten().any(|p| p == pdf))
+    }
+
+    /// Whether embed `(pdf, page)` of note `path` shows the file card instead of the page.
+    pub fn pdf_embed_failed(&self, path: &str, pdf: &str, page: usize) -> bool {
+        self.pdf_failed
+            .get(path)
+            .is_some_and(|f| f.contains(&(pdf.to_owned(), page)))
     }
 
     /// `from` was renamed (its [`DocReading`] moved with the [`crate::app::OpenDoc`]): the
@@ -543,6 +616,7 @@ impl ReadingStore {
                 v.sel = None;
             });
             self.images.release_owner(od.buffer.path());
+            self.release_embeds(od.buffer.path());
         }
     }
 
@@ -573,6 +647,20 @@ impl ReadingStore {
                 (src, key)
             })
             .collect();
+        let pdfs: HashMap<String, Option<String>> = render::pdf_embeds(&model)
+            .into_iter()
+            .map(|(target, _)| {
+                let key = self.resolve(doc.path(), &percent_decode(&target));
+                (target, key)
+            })
+            .collect();
+        let live: HashSet<(String, usize)> = render::pdf_embeds(&model)
+            .into_iter()
+            .filter_map(|(t, page)| {
+                Some((pdfs.get(&t)?.clone()?, (page as usize).saturating_sub(1)))
+            })
+            .collect();
+        let embed_keys = self.prune_embeds(doc.path(), &live);
         let unresolved: HashSet<String> = if daemon.is_some() {
             render::link_targets(&model)
                 .into_iter()
@@ -584,13 +672,15 @@ impl ReadingStore {
         } else {
             HashSet::new()
         };
-        let keep: HashSet<String> = images.values().flatten().cloned().collect();
+        let mut keep: HashSet<String> = images.values().flatten().cloned().collect();
         if let Some(d) = daemon {
             // Plan round-5 WP-2: header-read sizes so placeholders take the image's height.
             for key in &keep {
                 self.images.note_dims(key, d.vault_root());
             }
         }
+        // Audit E4: the page keys this note's embeds still pin survive the retain.
+        keep.extend(embed_keys);
         self.images.retain_owner(doc.path(), &keep);
         let runs = editor_model::visible::visible_runs(&model);
         let resolver_epoch = self.resolver.epoch();
@@ -606,6 +696,7 @@ impl ReadingStore {
             resolver_epoch,
             model,
             images,
+            pdfs,
             runs,
             unresolved,
         });

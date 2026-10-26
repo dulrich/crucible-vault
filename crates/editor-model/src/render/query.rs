@@ -148,3 +148,31 @@ fn collect_images(blocks: &[Block], out: &mut Vec<(String, bool)>) {
         }
     }
 }
+
+/// Plan round-15 WP-4: every PDF embed's `(target, 1-based page)`, in document order, including
+/// inside transclusions.
+pub fn pdf_embeds(model: &RenderModel) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    collect_pdf_embeds(&model.blocks, &mut out);
+    out
+}
+
+fn collect_pdf_embeds(blocks: &[Block], out: &mut Vec<(String, u32)>) {
+    for b in blocks {
+        match b {
+            Block::PdfEmbed { target, page, .. } => out.push((target.clone(), *page)),
+            Block::List { items, .. } => {
+                for i in items {
+                    collect_pdf_embeds(&i.children, out);
+                }
+            }
+            Block::Callout { children, .. } | Block::BlockQuote(children) => {
+                collect_pdf_embeds(children, out);
+            }
+            Block::Transclusion {
+                content: Some(c), ..
+            } => collect_pdf_embeds(c, out),
+            _ => {}
+        }
+    }
+}

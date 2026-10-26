@@ -70,6 +70,9 @@ pub struct PdfTabs {
     pub views: HashMap<u64, PdfView>,
     /// Projected bytes per PDF page key pinned or in flight (audit E1 accounting).
     pub reserved: HashMap<String, usize>,
+    /// Plan round-15 WP-4: PDF path -> 0-based page a click on an inline embed asked the tab to
+    /// scroll to (consumed once the tab has a laid-out width).
+    pub goto: HashMap<String, usize>,
 }
 
 impl PdfTabs {
@@ -84,6 +87,19 @@ fn settle(reserved: &mut HashMap<String, usize>, cache: &image_cache::ImageCache
     if !cache.contains(key) && !cache.waiting(key) {
         reserved.remove(key);
     }
+}
+
+/// The scrollable id of PDF tab `view`'s page column.
+pub fn pdf_scroll_id(view: u64) -> iced::widget::Id {
+    iced::widget::Id::from(format!("pdf-pages:{view}"))
+}
+
+/// The scroll offset of the top of 0-based `page` in a column of pages `width` px wide
+/// (column padding and inter-page spacing are 8 px; see [`App::pdf_body`]).
+pub fn pdf_page_offset(pages: &PageSizes, width: f32, page: usize) -> f32 {
+    pages.iter().take(page).fold(8.0, |y, &(pw, ph)| {
+        y + if pw > 0.0 { width * ph / pw } else { width } + 8.0
+    })
 }
 
 /// One placeholder handle per distinct page size.
@@ -132,23 +148,50 @@ impl App {
                 );
             }
             PdfTabMsg::Opened { path, result } => {
-                if !self.path_open(&path) {
+                if !self.pdf_needed(&path) {
                     self.pdf.docs.remove(&path);
                     return Task::none();
                 }
                 let doc = match result {
-                    Ok((bytes, pages)) => PdfDoc::Ready {
-                        placeholders: placeholders(&pages),
-                        bytes,
-                        pages,
-                        error: None,
-                    },
+                    Ok((bytes, pages)) => {
+                        let placeholders = placeholders(&pages);
+                        self.reading.pdf_info.insert(
+                            path.clone(),
+                            crate::reading::PdfInfo::Ready {
+                                pages: pages.clone(),
+                                placeholders: placeholders.clone(),
+                            },
+                        );
+                        PdfDoc::Ready {
+                            placeholders,
+                            bytes,
+                            pages,
+                            error: None,
+                        }
+                    }
                     Err(e) => {
                         tracing::debug!(error = %e, "pdf open failed");
+                        self.reading
+                            .pdf_info
+                            .insert(path.clone(), crate::reading::PdfInfo::Failed);
+                        self.pdf.goto.remove(&path);
                         PdfDoc::Failed(e)
                     }
                 };
-                self.pdf.docs.insert(path, doc);
+                self.pdf.docs.insert(path.clone(), doc);
+                // Inline embeds waiting on this document start their renders.
+                let waiting: Vec<(String, u64)> = self
+                    .reading
+                    .pdf_embeds
+                    .iter()
+                    .filter(|(_, v)| v.shown.keys().any(|(p, _)| *p == path))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                let tasks: Vec<_> = waiting
+                    .into_iter()
+                    .map(|(note, view)| self.pump_embeds(&note, view))
+                    .collect();
+                return Task::batch(tasks);
             }
             PdfTabMsg::PageShown {
                 path,
@@ -162,7 +205,8 @@ impl App {
                 }
                 v.width = width;
                 v.shown.insert(page);
-                return self.pump_pdf(view);
+                let pump = self.pump_pdf(view);
+                return Task::batch([pump, self.pdf_apply_goto(&path)]);
             }
             PdfTabMsg::PageHidden { path, view, page } => {
                 let Some(v) = self.pdf.views.get_mut(&view) else {
@@ -214,8 +258,220 @@ impl App {
                 return self.pump_pdf(view);
             }
             PdfTabMsg::OpenExternal(path) => self.open_external(&path),
+            PdfTabMsg::EmbedShown {
+                note,
+                view,
+                pdf,
+                page,
+                width,
+            } => {
+                if !self.reading.pdf_embed_known(&self.docs, &note, &pdf) {
+                    return Task::none();
+                }
+                self.reading
+                    .pdf_embeds
+                    .entry((note.clone(), view))
+                    .or_default()
+                    .shown
+                    .insert((pdf, page), width);
+                return self.pump_embeds(&note, view);
+            }
+            PdfTabMsg::EmbedHidden {
+                note,
+                view,
+                pdf,
+                page,
+            } => {
+                let Some(v) = self.reading.pdf_embeds.get_mut(&(note.clone(), view)) else {
+                    return Task::none();
+                };
+                v.shown.remove(&(pdf.clone(), page));
+                if let Some(key) = v.pins.remove(&(pdf, page)) {
+                    let cache = &mut self.reading.images;
+                    cache.hide(&image_cache::view_owner(&note, view), &key);
+                    settle(&mut self.pdf.reserved, cache, &key);
+                }
+                return self.pump_embeds(&note, view);
+            }
+            PdfTabMsg::EmbedRendered {
+                note,
+                view,
+                pdf,
+                page,
+                key,
+                result,
+            } => {
+                let cache = &mut self.reading.images;
+                match result {
+                    Ok(d) => {
+                        cache.loaded(&key, Some(d));
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "pdf embed render failed");
+                        cache.loaded(&key, None);
+                        self.reading
+                            .pdf_failed
+                            .entry(note.clone())
+                            .or_default()
+                            .insert((pdf.clone(), page));
+                        if let Some(v) = self.reading.pdf_embeds.get_mut(&(note.clone(), view))
+                            && v.pins.get(&(pdf, page)) == Some(&key)
+                        {
+                            v.pins.retain(|_, k| *k != key);
+                        }
+                    }
+                }
+                settle(&mut self.pdf.reserved, &self.reading.images, &key);
+                return self.pump_embeds(&note, view);
+            }
+            // The existing open rules (focus an open tab, else a new one), then the scroll.
+            PdfTabMsg::EmbedOpen { path, page } => {
+                self.pdf.goto.insert(path.clone(), page);
+                let open = self.update_inner(Message::Tabs(TabsMsg::Open(path.clone())));
+                return Task::batch([open, self.pdf_apply_goto(&path)]);
+            }
         }
         Task::none()
+    }
+
+    /// Whether a PDF document must stay loaded: a tab shows it, or an open note embeds it.
+    fn pdf_needed(&self, path: &str) -> bool {
+        self.path_open(path)
+            || self.docs.values().any(|od| {
+                od.reading
+                    .doc
+                    .as_ref()
+                    .is_some_and(|d| d.pdfs.values().flatten().any(|p| p == path))
+            })
+    }
+
+    /// Drops parsed documents (and Reading's mirror of them) nothing needs any more.
+    pub(super) fn sweep_pdf_docs(&mut self) {
+        let stale: Vec<String> = self
+            .pdf
+            .docs
+            .iter()
+            .filter(|(p, d)| !matches!(d, PdfDoc::Loading) && !self.pdf_needed(p))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in stale {
+            self.pdf.docs.remove(&p);
+        }
+        let docs = &self.pdf.docs;
+        self.reading.pdf_info.retain(|p, _| docs.contains_key(p));
+    }
+
+    /// Plan round-15 WP-4: starts the renders of tab `view`'s shown inline embeds in note
+    /// `note` that have none, through the same admission rule ([`pdf::admit`]) and
+    /// reservation map ([`PdfTabs::reserved`]) as the PDF tab, so there is one accounting. An
+    /// embed whose page is out of range or refused is marked failed (it draws the file card);
+    /// a document not yet loaded is opened (its `Opened` pumps again).
+    fn pump_embeds(&mut self, note: &str, view: u64) -> Task<Message> {
+        let Some(ev) = self.reading.pdf_embeds.get(&(note.to_owned(), view)) else {
+            return Task::none();
+        };
+        let wanted: Vec<((String, usize), f32)> = ev
+            .shown
+            .iter()
+            .filter(|(k, _)| !ev.pins.contains_key(*k))
+            .filter(|((pdf, page), _)| !self.reading.pdf_embed_failed(note, pdf, *page))
+            .map(|(k, w)| (k.clone(), *w))
+            .collect();
+        let owner = image_cache::view_owner(note, view);
+        let mut tasks = Vec::new();
+        for ((pdf, page), display) in wanted {
+            let (bytes, size) = match self.pdf.docs.get(&pdf) {
+                None => {
+                    tasks.push(self.update_pdf_tab(PdfTabMsg::Open { path: pdf }));
+                    continue;
+                }
+                Some(PdfDoc::Loading) => continue,
+                Some(PdfDoc::Failed(_)) => (None, None),
+                Some(PdfDoc::Ready { bytes, pages, .. }) => {
+                    (Some(Arc::clone(bytes)), pages.get(page).copied())
+                }
+            };
+            let cache = &mut self.reading.images;
+            // Reservations of keys the cache evicted meanwhile no longer count.
+            self.pdf
+                .reserved
+                .retain(|k, _| cache.contains(k) || cache.waiting(k));
+            let admitted = size.and_then(|size| {
+                let used: usize = self.pdf.reserved.values().sum();
+                pdf::admit(size, display, used, cache.budget()).map(|w| (size, w))
+            });
+            let (Some(bytes), Some((size, width))) = (bytes, admitted) else {
+                self.reading
+                    .pdf_failed
+                    .entry(note.to_owned())
+                    .or_default()
+                    .insert((pdf, page));
+                continue;
+            };
+            let key = page_key(&pdf, page, width);
+            let start = cache.show(&owner, &key);
+            if let Some(ev) = self.reading.pdf_embeds.get_mut(&(note.to_owned(), view)) {
+                ev.pins.insert((pdf.clone(), page), key.clone());
+            }
+            if start {
+                self.pdf
+                    .reserved
+                    .insert(key.clone(), pdf::projected_bytes(size, width));
+                let note = note.to_owned();
+                tasks.push(Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || pdf::render_page(&bytes, page, width))
+                            .await
+                            .unwrap_or_else(|_| Err("render task failed".to_owned()))
+                    },
+                    move |result| {
+                        Message::PdfTab(PdfTabMsg::EmbedRendered {
+                            note,
+                            view,
+                            pdf,
+                            page,
+                            key,
+                            result,
+                        })
+                    },
+                ));
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    /// Plan round-15 WP-4: scrolls a PDF tab of `path` to the page an embed click asked for,
+    /// once a tab has a laid-out width and the document is parsed (else the request stays
+    /// pending and the next `PageShown` retries).
+    fn pdf_apply_goto(&mut self, path: &str) -> Task<Message> {
+        let Some(&page) = self.pdf.goto.get(path) else {
+            return Task::none();
+        };
+        let Some(PdfDoc::Ready { pages, .. }) = self.pdf.docs.get(path) else {
+            return Task::none();
+        };
+        let ids: Vec<u64> = self
+            .panes
+            .iter()
+            .flat_map(|(_, ps)| ps.tabs.iter())
+            .filter(|t| matches!(&t.kind, TabKind::Pdf(p) if p == path))
+            .map(|t| t.id)
+            .collect();
+        let Some((view, width)) = ids.into_iter().find_map(|id| {
+            let w = self.pdf.views.get(&id)?.width;
+            (w > 0.0).then_some((id, w))
+        }) else {
+            return Task::none();
+        };
+        self.pdf.goto.remove(path);
+        let y = pdf_page_offset(pages, width, page);
+        iced::widget::operation::scroll_to(
+            pdf_scroll_id(view),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
     }
 
     /// Starts renders for `view`'s shown pages that have none, within [`MAX_INFLIGHT`] and
@@ -225,6 +481,7 @@ impl App {
             docs,
             views,
             reserved,
+            goto: _,
         } = &mut self.pdf;
         let Some(v) = views.get_mut(&view) else {
             return Task::none();
@@ -304,6 +561,9 @@ impl App {
         }
         if let Some(doc) = self.pdf.docs.remove(from) {
             self.pdf.docs.insert(to.to_owned(), doc);
+        }
+        if let Some(info) = self.reading.pdf_info.remove(from) {
+            self.reading.pdf_info.insert(to.to_owned(), info);
         }
     }
 
@@ -395,9 +655,12 @@ impl App {
                     })),
             );
         }
-        iced::widget::column![bar, scrollable(col).height(Length::Fill)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        iced::widget::column![
+            bar,
+            scrollable(col).id(pdf_scroll_id(view)).height(Length::Fill)
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 }
