@@ -24,7 +24,7 @@ pub(super) fn start_event_bridge(
                 let (kind, want_hash) = match ev.kind {
                     EventKind::Created => (ChangeKind::Created, true),
                     EventKind::Modified => (ChangeKind::Modified, true),
-                    EventKind::Deleted => (ChangeKind::Deleted, false),
+                    EventKind::Deleted { .. } => (ChangeKind::Deleted, false),
                     EventKind::Renamed { .. } => (ChangeKind::Renamed, false),
                 };
                 let hash = if want_hash {
@@ -43,14 +43,10 @@ pub(super) fn start_event_bridge(
                     sync_read(&s, &mut read_sync, &ev.path, &ev.kind);
                 }
                 // Round 11 WP-1 (Decision 1): a delete the writer recorded as absorbed by another
-                // note (auto-file's trash) reports that note as `replaced_by`.
-                let replaced_by = if matches!(ev.kind, EventKind::Deleted) {
-                    weak.upgrade().and_then(|s| s.writer()).and_then(|w| {
-                        let p = ev.path.clone();
-                        w.call(move |vw| vw.take_replaced_by(&p)).ok().flatten()
-                    })
-                } else {
-                    None
+                // note (auto-file's trash) reports that note as `replaced_by` (the watcher fills it).
+                let replaced_by = match &ev.kind {
+                    EventKind::Deleted { replaced_by } => replaced_by.clone(),
+                    _ => None,
                 };
                 let origin = match ev.origin {
                     cv_vault::Origin::Daemon => Origin::Daemon,

@@ -43,7 +43,7 @@ use std::path::Path;
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_state::NewTrashEntry;
-use cv_vault::{ContentHash, TrashReason};
+use cv_vault::{ContentHash, FileIdentity, TrashLocation, TrashMove, TrashReason, TrashRecord};
 use serde::Serialize;
 
 use super::params::check_keys;
@@ -135,9 +135,13 @@ pub(crate) fn run_in(
 
 // ---- identity -----------------------------------------------------------------------------------
 
-/// Whether the object `(bytes, mtime_ms, inode)` is the one `row` recorded (each recorded field).
-fn identity_matches(row: &NewTrashEntry, id: (u64, i64, u64)) -> bool {
-    let (bytes, mtime_ms, inode) = id;
+/// Whether the object `id` is the one `row` recorded (each recorded field).
+fn identity_matches(row: &NewTrashEntry, id: FileIdentity) -> bool {
+    let FileIdentity {
+        bytes,
+        mtime_ms,
+        inode,
+    } = id;
     i64::try_from(bytes).is_ok_and(|b| b == row.bytes)
         && row.mtime_ms.is_none_or(|m| m == mtime_ms)
         && row
@@ -190,13 +194,15 @@ fn seed(
         let Ok(id) = cv_vault::trash::identity(&full) else {
             continue;
         };
-        let known = ctx.state().trash_entry_by_path("vault", &rel)?;
+        let known = ctx
+            .state()
+            .trash_entry_by_path(TrashLocation::Vault, &rel)?;
         if known.is_some_and(|e| identity_matches(&e.entry, id)) {
             continue;
         }
         let original = rel.strip_prefix(".trash/").unwrap_or(&rel).to_owned();
         ctx.state()
-            .insert_trash_entry(&entry("vault", rel, original, now, id, None))?;
+            .insert_trash_entry(&seeded(TrashLocation::Vault, rel, original, now, id))?;
         v.seeded += 1;
     }
     let Some(root) = system_root else {
@@ -216,44 +222,44 @@ fn seed(
         if too_fresh(&md, now) {
             continue;
         }
-        let id = (e.bytes, e.mtime_ms, e.inode);
-        let known = ctx.state().trash_entry_by_path("system", &e.name)?;
+        let id = e.identity;
+        let known = ctx
+            .state()
+            .trash_entry_by_path(TrashLocation::System, &e.name)?;
         if known.is_some_and(|k| identity_matches(&k.entry, id)) {
             continue;
         }
-        let info = format!("{}.trashinfo", e.name);
-        ctx.state().insert_trash_entry(&entry(
-            "system",
+        ctx.state().insert_trash_entry(&seeded(
+            TrashLocation::System,
             e.name,
             e.original_path,
             now,
             id,
-            Some(info),
         ))?;
         v.adopted += 1;
     }
     Ok(())
 }
 
-fn entry(
-    location: &str,
+/// A `seeded` ledger row for a trash file found on disk (system rows get their `.trashinfo`
+/// name from the record, as the writer's do).
+fn seeded(
+    location: TrashLocation,
     trash_path: String,
     original_path: String,
     trashed_ms: i64,
-    id: (u64, i64, u64),
-    info_name: Option<String>,
+    identity: FileIdentity,
 ) -> NewTrashEntry {
-    NewTrashEntry {
-        location: location.to_owned(),
-        trash_path,
+    crate::daemon::trash::entry_of(&TrashRecord {
+        moved: TrashMove {
+            location,
+            trash_path,
+            identity,
+        },
         original_path,
         trashed_ms,
-        bytes: i64::try_from(id.0).unwrap_or(i64::MAX),
-        reason: TrashReason::Seeded.as_str().to_owned(),
-        mtime_ms: Some(id.1),
-        inode: i64::try_from(id.2).ok(),
-        info_name,
-    }
+        reason: TrashReason::Seeded,
+    })
 }
 
 // ---- expire -------------------------------------------------------------------------------------
@@ -296,19 +302,18 @@ fn expire(
         if e.trashed_ms.saturating_add(retention_ms) >= now {
             continue;
         }
-        let removal = match e.location.as_str() {
-            "vault" => {
+        let removal = match e.location {
+            TrashLocation::Vault => {
                 if vault_trash_path(&e.trash_path) {
                     remove_vault(ctx, e)?
                 } else {
                     Removal::Gone
                 }
             }
-            "system" => {
+            TrashLocation::System => {
                 let Some(root) = system_root else { continue };
                 remove_system(root, e)
             }
-            _ => Removal::Gone,
         };
         match removal {
             Removal::Deleted => {

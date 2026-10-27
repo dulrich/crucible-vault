@@ -103,7 +103,7 @@ fn daemon_write_is_echo_external_write_is_applied() {
     std::fs::remove_file(fx.vault.path().join("n.md")).unwrap();
     let evs = first_then_tail(&rx);
     assert_eq!(evs.len(), 1, "{evs:?}");
-    assert_eq!(evs[0].kind, EventKind::Deleted);
+    assert_eq!(evs[0].kind, EventKind::Deleted { replaced_by: None });
     assert_eq!(evs[0].origin, Origin::External);
     assert!(
         wh.call(|w| w.index().query().file("n.md").unwrap().is_none())
@@ -124,7 +124,7 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
         vec![
             VaultEvent {
                 path: "b.md".into(),
-                kind: EventKind::Deleted,
+                kind: EventKind::Deleted { replaced_by: None },
                 origin: Origin::Daemon
             },
             VaultEvent {
@@ -217,7 +217,7 @@ fn expired_move_echo_degrades_to_delete_and_create() {
         vec![
             VaultEvent {
                 path: "a.md".into(),
-                kind: EventKind::Deleted,
+                kind: EventKind::Deleted { replaced_by: None },
                 origin: Origin::External
             },
             VaultEvent {
@@ -230,5 +230,25 @@ fn expired_move_echo_degrades_to_delete_and_create() {
     assert!(
         wh.call(|w| w.index().query().file("c.md").unwrap().is_some())
             .unwrap()
+    );
+}
+
+#[test]
+fn delete_replaced_carries_replaced_by_on_the_event() {
+    let fx = Fx::new(&[("a.md", "A"), ("b.md", "B")]);
+    let (wh, rx, _j) = spawn_writer_with_watcher(fx.live(), cfg()).unwrap();
+    wh.call(|w| w.delete_replaced("a.md", h("A"), "b.md"))
+        .unwrap()
+        .unwrap();
+    let evs = first_then_tail(&rx);
+    assert_eq!(
+        evs,
+        vec![VaultEvent {
+            path: "a.md".into(),
+            kind: EventKind::Deleted {
+                replaced_by: Some("b.md".into())
+            },
+            origin: Origin::Daemon
+        }]
     );
 }

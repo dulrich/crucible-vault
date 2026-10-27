@@ -169,3 +169,84 @@ fn missing_note_cleans_the_dangling_entry_and_writes_no_row() {
     assert!(keys(&e, "a/keep.md", NOT_DUP_KEY).is_empty());
     assert!(e.state.lock().unwrap().dup_labels().unwrap().is_empty());
 }
+
+fn try_resolve(
+    e: &StepEnv,
+    keep: &str,
+    other: &str,
+    verdict: &str,
+) -> Result<StepOutcome, crate::steps::StepError> {
+    let mut p = Map::new();
+    p.insert("keep".into(), keep.into());
+    p.insert("other".into(), other.into());
+    p.insert("verdict".into(), verdict.into());
+    e.exec_with(&step("dupes_resolve"), &p, &e.context, &e.vars)
+}
+
+/// D4 boundary (a): the trash fails after the label + re-points committed; both notes stay, and
+/// the retry reuses the committed label (exactly one row) and finishes the keep.
+#[test]
+fn keep_retry_after_a_failed_trash_reuses_the_committed_label() {
+    let body = words("p", 60);
+    let e = env(&[
+        ("a/keep.md", labelled("b/dup", &body)),
+        ("b/dup.md", labelled("a/keep", &body)),
+    ]);
+    tracker_row(&e, "1", "b/dup.md");
+    // A plain file where `.trash/` must be a directory: the trash move fails.
+    let blocker = e.vault().join(".trash");
+    std::fs::write(&blocker, "x").unwrap();
+    assert!(try_resolve(&e, "a/keep.md", "b/dup.md", "keep").is_err());
+    assert!(e.read("b/dup.md").is_some() && e.read("a/keep.md").is_some());
+    {
+        let st = e.state.lock().unwrap();
+        assert_eq!(
+            st.dup_labels().unwrap().len(),
+            1,
+            "label committed before the trash"
+        );
+        assert_eq!(st.tracker_items_for_note("a/keep.md").unwrap().len(), 1);
+    }
+    std::fs::remove_file(&blocker).unwrap();
+    let o = resolve(&e, "a/keep.md", "b/dup.md", "keep");
+    assert_eq!(s(&o, "action"), "keep");
+    assert_eq!(o.vars["tracker_repointed"], 0);
+    assert!(e.read("b/dup.md").is_none());
+    assert_eq!(e.state.lock().unwrap().dup_labels().unwrap().len(), 1);
+}
+
+/// D4 boundary (b): a relabel failure after the trash is best-effort (the job completes) and
+/// a retry neither loses nor duplicates the label.
+#[cfg(unix)]
+#[test]
+fn keep_relabel_failure_after_the_trash_never_defers_or_duplicates() {
+    use std::os::unix::fs::PermissionsExt;
+    let body = words("r", 60);
+    let e = env(&[
+        ("a/keep.md", labelled("b/dup", &body)),
+        ("b/dup.md", labelled("a/keep", &body)),
+    ]);
+    // `a/` read-only: the keep note's relabel write fails; the trash of `b/dup.md` does not.
+    let dir = e.vault().join("a");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = std::fs::write(dir.join(".probe"), "x").is_ok();
+    let first = try_resolve(&e, "a/keep.md", "b/dup.md", "keep");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if probe {
+        return; // running as root: permissions do not block the write
+    }
+    let first = first.unwrap();
+    assert_eq!(s(&first, "action"), "keep");
+    assert!(e.read("b/dup.md").is_none());
+    assert_eq!(
+        keys(&e, "a/keep.md", POSSIBLE_KEY),
+        vec!["[[b/dup]]"],
+        "relabel failed"
+    );
+    // A retry of the same verdict (as after a transient conflict): stale, cleans the dangling
+    // entry, and the committed label stays the only row.
+    let retry = resolve(&e, "a/keep.md", "b/dup.md", "keep");
+    assert_eq!(s(&retry, "action"), "stale");
+    assert!(keys(&e, "a/keep.md", POSSIBLE_KEY).is_empty());
+    assert_eq!(e.state.lock().unwrap().dup_labels().unwrap().len(), 1);
+}

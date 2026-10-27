@@ -5,27 +5,8 @@
 
 use serde::Deserialize;
 
-/// Where a recoverable delete moves the file.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrashLocation {
-    /// The vault's own `.trash/<path>` (Obsidian-style; the default).
-    #[default]
-    Vault,
-    /// The XDG home trash (`$XDG_DATA_HOME/Trash`).
-    System,
-}
-
-impl TrashLocation {
-    /// The config / ledger spelling.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Vault => "vault",
-            Self::System => "system",
-        }
-    }
-}
+/// Where a recoverable delete moves the file (the one protocol definition, WP-R6).
+pub use cv_protocol::TrashLocation;
 
 /// `[trash]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

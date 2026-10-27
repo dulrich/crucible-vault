@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
 use cv_state::NewTrashEntry;
 use cv_vault::test_support::LiveFixture;
-use cv_vault::{ContentHash, TrashReason};
+use cv_vault::{ContentHash, FileIdentity, TrashLocation, TrashMove, TrashReason, TrashRecord};
 
 use super::{DAY_MS, Params, run_in, sweep_one};
 use crate::steps::testkit::{StepEnv, config_of};
@@ -76,21 +76,28 @@ fn set_old(p: &Path, days: u64) {
 }
 
 fn row_for(
-    location: &str,
+    location: TrashLocation,
     trash_path: &str,
-    id: (u64, i64, u64),
+    identity: FileIdentity,
     trashed_ms: i64,
 ) -> NewTrashEntry {
-    NewTrashEntry {
-        location: location.into(),
-        trash_path: trash_path.into(),
+    crate::daemon::trash::entry_of(&TrashRecord {
+        moved: TrashMove {
+            location,
+            trash_path: trash_path.into(),
+            identity,
+        },
         original_path: "orig/x.md".into(),
         trashed_ms,
-        bytes: i64::try_from(id.0).unwrap(),
-        reason: "deleted".into(),
-        mtime_ms: Some(id.1),
-        inode: i64::try_from(id.2).ok(),
-        info_name: (location == "system").then(|| format!("{trash_path}.trashinfo")),
+        reason: TrashReason::Deleted,
+    })
+}
+
+fn fid(bytes: u64, mtime_ms: i64, inode: u64) -> FileIdentity {
+    FileIdentity {
+        bytes,
+        mtime_ms,
+        inode,
     }
 }
 
@@ -329,10 +336,10 @@ fn seed_is_idempotent_and_honours_the_ctime_guard() {
     assert_eq!(n(&run(&e, None, later), "seeded"), 0);
     let r = rows(&e);
     assert_eq!(r.len(), 1);
-    assert_eq!(r[0].entry.location, "vault");
+    assert_eq!(r[0].entry.location, TrashLocation::Vault);
     assert_eq!(r[0].entry.trash_path, ".trash/old/x.md");
     assert_eq!(r[0].entry.original_path, "old/x.md");
-    assert_eq!(r[0].entry.reason, "seeded");
+    assert_eq!(r[0].entry.reason, TrashReason::Seeded);
     assert_eq!(r[0].entry.trashed_ms, later);
     assert_eq!(r[0].entry.bytes, "trashed earlier".len() as i64);
     assert!(r[0].entry.inode.is_some() && r[0].entry.mtime_ms.is_some());
@@ -346,7 +353,7 @@ fn seed_skips_files_that_already_have_a_matching_row() {
     e.state
         .lock()
         .unwrap()
-        .insert_trash_entry(&row_for("vault", ".trash/k.md", id, now()))
+        .insert_trash_entry(&row_for(TrashLocation::Vault, ".trash/k.md", id, now()))
         .unwrap();
     assert_eq!(n(&run(&e, None, now() + 11 * 60 * 1000), "seeded"), 0);
     assert_eq!(rows(&e).len(), 1);
@@ -365,7 +372,7 @@ fn adopts_a_marked_system_entry_and_never_an_unmarked_one() {
     assert_eq!(n(&run(&e, Some(&root), later), "adopted"), 0);
     let r = rows(&e);
     assert_eq!(r.len(), 1);
-    assert_eq!(r[0].entry.location, "system");
+    assert_eq!(r[0].entry.location, TrashLocation::System);
     assert_eq!(r[0].entry.trash_path, "mine.md");
     assert_eq!(r[0].entry.original_path, "sub/mine.md");
     assert_eq!(r[0].entry.info_name.as_deref(), Some("mine.md.trashinfo"));
@@ -386,14 +393,14 @@ fn vault_row_past_retention_deletes_the_file_and_the_row() {
     {
         let mut db = e.state.lock().unwrap();
         db.insert_trash_entry(&row_for(
-            "vault",
+            TrashLocation::Vault,
             ".trash/d/gone.md",
             id(".trash/d/gone.md"),
             old_ms(),
         ))
         .unwrap();
         db.insert_trash_entry(&row_for(
-            "vault",
+            TrashLocation::Vault,
             ".trash/d/keep.md",
             id(".trash/d/keep.md"),
             now(),
@@ -421,7 +428,7 @@ fn system_row_past_retention_deletes_file_and_trashinfo() {
     e.state
         .lock()
         .unwrap()
-        .insert_trash_entry(&row_for("system", "s.md", id, old_ms()))
+        .insert_trash_entry(&row_for(TrashLocation::System, "s.md", id, old_ms()))
         .unwrap();
     // Without a system root the row cannot be evaluated and stays.
     assert_eq!(n(&run(&e, None, now()), "expired"), 0);
@@ -439,7 +446,12 @@ fn missing_file_drops_the_row_without_error() {
     e.state
         .lock()
         .unwrap()
-        .insert_trash_entry(&row_for("vault", ".trash/restored.md", (3, 5, 7), old_ms()))
+        .insert_trash_entry(&row_for(
+            TrashLocation::Vault,
+            ".trash/restored.md",
+            fid(3, 5, 7),
+            old_ms(),
+        ))
         .unwrap();
     let o = run(&e, None, now());
     assert_eq!((n(&o, "expired"), n(&o, "rows_dropped")), (0, 1));
@@ -456,7 +468,7 @@ fn name_reuse_after_a_restore_drops_the_row_and_keeps_the_new_file() {
     e.state
         .lock()
         .unwrap()
-        .insert_trash_entry(&row_for("vault", ".trash/r.md", id, old_ms()))
+        .insert_trash_entry(&row_for(TrashLocation::Vault, ".trash/r.md", id, old_ms()))
         .unwrap();
     std::fs::rename(e.fx.path(".trash/r.md"), e.fx.path("restored.md")).unwrap();
     e.fx.write(".trash/r.md", "a different file entirely");
@@ -467,7 +479,7 @@ fn name_reuse_after_a_restore_drops_the_row_and_keeps_the_new_file() {
     e.state
         .lock()
         .unwrap()
-        .insert_trash_entry(&row_for("system", "r.md", sid, old_ms()))
+        .insert_trash_entry(&row_for(TrashLocation::System, "r.md", sid, old_ms()))
         .unwrap();
     std::fs::remove_file(root.join("files/r.md")).unwrap();
     std::fs::write(root.join("files/r.md"), "someone else's file, longer").unwrap();
@@ -482,7 +494,11 @@ fn name_reuse_after_a_restore_drops_the_row_and_keeps_the_new_file() {
     );
     assert!(e.fx.read("restored.md").is_some());
     // The surviving unrecorded files are only seeded (a fresh row), never deleted.
-    assert!(rows(&e).iter().all(|r| r.entry.reason != "deleted"));
+    assert!(
+        rows(&e)
+            .iter()
+            .all(|r| r.entry.reason != TrashReason::Deleted)
+    );
 }
 
 #[test]
@@ -494,7 +510,7 @@ fn retention_zero_expires_nothing() {
     e.state
         .lock()
         .unwrap()
-        .insert_trash_entry(&row_for("vault", ".trash/old.md", id, 1))
+        .insert_trash_entry(&row_for(TrashLocation::Vault, ".trash/old.md", id, 1))
         .unwrap();
     let o = run(&e, None, now());
     assert_eq!((n(&o, "expired"), n(&o, "rows_dropped")), (0, 0));
@@ -509,7 +525,7 @@ fn escaping_trash_paths_never_delete_anything() {
         e.state
             .lock()
             .unwrap()
-            .insert_trash_entry(&row_for("vault", bad, (17, 1, 1), old_ms()))
+            .insert_trash_entry(&row_for(TrashLocation::Vault, bad, fid(17, 1, 1), old_ms()))
             .unwrap();
     }
     let o = run(&e, None, now());

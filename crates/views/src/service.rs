@@ -46,6 +46,10 @@ pub struct ViewHost {
     sources: Vec<engine::Record>,
     /// Note path → first matching `[[serial]]` row name (`file.serial`), from [`Self::set_sources`].
     serial: Option<std::collections::BTreeMap<String, String>>,
+    /// `vault.toml` `[trash] retention_days` as the embedder last pushed it
+    /// ([`Self::set_trash_retention_days`]; the daemon pushes `ConfigSet`'s typed value, so tidy
+    /// and the Trash view share one value and default). `0` (also before any push) = no expiry.
+    trash_retention_days: u32,
 }
 
 impl std::fmt::Debug for ViewHost {
@@ -72,7 +76,21 @@ impl ViewHost {
             today: None,
             sources: Vec::new(),
             serial: None,
+            trash_retention_days: 0,
         }
+    }
+
+    /// Sets the Trash view's retention (`vault.toml` `[trash] retention_days`, typed by the
+    /// embedder; plan tn-review-2026-10-26-remediation WP-R6). `0` = never expire.
+    pub fn set_trash_retention_days(&mut self, days: u32) {
+        self.trash_retention_days = days;
+    }
+
+    /// [`Self::set_trash_retention_days`] as a builder.
+    #[must_use]
+    pub fn with_trash_retention_days(mut self, days: u32) -> Self {
+        self.trash_retention_days = days;
+        self
     }
 
     /// Sets the `state.db` path (`CV_STATE_DB`) `tracker_items` views read from.
@@ -244,7 +262,7 @@ impl ViewHost {
                     .state_db
                     .clone()
                     .ok_or_else(|| ViewsError::NoStateDb(view_id.to_string()))?;
-                let days = trash_retention_days(&self.config_dir);
+                let days = self.trash_retention_days;
                 let sc = open_state(&mut self.state_conn, &path)?;
                 Some(trash_records(sc, days).map_err(ViewsError::State)?)
             }
@@ -404,20 +422,6 @@ pub fn tracker_records(conn: &Connection) -> rusqlite::Result<Vec<engine::Record
         Ok(Arc::new(m))
     })?;
     rows.collect()
-}
-
-/// Default `vault.toml` `[trash] retention_days`.
-const DEFAULT_TRASH_RETENTION_DAYS: u32 = 30;
-
-/// `[trash] retention_days` from `<config_dir>/vault.toml` (`0` = never expire). Absent file or
-/// key, or an invalid value (not a non-negative integer), gives the default 30.
-pub fn trash_retention_days(config_dir: &Path) -> u32 {
-    std::fs::read_to_string(config_dir.join("vault.toml"))
-        .ok()
-        .and_then(|t| t.parse::<toml::Table>().ok())
-        .and_then(|t| t.get("trash")?.get("retention_days")?.as_integer())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(DEFAULT_TRASH_RETENTION_DAYS)
 }
 
 /// Every `trash_entries` row as a record, soonest-trashed first (`trashed_ms, id`). Fields:

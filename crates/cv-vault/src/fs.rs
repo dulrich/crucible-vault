@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, VaultError, io};
 use crate::hash::ContentHash;
 use crate::path::{TMP_PREFIX, is_ignored, validate_rel_path};
-use crate::trash::{TrashMove, TrashTarget, TrashedIn, identity};
+use crate::trash::{TrashLocation, TrashMove, TrashTarget, identity};
 
 /// The vault filesystem; see the module docs.
 pub struct VaultFs {
@@ -256,16 +256,14 @@ impl VaultFs {
             return Ok(None);
         }
         let src = self.root.join(path);
-        let (bytes, mtime_ms, inode) = identity(&src).map_err(|e| io(&src, e))?;
+        let identity = identity(&src).map_err(|e| io(&src, e))?;
         if let TrashTarget::System(sys) = &self.trash
             && let Some(name) = sys.move_in(&src, path).map_err(|e| io(&src, e))?
         {
             return Ok(Some(TrashMove {
-                location: TrashedIn::System,
+                location: TrashLocation::System,
                 trash_path: name,
-                bytes,
-                mtime_ms,
-                inode,
+                identity,
             }));
         }
         let trash_rel = self.trash_slot(path);
@@ -275,11 +273,9 @@ impl VaultFs {
         }
         std::fs::rename(&src, &dest).map_err(|e| io(&src, e))?;
         Ok(Some(TrashMove {
-            location: TrashedIn::Vault,
+            location: TrashLocation::Vault,
             trash_path: trash_rel,
-            bytes,
-            mtime_ms,
-            inode,
+            identity,
         }))
     }
 

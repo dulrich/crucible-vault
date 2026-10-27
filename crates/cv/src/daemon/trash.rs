@@ -15,17 +15,18 @@ use cv_vault::{SystemTrash, TrashRecord, TrashTarget, VaultWriter};
 use super::Shared;
 use crate::sync::lock;
 
-/// The ledger row for `r`.
+/// The ledger row for `r`: the one record-to-row conversion (the writer's moves here, tidy's
+/// seed/adopt rows via a [`TrashRecord`] too; plan tn-review-2026-10-26-remediation WP-R6).
 pub(crate) fn entry_of(r: &TrashRecord) -> NewTrashEntry {
     NewTrashEntry {
-        location: r.moved.location.as_str().to_string(),
+        location: r.moved.location,
         trash_path: r.moved.trash_path.clone(),
         original_path: r.original_path.clone(),
         trashed_ms: r.trashed_ms,
-        bytes: i64::try_from(r.moved.bytes).unwrap_or(i64::MAX),
-        reason: r.reason.as_str().to_string(),
-        mtime_ms: Some(r.moved.mtime_ms),
-        inode: i64::try_from(r.moved.inode).ok(),
+        bytes: i64::try_from(r.moved.identity.bytes).unwrap_or(i64::MAX),
+        reason: r.reason,
+        mtime_ms: Some(r.moved.identity.mtime_ms),
+        inode: i64::try_from(r.moved.identity.inode).ok(),
         info_name: r.info_name(),
     }
 }
@@ -86,25 +87,27 @@ pub(super) fn apply_trash_config(shared: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cv_vault::{TrashMove, TrashReason, TrashedIn};
+    use cv_vault::{FileIdentity, TrashMove, TrashReason};
 
     #[test]
     fn entry_of_maps_every_field() {
         let r = TrashRecord {
             moved: TrashMove {
-                location: TrashedIn::System,
+                location: TrashLocation::System,
                 trash_path: "a.png".into(),
-                bytes: 9,
-                mtime_ms: 7,
-                inode: 5,
+                identity: FileIdentity {
+                    bytes: 9,
+                    mtime_ms: 7,
+                    inode: 5,
+                },
             },
             original_path: "x/a.png".into(),
             trashed_ms: 11,
             reason: TrashReason::NoteAttachment,
         };
         let e = entry_of(&r);
-        assert_eq!(e.location, "system");
-        assert_eq!(e.reason, "note-attachment");
+        assert_eq!(e.location, TrashLocation::System);
+        assert_eq!(e.reason, TrashReason::NoteAttachment);
         assert_eq!(e.info_name.as_deref(), Some("a.png.trashinfo"));
         assert_eq!((e.bytes, e.mtime_ms, e.inode), (9, Some(7), Some(5)));
         assert!(matches!(

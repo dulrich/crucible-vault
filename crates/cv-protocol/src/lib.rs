@@ -9,7 +9,9 @@ use serde_json::Value;
 pub mod client;
 mod enums;
 pub mod methods;
-pub use enums::{BreakerState, ContextNeed, FailureKind, Lane, TrackerOutcome};
+pub use enums::{
+    BreakerState, ContextNeed, FailureKind, Lane, TrackerOutcome, TrashLocation, TrashReason,
+};
 pub use methods::{METHOD_NAMES, Method};
 
 /// Protocol version exchanged in `hello`; a mismatch is refused, never degraded.

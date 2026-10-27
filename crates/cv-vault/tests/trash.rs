@@ -6,7 +6,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{Fx, h};
-use cv_vault::{SystemTrash, TrashReason, TrashTarget, TrashedIn, cv_owned_system_entries};
+use cv_vault::{SystemTrash, TrashLocation, TrashReason, TrashTarget, cv_owned_system_entries};
 
 const DATE: &str = "2026-10-26T12:34:56";
 
@@ -22,15 +22,15 @@ fn vault_move_records_deleted_row() {
     let recs = w.take_trash_records();
     assert_eq!(recs.len(), 1);
     let r = &recs[0];
-    assert_eq!(r.moved.location, TrashedIn::Vault);
+    assert_eq!(r.moved.location, TrashLocation::Vault);
     assert_eq!(r.moved.trash_path, ".trash/f/a.md");
     assert_eq!(r.original_path, "f/a.md");
-    assert_eq!(r.moved.bytes, 1);
+    assert_eq!(r.moved.identity.bytes, 1);
     assert_eq!(r.reason, TrashReason::Deleted);
     assert!(r.info_name().is_none());
     let md = std::fs::symlink_metadata(fx.vault.path().join(".trash/f/a.md")).unwrap();
     assert_eq!(
-        r.moved.inode,
+        r.moved.identity.inode,
         std::os::unix::fs::MetadataExt::ino(&md),
         "rename keeps the inode"
     );
@@ -113,14 +113,14 @@ fn system_move_writes_trashinfo() {
     assert_eq!(lines[2], format!("DeletionDate={DATE}"));
     assert!(!fx.vault.path().join(".trash").exists());
     let r = w.take_trash_records().remove(0);
-    assert_eq!(r.moved.location, TrashedIn::System);
+    assert_eq!(r.moved.location, TrashLocation::System);
     assert_eq!(r.moved.trash_path, "caf\u{e9}.md");
     assert_eq!(r.info_name().as_deref(), Some("caf\u{e9}.md.trashinfo"));
     // The crash receipt: cv-owned and adoptable.
     let owned = cv_owned_system_entries(&t).unwrap();
     assert_eq!(owned.len(), 1);
     assert_eq!(owned[0].original_path, "My notes/caf\u{e9}.md");
-    assert_eq!(owned[0].inode, r.moved.inode);
+    assert_eq!(owned[0].identity.inode, r.moved.identity.inode);
 }
 
 #[test]
@@ -171,6 +171,6 @@ fn cross_device_falls_back_to_vault_trash() {
     );
     assert_eq!(std::fs::read_dir(t.join("files")).unwrap().count(), 0);
     let r = w.take_trash_records().remove(0);
-    assert_eq!(r.moved.location, TrashedIn::Vault);
+    assert_eq!(r.moved.location, TrashLocation::Vault);
     assert_eq!(r.moved.trash_path, ".trash/x/a.md");
 }

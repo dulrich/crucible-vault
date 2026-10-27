@@ -724,3 +724,38 @@ fn view_run_select_is_optional_and_additive() {
         json!({"property": "file.serial", "value": "Saga"})
     );
 }
+
+#[test]
+fn trash_enums_keep_their_ledger_and_wire_strings() {
+    let loc = [
+        (TrashLocation::Vault, "vault"),
+        (TrashLocation::System, "system"),
+    ];
+    for (v, s) in loc {
+        assert_eq!(v.as_str(), s);
+        assert_eq!(TrashLocation::parse(s), Some(v));
+        assert_eq!(serde_json::to_string(&v).unwrap(), format!("\"{s}\""));
+        assert_eq!(
+            serde_json::from_str::<TrashLocation>(&format!("\"{s}\"")).unwrap(),
+            v
+        );
+    }
+    assert_eq!(TrashLocation::default(), TrashLocation::Vault);
+    let reasons = [
+        (TrashReason::Deleted, "deleted"),
+        (TrashReason::Replaced, "replaced"),
+        (TrashReason::NoteAttachment, "note-attachment"),
+        (TrashReason::Orphan, "orphan"),
+        (TrashReason::Seeded, "seeded"),
+    ];
+    assert_eq!(TrashReason::ALL.len(), reasons.len());
+    for (v, s) in reasons {
+        assert_eq!(v.as_str(), s);
+        assert_eq!(TrashReason::parse(s), Some(v));
+        assert_eq!(serde_json::to_string(&v).unwrap(), format!("\"{s}\""));
+        assert_eq!(
+            serde_json::from_str::<TrashReason>(&format!("\"{s}\"")).unwrap(),
+            v
+        );
+    }
+}

@@ -32,7 +32,7 @@ impl ReadSync {
         read_now: impl FnOnce() -> Option<bool>,
     ) -> bool {
         match kind {
-            EventKind::Deleted => {
+            EventKind::Deleted { .. } => {
                 self.seen.remove(path);
                 false
             }
@@ -229,7 +229,7 @@ mod tests {
         };
         assert!(!rs.observe("b.md", &ren, || Some(true)));
         assert!(!rs.observe("b.md", &EventKind::Modified, || Some(true)));
-        assert!(!rs.observe("b.md", &EventKind::Deleted, || None));
+        assert!(!rs.observe("b.md", &EventKind::Deleted { replaced_by: None }, || None));
         // Deleted forgot it: a recreate that is read counts as a transition.
         assert!(rs.observe("b.md", &EventKind::Created, || Some(true)));
         // Non-markdown paths are ignored.

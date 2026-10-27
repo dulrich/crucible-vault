@@ -240,32 +240,24 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     if verdict == "not-duplicates" {
         relabel(ctx, &r, &keep, &other, true)?;
         relabel(ctx, &r, &other, &keep, true)?;
+        ctx.state().record_dup_verdict(&label, false)?;
     } else {
         let inbound = user_inbound_sources(ctx, &other)?
             .into_iter()
             .filter(|p| p != &keep)
             .count();
-        // Tracker rows first, so a failed trash never leaves rows on a trashed note.
-        let mut repointed = 0u32;
-        {
-            let mut st = ctx.state();
-            for row in st.tracker_items_for_note(&other)? {
-                if st.set_tracker_note_path(
-                    &row.source_kind,
-                    &row.source_key,
-                    &row.item_id,
-                    &keep,
-                )? {
-                    repointed += 1;
-                }
-            }
-        }
+        // D4 (plan tn-review-2026-10-26-remediation WP-R6): the label and the tracker re-points
+        // commit in one state transaction before the trash, so a failed trash never leaves rows
+        // on a trashed note and a retry (any boundary) reuses the committed label.
+        let (_, repointed) = ctx.state().record_dup_verdict(&label, true)?;
         super::auto_file::trash(ctx, &other, o_hash, &keep)?;
-        relabel(ctx, &r, &keep, &other, false)?;
+        // Best-effort once the trash is done: a conflict here never defers (the label is safe).
+        if let Err(e) = relabel(ctx, &r, &keep, &other, false) {
+            tracing::warn!(keep = %keep, error = %e, "dupes_resolve: relabel after trash failed");
+        }
         vars.insert("inbound_links".into(), inbound.into());
         vars.insert("tracker_repointed".into(), repointed.into());
     }
-    ctx.state().insert_dup_label(&label)?;
     vars.insert("action".into(), verdict.into());
     let mut out = StepOutcome::default();
     out.set_vars(&vars);

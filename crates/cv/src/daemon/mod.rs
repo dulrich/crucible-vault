@@ -47,7 +47,7 @@ mod memory;
 mod notes;
 mod queue;
 mod read_sync;
-mod trash;
+pub(crate) mod trash;
 
 pub(crate) use background::clear_stale_socket;
 use background::{config_poller, drain_spool};
@@ -213,6 +213,7 @@ impl Daemon {
             bail!("runner already started");
         }
         trash::apply_trash_config(&shared);
+        shared.views.set_config(&runner.config());
         memory::register_gauges(&shared);
         let mut tasks = vec![
             runner.spawn_claim_loop(stop_rx.clone()),

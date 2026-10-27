@@ -27,7 +27,11 @@ use cv_index::{file_times, rel_path};
 pub enum EventKind {
     Created,
     Modified,
-    Deleted,
+    /// Gone; `replaced_by` names the note that absorbed it when the writer deleted it via
+    /// `VaultWriter::delete_replaced` (round 11 WP-1, Decision 1; filled here, WP-R6).
+    Deleted {
+        replaced_by: Option<String>,
+    },
     /// Moved from `from` to the event's path.
     Renamed {
         from: String,
@@ -535,12 +539,13 @@ impl WatchState {
                     }
                 }
                 let daemon = w.echoes.take_match(path, None);
+                let replaced_by = w.echoes.take_replaced(path);
                 if !daemon && let Err(e) = w.index.remove_file(path) {
                     tracing::warn!(path, error = %e, "index update for external delete failed");
                 }
                 out.push(VaultEvent {
                     path: path.to_string(),
-                    kind: EventKind::Deleted,
+                    kind: EventKind::Deleted { replaced_by },
                     origin: if daemon {
                         Origin::Daemon
                     } else {

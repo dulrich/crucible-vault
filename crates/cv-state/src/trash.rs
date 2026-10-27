@@ -3,18 +3,21 @@
 //! mutating accessor raises the `trash_entries` change signal (audit E3), so views refresh
 //! without daemon-side signal calls.
 //!
-//! Strings are the ledger spelling: `location` ∈ `vault`/`system`, `reason` ∈
-//! `deleted`/`replaced`/`note-attachment`/`orphan`/`seeded` (the table's CHECKs refuse others).
+//! `location`/`reason` are the protocol enums ([`TrashLocation`], [`TrashReason`]); this module
+//! owns their SQL text form (`as_str` in, `parse` out). The table's CHECKs still refuse any
+//! other spelling (schema v15 unchanged; plan tn-review-2026-10-26-remediation WP-R6).
 
 use crate::error::Result;
 use crate::store::StateDb;
+use cv_protocol::{TrashLocation, TrashReason};
+use rusqlite::types::Type;
 use rusqlite::{OptionalExtension, Row, params};
 
 /// One ledger row without its id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTrashEntry {
-    /// `vault` | `system`.
-    pub location: String,
+    /// Which trash.
+    pub location: TrashLocation,
     /// Vault-relative `.trash/…` path (vault) or the name inside `Trash/files/` (system).
     pub trash_path: String,
     /// The vault path the file had.
@@ -23,8 +26,8 @@ pub struct NewTrashEntry {
     pub trashed_ms: i64,
     /// Size at move time.
     pub bytes: i64,
-    /// `deleted` | `replaced` | `note-attachment` | `orphan` | `seeded`.
-    pub reason: String,
+    /// Why it was trashed.
+    pub reason: TrashReason,
     /// The file's mtime (ms) at move time (identity, audit E1).
     pub mtime_ms: Option<i64>,
     /// The file's inode at move time (identity; rename preserves it).
@@ -44,16 +47,28 @@ pub struct TrashEntry {
 
 const COLS: &str = "id, location, trash_path, original_path, trashed_ms, bytes, reason, mtime_ms, inode, info_name";
 
+/// Column `i` parsed by `parse` (an unknown spelling is a conversion error, never coerced).
+fn text<T>(r: &Row<'_>, i: usize, parse: fn(&str) -> Option<T>) -> rusqlite::Result<T> {
+    let s: String = r.get(i)?;
+    parse(&s).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            i,
+            Type::Text,
+            format!("unknown ledger spelling {s:?}").into(),
+        )
+    })
+}
+
 fn row(r: &Row<'_>) -> rusqlite::Result<TrashEntry> {
     Ok(TrashEntry {
         id: r.get(0)?,
         entry: NewTrashEntry {
-            location: r.get(1)?,
+            location: text(r, 1, TrashLocation::parse)?,
             trash_path: r.get(2)?,
             original_path: r.get(3)?,
             trashed_ms: r.get(4)?,
             bytes: r.get(5)?,
-            reason: r.get(6)?,
+            reason: text(r, 6, TrashReason::parse)?,
             mtime_ms: r.get(7)?,
             inode: r.get(8)?,
             info_name: r.get(9)?,
@@ -69,12 +84,12 @@ impl StateDb {
                  reason, mtime_ms, inode, info_name)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                e.location,
+                e.location.as_str(),
                 e.trash_path,
                 e.original_path,
                 e.trashed_ms,
                 e.bytes,
-                e.reason,
+                e.reason.as_str(),
                 e.mtime_ms,
                 e.inode,
                 e.info_name
@@ -97,7 +112,7 @@ impl StateDb {
     /// The newest row for `location` + `trash_path` (seed/adopt de-duplication), if any.
     pub fn trash_entry_by_path(
         &self,
-        location: &str,
+        location: TrashLocation,
         trash_path: &str,
     ) -> Result<Option<TrashEntry>> {
         Ok(self
@@ -107,7 +122,7 @@ impl StateDb {
                     "SELECT {COLS} FROM trash_entries WHERE location = ?1 AND trash_path = ?2
                      ORDER BY id DESC LIMIT 1"
                 ),
-                params![location, trash_path],
+                params![location.as_str(), trash_path],
                 row,
             )
             .optional()?)

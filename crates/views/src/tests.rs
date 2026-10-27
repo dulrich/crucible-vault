@@ -1550,43 +1550,31 @@ fn trash_retention_zero_means_no_expiry() {
 }
 
 #[test]
-fn trash_retention_days_reads_vault_toml_with_a_default_of_30() {
-    let dir = tempfile::tempdir().unwrap();
-    let days = |body: Option<&str>| {
-        let f = dir.path().join("vault.toml");
-        match body {
-            Some(b) => std::fs::write(&f, b).unwrap(),
-            None => {
-                let _ = std::fs::remove_file(&f);
-            }
-        }
-        crate::service::trash_retention_days(dir.path())
-    };
-    assert_eq!(days(None), 30);
-    assert_eq!(days(Some("[trash]\nretention_days = 7\n")), 7);
-    assert_eq!(days(Some("[trash]\nretention_days = 0\n")), 0);
-    assert_eq!(days(Some("[trash]\nlocation = \"x\"\n")), 30);
-    assert_eq!(days(Some("[trash]\nretention_days = -3\n")), 30);
-    assert_eq!(days(Some("[trash]\nretention_days = \"soon\"\n")), 30);
-    assert_eq!(days(Some("not = [valid")), 30);
-}
-
-#[test]
-fn trash_view_runs_end_to_end_and_follows_vault_toml() {
+fn trash_view_runs_end_to_end_and_follows_the_pushed_retention() {
     let fx = fixture(&[("trash.toml", TRASH_DEF)]);
     let state = trash_db(fx._tmp.path());
-    let mut host = fx.host().with_state_db(&state);
+    let mut host = fx
+        .host()
+        .with_state_db(&state)
+        .with_trash_retention_days(30);
     let r = fx.run(&mut host, "trash#T", None);
     assert!(r.notices.is_empty(), "{:?}", r.notices);
     assert!(
         r.rows()
             .all(|row| matches!(row.cells[2], Cell::Date { .. }))
     );
+    // `vault.toml` is never read by the host: only the pushed value counts.
     std::fs::write(
         fx.config.join("vault.toml"),
         "[trash]\nretention_days = 0\n",
     )
     .unwrap();
+    let r = fx.run(&mut host, "trash#T", None);
+    assert!(
+        r.rows()
+            .all(|row| matches!(row.cells[2], Cell::Date { .. }))
+    );
+    host.set_trash_retention_days(0);
     let r = fx.run(&mut host, "trash#T", None);
     assert!(r.rows().all(|row| row.cells[2] == Cell::Null));
 }

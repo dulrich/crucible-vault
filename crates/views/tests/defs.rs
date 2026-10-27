@@ -168,6 +168,7 @@ impl Fx {
     fn host(&self) -> ViewHost {
         ViewHost::new(&self.config, &self.base)
             .with_state_db(&self.state)
+            .with_trash_retention_days(30)
             .with_today(NaiveDate::from_ymd_opt(2026, 10, 3).unwrap())
     }
     fn run(&self, host: &mut ViewHost, id: &str, this: Option<&str>) -> ViewResult {

@@ -1038,6 +1038,7 @@ name = "cv-vault"
 version = "0.2.0"
 dependencies = [
  "cv-index",
+ "cv-protocol",
  "hex",
  "notify",
  "ofm",

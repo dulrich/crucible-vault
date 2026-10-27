@@ -4,7 +4,7 @@
 
 use crate::health::{MAX_OPEN_WINDOW_MS, OPEN_WINDOW_MS, PROBE_STALE_MS};
 use crate::*;
-use cv_protocol::{BreakerState, FailureKind, Lane, TrackerOutcome};
+use cv_protocol::{BreakerState, FailureKind, Lane, TrackerOutcome, TrashLocation, TrashReason};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -1325,14 +1325,14 @@ fn dup_labels_roundtrip() {
     assert_eq!(s.dup_labels().unwrap(), vec![l]);
 }
 
-fn trash_entry(path: &str, reason: &str, at: i64) -> NewTrashEntry {
+fn trash_entry(path: &str, reason: TrashReason, at: i64) -> NewTrashEntry {
     NewTrashEntry {
-        location: "vault".into(),
+        location: TrashLocation::Vault,
         trash_path: format!(".trash/{path}"),
         original_path: path.into(),
         trashed_ms: at,
         bytes: 3,
-        reason: reason.into(),
+        reason,
         mtime_ms: Some(10),
         inode: Some(42),
         info_name: None,
@@ -1372,9 +1372,9 @@ fn trash_entries_roundtrip_and_signal() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sn = Arc::clone(&seen);
     s.set_change_hook(Box::new(move |t| sn.lock().unwrap().push(t)));
-    let a = trash_entry("a.md", "deleted", 5);
-    let mut b = trash_entry("b.png", "note-attachment", 2);
-    b.location = "system".into();
+    let a = trash_entry("a.md", TrashReason::Deleted, 5);
+    let mut b = trash_entry("b.png", TrashReason::NoteAttachment, 2);
+    b.location = TrashLocation::System;
     b.trash_path = "b.png".into();
     b.info_name = Some("b.png.trashinfo".into());
     let ia = s.insert_trash_entry(&a).unwrap();
@@ -1383,23 +1383,28 @@ fn trash_entries_roundtrip_and_signal() {
     assert_eq!(all.len(), 2);
     assert_eq!((all[0].id, &all[0].entry), (ib, &b), "oldest first");
     assert_eq!(
-        s.trash_entry_by_path("vault", ".trash/a.md")
+        s.trash_entry_by_path(TrashLocation::Vault, ".trash/a.md")
             .unwrap()
             .map(|e| e.id),
         Some(ia)
     );
     assert!(
-        s.trash_entry_by_path("system", ".trash/a.md")
+        s.trash_entry_by_path(TrashLocation::System, ".trash/a.md")
             .unwrap()
             .is_none()
     );
-    assert!(
-        s.insert_trash_entry(&trash_entry("c.md", "lost", 1))
-            .is_err()
-    );
-    let mut bad = trash_entry("c.md", "deleted", 1);
-    bad.location = "bin".into();
-    assert!(s.insert_trash_entry(&bad).is_err());
+    // The CHECKs still refuse unknown spellings (reachable by raw SQL only now).
+    for (loc, reason) in [("vault", "lost"), ("bin", "deleted")] {
+        assert!(
+            s.conn()
+                .execute(
+                    "INSERT INTO trash_entries (location, trash_path, original_path, trashed_ms,
+                         bytes, reason) VALUES (?1, 'x', 'x', 1, 1, ?2)",
+                    rusqlite::params![loc, reason],
+                )
+                .is_err()
+        );
+    }
     assert!(s.delete_trash_entry(ia).unwrap());
     assert!(!s.delete_trash_entry(ia).unwrap());
     assert_eq!(s.trash_entries().unwrap().len(), 1);

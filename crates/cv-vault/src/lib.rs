@@ -28,8 +28,8 @@ pub use hash::ContentHash;
 pub use path::validate_rel_path;
 pub use thread::{WriterHandle, spawn_writer, spawn_writer_with_watcher};
 pub use trash::{
-    SystemTrash, SystemTrashEntry, TrashMove, TrashReason, TrashRecord, TrashTarget, TrashedIn,
-    cv_owned_system_entries,
+    FileIdentity, SystemTrash, SystemTrashEntry, TrashLocation, TrashMove, TrashReason,
+    TrashRecord, TrashTarget, cv_owned_system_entries,
 };
 pub use watcher::{EventKind, Origin, VaultEvent, WatchConfig};
 pub use writer::{RenameOutcome, VaultWriter};

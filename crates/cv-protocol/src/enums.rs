@@ -242,3 +242,33 @@ mod tests {
         assert!(serde_json::from_value::<W>(json!({ "s": "pending" })).is_err());
     }
 }
+
+wire_enum! {
+    /// Which trash a file goes to / landed in (`vault.toml` `[trash] location`, the
+    /// `trash_entries.location` column). Plan tn-review-2026-10-26-remediation WP-R6 collapsed
+    /// `cv_actions::TrashLocation` and `cv_vault::TrashedIn` onto this one definition.
+    #[derive(Default)]
+    TrashLocation {
+        /// The vault's own `.trash/<path>` (Obsidian-style; the default).
+        #[default]
+        Vault = "vault",
+        /// The XDG home trash (`$XDG_DATA_HOME/Trash`).
+        System = "system",
+    }
+}
+
+wire_enum! {
+    /// Why a file was trashed (the `trash_entries.reason` column).
+    TrashReason {
+        /// A plain recoverable delete (editor delete, step deletes).
+        Deleted = "deleted",
+        /// A note absorbed by another (`VaultWriter::delete_replaced`).
+        Replaced = "replaced",
+        /// An unshared attachment taken along by `VaultWriter::delete_note`.
+        NoteAttachment = "note-attachment",
+        /// An orphaned attachment (tidy's sweep).
+        Orphan = "orphan",
+        /// A pre-existing trash file given a row by tidy's seed pass.
+        Seeded = "seeded",
+    }
+}

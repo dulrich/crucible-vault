@@ -126,7 +126,8 @@ impl SystemTrash {
     }
 }
 
-/// Where recoverable deletes go.
+/// Where recoverable deletes go: a [`TrashLocation`] plus, for the system trash, its root (the
+/// one location type that carries data, so it stays a wrapper rather than a mirror).
 #[derive(Debug, Clone, Default)]
 pub enum TrashTarget {
     /// `<vault>/.trash/<path>` (the default).
@@ -136,68 +137,40 @@ pub enum TrashTarget {
     System(SystemTrash),
 }
 
-/// Why a file was trashed (the ledger's `reason`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrashReason {
-    /// A plain recoverable delete (editor delete, step deletes).
-    Deleted,
-    /// A note absorbed by another ([`crate::VaultWriter::delete_replaced`]).
-    Replaced,
-    /// An unshared attachment taken along by [`crate::VaultWriter::delete_note`].
-    NoteAttachment,
-    /// An orphaned attachment (WP-2's sweep).
-    Orphan,
-    /// A pre-existing trash file given a row by WP-2's seed pass.
-    Seeded,
-}
-
-impl TrashReason {
-    /// The ledger spelling.
+impl TrashTarget {
+    /// The ledger location this target writes to.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub fn location(&self) -> TrashLocation {
         match self {
-            Self::Deleted => "deleted",
-            Self::Replaced => "replaced",
-            Self::NoteAttachment => "note-attachment",
-            Self::Orphan => "orphan",
-            Self::Seeded => "seeded",
+            Self::Vault => TrashLocation::Vault,
+            Self::System(_) => TrashLocation::System,
         }
     }
 }
 
-/// Which trash a file landed in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrashedIn {
-    /// The vault `.trash/`.
-    Vault,
-    /// The XDG home trash.
-    System,
-}
+pub use cv_protocol::{TrashLocation, TrashReason};
 
-impl TrashedIn {
-    /// The ledger spelling.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Vault => "vault",
-            Self::System => "system",
-        }
-    }
+/// Identity of a file on disk (no follow): what the ledger records and what expiry re-checks
+/// before a permanent delete (plan tidiness-trash-orphans audit E1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    /// Size in bytes.
+    pub bytes: u64,
+    /// mtime, ms since the epoch (rename preserves it).
+    pub mtime_ms: i64,
+    /// Inode (rename preserves it).
+    pub inode: u64,
 }
 
 /// One completed trash move (what the fs layer did).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrashMove {
     /// Where it landed.
-    pub location: TrashedIn,
+    pub location: TrashLocation,
     /// Vault-relative `.trash/…` path (vault), or the name inside `Trash/files/` (system).
     pub trash_path: String,
-    /// Size from `symlink_metadata` before the move.
-    pub bytes: u64,
-    /// mtime (ms) from `symlink_metadata` before the move (rename preserves it).
-    pub mtime_ms: i64,
-    /// Inode before the move (rename preserves it).
-    pub inode: u64,
+    /// Identity from `symlink_metadata` before the move (rename preserves it).
+    pub identity: FileIdentity,
 }
 
 /// One trash move, ready for the ledger (`trash_entries`).
@@ -217,16 +190,20 @@ impl TrashRecord {
     /// System moves only: the `.trashinfo` file name (`info/<name>.trashinfo`).
     #[must_use]
     pub fn info_name(&self) -> Option<String> {
-        (self.moved.location == TrashedIn::System)
+        (self.moved.location == TrashLocation::System)
             .then(|| format!("{}.trashinfo", self.moved.trash_path))
     }
 }
 
-/// Identity fields of `p` (no follow): `(bytes, mtime_ms, inode)`.
-pub fn identity(p: &Path) -> std::io::Result<(u64, i64, u64)> {
+/// Identity of `p` (no follow).
+pub fn identity(p: &Path) -> std::io::Result<FileIdentity> {
     let md = p.symlink_metadata()?;
     let mtime_ms = md.mtime() * 1000 + md.mtime_nsec() / 1_000_000;
-    Ok((md.len(), mtime_ms, md.ino()))
+    Ok(FileIdentity {
+        bytes: md.len(),
+        mtime_ms,
+        inode: md.ino(),
+    })
 }
 
 /// A cv-created system-trash entry (its `.trashinfo` carries [`CV_MARKER_KEY`]).
@@ -238,10 +215,8 @@ pub struct SystemTrashEntry {
     pub original_path: String,
     /// The raw `DeletionDate` value.
     pub deletion_date: String,
-    /// Identity of the file now in `files/` (bytes, mtime ms, inode).
-    pub bytes: u64,
-    pub mtime_ms: i64,
-    pub inode: u64,
+    /// Identity of the file now in `files/`.
+    pub identity: FileIdentity,
 }
 
 /// The adoption hook for WP-2's sweep: every cv-created entry of the home trash at `trash_root`
@@ -277,16 +252,14 @@ pub fn cv_owned_system_entries(trash_root: &Path) -> std::io::Result<Vec<SystemT
         let Some(original_path) = original else {
             continue;
         };
-        let Ok((bytes, mtime_ms, inode)) = identity(&trash_root.join("files").join(name)) else {
+        let Ok(identity) = identity(&trash_root.join("files").join(name)) else {
             continue;
         };
         out.push(SystemTrashEntry {
             name: name.to_string(),
             original_path,
             deletion_date: date,
-            bytes,
-            mtime_ms,
-            inode,
+            identity,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -377,7 +350,7 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].name, "y.md");
         assert_eq!(got[0].original_path, "sub/y.md");
-        assert_eq!(got[0].bytes, 1);
+        assert_eq!(got[0].identity.bytes, 1);
         assert!(
             cv_owned_system_entries(&d.path().join("none"))
                 .unwrap()

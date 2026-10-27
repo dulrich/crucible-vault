@@ -371,7 +371,7 @@ async fn trash_moves_reach_the_ledger_and_follow_vault_toml() {
         ),
         ("vault", ".trash/a.md", "a.md")
     );
-    assert_eq!(r.reason, "deleted");
+    assert_eq!(r.reason.as_str(), "deleted");
     let mut sub = client(&env);
     sub.request(Request::Subscribe(SubscribeParams {
         topics: vec![Topic::ConfigReloaded],

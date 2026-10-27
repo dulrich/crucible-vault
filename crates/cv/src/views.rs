@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use cv_actions::ConfigSet;
 use cv_actions::pipelines::{SerialStatus, SourcesConfig};
 use cv_protocol::{Notification, ViewResult, ViewSelect, ViewSort};
 use tokio::sync::{broadcast, oneshot};
@@ -27,8 +28,10 @@ enum Cmd {
     },
     /// A new index generation committed: reopen the reader.
     Generation(u64),
-    /// `CV_CONFIG_DIR` changed.
-    Config(PathBuf),
+    /// `CV_CONFIG_DIR` changed: reload definitions and take the reloaded typed settings.
+    Config(PathBuf, ViewSettings),
+    /// The typed settings (the runner's first config load): no definitions reload.
+    Settings(ViewSettings),
     /// Notes changed incrementally (coalesced by the daemon): every view id goes stale.
     NotesChanged,
     /// A `state.db` table changed (from [`ViewRegistry::change_hook`]).
@@ -60,7 +63,7 @@ pub enum ViewError {
 impl ViewRegistry {
     /// Starts the host over the index at base path `index_base`, loading definitions from
     /// `config_dir` (`CV_CONFIG_DIR` at startup; later changes arrive via
-    /// [`ViewRegistry::notify_config`]); `state_db` feeds `source = "tracker_items"` views.
+    /// [`ViewRegistry::notify_config`]; typed settings via [`ViewRegistry::set_config`]); `state_db` feeds `source = "tracker_items"` views.
     /// Invalidations go to `events`.
     pub fn start(
         config_dir: &Path,
@@ -77,12 +80,12 @@ impl ViewRegistry {
         let (tx, rx) = mpsc::channel::<Cmd>();
         let base = index_base.to_path_buf();
         let thread_ids = Arc::clone(&ids);
-        let sources = load_sources(config_dir).unwrap_or_default();
-        let day_folder = load_day_folder(config_dir);
+        // Defaults until the runner's config arrives ([`ViewRegistry::set_config`]).
+        let settings = ViewSettings::of(&ConfigSet::new());
         std::thread::Builder::new()
             .name("cv-view".into())
             .spawn(move || {
-                serve(host, sources, day_folder, &rx, &base, &events, &thread_ids);
+                serve(host, settings, &rx, &base, &events, &thread_ids);
             })?;
         Ok(Self { ids, tx })
     }
@@ -138,9 +141,15 @@ impl ViewRegistry {
         self.signal(Cmd::NotesChanged);
     }
 
-    /// The config dir changed.
-    pub fn notify_config(&self, dir: &Path) {
-        self.signal(Cmd::Config(dir.to_path_buf()));
+    /// The config dir changed; `config` is the runner's reloaded `ConfigSet` (plan
+    /// tn-review-2026-10-26-remediation WP-R6, D6: the host never re-parses config files).
+    pub fn notify_config(&self, dir: &Path, config: &ConfigSet) {
+        self.signal(Cmd::Config(dir.to_path_buf(), ViewSettings::of(config)));
+    }
+
+    /// Pushes `config`'s typed settings (the runner's first load) without reloading definitions.
+    pub fn set_config(&self, config: &ConfigSet) {
+        self.signal(Cmd::Settings(ViewSettings::of(config)));
     }
 
     fn send(&self, cmd: Cmd) -> Result<(), ()> {
@@ -154,27 +163,27 @@ impl ViewRegistry {
     }
 }
 
-/// `<config_dir>/sources.toml` typed (absent = no sources); `None` = unreadable or invalid (the
-/// caller keeps its last valid value, as `ConfigSet` does).
-fn load_sources(config_dir: &Path) -> Option<SourcesConfig> {
-    let path = config_dir.join("sources.toml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(SourcesConfig::default()),
-        Err(e) => {
-            tracing::warn!(error = %e, "view host: reading sources.toml");
-            return None;
-        }
-    };
-    match text
-        .parse::<toml::Table>()
-        .map_err(|e| e.message().to_owned())
-        .and_then(|t| SourcesConfig::from_table(&t))
-    {
-        Ok(c) => Some(c),
-        Err(e) => {
-            tracing::warn!(error = %e, "view host: sources.toml is invalid; keeping the last valid rows");
-            None
+/// What the view host takes from the runner's [`ConfigSet`] (plan tn-review-2026-10-26-remediation
+/// WP-R6, D6): typed values only, so the host shares `ConfigSet`'s defaults and its
+/// keep-the-last-valid-value policy with tidy and every other consumer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewSettings {
+    /// `sources.toml`.
+    pub sources: SourcesConfig,
+    /// `vault.toml` `[trash] retention_days` (the value tidy expires by).
+    pub trash_retention_days: u32,
+    /// `captures.toml` `[periods.day].folder` ([`DEFAULT_DAY_FOLDER`] when unset).
+    pub day_folder: String,
+}
+
+impl ViewSettings {
+    /// The typed settings of `c`.
+    #[must_use]
+    pub fn of(c: &ConfigSet) -> Self {
+        Self {
+            sources: c.sources().clone(),
+            trash_retention_days: c.vault().trash.retention_days,
+            day_folder: day_folder_of(c.table("captures.toml")),
         }
     }
 }
@@ -195,15 +204,6 @@ fn day_folder_of(captures: &toml::Table) -> String {
         .map(|f| f.trim().trim_matches('/'))
         .filter(|f| !f.is_empty())
         .map_or_else(|| DEFAULT_DAY_FOLDER.to_owned(), str::to_owned)
-}
-
-/// `<config_dir>/captures.toml`'s day folder (default when absent or unreadable), pushed to the
-/// host alongside the sources.
-fn load_day_folder(config_dir: &Path) -> String {
-    std::fs::read_to_string(config_dir.join("captures.toml"))
-        .ok()
-        .and_then(|t| t.parse::<toml::Table>().ok())
-        .map_or_else(|| DEFAULT_DAY_FOLDER.to_owned(), |t| day_folder_of(&t))
 }
 
 /// One day-folder note as the source-row counts read it.
@@ -396,18 +396,18 @@ fn log_notices(host: &views::ViewHost) {
     }
 }
 
-/// The host loop. `sources` is the typed `sources.toml`; the `source = "sources"` rows and the
-/// `file.serial` set are recomputed lazily — on the first run of a view that reads them after a
+/// The host loop. `settings` holds the typed config (sources, retention, day folder); the
+/// `source = "sources"` rows and the `file.serial` set are recomputed lazily — on the first run of a view that reads them after a
 /// generation, notes change or config change ([`views::ViewHost::needs_sources`]).
 fn serve(
     mut host: views::ViewHost,
-    mut sources: SourcesConfig,
-    mut day_folder: String,
+    mut settings: ViewSettings,
     rx: &mpsc::Receiver<Cmd>,
     base: &Path,
     events: &broadcast::Sender<Notification>,
     ids: &Mutex<Vec<String>>,
 ) {
+    host.set_trash_retention_days(settings.trash_retention_days);
     let mut reader: Option<cv_index::Reader> = None;
     let mut sources_stale = true;
     let invalidate = |v: Vec<String>| {
@@ -438,7 +438,7 @@ fn serve(
                     && host.needs_sources(&view_id)
                     && let Some(r) = reader.as_ref()
                 {
-                    match source_data(&r.query(), &sources, &day_folder) {
+                    match source_data(&r.query(), &settings.sources, &settings.day_folder) {
                         Ok((records, serial)) => {
                             host.set_sources(records, serial);
                             sources_stale = false;
@@ -475,11 +475,15 @@ fn serve(
                 invalidate(host.view_ids());
             }
             Cmd::StateChanged(table) => invalidate(host.on_state_changed(table)),
-            Cmd::Config(dir) => {
-                if let Some(s) = load_sources(&dir) {
-                    sources = s;
-                }
-                day_folder = load_day_folder(&dir);
+            Cmd::Settings(s) => {
+                host.set_trash_retention_days(s.trash_retention_days);
+                settings = s;
+                sources_stale = true;
+                invalidate(host.view_ids());
+            }
+            Cmd::Config(dir, s) => {
+                host.set_trash_retention_days(s.trash_retention_days);
+                settings = s;
                 sources_stale = true;
                 invalidate(host.on_config_changed(&dir));
                 log_notices(&host);
@@ -503,6 +507,51 @@ mod tests {
 
     use super::*;
     use std::time::Duration;
+
+    /// D6 (plan tn-review-2026-10-26-remediation WP-R6): the view host's retention is
+    /// `ConfigSet`'s, so after an invalid `vault.toml` edit it keeps the last valid value exactly
+    /// as tidy (`config.vault().trash.retention_days`) does.
+    #[test]
+    fn view_settings_keep_the_last_valid_retention_like_tidy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = ConfigSet::new();
+        assert_eq!(
+            ViewSettings::of(&c).trash_retention_days,
+            c.vault().trash.retention_days
+        );
+        std::fs::write(
+            dir.path().join("vault.toml"),
+            "[trash]\nretention_days = 7\n",
+        )
+        .unwrap();
+        crate::runner::load_config_dir(dir.path(), &mut c);
+        assert_eq!(ViewSettings::of(&c).trash_retention_days, 7);
+        std::fs::write(
+            dir.path().join("vault.toml"),
+            "[trash]\nretention_days = \"soon\"\n",
+        )
+        .unwrap();
+        crate::runner::load_config_dir(dir.path(), &mut c);
+        assert!(!c.errors().is_empty());
+        assert_eq!(
+            c.vault().trash.retention_days,
+            7,
+            "tidy keeps the last valid value"
+        );
+        assert_eq!(
+            ViewSettings::of(&c).trash_retention_days,
+            7,
+            "and so does the view host"
+        );
+        assert_eq!(ViewSettings::of(&c).day_folder, "daily/day");
+    }
+
+    /// `dir` loaded the way the runner loads it.
+    fn loaded(dir: &Path) -> ConfigSet {
+        let mut c = ConfigSet::new();
+        crate::runner::load_config_dir(dir, &mut c);
+        c
+    }
 
     /// No definitions: nothing is listed and an unknown id is `NotFound`.
     #[tokio::test]
@@ -797,6 +846,7 @@ mod tests {
         let mut index = cv_index::Index::create(&vault, &base).unwrap();
         let (tx, _rx) = broadcast::channel(64);
         let reg = ViewRegistry::start(&config, &base, None, tx).unwrap();
+        reg.set_config(&loaded(&config));
         let all = "works#All".to_owned();
         let s = |a: &str, b: &str, c: &str, d: &str| {
             (a.to_owned(), b.to_owned(), c.to_owned(), d.to_owned())
@@ -860,7 +910,7 @@ mod tests {
                 .replace("works=true\n", ""),
         )
         .unwrap();
-        reg.notify_config(&config);
+        reg.notify_config(&config, &loaded(&config));
         let rows = source_rows(&reg.run(&all, None, None, None).await.unwrap());
         let counts: Vec<(&str, &str, &str)> = rows
             .iter()
