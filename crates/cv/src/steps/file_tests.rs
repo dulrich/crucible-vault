@@ -7,7 +7,7 @@ use cv_protocol::ActionContext;
 use serde_json::{Map, json};
 
 use super::StepOutcome;
-use super::testkit::{active, example_env, fails, today, tomorrow};
+use super::testkit::{active, example_env, fails, note_gone, today, tomorrow};
 
 // ---- forward task / mark_forwarded -----------------------------------------------------------
 
@@ -353,4 +353,34 @@ fn upsert_tags_kind_blog_writes_an_absent_trim_label_only() {
     env.run(up, json!({"kind": "repo"}), active("r.md"))
         .unwrap();
     assert!(!env.read("r.md").unwrap().contains("trim-label"));
+}
+
+/// D11: a single-note step whose target note is gone is `NoteGone`, not a hard failure.
+#[test]
+fn missing_target_note_is_note_gone() {
+    let env = example_env(&[("other.md", "x\n")]);
+    let ctx = ActionContext {
+        line: Some(0),
+        ..active("missing.md")
+    };
+    assert_eq!(
+        note_gone(env.run("type = \"mark_forwarded\"", json!({}), ctx)),
+        "missing.md"
+    );
+    assert_eq!(
+        note_gone(env.run(
+            "type = \"set_props\"\nprops = { n = 3 }",
+            json!({}),
+            active("missing.md")
+        )),
+        "missing.md"
+    );
+    assert_eq!(
+        note_gone(env.run(
+            "type = \"copy\"\nto = \"_raw_transcript\"",
+            json!({}),
+            active("missing.md")
+        )),
+        "missing.md"
+    );
 }

@@ -376,8 +376,9 @@ pub struct Base {
     pub source: Source,
     pub formulas: BTreeMap<String, Result<Expr, String>>,
     pub views: Vec<View>,
-    /// Some filter or formula text mentions `file.serial` (the daemon-supplied serial match
-    /// set; `ViewHost::needs_sources`). A textual check: a false positive only costs a recompute.
+    /// Some compiled expression or property id reads `file.serial` (the daemon-supplied serial
+    /// match set; `ViewHost::needs_sources`); walked from the compiled definition by
+    /// [`Self::reads_serial`].
     pub uses_serial: bool,
 }
 
@@ -464,8 +465,53 @@ impl Base {
             source: def.source,
             formulas,
             views,
-            uses_serial: format!("{def:?}").contains("file.serial"),
+            uses_serial: false,
         }
+        .with_serial_scan()
+    }
+
+    fn with_serial_scan(mut self) -> Self {
+        self.uses_serial = self.reads_serial();
+        self
+    }
+
+    /// Whether any compiled filter, formula, column, sort key, group-by, summary, pivot, task
+    /// filter or `select_by` of this base reads the property `file.serial`.
+    pub fn reads_serial(&self) -> bool {
+        let is_serial = |id: &str| norm(id) == "file.serial";
+        let reads = |e: &Expr| e.references("file", "serial");
+        let sums = |s: &[(String, SumFn)]| s.iter().any(|(id, _)| is_serial(id));
+        fn filter(f: &Filter, reads: &dyn Fn(&Expr) -> bool) -> bool {
+            match f {
+                Filter::Expr(e) => reads(e),
+                Filter::And(v) | Filter::Or(v) | Filter::Not(v) => {
+                    v.iter().any(|f| filter(f, reads))
+                }
+            }
+        }
+        self.formulas.values().any(|f| f.as_ref().is_ok_and(reads))
+            || self.views.iter().any(|v| {
+                v.filters.iter().any(|f| filter(f, &reads))
+                    || v.order.iter().any(|(id, e, _)| is_serial(id) || reads(e))
+                    || v.sort.iter().any(|(e, _)| reads(e))
+                    || v.group.as_ref().is_some_and(|(e, _)| reads(e))
+                    || sums(&v.summaries)
+                    || v.summary_rows
+                        .iter()
+                        .any(|r| reads(&r.filter) || sums(&r.summaries))
+                    || v.pivot.as_ref().is_some_and(|p| {
+                        reads(&p.rows)
+                            || reads(&p.value)
+                            || p.display.as_ref().is_some_and(reads)
+                            || p.columns
+                                .iter()
+                                .any(|(id, e)| is_serial(id) || e.as_ref().is_some_and(reads))
+                    })
+                    || v.tasks
+                        .as_ref()
+                        .is_some_and(|t| t.task_filter.as_ref().is_some_and(reads))
+                    || v.select_by.as_deref().is_some_and(is_serial)
+            })
     }
 
     pub fn id(&self, v: &View) -> String {
@@ -758,6 +804,70 @@ status = [" "]
         assert_eq!(
             (d.source, d.views[0].source),
             (Source::Sources, Some(Source::Index))
+        );
+    }
+
+    fn serial(toml_text: &str) -> bool {
+        check_text("t", toml_text, &mut Vec::new())
+            .unwrap()
+            .uses_serial
+    }
+
+    #[test]
+    fn serial_detected_in_a_filter() {
+        assert!(serial(
+            "[[views]]\ntype='table'\nname='V'\nfilters={and=['file.serial == \"x\"']}\norder=['file.name']\n"
+        ));
+        assert!(serial(
+            "[filters]\nor=[{not=['file[\"serial\"] == null']}]\n[[views]]\ntype='table'\nname='V'\norder=['file.name']\n"
+        ));
+    }
+
+    #[test]
+    fn serial_detected_in_a_formula() {
+        assert!(serial(
+            "[formulas]\nf='if(file.serial, 1, 0)'\n[[views]]\ntype='table'\nname='V'\norder=['file.name']\n"
+        ));
+    }
+
+    #[test]
+    fn serial_detected_as_a_column_id_group_and_sort() {
+        assert!(serial(
+            "[[views]]\ntype='table'\nname='V'\norder=['file.name','file.serial']\n"
+        ));
+        assert!(serial(
+            "[[views]]\ntype='table'\nname='V'\norder=['file.name']\ngroupBy={property='file.serial',direction='ASC'}\n"
+        ));
+        assert!(serial(
+            "[[views]]\ntype='table'\nname='V'\norder=['file.name']\nsort=[{property='file.serial',direction='ASC'}]\n"
+        ));
+    }
+
+    #[test]
+    fn serial_text_in_a_literal_or_label_is_not_a_reference() {
+        assert!(!serial(
+            "[formulas]\nf='\"file.serial\"'\n[properties.\"note.x\"]\ndisplayName='file.serial'\n[[views]]\ntype='table'\nname='file.serial'\nfilters='note.x == \"file.serial\"'\norder=['file.name','note.x']\n"
+        ));
+    }
+
+    #[test]
+    fn every_shipped_definition_that_reads_serial_still_does() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("defs");
+        let mut serial_files = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap() {
+            let path = e.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let def = toml::from_str::<BaseDef>(&text).unwrap();
+            let old = format!("{def:?}").contains("file.serial");
+            let new = Base::compile("t", &def, &mut Vec::new()).uses_serial;
+            assert_eq!(old, new, "{}", path.display());
+            if new {
+                serial_files.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+            }
+        }
+        assert!(
+            serial_files.contains(&"works".to_string()),
+            "{serial_files:?}"
         );
     }
 }

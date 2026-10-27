@@ -250,32 +250,13 @@ fn ordered(dir: Direction, o: std::cmp::Ordering) -> std::cmp::Ordering {
 /// A non-file row (`tracker_items`): field name → value.
 pub type Record = Arc<std::collections::BTreeMap<String, Value>>;
 
-/// Runs `view` over index files.
-pub fn run(env: &Env<'_>, view: &View) -> R<ViewResult> {
-    run_on(env, view, None)
-}
-
 /// Runs `view` over `records` when given (no SQL narrowing; filters evaluate per record),
-/// otherwise over index files.
-pub fn run_on(env: &Env<'_>, view: &View, records: Option<&[Record]>) -> R<ViewResult> {
-    run_sorted(env, view, records, None)
-}
-
-/// [`run_on`] with the editor's column-header sort as the primary key of a table view
-/// (an unknown column is ignored; pivot and tasks views ignore it).
-pub fn run_sorted(
-    env: &Env<'_>,
-    view: &View,
-    records: Option<&[Record]>,
-    ui_sort: Option<&cv_protocol::ViewSort>,
-) -> R<ViewResult> {
-    run_selected(env, view, records, ui_sort, None)
-}
-
-/// [`run_sorted`] with the host's in-place selection (plan round-13 WP-4): rows whose
+/// otherwise over index files. `ui_sort` is the editor's column-header sort as the primary key
+/// of a table view (an unknown column is ignored; pivot and tasks views ignore it).
+/// `select` is the host's in-place selection (plan round-13 WP-4): rows whose
 /// `select.property` evaluates to the text `select.value`, ANDed with the view's filters before
 /// grouping, sorting, the limit and summaries.
-pub fn run_selected(
+pub fn run(
     env: &Env<'_>,
     view: &View,
     records: Option<&[Record]>,

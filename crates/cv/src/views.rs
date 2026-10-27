@@ -447,13 +447,18 @@ fn serve(
                     }
                 }
                 let res = match reader.as_ref() {
-                    Some(r) => host.run_with_select(
-                        r,
-                        &view_id,
-                        this_path.as_deref(),
-                        sort.as_ref(),
-                        select.as_ref(),
-                    ),
+                    Some(r) => host
+                        .run(
+                            r.generation(),
+                            &views::RunRequest {
+                                view_id: &view_id,
+                                this_path: this_path.as_deref(),
+                                sort: sort.as_ref(),
+                                select: select.as_ref(),
+                            },
+                        )
+                        .and_then(|v| v.into_protocol().map_err(views::ViewsError::from))
+                        .map_err(|e| e.to_string()),
                     None => Err("no index reader".into()),
                 };
                 let _ = reply.send(res);

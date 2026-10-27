@@ -249,6 +249,14 @@ pub(crate) fn tomorrow() -> String {
         .to_string()
 }
 
+/// The path of a [`StepError::NoteGone`] (D11: a missing single target note settles quietly).
+pub(crate) fn note_gone(r: Result<StepOutcome, StepError>) -> String {
+    match r {
+        Err(StepError::NoteGone { path }) => path,
+        other => panic!("expected NoteGone, got {other:?}"),
+    }
+}
+
 pub(crate) fn fails(r: Result<StepOutcome, StepError>) -> String {
     match r {
         Err(StepError::Failed { message, .. }) => message,

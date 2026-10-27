@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use chrono::NaiveDate;
 use serde_json::Value as Json;
 use views::result::{Cell, ColumnRole};
-use views::{ViewHost, ViewResult};
+use views::{RunRequest, ViewHost, ViewResult};
 
 const IDS: &[&str] = &[
     "backlinks#Here",
@@ -175,7 +175,14 @@ impl Fx {
         let g = cv_index::Reader::open_current(&self.base)
             .unwrap()
             .generation();
-        host.run_typed(g, id, this).unwrap()
+        host.run(
+            g,
+            &RunRequest {
+                this_path: this,
+                ..RunRequest::view(id)
+            },
+        )
+        .unwrap()
     }
 }
 

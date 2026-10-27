@@ -18,7 +18,7 @@ pub mod value;
 pub use def::{SumFn, norm as canonical_property_id};
 pub use eval::FILE_PROPERTY_IDS;
 pub use result::ViewResult;
-pub use service::{ViewHost, ViewsError};
+pub use service::{RunRequest, ViewHost, ViewsError};
 
 #[cfg(test)]
 mod tests;

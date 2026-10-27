@@ -165,6 +165,31 @@ impl Expr {
             Self::Method(r, _, a) => r.row_dependent() || a.iter().any(Self::row_dependent),
         }
     }
+
+    /// Whether the expression reads the property `owner.field` (`file.serial`, or the indexed
+    /// form `file["serial"]`). Walks the AST, so the text only appearing inside a string literal
+    /// is not a reference.
+    pub fn references(&self, owner: &str, field: &str) -> bool {
+        match self {
+            Self::Lit(_) => false,
+            Self::Ident(_) => false,
+            Self::Member(e, f) => {
+                (f == field && matches!(&**e, Self::Ident(o) if o == owner))
+                    || e.references(owner, field)
+            }
+            Self::Index(a, b) => {
+                let direct = matches!(&**a, Self::Ident(o) if o == owner)
+                    && matches!(&**b, Self::Lit(Value::Str(k)) if k == field);
+                direct || a.references(owner, field) || b.references(owner, field)
+            }
+            Self::List(v) | Self::Call(_, v) => v.iter().any(|e| e.references(owner, field)),
+            Self::Not(e) | Self::Neg(e) => e.references(owner, field),
+            Self::Bin(_, a, b) => a.references(owner, field) || b.references(owner, field),
+            Self::Method(r, _, a) => {
+                r.references(owner, field) || a.iter().any(|e| e.references(owner, field))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

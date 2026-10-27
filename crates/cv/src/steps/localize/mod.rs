@@ -171,9 +171,7 @@ pub(super) fn execute_note(
     if !path.ends_with(".md") {
         return Ok((NoteVars::default(), Vec::new()));
     }
-    let Some((bytes, _)) = ctx.read(&path)? else {
-        return Err(StepError::NoteGone { path });
-    };
+    let (bytes, _) = ctx.read_required(&path)?;
     let content = String::from_utf8(bytes)
         .map_err(|_| StepError::failed(format!("localize: {path} is not UTF-8")))?;
     let matches = parse_attachment_refs(&content);

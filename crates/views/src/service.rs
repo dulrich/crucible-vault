@@ -32,6 +32,26 @@ pub enum ViewsError {
     Json(#[from] serde_json::Error),
 }
 
+/// One view evaluation: the view, the host note (`this`), the editor's column-header sort and
+/// the host's in-place selection (plan round-13 WP-4).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunRequest<'a> {
+    pub view_id: &'a str,
+    pub this_path: Option<&'a str>,
+    pub sort: Option<&'a cv_protocol::ViewSort>,
+    pub select: Option<&'a cv_protocol::ViewSelect>,
+}
+
+impl<'a> RunRequest<'a> {
+    /// A plain run of `view_id`: no host note, sort or selection.
+    pub fn view(view_id: &'a str) -> Self {
+        Self {
+            view_id,
+            ..Self::default()
+        }
+    }
+}
+
 /// The view evaluator hosted by the daemon.
 pub struct ViewHost {
     config_dir: PathBuf,
@@ -200,36 +220,15 @@ impl ViewHost {
         ids
     }
 
-    /// Evaluates `view_id` against index generation `generation`.
-    pub fn run_typed(
-        &mut self,
-        generation: u64,
-        view_id: &str,
-        this_path: Option<&str>,
-    ) -> Result<ViewResult, ViewsError> {
-        self.run_sorted(generation, view_id, this_path, None)
-    }
-
-    /// [`Self::run_typed`] with the editor's column-header sort.
-    pub fn run_sorted(
-        &mut self,
-        generation: u64,
-        view_id: &str,
-        this_path: Option<&str>,
-        ui_sort: Option<&cv_protocol::ViewSort>,
-    ) -> Result<ViewResult, ViewsError> {
-        self.run_selected(generation, view_id, this_path, ui_sort, None)
-    }
-
-    /// [`Self::run_sorted`] with the host's in-place selection (plan round-13 WP-4).
-    pub fn run_selected(
-        &mut self,
-        generation: u64,
-        view_id: &str,
-        this_path: Option<&str>,
-        ui_sort: Option<&cv_protocol::ViewSort>,
-        select: Option<&cv_protocol::ViewSelect>,
-    ) -> Result<ViewResult, ViewsError> {
+    /// Evaluates `req` against index generation `generation` (the one run entry point; the
+    /// daemon converts the typed result to the wire form).
+    pub fn run(&mut self, generation: u64, req: &RunRequest<'_>) -> Result<ViewResult, ViewsError> {
+        let RunRequest {
+            view_id,
+            this_path,
+            sort: ui_sort,
+            select,
+        } = *req;
         let (bi, vi) = self
             .bases
             .iter()
@@ -290,45 +289,10 @@ impl ViewHost {
             notices: RefCell::default(),
             serial: self.serial.as_ref(),
         };
-        let mut r = engine::run_selected(&env, view, records.as_deref(), ui_sort, select)?;
+        let mut r = engine::run(&env, view, records.as_deref(), ui_sort, select)?;
         r.notices
             .extend(load_notices.into_iter().map(|n| format!("load: {n}")));
         Ok(r)
-    }
-
-    /// The daemon's `view_run` body: evaluates on `reader`'s generation.
-    pub fn run(
-        &mut self,
-        reader: &cv_index::Reader,
-        view_id: &str,
-        this_path: Option<&str>,
-    ) -> Result<cv_protocol::ViewResult, String> {
-        self.run_with_sort(reader, view_id, this_path, None)
-    }
-
-    /// [`Self::run`] with the editor's column-header sort.
-    pub fn run_with_sort(
-        &mut self,
-        reader: &cv_index::Reader,
-        view_id: &str,
-        this_path: Option<&str>,
-        ui_sort: Option<&cv_protocol::ViewSort>,
-    ) -> Result<cv_protocol::ViewResult, String> {
-        self.run_with_select(reader, view_id, this_path, ui_sort, None)
-    }
-
-    /// [`Self::run_with_sort`] with the host's in-place selection (plan round-13 WP-4).
-    pub fn run_with_select(
-        &mut self,
-        reader: &cv_index::Reader,
-        view_id: &str,
-        this_path: Option<&str>,
-        ui_sort: Option<&cv_protocol::ViewSort>,
-        select: Option<&cv_protocol::ViewSelect>,
-    ) -> Result<cv_protocol::ViewResult, String> {
-        self.run_selected(reader.generation(), view_id, this_path, ui_sort, select)
-            .and_then(|r| r.into_protocol().map_err(ViewsError::from))
-            .map_err(|e| e.to_string())
     }
 }
 

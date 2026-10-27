@@ -426,6 +426,14 @@ impl<'a> StepCtx<'a> {
         Ok(r)
     }
 
+    /// [`Self::read`] for a step whose single target note must exist: a missing note is
+    /// [`StepError::NoteGone`] (the runner settles it quietly), not a hard failure.
+    pub fn read_required(&self, path: &str) -> Result<(Vec<u8>, ContentHash), StepError> {
+        self.read(path)?.ok_or_else(|| StepError::NoteGone {
+            path: path.to_owned(),
+        })
+    }
+
     /// CAS write: `expected` is the hash the step read (`None` = must not
     /// exist). A mismatch is [`VaultError::Conflict`] — never a clobber — and maps to
     /// [`StepError::conflict`] (a `Deferred{Wait}`).

@@ -108,9 +108,7 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
             .unwrap_or(false);
     }
     let path = target_path(ctx, p.path.as_deref())?;
-    let (bytes, hash) = ctx
-        .read(&path)?
-        .ok_or_else(|| StepError::failed("lint target note not found"))?;
+    let (bytes, hash) = ctx.read_required(&path)?;
     let original =
         String::from_utf8(bytes).map_err(|_| StepError::failed("lint target is not UTF-8"))?;
     let input = if cleanup {

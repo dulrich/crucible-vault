@@ -460,9 +460,7 @@ fn copy_note(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError
     if dst == src {
         return Err(StepError::failed("copy destination equals the source"));
     }
-    let (bytes, _) = ctx
-        .read(&src)?
-        .ok_or_else(|| StepError::failed("copy source note not found"))?;
+    let (bytes, _) = ctx.read_required(&src)?;
     let mut out = StepOutcome::default();
     out.set_vars(&CopyVars {
         copied_path: dst.clone(),
@@ -518,9 +516,7 @@ fn edit_note(
     path: &str,
     edit: impl FnOnce(&mut FrontmatterDoc) -> Result<bool, StepError>,
 ) -> Result<StepOutcome, StepError> {
-    let (bytes, hash) = ctx
-        .read(path)?
-        .ok_or_else(|| StepError::failed("target note not found"))?;
+    let (bytes, hash) = ctx.read_required(path)?;
     let mut doc = FrontmatterDoc::new(utf8(bytes)?);
     let mut out = StepOutcome::default();
     if edit(&mut doc)? {
@@ -617,9 +613,7 @@ fn mark_forwarded(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, Step
         .line
         .or_else(|| ctx.context.line.and_then(|l| usize::try_from(l).ok()))
         .ok_or_else(|| StepError::failed("mark_forwarded needs a line"))?;
-    let (bytes, hash) = ctx
-        .read(&path)?
-        .ok_or_else(|| StepError::failed("mark_forwarded note not found"))?;
+    let (bytes, hash) = ctx.read_required(&path)?;
     let text = utf8(bytes)?;
     let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     let cur = lines

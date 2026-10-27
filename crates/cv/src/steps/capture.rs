@@ -428,9 +428,7 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
         return Ok(out);
     }
 
-    if ctx.read(&path)?.is_none() {
-        return Err(StepError::failed("capture target note not found"));
-    }
+    ctx.read_required(&path)?;
     let fixed = p.section.clone().filter(|x| !x.trim().is_empty());
     // Re-appliable on a concurrent edit (SR7): the section and the "already present" check
     // are decided on the text read for each attempt.

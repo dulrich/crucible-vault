@@ -6,7 +6,7 @@ use cv_protocol::ActionContext;
 use serde_json::{Map, json};
 
 use super::StepError;
-use super::testkit::{active, example_env, fails, today};
+use super::testkit::{active, example_env, note_gone, today};
 
 // ---- capture ---------------------------------------------------------------------------------
 
@@ -89,9 +89,9 @@ fn capture_whole_note_modes_and_targets() {
             .is_empty()
     );
     // A missing active/path target fails closed.
-    assert!(
-        fails(env.run(app, json!({"p": "nope.md", "value": "v"}), active("b.md")))
-            .contains("not found")
+    assert_eq!(
+        note_gone(env.run(app, json!({"p": "nope.md", "value": "v"}), active("b.md"))),
+        "nope.md"
     );
 }
 

@@ -10,7 +10,7 @@ use crate::db::Db;
 use crate::eval::{Env, RowCtx};
 use crate::expr::parse;
 use crate::result::{Cell, Kind, ViewResult};
-use crate::service::ViewHost;
+use crate::service::{RunRequest, ViewHost};
 use crate::value::Value;
 
 const NOTES: &[(&str, &str)] = &[
@@ -109,7 +109,14 @@ impl Fx {
     }
     fn run(&self, host: &mut ViewHost, id: &str, this: Option<&str>) -> ViewResult {
         let g = self.reader().generation();
-        host.run_typed(g, id, this).unwrap()
+        host.run(
+            g,
+            &RunRequest {
+                this_path: this,
+                ..RunRequest::view(id)
+            },
+        )
+        .unwrap()
     }
 }
 
@@ -538,11 +545,18 @@ fn table_view_end_to_end() {
     assert_eq!(text(&m.summaries[0].cells[1]), "1900");
 
     // The protocol shape.
-    let p = h.run(&fx.reader(), "month#Month", None).unwrap();
+    let p = h
+        .run(fx.reader().generation(), &RunRequest::view("month#Month"))
+        .unwrap()
+        .into_protocol()
+        .unwrap();
     assert_eq!(p.0["kind"], "table");
     assert_eq!(p.0["groups"][0]["key"]["t"], "text");
     assert_eq!(p.0["groups"][0]["rows"][0]["cells"][0]["t"], "link");
-    assert!(h.run(&fx.reader(), "nope#x", None).is_err());
+    assert!(
+        h.run(fx.reader().generation(), &RunRequest::view("nope#x"))
+            .is_err()
+    );
 }
 
 const PIVOT: &str = r##"
@@ -750,7 +764,11 @@ fn hosting_ids_invalidation_and_reload() {
     let mut h = fx.host();
     assert_eq!(h.view_ids(), vec!["hubs#Stack"]);
     let reader = fx.reader();
-    let p = h.run(&reader, "hubs#Stack", None).unwrap();
+    let p = h
+        .run(reader.generation(), &RunRequest::view("hubs#Stack"))
+        .unwrap()
+        .into_protocol()
+        .unwrap();
     assert_eq!(p.0["kind"], "table");
     assert_eq!(p.0["columns"][1]["label"], "description");
     assert_eq!(
@@ -762,7 +780,10 @@ fn hosting_ids_invalidation_and_reload() {
         vec!["hubs#Stack"]
     );
     // Still serves the old generation through a fresh connection.
-    assert!(h.run(&reader, "hubs#Stack", None).is_ok());
+    assert!(
+        h.run(reader.generation(), &RunRequest::view("hubs#Stack"))
+            .is_ok()
+    );
 
     std::fs::write(
         fx.config.join("views").join("more.toml"),
@@ -866,13 +887,13 @@ order = ["file.name", "formula.label"]
     let g = cv_index::Reader::open_current(&base).unwrap().generation();
     let mut h = ViewHost::new(&config, &base);
     for id in ["t#Simple", "t#Narrowed", "t#Scan"] {
-        let first = h.run_typed(g, id, None).unwrap();
+        let first = h.run(g, &RunRequest::view(id)).unwrap();
         assert!(first.notices.is_empty(), "{:?}", first.notices);
         assert!(first.rows().count() > 0, "{id}");
         let n = 20u32;
         let start = std::time::Instant::now();
         for _ in 0..n {
-            let _ = h.run_typed(g, id, None).unwrap();
+            let _ = h.run(g, &RunRequest::view(id)).unwrap();
         }
         let per = start.elapsed() / n;
         println!("{id}: {} rows, {per:?} per run", first.rows().count());
@@ -1053,7 +1074,15 @@ fn tracker_items_view_needs_a_state_db() {
     let fx = fixture(&[("intake.toml", INTAKE)]);
     let mut host = fx.host();
     let g = fx.reader().generation();
-    let e = host.run_typed(g, "intake#Day", None).unwrap_err();
+    let e = host
+        .run(
+            g,
+            &RunRequest {
+                this_path: None,
+                ..RunRequest::view("intake#Day")
+            },
+        )
+        .unwrap_err();
     assert!(e.to_string().contains("no state.db"), "{e}");
 }
 
@@ -1387,8 +1416,16 @@ fn ui_sort_is_primary_then_definition_keys_and_precedes_limit() {
     let mut h = fx.host();
     assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());
     let g = fx.reader().generation();
-    let mut run =
-        |id: &str, s: Option<cv_protocol::ViewSort>| h.run_sorted(g, id, None, s.as_ref()).unwrap();
+    let mut run = |id: &str, s: Option<cv_protocol::ViewSort>| {
+        h.run(
+            g,
+            &RunRequest {
+                sort: s.as_ref(),
+                ..RunRequest::view(id)
+            },
+        )
+        .unwrap()
+    };
     let base = run("us#All", None);
     let asc = names(&run("us#All", Some(ui("file.name", Asc))));
     let mut desc = names(&run("us#All", Some(ui("file.name", Desc))));
@@ -1433,7 +1470,7 @@ fn ui_select_filters_rows_and_summaries() {
     let fx = fixture(&[("us.toml", UI_SORT)]);
     let mut h = fx.host();
     let g = fx.reader().generation();
-    let all = h.run_sorted(g, "us#Sel", None, None).unwrap();
+    let all = h.run(g, &RunRequest::view("us#Sel")).unwrap();
     assert_eq!(all.select_by.as_deref(), Some("file.name"));
     let first = names(&all)[0].clone();
     assert!(names(&all).len() > 1);
@@ -1443,7 +1480,15 @@ fn ui_select_filters_rows_and_summaries() {
         property: "file.name".into(),
         value: first.clone(),
     };
-    let one = h.run_selected(g, "us#Sel", None, None, Some(&sel)).unwrap();
+    let one = h
+        .run(
+            g,
+            &RunRequest {
+                select: Some(&sel),
+                ..RunRequest::view("us#Sel")
+            },
+        )
+        .unwrap();
     assert_eq!(names(&one), [first]);
     assert_eq!(count(&one), "1");
     let none = cv_protocol::ViewSelect {
@@ -1452,8 +1497,14 @@ fn ui_select_filters_rows_and_summaries() {
     };
     assert!(
         names(
-            &h.run_selected(g, "us#Sel", None, None, Some(&none))
-                .unwrap()
+            &h.run(
+                g,
+                &RunRequest {
+                    select: Some(&none),
+                    ..RunRequest::view("us#Sel")
+                },
+            )
+            .unwrap()
         )
         .is_empty()
     );
@@ -1490,7 +1541,15 @@ fn trash_view_needs_a_state_db() {
     let fx = fixture(&[("trash.toml", TRASH_DEF)]);
     let mut host = fx.host();
     let g = fx.reader().generation();
-    let e = host.run_typed(g, "trash#T", None).unwrap_err();
+    let e = host
+        .run(
+            g,
+            &RunRequest {
+                this_path: None,
+                ..RunRequest::view("trash#T")
+            },
+        )
+        .unwrap_err();
     assert!(e.to_string().contains("no state.db"), "{e}");
 }
 

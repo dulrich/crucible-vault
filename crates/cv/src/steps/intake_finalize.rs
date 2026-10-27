@@ -165,9 +165,7 @@ fn resolve_rows(
 
 fn run(path: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let path = note_path(ctx, path)?;
-    let (bytes, _) = ctx
-        .read(&path)?
-        .ok_or_else(|| StepError::failed("intake_finalize target note not found"))?;
+    let (bytes, _) = ctx.read_required(&path)?;
     let text = String::from_utf8(bytes).map_err(|_| StepError::failed("note is not UTF-8"))?;
     let v = finalize_note(ctx, &path, &text, None, false, &BTreeSet::new())?;
     let mut out = StepOutcome::default();

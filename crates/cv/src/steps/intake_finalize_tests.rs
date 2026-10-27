@@ -244,3 +244,14 @@ fn blog_rows_go_through_finalize_and_set_rows_stay_untouched() {
         [json!(0), json!(0), json!(0), json!(0)]
     );
 }
+
+/// D11: a missing finalize target is `NoteGone`, not a hard failure.
+#[test]
+fn missing_note_is_note_gone() {
+    let e = env(&[("notes/a.md", "x\n".to_owned())]);
+    let step = Step::from_table("type = \"intake_finalize\"".parse().unwrap()).unwrap();
+    let mut vars = Map::new();
+    vars.insert("moved_path".into(), json!("stack/gone.md"));
+    let r = e.exec_with(&step, &Map::new(), &ActionContext::default(), &vars);
+    assert_eq!(super::testkit::note_gone(r), "stack/gone.md");
+}
