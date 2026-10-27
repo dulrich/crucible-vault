@@ -22,9 +22,6 @@ pub(crate) struct Params {
     /// `Some(folder)` = folder scope (plan `usability-sprint-captures-links` WP-2 backfill).
     pub(super) folder_scope: Option<String>,
     pub(super) limit: u64,
-    /// Folder scope only: select notes by their source-relative image refs instead of remote
-    /// ones (plan `round-15-relative-images-pdf-viewer` WP-1 backfill).
-    pub(super) relative_sources: bool,
     pub(super) repair: bool,
     pub(super) folder_template: String,
     pub(super) name_template: String,
@@ -129,15 +126,10 @@ pub(super) fn parse_params(t: &toml::Table) -> Result<Params, String> {
         ),
         Some(o) => return Err(format!("localize: scope {o:?} (want note|folder)")),
     };
-    let relative_sources = b("relative_sources", false)?;
-    if relative_sources && folder_scope.is_none() {
-        return Err("localize: relative_sources requires scope = \"folder\"".into());
-    }
     Ok(Params {
         path: s("path")?,
         folder_scope,
         limit: u("limit", 50)?,
-        relative_sources,
         repair,
         folder_template,
         name_template,

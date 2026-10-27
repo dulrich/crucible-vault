@@ -164,10 +164,6 @@ const STEPS: &[(&str, &str)] = &[
         "scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 50",
     ),
     (
-        "localize",
-        "scope = \"folder\"\nfolder = \"\"\nrelative_sources = true\nlimit = 200",
-    ),
-    (
         "agent",
         "agent = \"a1\"\nmodel = \"local:m1\"\noutput_var = \"out\"\nmax_tokens = 10\noutput = \"replace\"",
     ),
@@ -209,10 +205,8 @@ const STEPS: &[(&str, &str)] = &[
     ("intake_finalize", "path = \"{vars.moved_path}\""),
     ("ignore_video", "mode = \"manual\""),
     ("daily_brief", ""),
-    ("capture_repair", "folder = \"daily/day\"\nlimit = 10"),
     ("dupes_scan", "dry_run = true"),
     ("dupes_resolve", ""),
-    ("blog_metadata_backfill", "dry_run = false"),
     ("tidy", "min_age_hours = 48"),
 ];
 

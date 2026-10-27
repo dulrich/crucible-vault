@@ -53,9 +53,7 @@ use cv_vault::VaultError;
 use serde::Serialize;
 
 use super::{StepCtx, StepError, StepModule, StepOutcome};
-#[cfg(test)]
-pub(crate) use backfill::has_escaped_paren_image;
-pub use backfill::{BACKFILL_KIND, RETRY_KIND};
+pub use backfill::BACKFILL_KIND;
 #[cfg(test)]
 pub(crate) use note::SERVICE;
 pub use note::convert_image;

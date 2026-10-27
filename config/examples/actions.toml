@@ -13,7 +13,8 @@
 # Step `type`s: guard, capture, materialize, move, copy, set_props, remove_props, upsert_tags,
 # lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete, link_scan,
 # yt_metadata, yt_channel_enrich, x_discover, x_metadata, x_backfill, image_describe,
-# track_youtube, track_blogs, track_mail, auto_file, intake_reconcile, ignore_video, daily_brief, capture_repair.
+# track_youtube, track_blogs, track_mail, auto_file, intake_reconcile, ignore_video, daily_brief,
+# dupes_scan, dupes_resolve, tidy.
 # Each step's other keys belong to its module (WP-10..13 document them; WP-10's in
 # crates/cv/src/steps/{materialize,capture,file,lint}.rs). Step string params take single-brace
 # placeholders {param.NAME}, {vars.NAME}, {path}, {period.day|week|month}; note/capture templates
@@ -411,37 +412,6 @@ required = true
 [[action.steps]]
 type = "dupes_resolve"
 
-# One-shot `_blog_metadata` backfill into intake (plan round-12-feedback-todos WP-8): re-keys stale
-# post-ids, trashes metadata notes whose capture certainly holds them (rows re-pointed first),
-# labels uncertain twins `possible-duplicate`, and files the rest as `blog` captures in the day
-# folder of their `published` date; matched blog rows are re-dated and made visible. DRY RUN unless
-# the job param `dry_run = false` is given (`cv intake backfill-blog-metadata --apply`). The step
-# holds `intake::identity`.
-[[action]]
-id = "blog-metadata-backfill"
-label = "Backfill _blog_metadata into intake"
-group = "Maintenance"
-resources = { note = false, keys = ["intake::identity"] }
-[[action.steps]]
-type = "blog_metadata_backfill"
-
-# One-shot source-relative image backfill (plan round-15-relative-images-pdf-viewer WP-1): notes
-# with an http(s) frontmatter `source` and page-relative image refs (`![](/img/a.png)`,
-# `![](a.png)`) get them downloaded against the source URL and localized. `folder = ""` is the
-# whole vault. Each note is attempted once (ignored_ids kind `localize_relative_backfill`), so a
-# re-run changes nothing.
-[[action]]
-id = "localize-relative-sources-backfill"
-label = "Localize backfill: source-relative images"
-group = "Maintenance"
-resources = { note = false, keys = ["localize-backfill::relative-sources"] }
-[[action.steps]]
-type = "localize"
-scope = "folder"
-folder = ""
-relative_sources = true
-limit = 200
-
 [[action]]
 id = "image-describe-note"
 label = "Describe images in note"
@@ -548,17 +518,6 @@ type = "localize"
 scope = "folder"
 folder = "daily"
 limit = 50
-
-# Capture repair: blog captures (tag `blog`) renamed to their title filename (links rewritten)
-# and malformed `tags` normalized. Idempotent.
-[[action]]
-id = "capture-repair"
-label = "Capture repair: blog notes"
-group = "Maintenance"
-resources = { note = false, keys = ["capture-repair::daily/day"] }
-[[action.steps]]
-type = "capture_repair"
-folder = "daily/day"
 
 # Vault tidiness (plan tidiness-trash-orphans WP-2): trashes orphaned managed attachments older
 # than `min_age_hours`, gives every unrecorded `.trash/` file (and cv-owned system-trash entry) a

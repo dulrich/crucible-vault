@@ -336,13 +336,6 @@ fn folder_backfill_leaves_an_all_unreachable_note_unrecorded() {
     assert_eq!(var(&out, "failed"), 0);
     assert_eq!(var(&out, "ineligible"), 0);
     assert!(ignored(&env).is_empty(), "not in the exclusion set");
-    assert!(
-        !env.state
-            .lock()
-            .unwrap()
-            .is_ignored(localize::RETRY_KIND, "Clippings/n.md")
-            .unwrap()
-    );
 }
 
 #[test]
@@ -691,83 +684,6 @@ fn remote_ref_predicate_skips_fences_and_sees_data_uris() {
     ));
 }
 
-/// Plan round-9-feedback-todos WP-2 (audit M1): a note excluded before escaped-paren image URLs
-/// were matched is retried once and localized; an ordinary excluded note stays skipped.
-#[test]
-fn folder_backfill_retries_only_escaped_paren_exclusions_once() {
-    let img = png(11);
-    let routes = HashMap::from([
-        route("/a%281%29.png", "image/png", img.clone()),
-        route("/ok.png", "image/png", img),
-    ]);
-    let (env, outs) = with_server(routes, None, move |port, _| {
-        let esc = format!("![](http://127.0.0.1:{port}/a\\(1\\).png)\n");
-        let plain = format!("![](http://127.0.0.1:{port}/ok.png)\n");
-        let env = env(&[
-            ("Clippings/esc.md", esc.as_bytes()),
-            ("Clippings/plain.md", plain.as_bytes()),
-        ]);
-        for f in ["Clippings/esc.md", "Clippings/plain.md"] {
-            env.state
-                .lock()
-                .unwrap()
-                .insert_ignored_id(localize::BACKFILL_KIND, f, "old failure", 1)
-                .unwrap();
-        }
-        let step = env.step("scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 10");
-        let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
-        (env, outs)
-    });
-    assert_eq!(
-        (var(&outs[0], "localized"), var(&outs[0], "failed")),
-        (1, 0)
-    );
-    assert_eq!(
-        (var(&outs[1], "localized"), var(&outs[1], "failed")),
-        (0, 0)
-    );
-    assert!(!env.text("Clippings/esc.md").contains("127.0.0.1"));
-    assert!(
-        env.text("Clippings/plain.md").contains("127.0.0.1"),
-        "an ordinary exclusion stays skipped"
-    );
-}
-
-#[test]
-fn escaped_paren_image_predicate_is_narrow() {
-    use localize::has_escaped_paren_image as f;
-    assert!(f("x ![](https://h.example/a\\(1\\).png) y"));
-    assert!(!f("![](https://h.example/a.png) and \\( prose \\)"));
-    assert!(!f("[link](https://h.example/a\\(1\\))"), "not an image");
-}
-
-/// A failed retry records the spent retry: the escaped note is not selected again.
-#[test]
-fn folder_backfill_spent_retry_is_not_repeated() {
-    let (env, outs) = with_server(HashMap::new(), None, move |port, _| {
-        let esc = format!("![](http://127.0.0.1:{port}/gone\\(1\\).png)\n");
-        let env = env(&[("Clippings/esc.md", esc.as_bytes())]);
-        env.state
-            .lock()
-            .unwrap()
-            .insert_ignored_id(localize::BACKFILL_KIND, "Clippings/esc.md", "old", 1)
-            .unwrap();
-        let step = env.step("scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 10");
-        let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
-        (env, outs)
-    });
-    assert_eq!(var(&outs[0], "failed"), 1);
-    assert_eq!(var(&outs[1], "failed"), 0);
-    assert_eq!(
-        env.state
-            .lock()
-            .unwrap()
-            .ignored_ids(localize::RETRY_KIND)
-            .unwrap(),
-        ["Clippings/esc.md"]
-    );
-}
-
 /// Plan round-15 WP-1: page-relative image refs resolve against the note's `source` URL
 /// (root-relative, bare file, encoded reserved character), download through the remote path
 /// and are rewritten to managed `_MD5` attachments; a 404 stays as it is.
@@ -821,43 +737,4 @@ fn relative_image_refs_without_an_http_source_are_untouched() {
     });
     assert_eq!(note_a.0, note_a.1);
     assert_eq!(note_b.0, note_b.1);
-}
-
-#[test]
-fn relative_source_backfill_selects_notes_without_remote_refs_and_is_idempotent() {
-    let img = png(25);
-    let routes = HashMap::from([route("/img/a.png", "image/png", img.clone())]);
-    let (env, outs, port) = with_server(routes, None, move |port, _| {
-        let rel = format!("---\nsource: http://127.0.0.1:{port}/p/post\n---\n![](/img/a.png)\n");
-        let gone =
-            format!("---\nsource: http://127.0.0.1:{port}/p/post\n---\n![](/img/gone.png)\n");
-        let plain = "---\nsource: http://example.invalid/p\n---\n![](_attachments/z/abc_MD5.png)\n";
-        let env = env(&[
-            ("a.md", rel.as_bytes()),
-            ("b.md", gone.as_bytes()),
-            ("c.md", plain.as_bytes()),
-            ("d.md", b"![](/img/a.png)\n"),
-        ]);
-        let step =
-            env.step("scope = \"folder\"\nfolder = \"\"\nrelative_sources = true\nlimit = 10");
-        let outs: Vec<StepOutcome> = (0..2).map(|_| env.run(&step, "").unwrap()).collect();
-        (env, outs, port)
-    });
-    assert_eq!(
-        (var(&outs[0], "localized"), var(&outs[0], "failed")),
-        (1, 1)
-    );
-    assert_eq!(
-        (var(&outs[1], "localized"), var(&outs[1], "failed")),
-        (0, 0)
-    );
-    assert_eq!(
-        env.text("a.md"),
-        format!(
-            "---\nsource: http://127.0.0.1:{port}/p/post\n---\n![](_attachments/a/{}_MD5.png)\n",
-            super::util::md5_hex(&img)
-        )
-    );
-    assert!(env.text("b.md").contains("/img/gone.png"));
-    assert_eq!(env.text("d.md"), "![](/img/a.png)\n");
 }

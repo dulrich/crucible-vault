@@ -6,159 +6,10 @@ use serde::Serialize;
 use super::super::{StepCtx, StepError, StepOutcome};
 use super::execute_note;
 use super::params::Params;
-use super::relative;
 
 /// The `ignored_ids` kind recording notes a folder-scope backfill attempted and could not fully
 /// localize (audit M2 progress invariant: never re-selected, so repeated runs reach new notes).
 pub const BACKFILL_KIND: &str = "localize_backfill";
-
-/// The `ignored_ids` kind recording that a [`BACKFILL_KIND`]-excluded note has had its one
-/// escaped-paren retry (plan round-9-feedback-todos WP-2, audit M1). Every exclusion made from
-/// this round on records it too, so only exclusions older than the escaped-paren matcher retry.
-pub const RETRY_KIND: &str = "localize_backfill_retry";
-
-/// Whether `text` has a remote markdown image whose URL carries a backslash-escaped parenthesis
-/// (`![](https://h/a\(1\).png)`): the URL shape the reference regexes truncated before WP-1.
-pub(crate) fn has_escaped_paren_image(text: &str) -> bool {
-    let mut rest = text;
-    while let Some(i) = rest.find("](http") {
-        let line_start = rest[..i].rfind('\n').map_or(0, |n| n + 1);
-        let is_image = rest[line_start..i].contains("![");
-        let url = &rest[i + 2..];
-        let mut it = url.chars();
-        while let Some(c) = it.next() {
-            match c {
-                '\\' => {
-                    if matches!(it.next(), Some('(' | ')')) && is_image {
-                        return true;
-                    }
-                }
-                ')' | '\n' | ' ' | '\t' => break,
-                _ => {}
-            }
-        }
-        rest = &rest[i + 2..];
-    }
-    false
-}
-
-/// The `ignored_ids` kind recording notes the source-relative backfill (`relative_sources = true`)
-/// has attempted (plan `round-15-relative-images-pdf-viewer` WP-1): each note is attempted once,
-/// so a re-run changes nothing and the batches reach new notes.
-pub const RELATIVE_KIND: &str = "localize_relative_backfill";
-
-/// The source-relative backfill (`relative_sources = true`): candidates are the indexed `.md`
-/// notes under `folder` (empty = the whole vault, `.trash/` excluded) that carry a frontmatter
-/// `source` and a page-relative image ref ([`relative::has_relative_candidates`]) and are not
-/// recorded under [`RELATIVE_KIND`]. Selection does not depend on remote refs. A throttled or
-/// all-unreachable note is not recorded and ends the batch (a later run retries it); a CAS
-/// conflict is not recorded; every other attempt is, success or not.
-fn execute_relative(
-    p: &Params,
-    folder: &str,
-    ctx: &mut StepCtx<'_>,
-) -> Result<StepOutcome, StepError> {
-    let state_err = |e: cv_state::StateError| StepError::failed(format!("localize: state: {e}"));
-    let prefix = if folder.is_empty() {
-        String::new()
-    } else {
-        format!("{folder}/")
-    };
-    let paths = {
-        let reader = ctx.index()?;
-        reader
-            .query()
-            .md_paths_with_prop_key("source")
-            .map_err(|e| StepError::failed(format!("localize: index: {e}")))?
-    };
-    let mut scanned = 0_u64;
-    let mut candidates = Vec::new();
-    for f in paths {
-        if f.starts_with(".trash/") || !f.starts_with(&prefix) || !f.ends_with(".md") {
-            continue;
-        }
-        scanned += 1;
-        if ctx
-            .state()
-            .is_ignored(RELATIVE_KIND, &f)
-            .map_err(state_err)?
-        {
-            continue;
-        }
-        let Some((bytes, _)) = ctx.read(&f)? else {
-            continue;
-        };
-        if std::str::from_utf8(&bytes).is_ok_and(relative::has_relative_candidates) {
-            candidates.push(f);
-        }
-    }
-    let (mut localized, mut failed, mut attempted, mut throttled) = (0_u64, 0_u64, 0_u64, 0_u64);
-    let mut out = StepOutcome::default();
-    for f in &candidates {
-        if attempted >= p.limit {
-            break;
-        }
-        attempted += 1;
-        let reason = match execute_note(p, f, ctx) {
-            Ok((v, paths)) => {
-                let c = v.counts.unwrap_or_default();
-                for op in paths {
-                    out.push_output(op);
-                }
-                if c.throttled > 0 {
-                    attempted -= 1;
-                    throttled += 1;
-                    break;
-                }
-                if v.all_unreachable {
-                    attempted -= 1;
-                    break;
-                }
-                (c.failed > 0).then(|| format!("{} download(s) failed", c.failed))
-            }
-            Err(StepError::Deferred {
-                cause: super::super::DeferCause::Wait,
-                ..
-            }) => {
-                attempted -= 1;
-                continue;
-            }
-            Err(e @ StepError::Deferred { .. }) => return Err(e),
-            Err(e) => Some(e.to_string()),
-        };
-        match &reason {
-            None => localized += 1,
-            Some(_) => failed += 1,
-        }
-        let r: String = reason
-            .unwrap_or_else(|| "attempted".to_owned())
-            .chars()
-            .take(200)
-            .collect();
-        ctx.state()
-            .insert_ignored_id(RELATIVE_KIND, f, &r, crate::now_ms())
-            .map_err(state_err)?;
-    }
-    let unattempted_remaining = candidates.len() as u64 - attempted;
-    tracing::info!(
-        folder,
-        scanned,
-        localized,
-        failed,
-        throttled,
-        unattempted_remaining,
-        "localize relative-source backfill"
-    );
-    out.set_vars(&FolderVars {
-        scanned,
-        localized,
-        failed,
-        throttled,
-        ineligible: 0,
-        unattempted_remaining,
-    });
-    Ok(out)
-}
 
 /// Outcome vars of a folder-scope `localize` backfill.
 #[derive(Serialize)]
@@ -184,19 +35,16 @@ pub(super) fn execute_folder(
     folder: &str,
     ctx: &mut StepCtx<'_>,
 ) -> Result<StepOutcome, StepError> {
-    if p.relative_sources {
-        return execute_relative(p, folder, ctx);
-    }
     let files = super::super::util::md_files_under(ctx, folder);
     let scanned = files.len() as u64;
     let mut candidates = Vec::new();
     let state_err = |e: cv_state::StateError| StepError::failed(format!("localize: state: {e}"));
     for f in files {
-        let excluded = ctx
+        if ctx
             .state()
             .is_ignored(BACKFILL_KIND, &f)
-            .map_err(state_err)?;
-        if excluded && ctx.state().is_ignored(RETRY_KIND, &f).map_err(state_err)? {
+            .map_err(state_err)?
+        {
             continue;
         }
         let Some((bytes, _)) = ctx.read(&f)? else {
@@ -208,21 +56,12 @@ pub(super) fn execute_folder(
         if !has_remote_image_refs(text) {
             continue;
         }
-        // Plan round-9-feedback-todos WP-2 (audit M1): a note excluded before escaped-paren image
-        // URLs were matched gets one retry; when it is excluded again, [`RETRY_KIND`] records the
-        // spent retry so it never loops. Every other excluded note stays skipped.
-        if excluded && !has_escaped_paren_image(text) {
-            continue;
-        }
         candidates.push(f);
     }
-    // Records a settled or failed note: excluded, and its escaped-paren retry spent (an exclusion
-    // made with the WP-1 matcher has already seen the unescaped URL).
+    // Records a settled or failed note: excluded, never re-selected.
     let exclude = |ctx: &StepCtx<'_>, f: &str, r: &str| -> Result<(), StepError> {
-        let mut db = ctx.state();
-        db.insert_ignored_id(BACKFILL_KIND, f, r, crate::now_ms())
-            .map_err(state_err)?;
-        db.insert_ignored_id(RETRY_KIND, f, "retry spent", crate::now_ms())
+        ctx.state()
+            .insert_ignored_id(BACKFILL_KIND, f, r, crate::now_ms())
             .map_err(state_err)?;
         Ok(())
     };

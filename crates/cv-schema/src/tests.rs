@@ -554,7 +554,7 @@ fn lookup_by_file_and_step_kind() {
     assert_eq!(schema_for("editor.toml"), Some(editor_schema()));
     assert_eq!(step_schema("agent").unwrap().name, "agent");
     assert!(step_schema("nope").is_none());
-    assert_eq!(schemas::STEP.variants.len(), 35);
+    assert_eq!(schemas::STEP.variants.len(), 33);
 }
 
 #[test]

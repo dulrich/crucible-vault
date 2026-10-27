@@ -217,13 +217,6 @@ pub(super) fn period(
     })
 }
 
-/// The day period's asset folder for `date` (`<folder>/<formatted date>`): what
-/// `{period.day}` expands to when today is `date` (plan round-12-feedback-todos WP-8).
-pub(super) fn day_folder(config: &ConfigSet, date: NaiveDate) -> Result<String, StepError> {
-    let per = period(config, "day", None).map_err(StepError::failed)?;
-    Ok(join(&per.folder, &per.base_name(date)?))
-}
-
 /// The period (with its date) whose folder holds `path` directly (`daily/day/2026-10-13.md` →
 /// day, 2026-10-13). The date is parsed strictly from the basename; a non-parsing name (or a
 /// format that does not pin a date, e.g. weeks) uses `fallback`.

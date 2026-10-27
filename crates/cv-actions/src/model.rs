@@ -134,14 +134,10 @@ step_kinds! {
     IntakeFinalize = "intake_finalize", false;
     IgnoreVideo = "ignore_video", true;
     DailyBrief = "daily_brief", true;
-    /// One-time blog-capture repair (plan `usability-sprint-captures-links` WP-2).
-    CaptureRepair = "capture_repair", true;
     /// On-demand duplicate scan writing `possible-duplicate` (plan `round-12-feedback-todos` WP-6).
     DupesScan = "dupes_scan", true;
     /// One duplicate-pair verdict (`not-duplicates` | `keep`) (plan `round-12-feedback-todos` WP-7).
     DupesResolve = "dupes_resolve", true;
-    /// One-shot `_blog_metadata` backfill into intake (plan `round-12-feedback-todos` WP-8).
-    BlogMetadataBackfill = "blog_metadata_backfill", true;
     /// Daily vault tidiness: orphaned-attachment sweep, trash ledger seed and retention expiry
     /// (plan `tidiness-trash-orphans` WP-2). Trashes files, so it counts as mutating.
     Tidy = "tidy", true;
@@ -173,10 +169,9 @@ impl StepKind {
         match self {
             StepKind::TrackBlogs | StepKind::TrackMail => &[ATTACHMENTS_KEY, INTAKE_IDENTITY_KEY],
             StepKind::Localize | StepKind::Tidy => &[ATTACHMENTS_KEY],
-            StepKind::AutoFile
-            | StepKind::IntakeReconcile
-            | StepKind::IntakeFinalize
-            | StepKind::BlogMetadataBackfill => &[INTAKE_IDENTITY_KEY],
+            StepKind::AutoFile | StepKind::IntakeReconcile | StepKind::IntakeFinalize => {
+                &[INTAKE_IDENTITY_KEY]
+            }
             _ => &[],
         }
     }

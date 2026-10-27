@@ -52,16 +52,6 @@ pub(super) fn as_remote(m: &AttachmentMatch, source: &Url) -> Option<AttachmentM
     })
 }
 
-/// Whether `text` has a source-relative candidate ref: an `http(s)` `source` and at least one
-/// [`is_relative_md_image`] ref outside fenced code (the relative backfill's selection; vault
-/// resolution is decided per ref in the note pass).
-pub(super) fn has_relative_candidates(text: &str) -> bool {
-    source_url(text).is_some()
-        && cv_text::attachments::parse_attachment_refs(text)
-            .iter()
-            .any(is_relative_md_image)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,7 +118,5 @@ mod tests {
             links,
             ["https://h.example/p/x%23y.png", "https://h.example/i/a.png"]
         );
-        assert!(has_relative_candidates(note));
-        assert!(!has_relative_candidates("![](a.png)"));
     }
 }

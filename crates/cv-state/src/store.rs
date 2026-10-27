@@ -715,22 +715,6 @@ impl StateReader {
         query::get(&self.conn, id)
     }
 
-    /// Every step checkpoint of `job_id`, in step order (the CLI reads a settled job's outcome
-    /// vars; plan round-12-feedback-todos WP-8).
-    pub fn checkpoints(&self, job_id: &str) -> Result<Vec<crate::StepCheckpoint>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT step_index, outcome, at_ms FROM job_step_checkpoints WHERE job_id = ?1 ORDER BY step_index",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![job_id], |r| {
-            Ok(crate::StepCheckpoint {
-                step_index: r.get(0)?,
-                outcome: r.get(1)?,
-                at_ms: r.get(2)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
     /// Queue list.
     pub fn list(&self, q: &ListQuery) -> Result<Vec<Job>> {
         query::list(&self.conn, q)

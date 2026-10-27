@@ -447,13 +447,6 @@ pub static LOCALIZE: Record = Record {
             POS_INT,
         )
         .dflt(D::Int(50)),
-        field(
-            "relative_sources",
-            "Relative sources",
-            "Backfill by page-relative image refs of notes with an http(s) `source` (scope = folder)",
-            Node::Bool,
-        )
-        .dflt(D::Bool(false)),
     ],
     rules: &[],
     summary: None,

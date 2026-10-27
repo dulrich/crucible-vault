@@ -21,7 +21,7 @@ pub const DEFAULT_LIMIT: u32 = 50;
 pub const MAX_LIMIT: u32 = 500;
 
 /// Usage lines (also appended to the top-level `cv --help`).
-pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv intake reconcile [--dry-run]   link NULL-path rows, probe + auto-tick the complete ones, finalize youtube rows, re-match + re-clean mail; prints counts as key=value\n  cv intake backfill-blog-metadata [--apply]   fold _blog_metadata notes into intake (dry run unless --apply); prints counts as key=value\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
+pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv intake reconcile [--dry-run]   link NULL-path rows, probe + auto-tick the complete ones, finalize youtube rows, re-match + re-clean mail; prints counts as key=value\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
 
 fn page_limit(l: Option<u32>) -> u32 {
     l.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
@@ -185,10 +185,6 @@ pub enum Command {
     IntakeReconcile {
         dry_run: bool,
     },
-    /// `cv intake backfill-blog-metadata [--apply]` (plan round-12-feedback-todos WP-8).
-    IntakeBackfillBlogMetadata {
-        apply: bool,
-    },
     Run {
         action_id: String,
         note: Option<String>,
@@ -239,12 +235,6 @@ pub fn parse(args: &[String]) -> Option<Command> {
         }
         ["intake", "reconcile"] => Some(Command::IntakeReconcile { dry_run: false }),
         ["intake", "reconcile", "--dry-run"] => Some(Command::IntakeReconcile { dry_run: true }),
-        ["intake", "backfill-blog-metadata"] => {
-            Some(Command::IntakeBackfillBlogMetadata { apply: false })
-        }
-        ["intake", "backfill-blog-metadata", "--apply"] => {
-            Some(Command::IntakeBackfillBlogMetadata { apply: true })
-        }
         ["run", action, rest @ ..] if !action.starts_with('-') => {
             let note = match rest {
                 [] => None,
@@ -336,9 +326,6 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
             render_intake(&client.call::<methods::IntakeList>(p.clone()).map_err(e)?)
         }
         Command::IntakeReconcile { dry_run } => reconcile(&client, *dry_run)?,
-        Command::IntakeBackfillBlogMetadata { apply } => {
-            backfill_blog_metadata(&client, config, *apply)?
-        }
         Command::Run { action_id, note } => {
             let r = client
                 .call::<methods::RunAction>(RunActionParams {
@@ -380,68 +367,6 @@ fn reconcile(client: &Client, dry_run: bool) -> Result<String> {
         ));
     }
     Ok(render_counts(&r.counts))
-}
-
-/// The step outcome vars of a job's checkpoints, merged in step order (later keys win).
-pub(crate) fn checkpoint_vars(
-    cps: &[cv_state::StepCheckpoint],
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut vars = serde_json::Map::new();
-    for cp in cps {
-        if let Ok(serde_json::Value::Object(o)) =
-            serde_json::from_str::<serde_json::Value>(&cp.outcome)
-                .map(|v| v.get("vars").cloned().unwrap_or(serde_json::Value::Null))
-        {
-            vars.extend(o);
-        }
-    }
-    vars
-}
-
-/// Longest `cv intake backfill-blog-metadata` waits for its job.
-const BACKFILL_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
-
-/// Runs the `blog-metadata-backfill` action (dry run unless `apply`) through `run_action`, polls
-/// `job` until it settles, then renders the job's checkpoint vars (read-only `state.db`) as
-/// `key=value` lines; a job that did not complete is an error (exit 1). No new protocol request.
-fn backfill_blog_metadata(client: &Client, config: &Config, apply: bool) -> Result<String> {
-    let mut params = serde_json::Map::new();
-    params.insert("dry_run".into(), serde_json::Value::Bool(!apply));
-    let r = client
-        .call::<methods::RunAction>(RunActionParams {
-            action_id: "blog-metadata-backfill".into(),
-            params,
-            context: ActionContext::default(),
-        })
-        .map_err(|e| anyhow!("{e}"))?;
-    let deadline = std::time::Instant::now() + BACKFILL_WAIT;
-    let status = loop {
-        let s = client
-            .call::<methods::Job>(JobIdParams {
-                job_id: r.job_id.clone(),
-            })
-            .map_err(|e| anyhow!("{e}"))?;
-        let settled = matches!(
-            s.status,
-            JobState::Done | JobState::Failed | JobState::Cancelled
-        );
-        if settled || std::time::Instant::now() >= deadline {
-            break s;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    };
-    if status.status != JobState::Done {
-        return Err(anyhow!(
-            "backfill job {} {}{}",
-            r.job_id,
-            enum_str(status.status),
-            status.message.map(|m| format!(": {m}")).unwrap_or_default()
-        ));
-    }
-    let cps = cv_state::StateReader::open(&config.state_db)
-        .and_then(|rd| rd.checkpoints(&r.job_id))
-        .map_err(|e| anyhow!("state.db: {e}"))?;
-    Ok(render_counts(&checkpoint_vars(&cps)))
 }
 
 /// `key=value` lines (aggregate counts only; sorted by key).
@@ -576,14 +501,6 @@ mod tests {
             Some(Command::IntakeReconcile { dry_run: true })
         );
         assert_eq!(
-            parse(&a(&["intake", "backfill-blog-metadata"])),
-            Some(Command::IntakeBackfillBlogMetadata { apply: false })
-        );
-        assert_eq!(
-            parse(&a(&["intake", "backfill-blog-metadata", "--apply"])),
-            Some(Command::IntakeBackfillBlogMetadata { apply: true })
-        );
-        assert_eq!(
             parse(&a(&["jobs", "retry", "j1"])),
             Some(Command::JobRetry("j1".into()))
         );
@@ -600,8 +517,6 @@ mod tests {
             &["intake", "reconcile", "stray"],
             &["intake", "reconcile", "--dry-run", "x"],
             &["intake", "reconcile", "--dryrun"],
-            &["intake", "backfill-blog-metadata", "--dry-run"],
-            &["intake", "backfill-blog-metadata", "--apply", "x"],
         ] {
             assert_eq!(parse(&a(bad)), None, "{bad:?}");
             assert_eq!(run(&a(bad)), 2, "{bad:?}");

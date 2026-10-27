@@ -24,10 +24,8 @@
 //! | `IntakeFinalize` | [`intake_finalize`] | intake-followups-mail-youtube WP-4 |
 //! | `IgnoreVideo` | [`ignore`] | A2 WP-9 |
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
-//! | `CaptureRepair` | [`capture_repair`] | usability-sprint WP-2 |
 //! | `DupesScan` | [`dupes`] | round-12-feedback-todos WP-6 |
 //! | `DupesResolve` | [`dupes_resolve`] | round-12-feedback-todos WP-7 |
-//! | `BlogMetadataBackfill` | [`blog_metadata_backfill`] | round-12-feedback-todos WP-8 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -40,13 +38,7 @@ mod agent_tests;
 pub mod auto_file;
 #[cfg(test)]
 mod auto_file_tests;
-pub mod blog_metadata_backfill;
-#[cfg(test)]
-mod blog_metadata_backfill_tests;
 pub mod capture;
-pub mod capture_repair;
-#[cfg(test)]
-mod capture_repair_tests;
 #[cfg(test)]
 mod capture_tests;
 #[cfg(test)]
@@ -619,10 +611,8 @@ step_modules! {
     IntakeFinalize => intake_finalize::IntakeFinalize,
     IgnoreVideo => ignore::IgnoreVideo,
     DailyBrief => daily_brief::DailyBrief,
-    CaptureRepair => capture_repair::CaptureRepair,
     DupesScan => dupes::DupesScan,
     DupesResolve => dupes_resolve::DupesResolve,
-    BlogMetadataBackfill => blog_metadata_backfill::BlogMetadataBackfill,
     Tidy => tidy::Tidy,
     RunAction => RunActionStep,
 }

@@ -324,45 +324,10 @@ pub static DAILY_BRIEF: Record = Record {
     summary: None,
 };
 
-/// `capture_repair` — `crates/cv/src/steps/capture_repair.rs` (`parse_params`). Not modelled:
-/// `folder` is required.
-pub static CAPTURE_REPAIR: Record = Record {
-    name: "capture_repair",
-    fields: &[
-        field(
-            "folder",
-            "Folder",
-            "Captured blog notes to rename + retag",
-            Node::Str,
-        ),
-        field(
-            "limit",
-            "Limit",
-            "Notes changed per run (default: all)",
-            POS_INT,
-        ),
-    ],
-    rules: &[],
-    summary: None,
-};
-
 /// `dupes_resolve` — `crates/cv/src/steps/dupes_resolve.rs` (no step params; job params `keep`, `other`, `verdict` = `not-duplicates` | `keep`).
 pub static DUPES_RESOLVE: Record = Record {
     name: "dupes_resolve",
     fields: &[],
-    rules: &[],
-    summary: None,
-};
-
-/// `blog_metadata_backfill` — `crates/cv/src/steps/blog_metadata_backfill.rs` (`dry_run`, default `true`: writes only with an explicit `dry_run = false`, step or job param).
-pub static BLOG_METADATA_BACKFILL: Record = Record {
-    name: "blog_metadata_backfill",
-    fields: &[field(
-        "dry_run",
-        "Dry run",
-        "Compute every count but write nothing (default true; a job param dry_run = false applies)",
-        Node::Bool,
-    )],
     rules: &[],
     summary: None,
 };
