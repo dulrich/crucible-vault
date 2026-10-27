@@ -162,10 +162,7 @@ impl SupersedeIndex {
     pub fn build(ctx: &StepCtx<'_>) -> Result<Self, StepError> {
         let reader = ctx.index()?;
         let q = reader.query();
-        let rows = |key: &str| {
-            q.md_props_with_key(key)
-                .map_err(|e| StepError::failed(format!("index: {e}")))
-        };
+        let rows = |key: &str| Ok::<_, StepError>(q.md_props_with_key(key)?);
         let mut idx = Self::default();
         for r in rows("source")? {
             for s in json_strings(&r.value) {

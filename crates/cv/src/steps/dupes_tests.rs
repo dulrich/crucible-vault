@@ -25,12 +25,22 @@ impl Env {
     }
 
     fn run_with(&self, dry: bool) -> StepOutcome {
+        self.run_job(dry, None)
+    }
+
+    fn run_job(&self, dry: bool, job: Option<Value>) -> StepOutcome {
+        let mut ctx = self.0.ctx();
+        let mut params = ctx.params.clone();
+        if let Some(j) = job {
+            params.insert("dry_run".into(), j);
+        }
+        ctx.params = &params;
         let mut t = toml::Table::new();
         t.insert("type".into(), "dupes_scan".into());
         t.insert("dry_run".into(), dry.into());
         let step = Step::from_table(t).unwrap();
         crate::steps::validate(&step, &self.0.config).unwrap();
-        crate::steps::execute(&step, &mut self.0.ctx()).unwrap()
+        crate::steps::execute(&step, &mut ctx).unwrap()
     }
 
     fn run(&self) -> StepOutcome {
@@ -179,6 +189,22 @@ fn dry_run_counts_but_writes_nothing() {
     }
 }
 
+#[test]
+fn job_dry_run_wins_over_the_step_param_in_both_directions() {
+    let body = words("j", 60);
+    let files = [("a/x.md", note("", &body)), ("b/y.md", note("", &body))];
+    let env = Env::new(&files);
+    // Step dry_run = true, job "false" → a real run.
+    let o = env.run_job(true, Some(Value::String("false".into())));
+    assert_eq!(o.vars["dry_run"], Value::Bool(false));
+    assert!(!env.labels("a/x.md").is_empty());
+    // Step dry_run = false, job true → dry.
+    let env = Env::new(&files);
+    let o = env.run_job(false, Some(Value::Bool(true)));
+    assert_eq!(o.vars["dry_run"], Value::Bool(true));
+    assert!(env.labels("a/x.md").is_empty());
+}
+
 /// Scratch-copy measurement driver (never the live vault): `CV_DUPES_SCRATCH=/tmp/r12-wp6`
 /// holding `vault/` and `config/`; prints the outcome vars plus the scan's RSS (VmHWM reset via
 /// `/proc/self/clear_refs` after the index build, so it measures the scan alone).
@@ -239,6 +265,7 @@ fn scratch_dry_run() {
         vault_root: &vault,
         index_db: &index_db,
         search: None,
+        system_trash: None,
         state: &state,
         writer: Some(writer),
         children: &super::testkit::NoChildren,

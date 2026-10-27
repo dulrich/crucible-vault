@@ -42,15 +42,6 @@ impl StepModule for DupesResolve {
     }
 }
 
-/// A wikilink (or bare path) entry's target: `[[a/b|alias]]` → `a/b`.
-fn link_target(s: &str) -> &str {
-    let t = s.trim();
-    let t = t.strip_prefix("[[").unwrap_or(t);
-    let t = t.strip_suffix("]]").unwrap_or(t);
-    let t = t.split('|').next().unwrap_or(t);
-    t.split('#').next().unwrap_or(t).trim()
-}
-
 fn param<'a>(ctx: &'a StepCtx<'_>, k: &str) -> Result<&'a str, StepError> {
     match ctx.params.get(k) {
         Some(Value::String(s)) if !s.trim().is_empty() => Ok(s.trim()),
@@ -67,11 +58,7 @@ struct Links {
 }
 
 fn resolver(ctx: &StepCtx<'_>) -> Result<Links, StepError> {
-    let files = ctx
-        .index()?
-        .query()
-        .file_paths()
-        .map_err(|e| StepError::failed(format!("index: {e}")))?;
+    let files = ctx.index()?.query().file_paths()?;
     let mut r = Resolver::default();
     for (id, p) in &files {
         r.add(*id, p);
@@ -85,7 +72,7 @@ fn resolver(ctx: &StepCtx<'_>) -> Result<Links, StepError> {
 /// Whether the label entry `entry` (in note `from`) points at `target`: by its link text equal
 /// to `target` without `.md` (also covers a dangling entry), else by resolved id.
 fn points_at(l: &Links, from: &str, entry: &str, target: &str) -> bool {
-    let t = link_target(entry);
+    let t = cv_text::wikilink::target(entry);
     if t.is_empty() {
         return false;
     }
@@ -101,7 +88,7 @@ fn points_at(l: &Links, from: &str, entry: &str, target: &str) -> bool {
 }
 
 fn wikilink(path: &str) -> JsValue {
-    JsValue::Str(format!("[[{}]]", path.strip_suffix(".md").unwrap_or(path)))
+    JsValue::Str(cv_text::wikilink::link_to(path))
 }
 
 /// Edits `path`'s label keys: drops `drop` from `possible-duplicate` and (when `add_not_dup`)
@@ -151,11 +138,7 @@ pub(crate) fn user_inbound_sources(
     ctx: &StepCtx<'_>,
     target: &str,
 ) -> Result<Vec<String>, StepError> {
-    let rows = ctx
-        .index()?
-        .query()
-        .backlinks(target)
-        .map_err(|e| StepError::failed(format!("index: {e}")))?;
+    let rows = ctx.index()?.query().backlinks(target)?;
     let mut by_src: std::collections::BTreeMap<String, (bool, Vec<String>)> =
         std::collections::BTreeMap::new();
     for row in rows {
@@ -180,7 +163,7 @@ pub(crate) fn user_inbound_sources(
             let doc = FrontmatterDoc::new(text);
             for key in [POSSIBLE_KEY, NOT_DUP_KEY] {
                 for entry in doc.get_strings(key) {
-                    let t = link_target(&entry);
+                    let t = cv_text::wikilink::target(&entry);
                     if let Some(i) = fm.iter().position(|f| f.trim() == t) {
                         fm.swap_remove(i);
                     }

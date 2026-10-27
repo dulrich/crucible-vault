@@ -283,10 +283,6 @@ fn record(
     }
 }
 
-fn index_err(e: impl std::fmt::Display) -> StepError {
-    StepError::failed(format!("index: {e}"))
-}
-
 fn is_image(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, e)| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
@@ -302,18 +298,12 @@ fn candidates(ctx: &StepCtx<'_>, scope: Scope) -> Result<Vec<String>, StepError>
             let note = ctx.context.active_path.clone().ok_or_else(|| {
                 StepError::failed("image_describe step: scope = note needs an active note")
             })?;
-            q.outgoing(&note)
-                .map_err(index_err)?
+            q.outgoing(&note)?
                 .into_iter()
                 .filter_map(|l| l.resolved_path)
                 .collect()
         }
-        Scope::Vault => q
-            .file_paths()
-            .map_err(index_err)?
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect(),
+        Scope::Vault => q.file_paths()?.into_iter().map(|(_, p)| p).collect(),
     };
     Ok(paths
         .into_iter()

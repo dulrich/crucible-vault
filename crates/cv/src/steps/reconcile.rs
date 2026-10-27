@@ -27,7 +27,7 @@
 //! 9. **Publication** (F, [`super::reconcile_repair`]): `publication_backfilled`,
 //!    `publication_no_row`, `publication_conflict`.
 //!
-//! `dry_run` (step param, or a job param `dry_run = true`) computes every count of every phase and
+//! `dry_run` (step param; a job param `dry_run`, bool or `"true"`/`"false"`, wins over it) computes every count of every phase and
 //! writes nothing to `state.db` or the vault (the probe is a read-only fetch); it is echoed as the
 //! `dry_run` var. Outcome vars are aggregate counts only. The step holds `intake::identity`
 //! (step-intrinsic).
@@ -39,7 +39,6 @@ use cv_providers::FailureKind;
 use cv_providers::web::FetchError;
 use cv_state::TrackerItem;
 use serde::Serialize;
-use serde_json::Value;
 
 use super::params::{check_keys, get_bool};
 use super::reconcile_backfill as backfill;
@@ -67,16 +66,7 @@ impl StepModule for IntakeReconcile {
     }
 
     fn run(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-        run(dry_run || job_dry_run(ctx), ctx)
-    }
-}
-
-/// A job param `dry_run` (`true` or `"true"`) turns the dry run on.
-fn job_dry_run(ctx: &StepCtx<'_>) -> bool {
-    match ctx.params.get("dry_run") {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
-        _ => false,
+        run(super::job_flag(ctx, "dry_run").unwrap_or(dry_run), ctx)
     }
 }
 

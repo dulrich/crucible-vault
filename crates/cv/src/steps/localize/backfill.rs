@@ -38,13 +38,8 @@ pub(super) fn execute_folder(
     let files = super::super::util::md_files_under(ctx, folder);
     let scanned = files.len() as u64;
     let mut candidates = Vec::new();
-    let state_err = |e: cv_state::StateError| StepError::failed(format!("localize: state: {e}"));
     for f in files {
-        if ctx
-            .state()
-            .is_ignored(BACKFILL_KIND, &f)
-            .map_err(state_err)?
-        {
+        if ctx.state().is_ignored(BACKFILL_KIND, &f)? {
             continue;
         }
         let Some((bytes, _)) = ctx.read(&f)? else {
@@ -61,8 +56,7 @@ pub(super) fn execute_folder(
     // Records a settled or failed note: excluded, never re-selected.
     let exclude = |ctx: &StepCtx<'_>, f: &str, r: &str| -> Result<(), StepError> {
         ctx.state()
-            .insert_ignored_id(BACKFILL_KIND, f, r, crate::now_ms())
-            .map_err(state_err)?;
+            .insert_ignored_id(BACKFILL_KIND, f, r, crate::now_ms())?;
         Ok(())
     };
     let (mut localized, mut failed, mut attempted, mut throttled) = (0_u64, 0_u64, 0_u64, 0_u64);

@@ -364,8 +364,7 @@ pub(super) fn reclean(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Res
         let reader = ctx.index()?;
         reader
             .query()
-            .md_props_with_key("via")
-            .map_err(|e| StepError::failed(format!("index: {e}")))?
+            .md_props_with_key("via")?
             .into_iter()
             .filter(|r| {
                 matches!(&r.value, serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("email"))

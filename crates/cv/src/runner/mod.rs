@@ -326,6 +326,9 @@ pub struct RunnerDeps {
     pub config_dir: PathBuf,
     /// `CV_SEARCH_DB`: opened lazily by the first live search step (plan semsearch-crate WP-3).
     pub search_db: PathBuf,
+    /// `Config::data_home` (`XDG_DATA_HOME`): the system trash is `<data_home>/Trash`, the same
+    /// root moves to the system trash use; steps read it as `StepCtx::system_trash`.
+    pub data_home: Option<PathBuf>,
 }
 
 pub(crate) struct Inner {
@@ -338,6 +341,7 @@ pub(crate) struct Inner {
     vault_root: PathBuf,
     index_db: PathBuf,
     config_dir: PathBuf,
+    system_trash: Option<PathBuf>,
     /// The one shared `semsearch` handle per process (Decision 7).
     search: cv_search::SearchDb,
     config: RwLock<Arc<ConfigSet>>,
@@ -373,6 +377,7 @@ impl Runner {
                 vault_root: deps.vault_root,
                 index_db: deps.index_db,
                 config_dir: deps.config_dir,
+                system_trash: deps.data_home.map(|h| h.join("Trash")),
                 search: cv_search::SearchDb::new(deps.search_db),
                 config: RwLock::new(Arc::new(ConfigSet::new())),
                 wake: Notify::new(),
@@ -965,6 +970,7 @@ fn execute_steps(
             vault_root: &inner.vault_root,
             index_db: &inner.index_db,
             search: Some(&inner.search),
+            system_trash: inner.system_trash.as_deref(),
             state: &inner.state,
             writer: inner.writer.writer(),
             children: &spawner,

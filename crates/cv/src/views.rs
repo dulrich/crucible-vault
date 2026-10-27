@@ -78,9 +78,12 @@ impl ViewRegistry {
         let base = index_base.to_path_buf();
         let thread_ids = Arc::clone(&ids);
         let sources = load_sources(config_dir).unwrap_or_default();
+        let day_folder = load_day_folder(config_dir);
         std::thread::Builder::new()
             .name("cv-view".into())
-            .spawn(move || serve(host, sources, &rx, &base, &events, &thread_ids))?;
+            .spawn(move || {
+                serve(host, sources, day_folder, &rx, &base, &events, &thread_ids);
+            })?;
         Ok(Self { ids, tx })
     }
 
@@ -176,17 +179,34 @@ fn load_sources(config_dir: &Path) -> Option<SourcesConfig> {
     }
 }
 
-/// An index prop value as text (lists joined by `,`), as the serial matcher's callers read it.
-fn prop_text(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(a) => a.iter().map(prop_text).collect::<Vec<_>>().join(","),
-        serde_json::Value::Null | serde_json::Value::Object(_) => String::new(),
-        other => other.to_string(),
-    }
+/// The default day-note folder when `captures.toml` configures no `[periods.day].folder`.
+const DEFAULT_DAY_FOLDER: &str = "daily/day";
+
+/// The day folder from a parsed `captures.toml` (`[periods.day].folder`, slashes trimmed, the
+/// same key `materialize`'s period settings read); [`DEFAULT_DAY_FOLDER`] when unset or blank.
+fn day_folder_of(captures: &toml::Table) -> String {
+    captures
+        .get("periods")
+        .and_then(toml::Value::as_table)
+        .and_then(|p| p.get("day"))
+        .and_then(toml::Value::as_table)
+        .and_then(|d| d.get("folder"))
+        .and_then(toml::Value::as_str)
+        .map(|f| f.trim().trim_matches('/'))
+        .filter(|f| !f.is_empty())
+        .map_or_else(|| DEFAULT_DAY_FOLDER.to_owned(), str::to_owned)
 }
 
-/// One `daily/day` note as the source-row counts read it.
+/// `<config_dir>/captures.toml`'s day folder (default when absent or unreadable), pushed to the
+/// host alongside the sources.
+fn load_day_folder(config_dir: &Path) -> String {
+    std::fs::read_to_string(config_dir.join("captures.toml"))
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .map_or_else(|| DEFAULT_DAY_FOLDER.to_owned(), |t| day_folder_of(&t))
+}
+
+/// One day-folder note as the source-row counts read it.
 #[derive(Default)]
 struct Entry {
     authors: Vec<String>,
@@ -210,11 +230,12 @@ struct Entry {
 fn source_data(
     q: &cv_index::Query<'_>,
     cfg: &SourcesConfig,
+    day_folder: &str,
 ) -> Result<(Vec<views::engine::Record>, BTreeMap<String, String>), String> {
     use views::value::Value;
     let ix = |e: cv_index::Error| format!("index: {e}");
     let mut notes: BTreeMap<String, Entry> = q
-        .md_files_under("daily/day")
+        .md_files_under(day_folder)
         .map_err(ix)?
         .into_iter()
         .map(|f| {
@@ -233,12 +254,9 @@ fn source_data(
                 continue;
             };
             match key {
-                "author" => match &r.value {
-                    serde_json::Value::Array(v) => e.authors.extend(v.iter().map(prop_text)),
-                    v => e.authors.push(prop_text(v)),
-                },
-                "source" => e.source = prop_text(&r.value),
-                "publication" => e.publication = prop_text(&r.value).trim().to_owned(),
+                "author" => e.authors.extend(cv_index::prop_texts(&r.value)),
+                "source" => e.source = cv_index::prop_text(&r.value),
+                "publication" => e.publication = cv_index::prop_text(&r.value).trim().to_owned(),
                 "read" => e.read = r.value == serde_json::Value::Bool(true),
                 _ => {
                     let v = Value::from_json(&r.value);
@@ -384,6 +402,7 @@ fn log_notices(host: &views::ViewHost) {
 fn serve(
     mut host: views::ViewHost,
     mut sources: SourcesConfig,
+    mut day_folder: String,
     rx: &mpsc::Receiver<Cmd>,
     base: &Path,
     events: &broadcast::Sender<Notification>,
@@ -419,7 +438,7 @@ fn serve(
                     && host.needs_sources(&view_id)
                     && let Some(r) = reader.as_ref()
                 {
-                    match source_data(&r.query(), &sources) {
+                    match source_data(&r.query(), &sources, &day_folder) {
                         Ok((records, serial)) => {
                             host.set_sources(records, serial);
                             sources_stale = false;
@@ -460,6 +479,7 @@ fn serve(
                 if let Some(s) = load_sources(&dir) {
                     sources = s;
                 }
+                day_folder = load_day_folder(&dir);
                 sources_stale = true;
                 invalidate(host.on_config_changed(&dir));
                 log_notices(&host);
@@ -471,6 +491,16 @@ fn serve(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn day_folder_comes_from_the_period_config() {
+        let t = |s: &str| super::day_folder_of(&s.parse::<toml::Table>().unwrap());
+        assert_eq!(t(""), "daily/day");
+        assert_eq!(t("[periods.day]\nformat='YYYY'"), "daily/day");
+        assert_eq!(t("[periods.day]\nfolder=' '"), "daily/day");
+        assert_eq!(t("[periods.day]\nfolder='/journal/days/'"), "journal/days");
+        assert_eq!(t("[periods.week]\nfolder='w'"), "daily/day");
+    }
+
     use super::*;
     use std::time::Duration;
 

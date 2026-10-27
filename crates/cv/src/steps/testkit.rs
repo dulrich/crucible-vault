@@ -67,6 +67,7 @@ impl StepEnv {
             vault_root: &self.fx.vault,
             index_db: &self.fx.index_db,
             search: None,
+            system_trash: None,
             state: &self.state,
             writer: Some(self.fx.writer.clone()),
             children: &NoChildren,

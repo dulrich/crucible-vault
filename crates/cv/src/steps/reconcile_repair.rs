@@ -97,8 +97,7 @@ pub(super) fn merge_mail_twins(
         let reader = ctx.index()?;
         reader
             .query()
-            .md_props_with_key("via")
-            .map_err(|e| StepError::failed(format!("index: {e}")))?
+            .md_props_with_key("via")?
             .into_iter()
             .filter(|r| {
                 matches!(&r.value, serde_json::Value::String(s) if s.trim().eq_ignore_ascii_case("email"))
@@ -286,16 +285,6 @@ fn publication_of_row(ctx: &StepCtx<'_>, r: &TrackerItem) -> Option<String> {
     }
 }
 
-/// The text of an indexed property value (a list comma-joined, as [`cv_note::js_text`]).
-fn index_text(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(a) => a.iter().map(index_text).collect::<Vec<_>>().join(","),
-        serde_json::Value::Null | serde_json::Value::Object(_) => String::new(),
-        other => other.to_string(),
-    }
-}
-
 /// Notes (outside `.trash/`) whose indexed `source` and `author` match some `[[serial]]` row:
 /// the index prefilter for phase F's serial half (the note's own frontmatter is re-checked).
 fn serial_candidates(
@@ -307,17 +296,13 @@ fn serial_candidates(
     }
     let reader = ctx.index()?;
     let q = reader.query();
-    let ix = |e| StepError::failed(format!("index: {e}"));
     let mut authors: HashMap<String, Vec<String>> = HashMap::new();
-    for r in q.md_props_with_key("author").map_err(ix)? {
+    for r in q.md_props_with_key("author")? {
         let a = authors.entry(r.path).or_default();
-        match r.value {
-            serde_json::Value::Array(v) => a.extend(v.iter().map(index_text)),
-            v => a.push(index_text(&v)),
-        }
+        a.extend(cv_index::prop_texts(&r.value));
     }
     let mut out = Vec::new();
-    for r in q.md_props_with_key("source").map_err(ix)? {
+    for r in q.md_props_with_key("source")? {
         if r.path.starts_with(".trash/") {
             continue;
         }
@@ -325,7 +310,7 @@ fn serial_candidates(
             .get(&r.path)
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        let source = index_text(&r.value);
+        let source = cv_index::prop_text(&r.value);
         if serial.iter().any(|s| s.matches(&a, &source)) {
             out.push(r.path);
         }

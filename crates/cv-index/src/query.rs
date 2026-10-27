@@ -110,6 +110,28 @@ pub struct PropRow {
     pub value: serde_json::Value,
 }
 
+/// The text of an indexed property value (a list comma-joined, as `cv_note::js_text`; null and
+/// objects are empty). The one reader of property JSON text for the daemon's callers.
+#[must_use]
+pub fn prop_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a.iter().map(prop_text).collect::<Vec<_>>().join(","),
+        serde_json::Value::Null | serde_json::Value::Object(_) => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// An indexed property as a list of texts: an array's elements each, any other value as one
+/// entry (the serial matcher's author list).
+#[must_use]
+pub fn prop_texts(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::Array(a) => a.iter().map(prop_text).collect(),
+        other => vec![prop_text(other)],
+    }
+}
+
 /// One block item (`callout|fndef|fnref|blockid`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockRow {
@@ -554,6 +576,17 @@ fn retry_generation_swap<T>(mut once: impl FnMut() -> Result<T>) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prop_text_joins_lists_and_blanks_null() {
+        use serde_json::json;
+        assert_eq!(prop_text(&json!("a")), "a");
+        assert_eq!(prop_text(&json!(["a", 2, null])), "a,2,");
+        assert_eq!(prop_text(&json!({"k": 1})), "");
+        assert_eq!(prop_text(&json!(true)), "true");
+        assert_eq!(prop_texts(&json!(["a", "b"])), ["a", "b"]);
+        assert_eq!(prop_texts(&json!("x")), ["x"]);
+    }
 
     fn missing() -> Error {
         Error::GenerationMissing {

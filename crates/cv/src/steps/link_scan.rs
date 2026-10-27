@@ -84,7 +84,7 @@ fn is_excluded(path: &str, exclusions: &[String]) -> bool {
 
 /// `[[path-without-.md]]`.
 fn wikilink(path: &str) -> String {
-    format!("[[{}]]", path.strip_suffix(".md").unwrap_or(path))
+    cv_text::wikilink::link_to(path)
 }
 
 /// The `link_scan` step (unknown keys disarm, I5).
@@ -118,8 +118,7 @@ fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let reader = ctx.index()?;
     let q = reader.query();
     let link_record_notes: BTreeSet<String> = q
-        .files_with_prop("type", &json!("link-record"))
-        .map_err(|e| StepError::failed(format!("index: {e}")))?
+        .files_with_prop("type", &json!("link-record"))?
         .into_iter()
         .map(|r| r.path)
         .collect();
@@ -137,8 +136,7 @@ fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             }
         }
         Scope::Vault => q
-            .file_paths()
-            .map_err(|e| StepError::failed(format!("index: {e}")))?
+            .file_paths()?
             .into_iter()
             .map(|(_, path)| path)
             .filter(|path| path.ends_with(".md"))

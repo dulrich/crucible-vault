@@ -180,7 +180,7 @@ fn resolve_images(
     (descriptions, vec![facet])
 }
 
-/// `stripWikilink` (`filePreparation.ts:95-98`).
+/// `stripWikilink` (`filePreparation.ts:95-98`). `cv-search` has no `cv-text` edge, so this keeps a local copy of the canonical form `cv_text::wikilink::target`.
 fn strip_wikilink(raw: &str) -> String {
     let t = raw.trim();
     let t = t.strip_prefix("[[").unwrap_or(t);

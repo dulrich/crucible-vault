@@ -332,11 +332,35 @@ impl From<cv_state::StateError> for StepError {
     }
 }
 
+impl From<cv_index::Error> for StepError {
+    /// An `index.db` error fails the step (the one index-error mapping, D2).
+    fn from(e: cv_index::Error) -> Self {
+        StepError::failed(format!("index: {e}"))
+    }
+}
+
 /// Enqueues a child run for [`Step::RunAction`] (implemented by the runner: same lane, chain
 /// depth limit, cycle check).
 pub trait ChildSpawner {
     /// Enqueues `action_id` with `params`; returns the child job id.
     fn spawn_child(&self, action_id: &str, params: Map<String, Value>) -> Result<String, String>;
+}
+
+/// A boolean job param `key`: a bool, or the string `"true"`/`"false"` (any case); anything
+/// else (absent, another type, another string) is `None`.
+fn flag_of(params: &Map<String, Value>, key: &str) -> Option<bool> {
+    match params.get(key) {
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::String(s)) if s.eq_ignore_ascii_case("true") => Some(true),
+        Some(Value::String(s)) if s.eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
+}
+
+/// The job's boolean param `key` (see [`flag_of`]). A present job flag wins over the step param
+/// (`job_flag(ctx, key).unwrap_or(step_value)`), the one precedence rule (D3).
+pub(crate) fn job_flag(ctx: &StepCtx<'_>, key: &str) -> Option<bool> {
+    flag_of(ctx.params, key)
 }
 
 /// Everything a step sees. Built per step by the runner.
@@ -360,6 +384,9 @@ pub struct StepCtx<'a> {
     pub index_db: &'a Path,
     /// The daemon's shared `semsearch` index (`None` outside a runner: search steps fail).
     pub search: Option<&'a cv_search::SearchDb>,
+    /// The system-trash root (`<Config::data_home>/Trash`, what moves to the system trash use);
+    /// `None` without a data home or outside a runner.
+    pub system_trash: Option<&'a Path>,
     /// The daemon's `state.db` (e.g. image descriptions for the search feed). Lock briefly and
     /// never across a writer call; steps run on a blocking thread, so a std `Mutex` is fine.
     pub state: &'a Arc<Mutex<StateDb>>,
@@ -376,8 +403,7 @@ impl<'a> StepCtx<'a> {
 
     /// The current index generation ([`cv_index::Reader::open_current`] owns the swap retry).
     pub fn index(&self) -> Result<cv_index::Reader, StepError> {
-        cv_index::Reader::open_current(self.index_db)
-            .map_err(|e| StepError::failed(format!("index: {e}")))
+        cv_index::Reader::open_current(self.index_db).map_err(StepError::from)
     }
 
     /// The single writer (I2); fails when the daemon is shutting down.
@@ -497,6 +523,7 @@ impl<'a> StepCtx<'a> {
             vault_root: self.vault_root,
             index_db: self.index_db,
             search: self.search,
+            system_trash: self.system_trash,
             state: self.state,
             writer: self.writer.clone(),
             children: self.children,

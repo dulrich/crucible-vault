@@ -27,18 +27,10 @@ pub struct OrphanRow {
     pub mtime: i64,
 }
 
-/// Crucible `OBSIDIAN_NATIVE_EMBED_FORMATS` (`src/types.ts:33`), all four localize media types:
-/// `classifyLocalizeMediaType` returns non-null exactly for these extensions.
-const MEDIA_EXTS: &[&str] = &[
-    "avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp", // images
-    "flac", "m4a", "mp3", "ogg", "wav", "webm", "3gp", // audio
-    "mkv", "mov", "mp4", "ogv", // video
-    "pdf",
-];
-
-/// Crucible `MD5_NAME_RE` (`/_MD5\.[A-Za-z0-9]+$/`) on a split (`name`, `ext`) pair.
+/// Crucible `MD5_NAME_RE` on a split (`name`, `ext`) pair: [`cv_text::attachments::is_md5_name`]
+/// on the joined file name, the one managed-name predicate.
 fn is_managed(name: &str, ext: &str) -> bool {
-    name.ends_with("_MD5") && !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+    cv_text::attachments::is_md5_name(&format!("{name}.{ext}"))
 }
 
 /// Managed attachments (`…_MD5.<media ext>`, anywhere in the vault) with **no resolved incoming
@@ -65,7 +57,7 @@ pub fn orphaned_attachments(q: &Query<'_>) -> Result<Vec<OrphanRow>> {
     let mut out = Vec::new();
     for row in rows {
         let (orphan, name, ext) = row?;
-        if is_managed(&name, &ext) && MEDIA_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+        if is_managed(&name, &ext) && cv_text::attachments::classify_media(&ext).is_some() {
             out.push(orphan);
         }
     }
@@ -114,6 +106,37 @@ pub fn delete_preview(q: &Query<'_>, note: &str) -> Result<Vec<(String, bool)>> 
 mod tests {
     use super::*;
     use crate::Index;
+
+    /// The orphan classifier derives from cv-text: every native media extension (any case) is
+    /// media, and `is_managed` agrees with `is_md5_name`.
+    #[test]
+    fn classifier_derives_from_cv_text() {
+        use cv_text::attachments::{Media, classify_media, is_md5_name};
+        for m in [Media::Images, Media::Audio, Media::Video, Media::Pdf] {
+            for e in m.native() {
+                assert!(classify_media(e).is_some(), "{e}");
+                assert!(classify_media(&e.to_ascii_uppercase()).is_some(), "{e}");
+            }
+        }
+        assert!(classify_media("txt").is_none());
+        for (name, ext) in [
+            ("abc_MD5", "png"),
+            ("abc_MD5", ""),
+            ("abc", "png"),
+            ("abc_MD5", "p-g"),
+            ("a_MD5_MD5", "pdf"),
+            ("md5", "png"),
+        ] {
+            assert_eq!(
+                is_managed(name, ext),
+                is_md5_name(&format!("{name}.{ext}")),
+                "{name}.{ext}"
+            );
+        }
+        assert!(is_managed("abc_MD5", "png"));
+        assert!(!is_managed("abc", "png"));
+        assert!(!is_managed("abc_MD5", ""));
+    }
 
     /// A temp root holding `vault/` and the index (removed on drop).
     struct Fx(tempfile::TempDir);

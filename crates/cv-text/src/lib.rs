@@ -12,6 +12,7 @@ pub mod similar;
 pub mod template;
 pub mod url_canon;
 pub mod vpath;
+pub mod wikilink;
 
 pub use moment::{
     MomentFormatError, format_moment, moment_to_strftime, parse_moment_date_strict,

@@ -576,13 +576,12 @@ fn fanfic_kind() -> String {
 /// `#heading` dropped, so the link target names the author), `#` removed, trimmed again.
 fn author_key(a: &str) -> String {
     let t = a.trim();
-    let inner = t
-        .strip_prefix("[[")
-        .and_then(|r| r.strip_suffix("]]"))
-        .map_or(t, |inner| {
-            let inner = inner.split('|').next().unwrap_or(inner);
-            inner.split('#').next().unwrap_or(inner)
-        });
+    // Only a wrapped entry is a link; a bare author keeps its `#` handling (`C#` → `C`).
+    let inner = if t.starts_with("[[") && t.ends_with("]]") {
+        cv_text::wikilink::target(t)
+    } else {
+        t
+    };
     inner.replace('#', "").trim().to_owned()
 }
 
@@ -656,6 +655,20 @@ impl NewsletterSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `author_key` is `wikilink::target` plus author-specific `#` removal, and also covers a
+    /// bare (unbracketed) author where `target` would cut at the `#`.
+    #[test]
+    fn author_key_differs_from_wikilink_target_for_bare_authors() {
+        assert_eq!(author_key("[[A#b]]"), cv_text::wikilink::target("[[A#b]]"));
+        assert_eq!(author_key(" [[A|x]] "), "A");
+        assert_eq!(author_key("C#"), "C");
+        assert_eq!(cv_text::wikilink::target("C#"), "C");
+        assert_eq!(author_key("#tag"), "tag");
+        assert_eq!(cv_text::wikilink::target("#tag"), "");
+        assert_eq!(author_key("A#b"), "Ab");
+        assert_ne!(author_key("A#b"), cv_text::wikilink::target("A#b"));
+    }
 
     /// Plan round-11-feedback-todos WP-4: deploy migration 0007's output (its test fixture's
     /// expected `sources.toml`) parses, with the migrated serial rows intact.

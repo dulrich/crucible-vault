@@ -45,7 +45,7 @@ fn env(files: &[(&str, &str)]) -> StepEnv {
 }
 
 fn now() -> i64 {
-    super::now_ms()
+    crate::now_ms()
 }
 
 fn p() -> Params {
@@ -230,10 +230,10 @@ fn orphan_too_young_by_a_longer_grace_period() {
 }
 
 fn sweep(e: &StepEnv, path: &str, hash: ContentHash) -> bool {
-    let (root, idx, path) = (e.fx.vault.clone(), e.fx.index_db.clone(), path.to_owned());
+    let (root, path) = (e.fx.vault.clone(), path.to_owned());
     let at = now();
     e.fx.writer
-        .call(move |vw| sweep_one(vw, &root, &idx, &path, hash, 24 * 3_600_000, at))
+        .call(move |vw| sweep_one(vw, &root, &path, hash, 24 * 3_600_000, at))
         .unwrap()
 }
 

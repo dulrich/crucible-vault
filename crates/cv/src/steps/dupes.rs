@@ -30,7 +30,7 @@
 //!
 //! **Output.** Each kept pair is written into both notes' `possible-duplicate` (a list of
 //! `[[path]]` wikilinks; an entry is matched by resolved target, so a rerun writes nothing new)
-//! through [`StepCtx::modify`]. `dry_run` (step param, or job param `dry_run = true`) computes
+//! through [`StepCtx::modify`]. `dry_run` (step param; a job param `dry_run`, bool or `"true"`/`"false"`, wins over it) computes
 //! every count and writes nothing. Vars are aggregates only: `notes`, `notes_shingled`,
 //! `verified`, `pairs`, `pairs_identity`, `pairs_containment`, `pairs_c90`,
 //! `pairs_c90_identity`, `written` (notes changed), `links_added`, `already_labelled`,
@@ -44,7 +44,6 @@ use cv_text::resolver::Resolver;
 use cv_text::similar::Shingles;
 use cv_text::url_canon::{PostIdOptions, build_blog_canon_host_map, post_id_from_url};
 use serde::Serialize;
-use serde_json::Value;
 
 use super::params::{check_keys, get_bool};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
@@ -79,12 +78,7 @@ impl StepModule for DupesScan {
     }
 
     fn run(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-        let job_dry = match ctx.params.get("dry_run") {
-            Some(Value::Bool(b)) => *b,
-            Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
-            _ => false,
-        };
-        run(dry_run || job_dry, ctx)
+        run(super::job_flag(ctx, "dry_run").unwrap_or(dry_run), ctx)
     }
 }
 
@@ -193,21 +187,12 @@ pub(crate) fn top_of(path: &str) -> &str {
     path.split_once('/').map_or("", |(t, _)| t)
 }
 
-/// A wikilink (or bare path) entry's target: `[[a/b|alias]]` → `a/b`.
-pub(crate) fn link_target(s: &str) -> &str {
-    let t = s.trim();
-    let t = t.strip_prefix("[[").unwrap_or(t);
-    let t = t.strip_suffix("]]").unwrap_or(t);
-    let t = t.split('|').next().unwrap_or(t);
-    t.split('#').next().unwrap_or(t).trim()
-}
-
 /// The resolved ids of `key`'s wikilink entries in the note `path` (`id`).
 fn linked_ids(doc: &FrontmatterDoc, key: &str, r: &Resolver, path: &str, id: i64) -> Vec<i64> {
     let mut v: Vec<i64> = doc
         .get_strings(key)
         .iter()
-        .map(|s| link_target(s))
+        .map(|s| cv_text::wikilink::target(s))
         .filter(|t| !t.is_empty())
         .filter_map(|t| r.resolve(path, id, t))
         .collect();
@@ -288,11 +273,7 @@ fn ratio(num: u32, den: u32) -> f64 {
 /// The scan.
 fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let opts = post_id_options(ctx.config);
-    let files = ctx
-        .index()?
-        .query()
-        .file_paths()
-        .map_err(|e| StepError::failed(format!("index: {e}")))?;
+    let files = ctx.index()?.query().file_paths()?;
     let mut resolver = Resolver::default();
     for (id, p) in &files {
         resolver.add(*id, p);
@@ -539,7 +520,7 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             .iter()
             .map(|&o| {
                 let p = &notes[o].path;
-                JsValue::Str(format!("[[{}]]", p.strip_suffix(".md").unwrap_or(p)))
+                JsValue::Str(cv_text::wikilink::link_to(p))
             })
             .collect();
         let path = notes[i].path.clone();

@@ -158,15 +158,7 @@ pub(crate) fn append_link(
 
 /// Wikilink targets of a frontmatter value (`[[a/b]]`, `[[a/b|alias]]`, bare strings), in order.
 pub(crate) fn link_targets(v: Option<&JsValue>) -> Vec<String> {
-    let one = |s: &str| {
-        let s = s.trim();
-        let s = s
-            .strip_prefix("[[")
-            .and_then(|s| s.strip_suffix("]]"))
-            .unwrap_or(s);
-        let s = s.split('|').next().unwrap_or(s).trim();
-        s.split('#').next().unwrap_or(s).trim().to_owned()
-    };
+    let one = |s: &str| cv_text::wikilink::target(s).to_owned();
     match v {
         Some(JsValue::Str(s)) if !s.trim().is_empty() => vec![one(s)],
         Some(JsValue::Arr(a)) => a

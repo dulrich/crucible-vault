@@ -297,7 +297,7 @@ impl<'r> NotePrep<'r> {
     }
 
     fn idx<T>(r: cv_index::Result<T>) -> Result<T, StepError> {
-        r.map_err(|e| StepError::failed(format!("index: {e}")))
+        r.map_err(StepError::from)
     }
 
     /// Whether the feed indexes `path`.

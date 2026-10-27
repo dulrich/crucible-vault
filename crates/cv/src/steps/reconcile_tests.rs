@@ -287,6 +287,15 @@ fn job_param_turns_the_dry_run_on() {
 }
 
 #[test]
+fn job_false_overrides_a_step_dry_run_true() {
+    let mut w = complete_and_paid();
+    w.env.params.insert("dry_run".into(), json!("false"));
+    let o = run(&w, "dry_run = true").unwrap();
+    assert_eq!(n(&o, "dry_run"), json!(false));
+    assert!(row(&w, "free").1.is_some());
+}
+
+#[test]
 fn probe_failure_leaves_the_row_open_and_is_counted() {
     let w = world(&[("notes/x.md", note("BASE/p/x", &words(20)))]);
     add_row(&w, "x", Some("notes/x.md"));

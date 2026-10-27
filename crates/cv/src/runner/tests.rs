@@ -68,6 +68,7 @@ fn runner(
         index_db: f._dir.path().join("index.db"),
         config_dir: f._dir.path().join("config"),
         search_db: f._dir.path().join("search.db"),
+        data_home: None,
     });
     r.set_config(config(src));
     r

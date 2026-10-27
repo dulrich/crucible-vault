@@ -39,7 +39,7 @@
 //! `orphans_skipped`, `seeded`, `adopted`, `expired`, `expired_bytes`, `rows_dropped`.
 
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_state::NewTrashEntry;
@@ -85,7 +85,8 @@ impl StepModule for Tidy {
     }
 
     fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-        run_in(p, ctx, system_trash_root().as_deref(), now_ms())
+        let root = ctx.system_trash.map(Path::to_path_buf);
+        run_in(p, ctx, root.as_deref(), crate::now_ms())
     }
 }
 
@@ -100,22 +101,6 @@ struct Vars {
     expired: u64,
     expired_bytes: u64,
     rows_dropped: u64,
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
-/// `$XDG_DATA_HOME/Trash` (default `$HOME/.local/share/Trash`), the same root the daemon's writer
-/// is configured with (`Config::data_home`); `None` without either variable.
-fn system_trash_root() -> Option<PathBuf> {
-    let var = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let home = var("XDG_DATA_HOME").or_else(|| var("HOME").map(|h| h.join(".local/share")))?;
-    Some(home.join("Trash"))
 }
 
 /// Runs the three phases against `system_root` (the XDG `Trash` directory, if any) at `now`.
@@ -382,8 +367,7 @@ fn orphans(
 ) -> Result<(), StepError> {
     let rows = {
         let reader = ctx.index()?;
-        cv_index::orphaned_attachments(&reader.query())
-            .map_err(|e| StepError::failed(format!("index: {e}")))?
+        cv_index::orphaned_attachments(&reader.query())?
     };
     let min_age_ms = i64::try_from(min_age_hours)
         .unwrap_or(i64::MAX)
@@ -393,13 +377,9 @@ fn orphans(
             v.orphans_skipped += 1;
             continue;
         };
-        let (root, index_db, path) = (
-            ctx.vault_root.to_path_buf(),
-            ctx.index_db.to_path_buf(),
-            row.path.clone(),
-        );
+        let (root, path) = (ctx.vault_root.to_path_buf(), row.path.clone());
         let ok = ctx.with_writer(&[], move |vw| {
-            sweep_one(vw, &root, &index_db, &path, hash, min_age_ms, now)
+            sweep_one(vw, &root, &path, hash, min_age_ms, now)
         })?;
         if ok {
             v.orphans_trashed += 1;
@@ -415,7 +395,6 @@ fn orphans(
 pub(crate) fn sweep_one(
     vw: &mut cv_vault::VaultWriter,
     root: &Path,
-    index_db: &Path,
     path: &str,
     hash: ContentHash,
     min_age_ms: i64,
@@ -431,10 +410,8 @@ pub(crate) fn sweep_one(
     if now - mtime_ms < min_age_ms {
         return false;
     }
-    let unreferenced = cv_index::Reader::open_current(index_db)
-        .ok()
-        .and_then(|r| cv_index::referenced_elsewhere(&r.query(), path, "").ok())
-        .is_some_and(|referenced| !referenced);
+    let unreferenced = cv_index::referenced_elsewhere(&vw.index().query(), path, "")
+        .is_ok_and(|referenced| !referenced);
     if !unreferenced {
         return false;
     }
