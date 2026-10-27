@@ -167,6 +167,9 @@ pub struct Panels {
     /// The picked tag and its files.
     pub tag_files: Option<(String, Vec<String>)>,
     pub search: Search,
+    /// Plan round-12-feedback-todos WP-3: the search centre modal is open (`search.location =
+    /// "modal"`); WP-R3 (review E8) moved it here from `App`.
+    pub search_modal: bool,
     pub windows: HashMap<ListIdKey, ListWindow>,
 }
 
@@ -468,12 +471,21 @@ pub enum Effect {
     SearchDebounce(u64),
     /// Run the FTS query `q` off-thread; the answer is tagged with `seq`.
     SearchRun { seq: u64, q: String },
+    /// WP-R3 (review E8): the search modal opened; `App` closes the other centre modals and
+    /// focuses its field.
+    OpenSearchModal,
     /// Plan round-12-feedback-todos WP-7: run this action call (a duplicate verdict button).
     RunCall(crate::palette::Call),
 }
 
-/// Handles a [`PanelsMsg`] on the panel state; `has_daemon` says whether search can run.
-pub fn update(p: &mut Panels, m: PanelsMsg, has_daemon: bool) -> Effect {
+/// Handles a [`PanelsMsg`] on the panel state; `has_daemon` says whether search can run and
+/// `search_location` is the `search.location` pref (modal or side panel).
+pub fn update(
+    p: &mut Panels,
+    m: PanelsMsg,
+    has_daemon: bool,
+    search_location: crate::settings::editor_prefs::SearchLocation,
+) -> Effect {
     match m {
         PanelsMsg::Toggle => {
             p.visible = !p.visible;
@@ -488,11 +500,28 @@ pub fn update(p: &mut Panels, m: PanelsMsg, has_daemon: bool) -> Effect {
                 Effect::Sync
             }
         }
-        // Routed by `App::update_panels` (it owns the prefs and the modal flag).
-        PanelsMsg::Search | PanelsMsg::CloseSearchModal => Effect::None,
+        PanelsMsg::Search
+            if search_location == crate::settings::editor_prefs::SearchLocation::Modal =>
+        {
+            p.search_modal = true;
+            Effect::OpenSearchModal
+        }
+        PanelsMsg::Search => update(
+            p,
+            PanelsMsg::Show(PanelKind::Search),
+            has_daemon,
+            search_location,
+        ),
+        PanelsMsg::CloseSearchModal => {
+            p.search_modal = false;
+            Effect::None
+        }
         PanelsMsg::Tick => Effect::Sync,
         PanelsMsg::OutlineJump(line) => Effect::OutlineJump(line),
-        PanelsMsg::Open(path) => Effect::Open(path),
+        PanelsMsg::Open(path) => {
+            p.search_modal = false;
+            Effect::Open(path)
+        }
         PanelsMsg::Backlinks { path, result } => match result {
             Ok(b) if p.path.as_deref() == Some(path.as_str()) => {
                 p.backlinks = b;
@@ -546,7 +575,7 @@ pub fn update(p: &mut Panels, m: PanelsMsg, has_daemon: bool) -> Effect {
             keep,
             other,
             verdict,
-        } => Effect::RunCall(props::dup_call(&keep, &other, &verdict)),
+        } => Effect::RunCall(props::dup_call(&keep, &other, verdict)),
     }
 }
 
@@ -560,21 +589,21 @@ fn dup_entry<'a>(p: &Panels, src: &str, v: &PropValue, t: Tokens) -> Element<'a,
     let Some(other) = p.resolve(src, target) else {
         return el;
     };
-    let press = |verdict: &str| {
+    let press = |verdict: props::DupVerdict| {
         pm(PanelsMsg::ResolveDup {
             keep: src.to_owned(),
             other: other.clone(),
-            verdict: verdict.to_owned(),
+            verdict,
         })
     };
     row![
         el,
         button(text("Not duplicates").size(12))
             .padding([0, 4])
-            .on_press(press("not-duplicates")),
+            .on_press(press(props::DupVerdict::NotDuplicates)),
         button(text("Keep this version").size(12))
             .padding([0, 4])
-            .on_press(press("keep")),
+            .on_press(press(props::DupVerdict::Keep)),
     ]
     .spacing(4)
     .into()

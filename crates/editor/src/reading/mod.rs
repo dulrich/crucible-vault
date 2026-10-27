@@ -35,7 +35,7 @@ use iced::{Element, Subscription, Task};
 use crate::app::{Docs, OpenDoc};
 use crate::daemon::DaemonClient;
 use crate::image_cache::{self, ImageCache};
-use crate::message::{Message, ReadingMsg, TabsMsg};
+use crate::message::{Message, ReadingMsg};
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
 use crate::widget::selectable::Selection;
@@ -587,14 +587,15 @@ impl ReadingStore {
                 (src, key)
             })
             .collect();
-        let pdfs: HashMap<String, Option<String>> = render::pdf_embeds(&model)
-            .into_iter()
+        let embeds = render::pdf_embeds(&model);
+        let pdfs: HashMap<String, Option<String>> = embeds
+            .iter()
             .map(|(target, _)| {
-                let key = self.resolve(doc.path(), &percent_decode(&target));
-                (target, key)
+                let key = self.resolve(doc.path(), &percent_decode(target));
+                (target.clone(), key)
             })
             .collect();
-        let pdf_pages: HashSet<crate::pdf::store::PageKey> = render::pdf_embeds(&model)
+        let pdf_pages: HashSet<crate::pdf::store::PageKey> = embeds
             .into_iter()
             .filter_map(|(t, page)| {
                 let path = pdfs.get(&t)?.clone()?;
@@ -690,22 +691,15 @@ impl ReadingStore {
         self.resolver.resolve(src, target)
     }
 
-    /// The message a link click produces: `TabsMsg::Open(path)` when it resolves, else `None`
-    /// (unresolved links and URLs with a scheme do not open).
+    /// The vault path a link click opens when it resolves, else `None` (unresolved links and
+    /// URLs with a scheme do not open). `App` places the open (WP-R3, review E7).
     pub fn click(
         &mut self,
         src: &str,
         target: &str,
-        new_tab: bool,
         daemon: Option<&Arc<dyn DaemonClient>>,
-    ) -> Option<Message> {
-        self.resolve_link(src, target, daemon).map(|p| {
-            Message::Tabs(if new_tab {
-                TabsMsg::OpenNew(p)
-            } else {
-                TabsMsg::Open(p)
-            })
-        })
+    ) -> Option<String> {
+        self.resolve_link(src, target, daemon)
     }
 
     /// `tab` shows image `key`: pins it, and starts an off-thread load on a miss.
@@ -762,6 +756,8 @@ pub enum Effect {
     Task(Task<Message>),
     /// plan round-5 WP-3: a status-bar notice.
     Notice(crate::app::Severity, String),
+    /// WP-R3 (review E7): a resolved link click; `App` places the open per the held modifiers.
+    OpenPath(String),
     /// Plan round-6 WP-4: an unresolved vault link `target` was clicked; `App` warns or
     /// creates it per `editor.toml` `missing_link`.
     MissingLink(String),
@@ -781,17 +777,17 @@ pub fn update(
     fx
 }
 
-/// A link click: opens the resolved note (a new tab when `new_tab`), else flags it missing.
+/// A link click: returns the resolved note's open path as an effect, else flags it missing.
 fn open_link(
     store: &mut ReadingStore,
     src: String,
     target: String,
-    new_tab: bool,
     daemon: Option<&Arc<dyn DaemonClient>>,
     fx: &mut Vec<Effect>,
 ) -> Task<Message> {
-    if let Some(m) = store.click(&src, &target, new_tab, daemon) {
-        return Task::done(m);
+    if let Some(p) = store.click(&src, &target, daemon) {
+        fx.push(Effect::OpenPath(p));
+        return Task::none();
     }
     // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing;
     // plan round-6 WP-4: `App` warns or creates it per `missing_link`.
@@ -935,11 +931,7 @@ fn update_store(
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. } => {}
         ReadingMsg::OpenLink { src, target } => {
-            return open_link(store, src, target, false, daemon, fx);
-        }
-        // plan round-14 WP-2: Ctrl/Cmd held — the same link, as a new tab.
-        ReadingMsg::OpenLinkNew { src, target } => {
-            return open_link(store, src, target, true, daemon, fx);
+            return open_link(store, src, target, daemon, fx);
         }
         ReadingMsg::ImageShown {
             tab,
@@ -1028,12 +1020,3 @@ mod link_menu_tests;
 mod selection_tests;
 #[cfg(test)]
 mod tests;
-
-/// Plan round-14 WP-2: a link click with Ctrl/Cmd held (`new_tab`) opens the note in a new tab;
-/// any other message, or a plain click, is unchanged.
-pub(crate) fn new_tab_link(m: ReadingMsg, new_tab: bool) -> ReadingMsg {
-    match m {
-        ReadingMsg::OpenLink { src, target } if new_tab => ReadingMsg::OpenLinkNew { src, target },
-        m => m,
-    }
-}

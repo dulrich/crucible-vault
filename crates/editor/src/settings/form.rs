@@ -11,7 +11,6 @@
 //! and unknown keys survive); typing-level UI state (number drafts, chip/new-key/rename drafts,
 //! the path field showing suggestions) lives in [`FormState`] and never reaches the file.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_schema::toml_edit::{Item, Value};
@@ -38,15 +37,9 @@ pub struct FormState {
     /// The field whose typeahead is active (plan round-5 WP-4).
     pub typeahead: Option<ActiveTa>,
     /// The display order last shown per display-sorted list (round-13 WP-1), see
-    /// [`Self::list_order`]. Interior mutability: the render pass records what it showed.
-    orders: RefCell<BTreeMap<(String, Path), ListOrder>>,
-}
-
-/// The shown order of one display-sorted list; `pinned` keeps it across edits.
-#[derive(Debug, Clone)]
-struct ListOrder {
-    order: Vec<usize>,
-    pinned: bool,
+    /// [`Self::list_order`]. WP-R3 (review E9): written only in the update path, when an edit
+    /// starts ([`Self::pin_order`]); the render pass only reads it.
+    pub(super) orders: BTreeMap<(String, Path), Vec<usize>>,
 }
 
 /// What the active typeahead edits.
@@ -113,9 +106,10 @@ impl FormState {
     }
 
     /// The order to show a display-sorted list's items in. While the list is pinned (an item of
-    /// it was edited, see [`Self::pin_order`]) the order last shown is kept, so the edited item
-    /// neither jumps under the cursor nor takes the widget focus to another row (iced keeps
-    /// focus by tree position); otherwise it is the fresh sort of `names` and is remembered.
+    /// it is being edited, see [`Self::pin_order`]) the order snapshotted at the edit's start is
+    /// kept, so the edited item neither jumps under the cursor nor takes the widget focus to
+    /// another row (iced keeps focus by tree position); otherwise it is the fresh sort of
+    /// `names`. A pure read.
     pub fn list_order(
         &self,
         file: &str,
@@ -123,47 +117,31 @@ impl FormState {
         names: &[String],
         sorted: bool,
     ) -> Vec<usize> {
-        if !sorted {
-            return display_order(names, false);
-        }
-        let key = (file.to_owned(), list.clone());
-        let mut orders = self.orders.borrow_mut();
-        if let Some(o) = orders.get(&key)
-            && o.pinned
-            && o.order.len() == names.len()
+        if sorted
+            && let Some(order) = self.orders.get(&(file.to_owned(), list.clone()))
+            && order.len() == names.len()
         {
-            return o.order.clone();
+            return order.clone();
         }
-        let order = display_order(names, true);
-        orders.insert(
-            key,
-            ListOrder {
-                order: order.clone(),
-                pinned: false,
-            },
-        );
-        order
+        display_order(names, sorted)
     }
 
-    /// Pins the shown order of the list at `list` (an item of it is being edited).
-    pub fn pin_order(&mut self, file: &str, list: &Path) {
-        if let Some(o) = self
-            .orders
-            .get_mut()
-            .get_mut(&(file.to_owned(), list.clone()))
-        {
-            o.pinned = true;
-        }
+    /// Pins `order` (the order shown when an edit of one of its items starts) for the list at
+    /// `list`, unless it is pinned already.
+    pub fn pin_order(&mut self, file: &str, list: &Path, order: Vec<usize>) {
+        self.orders
+            .entry((file.to_owned(), list.clone()))
+            .or_insert(order);
     }
 
     /// Releases every pinned list order of `file`: the next render sorts afresh.
     pub fn unpin_orders(&mut self, file: &str) {
-        self.orders.get_mut().retain(|(f, _), _| f != file);
+        self.orders.retain(|(f, _), _| f != file);
     }
 
     /// Releases every pinned list order of every file (a section switch).
     pub fn unpin_all(&mut self) {
-        self.orders.get_mut().clear();
+        self.orders.clear();
     }
 
     /// Expands or collapses the item at `path` (navigating away from an edit: re-sorts).
@@ -861,20 +839,34 @@ pub fn display_order(names: &[String], sorted: bool) -> Vec<usize> {
     order
 }
 
+/// Each item's display name: its non-empty `name`, else its summary.
+fn list_names(doc: &ConfigDoc, list: &Path, summaries: &[String]) -> Vec<String> {
+    summaries
+        .iter()
+        .enumerate()
+        .map(|(i, summary)| {
+            doc.get_str(&list.index(i).key("name"))
+                .filter(|s| !s.is_empty())
+                .map_or_else(|| summary.clone(), str::to_owned)
+        })
+        .collect()
+}
+
+/// The order the list at `list` (item schema `inner`) is shown in right now.
+pub fn current_order(doc: &ConfigDoc, list: &Path, inner: &Node) -> Vec<usize> {
+    let summaries: Vec<String> = (0..doc.len(list))
+        .map(|i| summary(doc, &list.index(i), inner, i))
+        .collect();
+    display_order(&list_names(doc, list, &summaries), true)
+}
+
 fn list_rows(cx: &Ctx<'_>, p: &Path, inner: &'static Node, depth: u16, out: &mut Vec<Row>) {
     let len = cx.doc.len(p);
     let sorted = sorted_list(cx.file, p);
     let summaries: Vec<String> = (0..len)
         .map(|i| summary(cx.doc, &p.index(i), inner, i))
         .collect();
-    let names: Vec<String> = (0..len)
-        .map(|i| {
-            cx.doc
-                .get_str(&p.index(i).key("name"))
-                .filter(|s| !s.is_empty())
-                .map_or_else(|| summaries[i].clone(), str::to_owned)
-        })
-        .collect();
+    let names = list_names(cx.doc, p, &summaries);
     for i in cx.form.list_order(cx.file, p, &names, sorted) {
         let ip = p.index(i);
         let expanded = cx.form.is_expanded(cx.file, &ip);

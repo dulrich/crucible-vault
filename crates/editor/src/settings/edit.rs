@@ -12,6 +12,9 @@ impl Settings {
         let Some(f) = self.files.get_mut(file) else {
             return Err(format!("{file}: no such settings file"));
         };
+        // WP-R3 (review E9): the display order is snapshotted here, before the edit, so the
+        // render pass never has to write it.
+        let snapshots = sorted_snapshots(f, file, edit);
         if let Err(e) = f.edit(|doc| edit.apply(doc)) {
             f.set_notice(Some(e.clone()));
             return Err(e);
@@ -22,10 +25,9 @@ impl Settings {
             Seg::Key(_) => None,
         };
         match edit {
-            DocEdit::Set(p, _) => pin_sorted(fs, file, p),
-            DocEdit::SetMany(items) => {
-                for (p, _) in items {
-                    pin_sorted(fs, file, p);
+            DocEdit::Set(..) | DocEdit::SetMany(_) => {
+                for (list, order) in snapshots {
+                    fs.pin_order(file, &list, order);
                 }
             }
             DocEdit::Remove(p) => {
@@ -194,13 +196,34 @@ impl DocEdit {
     }
 }
 
-/// Pins the shown order of the display-sorted list that holds the item `p` edits (round-13 WP-1):
-/// the edited row stays where the user is typing until the edit ends.
-fn pin_sorted(fs: &mut super::form::FormState, file: &str, p: &cv_schema::Path) {
-    if let [Seg::Key(k), Seg::Index(_), ..] = p.0.as_slice() {
+/// The shown order of every display-sorted list that holds an item `edit` sets (round-13 WP-1):
+/// pinned when the edit applies, so the edited row stays where the user is typing until the
+/// edit ends.
+fn sorted_snapshots(
+    f: &ConfigFile,
+    file: &str,
+    edit: &DocEdit,
+) -> Vec<(cv_schema::Path, Vec<usize>)> {
+    let paths: Vec<&cv_schema::Path> = match edit {
+        DocEdit::Set(p, _) => vec![p],
+        DocEdit::SetMany(items) => items.iter().map(|(p, _)| p).collect(),
+        _ => return Vec::new(),
+    };
+    let (Some(doc), Some(Node::Record(root))) = (f.doc(), f.schema()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(cv_schema::Path, Vec<usize>)> = Vec::new();
+    for p in paths {
+        let [Seg::Key(k), Seg::Index(_), ..] = p.0.as_slice() else {
+            continue;
+        };
         let list = cv_schema::Path::root().key(k);
-        if super::form::sorted_list(file, &list) {
-            fs.pin_order(file, &list);
+        if !super::form::sorted_list(file, &list) || out.iter().any(|(l, _)| *l == list) {
+            continue;
+        }
+        if let Some(Node::List(inner)) = root.field(k).map(|fl| &fl.node) {
+            out.push((list.clone(), super::form::current_order(doc, &list, inner)));
         }
     }
+    out
 }

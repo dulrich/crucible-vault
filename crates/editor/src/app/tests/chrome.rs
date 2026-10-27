@@ -385,20 +385,23 @@ fn search_command_opens_modal_or_panel_per_location() {
     let (_tmp, _d, mut app) = app_with(&[], None);
     app.panels.visible = false;
     let _ = app.send(Message::Panels(PanelsMsg::Search));
-    assert!(!app.search_modal && app.panels.visible);
+    assert!(!app.panels.search_modal && app.panels.visible);
     assert_eq!(app.panels.kind, crate::panels::PanelKind::Search);
 
     app.prefs.search_location = SearchLocation::Modal;
     app.panels.visible = false;
     let _ = app.send(Message::Panels(PanelsMsg::Search));
-    assert!(app.search_modal && !app.panels.visible);
+    assert!(app.panels.search_modal && !app.panels.visible);
     assert!(matches!(
         app.overlay_close(),
         Some(Message::Panels(PanelsMsg::CloseSearchModal))
     ));
     drop(app.view());
     let _ = app.send(Message::Panels(PanelsMsg::Open("a.md".into())));
-    assert!(!app.search_modal, "opening a result closes the modal");
+    assert!(
+        !app.panels.search_modal,
+        "opening a result closes the modal"
+    );
 }
 
 /// Plan round-12-feedback-todos WP-3: the search modal is one of the exclusive centre modals.
@@ -410,12 +413,12 @@ fn search_modal_is_exclusive_with_palette_and_switcher() {
     app.prefs.search_location = SearchLocation::Modal;
     let _ = app.send(Message::Palette(PaletteMsg::Open));
     let _ = app.send(Message::Panels(PanelsMsg::Search));
-    assert!(app.search_modal && !app.palette.open && !app.switcher.open);
+    assert!(app.panels.search_modal && !app.palette.open && !app.switcher.open);
     let _ = app.send(Message::Switcher(SwitcherMsg::Open));
-    assert!(app.switcher.open && !app.search_modal);
+    assert!(app.switcher.open && !app.panels.search_modal);
     let _ = app.send(Message::Panels(PanelsMsg::Search));
-    assert!(app.search_modal && !app.switcher.open);
+    assert!(app.panels.search_modal && !app.switcher.open);
     let _ = app.send(Message::Palette(PaletteMsg::Open));
-    assert!(app.palette.open && !app.search_modal);
+    assert!(app.palette.open && !app.panels.search_modal);
     drop(app.view());
 }

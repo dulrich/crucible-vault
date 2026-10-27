@@ -919,6 +919,29 @@ fn source_rows(app: &App) -> Vec<Row> {
         .collect()
 }
 
+/// WP-R3 (review E12b): the select cell finds the Name column by its role, wherever it sits
+/// (not by key), and falls back to the first column when no column carries the role.
+#[test]
+fn select_cell_finds_name_by_role() {
+    let (_tmp, d, mut app) = setup();
+    d.set_view_result(ACTIVE, ViewResult(sources_result()))
+        .expect("script");
+    d.set_view_result(ENTRIES, ViewResult(entries_result()))
+        .expect("script");
+    load(&mut app, ACTIVE);
+    load(&mut app, ENTRIES);
+    let rows = source_rows(&app);
+    let cols = [
+        Column::plain("note.kind", "Kind"),
+        Column::plain("renamed", "Title").with_role(ColumnRole::Name),
+    ];
+    let (i, _) = select_cell(&rows[1], &cols, NOTE).expect("serial row selects");
+    assert_eq!(i, 1, "found by role, not first and not by key");
+    let plain = [Column::plain("a", "A"), Column::plain("note.name", "Name")];
+    let (i, _) = select_cell(&rows[1], &plain, NOTE).expect("serial row selects");
+    assert_eq!(i, 0, "no role: the first column");
+}
+
 /// Plan round-13 WP-4: a serial row's Name click selects (the `select_by` section re-runs with
 /// `select`, its header shows the name); clicking it again clears; a non-serial row is inert.
 #[test]
@@ -933,7 +956,7 @@ fn serial_row_click_selects_and_reclick_clears() {
     assert!(app.views.host_selects(NOTE));
     let rows = source_rows(&app);
     let cols = [
-        Column::plain("note.name", "Name"),
+        Column::plain("note.name", "Name").with_role(ColumnRole::Name),
         Column::plain("note.kind", "Kind"),
     ];
     assert!(

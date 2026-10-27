@@ -899,30 +899,18 @@ fn nav_open_placement_default_replace_and_ctrl_click() {
     assert_eq!(app.panes.get(pane).and_then(|s| s.active), Some(2));
 }
 
-/// Plan round-14 WP-2: the wikilink click decides its placement from the modifiers (pure
-/// `new_tab_link`), `TabsMsg::OpenNew` adds a second tab of a note already open in the pane
-/// (active), a plain `Open` focuses the existing tab, a view link cell with Ctrl held adds a
-/// tab, keyboard-driven opens keep their placement, and Quick Switch `duplicate` is untouched.
+/// Plan round-14 WP-2 / WP-R3: `click_place()` reads the held modifier (new tab with Ctrl, else
+/// the existing tab), a wikilink click (`ReadingMsg::OpenLink`) goes through it and adds a
+/// second tab of a note already open in the pane (active), a plain `Open` focuses the existing
+/// tab, a view link cell with Ctrl held adds a tab, keyboard-driven opens keep their placement,
+/// and Quick Switch `duplicate` is untouched.
 #[test]
 fn ctrl_click_on_links_adds_a_tab_plain_click_focuses() {
     use crate::message::ReadingMsg;
-    use crate::reading::new_tab_link;
     let link = || ReadingMsg::OpenLink {
         src: "r14l/a.md".into(),
         target: "b".into(),
     };
-    assert!(matches!(
-        new_tab_link(link(), false),
-        ReadingMsg::OpenLink { .. }
-    ));
-    assert!(matches!(
-        new_tab_link(link(), true),
-        ReadingMsg::OpenLinkNew { .. }
-    ));
-    assert!(matches!(
-        new_tab_link(ReadingMsg::Tick, true),
-        ReadingMsg::Tick
-    ));
 
     let (_tmp, d) = fake_arc();
     for p in ["r14l/a.md", "r14l/b.md"] {
@@ -939,8 +927,14 @@ fn ctrl_click_on_links_adds_a_tab_plain_click_focuses() {
     assert_eq!(pane_paths(&app, pane), ["r14l/b.md", "r14l/a.md"]);
     assert_eq!(active(&app), Some(0));
 
+    // click_place(): the held modifier decides, nothing else.
+    assert_eq!(app.click_place(), crate::app::Place::Focus);
+    let _ = app.send(Message::Modifiers(iced::keyboard::Modifiers::CTRL));
+    assert_eq!(app.click_place(), crate::app::Place::NewTab);
+
     // Ctrl+click on the wikilink: a second tab of the already-open note, active.
-    let _ = app.send(Message::Tabs(TabsMsg::OpenNew("r14l/b.md".into())));
+    let _ = app.send(Message::Reading(link()));
+    let _ = app.send(Message::Modifiers(iced::keyboard::Modifiers::empty()));
     assert_eq!(
         pane_paths(&app, pane),
         ["r14l/b.md", "r14l/a.md", "r14l/b.md"]

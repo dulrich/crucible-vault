@@ -9,7 +9,7 @@ impl App {
             PaletteMsg::Open => {
                 // Decision 9 (round-12): one centre modal at a time.
                 self.switcher.open = false;
-                self.search_modal = false;
+                self.panels.search_modal = false;
                 self.palette.show();
                 let fetch = self.fetch_actions();
                 return Task::batch([

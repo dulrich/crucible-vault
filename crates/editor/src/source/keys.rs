@@ -132,15 +132,15 @@ pub fn shift_click(msg: SourceMsg, shift: bool) -> SourceMsg {
 
 /// Plan usability-sprint-captures-links WP-3: what a Ctrl/Cmd+click at byte `col` of `line` in
 /// note `path` does — a remote URL (bare or md-link) opens in the browser, a wikilink or vault
-/// md-link opens the note as Reading's `OpenLink` does, but always in a new tab (plan round-14
-/// WP-2: `OpenLinkNew`); elsewhere nothing.
+/// md-link opens the note as Reading's `OpenLink` does, but placed by `App::click_place` (Ctrl/Cmd is
+/// held, so a new tab; plan round-14 WP-2, WP-R3); elsewhere nothing.
 pub fn command_click_msg(path: &str, line: &str, col: usize) -> Option<Message> {
     use editor_model::link_at::{LinkAt, link_at};
     Some(match link_at(line, col)? {
         LinkAt::Url(u) => Message::OpenUrl(u),
         LinkAt::Md(u) if editor_model::render::is_remote(&u) => Message::OpenUrl(u),
         LinkAt::Md(target) | LinkAt::Wiki(target) => {
-            Message::Reading(crate::message::ReadingMsg::OpenLinkNew {
+            Message::Reading(crate::message::ReadingMsg::OpenLink {
                 src: path.to_owned(),
                 target,
             })

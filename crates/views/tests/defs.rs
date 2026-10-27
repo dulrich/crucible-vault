@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use chrono::NaiveDate;
 use serde_json::Value as Json;
-use views::result::Cell;
+use views::result::{Cell, ColumnRole};
 use views::{ViewHost, ViewResult};
 
 const IDS: &[&str] = &[
@@ -424,7 +424,10 @@ fn works_views_read_injected_sources_rows() {
     assert_eq!(column(&r, "Entries"), [("Bob News".into(), "2".into())]);
     // A record `status` column bound as `note.status` is plain text, not a task-status cell.
     assert!(
-        r.columns.iter().all(|c| c.role.is_none()),
+        r.columns.iter().all(|c| !matches!(
+            c.role,
+            Some(ColumnRole::Status | ColumnRole::Checkbox { .. })
+        )),
         "{:?}",
         r.columns
     );

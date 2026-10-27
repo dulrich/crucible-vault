@@ -5,6 +5,7 @@ use iced::widget::text_editor::{Action, Edit};
 use super::*;
 use crate::message::{ExplorerMsg, FindMsg, PaletteMsg, SourceMsg, TabsMsg};
 use crate::palette::chord::{self, Chord};
+use crate::panels::props::DupVerdict;
 use crate::reading::ViewMode;
 
 type Fixture = (tempfile::TempDir, Arc<FakeDaemon>, App);
@@ -283,11 +284,11 @@ fn duplicate_buttons_dispatch_dupes_resolve_params() {
     )
     .expect("register");
     open(&mut app, "wp7d/a.md");
-    for verdict in ["not-duplicates", "keep"] {
+    for verdict in [DupVerdict::NotDuplicates, DupVerdict::Keep] {
         let _ = app.send(Message::Panels(crate::message::PanelsMsg::ResolveDup {
             keep: "wp7d/a.md".into(),
             other: "wp7d/b.md".into(),
-            verdict: verdict.into(),
+            verdict,
         }));
     }
     let got = calls.lock().expect("lock").clone();

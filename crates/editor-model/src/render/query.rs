@@ -1,7 +1,7 @@
 //! Read-only walks over a [`RenderModel`]: task lines, link targets, images, inline text.
 
 use super::lower::is_remote;
-use super::model::{Block, Inline, RenderModel};
+use super::model::{Block, Inline, ListItem, RenderModel};
 use crate::props::PropValue;
 
 /// Every host-note task line with its status, in document order (transclusions excluded).
@@ -11,23 +11,45 @@ pub fn task_lines(model: &RenderModel) -> Vec<(usize, char)> {
     out
 }
 
-fn collect_tasks(blocks: &[Block], out: &mut Vec<(usize, char)>) {
+/// What [`walk_blocks`] hands its visitor.
+enum Visit<'a> {
+    /// A block, before its children.
+    Block(&'a Block),
+    /// A list item, before its children.
+    Item(&'a ListItem),
+}
+
+/// WP-R3 (review E11): the one recursive block walker, in document order. List item children,
+/// callout and quote children are always entered; transclusion content only when `transcluded`.
+fn walk_blocks<'a>(blocks: &'a [Block], transcluded: bool, visit: &mut impl FnMut(Visit<'a>)) {
     for b in blocks {
+        visit(Visit::Block(b));
         match b {
             Block::List { items, .. } => {
                 for i in items {
-                    if let (Some(l), Some(c)) = (i.line, i.task) {
-                        out.push((l, c));
-                    }
-                    collect_tasks(&i.children, out);
+                    visit(Visit::Item(i));
+                    walk_blocks(&i.children, transcluded, visit);
                 }
             }
             Block::Callout { children, .. } | Block::BlockQuote(children) => {
-                collect_tasks(children, out);
+                walk_blocks(children, transcluded, visit);
             }
+            Block::Transclusion {
+                content: Some(c), ..
+            } if transcluded => walk_blocks(c, transcluded, visit),
             _ => {}
         }
     }
+}
+
+fn collect_tasks(blocks: &[Block], out: &mut Vec<(usize, char)>) {
+    walk_blocks(blocks, false, &mut |v| {
+        if let Visit::Item(i) = v
+            && let (Some(l), Some(c)) = (i.line, i.task)
+        {
+            out.push((l, c));
+        }
+    });
 }
 
 /// The plain text of inlines (for headings, titles, alt text).
@@ -93,7 +115,8 @@ fn inline_links(inlines: &[Inline], out: &mut Vec<String>) {
 }
 
 fn collect_links(blocks: &[Block], out: &mut Vec<String>) {
-    for b in blocks {
+    walk_blocks(blocks, true, &mut |v| {
+        let Visit::Block(b) = v else { return };
         match b {
             Block::Heading { inlines, .. } | Block::Paragraph(inlines) => {
                 inline_links(inlines, out);
@@ -106,20 +129,9 @@ fn collect_links(blocks: &[Block], out: &mut Vec<String>) {
             Block::Image {
                 link: Some(href), ..
             } if !is_remote(href) && !self_link(href) => out.push(href.clone()),
-            Block::List { items, .. } => {
-                for i in items {
-                    collect_links(&i.children, out);
-                }
-            }
-            Block::Callout { children, .. } | Block::BlockQuote(children) => {
-                collect_links(children, out);
-            }
-            Block::Transclusion {
-                content: Some(c), ..
-            } => collect_links(c, out),
             _ => {}
         }
-    }
+    });
 }
 
 /// Every image block's `(src, remote)`, in document order, including inside transclusions.
@@ -130,23 +142,11 @@ pub fn images(model: &RenderModel) -> Vec<(String, bool)> {
 }
 
 fn collect_images(blocks: &[Block], out: &mut Vec<(String, bool)>) {
-    for b in blocks {
-        match b {
-            Block::Image { src, remote, .. } => out.push((src.clone(), *remote)),
-            Block::List { items, .. } => {
-                for i in items {
-                    collect_images(&i.children, out);
-                }
-            }
-            Block::Callout { children, .. } | Block::BlockQuote(children) => {
-                collect_images(children, out);
-            }
-            Block::Transclusion {
-                content: Some(c), ..
-            } => collect_images(c, out),
-            _ => {}
+    walk_blocks(blocks, true, &mut |v| {
+        if let Visit::Block(Block::Image { src, remote, .. }) = v {
+            out.push((src.clone(), *remote));
         }
-    }
+    });
 }
 
 /// Plan round-15 WP-4: every PDF embed's `(target, 1-based page)`, in document order, including
@@ -158,21 +158,9 @@ pub fn pdf_embeds(model: &RenderModel) -> Vec<(String, u32)> {
 }
 
 fn collect_pdf_embeds(blocks: &[Block], out: &mut Vec<(String, u32)>) {
-    for b in blocks {
-        match b {
-            Block::PdfEmbed { target, page, .. } => out.push((target.clone(), *page)),
-            Block::List { items, .. } => {
-                for i in items {
-                    collect_pdf_embeds(&i.children, out);
-                }
-            }
-            Block::Callout { children, .. } | Block::BlockQuote(children) => {
-                collect_pdf_embeds(children, out);
-            }
-            Block::Transclusion {
-                content: Some(c), ..
-            } => collect_pdf_embeds(c, out),
-            _ => {}
+    walk_blocks(blocks, true, &mut |v| {
+        if let Visit::Block(Block::PdfEmbed { target, page, .. }) = v {
+            out.push((target.clone(), *page));
         }
-    }
+    });
 }

@@ -185,9 +185,12 @@ fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
     drop(app.view());
     // The fallback card's click is the link route: it resolves to an open, which opens the PDF tab.
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
-    let click = app.reading.click("A.md", "doc.pdf", false, Some(&dc));
-    assert!(matches!(&click, Some(Message::Tabs(TabsMsg::Open(p))) if p == "doc.pdf"));
-    let _ = app.send(click.expect("resolved"));
+    let click = app.reading.click("A.md", "doc.pdf", Some(&dc));
+    assert_eq!(click.as_deref(), Some("doc.pdf"));
+    let _ = app.send(Message::Reading(crate::message::ReadingMsg::OpenLink {
+        src: "A.md".into(),
+        target: "doc.pdf".into(),
+    }));
     assert!(app.opened_files().is_empty(), "no opener for a PDF");
     assert_eq!(
         kinds(&app),

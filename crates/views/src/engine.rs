@@ -551,6 +551,7 @@ fn table(
                 col.width = view.column_widths.get(id).copied();
                 match view.checkbox_key(id) {
                     Some(key) => col.with_role(ColumnRole::Checkbox { key }),
+                    None if id == "note.name" || id == "name" => col.with_role(ColumnRole::Name),
                     None => col,
                 }
             })

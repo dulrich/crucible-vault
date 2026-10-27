@@ -280,8 +280,6 @@ pub struct App {
     pub reading: crate::reading::ReadingStore,
     /// WP-5: command palette, action invocation and the job toast.
     pub palette: crate::palette::Palette,
-    /// Plan round-12-feedback-todos WP-3: the search centre modal is open (`search.location = "modal"`).
-    pub search_modal: bool,
     /// WP-5: the right-hand side panels.
     pub panels: crate::panels::Panels,
     /// The one link-resolver cache, shared by Reading and the panels.
@@ -437,7 +435,6 @@ impl App {
             today: None,
             reading: crate::reading::ReadingStore::new(),
             palette: crate::palette::Palette::default(),
-            search_modal: false,
             panels: crate::panels::Panels::default(),
             resolver,
             views: crate::views::ViewStore {

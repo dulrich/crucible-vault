@@ -528,7 +528,7 @@ impl App {
             SwitcherMsg::Open => {
                 // Decision 9 (round-12): one centre modal at a time.
                 self.palette.close();
-                self.search_modal = false;
+                self.panels.search_modal = false;
                 s.open = true;
                 s.move_from = None;
                 s.query.clear();

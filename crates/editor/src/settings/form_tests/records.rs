@@ -234,19 +234,32 @@ fn sources_lists_show_sorted_by_name_without_reorder_controls() {
 }
 
 /// Round-13 WP-1: an edit pins the shown order of a sorted list; leaving the item re-sorts.
+/// WP-R3 (review E9): `list_order` is a pure read; the order is pinned by the update path.
 #[test]
 fn pinned_list_order_survives_an_edit_until_released() {
     let mut fs = FormState::default();
     let list = cv_schema::Path::root().key("serial");
     let before: Vec<String> = vec!["Alpha".into(), "Mid".into(), "A".into()];
     assert_eq!(fs.list_order(SOURCES, &list, &before, true), vec![2, 0, 1]);
-    fs.pin_order(SOURCES, &list);
+    fs.pin_order(SOURCES, &list, vec![2, 0, 1]);
     let after: Vec<String> = vec!["Alpha".into(), "Mid".into(), "Ax".into()];
     assert_eq!(fs.list_order(SOURCES, &list, &after, true), vec![2, 0, 1]);
     fs.unpin_orders(SOURCES);
     assert_eq!(fs.list_order(SOURCES, &list, &after, true), vec![0, 2, 1]);
     // An unsorted list is always file order.
     assert_eq!(fs.list_order(SOURCES, &list, &after, false), vec![0, 1, 2]);
+}
+
+/// WP-R3 (review E9): view passes without an edit never insert or change an order.
+#[test]
+fn list_order_is_a_pure_read() {
+    let fs = FormState::default();
+    let list = cv_schema::Path::root().key("serial");
+    let names: Vec<String> = vec!["b".into(), "A".into()];
+    assert_eq!(fs.list_order(SOURCES, &list, &names, true), vec![1, 0]);
+    let renamed: Vec<String> = vec!["a".into(), "B".into()];
+    assert_eq!(fs.list_order(SOURCES, &list, &renamed, true), vec![0, 1]);
+    assert!(fs.orders.is_empty(), "no render-time insert");
 }
 
 #[test]

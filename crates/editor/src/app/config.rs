@@ -425,7 +425,7 @@ impl App {
             && self.dialog.is_none()
             && !self.switcher.open
             && !self.palette.open
-            && !self.search_modal
+            && !self.panels.search_modal
     }
 
     pub(super) fn update_settings(&mut self, m: crate::settings::SettingsMsg) -> Task<Message> {

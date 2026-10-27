@@ -140,6 +140,16 @@ impl App {
         self.open_with(path, Place::Focus);
     }
 
+    /// Where a link click opens (plan round-14 WP-2; WP-R3, review E7): a new tab when
+    /// Ctrl/Cmd is held, else the focused pane's existing tab.
+    pub(super) fn click_place(&self) -> Place {
+        if self.modifiers.command() {
+            Place::NewTab
+        } else {
+            Place::Focus
+        }
+    }
+
     /// The nav bar's placement (plan round-14 WP-2): Ctrl/Cmd+click always adds a tab, else the
     /// `nav_open` pref.
     pub(super) fn nav_place(&self, new_tab: bool) -> Place {
@@ -398,7 +408,6 @@ impl App {
     pub(super) fn update_tabs(&mut self, m: TabsMsg) -> Task<Message> {
         match m {
             TabsMsg::Open(p) => self.open(&p),
-            TabsMsg::OpenNew(p) => self.open_with(&p, Place::NewTab),
             TabsMsg::Select(pane, i) => self.select_tab(pane, i),
             TabsMsg::GoTo(n) => {
                 let i = usize::from(n.saturating_sub(1));

@@ -2,7 +2,10 @@
   "columns": [
     {
       "key": "note.name",
-      "label": "Name"
+      "label": "Name",
+      "role": {
+        "kind": "name"
+      }
     },
     {
       "key": "note.status",

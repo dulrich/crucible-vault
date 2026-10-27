@@ -276,8 +276,6 @@ pub enum ReadingMsg {
     Tick,
     /// A wiki-link / vault md-link click in the reading pane of `src`.
     OpenLink { src: String, target: String },
-    /// The same link opened with Ctrl/Cmd held: always a new tab (plan round-14 WP-2).
-    OpenLinkNew { src: String, target: String },
     /// An image sensor came into view (`width` = laid-out width).
     ImageShown {
         tab: String,
@@ -449,7 +447,7 @@ pub enum PanelsMsg {
     ResolveDup {
         keep: String,
         other: String,
-        verdict: String,
+        verdict: crate::panels::props::DupVerdict,
     },
 }
 
@@ -566,8 +564,6 @@ pub enum StatusMsg {
 pub enum TabsMsg {
     /// Open a vault-relative path (or focus its tab).
     Open(String),
-    /// Ctrl/Cmd+click on a link (plan round-14 WP-2): open `path` as a new tab in the focused pane.
-    OpenNew(String),
     Select(Pane, usize),
     /// Close (the tab ×): a dirty buffer saves first; a failed save cancels.
     Close(Pane, usize),
@@ -726,7 +722,6 @@ impl TabsMsg {
     pub fn kind(&self) -> MsgKind {
         match self {
             Self::Open(_)
-            | Self::OpenNew(_)
             | Self::Select(..)
             | Self::Close(..)
             | Self::CloseActive

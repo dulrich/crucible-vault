@@ -181,14 +181,6 @@ impl App {
                     return self.title_submit(&path);
                 }
             }
-            // Plan round-14 WP-2: a link click with Ctrl/Cmd held opens a new tab (decided here,
-            // on the click-originated message only; `TabsMsg::Open` keeps its placement).
-            Message::Reading(m @ crate::message::ReadingMsg::OpenLink { .. })
-                if self.modifiers.command() =>
-            {
-                let m = crate::reading::new_tab_link(m, true);
-                return self.update_inner(Message::Reading(m));
-            }
             Message::Reading(m) => {
                 let mode_change = matches!(
                     m,
@@ -222,6 +214,11 @@ impl App {
                         crate::reading::Effect::Task(t) => t,
                         crate::reading::Effect::Notice(severity, text) => {
                             self.status.notify(severity, text);
+                            continue;
+                        }
+                        crate::reading::Effect::OpenPath(path) => {
+                            // WP-R3 (review E7): the one new-tab decision for link clicks.
+                            self.open_with(&path, self.click_place());
                             continue;
                         }
                         crate::reading::Effect::MissingLink(target) => {
@@ -363,28 +360,18 @@ impl App {
 
     fn update_panels(&mut self, m: PanelsMsg) -> Task<Message> {
         use crate::panels::Effect;
-        match m {
-            PanelsMsg::Search
-                if self.prefs.search_location
-                    == crate::settings::editor_prefs::SearchLocation::Modal =>
-            {
+        match crate::panels::update(
+            &mut self.panels,
+            m,
+            self.daemon.is_some(),
+            self.prefs.search_location,
+        ) {
+            Effect::OpenSearchModal => {
                 // Decision 9/10 (round-12): one centre modal at a time.
                 self.switcher.open = false;
                 self.palette.close();
-                self.search_modal = true;
-                return iced::widget::operation::focus(crate::panels::SEARCH_MODAL_ID);
+                iced::widget::operation::focus(crate::panels::SEARCH_MODAL_ID)
             }
-            PanelsMsg::Search => {
-                return self.update_panels(PanelsMsg::Show(crate::panels::PanelKind::Search));
-            }
-            PanelsMsg::CloseSearchModal => {
-                self.search_modal = false;
-                return Task::none();
-            }
-            PanelsMsg::Open(_) => self.search_modal = false,
-            _ => {}
-        }
-        match crate::panels::update(&mut self.panels, m, self.daemon.is_some()) {
             Effect::None => Task::none(),
             Effect::Sync => self.sync_panels(),
             Effect::SyncAndFocusSearch => Task::batch([
@@ -511,12 +498,7 @@ impl App {
             }
             crate::views::Effect::Open { path, line } => {
                 // Plan round-14 WP-2: Ctrl/Cmd+click on a link cell adds a new tab.
-                let how = if self.modifiers.command() {
-                    Place::NewTab
-                } else {
-                    Place::Focus
-                };
-                self.open_with(&path, how);
+                self.open_with(&path, self.click_place());
                 let line = line.and_then(|l| usize::try_from(l.saturating_sub(1)).ok());
                 if let Some(line) = line
                     && self.active_note().is_some_and(|t| t.path == path)

@@ -106,7 +106,7 @@ impl Column {
 /// What a column's cells do in the editor.
 ///
 /// JSON: `{"kind": "checkbox", "key": "read"}`, `{"kind": "status"}`, `{"kind": "task_text"}`,
-/// `{"kind": "task_file"}`.
+/// `{"kind": "task_file"}`, `{"kind": "name"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ColumnRole {
@@ -120,6 +120,9 @@ pub enum ColumnRole {
     TaskText,
     /// A Tasks view's file link.
     TaskFile,
+    /// WP-R3 (review E12b): the note-name column (`note.name` / `name`); the editor's select
+    /// cell (a `sources` serial row) lands here.
+    Name,
 }
 
 /// One row; `path`/`line` locate the source (a task row carries its 1-based line).

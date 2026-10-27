@@ -129,6 +129,13 @@ pub struct Entry {
     pub window: ListWindow,
 }
 
+impl Entry {
+    /// WP-R3 (review E10): a loaded view with a `select_by` property (the one predicate).
+    fn is_select_ready(&self) -> bool {
+        matches!(&self.state, State::Ready(d) if d.select_by.is_some())
+    }
+}
+
 /// Plan round-5 WP-1: the widget id of the virtual result list of view `id` in note `host`.
 pub fn list_id(id: &str, host: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("views-list:{host}:{id}"))
@@ -204,10 +211,43 @@ impl ViewStore {
     /// Plan round-13 WP-4: whether note `host` embeds a loaded `select_by` view (its sources
     /// sections' serial rows are then clickable).
     pub fn host_selects(&self, host: &str) -> bool {
-        self.entries.iter().any(|((_, h), e)| {
-            h.as_deref() == Some(host)
-                && matches!(&e.state, State::Ready(d) if d.select_by.is_some())
-        })
+        self.entries
+            .iter()
+            .any(|((_, h), e)| h.as_deref() == Some(host) && e.is_select_ready())
+    }
+
+    /// WP-R3 (review E10): marks the entry at `key` stale and bumps its epoch (a shown fence asks
+    /// again). `Loaded` re-bumps the epoch of a stale entry, so an in-flight run is covered too.
+    fn invalidate_entry(&mut self, key: &Key) {
+        if let Some(e) = self.entries.get_mut(key) {
+            e.stale = true;
+            e.epoch = e.epoch.wrapping_add(1);
+        }
+    }
+
+    /// WP-R3 (review E10): claims the idle entry at `key` for a run (`false` while one is
+    /// outstanding or the entry is absent).
+    fn claim(&mut self, key: &Key) -> bool {
+        match self.entries.get_mut(key) {
+            Some(e) if !e.in_flight => {
+                e.in_flight = true;
+                e.stale = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// WP-R3 (review E10): the run request for the claimed view `id` in `host`.
+    fn run_effect(&self, id: String, host: Option<String>) -> Effect {
+        let sort = self.wire_sort(&id, host.as_deref());
+        let select = self.wire_select(&id, host.as_deref());
+        Effect::Run {
+            id,
+            host,
+            sort,
+            select,
+        }
     }
 
     /// Plan round-13 WP-4: toggles `host`'s selection to `value` (the same value clears it) and
@@ -222,36 +262,20 @@ impl ViewStore {
         let mut ids: Vec<String> = self
             .entries
             .iter()
-            .filter(|((_, h), e)| {
-                h.as_deref() == Some(host.as_str())
-                    && matches!(&e.state, State::Ready(d) if d.select_by.is_some())
-            })
+            .filter(|((_, h), e)| h.as_deref() == Some(host.as_str()) && e.is_select_ready())
             .map(|((id, _), _)| id.clone())
             .collect();
         ids.sort();
         let mut run = None;
         for id in ids {
-            let Some(e) = self.entries.get_mut(&(id.clone(), Some(host.clone()))) else {
-                continue;
-            };
-            e.stale = true;
-            e.epoch = e.epoch.wrapping_add(1);
-            if run.is_none() && !e.in_flight {
-                e.in_flight = true;
-                e.stale = false;
+            let key = (id.clone(), Some(host.clone()));
+            self.invalidate_entry(&key);
+            if run.is_none() && self.claim(&key) {
                 run = Some(id);
             }
         }
         match run {
-            Some(id) => {
-                let h = Some(host.as_str());
-                Effect::Run {
-                    sort: self.wire_sort(&id, h),
-                    select: self.wire_select(&id, h),
-                    id,
-                    host: Some(host),
-                }
-            }
+            Some(id) => self.run_effect(id, Some(host)),
             None => Effect::None,
         }
     }
@@ -375,19 +399,10 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
                     epoch: 0,
                     window: ListWindow::default(),
                 });
-            if e.in_flight || !e.stale {
+            if !e.stale || !store.claim(&(id.clone(), host.clone())) {
                 return Effect::None;
             }
-            e.in_flight = true;
-            e.stale = false;
-            let sort = store.wire_sort(&id, host.as_deref());
-            let select = store.wire_select(&id, host.as_deref());
-            Effect::Run {
-                id,
-                host,
-                sort,
-                select,
-            }
+            store.run_effect(id, host)
         }
         ViewsMsg::SortBy { id, host, column } => {
             let key = view_sort_key(&id, host.as_deref());
@@ -395,24 +410,12 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
                 Some(s) => store.sorts.insert(key, s),
                 None => store.sorts.remove(&key),
             };
-            let sort = store.wire_sort(&id, host.as_deref());
-            let select = store.wire_select(&id, host.as_deref());
-            let Some(e) = store.entries.get_mut(&(id.clone(), host.clone())) else {
-                return Effect::None;
-            };
-            e.stale = true;
-            e.epoch = e.epoch.wrapping_add(1);
-            if e.in_flight {
-                // `Loaded` re-bumps the epoch of a stale entry, so the fence asks again.
-                return Effect::None;
-            }
-            e.in_flight = true;
-            e.stale = false;
-            Effect::Run {
-                id,
-                host,
-                sort,
-                select,
+            let key = (id.clone(), host.clone());
+            store.invalidate_entry(&key);
+            if store.claim(&key) {
+                store.run_effect(id, host)
+            } else {
+                Effect::None
             }
         }
         ViewsMsg::Loaded { id, host, result } => {
@@ -748,13 +751,13 @@ pub(crate) fn row_targets(r: &Row, cols: &[Column]) -> Vec<Option<Message>> {
 
 /// Plan round-13 WP-4 (Decision 1): the Name cell of a selectable row of a section in note
 /// `host` that embeds a `select_by` view — `(column index, click)`. Only rows the producer marks
-/// with [`Row::select`] (a `sources` `[[serial]]` row) qualify; the Name cell is the `note.name`
-/// / `name` column, else the first. The click toggles the host's selection to the row's name.
+/// with [`Row::select`] (a `sources` `[[serial]]` row) qualify; the Name cell is the column with
+/// [`ColumnRole::Name`], else the first. The click toggles the host's selection to the row's name.
 pub(crate) fn select_cell(r: &Row, cols: &[Column], host: &str) -> Option<(usize, Message)> {
     let value = r.select.clone()?;
     let i = cols
         .iter()
-        .position(|c| c.key == "note.name" || c.key == "name")
+        .position(|c| c.role == Some(ColumnRole::Name))
         .unwrap_or(0);
     Some((
         i,

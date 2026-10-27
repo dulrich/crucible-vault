@@ -2,7 +2,10 @@
   "columns": [
     {
       "key": "name",
-      "label": "name"
+      "label": "name",
+      "role": {
+        "kind": "name"
+      }
     },
     {
       "key": "original_path",

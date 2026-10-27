@@ -17,9 +17,29 @@ pub fn checked(p: &Property) -> Option<bool> {
 /// verdict buttons (the daemon's `dupes_scan` writes it).
 pub const POSSIBLE_DUPLICATE: &str = "possible-duplicate";
 
+/// WP-R3 (review E12b): a duplicate verdict. The daemon's string form exists only in
+/// [`Self::as_str`], where [`dup_call`] builds the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DupVerdict {
+    /// The two notes are not duplicates (`not-duplicates`).
+    NotDuplicates,
+    /// Keep this version (`keep`).
+    Keep,
+}
+
+impl DupVerdict {
+    /// The `dupes-resolve` action's `verdict` parameter.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotDuplicates => "not-duplicates",
+            Self::Keep => "keep",
+        }
+    }
+}
+
 /// Plan round-12-feedback-todos WP-7: the `dupes-resolve` call one verdict button sends —
 /// `keep` = the panel's note, `other` = the entry's resolved path.
-pub fn dup_call(keep: &str, other: &str, verdict: &str) -> crate::palette::Call {
+pub fn dup_call(keep: &str, other: &str, verdict: DupVerdict) -> crate::palette::Call {
     let s = |v: &str| serde_json::Value::String(v.to_owned());
     crate::palette::Call {
         action_id: "dupes-resolve".into(),
@@ -27,7 +47,7 @@ pub fn dup_call(keep: &str, other: &str, verdict: &str) -> crate::palette::Call 
         params: serde_json::Map::from_iter([
             ("keep".to_owned(), s(keep)),
             ("other".to_owned(), s(other)),
-            ("verdict".to_owned(), s(verdict)),
+            ("verdict".to_owned(), s(verdict.as_str())),
         ]),
         needs: Vec::new(),
     }
