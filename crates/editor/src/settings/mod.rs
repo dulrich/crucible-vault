@@ -49,6 +49,7 @@ pub mod captures;
 pub mod edit;
 pub mod editor_prefs;
 pub mod form;
+mod form_state;
 pub mod input;
 pub mod lookups;
 pub mod pages;
