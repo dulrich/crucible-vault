@@ -292,7 +292,10 @@ fn pdf_opens_a_pdf_tab_and_round_trips_as_a_note_tab() {
     let key = crate::app::pdf_tab::page_key("doc.pdf", 0, 320);
     assert_eq!(key, "doc.pdf#page=1@320");
     assert_eq!(app.reading.images.pending_len(), 1, "a render started");
-    assert!(app.pdf.reserved_bytes() > 0, "projected bytes reserved");
+    assert!(
+        app.reading.images.pdf_bytes() > 0,
+        "projected bytes reserved"
+    );
     let bytes = Arc::new(pdf.clone());
     let _ = app.send(Message::PdfTab(PdfTabMsg::Rendered {
         path: "doc.pdf".into(),
@@ -327,7 +330,7 @@ fn pdf_opens_a_pdf_tab_and_round_trips_as_a_note_tab() {
     // Closing the PDF tab releases its page pin and reservation.
     let _ = app.send(Message::Tabs(TabsMsg::Close(app.focus, 1)));
     assert_eq!(app.reading.images.pins(&key), 0);
-    assert_eq!(app.pdf.reserved_bytes(), 0);
+    assert_eq!(app.reading.images.pdf_bytes(), 0);
     assert!(app.pdf.docs.is_empty());
 }
 
@@ -365,14 +368,14 @@ fn renaming_a_pdf_keeps_its_tab_a_pdf_tab() {
         page: 0,
         width: 300.0,
     }));
-    assert!(app.pdf.reserved_bytes() > 0);
+    assert!(app.reading.images.pdf_bytes() > 0);
     let moved = d.daemon_move("doc.pdf", "d2.pdf").expect("move");
     for n in moved {
         let _ = app.send(Message::Status(StatusMsg::Notification(n)));
     }
     assert_eq!(kinds(&app), [TabKind::Pdf("d2.pdf".into())]);
     assert_eq!(app.active_tab().expect("tab").id, id, "same tab");
-    assert_eq!(app.pdf.reserved_bytes(), 0, "old page pins released");
+    assert_eq!(app.reading.images.pdf_bytes(), 0, "old page pins released");
     assert!(app.pdf.docs.contains_key("d2.pdf") && !app.pdf.docs.contains_key("doc.pdf"));
 }
 
@@ -427,9 +430,12 @@ fn a_pdf_embed_renders_pins_survives_recompute_and_opens_the_tab_at_its_page() {
     let width = crate::image_cache::decode_width(300.0);
     let key = crate::app::pdf_tab::page_key("doc.pdf", 1, width);
     assert_eq!(key, format!("doc.pdf#page=2@{width}"));
-    assert!(app.reading.images.waiting(&key), "pinned, load in flight");
     assert!(
-        app.pdf.reserved.contains_key(&key),
+        app.reading.images.is_reserved(&key),
+        "pinned, load in flight"
+    );
+    assert!(
+        app.reading.images.is_reserved(&key),
         "one E1 reservation map"
     );
     let bytes = Arc::new(pdf.clone());
@@ -510,14 +516,14 @@ fn a_pdf_embed_falls_back_to_the_card() {
         app.reading.pdf_embed_failed("A.md", "doc.pdf", 8),
         "page 9 of 3"
     );
-    assert!(app.pdf.reserved.is_empty(), "nothing reserved");
+    assert!(app.reading.images.pdf_bytes() == 0, "nothing reserved");
     drop(app.view());
 
     // A render failure marks the page failed and releases its pin.
     embed_shown(&mut app, view, 0, 300.0);
     let width = crate::image_cache::decode_width(300.0);
     let key = crate::app::pdf_tab::page_key("doc.pdf", 0, width);
-    assert!(app.reading.images.waiting(&key));
+    assert!(app.reading.images.is_reserved(&key));
     let _ = app.send(Message::PdfTab(PdfTabMsg::EmbedRendered {
         note: "A.md".into(),
         view,
@@ -528,7 +534,7 @@ fn a_pdf_embed_falls_back_to_the_card() {
     }));
     assert!(app.reading.pdf_embed_failed("A.md", "doc.pdf", 0));
     assert!(!app.reading.images.contains(&key));
-    assert!(app.pdf.reserved.is_empty());
+    assert!(app.reading.images.pdf_bytes() == 0);
     drop(app.view());
 }
 
@@ -542,6 +548,198 @@ fn an_unparseable_pdf_embed_shows_the_card() {
         app.reading.pdf_info.get("doc.pdf"),
         Some(crate::reading::PdfInfo::Failed)
     ));
-    assert!(app.pdf.reserved.is_empty());
+    assert!(app.reading.images.pdf_bytes() == 0);
     drop(app.view());
+}
+
+/// WP-R1: the width a PDF page key was rendered at.
+fn key_width(key: &str) -> u32 {
+    key.rsplit('@')
+        .next()
+        .and_then(|w| w.parse().ok())
+        .expect("page key width")
+}
+
+/// WP-R1: completes every render tab `view` has in flight with a fake bitmap of the projected
+/// size (Letter pages), until nothing is left in flight.
+fn settle_renders(app: &mut App, view: u64) {
+    use crate::message::PdfTabMsg;
+    for _ in 0..64 {
+        let Some(v) = app.pdf.views.get(&view) else {
+            return;
+        };
+        let pending: Vec<(usize, String)> = v
+            .pages
+            .iter()
+            .chain(v.upgrading.iter())
+            .map(|(p, k)| (*p, k.clone()))
+            .filter(|(_, k)| !app.reading.images.contains(k))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        for (page, key) in pending {
+            let w = key_width(&key);
+            let bytes = crate::pdf::projected_bytes(LETTER, w);
+            let d = crate::image_cache::Decoded {
+                handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]),
+                width: w,
+                height: (bytes / 4 / w as usize) as u32,
+                bytes,
+            };
+            let _ = app.send(Message::PdfTab(PdfTabMsg::Rendered {
+                path: "doc.pdf".into(),
+                view,
+                page,
+                key,
+                result: Ok(d),
+            }));
+        }
+    }
+    panic!("renders never settled");
+}
+
+const LETTER: (f32, f32) = (612.0, 792.0);
+
+/// WP-R1 (P1): at a 1900 px pane over the 64 MiB budget the shown set spans six Letter pages
+/// (only three fit at full width); the visible pages — the middle of the shown set — still
+/// render at the full decode width, whatever order the sensors report in.
+#[test]
+fn visible_pdf_pages_render_at_full_width_under_budget_pressure() {
+    use crate::message::PdfTabMsg;
+    let pdf = crate::pdf::synthetic_pdf(6, 612, 792);
+    let (_tmp, _d, mut app) = setup(&[("doc.pdf", &pdf)], false);
+    app.reading.images = crate::image_cache::ImageCache::with_budget(64 << 20);
+    open(&mut app, "doc.pdf");
+    let id = app.active_tab().expect("tab").id;
+    pdf_opened(&mut app, "doc.pdf", &pdf);
+    for page in 0..6 {
+        let _ = app.send(Message::PdfTab(PdfTabMsg::PageShown {
+            path: "doc.pdf".into(),
+            view: id,
+            page,
+            width: 1900.0,
+        }));
+    }
+    settle_renders(&mut app, id);
+    let v = app.pdf.views.get(&id).expect("view");
+    for page in [2, 3] {
+        let key = v.pages.get(&page).expect("visible page admitted");
+        assert_eq!(key_width(key), 1920, "page {page}: {key}");
+    }
+}
+
+/// WP-R1 (review P1): a page admitted below its planned width re-renders at full width once
+/// farther pages leave view, and its smaller bitmap is dropped.
+#[test]
+fn a_downscaled_pdf_page_upgrades_when_room_frees() {
+    use crate::message::PdfTabMsg;
+    let pdf = crate::pdf::synthetic_pdf(6, 612, 792);
+    let (_tmp, _d, mut app) = setup(&[("doc.pdf", &pdf)], false);
+    app.reading.images = crate::image_cache::ImageCache::with_budget(64 << 20);
+    open(&mut app, "doc.pdf");
+    let id = app.active_tab().expect("tab").id;
+    pdf_opened(&mut app, "doc.pdf", &pdf);
+    for page in 0..6 {
+        let _ = app.send(Message::PdfTab(PdfTabMsg::PageShown {
+            path: "doc.pdf".into(),
+            view: id,
+            page,
+            width: 1900.0,
+        }));
+    }
+    settle_renders(&mut app, id);
+    let small = app.pdf.views[&id].pages[&4].clone();
+    assert!(key_width(&small) < 1920, "{small}");
+    for page in [0, 1, 5] {
+        let _ = app.send(Message::PdfTab(PdfTabMsg::PageHidden {
+            path: "doc.pdf".into(),
+            view: id,
+            page,
+        }));
+    }
+    assert_eq!(
+        app.pdf.views[&id].pages[&4], small,
+        "shown until the upgrade lands"
+    );
+    settle_renders(&mut app, id);
+    let v = &app.pdf.views[&id];
+    for page in [2, 3, 4] {
+        assert_eq!(key_width(&v.pages[&page]), 1920, "page {page}");
+    }
+    assert!(v.upgrading.is_empty());
+    assert!(
+        !app.reading.images.contains(&small),
+        "the smaller key is dropped"
+    );
+    assert!(app.reading.images.pdf_bytes() <= app.reading.images.budget());
+}
+
+/// WP-R1 (review E3, audit B1): PDF accounting lives in the cache — a reservation becomes the
+/// resident entry's bytes on load (several completed batches all count), a shared key counts
+/// once, and the last owner's release frees an outstanding reservation.
+#[test]
+fn pdf_page_accounting_spans_completed_batches_and_releases() {
+    use crate::image_cache::{Decoded, ImageCache, view_owner};
+    let decoded = |bytes: usize| Decoded {
+        handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]),
+        width: 1,
+        height: 1,
+        bytes,
+    };
+    let mut cache = ImageCache::with_budget(1 << 20);
+    let tab = view_owner("doc.pdf", 1);
+    for (i, batch) in [["p1", "p2"], ["p3", "p4"]].iter().enumerate() {
+        for k in batch {
+            assert!(cache.show(&tab, k));
+            cache.reserve(k, 1000);
+        }
+        // Shown by a second view too: still one reservation.
+        assert!(!cache.show(&view_owner("doc.pdf", 2), batch[0]));
+        assert_eq!(cache.pdf_bytes(), 2000 * (i + 1));
+        for k in batch {
+            assert!(cache.loaded(k, Some(decoded(1000))));
+        }
+        assert_eq!(cache.pdf_bytes(), 2000 * (i + 1), "batch {i} resident");
+    }
+    assert_eq!(
+        crate::pdf::admit((10.0, 10.0), 64.0, cache.pdf_bytes(), 4500),
+        None,
+        "admission reads resident pages, not only pending ones"
+    );
+    // An image (not a PDF page) never counts.
+    assert!(cache.show("a.md", "img.png"));
+    assert!(cache.loaded("img.png", Some(decoded(500))));
+    assert_eq!(cache.pdf_bytes(), 4000);
+    // Outstanding reservation released with its owner; the late load is dropped.
+    assert!(cache.show(&tab, "p5"));
+    cache.reserve("p5", 1000);
+    assert_eq!(cache.pdf_bytes(), 5000);
+    cache.release_owner("doc.pdf");
+    assert_eq!(cache.pdf_bytes(), 0);
+    assert!(!cache.loaded("p5", Some(decoded(1000))));
+    assert_eq!(cache.pdf_bytes(), 0);
+}
+
+/// WP-R1 (review E5): renaming a note releases its inline PDF embed state and pins.
+#[test]
+fn renaming_a_note_releases_its_pdf_embeds() {
+    let (_tmp, d, mut app, pdf, view) = embed_setup(b"![[doc.pdf#page=2]]\n");
+    embed_shown(&mut app, view, 1, 300.0);
+    embed_doc_opened(&mut app, &pdf);
+    let key = crate::app::pdf_tab::page_key("doc.pdf", 1, crate::image_cache::decode_width(300.0));
+    assert!(app.reading.images.is_reserved(&key));
+    app.reading
+        .pdf_failed
+        .entry("A.md".into())
+        .or_default()
+        .insert(("doc.pdf".into(), 0));
+    let moved = d.daemon_move("A.md", "B.md").expect("move");
+    for n in moved {
+        let _ = app.send(Message::Status(StatusMsg::Notification(n)));
+    }
+    assert!(!app.reading.pdf_embeds.keys().any(|(n, _)| n == "A.md"));
+    assert!(!app.reading.pdf_failed.contains_key("A.md"));
+    assert!(!app.reading.images.is_reserved(&key));
+    assert_eq!(app.reading.images.pdf_bytes(), 0);
 }

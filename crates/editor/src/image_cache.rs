@@ -155,6 +155,9 @@ struct Entry {
     bytes: usize,
     last_used: u64,
     owners: HashSet<String>,
+    /// A PDF page bitmap admitted under [`ImageCache::reserve`]: counted by
+    /// [`ImageCache::pdf_bytes`] while resident (WP-R1, review E3).
+    pdf: bool,
 }
 
 /// The cache.
@@ -166,6 +169,10 @@ pub struct ImageCache {
     entries: HashMap<String, Entry>,
     /// Keys with a load in flight, and who asked.
     pending: HashMap<String, HashSet<String>>,
+    /// WP-R1 (review E3): projected bytes of PDF page loads in flight, by key. A reservation
+    /// lives while someone waits for the load; [`Self::loaded`] transfers it to the resident
+    /// entry, and [`Self::hide`] / [`Self::retain_owner`] release it with the last waiter.
+    reserved: HashMap<String, usize>,
     /// Header-read intrinsic sizes by key (plan round-5 WP-2).
     dims: HashMap<String, Dims>,
 }
@@ -194,6 +201,7 @@ impl ImageCache {
             tick: 0,
             entries: HashMap::new(),
             pending: HashMap::new(),
+            reserved: HashMap::new(),
             dims: HashMap::new(),
         }
     }
@@ -250,9 +258,38 @@ impl ImageCache {
         self.entries.get(key).map_or(0, |e| e.owners.len())
     }
 
-    /// Plan round-15 WP-3: whether a load of `key` is in flight with someone still waiting.
-    pub fn waiting(&self, key: &str) -> bool {
-        self.pending.get(key).is_some_and(|w| !w.is_empty())
+    /// WP-R1 (review E3): reserves `bytes` for the PDF page load of `key` just started (a
+    /// [`Self::show`] that returned `true`); ignored when nobody waits for `key`.
+    pub fn reserve(&mut self, key: &str, bytes: usize) {
+        if self.pending.get(key).is_some_and(|w| !w.is_empty()) {
+            self.reserved.insert(key.to_owned(), bytes);
+        }
+    }
+
+    /// WP-R1 (review E3, audit B1): the bytes PDF page admission counts — every resident
+    /// admitted PDF page plus every outstanding reservation, each key once.
+    pub fn pdf_bytes(&self) -> usize {
+        let resident: usize = self
+            .entries
+            .values()
+            .filter(|e| e.pdf)
+            .map(|e| e.bytes)
+            .sum();
+        resident + self.reserved.values().sum::<usize>()
+    }
+
+    /// The bytes [`Self::pdf_bytes`] counts for `key` (0 when it counts none).
+    pub fn pdf_bytes_of(&self, key: &str) -> usize {
+        match (self.reserved.get(key), self.entries.get(key)) {
+            (Some(&b), _) => b,
+            (None, Some(e)) if e.pdf => e.bytes,
+            _ => 0,
+        }
+    }
+
+    /// Whether a PDF page load of `key` is reserved (in flight with someone waiting).
+    pub fn is_reserved(&self, key: &str) -> bool {
+        self.reserved.contains_key(key)
     }
 
     /// Whether `key` is cached.
@@ -284,6 +321,9 @@ impl ImageCache {
     pub fn hide(&mut self, owner: &str, key: &str) {
         if let Some(w) = self.pending.get_mut(key) {
             w.remove(owner);
+            if w.is_empty() {
+                self.reserved.remove(key);
+            }
         }
         let release = match self.entries.get_mut(key) {
             Some(e) => {
@@ -308,6 +348,9 @@ impl ImageCache {
         for (k, w) in &mut self.pending {
             if !keep.contains(k) {
                 w.retain(|o| !owned_by(o, owner));
+                if w.is_empty() {
+                    self.reserved.remove(k);
+                }
             }
         }
         let drop: Vec<String> = self
@@ -329,6 +372,8 @@ impl ImageCache {
     pub fn loaded(&mut self, key: &str, decoded: Option<Decoded>) -> bool {
         crate::memory::touch();
         let owners = self.pending.remove(key).unwrap_or_default();
+        // The reservation becomes the resident entry's bytes (or goes with a failed load).
+        let pdf = self.reserved.remove(key).is_some();
         let Some(d) = decoded else { return false };
         if owners.is_empty() {
             return false;
@@ -343,6 +388,7 @@ impl ImageCache {
                 bytes: d.bytes,
                 last_used: self.tick,
                 owners,
+                pdf,
             },
         );
         self.evict(key);

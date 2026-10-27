@@ -396,7 +396,7 @@ fn pdf_embed<'a>(
         _ => None,
     };
     let fill = |h: &iced::widget::image::Handle| -> Element<'a, Message> {
-        let img = image(h.clone()).width(Length::Fill);
+        let img = crate::pdf::page_image(h.clone());
         let mut c = container(img).width(Length::Fill);
         if let Some(w) = width {
             c = c.max_width(w as f32);

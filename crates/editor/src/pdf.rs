@@ -123,6 +123,45 @@ pub fn admit(page: (f32, f32), display: f32, reserved: usize, budget: usize) -> 
     (width >= MIN_RENDER_WIDTH).then_some(width)
 }
 
+/// WP-R1 (review P1): the order pages are admitted in — nearest the viewport first. The shown
+/// set is the viewport plus a symmetric sensor anticipate margin, so its middle is the viewport;
+/// ties go to the earlier page.
+pub fn nearest_first(shown: &std::collections::BTreeSet<usize>) -> Vec<usize> {
+    let (Some(&first), Some(&last)) = (shown.first(), shown.last()) else {
+        return Vec::new();
+    };
+    let mid = first + last;
+    let mut order: Vec<usize> = shown.iter().copied().collect();
+    order.sort_by_key(|&p| ((2 * p).abs_diff(mid), p));
+    order
+}
+
+/// WP-R1 (review P1): the widths to render `pages` (sizes in points, already in
+/// [`nearest_first`] order) at for a pane `display` px wide, given `other` PDF bytes held
+/// outside this plan and the cache `budget`. Each page in turn takes [`admit`]'s width against
+/// what the earlier ones took, so pressure costs the farthest pages first.
+pub fn plan(pages: &[(f32, f32)], display: f32, other: usize, budget: usize) -> Vec<Option<u32>> {
+    let mut used = other;
+    pages
+        .iter()
+        .map(|&size| {
+            let w = admit(size, display, used, budget)?;
+            used += projected_bytes(size, w);
+            Some(w)
+        })
+        .collect()
+}
+
+/// WP-R1 (review P1): a page bitmap (or its placeholder) drawn expanding to its slot width,
+/// whatever its pixel width — iced's non-expanding image keeps a narrower bitmap at its pixel
+/// size (`iced_widget-0.14.2/src/image.rs:185-235`), while expanding it scales to the slot with
+/// the page's aspect, so a placeholder and any render of the page lay out at the same height.
+pub fn page_image(h: Handle) -> iced::widget::Image<Handle> {
+    iced::widget::image(h)
+        .width(iced::Length::Fill)
+        .expand(true)
+}
+
 /// Test support: a minimal valid PDF of `pages` pages, each `w` × `h` points, with one filled
 /// rectangle per page (hand-written objects and xref; no dependency).
 pub fn synthetic_pdf(pages: usize, w: u32, h: u32) -> Vec<u8> {
@@ -221,6 +260,36 @@ mod tests {
         // Half the room left: a smaller width again, still within the remainder.
         let w2 = admit(A4, 2048.0, budget / 2, budget).expect("fits the rest");
         assert!(w2 < w && projected_bytes(A4, w2) <= budget / 2);
+    }
+
+    /// WP-R1 (review P1): six Letter pages shown at a 1900 px pane over 64 MiB — only three fit
+    /// at full width, and the middle (visible) pages take them.
+    #[test]
+    fn the_visible_pages_are_planned_first_at_full_width() {
+        let shown: std::collections::BTreeSet<usize> = (0..6).collect();
+        let order = nearest_first(&shown);
+        assert_eq!(order, [2, 3, 1, 4, 0, 5]);
+        let letter = (612.0, 792.0);
+        let widths = plan(&[letter; 6], 1900.0, 0, 64 << 20);
+        assert_eq!(widths[..3], [Some(1920); 3], "{widths:?}");
+        assert!(widths[3].is_some_and(|w| w < 1920), "{widths:?}");
+        assert_eq!(widths[4..], [None, None], "{widths:?}");
+        // Room freed (the far pages left view): the downscaled page plans at full width.
+        assert_eq!(plan(&[letter; 3], 1900.0, 0, 64 << 20), [Some(1920); 3]);
+    }
+
+    /// WP-R1 (review P1): a page bitmap narrower than its slot lays out at the slot width, with
+    /// the bitmap's aspect (iced's null renderer measures every image 100 × 100).
+    #[test]
+    fn a_narrow_page_bitmap_expands_to_its_slot() {
+        use iced::advanced::Widget;
+        use iced::advanced::layout::Limits;
+        use iced::advanced::widget::Tree;
+        let mut img = page_image(Handle::from_rgba(1, 1, vec![0; 4]));
+        let limits = Limits::new(iced::Size::ZERO, iced::Size::new(1900.0, f32::INFINITY));
+        let node =
+            Widget::<(), iced::Theme, ()>::layout(&mut img, &mut Tree::empty(), &(), &limits);
+        assert_eq!(node.size(), iced::Size::new(1900.0, 1900.0));
     }
 
     /// Audit item 5: RSS for 20 rendered pages through the cache path (run with

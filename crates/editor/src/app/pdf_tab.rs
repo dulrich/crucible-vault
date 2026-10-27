@@ -5,8 +5,10 @@
 //! width. Each page is a sensor: a page coming within the near window (its anticipate margin)
 //! is pinned in the shared [`ImageCache`] for this tab ([`image_cache::view_owner`]) under
 //! [`page_key`] and rendered off the UI thread ([`crate::pdf::render_page`]); leaving it
-//! unpins (and so releases) it. At most [`MAX_INFLIGHT`] renders run per tab, and every render
-//! passes [`crate::pdf::admit`] against the bytes reserved for PDF pages (audit E1).
+//! unpins (and so releases) it. At most [`MAX_INFLIGHT`] renders run per tab. Widths come from
+//! [`crate::pdf::plan`] over the shown pages nearest the viewport first, against the PDF bytes
+//! the cache accounts ([`ImageCache::pdf_bytes`], WP-R1); a page held below its planned width is
+//! upgraded (the old bitmap shows until the new one lands), one held above it is released.
 //!
 //! [`ImageCache`]: crate::image_cache::ImageCache
 
@@ -57,9 +59,12 @@ pub struct PdfView {
     pub shown: BTreeSet<usize>,
     /// Pages pinned (or loading) for this tab, and their cache key.
     pub pages: BTreeMap<usize, String>,
-    /// Pages whose render this tab started and has not seen finish.
-    pub inflight: BTreeSet<usize>,
-    /// Pages refused by admission or failed; retried after a page leaves view.
+    /// WP-R1: pages re-rendering at a larger planned width, and the new key (pinned too); it
+    /// replaces the `pages` key when it lands.
+    pub upgrading: BTreeMap<usize, String>,
+    /// Pages whose render this tab started and has not seen finish, and that render's key.
+    pub inflight: BTreeMap<usize, String>,
+    /// Pages whose render failed; retried after a page leaves view.
     pub refused: BTreeSet<usize>,
 }
 
@@ -68,25 +73,17 @@ pub struct PdfView {
 pub struct PdfTabs {
     pub docs: HashMap<String, PdfDoc>,
     pub views: HashMap<u64, PdfView>,
-    /// Projected bytes per PDF page key pinned or in flight (audit E1 accounting).
-    pub reserved: HashMap<String, usize>,
     /// Plan round-15 WP-4: PDF path -> 0-based page a click on an inline embed asked the tab to
     /// scroll to (consumed once the tab has a laid-out width).
     pub goto: HashMap<String, usize>,
 }
 
-impl PdfTabs {
-    /// Bytes reserved for PDF pages.
-    pub fn reserved_bytes(&self) -> usize {
-        self.reserved.values().sum()
-    }
-}
-
-/// Drops `key`'s reservation once the cache neither holds nor awaits it.
-fn settle(reserved: &mut HashMap<String, usize>, cache: &image_cache::ImageCache, key: &str) {
-    if !cache.contains(key) && !cache.waiting(key) {
-        reserved.remove(key);
-    }
+/// The width page key `key` ([`page_key`]) was rendered at.
+fn key_width(key: &str) -> u32 {
+    key.rsplit('@')
+        .next()
+        .and_then(|w| w.parse().ok())
+        .unwrap_or(0)
 }
 
 /// The scrollable id of PDF tab `view`'s page column.
@@ -214,10 +211,13 @@ impl App {
                 };
                 v.shown.remove(&page);
                 v.refused.clear();
-                if let Some(key) = v.pages.remove(&page) {
-                    let cache = &mut self.reading.images;
-                    cache.hide(&image_cache::view_owner(&path, view), &key);
-                    settle(&mut self.pdf.reserved, cache, &key);
+                v.inflight.remove(&page);
+                let owner = image_cache::view_owner(&path, view);
+                for key in [v.pages.remove(&page), v.upgrading.remove(&page)]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.reading.images.hide(&owner, &key);
                 }
                 return self.pump_pdf(view);
             }
@@ -240,20 +240,28 @@ impl App {
                         Some(e)
                     }
                 };
-                settle(&mut self.pdf.reserved, cache, &key);
-                if let Some(e) = failed {
-                    if let Some(PdfDoc::Ready { error, .. }) = self.pdf.docs.get_mut(&path) {
-                        *error = Some(format!("page {}: {e}", page + 1));
+                if let Some(e) = &failed
+                    && let Some(PdfDoc::Ready { error, .. }) = self.pdf.docs.get_mut(&path)
+                {
+                    *error = Some(format!("page {}: {e}", page + 1));
+                }
+                if let Some(v) = self.pdf.views.get_mut(&view) {
+                    if v.inflight.get(&page) == Some(&key) {
+                        v.inflight.remove(&page);
                     }
-                    if let Some(v) = self.pdf.views.get_mut(&view)
-                        && v.pages.get(&page) == Some(&key)
-                    {
+                    let owner = image_cache::view_owner(&path, view);
+                    if v.upgrading.get(&page) == Some(&key) {
+                        // An upgrade landed: it replaces the smaller bitmap, which is dropped.
+                        v.upgrading.remove(&page);
+                        if failed.is_some() {
+                            v.refused.insert(page);
+                        } else if let Some(old) = v.pages.insert(page, key) {
+                            cache.hide(&owner, &old);
+                        }
+                    } else if failed.is_some() && v.pages.get(&page) == Some(&key) {
                         v.pages.remove(&page);
                         v.refused.insert(page);
                     }
-                }
-                if let Some(v) = self.pdf.views.get_mut(&view) {
-                    v.inflight.remove(&page);
                 }
                 return self.pump_pdf(view);
             }
@@ -289,7 +297,6 @@ impl App {
                 if let Some(key) = v.pins.remove(&(pdf, page)) {
                     let cache = &mut self.reading.images;
                     cache.hide(&image_cache::view_owner(&note, view), &key);
-                    settle(&mut self.pdf.reserved, cache, &key);
                 }
                 return self.pump_embeds(&note, view);
             }
@@ -321,7 +328,6 @@ impl App {
                         }
                     }
                 }
-                settle(&mut self.pdf.reserved, &self.reading.images, &key);
                 return self.pump_embeds(&note, view);
             }
             // The existing open rules (focus an open tab, else a new one), then the scroll.
@@ -362,8 +368,8 @@ impl App {
     }
 
     /// Plan round-15 WP-4: starts the renders of tab `view`'s shown inline embeds in note
-    /// `note` that have none, through the same admission rule ([`pdf::admit`]) and
-    /// reservation map ([`PdfTabs::reserved`]) as the PDF tab, so there is one accounting. An
+    /// `note` that have none, through the same admission rule ([`pdf::admit`]) and cache
+    /// accounting ([`image_cache::ImageCache::pdf_bytes`]) as the PDF tab. An
     /// embed whose page is out of range or refused is marked failed (it draws the file card);
     /// a document not yet loaded is opened (its `Opened` pumps again).
     fn pump_embeds(&mut self, note: &str, view: u64) -> Task<Message> {
@@ -392,13 +398,8 @@ impl App {
                 }
             };
             let cache = &mut self.reading.images;
-            // Reservations of keys the cache evicted meanwhile no longer count.
-            self.pdf
-                .reserved
-                .retain(|k, _| cache.contains(k) || cache.waiting(k));
             let admitted = size.and_then(|size| {
-                let used: usize = self.pdf.reserved.values().sum();
-                pdf::admit(size, display, used, cache.budget()).map(|w| (size, w))
+                pdf::admit(size, display, cache.pdf_bytes(), cache.budget()).map(|w| (size, w))
             });
             let (Some(bytes), Some((size, width))) = (bytes, admitted) else {
                 self.reading
@@ -414,9 +415,7 @@ impl App {
                 ev.pins.insert((pdf.clone(), page), key.clone());
             }
             if start {
-                self.pdf
-                    .reserved
-                    .insert(key.clone(), pdf::projected_bytes(size, width));
+                cache.reserve(&key, pdf::projected_bytes(size, width));
                 let note = note.to_owned();
                 tasks.push(Task::perform(
                     async move {
@@ -474,15 +473,13 @@ impl App {
         )
     }
 
-    /// Starts renders for `view`'s shown pages that have none, within [`MAX_INFLIGHT`] and
-    /// the admission rule ([`pdf::admit`], audit E1).
+    /// Starts renders for `view`'s shown pages, nearest the viewport first, at the widths
+    /// [`pdf::plan`] gives them against the cache's PDF bytes held outside this tab (WP-R1):
+    /// a page held above its planned width is released first (a farther page yields its room),
+    /// then pages without a render, or held below their planned width (the upgrade), start one
+    /// within [`MAX_INFLIGHT`].
     fn pump_pdf(&mut self, view: u64) -> Task<Message> {
-        let PdfTabs {
-            docs,
-            views,
-            reserved,
-            goto: _,
-        } = &mut self.pdf;
+        let PdfTabs { docs, views, .. } = &mut self.pdf;
         let Some(v) = views.get_mut(&view) else {
             return Task::none();
         };
@@ -491,31 +488,64 @@ impl App {
         };
         let cache = &mut self.reading.images;
         let owner = image_cache::view_owner(&v.path, view);
-        let wanted: Vec<usize> = v
-            .shown
-            .iter()
-            .copied()
-            .filter(|p| !v.pages.contains_key(p) && !v.refused.contains(p))
+        let order: Vec<(usize, (f32, f32))> = pdf::nearest_first(&v.shown)
+            .into_iter()
+            .filter_map(|p| pages.get(p).map(|&s| (p, s)))
             .collect();
+        let own: usize = v
+            .pages
+            .values()
+            .chain(v.upgrading.values())
+            .map(|k| cache.pdf_bytes_of(k))
+            .sum();
+        let other = cache.pdf_bytes().saturating_sub(own);
+        let sizes: Vec<(f32, f32)> = order.iter().map(|&(_, s)| s).collect();
+        let plan = pdf::plan(&sizes, v.width, other, cache.budget());
+        // Release what the plan shrinks or refuses.
+        for (&(page, _), want) in order.iter().zip(&plan) {
+            let held = v.upgrading.get(&page).or_else(|| v.pages.get(&page));
+            if v.refused.contains(&page)
+                || !held.is_some_and(|k| want.is_none_or(|w| w < key_width(k)))
+            {
+                continue;
+            }
+            v.inflight.remove(&page);
+            for key in [v.pages.remove(&page), v.upgrading.remove(&page)]
+                .into_iter()
+                .flatten()
+            {
+                cache.hide(&owner, &key);
+            }
+        }
         let mut tasks = Vec::new();
-        for page in wanted {
+        for (&(page, size), want) in order.iter().zip(&plan) {
+            let Some(width) = *want else { continue };
+            let held = v.upgrading.get(&page).or_else(|| v.pages.get(&page));
+            if v.refused.contains(&page) || held.is_some_and(|k| key_width(k) >= width) {
+                continue;
+            }
             if v.inflight.len() >= MAX_INFLIGHT {
                 break;
             }
-            let Some(&size) = pages.get(page) else {
-                continue;
-            };
-            let used: usize = reserved.values().sum();
-            let Some(width) = pdf::admit(size, v.width, used, cache.budget()) else {
-                v.refused.insert(page);
-                continue;
-            };
             let key = page_key(&v.path, page, width);
             let start = cache.show(&owner, &key);
-            v.pages.insert(page, key.clone());
+            if v.pages.contains_key(&page) {
+                if let Some(old) = v.upgrading.insert(page, key.clone()) {
+                    cache.hide(&owner, &old);
+                }
+                if cache.contains(&key) {
+                    // Already resident (another view's render): the upgrade is immediate.
+                    v.upgrading.remove(&page);
+                    if let Some(old) = v.pages.insert(page, key.clone()) {
+                        cache.hide(&owner, &old);
+                    }
+                }
+            } else {
+                v.pages.insert(page, key.clone());
+            }
             if start {
-                reserved.insert(key.clone(), pdf::projected_bytes(size, width));
-                v.inflight.insert(page);
+                cache.reserve(&key, pdf::projected_bytes(size, width));
+                v.inflight.insert(page, key.clone());
                 let bytes = Arc::clone(bytes);
                 let path = v.path.clone();
                 tasks.push(Task::perform(
@@ -546,9 +576,8 @@ impl App {
         };
         let cache = &mut self.reading.images;
         let owner = image_cache::view_owner(path, view);
-        for key in v.pages.values() {
+        for key in v.pages.values().chain(v.upgrading.values()) {
             cache.hide(&owner, key);
-            settle(&mut self.pdf.reserved, cache, key);
         }
     }
 
@@ -569,7 +598,7 @@ impl App {
 
     /// The PDF tab body: a "page N / M" bar with "Open externally", then the pages.
     pub(super) fn pdf_body<'a>(&'a self, path: &'a str, view: u64) -> Element<'a, Message> {
-        use iced::widget::{Column, image, scrollable, sensor};
+        use iced::widget::{Column, scrollable, sensor};
         let t = self.tokens;
         let name = path.rsplit('/').next().unwrap_or(path);
         let faint = |s: String| text(s).color(t.text_faint.to_color());
@@ -630,7 +659,7 @@ impl App {
                 .and_then(|k| self.reading.images.get(k))
                 .or_else(|| placeholders.get(i));
             let body: Element<'a, Message> = match handle {
-                Some(h) => image(h.clone()).width(Length::Fill).into(),
+                Some(h) => pdf::page_image(h.clone()).into(),
                 None => Space::new().width(Length::Fill).height(100).into(),
             };
             let est_w = if width > 0.0 { width } else { 800.0 };

@@ -542,9 +542,10 @@ impl ReadingStore {
     }
 
     /// `from` was renamed (its [`DocReading`] moved with the [`crate::app::OpenDoc`]): the
-    /// `from` image pins are released (the next render re-pins under the new path).
+    /// `from` image pins and inline PDF embed state are released (the next render re-pins
+    /// under the new path), as [`Self::closed`] does (WP-R1, review E5).
     pub fn renamed(&mut self, from: &str) {
-        self.images.release_owner(from);
+        self.closed(from);
     }
 
     /// A filename edit is pending (the breadcrumb's input holds unsubmitted text); the Escape
