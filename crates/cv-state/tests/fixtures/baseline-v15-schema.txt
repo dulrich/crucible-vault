@@ -1,4 +1,4 @@
-user_version=11
+user_version=15
 index|jobs_claim|jobs|CREATE INDEX jobs_claim ON jobs(status, lane, id)
 index|jobs_dedupe|jobs|CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL
 index|jobs_settled|jobs|CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL
@@ -10,17 +10,34 @@ index|sqlite_autoindex_image_descriptions_1|image_descriptions|NULL
 index|sqlite_autoindex_job_step_checkpoints_1|job_step_checkpoints|NULL
 index|sqlite_autoindex_jobs_1|jobs|NULL
 index|sqlite_autoindex_link_records_1|link_records|NULL
+index|sqlite_autoindex_mail_boilerplate_1|mail_boilerplate|NULL
+index|sqlite_autoindex_mail_boilerplate_seen_1|mail_boilerplate_seen|NULL
 index|sqlite_autoindex_schedule_runs_1|schedule_runs|NULL
 index|sqlite_autoindex_service_health_1|service_health|NULL
 index|sqlite_autoindex_tracker_items_1|tracker_items|NULL
 index|tracker_items_day|tracker_items|CREATE INDEX tracker_items_day ON tracker_items(day)
 index|tracker_items_source_seen|tracker_items|CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key, first_seen_ms)
+index|tracker_items_url|tracker_items|CREATE INDEX tracker_items_url ON tracker_items(url)
+index|trash_entries_path|trash_entries|CREATE INDEX trash_entries_path ON trash_entries(location, trash_path)
+index|trash_entries_trashed|trash_entries|CREATE INDEX trash_entries_trashed ON trash_entries(trashed_ms)
 table|api_usage|api_usage|CREATE TABLE api_usage (
     service  TEXT NOT NULL,
     day      TEXT NOT NULL,
     units    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (service, day)
 )
+table|dup_labels|dup_labels|CREATE TABLE dup_labels (
+         id                         INTEGER PRIMARY KEY,
+         keep_path                  TEXT NOT NULL,
+         other_path                 TEXT NOT NULL,
+         keep_identity              TEXT,
+         other_identity             TEXT,
+         containment_keep_in_other  REAL NOT NULL,
+         containment_other_in_keep  REAL NOT NULL,
+         identity_match             INTEGER NOT NULL,
+         verdict                    TEXT NOT NULL CHECK (verdict IN ('not-duplicates', 'keep')),
+         at_ms                      INTEGER NOT NULL
+     )
 table|ignored_ids|ignored_ids|CREATE TABLE ignored_ids (
     kind    TEXT NOT NULL,
     id      TEXT NOT NULL,
@@ -81,6 +98,17 @@ table|link_records|link_records|CREATE TABLE link_records (
     yt_video_id          TEXT,
     x_status_id          TEXT
 )
+table|mail_boilerplate|mail_boilerplate|CREATE TABLE mail_boilerplate (
+         source_key  TEXT NOT NULL,
+         line_key    INTEGER NOT NULL,
+         count       INTEGER NOT NULL,
+         PRIMARY KEY (source_key, line_key)
+     )
+table|mail_boilerplate_seen|mail_boilerplate_seen|CREATE TABLE mail_boilerplate_seen (
+         source_key  TEXT NOT NULL,
+         message_id  TEXT NOT NULL,
+         PRIMARY KEY (source_key, message_id)
+     )
 table|schedule_runs|schedule_runs|CREATE TABLE schedule_runs (
     action_id    TEXT PRIMARY KEY,
     last_run_ms  INTEGER NOT NULL
@@ -106,6 +134,19 @@ table|tracker_items|tracker_items|CREATE TABLE tracker_items (
     day            TEXT NOT NULL,
     outcome        TEXT NOT NULL CHECK (outcome IN ('line', 'note', 'ignored', 'skipped')),
     score          REAL,
-    full_body      INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
+    full_body      INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT, access TEXT, complete INTEGER, full_word_count INTEGER,
     PRIMARY KEY (source_kind, source_key, item_id)
 )
+table|trash_entries|trash_entries|CREATE TABLE trash_entries (
+         id             INTEGER PRIMARY KEY,
+         location       TEXT NOT NULL CHECK (location IN ('vault', 'system')),
+         trash_path     TEXT NOT NULL,
+         original_path  TEXT NOT NULL,
+         trashed_ms     INTEGER NOT NULL,
+         bytes          INTEGER NOT NULL,
+         reason         TEXT NOT NULL
+             CHECK (reason IN ('deleted', 'replaced', 'note-attachment', 'orphan', 'seeded')),
+         mtime_ms       INTEGER,
+         inode          INTEGER,
+         info_name      TEXT
+     )

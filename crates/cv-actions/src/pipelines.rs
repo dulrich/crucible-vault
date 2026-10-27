@@ -661,7 +661,60 @@ mod tests {
     /// expected `sources.toml`) parses, with the migrated serial rows intact.
     #[test]
     fn migration_0007_output_parses() {
-        let text = include_str!("../../../deploy/migrations/fixtures/0007-expected/sources.toml");
+        let text = r#"[[blog]]
+name = "Some Blog"
+link = "https://blog.example/feed"
+
+[[newsletter]]
+name = "Letter"
+from = ["@letter.example"]
+works = true
+
+[[youtube]]
+channel = "Chan"
+id = "UC0"
+
+[[serial]]
+name = "Alpha Saga"
+short = "Alpha Saga"
+author = "Ann Writer"
+prefix = ["https://a.example/s/1", "https://a.example/s/1b"]
+kind = "fanfic"
+status = "active"
+
+[[serial]]
+name = "Beta Tale"
+short = "Beta Tale"
+author = "Bob"
+prefix = ["https://b.example/feed/", "https://b2.example/"]
+kind = "blog"
+
+[[serial]]
+name = "Delta Empty"
+short = "Delta Empty"
+kind = "fanfic"
+
+[[serial]]
+name = "Gamma"
+short = "Gamma"
+prefix = ["https://g.example/x"]
+kind = "fanfic"
+status = "complete"
+
+[[serial]]
+name = "Theta Shared"
+short = "Beta Tale"
+author = "Tess"
+prefix = ["https://t.example/s/9"]
+kind = "fanfic"
+
+[[serial]]
+name = "Zeta"
+short = "Zeta \"Q\" \\ T"
+author = "Zed"
+kind = "fanfic"
+status = "ignored"
+"#;
         let c = SourcesConfig::from_table(&text.parse::<toml::Table>().unwrap()).unwrap();
         let names: Vec<&str> = c.serial.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(

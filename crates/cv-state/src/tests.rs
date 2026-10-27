@@ -301,16 +301,16 @@ fn schema_dump(c: &rusqlite::Connection) -> String {
     format!("user_version={v}\n{}\n", rows.join("\n"))
 }
 
-/// D24: a fresh database gets exactly the schema the retired v1→v11 chain produced.
+/// D27: a fresh database gets exactly the schema the retired v11 baseline + v12–v15 chain produced.
 #[test]
-fn fresh_baseline_matches_the_v11_chain_schema() {
+fn fresh_baseline_matches_the_v15_chain_schema() {
     let c = rusqlite::Connection::open_in_memory().unwrap();
     c.execute_batch(migrate::BASELINE).unwrap();
     c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
         .unwrap();
     assert_eq!(
         schema_dump(&c),
-        include_str!("../tests/fixtures/baseline-v11-schema.txt")
+        include_str!("../tests/fixtures/baseline-v15-schema.txt")
     );
 }
 
@@ -333,7 +333,7 @@ fn baseline_database_opens_without_a_schema_write() {
     assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
 }
 
-/// D24: versions 1..=10 predate the 0.1.1 baseline and are refused, by writer and reader.
+/// D27: versions 1..=14 predate the 0.2.0 baseline and are refused, by writer and reader.
 #[test]
 fn pre_baseline_versions_are_refused() {
     for v in 1..migrate::BASELINE_VERSION {
@@ -345,12 +345,12 @@ fn pre_baseline_versions_are_refused() {
         }
         let err = StateDb::open(&p, 1, QueueConfig::default()).unwrap_err();
         assert!(
-            matches!(err, StateError::PreBaseline { found, baseline: 11 } if found == v),
+            matches!(err, StateError::PreBaseline { found, baseline: 15 } if found == v),
             "{err}"
         );
         let msg = err.to_string();
         assert!(
-            msg.contains(&format!("version {v} ")) && msg.contains("predates the 0.1.1 baseline"),
+            msg.contains(&format!("version {v} ")) && msg.contains("predates the 0.2.0 baseline"),
             "{msg}"
         );
         assert!(matches!(
@@ -358,37 +358,6 @@ fn pre_baseline_versions_are_refused() {
             Err(StateError::PreBaseline { .. })
         ));
     }
-}
-
-/// v11 → v12 (plan auto-intake-sprint WP-2): the completeness columns land NULL on existing rows.
-#[test]
-fn v11_database_migrates_to_v12_with_null_completeness() {
-    let mut c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch(migrate::BASELINE).unwrap();
-    c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
-        .unwrap();
-    c.execute_batch(
-        "INSERT INTO tracker_items (source_kind, source_key, item_id, first_seen_ms, day, outcome)
-         VALUES ('blog', 'k', 'p', 1, '2026-10-20', 'line')",
-    )
-    .unwrap();
-    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::latest_version());
-    let row: (Option<String>, Option<bool>, Option<i64>) = c
-        .query_row(
-            "SELECT access, complete, full_word_count FROM tracker_items",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(row, (None, None, None));
-    let idx: i64 = c
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name = 'tracker_items_url'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(idx, 1);
 }
 
 #[test]
@@ -1337,38 +1306,10 @@ fn tracker_items_with_note_lists_only_linked_rows() {
     assert_eq!(got, vec!["a", "c"]);
 }
 
-/// v11 → v13 (plan round-10-feedback-todos WP-2): the boilerplate tables land empty.
+/// `dup_labels` round-trips a row.
 #[test]
-fn v11_database_migrates_to_v13_with_boilerplate_tables() {
-    let mut c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch(migrate::BASELINE).unwrap();
-    c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
-        .unwrap();
-    assert_eq!(migrate::latest_version(), 15);
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 15);
-    for t in ["mail_boilerplate", "mail_boilerplate_seen"] {
-        let n: i64 = c
-            .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 0, "{t}");
-    }
-}
-
-/// v13 → v14 (plan round-12-feedback-todos WP-7): `dup_labels` lands and round-trips a row.
-#[test]
-fn v13_database_migrates_to_v14_and_dup_labels_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("state.db");
-    {
-        let mut c = rusqlite::Connection::open(&p).unwrap();
-        c.execute_batch(migrate::BASELINE).unwrap();
-        for sql in &migrate::MIGRATIONS[..2] {
-            c.execute_batch(sql).unwrap();
-        }
-        c.pragma_update(None, "user_version", 13).unwrap();
-        assert_eq!(migrate::migrate(&mut c).unwrap(), 15);
-    }
-    let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+fn dup_labels_roundtrip() {
+    let (_d, mut s) = db();
     let l = crate::DupLabel {
         keep_path: "a.md".into(),
         other_path: "b.md".into(),
@@ -1398,23 +1339,29 @@ fn trash_entry(path: &str, reason: &str, at: i64) -> NewTrashEntry {
     }
 }
 
-/// v14 → v15 (plan tidiness-trash-orphans WP-1): `trash_entries` lands empty from a v14 database.
+/// A fresh database is created at the v15 baseline with the ledger and label tables present and empty.
 #[test]
-fn v14_database_migrates_to_v15_with_trash_entries() {
+fn fresh_database_is_created_at_v15() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("state.db");
-    {
-        let mut c = rusqlite::Connection::open(&p).unwrap();
-        c.execute_batch(migrate::BASELINE).unwrap();
-        for sql in &migrate::MIGRATIONS[..3] {
-            c.execute_batch(sql).unwrap();
-        }
-        c.pragma_update(None, "user_version", 14).unwrap();
-        assert_eq!(migrate::migrate(&mut c).unwrap(), 15);
-    }
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(migrate::BASELINE_VERSION, 15);
+    assert_eq!(migrate::latest_version(), 15);
     assert_eq!(s.schema_version().unwrap(), 15);
     assert!(s.trash_entries().unwrap().is_empty());
+    drop(s);
+    let c = rusqlite::Connection::open(&p).unwrap();
+    for t in [
+        "mail_boilerplate",
+        "mail_boilerplate_seen",
+        "dup_labels",
+        "trash_entries",
+    ] {
+        let n: i64 = c
+            .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "{t}");
+    }
 }
 
 /// The ledger accessors round-trip, refuse unknown spellings, and every mutation signals.

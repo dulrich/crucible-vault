@@ -1,14 +1,15 @@
-//! Forward-only, versioned migrations for `state.db`, from the 0.1.1 baseline (D24).
+//! Forward-only, versioned migrations for `state.db`, from the 0.2.0 baseline (D27).
 //!
 //! The schema is keyed on SQLite's `PRAGMA user_version`. A fresh database (version 0) is
-//! created directly at [`BASELINE_VERSION`] from [`BASELINE`], the schema the retired v1→v11
-//! chain produced (fixture `tests/fixtures/baseline-v11-schema.txt`), then brought forward by
-//! [`MIGRATIONS`]. A database at [`latest_version`] opens with no schema write. Versions
-//! `1..BASELINE_VERSION` predate the baseline and are refused with [`StateError::PreBaseline`]; a version newer than this build knows is
-//! refused with [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no
-//! down-migration and no "drop and rebuild" path. Later schema changes append to
-//! [`MIGRATIONS`]: entry `i` moves the database from `BASELINE_VERSION + i` to
-//! `BASELINE_VERSION + i + 1`, each inside its own transaction.
+//! created directly at [`BASELINE_VERSION`] (15) from [`BASELINE`], the schema the retired 0.1.1
+//! baseline (v11) plus its v12–v15 steps produced (fixture `tests/fixtures/baseline-v15-schema.txt`),
+//! then brought forward by [`MIGRATIONS`] (empty at the baseline). A database at [`latest_version`]
+//! opens with no schema write. Versions `1..BASELINE_VERSION` predate the baseline and are refused
+//! with [`StateError::PreBaseline`]; a version newer than this build knows is refused with
+//! [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no down-migration and
+//! no "drop and rebuild" path. Later schema changes append to [`MIGRATIONS`]: entry `i` moves the
+//! database from `BASELINE_VERSION + i` to `BASELINE_VERSION + i + 1`, each inside its own
+//! transaction.
 //!
 //! Crucible's store self-migrates via a meta-table version cookie
 //! (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/AGENTS.md:55`, `db/SqliteJobStore.ts`); we use
@@ -17,14 +18,54 @@
 use crate::error::{Result, StateError};
 use rusqlite::Connection;
 
-/// `user_version` of the 0.1.1 baseline schema.
-pub const BASELINE_VERSION: i64 = 11;
+/// `user_version` of the 0.2.0 baseline schema.
+pub const BASELINE_VERSION: i64 = 15;
 
-/// The 0.1.1 baseline schema (state.db v11). Byte-for-byte the `sqlite_master` the v1→v11
-/// chain produced, including the column order its `ALTER TABLE … ADD COLUMN` steps left —
-/// except the empty `sqlite_sequence` table a migrated database keeps after the chain dropped
-/// its only `AUTOINCREMENT` table (harmless; nothing reads it).
+/// The 0.2.0 baseline schema (state.db v15). Byte-for-byte the `sqlite_master` the v11 baseline
+/// plus its four post-baseline steps (v12–v15) produced, including the column order their
+/// `ALTER TABLE … ADD COLUMN` steps left (fixture `tests/fixtures/baseline-v15-schema.txt`).
 pub const BASELINE: &str = r"
+CREATE TABLE api_usage (
+    service  TEXT NOT NULL,
+    day      TEXT NOT NULL,
+    units    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (service, day)
+);
+CREATE TABLE dup_labels (
+         id                         INTEGER PRIMARY KEY,
+         keep_path                  TEXT NOT NULL,
+         other_path                 TEXT NOT NULL,
+         keep_identity              TEXT,
+         other_identity             TEXT,
+         containment_keep_in_other  REAL NOT NULL,
+         containment_other_in_keep  REAL NOT NULL,
+         identity_match             INTEGER NOT NULL,
+         verdict                    TEXT NOT NULL CHECK (verdict IN ('not-duplicates', 'keep')),
+         at_ms                      INTEGER NOT NULL
+     );
+CREATE TABLE ignored_ids (
+    kind    TEXT NOT NULL,
+    id      TEXT NOT NULL,
+    reason  TEXT NOT NULL DEFAULT '',
+    at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (kind, id)
+);
+CREATE TABLE image_descriptions (
+    md5               TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL,
+    narrative         TEXT NOT NULL,
+    extraction        TEXT NOT NULL,
+    description_hash  TEXT NOT NULL,
+    described_at      TEXT NOT NULL,
+    raw               TEXT NOT NULL
+);
+CREATE TABLE job_step_checkpoints (
+    job_id      TEXT NOT NULL,
+    step_index  INTEGER NOT NULL,
+    outcome     TEXT NOT NULL,
+    at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (job_id, step_index)
+);
 CREATE TABLE jobs (
     id              TEXT PRIMARY KEY,
     job_type        TEXT NOT NULL,
@@ -45,37 +86,6 @@ CREATE TABLE jobs (
     failure_kind    TEXT,
     notes           TEXT
 , cancel_requested INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE service_health (
-    service               TEXT PRIMARY KEY,
-    state                 TEXT NOT NULL,
-    failure_score         INTEGER NOT NULL,
-    open_count            INTEGER NOT NULL,
-    last_kind             TEXT,
-    last_reason           TEXT,
-    opened_at_ms          INTEGER,
-    retry_at_ms           INTEGER,
-    probe_acquired_at_ms  INTEGER
-);
-CREATE TABLE job_step_checkpoints (
-    job_id      TEXT NOT NULL,
-    step_index  INTEGER NOT NULL,
-    outcome     TEXT NOT NULL,
-    at_ms       INTEGER NOT NULL,
-    PRIMARY KEY (job_id, step_index)
-);
-CREATE TABLE schedule_runs (
-    action_id    TEXT PRIMARY KEY,
-    last_run_ms  INTEGER NOT NULL
-);
-CREATE TABLE image_descriptions (
-    md5               TEXT PRIMARY KEY,
-    kind              TEXT NOT NULL,
-    narrative         TEXT NOT NULL,
-    extraction        TEXT NOT NULL,
-    description_hash  TEXT NOT NULL,
-    described_at      TEXT NOT NULL,
-    raw               TEXT NOT NULL
-);
 CREATE TABLE link_records (
     canonical_url        TEXT PRIMARY KEY,
     url                  TEXT NOT NULL,
@@ -93,6 +103,32 @@ CREATE TABLE link_records (
     yt_video_id          TEXT,
     x_status_id          TEXT
 );
+CREATE TABLE mail_boilerplate (
+         source_key  TEXT NOT NULL,
+         line_key    INTEGER NOT NULL,
+         count       INTEGER NOT NULL,
+         PRIMARY KEY (source_key, line_key)
+     );
+CREATE TABLE mail_boilerplate_seen (
+         source_key  TEXT NOT NULL,
+         message_id  TEXT NOT NULL,
+         PRIMARY KEY (source_key, message_id)
+     );
+CREATE TABLE schedule_runs (
+    action_id    TEXT PRIMARY KEY,
+    last_run_ms  INTEGER NOT NULL
+);
+CREATE TABLE service_health (
+    service               TEXT PRIMARY KEY,
+    state                 TEXT NOT NULL,
+    failure_score         INTEGER NOT NULL,
+    open_count            INTEGER NOT NULL,
+    last_kind             TEXT,
+    last_reason           TEXT,
+    opened_at_ms          INTEGER,
+    retry_at_ms           INTEGER,
+    probe_acquired_at_ms  INTEGER
+);
 CREATE TABLE tracker_items (
     source_kind    TEXT NOT NULL,
     source_key     TEXT NOT NULL,
@@ -103,68 +139,10 @@ CREATE TABLE tracker_items (
     day            TEXT NOT NULL,
     outcome        TEXT NOT NULL CHECK (outcome IN ('line', 'note', 'ignored', 'skipped')),
     score          REAL,
-    full_body      INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
+    full_body      INTEGER, note_path TEXT, source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT, access TEXT, complete INTEGER, full_word_count INTEGER,
     PRIMARY KEY (source_kind, source_key, item_id)
 );
-CREATE TABLE ignored_ids (
-    kind    TEXT NOT NULL,
-    id      TEXT NOT NULL,
-    reason  TEXT NOT NULL DEFAULT '',
-    at_ms   INTEGER NOT NULL,
-    PRIMARY KEY (kind, id)
-);
-CREATE TABLE api_usage (
-    service  TEXT NOT NULL,
-    day      TEXT NOT NULL,
-    units    INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (service, day)
-);
-CREATE INDEX jobs_claim ON jobs(status, lane, id);
-CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL;
-CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL;
-CREATE INDEX link_records_x_status_id ON link_records(x_status_id);
-CREATE INDEX link_records_yt_video_id ON link_records(yt_video_id);
-CREATE INDEX tracker_items_day ON tracker_items(day);
-CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key, first_seen_ms);
-";
-
-/// Post-baseline steps (v12+). Later WPs append (never edit) entries.
-pub const MIGRATIONS: &[&str] = &[
-    // v12 (plan auto-intake-sprint WP-2): access/completeness per tracker item; url lookup.
-    "ALTER TABLE tracker_items ADD COLUMN access TEXT;
-     ALTER TABLE tracker_items ADD COLUMN complete INTEGER;
-     ALTER TABLE tracker_items ADD COLUMN full_word_count INTEGER;
-     CREATE INDEX tracker_items_url ON tracker_items(url);",
-    // v13 (plan round-10-feedback-todos WP-2): per-sender learned newsletter boilerplate lines
-    // (`line_key` = the cv-ingest FNV-1a 64 key as a signed integer) and the messages learned.
-    "CREATE TABLE mail_boilerplate (
-         source_key  TEXT NOT NULL,
-         line_key    INTEGER NOT NULL,
-         count       INTEGER NOT NULL,
-         PRIMARY KEY (source_key, line_key)
-     );
-     CREATE TABLE mail_boilerplate_seen (
-         source_key  TEXT NOT NULL,
-         message_id  TEXT NOT NULL,
-         PRIMARY KEY (source_key, message_id)
-     );",
-    // v14 (plan round-12-feedback-todos WP-7): one row per duplicate verdict, with its scores.
-    "CREATE TABLE dup_labels (
-         id                         INTEGER PRIMARY KEY,
-         keep_path                  TEXT NOT NULL,
-         other_path                 TEXT NOT NULL,
-         keep_identity              TEXT,
-         other_identity             TEXT,
-         containment_keep_in_other  REAL NOT NULL,
-         containment_other_in_keep  REAL NOT NULL,
-         identity_match             INTEGER NOT NULL,
-         verdict                    TEXT NOT NULL CHECK (verdict IN ('not-duplicates', 'keep')),
-         at_ms                      INTEGER NOT NULL
-     );",
-    // v15 (plan tidiness-trash-orphans WP-1): one row per trash move. `trash_path` is
-    // vault-relative (`.trash/…`) for `vault`, the name inside `Trash/files/` for `system`;
-    // `mtime_ms`/`inode`/`info_name` are the object identity checked before expiry (audit E1).
-    "CREATE TABLE trash_entries (
+CREATE TABLE trash_entries (
          id             INTEGER PRIMARY KEY,
          location       TEXT NOT NULL CHECK (location IN ('vault', 'system')),
          trash_path     TEXT NOT NULL,
@@ -177,9 +155,20 @@ pub const MIGRATIONS: &[&str] = &[
          inode          INTEGER,
          info_name      TEXT
      );
-     CREATE INDEX trash_entries_path ON trash_entries(location, trash_path);
-     CREATE INDEX trash_entries_trashed ON trash_entries(trashed_ms);",
-];
+CREATE INDEX jobs_claim ON jobs(status, lane, id);
+CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL;
+CREATE INDEX link_records_x_status_id ON link_records(x_status_id);
+CREATE INDEX link_records_yt_video_id ON link_records(yt_video_id);
+CREATE INDEX tracker_items_day ON tracker_items(day);
+CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key, first_seen_ms);
+CREATE INDEX tracker_items_url ON tracker_items(url);
+CREATE INDEX trash_entries_path ON trash_entries(location, trash_path);
+CREATE INDEX trash_entries_trashed ON trash_entries(trashed_ms);
+";
+
+/// Post-baseline steps (v16+). Later WPs append (never edit) entries.
+pub const MIGRATIONS: &[&str] = &[];
 
 /// Highest schema version this build knows.
 #[must_use]

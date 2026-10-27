@@ -1165,9 +1165,47 @@ summaries = { "word-count" = "Sum" }
 /// not-read rows' words and minutes.
 #[test]
 fn migrated_reading_list_has_an_unread_row() {
-    let migrated = include_str!(
-        "../../../deploy/migrations/fixtures/0006-expected/views/daily-reading-list.toml"
-    );
+    let migrated = r##"# Migrated from vault-repo `_custom/bases/daily-reading-list.base` (view `Reading List`), expressions verbatim.
+# `this` = the day note; rows are the reading entries in `daily/day/<day>/`.
+
+[filters]
+and = ['file.folder == "daily/day/" + this.file.name']
+
+[formulas]
+tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "using").join(", ")'
+minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
+read = 'if(note.read == true, "✅", "❌")'
+
+[[views]]
+type = "table"
+name = "Reading List"
+order = ["file.name", "note.publication", "formula.tags", "word-count", "formula.minutes", "note.read"]
+summaries = { "word-count" = "Sum", "formula.minutes" = "Sum" }
+columnSize = { "note.read" = 80, "word-count" = 80, "formula.minutes" = 80 }
+maxHeight = "none"
+
+[[views.sort]]
+property = "file.name"
+direction = "ASC"
+
+[[views.summary_rows]]
+label = "Unread"
+filter = 'note.read != true'
+summaries = { "word-count" = "Sum", "formula.minutes" = "Sum" }
+
+[properties."note.read"]
+displayName = "Read"
+checkbox = true
+
+[properties."note.publication"]
+displayName = "Publication"
+
+[properties."file.name"]
+displayName = "Note"
+
+[properties."word-count"]
+displayName = "Words"
+"##;
     let fx = fixture(&[("daily-reading-list.toml", migrated)]);
     let mut h = fx.host();
     assert!(h.load_notices().is_empty(), "{:?}", h.load_notices());

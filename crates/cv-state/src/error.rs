@@ -18,10 +18,10 @@ pub enum StateError {
         /// Highest version this build knows.
         supported: i64,
     },
-    /// The database predates the 0.1.1 baseline (D24): its `user_version` is below the
+    /// The database predates the 0.2.0 baseline (D27): its `user_version` is below the
     /// baseline and the pre-baseline migration chain no longer ships.
     #[error(
-        "state.db schema version {found} predates the 0.1.1 baseline (v{baseline}); upgrade it with a pre-0.1.1 cv build first"
+        "state.db schema version {found} predates the 0.2.0 baseline (v{baseline}); upgrade it with a pre-0.2.0 cv build first"
     )]
     PreBaseline {
         /// Version found on disk.
