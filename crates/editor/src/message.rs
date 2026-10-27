@@ -50,6 +50,12 @@ pub enum Message {
     ImageTab(ImageTabMsg),
     /// Plan round-15 WP-3: a PDF tab.
     PdfTab(PdfTabMsg),
+    /// WP-R2 (review E2): an off-thread image decode or PDF page render finished
+    /// (`Err` = unreadable/undecodable; no note text). Handled once, by key, at App level.
+    MediaLoaded {
+        key: MediaKey,
+        result: Result<crate::image_cache::Decoded, String>,
+    },
     /// Plan usability-sprint-captures-links WP-5: a `title` → filename rename finished
     /// (`seq` = the buffer's edit sequence when it was issued).
     TitleRenamed {
@@ -192,70 +198,53 @@ pub enum ImageTabMsg {
     Shown { path: String, view: u64, width: f32 },
     /// The tab body left view: unpin.
     Hidden { path: String, view: u64 },
-    /// The off-thread decode finished.
-    Loaded {
-        key: String,
-        result: Result<crate::image_cache::Decoded, String>,
-    },
 }
 
-/// Plan round-15 WP-3: a PDF tab (vault path `path`, tab id `view`, 0-based `page`).
+/// WP-R2 (review E2): what a media load completion is for — an image (its vault path) or a
+/// PDF page render (the page and the cache key it renders into).
+#[derive(Debug, Clone)]
+pub enum MediaKey {
+    Image(String),
+    Page(crate::pdf::store::PageKey, String),
+}
+
+/// Plan round-15 WP-3 / WP-R2: PDF tabs and inline PDF embeds — the consumers of the one PDF
+/// store (`crate::pdf::store`).
 #[derive(Debug, Clone)]
 pub enum PdfTabMsg {
-    /// The tab body came into view: read and parse the file once.
+    /// A PDF tab body came into view: read and parse the file once.
     Open { path: String },
     /// The off-thread read + parse finished: shared bytes and page sizes, or the failure.
     Opened {
         path: String,
         result: Result<(std::sync::Arc<Vec<u8>>, crate::pdf::PageSizes), String>,
     },
-    /// Page `page` came within the near window at laid-out `width`.
+    /// A page of PDF tab `view` came within the near window at laid-out `width`.
     PageShown {
-        path: String,
         view: u64,
-        page: usize,
+        page: crate::pdf::store::PageKey,
         width: f32,
     },
-    /// Page `page` left the near window: unpin.
+    /// A page of PDF tab `view` left the near window: unpin.
     PageHidden {
-        path: String,
         view: u64,
-        page: usize,
-    },
-    /// An off-thread page render finished.
-    Rendered {
-        path: String,
-        view: u64,
-        page: usize,
-        key: String,
-        result: Result<crate::image_cache::Decoded, String>,
+        page: crate::pdf::store::PageKey,
     },
     /// "Open externally": hand the file to the system opener.
     OpenExternal(String),
-    /// Plan round-15 WP-4: the inline embed of 0-based `page` of vault file `pdf` in note
-    /// `note` (tab `view`) came within the near window at laid-out `width`.
+    /// Plan round-15 WP-4: an inline embed of `page` in note `note` (tab `view`) came within
+    /// the near window at laid-out `width`.
     EmbedShown {
         note: String,
         view: u64,
-        pdf: String,
-        page: usize,
+        page: crate::pdf::store::PageKey,
         width: f32,
     },
     /// The inline embed left the near window: unpin.
     EmbedHidden {
         note: String,
         view: u64,
-        pdf: String,
-        page: usize,
-    },
-    /// An off-thread embed page render finished.
-    EmbedRendered {
-        note: String,
-        view: u64,
-        pdf: String,
-        page: usize,
-        key: String,
-        result: Result<crate::image_cache::Decoded, String>,
+        page: crate::pdf::store::PageKey,
     },
     /// A click on an inline embed: open the PDF tab scrolled to 0-based `page`.
     EmbedOpen { path: String, page: usize },
@@ -299,11 +288,6 @@ pub enum ReadingMsg {
     },
     /// An image sensor left view.
     ImageHidden { tab: String, view: u64, key: String },
-    /// An off-thread decode finished (`Err` = unreadable/undecodable; no note text).
-    ImageLoaded {
-        key: String,
-        result: Result<crate::image_cache::Decoded, String>,
-    },
     /// A host-note task checkbox was clicked: toggle the box at source `line` of `path`.
     ToggleTask { path: String, line: usize },
     /// plan usability-sprint-captures-links WP-4: a frontmatter boolean checkbox was clicked:

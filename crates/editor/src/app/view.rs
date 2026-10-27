@@ -12,8 +12,22 @@ impl App {
                 return crate::settings::view(&self.settings, &self.explorer.paths, self.tokens);
             }
             TabKind::Log => return crate::log::view(&self.status.log, self.tokens),
-            TabKind::Image(p) => return self.image_body(p, tab.id),
-            TabKind::Pdf(p) => return self.pdf_body(p, tab.id),
+            TabKind::File {
+                viewer: Viewer::Image,
+                path,
+            } => return self.image_body(path, tab.id),
+            TabKind::File {
+                viewer: Viewer::Pdf,
+                path,
+            } => {
+                return crate::pdf::view::tab_body(
+                    &self.pdf,
+                    &self.reading.images,
+                    self.tokens,
+                    path,
+                    tab.id,
+                );
+            }
             TabKind::Note(p) => p,
         };
         let Some(doc) = buf(&self.docs, path) else {
@@ -23,6 +37,7 @@ impl App {
             &self.reading,
             &self.docs,
             &self.views,
+            &self.pdf,
             doc,
             tab.id,
             self.tokens,
@@ -72,7 +87,7 @@ impl App {
         match &tab.kind {
             TabKind::Settings => "Settings".to_owned(),
             TabKind::Log => "Log".to_owned(),
-            TabKind::Image(p) | TabKind::Pdf(p) => p.rsplit('/').next().unwrap_or(p).to_owned(),
+            TabKind::File { path: p, .. } => p.rsplit('/').next().unwrap_or(p).to_owned(),
             TabKind::Note(p) => {
                 let siblings: Vec<&str> = ps.tabs.iter().filter_map(Tab::path).collect();
                 let fm = match self.prefs.tab_title {
@@ -135,7 +150,7 @@ impl App {
             };
             let (dirty, saving) = match &tab.kind {
                 TabKind::Settings => (self.settings.any_dirty(), false),
-                TabKind::Log | TabKind::Image(_) | TabKind::Pdf(_) => (false, false),
+                TabKind::Log | TabKind::File { .. } => (false, false),
                 TabKind::Note(p) => {
                     buf(&self.docs, p).map_or((false, false), |d| (d.is_dirty(), d.is_saving()))
                 }

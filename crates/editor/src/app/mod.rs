@@ -67,7 +67,7 @@ pub struct Tab {
     pub kind: TabKind,
 }
 
-pub use crate::ui_state::TabKind;
+pub use crate::ui_state::{TabKind, Viewer};
 
 /// One open document: everything per note path lives here, so a close is one
 /// `remove` and a rename one re-key. A document lives while at least one tab shows its path.
@@ -149,14 +149,14 @@ impl Tab {
     pub fn path(&self) -> Option<&str> {
         match &self.kind {
             TabKind::Note(p) => Some(p),
-            TabKind::Image(_) | TabKind::Pdf(_) | TabKind::Settings | TabKind::Log => None,
+            TabKind::File { .. } | TabKind::Settings | TabKind::Log => None,
         }
     }
 
-    /// Plan round-14 WP-3: the vault path an image (or, round-15 WP-3, a PDF) tab shows.
-    pub fn image_path(&self) -> Option<&str> {
+    /// WP-R2 (review E6): the vault path a file tab (image or PDF) shows.
+    pub fn file_path(&self) -> Option<&str> {
         match &self.kind {
-            TabKind::Image(p) | TabKind::Pdf(p) => Some(p),
+            TabKind::File { path: p, .. } => Some(p),
             _ => None,
         }
     }
@@ -171,14 +171,14 @@ impl Tab {
     /// Settings / Log show no file and are untouched.
     pub fn retarget(&mut self, to: &str) {
         match &mut self.kind {
-            TabKind::Note(p) | TabKind::Image(p) | TabKind::Pdf(p) => to.clone_into(p),
+            TabKind::Note(p) | TabKind::File { path: p, .. } => to.clone_into(p),
             TabKind::Settings | TabKind::Log => {}
         }
     }
 
     /// Whether this tab shows the note (or, plan round-14 WP-3, the image) at `path`.
     pub fn shows(&self, path: &str) -> bool {
-        self.path().or_else(|| self.image_path()) == Some(path)
+        self.path().or_else(|| self.file_path()) == Some(path)
     }
 }
 
@@ -344,10 +344,9 @@ pub struct App {
     pub context_menu: Option<crate::context_menu::ContextMenu>,
     /// plan editor-round-4 WP-4: the image clipboard writer (`xclip` in production).
     pub clip_writer: Arc<dyn crate::clipboard_image::ClipboardWriter + Send + Sync>,
-    /// Plan round-14 WP-3: image-tab decode failures by vault path (shown in the tab).
-    pub image_errors: std::collections::HashMap<String, String>,
-    /// Plan round-15 WP-3: PDF tab documents and per-tab page state (only `Send` data).
-    pub pdf: pdf_tab::PdfTabs,
+    /// WP-R2 (review E1): the one PDF store — documents, tab and embed consumers (only
+    /// `Send` data).
+    pub pdf: crate::pdf::store::PdfStore<iced::widget::image::Handle>,
 }
 
 /// A quit in progress: the saves it waits on, and whether one failed.
@@ -474,8 +473,7 @@ impl App {
             period_folders: editor_model::period::PeriodFolders::default(),
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::Xclip),
-            image_errors: std::collections::HashMap::new(),
-            pdf: pdf_tab::PdfTabs::default(),
+            pdf: crate::pdf::store::PdfStore::default(),
         };
         app.reading.resolver = shared.clone();
         app.panels.resolver = shared;
@@ -486,7 +484,7 @@ impl App {
         for (pane, tabs, active) in plan {
             for kind in tabs {
                 match kind {
-                    TabKind::Note(p) | TabKind::Image(p) | TabKind::Pdf(p) => {
+                    TabKind::Note(p) | TabKind::File { path: p, .. } => {
                         if let Err(e) = app.open_into(pane, &p, Place::Restore) {
                             app.status.set_error(open_error(&e));
                         }

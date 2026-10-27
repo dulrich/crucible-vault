@@ -20,17 +20,40 @@ use crate::theme::Surround;
 pub enum TabKind {
     /// A vault note at this path.
     Note(String),
-    /// Plan round-14 WP-3: a decodable vault image at this path (read-only view, no document).
-    /// Persists as a `note` tab (no new wire tag, so older builds still load the file) and is
-    /// re-classified by extension when restored.
-    Image(String),
-    /// Plan round-15 WP-3: a vault PDF at this path (paged read-only view, no document). Persists
-    /// as a `note` tab like [`Self::Image`] and is re-classified by extension when restored.
-    Pdf(String),
+    /// WP-R2 (review E6): a vault file shown read-only with no document — an image (plan
+    /// round-14 WP-3) or a paged PDF (plan round-15 WP-3); `viewer` dispatches close, retarget
+    /// and drawing. Persists as a `note` tab (no new wire tag, so older builds still load the
+    /// file) and is re-classified by extension when restored.
+    File { viewer: Viewer, path: String },
     /// Plan editor-settings-tab WP-2: the Settings tab.
     Settings,
     /// Plan round-6-feedback-todos WP-7: the notice log.
     Log,
+}
+
+/// WP-R2 (review E6): how a [`TabKind::File`] tab shows its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Viewer {
+    Image,
+    Pdf,
+}
+
+impl TabKind {
+    /// An image file tab.
+    pub fn image(path: &str) -> Self {
+        Self::File {
+            viewer: Viewer::Image,
+            path: path.to_owned(),
+        }
+    }
+
+    /// A PDF file tab.
+    pub fn pdf(path: &str) -> Self {
+        Self::File {
+            viewer: Viewer::Pdf,
+            path: path.to_owned(),
+        }
+    }
 }
 
 /// The legacy Settings / Log tab paths (read path only).
@@ -55,7 +78,7 @@ enum TabIn {
 impl From<TabKind> for TabWire {
     fn from(k: TabKind) -> Self {
         match k {
-            TabKind::Note(path) | TabKind::Image(path) | TabKind::Pdf(path) => Self::Note { path },
+            TabKind::Note(path) | TabKind::File { path, .. } => Self::Note { path },
             TabKind::Settings => Self::Settings,
             TabKind::Log => Self::Log,
         }

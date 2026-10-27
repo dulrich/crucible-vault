@@ -9,6 +9,13 @@
 //! xref lazily) and keeps the render jobs independent (no per-document thread to manage).
 //!
 //! **Bitmap budget (audit E1):** [`admit`] is the one admission rule for page bitmaps.
+//!
+//! WP-R2 (review E14): this module is the render seam and the admission arithmetic; the
+//! store (documents, consumers, retry policy; no iced) is [`store`], the drawing helpers are
+//! [`view`], and the message glue is `app::pdf_tab`.
+
+pub mod store;
+pub mod view;
 
 use std::sync::Arc;
 
@@ -141,10 +148,16 @@ pub fn nearest_first(shown: &std::collections::BTreeSet<usize>) -> Vec<usize> {
 /// outside this plan and the cache `budget`. Each page in turn takes [`admit`]'s width against
 /// what the earlier ones took, so pressure costs the farthest pages first.
 pub fn plan(pages: &[(f32, f32)], display: f32, other: usize, budget: usize) -> Vec<Option<u32>> {
+    let each: Vec<((f32, f32), f32)> = pages.iter().map(|&s| (s, display)).collect();
+    plan_each(&each, other, budget)
+}
+
+/// WP-R2: [`plan`] with each page's own display width (an embed's `|W`).
+pub fn plan_each(pages: &[((f32, f32), f32)], other: usize, budget: usize) -> Vec<Option<u32>> {
     let mut used = other;
     pages
         .iter()
-        .map(|&size| {
+        .map(|&(size, display)| {
             let w = admit(size, display, used, budget)?;
             used += projected_bytes(size, w);
             Some(w)
@@ -152,18 +165,9 @@ pub fn plan(pages: &[(f32, f32)], display: f32, other: usize, budget: usize) -> 
         .collect()
 }
 
-/// WP-R1 (review P1): a page bitmap (or its placeholder) drawn expanding to its slot width,
-/// whatever its pixel width — iced's non-expanding image keeps a narrower bitmap at its pixel
-/// size (`iced_widget-0.14.2/src/image.rs:185-235`), while expanding it scales to the slot with
-/// the page's aspect, so a placeholder and any render of the page lay out at the same height.
-pub fn page_image(h: Handle) -> iced::widget::Image<Handle> {
-    iced::widget::image(h)
-        .width(iced::Length::Fill)
-        .expand(true)
-}
-
 /// Test support: a minimal valid PDF of `pages` pages, each `w` × `h` points, with one filled
-/// rectangle per page (hand-written objects and xref; no dependency).
+/// rectangle per page (hand-written objects and xref; no dependency). Test-only (WP-R2, E14).
+#[cfg(test)]
 pub fn synthetic_pdf(pages: usize, w: u32, h: u32) -> Vec<u8> {
     let mut out: Vec<u8> = b"%PDF-1.4\n".to_vec();
     let mut offsets: Vec<usize> = Vec::new();
@@ -285,7 +289,7 @@ mod tests {
         use iced::advanced::Widget;
         use iced::advanced::layout::Limits;
         use iced::advanced::widget::Tree;
-        let mut img = page_image(Handle::from_rgba(1, 1, vec![0; 4]));
+        let mut img = view::page_image(Handle::from_rgba(1, 1, vec![0; 4]));
         let limits = Limits::new(iced::Size::ZERO, iced::Size::new(1900.0, f32::INFINITY));
         let node =
             Widget::<(), iced::Theme, ()>::layout(&mut img, &mut Tree::empty(), &(), &limits);
@@ -313,7 +317,7 @@ mod tests {
         let before = rss_kib();
         let mut reserved = 0;
         for i in 0..20 {
-            let key = format!("big.pdf#page={i}@w");
+            let key = store::PageKey::new("big.pdf", i).cache_key(1000);
             let Some(w) = admit((612.0, 792.0), 1000.0, reserved, cache.budget()) else {
                 println!("page {i} refused (reserved {reserved})");
                 continue;

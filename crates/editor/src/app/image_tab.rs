@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::image_cache;
-use crate::message::ImageTabMsg;
+use crate::message::{ImageTabMsg, MediaKey};
 use cv_text::file_kind::{self, FileKind};
 
 /// A file read made while classifying it (bytes, content hash).
@@ -54,7 +54,7 @@ impl App {
     pub(super) fn update_image_tab(&mut self, m: ImageTabMsg) -> Task<Message> {
         match m {
             ImageTabMsg::Shown { path, view, width } => {
-                if self.image_errors.contains_key(&path) {
+                if self.reading.images.failure(&path).is_some() {
                     return Task::none();
                 }
                 let Some(d) = &self.daemon else {
@@ -66,7 +66,10 @@ impl App {
                         Arc::clone(d),
                         path,
                         image_cache::decode_width(width),
-                        |key, result| Message::ImageTab(ImageTabMsg::Loaded { key, result }),
+                        |key, result| Message::MediaLoaded {
+                            key: MediaKey::Image(key),
+                            result,
+                        },
                     );
                 }
             }
@@ -75,30 +78,71 @@ impl App {
                     .images
                     .hide(&image_cache::view_owner(&path, view), &path);
             }
-            ImageTabMsg::Loaded { key, result } => match result {
-                Ok(d) => {
-                    self.image_errors.remove(&key);
-                    self.reading.images.loaded(&key, Some(d));
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "image tab decode failed");
-                    self.reading.images.loaded(&key, None);
-                    self.image_errors.insert(key, e);
-                }
-            },
         }
         Task::none()
     }
 
-    /// Plan round-15 WP-2: the image shown at `from` moved to `to`. Every tab of `from` keeps
-    /// its kind and id ([`Tab::retarget`]) and its history entries move; the `from` pins are
-    /// released and a cached decode failure moves with the file. The new pin and decode come
-    /// from the tab's sensor (its key is the path, so the path change re-fires `Shown`).
-    pub(super) fn retarget_image(&mut self, from: &str, to: &str) {
-        let ids: Vec<u64> = self
+    /// WP-R2 (review E2): the one media completion, by key. It updates the cache, records a
+    /// failure every surface reads (images: [`image_cache::ImageCache::failure`]; PDF pages:
+    /// [`crate::pdf::store::PdfStore::page_failed`]) and re-pumps every consumer of the key.
+    /// Images keep one shared decode per path (decoded at the first shower's width bucket;
+    /// a wider later view scales it up) — see the WP-R2 report.
+    pub(super) fn media_loaded(
+        &mut self,
+        key: MediaKey,
+        result: Result<image_cache::Decoded, String>,
+    ) -> Task<Message> {
+        let cache = &mut self.reading.images;
+        match key {
+            MediaKey::Image(key) => match result {
+                Ok(d) => {
+                    cache.loaded(&key, Some(d));
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "image load failed");
+                    cache.loaded(&key, None);
+                    // A Reading embed's failure is a notice; an image tab shows it in place.
+                    if !self.path_open(&key) {
+                        self.status.notify(
+                            Severity::Warning,
+                            crate::reading::image_failure_text(&key, &e),
+                        );
+                    }
+                    self.reading.images.fail(&key, e);
+                }
+            },
+            MediaKey::Page(page, key) => {
+                let error = match result {
+                    Ok(d) => {
+                        cache.loaded(&key, Some(d));
+                        None
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "pdf page render failed");
+                        cache.loaded(&key, None);
+                        Some(e)
+                    }
+                };
+                self.pdf.rendered(&page, &key, error, cache);
+                return self.pump_pdf();
+            }
+        }
+        Task::none()
+    }
+
+    /// Plan round-15 WP-2 / WP-R2 (review E6): the file shown at `from` moved to `to`. Every
+    /// file tab of `from` keeps its viewer and id ([`Tab::retarget`]) and its history entries
+    /// move; the `from` pins are released (an image failure and a parsed PDF move with the
+    /// file). The new pin comes from the tab's sensor (its key carries the path).
+    pub(super) fn retarget_file(&mut self, from: &str, to: &str) {
+        let tabs: Vec<(Viewer, u64)> = self
             .panes
             .iter()
-            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.shows(from)).map(|t| t.id))
+            .flat_map(|(_, ps)| ps.tabs.iter())
+            .filter_map(|t| match &t.kind {
+                TabKind::File { viewer, path } if path == from => Some((*viewer, t.id)),
+                _ => None,
+            })
             .collect();
         for (_, ps) in self.panes.iter_mut() {
             for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
@@ -106,26 +150,32 @@ impl App {
             }
             ps.history.retarget(from, to);
         }
-        for &id in &ids {
-            self.reading
-                .images
-                .hide(&image_cache::view_owner(from, id), from);
+        for &(viewer, id) in &tabs {
+            self.file_view_released(viewer, from, id);
         }
-        if let Some(e) = self.image_errors.remove(from) {
-            self.image_errors.insert(to.to_owned(), e);
+        if let Some(e) = self.reading.images.take_failure(from) {
+            self.reading.images.fail(to, e);
         }
-        self.retarget_pdf(from, to, &ids);
+        self.pdf.renamed(from, to, &mut self.reading.images);
     }
 
-    /// An image tab closed: its pin goes (and a cached failure, when no tab shows it any more).
-    pub(super) fn image_tab_closed(&mut self, path: &str, view: u64) {
-        self.reading
-            .images
-            .hide(&image_cache::view_owner(path, view), path);
-        self.pdf_view_closed(path, view);
-        if !self.path_open(path) {
-            self.image_errors.remove(path);
-            self.pdf.docs.remove(path);
+    /// File tab `view` (`viewer`) no longer shows `path`: its pins go.
+    fn file_view_released(&mut self, viewer: Viewer, path: &str, view: u64) {
+        match viewer {
+            Viewer::Image => self
+                .reading
+                .images
+                .hide(&image_cache::view_owner(path, view), path),
+            Viewer::Pdf => self.pdf.view_closed(view, &mut self.reading.images),
+        }
+    }
+
+    /// A file tab closed: its pins go (and an image failure, when no tab shows it any more);
+    /// parsed PDFs are left to [`Self::sweep_pdf_docs`], the one removal rule.
+    pub(super) fn file_tab_closed(&mut self, viewer: Viewer, path: &str, view: u64) {
+        self.file_view_released(viewer, path, view);
+        if viewer == Viewer::Image && !self.path_open(path) {
+            self.reading.images.take_failure(path);
         }
     }
 
@@ -134,20 +184,22 @@ impl App {
         use iced::widget::{image, sensor};
         let t = self.tokens;
         let name = path.rsplit('/').next().unwrap_or(path);
-        let content: Element<'a, Message> =
-            match (self.reading.images.get(path), self.image_errors.get(path)) {
-                (Some(h), _) => image(h.clone())
-                    .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
-                (None, Some(e)) => text(format!("Cannot show {name}: {e}"))
-                    .color(t.text_faint.to_color())
-                    .into(),
-                (None, None) => text(format!("Loading {name}…"))
-                    .color(t.text_faint.to_color())
-                    .into(),
-            };
+        let content: Element<'a, Message> = match (
+            self.reading.images.get(path),
+            self.reading.images.failure(path),
+        ) {
+            (Some(h), _) => image(h.clone())
+                .content_fit(iced::ContentFit::ScaleDown)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            (None, Some(e)) => text(format!("Cannot show {name}: {e}"))
+                .color(t.text_faint.to_color())
+                .into(),
+            (None, None) => text(format!("Loading {name}…"))
+                .color(t.text_faint.to_color())
+                .into(),
+        };
         let shown = path.to_owned();
         let body = container(content)
             .width(Length::Fill)

@@ -38,6 +38,8 @@ pub(crate) enum LinkTarget {
 struct Ctx<'a, 'c> {
     store: &'a ReadingStore,
     views: &'a crate::views::ViewStore,
+    /// WP-R2 (review E1): the PDF store, borrowed like `views`.
+    pdfs: &'a crate::pdf::store::PdfStore<iced::widget::image::Handle>,
     doc: &'a Doc,
     path: &'a str,
     /// The showing view (tab id) — image pins are per view (plan editor-feedback-round-2 WP-7).
@@ -124,6 +126,7 @@ pub fn reading<'a>(
     store: &'a ReadingStore,
     docs: &'a crate::app::Docs,
     views: &'a crate::views::ViewStore,
+    pdfs: &'a crate::pdf::store::PdfStore<iced::widget::image::Handle>,
     path: &'a str,
     view: u64,
     t: Tokens,
@@ -141,6 +144,7 @@ pub fn reading<'a>(
     let cx = Ctx {
         store,
         views,
+        pdfs,
         doc,
         path,
         view,
@@ -368,35 +372,35 @@ fn pdf_embed<'a>(
     page: u32,
     width: Option<u32>,
 ) -> Element<'a, Message> {
-    use crate::reading::PdfInfo;
+    use crate::pdf::store::{Consumer, Doc as PdfDoc, PageKey};
     let Some(Some(pdf)) = cx.doc.pdfs.get(target) else {
         return file_card(cx, target);
     };
-    let page0 = (page as usize).saturating_sub(1);
-    if cx.store.pdf_embed_failed(cx.path, pdf, page0) {
+    let pk = PageKey::new(pdf, (page as usize).saturating_sub(1));
+    let page0 = pk.page;
+    // WP-R2: a render failure of the page (any surface's) shows the card.
+    if cx.pdfs.page_failed(&pk).is_some() {
         return file_card(cx, target);
     }
-    let info = cx.store.pdf_info.get(pdf);
-    let size = match info {
-        Some(PdfInfo::Failed) => return file_card(cx, target),
-        Some(PdfInfo::Ready { pages, .. }) => match pages.get(page0) {
-            Some(&size) => Some(size),
+    let (size, placeholder) = match cx.pdfs.doc(pdf) {
+        Some(PdfDoc::Failed(_)) => return file_card(cx, target),
+        Some(PdfDoc::Ready {
+            pages,
+            placeholders,
+            ..
+        }) => match pages.get(page0) {
+            Some(&size) => (Some(size), placeholders.get(page0)),
             None => return file_card(cx, target),
         },
-        None => None,
+        Some(PdfDoc::Loading) | None => (None, None),
     };
-    let pinned = cx
-        .store
-        .pdf_embeds
-        .get(&(cx.path.to_owned(), cx.view))
-        .and_then(|v| v.pins.get(&(pdf.clone(), page0)))
-        .and_then(|k| cx.store.images.get(k));
-    let placeholder = match info {
-        Some(PdfInfo::Ready { placeholders, .. }) => placeholders.get(page0),
-        _ => None,
+    let me = Consumer::Embed {
+        note: cx.path.to_owned(),
+        view: cx.view,
     };
+    let pinned = cx.pdfs.held(&me, &pk).and_then(|k| cx.store.images.get(k));
     let fill = |h: &iced::widget::image::Handle| -> Element<'a, Message> {
-        let img = crate::pdf::page_image(h.clone());
+        let img = crate::pdf::view::page_image(h.clone());
         let mut c = container(img).width(Length::Fill);
         if let Some(w) = width {
             c = c.max_width(w as f32);
@@ -420,7 +424,7 @@ fn pdf_embed<'a>(
         |(pw, ph)| if pw > 0.0 { est_w * ph / pw } else { est_w },
     );
     let (note, view) = (cx.path.to_owned(), cx.view);
-    let shown = (note.clone(), pdf.clone());
+    let shown = (note.clone(), pk.clone());
     let hidden = shown.clone();
     let clicked = Message::PdfTab(PdfTabMsg::EmbedOpen {
         path: pdf.clone(),
@@ -432,22 +436,20 @@ fn pdf_embed<'a>(
         .width(Length::Fill)
         .on_press(clicked);
     sensor(card)
-        .key(format!("{note}\u{1}{view}\u{1}{pdf}#page={page}"))
+        .key(format!("{note}\u{1}{view}\u{1}{}", pk.id()))
         .anticipate(crate::image_cache::sensor_margin(est_w, est_h))
         .on_show(move |size| {
             Message::PdfTab(PdfTabMsg::EmbedShown {
                 note: shown.0.clone(),
                 view,
-                pdf: shown.1.clone(),
-                page: page0,
+                page: shown.1.clone(),
                 width: size.width,
             })
         })
         .on_hide(Message::PdfTab(PdfTabMsg::EmbedHidden {
             note: hidden.0,
             view,
-            pdf: hidden.1,
-            page: page0,
+            page: hidden.1,
         }))
         .into()
 }

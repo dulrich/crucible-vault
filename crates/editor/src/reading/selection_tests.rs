@@ -45,6 +45,7 @@ struct H {
     store: ReadingStore,
     docs: Docs,
     views: crate::views::ViewStore,
+    pdfs: crate::pdf::store::PdfStore<iced::widget::image::Handle>,
     r: iced::Renderer,
     tree: Option<Tree>,
     /// Messages other than the selection's own (link clicks).
@@ -67,6 +68,7 @@ impl H {
             store,
             docs,
             views: crate::views::ViewStore::default(),
+            pdfs: crate::pdf::store::PdfStore::default(),
             r: renderer(),
             tree: None,
             other: Vec::new(),
@@ -88,6 +90,7 @@ impl H {
             &self.store,
             &self.docs,
             &self.views,
+            &self.pdfs,
             PATH,
             VIEW,
             t,

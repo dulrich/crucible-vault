@@ -51,7 +51,7 @@ impl App {
                 TabKind::Settings => tasks.push(self.settings.restore_scroll()),
                 // The Log tab has no stored place (was Settings' restore).
                 // Plan round-14 WP-3: an image tab's sensor re-pins on show.
-                TabKind::Log | TabKind::Image(_) | TabKind::Pdf(_) => {}
+                TabKind::Log | TabKind::File { .. } => {}
             }
         }
         Task::batch(tasks)
@@ -291,9 +291,9 @@ impl App {
             self.docs.insert(path.to_owned(), od);
         }
         let tab = if is_image {
-            Tab::new(TabKind::Image(path.to_owned()))
+            Tab::new(TabKind::image(path))
         } else if is_pdf {
-            Tab::new(TabKind::Pdf(path.to_owned()))
+            Tab::new(TabKind::pdf(path))
         } else {
             Tab::note(path)
         };
@@ -363,13 +363,14 @@ impl App {
     /// document and its reading/view state are dropped (one `remove` each) only with the last
     /// tab showing its path (plan editor-feedback-round-2 WP-7).
     pub(super) fn on_tab_closed(&mut self, tab: &Tab) {
-        if let Some(p) = tab.image_path() {
-            self.sink.closed(p);
-            let p = p.to_owned();
-            self.image_tab_closed(&p, tab.id);
+        if let TabKind::File { viewer, path } = &tab.kind {
+            self.sink.closed(path);
+            self.file_tab_closed(*viewer, path, tab.id);
             self.sweep_pdf_docs();
             return;
         }
+        // A note tab's inline PDF embeds go with it.
+        self.pdf.view_closed(tab.id, &mut self.reading.images);
         let Some(path) = tab.path() else {
             return;
         };
@@ -496,7 +497,7 @@ impl App {
                 return self.flush_settings().1;
             }
             // An image tab holds nothing unsaved.
-            TabKind::Log | TabKind::Image(_) | TabKind::Pdf(_) => {
+            TabKind::Log | TabKind::File { .. } => {
                 self.remove_tab(id);
                 return Task::none();
             }
@@ -560,7 +561,7 @@ impl App {
         match &kind {
             TabKind::Log => self.status.log.unread = 0,
             TabKind::Settings => {}
-            TabKind::Note(p) | TabKind::Image(p) | TabKind::Pdf(p) => {
+            TabKind::Note(p) | TabKind::File { path: p, .. } => {
                 let p = p.clone();
                 if let Err(e) = self.open_into(pane, &p, Place::Focus) {
                     self.status.set_error(open_error(&e));

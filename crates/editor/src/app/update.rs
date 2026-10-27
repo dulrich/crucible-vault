@@ -55,6 +55,7 @@ impl App {
             Message::Tabs(m) => return self.update_tabs(m),
             Message::ImageTab(m) => return self.update_image_tab(m),
             Message::PdfTab(m) => return self.update_pdf_tab(m),
+            Message::MediaLoaded { key, result } => return self.media_loaded(key, result),
             Message::Dialog(m) => return self.update_dialog(m),
             Message::Menu(m) => return self.update_menu(m),
             Message::Find(m) => return self.update_find(m),
@@ -213,6 +214,8 @@ impl App {
                     active,
                     self.daemon.as_ref(),
                 );
+                // WP-R2: a re-lower or mode switch may drop inline PDF embeds.
+                self.prune_pdf_embeds();
                 let mut tasks = Vec::new();
                 for e in fx {
                     tasks.push(match e {

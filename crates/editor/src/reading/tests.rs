@@ -225,10 +225,10 @@ fn show_and_load(app: &mut App, d: &Arc<dyn DaemonClient>, path: &str, key: &str
     assert_eq!(app.reading.images.pending_len(), 1, "a load started");
     let (bytes, _) = d.read_file(key).expect("read");
     let result = decode(&bytes, 320).map_err(|e| e.to_string());
-    let _ = app.send(Message::Reading(ReadingMsg::ImageLoaded {
-        key: key.to_owned(),
+    let _ = app.send(Message::MediaLoaded {
+        key: crate::message::MediaKey::Image(key.to_owned()),
         result,
-    }));
+    });
     assert_eq!(app.reading.images.len(), 1);
     assert_eq!(app.reading.images.pins(key), 1);
 }
@@ -990,10 +990,10 @@ fn late_attachment_re_renders_the_doc() {
 fn image_load_failure_raises_a_warning_notice() {
     let (_tmp, d) = setup(&[("n.md", b"![[att/pic.png]]\n")]);
     let mut app = app_on(&d, "n.md");
-    let _ = app.send(Message::Reading(ReadingMsg::ImageLoaded {
-        key: "att/pic.png".into(),
+    let _ = app.send(Message::MediaLoaded {
+        key: crate::message::MediaKey::Image("att/pic.png".into()),
         result: Err("unsupported format\nmore detail".into()),
-    }));
+    });
     let n = app.status.notice.clone().expect("notice");
     assert_eq!(n.severity, crate::app::Severity::Warning);
     assert_eq!(n.text, "image failed to load: pic.png (unsupported format)");

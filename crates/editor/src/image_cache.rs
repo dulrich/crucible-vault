@@ -175,6 +175,10 @@ pub struct ImageCache {
     reserved: HashMap<String, usize>,
     /// Header-read intrinsic sizes by key (plan round-5 WP-2).
     dims: HashMap<String, Dims>,
+    /// WP-R2 (review E2): image keys whose load failed, and why — read by every surface (the
+    /// image tab shows it; a Reading embed does not reload it). Forgotten when the file
+    /// changes ([`Self::forget_dims_of`]) or a load of the key succeeds.
+    failed: HashMap<String, String>,
 }
 
 impl Default for ImageCache {
@@ -203,6 +207,7 @@ impl ImageCache {
             pending: HashMap::new(),
             reserved: HashMap::new(),
             dims: HashMap::new(),
+            failed: HashMap::new(),
         }
     }
 
@@ -226,6 +231,22 @@ impl ImageCache {
     /// fall back to the 120 px box until the next tick, so the view jumped on any vault churn.
     pub fn forget_dims_of(&mut self, key: &str) {
         self.dims.remove(key);
+        self.failed.remove(key);
+    }
+
+    /// WP-R2 (review E2): the load of image `key` failed with `reason`.
+    pub fn fail(&mut self, key: &str, reason: String) {
+        self.failed.insert(key.to_owned(), reason);
+    }
+
+    /// Why image `key` failed to load, if it did.
+    pub fn failure(&self, key: &str) -> Option<&str> {
+        self.failed.get(key).map(String::as_str)
+    }
+
+    /// Forgets `key`'s failure (returned), e.g. to move it with a renamed file.
+    pub fn take_failure(&mut self, key: &str) -> Option<String> {
+        self.failed.remove(key)
     }
 
     /// The byte budget.
@@ -375,6 +396,7 @@ impl ImageCache {
         // The reservation becomes the resident entry's bytes (or goes with a failed load).
         let pdf = self.reserved.remove(key).is_some();
         let Some(d) = decoded else { return false };
+        self.failed.remove(key);
         if owners.is_empty() {
             return false;
         }

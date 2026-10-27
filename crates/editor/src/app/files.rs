@@ -356,8 +356,8 @@ impl App {
             return;
         }
         if !self.docs.contains_key(from) {
-            // Plan round-15 WP-2: only image tabs show a path without a document.
-            self.retarget_image(from, to);
+            // Plan round-15 WP-2: only file tabs show a path without a document.
+            self.retarget_file(from, to);
             return;
         }
         let Some(d) = &self.daemon else { return };
@@ -403,6 +403,7 @@ impl App {
         // `to`.
         doc.reading.clear_title();
         self.reading.renamed(from);
+        self.pdf_note_closed(from);
         self.views.rehost(from, to);
         self.views.invalidate(&[]);
         if self.docs.contains_key(to) {
