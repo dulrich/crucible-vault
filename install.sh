@@ -123,6 +123,28 @@ if [[ $skip_build = 0 ]]; then
   cargo install --locked --path "$REPO/crates/editor"
 fi
 
+# --- desktop entry -------------------------------------------------------------------------
+
+# Lists the editor in XDG launchers (CDE's Super+Return, menus). Exec is the absolute installed
+# path: a launcher's PATH need not contain the cargo bin dir. Rewritten on every run.
+editor_bin=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/cvault-editor
+apps_dir=${XDG_DATA_HOME:-$HOME/.local/share}/applications
+if [[ -x $editor_bin ]]; then
+  mkdir -p "$apps_dir"
+  cat >"$apps_dir/cvault-editor.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=cvault-editor
+Comment=Crucible vault editor
+Exec=$editor_bin
+Terminal=false
+Categories=Office;TextEditor;
+EOF
+  echo "    desktop entry: $apps_dir/cvault-editor.desktop"
+else
+  warn "no cvault-editor at $editor_bin; desktop entry not written"
+fi
+
 # --- close the editor ----------------------------------------------------------------------
 
 editor_was_running=0
