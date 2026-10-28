@@ -1,4 +1,4 @@
-//! `cvault-editor [--fake <dir>]`: connects to the daemon at `$CV_SOCKET` (default
+//! `cvault-editor [--fake <dir>] [--version]`: connects to the daemon at `$CV_SOCKET` (default
 //! `$XDG_RUNTIME_DIR/crucible-vault/daemon.sock`), or with `--fake <dir>` (only when built with
 //! the `fake` cargo feature) serves `<dir>` through the in-process `FakeDaemon` (an empty or
 //! missing `<dir>` is seeded with a synthetic vault).
@@ -10,10 +10,22 @@ use editor::app::App;
 use editor::daemon::{Connector, DaemonClient, SocketDaemon};
 
 const USAGE: &str = if cfg!(feature = "fake") {
-    "usage: cvault-editor [--fake <dir>]"
+    "usage: cvault-editor [--fake <dir>] [--version] [--help]\n\nenvironment:\n  CV_SOCKET            daemon socket (default $XDG_RUNTIME_DIR/crucible-vault/daemon.sock)\n  XDG_RUNTIME_DIR      base for the default socket\n  RUST_LOG             tracing filter\n  WGPU_BACKEND, VK_LOADER_DRIVERS_SELECT, VK_DRIVER_FILES, VK_ICD_FILENAMES, ICED_BACKEND\n                       if any is set, the Vulkan/radeon defaults are skipped"
 } else {
-    "usage: cvault-editor"
+    "usage: cvault-editor [--version] [--help]\n\nenvironment:\n  CV_SOCKET            daemon socket (default $XDG_RUNTIME_DIR/crucible-vault/daemon.sock)\n  XDG_RUNTIME_DIR      base for the default socket\n  RUST_LOG             tracing filter\n  WGPU_BACKEND, VK_LOADER_DRIVERS_SELECT, VK_DRIVER_FILES, VK_ICD_FILENAMES, ICED_BACKEND\n                       if any is set, the Vulkan/radeon defaults are skipped"
 };
+
+/// Pure decision for the side-effect-free early exits: `Some(stdout text)` for help (wins) or
+/// version, `None` for a normal start.
+fn early_exit(args: &[String]) -> Option<String> {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        Some(USAGE.to_owned())
+    } else if args.iter().any(|a| a == "-V" || a == "--version") {
+        Some(format!("cvault-editor {}", env!("CARGO_PKG_VERSION")))
+    } else {
+        None
+    }
+}
 
 #[cfg(feature = "fake")]
 fn fake(dir: &std::path::Path) -> anyhow::Result<editor::daemon::FakeDaemon> {
@@ -27,10 +39,11 @@ fn fake(dir: &std::path::Path) -> anyhow::Result<editor::daemon::FakeDaemon> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Help wins over every other argument (`--fake --help` must not seed a vault in `./--help`)
-    // and is answered before the arena cap, the GPU defaults or the tracing subscriber.
-    if std::env::args().skip(1).any(|a| a == "-h" || a == "--help") {
-        println!("{USAGE}");
+    // Help / version win over every other argument (`--fake --help` must not seed a vault in
+    // `./--help`) and are answered before the arena cap, the GPU defaults or the tracing subscriber.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(text) = early_exit(&argv) {
+        println!("{text}");
         return Ok(());
     }
     // Arena cap + glibc FFI live in `cv-malloc` (plan memory-instrumentation-and-reduction WP-M1).
@@ -39,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = argv;
     let connector: Option<Connector>;
     let daemon: Option<Arc<dyn DaemonClient>> = match args.as_slice() {
         [] => {
@@ -136,3 +149,31 @@ fn gpu_defaults() {
 
 #[cfg(not(all(feature = "gpu", target_os = "linux")))]
 fn gpu_defaults() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn early_exit_help_version_normal() {
+        assert_eq!(early_exit(&v(&["--help"])).as_deref(), Some(USAGE));
+        assert_eq!(
+            early_exit(&v(&["--fake", "--help"])).as_deref(),
+            Some(USAGE)
+        );
+        assert!(USAGE.contains("--version") && USAGE.contains("CV_SOCKET"));
+        let ver = format!("cvault-editor {}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(early_exit(&v(&["--version"])), Some(ver.clone()));
+        assert_eq!(early_exit(&v(&["-V"])), Some(ver));
+        assert_eq!(
+            early_exit(&v(&["--version", "--help"])).as_deref(),
+            Some(USAGE)
+        );
+        assert_eq!(early_exit(&v(&[])), None);
+        assert_eq!(early_exit(&v(&["--fake", "d"])), None);
+    }
+}

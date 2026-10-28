@@ -1,5 +1,5 @@
 //! Hand-rolled CLI dispatch (no clap is pinned): `cv daemon`, `cv uri <url>`, `cv status`,
-//! `cv signals …`, `cv jobs|intake|run …`, `cv --help`.
+//! `cv signals …`, `cv jobs|intake|run …`, `cv --help`, `cv --version`.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text (`{JOBS}` is replaced by [`crate::jobs::USAGE`]).
-const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print generation, queue counts, config errors, service health\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --help        this text\n";
+const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print generation, queue counts, config errors, service health\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --version     print the version (also -V)\n  cv --help        this text\n";
 
 /// Usage text.
 #[must_use]
@@ -21,14 +21,34 @@ pub fn usage() -> String {
     USAGE_TEMPLATE.replace("{JOBS}", crate::jobs::USAGE)
 }
 
-/// Runs the CLI with `args` (without argv[0]); returns the process exit code.
-pub fn run(args: &[String]) -> i32 {
-    // Help wins over every command (`cv uri --help` must not spool "--help", `cv daemon --help`
-    // must not start a daemon) and is answered before any config, socket or spool is touched.
+/// Version line printed by `cv --version`.
+#[must_use]
+pub fn version_line() -> String {
+    format!("cv {}\n", env!("CARGO_PKG_VERSION"))
+}
+
+/// Pure decision for the side-effect-free early exits: `Some(stdout text)` for help (wins) or
+/// version, `None` for a normal command.
+#[must_use]
+pub fn early_exit(args: &[String]) -> Option<String> {
     if args.first().map(String::as_str) == Some("help")
         || args.iter().any(|a| a == "--help" || a == "-h")
     {
-        print!("{}", usage());
+        Some(usage())
+    } else if args.iter().any(|a| a == "--version" || a == "-V") {
+        Some(version_line())
+    } else {
+        None
+    }
+}
+
+/// Runs the CLI with `args` (without argv[0]); returns the process exit code.
+pub fn run(args: &[String]) -> i32 {
+    // Help / version win over every command (`cv uri --help` must not spool "--help", `cv daemon
+    // --version` must not start a daemon) and are answered before any config, socket or spool is
+    // touched.
+    if let Some(text) = early_exit(args) {
+        print!("{text}");
         return 0;
     }
     match args.first().map(String::as_str) {
@@ -293,6 +313,26 @@ pub fn status_command(config: &Config) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn early_exit_help_version_normal() {
+        assert_eq!(early_exit(&v(&["--help"])), Some(usage()));
+        assert_eq!(early_exit(&v(&["uri", "-h"])), Some(usage()));
+        assert_eq!(early_exit(&v(&["help"])), Some(usage()));
+        assert!(usage().contains("--version"));
+        let ver = format!("cv {}\n", env!("CARGO_PKG_VERSION"));
+        assert_eq!(early_exit(&v(&["--version"])), Some(ver.clone()));
+        assert_eq!(early_exit(&v(&["-V"])), Some(ver.clone()));
+        assert_eq!(early_exit(&v(&["daemon", "--version"])), Some(ver));
+        // help beats version
+        assert_eq!(early_exit(&v(&["--version", "--help"])), Some(usage()));
+        assert_eq!(early_exit(&v(&["status"])), None);
+        assert_eq!(early_exit(&v(&[])), None);
+    }
 
     #[test]
     fn status_fallback_reports_counts_and_breaker_detail() {
