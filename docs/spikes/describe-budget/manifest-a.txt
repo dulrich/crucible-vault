@@ -1,0 +1,9 @@
+A01 <code-root>/private-repo-b/references/aa-cost-per-task-pareto.png
+A02 <code-root>/private-repo-b/references/grammar-benchmark.png
+A03 <code-root>/private-repo-b/references/translation-chart.png
+A04 <code-root>/private-repo-b/references/translate-benchmark.png
+A05 <code-root>/fleet-tooling/references/fitness-tracker-user-settings.png
+A06 <code-root>/fleet-tooling/references/initiative-tracker-seg-group-bug.png
+A07 <code-root>/private-repo-a/nutrition/stages-of-fasting.jpg
+A08 <code-root>/private-repo-a/dating/beta-alpha-quadrant.png
+A09 <code-root>/private-repo-c/runs/wp45-enemies.png
