@@ -21,7 +21,28 @@
 //! | `prune_transient` | before scanning, drop transient `failed` and degenerate `vision` records | `false` |
 //!
 //! Config: `pipelines.toml [image_describe]` (`enabled`, `provider` (default `local`), `model`,
-//! `max_tokens` (default 4096 per pass — reasoning models eat short budgets, spike a2-vision)).
+//! `max_tokens` (an override of the per-pass cap, see below)).
+//!
+//! Describe wire (plan `round-16-version-describe-intake` WP-2; settled numbers from
+//! `docs/spikes/describe-budget/FINDINGS.md` §1–3, not re-derived here). Crucible gates its describe
+//! settings on `isLocal` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/providers/
+//! openaiCompatible.ts:271-296`, `src/providers/shared.ts:99-108`); the same gate here is
+//! [`cv_providers::limiter::is_local`] (explicit `local`, else a loopback `openai-compatible`).
+//! For a **local** provider both passes send `reasoning_effort: "none"` (reasoning-on extraction
+//! returns empty content at any practical cap and is no more accurate), the model family's
+//! recommended sampler `temperature` 1.0 / `top_p` 0.95 / `top_k` 64 plus `repeat_penalty` 1.15 /
+//! `repeat_last_n` 256 (Crucible's temperature 0 loops on ~26% of extractions), and per-pass caps
+//! narrative 512 / extraction 2048 unless `max_tokens` is set (then that value caps both). A
+//! **remote** provider gets none of the extra fields and the single cap `max_tokens` (default
+//! 4096), exactly as before this round. Dropped from Crucible: temperature 0 (loops).
+//!
+//! `finish reason "length"`: a pass cut off at its cap with a non-degenerate body is stored
+//! truncated (a long transcription is useful); a repetition loop ([`is_repetition_loop`]) or an
+//! empty body stays a recorded permanent failure. Retry: a `failed` record whose text is the old
+//! `finish reason "length"; output discarded` (every record the pre-round-16 wire produced) is
+//! treated as pending again by the scan (re-described and overwritten); the new failure texts
+//! differ, so a re-failed image is poison-skipped as before.
+//!
 //! Outcome vars (counts only): `described`, `svg`, `failed`, `skipped`, `pruned`, `remaining`.
 
 use std::collections::BTreeSet;
@@ -30,6 +51,8 @@ use std::sync::OnceLock;
 
 use base64::Engine as _;
 use cv_actions::{ConfigSet, StepKind};
+use cv_providers::limiter::is_local;
+use cv_providers::manager::WireExtras;
 use cv_providers::{CompletionRequest, FinishReason, ImagePart, ProviderError, ProviderManager};
 use cv_search::prepare::localized_image_md5;
 use cv_state::ImageDescription;
@@ -49,6 +72,11 @@ const DEGENERATE_MAX_EXTRACTION_CHARS: usize = 20_000;
 /// Crucible `FAILURE_MESSAGE_MAX_CHARS` (`imageDescribe.ts:65`).
 const FAILURE_MAX_CHARS: usize = 500;
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// Local per-pass caps (Crucible `shared.ts:99-108`; FINDINGS §3: narrative max 219 tokens).
+const LOCAL_NARRATIVE_CAP: u32 = 512;
+const LOCAL_EXTRACTION_CAP: u32 = 2048;
+/// The old (pre-round-16) failure text of a pass cut off at its cap; such records are retried.
+const LEGACY_LENGTH_FAILURE: &str = "finish reason \"length\"; output discarded";
 const DEFAULT_PROVIDER: &str = "local";
 /// Media a note may embed as an image (localize's image set plus svg/avif).
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
@@ -327,6 +355,7 @@ fn pass(
     prompt: &str,
     image: &ImagePart,
     max_tokens: u32,
+    extras: &WireExtras,
 ) -> Result<Pass, StepError> {
     let handle =
         tokio::runtime::Handle::try_current().map_err(|_| StepError::failed("no async runtime"))?;
@@ -335,8 +364,10 @@ fn pass(
         user: prompt.to_owned(),
         max_tokens: Some(max_tokens),
         images: vec![image.clone()],
+        extras: extras.clone(),
     };
     match handle.block_on(mgr.complete(provider, model, req)) {
+        Ok(c) if c.finish_reason == FinishReason::Length => Ok(length_pass(&c.text)),
         Ok(c) if c.finish_reason != FinishReason::Stop => Ok(Pass::ImageFailure(format!(
             "finish reason {:?}; output discarded",
             c.raw_finish_reason.as_deref().unwrap_or("missing")
@@ -352,6 +383,101 @@ fn pass(
             Ok(Pass::ImageFailure(format!("{api} returned HTTP {status}")))
         }
         Err(e) => Err(agent::provider_failure(&provider.id, &e)),
+    }
+}
+
+/// A pass that ended at its token cap: a non-degenerate body is kept truncated; an empty body
+/// (reasoning ate the budget) or a repetition loop is an image failure. These texts deliberately
+/// differ from [`LEGACY_LENGTH_FAILURE`] so a re-failed image is not retried forever.
+fn length_pass(text: &str) -> Pass {
+    let t = text.trim();
+    if t.is_empty() {
+        Pass::ImageFailure("token cap reached with no content".into())
+    } else if is_repetition_loop(t) {
+        Pass::ImageFailure("token cap reached in a repetition loop; output discarded".into())
+    } else {
+        tracing::info!(
+            chars = t.len(),
+            "image_describe: storing a cap-truncated pass"
+        );
+        Pass::Text(t.to_owned())
+    }
+}
+
+/// Minimum line / word counts before a repetition verdict (short bodies cannot loop).
+const LOOP_MIN_LINES: usize = 8;
+const LOOP_MIN_WORDS: usize = 64;
+/// Unique-fraction ceiling for a loop. FINDINGS §1: looping extractions had 0–16% unique lines,
+/// genuinely long output >= 56%; 35% sits in the gap.
+const LOOP_MAX_UNIQUE_PERCENT: usize = 35;
+
+/// Whether a cap-truncated body is a degenerate repetition loop. Two signals, either suffices:
+/// the share of unique non-empty lines (multi-line loops) and, for bodies without enough lines,
+/// the share of unique word 4-grams (a loop inside one paragraph). Both need a minimum size so a
+/// short answer is never judged.
+pub(crate) fn is_repetition_loop(text: &str) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() >= LOOP_MIN_LINES {
+        let unique: BTreeSet<&str> = lines.iter().copied().collect();
+        return unique.len() * 100 < lines.len() * LOOP_MAX_UNIQUE_PERCENT;
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < LOOP_MIN_WORDS {
+        return false;
+    }
+    let grams: Vec<&[&str]> = words.windows(4).collect();
+    let unique: BTreeSet<&[&str]> = grams.iter().copied().collect();
+    unique.len() * 100 < grams.len() * LOOP_MAX_UNIQUE_PERCENT
+}
+
+/// A `failed` record that the pre-round-16 wire produced by a `length` finish: describable again.
+fn is_legacy_length_failure(rec: &ImageDescription) -> bool {
+    rec.kind == "failed"
+        && serde_json::from_str::<serde_json::Value>(&rec.raw)
+            .ok()
+            .and_then(|v| v.get("failure")?.as_str().map(str::to_owned))
+            .is_some_and(|f| f.contains(LEGACY_LENGTH_FAILURE))
+}
+
+/// The per-provider describe wire: extra body fields and the two per-pass caps.
+#[derive(Debug, Clone, PartialEq)]
+struct DescribeWire {
+    extras: WireExtras,
+    narrative_cap: u32,
+    extraction_cap: u32,
+}
+
+/// Local providers get Crucible's settings plus the measured sampler (module header); remote
+/// providers get no extras and the single configured cap. `override_cap` is
+/// `[image_describe] max_tokens` (> 0).
+fn describe_wire(
+    provider: &cv_providers::ProviderConfig,
+    override_cap: Option<u32>,
+) -> DescribeWire {
+    if is_local(provider) {
+        DescribeWire {
+            extras: WireExtras {
+                reasoning_effort: Some("none".into()),
+                temperature: Some(1.0),
+                top_p: Some(0.95),
+                top_k: Some(64),
+                repeat_penalty: Some(1.15),
+                repeat_last_n: Some(256),
+            },
+            narrative_cap: override_cap.unwrap_or(LOCAL_NARRATIVE_CAP),
+            extraction_cap: override_cap.unwrap_or(LOCAL_EXTRACTION_CAP),
+        }
+    } else {
+        let cap = override_cap.unwrap_or(DEFAULT_MAX_TOKENS);
+        DescribeWire {
+            extras: WireExtras::default(),
+            narrative_cap: cap,
+            extraction_cap: cap,
+        }
     }
 }
 
@@ -395,10 +521,7 @@ pub(crate) fn run(
             StepError::failed(format!("image_describe: unknown provider {provider_id:?}"))
         })?
         .clone();
-    let max_tokens = cfg
-        .max_tokens
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_TOKENS);
+    let wire = describe_wire(&provider, cfg.max_tokens.filter(|n| *n > 0));
     let prov = Model {
         provider_id: &provider.id,
         model_id: &model,
@@ -423,7 +546,15 @@ pub(crate) fn run(
                 n.skipped += 1;
                 continue;
             };
-            if !md5s.insert(md5.clone()) || st.image_description(&md5)?.is_some() {
+            if !md5s.insert(md5.clone()) {
+                n.skipped += 1;
+                continue;
+            }
+            // Any record poison-skips, except an old `length` failure (retried, overwritten).
+            if st
+                .image_description(&md5)?
+                .is_some_and(|r| !is_legacy_length_failure(&r))
+            {
                 n.skipped += 1;
                 continue;
             }
@@ -445,7 +576,7 @@ pub(crate) fn run(
             n.svg += 1;
             record(&md5, "svg-text", "", &text, None, None)
         } else {
-            match describe(mgr, &provider, &model, &bytes, max_tokens)? {
+            match describe(mgr, &provider, &model, &bytes, &wire)? {
                 Ok((narrative, extraction)) => {
                     n.described += 1;
                     record(&md5, "vision", &narrative, &extraction, Some(&prov), None)
@@ -473,7 +604,7 @@ fn describe(
     provider: &cv_providers::ProviderConfig,
     model: &str,
     bytes: &[u8],
-    max_tokens: u32,
+    wire: &DescribeWire,
 ) -> Result<Result<(String, String), String>, StepError> {
     let (mime, data) = match prepare_image(bytes) {
         Ok(x) => x,
@@ -483,11 +614,27 @@ fn describe(
         mime,
         base64: base64::engine::general_purpose::STANDARD.encode(data),
     };
-    let narrative = match pass(mgr, provider, model, NARRATIVE_PROMPT, &part, max_tokens)? {
+    let narrative = match pass(
+        mgr,
+        provider,
+        model,
+        NARRATIVE_PROMPT,
+        &part,
+        wire.narrative_cap,
+        &wire.extras,
+    )? {
         Pass::Text(t) => t,
         Pass::ImageFailure(f) => return Ok(Err(format!("narrative: {f}"))),
     };
-    let extraction = match pass(mgr, provider, model, EXTRACTION_PROMPT, &part, max_tokens)? {
+    let extraction = match pass(
+        mgr,
+        provider,
+        model,
+        EXTRACTION_PROMPT,
+        &part,
+        wire.extraction_cap,
+        &wire.extras,
+    )? {
         Pass::Text(t) => t,
         Pass::ImageFailure(f) => return Ok(Err(format!("extraction: {f}"))),
     };

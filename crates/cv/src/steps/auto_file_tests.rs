@@ -58,7 +58,7 @@ kind = "post"
 
 /// Records the children a step spawns.
 #[derive(Default)]
-struct Rec(Mutex<Vec<(String, Map<String, Value>)>>);
+struct Rec(Mutex<Vec<(String, Map<String, Value>)>>, Mutex<Vec<String>>);
 
 impl ChildSpawner for Rec {
     fn spawn_child(&self, id: &str, params: Map<String, Value>) -> Result<String, String> {
@@ -66,9 +66,25 @@ impl ChildSpawner for Rec {
         v.push((id.to_owned(), params));
         Ok(format!("job-{}", v.len()))
     }
+
+    fn spawn_child_at(
+        &self,
+        id: &str,
+        _: Map<String, Value>,
+        path: &str,
+    ) -> Result<String, String> {
+        let mut v = self.1.lock().unwrap();
+        v.push(format!("{id}@{path}"));
+        Ok(format!("enrich-{}", v.len()))
+    }
 }
 
 impl Rec {
+    /// The `spawn_child_at` calls, as `action@path`.
+    fn enriched(&self) -> Vec<String> {
+        self.1.lock().unwrap().clone()
+    }
+
     fn kinds(&self) -> Vec<String> {
         self.0
             .lock()
@@ -171,6 +187,9 @@ fn sole_clip_is_new_and_never_self_matched() {
     assert!(var(&o, "target").is_none() && var(&o, "kind").is_none());
     assert!(e.read("Clippings/Solo.md").is_some());
     assert!(rec.kinds().is_empty());
+    // Left in place: enriched in place.
+    assert_eq!(rec.enriched(), ["clip-enrich@Clippings/Solo.md"]);
+    assert_eq!(var(&o, "enrich_job_id"), Some("enrich-1"));
 }
 
 #[test]
@@ -187,6 +206,8 @@ fn contained_clip_of_an_indexed_note_is_trashed_and_the_target_untouched() {
     assert!(trashed(&e));
     assert_eq!(e.read("Notes/Orig.md").unwrap(), orig);
     assert!(rec.kinds().is_empty());
+    // The trashed clip is not enriched, nor the unchanged target.
+    assert!(rec.enriched().is_empty());
 }
 
 #[test]
@@ -215,6 +236,8 @@ fn fuller_clip_replaces_a_stub_and_ticks_only_when_complete() {
         assert!(t.contains("p119") && t.contains("complete:"), "{t}");
         assert!(e.read("Clippings/Full.md").is_none());
         assert!(rec.kinds().is_empty(), "replaced files nothing");
+        // The target took the clip's body: it is the one enriched.
+        assert_eq!(rec.enriched(), ["clip-enrich@Notes/Stub.md"]);
         let db = e.state.lock().unwrap();
         let st = db
             .tracker_item_status(
@@ -239,6 +262,7 @@ fn identity_match_without_containment_keeps_the_clip_with_duplicate_of() {
     let t = e.read("Clippings/Other.md").expect("kept");
     assert!(t.contains("duplicate-of: \"[[Notes/Orig]]\""), "{t}");
     assert!(rec.kinds().is_empty(), "no kind matches other.example");
+    assert_eq!(rec.enriched(), ["clip-enrich@Clippings/Other.md"]);
 }
 
 /// Round 11 Decision 4: `[[serial]]` rows (config order) file a matching clip as their `kind`
@@ -334,6 +358,12 @@ fn blog_newsletter_and_hosts_rules_pick_the_kind() {
             "{url}"
         );
         assert!(e.read("Clippings/H.md").is_some());
+        // A filed clip is enriched by `file-as-kind` on the moved path; an unfiled one in place.
+        let enriched: Vec<String> = match want {
+            Some(_) => vec![],
+            None => vec!["clip-enrich@Clippings/H.md".into()],
+        };
+        assert_eq!(rec.enriched(), enriched, "{url}");
     }
 }
 
@@ -375,7 +405,7 @@ fn host_row_matches_blog_and_newsletter() {
 }
 
 #[test]
-fn e1_clip_auto_file_has_no_event_starter_and_runs_last_in_clip_images() {
+fn filing_first_clip_images_only_files_and_enrichment_is_one_serialized_job() {
     use cv_actions::{Starter, StepKind};
     let c = example_config();
     let auto = c.armed("clip-auto-file").expect("armed");
@@ -383,18 +413,37 @@ fn e1_clip_auto_file_has_no_event_starter_and_runs_last_in_clip_images() {
         auto.starters
             .iter()
             .all(|s| !matches!(s, Starter::Event { .. })),
-        "an independent event starter could run before localize"
+        "clip-auto-file runs only as clip-images' child"
     );
     assert_eq!(auto.steps.len(), 1);
     assert_eq!(auto.steps[0].kind, StepKind::AutoFile);
+    // Plan round-16 WP-5 (1): filing is the first (and only) work clip detection enqueues.
     let images = c.armed("clip-images").expect("armed");
     let kinds: Vec<StepKind> = images.steps.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, [StepKind::RunAction]);
+    let only = images.steps[0].run_action().unwrap();
+    assert_eq!(only.action_id, "clip-auto-file");
+    // (2) a filed clip is enriched by file-as-kind's last step, after the move.
+    let file = c.armed("file-as-kind").expect("armed");
+    assert_eq!(file.steps[0].kind, StepKind::Move);
+    let last = file.steps.last().unwrap().run_action().unwrap();
+    assert_eq!(last.action_id, "clip-enrich");
+    // (3) one job localizes then describes, under the shared key.
+    let enrich = c.armed("clip-enrich").expect("armed");
+    let kinds: Vec<StepKind> = enrich.steps.iter().map(|s| s.kind).collect();
     assert_eq!(
         kinds,
-        [StepKind::Localize, StepKind::RunAction, StepKind::RunAction]
+        [
+            StepKind::Localize,
+            StepKind::ImageDescribe,
+            StepKind::SearchUpsert
+        ]
     );
-    let last = images.steps.last().unwrap().run_action().unwrap();
-    assert_eq!(last.action_id, "clip-auto-file");
+    let keys = enrich
+        .resources
+        .derive(Some("A/b.md"), &Map::new())
+        .unwrap();
+    assert!(keys.iter().any(|k| k == "clip::enrich"), "{keys:?}");
     assert!(
         StepKind::AutoFile
             .intrinsic_resource_keys()
@@ -448,6 +497,60 @@ fn clip_already_in_its_kind_folder_is_a_noop_and_rerun_is_stable() {
         assert!(var(&o, "child_job_id").is_none());
         assert!(!trashed(&e));
         assert_eq!(e.read(&p).as_deref(), Some(clip.as_str()));
+        // Already filed: enriched where it sits.
+        assert_eq!(rec.enriched(), [format!("clip-enrich@{p}")]);
+    }
+}
+
+/// Plan round-16 WP-5 (4): the dedup verdict is the same whether the clip's images are still
+/// remote (markdown alt text + URL) or already localized (wiki embed), through both the
+/// containment check (`merged` vs `duplicate`) and the supersede engine (`replaced`).
+#[test]
+fn dedup_verdicts_ignore_remote_vs_localized_image_embeds() {
+    let alt = words("alt", 0, 40);
+    let remote = format!("![{alt}](https://cdn.example/img/a.png)");
+    let local = "![[attachments/clip/a.png]]".to_owned();
+    // Containment: a target holding the localized text; the clip still has its remote image. The
+    // long alt text alone would drop containment below the threshold if it counted.
+    for clip_img in [&remote, &local] {
+        let body = words("c", 0, 30);
+        let orig = doc(
+            "source: https://dup.example/post\n",
+            &format!("{body}\n\n{local}\n"),
+        );
+        let clip = doc(
+            "source: https://dup.example/post?utm_source=feed\n",
+            &format!("{body}\n\n{clip_img}\n"),
+        );
+        let e = world(&[("Notes/Orig.md", orig), ("Clippings/Dup.md", clip)]);
+        let rec = Rec::default();
+        let o = run(&e, "Clippings/Dup.md", &rec);
+        assert_eq!(var(&o, "action"), Some("merged"), "{clip_img}");
+    }
+    // Supersede: a fuller clip replaces a stub; the real body (remote image included) is written.
+    for clip_img in [&remote, &local] {
+        let stub = doc(
+            "source: https://www.paid.example/p/deep\ncomplete: false\n",
+            &format!("{}\n\n{local}\n", words("p", 0, 30)),
+        );
+        let full = format!(
+            "{}\n\n{clip_img}\n\n{}",
+            words("p", 0, 30),
+            words("p", 30, 90)
+        );
+        let clip = doc("source: https://www.paid.example/p/deep?ref=x\n", &full);
+        let e = world(&[("Notes/Stub.md", stub), ("Clippings/Full.md", clip)]);
+        row(
+            &e,
+            "https://www.paid.example/feed",
+            "Notes/Stub.md",
+            "https://www.paid.example/p/deep",
+        );
+        let rec = Rec::default();
+        let o = run(&e, "Clippings/Full.md", &rec);
+        assert_eq!(var(&o, "action"), Some("replaced"), "{clip_img}");
+        let t = e.read("Notes/Stub.md").unwrap();
+        assert!(t.contains(clip_img.as_str()), "body written unchanged: {t}");
     }
 }
 

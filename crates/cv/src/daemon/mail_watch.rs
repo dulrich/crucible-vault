@@ -1,25 +1,28 @@
-//! Maildir watch (plan `intake-followups-mail-youtube` WP-3): enqueue `track-mail` as soon as a
-//! dropped message settles, instead of waiting for the 15-minute schedule (which stays as the
-//! backstop, untouched).
+//! Maildir watch (plan `intake-followups-mail-youtube` WP-3, readiness reworked by plan round-16
+//! WP-6): enqueue `track-mail` as soon as a dropped message is fully written, instead of waiting
+//! for the 15-minute schedule (which stays as the backstop, untouched).
 //!
 //! Pattern-matched on the vault watcher (`crates/cv-vault/src/watcher.rs`): raw `notify` events
-//! are only *hints*. A hint on a message path (`<maildir>/*.eml`, or any non-dot file in
-//! `<maildir>/new/`) restarts that path's quiet timer; once every pending path has been quiet for
-//! [`Timings::quiet`] (~5 s) **and** its size is unchanged across two consecutive checks
-//! [`Timings::check`] (~1 s) apart, one enqueue fires (audit E3). A file still being written is
-//! therefore not enqueued until it settles. The enqueue uses the scheduler's own request
+//! are only *hints*. A message path (`<maildir>/*.eml`, or any non-dot file in `<maildir>/new/`) is
+//! **ready** on a writer-finished event — rename into place (`Modify(Name(To|Both))`: a browser
+//! `.part` → `.eml`, mbsync `tmp/` → `new/`) or `Access(Close(Write))` — **and** when the pure
+//! completeness check [`cv_ingest::mail::is_complete`] passes on its bytes (headers terminated,
+//! every MIME multipart closed). Ready fires one enqueue with no added wait; an incomplete
+//! message waits for its next event. There is no quiet/size-stable timer. The `track-mail` scan
+//! applies the same predicate to every candidate it handles, so a complete message B never gets an
+//! incomplete message A consumed. The enqueue uses the scheduler's own request
 //! ([`RunRequest::schedule`]), so its dedupe key (`track-mail::schedule`) collapses a burst — and a
 //! pending scheduled run — into one queued job.
 //!
 //! The watch is non-recursive on `<maildir>` and `<maildir>/new` (each only if it exists; a
 //! missing directory is one `warn!` per (re)build, never retried until the config changes). The
 //! loop re-reads `[mail]` every check, so a config reload rebuilds the watcher; daemon stop ends
-//! the task with the other background tasks. It never reads message contents and never writes.
-//! No Crucible equivalent exists (Crucible had no mail intake); nothing Obsidian-induced is carried.
+//! the task with the other background tasks. It only reads candidate bytes for the completeness
+//! check and never writes. No Crucible equivalent exists (Crucible had no mail intake); nothing
+//! Obsidian-induced is carried.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cv_actions::pipelines::MailPipeline;
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -30,19 +33,16 @@ use crate::runner::{RunRequest, Runner};
 /// The action a settled drop enqueues.
 pub(crate) const ACTION: &str = "track-mail";
 
-/// Readiness timings.
+/// Watch-loop timing.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Timings {
-    /// A path is examined once no event touched it for this long.
-    pub quiet: Duration,
-    /// Loop period; also the spacing of the two size checks.
+    /// Period of the config re-read (events are handled as they arrive, not on this tick).
     pub check: Duration,
 }
 
 impl Default for Timings {
     fn default() -> Self {
         Self {
-            quiet: Duration::from_secs(5),
             check: Duration::from_secs(1),
         }
     }
@@ -70,69 +70,29 @@ fn is_message(root: &Path, p: &Path) -> bool {
     parent == root.join("new")
 }
 
-/// Whether `kind` hints at a (possibly new) message: create, rename-into, write, close-write.
-fn is_hint(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Create(_)
-            | EventKind::Modify(_)
-            | EventKind::Access(notify::event::AccessKind::Close(_))
-    )
-}
-
-#[derive(Debug)]
-struct Pending {
-    last_event: Instant,
-    size: Option<u64>,
-}
-
-/// The per-path debounce state.
-#[derive(Debug, Default)]
-struct Settle {
-    pending: HashMap<PathBuf, Pending>,
-}
-
-impl Settle {
-    fn hint(&mut self, p: PathBuf, now: Instant) {
-        self.pending.insert(
-            p,
-            Pending {
-                last_event: now,
-                size: None,
-            },
-        );
-    }
-
-    /// One check: `true` when every pending path is quiet and size-stable (then clears).
-    fn ready(&mut self, now: Instant, quiet: Duration) -> bool {
-        if self.pending.is_empty()
-            || self
-                .pending
-                .values()
-                .any(|e| now.duration_since(e.last_event) < quiet)
-        {
-            return false;
+/// The path an event says a writer just finished with, if any: rename into place
+/// (`Name(To)`; `Name(Both)` carries `[from, to]`) or close-after-write.
+fn finished_paths(ev: &notify::Event) -> Vec<&Path> {
+    use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
+    match &ev.kind {
+        EventKind::Modify(ModifyKind::Name(RenameMode::To))
+        | EventKind::Access(AccessKind::Close(AccessMode::Write)) => {
+            ev.paths.iter().map(PathBuf::as_path).collect()
         }
-        let mut stable = true;
-        self.pending.retain(|p, e| {
-            let Ok(md) = std::fs::metadata(p) else {
-                return false; // moved away or deleted: nothing to wait for
-            };
-            if !md.is_file() {
-                return false;
-            }
-            if e.size != Some(md.len()) {
-                e.size = Some(md.len());
-                stable = false;
-            }
-            true
-        });
-        if stable && !self.pending.is_empty() {
-            self.pending.clear();
-            return true;
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+            ev.paths.last().map(PathBuf::as_path).into_iter().collect()
         }
-        false
+        _ => Vec::new(),
     }
+}
+
+/// Whether `ev` makes some message under `root` ready: a writer-finished event on a message path
+/// whose bytes pass [`cv_ingest::mail::is_complete`].
+fn ready(root: &Path, ev: &notify::Event) -> bool {
+    finished_paths(ev).into_iter().any(|p| {
+        is_message(root, p)
+            && std::fs::read(p).is_ok_and(|bytes| cv_ingest::mail::is_complete(&bytes))
+    })
 }
 
 type Rx = mpsc::UnboundedReceiver<notify::Result<notify::Event>>;
@@ -163,8 +123,18 @@ fn build(root: &Path) -> Option<(notify::RecommendedWatcher, Rx)> {
     any.then_some((w, rx))
 }
 
+/// Awaits the next watcher event (never resolves while no watcher is active).
+async fn next_event(
+    active: &mut Option<(notify::RecommendedWatcher, Rx)>,
+) -> Option<notify::Result<notify::Event>> {
+    match active {
+        Some((_, rx)) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The watch loop: `config` yields the maildir to watch (re-read every check), `enqueue` fires
-/// once per settled drop.
+/// once per batch of events that made a message ready.
 pub(crate) async fn run(
     config: impl Fn() -> Option<PathBuf> + Send + 'static,
     enqueue: impl Fn() + Send + 'static,
@@ -173,39 +143,47 @@ pub(crate) async fn run(
 ) {
     let mut current: Option<PathBuf> = None;
     let mut active: Option<(notify::RecommendedWatcher, Rx)> = None;
-    let mut settle = Settle::default();
     let mut tick = tokio::time::interval(timings.check);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
+        let first = tokio::select! {
             _ = stop.changed() => return,
-            _ = tick.tick() => {}
-        }
+            _ = tick.tick() => None,
+            ev = next_event(&mut active) => Some(ev),
+        };
         let want = config();
         if want != current {
             active = None;
-            settle = Settle::default();
             if let Some(root) = &want {
                 active = build(root);
             }
             current = want;
+            continue; // events from a replaced watcher are dropped with it
         }
+        let Some(first) = first else { continue };
         let (Some(root), Some((_, rx))) = (&current, active.as_mut()) else {
             continue;
         };
-        let now = Instant::now();
-        while let Ok(ev) = rx.try_recv() {
-            let Ok(ev) = ev else { continue };
-            if !is_hint(&ev.kind) {
-                continue;
-            }
-            for p in ev.paths {
-                if is_message(root, &p) {
-                    settle.hint(p, now);
+        // One batch: the event that woke us plus whatever already queued behind it.
+        let mut fire = false;
+        let mut closed = false;
+        let mut next = Some(first);
+        while let Some(ev) = next {
+            match ev {
+                Some(Ok(ev)) => fire |= ready(root, &ev),
+                Some(Err(_)) => {}
+                None => {
+                    closed = true;
+                    break;
                 }
             }
+            next = rx.try_recv().ok().map(Some);
         }
-        if settle.ready(now, timings.quiet) {
+        if closed {
+            active = None; // channel closed: rebuild on the next config check
+            current = None;
+        }
+        if fire {
             enqueue();
         }
     }

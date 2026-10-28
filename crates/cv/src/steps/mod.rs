@@ -344,6 +344,18 @@ impl From<cv_index::Error> for StepError {
 pub trait ChildSpawner {
     /// Enqueues `action_id` with `params`; returns the child job id.
     fn spawn_child(&self, action_id: &str, params: Map<String, Value>) -> Result<String, String>;
+
+    /// Enqueues `action_id` with `params` on `active_path` instead of the run's own active note
+    /// (`auto_file` hands enrichment to a supersede target; plan round-16 WP-5).
+    fn spawn_child_at(
+        &self,
+        action_id: &str,
+        params: Map<String, Value>,
+        active_path: &str,
+    ) -> Result<String, String> {
+        let _ = (action_id, params, active_path);
+        Err("spawning on another path is not supported here".into())
+    }
 }
 
 /// A boolean job param `key`: a bool, or the string `"true"`/`"false"` (any case); anything

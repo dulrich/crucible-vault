@@ -445,6 +445,7 @@ pub(crate) fn run(
         user,
         max_tokens,
         images: Vec::new(),
+        extras: cv_providers::manager::WireExtras::default(),
     };
     let completion = handle
         .block_on(mgr.complete(&provider, &model, req))

@@ -29,6 +29,10 @@ use mail_parser::MessageParser;
 mod clean;
 pub use clean::{clean_body, clean_body_with, strip_html_chrome};
 
+#[path = "mail_ready.rs"]
+mod ready;
+pub use ready::is_complete;
+
 /// One parsed newsletter message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailPost {

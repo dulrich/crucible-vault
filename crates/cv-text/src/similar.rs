@@ -19,7 +19,7 @@ pub const SHINGLE_WORDS: usize = 4;
 
 /// Strip markdown/HTML residue, case-fold, and return the alphanumeric word tokens joined by single spaces.
 ///
-/// Removed: HTML tags and entities, markdown link/image targets (`](...)`), bare URLs (`http(s)://`, `www.`); markdown markers (`#`, `*`, `_`, `>`, `-`, backticks) are non-alphanumeric and so act as separators.
+/// Removed: HTML tags and entities, whole image embeds (`![alt](target)` and `![[target]]`, alt text included), markdown link targets (`](...)`), bare URLs (`http(s)://`, `www.`); markdown markers (`#`, `*`, `_`, `>`, `-`, backticks) are non-alphanumeric and so act as separators.
 pub fn normalize(text: &str) -> String {
     tokens(text).join(" ")
 }
@@ -75,6 +75,14 @@ fn strip_residue(text: &str) -> String {
         {
             out.push(' ');
             i += rel;
+        } else if c == '!'
+            && chars.get(i + 1) == Some(&'[')
+            && let Some(len) = image_embed_len(&chars[i..])
+        {
+            // Image embed (`![alt](target)`, `![[target]]`): alt and target contribute nothing,
+            // so a clip's verdict is the same before and after localization (plan round-16 WP-5).
+            out.push(' ');
+            i += len;
         } else if c == ']' && chars.get(i + 1) == Some(&'(') {
             // Link/image target: skip to the closing paren on the same line.
             let end = chars[i + 2..]
@@ -99,6 +107,23 @@ fn strip_residue(text: &str) -> String {
         }
     }
     out
+}
+
+/// Length (in chars) of an image embed at the start of `s` (which starts with `![`), if it is one
+/// closed on the same line: `![[target]]`, or `![alt](target)`.
+fn image_embed_len(s: &[char]) -> Option<usize> {
+    let line = s.iter().position(|&c| c == '\n').unwrap_or(s.len());
+    let s = &s[..line];
+    if s.get(2) == Some(&'[') {
+        let close = s[3..].windows(2).position(|w| w == [']', ']'])?;
+        return Some(3 + close + 2);
+    }
+    let alt_end = 2 + s[2..].iter().position(|&c| c == ']')?;
+    if s.get(alt_end + 1) != Some(&'(') {
+        return None;
+    }
+    let close = s[alt_end + 2..].iter().position(|&c| c == ')')?;
+    Some(alt_end + 2 + close + 1)
 }
 
 /// Length (in chars) of an entity `&name;` / `&#123;` / `&#x1f;` at the start of `s`, if it is one.
@@ -439,6 +464,26 @@ mod tests {
         assert!((containment("brown fox", large) - 1.0).abs() < f64::EPSILON);
         assert!((containment("brown cat", large) - 0.5).abs() < f64::EPSILON);
         assert!((jaccard("a b", "a b") - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// Plan round-16 WP-5 (4): a remote image with alt text and its localized wiki embed (or
+    /// localized markdown target) normalize identically, so localization never moves a verdict.
+    #[test]
+    fn image_embeds_contribute_nothing() {
+        let remote = "Intro words here.\n\n![A chart of quarterly widget sales](https://cdn.example/a.png)\n\nOutro words.";
+        let wiki = "Intro words here.\n\n![[attachments/clip/a.png]]\n\nOutro words.";
+        let local_md = "Intro words here.\n\n![](attachments/clip/a.png)\n\nOutro words.";
+        let want = "intro words here outro words";
+        assert_eq!(normalize(remote), want);
+        assert_eq!(normalize(wiki), want);
+        assert_eq!(normalize(local_md), want);
+        // A linked image keeps neither alt nor either target; a plain link keeps its text.
+        assert_eq!(
+            normalize("[![alt text](i.png)](https://x.example) see [more](u)"),
+            "see more"
+        );
+        // An unclosed embed is ordinary text.
+        assert_eq!(normalize("![open alt"), "open alt");
     }
 
     #[test]
