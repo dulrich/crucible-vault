@@ -151,8 +151,12 @@ async fn rename_into_place_enqueues_on_the_event() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.count(), 0, "a .part file is not a message path");
     std::fs::rename(&part, d.path().join("mail.eml")).expect("rename");
-    // No quiet window: well under the old ~5 s settle.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // No quiet window: enqueued well under the old ~5 s settle. Polled (not a fixed sleep) so a
+    // loaded machine's slower inotify delivery does not flake the test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while rig.count() == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(rig.finish().await, 1);
 }
 
