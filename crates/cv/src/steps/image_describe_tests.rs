@@ -13,7 +13,8 @@ use cv_vault::test_support::LiveFixture;
 use serde_json::{Value, json};
 
 use super::{
-    MAX_LONG_EDGE, extract_svg_text, fit_long_edge, fnv1a32_hex, parse, prepare_image, run,
+    MAX_LONG_EDGE, describe_wire, extract_svg_text, fit_long_edge, fnv1a32_hex, is_repetition_loop,
+    parse, prepare_image, run,
 };
 use crate::steps::testkit::StepEnv;
 use crate::steps::{DeferCause, StepError, StepOutcome};
@@ -69,6 +70,17 @@ fn ok(text: &str) -> (u16, String) {
 }
 
 fn config(base: &str, enabled: bool, provider: &str) -> ConfigSet {
+    config_with(base, enabled, provider, "", "")
+}
+
+/// `config` plus raw extra lines for the `fake` provider table and the `[image_describe]` table.
+fn config_with(
+    base: &str,
+    enabled: bool,
+    provider: &str,
+    provider_extra: &str,
+    describe_extra: &str,
+) -> ConfigSet {
     let providers = format!(
         r#"
 [[provider]]
@@ -76,6 +88,7 @@ id = "fake"
 kind = "openai-compatible"
 base_url = "{base}"
 api_key_env = "CV_TEST_KEY"
+{provider_extra}
 [[provider.models]]
 id = "vl"
 
@@ -89,7 +102,7 @@ id = "vl"
 "#
     );
     let pipelines = format!(
-        "[image_describe]\nenabled = {enabled}\nprovider = \"{provider}\"\nmodel = \"vl\"\n"
+        "[image_describe]\nenabled = {enabled}\nprovider = \"{provider}\"\nmodel = \"vl\"\n{describe_extra}\n"
     );
     let mut c = ConfigSet::new();
     let files = BTreeMap::from([
@@ -237,7 +250,17 @@ async fn describes_then_skips_recorded() {
         assert_eq!(bodies.len(), 2);
         let msgs = bodies[0]["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1, "no system message");
-        assert_eq!(bodies[0]["max_tokens"], 4096);
+        // Loopback provider = local: Crucible's per-pass caps plus the measured sampler.
+        assert_eq!(bodies[0]["max_tokens"], 512);
+        assert_eq!(bodies[1]["max_tokens"], 2048);
+        for b in &bodies {
+            assert_eq!(b["reasoning_effort"], "none");
+            assert_eq!(b["temperature"], 1.0);
+            assert_eq!(b["top_p"], 0.95);
+            assert_eq!(b["top_k"], 64);
+            assert_eq!(b["repeat_penalty"], 1.15);
+            assert_eq!(b["repeat_last_n"], 256);
+        }
         let url = msgs[0]["content"][1]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
     }
@@ -427,4 +450,152 @@ fn prune_transient_and_degenerate_only() {
         .map(|m| (*m).to_owned())
         .collect();
     assert_eq!(left, ["p1", "s1", "v1"]);
+}
+
+// ---- round 16 WP-2: wire, `length`, retry ----
+
+fn length(text: &str) -> (u16, String) {
+    (
+        200,
+        json!({"choices": [{"message": {"content": text}, "finish_reason": "length"}]}).to_string(),
+    )
+}
+
+fn provider_of(base: &str, extra: &str) -> cv_providers::config::ProviderConfig {
+    cv_providers::config::ProvidersConfig::from_toml(&format!(
+        "[[provider]]\nid = \"p\"\nkind = \"openai-compatible\"\nbase_url = \"{base}\"\n{extra}"
+    ))
+    .unwrap()
+    .providers
+    .remove(0)
+}
+
+#[test]
+fn wire_is_local_gated_and_override_caps_both_passes() {
+    let local = describe_wire(&provider_of("http://127.0.0.1:1/v1", ""), None);
+    assert_eq!((local.narrative_cap, local.extraction_cap), (512, 2048));
+    assert_eq!(local.extras.reasoning_effort.as_deref(), Some("none"));
+    assert_eq!(local.extras.top_k, Some(64));
+    let over = describe_wire(&provider_of("http://127.0.0.1:1/v1", ""), Some(800));
+    assert_eq!((over.narrative_cap, over.extraction_cap), (800, 800));
+    // Remote: nothing extra, the single 4096 cap as before; explicit `local = true` flips it.
+    let remote = describe_wire(&provider_of("https://api.example.com/v1", ""), None);
+    assert_eq!(remote.extras, cv_providers::manager::WireExtras::default());
+    assert_eq!((remote.narrative_cap, remote.extraction_cap), (4096, 4096));
+    let forced = describe_wire(
+        &provider_of("https://api.example.com/v1", "local = true\n"),
+        None,
+    );
+    assert_eq!(forced.extras.reasoning_effort.as_deref(), Some("none"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_body_carries_no_new_fields_and_old_cap() {
+    let (base, seen) = fake_provider(vec![ok("A."), ok("T.")]).await;
+    let e = Arc::new(clip_env(png(8, 8), &[]));
+    let cfg = config_with(&base, true, "fake", "local = false", "");
+    exec_async(Arc::clone(&e), cfg, "").await.unwrap();
+    for b in seen.bodies() {
+        let mut keys: Vec<&str> = b.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["max_tokens", "messages", "model"]);
+        assert_eq!(b["max_tokens"], 4096);
+    }
+    // The override applies to a local provider's both passes.
+    let (base, seen) = fake_provider(vec![ok("A."), ok("T.")]).await;
+    let e = Arc::new(clip_env(png(8, 8), &[]));
+    let cfg = config_with(&base, true, "fake", "", "max_tokens = 800");
+    exec_async(Arc::clone(&e), cfg, "").await.unwrap();
+    assert!(seen.bodies().iter().all(|b| b["max_tokens"] == 800));
+}
+
+#[test]
+fn repetition_loop_detector() {
+    // Multi-line loop: 3 unique lines out of 39.
+    let looped = "Model A: 1\nModel B: 2\nModel C: 3\n".repeat(13);
+    assert!(is_repetition_loop(&looped));
+    // Genuinely long, all-unique lines.
+    let long: String = (0..60)
+        .map(|i| format!("row {i}: value {}\n", i * 7))
+        .collect();
+    assert!(!is_repetition_loop(&long));
+    // One-paragraph loop (no newlines).
+    assert!(is_repetition_loop(&"the quick brown fox jumps ".repeat(30)));
+    let prose: String = (0..80).map(|i| format!("w{i} ")).collect();
+    assert!(!is_repetition_loop(&prose));
+    // Short bodies are never judged.
+    assert!(!is_repetition_loop("a\na\na"));
+    assert!(!is_repetition_loop(""));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_degenerate_length_is_stored_truncated() {
+    let long: String = (0..60).map(|i| format!("row {i}: value {i}\n")).collect();
+    let (base, _mock) = fake_provider(vec![ok("A chart."), length(&long)]).await;
+    let e = Arc::new(clip_env(png(8, 8), &[]));
+    let out = exec_async(Arc::clone(&e), config(&base, true, "fake"), "")
+        .await
+        .unwrap();
+    assert_eq!((var(&out, "described"), var(&out, "failed")), (1, 0));
+    let r = rec(&e, MD5_A).unwrap();
+    assert_eq!(r.kind, "vision");
+    assert_eq!(r.extraction, long.trim());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn length_loop_or_empty_is_a_recorded_failure() {
+    let looped = "Model A: 1\nModel B: 2\n".repeat(30);
+    for reply in [length(&looped), length("")] {
+        let (base, _mock) = fake_provider(vec![ok("A chart."), reply]).await;
+        let e = Arc::new(clip_env(png(8, 8), &[]));
+        let out = exec_async(Arc::clone(&e), config(&base, true, "fake"), "")
+            .await
+            .unwrap();
+        assert_eq!((var(&out, "described"), var(&out, "failed")), (0, 1));
+        let r = rec(&e, MD5_A).unwrap();
+        assert_eq!(r.kind, "failed");
+        assert!(!r.raw.contains(super::LEGACY_LENGTH_FAILURE), "{}", r.raw);
+        // Re-run: poison-skipped, no new request.
+        let before = rec(&e, MD5_A);
+        let out = exec_async(Arc::clone(&e), config(&base, true, "fake"), "")
+            .await
+            .unwrap();
+        assert_eq!(var(&out, "skipped"), 1);
+        assert_eq!(rec(&e, MD5_A), before);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_length_failure_is_retried_and_other_failures_are_not() {
+    let (base, seen) = fake_provider(vec![ok("A chart."), ok("Title: Q3")]).await;
+    let e = Arc::new(clip_env(
+        png(8, 8),
+        &[("att/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_MD5.png", png(9, 9))],
+    ));
+    {
+        let mut st = e.state.lock().unwrap();
+        st.put_image_description(&super::record(
+            MD5_A,
+            "failed",
+            "",
+            "",
+            None,
+            Some("extraction: finish reason \"length\"; output discarded"),
+        ))
+        .unwrap();
+        // B carries a different permanent failure and stays poison-skipped.
+        st.put_image_description(&super::record(MD5_B, "failed", "", "", None, Some("boom")))
+            .unwrap();
+    }
+    let out = exec_async(
+        Arc::clone(&e),
+        config(&base, true, "fake"),
+        "scope = \"vault\"",
+    )
+    .await
+    .unwrap();
+    assert_eq!(var(&out, "described"), 1);
+    assert_eq!(seen.bodies().len(), 2, "only the length-failed image");
+    assert_eq!(rec(&e, MD5_A).unwrap().kind, "vision");
+    assert_eq!(rec(&e, MD5_B).unwrap().kind, "failed");
 }

@@ -105,6 +105,51 @@ fn chat_messages(system: &str, user_msg: Value, has_images: bool) -> Value {
     }
 }
 
+/// Optional openai-compatible body fields (round 16 WP-2: Crucible's describe wire,
+/// `openaiCompatible.ts:271-296`, plus the measured sampler). Every field unset (the default) adds
+/// nothing to the body, so a request that sets none is byte-for-byte the pre-round-16 one. Only
+/// the `openai-compatible` kind carries them; other kinds ignore them (their wires have no such
+/// fields).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WireExtras {
+    /// `reasoning_effort` (e.g. `"none"`).
+    pub reasoning_effort: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
+    pub repeat_penalty: Option<f64>,
+    pub repeat_last_n: Option<u32>,
+}
+
+/// Adds the set `extras` to an openai-compatible request body; a no-op for every other kind and
+/// for unset fields.
+pub fn apply_extras(kind: ProviderKind, wire: &mut WireRequest, extras: &WireExtras) {
+    if kind != ProviderKind::OpenaiCompatible {
+        return;
+    }
+    let Some(body) = wire.body.as_object_mut() else {
+        return;
+    };
+    if let Some(v) = &extras.reasoning_effort {
+        body.insert("reasoning_effort".into(), json!(v));
+    }
+    if let Some(v) = extras.temperature {
+        body.insert("temperature".into(), json!(v));
+    }
+    if let Some(v) = extras.top_p {
+        body.insert("top_p".into(), json!(v));
+    }
+    if let Some(v) = extras.top_k {
+        body.insert("top_k".into(), json!(v));
+    }
+    if let Some(v) = extras.repeat_penalty {
+        body.insert("repeat_penalty".into(), json!(v));
+    }
+    if let Some(v) = extras.repeat_last_n {
+        body.insert("repeat_last_n".into(), json!(v));
+    }
+}
+
 /// Builds a completion request for an HTTP kind. Empty `images` = the text-only wire shape.
 pub fn build_completion(
     p: &ProviderConfig,
@@ -605,6 +650,55 @@ mod image_wire_tests {
         build_completion(&prov(kind), Some("k"), "m", system, "U", images, 7)
             .unwrap()
             .body
+    }
+
+    fn with_extras(kind: &str, extras: &WireExtras) -> Value {
+        let p = prov(kind);
+        let mut w = build_completion(&p, Some("k"), "m", "S", "U", &[], 7).unwrap();
+        apply_extras(p.kind, &mut w, extras);
+        w.body
+    }
+
+    #[test]
+    fn unset_extras_leave_every_kind_byte_identical() {
+        for kind in ["openai-compatible", "anthropic", "google", "ollama"] {
+            let p = prov(kind);
+            let plain = build_completion(&p, Some("k"), "m", "S", "U", &img(), 7).unwrap();
+            let mut with = plain.clone();
+            apply_extras(p.kind, &mut with, &WireExtras::default());
+            assert_eq!(with.body.to_string(), plain.body.to_string(), "{kind}");
+        }
+        // The pre-round-16 openai-compatible text-only JSON, literally.
+        assert_eq!(
+            with_extras("openai-compatible", &WireExtras::default()).to_string(),
+            json!({"model": "m", "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}], "max_tokens": 7}).to_string()
+        );
+    }
+
+    #[test]
+    fn set_extras_land_only_on_openai_compatible() {
+        let e = WireExtras {
+            reasoning_effort: Some("none".into()),
+            temperature: Some(1.0),
+            top_p: Some(0.95),
+            top_k: Some(64),
+            repeat_penalty: Some(1.15),
+            repeat_last_n: Some(256),
+        };
+        let b = with_extras("openai-compatible", &e);
+        assert_eq!(b["reasoning_effort"], "none");
+        assert_eq!(b["temperature"], 1.0);
+        assert_eq!(b["top_p"], 0.95);
+        assert_eq!(b["top_k"], 64);
+        assert_eq!(b["repeat_penalty"], 1.15);
+        assert_eq!(b["repeat_last_n"], 256);
+        for kind in ["anthropic", "google", "ollama"] {
+            assert_eq!(
+                with_extras(kind, &e).to_string(),
+                with_extras(kind, &WireExtras::default()).to_string(),
+                "{kind}"
+            );
+        }
     }
 
     #[test]

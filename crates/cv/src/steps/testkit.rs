@@ -15,11 +15,16 @@ use serde_json::{Map, Value};
 
 use super::{ChildSpawner, StepCtx, StepError, StepOutcome};
 
-/// Spawns nothing (tests that do not exercise child jobs).
+/// Spawns nothing (tests that do not exercise child jobs): every spawn succeeds as a no-op, so
+/// an action ending in `run_action` (e.g. `file-as-kind` → `clip-enrich`) runs to completion.
 pub(crate) struct NoChildren;
 impl ChildSpawner for NoChildren {
     fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
-        Err("no children in tests".into())
+        Ok("no-child".into())
+    }
+
+    fn spawn_child_at(&self, _: &str, _: Map<String, Value>, _: &str) -> Result<String, String> {
+        Ok("no-child".into())
     }
 }
 

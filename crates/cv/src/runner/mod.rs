@@ -834,6 +834,9 @@ struct Spawner<'a> {
     inner: &'a Inner,
     parent_job: &'a str,
     parent: &'a JobParams,
+    /// The run's current context: `active_path` already follows a `move` of the active note, so a
+    /// child spawned after the move runs on the moved path (plan round-16 WP-5).
+    context: &'a ActionContext,
     lane: Lane,
     config: &'a ConfigSet,
 }
@@ -841,6 +844,31 @@ struct Spawner<'a> {
 impl ChildSpawner for Spawner<'_> {
     /// `run_action` step (pin 10): enqueue the target as a child job in the same lane.
     fn spawn_child(&self, action_id: &str, params: Map<String, Value>) -> Result<String, String> {
+        self.spawn_with(action_id, params, self.context.clone())
+    }
+
+    /// As [`Self::spawn_child`], with the child's `active_path` set to `active_path`.
+    fn spawn_child_at(
+        &self,
+        action_id: &str,
+        params: Map<String, Value>,
+        active_path: &str,
+    ) -> Result<String, String> {
+        let context = ActionContext {
+            active_path: Some(active_path.to_owned()),
+            ..self.context.clone()
+        };
+        self.spawn_with(action_id, params, context)
+    }
+}
+
+impl Spawner<'_> {
+    fn spawn_with(
+        &self,
+        action_id: &str,
+        params: Map<String, Value>,
+        context: ActionContext,
+    ) -> Result<String, String> {
         let mut chain = self.parent.chain.clone();
         chain.push(self.parent.action_id.clone());
         if chain.iter().any(|a| a == action_id) {
@@ -870,13 +898,7 @@ impl ChildSpawner for Spawner<'_> {
         self.inner
             .enqueue(
                 &target,
-                RunRequest::child(
-                    merged,
-                    self.parent.context.clone(),
-                    self.parent_job,
-                    chain,
-                    self.lane,
-                ),
+                RunRequest::child(merged, context, self.parent_job, chain, self.lane),
             )
             .map_err(|e| e.to_string())
     }
@@ -925,13 +947,6 @@ fn execute_steps(
         };
         done.insert(i, o);
     }
-    let spawner = Spawner {
-        inner,
-        parent_job: job_id,
-        parent: jp,
-        lane,
-        config,
-    };
     let mut seen_outputs = BTreeSet::new();
     // The run's own context: `active_path` follows a `move` of the active note (WP-8).
     let mut context = jp.context.clone();
@@ -960,6 +975,14 @@ fn execute_steps(
         if lock(&inner.state).cancel_requested(job_id).unwrap_or(false) {
             return (JobResult::Cancelled, summary);
         }
+        let spawner = Spawner {
+            inner,
+            parent_job: job_id,
+            parent: jp,
+            context: &context,
+            lane,
+            config,
+        };
         let mut ctx = StepCtx {
             action,
             step_index: i,

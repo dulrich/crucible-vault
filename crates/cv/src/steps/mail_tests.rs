@@ -704,3 +704,48 @@ fn new_mail_note_of_blog_kind_has_an_unticked_trim_label() {
     let text = w.env.read(&r.note_path.unwrap()).unwrap();
     assert!(text.contains("\ntrim-label: false\n"), "{text}");
 }
+
+/// Plan round-16 WP-6 consumer gate: complete message B triggers a scan while multipart message A
+/// is still being written. B is processed; A is neither handled nor moved.
+#[test]
+fn incomplete_multipart_is_left_untouched_while_a_complete_message_is_processed() {
+    let w = world(&[]);
+    let a_open = "From: Sender <news@paid.example>\nSubject: Partial\nMessage-ID: <a1@paid.example>\nContent-Type: multipart/alternative; boundary=\"b1\"\n\n--b1\nContent-Type: text/plain\n\nfirst half of the bod"
+        .replace('\n', "\r\n");
+    w.put("new/a", a_open.as_bytes());
+    w.put(
+        "new/b",
+        &eml(
+            "b1@paid.example",
+            "news@paid.example",
+            "Done",
+            "<p>one two three four</p>",
+        ),
+    );
+    let o = w.run();
+    assert_eq!(
+        (
+            n(&o, "scanned"),
+            n(&o, "new"),
+            n(&o, "incomplete"),
+            n(&o, "invalid")
+        ),
+        (json!(2), json!(1), json!(1), json!(0))
+    );
+    assert!(w.exists("new/a"), "the incomplete message stays in new/");
+    assert_eq!(
+        std::fs::read(w.root().join("new/a")).unwrap(),
+        a_open.as_bytes()
+    );
+    assert!(!w.exists("new/b"), "the complete message moved on");
+    assert!(
+        w.row("Paid Letter", "a1@paid.example").is_none(),
+        "A not recorded"
+    );
+    // Once A's closing boundary lands, a later scan handles it.
+    let done = format!("{a_open}y\r\n--b1--\r\n");
+    w.put("new/a", done.as_bytes());
+    let o2 = w.run();
+    assert_eq!((n(&o2, "new"), n(&o2, "incomplete")), (json!(1), json!(0)));
+    assert!(!w.exists("new/a"));
+}

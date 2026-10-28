@@ -24,7 +24,12 @@
 //! The Maildir is outside the vault, so `std::fs` is correct for it; vault writes go through
 //! [`StepCtx`] and the supersede engine. Unknown senders are still captured (key
 //! `unknown-sender`, row left open). Outcome vars: `scanned`, `new`, `kept`, `replaced`,
-//! `invalid`, `move_failed` (+ `disabled`).
+//! `invalid`, `incomplete`, `move_failed` (+ `disabled`).
+//!
+//! Readiness gate (plan round-16 WP-6): a candidate that fails [`mail::is_complete`] (a multipart
+//! without its closing boundary, cut headers — a download still being written) is skipped
+//! untouched and counted `incomplete`; whichever event or schedule triggered the scan, it is
+//! picked up by a later one.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -74,6 +79,7 @@ struct Vars {
     kept: usize,
     replaced: usize,
     invalid: usize,
+    incomplete: usize,
     move_failed: usize,
 }
 
@@ -568,6 +574,13 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 continue;
             }
         };
+        // Consumer gate (round-16 WP-6): a message still being written (unclosed multipart,
+        // cut headers) is neither handled nor moved; a later scan picks it up.
+        if !mail::is_complete(&bytes) {
+            vars.incomplete += 1;
+            tracing::debug!(file = %file.display(), "track_mail: incomplete message left for a later scan");
+            continue;
+        }
         let Some(post) = mail::parse_eml(&bytes) else {
             vars.invalid += 1;
             tracing::warn!(file = %file.display(), "track_mail: unparseable message left in place");
