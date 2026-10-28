@@ -213,6 +213,10 @@ kind = "{param.kind}"
 type = "lint"
 path = "{vars.moved_path}"
 kind = "{param.kind}"
+# Enrich the filed note at its moved path (the child follows the move; plan round-16 WP-5).
+[[action.steps]]
+type = "run_action"
+action = "clip-enrich"
 
 # Refine a transcript with an agent (WP-12 runs the `agent` step; agents.toml/providers.toml are
 # WP-12's). Crucible's four per-provider chains become one action with a `provider` param whose
@@ -329,31 +333,25 @@ resources = { note = false, keys = ["x::metadata"] }
 type = "x_backfill"
 limit = 50
 
-# Image describe: the clip action localizes a new clip's images, then describes them.
+# Clip intake, filing first (plan round-16 WP-5): a new clip's only work on detection is dedup +
+# filing (`clip-auto-file`); it never waits on localize or describe. Enrichment (`clip-enrich`)
+# follows on the note's final path.
 [[action]]
 id = "clip-images"
-label = "Clip: localize + describe images"
+label = "Clip: file, then localize + describe images"
 group = "Ingest"
 starters = [
   { type = "event", kinds = ["created"], origin = "any", selector = { folder = "Clippings" } },
   { type = "event", kinds = ["created"], origin = "any", selector = { tag = "clippings" } },
 ]
 [[action.steps]]
-type = "localize"
-[[action.steps]]
-type = "run_action"
-action = "image-describe-note"
-[[action.steps]]
 type = "run_action"
 action = "clip-auto-file"
 
 # Clip dedup + auto-file (plan auto-intake-sprint WP-5). It has NO event starter on purpose (audit
-# E1): independent `created` starters would each enqueue, so this could run before `clip-images`'
-# `localize`. It runs only as the child spawned by the LAST step of `clip-images`, i.e. after
-# `localize` finished, with that run's context (active_path = the clip). `image-describe-note`
-# is enqueued first and so is claimed first. Known limit: if that describe child is deferred by an
-# open service breaker, filing can run first; the describe then fails on the moved path and
-# `image-describe-backfill` covers it later. No content is lost.
+# E1): it runs only as the child of `clip-images`, with that run's context (active_path = the
+# clip). It spawns `clip-enrich` on the final path: the supersede target that took the clip's body,
+# or the clip left in place; a clip filed by `file-as-kind` is enriched by that action's last step.
 [[action]]
 id = "clip-auto-file"
 label = "Clip: dedup + auto-file by kind"
@@ -411,6 +409,23 @@ choices = ["not-duplicates", "keep"]
 required = true
 [[action.steps]]
 type = "dupes_resolve"
+
+# Enrichment of a filed clip (plan round-16 WP-5): localize its images, then describe them, in one
+# job on the note's final path. The shared `clip::enrich` key lets at most one enrichment run at a
+# time, so the queue's other slot stays free for filing.
+[[action]]
+id = "clip-enrich"
+label = "Clip: localize + describe images"
+group = "Ingest"
+needs = ["active_path"]
+resources = { note = true, keys = ["clip::enrich"] }
+[[action.steps]]
+type = "localize"
+[[action.steps]]
+type = "image_describe"
+scope = "note"
+[[action.steps]]
+type = "search_upsert"
 
 [[action]]
 id = "image-describe-note"

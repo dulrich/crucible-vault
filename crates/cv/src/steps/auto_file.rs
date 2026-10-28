@@ -27,8 +27,13 @@
 //!    A match spawns `file-as-kind { kind }` as a child (move + tags + lint); no match leaves the
 //!    clip in place.
 //!
+//! 3. **Enrichment** (plan round-16 WP-5, filing first): `localize` + describe run afterwards, as
+//!    the `clip-enrich` child, on the note's final path: the supersede target (`Replaced`), or the
+//!    clip left in place (no kind match, `filed = "already"`, `duplicate`). A filed clip is
+//!    enriched by `file-as-kind`'s last step on the moved path; a trashed clip never is.
+//!
 //! The step never moves the clip itself. Outcome vars: `action` (`replaced|merged|duplicate|new|
-//! missing`), `target`, `kind`, `child_job_id`. A clip that already sits in its kind's folder with
+//! missing`), `target`, `kind`, `child_job_id`, `enrich_job_id`. A clip that already sits in its kind's folder with
 //! all of the kind's tags spawns no child and reports `kind` with `filed = "already"` (`action`
 //! unchanged). The matched serial row's `publication()` (any kind), else the matched host row's,
 //! is written to the clip when absent, before the child is spawned.
@@ -47,6 +52,10 @@ use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
 
 /// The action a kind match spawns.
 const FILE_ACTION: &str = "file-as-kind";
+
+/// The enrichment action (localize + describe under one shared key, plan round-16 WP-5) spawned
+/// on the clip's final path when no `file-as-kind` child moves it.
+const ENRICH_ACTION: &str = "clip-enrich";
 
 /// The `auto_file` step (no params; unknown keys disarm, I5).
 pub(crate) struct AutoFile;
@@ -75,6 +84,8 @@ struct Vars {
     filed: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     child_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enrich_job_id: Option<String>,
 }
 
 /// The clip facts the kind rules read (every field optional).
@@ -352,6 +363,8 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     match (resolved.action, resolved.path) {
         (Action::Replaced, Some(target)) => {
             trash(ctx, &clip_path, clip_hash, &target)?;
+            // The target took the clip's body: enrich it in place (the trashed clip never is).
+            vars.enrich_job_id = enrich(ctx, &target);
             out.push_output(target);
             vars.action = "replaced";
             out.set_vars(&vars);
@@ -385,12 +398,47 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
 
     // ---- kind ---------------------------------------------------------------------------------
+    file_by_kind(ctx, &clip_path, &clip, row.as_ref(), &sources, &mut vars)?;
+    // No `file-as-kind` child: the clip stays where it is, so it is enriched in place. A filed
+    // clip is enriched by `file-as-kind`'s own last step, on the moved path.
+    if vars.child_job_id.is_none() {
+        vars.enrich_job_id = enrich(ctx, &clip_path);
+    }
+    out.set_vars(&vars);
+    Ok(out)
+}
+
+/// Enqueues [`ENRICH_ACTION`] (localize + describe) on `path`; a failure to enqueue is logged,
+/// never fatal (filing already happened; the backfills cover the images later).
+fn enrich(ctx: &StepCtx<'_>, path: &str) -> Option<String> {
+    match ctx
+        .children
+        .spawn_child_at(ENRICH_ACTION, serde_json::Map::new(), path)
+    {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(error = %e, "auto_file: could not enqueue clip-enrich");
+            None
+        }
+    }
+}
+
+/// Step 2: picks the clip's kind and spawns `file-as-kind` (sets `vars.kind`, `vars.filed`,
+/// `vars.child_job_id`); no match, or an already-filed clip, leaves it in place.
+fn file_by_kind(
+    ctx: &mut StepCtx<'_>,
+    clip_path: &str,
+    clip: &Clip,
+    row: Option<&HostRow>,
+    sources: &SourcesConfig,
+    vars: &mut Vars,
+) -> Result<(), StepError> {
     let is_kind = |k: &str| kind_def(ctx.config, k).is_ok();
     let mut work_pub = None;
-    let kind = if let Some(s) = serial_hit(&sources.serial, &clip, is_kind) {
+    let kind = if let Some(s) = serial_hit(&sources.serial, clip, is_kind) {
         work_pub = Some(s.publication().trim().to_owned()).filter(|p| !p.is_empty());
         Some(s.kind.trim().to_owned())
-    } else if let Some(k) = row.as_ref().and_then(|r| r.kind.clone()) {
+    } else if let Some(k) = row.and_then(|r| r.kind.clone()) {
         Some(k)
     } else if let Some(h) = &clip.host {
         hosts_kind(ctx.config, h)?
@@ -398,13 +446,11 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         None
     };
     let Some(kind) = kind else {
-        out.set_vars(&vars);
-        return Ok(out);
+        return Ok(());
     };
     if !is_kind(&kind) {
         tracing::info!(%kind, "auto_file: kind is not defined in kinds.toml; clip left in place");
-        out.set_vars(&vars);
-        return Ok(out);
+        return Ok(());
     }
     let allowed = ctx
         .config
@@ -413,22 +459,20 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         .is_some_and(|p| p.choices.contains(&kind));
     if !allowed {
         tracing::info!(%kind, "auto_file: kind is not a file-as-kind choice; clip left in place");
-        out.set_vars(&vars);
-        return Ok(out);
+        return Ok(());
     }
     // A serial row's publication (any kind, round-11 Decision 4) wins over a host row's; never
     // overwrites.
     if let Some(p) = work_pub
         .as_deref()
-        .or_else(|| row.as_ref().and_then(|r| r.publication.as_deref()))
+        .or_else(|| row.and_then(|r| r.publication.as_deref()))
     {
-        set_publication(ctx, &clip_path, p)?;
+        set_publication(ctx, clip_path, p)?;
     }
-    if already_filed(ctx, &clip_path, &kind)? {
+    if already_filed(ctx, clip_path, &kind)? {
         vars.filed = Some("already");
         vars.kind = Some(kind);
-        out.set_vars(&vars);
-        return Ok(out);
+        return Ok(());
     }
     let mut params = serde_json::Map::new();
     params.insert("kind".into(), serde_json::Value::String(kind.clone()));
@@ -439,6 +483,5 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         }
     }
     vars.kind = Some(kind);
-    out.set_vars(&vars);
-    Ok(out)
+    Ok(())
 }
