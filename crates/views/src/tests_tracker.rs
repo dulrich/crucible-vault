@@ -199,3 +199,55 @@ fn state_change_invalidates_only_tracker_views() {
     assert!(host.on_state_changed("link_records").is_empty());
     assert_eq!(host.on_index_generation(99), vec!["notes#All"]);
 }
+
+/// Plan round-16-version-describe-intake WP-4: the shipped `intake-by-source` def parses and groups
+/// the open uncaptured `tracker_items` rows by source name (kind when the name is blank), newest
+/// day first inside each group; done (`x`), cancelled (`-`) and captured (`note`) rows are out.
+#[test]
+fn intake_by_source_groups_open_uncaptured_items() {
+    let fx = fixture(&[(
+        "intake-by-source.toml",
+        include_str!("../defs/intake-by-source.toml"),
+    )]);
+    let p = fx._tmp.path().join("state.db");
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch(
+        "CREATE TABLE tracker_items (source_kind TEXT NOT NULL, source_key TEXT NOT NULL,
+            item_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+            first_seen_ms INTEGER NOT NULL, day TEXT NOT NULL, outcome TEXT NOT NULL,
+            score REAL, full_body INTEGER, note_path TEXT,
+            source_name TEXT, duration_s INTEGER, word_count INTEGER, status TEXT,
+            access TEXT, complete INTEGER, full_word_count INTEGER,
+            PRIMARY KEY (source_kind, source_key, item_id));
+         INSERT INTO tracker_items VALUES
+            ('youtube', 'UC1', 'a1', 'Old', 'https://y/1', 1, '2026-10-01', 'line', NULL, NULL, NULL, 'Chan', 65, NULL, NULL, NULL, NULL, NULL),
+            ('youtube', 'UC1', 'a2', 'New', 'https://y/2', 2, '2026-10-03', 'line', NULL, NULL, NULL, 'Chan', 3725, NULL, ' ', NULL, NULL, NULL),
+            ('youtube', 'UC1', 'a3', 'Done', 'https://y/3', 3, '2026-10-02', 'line', NULL, NULL, NULL, 'Chan', 60, NULL, 'x', NULL, NULL, NULL),
+            ('youtube', 'UC1', 'a4', 'Cancelled', 'https://y/4', 4, '2026-10-02', 'line', NULL, NULL, NULL, 'Chan', 60, NULL, '-', NULL, NULL, NULL),
+            ('blog', 'b', 'b1', 'Captured', 'https://b/1', 5, '2026-10-02', 'note', NULL, 1, 'n/Captured.md', 'Feed', NULL, 900, NULL, NULL, NULL, NULL),
+            ('blog', 'b', 'b2', 'Nameless', 'https://b/2', 6, '2026-10-02', 'line', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+            ('blog', 'c', 'c1', 'Feed line', 'https://c/1', 7, '2026-10-04', 'line', NULL, NULL, NULL, 'Feed', NULL, NULL, NULL, NULL, NULL, NULL);",
+    )
+    .unwrap();
+    drop(c);
+    let mut host = fx.host().with_state_db(&p);
+    assert!(host.load_notices().is_empty(), "{:?}", host.load_notices());
+    let r = fx.run(&mut host, "intake-by-source#Intake by source", None);
+    assert_eq!(r.kind, Kind::Table);
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    let groups: Vec<String> = r
+        .groups
+        .iter()
+        .map(|g| g.key.as_ref().map(text).unwrap_or_default())
+        .collect();
+    assert_eq!(groups, ["blog", "Chan", "Feed"]);
+    assert_eq!(
+        grid(&r),
+        vec![
+            vec!["Nameless", "Blog", "", "2026-10-02"],
+            vec!["New", "YouTube", "1:02:05", "2026-10-03"],
+            vec!["Old", "YouTube", "1:05", "2026-10-01"],
+            vec!["Feed line", "Blog", "", "2026-10-04"],
+        ]
+    );
+}

@@ -1,0 +1,39 @@
+# Intake by source (plan round-16-version-describe-intake WP-4): every open (not done, not cancelled)
+# uncaptured intake item across all days, grouped by source, newest day first inside each group.
+# `outcome == "line"` rows are the items that have no captured note; `status` is the task-status
+# checkbox (`x` = done, `-` = cancelled, null = open). Formulas are per-file, so the item/type/length
+# formulas are copied from `daily-intake.toml`; `group` is the source's display name, falling back to
+# the source kind when the name is blank. Embed it with a `crucible-view` fence:
+# `intake-by-source.toml#Intake by source`.
+source = "tracker_items"
+
+[filters]
+and = ['outcome == "line"', '!done', 'status != "-"']
+
+[formulas]
+item = 'if(outcome == "note" && note_path, link(note_path, title), url(url, title))'
+type = 'if(source_kind == "youtube", "YouTube", if(source_kind == "blog", "Blog", source_kind))'
+group = 'if(source_name, source_name, source_kind)'
+mins = '(duration % 3600 - duration % 60) / 60'
+secs = 'if(duration % 60 < 10, "0", "") + duration % 60'
+wpm = 'number(file("_custom/Settings.md").properties.reading_wpm)'
+length = 'if(duration, if(duration >= 3600, (duration - duration % 3600) / 3600 + ":" + if(formula.mins < 10, "0", "") + formula.mins + ":" + formula.secs, (duration - duration % 60) / 60 + ":" + formula.secs), if(word_count && formula.wpm > 0, (word_count / formula.wpm).round() + " min", ""))'
+
+[properties."formula.item"]
+displayName = "Title"
+
+[properties."formula.type"]
+displayName = "Type"
+
+[properties."formula.length"]
+displayName = "Length"
+
+[properties.day]
+displayName = "Day"
+
+[[views]]
+type = "table"
+name = "Intake by source"
+order = ["formula.item", "formula.type", "formula.length", "day"]
+sort = [{ property = "day", direction = "DESC" }]
+groupBy = { property = "formula.group", direction = "ASC" }
