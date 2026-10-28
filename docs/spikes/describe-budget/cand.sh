@@ -2,6 +2,7 @@
 # Candidate settings run: sampler = Unsloth-recommended (t 1.0, top_p 0.95, top_k 64) + repeat_penalty 1.15/256.
 # Arms: off (reasoning_effort none; caps narr 512 / extr 2048), on (reasoning default; caps 4096 both).
 # Usage: cand.sh <in-dir> <out-dir> <arms...>
+case "${1:-}" in -h|--help) sed -n "2,/^set -euo/{/^#/s/^# \{0,1\}//p}" "$0"; exit 0;; esac
 set -euo pipefail
 IN=$1; OUT=$2; shift 2
 URL=http://127.0.0.1:4811/v1/chat/completions

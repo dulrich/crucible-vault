@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Sampler arms on the extraction pass of the 7 temp-0 loopers (reasoning off, max_tokens 2048).
+# Usage: loop.sh (run from the spike dir holding in-a/ and in-b/; ARMS="t0 default t0-rep t0-dry rec rec-rep" selects arms)
+case "${1:-}" in -h|--help) sed -n "2,/^set -euo/{/^#/s/^# \{0,1\}//p}" "$0"; exit 0;; esac
 set -euo pipefail
 URL=http://127.0.0.1:4811/v1/chat/completions
 EXTR='Transcribe this image as structured plain text: its title, subtitle, axis labels and ranges, series names, data values, annotations, table content, and component labels, in that order where present. Plain text only, no JSON, no markdown formatting.'
