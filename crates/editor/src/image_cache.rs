@@ -364,6 +364,27 @@ impl ImageCache {
         self.retain_owner(owner, &HashSet::new());
     }
 
+    /// Plan round-16 WP-3: document `from` now lives at `to` (a rename, the daemon's move
+    /// included): every pin (resident or pending) of `from` and its per-view owners moves to the
+    /// same owner under `to`. The open tab's image sensors are keyed by image key and stay in
+    /// the tree across the rename, so they never re-fire `on_show`: releasing the pins instead
+    /// evicted the images for good (blank until the note was reopened).
+    pub fn rename_owner(&mut self, from: &str, to: &str) {
+        let rekey = |set: &mut HashSet<String>| {
+            let moved: Vec<String> = set.iter().filter(|o| owned_by(o, from)).cloned().collect();
+            for o in moved {
+                set.remove(&o);
+                set.insert(format!("{to}{}", &o[from.len()..]));
+            }
+        };
+        for w in self.pending.values_mut() {
+            rekey(w);
+        }
+        for e in self.entries.values_mut() {
+            rekey(&mut e.owners);
+        }
+    }
+
     /// Drops `owner`'s pins on keys not in `keep` (render-model replacement).
     pub fn retain_owner(&mut self, owner: &str, keep: &HashSet<String>) {
         for (k, w) in &mut self.pending {

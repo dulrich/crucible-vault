@@ -264,11 +264,14 @@ impl ReadingStore {
                 .is_some_and(|d| d.pdfs.values().flatten().any(|p| p == pdf))
     }
 
-    /// `from` was renamed (its [`DocReading`] moved with the [`crate::app::OpenDoc`]): the
-    /// `from` image pins and inline PDF embed state are released (the next render re-pins
-    /// under the new path), as [`Self::closed`] does (WP-R1, review E5).
-    pub fn renamed(&mut self, from: &str) {
-        self.closed(from);
+    /// `from` was renamed to `to` (its [`DocReading`] moved with the [`crate::app::OpenDoc`]):
+    /// the `from` image pins move to `to` (plan round-16 WP-3). They used to be released here
+    /// (WP-R1, review E5) on the premise that the next render re-pins, but the image sensors
+    /// are keyed by image key and survive the rename, so nothing re-pinned and the images
+    /// stayed blank until a reopen. The next recompute's `retain_owner(to, ..)` drops keys the
+    /// new text no longer embeds.
+    pub fn renamed(&mut self, from: &str, to: &str) {
+        self.images.rename_owner(from, to);
     }
 
     /// A filename edit is pending (the breadcrumb's input holds unsubmitted text); the Escape

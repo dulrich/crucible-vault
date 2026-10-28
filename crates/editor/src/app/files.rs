@@ -399,10 +399,10 @@ impl App {
             ps.history.retarget(from, to);
         }
         // The document (close waiters, Reading state) moves as one; its pending filename edit
-        // is dropped, the `from` image pins are released, and the new text renders now under
-        // `to`.
+        // is dropped, the `from` image pins move to `to` (plan round-16 WP-3: the tab's image
+        // sensors never re-fire for an unchanged key), and the new text renders now under `to`.
         doc.reading.clear_title();
-        self.reading.renamed(from);
+        self.reading.renamed(from, to);
         self.pdf_note_closed(from);
         self.views.rehost(from, to);
         self.views.invalidate(&[]);
