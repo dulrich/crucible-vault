@@ -1,7 +1,7 @@
 # A2 spike — local vision input + Crucible state (2026-10-15)
 
 ## Q1: does the local inference server accept OpenAI `image_url` content?
-- Endpoint: llama-swap at `http://127.0.0.1:4811/v1` (Crucible provider `vz3dns1`). Crucible's configured image model id `gemma-4-12B-it-Q4_K_M` is no longer served; the served equivalent is `gemma-4-12B-it-qat-UD-Q4_K_XL`.
+- Endpoint: llama-swap at `http://127.0.0.1:4811/v1` (Crucible provider `vz3dns1`). Crucible's configured image model id `gemma-4-12B-it-Q4_K_M` is no longer served; the served build `gemma-4-12B-it-qat-UD-Q4_K_XL` is the same Gemma 4 12B (a QAT quantization) as Crucible's Q4_K_M.
 - Request: `req.json` / `req2.json` (64×64 solid-red PNG as a `data:image/png;base64` URL, prompt "What single colour fills this image? One word.").
 - `curl -s http://127.0.0.1:4811/v1/chat/completions -d @req2.json` → content `"Red"`, 162 completion tokens (reasoning in `reasoning_content`), 77 prompt tokens. Cold call 1.44 s wall.
 - With `max_tokens: 30` the answer was empty (`finish_reason: length`; reasoning consumed the budget) → a describe call needs a generous `max_tokens` and must read `content`, not assume it is non-empty.
