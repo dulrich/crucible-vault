@@ -18,6 +18,7 @@ use crate::error::{ProviderError, Result};
 use crate::limiter::{ConcurrencyLimiter, resolve_concurrency_limit};
 use crate::secrets::{SecretSource, resolve_api_key};
 pub use crate::wire::ImagePart;
+pub use crate::wire::WireExtras;
 use crate::wire::{self, Completion, Embeddings, FinishReason, RerankItem, WireRequest};
 
 /// One completion request. `max_tokens` falls back to the provider's, then 4096 — it is always
@@ -30,6 +31,9 @@ pub struct CompletionRequest {
     /// Images attached to the user turn (plan `v0-automation-pipelines` WP-6); empty = the
     /// text-only wire shape, byte for byte. A CLI provider cannot take images (`Unsupported`).
     pub images: Vec<ImagePart>,
+    /// Optional openai-compatible body fields (round 16 WP-2); default = none, byte-identical
+    /// to the pre-round-16 wire.
+    pub extras: WireExtras,
 }
 
 pub struct ProviderManager {
@@ -125,7 +129,7 @@ impl ProviderManager {
             return self.limiter.run(&p.id, limit, fut).await;
         }
         let key = resolve_api_key(p, self.secrets.as_ref())?;
-        let wire = wire::build_completion(
+        let mut wire = wire::build_completion(
             p,
             key.as_deref(),
             &model,
@@ -134,6 +138,7 @@ impl ProviderManager {
             &req.images,
             max_tokens,
         )?;
+        wire::apply_extras(p.kind, &mut wire, &req.extras);
         let http = self.http.clone();
         let kind = p.kind;
         let timeout = request_timeout(p);
@@ -181,6 +186,7 @@ impl ProviderManager {
                     user: wire::rerank_fallback_user_prompt(query, documents),
                     max_tokens: None,
                     images: Vec::new(),
+                    extras: WireExtras::default(),
                 },
             )
             .await?;

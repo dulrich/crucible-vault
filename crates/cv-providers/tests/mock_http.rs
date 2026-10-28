@@ -109,6 +109,7 @@ fn req(max: Option<u32>) -> CompletionRequest {
         user: "USER".into(),
         max_tokens: max,
         images: Vec::new(),
+        extras: cv_providers::manager::WireExtras::default(),
     }
 }
 
