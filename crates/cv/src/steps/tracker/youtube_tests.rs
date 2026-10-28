@@ -768,7 +768,10 @@ fn lines_mode_ignored_short_writes_a_cancelled_line() {
 
 #[test]
 fn retroactive_pass_cancels_only_eligible_rows_once() {
-    let w = world(&[], std_routes(), SHORTS_UCA, SOURCES);
+    // UCz stays a configured (skipped) source: the orphans pass must not cancel its row.
+    let sources =
+        format!("{SOURCES}\n[[youtube]]\nchannel = \"Z\"\nid = \"UCz\"\npriority = \"skip\"\n");
+    let w = world(&[], std_routes(), SHORTS_UCA, &sources);
     let mk = |key: &str, id: &str, dur: Option<i64>| cv_state::TrackerItem {
         source_key: key.into(),
         duration_s: dur,

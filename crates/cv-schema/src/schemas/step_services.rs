@@ -324,6 +324,20 @@ pub static DAILY_BRIEF: Record = Record {
     summary: None,
 };
 
+/// `cancel_source_intake` — `crates/cv/src/steps/cancel_source.rs` (`source`, required; cancels every open intake row of the one source it names, in state.db only).
+pub static CANCEL_SOURCE_INTAKE: Record = Record {
+    name: "cancel_source_intake",
+    fields: &[field(
+        "source",
+        "Source",
+        "A source key or name with open intake (placeholders ok, usually \"{param.source}\"); matched exactly, case-insensitively; an ambiguous name fails",
+        Node::Str,
+    )
+    .req()],
+    rules: &[],
+    summary: None,
+};
+
 /// `dupes_resolve` — `crates/cv/src/steps/dupes_resolve.rs` (no step params; job params `keep`, `other`, `verdict` = `not-duplicates` | `keep`).
 pub static DUPES_RESOLVE: Record = Record {
     name: "dupes_resolve",

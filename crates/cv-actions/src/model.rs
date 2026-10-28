@@ -138,6 +138,8 @@ step_kinds! {
     DupesScan = "dupes_scan", true;
     /// One duplicate-pair verdict (`not-duplicates` | `keep`) (plan `round-12-feedback-todos` WP-7).
     DupesResolve = "dupes_resolve", true;
+    /// Cancels the open intake of one source (plan `cancel-source-intake` WP-1); writes `state.db` only.
+    CancelSourceIntake = "cancel_source_intake", false;
     /// Daily vault tidiness: orphaned-attachment sweep, trash ledger seed and retention expiry
     /// (plan `tidiness-trash-orphans` WP-2). Trashes files, so it counts as mutating.
     Tidy = "tidy", true;

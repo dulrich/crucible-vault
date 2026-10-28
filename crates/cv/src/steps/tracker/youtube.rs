@@ -26,6 +26,7 @@ use cv_providers::web::FetchError;
 use cv_providers::web::youtube::{self as api, PlaylistItem};
 use serde::Serialize;
 
+use super::super::cancel_source::{orphans_pass, youtube_keys};
 use super::super::params::check_keys;
 use super::super::util::{fetch_bounded, md_files_under};
 use super::super::web::{block_on, client, record_usage, secret};
@@ -189,6 +190,8 @@ fn cancel_listed_shorts(
 /// Executes the step.
 pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
+    // First, so every path below (disabled, no key, all-failed deferral) runs it: DB-only.
+    orphans_pass(ctx, KIND, &youtube_keys(ctx.config));
     if !ctx.config.pipelines().youtube.enabled {
         out.set_vars(&Vars {
             disabled: true,

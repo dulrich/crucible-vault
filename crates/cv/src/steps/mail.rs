@@ -41,6 +41,7 @@ use cv_ingest::mail::{self, MailPost};
 use cv_protocol::TrackerOutcome;
 use serde::Serialize;
 
+use super::cancel_source::{mail_keys, orphans_pass};
 use super::file::kind_def;
 use super::materialize::{join, now};
 use super::params::{expand, get_str, get_str_list};
@@ -545,6 +546,8 @@ fn handle(
 /// Executes the step.
 pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
+    // First, so the disabled / no-maildir path runs it too: DB-only.
+    orphans_pass(ctx, KIND, &mail_keys(ctx.config));
     let cfg = ctx.config.pipelines().mail.clone();
     if !cfg.enabled || cfg.maildir.trim().is_empty() {
         out.set_vars(&Vars {

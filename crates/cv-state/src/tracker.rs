@@ -401,6 +401,71 @@ impl StateDb {
         Ok(n > 0)
     }
 
+    /// `(source_key, source_name)` pairs (distinct) of `source_kind` that have at least one open
+    /// row (`outcome = 'line' AND status IS NULL`), ordered (plan cancel-source-intake WP-1).
+    pub fn tracker_open_sources(&self, source_kind: &str) -> Result<Vec<(String, Option<String>)>> {
+        let mut st = self.conn().prepare(
+            "SELECT DISTINCT source_key, source_name FROM tracker_items
+             WHERE source_kind = ?1 AND outcome = 'line' AND status IS NULL
+             ORDER BY source_key, source_name",
+        )?;
+        let rows = st
+            .query_map(params![source_kind], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Cancels up to `limit` open rows (`outcome = 'line' AND status IS NULL`, oldest first) of
+    /// exactly one `(source_kind, source_key)` (plan cancel-source-intake WP-1): each becomes
+    /// `outcome = 'ignored'`, status `-`, plus an `ignored_ids` row (`reason`), all in one
+    /// transaction. Rows that are done, cancelled, `note` or `skipped` never change. Returns the
+    /// rows changed.
+    pub fn cancel_source_open_items(
+        &mut self,
+        source_kind: &str,
+        source_key: &str,
+        reason: &str,
+        at_ms: i64,
+        limit: usize,
+    ) -> Result<usize> {
+        let tx = self.conn().unchecked_transaction()?;
+        let ids: Vec<String> = {
+            let mut st = tx.prepare(
+                "SELECT item_id FROM tracker_items
+                 WHERE source_kind = ?1 AND source_key = ?2 AND outcome = 'line'
+                   AND status IS NULL
+                 ORDER BY first_seen_ms, item_id LIMIT ?3",
+            )?;
+            st.query_map(
+                params![
+                    source_kind,
+                    source_key,
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                |r| r.get(0),
+            )?
+            .collect::<std::result::Result<_, _>>()?
+        };
+        for id in &ids {
+            tx.execute(
+                "UPDATE tracker_items SET outcome = 'ignored', status = '-'
+                 WHERE source_kind = ?1 AND source_key = ?2 AND item_id = ?3
+                   AND outcome = 'line' AND status IS NULL",
+                params![source_kind, source_key, id],
+            )?;
+            tx.execute(
+                "INSERT INTO ignored_ids (kind, id, reason, at_ms) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT DO NOTHING",
+                params![source_kind, id, reason, at_ms],
+            )?;
+        }
+        tx.commit()?;
+        if !ids.is_empty() {
+            self.changed("tracker_items");
+        }
+        Ok(ids.len())
+    }
+
     /// Sets status `-` on every row of `(source_kind, item_id)` (any source; the manual
     /// `youtube-ignore-video` step, round-8 WP-1). Outcome is unchanged. Returns rows changed.
     pub fn cancel_tracker_items_by_id(

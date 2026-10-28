@@ -83,6 +83,7 @@ pub static STEP: Union = Union {
         Variant::of(&DAILY_BRIEF, "Daily brief"),
         Variant::of(&DUPES_SCAN, "Duplicate scan"),
         Variant::of(&DUPES_RESOLVE, "Duplicate resolve"),
+        Variant::of(&CANCEL_SOURCE_INTAKE, "Cancel source intake"),
         Variant::of(&TIDY, "Vault tidy"),
     ],
 };

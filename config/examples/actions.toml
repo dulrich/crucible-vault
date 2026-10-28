@@ -498,6 +498,22 @@ needs = ["active_path"]
 type = "ignore_video"
 mode = "manual"
 
+# Cancels every open intake row of one source (plan cancel-source-intake): enter a source key or
+# its name exactly (case-insensitive); an ambiguous name fails and lists the candidates. Database
+# only. Sources removed from sources.toml are cancelled automatically by their tracker.
+[[action]]
+id = "cancel-source-intake"
+label = "Cancel open intake from source"
+group = "Ingest"
+[[action.params]]
+name = "source"
+label = "Source"
+kind = "text"
+required = true
+[[action.steps]]
+type = "cancel_source_intake"
+source = "{param.source}"
+
 # Daily Brief (schedules.toml: daily 06:00): FX + weather into today's `# Daily Brief`.
 [[action]]
 id = "daily-brief"

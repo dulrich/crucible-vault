@@ -42,6 +42,7 @@ use cv_ingest::blogs::{self as policy, BlogPost};
 use cv_protocol::TrackerOutcome;
 use serde::Serialize;
 
+use super::super::cancel_source::{blog_keys, orphans_pass};
 use super::super::file::kind_def;
 use super::super::materialize::{join, now};
 use super::super::params::{expand, get_str, get_str_list};
@@ -423,6 +424,8 @@ fn supersede_existing(
 /// Executes the step.
 pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
+    // First, so every path below (disabled, all-failed deferral) runs it: DB-only.
+    orphans_pass(ctx, KIND, &blog_keys(ctx.config));
     let cfg = ctx.config.pipelines().blogs.clone();
     if !cfg.enabled {
         out.set_vars(&Vars {

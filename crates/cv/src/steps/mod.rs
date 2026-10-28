@@ -26,6 +26,7 @@
 //! | `DailyBrief` | [`daily_brief`] | A2 WP-9 |
 //! | `DupesScan` | [`dupes`] | round-12-feedback-todos WP-6 |
 //! | `DupesResolve` | [`dupes_resolve`] | round-12-feedback-todos WP-7 |
+//! | `CancelSourceIntake` | [`cancel_source`] | cancel-source-intake WP-1 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -38,6 +39,9 @@ mod agent_tests;
 pub mod auto_file;
 #[cfg(test)]
 mod auto_file_tests;
+pub mod cancel_source;
+#[cfg(test)]
+mod cancel_source_tests;
 pub mod capture;
 #[cfg(test)]
 mod capture_tests;
@@ -660,6 +664,7 @@ step_modules! {
     DailyBrief => daily_brief::DailyBrief,
     DupesScan => dupes::DupesScan,
     DupesResolve => dupes_resolve::DupesResolve,
+    CancelSourceIntake => cancel_source::CancelSourceIntake,
     Tidy => tidy::Tidy,
     RunAction => RunActionStep,
 }

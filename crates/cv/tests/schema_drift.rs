@@ -207,6 +207,7 @@ const STEPS: &[(&str, &str)] = &[
     ("daily_brief", ""),
     ("dupes_scan", "dry_run = true"),
     ("dupes_resolve", ""),
+    ("cancel_source_intake", "source = \"{param.source}\""),
     ("tidy", "min_age_hours = 48"),
 ];
 

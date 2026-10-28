@@ -258,3 +258,92 @@ fn trash_entries_roundtrip_and_signal() {
         vec!["trash_entries", "trash_entries", "trash_entries"]
     );
 }
+
+fn line_row(kind: &str, key: &str, id: &str, name: &str) -> TrackerItem {
+    let mut it = mail_row(key, id);
+    it.source_kind = kind.into();
+    it.outcome = TrackerOutcome::Line;
+    it.source_name = Some(name.into());
+    it
+}
+
+/// Plan cancel-source-intake WP-1: only the open `line` rows of the exact source change; done,
+/// cancelled, `note`, `skipped` rows and other sources are untouched; reasons are recorded.
+#[test]
+fn cancel_source_open_items_touches_only_open_rows_of_one_source() {
+    let (_d, mut s) = db();
+    for (key, id) in [("UCa", "o1"), ("UCa", "o2"), ("UCa", "d1"), ("UCa", "c1")] {
+        s.insert_tracker_item(&line_row("youtube", key, id, "Chan A"))
+            .unwrap();
+    }
+    s.set_tracker_item_status("youtube", "UCa", "d1", Some('x'))
+        .unwrap();
+    s.set_tracker_item_status("youtube", "UCa", "c1", Some('-'))
+        .unwrap();
+    for (id, outcome) in [
+        ("n1", TrackerOutcome::Note),
+        ("s1", TrackerOutcome::Skipped),
+    ] {
+        let mut it = line_row("youtube", "UCa", id, "Chan A");
+        it.outcome = outcome;
+        s.insert_tracker_item(&it).unwrap();
+    }
+    s.insert_tracker_item(&line_row("youtube", "UCb", "b1", "Chan B"))
+        .unwrap();
+    s.insert_tracker_item(&line_row("blog", "UCa", "k1", "Blog"))
+        .unwrap();
+    assert_eq!(
+        s.tracker_open_sources("youtube").unwrap(),
+        vec![
+            ("UCa".to_owned(), Some("Chan A".to_owned())),
+            ("UCb".to_owned(), Some("Chan B".to_owned()))
+        ]
+    );
+    assert_eq!(
+        s.cancel_source_open_items("youtube", "UCa", "source-removed", 5, usize::MAX)
+            .unwrap(),
+        2
+    );
+    for id in ["o1", "o2"] {
+        let it = s.tracker_item("youtube", "UCa", id).unwrap().unwrap();
+        assert_eq!(it.outcome, TrackerOutcome::Ignored);
+        assert_eq!(
+            s.tracker_item_status("youtube", "UCa", id).unwrap(),
+            Some(Some('-'))
+        );
+        let reason: String = s
+            .conn()
+            .query_row(
+                "SELECT reason FROM ignored_ids WHERE kind = 'youtube' AND id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "source-removed");
+    }
+    let st = |k: &str, key: &str, id: &str| s.tracker_item_status(k, key, id).unwrap();
+    assert_eq!(st("youtube", "UCa", "d1"), Some(Some('x')));
+    assert_eq!(st("youtube", "UCa", "c1"), Some(Some('-')));
+    assert_eq!(st("youtube", "UCa", "n1"), Some(None));
+    assert_eq!(st("youtube", "UCa", "s1"), Some(None));
+    assert_eq!(st("youtube", "UCb", "b1"), Some(None));
+    assert_eq!(st("blog", "UCa", "k1"), Some(None));
+    for id in ["d1", "c1", "n1", "s1", "b1"] {
+        assert!(!s.is_ignored("youtube", id).unwrap(), "{id}");
+    }
+    // Idempotent, and the limit bounds a run.
+    assert_eq!(
+        s.cancel_source_open_items("youtube", "UCa", "source-removed", 6, usize::MAX)
+            .unwrap(),
+        0
+    );
+    s.insert_tracker_item(&line_row("youtube", "UCc", "z1", "C"))
+        .unwrap();
+    s.insert_tracker_item(&line_row("youtube", "UCc", "z2", "C"))
+        .unwrap();
+    assert_eq!(
+        s.cancel_source_open_items("youtube", "UCc", "source-cancelled", 7, 1)
+            .unwrap(),
+        1
+    );
+}
