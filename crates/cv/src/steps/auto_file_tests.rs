@@ -457,7 +457,9 @@ fn filing_first_clip_images_only_files_and_enrichment_is_one_serialized_job() {
         [
             StepKind::Localize,
             StepKind::ImageDescribe,
-            StepKind::SearchUpsert
+            StepKind::SearchUpsert,
+            StepKind::YtMetadata,
+            StepKind::YtChannelEnrich
         ]
     );
     let keys = enrich

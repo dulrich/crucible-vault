@@ -412,7 +412,11 @@ type = "dupes_resolve"
 
 # Enrichment of a filed clip (plan round-16 WP-5): localize its images, then describe them, in one
 # job on the note's final path. The shared `clip::enrich` key lets at most one enrichment run at a
-# time, so the queue's other slot stays free for filing.
+# time, so the queue's other slot stays free for filing. The last two steps are `yt-metadata`'s own:
+# the daemon-written `yt-video-id` (set by `lint` while filing) never fires `yt-metadata`'s
+# external-origin starter, so enrichment links the metadata note directly (direct steps, not
+# `run_action`: the filed-clip chain is already at the depth limit). Both are no-ops on a note
+# without a video id; the channel step is a no-op unless pipelines.toml [youtube] channel_enrich.
 [[action]]
 id = "clip-enrich"
 label = "Clip: localize + describe images"
@@ -426,6 +430,10 @@ type = "image_describe"
 scope = "note"
 [[action.steps]]
 type = "search_upsert"
+[[action.steps]]
+type = "yt_metadata"
+[[action.steps]]
+type = "yt_channel_enrich"   # no-op unless pipelines.toml [youtube] channel_enrich = true
 
 [[action]]
 id = "image-describe-note"

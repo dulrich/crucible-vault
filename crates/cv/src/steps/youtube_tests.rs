@@ -391,3 +391,59 @@ fn non_utf8_note_is_read_lossily_like_x() {
     );
     assert_eq!(std::fs::read(w.vault.join("n/a.md")).unwrap(), bytes);
 }
+
+// ---- clip-enrich (plan round-18-holds-yt-metadata WP-3) --------------------------------------
+
+/// The shipped example `clip-enrich` ends with `yt-metadata`'s own two steps, after `search_upsert`.
+#[test]
+fn example_clip_enrich_arms_with_the_yt_metadata_steps() {
+    let c = crate::steps::testkit::example_config();
+    assert!(c.errors().is_empty(), "{:?}", c.errors());
+    let a = c.armed("clip-enrich").expect("clip-enrich armed");
+    let kinds: Vec<&str> = a.steps.iter().map(|s| s.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "localize",
+            "image_describe",
+            "search_upsert",
+            "yt_metadata",
+            "yt_channel_enrich"
+        ]
+    );
+    // Direct steps: a `run_action` would exceed the filed-clip chain depth.
+    assert!(!kinds.contains(&"run_action"));
+}
+
+/// Executing the example `clip-enrich`'s `yt_metadata` step links a YouTube note's metadata note
+/// and leaves a non-YouTube note byte-unchanged.
+#[test]
+fn example_clip_enrich_yt_metadata_step_links_youtube_and_skips_others() {
+    let c = crate::steps::testkit::example_config();
+    let s = c
+        .armed("clip-enrich")
+        .unwrap()
+        .steps
+        .iter()
+        .find(|s| s.kind.as_str() == "yt_metadata")
+        .unwrap()
+        .clone();
+    let plain = "---\ntitle: p\nsource: https://example.com/post\n---\nBody\n";
+    let w = world(
+        &[("n/yt.md", NOTE), ("n/plain.md", plain)],
+        vec![("/videos", 200, VIDEO.into())],
+        "",
+    );
+    let o = run(&w, &s, Some("n/yt.md"), &Map::new()).unwrap();
+    assert_eq!(o.vars["linked"], json!(true));
+    assert!(read(&w, "n/yt.md").contains("[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]"));
+    assert!(
+        w.vault
+            .join("_yt_metadata/synth-channel/dQw4w9WgXcQ.md")
+            .exists()
+    );
+    let hits = w.http.hits();
+    run(&w, &s, Some("n/plain.md"), &Map::new()).unwrap();
+    assert_eq!(read(&w, "n/plain.md"), plain);
+    assert_eq!(w.http.hits(), hits, "no API call for a non-YouTube note");
+}
