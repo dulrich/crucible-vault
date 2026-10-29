@@ -315,49 +315,61 @@ fn ctrl_alt_arrows_step_the_focused_pane() {
     ));
 }
 
+/// Plan round-17 WP-5 (Decision 8): the four left failsafes, in order, with their messages.
 #[test]
-fn menu_bar_pref_parses_and_defaults_to_shown() {
-    use crate::settings::editor_prefs::parse;
-    let med = crate::theme::Surround::Med;
-    assert!(parse("", med).expect("p").menu_bar_shown);
-    assert!(
-        !parse("menu_bar = \"hidden\"\n", med)
-            .expect("p")
-            .menu_bar_shown
+fn status_failsafes_are_the_four_buttons_in_order() {
+    use crate::icons::Icon;
+    let f = crate::app::view::status_failsafes();
+    let labels: Vec<_> = f.iter().map(|(_, l, _)| *l).collect();
+    assert_eq!(labels, ["Settings", "Logs", "Commands", "Switcher"]);
+    let icons: Vec<_> = f.iter().map(|(i, _, _)| *i).collect();
+    assert_eq!(
+        icons,
+        [Icon::Settings, Icon::Activity, Icon::Command, Icon::File]
     );
-    assert!(
-        parse("menu_bar = \"shown\"\n", med)
-            .expect("p")
-            .menu_bar_shown
-    );
+    assert!(matches!(
+        f[0].2,
+        Message::Settings(crate::settings::SettingsMsg::Open)
+    ));
+    assert!(matches!(f[1].2, Message::Log(crate::log::LogMsg::Open)));
+    assert!(matches!(f[2].2, Message::Palette(PaletteMsg::Open)));
+    assert!(matches!(f[3].2, Message::Switcher(SwitcherMsg::Open)));
+}
+
+/// Plan round-17 WP-5: the glyphs were read from the vendored font's glyph names.
+#[test]
+fn command_and_file_icons_use_the_font_codepoints() {
+    use crate::icons::Icon;
+    assert_eq!(Icon::Command.glyph(), '\u{e09e}');
+    assert_eq!(Icon::File.glyph(), '\u{e0c4}');
+}
+
+/// Plan round-17 WP-5 (Decisions 7, 9): the chrome actions stay on the command palette.
+#[test]
+fn removed_chrome_actions_stay_reachable_from_the_palette() {
+    let ids: Vec<&str> = crate::palette::commands::table()
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    for id in [
+        "close_pane",
+        "surround",
+        "split_right",
+        "split_down",
+        "toggle_panels",
+        "quick_switcher",
+        "command_palette",
+        "open_settings",
+    ] {
+        assert!(ids.contains(&id), "{id} missing from the palette");
+    }
 }
 
 #[test]
-fn menu_bar_session_state_seeds_toggles_and_follows_only_pref_changes() {
-    use crate::app::alt_tap::AltInput;
-    let (_tmp, _d, mut app) = app_with(&[], None);
-    assert!(app.menu_bar_shown, "default shown");
-    // A reload that changes the pref to hidden hides the bar.
-    app.prefs.menu_bar_shown = false;
-    let _ = app.send(Message::AltKey(AltInput::Other));
-    assert!(!app.menu_bar_shown);
-    // A bare-Alt tap flips it.
-    let _ = app.send(Message::AltKey(AltInput::AltDown { others_held: false }));
-    let _ = app.send(Message::AltKey(AltInput::AltUp));
-    assert!(app.menu_bar_shown);
-    // A reload with the pref unchanged leaves the toggled state alone.
-    let _ = app.send(Message::AltKey(AltInput::Other));
-    assert!(app.menu_bar_shown);
-    // Alt + a key never toggles.
-    let _ = app.send(Message::AltKey(AltInput::AltDown { others_held: false }));
-    let _ = app.send(Message::AltKey(AltInput::Other));
-    let _ = app.send(Message::AltKey(AltInput::AltUp));
-    assert!(app.menu_bar_shown);
-    // A pref change back to shown while toggled hidden follows the new value.
-    app.menu_bar_shown = false;
-    app.prefs.menu_bar_shown = true;
-    let _ = app.send(Message::AltKey(AltInput::Other));
-    assert!(app.menu_bar_shown);
+fn legacy_menu_bar_key_still_loads() {
+    use crate::settings::editor_prefs::parse;
+    let med = crate::theme::Surround::Med;
+    assert!(parse("menu_bar = \"hidden\"\n", med).is_ok());
 }
 
 /// Plan round-12-feedback-todos Decision 9: opening the switcher closes the palette and vice versa.

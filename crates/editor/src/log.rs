@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Element, Length};
 
 use crate::app::Severity;
@@ -188,7 +188,9 @@ pub fn view(log: &Log, t: crate::theme::Tokens) -> Element<'_, Message> {
     let body: Element<'_, Message> = if log.is_empty() {
         text("No notices yet.").size(14).into()
     } else {
-        scrollable(rows).height(Length::Fill).into()
+        crate::theme::gutter_scroll(rows)
+            .height(Length::Fill)
+            .into()
     };
     container(column![bar, body].spacing(8))
         .padding(8)

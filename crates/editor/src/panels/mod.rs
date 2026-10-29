@@ -20,7 +20,7 @@ use editor_model::props::{PropValue, Property};
 use editor_model::render::is_remote;
 use iced::widget::span;
 use iced::widget::text::Span;
-use iced::widget::{button, column, container, rich_text, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, rich_text, row, text, text_input};
 use iced::{Element, Length};
 
 use crate::context_menu::{Target, on_right};
@@ -759,7 +759,7 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
     .spacing(2)
     .wrap();
     let body: Element<'a, Message> = match p.kind {
-        PanelKind::Outline => scrollable(column(p.outline.iter().map(|h| {
+        PanelKind::Outline => crate::theme::gutter_scroll(column(p.outline.iter().map(|h| {
             let indent = "  ".repeat(usize::from(h.level.saturating_sub(1)));
             on_right(
                 button(text(format!("{indent}{}", h.text)).size(13))
@@ -790,7 +790,9 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
             for l in &p.links.external {
                 c = c.push(external_button(src, l.target.clone(), t));
             }
-            scrollable(c.spacing(2)).height(Length::Fill).into()
+            crate::theme::gutter_scroll(c.spacing(2))
+                .height(Length::Fill)
+                .into()
         }
         PanelKind::Backlinks => {
             VirtualList::new(&p.backlinks, ROW2, p.window(ListId::Backlinks), |w| {
@@ -848,7 +850,7 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
                     .into()
             }),
         },
-        PanelKind::Properties => scrollable(
+        PanelKind::Properties => crate::theme::gutter_scroll(
             column(p.props.iter().map(|pr| {
                 let v: Element<'a, Message> = if pr.key == props::POSSIBLE_DUPLICATE
                     && let Some(vs) = props::links(pr)

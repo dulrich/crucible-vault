@@ -1,7 +1,7 @@
 //! The Settings tab's view: the section rail, the page body and the shared file header / save
 //! status line.
 
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Element, Length, Theme};
 
 use super::{ConfigFile, LoadState, Section, Settings, SettingsMsg, body_scroll_id, pages, status};
@@ -56,7 +56,7 @@ pub fn view<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a, 
     let rail = container(rail)
         .padding(1)
         .style(crate::theme::seg_group_style(t));
-    let body = scrollable(container(page(s, paths, t)).padding([0, 16]))
+    let body = crate::theme::gutter_scroll(container(page(s, paths, t)).padding([0, 16]))
         .id(body_scroll_id(s.section))
         .on_scroll({
             let sec = s.section;

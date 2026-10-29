@@ -862,3 +862,11 @@ fn editor_nav_open_enum_default_new_tab() {
         .expect("field");
     assert!(matches!(f.default, Some(node::Default::Str("new-tab"))));
 }
+
+/// Plan round-17 WP-5: `menu_bar` left the editor schema, yet a file still carrying it is valid.
+#[test]
+fn dropped_menu_bar_key_is_unlisted_but_tolerated() {
+    let live = "menu_bar = \"hidden\"\nfont_size = 18.0\n";
+    assert!(errs(live, "editor.toml").is_empty());
+    assert!(!format!("{:?}", schema_for("editor.toml").unwrap()).contains("menu_bar"));
+}

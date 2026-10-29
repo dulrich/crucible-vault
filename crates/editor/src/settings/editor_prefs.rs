@@ -73,8 +73,6 @@ pub struct Prefs {
     pub missing_link: MissingLink,
     /// `focus_follows_mouse` (plan editor-round-4 WP-4): hovering a pane focuses it.
     pub focus_follows_mouse: bool,
-    /// `menu_bar` (plan round-10 WP-7): whether the top button row starts shown.
-    pub menu_bar_shown: bool,
     /// `auto_lint` (plan round-9-feedback-todos WP-6, D26): lint the open note at autosave.
     pub auto_lint: bool,
     /// `scroll_anchor` (plan round-8-intake-views-anchor WP-4): the viewport height, in percent
@@ -176,7 +174,6 @@ impl Default for Prefs {
             delete_mode: DeleteMode::Trash,
             missing_link: MissingLink::Warn,
             focus_follows_mouse: false,
-            menu_bar_shown: true,
             auto_lint: true,
             scroll_anchor: 0,
             palette_hidden: Vec::new(),
@@ -285,11 +282,6 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
         focus_follows_mouse: doc
             .get_bool(&p("focus_follows_mouse"))
             .unwrap_or(d.focus_follows_mouse),
-        menu_bar_shown: match doc.get_str(&p("menu_bar")) {
-            Some("hidden") => false,
-            Some("shown") => true,
-            _ => d.menu_bar_shown,
-        },
         auto_lint: doc.get_bool(&p("auto_lint")).unwrap_or(d.auto_lint),
         scroll_anchor: int_in("scroll_anchor")
             .and_then(|v| u8::try_from(v).ok())

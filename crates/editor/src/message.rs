@@ -19,8 +19,6 @@ pub enum Message {
     MemoryDue,
     /// Plan memory-instrumentation-and-reduction WP-M4: the always-on quiet-period trim tick.
     TrimTick,
-    /// Plan round-10 WP-7: a key/mouse input for the bare-Alt menu-bar toggle.
-    AltKey(crate::app::alt_tap::AltInput),
     Source(SourceMsg),
     Reading(ReadingMsg),
     Explorer(ExplorerMsg),

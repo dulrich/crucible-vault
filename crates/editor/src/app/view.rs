@@ -4,6 +4,30 @@ use super::tab_drag::{Cell, DropTarget};
 use super::*;
 use iced::widget::column;
 
+/// Plan round-17 WP-5 (Decision 8): the status bar's left failsafes, in order — icon, label,
+/// message. Every chrome action removed with the menu bar stays on the command palette.
+pub(super) fn status_failsafes() -> [(crate::icons::Icon, &'static str, Message); 4] {
+    use crate::icons::Icon;
+    [
+        (
+            Icon::Settings,
+            "Settings",
+            Message::Settings(crate::settings::SettingsMsg::Open),
+        ),
+        (
+            Icon::Activity,
+            "Logs",
+            Message::Log(crate::log::LogMsg::Open),
+        ),
+        (
+            Icon::Command,
+            "Commands",
+            Message::Palette(PaletteMsg::Open),
+        ),
+        (Icon::File, "Switcher", Message::Switcher(SwitcherMsg::Open)),
+    ]
+}
+
 impl App {
     /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
     pub(super) fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
@@ -120,8 +144,7 @@ impl App {
     /// The tab bar: the pane's tab headers (fixed height, clipped), then the close-pane button.
     fn tab_bar<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> Element<'a, Message> {
         use crate::header::{BAR_HEIGHT, MARKER_WIDTH, TITLE_MAX_CHARS, ellipsize, marker};
-        use crate::icons::Icon;
-        use crate::theme::{FONT_FAMILY, control_label, icon_button};
+        use crate::theme::{FONT_FAMILY, control_label};
         let t = self.tokens;
         let focused = pane == self.focus;
         // Plan round-11 WP-6: mid-drag the strip is drawn from the previewed layout. `i` is the
@@ -248,18 +271,7 @@ impl App {
             .width(Length::Fill)
             .height(BAR_HEIGHT)
             .clip(true);
-        let headers = self.drop_area(headers, DropTarget::End(pane));
-        // The close-pane button is pane-level, so it lives at the tab bar's right end.
-        let close: Element<'a, Message> = if self.panes.len() > 1 {
-            icon_button(Icon::X, Some(Message::Panes(PanesMsg::Close(pane))), t).into()
-        } else {
-            Space::new().into()
-        };
-        row![headers, close]
-            .spacing(4)
-            .height(BAR_HEIGHT)
-            .align_y(iced::Alignment::Center)
-            .into()
+        self.drop_area(headers, DropTarget::End(pane))
     }
 
     /// The note control bar: back/forward seg-group, centred breadcrumb (folders + editable
@@ -581,28 +593,6 @@ impl App {
             ..container::Style::default()
         };
 
-        let top = row![
-            button(text("Quick switch (Ctrl+P)").size(14))
-                .style(button::text)
-                .on_press(Message::Switcher(SwitcherMsg::Open)),
-            button(text("Command palette (Ctrl+Shift+P)").size(14))
-                .style(button::text)
-                .on_press(Message::Palette(PaletteMsg::Open)),
-            button(text("Panels").size(14))
-                .style(button::text)
-                .on_press(Message::Panels(PanelsMsg::Toggle)),
-            button(text("Split right").size(14))
-                .style(button::text)
-                .on_press(Message::Panes(PanesMsg::SplitRight)),
-            button(text("Split down").size(14))
-                .style(button::text)
-                .on_press(Message::Panes(PanesMsg::SplitDown)),
-            button(text("Settings (Ctrl+,)").size(14))
-                .style(button::text)
-                .on_press(Message::Settings(crate::settings::SettingsMsg::Open)),
-        ]
-        .spacing(8);
-
         let grid = PaneGrid::new(&self.panes, |pane, ps, _| self.pane_view(pane, ps))
             .spacing(4)
             .on_click(|p| Message::Panes(PanesMsg::Focus(p)))
@@ -644,40 +634,41 @@ impl App {
             }
             None => Space::new().into(),
         };
-        // Plan round-7 WP-3: a dedicated Log icon-button carrying the Warning+ unread count.
+        // Plan round-17 WP-5 (Decision 8): the left failsafes, each an icon + label; Logs keeps
+        // the Warning+ unread count (plan round-7 WP-3) and its warn colour.
         let unread = self.status.log.unread;
-        let log_button = button(
-            text(if unread > 0 {
-                format!("☰ Log {unread}")
+        let failsafes = row(status_failsafes().into_iter().map(|(icon, label, msg)| {
+            let (label, color) = if matches!(msg, Message::Log(_)) && unread > 0 {
+                (format!("{label} {unread}"), t.warn_text.to_color())
             } else {
-                "☰ Log".to_owned()
-            })
-            .size(16)
-            .color(if unread > 0 {
-                t.warn_text.to_color()
-            } else {
-                t.text_dim.to_color()
-            }),
-        )
-        .padding(0)
-        .style(button::text)
-        .on_press(Message::Log(crate::log::LogMsg::Open));
+                (label.to_owned(), t.text_dim.to_color())
+            };
+            button(
+                row![
+                    text(icon.glyph().to_string())
+                        .font(crate::icons::FONT)
+                        .size(crate::theme::ICON_SIZE)
+                        .color(color),
+                    text(label).size(16).color(color),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding(0)
+            .style(button::text)
+            .on_press(msg)
+            .into()
+        }))
+        .spacing(16);
         let status = row![
-            log_button,
+            failsafes,
             text(self.status.line()).size(16),
             text(toast).size(16).color(t.accent_text.to_color()),
             notice,
-            button(text(format!("Surround: {}", self.prefs.surround.label())).size(16))
-                .style(button::text)
-                .on_press(Message::Theme(ThemeMsg::Cycle)),
         ]
         .spacing(16);
 
-        // plan round-10 WP-7: the whole header row is omitted while the menu bar is hidden.
-        let mut main = column![];
-        if self.menu_bar_shown {
-            main = main.push(container(top).padding(4).width(Length::Fill).style(panel));
-        }
+        let main = column![];
         let side_width = if self.ui.side_collapsed {
             Length::Fixed(46.0)
         } else {

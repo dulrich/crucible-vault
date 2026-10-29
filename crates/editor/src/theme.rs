@@ -370,6 +370,19 @@ pub fn icon_text<'a>(icon: crate::icons::Icon) -> iced::widget::Text<'a> {
         .height(iced::Length::Fill)
 }
 
+/// The gap, in px, between a pane-level scrollable's content and its scrollbar.
+pub const SCROLL_GUTTER: f32 = 4.0;
+
+/// Plan round-17 WP-5 (Decision 11): a vertical scrollable whose scrollbar sits in its own
+/// gutter (iced 0.14 `Scrollbar::spacing` embeds it) instead of overlaying the content.
+pub fn gutter_scroll<'a, M: 'a>(
+    content: impl Into<iced::Element<'a, M>>,
+) -> iced::widget::Scrollable<'a, M> {
+    use iced::widget::scrollable::{Direction, Scrollbar};
+    iced::widget::scrollable(content)
+        .direction(Direction::Vertical(Scrollbar::new().spacing(SCROLL_GUTTER)))
+}
+
 /// A 34×34 CC-11 icon button; `msg = None` renders it disabled.
 pub fn icon_button<'a, M: Clone + 'a>(
     icon: crate::icons::Icon,

@@ -66,6 +66,10 @@ pub enum Icon {
     Trophy,
     ThumbsUp,
     ThumbsDown,
+    // plan round-17 WP-5: the status-bar failsafes. Codepoints read from the vendored font's
+    // `cmap` + `post` glyph names (fontTools `getBestCmap()`: command = U+E09E, file = U+E0C4).
+    Command,
+    File,
 }
 
 impl Icon {
@@ -118,6 +122,8 @@ impl Icon {
             Self::Trophy => '\u{e376}',
             Self::ThumbsUp => '\u{e189}',
             Self::ThumbsDown => '\u{e188}',
+            Self::Command => '\u{e09e}',
+            Self::File => '\u{e0c4}',
         }
     }
 }
@@ -152,6 +158,8 @@ mod tests {
             Icon::Trophy,
             Icon::ThumbsUp,
             Icon::ThumbsDown,
+            Icon::Command,
+            Icon::File,
         ] {
             assert!(('\u{e000}'..='\u{f8ff}').contains(&i.glyph()));
         }

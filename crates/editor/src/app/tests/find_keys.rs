@@ -175,10 +175,10 @@ fn setup() -> (tempfile::TempDir, App, Ui) {
     (tmp, app, ui)
 }
 
-/// Note at (600, 400); find input at (400, 140); the bar's ChevronDown (Next) at (1131, 141).
+/// Note at (600, 400); find input at (400, 104); the bar's ChevronDown (Next) at (1131, 105).
 const IN_NOTE: iced::Point = iced::Point::new(600.0, 400.0);
-const IN_INPUT: iced::Point = iced::Point::new(400.0, 140.0);
-const ON_BAR: iced::Point = iced::Point::new(1131.0, 141.0);
+const IN_INPUT: iced::Point = iced::Point::new(400.0, 104.0);
+const ON_BAR: iced::Point = iced::Point::new(1131.0, 105.0);
 
 #[test]
 fn find_input_click_takes_focus_from_the_note() {
@@ -468,7 +468,7 @@ fn log_button_and_notice_open_the_log() {
         height: 800.0,
     };
     let s = spots(&mut ui, &app);
-    let label = format!("☰ Log {unread}");
+    let label = format!("Logs {unread}");
     let at = s
         .texts
         .iter()

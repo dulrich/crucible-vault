@@ -129,7 +129,7 @@ impl<'a, T, M: 'a> VirtualList<'a, T, M> {
             .push(Space::new().height(Length::Fixed(after)))
             .width(Length::Fill);
         let on_scroll = self.on_scroll;
-        let s = scrollable(body)
+        let s = crate::theme::gutter_scroll(body)
             .on_scroll(move |v| on_scroll(ListWindow::from_viewport(&v)))
             .height(Length::Fill)
             .width(Length::Fill);

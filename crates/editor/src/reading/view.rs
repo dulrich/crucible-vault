@@ -3,9 +3,7 @@
 use editor_model::props::{PropValue, Property};
 use editor_model::render::{Align, Block, Fold, Inline, ListItem, inline_text};
 use iced::font::{Style as FontStyle, Weight};
-use iced::widget::{
-    Space, button, column, container, image, row, rule, scrollable, sensor, span, text,
-};
+use iced::widget::{Space, button, column, container, image, row, rule, sensor, span, text};
 use iced::{Border, Element, Font, Length, Theme};
 
 use std::cell::Cell;
@@ -189,7 +187,7 @@ pub fn reading<'a>(
             );
         }
     }
-    let scroll = scrollable(container(column(items).spacing(10)).padding(8))
+    let scroll = crate::theme::gutter_scroll(container(column(items).spacing(10)).padding(8))
         .id(crate::find::reading_scroll_id(path, view))
         .on_scroll(move |v| {
             Message::Reading(ReadingMsg::Scrolled {

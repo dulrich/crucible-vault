@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use iced::widget::image::Handle;
-use iced::widget::{Column, Space, button, container, row, scrollable, sensor, text};
+use iced::widget::{Column, Space, button, container, row, sensor, text};
 use iced::{Element, Length};
 
 use super::PageSizes;
@@ -154,7 +154,9 @@ pub fn tab_body<'a>(
     }
     iced::widget::column![
         bar,
-        scrollable(col).id(scroll_id(view)).height(Length::Fill)
+        crate::theme::gutter_scroll(col)
+            .id(scroll_id(view))
+            .height(Length::Fill)
     ]
     .width(Length::Fill)
     .height(Length::Fill)
