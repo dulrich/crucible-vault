@@ -679,3 +679,93 @@ fn pdf_embeds_lower_to_pdf_embed_blocks() {
         vec![("a.pdf".to_owned(), 2), ("b.pdf".to_owned(), 1)]
     );
 }
+
+/// Plan remote-media-sprint WP-5: an HTML block that is exactly one media element is a card.
+#[test]
+fn html_single_media_element_lowers_to_a_card() {
+    let media = |url: &str, kind| Block::RemoteMedia {
+        url: url.into(),
+        kind,
+    };
+    assert_eq!(
+        lower("<video src=\"https://a.example/v.mp4\" controls></video>\n").blocks,
+        vec![media("https://a.example/v.mp4", RemoteCardKind::Video)]
+    );
+    assert_eq!(
+        lower("<audio src=\"https://a.example/s.mp3\"></audio>\n").blocks,
+        vec![media("https://a.example/s.mp3", RemoteCardKind::Audio)]
+    );
+    assert_eq!(
+        lower("<iframe src=\"https://www.youtube.com/embed/dQw4w9WgXcQ\"></iframe>\n").blocks,
+        vec![media(
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+            RemoteCardKind::Video
+        )]
+    );
+    // An unclassified iframe host is an embed.
+    assert_eq!(
+        lower("<iframe src=\"https://datawrapper.example/chart/1\"></iframe>\n").blocks,
+        vec![media(
+            "https://datawrapper.example/chart/1",
+            RemoteCardKind::Embed
+        )]
+    );
+}
+
+#[test]
+fn html_single_img_lowers_to_a_remote_image() {
+    assert_eq!(
+        lower("<img src=\"https://a.example/p.png\">\n").blocks,
+        vec![Block::Image {
+            src: "https://a.example/p.png".into(),
+            alt: String::new(),
+            width: None,
+            remote: true,
+            link: None,
+        }]
+    );
+}
+
+#[test]
+fn html_blocks_that_are_not_one_media_element_stay_raw() {
+    for src in [
+        "<video src=\"https://a.example/v.mp4\"></video>\n<audio src=\"https://a.example/s.mp3\"></audio>\n",
+        "<div>hi <img src=\"https://a.example/p.png\"></div>\n",
+        "<div>plain</div>\n",
+    ] {
+        let m = lower(src);
+        assert!(
+            matches!(m.blocks.as_slice(), [Block::Paragraph(_)]),
+            "{src:?} -> {:?}",
+            m.blocks
+        );
+    }
+}
+
+/// Plan remote-media-sprint WP-5: a local audio/video embed is a file embed (the media card).
+#[test]
+fn local_audio_video_embeds_are_file_embeds() {
+    for f in ["x.mp3", "dir/y.MP4", "z.webm"] {
+        assert_eq!(
+            lower(&format!("![[{f}]]\n")).blocks,
+            vec![Block::FileEmbed { target: f.into() }],
+            "{f}"
+        );
+    }
+}
+
+#[test]
+fn remote_card_kind_by_url() {
+    use RemoteCardKind as K;
+    let k = K::from_url;
+    assert_eq!(
+        k("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+        Some(K::Video)
+    );
+    assert_eq!(k("https://a.example/v.mp4"), Some(K::Video));
+    assert_eq!(k("https://a.example/s.mp3"), Some(K::Audio));
+    assert_eq!(k("https://a.example/d.pdf"), Some(K::Pdf));
+    assert_eq!(k("https://x.com/u/status/123"), Some(K::Post));
+    assert_eq!(k("https://a.example/p.png"), None);
+    assert_eq!(k("https://a.example/page"), None);
+}

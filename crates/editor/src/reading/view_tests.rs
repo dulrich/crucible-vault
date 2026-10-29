@@ -98,3 +98,70 @@ fn host_tasks_toggle_and_transcluded_do_not() {
     assert!(task_press("a.md", Some('x'), None).is_none());
     assert!(task_press("a.md", None, Some(3)).is_none());
 }
+
+/// Plan remote-media-sprint WP-5: the ▶ badge rule.
+#[test]
+fn video_hrefs_get_the_badge() {
+    use embeds::is_video_href;
+    assert!(is_video_href("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+    assert!(is_video_href("https://youtu.be/dQw4w9WgXcQ"));
+    assert!(is_video_href("https://a.example/v.mp4"));
+    assert!(!is_video_href("https://a.example/page"));
+    assert!(!is_video_href("https://a.example/p.png"));
+    assert!(!is_video_href("Other.md"));
+}
+
+/// Plan remote-media-sprint WP-5: card labels by kind; image / unknown keep the placeholder.
+#[test]
+fn remote_card_labels() {
+    use embeds::remote_card_label as l;
+    assert_eq!(
+        l("https://www.youtube.com/watch?v=dQw4w9WgXcQ").as_deref(),
+        Some("▶ video · youtube.com")
+    );
+    assert_eq!(
+        l("https://cdn.example/v.mp4").as_deref(),
+        Some("▶ video · cdn.example")
+    );
+    assert_eq!(l("https://x.com/u/status/1").as_deref(), Some("X post"));
+    assert_eq!(
+        l("https://www.a.example/s.mp3?x=1").as_deref(),
+        Some("♪ audio · a.example")
+    );
+    assert_eq!(
+        l("https://a.example/d.pdf").as_deref(),
+        Some("pdf · a.example")
+    );
+    assert_eq!(l("https://a.example/p.png"), None);
+    assert_eq!(l("https://a.example/page"), None);
+}
+
+#[test]
+fn embed_card_label_uses_the_host() {
+    use editor_model::render::RemoteCardKind;
+    assert_eq!(
+        embeds::remote_card_text(RemoteCardKind::Embed, "https://www.dw.example/c/1"),
+        "embed · dw.example"
+    );
+}
+
+#[test]
+fn media_glyph_by_extension() {
+    use embeds::media_glyph as g;
+    assert_eq!(g("a/b.mp3"), Some("♪"));
+    assert_eq!(g("b.FLAC"), Some("♪"));
+    assert_eq!(g("b.mp4"), Some("▶"));
+    assert_eq!(g("b.webm"), Some("▶"));
+    assert_eq!(g("b.pdf"), None);
+    assert_eq!(g("b"), None);
+}
+
+/// A markdown `![](local.mp4)` lowers to a local image block (the media card in the view).
+#[test]
+fn markdown_local_video_is_a_local_image_block() {
+    let m = editor_model::render::lower("![](clips/a.mp4)\n");
+    assert!(matches!(
+        m.blocks.as_slice(),
+        [Block::Image { remote: false, src, .. }] if src == "clips/a.mp4"
+    ));
+}

@@ -105,7 +105,10 @@ impl Lower {
     fn block<'a>(&mut self, n: N<'a>, out: &mut Vec<Block>) {
         let value = n.data().value.clone();
         match value {
-            NodeValue::Paragraph => self.paragraph(n.children(), out),
+            NodeValue::Paragraph => match inline_html_media(n) {
+                Some(card) => out.push(card),
+                None => self.paragraph(n.children(), out),
+            },
             NodeValue::Heading(h) => {
                 let inlines = spans_only(self.inlines(n.children()));
                 out.push(Block::Heading {
@@ -210,10 +213,14 @@ impl Lower {
                     blocks,
                 });
             }
-            NodeValue::HtmlBlock(h) => out.push(Block::Paragraph(vec![Inline::Text {
-                text: h.literal.trim_end().to_owned(),
-                style: Style::default(),
-            }])),
+            NodeValue::HtmlBlock(h) => {
+                out.push(html_media_block(&h.literal).unwrap_or_else(|| {
+                    Block::Paragraph(vec![Inline::Text {
+                        text: h.literal.trim_end().to_owned(),
+                        style: Style::default(),
+                    }])
+                }))
+            }
             NodeValue::FrontMatter(_) => {}
             _ => {
                 for c in n.children() {
@@ -628,4 +635,55 @@ fn split_width(alt: &str) -> (&str, Option<u32>) {
         },
         None => (alt, None),
     }
+}
+
+/// Plan remote-media-sprint WP-5: `<video …></video>` / `<audio …></audio>` on one line is not a
+/// CommonMark HTML block (only `<iframe>` is) but a paragraph of inline HTML. A paragraph made
+/// only of inline HTML, text and breaks whose joined source is exactly one media element is the
+/// same card as the block form.
+fn inline_html_media<'a>(n: N<'a>) -> Option<Block> {
+    let mut src = String::new();
+    let mut html = false;
+    for c in n.children() {
+        match &c.data().value {
+            NodeValue::HtmlInline(h) => {
+                html = true;
+                src.push_str(h);
+            }
+            NodeValue::Text(t) => src.push_str(t),
+            NodeValue::SoftBreak | NodeValue::LineBreak => src.push('\n'),
+            _ => return None,
+        }
+    }
+    if html { html_media_block(&src) } else { None }
+}
+
+/// Plan remote-media-sprint WP-5: an HTML block whose trimmed literal is exactly one media
+/// element (per `cv_text::scan_html_media`) lowers to a card block; anything else is `None`
+/// (raw text). An `<img>` is a remote [`Block::Image`]; `<video>`/`<audio>`/`<iframe>` are a
+/// [`Block::RemoteMedia`] by the source's kind, falling back to the tag (an `<iframe>` whose
+/// source is not otherwise classified is an embed).
+fn html_media_block(literal: &str) -> Option<Block> {
+    use super::model::RemoteCardKind;
+    use cv_text::HtmlMediaTag as T;
+    let t = literal.trim();
+    let [m] = cv_text::scan_html_media(t).try_into().ok()?;
+    if m.span.start != 0 || m.span.end != t.len() {
+        return None;
+    }
+    if m.tag == T::Img {
+        return Some(Block::Image {
+            src: m.src,
+            alt: String::new(),
+            width: None,
+            remote: true,
+            link: None,
+        });
+    }
+    let kind = RemoteCardKind::from_url(&m.src).unwrap_or(match m.tag {
+        T::Video => RemoteCardKind::Video,
+        T::Audio => RemoteCardKind::Audio,
+        _ => RemoteCardKind::Embed,
+    });
+    Some(Block::RemoteMedia { url: m.src, kind })
 }

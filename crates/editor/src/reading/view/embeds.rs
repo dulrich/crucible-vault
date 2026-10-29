@@ -2,6 +2,7 @@
 //! the view fence, file card, inline PDF page, and image / linked-image blocks.
 
 use super::*;
+use editor_model::render::RemoteCardKind;
 
 /// The `crucible-view` fence hook: the view `<file>#<name>` with `this` = the embedding note.
 pub(super) fn view_fence<'a>(cx: &Ctx<'a, '_>, file: &str, name: &str) -> Element<'a, Message> {
@@ -23,8 +24,16 @@ pub(super) fn file_card<'a>(cx: &Ctx<'a, '_>, target: &'a str) -> Element<'a, Me
         src: cx.path.to_owned(),
         target: target.to_owned(),
     });
+    // Plan remote-media-sprint WP-5: a local audio/video file is a media card (♪/▶ + name).
+    let label = match media_glyph(target) {
+        Some(g) => format!("{g} {name}"),
+        None => name.to_owned(),
+    };
     let card = row![
-        text(name).size(cx.sz(14.0)).color(t.text.to_color()),
+        text(label)
+            .size(cx.sz(14.0))
+            .color(t.text.to_color())
+            .shaping(iced::widget::text::Shaping::Advanced),
         Space::new().width(Length::Fill),
         text("Open externally ↗")
             .size(cx.sz(12.0))
@@ -151,6 +160,16 @@ pub(super) fn image_block<'a>(
             t.line,
         )
     };
+    if remote && link.is_none() {
+        // Plan remote-media-sprint WP-5: a non-image remote reference is a card by kind.
+        if let Some(kind) = RemoteCardKind::from_url(src) {
+            return remote_card(cx, src, kind);
+        }
+    }
+    if !remote && media_glyph(src).is_some() {
+        // WP-5: `![](local.mp4)` is the same media card as `![[local.mp4]]`.
+        return file_card(cx, src);
+    }
     if remote {
         // Never fetched: localization is the daemon's job (inventory #7).
         // WP-3: the placeholder opens the image URL in the browser.
@@ -273,6 +292,23 @@ pub(super) fn linked_image<'a>(
         selection: false,
         missing,
     };
+    // Plan remote-media-sprint WP-5: a video href gets a ▶ badge over the thumbnail.
+    let img: Element<'a, Message> = if is_video_href(href) {
+        iced::widget::Stack::new()
+            .push(img)
+            .push(
+                container(
+                    text("▶")
+                        .size(cx.sz(28.0))
+                        .color(iced::Color::WHITE)
+                        .shaping(iced::widget::text::Shaping::Advanced),
+                )
+                .center(Length::Fill),
+            )
+            .into()
+    } else {
+        img
+    };
     crate::context_menu::on_right(
         button(img).padding(0).style(button::text).on_press(open),
         linked_image_target(cx, link, src, remote),
@@ -325,4 +361,86 @@ where
         ),
         None => s,
     }
+}
+
+/// Plan remote-media-sprint WP-5: whether a linked image's `href` is a video (the ▶ badge rule).
+pub(super) fn is_video_href(href: &str) -> bool {
+    matches!(
+        cv_text::classify_remote(href),
+        cv_text::RemoteKind::VideoPage { .. } | cv_text::RemoteKind::VideoFile
+    )
+}
+
+/// The URL host minus a leading `www.` (the whole string when it has no scheme).
+fn card_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    host.strip_prefix("www.").unwrap_or(host)
+}
+
+/// Plan remote-media-sprint WP-5: the card label of a remote non-image reference. Glyph coverage:
+/// the bundled font (Inter) has none of ▶ ♪ 𝕏 ⧉; ▶ and ♪ come from common system fallbacks, but
+/// 𝕏 and especially ⧉ (one installed font on the dev host) are not reliable, so those two use
+/// plain text.
+pub(super) fn remote_card_text(kind: RemoteCardKind, url: &str) -> String {
+    let host = card_host(url);
+    match kind {
+        RemoteCardKind::Video => format!("▶ video · {host}"),
+        RemoteCardKind::Post => "X post".to_owned(),
+        RemoteCardKind::Audio => format!("♪ audio · {host}"),
+        RemoteCardKind::Pdf => format!("pdf · {host}"),
+        RemoteCardKind::Embed => format!("embed · {host}"),
+    }
+}
+
+/// The label for a URL that classifies as a card kind (`None` = image/unknown: the placeholder).
+#[cfg(test)]
+pub(super) fn remote_card_label(url: &str) -> Option<String> {
+    RemoteCardKind::from_url(url).map(|k| remote_card_text(k, url))
+}
+
+/// Plan remote-media-sprint WP-5: ♪ / ▶ for a local audio / video file name, else `None`.
+pub(super) fn media_glyph(target: &str) -> Option<&'static str> {
+    const AUDIO: &[&str] = &["mp3", "m4a", "wav", "flac", "ogg", "oga", "opus", "aac"];
+    const VIDEO: &[&str] = &["webm", "mp4", "m4v", "mkv", "mov", "avi", "3gp"];
+    let name = target.rsplit('/').next().unwrap_or(target);
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    if AUDIO.contains(&ext.as_str()) {
+        Some("♪")
+    } else if VIDEO.contains(&ext.as_str()) {
+        Some("▶")
+    } else {
+        None
+    }
+}
+
+/// Plan remote-media-sprint WP-5: a card for a remote non-image reference. Left click opens the
+/// URL; right click offers Copy URL (the remote-image menu target).
+pub(super) fn remote_card<'a>(
+    cx: &Ctx<'a, '_>,
+    url: &'a str,
+    kind: RemoteCardKind,
+) -> Element<'a, Message> {
+    let t = cx.t;
+    let label = boxed(
+        text(remote_card_text(kind, url))
+            .size(cx.sz(13.0))
+            .color(t.text_faint.to_color())
+            .shaping(iced::widget::text::Shaping::Advanced)
+            .into(),
+        t,
+        t.line,
+    );
+    let target = crate::context_menu::Target::Image {
+        src: url.to_owned(),
+        remote: true,
+    };
+    crate::context_menu::on_right(
+        button(label)
+            .padding(0)
+            .style(button::text)
+            .on_press(Message::OpenUrl(url.to_owned())),
+        target,
+    )
 }

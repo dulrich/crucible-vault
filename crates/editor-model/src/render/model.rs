@@ -124,6 +124,12 @@ pub enum Block {
         page: u32,
         width: Option<u32>,
     },
+    /// Plan remote-media-sprint WP-5: a remote non-image media reference (an HTML block that is
+    /// exactly one `<video>`/`<audio>`/`<iframe>` element), drawn as a card that opens `url`.
+    RemoteMedia {
+        url: String,
+        kind: RemoteCardKind,
+    },
     /// A `crucible-view` fence (one-line body `<file>#<name>`), rendered by WP-7's hook.
     ViewFence {
         file: String,
@@ -178,5 +184,36 @@ pub struct LowerOptions {
 impl Default for LowerOptions {
     fn default() -> Self {
         Self { transclude: true }
+    }
+}
+
+/// Plan remote-media-sprint WP-5: which card a remote non-image reference is drawn as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteCardKind {
+    /// A video page or video file.
+    Video,
+    /// An X/Twitter post.
+    Post,
+    /// An audio file.
+    Audio,
+    /// A PDF.
+    Pdf,
+    /// Any other iframe-style embed.
+    Embed,
+}
+
+impl RemoteCardKind {
+    /// The card kind of a remote URL, or `None` for an image / unknown URL (those keep the
+    /// remote-image placeholder).
+    pub fn from_url(url: &str) -> Option<Self> {
+        use cv_text::RemoteKind as K;
+        match cv_text::classify_remote(url) {
+            K::VideoPage { .. } | K::VideoFile => Some(Self::Video),
+            K::Post => Some(Self::Post),
+            K::AudioFile => Some(Self::Audio),
+            K::Pdf => Some(Self::Pdf),
+            K::Embed => Some(Self::Embed),
+            K::Image | K::Unknown => None,
+        }
     }
 }

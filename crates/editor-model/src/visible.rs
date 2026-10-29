@@ -288,6 +288,7 @@ impl Walk {
                 let name = target.rsplit('/').next().unwrap_or(target).to_owned();
                 self.push(name, Vec::new(), sep, true);
             }
+            Block::RemoteMedia { url, .. } => self.push(url.clone(), Vec::new(), sep, true),
             Block::ThematicBreak | Block::ViewFence { .. } => {}
         }
     }

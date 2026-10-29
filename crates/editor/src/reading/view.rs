@@ -29,7 +29,7 @@ use crate::{
 use embeds::linked_image_open;
 #[cfg(test)]
 pub(super) use embeds::sized_image;
-use embeds::{file_card, image_block, linked_image, pdf_embed, view_fence};
+use embeds::{file_card, image_block, linked_image, pdf_embed, remote_card, view_fence};
 use std::borrow::Cow;
 
 /// A clickable target inside rich text.
@@ -511,6 +511,10 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
         } => {
             cx.take_run();
             pdf_embed(cx, target, *page, *width)
+        }
+        Block::RemoteMedia { url, kind } => {
+            cx.take_run();
+            remote_card(cx, url, *kind)
         }
     }
 }
