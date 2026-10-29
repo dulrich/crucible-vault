@@ -20,8 +20,14 @@ const USAGE: &str = if cfg!(feature = "fake") {
 fn early_exit(args: &[String]) -> Option<String> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         Some(USAGE.to_owned())
+    } else if args.iter().any(|a| a == "--build") {
+        Some(env!("FLEET_BUILD_ID").to_owned())
     } else if args.iter().any(|a| a == "-V" || a == "--version") {
-        Some(format!("cvault-editor {}", env!("CARGO_PKG_VERSION")))
+        Some(format!(
+            "cvault-editor {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("FLEET_BUILD_ID")
+        ))
     } else {
         None
     }
@@ -166,7 +172,19 @@ mod tests {
             Some(USAGE)
         );
         assert!(USAGE.contains("--version") && USAGE.contains("CV_SOCKET"));
-        let ver = format!("cvault-editor {}", env!("CARGO_PKG_VERSION"));
+        let ver = format!(
+            "cvault-editor {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("FLEET_BUILD_ID")
+        );
+        assert_eq!(
+            early_exit(&v(&["--build"])).as_deref(),
+            Some(env!("FLEET_BUILD_ID"))
+        );
+        assert_eq!(
+            early_exit(&v(&["--build", "--help"])).as_deref(),
+            Some(USAGE)
+        );
         assert_eq!(early_exit(&v(&["--version"])), Some(ver.clone()));
         assert_eq!(early_exit(&v(&["-V"])), Some(ver));
         assert_eq!(

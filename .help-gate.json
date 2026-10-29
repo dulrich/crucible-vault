@@ -1,7 +1,9 @@
 {
+  "build-flags": "enforce",
   "entrypoints": [
     {
       "path": "crates/cv/src/main.rs",
+      "version": "semver",
       "subcommands": [
         "daemon",
         "uri",
@@ -15,6 +17,7 @@
     },
     {
       "path": "crates/editor/src/main.rs",
+      "version": "semver",
       "subcommands": [
         "--fake"
       ]

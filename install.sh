@@ -32,6 +32,10 @@ usage: ./install.sh [--list] [--skip-build] [--no-editor]
 EOF
 }
 
+. "$REPO/scripts/lib/build-id.sh"
+case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
+build_flags "${BASH_SOURCE[0]}" "$@"
+
 for a in "$@"; do
   case $a in
     --list) list_only=1 ;;

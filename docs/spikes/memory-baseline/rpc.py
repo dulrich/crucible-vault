@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """usage: rpc.py <socket> <method> '<params-json>' — prints only aggregates (result size, latency)."""
-import json, socket, sys, time
+import json, os, socket, sys, time
 if any(a in ("-h", "--help") for a in sys.argv[1:]):
     print(__doc__.strip())
     sys.exit(0)
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from build_id import handle_build_flags
+
+_rc = handle_build_flags(sys.argv[1:], os.path.realpath(__file__), name="rpc.py", semver=None)
+if _rc is not None:
+    sys.exit(_rc)
 sock, method, params = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
 s = socket.socket(socket.AF_UNIX); s.connect(sock)
 def call(m, prm, i):

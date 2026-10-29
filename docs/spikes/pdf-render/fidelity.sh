@@ -3,6 +3,8 @@
 # hayro vs pdfium pixel agreement on page 1 + mid page of every non-.trash live-vault PDF at 96 dpi; aggregates only (sorted index, never names).
 set -u
 if [ "${1:-}" = "--help" ]; then echo "usage: fidelity.sh [outfile.tsv]"; exit 0; fi
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 out=${1:-results-fidelity.tsv}
 VAULT=${VAULT:-~/vault}
 HERE=$(cd "$(dirname "$0")" && pwd)

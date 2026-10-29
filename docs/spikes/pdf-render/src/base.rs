@@ -1,1 +1,1 @@
-fn main(){ if std::env::args().nth(1).as_deref()==Some("--help"){println!("usage: base");return;} println!("base"); }
+fn main(){ if std::env::args().nth(1).as_deref()==Some("--help"){println!("usage: base");return;} if std::env::args().skip(1).any(|a| a=="--build"||a=="--version"){println!("{}",env!("FLEET_BUILD_ID"));return;} println!("base"); }

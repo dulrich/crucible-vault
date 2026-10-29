@@ -4,6 +4,8 @@ for _a in "$@"; do case "$_a" in --help|-h)
   printf 'usage: %s %s\n' "${0##*/}" '<pid> <interval_s> <count> <out.tsv>'
   awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
   exit 0;; esac; done
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 
 pid=$1; iv=$2; n=$3; out=$4
 printf 't_s\trss_kb\tpss_anon_kb\tpss_file_kb\thwm_kb\tthreads\theap_kb\tarena_kb\tother_anon_kb\n' > "$out"

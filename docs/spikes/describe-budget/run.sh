@@ -5,6 +5,8 @@
 # (8192) so the natural output length is observable; arms: reasoning off / on (default).
 # Usage: run.sh <in-dir> <out-dir>
 case "${1:-}" in -h|--help) sed -n "2,/^set -euo/{/^#/s/^# \{0,1\}//p}" "$0"; exit 0;; esac
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 set -euo pipefail
 IN=$1; OUT=$2
 URL=http://127.0.0.1:4811/v1/chat/completions

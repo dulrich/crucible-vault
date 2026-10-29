@@ -11,6 +11,10 @@ fn main() {
         println!("usage: r_hayro <pdf> <scale>  (prints one aggregate line: pages, ms and non-white px for page 1 and mid page)");
         return;
     }
+    if a.iter().skip(1).any(|x| x == "--build" || x == "--version") {
+        println!("{}", env!("FLEET_BUILD_ID"));
+        return;
+    }
     let scale: f32 = a[2].parse().unwrap();
     let r = std::panic::catch_unwind(|| {
         let data = std::fs::read(&a[1]).map_err(|e| e.to_string())?;

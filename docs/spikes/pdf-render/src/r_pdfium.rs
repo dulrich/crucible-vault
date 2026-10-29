@@ -8,6 +8,10 @@ fn main() {
         println!("usage: r_pdfium <pdf> <scale>  (env PDFIUM_LIB_DIR = dir holding libpdfium.so)");
         return;
     }
+    if a.iter().skip(1).any(|x| x == "--build" || x == "--version") {
+        println!("{}", env!("FLEET_BUILD_ID"));
+        return;
+    }
     let scale: f32 = a[2].parse().unwrap();
     let r = std::panic::catch_unwind(|| {
         let dir = std::env::var("PDFIUM_LIB_DIR").unwrap();

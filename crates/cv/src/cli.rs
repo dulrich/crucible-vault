@@ -21,10 +21,20 @@ pub fn usage() -> String {
     USAGE_TEMPLATE.replace("{JOBS}", crate::jobs::USAGE)
 }
 
-/// Version line printed by `cv --version`.
+/// Version line printed by `cv --version`: `cv <semver> (<build id>)`.
 #[must_use]
 pub fn version_line() -> String {
-    format!("cv {}\n", env!("CARGO_PKG_VERSION"))
+    format!(
+        "cv {} ({})\n",
+        env!("CARGO_PKG_VERSION"),
+        env!("FLEET_BUILD_ID")
+    )
+}
+
+/// Build-id line printed by `cv --build`.
+#[must_use]
+pub fn build_line() -> String {
+    format!("{}\n", env!("FLEET_BUILD_ID"))
 }
 
 /// Pure decision for the side-effect-free early exits: `Some(stdout text)` for help (wins) or
@@ -35,6 +45,8 @@ pub fn early_exit(args: &[String]) -> Option<String> {
         || args.iter().any(|a| a == "--help" || a == "-h")
     {
         Some(usage())
+    } else if args.iter().any(|a| a == "--build") {
+        Some(build_line())
     } else if args.iter().any(|a| a == "--version" || a == "-V") {
         Some(version_line())
     } else {
@@ -325,7 +337,16 @@ mod tests {
         assert_eq!(early_exit(&v(&["uri", "-h"])), Some(usage()));
         assert_eq!(early_exit(&v(&["help"])), Some(usage()));
         assert!(usage().contains("--version"));
-        let ver = format!("cv {}\n", env!("CARGO_PKG_VERSION"));
+        let ver = format!(
+            "cv {} ({})\n",
+            env!("CARGO_PKG_VERSION"),
+            env!("FLEET_BUILD_ID")
+        );
+        assert_eq!(
+            early_exit(&v(&["--build"])),
+            Some(format!("{}\n", env!("FLEET_BUILD_ID")))
+        );
+        assert_eq!(early_exit(&v(&["--build", "--help"])), Some(usage()));
         assert_eq!(early_exit(&v(&["--version"])), Some(ver.clone()));
         assert_eq!(early_exit(&v(&["-V"])), Some(ver.clone()));
         assert_eq!(early_exit(&v(&["daemon", "--version"])), Some(ver));

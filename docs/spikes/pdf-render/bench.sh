@@ -7,6 +7,8 @@ if [ "${1:-}" = "--help" ] || [ $# -lt 1 ]; then
   echo "usage: bench.sh <hayro|pdfium|poppler> [outfile.tsv]  (run from docs/spikes/pdf-render/; needs target/release bins and, for pdfium, vendor/pdfium/lib)"
   exit 0
 fi
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 cand=$1; out=${2:-results-$cand.tsv}
 VAULT=${VAULT:-~/vault}
 HERE=$(cd "$(dirname "$0")" && pwd)

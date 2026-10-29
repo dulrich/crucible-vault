@@ -188,6 +188,10 @@ fn main() {
         println!("usage: reading-select-spike\n\nHeadless selection/copy harness for the Reading view spike (writes PNGs to ./out). Takes no arguments.");
         return;
     }
+    if std::env::args().skip(1).any(|a| a == "--build" || a == "--version") {
+        println!("{}", env!("FLEET_BUILD_ID"));
+        return;
+    }
     std::fs::create_dir_all("out").unwrap();
     let mut h = Harness::new();
     h.events(&[]);

@@ -338,6 +338,10 @@ fn overlap_mode(vault: &str, fa: &str, fb: &str) {
 mod identity;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if !std::env::args().skip(1).any(|a| a == "--help" || a == "-h") && std::env::args().skip(1).any(|a| a == "--build" || a == "--version") {
+        println!("{}", env!("FLEET_BUILD_ID"));
+        return;
+    }
     match a.get(1).map(String::as_str) {
         Some("shingles") if a.len() == 4 => shingles_mode(&a[2], &a[3]),
         Some("semantic") if a.len() == 4 => semantic_mode(&a[2], &a[3]),

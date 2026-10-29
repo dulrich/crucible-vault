@@ -16,6 +16,10 @@ fn main() {
         println!("usage: source-scroll-spike\n\nSource-view scroll_content measurement. Takes no arguments.");
         return;
     }
+    if std::env::args().skip(1).any(|a| a == "--build" || a == "--version") {
+        println!("{}", env!("FLEET_BUILD_ID"));
+        return;
+    }
     let lh = 18.2f32; let n = 200f32;
     run("up 4n then down 50 (current scroll_content)", &[(-4.0*n*lh) as i32, (50.0*lh) as i32]);
     run("single down 50", &[(50.0*lh) as i32]);

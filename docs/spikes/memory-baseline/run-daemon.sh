@@ -4,6 +4,8 @@ for _a in "$@"; do case "$_a" in --help|-h)
   printf 'usage: %s %s\n' "${0##*/}" '<label> <seconds> [ENV=VAL ...]'
   awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
   exit 0;; esac; done
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 
 label=$1; secs=$2; shift 2
 S=~/.local/share/cv-mem-scratch; D=$(dirname "$0")

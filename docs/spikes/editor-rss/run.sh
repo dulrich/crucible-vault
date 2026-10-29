@@ -7,6 +7,8 @@ for _a in "$@"; do case "$_a" in --help|-h)
   printf 'usage: %s %s\n' "${0##*/}" '<label>'
   awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
   exit 0;; esac; done
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 
 set -u
 label=$1; S=${SCRATCH:?SCRATCH unset}; title=crucible-vault
