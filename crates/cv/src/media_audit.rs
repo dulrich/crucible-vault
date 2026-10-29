@@ -13,19 +13,20 @@
 //! unconverted video/post/iframe embeds, audio/PDF embeds while `[remote_media]` says `localize`
 //! for them, unmanaged local image refs, undescribed images, or describe coverage unavailable
 //! (`state.db` absent: nothing can be proved). Images whose describe failed permanently under a
-//! cv provider (`failed` with `providerId`) are a reported exception, not undescribed.
+//! cv provider (`failed` with `providerId`) are a reported exception, not undescribed; so is an
+//! unmanaged local image ref whose file is nowhere in the vault (no basename match), which is
+//! counted apart from the unmanaged refs.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use cv_actions::vault::{MediaMode, VaultConfig};
 use cv_search::prepare::localized_image_md5;
 use cv_state::StateReader;
-use cv_text::attachments::{
-    count_unmanaged_local_image_refs, is_embed_page, parse_attachment_refs,
-};
+use cv_text::attachments::{is_embed_page, parse_attachment_refs, unmanaged_local_image_refs};
 use cv_text::remote_media::{HtmlMediaTag, RemoteKind, classify_remote, scan_html_media};
+use cv_text::vpath::basename;
 
 use crate::config::Config;
 use crate::steps::util::vault_files;
@@ -203,6 +204,9 @@ struct Report {
     audio: Tally,
     pdf: Tally,
     unmanaged: Tally,
+    /// Unmanaged local image refs whose file is nowhere in the vault (no basename match): a
+    /// reported exception, outside acceptance — localize cannot adopt a file that does not exist.
+    missing: Tally,
     /// `None` = `state.db` absent (coverage unavailable).
     coverage: Option<Coverage>,
     /// The `_MD5` image count even when coverage is unavailable.
@@ -272,6 +276,13 @@ fn audit(vault: &Path, state: Option<&StateReader>, modes: Modes) -> Result<Repo
     };
     // md5 -> top-level folder of its first file.
     let mut md5s: BTreeMap<String, String> = BTreeMap::new();
+    // Unmanaged refs per note (folder, basenames), resolved once every file is known.
+    let mut pending: Vec<(String, Vec<String>)> = Vec::new();
+    // Basenames of every non-note file, `_custom/` included (an embed may resolve there).
+    let mut file_names: HashSet<String> = vault_files(&vault.join("_custom"))
+        .iter()
+        .map(|f| basename(f).to_owned())
+        .collect();
     for rel in vault_files(vault) {
         let folder = top_folder(&rel).to_owned();
         if rel.ends_with(".md") {
@@ -287,13 +298,23 @@ fn audit(vault: &Path, state: Option<&StateReader>, modes: Modes) -> Result<Repo
             r.video.add(&folder, vid);
             r.audio.add(&folder, aud);
             r.pdf.add(&folder, pdf);
-            r.unmanaged
-                .add(&folder, count_unmanaged_local_image_refs(text));
-        } else if is_image_file(&rel)
+            pending.push((folder, unmanaged_local_image_refs(text)));
+            continue;
+        }
+        file_names.insert(basename(&rel).to_owned());
+        if is_image_file(&rel)
             && let Some((md5, _)) = localized_image_md5(&rel)
         {
             md5s.entry(md5).or_insert(folder);
         }
+    }
+    for (folder, names) in &pending {
+        let found = names
+            .iter()
+            .filter(|n| file_names.contains(n.as_str()))
+            .count() as u64;
+        r.unmanaged.add(folder, found);
+        r.missing.add(folder, names.len() as u64 - found);
     }
     r.managed_images = md5s.len() as u64;
     if let Some(st) = state {
@@ -371,6 +392,11 @@ fn render(r: &Report, verbose: bool) -> String {
         &r.pdf,
     );
     section(&mut o, "unmanaged local image refs", &r.unmanaged);
+    section(
+        &mut o,
+        "reported exception (local image ref, file missing from vault)",
+        &r.missing,
+    );
     o.push_str(&format!("managed _MD5 images: {}\n", r.managed_images));
     match &r.coverage {
         None => o.push_str("describe coverage: unavailable (state.db not found)\n"),

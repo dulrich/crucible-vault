@@ -844,4 +844,8 @@ fn unmanaged_local_image_refs_counted() {
     assert_eq!(n("```\n![[pic.png]]\n```\n"), 0);
     assert!(has_unmanaged_local_image_refs("text ![[pic.gif]]"));
     assert!(!has_unmanaged_local_image_refs("text"));
+    assert_eq!(
+        unmanaged_local_image_refs("![[pic.png]] ![a](dir/b%20c.JPG) ![[x.png#a|200]]"),
+        ["pic.png", "b c.JPG", "x.png"]
+    );
 }

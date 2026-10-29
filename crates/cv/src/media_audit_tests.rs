@@ -40,6 +40,7 @@ const NOTE: &str = "SECRET-TITLE\n\
 <audio src=\"https://x.test/t.ogg\"></audio>\n\
 ![](https://x.test/d.pdf)\n\
 ![[local.png]]\n\
+![[gone.png]]\n\
 ```\n![](https://x.test/fenced.png)\n![[fenced.png]]\n```\n";
 
 struct Fixture {
@@ -52,6 +53,7 @@ fn fixture() -> Fixture {
     let v = dir.path().join("vault");
     write(&v, "Clippings/n.md", NOTE.as_bytes());
     write(&v, "root.md", b"![](https://x.test/r.png)\n");
+    write(&v, "pics/local.png", b"x");
     write(&v, "_custom/c.md", b"![](https://x.test/custom.png)\n");
     write(&v, ".trash/t.md", b"![](https://x.test/trash.png)\n");
     for (rel, md5) in [
@@ -109,8 +111,10 @@ fn counts_each_kind_and_excludes_fences_custom_and_dot_dirs() {
     // youtube page + <iframe> + <video>.
     assert_eq!(r.video.total, 3);
     assert_eq!((r.audio.total, r.pdf.total), (2, 1));
-    // ![[local.png]] only; the fenced ref is code.
+    // ![[local.png]] only; the fenced ref is code; ![[gone.png]] has no file.
     assert_eq!(r.unmanaged.total, 1);
+    assert_eq!(r.missing.total, 1);
+    assert_eq!(r.missing.by_folder["Clippings"], 1);
     // _MD5 files outside _custom: A, B, C, D.
     assert_eq!(r.managed_images, 4);
     let c = r.coverage.unwrap();
@@ -135,7 +139,7 @@ fn strict_exit_codes_and_mode_gated_audio_pdf() {
     write(
         &v,
         "a.md",
-        b"![](https://x.test/s.mp3)\n![](https://x.test/d.pdf)\n",
+        b"![](https://x.test/s.mp3)\n![](https://x.test/d.pdf)\n![[gone.png]]\n",
     );
     write(&v, "att/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_MD5.png", b"x");
     let db = dir.path().join("s.db");
@@ -176,6 +180,7 @@ fn output_carries_no_note_text_or_paths_and_verbose_lists_md5() {
             "n.md",
             "x.test",
             "local.png",
+            "gone.png",
             "Clippings/",
             ".md",
         ] {

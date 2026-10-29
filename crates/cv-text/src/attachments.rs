@@ -840,19 +840,27 @@ pub fn has_remote_image_refs(content: &str) -> bool {
 /// counted; a `#fragment` or `|size` suffix on the target is ignored.
 #[must_use]
 pub fn count_unmanaged_local_image_refs(content: &str) -> u64 {
+    unmanaged_local_image_refs(content).len() as u64
+}
+
+/// The basenames of the refs [`count_unmanaged_local_image_refs`] counts, in document order
+/// (one entry per ref; `cv media audit` checks each against the vault's files).
+#[must_use]
+pub fn unmanaged_local_image_refs(content: &str) -> Vec<String> {
     parse_attachment_refs(content)
         .iter()
         .filter(|m| m.is_embed && !m.is_remote)
-        .filter(|m| {
+        .filter_map(|m| {
             let cut = m.link.split('#').next().unwrap_or("");
             let cut = cut.split('|').next().unwrap_or("");
             let name = basename(cut);
-            !is_md5_name(name)
+            (!is_md5_name(name)
                 && name
                     .rsplit_once('.')
-                    .is_some_and(|(_, e)| classify_media(e) == Some(Media::Images))
+                    .is_some_and(|(_, e)| classify_media(e) == Some(Media::Images)))
+            .then(|| name.to_owned())
         })
-        .count() as u64
+        .collect()
 }
 
 /// Whether [`count_unmanaged_local_image_refs`] is non-zero.
