@@ -112,6 +112,10 @@ pub(crate) fn run_in(
 ) -> Result<StepOutcome, StepError> {
     let mut v = Vars::default();
     seed(ctx, system_root, now, &mut v)?;
+    // Rows whose trash file vanished (emptied in a file manager, say) leave the ledger first.
+    v.rows_dropped += ctx
+        .state()
+        .prune_missing_trash(ctx.vault_root, system_root)? as u64;
     let retention = ctx.config.vault().trash.retention_days;
     if retention > 0 {
         expire(ctx, system_root, now, i64::from(retention) * DAY_MS, &mut v)?;

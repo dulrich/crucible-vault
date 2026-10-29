@@ -392,6 +392,27 @@ fn non_note_target_is_a_noop_not_an_error() {
 }
 
 #[test]
+fn machine_folder_copy_is_skipped_and_nothing_is_trashed() {
+    let body = words("m", 0, 60);
+    let orig = doc("source: https://dup.example/post\n", &body);
+    let copy = doc(
+        "source: https://dup.example/post\ntags:\n  - clippings\n",
+        &body,
+    );
+    let e = world(&[
+        ("Notes/Orig.md", orig.clone()),
+        ("_raw_transcript/Copy.md", copy.clone()),
+    ]);
+    let rec = Rec::default();
+    let o = run(&e, "_raw_transcript/Copy.md", &rec);
+    assert_eq!(var(&o, "action"), Some("skipped"));
+    assert_eq!(e.read("_raw_transcript/Copy.md").unwrap(), copy);
+    assert_eq!(e.read("Notes/Orig.md").unwrap(), orig);
+    assert!(!trashed(&e));
+    assert!(rec.kinds().is_empty() && rec.enriched().is_empty());
+}
+
+#[test]
 fn host_row_matches_blog_and_newsletter() {
     let c = config_of(&[("sources.toml", SOURCES)]);
     let s = c.sources();

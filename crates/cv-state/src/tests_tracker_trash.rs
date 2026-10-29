@@ -347,3 +347,61 @@ fn cancel_source_open_items_touches_only_open_rows_of_one_source() {
         1
     );
 }
+
+/// Plan round-17 WP-1: prune deletes only rows whose file is gone (both locations), keeps present
+/// files, unsafe paths and a missing system root, and signals once.
+#[test]
+fn prune_missing_trash_tracks_the_disk() {
+    use std::sync::{Arc, Mutex};
+    let (_d, mut s) = db();
+    let vault = tempfile::tempdir().unwrap();
+    let sys = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join(".trash")).unwrap();
+    std::fs::create_dir_all(sys.path().join("files")).unwrap();
+    std::fs::write(vault.path().join(".trash/present.md"), "x").unwrap();
+    std::fs::write(sys.path().join("files/present.png"), "x").unwrap();
+    let sys_row = |name: &str| NewTrashEntry {
+        location: TrashLocation::System,
+        trash_path: name.into(),
+        info_name: Some(format!("{name}.trashinfo")),
+        ..trash_entry(name, TrashReason::Deleted, 1)
+    };
+    s.insert_trash_entry(&trash_entry("present.md", TrashReason::Deleted, 1))
+        .unwrap();
+    s.insert_trash_entry(&trash_entry("missing.md", TrashReason::Deleted, 2))
+        .unwrap();
+    s.insert_trash_entry(&sys_row("present.png")).unwrap();
+    s.insert_trash_entry(&sys_row("missing.png")).unwrap();
+    s.insert_trash_entry(&trash_entry("../escape.md", TrashReason::Deleted, 3))
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sn = Arc::clone(&seen);
+    s.set_change_hook(Box::new(move |t| sn.lock().unwrap().push(t)));
+    // No system root: system rows are kept (only the missing vault row goes).
+    assert_eq!(s.prune_missing_trash(vault.path(), None).unwrap(), 1);
+    assert_eq!(
+        s.prune_missing_trash(vault.path(), Some(sys.path()))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.prune_missing_trash(vault.path(), Some(sys.path()))
+            .unwrap(),
+        0
+    );
+    let mut left: Vec<String> = s
+        .trash_entries()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.entry.trash_path)
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [".trash/../escape.md", ".trash/present.md", "present.png"]
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["trash_entries", "trash_entries"]
+    );
+}

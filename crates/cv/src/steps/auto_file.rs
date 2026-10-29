@@ -285,6 +285,12 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         out.set_vars(&vars);
         return Ok(out);
     }
+    // Machine folders (`_raw_transcript/`, `_custom/`, …) are never filed, superseded or trashed.
+    if clip_path.starts_with('_') {
+        vars.action = "skipped";
+        out.set_vars(&vars);
+        return Ok(out);
+    }
     let Some((bytes, clip_hash)) = ctx.read(&clip_path)? else {
         out.set_vars(&vars);
         return Ok(out);

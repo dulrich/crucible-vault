@@ -213,6 +213,7 @@ impl Daemon {
             bail!("runner already started");
         }
         trash::apply_trash_config(&shared);
+        trash::start_prune(&shared);
         shared.views.set_config(&runner.config());
         memory::register_gauges(&shared);
         let mut tasks = vec![

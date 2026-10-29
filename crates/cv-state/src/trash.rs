@@ -12,6 +12,7 @@ use crate::store::StateDb;
 use cv_protocol::{TrashLocation, TrashReason};
 use rusqlite::types::Type;
 use rusqlite::{OptionalExtension, Row, params};
+use std::path::{Component, Path};
 
 /// One ledger row without its id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,4 +139,51 @@ impl StateDb {
         }
         Ok(n > 0)
     }
+
+    /// Deletes every row whose trashed file is verifiably absent (plan round-17-todos-ui-sweep
+    /// WP-1): `vault` rows resolve `trash_path` under `vault_root`, `system` rows under
+    /// `system_root/files/` (`None`: system rows are kept). Only `NotFound` counts as absent -- any
+    /// other I/O error, or a `trash_path` that is not a plain relative path, keeps the row.
+    /// Returns the number deleted; signals `trash_entries` once when any row went.
+    pub fn prune_missing_trash(
+        &mut self,
+        vault_root: &Path,
+        system_root: Option<&Path>,
+    ) -> Result<usize> {
+        let mut gone = Vec::new();
+        for r in self.trash_entries()? {
+            let e = &r.entry;
+            let Some(file) = (match e.location {
+                TrashLocation::Vault => {
+                    plain_relative(&e.trash_path).then(|| vault_root.join(&e.trash_path))
+                }
+                TrashLocation::System => system_root
+                    .filter(|_| plain_relative(&e.trash_path))
+                    .map(|root| root.join("files").join(&e.trash_path)),
+            }) else {
+                continue;
+            };
+            if matches!(std::fs::symlink_metadata(&file), Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+            {
+                gone.push(r.id);
+            }
+        }
+        for id in &gone {
+            self.conn()
+                .execute("DELETE FROM trash_entries WHERE id = ?1", params![id])?;
+        }
+        if !gone.is_empty() {
+            self.changed("trash_entries");
+        }
+        Ok(gone.len())
+    }
+}
+
+/// A non-empty relative path of plain components only (no `..`, root or prefix).
+fn plain_relative(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains('\0')
+        && Path::new(s)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
 }

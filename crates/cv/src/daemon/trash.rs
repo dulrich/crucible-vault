@@ -5,8 +5,10 @@
 //! holding the state lock across a writer call cannot deadlock); a small std thread persists them.
 //! A crash between the move and the insert leaves only an unrecorded file (WP-2 seeds/adopts it).
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use cv_actions::TrashLocation;
 use cv_state::{NewTrashEntry, StateDb};
@@ -84,6 +86,108 @@ pub(super) fn apply_trash_config(shared: &Shared) {
     }
 }
 
+/// The system trash root (`<data_home>/Trash`), if a data home is known.
+fn system_root(data_home: Option<&Path>) -> Option<PathBuf> {
+    data_home.map(|h| h.join("Trash"))
+}
+
+/// Deletes ledger rows whose trash file is gone; the one function the daemon start, tidy and the
+/// trash watcher share. Returns the rows deleted (failures are logged, never fatal).
+pub(crate) fn prune_ledger(
+    state: &Mutex<StateDb>,
+    vault_root: &Path,
+    data_home: Option<&Path>,
+) -> usize {
+    let sys = system_root(data_home);
+    match lock(state).prune_missing_trash(vault_root, sys.as_deref()) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "pruning the trash ledger");
+            0
+        }
+    }
+}
+
+/// Debounce window: a burst of trash events (an emptied bin) prunes once, after it settles.
+const PRUNE_DEBOUNCE: Duration = Duration::from_millis(1500);
+
+/// Daemon start: prunes the ledger once, then watches the trash folders (vault `.trash`, system
+/// `Trash/files`) with a dedicated debounced watcher that only prunes -- trash events never reach
+/// the vault watcher, note indexing or event starters. A folder that does not exist yet is not
+/// watched (the start and tidy prunes cover it).
+pub(super) fn start_prune(shared: &Arc<Shared>) {
+    let n = prune_ledger(
+        &shared.state,
+        &shared.vault_root,
+        shared.config.data_home.as_deref(),
+    );
+    if n > 0 {
+        tracing::info!(rows = n, "pruned trash ledger rows without a file");
+    }
+    let dirs: Vec<PathBuf> = [
+        Some(shared.vault_root.join(".trash")),
+        system_root(shared.config.data_home.as_deref()).map(|r| r.join("files")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|d| d.is_dir())
+    .collect();
+    if dirs.is_empty() {
+        return;
+    }
+    let weak = Arc::downgrade(shared);
+    let spawned = std::thread::Builder::new()
+        .name("cv-trash-watch".into())
+        .spawn(move || watch_loop(&dirs, &weak));
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "trash watcher not started");
+    }
+}
+
+fn watch_loop(dirs: &[PathBuf], shared: &Weak<Shared>) {
+    use notify::Watcher;
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let handler = move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    };
+    let mut watcher = match notify::recommended_watcher(handler) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = %e, "trash watcher unavailable");
+            return;
+        }
+    };
+    let mut watching = 0;
+    for d in dirs {
+        match watcher.watch(d, notify::RecursiveMode::Recursive) {
+            Ok(()) => watching += 1,
+            Err(e) => tracing::warn!(error = %e, "watching a trash folder"),
+        }
+    }
+    if watching == 0 {
+        return;
+    }
+    // Wake periodically so the thread ends once the daemon is gone.
+    loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) => {
+                // Settle: drain until the folder is quiet for the debounce window.
+                while rx.recv_timeout(PRUNE_DEBOUNCE).is_ok() {}
+                let Some(sh) = shared.upgrade() else { return };
+                prune_ledger(&sh.state, &sh.vault_root, sh.config.data_home.as_deref());
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if shared.strong_count() == 0 {
+                    return;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +218,40 @@ mod tests {
             target_for(TrashLocation::System, None),
             TrashTarget::Vault
         ));
+    }
+
+    /// The daemon-start / tidy / watcher call: a vault row whose file is gone is pruned, a
+    /// present one kept.
+    #[test]
+    fn prune_ledger_drops_only_missing_rows() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".trash")).unwrap();
+        std::fs::write(vault.path().join(".trash/here.md"), "x").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut s = StateDb::open(
+            &db.path().join("state.db"),
+            1,
+            cv_state::QueueConfig::default(),
+        )
+        .unwrap();
+        for n in ["here.md", "gone.md"] {
+            s.insert_trash_entry(&NewTrashEntry {
+                location: TrashLocation::Vault,
+                trash_path: format!(".trash/{n}"),
+                original_path: n.into(),
+                trashed_ms: 1,
+                bytes: 1,
+                reason: TrashReason::Deleted,
+                mtime_ms: None,
+                inode: None,
+                info_name: None,
+            })
+            .unwrap();
+        }
+        let state = Mutex::new(s);
+        assert_eq!(prune_ledger(&state, vault.path(), None), 1);
+        let left = lock(&state).trash_entries().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].entry.trash_path, ".trash/here.md");
     }
 }
