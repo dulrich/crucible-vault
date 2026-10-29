@@ -1,5 +1,6 @@
 //! The `localize` step's folder-scope backfill (plan `usability-sprint-captures-links` WP-2).
 
+use cv_text::attachments::has_unmanaged_local_image_refs;
 use cv_text::remote_media::has_remote_media_refs;
 use serde::Serialize;
 
@@ -7,9 +8,18 @@ use super::super::{StepCtx, StepError, StepOutcome};
 use super::execute_note;
 use super::params::Params;
 
-/// The `ignored_ids` kind recording notes a folder-scope backfill attempted and could not fully
-/// localize (audit M2 progress invariant: never re-selected, so repeated runs reach new notes).
-pub const BACKFILL_KIND: &str = "localize_backfill";
+/// The `ignored_ids` kind recording notes a folder- or vault-scope backfill attempted and could
+/// not fully localize (audit M2 progress invariant: never re-selected, so repeated runs reach new
+/// notes). Versioned (plan remote-media-sprint WP-4): rows of the earlier `localize_backfill`
+/// kind are never consulted, so every note settled before the media modes (and the wider
+/// candidate predicate) is re-selected exactly once; notes settled under this kind never are.
+pub const BACKFILL_KIND: &str = "localize_media_backfill";
+
+/// Backfill candidate predicate and the settle rule's "refs remain" check (audit M1): remote
+/// media the step converts, or a local image that is not yet a managed `_MD5` attachment.
+fn needs_localize(text: &str) -> bool {
+    has_remote_media_refs(text) || has_unmanaged_local_image_refs(text)
+}
 
 /// Outcome vars of a folder-scope `localize` backfill.
 #[derive(Serialize)]
@@ -24,21 +34,22 @@ struct FolderVars {
     unattempted_remaining: u64,
 }
 
-/// Folder-scope backfill: candidates are `.md` under `folder` (sorted) with remote media the
-/// step converts (`has_remote_media_refs`: remote/data images, other remote embeds, HTML media)
-/// that are not recorded under [`BACKFILL_KIND`]; at most `limit` are attempted. A note whose
+/// Folder- or vault-scope backfill over `files` (sorted vault-relative `.md` paths; `folder` is
+/// the log label only): candidates have remote media the step converts (`has_remote_media_refs`:
+/// remote/data images, other remote embeds, HTML media) or an unmanaged local image
+/// (`has_unmanaged_local_image_refs`) and are not recorded under [`BACKFILL_KIND`]; at most `limit` are attempted. A note whose
 /// localize errs, or that still has such refs afterwards, is recorded (never re-selected).
 /// A note whose downloads were throttled (429/5xx) is neither recorded nor counted as attempted,
 /// and ends the batch: the host is rate-limiting, so a later run retries it (`throttled = 1`).
 /// A note left with any other transient failure (audit B1) is counted as attempted but never
 /// recorded (`retrying`). A note left only with refs that are not eligible attachments is
 /// settled — recorded so it is not re-selected, counted `ineligible`, not `failed`.
-pub(super) fn execute_folder(
+pub(super) fn execute_backfill(
     p: &Params,
     folder: &str,
+    files: Vec<String>,
     ctx: &mut StepCtx<'_>,
 ) -> Result<StepOutcome, StepError> {
-    let files = super::super::util::md_files_under(ctx, folder);
     let scanned = files.len() as u64;
     let mut candidates = Vec::new();
     for f in files {
@@ -51,7 +62,7 @@ pub(super) fn execute_folder(
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
-        if !has_remote_media_refs(text) {
+        if !needs_localize(text) {
             continue;
         }
         candidates.push(f);
@@ -80,7 +91,7 @@ pub(super) fn execute_folder(
                 }
                 let left = ctx
                     .read(f)?
-                    .is_some_and(|(b, _)| std::str::from_utf8(&b).is_ok_and(has_remote_media_refs));
+                    .is_some_and(|(b, _)| std::str::from_utf8(&b).is_ok_and(needs_localize));
                 if left && v.all_unreachable {
                     // The network is down: not recorded, so a later run retries the note;
                     // ends the batch like the former network deferral.

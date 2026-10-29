@@ -43,6 +43,9 @@ pub(crate) struct Params {
     pub(super) path: Option<String>,
     /// `Some(folder)` = folder scope (plan `usability-sprint-captures-links` WP-2 backfill).
     pub(super) folder_scope: Option<String>,
+    /// `scope = "vault"` (plan remote-media-sprint WP-4): backfill every `.md` outside `_custom/`
+    /// and the dot-dirs. Never set together with `folder_scope`.
+    pub(super) vault_scope: bool,
     pub(super) limit: u64,
     pub(super) repair: bool,
     pub(super) folder_template: String,
@@ -183,8 +186,16 @@ pub(super) fn parse_params(t: &toml::Table, rm: &RemoteMediaConfig) -> Result<Pa
         Some(_) => return Err("localize: image_quality must be a number".into()),
     };
     let folder = s("folder")?;
-    let folder_scope = match s("scope")?.as_deref() {
+    let scope = s("scope")?;
+    let vault_scope = scope.as_deref() == Some("vault");
+    let folder_scope = match scope.as_deref() {
         None | Some("note") => {
+            if folder.is_some() {
+                return Err("localize: folder requires scope = \"folder\"".into());
+            }
+            None
+        }
+        Some("vault") => {
             if folder.is_some() {
                 return Err("localize: folder requires scope = \"folder\"".into());
             }
@@ -195,7 +206,7 @@ pub(super) fn parse_params(t: &toml::Table, rm: &RemoteMediaConfig) -> Result<Pa
                 .map(|f| f.trim_matches('/').to_owned())
                 .ok_or("localize: scope = \"folder\" requires folder")?,
         ),
-        Some(o) => return Err(format!("localize: scope {o:?} (want note|folder)")),
+        Some(o) => return Err(format!("localize: scope {o:?} (want note|folder|vault)")),
     };
     let (ytimg_base, vimeo_base) = media_bases();
     Ok(Params {
@@ -203,6 +214,7 @@ pub(super) fn parse_params(t: &toml::Table, rm: &RemoteMediaConfig) -> Result<Pa
         vimeo_base,
         path: s("path")?,
         folder_scope,
+        vault_scope,
         limit: u("limit", 50)?,
         repair,
         folder_template,

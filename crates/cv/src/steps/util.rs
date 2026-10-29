@@ -68,6 +68,47 @@ pub(crate) fn md_files_under(ctx: &StepCtx<'_>, rel: &str) -> Vec<String> {
     out
 }
 
+/// Every file in the vault outside the top-level `_custom/` and every dot-directory (`.trash/`,
+/// `.git/`, ...), recursive, read-only, no symlinks, sorted, vault-relative; root-level files
+/// included (plan remote-media-sprint WP-4, Decision 5).
+pub(crate) fn vault_files(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(root.join(&dir)) else {
+            continue;
+        };
+        for e in rd.filter_map(Result::ok) {
+            let Ok(name) = e.file_name().into_string() else {
+                continue;
+            };
+            let Ok(ft) = e.file_type() else { continue };
+            let p = if dir.is_empty() {
+                name.clone()
+            } else {
+                format!("{dir}/{name}")
+            };
+            if ft.is_dir() {
+                if name.starts_with('.') || (dir.is_empty() && name == "_custom") {
+                    continue;
+                }
+                stack.push(p);
+            } else if ft.is_file() {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// [`vault_files`] restricted to `.md` notes (the whole-vault `localize` scope).
+pub(crate) fn md_files_vault(root: &std::path::Path) -> Vec<String> {
+    let mut v = vault_files(root);
+    v.retain(|p| p.ends_with(".md"));
+    v
+}
+
 /// Crucible `md5HexForBytes` (deterministic content MD5 naming `_MD5` attachments,
 /// `src/AGENTS.md:23,49`); shared by the `localize` step and the daemon's `write_attachment` RPC.
 pub(crate) fn md5_hex(bytes: &[u8]) -> String {

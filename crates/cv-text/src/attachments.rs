@@ -834,6 +834,33 @@ pub fn has_remote_image_refs(content: &str) -> bool {
         .any(|m| outside(m.start()))
 }
 
+/// The number of local image embeds in `content` whose basename is not `_MD5`-named, outside
+/// fenced code (plan remote-media-sprint WP-4, audit M1): images the `localize` step has not
+/// yet normalized into a managed attachment. Remote, `data:` and non-image targets are not
+/// counted; a `#fragment` or `|size` suffix on the target is ignored.
+#[must_use]
+pub fn count_unmanaged_local_image_refs(content: &str) -> u64 {
+    parse_attachment_refs(content)
+        .iter()
+        .filter(|m| m.is_embed && !m.is_remote)
+        .filter(|m| {
+            let cut = m.link.split('#').next().unwrap_or("");
+            let cut = cut.split('|').next().unwrap_or("");
+            let name = basename(cut);
+            !is_md5_name(name)
+                && name
+                    .rsplit_once('.')
+                    .is_some_and(|(_, e)| classify_media(e) == Some(Media::Images))
+        })
+        .count() as u64
+}
+
+/// Whether [`count_unmanaged_local_image_refs`] is non-zero.
+#[must_use]
+pub fn has_unmanaged_local_image_refs(content: &str) -> bool {
+    count_unmanaged_local_image_refs(content) > 0
+}
+
 /// Whether `content` has any remote markdown embed (`![…](http…)`, embed pages included)
 /// outside fenced code.
 pub(crate) fn has_remote_md_embed(content: &str) -> bool {

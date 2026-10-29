@@ -561,3 +561,21 @@ resources = { note = false, keys = [] }
 [[action.steps]]
 type = "tidy"
 min_age_hours = 24
+
+# Whole-vault localize sweep (plan remote-media-sprint WP-4): every note outside _custom/ and the
+# dot-dirs, machine-written _* folders included, up to 500 candidates per run, then a describe
+# pass for the images it created. Notes settled once (ignored_ids localize_media_backfill) are
+# never re-selected, so edits rely on localize-on-edit. Shares localize-sweep's resource keys so
+# the two never run concurrently.
+[[action]]
+id = "localize-vault-sweep"
+label = "Localize sweep: whole vault"
+group = "Maintenance"
+resources = { note = false, keys = ["localize-backfill::Clippings", "localize-backfill::daily", "localize-backfill::sweep"] }
+[[action.steps]]
+type = "localize"
+scope = "vault"
+limit = 500
+[[action.steps]]
+type = "run_action"
+action = "image-describe-backfill"

@@ -452,8 +452,8 @@ pub static LOCALIZE: Record = Record {
         field(
             "scope",
             "Scope",
-            "folder: backfill every note under `folder` with remote images",
-            Node::Enum(&["note", "folder"]),
+            "folder: backfill every note under `folder` with remote media; vault: every note outside _custom/ and the dot-dirs",
+            Node::Enum(&["note", "folder", "vault"]),
         )
         .dflt(D::Str("note")),
         field(
@@ -465,7 +465,7 @@ pub static LOCALIZE: Record = Record {
         field(
             "limit",
             "Limit",
-            "Notes attempted per run (scope = folder)",
+            "Notes attempted per run (scope = folder or vault)",
             POS_INT,
         )
         .dflt(D::Int(50)),

@@ -682,7 +682,9 @@ fn folder_scope_params_validate() {
     assert!(mk("scope = \"note\"").is_ok());
     assert!(mk("scope = \"folder\"").is_err());
     assert!(mk("folder = \"daily\"").is_err());
-    assert!(mk("scope = \"vault\"").is_err());
+    assert!(mk("scope = \"vault\"").is_ok());
+    assert!(mk("scope = \"vault\"\nfolder = \"daily\"").is_err());
+    assert!(mk("scope = \"elsewhere\"").is_err());
     assert!(mk("scope = \"folder\"\nfolder = \"d\"\nlimit = 0").is_err());
 }
 
@@ -759,3 +761,55 @@ fn relative_image_refs_without_an_http_source_are_untouched() {
 
 #[path = "localize_media_tests.rs"]
 mod media;
+
+/// Plan remote-media-sprint WP-4: `scope = "vault"` covers root-level notes and the machine `_*`
+/// folders, skips `_custom/` and dot-dirs, selects a note with an unmanaged local image, honours
+/// `limit`, and a settled note is never re-selected.
+#[test]
+fn vault_backfill_scope_and_selection() {
+    let img = png(31);
+    let local = png(32);
+    let routes = HashMap::from([route("/ok.png", "image/png", img.clone())]);
+    let (env, outs) = with_server(routes, None, move |port, _| {
+        let ok = format!("![](http://127.0.0.1:{port}/ok.png)\n");
+        let env = env(&[
+            ("root.md", ok.as_bytes()),
+            ("_yt_metadata/a.md", ok.as_bytes()),
+            ("_custom/x.md", ok.as_bytes()),
+            (".trash/y.md", ok.as_bytes()),
+            ("daily/pic.png", &local),
+            ("daily/n.md", b"![[pic.png]]\n"),
+            ("daily/plain.md", b"nothing\n"),
+        ]);
+        let step = env.step("scope = \"vault\"\nlimit = 2");
+        let outs: Vec<StepOutcome> = (0..3).map(|_| env.run(&step, "").unwrap()).collect();
+        (env, outs)
+    });
+    let v = |i: usize, k: &str| var(&outs[i], k);
+    // 4 notes outside _custom/ and the dot-dirs; 3 candidates; limit 2 per run.
+    assert_eq!(v(0, "scanned"), 4);
+    assert_eq!(
+        (
+            v(0, "localized") + v(0, "failed"),
+            v(0, "unattempted_remaining")
+        ),
+        (2, 1)
+    );
+    assert_eq!(
+        (
+            v(1, "localized") + v(1, "failed"),
+            v(1, "unattempted_remaining")
+        ),
+        (1, 0)
+    );
+    assert_eq!(v(2, "localized") + v(2, "failed"), 0);
+    let md5 = super::util::md5_hex(&img);
+    assert!(env.text("root.md").contains(&format!("{md5}_MD5.png")));
+    assert!(
+        env.text("_yt_metadata/a.md")
+            .contains(&format!("{md5}_MD5.png"))
+    );
+    assert!(env.text("_custom/x.md").contains("127.0.0.1"));
+    assert!(env.text(".trash/y.md").contains("127.0.0.1"));
+    assert!(env.text("daily/n.md").contains("_MD5."));
+}

@@ -13,7 +13,7 @@ use crate::daemon::{Daemon, DaemonOptions};
 use crate::{spool, uri};
 
 /// Usage text (`{JOBS}` is replaced by [`crate::jobs::USAGE`]).
-const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print generation, queue counts, config errors, service health\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n{JOBS}  cv --version     print the version (also -V)\n  cv --help        this text\n";
+const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the core daemon\n  cv uri <url>     hand an obsidian:// URL to the daemon (spooled if it is not running)\n  cv status        print generation, queue counts, config errors, service health\n  cv signals ...   export [--out <path>] [--weak] (source-eval training JSONL)\n  cv media audit   [--vault <path>] [--state-db <path>] [--strict] [--verbose] (read-only remote-media counts)\n{JOBS}  cv --version     print the version (also -V)\n  cv --help        this text\n";
 
 /// Usage text.
 #[must_use]
@@ -63,6 +63,7 @@ pub fn run(args: &[String]) -> i32 {
             Ok(())
         })),
         Some("signals") => crate::signals::run(&args[1..]),
+        Some("media") => crate::media_audit::run(&args[1..]),
         Some("jobs") => crate::jobs::run(args),
         Some("intake") => crate::jobs::run(args),
         Some("run") => crate::jobs::run(args),

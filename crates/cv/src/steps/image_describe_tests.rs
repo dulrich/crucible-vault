@@ -276,7 +276,11 @@ async fn describes_then_skips_recorded() {
 async fn failed_record_is_poison_skipped() {
     let (base, seen) = fake_provider(vec![ok("x")]).await;
     let e = Arc::new(clip_env(png(8, 8), &[]));
-    let failed = super::record(MD5_A, "failed", "", "", None, Some("boom"));
+    let m = super::Model {
+        provider_id: "fake",
+        model_id: "m",
+    };
+    let failed = super::record(MD5_A, "failed", "", "", Some(&m), Some("boom"));
     e.state
         .lock()
         .unwrap()
@@ -584,8 +588,19 @@ async fn old_length_failure_is_retried_and_other_failures_are_not() {
         ))
         .unwrap();
         // B carries a different permanent failure and stays poison-skipped.
-        st.put_image_description(&super::record(MD5_B, "failed", "", "", None, Some("boom")))
-            .unwrap();
+        let m = super::Model {
+            provider_id: "fake",
+            model_id: "m",
+        };
+        st.put_image_description(&super::record(
+            MD5_B,
+            "failed",
+            "",
+            "",
+            Some(&m),
+            Some("boom"),
+        ))
+        .unwrap();
     }
     let out = exec_async(
         Arc::clone(&e),
@@ -598,4 +613,39 @@ async fn old_length_failure_is_retried_and_other_failures_are_not() {
     assert_eq!(seen.bodies().len(), 2, "only the length-failed image");
     assert_eq!(rec(&e, MD5_A).unwrap().kind, "vision");
     assert_eq!(rec(&e, MD5_B).unwrap().kind, "failed");
+}
+
+/// Plan remote-media-sprint WP-4: a `failed` record without `providerId` (a Crucible-era failure)
+/// is described again once; the re-failure carries provenance and is then poison-skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unattributed_failure_is_retried_once() {
+    let (base, seen) = fake_provider(vec![(400, "bad image".into()), ok("never used")]).await;
+    let e = Arc::new(clip_env(png(8, 8), &[]));
+    e.state
+        .lock()
+        .unwrap()
+        .put_image_description(&super::record(
+            MD5_A,
+            "failed",
+            "",
+            "",
+            None,
+            Some("API returned 500"),
+        ))
+        .unwrap();
+    let out = exec_async(Arc::clone(&e), config(&base, true, "fake"), "")
+        .await
+        .unwrap();
+    assert_eq!((var(&out, "failed"), var(&out, "skipped")), (1, 0));
+    let r = rec(&e, MD5_A).unwrap();
+    assert_eq!(r.kind, "failed");
+    assert!(r.raw.contains("\"providerId\":\"fake\""), "{}", r.raw);
+    let calls = seen.bodies().len();
+    assert!(calls >= 1);
+    // The second pass skips the now-attributed failure.
+    let out = exec_async(Arc::clone(&e), config(&base, true, "fake"), "")
+        .await
+        .unwrap();
+    assert_eq!((var(&out, "failed"), var(&out, "skipped")), (0, 1));
+    assert_eq!(seen.bodies().len(), calls);
 }

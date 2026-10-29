@@ -833,3 +833,15 @@ fn embed_pages_still_excluded_from_detection() {
         "![v](https://www.youtube.com/watch?v=dQw4w9WgXcQ \"t\")"
     ));
 }
+
+#[test]
+fn unmanaged_local_image_refs_counted() {
+    let n = count_unmanaged_local_image_refs;
+    assert_eq!(n("![[pic.png]] ![a](dir/b%20c.JPG) ![[x.png#a|200]]"), 3);
+    assert_eq!(n("![[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_MD5.webp]]"), 0);
+    assert_eq!(n("![](https://example.com/a.png)"), 0);
+    assert_eq!(n("![[note]] ![[doc.pdf]] [link](pic.png)"), 0);
+    assert_eq!(n("```\n![[pic.png]]\n```\n"), 0);
+    assert!(has_unmanaged_local_image_refs("text ![[pic.gif]]"));
+    assert!(!has_unmanaged_local_image_refs("text"));
+}

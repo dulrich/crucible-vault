@@ -41,7 +41,10 @@
 //! empty body stays a recorded permanent failure. Retry: a `failed` record whose text is the old
 //! `finish reason "length"; output discarded` (every record the pre-round-16 wire produced) is
 //! treated as pending again by the scan (re-described and overwritten); the new failure texts
-//! differ, so a re-failed image is poison-skipped as before.
+//! differ, so a re-failed image is poison-skipped as before. Plan remote-media-sprint WP-4 extends
+//! the retry to a `failed` record with **no `providerId`** in `raw` (a Crucible-era failure, e.g.
+//! "API returned 500" or ENOENT, never produced by this wire): pending again, once. Any record
+//! this module writes for a failure carries `providerId`, so a re-failure is poison-skipped.
 //!
 //! Outcome vars (counts only): `described`, `svg`, `failed`, `skipped`, `pruned`, `remaining`.
 
@@ -443,6 +446,20 @@ fn is_legacy_length_failure(rec: &ImageDescription) -> bool {
             .is_some_and(|f| f.contains(LEGACY_LENGTH_FAILURE))
 }
 
+/// A `failed` record without cv provenance (`providerId` absent from `raw`): a Crucible-era
+/// failure, retried once under the current wire. A re-failure is recorded with `providerId`.
+fn is_unattributed_failure(rec: &ImageDescription) -> bool {
+    rec.kind == "failed"
+        && serde_json::from_str::<serde_json::Value>(&rec.raw)
+            .ok()
+            .is_some_and(|v| v.get("providerId").is_none_or(serde_json::Value::is_null))
+}
+
+/// Whether the pending scan describes an existing record again (it never overwrites any other).
+pub(crate) fn is_retryable(rec: &ImageDescription) -> bool {
+    is_legacy_length_failure(rec) || is_unattributed_failure(rec)
+}
+
 /// The per-provider describe wire: extra body fields and the two per-pass caps.
 #[derive(Debug, Clone, PartialEq)]
 struct DescribeWire {
@@ -550,10 +567,11 @@ pub(crate) fn run(
                 n.skipped += 1;
                 continue;
             }
-            // Any record poison-skips, except an old `length` failure (retried, overwritten).
+            // Any record poison-skips, except an old `length` failure or a failure without cv
+            // provenance (retried, overwritten).
             if st
                 .image_description(&md5)?
-                .is_some_and(|r| !is_legacy_length_failure(&r))
+                .is_some_and(|r| !is_retryable(&r))
             {
                 n.skipped += 1;
                 continue;

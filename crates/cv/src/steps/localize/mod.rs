@@ -114,7 +114,12 @@ fn repair_counts(
 /// `scope = "folder"` — on up to `limit` candidate notes under `folder`.
 pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     if let Some(folder) = p.folder_scope.clone() {
-        return backfill::execute_folder(p, &folder, ctx);
+        let files = super::util::md_files_under(ctx, &folder);
+        return backfill::execute_backfill(p, &folder, files, ctx);
+    }
+    if p.vault_scope {
+        let files = super::util::md_files_vault(ctx.vault_root);
+        return backfill::execute_backfill(p, "(vault)", files, ctx);
     }
     let path = ctx_note_path(p, ctx)?;
     let (vars, output_paths) = execute_note(p, &path, ctx)?;
