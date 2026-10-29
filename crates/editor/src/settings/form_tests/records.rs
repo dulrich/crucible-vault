@@ -222,15 +222,102 @@ fn sources_lists_show_sorted_by_name_without_reorder_controls() {
         items_of(&st, "serial"),
         vec![(1, "abc".into(), false), (0, "Zed".into(), false)]
     );
-    // Another list keeps file order and its up/down controls.
+    // Round-17: YouTube sorts too (by channel).
     assert_eq!(
         items_of(&st, "youtube"),
-        vec![(0, "UC2".into(), true), (1, "UC1".into(), true)]
+        vec![(1, "UC1".into(), false), (0, "UC2".into(), false)]
     );
     assert_eq!(
         form::display_order(&["b".into(), "A".into()], true),
         vec![1, 0]
     );
+}
+
+fn items_in(st: &Settings, file: &str, list: &str) -> Vec<(usize, String, bool)> {
+    rows_of(st, file)
+        .into_iter()
+        .filter_map(|r| match r.kind {
+            Kind::Item {
+                list: l,
+                index,
+                summary,
+                reorder,
+                ..
+            } if l == p(list) => Some((index, summary, reorder)),
+            _ => None,
+        })
+        .collect()
+}
+
+const SCHEDULES: &str = "_custom/crucible-vault/schedules.toml";
+
+/// Round-17 Decision 5: schedules sort by `action`, no reorder controls.
+#[test]
+fn schedules_sort_by_action_without_reorder_controls() {
+    let text = "[[schedule]]\naction = \"zebra\"\ndaily = \"06:00\"\n\n[[schedule]]\naction = \"Apple\"\nevery = \"1h\"\n";
+    let st = loaded(SCHEDULES, text);
+    assert_eq!(
+        items_in(&st, SCHEDULES, "schedule"),
+        vec![(1, "Apple".into(), false), (0, "zebra".into(), false)]
+    );
+}
+
+/// A provider's `models` sublist sorts too, whatever the provider index.
+#[test]
+fn provider_models_sublist_sorts() {
+    let text = "[[provider]]\nname = \"b\"\n\n[[provider]]\nname = \"a\"\n\n[[provider.models]]\nid = \"z\"\n\n[[provider.models]]\nid = \"M\"\n";
+    let mut st = loaded(PROVIDERS, text);
+    st.form_msg(PROVIDERS, FormMsg::Toggle(p("provider[1]")));
+    assert_eq!(
+        items_in(&st, PROVIDERS, "provider"),
+        vec![(1, "a".into(), false), (0, "b".into(), false)]
+    );
+    assert_eq!(
+        items_in(&st, PROVIDERS, "provider[1].models"),
+        vec![(1, "M".into(), false), (0, "z".into(), false)]
+    );
+}
+
+/// The Actions root list sorts; its `steps` keep file order with up/down.
+#[test]
+fn actions_root_sorts_while_steps_stay_manual() {
+    let text = "[[action]]\nid = \"b\"\n\n[[action]]\nid = \"A\"\n\n[[action.steps]]\ntype = \"move\"\nto = \"x\"\n\n[[action.steps]]\ntype = \"move\"\nto = \"a\"\n";
+    let mut st = loaded(ACTIONS, text);
+    st.form_msg(ACTIONS, FormMsg::Toggle(p("action[1]")));
+    assert_eq!(
+        items_in(&st, ACTIONS, "action")
+            .into_iter()
+            .map(|(i, _, r)| (i, r))
+            .collect::<Vec<_>>(),
+        vec![(1, false), (0, false)]
+    );
+    let steps = items_in(&st, ACTIONS, "action[1].steps");
+    assert_eq!(steps.iter().map(|s| s.0).collect::<Vec<_>>(), vec![0, 1]);
+    assert!(steps.iter().all(|s| s.2), "steps keep their up/down");
+}
+
+/// Kinds sorts by stored key; a map the table does not list keeps file order.
+#[test]
+fn kinds_map_sorts_by_key_but_unlisted_maps_keep_file_order() {
+    let keys = |st: &Settings, file: &str| -> Vec<String> {
+        rows_of(st, file)
+            .into_iter()
+            .filter_map(|r| match r.kind {
+                Kind::MapKey { key, .. } => Some(key),
+                _ => None,
+            })
+            .collect()
+    };
+    let st = loaded(
+        KINDS,
+        "[kinds.zeta]\nfolder = \"z\"\n\n[kinds.Alpha]\nfolder = \"a\"\n",
+    );
+    assert_eq!(keys(&st, KINDS), ["Alpha", "zeta"]);
+    // An unlisted map (Pipelines' map fields) is not key-sorted.
+    assert!(form::sorted_map(KINDS, &p("kinds")));
+    assert!(form::sorted_map(AGENTS, &Path::root()));
+    assert!(!form::sorted_map(PIPES, &p("kinds")));
+    assert!(!form::sorted_map(KINDS, &p("other")));
 }
 
 /// Round-13 WP-1: an edit pins the shown order of a sorted list; leaving the item re-sorts.

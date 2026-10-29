@@ -245,6 +245,9 @@ pub fn rows(st: &HotkeyState, actions_doc: Option<&ConfigDoc>) -> Vec<HotkeyRow>
             conflicted: km.conflicted.contains(&id),
         }
     }));
+    // Round-17 Decision 5: sorted by title, case-insensitive; the stable sort keeps ties in
+    // commands, actions, bookmarks order. Every consumer addresses a row by `Target`.
+    v.sort_by_cached_key(|r| r.title.to_lowercase());
     v
 }
 

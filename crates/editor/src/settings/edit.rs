@@ -209,21 +209,38 @@ fn sorted_snapshots(
         DocEdit::SetMany(items) => items.iter().map(|(p, _)| p).collect(),
         _ => return Vec::new(),
     };
-    let (Some(doc), Some(Node::Record(root))) = (f.doc(), f.schema()) else {
+    let (Some(doc), Some(root)) = (f.doc(), f.schema()) else {
         return Vec::new();
     };
     let mut out: Vec<(cv_schema::Path, Vec<usize>)> = Vec::new();
     for p in paths {
-        let [Seg::Key(k), Seg::Index(_), ..] = p.0.as_slice() else {
-            continue;
-        };
-        let list = cv_schema::Path::root().key(k);
-        if !super::form::sorted_list(file, &list) || out.iter().any(|(l, _)| *l == list) {
-            continue;
-        }
-        if let Some(Node::List(inner)) = root.field(k).map(|fl| &fl.node) {
-            out.push((list.clone(), super::form::current_order(doc, &list, inner)));
+        // Every list the edited path passes through (`provider[1].models[0].id` → `provider`,
+        // `provider[1].models`), nested lists included.
+        for (n, seg) in p.0.iter().enumerate() {
+            if !matches!(seg, Seg::Index(_)) || n == 0 {
+                continue;
+            }
+            let list = cv_schema::Path(p.0[..n].to_vec());
+            if !super::form::sorted_list(file, &list) || out.iter().any(|(l, _)| *l == list) {
+                continue;
+            }
+            if let Some(Node::List(inner)) = node_at(root, &list) {
+                out.push((list.clone(), super::form::current_order(doc, &list, inner)));
+            }
         }
     }
     out
+}
+
+/// The schema node at `path` under `root` (records by field, lists by item).
+fn node_at<'a>(root: &'a Node, path: &cv_schema::Path) -> Option<&'a Node> {
+    let mut node = root;
+    for seg in &path.0 {
+        node = match (node, seg) {
+            (Node::Record(r), Seg::Key(k)) => &r.field(k)?.node,
+            (Node::List(inner), Seg::Index(_)) => inner,
+            _ => return None,
+        };
+    }
+    Some(node)
 }

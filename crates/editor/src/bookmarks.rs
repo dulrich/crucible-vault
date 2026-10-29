@@ -47,8 +47,6 @@ pub enum BookmarkMsg {
     /// Bookmark the focused pane's active tab.
     AddActive,
     Remove(usize),
-    Up(usize),
-    Down(usize),
     Open(String),
     /// WP-9: set (`Some`) or drop (`None`) the `keys` of the bookmark at this path (Hotkeys
     /// page), written straight through the shared CAS write.
@@ -141,8 +139,6 @@ pub fn doc_edit(m: &BookmarkMsg, items: &[Bookmark], active: Option<&str>) -> Op
             )
         }
         BookmarkMsg::Remove(i) if i < n => DocEdit::Remove(list.index(i)),
-        BookmarkMsg::Up(i) if i > 0 && i < n => DocEdit::Move(list, i, i - 1),
-        BookmarkMsg::Down(i) if i + 1 < n => DocEdit::Move(list, i, i + 1),
         _ => return None,
     })
 }
@@ -163,6 +159,13 @@ impl Bookmarks {
         self.items = f.doc().map(items_of).unwrap_or_default();
         self.writing = f.saving();
     }
+}
+
+/// The file indices of `items` in the order the sidebar shows them: by name, case-insensitive,
+/// ties by file index (round-17 Decision 6). Display-only; edits address the file index.
+pub fn shown_order(items: &[Bookmark]) -> Vec<usize> {
+    let names: Vec<String> = items.iter().map(|b| b.name.clone()).collect();
+    crate::settings::form::display_order(&names, true)
 }
 
 /// The bookmarks list (pane side).
@@ -187,7 +190,8 @@ pub fn view<'a>(b: &'a Bookmarks, tokens: Tokens) -> Element<'a, Message> {
         );
     }
     let mut col = column![head].spacing(2);
-    for (i, bm) in b.items.iter().enumerate() {
+    for i in shown_order(&b.items) {
+        let bm = &b.items[i];
         col = col.push(
             row![
                 button({
@@ -201,12 +205,39 @@ pub fn view<'a>(b: &'a Bookmarks, tokens: Tokens) -> Element<'a, Message> {
                 .style(button::text)
                 .width(Length::Fill)
                 .on_press(msg(BookmarkMsg::Open(bm.path.clone()))),
-                small("↑", BookmarkMsg::Up(i)),
-                small("↓", BookmarkMsg::Down(i)),
                 small("×", BookmarkMsg::Remove(i)),
             ]
             .spacing(2),
         );
     }
     col.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bm(name: &str, path: &str) -> Bookmark {
+        Bookmark {
+            name: name.into(),
+            path: path.into(),
+            keys: Vec::new(),
+        }
+    }
+
+    /// Round-17 Decision 6: the sidebar sorts by name (case-insensitive, ties by file index);
+    /// the remove button addresses the file index of the shown row.
+    #[test]
+    fn sidebar_order_is_by_name_and_remove_targets_the_file_entry() {
+        let items = vec![bm("zeta", "z.md"), bm("Alpha", "a.md"), bm("alpha", "b.md")];
+        let shown = shown_order(&items);
+        assert_eq!(shown, [1, 2, 0]);
+        let list = Path::root().key("bookmark");
+        for &i in &shown {
+            assert!(matches!(
+                doc_edit(&BookmarkMsg::Remove(i), &items, None),
+                Some(DocEdit::Remove(p)) if p == list.index(i)
+            ));
+        }
+    }
 }

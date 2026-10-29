@@ -160,11 +160,11 @@ fn assigning_a_bookmark_chord_writes_keys_and_survives_reorder() {
         app.palette.keymap.get(&c("Alt+9")),
         Some(&Bound::Bookmark("wp9/a.md".into()))
     );
-    // Reorder: the chord follows the bookmark.
-    bm_msg(&mut app, crate::bookmarks::BookmarkMsg::Down(0));
+    // Removing a sibling: the chord stays with the bookmark.
+    bm_msg(&mut app, crate::bookmarks::BookmarkMsg::Remove(1));
     let on_disk = bm_on_disk(&d);
-    assert_eq!(on_disk[1].path, "wp9/a.md");
-    assert_eq!(on_disk[1].keys, ["Alt+9"]);
+    assert_eq!(on_disk[0].path, "wp9/a.md");
+    assert_eq!(on_disk[0].keys, ["Alt+9"]);
     assert_eq!(
         app.palette.keymap.get(&c("Alt+9")),
         Some(&Bound::Bookmark("wp9/a.md".into()))
@@ -369,4 +369,17 @@ fn text_filter_narrows_rows_by_title_or_id_case_insensitively() {
     assert!(shown.iter().all(|r| {
         r.title.to_lowercase().contains("quit") || r.target.id().to_lowercase().contains("quit")
     }));
+}
+
+/// Round-17 Decision 5: the table is sorted by title, case-insensitively.
+#[test]
+fn hotkey_rows_are_sorted_by_title() {
+    let (_tmp, d) = fake();
+    let app = bm_app(&d, TWO);
+    let rows = hotkeys::rows(&app.settings.hotkeys, None);
+    let titles: Vec<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
+    let mut sorted = titles.clone();
+    sorted.sort();
+    assert_eq!(titles, sorted);
+    assert!(rows.len() > 2);
 }

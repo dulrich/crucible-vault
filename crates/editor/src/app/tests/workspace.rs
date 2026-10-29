@@ -397,13 +397,13 @@ fn bookmarks_load_add_and_conflict() {
         .collect();
     assert_eq!(names, ["x", "y"]);
     assert!(!app.bookmarks.writing);
-    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Down(0))));
+    let _ = app.send(Message::Panes(PanesMsg::Bookmark(BookmarkMsg::Remove(0))));
     let names: Vec<String> = crate::bookmarks::parse(&d.read_file(BOOKMARKS_PATH).expect("r").0)
         .expect("parse")
         .into_iter()
         .map(|b| b.name)
         .collect();
-    assert_eq!(names, ["y", "x"]);
+    assert_eq!(names, ["y"]);
 }
 
 fn register_period(d: &Arc<FakeDaemon>, materialize: bool) -> Arc<Mutex<Vec<(String, String)>>> {

@@ -13,7 +13,7 @@
 
 use cv_schema::toml_edit::{Item, Value};
 use cv_schema::{
-    ConfigDoc, Default as Dflt, Field, FieldError, Node, Path, Record, RefKind, Summary, Union,
+    ConfigDoc, Default as Dflt, Field, FieldError, Node, Path, Record, RefKind, Seg, Summary, Union,
 };
 
 use super::ScalarValue;
@@ -631,19 +631,70 @@ fn compound(node: &Node) -> bool {
     )
 }
 
-/// The Sources lists shown sorted by name with no reorder controls (plan round-10 Decision 7):
-/// the file's row order carries first-match semantics, so the sort is display-only.
-const SORTED_SOURCE_LISTS: [&str; 3] = ["blog", "newsletter", "serial"];
+/// Lists shown display-sorted with no reorder controls, as `(file, list shape)`; a shape is the
+/// path with every index written `[]` (round-17 Decision 5, extending round-10 Decision 7). The
+/// file's row order carries first-match semantics, so the sort is display-only. Every other list
+/// (Action steps / params / starters, Pipelines lists, Editor `nav_links`, a view's lists) stays
+/// manual with ↑↓.
+const SORTED_LISTS: [(&str, &str); 10] = [
+    (PROVIDERS_PATH, "provider"),
+    (PROVIDERS_PATH, "provider[].models"),
+    (SOURCES_PATH, "youtube"),
+    (SOURCES_PATH, "blog"),
+    (SOURCES_PATH, "newsletter"),
+    (SOURCES_PATH, "serial"),
+    (SCHEDULES_PATH, "schedule"),
+    (ACTIONS_PATH, "action"),
+    (BOOKMARKS_PATH, "bookmark"),
+    (CAPTURES_PATH, "capture"),
+];
 
-/// The `sources.toml` vault path.
+/// Maps shown key-sorted (case-insensitive, ties by file order), as `(file, map shape)`; `""` is
+/// the file root. Sorted by the stored key, never the rename draft, so a row does not jump while
+/// its key is being typed.
+const SORTED_MAPS: [(&str, &str); 3] = [
+    (KINDS_PATH, "kinds"),
+    (AGENTS_PATH, ""),
+    (EDITOR_PATH, "keys"),
+];
+
+const PROVIDERS_PATH: &str = cv_schema::config_path!("providers.toml");
 const SOURCES_PATH: &str = cv_schema::config_path!("sources.toml");
+const SCHEDULES_PATH: &str = cv_schema::config_path!("schedules.toml");
+const ACTIONS_PATH: &str = cv_schema::config_path!("actions.toml");
+const BOOKMARKS_PATH: &str = cv_schema::config_path!("bookmarks.toml");
+const CAPTURES_PATH: &str = cv_schema::config_path!("captures.toml");
+const KINDS_PATH: &str = cv_schema::config_path!("kinds.toml");
+const AGENTS_PATH: &str = cv_schema::config_path!("agents.toml");
+const EDITOR_PATH: &str = cv_schema::config_path!("editor.toml");
+
+/// `p` with every list index written `[]` (`provider[2].models` → `provider[].models`).
+fn shape(p: &Path) -> String {
+    let mut s = String::new();
+    for seg in &p.0 {
+        match seg {
+            Seg::Key(k) => {
+                if !s.is_empty() {
+                    s.push('.');
+                }
+                s.push_str(k);
+            }
+            Seg::Index(_) => s.push_str("[]"),
+        }
+    }
+    s
+}
 
 /// Whether the list at `p` in `file` is display-sorted without reorder controls.
 pub fn sorted_list(file: &str, p: &Path) -> bool {
-    file == SOURCES_PATH
-        && SORTED_SOURCE_LISTS
-            .iter()
-            .any(|k| *p == Path::root().key(k))
+    let sh = shape(p);
+    SORTED_LISTS.iter().any(|(f, s)| *f == file && *s == sh)
+}
+
+/// Whether the map at `p` in `file` is shown key-sorted.
+pub fn sorted_map(file: &str, p: &Path) -> bool {
+    let sh = shape(p);
+    SORTED_MAPS.iter().any(|(f, s)| *f == file && *s == sh)
 }
 
 /// The order list items are shown in: file order, or (`sorted`) case-insensitive by each item's
@@ -740,7 +791,11 @@ fn map_rows(
         hint: leaf.hint,
         ..Leaf::bare("Value")
     };
-    for k in cx.doc.keys(p) {
+    let mut keys = cx.doc.keys(p);
+    if sorted_map(cx.file, p) {
+        keys.sort_by_cached_key(|k| k.to_lowercase());
+    }
+    for k in keys {
         let kp = p.key(&k);
         let expanded = !collapsible || cx.form.is_expanded(cx.file, &kp);
         let draft = cx
