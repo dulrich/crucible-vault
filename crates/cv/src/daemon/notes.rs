@@ -16,6 +16,11 @@ impl Shared {
             .map_err(internal)
     }
 
+    /// The runner's note holds (empty before the runner starts).
+    pub(crate) fn holds_view(&self) -> crate::runner::HoldsView {
+        self.runner().map(Runner::holds_view).unwrap_or_default()
+    }
+
     /// Runs `f` as one writer job; every layer's failure (shutdown, writer gone, the job's own
     /// error) flattens into one [`RpcError`].
     pub(crate) async fn writer_job<T: Send + 'static>(
@@ -25,6 +30,7 @@ impl Shared {
         match self.with_writer(move |w| w.call(f)).await? {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(JobError::Invalid(m))) => Err(rpc_err(error_codes::INVALID_PARAMS, m)),
+            Ok(Err(JobError::Held { path, label })) => Err(rpc_held(&path, &label)),
             Ok(Err(JobError::Vault(e))) | Err(e) => Err(rpc_from_vault(e)),
         }
     }
@@ -47,9 +53,24 @@ impl Shared {
     /// `write_note`: a CAS write; a hash conflict is a result, not an error.
     pub(super) async fn write_note(&self, p: WriteNoteParams) -> Result<WriteNoteResult, RpcError> {
         let expected = (!p.base_hash.is_empty()).then(|| ContentHash::from_hex(p.base_hash));
+        let holds = self.holds_view();
         let res = self
-            .with_writer(move |w| w.write(&p.path, p.content.into_bytes(), expected))
+            .with_writer(move |w| {
+                w.call(move |vw| {
+                    // Plan round-18 Decision 2: refused inside the writer job, before mutation.
+                    if let Some((path, label)) = holds.holder([p.path.as_str()]) {
+                        return Err(JobError::Held { path, label });
+                    }
+                    Ok(vw.write(&p.path, p.content.as_bytes(), expected)?)
+                })
+            })
             .await?;
+        let res = match res {
+            Ok(Ok(h)) => Ok(h),
+            Ok(Err(JobError::Held { path, label })) => return Err(rpc_held(&path, &label)),
+            Ok(Err(JobError::Invalid(m))) => return Err(rpc_err(error_codes::INVALID_PARAMS, m)),
+            Ok(Err(JobError::Vault(e))) | Err(e) => Err(e),
+        };
         match res {
             Ok(h) => Ok(WriteNoteResult::Written {
                 hash: h.as_str().to_owned(),
@@ -64,8 +85,29 @@ impl Shared {
     /// `rename`: read the hash and rename in one writer job, so the CAS token is the hash the
     /// writer itself just read and no other writer job can interleave.
     pub(super) async fn rename(&self, p: RenameParams) -> Result<RenameResult, RpcError> {
+        let holds = self.holds_view();
         let out = self
             .writer_job(move |vw| {
+                // Plan round-18 Decision 2: both endpoints and every backlink source the rename
+                // would rewrite (`VaultWriter::rename` gathers the same set), before mutation.
+                // With no holds nothing is queried (the request runs exactly as before).
+                let sources: Vec<String> = if holds.is_empty() {
+                    Vec::new()
+                } else {
+                    vw.index()
+                        .query()
+                        .backlinks(&p.from)
+                        .map_err(VaultError::from)?
+                        .into_iter()
+                        .map(|r| r.src_path)
+                        .collect()
+                };
+                let touched = [p.from.as_str(), p.to.as_str()]
+                    .into_iter()
+                    .chain(sources.iter().map(String::as_str));
+                if let Some((path, label)) = holds.holder(touched) {
+                    return Err(JobError::Held { path, label });
+                }
                 let h = vw
                     .fs()
                     .hash(&p.from)?
@@ -82,7 +124,11 @@ impl Shared {
     /// `delete`: hash read + CAS delete in one writer job.
     pub(super) async fn delete(&self, p: DeleteParams) -> Result<DeleteResult, RpcError> {
         let permanent = p.mode == DeleteMode::Permanent;
+        let holds = self.holds_view();
         self.writer_job(move |vw| {
+            if let Some((path, label)) = holds.holder_under(&p.path) {
+                return Err(JobError::Held { path, label });
+            }
             let h = vw
                 .fs()
                 .hash(&p.path)?
@@ -122,8 +168,16 @@ impl Shared {
         p: DeleteNoteParams,
     ) -> Result<DeleteNoteResult, RpcError> {
         let permanent = p.mode == DeleteMode::Permanent;
+        let holds = self.holds_view();
         let (removed, skipped) = self
-            .writer_job(move |vw| Ok(vw.delete_note(&p.path, &p.attachments, permanent)?))
+            .writer_job(move |vw| {
+                let touched = std::iter::once(p.path.as_str())
+                    .chain(p.attachments.iter().map(String::as_str));
+                if let Some((path, label)) = holds.holder(touched) {
+                    return Err(JobError::Held { path, label });
+                }
+                Ok(vw.delete_note(&p.path, &p.attachments, permanent)?)
+            })
             .await?;
         Ok(DeleteNoteResult { removed, skipped })
     }
@@ -135,8 +189,12 @@ impl Shared {
         &self,
         p: cv_protocol::NoteSetBoolParams,
     ) -> Result<cv_protocol::NoteSetBoolResult, RpcError> {
+        let holds = self.holds_view();
         let hash = self
             .writer_job(move |vw| {
+                if let Some((path, label)) = holds.holder([p.path.as_str()]) {
+                    return Err(JobError::Held { path, label });
+                }
                 let bytes = vw
                     .fs()
                     .read(&p.path)?

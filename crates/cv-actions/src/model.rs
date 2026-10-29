@@ -55,6 +55,37 @@ impl Action {
         self.steps.iter().any(Step::mutates_note)
     }
 
+    /// Whether a running job of this action holds its active note (plan round-18 Decision 1): iff
+    /// `resources.note` and an `agent` step precedes a `capture` step whose **effective** mode is
+    /// `replace`. The effective mode is the step's own `mode`, else the named preset's `mode`
+    /// (`preset_mode(name)`, from `captures.toml`), else the capture default `append` — the same
+    /// overlay `cv`'s capture step resolves (`steps/capture.rs` `Capture::parse`). An unresolvable
+    /// preset never holds unless the step itself says `replace`. A `run_action` child is
+    /// classified by its own steps, so `run_action` steps are ignored here.
+    #[must_use]
+    pub fn holds_note(&self, preset_mode: impl Fn(&str) -> Option<String>) -> bool {
+        if !self.resources.note {
+            return false;
+        }
+        let mut agent_seen = false;
+        for step in &self.steps {
+            match step.kind {
+                StepKind::Agent => agent_seen = true,
+                StepKind::Capture if agent_seen => {
+                    let str_of = |k: &str| step.params.get(k).and_then(toml::Value::as_str);
+                    let mode = str_of("mode")
+                        .map(str::to_owned)
+                        .or_else(|| str_of("capture").and_then(&preset_mode));
+                    if mode.as_deref() == Some("replace") {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Whether the action can be started by `run_action` (has a command starter).
     #[must_use]
     pub fn has_command_starter(&self) -> bool {
@@ -496,6 +527,97 @@ fn expand(t: &str, path: Option<&str>, params: &Map<String, Value>) -> Result<St
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn action(note: bool, steps: &[&str]) -> Action {
+        Action {
+            id: "a".into(),
+            label: "A".into(),
+            group: None,
+            keys: Vec::new(),
+            params: Vec::new(),
+            needs: Vec::new(),
+            lane: LaneChoice::Auto,
+            durable: true,
+            steps: steps
+                .iter()
+                .map(|s| Step::from_table(toml::from_str(s).unwrap()).unwrap())
+                .collect(),
+            starters: Vec::new(),
+            resources: ResourceSpec {
+                note,
+                keys: Vec::new(),
+            },
+        }
+    }
+
+    /// Plan round-18 Decision 1: the hold predicate table.
+    #[test]
+    fn holds_note_only_for_agent_then_effective_replace() {
+        let presets = |n: &str| match n {
+            "replace-note" => Some("replace".to_owned()),
+            "log" => Some("append".to_owned()),
+            _ => None,
+        };
+        let agent = "type = \"agent\"\nagent = \"x\"";
+        let cases: &[(bool, &[&str], bool)] = &[
+            // agent → explicit replace.
+            (
+                true,
+                &[agent, "type = \"capture\"\nmode = \"replace\""],
+                true,
+            ),
+            // agent → preset-supplied replace.
+            (
+                true,
+                &[agent, "type = \"capture\"\ncapture = \"replace-note\""],
+                true,
+            ),
+            // agent → preset replace overridden by the step's own append.
+            (
+                true,
+                &[
+                    agent,
+                    "type = \"capture\"\ncapture = \"replace-note\"\nmode = \"append\"",
+                ],
+                false,
+            ),
+            // replace without an agent (capture.replace-note).
+            (
+                true,
+                &["type = \"capture\"\ncapture = \"replace-note\""],
+                false,
+            ),
+            // capture before the agent.
+            (
+                true,
+                &["type = \"capture\"\nmode = \"replace\"", agent],
+                false,
+            ),
+            // note = false.
+            (
+                false,
+                &[agent, "type = \"capture\"\nmode = \"replace\""],
+                false,
+            ),
+            // command-only / non-capture actions.
+            (true, &["type = \"guard\"", agent], false),
+            // agent → default (append) and unknown preset.
+            (true, &[agent, "type = \"capture\""], false),
+            (
+                true,
+                &[agent, "type = \"capture\"\ncapture = \"nope\""],
+                false,
+            ),
+            (
+                true,
+                &[agent, "type = \"capture\"\ncapture = \"log\""],
+                false,
+            ),
+        ];
+        for (i, (note, steps, want)) in cases.iter().enumerate() {
+            assert_eq!(action(*note, steps).holds_note(presets), *want, "case {i}");
+        }
+    }
 
     #[test]
     fn schedules_parse_and_due_times() {

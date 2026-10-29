@@ -343,6 +343,47 @@ struct Hold {
     label: String,
 }
 
+/// A cheap shared read of the runner's note holds (plan round-18 Decision 2): the daemon's
+/// client-write handlers consult it inside the serialized writer job, before mutating.
+#[derive(Clone, Default)]
+pub struct HoldsView(Arc<Mutex<HashMap<String, Hold>>>);
+
+impl HoldsView {
+    /// Whether no note is held.
+    pub fn is_empty(&self) -> bool {
+        lock(&self.0).is_empty()
+    }
+
+    /// The first hold on `path` itself or on any note under it as a folder (`path/…`).
+    pub fn holder_under(&self, path: &str) -> Option<(String, String)> {
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        lock(&self.0)
+            .values()
+            .find(|h| h.path == path || h.path.starts_with(&prefix))
+            .map(|h| (h.path.clone(), h.label.clone()))
+    }
+
+    /// The first hold on any of `paths`, as `(path, holding action label)`.
+    pub fn holder<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> Option<(String, String)> {
+        let holds = lock(&self.0);
+        if holds.is_empty() {
+            return None;
+        }
+        paths.into_iter().find_map(|p| {
+            holds
+                .values()
+                .find(|h| h.path == p)
+                .map(|h| (h.path.clone(), h.label.clone()))
+        })
+    }
+}
+
+impl std::fmt::Debug for HoldsView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HoldsView").finish_non_exhaustive()
+    }
+}
+
 pub(crate) struct Inner {
     state: Arc<Mutex<StateDb>>,
     writer: Arc<dyn WriterSource>,
@@ -359,9 +400,11 @@ pub(crate) struct Inner {
     config: RwLock<Arc<ConfigSet>>,
     wake: Notify,
     running: Mutex<HashSet<String>>,
-    /// Note holds of running jobs (`job id -> Hold`; plan round-17 WP-2): a job whose action has
-    /// `resources.note = true` and an active note holds that note until its attempt ends.
-    holds: Mutex<HashMap<String, Hold>>,
+    /// Note holds of running jobs (`job id -> Hold`; plan round-17 WP-2, narrowed by plan round-18
+    /// Decision 1 to [`ConfigSet::action_holds_note`]): such a job holds its active note until its
+    /// attempt ends. Shared (`Arc`) so the daemon's writer jobs can refuse client writes to a held
+    /// note ([`HoldsView`]).
+    holds: Arc<Mutex<HashMap<String, Hold>>>,
     finished: Mutex<BTreeMap<String, RunSummary>>,
     cycle: Mutex<HashMap<(String, String), Instant>>,
 }
@@ -397,7 +440,7 @@ impl Runner {
                 config: RwLock::new(Arc::new(ConfigSet::new())),
                 wake: Notify::new(),
                 running: Mutex::new(HashSet::new()),
-                holds: Mutex::new(HashMap::new()),
+                holds: Arc::new(Mutex::new(HashMap::new())),
                 finished: Mutex::new(BTreeMap::new()),
                 cycle: Mutex::new(HashMap::new()),
             }),
@@ -455,6 +498,11 @@ impl Runner {
             && lock(&self.inner.state)
                 .cancel(job_id, self.inner.clock.now_ms())
                 .is_ok()
+    }
+
+    /// A shared read handle on the current note holds (the daemon's write refusal).
+    pub fn holds_view(&self) -> HoldsView {
+        HoldsView(Arc::clone(&self.inner.holds))
     }
 
     /// The current note holds as `running` statuses (the subscribe snapshot, plan round-17 WP-2).
@@ -618,11 +666,17 @@ impl Inner {
     }
 
     /// Starts a hold for `job_id` when the action holds its note, then publishes `running`.
-    fn start_running(&self, job_id: &str, action: &Action, context: &ActionContext) {
+    fn start_running(
+        &self,
+        job_id: &str,
+        action: &Action,
+        context: &ActionContext,
+        holds_note: bool,
+    ) {
         let hold = context
             .active_path
             .as_ref()
-            .filter(|p| action.resources.note && !p.is_empty())
+            .filter(|p| holds_note && !p.is_empty())
             .map(|p| Hold {
                 path: p.clone(),
                 label: action.label.clone(),
@@ -888,7 +942,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 RunSummary::default(),
             ),
             Some(action) => {
-                inner.start_running(&id, &action, &jp.context);
+                inner.start_running(&id, &action, &jp.context, config.action_holds_note(&action));
                 let inner2 = Arc::clone(&inner);
                 let job_id = id.clone();
                 let lane = job.lane;

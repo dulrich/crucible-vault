@@ -37,6 +37,19 @@ impl Env {
         std::fs::write(vault.join("inbox/x.md"), "# X\n").unwrap();
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::write(root.join("config/actions.toml"), actions).unwrap();
+        // Hold tests (plan round-18) run an `agent` step validated against the shipped agents.
+        for (name, text) in [
+            (
+                "agents.toml",
+                include_str!("../../../../config/examples/agents.toml"),
+            ),
+            (
+                "providers.toml",
+                include_str!("../../../../config/examples/providers.toml"),
+            ),
+        ] {
+            std::fs::write(root.join("config").join(name), text).unwrap();
+        }
         let mut vars = HashMap::new();
         for (k, v) in [
             ("HOME", root.join("home")),
@@ -727,14 +740,8 @@ async fn a_slow_call_does_not_block_its_connection() {
 /// snapshot `running` notification for the hold right after the subscribe reply.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subscribe_snapshots_current_note_holds() {
-    const HOLD: &str = "[[action]]\nid = \"refine\"\nlabel = \"Refine\"\nneeds = [\"active_path\"]\n[[action.steps]]\ntype = \"set_props\"\n";
-    let env = Env::new(HOLD);
-    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let go = Mutex::new(go_rx);
-    let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |_, _| {
-        let _ = go.lock().unwrap().recv_timeout(Duration::from_secs(10));
-        Ok(StepOutcome::default())
-    })));
+    let env = Env::new(HOLD_ACTION);
+    let (exec, go_tx) = gated_exec();
     let d = start(&env, exec).await;
     let c = env.client();
     let ctx = ActionContext {
@@ -767,6 +774,208 @@ async fn subscribe_snapshots_current_note_holds() {
             Some("a.md"),
             Some("Refine")
         )
+    );
+    go_tx.send(()).unwrap();
+    d.shutdown().await.unwrap();
+}
+
+/// A holding action (plan round-18 Decision 1: `agent` then a `replace` capture).
+const HOLD_ACTION: &str = r#"
+[[action]]
+id = "refine"
+label = "Refine"
+needs = ["active_path"]
+[[action.steps]]
+type = "agent"
+agent = "refine-transcript"
+output_var = "out"
+[[action.steps]]
+type = "capture"
+target = "active"
+mode = "replace"
+format = "{{vars.out}}"
+"#;
+
+/// An executor whose first step blocks until the returned sender fires (or 10 s pass).
+fn gated_exec() -> (Arc<dyn StepExecutor>, std::sync::mpsc::Sender<()>) {
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let go = Mutex::new(go_rx);
+    let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |_, ctx| {
+        if ctx.step_index == 0 {
+            let _ = go.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        }
+        Ok(StepOutcome::default())
+    })));
+    (exec, go_tx)
+}
+
+fn active(path: &str) -> ActionContext {
+    ActionContext {
+        active_path: Some(path.into()),
+        ..ActionContext::default()
+    }
+}
+
+/// Asserts `r` is the `HELD` refusal of `path` by `Refine`.
+fn assert_held(r: Result<Value, ClientError>, path: &str) {
+    match r {
+        Err(ClientError::Rpc(e)) => {
+            assert_eq!(e.code, error_codes::HELD, "{e:?}");
+            assert_eq!(e.data, Some(json!({ "path": path, "label": "Refine" })));
+        }
+        other => panic!("expected HELD, got {other:?}"),
+    }
+}
+
+/// Plan round-18 Decision 2: each of the five client writes that would change a held note is
+/// refused with `HELD` (nothing mutated) — its own path, a folder containing it, and a rename
+/// whose inbound-link rewrite would touch it — and accepted once the hold is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_writes_to_a_held_note_are_refused_until_release() {
+    let env = Env::new(HOLD_ACTION);
+    let vault = env.vault();
+    let held_text = "# X\n[[c]]\n";
+    std::fs::write(vault.join("inbox/x.md"), held_text).unwrap();
+    std::fs::write(vault.join("c.md"), "# C\n").unwrap();
+    let (exec, go_tx) = gated_exec();
+    let d = start(&env, exec).await;
+    let c = env.client();
+    c.request(run("refine", json!({}), active("inbox/x.md")))
+        .unwrap();
+    let runner = d.shared().runner().unwrap().clone();
+    poll(|| !runner.held_notes().is_empty());
+    let held = "inbox/x.md";
+    let write = || {
+        let cur = std::fs::read(vault.join(held)).unwrap();
+        Request::WriteNote(cv_protocol::WriteNoteParams {
+            path: held.into(),
+            content: "# changed\n".into(),
+            base_hash: ContentHash::of(&cur).as_str().to_owned(),
+        })
+    };
+    assert_held(c.request(write()), held);
+    assert_held(
+        c.request(Request::NoteSetBool(cv_protocol::NoteSetBoolParams {
+            path: held.into(),
+            key: "done".into(),
+            value: true,
+        })),
+        held,
+    );
+    assert_held(
+        c.request(Request::Rename(cv_protocol::RenameParams {
+            from: held.into(),
+            to: "inbox/y.md".into(),
+        })),
+        held,
+    );
+    // An unheld note whose backlink source (the rewrite set) is held.
+    assert_held(
+        c.request(Request::Rename(cv_protocol::RenameParams {
+            from: "c.md".into(),
+            to: "d.md".into(),
+        })),
+        held,
+    );
+    assert_held(
+        c.request(Request::Delete(cv_protocol::DeleteParams {
+            path: held.into(),
+            mode: cv_protocol::DeleteMode::Trash,
+        })),
+        held,
+    );
+    assert_held(
+        c.request(Request::Delete(cv_protocol::DeleteParams {
+            path: "inbox".into(),
+            mode: cv_protocol::DeleteMode::Trash,
+        })),
+        held,
+    );
+    assert_held(
+        c.request(Request::DeleteNote(cv_protocol::DeleteNoteParams {
+            path: held.into(),
+            attachments: Vec::new(),
+            mode: cv_protocol::DeleteMode::Trash,
+        })),
+        held,
+    );
+    // Nothing moved, rewritten or trashed.
+    assert_eq!(
+        std::fs::read_to_string(vault.join(held)).unwrap(),
+        held_text
+    );
+    assert!(vault.join("c.md").exists() && !vault.join("d.md").exists());
+    assert!(!vault.join("inbox/y.md").exists());
+    go_tx.send(()).unwrap();
+    poll(|| runner.held_notes().is_empty());
+    // Released: the same requests go through.
+    c.request(Request::Rename(cv_protocol::RenameParams {
+        from: "c.md".into(),
+        to: "d.md".into(),
+    }))
+    .unwrap();
+    assert!(c.request(write()).unwrap().get("written").is_some());
+    assert_eq!(
+        std::fs::read_to_string(vault.join(held)).unwrap(),
+        "# changed\n"
+    );
+    d.shutdown().await.unwrap();
+}
+
+/// Plan round-18 Decision 2 (audit E2): the refusal runs inside the writer job, so a write that
+/// entered its handler before the hold existed but reaches the writer after it is refused, while
+/// one the writer executed before the hold lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn held_check_runs_in_the_writer_not_the_handler() {
+    let env = Env::new(HOLD_ACTION);
+    let vault = env.vault();
+    let (exec, go_tx) = gated_exec();
+    let d = start(&env, exec).await;
+    let c = env.client();
+    // Before the hold: executed by the writer, lands.
+    let before = c
+        .request(Request::WriteNote(cv_protocol::WriteNoteParams {
+            path: "a.md".into(),
+            content: "# before\n".into(),
+            base_hash: ContentHash::of(b"# A\n").as_str().to_owned(),
+        }))
+        .unwrap();
+    assert!(before.get("written").is_some(), "{before:?}");
+    let before_hash = ContentHash::of(b"# before\n").as_str().to_owned();
+    // Park the writer, queue a write behind it, then start the hold.
+    let w = d.shared().writer().unwrap();
+    let (park_tx, park_rx) = std::sync::mpsc::channel::<()>();
+    let parked = std::thread::spawn(move || {
+        w.call(move |_| {
+            let _ = park_rx.recv_timeout(Duration::from_secs(10));
+        })
+        .unwrap();
+    });
+    let env_vars = env.vars.clone();
+    let late = std::thread::spawn(move || {
+        let c = Client::connect(
+            Path::new(&env_vars["CV_SOCKET"]),
+            "test",
+            cv_index::SCHEMA_VERSION,
+        )
+        .unwrap();
+        c.request(Request::WriteNote(cv_protocol::WriteNoteParams {
+            path: "a.md".into(),
+            content: "# late\n".into(),
+            base_hash: before_hash,
+        }))
+    });
+    // Let the late write reach (and queue behind) the parked writer.
+    std::thread::sleep(Duration::from_millis(300));
+    c.request(run("refine", json!({}), active("a.md"))).unwrap();
+    let runner = d.shared().runner().unwrap().clone();
+    poll(|| !runner.held_notes().is_empty());
+    park_tx.send(()).unwrap();
+    parked.join().unwrap();
+    assert_held(late.join().unwrap(), "a.md");
+    assert_eq!(
+        std::fs::read_to_string(vault.join("a.md")).unwrap(),
+        "# before\n"
     );
     go_tx.send(()).unwrap();
     d.shutdown().await.unwrap();

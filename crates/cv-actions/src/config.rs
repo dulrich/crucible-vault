@@ -322,6 +322,27 @@ impl ConfigSet {
         self.tables.get(file).unwrap_or(&self.empty)
     }
 
+    /// The `mode` of the `[[capture]]` preset `name` in `captures.toml` (`None` when the preset
+    /// is unknown or sets no mode) — the input of [`Action::holds_note`].
+    #[must_use]
+    pub fn capture_preset_mode(&self, name: &str) -> Option<String> {
+        self.table("captures.toml")
+            .get("capture")?
+            .as_array()?
+            .iter()
+            .filter_map(toml::Value::as_table)
+            .find(|e| e.get("name").and_then(toml::Value::as_str) == Some(name))?
+            .get("mode")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// Whether a running job of `action` holds its note, with presets from this config.
+    #[must_use]
+    pub fn action_holds_note(&self, action: &Action) -> bool {
+        action.holds_note(|n| self.capture_preset_mode(n))
+    }
+
     /// Every current error: file parse errors, unattributable entry errors, and one line per
     /// disarmed action.
     #[must_use]

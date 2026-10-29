@@ -53,7 +53,7 @@ pub(crate) use background::clear_stale_socket;
 use background::{config_poller, drain_spool};
 use bridge::{generation_listener, start_event_bridge};
 pub use errors::rpc_err;
-pub(crate) use errors::{JobError, rpc_from_state, rpc_from_vault};
+pub(crate) use errors::{JobError, rpc_from_state, rpc_from_vault, rpc_held};
 use errors::{internal, reply, unavailable};
 
 /// Broadcast capacity for notifications (a lagging subscriber skips, never blocks).

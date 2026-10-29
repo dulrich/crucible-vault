@@ -94,6 +94,10 @@ pub mod error_codes {
     pub const REFUSED: i64 = 1005;
     /// The daemon cannot serve the call right now (shutting down, writer gone, runner not up).
     pub const UNAVAILABLE: i64 = 1006;
+    /// The note is held by a running daemon job that will replace it wholesale (plan round-18
+    /// Decision 2): the request would change it and is refused, nothing mutated. `data` carries
+    /// `{ "path": <held path>, "label": <holding action label> }`.
+    pub const HELD: i64 = 1007;
 }
 
 /// A daemon→client notification (no id), sent after `subscribe`.

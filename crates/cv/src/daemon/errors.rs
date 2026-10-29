@@ -59,6 +59,20 @@ pub(super) fn unavailable(m: &str) -> RpcError {
 pub(crate) enum JobError {
     Vault(VaultError),
     Invalid(String),
+    /// The request would change a note a running job holds (plan round-18 Decision 2).
+    Held {
+        path: String,
+        label: String,
+    },
+}
+
+/// The `HELD` refusal of a request that would change `path`, held by action `label`.
+pub(crate) fn rpc_held(path: &str, label: &str) -> RpcError {
+    RpcError {
+        code: error_codes::HELD,
+        message: format!("{label} is updating {path}"),
+        data: Some(json!({ "path": path, "label": label })),
+    }
 }
 
 impl From<VaultError> for JobError {
