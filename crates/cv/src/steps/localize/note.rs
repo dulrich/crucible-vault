@@ -8,8 +8,8 @@ use cv_providers::FailureKind;
 use cv_providers::web::{FetchError, FetchRequest, Limited, WebClient};
 use cv_text::attachments::{
     AttachmentMatch, Media, clamp_image_quality, classify_media, ext_from_mime, ext_from_url,
-    format_ref, guess_remote_original_name, is_embed_page, is_md5_name, is_page_mime,
-    resolve_attachment_folder, resolve_attachment_path,
+    format_ref, guess_remote_original_name, is_md5_name, is_page_mime, resolve_attachment_folder,
+    resolve_attachment_path,
 };
 use cv_text::vpath;
 use cv_vault::VaultError;
@@ -26,17 +26,21 @@ fn local_now() -> chrono::NaiveDateTime {
 /// The breaker key of localize's attachment downloads (shared host gate, B8).
 pub(crate) const SERVICE: &str = "localize";
 
-/// Why one download failed.
+/// Why one download failed (plan remote-media-sprint Decision 1: permanent vs transient).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum DownloadError {
-    /// Connect/timeout: the network (or host) is unreachable.
+pub(super) enum DownloadError {
+    /// Connect/timeout (and body/transport errors): transient.
     Unreachable,
-    /// HTTP 429 / 5xx: the host asks us to come back later (not a property of the image).
+    /// HTTP 408 / 429 / 5xx: the host asks us to come back later (transient).
     Throttled(FetchError),
     /// The response's type (Content-Type, else the URL extension) is not an eligible
-    /// attachment; the body was not read.
+    /// attachment, and not a reason to give up on the ref (e.g. an image type outside the
+    /// whitelist); the body was not read.
     NotEligible,
-    /// Anything else (HTTP status, body error, too large).
+    /// Will never succeed: HTTP 404/410/other 4xx, a page response (`text/*`, XHTML), or —
+    /// when an image was wanted — a non-image Content-Type.
+    Permanent(String),
+    /// Neither (too large, malformed URL, quota/auth): left as-is, not retried as transient.
     Failed(String),
 }
 
@@ -45,17 +49,20 @@ enum DownloadError {
 /// (`text/*`, XHTML) is never an attachment, whatever the URL's extension says; otherwise the
 /// extension comes from the Content-Type, else the URL, and must be `eligible` — all before the
 /// body is read.
-fn download(
+pub(super) fn download(
     client: &WebClient,
     handle: &tokio::runtime::Handle,
     url: &str,
     max_bytes: u64,
     timeout: Duration,
+    want_image: bool,
     eligible: impl Fn(&str) -> bool,
 ) -> Result<(Vec<u8>, String), DownloadError> {
     let mut req = FetchRequest::get(SERVICE, url);
     req.timeout = Some(timeout);
+    let rejected_ctype = std::cell::RefCell::new(String::new());
     let decide = |ctype: &str| {
+        rejected_ctype.replace(ctype.trim().to_ascii_lowercase());
         if is_page_mime(ctype) {
             return None;
         }
@@ -67,12 +74,34 @@ fn download(
     };
     match handle.block_on(client.fetch_limited(req, max_bytes, decide)) {
         Ok(Limited::Body(bytes, ext)) => Ok((bytes, ext)),
-        Ok(Limited::Rejected) => Err(DownloadError::NotEligible),
-        Err(e) => Err(match e.failure().kind {
-            FailureKind::Connect | FailureKind::Timeout => DownloadError::Unreachable,
-            FailureKind::RateLimited | FailureKind::Server => DownloadError::Throttled(e),
-            _ => DownloadError::Failed(e.to_string()),
-        }),
+        Ok(Limited::Rejected) => {
+            let ct = rejected_ctype.into_inner();
+            let ct = ct.split(';').next().unwrap_or("").trim();
+            if is_page_mime(ct) {
+                Err(DownloadError::Permanent(format!("page response ({ct})")))
+            } else if want_image && !ct.is_empty() && !ct.starts_with("image/") {
+                Err(DownloadError::Permanent(format!("not an image ({ct})")))
+            } else {
+                Err(DownloadError::NotEligible)
+            }
+        }
+        Err(e) => Err(classify_fetch_error(e)),
+    }
+}
+
+/// Decision 1's split of a fetch failure.
+pub(super) fn classify_fetch_error(e: FetchError) -> DownloadError {
+    match &e {
+        FetchError::NotFound { .. } => return DownloadError::Permanent(e.to_string()),
+        FetchError::Permanent { status, .. } if (400..500).contains(status) => {
+            return DownloadError::Permanent(e.to_string());
+        }
+        _ => {}
+    }
+    match e.failure().kind {
+        FailureKind::Connect | FailureKind::Timeout => DownloadError::Unreachable,
+        FailureKind::RateLimited | FailureKind::Server => DownloadError::Throttled(e),
+        _ => DownloadError::Failed(e.to_string()),
     }
 }
 
@@ -176,7 +205,31 @@ pub(super) struct Counts {
     /// response type outside the whitelists) — not failures.
     pub(super) ineligible: u64,
     pub(super) remote_attempts: u64,
+    /// Downloads that failed transiently (unreachable, throttled, write error): the note must
+    /// not be settled (plan remote-media-sprint audit B1).
+    pub(super) transient: u64,
+    /// Video thumbnails localized (plan remote-media-sprint WP-3).
+    pub(super) thumbnails: u64,
+    /// Remote image embeds de-embedded to a link after a permanent failure.
+    pub(super) delinked: u64,
+    /// Remote media embeds rewritten to a link card (video, post, embed, audio, pdf).
+    pub(super) media_links: u64,
     pub(super) created: Vec<String>,
+}
+
+/// One [`Run::fetch`] result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Fetched {
+    /// Written (or reused) at this vault path.
+    Local(String),
+    /// Will never succeed (4xx, page, non-image).
+    Permanent,
+    /// Retry later (unreachable, throttled, write error).
+    Transient,
+    /// The type is not an eligible attachment (left as-is, not a failure).
+    Ineligible,
+    /// Neither (too large, malformed): left as-is.
+    Failed,
 }
 
 /// Per-run state shared by the remote/local processors.
@@ -234,64 +287,78 @@ impl Run<'_> {
         }
     }
 
-    /// Crucible `processRemote`. `Ok(None)` = left as-is (counted when it was a failure).
-    pub(super) fn process_remote(
+    /// One remote attachment download (Crucible `downloadRemote` + `writeAttachment`), counted:
+    /// every call is a remote attempt; a transient failure (unreachable, throttled, write error)
+    /// is counted in `transient` and `failed`, a permanent one in `failed`, an ineligible type in
+    /// `ineligible`.
+    pub(super) fn fetch(
         &mut self,
         ctx: &mut StepCtx<'_>,
         note: &str,
-        m: &AttachmentMatch,
-    ) -> Result<Option<String>, StepError> {
+        url: &str,
+        want_image: bool,
+        eligible: &dyn Fn(&str) -> bool,
+    ) -> Result<Fetched, StepError> {
         let (Some(client), Some(handle)) = (self.client, self.handle.as_ref()) else {
             return Err(StepError::failed("no async runtime"));
         };
-        if is_embed_page(&m.link) {
-            self.counts.ineligible += 1;
-            return Ok(None);
-        }
         self.counts.remote_attempts += 1;
         let p = self.p;
-        let (bytes, ext) = match download(client, handle, &m.link, p.max_bytes, p.timeout, |e| {
-            p.eligible(e)
-        }) {
+        let res = download(
+            client,
+            handle,
+            url,
+            p.max_bytes,
+            p.timeout,
+            want_image,
+            eligible,
+        );
+        let (bytes, ext) = match res {
             Ok(d) => d,
             Err(DownloadError::NotEligible) => {
                 // Crucible: "ext not eligible (left as-is)" — not a failure.
                 self.counts.ineligible += 1;
-                return Ok(None);
+                return Ok(Fetched::Ineligible);
             }
             Err(e) => {
-                tracing::debug!(error = ?e, "localize: download failed (left as-is)");
+                tracing::debug!(error = ?e, "localize: download failed");
                 self.counts.failed += 1;
-                match e {
-                    DownloadError::Unreachable => self.counts.unreachable += 1,
+                return Ok(match e {
+                    DownloadError::Unreachable => {
+                        self.counts.unreachable += 1;
+                        self.counts.transient += 1;
+                        Fetched::Transient
+                    }
                     DownloadError::Throttled(f) => {
                         self.counts.throttled += 1;
+                        self.counts.transient += 1;
                         self.counts.first_throttle.get_or_insert(f);
+                        Fetched::Transient
                     }
-                    DownloadError::Failed(_) | DownloadError::NotEligible => {}
-                }
-                return Ok(None);
+                    DownloadError::Permanent(_) => Fetched::Permanent,
+                    DownloadError::Failed(_) | DownloadError::NotEligible => Fetched::Failed,
+                });
             }
         };
-        if !self.p.eligible(&ext) {
-            // Crucible: "ext not eligible (left as-is)" — not a failure.
+        if !eligible(&ext) {
             self.counts.ineligible += 1;
-            return Ok(None);
+            return Ok(Fetched::Ineligible);
         }
         let (bytes, ext) = self.maybe_convert(bytes, &ext);
-        let original = guess_remote_original_name(&m.link);
+        let original = guess_remote_original_name(url);
         let before = self.counts.reused;
         match self.write_attachment(ctx, note, bytes, &ext, &original) {
             Ok(target) => {
                 if self.counts.reused == before {
                     self.counts.downloaded += 1;
                 }
-                Ok(Some(format_ref(m, &target)))
+                Ok(Fetched::Local(target))
             }
             Err(e) => {
                 tracing::debug!(error = %e, "localize: attachment write failed (left as-is)");
                 self.counts.failed += 1;
-                Ok(None)
+                self.counts.transient += 1;
+                Ok(Fetched::Transient)
             }
         }
     }

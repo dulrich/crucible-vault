@@ -834,6 +834,17 @@ pub fn has_remote_image_refs(content: &str) -> bool {
         .any(|m| outside(m.start()))
 }
 
+/// Whether `content` has any remote markdown embed (`![…](http…)`, embed pages included)
+/// outside fenced code.
+pub(crate) fn has_remote_md_embed(content: &str) -> bool {
+    let fenced = fenced_ranges(content);
+    md_refs::scan(content).iter().any(|m| {
+        m.kind == RefKind::MdEmbed
+            && !in_ranges(&fenced, m.span.start)
+            && remote_image_dest(m.inner(content)).is_some()
+    })
+}
+
 /// The number of managed (`<md5>_MD5.<image ext>`) image names in `content` (the `images`
 /// outcome var; plan `v0-automation-pipelines` WP-6: the image-describe trigger seam). A regex
 /// scan over note text with an image-extension allowlist and a word boundary — not the

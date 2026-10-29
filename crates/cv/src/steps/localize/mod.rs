@@ -34,13 +34,14 @@
 //! folder-scope `backfill`) and the one note pass ([`execute_note`]).
 
 mod backfill;
+mod media;
 mod note;
 mod params;
 mod relative;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_providers::web::FetchError;
@@ -49,6 +50,7 @@ use cv_text::attachments::{
     parse_attachment_refs, resolve_attachment_folder, resolve_local_attachment_repair,
     rewrite_localized_attachment_refs, strip_data_uri_image_placeholders,
 };
+use cv_text::remote_media::scan_html_media;
 use cv_vault::VaultError;
 use serde::Serialize;
 
@@ -60,6 +62,8 @@ pub use note::convert_image;
 use note::{Counts, Run, VaultView};
 pub use params::ImageFormat;
 pub(crate) use params::Params;
+#[cfg(test)]
+pub(crate) use params::TEST_MEDIA_BASE;
 use params::parse_params;
 
 /// The `localize` step (params all optional; an empty table is valid).
@@ -142,6 +146,10 @@ pub(super) struct NoteVars {
     /// Every remote ref was unreachable (not a var).
     #[serde(skip)]
     pub(super) all_unreachable: bool,
+    /// Downloads that failed transiently (not a var): a backfill never settles such a note
+    /// (plan remote-media-sprint audit B1).
+    #[serde(skip)]
+    pub(super) transient: u64,
 }
 
 /// The download/rewrite counts of a localized `.md` note.
@@ -154,6 +162,12 @@ pub(super) struct NoteCounts {
     pub(super) throttled: u64,
     pub(super) ineligible: u64,
     pub(super) localized: u64,
+    /// Video embeds rewritten to a linked local thumbnail (planned rewrites).
+    pub(super) thumbnails: u64,
+    /// Remote image embeds de-embedded to a link after a permanent failure (planned).
+    pub(super) delinked: u64,
+    /// Remote media embeds rewritten to a link card (planned).
+    pub(super) media_links: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) repaired: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,7 +229,13 @@ pub(super) fn execute_note(
             relative::as_remote(m, source)
         })
         .collect();
-    if matches.iter().any(|m| m.is_remote) || rel.iter().any(Option::is_some) {
+    // HTML media elements (plan remote-media-sprint WP-3), localize mode only.
+    let html = if p.repair {
+        Vec::new()
+    } else {
+        scan_html_media(&content)
+    };
+    if matches.iter().any(|m| m.is_remote) || rel.iter().any(Option::is_some) || !html.is_empty() {
         if run.handle.is_none() {
             return Err(StepError::failed("no async runtime"));
         }
@@ -251,7 +271,7 @@ pub(super) fn execute_note(
                 run.process_remote(ctx, &path, m)?
             } else if let Some(rm) = r {
                 // A failed download keeps the local repair as before (never a worse note).
-                run.process_remote(ctx, &path, rm)?.or_else(local)
+                run.process_relative(ctx, &path, rm)?.or_else(local)
             } else {
                 local()
             };
@@ -266,7 +286,7 @@ pub(super) fn execute_note(
             let new_ref = if m.is_remote {
                 run.process_remote(ctx, &path, m)?
             } else if let Some(rm) = r {
-                run.process_remote(ctx, &path, rm)?
+                run.process_relative(ctx, &path, rm)?
             } else {
                 match run.process_local(ctx, &path, m, view.as_ref())? {
                     Some((r, old)) => {
@@ -277,6 +297,18 @@ pub(super) fn execute_note(
                 }
             };
             plan_replacement(&mut replacements, m, new_ref);
+        }
+    }
+    // Element source text → replacement; applied in `modify` by re-scanning the current text
+    // and matching the element's text (never first-read byte offsets).
+    let mut html_repl: HashMap<String, String> = HashMap::new();
+    for h in &html {
+        let text = &content[h.span.clone()];
+        if html_repl.contains_key(text) {
+            continue;
+        }
+        if let Some(to) = run.process_html(ctx, &path, h, text)? {
+            html_repl.insert(text.to_owned(), to);
         }
     }
 
@@ -295,8 +327,11 @@ pub(super) fn execute_note(
     let mut applied_from: Vec<String> = Vec::new();
     let mut images = 0_u64;
     let strip = placeholders > 0;
+    let mut html_applied = 0_u64;
     let written = ctx.modify(&path, |cur| {
-        let rewritten = rewrite_localized_attachment_refs(cur, &replacements);
+        let (cur_html, n) = apply_html_replacements(cur, &html_repl);
+        html_applied = n;
+        let rewritten = rewrite_localized_attachment_refs(&cur_html, &replacements);
         let mut updated = rewritten.content;
         if strip {
             updated = strip_data_uri_image_placeholders(&updated).0;
@@ -342,7 +377,10 @@ pub(super) fn execute_note(
         failed: c.failed,
         throttled: c.throttled,
         ineligible: c.ineligible,
-        localized: if changed { applied } else { 0 },
+        localized: if changed { applied + html_applied } else { 0 },
+        thumbnails: c.thumbnails,
+        delinked: c.delinked,
+        media_links: c.media_links,
         ..NoteCounts::default()
     };
     if p.repair {
@@ -362,8 +400,31 @@ pub(super) fn execute_note(
         counts: Some(counts),
         throttle: run.counts.first_throttle.take(),
         all_unreachable,
+        transient: run.counts.transient,
     };
     Ok((vars, output_paths))
+}
+
+/// Replaces each HTML media element of `cur` whose source text is a key of `repl` (re-scanned on
+/// the current text, so a concurrent edit is kept); returns the text and the count applied.
+fn apply_html_replacements(cur: &str, repl: &HashMap<String, String>) -> (String, u64) {
+    if repl.is_empty() {
+        return (cur.to_owned(), 0);
+    }
+    let mut out = String::with_capacity(cur.len());
+    let mut cursor = 0;
+    let mut n = 0;
+    for h in scan_html_media(cur) {
+        let Some(to) = repl.get(&cur[h.span.clone()]) else {
+            continue;
+        };
+        out.push_str(&cur[cursor..h.span.start]);
+        out.push_str(to);
+        cursor = h.span.end;
+        n += 1;
+    }
+    out.push_str(&cur[cursor..]);
+    (out, n)
 }
 
 /// One ref's planned rewrite (the repair and localize passes share it): records `from → to`

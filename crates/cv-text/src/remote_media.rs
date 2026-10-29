@@ -382,6 +382,25 @@ pub fn scan_html_media(content: &str) -> Vec<HtmlMedia> {
     out
 }
 
+/// An attribute of the start tag that opens `element` (an [`HtmlMedia`] span's text), e.g. an
+/// `<img>`'s `alt`; `None` when absent or the tag is malformed.
+#[must_use]
+pub fn html_attr(element: &str, name: &str) -> Option<String> {
+    let t = parse_start_tag(element, element.find('<')?)?;
+    t.attr(&name.to_ascii_lowercase()).map(str::to_owned)
+}
+
+/// Whether `content` has any remote media the `localize` step converts, outside fenced code:
+/// a remote image or `data:image` placeholder ([`crate::attachments::has_remote_image_refs`]),
+/// any other remote markdown embed (video/post pages, audio, pdf, …), or an HTML media element
+/// with a remote source (the backfill candidate predicate, plan remote-media-sprint WP-3).
+#[must_use]
+pub fn has_remote_media_refs(content: &str) -> bool {
+    crate::attachments::has_remote_image_refs(content)
+        || crate::attachments::has_remote_md_embed(content)
+        || !scan_html_media(content).is_empty()
+}
+
 /// The first remote `<source src>` in `content[from..to]`.
 fn first_source_src(content: &str, from: usize, to: usize) -> Option<String> {
     let inner = &content[..to];

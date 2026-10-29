@@ -280,7 +280,7 @@ fn write_race_reapplies_then_persistent_race_defers() {
 }
 
 #[test]
-fn one_failed_download_among_several_is_counted_and_left() {
+fn one_permanently_failed_download_among_several_is_counted_and_delinked() {
     let (a, b) = (png(4), png(5));
     let routes = HashMap::from([
         route("/a.png", "image/png", a.clone()),
@@ -297,11 +297,12 @@ fn one_failed_download_among_several_is_counted_and_left() {
     });
     assert_eq!(var(&out, "downloaded"), 2);
     assert_eq!(var(&out, "failed"), 1);
+    assert_eq!(var(&out, "delinked"), 1);
     let (ma, mb) = (super::util::md5_hex(&a), super::util::md5_hex(&b));
     assert_eq!(
         env.text("n.md"),
         format!(
-            "![](_attachments/n/{ma}_MD5.png)\n![](http://127.0.0.1:{port}/missing.png)\n![](_attachments/n/{mb}_MD5.png)\n"
+            "![](_attachments/n/{ma}_MD5.png)\n[🖼 127.0.0.1](http://127.0.0.1:{port}/missing.png)\n![](_attachments/n/{mb}_MD5.png)\n"
         )
     );
 }
@@ -411,10 +412,15 @@ fn ignored(env: &Env) -> Vec<String> {
 #[test]
 fn folder_backfill_is_bounded_resumes_and_records_failures() {
     let img = png(7);
-    let routes = HashMap::from([route("/ok.png", "image/png", img.clone())]);
+    assert!(img.len() < 4096);
+    let routes = HashMap::from([
+        route("/ok.png", "image/png", img.clone()),
+        route("/big.png", "image/png", vec![0; 8192]),
+    ]);
     let (env, outs) = with_server(routes, None, move |port, _| {
         let ok = format!("![](http://127.0.0.1:{port}/ok.png)\n");
-        let bad = format!("![](http://127.0.0.1:{port}/gone.png)\n");
+        // Too large: neither transient nor permanent — left, and recorded as failed.
+        let bad = format!("![](http://127.0.0.1:{port}/big.png)\n");
         let fenced = format!("```\n![](http://127.0.0.1:{port}/ok.png)\n```\n");
         let env = env(&[
             ("Clippings/a.md", ok.as_bytes()),
@@ -424,7 +430,8 @@ fn folder_backfill_is_bounded_resumes_and_records_failures() {
             ("Clippings/e.md", fenced.as_bytes()),
             ("other/x.md", ok.as_bytes()),
         ]);
-        let step = env.step("scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 2");
+        let step =
+            env.step("scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 2\nmax_bytes = 4096");
         let outs: Vec<StepOutcome> = (0..3).map(|_| env.run(&step, "").unwrap()).collect();
         (env, outs)
     });
@@ -463,7 +470,7 @@ fn folder_backfill_is_bounded_resumes_and_records_failures() {
         env.text("Clippings/sub/c.md"),
         format!("![](Clippings/sub/_attachments/c/{md5}_MD5.png)\n")
     );
-    assert!(env.text("Clippings/b.md").contains("gone.png"));
+    assert!(env.text("Clippings/b.md").contains("big.png"));
     assert!(env.text("Clippings/e.md").contains("127.0.0.1"));
     assert!(env.text("other/x.md").contains("127.0.0.1"));
 }
@@ -608,24 +615,31 @@ fn a_page_response_is_ineligible_not_failed() {
         let out = env.run(&step, "n.md").unwrap();
         (env, out)
     });
+    // Decision 1: a page response is permanent (de-embedded); an id-less YouTube page has no
+    // thumbnail (link card).
     assert_eq!(
         (
             var(&out, "downloaded"),
-            var(&out, "failed"),
+            var(&out, "delinked"),
+            var(&out, "media_links"),
             var(&out, "ineligible")
         ),
-        (1, 0, 2)
+        (1, 1, 1, 0)
     );
     let t = env.text("n.md");
-    assert!(t.contains("/page.png") && t.contains("youtube.com/watch"));
+    assert!(t.contains("\n[🖼 127.0.0.1](http://127.0.0.1:"), "{t}");
+    assert!(
+        t.contains("[▶ video · youtube.com](https://www.youtube.com/watch?v=a)"),
+        "{t}"
+    );
     assert!(!t.contains("/ok.png"));
 }
 
 #[test]
-fn folder_backfill_settles_ineligible_notes_and_skips_embed_only_notes() {
-    let routes = HashMap::from([route("/page.png", "text/html", b"<html></html>".to_vec())]);
+fn folder_backfill_settles_ineligible_notes_and_converts_embed_only_notes() {
+    let routes = HashMap::from([route("/a.tiff", "image/tiff", b"II*\0".to_vec())]);
     let (env, outs) = with_server(routes, None, move |port, _| {
-        let page = format!("![](http://127.0.0.1:{port}/page.png)\n");
+        let page = format!("![](http://127.0.0.1:{port}/a.tiff)\n");
         let env = env(&[
             ("daily/a.md", page.as_bytes()),
             ("daily/v.md", b"![](https://www.youtube.com/watch?v=a)\n"),
@@ -642,12 +656,16 @@ fn folder_backfill_settles_ineligible_notes_and_skips_embed_only_notes() {
             v(0, "ineligible"),
             v(0, "unattempted_remaining")
         ),
-        (0, 0, 1, 0)
+        (1, 0, 1, 0)
     );
     assert_eq!(
         ignored(&env),
         ["daily/a.md"],
-        "settled, never the embed-only note"
+        "settled; the embed-only note is converted, not recorded"
+    );
+    assert!(
+        env.text("daily/v.md")
+            .starts_with("[▶ video · youtube.com](")
     );
     assert_eq!((v(1, "ineligible"), v(1, "unattempted_remaining")), (0, 0));
 }
@@ -738,3 +756,6 @@ fn relative_image_refs_without_an_http_source_are_untouched() {
     assert_eq!(note_a.0, note_a.1);
     assert_eq!(note_b.0, note_b.1);
 }
+
+#[path = "localize_media_tests.rs"]
+mod media;

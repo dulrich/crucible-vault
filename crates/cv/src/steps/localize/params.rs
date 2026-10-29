@@ -50,11 +50,8 @@ pub(crate) struct Params {
     /// Media downloaded today: Images (unless a legacy `images = false`), Audio iff
     /// `audio == Localize`, Pdf iff `pdf == Localize`, Video iff `video == VideoMode::Localize`.
     pub(super) enabled: Vec<Media>,
-    #[allow(dead_code)] // read by WP-3
     pub(super) video: VideoMode,
-    #[allow(dead_code)] // read by WP-3
     pub(super) audio: AudioMode,
-    #[allow(dead_code)] // read by WP-3
     pub(super) pdf: PdfMode,
     pub(super) whitelists: HashMap<&'static str, Vec<String>>,
     pub(super) convert_images: bool,
@@ -62,6 +59,27 @@ pub(crate) struct Params {
     pub(super) image_quality: Option<f64>,
     pub(super) timeout: Duration,
     pub(super) max_bytes: u64,
+    /// Thumbnail host base (`https://i.ytimg.com`); never a param — tests point it at the
+    /// local fixture through [`TEST_MEDIA_BASE`].
+    pub(super) ytimg_base: String,
+    /// oEmbed host base (`https://vimeo.com`); never a param.
+    pub(super) vimeo_base: String,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of both media host bases (the local HTTP fixture).
+    pub(crate) static TEST_MEDIA_BASE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The (ytimg, vimeo) bases.
+fn media_bases() -> (String, String) {
+    #[cfg(test)]
+    if let Some(b) = TEST_MEDIA_BASE.with(|b| b.borrow().clone()) {
+        return (b.clone(), b);
+    }
+    ("https://i.ytimg.com".into(), "https://vimeo.com".into())
 }
 
 /// A link/localize mode param: the mode string, or a legacy bool (`true` = localize).
@@ -179,7 +197,10 @@ pub(super) fn parse_params(t: &toml::Table, rm: &RemoteMediaConfig) -> Result<Pa
         ),
         Some(o) => return Err(format!("localize: scope {o:?} (want note|folder)")),
     };
+    let (ytimg_base, vimeo_base) = media_bases();
     Ok(Params {
+        ytimg_base,
+        vimeo_base,
         path: s("path")?,
         folder_scope,
         limit: u("limit", 50)?,
