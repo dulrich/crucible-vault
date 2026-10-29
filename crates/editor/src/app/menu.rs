@@ -269,7 +269,7 @@ impl App {
     /// Reveal in explorer: open the sidebar, expand the note's ancestor folders, select it.
     /// (The virtual list has no scroll-to operation, so the row is not scrolled into view.)
     fn reveal(&mut self, path: &str) {
-        self.ui.side_collapsed = false;
+        let _ = self.set_side(Some(crate::ui_state::SideSection::Files));
         let mut p = path;
         while let Some((parent, _)) = p.rsplit_once('/') {
             self.ui.expanded.insert(parent.to_owned());

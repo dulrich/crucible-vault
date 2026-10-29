@@ -163,14 +163,72 @@ fn side_collapse_and_borders_persist() {
     let tmp = tempfile::tempdir().expect("tmp");
     let state = tmp.path().join("state/editor.json");
     let (_tmp, d, mut app) = app_with(&[], Some(state.clone()));
-    assert!(!app.ui.side_collapsed && !app.ui.pane_borders);
+    assert!(app.ui.side.0.is_some() && !app.ui.pane_borders);
     let _ = app.send(Message::Panes(PanesMsg::ToggleSide));
     let _ = app.send(Message::Panes(PanesMsg::ToggleBorders));
     drop(app.view());
     let _ = app.send(Message::PersistDue);
     let dc: Arc<dyn DaemonClient> = d as Arc<dyn DaemonClient>;
     let again = App::new(Some(dc), Some(state));
-    assert!(again.ui.side_collapsed && again.ui.pane_borders);
+    assert!(again.ui.side.0.is_none() && again.ui.pane_borders);
+}
+
+/// Plan round-17 WP-6: the activity strip — a click on the open section's button closes the
+/// sidebar, another section's swaps, the strip's active section is the open one, and
+/// `ToggleSide` reopens the last open section.
+#[test]
+fn activity_strip_toggles_swaps_and_reopens_last() {
+    use crate::ui_state::SideSection as S;
+    let (_tmp, _d, mut app) = app_with(&[], None);
+    assert_eq!(app.ui.side.0, Some(S::Files));
+    let click = |app: &mut App, s: S| {
+        let m = super::super::view::strip_message(app.ui.side.0, s);
+        let _ = app.send(m);
+    };
+    click(&mut app, S::Files);
+    assert_eq!(app.ui.side.0, None, "open section's button closes");
+    click(&mut app, S::Files);
+    click(&mut app, S::Outline);
+    assert_eq!(app.ui.side.0, Some(S::Outline), "swap");
+    assert!(app.panels.visible && app.panels.kind == crate::panels::PanelKind::Outline);
+    let _ = app.send(Message::Panes(PanesMsg::ToggleSide));
+    assert!(app.ui.side.0.is_none() && !app.panels.visible);
+    let _ = app.send(Message::Panes(PanesMsg::ToggleSide));
+    assert_eq!(app.ui.side.0, Some(S::Outline), "reopens the last section");
+    click(&mut app, S::Bookmarks);
+    assert!(!app.panels.visible, "a non-panel section hides the panels");
+    drop(app.view());
+}
+
+/// Plan round-17 WP-6: `Show(Search)` opens the Search section; the palette's `toggle_panels`
+/// still resolves (to the sidebar toggle) and every section has a `panel.<id>` show command.
+#[test]
+fn show_search_opens_its_section_and_palette_keeps_toggle() {
+    use crate::message::PanelsMsg;
+    use crate::ui_state::SideSection as S;
+    let (_tmp, _d, mut app) = app_with(&[], None);
+    let _ = app.send(Message::Panels(PanelsMsg::Show(
+        crate::panels::PanelKind::Search,
+    )));
+    assert_eq!(app.ui.side.0, Some(S::Search));
+    assert!(app.panels.visible);
+    let _ = app.send(Message::Panels(PanelsMsg::Toggle));
+    assert_eq!(
+        app.ui.side.0, None,
+        "PanelsMsg::Toggle is the sidebar toggle"
+    );
+    let table = crate::palette::commands::table();
+    for id in [
+        "toggle_panels",
+        "panel.files",
+        "panel.bookmarks",
+        "panel.tags",
+    ] {
+        assert!(table.iter().any(|c| c.id == id), "{id}");
+    }
+    let files = crate::palette::commands::ClientCmd::Panel(S::Files);
+    let _ = app.send(files.message(app.focus));
+    assert_eq!(app.ui.side.0, Some(S::Files));
 }
 
 #[test]

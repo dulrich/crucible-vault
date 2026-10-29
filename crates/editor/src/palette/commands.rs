@@ -13,8 +13,8 @@ use crate::message::{
     ExplorerMsg, FindMsg, Message, PaletteMsg, PanelsMsg, PanesMsg, ReadingMsg, SourceMsg,
     SwitcherMsg, TabsMsg, ThemeMsg,
 };
-use crate::panels::PanelKind;
 use crate::theme::Surround;
+use crate::ui_state::SideSection;
 
 /// A client-side command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +31,7 @@ pub enum ClientCmd {
     TogglePanels,
     /// editor-usability-round WP-3: debug pane borders.
     TogglePaneBorders,
-    Panel(PanelKind),
+    Panel(SideSection),
     /// editor-usability-round WP-4 commands.
     Quit,
     CloseTab,
@@ -238,11 +238,11 @@ static TABLE: LazyLock<Vec<CmdSpec>> = LazyLock::new(|| {
             Message::Source(SourceMsg::Redo)
         }),
         cmd(
-            C::TogglePanels,
+            C::TogglePanels, // id kept: user hotkeys may bind `toggle_panels`
             "toggle_panels",
-            "Toggle side panels",
+            "Toggle sidebar",
             &[],
-            |_| Message::Panels(PanelsMsg::Toggle),
+            |_| Message::Panes(PanesMsg::ToggleSide),
         ),
         cmd(
             C::TogglePaneBorders,
@@ -350,13 +350,21 @@ static TABLE: LazyLock<Vec<CmdSpec>> = LazyLock::new(|| {
             |_| Message::Reading(ReadingMsg::GoToEdge { bottom: true }),
         ),
     ]);
+    // Plan round-17 WP-6: every sidebar section has a `panel.<id>` show command (Files and
+    // Bookmarks included); a panel section keeps its `PanelsMsg::Show` path (Search focuses).
     let panels = [
-        (PanelKind::Outline, "outline", "Show Outline panel"),
-        (PanelKind::Links, "links", "Show Links panel"),
-        (PanelKind::Backlinks, "backlinks", "Show Backlinks panel"),
-        (PanelKind::Tags, "tags", "Show Tags panel"),
-        (PanelKind::Properties, "properties", "Show Properties panel"),
-        (PanelKind::Search, "search", "Show Search panel"),
+        (SideSection::Files, "files", "Show Files"),
+        (SideSection::Bookmarks, "bookmarks", "Show Bookmarks"),
+        (SideSection::Outline, "outline", "Show Outline panel"),
+        (SideSection::Links, "links", "Show Links panel"),
+        (SideSection::Backlinks, "backlinks", "Show Backlinks panel"),
+        (SideSection::Tags, "tags", "Show Tags panel"),
+        (
+            SideSection::Properties,
+            "properties",
+            "Show Properties panel",
+        ),
+        (SideSection::Search, "search", "Show Search panel"),
     ];
     v.extend(family(
         lit(&panels),
@@ -364,7 +372,10 @@ static TABLE: LazyLock<Vec<CmdSpec>> = LazyLock::new(|| {
         "Panels",
         C::Panel,
         |_| Vec::new(),
-        |k| Message::Panels(PanelsMsg::Show(k)),
+        |s| match s.panel() {
+            Some(k) => Message::Panels(PanelsMsg::Show(k)),
+            None => Message::Panes(PanesMsg::Side(s)),
+        },
     ));
     v.push(CmdSpec {
         listed: false,

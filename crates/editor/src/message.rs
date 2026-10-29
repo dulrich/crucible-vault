@@ -531,8 +531,11 @@ pub enum PanesMsg {
     /// The focused pane's back/forward (WP-4 binds these; Ctrl+Alt+Left/Right).
     BackFocused,
     ForwardFocused,
-    /// Collapse / expand the side column to its icon strip.
+    /// Close the sidebar, or reopen its last section (plan round-17 WP-6).
     ToggleSide,
+    /// Open (swap to) a sidebar section; never closes (the strip sends `ToggleSide` for the
+    /// open section's own button).
+    Side(crate::ui_state::SideSection),
     /// Debug pane borders on/off.
     ToggleBorders,
     /// Open / close the view-mode dropdown of a pane (`None` closes).

@@ -28,6 +28,19 @@ pub(super) fn status_failsafes() -> [(crate::icons::Icon, &'static str, Message)
     ]
 }
 
+/// Plan round-17 WP-6: the message of section `s`'s strip button — the open section's own
+/// button closes the sidebar, any other swaps to its section ([`crate::ui_state::strip_click`]).
+pub(super) fn strip_message(
+    open: Option<crate::ui_state::SideSection>,
+    s: crate::ui_state::SideSection,
+) -> Message {
+    if crate::ui_state::strip_click(open, s).is_none() {
+        Message::Panes(PanesMsg::ToggleSide)
+    } else {
+        Message::Panes(PanesMsg::Side(s))
+    }
+}
+
 impl App {
     /// The single tab-body render site (WP-3 swaps this expression for the mode switch).
     pub(super) fn tab_body<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
@@ -533,50 +546,77 @@ impl App {
         })
     }
 
-    fn side_view(&self) -> Element<'_, Message> {
+    /// Plan round-17 WP-6 (Decision 10): the always-visible 46px activity strip — one icon
+    /// button per section, tooltip with its name, the open one drawn active.
+    fn side_strip(&self) -> Element<'_, Message> {
         use crate::icons::Icon;
-        use crate::theme::icon_button;
+        use crate::theme::{icon_button, icon_button_style};
+        use crate::ui_state::SideSection as S;
         let t = self.tokens;
-        let collapsed = self.ui.side_collapsed;
-        // Collapsed: a 46px icon strip; any icon expands. The full column stays in the tree (a
-        // zero-width clipped container) so the explorer's scroll offset and focus survive.
-        let strip: Element<'_, Message> = if collapsed {
-            let expand = || Some(Message::Panes(PanesMsg::ToggleSide));
-            column![
-                icon_button(Icon::PanelLeftOpen, expand(), t),
-                icon_button(Icon::FolderTree, expand(), t),
-                icon_button(Icon::Bookmark, expand(), t),
-            ]
-            .spacing(6)
-            .padding(6)
+        let open = self.ui.side.0;
+        let buttons = S::ALL.into_iter().map(|s| {
+            let icon = match s {
+                S::Files => Icon::FolderTree,
+                S::Bookmarks => Icon::Bookmark,
+                S::Outline => Icon::ListTree,
+                S::Links => Icon::Link,
+                S::Backlinks => Icon::CornerUpLeft,
+                S::Tags => Icon::Tags,
+                S::Properties => Icon::TableProperties,
+                S::Search => Icon::Search,
+            };
+            let b = icon_button(icon, Some(strip_message(open, s)), t)
+                .style(icon_button_style(t, open == Some(s)));
+            iced::widget::tooltip(
+                b,
+                container(text(s.label()).size(13))
+                    .padding(6)
+                    .style(crate::theme::seg_group_style(t)),
+                iced::widget::tooltip::Position::Right,
+            )
+            .delay(std::time::Duration::from_millis(600))
             .into()
-        } else {
-            Space::new().into()
-        };
-        let header = row![
-            Space::new().width(Length::Fill),
-            icon_button(
-                Icon::PanelLeftClose,
-                Some(Message::Panes(PanesMsg::ToggleSide)),
-                t,
-            ),
-        ];
-        let full = column![
-            header,
-            container(explorer::view(&self.explorer, t)).height(Length::Fill),
-            bookmarks::view(&self.bookmarks, t),
-        ]
-        .spacing(8)
-        .padding(4);
-        let full = container(full)
-            .width(if collapsed {
-                Length::Fixed(0.0)
+        });
+        column(buttons).spacing(6).padding(6).into()
+    }
+
+    /// The open section's column. Every section keeps a fixed slot (files, bookmarks, panel) —
+    /// inactive ones are zero-width clipped — so the explorer's scroll offset and focus survive a
+    /// swap; the bookmarks and panel bodies are only built while open.
+    fn side_section(&self) -> Element<'_, Message> {
+        use crate::ui_state::SideSection as S;
+        let t = self.tokens;
+        let open = self.ui.side.0;
+        fn slot(active: bool, body: Element<'_, Message>) -> container::Container<'_, Message> {
+            container(body)
+                .width(if active {
+                    Length::Fill
+                } else {
+                    Length::Fixed(0.0)
+                })
+                .height(Length::Fill)
+                .padding(if active { 4 } else { 0 })
+                .clip(true)
+        }
+        let blank = || -> Element<'_, Message> { Space::new().into() };
+        let files = slot(open == Some(S::Files), explorer::view(&self.explorer, t));
+        let bookmarks = slot(
+            open == Some(S::Bookmarks),
+            if open == Some(S::Bookmarks) {
+                bookmarks::view(&self.bookmarks, t)
             } else {
-                Length::Fill
-            })
-            .height(Length::Fill)
-            .clip(true);
-        row![strip, full].height(Length::Fill).into()
+                blank()
+            },
+        );
+        let panel = slot(
+            open.is_some_and(|s| s.panel().is_some()),
+            if open.is_some_and(|s| s.panel().is_some()) {
+                crate::panels::view(&self.panels, t)
+            } else {
+                blank()
+            },
+        );
+        row![files, bookmarks, panel].height(Length::Fill).into()
     }
 
     /// The view.
@@ -669,29 +709,26 @@ impl App {
         .spacing(16);
 
         let main = column![];
-        let side_width = if self.ui.side_collapsed {
-            Length::Fixed(46.0)
-        } else {
+        let section_width = if self.ui.side.0.is_some() {
             Length::FillPortion(1)
+        } else {
+            Length::Fixed(0.0)
         };
-        let mut body = row![
-            container(self.side_view())
+        let body = row![
+            container(self.side_strip())
                 .style(inset)
-                .width(side_width)
+                .width(Length::Fixed(46.0))
                 .height(Length::Fill),
+            container(self.side_section())
+                .style(inset)
+                .width(section_width)
+                .height(Length::Fill)
+                .clip(true),
             container(grid)
                 .padding(4)
                 .width(Length::FillPortion(4))
                 .height(Length::Fill),
         ];
-        if self.panels.visible {
-            body = body.push(
-                container(crate::panels::view(&self.panels, t))
-                    .style(inset)
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fill),
-            );
-        }
         let base = main.push(body.height(Length::Fill)).push(
             container(status)
                 .padding(4)

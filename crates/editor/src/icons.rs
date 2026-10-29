@@ -70,6 +70,12 @@ pub enum Icon {
     // `cmap` + `post` glyph names (fontTools `getBestCmap()`: command = U+E09E, file = U+E0C4).
     Command,
     File,
+    // plan round-17 WP-6: the sidebar activity strip. Codepoints read the same way (list-tree =
+    // U+E40C, link = U+E107, corner-up-left = U+E0AB, table-properties = U+E4DF).
+    ListTree,
+    Link,
+    CornerUpLeft,
+    TableProperties,
 }
 
 impl Icon {
@@ -124,6 +130,10 @@ impl Icon {
             Self::ThumbsDown => '\u{e188}',
             Self::Command => '\u{e09e}',
             Self::File => '\u{e0c4}',
+            Self::ListTree => '\u{e40c}',
+            Self::Link => '\u{e107}',
+            Self::CornerUpLeft => '\u{e0ab}',
+            Self::TableProperties => '\u{e4df}',
         }
     }
 }
@@ -162,6 +172,16 @@ mod tests {
             Icon::File,
         ] {
             assert!(('\u{e000}'..='\u{f8ff}').contains(&i.glyph()));
+        }
+        for (i, cp) in [
+            (Icon::ListTree, '\u{e40c}'),
+            (Icon::Link, '\u{e107}'),
+            (Icon::CornerUpLeft, '\u{e0ab}'),
+            (Icon::TableProperties, '\u{e4df}'),
+            (Icon::Tags, '\u{e35f}'),
+            (Icon::FolderTree, '\u{e33f}'),
+        ] {
+            assert_eq!(i.glyph(), cp);
         }
         // TrueType magic.
         assert_eq!(&FONT_BYTES[..4], &[0, 1, 0, 0]);

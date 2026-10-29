@@ -59,30 +59,6 @@ pub enum PanelKind {
     Search,
 }
 
-impl PanelKind {
-    /// Every panel, in tab order.
-    pub const ALL: [PanelKind; 6] = [
-        PanelKind::Outline,
-        PanelKind::Links,
-        PanelKind::Backlinks,
-        PanelKind::Tags,
-        PanelKind::Properties,
-        PanelKind::Search,
-    ];
-
-    /// The tab label.
-    pub fn label(self) -> &'static str {
-        match self {
-            PanelKind::Outline => "Outline",
-            PanelKind::Links => "Links",
-            PanelKind::Backlinks => "Backlinks",
-            PanelKind::Tags => "Tags",
-            PanelKind::Properties => "Properties",
-            PanelKind::Search => "Search",
-        }
-    }
-}
-
 /// The scrollable lists with a virtual window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListId {
@@ -745,19 +721,7 @@ pub(crate) fn check_press(src: &str, key: &str) -> Message {
 
 pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
     let src: &'a str = p.path.as_deref().unwrap_or_default();
-    let tabs = row(PanelKind::ALL.iter().map(|&k| {
-        let mut l = text(k.label()).size(12);
-        if k == p.kind {
-            l = l.color(t.accent_text.to_color());
-        }
-        button(l)
-            .style(button::text)
-            .padding(2)
-            .on_press(pm(PanelsMsg::Show(k)))
-            .into()
-    }))
-    .spacing(2)
-    .wrap();
+    // Plan round-17 WP-6: the activity strip replaces the panel's own tab row.
     let body: Element<'a, Message> = match p.kind {
         PanelKind::Outline => crate::theme::gutter_scroll(column(p.outline.iter().map(|h| {
             let indent = "  ".repeat(usize::from(h.level.saturating_sub(1)));
@@ -905,7 +869,7 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
         .into(),
         PanelKind::Search => search_view(p, t, SEARCH_ID),
     };
-    column![tabs, body].spacing(6).padding(4).into()
+    column![body].padding(4).into()
 }
 
 /// The search field and result list, shared by the side panel and the centre modal (`id` is the

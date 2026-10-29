@@ -298,7 +298,7 @@ fn panels_open_latency() {
         // Each round: a new index generation (as after any save), then Toggle Panels open.
         app.status.generation += 1;
         let t = std::time::Instant::now();
-        let _ = app.send(Message::Panels(PanelsMsg::Toggle));
+        let _ = app.send(Message::Panels(PanelsMsg::Show(PanelKind::Outline)));
         let open = t.elapsed();
         let t = std::time::Instant::now();
         let _ = app.send(Message::Panels(PanelsMsg::Tick));

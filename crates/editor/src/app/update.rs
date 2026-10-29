@@ -2,6 +2,7 @@
 
 use super::connection::{notification_stream, opener_stream};
 use super::*;
+use crate::ui_state::{SideOpen, SideSection};
 
 impl App {
     /// The update function.
@@ -279,9 +280,8 @@ impl App {
             PanesMsg::Page(down) => return self.page(down),
             PanesMsg::BackFocused => self.history_step(self.focus, false),
             PanesMsg::ForwardFocused => self.history_step(self.focus, true),
-            PanesMsg::ToggleSide => {
-                self.ui.side_collapsed = !self.ui.side_collapsed;
-            }
+            PanesMsg::ToggleSide => return self.toggle_side(),
+            PanesMsg::Side(s) => return self.set_side(Some(s)),
             PanesMsg::ToggleBorders => {
                 self.ui.pane_borders = !self.ui.pane_borders;
             }
@@ -343,14 +343,55 @@ impl App {
         Task::none()
     }
 
+    /// Plan round-17 WP-6 (Decision 10): the single transition of the sidebar — `section` opens
+    /// (`None` closes), the last open section is remembered, and `panels.visible` / `.kind` are
+    /// derived so `sync_panels` and the palette subscription see "a panel section is open".
+    pub(super) fn set_side(&mut self, section: Option<SideSection>) -> Task<Message> {
+        self.ui.side = SideOpen(section);
+        if let Some(s) = section {
+            self.side_last = s;
+        }
+        let panel = section.and_then(SideSection::panel);
+        self.panels.visible = panel.is_some();
+        if let Some(k) = panel {
+            self.panels.kind = k;
+        }
+        if panel == Some(crate::panels::PanelKind::Search) {
+            return Task::batch([
+                self.sync_panels(),
+                iced::widget::operation::focus(crate::panels::SEARCH_ID),
+            ]);
+        }
+        self.sync_panels()
+    }
+
+    /// Open → close; closed → reopen the last open section (default Files).
+    pub(super) fn toggle_side(&mut self) -> Task<Message> {
+        let next = match self.ui.side.0 {
+            Some(_) => None,
+            None => Some(self.side_last),
+        };
+        self.set_side(next)
+    }
+
     fn update_panels(&mut self, m: PanelsMsg) -> Task<Message> {
         use crate::panels::Effect;
-        match crate::panels::update(
+        if matches!(m, PanelsMsg::Toggle) {
+            return self.toggle_side();
+        }
+        let effect = crate::panels::update(
             &mut self.panels,
             m,
             self.daemon.is_some(),
             self.prefs.search_location,
-        ) {
+        );
+        // `Show` (and the side-panel `Search`) open that panel's section.
+        if self.panels.visible {
+            let s = SideSection::of_panel(self.panels.kind);
+            self.ui.side = SideOpen(Some(s));
+            self.side_last = s;
+        }
+        match effect {
             Effect::OpenSearchModal => {
                 // Decision 9/10 (round-12): one centre modal at a time.
                 self.switcher.open = false;

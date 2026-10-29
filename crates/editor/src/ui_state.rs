@@ -120,8 +120,12 @@ pub struct UiState {
     pub panes: Option<PaneLayout>,
     /// WP-4 explorer: expanded folders (vault-relative).
     pub expanded: BTreeSet<String>,
-    /// editor-usability-round WP-3: the side column is collapsed to its icon strip.
+    /// editor-usability-round WP-3: the side column was collapsed (read only: plan round-17
+    /// WP-6 superseded it with `side`; a file without `side` migrates from it in [`load`]).
+    #[serde(skip_serializing)]
     pub side_collapsed: bool,
+    /// Plan round-17 WP-6 (Decision 10): the open sidebar section (`None` = closed).
+    pub side: SideOpen,
     /// editor-usability-round WP-3: debug pane borders (off by default).
     pub pane_borders: bool,
     /// Plan round-9-feedback-todos WP-5: ids of the views whose "Only open" toggle is on.
@@ -129,6 +133,95 @@ pub struct UiState {
     /// Plan round-11 WP-5: the column-header sort of each table view, keyed by
     /// [`view_sort_key`] (`"<host>\u{1f}<view id>"`, empty host for a hostless view).
     pub view_sorts: BTreeMap<String, ViewSortPref>,
+}
+
+/// Plan round-17 WP-6: a sidebar activity-bar section, in strip order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SideSection {
+    Files,
+    Bookmarks,
+    Outline,
+    Links,
+    Backlinks,
+    Tags,
+    Properties,
+    Search,
+}
+
+impl SideSection {
+    /// Every section, in strip order.
+    pub const ALL: [SideSection; 8] = [
+        SideSection::Files,
+        SideSection::Bookmarks,
+        SideSection::Outline,
+        SideSection::Links,
+        SideSection::Backlinks,
+        SideSection::Tags,
+        SideSection::Properties,
+        SideSection::Search,
+    ];
+
+    /// The tooltip / name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Bookmarks => "Bookmarks",
+            Self::Outline => "Outline",
+            Self::Links => "Links",
+            Self::Backlinks => "Backlinks",
+            Self::Tags => "Tags",
+            Self::Properties => "Properties",
+            Self::Search => "Search",
+        }
+    }
+
+    /// The panel this section shows (`None` for Files / Bookmarks).
+    pub fn panel(self) -> Option<crate::panels::PanelKind> {
+        use crate::panels::PanelKind as K;
+        match self {
+            Self::Files | Self::Bookmarks => None,
+            Self::Outline => Some(K::Outline),
+            Self::Links => Some(K::Links),
+            Self::Backlinks => Some(K::Backlinks),
+            Self::Tags => Some(K::Tags),
+            Self::Properties => Some(K::Properties),
+            Self::Search => Some(K::Search),
+        }
+    }
+
+    /// The section of panel `k`.
+    pub fn of_panel(k: crate::panels::PanelKind) -> Self {
+        use crate::panels::PanelKind as K;
+        match k {
+            K::Outline => Self::Outline,
+            K::Links => Self::Links,
+            K::Backlinks => Self::Backlinks,
+            K::Tags => Self::Tags,
+            K::Properties => Self::Properties,
+            K::Search => Self::Search,
+        }
+    }
+}
+
+/// The persisted open section; `None` = the sidebar is closed. Defaults to Files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SideOpen(pub Option<SideSection>);
+
+impl Default for SideOpen {
+    fn default() -> Self {
+        Self(Some(SideSection::Files))
+    }
+}
+
+/// The activity-strip click: the open section's button closes, any other swaps to its section.
+pub fn strip_click(open: Option<SideSection>, clicked: SideSection) -> Option<SideSection> {
+    if open == Some(clicked) {
+        None
+    } else {
+        Some(clicked)
+    }
 }
 
 /// One persisted column-header sort: the column key and whether it runs descending.
@@ -230,13 +323,25 @@ pub fn default_path() -> Option<PathBuf> {
 
 /// Loads `path`; a missing or unparseable file yields defaults.
 pub fn load(path: &Path) -> UiState {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "editor.json unreadable; using defaults");
-            UiState::default()
-        }),
-        Err(_) => UiState::default(),
-    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return UiState::default();
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&bytes).and_then(|v| {
+        // Plan round-17 WP-6 migration: a file without `side` derives it from the old
+        // `side_collapsed` (collapsed → closed, else Files).
+        let legacy_closed = v.get("side").is_none()
+            && v.get("side_collapsed").and_then(serde_json::Value::as_bool) == Some(true);
+        serde_json::from_value::<UiState>(v).map(|mut s| {
+            if legacy_closed {
+                s.side = SideOpen(None);
+            }
+            s
+        })
+    });
+    parsed.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "editor.json unreadable; using defaults");
+        UiState::default()
+    })
 }
 
 /// Atomically writes `state` to `path`, refusing any path inside `vault_root`.
@@ -320,13 +425,53 @@ mod tests {
         let path = tmp.path().join("editor.json");
         std::fs::write(&path, br#"{"tabs":["a.md"],"surround":"dark"}"#).expect("old");
         let s = load(&path);
-        assert!(!s.side_collapsed && !s.pane_borders, "pre-WP-3 file → off");
+        assert!(!s.pane_borders, "pre-WP-3 file → off");
+        assert_eq!(
+            s.side,
+            SideOpen(Some(SideSection::Files)),
+            "no side key → Files"
+        );
         let mut s2 = s.clone();
         s2.tabs.clear(); // read-only legacy field: never written
-        s2.side_collapsed = true;
+        s2.side = SideOpen(None);
         s2.pane_borders = true;
         save(&path, &s2, None).expect("save");
         assert_eq!(load(&path), s2);
+    }
+
+    #[test]
+    fn side_section_round_trips_and_legacy_collapsed_migrates() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("editor.json");
+        assert_eq!(
+            load(&path).side.0,
+            Some(SideSection::Files),
+            "fresh → Files"
+        );
+        std::fs::write(&path, br#"{"side_collapsed":true}"#).expect("legacy");
+        assert_eq!(load(&path).side.0, None, "collapsed → closed");
+        std::fs::write(&path, br#"{"side_collapsed":false}"#).expect("legacy");
+        assert_eq!(load(&path).side.0, Some(SideSection::Files));
+        for open in [Some(SideSection::Backlinks), None] {
+            let s = UiState {
+                side: SideOpen(open),
+                ..UiState::default()
+            };
+            save(&path, &s, None).expect("save");
+            let text = std::fs::read_to_string(&path).expect("read");
+            assert!(!text.contains("side_collapsed"), "{text}");
+            assert_eq!(load(&path).side.0, open, "the explicit key wins");
+        }
+        std::fs::write(&path, br#"{"side":"search","side_collapsed":true}"#).expect("both");
+        assert_eq!(load(&path).side.0, Some(SideSection::Search));
+    }
+
+    #[test]
+    fn strip_click_toggles_and_swaps() {
+        use SideSection as S;
+        assert_eq!(strip_click(Some(S::Files), S::Files), None);
+        assert_eq!(strip_click(Some(S::Files), S::Outline), Some(S::Outline));
+        assert_eq!(strip_click(None, S::Tags), Some(S::Tags));
     }
 
     #[test]

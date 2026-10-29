@@ -281,6 +281,8 @@ pub struct App {
     pub palette: crate::palette::Palette,
     /// WP-5: the right-hand side panels.
     pub panels: crate::panels::Panels,
+    /// Plan round-17 WP-6: the last open sidebar section (what `ToggleSide` reopens).
+    pub side_last: crate::ui_state::SideSection,
     /// The one link-resolver cache, shared by Reading and the panels.
     pub resolver: std::sync::Arc<crate::reading::resolver::ResolverCache>,
     /// WP-7: `crucible-view` fence results, keyed by `(view id, embedding note)`.
@@ -429,6 +431,7 @@ impl App {
             reading: crate::reading::ReadingStore::new(),
             palette: crate::palette::Palette::default(),
             panels: crate::panels::Panels::default(),
+            side_last: crate::ui_state::SideSection::Files,
             resolver,
             views: crate::views::ViewStore {
                 filters: view_filters,
@@ -462,6 +465,14 @@ impl App {
             clip_writer: Arc::new(crate::clipboard_image::Xclip),
             pdf: crate::pdf::store::PdfStore::default(),
         };
+        // Plan round-17 WP-6: the restored section; a panel section makes the panels live.
+        if let Some(s) = app.ui.side.0 {
+            app.side_last = s;
+            if let Some(k) = s.panel() {
+                app.panels.visible = true;
+                app.panels.kind = k;
+            }
+        }
         app.reading.resolver = shared.clone();
         app.panels.resolver = shared;
         app.load_editor_prefs();

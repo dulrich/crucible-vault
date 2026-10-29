@@ -415,7 +415,7 @@ mod state_flush {
         assert!(app.exiting);
         assert_eq!(app.ui_writes, 1, "written at exit");
         assert!(
-            crate::ui_state::load(&state).side_collapsed,
+            crate::ui_state::load(&state).side.0.is_none(),
             "the latest state"
         );
         // A debounce tick arriving after the exit write has nothing left to write.

@@ -125,10 +125,12 @@ fn tab_menu_close_others_copy_path_reveal_and_delete() {
     let _ = app.send(menu(MenuMsg::Choose(Item::CopyPath)));
     assert_eq!(app.copied(), ["m4tab/b.md"]);
 
-    app.ui.side_collapsed = true;
+    let _ = app.send(Message::Panes(crate::message::PanesMsg::Side(
+        crate::ui_state::SideSection::Outline,
+    )));
     let _ = app.send(menu(MenuMsg::Open(t.clone(), AT)));
     let _ = app.send(menu(MenuMsg::Choose(Item::Reveal)));
-    assert!(!app.ui.side_collapsed);
+    assert_eq!(app.ui.side.0, Some(crate::ui_state::SideSection::Files));
     assert!(app.ui.expanded.contains("m4tab"));
     assert_eq!(app.explorer.selected.as_deref(), Some("m4tab/b.md"));
 
