@@ -70,7 +70,7 @@ impl App {
         let Some(doc) = buf(&self.docs, path) else {
             return iced::widget::Space::new().into();
         };
-        crate::reading::tab_body(
+        let body = crate::reading::tab_body(
             &self.reading,
             &self.docs,
             &self.views,
@@ -83,7 +83,9 @@ impl App {
             self.active_tab().is_some_and(|t| t.id == tab.id),
             self.find_bar_for(tab.id),
             self.link_ta_overlay(path, tab.id),
-        )
+        );
+        // Plan round-17 WP-2: the held-note overlay layer (always present, empty unless shown).
+        self.hold_overlay(path, body)
     }
 
     /// The find bar whose paint tab `tab` shows — the focused pane's, when `tab` is

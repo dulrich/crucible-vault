@@ -37,6 +37,7 @@ impl App {
         match message {
             Message::PersistDue => self.write_ui_state(),
             Message::MemoryDue => return self.send_memory_report(),
+            Message::HoldTick => self.hold_tick(),
             Message::TrimTick => return self.maybe_trim(),
             Message::Tabs(m) => return self.update_tabs(m),
             Message::ImageTab(m) => return self.update_image_tab(m),
@@ -71,6 +72,9 @@ impl App {
                 {
                     return crate::reading::ScrollIntent::SourceRelayout { path, lines }.task();
                 }
+            }
+            Message::Source(m) if self.held_source_gate(&m) != holds::Gate::Pass => {
+                return Task::none();
             }
             Message::Source(SourceMsg::LinkKey(k)) => {
                 if let Some(next) = self.link_ta_key(k) {
@@ -583,6 +587,12 @@ impl App {
             iced::time::every(crate::memory::REPORT_EVERY).map(|_| Message::MemoryDue),
             // plan memory-instrumentation-and-reduction WP-M4: quiet-period trim, every mode.
             iced::time::every(crate::memory::TRIM_TICK).map(|_| Message::TrimTick),
+            // Plan round-17 WP-2: the spinner (and the 400 ms overlay threshold) only while held.
+            if self.holds.is_empty() {
+                Subscription::none()
+            } else {
+                iced::time::every(holds::SPINNER_TICK).map(|_| Message::HoldTick)
+            },
             // Any input is activity (records a timestamp; emits no message).
             iced::event::listen_with(|_, _, _| {
                 crate::memory::touch();

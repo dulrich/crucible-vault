@@ -34,6 +34,7 @@ mod actions;
 mod config;
 mod connection;
 mod files;
+mod holds;
 mod image_tab;
 mod menu;
 pub mod pdf_tab;
@@ -302,6 +303,10 @@ pub struct App {
     state_path: Option<PathBuf>,
     /// `App::new` is restoring tabs: their first reading render waits for the debounce tick.
     restoring: bool,
+    /// Plan round-17 WP-2: note holds by daemon job id ([`holds`]).
+    pub(crate) holds: std::collections::HashMap<String, holds::Hold>,
+    /// The hold overlay's spinner frame.
+    hold_frame: u32,
     /// editor-usability-round WP-3: the pane whose view-mode dropdown is open.
     pub mode_menu: Option<Pane>,
     /// plan editor-round-4 WP-4: a mouse button is held (hover focus is suppressed).
@@ -446,6 +451,8 @@ impl App {
             reconnect_attempt: 0,
             state_path,
             restoring: true,
+            holds: std::collections::HashMap::new(),
+            hold_frame: 0,
             mode_menu: None,
             mouse_down: false,
             tab_drag: tab_drag::TabDrag::default(),

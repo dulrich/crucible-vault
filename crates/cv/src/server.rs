@@ -101,6 +101,7 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
     let (reply_tx, mut replies) = mpsc::unbounded_channel::<Value>();
     let mut calls = JoinSet::new();
     loop {
+        let mut snapshot: Vec<Value> = Vec::new();
         let out: Value = tokio::select! {
             _ = stop.changed() => break,
             Some(v) = replies.recv() => v,
@@ -121,10 +122,15 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
                 Ok(Some(l)) if l.trim().is_empty() => continue,
                 Ok(Some(l)) => {
                     let was_empty = topics.is_empty();
+                    let had_jobs = topics.contains(&Topic::JobUpdated);
                     let step = handle_line(&l, &shared, &mut greeted, &mut topics, &mut guard);
                     if was_empty && !topics.is_empty() {
                         // Start the feed at subscription time: no backlog from before it.
                         events = shared.subscribe();
+                    }
+                    if !had_jobs && topics.contains(&Topic::JobUpdated) {
+                        // Snapshot the current note holds, written right after the reply.
+                        snapshot = held_snapshot(&shared);
                     }
                     match step {
                         Line::Reply(v) => v,
@@ -147,7 +153,40 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
             tracing::debug!(error = %e, "connection write");
             break;
         }
+        if !write_all_lines(&mut wr, snapshot).await {
+            break;
+        }
     }
+}
+
+/// One `job_updated` notification per current note hold (plan round-17 WP-2): a client that
+/// subscribes mid-run learns which notes are held, since the feed carries no backlog.
+fn held_snapshot(shared: &Shared) -> Vec<Value> {
+    let Some(runner) = shared.runner() else {
+        return Vec::new();
+    };
+    runner
+        .held_notes()
+        .into_iter()
+        .filter_map(|s| {
+            serde_json::to_value(RpcNotification::new(cv_protocol::Notification::JobUpdated(
+                s,
+            )))
+            .ok()
+        })
+        .collect()
+}
+
+async fn write_all_lines(wr: &mut tokio::net::unix::OwnedWriteHalf, lines: Vec<Value>) -> bool {
+    for v in lines {
+        let mut buf = v.to_string();
+        buf.push('\n');
+        if let Err(e) = wr.write_all(buf.as_bytes()).await {
+            tracing::debug!(error = %e, "connection write");
+            return false;
+        }
+    }
+    true
 }
 
 fn handle_line(

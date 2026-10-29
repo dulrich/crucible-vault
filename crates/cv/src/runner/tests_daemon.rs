@@ -722,3 +722,52 @@ async fn a_slow_call_does_not_block_its_connection() {
     assert!(status_took < Duration::from_millis(800), "{status_took:?}");
     d.shutdown().await.unwrap();
 }
+
+/// Plan round-17 WP-2 (audit E2): subscribing to `job_updated` while a job holds a note sends a
+/// snapshot `running` notification for the hold right after the subscribe reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscribe_snapshots_current_note_holds() {
+    const HOLD: &str = "[[action]]\nid = \"refine\"\nlabel = \"Refine\"\nneeds = [\"active_path\"]\n[[action.steps]]\ntype = \"set_props\"\n";
+    let env = Env::new(HOLD);
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let go = Mutex::new(go_rx);
+    let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |_, _| {
+        let _ = go.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        Ok(StepOutcome::default())
+    })));
+    let d = start(&env, exec).await;
+    let c = env.client();
+    let ctx = ActionContext {
+        active_path: Some("a.md".into()),
+        ..ActionContext::default()
+    };
+    let job = c.request(run("refine", json!({}), ctx)).unwrap();
+    let job_id = job["job_id"].as_str().unwrap().to_owned();
+    let runner = d.shared().runner().unwrap().clone();
+    poll(|| !runner.held_notes().is_empty());
+    let sub = env.client();
+    sub.request(Request::Subscribe(SubscribeParams {
+        topics: vec![Topic::JobUpdated],
+    }))
+    .unwrap();
+    let n = sub.next_notification(Duration::from_secs(5)).unwrap();
+    let Some(Notification::JobUpdated(s)) = n else {
+        panic!("expected a job_updated snapshot, got {n:?}");
+    };
+    assert_eq!(
+        (
+            s.job_id.as_str(),
+            s.status,
+            s.held_note.as_deref(),
+            s.action_label.as_deref()
+        ),
+        (
+            job_id.as_str(),
+            JobState::Running,
+            Some("a.md"),
+            Some("Refine")
+        )
+    );
+    go_tx.send(()).unwrap();
+    d.shutdown().await.unwrap();
+}

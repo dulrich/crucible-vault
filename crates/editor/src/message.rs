@@ -19,6 +19,8 @@ pub enum Message {
     MemoryDue,
     /// Plan memory-instrumentation-and-reduction WP-M4: the always-on quiet-period trim tick.
     TrimTick,
+    /// Plan round-17 WP-2: the hold overlay spinner tick (subscribed only while a note is held).
+    HoldTick,
     Source(SourceMsg),
     Reading(ReadingMsg),
     Explorer(ExplorerMsg),

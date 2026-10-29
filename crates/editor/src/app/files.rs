@@ -212,6 +212,10 @@ impl App {
         path: &str,
         f: impl FnOnce(&mut crate::source::SourceBuffer, std::time::Instant) -> bool,
     ) -> Option<Task<Message>> {
+        if self.refuse_held_save(path) {
+            // Plan round-17 WP-2: a held note takes no Reading / view edit.
+            return Some(Task::none());
+        }
         let od = self.docs.get_mut(path)?;
         if !f(&mut od.buffer, std::time::Instant::now()) {
             return Some(Task::none());
@@ -278,6 +282,9 @@ impl App {
         let Some(input) = self.reading.take_title(&mut self.docs, path) else {
             return Task::none();
         };
+        if self.refuse_held_save(path) {
+            return Task::none();
+        }
         let Some(to) = crate::reading::rename_target(path, &input) else {
             return Task::none();
         };
@@ -307,6 +314,7 @@ impl App {
     /// and all, with no deleted / missing state; bytes changed under unsaved edits → the
     /// edited-move path (text kept behind the conflict bar).
     pub(super) fn follow_daemon_move(&mut self, from: &str, to: &str) {
+        self.retarget_holds(from, to);
         if from == to || !self.path_open(from) {
             return;
         }

@@ -234,6 +234,9 @@ impl App {
         path: &str,
         after: Option<AfterSave>,
     ) -> Option<Task<Message>> {
+        if self.refuse_held_save(path) {
+            return None;
+        }
         let job = buf_mut(&mut self.docs, path)?.begin_save()?;
         let Some(after) = after else {
             return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));

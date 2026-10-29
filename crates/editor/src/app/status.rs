@@ -163,6 +163,7 @@ impl App {
                         .record(Severity::Warning, "daemon connection lost", None);
                 }
                 self.status.connected = false;
+                self.clear_holds();
                 return self.start_reconnect();
             }
             StatusMsg::ReconnectDue => return self.try_reconnect(),
@@ -201,6 +202,7 @@ impl App {
                         self.status.last_job = Some(format!("{}: {state}", j.job_id));
                         self.palette.jobs.job_updated(&j, std::time::Instant::now());
                         self.job_finished(&j);
+                        return self.hold_job_updated(&j, std::time::Instant::now());
                     }
                     Notification::FileChanged {
                         path,

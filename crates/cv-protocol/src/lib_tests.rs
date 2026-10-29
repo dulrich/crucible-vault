@@ -462,6 +462,32 @@ fn job_status_open_path_is_additive() {
 }
 
 #[test]
+fn job_status_held_note_is_additive() {
+    // Old daemon payload (no hold fields) parses; None fields are omitted on the wire.
+    let old: JobStatus =
+        serde_json::from_value(json!({"job_id":"j","status":"running","output_paths":[]}))
+            .expect("old");
+    assert_eq!(
+        (old.held_note.as_deref(), old.action_label.as_deref()),
+        (None, None)
+    );
+    let v = serde_json::to_value(&old).expect("ser");
+    assert!(v.get("held_note").is_none() && v.get("action_label").is_none());
+    let held = JobStatus {
+        held_note: Some("k/a.md".into()),
+        action_label: Some("Refine".into()),
+        ..old
+    };
+    let v = round_trip(&held);
+    assert_eq!(
+        (&v["held_note"], &v["action_label"]),
+        (&json!("k/a.md"), &json!("Refine"))
+    );
+    let back: JobStatus = serde_json::from_value(v).expect("back");
+    assert_eq!(back, held);
+}
+
+#[test]
 fn file_changed_from_is_optional_both_ways() {
     let old =
         r#"{"method":"file_changed","params":{"path":"a.md","kind":"renamed","origin":"daemon"}}"#;
@@ -506,6 +532,8 @@ fn notifications_round_trip_and_topic() {
             message: None,
             output_paths: vec!["o.md".into()],
             open_path: None,
+            held_note: None,
+            action_label: None,
         }),
         Notification::ConfigReloaded { errors: vec![] },
         Notification::OpenRequested {

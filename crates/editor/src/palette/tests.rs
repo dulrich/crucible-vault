@@ -394,6 +394,8 @@ fn palette_prompts_saves_first_and_runs_with_context() {
             message: None,
             output_paths: Vec::new(),
             open_path: None,
+            held_note: None,
+            action_label: None,
         }),
     )));
     let toast = e.app.palette.jobs.toast.clone().expect("toast");
@@ -581,6 +583,8 @@ fn terminal_status_before_the_reply_still_follows_and_original_kept_opens_new_ta
         message: None,
         output_paths: Vec::new(),
         open_path: Some("kinds/b.md".into()),
+        held_note: None,
+        action_label: None,
     };
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::JobUpdated(j),
@@ -823,6 +827,8 @@ fn job_status(id: &str, status: JobState, open: Option<&str>) -> JobStatus {
         message: None,
         output_paths: Vec::new(),
         open_path: open.map(str::to_owned),
+        held_note: None,
+        action_label: None,
     }
 }
 
@@ -1100,6 +1106,8 @@ fn failed_job_message_reaches_toast_and_notice() {
             message: Some("already exists: stack/clip.md".into()),
             output_paths: Vec::new(),
             open_path: None,
+            held_note: None,
+            action_label: None,
         }),
     )));
     let toast = app.palette.jobs.toast.clone().expect("toast");

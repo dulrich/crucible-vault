@@ -994,3 +994,138 @@ async fn clip_filing_runs_first_and_enrichment_follows_the_final_path_serialized
     // (3) one enrichment at a time.
     assert_eq!(max_live.load(Ordering::SeqCst), 1, "{log:?}");
 }
+
+const HOLDS: &str = r#"
+[[action]]
+id = "refine"
+label = "Refine"
+[[action.steps]]
+type = "guard"
+
+[[action]]
+id = "free"
+label = "Free"
+resources = { note = false }
+[[action.steps]]
+type = "guard"
+"#;
+
+/// `(status, held_note, action_label)` of one job's `JobUpdated` notifications.
+type HoldSeen = (JobState, Option<String>, Option<String>);
+
+/// Drains `rx`, grouping `(status, held_note, action_label)` by job id.
+fn drain_holds(rx: &mut broadcast::Receiver<Notification>) -> BTreeMap<String, Vec<HoldSeen>> {
+    let mut m: BTreeMap<String, Vec<HoldSeen>> = BTreeMap::new();
+    while let Ok(n) = rx.try_recv() {
+        if let Notification::JobUpdated(s) = n {
+            m.entry(s.job_id)
+                .or_default()
+                .push((s.status, s.held_note, s.action_label));
+        }
+    }
+    m
+}
+
+fn held(status: JobState, path: &str, label: &str) -> HoldSeen {
+    (status, Some(path.to_owned()), Some(label.to_owned()))
+}
+
+/// Plan round-17 WP-2: a `note = true` action holds its active note while it runs (on `running`,
+/// the terminal status and the `held_notes` snapshot); a `note = false` action never holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn note_hold_published_while_running_and_released_after() {
+    let f = fixture();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let go = Mutex::new(go_rx);
+    let exec = FnExec(Box::new(move |_, ctx| {
+        if ctx.action.id == "refine" {
+            go.lock().unwrap().recv().unwrap();
+        }
+        Ok(StepOutcome::default())
+    }));
+    let r = runner(&f, Arc::new(exec), Arc::new(SystemClock), 2, HOLDS);
+    let mut rx = f.events.subscribe();
+    let refine = enqueue(&r, "refine", Some("a.md"), Lane::User);
+    let free = enqueue(&r, "free", Some("b.md"), Lane::User);
+    let (_stop_tx, stop) = watch::channel(false);
+    let _h = r.spawn_claim_loop(stop);
+    assert_eq!(wait_terminal(&f, &free).await, DbStatus::Done);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while r.held_notes().is_empty() {
+        assert!(Instant::now() < deadline, "hold never appeared");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let snap: Vec<_> = r
+        .held_notes()
+        .into_iter()
+        .map(|s| (s.job_id, s.status, s.held_note, s.action_label))
+        .collect();
+    let want = held(JobState::Running, "a.md", "Refine");
+    assert_eq!(snap, vec![(refine.clone(), want.0, want.1, want.2)]);
+    go_tx.send(()).unwrap();
+    assert_eq!(wait_terminal(&f, &refine).await, DbStatus::Done);
+    assert!(r.held_notes().is_empty());
+    let seen = drain_holds(&mut rx);
+    assert_eq!(
+        seen[&refine],
+        vec![
+            (JobState::Pending, None, None),
+            held(JobState::Running, "a.md", "Refine"),
+            held(JobState::Done, "a.md", "Refine"),
+        ]
+    );
+    assert!(seen[&free].iter().all(|s| s.1.is_none() && s.2.is_none()));
+}
+
+/// Plan round-17 WP-2 (audit E3): a move of the held note republishes `running` with the new
+/// path; a deferred attempt releases the hold and the retry re-holds it.
+#[test]
+fn note_hold_follows_a_move_and_is_released_on_deferral() {
+    let f = fixture();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c2 = Arc::clone(&calls);
+    let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |_, ctx| {
+        if ctx.step_index == 1 && c2.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(StepError::Deferred {
+                retry_after_ms: 20,
+                service: None,
+                cause: crate::steps::DeferCause::Wait,
+            });
+        }
+        Ok(if ctx.step_index == 0 {
+            moved_outcome()
+        } else {
+            StepOutcome::default()
+        })
+    })));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let r = runner(&f, exec, Arc::new(SystemClock), 1, MOVE_THEN_TAG);
+    let mut rx = f.events.subscribe();
+    let id = enqueue(&r, "file", Some("inbox/a.md"), Lane::User);
+    rt.block_on(async {
+        let (_stop_tx, stop) = watch::channel(false);
+        let _h = r.spawn_claim_loop(stop);
+        assert_eq!(wait_terminal(&f, &id).await, DbStatus::Done);
+    });
+    assert!(r.held_notes().is_empty());
+    let label = r.config().armed("file").unwrap().label.clone();
+    let l = label.as_str();
+    assert_eq!(
+        drain_holds(&mut rx)[&id],
+        vec![
+            (JobState::Pending, None, None),
+            held(JobState::Running, "inbox/a.md", l),
+            held(JobState::Running, "stack/a.md", l),
+            held(JobState::Deferred, "stack/a.md", l),
+            // The retry replays the move checkpoint: the hold starts on the job's original
+            // context and follows the replayed move.
+            held(JobState::Running, "inbox/a.md", l),
+            held(JobState::Running, "stack/a.md", l),
+            held(JobState::Done, "stack/a.md", l),
+        ]
+    );
+}

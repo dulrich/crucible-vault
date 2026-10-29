@@ -331,6 +331,18 @@ pub struct RunnerDeps {
     pub data_home: Option<PathBuf>,
 }
 
+/// One running job's note hold: the vault path it holds and its action label.
+///
+/// Crucible reference: `src/orchestration/NoteLockManager.ts:47-112` (per-note lock +
+/// `note-lock-changed` event). The Obsidian-induced part (plugin-side async lock bookkeeping
+/// around Obsidian's shared writer) is dropped: claim-time resource keys already serialize jobs,
+/// so the daemon only publishes the hold as a signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hold {
+    path: String,
+    label: String,
+}
+
 pub(crate) struct Inner {
     state: Arc<Mutex<StateDb>>,
     writer: Arc<dyn WriterSource>,
@@ -347,6 +359,9 @@ pub(crate) struct Inner {
     config: RwLock<Arc<ConfigSet>>,
     wake: Notify,
     running: Mutex<HashSet<String>>,
+    /// Note holds of running jobs (`job id -> Hold`; plan round-17 WP-2): a job whose action has
+    /// `resources.note = true` and an active note holds that note until its attempt ends.
+    holds: Mutex<HashMap<String, Hold>>,
     finished: Mutex<BTreeMap<String, RunSummary>>,
     cycle: Mutex<HashMap<(String, String), Instant>>,
 }
@@ -382,6 +397,7 @@ impl Runner {
                 config: RwLock::new(Arc::new(ConfigSet::new())),
                 wake: Notify::new(),
                 running: Mutex::new(HashSet::new()),
+                holds: Mutex::new(HashMap::new()),
                 finished: Mutex::new(BTreeMap::new()),
                 cycle: Mutex::new(HashMap::new()),
             }),
@@ -439,6 +455,17 @@ impl Runner {
             && lock(&self.inner.state)
                 .cancel(job_id, self.inner.clock.now_ms())
                 .is_ok()
+    }
+
+    /// The current note holds as `running` statuses (the subscribe snapshot, plan round-17 WP-2).
+    pub fn held_notes(&self) -> Vec<JobStatus> {
+        let holds = lock(&self.inner.holds);
+        let mut v: Vec<JobStatus> = holds
+            .iter()
+            .map(|(id, h)| held_status(id, JobState::Running, h))
+            .collect();
+        v.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+        v
     }
 
     /// The summary of a finished run (if remembered).
@@ -567,13 +594,71 @@ impl Inner {
         output_paths: Vec<String>,
         open_path: Option<String>,
     ) {
+        self.publish_held(id, status, message, output_paths, open_path, None);
+    }
+
+    fn publish_held(
+        &self,
+        id: &str,
+        status: JobState,
+        message: Option<String>,
+        output_paths: Vec<String>,
+        open_path: Option<String>,
+        hold: Option<&Hold>,
+    ) {
         let _ = self.events.send(Notification::JobUpdated(JobStatus {
             job_id: id.to_owned(),
             status,
             message,
             output_paths,
             open_path,
+            held_note: hold.map(|h| h.path.clone()),
+            action_label: hold.map(|h| h.label.clone()),
         }));
+    }
+
+    /// Starts a hold for `job_id` when the action holds its note, then publishes `running`.
+    fn start_running(&self, job_id: &str, action: &Action, context: &ActionContext) {
+        let hold = context
+            .active_path
+            .as_ref()
+            .filter(|p| action.resources.note && !p.is_empty())
+            .map(|p| Hold {
+                path: p.clone(),
+                label: action.label.clone(),
+            });
+        if let Some(h) = &hold {
+            lock(&self.holds).insert(job_id.to_owned(), h.clone());
+        }
+        self.publish_held(
+            job_id,
+            JobState::Running,
+            None,
+            Vec::new(),
+            None,
+            hold.as_ref(),
+        );
+    }
+
+    /// Re-targets a hold after a move of the active note and republishes `running` (holds follow
+    /// renames).
+    fn retarget_hold(&self, job_id: &str, context: &ActionContext) {
+        let Some(path) = context.active_path.as_ref() else {
+            return;
+        };
+        let moved = {
+            let mut holds = lock(&self.holds);
+            match holds.get_mut(job_id) {
+                Some(h) if &h.path != path => {
+                    h.path.clone_from(path);
+                    Some(h.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(h) = moved {
+            self.publish_held(job_id, JobState::Running, None, Vec::new(), None, Some(&h));
+        }
     }
 
     fn recover(&self) {
@@ -768,6 +853,19 @@ fn trim_after_job() {
     }
 }
 
+/// A `JobStatus` carrying `hold`.
+fn held_status(id: &str, status: JobState, hold: &Hold) -> JobStatus {
+    JobStatus {
+        job_id: id.to_owned(),
+        status,
+        message: None,
+        output_paths: Vec::new(),
+        open_path: None,
+        held_note: Some(hold.path.clone()),
+        action_label: Some(hold.label.clone()),
+    }
+}
+
 /// Executes one claimed job end to end and settles it.
 async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
     let id = job.id.clone();
@@ -790,7 +888,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 RunSummary::default(),
             ),
             Some(action) => {
-                inner.publish_status(&id, JobState::Running, None, Vec::new(), None);
+                inner.start_running(&id, &action, &jp.context);
                 let inner2 = Arc::clone(&inner);
                 let job_id = id.clone();
                 let lane = job.lane;
@@ -811,6 +909,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
     let (result, failure) = Inner::apply_service_policy(&job, result, summary.defer_cause);
     inner.settle(&job, &result, failure.as_ref());
     lock(&inner.running).remove(&id);
+    let hold = lock(&inner.holds).remove(&id);
     let (state, message) = match &result {
         JobResult::Done => (JobState::Done, None),
         JobResult::Failed { error, .. } => (JobState::Failed, Some(error.clone())),
@@ -827,7 +926,14 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
             f.remove(&k);
         }
     }
-    inner.publish_status(&id, state, message, summary.output_paths, summary.open_path);
+    inner.publish_held(
+        &id,
+        state,
+        message,
+        summary.output_paths,
+        summary.open_path,
+        hold.as_ref(),
+    );
 }
 
 struct Spawner<'a> {
@@ -967,6 +1073,7 @@ fn execute_steps(
         if let Some(o) = done.get(&i) {
             absorb(o, &mut summary, &mut vars);
             steps::follow_move(&mut context, o);
+            inner.retarget_hold(job_id, &context);
             if o.stop {
                 break;
             }
@@ -1024,6 +1131,7 @@ fn execute_steps(
                 }
                 absorb(&o, &mut summary, &mut vars);
                 steps::follow_move(&mut context, &o);
+                inner.retarget_hold(job_id, &context);
                 if o.stop {
                     break;
                 }

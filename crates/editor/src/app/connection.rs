@@ -240,6 +240,8 @@ impl App {
         self.status.connected = true;
         self.status.reconnecting = false;
         self.status.notice = None;
+        // Plan round-17 WP-2: the subscribe snapshot re-fills the holds.
+        self.clear_holds();
         self.status
             .record(Severity::Info, "reconnected to daemon", None);
         self.reconnect_attempt = 0;
