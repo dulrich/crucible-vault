@@ -144,6 +144,7 @@ fn every_section_is_in_the_rail_with_its_file() {
         [
             "Editor",
             "Vault",
+            "Remote content",
             "Hotkeys",
             "Actions",
             "Schedules",

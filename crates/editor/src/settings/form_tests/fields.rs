@@ -363,6 +363,43 @@ fn vault_section_binds_vault_toml_with_location_enum() {
     assert!(matches!(&loc.kind, Kind::Enum { .. }), "{:?}", loc.kind);
 }
 
+/// Plan remote-media-sprint WP-2: "Remote content" and Vault split `vault.toml` — each page
+/// lists only its own record.
+#[test]
+fn remote_content_section_lists_only_remote_media() {
+    let vault = Section::RemoteContent.file().expect("file");
+    assert_eq!(Some(vault), Section::Vault.file());
+    let st = loaded(
+        vault,
+        "[trash]\nlocation = \"system\"\n\n[remote_media]\nvideo = \"link\"\n",
+    );
+    let f = st.file(vault).expect("f");
+    let remote = pages::section_rows(&st, f, Section::RemoteContent.info());
+    assert!(!remote.is_empty());
+    assert!(
+        remote
+            .iter()
+            .all(|r| r.path.to_string().starts_with("remote_media")),
+        "{:?}",
+        remote
+            .iter()
+            .map(|r| r.path.to_string())
+            .collect::<Vec<_>>()
+    );
+    let video = remote
+        .iter()
+        .find(|r| r.path == p("remote_media.video"))
+        .expect("video row");
+    assert!(matches!(&video.kind, Kind::Enum { .. }), "{:?}", video.kind);
+    let trash = pages::section_rows(&st, f, Section::Vault.info());
+    assert!(trash.iter().any(|r| r.path == p("trash.location")));
+    assert!(
+        !trash
+            .iter()
+            .any(|r| r.path.to_string().starts_with("remote_media"))
+    );
+}
+
 #[test]
 fn captures_page_puts_periods_first() {
     let text = "[[capture]]\nid = \"c\"\n\n[periods.day]\nfolder = \"daily\"\n";

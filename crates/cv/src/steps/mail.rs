@@ -490,7 +490,10 @@ fn handle(
             && let Some(p) = &resolved.path
         {
             out.push_output(p.clone());
-            if let Err(e) = localize::run(&localize::Params::note(p.clone()), ctx) {
+            if let Err(e) = localize::run(
+                &localize::Params::note(p.clone(), &ctx.config.vault().remote_media),
+                ctx,
+            ) {
                 tracing::warn!(path = %p, error = %e, "track_mail: inline localize failed");
             }
             return Ok(Handled::Replaced);
@@ -520,7 +523,10 @@ fn handle(
         );
         if create_or_found(ctx, &path, text.into_bytes())? {
             out.push_output(path.clone());
-            if let Err(e) = localize::run(&localize::Params::note(path.clone()), ctx) {
+            if let Err(e) = localize::run(
+                &localize::Params::note(path.clone(), &ctx.config.vault().remote_media),
+                ctx,
+            ) {
                 tracing::warn!(path = %path, error = %e, "track_mail: inline localize failed");
             }
             lint::run(

@@ -156,9 +156,12 @@ const STEPS: &[(&str, &str)] = &[
     ),
     (
         "localize",
-        "path = \"{path}\"\nmode = \"repair\"\nfolder_template = \"{{folder}}/_att\"\nname_template = \"{{md5}}.{{ext}}\"\nimages = true\naudio = true\nvideo = false\npdf = true\nimages_whitelist = [\"png\"]\naudio_whitelist = [\"mp3\"]\nvideo_whitelist = [\"mp4\"]\npdf_whitelist = [\"pdf\"]\nconvert_images = true\nimage_format = \"jpeg\"\nimage_quality = 80\ntimeout_secs = 10\nmax_bytes = 1000",
+        "path = \"{path}\"\nmode = \"repair\"\nfolder_template = \"{{folder}}/_att\"\nname_template = \"{{md5}}.{{ext}}\"\nimages = \"localize\"\naudio = \"localize\"\nvideo = \"link\"\npdf = \"localize\"\nimages_whitelist = [\"png\"]\naudio_whitelist = [\"mp3\"]\nvideo_whitelist = [\"mp4\"]\npdf_whitelist = [\"pdf\"]\nconvert_images = true\nimage_format = \"jpeg\"\nimage_quality = 80\ntimeout_secs = 10\nmax_bytes = 1000",
     ),
-    ("localize", "image_quality = 0.8"),
+    (
+        "localize",
+        "image_quality = 0.8\nvideo = \"thumbnail\"\naudio = \"link\"",
+    ),
     (
         "localize",
         "scope = \"folder\"\nfolder = \"Clippings\"\nlimit = 50",
@@ -364,6 +367,34 @@ status = "complete"
 works = true
 "#];
 
+/// Plan remote-media-sprint WP-2 (deferred audit item E4): `vault.toml` joins the sample loop,
+/// with a full `[remote_media]` table.
+const VAULT: &[&str] = &[
+    r#"
+[trash]
+location = "system"
+retention_days = 7
+
+[remote_media]
+images = "localize"
+video = "link"
+audio = "localize"
+pdf = "localize"
+images_whitelist = ["png", "jpg"]
+audio_whitelist = ["mp3"]
+video_whitelist = ["mp4"]
+pdf_whitelist = ["pdf"]
+convert_images = true
+image_format = "jpeg"
+image_quality = 80
+folder_template = "{{folder}}/_att"
+name_template = "{{md5}}.{{ext}}"
+timeout_secs = 10
+max_bytes = 1000
+"#,
+    "[remote_media]\nvideo = \"thumbnail\"\naudio = \"link\"\npdf = \"link\"\nimage_format = \"webp\"\nimage_quality = 72.5\n",
+];
+
 const SCHEDULES: &[&str] = &[
     "[[schedule]]\naction = \"s\"\ndaily = \"06:00\"\n\n[[schedule]]\naction = \"s\"\nevery = \"2h\"\n",
 ];
@@ -515,6 +546,7 @@ fn support_files_parse_and_validate() {
         ("captures.toml", CAPTURES),
         ("pipelines.toml", PIPELINES),
         ("sources.toml", SOURCES),
+        ("vault.toml", VAULT),
     ] {
         for s in samples {
             assert_eq!(

@@ -67,7 +67,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
     .spacing(8)
     .align_y(Alignment::Center);
     let body: Element<'_, Message> = match s.view_selected.as_deref().and_then(|p| s.file(p)) {
-        Some(f) => super::generic(cx, f, ""),
+        Some(f) => super::generic(cx, f, crate::settings::Section::Views.info(), ""),
         None => Space::new().into(),
     };
     column![

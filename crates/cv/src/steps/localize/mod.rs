@@ -68,8 +68,8 @@ pub(crate) struct Localize;
 impl StepModule for Localize {
     type Params = Params;
 
-    fn parse(_: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
-        parse_params(t)
+    fn parse(_: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
+        parse_params(t, &config.vault().remote_media)
     }
 
     fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {

@@ -269,7 +269,10 @@ fn write_note(
     out_paths.push(path.clone());
     // Inline localize (plan usability-sprint-captures-links WP-1): remote images become local
     // `_MD5` attachments now; a failure leaves the remote refs and never fails the capture.
-    if let Err(e) = localize::run(&localize::Params::note(path.clone()), ctx) {
+    if let Err(e) = localize::run(
+        &localize::Params::note(path.clone(), &ctx.config.vault().remote_media),
+        ctx,
+    ) {
         *localize_failed += 1;
         tracing::warn!(path = %path, error = %e, "track_blogs: inline localize failed");
     }
@@ -572,7 +575,13 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                         path.clone_from(&r.path);
                         if let Some(p) = &r.path {
                             out.output_paths.push(p.clone());
-                            if let Err(e) = localize::run(&localize::Params::note(p.clone()), ctx) {
+                            if let Err(e) = localize::run(
+                                &localize::Params::note(
+                                    p.clone(),
+                                    &ctx.config.vault().remote_media,
+                                ),
+                                ctx,
+                            ) {
                                 localize_failed += 1;
                                 tracing::warn!(path = %p, error = %e, "track_blogs: inline localize failed");
                             }

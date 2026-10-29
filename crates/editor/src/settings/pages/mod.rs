@@ -14,7 +14,7 @@ use iced::widget::{Space, column, text};
 
 use super::form::{self, Ctx, Row};
 use super::widgets::{self, Rcx};
-use super::{ConfigFile, Settings, file_header, save_bar};
+use super::{ConfigFile, SectionInfo, Settings, file_header, save_bar};
 use crate::message::Message;
 use crate::theme::Tokens;
 
@@ -40,6 +40,13 @@ pub fn file_rows(s: &Settings, f: &ConfigFile) -> Vec<Row> {
         ),
         _ => Vec::new(),
     }
+}
+
+/// The rows of `f`'s form that `info`'s section shows (its [`SectionInfo::keys`] filter).
+pub fn section_rows(s: &Settings, f: &ConfigFile, info: &SectionInfo) -> Vec<Row> {
+    let mut rows = file_rows(s, f);
+    rows.retain(|r| info.shows(&r.path));
+    rows
 }
 
 /// The render context of `f`.
@@ -80,8 +87,13 @@ pub fn frame<'a>(
 }
 
 /// The generic page: the whole schema as one form.
-pub fn generic<'a>(cx: PageCx<'a>, f: &'a ConfigFile, intro: &'a str) -> Element<'a, Message> {
-    frame(cx, f, intro, file_rows(cx.s, f))
+pub fn generic<'a>(
+    cx: PageCx<'a>,
+    f: &'a ConfigFile,
+    info: &SectionInfo,
+    intro: &'a str,
+) -> Element<'a, Message> {
+    frame(cx, f, intro, section_rows(cx.s, f, info))
 }
 
 #[cfg(test)]

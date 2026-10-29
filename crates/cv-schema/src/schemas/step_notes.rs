@@ -374,10 +374,32 @@ pub static LOCALIZE: Record = Record {
             Node::Str,
         )
         .dflt(D::Str("{{md5}}_MD5.{{ext}}")),
-        field("images", "Images", "Localize images", Node::Bool).dflt(D::Bool(true)),
-        field("audio", "Audio", "Localize audio", Node::Bool).dflt(D::Bool(false)),
-        field("video", "Video", "Localize video", Node::Bool).dflt(D::Bool(false)),
-        field("pdf", "PDF", "Localize PDFs", Node::Bool).dflt(D::Bool(false)),
+        // Mode overrides of vault.toml `[remote_media]` (plan remote-media-sprint WP-2); the
+        // parser also accepts the legacy bools, which this vocabulary cannot express.
+        field(
+            "images",
+            "Images",
+            "Override of Remote content images; unset uses vault.toml",
+            Node::Enum(&["localize"]),
+        ),
+        field(
+            "audio",
+            "Audio",
+            "Override of Remote content audio; unset uses vault.toml",
+            Node::Enum(&["link", "localize"]),
+        ),
+        field(
+            "video",
+            "Video",
+            "Override of Remote content video; unset uses vault.toml",
+            Node::Enum(&["thumbnail", "link"]),
+        ),
+        field(
+            "pdf",
+            "PDF",
+            "Override of Remote content PDFs; unset uses vault.toml",
+            Node::Enum(&["link", "localize"]),
+        ),
         field(
             "images_whitelist",
             "Image extensions",

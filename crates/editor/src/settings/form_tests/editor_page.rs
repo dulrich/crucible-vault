@@ -255,7 +255,11 @@ fn section_table_rows_match_their_sections_and_files() {
             assert!(f.starts_with(CONFIG_DIR), "{f}");
             let name = sec.file_name().expect("name");
             assert!(cv_schema::FILES.contains(&name), "{name}");
-            assert_eq!(Section::for_file_name(name), Some(sec));
+            // A file split across sections (`vault.toml`) routes to its first section.
+            assert_eq!(
+                Section::for_file_name(name).and_then(Section::file),
+                Some(f)
+            );
         }
     }
     assert_eq!(crate::palette::CONFIG_PREFIX, CONFIG_DIR);

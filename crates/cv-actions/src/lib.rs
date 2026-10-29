@@ -25,4 +25,7 @@ pub use model::{
     ResourceSpec, RunAction, Schedule, Selector, Starter, Step, StepKind,
 };
 pub use pipelines::{PipelinesConfig, SourcesConfig};
-pub use vault::{TrashConfig, TrashLocation, VaultConfig};
+pub use vault::{
+    ImageFormat, ImagesMode, MediaMode, RemoteMediaConfig, TrashConfig, TrashLocation, VaultConfig,
+    VaultVideoMode, check_templates,
+};

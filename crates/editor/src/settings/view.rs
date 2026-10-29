@@ -102,6 +102,7 @@ fn page_inner<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a
             Some(f) => pages::generic(
                 cx,
                 f,
+                sec.info(),
                 match sec {
                     Section::Editor => s.editor_note.as_deref().unwrap_or(sec.info().intro),
                     _ => sec.info().intro,
