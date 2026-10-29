@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use chrono::NaiveDateTime;
 use regex::Regex;
 
+use crate::md_refs::{self, MdRef, RefKind};
 use crate::template::{AttachmentTemplateContext, apply_attachment_template};
 use crate::vpath::{basename, percent_decode, split};
 
@@ -37,17 +38,6 @@ fn re(cell: &'static OnceLock<Regex>, src: &str) -> &'static Regex {
     })
 }
 
-/// Crucible `MARKDOWN_ATTACHMENT_REF_RE`: embeds first (alternation order is load-bearing), then
-/// wiki links, then markdown links whose text excludes `[` (so a linked image
-/// `[![](img)](href)` yields the nested embed).
-fn attachment_ref_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    re(
-        &R,
-        r"!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\((?:\\.|[^)\\\n])+\)|\[\[[^\]\n]+\]\]|\[[^\[\]\n]*\]\((?:\\.|[^)\\\n])+\)",
-    )
-}
-
 /// A managed (`<md5>_MD5.<image ext>`) image name, for the `images` outcome var (plan
 /// `v0-automation-pipelines` WP-6: the image-describe trigger seam).
 fn managed_image_re() -> &'static Regex {
@@ -58,14 +48,42 @@ fn managed_image_re() -> &'static Regex {
     )
 }
 
-/// Crucible `REMOTE_MD_IMAGE_RE`, plus an optional CommonMark link title (`"t"` / `'t'`) after the
-/// URL — Substack clips title every image, and Crucible's pattern missed those.
-fn remote_md_image_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    re(
-        &R,
-        r#"!\[([^\]]*)\]\((https?://(?:\\.|[^)\s\\])+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'))?[ \t]*\)"#,
-    )
+/// Crucible `REMOTE_MD_IMAGE_RE` over a scanned embed's destination text: a remote URL (bare or
+/// `<…>`), then an optional CommonMark title (`"t"`, `'t'` or `(t)`, backslash escapes allowed)
+/// and trailing blanks. Substack clips title every image, and Crucible's pattern missed those.
+fn remote_image_dest(inner: &str) -> Option<&str> {
+    let (url, rest) = if let Some(r) = inner.strip_prefix('<') {
+        let (u, rest) = r.split_once('>')?;
+        (u, rest)
+    } else {
+        let end = inner.find([' ', '\t']).unwrap_or(inner.len());
+        inner.split_at(end)
+    };
+    if !is_remote(url) || url.contains(['<', ' ', '\t']) {
+        return None;
+    }
+    let rest = rest.trim_matches([' ', '\t']);
+    (rest.is_empty() || is_md_title(rest)).then_some(url)
+}
+
+/// A whole CommonMark link title: `"…"`, `'…'` or `(…)`, backslash escapes allowed.
+fn is_md_title(t: &str) -> bool {
+    let b = t.as_bytes();
+    let close = match b.first() {
+        Some(b'"') => b'"',
+        Some(b'\'') => b'\'',
+        Some(b'(') => b')',
+        _ => return false,
+    };
+    let mut j = 1;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            c if c == close => return j == b.len() - 1,
+            _ => j += 1,
+        }
+    }
+    false
 }
 
 /// Crucible `DATA_URI_IMAGE_RE` (placeholder plus trailing inline whitespace).
@@ -126,12 +144,8 @@ fn extract_ref_link_target(r: &str) -> Option<&str> {
         let t = &inner[..end];
         return (!t.is_empty()).then_some(t);
     }
-    if body.starts_with('[') && body.ends_with(')') {
-        let close = body.find("](")?;
-        let t = &body[close + 2..body.len() - 1];
-        return (!t.is_empty()).then_some(t);
-    }
-    None
+    let m = md_refs::whole(r)?;
+    matches!(m.kind, RefKind::MdEmbed | RefKind::MdLink).then(|| m.inner(r))
 }
 
 /// Unescapes a CommonMark backslash-escaped URL for download: `\(`/`\)` become `%28`/`%29`
@@ -186,20 +200,24 @@ pub fn rewrite_localized_attachment_refs(
     for r in replacements {
         by_original.entry(r.from.as_str()).or_insert(r.to.as_str());
     }
+    let fences = fenced_ranges(content);
     let mut updated = String::with_capacity(content.len());
     let mut cursor = 0;
     let mut applied_from = Vec::new();
-    for m in attachment_ref_re().find_iter(content) {
-        let original = m.as_str();
+    for m in md_refs::scan(content) {
+        if in_ranges(&fences, m.span.start) {
+            continue;
+        }
+        let original = &content[m.span.clone()];
         if !original.starts_with('!') && !is_managed_attachment_link(original) {
             continue;
         }
         let Some(to) = by_original.get(original) else {
             continue;
         };
-        updated.push_str(&content[cursor..m.start()]);
+        updated.push_str(&content[cursor..m.span.start]);
         updated.push_str(to);
-        cursor = m.end();
+        cursor = m.span.end;
         applied_from.push(original.to_owned());
     }
     if cursor == 0 {
@@ -226,22 +244,26 @@ pub fn repoint_attachment_folder_prefix(content: &str, old: &str, new: &str) -> 
     let raw_new = format!("{new}/");
     let enc_old = raw_old.replace(' ', "%20");
     let enc_new = raw_new.replace(' ', "%20");
-    attachment_ref_re()
-        .replace_all(content, |c: &regex::Captures<'_>| {
-            let r = &c[0];
-            if !r.starts_with('!') && !is_managed_attachment_link(r) {
-                return r.to_owned();
-            }
-            let mut out = r.to_owned();
-            if out.contains(&raw_old) {
-                out = out.replace(&raw_old, &raw_new);
-            }
-            if enc_old != raw_old && out.contains(&enc_old) {
-                out = out.replace(&enc_old, &enc_new);
-            }
-            out
-        })
-        .into_owned()
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for m in md_refs::scan(content) {
+        let r = &content[m.span.clone()];
+        if !r.starts_with('!') && !is_managed_attachment_link(r) {
+            continue;
+        }
+        let mut rep = r.to_owned();
+        if rep.contains(&raw_old) {
+            rep = rep.replace(&raw_old, &raw_new);
+        }
+        if enc_old != raw_old && rep.contains(&enc_old) {
+            rep = rep.replace(&enc_old, &enc_new);
+        }
+        out.push_str(&content[cursor..m.span.start]);
+        out.push_str(&rep);
+        cursor = m.span.end;
+    }
+    out.push_str(&content[cursor..]);
+    out
 }
 
 /// Why a broken ref could not be repaired (Crucible `AttachmentRepairFailureReason`).
@@ -426,7 +448,7 @@ pub fn format_ref(m: &AttachmentMatch, target: &str) -> String {
 
 /// Byte ranges of fenced code blocks (```` ``` ```` / `~~~`); refs inside are not refs (the
 /// Obsidian metadata cache skips them, and `parseAttachmentRefsFromCache` read the cache).
-fn fenced_ranges(content: &str) -> Vec<(usize, usize)> {
+pub(crate) fn fenced_ranges(content: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut open: Option<(usize, &str)> = None;
     let mut pos = 0;
@@ -455,27 +477,20 @@ fn fenced_ranges(content: &str) -> Vec<(usize, usize)> {
     out
 }
 
+pub(crate) fn in_ranges(ranges: &[(usize, usize)], at: usize) -> bool {
+    ranges.iter().any(|&(a, b)| at >= a && at < b)
+}
+
 /// A remote link Obsidian renders as an embedded page (YouTube video, X/Twitter post), not an
-/// attachment: never downloaded and never a backfill candidate.
+/// attachment: never downloaded and never a backfill candidate. A thin wrapper over the
+/// [`crate::remote_media`] page-shape rules with its original truth table (Vimeo and `x.com/i/…`
+/// are not embed pages here; callers that want them use `classify_remote`).
 pub fn is_embed_page(link: &str) -> bool {
-    let Ok(u) = url::Url::parse(link.trim()) else {
-        return false;
-    };
-    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
-    let host = host.strip_prefix("www.").unwrap_or(&host);
-    let host = host.strip_prefix("m.").unwrap_or(host);
-    let path = u.path();
-    match host {
-        "youtube.com" | "music.youtube.com" | "youtube-nocookie.com" => {
-            path == "/watch"
-                || ["/shorts/", "/embed/", "/live/"]
-                    .iter()
-                    .any(|p| path.starts_with(p))
-        }
-        "youtu.be" => path.len() > 1,
-        "x.com" | "twitter.com" | "mobile.twitter.com" => path.contains("/status/"),
-        _ => false,
-    }
+    use crate::remote_media::PageShape;
+    matches!(
+        crate::remote_media::page_shape(link),
+        Some(PageShape::YouTube(_) | PageShape::Post { status: true })
+    )
 }
 
 fn is_remote(link: &str) -> bool {
@@ -484,15 +499,14 @@ fn is_remote(link: &str) -> bool {
 }
 
 /// The raw (still percent-encoded, `<>` stripped) destination of an inline markdown link or
-/// image `body` (without a leading `!`).
-fn md_raw_dest(body: &str) -> Option<&str> {
-    let close = body.find("](")?;
-    let dest = body.get(close + 2..body.len() - 1)?.trim();
-    Some(if let Some(rest) = dest.strip_prefix('<') {
+/// image, from the text between its destination parens.
+fn md_raw_dest(inner: &str) -> &str {
+    let dest = inner.trim();
+    if let Some(rest) = dest.strip_prefix('<') {
         rest.split_once('>').map_or(rest, |(d, _)| d)
     } else {
         dest.split_whitespace().next().unwrap_or("")
-    })
+    }
 }
 
 /// The original, still percent-encoded destination of a markdown ref's source text
@@ -503,47 +517,53 @@ pub fn md_ref_raw_destination(original: &str) -> Option<String> {
     if body.starts_with("[[") {
         return None;
     }
-    md_raw_dest(body).map(str::to_owned)
+    if let Some(m) = md_refs::whole(original)
+        && matches!(m.kind, RefKind::MdEmbed | RefKind::MdLink)
+    {
+        return Some(md_raw_dest(m.inner(original)).to_owned());
+    }
+    let close = body.find("](")?;
+    let inner = body.get(close + 2..body.len().checked_sub(1)?)?;
+    Some(md_raw_dest(inner).to_owned())
 }
 
-/// Splits a matched ref into (link, display text).
-fn ref_parts(original: &str) -> Option<(String, Option<String>, Syntax)> {
-    let body = original.strip_prefix('!').unwrap_or(original);
-    if let Some(inner) = body.strip_prefix("[[").and_then(|s| s.strip_suffix("]]")) {
+/// Splits a scanned ref into (link, display text).
+fn ref_parts(content: &str, m: &MdRef) -> (String, Option<String>, Syntax) {
+    let original = &content[m.span.clone()];
+    if matches!(m.kind, RefKind::Wiki | RefKind::WikiEmbed) {
+        let body = original.strip_prefix('!').unwrap_or(original);
+        let inner = &body[2..body.len() - 2];
         let (link, display) = match inner.split_once('|') {
             Some((l, d)) => (l, Some(d.to_owned())),
             None => (inner, None),
         };
-        return Some((link.trim().to_owned(), display, Syntax::Wiki));
+        return (link.trim().to_owned(), display, Syntax::Wiki);
     }
-    let close = body.find("](")?;
-    let text = &body[1..close];
-    let dest = md_raw_dest(body)?;
+    let dest = md_raw_dest(m.inner(content));
     let link = if is_remote(dest) {
         unescape_md_url(dest)
     } else {
         percent_decode(dest)
     };
-    Some((link, Some(text.to_owned()), Syntax::Md))
+    (link, Some(m.text(content).to_owned()), Syntax::Md)
 }
 
 /// Port of Crucible `parseAttachmentRefsFromCache`, over the note text instead of the metadata
 /// cache: every embed (`data:` URIs excluded — the cache never lists them), every link whose
-/// decoded basename is a managed `_MD5` name, then remote markdown images via
-/// `REMOTE_MD_IMAGE_RE`; deduped by `original`.
+/// decoded basename is a managed `_MD5` name, then remote markdown images (Crucible
+/// `REMOTE_MD_IMAGE_RE`, widened: see [`remote_image_dest`]); deduped by `original`. Every
+/// `original` is a span of the one scanner `rewrite_localized_attachment_refs` walks.
 pub fn parse_attachment_refs(content: &str) -> Vec<AttachmentMatch> {
     let fences = fenced_ranges(content);
-    let in_fence = |i: usize| fences.iter().any(|&(s, e)| i >= s && i < e);
+    let refs: Vec<MdRef> = md_refs::scan(content)
+        .into_iter()
+        .filter(|m| !in_ranges(&fences, m.span.start))
+        .collect();
     let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for m in attachment_ref_re().find_iter(content) {
-        if in_fence(m.start()) {
-            continue;
-        }
-        let original = m.as_str();
-        let Some((link, display, syntax)) = ref_parts(original) else {
-            continue;
-        };
+    for m in &refs {
+        let original = &content[m.span.clone()];
+        let (link, display, syntax) = ref_parts(content, m);
         let is_embed = original.starts_with('!');
         if link.is_empty() || link.to_ascii_lowercase().starts_with("data:") {
             continue;
@@ -577,16 +597,17 @@ pub fn parse_attachment_refs(content: &str) -> Vec<AttachmentMatch> {
             display_text,
         });
     }
-    for c in remote_md_image_re().captures_iter(content) {
-        let (Some(all), Some(url)) = (c.get(0), c.get(2)) else {
+    for m in refs.iter().filter(|m| m.kind == RefKind::MdEmbed) {
+        let Some(url) = remote_image_dest(m.inner(content)) else {
             continue;
         };
-        if in_fence(all.start()) || !seen.insert(all.as_str().to_owned()) {
+        let original = &content[m.span.clone()];
+        if !seen.insert(original.to_owned()) {
             continue;
         }
         out.push(AttachmentMatch {
-            original: all.as_str().to_owned(),
-            link: unescape_md_url(url.as_str()),
+            original: original.to_owned(),
+            link: unescape_md_url(url),
             syntax: Syntax::Md,
             is_remote: true,
             is_embed: true,
@@ -803,11 +824,11 @@ fn render(t: &str, c: &AttachmentTemplateContext) -> String {
 /// code (the folder-scope candidate predicate).
 pub fn has_remote_image_refs(content: &str) -> bool {
     let fenced = fenced_ranges(content);
-    let outside = |at: usize| !fenced.iter().any(|&(a, b)| at >= a && at < b);
-    remote_md_image_re().captures_iter(content).any(|c| {
-        c.get(0).is_some_and(|m| outside(m.start()))
-            && c.get(2)
-                .is_some_and(|u| is_remote(u.as_str()) && !is_embed_page(u.as_str()))
+    let outside = |at: usize| !in_ranges(&fenced, at);
+    md_refs::scan(content).iter().any(|m| {
+        m.kind == RefKind::MdEmbed
+            && outside(m.span.start)
+            && remote_image_dest(m.inner(content)).is_some_and(|u| !is_embed_page(u))
     }) || data_uri_image_re()
         .find_iter(content)
         .any(|m| outside(m.start()))

@@ -694,3 +694,142 @@ fn escaped_paren_image_url_is_unescaped_and_fully_matched() {
         "x ![[local_MD5.png]] y\n![](https://h.example/plain.png)\n"
     );
 }
+
+// --- plan remote-media-sprint WP-1: widened remote-ref shapes and the rewrite round trip ---
+
+const WIDE_SHAPES: &[(&str, &str)] = &[
+    (
+        r#"![a](https://a.test/x.png "say \"hi\" now")"#,
+        "https://a.test/x.png",
+    ),
+    (
+        r"![a](https://a.test/q.png 'it\'s')",
+        "https://a.test/q.png",
+    ),
+    (
+        "![a](https://a.test/p.png (paren title))",
+        "https://a.test/p.png",
+    ),
+    ("![a [b] c](https://a.test/n.png)", "https://a.test/n.png"),
+    (
+        "![w](https://en.wikipedia.org/wiki/Foo_(bar).png)",
+        "https://en.wikipedia.org/wiki/Foo_(bar).png",
+    ),
+    ("![ang](<https://a.test/a.png>)", "https://a.test/a.png"),
+    (
+        r#"![t](https://a.test/t.png "x ) y")"#,
+        "https://a.test/t.png",
+    ),
+];
+
+#[test]
+fn remote_shapes_detected_and_parsed() {
+    for &(src, url) in WIDE_SHAPES {
+        let body = format!("pre {src} post\n");
+        assert!(has_remote_image_refs(&body), "{src}");
+        let refs = parse_attachment_refs(&body);
+        assert_eq!(refs.len(), 1, "{src}: {refs:?}");
+        assert_eq!(refs[0].original, src);
+        assert_eq!(refs[0].link, url);
+        assert!(refs[0].is_remote && refs[0].is_embed);
+    }
+}
+
+#[test]
+fn remote_shapes_round_trip_through_rewrite() {
+    for &(src, _) in WIDE_SHAPES {
+        let body = format!("a {src} b {src}\n");
+        let refs = parse_attachment_refs(&body);
+        let res = rewrite_localized_attachment_refs(
+            &body,
+            &[r(&refs[0].original, "![](n/_attachments/x/abc_MD5.png)")],
+        );
+        assert_eq!(
+            res.content,
+            "a ![](n/_attachments/x/abc_MD5.png) b ![](n/_attachments/x/abc_MD5.png)\n",
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn linked_image_yields_inner_remote_image_only() {
+    let src = r#"[![alt](https://img.test/i.png "t \"q\"")](https://outer.test/page)"#;
+    assert!(has_remote_image_refs(src));
+    let refs = parse_attachment_refs(src);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].link, "https://img.test/i.png");
+    let res = rewrite_localized_attachment_refs(src, &[r(&refs[0].original, "![](l_MD5.png)")]);
+    assert_eq!(res.content, "[![](l_MD5.png)](https://outer.test/page)");
+}
+
+#[test]
+fn rewrite_skips_fenced_copy() {
+    let src = "![x](https://a.test/f_(1).png)\n```\n![x](https://a.test/f_(1).png)\n```\n";
+    let refs = parse_attachment_refs(src);
+    assert_eq!(refs.len(), 1);
+    let res = rewrite_localized_attachment_refs(src, &[r(&refs[0].original, "![](z_MD5.png)")]);
+    assert_eq!(
+        res.content,
+        "![](z_MD5.png)\n```\n![x](https://a.test/f_(1).png)\n```\n"
+    );
+    assert_eq!(res.applied_from.len(), 1);
+}
+
+#[test]
+fn fenced_wide_shapes_not_detected() {
+    let src = "```\n![a [b]](https://a.test/x.png \"t\")\n```\n";
+    assert!(!has_remote_image_refs(src));
+    assert!(parse_attachment_refs(src).is_empty());
+}
+
+#[test]
+fn remote_with_space_or_bad_title_not_an_image() {
+    for src in [
+        "![](https://a.test/a b.png)",
+        "![](https://a.test/a.png junk)",
+        "![](https://a.test/a.png \"open)",
+    ] {
+        assert!(!has_remote_image_refs(src), "{src}");
+    }
+}
+
+#[test]
+fn paren_dest_balanced_or_first_close_fallback() {
+    let src = "![](foo(bar.png) tail)";
+    assert_eq!(parse_attachment_refs(src)[0].original, src);
+    let src = "![](a(b.png)\n";
+    assert_eq!(parse_attachment_refs(src)[0].original, "![](a(b.png)");
+}
+
+#[test]
+fn nested_alt_local_embed_and_raw_destination() {
+    let src = "![see [1] here](img/a%20b.png \"t\")";
+    let refs = parse_attachment_refs(src);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].link, "img/a b.png");
+    assert_eq!(
+        md_ref_raw_destination(src).as_deref(),
+        Some("img/a%20b.png")
+    );
+    assert_eq!(
+        md_ref_raw_destination("![w](https://w.test/F_(b).png)").as_deref(),
+        Some("https://w.test/F_(b).png")
+    );
+}
+
+#[test]
+fn managed_link_with_paren_path_round_trips() {
+    let src = "[doc](notes/_attachments/a_(1)/abc_MD5.pdf)";
+    let refs = parse_attachment_refs(src);
+    assert_eq!(refs.len(), 1);
+    let res = rewrite_localized_attachment_refs(src, &[r(src, "[doc](n/abc_MD5.pdf)")]);
+    assert_eq!(res.content, "[doc](n/abc_MD5.pdf)");
+}
+
+#[test]
+fn embed_pages_still_excluded_from_detection() {
+    assert!(!has_remote_image_refs(
+        "![v](https://www.youtube.com/watch?v=dQw4w9WgXcQ \"t\")"
+    ));
+}

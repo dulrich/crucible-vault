@@ -5,7 +5,9 @@
 
 pub mod attachments;
 pub mod file_kind;
+mod md_refs;
 pub mod moment;
+pub mod remote_media;
 pub mod resolver;
 pub mod sections;
 pub mod similar;
@@ -17,6 +19,9 @@ pub mod wikilink;
 pub use moment::{
     MomentFormatError, format_moment, moment_to_strftime, parse_moment_date_strict,
     resolve_next_daily_date,
+};
+pub use remote_media::{
+    HtmlMedia, HtmlMediaTag, RemoteKind, VideoProvider, classify_remote, scan_html_media,
 };
 pub use sections::{
     SectionInsertMode, SectionRange, find_section_range, insert_into_section, is_section_empty,
