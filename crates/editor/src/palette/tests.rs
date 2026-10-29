@@ -48,6 +48,41 @@ fn today() -> NaiveDate {
 
 // ---- pure: prompt ----
 
+/// Plan round-17 WP-4: the multiline prompt publishes a changed, non-empty selection to PRIMARY
+/// (once) and a middle click reads PRIMARY, whose text is pasted into the prompt.
+#[test]
+fn multiline_prompt_primary_select_and_middle_paste() {
+    let mut pal = Palette::default();
+    pal.begin_prompt(
+        action("m", vec![spec("body", ParamKind::Multiline, false)], &[]),
+        today(),
+    );
+    let ed = |pal: &mut Palette, a| pal.prompt_input(PromptMsg::Editor(a), &[], &[]);
+    assert_eq!(
+        ed(&mut pal, Action::Edit(Edit::Insert('h'))),
+        PromptFx::None
+    );
+    assert_eq!(
+        ed(&mut pal, Action::Edit(Edit::Insert('i'))),
+        PromptFx::None
+    );
+    assert_eq!(
+        ed(&mut pal, Action::SelectAll),
+        PromptFx::WritePrimary("hi".into())
+    );
+    assert_eq!(ed(&mut pal, Action::SelectAll), PromptFx::None, "unchanged");
+    assert_eq!(
+        pal.prompt_input(PromptMsg::MiddleClick(iced::Point::ORIGIN), &[], &[]),
+        PromptFx::ReadPrimary
+    );
+    pal.multiline
+        .perform(Action::Move(iced::widget::text_editor::Motion::DocumentEnd));
+    pal.prompt_input(PromptMsg::PastePrimary(Some(" there".into())), &[], &[]);
+    assert_eq!(pal.prompt.as_ref().expect("prompt").text(), "hi there");
+    pal.prompt_input(PromptMsg::PastePrimary(None), &[], &[]);
+    assert_eq!(pal.prompt.as_ref().expect("prompt").text(), "hi there");
+}
+
 #[test]
 fn prompt_every_kind_defaults_and_map() {
     let mut e = spec("kind", ParamKind::Enum, true);

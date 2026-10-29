@@ -1,6 +1,6 @@
 //! String-list chips: a chip strip + adder, or (Channel picker) an add/drop list.
 
-use iced::widget::{Space, button, column, container, pick_list, row, text, text_input};
+use iced::widget::{Space, button, column, container, pick_list, row, text};
 use iced::{Alignment, Element, Length};
 
 use super::{FIELD_W, Head, Rcx};
@@ -127,7 +127,7 @@ fn adder<'a>(
         .padding([8, 10])
         .into();
     }
-    let mut input = text_input("add…", draft)
+    let mut input = crate::widget::clip_input::clip_input("add…", draft)
         .size(14)
         .padding([8, 10])
         .width(Length::Fixed(160.0));

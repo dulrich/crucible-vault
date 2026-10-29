@@ -1,6 +1,6 @@
 //! Structural rows: headings, read-only values, list items and map keys.
 
-use iced::widget::{Space, button, column, container, pick_list, row, text, text_input};
+use iced::widget::{Space, button, column, container, pick_list, row, text};
 use iced::{Alignment, Element, Font, Length};
 
 use super::{FIELD_W, Head, LABEL_W, Rcx, small, text_button};
@@ -144,7 +144,7 @@ pub(super) fn map_key<'a>(
             from: key.to_owned(),
         })
     };
-    let mut input = text_input("key", draft)
+    let mut input = crate::widget::clip_input::clip_input("key", draft)
         .size(14)
         .padding([8, 10])
         .width(Length::Fixed(LABEL_W));
@@ -240,7 +240,7 @@ pub(super) fn add_key<'a>(
         map: map.clone(),
         value,
     });
-    let mut input = text_input("new key", draft)
+    let mut input = crate::widget::clip_input::clip_input("new key", draft)
         .size(14)
         .padding([8, 10])
         .width(Length::Fixed(LABEL_W));

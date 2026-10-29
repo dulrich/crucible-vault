@@ -7,7 +7,7 @@
 //! are local: [`crate::settings::views_check`] runs the `views` crate's own `BaseDef` parse
 //! (an error blocks Save) and `Base::compile` (notices shown as warnings).
 
-use iced::widget::{Space, button, column, container, row, text, text_input};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
 use super::PageCx;
@@ -49,7 +49,7 @@ pub fn view(cx: PageCx<'_>) -> Element<'_, Message> {
             .into()
     };
     let new_row = row![
-        text_input("new view file name", &s.new_view)
+        crate::widget::clip_input::clip_input("new view file name", &s.new_view)
             .size(14)
             .padding([8, 10])
             .width(Length::Fixed(260.0))

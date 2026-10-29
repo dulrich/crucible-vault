@@ -1,13 +1,17 @@
 //! The palette overlay view.
 
 use cv_protocol::ParamKind;
-use iced::widget::{button, column, pick_list, row, text, text_editor, text_input, toggler};
+use iced::widget::{button, column, pick_list, row, text, text_editor, toggler};
 use iced::{Element, Length};
 
 use super::prompt::{ParamValue, Prompt};
 use super::{INPUT_ID, Palette, PromptMsg, SHOWN};
 use crate::message::{Message, PaletteMsg};
 use crate::theme::Tokens;
+
+/// The multiline prompt editor's padding (iced's default, made explicit so a middle-click
+/// position maps to the content as in the source editor).
+pub(super) const MULTILINE_PADDING: f32 = 5.0;
 
 fn prompt_view<'a>(p: &'a Palette, pr: &'a Prompt, t: Tokens) -> Element<'a, Message> {
     let pm = |m| Message::Palette(PaletteMsg::Prompt(m));
@@ -37,17 +41,21 @@ fn prompt_view<'a>(p: &'a Palette, pr: &'a Prompt, t: Tokens) -> Element<'a, Mes
             move |c: String| pm(PromptMsg::Choice(c)),
         )
         .into(),
-        ParamKind::Multiline => text_editor(&p.multiline)
-            .height(120)
-            .on_action(move |a| pm(PromptMsg::Editor(a)))
-            .into(),
+        ParamKind::Multiline => crate::widget::middle_click::middle_click(
+            text_editor(&p.multiline)
+                .height(120)
+                .padding(MULTILINE_PADDING)
+                .on_action(move |a| pm(PromptMsg::Editor(a))),
+            move |at| pm(PromptMsg::MiddleClick(at)),
+        )
+        .into(),
         ParamKind::Text | ParamKind::Path | ParamKind::Date => {
             let ph = if spec.kind == ParamKind::Date {
                 "YYYY-MM-DD"
             } else {
                 ""
             };
-            text_input(ph, pr.text())
+            crate::widget::clip_input::clip_input(ph, pr.text())
                 .id(INPUT_ID)
                 .on_input(move |s| pm(PromptMsg::Text(s)))
                 .on_submit(Message::Palette(PaletteMsg::Submit))
@@ -91,7 +99,7 @@ pub fn view<'a>(p: &'a Palette, t: Tokens) -> Element<'a, Message> {
         return prompt_view(p, pr, t);
     }
     let mut col = column![
-        text_input("Run a command…", &p.query)
+        crate::widget::clip_input::clip_input("Run a command…", &p.query)
             .id(INPUT_ID)
             .on_input(|q| Message::Palette(PaletteMsg::Query(q)))
             .on_submit(Message::Palette(PaletteMsg::Submit))

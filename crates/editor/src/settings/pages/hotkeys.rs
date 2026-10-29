@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use cv_protocol::ActionInfo;
 use cv_schema::{ConfigDoc, Path};
-use iced::widget::{column, container, row, text, text_input};
+use iced::widget::{column, container, row, text};
 use iced::{Element, Length};
 
 use super::PageCx;
@@ -441,7 +441,7 @@ fn search_bar<'a>(st: &HotkeyState, t: Tokens) -> Element<'a, Message> {
         text_button("Find by chord", Some(hk(HotkeyMsg::FindChord)), t)
     };
     let mut r = row![
-        text_input("filter commands", &st.filter)
+        crate::widget::clip_input::clip_input("filter commands", &st.filter)
             .size(14)
             .padding([8, 10])
             .width(Length::Fixed(260.0))

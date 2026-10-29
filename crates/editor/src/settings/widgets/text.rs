@@ -1,6 +1,6 @@
 //! Text and number fields.
 
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Element, Font, Length};
 
 use super::{FIELD_W, Head, Rcx};
@@ -36,7 +36,7 @@ pub(super) fn text_field<'a>(
     } else {
         placeholder
     };
-    let mut input = text_input(&placeholder, &shown)
+    let mut input = crate::widget::clip_input::clip_input(&placeholder, &shown)
         .size(14)
         .padding([8, 10])
         .width(Length::Fixed(FIELD_W));
@@ -113,7 +113,7 @@ pub(super) fn number<'a>(
 ) -> Element<'a, Message> {
     let t = cx.t;
     let path = &h.path;
-    let mut input = text_input(placeholder, value)
+    let mut input = crate::widget::clip_input::clip_input(placeholder, value)
         .size(14)
         .padding([8, 10])
         .width(Length::Fixed(160.0));

@@ -20,7 +20,7 @@ use editor_model::props::{PropValue, Property};
 use editor_model::render::is_remote;
 use iced::widget::span;
 use iced::widget::text::Span;
-use iced::widget::{button, column, container, rich_text, row, text, text_input};
+use iced::widget::{button, column, container, rich_text, row, text};
 use iced::{Element, Length};
 
 use crate::context_menu::{Target, on_right};
@@ -876,7 +876,7 @@ pub fn view<'a>(p: &'a Panels, t: Tokens) -> Element<'a, Message> {
 /// field's widget id).
 pub fn search_view<'a>(p: &'a Panels, t: Tokens, id: &'static str) -> Element<'a, Message> {
     let mut c = column![
-        text_input("Search the vault…", &p.search.query)
+        crate::widget::clip_input::clip_input("Search the vault…", &p.search.query)
             .id(id)
             .on_input(|q| pm(PanelsMsg::SearchInput(q)))
     ]

@@ -8,7 +8,7 @@
 use cv_protocol::{ActionContext, RunActionParams};
 use editor_model::rank::{RankMode, rank};
 use iced::keyboard::{self, Key};
-use iced::widget::{button, column, text, text_input};
+use iced::widget::{button, column, text};
 use iced::{Element, Length};
 
 use crate::message::{Message, SwitcherMsg};
@@ -173,7 +173,7 @@ pub fn view<'a>(s: &'a Switcher, tokens: Tokens) -> Element<'a, Message> {
         "Find or create a note…"
     };
     let mut col = column![
-        text_input(hint, &s.query)
+        crate::widget::clip_input::clip_input(hint, &s.query)
             .id(INPUT_ID)
             .on_input(|q| Message::Switcher(SwitcherMsg::Query(q)))
             .on_submit(Message::Switcher(SwitcherMsg::Submit))

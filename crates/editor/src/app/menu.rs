@@ -196,6 +196,12 @@ impl App {
                 else {
                     self.status
                         .notify(Severity::Warning, format!("unresolved link: {target}"));
+                    // Plan round-17 WP-4 (Decision 12): Copy path still copies the target
+                    // text verbatim; the warning stays as information.
+                    if item == Item::CopyPath {
+                        self.sink.copied(&target);
+                        return iced::clipboard::write(target);
+                    }
                     return Task::none();
                 };
                 if item == Item::CopyPath {

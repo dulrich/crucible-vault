@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_protocol::ChangeKind;
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
 
 use crate::daemon::LocalIndex;
@@ -388,7 +388,7 @@ pub fn view<'a>(ex: &'a Explorer, tokens: Tokens) -> Element<'a, Message> {
         };
         col = col.push(
             row![
-                text_input(hint, &e.input)
+                crate::widget::clip_input::clip_input(hint, &e.input)
                     .size(14)
                     .on_input(|s| Message::Explorer(ExplorerMsg::Input(s)))
                     .on_submit(Message::Explorer(ExplorerMsg::Submit)),

@@ -99,7 +99,7 @@ fn copy_path_resolves_or_notices() {
     assert_eq!(app.copied(), ["sub/B.md"]);
     assert!(app.status.notice.is_none());
     choose(&mut app, link("Nope", false, false), Item::CopyPath);
-    assert_eq!(app.copied(), ["sub/B.md"], "nothing copied");
+    assert_eq!(app.copied(), ["sub/B.md", "Nope"], "target copied verbatim");
     let n = app.status.notice.clone().expect("notice");
     assert_eq!(n.severity, crate::app::Severity::Warning);
     assert_eq!(n.text, "unresolved link: Nope");

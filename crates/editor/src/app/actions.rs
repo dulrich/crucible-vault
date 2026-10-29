@@ -111,8 +111,19 @@ impl App {
             }
             PaletteMsg::Key(c) => return self.on_chord(&c),
             PaletteMsg::Prompt(pm) => {
-                self.palette
-                    .prompt_input(pm, &self.explorer.paths, &self.ui.recent);
+                use crate::palette::{PromptFx, PromptMsg};
+                match self
+                    .palette
+                    .prompt_input(pm, &self.explorer.paths, &self.ui.recent)
+                {
+                    PromptFx::None => {}
+                    PromptFx::WritePrimary(s) => return iced::clipboard::write_primary(s),
+                    PromptFx::ReadPrimary => {
+                        return iced::clipboard::read_primary().map(|t| {
+                            Message::Palette(PaletteMsg::Prompt(PromptMsg::PastePrimary(t)))
+                        });
+                    }
+                }
             }
             PaletteMsg::Ran {
                 title,

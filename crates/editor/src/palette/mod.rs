@@ -52,6 +52,10 @@ pub enum PromptMsg {
     Bool(bool),
     Choice(String),
     Editor(text_editor::Action),
+    /// A middle press over the multiline editor, at this position relative to its bounds.
+    MiddleClick(iced::Point),
+    /// PRIMARY was read for a middle-click paste.
+    PastePrimary(Option<String>),
     /// A path suggestion was picked.
     Suggest(String),
     Back,
@@ -216,6 +220,8 @@ pub struct Palette {
     pub prompt_error: Option<String>,
     /// Backing store for a Multiline prompt.
     pub multiline: text_editor::Content,
+    /// The multiline selection last written to PRIMARY.
+    pub multiline_primary: Option<String>,
     /// Path suggestions for a Path prompt.
     pub suggestions: Vec<String>,
     /// A chord pressed before the action list arrived.
@@ -249,6 +255,7 @@ impl Default for Palette {
             prompt: None,
             prompt_error: None,
             multiline: text_editor::Content::new(),
+            multiline_primary: None,
             suggestions: Vec::new(),
             pending_chord: None,
             jobs: Jobs::default(),
@@ -372,8 +379,12 @@ impl Palette {
     }
 
     /// Applies a prompt input. `paths` feeds Path suggestions.
-    pub fn prompt_input(&mut self, m: PromptMsg, paths: &[String], recent: &[String]) {
-        let Some(p) = &mut self.prompt else { return };
+    /// The returned [`PromptFx`] is the clipboard work the app runs (plan round-17 WP-4: the
+    /// multiline editor gets the source editor's PRIMARY contract).
+    pub fn prompt_input(&mut self, m: PromptMsg, paths: &[String], recent: &[String]) -> PromptFx {
+        let Some(p) = &mut self.prompt else {
+            return PromptFx::None;
+        };
         self.prompt_error = None;
         match m {
             PromptMsg::Text(s) | PromptMsg::Choice(s) | PromptMsg::Suggest(s) => {
@@ -397,6 +408,25 @@ impl Palette {
             PromptMsg::Editor(a) => {
                 self.multiline.perform(a);
                 p.set_text(self.multiline.text());
+                return self.take_new_primary();
+            }
+            PromptMsg::MiddleClick(at) => {
+                let pad = view::MULTILINE_PADDING;
+                self.multiline
+                    .perform(text_editor::Action::Click(iced::Point::new(
+                        at.x - pad,
+                        at.y - pad,
+                    )));
+                return PromptFx::ReadPrimary;
+            }
+            PromptMsg::PastePrimary(text) => {
+                if let Some(t) = text.filter(|t| !t.is_empty()) {
+                    self.multiline
+                        .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                            std::sync::Arc::new(t),
+                        )));
+                    p.set_text(self.multiline.text());
+                }
             }
             PromptMsg::Back => {
                 p.back();
@@ -404,7 +434,28 @@ impl Palette {
                 self.sync_step(&snapshot);
             }
         }
+        PromptFx::None
     }
+
+    /// The multiline selection when it is non-empty and differs from the one last published.
+    fn take_new_primary(&mut self) -> PromptFx {
+        let sel = self.multiline.selection().filter(|s| !s.is_empty());
+        if sel == self.multiline_primary {
+            return PromptFx::None;
+        }
+        self.multiline_primary.clone_from(&sel);
+        sel.map_or(PromptFx::None, PromptFx::WritePrimary)
+    }
+}
+
+/// Clipboard work a prompt input asks the app to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptFx {
+    None,
+    /// Write this selection to PRIMARY.
+    WritePrimary(String),
+    /// Read PRIMARY and answer with [`PromptMsg::PastePrimary`].
+    ReadPrimary,
 }
 
 /// Global keys: Esc closes/cancels, Up/Down move, Ctrl+Enter submits a multiline

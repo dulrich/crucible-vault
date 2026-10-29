@@ -14,7 +14,7 @@ use std::sync::Arc;
 use editor_model::visible::{self, Occurrence, VisRun};
 
 use iced::widget::pane_grid::Pane;
-use iced::widget::{Space, row, text, text_input};
+use iced::widget::{Space, row, text};
 use iced::{Element, Length, Subscription};
 
 use crate::icons::Icon;
@@ -163,7 +163,7 @@ pub fn view<'a>(pane: Pane, bar: Option<&'a FindBar>, t: Tokens) -> Element<'a, 
     // its keys never also reach a still-focused source editor (bug fix editor-find-return-leak).
     crate::widget::press_notify::press_notify(
         row![
-            text_input("Find in note…", &b.query)
+            crate::widget::clip_input::clip_input("Find in note…", &b.query)
                 .id(input_id(pane))
                 .on_input(move |q| fm(FindMsg::Query(q)))
                 .on_submit(fm(FindMsg::Submit))

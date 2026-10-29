@@ -360,7 +360,7 @@ impl App {
             .min(360.0);
         let p_in = path.to_owned();
         crumbs.push(
-            iced::widget::text_input("note name", name)
+            crate::widget::clip_input::clip_input("note name", name)
                 .id(crate::reading::title_id(path))
                 .size(14)
                 .width(name_w)

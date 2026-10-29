@@ -1,4 +1,5 @@
 //! Editor-specific widgets.
+pub mod clip_input;
 pub mod middle_click;
 pub mod press_notify;
 pub mod right_click;
