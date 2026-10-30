@@ -197,6 +197,19 @@ pub(crate) fn find_metadata_note(
     )
 }
 
+/// The `publication` for a video fetched outside the tracker: the configured channel's
+/// `publication_of` (matched by channel id), else the non-blank channel title.
+fn untracked_publication(ctx: &StepCtx<'_>, meta: &VideoMeta) -> Option<String> {
+    ctx.config
+        .sources()
+        .youtube
+        .iter()
+        .find(|r| !meta.channel_id.is_empty() && r.id == meta.channel_id)
+        .map(|r| r.publication().to_owned())
+        .or_else(|| Some(meta.channel_title.trim().to_owned()))
+        .filter(|p| !p.is_empty())
+}
+
 /// Writes the metadata note for `id` from an already fetched `videos.list` item (`None` = the
 /// video is unavailable → tombstone), find-or-create, no refetch: `(path, created, tombstone,
 /// channel_id)` (`channel_id` only when created). The tracker (WP-7) calls this with batched
@@ -220,6 +233,10 @@ pub(crate) fn write_metadata_note(
     };
     let folder = channel_folder(ctx, &meta.channel_id, &meta.channel_title);
     let path = format!("{root}/{folder}/{id}.md");
+    // Untracked clip (plan intake-auto-enrich WP-4): the `sources.toml` channel's publication
+    // when configured there, else the fetched channel name.
+    let untracked = untracked_publication(ctx, &meta);
+    let publication = publication.or(untracked.as_deref());
     let created = create_or_found(
         ctx,
         &path,

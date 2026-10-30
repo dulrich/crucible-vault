@@ -359,7 +359,7 @@ pub(super) fn publication(
             continue;
         };
         let doc = FrontmatterDoc::new(text.as_str());
-        if doc.get("publication").ok().flatten().is_some() {
+        if !crate::supersede::publication_blank(&doc) {
             continue;
         }
         let rows = by_note.get(&path);
@@ -376,7 +376,7 @@ pub(super) fn publication(
         }
         match ctx.modify(&path, |old| {
             let mut d = FrontmatterDoc::new(old);
-            if d.get("publication").ok().flatten().is_some() {
+            if !crate::supersede::publication_blank(&d) {
                 return Ok(None);
             }
             d.insert_after("author", "publication", &JsValue::Str(p.clone()))?;

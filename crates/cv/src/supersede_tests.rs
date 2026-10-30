@@ -266,6 +266,22 @@ fn replaced_fills_an_absent_publication_after_author() {
 }
 
 #[test]
+fn replaced_fills_an_empty_blank_or_null_publication() {
+    for empty in [
+        "publication: \"\"\n",
+        "publication: \"  \"\n",
+        "publication:\n",
+    ] {
+        let t = replace_with_publication(empty);
+        assert!(
+            t.contains("publication: \"Synth Pub\"") || t.contains("publication: Synth Pub"),
+            "{empty}: {t}"
+        );
+        assert_eq!(t.matches("publication").count(), 1, "{t}");
+    }
+}
+
+#[test]
 fn replaced_keeps_an_existing_publication() {
     let t = replace_with_publication("publication: Old Pub\n");
     assert!(t.contains("publication: Old Pub\n"), "{t}");

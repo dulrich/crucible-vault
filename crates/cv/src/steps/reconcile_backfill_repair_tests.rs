@@ -227,6 +227,49 @@ fn publication_is_backfilled_once_and_never_overwritten() {
     assert_eq!(w.env.read("Letters/a.md").unwrap(), a);
 }
 
+/// WP-4 (intake-auto-enrich): a present-but-empty `publication` counts as absent in phase F.
+#[test]
+fn publication_fills_empty_and_leaves_non_empty() {
+    let mut w = world(&[
+        ("Letters/a.md", "---\ntitle: \"A\"\nauthor:\n  - \"[[P]]\"\npublication: \"\"\nvia: rss\n---\n\nBody a.\n".to_owned()),
+        ("Letters/b.md", "---\ntitle: \"B\"\nauthor:\n  - \"[[P]]\"\npublication: Mine\nvia: rss\n---\n\nBody b.\n".to_owned()),
+        ("Letters/c.md", "---\ntitle: \"C\"\nauthor:\n  - \"[[P]]\"\npublication:\nvia: rss\n---\n\nBody c.\n".to_owned()),
+    ]);
+    w.sources(ZED_BLOG);
+    for (id, p) in [
+        ("a", "Letters/a.md"),
+        ("b", "Letters/b.md"),
+        ("c", "Letters/c.md"),
+    ] {
+        add_row(
+            &w,
+            "blog",
+            "https://zed.substack.com/feed",
+            id,
+            TrackerOutcome::Note,
+            Some(p),
+        );
+    }
+    let b0 = w.env.read("Letters/b.md").unwrap();
+    let dry = w.reconcile(true);
+    assert_eq!(n(&dry, "publication_backfilled"), 2);
+    assert!(
+        w.env
+            .read("Letters/a.md")
+            .unwrap()
+            .contains("publication: \"\"")
+    );
+    let o = w.reconcile(false);
+    assert_eq!(n(&o, "publication_backfilled"), 2);
+    for p in ["Letters/a.md", "Letters/c.md"] {
+        let t = w.env.read(p).unwrap();
+        assert!(t.contains("publication: ZZ\n"), "{t}");
+        assert_eq!(t.matches("publication").count(), 1, "{t}");
+    }
+    assert_eq!(w.env.read("Letters/b.md").unwrap(), b0);
+    assert_eq!(n(&w.reconcile(false), "publication_backfilled"), 0);
+}
+
 /// Round 11 E1: a note matching a `[[serial]]` row gets its publication with no tracker row;
 /// one with a publication is untouched.
 #[test]

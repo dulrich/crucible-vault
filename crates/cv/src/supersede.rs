@@ -467,12 +467,22 @@ fn replaced_text(old: &str, inc: &Incoming<'_>, words: u64) -> Result<String, St
         &JsValue::Str(inc.origin.via().to_owned()),
     )?;
     if let Some(p) = inc.publication
-        && doc.get("publication")?.is_none()
+        && publication_blank(&doc)
     {
         // After `author`; `insert_after` appends at the block end when `author` is absent.
         doc.insert_after("author", "publication", &JsValue::Str(p.to_owned()))?;
     }
     Ok(doc.into_text())
+}
+
+/// Whether `doc` has no usable `publication`: absent, YAML null, or a blank string (plan
+/// intake-auto-enrich WP-4: present-but-empty counts as absent). Any other value is non-empty.
+pub(crate) fn publication_blank(doc: &FrontmatterDoc) -> bool {
+    match doc.get("publication") {
+        Ok(None | Some(JsValue::Null)) => true,
+        Ok(Some(JsValue::Str(s))) => s.trim().is_empty(),
+        _ => false,
+    }
 }
 
 /// Replaces `path`'s body in place (CAS through [`StepCtx::modify`]). `false` when the old text

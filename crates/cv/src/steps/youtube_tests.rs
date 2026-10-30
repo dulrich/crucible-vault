@@ -281,6 +281,48 @@ fn missing_key_fails_no_api_key_and_quota_defers() {
     }
 }
 
+/// WP-4 (intake-auto-enrich): an untracked clip's metadata note gets the fetched channel name.
+#[test]
+fn untracked_clip_metadata_gets_the_channel_name_as_publication() {
+    let w = world(
+        &[("n/a.md", NOTE)],
+        vec![("/videos", 200, VIDEO.into())],
+        "",
+    );
+    meta(&w, "n/a.md").unwrap();
+    let m = read(&w, "_yt_metadata/synth-channel/dQw4w9WgXcQ.md");
+    assert!(m.contains("\npublication: \"Synth Channel\"\n"), "{m}");
+}
+
+/// A channel configured in `sources.toml` supplies its `publication_of` (`short`, else name).
+#[test]
+fn configured_channel_clip_uses_publication_of() {
+    let body = VIDEO.replace("UCsynth", "UCtracked");
+    let w = world(&[("n/a.md", NOTE)], vec![("/videos", 200, body)], "");
+    meta(&w, "n/a.md").unwrap();
+    let m = read(&w, "_yt_metadata/tracked-name/dQw4w9WgXcQ.md");
+    assert!(m.contains("\npublication: \"Tracked Name\"\n"), "{m}");
+}
+
+/// An existing metadata note is found, never rewritten.
+#[test]
+fn existing_metadata_note_publication_is_untouched() {
+    let existing = "---\nvideoId: dQw4w9WgXcQ\npublication: \"Mine\"\n---\n# Synthetic\n";
+    let w = world(
+        &[
+            ("n/a.md", NOTE),
+            ("_yt_metadata/synth-channel/dQw4w9WgXcQ.md", existing),
+        ],
+        vec![("/videos", 200, VIDEO.into())],
+        "",
+    );
+    meta(&w, "n/a.md").unwrap();
+    assert_eq!(
+        read(&w, "_yt_metadata/synth-channel/dQw4w9WgXcQ.md"),
+        existing
+    );
+}
+
 #[test]
 fn tracked_channel_uses_sources_name_folder() {
     let body = VIDEO.replace("UCsynth", "UCtracked");
