@@ -813,6 +813,21 @@ impl StateReader {
         query::list(&self.conn, q)
     }
 
+    /// Every telemetry row of job `id` (input of [`crate::split_buckets`]).
+    pub fn job_telemetry(&self, id: &str) -> Result<Option<JobTelemetry>> {
+        query::telemetry(&self.conn, id)
+    }
+
+    /// Telemetry of every job settled at or after `since_ms` (all settled jobs when `None`),
+    /// optionally one `job_type`. Batched: one query for the jobs plus one per child table.
+    pub fn telemetry_since(
+        &self,
+        since_ms: Option<i64>,
+        job_type: Option<&str>,
+    ) -> Result<Vec<JobTelemetry>> {
+        query::telemetry_since(&self.conn, since_ms, job_type)
+    }
+
     /// Queue status: counts per (type, status).
     pub fn counts(&self) -> Result<Vec<StatusCount>> {
         query::counts(&self.conn)

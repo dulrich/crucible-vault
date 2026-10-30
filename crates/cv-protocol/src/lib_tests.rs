@@ -96,6 +96,14 @@ fn all_requests_round_trip() {
             recent_first: Some(false),
         }),
         Request::JobsList(JobsListParams::default()),
+        Request::JobsStats(JobsStatsParams {
+            job_type: Some("t".into()),
+            since_ms: Some(5),
+        }),
+        Request::JobsStats(JobsStatsParams::default()),
+        Request::JobTimeline(JobIdParams {
+            job_id: "j1".into(),
+        }),
         Request::JobRetry(JobIdParams {
             job_id: "j1".into(),
         }),
@@ -638,6 +646,8 @@ fn method_markers_match_the_wire() {
     check::<m::Cancel>(id(), s);
     check::<m::JobsList>(JobsListParams::default(), s);
     check::<m::JobRetry>(id(), s);
+    check::<m::JobsStats>(JobsStatsParams::default(), s);
+    check::<m::JobTimeline>(id(), s);
     check::<m::IntakeList>(
         IntakeListParams {
             source_kind: None,

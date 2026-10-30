@@ -222,3 +222,133 @@ fn recovery_and_queued_cancel_mark_the_row_partial() {
     assert!(t.partial);
     assert_eq!(split_buckets(&t), None);
 }
+
+// ---- read side: telemetry_since / job_stats (plan job-telemetry WP-2) -------------------
+
+fn tel(id: &str, ty: &str, created: i64, settled: i64, run: i64, partial: bool) -> JobTelemetry {
+    JobTelemetry {
+        id: id.into(),
+        job_type: ty.into(),
+        status: JobStatus::Done,
+        created_ms: created,
+        settled_ms: Some(settled),
+        partial,
+        attempts: vec![AttemptTime {
+            attempt: 1,
+            claimed_ms: settled - run,
+            settled_ms: Some(settled),
+        }],
+        waits: Vec::new(),
+        steps: Vec::new(),
+    }
+}
+
+#[test]
+fn nearest_rank_percentiles_on_a_known_set() {
+    let v: Vec<i64> = (1..=10).collect();
+    assert_eq!(nearest_rank(&v, 50), 5);
+    assert_eq!(nearest_rank(&v, 95), 10);
+    assert_eq!(nearest_rank(&[7], 50), 7);
+    assert_eq!(nearest_rank(&[], 95), 0);
+    // Through job_stats: totals 10,20,..,100 -> p50 = 50, p95 = 100, max = 100.
+    let jobs: Vec<JobTelemetry> = (1..=10)
+        .map(|i| tel(&format!("j{i}"), "t", 0, i * 10, i * 10, false))
+        .collect();
+    let s = &job_stats(&jobs)[0];
+    assert_eq!((s.n, s.partial), (10, 0));
+    assert_eq!(
+        s.total,
+        Pcts {
+            p50: 50,
+            p95: 100,
+            max: 100
+        }
+    );
+    assert_eq!(s.run.p50, 50);
+    assert_eq!(s.residual, Pcts::default());
+}
+
+#[test]
+fn partial_jobs_are_counted_and_never_attributed() {
+    let jobs = vec![
+        tel("a", "t", 0, 100, 40, false),
+        tel("b", "t", 0, 5_000, 40, true),
+        tel("c", "u", 0, 7, 1, true),
+    ];
+    let stats = job_stats(&jobs);
+    let t = stats.iter().find(|s| s.job_type == "t").unwrap();
+    assert_eq!((t.n, t.partial, t.total.max), (1, 1, 100));
+    let u = stats.iter().find(|s| s.job_type == "u").unwrap();
+    assert_eq!((u.n, u.partial, u.total.max), (0, 1, 0));
+    assert_eq!(stats[0].job_type, "t", "sorted by summed total ms");
+}
+
+#[test]
+fn top_blockers_are_ordered_by_summed_ms_and_capped_at_three() {
+    let wait = |at_ms, cause, blocker: &str| WaitEvent {
+        at_ms,
+        cause,
+        blocker: Some(blocker.into()),
+        until_ms: None,
+    };
+    let mut j = tel("a", "t", 0, 1_000, 10, false);
+    j.waits = vec![
+        wait(0, WaitCause::Key, "k1"),
+        wait(100, WaitCause::Permit, "p1"),
+        wait(400, WaitCause::Key, "k2"),
+        wait(450, WaitCause::Breaker, "svc"),
+    ];
+    j.attempts[0].claimed_ms = 990;
+    let top = &job_stats(&[j])[0].top_blockers;
+    assert_eq!(
+        top,
+        &vec![
+            (WaitCause::Breaker, "svc".to_owned(), 540),
+            (WaitCause::Permit, "p1".to_owned(), 300),
+            (WaitCause::Key, "k1".to_owned(), 100),
+        ]
+    );
+}
+
+#[test]
+fn telemetry_since_filters_and_matches_the_per_job_loader() {
+    let (d, mut s) = db();
+    let a = id_of(s.enqueue(job("alpha", None, &["n"]), 10).unwrap());
+    let b = id_of(s.enqueue(job("alpha", None, &["n"]), 11).unwrap());
+    let c = id_of(s.enqueue(job("beta", None, &[]), 12).unwrap());
+    assert_eq!(s.claim(20).unwrap().unwrap().id, a);
+    s.step_started(&a, 0, "guard", 21).unwrap();
+    s.step_ended(&a, 0, 25).unwrap();
+    assert_eq!(s.claim(26).unwrap().unwrap().id, c); // b is key-blocked by a
+    s.settle(&a, &JobResult::Done, 30).unwrap();
+    s.settle(&c, &JobResult::Done, 40).unwrap();
+    assert_eq!(s.claim(41).unwrap().unwrap().id, b);
+    fail_now(&mut s, &b, 100);
+    s.retry_job(&b, 110).unwrap();
+    s.claim(120).unwrap();
+    s.settle(&b, &JobResult::Done, 200).unwrap();
+
+    let r = StateReader::open(&d.path().join("state.db")).unwrap();
+    let all = r.telemetry_since(None, None).unwrap();
+    assert_eq!(all.len(), 3);
+    for t in &all {
+        assert_eq!(Some(t), r.job_telemetry(&t.id).unwrap().as_ref(), "parity");
+    }
+    let ids = |v: &[JobTelemetry]| v.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&all), vec![a.clone(), c.clone(), b.clone()]);
+    assert_eq!(
+        ids(&r.telemetry_since(Some(40), None).unwrap()),
+        vec![c.clone(), b.clone()]
+    );
+    assert_eq!(
+        ids(&r.telemetry_since(None, Some("alpha")).unwrap()),
+        vec![a.clone(), b.clone()]
+    );
+    assert!(
+        r.telemetry_since(Some(100), Some("beta"))
+            .unwrap()
+            .is_empty()
+    );
+    let bt = all.iter().find(|t| t.id == b).unwrap();
+    assert_eq!(bt.attempts.len(), 2);
+}

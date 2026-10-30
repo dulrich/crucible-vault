@@ -7,8 +7,10 @@
 
 use anyhow::{Result, anyhow};
 use cv_protocol::{
-    ActionContext, IntakeItem, IntakeListParams, IntakeListResult, JobIdParams, JobState,
-    JobSummary, JobsListParams, JobsListResult, RunActionParams, TrackerOutcome, methods,
+    ActionContext, BlockerMs, BucketPcts, IntakeItem, IntakeListParams, IntakeListResult,
+    JobIdParams, JobState, JobSummary, JobTimelineResult, JobTypeStats, JobsListParams,
+    JobsListResult, JobsStatsParams, JobsStatsResult, RunActionParams, TimelineAttempt,
+    TimelineSplit, TimelineStep, TimelineWait, TrackerOutcome, methods,
 };
 use cv_state::{IntakeQuery, Job, ListQuery, TrackerItem};
 
@@ -21,7 +23,7 @@ pub const DEFAULT_LIMIT: u32 = 50;
 pub const MAX_LIMIT: u32 = 500;
 
 /// Usage lines (also appended to the top-level `cv --help`).
-pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv intake reconcile [--dry-run]   link NULL-path rows, probe + auto-tick the complete ones, finalize youtube rows, re-match + re-clean mail; prints counts as key=value\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
+pub const USAGE: &str = "  cv jobs list [--status S] [--type T] [--limit N] [--offset N]\n                   S = queued|running|done|failed|cancelled|deferred\n  cv jobs retry <job-id> | cv jobs cancel <job-id>\n  cv jobs stats [--type T] [--since <N>m|<N>h|<N>d|YYYY-MM-DD]   per-type wait/run bucket p50/p95/max (a date is UTC midnight; default: all retained rows)\n  cv jobs show <job-id>   one job's timeline: waits, attempts, steps, bucket split\n  cv intake list [--source-kind K] [--source KEY] [--day YYYY-MM-DD] [--outcome line|note|ignored|skipped] [--limit N] [--offset N]\n  cv intake reconcile [--dry-run]   link NULL-path rows, probe + auto-tick the complete ones, finalize youtube rows, re-match + re-clean mail; prints counts as key=value\n  cv run <action-id> [--note <vault-path>]   run an action through the daemon\n";
 
 fn page_limit(l: Option<u32>) -> u32 {
     l.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
@@ -94,6 +96,114 @@ pub fn job_summary(j: &Job, now_ms: i64) -> JobSummary {
         defer_until_ms: j.defer_until_ms,
         error: j.error.clone(),
         failure_kind: j.failure_kind,
+    }
+}
+
+fn wire_pcts(p: cv_state::Pcts) -> BucketPcts {
+    BucketPcts {
+        p50: p.p50,
+        p95: p.p95,
+        max: p.max,
+    }
+}
+
+fn wire_blockers(b: &[(cv_state::WaitCause, String, i64)]) -> Vec<BlockerMs> {
+    b.iter()
+        .map(|(c, blocker, ms)| BlockerMs {
+            cause: c.as_str().to_owned(),
+            blocker: blocker.clone(),
+            ms: *ms,
+        })
+        .collect()
+}
+
+/// `jobs_stats` result from the aggregated per-type stats (aggregates only: no params or paths).
+#[must_use]
+pub fn jobs_stats_result(stats: &[cv_state::TypeStats]) -> JobsStatsResult {
+    JobsStatsResult {
+        types: stats
+            .iter()
+            .map(|s| JobTypeStats {
+                job_type: s.job_type.clone(),
+                n: s.n,
+                partial: s.partial,
+                total: wire_pcts(s.total),
+                deferral: wire_pcts(s.deferral),
+                permit: wire_pcts(s.permit),
+                key: wire_pcts(s.key),
+                breaker: wire_pcts(s.breaker),
+                run: wire_pcts(s.run),
+                residual: wire_pcts(s.residual),
+                blockers: wire_blockers(&s.top_blockers),
+            })
+            .collect(),
+        partial_total: stats.iter().map(|s| s.partial).sum(),
+    }
+}
+
+/// One job's stored telemetry as a `job_timeline` result. A partial or unsettled job keeps its
+/// stored events but carries `available = false` and no split or wait durations.
+#[must_use]
+pub fn job_timeline(t: &cv_state::JobTelemetry) -> JobTimelineResult {
+    let split = cv_state::split_buckets(t);
+    let durations = cv_state::wait_durations(t);
+    let unavailable = if split.is_some() {
+        None
+    } else if t.settled_ms.is_none() {
+        Some("not settled".to_owned())
+    } else {
+        Some("partial coverage".to_owned())
+    };
+    JobTimelineResult {
+        job_id: t.id.clone(),
+        job_type: t.job_type.clone(),
+        status: t.status.as_str().to_owned(),
+        created_ms: t.created_ms,
+        settled_ms: t.settled_ms,
+        available: split.is_some(),
+        unavailable,
+        waits: t
+            .waits
+            .iter()
+            .enumerate()
+            .map(|(i, w)| TimelineWait {
+                at_ms: w.at_ms,
+                cause: w.cause.as_str().to_owned(),
+                blocker: w.blocker.clone(),
+                until_ms: w.until_ms,
+                duration_ms: durations.as_ref().and_then(|d| d.get(i).copied()),
+            })
+            .collect(),
+        attempts: t
+            .attempts
+            .iter()
+            .map(|a| TimelineAttempt {
+                attempt: a.attempt,
+                claimed_ms: a.claimed_ms,
+                settled_ms: a.settled_ms,
+                steps: t
+                    .steps
+                    .iter()
+                    .filter(|s| s.attempt == a.attempt)
+                    .map(|s| TimelineStep {
+                        index: s.step_index,
+                        kind: s.step_kind.clone(),
+                        start_ms: s.start_ms,
+                        end_ms: s.end_ms,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        split: split.map(|b| TimelineSplit {
+            total_ms: b.total_ms,
+            deferral_ms: b.deferral_ms,
+            permit_ms: b.permit_ms,
+            key_ms: b.key_ms,
+            breaker_ms: b.breaker_ms,
+            run_ms: b.run_ms,
+            residual_ms: b.residual_ms,
+            blockers: wire_blockers(&b.blockers),
+        }),
     }
 }
 
@@ -181,6 +291,11 @@ pub enum Command {
     JobsList(JobsListParams),
     JobRetry(String),
     JobCancel(String),
+    JobsStats {
+        job_type: Option<String>,
+        since: Option<Since>,
+    },
+    JobShow(String),
     IntakeList(IntakeListParams),
     IntakeReconcile {
         dry_run: bool,
@@ -189,6 +304,81 @@ pub enum Command {
         action_id: String,
         note: Option<String>,
     },
+}
+
+/// A `--since` bound: a relative age or an absolute UTC instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Since {
+    /// `<N>m|h|d`: this many ms before now.
+    Ago(i64),
+    /// `YYYY-MM-DD`: UTC midnight, in epoch ms.
+    At(i64),
+}
+
+impl Since {
+    /// The `since_ms` bound at clock `now_ms`.
+    #[must_use]
+    pub fn resolve(self, now_ms: i64) -> i64 {
+        match self {
+            Self::Ago(ms) => now_ms.saturating_sub(ms),
+            Self::At(ms) => ms,
+        }
+    }
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian civil date (Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Parses `--since`: `<N>m|<N>h|<N>d` (N a non-negative integer) or a real `YYYY-MM-DD` date
+/// (UTC midnight, 1970 or later). Anything else is `None` (a usage error), never coerced.
+#[must_use]
+pub fn parse_since(v: &str) -> Option<Since> {
+    if !v.is_ascii() || v.is_empty() {
+        return None;
+    }
+    let b = v.as_bytes();
+    if b.len() == 10 && b[4] == b'-' && b[7] == b'-' {
+        let field = |r: std::ops::Range<usize>| -> Option<i64> {
+            let t = &v[r];
+            if t.bytes().all(|c| c.is_ascii_digit()) {
+                t.parse().ok()
+            } else {
+                None
+            }
+        };
+        let (y, m, d) = (field(0..4)?, field(5..7)?, field(8..10)?);
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let dim = match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if leap => 29,
+            2 => 28,
+            _ => return None,
+        };
+        if y < 1970 || d < 1 || d > dim {
+            return None;
+        }
+        return Some(Since::At(days_from_civil(y, m, d) * 86_400_000));
+    }
+    let (num, unit) = v.split_at(v.len() - 1);
+    if num.is_empty() || !num.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let n: i64 = num.parse().ok()?;
+    let unit_ms: i64 = match unit {
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => return None,
+    };
+    n.checked_mul(unit_ms).map(Since::Ago)
 }
 
 fn num(v: &str) -> Option<u32> {
@@ -214,6 +404,18 @@ pub fn parse(args: &[String]) -> Option<Command> {
             }
             Some(Command::JobsList(p))
         }
+        ["jobs", "stats", rest @ ..] => {
+            let (mut job_type, mut since) = (None, None);
+            for pair in pairs(rest)? {
+                match pair {
+                    ("--type", v) => job_type = Some(v.to_owned()),
+                    ("--since", v) => since = Some(parse_since(v)?),
+                    _ => return None,
+                }
+            }
+            Some(Command::JobsStats { job_type, since })
+        }
+        ["jobs", "show", id] if !id.starts_with('-') => Some(Command::JobShow((*id).to_owned())),
         ["jobs", "retry", id] if !id.starts_with('-') => Some(Command::JobRetry((*id).to_owned())),
         ["jobs", "cancel", id] if !id.starts_with('-') => {
             Some(Command::JobCancel((*id).to_owned()))
@@ -306,6 +508,19 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
         Command::JobsList(p) => render_jobs(
             &client.call::<methods::JobsList>(p.clone()).map_err(e)?,
             now,
+        ),
+        Command::JobsStats { job_type, since } => render_stats(
+            &client
+                .call::<methods::JobsStats>(JobsStatsParams {
+                    job_type: job_type.clone(),
+                    since_ms: since.map(|s| s.resolve(now)),
+                })
+                .map_err(e)?,
+        ),
+        Command::JobShow(id) => render_timeline(
+            &client
+                .call::<methods::JobTimeline>(JobIdParams { job_id: id.clone() })
+                .map_err(e)?,
         ),
         Command::JobRetry(id) | Command::JobCancel(id) => {
             let p = JobIdParams { job_id: id.clone() };
@@ -428,6 +643,130 @@ fn render_jobs(r: &JobsListResult, now: i64) -> String {
             .trim_end(),
         );
         out.push('\n');
+    }
+    out
+}
+
+/// A duration in ms, human: `850ms`, `4.2s`, `3m05s`, `2h10m`.
+fn dur(ms: i64) -> String {
+    let ms = ms.max(0);
+    match ms {
+        0..1000 => format!("{ms}ms"),
+        1000..60_000 => format!("{}.{}s", ms / 1000, (ms % 1000) / 100),
+        60_000..3_600_000 => format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000),
+        _ => format!("{}h{:02}m", ms / 3_600_000, (ms % 3_600_000) / 60_000),
+    }
+}
+
+fn blocker_line(b: &BlockerMs) -> String {
+    let who = if b.blocker.is_empty() {
+        "-"
+    } else {
+        &b.blocker
+    };
+    format!("  blocker   {} {}  {}\n", b.cause, who, dur(b.ms))
+}
+
+fn render_stats(r: &JobsStatsResult) -> String {
+    if r.types.is_empty() && r.partial_total == 0 {
+        return "no settled jobs\n".to_owned();
+    }
+    let mut out = String::new();
+    for t in &r.types {
+        out.push_str(&format!(
+            "{}  n={}  partial={}\n",
+            t.job_type, t.n, t.partial
+        ));
+        for (name, p) in [
+            ("total", &t.total),
+            ("deferral", &t.deferral),
+            ("permit", &t.permit),
+            ("key", &t.key),
+            ("breaker", &t.breaker),
+            ("run", &t.run),
+            ("residual", &t.residual),
+        ] {
+            out.push_str(&format!(
+                "  {name:<9} p50 {}  p95 {}  max {}\n",
+                dur(p.p50),
+                dur(p.p95),
+                dur(p.max)
+            ));
+        }
+        for b in &t.blockers {
+            out.push_str(&blocker_line(b));
+        }
+    }
+    if r.partial_total > 0 {
+        out.push_str(&format!(
+            "partial_total={} (partial coverage; excluded from the buckets)\n",
+            r.partial_total
+        ));
+    }
+    out
+}
+
+fn render_timeline(t: &JobTimelineResult) -> String {
+    let rel = |at: i64| format!("+{}", dur(at - t.created_ms));
+    let mut out = format!("{}  {}  {}\n", t.job_id, t.job_type, t.status);
+    out.push_str("  created   +0ms\n");
+    for w in &t.waits {
+        let who = w
+            .blocker
+            .as_deref()
+            .filter(|b| !b.is_empty())
+            .unwrap_or("-");
+        let d = w.duration_ms.map_or_else(|| "unavailable".to_owned(), dur);
+        out.push_str(&format!(
+            "  {:<9} wait {} {}  {}\n",
+            rel(w.at_ms),
+            w.cause,
+            who,
+            d
+        ));
+    }
+    for a in &t.attempts {
+        let run = a.settled_ms.map_or_else(
+            || "unsettled".to_owned(),
+            |s| format!("run {}", dur(s - a.claimed_ms)),
+        );
+        out.push_str(&format!(
+            "  {:<9} attempt {} claimed  {}\n",
+            rel(a.claimed_ms),
+            a.attempt,
+            run
+        ));
+        for s in &a.steps {
+            let d = s
+                .end_ms
+                .map_or_else(|| "unfinished".to_owned(), |e| dur(e - s.start_ms));
+            out.push_str(&format!("            step {} {}  {}\n", s.index, s.kind, d));
+        }
+    }
+    match t.settled_ms {
+        Some(s) => out.push_str(&format!("  {:<9} settled {}\n", rel(s), t.status)),
+        None => out.push_str("  not settled\n"),
+    }
+    match &t.split {
+        Some(b) => {
+            out.push_str(&format!(
+                "  bucket split: total {}  deferral {}  permit {}  key {}  breaker {}  run {}  residual {}\n",
+                dur(b.total_ms),
+                dur(b.deferral_ms),
+                dur(b.permit_ms),
+                dur(b.key_ms),
+                dur(b.breaker_ms),
+                dur(b.run_ms),
+                dur(b.residual_ms)
+            ));
+            for x in &b.blockers {
+                out.push_str(&blocker_line(x));
+            }
+        }
+        None => out.push_str(&format!(
+            "  bucket split: unavailable ({})\n",
+            t.unavailable.as_deref().unwrap_or("not available")
+        )),
     }
     out
 }
@@ -581,6 +920,169 @@ mod tests {
                 ..IntakeListParams::default()
             })
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+    use cv_state::{AttemptTime, JobStatus, JobTelemetry, StepTime, WaitCause, WaitEvent};
+
+    fn a(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn parse_stats_and_show() {
+        assert_eq!(
+            parse(&a(&["jobs", "stats"])),
+            Some(Command::JobsStats {
+                job_type: None,
+                since: None
+            })
+        );
+        assert_eq!(
+            parse(&a(&["jobs", "stats", "--type", "t", "--since", "90m"])),
+            Some(Command::JobsStats {
+                job_type: Some("t".into()),
+                since: Some(Since::Ago(90 * 60_000))
+            })
+        );
+        assert_eq!(parse_since("2h"), Some(Since::Ago(7_200_000)));
+        assert_eq!(parse_since("3d"), Some(Since::Ago(3 * 86_400_000)));
+        assert_eq!(parse_since("1970-01-02"), Some(Since::At(86_400_000)));
+        assert_eq!(
+            parse_since("2024-02-29"),
+            Some(Since::At(1_709_164_800_000))
+        );
+        assert_eq!(Since::Ago(1_000).resolve(5_000), 4_000);
+        assert_eq!(Since::At(7).resolve(5_000), 7);
+        assert_eq!(
+            parse(&a(&["jobs", "show", "j1"])),
+            Some(Command::JobShow("j1".into()))
+        );
+        for bad in [
+            "",
+            "m",
+            "5",
+            "5x",
+            "-5m",
+            "1.5h",
+            "2023-02-29",
+            "2023-13-01",
+            "1969-12-31",
+            "2023-1-01",
+            "99999999999999999999d",
+        ] {
+            assert_eq!(parse_since(bad), None, "{bad:?}");
+        }
+        for bad in [
+            &["jobs", "stats", "--since", "soon"][..],
+            &["jobs", "stats", "--since"],
+            &["jobs", "stats", "--bogus", "1"],
+            &["jobs", "show"],
+            &["jobs", "show", "a", "b"],
+        ] {
+            assert_eq!(parse(&a(bad)), None, "{bad:?}");
+            assert_eq!(run(&a(bad)), 2, "{bad:?}");
+        }
+    }
+
+    fn tel(partial: bool) -> JobTelemetry {
+        JobTelemetry {
+            id: "job-1".into(),
+            job_type: "synth".into(),
+            status: JobStatus::Done,
+            created_ms: 1_000,
+            settled_ms: Some(9_000),
+            partial,
+            attempts: vec![
+                AttemptTime {
+                    attempt: 1,
+                    claimed_ms: 3_000,
+                    settled_ms: Some(4_000),
+                },
+                AttemptTime {
+                    attempt: 2,
+                    claimed_ms: 6_000,
+                    settled_ms: Some(9_000),
+                },
+            ],
+            waits: vec![WaitEvent {
+                at_ms: 1_000,
+                cause: WaitCause::Key,
+                blocker: Some("holder".into()),
+                until_ms: None,
+            }],
+            steps: vec![
+                StepTime {
+                    attempt: 1,
+                    step_index: 0,
+                    step_kind: "guard".into(),
+                    start_ms: 3_000,
+                    end_ms: Some(3_500),
+                },
+                StepTime {
+                    attempt: 2,
+                    step_index: 0,
+                    step_kind: "shell".into(),
+                    start_ms: 6_000,
+                    end_ms: Some(8_400),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn show_renders_a_timeline_and_never_a_fabricated_zero_for_partial_jobs() {
+        let full = render_timeline(&job_timeline(&tel(false)));
+        println!("{full}");
+        assert!(full.contains("wait key holder  2.0s"), "{full}");
+        assert!(full.contains("step 0 shell  2.4s"), "{full}");
+        assert!(full.contains("bucket split: total 8.0s"), "{full}");
+        assert!(!full.contains("unavailable"), "{full}");
+        let partial = render_timeline(&job_timeline(&tel(true)));
+        println!("{partial}");
+        assert!(
+            partial.contains("bucket split: unavailable (partial coverage)"),
+            "{partial}"
+        );
+        assert!(
+            partial.contains("wait key holder  unavailable"),
+            "{partial}"
+        );
+        let mut open = tel(false);
+        open.settled_ms = None;
+        let open = render_timeline(&job_timeline(&open));
+        assert!(
+            open.contains("bucket split: unavailable (not settled)"),
+            "{open}"
+        );
+    }
+
+    #[test]
+    fn stats_output_carries_aggregates_only() {
+        // Seed text the renderer must never see: a sentinel in a job id-adjacent field cannot
+        // reach `JobTelemetry` (it holds no params), so assert the rendered block directly.
+        let jobs = [tel(false), tel(true)];
+        let r = jobs_stats_result(&cv_state::job_stats(&jobs));
+        let text = render_stats(&r);
+        println!("{text}");
+        assert!(text.starts_with("synth  n=1  partial=1\n"), "{text}");
+        assert!(
+            text.contains("  total     p50 8.0s  p95 8.0s  max 8.0s"),
+            "{text}"
+        );
+        assert!(text.contains("  blocker   key holder  2.0s"), "{text}");
+        assert!(text.contains("partial_total=1"), "{text}");
+        assert!(!text.contains("job-1"), "no job ids in the aggregate view");
+        assert_eq!(
+            render_stats(&JobsStatsResult {
+                types: vec![],
+                partial_total: 0
+            }),
+            "no settled jobs\n"
         );
     }
 }

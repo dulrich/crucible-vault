@@ -966,3 +966,106 @@ async fn memory_report_reaches_status() {
     drop(c);
     d.shutdown().await.unwrap();
 }
+
+/// Plan job-telemetry WP-2: `job_timeline` maps a failed-then-retried job's two attempts and
+/// their steps, a cancelled-while-queued job is `available = false`, an unknown id is NOT_FOUND,
+/// and `jobs_stats` carries aggregates only (no params text).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn job_timeline_and_stats_over_rpc() {
+    use cv_protocol::{JobsStatsParams, Lane, methods as m};
+    use cv_state::{EnqueueOutcome, JobResult, NewJob, QueueConfig, StateDb};
+    const SENTINEL: &str = "SENTINEL-PARAMS-TEXT";
+    let env = Env::new();
+    let db_path = PathBuf::from(&env.vars["CV_STATE_DB"]);
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let new_job = |t: &str| NewJob {
+        job_type: t.into(),
+        lane: Lane::Background,
+        dedupe_key: None,
+        params: json!({"note": SENTINEL}),
+        resource_keys: vec![],
+        service: None,
+    };
+    let id_of = |o: EnqueueOutcome| match o {
+        EnqueueOutcome::Enqueued(id) | EnqueueOutcome::Duplicate(id) => id,
+    };
+    // Seed settled rows before the daemon starts (its runner would claim a queued row).
+    let base = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        - 100_000;
+    let (retried, queued_cancelled) = {
+        let mut s = StateDb::open(&db_path, base, QueueConfig::default()).unwrap();
+        let a = id_of(s.enqueue(new_job("synth"), base).unwrap());
+        s.claim(base + 10).unwrap().unwrap();
+        s.step_started(&a, 0, "guard", base + 10).unwrap();
+        s.step_ended(&a, 0, base + 14).unwrap();
+        s.settle(
+            &a,
+            &JobResult::Failed {
+                error: "boom".into(),
+                reason: None,
+            },
+            base + 20,
+        )
+        .unwrap();
+        s.retry_job(&a, base + 100).unwrap();
+        s.claim(base + 110).unwrap().unwrap();
+        s.step_started(&a, 0, "guard", base + 110).unwrap();
+        s.step_ended(&a, 0, base + 112).unwrap();
+        s.step_started(&a, 1, "shell", base + 112).unwrap();
+        s.step_ended(&a, 1, base + 150).unwrap();
+        s.settle(&a, &JobResult::Done, base + 160).unwrap();
+        let q = id_of(s.enqueue(new_job("synth"), base + 200).unwrap());
+        s.cancel(&q, base + 210).unwrap();
+        (a, q)
+    };
+    let d = start(&env).await;
+    let c = client(&env);
+    let t = c
+        .call::<m::JobTimeline>(JobIdParams {
+            job_id: retried.clone(),
+        })
+        .unwrap();
+    assert!(t.available, "{t:?}");
+    assert_eq!(t.attempts.len(), 2);
+    assert_eq!(t.attempts[0].steps.len(), 1);
+    assert_eq!(t.attempts[1].steps.len(), 2);
+    assert_eq!(t.attempts[1].steps[1].kind, "shell");
+    let sp = t.split.as_ref().unwrap();
+    assert_eq!(sp.total_ms, 160);
+    assert_eq!(sp.run_ms, 10 + 50);
+    let p = c
+        .call::<m::JobTimeline>(JobIdParams {
+            job_id: queued_cancelled,
+        })
+        .unwrap();
+    assert!(!p.available && p.split.is_none());
+    assert_eq!(p.unavailable.as_deref(), Some("partial coverage"));
+    let e = c
+        .call::<m::JobTimeline>(JobIdParams {
+            job_id: "nope".into(),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&e, ClientError::Rpc(r) if r.code == error_codes::NOT_FOUND),
+        "{e:?}"
+    );
+    let st = c.call::<m::JobsStats>(JobsStatsParams::default()).unwrap();
+    assert_eq!(st.types.len(), 1);
+    assert_eq!((st.types[0].n, st.types[0].partial), (1, 1));
+    assert_eq!(st.partial_total, 1);
+    let wire = format!(
+        "{}{}{}",
+        serde_json::to_string(&t).unwrap(),
+        serde_json::to_string(&p).unwrap(),
+        serde_json::to_string(&st).unwrap()
+    );
+    assert!(!wire.contains(SENTINEL), "params text leaked: {wire}");
+    drop(c);
+    d.shutdown().await.unwrap();
+}

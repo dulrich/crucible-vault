@@ -401,6 +401,8 @@ impl Shared {
             Request::Cancel(p) => reply::<m::Cancel>(self.cancel(&p.job_id)),
             Request::JobsList(p) => reply::<m::JobsList>(self.jobs_list(&p)),
             Request::JobRetry(p) => reply::<m::JobRetry>(self.job_retry(&p.job_id)),
+            Request::JobsStats(p) => reply::<m::JobsStats>(self.jobs_stats(&p)),
+            Request::JobTimeline(p) => reply::<m::JobTimeline>(self.job_timeline(&p.job_id)),
             Request::IntakeList(p) => reply::<m::IntakeList>(self.intake_list(&p)),
             Request::ReconcileIntake(p) => {
                 reply::<m::ReconcileIntake>(self.reconcile_intake(p).await)

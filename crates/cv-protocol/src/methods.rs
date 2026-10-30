@@ -70,6 +70,8 @@ methods! {
     Cancel = "cancel" (JobIdParams) -> JobStatus;
     JobsList = "jobs_list" (JobsListParams) -> JobsListResult;
     JobRetry = "job_retry" (JobIdParams) -> JobStatus;
+    JobsStats = "jobs_stats" (JobsStatsParams) -> JobsStatsResult;
+    JobTimeline = "job_timeline" (JobIdParams) -> JobTimelineResult;
     IntakeList = "intake_list" (IntakeListParams) -> IntakeListResult;
     Uri = "uri" (UriParams) -> UriResult;
     Status = "status" -> StatusResult;

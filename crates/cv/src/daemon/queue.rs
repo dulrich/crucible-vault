@@ -52,6 +52,28 @@ impl Shared {
         })
     }
 
+    /// `jobs_stats`: per-type bucket percentiles over the settled jobs, via the read-only handle.
+    pub(super) fn jobs_stats(
+        &self,
+        p: &cv_protocol::JobsStatsParams,
+    ) -> Result<cv_protocol::JobsStatsResult, RpcError> {
+        let jobs = self
+            .reader()?
+            .telemetry_since(p.since_ms, p.job_type.as_deref())
+            .map_err(rpc_from_state)?;
+        Ok(crate::jobs::jobs_stats_result(&cv_state::job_stats(&jobs)))
+    }
+
+    /// `job_timeline`: one job's stored telemetry; an unknown id is `NoSuchJob` (like `job`).
+    pub(super) fn job_timeline(
+        &self,
+        id: &str,
+    ) -> Result<cv_protocol::JobTimelineResult, RpcError> {
+        let t = self.reader()?.job_telemetry(id).map_err(rpc_from_state)?;
+        t.map(|t| crate::jobs::job_timeline(&t))
+            .ok_or_else(|| rpc_from_state(StateError::NoSuchJob(id.to_owned())))
+    }
+
     pub(super) fn job_retry(&self, id: &str) -> Result<JobStatus, RpcError> {
         let outcome = lock(&self.state)
             .retry_job(id, now_ms())

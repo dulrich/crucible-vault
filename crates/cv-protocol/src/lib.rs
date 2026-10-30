@@ -142,6 +142,10 @@ pub enum Request {
     JobsList(JobsListParams),
     /// Re-queue one failed/cancelled job.
     JobRetry(JobIdParams),
+    /// Per-type wait/run bucket percentiles (plan job-telemetry WP-2).
+    JobsStats(JobsStatsParams),
+    /// One job's stored telemetry timeline.
+    JobTimeline(JobIdParams),
     /// Tracker intake rows.
     IntakeList(IntakeListParams),
     Uri(UriParams),
@@ -499,6 +503,129 @@ impl JobSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobsListResult {
     pub jobs: Vec<JobSummary>,
+}
+
+/// `jobs_stats` params (plan job-telemetry WP-2): settled jobs with `settled_at_ms >= since_ms`
+/// (all retained rows when absent), optionally one `job_type`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobsStatsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<i64>,
+}
+
+/// p50 / p95 / max of one wait or run bucket, in ms (nearest-rank over the attributed jobs).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketPcts {
+    pub p50: i64,
+    pub p95: i64,
+    pub max: i64,
+}
+
+/// Measured wait attributed to one `(cause, blocker)` (`blocker` is `""` when none was named).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockerMs {
+    /// `deferred|permit|key|breaker`.
+    pub cause: String,
+    pub blocker: String,
+    pub ms: i64,
+}
+
+/// One `job_type` row of `jobs_stats`. Aggregates only: no params, paths or note content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobTypeStats {
+    pub job_type: String,
+    /// Attributed jobs.
+    pub n: u64,
+    /// Settled jobs excluded for partial coverage.
+    pub partial: u64,
+    pub total: BucketPcts,
+    pub deferral: BucketPcts,
+    pub permit: BucketPcts,
+    pub key: BucketPcts,
+    pub breaker: BucketPcts,
+    pub run: BucketPcts,
+    pub residual: BucketPcts,
+    /// Top blockers by summed ms, largest first.
+    pub blockers: Vec<BlockerMs>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobsStatsResult {
+    /// Sorted by summed total ms, descending.
+    pub types: Vec<JobTypeStats>,
+    /// Sum of the per-type `partial` counts.
+    pub partial_total: u64,
+}
+
+/// One stored wait-cause change of a job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineWait {
+    pub at_ms: i64,
+    pub cause: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<i64>,
+    /// Measured duration; absent when the job's intervals are unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+}
+
+/// One executed step of one attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineStep {
+    pub index: i64,
+    pub kind: String,
+    pub start_ms: i64,
+    /// Absent when the step never stamped an end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<i64>,
+}
+
+/// One claim of a job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineAttempt {
+    pub attempt: i64,
+    pub claimed_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_ms: Option<i64>,
+    pub steps: Vec<TimelineStep>,
+}
+
+/// The bucket split of a settled, fully instrumented job: every ms lands in exactly one bucket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSplit {
+    pub total_ms: i64,
+    pub deferral_ms: i64,
+    pub permit_ms: i64,
+    pub key_ms: i64,
+    pub breaker_ms: i64,
+    pub run_ms: i64,
+    pub residual_ms: i64,
+    pub blockers: Vec<BlockerMs>,
+}
+
+/// `job_timeline` result: the stored telemetry of one job. `available` is `false` (and `split`
+/// absent) for a partial-coverage or unsettled job, never a fabricated zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobTimelineResult {
+    pub job_id: String,
+    pub job_type: String,
+    /// Stored status (`queued|running|done|failed|cancelled`).
+    pub status: String,
+    pub created_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_ms: Option<i64>,
+    pub available: bool,
+    /// Why `available` is false: `partial coverage` or `not settled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    pub waits: Vec<TimelineWait>,
+    pub attempts: Vec<TimelineAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<TimelineSplit>,
 }
 
 /// `intake_list` params; `day` is `YYYY-MM-DD`, `outcome` `line|note|ignored|skipped`.

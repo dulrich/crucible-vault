@@ -30,8 +30,8 @@ pub use image_descriptions::ImageDescription;
 pub use job::{EnqueueOutcome, FailureReason, Job, JobResult, JobStatus, NewJob, namespaced_key};
 pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
 pub use query::{
-    AttemptRun, AttemptTime, BucketSplit, JobTelemetry, ListQuery, StatusCount, StepTime,
-    WaitCause, WaitEvent, split_buckets,
+    AttemptRun, AttemptTime, BucketSplit, JobTelemetry, ListQuery, Pcts, StatusCount, StepTime,
+    TypeStats, WaitCause, WaitEvent, job_stats, nearest_rank, split_buckets, wait_durations,
 };
 pub use runner_state::StepCheckpoint;
 pub use store::{
