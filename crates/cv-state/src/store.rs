@@ -14,6 +14,7 @@
 //! markdown queue archive and its notice (`:63`), and the file-backend `JobStore.move`
 //! rename/rollback; the `NoteLockManager` is replaced by claim-time resource-key exclusion (I3).
 
+use crate::claim::{self, Eligibility, ProbeMode};
 use crate::error::{Result, StateError};
 use crate::health::{self, ServiceFailureKind, ServiceHealth};
 use crate::id::new_job_id;
@@ -22,8 +23,8 @@ use crate::job::{
     EnqueueOutcome, Job, JobResult, JobStatus, NewJob, failure_kind_for, lane_rank, namespaced_key,
 };
 use crate::migrate;
-use crate::query::{self, JobTelemetry, ListQuery, StatusCount, WaitCause};
-use crate::telemetry;
+use crate::query::{self, ListQuery, StatusCount};
+use crate::telemetry::{self, WaitCause};
 use cv_protocol::BreakerState;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, HashSet};
@@ -83,7 +84,7 @@ static TOKEN_SEQ: AtomicU64 = AtomicU64::new(0);
 pub type ChangeHook = Box<dyn Fn(&'static str) + Send>;
 
 pub struct StateDb {
-    conn: Connection,
+    pub(crate) conn: Connection,
     token: String,
     config: QueueConfig,
     change_hook: Option<ChangeHook>,
@@ -231,48 +232,40 @@ impl StateDb {
         }
         // Fail closed (I3): an unreadable running row's keys cannot be checked for overlap, so
         // no claim proceeds until the row is repaired.
-        let busy = telemetry::running_keys(&tx)?;
-        let candidates: Vec<(String, String, Option<String>)> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, resource_keys, service FROM jobs WHERE status = 'queued' AND (defer_until_ms IS NULL OR defer_until_ms <= ?1) ORDER BY lane ASC, id ASC",
-            )?;
-            stmt.query_map(params![now_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
+        let busy = claim::running_keys(&tx)?;
         let mut chosen = None;
-        for (id, raw_keys, service) in candidates {
+        for (id, raw_keys, service) in claim::candidates(&tx, now_ms)? {
             // Fail closed (I3): a candidate whose resource keys do not parse is never claimed;
             // it stays queued and visible to `list` (which tolerates corrupt JSON).
             let Ok(keys) = serde_json::from_str::<Vec<String>>(&raw_keys) else {
                 tracing::warn!(job_id = %id, "unparseable resource_keys; not claimable");
                 continue;
             };
-            // Telemetry (plan job-telemetry Decisions 3-4): a skipped candidate records its
-            // cause only when it changed; the classification reuses this pass's decision.
-            if let Some(blocker) = keys.iter().find_map(|k| busy.get(k)) {
-                telemetry::note_wait(&tx, &id, WaitCause::Key, Some(blocker), now_ms)?;
-                continue;
-            }
-            if let Some(svc) = &service
-                && let Some(mut h) = health::load(&tx, svc)?
-            {
-                match h.state {
-                    BreakerState::Closed => {}
-                    BreakerState::Open => {
-                        telemetry::note_wait(&tx, &id, WaitCause::Breaker, Some(svc), now_ms)?;
-                        continue;
+            let mut h = match &service {
+                Some(svc) => health::load(&tx, svc)?,
+                None => None,
+            };
+            match claim::classify(
+                &keys,
+                service.as_deref(),
+                &busy,
+                h.as_mut(),
+                ProbeMode::Take,
+                now_ms,
+            ) {
+                // Telemetry (plan job-telemetry Decisions 3-4): a skipped candidate records its
+                // cause only when it changed; the classification reuses this pass's decision.
+                Eligibility::Wait { cause, blocker } => {
+                    telemetry::note_wait(&tx, &id, cause, Some(&blocker), now_ms)?;
+                }
+                Eligibility::Claimable { probe_taken } => {
+                    if probe_taken && let Some(h) = &h {
+                        health::store(&tx, h)?;
                     }
-                    BreakerState::HalfOpen => {
-                        if !h.try_acquire_probe(now_ms) {
-                            telemetry::note_wait(&tx, &id, WaitCause::Breaker, Some(svc), now_ms)?;
-                            continue;
-                        }
-                        health::store(&tx, &h)?;
-                    }
+                    chosen = Some(id);
+                    break;
                 }
             }
-            chosen = Some(id);
-            break;
         }
         let Some(id) = chosen else {
             tx.commit()?;
@@ -286,76 +279,6 @@ impl StateDb {
         let job = query::get(&tx, &id)?;
         tx.commit()?;
         Ok(job)
-    }
-
-    /// Permit-wait observation (plan job-telemetry Decision 3): the claim loop calls this when
-    /// no runner permit is free. Every claimable queued candidate records why it waits — a busy
-    /// key or breaker when one applies (classified read-only; never takes the half-open probe,
-    /// audit E2), else the permit, naming the running jobs' actions. One transaction; a
-    /// candidate is written only when its cause changed (Decision 4).
-    pub fn observe_permit_wait(&mut self, now_ms: i64) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let busy = telemetry::running_keys(&tx)?;
-        let holders = telemetry::running_actions(&tx)?;
-        let candidates: Vec<(String, String, Option<String>)> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, resource_keys, service FROM jobs WHERE status = 'queued' AND (defer_until_ms IS NULL OR defer_until_ms <= ?1)",
-            )?;
-            stmt.query_map(params![now_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        for (id, raw_keys, service) in candidates {
-            let Ok(keys) = serde_json::from_str::<Vec<String>>(&raw_keys) else {
-                continue;
-            };
-            let (cause, blocker) = if let Some(b) = keys.iter().find_map(|k| busy.get(k)) {
-                (WaitCause::Key, b.clone())
-            } else if let Some(svc) = &service
-                && let Some(h) = health::load(&tx, svc)?
-                && (h.state == BreakerState::Open
-                    || (h.state == BreakerState::HalfOpen && h.probe_in_flight()))
-            {
-                (WaitCause::Breaker, svc.clone())
-            } else {
-                (WaitCause::Permit, holders.clone())
-            };
-            telemetry::note_wait(&tx, &id, cause, Some(&blocker), now_ms)?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Stamps the start of step `step_index` (`step_kind`) of `job_id`'s current telemetry attempt.
-    pub fn step_started(
-        &mut self,
-        job_id: &str,
-        step_index: i64,
-        step_kind: &str,
-        now_ms: i64,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO job_step_times (job_id, attempt, step_index, step_kind, start_ms, end_ms)
-             SELECT id, tel_attempt, ?2, ?3, ?4, NULL FROM jobs WHERE id = ?1",
-            params![job_id, step_index, step_kind, now_ms],
-        )?;
-        Ok(())
-    }
-
-    /// Stamps the end of step `step_index` of `job_id`'s current telemetry attempt.
-    pub fn step_ended(&mut self, job_id: &str, step_index: i64, now_ms: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE job_step_times SET end_ms = ?3 WHERE job_id = ?1 AND step_index = ?2
-               AND attempt = (SELECT tel_attempt FROM jobs WHERE id = ?1)",
-            params![job_id, step_index, now_ms],
-        )?;
-        Ok(())
-    }
-
-    /// Every telemetry row of job `id` (input of [`crate::split_buckets`]).
-    pub fn job_telemetry(&self, id: &str) -> Result<Option<JobTelemetry>> {
-        query::telemetry(&self.conn, id)
     }
 
     /// Earliest `defer_until_ms` among deferred queued rows still in the future (the wake time).
@@ -782,7 +705,7 @@ pub enum RetryOutcome {
 /// Read-only client handle (plan B editor, A2 dashboard, `cv status`). Opened with
 /// `SQLITE_OPEN_READ_ONLY`; it never migrates, so a not-yet-created or newer DB is an error.
 pub struct StateReader {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl std::fmt::Debug for StateReader {
@@ -811,21 +734,6 @@ impl StateReader {
     /// Queue list.
     pub fn list(&self, q: &ListQuery) -> Result<Vec<Job>> {
         query::list(&self.conn, q)
-    }
-
-    /// Every telemetry row of job `id` (input of [`crate::split_buckets`]).
-    pub fn job_telemetry(&self, id: &str) -> Result<Option<JobTelemetry>> {
-        query::telemetry(&self.conn, id)
-    }
-
-    /// Telemetry of every job settled at or after `since_ms` (all settled jobs when `None`),
-    /// optionally one `job_type`. Batched: one query for the jobs plus one per child table.
-    pub fn telemetry_since(
-        &self,
-        since_ms: Option<i64>,
-        job_type: Option<&str>,
-    ) -> Result<Vec<JobTelemetry>> {
-        query::telemetry_since(&self.conn, since_ms, job_type)
     }
 
     /// Queue status: counts per (type, status).

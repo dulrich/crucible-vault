@@ -5,15 +5,17 @@ use super::*;
 
 /// The invariant: every millisecond of `settled − created` lands in exactly one bucket.
 fn split(s: &StateDb, id: &str) -> BucketSplit {
-    let t = s.job_telemetry(id).unwrap().unwrap();
-    let b = split_buckets(&t).expect("settled, fully instrumented");
+    split_of(&s.job_telemetry(id).unwrap().unwrap())
+}
+
+fn split_of(t: &JobTelemetry) -> BucketSplit {
+    let b = split_buckets(t).expect("settled, fully instrumented");
     assert!(b.residual_ms >= 0, "{b:?}");
     assert_eq!(
         b.deferral_ms + b.permit_ms + b.key_ms + b.breaker_ms + b.run_ms + b.residual_ms,
         b.total_ms,
         "{b:?}"
     );
-    assert_eq!(b.run_ms, b.attempts.iter().map(|a| a.run_ms).sum::<i64>());
     let waits: i64 = b.blockers.iter().map(|(_, _, ms)| ms).sum();
     assert_eq!(waits, b.deferral_ms + b.permit_ms + b.key_ms + b.breaker_ms);
     b
@@ -67,8 +69,13 @@ fn failed_then_retried_puts_the_terminal_gap_in_the_residual() {
     s.settle(&id, &JobResult::Done, 150).unwrap();
     // E1: `attempts` was reset by retry; the telemetry attempt is not.
     assert_eq!(s.job(&id).unwrap().unwrap().attempts, 1);
-    let b = split(&s, &id);
-    let attempts: Vec<(i64, i64)> = b.attempts.iter().map(|a| (a.attempt, a.run_ms)).collect();
+    let t = s.job_telemetry(&id).unwrap().unwrap();
+    let b = split_of(&t);
+    let attempts: Vec<(i64, i64)> = t
+        .attempts
+        .iter()
+        .map(|a| (a.attempt, a.settled_ms.unwrap() - a.claimed_ms))
+        .collect();
     assert_eq!(attempts, vec![(1, 10), (2, 40)]);
     assert_eq!((b.total_ms, b.run_ms, b.residual_ms), (140, 50, 90));
 }
@@ -147,12 +154,24 @@ fn step_rows_are_kept_per_telemetry_attempt_and_pruned_with_the_job() {
     s.step_started(&id, 1, "set_props", 7).unwrap();
     s.step_ended(&id, 1, 10).unwrap();
     s.settle(&id, &JobResult::Done, 10).unwrap();
-    let b = split(&s, &id);
+    let t = s.job_telemetry(&id).unwrap().unwrap();
+    let b = split_of(&t);
+    assert_eq!(b.run_ms, 3 + 4);
     type Steps = Vec<(i64, String, i64)>;
-    let steps: Vec<(i64, Steps)> = b
+    let steps: Vec<(i64, Steps)> = t
         .attempts
-        .into_iter()
-        .map(|a| (a.attempt, a.steps))
+        .iter()
+        .map(|a| {
+            let s = t.steps.iter().filter(|s| s.attempt == a.attempt);
+            let s = s.map(|s| {
+                (
+                    s.step_index,
+                    s.step_kind.clone(),
+                    s.end_ms.unwrap() - s.start_ms,
+                )
+            });
+            (a.attempt, s.collect())
+        })
         .collect();
     assert_eq!(
         steps,

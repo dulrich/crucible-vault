@@ -3,6 +3,7 @@
 //!
 //! Pure and synchronous: no async runtime. Every time-dependent API takes `now_ms`.
 
+mod claim;
 mod dup_labels;
 mod error;
 pub mod health;
@@ -29,14 +30,15 @@ pub use id::new_job_id;
 pub use image_descriptions::ImageDescription;
 pub use job::{EnqueueOutcome, FailureReason, Job, JobResult, JobStatus, NewJob, namespaced_key};
 pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
-pub use query::{
-    AttemptRun, AttemptTime, BucketSplit, JobTelemetry, ListQuery, Pcts, StatusCount, StepTime,
-    TypeStats, WaitCause, WaitEvent, job_stats, nearest_rank, split_buckets, wait_durations,
-};
+pub use query::{ListQuery, StatusCount};
 pub use runner_state::StepCheckpoint;
 pub use store::{
     BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, QueueConfig,
     RequeueBreakdown, RetryOutcome, StateDb, StateReader,
+};
+pub use telemetry::{
+    AttemptTime, BucketSplit, JobTelemetry, Pcts, StepTime, TypeStats, WaitCause, WaitEvent,
+    job_stats, nearest_rank, split_buckets, wait_durations,
 };
 pub use tracker::{IntakeQuery, Rekey, TrackerEvidence, TrackerItem};
 pub use trash::{NewTrashEntry, TrashEntry};
