@@ -443,7 +443,11 @@ impl App {
         let Some(q) = &self.quit else {
             return Task::none();
         };
-        if q.pending.is_empty() && q.settings.is_empty() && q.awaiting.is_empty() {
+        if q.pending.is_empty()
+            && q.settings.is_empty()
+            && q.awaiting.is_empty()
+            && q.held.is_empty()
+        {
             let losses = self.quit.take().map(|q| q.losses).unwrap_or_default();
             if losses.is_empty() {
                 return self.exit();
@@ -522,6 +526,18 @@ impl App {
         }
         if doc.conflict().is_some() || !self.status.connected {
             self.close_dialog(&path, vec![id], "not connected");
+            return Task::none();
+        }
+        // Plan round-18 WP-2 (Decision 3): a held note's close waits for the release, then
+        // saves and closes (`resume_hold_waits`); nothing closes or is lost meanwhile.
+        if let Some(label) = self.held(&path).map(|h| h.label.clone()) {
+            self.status.notify(
+                Severity::Warning,
+                format!("{label} is updating this note — closing when it finishes"),
+            );
+            if !self.hold_closes.contains(&(path.clone(), id)) {
+                self.hold_closes.push((path, id));
+            }
             return Task::none();
         }
         if let Some(t) = self.save_then(&path, Some(AfterSave::CloseTab(id))) {

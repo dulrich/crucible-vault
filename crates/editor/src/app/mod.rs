@@ -305,6 +305,9 @@ pub struct App {
     restoring: bool,
     /// Plan round-17 WP-2: note holds by daemon job id ([`holds`]).
     pub(crate) holds: std::collections::HashMap<String, holds::Hold>,
+    /// Plan round-18 WP-2: tab closes of dirty held notes `(note path, tab id)`, resumed (saved,
+    /// then closed) when the hold releases.
+    pub(crate) hold_closes: Vec<(String, u64)>,
     /// The hold overlay's spinner frame.
     hold_frame: u32,
     /// editor-usability-round WP-3: the pane whose view-mode dropdown is open.
@@ -356,6 +359,9 @@ pub(crate) struct QuitState {
     /// Notes whose normal (autosave/flush) save was already in flight at quit; resolved by
     /// their `SourceMsg::Saved` (plan editor-feedback-round-2 WP-3 rework).
     awaiting: std::collections::HashSet<String>,
+    /// Plan round-18 WP-2: dirty notes a running job holds; saved (then counted `pending`) when
+    /// the hold releases, a loss on disconnect (a second quit offers "quit anyway").
+    held: std::collections::HashSet<String>,
     /// plan editor-data-safety WP-2: what cannot be saved (shown in the dialog once every
     /// flush has resolved).
     losses: crate::dialog::UnsavedEdits,
@@ -452,6 +458,7 @@ impl App {
             state_path,
             restoring: true,
             holds: std::collections::HashMap::new(),
+            hold_closes: Vec::new(),
             hold_frame: 0,
             mode_menu: None,
             mouse_down: false,

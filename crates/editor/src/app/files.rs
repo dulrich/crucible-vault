@@ -83,6 +83,12 @@ impl App {
     }
 
     pub(super) fn dispatch_op(&mut self, op: FileOp) -> Task<Message> {
+        // Plan round-18 WP-2 (Decision 2 fast path): a held note (or a folder holding one) is
+        // neither renamed nor deleted; the daemon refuses it too.
+        if let Some(label) = self.held_by_op(&op) {
+            self.notify_held(&label);
+            return Task::none();
+        }
         // A rename/move/trash re-reads (or closes) the open tab, which would drop unsaved edits.
         if let FileOp::Delete { path } = &op
             && self.doc_dirty(path)
@@ -173,7 +179,7 @@ impl App {
                         ));
                     }
                 }
-                Err(e) => self.status.set_error(e),
+                Err(e) => self.report_error(e),
             },
             ExplorerMsg::Input(s) => {
                 if let Some(e) = &mut self.explorer.edit {
@@ -197,7 +203,7 @@ impl App {
                         FileOp::Delete { path } => self.close_path(path),
                     }
                 }
-                Err(e) => self.status.set_error(e),
+                Err(e) => self.report_error(e),
             },
         }
         Task::none()
@@ -271,7 +277,7 @@ impl App {
         }
         let p = cv_protocol::NoteSetBoolParams { path, key, value };
         self.rpc(
-            move |d| d.note_set_bool(&p).map_err(|e| e.to_string()),
+            move |d| d.note_set_bool(&p).map_err(|e| crate::daemon::rpc_err(&e)),
             |r| Message::Views(crate::message::ViewsMsg::BoolSet(r)),
         )
     }
@@ -515,8 +521,12 @@ impl App {
                 Task::none()
             }
             Err(e) => {
-                self.status
-                    .set_error(format!("title changed; rename failed: {e}"));
+                if crate::daemon::held_label(&e).is_some() {
+                    self.report_error(e);
+                } else {
+                    self.status
+                        .set_error(format!("title changed; rename failed: {e}"));
+                }
                 let Some(doc) = buf_mut(&mut self.docs, from) else {
                     return Task::none();
                 };

@@ -347,6 +347,8 @@ pub fn update(store: &mut ViewStore, m: ViewsMsg) -> Effect {
             }
             Effect::None
         }
+        // A daemon `HELD` refusal keeps its tagged text (`App::report_error` posts the hold notice).
+        ViewsMsg::BoolSet(Err(e)) if crate::daemon::held_label(&e).is_some() => Effect::Notice(e),
         ViewsMsg::BoolSet(Err(e)) => Effect::Notice(format!("property change failed: {e}")),
         ViewsMsg::Select { host, value } => store.select(host, value),
     }

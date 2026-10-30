@@ -163,8 +163,8 @@ impl App {
                         .record(Severity::Warning, "daemon connection lost", None);
                 }
                 self.status.connected = false;
-                self.clear_holds();
-                return self.start_reconnect();
+                let released = self.clear_holds();
+                return Task::batch([released, self.start_reconnect()]);
             }
             StatusMsg::ReconnectDue => return self.try_reconnect(),
             StatusMsg::OpenerFailed(msg) => self.status.set_error(msg),

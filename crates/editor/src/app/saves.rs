@@ -101,14 +101,14 @@ impl App {
         self.rpc(
             move |d| {
                 d.delete_note(&path, &attachments, mode)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| crate::daemon::rpc_err(&e))
             },
             |r| Message::Explorer(ExplorerMsg::NoteDeleted(r)),
         )
     }
 
     /// Why `path`'s edits could not be saved (`fallback` when no conflict / outage explains it).
-    fn loss_reason(&self, path: &str, fallback: &str) -> crate::dialog::LossReason {
+    pub(super) fn loss_reason(&self, path: &str, fallback: &str) -> crate::dialog::LossReason {
         use crate::dialog::LossReason;
         match buf(&self.docs, path) {
             Some(d) if d.is_missing() => LossReason::Missing,
@@ -268,7 +268,21 @@ impl App {
     ) -> Task<Message> {
         let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
         let result = buf_mut(&mut self.docs, path).map(|d| d.finish_save(seq, outcome));
-        if after.is_none()
+        // Plan round-18 WP-2: a daemon `HELD` refusal keeps the buffer dirty and posts the one
+        // hold notice (not a generic failure); later text sees a plain message.
+        let held = match &result {
+            Some(Err(e)) => crate::daemon::held_label(e).map(str::to_owned),
+            _ => None,
+        };
+        let result = match (&held, result) {
+            (Some(label), Some(Err(_))) => Some(Err(format!("{label} is updating this note"))),
+            (_, r) => r,
+        };
+        if let Some(label) = &held {
+            if after.is_none() {
+                self.notify_held(label);
+            }
+        } else if after.is_none()
             && let Some(Err(e)) = &result
         {
             self.status.set_error(format!("save failed: {e}"));
@@ -449,8 +463,11 @@ impl App {
     /// Quit: flush every dirty document (once per document, however many tabs show it — plan
     /// editor-feedback-round-2 WP-7), exit once all saves land; any failure cancels the quit.
     pub(super) fn quit(&mut self) -> Task<Message> {
-        if self.quit.is_some() || self.dialog.is_some() {
+        if self.dialog.is_some() {
             return Task::none();
+        }
+        if self.quit.is_some() {
+            return self.quit_anyway_dialog();
         }
         let dirty: Vec<String> = self
             .docs
@@ -477,9 +494,15 @@ impl App {
         let connected = self.status.connected && self.daemon.is_some();
         let (mut pending, mut saves) = (std::collections::HashSet::new(), Vec::new());
         let mut awaiting = std::collections::HashSet::new();
+        let mut held = std::collections::HashSet::new();
         for path in dirty {
             if !connected {
                 losses.note(&path, crate::dialog::LossReason::Disconnected);
+                continue;
+            }
+            // Plan round-18 WP-2: a held note's save starts when the hold releases.
+            if self.held(&path).is_some() {
+                held.insert(path);
                 continue;
             }
             let reason = self.loss_reason(&path, "the save could not start");
@@ -505,6 +528,7 @@ impl App {
             pending,
             settings: std::collections::HashSet::new(),
             awaiting,
+            held,
             losses,
         });
         if !connected {

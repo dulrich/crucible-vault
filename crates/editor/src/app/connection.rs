@@ -241,7 +241,7 @@ impl App {
         self.status.reconnecting = false;
         self.status.notice = None;
         // Plan round-17 WP-2: the subscribe snapshot re-fills the holds.
-        self.clear_holds();
+        let released = self.clear_holds();
         self.status
             .record(Severity::Info, "reconnected to daemon", None);
         self.reconnect_attempt = 0;
@@ -258,7 +258,7 @@ impl App {
         let paths: Vec<String> = self.docs.keys().cloned().collect();
         let saves: Vec<Task<Message>> = paths.iter().map(|p| self.resync_doc(p)).collect();
         let memory = self.send_memory_report();
-        Task::batch([fetch, status, memory].into_iter().chain(saves))
+        Task::batch([released, fetch, status, memory].into_iter().chain(saves))
     }
 
     /// Sends a `memory_report` to the daemon (plan memory-instrumentation-and-reduction WP-M2):

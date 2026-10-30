@@ -109,6 +109,8 @@ pub enum LossReason {
     Missing,
     Disconnected,
     SaveFailed(String),
+    /// Plan round-18 WP-2: a daemon job (the label) is updating the note.
+    Held(String),
 }
 
 impl LossReason {
@@ -118,6 +120,7 @@ impl LossReason {
             Self::Missing => "file missing".into(),
             Self::Disconnected => "daemon disconnected".into(),
             Self::SaveFailed(e) => format!("save failed: {e}"),
+            Self::Held(label) => format!("{label} is updating this note"),
         }
     }
 }

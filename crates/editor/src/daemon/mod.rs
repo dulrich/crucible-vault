@@ -82,6 +82,33 @@ pub enum DaemonError {
     State(#[from] cv_state::StateError),
 }
 
+/// Tags an error string as a daemon `HELD` refusal (see [`rpc_err`]).
+const HELD_TAG: &str = "\u{1f}held\u{1f}";
+
+/// Plan round-18 WP-2: the error string a stringifying RPC site carries for `e`. A daemon
+/// `HELD` refusal keeps its code as a tagged string (label from `data.label`, else the
+/// message), so [`held_label`] recovers it where the result is reported; any other error is
+/// its plain `Display`.
+pub fn rpc_err(e: &DaemonError) -> String {
+    if let DaemonError::Rpc(r) = e
+        && r.code == cv_protocol::error_codes::HELD
+    {
+        let label = r
+            .data
+            .as_ref()
+            .and_then(|d| d.get("label"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&r.message);
+        return format!("{HELD_TAG}{label}");
+    }
+    e.to_string()
+}
+
+/// The holder label when `e` came from [`rpc_err`] on a `HELD` refusal.
+pub fn held_label(e: &str) -> Option<&str> {
+    e.strip_prefix(HELD_TAG)
+}
+
 /// Result alias.
 pub type Result<T> = std::result::Result<T, DaemonError>;
 

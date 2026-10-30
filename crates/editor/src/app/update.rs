@@ -74,6 +74,9 @@ impl App {
                 }
             }
             Message::Source(m) if self.held_source_gate(&m) != holds::Gate::Pass => {
+                if holds::source_gate(&m) == holds::Gate::CopyOnly {
+                    return self.held_cut_copy();
+                }
                 return Task::none();
             }
             Message::Source(SourceMsg::LinkKey(k)) => {
@@ -523,7 +526,7 @@ impl App {
                 self.set_note_bool(path, key, value)
             }
             crate::views::Effect::Notice(text) => {
-                self.status.set_error(text);
+                self.report_error(text);
                 Task::none()
             }
             crate::views::Effect::Open { path, line } => {

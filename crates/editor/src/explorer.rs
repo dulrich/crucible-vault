@@ -40,15 +40,17 @@ impl FileOp {
     /// Runs the RPC (blocking; off the UI thread).
     pub fn run(&self, d: &dyn crate::daemon::DaemonClient) -> Result<String, String> {
         match self {
-            Self::Create { path } => d.create_note(path, "").map_err(|e| e.to_string()),
+            Self::Create { path } => d
+                .create_note(path, "")
+                .map_err(|e| crate::daemon::rpc_err(&e)),
             Self::Rename { from, to } => d
                 .rename(from, to)
                 .map(|()| to.clone())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| crate::daemon::rpc_err(&e)),
             Self::Delete { path } => d
                 .delete(path)
                 .map(|()| path.clone())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| crate::daemon::rpc_err(&e)),
         }
     }
 }

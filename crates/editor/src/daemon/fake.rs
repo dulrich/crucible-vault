@@ -105,6 +105,12 @@ struct Inner {
     search: cv_protocol::SearchResult,
     search_disconnected: bool,
     search_calls: Vec<(String, u32)>,
+    /// Plan round-18 WP-2: while `Some((path, label))`, `write_note` / `rename` / `delete` /
+    /// `delete_note` / `note_set_bool` answer the daemon's `HELD` refusal.
+    held_reply: Option<(String, String)>,
+    /// Every `write_note` / `rename` / `delete` / `delete_note` / `note_set_bool` request that
+    /// reached the fake, as `"<method> <path>"`, in order.
+    mutation_calls: Vec<String>,
 }
 
 /// The fake daemon.
@@ -177,6 +183,8 @@ impl FakeDaemon {
                 },
                 search_disconnected: false,
                 search_calls: Vec::new(),
+                held_reply: None,
+                mutation_calls: Vec::new(),
             }),
             hello,
             vault_root: vault_root.to_path_buf(),
@@ -302,6 +310,31 @@ impl FakeDaemon {
     /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call so far, in order.
     pub fn status_calls(&self) -> Result<Vec<cv_protocol::TrackerItemSetStatusParams>> {
         Ok(self.lock()?.status_calls.clone())
+    }
+
+    /// Plan round-18 WP-2: the mutating requests that reached the fake (`"<method> <path>"`).
+    pub fn mutation_calls(&self) -> Result<Vec<String>> {
+        Ok(self.lock()?.mutation_calls.clone())
+    }
+
+    /// Plan round-18 WP-2: makes the mutating requests answer `HELD` (`None` = succeed again).
+    pub fn set_held_reply(&self, held: Option<(&str, &str)>) -> Result<()> {
+        self.lock()?.held_reply = held.map(|(p, l)| (p.to_owned(), l.to_owned()));
+        Ok(())
+    }
+
+    /// Logs one mutating request, then answers the scripted `HELD` refusal when set.
+    fn mutation(&self, method: &str, path: &str) -> Result<()> {
+        let mut g = self.lock()?;
+        g.mutation_calls.push(format!("{method} {path}"));
+        match &g.held_reply {
+            Some((held, label)) => Err(DaemonError::Rpc(cv_protocol::RpcError {
+                code: cv_protocol::error_codes::HELD,
+                message: format!("{label} is updating {held}"),
+                data: Some(serde_json::json!({"path": held, "label": label})),
+            })),
+            None => Ok(()),
+        }
     }
 
     /// Plan round-8-intake-views-anchor WP-3: every `note_set_bool` call so far, in order.
@@ -461,6 +494,7 @@ impl DaemonClient for FakeDaemon {
         content: &str,
         base_hash: &ContentHash,
     ) -> Result<ContentHash> {
+        self.mutation("write_note", path)?;
         let abs = vault_abs(&self.vault_root, path)?;
         let mut g = self.lock()?;
         let found = current_hash(&abs)?;
@@ -526,6 +560,7 @@ impl DaemonClient for FakeDaemon {
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
+        self.mutation("rename", from)?;
         let (a, b) = (
             vault_abs(&self.vault_root, from)?,
             vault_abs(&self.vault_root, to)?,
@@ -542,6 +577,7 @@ impl DaemonClient for FakeDaemon {
     }
 
     fn delete(&self, path: &str) -> Result<()> {
+        self.mutation("delete", path)?;
         let abs = vault_abs(&self.vault_root, path)?;
         let mut g = self.lock()?;
         std::fs::remove_file(&abs).map_err(|e| match e.kind() {
@@ -569,6 +605,7 @@ impl DaemonClient for FakeDaemon {
         attachments: &[String],
         mode: DeleteMode,
     ) -> Result<DeleteNoteResult> {
+        self.mutation("delete_note", path)?;
         let mut g = self.lock()?;
         self.remove_mode(&mut g, path, mode)?;
         let mut out = DeleteNoteResult {
@@ -721,6 +758,7 @@ impl DaemonClient for FakeDaemon {
     }
 
     fn note_set_bool(&self, p: &cv_protocol::NoteSetBoolParams) -> Result<()> {
+        self.mutation("note_set_bool", &p.path)?;
         self.lock()?.bool_calls.push(p.clone());
         Ok(())
     }

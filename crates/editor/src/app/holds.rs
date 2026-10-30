@@ -16,7 +16,8 @@ use cv_protocol::{JobState, JobStatus};
 use iced::widget::{Space, column, container, stack, text};
 use iced::{Element, Length, Task};
 
-use super::{App, Severity, buf};
+use super::{AfterSave, App, Severity, buf, panes};
+use crate::explorer::FileOp;
 use crate::message::{LinkKey, Message, SourceKey, SourceMsg, SourceTarget};
 
 /// A hold shorter than this never shows the overlay (no flicker for fast on-edit actions).
@@ -52,6 +53,8 @@ pub(super) enum Gate {
     Drop,
     /// An explicit save: refused with a notice.
     Refuse,
+    /// Plan round-18 WP-2 (Decision 4): Cut copies the selection and leaves the buffer alone.
+    CopyOnly,
 }
 
 /// Classifies a source-editor message for a held note.
@@ -67,13 +70,13 @@ pub(super) fn source_gate(m: &SourceMsg) -> Gate {
         )
         | SourceMsg::Undo
         | SourceMsg::Redo
-        | SourceMsg::Cut
         | SourceMsg::Paste
         | SourceMsg::PasteResolved { .. }
         | SourceMsg::PastePrimary { .. }
         | SourceMsg::AutosaveDue { .. }
         | SourceMsg::LinkKey(LinkKey::Enter | LinkKey::Tab)
         | SourceMsg::LinkPick(_) => Gate::Drop,
+        SourceMsg::Cut => Gate::CopyOnly,
         SourceMsg::Save | SourceMsg::KeepMine(_) => Gate::Refuse,
         _ => Gate::Pass,
     }
@@ -112,6 +115,9 @@ impl App {
         if self.held(&h.path).is_some() {
             return Task::none();
         }
+        if self.has_hold_waits(&h.path) {
+            return self.resume_hold_waits(&h.path);
+        }
         match buf(&self.docs, &h.path).filter(|b| b.is_dirty()) {
             Some(b) => crate::source::autosave_timer(h.path, b.edit_seq()),
             None => Task::none(),
@@ -119,8 +125,149 @@ impl App {
     }
 
     /// Drops every hold (connection lost or re-established; the subscribe snapshot re-fills).
-    pub(super) fn clear_holds(&mut self) {
+    /// A missed release never arrives, so the waiters are reconciled here: after a disconnect a
+    /// waiting close goes to the close dialog ("not connected") and a waiting quit entry becomes
+    /// a `Disconnected` loss; on a live reconnect a waiter (there is none in practice, as the
+    /// disconnect already drained them) proceeds to its save, which the daemon refuses with
+    /// `HELD` if the snapshot re-holds the note — a failure dialog, never a hang.
+    pub(super) fn clear_holds(&mut self) -> Task<Message> {
         self.holds.clear();
+        let mut paths: Vec<String> = self.hold_closes.iter().map(|(p, _)| p.clone()).collect();
+        if let Some(q) = &self.quit {
+            paths.extend(q.held.iter().cloned());
+        }
+        paths.sort();
+        paths.dedup();
+        if self.status.connected {
+            return Task::batch(paths.iter().map(|p| self.resume_hold_waits(p)));
+        }
+        for path in &paths {
+            let ids: Vec<u64> = self
+                .hold_closes
+                .iter()
+                .filter(|(p, _)| p == path)
+                .map(|(_, id)| *id)
+                .collect();
+            self.hold_closes.retain(|(p, _)| p != path);
+            let ids: Vec<u64> = ids
+                .into_iter()
+                .filter(|id| panes::find_id(&self.panes, *id).is_some())
+                .collect();
+            if !ids.is_empty() && self.dialog.is_none() {
+                self.close_dialog(path, ids, "not connected");
+            }
+            if let Some(q) = &mut self.quit
+                && q.held.remove(path)
+            {
+                q.losses.note(path, crate::dialog::LossReason::Disconnected);
+            }
+        }
+        self.quit_progress()
+    }
+
+    /// Whether a close or the quit waits for `path`'s hold to release.
+    fn has_hold_waits(&self, path: &str) -> bool {
+        self.hold_closes.iter().any(|(p, _)| p == path)
+            || self.quit.as_ref().is_some_and(|q| q.held.contains(path))
+    }
+
+    /// Plan round-18 WP-2 (Decision 3): `path`'s hold released (or was dropped on a live
+    /// reconnect) while a close or the quit waited on it. Drives the note's save with the
+    /// matching follow-up — the first waiting tab id (or the quit) rides the save, other waiting
+    /// tabs join `close_waiters` — so the existing landing paths close or finish the quit on a
+    /// clean save, and a conflict or failure reaches the usual close dialog / loss list.
+    fn resume_hold_waits(&mut self, path: &str) -> Task<Message> {
+        let ids: Vec<u64> = self
+            .hold_closes
+            .iter()
+            .filter(|(p, _)| p == path)
+            .map(|(_, id)| *id)
+            .filter(|id| panes::find_id(&self.panes, *id).is_some())
+            .collect();
+        self.hold_closes.retain(|(p, _)| p != path);
+        let quit = self.quit.as_mut().is_some_and(|q| q.held.remove(path));
+        let dirty = self.doc_dirty(path);
+        if !dirty {
+            // Saved or reloaded meanwhile: nothing to lose.
+            for id in ids {
+                self.remove_tab(id);
+            }
+            return self.quit_progress();
+        }
+        let (after, rest) = if quit {
+            (AfterSave::Quit, ids.clone())
+        } else if let Some((first, rest)) = ids.split_first() {
+            (AfterSave::CloseTab(*first), rest.to_vec())
+        } else {
+            return self.quit_progress();
+        };
+        let started = self.save_then(path, Some(after));
+        let saving = buf(&self.docs, path).is_some_and(|d| d.is_saving());
+        match started {
+            Some(t) => {
+                if quit && let Some(q) = &mut self.quit {
+                    q.pending.insert(path.to_owned());
+                }
+                self.add_close_waiters(path, &rest);
+                t
+            }
+            None if saving => {
+                // A save is in flight (the follow-up is queued): the landing resolves the waits.
+                if quit && let Some(q) = &mut self.quit {
+                    q.awaiting.insert(path.to_owned());
+                }
+                self.add_close_waiters(path, &ids);
+                Task::none()
+            }
+            None => {
+                if quit {
+                    let reason = self.loss_reason(path, "the save could not start");
+                    if let Some(q) = &mut self.quit {
+                        q.losses.note(path, reason);
+                    }
+                }
+                if !ids.is_empty() && self.quit.is_none() {
+                    self.close_dialog(path, ids, "the save could not start");
+                }
+                self.quit_progress()
+            }
+        }
+    }
+
+    fn add_close_waiters(&mut self, path: &str, ids: &[u64]) {
+        if let Some(d) = self.docs.get_mut(path) {
+            for id in ids {
+                if !d.close_waiters.contains(id) {
+                    d.close_waiters.push(*id);
+                }
+            }
+        }
+    }
+
+    /// A quit asked again while the first still waits on held notes: with no saves of its own in
+    /// flight, offers the usual unsaved-edits dialog naming each hold — OK is "quit anyway".
+    pub(super) fn quit_anyway_dialog(&mut self) -> Task<Message> {
+        let Some(q) = &self.quit else {
+            return Task::none();
+        };
+        if q.held.is_empty() || !q.pending.is_empty() || !q.awaiting.is_empty() {
+            return Task::none();
+        }
+        let mut losses = q.losses.clone();
+        let mut held: Vec<String> = q.held.iter().cloned().collect();
+        held.sort();
+        for path in held {
+            let label = self
+                .held(&path)
+                .map_or_else(String::new, |h| h.label.clone());
+            losses.note(&path, crate::dialog::LossReason::Held(label));
+        }
+        self.quit = None;
+        self.dialog = Some(crate::dialog::Dialog::Unsaved {
+            losses,
+            then: crate::dialog::Discard::Quit,
+        });
+        Task::none()
     }
 
     /// A daemon move of `from` to `to` retargets its holds.
@@ -135,11 +282,59 @@ impl App {
         let Some(label) = self.held(path).map(|h| h.label.clone()) else {
             return false;
         };
+        self.notify_held(&label);
+        true
+    }
+
+    /// The one hold notice (a local refusal and a daemon `HELD` reply both post it).
+    pub(super) fn notify_held(&mut self, label: &str) {
         self.status.notify(
             Severity::Warning,
             format!("{label} is updating this note — save held"),
         );
-        true
+    }
+
+    /// Reports a stringified daemon error: a `HELD` refusal (see `daemon::rpc_err`) posts the
+    /// hold notice, anything else is the usual error.
+    pub(super) fn report_error(&mut self, e: String) {
+        match crate::daemon::held_label(&e) {
+            Some(label) => {
+                let label = label.to_owned();
+                self.notify_held(&label);
+            }
+            None => self.status.set_error(e),
+        }
+    }
+
+    /// The holder label when `op` renames or deletes a held note (a delete also covers any held
+    /// note under the path as a folder).
+    pub(super) fn held_by_op(&self, op: &FileOp) -> Option<String> {
+        let label = |h: &Hold| Some(h.label.clone());
+        match op {
+            FileOp::Create { .. } => None,
+            FileOp::Rename { from, to } => {
+                self.held(from).or_else(|| self.held(to)).and_then(label)
+            }
+            FileOp::Delete { path } => {
+                let under = format!("{}/", path.trim_end_matches('/'));
+                self.holds
+                    .values()
+                    .find(|h| h.path == *path || h.path.starts_with(&under))
+                    .and_then(label)
+            }
+        }
+    }
+
+    /// Cut on a held note: the selection goes to the clipboard, the buffer is untouched.
+    pub(super) fn held_cut_copy(&self) -> Task<Message> {
+        match self
+            .active_doc()
+            .and_then(crate::source::SourceBuffer::selection)
+            .filter(|s| !s.is_empty())
+        {
+            Some(sel) => iced::clipboard::write(sel),
+            None => Task::none(),
+        }
     }
 
     /// The gate a source message meets: `Pass` unless its note is held; a refused save posts the

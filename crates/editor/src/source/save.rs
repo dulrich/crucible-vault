@@ -36,7 +36,7 @@ impl SaveJob {
         match d.write_note(&self.path, &self.text, &self.base) {
             Ok(h) => SaveOutcome::Saved(h),
             Err(DaemonError::Conflict { current_hash }) => SaveOutcome::Conflict(current_hash),
-            Err(e) => SaveOutcome::Failed(e.to_string()),
+            Err(e) => SaveOutcome::Failed(crate::daemon::rpc_err(&e)),
         }
     }
 
