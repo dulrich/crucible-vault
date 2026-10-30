@@ -1,5 +1,4 @@
 {
-  "build-flags": "enforce",
   "entrypoints": [
     {
       "path": "crates/cv/src/main.rs",
