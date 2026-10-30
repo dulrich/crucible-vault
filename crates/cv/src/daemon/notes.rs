@@ -58,9 +58,7 @@ impl Shared {
             .with_writer(move |w| {
                 w.call(move |vw| {
                     // Plan round-18 Decision 2: refused inside the writer job, before mutation.
-                    if let Some((path, label)) = holds.holder([p.path.as_str()]) {
-                        return Err(JobError::Held { path, label });
-                    }
+                    holds.refuse([p.path.as_str()])?;
                     Ok(vw.write(&p.path, p.content.as_bytes(), expected)?)
                 })
             })
@@ -89,24 +87,12 @@ impl Shared {
         let out = self
             .writer_job(move |vw| {
                 // Plan round-18 Decision 2: both endpoints and every backlink source the rename
-                // would rewrite (`VaultWriter::rename` gathers the same set), before mutation.
-                // With no holds nothing is queried (the request runs exactly as before).
-                let sources: Vec<String> = if holds.is_empty() {
-                    Vec::new()
-                } else {
-                    vw.index()
-                        .query()
-                        .backlinks(&p.from)
-                        .map_err(VaultError::from)?
-                        .into_iter()
-                        .map(|r| r.src_path)
-                        .collect()
-                };
-                let touched = [p.from.as_str(), p.to.as_str()]
-                    .into_iter()
-                    .chain(sources.iter().map(String::as_str));
-                if let Some((path, label)) = holds.holder(touched) {
-                    return Err(JobError::Held { path, label });
+                // would rewrite (`VaultWriter::rename_touched`, the set `rename` itself gathers),
+                // before mutation. With no holds nothing is queried (the request runs exactly as
+                // before).
+                if !holds.is_empty() {
+                    let touched = vw.rename_touched(&p.from, &p.to)?;
+                    holds.refuse(touched.iter().map(String::as_str))?;
                 }
                 let h = vw
                     .fs()
@@ -126,9 +112,7 @@ impl Shared {
         let permanent = p.mode == DeleteMode::Permanent;
         let holds = self.holds_view();
         self.writer_job(move |vw| {
-            if let Some((path, label)) = holds.holder_under(&p.path) {
-                return Err(JobError::Held { path, label });
-            }
+            holds.refuse_under(&p.path)?;
             let h = vw
                 .fs()
                 .hash(&p.path)?
@@ -173,9 +157,7 @@ impl Shared {
             .writer_job(move |vw| {
                 let touched = std::iter::once(p.path.as_str())
                     .chain(p.attachments.iter().map(String::as_str));
-                if let Some((path, label)) = holds.holder(touched) {
-                    return Err(JobError::Held { path, label });
-                }
+                holds.refuse(touched)?;
                 Ok(vw.delete_note(&p.path, &p.attachments, permanent)?)
             })
             .await?;
@@ -192,9 +174,7 @@ impl Shared {
         let holds = self.holds_view();
         let hash = self
             .writer_job(move |vw| {
-                if let Some((path, label)) = holds.holder([p.path.as_str()]) {
-                    return Err(JobError::Held { path, label });
-                }
+                holds.refuse([p.path.as_str()])?;
                 let bytes = vw
                     .fs()
                     .read(&p.path)?

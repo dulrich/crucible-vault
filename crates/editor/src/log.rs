@@ -244,8 +244,7 @@ mod tests {
                 message: Some("already exists: stack/clip.md".into()),
                 output_paths: Vec::new(),
                 open_path: None,
-                held_note: None,
-                action_label: None,
+                hold: None,
             }),
         )));
         let e = app.status.log.visible().next().expect("entry");

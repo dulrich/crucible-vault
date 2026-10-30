@@ -765,8 +765,8 @@ async fn subscribe_snapshots_current_note_holds() {
         (
             s.job_id.as_str(),
             s.status,
-            s.held_note.as_deref(),
-            s.action_label.as_deref()
+            s.hold.as_ref().map(|h| h.path.as_str()),
+            s.hold.as_ref().map(|h| h.label.as_str())
         ),
         (
             job_id.as_str(),

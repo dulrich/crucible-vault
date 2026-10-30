@@ -332,6 +332,23 @@ impl VaultWriter {
         Ok(usize::try_from(row.size).ok() == Some(bytes.len()) && row.mtime == m)
     }
 
+    /// The inbound links of `from`, grouped by source note: the notes a rename of `from` rewrites.
+    fn backlink_groups(&self, from: &str) -> Result<BTreeMap<String, Vec<LinkRow>>> {
+        let mut groups: BTreeMap<String, Vec<LinkRow>> = BTreeMap::new();
+        for row in self.index.query().backlinks(from)? {
+            groups.entry(row.src_path.clone()).or_default().push(row);
+        }
+        Ok(groups)
+    }
+
+    /// Every path renaming `from` to `to` touches: both endpoints plus the backlink sources it
+    /// rewrites (the same grouping [`Self::rename`] gathers). Daemon hold checks use it.
+    pub fn rename_touched(&self, from: &str, to: &str) -> Result<Vec<String>> {
+        let mut touched = vec![from.to_owned(), to.to_owned()];
+        touched.extend(self.backlink_groups(from)?.into_keys());
+        Ok(touched)
+    }
+
     /// Renames `from` to `to` (CAS on `expected`), then rewrites inbound links (Obsidian's
     /// `alwaysUpdateLinks: true`): see [`crate::rewrite`]'s rules. Source notes that changed
     /// since the index saw them are skipped and reported, never clobbered.
@@ -341,10 +358,7 @@ impl VaultWriter {
         if self.fs.read(to)?.is_some() {
             return Err(VaultError::Exists(to.to_string()));
         }
-        let mut groups: BTreeMap<String, Vec<LinkRow>> = BTreeMap::new();
-        for row in self.index.query().backlinks(from)? {
-            groups.entry(row.src_path.clone()).or_default().push(row);
-        }
+        let mut groups = self.backlink_groups(from)?;
         // The moved note's own folder-relative outgoing links (to other files) are rebased onto
         // its new folder in the same CAS write as its self-link rewrites.
         let outgoing: Vec<LinkRow> = self

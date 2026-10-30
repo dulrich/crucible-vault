@@ -9,14 +9,15 @@
 //!   command registry, no hidden commands and no `mutating` flag; the queue + resource keys are
 //!   the only serialization.
 
+mod clock;
 mod config_load;
 mod events;
+mod holds;
 mod rpc;
 mod schedule;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,10 @@ use crate::steps::{
 };
 use crate::sync::{lock, read, write};
 
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use config_load::load_config_dir;
+pub use holds::HoldsView;
+use holds::Running;
 pub use rpc::{actions_list, run_action};
 
 /// Maximum `run_action` nesting (pin 10).
@@ -58,55 +62,6 @@ pub(crate) const PRUNE_EVERY_MS: i64 = 3_600_000;
 pub(crate) struct Maintenance {
     last_recover_ms: Option<i64>,
     last_prune_ms: Option<i64>,
-}
-
-/// Time source (tests inject [`ManualClock`]).
-pub trait Clock: Send + Sync {
-    /// Milliseconds since the Unix epoch.
-    fn now_ms(&self) -> i64;
-    /// Local UTC offset in ms at `now_ms` (daily schedules).
-    fn local_offset_ms(&self, now_ms: i64) -> i64;
-}
-
-/// The wall clock.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_ms(&self) -> i64 {
-        crate::now_ms()
-    }
-    fn local_offset_ms(&self, now_ms: i64) -> i64 {
-        use chrono::{Local, Offset, TimeZone};
-        Local
-            .timestamp_millis_opt(now_ms)
-            .single()
-            .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()) * 1000)
-    }
-}
-
-/// A settable clock (UTC).
-#[derive(Debug, Default)]
-pub struct ManualClock(AtomicI64);
-
-impl ManualClock {
-    /// Starts at `ms`.
-    pub fn new(ms: i64) -> Self {
-        Self(AtomicI64::new(ms))
-    }
-    /// Sets the time.
-    pub fn set(&self, ms: i64) {
-        self.0.store(ms, Ordering::SeqCst);
-    }
-}
-
-impl Clock for ManualClock {
-    fn now_ms(&self) -> i64 {
-        self.0.load(Ordering::SeqCst)
-    }
-    fn local_offset_ms(&self, _: i64) -> i64 {
-        0
-    }
 }
 
 /// Executes one step. Production: [`ProductionExecutor`] (→ [`steps::execute`]); tests inject
@@ -331,59 +286,6 @@ pub struct RunnerDeps {
     pub data_home: Option<PathBuf>,
 }
 
-/// One running job's note hold: the vault path it holds and its action label.
-///
-/// Crucible reference: `src/orchestration/NoteLockManager.ts:47-112` (per-note lock +
-/// `note-lock-changed` event). The Obsidian-induced part (plugin-side async lock bookkeeping
-/// around Obsidian's shared writer) is dropped: claim-time resource keys already serialize jobs,
-/// so the daemon only publishes the hold as a signal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Hold {
-    path: String,
-    label: String,
-}
-
-/// A cheap shared read of the runner's note holds (plan round-18 Decision 2): the daemon's
-/// client-write handlers consult it inside the serialized writer job, before mutating.
-#[derive(Clone, Default)]
-pub struct HoldsView(Arc<Mutex<HashMap<String, Hold>>>);
-
-impl HoldsView {
-    /// Whether no note is held.
-    pub fn is_empty(&self) -> bool {
-        lock(&self.0).is_empty()
-    }
-
-    /// The first hold on `path` itself or on any note under it as a folder (`path/…`).
-    pub fn holder_under(&self, path: &str) -> Option<(String, String)> {
-        let prefix = format!("{}/", path.trim_end_matches('/'));
-        lock(&self.0)
-            .values()
-            .find(|h| h.path == path || h.path.starts_with(&prefix))
-            .map(|h| (h.path.clone(), h.label.clone()))
-    }
-
-    /// The first hold on any of `paths`, as `(path, holding action label)`.
-    pub fn holder<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> Option<(String, String)> {
-        let holds = lock(&self.0);
-        if holds.is_empty() {
-            return None;
-        }
-        paths.into_iter().find_map(|p| {
-            holds
-                .values()
-                .find(|h| h.path == p)
-                .map(|h| (h.path.clone(), h.label.clone()))
-        })
-    }
-}
-
-impl std::fmt::Debug for HoldsView {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HoldsView").finish_non_exhaustive()
-    }
-}
-
 pub(crate) struct Inner {
     state: Arc<Mutex<StateDb>>,
     writer: Arc<dyn WriterSource>,
@@ -399,12 +301,12 @@ pub(crate) struct Inner {
     search: cv_search::SearchDb,
     config: RwLock<Arc<ConfigSet>>,
     wake: Notify,
-    running: Mutex<HashSet<String>>,
-    /// Note holds of running jobs (`job id -> Hold`; plan round-17 WP-2, narrowed by plan round-18
-    /// Decision 1 to [`ConfigSet::action_holds_note`]): such a job holds its active note until its
+    /// Every claimed job in this runner (`job id -> its note hold`): cancellation and stale-lease
+    /// recovery read all keys; only jobs whose action holds its note (plan round-17 WP-2, narrowed
+    /// by plan round-18 Decision 1 to [`ConfigSet::action_holds_note`]) carry `Some`, until their
     /// attempt ends. Shared (`Arc`) so the daemon's writer jobs can refuse client writes to a held
     /// note ([`HoldsView`]).
-    holds: Arc<Mutex<HashMap<String, Hold>>>,
+    running: Running,
     finished: Mutex<BTreeMap<String, RunSummary>>,
     cycle: Mutex<HashMap<(String, String), Instant>>,
 }
@@ -439,8 +341,7 @@ impl Runner {
                 search: cv_search::SearchDb::new(deps.search_db),
                 config: RwLock::new(Arc::new(ConfigSet::new())),
                 wake: Notify::new(),
-                running: Mutex::new(HashSet::new()),
-                holds: Arc::new(Mutex::new(HashMap::new())),
+                running: Running::default(),
                 finished: Mutex::new(BTreeMap::new()),
                 cycle: Mutex::new(HashMap::new()),
             }),
@@ -494,26 +395,10 @@ impl Runner {
     /// Requests cancellation of a job running in this runner; it stops before its next step.
     /// The request is the durable `cancel_requested` flag ([`cv_state::StateDb::cancel`]).
     pub fn request_cancel(&self, job_id: &str) -> bool {
-        lock(&self.inner.running).contains(job_id)
+        lock(&self.inner.running).contains_key(job_id)
             && lock(&self.inner.state)
                 .cancel(job_id, self.inner.clock.now_ms())
                 .is_ok()
-    }
-
-    /// A shared read handle on the current note holds (the daemon's write refusal).
-    pub fn holds_view(&self) -> HoldsView {
-        HoldsView(Arc::clone(&self.inner.holds))
-    }
-
-    /// The current note holds as `running` statuses (the subscribe snapshot, plan round-17 WP-2).
-    pub fn held_notes(&self) -> Vec<JobStatus> {
-        let holds = lock(&self.inner.holds);
-        let mut v: Vec<JobStatus> = holds
-            .iter()
-            .map(|(id, h)| held_status(id, JobState::Running, h))
-            .collect();
-        v.sort_by(|a, b| a.job_id.cmp(&b.job_id));
-        v
     }
 
     /// The summary of a finished run (if remembered).
@@ -625,94 +510,13 @@ impl Inner {
     fn enqueued(&self, out: EnqueueOutcome) -> Result<String, EnqueueError> {
         let id = match out {
             EnqueueOutcome::Enqueued(id) => {
-                self.publish_status(&id, JobState::Pending, None, Vec::new(), None);
+                self.publish(&id, JobState::Pending, None, Vec::new(), None, None);
                 id
             }
             EnqueueOutcome::Duplicate(id) => id,
         };
         self.wake.notify_one();
         Ok(id)
-    }
-
-    fn publish_status(
-        &self,
-        id: &str,
-        status: JobState,
-        message: Option<String>,
-        output_paths: Vec<String>,
-        open_path: Option<String>,
-    ) {
-        self.publish_held(id, status, message, output_paths, open_path, None);
-    }
-
-    fn publish_held(
-        &self,
-        id: &str,
-        status: JobState,
-        message: Option<String>,
-        output_paths: Vec<String>,
-        open_path: Option<String>,
-        hold: Option<&Hold>,
-    ) {
-        let _ = self.events.send(Notification::JobUpdated(JobStatus {
-            job_id: id.to_owned(),
-            status,
-            message,
-            output_paths,
-            open_path,
-            held_note: hold.map(|h| h.path.clone()),
-            action_label: hold.map(|h| h.label.clone()),
-        }));
-    }
-
-    /// Starts a hold for `job_id` when the action holds its note, then publishes `running`.
-    fn start_running(
-        &self,
-        job_id: &str,
-        action: &Action,
-        context: &ActionContext,
-        holds_note: bool,
-    ) {
-        let hold = context
-            .active_path
-            .as_ref()
-            .filter(|p| holds_note && !p.is_empty())
-            .map(|p| Hold {
-                path: p.clone(),
-                label: action.label.clone(),
-            });
-        if let Some(h) = &hold {
-            lock(&self.holds).insert(job_id.to_owned(), h.clone());
-        }
-        self.publish_held(
-            job_id,
-            JobState::Running,
-            None,
-            Vec::new(),
-            None,
-            hold.as_ref(),
-        );
-    }
-
-    /// Re-targets a hold after a move of the active note and republishes `running` (holds follow
-    /// renames).
-    fn retarget_hold(&self, job_id: &str, context: &ActionContext) {
-        let Some(path) = context.active_path.as_ref() else {
-            return;
-        };
-        let moved = {
-            let mut holds = lock(&self.holds);
-            match holds.get_mut(job_id) {
-                Some(h) if &h.path != path => {
-                    h.path.clone_from(path);
-                    Some(h.clone())
-                }
-                _ => None,
-            }
-        };
-        if let Some(h) = moved {
-            self.publish_held(job_id, JobState::Running, None, Vec::new(), None, Some(&h));
-        }
     }
 
     fn recover(&self) {
@@ -815,7 +619,7 @@ impl Inner {
             return;
         }
         m.last_recover_ms = Some(now);
-        let live = lock(&self.running).clone();
+        let live: HashSet<String> = lock(&self.running).keys().cloned().collect();
         let retention_days = read(&self.config).pipelines().queue.retention_days;
         let mut db = lock(&self.state);
         match db.recover_stale_leases_except(now, &live) {
@@ -868,7 +672,7 @@ async fn claim_loop(inner: Arc<Inner>, mut stop: watch::Receiver<bool>) {
             let claimed = lock(&inner.state).claim(inner.clock.now_ms());
             match claimed {
                 Ok(Some(job)) => {
-                    lock(&inner.running).insert(job.id.clone());
+                    lock(&inner.running).insert(job.id.clone(), None);
                     let inner2 = Arc::clone(&inner);
                     tokio::spawn(async move {
                         run_job(Arc::clone(&inner2), job).await;
@@ -915,19 +719,6 @@ fn trim_after_job() {
     }
 }
 
-/// A `JobStatus` carrying `hold`.
-fn held_status(id: &str, status: JobState, hold: &Hold) -> JobStatus {
-    JobStatus {
-        job_id: id.to_owned(),
-        status,
-        message: None,
-        output_paths: Vec::new(),
-        open_path: None,
-        held_note: Some(hold.path.clone()),
-        action_label: Some(hold.label.clone()),
-    }
-}
-
 /// Executes one claimed job end to end and settles it.
 async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
     let id = job.id.clone();
@@ -970,8 +761,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
     };
     let (result, failure) = Inner::apply_service_policy(&job, result, summary.defer_cause);
     inner.settle(&job, &result, failure.as_ref());
-    lock(&inner.running).remove(&id);
-    let hold = lock(&inner.holds).remove(&id);
+    let hold = lock(&inner.running).remove(&id).flatten();
     let (state, message) = match &result {
         JobResult::Done => (JobState::Done, None),
         JobResult::Failed { error, .. } => (JobState::Failed, Some(error.clone())),
@@ -988,7 +778,7 @@ async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
             f.remove(&k);
         }
     }
-    inner.publish_held(
+    inner.publish(
         &id,
         state,
         message,

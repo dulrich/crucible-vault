@@ -1,5 +1,5 @@
 //! Plan round-17 WP-2 (Decision 3): note holds. A running daemon job whose action declares
-//! `resources.note = true` holds its note (`JobStatus.held_note`); while held, the note's tabs are
+//! `resources.note = true` holds its note (`JobStatus.hold`); while held, the note's tabs are
 //! read-only, saves are refused with a notice, and after [`OVERLAY_DELAY`] a dimmed overlay with a
 //! spinner and the action label covers the tab body. Holds clear on the job's terminal status and
 //! on every (re)connect — the daemon's subscribe snapshot re-fills them.
@@ -78,7 +78,15 @@ pub(super) fn source_gate(m: &SourceMsg) -> Gate {
         | SourceMsg::LinkPick(_) => Gate::Drop,
         SourceMsg::Cut => Gate::CopyOnly,
         SourceMsg::Save | SourceMsg::KeepMine(_) => Gate::Refuse,
-        _ => Gate::Pass,
+        // Every remaining variant passes; listed so a new `SourceMsg` fails to compile here.
+        SourceMsg::Action(_)
+        | SourceMsg::Key(SourceKey::Home { .. } | SourceKey::End { .. })
+        | SourceMsg::Viewport { .. }
+        | SourceMsg::Saved { .. }
+        | SourceMsg::TakeTheirs(_)
+        | SourceMsg::MiddleClick { .. }
+        | SourceMsg::CommandClick { .. }
+        | SourceMsg::LinkKey(LinkKey::Up | LinkKey::Down | LinkKey::Escape) => Gate::Pass,
     }
 }
 
@@ -93,8 +101,12 @@ impl App {
     /// edits re-arms its autosave (whose save then meets the CAS conflict bar if the job wrote).
     pub(super) fn hold_job_updated(&mut self, j: &JobStatus, now: Instant) -> Task<Message> {
         if j.status == JobState::Running {
-            if let Some(path) = &j.held_note {
-                let label = j.action_label.clone().unwrap_or_else(|| j.job_id.clone());
+            if let Some(cv_protocol::NoteHold { path, label }) = &j.hold {
+                let label = if label.is_empty() {
+                    j.job_id.clone()
+                } else {
+                    label.clone()
+                };
                 self.holds
                     .entry(j.job_id.clone())
                     .and_modify(|h| {

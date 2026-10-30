@@ -9,8 +9,7 @@ pub(super) fn map_job(j: &cv_state::Job) -> JobStatus {
         message: j.error.clone(),
         output_paths: Vec::new(),
         open_path: None,
-        held_note: None,
-        action_label: None,
+        hold: None,
     }
 }
 

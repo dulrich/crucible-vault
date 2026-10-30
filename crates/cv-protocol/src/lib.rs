@@ -427,6 +427,17 @@ pub enum JobState {
     Cancelled,
 }
 
+/// A job's note hold on the wire: the held vault path and the holding action's display label (the
+/// editor's overlay text). Flattened into [`JobStatus`] as `held_note` / `action_label`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteHold {
+    #[serde(rename = "held_note")]
+    pub path: String,
+    /// Absent from older daemons (the editor falls back to the job id).
+    #[serde(rename = "action_label", default)]
+    pub label: String,
+}
+
 /// Result of `job` / `cancel`, and payload of `job_updated`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStatus {
@@ -442,14 +453,13 @@ pub struct JobStatus {
     /// destination). Additive (absent from older daemons; omitted when `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_path: Option<String>,
-    /// The vault path this job holds while it runs (its action declares `resources.note = true`
-    /// and the run has an active note). Set on `running` (re-sent when a move retargets it) and,
+    /// The note this job holds while it runs (its action declares `resources.note = true` and the
+    /// run has an active note). Set on `running` (re-sent when a move retargets it) and,
     /// informationally, on the terminal status that releases it. Additive (plan round-17 WP-2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held_note: Option<String>,
-    /// The holding action's display label (the editor's overlay text). Set with `held_note`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action_label: Option<String>,
+    /// Flattened: on the wire it is the top-level `held_note` + `action_label` pair, both absent
+    /// when there is no hold.
+    #[serde(flatten)]
+    pub hold: Option<NoteHold>,
 }
 
 /// `jobs_list` params. `status`: `queued|running|done|failed|cancelled|deferred`, where

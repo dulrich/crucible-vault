@@ -17,8 +17,10 @@ fn job(id: &str, status: JobState, held: Option<&str>) -> Notification {
         message: None,
         output_paths: Vec::new(),
         open_path: None,
-        held_note: held.map(str::to_owned),
-        action_label: held.map(|_| "Refine".to_owned()),
+        hold: held.map(|p| cv_protocol::NoteHold {
+            path: p.to_owned(),
+            label: "Refine".to_owned(),
+        }),
     })
 }
 

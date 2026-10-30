@@ -461,8 +461,7 @@ fn terminal(job_id: String, outcome: std::result::Result<Option<String>, String>
         message,
         output_paths: open_path.iter().cloned().collect(),
         open_path,
-        held_note: None,
-        action_label: None,
+        hold: None,
     }
 }
 
@@ -649,8 +648,7 @@ impl DaemonClient for FakeDaemon {
                     message: None,
                     output_paths: Vec::new(),
                     open_path: None,
-                    held_note: None,
-                    action_label: None,
+                    hold: None,
                 };
                 g.jobs.insert(job_id.clone(), job.clone());
                 g.queued.push((job_id.clone(), params));

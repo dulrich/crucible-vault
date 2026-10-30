@@ -213,7 +213,7 @@ fn maintenance_skips_live_ids_and_prunes_by_configured_retention() {
         db.cancel(&old, 1_000_000).unwrap();
         (live, stale, old)
     };
-    lock(&r.inner().running).insert(live.clone());
+    lock(&r.inner().running).insert(live.clone(), None);
     let mut m = Maintenance::default();
     // 31 days later: both leases are stale and the default 30-day retention has passed.
     clock.set(1_000_000 + 31 * 86_400_000);
