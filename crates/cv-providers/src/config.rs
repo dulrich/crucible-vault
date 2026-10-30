@@ -92,6 +92,9 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     /// File name (no path separators) under the secrets dir holding the API key.
     pub api_key_file: Option<String>,
+    /// `anthropic` only: header name carrying the key instead of `x-api-key` (e.g. the inference
+    /// router's `x-gateway-key`). Absent = `x-api-key`.
+    pub auth_header: Option<String>,
     /// Explicit completion concurrency cap; `0`/absent falls back to the default.
     pub max_concurrent_requests: Option<u32>,
     /// Overrides the local-default heuristic for the concurrency limit.
@@ -149,6 +152,20 @@ impl ProvidersConfig {
                     p.id
                 )));
             }
+            if let Some(h) = &p.auth_header {
+                if p.kind != ProviderKind::Anthropic {
+                    return Err(ProviderError::Config(format!(
+                        "provider {:?}: `auth_header` is only supported on kind \"anthropic\"",
+                        p.id
+                    )));
+                }
+                if h.is_empty() || !h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                    return Err(ProviderError::Config(format!(
+                        "provider {:?}: `auth_header` must be a non-empty header name",
+                        p.id
+                    )));
+                }
+            }
         }
         Ok(cfg)
     }
@@ -198,6 +215,7 @@ id = "claude"
 kind = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 max_concurrent_requests = 2
+auth_header = "x-gateway-key"
 
 [[provider]]
 id = "codex"
@@ -216,6 +234,11 @@ command = "codex"
         assert!(!local.model("bge").unwrap().has(Capability::Rerank));
         assert!(!local.model("none").unwrap().has(Capability::Chat));
         assert_eq!(cfg.get("claude").unwrap().max_concurrent_requests, Some(2));
+        assert_eq!(
+            cfg.get("claude").unwrap().auth_header.as_deref(),
+            Some("x-gateway-key")
+        );
+        assert_eq!(local.auth_header, None);
     }
 
     #[test]
@@ -226,6 +249,9 @@ command = "codex"
             "[[provider]]\nid = \"a\"\nkind = \"ollama\"\n[[provider]]\nid = \"a\"\nkind = \"google\"",
             "[[provider]]\nid = \"a:b\"\nkind = \"ollama\"",
             "[[provider]]\nid = \"c\"\nkind = \"cli\"",
+            "[[provider]]\nid = \"a\"\nkind = \"anthropic\"\nauth_header = \"\"",
+            "[[provider]]\nid = \"a\"\nkind = \"anthropic\"\nauth_header = \"x gateway\"",
+            "[[provider]]\nid = \"a\"\nkind = \"openai-compatible\"\nauth_header = \"x-gateway-key\"",
         ] {
             assert!(
                 matches!(

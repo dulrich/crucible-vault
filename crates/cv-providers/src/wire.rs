@@ -221,7 +221,10 @@ pub fn build_completion(
                 url: format!("{base}/v1/messages"),
                 headers: vec![
                     ("content-type".into(), "application/json".into()),
-                    ("x-api-key".into(), key.to_owned()),
+                    (
+                        p.auth_header.as_deref().unwrap_or("x-api-key").into(),
+                        key.to_owned(),
+                    ),
                     ("anthropic-version".into(), "2023-06-01".into()),
                 ],
                 body,
@@ -657,6 +660,33 @@ mod image_wire_tests {
         let mut w = build_completion(&p, Some("k"), "m", "S", "U", &[], 7).unwrap();
         apply_extras(p.kind, &mut w, extras);
         w.body
+    }
+
+    #[test]
+    fn anthropic_auth_header_replaces_x_api_key() {
+        let names = |p: &ProviderConfig| {
+            build_completion(p, Some("k"), "m", "S", "U", &[], 7)
+                .unwrap()
+                .headers
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect::<Vec<String>>()
+        };
+        let default = names(&prov("anthropic"));
+        assert_eq!(default, ["content-type", "x-api-key", "anthropic-version"]);
+        let mut p = prov("anthropic");
+        p.auth_header = Some("x-gateway-key".into());
+        let w = build_completion(&p, Some("k"), "m", "S", "U", &[], 7).unwrap();
+        assert!(
+            w.headers
+                .iter()
+                .any(|(n, v)| n == "x-gateway-key" && v == "k")
+        );
+        assert!(!w.headers.iter().any(|(n, _)| n == "x-api-key"));
+        assert_eq!(
+            names(&p),
+            ["content-type", "x-gateway-key", "anthropic-version"]
+        );
     }
 
     #[test]

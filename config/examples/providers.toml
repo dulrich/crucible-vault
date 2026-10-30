@@ -50,3 +50,19 @@ timeout_seconds = 900
 
 [[provider.models]]
 id = "gpt-5.5"
+
+# Local inference router (inference-server) — codex subscription models via the sidecar. The router
+# authenticates `x-gateway-key`; the key arrives via the host-env consumer `crucible-vault`
+# (EnvironmentFile drop-in, migration 0025). The sidecar serves one request at a time.
+[[provider]]
+id = "router"
+kind = "anthropic"
+name = "Inference router"
+base_url = "http://127.0.0.1:4813"
+api_key_env = "CV_ROUTER_GATEWAY_KEY"
+auth_header = "x-gateway-key"
+max_concurrent_requests = 1
+
+[[provider.models]]
+id = "codex-profile-a/gpt-6.1-terra"
+label = "GPT-6.1 Terra (codex)"
