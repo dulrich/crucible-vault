@@ -8,6 +8,7 @@ pub mod access;
 pub mod blogs;
 pub mod boilerplate;
 pub mod brief;
+pub mod enrich;
 pub mod feed;
 pub mod fm;
 pub mod html;
