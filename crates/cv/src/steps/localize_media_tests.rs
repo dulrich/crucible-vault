@@ -283,16 +283,15 @@ fn video_link_mode_never_fetches_a_thumbnail() {
 }
 
 #[test]
-fn video_localize_downloads_the_file() {
-    let (env, _, _, _) = run_note(
-        vec![("/v.mp4", "video/mp4", b"fake mp4".to_vec())],
-        "video = true",
-        "![]({b}/v.mp4)\n",
-    );
-    assert_eq!(
-        env.text("n.md"),
-        format!("![](_attachments/n/{}_MD5.mp4)\n", md5(b"fake mp4"))
-    );
+fn video_bool_is_a_load_error() {
+    let e = env(&[("n.md", b"x")]);
+    let t: toml::Table = toml::from_str("video = true").unwrap();
+    let mut full = t.clone();
+    full.insert("type".into(), toml::Value::String("localize".into()));
+    let step = cv_actions::Step::from_table(full).unwrap();
+    let err = crate::steps::validate(&step, &e.config).unwrap_err();
+    assert!(err.contains("video must be"), "{err}");
+    assert!(err.contains("a bool is not accepted"), "{err}");
 }
 
 #[test]

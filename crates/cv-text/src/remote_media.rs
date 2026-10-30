@@ -156,6 +156,39 @@ pub fn classify_remote(url: &str) -> RemoteKind {
     }
 }
 
+/// The kind a media reference is handled as: [`classify_remote`] plus the HTML tag and the
+/// id-less video page (see [`effective_kind`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectiveKind {
+    /// A kind from [`classify_remote`], or the one the HTML tag forces.
+    Kind(RemoteKind),
+    /// A video-page URL without a usable id ([`crate::attachments::is_embed_page`] but not a
+    /// [`RemoteKind::VideoPage`]), reached only without an HTML tag: no thumbnail to be had.
+    IdlessVideoPage,
+}
+
+/// The one kind rule shared by the `localize` step and the media audit: a
+/// [`RemoteKind::VideoPage`] or [`RemoteKind::Post`] from [`classify_remote`] wins over any tag;
+/// otherwise the HTML tag decides (`iframe` is [`RemoteKind::Embed`], `video` a
+/// [`RemoteKind::VideoFile`], `audio` an [`RemoteKind::AudioFile`], `img` an
+/// [`RemoteKind::Image`]); with no tag, an embed-page URL that is not a video page is
+/// [`EffectiveKind::IdlessVideoPage`], else the [`classify_remote`] kind.
+#[must_use]
+pub fn effective_kind(url: &str, tag: Option<HtmlMediaTag>) -> EffectiveKind {
+    let kind = classify_remote(url);
+    if matches!(kind, RemoteKind::VideoPage { .. } | RemoteKind::Post) {
+        return EffectiveKind::Kind(kind);
+    }
+    match tag {
+        Some(HtmlMediaTag::Iframe) => EffectiveKind::Kind(RemoteKind::Embed),
+        Some(HtmlMediaTag::Video) => EffectiveKind::Kind(RemoteKind::VideoFile),
+        Some(HtmlMediaTag::Audio) => EffectiveKind::Kind(RemoteKind::AudioFile),
+        Some(HtmlMediaTag::Img) => EffectiveKind::Kind(RemoteKind::Image),
+        None if crate::attachments::is_embed_page(url) => EffectiveKind::IdlessVideoPage,
+        None => EffectiveKind::Kind(kind),
+    }
+}
+
 /// An HTML media element's tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HtmlMediaTag {

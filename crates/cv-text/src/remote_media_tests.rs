@@ -96,6 +96,61 @@ fn classify_by_extension() {
 }
 
 #[test]
+fn effective_kind_rules() {
+    use EffectiveKind::{IdlessVideoPage, Kind};
+    let page = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    let post = "https://x.com/a/status/1";
+    // A video page or post wins over every tag.
+    for tag in [
+        None,
+        Some(HtmlMediaTag::Img),
+        Some(HtmlMediaTag::Video),
+        Some(HtmlMediaTag::Audio),
+        Some(HtmlMediaTag::Iframe),
+    ] {
+        assert_eq!(
+            effective_kind(page, tag),
+            Kind(yt("dQw4w9WgXcQ")),
+            "{tag:?}"
+        );
+        assert_eq!(effective_kind(post, tag), Kind(RemoteKind::Post), "{tag:?}");
+    }
+    // Otherwise the tag decides.
+    let u = "https://a.test/x";
+    assert_eq!(
+        effective_kind(u, Some(HtmlMediaTag::Iframe)),
+        Kind(RemoteKind::Embed)
+    );
+    assert_eq!(
+        effective_kind(u, Some(HtmlMediaTag::Video)),
+        Kind(RemoteKind::VideoFile)
+    );
+    assert_eq!(
+        effective_kind(u, Some(HtmlMediaTag::Audio)),
+        Kind(RemoteKind::AudioFile)
+    );
+    assert_eq!(
+        effective_kind("https://a.test/x.mp4", Some(HtmlMediaTag::Img)),
+        Kind(RemoteKind::Image)
+    );
+    // No tag: the classifier's kind, except an id-less embed page.
+    assert_eq!(
+        effective_kind("https://a.test/x.pdf", None),
+        Kind(RemoteKind::Pdf)
+    );
+    assert_eq!(effective_kind(u, None), Kind(RemoteKind::Unknown));
+    assert_eq!(
+        effective_kind("https://youtu.be/abc", None),
+        IdlessVideoPage
+    );
+    // The id-less page is only reached without a tag.
+    assert_eq!(
+        effective_kind("https://youtu.be/abc", Some(HtmlMediaTag::Img)),
+        Kind(RemoteKind::Image)
+    );
+}
+
+#[test]
 fn is_embed_page_truth_table_unchanged() {
     for u in [
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ",

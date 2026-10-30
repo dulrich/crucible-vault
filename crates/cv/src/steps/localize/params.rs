@@ -12,25 +12,8 @@ use cv_text::attachments::{Media, classify_media};
 /// Target image format (Crucible `ImageConvertFormat`); the one definition is `cv_actions`'.
 pub use cv_actions::ImageFormat;
 
-/// Remote video handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VideoMode {
-    /// Keep the link, show a localized thumbnail (WP-3 acts on it).
-    Thumbnail,
-    /// Keep the link only.
-    Link,
-    /// Download the video file — reachable only from the legacy step bool `video = true`.
-    Localize,
-}
-
-impl From<VaultVideoMode> for VideoMode {
-    fn from(m: VaultVideoMode) -> Self {
-        match m {
-            VaultVideoMode::Thumbnail => Self::Thumbnail,
-            VaultVideoMode::Link => Self::Link,
-        }
-    }
-}
+/// Remote video handling: the vault-level mode, used directly (video files are never downloaded).
+pub(crate) type VideoMode = VaultVideoMode;
 
 /// Remote audio handling.
 pub(crate) type AudioMode = MediaMode;
@@ -50,8 +33,8 @@ pub(crate) struct Params {
     pub(super) repair: bool,
     pub(super) folder_template: String,
     pub(super) name_template: String,
-    /// Media downloaded today: Images (unless a legacy `images = false`), Audio iff
-    /// `audio == Localize`, Pdf iff `pdf == Localize`, Video iff `video == VideoMode::Localize`.
+    /// Media downloaded today: Images, Audio iff `audio == Localize`, Pdf iff `pdf == Localize`
+    /// (video files are never downloaded).
     pub(super) enabled: Vec<Media>,
     pub(super) video: VideoMode,
     pub(super) audio: AudioMode,
@@ -85,15 +68,15 @@ fn media_bases() -> (String, String) {
     ("https://i.ytimg.com".into(), "https://vimeo.com".into())
 }
 
-/// A link/localize mode param: the mode string, or a legacy bool (`true` = localize).
+/// A link/localize mode param: `"link"` or `"localize"`; a bool is a load error.
 fn media_mode(t: &toml::Table, k: &str, d: MediaMode) -> Result<MediaMode, String> {
     match t.get(k) {
         None => Ok(d),
-        Some(toml::Value::Boolean(true)) => Ok(MediaMode::Localize),
-        Some(toml::Value::Boolean(false)) => Ok(MediaMode::Link),
         Some(toml::Value::String(s)) if s == "link" => Ok(MediaMode::Link),
         Some(toml::Value::String(s)) if s == "localize" => Ok(MediaMode::Localize),
-        Some(_) => Err(format!("localize: {k} must be \"link\" or \"localize\"")),
+        Some(_) => Err(format!(
+            "localize: {k} must be \"link\" or \"localize\" (a bool is not accepted)"
+        )),
     }
 }
 
@@ -130,29 +113,33 @@ pub(super) fn parse_params(t: &toml::Table, rm: &RemoteMediaConfig) -> Result<Pa
     let folder_template = s("folder_template")?.unwrap_or_else(|| rm.folder_template.clone());
     let name_template = s("name_template")?.unwrap_or_else(|| rm.name_template.clone());
     check_templates(&folder_template, &name_template).map_err(|e| format!("localize: {e}"))?;
-    // `images`: "localize" (the only mode) or a legacy bool (`false` = skip images).
-    let images = match t.get("images") {
-        None => true,
-        Some(toml::Value::Boolean(v)) => *v,
-        Some(toml::Value::String(s)) if s == "localize" => true,
-        Some(_) => return Err("localize: images must be \"localize\"".into()),
-    };
+    // `images`: "localize" (the only mode); a bool is a load error.
+    match t.get("images") {
+        None => {}
+        Some(toml::Value::String(s)) if s == "localize" => {}
+        Some(_) => {
+            return Err("localize: images must be \"localize\" (a bool is not accepted)".into());
+        }
+    }
     let audio = media_mode(t, "audio", rm.audio)?;
     let pdf = media_mode(t, "pdf", rm.pdf)?;
     let video = match t.get("video") {
-        None | Some(toml::Value::Boolean(false)) => VideoMode::from(rm.video),
-        Some(toml::Value::Boolean(true)) => VideoMode::Localize,
+        None => rm.video,
         Some(toml::Value::String(s)) if s == "thumbnail" => VideoMode::Thumbnail,
         Some(toml::Value::String(s)) if s == "link" => VideoMode::Link,
-        Some(_) => return Err("localize: video must be \"thumbnail\" or \"link\"".into()),
+        Some(_) => {
+            return Err(
+                "localize: video must be \"thumbnail\" or \"link\" (a bool is not accepted)".into(),
+            );
+        }
     };
     let mut enabled = Vec::new();
     let mut whitelists = HashMap::new();
     for m in [Media::Images, Media::Audio, Media::Video, Media::Pdf] {
         let on = match m {
-            Media::Images => images,
+            Media::Images => true,
             Media::Audio => audio == MediaMode::Localize,
-            Media::Video => video == VideoMode::Localize,
+            Media::Video => false,
             Media::Pdf => pdf == MediaMode::Localize,
         };
         if on {

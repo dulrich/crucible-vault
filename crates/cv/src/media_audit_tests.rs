@@ -100,6 +100,16 @@ const LINK: Modes = Modes {
 };
 
 #[test]
+fn note_counts_follow_the_effective_kind() {
+    // `<img src=<video page>>` is a video (was an image); a markdown embed of an id-less embed
+    // page is a video (was uncounted). Plan tn-review-2026-10-29-remediation Decision 1.
+    let text = "<img src=\"https://www.youtube.com/watch?v=dQw4w9WgXcQ\">\n\
+                ![](https://youtu.be/abc)\n\
+                ![](https://a.test/p.png)\n";
+    assert_eq!(note_counts(text), (1, 2, 0, 0));
+}
+
+#[test]
 fn counts_each_kind_and_excludes_fences_custom_and_dot_dirs() {
     let f = fixture();
     let r = report(&f, LINK);

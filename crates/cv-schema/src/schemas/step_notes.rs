@@ -375,7 +375,7 @@ pub static LOCALIZE: Record = Record {
         )
         .dflt(D::Str("{{md5}}_MD5.{{ext}}")),
         // Mode overrides of vault.toml `[remote_media]` (plan remote-media-sprint WP-2); the
-        // parser also accepts the legacy bools, which this vocabulary cannot express.
+        // parser rejects a bool for any of the four.
         field(
             "images",
             "Images",

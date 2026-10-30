@@ -24,8 +24,8 @@ use anyhow::{Result, anyhow, bail};
 use cv_actions::vault::{MediaMode, VaultConfig};
 use cv_search::prepare::localized_image_md5;
 use cv_state::StateReader;
-use cv_text::attachments::{is_embed_page, parse_attachment_refs, unmanaged_local_image_refs};
-use cv_text::remote_media::{HtmlMediaTag, RemoteKind, classify_remote, scan_html_media};
+use cv_text::attachments::{parse_attachment_refs, unmanaged_local_image_refs};
+use cv_text::remote_media::{EffectiveKind, RemoteKind, effective_kind, scan_html_media};
 use cv_text::vpath::basename;
 
 use crate::config::Config;
@@ -236,30 +236,25 @@ fn top_folder(rel: &str) -> &str {
 /// Counts of one note's remote refs by kind: (images, video, audio, pdf).
 fn note_counts(text: &str) -> (u64, u64, u64, u64) {
     let (mut img, mut vid, mut aud, mut pdf) = (0_u64, 0_u64, 0_u64, 0_u64);
-    for m in parse_attachment_refs(text) {
-        if !(m.is_embed && m.is_remote && m.syntax == cv_text::attachments::Syntax::Md) {
-            continue;
-        }
-        match classify_remote(&m.link) {
-            RemoteKind::Image | RemoteKind::Unknown => {
-                if !is_embed_page(&m.link) {
-                    img += 1;
-                }
-            }
+    let mut count = |k: EffectiveKind| match k {
+        EffectiveKind::Kind(RemoteKind::Image | RemoteKind::Unknown) => img += 1,
+        EffectiveKind::IdlessVideoPage
+        | EffectiveKind::Kind(
             RemoteKind::VideoPage { .. }
             | RemoteKind::VideoFile
             | RemoteKind::Post
-            | RemoteKind::Embed => vid += 1,
-            RemoteKind::AudioFile => aud += 1,
-            RemoteKind::Pdf => pdf += 1,
+            | RemoteKind::Embed,
+        ) => vid += 1,
+        EffectiveKind::Kind(RemoteKind::AudioFile) => aud += 1,
+        EffectiveKind::Kind(RemoteKind::Pdf) => pdf += 1,
+    };
+    for m in parse_attachment_refs(text) {
+        if m.is_embed && m.is_remote && m.syntax == cv_text::attachments::Syntax::Md {
+            count(effective_kind(&m.link, None));
         }
     }
     for h in scan_html_media(text) {
-        match h.tag {
-            HtmlMediaTag::Img => img += 1,
-            HtmlMediaTag::Video | HtmlMediaTag::Iframe => vid += 1,
-            HtmlMediaTag::Audio => aud += 1,
-        }
+        count(effective_kind(&h.src, Some(h.tag)));
     }
     (img, vid, aud, pdf)
 }

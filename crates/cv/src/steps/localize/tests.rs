@@ -71,28 +71,18 @@ fn step_param_overrides_vault_config() {
 }
 
 #[test]
-fn legacy_bools_map_to_modes() {
+fn legacy_bools_are_rejected_naming_the_key() {
     let rm = vault_rm();
-    let t = p(
-        "audio = true\npdf = true\nvideo = true\n",
-        &RemoteMediaConfig::default(),
-    )
-    .unwrap();
-    assert_eq!(t.audio, MediaMode::Localize);
-    assert_eq!(t.pdf, MediaMode::Localize);
-    assert_eq!(t.video, VideoMode::Localize);
-    assert_eq!(
-        t.enabled,
-        vec![Media::Images, Media::Audio, Media::Video, Media::Pdf]
-    );
-    let f = p("audio = false\npdf = false\nvideo = false\n", &rm).unwrap();
-    assert_eq!(f.audio, MediaMode::Link);
-    assert_eq!(f.pdf, MediaMode::Link);
-    // `video = false` = the vault default.
-    assert_eq!(f.video, VideoMode::Link);
-    assert_eq!(f.enabled, vec![Media::Images]);
-    let no_img = p("images = false\n", &rm).unwrap();
-    assert!(!no_img.enabled.contains(&Media::Images));
+    for k in ["images", "video", "audio", "pdf"] {
+        for v in ["true", "false"] {
+            let e = p(&format!("{k} = {v}\n"), &rm).unwrap_err();
+            assert!(
+                e.starts_with(&format!("localize: {k} must be ")),
+                "{k} = {v}: {e}"
+            );
+            assert!(e.contains("a bool is not accepted"), "{k} = {v}: {e}");
+        }
+    }
     assert!(p("images = \"localize\"\n", &rm).is_ok());
 }
 

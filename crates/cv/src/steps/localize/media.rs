@@ -11,13 +11,12 @@ use cv_text::attachments::{
     md_ref_raw_destination,
 };
 use cv_text::remote_media::{
-    HtmlMedia, HtmlMediaTag, RemoteKind, VideoProvider, classify_remote, html_attr,
+    EffectiveKind, HtmlMedia, HtmlMediaTag, RemoteKind, VideoProvider, effective_kind, html_attr,
 };
 
 use super::super::{StepCtx, StepError};
 use super::note::{DownloadError, Fetched, Run, SERVICE, classify_fetch_error};
-use super::params::VideoMode;
-use cv_actions::MediaMode;
+use cv_actions::{MediaMode, VaultVideoMode as VideoMode};
 
 /// One remote media source to rewrite.
 struct Src<'a> {
@@ -190,20 +189,14 @@ impl Run<'_> {
         local: &dyn Fn(&str) -> String,
     ) -> Result<Option<String>, StepError> {
         let p = self.p;
-        let mut kind = classify_remote(s.url);
-        match (s.tag, &kind) {
-            (_, RemoteKind::VideoPage { .. } | RemoteKind::Post) => {}
-            (Some(HtmlMediaTag::Iframe), _) => kind = RemoteKind::Embed,
-            (Some(HtmlMediaTag::Video), _) => kind = RemoteKind::VideoFile,
-            (Some(HtmlMediaTag::Audio), _) => kind = RemoteKind::AudioFile,
-            (Some(HtmlMediaTag::Img), _) => kind = RemoteKind::Image,
-            (None, _) if is_embed_page(s.url) => {
+        let kind = match effective_kind(s.url, s.tag) {
+            EffectiveKind::Kind(k) => k,
+            EffectiveKind::IdlessVideoPage => {
                 // A YouTube page without a usable id: no thumbnail to be had.
                 self.counts.media_links += 1;
                 return Ok(Some(s.video_card()));
             }
-            (None, _) => {}
-        }
+        };
         let out = match kind {
             RemoteKind::VideoPage { provider, id } => {
                 if p.video == VideoMode::Link {
@@ -230,13 +223,6 @@ impl Run<'_> {
             RemoteKind::Post => Some(card("𝕏 post", &s.dest)),
             RemoteKind::Embed => Some(card(&format!("⧉ embed · {}", host(s.url)), &s.dest)),
             RemoteKind::VideoFile => match p.video {
-                VideoMode::Localize => {
-                    match self.fetch(ctx, note, s.url, false, &|e| p.eligible(e))? {
-                        Fetched::Local(t) => return Ok(Some(local(&t))),
-                        Fetched::Permanent | Fetched::Ineligible => Some(s.video_card()),
-                        Fetched::Transient | Fetched::Failed => return Ok(None),
-                    }
-                }
                 VideoMode::Thumbnail => match s.poster {
                     Some(poster) => match self.thumbnail(ctx, note, &[poster.to_owned()])? {
                         Thumb::Got(t) => Some(thumb_ref(&t, s.url)),
