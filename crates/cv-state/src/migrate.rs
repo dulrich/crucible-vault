@@ -3,7 +3,7 @@
 //! The schema is keyed on SQLite's `PRAGMA user_version`. A fresh database (version 0) is
 //! created directly at [`BASELINE_VERSION`] (15) from [`BASELINE`], the schema the retired 0.1.1
 //! baseline (v11) plus its v12–v15 steps produced (fixture `tests/fixtures/baseline-v15-schema.txt`),
-//! then brought forward by [`MIGRATIONS`] (empty at the baseline). A database at [`latest_version`]
+//! then brought forward by [`MIGRATIONS`] (v16: job telemetry). A database at [`latest_version`]
 //! opens with no schema write. Versions `1..BASELINE_VERSION` predate the baseline and are refused
 //! with [`StateError::PreBaseline`]; a version newer than this build knows is refused with
 //! [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no down-migration and
@@ -168,7 +168,46 @@ CREATE INDEX trash_entries_trashed ON trash_entries(trashed_ms);
 ";
 
 /// Post-baseline steps (v16+). Later WPs append (never edit) entries.
-pub const MIGRATIONS: &[&str] = &[];
+///
+/// v16 (plan job-telemetry WP-1): job timing and wait-cause telemetry. Additive only: a
+/// monotonic per-job telemetry attempt (`tel_attempt`; never reset, unlike `attempts`), the
+/// first/last claim times, a partial-coverage marker (`tel_partial`, set on every pre-v16 row),
+/// and three child tables pruned with their job: attempt claim/settle times, wait-cause change
+/// events, and per-step start/end times.
+pub const MIGRATIONS: &[&str] = &[V16_JOB_TELEMETRY];
+
+const V16_JOB_TELEMETRY: &str = r"
+ALTER TABLE jobs ADD COLUMN tel_attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN first_claimed_ms INTEGER;
+ALTER TABLE jobs ADD COLUMN last_claimed_ms INTEGER;
+ALTER TABLE jobs ADD COLUMN tel_partial INTEGER NOT NULL DEFAULT 0;
+UPDATE jobs SET tel_partial = 1;
+CREATE TABLE job_attempt_times (
+    job_id      TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    claimed_ms  INTEGER NOT NULL,
+    settled_ms  INTEGER,
+    PRIMARY KEY (job_id, attempt)
+);
+CREATE TABLE job_wait_events (
+    seq       INTEGER PRIMARY KEY,
+    job_id    TEXT NOT NULL,
+    at_ms     INTEGER NOT NULL,
+    cause     TEXT NOT NULL,
+    blocker   TEXT,
+    until_ms  INTEGER
+);
+CREATE INDEX job_wait_events_job ON job_wait_events(job_id, seq);
+CREATE TABLE job_step_times (
+    job_id      TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    step_index  INTEGER NOT NULL,
+    step_kind   TEXT NOT NULL,
+    start_ms    INTEGER NOT NULL,
+    end_ms      INTEGER,
+    PRIMARY KEY (job_id, attempt, step_index)
+);
+";
 
 /// Highest schema version this build knows.
 #[must_use]

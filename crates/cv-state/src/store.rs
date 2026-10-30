@@ -22,7 +22,8 @@ use crate::job::{
     EnqueueOutcome, Job, JobResult, JobStatus, NewJob, failure_kind_for, lane_rank, namespaced_key,
 };
 use crate::migrate;
-use crate::query::{self, ListQuery, StatusCount};
+use crate::query::{self, JobTelemetry, ListQuery, StatusCount, WaitCause};
+use crate::telemetry;
 use cv_protocol::BreakerState;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, HashSet};
@@ -228,17 +229,9 @@ impl StateDb {
                 health::store(&tx, &h)?;
             }
         }
-        let mut busy: HashSet<String> = HashSet::new();
-        {
-            let mut stmt = tx.prepare("SELECT resource_keys FROM jobs WHERE status = 'running'")?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            for raw in rows {
-                // Fail closed (I3): an unreadable running row's keys cannot be checked for
-                // overlap, so no claim proceeds until the row is repaired.
-                let keys: Vec<String> = serde_json::from_str(&raw?)?;
-                busy.extend(keys);
-            }
-        }
+        // Fail closed (I3): an unreadable running row's keys cannot be checked for overlap, so
+        // no claim proceeds until the row is repaired.
+        let busy = telemetry::running_keys(&tx)?;
         let candidates: Vec<(String, String, Option<String>)> = {
             let mut stmt = tx.prepare(
                 "SELECT id, resource_keys, service FROM jobs WHERE status = 'queued' AND (defer_until_ms IS NULL OR defer_until_ms <= ?1) ORDER BY lane ASC, id ASC",
@@ -254,7 +247,10 @@ impl StateDb {
                 tracing::warn!(job_id = %id, "unparseable resource_keys; not claimable");
                 continue;
             };
-            if keys.iter().any(|k| busy.contains(k)) {
+            // Telemetry (plan job-telemetry Decisions 3-4): a skipped candidate records its
+            // cause only when it changed; the classification reuses this pass's decision.
+            if let Some(blocker) = keys.iter().find_map(|k| busy.get(k)) {
+                telemetry::note_wait(&tx, &id, WaitCause::Key, Some(blocker), now_ms)?;
                 continue;
             }
             if let Some(svc) = &service
@@ -262,9 +258,13 @@ impl StateDb {
             {
                 match h.state {
                     BreakerState::Closed => {}
-                    BreakerState::Open => continue,
+                    BreakerState::Open => {
+                        telemetry::note_wait(&tx, &id, WaitCause::Breaker, Some(svc), now_ms)?;
+                        continue;
+                    }
                     BreakerState::HalfOpen => {
                         if !h.try_acquire_probe(now_ms) {
+                            telemetry::note_wait(&tx, &id, WaitCause::Breaker, Some(svc), now_ms)?;
                             continue;
                         }
                         health::store(&tx, &h)?;
@@ -279,12 +279,83 @@ impl StateDb {
             return Ok(None);
         };
         tx.execute(
-            "UPDATE jobs SET status = 'running', claim_token = ?2, claimed_at_ms = ?3, defer_until_ms = NULL, attempts = attempts + 1 WHERE id = ?1 AND status = 'queued'",
+            "UPDATE jobs SET status = 'running', claim_token = ?2, claimed_at_ms = ?3, defer_until_ms = NULL, attempts = attempts + 1, tel_attempt = tel_attempt + 1, first_claimed_ms = COALESCE(first_claimed_ms, ?3), last_claimed_ms = ?3 WHERE id = ?1 AND status = 'queued'",
             params![id, self.token, now_ms],
         )?;
+        telemetry::record_claim(&tx, &id, now_ms)?;
         let job = query::get(&tx, &id)?;
         tx.commit()?;
         Ok(job)
+    }
+
+    /// Permit-wait observation (plan job-telemetry Decision 3): the claim loop calls this when
+    /// no runner permit is free. Every claimable queued candidate records why it waits — a busy
+    /// key or breaker when one applies (classified read-only; never takes the half-open probe,
+    /// audit E2), else the permit, naming the running jobs' actions. One transaction; a
+    /// candidate is written only when its cause changed (Decision 4).
+    pub fn observe_permit_wait(&mut self, now_ms: i64) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let busy = telemetry::running_keys(&tx)?;
+        let holders = telemetry::running_actions(&tx)?;
+        let candidates: Vec<(String, String, Option<String>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, resource_keys, service FROM jobs WHERE status = 'queued' AND (defer_until_ms IS NULL OR defer_until_ms <= ?1)",
+            )?;
+            stmt.query_map(params![now_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (id, raw_keys, service) in candidates {
+            let Ok(keys) = serde_json::from_str::<Vec<String>>(&raw_keys) else {
+                continue;
+            };
+            let (cause, blocker) = if let Some(b) = keys.iter().find_map(|k| busy.get(k)) {
+                (WaitCause::Key, b.clone())
+            } else if let Some(svc) = &service
+                && let Some(h) = health::load(&tx, svc)?
+                && (h.state == BreakerState::Open
+                    || (h.state == BreakerState::HalfOpen && h.probe_in_flight()))
+            {
+                (WaitCause::Breaker, svc.clone())
+            } else {
+                (WaitCause::Permit, holders.clone())
+            };
+            telemetry::note_wait(&tx, &id, cause, Some(&blocker), now_ms)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stamps the start of step `step_index` (`step_kind`) of `job_id`'s current telemetry attempt.
+    pub fn step_started(
+        &mut self,
+        job_id: &str,
+        step_index: i64,
+        step_kind: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO job_step_times (job_id, attempt, step_index, step_kind, start_ms, end_ms)
+             SELECT id, tel_attempt, ?2, ?3, ?4, NULL FROM jobs WHERE id = ?1",
+            params![job_id, step_index, step_kind, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Stamps the end of step `step_index` of `job_id`'s current telemetry attempt.
+    pub fn step_ended(&mut self, job_id: &str, step_index: i64, now_ms: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE job_step_times SET end_ms = ?3 WHERE job_id = ?1 AND step_index = ?2
+               AND attempt = (SELECT tel_attempt FROM jobs WHERE id = ?1)",
+            params![job_id, step_index, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Every telemetry row of job `id` (input of [`crate::split_buckets`]).
+    pub fn job_telemetry(&self, id: &str) -> Result<Option<JobTelemetry>> {
+        query::telemetry(&self.conn, id)
     }
 
     /// Earliest `defer_until_ms` among deferred queued rows still in the future (the wake time).
@@ -406,6 +477,21 @@ impl StateDb {
                 )?
             }
         };
+        telemetry::record_settle(tx, id, now_ms)?;
+        if let JobResult::Deferred {
+            retry_after_ms,
+            service_unhealthy,
+        } = result
+        {
+            telemetry::insert_wait(
+                tx,
+                id,
+                WaitCause::Deferred,
+                service_unhealthy.as_deref(),
+                Some(now_ms.saturating_add((*retry_after_ms).max(0))),
+                now_ms,
+            )?;
+        }
         Ok(job.service)
     }
 
@@ -414,7 +500,7 @@ impl StateDb {
     /// cancelled. Anything else is [`StateError::WrongStatus`].
     pub fn cancel(&mut self, id: &str, now_ms: i64) -> Result<()> {
         let n = self.conn.execute(
-            "UPDATE jobs SET status = 'cancelled', settled_at_ms = ?2, defer_until_ms = NULL WHERE id = ?1 AND status = 'queued'",
+            "UPDATE jobs SET status = 'cancelled', settled_at_ms = ?2, defer_until_ms = NULL, tel_partial = 1 WHERE id = ?1 AND status = 'queued'",
             params![id, now_ms],
         )?;
         if n > 0 {
@@ -496,7 +582,7 @@ impl StateDb {
     /// start, every other token is dead (single writer).
     pub fn recover_foreign_leases(&mut self) -> Result<usize> {
         Ok(self.conn.execute(
-            "UPDATE jobs SET status = 'queued', claim_token = NULL, claimed_at_ms = NULL WHERE status = 'running' AND (claim_token IS NULL OR claim_token <> ?1)",
+            "UPDATE jobs SET status = 'queued', claim_token = NULL, claimed_at_ms = NULL, tel_partial = 1 WHERE status = 'running' AND (claim_token IS NULL OR claim_token <> ?1)",
             params![self.token],
         )?)
     }
@@ -519,7 +605,7 @@ impl StateDb {
         let mut n = 0;
         for id in stale.iter().filter(|id| !live.contains(*id)) {
             n += self.conn.execute(
-                "UPDATE jobs SET status = 'queued', claim_token = NULL, claimed_at_ms = NULL WHERE id = ?1 AND status = 'running' AND claimed_at_ms < ?2",
+                "UPDATE jobs SET status = 'queued', claim_token = NULL, claimed_at_ms = NULL, tel_partial = 1 WHERE id = ?1 AND status = 'running' AND claimed_at_ms < ?2",
                 params![id, cutoff],
             )?;
         }
@@ -541,11 +627,18 @@ impl StateDb {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // WP-9: a pruned job's step checkpoints go with it.
-        tx.execute(
-            "DELETE FROM job_step_checkpoints WHERE job_id IN (SELECT id FROM jobs WHERE status IN ('done','failed','cancelled') AND settled_at_ms < ?1)",
-            params![cutoff],
-        )?;
+        // WP-9: a pruned job's step checkpoints go with it; so do its telemetry rows (v16).
+        for table in [
+            "job_step_checkpoints",
+            "job_attempt_times",
+            "job_wait_events",
+            "job_step_times",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE job_id IN (SELECT id FROM jobs WHERE status IN ('done','failed','cancelled') AND settled_at_ms < ?1)"),
+                params![cutoff],
+            )?;
+        }
         let n = tx.execute(
             "DELETE FROM jobs WHERE status IN ('done','failed','cancelled') AND settled_at_ms < ?1",
             params![cutoff],

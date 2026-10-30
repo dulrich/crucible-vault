@@ -524,3 +524,6 @@ mod health_reader;
 
 #[path = "tests_settle_recovery.rs"]
 mod settle_recovery;
+
+#[path = "tests_telemetry.rs"]
+mod telemetry;

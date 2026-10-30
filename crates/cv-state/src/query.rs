@@ -188,3 +188,265 @@ pub(crate) fn find_pending(conn: &Connection, namespaced: &str) -> Result<Option
         )
         .optional()?)
 }
+
+// ---- job telemetry (plan job-telemetry WP-1, state.db v16) ------------------------------
+
+/// Why a queued job was not running, as recorded by the claim pass / claim loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCause {
+    /// Waiting out a `defer_until_ms` (deferred settle); the blocker is the deferring service.
+    Deferred,
+    /// Claimable, but every runner permit was taken; the blocker names the running actions.
+    Permit,
+    /// A resource key was held by a running job; the blocker is that job's action.
+    Key,
+    /// The job's service breaker was open (or half-open with its probe taken).
+    Breaker,
+}
+
+impl WaitCause {
+    /// Stored form.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deferred => "deferred",
+            Self::Permit => "permit",
+            Self::Key => "key",
+            Self::Breaker => "breaker",
+        }
+    }
+
+    /// Parse the stored form.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "deferred" => Some(Self::Deferred),
+            "permit" => Some(Self::Permit),
+            "key" => Some(Self::Key),
+            "breaker" => Some(Self::Breaker),
+            _ => None,
+        }
+    }
+}
+
+/// One claim of a job (telemetry attempt `attempt`, monotonic per job, never reset).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptTime {
+    pub attempt: i64,
+    pub claimed_ms: i64,
+    /// `None` when the attempt never settled normally (recovered lease; the row is partial).
+    pub settled_ms: Option<i64>,
+}
+
+/// A wait-cause change: from `at_ms` the job waited for `cause` until the next event, the next
+/// claim, or settle (a deferral also ends at `until_ms`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitEvent {
+    pub at_ms: i64,
+    pub cause: WaitCause,
+    pub blocker: Option<String>,
+    pub until_ms: Option<i64>,
+}
+
+/// One executed step of one attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepTime {
+    pub attempt: i64,
+    pub step_index: i64,
+    pub step_kind: String,
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
+}
+
+/// Every stored telemetry row of one job (input of [`split_buckets`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobTelemetry {
+    pub id: String,
+    pub job_type: String,
+    pub status: JobStatus,
+    pub created_ms: i64,
+    pub settled_ms: Option<i64>,
+    /// Partial-coverage marker (Decision 6): created/claimed before v16, recovered without a
+    /// normal settle, or cancelled while queued.
+    pub partial: bool,
+    /// In claim order.
+    pub attempts: Vec<AttemptTime>,
+    /// In record order.
+    pub waits: Vec<WaitEvent>,
+    /// By attempt, then step index.
+    pub steps: Vec<StepTime>,
+}
+
+/// Run time of one attempt, split per executed step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptRun {
+    pub attempt: i64,
+    pub run_ms: i64,
+    /// `(step_index, step_kind, duration_ms)`; a step with no end stamp is omitted.
+    pub steps: Vec<(i64, String, i64)>,
+}
+
+/// `settled − created` of one job, split so every millisecond lands in exactly one bucket:
+/// `deferral + permit + key + breaker + run + residual == total`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketSplit {
+    pub total_ms: i64,
+    pub deferral_ms: i64,
+    pub permit_ms: i64,
+    pub key_ms: i64,
+    pub breaker_ms: i64,
+    pub run_ms: i64,
+    /// Non-executing / unobserved residual: time terminal between a failure and its retry,
+    /// and queued time no claim pass observed with a cause. Never folded into a measured bucket.
+    pub residual_ms: i64,
+    /// Measured wait per `(cause, blocker)` (blocker `""` when none was named).
+    pub blockers: Vec<(WaitCause, String, i64)>,
+    pub attempts: Vec<AttemptRun>,
+}
+
+/// Split a settled, fully instrumented job's `settled − created` into wait buckets (deferral,
+/// permit, key, breaker, each with its blockers), run time (per attempt and per step) and the
+/// labelled non-executing / unobserved residual (`total − measured`). Pure over the stored rows
+/// ([`crate::StateDb::job_telemetry`] loads them).
+///
+/// Returns `None` for a job that has not settled or carries the partial-coverage marker: its
+/// intervals are unavailable, never reported as a fabricated zero or cause.
+///
+/// A wait event spans from its `at_ms` to the earliest of the next event, the next claim at or
+/// after it, and settle; a deferral additionally ends at its `until_ms` (the time after it until
+/// the claim is unobserved). An attempt runs from its claim to its settle.
+#[must_use]
+pub fn split_buckets(t: &JobTelemetry) -> Option<BucketSplit> {
+    let settled = t.settled_ms?;
+    if t.partial {
+        return None;
+    }
+    let clamp = |v: i64| v.clamp(t.created_ms, settled);
+    let mut out = BucketSplit {
+        total_ms: settled - t.created_ms,
+        ..BucketSplit::default()
+    };
+    let mut claims: Vec<i64> = t.attempts.iter().map(|a| a.claimed_ms).collect();
+    claims.sort_unstable();
+    for (i, a) in t.attempts.iter().enumerate() {
+        let next_claim = t.attempts.get(i + 1).map_or(settled, |n| n.claimed_ms);
+        let end = clamp(a.settled_ms.unwrap_or(next_claim));
+        let run = (end - clamp(a.claimed_ms)).max(0);
+        out.run_ms += run;
+        let steps = t
+            .steps
+            .iter()
+            .filter(|s| s.attempt == a.attempt)
+            .filter_map(|s| {
+                s.end_ms
+                    .map(|e| (s.step_index, s.step_kind.clone(), (e - s.start_ms).max(0)))
+            })
+            .collect();
+        out.attempts.push(AttemptRun {
+            attempt: a.attempt,
+            run_ms: run,
+            steps,
+        });
+    }
+    let mut blockers: std::collections::BTreeMap<(WaitCause, String), i64> =
+        std::collections::BTreeMap::new();
+    for (i, w) in t.waits.iter().enumerate() {
+        let next_event = t.waits.get(i + 1).map_or(settled, |n| n.at_ms);
+        let next_claim = claims
+            .iter()
+            .copied()
+            .find(|c| *c >= w.at_ms)
+            .unwrap_or(settled);
+        let mut end = next_event.min(next_claim);
+        if w.cause == WaitCause::Deferred
+            && let Some(u) = w.until_ms
+        {
+            end = end.min(u);
+        }
+        let ms = (clamp(end) - clamp(w.at_ms)).max(0);
+        match w.cause {
+            WaitCause::Deferred => out.deferral_ms += ms,
+            WaitCause::Permit => out.permit_ms += ms,
+            WaitCause::Key => out.key_ms += ms,
+            WaitCause::Breaker => out.breaker_ms += ms,
+        }
+        *blockers
+            .entry((w.cause, w.blocker.clone().unwrap_or_default()))
+            .or_insert(0) += ms;
+    }
+    out.blockers = blockers
+        .into_iter()
+        .map(|((c, b), ms)| (c, b, ms))
+        .collect();
+    out.residual_ms =
+        out.total_ms - out.deferral_ms - out.permit_ms - out.key_ms - out.breaker_ms - out.run_ms;
+    Some(out)
+}
+
+/// Every telemetry row of job `id`; `None` when the job does not exist.
+pub(crate) fn telemetry(conn: &Connection, id: &str) -> Result<Option<JobTelemetry>> {
+    let Some(job) = get(conn, id)? else {
+        return Ok(None);
+    };
+    let partial: bool = conn.query_row(
+        "SELECT tel_partial FROM jobs WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    let attempts = conn
+        .prepare("SELECT attempt, claimed_ms, settled_ms FROM job_attempt_times WHERE job_id = ?1 ORDER BY attempt")?
+        .query_map(params![id], |r| {
+            Ok(AttemptTime {
+                attempt: r.get(0)?,
+                claimed_ms: r.get(1)?,
+                settled_ms: r.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let raw_waits = conn
+        .prepare("SELECT at_ms, cause, blocker, until_ms FROM job_wait_events WHERE job_id = ?1 ORDER BY seq")?
+        .query_map(params![id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let waits = raw_waits
+        .into_iter()
+        .filter_map(|(at_ms, cause, blocker, until_ms)| {
+            WaitCause::parse(&cause).map(|cause| WaitEvent {
+                at_ms,
+                cause,
+                blocker,
+                until_ms,
+            })
+        })
+        .collect();
+    let steps = conn
+        .prepare("SELECT attempt, step_index, step_kind, start_ms, end_ms FROM job_step_times WHERE job_id = ?1 ORDER BY attempt, step_index")?
+        .query_map(params![id], |r| {
+            Ok(StepTime {
+                attempt: r.get(0)?,
+                step_index: r.get(1)?,
+                step_kind: r.get(2)?,
+                start_ms: r.get(3)?,
+                end_ms: r.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(Some(JobTelemetry {
+        id: job.id,
+        job_type: job.job_type,
+        status: job.status,
+        created_ms: job.created_ms,
+        settled_ms: job.settled_at_ms,
+        partial,
+        attempts,
+        waits,
+        steps,
+    }))
+}

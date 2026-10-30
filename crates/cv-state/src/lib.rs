@@ -15,6 +15,7 @@ pub mod migrate;
 mod query;
 mod runner_state;
 mod store;
+mod telemetry;
 mod tracker;
 mod trash;
 
@@ -28,7 +29,10 @@ pub use id::new_job_id;
 pub use image_descriptions::ImageDescription;
 pub use job::{EnqueueOutcome, FailureReason, Job, JobResult, JobStatus, NewJob, namespaced_key};
 pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
-pub use query::{ListQuery, StatusCount};
+pub use query::{
+    AttemptRun, AttemptTime, BucketSplit, JobTelemetry, ListQuery, StatusCount, StepTime,
+    WaitCause, WaitEvent, split_buckets,
+};
 pub use runner_state::StepCheckpoint;
 pub use store::{
     BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, QueueConfig,

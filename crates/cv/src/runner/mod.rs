@@ -856,7 +856,15 @@ async fn claim_loop(inner: Arc<Inner>, mut stop: watch::Receiver<bool>) {
             return;
         }
         inner.maintenance_tick(&mut maintenance);
-        while let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
+        loop {
+            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                // Every permit is taken: queued claimable work waits for one (plan
+                // job-telemetry Decision 3; written only on a cause change).
+                if let Err(e) = lock(&inner.state).observe_permit_wait(inner.clock.now_ms()) {
+                    tracing::warn!(error = %e, "telemetry: permit-wait observation failed");
+                }
+                break;
+            };
             let claimed = lock(&inner.state).claim(inner.clock.now_ms());
             match claimed {
                 Ok(Some(job)) => {
@@ -1160,7 +1168,20 @@ fn execute_steps(
             children: &spawner,
             written: Vec::new(),
         };
+        let idx = i64::try_from(i).unwrap_or(i64::MAX);
+        let started = lock(&inner.state).step_started(
+            job_id,
+            idx,
+            step.kind().as_str(),
+            inner.clock.now_ms(),
+        );
+        if let Err(e) = started {
+            tracing::warn!(job_id, error = %e, "telemetry: step start not recorded");
+        }
         let res = inner.executor.execute(step, &mut ctx);
+        if let Err(e) = lock(&inner.state).step_ended(job_id, idx, inner.clock.now_ms()) {
+            tracing::warn!(job_id, error = %e, "telemetry: step end not recorded");
+        }
         let written = std::mem::take(&mut ctx.written);
         inner.record_writes(&action.id, &written);
         match res {
@@ -1174,7 +1195,6 @@ fn execute_steps(
                         );
                     }
                 };
-                let idx = i64::try_from(i).unwrap_or(i64::MAX);
                 let put =
                     lock(&inner.state).put_checkpoint(job_id, idx, &text, inner.clock.now_ms());
                 if let Err(e) = put {
