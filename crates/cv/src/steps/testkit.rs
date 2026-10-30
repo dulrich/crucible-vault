@@ -28,6 +28,31 @@ impl ChildSpawner for NoChildren {
     }
 }
 
+/// Records every `spawn_child_at` as `action@path` (every other spawn is refused).
+#[derive(Default)]
+pub(crate) struct AtRecorder(pub Mutex<Vec<String>>);
+impl AtRecorder {
+    /// The recorded `action@path` calls.
+    pub fn calls(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+impl ChildSpawner for AtRecorder {
+    fn spawn_child(&self, _: &str, _: Map<String, Value>) -> Result<String, String> {
+        Err("unexpected spawn_child".into())
+    }
+
+    fn spawn_child_at(
+        &self,
+        id: &str,
+        _: Map<String, Value>,
+        path: &str,
+    ) -> Result<String, String> {
+        self.0.lock().unwrap().push(format!("{id}@{path}"));
+        Ok("job".into())
+    }
+}
+
 /// A fixture vault + writer + state db + config, and the defaults every [`StepCtx`] starts from.
 pub(crate) struct StepEnv {
     pub fx: LiveFixture,

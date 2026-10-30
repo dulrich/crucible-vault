@@ -450,7 +450,8 @@ fn example_clip_enrich_arms_with_the_yt_metadata_steps() {
             "image_describe",
             "search_upsert",
             "yt_metadata",
-            "yt_channel_enrich"
+            "yt_channel_enrich",
+            "intake_enrich"
         ]
     );
     // Direct steps: a `run_action` would exceed the filed-clip chain depth.

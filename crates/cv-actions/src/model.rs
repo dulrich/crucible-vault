@@ -174,6 +174,9 @@ step_kinds! {
     /// Daily vault tidiness: orphaned-attachment sweep, trash ledger seed and retention expiry
     /// (plan `tidiness-trash-orphans` WP-2). Trashes files, so it counts as mutating.
     Tidy = "tidy", true;
+    /// One LLM structure + cleanup pass over an intake note, folding (never deleting) what the
+    /// cleanup marks (plan `intake-auto-enrich` WP-3).
+    IntakeEnrich = "intake_enrich", true;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

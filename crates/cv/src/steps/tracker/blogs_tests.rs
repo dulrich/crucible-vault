@@ -698,3 +698,27 @@ fn blog_note_publication_prefers_the_rows_short() {
     let t = note(&w, "x").expect("note");
     assert!(t.contains("publication: \"FB\"\n"), "{t}");
 }
+
+/// Plan intake-auto-enrich WP-3: a new full-body note enqueues exactly one `intake-enrich` child
+/// on its final path (after the inline localize/lint); a re-run, which finds the note, adds none.
+#[test]
+fn new_blog_note_enqueues_one_enrich_job_and_a_rerun_adds_none() {
+    let w = world(
+        &[],
+        ON,
+        &[("Full", "/a", "body = \"full\"\ntags = [\"research\"]")],
+    );
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    let rec = crate::steps::testkit::AtRecorder::default();
+    let _rt = w.rt.enter();
+    let mut ctx = w.ctx();
+    ctx.children = &rec;
+    let o = execute(&step(""), &mut ctx).unwrap();
+    assert_eq!(o.output_paths.len(), 1, "{o:?}");
+    assert_eq!(
+        rec.calls(),
+        [format!("intake-enrich@{}", o.output_paths[0])]
+    );
+    execute(&step(""), &mut ctx).unwrap();
+    assert_eq!(rec.calls().len(), 1);
+}

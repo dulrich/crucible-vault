@@ -376,3 +376,40 @@ pub static TIDY: Record = Record {
     rules: &[],
     summary: None,
 };
+
+/// `intake_enrich` — `crates/cv/src/steps/intake_enrich.rs` (`parse`; plan `intake-auto-enrich` WP-3).
+pub static INTAKE_ENRICH: Record = Record {
+    name: "intake_enrich",
+    fields: &[
+        field(
+            "scope",
+            "Scope",
+            "note: enrich the run's active note; backfill: enqueue the newest unenriched intake notes",
+            Node::Enum(&["note", "backfill"]),
+        )
+        .dflt(D::Str("note")),
+        field(
+            "force",
+            "Force",
+            "Re-run on a note that already carries `enriched` (a job param `force` wins)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+        field(
+            "agent",
+            "Agent",
+            "The agents.toml id that returns the enrich JSON",
+            Node::Str,
+        )
+        .dflt(D::Str("intake-enrich")),
+        field(
+            "limit",
+            "Limit",
+            "Backfill: notes enqueued per run (newest first)",
+            POS_INT,
+        )
+        .dflt(D::Int(20)),
+    ],
+    rules: &[],
+    summary: None,
+};

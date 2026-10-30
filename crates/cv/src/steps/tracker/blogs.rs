@@ -280,6 +280,9 @@ fn write_note(
         .is_ok()
         .then(|| NOTE_KIND.to_owned());
     lint::run(&lint::Params::note(path.clone(), kind), ctx)?;
+    // The note is in its final form: one enrich pass (plan intake-auto-enrich WP-3). A child job,
+    // not a starter: the daemon's create event would race the inline localize/lint above.
+    super::super::intake_enrich::enqueue_for(ctx, &path);
     #[cfg(test)]
     if super::hook::fail_now() {
         return Err(StepError::failed("injected failure after note write"));

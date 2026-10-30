@@ -1,6 +1,6 @@
 # Spike: automatic intake processing premises (2026-10-30)
 
-Promoted from `runs/spike/auto-intake-llm/` with plan `intake-auto-enrich`; its driver scripts (`llm.sh`, `run-all.sh`, `verify.sh`, `gliner.sh`, `fm-census.pl`, `banner-census.pl`) and prompts are promoted beside this file by WP-3. The public corpus is not committed (sources named below, regenerable).
+Promoted from `runs/spike/auto-intake-llm/` with plan `intake-auto-enrich`; its driver scripts (`llm.sh`, `run-all.sh`, `verify.sh`, `gliner.sh`, `fm-census.pl`, `banner-census.pl`) and `prompts/` are promoted beside this file (plan `intake-auto-enrich` WP-3); the shipped combined prompt is `config/examples/prompts/Intake Enrich.md`. The scripts read `corpus/` and write `out/` next to themselves, so run them from a scratch copy of this folder. The public corpus and run outputs are not committed (sources named below, regenerable).
 
 Scope: FEEDBACK.md "Intake → first pass on auto processing" + related Backlog items. Vault measurements are aggregates only (read-only, `.trash/` and `_custom/` excluded); LLM/NER quality is judged on a **public corpus** (`corpus/`, 5 docs, 23.5k words: two Public Publication D posts with "Brought to you by" sponsor blocks, one paid-preview post, a Dwarkesh podcast transcript, Public Author A's 2024 review with full site chrome), built with `pandoc -f html -t gfm-raw_html` from Substack `/api/v1/posts/<slug>` `body_html` / the page HTML.
 

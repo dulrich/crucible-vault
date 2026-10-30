@@ -533,6 +533,9 @@ fn handle(
                 &lint::Params::note(path.clone(), kind_defined.then(|| kind.to_owned())),
                 ctx,
             )?;
+            // Final form: one enrich pass (plan intake-auto-enrich WP-3; child job, not a starter,
+            // so it never races the inline localize/lint above).
+            super::intake_enrich::enqueue_for(ctx, &path);
         }
     }
     if let Some(u) = &canon {

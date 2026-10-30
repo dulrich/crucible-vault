@@ -212,6 +212,19 @@ struct Vars {
     agent_provider: String,
 }
 
+/// Params of a plain `output = "var"` run of agent `agent` on its default model (what
+/// `intake_enrich` drives; plan `intake-auto-enrich` WP-3). The completion text lands in
+/// [`DEFAULT_OUTPUT_VAR`].
+pub(crate) fn var_params(agent: &str) -> StepParams {
+    StepParams {
+        agent: agent.to_owned(),
+        model: None,
+        output_var: None,
+        max_tokens: None,
+        output: OutputMode::Var,
+    }
+}
+
 /// Parses and checks one step's params against `agents.toml` / `providers.toml`.
 pub(crate) fn parse(t: &toml::Table, config: &ConfigSet) -> Result<StepParams, String> {
     let sp = params(t)?;

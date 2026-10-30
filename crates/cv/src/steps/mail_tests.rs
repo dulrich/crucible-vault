@@ -749,3 +749,32 @@ fn incomplete_multipart_is_left_untouched_while_a_complete_message_is_processed(
     assert_eq!((n(&o2, "new"), n(&o2, "incomplete")), (json!(1), json!(0)));
     assert!(!w.exists("new/a"));
 }
+
+/// Plan intake-auto-enrich WP-3: a new mail note enqueues exactly one `intake-enrich` child on
+/// its path; a second scan (nothing new) adds none.
+#[test]
+fn new_mail_note_enqueues_one_enrich_job() {
+    let w = world(&[]);
+    w.put(
+        "new/1.eml",
+        &eml(
+            "e1@x.example",
+            "who@stranger.example",
+            "Odd letter",
+            "<p>alpha beta gamma</p>",
+        ),
+    );
+    let rec = crate::steps::testkit::AtRecorder::default();
+    let mut ctx = w.env.ctx();
+    ctx.children = &rec;
+    let t: toml::Table = "type = \"track_mail\"".parse().unwrap();
+    let st = Step::from_table(t).unwrap();
+    execute(&st, &mut ctx).unwrap();
+    let (r, _) = w.row("unknown-sender", "e1@x.example").unwrap();
+    assert_eq!(
+        rec.calls(),
+        [format!("intake-enrich@{}", r.note_path.unwrap())]
+    );
+    execute(&st, &mut ctx).unwrap();
+    assert_eq!(rec.calls().len(), 1);
+}

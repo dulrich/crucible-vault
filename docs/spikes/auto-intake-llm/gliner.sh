@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# gliner.sh <doc.md> <out.json> — GLiNER2 entity pass over a doc, paragraph-chunked (≤32 per request,
+# paragraphs ≥40 chars, links/images stripped). Prints: doc paragraphs entities_unique wall_s.
+set -euo pipefail
+if [ "${1:-}" = "--help" ]; then sed -n 2,3p "$0"; exit 0; fi
+doc=$1 out=$2
+schema='{"entities":{"person":"Names of people","organization":"Companies, institutions, publications or other named organizations","product":"Named software, products, models or services","work":"Titles of books, papers, films, podcasts or articles","location":"Named places"}}'
+perl -0ne 's/!\[[^\]]*\]\([^)]*\)//g; s/\[([^\]]*)\]\([^)]*\)/$1/g; for (split /\n\s*\n/) { s/\s+/ /g; s/^\s+|\s+$//g; print "$_\n" if length($_) >= 40 && length($_) < 4000 }' "$doc" > /tmp/gl.paras
+n=$(wc -l < /tmp/gl.paras); t0=$(date +%s.%N); : > "$out.parts"
+split -l 32 /tmp/gl.paras /tmp/gl.chunk.
+for c in /tmp/gl.chunk.*; do
+  jq -Rn --argjson s "$schema" '{model:"gliner2-base", texts:[inputs], schema:$s}' < "$c" \
+   | curl -s -m 600 http://127.0.0.1:4812/v1/extract -H 'content-type: application/json' -d @- >> "$out.parts"; echo >> "$out.parts"
+done; rm -f /tmp/gl.chunk.*
+t1=$(date +%s.%N); jq -s . "$out.parts" > "$out"; rm "$out.parts"
+u=$(jq "[.[].results[].entities | to_entries[] | .value[] | select(.confidence>=0.6) | .text] | unique | length" "$out")
+printf '%s\t%s\t%s\t%.1f\n' "$(basename "$doc" .md)" "$n" "$u" "$(echo "$t1 - $t0" | bc)"

@@ -212,6 +212,11 @@ const STEPS: &[(&str, &str)] = &[
     ("dupes_resolve", ""),
     ("cancel_source_intake", "source = \"{param.source}\""),
     ("tidy", "min_age_hours = 48"),
+    ("intake_enrich", ""),
+    (
+        "intake_enrich",
+        "scope = \"backfill\"\nlimit = 5\nforce = true\nagent = \"intake-enrich\"",
+    ),
 ];
 
 const ACTION_FULL: &str = r#"

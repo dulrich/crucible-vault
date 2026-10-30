@@ -34,6 +34,8 @@ type = "localize"
 [[action.steps]]
 type = "image_describe"
 scope = "note"
+[[action.steps]]
+type = "intake_enrich"
 "#;
 
 /// Plan round-16 WP-5: filing settles before any localize/describe of the same clip; enrichment
@@ -102,7 +104,7 @@ async fn clip_filing_runs_first_and_enrichment_follows_the_final_path_serialized
         .lock()
         .unwrap()
         .iter()
-        .filter(|l| l.starts_with("image_describe"))
+        .filter(|l| l.starts_with("intake_enrich"))
         .count()
         < 3
     {
@@ -125,6 +127,13 @@ async fn clip_filing_runs_first_and_enrichment_follows_the_final_path_serialized
         assert!(at(&format!("dedup {dedup}")) <= at(last_filing));
         assert!(at(last_filing) < at(&format!("localize {fin}")), "{log:?}");
         assert!(at(&format!("localize {fin}")) < at(&format!("image_describe {fin}")));
+        // Plan intake-auto-enrich WP-3: every filed clip reaches the enrich pass, last, on the
+        // final path, from `clip-images` (the chain is already at MAX_CHAIN_DEPTH, so the pass
+        // is a step of `clip-enrich`, not another action).
+        assert!(
+            at(&format!("image_describe {fin}")) < at(&format!("intake_enrich {fin}")),
+            "{log:?}"
+        );
     }
     assert!(
         !log.iter()

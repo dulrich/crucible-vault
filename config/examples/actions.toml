@@ -14,7 +14,7 @@
 # lint, localize, agent, mark_forwarded, run_action, search_upsert, search_delete, link_scan,
 # yt_metadata, yt_channel_enrich, x_discover, x_metadata, x_backfill, image_describe,
 # track_youtube, track_blogs, track_mail, auto_file, intake_reconcile, ignore_video, daily_brief,
-# dupes_scan, dupes_resolve, tidy.
+# dupes_scan, dupes_resolve, tidy, intake_enrich.
 # Each step's other keys belong to its module (WP-10..13 document them; WP-10's in
 # crates/cv/src/steps/{materialize,capture,file,lint}.rs). Step string params take single-brace
 # placeholders {param.NAME}, {vars.NAME}, {path}, {period.day|week|month}; note/capture templates
@@ -434,6 +434,48 @@ type = "search_upsert"
 type = "yt_metadata"
 [[action.steps]]
 type = "yt_channel_enrich"   # no-op unless pipelines.toml [youtube] channel_enrich = true
+[[action.steps]]
+type = "intake_enrich"       # one LLM structure + cleanup pass; skips an already-enriched note
+
+# Intake enrich (plan intake-auto-enrich WP-3, D29): one LLM pass over one note — a collapsed top
+# block, chapter headings in heading-less bodies, and one folded `[!removed]-` callout holding what
+# the cleanup marked (nothing is deleted). Filed clips get it as the last step of `clip-enrich`
+# (the chain is already at the depth limit); new tracker blog and mail notes get it as a child job
+# enqueued by `track_blogs` / `track_mail` once the note is final. Same `clip::enrich` key as
+# `clip-enrich`, so slow enrichment never holds both queue slots. `force` re-runs an enriched note.
+[[action]]
+id = "intake-enrich"
+label = "Intake: enrich note"
+group = "Ingest"
+needs = ["active_path"]
+resources = { note = true, keys = ["clip::enrich"] }
+[[action.params]]
+name = "force"
+label = "Force"
+kind = "bool"
+default = "false"
+[[action.steps]]
+type = "intake_enrich"
+[[action.steps]]
+type = "search_upsert"
+
+# Manual backfill: enqueues `intake-enrich` for the newest `limit` unenriched intake notes (tracker
+# blog/mail notes: `post-id` / `message-id`; clipped YouTube: a youtube `source`). The children
+# share the `clip::enrich` key, so they run one at a time. Run it again for the next batch. The
+# `limit` param is text (there is no integer param kind); a non-integer or non-positive value fails.
+[[action]]
+id = "intake-enrich-backfill"
+label = "Intake: enrich recent notes"
+group = "Ingest"
+resources = { note = false, keys = ["intake::enrich-backfill"] }
+[[action.params]]
+name = "limit"
+label = "Notes per run"
+kind = "text"
+default = "20"
+[[action.steps]]
+type = "intake_enrich"
+scope = "backfill"
 
 [[action]]
 id = "image-describe-note"

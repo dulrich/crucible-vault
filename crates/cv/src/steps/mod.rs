@@ -27,6 +27,7 @@
 //! | `DupesScan` | [`dupes`] | round-12-feedback-todos WP-6 |
 //! | `DupesResolve` | [`dupes_resolve`] | round-12-feedback-todos WP-7 |
 //! | `CancelSourceIntake` | [`cancel_source`] | cancel-source-intake WP-1 |
+//! | `IntakeEnrich` | [`intake_enrich`] | intake-auto-enrich WP-3 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -59,6 +60,9 @@ pub mod file;
 mod file_tests;
 pub mod ignore;
 pub mod image_describe;
+pub mod intake_enrich;
+#[cfg(test)]
+mod intake_enrich_tests;
 pub mod intake_finalize;
 #[cfg(test)]
 mod intake_finalize_tests;
@@ -666,6 +670,7 @@ step_modules! {
     DupesResolve => dupes_resolve::DupesResolve,
     CancelSourceIntake => cancel_source::CancelSourceIntake,
     Tidy => tidy::Tidy,
+    IntakeEnrich => intake_enrich::IntakeEnrich,
     RunAction => RunActionStep,
 }
 
