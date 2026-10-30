@@ -2,46 +2,9 @@
 //! bucket split over them and the per-type aggregate.
 
 use crate::job::JobStatus;
+/// The wait-cause and percentile vocabulary is the wire's (plan tn-review-2026-10-29 WP-R2).
+pub use cv_protocol::{BucketPcts as Pcts, WaitCause};
 use serde::{Deserialize, Serialize};
-
-/// Why a queued job was not running, as recorded by the claim pass / claim loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WaitCause {
-    /// Waiting out a `defer_until_ms` (deferred settle); the blocker is the deferring service.
-    Deferred,
-    /// Claimable, but every runner permit was taken; the blocker names the running actions.
-    Permit,
-    /// A resource key was held by a running job; the blocker is that job's action.
-    Key,
-    /// The job's service breaker was open (or half-open with its probe taken).
-    Breaker,
-}
-
-impl WaitCause {
-    /// Stored form.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Deferred => "deferred",
-            Self::Permit => "permit",
-            Self::Key => "key",
-            Self::Breaker => "breaker",
-        }
-    }
-
-    /// Parse the stored form.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "deferred" => Some(Self::Deferred),
-            "permit" => Some(Self::Permit),
-            "key" => Some(Self::Key),
-            "breaker" => Some(Self::Breaker),
-            _ => None,
-        }
-    }
-}
 
 /// One claim of a job (telemetry attempt `attempt`, monotonic per job, never reset).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,14 +154,6 @@ pub fn split_buckets(t: &JobTelemetry) -> Option<BucketSplit> {
     out.residual_ms =
         out.total_ms - out.deferral_ms - out.permit_ms - out.key_ms - out.breaker_ms - out.run_ms;
     Some(out)
-}
-
-/// p50 / p95 / max of one bucket over the attributed jobs (nearest-rank percentiles).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Pcts {
-    pub p50: i64,
-    pub p95: i64,
-    pub max: i64,
 }
 
 /// Per-`job_type` aggregate of [`job_stats`].

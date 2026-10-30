@@ -802,3 +802,40 @@ fn trash_enums_keep_their_ledger_and_wire_strings() {
         );
     }
 }
+
+#[test]
+fn job_timeline_wire_strings() {
+    let t = JobTimelineResult {
+        job_id: "j".into(),
+        job_type: "t".into(),
+        status: JobState::Pending,
+        created_ms: 1,
+        settled_ms: None,
+        unavailable: Some(TimelineUnavailable::NotSettled),
+        waits: vec![TimelineWait {
+            at_ms: 1,
+            cause: WaitCause::Breaker,
+            blocker: None,
+            until_ms: None,
+            duration_ms: None,
+        }],
+        attempts: vec![],
+        split: None,
+    };
+    let v = round_trip(&t);
+    assert_eq!(v["status"], "pending");
+    assert_eq!(v["unavailable"], "not settled");
+    assert_eq!(v["waits"][0]["cause"], "breaker");
+    assert!(v.get("available").is_none());
+    for (u, s) in [
+        (TimelineUnavailable::NotSettled, "not settled"),
+        (TimelineUnavailable::PartialCoverage, "partial coverage"),
+    ] {
+        assert_eq!(serde_json::to_value(u).unwrap(), json!(s));
+        assert_eq!(u.to_string(), s);
+    }
+    assert_eq!(
+        WaitCause::parse(WaitCause::Key.as_str()),
+        Some(WaitCause::Key)
+    );
+}

@@ -972,6 +972,7 @@ version = "0.2.0"
 dependencies = [
  "cv-ingest",
  "cv-testkit",
+ "cv-text",
  "reqwest",
  "serde",
  "serde_json",

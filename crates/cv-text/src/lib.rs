@@ -4,6 +4,7 @@
 //! Sync, I/O-free and clock-free: every time-dependent function takes its `now` as an argument.
 
 pub mod attachments;
+mod civil;
 pub mod file_kind;
 mod md_refs;
 pub mod moment;
@@ -16,6 +17,7 @@ pub mod url_canon;
 pub mod vpath;
 pub mod wikilink;
 
+pub use civil::days_from_civil;
 pub use moment::{
     MomentFormatError, format_moment, moment_to_strftime, parse_moment_date_strict,
     resolve_next_daily_date,

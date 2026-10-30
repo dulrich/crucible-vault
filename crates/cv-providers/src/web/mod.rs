@@ -191,14 +191,7 @@ fn parse_http_date(v: &str) -> Option<i64> {
     if parts.next()? != "GMT" || !(1..=31).contains(&day) || h > 23 || m > 59 || s > 60 {
         return None;
     }
-    // Days from civil (Howard Hinnant's algorithm).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
+    let days = cv_text::days_from_civil(year, month, day);
     Some(days * 86_400 + h * 3600 + m * 60 + s)
 }
 

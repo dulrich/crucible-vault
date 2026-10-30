@@ -17,6 +17,8 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["rustls",
 toml = "=1.1.8"
 # `From<wire>` for the cv-ingest metadata types.
 cv-ingest = { path = "../cv-ingest" }
+# `days_from_civil` shared with `cv jobs` (plan tn-review-2026-10-29-remediation WP-R2).
+cv-text = { path = "../cv-text" }
 
 [dev-dependencies]
 # The shared std-only `MockHttp`.

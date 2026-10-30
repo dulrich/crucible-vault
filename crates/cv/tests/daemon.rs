@@ -968,7 +968,7 @@ async fn memory_report_reaches_status() {
 }
 
 /// Plan job-telemetry WP-2: `job_timeline` maps a failed-then-retried job's two attempts and
-/// their steps, a cancelled-while-queued job is `available = false`, an unknown id is NOT_FOUND,
+/// their steps, a cancelled-while-queued job has no split (partial coverage), an unknown id is NOT_FOUND,
 /// and `jobs_stats` carries aggregates only (no params text).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn job_timeline_and_stats_over_rpc() {
@@ -1031,7 +1031,7 @@ async fn job_timeline_and_stats_over_rpc() {
             job_id: retried.clone(),
         })
         .unwrap();
-    assert!(t.available, "{t:?}");
+    assert!(t.split.is_some() && t.unavailable.is_none(), "{t:?}");
     assert_eq!(t.attempts.len(), 2);
     assert_eq!(t.attempts[0].steps.len(), 1);
     assert_eq!(t.attempts[1].steps.len(), 2);
@@ -1044,8 +1044,11 @@ async fn job_timeline_and_stats_over_rpc() {
             job_id: queued_cancelled,
         })
         .unwrap();
-    assert!(!p.available && p.split.is_none());
-    assert_eq!(p.unavailable.as_deref(), Some("partial coverage"));
+    assert!(p.split.is_none());
+    assert_eq!(
+        p.unavailable,
+        Some(cv_protocol::TimelineUnavailable::PartialCoverage)
+    );
     let e = c
         .call::<m::JobTimeline>(JobIdParams {
             job_id: "nope".into(),
