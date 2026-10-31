@@ -154,7 +154,7 @@ fn forced_rerun_keeps_prior_fold_and_adds_new() {
     let fold = &e.text[e.text.find("[!removed]").unwrap()..];
     assert!(fold.contains("> ## Sponsor"));
     assert!(fold.contains("> Subscribe now"));
-    assert!(fold.contains(">\n> Some analysts expect a plateau next year.\n%% /cv-enrich %%"));
+    assert!(fold.contains(">\n> Some analysts expect a plateau next year.\n\n%% /cv-enrich %%"));
     assert_eq!(e.text.matches("[!removed]-").count(), 1);
     assert_eq!(e.report.lines_folded, 1);
 }
@@ -418,4 +418,29 @@ fn rerun_with_empty_output_keeps_fold_and_drops_top() {
     assert!(!e.text.contains("[!abstract]"));
     assert!(e.text.contains("> ## Sponsor"));
     assert!(e.text.starts_with(&format!("{FM}Welcome")));
+}
+
+/// A close marker right after a `> ` line is a lazy continuation of the callout and renders as
+/// text inside it; every close marker follows a blank line instead.
+#[test]
+fn close_marker_follows_blank_line() {
+    let t = enrich(&note(), &full(), &[], opts()).text;
+    let lines: Vec<&str> = t.lines().collect();
+    let closes: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i] == MARK_CLOSE)
+        .collect();
+    assert_eq!(closes.len(), 2);
+    for i in closes {
+        assert_eq!(lines[i - 1], "", "line before close marker {i}");
+    }
+}
+
+/// Notes enriched before the blank-line fix (close marker glued to the callout) re-run to the
+/// fixed layout with the same fold content.
+#[test]
+fn legacy_glued_close_marker_reruns_to_fixed_layout() {
+    let fixed = enrich(&note(), &full(), &[], opts()).text;
+    let legacy = fixed.replace(&format!("\n\n{MARK_CLOSE}"), &format!("\n{MARK_CLOSE}"));
+    assert_ne!(legacy, fixed);
+    assert_eq!(enrich(&legacy, &full(), &[], opts()).text, fixed);
 }

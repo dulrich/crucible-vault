@@ -30,7 +30,8 @@
 //!   callout header is `> [!removed]-` is the fold, the other the top block. A re-run strips both
 //!   and carries the old fold's content into the new fold (plan E2: content already folded stays).
 //! - **Fold layout**: no per-group labels; disjoint groups are separated by a lone `>` line; each
-//!   original line is prefixed `> ` (a blank line becomes `>`).
+//!   original line is prefixed `> ` (a blank line becomes `>`). A blank line precedes each close marker so the
+//!   marker is not a lazy continuation of the callout (it would render as text inside it).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -347,7 +348,11 @@ fn strip_generated(rest: &str) -> Stripped {
             })
             .flatten();
         if let Some(j) = close {
-            let inner = &raw[i + 1..j];
+            let mut inner = &raw[i + 1..j];
+            // The blank line ending the callout is layout, not fold content (older notes lack it).
+            while inner.last().is_some_and(|l| l.trim().is_empty()) {
+                inner = &inner[..inner.len() - 1];
+            }
             match inner.iter().position(|l| l.trim_end() == FOLD_HEADER) {
                 Some(h) => {
                     had_fold = true;
@@ -609,6 +614,9 @@ pub fn enrich(
                 }
                 top.extend(sec.iter().map(|l| format!("> {l}")));
             }
+            // A blank line ends the callout: a close marker right after a `> ` line is a lazy
+            // continuation of the callout paragraph and renders as text inside it.
+            top.push(String::new());
             top.push(MARK_CLOSE.to_owned());
         }
     }
@@ -640,6 +648,7 @@ pub fn enrich(
                 });
             }
         }
+        fold_block.push(String::new()); // ends the callout (see the top block)
         fold_block.push(MARK_CLOSE.to_owned());
     }
 
