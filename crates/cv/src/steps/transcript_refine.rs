@@ -11,7 +11,9 @@
 //! model call; skip (`skipped` outcome var, no model call, no write) when `source` is not a
 //! YouTube URL (`"not youtube"`), the note carries the `refined` tag (`"already refined"` — the
 //! manual `refine-transcript` action's convention), or it has no `## Transcript` text outside the
-//! managed enrich blocks (`"no transcript"`). Otherwise [`cv_ingest::transcript`] chunks the
+//! managed enrich blocks (`"no transcript"`), or that text is under
+//! [`cv_ingest::transcript::MIN_REFINE_WORDS`] words (`"short transcript"`: a model answer to a
+//! very short transcript fails retention, and there is little to clean). Otherwise [`cv_ingest::transcript`] chunks the
 //! section (at most 12,000 words per call), each chunk goes through the `agent` step's provider
 //! path (the same failure mapping: transport/5xx/429 → `Deferred`, truncation or an empty answer
 //! → `Failed`) as the agent's `{{value}}` — the agent sees only the chunk text — and every answer
@@ -57,6 +59,9 @@ pub(crate) const REFINED_VAR: &str = "transcript_refined";
 #[derive(Debug, Clone)]
 pub(crate) struct Params {
     agent: String,
+    /// Sections under this many words are skipped: `transcript::MIN_REFINE_WORDS`, not a config
+    /// key (the intake backfill applies the same floor); tests lower it.
+    pub(crate) min_words: usize,
 }
 
 pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
@@ -67,6 +72,7 @@ pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
     }
     Ok(Params {
         agent: agent.trim().to_owned(),
+        min_words: transcript::MIN_REFINE_WORDS,
     })
 }
 
@@ -158,6 +164,9 @@ pub(crate) fn run_note(
     };
     let original = &body[range.clone()];
     let words_in = transcript::words(original);
+    if words_in < p.min_words {
+        return Ok(skip("short transcript"));
+    }
 
     // One call per chunk; every answer is validated before anything is written.
     let chunks = transcript::chunks(original);

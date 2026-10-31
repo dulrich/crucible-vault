@@ -28,7 +28,8 @@
 //! *intake note* is a markdown note outside `.trash/` and `_`/`.`-prefixed top folders that
 //! carries `post-id` (tracker blog), `message-id` (mail) or a YouTube `source` URL (clipped
 //! video), and no non-empty `enriched` — plus (plan `youtube-transcript-auto-refine` WP-2, D30)
-//! every YouTube clip with a non-empty `## Transcript` section and no `refined` tag, enriched or
+//! every YouTube clip whose `## Transcript` section the step would refine (one segment of at least
+//! `MIN_REFINE_WORDS` words, no `refined` tag), enriched or
 //! not: the child's `transcript_refine` step refines it and forces the re-enrich. The batch is
 //! newest first over the union, at most `limit`, no duplicates.
 //!
@@ -339,14 +340,21 @@ pub(crate) fn pick_backfill(
 }
 
 /// Whether a YouTube clip's text still wants `transcript_refine`: it carries a non-empty
-/// `## Transcript` section (managed enrich blocks excluded, via `cv_ingest::transcript`) and no
-/// `refined` tag.
+/// `## Transcript` section (managed enrich blocks excluded, via `cv_ingest::transcript`) of at
+/// least `MIN_REFINE_WORDS` words in one segment, and no `refined` tag — exactly the notes the step
+/// would refine, so a note it skips or rejects (short, or split by managed blocks) is never
+/// re-picked by every backfill pass.
 pub(crate) fn transcript_refine_pending(text: &str) -> bool {
+    use cv_ingest::transcript;
     if super::transcript_refine::is_refined(text) {
         return false;
     }
     let doc = FrontmatterDoc::new(text);
-    cv_ingest::transcript::locate(doc.body()).is_some_and(|s| !s.segments.is_empty())
+    let body = doc.body();
+    transcript::locate(body).is_some_and(|s| match s.segments.as_slice() {
+        [one] => transcript::words(&body[one.clone()]) >= transcript::MIN_REFINE_WORDS,
+        _ => false,
+    })
 }
 
 /// `intake_notes` result: candidates with `ctime`, enriched paths, refine-pending paths.

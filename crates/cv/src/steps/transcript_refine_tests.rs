@@ -159,8 +159,12 @@ fn raw_dir_absent(e: &StepEnv) -> bool {
     !e.fx.path("_raw_transcript").exists()
 }
 
+/// The tiny fixtures sit far under the real `MIN_REFINE_WORDS` floor, so it is lowered here;
+/// `a_short_transcript_is_skipped_at_the_default_floor` covers the real value.
 fn params() -> Params {
-    parse(&toml::Table::new()).unwrap()
+    let mut p = parse(&toml::Table::new()).unwrap();
+    p.min_words = 0;
+    p
 }
 
 /// Runs the step on a blocking thread inside the runtime hosting the fake provider.
@@ -272,6 +276,44 @@ async fn skips_make_no_model_call_and_no_write() {
     }
     assert!(mock.requests().is_empty());
     assert!(raw_dir_absent(&e));
+}
+
+/// A transcript under `MIN_REFINE_WORDS` is skipped before any model call (live: 173/196-word
+/// transcripts failed retention on every backfill pass); one at the floor is refined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_transcript_is_skipped_at_the_default_floor() {
+    let (base, mock) = echo();
+    let e = env(&base, "CV_TEST_KEY");
+    let floor = cv_ingest::transcript::MIN_REFINE_WORDS;
+    assert_eq!(parse(&toml::Table::new()).unwrap().min_words, floor);
+    let run = |name: &'static str, words: usize| {
+        let e = Arc::clone(&e);
+        async move {
+            let text = note_with("", YT, &"word ".repeat(words), "");
+            e.fx.write(name, text.clone());
+            let (e2, n) = (Arc::clone(&e), name.to_owned());
+            let o = tokio::task::spawn_blocking(move || {
+                let context = ActionContext {
+                    active_path: Some(n),
+                    ..ActionContext::default()
+                };
+                let mut ctx = e2.ctx();
+                ctx.context = &context;
+                run_note(&parse(&toml::Table::new()).unwrap(), &mut ctx, &mgr())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            (o, text, read(&e, name))
+        }
+    };
+    let (o, before, after) = run("short.md", floor - 1).await;
+    assert_eq!(var(&o, "skipped"), json!("short transcript"));
+    assert_eq!(after, before);
+    assert!(mock.requests().is_empty());
+    let (o, _, _) = run("long.md", floor).await;
+    assert_eq!(var(&o, "refined"), json!(true));
+    assert_eq!(mock.requests().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

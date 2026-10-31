@@ -350,13 +350,24 @@ fn params_and_pure_selection() {
     let yt = |tags: &str, body: &str| {
         format!("---\nsource: https://www.youtube.com/watch?v=abc\n{tags}---\n{body}")
     };
+    let floor = cv_ingest::transcript::MIN_REFINE_WORDS;
+    let long = "word ".repeat(floor);
     assert!(transcript_refine_pending(&yt(
         "",
-        "## Transcript\n\nhello there\n"
+        &format!("## Transcript\n\n{long}\n")
     )));
     assert!(!transcript_refine_pending(&yt(
         "tags: [refined]\n",
-        "## Transcript\n\nhello\n"
+        &format!("## Transcript\n\n{long}\n")
+    )));
+    // Under the floor, or split by a managed block: the step would skip / reject it.
+    assert!(!transcript_refine_pending(&yt(
+        "",
+        &format!("## Transcript\n\n{}\n", "word ".repeat(floor - 1))
+    )));
+    assert!(!transcript_refine_pending(&yt(
+        "",
+        &format!("## Transcript\n\n{long}\n%% cv-enrich %%\nmanaged\n%% /cv-enrich %%\n{long}\n")
     )));
     assert!(!transcript_refine_pending(&yt(
         "",
@@ -392,14 +403,21 @@ fn params_and_pure_selection() {
 #[test]
 fn backfill_picks_enriched_unrefined_youtube_clips() {
     let yt = "source: https://www.youtube.com/watch?v=abc\n";
+    let long = "word ".repeat(cv_ingest::transcript::MIN_REFINE_WORDS);
     let fx = LiveFixture::new([
         (
             "Clips/pending.md",
+            format!("---\n{yt}enriched: 2026-10-01\n---\n## Transcript\n\n{long}\n"),
+        ),
+        (
+            "Clips/short.md",
             format!("---\n{yt}enriched: 2026-10-01\n---\n## Transcript\n\nhello there\n"),
         ),
         (
             "Clips/refined.md",
-            format!("---\n{yt}enriched: 2026-10-01\ntags: [refined]\n---\n## Transcript\n\nhi\n"),
+            format!(
+                "---\n{yt}enriched: 2026-10-01\ntags: [refined]\n---\n## Transcript\n\n{long}\n"
+            ),
         ),
         (
             "Clips/nots.md",

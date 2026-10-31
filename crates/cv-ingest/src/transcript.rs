@@ -32,6 +32,12 @@ pub const MAX_CHUNK_WORDS: usize = 12_000;
 /// truncated answer, which the step then rejects without writing.
 pub const MIN_RETENTION: f64 = 0.6;
 
+/// A section with fewer words is not refined (the step skips it as `"short transcript"`, and the
+/// intake backfill does not count it as refine-pending). Live 2026-10-30: two 173/196-word
+/// transcripts came back as 7-word answers and failed retention on every backfill pass; a
+/// transcript that short has little to clean up, and the enrich pass still runs on it.
+pub const MIN_REFINE_WORDS: usize = 300;
+
 /// The located `## Transcript` section of a note body (byte offsets into that body).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
