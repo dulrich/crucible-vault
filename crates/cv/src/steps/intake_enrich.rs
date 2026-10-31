@@ -27,7 +27,10 @@
 //! backfill job itself (no resource keys) never occupies a second slot of the same key. An
 //! *intake note* is a markdown note outside `.trash/` and `_`/`.`-prefixed top folders that
 //! carries `post-id` (tracker blog), `message-id` (mail) or a YouTube `source` URL (clipped
-//! video), and no non-empty `enriched`.
+//! video), and no non-empty `enriched` — plus (plan `youtube-transcript-auto-refine` WP-2, D30)
+//! every YouTube clip with a non-empty `## Transcript` section and no `refined` tag, enriched or
+//! not: the child's `transcript_refine` step refines it and forces the re-enrich. The batch is
+//! newest first over the union, at most `limit`, no duplicates.
 //!
 //! Outcome vars: `skipped` (`"already enriched"`), `enriched`, `anchors_resolved`,
 //! `anchors_dropped`, `lines_folded`, `banners_folded`, `fold_refused_over_half`, `top_block`,
@@ -317,23 +320,41 @@ fn is_user_path(path: &str) -> bool {
     !path.starts_with(['.', '_'])
 }
 
-/// The newest-first (`ctime` desc, then path) unenriched candidates, at most `limit`.
+/// The newest-first (`ctime` desc, then path) candidates, at most `limit`: the unenriched ones plus
+/// every path in `refine_pending` (a YouTube clip whose transcript is still unrefined, enriched
+/// or not).
 pub(crate) fn pick_backfill(
     candidates: &BTreeMap<String, i64>,
     enriched: &BTreeSet<String>,
+    refine_pending: &BTreeSet<String>,
     limit: usize,
 ) -> Vec<String> {
     let mut v: Vec<(&String, i64)> = candidates
         .iter()
-        .filter(|(p, _)| !enriched.contains(*p))
+        .filter(|(p, _)| !enriched.contains(*p) || refine_pending.contains(*p))
         .map(|(p, c)| (p, *c))
         .collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     v.into_iter().take(limit).map(|(p, _)| p.clone()).collect()
 }
 
-/// Intake notes (candidates with their `ctime`) and the set of already-enriched paths.
-fn intake_notes(ctx: &StepCtx<'_>) -> Result<(BTreeMap<String, i64>, BTreeSet<String>), StepError> {
+/// Whether a YouTube clip's text still wants `transcript_refine`: it carries a non-empty
+/// `## Transcript` section (managed enrich blocks excluded, via `cv_ingest::transcript`) and no
+/// `refined` tag.
+pub(crate) fn transcript_refine_pending(text: &str) -> bool {
+    if super::transcript_refine::is_refined(text) {
+        return false;
+    }
+    let doc = FrontmatterDoc::new(text);
+    cv_ingest::transcript::locate(doc.body()).is_some_and(|s| !s.segments.is_empty())
+}
+
+/// `intake_notes` result: candidates with `ctime`, enriched paths, refine-pending paths.
+type IntakeNotes = (BTreeMap<String, i64>, BTreeSet<String>, BTreeSet<String>);
+
+/// Intake notes (candidates with their `ctime`), the set of already-enriched paths, and the
+/// YouTube clips with a pending transcript refine (enriched or not).
+fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
     let reader = ctx.index()?;
     let q = reader.query();
     let ctimes: BTreeMap<String, i64> = q
@@ -345,8 +366,10 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<(BTreeMap<String, i64>, BTreeSet<St
     for key in ["post-id", "message-id"] {
         cands.extend(q.md_paths_with_prop_key(key)?);
     }
+    let mut youtube = BTreeSet::new();
     for r in q.md_props_with_key("source")? {
         if is_youtube_source(&cv_index::prop_text(&r.value)) {
+            youtube.insert(r.path.clone());
             cands.insert(r.path);
         }
     }
@@ -360,6 +383,15 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<(BTreeMap<String, i64>, BTreeSet<St
         })
         .map(|r| r.path)
         .collect();
+    let mut refine = BTreeSet::new();
+    for p in youtube.iter().filter(|p| is_user_path(p)) {
+        if let Some((bytes, _)) = ctx.read(p)?
+            && let Ok(text) = String::from_utf8(bytes)
+            && transcript_refine_pending(&text)
+        {
+            refine.insert(p.clone());
+        }
+    }
     let cands = cands
         .into_iter()
         .filter(|p| is_user_path(p))
@@ -368,7 +400,7 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<(BTreeMap<String, i64>, BTreeSet<St
             (p, c)
         })
         .collect();
-    Ok((cands, enriched))
+    Ok((cands, enriched, refine))
 }
 
 /// The backfill batch size: a job param `limit` (a positive integer or its decimal text — the
@@ -399,8 +431,8 @@ pub(crate) fn effective_limit(
 
 fn backfill(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let limit = effective_limit(ctx.params, p.limit).map_err(StepError::failed)?;
-    let (cands, enriched) = intake_notes(ctx)?;
-    let picks = pick_backfill(&cands, &enriched, limit);
+    let (cands, enriched, refine) = intake_notes(ctx)?;
+    let picks = pick_backfill(&cands, &enriched, &refine, limit);
     let (mut ok, mut failed) = (0, 0);
     for path in &picks {
         if enqueue_for(ctx, path).is_some() {

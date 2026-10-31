@@ -110,7 +110,7 @@ fn skip(why: &'static str) -> StepOutcome {
 
 /// Whether `text` carries the `refined` tag (frontmatter or inline, the index's reading; a
 /// nested `refined/x` counts like the manual guard's).
-fn is_refined(text: &str) -> bool {
+pub(crate) fn is_refined(text: &str) -> bool {
     cv_index::note_tags(text).iter().any(|t| {
         let t = t.trim().trim_start_matches('#').to_lowercase();
         t == REFINED_TAG || t.starts_with("refined/")

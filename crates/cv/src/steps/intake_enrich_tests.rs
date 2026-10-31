@@ -16,6 +16,7 @@ use serde_json::{Map, Value, json};
 
 use super::intake_enrich::{
     Params, already_enriched, effective_limit, is_youtube_source, parse, pick_backfill, run_note,
+    transcript_refine_pending,
 };
 use super::testkit::{AtRecorder, StepEnv};
 use super::{DeferCause, StepError, StepOutcome};
@@ -335,8 +336,40 @@ fn params_and_pure_selection() {
         .map(|(p, c)| (p.to_owned(), c))
         .collect();
     let done: BTreeSet<String> = ["d.md".to_owned()].into();
-    assert_eq!(pick_backfill(&cands, &done, 2), ["b.md", "c.md"]);
-    assert_eq!(pick_backfill(&cands, &BTreeSet::new(), 10).len(), 4);
+    let none = BTreeSet::new();
+    assert_eq!(pick_backfill(&cands, &done, &none, 2), ["b.md", "c.md"]);
+    assert_eq!(pick_backfill(&cands, &none, &none, 10).len(), 4);
+    // An enriched path is picked only when refine-pending; no duplicates, same order and limit.
+    let pending: BTreeSet<String> = ["d.md".to_owned(), "a.md".to_owned()].into();
+    assert_eq!(
+        pick_backfill(&cands, &done, &pending, 10),
+        ["b.md", "d.md", "c.md", "a.md"]
+    );
+    assert_eq!(pick_backfill(&cands, &done, &pending, 2), ["b.md", "d.md"]);
+
+    let yt = |tags: &str, body: &str| {
+        format!("---\nsource: https://www.youtube.com/watch?v=abc\n{tags}---\n{body}")
+    };
+    assert!(transcript_refine_pending(&yt(
+        "",
+        "## Transcript\n\nhello there\n"
+    )));
+    assert!(!transcript_refine_pending(&yt(
+        "tags: [refined]\n",
+        "## Transcript\n\nhello\n"
+    )));
+    assert!(!transcript_refine_pending(&yt(
+        "",
+        "## Notes\n\nno transcript\n"
+    )));
+    assert!(!transcript_refine_pending(&yt(
+        "",
+        "## Transcript\n\n## Next\n\nx\n"
+    )));
+    assert!(!transcript_refine_pending(&yt(
+        "",
+        "## Transcript\n\n%% cv-enrich %%\nmanaged\n%% /cv-enrich %%\n"
+    )));
 
     let job = |v: Value| Map::from_iter([("limit".to_owned(), v)]);
     assert_eq!(effective_limit(&Map::new(), 20), Ok(20));
@@ -352,6 +385,57 @@ fn params_and_pure_selection() {
     ] {
         assert!(effective_limit(&job(bad.clone()), 20).is_err(), "{bad}");
     }
+}
+
+/// Plan `youtube-transcript-auto-refine` WP-2: an enriched-but-unrefined YouTube clip with a
+/// transcript is picked; a refined one, and an enriched one without a transcript, are not.
+#[test]
+fn backfill_picks_enriched_unrefined_youtube_clips() {
+    let yt = "source: https://www.youtube.com/watch?v=abc\n";
+    let fx = LiveFixture::new([
+        (
+            "Clips/pending.md",
+            format!("---\n{yt}enriched: 2026-10-01\n---\n## Transcript\n\nhello there\n"),
+        ),
+        (
+            "Clips/refined.md",
+            format!("---\n{yt}enriched: 2026-10-01\ntags: [refined]\n---\n## Transcript\n\nhi\n"),
+        ),
+        (
+            "Clips/nots.md",
+            format!("---\n{yt}enriched: 2026-10-01\n---\n## Notes\n\nx\n"),
+        ),
+        (
+            "Clips/fresh.md",
+            format!("---\n{yt}---\n## Transcript\n\nhello\n"),
+        ),
+    ]);
+    let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
+    let rec = AtRecorder::default();
+    let mut ctx = e.ctx();
+    ctx.children = &rec;
+    let t: toml::Table = "scope = \"backfill\"\nlimit = 10".parse().unwrap();
+    let o = super::execute(
+        &cv_actions::Step::from_table({
+            let mut s = toml::Table::new();
+            s.insert("type".into(), "intake_enrich".into());
+            s.extend(t);
+            s
+        })
+        .unwrap(),
+        &mut ctx,
+    )
+    .unwrap();
+    let mut got = rec.calls();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            "intake-enrich@Clips/fresh.md",
+            "intake-enrich@Clips/pending.md"
+        ]
+    );
+    assert_eq!(var(&o, "enqueued"), json!(2));
 }
 
 #[test]

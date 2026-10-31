@@ -429,20 +429,25 @@ type = "localize"
 type = "image_describe"
 scope = "note"
 [[action.steps]]
-type = "search_upsert"
-[[action.steps]]
 type = "yt_metadata"
 [[action.steps]]
 type = "yt_channel_enrich"   # no-op unless pipelines.toml [youtube] channel_enrich = true
 [[action.steps]]
-type = "intake_enrich"       # one LLM structure + cleanup pass; skips an already-enriched note
+type = "transcript_refine"   # YouTube `## Transcript` section -> refined text + `###` chapters; skips a refined note
+[[action.steps]]
+type = "intake_enrich"       # one LLM structure + cleanup pass; skips an already-enriched note (forced after a refine)
+[[action.steps]]
+type = "search_upsert"       # last: indexes the refined + enriched text
 
 # Intake enrich (plan intake-auto-enrich WP-3, D29): one LLM pass over one note — a collapsed top
 # block, chapter headings in heading-less bodies, and one folded `[!removed]-` callout holding what
-# the cleanup marked (nothing is deleted). Filed clips get it as the last step of `clip-enrich`
-# (the chain is already at the depth limit); new tracker blog and mail notes get it as a child job
-# enqueued by `track_blogs` / `track_mail` once the note is final. Same `clip::enrich` key as
-# `clip-enrich`, so slow enrichment never holds both queue slots. `force` re-runs an enriched note.
+# the cleanup marked (nothing is deleted). Filed clips get it as a step of `clip-enrich`, after
+# `transcript_refine` and before the final search refresh (the chain is already at the depth limit);
+# new tracker blog and mail notes get it as a child job enqueued by `track_blogs` / `track_mail`
+# once the note is final. Same `clip::enrich` key as `clip-enrich`, so slow enrichment never holds
+# both queue slots. `force` re-runs an enriched note. `transcript_refine` runs first (plan
+# youtube-transcript-auto-refine, D30): a refined YouTube note is re-enriched forced, so the top
+# block and fold are built on the refined text.
 [[action]]
 id = "intake-enrich"
 label = "Intake: enrich note"
@@ -454,6 +459,8 @@ name = "force"
 label = "Force"
 kind = "bool"
 default = "false"
+[[action.steps]]
+type = "transcript_refine"
 [[action.steps]]
 type = "intake_enrich"
 [[action.steps]]

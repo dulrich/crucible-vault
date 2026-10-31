@@ -436,7 +436,8 @@ fn non_utf8_note_is_read_lossily_like_x() {
 
 // ---- clip-enrich (plan round-18-holds-yt-metadata WP-3) --------------------------------------
 
-/// The shipped example `clip-enrich` ends with `yt-metadata`'s own two steps, after `search_upsert`.
+/// The shipped example `clip-enrich` runs `yt-metadata`'s own two steps, then the transcript
+/// refine, the enrich and the final search refresh.
 #[test]
 fn example_clip_enrich_arms_with_the_yt_metadata_steps() {
     let c = crate::steps::testkit::example_config();
@@ -448,10 +449,11 @@ fn example_clip_enrich_arms_with_the_yt_metadata_steps() {
         [
             "localize",
             "image_describe",
-            "search_upsert",
             "yt_metadata",
             "yt_channel_enrich",
-            "intake_enrich"
+            "transcript_refine",
+            "intake_enrich",
+            "search_upsert"
         ]
     );
     // Direct steps: a `run_action` would exceed the filed-clip chain depth.
