@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # llm.sh — one spike call to the inference router (Anthropic /v1/messages, 127.0.0.1:4813).
-# usage: GATEWAY_KEY=... llm.sh <model-id> <prompt-file> <doc-file> <out-prefix>
+# Usage: GATEWAY_KEY=... llm.sh <model-id> <prompt-file> <doc-file> <out-prefix>
 # Writes <out-prefix>.json/.txt and appends one TSV line to results.tsv:
 #   model task doc wall_s in_tok out_tok stop_reason json_ok
+case "${1:-}" in -h|--help) sed -n "2,/^set -euo/{/^#/s/^# \{0,1\}//p}" "$0"; exit 0;; esac
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 set -euo pipefail
-if [ "${1:-}" = "--help" ]; then sed -n 2,5p "$0"; exit 0; fi
 : "${GATEWAY_KEY:?export GATEWAY_KEY (the router x-gateway-key) first}"
 model=$1 prompt=$2 doc=$3 out=$4; here=$(cd "$(dirname "$0")" && pwd)
 body=$(jq -n --arg m "$model" --rawfile p "$prompt" --rawfile d "$doc" \

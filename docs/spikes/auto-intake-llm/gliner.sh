@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # gliner.sh <doc.md> <out.json> — GLiNER2 entity pass over a doc, paragraph-chunked (≤32 per request,
 # paragraphs ≥40 chars, links/images stripped). Prints: doc paragraphs entities_unique wall_s.
+# Usage: gliner.sh <doc.md> <out.json>
+case "${1:-}" in -h|--help) sed -n "2,/^set -euo/{/^#/s/^# \{0,1\}//p}" "$0"; exit 0;; esac
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 set -euo pipefail
-if [ "${1:-}" = "--help" ]; then sed -n 2,3p "$0"; exit 0; fi
 doc=$1 out=$2
 schema='{"entities":{"person":"Names of people","organization":"Companies, institutions, publications or other named organizations","product":"Named software, products, models or services","work":"Titles of books, papers, films, podcasts or articles","location":"Named places"}}'
 perl -0ne 's/!\[[^\]]*\]\([^)]*\)//g; s/\[([^\]]*)\]\([^)]*\)/$1/g; for (split /\n\s*\n/) { s/\s+/ /g; s/^\s+|\s+$//g; print "$_\n" if length($_) >= 40 && length($_) < 4000 }' "$doc" > /tmp/gl.paras

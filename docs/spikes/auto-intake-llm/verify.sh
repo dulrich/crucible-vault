@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # verify.sh — anchor fidelity: for each out/<eff>-<task>-<doc>.txt, count anchors (quote/starts_at/
 # first_line/last_line/content_ends_after) found verbatim (after whitespace squeeze) in corpus/<doc>.md.
+# Usage: verify.sh  (reads out/ and corpus/ beside it)
+case "${1:-}" in -h|--help) sed -n "2,/^set -euo/{/^#/s/^# \{0,1\}//p}" "$0"; exit 0;; esac
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 set -euo pipefail
-if [ "${1:-}" = "--help" ]; then sed -n 2,3p "$0"; exit 0; fi
 cd "$(dirname "$0")"
 printf 'eff\ttask\tdoc\tanchors\tfound\tentities\tclaims\tchapters\tspans\tkinds\tscores\n'
 for f in out/{low,med}-{structure,cleanup}-*.txt; do
