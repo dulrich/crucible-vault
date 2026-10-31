@@ -398,3 +398,36 @@ fn backfill_enqueues_only_unenriched_intake_notes_newest_first() {
     );
     assert_eq!(var(&o, "enqueued"), json!(3));
 }
+
+/// A recurring banner (>= 3 notes of one publication, top of body) folds into `[!removed]-`
+/// even when the model names no span (plan `intake-auto-enrich` WP-5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recurring_banner_folds_without_any_model_span() {
+    let none = json!({
+        "summary": "A test post.", "entities": [], "key_claims": [], "chapters": [],
+        "spans": [], "content_ends_after": null
+    })
+    .to_string();
+    let (base, _mock) = fake(200, &none, "stop", None);
+    let banner = "![](https://cdn.example/banner.png?v=2)";
+    let note = |i: usize| {
+        format!(
+            "---\ntitle: T{i}\nsource: https://posts.example/{i}\npublication: Pub\n---\n\n{banner}\n\nreal body line one\n\nreal body line two\n\nmore\n\nmore\n\nmore\n\nmore\n\nmore\n\nmore\n\nmore\n\nend\n"
+        )
+    };
+    let mut b = LiveFixture::builder();
+    for i in 0..3 {
+        b = b.file(&format!("n{i}.md"), note(i));
+    }
+    let e = Arc::new(StepEnv::new(
+        b.build(),
+        config(&base, "CV_TEST_KEY"),
+        action(),
+    ));
+    let o = exec(&e, "n1.md", Map::new(), params(false)).await.unwrap();
+    let t = read(&e, "n1.md");
+    assert!(t.contains("> [!removed]-"), "{t}");
+    assert!(t.contains(&format!("> {banner}")), "{t}");
+    assert_eq!(t.matches(banner).count(), 1, "{t}");
+    assert_eq!(var(&o, "banners_folded"), json!(1));
+}

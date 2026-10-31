@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_ingest::enrich::{self, EnrichOpts, EnrichReport};
+use cv_ingest::enrich::{self, BannerRef, EnrichOpts, EnrichReport};
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_providers::ProviderManager;
 use serde::Serialize;
@@ -221,10 +221,11 @@ pub(crate) fn run_note(
             p.agent
         ))
     })?;
+    let banners = banner_refs(ctx, &path, &text);
     let edit = enrich::enrich(
         &text,
         &parsed,
-        &[],
+        &banners,
         EnrichOpts {
             top_block: words >= SHORT_WORDS,
         },
@@ -245,6 +246,23 @@ pub(crate) fn run_note(
     out.push_output(path);
     out.set_vars(&Vars::from_report(words, &edit.report));
     Ok(out)
+}
+
+/// The recurring-banner embeds of `path` from the index (`cv_index::queries::banners`); an index
+/// failure is logged and yields none — enrichment never fails on it.
+fn banner_refs(ctx: &StepCtx<'_>, path: &str, text: &str) -> Vec<BannerRef> {
+    let body_offset = text.len() - FrontmatterDoc::new(text).body().len();
+    let found = ctx.index().map_err(|e| e.to_string()).and_then(|reader| {
+        cv_index::queries::banners::banner_refs(&reader.query(), path, text, body_offset)
+            .map_err(|e| e.to_string())
+    });
+    match found {
+        Ok(v) => v.into_iter().map(BannerRef).collect(),
+        Err(e) => {
+            tracing::warn!(path, error = %e, "banner lookup failed; none folded");
+            Vec::new()
+        }
+    }
 }
 
 /// Enqueues [`ENRICH_ACTION`] on `path` (a tracker note that just reached its final form); a
