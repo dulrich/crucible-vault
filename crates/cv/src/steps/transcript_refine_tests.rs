@@ -519,3 +519,36 @@ fn params_parse() {
     assert!(parse(&"agent = 3".parse().unwrap()).is_err());
     assert!(parse(&"invented = 1".parse().unwrap()).is_err());
 }
+
+/// Every shipped agent whose `prompt_file` is a shipped example prompt must place its input in
+/// that prompt: the agent step sends only the rendered prompt as the user message, so a prompt
+/// without `{{value}}`/`{{input}}` (or `{{content}}`/`{{selection}}`) drops the input entirely.
+/// Live 2026-10-30: the first `Refine Transcript Chapters.md` had none, and every refine came back
+/// as a 7-word answer.
+#[test]
+fn shipped_prompts_carry_their_input() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/examples");
+    let agents: toml::Table = std::fs::read_to_string(root.join("agents.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut checked = 0;
+    for (id, def) in &agents {
+        let Some(pf) = def.get("prompt_file").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let name = pf.rsplit('/').next().unwrap();
+        let Ok(text) = std::fs::read_to_string(root.join("prompts").join(name)) else {
+            continue; // a live-only prompt (not shipped in the repo)
+        };
+        let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            ["{{value}}", "{{input}}", "{{content}}", "{{selection}}"]
+                .iter()
+                .any(|p| squeezed.contains(p)),
+            "agent {id}: {name} has no input placeholder"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 2, "expected the shipped refine + enrich prompts");
+}

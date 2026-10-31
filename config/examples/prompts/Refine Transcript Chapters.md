@@ -16,3 +16,7 @@ Speakers:
 - Never invent speakers or labels. If the transcript does not name its speakers (for example auto-captions without turn cues), and for any single-speaker monologue, use no speaker labels at all.
 
 Input scope: the input is only a transcript section (or one consecutive part of it) of the note. Keep only spoken content; drop sponsor-read boilerplate only if it is clearly an ad read inserted into the speech.
+
+The transcript follows.
+
+{{value}}
