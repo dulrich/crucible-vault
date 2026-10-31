@@ -158,3 +158,45 @@ fn backfill_parse_rejects_bad_scope_and_note_scope_dry_run() {
         assert!(super::validate(&step, &super::testkit::example_config()).is_err());
     }
 }
+
+// ---- heading restore (plan round-20-transcript-heading-auto-holds WP-1) -----------------------
+
+const TOC_ENRICH: &str =
+    "\n%% cv-enrich %%\n> [!abstract]- Summary\n> [[#Transcript]]\n\n%% /cv-enrich %%\n";
+
+#[test]
+fn plan_restores_dropped_heading_on_post_note_then_settles() {
+    let fm = yt_fm("tags: [post]\n");
+    let note = format!("{fm}{TOC_ENRICH}\nhello there\n\nsecond part\n");
+    let p = super::yt_clip_tidy::plan(&note, None).unwrap();
+    assert!(p.heading_restored && !p.cleaned);
+    let new = p.new.expect("changed");
+    assert_eq!(
+        new,
+        format!("{fm}{TOC_ENRICH}\n## Transcript\n\nhello there\n\nsecond part\n")
+    );
+    assert_eq!(super::yt_clip_tidy::plan(&new, None).unwrap().new, None);
+}
+
+#[test]
+fn plan_leaves_non_post_renamed_heading_alone() {
+    let note = format!("{}{TOC_ENRICH}\n## Notes\n\nmine\n", yt_fm(""));
+    let p = super::yt_clip_tidy::plan(&note, None).unwrap();
+    assert!(!p.heading_restored);
+    assert_eq!(p.new, None);
+}
+
+#[test]
+fn backfill_cleans_with_toc_keeps_heading_and_counts() {
+    let fm = yt_fm("tags: [post]\n");
+    let note = format!("{fm}{TOC_ENRICH}\n{TS_TAIL}");
+    let e = example_env(&[("Clips/v.md", note.as_str())]);
+    let o = backfill(&e, json!({}));
+    assert_eq!(count(&o, "cleaned"), 1);
+    assert_eq!(count(&o, "heading_restored"), 0);
+    let got = e.read("Clips/v.md").unwrap();
+    assert!(
+        got.contains("\n## Transcript\n\nhello there\n\nsecond part\n"),
+        "{got}"
+    );
+}

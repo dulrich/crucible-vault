@@ -19,7 +19,8 @@ pub use lint::{
 };
 pub use ofm::frontmatter::JsValue;
 pub use transcript::{
-    TranscriptEvidence, cleanup_youtube_transcript, strip_youtube_preamble, transcript_evidence,
+    TranscriptEvidence, cleanup_youtube_transcript, prefix_links_transcript,
+    restore_transcript_heading, strip_youtube_preamble, transcript_evidence,
 };
 pub use vault::{PropertyOp, PropertyOpError, VaultEditError, VaultEditPlan, plan_vault_edits};
 pub use wordcount::{calculate_word_count, count_words, strip_non_prose_content};

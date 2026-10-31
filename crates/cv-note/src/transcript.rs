@@ -37,6 +37,8 @@ static BRACKET_ANNOTATION_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| re(r"\\?\[[A-Za-z][A-Za-z ]*\\?\]"));
 static PARAGRAPH_SPLIT_RE: LazyLock<Option<Regex>> = LazyLock::new(|| re(r"\r?\n[ \t]*\r?\n\s*"));
 static WS_RE: LazyLock<Option<Regex>> = LazyLock::new(|| re(r"\s+"));
+static TRANSCRIPT_LINK_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| re(r"(?i)\[\[[ \t]*#[ \t]*Transcript[ \t]*(?:\|[^\]\n]*)?\]\]"));
 
 fn is_timestamp_para(p: &str) -> bool {
     TIMESTAMP_PARA_RE
@@ -165,12 +167,10 @@ struct ClipShape {
     header_end: usize,
 }
 
-/// Skip leading blank lines and whole `%% … %%` regions, in any order. The first remaining line
-/// must be a YouTube embed with a `## Transcript` heading later, or — when `embed_optional` — the
-/// `## Transcript` heading itself (an already-stripped body).
-fn locate_clip(body: &str, embed_optional: bool) -> Option<ClipShape> {
-    let header_re = TRANSCRIPT_HEADER_RE.as_ref()?;
-    let lines = lines_of(body);
+/// `(prefix_end, next_line)`: skip leading blank lines and whole `%% … %%` regions; `prefix_end` is
+/// the end of the last region (0 when none), `next_line` the index of the first other line. `None`
+/// on an unterminated or mixed comment.
+fn scan_prefix(lines: &[Line<'_>]) -> Option<(usize, usize)> {
     let mut prefix_end = 0;
     let mut i = 0;
     while let Some(line) = lines.get(i) {
@@ -178,13 +178,53 @@ fn locate_clip(body: &str, embed_optional: bool) -> Option<ClipShape> {
         if t.is_empty() {
             i += 1;
         } else if t.starts_with("%%") {
-            let j = comment_region_end(&lines, i)?;
+            let j = comment_region_end(lines, i)?;
             prefix_end = lines.get(j)?.end;
             i = j + 1;
         } else {
             break;
         }
     }
+    Some((prefix_end, i))
+}
+
+/// Whether a managed prefix links the note's transcript (`[[#Transcript]]` or
+/// `[[#Transcript|alias]]`, case-insensitive) — the ToC callout `intake_enrich` writes. Plan
+/// round-20-transcript-heading-auto-holds WP-1.
+#[must_use]
+pub fn prefix_links_transcript(prefix: &str) -> bool {
+    TRANSCRIPT_LINK_RE
+        .as_ref()
+        .is_some_and(|r| r.is_match(prefix))
+}
+
+/// Re-insert the `## Transcript` heading a cleanup dropped: when the note's managed prefix links
+/// `#Transcript` yet the body has no such heading, put `## Transcript` and a blank line directly
+/// after the prefix. `None` when there is no prefix, no link, or the heading exists (so a second
+/// pass is `None`). Plan round-20-transcript-heading-auto-holds WP-1.
+#[must_use]
+pub fn restore_transcript_heading(content: &str) -> Option<String> {
+    let (_, body) = ofm::frontmatter::split_frontmatter(content);
+    let fm_text = &content[..content.len() - body.len()];
+    if TRANSCRIPT_HEADER_RE.as_ref()?.is_match(body) {
+        return None;
+    }
+    let (prefix_end, _) = scan_prefix(&lines_of(body))?;
+    let prefix = &body[..prefix_end];
+    if prefix.is_empty() || !prefix_links_transcript(prefix) {
+        return None;
+    }
+    let rest = body[prefix_end..].trim_start_matches(['\n', '\r', ' ', '\t']);
+    Some(format!("{fm_text}{prefix}\n## Transcript\n\n{rest}"))
+}
+
+/// Skip leading blank lines and whole `%% … %%` regions, in any order. The first remaining line
+/// must be a YouTube embed with a `## Transcript` heading later, or — when `embed_optional` — the
+/// `## Transcript` heading itself (an already-stripped body).
+fn locate_clip(body: &str, embed_optional: bool) -> Option<ClipShape> {
+    let header_re = TRANSCRIPT_HEADER_RE.as_ref()?;
+    let lines = lines_of(body);
+    let (prefix_end, i) = scan_prefix(&lines)?;
     let first = lines.get(i)?;
     if is_youtube_embed(first.text) {
         let m = header_re.find(&body[first.end..])?;
@@ -271,6 +311,11 @@ pub fn cleanup_youtube_transcript(content: &str) -> String {
     if !prefix.is_empty() {
         result.push('\n');
     }
+    if prefix_links_transcript(prefix) {
+        // Plan round-20-transcript-heading-auto-holds WP-1: the ToC links the heading — keep it.
+        result.push_str(&body[shape.header_start..shape.header_end]);
+        result.push('\n');
+    }
     result.push_str(&cleaned.join("\n\n"));
     if !trailing.is_empty() {
         result.push_str("\n\n");
@@ -294,7 +339,7 @@ pub enum TranscriptEvidence {
     /// A `## Transcript` heading followed (blank lines allowed) by at least three `**m:ss**`
     /// paragraphs — the shape a fresh clip has before `lint` cleans it.
     Structured,
-    /// An already-cleaned note: no `## Transcript` heading, no YouTube embed left, at least 50
+    /// An already-cleaned note: no (or an unstamped, kept) `## Transcript` heading, no YouTube embed left, at least 50
     /// body words, and a kind with `cleanup_transcript = true` (the caller's `cleanup_kind`).
     LegacyCleaned,
 }
@@ -320,7 +365,11 @@ pub fn transcript_evidence(content: &str, cleanup_kind: bool) -> Option<Transcri
             .split(&after)
             .take_while(|p| is_timestamp_para(p))
             .count();
-        return (stamped >= MIN_TIMESTAMP_PARAS).then_some(TranscriptEvidence::Structured);
+        if stamped >= MIN_TIMESTAMP_PARAS {
+            return Some(TranscriptEvidence::Structured);
+        }
+        // Plan round-20-transcript-heading-auto-holds WP-1: a kept heading over cleaned
+        // (unstamped) text falls through to the legacy test.
     }
     if !cleanup_kind || has_youtube_embed(body) {
         return None;
@@ -460,6 +509,74 @@ mod tests {
             "{fm}{ENRICHED}[![](a.jpg)](https://ex.test/v)\nDesc.\n\n## Transcript\n\n**0:01** hi\n"
         );
         assert_eq!(cleanup_youtube_transcript(&other), other);
+    }
+
+    const FM: &str = "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\n";
+    const TOC: &str =
+        "\n%% cv-enrich %%\n> [!abstract]- Summary\n> [[#Transcript]]\n\n%% /cv-enrich %%\n";
+
+    fn toc_clip(toc: &str) -> String {
+        format!(
+            "{FM}{toc}[![](a.jpg)](https://youtu.be/dQw4w9WgXcQ)\nDesc.\n\n## Transcript\n\n**0:01** [Music] hi\n\n**0:04** there\n\n**0:09** more\n"
+        )
+    }
+
+    #[test]
+    fn cleanup_keeps_heading_when_prefix_links_it() {
+        let out = cleanup_youtube_transcript(&toc_clip(TOC));
+        assert_eq!(
+            out,
+            format!("{FM}{TOC}\n## Transcript\n\nhi\n\nthere\n\nmore\n")
+        );
+        assert_eq!(
+            cleanup_youtube_transcript(&out),
+            out,
+            "second pass unchanged"
+        );
+        let alias = TOC.replace("[[#Transcript]]", "[[#transcript|jump]]");
+        let out = cleanup_youtube_transcript(&toc_clip(&alias));
+        assert!(out.contains("\n## Transcript\n\nhi\n"), "{out}");
+        let plain = TOC.replace("[[#Transcript]]", "no link");
+        let out = cleanup_youtube_transcript(&toc_clip(&plain));
+        assert_eq!(out, format!("{FM}{plain}\nhi\n\nthere\n\nmore\n"));
+    }
+
+    #[test]
+    fn restore_heading_after_prefix_and_idempotent() {
+        let dropped = format!("{FM}{TOC}\nhi\n\nthere\n");
+        let out = restore_transcript_heading(&dropped).expect("restores");
+        assert_eq!(out, format!("{FM}{TOC}\n## Transcript\n\nhi\n\nthere\n"));
+        assert_eq!(restore_transcript_heading(&out), None);
+        let unlinked = format!("{FM}{}\nhi\n", TOC.replace("[[#Transcript]]", "x"));
+        assert_eq!(restore_transcript_heading(&unlinked), None);
+        assert_eq!(restore_transcript_heading("plain\n"), None);
+    }
+
+    #[test]
+    fn evidence_tracks_cleanup_and_restore() {
+        let long = words(60);
+        let before = format!(
+            "{FM}{TOC}[![](a.jpg)](https://youtu.be/dQw4w9WgXcQ)\n\n## Transcript\n\n**0:01** {long}\n\n**0:04** b\n\n**0:09** c\n"
+        );
+        assert_eq!(
+            transcript_evidence(&before, true),
+            Some(TranscriptEvidence::Structured)
+        );
+        let cleaned = cleanup_youtube_transcript(&before);
+        assert!(cleaned.contains("\n## Transcript\n\n"), "{cleaned}");
+        assert_eq!(
+            transcript_evidence(&cleaned, true),
+            Some(TranscriptEvidence::LegacyCleaned)
+        );
+        assert_eq!(transcript_evidence(&cleaned, false), None);
+        let dropped = cleaned.replace("## Transcript\n\n", "");
+        let restored = restore_transcript_heading(&dropped).expect("restores");
+        assert_eq!(
+            transcript_evidence(&restored, true),
+            Some(TranscriptEvidence::LegacyCleaned)
+        );
+        let embed = format!("![](https://youtu.be/dQw4w9WgXcQ)\n## Transcript\n\n{long}\n");
+        assert_eq!(transcript_evidence(&embed, true), None);
     }
 
     #[test]

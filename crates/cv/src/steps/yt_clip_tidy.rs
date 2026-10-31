@@ -22,9 +22,11 @@
 //! system folders (`.trash/`, `_yt_metadata/`, `_raw_transcript/`, `_custom/`, …) whose `source`
 //! is a YouTube URL, in path order, and per note in one CAS modify (no network, no child jobs):
 //! (a) [`tidy`]; (b) on a `post`-tagged note, [`cv_note::cleanup_youtube_transcript`] on the
-//! result; (c) `publication` from the note's linked `yt-metadata` note (its `publication`, else its
+//! result; (b2) on that same note, [`cv_note::restore_transcript_heading`] re-inserts a
+//! `## Transcript` heading the cleanup dropped when the managed prefix still links `#Transcript`
+//! (plan round-20-transcript-heading-auto-holds WP-1); (c) `publication` from the note's linked `yt-metadata` note (its `publication`, else its
 //! `channelTitle`) when the note's own is absent or blank, inserted after `author`. A partial shape
-//! changes nothing. Outcome vars: `scanned`, `stripped`, `cleaned`, `publication_filled`,
+//! changes nothing. Outcome vars: `scanned`, `stripped`, `cleaned`, `heading_restored`, `publication_filled`,
 //! `no_metadata` (publication wanted, no usable linked metadata note), `conflict`, `unchanged`,
 //! `dry_run`.
 
@@ -138,6 +140,7 @@ pub(crate) struct Plan {
     pub new: Option<String>,
     pub stripped: bool,
     pub cleaned: bool,
+    pub heading_restored: bool,
     pub filled: bool,
 }
 
@@ -171,6 +174,12 @@ pub(crate) fn plan(text: &str, meta_publication: Option<&str>) -> Result<Plan, S
             cur = cleaned;
             p.cleaned = true;
         }
+        // Plan round-20-transcript-heading-auto-holds WP-1 (audit E2): only a post-tagged YouTube
+        // note, whose heading the cleanup is the only known remover of, gets it back.
+        if let Some(t) = cv_note::restore_transcript_heading(&cur) {
+            cur = t;
+            p.heading_restored = true;
+        }
     }
     if is_youtube
         && let Some(publication) = meta_publication
@@ -197,6 +206,7 @@ struct BackfillVars {
     scanned: u32,
     stripped: u32,
     cleaned: u32,
+    heading_restored: u32,
     publication_filled: u32,
     no_metadata: u32,
     conflict: u32,
@@ -274,6 +284,7 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         }
         v.stripped += u32::from(applied.stripped);
         v.cleaned += u32::from(applied.cleaned);
+        v.heading_restored += u32::from(applied.heading_restored);
         v.publication_filled += u32::from(applied.filled);
     }
     let mut out = StepOutcome::default();
