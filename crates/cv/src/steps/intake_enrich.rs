@@ -176,7 +176,14 @@ pub(crate) fn run_note(
     ctx: &mut StepCtx<'_>,
     mgr: &ProviderManager,
 ) -> Result<StepOutcome, StepError> {
-    let force = job_flag(ctx, "force").unwrap_or(p.force);
+    // A preceding `transcript_refine` that rewrote the note forces a re-enrich on the refined
+    // text; its outcome var rides the checkpointed vars, so a replayed run sees it too.
+    let refined_now = ctx
+        .vars
+        .get(super::transcript_refine::REFINED_VAR)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let force = job_flag(ctx, "force").unwrap_or(p.force) || refined_now;
     let path = ctx
         .context
         .active_path

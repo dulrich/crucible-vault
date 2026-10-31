@@ -177,6 +177,9 @@ step_kinds! {
     /// One LLM structure + cleanup pass over an intake note, folding (never deleting) what the
     /// cleanup marks (plan `intake-auto-enrich` WP-3).
     IntakeEnrich = "intake_enrich", true;
+    /// Refines a YouTube clip's `## Transcript` section into cleaned paragraphs with `###`
+    /// chapter headings (plan `youtube-transcript-auto-refine` WP-1).
+    TranscriptRefine = "transcript_refine", true;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

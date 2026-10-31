@@ -51,3 +51,15 @@ prompt_file = "_custom/prompts/Intake Enrich.md"
 input = "{{content}}"
 model = "router:codex-profile-a/gpt-6.1-terra"
 max_tokens = 8192
+
+# Transcript refine (plan youtube-transcript-auto-refine WP-1, D30): the `transcript_refine` step
+# sends ONE `## Transcript` section (or a <=12k-word chunk of it) per call as `{{value}}` and
+# replaces the section with the refined text plus `###` chapter headings. Same route as
+# `intake-enrich`; repoint `model` without code changes. `max_tokens` fits a 12k-word chunk
+# (spike: 2.8k-13.3k output tokens per 2.7k-12.8k words).
+[transcript-refine]
+name = "Transcript Refine"
+prompt_file = "_custom/prompts/Refine Transcript Chapters.md"
+input = "{{value}}"
+model = "router:codex-profile-a/gpt-6.1-terra"
+max_tokens = 32000

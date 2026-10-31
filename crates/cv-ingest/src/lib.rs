@@ -16,6 +16,7 @@ pub mod mail;
 pub mod signals;
 pub mod supersede;
 pub mod tracker;
+pub mod transcript;
 pub mod urls;
 pub mod x;
 pub mod youtube;

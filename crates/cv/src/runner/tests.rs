@@ -891,3 +891,4 @@ fn clip_images_tag_starter_ignores_the_daemon_move_that_files_the_clip() {
 mod clips;
 mod holds;
 mod telemetry;
+mod transcript_refine;

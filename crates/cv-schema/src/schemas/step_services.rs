@@ -413,3 +413,17 @@ pub static INTAKE_ENRICH: Record = Record {
     rules: &[],
     summary: None,
 };
+
+/// `transcript_refine` — `crates/cv/src/steps/transcript_refine.rs` (`parse`; plan `youtube-transcript-auto-refine` WP-1).
+pub static TRANSCRIPT_REFINE: Record = Record {
+    name: "transcript_refine",
+    fields: &[field(
+        "agent",
+        "Agent",
+        "The agents.toml id that refines one transcript chunk (it receives only the chunk text)",
+        Node::Str,
+    )
+    .dflt(D::Str("transcript-refine"))],
+    rules: &[],
+    summary: None,
+};

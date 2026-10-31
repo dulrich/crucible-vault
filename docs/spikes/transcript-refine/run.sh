@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# run.sh — spike: one terra refine+chapters call per transcript, aggregates only.
+# Usage: host-env run crucible-vault -- run.sh [model]   (needs CV_ROUTER_GATEWAY_KEY in env)
+# Inputs: corpus/*.md (transcript sections). Outputs: out/<doc>.{json,txt}; results.tsv lines:
+#   doc in_words wall_s in_tok out_tok stop out_words ratio headings speaker_paras timestamps_left
+case "${1:-}" in -h|--help) sed -n '2,5s/^# \{0,1\}//p' "$0"; exit 0;; esac
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
+set -euo pipefail
+: "${CV_ROUTER_GATEWAY_KEY:?run under host-env run crucible-vault --}"
+model=${1:-codex-profile-a/gpt-6.1-terra}; here=$(cd "$(dirname "$0")" && pwd)
+for doc in "$here"/corpus/*.md; do
+  n=$(basename "$doc" .md); out="$here/out/$n"
+  body=$(jq -n --arg m "$model" --rawfile p "$here/prompts/refine-chapters.md" --rawfile d "$doc" \
+    '{model:$m, max_tokens:32000, system:$p, messages:[{role:"user",content:("<transcript>\n"+$d+"\n</transcript>")}]}')
+  t0=$(date +%s.%N)
+  curl -s -m 1200 http://127.0.0.1:4813/v1/messages -H 'content-type: application/json' \
+    -H 'anthropic-version: 2023-06-01' -H "x-gateway-key: $CV_ROUTER_GATEWAY_KEY" -d "$body" > "$out.json" || true
+  t1=$(date +%s.%N)
+  jq -r '[.content[]? | select(.type=="text") | .text] | join("")' "$out.json" > "$out.txt" 2>/dev/null || : > "$out.txt"
+  iw=$(wc -w < "$doc"); ow=$(wc -w < "$out.txt")
+  printf '%s\t%s\t%.1f\t%s\t%s\t%s\t%s\t%.2f\t%s\t%s\t%s\n' "$n" "$iw" "$(echo "$t1 - $t0" | bc)" \
+    "$(jq -r '.usage.input_tokens // "-"' "$out.json")" "$(jq -r '.usage.output_tokens // "-"' "$out.json")" \
+    "$(jq -r '.stop_reason // .error.message // "-"' "$out.json" | head -c 60)" "$ow" "$(echo "$ow / ($iw + 0.001)" | bc -l)" \
+    "$(grep -c '^## ' "$out.txt" || true)" "$(grep -cE '^\*\*[^*]{1,40}:\*\* ' "$out.txt" || true)" \
+    "$(grep -cE '\b[0-9]{1,2}:[0-9]{2}\b' "$out.txt" || true)" | tee -a "$here/results.tsv"
+done

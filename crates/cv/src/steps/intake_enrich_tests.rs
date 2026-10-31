@@ -431,3 +431,61 @@ async fn a_recurring_banner_folds_without_any_model_span() {
     assert_eq!(t.matches(banner).count(), 1, "{t}");
     assert_eq!(var(&o, "banners_folded"), json!(1));
 }
+
+/// Like [`exec`] with the earlier steps' vars (what the runner hands a later step).
+async fn exec_vars(
+    e: &Arc<StepEnv>,
+    path: &str,
+    job_params: Map<String, Value>,
+    vars: Map<String, Value>,
+) -> Result<StepOutcome, StepError> {
+    let (e, path) = (Arc::clone(e), path.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let context = ActionContext {
+            active_path: Some(path),
+            ..ActionContext::default()
+        };
+        let mut ctx = e.ctx();
+        ctx.params = &job_params;
+        ctx.context = &context;
+        ctx.vars = &vars;
+        run_note(&params(false), &mut ctx, &mgr())
+    })
+    .await
+    .unwrap()
+}
+
+/// Plan `youtube-transcript-auto-refine` WP-1 (audit E1): a refine that rewrote the note forces
+/// the re-enrich even though the job's `force` param is present and `"false"` (the action's
+/// default), and an unset flag changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refine_that_wrote_forces_enrich_over_a_false_force_param() {
+    let (base, mock) = fake(200, &answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("n.md", long_note());
+    exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
+    assert_eq!(mock.requests().len(), 1);
+    let false_force = || Map::from_iter([("force".to_owned(), json!("false"))]);
+    let flag = |v: Value| Map::from_iter([("transcript_refined".to_owned(), v)]);
+
+    // No refine var (or false): skipped as before, whatever the param says.
+    for vars in [Map::new(), flag(json!(false))] {
+        let o = exec_vars(&e, "n.md", false_force(), vars).await.unwrap();
+        assert_eq!(var(&o, "skipped"), json!("already enriched"));
+    }
+    assert_eq!(mock.requests().len(), 1);
+
+    // Refine wrote: forced, with the param absent, `"false"` and boolean `false`.
+    for job in [
+        Map::new(),
+        false_force(),
+        Map::from_iter([("force".to_owned(), json!(false))]),
+    ] {
+        let before = mock.requests().len();
+        let o = exec_vars(&e, "n.md", job, flag(json!(true))).await.unwrap();
+        assert_eq!(var(&o, "enriched"), json!(true));
+        assert_eq!(mock.requests().len(), before + 1);
+    }
+    let t = read(&e, "n.md");
+    assert_eq!(t.matches("[!removed]-").count(), 1, "{t}");
+}
