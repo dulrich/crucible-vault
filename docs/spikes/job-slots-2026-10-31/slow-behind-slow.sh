@@ -4,6 +4,8 @@
 # >= 1 s. Read-only; aggregates and action ids only (no note paths).
 # Usage: slow-behind-slow.sh [hours] [state.db]
 set -euo pipefail
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
 case "${1:-}" in -h|--help) sed -n 2,5p "$0" | sed 's/^# \{0,1\}//'; exit 0;; esac
 H=${1:-24}; DB=${2:-${CV_STATE_DB:-$HOME/.local/state/crucible-vault/state.db}}
 NOW=$(($(date +%s) * 1000)); SINCE=$((NOW - H * 3600000))

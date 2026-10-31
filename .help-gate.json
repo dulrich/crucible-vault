@@ -56,6 +56,9 @@
     {
       "path": "docs/spikes/pdf-render/src/fidelity.rs",
       "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
+    },
+    {
+      "path": "docs/spikes/job-slots-2026-10-31/slow-behind-slow.sh"
     }
   ],
   "exclude": []
