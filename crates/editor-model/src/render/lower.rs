@@ -47,7 +47,10 @@ pub fn lower_with(source: &str, opts: LowerOptions) -> RenderModel {
     let mut options = ofm::comrak_options();
     options.extension.footnotes = true;
     let arena = Arena::new();
-    let root = parse_document(&arena, body, &options);
+    // Obsidian `%% … %%` comments are never displayed; blanking keeps every newline, so the
+    // block line numbers below still index the real note.
+    let body = crate::comments::blank_comments(body);
+    let root = parse_document(&arena, &body, &options);
     let mut l = Lower {
         opts,
         line_offset,

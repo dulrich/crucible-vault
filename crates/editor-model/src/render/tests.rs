@@ -769,3 +769,30 @@ fn remote_card_kind_by_url() {
     assert_eq!(k("https://a.example/p.png"), None);
     assert_eq!(k("https://a.example/page"), None);
 }
+
+/// Obsidian `%% … %%` comments (the `cv-enrich` markers) are not displayed, and block line ranges
+/// still index the real note.
+#[test]
+fn percent_comments_are_hidden() {
+    let src = "---\nt: x\n---\n%% cv-enrich heading %%\n## A chapter\n\nkeep %%hide%% this\n\n%% cv-enrich %%\n\n> quote\n\n%% /cv-enrich %%\n";
+    let m = lower(src);
+    assert_eq!(
+        m.blocks,
+        vec![
+            Block::Heading {
+                level: 2,
+                inlines: vec![t("A chapter")]
+            },
+            Block::Paragraph(vec![t("keep  this")]),
+            Block::BlockQuote(vec![Block::Paragraph(vec![t("quote")])]),
+        ]
+    );
+    // `## A chapter` is note line 4 (0-based), the quote line 10.
+    assert_eq!(m.block_lines[0], 4..5);
+    assert_eq!(m.block_lines[2].start, 10);
+    // Inline code keeps its `%%`.
+    assert_eq!(
+        one("a `%%x%%`\n"),
+        Block::Paragraph(vec![t("a "), Inline::Code("%%x%%".into())])
+    );
+}

@@ -3,6 +3,7 @@
 pub mod autolint;
 pub mod carry;
 pub mod chord;
+pub mod comments;
 pub mod editing;
 pub mod edits;
 pub mod find;

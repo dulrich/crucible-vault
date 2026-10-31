@@ -18,10 +18,12 @@ fn line_start(text: &str, line: usize) -> usize {
 
 /// plan editor-round-4 WP-3: byte ranges of a block's source that Reading never displays —
 /// md-link destinations `](url "title")`, image `![alt](src)` wholes, wiki-link targets hidden
-/// by an alias (`[[target|`), `[[`/`]]` brackets, embeds `![[…]]` and code-fence lines.
+/// by an alias (`[[target|`), `[[`/`]]` brackets, embeds `![[…]]` and code-fence lines, and
+/// `%% … %%` comments ([`crate::comments`]).
 pub fn invisible_ranges(src: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let bytes = src.as_bytes();
+    out.extend(crate::comments::comment_ranges(src));
     // Code-fence lines (the info string is not painted; the fence is markup).
     let mut at = 0;
     for line in src.split_inclusive('\n') {
