@@ -271,8 +271,11 @@ pub struct RunnerDeps {
     pub executor: Arc<dyn StepExecutor>,
     /// Clock.
     pub clock: Arc<dyn Clock>,
-    /// Concurrent jobs (default 2).
+    /// Concurrent jobs in the general pool (any job; the daemon runs 3).
     pub concurrency: usize,
+    /// Permits of the fast pool (plan job-slots-fast-lane WP-2): only jobs of armed `fast`
+    /// actions claim them; 0 = single-pool behavior.
+    pub fast_slots: usize,
     /// Vault root.
     pub vault_root: PathBuf,
     /// `CV_INDEX_DB` base.
@@ -293,6 +296,11 @@ pub(crate) struct Inner {
     executor: Arc<dyn StepExecutor>,
     clock: Arc<dyn Clock>,
     concurrency: usize,
+    fast_slots: usize,
+    /// The pool and `job_type` of every job this runner claimed, until its permit is dropped
+    /// (plan job-slots-fast-lane WP-2, audit E1): permit-wait holders are named from this
+    /// record, never re-derived from the current fast set.
+    pools: Mutex<HashMap<String, (Pool, String)>>,
     vault_root: PathBuf,
     index_db: PathBuf,
     config_dir: PathBuf,
@@ -334,6 +342,8 @@ impl Runner {
                 executor: deps.executor,
                 clock: deps.clock,
                 concurrency: deps.concurrency.max(1),
+                fast_slots: deps.fast_slots,
+                pools: Mutex::new(HashMap::new()),
                 vault_root: deps.vault_root,
                 index_db: deps.index_db,
                 config_dir: deps.config_dir,
@@ -651,40 +661,116 @@ impl Inner {
     }
 }
 
+/// A runner permit pool (plan job-slots-fast-lane WP-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pool {
+    /// Claims any job (`RunnerDeps::concurrency` permits).
+    General,
+    /// Claims only jobs of armed `fast` actions (`RunnerDeps::fast_slots` permits).
+    Fast,
+}
+
+impl Inner {
+    fn config_snapshot(&self) -> Arc<ConfigSet> {
+        Arc::clone(&read(&self.config))
+    }
+
+    /// The permit-wait view: `fast_types` from this pass's snapshot, each pool's free state and
+    /// its holders from the claim-time record (sorted by the store).
+    fn pool_view(
+        &self,
+        fast_types: HashSet<String>,
+        general_free: bool,
+        fast_free: bool,
+    ) -> cv_state::PoolView {
+        let mut view = cv_state::PoolView {
+            fast_types,
+            general_free,
+            fast_free,
+            ..cv_state::PoolView::default()
+        };
+        for (pool, job_type) in lock(&self.pools).values() {
+            match pool {
+                Pool::General => view.general_holders.push(job_type.clone()),
+                Pool::Fast => view.fast_holders.push(job_type.clone()),
+            }
+        }
+        view
+    }
+}
+
+/// `action:<id>` of every armed `fast` action (plan job-slots-fast-lane WP-2).
+fn fast_job_types(config: &ConfigSet) -> HashSet<String> {
+    config
+        .armed_actions()
+        .filter(|a| a.fast)
+        .map(|a| format!("action:{}", a.id))
+        .collect()
+}
+
+/// Claims into `pool` while it has a free permit (plan job-slots-fast-lane WP-2), restricted to
+/// `only` job types when set. Returns whether the pool ended exhausted (a permit was wanted
+/// and none was free). The permit and the job's pool record travel with the job until settle.
+fn claim_pool(
+    inner: &Arc<Inner>,
+    permits: &Arc<tokio::sync::Semaphore>,
+    pool: Pool,
+    only: Option<&HashSet<String>>,
+) -> bool {
+    loop {
+        let Ok(permit) = Arc::clone(permits).try_acquire_owned() else {
+            return true;
+        };
+        let claimed = lock(&inner.state).claim_filtered(inner.clock.now_ms(), only);
+        match claimed {
+            Ok(Some(job)) => {
+                lock(&inner.running).insert(job.id.clone(), None);
+                lock(&inner.pools).insert(job.id.clone(), (pool, job.job_type.clone()));
+                let inner2 = Arc::clone(inner);
+                tokio::spawn(async move {
+                    let id = job.id.clone();
+                    run_job(Arc::clone(&inner2), job).await;
+                    lock(&inner2.pools).remove(&id);
+                    drop(permit);
+                    inner2.wake.notify_one();
+                });
+            }
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::error!(error = %e, "claim failed");
+                return false;
+            }
+        }
+    }
+}
+
 async fn claim_loop(inner: Arc<Inner>, mut stop: watch::Receiver<bool>) {
     inner.recover();
     let mut maintenance = Maintenance::default();
-    let permits = Arc::new(tokio::sync::Semaphore::new(inner.concurrency));
+    let general = Arc::new(tokio::sync::Semaphore::new(inner.concurrency));
+    let fast = Arc::new(tokio::sync::Semaphore::new(inner.fast_slots));
     loop {
         if *stop.borrow() {
             return;
         }
         inner.maintenance_tick(&mut maintenance);
-        loop {
-            let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-                // Every permit is taken: queued claimable work waits for one (plan
-                // job-telemetry Decision 3; written only on a cause change).
-                if let Err(e) = lock(&inner.state).observe_permit_wait(inner.clock.now_ms()) {
-                    tracing::warn!(error = %e, "telemetry: permit-wait observation failed");
-                }
-                break;
-            };
-            let claimed = lock(&inner.state).claim(inner.clock.now_ms());
-            match claimed {
-                Ok(Some(job)) => {
-                    lock(&inner.running).insert(job.id.clone(), None);
-                    let inner2 = Arc::clone(&inner);
-                    tokio::spawn(async move {
-                        run_job(Arc::clone(&inner2), job).await;
-                        drop(permit);
-                        inner2.wake.notify_one();
-                    });
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::error!(error = %e, "claim failed");
-                    break;
-                }
+        // Plan job-slots-fast-lane WP-2 (audit E1): one config snapshot per pass; its fast set
+        // drives this pass's fast claims and its permit-wait observation. A fast job takes the
+        // fast slot first, keeping general slots for slow work; the general pool claims any job.
+        let fast_types = fast_job_types(&inner.config_snapshot());
+        let fast_exhausted =
+            !fast_types.is_empty() && claim_pool(&inner, &fast, Pool::Fast, Some(&fast_types));
+        let general_exhausted = claim_pool(&inner, &general, Pool::General, None);
+        if general_exhausted || fast_exhausted {
+            // A pool is full: queued claimable work whose every usable pool is exhausted waits
+            // for a permit (plan job-telemetry Decision 3; written only on a cause change).
+            let view = inner.pool_view(
+                fast_types,
+                general.available_permits() > 0,
+                fast.available_permits() > 0,
+            );
+            if let Err(e) = lock(&inner.state).observe_pool_wait(inner.clock.now_ms(), &view) {
+                tracing::warn!(error = %e, "telemetry: permit-wait observation failed");
             }
         }
         let now = inner.clock.now_ms();

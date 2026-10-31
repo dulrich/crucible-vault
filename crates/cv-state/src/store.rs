@@ -220,6 +220,18 @@ impl StateDb {
     /// rows whose resource keys overlap any running job's (I3), and rows whose service breaker
     /// is open (half-open admits exactly one probe). Ticks every breaker first.
     pub fn claim(&mut self, now_ms: i64) -> Result<Option<Job>> {
+        self.claim_filtered(now_ms, None)
+    }
+
+    /// [`StateDb::claim`] restricted to candidates whose `job_type` is in `only` (`None` = every
+    /// candidate). Plan job-slots-fast-lane WP-2 (audit E3): the filter runs before
+    /// classification, so a filtered-out candidate never takes a half-open probe and records no
+    /// wait; the busy-key check (I3) stays global across pools.
+    pub fn claim_filtered(
+        &mut self,
+        now_ms: i64,
+        only: Option<&HashSet<String>>,
+    ) -> Result<Option<Job>> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -234,7 +246,10 @@ impl StateDb {
         // no claim proceeds until the row is repaired.
         let busy = claim::running_keys(&tx)?;
         let mut chosen = None;
-        for (id, raw_keys, service) in claim::candidates(&tx, now_ms)? {
+        for (id, raw_keys, service, job_type) in claim::candidates(&tx, now_ms)? {
+            if only.is_some_and(|set| !set.contains(&job_type)) {
+                continue;
+            }
             // Fail closed (I3): a candidate whose resource keys do not parse is never claimed;
             // it stays queued and visible to `list` (which tolerates corrupt JSON).
             let Ok(keys) = serde_json::from_str::<Vec<String>>(&raw_keys) else {

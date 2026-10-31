@@ -98,6 +98,62 @@ fn key_wait_is_attributed_to_the_blocking_action() {
     assert_eq!(sb.blockers, vec![(WaitCause::Key, "holder".to_owned(), 25)]);
 }
 
+/// Plan job-slots-fast-lane WP-2 (audit E3): a fast-filtered claim never classifies a
+/// filtered-out candidate, so a half-open breaker's one probe stays free for the general pool.
+#[test]
+fn filtered_claim_leaves_a_filtered_out_half_open_probe_untaken() {
+    let (_d, mut s) = db();
+    for _ in 0..3 {
+        s.report_service_failure("svc", ServiceFailureKind::Timeout, "t", None, 0)
+            .unwrap();
+    }
+    let mut gated = job("slow", None, &[]);
+    gated.service = Some("svc".into());
+    let g = id_of(s.enqueue(gated, 1).unwrap());
+    let fast: std::collections::HashSet<String> = ["quick".to_owned()].into();
+    assert!(
+        s.claim_filtered(OPEN_WINDOW_MS, Some(&fast))
+            .unwrap()
+            .is_none()
+    );
+    let h = s.service_health("svc").unwrap();
+    assert_eq!(h.state, BreakerState::HalfOpen);
+    assert!(
+        !h.probe_in_flight(),
+        "filtered-out candidate took the probe"
+    );
+    assert!(s.job_telemetry(&g).unwrap().unwrap().waits.is_empty());
+    assert_eq!(s.claim(OPEN_WINDOW_MS).unwrap().unwrap().id, g);
+}
+
+/// Plan job-slots-fast-lane WP-2 (audit E4): permit waits are written only for candidates whose
+/// every usable pool is exhausted, naming exactly those pools' holders.
+#[test]
+fn pool_wait_records_permit_only_when_every_usable_pool_is_full() {
+    let (_d, mut s) = db();
+    let slow = id_of(s.enqueue(job("slow", None, &[]), 10).unwrap());
+    let quick = id_of(s.enqueue(job("quick", None, &[]), 11).unwrap());
+    let mut view = PoolView {
+        fast_types: ["quick".to_owned()].into(),
+        general_free: false,
+        fast_free: true,
+        general_holders: vec!["g2".into(), "g1".into()],
+        fast_holders: vec!["f1".into()],
+    };
+    s.observe_pool_wait(12, &view).unwrap();
+    let waits = |s: &StateDb, id: &str| s.job_telemetry(id).unwrap().unwrap().waits;
+    let w = waits(&s, &slow);
+    assert_eq!(w.len(), 1, "general full: the slow job waits");
+    assert_eq!(w[0].blocker.as_deref(), Some("g1,g2"));
+    assert!(waits(&s, &quick).is_empty(), "fast permit free: no wait");
+    view.fast_free = false;
+    s.observe_pool_wait(13, &view).unwrap();
+    let q = waits(&s, &quick);
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0].cause, WaitCause::Permit);
+    assert_eq!(q[0].blocker.as_deref(), Some("f1,g1,g2"));
+}
+
 #[test]
 fn permit_wait_names_the_running_actions_and_writes_on_change_only() {
     let (_d, mut s) = db();

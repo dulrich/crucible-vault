@@ -36,16 +36,19 @@ pub(crate) fn running_actions(tx: &Transaction<'_>) -> Result<String> {
     Ok(v.join(","))
 }
 
-/// One undeferred queued row: `(id, raw resource_keys JSON, service)`.
-pub(crate) type Candidate = (String, String, Option<String>);
+/// One undeferred queued row: `(id, raw resource_keys JSON, service, job_type)` (`job_type`
+/// added by plan job-slots-fast-lane WP-2 for the pool filter).
+pub(crate) type Candidate = (String, String, Option<String>, String);
 
 /// Every undeferred queued row at `now_ms`, highest lane then oldest id (the claim order).
 pub(crate) fn candidates(tx: &Transaction<'_>, now_ms: i64) -> Result<Vec<Candidate>> {
     let mut stmt = tx.prepare(
-        "SELECT id, resource_keys, service FROM jobs WHERE status = 'queued' AND (defer_until_ms IS NULL OR defer_until_ms <= ?1) ORDER BY lane ASC, id ASC",
+        "SELECT id, resource_keys, service, job_type FROM jobs WHERE status = 'queued' AND (defer_until_ms IS NULL OR defer_until_ms <= ?1) ORDER BY lane ASC, id ASC",
     )?;
     Ok(stmt
-        .query_map(params![now_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map(params![now_ms], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?)
 }
 

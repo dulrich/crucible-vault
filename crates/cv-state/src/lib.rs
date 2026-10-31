@@ -37,8 +37,8 @@ pub use store::{
     RequeueBreakdown, RetryOutcome, StateDb, StateReader,
 };
 pub use telemetry::{
-    AttemptTime, BucketSplit, JobTelemetry, Pcts, StepTime, TypeStats, WaitCause, WaitEvent,
-    job_stats, nearest_rank, split_buckets, wait_durations,
+    AttemptTime, BucketSplit, JobTelemetry, Pcts, PoolView, StepTime, TypeStats, WaitCause,
+    WaitEvent, job_stats, nearest_rank, split_buckets, wait_durations,
 };
 pub use tracker::{IntakeQuery, Rekey, TrackerEvidence, TrackerItem};
 pub use trash::{NewTrashEntry, TrashEntry};

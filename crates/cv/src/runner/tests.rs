@@ -69,6 +69,18 @@ fn runner(
     concurrency: usize,
     src: &str,
 ) -> Runner {
+    runner_pools(f, exec, clock, concurrency, 0, src)
+}
+
+/// [`runner`] with a fast pool of `fast_slots` permits (plan job-slots-fast-lane WP-2).
+fn runner_pools(
+    f: &Fixture,
+    exec: Arc<dyn StepExecutor>,
+    clock: Arc<dyn Clock>,
+    concurrency: usize,
+    fast_slots: usize,
+    src: &str,
+) -> Runner {
     let r = Runner::new(RunnerDeps {
         state: Arc::clone(&f.state),
         writer: Arc::new(None::<WriterHandle>),
@@ -76,6 +88,7 @@ fn runner(
         executor: exec,
         clock,
         concurrency,
+        fast_slots,
         vault_root: f._dir.path().to_path_buf(),
         index_db: f._dir.path().join("index.db"),
         config_dir: f._dir.path().join("config"),
