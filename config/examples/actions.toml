@@ -194,6 +194,7 @@ capture = "monthly-observation"
 # WP-3; matches the live action). The resource key is the active note, which is the note moved.
 [[action]]
 id = "file-as-kind"
+hold = true
 label = "File as kind"
 group = "Ingest"
 needs = ["active_path"]
@@ -419,6 +420,7 @@ type = "dupes_resolve"
 # without a video id; the channel step is a no-op unless pipelines.toml [youtube] channel_enrich.
 [[action]]
 id = "clip-enrich"
+hold = true
 label = "Clip: localize + describe images"
 group = "Ingest"
 needs = ["active_path"]
@@ -452,6 +454,7 @@ type = "search_upsert"       # last: indexes the refined + enriched text
 # block and fold are built on the refined text.
 [[action]]
 id = "intake-enrich"
+hold = true
 label = "Intake: enrich note"
 group = "Ingest"
 needs = ["active_path"]

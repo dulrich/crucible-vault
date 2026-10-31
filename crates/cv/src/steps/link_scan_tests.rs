@@ -23,6 +23,7 @@ fn env(files: &[(&str, &str)]) -> Env {
         needs: vec![],
         lane: LaneChoice::Auto,
         durable: true,
+        hold: false,
         steps: vec![],
         starters: vec![],
         resources: ResourceSpec {

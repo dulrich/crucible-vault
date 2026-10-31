@@ -40,6 +40,10 @@ pub struct Action {
     pub lane: LaneChoice,
     /// `false`: `run_action` awaits completion (≤10 s) and returns `open_path`.
     pub durable: bool,
+    /// Explicit opt-in to hold the active note while a job runs (Plan round-20-transcript-heading-auto-holds
+    /// WP-2; supersedes round-18 Decision 1's narrowing for opted-in actions). Only effective with
+    /// `resources.note`.
+    pub hold: bool,
     /// Steps, executed sequentially.
     pub steps: Vec<Step>,
     /// How runs start.
@@ -55,8 +59,9 @@ impl Action {
         self.steps.iter().any(Step::mutates_note)
     }
 
-    /// Whether a running job of this action holds its active note (plan round-18 Decision 1): iff
-    /// `resources.note` and an `agent` step precedes a `capture` step whose **effective** mode is
+    /// Whether a running job of this action holds its active note: iff `resources.note` and either
+    /// the action opted in with `hold = true` (Plan round-20-transcript-heading-auto-holds WP-2), or
+    /// (plan round-18 Decision 1) an `agent` step precedes a `capture` step whose **effective** mode is
     /// `replace`. The effective mode is the step's own `mode`, else the named preset's `mode`
     /// (`preset_mode(name)`, from `captures.toml`), else the capture default `append` — the same
     /// overlay `cv`'s capture step resolves (`steps/capture.rs` `Capture::parse`). An unresolvable
@@ -66,6 +71,9 @@ impl Action {
     pub fn holds_note(&self, preset_mode: impl Fn(&str) -> Option<String>) -> bool {
         if !self.resources.note {
             return false;
+        }
+        if self.hold {
+            return true;
         }
         let mut agent_seen = false;
         for step in &self.steps {
@@ -547,6 +555,7 @@ mod tests {
             needs: Vec::new(),
             lane: LaneChoice::Auto,
             durable: true,
+            hold: false,
             steps: steps
                 .iter()
                 .map(|s| Step::from_table(toml::from_str(s).unwrap()).unwrap())
@@ -626,6 +635,14 @@ mod tests {
         for (i, (note, steps, want)) in cases.iter().enumerate() {
             assert_eq!(action(*note, steps).holds_note(presets), *want, "case {i}");
         }
+        // Plan round-20-transcript-heading-auto-holds WP-2: the explicit `hold` opt-in.
+        let mut opted = action(true, &["type = \"guard\""]);
+        assert!(!opted.holds_note(presets));
+        opted.hold = true;
+        assert!(opted.holds_note(presets));
+        let mut no_note = action(false, &["type = \"guard\""]);
+        no_note.hold = true;
+        assert!(!no_note.holds_note(presets));
     }
 
     #[test]

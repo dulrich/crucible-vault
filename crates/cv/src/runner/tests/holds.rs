@@ -168,16 +168,26 @@ fn note_hold_follows_a_move_and_is_released_on_deferral() {
     );
 }
 
-/// Plan round-18 Decision 1 against the shipped examples: `refine-transcript` holds its note,
+/// Plan round-18 Decision 1 and round-20-transcript-heading-auto-holds WP-2 against the shipped
+/// examples: `refine-transcript` (agent → replace) and the `hold = true` opt-ins hold their note,
 /// `capture.replace-note` (no agent) does not, and no other example action holds.
 #[test]
-fn example_config_holds_only_refine_transcript() {
+fn example_config_holds_exactly_the_expected_set() {
     let c = crate::steps::testkit::example_config();
-    let holding: Vec<&str> = c
+    let mut holding: Vec<&str> = c
         .armed_actions()
         .filter(|a| c.action_holds_note(a))
         .map(|a| a.id.as_str())
         .collect();
-    assert_eq!(holding, vec!["refine-transcript"]);
+    holding.sort_unstable();
+    assert_eq!(
+        holding,
+        vec![
+            "clip-enrich",
+            "file-as-kind",
+            "intake-enrich",
+            "refine-transcript"
+        ]
+    );
     assert!(!c.action_holds_note(c.armed("capture.replace-note").unwrap()));
 }

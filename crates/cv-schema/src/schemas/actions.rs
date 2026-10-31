@@ -204,6 +204,13 @@ pub static ACTION: Record = Record {
         )
         .dflt(D::Bool(true)),
         field(
+            "hold",
+            "Hold note",
+            "true: hold the active note while a job runs (needs resources.note)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+        field(
             "steps",
             "Steps",
             "Executed in order",

@@ -59,6 +59,9 @@ struct ActionDef {
     lane: LaneChoice,
     #[serde(default = "yes")]
     durable: bool,
+    /// Plan round-20-transcript-heading-auto-holds WP-2: explicit hold opt-in.
+    #[serde(default)]
+    hold: bool,
     #[serde(default)]
     steps: Vec<toml::Table>,
     #[serde(default)]
@@ -453,6 +456,7 @@ fn parse_action(entry: toml::Value) -> Result<Action, String> {
             .collect::<Result<Vec<_>, _>>()?,
         lane: def.lane,
         durable: def.durable,
+        hold: def.hold,
         steps,
         starters,
         resources: def.resources,
@@ -520,6 +524,22 @@ id = "b"
 type = "guard"
 "#;
 
+    /// Plan round-20-transcript-heading-auto-holds WP-2: `hold` parses; a non-bool is an error.
+    #[test]
+    fn hold_key_parses_and_rejects_non_bool() {
+        let mut c = ConfigSet::new();
+        c.reload(
+            &files("[[action]]\nid = \"h\"\nhold = true\n[[action.steps]]\ntype = \"guard\"\n"),
+            &ok,
+        );
+        assert!(c.armed("h").unwrap().hold);
+        c.reload(
+            &files("[[action]]\nid = \"h\"\nhold = \"yes\"\n[[action.steps]]\ntype = \"guard\"\n"),
+            &ok,
+        );
+        assert_eq!(c.errors().len(), 1, "{:?}", c.errors());
+    }
+
     #[test]
     fn good_then_bad_keeps_old_actions_and_reports() {
         let mut c = ConfigSet::new();
@@ -529,6 +549,7 @@ type = "guard"
         let a = c.armed("a").unwrap();
         assert_eq!(a.params[0].kind, ParamKind::Text);
         assert!(!a.durable);
+        assert!(!a.hold);
         assert_eq!(a.starters, vec![Starter::Command]);
         c.reload(&files("[[action]\nid = "), &ok);
         let errs = c.errors();
