@@ -44,6 +44,10 @@ pub struct Action {
     /// WP-2; supersedes round-18 Decision 1's narrowing for opted-in actions). Only effective with
     /// `resources.note`.
     pub hold: bool,
+    /// Runs may use the reserved fast job slot (Plan job-slots-fast-lane WP-1). Such an action must
+    /// stay short and never call a model: config load rejects `fast = true` with a step for which
+    /// [`StepKind::calls_model`] holds.
+    pub fast: bool,
     /// Steps, executed sequentially.
     pub steps: Vec<Step>,
     /// How runs start.
@@ -208,6 +212,26 @@ impl StepKind {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// Whether a step of this kind calls a model **directly in its own run** (Plan
+    /// job-slots-fast-lane WP-1, audit E2): the fast job slot must never hold such a step, so
+    /// `fast = true` with one is a config error. A `run_action` step only enqueues a child job (the
+    /// child is classified on its own) and does not count. Where each call lives (`crates/cv/src/steps/`):
+    /// `agent` (`agent.rs` `run`, `mgr.complete`), `intake_enrich` (`intake_enrich.rs` `agent::run`),
+    /// `transcript_refine` (`transcript_refine.rs` `agent::run`), `image_describe`
+    /// (`image_describe.rs` `mgr.complete`), `search_upsert` (`search.rs` embedder call through
+    /// `agent::manager()` when `embed` is set; counted unconditionally, fails closed).
+    #[must_use]
+    pub fn calls_model(self) -> bool {
+        matches!(
+            self,
+            StepKind::Agent
+                | StepKind::IntakeEnrich
+                | StepKind::TranscriptRefine
+                | StepKind::ImageDescribe
+                | StepKind::SearchUpsert
+        )
     }
 
     /// Queue resource keys the step itself always needs, whatever the action config says (plan
@@ -556,6 +580,7 @@ mod tests {
             lane: LaneChoice::Auto,
             durable: true,
             hold: false,
+            fast: false,
             steps: steps
                 .iter()
                 .map(|s| Step::from_table(toml::from_str(s).unwrap()).unwrap())

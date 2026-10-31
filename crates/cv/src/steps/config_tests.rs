@@ -38,6 +38,19 @@ fn example_config_arms_every_action() {
     );
 }
 
+/// Plan job-slots-fast-lane WP-1: exactly the three short, model-free example actions are `fast`.
+#[test]
+fn example_config_marks_exactly_three_actions_fast() {
+    let c = example_config();
+    let mut fast: Vec<&str> = c
+        .armed_actions()
+        .filter(|a| a.fast)
+        .map(|a| a.id.as_str())
+        .collect();
+    fast.sort_unstable();
+    assert_eq!(fast, ["clip-auto-file", "file-as-kind", "link-scan"]);
+}
+
 #[test]
 fn validation_rejects_bad_params() {
     let c = example_config();

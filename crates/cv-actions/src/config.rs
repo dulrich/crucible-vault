@@ -62,6 +62,9 @@ struct ActionDef {
     /// Plan round-20-transcript-heading-auto-holds WP-2: explicit hold opt-in.
     #[serde(default)]
     hold: bool,
+    /// Plan job-slots-fast-lane WP-1: the action may use the reserved fast job slot.
+    #[serde(default)]
+    fast: bool,
     #[serde(default)]
     steps: Vec<toml::Table>,
     #[serde(default)]
@@ -422,6 +425,15 @@ fn parse_action(entry: toml::Value) -> Result<Action, String> {
         .enumerate()
         .map(|(n, t)| Step::from_table(t).map_err(|e| format!("step {}: {e}", n + 1)))
         .collect::<Result<Vec<_>, _>>()?;
+    if def.fast
+        && let Some(n) = steps.iter().position(|s| s.kind().calls_model())
+    {
+        return Err(format!(
+            "fast = true cannot have a model-calling step (step {}: {}); the fast slot must stay short",
+            n + 1,
+            steps[n].kind().as_str()
+        ));
+    }
     let starters = match def.starters {
         None => vec![Starter::Command],
         Some(defs) => defs
@@ -457,6 +469,7 @@ fn parse_action(entry: toml::Value) -> Result<Action, String> {
         lane: def.lane,
         durable: def.durable,
         hold: def.hold,
+        fast: def.fast,
         steps,
         starters,
         resources: def.resources,
@@ -538,6 +551,54 @@ type = "guard"
             &ok,
         );
         assert_eq!(c.errors().len(), 1, "{:?}", c.errors());
+    }
+
+    /// Plan job-slots-fast-lane WP-1: `fast` parses (default false), a non-bool is an error.
+    #[test]
+    fn fast_key_parses_and_rejects_non_bool() {
+        let mut c = ConfigSet::new();
+        c.reload(
+            &files("[[action]]\nid = \"f\"\nfast = true\n[[action.steps]]\ntype = \"guard\"\n"),
+            &ok,
+        );
+        assert!(c.armed("f").unwrap().fast);
+        c.reload(
+            &files("[[action]]\nid = \"f\"\n[[action.steps]]\ntype = \"guard\"\n"),
+            &ok,
+        );
+        assert!(!c.armed("f").unwrap().fast);
+        c.reload(
+            &files("[[action]]\nid = \"f\"\nfast = \"yes\"\n[[action.steps]]\ntype = \"guard\"\n"),
+            &ok,
+        );
+        assert_eq!(c.errors().len(), 1, "{:?}", c.errors());
+    }
+
+    /// Plan job-slots-fast-lane WP-1 (audit E2): `fast` rejects inline model-calling steps and
+    /// accepts a `run_action` child enqueue.
+    #[test]
+    fn fast_rejects_model_calling_steps_but_accepts_run_action() {
+        for kind in [
+            "agent",
+            "intake_enrich",
+            "transcript_refine",
+            "image_describe",
+        ] {
+            let mut c = ConfigSet::new();
+            let src = format!(
+                "[[action]]\nid = \"f\"\nfast = true\n[[action.steps]]\ntype = \"guard\"\n[[action.steps]]\ntype = \"{kind}\"\n"
+            );
+            c.reload(&files(&src), &ok);
+            assert!(c.armed("f").is_none(), "{kind} armed");
+            assert_eq!(c.errors().len(), 1, "{kind}: {:?}", c.errors());
+            assert!(c.errors()[0].contains(kind), "{:?}", c.errors());
+        }
+        let mut c = ConfigSet::new();
+        c.reload(
+            &files("[[action]]\nid = \"f\"\nfast = true\n[[action.steps]]\ntype = \"run_action\"\naction = \"x\"\n"),
+            &ok,
+        );
+        assert!(c.armed("f").unwrap().fast, "{:?}", c.errors());
     }
 
     #[test]

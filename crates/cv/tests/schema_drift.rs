@@ -233,6 +233,7 @@ needs = ["active_path", "selection", "value", "line"]
 lane = "background"
 durable = false
 hold = true
+fast = true
 resources = { note = false, keys = ["note::{path}", "p::{param.kind}"] }
 
 [[action.params]]

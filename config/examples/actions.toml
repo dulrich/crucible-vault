@@ -195,6 +195,7 @@ capture = "monthly-observation"
 [[action]]
 id = "file-as-kind"
 hold = true
+fast = true
 label = "File as kind"
 group = "Ingest"
 needs = ["active_path"]
@@ -267,6 +268,7 @@ tags = ["refined"]
 # Link records: rescan a clip on create/modify (an unchanged rescan writes nothing).
 [[action]]
 id = "link-scan"
+fast = true
 label = "Link scan (note)"
 group = "Ingest"
 starters = [
@@ -355,6 +357,7 @@ action = "clip-auto-file"
 # or the clip left in place; a clip filed by `file-as-kind` is enriched by that action's last step.
 [[action]]
 id = "clip-auto-file"
+fast = true
 label = "Clip: dedup + auto-file by kind"
 group = "Ingest"
 needs = ["active_path"]

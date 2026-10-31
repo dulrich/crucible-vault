@@ -211,6 +211,13 @@ pub static ACTION: Record = Record {
         )
         .dflt(D::Bool(false)),
         field(
+            "fast",
+            "Fast slot",
+            "true: runs may use the reserved fast job slot (short; no model-calling step)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+        field(
             "steps",
             "Steps",
             "Executed in order",
