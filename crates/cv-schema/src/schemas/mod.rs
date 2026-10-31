@@ -87,6 +87,7 @@ pub static STEP: Union = Union {
         Variant::of(&TIDY, "Vault tidy"),
         Variant::of(&INTAKE_ENRICH, "Enrich intake note"),
         Variant::of(&TRANSCRIPT_REFINE, "Refine transcript"),
+        Variant::of(&YT_CLIP_TIDY, "YouTube clip tidy"),
     ],
 };
 

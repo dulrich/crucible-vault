@@ -458,6 +458,7 @@ fn filing_first_clip_images_only_files_and_enrichment_is_one_serialized_job() {
             StepKind::Localize,
             StepKind::ImageDescribe,
             StepKind::YtMetadata,
+            StepKind::YtClipTidy,
             StepKind::YtChannelEnrich,
             StepKind::TranscriptRefine,
             StepKind::IntakeEnrich,
@@ -727,4 +728,39 @@ fn auto_filed_blog_clip_gets_an_unticked_trim_label_via_the_child() {
             "{t}"
         );
     }
+}
+
+/// Plan round-19-yt-cleanup-intake WP-2: a YouTube clip files as `post` under `MIN_REFINE_WORDS`
+/// transcript words, else (or with no transcript section) as `transcript`; a non-video YouTube
+/// URL falls through to the other rules.
+#[test]
+fn youtube_clip_kind_follows_transcript_length() {
+    let src = "source: https://www.youtube.com/watch?v=dQw4w9WgXcQ\n";
+    let cases = [
+        (
+            format!("## Transcript\n\n{}", words("s", 0, 120)),
+            "file-as-kind:post",
+        ),
+        (
+            format!("## Transcript\n\n{}", words("l", 0, 1500)),
+            "file-as-kind:transcript",
+        ),
+        (words("d", 0, 30), "file-as-kind:transcript"),
+    ];
+    for (body, want) in cases {
+        let e = world(&[("Clippings/Y.md", doc(src, &body))]);
+        let rec = Rec::default();
+        run(&e, "Clippings/Y.md", &rec);
+        assert_eq!(rec.kinds(), vec![want.to_owned()]);
+    }
+    let e = world(&[(
+        "Clippings/C.md",
+        doc(
+            "source: https://www.youtube.com/@chan\n",
+            &words("c", 0, 30),
+        ),
+    )]);
+    let rec = Rec::default();
+    run(&e, "Clippings/C.md", &rec);
+    assert!(rec.kinds().is_empty());
 }

@@ -219,6 +219,7 @@ const STEPS: &[(&str, &str)] = &[
     ),
     ("transcript_refine", ""),
     ("transcript_refine", "agent = \"transcript-refine\""),
+    ("yt_clip_tidy", ""),
 ];
 
 const ACTION_FULL: &str = r#"
@@ -283,6 +284,8 @@ const PIPELINES: &[&str] = &[r##"
 enabled = true
 metadata_root = "_yt_metadata"
 channel_enrich = true
+long_kind = "transcript"
+short_kind = "post"
 
 [x]
 enabled = true

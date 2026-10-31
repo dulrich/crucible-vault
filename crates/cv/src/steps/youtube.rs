@@ -9,7 +9,8 @@
 //! replace them) and the metadata-cache reads (the note is read directly).
 //!
 //! `yt_metadata` outcome vars: `video_id`, `channel_id`, `metadata_path`, `created`, `tombstone`,
-//! `linked`. `yt_channel_enrich` runs only when `pipelines.toml` `[youtube] channel_enrich` is on
+//! `linked`. `yt_metadata` also fills the clip's blank `publication` from the metadata note (plan
+//! round-19-yt-cleanup-intake WP-2). `yt_channel_enrich` runs only when `pipelines.toml` `[youtube] channel_enrich` is on
 //! and (`force` or the previous step set `created = true`).
 
 use cv_actions::{ConfigSet, StepKind};
@@ -273,7 +274,63 @@ fn metadata(video_id: Option<&str>, ctx: &mut StepCtx<'_>) -> Result<StepOutcome
     if let Some(c) = channel.flatten() {
         out.vars.insert("channel_id".to_owned(), c.into());
     }
+    fill_clip_publication(ctx, &mut out)?;
     Ok(out)
+}
+
+/// Plan round-19-yt-cleanup-intake WP-2: gives the clip (the active note) the `publication` of its
+/// linked metadata note — that note's `publication` (the resolved one when `write_metadata_note`
+/// created it), else its `channelTitle` — when the clip's own is absent or blank; a non-empty one
+/// is never overwritten. A second CAS modify after the link write, rather than folding it into
+/// the shared `link_metadata` (also used by the X metadata steps): one uniform path for a created,
+/// found or already-linked metadata note. Tombstones carry no channel, so nothing is filled.
+fn fill_clip_publication(ctx: &mut StepCtx<'_>, out: &mut StepOutcome) -> Result<(), StepError> {
+    let Some(clip) = ctx.context.active_path.clone() else {
+        return Ok(());
+    };
+    if out.vars.get("tombstone") == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    let Some(Value::String(meta_path)) = out.vars.get("metadata_path").cloned() else {
+        return Ok(());
+    };
+    if meta_path == clip {
+        return Ok(());
+    }
+    let Some((bytes, _)) = ctx.read(&meta_path)? else {
+        return Ok(());
+    };
+    let meta = FrontmatterDoc::new(String::from_utf8_lossy(&bytes).into_owned());
+    let Some(publication) = ["publication", "channelTitle"]
+        .into_iter()
+        .find_map(|k| meta.get_str_trimmed(k).filter(|s| !s.is_empty()))
+    else {
+        return Ok(());
+    };
+    if ctx.read(&clip)?.is_none() {
+        return Ok(());
+    }
+    let written = ctx.modify(&clip, |old| {
+        let mut d = FrontmatterDoc::new(old);
+        let blank = match d.get("publication") {
+            Ok(None | Some(cv_note::JsValue::Null)) => true,
+            Ok(Some(cv_note::JsValue::Str(s))) => s.trim().is_empty(),
+            _ => false,
+        };
+        if !blank {
+            return Ok(None);
+        }
+        d.insert_after(
+            "author",
+            "publication",
+            &cv_note::JsValue::Str(publication.clone()),
+        )?;
+        Ok(Some(d.into_text()))
+    })?;
+    if written.is_some() {
+        out.push_output(clip);
+    }
+    Ok(())
 }
 
 fn channel_enrich(

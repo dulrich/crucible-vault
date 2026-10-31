@@ -26,6 +26,20 @@ pub static PIPE_YOUTUBE: Record = Record {
             Node::Bool,
         )
         .dflt(D::Bool(false)),
+        field(
+            "long_kind",
+            "Long-video kind",
+            "auto_file: kind for a YouTube clip whose transcript has at least 300 words",
+            Node::Str,
+        )
+        .dflt(D::Str("transcript")),
+        field(
+            "short_kind",
+            "Short-video kind",
+            "auto_file: kind for a YouTube clip with a shorter transcript (Shorts)",
+            Node::Str,
+        )
+        .dflt(D::Str("post")),
     ],
     rules: &[],
     summary: None,

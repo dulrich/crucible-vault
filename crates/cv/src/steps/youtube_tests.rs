@@ -186,7 +186,7 @@ fn creates_links_after_video_id_counts_usage_then_rerun_is_a_noop() {
     assert!(m.contains("duration_seconds: 30\n") && m.contains("\n---\n# Synthetic\n"));
     assert_eq!(
         read(&w, "n/a.md"),
-        "---\ntitle: n\nyt-video-id: dQw4w9WgXcQ\nyt-metadata:\n  - \"[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]\"\nsource: x\n---\nBody\n"
+        "---\ntitle: n\nyt-video-id: dQw4w9WgXcQ\nyt-metadata:\n  - \"[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]\"\nsource: x\npublication: Synth Channel\n---\nBody\n"
     );
     let day = crate::steps::web::local_day();
     assert_eq!(
@@ -323,6 +323,37 @@ fn existing_metadata_note_publication_is_untouched() {
     );
 }
 
+/// Plan round-19-yt-cleanup-intake WP-2: the clip gets the found metadata note's `publication`
+/// (else `channelTitle`) when its own is absent or blank, after `author`; never overwritten.
+#[test]
+fn clip_publication_from_found_metadata_note() {
+    let meta_path = "_yt_metadata/synth-channel/dQw4w9WgXcQ.md";
+    let with_pub = "---\nvideoId: dQw4w9WgXcQ\npublication: \"Mine\"\n---\n# S\n";
+    let title_only = "---\nvideoId: dQw4w9WgXcQ\nchannelTitle: \"Chan T\"\n---\n# S\n";
+    let clip = |p: &str| {
+        format!("---\ntitle: n\nauthor: a\n{p}yt-video-id: dQw4w9WgXcQ\nsource: x\n---\nBody\n")
+    };
+    for (meta_note, own, want) in [
+        (with_pub, "", "publication: Mine\n"),
+        (title_only, "", "publication: Chan T\n"),
+        (with_pub, "publication: \"\"\n", "publication: Mine\n"),
+        (with_pub, "publication: Keep\n", "publication: Keep\n"),
+    ] {
+        let note = clip(own);
+        let w = world(
+            &[("n/a.md", note.as_str()), (meta_path, meta_note)],
+            vec![("/videos", 200, VIDEO.into())],
+            "",
+        );
+        meta(&w, "n/a.md").unwrap();
+        let t = read(&w, "n/a.md");
+        assert!(t.contains(&format!("author: a\n{want}")), "{t}");
+        assert_eq!(t.matches("publication:").count(), 1, "{t}");
+        assert_eq!(read(&w, meta_path), meta_note, "metadata note untouched");
+        assert_eq!(w.http.hits(), 0, "found, not fetched");
+    }
+}
+
 #[test]
 fn tracked_channel_uses_sources_name_folder() {
     let body = VIDEO.replace("UCsynth", "UCtracked");
@@ -394,7 +425,7 @@ fn concurrent_edit_of_the_source_note_is_kept_and_link_reapplied() {
     assert_eq!(o.vars["linked"], json!(true));
     assert_eq!(
         read(&w, "n/a.md"),
-        "---\ntitle: n\nyt-video-id: dQw4w9WgXcQ\nyt-metadata:\n  - \"[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]\"\nsource: x\n---\nBody\nracer\n"
+        "---\ntitle: n\nyt-video-id: dQw4w9WgXcQ\nyt-metadata:\n  - \"[[_yt_metadata/synth-channel/dQw4w9WgXcQ]]\"\nsource: x\npublication: Synth Channel\n---\nBody\nracer\n"
     );
 }
 
@@ -450,6 +481,7 @@ fn example_clip_enrich_arms_with_the_yt_metadata_steps() {
             "localize",
             "image_describe",
             "yt_metadata",
+            "yt_clip_tidy",
             "yt_channel_enrich",
             "transcript_refine",
             "intake_enrich",

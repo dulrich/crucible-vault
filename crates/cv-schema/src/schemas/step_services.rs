@@ -414,6 +414,14 @@ pub static INTAKE_ENRICH: Record = Record {
     summary: None,
 };
 
+/// `yt_clip_tidy` — `crates/cv/src/steps/yt_clip_tidy.rs` (no params; plan `round-19-yt-cleanup-intake` WP-2).
+pub static YT_CLIP_TIDY: Record = Record {
+    name: "yt_clip_tidy",
+    fields: &[],
+    rules: &[],
+    summary: None,
+};
+
 /// `transcript_refine` — `crates/cv/src/steps/transcript_refine.rs` (`parse`; plan `youtube-transcript-auto-refine` WP-1).
 pub static TRANSCRIPT_REFINE: Record = Record {
     name: "transcript_refine",

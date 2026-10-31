@@ -22,7 +22,10 @@
 //!       newsletter row, else `blog`);
 //!    3. (2b) a `[[newsletter]]` row whose `hosts` lists the clip host (that row's `kind`;
 //!       Decision 7);
-//!    4. a `kinds.toml` kind whose `hosts` holds the clip host.
+//!    4. a YouTube video `source` (plan round-19-yt-cleanup-intake WP-2): `pipelines.toml`
+//!       `[youtube] short_kind` (default `post`) when its `## Transcript` text is under
+//!       `MIN_REFINE_WORDS`, else `long_kind` (default `transcript`); not gated by `enabled`;
+//!    5. a `kinds.toml` kind whose `hosts` holds the clip host.
 //!
 //!    A match spawns `file-as-kind { kind }` as a child (move + tags + lint); no match leaves the
 //!    clip in place.
@@ -404,7 +407,15 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
 
     // ---- kind ---------------------------------------------------------------------------------
-    file_by_kind(ctx, &clip_path, &clip, row.as_ref(), &sources, &mut vars)?;
+    file_by_kind(
+        ctx,
+        &clip_path,
+        &clip,
+        &body,
+        row.as_ref(),
+        &sources,
+        &mut vars,
+    )?;
     // No `file-as-kind` child: the clip stays where it is, so it is enriched in place. A filed
     // clip is enriched by `file-as-kind`'s own last step, on the moved path.
     if vars.child_job_id.is_none() {
@@ -412,6 +423,23 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
     out.set_vars(&vars);
     Ok(out)
+}
+
+/// The kind of a YouTube clip (plan round-19-yt-cleanup-intake WP-2): `short_kind` when its
+/// `## Transcript` text (outside managed enrich blocks) is under
+/// [`cv_ingest::transcript::MIN_REFINE_WORDS`] words — the floor refine skips, so every Short gets
+/// the mechanical `cleanup_transcript` lint — else `long_kind` (also with no transcript section).
+fn youtube_kind(yt: &cv_actions::pipelines::YoutubePipeline, body: &str) -> String {
+    let short = cv_ingest::transcript::locate(body).is_some_and(|s| {
+        let words: usize = s
+            .segments
+            .iter()
+            .map(|r| cv_ingest::transcript::words(&body[r.clone()]))
+            .sum();
+        words < cv_ingest::transcript::MIN_REFINE_WORDS
+    });
+    let kind = if short { &yt.short_kind } else { &yt.long_kind };
+    kind.trim().to_owned()
 }
 
 /// Enqueues [`ENRICH_ACTION`] (localize + describe) on `path`; a failure to enqueue is logged,
@@ -435,6 +463,7 @@ fn file_by_kind(
     ctx: &mut StepCtx<'_>,
     clip_path: &str,
     clip: &Clip,
+    body: &str,
     row: Option<&HostRow>,
     sources: &SourcesConfig,
     vars: &mut Vars,
@@ -446,6 +475,8 @@ fn file_by_kind(
         Some(s.kind.trim().to_owned())
     } else if let Some(k) = row.and_then(|r| r.kind.clone()) {
         Some(k)
+    } else if cv_text::extract_video_id_from_url(&clip.source).is_some() {
+        Some(youtube_kind(&ctx.config.pipelines().youtube, body))
     } else if let Some(h) = &clip.host {
         hosts_kind(ctx.config, h)?
     } else {

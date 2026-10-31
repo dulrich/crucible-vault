@@ -85,6 +85,11 @@ pub struct YoutubePipeline {
     pub metadata_root: String,
     /// Write channel `about.md` notes (default off, as in Crucible).
     pub channel_enrich: bool,
+    /// The kind `auto_file` files a YouTube clip as when its transcript reaches
+    /// `MIN_REFINE_WORDS` (default `transcript`; plan round-19-yt-cleanup-intake WP-2).
+    pub long_kind: String,
+    /// The kind for a shorter (or Short's) transcript (default `post`).
+    pub short_kind: String,
 }
 
 impl Default for YoutubePipeline {
@@ -93,6 +98,8 @@ impl Default for YoutubePipeline {
             enabled: false,
             metadata_root: "_yt_metadata".into(),
             channel_enrich: false,
+            long_kind: "transcript".into(),
+            short_kind: "post".into(),
         }
     }
 }

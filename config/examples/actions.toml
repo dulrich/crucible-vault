@@ -431,6 +431,8 @@ scope = "note"
 [[action.steps]]
 type = "yt_metadata"
 [[action.steps]]
+type = "yt_clip_tidy"        # YouTube: deletes the thumbnail embed + clipped description above `## Transcript`
+[[action.steps]]
 type = "yt_channel_enrich"   # no-op unless pipelines.toml [youtube] channel_enrich = true
 [[action.steps]]
 type = "transcript_refine"   # YouTube `## Transcript` section -> refined text + `###` chapters; skips a refined note

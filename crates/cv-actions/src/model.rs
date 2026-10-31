@@ -180,6 +180,9 @@ step_kinds! {
     /// Refines a YouTube clip's `## Transcript` section into cleaned paragraphs with `###`
     /// chapter headings (plan `youtube-transcript-auto-refine` WP-1).
     TranscriptRefine = "transcript_refine", true;
+    /// Deletes a YouTube clip's thumbnail embed and clipped description ahead of `## Transcript`
+    /// (plan `round-19-yt-cleanup-intake` WP-2).
+    YtClipTidy = "yt_clip_tidy", true;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

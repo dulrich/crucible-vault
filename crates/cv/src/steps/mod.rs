@@ -29,6 +29,7 @@
 //! | `CancelSourceIntake` | [`cancel_source`] | cancel-source-intake WP-1 |
 //! | `IntakeEnrich` | [`intake_enrich`] | intake-auto-enrich WP-3 |
 //! | `TranscriptRefine` | [`transcript_refine`] | youtube-transcript-auto-refine WP-1 |
+//! | `YtClipTidy` | [`yt_clip_tidy`] | round-19-yt-cleanup-intake WP-2 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -104,6 +105,9 @@ pub(crate) mod util;
 pub mod web;
 pub mod x;
 pub mod youtube;
+pub mod yt_clip_tidy;
+#[cfg(test)]
+mod yt_clip_tidy_tests;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -676,6 +680,7 @@ step_modules! {
     Tidy => tidy::Tidy,
     IntakeEnrich => intake_enrich::IntakeEnrich,
     TranscriptRefine => transcript_refine::TranscriptRefine,
+    YtClipTidy => yt_clip_tidy::YtClipTidy,
     RunAction => RunActionStep,
 }
 

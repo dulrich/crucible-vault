@@ -6,9 +6,12 @@
 //! annotations removed and whitespace collapsed; trailing non-transcript paragraphs are kept.
 //! Deviations: the frontmatter is located with `ofm::frontmatter::split_frontmatter` instead of
 //! Crucible's `FRONTMATTER_REGEX`, the `(?!\()` look-ahead is checked by hand (the `regex` crate
-//! has none), video-id recognition reuses `cv_text::extract_video_id_from_url`, and content between
-//! the embed and `## Transcript` (e.g. a clipped description) is tolerated and kept ahead of the
-//! cleaned transcript (Crucible required the header directly after the embed). Nothing
+//! has none), video-id recognition reuses `cv_text::extract_video_id_from_url`, content between
+//! the embed and `## Transcript` (e.g. a clipped description) is tolerated and dropped (Crucible
+//! required the header directly after the embed; plan round-19-yt-cleanup-intake WP-2 deletes the
+//! description, kept in the `_yt_metadata` note), leading `%% … %%` managed regions are skipped
+//! and kept, the localized `[![](img)](url)` embed form is accepted, and an already-stripped body
+//! (no embed) is cleaned too. Nothing
 //! Obsidian-induced to drop (the `vault.modify` write is the caller's).
 //!
 //! [`transcript_evidence`] (plan intake-followups-mail-youtube WP-4, cv's own — Crucible ticked
@@ -22,8 +25,8 @@ fn re(p: &str) -> Option<Regex> {
     Regex::new(p).ok()
 }
 
-static YT_EMBED_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| re(r"^([ \t]*\r?\n)*[ \t]*!\[\]\(([^)\s]+)\)[ \t]*\r?\n"));
+static YT_EMBED_LINE_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| re(r"^[ \t]*(?:!\[\]\(([^)\s]+)\)|\[!\[\]\([^)\s]+\)\]\(([^)\s]+)\))[ \t]*$"));
 static TRANSCRIPT_HEADER_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| re(r"(?m)^[ \t]*##[ \t]+Transcript[ \t]*\r?\n"));
 static LEADING_BLANK_LINES_RE: LazyLock<Option<Regex>> = LazyLock::new(|| re(r"^([ \t]*\r?\n)+"));
@@ -78,34 +81,170 @@ fn clean_paragraph(p: &str) -> String {
     out.trim().to_owned()
 }
 
+/// One body line: byte span (newline included in `end`) and its text without the line ending.
+struct Line<'a> {
+    start: usize,
+    end: usize,
+    text: &'a str,
+}
+
+fn lines_of(body: &str) -> Vec<Line<'_>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for seg in body.split_inclusive('\n') {
+        let end = start + seg.len();
+        let text = seg.strip_suffix('\n').unwrap_or(seg);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        out.push(Line { start, end, text });
+        start = end;
+    }
+    out
+}
+
+/// The inner text of a single-line `%% x %%` comment, when trimmed `t` is exactly one.
+fn single_comment(t: &str) -> Option<&str> {
+    if t.len() < 4 {
+        return None;
+    }
+    let inner = t.strip_prefix("%%")?.strip_suffix("%%")?;
+    (!inner.contains("%%")).then(|| inner.trim())
+}
+
+/// Index of the last line of the `%% … %%` comment region opening at `lines[i]` (whose trimmed
+/// text starts with `%%`). A single-line `%% name %%` paired with a later `%% /name %%` line spans
+/// through that close marker (the `%% cv-enrich %%` … `%% /cv-enrich %%` managed block, whose
+/// `> [!abstract]` callout sits inside); an unpaired one is just its own line. A bare `%%` opener
+/// runs to the next line containing `%%`, which must end with it. `None` for a line that mixes a
+/// comment with visible text, or an unterminated comment (the caller then does nothing).
+fn comment_region_end(lines: &[Line<'_>], i: usize) -> Option<usize> {
+    let t = lines.get(i)?.text.trim();
+    if let Some(name) = single_comment(t) {
+        if name.is_empty() || name.starts_with('/') {
+            return Some(i);
+        }
+        let close = format!("/{name}");
+        let paired = lines
+            .iter()
+            .enumerate()
+            .skip(i + 1)
+            .find(|(_, l)| single_comment(l.text.trim()) == Some(close.as_str()))
+            .map(|(j, _)| j);
+        return Some(paired.unwrap_or(i));
+    }
+    if t.get(2..).is_none_or(|rest| rest.contains("%%")) {
+        return None;
+    }
+    let (j, l) = lines
+        .iter()
+        .enumerate()
+        .skip(i + 1)
+        .find(|(_, l)| l.text.contains("%%"))?;
+    l.text.trim().ends_with("%%").then_some(j)
+}
+
+/// Whether `line` is a YouTube embed (`![](URL)` or `[![](IMG)](URL)`) whose URL carries a
+/// recognized video id.
+fn is_youtube_embed(line: &str) -> bool {
+    YT_EMBED_LINE_RE
+        .as_ref()
+        .and_then(|r| r.captures(line))
+        .and_then(|c| c.get(1).or_else(|| c.get(2)))
+        .is_some_and(|u| cv_text::extract_video_id_from_url(u.as_str()).is_some())
+}
+
+/// Where a YouTube clip body's managed prefix, embed and `## Transcript` heading sit (plan
+/// round-19-yt-cleanup-intake WP-2) — the one locator shared by [`strip_youtube_preamble`] and
+/// [`cleanup_youtube_transcript`].
+struct ClipShape {
+    /// End of the last leading `%% … %%` region (0 when there is none); `body[..prefix_end]` is
+    /// preserved byte-identical.
+    prefix_end: usize,
+    /// Start of the `## Transcript` heading line.
+    header_start: usize,
+    /// End of the heading line (newline included).
+    header_end: usize,
+}
+
+/// Skip leading blank lines and whole `%% … %%` regions, in any order. The first remaining line
+/// must be a YouTube embed with a `## Transcript` heading later, or — when `embed_optional` — the
+/// `## Transcript` heading itself (an already-stripped body).
+fn locate_clip(body: &str, embed_optional: bool) -> Option<ClipShape> {
+    let header_re = TRANSCRIPT_HEADER_RE.as_ref()?;
+    let lines = lines_of(body);
+    let mut prefix_end = 0;
+    let mut i = 0;
+    while let Some(line) = lines.get(i) {
+        let t = line.text.trim();
+        if t.is_empty() {
+            i += 1;
+        } else if t.starts_with("%%") {
+            let j = comment_region_end(&lines, i)?;
+            prefix_end = lines.get(j)?.end;
+            i = j + 1;
+        } else {
+            break;
+        }
+    }
+    let first = lines.get(i)?;
+    if is_youtube_embed(first.text) {
+        let m = header_re.find(&body[first.end..])?;
+        return Some(ClipShape {
+            prefix_end,
+            header_start: first.end + m.start(),
+            header_end: first.end + m.end(),
+        });
+    }
+    if embed_optional
+        && header_re
+            .find(&body[first.start..first.end])
+            .is_some_and(|m| m.start() == 0 && m.end() == first.end - first.start)
+    {
+        return Some(ClipShape {
+            prefix_end,
+            header_start: first.start,
+            header_end: first.end,
+        });
+    }
+    None
+}
+
+/// Remove a YouTube clip's thumbnail embed and the clipped description below it (plan
+/// round-19-yt-cleanup-intake WP-2; D29's one delete-not-fold exception — the description stays
+/// in the linked `_yt_metadata` note and frontmatter `description`). Takes the **body only** (the
+/// caller splits the frontmatter off). Leading blank lines and `%% … %%` regions (the
+/// `%% cv-enrich %%` managed block) are skipped and kept byte-identical; the first other line must
+/// be `![](URL)` or `[![](IMG)](URL)` with a recognized video id, followed later by
+/// `## Transcript`. Everything from the embed line up to the heading is dropped, leaving one blank
+/// line between a non-empty prefix and the heading. Nothing at or after the heading is touched.
+/// `None` when the shape is absent (so a second pass is `None`).
+#[must_use]
+pub fn strip_youtube_preamble(body: &str) -> Option<String> {
+    let shape = locate_clip(body, false)?;
+    let mut out = String::with_capacity(body.len());
+    out.push_str(&body[..shape.prefix_end]);
+    if shape.prefix_end > 0 {
+        out.push('\n');
+    }
+    out.push_str(&body[shape.header_start..]);
+    Some(out)
+}
+
 /// Clean the transcript; returns the input unchanged when the note does not match the shape.
+/// Plan round-19-yt-cleanup-intake WP-2: the embed is found after leading `%% … %%` managed
+/// regions (kept byte-identical), in either embed form; the embed and the clipped description are
+/// dropped; a body already stripped (`## Transcript` directly after the managed prefix) is cleaned
+/// too.
 pub fn cleanup_youtube_transcript(content: &str) -> String {
     let (_, body) = ofm::frontmatter::split_frontmatter(content);
     let fm_text = &content[..content.len() - body.len()];
-    let (Some(embed_re), Some(header_re), Some(split_re)) = (
-        YT_EMBED_RE.as_ref(),
-        TRANSCRIPT_HEADER_RE.as_ref(),
-        PARAGRAPH_SPLIT_RE.as_ref(),
-    ) else {
+    let Some(split_re) = PARAGRAPH_SPLIT_RE.as_ref() else {
         return content.to_owned();
     };
-    let Some(embed) = embed_re.captures(body) else {
+    let Some(shape) = locate_clip(body, true) else {
         return content.to_owned();
     };
-    let (Some(whole), Some(url)) = (embed.get(0), embed.get(2)) else {
-        return content.to_owned();
-    };
-    if cv_text::extract_video_id_from_url(url.as_str()).is_none() {
-        return content.to_owned();
-    }
-    let after_embed = &body[whole.end()..];
-    let Some(header) = header_re.find(after_embed) else {
-        return content.to_owned();
-    };
-    // Content between the embed and `## Transcript` (e.g. a clipped description) is kept,
-    // verbatim, ahead of the cleaned transcript.
-    let preamble = after_embed[..header.start()].trim();
-    let after_header = &after_embed[header.end()..];
+    let prefix = &body[..shape.prefix_end];
+    let after_header = &body[shape.header_end..];
     let after_header = match LEADING_BLANK_LINES_RE.as_ref() {
         Some(r) => r.replace(after_header, "").into_owned(),
         None => after_header.to_owned(),
@@ -128,10 +267,9 @@ pub fn cleanup_youtube_transcript(content: &str) -> String {
         .collect();
     let trailing = paragraphs[first_non..].join("\n\n");
     let trailing = trailing.trim_end();
-    let mut result = String::new();
-    if !preamble.is_empty() {
-        result.push_str(preamble);
-        result.push_str("\n\n");
+    let mut result = String::from(prefix);
+    if !prefix.is_empty() {
+        result.push('\n');
     }
     result.push_str(&cleaned.join("\n\n"));
     if !trailing.is_empty() {
@@ -267,8 +405,61 @@ mod tests {
         let out = cleanup_youtube_transcript(src);
         assert_eq!(
             out,
-            "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\nA description line.\n\n> a quote\n\nhello there\n\nsecond\n"
+            "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\nhello there\n\nsecond\n"
         );
+    }
+
+    const ENRICHED: &str =
+        "\n%% cv-enrich %%\n> [!abstract]- Summary\n> gist\n\n%% /cv-enrich %%\n%%\nmulti\n%%\n";
+
+    #[test]
+    fn strip_removes_localized_embed_and_description() {
+        let body = format!(
+            "{ENRICHED}\n[![](Clippings/_attachments/t.jpg)](https://www.youtube.com/watch?v=dQw4w9WgXcQ)\n\nDesc line.\n\nMore desc.\n\n## Transcript\n\n**0:01** hi\n"
+        );
+        let out = strip_youtube_preamble(&body).expect("strips");
+        assert_eq!(out, format!("{ENRICHED}\n## Transcript\n\n**0:01** hi\n"));
+        assert_eq!(strip_youtube_preamble(&out), None, "idempotent");
+        let bare = "![](https://youtu.be/dQw4w9WgXcQ)\ndesc\n## Transcript\nx\n";
+        assert_eq!(
+            strip_youtube_preamble(bare).as_deref(),
+            Some("## Transcript\nx\n")
+        );
+    }
+
+    #[test]
+    fn strip_needs_full_shape() {
+        for body in [
+            "plain\n## Transcript\nx\n",
+            "![](https://ex.test/a.png)\ndesc\n## Transcript\nx\n",
+            "![](https://youtu.be/dQw4w9WgXcQ)\ndesc only\n",
+            "%% cv-enrich %%\n> [!abstract]- no close\n![](https://youtu.be/dQw4w9WgXcQ)\n## Transcript\nx\n",
+            "%%\nunterminated\n![](https://youtu.be/dQw4w9WgXcQ)\n## Transcript\nx\n",
+            "intro\n![](https://youtu.be/dQw4w9WgXcQ)\n## Transcript\nx\n",
+        ] {
+            assert_eq!(strip_youtube_preamble(body), None, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn cleanup_enriched_localized_short() {
+        let fm = "---\nsource: https://youtu.be/dQw4w9WgXcQ\n---\n";
+        let src = format!(
+            "{fm}{ENRICHED}[![](a.jpg)](https://youtu.be/dQw4w9WgXcQ)\nDesc.\n\n## Transcript\n\n**0:01** [Music] hi\n\n**0:04** there\n"
+        );
+        let out = cleanup_youtube_transcript(&src);
+        assert_eq!(out, format!("{fm}{ENRICHED}\nhi\n\nthere\n"));
+        assert_eq!(
+            cleanup_youtube_transcript(&out),
+            out,
+            "second pass unchanged"
+        );
+        let stripped = format!("{fm}{ENRICHED}\n## Transcript\n\n**0:01** hi\n\n**0:04** there\n");
+        assert_eq!(cleanup_youtube_transcript(&stripped), out);
+        let other = format!(
+            "{fm}{ENRICHED}[![](a.jpg)](https://ex.test/v)\nDesc.\n\n## Transcript\n\n**0:01** hi\n"
+        );
+        assert_eq!(cleanup_youtube_transcript(&other), other);
     }
 
     #[test]
