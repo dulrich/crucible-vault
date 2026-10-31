@@ -243,7 +243,16 @@ pub(crate) fn press_target(
                 LinkTarget::Vault(t) => (t, false),
                 LinkTarget::External(u) => (u, true),
             };
-            let missing = !external && unresolved.contains(&target);
+            // Plan round-19-yt-cleanup-intake WP-1: a wikilink's `#fragment` rides in the href;
+            // the menu names (and "Create note"s) the bare target.
+            let whole = target.clone();
+            let target = if external {
+                target
+            } else {
+                super::links::split_fragment(&target).0
+            };
+            let missing =
+                !external && (unresolved.contains(&target) || unresolved.contains(&whole));
             crate::context_menu::Target::Link {
                 src: path.to_owned(),
                 target,
@@ -628,10 +637,15 @@ fn link_color(cx: &Ctx<'_, '_>, target: &str) -> iced::Color {
 fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {
     let src = path.to_owned();
     move |l| match l {
-        LinkTarget::Vault(target) => Message::Reading(ReadingMsg::OpenLink {
-            src: src.clone(),
-            target,
-        }),
+        // The wikilink / md-href `#fragment` rides in the string (plan round-19 WP-1).
+        LinkTarget::Vault(href) => {
+            let (target, fragment) = super::links::split_fragment(&href);
+            Message::Reading(ReadingMsg::OpenLink {
+                src: src.clone(),
+                target,
+                fragment,
+            })
+        }
         // WP-3: handed to the opener (which refuses non-allowlisted schemes).
         LinkTarget::External(url) => Message::OpenUrl(url),
     }
@@ -744,14 +758,20 @@ fn inlines_view<'a>(
                     .background(t.inset.to_color())
                     .color(t.text.to_color())
             }),
-            Inline::WikiLink { target, .. } => {
+            Inline::WikiLink {
+                target, fragment, ..
+            } => {
                 // No permanent underline: the run widget underlines the hovered link itself.
                 let label = editor_model::visible::inline_visible(i)
                     .unwrap_or_default()
                     .into_owned();
                 let color = link_color(cx, target);
+                let href = match fragment {
+                    Some(f) => format!("{target}#{f}"),
+                    None => target.clone(),
+                };
                 painted(cx, run, at, &mut spans, Cow::Owned(label), |p| {
-                    span(p).color(color).link(LinkTarget::Vault(target.clone()))
+                    span(p).color(color).link(LinkTarget::Vault(href.clone()))
                 });
             }
             Inline::Link { url, label } => {

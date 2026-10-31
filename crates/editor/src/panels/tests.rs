@@ -117,6 +117,11 @@ fn outline_links_and_props_from_the_buffer() {
     )));
     let _ = app.send(Message::Panels(PanelsMsg::Tick));
     assert_eq!(app.panels.outline[0].text, "New top");
+    // Plan round-19-yt-cleanup-intake WP-1: the jump is mode-aware; Source moves the cursor.
+    let _ = app.send(Message::Reading(crate::message::ReadingMsg::SetMode {
+        path: "a.md".into(),
+        mode: crate::reading::ViewMode::Source,
+    }));
     let _ = app.send(Message::Panels(PanelsMsg::OutlineJump(10)));
     assert_eq!(app.active_doc().expect("doc").cursor().position.line, 10);
     let tab = app.active_tab().expect("tab");
@@ -336,6 +341,11 @@ fn panel_entries_yield_the_link_menu_and_outline_anchors() {
     let _ = app.send(Message::Menu(MenuMsg::Open(resolved, iced::Point::ORIGIN)));
     let _ = app.send(Message::Menu(MenuMsg::Choose(Item::CopyPath)));
     assert_eq!(app.copied(), ["b.md"]);
+    // Plan round-19-yt-cleanup-intake WP-1: the jump is mode-aware; the cursor moves in Source.
+    let _ = app.send(Message::Reading(crate::message::ReadingMsg::SetMode {
+        path: "a.md".into(),
+        mode: crate::reading::ViewMode::Source,
+    }));
     let _ = app.send(Message::Menu(MenuMsg::Open(anchor, iced::Point::ORIGIN)));
     let _ = app.send(Message::Menu(MenuMsg::Choose(Item::Open)));
     assert_eq!(app.active_doc().expect("doc").cursor().position.line, 18);

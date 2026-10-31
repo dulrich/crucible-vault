@@ -12,6 +12,11 @@ impl App {
         };
         let before = self.active_paths();
         let views_before = self.active_views();
+        // A press on a visible tab must not move the strip under the pointer.
+        let by_press = matches!(
+            message,
+            Message::Tabs(TabsMsg::DragPress(..) | TabsMsg::Select(..))
+        );
         let task = self.update_inner(message);
         self.link_ta_validate();
         if self.dialog.is_some() {
@@ -23,7 +28,12 @@ impl App {
         let auto = self.schedule_settings_autosave();
         let restore = self.restore_places(&views_before);
         let persist = self.schedule_persist();
-        let extra: Vec<Task<Message>> = [flush, auto, restore, persist]
+        let strip = if by_press {
+            Task::none()
+        } else {
+            self.scroll_tabs_into_view(&views_before)
+        };
+        let extra: Vec<Task<Message>> = [flush, auto, restore, persist, strip]
             .into_iter()
             .filter(|t| t.units() > 0)
             .collect();
@@ -209,10 +219,21 @@ impl App {
                             self.status.notify(severity, text);
                             continue;
                         }
-                        crate::reading::Effect::OpenPath(path) => {
-                            // WP-R3 (review E7): the one new-tab decision for link clicks.
-                            self.open_with(&path, self.click_place());
-                            continue;
+                        crate::reading::Effect::OpenPath(path, fragment) => {
+                            // Plan round-19-yt-cleanup-intake WP-1: a same-note anchor opens
+                            // nothing (no new tab, even with Ctrl held); it only jumps.
+                            let same = fragment.is_some()
+                                && self.active_note().is_some_and(|t| t.path == path);
+                            if !same {
+                                // WP-R3 (review E7): the one new-tab decision for link clicks.
+                                self.open_with(&path, self.click_place());
+                            }
+                            match fragment {
+                                // `open_with` reads and lowers the note inline, so the jump
+                                // needs no pending state.
+                                Some(f) => self.jump_to_heading(&path, &f),
+                                None => continue,
+                            }
                         }
                         crate::reading::Effect::MissingLink(target) => {
                             self.missing_link_click(&target)
@@ -411,15 +432,11 @@ impl App {
                 self.sync_panels(),
                 iced::widget::operation::focus(crate::panels::SEARCH_ID),
             ]),
-            Effect::OutlineJump(line) => {
-                if let Some(doc) = self.active_doc_mut() {
-                    doc.move_to(iced::widget::text_editor::Cursor {
-                        position: iced::widget::text_editor::Position { line, column: 0 },
-                        selection: None,
-                    });
-                }
-                Task::none()
-            }
+            // Plan round-19-yt-cleanup-intake WP-1: mode-aware (Reading scrolls too).
+            Effect::OutlineJump(line) => match self.active_note().map(|t| t.path.to_owned()) {
+                Some(path) => self.jump_to_line(&path, line),
+                None => Task::none(),
+            },
             Effect::RunCall(call) => self.run_call(call),
             Effect::Open(p) => {
                 self.open(&p);

@@ -395,5 +395,8 @@ mod find_images;
 #[path = "tests_place.rs"]
 mod place;
 
+#[path = "tests_anchor.rs"]
+mod anchor;
+
 #[path = "tests_moves.rs"]
 mod moves;

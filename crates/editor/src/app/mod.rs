@@ -39,7 +39,7 @@ mod image_tab;
 mod menu;
 pub mod pdf_tab;
 mod saves;
-mod scroll;
+pub(crate) mod scroll;
 mod status;
 pub mod tab_drag;
 mod tabs;

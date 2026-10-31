@@ -282,6 +282,48 @@ impl App {
         .spacing(4)
         .height(BAR_HEIGHT)
         .align_y(iced::Alignment::Center);
+        // Plan round-19-yt-cleanup-intake WP-1: a strip wider than the pane scrolls sideways
+        // (thin overlay bar in the line/accent tokens); the activated tab is snapped into view.
+        let headers = iced::widget::scrollable(headers)
+            .id(super::scroll::tab_strip_id(pane))
+            .direction(iced::widget::scrollable::Direction::Horizontal(
+                iced::widget::scrollable::Scrollbar::new()
+                    .width(3)
+                    .scroller_width(3),
+            ))
+            .style(move |_: &Theme, status| {
+                use iced::widget::scrollable::{Rail, Scroller, Style};
+                let hot = !matches!(status, iced::widget::scrollable::Status::Active { .. });
+                let rail = Rail {
+                    background: None,
+                    border: iced::Border::default(),
+                    scroller: Scroller {
+                        background: if hot {
+                            t.accent_ui.to_color().into()
+                        } else {
+                            t.line.to_color().into()
+                        },
+                        border: iced::Border {
+                            radius: crate::theme::RADIUS.into(),
+                            ..iced::Border::default()
+                        },
+                    },
+                };
+                Style {
+                    container: container::Style::default(),
+                    vertical_rail: rail,
+                    horizontal_rail: rail,
+                    gap: None,
+                    auto_scroll: iced::widget::scrollable::AutoScroll {
+                        background: iced::Color::TRANSPARENT.into(),
+                        border: iced::Border::default(),
+                        shadow: iced::Shadow::default(),
+                        icon: iced::Color::TRANSPARENT,
+                    },
+                }
+            })
+            .width(Length::Fill)
+            .height(BAR_HEIGHT);
         let headers = container(headers)
             .width(Length::Fill)
             .height(BAR_HEIGHT)

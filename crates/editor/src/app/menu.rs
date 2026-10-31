@@ -172,6 +172,7 @@ impl App {
             ) => self.update_inner(Message::Reading(crate::message::ReadingMsg::OpenLink {
                 src,
                 target,
+                fragment: None,
             })),
             (
                 Target::Link {

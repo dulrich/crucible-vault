@@ -6,8 +6,13 @@
 /// What a click position lands on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkAt {
-    /// A `[[wikilink]]` / `![[embed]]`: its target (no `#fragment`, no `|alias`).
-    Wiki(String),
+    /// A `[[wikilink]]` / `![[embed]]`: its target (no `#fragment`, no `|alias`; empty for a
+    /// same-note `[[#Heading]]`) and its `#fragment`, trimmed (plan round-19-yt-cleanup-intake
+    /// WP-1).
+    Wiki {
+        target: String,
+        fragment: Option<String>,
+    },
     /// A `[label](url)`: the URL (remote or a vault path).
     Md(String),
     /// A bare `http(s)://…` / `mailto:…` run.
@@ -38,8 +43,14 @@ fn wiki_at(line: &str, col: usize) -> Option<LinkAt> {
         if (start..end).contains(&col) {
             let inner = &line[open + 2..close];
             let target = inner.split('|').next().unwrap_or("");
-            let target = target.split('#').next().unwrap_or("").trim();
-            return (!target.is_empty()).then(|| LinkAt::Wiki(target.to_owned()));
+            let (target, fragment) = match target.split_once('#') {
+                Some((t, f)) => (t.trim(), Some(f.trim()).filter(|f| !f.is_empty())),
+                None => (target.trim(), None),
+            };
+            return (!target.is_empty() || fragment.is_some()).then(|| LinkAt::Wiki {
+                target: target.to_owned(),
+                fragment: fragment.map(str::to_owned),
+            });
         }
         from = end;
     }
@@ -114,6 +125,13 @@ pub fn link_at(line: &str, col: usize) -> Option<LinkAt> {
 mod tests {
     use super::*;
 
+    fn wiki(t: &str, f: Option<&str>) -> Option<LinkAt> {
+        Some(LinkAt::Wiki {
+            target: t.to_owned(),
+            fragment: f.map(str::to_owned),
+        })
+    }
+
     fn url(s: &str) -> Option<LinkAt> {
         Some(LinkAt::Url(s.to_owned()))
     }
@@ -137,15 +155,15 @@ mod tests {
     #[test]
     fn wiki_and_md_links() {
         let line = "a [[Note#H|alias]] b [lbl](https://x.y/z \"t\") c ![i](img.png)";
-        assert_eq!(link_at(line, 5), Some(LinkAt::Wiki("Note".into())));
+        assert_eq!(link_at(line, 5), wiki("Note", Some("H")));
         let at = line.find("lbl").expect("lbl");
         assert_eq!(link_at(line, at), Some(LinkAt::Md("https://x.y/z".into())));
         let at = line.find("img").expect("img");
         assert_eq!(link_at(line, at), Some(LinkAt::Md("img.png".into())));
         assert_eq!(link_at(line, 1), None);
-        assert_eq!(
-            link_at("x ![[pic.png]]", 2),
-            Some(LinkAt::Wiki("pic.png".into()))
-        );
+        assert_eq!(link_at("x ![[pic.png]]", 2), wiki("pic.png", None));
+        assert_eq!(link_at("[[N]]", 2), wiki("N", None));
+        assert_eq!(link_at("[[#Head er]]", 2), wiki("", Some("Head er")));
+        assert_eq!(link_at("[[]]", 2), None);
     }
 }

@@ -205,12 +205,14 @@ fn unresolved_link_click_creates_under_create_mode() {
     let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "Nope".into(),
+        fragment: None,
     }));
     assert!(d.read_file("Nope.md").is_ok(), "created at the root");
     assert_eq!(app.active_tab().and_then(|t| t.path()), Some("Nope.md"));
     let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "sub/Deep".into(),
+        fragment: None,
     }));
     assert!(
         d.read_file("sub/Deep.md").is_ok(),

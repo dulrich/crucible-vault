@@ -190,6 +190,7 @@ fn pdf_embed_is_a_file_card_and_a_note_embed_stays_a_transclusion() {
     let _ = app.send(Message::Reading(crate::message::ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "doc.pdf".into(),
+        fragment: None,
     }));
     assert!(app.opened_files().is_empty(), "no opener for a PDF");
     assert_eq!(

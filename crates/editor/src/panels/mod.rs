@@ -626,6 +626,7 @@ fn link_button<'a>(
                 .on_press(Message::Reading(crate::message::ReadingMsg::OpenLink {
                     src: src.to_owned(),
                     target: label.clone(),
+                    fragment: None,
                 })),
             link_target(src, &label, false, true),
         ),
@@ -680,6 +681,7 @@ fn prop_el<'a>(
             Message::Reading(crate::message::ReadingMsg::OpenLink {
                 src: src.to_owned(),
                 target: target.clone(),
+                fragment: None,
             }),
             link_target(src, target, false, unresolved.contains(target)),
         ),

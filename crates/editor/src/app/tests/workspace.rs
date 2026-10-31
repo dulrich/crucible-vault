@@ -910,6 +910,7 @@ fn ctrl_click_on_links_adds_a_tab_plain_click_focuses() {
     let link = || ReadingMsg::OpenLink {
         src: "r14l/a.md".into(),
         target: "b".into(),
+        fragment: None,
     };
 
     let (_tmp, d) = fake_arc();

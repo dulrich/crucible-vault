@@ -313,6 +313,71 @@ impl App {
         Task::none()
     }
 
+    /// Plan round-19-yt-cleanup-intake WP-1: a pane whose active tab changed (activated or
+    /// opened) scrolls its tab strip so that tab is visible.
+    pub(super) fn scroll_tabs_into_view(&self, before: &[(u64, TabKind)]) -> Task<Message> {
+        let tasks: Vec<Task<Message>> = self
+            .panes
+            .iter()
+            .filter_map(|(pane, ps)| {
+                let i = ps.active.filter(|&i| i < ps.tabs.len())?;
+                let tab = &ps.tabs[i];
+                if before.iter().any(|(id, _)| *id == tab.id) {
+                    return None;
+                }
+                Some(iced::widget::operation::snap_to(
+                    tab_strip_id(*pane),
+                    iced::widget::scrollable::RelativeOffset {
+                        x: strip_fraction(i, ps.tabs.len()),
+                        y: 0.0,
+                    },
+                ))
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
+    /// Plan round-19-yt-cleanup-intake WP-1: the one mode-aware "go to source line `line`" of
+    /// `path` (0-based) — Outline entries and `[[Note#Heading]]` links. Source/Split move the
+    /// cursor (the shaped editor scrolls to it); Reading/Split put the line's block at the top,
+    /// stored as the tab's top block so a mode switch or re-activation keeps it.
+    pub(super) fn jump_to_line(&mut self, path: &str, line: usize) -> Task<Message> {
+        let mode = self.reading.mode(&self.docs, path);
+        if mode.shows_source()
+            && let Some(doc) = buf_mut(&mut self.docs, path)
+        {
+            doc.move_to(iced::widget::text_editor::Cursor {
+                position: iced::widget::text_editor::Position { line, column: 0 },
+                selection: None,
+            });
+        }
+        if mode.shows_reading() {
+            let view = self.view_of(path);
+            let hit = self
+                .reading
+                .doc(&self.docs, path)
+                .and_then(|d| Some((d.model.block_for_line(line)?, d.model.blocks.len())));
+            if let Some((b, n)) = hit {
+                self.reading.set_top_block(&mut self.docs, path, view, b);
+                return crate::reading::probe(path, view, n, Some(b));
+            }
+        }
+        Task::none()
+    }
+
+    /// Plan round-19-yt-cleanup-intake WP-1: jumps `path` to its first heading whose text equals
+    /// `fragment` (trimmed; the Obsidian rule). No match, a `^block` fragment or an empty one:
+    /// stays where it is.
+    pub(super) fn jump_to_heading(&mut self, path: &str, fragment: &str) -> Task<Message> {
+        let Some(line) = self
+            .doc(path)
+            .and_then(|d| heading_line(&d.text(), fragment))
+        else {
+            return Task::none();
+        };
+        self.jump_to_line(path, line)
+    }
+
     /// plan editor-ui-round-3 WP-5: Go to top / bottom. Source/Split: the cursor moves to the
     /// buffer's start / end (the shaped editor scrolls to its cursor; the selection drops);
     /// Reading/Split: the reading scrollable snaps to its top / bottom.
@@ -465,4 +530,35 @@ fn reading_find_runs<'a>(
     (reading.mode(docs, path) == crate::reading::ViewMode::Reading)
         .then(|| reading.doc(docs, path).map(|d| d.runs.as_slice()))
         .flatten()
+}
+
+/// Plan round-19-yt-cleanup-intake WP-1: the 0-based line of the first heading of `source`
+/// whose text equals `fragment` after trimming (the Outline's heading list; `^block` ids and
+/// empty fragments never match).
+pub(crate) fn heading_line(source: &str, fragment: &str) -> Option<usize> {
+    let want = fragment.trim();
+    if want.is_empty() || want.starts_with('^') {
+        return None;
+    }
+    editor_model::outline::outline(source)
+        .into_iter()
+        .find(|h| h.text.trim() == want)
+        .map(|h| h.line)
+}
+
+/// Plan round-19-yt-cleanup-intake WP-1: the tab strip scrollable's widget id for `pane`.
+pub(crate) fn tab_strip_id(pane: Pane) -> iced::widget::Id {
+    iced::widget::Id::from(format!("tab-strip:{pane:?}"))
+}
+
+/// Plan round-19-yt-cleanup-intake WP-1: the relative horizontal offset that shows tab `i` of
+/// `n` fully — `i / (n - 1)` puts the tab's left edge at `i * (viewport - width) / (n - 1)`
+/// into the viewport, so a fixed-width tab is always inside it.
+pub(crate) fn strip_fraction(i: usize, n: usize) -> f32 {
+    if n < 2 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let f = i as f32 / (n - 1) as f32;
+    f.clamp(0.0, 1.0)
 }

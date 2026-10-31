@@ -139,10 +139,17 @@ pub fn command_click_msg(path: &str, line: &str, col: usize) -> Option<Message> 
     Some(match link_at(line, col)? {
         LinkAt::Url(u) => Message::OpenUrl(u),
         LinkAt::Md(u) if editor_model::render::is_remote(&u) => Message::OpenUrl(u),
-        LinkAt::Md(target) | LinkAt::Wiki(target) => {
+        LinkAt::Md(target) => Message::Reading(crate::message::ReadingMsg::OpenLink {
+            src: path.to_owned(),
+            target,
+            fragment: None,
+        }),
+        // Plan round-19-yt-cleanup-intake WP-1: the `#heading` rides along (empty target = this note).
+        LinkAt::Wiki { target, fragment } => {
             Message::Reading(crate::message::ReadingMsg::OpenLink {
                 src: path.to_owned(),
                 target,
+                fragment,
             })
         }
     })

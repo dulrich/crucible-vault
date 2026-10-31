@@ -66,7 +66,8 @@ fn vault_image_in_vault_link_opens_the_note() {
         panic!("expected one linked local image: {:?}", m.blocks);
     };
     assert_eq!((src.as_str(), href.as_str()), ("img/a.png", "Other.md"));
-    let Message::Reading(ReadingMsg::OpenLink { src, target }) = linked_image_open("n.md", href)
+    let Message::Reading(ReadingMsg::OpenLink { src, target, .. }) =
+        linked_image_open("n.md", href)
     else {
         panic!("vault href must OpenLink");
     };

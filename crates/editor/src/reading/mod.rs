@@ -527,7 +527,7 @@ pub enum Effect {
     /// plan round-5 WP-3: a status-bar notice.
     Notice(crate::app::Severity, String),
     /// WP-R3 (review E7): a resolved link click; `App` places the open per the held modifiers.
-    OpenPath(String),
+    OpenPath(String, Option<String>),
     /// Plan round-6 WP-4: an unresolved vault link `target` was clicked; `App` warns or
     /// creates it per `editor.toml` `missing_link`.
     MissingLink(String),
@@ -680,8 +680,12 @@ fn update_store(
         | ReadingMsg::GoToEdge { .. }
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. } => {}
-        ReadingMsg::OpenLink { src, target } => {
-            return open_link(store, src, target, daemon, fx);
+        ReadingMsg::OpenLink {
+            src,
+            target,
+            fragment,
+        } => {
+            return open_link(store, src, target, fragment, daemon, fx);
         }
         ReadingMsg::ImageShown {
             tab,

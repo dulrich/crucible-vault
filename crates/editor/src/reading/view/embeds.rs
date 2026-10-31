@@ -23,6 +23,7 @@ pub(super) fn file_card<'a>(cx: &Ctx<'a, '_>, target: &'a str) -> Element<'a, Me
     let open = Message::Reading(ReadingMsg::OpenLink {
         src: cx.path.to_owned(),
         target: target.to_owned(),
+        fragment: None,
     });
     // Plan remote-media-sprint WP-5: a local audio/video file is a media card (♪/▶ + name).
     let label = match media_glyph(target) {

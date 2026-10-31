@@ -48,16 +48,29 @@ impl ReadingStore {
     }
 }
 
+/// Plan round-19-yt-cleanup-intake WP-1: a Reading href `target#fragment` as `(target, fragment)`
+/// (an empty or missing fragment is `None`).
+pub(crate) fn split_fragment(href: &str) -> (String, Option<String>) {
+    match href.split_once('#') {
+        Some((t, f)) => (
+            t.to_owned(),
+            Some(f.trim().to_owned()).filter(|f| !f.is_empty()),
+        ),
+        None => (href.to_owned(), None),
+    }
+}
+
 /// A link click: returns the resolved note's open path as an effect, else flags it missing.
 pub(super) fn open_link(
     store: &mut ReadingStore,
     src: String,
     target: String,
+    fragment: Option<String>,
     daemon: Option<&Arc<dyn DaemonClient>>,
     fx: &mut Vec<Effect>,
 ) -> Task<Message> {
     if let Some(p) = store.click(&src, &target, daemon) {
-        fx.push(Effect::OpenPath(p));
+        fx.push(Effect::OpenPath(p, fragment));
         return Task::none();
     }
     // plan round-5 WP-3: an unresolved vault link says so instead of doing nothing;

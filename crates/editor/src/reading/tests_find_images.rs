@@ -240,11 +240,13 @@ fn unresolved_link_click_raises_a_notice() {
     let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "https://example.com/x".into(),
+        fragment: None,
     }));
     assert!(app.status.notice.is_none());
     let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "Nope".into(),
+        fragment: None,
     }));
     let n = app.status.notice.clone().expect("notice");
     assert_eq!(n.severity, crate::app::Severity::Warning);

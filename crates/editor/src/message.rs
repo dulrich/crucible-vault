@@ -275,7 +275,12 @@ pub enum ReadingMsg {
     /// The recompute debounce tick.
     Tick,
     /// A wiki-link / vault md-link click in the reading pane of `src`.
-    OpenLink { src: String, target: String },
+    OpenLink {
+        src: String,
+        target: String,
+        /// The `#heading` of `[[Note#heading]]` (plan round-19-yt-cleanup-intake WP-1).
+        fragment: Option<String>,
+    },
     /// An image sensor came into view (`width` = laid-out width).
     ImageShown {
         tab: String,
