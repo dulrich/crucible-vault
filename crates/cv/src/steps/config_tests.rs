@@ -12,7 +12,7 @@ use super::testkit::example_config;
 fn example_config_arms_every_action() {
     let c = example_config();
     assert!(c.errors().is_empty(), "{:?}", c.errors());
-    assert_eq!(c.armed_actions().count(), 41);
+    assert_eq!(c.armed_actions().count(), 42);
     for id in [
         "period.open",
         "note.create",

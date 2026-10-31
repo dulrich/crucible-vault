@@ -486,6 +486,26 @@ default = "20"
 type = "intake_enrich"
 scope = "backfill"
 
+# One-shot YouTube clip backfill (plan round-19-yt-cleanup-intake WP-3): over every indexed note whose
+# `source` is a YouTube URL (outside `.trash/`, `_yt_metadata/`, `_raw_transcript/`, `_custom/`) it
+# deletes the thumbnail embed + clipped description above `## Transcript`, strips the transcript
+# timestamps on `post`-tagged notes, and fills a blank `publication` from the linked metadata note
+# (`publication`, else `channelTitle`). No network, no child jobs; a partial shape is left alone, so
+# a second run changes nothing. Job param `dry_run = true` counts only.
+[[action]]
+id = "yt-clip-tidy-backfill"
+label = "YouTube clips: tidy existing notes"
+group = "Ingest"
+resources = { note = false, keys = ["yt-clip-tidy::backfill"] }
+[[action.params]]
+name = "dry_run"
+label = "Dry run"
+kind = "bool"
+default = "false"
+[[action.steps]]
+type = "yt_clip_tidy"
+scope = "backfill"
+
 [[action]]
 id = "image-describe-note"
 label = "Describe images in note"

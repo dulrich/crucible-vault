@@ -220,6 +220,7 @@ const STEPS: &[(&str, &str)] = &[
     ("transcript_refine", ""),
     ("transcript_refine", "agent = \"transcript-refine\""),
     ("yt_clip_tidy", ""),
+    ("yt_clip_tidy", "scope = \"backfill\"\ndry_run = true"),
 ];
 
 const ACTION_FULL: &str = r#"

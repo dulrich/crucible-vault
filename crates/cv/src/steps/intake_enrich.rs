@@ -317,7 +317,7 @@ pub(crate) fn is_youtube_source(source: &str) -> bool {
 
 /// Whether `path` is outside the system folders (`.trash/`, `.`/`_`-prefixed top folders such as
 /// `_custom`, `_yt_metadata`).
-fn is_user_path(path: &str) -> bool {
+pub(crate) fn is_user_path(path: &str) -> bool {
     !path.starts_with(['.', '_'])
 }
 

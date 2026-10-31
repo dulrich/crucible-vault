@@ -300,37 +300,46 @@ fn fill_clip_publication(ctx: &mut StepCtx<'_>, out: &mut StepOutcome) -> Result
     let Some((bytes, _)) = ctx.read(&meta_path)? else {
         return Ok(());
     };
-    let meta = FrontmatterDoc::new(String::from_utf8_lossy(&bytes).into_owned());
-    let Some(publication) = ["publication", "channelTitle"]
-        .into_iter()
-        .find_map(|k| meta.get_str_trimmed(k).filter(|s| !s.is_empty()))
-    else {
+    let Some(publication) = metadata_publication(&String::from_utf8_lossy(&bytes)) else {
         return Ok(());
     };
     if ctx.read(&clip)?.is_none() {
         return Ok(());
     }
-    let written = ctx.modify(&clip, |old| {
-        let mut d = FrontmatterDoc::new(old);
-        let blank = match d.get("publication") {
-            Ok(None | Some(cv_note::JsValue::Null)) => true,
-            Ok(Some(cv_note::JsValue::Str(s))) => s.trim().is_empty(),
-            _ => false,
-        };
-        if !blank {
-            return Ok(None);
-        }
-        d.insert_after(
-            "author",
-            "publication",
-            &cv_note::JsValue::Str(publication.clone()),
-        )?;
-        Ok(Some(d.into_text()))
-    })?;
+    let written = ctx.modify(&clip, |old| with_publication(old, &publication))?;
     if written.is_some() {
         out.push_output(clip);
     }
     Ok(())
+}
+
+/// A metadata note's publication: its `publication`, else its `channelTitle` (trimmed,
+/// non-empty). Shared with the `yt_clip_tidy` backfill (plan round-19-yt-cleanup-intake WP-3).
+pub(crate) fn metadata_publication(meta_text: &str) -> Option<String> {
+    let meta = FrontmatterDoc::new(meta_text);
+    ["publication", "channelTitle"]
+        .into_iter()
+        .find_map(|k| meta.get_str_trimmed(k).filter(|s| !s.is_empty()))
+}
+
+/// `note` with `publication` inserted after `author` when its own is absent or blank, else `None`
+/// (a non-empty value is never overwritten). Shared with the `yt_clip_tidy` backfill.
+pub(crate) fn with_publication(note: &str, publication: &str) -> Result<Option<String>, StepError> {
+    let mut d = FrontmatterDoc::new(note);
+    let blank = match d.get("publication") {
+        Ok(None | Some(cv_note::JsValue::Null)) => true,
+        Ok(Some(cv_note::JsValue::Str(s))) => s.trim().is_empty(),
+        _ => false,
+    };
+    if !blank {
+        return Ok(None);
+    }
+    d.insert_after(
+        "author",
+        "publication",
+        &cv_note::JsValue::Str(publication.to_owned()),
+    )?;
+    Ok(Some(d.into_text()))
 }
 
 fn channel_enrich(

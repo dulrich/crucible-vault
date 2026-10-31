@@ -414,10 +414,25 @@ pub static INTAKE_ENRICH: Record = Record {
     summary: None,
 };
 
-/// `yt_clip_tidy` — `crates/cv/src/steps/yt_clip_tidy.rs` (no params; plan `round-19-yt-cleanup-intake` WP-2).
+/// `yt_clip_tidy` — `crates/cv/src/steps/yt_clip_tidy.rs` (`parse`; plan `round-19-yt-cleanup-intake` WP-2, backfill scope WP-3).
 pub static YT_CLIP_TIDY: Record = Record {
     name: "yt_clip_tidy",
-    fields: &[],
+    fields: &[
+        field(
+            "scope",
+            "Scope",
+            "note: tidy the run's active note; backfill: tidy, clean and fill publication on every indexed YouTube note",
+            Node::Enum(&["note", "backfill"]),
+        )
+        .dflt(D::Str("note")),
+        field(
+            "dry_run",
+            "Dry run",
+            "Backfill only: compute every count but write nothing (a job param dry_run = true also turns it on)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+    ],
     rules: &[],
     summary: None,
 };
