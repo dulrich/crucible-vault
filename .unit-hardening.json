@@ -1,0 +1,7 @@
+{
+  "defaultScope": "user",
+  "units": [
+    { "path": "deploy/crucible-vault.service", "scope": "user" }
+  ],
+  "exclude": []
+}
