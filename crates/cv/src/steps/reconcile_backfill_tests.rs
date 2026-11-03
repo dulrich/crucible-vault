@@ -483,6 +483,37 @@ fn recleaned_is_pure_and_idempotent() {
     );
 }
 
+/// Round 21 WP-3 (audit M1): the outcome migration 0033 relies on. A `[[newsletter]]` row added
+/// after the mail was captured under `unknown-sender` makes ONE non-dry reconcile re-key the row
+/// (phase B) and then write the row's name as the note's `publication` (phase F reads the
+/// persisted, re-keyed rows, so B must run first); a second run changes nothing.
+#[test]
+fn one_non_dry_run_rekeys_unknown_sender_mail_and_backfills_its_publication() {
+    const EXAMPLE_DIGEST: &str = "[[newsletter]]\nname = \"Example Digest\"\nfrom = [\"hello@plain.example\"]\nkind = \"blog\"\n";
+    let w = rematch_world(EXAMPLE_DIGEST, "<p>alpha beta gamma</p>");
+    let (r0, _) = w.row(KIND, UNKNOWN, "m1@plain.example").unwrap();
+    let path = r0.note_path.unwrap();
+    let before = w.env.read(&path).unwrap();
+    assert!(
+        !before.contains("publication"),
+        "the unknown-sender note starts without a publication: {before}"
+    );
+
+    let first = w.reconcile(false);
+    assert_eq!(n(&first, "mail_rematched"), 1);
+    assert_eq!(n(&first, "publication_backfilled"), 1);
+    assert!(w.row(KIND, UNKNOWN, "m1@plain.example").is_none());
+    let (r, _) = w.row(KIND, "Example Digest", "m1@plain.example").unwrap();
+    assert_eq!(r.note_path.as_deref(), Some(path.as_str()));
+    let after = w.env.read(&path).unwrap();
+    assert!(after.contains("publication: Example Digest\n"), "{after}");
+
+    let second = w.reconcile(false);
+    assert_eq!(n(&second, "mail_rematched"), 0);
+    assert_eq!(n(&second, "publication_backfilled"), 0);
+    assert_eq!(w.env.read(&path).unwrap(), after, "note bytes unchanged");
+}
+
 #[test]
 fn intake_reconcile_is_a_note_mutating_step() {
     assert!(cv_actions::StepKind::IntakeReconcile.mutates_note());
