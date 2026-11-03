@@ -469,6 +469,13 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
         Key::Named(Named::Escape) => p(PaletteMsg::Escape),
         Key::Named(Named::ArrowUp) => p(PaletteMsg::Up),
         Key::Named(Named::ArrowDown) => p(PaletteMsg::Down),
+        // Plan round-21 WP-1: plain Left/Right no widget captured scroll a focused tab strip
+        // (the app ignores them without strip focus).
+        Key::Named(arrow @ (Named::ArrowLeft | Named::ArrowRight)) if modifiers.is_empty() => {
+            Some(Message::Tabs(crate::message::TabsMsg::StripKey(
+                arrow == Named::ArrowRight,
+            )))
+        }
         Key::Named(Named::Enter) if modifiers.command() => p(PaletteMsg::CtrlEnter),
         Key::Named(Named::Enter) if !modifiers.alt() && !modifiers.shift() => p(PaletteMsg::Enter),
         // editor-usability-round WP-3: focused-pane back/forward (`chord` has no arrow names,

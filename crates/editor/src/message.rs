@@ -424,6 +424,9 @@ pub enum PanelsMsg {
     Search,
     /// Close the search modal.
     CloseSearchModal,
+    /// Plan round-21 WP-1: Escape while the search modal is open (two-stage): a non-empty
+    /// query is cleared and the input refocused, otherwise the modal closes.
+    SearchModalEscape,
     /// Show the column on a panel.
     Show(crate::panels::PanelKind),
     /// Recompute tick (buffer-keyed; cheap when nothing changed).
@@ -599,6 +602,12 @@ pub enum TabsMsg {
     HeaderEnter(u64),
     /// The cursor left a tab header.
     HeaderLeave(u64),
+    /// Plan round-21 WP-1: the wheel over `Pane`'s tab strip; the payload is the horizontal
+    /// offset delta in pixels (see `app::scroll::wheel_to_strip_offset`).
+    StripWheel(Pane, f32),
+    /// Plan round-21 WP-1: a plain Left (`false`) / Right (`true`) press no widget captured;
+    /// scrolls the focused tab strip by one step, and does nothing without strip focus.
+    StripKey(bool),
 }
 
 /// editor-usability-round WP-4: the focused pane's find bar.
@@ -743,7 +752,9 @@ impl TabsMsg {
             | Self::DragRelease
             | Self::DragCancel
             | Self::HeaderEnter(_)
-            | Self::HeaderLeave(_) => MsgKind::Input,
+            | Self::HeaderLeave(_)
+            | Self::StripWheel(..)
+            | Self::StripKey(_) => MsgKind::Input,
         }
     }
 }

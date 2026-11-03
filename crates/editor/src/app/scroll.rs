@@ -551,6 +551,78 @@ pub(crate) fn tab_strip_id(pane: Pane) -> iced::widget::Id {
     iced::widget::Id::from(format!("tab-strip:{pane:?}"))
 }
 
+/// Plan round-21 WP-1: one Left/Right press scrolls a focused tab strip by this many pixels.
+pub(crate) const STRIP_KEY_STEP: f32 = 120.0;
+
+/// Plan round-21 WP-1: a wheel `delta` over the tab strip as a horizontal pixel offset. iced
+/// 0.14's horizontal-only `scrollable` reads only the delta's x axis, so a plain wheel (y) did
+/// nothing; this maps y (wheel down = positive offset = scroll right) with x added for a
+/// diagonal. A line step is 60 px like iced's own.
+pub(crate) fn wheel_to_strip_offset(delta: iced::mouse::ScrollDelta) -> f32 {
+    match delta {
+        iced::mouse::ScrollDelta::Lines { x, y } => -(x + y) * 60.0,
+        iced::mouse::ScrollDelta::Pixels { x, y } => -(x + y),
+    }
+}
+
+impl App {
+    /// Plan round-21 WP-1: scrolls `pane`'s tab strip sideways by `dx` pixels (clamped by iced).
+    pub(super) fn scroll_strip(&self, pane: Pane, dx: f32) -> Task<Message> {
+        iced::widget::operation::scroll_by(
+            tab_strip_id(pane),
+            iced::widget::scrollable::AbsoluteOffset { x: dx, y: 0.0 },
+        )
+    }
+
+    /// Plan round-21 WP-1: whether `m` is user input elsewhere that takes the tab strip's
+    /// keyboard focus away (a press outside the strip reaches the app as one of these).
+    pub(super) fn drops_strip_focus(m: &Message) -> bool {
+        use crate::message::{ExplorerMsg, PanesMsg};
+        match m {
+            Message::Source(m) => m.kind() == crate::message::MsgKind::Input,
+            Message::Find(_) | Message::Palette(PaletteMsg::Open) => true,
+            Message::Switcher(SwitcherMsg::Open | SwitcherMsg::OpenMove) => true,
+            Message::Explorer(
+                ExplorerMsg::Toggle(_)
+                | ExplorerMsg::Select(_)
+                | ExplorerMsg::Open(_)
+                | ExplorerMsg::BeginNew
+                | ExplorerMsg::BeginRename
+                | ExplorerMsg::BeginMove,
+            ) => true,
+            Message::Panels(
+                PanelsMsg::Search
+                | PanelsMsg::Show(_)
+                | PanelsMsg::Open(_)
+                | PanelsMsg::OutlineJump(_),
+            ) => true,
+            Message::Panes(
+                PanesMsg::Focus(_)
+                | PanesMsg::SplitRight
+                | PanesMsg::SplitDown
+                | PanesMsg::Close(_)
+                | PanesMsg::Back(_)
+                | PanesMsg::Forward(_)
+                | PanesMsg::Side(_)
+                | PanesMsg::ToggleSide
+                | PanesMsg::ModeMenu(_),
+            ) => true,
+            Message::Tabs(
+                TabsMsg::Open(_)
+                | TabsMsg::Select(..)
+                | TabsMsg::Close(..)
+                | TabsMsg::CloseActive
+                | TabsMsg::GoTo(_),
+            ) => true,
+            Message::Reading(
+                crate::message::ReadingMsg::OpenLink { .. }
+                | crate::message::ReadingMsg::ToggleTask { .. },
+            ) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Plan round-19-yt-cleanup-intake WP-1: the relative horizontal offset that shows tab `i` of
 /// `n` fully — `i / (n - 1)` puts the tab's left edge at `i * (viewport - width) / (n - 1)`
 /// into the viewport, so a fixed-width tab is always inside it.

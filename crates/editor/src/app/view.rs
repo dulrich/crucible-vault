@@ -160,6 +160,9 @@ impl App {
     fn tab_bar<'a>(&'a self, pane: Pane, ps: &'a PaneState) -> Element<'a, Message> {
         use crate::header::{BAR_HEIGHT, MARKER_WIDTH, TITLE_MAX_CHARS, ellipsize, marker};
         use crate::theme::{FONT_FAMILY, control_label};
+        /// Plan round-21 WP-1: rail and scroller thickness, and the permanent strip below the
+        /// headers it overlays (so headers stay clickable and nothing shifts on overflow).
+        const STRIP_RAIL: f32 = 9.0;
         let t = self.tokens;
         let focused = pane == self.focus;
         // Plan round-11 WP-6: mid-drag the strip is drawn from the previewed layout. `i` is the
@@ -288,14 +291,14 @@ impl App {
             .id(super::scroll::tab_strip_id(pane))
             .direction(iced::widget::scrollable::Direction::Horizontal(
                 iced::widget::scrollable::Scrollbar::new()
-                    .width(3)
-                    .scroller_width(3),
+                    .width(STRIP_RAIL)
+                    .scroller_width(STRIP_RAIL),
             ))
             .style(move |_: &Theme, status| {
                 use iced::widget::scrollable::{Rail, Scroller, Style};
                 let hot = !matches!(status, iced::widget::scrollable::Status::Active { .. });
                 let rail = Rail {
-                    background: None,
+                    background: Some(t.line.to_color().scale_alpha(0.35).into()),
                     border: iced::Border::default(),
                     scroller: Scroller {
                         background: if hot {
@@ -323,10 +326,19 @@ impl App {
                 }
             })
             .width(Length::Fill)
-            .height(BAR_HEIGHT);
+            .height(BAR_HEIGHT + STRIP_RAIL);
+        // Plan round-21 WP-1: iced's horizontal-only scrollable drops a wheel's y axis, so the
+        // plain wheel is caught here (it only reaches this area when the scrollable did not
+        // scroll and capture) and mapped to a sideways offset.
+        let headers = iced::widget::mouse_area(headers).on_scroll(move |d| {
+            Message::Tabs(TabsMsg::StripWheel(
+                pane,
+                super::scroll::wheel_to_strip_offset(d),
+            ))
+        });
         let headers = container(headers)
             .width(Length::Fill)
-            .height(BAR_HEIGHT)
+            .height(BAR_HEIGHT + STRIP_RAIL)
             .clip(true);
         self.drop_area(headers, DropTarget::End(pane))
     }

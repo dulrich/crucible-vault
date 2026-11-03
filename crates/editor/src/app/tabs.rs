@@ -432,6 +432,21 @@ impl App {
             }
             TabsMsg::Quit => return self.quit(),
             TabsMsg::FlushAll => return self.flush_all_notes(),
+            // Plan round-21 WP-1: a header press hands the strip keyboard focus and unfocuses
+            // every focusable widget (`operation::focus` on an id no widget carries), so
+            // Left/Right never land in an editor or input.
+            TabsMsg::DragPress(pane, i) => {
+                self.update_tab_drag(TabsMsg::DragPress(pane, i));
+                self.strip_focus = Some(pane);
+                return iced::widget::operation::focus(iced::widget::Id::new("tab-strip-focus"));
+            }
+            TabsMsg::StripWheel(pane, dx) => return self.scroll_strip(pane, dx),
+            TabsMsg::StripKey(forward) => {
+                if let Some(pane) = self.strip_focus.filter(|p| self.panes.get(*p).is_some()) {
+                    let step = super::scroll::STRIP_KEY_STEP;
+                    return self.scroll_strip(pane, if forward { step } else { -step });
+                }
+            }
             m => self.update_tab_drag(m),
         }
         Task::none()

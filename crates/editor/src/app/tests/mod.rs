@@ -70,6 +70,7 @@ mod replaced;
 mod save_continue;
 mod scroll_matrix;
 mod shared_docs;
+mod strip;
 mod tab_drag;
 mod title_sync;
 mod unsaved_dialog;

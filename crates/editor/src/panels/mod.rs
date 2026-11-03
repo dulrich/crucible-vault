@@ -450,6 +450,8 @@ pub enum Effect {
     /// WP-R3 (review E8): the search modal opened; `App` closes the other centre modals and
     /// focuses its field.
     OpenSearchModal,
+    /// Plan round-21 WP-1: the modal's query was cleared (first Escape); `App` refocuses its field.
+    FocusSearchModal,
     /// Plan round-12-feedback-todos WP-7: run this action call (a duplicate verdict button).
     RunCall(crate::palette::Call),
 }
@@ -489,6 +491,19 @@ pub fn update(
             search_location,
         ),
         PanelsMsg::CloseSearchModal => {
+            p.search_modal = false;
+            Effect::None
+        }
+        // Plan round-21 WP-1: two-stage Escape (clear, then close).
+        PanelsMsg::SearchModalEscape if p.search_modal && !p.search.query.is_empty() => {
+            p.search.query.clear();
+            p.search.results.clear();
+            p.search.error = None;
+            // Invalidate any in-flight debounce/result for the old query.
+            p.search.seq += 1;
+            Effect::FocusSearchModal
+        }
+        PanelsMsg::SearchModalEscape => {
             p.search_modal = false;
             Effect::None
         }

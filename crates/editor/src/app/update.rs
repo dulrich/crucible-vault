@@ -10,6 +10,10 @@ impl App {
         let Some(message) = self.modal_filter(message) else {
             return Task::none();
         };
+        // Plan round-21 WP-1: user input elsewhere takes the tab strip's keyboard focus.
+        if self.strip_focus.is_some() && Self::drops_strip_focus(&message) {
+            self.strip_focus = None;
+        }
         let before = self.active_paths();
         let views_before = self.active_views();
         // A press on a visible tab must not move the strip under the pointer.
@@ -426,6 +430,9 @@ impl App {
                 self.palette.close();
                 iced::widget::operation::focus(crate::panels::SEARCH_MODAL_ID)
             }
+            Effect::FocusSearchModal => {
+                iced::widget::operation::focus(crate::panels::SEARCH_MODAL_ID)
+            }
             Effect::None => Task::none(),
             Effect::Sync => self.sync_panels(),
             Effect::SyncAndFocusSearch => Task::batch([
@@ -566,7 +573,8 @@ impl App {
 
     /// Daemon notifications and global keys as iced subscriptions.
     pub fn subscription(&self) -> Subscription<Message> {
-        let captured_esc = if self.switcher.open {
+        // Plan round-21 WP-1: the search modal's focused input captures Escape too.
+        let captured_esc = if self.switcher.open || self.panels.search_modal {
             iced::event::listen_with(switcher::captured_escape)
         } else {
             Subscription::none()

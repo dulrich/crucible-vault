@@ -316,6 +316,10 @@ pub struct App {
     pub mouse_down: bool,
     /// Plan round-10 WP-8: the tab-drag tracker.
     pub(super) tab_drag: tab_drag::TabDrag,
+    /// Plan round-21 WP-1: the pane whose tab strip has keyboard focus (Left/Right scroll it).
+    /// Set by a press on a tab header, cleared by any other user input
+    /// ([`App::drops_strip_focus`]).
+    pub(super) strip_focus: Option<Pane>,
     /// A back/forward step is opening a path: it must not push onto the history.
     history_nav: bool,
     /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
@@ -463,6 +467,7 @@ impl App {
             mode_menu: None,
             mouse_down: false,
             tab_drag: tab_drag::TabDrag::default(),
+            strip_focus: None,
             history_nav: false,
             quit: None,
             dialog: None,

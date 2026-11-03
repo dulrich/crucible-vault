@@ -58,6 +58,19 @@ impl App {
                 m => Some(m),
             };
         }
+        // Plan round-21 WP-1: the search modal's Escape. The global listener fires both the
+        // switcher's and the palette's Escape for one ignored press (the captured path fires
+        // the switcher's only), so the switcher's becomes the single search transition and the
+        // palette's is dropped.
+        if self.panels.search_modal {
+            return match m {
+                Message::Switcher(SwitcherMsg::Escape) => Some(Message::Panels(
+                    crate::message::PanelsMsg::SearchModalEscape,
+                )),
+                Message::Palette(PaletteMsg::Escape) => None,
+                m => Some(m),
+            };
+        }
         Some(m)
     }
 
