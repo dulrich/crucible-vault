@@ -71,6 +71,7 @@ mod save_continue;
 mod scroll_matrix;
 mod shared_docs;
 mod strip;
+mod strip_route;
 mod tab_drag;
 mod title_sync;
 mod unsaved_dialog;
