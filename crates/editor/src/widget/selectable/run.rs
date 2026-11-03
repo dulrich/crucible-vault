@@ -10,6 +10,8 @@ use iced::widget::text::Span;
 use iced::{Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Vector};
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::SpanLink;
+
 /// Splits `spans` at hard newlines: one newline-free span list per hard line, each with its
 /// byte offset into the concatenated text (audit E3).
 pub(super) fn split_lines<'a, L: Clone>(spans: &[Span<'a, L>]) -> Vec<(usize, Vec<Span<'a, L>>)> {
@@ -110,6 +112,38 @@ pub struct RunState<P, L> {
     width: f32,
     /// The hovered link span as (line, span).
     hovered: Option<(usize, usize)>,
+    /// Plan round-22 WP-2: the hovered copy value (inline code) and its one glyph.
+    copy: Option<CopyHover<L>>,
+}
+
+/// Plan round-22 WP-2: a hovered copy value — every fragment of one logical value (find painting
+/// splits an inline-code value into several physical spans, audit E1) counts as hovering it, and
+/// the single glyph sits just after the value's **last** fragment.
+#[derive(Clone, PartialEq)]
+struct CopyHover<L> {
+    /// The value's link (the whole logical value, shared by all its fragments).
+    link: L,
+    /// The glyph's rectangle, run-local.
+    glyph: Rectangle,
+}
+
+/// Plan round-22 WP-2: the first and last span of the copy value containing span `s` — the
+/// contiguous spans carrying an equal link.
+fn copy_group<L: SpanLink + PartialEq>(
+    spans: &[Span<'static, L>],
+    s: usize,
+) -> Option<(usize, usize)> {
+    let link = spans.get(s)?.link.as_ref().filter(|l| l.is_copy())?;
+    let same = |k: usize| spans.get(k).and_then(|x| x.link.as_ref()) == Some(link);
+    let mut first = s;
+    while first > 0 && same(first - 1) {
+        first -= 1;
+    }
+    let mut last = s;
+    while same(last + 1) {
+        last += 1;
+    }
+    Some((first, last))
 }
 
 impl<P: text::Paragraph, L: Clone> RunState<P, L> {
@@ -149,11 +183,23 @@ impl<P: text::Paragraph, L: Clone> RunState<P, L> {
             .hit_test(local)
             .map_or(0, |h| h.cursor())
             .min(line.text.len());
-        let link = line
-            .paragraph
-            .hit_span(local)
-            .and_then(|s| line.spans.get(s)?.link.clone());
+        // Plan round-22 WP-2: a press on the hovered copy glyph is a press on its value.
+        let link = self
+            .copy
+            .as_ref()
+            .filter(|c| c.glyph.contains(p))
+            .map(|c| c.link.clone())
+            .or_else(|| {
+                line.paragraph
+                    .hit_span(local)
+                    .and_then(|s| line.spans.get(s)?.link.clone())
+            });
         (line.start + byte, link)
+    }
+
+    /// Plan round-22 WP-2: the hovered copy value's glyph rectangle, run-local (tests and probes).
+    pub fn copy_glyph(&self) -> Option<Rectangle> {
+        self.copy.as_ref().map(|c| c.glyph)
     }
 
     /// The run-text byte range of the visual line holding `byte`.
@@ -223,7 +269,7 @@ pub fn run<'a, L>(
 impl<M, Theme, R, L> Widget<M, Theme, R> for Run<'_, L>
 where
     R: text::Renderer<Font = Font>,
-    L: Clone + PartialEq + 'static,
+    L: SpanLink + Clone + PartialEq + 'static,
 {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<RunState<R::Paragraph, L>>()
@@ -237,6 +283,7 @@ where
             lh: 0.0,
             width: 0.0,
             hovered: None,
+            copy: None,
         })
     }
 
@@ -336,14 +383,43 @@ where
         }
         let st = tree.state.downcast_mut::<RunState<R::Paragraph, L>>();
         let b = layout.bounds();
-        let hovered = cursor.position_in(b).and_then(|p| {
+        let pos = cursor.position_in(b);
+        // Plan round-22 WP-2: the glyph itself keeps its value hovered.
+        let on_glyph = pos.is_some_and(|p| st.copy.as_ref().is_some_and(|c| c.glyph.contains(p)));
+        let span = pos.and_then(|p| {
             let i = st.line_at(p.y);
             let line = st.lines.get(i)?;
             let s = line.paragraph.hit_span(Point::new(p.x, p.y - line.y))?;
-            line.spans.get(s)?.link.as_ref().map(|_| (i, s))
+            Some((i, s))
         });
-        if hovered != st.hovered {
+        let hovered = span.filter(|&(i, s)| {
+            st.lines[i].spans[s]
+                .link
+                .as_ref()
+                .is_some_and(|l| !l.is_copy())
+        });
+        let copy = if on_glyph {
+            st.copy.clone()
+        } else {
+            span.and_then(|(i, s)| {
+                let line = &st.lines[i];
+                let (_, last) = copy_group(&line.spans, s)?;
+                let link = line.spans[s].link.clone()?;
+                // The one glyph: just after the value's last fragment (its last line box).
+                let r = line.paragraph.span_bounds(last).last().copied()?;
+                let gw = self.size.0;
+                Some(CopyHover {
+                    link,
+                    glyph: Rectangle::new(
+                        Point::new(r.x + r.width + 1.0, r.y + line.y),
+                        Size::new(gw, r.height),
+                    ),
+                })
+            })
+        };
+        if hovered != st.hovered || copy != st.copy {
             st.hovered = hovered;
+            st.copy = copy;
             shell.request_redraw();
         }
     }
@@ -357,7 +433,7 @@ where
         _r: &R,
     ) -> mouse::Interaction {
         let st = tree.state.downcast_ref::<RunState<R::Paragraph, L>>();
-        if st.hovered.is_some() {
+        if st.hovered.is_some() || st.copy.is_some() {
             mouse::Interaction::Pointer
         } else if cursor.is_over(layout.bounds()) {
             mouse::Interaction::Text
@@ -455,13 +531,32 @@ where
             }
             r.fill_paragraph(p, origin, style.text_color, *viewport);
         }
+        if let Some(c) = &st.copy {
+            let g = c.glyph;
+            r.fill_text(
+                text::Text {
+                    content: crate::icons::Icon::Copy.glyph().to_string(),
+                    bounds: g.size(),
+                    size: self.size,
+                    line_height: text::LineHeight::Absolute(Pixels(g.height)),
+                    font: crate::icons::FONT,
+                    align_x: text::Alignment::Default,
+                    align_y: iced::alignment::Vertical::Top,
+                    shaping: text::Shaping::Basic,
+                    wrapping: text::Wrapping::None,
+                },
+                g.position() + (b.position() - Point::ORIGIN),
+                style.text_color,
+                *viewport,
+            );
+        }
     }
 }
 
 impl<'a, M, Theme, R, L> From<Run<'a, L>> for Element<'a, M, Theme, R>
 where
     R: text::Renderer<Font = Font> + 'a,
-    L: Clone + PartialEq + 'static,
+    L: SpanLink + Clone + PartialEq + 'static,
 {
     fn from(w: Run<'a, L>) -> Self {
         Element::new(w)

@@ -162,6 +162,20 @@ pub fn probe_caret<M, L: Clone + 'static>(
     })
 }
 
+/// Plan round-22 WP-2: run `run`'s hovered copy glyph rectangle (content coordinates), if any
+/// (tests and probes).
+pub fn probe_copy_glyph<M, L: super::SpanLink + Clone + PartialEq + 'static>(
+    el: &mut Element<'_, M>,
+    tree: &mut Tree,
+    layout: Layout<'_>,
+    r: &iced::Renderer,
+    run: usize,
+) -> Option<Rectangle> {
+    on_run::<M, L, _>(el, tree, layout, r, run, |s, b| {
+        s.copy_glyph().map(|g| g + (b.position() - Point::ORIGIN))
+    })
+}
+
 /// Which run a content point belongs to when it is not over one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Bias {

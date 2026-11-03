@@ -89,7 +89,7 @@ impl<'a, M, L> Root<'a, M, L> {
 
 impl<M, L> Root<'_, M, L>
 where
-    L: Clone + Send + 'static,
+    L: super::SpanLink + Clone + PartialEq + Send + 'static,
 {
     /// Every run's box and the scrollable's translation/viewport (once per event).
     fn collect(&mut self, tree: &mut Tree, layout: Layout<'_>, r: &iced::Renderer) -> Collected {
@@ -253,7 +253,7 @@ where
 
 impl<M, L> Widget<M, iced::Theme, iced::Renderer> for Root<'_, M, L>
 where
-    L: Clone + Send + 'static,
+    L: super::SpanLink + Clone + PartialEq + Send + 'static,
 {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<RootState<L>>()
@@ -394,6 +394,8 @@ where
                 let Some((pos, link)) = self.hit(tree, layout, r, &c, at, Bias::Drag) else {
                     return;
                 };
+                // Plan round-22 WP-2: a copy value (inline code) has no link menu.
+                let link = link.filter(|l| !l.is_copy());
                 let inside = self.selection.is_some_and(|s| s.contains(pos));
                 if link.is_none() && !inside {
                     return;
@@ -517,7 +519,7 @@ where
 
 impl<'a, M: 'a, L> From<Root<'a, M, L>> for Element<'a, M>
 where
-    L: Clone + Send + 'static,
+    L: super::SpanLink + Clone + PartialEq + Send + 'static,
 {
     fn from(w: Root<'a, M, L>) -> Self {
         Element::new(w)

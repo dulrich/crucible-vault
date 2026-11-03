@@ -37,6 +37,15 @@ pub(crate) enum LinkTarget {
     Vault(String),
     /// A URL with a scheme: opened via `open_url` (plan usability-sprint-captures-links WP-3).
     External(String),
+    /// Plan round-22 WP-2: inline code — the **whole logical code value** (never a find-painted
+    /// fragment; every fragment of one value carries the same payload), copied on click.
+    Copy(String),
+}
+
+impl crate::widget::selectable::SpanLink for LinkTarget {
+    fn is_copy(&self) -> bool {
+        matches!(self, Self::Copy(_))
+    }
 }
 
 /// The drawing context; `'c` borrows the per-frame locals (run cursor, find occurrences).
@@ -247,6 +256,13 @@ pub(crate) fn press_target(
             let (target, external) = match l {
                 LinkTarget::Vault(t) => (t, false),
                 LinkTarget::External(u) => (u, true),
+                // The root never reports a copy value as a menu link; selection menu.
+                LinkTarget::Copy(_) => {
+                    return crate::context_menu::Target::Selection {
+                        path: path.to_owned(),
+                        view,
+                    };
+                }
             };
             // Plan round-19-yt-cleanup-intake WP-1: a wikilink's `#fragment` rides in the href;
             // the menu names (and "Create note"s) the bare target.
@@ -721,6 +737,8 @@ fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {
         }
         // WP-3: handed to the opener (which refuses non-allowlisted schemes).
         LinkTarget::External(url) => Message::OpenUrl(url),
+        // Plan round-22 WP-2: inline code → copy the whole value.
+        LinkTarget::Copy(text) => Message::Reading(ReadingMsg::InlineCodeCopy { text }),
     }
 }
 
@@ -825,11 +843,13 @@ fn inlines_view<'a>(
             }
             // plan editor-round-4 WP-3: code spans, link labels and tags are visible text too,
             // painted like `Text`; split link pieces keep their click target.
+            // Plan round-22 WP-2 (audit E1): every find-painted fragment carries the whole value.
             Inline::Code(c) => painted(cx, run, at, &mut spans, Cow::Borrowed(c.as_str()), |p| {
                 span(p)
                     .font(Font::MONOSPACE)
                     .background(t.inset.to_color())
                     .color(t.text.to_color())
+                    .link(LinkTarget::Copy(c.clone()))
             }),
             Inline::WikiLink {
                 target, fragment, ..

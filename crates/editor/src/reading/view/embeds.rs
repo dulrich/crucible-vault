@@ -282,7 +282,8 @@ pub(super) fn linked_image<'a>(
     let open = linked_image_open(cx.path, href);
     let (target, external) = match href_target(href) {
         LinkTarget::Vault(t) => (t, false),
-        LinkTarget::External(u) => (u, true),
+        // `href_target` only yields Vault / External.
+        LinkTarget::External(u) | LinkTarget::Copy(u) => (u, true),
     };
     let missing = !external && cx.doc.unresolved.contains(&target);
     let link = crate::context_menu::Target::Link {

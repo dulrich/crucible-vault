@@ -64,6 +64,7 @@ mod hold_gaps;
 mod holds;
 mod image_menu;
 mod index_follow;
+mod inline_copy;
 mod link_typeahead;
 mod reconnect;
 mod replaced;

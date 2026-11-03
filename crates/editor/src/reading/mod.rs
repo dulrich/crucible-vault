@@ -741,6 +741,7 @@ fn update_store(
         ReadingMsg::ToggleTask { .. }
         | ReadingMsg::ToggleProp { .. }
         | ReadingMsg::GoToEdge { .. }
+        | ReadingMsg::InlineCodeCopy { .. }
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. } => {}
         ReadingMsg::OpenLink {

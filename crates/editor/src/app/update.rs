@@ -185,6 +185,12 @@ impl App {
             Message::Reading(crate::message::ReadingMsg::ToggleProp { path, key }) => {
                 return self.toggle_prop(&path, &key);
             }
+            // Plan round-22 WP-2: inline-code copy — clipboard plus a "Copied" notice.
+            Message::Reading(crate::message::ReadingMsg::InlineCodeCopy { text }) => {
+                self.status
+                    .notify(crate::app::status::Severity::Info, "Copied");
+                return iced::clipboard::write(text);
+            }
             Message::Reading(crate::message::ReadingMsg::GoToEdge { bottom }) => {
                 return self.go_to_edge(bottom);
             }

@@ -52,6 +52,8 @@ struct H {
     other: Vec<Message>,
     /// `SelectDone` count (PRIMARY writes).
     primary: usize,
+    /// Plan round-22 WP-2: the find paint (query, active occurrence), if any.
+    find: Option<(&'static str, Option<usize>)>,
 }
 
 impl H {
@@ -73,6 +75,7 @@ impl H {
             tree: None,
             other: Vec::new(),
             primary: 0,
+            find: None,
         }
     }
 
@@ -96,7 +99,8 @@ impl H {
             t,
             1.0,
             true,
-            None,
+            self.find
+                .map(|(query, active)| crate::find::ReadingPaint { query, active }),
         );
         let tree = match &mut self.tree {
             Some(tr) => {
@@ -380,4 +384,97 @@ fn ctrl_a_and_ctrl_c_take_the_focused_reading_view() {
         mode: ViewMode::Source,
     }));
     assert_eq!(app.reading.selection_text(&app.docs, PATH, view), None);
+}
+
+// ---- plan round-22 WP-2: hover copy for inline code ----
+
+fn code_run_pt(h: &mut H, needle: &str) -> (usize, Point) {
+    let text = h.run_text(0);
+    let at = text.find(needle).expect("needle in run");
+    (at, h.pt(SelPos::new(0, at)))
+}
+
+#[test]
+fn clicking_inline_code_emits_the_copy_message_with_the_exact_text() {
+    let mut h = H::new("run `cargo foo` now\n");
+    assert_eq!(h.run_text(0), "run cargo foo now");
+    let (_, p) = code_run_pt(&mut h, "cargo");
+    h.click(Point::new(p.x + 6.0, p.y));
+    assert!(
+        matches!(
+            h.other.as_slice(),
+            [Message::Reading(ReadingMsg::InlineCodeCopy { text })] if text == "cargo foo"
+        ),
+        "{:?}",
+        h.other
+    );
+    assert_eq!(h.text(), None, "a click selects nothing");
+    // The hover glyph is drawn after the span; a click on it copies too.
+    h.other.clear();
+    let (a, _) = code_run_pt(&mut h, "cargo");
+    let end = h.pt(SelPos::new(0, a + "cargo foo".len()));
+    h.mv(Point::new(end.x - 4.0, end.y));
+    let g = h
+        .with(|el, tree, l, r| selectable::probe_copy_glyph::<_, LinkTarget>(el, tree, l, r, 0))
+        .expect("glyph while hovered");
+    h.click(Point::new(g.x + g.width / 2.0, g.y + g.height / 2.0));
+    assert!(matches!(
+        h.other.as_slice(),
+        [Message::Reading(ReadingMsg::InlineCodeCopy { text })] if text == "cargo foo"
+    ));
+}
+
+#[test]
+fn dragging_across_inline_code_selects_and_does_not_copy() {
+    let mut h = H::new("run `cargo foo` now\n");
+    let (a, pa) = code_run_pt(&mut h, "cargo");
+    let pb = h.pt(SelPos::new(0, a + "cargo foo".len()));
+    h.drag(Point::new(pa.x + 3.0, pa.y), pb);
+    assert!(h.other.is_empty(), "a drag is never a copy: {:?}", h.other);
+    assert!(
+        h.text()
+            .is_some_and(|t| t.ends_with("cargo foo") && t.len() > 5)
+    );
+}
+
+#[test]
+fn find_split_inline_code_keeps_one_whole_value_payload_and_one_glyph() {
+    let md = "run `cargo foo bar` now\n";
+    let plain = H::new(md);
+    let mut h = H::new(md);
+    h.find = Some(("foo", Some(0)));
+    // The find paint splits the code value into three physical spans.
+    let model = h.store.doc(&h.docs, PATH).expect("doc").runs.clone();
+    assert_eq!(
+        editor_model::visible::occurrences(&model, "foo").len(),
+        editor_model::visible::occurrences(
+            &plain.store.doc(&plain.docs, PATH).expect("doc").runs,
+            "foo"
+        )
+        .len()
+    );
+    // Hover the leading fragment: the whole value is hovered, one glyph after the LAST fragment.
+    let (a, p) = code_run_pt(&mut h, "cargo");
+    h.mv(Point::new(p.x + 4.0, p.y));
+    let g = h
+        .with(|el, tree, l, r| selectable::probe_copy_glyph::<_, LinkTarget>(el, tree, l, r, 0))
+        .expect("glyph from the first fragment");
+    let end = h.pt(SelPos::new(0, a + "cargo foo bar".len()));
+    assert!(
+        g.x >= end.x,
+        "glyph {} after the value's end {}",
+        g.x,
+        end.x
+    );
+    // Clicking the match fragment copies the whole value.
+    let (_, pm) = code_run_pt(&mut h, "foo");
+    h.click(Point::new(pm.x + 3.0, pm.y));
+    assert!(
+        matches!(
+            h.other.as_slice(),
+            [Message::Reading(ReadingMsg::InlineCodeCopy { text })] if text == "cargo foo bar"
+        ),
+        "{:?}",
+        h.other
+    );
 }

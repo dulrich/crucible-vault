@@ -21,11 +21,23 @@
 //! **Caveat (spike):** the `Paragraph` trait exposes no visual-line byte ranges; they are
 //! recovered by probing `hit_test` at each line's left and right edge ([`line_ranges`]).
 
+/// Plan round-22 WP-2: what the widgets need to know about a span's link type — whether it is a
+/// copy payload (inline code: hover shows a copy glyph, no underline, no link menu) rather than
+/// a navigation link.
+pub trait SpanLink {
+    /// Whether this link is a copy payload.
+    fn is_copy(&self) -> bool {
+        false
+    }
+}
+
+impl SpanLink for () {}
+
 mod ops;
 mod root;
 mod run;
 
-pub use ops::{RunBox, probe_caret, probe_runs};
+pub use ops::{RunBox, probe_caret, probe_copy_glyph, probe_runs};
 pub use root::{Root, root};
 pub use run::{Run, RunState, line_ranges, run};
 

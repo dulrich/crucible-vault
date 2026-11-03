@@ -332,6 +332,10 @@ pub enum ReadingMsg {
         run: usize,
         text: String,
     },
+    /// plan round-22 WP-2: an inline code span (or its hover glyph) was clicked: `text` (the whole
+    /// code value, backticks stripped by the parser) goes to the clipboard and the status bar
+    /// shows "Copied".
+    InlineCodeCopy { text: String },
     /// plan round-21 WP-2: the "Copied" confirmation of code block `run` timed out.
     CodeCopiedDone { path: String, view: u64, run: usize },
 }
