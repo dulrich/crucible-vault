@@ -23,6 +23,8 @@ pub enum Target {
     TrackerStatus { key: String },
     /// A tab header: the tab with [`crate::app::Tab::id`] `id` in `pane`.
     Tab { pane: Pane, id: u64, path: String },
+    /// Plan round-22 WP-3: a file (image / PDF) tab header — Copy path, Reveal, Close only.
+    FileTab { id: u64, path: String },
     /// An explorer row (`folder` = a folder row).
     Row { path: String, folder: bool },
     /// plan editor-round-4 WP-4: a Reading image — `src` is the vault path (resolved key) or,
@@ -128,6 +130,11 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
             (Item::CopyPath, "Copy path"),
             (Item::Rename, "Rename"),
             (Item::Delete, "Delete note…"),
+        ]),
+        Target::FileTab { .. } => named(&[
+            (Item::CopyPath, "Copy path"),
+            (Item::Reveal, "Reveal in explorer"),
+            (Item::Close, "Close"),
         ]),
         Target::Row { folder: false, .. } => named(&[
             (Item::Open, "Open"),
@@ -257,6 +264,16 @@ pub fn open_msg(target: Target) -> impl Fn(Point) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_tab_menu_lists_exactly_three_items() {
+        let t = Target::FileTab {
+            id: 1,
+            path: "img/a.png".into(),
+        };
+        let names: Vec<String> = items(&t).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(names, ["Copy path", "Reveal in explorer", "Close"]);
+    }
 
     #[test]
     fn linked_image_menu_lists_link_items_then_image_items() {

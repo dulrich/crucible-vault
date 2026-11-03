@@ -129,7 +129,9 @@ impl App {
                     status: (c != ' ').then_some(c),
                 }))
             }
-            (Target::Tab { id, .. }, Item::Close) => self.close_tab(id),
+            (Target::Tab { id, .. } | Target::FileTab { id, .. }, Item::Close) => {
+                self.close_tab(id)
+            }
             (Target::Tab { pane, id, .. }, Item::CloseOthers) => {
                 let others: Vec<u64> = self
                     .panes
@@ -148,10 +150,10 @@ impl App {
                 }
                 iced::widget::operation::focus(crate::reading::title_id(&path))
             }
-            (Target::Tab { path, .. } | Target::Row { path, .. }, Item::Reveal) => {
-                self.reveal(&path);
-                Task::none()
-            }
+            (
+                Target::Tab { path, .. } | Target::FileTab { path, .. } | Target::Row { path, .. },
+                Item::Reveal,
+            ) => self.reveal(&path),
             (Target::Image { src, remote: false }, Item::CopyImage) => {
                 self.sink.copied_image(&src);
                 let Some(d) = self.daemon.clone() else {
@@ -248,7 +250,12 @@ impl App {
             )
             | (Target::Image { src, remote: true }, Item::CopyUrl)
             | (Target::Image { src, remote: false }, Item::CopyPath)
-            | (Target::Tab { path: src, .. } | Target::Row { path: src, .. }, Item::CopyPath) => {
+            | (
+                Target::Tab { path: src, .. }
+                | Target::FileTab { path: src, .. }
+                | Target::Row { path: src, .. },
+                Item::CopyPath,
+            ) => {
                 self.sink.copied(&src);
                 iced::clipboard::write(src)
             }
@@ -286,9 +293,10 @@ impl App {
         }
     }
 
-    /// Reveal in explorer: open the sidebar, expand the note's ancestor folders, select it.
-    /// (The virtual list has no scroll-to operation, so the row is not scrolled into view.)
-    fn reveal(&mut self, path: &str) {
+    /// Reveal in explorer: open the sidebar, expand the note's ancestor folders, select it, and
+    /// scroll the list so its row sits at the vertical centre (plan round-22 WP-3). The
+    /// viewport height is the explorer's last reported list window (`ListWindow::height`).
+    pub(super) fn reveal(&mut self, path: &str) -> Task<Message> {
         let _ = self.set_side(Some(crate::ui_state::SideSection::Files));
         let mut p = path;
         while let Some((parent, _)) = p.rsplit_once('/') {
@@ -297,6 +305,21 @@ impl App {
         }
         self.explorer.selected = Some(path.to_owned());
         self.explorer.relayout(&self.ui.expanded);
+        let Some(index) = self.explorer.rows.iter().position(|r| r.path == path) else {
+            return Task::none();
+        };
+        let y = crate::explorer::centred_offset(
+            index,
+            self.explorer.rows.len(),
+            self.explorer.window.height,
+        );
+        iced::widget::operation::scroll_to(
+            crate::explorer::list_id(),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
     }
 }
 

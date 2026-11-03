@@ -21,6 +21,19 @@ use crate::widget::virtual_list::{ListWindow, VirtualList};
 /// Row height of the tree.
 pub const ROW_HEIGHT: f32 = 24.0;
 
+/// Plan round-22 WP-3: the explorer list's scrollable id (so reveal can scroll it).
+pub fn list_id() -> iced::widget::Id {
+    iced::widget::Id::new("explorer-list")
+}
+
+/// Plan round-22 WP-3: the scroll offset that puts row `index` (of `len` rows) at the vertical
+/// centre of a `viewport` tall list: `index * ROW_HEIGHT - (viewport - ROW_HEIGHT) / 2`, clamped
+/// to `[0, len * ROW_HEIGHT - viewport]` (0 when the content fits).
+pub fn centred_offset(index: usize, len: usize, viewport: f32) -> f32 {
+    let max = (len as f32 * ROW_HEIGHT - viewport).max(0.0);
+    (index as f32 * ROW_HEIGHT - (viewport - ROW_HEIGHT) / 2.0).clamp(0.0, max)
+}
+
 /// A file operation dispatched over RPC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOp {
@@ -405,6 +418,7 @@ pub fn view<'a>(ex: &'a Explorer, tokens: Tokens) -> Element<'a, Message> {
     let list = VirtualList::new(&ex.rows, ROW_HEIGHT, ex.window, |w| {
         Message::Explorer(ExplorerMsg::Scrolled(w))
     })
+    .id(list_id())
     .view(move |_, r| row_view(r, selected, tokens));
     col.push(list).height(Length::Fill).into()
 }
@@ -468,6 +482,18 @@ mod tests {
 
     use super::*;
     use crate::daemon::{DaemonClient, FakeDaemon};
+
+    #[test]
+    fn centred_offset_centres_a_deep_row_and_clamps_at_both_ends() {
+        // 100 rows of 24 px in a 240 px viewport: row 50 -> 1200 - (240 - 24) / 2 = 1092.
+        assert_eq!(centred_offset(50, 100, 240.0), 1092.0);
+        // Near the top the centred offset is negative: clamped to 0.
+        assert_eq!(centred_offset(2, 100, 240.0), 0.0);
+        // Near the bottom: clamped to content - viewport = 2400 - 240.
+        assert_eq!(centred_offset(99, 100, 240.0), 2160.0);
+        // Content shorter than the viewport never scrolls.
+        assert_eq!(centred_offset(3, 5, 240.0), 0.0);
+    }
 
     /// The pre-WP-2 build: a `folder_files` + `subfolders` call per folder.
     fn per_folder(index: &LocalIndex) -> (BTreeSet<String>, BTreeSet<String>) {

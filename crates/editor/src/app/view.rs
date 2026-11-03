@@ -244,9 +244,9 @@ impl App {
             .height(BAR_HEIGHT)
             .align_y(iced::Alignment::Center);
             // WP-4: right-click a note tab for its context menu.
-            let chip: Element<'a, Message> = match tab.path() {
-                None => chip.into(),
-                Some(p) => crate::context_menu::on_right(
+            // Plan round-22 WP-3: file (image / PDF) tabs get Copy path / Reveal / Close.
+            let chip: Element<'a, Message> = match (tab.path(), tab.file_path()) {
+                (Some(p), _) => crate::context_menu::on_right(
                     chip,
                     crate::context_menu::Target::Tab {
                         pane: tp,
@@ -254,6 +254,14 @@ impl App {
                         path: p.to_owned(),
                     },
                 ),
+                (None, Some(p)) => crate::context_menu::on_right(
+                    chip,
+                    crate::context_menu::Target::FileTab {
+                        id: tab.id,
+                        path: p.to_owned(),
+                    },
+                ),
+                (None, None) => chip.into(),
             };
             // The hovered drop slot shows an accent edge (only while a drag is live).
             let slot = DropTarget::Slot(pane, i);
