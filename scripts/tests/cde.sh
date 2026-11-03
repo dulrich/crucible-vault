@@ -3,6 +3,21 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+
+usage() {
+  cat <<'USAGE'
+usage: scripts/tests/cde.sh [--help | --build | --version]
+
+Hermetic test of scripts/lib/cde.sh against a stub `crucible` in a temp dir.
+Never touches a real CDE socket. Prints one "ok"/"FAIL" line per check and
+"all ok" on success; exits 1 if any check fails.
+USAGE
+}
+case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
+# shellcheck source=../lib/build-id.sh
+. "$HERE/../lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
+
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/run/cde" "$T/home/.local/bin"
