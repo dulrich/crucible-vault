@@ -63,6 +63,9 @@ struct Ctx<'a, 'c> {
     active: Option<usize>,
     /// The tab's selection.
     sel: Option<Selection>,
+    /// plan round-21 WP-2: the code block (run index) under the pointer / just copied.
+    code_hover: Option<usize>,
+    code_copied: Option<usize>,
 }
 
 impl<'a, 'c> Ctx<'a, 'c> {
@@ -160,6 +163,8 @@ pub fn reading<'a>(
         occ: &occ,
         active: find.and_then(|f| f.active),
         sel: store.selection(docs, path, view),
+        code_hover: store.code_ui(docs, path, view).0,
+        code_copied: store.code_ui(docs, path, view).1,
     };
     // Fixed slot 0 (properties, `Space` when absent) keeps every body widget at a stable tree
     // position whether or not the note has frontmatter. The filename edit moved to the note
@@ -355,6 +360,74 @@ fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Mes
         .into()
 }
 
+/// plan round-21 WP-2: the click message of code block `run`'s copy button — carries exactly the
+/// block's stored `code` (no fence, no language line, no added or stripped newline).
+pub(super) fn copy_message(path: &str, view: u64, run: usize, code: &str) -> Message {
+    Message::Reading(ReadingMsg::CodeCopy {
+        path: path.to_owned(),
+        view,
+        run,
+        text: code.to_owned(),
+    })
+}
+
+/// plan round-21 WP-2: `body` (a code block) with a hover-revealed copy button in its top-right
+/// corner. The overlay is a `stack` layer, so the block's size and text layout never change; the
+/// run index `run` (already taken by the caller) keys the hover/copied state.
+fn copy_overlay<'a>(
+    cx: &Ctx<'a, '_>,
+    run: usize,
+    code: &str,
+    body: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let t = cx.t;
+    let (path, view) = (cx.path.to_owned(), cx.view);
+    let over = move |over: bool| {
+        Message::Reading(ReadingMsg::CodeHover {
+            path: path.clone(),
+            view,
+            run,
+            over,
+        })
+    };
+    let overlay: Element<'a, Message> = if cx.code_hover != Some(run) {
+        Space::new().into()
+    } else if cx.code_copied == Some(run) {
+        text("Copied")
+            .size(cx.sz(12.0))
+            .color(t.accent_ui.to_color())
+            .into()
+    } else {
+        let msg = copy_message(cx.path, view, run, code);
+        let glyph = text(crate::icons::Icon::Copy.glyph().to_string())
+            .font(crate::icons::FONT)
+            .size(cx.sz(14.0))
+            .line_height(1.0);
+        button(glyph)
+            .padding(2)
+            .style(move |_: &Theme, status| {
+                let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    text_color: if hot { t.accent_ui } else { t.text_faint }.to_color(),
+                    ..button::Style::default()
+                }
+            })
+            .on_press(msg)
+            .into()
+    };
+    let layer = container(overlay)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Top)
+        .padding(6);
+    let (on_enter, on_exit) = (over.clone()(true), over(false));
+    iced::widget::mouse_area(iced::widget::stack![body, layer])
+        .on_enter(on_enter)
+        .on_exit(on_exit)
+        .into()
+}
+
 fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
     let t = cx.t;
     match b {
@@ -443,7 +516,7 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
                 span(p).font(Font::MONOSPACE).color(t.text.to_color())
             });
             col.push(cx.run_el(i, spans, cx.sz(14.0)));
-            boxed(column(col).spacing(4).into(), t, t.line)
+            copy_overlay(cx, i, code, boxed(column(col).spacing(4).into(), t, t.line))
         }
         Block::BlockQuote(children) => {
             container(column(children.iter().map(|c| block(cx, c))).spacing(6))

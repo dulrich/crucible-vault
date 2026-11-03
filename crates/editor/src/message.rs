@@ -315,6 +315,25 @@ pub enum ReadingMsg {
     },
     /// Plan round-5 WP-7: a selection gesture ended (mouse release): copy to PRIMARY.
     SelectDone { path: String, view: u64 },
+    /// plan round-21 WP-2: the pointer entered (`over`) or left Reading code block `run` (its
+    /// visible-run index in the render) of tab `view` on `path`: shows or hides its copy button.
+    CodeHover {
+        path: String,
+        view: u64,
+        run: usize,
+        over: bool,
+    },
+    /// plan round-21 WP-2: the copy button of code block `run` was clicked: `text` (exactly the
+    /// block's code, no fence or language line) goes to the clipboard and the button reads
+    /// "Copied" for [`crate::reading::COPIED_FOR`].
+    CodeCopy {
+        path: String,
+        view: u64,
+        run: usize,
+        text: String,
+    },
+    /// plan round-21 WP-2: the "Copied" confirmation of code block `run` timed out.
+    CodeCopiedDone { path: String, view: u64, run: usize },
 }
 
 /// WP-4: the file explorer.

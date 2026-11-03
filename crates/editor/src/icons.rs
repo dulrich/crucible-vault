@@ -76,6 +76,9 @@ pub enum Icon {
     Link,
     CornerUpLeft,
     TableProperties,
+    // plan round-21 WP-2: the code-block copy button (copy = U+E0A2, read from the vendored font's
+    // `cmap` + `post` glyph names).
+    Copy,
 }
 
 impl Icon {
@@ -134,6 +137,7 @@ impl Icon {
             Self::Link => '\u{e107}',
             Self::CornerUpLeft => '\u{e0ab}',
             Self::TableProperties => '\u{e4df}',
+            Self::Copy => '\u{e0a2}',
         }
     }
 }
@@ -180,6 +184,7 @@ mod tests {
             (Icon::TableProperties, '\u{e4df}'),
             (Icon::Tags, '\u{e35f}'),
             (Icon::FolderTree, '\u{e33f}'),
+            (Icon::Copy, '\u{e0a2}'),
         ] {
             assert_eq!(i.glyph(), cp);
         }

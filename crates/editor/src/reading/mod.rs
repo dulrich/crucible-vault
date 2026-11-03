@@ -50,6 +50,9 @@ pub const TICK: Duration = Duration::from_millis(250);
 /// first scroll report (it arrives within a frame or two of the activation).
 pub const RESTORE_GUARD: Duration = Duration::from_millis(1000);
 
+/// plan round-21 WP-2: how long a code block's copy button reads "Copied".
+pub const COPIED_FOR: Duration = Duration::from_millis(1500);
+
 /// A tab's display mode: source / reading / split (D9). New tabs open in Reading (plan
 /// editor-cutover-blockers). Persisted per path in `editor.json` (`ui_state::UiState::modes`)
 /// as `"source"` / `"reading"` / `"split"` (the spellings of the former `ui_state::Layout`).
@@ -162,6 +165,10 @@ struct ViewPlace {
     /// for a re-created scrollable) must re-apply the stored place instead of overwriting it.
     /// Plan round-6 WP-2: armed at an instant and honoured only within [`RESTORE_GUARD`].
     restoring: Option<std::time::Instant>,
+    /// plan round-21 WP-2: the code block (visible-run index) under the pointer, and the one
+    /// whose copy was just clicked. Both are cleared when the Doc is replaced.
+    code_hover: Option<usize>,
+    code_copied: Option<usize>,
 }
 
 /// Cross-document reading state: the image cache, the shared resolver, and the settings and
@@ -204,7 +211,11 @@ impl DocReading {
 
     /// Drops every tab's selection (its Doc was replaced or dropped).
     fn clear_selections(&mut self) {
-        self.views.values_mut().for_each(|v| v.sel = None);
+        self.views.values_mut().for_each(|v| {
+            v.sel = None;
+            v.code_hover = None;
+            v.code_copied = None;
+        });
     }
 }
 
@@ -341,6 +352,8 @@ impl ReadingStore {
             entry.views.values_mut().for_each(|v| {
                 v.top = None;
                 v.sel = None;
+                v.code_hover = None;
+                v.code_copied = None;
             });
             self.images.release_owner(od.buffer.path());
         }
@@ -672,6 +685,56 @@ fn update_store(
         ReadingMsg::SelectDone { path, view } => {
             if let Some(text) = store.selection_text(docs, &path, view) {
                 return iced::clipboard::write_primary(text);
+            }
+        }
+        ReadingMsg::CodeHover {
+            path,
+            view,
+            run,
+            over,
+        } => {
+            if let Some(d) = rd_mut(docs, &path) {
+                let v = d.place_mut(view);
+                if over {
+                    v.code_hover = Some(run);
+                } else if v.code_hover == Some(run) {
+                    v.code_hover = None;
+                    if v.code_copied == Some(run) {
+                        v.code_copied = None;
+                    }
+                }
+            }
+        }
+        ReadingMsg::CodeCopy {
+            path,
+            view,
+            run,
+            text,
+        } => {
+            if let Some(d) = rd_mut(docs, &path) {
+                d.place_mut(view).code_copied = Some(run);
+            }
+            return Task::batch([
+                iced::clipboard::write(text),
+                Task::perform(
+                    // Built lazily inside the async block (it needs the executor's reactor).
+                    async { tokio::time::sleep(COPIED_FOR).await },
+                    move |()| {
+                        Message::Reading(ReadingMsg::CodeCopiedDone {
+                            path: path.clone(),
+                            view,
+                            run,
+                        })
+                    },
+                ),
+            ]);
+        }
+        ReadingMsg::CodeCopiedDone { path, view, run } => {
+            if let Some(d) = rd_mut(docs, &path) {
+                let v = d.place_mut(view);
+                if v.code_copied == Some(run) {
+                    v.code_copied = None;
+                }
             }
         }
         // Buffer edits and renames need the app (tabs, explorer, saves): handled in `App`.
