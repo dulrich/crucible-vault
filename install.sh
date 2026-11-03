@@ -33,6 +33,7 @@ EOF
 }
 
 . "$REPO/scripts/lib/build-id.sh"
+. "$REPO/scripts/lib/cde.sh"
 case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
 build_flags "${BASH_SOURCE[0]}" "$@"
 
@@ -157,7 +158,21 @@ if [[ $touch_editor = 1 ]] && pgrep -x cvault-editor >/dev/null; then
   say "closing cvault-editor"
   # A window close request is the editor's Quit: dirty buffers flush first, and the
   # unsaved-edits dialog appears if a save fails. Never killed.
-  if [[ -n ${DISPLAY:-} ]] && command -v wmctrl >/dev/null; then
+  # Under CDE: ask the compositor to close the window by pid (same graceful close request).
+  closed_via_cde=0
+  if cde_sock=$(cde_socket); then
+    for pid in $(pgrep -x cvault-editor); do
+      if reply=$(cde_msg "$cde_sock" close-pid "$pid"); then
+        echo "    asked CDE to close cvault-editor (pid $pid)"
+        closed_via_cde=1
+      else
+        echo "    CDE close-pid failed for pid $pid: $reply"
+      fi
+    done
+  fi
+  if [[ $closed_via_cde = 1 ]]; then
+    :
+  elif [[ -n ${DISPLAY:-} ]] && command -v wmctrl >/dev/null; then
     for pid in $(pgrep -x cvault-editor); do
       wmctrl -lp | awk -v p="$pid" '$3 == p { print $1 }' | while read -r w; do
         wmctrl -i -c "$w" || true
@@ -208,7 +223,15 @@ if [[ $editor_was_running = 1 ]]; then
   say "relaunching cvault-editor"
   # 9>&-: the editor must not inherit the install.lock fd, or it holds the flock for its whole
   # lifetime and every later install.sh fails with "another install.sh is running".
-  setsid -f cvault-editor 9>&- </dev/null >/dev/null 2>&1
+  # Under CDE the compositor spawns it into the focused pane (absolute path: its PATH may lack
+  # the cargo bin dir); otherwise, or if that fails, a detached session.
+  reply=
+  if cde_sock=$(cde_socket) && reply=$(cde_msg "$cde_sock" run "$editor_bin"); then
+    echo "    asked CDE to run cvault-editor"
+  else
+    [[ -z ${reply:-} ]] || echo "    CDE run failed: $reply"
+    setsid -f cvault-editor 9>&- </dev/null >/dev/null 2>&1
+  fi
 fi
 
 [[ $config_ok = 1 ]] || exit 1
