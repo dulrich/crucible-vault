@@ -451,8 +451,9 @@ type = "search_upsert"       # last: indexes the refined + enriched text
 # the cleanup marked (nothing is deleted). Filed clips get it as a step of `clip-enrich`, after
 # `transcript_refine` and before the final search refresh (the chain is already at the depth limit);
 # new tracker blog and mail notes get it as a child job enqueued by `track_blogs` / `track_mail`
-# once the note is final. Same `clip::enrich` key as `clip-enrich`, so slow enrichment never holds
-# both queue slots. `force` re-runs an enriched note. `transcript_refine` runs first (plan
+# once the note is final. Same `clip::enrich` key as `clip-enrich`, so enrich runs serialize on that
+# key and slow enrichment never occupies more than one of the 3 general slots (the 1 fast slot is
+# separate). `force` re-runs an enriched note. `transcript_refine` runs first (plan
 # youtube-transcript-auto-refine, D30): a refined YouTube note is re-enriched forced, so the top
 # block and fold are built on the refined text.
 [[action]]

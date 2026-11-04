@@ -42,6 +42,7 @@ EOF
 
 . "$REPO/scripts/lib/build-id.sh"
 . "$REPO/scripts/lib/cde.sh"
+. "$REPO/scripts/lib/backup.sh"
 case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
 build_flags "${BASH_SOURCE[0]}" "$@"
 
@@ -82,14 +83,7 @@ phases_of() {
     done )
 }
 
-# Backs up a file into this run's backup dir (migrations call it before editing).
-backup() {
-  local f=$1
-  [[ -e $f ]] || return 0
-  mkdir -p "$BACKUP_DIR"
-  cp -p -- "$f" "$BACKUP_DIR/$(basename "$f")"
-  echo "    backup: $BACKUP_DIR/$(basename "$f")"
-}
+# `backup <file>` (scripts/lib/backup.sh, sourced above) copies a file into this run's backup dir; migrations call it before editing.
 export -f backup
 
 run_phase() {
