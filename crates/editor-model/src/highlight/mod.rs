@@ -62,7 +62,11 @@ pub struct LineState {
 /// One span.
 pub type Span = (Range<usize>, Kind);
 
-fn fence_open(line: &str) -> Option<(u8, usize)> {
+/// The fence char and run length when `line` opens a fenced code block (CommonMark): at most 3
+/// spaces of indent (a tab is 4 columns, so a tab-indented line never opens), a run of at least
+/// 3 `` ` `` or `~`, and for a backtick fence an info string with no backtick. The one fence rule
+/// of `editor-model`, shared with [`crate::comments`] (plan tn-review-2026-11-04-remediation E7).
+pub(crate) fn fence_open(line: &str) -> Option<(u8, usize)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
         return None;
@@ -79,10 +83,17 @@ fn fence_open(line: &str) -> Option<(u8, usize)> {
     Some((ch, len))
 }
 
-fn fence_closes(line: &str, ch: u8, len: usize) -> bool {
-    let t = line.trim();
-    let n = t.bytes().take_while(|&b| b == ch).count();
-    n >= len && n == t.len() && line.len() - line.trim_start_matches(' ').len() <= 3
+/// Whether `line` closes a fence opened with `len` × `ch` (CommonMark): at most 3 spaces of
+/// indent (a tab-indented line is code content, not a close), a run of at least `len` × `ch`,
+/// then only spaces or tabs.
+pub(crate) fn fence_closes(line: &str, ch: u8, len: usize) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = line[indent..].trim_end_matches([' ', '\t']);
+    let n = rest.bytes().take_while(|&b| b == ch).count();
+    n >= len && n == rest.len()
 }
 
 /// Scans one line (without its line ending) from `state`.

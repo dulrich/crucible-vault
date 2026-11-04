@@ -107,6 +107,17 @@ fn fences_carry_state_backtick_and_tilde() {
     assert_eq!(s[8], vec![(0..5, Kind::Tag)]);
 }
 
+/// E7 (CommonMark, shared with `comments`): a tab-indented fence line is code content, not a
+/// close; a close may carry trailing spaces or tabs.
+#[test]
+fn tab_indented_fence_line_does_not_close() {
+    let s = scan_document("```\n\t```\n#in\n``` \t\n#out");
+    assert_eq!(s[1], vec![(0..4, Kind::Code)]);
+    assert_eq!(s[2], vec![(0..3, Kind::Code)]);
+    assert_eq!(s[3], vec![(0..5, Kind::FenceMarker)]);
+    assert_eq!(s[4], vec![(0..4, Kind::Tag)]);
+}
+
 #[test]
 fn callout_state_tracks_continuation() {
     let (_, st) = scan_line(LineState::default(), "> [!warning] Careful");

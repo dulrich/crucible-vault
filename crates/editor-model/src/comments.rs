@@ -13,20 +13,9 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-/// The fence char and run length of a fence line (≤ 3 spaces indent, ≥ 3 `` ` `` or `~`).
-fn fence(line: &str) -> Option<(u8, usize)> {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    if indent > 3 {
-        return None;
-    }
-    let rest = &line[indent..];
-    let ch = *rest.as_bytes().first()?;
-    if ch != b'`' && ch != b'~' {
-        return None;
-    }
-    let len = rest.bytes().take_while(|&b| b == ch).count();
-    (len >= 3).then_some((ch, len))
-}
+// Fences follow the highlighter's one CommonMark rule, so Reading and Source agree on what is
+// code (plan tn-review-2026-11-04-remediation E7).
+use crate::highlight::{fence_closes, fence_open};
 
 /// Byte ranges (delimiters included) of every closed `%% … %%` comment in `src`, in order.
 pub fn comment_ranges(src: &str) -> Vec<Range<usize>> {
@@ -40,12 +29,12 @@ pub fn comment_ranges(src: &str) -> Vec<Range<usize>> {
         let text = line.trim_end_matches(['\n', '\r']);
         if open.is_none() {
             if let Some((ch, len)) = fenced {
-                if fence(text).is_some_and(|(c, n)| c == ch && n >= len && text.trim().len() == n) {
+                if fence_closes(text, ch, len) {
                     fenced = None;
                 }
                 continue;
             }
-            if let Some(f) = fence(text) {
+            if let Some(f) = fence_open(text) {
                 fenced = Some(f);
                 continue;
             }
@@ -138,6 +127,16 @@ mod tests {
         // After the fence closes, comments count again; an unmatched backtick is plain text.
         assert_eq!(hidden("```\nx\n```\n%%c%%\n"), ["%%c%%"]);
         assert_eq!(hidden("a ` b %%c%%\n"), ["%%c%%"]);
+    }
+
+    /// E7: the CommonMark fence rule shared with the highlighter. A backtick in a backtick
+    /// fence's info string makes the line text, so the comment after it is hidden; a
+    /// tab-indented fence line inside a block is code content, not a close.
+    #[test]
+    fn fence_edges_follow_commonmark() {
+        assert_eq!(hidden("```a`b\n%% draft %%\ntext\n"), ["%% draft %%"]);
+        assert!(hidden("```\ncode\n\t```\n%% secret %%\n```\n").is_empty());
+        assert_eq!(hidden("```\nx\n``` \t\n%%c%%\n"), ["%%c%%"]);
     }
 
     #[test]
