@@ -2,31 +2,17 @@
 //! [`StepEnv`] (never the live vault, never the network).
 
 use cv_actions::pipelines::SupersedeConfig;
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec};
+use cv_actions::{Action, ConfigSet, ResourceSpec};
 use cv_ingest::access::Access;
 use cv_protocol::TrackerOutcome;
 use cv_state::TrackerItem;
 use cv_vault::test_support::LiveFixture;
 
 use super::{Action as Verdict, Incoming, Origin, SupersedeIndex, resolve};
-use crate::steps::testkit::StepEnv;
+use crate::steps::testkit::{ActionBuilder, StepEnv};
 
 fn action() -> Action {
-    Action {
-        id: "intake".into(),
-        label: "Intake".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec::default(),
-    }
+    ActionBuilder::new("intake", vec![], ResourceSpec::default()).build()
 }
 
 fn env(files: &[(&str, String)]) -> StepEnv {

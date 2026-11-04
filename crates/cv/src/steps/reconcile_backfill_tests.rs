@@ -2,7 +2,7 @@
 //! synthetic `.eml` files (invented senders and text) in a temp Maildir and a temp `state.db`;
 //! never the network, never the live vault.
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_protocol::TrackerOutcome;
 use cv_state::TrackerItem;
 use cv_vault::test_support::LiveFixture;
@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::reconcile_backfill::{Counts, recleaned};
 use super::{reconcile_backfill, reconcile_repair};
 use crate::steps::mail::{KIND, UNKNOWN};
-use crate::steps::testkit::{StepEnv, config_of};
+use crate::steps::testkit::{ActionBuilder, StepEnv, config_of};
 use crate::steps::{StepOutcome, execute};
 
 const VID: &str = "dQw4w9WgXcQ";
@@ -27,21 +27,7 @@ struct World {
 }
 
 fn action() -> Action {
-    Action {
-        id: "intake-reconcile".into(),
-        label: "Reconcile".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec::default(),
-    }
+    ActionBuilder::new("intake-reconcile", vec![], ResourceSpec::default()).build()
 }
 
 fn config(mail: &tempfile::TempDir, sources: &str) -> ConfigSet {

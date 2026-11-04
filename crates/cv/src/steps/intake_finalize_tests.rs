@@ -1,33 +1,19 @@
 //! `intake_finalize` tests (plan intake-followups-mail-youtube WP-4): synthetic temp vaults and a
 //! temp `state.db` (never the live vault).
 
-use cv_actions::{Action, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ResourceSpec, Step};
 use cv_protocol::{ActionContext, TrackerOutcome};
 use cv_state::TrackerItem;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
-use crate::steps::testkit::{StepEnv, config_of};
+use crate::steps::testkit::{ActionBuilder, StepEnv, config_of};
 use crate::steps::{StepOutcome, validate};
 
 const VID: &str = "dQw4w9WgXcQ";
 
 fn action() -> Action {
-    Action {
-        id: "file-as-kind".into(),
-        label: "File".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec::default(),
-    }
+    ActionBuilder::new("file-as-kind", vec![], ResourceSpec::default()).build()
 }
 
 fn env(files: &[(&str, String)]) -> StepEnv {

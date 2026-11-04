@@ -2,52 +2,19 @@
 //! `cv_testkit::MockHttp` posing as an `openai-compatible` provider, synthetic notes in a temp
 //! vault. No real provider is ever called.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec};
+use cv_actions::{Action, ConfigSet, ResourceSpec};
 use cv_protocol::ActionContext;
-use cv_providers::{ProviderManager, SecretSource};
 use cv_state::FailureReason;
-use cv_testkit::MockHttp;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
 use super::intake_enrich::{Params, already_enriched, parse, pick_backfill, reattach, run_note};
-use super::testkit::{AtRecorder, StepEnv};
+use super::testkit::{ActionBuilder, AtRecorder, Hook, StepEnv, fake, mgr, providers};
 use super::{DeferCause, StepError, StepOutcome, job_pos_int};
-
-struct TestSecrets(HashMap<String, String>);
-impl SecretSource for TestSecrets {
-    fn env_var(&self, name: &str) -> Option<String> {
-        self.0.get(name).cloned()
-    }
-    fn secret_file(&self, _name: &str) -> Option<String> {
-        None
-    }
-}
-
-fn mgr() -> ProviderManager {
-    let mut m = HashMap::new();
-    m.insert("CV_TEST_KEY".to_owned(), "test-key".to_owned());
-    ProviderManager::new(Arc::new(TestSecrets(m))).unwrap()
-}
-
-type Hook = Arc<dyn Fn() + Send + Sync>;
-
-/// A fake provider answering every request with `text` (finish `finish`), counting requests.
-fn fake(status: u16, text: &str, finish: &str, hook: Option<Hook>) -> (String, MockHttp) {
-    let body =
-        json!({"choices": [{"message": {"content": text}, "finish_reason": finish}]}).to_string();
-    let m = MockHttp::start(move |_| {
-        if let Some(h) = &hook {
-            h();
-        }
-        cv_testkit::Reply::json(status, body.clone())
-    });
-    (format!("{}/v1", m.url()), m)
-}
 
 const AGENTS: &str = r#"
 [intake-enrich]
@@ -57,20 +24,6 @@ input = "{{content}}"
 model = "fake:m1"
 max_tokens = 100
 "#;
-
-fn providers(base: &str, key_env: &str) -> String {
-    format!(
-        r#"
-[[provider]]
-id = "fake"
-kind = "openai-compatible"
-base_url = "{base}"
-api_key_env = "{key_env}"
-[[provider.models]]
-id = "m1"
-"#
-    )
-}
 
 fn config(base: &str, key_env: &str) -> ConfigSet {
     let mut c = ConfigSet::new();
@@ -84,24 +37,15 @@ fn config(base: &str, key_env: &str) -> ConfigSet {
 }
 
 fn action() -> Action {
-    Action {
-        id: "intake-enrich".into(),
-        label: "Intake: enrich note".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec {
+    ActionBuilder::new(
+        "intake-enrich",
+        vec![],
+        ResourceSpec {
             note: true,
             keys: vec!["clip::enrich".into()],
         },
-    }
+    )
+    .build()
 }
 
 fn env(base: &str, key_env: &str) -> Arc<StepEnv> {

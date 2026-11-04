@@ -4,14 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
-use cv_actions::{Action, LaneChoice, ResourceSpec, Step};
+use cv_actions::{ResourceSpec, Step};
 use cv_protocol::TrackerOutcome;
 use cv_state::TrackerItem;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Value, json};
 
 use crate::steps::mail::KIND;
-use crate::steps::testkit::{StepEnv, config_of};
+use crate::steps::testkit::{ActionBuilder, StepEnv, config_of};
 use crate::steps::{StepOutcome, execute};
 
 const FEED: &str = "https://paid.example/feed";
@@ -86,21 +86,7 @@ fn world_with(sources: &str, files: &[(&str, String)]) -> World {
         ("kinds.toml", KINDS),
         ("captures.toml", CAPTURES),
     ]);
-    let action = Action {
-        id: "track-mail".into(),
-        label: "Track mail".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec::default(),
-    };
+    let action = ActionBuilder::new("track-mail", vec![], ResourceSpec::default()).build();
     let fx = LiveFixture::new(files.iter().map(|(p, t)| (*p, t.clone())));
     World {
         env: StepEnv::new(fx, config, action),

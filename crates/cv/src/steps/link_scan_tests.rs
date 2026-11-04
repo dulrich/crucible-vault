@@ -1,6 +1,6 @@
 //! WP-3 `link_scan` tests: a synthetic temp vault and a temp `state.db` (never the live vault).
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{ConfigSet, ResourceSpec, Step};
 use cv_protocol::ActionContext;
 use cv_state::StateDb;
 use cv_vault::test_support::LiveFixture;
@@ -8,30 +8,21 @@ use serde_json::json;
 
 use super::{is_excluded, normalize_exclusions};
 use crate::steps::StepOutcome;
-use crate::steps::testkit::StepEnv;
+use crate::steps::testkit::{ActionBuilder, StepEnv};
 use crate::steps::{execute, validate};
 
 type Env = StepEnv;
 
 fn env(files: &[(&str, &str)]) -> Env {
-    let action = Action {
-        id: "link-scan".into(),
-        label: "Link scan".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec {
+    let action = ActionBuilder::new(
+        "link-scan",
+        vec![],
+        ResourceSpec {
             note: false,
             keys: vec![],
         },
-    };
+    )
+    .build();
     StepEnv::new(
         LiveFixture::new(files.iter().copied()),
         ConfigSet::new(),

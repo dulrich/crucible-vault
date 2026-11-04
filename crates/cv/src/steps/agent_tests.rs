@@ -2,67 +2,21 @@
 //! `openai-compatible` provider, synthetic notes in temp dirs.
 //! No real provider is ever called.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_protocol::{ActionContext, ParamKind, ParamSpec};
-use cv_providers::{ProviderManager, SecretSource};
+use cv_providers::ProviderManager;
 use cv_state::FailureReason;
 use cv_testkit::MockHttp;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value};
 
 use super::agent;
-use super::testkit::StepEnv;
+use super::testkit::{ActionBuilder, Hook, StepEnv, fake, fake_raw, mgr};
 use super::{DeferCause, StepError, StepOutcome};
-
-struct TestSecrets(HashMap<String, String>);
-impl SecretSource for TestSecrets {
-    fn env_var(&self, name: &str) -> Option<String> {
-        self.0.get(name).cloned()
-    }
-    fn secret_file(&self, _name: &str) -> Option<String> {
-        None
-    }
-}
-
-fn mgr() -> ProviderManager {
-    let mut m = HashMap::new();
-    m.insert("CV_TEST_KEY".to_owned(), "test-key".to_owned());
-    ProviderManager::new(Arc::new(TestSecrets(m))).unwrap()
-}
-
-/// One canned reply; `hook` runs before replying (simulates an edit during the slow call).
-#[derive(Clone)]
-struct Reply {
-    status: u16,
-    body: String,
-    hook: Option<Arc<dyn Fn() + Send + Sync>>,
-}
-
-fn ok_reply(text: &str, finish: &str) -> Reply {
-    Reply {
-        status: 200,
-        body: serde_json::json!({
-            "choices": [{"message": {"content": text}, "finish_reason": finish}]
-        })
-        .to_string(),
-        hook: None,
-    }
-}
-
-/// Serves `reply` on 127.0.0.1; returns the base URL and the mock (its recorded requests).
-async fn fake_provider(reply: Reply) -> (String, MockHttp) {
-    let m = MockHttp::start(move |_| {
-        if let Some(h) = &reply.hook {
-            h();
-        }
-        cv_testkit::Reply::json(reply.status, reply.body.clone())
-    });
-    (format!("{}/v1", m.url()), m)
-}
 
 /// The JSON request bodies the fake provider received.
 fn bodies(m: &MockHttp) -> Vec<Value> {
@@ -128,31 +82,23 @@ fn step(src: &str) -> Step {
 }
 
 fn action() -> Action {
-    Action {
-        id: "refine".into(),
-        label: "Refine".into(),
-        group: None,
-        keys: vec![],
-        params: vec![ParamSpec {
-            name: "provider".into(),
-            label: "Provider".into(),
-            kind: ParamKind::Enum,
-            required: true,
-            choices: vec![],
-            default: None,
-        }],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec {
+    ActionBuilder::new(
+        "refine",
+        vec![],
+        ResourceSpec {
             note: true,
             keys: vec![],
         },
-    }
+    )
+    .params(vec![ParamSpec {
+        name: "provider".into(),
+        label: "Provider".into(),
+        kind: ParamKind::Enum,
+        required: true,
+        choices: vec![],
+        default: None,
+    }])
+    .build()
 }
 
 type Env = StepEnv;
@@ -284,7 +230,7 @@ fn shipped_examples_validate_a_refine_step() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn renders_content_into_var() {
-    let (base, seen) = fake_provider(ok_reply("REFINED", "stop")).await;
+    let (base, seen) = fake(200, "REFINED", "stop", None);
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "notes/talk.md", "---\ntags: [x]\n---\nraw words\n");
     let out = exec(
@@ -312,7 +258,7 @@ async fn renders_content_into_var() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prompt_file_and_param_model() {
-    let (base, seen) = fake_provider(ok_reply("OUT", "stop")).await;
+    let (base, seen) = fake(200, "OUT", "stop", None);
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "_custom/prompts/p.md", "Body: {{content}}");
     note(&e, "n.md", "hello");
@@ -370,7 +316,7 @@ async fn prompt_file_and_param_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replace_mode_cas_write() {
-    let (base, _mock) = fake_provider(ok_reply("clean text", "stop")).await;
+    let (base, _mock) = fake(200, "clean text", "stop", None);
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "t.md", "---\na: 1\n---\nmessy\n");
     let out = exec(
@@ -399,13 +345,12 @@ async fn replace_mode_cas_write() {
 async fn replace_mode_conflict_defers_and_never_clobbers() {
     let slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     let s2 = Arc::clone(&slot);
-    let mut reply = ok_reply("clobber", "stop");
-    reply.hook = Some(Arc::new(move || {
+    let hook: Hook = Arc::new(move || {
         if let Some(p) = s2.lock().unwrap().as_ref() {
             std::fs::write(p, "user edit\n").unwrap();
         }
-    }));
-    let (base, _mock) = fake_provider(reply).await;
+    });
+    let (base, _mock) = fake(200, "clobber", "stop", Some(hook));
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "c.md", "original\n");
     *slot.lock().unwrap() = Some(e.fx.path("c.md"));
@@ -431,12 +376,7 @@ async fn replace_mode_conflict_defers_and_never_clobbers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outage_is_deferred() {
-    let (base, _mock) = fake_provider(Reply {
-        status: 503,
-        body: "{}".into(),
-        hook: None,
-    })
-    .await;
+    let (base, _mock) = fake_raw(503, "{}".into(), None);
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "n.md", "x");
     let err = exec(
@@ -483,12 +423,7 @@ async fn outage_is_deferred() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_4xx_fails() {
-    let (base, _mock) = fake_provider(Reply {
-        status: 400,
-        body: "{}".into(),
-        hook: None,
-    })
-    .await;
+    let (base, _mock) = fake_raw(400, "{}".into(), None);
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     let err = exec(Arc::clone(&e), "agent = \"refine\"", Map::new(), None)
         .await
@@ -501,7 +436,7 @@ async fn http_4xx_fails() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_key_is_no_api_key() {
-    let (base, seen) = fake_provider(ok_reply("x", "stop")).await;
+    let (base, seen) = fake(200, "x", "stop", None);
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     let err = exec(
         Arc::clone(&e),
@@ -526,7 +461,7 @@ async fn missing_key_is_no_api_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn truncation_fails_and_writes_nothing() {
-    let (base, _mock) = fake_provider(ok_reply("half", "length")).await;
+    let (base, _mock) = fake(200, "half", "length", None);
     let e = Arc::new(env(config_with(AGENTS, &providers_toml(&base))));
     note(&e, "n.md", "orig\n");
     let err = exec(

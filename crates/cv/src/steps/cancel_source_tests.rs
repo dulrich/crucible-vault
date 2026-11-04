@@ -3,14 +3,14 @@
 
 use std::collections::BTreeMap;
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_protocol::TrackerOutcome;
 use cv_state::TrackerItem;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
 use super::cancel_source::{cancel_orphaned, mail_keys};
-use crate::steps::testkit::StepEnv;
+use crate::steps::testkit::{ActionBuilder, StepEnv};
 use crate::steps::{StepError, StepOutcome, execute, validate};
 
 fn config(sources: &str) -> ConfigSet {
@@ -22,21 +22,7 @@ fn config(sources: &str) -> ConfigSet {
 }
 
 fn action() -> Action {
-    Action {
-        id: "cancel-source-intake".into(),
-        label: "Cancel".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec::default(),
-    }
+    ActionBuilder::new("cancel-source-intake", vec![], ResourceSpec::default()).build()
 }
 
 fn env(sources: &str) -> StepEnv {

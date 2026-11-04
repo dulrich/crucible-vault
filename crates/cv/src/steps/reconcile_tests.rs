@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_ingest::access::Access;
 use cv_protocol::TrackerOutcome;
 use cv_providers::FailureKind;
@@ -15,7 +15,7 @@ use cv_vault::test_support::LiveFixture;
 use serde_json::{Value, json};
 
 use super::reconcile::{ProbeOutcome, body_verdict, classify_probe};
-use crate::steps::testkit::StepEnv;
+use crate::steps::testkit::{ActionBuilder, StepEnv};
 use crate::steps::{StepError, StepOutcome, execute, validate};
 
 type Routes = Arc<Mutex<Vec<(String, u16, String)>>>;
@@ -36,21 +36,7 @@ impl std::ops::Deref for World {
 }
 
 fn action() -> Action {
-    Action {
-        id: "intake-reconcile".into(),
-        label: "Reconcile".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec::default(),
-    }
+    ActionBuilder::new("intake-reconcile", vec![], ResourceSpec::default()).build()
 }
 
 /// `files` use `BASE` for the fixture server's base URL.

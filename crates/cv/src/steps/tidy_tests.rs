@@ -4,13 +4,13 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_state::NewTrashEntry;
 use cv_vault::test_support::LiveFixture;
 use cv_vault::{ContentHash, FileIdentity, TrashLocation, TrashMove, TrashReason, TrashRecord};
 
 use super::{DAY_MS, Params, run_in, sweep_one};
-use crate::steps::testkit::{StepEnv, config_of};
+use crate::steps::testkit::{ActionBuilder, StepEnv, config_of};
 use crate::steps::{StepOutcome, validate};
 
 const ORPH: &str = "a/orph_MD5.png";
@@ -18,24 +18,15 @@ const REFD: &str = "a/refd_MD5.png";
 const YOUNG: &str = "a/young_MD5.png";
 
 fn action() -> Action {
-    Action {
-        id: "vault-tidy".into(),
-        label: "Tidy".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec {
+    ActionBuilder::new(
+        "vault-tidy",
+        vec![],
+        ResourceSpec {
             note: false,
             keys: vec![],
         },
-    }
+    )
+    .build()
 }
 
 fn env_with(files: &[(&str, &str)], config: ConfigSet) -> StepEnv {

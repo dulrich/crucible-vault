@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_protocol::ActionContext;
 use cv_providers::secrets::SecretSource;
 use cv_state::FailureReason;
@@ -13,7 +13,7 @@ use cv_testkit::{MockHttp, Reply};
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
-use crate::steps::testkit::StepEnv;
+use crate::steps::testkit::{ActionBuilder, StepEnv};
 use crate::steps::web::{Overrides, create_or_found, test_overrides};
 use crate::steps::{DeferCause, StepError, StepOutcome};
 use crate::steps::{execute, validate};
@@ -96,24 +96,15 @@ fn step(kind: &str, src: &str) -> Step {
 }
 
 fn action() -> Action {
-    Action {
-        id: "yt-metadata".into(),
-        label: "YT".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec {
+    ActionBuilder::new(
+        "yt-metadata",
+        vec![],
+        ResourceSpec {
             note: true,
             keys: vec![],
         },
-    }
+    )
+    .build()
 }
 
 fn run(

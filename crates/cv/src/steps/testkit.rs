@@ -1,19 +1,122 @@
 //! Shared step-test harness: [`StepEnv`] owns a
 //! [`LiveFixture`] (temp vault + writer), a temp `state.db` and the
 //! config, and hands out [`StepCtx`]s; tests override single `StepCtx` fields where they differ.
-//! Also hosts the example-config harness the materialize/capture/file/lint tests share.
+//! Also hosts the plain-[`Action`] builder, the provider fakes (secrets, manager, fake completion
+//! server, `providers.toml` text) and the example-config harness the materialize/capture/file/lint tests share.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{Action, ConfigSet, Step};
-use cv_protocol::ActionContext;
+use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_protocol::{ActionContext, ParamSpec};
+use cv_providers::{ProviderManager, SecretSource};
 use cv_state::{QueueConfig, StateDb};
+use cv_testkit::MockHttp;
 use cv_vault::test_support::LiveFixture;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{ChildSpawner, StepCtx, StepError, StepOutcome};
+
+/// Builds a plain test [`Action`]: id, steps and resources are explicit, every other field is the
+/// default the plain literals used (`label` = the id, no group/keys/params/needs, `Auto` lane,
+/// durable, `hold`/`fast` false, no starters); a test that needs another field sets it through
+/// the builder method.
+pub(crate) struct ActionBuilder(Action);
+
+impl ActionBuilder {
+    pub fn new(id: &str, steps: Vec<Step>, resources: ResourceSpec) -> Self {
+        Self(Action {
+            id: id.into(),
+            label: id.into(),
+            group: None,
+            keys: vec![],
+            params: vec![],
+            needs: vec![],
+            lane: LaneChoice::Auto,
+            durable: true,
+            hold: false,
+            fast: false,
+            steps,
+            starters: vec![],
+            resources,
+        })
+    }
+
+    /// The action's prompted parameters.
+    #[must_use]
+    pub fn params(mut self, params: Vec<ParamSpec>) -> Self {
+        self.0.params = params;
+        self
+    }
+
+    pub fn build(self) -> Action {
+        self.0
+    }
+}
+
+/// A secret source answering `env_var` from a map and no secret files.
+pub(crate) struct TestSecrets(pub HashMap<String, String>);
+impl SecretSource for TestSecrets {
+    fn env_var(&self, name: &str) -> Option<String> {
+        self.0.get(name).cloned()
+    }
+    fn secret_file(&self, _name: &str) -> Option<String> {
+        None
+    }
+}
+
+/// A provider manager whose only secret is `CV_TEST_KEY = "test-key"`.
+pub(crate) fn mgr() -> ProviderManager {
+    let mut m = HashMap::new();
+    m.insert("CV_TEST_KEY".to_owned(), "test-key".to_owned());
+    ProviderManager::new(Arc::new(TestSecrets(m))).unwrap()
+}
+
+/// Runs before a fake provider replies (simulates an edit during the slow call).
+pub(crate) type Hook = Arc<dyn Fn() + Send + Sync>;
+
+/// An OpenAI chat-completions body with one choice.
+pub(crate) fn completion(text: &str, finish: &str) -> String {
+    json!({"choices": [{"message": {"content": text}, "finish_reason": finish}]}).to_string()
+}
+
+/// A fake provider answering every request with `status` and the raw `body` (after `hook`);
+/// returns the base URL and the mock (its recorded requests).
+pub(crate) fn fake_raw(status: u16, body: String, hook: Option<Hook>) -> (String, MockHttp) {
+    let m = MockHttp::start(move |_| {
+        if let Some(h) = &hook {
+            h();
+        }
+        cv_testkit::Reply::json(status, body.clone())
+    });
+    (format!("{}/v1", m.url()), m)
+}
+
+/// A fake provider answering every request with a completion of `text` (finish `finish`).
+pub(crate) fn fake(
+    status: u16,
+    text: &str,
+    finish: &str,
+    hook: Option<Hook>,
+) -> (String, MockHttp) {
+    fake_raw(status, completion(text, finish), hook)
+}
+
+/// A `providers.toml` with one `fake` openai-compatible provider (model `m1`) keyed by `key_env`.
+pub(crate) fn providers(base: &str, key_env: &str) -> String {
+    format!(
+        r#"
+[[provider]]
+id = "fake"
+kind = "openai-compatible"
+base_url = "{base}"
+api_key_env = "{key_env}"
+[[provider.models]]
+id = "m1"
+"#
+    )
+}
 
 /// Spawns nothing (tests that do not exercise child jobs): every spawn succeeds as a no-op, so
 /// an action ending in `run_action` (e.g. `file-as-kind` → `clip-enrich`) runs to completion.

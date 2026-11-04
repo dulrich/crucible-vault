@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
+use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_protocol::TrackerOutcome;
 use cv_testkit::{MockHttp, Reply};
 use cv_vault::test_support::LiveFixture;
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::super::hook;
 use super::KIND;
-use crate::steps::testkit::StepEnv;
+use crate::steps::testkit::{ActionBuilder, StepEnv};
 use crate::steps::{StepError, StepOutcome};
 use crate::steps::{execute, validate};
 
@@ -136,21 +136,7 @@ fn step(src: &str) -> Step {
 }
 
 fn action() -> Action {
-    Action {
-        id: "track-blogs".into(),
-        label: "Track blogs".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec::default(),
-    }
+    ActionBuilder::new("track-blogs", vec![], ResourceSpec::default()).build()
 }
 
 fn run(w: &World) -> Result<StepOutcome, StepError> {

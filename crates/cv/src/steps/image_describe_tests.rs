@@ -5,8 +5,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use cv_actions::{Action, ConfigSet, LaneChoice, ResourceSpec, Step};
-use cv_providers::{ProviderManager, SecretSource};
+use cv_actions::{ConfigSet, ResourceSpec, Step};
 use cv_state::{FailureReason, ImageDescription};
 use cv_testkit::{MockHttp, Reply};
 use cv_vault::test_support::LiveFixture;
@@ -16,21 +15,11 @@ use super::{
     MAX_LONG_EDGE, describe_wire, extract_svg_text, fit_long_edge, fnv1a32_hex, is_repetition_loop,
     parse, prepare_image, run,
 };
-use crate::steps::testkit::StepEnv;
+use crate::steps::testkit::{ActionBuilder, StepEnv, completion, mgr};
 use crate::steps::{DeferCause, StepError, StepOutcome};
 
 const MD5_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MD5_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-struct TestSecrets;
-impl SecretSource for TestSecrets {
-    fn env_var(&self, name: &str) -> Option<String> {
-        (name == "CV_TEST_KEY").then(|| "test-key".to_owned())
-    }
-    fn secret_file(&self, _name: &str) -> Option<String> {
-        None
-    }
-}
 
 fn png(w: u32, h: u32) -> Vec<u8> {
     let img = image::DynamicImage::ImageLuma8(image::GrayImage::new(w, h));
@@ -63,10 +52,7 @@ impl Seen {
 }
 
 fn ok(text: &str) -> (u16, String) {
-    (
-        200,
-        json!({"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}).to_string(),
-    )
+    (200, completion(text, "stop"))
 }
 
 fn config(base: &str, enabled: bool, provider: &str) -> ConfigSet {
@@ -117,24 +103,15 @@ id = "vl"
 type Env = StepEnv;
 
 fn env(files: &[(&str, Vec<u8>)]) -> Env {
-    let action = Action {
-        id: "image-describe-note".into(),
-        label: "Describe".into(),
-        group: None,
-        keys: vec![],
-        params: vec![],
-        needs: vec![],
-        lane: LaneChoice::Auto,
-        durable: true,
-        hold: false,
-        fast: false,
-        steps: vec![],
-        starters: vec![],
-        resources: ResourceSpec {
+    let action = ActionBuilder::new(
+        "image-describe-note",
+        vec![],
+        ResourceSpec {
             note: true,
             keys: vec![],
         },
-    };
+    )
+    .build();
     let mut env = StepEnv::new(
         LiveFixture::new(files.iter().map(|(r, b)| (*r, b))),
         ConfigSet::new(),
@@ -161,7 +138,7 @@ fn exec(e: &Env, cfg: &ConfigSet, src: &str) -> Result<StepOutcome, StepError> {
     let mut ctx = e.ctx();
     ctx.config = cfg;
     let t: toml::Table = format!("type = \"image_describe\"\n{src}").parse().unwrap();
-    let mgr = ProviderManager::new(Arc::new(TestSecrets)).unwrap();
+    let mgr = mgr();
     run(
         &parse(&Step::from_table(t).unwrap().params).unwrap(),
         &mut ctx,
