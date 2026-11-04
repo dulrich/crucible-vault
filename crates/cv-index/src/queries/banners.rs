@@ -72,7 +72,6 @@ enum Key {
 }
 
 struct Candidate {
-    line: usize,
     span: (usize, usize),
     key: Key,
 }
@@ -160,7 +159,7 @@ fn candidates(q: &Query<'_>, note: &str) -> Result<Vec<Candidate>> {
     let mut out = Vec::new();
     for row in rows {
         let (kind, target, external, line, s, e, rpath, rname, rext) = row?;
-        let (Ok(line), Ok(s), Ok(e)) = (
+        let (Ok(_), Ok(s), Ok(e)) = (
             usize::try_from(line),
             usize::try_from(s),
             usize::try_from(e),
@@ -185,11 +184,7 @@ fn candidates(q: &Query<'_>, note: &str) -> Result<Vec<Candidate>> {
                 Key::Path(path)
             }
         };
-        out.push(Candidate {
-            line,
-            span: (s, e),
-            key,
-        });
+        out.push(Candidate { span: (s, e), key });
     }
     Ok(out)
 }
@@ -224,17 +219,13 @@ fn key_count(q: &Query<'_>, ids: &str, key: &Key) -> Result<i64> {
     Ok(n)
 }
 
-/// The exact embed texts in `note` (whose full `text` and `body_offset` — the byte where the
-/// body starts — the caller holds) that are recurring banners, in document order, deduplicated.
-/// Texts are sliced from `text` by the indexed byte span (wiki `raw` is faithful but md-image
+/// The exact embed texts in `note` (whose frontmatter-free `body` the caller holds) that are
+/// recurring banners, in document order, deduplicated. The indexed spans are whole-file offsets;
+/// the frontmatter length is the indexed file size minus `body`'s length. Texts are sliced from
+/// `body` by the indexed byte span (wiki `raw` is faithful but md-image
 /// `raw` is only the destination); a span that no longer reads as an embed (stale index) is
 /// skipped. Cost: one SQL pass for the note's embeds, one grouped count per candidate key.
-pub fn banner_refs(
-    q: &Query<'_>,
-    note: &str,
-    text: &str,
-    body_offset: usize,
-) -> Result<Vec<String>> {
+pub fn banner_refs(q: &Query<'_>, note: &str, body: &str) -> Result<Vec<String>> {
     let Some(group) = group_of(q, note)? else {
         return Ok(Vec::new());
     };
@@ -242,19 +233,29 @@ pub fn banner_refs(
     if cands.is_empty() {
         return Ok(Vec::new());
     }
-    let body_start = 1 + text
-        .get(..body_offset)
-        .map_or(0, |p| p.matches('\n').count());
-    let total = text.trim_end_matches('\n').matches('\n').count() + 1;
-    let n = (total + 1).saturating_sub(body_start);
+    let Some(fm_len) = q
+        .file(note)?
+        .and_then(|f| usize::try_from(f.size).ok())
+        .and_then(|size| size.checked_sub(body.len()))
+    else {
+        return Ok(Vec::new());
+    };
+    let n = body.trim_end_matches('\n').matches('\n').count() + 1;
     let ids = members(q, &group)?;
     let ids = serde_json::to_string(&ids).map_err(Error::Json)?;
     let mut out: Vec<String> = Vec::new();
     for c in cands {
-        if c.line < body_start || !in_edge(c.line - body_start, n) {
+        let (Some(s), Some(e)) = (c.span.0.checked_sub(fm_len), c.span.1.checked_sub(fm_len))
+        else {
+            continue;
+        };
+        let Some(before) = body.get(..s) else {
+            continue;
+        };
+        if !in_edge(before.matches('\n').count(), n) {
             continue;
         }
-        let Some(raw) = text.get(c.span.0..c.span.1).filter(|r| r.starts_with("![")) else {
+        let Some(raw) = body.get(s..e).filter(|r| r.starts_with("![")) else {
             continue;
         };
         if out.iter().any(|o| o == raw) || key_count(q, &ids, &c.key)? < MIN_NOTES {
@@ -320,8 +321,8 @@ mod tests {
 
     fn refs(t: &Fx, idx: &Index, rel: &str) -> Vec<String> {
         let text = t.text(rel);
-        let off = text.find("\n---\n").unwrap() + 5;
-        banner_refs(&idx.query(), rel, &text, off).unwrap()
+        let body = &text[text.find("\n---\n").unwrap() + 5..];
+        banner_refs(&idx.query(), rel, body).unwrap()
     }
 
     const PUB: &str = "source: https://x.test/p\npublication: Pub";

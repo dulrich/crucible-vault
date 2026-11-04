@@ -15,7 +15,8 @@ use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
 use super::intake_enrich::{
-    Params, already_enriched, effective_limit, is_youtube_source, parse, pick_backfill, run_note,
+    Params, already_enriched, effective_limit, is_youtube_source, parse, pick_backfill, reattach,
+    run_note,
 };
 use super::testkit::{AtRecorder, StepEnv};
 use super::{DeferCause, StepError, StepOutcome};
@@ -318,6 +319,31 @@ async fn missing_key_fails_no_api_key_and_an_outage_defers() {
         "{err:?}"
     );
     assert_eq!(read(&e, "n.md"), long_note());
+}
+
+/// Moved from `cv_ingest::enrich_tests` (`enrich` now takes the body; plan tn-review-2026-11-04-remediation WP-R2): the frontmatter survives enrich + reattach byte for byte, on a first run and a re-run.
+#[test]
+fn frontmatter_untouched_byte_for_byte() {
+    use cv_ingest::enrich::{EnrichOpts, EnrichOutput, enrich};
+    use cv_note::FrontmatterDoc;
+    let fm = "---\r\nweird:   spacing  \r\nlist:\n  - a\n---\n";
+    let out = EnrichOutput {
+        summary: Some("A summary.".into()),
+        ..EnrichOutput::default()
+    };
+    let opts = EnrichOpts { top_block: true };
+    let n = format!("{fm}Some body text.\n\nMore text.\n");
+    let run = |text: &str| {
+        let doc = FrontmatterDoc::new(text);
+        let body = doc.body();
+        let e = enrich(body, &out, &[], opts);
+        reattach(text, body, &e.text).into_text()
+    };
+    let once = run(&n);
+    assert!(once.starts_with(fm), "{once}");
+    assert!(once.contains("[!abstract]"), "{once}");
+    let again = run(&once);
+    assert!(again.starts_with(fm), "{again}");
 }
 
 #[test]

@@ -146,3 +146,13 @@ fn eligibility_reads_the_section_once() {
     );
     assert_eq!(Eligibility::Split { words: 7 }.words(), 7);
 }
+
+/// Decision 1 (plan tn-review-2026-11-04-remediation WP-R2): one heading rule shared with the lint.
+#[test]
+fn heading_rule_is_fence_kind_aware_and_allows_indent() {
+    let nested = "````\n```\n## Transcript\n````\n\n## Notes\n";
+    assert!(locate(nested).is_none());
+    let after = "````\n```\n## Transcript\n````\n  ## TRANSCRIPT\n\nwords here\n";
+    let s = locate(after).unwrap();
+    assert_eq!(seg(after, &s), ["words here"]);
+}

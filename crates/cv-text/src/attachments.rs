@@ -446,36 +446,9 @@ pub fn format_ref(m: &AttachmentMatch, target: &str) -> String {
     }
 }
 
-/// Byte ranges of fenced code blocks (```` ``` ```` / `~~~`); refs inside are not refs (the
+/// Byte ranges of fenced code blocks ([`crate::blocks::fenced_ranges`]); refs inside are not refs (the
 /// Obsidian metadata cache skips them, and `parseAttachmentRefsFromCache` read the cache).
-pub(crate) fn fenced_ranges(content: &str) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let mut open: Option<(usize, &str)> = None;
-    let mut pos = 0;
-    for line in content.split_inclusive('\n') {
-        let t = line.trim_start();
-        let fence = if t.starts_with("```") {
-            Some("```")
-        } else if t.starts_with("~~~") {
-            Some("~~~")
-        } else {
-            None
-        };
-        match (open, fence) {
-            (None, Some(f)) => open = Some((pos, f)),
-            (Some((start, f)), Some(g)) if f == g => {
-                out.push((start, pos + line.len()));
-                open = None;
-            }
-            _ => {}
-        }
-        pos += line.len();
-    }
-    if let Some((start, _)) = open {
-        out.push((start, content.len()));
-    }
-    out
-}
+pub(crate) use crate::blocks::fenced_ranges;
 
 pub(crate) fn in_ranges(ranges: &[(usize, usize)], at: usize) -> bool {
     ranges.iter().any(|&(a, b)| at >= a && at < b)

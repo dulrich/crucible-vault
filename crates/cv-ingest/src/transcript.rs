@@ -20,7 +20,7 @@
 
 use std::ops::Range;
 
-use crate::enrich::{MARK_CLOSE, MARK_HEADING, MARK_OPEN};
+use cv_text::blocks::{self, ENRICH_HEADING, ENRICH_OPEN, Line};
 
 /// A section over this many words is sent in several calls (spike: whole transcripts up to 12.8k
 /// words refined in one call, 8 of 418 unrefined clips are larger).
@@ -48,45 +48,11 @@ pub struct Section {
     pub segments: Vec<Range<usize>>,
 }
 
-struct Line<'a> {
-    start: usize,
-    end: usize,
-    text: &'a str,
-}
-
-fn lines(body: &str) -> Vec<Line<'_>> {
-    let mut v = Vec::new();
-    let mut pos = 0;
-    while pos < body.len() {
-        let end = body[pos..].find('\n').map_or(body.len(), |i| pos + i + 1);
-        v.push(Line {
-            start: pos,
-            end,
-            text: body[pos..end].trim_end_matches(['\n', '\r']),
-        });
-        pos = end;
-    }
-    v
-}
-
-/// The index of the close marker when `ls[i]` opens a well-formed managed pair.
+/// The index of the close marker when `ls[i]` opens a well-formed `cv-enrich` pair.
 fn managed_close(ls: &[Line<'_>], i: usize) -> Option<usize> {
-    if ls[i].text.trim() != MARK_OPEN {
-        return None;
-    }
-    (i + 1..ls.len())
-        .find(|&j| matches!(ls[j].text.trim(), MARK_CLOSE | MARK_OPEN))
-        .filter(|&j| ls[j].text.trim() == MARK_CLOSE)
-}
-
-fn is_transcript_heading(t: &str) -> bool {
-    t.strip_prefix("## ")
-        .is_some_and(|r| r.trim().eq_ignore_ascii_case("transcript"))
-}
-
-fn is_fence(t: &str) -> bool {
-    let t = t.trim_start();
-    t.starts_with("```") || t.starts_with("~~~")
+    (ls[i].text.trim() == ENRICH_OPEN)
+        .then(|| blocks::managed_close(ls, i))
+        .flatten()
 }
 
 /// A level-1 or level-2 heading line (the section terminators).
@@ -98,31 +64,19 @@ fn is_section_heading(t: &str) -> bool {
 /// when there is no such heading.
 #[must_use]
 pub fn locate(body: &str) -> Option<Section> {
-    let ls = lines(body);
-    let mut fenced = false;
-    let mut h = None;
-    for (i, l) in ls.iter().enumerate() {
-        if is_fence(l.text) {
-            fenced = !fenced;
-        } else if !fenced && is_transcript_heading(l.text) {
-            h = Some(i);
-            break;
-        }
-    }
-    let h = h?;
+    let ls = blocks::lines(body);
+    let fenced = blocks::fenced_lines(&ls);
+    let h = blocks::transcript_heading(&ls, 0)?;
     let body_start = ls[h].end;
     // Section end: the next level-1/2 heading outside fences and managed blocks.
     let mut end = body.len();
-    let mut fenced = false;
     let mut i = h + 1;
     while i < ls.len() {
         if let Some(j) = managed_close(&ls, i) {
             i = j + 1;
             continue;
         }
-        if is_fence(ls[i].text) {
-            fenced = !fenced;
-        } else if !fenced && is_section_heading(ls[i].text) {
+        if !fenced[i] && is_section_heading(ls[i].text) {
             end = ls[i].start;
             break;
         }
@@ -143,7 +97,7 @@ pub fn locate(body: &str) -> Option<Section> {
     let mut i = h + 1;
     while i < ls.len() && ls[i].start < end {
         let managed = managed_close(&ls, i);
-        if managed.is_some() || ls[i].text.trim() == MARK_HEADING {
+        if managed.is_some() || ls[i].text.trim() == ENRICH_HEADING {
             if let Some(s) = seg_start.take() {
                 push(&mut segments, s, seg_end);
             }

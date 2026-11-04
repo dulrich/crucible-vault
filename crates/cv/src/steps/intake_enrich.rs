@@ -201,10 +201,9 @@ pub(crate) fn run_note(
         });
         return Ok(out);
     }
-    let words = FrontmatterDoc::new(text.as_str())
-        .body()
-        .split_whitespace()
-        .count();
+    let source = FrontmatterDoc::new(text.as_str());
+    let body = source.body();
+    let words = body.split_whitespace().count();
 
     let answer = agent::complete(ctx, mgr, &agent::var_params(&p.agent), None)?;
     let model_ref = answer.model_ref();
@@ -214,16 +213,16 @@ pub(crate) fn run_note(
             p.agent
         ))
     })?;
-    let banners = banner_refs(ctx, &path, &text);
+    let banners = banner_refs(ctx, &path, body);
     let edit = enrich::enrich(
-        &text,
+        body,
         &parsed,
         &banners,
         EnrichOpts {
             top_block: words >= SHORT_WORDS,
         },
     );
-    let mut doc = FrontmatterDoc::new(edit.text);
+    let mut doc = reattach(&text, body, &edit.text);
     let date = super::materialize::now().format("%Y-%m-%d").to_string();
     let fm_err =
         |e: cv_note::FmError| StepError::failed(format!("intake_enrich: frontmatter: {e}"));
@@ -239,12 +238,17 @@ pub(crate) fn run_note(
     Ok(out)
 }
 
+/// The note `text` with its body (`body`, the [`FrontmatterDoc::body`] of `text`) replaced by `new_body`: the frontmatter block is kept byte-exact.
+pub(crate) fn reattach(text: &str, body: &str, new_body: &str) -> FrontmatterDoc {
+    let fm = &text[..text.len() - body.len()];
+    FrontmatterDoc::new(format!("{fm}{new_body}"))
+}
+
 /// The recurring-banner embeds of `path` from the index (`cv_index::queries::banners`); an index
 /// failure is logged and yields none — enrichment never fails on it.
-fn banner_refs(ctx: &StepCtx<'_>, path: &str, text: &str) -> Vec<BannerRef> {
-    let body_offset = text.len() - FrontmatterDoc::new(text).body().len();
+fn banner_refs(ctx: &StepCtx<'_>, path: &str, body: &str) -> Vec<BannerRef> {
     let found = ctx.index().map_err(|e| e.to_string()).and_then(|reader| {
-        cv_index::queries::banners::banner_refs(&reader.query(), path, text, body_offset)
+        cv_index::queries::banners::banner_refs(&reader.query(), path, body)
             .map_err(|e| e.to_string())
     });
     match found {

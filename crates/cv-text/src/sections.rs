@@ -39,6 +39,22 @@ fn heading_level(trimmed: &str) -> Option<usize> {
         .map(|_| n)
 }
 
+/// The title of an ATX heading line: leading whitespace trimmed, 1–6 `#`s, then a space or tab, then the text trimmed, closing `#`s stripped and trimmed again. `None` for a non-heading or an empty title.
+#[must_use]
+pub fn heading_text(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    let hashes = leading_hashes(t);
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = &t[hashes..];
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let text = rest.trim().trim_end_matches('#').trim();
+    (!text.is_empty()).then_some(text)
+}
+
 /// Locate the section anchored by `header` (matched against trimmed lines).
 pub fn find_section_range(content: &str, header: &str) -> Option<SectionRange> {
     let header_trimmed = header.trim();
@@ -124,6 +140,28 @@ mod tests {
     use super::*;
 
     const DOC: &str = "# Title\n## A\n- a1\n### A.sub\n- s1\n\n## B\n- b1\n---\nfooter";
+
+    #[test]
+    fn heading_text_truth_table() {
+        let cases = [
+            ("# A", Some("A")),
+            ("  ## Spaced  ", Some("Spaced")),
+            ("###\tTab", Some("Tab")),
+            ("###### Six", Some("Six")),
+            ("####### Seven", None),
+            ("#NoSpace", None),
+            ("## Closing ##", Some("Closing")),
+            ("## Closing ## ", Some("Closing")),
+            ("## #", None),
+            ("##   ", None),
+            ("#", None),
+            ("plain", None),
+            ("", None),
+        ];
+        for (line, want) in cases {
+            assert_eq!(heading_text(line), want, "{line:?}");
+        }
+    }
 
     #[test]
     fn finds_range_with_subheadings_inside() {

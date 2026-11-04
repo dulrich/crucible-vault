@@ -19,6 +19,7 @@
 
 use std::sync::LazyLock;
 
+use cv_text::blocks::{self, Line};
 use regex::Regex;
 
 fn re(p: &str) -> Option<Regex> {
@@ -27,8 +28,6 @@ fn re(p: &str) -> Option<Regex> {
 
 static YT_EMBED_LINE_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| re(r"^[ \t]*(?:!\[\]\(([^)\s]+)\)|\[!\[\]\([^)\s]+\)\]\(([^)\s]+)\))[ \t]*$"));
-static TRANSCRIPT_HEADER_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| re(r"(?m)^[ \t]*##[ \t]+Transcript[ \t]*\r?\n"));
 static LEADING_BLANK_LINES_RE: LazyLock<Option<Regex>> = LazyLock::new(|| re(r"^([ \t]*\r?\n)+"));
 static TIMESTAMP_PARA_RE: LazyLock<Option<Regex>> = LazyLock::new(|| re(r"^\*\*\d+:\d+\*\*"));
 static TIMESTAMP_PREFIX_RE: LazyLock<Option<Regex>> =
@@ -83,55 +82,17 @@ fn clean_paragraph(p: &str) -> String {
     out.trim().to_owned()
 }
 
-/// One body line: byte span (newline included in `end`) and its text without the line ending.
-struct Line<'a> {
-    start: usize,
-    end: usize,
-    text: &'a str,
-}
-
-fn lines_of(body: &str) -> Vec<Line<'_>> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    for seg in body.split_inclusive('\n') {
-        let end = start + seg.len();
-        let text = seg.strip_suffix('\n').unwrap_or(seg);
-        let text = text.strip_suffix('\r').unwrap_or(text);
-        out.push(Line { start, end, text });
-        start = end;
-    }
-    out
-}
-
-/// The inner text of a single-line `%% x %%` comment, when trimmed `t` is exactly one.
-fn single_comment(t: &str) -> Option<&str> {
-    if t.len() < 4 {
-        return None;
-    }
-    let inner = t.strip_prefix("%%")?.strip_suffix("%%")?;
-    (!inner.contains("%%")).then(|| inner.trim())
-}
-
 /// Index of the last line of the `%% … %%` comment region opening at `lines[i]` (whose trimmed
 /// text starts with `%%`). A single-line `%% name %%` paired with a later `%% /name %%` line spans
-/// through that close marker (the `%% cv-enrich %%` … `%% /cv-enrich %%` managed block, whose
-/// `> [!abstract]` callout sits inside); an unpaired one is just its own line. A bare `%%` opener
-/// runs to the next line containing `%%`, which must end with it. `None` for a line that mixes a
-/// comment with visible text, or an unterminated comment (the caller then does nothing).
-fn comment_region_end(lines: &[Line<'_>], i: usize) -> Option<usize> {
+/// through that close marker ([`blocks::managed_close`]: the `%% cv-enrich %%` … `%% /cv-enrich %%`
+/// managed block, whose `> [!abstract]` callout sits inside); an unpaired one is just its own line.
+/// A bare `%%` opener runs to the next line containing `%%`, which must end with it. `None` for a
+/// line that mixes a comment with visible text, or an unterminated comment (the caller then does
+/// nothing).
+fn comment_end(lines: &[Line<'_>], i: usize) -> Option<usize> {
     let t = lines.get(i)?.text.trim();
-    if let Some(name) = single_comment(t) {
-        if name.is_empty() || name.starts_with('/') {
-            return Some(i);
-        }
-        let close = format!("/{name}");
-        let paired = lines
-            .iter()
-            .enumerate()
-            .skip(i + 1)
-            .find(|(_, l)| single_comment(l.text.trim()) == Some(close.as_str()))
-            .map(|(j, _)| j);
-        return Some(paired.unwrap_or(i));
+    if blocks::single_comment(t).is_some() {
+        return Some(blocks::managed_close(lines, i).unwrap_or(i));
     }
     if t.get(2..).is_none_or(|rest| rest.contains("%%")) {
         return None;
@@ -178,7 +139,7 @@ fn scan_prefix(lines: &[Line<'_>]) -> Option<(usize, usize)> {
         if t.is_empty() {
             i += 1;
         } else if t.starts_with("%%") {
-            let j = comment_region_end(lines, i)?;
+            let j = comment_end(lines, i)?;
             prefix_end = lines.get(j)?.end;
             i = j + 1;
         } else {
@@ -206,10 +167,11 @@ pub fn prefix_links_transcript(prefix: &str) -> bool {
 pub fn restore_transcript_heading(content: &str) -> Option<String> {
     let (_, body) = ofm::frontmatter::split_frontmatter(content);
     let fm_text = &content[..content.len() - body.len()];
-    if TRANSCRIPT_HEADER_RE.as_ref()?.is_match(body) {
+    let lines = blocks::lines(body);
+    if header_line(&lines, 0).is_some() {
         return None;
     }
-    let (prefix_end, _) = scan_prefix(&lines_of(body))?;
+    let (prefix_end, _) = scan_prefix(&lines)?;
     let prefix = &body[..prefix_end];
     if prefix.is_empty() || !prefix_links_transcript(prefix) {
         return None;
@@ -218,27 +180,27 @@ pub fn restore_transcript_heading(content: &str) -> Option<String> {
     Some(format!("{fm_text}{prefix}\n## Transcript\n\n{rest}"))
 }
 
+/// The first `## Transcript` heading line at or after `from` (Decision 1's rule, [`blocks::transcript_heading`]: case-insensitive, leading whitespace allowed, never inside a code fence) that ends with a newline (a heading on the unterminated last line is no transcript header).
+fn header_line(lines: &[Line<'_>], from: usize) -> Option<usize> {
+    blocks::transcript_heading(lines, from).filter(|&h| lines[h].has_newline())
+}
+
 /// Skip leading blank lines and whole `%% … %%` regions, in any order. The first remaining line
 /// must be a YouTube embed with a `## Transcript` heading later, or — when `embed_optional` — the
 /// `## Transcript` heading itself (an already-stripped body).
 fn locate_clip(body: &str, embed_optional: bool) -> Option<ClipShape> {
-    let header_re = TRANSCRIPT_HEADER_RE.as_ref()?;
-    let lines = lines_of(body);
+    let lines = blocks::lines(body);
     let (prefix_end, i) = scan_prefix(&lines)?;
     let first = lines.get(i)?;
     if is_youtube_embed(first.text) {
-        let m = header_re.find(&body[first.end..])?;
+        let h = lines.get(header_line(&lines, i + 1)?)?;
         return Some(ClipShape {
             prefix_end,
-            header_start: first.end + m.start(),
-            header_end: first.end + m.end(),
+            header_start: h.start,
+            header_end: h.end,
         });
     }
-    if embed_optional
-        && header_re
-            .find(&body[first.start..first.end])
-            .is_some_and(|m| m.start() == 0 && m.end() == first.end - first.start)
-    {
+    if embed_optional && header_line(&lines, i) == Some(i) {
         return Some(ClipShape {
             prefix_end,
             header_start: first.start,
@@ -350,13 +312,10 @@ pub enum TranscriptEvidence {
 #[must_use]
 pub fn transcript_evidence(content: &str, cleanup_kind: bool) -> Option<TranscriptEvidence> {
     let (_, body) = ofm::frontmatter::split_frontmatter(content);
-    let (Some(header_re), Some(split_re)) =
-        (TRANSCRIPT_HEADER_RE.as_ref(), PARAGRAPH_SPLIT_RE.as_ref())
-    else {
-        return None;
-    };
-    if let Some(h) = header_re.find(body) {
-        let after = &body[h.end()..];
+    let split_re = PARAGRAPH_SPLIT_RE.as_ref()?;
+    let lines = blocks::lines(body);
+    if let Some(h) = header_line(&lines, 0) {
+        let after = &body[lines[h].end..];
         let after = match LEADING_BLANK_LINES_RE.as_ref() {
             Some(r) => r.replace(after, "").into_owned(),
             None => after.to_owned(),
@@ -587,5 +546,21 @@ mod tests {
         assert_eq!(cleanup_youtube_transcript(b), b);
         let c = "plain note\n";
         assert_eq!(cleanup_youtube_transcript(c), c);
+    }
+
+    /// Decision 1 (plan tn-review-2026-11-04-remediation WP-R2): a `## Transcript` line inside a
+    /// ```` fence that holds a ``` line is no heading.
+    #[test]
+    fn heading_inside_nested_fence_is_ignored() {
+        let src = "![](https://youtu.be/dQw4w9WgXcQ)\n````\n```\n## Transcript\n\n**0:01** a\n\n**0:05** b\n\n**1:10** c\n````\n";
+        assert_eq!(cleanup_youtube_transcript(src), src);
+        assert_eq!(transcript_evidence(src, false), None);
+    }
+
+    /// Decision 1: the lint's heading match is case-insensitive.
+    #[test]
+    fn lowercase_transcript_heading_is_cleaned() {
+        let src = "![](https://youtu.be/dQw4w9WgXcQ)\n## transcript\n\n**0:01** [Music] hi\n\n**0:05** there\n";
+        assert_eq!(cleanup_youtube_transcript(src), "hi\n\nthere\n");
     }
 }

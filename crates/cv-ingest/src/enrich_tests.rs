@@ -3,8 +3,6 @@
 
 use super::*;
 
-const FM: &str = "---\ntitle: \"Weekly Widget Letter\"\ntags: [intake]\n---\n";
-
 const BODY: &str = "Welcome to this week's letter about widgets.
 
 Widgets are getting   smaller every year, and the cost keeps falling.
@@ -59,7 +57,7 @@ Thanks!"###,
 }
 
 fn note() -> String {
-    format!("{FM}{BODY}")
+    BODY.to_owned()
 }
 
 #[test]
@@ -108,8 +106,7 @@ fn squeeze_collapses_whitespace() {
 fn full_enrich_renders_top_block_and_fold() {
     let e = enrich(&note(), &full(), &[], opts());
     let t = &e.text;
-    assert!(t.starts_with(FM));
-    assert!(t[FM.len()..].starts_with("%% cv-enrich %%\n> [!abstract]-\n> A letter"));
+    assert!(t.starts_with("%% cv-enrich %%\n> [!abstract]-\n> A letter"));
     assert!(t.contains("> Entities: Acme Gizmos (org)"));
     assert!(t.contains("> - Widgets shrank. — \"the median widget shrank by a third\""));
     // Body has a heading (## Sponsor) but it is folded, so chapters apply.
@@ -292,16 +289,6 @@ fn repeated_chrome_resolves_to_successive_occurrences() {
 }
 
 #[test]
-fn frontmatter_untouched_byte_for_byte() {
-    let fm = "---\r\nweird:   spacing  \r\nlist:\n  - a\n---\n";
-    let n = format!("{fm}{BODY}");
-    let e = enrich(&n, &full(), &[], opts());
-    assert!(e.text.starts_with(fm));
-    let again = enrich(&e.text, &full(), &[], opts());
-    assert!(again.text.starts_with(fm));
-}
-
-#[test]
 fn half_body_cap_refuses_fold_but_keeps_top_block() {
     let mut o = full();
     o.spans = vec![Span {
@@ -417,7 +404,7 @@ fn rerun_with_empty_output_keeps_fold_and_drops_top() {
     let e = enrich(&once, &EnrichOutput::default(), &[], opts());
     assert!(!e.text.contains("[!abstract]"));
     assert!(e.text.contains("> ## Sponsor"));
-    assert!(e.text.starts_with(&format!("{FM}Welcome")));
+    assert!(e.text.starts_with("Welcome"));
 }
 
 /// A close marker right after a `> ` line is a lazy continuation of the callout and renders as
@@ -443,4 +430,17 @@ fn legacy_glued_close_marker_reruns_to_fixed_layout() {
     let legacy = fixed.replace(&format!("\n\n{MARK_CLOSE}"), &format!("\n{MARK_CLOSE}"));
     assert_ne!(legacy, fixed);
     assert_eq!(enrich(&legacy, &full(), &[], opts()).text, fixed);
+}
+
+/// Plan tn-review-2026-11-04-remediation WP-R2: a ```` fence holding a ``` line stays open (its
+/// `#` line is no heading), and a lowercase `## transcript` heading is an existing heading.
+#[test]
+fn nested_fence_and_lowercase_transcript_heading() {
+    let body =
+        "Intro line.\n````\n```\n# not a heading\n````\n## transcript\nSecond part starts.\n";
+    let mut o = EnrichOutput::default();
+    o.summary = Some("S.".into());
+    let e = enrich(body, &o, &[], opts());
+    assert!(e.text.contains("> - [[#transcript]]"), "{}", e.text);
+    assert!(!e.text.contains("[[#not a heading]]"), "{}", e.text);
 }
