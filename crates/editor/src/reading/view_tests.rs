@@ -36,7 +36,10 @@ fn external_link_maps_to_open_url() {
         Message::OpenUrl(u) if u == "https://x.y"
     ));
     assert!(matches!(
-        f(LinkTarget::Vault("b".into())),
+        f(LinkTarget::Vault {
+            target: "b".into(),
+            fragment: None
+        }),
         Message::Reading(ReadingMsg::OpenLink { .. })
     ));
 }

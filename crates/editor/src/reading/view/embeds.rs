@@ -281,7 +281,7 @@ pub(super) fn linked_image<'a>(
 ) -> Element<'a, Message> {
     let open = linked_image_open(cx.path, href);
     let (target, external) = match href_target(href) {
-        LinkTarget::Vault(t) => (t, false),
+        LinkTarget::Vault { target, .. } => (target, false),
         // `href_target` only yields Vault / External.
         LinkTarget::External(u) | LinkTarget::Copy(u) => (u, true),
     };

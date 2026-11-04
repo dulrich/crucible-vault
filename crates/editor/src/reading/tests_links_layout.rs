@@ -306,7 +306,10 @@ fn table_cell_link_right_click_yields_the_link_menu() {
             "A.md",
             7,
             &doc.unresolved,
-            Some(LinkTarget::Vault(t.into())),
+            Some(LinkTarget::Vault {
+                target: t.into(),
+                fragment: None,
+            }),
             false,
         )
     };

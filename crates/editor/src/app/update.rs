@@ -186,7 +186,11 @@ impl App {
                 return self.toggle_prop(&path, &key);
             }
             // Plan round-22 WP-2: inline-code copy — clipboard plus a "Copied" notice.
-            Message::Reading(crate::message::ReadingMsg::InlineCodeCopy { text }) => {
+            // (A code block's in-button "Copied" is the reading reducer's; Decision 7.)
+            Message::Reading(crate::message::ReadingMsg::Copy {
+                text,
+                feedback: crate::message::CopyFeedback::Notice,
+            }) => {
                 self.status
                     .notify(crate::app::status::Severity::Info, "Copied");
                 return iced::clipboard::write(text);
@@ -571,16 +575,13 @@ impl App {
                 // Plan round-14 WP-2: Ctrl/Cmd+click on a link cell adds a new tab.
                 self.open_with(&path, self.click_place());
                 let line = line.and_then(|l| usize::try_from(l.saturating_sub(1)).ok());
-                if let Some(line) = line
-                    && self.active_note().is_some_and(|t| t.path == path)
-                    && let Some(doc) = buf_mut(&mut self.docs, &path)
-                {
-                    doc.move_to(iced::widget::text_editor::Cursor {
-                        position: iced::widget::text_editor::Position { line, column: 0 },
-                        selection: None,
-                    });
+                // WP-R7 (Decision 4): the one mode-aware go-to-line, so Reading tops the block.
+                match line {
+                    Some(line) if self.active_note().is_some_and(|t| t.path == path) => {
+                        self.jump_to_line(&path, line)
+                    }
+                    _ => Task::none(),
                 }
-                Task::none()
             }
         }
     }

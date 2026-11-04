@@ -403,7 +403,7 @@ fn clicking_inline_code_emits_the_copy_message_with_the_exact_text() {
     assert!(
         matches!(
             h.other.as_slice(),
-            [Message::Reading(ReadingMsg::InlineCodeCopy { text })] if text == "cargo foo"
+            [Message::Reading(ReadingMsg::Copy { text, feedback: crate::message::CopyFeedback::Notice })] if text == "cargo foo"
         ),
         "{:?}",
         h.other
@@ -420,7 +420,7 @@ fn clicking_inline_code_emits_the_copy_message_with_the_exact_text() {
     h.click(Point::new(g.x + g.width / 2.0, g.y + g.height / 2.0));
     assert!(matches!(
         h.other.as_slice(),
-        [Message::Reading(ReadingMsg::InlineCodeCopy { text })] if text == "cargo foo"
+        [Message::Reading(ReadingMsg::Copy { text, feedback: crate::message::CopyFeedback::Notice })] if text == "cargo foo"
     ));
 }
 
@@ -472,7 +472,7 @@ fn find_split_inline_code_keeps_one_whole_value_payload_and_one_glyph() {
     assert!(
         matches!(
             h.other.as_slice(),
-            [Message::Reading(ReadingMsg::InlineCodeCopy { text })] if text == "cargo foo bar"
+            [Message::Reading(ReadingMsg::Copy { text, feedback: crate::message::CopyFeedback::Notice })] if text == "cargo foo bar"
         ),
         "{:?}",
         h.other

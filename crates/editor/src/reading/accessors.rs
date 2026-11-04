@@ -160,12 +160,11 @@ impl ReadingStore {
         rd(docs, path)?.place(view)?.sel
     }
 
-    /// plan round-21 WP-2: tab `view`'s code-block copy state of `path` — (hovered run, copied
-    /// run).
-    pub fn code_ui(&self, docs: &Docs, path: &str, view: u64) -> (Option<usize>, Option<usize>) {
+    /// plan round-21 WP-2: tab `view`'s just-copied code block (run index) of `path`.
+    pub fn code_copied(&self, docs: &Docs, path: &str, view: u64) -> Option<usize> {
         rd(docs, path)
             .and_then(|d| d.place(view))
-            .map_or((None, None), |v| (v.code_hover, v.code_copied))
+            .and_then(|v| v.code_copied)
     }
 
     /// Sets (or clears: `None` or collapsed) tab `view`'s Reading selection of `path`.

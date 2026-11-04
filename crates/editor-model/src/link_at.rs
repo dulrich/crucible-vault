@@ -21,6 +21,16 @@ pub enum LinkAt {
 
 const SCHEMES: [&str; 3] = ["https://", "http://", "mailto:"];
 
+/// Plan tn-review-2026-11-04-remediation WP-R7 (review E2): the one `target#fragment` splitter.
+/// Splits at the first `#`; the target is returned as written, and the fragment is trimmed (an
+/// empty or missing fragment is `None`). Md-link hrefs split here once, when their span is built.
+pub fn split_href(href: &str) -> (&str, Option<&str>) {
+    match href.split_once('#') {
+        Some((t, f)) => (t, Some(f.trim()).filter(|f| !f.is_empty())),
+        None => (href, None),
+    }
+}
+
 fn floor_boundary(s: &str, mut i: usize) -> usize {
     i = i.min(s.len());
     while !s.is_char_boundary(i) {
@@ -43,10 +53,8 @@ fn wiki_at(line: &str, col: usize) -> Option<LinkAt> {
         if (start..end).contains(&col) {
             let inner = &line[open + 2..close];
             let target = inner.split('|').next().unwrap_or("");
-            let (target, fragment) = match target.split_once('#') {
-                Some((t, f)) => (t.trim(), Some(f.trim()).filter(|f| !f.is_empty())),
-                None => (target.trim(), None),
-            };
+            let (target, fragment) = split_href(target);
+            let target = target.trim();
             return (!target.is_empty() || fragment.is_some()).then(|| LinkAt::Wiki {
                 target: target.to_owned(),
                 fragment: fragment.map(str::to_owned),
@@ -150,6 +158,15 @@ mod tests {
         assert_eq!(link_at("<mailto:me@x.y>.", 3), url("mailto:me@x.y"));
         assert_eq!(link_at("end https://x.y.", 15), None, "the trimmed dot");
         assert_eq!(link_at("http://", 2), None, "scheme only");
+    }
+
+    /// Moved from the editor's `split_fragment` test (WP-R7, review E2).
+    #[test]
+    fn split_href_rules() {
+        assert_eq!(split_href("N#H"), ("N", Some("H")));
+        assert_eq!(split_href("#H"), ("", Some("H")));
+        assert_eq!(split_href("N# "), ("N", None));
+        assert_eq!(split_href("N"), ("N", None));
     }
 
     #[test]

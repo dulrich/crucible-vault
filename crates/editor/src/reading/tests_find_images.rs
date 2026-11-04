@@ -353,11 +353,9 @@ fn copy_message_carries_exactly_the_block_text() {
     assert_eq!(texts.len(), 2);
     for (i, code) in texts.iter().enumerate() {
         match view::copy_message("n.md", 3, i, code) {
-            Message::Reading(ReadingMsg::CodeCopy {
-                path,
-                view,
-                run,
+            Message::Reading(ReadingMsg::Copy {
                 text,
+                feedback: crate::message::CopyFeedback::Block { path, view, run },
             }) => {
                 assert_eq!((path.as_str(), view, run), ("n.md", 3, i));
                 assert_eq!(&text, code);
@@ -373,59 +371,49 @@ fn copy_click_writes_the_clipboard_and_confirms_then_clears() {
     let p = "r21/code.md";
     let (_t, mut app) = find_on(p, b"```rust\nfn a() {}\n```\n", ViewMode::Reading, "fn");
     let view = app.active_tab().map(|t| t.id).expect("tab");
-    let code_ui = |app: &App| app.reading.code_ui(&app.docs, p, view);
-    let hover = |over| {
-        Message::Reading(ReadingMsg::CodeHover {
-            path: p.into(),
-            view,
-            run: 0,
-            over,
-        })
-    };
-    let _ = app.send(hover(true));
-    assert_eq!(code_ui(&app), (Some(0), None));
+    let copied = |app: &App| app.reading.code_copied(&app.docs, p, view);
+    assert_eq!(copied(&app), None);
     drop(app.view());
     let t = app.send(view::copy_message(p, view, 0, "fn a() {}\n"));
     assert!(t.units() > 0, "the code went to the clipboard");
-    assert_eq!(code_ui(&app), (Some(0), Some(0)));
+    assert_eq!(copied(&app), Some(0));
+    assert!(
+        app.status.notice.is_none(),
+        "a block confirms in its button"
+    );
     drop(app.view());
     let _ = app.send(Message::Reading(ReadingMsg::CodeCopiedDone {
         path: p.into(),
         view,
         run: 0,
     }));
-    assert_eq!(code_ui(&app), (Some(0), None));
-    let _ = app.send(view::copy_message(p, view, 0, "x"));
-    let _ = app.send(hover(false));
-    assert_eq!(
-        code_ui(&app),
-        (None, None),
-        "leaving clears hover and Copied"
-    );
+    assert_eq!(copied(&app), None);
 }
 
+/// WP-R7 (review E1): the copied state is per block, find paint is unchanged, and Source draws
+/// no Reading code block (so no copy button).
 #[test]
-fn hover_state_is_per_block_and_find_paint_is_unchanged() {
+fn copied_state_is_per_block_and_find_paint_is_unchanged() {
     let p = "r21/two.md";
     let body = b"```\nfoo one\n```\n\n```\nfoo two\n```\n";
     let (_t, mut app) = find_on(p, body, ViewMode::Reading, "foo");
     assert_eq!(bar(&app).count(), "1/2");
     let view = app.active_tab().map(|t| t.id).expect("tab");
-    let _ = app.send(Message::Reading(ReadingMsg::CodeHover {
-        path: p.into(),
-        view,
-        run: 1,
-        over: true,
-    }));
-    // Exiting a block that is not the hovered one leaves the hovered block's state alone.
-    let _ = app.send(Message::Reading(ReadingMsg::CodeHover {
+    let _ = app.send(view::copy_message(p, view, 1, "foo two\n"));
+    // A timer for another block leaves this block's state alone.
+    let _ = app.send(Message::Reading(ReadingMsg::CodeCopiedDone {
         path: p.into(),
         view,
         run: 0,
-        over: false,
     }));
-    assert_eq!(app.reading.code_ui(&app.docs, p, view).0, Some(1));
+    assert_eq!(app.reading.code_copied(&app.docs, p, view), Some(1));
     drop(app.view());
     assert_eq!(bar(&app).count(), "1/2");
     assert_eq!(strong_hit(&app, p), Some((0, 0)));
+    reading(&mut app, p, ViewMode::Source);
+    assert!(
+        app.reading.doc(&app.docs, p).is_none(),
+        "Source renders no Reading code block, so no copy button"
+    );
+    drop(app.view());
 }

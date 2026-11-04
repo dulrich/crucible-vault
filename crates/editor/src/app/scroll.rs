@@ -366,12 +366,13 @@ impl App {
     }
 
     /// Plan round-19-yt-cleanup-intake WP-1: jumps `path` to its first heading whose text equals
-    /// `fragment` (trimmed; the Obsidian rule). No match, a `^block` fragment or an empty one:
-    /// stays where it is.
+    /// `fragment` (trimmed, case-insensitive; the Obsidian rule, Decision 3 of plan
+    /// tn-review-2026-11-04-remediation). No match, a `^block` fragment or an empty one: stays
+    /// where it is.
     pub(super) fn jump_to_heading(&mut self, path: &str, fragment: &str) -> Task<Message> {
         let Some(line) = self
             .doc(path)
-            .and_then(|d| heading_line(&d.text(), fragment))
+            .and_then(|d| editor_model::outline::heading_line(&d.text(), fragment))
         else {
             return Task::none();
         };
@@ -530,20 +531,6 @@ fn reading_find_runs<'a>(
     (reading.mode(docs, path) == crate::reading::ViewMode::Reading)
         .then(|| reading.doc(docs, path).map(|d| d.runs.as_slice()))
         .flatten()
-}
-
-/// Plan round-19-yt-cleanup-intake WP-1: the 0-based line of the first heading of `source`
-/// whose text equals `fragment` after trimming (the Outline's heading list; `^block` ids and
-/// empty fragments never match).
-pub(crate) fn heading_line(source: &str, fragment: &str) -> Option<usize> {
-    let want = fragment.trim();
-    if want.is_empty() || want.starts_with('^') {
-        return None;
-    }
-    editor_model::outline::outline(source)
-        .into_iter()
-        .find(|h| h.text.trim() == want)
-        .map(|h| h.line)
 }
 
 /// Plan round-19-yt-cleanup-intake WP-1: the tab strip scrollable's widget id for `pane`.

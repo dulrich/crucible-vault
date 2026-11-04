@@ -37,7 +37,7 @@ use iced::{Element, Subscription, Task};
 use crate::app::{Docs, OpenDoc};
 use crate::daemon::DaemonClient;
 use crate::image_cache::{self, ImageCache};
-use crate::message::{Message, ReadingMsg};
+use crate::message::{CopyFeedback, Message, ReadingMsg};
 use crate::source::SourceBuffer;
 use crate::theme::Tokens;
 use crate::widget::selectable::Selection;
@@ -165,9 +165,8 @@ struct ViewPlace {
     /// for a re-created scrollable) must re-apply the stored place instead of overwriting it.
     /// Plan round-6 WP-2: armed at an instant and honoured only within [`RESTORE_GUARD`].
     restoring: Option<std::time::Instant>,
-    /// plan round-21 WP-2: the code block (visible-run index) under the pointer, and the one
-    /// whose copy was just clicked. Both are cleared when the Doc is replaced.
-    code_hover: Option<usize>,
+    /// plan round-21 WP-2: the code block (visible-run index) whose copy was just clicked; its
+    /// timer clears it ([`COPIED_FOR`]). Hover itself is the `hover` widget's (WP-R7, review E1).
     code_copied: Option<usize>,
 }
 
@@ -213,8 +212,6 @@ impl DocReading {
     fn clear_selections(&mut self) {
         self.views.values_mut().for_each(|v| {
             v.sel = None;
-            v.code_hover = None;
-            v.code_copied = None;
         });
     }
 }
@@ -352,8 +349,6 @@ impl ReadingStore {
             entry.views.values_mut().for_each(|v| {
                 v.top = None;
                 v.sel = None;
-                v.code_hover = None;
-                v.code_copied = None;
             });
             self.images.release_owner(od.buffer.path());
         }
@@ -405,12 +400,11 @@ impl ReadingStore {
             })
             .collect();
         let unresolved: HashSet<String> = if daemon.is_some() {
+            // WP-R7 (review E2): one key form — the bare target, as the spans carry it.
             render::link_targets(&model)
-                .into_iter()
-                .filter(|t| {
-                    let bare = t.split('#').next().unwrap_or(t);
-                    self.resolve(doc.path(), &percent_decode(bare)).is_none()
-                })
+                .iter()
+                .map(|t| editor_model::link_at::split_href(t).0.to_owned())
+                .filter(|bare| self.resolve(doc.path(), &percent_decode(bare)).is_none())
                 .collect()
         } else {
             HashSet::new()
@@ -687,29 +681,9 @@ fn update_store(
                 return iced::clipboard::write_primary(text);
             }
         }
-        ReadingMsg::CodeHover {
-            path,
-            view,
-            run,
-            over,
-        } => {
-            if let Some(d) = rd_mut(docs, &path) {
-                let v = d.place_mut(view);
-                if over {
-                    v.code_hover = Some(run);
-                } else if v.code_hover == Some(run) {
-                    v.code_hover = None;
-                    if v.code_copied == Some(run) {
-                        v.code_copied = None;
-                    }
-                }
-            }
-        }
-        ReadingMsg::CodeCopy {
-            path,
-            view,
-            run,
+        ReadingMsg::Copy {
             text,
+            feedback: CopyFeedback::Block { path, view, run },
         } => {
             if let Some(d) = rd_mut(docs, &path) {
                 d.place_mut(view).code_copied = Some(run);
@@ -741,7 +715,11 @@ fn update_store(
         ReadingMsg::ToggleTask { .. }
         | ReadingMsg::ToggleProp { .. }
         | ReadingMsg::GoToEdge { .. }
-        | ReadingMsg::InlineCodeCopy { .. }
+        // The status-bar notice is the app's (WP-R7, Decision 7).
+        | ReadingMsg::Copy {
+            feedback: CopyFeedback::Notice,
+            ..
+        }
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. } => {}
         ReadingMsg::OpenLink {

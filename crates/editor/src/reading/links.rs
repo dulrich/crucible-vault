@@ -25,8 +25,8 @@ impl ReadingStore {
         }
         let d = daemon?;
         self.resolver.refresh(d.as_ref());
-        let target = target.split('#').next().unwrap_or(target);
-        let target = percent_decode(target);
+        // A source-mode md-link click still carries its `#fragment` here.
+        let target = percent_decode(editor_model::link_at::split_href(target).0);
         // `[[#h]]` resolves to the note itself; keep it (focuses the same tab).
         self.resolve(src, &target)
     }
@@ -45,18 +45,6 @@ impl ReadingStore {
         daemon: Option<&Arc<dyn DaemonClient>>,
     ) -> Option<String> {
         self.resolve_link(src, target, daemon)
-    }
-}
-
-/// Plan round-19-yt-cleanup-intake WP-1: a Reading href `target#fragment` as `(target, fragment)`
-/// (an empty or missing fragment is `None`).
-pub(crate) fn split_fragment(href: &str) -> (String, Option<String>) {
-    match href.split_once('#') {
-        Some((t, f)) => (
-            t.to_owned(),
-            Some(f.trim().to_owned()).filter(|f| !f.is_empty()),
-        ),
-        None => (href.to_owned(), None),
     }
 }
 

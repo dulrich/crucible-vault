@@ -68,10 +68,7 @@ fn section(blocks: Vec<Block>, name: &str) -> Vec<Block> {
                 if *l <= cur {
                     break;
                 }
-            } else if inline_text(inlines)
-                .trim()
-                .eq_ignore_ascii_case(name.trim())
-            {
+            } else if crate::outline::heading_matches(&inline_text(inlines), name) {
                 level = Some(*l);
             }
         }

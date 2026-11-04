@@ -315,29 +315,26 @@ pub enum ReadingMsg {
     },
     /// Plan round-5 WP-7: a selection gesture ended (mouse release): copy to PRIMARY.
     SelectDone { path: String, view: u64 },
-    /// plan round-21 WP-2: the pointer entered (`over`) or left Reading code block `run` (its
-    /// visible-run index in the render) of tab `view` on `path`: shows or hides its copy button.
-    CodeHover {
-        path: String,
-        view: u64,
-        run: usize,
-        over: bool,
-    },
-    /// plan round-21 WP-2: the copy button of code block `run` was clicked: `text` (exactly the
-    /// block's code, no fence or language line) goes to the clipboard and the button reads
-    /// "Copied" for [`crate::reading::COPIED_FOR`].
-    CodeCopy {
-        path: String,
-        view: u64,
-        run: usize,
+    /// The one Reading code copy (plan tn-review-2026-11-04-remediation WP-R7, review E1): `text`
+    /// goes to the clipboard, and `feedback` says where "Copied" shows (Decision 7). A code block's
+    /// button carries exactly the block's code (no fence or language line; round-21 WP-2); an
+    /// inline code span (or its hover glyph) carries the whole code value (round-22 WP-2).
+    Copy {
         text: String,
+        feedback: CopyFeedback,
     },
-    /// plan round-22 WP-2: an inline code span (or its hover glyph) was clicked: `text` (the whole
-    /// code value, backticks stripped by the parser) goes to the clipboard and the status bar
-    /// shows "Copied".
-    InlineCodeCopy { text: String },
     /// plan round-21 WP-2: the "Copied" confirmation of code block `run` timed out.
     CodeCopiedDone { path: String, view: u64, run: usize },
+}
+
+/// Where a [`ReadingMsg::Copy`] confirms (Decision 7 of plan tn-review-2026-11-04-remediation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyFeedback {
+    /// In-button "Copied" on code block `run` (its visible-run index) of tab `view` on `path`,
+    /// for [`crate::reading::COPIED_FOR`].
+    Block { path: String, view: u64, run: usize },
+    /// The status-bar "Copied" notice (inline code).
+    Notice,
 }
 
 /// WP-4: the file explorer.

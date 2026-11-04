@@ -33,8 +33,12 @@ use std::borrow::Cow;
 /// A clickable target inside rich text.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LinkTarget {
-    /// A vault target (wiki-link target or relative md-link URL).
-    Vault(String),
+    /// A vault target (wiki-link target or relative md-link URL), bare, with its `#fragment`
+    /// typed apart (WP-R7, review E2: md-hrefs split once via `link_at::split_href`).
+    Vault {
+        target: String,
+        fragment: Option<String>,
+    },
     /// A URL with a scheme: opened via `open_url` (plan usability-sprint-captures-links WP-3).
     External(String),
     /// Plan round-22 WP-2: inline code — the **whole logical code value** (never a find-painted
@@ -72,8 +76,7 @@ struct Ctx<'a, 'c> {
     active: Option<usize>,
     /// The tab's selection.
     sel: Option<Selection>,
-    /// plan round-21 WP-2: the code block (run index) under the pointer / just copied.
-    code_hover: Option<usize>,
+    /// plan round-21 WP-2: the code block (run index) just copied.
     code_copied: Option<usize>,
 }
 
@@ -172,8 +175,7 @@ pub fn reading<'a>(
         occ: &occ,
         active: find.and_then(|f| f.active),
         sel: store.selection(docs, path, view),
-        code_hover: store.code_ui(docs, path, view).0,
-        code_copied: store.code_ui(docs, path, view).1,
+        code_copied: store.code_copied(docs, path, view),
     };
     // Fixed slot 0 (properties, `Space` when absent) keeps every body widget at a stable tree
     // position whether or not the note has frontmatter. The filename edit moved to the note
@@ -254,7 +256,7 @@ pub(crate) fn press_target(
     match link {
         Some(l) => {
             let (target, external) = match l {
-                LinkTarget::Vault(t) => (t, false),
+                LinkTarget::Vault { target, .. } => (target, false),
                 LinkTarget::External(u) => (u, true),
                 // The root never reports a copy value as a menu link; selection menu.
                 LinkTarget::Copy(_) => {
@@ -264,16 +266,9 @@ pub(crate) fn press_target(
                     };
                 }
             };
-            // Plan round-19-yt-cleanup-intake WP-1: a wikilink's `#fragment` rides in the href;
-            // the menu names (and "Create note"s) the bare target.
-            let whole = target.clone();
-            let target = if external {
-                target
-            } else {
-                super::links::split_fragment(&target).0
-            };
-            let missing =
-                !external && (unresolved.contains(&target) || unresolved.contains(&whole));
+            // The menu names (and "Create note"s) the bare target; the unresolved set is keyed
+            // by bare targets too (WP-R7, review E2).
+            let missing = !external && unresolved.contains(&target);
             crate::context_menu::Target::Link {
                 src: path.to_owned(),
                 target,
@@ -334,7 +329,10 @@ fn properties<'a>(cx: &Ctx<'a, '_>, props: &'a [Property]) -> Element<'a, Messag
                     alias,
                 } => span(link_label(target, fragment.as_ref(), alias.as_ref()))
                     .color(link_color(cx, target))
-                    .link(LinkTarget::Vault(target.clone())),
+                    .link(LinkTarget::Vault {
+                        target: target.clone(),
+                        fragment: fragment.clone(),
+                    }),
             });
         }
         row![
@@ -379,17 +377,20 @@ fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Mes
 /// plan round-21 WP-2: the click message of code block `run`'s copy button — carries exactly the
 /// block's stored `code` (no fence, no language line, no added or stripped newline).
 pub(super) fn copy_message(path: &str, view: u64, run: usize, code: &str) -> Message {
-    Message::Reading(ReadingMsg::CodeCopy {
-        path: path.to_owned(),
-        view,
-        run,
+    Message::Reading(ReadingMsg::Copy {
         text: code.to_owned(),
+        feedback: crate::message::CopyFeedback::Block {
+            path: path.to_owned(),
+            view,
+            run,
+        },
     })
 }
 
 /// plan round-21 WP-2: `body` (a code block) with a hover-revealed copy button in its top-right
-/// corner. The overlay is a `stack` layer, so the block's size and text layout never change; the
-/// run index `run` (already taken by the caller) keys the hover/copied state.
+/// corner, drawn by `iced::widget::hover` (WP-R7, review E1: no app hover state). The overlay is
+/// a stacked layer, so the block's size and text layout never change; the run index `run`
+/// (already taken by the caller) keys the copied state.
 fn copy_overlay<'a>(
     cx: &Ctx<'a, '_>,
     run: usize,
@@ -397,18 +398,8 @@ fn copy_overlay<'a>(
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let t = cx.t;
-    let (path, view) = (cx.path.to_owned(), cx.view);
-    let over = move |over: bool| {
-        Message::Reading(ReadingMsg::CodeHover {
-            path: path.clone(),
-            view,
-            run,
-            over,
-        })
-    };
-    let overlay: Element<'a, Message> = if cx.code_hover != Some(run) {
-        Space::new().into()
-    } else if cx.code_copied == Some(run) {
+    let view = cx.view;
+    let overlay: Element<'a, Message> = if cx.code_copied == Some(run) {
         text("Copied")
             .size(cx.sz(12.0))
             .color(t.accent_ui.to_color())
@@ -437,11 +428,7 @@ fn copy_overlay<'a>(
         .align_x(iced::alignment::Horizontal::Right)
         .align_y(iced::alignment::Vertical::Top)
         .padding(6);
-    let (on_enter, on_exit) = (over.clone()(true), over(false));
-    iced::widget::mouse_area(iced::widget::stack![body, layer])
-        .on_enter(on_enter)
-        .on_exit(on_exit)
-        .into()
+    iced::widget::hover(body, layer)
 }
 
 fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
@@ -581,7 +568,10 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
                 vec![
                     span(label)
                         .color(t.accent_ui.to_color())
-                        .link(LinkTarget::Vault(target.clone())),
+                        .link(LinkTarget::Vault {
+                            target: target.clone(),
+                            fragment: fragment.clone(),
+                        }),
                 ],
                 cx.sz(13.0),
             );
@@ -708,7 +698,16 @@ fn href_target(href: &str) -> LinkTarget {
     if editor_model::render::is_remote(href) {
         LinkTarget::External(href.to_owned())
     } else {
-        LinkTarget::Vault(href.to_owned())
+        vault_href(href)
+    }
+}
+
+/// A relative md-link href as a vault target, split once (WP-R7, review E2).
+fn vault_href(href: &str) -> LinkTarget {
+    let (target, fragment) = editor_model::link_at::split_href(href);
+    LinkTarget::Vault {
+        target: target.to_owned(),
+        fragment: fragment.map(str::to_owned),
     }
 }
 
@@ -726,19 +725,18 @@ fn link_color(cx: &Ctx<'_, '_>, target: &str) -> iced::Color {
 fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {
     let src = path.to_owned();
     move |l| match l {
-        // The wikilink / md-href `#fragment` rides in the string (plan round-19 WP-1).
-        LinkTarget::Vault(href) => {
-            let (target, fragment) = super::links::split_fragment(&href);
-            Message::Reading(ReadingMsg::OpenLink {
-                src: src.clone(),
-                target,
-                fragment,
-            })
-        }
+        LinkTarget::Vault { target, fragment } => Message::Reading(ReadingMsg::OpenLink {
+            src: src.clone(),
+            target,
+            fragment,
+        }),
         // WP-3: handed to the opener (which refuses non-allowlisted schemes).
         LinkTarget::External(url) => Message::OpenUrl(url),
         // Plan round-22 WP-2: inline code → copy the whole value.
-        LinkTarget::Copy(text) => Message::Reading(ReadingMsg::InlineCodeCopy { text }),
+        LinkTarget::Copy(text) => Message::Reading(ReadingMsg::Copy {
+            text,
+            feedback: crate::message::CopyFeedback::Notice,
+        }),
     }
 }
 
@@ -859,21 +857,20 @@ fn inlines_view<'a>(
                     .unwrap_or_default()
                     .into_owned();
                 let color = link_color(cx, target);
-                let href = match fragment {
-                    Some(f) => format!("{target}#{f}"),
-                    None => target.clone(),
+                let l = LinkTarget::Vault {
+                    target: target.clone(),
+                    fragment: fragment.clone(),
                 };
                 painted(cx, run, at, &mut spans, Cow::Owned(label), |p| {
-                    span(p).color(color).link(LinkTarget::Vault(href.clone()))
+                    span(p).color(color).link(l.clone())
                 });
             }
             Inline::Link { url, label } => {
-                let l = if editor_model::render::is_remote(url) {
-                    LinkTarget::External(url.clone())
-                } else {
-                    LinkTarget::Vault(url.clone())
+                let l = href_target(url);
+                let color = match &l {
+                    LinkTarget::Vault { target, .. } => link_color(cx, target),
+                    _ => link_color(cx, url),
                 };
-                let color = link_color(cx, url);
                 painted(
                     cx,
                     run,

@@ -8,9 +8,11 @@ use crate::message::ReadingMsg;
 fn inline_code_copy_shows_a_copied_notice() {
     let (_tmp, _d, mut app) = setup(&["c/a.md"]);
     assert!(app.status.notice.is_none());
-    let _ = app.send(Message::Reading(ReadingMsg::InlineCodeCopy {
+    let task = app.send(Message::Reading(ReadingMsg::Copy {
         text: "certutil -hashfile x".into(),
+        feedback: crate::message::CopyFeedback::Notice,
     }));
+    assert!(task.units() > 0, "the value went to the clipboard");
     assert_eq!(
         app.status.notice.as_ref().map(|n| n.text.as_str()),
         Some("Copied")

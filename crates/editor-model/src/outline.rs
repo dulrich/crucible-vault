@@ -43,9 +43,40 @@ pub fn outline(source: &str) -> Vec<OutlineItem> {
     from_note(source, &ofm::parse(source))
 }
 
+/// Plan tn-review-2026-11-04-remediation WP-R7 (Decision 3): whether heading text `heading`
+/// matches link fragment `fragment` — equal case-insensitively after trimming both (Obsidian's
+/// rule). The one matcher for heading jumps ([`heading_line`]) and transclusion sections.
+pub fn heading_matches(heading: &str, fragment: &str) -> bool {
+    heading.trim().eq_ignore_ascii_case(fragment.trim())
+}
+
+/// The 0-based line of the first heading of `source` matching `fragment` ([`heading_matches`];
+/// `^block` ids and empty fragments never match).
+pub fn heading_line(source: &str, fragment: &str) -> Option<usize> {
+    let want = fragment.trim();
+    if want.is_empty() || want.starts_with('^') {
+        return None;
+    }
+    outline(source)
+        .into_iter()
+        .find(|h| heading_matches(&h.text, want))
+        .map(|h| h.line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Moved from the editor's `reading/tests_anchor.rs` (WP-R7, review E3) with the case rule
+    /// flipped per Decision 3: `[[N#a]]` resolves to `# A`.
+    #[test]
+    fn heading_line_match_rules() {
+        assert_eq!(heading_line("# A\n", " A "), Some(0));
+        assert_eq!(heading_line("# A\n", "a"), Some(0));
+        assert_eq!(heading_line("x\n\n## Target\n", "Target"), Some(2));
+        assert_eq!(heading_line("# A\n", "^blk"), None);
+        assert_eq!(heading_line("# A\n", ""), None);
+    }
 
     const FIXTURE: &str = "---\ntitle: x\ntags: [a]\n---\n# Top\n\ntext # not a heading\n\n```sh\n# comment in code\n```\n\n## Second ##\n\nSetext\n======\n\nSub setext\n----------\n\n###### Six\n";
 

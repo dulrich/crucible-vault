@@ -103,26 +103,6 @@ fn outline_jump_scrolls_reading() {
 }
 
 #[test]
-fn heading_match_and_fragment_split_rules() {
-    use crate::app::scroll::heading_line;
-    assert_eq!(
-        heading_line(std::str::from_utf8(NOTE).unwrap(), "Target"),
-        Some(8)
-    );
-    assert_eq!(heading_line("# A\n", " A "), Some(0));
-    assert_eq!(heading_line("# A\n", "a"), None);
-    assert_eq!(heading_line("# A\n", "^blk"), None);
-    assert_eq!(heading_line("# A\n", ""), None);
-    assert_eq!(links::split_fragment("N#H"), ("N".into(), Some("H".into())));
-    assert_eq!(
-        links::split_fragment("#H"),
-        (String::new(), Some("H".into()))
-    );
-    assert_eq!(links::split_fragment("N#"), ("N".into(), None));
-    assert_eq!(links::split_fragment("N"), ("N".into(), None));
-}
-
-#[test]
 fn tab_strip_fraction_and_activation_scroll() {
     use crate::app::scroll::strip_fraction;
     assert_eq!(strip_fraction(0, 1), 0.0);
