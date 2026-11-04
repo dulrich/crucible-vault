@@ -13,15 +13,19 @@
 //! note that merely embeds a video is never touched). Leading `%% … %%` managed regions, the
 //! frontmatter and everything at or after `## Transcript` stay byte-identical; a body that does not
 //! fully match the shape is left alone, so a second run is a no-op. Written through
-//! [`StepCtx::modify`] (CAS, I2). Timestamp cleanup is not done here — it stays on the kind `post`
-//! `cleanup_transcript` lint path. Like `transcript_refine`, there is no editor hold for a custom
-//! step; the CAS hash is the protection. Outcome vars: `stripped` (bool).
+//! [`StepCtx::modify`] (CAS, I2). Timestamp cleanup is not done here in note scope — it stays on
+//! the kind `cleanup_transcript` lint path. Like `transcript_refine`, the step has no hold of its
+//! own: the editor hold on the active note is the *action's* opt-in (`hold = true`, which requires
+//! `resources.note` and is a load error without it); without it the CAS hash is the only
+//! protection. Outcome vars: `stripped` (bool).
 //!
 //! **Backfill scope** (a scope of this step rather than its own: the strip, the composition and the
 //! publication fill share `tidy` and `with_publication`) walks every indexed note outside the
 //! system folders (`.trash/`, `_yt_metadata/`, `_raw_transcript/`, `_custom/`, …) whose `source`
 //! is a YouTube URL, in path order, and per note in one CAS modify (no network, no child jobs):
-//! (a) [`tidy`]; (b) on a `post`-tagged note, [`cv_note::cleanup_youtube_transcript`] on the
+//! (a) [`tidy`]; (b) on a note tagged with a `kinds.toml` kind whose `cleanup_transcript` is set
+//! (as `lint` resolves it; plan tn-review-2026-11-04-remediation Decision 10),
+//! [`cv_note::cleanup_youtube_transcript`] on the
 //! result; (b2) on that same note, [`cv_note::restore_transcript_heading`] re-inserts a
 //! `## Transcript` heading the cleanup dropped when the managed prefix still links `#Transcript`
 //! (plan round-20-transcript-heading-auto-holds WP-1); (c) `publication` from the note's linked `yt-metadata` note (its `publication`, else its
@@ -33,10 +37,12 @@
 use std::collections::BTreeSet;
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_note::{FrontmatterDoc, JsValue};
+use cv_note::FrontmatterDoc;
+use cv_text::url_canon::is_youtube_video;
+use cv_text::vpath::is_user_path;
 use serde::Serialize;
 
-use super::intake_enrich::{is_user_path, is_youtube_source};
+use super::file::cleanup_kind;
 use super::params::{check_keys, get_bool, get_str};
 use super::web::link_targets;
 use super::youtube::{metadata_publication, with_publication};
@@ -122,7 +128,7 @@ pub(crate) fn tidy(text: &str) -> Option<String> {
     let doc = FrontmatterDoc::new(text);
     if !doc
         .get_str_trimmed("source")
-        .is_some_and(|s| is_youtube_source(&s))
+        .is_some_and(|s| is_youtube_video(&s))
     {
         return None;
     }
@@ -144,21 +150,16 @@ pub(crate) struct Plan {
     pub filled: bool,
 }
 
-/// Whether the note's `tags` include `post` (a list, or a single string).
-fn has_post_tag(text: &str) -> bool {
-    match FrontmatterDoc::new(text).get("tags") {
-        Ok(Some(JsValue::Arr(a))) => a
-            .iter()
-            .any(|v| matches!(v, JsValue::Str(s) if s.trim().trim_start_matches('#') == "post")),
-        Ok(Some(JsValue::Str(s))) => s.trim().trim_start_matches('#') == "post",
-        _ => false,
-    }
-}
-
-/// The pure per-note backfill: strip, then (on a `post` tag) timestamp cleanup, then the
-/// publication fill from `meta_publication` (the linked metadata note's, if any). Each step runs
-/// on the previous one's result; a note that is not a YouTube clip is left alone.
-pub(crate) fn plan(text: &str, meta_publication: Option<&str>) -> Result<Plan, StepError> {
+/// The pure per-note backfill: strip, then (when `cleanup` — the note's kind sets
+/// `cleanup_transcript`, resolved by the caller via [`cleanup_kind`]) timestamp cleanup and
+/// heading restore, then the publication fill from `meta_publication` (the linked metadata note's,
+/// if any). Each step runs on the previous one's result; a note that is not a YouTube clip is left
+/// alone.
+pub(crate) fn plan(
+    text: &str,
+    cleanup: bool,
+    meta_publication: Option<&str>,
+) -> Result<Plan, StepError> {
     let mut p = Plan::default();
     let mut cur = text.to_owned();
     if let Some(t) = tidy(&cur) {
@@ -167,14 +168,14 @@ pub(crate) fn plan(text: &str, meta_publication: Option<&str>) -> Result<Plan, S
     }
     let is_youtube = FrontmatterDoc::new(text)
         .get_str_trimmed("source")
-        .is_some_and(|s| is_youtube_source(&s));
-    if is_youtube && has_post_tag(&cur) {
+        .is_some_and(|s| is_youtube_video(&s));
+    if is_youtube && cleanup {
         let cleaned = cv_note::cleanup_youtube_transcript(&cur);
         if cleaned != cur {
             cur = cleaned;
             p.cleaned = true;
         }
-        // Plan round-20-transcript-heading-auto-holds WP-1 (audit E2): only a post-tagged YouTube
+        // Plan round-20-transcript-heading-auto-holds WP-1 (audit E2): only a cleanup-kind YouTube
         // note, whose heading the cleanup is the only known remover of, gets it back.
         if let Some(t) = cv_note::restore_transcript_heading(&cur) {
             cur = t;
@@ -192,13 +193,10 @@ pub(crate) fn plan(text: &str, meta_publication: Option<&str>) -> Result<Plan, S
     Ok(p)
 }
 
-/// Whether the note's `publication` is absent or blank.
-fn publication_blank(text: &str) -> bool {
-    match FrontmatterDoc::new(text).get("publication") {
-        Ok(None | Some(JsValue::Null)) => true,
-        Ok(Some(JsValue::Str(s))) => s.trim().is_empty(),
-        _ => false,
-    }
+/// The note's tags as the backfill reads them for the kind lookup (frontmatter `tags`, a list or a
+/// single string).
+fn kind_tags(text: &str) -> Vec<String> {
+    FrontmatterDoc::new(text).get_strings("tags")
 }
 
 #[derive(Serialize, Default)]
@@ -227,12 +225,13 @@ fn linked_publication(ctx: &StepCtx<'_>, text: &str) -> Result<Option<String>, S
 }
 
 fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let config = ctx.config;
     let paths: BTreeSet<String> = ctx
         .index()?
         .query()
         .md_props_with_key("source")?
         .into_iter()
-        .filter(|r| is_youtube_source(&cv_index::prop_text(&r.value)) && is_user_path(&r.path))
+        .filter(|r| is_youtube_video(&cv_index::prop_text(&r.value)) && is_user_path(&r.path))
         .map(|r| r.path)
         .collect();
     let mut v = BackfillVars {
@@ -247,7 +246,10 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
             continue;
         };
         v.scanned += 1;
-        let wants_pub = publication_blank(&text);
+        // Malformed frontmatter is not "blank": no publication is wanted from it.
+        let wants_pub = FrontmatterDoc::new(text.as_str())
+            .is_blank("publication")
+            .unwrap_or(false);
         let meta = if wants_pub {
             linked_publication(ctx, &text)?
         } else {
@@ -256,7 +258,11 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         if wants_pub && meta.is_none() {
             v.no_metadata += 1;
         }
-        let first = plan(&text, meta.as_deref())?;
+        let first = plan(
+            &text,
+            cleanup_kind(config, &kind_tags(&text)),
+            meta.as_deref(),
+        )?;
         if first.new.is_none() {
             v.unchanged += 1;
             continue;
@@ -266,7 +272,7 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         } else {
             let mut last = Plan::default();
             match ctx.modify(path, |cur| {
-                last = plan(cur, meta.as_deref())?;
+                last = plan(cur, cleanup_kind(config, &kind_tags(cur)), meta.as_deref())?;
                 Ok(last.new.clone())
             }) {
                 Ok(Some(_)) => last,

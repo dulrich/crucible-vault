@@ -44,12 +44,13 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::enrich::{self, BannerRef, EnrichOpts, EnrichReport};
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_providers::ProviderManager;
+use cv_text::url_canon::is_youtube_video;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::agent;
-use super::params::{check_keys, get_bool, get_str};
-use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag};
+use super::params::{check_keys, get_bool, get_pos_int, get_str};
+use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag, job_pos_int};
 
 /// The action a single note is enriched by (also the backfill's child).
 pub(crate) const ENRICH_ACTION: &str = "intake-enrich";
@@ -83,11 +84,9 @@ pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
             ));
         }
     };
-    let limit = match t.get("limit") {
-        None => DEFAULT_LIMIT,
-        Some(toml::Value::Integer(n)) if *n > 0 => usize::try_from(*n).unwrap_or(usize::MAX),
-        Some(_) => return Err("intake_enrich step: `limit` must be an integer > 0".into()),
-    };
+    let limit = get_pos_int(t, "limit")
+        .map_err(|e| format!("intake_enrich step: {e}"))?
+        .unwrap_or(DEFAULT_LIMIT);
     let agent = get_str(t, "agent")?.unwrap_or_else(|| DEFAULT_AGENT.to_owned());
     if agent.trim().is_empty() {
         return Err("intake_enrich step: `agent` is empty".into());
@@ -155,24 +154,12 @@ impl Vars {
     }
 }
 
-/// Whether a frontmatter value counts as "set" (null and blank strings do not).
-fn is_set(v: Option<&JsValue>) -> bool {
-    match v {
-        None | Some(JsValue::Null) => false,
-        Some(JsValue::Str(s)) => !s.trim().is_empty(),
-        Some(_) => true,
-    }
-}
-
-/// Whether a note's `enriched` marker is set.
+/// Whether a note's `enriched` marker is set (not blank under [`cv_note::is_blank`]; malformed
+/// frontmatter reads as unset).
 pub(crate) fn already_enriched(text: &str) -> bool {
-    is_set(
-        FrontmatterDoc::new(text)
-            .get("enriched")
-            .ok()
-            .flatten()
-            .as_ref(),
-    )
+    !FrontmatterDoc::new(text)
+        .is_blank("enriched")
+        .unwrap_or(true)
 }
 
 /// The note run, with the provider manager injected (tests pass one with a test secret source).
@@ -283,28 +270,6 @@ struct BackfillVars {
     enqueue_failed: usize,
 }
 
-/// Whether a `source` value is a YouTube video URL (a clipped video).
-pub(crate) fn is_youtube_source(source: &str) -> bool {
-    let s = source.trim();
-    let rest = s
-        .strip_prefix("https://")
-        .or_else(|| s.strip_prefix("http://"))
-        .unwrap_or(s);
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    matches!(
-        host.strip_prefix("www.")
-            .or_else(|| host.strip_prefix("m."))
-            .unwrap_or(host),
-        "youtube.com" | "youtu.be"
-    )
-}
-
-/// Whether `path` is outside the system folders (`.trash/`, `.`/`_`-prefixed top folders such as
-/// `_custom`, `_yt_metadata`).
-pub(crate) fn is_user_path(path: &str) -> bool {
-    !path.starts_with(['.', '_'])
-}
-
 /// The newest-first (`ctime` desc, then path) candidates, at most `limit`: the unenriched ones plus
 /// every path in `refine_pending` (a YouTube clip whose transcript is still unrefined, enriched
 /// or not).
@@ -321,6 +286,15 @@ pub(crate) fn pick_backfill(
         .collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     v.into_iter().take(limit).map(|(p, _)| p.clone()).collect()
+}
+
+/// [`cv_note::is_blank`]'s rule over the index's `serde_json` property values (there is no `JsValue` conversion at the index boundary): null and a whitespace-only string are blank, everything else is set.
+fn json_is_blank(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        _ => false,
+    }
 }
 
 /// The backfill's view of the vault's intake notes.
@@ -350,7 +324,7 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
     }
     let mut youtube = BTreeSet::new();
     for r in q.md_props_with_key("source")? {
-        if is_youtube_source(&cv_index::prop_text(&r.value)) {
+        if is_youtube_video(&cv_index::prop_text(&r.value)) {
             youtube.insert(r.path.clone());
             cands.insert(r.path);
         }
@@ -358,15 +332,11 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
     let enriched: BTreeSet<String> = q
         .md_props_with_key("enriched")?
         .into_iter()
-        .filter(|r| match &r.value {
-            Value::Null => false,
-            Value::String(s) => !s.trim().is_empty(),
-            _ => true,
-        })
+        .filter(|r| !json_is_blank(&r.value))
         .map(|r| r.path)
         .collect();
     let mut refine = BTreeSet::new();
-    for p in youtube.iter().filter(|p| is_user_path(p)) {
+    for p in youtube.iter().filter(|p| cv_text::vpath::is_user_path(p)) {
         if let Some((bytes, _)) = ctx.read(p)?
             && let Ok(text) = String::from_utf8(bytes)
             && !super::transcript_refine::is_refined(&text)
@@ -380,7 +350,7 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
     }
     let cands = cands
         .into_iter()
-        .filter(|p| is_user_path(p))
+        .filter(|p| cv_text::vpath::is_user_path(p))
         .map(|p| {
             let c = ctimes.get(&p).copied().unwrap_or(0);
             (p, c)
@@ -393,34 +363,10 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
     })
 }
 
-/// The backfill batch size: a job param `limit` (a positive integer or its decimal text — the
-/// action's param kinds have no integer) wins over the step key; anything else is rejected, never
-/// rounded or coerced.
-pub(crate) fn effective_limit(
-    job: &serde_json::Map<String, Value>,
-    step_limit: usize,
-) -> Result<usize, String> {
-    let bad = |v: &Value| format!("intake_enrich: job param `limit` {v} is not a positive integer");
-    match job.get("limit") {
-        None | Some(Value::Null) => Ok(step_limit),
-        Some(v @ Value::Number(n)) => n
-            .as_u64()
-            .filter(|n| *n > 0)
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| bad(v)),
-        Some(Value::String(s)) if s.trim().is_empty() => Ok(step_limit),
-        Some(v @ Value::String(s)) => s
-            .trim()
-            .parse::<usize>()
-            .ok()
-            .filter(|n| *n > 0)
-            .ok_or_else(|| bad(v)),
-        Some(v) => Err(bad(v)),
-    }
-}
-
 fn backfill(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let limit = effective_limit(ctx.params, p.limit).map_err(StepError::failed)?;
+    let limit = job_pos_int(ctx.params, "limit")
+        .map_err(|e| StepError::failed(format!("intake_enrich: {e}")))?
+        .unwrap_or(p.limit);
     let notes = intake_notes(ctx)?;
     let picks = pick_backfill(&notes.ctimes, &notes.enriched, &notes.refine, limit);
     let (mut ok, mut failed) = (0, 0);

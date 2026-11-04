@@ -27,7 +27,7 @@
 use cv_actions::{ConfigSet, StepKind};
 use cv_note::{LintContext, LintSettings, cleanup_youtube_transcript, lint_note};
 
-use super::file::{step_kind, target_path};
+use super::file::{kind_cleans_transcript, step_kind, target_path};
 use cv_text::vpath::stem;
 
 use super::materialize::now;
@@ -103,9 +103,7 @@ pub(crate) fn run(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, Step
     let settings = &p.settings;
     let mut cleanup = p.cleanup_transcript;
     if let Some(def) = step_kind(ctx, p.kind.as_deref())? {
-        cleanup |= get_bool(def, "cleanup_transcript")
-            .map_err(StepError::failed)?
-            .unwrap_or(false);
+        cleanup |= kind_cleans_transcript(def).map_err(StepError::failed)?;
     }
     let path = target_path(ctx, p.path.as_deref())?;
     let (bytes, hash) = ctx.read_required(&path)?;

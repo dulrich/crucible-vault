@@ -14,12 +14,9 @@ use cv_testkit::MockHttp;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
-use super::intake_enrich::{
-    Params, already_enriched, effective_limit, is_youtube_source, parse, pick_backfill, reattach,
-    run_note,
-};
+use super::intake_enrich::{Params, already_enriched, parse, pick_backfill, reattach, run_note};
 use super::testkit::{AtRecorder, StepEnv};
-use super::{DeferCause, StepError, StepOutcome};
+use super::{DeferCause, StepError, StepOutcome, job_pos_int};
 
 struct TestSecrets(HashMap<String, String>);
 impl SecretSource for TestSecrets {
@@ -353,11 +350,6 @@ fn params_and_pure_selection() {
     assert!(parse(&"invented = 1".parse().unwrap()).is_err());
     assert!(parse(&"scope = \"backfill\"\nlimit = 5".parse().unwrap()).is_ok());
 
-    assert!(is_youtube_source("https://www.youtube.com/watch?v=abc"));
-    assert!(is_youtube_source("https://youtu.be/abc"));
-    assert!(!is_youtube_source("https://notyoutube.com/x"));
-    assert!(!is_youtube_source("https://example.com/youtube.com"));
-
     let cands: BTreeMap<String, i64> = [("a.md", 1), ("b.md", 3), ("c.md", 2), ("d.md", 3)]
         .into_iter()
         .map(|(p, c)| (p.to_owned(), c))
@@ -375,9 +367,9 @@ fn params_and_pure_selection() {
     assert_eq!(pick_backfill(&cands, &done, &pending, 2), ["b.md", "d.md"]);
 
     let job = |v: Value| Map::from_iter([("limit".to_owned(), v)]);
-    assert_eq!(effective_limit(&Map::new(), 20), Ok(20));
-    assert_eq!(effective_limit(&job(json!("5")), 20), Ok(5));
-    assert_eq!(effective_limit(&job(json!(7)), 20), Ok(7));
+    assert_eq!(job_pos_int(&Map::new(), "limit"), Ok(None));
+    assert_eq!(job_pos_int(&job(json!("5")), "limit"), Ok(Some(5)));
+    assert_eq!(job_pos_int(&job(json!(7)), "limit"), Ok(Some(7)));
     for bad in [
         json!("0"),
         json!("2.5"),
@@ -386,7 +378,7 @@ fn params_and_pure_selection() {
         json!(1.5),
         json!(true),
     ] {
-        assert!(effective_limit(&job(bad.clone()), 20).is_err(), "{bad}");
+        assert!(job_pos_int(&job(bad.clone()), "limit").is_err(), "{bad}");
     }
 }
 
@@ -394,7 +386,7 @@ fn params_and_pure_selection() {
 /// transcript is picked; a refined one, and an enriched one without a transcript, are not.
 #[test]
 fn backfill_picks_enriched_unrefined_youtube_clips() {
-    let yt = "source: https://www.youtube.com/watch?v=abc\n";
+    let yt = "source: https://www.youtube.com/watch?v=abcdefghijk\n";
     let long = "word ".repeat(cv_ingest::transcript::MIN_REFINE_WORDS);
     let fx = LiveFixture::new([
         (
@@ -455,7 +447,7 @@ fn backfill_enqueues_only_unenriched_intake_notes_newest_first() {
         ("Posts/mail.md", "---\nmessage-id: \"<m@x>\"\n---\nbody\n"),
         (
             "Clips/yt.md",
-            "---\nsource: https://www.youtube.com/watch?v=abc\n---\nbody\n",
+            "---\nsource: https://www.youtube.com/watch?v=abcdefghijk\n---\nbody\n",
         ),
         (
             "Posts/done.md",

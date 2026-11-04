@@ -391,6 +391,33 @@ pub(crate) fn job_flag(ctx: &StepCtx<'_>, key: &str) -> Option<bool> {
     flag_of(ctx.params, key)
 }
 
+/// A positive-integer job param `key`, the job-side twin of [`params::get_pos_int`]: a JSON
+/// integer > 0 or its decimal text (the action's param kinds have no integer) wins over the step
+/// key; absent, null or a blank string is `None`; anything else is rejected, never rounded or
+/// coerced. The error reads "job param `key` VALUE is not a positive integer" (callers prefix
+/// their step name).
+pub(crate) fn job_pos_int(params: &Map<String, Value>, key: &str) -> Result<Option<usize>, String> {
+    let bad = |v: &Value| format!("job param `{key}` {v} is not a positive integer");
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v @ Value::Number(n)) => n
+            .as_u64()
+            .filter(|n| *n > 0)
+            .and_then(|n| usize::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| bad(v)),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(v @ Value::String(s)) => s
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(Some)
+            .ok_or_else(|| bad(v)),
+        Some(v) => Err(bad(v)),
+    }
+}
+
 /// Everything a step sees. Built per step by the runner.
 pub struct StepCtx<'a> {
     /// The running action.

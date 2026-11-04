@@ -40,12 +40,13 @@
 //! `copy` whose destination already holds identical bytes succeeds.
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_note::{FrontmatterDoc, JsValue};
+use cv_note::{FrontmatterDoc, JsValue, is_blank};
 use serde::Serialize;
 
 use super::capture::{FORWARDED_TASK, OPEN_TASK};
 use super::materialize::join;
 use super::params::{check_keys, check_placeholders, expand, get_bool, get_str, get_str_list};
+use super::util::{has_tag, note_tags};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 const KIND_KEYS: &[&str] = &[
@@ -70,6 +71,32 @@ pub(super) fn kind_def<'c>(config: &'c ConfigSet, name: &str) -> Result<&'c toml
         return Err(format!("[kinds] step: unknown key {k:?}"));
     }
     Ok(def)
+}
+
+/// Whether a kind's table sets `cleanup_transcript = true` (the one reading of the flag: `lint`
+/// resolves its named kind through it, [`cleanup_kind`] resolves a note's tags through it).
+pub(super) fn kind_cleans_transcript(def: &toml::Table) -> Result<bool, String> {
+    Ok(get_bool(def, "cleanup_transcript")?.unwrap_or(false))
+}
+
+/// Whether one of `tags` (a leading `#` ignored) names a `kinds.toml` kind with
+/// `cleanup_transcript = true`; a malformed flag counts as unset. How the tidy backfill and
+/// `intake_finalize` decide a note is a cleaned-transcript kind (plan
+/// tn-review-2026-11-04-remediation Decision 10).
+pub(super) fn cleanup_kind(config: &ConfigSet, tags: &[String]) -> bool {
+    let Some(kinds) = config
+        .table("kinds.toml")
+        .get("kinds")
+        .and_then(toml::Value::as_table)
+    else {
+        return false;
+    };
+    tags.iter().any(|t| {
+        kinds
+            .get(t.trim_start_matches('#'))
+            .and_then(toml::Value::as_table)
+            .is_some_and(|d| kind_cleans_transcript(d).unwrap_or(false))
+    })
 }
 
 /// Resolves the step's `kind` (expanded) to its table, if the step names one.
@@ -269,31 +296,14 @@ fn parse(kind: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, 
 
 // --- guard -----------------------------------------------------------------------------------
 
-fn norm_tag(s: &str) -> String {
-    s.trim().trim_start_matches('#').to_lowercase()
-}
-
-/// The note's tags as the index records them ([`cv_index::note_tags`]: ofm's frontmatter +
-/// inline tags, never inside code — SR11), normalized for the guard's case-insensitive match.
-fn note_tags(text: &str) -> Vec<String> {
-    cv_index::note_tags(text)
-        .iter()
-        .map(|t| norm_tag(t))
-        .collect()
-}
-
-fn has_tag(tags: &[String], want: &str) -> bool {
-    let w = norm_tag(want);
-    tags.iter()
-        .any(|t| *t == w || t.strip_prefix(&w).is_some_and(|r| r.starts_with('/')))
-}
-
+/// The guard's "has a value": set under [`cv_note::is_blank`], plus one guard-only rule (plan
+/// tn-review-2026-11-04-remediation Decision 9): an empty array counts as absent here, because a
+/// guard on a list property means "has an entry" (the shared predicate treats any array as set).
 fn has_prop(text: &str, key: &str) -> Result<bool, StepError> {
     Ok(match FrontmatterDoc::new(text).get(key.trim())? {
-        None | Some(JsValue::Null) => false,
-        Some(JsValue::Str(s)) => !s.trim().is_empty(),
+        None => false,
         Some(JsValue::Arr(a)) => !a.is_empty(),
-        Some(_) => true,
+        Some(v) => !is_blank(&v),
     })
 }
 
@@ -648,6 +658,7 @@ fn mark_forwarded(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, Step
 
 #[cfg(test)]
 mod unit {
+    use super::super::util::norm_tag;
     use super::*;
 
     #[test]

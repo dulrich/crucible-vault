@@ -29,7 +29,7 @@ use cv_text::url_canon::{canonical_x_status_url, extract_x_status_from_url};
 use serde::Serialize;
 
 use super::metadata::{Ensured, MetadataKind, iso_now, link_metadata, link_onto, str_prop};
-use super::params::{check_keys, check_placeholders, expand, get_str};
+use super::params::{check_keys, check_placeholders, expand, get_pos_int, get_str};
 use super::web::{
     api_base, block_on, client, create_or_found, find_in_subfolders, link_targets, record_usage,
 };
@@ -43,11 +43,7 @@ const LIST_KEY: &str = "x-metadata";
 const ANCHOR: &str = "x-status-id";
 
 fn limit(t: &toml::Table) -> Result<usize, String> {
-    match t.get("limit") {
-        None => Ok(DEFAULT_LIMIT as usize),
-        Some(toml::Value::Integer(n)) if *n > 0 => Ok(*n as usize),
-        Some(_) => Err("`limit` must be an integer > 0".into()),
-    }
+    Ok(get_pos_int(t, "limit")?.unwrap_or(DEFAULT_LIMIT as usize))
 }
 
 /// Parsed `x_metadata` / `x_discover` / `x_backfill` params.

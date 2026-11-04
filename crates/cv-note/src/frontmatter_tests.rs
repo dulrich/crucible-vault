@@ -27,6 +27,20 @@ fn get_str_trimmed_drops_empty() {
 }
 
 #[test]
+fn is_blank_is_the_scalar_rule_and_set_if_empty_does_not_trim() {
+    let d = FrontmatterDoc::new("---\na: x\nb: '  '\nc:\nd: []\ne: 0\nf: false\n---\n");
+    assert!(!d.is_blank("a").unwrap());
+    for k in ["b", "c", "missing"] {
+        assert!(d.is_blank(k).unwrap(), "{k}");
+    }
+    for k in ["d", "e", "f"] {
+        assert!(!d.is_blank(k).unwrap(), "{k}");
+    }
+    let mut d = d;
+    assert!(!d.set_if_empty("b", &s("new")).unwrap());
+}
+
+#[test]
 fn get_bool_is_bool_only() {
     let d = FrontmatterDoc::new("---\na: true\nb: false\nc: 'true'\nd: 1\n---\n");
     assert_eq!(d.get_bool("a"), Some(true));

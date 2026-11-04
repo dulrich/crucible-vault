@@ -471,7 +471,7 @@ fn file_by_kind(
         Some(s.kind.trim().to_owned())
     } else if let Some(k) = row.and_then(|r| r.kind.clone()) {
         Some(k)
-    } else if cv_text::extract_video_id_from_url(&clip.source).is_some() {
+    } else if cv_text::url_canon::is_youtube_video(&clip.source) {
         Some(youtube_kind(&ctx.config.pipelines().youtube, body))
     } else if let Some(h) = &clip.host {
         hosts_kind(ctx.config, h)?

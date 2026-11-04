@@ -64,7 +64,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::agent;
-use super::params::{check_keys, get_bool, get_str};
+use super::params::{check_keys, get_bool, get_pos_int, get_str};
 use crate::steps::{StepCtx, StepError, StepModule, StepOutcome};
 
 const DEFAULT_LIMIT: usize = 100;
@@ -112,11 +112,9 @@ pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
             ));
         }
     };
-    let limit = match t.get("limit") {
-        None => DEFAULT_LIMIT,
-        Some(toml::Value::Integer(n)) if *n > 0 => usize::try_from(*n).unwrap_or(usize::MAX),
-        Some(_) => return Err("image_describe step: `limit` must be an integer > 0".into()),
-    };
+    let limit = get_pos_int(t, "limit")
+        .map_err(|e| format!("image_describe step: {e}"))?
+        .unwrap_or(DEFAULT_LIMIT);
     Ok(Params {
         scope,
         limit,

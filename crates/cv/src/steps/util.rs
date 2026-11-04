@@ -8,6 +8,29 @@ use tokio::task::JoinSet;
 use super::web::block_on;
 use super::{StepCtx, StepError};
 
+/// A tag in comparison form: trimmed, leading `#` dropped, lowercased.
+pub(crate) fn norm_tag(s: &str) -> String {
+    s.trim().trim_start_matches('#').to_lowercase()
+}
+
+/// The note's tags as the index records them ([`cv_index::note_tags`]: ofm's frontmatter + inline
+/// tags, never inside code — SR11), normalized by [`norm_tag`] for [`has_tag`].
+pub(crate) fn note_tags(text: &str) -> Vec<String> {
+    cv_index::note_tags(text)
+        .iter()
+        .map(|t| norm_tag(t))
+        .collect()
+}
+
+/// Whether `tags` (from [`note_tags`]) include `want` or a nested child of it (`want/…`), the
+/// index's `tagged` prefix rule, case-insensitive. The one tag-membership test: the guard and
+/// `transcript_refine::is_refined` both use it.
+pub(crate) fn has_tag(tags: &[String], want: &str) -> bool {
+    let w = norm_tag(want);
+    tags.iter()
+        .any(|t| *t == w || t.strip_prefix(&w).is_some_and(|r| r.starts_with('/')))
+}
+
 /// Fetches in flight per run.
 pub const MAX_IN_FLIGHT: usize = 4;
 
@@ -70,7 +93,10 @@ pub(crate) fn md_files_under(ctx: &StepCtx<'_>, rel: &str) -> Vec<String> {
 
 /// Every file in the vault outside the top-level `_custom/` and every dot-directory (`.trash/`,
 /// `.git/`, ...), recursive, read-only, no symlinks, sorted, vault-relative; root-level files
-/// included (plan remote-media-sprint WP-4, Decision 5).
+/// included (plan remote-media-sprint WP-4, Decision 5). Deliberately not
+/// [`cv_text::vpath::is_user_path`]: that predicate also skips every other `_`-prefixed top
+/// folder (`_yt_metadata`, …), which this walk must include, and it never skips a nested
+/// dot-directory the way this walk does — the two rules differ, so they stay separate.
 pub(crate) fn vault_files(root: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![String::new()];

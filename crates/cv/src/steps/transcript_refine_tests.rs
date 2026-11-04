@@ -137,9 +137,9 @@ fn env(base: &str, key_env: &str) -> Arc<StepEnv> {
     Arc::new(StepEnv::new(fx, config(base, key_env), action()))
 }
 
-const YT: &str = "https://www.youtube.com/watch?v=abc";
+const YT: &str = "https://www.youtube.com/watch?v=abcdefghijk";
 const RAW: &str = "0:01 so um today we talk about the thing you know 0:09 and then another part of the talk follows with more words 0:20 until the end of it";
-const EMBED: &str = "![](https://www.youtube.com/watch?v=abc)";
+const EMBED: &str = "![](https://www.youtube.com/watch?v=abcdefghijk)";
 const DESC: &str = "Description line OUTSIDE the transcript.";
 const REFINED: &str = "### Intro\n\nToday we talk about the thing and then another part of the talk follows with more words until the end of it.";
 
@@ -208,7 +208,7 @@ async fn single_chunk_refine_replaces_only_the_section_and_keeps_a_raw_copy() {
         "{t}"
     );
     assert!(
-        t.contains("\ntitle: V\nsource: https://www.youtube.com/watch?v=abc\n"),
+        t.contains("\ntitle: V\nsource: https://www.youtube.com/watch?v=abcdefghijk\n"),
         "{t}"
     );
     assert!(tags(&t).iter().any(|x| x == "refined"), "{t}");

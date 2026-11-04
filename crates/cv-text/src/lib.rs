@@ -36,5 +36,5 @@ pub use template::{
 pub use url_canon::{
     CanonMethod, CanonicalizedUrl, PostIdOptions, TrackedSourceHint, XStatusRef,
     build_blog_canon_host_map, canonical_x_status_url, canonicalize_url, extract_video_id_from_url,
-    extract_x_status_from_url, post_id_from_url, short_hash, slug_for_canonical,
+    extract_x_status_from_url, is_youtube_video, post_id_from_url, short_hash, slug_for_canonical,
 };

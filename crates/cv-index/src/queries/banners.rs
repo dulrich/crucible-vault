@@ -36,19 +36,6 @@ enum Group {
     Host(String),
 }
 
-/// The lowercase host of an http(s) URL, `www.` dropped.
-fn host_of(url: &str) -> Option<String> {
-    let url = url.trim();
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let auth = rest.split(['/', '?', '#']).next()?;
-    let auth = auth.rsplit('@').next()?;
-    let host = auth.split(':').next()?.to_ascii_lowercase();
-    let host = host.strip_prefix("www.").unwrap_or(&host).to_owned();
-    (!host.is_empty()).then_some(host)
-}
-
 /// The URL without its query and fragment.
 fn strip_url(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
@@ -92,7 +79,9 @@ fn group_of(q: &Query<'_>, note: &str) -> Result<Option<Group>> {
     }
     Ok(match (publication, source) {
         (Some(p), _) => Some(Group::Publication(p)),
-        (None, Some(s)) => host_of(&s).map(Group::Host),
+        (None, Some(s)) => cv_text::url_canon::http_host(&s)
+            .and_then(|h| cv_text::url_canon::bare_host_name(&h))
+            .map(Group::Host),
         (None, None) => None,
     })
 }
@@ -125,7 +114,11 @@ fn members(q: &Query<'_>, group: &Group) -> Result<Vec<i64>> {
                 let text = serde_json::from_str::<serde_json::Value>(&v)
                     .map(|j| crate::query::prop_text(&j))
                     .unwrap_or_default();
-                if host_of(&text).as_deref() == Some(h.as_str()) {
+                if cv_text::url_canon::http_host(&text)
+                    .and_then(|h| cv_text::url_canon::bare_host_name(&h))
+                    .as_deref()
+                    == Some(h.as_str())
+                {
                     ids.push(id);
                 }
             }
@@ -273,11 +266,6 @@ mod tests {
 
     #[test]
     fn helpers() {
-        assert_eq!(
-            host_of("https://WWW.Example.com:8080/a?b").as_deref(),
-            Some("example.com")
-        );
-        assert_eq!(host_of("ftp://x"), None);
         assert_eq!(strip_url("https://a/b.png?w=1#x"), "https://a/b.png");
         // 20 lines -> 3 per edge.
         assert!(in_edge(0, 20) && in_edge(2, 20) && !in_edge(3, 20));

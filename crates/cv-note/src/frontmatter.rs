@@ -276,6 +276,11 @@ impl FrontmatterDoc {
         }
     }
 
+    /// Whether `key` is blank under [`is_blank`]: absent, `null` or a whitespace-only string; every other value, arrays included, is set. A malformed block is an `Err` for the caller to decide, never a guess.
+    pub fn is_blank(&self, key: &str) -> Result<bool, FmError> {
+        Ok(self.get(key)?.is_none_or(|v| is_blank(&v)))
+    }
+
     /// Top-level keys in written order.
     pub fn keys(&self) -> Result<Vec<String>, FmError> {
         Ok(self.scan()?.1.into_iter().map(|e| e.key).collect())
@@ -507,7 +512,7 @@ impl FrontmatterDoc {
     }
 
     /// Crucible `upsertFrontmatterPropertyIfEmpty` (`src/frontmatter.ts:293-300`): set only when
-    /// the key is absent, `null`, or the empty string.
+    /// the key is absent, `null`, or the empty string. Unlike [`is_blank`] this does not trim: a whitespace-only string is a value here and is left untouched (plan tn-review-2026-11-04-remediation Decision 8).
     pub fn set_if_empty(&mut self, key: &str, value: &JsValue) -> Result<bool, FmError> {
         let key = key.trim();
         if key.is_empty() {
@@ -723,6 +728,16 @@ fn render_key(key: &str) -> String {
         key.to_owned()
     } else {
         json_stringify(&JsValue::Str(key.to_owned()))
+    }
+}
+
+/// The shared blank rule for a present frontmatter value (plan tn-review-2026-11-04-remediation Decision 9): `null` and a whitespace-only string are blank; every other value, arrays included even when empty, is set. Absent keys are blank at [`FrontmatterDoc::is_blank`]. It trims, unlike [`FrontmatterDoc::set_if_empty`] (Decision 8).
+#[must_use]
+pub fn is_blank(v: &JsValue) -> bool {
+    match v {
+        JsValue::Null => true,
+        JsValue::Str(s) => s.trim().is_empty(),
+        _ => false,
     }
 }
 

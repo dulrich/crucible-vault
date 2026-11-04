@@ -43,6 +43,18 @@ pub(crate) fn get_bool(t: &toml::Table, key: &str) -> Result<Option<bool>, Strin
     }
 }
 
+/// An optional positive-integer key: absent is `None`; anything but an integer > 0 is
+/// `"`{key}` must be an integer > 0"` (callers prefix their step name where they did before).
+pub(crate) fn get_pos_int(t: &toml::Table, key: &str) -> Result<Option<usize>, String> {
+    match t.get(key) {
+        None => Ok(None),
+        Some(toml::Value::Integer(n)) if *n > 0 => {
+            Ok(Some(usize::try_from(*n).unwrap_or(usize::MAX)))
+        }
+        Some(_) => Err(format!("`{key}` must be an integer > 0")),
+    }
+}
+
 /// An optional string-or-list-of-strings key.
 pub(crate) fn get_str_list(t: &toml::Table, key: &str) -> Result<Vec<String>, String> {
     match t.get(key) {

@@ -43,6 +43,12 @@ pub fn extract_video_id_from_url(value: &str) -> Option<String> {
     YT_URL_PATTERNS.iter().find_map(|r| captures1(r, value))
 }
 
+/// Whether `url` is a YouTube video URL: exactly when [`extract_video_id_from_url`] yields an id. A channel or playlist page is not a video.
+#[must_use]
+pub fn is_youtube_video(url: &str) -> bool {
+    extract_video_id_from_url(url).is_some()
+}
+
 // ---------------------------------------------------------------- X / Twitter
 
 const X_HOSTS: &[&str] = &[
@@ -563,6 +569,19 @@ mod tests {
             handle: handle.map(str::to_owned),
             status_id: STATUS_ID.to_owned(),
         })
+    }
+
+    #[test]
+    fn youtube_video_means_an_extractable_id() {
+        assert!(is_youtube_video(
+            "https://www.youtube.com/watch?v=abcdefghijk"
+        ));
+        assert!(is_youtube_video("https://youtu.be/abcdefghijk"));
+        assert!(!is_youtube_video("https://www.youtube.com/@channel"));
+        assert!(!is_youtube_video(
+            "https://www.youtube.com/playlist?list=PL1"
+        ));
+        assert!(!is_youtube_video("https://notyoutube.com/x"));
     }
 
     // ---- https://github.com/dulrich/obsidian-crucible/blob/master/tests/xPost.test.mjs

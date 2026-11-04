@@ -476,13 +476,10 @@ fn replaced_text(old: &str, inc: &Incoming<'_>, words: u64) -> Result<String, St
 }
 
 /// Whether `doc` has no usable `publication`: absent, YAML null, or a blank string (plan
-/// intake-auto-enrich WP-4: present-but-empty counts as absent). Any other value is non-empty.
+/// intake-auto-enrich WP-4: present-but-empty counts as absent). Any other value is non-empty, and
+/// malformed frontmatter is not blank. [`FrontmatterDoc::is_blank`] is the one rule.
 pub(crate) fn publication_blank(doc: &FrontmatterDoc) -> bool {
-    match doc.get("publication") {
-        Ok(None | Some(JsValue::Null)) => true,
-        Ok(Some(JsValue::Str(s))) => s.trim().is_empty(),
-        _ => false,
-    }
+    doc.is_blank("publication").unwrap_or(false)
 }
 
 /// Replaces `path`'s body in place (CAS through [`StepCtx::modify`]). `false` when the old text

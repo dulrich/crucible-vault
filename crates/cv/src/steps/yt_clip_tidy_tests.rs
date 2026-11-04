@@ -168,20 +168,23 @@ const TOC_ENRICH: &str =
 fn plan_restores_dropped_heading_on_post_note_then_settles() {
     let fm = yt_fm("tags: [post]\n");
     let note = format!("{fm}{TOC_ENRICH}\nhello there\n\nsecond part\n");
-    let p = super::yt_clip_tidy::plan(&note, None).unwrap();
+    let p = super::yt_clip_tidy::plan(&note, true, None).unwrap();
     assert!(p.heading_restored && !p.cleaned);
     let new = p.new.expect("changed");
     assert_eq!(
         new,
         format!("{fm}{TOC_ENRICH}\n## Transcript\n\nhello there\n\nsecond part\n")
     );
-    assert_eq!(super::yt_clip_tidy::plan(&new, None).unwrap().new, None);
+    assert_eq!(
+        super::yt_clip_tidy::plan(&new, true, None).unwrap().new,
+        None
+    );
 }
 
 #[test]
-fn plan_leaves_non_post_renamed_heading_alone() {
+fn plan_leaves_non_cleanup_renamed_heading_alone() {
     let note = format!("{}{TOC_ENRICH}\n## Notes\n\nmine\n", yt_fm(""));
-    let p = super::yt_clip_tidy::plan(&note, None).unwrap();
+    let p = super::yt_clip_tidy::plan(&note, false, None).unwrap();
     assert!(!p.heading_restored);
     assert_eq!(p.new, None);
 }
@@ -199,4 +202,54 @@ fn backfill_cleans_with_toc_keeps_heading_and_counts() {
         got.contains("\n## Transcript\n\nhello there\n\nsecond part\n"),
         "{got}"
     );
+}
+
+// ---- cleanup follows the kind's `cleanup_transcript` flag (plan tn-review-2026-11-04-remediation
+// Decision 10) ----------------------------------------------------------------------------------
+
+/// The example config with `kinds.toml` replaced by `kinds`.
+fn env_with_kinds(kinds: &str, files: &[(&str, &str)]) -> super::testkit::StepEnv {
+    let config = super::testkit::config_of(&[
+        (
+            "actions.toml",
+            include_str!("../../../../config/examples/actions.toml"),
+        ),
+        (
+            "captures.toml",
+            include_str!("../../../../config/examples/captures.toml"),
+        ),
+        ("kinds.toml", kinds),
+        (
+            "agents.toml",
+            include_str!("../../../../config/examples/agents.toml"),
+        ),
+        (
+            "providers.toml",
+            include_str!("../../../../config/examples/providers.toml"),
+        ),
+    ]);
+    let fx = cv_vault::test_support::LiveFixture::new(files.iter().copied());
+    let action = config.action("lint-note").unwrap().clone();
+    super::testkit::StepEnv::new(fx, config, action)
+}
+
+#[test]
+fn backfill_cleans_a_cleanup_kind_note_without_a_post_tag() {
+    let kinds = "[kinds.talk]\nlabel = \"Talk\"\ntags = [\"talk\"]\ncleanup_transcript = true\n";
+    let note = format!("{}{TOC_ENRICH}\n{TS_TAIL}", yt_fm("tags: [talk]\n"));
+    let e = env_with_kinds(kinds, &[("Clips/v.md", note.as_str())]);
+    let o = backfill(&e, json!({}));
+    assert_eq!(count(&o, "cleaned"), 1);
+    assert!(!e.read("Clips/v.md").unwrap().contains("**0:0"));
+}
+
+#[test]
+fn backfill_leaves_a_post_tagged_note_of_a_kind_without_the_flag() {
+    let kinds = "[kinds.post]\nlabel = \"Post\"\ntags = [\"post\"]\n";
+    let note = format!("{}{TOC_ENRICH}\n{TS_TAIL}", yt_fm("tags: [post]\n"));
+    let e = env_with_kinds(kinds, &[("Clips/v.md", note.as_str())]);
+    let o = backfill(&e, json!({}));
+    assert_eq!(count(&o, "cleaned"), 0);
+    assert_eq!(count(&o, "heading_restored"), 0);
+    assert_eq!(e.read("Clips/v.md").unwrap(), note);
 }

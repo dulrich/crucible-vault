@@ -35,7 +35,7 @@ use cv_state::{TrackerEvidence, TrackerItem};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::file::target_path;
+use super::file::{cleanup_kind, target_path};
 use super::params::{check_keys, check_placeholders, get_str};
 use super::reconcile::body_verdict;
 use super::{StepCtx, StepError, StepModule, StepOutcome};
@@ -94,24 +94,6 @@ fn own_video_id(sources: &[String], doc: &FrontmatterDoc) -> Option<String> {
         .iter()
         .find_map(|s| cv_text::extract_video_id_from_url(s))
         .or_else(|| strings(doc, "yt-video-id").into_iter().next())
-}
-
-/// Whether one of the note's tags is a `kinds.toml` kind with `cleanup_transcript = true`.
-fn cleanup_kind(config: &ConfigSet, tags: &[String]) -> bool {
-    let Some(kinds) = config
-        .table("kinds.toml")
-        .get("kinds")
-        .and_then(toml::Value::as_table)
-    else {
-        return false;
-    };
-    tags.iter().any(|t| {
-        kinds
-            .get(t.trim_start_matches('#'))
-            .and_then(|d| d.get("cleanup_transcript"))
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false)
-    })
 }
 
 /// The step's target: `path`, else `vars.moved_path`, else the active note.

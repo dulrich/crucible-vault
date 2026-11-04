@@ -38,6 +38,12 @@ pub fn split(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
 }
 
+/// Whether `path` is outside the system folders (`.trash/`, and the `.`/`_`-prefixed top folders such as `_custom`, `_yt_metadata`). Contrast the daemon's `vault_files` walk, which skips only dot-directories and top-level `_custom`.
+#[must_use]
+pub fn is_user_path(path: &str) -> bool {
+    !path.starts_with(['.', '_'])
+}
+
 /// Decodes `%XX` escapes; input whose decoded bytes are not UTF-8 is returned unchanged.
 #[must_use]
 pub fn percent_decode(s: &str) -> String {
@@ -50,6 +56,13 @@ pub fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_paths() {
+        assert!(is_user_path("a/b.md"));
+        assert!(!is_user_path(".trash/a.md"));
+        assert!(!is_user_path("_custom/x.md"));
+    }
 
     #[test]
     fn segments() {

@@ -30,8 +30,11 @@
 //! *before* the model call (I2: an edit during the call is a conflict, never a clobber; the hash
 //! is re-checked before the raw copy is created so a conflicted run leaves nothing behind).
 //!
-//! There is no editor hold for a custom step (holds only classify `agent` + replace `capture`);
-//! the CAS hash is the protection.
+//! The step has no hold of its own: the editor hold on the active note is the *action's* opt-in
+//! (`hold = true`, which requires `resources.note` and is a load error without it; the shipped
+//! `clip-enrich` and `intake-enrich` actions set it). Without that opt-in a run holds only for the
+//! `agent` + replace `capture` classification, which this step never matches. Either way the CAS
+//! hash is the write-time protection.
 //!
 //! Outcome vars: `skipped`, `words_in`, `words_out`, `chunks`, `headings`.
 
@@ -39,11 +42,12 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::transcript::{self, Eligibility};
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_providers::ProviderManager;
+use cv_text::url_canon::is_youtube_video;
 use serde::Serialize;
 
 use super::agent;
-use super::intake_enrich::is_youtube_source;
 use super::params::{check_keys, get_str};
+use super::util::{has_tag, note_tags};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 const DEFAULT_AGENT: &str = "transcript-refine";
@@ -112,10 +116,7 @@ fn skip(why: &'static str) -> StepOutcome {
 /// Whether `text` carries the `refined` tag (frontmatter or inline, the index's reading; a
 /// nested `refined/x` counts like the manual guard's).
 pub(crate) fn is_refined(text: &str) -> bool {
-    cv_index::note_tags(text).iter().any(|t| {
-        let t = t.trim().trim_start_matches('#').to_lowercase();
-        t == REFINED_TAG || t.starts_with("refined/")
-    })
+    has_tag(&note_tags(text), REFINED_TAG)
 }
 
 /// The step body, with the provider manager injected (tests pass one with a test secret source).
@@ -136,7 +137,7 @@ pub(crate) fn run_note(
     let doc = FrontmatterDoc::new(text.as_str());
     let youtube = doc
         .get_str_trimmed("source")
-        .is_some_and(|s| is_youtube_source(&s));
+        .is_some_and(|s| is_youtube_video(&s));
     if !youtube {
         return Ok(skip("not youtube"));
     }
