@@ -160,8 +160,13 @@ fn permit_wait_names_the_running_actions_and_writes_on_change_only() {
     let a = id_of(s.enqueue(job("long", None, &[]), 10).unwrap());
     let b = id_of(s.enqueue(job("quick", None, &[]), 11).unwrap());
     assert_eq!(s.claim(12).unwrap().unwrap().id, a);
-    s.observe_permit_wait(15).unwrap();
-    s.observe_permit_wait(16).unwrap();
+    // The single-pool case: one general permit held by `long`, no fast set.
+    let view = PoolView {
+        general_holders: vec!["long".to_owned()],
+        ..PoolView::default()
+    };
+    s.observe_pool_wait(15, &view).unwrap();
+    s.observe_pool_wait(16, &view).unwrap();
     assert_eq!(s.job_telemetry(&b).unwrap().unwrap().waits.len(), 1);
     s.settle(&a, &JobResult::Done, 40).unwrap();
     assert_eq!(s.claim(40).unwrap().unwrap().id, b);

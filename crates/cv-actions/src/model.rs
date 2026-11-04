@@ -41,8 +41,8 @@ pub struct Action {
     /// `false`: `run_action` awaits completion (≤10 s) and returns `open_path`.
     pub durable: bool,
     /// Explicit opt-in to hold the active note while a job runs (Plan round-20-transcript-heading-auto-holds
-    /// WP-2; supersedes round-18 Decision 1's narrowing for opted-in actions). Only effective with
-    /// `resources.note`.
+    /// WP-2; supersedes round-18 Decision 1's narrowing for opted-in actions). Requires
+    /// `resources.note`: `hold = true` with `resources.note = false` is rejected at load.
     pub hold: bool,
     /// Runs may use the reserved fast job slot (Plan job-slots-fast-lane WP-1). Such an action must
     /// stay short and never call a model: config load rejects `fast = true` with a step for which
@@ -106,9 +106,10 @@ impl Action {
 }
 
 /// Generates [`StepKind`] (variants, [`StepKind::ALL`], [`StepKind::as_str`],
-/// [`StepKind::mutates_note`]) from one table: `Variant = "toml_type", mutates;`.
+/// [`StepKind::mutates_note`], [`StepKind::calls_model`]) from one table:
+/// `Variant = "toml_type", mutates, calls_model;`. Every row declares both columns.
 macro_rules! step_kinds {
-    ($( $(#[$doc:meta])* $v:ident = $name:literal, $mutates:literal; )*) => {
+    ($( $(#[$doc:meta])* $v:ident = $name:literal, $mutates:literal, $model:literal; )*) => {
         /// Step kind tag (the TOML `type` value).
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         pub enum StepKind {
@@ -131,6 +132,22 @@ macro_rules! step_kinds {
             pub fn mutates_note(self) -> bool {
                 match self { $(StepKind::$v => $mutates,)* }
             }
+
+            /// Whether a step of this kind calls a model **directly in its own run** (Plan
+            /// job-slots-fast-lane WP-1, audit E2): the fast job slot must never hold such a
+            /// step, so `fast = true` with one is a config error. Read from the `step_kinds!`
+            /// table's `calls_model` column, which every row must declare, so a new kind cannot
+            /// be added without deciding it. A `run_action` step only enqueues a child job (the
+            /// child is classified on its own) and does not count. Where each call lives
+            /// (`crates/cv/src/steps/`): `agent` (`agent.rs` `run`, `mgr.complete`),
+            /// `intake_enrich` (`intake_enrich.rs` `agent::run`), `transcript_refine`
+            /// (`transcript_refine.rs` `agent::run`), `image_describe` (`image_describe.rs`
+            /// `mgr.complete`), `search_upsert` (`search.rs` embedder call through
+            /// `agent::manager()` when `embed` is set; counted unconditionally, fails closed).
+            #[must_use]
+            pub fn calls_model(self) -> bool {
+                match self { $(StepKind::$v => $model,)* }
+            }
         }
     };
 }
@@ -139,62 +156,62 @@ macro_rules! step_kinds {
 // `state.db`. `x_discover`/`x_backfill` ensure metadata inline and append to source notes'
 // `x-metadata` lists (plan `v0-automation-pipelines` WP-5), so they mutate.
 step_kinds! {
-    Guard = "guard", false;
-    Capture = "capture", true;
-    Materialize = "materialize", true;
-    Move = "move", true;
-    Copy = "copy", true;
-    SetProps = "set_props", true;
-    RemoveProps = "remove_props", true;
-    UpsertTags = "upsert_tags", true;
-    Lint = "lint", true;
-    Localize = "localize", true;
-    Agent = "agent", true;
-    MarkForwarded = "mark_forwarded", true;
+    Guard = "guard", false, false;
+    Capture = "capture", true, false;
+    Materialize = "materialize", true, false;
+    Move = "move", true, false;
+    Copy = "copy", true, false;
+    SetProps = "set_props", true, false;
+    RemoveProps = "remove_props", true, false;
+    UpsertTags = "upsert_tags", true, false;
+    Lint = "lint", true, false;
+    Localize = "localize", true, false;
+    Agent = "agent", true, true;
+    MarkForwarded = "mark_forwarded", true, false;
     /// Enqueue another action as a child job (replaces Crucible sub-chains, `src/chains.ts`).
-    RunAction = "run_action", false;
-    SearchUpsert = "search_upsert", false;
-    SearchDelete = "search_delete", false;
+    RunAction = "run_action", false, false;
+    SearchUpsert = "search_upsert", false, true;
+    SearchDelete = "search_delete", false, false;
     // A2 (plan v0-automation-pipelines WP-1).
-    LinkScan = "link_scan", false;
-    YtMetadata = "yt_metadata", true;
-    YtChannelEnrich = "yt_channel_enrich", true;
-    XDiscover = "x_discover", true;
-    XMetadata = "x_metadata", true;
-    XBackfill = "x_backfill", true;
-    ImageDescribe = "image_describe", true;
-    TrackYoutube = "track_youtube", true;
-    TrackBlogs = "track_blogs", true;
+    LinkScan = "link_scan", false, false;
+    YtMetadata = "yt_metadata", true, false;
+    YtChannelEnrich = "yt_channel_enrich", true, false;
+    XDiscover = "x_discover", true, false;
+    XMetadata = "x_metadata", true, false;
+    XBackfill = "x_backfill", true, false;
+    ImageDescribe = "image_describe", true, true;
+    TrackYoutube = "track_youtube", true, false;
+    TrackBlogs = "track_blogs", true, false;
     /// Maildir newsletter intake (plan `auto-intake-sprint` WP-4).
-    TrackMail = "track_mail", true;
+    TrackMail = "track_mail", true, false;
     /// Clip dedup + kind auto-filing (plan `auto-intake-sprint` WP-5).
-    AutoFile = "auto_file", true;
+    AutoFile = "auto_file", true, false;
     /// One-shot reconcile of tracker rows (plan `auto-intake-sprint` WP-6); plan
     /// `intake-followups-mail-youtube` WP-5 widened it to retag, re-clean and re-key mail notes.
-    IntakeReconcile = "intake_reconcile", true;
+    IntakeReconcile = "intake_reconcile", true, false;
     /// Links and ticks the tracker rows a filed note satisfies (plan
     /// `intake-followups-mail-youtube` WP-4); writes `state.db` only, never a note.
-    IntakeFinalize = "intake_finalize", false;
-    IgnoreVideo = "ignore_video", true;
-    DailyBrief = "daily_brief", true;
+    IntakeFinalize = "intake_finalize", false, false;
+    IgnoreVideo = "ignore_video", true, false;
+    DailyBrief = "daily_brief", true, false;
     /// On-demand duplicate scan writing `possible-duplicate` (plan `round-12-feedback-todos` WP-6).
-    DupesScan = "dupes_scan", true;
+    DupesScan = "dupes_scan", true, false;
     /// One duplicate-pair verdict (`not-duplicates` | `keep`) (plan `round-12-feedback-todos` WP-7).
-    DupesResolve = "dupes_resolve", true;
+    DupesResolve = "dupes_resolve", true, false;
     /// Cancels the open intake of one source (plan `cancel-source-intake` WP-1); writes `state.db` only.
-    CancelSourceIntake = "cancel_source_intake", false;
+    CancelSourceIntake = "cancel_source_intake", false, false;
     /// Daily vault tidiness: orphaned-attachment sweep, trash ledger seed and retention expiry
     /// (plan `tidiness-trash-orphans` WP-2). Trashes files, so it counts as mutating.
-    Tidy = "tidy", true;
+    Tidy = "tidy", true, false;
     /// One LLM structure + cleanup pass over an intake note, folding (never deleting) what the
     /// cleanup marks (plan `intake-auto-enrich` WP-3).
-    IntakeEnrich = "intake_enrich", true;
+    IntakeEnrich = "intake_enrich", true, true;
     /// Refines a YouTube clip's `## Transcript` section into cleaned paragraphs with `###`
     /// chapter headings (plan `youtube-transcript-auto-refine` WP-1).
-    TranscriptRefine = "transcript_refine", true;
+    TranscriptRefine = "transcript_refine", true, true;
     /// Deletes a YouTube clip's thumbnail embed and clipped description ahead of `## Transcript`
     /// (plan `round-19-yt-cleanup-intake` WP-2).
-    YtClipTidy = "yt_clip_tidy", true;
+    YtClipTidy = "yt_clip_tidy", true, false;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):
@@ -212,26 +229,6 @@ impl StepKind {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.as_str() == s)
-    }
-
-    /// Whether a step of this kind calls a model **directly in its own run** (Plan
-    /// job-slots-fast-lane WP-1, audit E2): the fast job slot must never hold such a step, so
-    /// `fast = true` with one is a config error. A `run_action` step only enqueues a child job (the
-    /// child is classified on its own) and does not count. Where each call lives (`crates/cv/src/steps/`):
-    /// `agent` (`agent.rs` `run`, `mgr.complete`), `intake_enrich` (`intake_enrich.rs` `agent::run`),
-    /// `transcript_refine` (`transcript_refine.rs` `agent::run`), `image_describe`
-    /// (`image_describe.rs` `mgr.complete`), `search_upsert` (`search.rs` embedder call through
-    /// `agent::manager()` when `embed` is set; counted unconditionally, fails closed).
-    #[must_use]
-    pub fn calls_model(self) -> bool {
-        matches!(
-            self,
-            StepKind::Agent
-                | StepKind::IntakeEnrich
-                | StepKind::TranscriptRefine
-                | StepKind::ImageDescribe
-                | StepKind::SearchUpsert
-        )
     }
 
     /// Queue resource keys the step itself always needs, whatever the action config says (plan

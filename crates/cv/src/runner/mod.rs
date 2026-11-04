@@ -9,9 +9,11 @@
 //!   command registry, no hidden commands and no `mutating` flag; the queue + resource keys are
 //!   the only serialization.
 
+mod claim;
 mod clock;
 mod config_load;
 mod events;
+mod execute;
 mod holds;
 mod rpc;
 mod schedule;
@@ -36,10 +38,15 @@ use crate::steps::{
 };
 use crate::sync::{lock, read, write};
 
+#[cfg(test)]
+use claim::run_job;
+use claim::{Pool, claim_loop, failed};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config_load::load_config_dir;
+pub use execute::apply_defaults;
+use execute::execute_steps;
 pub use holds::HoldsView;
-use holds::Running;
+use holds::{Running, RunningJob};
 pub use rpc::{actions_list, run_action};
 
 /// Maximum `run_action` nesting (pin 10).
@@ -297,10 +304,6 @@ pub(crate) struct Inner {
     clock: Arc<dyn Clock>,
     concurrency: usize,
     fast_slots: usize,
-    /// The pool and `job_type` of every job this runner claimed, until its permit is dropped
-    /// (plan job-slots-fast-lane WP-2, audit E1): permit-wait holders are named from this
-    /// record, never re-derived from the current fast set.
-    pools: Mutex<HashMap<String, (Pool, String)>>,
     vault_root: PathBuf,
     index_db: PathBuf,
     config_dir: PathBuf,
@@ -309,11 +312,14 @@ pub(crate) struct Inner {
     search: cv_search::SearchDb,
     config: RwLock<Arc<ConfigSet>>,
     wake: Notify,
-    /// Every claimed job in this runner (`job id -> its note hold`): cancellation and stale-lease
-    /// recovery read all keys; only jobs whose action holds its note (plan round-17 WP-2, narrowed
-    /// by plan round-18 Decision 1 to [`ConfigSet::action_holds_note`]) carry `Some`, until their
-    /// attempt ends. Shared (`Arc`) so the daemon's writer jobs can refuse client writes to a held
-    /// note ([`HoldsView`]).
+    /// Every claimed job in this runner (`job id -> RunningJob`), inserted at claim and removed
+    /// at one site, the settle in `claim::run_job`, together with the permit's release, so the
+    /// pool record and the note hold clear together. Cancellation and stale-lease recovery read
+    /// all keys; permit-wait holders are named from each entry's claim-time `pool` and
+    /// `job_type` (plan job-slots-fast-lane WP-2, audit E1), never re-derived from the current
+    /// fast set; only jobs whose action holds its note (plan round-17 WP-2, narrowed by plan
+    /// round-18 Decision 1 to [`ConfigSet::action_holds_note`]) carry a `hold`. Shared (`Arc`)
+    /// so the daemon's writer jobs can refuse client writes to a held note ([`HoldsView`]).
     running: Running,
     finished: Mutex<BTreeMap<String, RunSummary>>,
     cycle: Mutex<HashMap<(String, String), Instant>>,
@@ -343,7 +349,6 @@ impl Runner {
                 clock: deps.clock,
                 concurrency: deps.concurrency.max(1),
                 fast_slots: deps.fast_slots,
-                pools: Mutex::new(HashMap::new()),
                 vault_root: deps.vault_root,
                 index_db: deps.index_db,
                 config_dir: deps.config_dir,
@@ -536,88 +541,6 @@ impl Inner {
         tracing::info!(?foreign, "runner recovered leases");
     }
 
-    /// Breaker feeding + bounded transient retry (plan WP-2), run after the steps. Pure: returns
-    /// the final result plus the service failure to report; both are committed together with the
-    /// settle by [`Self::settle`] (SR10).
-    pub(crate) fn apply_service_policy(
-        job: &cv_state::Job,
-        result: JobResult,
-        cause: Option<DeferCause>,
-    ) -> (JobResult, Option<BreakerFailure>) {
-        match (result, cause) {
-            (
-                JobResult::Deferred {
-                    retry_after_ms,
-                    service_unhealthy: Some(svc),
-                },
-                Some(DeferCause::Transient(kind)),
-            ) => {
-                // Transient: the breaker computes its own doubling window (no retry_after).
-                let failure = BreakerFailure {
-                    service: svc.clone(),
-                    kind,
-                    reason: format!("transient {kind:?} (attempt {})", job.attempts),
-                    retry_after_ms: None,
-                };
-                let result = if job.attempts >= TRANSIENT_MAX_ATTEMPTS {
-                    JobResult::Failed {
-                        error: format!(
-                            "service {svc} still failing after {} attempts",
-                            job.attempts
-                        ),
-                        reason: Some(cv_state::FailureReason::ServiceOutage),
-                    }
-                } else {
-                    let shift = u32::try_from((job.attempts - 1).clamp(0, 20)).unwrap_or(20);
-                    let backoff = TRANSIENT_BASE_MS
-                        .saturating_mul(1_i64 << shift)
-                        .min(TRANSIENT_CAP_MS);
-                    JobResult::Deferred {
-                        retry_after_ms: retry_after_ms.max(backoff),
-                        service_unhealthy: Some(svc),
-                    }
-                };
-                (result, Some(failure))
-            }
-            (
-                JobResult::Deferred {
-                    retry_after_ms,
-                    service_unhealthy: Some(svc),
-                },
-                Some(DeferCause::Quota),
-            ) => {
-                let failure = BreakerFailure {
-                    service: svc.clone(),
-                    kind: cv_state::ServiceFailureKind::RateLimited,
-                    reason: "quota exhausted".into(),
-                    retry_after_ms: Some(retry_after_ms),
-                };
-                (
-                    JobResult::Deferred {
-                        retry_after_ms,
-                        service_unhealthy: Some(svc),
-                    },
-                    Some(failure),
-                )
-            }
-            (r, _) => (r, None),
-        }
-    }
-
-    /// Settles `job` with `result` and its breaker update in one state.db transaction.
-    fn settle(&self, job: &cv_state::Job, result: &JobResult, failure: Option<&BreakerFailure>) {
-        let now = self.clock.now_ms();
-        match lock(&self.state).settle_with_breaker(&job.id, result, failure, now) {
-            Ok(Some(requeued)) => tracing::info!(
-                service = job.service.as_deref().unwrap_or_default(),
-                requeued,
-                "breaker closed; requeued service failures"
-            ),
-            Ok(None) => {}
-            Err(e) => tracing::error!(job_id = %job.id, error = %e, "settle failed"),
-        }
-    }
-
     /// Periodic queue maintenance from the claim loop: stale-lease recovery every
     /// [`MAINTENANCE_EVERY_MS`] (never touching this runner's live jobs) and terminal pruning at
     /// most every [`PRUNE_EVERY_MS`] with the configured retention (`0` = keep forever).
@@ -659,482 +582,6 @@ impl Inner {
             m.insert((action.to_owned(), p.clone()), now);
         }
     }
-}
-
-/// A runner permit pool (plan job-slots-fast-lane WP-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Pool {
-    /// Claims any job (`RunnerDeps::concurrency` permits).
-    General,
-    /// Claims only jobs of armed `fast` actions (`RunnerDeps::fast_slots` permits).
-    Fast,
-}
-
-impl Inner {
-    fn config_snapshot(&self) -> Arc<ConfigSet> {
-        Arc::clone(&read(&self.config))
-    }
-
-    /// The permit-wait view: `fast_types` from this pass's snapshot, each pool's free state and
-    /// its holders from the claim-time record (sorted by the store).
-    fn pool_view(
-        &self,
-        fast_types: HashSet<String>,
-        general_free: bool,
-        fast_free: bool,
-    ) -> cv_state::PoolView {
-        let mut view = cv_state::PoolView {
-            fast_types,
-            general_free,
-            fast_free,
-            ..cv_state::PoolView::default()
-        };
-        for (pool, job_type) in lock(&self.pools).values() {
-            match pool {
-                Pool::General => view.general_holders.push(job_type.clone()),
-                Pool::Fast => view.fast_holders.push(job_type.clone()),
-            }
-        }
-        view
-    }
-}
-
-/// `action:<id>` of every armed `fast` action (plan job-slots-fast-lane WP-2).
-fn fast_job_types(config: &ConfigSet) -> HashSet<String> {
-    config
-        .armed_actions()
-        .filter(|a| a.fast)
-        .map(|a| format!("action:{}", a.id))
-        .collect()
-}
-
-/// Claims into `pool` while it has a free permit (plan job-slots-fast-lane WP-2), restricted to
-/// `only` job types when set. Returns whether the pool ended exhausted (a permit was wanted
-/// and none was free). The permit and the job's pool record travel with the job until settle.
-fn claim_pool(
-    inner: &Arc<Inner>,
-    permits: &Arc<tokio::sync::Semaphore>,
-    pool: Pool,
-    only: Option<&HashSet<String>>,
-) -> bool {
-    loop {
-        let Ok(permit) = Arc::clone(permits).try_acquire_owned() else {
-            return true;
-        };
-        let claimed = lock(&inner.state).claim_filtered(inner.clock.now_ms(), only);
-        match claimed {
-            Ok(Some(job)) => {
-                lock(&inner.running).insert(job.id.clone(), None);
-                lock(&inner.pools).insert(job.id.clone(), (pool, job.job_type.clone()));
-                let inner2 = Arc::clone(inner);
-                tokio::spawn(async move {
-                    let id = job.id.clone();
-                    run_job(Arc::clone(&inner2), job).await;
-                    lock(&inner2.pools).remove(&id);
-                    drop(permit);
-                    inner2.wake.notify_one();
-                });
-            }
-            Ok(None) => return false,
-            Err(e) => {
-                tracing::error!(error = %e, "claim failed");
-                return false;
-            }
-        }
-    }
-}
-
-async fn claim_loop(inner: Arc<Inner>, mut stop: watch::Receiver<bool>) {
-    inner.recover();
-    let mut maintenance = Maintenance::default();
-    let general = Arc::new(tokio::sync::Semaphore::new(inner.concurrency));
-    let fast = Arc::new(tokio::sync::Semaphore::new(inner.fast_slots));
-    loop {
-        if *stop.borrow() {
-            return;
-        }
-        inner.maintenance_tick(&mut maintenance);
-        // Plan job-slots-fast-lane WP-2 (audit E1): one config snapshot per pass; its fast set
-        // drives this pass's fast claims and its permit-wait observation. A fast job takes the
-        // fast slot first, keeping general slots for slow work; the general pool claims any job.
-        let fast_types = fast_job_types(&inner.config_snapshot());
-        let fast_exhausted =
-            !fast_types.is_empty() && claim_pool(&inner, &fast, Pool::Fast, Some(&fast_types));
-        let general_exhausted = claim_pool(&inner, &general, Pool::General, None);
-        if general_exhausted || fast_exhausted {
-            // A pool is full: queued claimable work whose every usable pool is exhausted waits
-            // for a permit (plan job-telemetry Decision 3; written only on a cause change).
-            let view = inner.pool_view(
-                fast_types,
-                general.available_permits() > 0,
-                fast.available_permits() > 0,
-            );
-            if let Err(e) = lock(&inner.state).observe_pool_wait(inner.clock.now_ms(), &view) {
-                tracing::warn!(error = %e, "telemetry: permit-wait observation failed");
-            }
-        }
-        let now = inner.clock.now_ms();
-        let wake_in = lock(&inner.state)
-            .next_wake(now)
-            .ok()
-            .flatten()
-            .map(|t| Duration::from_millis(u64::try_from(t - now).unwrap_or(0)))
-            .unwrap_or(IDLE_POLL)
-            .min(IDLE_POLL);
-        tokio::select! {
-            _ = stop.changed() => return,
-            () = inner.wake.notified() => {}
-            () = tokio::time::sleep(wake_in) => {}
-        }
-    }
-}
-
-/// A failure with no typed reason (classified `job`, never a service outage).
-fn failed(error: String) -> JobResult {
-    JobResult::Failed {
-        error,
-        reason: None,
-    }
-}
-
-/// Returns freed heap pages to the OS when the allocator retains more than
-/// [`cv_malloc::TRIM_RETAINED_THRESHOLD`] above live data. Runs on the blocking pool, never a worker.
-fn trim_after_job() {
-    if let Some((retained, trimmed)) = cv_malloc::trim_if_retained() {
-        tracing::debug!(target: "cv::memory", retained, trimmed, "trim after job");
-    }
-}
-
-/// Executes one claimed job end to end and settles it.
-async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
-    let id = job.id.clone();
-    let config = Arc::clone(&read(&inner.config));
-    let parsed: Result<JobParams, _> = serde_json::from_value(job.params.clone());
-    let (result, summary) = match parsed {
-        Err(e) => (
-            failed(format!("bad job params: {e}")),
-            RunSummary::default(),
-        ),
-        Ok(jp) => match config.armed(&jp.action_id).cloned() {
-            None => (
-                failed(format!(
-                    "action {:?} is not armed: {}",
-                    jp.action_id,
-                    config
-                        .disarm_reason(&jp.action_id)
-                        .unwrap_or("unknown action")
-                )),
-                RunSummary::default(),
-            ),
-            Some(action) => {
-                inner.start_running(&id, &action, &jp.context, config.action_holds_note(&action));
-                let inner2 = Arc::clone(&inner);
-                let job_id = id.clone();
-                let lane = job.lane;
-                let retry = job.attempts > 1;
-                match tokio::task::spawn_blocking(move || {
-                    let r = execute_steps(&inner2, &job_id, lane, retry, &action, &jp, &config);
-                    trim_after_job();
-                    r
-                })
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e) => (failed(format!("step panicked: {e}")), RunSummary::default()),
-                }
-            }
-        },
-    };
-    let (result, failure) = Inner::apply_service_policy(&job, result, summary.defer_cause);
-    inner.settle(&job, &result, failure.as_ref());
-    let hold = lock(&inner.running).remove(&id).flatten();
-    let (state, message) = match &result {
-        JobResult::Done => (JobState::Done, None),
-        JobResult::Failed { error, .. } => (JobState::Failed, Some(error.clone())),
-        JobResult::Deferred { .. } => (JobState::Deferred, None),
-        JobResult::Cancelled => (JobState::Cancelled, None),
-    };
-    {
-        let mut f = lock(&inner.finished);
-        f.insert(id.clone(), summary.clone());
-        while f.len() > FINISHED_CAP {
-            let Some(k) = f.keys().next().cloned() else {
-                break;
-            };
-            f.remove(&k);
-        }
-    }
-    inner.publish(
-        &id,
-        state,
-        message,
-        summary.output_paths,
-        summary.open_path,
-        hold.as_ref(),
-    );
-}
-
-struct Spawner<'a> {
-    inner: &'a Inner,
-    parent_job: &'a str,
-    parent: &'a JobParams,
-    /// The run's current context: `active_path` already follows a `move` of the active note, so a
-    /// child spawned after the move runs on the moved path (plan round-16 WP-5).
-    context: &'a ActionContext,
-    lane: Lane,
-    config: &'a ConfigSet,
-}
-
-impl ChildSpawner for Spawner<'_> {
-    /// `run_action` step (pin 10): enqueue the target as a child job in the same lane.
-    fn spawn_child(&self, action_id: &str, params: Map<String, Value>) -> Result<String, String> {
-        self.spawn_with(action_id, params, self.context.clone())
-    }
-
-    /// As [`Self::spawn_child`], with the child's `active_path` set to `active_path`.
-    fn spawn_child_at(
-        &self,
-        action_id: &str,
-        params: Map<String, Value>,
-        active_path: &str,
-    ) -> Result<String, String> {
-        let context = ActionContext {
-            active_path: Some(active_path.to_owned()),
-            ..self.context.clone()
-        };
-        self.spawn_with(action_id, params, context)
-    }
-}
-
-impl Spawner<'_> {
-    fn spawn_with(
-        &self,
-        action_id: &str,
-        params: Map<String, Value>,
-        context: ActionContext,
-    ) -> Result<String, String> {
-        let mut chain = self.parent.chain.clone();
-        chain.push(self.parent.action_id.clone());
-        if chain.iter().any(|a| a == action_id) {
-            return Err(format!(
-                "run_action cycle: {} -> {action_id}",
-                chain.join(" -> ")
-            ));
-        }
-        if chain.len() >= MAX_CHAIN_DEPTH {
-            return Err(format!("run_action depth limit {MAX_CHAIN_DEPTH} reached"));
-        }
-        let target = self.config.armed(action_id).ok_or_else(|| {
-            format!(
-                "run_action target {action_id:?} is not armed: {}",
-                self.config.disarm_reason(action_id).unwrap_or("unknown")
-            )
-        })?;
-        let mut merged = params;
-        apply_defaults(target, &mut merged);
-        let target = Action {
-            lane: match self.lane {
-                Lane::User => LaneChoice::User,
-                Lane::Background => LaneChoice::Background,
-            },
-            ..target.clone()
-        };
-        self.inner
-            .enqueue(
-                &target,
-                RunRequest::child(merged, context, self.parent_job, chain, self.lane),
-            )
-            .map_err(|e| e.to_string())
-    }
-}
-
-/// Fills absent params from their `ParamSpec` defaults.
-pub fn apply_defaults(action: &Action, params: &mut Map<String, Value>) {
-    for p in &action.params {
-        if !params.contains_key(&p.name)
-            && let Some(d) = &p.default
-        {
-            params.insert(p.name.clone(), Value::String(d.clone()));
-        }
-    }
-}
-
-fn execute_steps(
-    inner: &Inner,
-    job_id: &str,
-    lane: Lane,
-    retry: bool,
-    action: &Action,
-    jp: &JobParams,
-    config: &ConfigSet,
-) -> (JobResult, RunSummary) {
-    let mut summary = RunSummary::default();
-    let mut vars = Map::new();
-    let checkpoints = match lock(&inner.state).checkpoints(job_id) {
-        Ok(c) => c,
-        Err(e) => {
-            return (failed(format!("reading checkpoints: {e}")), summary);
-        }
-    };
-    let mut done: BTreeMap<usize, StepOutcome> = BTreeMap::new();
-    for cp in checkpoints {
-        // Fail closed: a checkpoint that does not parse means "applied, outcome unknown" — the
-        // step is never re-run, so the job fails rather than guessing.
-        let parsed = usize::try_from(cp.step_index)
-            .ok()
-            .zip(serde_json::from_str::<StepOutcome>(&cp.outcome).ok());
-        let Some((i, o)) = parsed else {
-            return (
-                failed(format!("corrupt checkpoint for step {}", cp.step_index)),
-                summary,
-            );
-        };
-        done.insert(i, o);
-    }
-    let mut seen_outputs = BTreeSet::new();
-    // The run's own context: `active_path` follows a `move` of the active note (WP-8).
-    let mut context = jp.context.clone();
-    let mut absorb = |o: &StepOutcome, summary: &mut RunSummary, vars: &mut Map<String, Value>| {
-        if o.open_path.is_some() {
-            summary.open_path.clone_from(&o.open_path);
-        }
-        for p in &o.output_paths {
-            if seen_outputs.insert(p.clone()) {
-                summary.output_paths.push(p.clone());
-            }
-        }
-        for (k, v) in &o.vars {
-            vars.insert(k.clone(), v.clone());
-        }
-    };
-    for (i, step) in action.steps.iter().enumerate() {
-        if let Some(o) = done.get(&i) {
-            absorb(o, &mut summary, &mut vars);
-            steps::follow_move(&mut context, o);
-            inner.retarget_hold(job_id, &context);
-            if o.stop {
-                break;
-            }
-            continue;
-        }
-        if lock(&inner.state).cancel_requested(job_id).unwrap_or(false) {
-            return (JobResult::Cancelled, summary);
-        }
-        let spawner = Spawner {
-            inner,
-            parent_job: job_id,
-            parent: jp,
-            context: &context,
-            lane,
-            config,
-        };
-        let mut ctx = StepCtx {
-            action,
-            step_index: i,
-            params: &jp.params,
-            context: &context,
-            vars: &vars,
-            config,
-            vault_root: &inner.vault_root,
-            index_db: &inner.index_db,
-            search: Some(&inner.search),
-            system_trash: inner.system_trash.as_deref(),
-            state: &inner.state,
-            writer: inner.writer.writer(),
-            children: &spawner,
-            written: Vec::new(),
-        };
-        let idx = i64::try_from(i).unwrap_or(i64::MAX);
-        let started = lock(&inner.state).step_started(
-            job_id,
-            idx,
-            step.kind().as_str(),
-            inner.clock.now_ms(),
-        );
-        if let Err(e) = started {
-            tracing::warn!(job_id, error = %e, "telemetry: step start not recorded");
-        }
-        let res = inner.executor.execute(step, &mut ctx);
-        if let Err(e) = lock(&inner.state).step_ended(job_id, idx, inner.clock.now_ms()) {
-            tracing::warn!(job_id, error = %e, "telemetry: step end not recorded");
-        }
-        let written = std::mem::take(&mut ctx.written);
-        inner.record_writes(&action.id, &written);
-        match res {
-            Ok(o) => {
-                let text = match serde_json::to_string(&o) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        return (
-                            failed(format!("step {} outcome not serializable: {e}", i + 1)),
-                            summary,
-                        );
-                    }
-                };
-                let put =
-                    lock(&inner.state).put_checkpoint(job_id, idx, &text, inner.clock.now_ms());
-                if let Err(e) = put {
-                    return (
-                        failed(format!("committing checkpoint of step {}: {e}", i + 1)),
-                        summary,
-                    );
-                }
-                absorb(&o, &mut summary, &mut vars);
-                steps::follow_move(&mut context, &o);
-                inner.retarget_hold(job_id, &context);
-                if o.stop {
-                    break;
-                }
-            }
-            Err(StepError::Failed { message, reason }) => {
-                return (
-                    JobResult::Failed {
-                        error: format!("step {} ({}): {message}", i + 1, step.kind().as_str()),
-                        reason,
-                    },
-                    summary,
-                );
-            }
-            Err(StepError::NoteGone { path }) => {
-                // A retried job whose note was moved or deleted since the first attempt settles
-                // quietly (plan round-11 Decision 3); a first attempt still fails.
-                if retry {
-                    tracing::info!(
-                        job = job_id,
-                        step = i + 1,
-                        "note moved or deleted; job skipped"
-                    );
-                    return (JobResult::Done, summary);
-                }
-                return (
-                    JobResult::Failed {
-                        error: format!(
-                            "step {} ({}): {path} not found",
-                            i + 1,
-                            step.kind().as_str()
-                        ),
-                        reason: None,
-                    },
-                    summary,
-                );
-            }
-            Err(StepError::Deferred {
-                retry_after_ms,
-                service,
-                cause,
-            }) => {
-                summary.defer_cause = Some(cause);
-                return (
-                    JobResult::Deferred {
-                        retry_after_ms,
-                        service_unhealthy: service,
-                    },
-                    summary,
-                );
-            }
-        }
-    }
-    (JobResult::Done, summary)
 }
 
 #[cfg(test)]

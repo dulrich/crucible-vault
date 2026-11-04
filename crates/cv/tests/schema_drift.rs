@@ -234,7 +234,7 @@ lane = "background"
 durable = false
 hold = true
 fast = true
-resources = { note = false, keys = ["note::{path}", "p::{param.kind}"] }
+resources = { note = true, keys = ["note::{path}", "p::{param.kind}"] }
 
 [[action.params]]
 name = "kind"

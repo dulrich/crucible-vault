@@ -1,0 +1,266 @@
+//! The step executor (moved from `runner/mod.rs`, plan tn-review-2026-11-04-remediation WP-R4, finding P3): sequential steps with per-step checkpoints, and the `run_action` child spawner.
+
+use super::*;
+
+struct Spawner<'a> {
+    inner: &'a Inner,
+    parent_job: &'a str,
+    parent: &'a JobParams,
+    /// The run's current context: `active_path` already follows a `move` of the active note, so a
+    /// child spawned after the move runs on the moved path (plan round-16 WP-5).
+    context: &'a ActionContext,
+    lane: Lane,
+    config: &'a ConfigSet,
+}
+
+impl ChildSpawner for Spawner<'_> {
+    /// `run_action` step (pin 10): enqueue the target as a child job in the same lane.
+    fn spawn_child(&self, action_id: &str, params: Map<String, Value>) -> Result<String, String> {
+        self.spawn_with(action_id, params, self.context.clone())
+    }
+
+    /// As [`Self::spawn_child`], with the child's `active_path` set to `active_path`.
+    fn spawn_child_at(
+        &self,
+        action_id: &str,
+        params: Map<String, Value>,
+        active_path: &str,
+    ) -> Result<String, String> {
+        let context = ActionContext {
+            active_path: Some(active_path.to_owned()),
+            ..self.context.clone()
+        };
+        self.spawn_with(action_id, params, context)
+    }
+}
+
+impl Spawner<'_> {
+    fn spawn_with(
+        &self,
+        action_id: &str,
+        params: Map<String, Value>,
+        context: ActionContext,
+    ) -> Result<String, String> {
+        let mut chain = self.parent.chain.clone();
+        chain.push(self.parent.action_id.clone());
+        if chain.iter().any(|a| a == action_id) {
+            return Err(format!(
+                "run_action cycle: {} -> {action_id}",
+                chain.join(" -> ")
+            ));
+        }
+        if chain.len() >= MAX_CHAIN_DEPTH {
+            return Err(format!("run_action depth limit {MAX_CHAIN_DEPTH} reached"));
+        }
+        let target = self.config.armed(action_id).ok_or_else(|| {
+            format!(
+                "run_action target {action_id:?} is not armed: {}",
+                self.config.disarm_reason(action_id).unwrap_or("unknown")
+            )
+        })?;
+        let mut merged = params;
+        apply_defaults(target, &mut merged);
+        let target = Action {
+            lane: match self.lane {
+                Lane::User => LaneChoice::User,
+                Lane::Background => LaneChoice::Background,
+            },
+            ..target.clone()
+        };
+        self.inner
+            .enqueue(
+                &target,
+                RunRequest::child(merged, context, self.parent_job, chain, self.lane),
+            )
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Fills absent params from their `ParamSpec` defaults.
+pub fn apply_defaults(action: &Action, params: &mut Map<String, Value>) {
+    for p in &action.params {
+        if !params.contains_key(&p.name)
+            && let Some(d) = &p.default
+        {
+            params.insert(p.name.clone(), Value::String(d.clone()));
+        }
+    }
+}
+
+pub(super) fn execute_steps(
+    inner: &Inner,
+    job_id: &str,
+    lane: Lane,
+    retry: bool,
+    action: &Action,
+    jp: &JobParams,
+    config: &ConfigSet,
+) -> (JobResult, RunSummary) {
+    let mut summary = RunSummary::default();
+    let mut vars = Map::new();
+    let checkpoints = match lock(&inner.state).checkpoints(job_id) {
+        Ok(c) => c,
+        Err(e) => {
+            return (failed(format!("reading checkpoints: {e}")), summary);
+        }
+    };
+    let mut done: BTreeMap<usize, StepOutcome> = BTreeMap::new();
+    for cp in checkpoints {
+        // Fail closed: a checkpoint that does not parse means "applied, outcome unknown" — the
+        // step is never re-run, so the job fails rather than guessing.
+        let parsed = usize::try_from(cp.step_index)
+            .ok()
+            .zip(serde_json::from_str::<StepOutcome>(&cp.outcome).ok());
+        let Some((i, o)) = parsed else {
+            return (
+                failed(format!("corrupt checkpoint for step {}", cp.step_index)),
+                summary,
+            );
+        };
+        done.insert(i, o);
+    }
+    let mut seen_outputs = BTreeSet::new();
+    // The run's own context: `active_path` follows a `move` of the active note (WP-8).
+    let mut context = jp.context.clone();
+    let mut absorb = |o: &StepOutcome, summary: &mut RunSummary, vars: &mut Map<String, Value>| {
+        if o.open_path.is_some() {
+            summary.open_path.clone_from(&o.open_path);
+        }
+        for p in &o.output_paths {
+            if seen_outputs.insert(p.clone()) {
+                summary.output_paths.push(p.clone());
+            }
+        }
+        for (k, v) in &o.vars {
+            vars.insert(k.clone(), v.clone());
+        }
+    };
+    for (i, step) in action.steps.iter().enumerate() {
+        if let Some(o) = done.get(&i) {
+            absorb(o, &mut summary, &mut vars);
+            steps::follow_move(&mut context, o);
+            inner.retarget_hold(job_id, &context);
+            if o.stop {
+                break;
+            }
+            continue;
+        }
+        if lock(&inner.state).cancel_requested(job_id).unwrap_or(false) {
+            return (JobResult::Cancelled, summary);
+        }
+        let spawner = Spawner {
+            inner,
+            parent_job: job_id,
+            parent: jp,
+            context: &context,
+            lane,
+            config,
+        };
+        let mut ctx = StepCtx {
+            action,
+            step_index: i,
+            params: &jp.params,
+            context: &context,
+            vars: &vars,
+            config,
+            vault_root: &inner.vault_root,
+            index_db: &inner.index_db,
+            search: Some(&inner.search),
+            system_trash: inner.system_trash.as_deref(),
+            state: &inner.state,
+            writer: inner.writer.writer(),
+            children: &spawner,
+            written: Vec::new(),
+        };
+        let idx = i64::try_from(i).unwrap_or(i64::MAX);
+        let started = lock(&inner.state).step_started(
+            job_id,
+            idx,
+            step.kind().as_str(),
+            inner.clock.now_ms(),
+        );
+        if let Err(e) = started {
+            tracing::warn!(job_id, error = %e, "telemetry: step start not recorded");
+        }
+        let res = inner.executor.execute(step, &mut ctx);
+        if let Err(e) = lock(&inner.state).step_ended(job_id, idx, inner.clock.now_ms()) {
+            tracing::warn!(job_id, error = %e, "telemetry: step end not recorded");
+        }
+        let written = std::mem::take(&mut ctx.written);
+        inner.record_writes(&action.id, &written);
+        match res {
+            Ok(o) => {
+                let text = match serde_json::to_string(&o) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return (
+                            failed(format!("step {} outcome not serializable: {e}", i + 1)),
+                            summary,
+                        );
+                    }
+                };
+                let put =
+                    lock(&inner.state).put_checkpoint(job_id, idx, &text, inner.clock.now_ms());
+                if let Err(e) = put {
+                    return (
+                        failed(format!("committing checkpoint of step {}: {e}", i + 1)),
+                        summary,
+                    );
+                }
+                absorb(&o, &mut summary, &mut vars);
+                steps::follow_move(&mut context, &o);
+                inner.retarget_hold(job_id, &context);
+                if o.stop {
+                    break;
+                }
+            }
+            Err(StepError::Failed { message, reason }) => {
+                return (
+                    JobResult::Failed {
+                        error: format!("step {} ({}): {message}", i + 1, step.kind().as_str()),
+                        reason,
+                    },
+                    summary,
+                );
+            }
+            Err(StepError::NoteGone { path }) => {
+                // A retried job whose note was moved or deleted since the first attempt settles
+                // quietly (plan round-11 Decision 3); a first attempt still fails.
+                if retry {
+                    tracing::info!(
+                        job = job_id,
+                        step = i + 1,
+                        "note moved or deleted; job skipped"
+                    );
+                    return (JobResult::Done, summary);
+                }
+                return (
+                    JobResult::Failed {
+                        error: format!(
+                            "step {} ({}): {path} not found",
+                            i + 1,
+                            step.kind().as_str()
+                        ),
+                        reason: None,
+                    },
+                    summary,
+                );
+            }
+            Err(StepError::Deferred {
+                retry_after_ms,
+                service,
+                cause,
+            }) => {
+                summary.defer_cause = Some(cause);
+                return (
+                    JobResult::Deferred {
+                        retry_after_ms,
+                        service_unhealthy: service,
+                    },
+                    summary,
+                );
+            }
+        }
+    }
+    (JobResult::Done, summary)
+}

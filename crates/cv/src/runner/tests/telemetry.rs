@@ -198,8 +198,8 @@ async fn fast_job_uses_a_general_slot_when_the_fast_slot_is_busy() {
     wait_status(&f, &q1, DbStatus::Running).await;
     wait_status(&f, &q2, DbStatus::Running).await;
     let pools: Vec<Pool> = {
-        let m = lock(&r.inner.pools);
-        vec![m[&q1].0, m[&q2].0]
+        let m = lock(&r.inner.running);
+        vec![m[&q1].pool, m[&q2].pool]
     };
     assert_eq!(pools, vec![Pool::Fast, Pool::General]);
     release(&released, &["hold-1", "hold-2"]);
@@ -218,7 +218,7 @@ async fn reload_changes_the_fast_set_and_running_jobs_keep_their_pool() {
     let (_stop_tx, stop) = watch::channel(false);
     let _h = r.spawn_claim_loop(stop);
     wait_status(&f, &q1, DbStatus::Running).await;
-    assert_eq!(lock(&r.inner.pools)[&q1].0, Pool::Fast);
+    assert_eq!(lock(&r.inner.running)[&q1].pool, Pool::Fast);
     r.set_config(config(POOLS_RELOADED));
     let s1 = enqueue(&r, "slow", Some("hold-s"), Lane::User);
     r.inner.wake.notify_one();

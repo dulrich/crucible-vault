@@ -434,6 +434,12 @@ fn parse_action(entry: toml::Value) -> Result<Action, String> {
             steps[n].kind().as_str()
         ));
     }
+    if def.hold && !def.resources.note {
+        return Err(
+            "hold = true needs resources.note (an action that keys no note has no note to hold)"
+                .into(),
+        );
+    }
     let starters = match def.starters {
         None => vec![Starter::Command],
         Some(defs) => defs
@@ -551,6 +557,26 @@ type = "guard"
             &ok,
         );
         assert_eq!(c.errors().len(), 1, "{:?}", c.errors());
+    }
+
+    /// Plan tn-review-2026-11-04-remediation Decision 6: `hold = true` with `resources.note =
+    /// false` is a load error (the opt-in would silently do nothing).
+    #[test]
+    fn hold_without_resources_note_is_rejected() {
+        let mut c = ConfigSet::new();
+        c.reload(
+            &files(
+                "[[action]]\nid = \"h\"\nhold = true\nresources = { note = false, keys = [\"k::x\"] }\n[[action.steps]]\ntype = \"guard\"\n",
+            ),
+            &ok,
+        );
+        assert!(c.armed("h").is_none());
+        assert_eq!(c.errors().len(), 1, "{:?}", c.errors());
+        assert!(
+            c.errors()[0].contains("hold = true needs resources.note"),
+            "{:?}",
+            c.errors()
+        );
     }
 
     /// Plan job-slots-fast-lane WP-1: `fast` parses (default false), a non-bool is an error.

@@ -246,7 +246,13 @@ impl StateDb {
         // no claim proceeds until the row is repaired.
         let busy = claim::running_keys(&tx)?;
         let mut chosen = None;
-        for (id, raw_keys, service, job_type) in claim::candidates(&tx, now_ms)? {
+        for claim::Candidate {
+            id,
+            raw_keys,
+            service,
+            job_type,
+        } in claim::candidates(&tx, now_ms)?
+        {
             if only.is_some_and(|set| !set.contains(&job_type)) {
                 continue;
             }

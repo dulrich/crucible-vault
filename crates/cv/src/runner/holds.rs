@@ -6,8 +6,24 @@ use cv_protocol::NoteHold;
 use super::*;
 use crate::daemon::JobError;
 
-/// The runner's claimed jobs: `job id -> its note hold` (`None` = claimed, holds no note).
-pub(super) type Running = Arc<Mutex<HashMap<String, Option<Hold>>>>;
+/// The runner's claimed jobs: `job id -> RunningJob`.
+pub(super) type Running = Arc<Mutex<HashMap<String, RunningJob>>>;
+
+/// One claimed job's permit-holder record (plan tn-review-2026-11-04-remediation WP-R4, finding
+/// P2): its permit pool and `job_type` as recorded at claim, its note hold (`None` = holds no
+/// note) and the permit itself. Inserted at claim; removed once, right after the settle, and
+/// dropping it releases the permit, so the pool record, the hold and the permit clear together.
+#[derive(Debug)]
+pub(super) struct RunningJob {
+    /// The permit pool the job was claimed into.
+    pub(super) pool: Pool,
+    /// The job's `job_type` (`action:<id>`), the permit-wait holder name.
+    pub(super) job_type: String,
+    /// The job's note hold, set when its attempt starts on an action that holds its note.
+    pub(super) hold: Option<Hold>,
+    /// The job's permit in `pool`, held until the entry is removed.
+    pub(super) _permit: tokio::sync::OwnedSemaphorePermit,
+}
 
 /// One running job's note hold: the vault path it holds and its action label.
 ///
@@ -46,7 +62,7 @@ pub struct HoldsView(pub(super) Running);
 impl HoldsView {
     /// Whether no note is held.
     pub fn is_empty(&self) -> bool {
-        lock(&self.0).values().all(Option::is_none)
+        lock(&self.0).values().all(|j| j.hold.is_none())
     }
 
     /// Refuses (`JobError::Held`) when any of `paths` is held; with no holds nothing is compared.
@@ -55,7 +71,7 @@ impl HoldsView {
         paths: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), JobError> {
         let running = lock(&self.0);
-        let holds: Vec<&Hold> = running.values().flatten().collect();
+        let holds: Vec<&Hold> = running.values().filter_map(|j| j.hold.as_ref()).collect();
         if holds.is_empty() {
             return Ok(());
         }
@@ -72,7 +88,7 @@ impl HoldsView {
         let prefix = format!("{}/", path.trim_end_matches('/'));
         match lock(&self.0)
             .values()
-            .flatten()
+            .filter_map(|j| j.hold.as_ref())
             .find(|h| h.path == path || h.path.starts_with(&prefix))
         {
             Some(h) => Err(h.refusal()),
@@ -124,8 +140,10 @@ impl Inner {
                 path: p.clone(),
                 label: action.label.clone(),
             });
-        if hold.is_some() {
-            lock(&self.running).insert(job_id.to_owned(), hold.clone());
+        if hold.is_some()
+            && let Some(j) = lock(&self.running).get_mut(job_id)
+        {
+            j.hold.clone_from(&hold);
         }
         self.publish(
             job_id,
@@ -145,8 +163,8 @@ impl Inner {
         };
         let moved = {
             let mut running = lock(&self.running);
-            match running.get_mut(job_id) {
-                Some(Some(h)) if &h.path != path => {
+            match running.get_mut(job_id).and_then(|j| j.hold.as_mut()) {
+                Some(h) if &h.path != path => {
                     h.path.clone_from(path);
                     Some(h.clone())
                 }
@@ -170,8 +188,8 @@ impl Runner {
         let running = lock(&self.inner.running);
         let mut v: Vec<JobStatus> = running
             .iter()
-            .filter_map(|(id, h)| {
-                h.as_ref().map(|h| JobStatus {
+            .filter_map(|(id, j)| {
+                j.hold.as_ref().map(|h| JobStatus {
                     job_id: id.clone(),
                     status: JobState::Running,
                     message: None,

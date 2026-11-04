@@ -1,5 +1,5 @@
 //! Claim eligibility (plan tn-review-2026-10-29-remediation WP-R1, finding T1): the one rule
-//! both [`crate::StateDb::claim`] and [`crate::StateDb::observe_permit_wait`] apply to a queued
+//! both [`crate::StateDb::claim`] and [`crate::StateDb::observe_pool_wait`] apply to a queued
 //! candidate — a busy resource key (I3), then the service breaker.
 
 use crate::error::Result;
@@ -26,19 +26,18 @@ pub(crate) fn running_keys(tx: &Transaction<'_>) -> Result<HashMap<String, Strin
     Ok(busy)
 }
 
-/// The running jobs' actions, sorted and comma-joined (the permit holders).
-pub(crate) fn running_actions(tx: &Transaction<'_>) -> Result<String> {
-    let mut stmt = tx.prepare("SELECT job_type FROM jobs WHERE status = 'running'")?;
-    let mut v = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    v.sort_unstable();
-    Ok(v.join(","))
+/// One undeferred queued row (`job_type` added by plan job-slots-fast-lane WP-2 for the pool
+/// filter).
+pub(crate) struct Candidate {
+    /// The job id.
+    pub(crate) id: String,
+    /// The raw `resource_keys` JSON.
+    pub(crate) raw_keys: String,
+    /// The breaker service, if any.
+    pub(crate) service: Option<String>,
+    /// The job type (`action:<id>`).
+    pub(crate) job_type: String,
 }
-
-/// One undeferred queued row: `(id, raw resource_keys JSON, service, job_type)` (`job_type`
-/// added by plan job-slots-fast-lane WP-2 for the pool filter).
-pub(crate) type Candidate = (String, String, Option<String>, String);
 
 /// Every undeferred queued row at `now_ms`, highest lane then oldest id (the claim order).
 pub(crate) fn candidates(tx: &Transaction<'_>, now_ms: i64) -> Result<Vec<Candidate>> {
@@ -47,7 +46,12 @@ pub(crate) fn candidates(tx: &Transaction<'_>, now_ms: i64) -> Result<Vec<Candid
     )?;
     Ok(stmt
         .query_map(params![now_ms], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok(Candidate {
+                id: r.get(0)?,
+                raw_keys: r.get(1)?,
+                service: r.get(2)?,
+                job_type: r.get(3)?,
+            })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?)
 }

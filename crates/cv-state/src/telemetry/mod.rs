@@ -38,49 +38,41 @@ pub struct PoolView {
 }
 
 impl StateDb {
-    /// Permit-wait observation (plan job-telemetry Decision 3): the claim loop calls this when
-    /// no runner permit is free. Every claimable queued candidate records why it waits — a busy
-    /// key or breaker when one applies (classified read-only; never takes the half-open probe,
-    /// audit E2), else the permit, naming the running jobs' actions. One transaction; a
-    /// candidate is written only when its cause changed (Decision 4). The single-pool form of
-    /// [`StateDb::observe_pool_wait`].
-    pub fn observe_permit_wait(&mut self, now_ms: i64) -> Result<()> {
-        self.observe_waits(now_ms, None)
-    }
-
-    /// Two-pool permit-wait observation (plan job-slots-fast-lane WP-2, audit E4): a candidate
-    /// is observed only when every pool it may use is exhausted (non-fast: general; fast:
-    /// general and fast); a claimable one records `Permit` naming the holders of exactly those
-    /// pools (sorted, comma-joined). A candidate with a usable free pool writes nothing.
+    /// Permit-wait observation (plan job-telemetry Decision 3; two pools by plan
+    /// job-slots-fast-lane WP-2, audit E4): the claim loop calls this when the general pool is
+    /// exhausted. A candidate is observed only when every pool it may use is exhausted
+    /// (non-fast: general; fast: general and fast); a candidate with a usable free pool writes
+    /// nothing. Every observed candidate records why it waits — a busy key or breaker when one
+    /// applies (classified read-only; never takes the half-open probe, audit E2), else `Permit`
+    /// naming the holders of exactly its pools (sorted, comma-joined). One transaction; a
+    /// candidate is written only when its cause changed (Decision 4). The single-pool case is an
+    /// empty `fast_types`.
     pub fn observe_pool_wait(&mut self, now_ms: i64, pools: &PoolView) -> Result<()> {
-        self.observe_waits(now_ms, Some(pools))
+        self.observe_waits(now_ms, pools)
     }
 
-    fn observe_waits(&mut self, now_ms: i64, pools: Option<&PoolView>) -> Result<()> {
+    fn observe_waits(&mut self, now_ms: i64, p: &PoolView) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let busy = claim::running_keys(&tx)?;
-        let all_holders = match pools {
-            None => claim::running_actions(&tx)?,
-            Some(_) => String::new(),
-        };
-        for (id, raw_keys, service, job_type) in claim::candidates(&tx, now_ms)? {
-            let holders = match pools {
-                None => all_holders.clone(),
-                Some(p) => {
-                    let fast = p.fast_types.contains(&job_type);
-                    if p.general_free || (fast && p.fast_free) {
-                        continue;
-                    }
-                    let mut v = p.general_holders.clone();
-                    if fast {
-                        v.extend(p.fast_holders.iter().cloned());
-                    }
-                    v.sort_unstable();
-                    v.join(",")
-                }
-            };
+        for claim::Candidate {
+            id,
+            raw_keys,
+            service,
+            job_type,
+        } in claim::candidates(&tx, now_ms)?
+        {
+            let fast = p.fast_types.contains(&job_type);
+            if p.general_free || (fast && p.fast_free) {
+                continue;
+            }
+            let mut v = p.general_holders.clone();
+            if fast {
+                v.extend(p.fast_holders.iter().cloned());
+            }
+            v.sort_unstable();
+            let holders = v.join(",");
             let Ok(keys) = serde_json::from_str::<Vec<String>>(&raw_keys) else {
                 continue;
             };
