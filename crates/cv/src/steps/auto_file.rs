@@ -429,15 +429,11 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
 /// `## Transcript` text (outside managed enrich blocks) is under
 /// [`cv_ingest::transcript::MIN_REFINE_WORDS`] words — the floor refine skips, so every Short gets
 /// the mechanical `cleanup_transcript` lint — else `long_kind` (also with no transcript section).
+/// The word count sums every segment, a split section included.
 fn youtube_kind(yt: &cv_actions::pipelines::YoutubePipeline, body: &str) -> String {
-    let short = cv_ingest::transcript::locate(body).is_some_and(|s| {
-        let words: usize = s
-            .segments
-            .iter()
-            .map(|r| cv_ingest::transcript::words(&body[r.clone()]))
-            .sum();
-        words < cv_ingest::transcript::MIN_REFINE_WORDS
-    });
+    use cv_ingest::transcript::{Eligibility, MIN_REFINE_WORDS, eligibility};
+    let e = eligibility(body);
+    let short = e != Eligibility::NoSection && e.words() < MIN_REFINE_WORDS;
     let kind = if short { &yt.short_kind } else { &yt.long_kind };
     kind.trim().to_owned()
 }

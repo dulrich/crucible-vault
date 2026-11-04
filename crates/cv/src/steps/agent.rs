@@ -213,8 +213,8 @@ struct Vars {
 }
 
 /// Params of a plain `output = "var"` run of agent `agent` on its default model (what
-/// `intake_enrich` drives; plan `intake-auto-enrich` WP-3). The completion text lands in
-/// [`DEFAULT_OUTPUT_VAR`].
+/// `intake_enrich` and `transcript_refine` drive through [`complete`]; plan `intake-auto-enrich`
+/// WP-3).
 pub(crate) fn var_params(agent: &str) -> StepParams {
     StepParams {
         agent: agent.to_owned(),
@@ -378,42 +378,79 @@ fn load_prompt(
         .map_err(|_| StepError::failed(format!("agent step: {what} prompt file is not UTF-8")))
 }
 
-/// The step body, with the manager injected (tests pass one with a test `SecretSource`).
-pub(crate) fn run(
-    sp: &StepParams,
-    ctx: &mut StepCtx<'_>,
-    mgr: &ProviderManager,
-) -> Result<StepOutcome, StepError> {
-    let def = agent_def(ctx.config, &sp.agent).map_err(StepError::failed)?;
-    let provs = providers(ctx.config).map_err(StepError::failed)?;
-    let (provider, model) = resolve_model(sp, &def, &provs, ctx)?;
-    let provider = provider.clone();
+/// One checked completion: the answer text and the provider/model it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Completion {
+    pub(crate) text: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+}
 
-    // The target note, read (with its CAS hash) before the slow provider call (I2).
+impl Completion {
+    /// `provider:model`, the `*-model` frontmatter value.
+    pub(crate) fn model_ref(&self) -> String {
+        format!("{}:{}", self.provider, self.model)
+    }
+}
+
+/// The run's target note path and its bytes + CAS hash (read before the slow call, I2).
+type Target = (Option<String>, Option<(Vec<u8>, cv_vault::ContentHash)>);
+
+fn read_target(ctx: &StepCtx<'_>) -> Result<Target, StepError> {
     let target = ctx.context.active_path.clone();
     let note = match &target {
         Some(p) => ctx.read(p)?,
         None => None,
     };
-    if sp.output == OutputMode::Replace && note.is_none() {
-        return Err(StepError::failed(
-            "agent step: output = \"replace\" needs an existing target note",
-        ));
-    }
-    let note_text = match &note {
+    Ok((target, note))
+}
+
+fn note_text(note: Option<&(Vec<u8>, cv_vault::ContentHash)>) -> Result<String, StepError> {
+    match note {
         Some((b, _)) => String::from_utf8(b.clone())
-            .map_err(|_| StepError::failed("agent step: target note is not UTF-8"))?,
-        None => String::new(),
-    };
-    let (frontmatter, body) = note_text.split_at(cv_note::span(&note_text).map_or(0, |r| r.end));
+            .map_err(|_| StepError::failed("agent step: target note is not UTF-8")),
+        None => Ok(String::new()),
+    }
+}
+
+/// One provider completion of agent `sp.agent` on the run's active note, with `value` (or, when
+/// `None`, the client's `ActionContext::value`) as the agent's `{{value}}`. Reads the note itself;
+/// a non-`stop` finish is an error. The typed edge for steps that drive an agent (`intake_enrich`,
+/// `transcript_refine`).
+pub(crate) fn complete(
+    ctx: &StepCtx<'_>,
+    mgr: &ProviderManager,
+    sp: &StepParams,
+    value: Option<&str>,
+) -> Result<Completion, StepError> {
+    let (target, note) = read_target(ctx)?;
+    let text = note_text(note.as_ref())?;
+    call(ctx, mgr, sp, value, target.as_deref(), &text)
+}
+
+/// The provider call over the already-read `note_text` of `target`.
+fn call(
+    ctx: &StepCtx<'_>,
+    mgr: &ProviderManager,
+    sp: &StepParams,
+    value: Option<&str>,
+    target: Option<&str>,
+    note_text: &str,
+) -> Result<Completion, StepError> {
+    let def = agent_def(ctx.config, &sp.agent).map_err(StepError::failed)?;
+    let provs = providers(ctx.config).map_err(StepError::failed)?;
+    let (provider, model) = resolve_model(sp, &def, &provs, ctx)?;
+    let provider = provider.clone();
+    let body = &note_text[cv_note::span(note_text).map_or(0, |r| r.end)..];
     let title = target
-        .as_deref()
         .and_then(|p| std::path::Path::new(p).file_stem())
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     let vars = ctx.vars;
     let context = ctx.context;
+    let client_value =
+        value.map_or_else(|| context.value.clone().unwrap_or_default(), str::to_owned);
     let base = |key: &str| -> Option<String> {
         match key {
             "content" => Some(body.to_owned()),
@@ -431,10 +468,10 @@ pub(crate) fn run(
     };
     let value = match &def.input {
         Some(t) => render(t, &|k| match k {
-            "value" | "input" => Some(context.value.clone().unwrap_or_default()),
+            "value" | "input" => Some(client_value.clone()),
             _ => base(k),
         }),
-        None => context.value.clone().unwrap_or_default(),
+        None => client_value.clone(),
     };
     let lookup = |k: &str| -> Option<String> {
         match k {
@@ -475,11 +512,37 @@ pub(crate) fn run(
             sp.agent, provider.id
         )));
     }
+    Ok(Completion {
+        text: completion.text,
+        provider: provider.id,
+        model,
+    })
+}
+
+/// The step body, with the manager injected (tests pass one with a test `SecretSource`): one
+/// completion whose text lands in a var, or replaces the note body.
+pub(crate) fn run(
+    sp: &StepParams,
+    ctx: &mut StepCtx<'_>,
+    mgr: &ProviderManager,
+) -> Result<StepOutcome, StepError> {
+    // A bad model fails before the replace-needs-a-note check, as it always has.
+    let def = agent_def(ctx.config, &sp.agent).map_err(StepError::failed)?;
+    let provs = providers(ctx.config).map_err(StepError::failed)?;
+    resolve_model(sp, &def, &provs, ctx)?;
+    let (target, note) = read_target(ctx)?;
+    if sp.output == OutputMode::Replace && note.is_none() {
+        return Err(StepError::failed(
+            "agent step: output = \"replace\" needs an existing target note",
+        ));
+    }
+    let text = note_text(note.as_ref())?;
+    let c = call(ctx, mgr, sp, None, target.as_deref(), &text)?;
 
     let mut out = StepOutcome::default();
     out.set_vars(&Vars {
-        agent_model: model.clone(),
-        agent_provider: provider.id.clone(),
+        agent_model: c.model.clone(),
+        agent_provider: c.provider.clone(),
     });
     match sp.output {
         OutputMode::Var => {
@@ -487,18 +550,19 @@ pub(crate) fn run(
                 .output_var
                 .clone()
                 .unwrap_or_else(|| DEFAULT_OUTPUT_VAR.to_owned());
-            out.vars.insert(name, Value::String(completion.text));
+            out.vars.insert(name, Value::String(c.text));
         }
         OutputMode::Replace => {
             let (path, (old, hash)) = match (target, note) {
                 (Some(p), Some(n)) => (p, n),
                 _ => return Err(StepError::failed("agent step: no target note")),
             };
-            let mut text = completion.text;
-            if !text.ends_with('\n') {
-                text.push('\n');
+            let frontmatter = &text[..cv_note::span(&text).map_or(0, |r| r.end)];
+            let mut body = c.text;
+            if !body.ends_with('\n') {
+                body.push('\n');
             }
-            let new = format!("{frontmatter}{text}").into_bytes();
+            let new = format!("{frontmatter}{body}").into_bytes();
             if new != old {
                 ctx.write(&path, new, Some(hash))?;
             }

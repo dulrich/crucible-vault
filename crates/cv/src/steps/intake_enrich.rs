@@ -30,7 +30,8 @@
 //! video), and no non-empty `enriched` — plus (plan `youtube-transcript-auto-refine` WP-2, D30)
 //! every YouTube clip whose `## Transcript` section the step would refine (one segment of at least
 //! `MIN_REFINE_WORDS` words, no `refined` tag), enriched or
-//! not: the child's `transcript_refine` step refines it and forces the re-enrich. The batch is
+//! not: the child's `transcript_refine` step refines it and clears `enriched`, so the re-enrich
+//! follows. The batch is
 //! newest first over the union, at most `limit`, no duplicates.
 //!
 //! Outcome vars: `skipped` (`"already enriched"`), `enriched`, `anchors_resolved`,
@@ -180,14 +181,9 @@ pub(crate) fn run_note(
     ctx: &mut StepCtx<'_>,
     mgr: &ProviderManager,
 ) -> Result<StepOutcome, StepError> {
-    // A preceding `transcript_refine` that rewrote the note forces a re-enrich on the refined
-    // text; its outcome var rides the checkpointed vars, so a replayed run sees it too.
-    let refined_now = ctx
-        .vars
-        .get(super::transcript_refine::REFINED_VAR)
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let force = job_flag(ctx, "force").unwrap_or(p.force) || refined_now;
+    // A preceding `transcript_refine` that rewrote the note cleared its `enriched` stamp in the
+    // same write (Decision 5), so the refined text is re-enriched without a side channel.
+    let force = job_flag(ctx, "force").unwrap_or(p.force);
     let path = ctx
         .context
         .active_path
@@ -210,23 +206,9 @@ pub(crate) fn run_note(
         .split_whitespace()
         .count();
 
-    let mut answer = agent::run(&agent::var_params(&p.agent), ctx, mgr)?;
-    let reply = match answer.vars.remove(agent::DEFAULT_OUTPUT_VAR) {
-        Some(Value::String(s)) => s,
-        _ => {
-            return Err(StepError::failed(
-                "intake_enrich: the agent returned no text",
-            ));
-        }
-    };
-    let model_ref = match (
-        answer.vars.get("agent_provider"),
-        answer.vars.get("agent_model"),
-    ) {
-        (Some(Value::String(p)), Some(Value::String(m))) => format!("{p}:{m}"),
-        _ => String::new(),
-    };
-    let parsed = enrich::parse(&reply).map_err(|e| {
+    let answer = agent::complete(ctx, mgr, &agent::var_params(&p.agent), None)?;
+    let model_ref = answer.model_ref();
+    let parsed = enrich::parse(&answer.text).map_err(|e| {
         StepError::failed(format!(
             "intake_enrich: agent {:?} answer unusable ({e}); nothing written",
             p.agent
@@ -246,10 +228,8 @@ pub(crate) fn run_note(
     let fm_err =
         |e: cv_note::FmError| StepError::failed(format!("intake_enrich: frontmatter: {e}"));
     doc.set("enriched", &JsValue::Str(date)).map_err(fm_err)?;
-    if !model_ref.is_empty() {
-        doc.set("enrich-model", &JsValue::Str(model_ref))
-            .map_err(fm_err)?;
-    }
+    doc.set("enrich-model", &JsValue::Str(model_ref))
+        .map_err(fm_err)?;
     let new = doc.into_text();
     if new != text {
         ctx.write(&path, new.into_bytes(), Some(hash))?;
@@ -339,29 +319,19 @@ pub(crate) fn pick_backfill(
     v.into_iter().take(limit).map(|(p, _)| p.clone()).collect()
 }
 
-/// Whether a YouTube clip's text still wants `transcript_refine`: it carries a non-empty
-/// `## Transcript` section (managed enrich blocks excluded, via `cv_ingest::transcript`) of at
-/// least `MIN_REFINE_WORDS` words in one segment, and no `refined` tag — exactly the notes the step
-/// would refine, so a note it skips or rejects (short, or split by managed blocks) is never
-/// re-picked by every backfill pass.
-pub(crate) fn transcript_refine_pending(text: &str) -> bool {
-    use cv_ingest::transcript;
-    if super::transcript_refine::is_refined(text) {
-        return false;
-    }
-    let doc = FrontmatterDoc::new(text);
-    let body = doc.body();
-    transcript::locate(body).is_some_and(|s| match s.segments.as_slice() {
-        [one] => transcript::words(&body[one.clone()]) >= transcript::MIN_REFINE_WORDS,
-        _ => false,
-    })
+/// The backfill's view of the vault's intake notes.
+struct IntakeNotes {
+    /// Candidates with their `ctime`.
+    ctimes: BTreeMap<String, i64>,
+    /// The already-enriched paths.
+    enriched: BTreeSet<String>,
+    /// YouTube clips with a pending transcript refine (enriched or not): no `refined` tag and a
+    /// [`Ready`](cv_ingest::transcript::Eligibility::Ready) section — exactly the notes the step
+    /// would refine, so a note it skips or rejects (short, or split by managed blocks) is never
+    /// re-picked by every backfill pass.
+    refine: BTreeSet<String>,
 }
 
-/// `intake_notes` result: candidates with `ctime`, enriched paths, refine-pending paths.
-type IntakeNotes = (BTreeMap<String, i64>, BTreeSet<String>, BTreeSet<String>);
-
-/// Intake notes (candidates with their `ctime`), the set of already-enriched paths, and the
-/// YouTube clips with a pending transcript refine (enriched or not).
 fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
     let reader = ctx.index()?;
     let q = reader.query();
@@ -395,7 +365,11 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
     for p in youtube.iter().filter(|p| is_user_path(p)) {
         if let Some((bytes, _)) = ctx.read(p)?
             && let Ok(text) = String::from_utf8(bytes)
-            && transcript_refine_pending(&text)
+            && !super::transcript_refine::is_refined(&text)
+            && matches!(
+                cv_ingest::transcript::eligibility(FrontmatterDoc::new(text.as_str()).body()),
+                cv_ingest::transcript::Eligibility::Ready { .. }
+            )
         {
             refine.insert(p.clone());
         }
@@ -408,7 +382,11 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
             (p, c)
         })
         .collect();
-    Ok((cands, enriched, refine))
+    Ok(IntakeNotes {
+        ctimes: cands,
+        enriched,
+        refine,
+    })
 }
 
 /// The backfill batch size: a job param `limit` (a positive integer or its decimal text — the
@@ -439,8 +417,8 @@ pub(crate) fn effective_limit(
 
 fn backfill(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let limit = effective_limit(ctx.params, p.limit).map_err(StepError::failed)?;
-    let (cands, enriched, refine) = intake_notes(ctx)?;
-    let picks = pick_backfill(&cands, &enriched, &refine, limit);
+    let notes = intake_notes(ctx)?;
+    let picks = pick_backfill(&notes.ctimes, &notes.enriched, &notes.refine, limit);
     let (mut ok, mut failed) = (0, 0);
     for path in &picks {
         if enqueue_for(ctx, path).is_some() {
@@ -451,7 +429,7 @@ fn backfill(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
     }
     let mut out = StepOutcome::default();
     out.set_vars(&BackfillVars {
-        candidates: cands.len(),
+        candidates: notes.ctimes.len(),
         enqueued: ok,
         enqueue_failed: failed,
     });

@@ -222,8 +222,6 @@ async fn single_chunk_refine_replaces_only_the_section_and_keeps_a_raw_copy() {
     assert_eq!(reqs.len(), 1);
     assert_eq!(user_text(&reqs[0]), RAW);
     assert!(!reqs[0].body_str().contains(DESC));
-    assert_eq!(var(&o, "refined"), json!(true));
-    assert_eq!(var(&o, "transcript_refined"), json!(true));
     assert_eq!(var(&o, "chunks"), json!(1));
     assert_eq!(var(&o, "headings"), json!(1));
     assert_eq!(
@@ -272,8 +270,6 @@ async fn skips_make_no_model_call_and_no_write() {
         e.fx.write(name, text.clone());
         let o = exec(&e, name).await.unwrap();
         assert_eq!(var(&o, "skipped"), json!(why), "{name}");
-        assert_eq!(var(&o, "refined"), json!(false), "{name}");
-        assert_eq!(var(&o, "transcript_refined"), json!(false), "{name}");
         assert_eq!(read(&e, name), text, "{name}");
     }
     assert!(mock.requests().is_empty());
@@ -314,7 +310,7 @@ async fn a_short_transcript_is_skipped_at_the_default_floor() {
     assert_eq!(after, before);
     assert!(mock.requests().is_empty());
     let (o, _, _) = run("long.md", floor).await;
-    assert_eq!(var(&o, "refined"), json!(true));
+    assert_eq!(var(&o, "chunks"), json!(1));
     assert_eq!(mock.requests().len(), 1);
 }
 
@@ -329,6 +325,22 @@ async fn a_second_run_is_skipped_as_already_refined() {
     assert_eq!(var(&o, "skipped"), json!("already refined"));
     assert_eq!(read(&e, "n.md"), after);
     assert_eq!(mock.requests().len(), 1);
+}
+
+/// Plan `tn-review-2026-11-04-remediation` Decision 5: the refine write clears the `enriched`
+/// stamp (and only it), so the following `intake_enrich` re-enriches the refined text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refine_write_clears_the_enriched_stamp() {
+    let (base, _mock) = fake(200, REFINED, "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    let before = note_with("enriched: 2026-10-01\nenrich-model: fake:m1\n", YT, RAW, "");
+    e.fx.write("n.md", before);
+    exec(&e, "n.md").await.unwrap();
+    let t = read(&e, "n.md");
+    assert!(!t.contains("enriched:"), "{t}");
+    assert!(t.contains("\nenrich-model: fake:m1\n"), "{t}");
+    assert!(!super::intake_enrich::already_enriched(&t), "{t}");
+    assert!(t.contains(REFINED), "{t}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

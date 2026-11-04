@@ -111,3 +111,38 @@ fn retention_floor() {
 fn counts_chapter_headings() {
     assert_eq!(chapter_headings("### A\n\nx\n### B\n\n## C\n#### D\n"), 2);
 }
+
+/// Ported from `intake_enrich_tests` (the backfill's former `transcript_refine_pending`): only a
+/// one-segment section at or above the floor is ready.
+#[test]
+fn eligibility_reads_the_section_once() {
+    let floor = MIN_REFINE_WORDS;
+    let long = "word ".repeat(floor);
+    let body = format!("## Transcript\n\n{long}\n");
+    let Eligibility::Ready { range, words } = eligibility(&body) else {
+        panic!("not ready");
+    };
+    assert_eq!((&body[range], words), (long.trim_end(), floor));
+    let short = format!("## Transcript\n\n{}\n", "word ".repeat(floor - 1));
+    assert_eq!(eligibility(&short), Eligibility::Short { words: floor - 1 });
+    assert!(matches!(
+        eligibility_at(&short, floor - 1),
+        Eligibility::Ready { .. }
+    ));
+    let split =
+        format!("## Transcript\n\n{long}\n%% cv-enrich %%\nmanaged\n%% /cv-enrich %%\n{long}\n");
+    assert_eq!(eligibility(&split), Eligibility::Split { words: 2 * floor });
+    assert_eq!(
+        eligibility("## Notes\n\nno transcript\n"),
+        Eligibility::NoSection
+    );
+    assert_eq!(
+        eligibility("## Transcript\n\n## Next\n\nx\n"),
+        Eligibility::Empty
+    );
+    assert_eq!(
+        eligibility("## Transcript\n\n%% cv-enrich %%\nmanaged\n%% /cv-enrich %%\n"),
+        Eligibility::Empty
+    );
+    assert_eq!(Eligibility::Split { words: 7 }.words(), 7);
+}

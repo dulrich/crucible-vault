@@ -24,23 +24,22 @@
 //! `copy` step's naming; a different file already there gets a `-2`…`-9` suffix, never an
 //! overwrite), then the section body is replaced (the `## Transcript` heading line, the managed
 //! enrich blocks and everything else stay byte-identical), the `raw-transcript` link,
-//! `refine-model` and the `refined` tag are set, and the note is written with the hash read
+//! `refine-model` and the `refined` tag are set, the `enriched` stamp is removed (plan
+//! `tn-review-2026-11-04-remediation` Decision 5: the following `intake_enrich` re-enriches the
+//! refined text), and the note is written with the hash read
 //! *before* the model call (I2: an edit during the call is a conflict, never a clobber; the hash
 //! is re-checked before the raw copy is created so a conflicted run leaves nothing behind).
 //!
 //! There is no editor hold for a custom step (holds only classify `agent` + replace `capture`);
 //! the CAS hash is the protection.
 //!
-//! Outcome vars: `skipped`, `refined`, `transcript_refined` (what `intake_enrich` ORs into
-//! `force`), `words_in`, `words_out`, `chunks`, `headings`.
+//! Outcome vars: `skipped`, `words_in`, `words_out`, `chunks`, `headings`.
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_ingest::transcript;
+use cv_ingest::transcript::{self, Eligibility};
 use cv_note::{FrontmatterDoc, JsValue};
-use cv_protocol::ActionContext;
 use cv_providers::ProviderManager;
 use serde::Serialize;
-use serde_json::Value;
 
 use super::agent;
 use super::intake_enrich::is_youtube_source;
@@ -52,8 +51,6 @@ const DEFAULT_AGENT: &str = "transcript-refine";
 const RAW_FOLDER: &str = "_raw_transcript";
 /// The tag a refined note carries (the manual action's `not_tag` guard).
 pub(crate) const REFINED_TAG: &str = "refined";
-/// The outcome var `intake_enrich` ORs into `force` when this step rewrote the note.
-pub(crate) const REFINED_VAR: &str = "transcript_refined";
 
 /// Parsed step params.
 #[derive(Debug, Clone)]
@@ -97,8 +94,6 @@ impl StepModule for TranscriptRefine {
 struct Vars {
     #[serde(skip_serializing_if = "Option::is_none")]
     skipped: Option<&'static str>,
-    refined: bool,
-    transcript_refined: bool,
     words_in: usize,
     words_out: usize,
     chunks: usize,
@@ -150,23 +145,17 @@ pub(crate) fn run_note(
     }
     let body = doc.body();
     let body_offset = text.len() - body.len();
-    let Some(section) = transcript::locate(body) else {
-        return Ok(skip("no transcript"));
-    };
-    let range = match section.segments.as_slice() {
-        [] => return Ok(skip("no transcript")),
-        [one] => one.clone(),
-        _ => {
+    let (range, words_in) = match transcript::eligibility_at(body, p.min_words) {
+        Eligibility::NoSection | Eligibility::Empty => return Ok(skip("no transcript")),
+        Eligibility::Split { .. } => {
             return Err(StepError::failed(
                 "transcript_refine: the transcript section is split by managed enrich blocks; not refined",
             ));
         }
+        Eligibility::Short { .. } => return Ok(skip("short transcript")),
+        Eligibility::Ready { range, words } => (range, words),
     };
     let original = &body[range.clone()];
-    let words_in = transcript::words(original);
-    if words_in < p.min_words {
-        return Ok(skip("short transcript"));
-    }
 
     // One call per chunk; every answer is validated before anything is written.
     let chunks = transcript::chunks(original);
@@ -215,6 +204,9 @@ pub(crate) fn run_note(
     }
     doc.append_to_list("tags", &JsValue::Str(REFINED_TAG.to_owned()))
         .map_err(fm_err)?;
+    // Decision 5: the refined text is not what was enriched, so the stamp goes in this same
+    // write and the following `intake_enrich` re-enriches it (also across a checkpoint replay).
+    doc.remove("enriched").map_err(fm_err)?;
     ctx.write(&path, doc.into_text().into_bytes(), Some(hash))?;
 
     let mut out = StepOutcome::default();
@@ -222,8 +214,6 @@ pub(crate) fn run_note(
     out.push_output(raw_path);
     out.set_vars(&Vars {
         skipped: None,
-        refined: true,
-        transcript_refined: true,
         words_in,
         words_out,
         chunks: chunks.len(),
@@ -232,53 +222,23 @@ pub(crate) fn run_note(
     Ok(out)
 }
 
-/// One agent call whose `{{value}}` is `chunk` (the agent's `input` template is `{{value}}`):
-/// the call runs on a sub-context whose [`ActionContext::value`] is the chunk, so the model sees
-/// only that text. Returns the trimmed answer and `provider:model`.
+/// One agent call whose `{{value}}` is `chunk` (the agent's `input` template is `{{value}}`), so
+/// the model sees only that text. Returns the trimmed answer and `provider:model`.
 fn refine_chunk(
     p: &Params,
-    ctx: &mut StepCtx<'_>,
+    ctx: &StepCtx<'_>,
     mgr: &ProviderManager,
     chunk: &str,
 ) -> Result<(String, String), StepError> {
-    let sub_context = ActionContext {
-        value: Some(chunk.to_owned()),
-        ..ctx.context.clone()
-    };
-    let mut sub = StepCtx {
-        action: ctx.action,
-        step_index: ctx.step_index,
-        params: ctx.params,
-        context: &sub_context,
-        vars: ctx.vars,
-        config: ctx.config,
-        vault_root: ctx.vault_root,
-        index_db: ctx.index_db,
-        search: ctx.search,
-        system_trash: ctx.system_trash,
-        state: ctx.state,
-        writer: ctx.writer.clone(),
-        children: ctx.children,
-        written: Vec::new(),
-    };
-    let mut answer = agent::run(&agent::var_params(&p.agent), &mut sub, mgr)?;
-    let reply = match answer.vars.remove(agent::DEFAULT_OUTPUT_VAR) {
-        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
-        _ => {
-            return Err(StepError::failed(format!(
-                "transcript_refine: agent {:?} returned no text; nothing written",
-                p.agent
-            )));
-        }
-    };
-    let model_ref = match (
-        answer.vars.get("agent_provider"),
-        answer.vars.get("agent_model"),
-    ) {
-        (Some(Value::String(p)), Some(Value::String(m))) => format!("{p}:{m}"),
-        _ => String::new(),
-    };
-    Ok((reply, model_ref))
+    let answer = agent::complete(ctx, mgr, &agent::var_params(&p.agent), Some(chunk))?;
+    let reply = answer.text.trim();
+    if reply.is_empty() {
+        return Err(StepError::failed(format!(
+            "transcript_refine: agent {:?} returned no text; nothing written",
+            p.agent
+        )));
+    }
+    Ok((reply.to_owned(), answer.model_ref()))
 }
 
 /// Copies the original note bytes to `_raw_transcript/<name>.md` (the `copy` step's naming) and

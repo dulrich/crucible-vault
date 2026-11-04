@@ -164,6 +164,63 @@ pub fn locate(body: &str) -> Option<Section> {
     })
 }
 
+/// What a note body's `## Transcript` section allows the `transcript_refine` step to do (word
+/// counts are the section's unmanaged text, all segments summed). The one reading shared by the
+/// step, the intake backfill's refine-pending pick and `auto_file`'s short/long kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Eligibility {
+    /// No `## Transcript` heading.
+    NoSection,
+    /// The heading is there, but the section has no unmanaged text.
+    Empty,
+    /// Managed enrich blocks split the text into several segments (the step refuses it).
+    Split { words: usize },
+    /// One segment under the word floor (the step skips it).
+    Short { words: usize },
+    /// One segment at or above the floor: the byte range of the text to refine.
+    Ready { range: Range<usize>, words: usize },
+}
+
+impl Eligibility {
+    /// The section's unmanaged word count, all segments summed (0 without text).
+    #[must_use]
+    pub fn words(&self) -> usize {
+        match self {
+            Self::NoSection | Self::Empty => 0,
+            Self::Split { words } | Self::Short { words } | Self::Ready { words, .. } => *words,
+        }
+    }
+}
+
+/// [`eligibility_at`] with the default floor [`MIN_REFINE_WORDS`].
+#[must_use]
+pub fn eligibility(body: &str) -> Eligibility {
+    eligibility_at(body, MIN_REFINE_WORDS)
+}
+
+/// The [`Eligibility`] of `body` (frontmatter already split off) under a `min_words` floor. A
+/// split section is reported as split whatever its size.
+#[must_use]
+pub fn eligibility_at(body: &str, min_words: usize) -> Eligibility {
+    let Some(section) = locate(body) else {
+        return Eligibility::NoSection;
+    };
+    let total = section
+        .segments
+        .iter()
+        .map(|r| words(&body[r.clone()]))
+        .sum();
+    match section.segments.as_slice() {
+        [] => Eligibility::Empty,
+        [_] if total < min_words => Eligibility::Short { words: total },
+        [one] => Eligibility::Ready {
+            range: one.clone(),
+            words: total,
+        },
+        _ => Eligibility::Split { words: total },
+    }
+}
+
 /// Whitespace-separated word count.
 #[must_use]
 pub fn words(text: &str) -> usize {
