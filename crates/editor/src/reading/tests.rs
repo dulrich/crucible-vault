@@ -22,7 +22,7 @@ fn png(w: u32, h: u32) -> Vec<u8> {
     out.into_inner()
 }
 
-fn setup(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<dyn DaemonClient>) {
+pub(crate) fn setup(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<dyn DaemonClient>) {
     let tmp = tempfile::tempdir().expect("tmp");
     let vault = tmp.path().join("vault");
     for (p, body) in files {
@@ -34,7 +34,7 @@ fn setup(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<dyn DaemonClient>) 
     (tmp, Arc::new(d))
 }
 
-fn app_on(d: &Arc<dyn DaemonClient>, path: &str) -> App {
+pub(crate) fn app_on(d: &Arc<dyn DaemonClient>, path: &str) -> App {
     let mut app = App::new(Some(Arc::clone(d)), None);
     let _ = app.send(Message::Tabs(TabsMsg::Open(path.to_owned())));
     assert_eq!(app.active_tab().and_then(|t| t.path()), Some(path));
@@ -49,7 +49,7 @@ fn viewport(app: &mut App, path: &str, lines: usize) {
     }));
 }
 
-fn reading(app: &mut App, path: &str, mode: ViewMode) {
+pub(crate) fn reading(app: &mut App, path: &str, mode: ViewMode) {
     let _ = app.send(Message::Reading(ReadingMsg::SetMode {
         path: path.to_owned(),
         mode,
@@ -357,7 +357,7 @@ fn long_note() -> Vec<u8> {
 }
 
 /// Opens `p` (body `body`) in `mode`, rendered, with the find bar searching `q`.
-fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir, App) {
+pub(crate) fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir, App) {
     use crate::message::FindMsg;
     let (t, d) = setup(&[(p, body)]);
     let mut app = app_on(&d, p);
@@ -372,7 +372,7 @@ fn find_on(p: &str, body: &[u8], mode: ViewMode, q: &str) -> (tempfile::TempDir,
 
 /// The strong Reading find occurrence the active tab of `p` paints, as (top-level
 /// block, nth occurrence inside it) — derived from the focused pane's bar at view time.
-fn strong_hit(app: &App, p: &str) -> Option<(usize, usize)> {
+pub(crate) fn strong_hit(app: &App, p: &str) -> Option<(usize, usize)> {
     let tab = app.active_tab().map(|t| t.id)?;
     let paint = app.find_bar_for(tab)?.reading_paint()?;
     let occ = editor_model::visible::occurrences(&app.reading.doc(&app.docs, p)?.runs, paint.query);
@@ -380,7 +380,7 @@ fn strong_hit(app: &App, p: &str) -> Option<(usize, usize)> {
     Some((part.block()?, n))
 }
 
-fn bar(app: &App) -> crate::find::FindBar {
+pub(crate) fn bar(app: &App) -> crate::find::FindBar {
     app.panes
         .get(app.focus)
         .and_then(|ps| ps.find.clone())

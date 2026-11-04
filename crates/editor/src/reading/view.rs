@@ -376,7 +376,7 @@ fn boxed(content: Element<'_, Message>, t: Tokens, edge: Rgb) -> Element<'_, Mes
 
 /// plan round-21 WP-2: the click message of code block `run`'s copy button — carries exactly the
 /// block's stored `code` (no fence, no language line, no added or stripped newline).
-pub(super) fn copy_message(path: &str, view: u64, run: usize, code: &str) -> Message {
+pub(crate) fn copy_message(path: &str, view: u64, run: usize, code: &str) -> Message {
     Message::Reading(ReadingMsg::Copy {
         text: code.to_owned(),
         feedback: crate::message::CopyFeedback::Block {

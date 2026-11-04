@@ -318,8 +318,11 @@ pub struct App {
     pub(super) tab_drag: tab_drag::TabDrag,
     /// Plan round-21 WP-1: the pane whose tab strip has keyboard focus (Left/Right scroll it).
     /// Set by a press on a tab header, cleared by any other user input
-    /// ([`App::drops_strip_focus`]).
+    /// ([`App::drop_strip_focus`]).
     pub(super) strip_focus: Option<Pane>,
+    /// Plan WP-R8: a press on a visible tab (`Select` / `DragPress`) set this; `update` then
+    /// skips the strip snap once, so the strip does not move under the pointer.
+    pub(super) strip_press: bool,
     /// A back/forward step is opening a path: it must not push onto the history.
     history_nav: bool,
     /// editor-usability-round WP-4: a quit waiting on these paths' saves (`None` = no quit).
@@ -468,6 +471,7 @@ impl App {
             mouse_down: false,
             tab_drag: tab_drag::TabDrag::default(),
             strip_focus: None,
+            strip_press: false,
             history_nav: false,
             quit: None,
             dialog: None,

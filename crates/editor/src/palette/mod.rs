@@ -473,7 +473,11 @@ pub fn key_event(ev: keyboard::Event) -> Option<Message> {
         // (the app ignores them without strip focus).
         Key::Named(arrow @ (Named::ArrowLeft | Named::ArrowRight)) if modifiers.is_empty() => {
             Some(Message::Tabs(crate::message::TabsMsg::StripKey(
-                arrow == Named::ArrowRight,
+                if arrow == Named::ArrowRight {
+                    crate::message::StripDir::Right
+                } else {
+                    crate::message::StripDir::Left
+                },
             )))
         }
         Key::Named(Named::Enter) if modifiers.command() => p(PaletteMsg::CtrlEnter),

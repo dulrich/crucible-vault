@@ -815,4 +815,4 @@ mod link_menu_tests;
 #[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

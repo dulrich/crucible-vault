@@ -561,51 +561,25 @@ impl App {
         )
     }
 
-    /// Plan round-21 WP-1: whether `m` is user input elsewhere that takes the tab strip's
-    /// keyboard focus away (a press outside the strip reaches the app as one of these).
-    pub(super) fn drops_strip_focus(m: &Message) -> bool {
-        use crate::message::{ExplorerMsg, PanesMsg};
-        match m {
-            Message::Source(m) => m.kind() == crate::message::MsgKind::Input,
-            Message::Find(_) | Message::Palette(PaletteMsg::Open) => true,
-            Message::Switcher(SwitcherMsg::Open | SwitcherMsg::OpenMove) => true,
-            Message::Explorer(
-                ExplorerMsg::Toggle(_)
-                | ExplorerMsg::Select(_)
-                | ExplorerMsg::Open(_)
-                | ExplorerMsg::BeginNew
-                | ExplorerMsg::BeginRename
-                | ExplorerMsg::BeginMove,
-            ) => true,
-            Message::Panels(
-                PanelsMsg::Search
-                | PanelsMsg::Show(_)
-                | PanelsMsg::Open(_)
-                | PanelsMsg::OutlineJump(_),
-            ) => true,
-            Message::Panes(
-                PanesMsg::Focus(_)
-                | PanesMsg::SplitRight
-                | PanesMsg::SplitDown
-                | PanesMsg::Close(_)
-                | PanesMsg::Back(_)
-                | PanesMsg::Forward(_)
-                | PanesMsg::Side(_)
-                | PanesMsg::ToggleSide
-                | PanesMsg::ModeMenu(_),
-            ) => true,
-            Message::Tabs(
-                TabsMsg::Open(_)
-                | TabsMsg::Select(..)
-                | TabsMsg::Close(..)
-                | TabsMsg::CloseActive
-                | TabsMsg::GoTo(_),
-            ) => true,
-            Message::Reading(
-                crate::message::ReadingMsg::OpenLink { .. }
-                | crate::message::ReadingMsg::ToggleTask { .. },
-            ) => true,
+    /// Plan round-21 WP-1 / WP-R8 (E5): the tab strip's keyboard focus drops on one signal —
+    /// any [`MsgKind::Input`] message that is not the strip's own ([`TabsMsg::is_strip_own`]).
+    /// Plan round-22 WP-1: the pane grid publishes `PanesMsg::Focus` for the strip's own pane
+    /// *after* the header's `DragPress` on the same press (iced_widget 0.14.2
+    /// pane_grid.rs:509-584: contents update first, then `on_click` regardless of capture), so
+    /// that focus is not "input elsewhere".
+    ///
+    /// [`MsgKind::Input`]: crate::message::MsgKind::Input
+    pub(super) fn drop_strip_focus(&mut self, m: &Message) {
+        let Some(pane) = self.strip_focus else {
+            return;
+        };
+        let own = match m {
+            Message::Tabs(t) => t.is_strip_own(),
+            Message::Panes(crate::message::PanesMsg::Focus(p)) => *p == pane,
             _ => false,
+        };
+        if !own && m.kind() == crate::message::MsgKind::Input {
+            self.strip_focus = None;
         }
     }
 }

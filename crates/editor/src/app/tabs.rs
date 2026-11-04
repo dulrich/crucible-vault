@@ -408,7 +408,10 @@ impl App {
     pub(super) fn update_tabs(&mut self, m: TabsMsg) -> Task<Message> {
         match m {
             TabsMsg::Open(p) => self.open(&p),
-            TabsMsg::Select(pane, i) => self.select_tab(pane, i),
+            TabsMsg::Select(pane, i) => {
+                self.strip_press = true;
+                self.select_tab(pane, i);
+            }
             TabsMsg::GoTo(n) => {
                 let i = usize::from(n.saturating_sub(1));
                 if n >= 1
@@ -438,13 +441,18 @@ impl App {
             TabsMsg::DragPress(pane, i) => {
                 self.update_tab_drag(TabsMsg::DragPress(pane, i));
                 self.strip_focus = Some(pane);
+                self.strip_press = true;
                 return iced::widget::operation::focus(iced::widget::Id::new("tab-strip-focus"));
             }
             TabsMsg::StripWheel(pane, dx) => return self.scroll_strip(pane, dx),
-            TabsMsg::StripKey(forward) => {
+            TabsMsg::StripKey(dir) => {
                 if let Some(pane) = self.strip_focus.filter(|p| self.panes.get(*p).is_some()) {
                     let step = super::scroll::STRIP_KEY_STEP;
-                    return self.scroll_strip(pane, if forward { step } else { -step });
+                    let dx = match dir {
+                        crate::message::StripDir::Left => -step,
+                        crate::message::StripDir::Right => step,
+                    };
+                    return self.scroll_strip(pane, dx);
                 }
             }
             m => self.update_tab_drag(m),

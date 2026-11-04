@@ -10,25 +10,9 @@ impl App {
         let Some(message) = self.modal_filter(message) else {
             return Task::none();
         };
-        // Plan round-21 WP-1: user input elsewhere takes the tab strip's keyboard focus.
-        // Plan round-22 WP-1: the pane grid publishes `PanesMsg::Focus` for the strip's own
-        // pane *after* the header's `DragPress` on the same press (iced_widget 0.14.2
-        // pane_grid.rs:509-584: contents update first, then `on_click` regardless of capture),
-        // so that focus is not "input elsewhere".
-        let own_pane = matches!(
-            message,
-            Message::Panes(crate::message::PanesMsg::Focus(p)) if Some(p) == self.strip_focus
-        );
-        if self.strip_focus.is_some() && !own_pane && Self::drops_strip_focus(&message) {
-            self.strip_focus = None;
-        }
+        self.drop_strip_focus(&message);
         let before = self.active_paths();
         let views_before = self.active_views();
-        // A press on a visible tab must not move the strip under the pointer.
-        let by_press = matches!(
-            message,
-            Message::Tabs(TabsMsg::DragPress(..) | TabsMsg::Select(..))
-        );
         let task = self.update_inner(message);
         self.link_ta_validate();
         if self.dialog.is_some() {
@@ -40,7 +24,9 @@ impl App {
         let auto = self.schedule_settings_autosave();
         let restore = self.restore_places(&views_before);
         let persist = self.schedule_persist();
-        let strip = if by_press {
+        // `Select` / `DragPress` set `strip_press`: a press on a visible tab must not move the
+        // strip under the pointer.
+        let strip = if std::mem::take(&mut self.strip_press) {
             Task::none()
         } else {
             self.scroll_tabs_into_view(&views_before)

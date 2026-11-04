@@ -410,6 +410,44 @@ pub fn seg_group_style(t: Tokens) -> impl Fn(&iced::Theme) -> iced::widget::cont
     }
 }
 
+/// The tab strip's thin overlay scrollbar (plan round-19-yt-cleanup-intake WP-1): `line` rail,
+/// `line` scroller that takes the accent while hovered or dragged.
+pub fn strip_scroll_style(
+    t: Tokens,
+) -> impl Fn(&iced::Theme, iced::widget::scrollable::Status) -> iced::widget::scrollable::Style {
+    move |_, status| {
+        use iced::widget::scrollable::{AutoScroll, Rail, Scroller, Status, Style};
+        let hot = !matches!(status, Status::Active { .. });
+        let rail = Rail {
+            background: Some(t.line.to_color().scale_alpha(0.35).into()),
+            border: iced::Border::default(),
+            scroller: Scroller {
+                background: if hot {
+                    t.accent_ui.to_color().into()
+                } else {
+                    t.line.to_color().into()
+                },
+                border: iced::Border {
+                    radius: RADIUS.into(),
+                    ..iced::Border::default()
+                },
+            },
+        };
+        Style {
+            container: iced::widget::container::Style::default(),
+            vertical_rail: rail,
+            horizontal_rail: rail,
+            gap: None,
+            auto_scroll: AutoScroll {
+                background: iced::Color::TRANSPARENT.into(),
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                icon: iced::Color::TRANSPARENT,
+            },
+        }
+    }
+}
+
 /// CC-16 segment: flush, transparent; the active one is a `panel_2` block with an `accent_text`
 /// glyph; hover promotes the glyph achromatically (`text`) and never clears the active block.
 pub fn segment_style(

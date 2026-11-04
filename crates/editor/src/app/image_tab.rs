@@ -208,7 +208,11 @@ impl App {
             .center_y(Length::Fill)
             .padding(8);
         // Plan round-22 WP-3: right-click the image for Copy image / Copy path.
-        let body = crate::context_menu::on_right(body, image_body_target(path));
+        let target = crate::context_menu::Target::Image {
+            src: path.to_owned(),
+            remote: false,
+        };
+        let body = crate::context_menu::on_right(body, target);
         sensor(body)
             .key_ref(path)
             .on_show(move |size| {
@@ -223,29 +227,5 @@ impl App {
                 view,
             }))
             .into()
-    }
-}
-
-/// Plan round-22 WP-3: the context-menu target of an image tab's body (a local vault image).
-pub(super) fn image_body_target(path: &str) -> crate::context_menu::Target {
-    crate::context_menu::Target::Image {
-        src: path.to_owned(),
-        remote: false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn image_body_target_is_the_local_image() {
-        assert_eq!(
-            image_body_target("img/a.png"),
-            crate::context_menu::Target::Image {
-                src: "img/a.png".into(),
-                remote: false
-            }
-        );
     }
 }

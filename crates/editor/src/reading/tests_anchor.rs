@@ -101,31 +101,3 @@ fn outline_jump_scrolls_reading() {
     assert!(want.is_some());
     assert_eq!(top(&app, p), want);
 }
-
-#[test]
-fn tab_strip_fraction_and_activation_scroll() {
-    use crate::app::scroll::strip_fraction;
-    assert_eq!(strip_fraction(0, 1), 0.0);
-    assert_eq!(strip_fraction(0, 5), 0.0);
-    assert_eq!(strip_fraction(4, 5), 1.0);
-    assert!((strip_fraction(2, 5) - 0.5).abs() < f32::EPSILON);
-    let files: Vec<(String, Vec<u8>)> = (0..30)
-        .map(|i| (format!("n{i}.md"), b"x\n".to_vec()))
-        .collect();
-    let refs: Vec<(&str, &[u8])> = files
-        .iter()
-        .map(|(p, b)| (p.as_str(), b.as_slice()))
-        .collect();
-    let (_t, d) = setup(&refs);
-    let mut app = app_on(&d, "n0.md");
-    for (p, _) in &files[1..] {
-        let _ = app.send(Message::Tabs(TabsMsg::Open(p.clone())));
-    }
-    assert_eq!(tab_count(&app), 30);
-    // Opening a tab snaps the strip; the many-tab bar still builds.
-    let task = app.send(Message::Tabs(TabsMsg::Open("n3.md".into())));
-    assert!(task.units() > 0);
-    drop(app.view());
-    let _ = app.send(Message::Tabs(TabsMsg::DragPress(app.focus, 5)));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("n5.md"));
-}

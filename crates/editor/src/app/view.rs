@@ -302,37 +302,7 @@ impl App {
                     .width(STRIP_RAIL)
                     .scroller_width(STRIP_RAIL),
             ))
-            .style(move |_: &Theme, status| {
-                use iced::widget::scrollable::{Rail, Scroller, Style};
-                let hot = !matches!(status, iced::widget::scrollable::Status::Active { .. });
-                let rail = Rail {
-                    background: Some(t.line.to_color().scale_alpha(0.35).into()),
-                    border: iced::Border::default(),
-                    scroller: Scroller {
-                        background: if hot {
-                            t.accent_ui.to_color().into()
-                        } else {
-                            t.line.to_color().into()
-                        },
-                        border: iced::Border {
-                            radius: crate::theme::RADIUS.into(),
-                            ..iced::Border::default()
-                        },
-                    },
-                };
-                Style {
-                    container: container::Style::default(),
-                    vertical_rail: rail,
-                    horizontal_rail: rail,
-                    gap: None,
-                    auto_scroll: iced::widget::scrollable::AutoScroll {
-                        background: iced::Color::TRANSPARENT.into(),
-                        border: iced::Border::default(),
-                        shadow: iced::Shadow::default(),
-                        icon: iced::Color::TRANSPARENT,
-                    },
-                }
-            })
+            .style(crate::theme::strip_scroll_style(t))
             .width(Length::Fill)
             .height(BAR_HEIGHT + STRIP_RAIL);
         // Plan round-21 WP-1: iced's horizontal-only scrollable drops a wheel's y axis, so the
