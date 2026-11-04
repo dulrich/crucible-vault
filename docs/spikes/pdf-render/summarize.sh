@@ -8,6 +8,7 @@ case $_shguard_m in
   *) printf '%s: refusing %s invocation (supports: exec; pipe callers set SHGUARD_MODE=pipe)\n' 'summarize.sh' "$_shguard_m" >&2; unset _shguard_m; return 1 2>/dev/null || exit 1 ;;
 esac
 # <<< shguard
+if [ "${1:-}" = "--build" ] || [ "${1:-}" = "--version" ]; then . "$(dirname "$(readlink -f "$0")")/../../../scripts/lib/build-id.sh"; build_flags "$0" "$@"; fi
 if [ "${1:-}" = "--help" ] || [ $# -lt 1 ]; then echo "usage: summarize.sh results-<cand>.tsv  (median/p95 render ms, RSS, status counts per dpi)"; exit 0; fi
 set -eu
 f=$1
