@@ -362,6 +362,42 @@ fn editor_tab_title_enum_and_default() {
 }
 
 #[test]
+fn editor_surround_accepts_dark_transparent() {
+    assert!(errs("surround = \"dark-transparent\"\n", "editor.toml").is_empty());
+    assert_eq!(
+        errs("surround = \"darktransparent\"\n", "editor.toml").len(),
+        1
+    );
+}
+
+#[test]
+fn editor_transparency_table_bounds_and_defaults() {
+    assert!(
+        errs(
+            "[transparency]\ntint = \"#102030\"\nalpha = 0.5\n",
+            "editor.toml"
+        )
+        .is_empty()
+    );
+    let e = errs("[transparency]\nalpha = 1.5\n", "editor.toml");
+    assert_eq!(e.len(), 1, "{e:?}");
+    let Node::Record(r) = editor_schema() else {
+        panic!("editor schema is a record");
+    };
+    let Some(Node::Record(t)) = r
+        .fields
+        .iter()
+        .find(|f| f.key == "transparency")
+        .map(|f| &f.node)
+    else {
+        panic!("transparency record");
+    };
+    let d = |k: &str| t.fields.iter().find(|f| f.key == k).expect("field").default;
+    assert!(matches!(d("tint"), Some(node::Default::Str("#000000"))));
+    assert!(matches!(d("alpha"), Some(node::Default::Float(a)) if (a - 0.8).abs() < 1e-9));
+}
+
+#[test]
 fn editor_quick_switch_open_enum_and_default() {
     for v in ["switch", "move", "duplicate"] {
         assert!(

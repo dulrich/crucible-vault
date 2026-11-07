@@ -78,6 +78,7 @@ impl App {
             doc,
             tab.id,
             self.tokens,
+            self.prefs.surround.is_transparent(),
             self.prefs.font_size,
             &self.palette.keymap,
             self.active_tab().is_some_and(|t| t.id == tab.id),
@@ -102,8 +103,24 @@ impl App {
             Surround::Dark => "N1 Dark",
             Surround::Med => "N1 Med",
             Surround::Light => "N1 Light",
+            // The opaque Dark palette: the alpha lives only on `App::style`'s background.
+            Surround::DarkTransparent => "N1 Dark (transparent)",
         };
         self.tokens.iced_theme(name)
+    }
+
+    /// The application style: window background (tint at alpha under the transparent surround,
+    /// else the opaque `bg` token) and text colour. The one place the alpha is carried.
+    pub fn style(&self, theme: &Theme) -> iced::theme::Style {
+        iced::theme::Style {
+            background_color: crate::theme::app_background(
+                self.prefs.surround,
+                &self.tokens,
+                self.prefs.transparency.tint,
+                self.prefs.transparency.alpha,
+            ),
+            text_color: theme.palette().text,
+        }
     }
 
     /// The backdrop-click / close message for the open overlay (`None` = no overlay open).

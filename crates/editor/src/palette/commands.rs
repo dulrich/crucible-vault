@@ -295,6 +295,11 @@ static TABLE: LazyLock<Vec<CmdSpec>> = LazyLock::new(|| {
         (Surround::Dark, "dark", "Set surround: Dark"),
         (Surround::Med, "med", "Set surround: Med"),
         (Surround::Light, "light", "Set surround: Light"),
+        (
+            Surround::DarkTransparent,
+            "dark-transparent",
+            "Set surround: Dark (transparent)",
+        ),
     ];
     v.extend(family(
         lit(&surrounds),

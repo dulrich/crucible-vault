@@ -1219,6 +1219,7 @@ fn persisted_command_ids_are_pinned() {
         "set_surround.dark",
         "set_surround.med",
         "set_surround.light",
+        "set_surround.dark-transparent",
         "find_in_note",
         "focus_search",
         "open_settings",
@@ -1243,7 +1244,7 @@ fn persisted_command_ids_are_pinned() {
     all.extend(["command_palette", "preset.lint-note"]);
     let bind: Vec<String> = bindables().into_iter().map(|b| b.id).collect();
     assert_eq!(bind, all);
-    assert_eq!(all.len(), 45);
+    assert_eq!(all.len(), 46);
     let preset = |action, period| Preset { action, period }.id();
     assert_eq!(preset(PERIOD_OPEN, Some(PeriodSel::Day)), "open_period.day");
     assert_eq!(

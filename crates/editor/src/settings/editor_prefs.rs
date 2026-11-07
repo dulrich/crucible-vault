@@ -19,7 +19,7 @@ use super::{ConfigFile, LoadState};
 use crate::daemon::DeleteMode;
 pub use crate::header::QuickSwitchOpen;
 use crate::header::TabTitle;
-use crate::theme::Surround;
+use crate::theme::{Rgb, Surround, parse_hex};
 use editor_model::period::{NavLink, default_nav_links};
 
 /// The vault file.
@@ -53,9 +53,32 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 /// Default search debounce (was `panels::SEARCH_DEBOUNCE`).
 pub const DEFAULT_SEARCH_DEBOUNCE_MS: u64 = 250;
 
+/// `[transparency]`: the `dark-transparent` surround's window background.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transparency {
+    pub tint: Rgb,
+    pub alpha: f32,
+}
+
+impl Default for Transparency {
+    fn default() -> Self {
+        Self {
+            tint: Rgb(0, 0, 0),
+            alpha: 0.8,
+        }
+    }
+}
+
+/// A strict `#rrggbb` (the shorthand `#rgb` is not accepted here).
+fn tint_of(s: &str) -> Option<Rgb> {
+    if s.len() == 7 { parse_hex(s) } else { None }
+}
+
 /// The effective editor prefs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prefs {
+    /// `[transparency]`.
+    pub transparency: Transparency,
     pub font_size: f32,
     pub ui_scale: f32,
     pub surround: Surround,
@@ -166,6 +189,7 @@ impl Default for Prefs {
             font_size: DEFAULT_FONT_SIZE,
             ui_scale: 1.0,
             surround: Surround::default(),
+            transparency: Transparency::default(),
             tab_title: TabTitle::default(),
             quick_switch_open: QuickSwitchOpen::default(),
             search_limit: DEFAULT_SEARCH_LIMIT,
@@ -216,7 +240,7 @@ fn in_range(v: f64, key: &str) -> Option<f32> {
 fn surround_of(s: &str) -> Option<Surround> {
     Surround::ALL
         .into_iter()
-        .find(|x| x.label().eq_ignore_ascii_case(s))
+        .find(|x| surround_key(*x).eq_ignore_ascii_case(s))
 }
 
 /// The surround's `editor.toml` spelling.
@@ -225,6 +249,7 @@ pub fn surround_key(s: Surround) -> &'static str {
         Surround::Dark => "dark",
         Surround::Med => "med",
         Surround::Light => "light",
+        Surround::DarkTransparent => "dark-transparent",
     }
 }
 
@@ -239,6 +264,16 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             .filter(|v| (lo..=hi).contains(&(*v as f64)))
     };
     Prefs {
+        transparency: Transparency {
+            tint: doc
+                .get_str(&p("transparency.tint"))
+                .and_then(tint_of)
+                .unwrap_or(d.transparency.tint),
+            alpha: doc
+                .get_float(&p("transparency.alpha"))
+                .and_then(|v| in_range(v, "transparency.alpha"))
+                .unwrap_or(d.transparency.alpha),
+        },
         font_size: doc
             .get_float(&p("font_size"))
             .and_then(|v| in_range(v, "font_size"))

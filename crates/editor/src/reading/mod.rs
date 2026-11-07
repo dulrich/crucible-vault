@@ -766,6 +766,7 @@ pub fn tab_body<'a>(
     doc: &'a SourceBuffer,
     view: u64,
     t: Tokens,
+    transparent: bool,
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
     focused: bool,
@@ -792,11 +793,19 @@ pub fn tab_body<'a>(
         )
     };
     match store.mode(docs, doc.path()) {
-        ViewMode::Source => crate::source::view(doc, t, font_size, keymap, find, link),
+        ViewMode::Source => crate::source::view(doc, t, transparent, font_size, keymap, find, link),
         ViewMode::Reading => reading(),
         ViewMode::Split => row![
-            container(crate::source::view(doc, t, font_size, keymap, find, link))
-                .width(Length::FillPortion(1)),
+            container(crate::source::view(
+                doc,
+                t,
+                transparent,
+                font_size,
+                keymap,
+                find,
+                link
+            ))
+            .width(Length::FillPortion(1)),
             container(reading()).width(Length::FillPortion(1)),
         ]
         .spacing(12)

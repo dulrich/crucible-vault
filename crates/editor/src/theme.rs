@@ -32,18 +32,27 @@ pub enum Surround {
     #[default]
     Med,
     Light,
+    /// The Dark tokens over a translucent application background (plan transparent-dark-surround).
+    #[serde(rename = "dark-transparent")]
+    DarkTransparent,
 }
 
 impl Surround {
-    /// `surround.ts:28` order.
-    pub const ALL: [Self; 3] = [Self::Dark, Self::Med, Self::Light];
+    /// `surround.ts:28` order, then the transparent Dark.
+    pub const ALL: [Self; 4] = [Self::Dark, Self::Med, Self::Light, Self::DarkTransparent];
+
+    /// Whether the application background is translucent.
+    pub fn is_transparent(self) -> bool {
+        matches!(self, Self::DarkTransparent)
+    }
 
     /// The next surround, dark → med → light → dark (`surround.ts:75`).
     pub fn next(self) -> Self {
         match self {
             Self::Dark => Self::Med,
             Self::Med => Self::Light,
-            Self::Light => Self::Dark,
+            Self::Light => Self::DarkTransparent,
+            Self::DarkTransparent => Self::Dark,
         }
     }
 
@@ -53,12 +62,13 @@ impl Surround {
             Self::Dark => "Dark",
             Self::Med => "Med",
             Self::Light => "Light",
+            Self::DarkTransparent => "Dark (transparent)",
         }
     }
 
     fn source(self) -> &'static str {
         match self {
-            Self::Dark => DARK,
+            Self::Dark | Self::DarkTransparent => DARK,
             Self::Med => MED,
             Self::Light => LIGHT,
         }
@@ -67,6 +77,22 @@ impl Surround {
     /// The parsed token set.
     pub fn tokens(self) -> Result<Tokens, ThemeError> {
         Tokens::parse(self.source())
+    }
+}
+
+/// The application background: `tint` at `alpha` (clamped to 0..=1) under the transparent
+/// surround, else the opaque `bg` token. The iced palette never carries this alpha.
+pub fn app_background(surround: Surround, tokens: &Tokens, tint: Rgb, alpha: f32) -> iced::Color {
+    if surround.is_transparent() {
+        let c = tint.to_color();
+        let a = if alpha.is_finite() {
+            alpha.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        iced::Color { a, ..c }
+    } else {
+        tokens.bg.to_color()
     }
 }
 
@@ -142,7 +168,7 @@ tokens! {
     on_accent_ui => "on-accent-ui",
 }
 
-fn parse_hex(s: &str) -> Option<Rgb> {
+pub(crate) fn parse_hex(s: &str) -> Option<Rgb> {
     let h = s.strip_prefix('#')?;
     let digit = |i: usize, n: usize| u8::from_str_radix(h.get(i..i + n)?, 16).ok();
     match h.len() {
@@ -554,7 +580,54 @@ mod tests {
     fn cycle_order_matches_surround_ts() {
         assert_eq!(Surround::Dark.next(), Surround::Med);
         assert_eq!(Surround::Med.next(), Surround::Light);
-        assert_eq!(Surround::Light.next(), Surround::Dark);
+        assert_eq!(Surround::Light.next(), Surround::DarkTransparent);
+        assert_eq!(Surround::DarkTransparent.next(), Surround::Dark);
+        assert_eq!(Surround::ALL[3], Surround::DarkTransparent);
+    }
+
+    #[test]
+    fn dark_transparent_serde_spelling_and_tokens() {
+        let s = serde_json::to_string(&Surround::DarkTransparent).expect("ser");
+        assert_eq!(s, "\"dark-transparent\"");
+        let back: Surround = serde_json::from_str(&s).expect("de");
+        assert_eq!(back, Surround::DarkTransparent);
+        let ui: Surround = serde_json::from_str("\"dark\"").expect("de");
+        assert_eq!(ui, Surround::Dark);
+        assert!(serde_json::from_str::<Surround>("\"darktransparent\"").is_err());
+        assert_eq!(Surround::DarkTransparent.tokens(), Surround::Dark.tokens());
+        assert_eq!(Surround::DarkTransparent.label(), "Dark (transparent)");
+        assert!(Surround::DarkTransparent.is_transparent() && !Surround::Dark.is_transparent());
+    }
+
+    #[test]
+    fn app_background_per_surround() {
+        let tint = Rgb(0x10, 0x20, 0x30);
+        for s in [Surround::Dark, Surround::Med, Surround::Light] {
+            let t = s.tokens().expect("tokens");
+            assert_eq!(
+                app_background(s, &t, tint, 0.5),
+                t.bg.to_color(),
+                "{s:?} opaque bg"
+            );
+        }
+        let t = Surround::Dark.tokens().expect("tokens");
+        let c = app_background(Surround::DarkTransparent, &t, tint, 0.8);
+        assert_eq!(
+            c,
+            iced::Color {
+                a: 0.8,
+                ..tint.to_color()
+            }
+        );
+        assert!(
+            (app_background(Surround::DarkTransparent, &t, tint, 7.0).a - 1.0).abs() < f32::EPSILON
+        );
+        assert!(
+            app_background(Surround::DarkTransparent, &t, tint, -1.0)
+                .a
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

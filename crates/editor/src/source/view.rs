@@ -22,6 +22,21 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("source-editor:{path}"))
 }
 
+/// The text editor's style: iced's default, except that under the transparent surround the
+/// background is transparent (the default repaints the palette background, which would stack
+/// its alpha over the translucent window).
+pub(crate) fn editor_style(
+    theme: &iced::Theme,
+    status: text_editor::Status,
+    transparent: bool,
+) -> text_editor::Style {
+    let mut style = text_editor::default(theme, status);
+    if transparent {
+        style.background = iced::Background::Color(iced::Color::TRANSPARENT);
+    }
+    style
+}
+
 /// Renders a document's source buffer with its conflict bar; `font_size` is the
 /// `editor.toml` base text size (live, plan editor-settings-tab WP-2); `keymap` is the effective
 /// keymap its key bindings route by (WP-4). `link` is the open `[[` note list overlay (plan
@@ -30,6 +45,7 @@ pub fn editor_id(path: &str) -> iced::widget::Id {
 pub fn view<'a>(
     doc: &'a SourceBuffer,
     tokens: Tokens,
+    transparent: bool,
     font_size: f32,
     keymap: &'a crate::palette::Keymap,
     find: Option<&crate::find::FindBar>,
@@ -48,6 +64,7 @@ pub fn view<'a>(
                 .size(font_size)
                 .height(Length::Fill)
                 .padding(EDITOR_PADDING)
+                .style(move |theme, status| editor_style(theme, status, transparent))
                 .on_action(|a| Message::Source(SourceMsg::Action(a)))
                 .key_binding(move |kp| key_binding(kp, keymap, link_open))
                 .highlight_with::<MarkdownHighlighter>(
@@ -121,4 +138,24 @@ pub fn view<'a>(
         .on_show(report)
         .on_resize(report)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::{Background, Color, Theme};
+
+    #[test]
+    fn editor_background_transparent_only_under_transparent_surround() {
+        let theme = Theme::Dark;
+        for status in [text_editor::Status::Active, text_editor::Status::Hovered] {
+            let opaque = editor_style(&theme, status, false);
+            assert_eq!(opaque, text_editor::default(&theme, status));
+            let clear = editor_style(&theme, status, true);
+            assert_eq!(clear.background, Background::Color(Color::TRANSPARENT));
+            assert_eq!(clear.selection, opaque.selection);
+            assert_eq!(clear.value, opaque.value);
+            assert_eq!(clear.placeholder, opaque.placeholder);
+        }
+    }
 }

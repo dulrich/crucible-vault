@@ -108,6 +108,10 @@ fn main() -> anyhow::Result<()> {
         .title("crucible-vault")
         .subscription(App::subscription)
         .theme(App::theme)
+        // Always transparent-capable: surround changes are live, `transparent` is fixed at window
+        // build. The alpha is only on `App::style`'s background (1.0 under the opaque surrounds).
+        .transparent(true)
+        .style(App::style)
         // `editor.toml` `ui_scale`, live (plan editor-settings-tab WP-2).
         .scale_factor(App::scale_factor)
         // Window close is a Quit: dirty buffers flush first (editor-usability-round WP-4).

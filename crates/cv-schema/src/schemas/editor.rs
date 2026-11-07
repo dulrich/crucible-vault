@@ -327,6 +327,33 @@ pub static EDITOR_SEARCH: Record = Record {
     summary: None,
 };
 
+/// `[transparency]`: tint and alpha of the `dark-transparent` surround's window background.
+pub static EDITOR_TRANSPARENCY: Record = Record {
+    name: "transparency",
+    fields: &[
+        field(
+            "tint",
+            "Tint",
+            "Background tint of the dark-transparent surround, #rrggbb",
+            Node::Str,
+        )
+        .dflt(D::Str("#000000")),
+        field(
+            "alpha",
+            "Alpha",
+            "Background opacity of the dark-transparent surround (0 clear, 1 opaque)",
+            Node::Float {
+                min: Some(0.0),
+                max: Some(1.0),
+            },
+        )
+        .dflt(D::Float(0.8))
+        .step(0.05),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `[palette]`.
 pub static EDITOR_PALETTE: Record = Record {
     name: "palette",
@@ -369,8 +396,8 @@ pub static EDITOR_FILE: Record = Record {
         field(
             "surround",
             "Surround",
-            "Colour surround",
-            Node::Enum(&["dark", "med", "light"]),
+            "Colour surround; dark-transparent renders opaque on cpu (tiny-skia) builds",
+            Node::Enum(&["dark", "med", "light", "dark-transparent"]),
         )
         .dflt(D::Str("med")),
         field(
@@ -451,6 +478,12 @@ pub static EDITOR_FILE: Record = Record {
             "Search panel",
             "Search panel tuning",
             Node::Record(&EDITOR_SEARCH),
+        ),
+        field(
+            "transparency",
+            "Transparency",
+            "Tint and alpha of the dark-transparent surround",
+            Node::Record(&EDITOR_TRANSPARENCY),
         ),
         field(
             "palette",

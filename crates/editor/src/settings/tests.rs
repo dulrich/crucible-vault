@@ -358,7 +358,7 @@ fn hidden_ids_leave_the_palette_list() {
 
 // ---- editor-side schema drift (WP-1 gap): schema ⇔ the editor's real parsers ----
 
-const EDITOR_SAMPLE: &str = r#"# editor prefs
+const EDITOR_SAMPLE: &str = r##"# editor prefs
 font_size = 18.0
 ui_scale = 1.5
 surround = "light"
@@ -378,6 +378,10 @@ nav_open = "replace"
 label = "Inbox"
 path = "core/Inbox.md"
 
+[transparency]
+tint = "#101820"
+alpha = 0.6
+
 [search]
 limit = 80
 debounce_ms = 120
@@ -389,7 +393,7 @@ hidden = ["quit", "my.action"]
 [keys]
 quick_switcher = ["Ctrl+P", "Ctrl+Alt+P"]
 quit = []
-"#;
+"##;
 
 /// Plan round-11 WP-7: `nav_links` absent → the defaults, `[]` → none, a malformed entry is
 /// skipped.
@@ -567,3 +571,44 @@ mod autosave;
 
 #[path = "tests_app_editor_toml.rs"]
 mod app_editor_toml;
+
+#[test]
+fn transparency_defaults_valid_and_independent_fallbacks() {
+    use crate::theme::Rgb;
+    let d = editor_prefs::Transparency::default();
+    assert_eq!((d.tint, d.alpha), (Rgb(0, 0, 0), 0.8));
+    let p = |t: &str| {
+        editor_prefs::parse(t, Surround::Med)
+            .expect("parse")
+            .transparency
+    };
+    assert_eq!(p(""), d);
+    let ok = p("[transparency]\ntint = \"#102030\"\nalpha = 0.5\n");
+    assert_eq!((ok.tint, ok.alpha), (Rgb(0x10, 0x20, 0x30), 0.5));
+    // A bad tint leaves a valid alpha alone (and the reverse); nothing is clamped.
+    let bad_tint = p("[transparency]\ntint = \"red\"\nalpha = 0.5\n");
+    assert_eq!((bad_tint.tint, bad_tint.alpha), (d.tint, 0.5));
+    let short = p("[transparency]\ntint = \"#fff\"\n");
+    assert_eq!(short.tint, d.tint);
+    for a in ["1.5", "-0.1"] {
+        let bad = p(&format!(
+            "[transparency]\ntint = \"#102030\"\nalpha = {a}\n"
+        ));
+        assert_eq!(
+            (bad.tint, bad.alpha),
+            (Rgb(0x10, 0x20, 0x30), d.alpha),
+            "{a}"
+        );
+    }
+    let nan = p("[transparency]\nalpha = nan\n");
+    assert_eq!(nan.alpha, d.alpha);
+}
+
+#[test]
+fn surround_dark_transparent_round_trips_editor_toml() {
+    let p = editor_prefs::parse("surround = \"dark-transparent\"\n", Surround::Med).expect("parse");
+    assert_eq!(p.surround, Surround::DarkTransparent);
+    assert_eq!(editor_prefs::surround_key(p.surround), "dark-transparent");
+    let q = editor_prefs::parse("surround = \"darktransparent\"\n", Surround::Med).expect("parse");
+    assert_eq!(q.surround, Surround::Med, "unknown spelling falls back");
+}
