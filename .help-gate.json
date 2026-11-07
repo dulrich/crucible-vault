@@ -20,46 +20,12 @@
       "subcommands": [
         "--fake"
       ]
-    },
-    {
-      "path": "docs/spikes/dupes/src/main.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/dupes/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/postid-dupes/src/main.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/postid-dupes/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/reading-select/src/main.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/reading-select/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/search-sidecar/bench/src/main.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/search-sidecar/bench/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/source-scroll/src/main.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/source-scroll/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/pdf-render/src/base.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/pdf-render/src/r_hayro.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/pdf-render/src/r_pdfium.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/pdf-render/src/fidelity.rs",
-      "build": "cargo build --offline --manifest-path docs/spikes/pdf-render/Cargo.toml"
-    },
-    {
-      "path": "docs/spikes/job-slots-2026-10-31/slow-behind-slow.sh"
     }
   ],
-  "exclude": []
+  "exclude": [
+    {
+      "path": "docs/spikes/",
+      "reason": "frozen spike evidence (docs/spikes/): cited by FINDINGS, never built or probed"
+    }
+  ]
 }
