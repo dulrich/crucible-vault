@@ -485,7 +485,7 @@ impl App {
             prefs: crate::settings::editor_prefs::Prefs::default(),
             period_folders: editor_model::period::PeriodFolders::default(),
             context_menu: None,
-            clip_writer: Arc::new(crate::clipboard_image::Xclip),
+            clip_writer: Arc::new(crate::clipboard_image::SystemClipboard::detect()),
             pdf: crate::pdf::store::PdfStore::default(),
         };
         // Plan round-17 WP-6: the restored section; a panel section makes the panels live.

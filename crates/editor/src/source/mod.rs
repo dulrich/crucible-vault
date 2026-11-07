@@ -140,7 +140,7 @@ pub fn update(
                 async move {
                     tokio::task::spawn_blocking(move || {
                         crate::clipboard_image::resolve(
-                            &crate::clipboard_image::Xclip,
+                            &crate::clipboard_image::SystemClipboard::detect(),
                             daemon.as_deref(),
                             &p,
                         )

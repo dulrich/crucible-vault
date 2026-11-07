@@ -1,34 +1,84 @@
 //! Plan editor-feedback-round-2 WP-9: image-aware Ctrl+V for the source editor.
 //!
-//! iced 0.14's clipboard API is text-only, so non-text targets are read through the `xclip`
-//! system binary (X11; plan "Dependency posture"). The decision is a pure function over a
-//! [`ClipboardReader`] so tests feed canned `TARGETS`/bytes and never spawn `xclip`.
+//! iced 0.14's clipboard API is text-only, so non-text targets go through a system binary:
+//! `wl-paste`/`wl-copy` (wl-clipboard) in a Wayland session, else `xclip` (X11; plan
+//! "Dependency posture"). The session rule — `WAYLAND_DISPLAY` set means Wayland — is the
+//! daemon's `clipboard_cmd` rule (`crates/cv/src/config.rs`, D-record premise correction).
+//! The decision is a pure function over a [`ClipboardReader`] so tests feed canned
+//! `TARGETS`/bytes and never spawn a binary.
 
 use std::process::{Command, Stdio};
 
 use crate::daemon::DaemonClient;
 
-/// Reads one target of the CLIPBOARD selection as raw bytes.
+/// Reads one target of the CLIPBOARD selection as raw bytes. The pseudo-target `TARGETS`
+/// yields the offered MIME types/atoms, one per line.
 pub trait ClipboardReader {
     /// `Err` carries a human-readable reason (binary missing, non-zero exit, …).
     fn read(&self, target: &str) -> Result<Vec<u8>, String>;
 }
 
-/// The production reader: `xclip -selection clipboard -t <target> -o`.
-pub struct Xclip;
+/// The production clipboard binary, chosen per session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemClipboard {
+    /// X11: `xclip -selection clipboard`.
+    Xclip,
+    /// Wayland: `wl-paste` / `wl-copy`.
+    WlClipboard,
+}
 
-impl ClipboardReader for Xclip {
+impl SystemClipboard {
+    /// The session's clipboard binary: Wayland when `WAYLAND_DISPLAY` is set and non-empty.
+    pub fn detect() -> Self {
+        Self::for_wayland_display(std::env::var_os("WAYLAND_DISPLAY").as_deref())
+    }
+
+    /// [`Self::detect`] over an explicit `WAYLAND_DISPLAY` value (testable).
+    pub fn for_wayland_display(v: Option<&std::ffi::OsStr>) -> Self {
+        match v {
+            Some(v) if !v.is_empty() => Self::WlClipboard,
+            _ => Self::Xclip,
+        }
+    }
+
+    fn bin(self, write: bool) -> &'static str {
+        match (self, write) {
+            (Self::Xclip, _) => "xclip",
+            (Self::WlClipboard, false) => "wl-paste",
+            (Self::WlClipboard, true) => "wl-copy",
+        }
+    }
+
+    /// Read argv: `TARGETS` lists the offered types, any other target reads its bytes.
+    fn read_args(self, target: &str) -> Vec<&str> {
+        match (self, target) {
+            (Self::Xclip, t) => vec!["-selection", "clipboard", "-t", t, "-o"],
+            (Self::WlClipboard, "TARGETS") => vec!["--list-types"],
+            (Self::WlClipboard, t) => vec!["--no-newline", "-t", t],
+        }
+    }
+
+    fn write_args(self, mime: &str) -> Vec<&str> {
+        match self {
+            Self::Xclip => vec!["-selection", "clipboard", "-t", mime, "-i"],
+            Self::WlClipboard => vec!["-t", mime],
+        }
+    }
+}
+
+impl ClipboardReader for SystemClipboard {
     fn read(&self, target: &str) -> Result<Vec<u8>, String> {
-        let out = Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", target, "-o"])
+        let bin = self.bin(false);
+        let out = Command::new(bin)
+            .args(self.read_args(target))
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
-            .map_err(|e| format!("xclip unavailable: {e}"))?;
+            .map_err(|e| format!("{bin} unavailable: {e}"))?;
         if out.status.success() {
             Ok(out.stdout)
         } else {
-            Err(format!("xclip -t {target} failed ({})", out.status))
+            Err(format!("{bin} -t {target} failed ({})", out.status))
         }
     }
 }
@@ -39,38 +89,39 @@ pub trait ClipboardWriter {
     fn write(&self, mime: &str, bytes: &[u8]) -> Result<(), String>;
 }
 
-/// The production writer: `xclip -selection clipboard -t <mime> -i`.
+/// The production writer: `xclip -selection clipboard -t <mime> -i` or `wl-copy -t <mime>`.
 ///
 /// Lifecycle (audit E4): stdin piped, all bytes written, stdin explicitly dropped (EOF), then
-/// the child is `wait()`ed (reaped). `xclip -i` forks a selection owner and the parent exits
-/// promptly, so the wait does not block on the selection's lifetime. Blocking: call off the
-/// UI thread.
-impl ClipboardWriter for Xclip {
+/// the child is `wait()`ed (reaped). Both `xclip -i` and `wl-copy` fork a selection owner and
+/// the parent exits promptly (wl-copy measured 2026-11-07), so the wait does not block on the
+/// selection's lifetime. Blocking: call off the UI thread.
+impl ClipboardWriter for SystemClipboard {
     fn write(&self, mime: &str, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write;
-        let mut child = Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", mime, "-i"])
+        let bin = self.bin(true);
+        let mut child = Command::new(bin)
+            .args(self.write_args(mime))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("xclip unavailable: {e}"))?;
+            .map_err(|e| format!("{bin} unavailable: {e}"))?;
         let written = match child.stdin.take() {
             Some(mut stdin) => {
                 let r = stdin.write_all(bytes);
                 drop(stdin);
-                r.map_err(|e| format!("xclip write failed: {e}"))
+                r.map_err(|e| format!("{bin} write failed: {e}"))
             }
-            None => Err("xclip stdin unavailable".to_owned()),
+            None => Err(format!("{bin} stdin unavailable")),
         };
         let status = child
             .wait()
-            .map_err(|e| format!("xclip wait failed: {e}"))?;
+            .map_err(|e| format!("{bin} wait failed: {e}"))?;
         written?;
         if status.success() {
             Ok(())
         } else {
-            Err(format!("xclip -t {mime} -i failed ({status})"))
+            Err(format!("{bin} -t {mime} failed ({status})"))
         }
     }
 }
@@ -131,7 +182,7 @@ pub enum PasteOutcome {
     Failed(String),
 }
 
-/// Parses `xclip -t TARGETS -o` output (one atom per line).
+/// Parses `xclip -t TARGETS -o` / `wl-paste --list-types` output (one type per line).
 pub fn parse_targets(raw: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(raw)
         .lines()
@@ -186,7 +237,7 @@ pub fn html_img_src(html: &str) -> Option<String> {
 }
 
 /// The paste decision: image bytes (PNG preferred, else the first `image/*`), else an
-/// HTML-only remote image as `![](src)`, else the ordinary text paste. Any `xclip` failure
+/// HTML-only remote image as `![](src)`, else the ordinary text paste. Any clipboard-binary failure
 /// degrades to text paste with a notice.
 pub fn decide(reader: &dyn ClipboardReader) -> Decision {
     let targets = match reader.read("TARGETS") {
@@ -361,5 +412,46 @@ mod tests {
         );
         assert_eq!(html_img_src("<img src=\"data:image/png;base64,AA\">"), None);
         assert_eq!(html_img_src("<p>no image</p>"), None);
+    }
+
+    #[test]
+    fn session_picks_clipboard_binary() {
+        use std::ffi::OsStr;
+        let w = SystemClipboard::for_wayland_display(Some(OsStr::new("wayland-1")));
+        assert_eq!(w, SystemClipboard::WlClipboard);
+        assert_eq!(
+            SystemClipboard::for_wayland_display(Some(OsStr::new(""))),
+            SystemClipboard::Xclip
+        );
+        assert_eq!(
+            SystemClipboard::for_wayland_display(None),
+            SystemClipboard::Xclip
+        );
+    }
+
+    #[test]
+    fn wl_clipboard_argv() {
+        let w = SystemClipboard::WlClipboard;
+        assert_eq!(
+            (w.bin(false), w.read_args("TARGETS")),
+            ("wl-paste", vec!["--list-types"])
+        );
+        assert_eq!(
+            w.read_args("image/png"),
+            vec!["--no-newline", "-t", "image/png"]
+        );
+        assert_eq!(
+            (w.bin(true), w.write_args("image/png")),
+            ("wl-copy", vec!["-t", "image/png"])
+        );
+        let x = SystemClipboard::Xclip;
+        assert_eq!(
+            x.read_args("TARGETS"),
+            vec!["-selection", "clipboard", "-t", "TARGETS", "-o"]
+        );
+        assert_eq!(
+            x.write_args("image/png"),
+            vec!["-selection", "clipboard", "-t", "image/png", "-i"]
+        );
     }
 }
