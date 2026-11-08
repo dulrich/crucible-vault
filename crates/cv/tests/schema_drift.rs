@@ -221,6 +221,11 @@ const STEPS: &[(&str, &str)] = &[
     ("transcript_refine", "agent = \"transcript-refine\""),
     ("yt_clip_tidy", ""),
     ("yt_clip_tidy", "scope = \"backfill\"\ndry_run = true"),
+    (
+        "fanfic_title",
+        "kind = \"{param.kind}\"\npath = \"{vars.moved_path}\"",
+    ),
+    ("fanfic_title", "scope = \"backfill\"\ndry_run = true"),
 ];
 
 const ACTION_FULL: &str = r#"

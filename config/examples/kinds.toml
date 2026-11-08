@@ -20,7 +20,7 @@ folder = "{period.day}"
 label = "Fanfic"
 tags = ["fanfic"]
 folder = "{period.day}"
-hosts = ["archiveofourown.org", "forums.spacebattles.com", "www.fanfiction.net"]
+hosts = ["archiveofourown.org", "forums.spacebattles.com", "www.fanfiction.net", "m.fanfiction.net", "www.royalroad.com", "www.author-site-a.example", "author-site-b.example"]
 
 [kinds.blog]
 label = "Blog"

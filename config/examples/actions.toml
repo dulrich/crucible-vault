@@ -208,6 +208,12 @@ required = true
 [[action.steps]]
 type = "move"
 kind = "{param.kind}"
+# A filed fanfic chapter is renamed `<story> - Chapter <n>` (links follow; no-op for other kinds, and
+# a collision or undetectable title leaves the name alone; plan round-23 WP-5).
+[[action.steps]]
+type = "fanfic_title"
+kind = "{param.kind}"
+path = "{vars.moved_path}"
 [[action.steps]]
 type = "upsert_tags"
 kind = "{param.kind}"
@@ -511,6 +517,24 @@ kind = "bool"
 default = "false"
 [[action.steps]]
 type = "yt_clip_tidy"
+scope = "backfill"
+
+# Fanfic titles (plan round-23 WP-5): renames existing `fanfic`-tagged notes not already named
+# `<story> - Chapter <n>` (title shapes, else a leading `Chapter N` body line); links follow. A taken
+# target name or an undetectable shape is left alone and counted. Defaults to a dry run (counts
+# only); run with `dry_run = false` to rename. A second run renames nothing.
+[[action]]
+id = "fanfic-title-backfill"
+label = "Fanfic: chapter titles"
+group = "Ingest"
+resources = { note = false, keys = ["fanfic-title::backfill"] }
+[[action.params]]
+name = "dry_run"
+label = "Dry run"
+kind = "bool"
+default = "true"
+[[action.steps]]
+type = "fanfic_title"
 scope = "backfill"
 
 [[action]]

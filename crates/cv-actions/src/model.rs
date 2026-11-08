@@ -212,6 +212,8 @@ step_kinds! {
     /// Deletes a YouTube clip's thumbnail embed and clipped description ahead of `## Transcript`
     /// (plan `round-19-yt-cleanup-intake` WP-2).
     YtClipTidy = "yt_clip_tidy", true, false;
+    /// Renames a fanfic note to `<story> - Chapter <n>` (plan `round-23-daemon-memory-mail-enrich-fanfic` WP-5).
+    FanficTitle = "fanfic_title", true, false;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

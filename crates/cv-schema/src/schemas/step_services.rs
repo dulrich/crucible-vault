@@ -437,6 +437,41 @@ pub static YT_CLIP_TIDY: Record = Record {
     summary: None,
 };
 
+/// `fanfic_title` — `crates/cv/src/steps/fanfic_title.rs` (`parse`; plan `round-23-daemon-memory-mail-enrich-fanfic` WP-5).
+pub static FANFIC_TITLE: Record = Record {
+    name: "fanfic_title",
+    fields: &[
+        field(
+            "scope",
+            "Scope",
+            "note: rename one note to `<story> - Chapter <n>`; backfill: rename every fanfic-tagged note not already in that shape",
+            Node::Enum(&["note", "backfill"]),
+        )
+        .dflt(D::Str("note")),
+        field(
+            "kind",
+            "Kind",
+            "Note scope: the filed kind (usually {param.kind}); any kind but fanfic makes the step a no-op",
+            Node::Str,
+        ),
+        field(
+            "path",
+            "Note path",
+            "Note scope: the note to rename (e.g. {vars.moved_path}); default the active note",
+            Node::Str,
+        ),
+        field(
+            "dry_run",
+            "Dry run",
+            "Backfill only: count what would be renamed, write nothing (a job param dry_run wins)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(true)),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `transcript_refine` — `crates/cv/src/steps/transcript_refine.rs` (`parse`; plan `youtube-transcript-auto-refine` WP-1).
 pub static TRANSCRIPT_REFINE: Record = Record {
     name: "transcript_refine",

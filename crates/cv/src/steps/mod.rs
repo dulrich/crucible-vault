@@ -30,6 +30,7 @@
 //! | `IntakeEnrich` | [`intake_enrich`] | intake-auto-enrich WP-3 |
 //! | `TranscriptRefine` | [`transcript_refine`] | youtube-transcript-auto-refine WP-1 |
 //! | `YtClipTidy` | [`yt_clip_tidy`] | round-19-yt-cleanup-intake WP-2 |
+//! | `FanficTitle` | [`fanfic_title`] | round-23-daemon-memory-mail-enrich-fanfic WP-5 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -57,6 +58,9 @@ pub mod dupes_resolve;
 mod dupes_resolve_tests;
 #[cfg(test)]
 mod dupes_tests;
+pub mod fanfic_title;
+#[cfg(test)]
+mod fanfic_title_tests;
 pub mod file;
 #[cfg(test)]
 mod file_tests;
@@ -708,6 +712,7 @@ step_modules! {
     IntakeEnrich => intake_enrich::IntakeEnrich,
     TranscriptRefine => transcript_refine::TranscriptRefine,
     YtClipTidy => yt_clip_tidy::YtClipTidy,
+    FanficTitle => fanfic_title::FanficTitle,
     RunAction => RunActionStep,
 }
 
