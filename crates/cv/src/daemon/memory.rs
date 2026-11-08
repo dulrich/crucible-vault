@@ -67,9 +67,13 @@ pub(super) fn register_gauges(shared: &Arc<Shared>) {
         Box::new(|| Ok(cv_malloc::info().in_use)),
     );
     add(
-        "malloc_retained_bytes",
+        // Renamed from `malloc_retained_bytes` (`system - in_use`, which never fell after a trim):
+        // now anon RSS minus live bytes, so it drops when `malloc_trim` returns pages.
+        "malloc_free_resident_bytes",
         GaugeKind::Bytes,
-        Box::new(|| Ok(cv_malloc::info().retained())),
+        Box::new(|| {
+            cv_malloc::current_free_resident().ok_or_else(|| "status unreadable".to_owned())
+        }),
     );
     let w = Arc::downgrade(shared);
     add(
@@ -178,10 +182,10 @@ pub(super) async fn memory_logger(shared: Arc<Shared>, mut stop: watch::Receiver
 }
 
 fn log_report(process: &str, r: &MemoryReport, delta: Option<i128>, age_secs: Option<u64>) {
-    let retained = r
-        .malloc_system
+    let free_resident = r
+        .anon
         .zip(r.malloc_in_use)
-        .map(|(s, u)| s.saturating_sub(u));
+        .map(|(a, u)| cv_malloc::free_resident(a, u));
     let gauges: Vec<String> = r
         .gauges
         .iter()
@@ -198,7 +202,7 @@ fn log_report(process: &str, r: &MemoryReport, delta: Option<i128>, age_secs: Op
         anon = ?r.anon,
         swap = ?r.swap,
         malloc_in_use = ?r.malloc_in_use,
-        malloc_retained = ?retained,
+        malloc_free_resident = ?free_resident,
         hwm = ?r.hwm,
         delta_rss_swap_since_first = ?delta,
         age_secs = ?age_secs,

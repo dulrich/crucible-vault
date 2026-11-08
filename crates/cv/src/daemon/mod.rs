@@ -58,6 +58,69 @@ use errors::{internal, reply, unavailable};
 
 /// Broadcast capacity for notifications (a lagging subscriber skips, never blocks).
 const EVENT_CAPACITY: usize = 1024;
+
+/// Job slots that may claim any job (`RunnerDeps::concurrency`).
+pub(crate) const GENERAL_SLOTS: usize = 3;
+/// Extra slots that claim only `fast` actions (`RunnerDeps::fast_slots`).
+pub(crate) const FAST_SLOTS: usize = 1;
+
+/// Parses a positive-integer thread-count env value; `None` for an invalid or zero value (the
+/// caller warns and falls back).
+fn parse_threads(v: &str) -> Option<usize> {
+    v.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// The tokio thread rule (plan round-23 WP-3, `docs/spikes/daemon-threads/FINDINGS.md`):
+/// workers = `TOKIO_WORKER_THREADS` or `min(slots, parallelism)` (at least 1); blocking-pool cap =
+/// `CV_MAX_BLOCKING_THREADS` or `4 × slots` (at least the worker count). Invalid or zero env
+/// values fall back to the default and come back as warnings.
+pub(crate) fn runtime_threads(
+    slots: usize,
+    parallelism: usize,
+    env_workers: Option<&str>,
+    env_blocking: Option<&str>,
+) -> ((usize, usize), Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut env = |name: &str, v: Option<&str>| {
+        let v = v?;
+        let parsed = parse_threads(v);
+        if parsed.is_none() {
+            warnings.push(format!("{name}={v:?} is not a positive integer; ignored"));
+        }
+        parsed
+    };
+    let w =
+        env("TOKIO_WORKER_THREADS", env_workers).unwrap_or_else(|| slots.min(parallelism).max(1));
+    let b = env("CV_MAX_BLOCKING_THREADS", env_blocking)
+        .unwrap_or(4 * slots)
+        .max(w);
+    ((w, b), warnings)
+}
+
+/// Builds the daemon's tokio runtime with the [`runtime_threads`] caps, logging the choice once.
+pub(crate) fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let ((w, b), warnings) = runtime_threads(
+        GENERAL_SLOTS + FAST_SLOTS,
+        parallelism,
+        std::env::var("TOKIO_WORKER_THREADS").ok().as_deref(),
+        std::env::var("CV_MAX_BLOCKING_THREADS").ok().as_deref(),
+    );
+    for m in &warnings {
+        tracing::warn!("{m}");
+    }
+    tracing::info!(
+        worker_threads = w,
+        max_blocking_threads = b,
+        "tokio runtime"
+    );
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(w)
+        .max_blocking_threads(b)
+        .build()
+        .context("building the tokio runtime")
+}
 /// Upper bound on the ` N` collision suffix search.
 const MAX_SUFFIX: u32 = 10_000;
 /// `write_attachment` decoded-size cap (25 MiB).
@@ -201,8 +264,8 @@ impl Daemon {
             events: shared.events.clone(),
             executor,
             clock: Arc::new(SystemClock),
-            concurrency: 3,
-            fast_slots: 1,
+            concurrency: GENERAL_SLOTS,
+            fast_slots: FAST_SLOTS,
             vault_root: shared.vault_root.clone(),
             index_db: shared.config.index_db.clone(),
             config_dir: shared.config.config_dir.clone(),
@@ -452,5 +515,43 @@ impl Shared {
                 reply::<m::MemoryReport>(Ok(()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod thread_rule_tests {
+    use super::*;
+
+    const SLOTS: usize = GENERAL_SLOTS + FAST_SLOTS;
+
+    #[test]
+    fn default_is_four_workers_sixteen_blocking() {
+        assert_eq!(runtime_threads(SLOTS, 8, None, None), ((4, 16), vec![]));
+    }
+
+    #[test]
+    fn low_parallelism_caps_workers() {
+        let ((w, b), _) = runtime_threads(SLOTS, 2, None, None);
+        assert_eq!((w, b), (2, 16));
+        assert_eq!(runtime_threads(SLOTS, 0, None, None).0.0, 1);
+    }
+
+    #[test]
+    fn valid_env_overrides() {
+        let ((w, b), warns) = runtime_threads(SLOTS, 8, Some("6"), Some("40"));
+        assert_eq!((w, b), (6, 40));
+        assert!(warns.is_empty());
+        // The blocking cap never drops below the worker count.
+        assert_eq!(runtime_threads(SLOTS, 8, Some("20"), Some("5")).0, (20, 20));
+    }
+
+    #[test]
+    fn invalid_and_zero_env_fall_back_with_warning() {
+        let ((w, b), warns) = runtime_threads(SLOTS, 8, Some("abc"), Some("-3"));
+        assert_eq!((w, b), (4, 16));
+        assert_eq!(warns.len(), 2);
+        let ((w, b), warns) = runtime_threads(SLOTS, 8, Some("0"), Some("0"));
+        assert_eq!((w, b), (4, 16));
+        assert_eq!(warns.len(), 2);
     }
 }

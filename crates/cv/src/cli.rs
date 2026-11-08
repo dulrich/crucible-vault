@@ -97,12 +97,11 @@ fn report(r: Result<()>) -> i32 {
 }
 
 fn cmd_daemon() -> Result<()> {
+    // Before any thread exists (daemon threads spawn in `Daemon::start`).
+    cv_malloc::tune_daemon();
     let config = Config::from_env()?;
     let daemon = Daemon::start(config, DaemonOptions::default())?;
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("building the tokio runtime")?;
+    let rt = crate::daemon::build_runtime()?;
     rt.block_on(async move {
         let running = daemon.spawn().await?;
         wait_for_signal().await?;
@@ -249,17 +248,17 @@ fn render_memory(out: &mut String, m: &cv_protocol::MemoryStatus) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
         };
-        let retained = r
-            .malloc_system
+        let free_resident = r
+            .anon
             .zip(r.malloc_in_use)
-            .map(|(s, u)| s.saturating_sub(u));
+            .map(|(a, u)| cv_malloc::free_resident(a, u));
         let age = age.map_or_else(String::new, |a| format!(" ({a}s ago)"));
         out.push_str(&format!(
-            "{who}: rss+swap {}, anon {}, malloc live {} / retained {}, hwm {}{age}\n",
+            "{who}: rss+swap {}, anon {}, malloc live {} / free-resident {}, hwm {}{age}\n",
             mib(rss_swap),
             mib(r.anon),
             mib(r.malloc_in_use),
-            mib(retained),
+            mib(free_resident),
             mib(r.hwm),
         ));
         let mut gauges: Vec<&cv_protocol::GaugeValue> = r.gauges.iter().collect();
@@ -326,6 +325,25 @@ pub fn status_command(config: &Config) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_line_shows_free_resident_from_anon_and_in_use() {
+        let mib = 1_048_576;
+        let m = cv_protocol::MemoryStatus {
+            daemon: cv_protocol::MemoryReport {
+                anon: Some(100 * mib),
+                malloc_in_use: Some(30 * mib),
+                ..Default::default()
+            },
+            editor: None,
+        };
+        let mut out = String::new();
+        render_memory(&mut out, &m);
+        assert!(
+            out.contains("anon 100.0 MiB, malloc live 30.0 MiB / free-resident 70.0 MiB"),
+            "{out}"
+        );
+    }
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| (*s).to_owned()).collect()

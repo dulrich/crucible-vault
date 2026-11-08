@@ -21,6 +21,18 @@ impl MallocInfo {
     }
 }
 
+/// `M_TRIM_THRESHOLD` shared by [`cap_arenas`] and [`tune_daemon`] (128 KiB).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const TRIM_THRESHOLD_BYTES: i32 = 131_072;
+
+/// Free-but-resident heap: process anonymous RSS minus live allocator bytes (saturating). Unlike
+/// [`MallocInfo::retained`] (`system - in_use`, which never shrinks because `malloc_trim`
+/// madvises pages away without lowering `arena`), this falls after a trim.
+#[must_use]
+pub fn free_resident(anon: u64, in_use: u64) -> u64 {
+    anon.saturating_sub(in_use)
+}
+
 /// Caps glibc malloc arenas (plan editor-cutover-blockers WP-2): off-thread image decodes each
 /// grow their own arena and glibc keeps the freed pages, measured at 100–130 MiB of RSS.
 /// Equivalent to `MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072`. Linux/glibc only. Call
@@ -32,7 +44,21 @@ pub fn cap_arenas() {
     // valid glibc options with in-range values. A zero return (rejected) is harmless.
     unsafe {
         libc::mallopt(libc::M_ARENA_MAX, 2);
-        libc::mallopt(libc::M_TRIM_THRESHOLD, 131_072);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD_BYTES);
+    }
+}
+
+/// Daemon allocator tuning (plan round-23 WP-3, pinned by `docs/spikes/daemon-threads/FINDINGS.md`
+/// "Verdict"): only `M_TRIM_THRESHOLD=131072`, the arena count untouched (an arena cap of 2
+/// cost +11-33% run p95 in the spike). Linux/glibc only. Call first thing, before any thread
+/// exists.
+pub fn tune_daemon() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `mallopt` only sets an allocator tunable and is called before any other thread
+    // exists, so no allocation races the change; `M_TRIM_THRESHOLD` is a valid glibc option with
+    // an in-range value. A zero return (rejected) is harmless.
+    unsafe {
+        libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD_BYTES);
     }
 }
 
@@ -87,11 +113,24 @@ pub fn info() -> MallocInfo {
 /// workloads never cross it, so the threshold is the rate limiter.
 pub const TRIM_RETAINED_THRESHOLD: u64 = 32 * 1024 * 1024;
 
-/// Trims when retained bytes exceed [`TRIM_RETAINED_THRESHOLD`]; returns `(retained, trimmed)`
-/// when it did, `None` otherwise (the caller owns any logging).
-pub fn trim_if_retained() -> Option<(u64, bool)> {
-    let retained = info().retained();
-    (retained > TRIM_RETAINED_THRESHOLD).then(|| (retained, trim()))
+/// This process's anonymous RSS from `/proc/self/status` (`RssAnon`); `None` when unreadable.
+#[must_use]
+pub fn anon_rss() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/status").ok()?;
+    memstat::parse_status(&text).rss_anon
+}
+
+/// Current [`free_resident`] figure (`None` when `/proc/self/status` is unreadable).
+#[must_use]
+pub fn current_free_resident() -> Option<u64> {
+    anon_rss().map(|a| free_resident(a, info().in_use))
+}
+
+/// Trims when [`current_free_resident`] exceeds [`TRIM_RETAINED_THRESHOLD`]; returns
+/// `(free_resident, trimmed)` when it did, `None` otherwise (the caller owns any logging).
+pub fn trim_if_free_resident() -> Option<(u64, bool)> {
+    let free = current_free_resident()?;
+    (free > TRIM_RETAINED_THRESHOLD).then(|| (free, trim()))
 }
 
 /// The one mapping of a `memstat` snapshot (Serialize-only) plus `mallinfo2` onto the wire type (shared by the daemon and the editor; `cv-protocol` must not depend on
@@ -148,6 +187,12 @@ mod tests {
         drop(buf);
         let _ = trim();
         assert!(info().system > 0);
+    }
+
+    #[test]
+    fn free_resident_is_anon_minus_in_use_saturating() {
+        assert_eq!(free_resident(100, 30), 70);
+        assert_eq!(free_resident(30, 100), 0);
     }
 
     #[test]
