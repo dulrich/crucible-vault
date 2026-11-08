@@ -27,16 +27,24 @@ fn moved(path: &str) -> serde_json::Map<String, Value> {
 
 #[test]
 fn plan_is_pure_per_shape() {
-    assert_eq!(plan("F/A - Chapter 2.md", "x"), Plan::Already);
     assert_eq!(
-        plan("F/A - Chapter 2 - W - Fandom.md", "x"),
+        plan("F/A - Chapter 2.md", "x", &[], &|_| true),
+        Plan::Already
+    );
+    assert_eq!(
+        plan("F/A - Chapter 2 - W - Fandom.md", "x", &[], &|_| true),
         Plan::Rename("F/A - Chapter 2.md".into())
     );
     assert_eq!(
-        plan("F/A | Site.md", "---\nk: v\n---\n\n# Chapter 4\n"),
+        plan(
+            "F/A | Site.md",
+            "---\nk: v\n---\n\n# Chapter 4\n",
+            &[],
+            &|_| true
+        ),
         Plan::Rename("F/A - Chapter 4.md".into())
     );
-    assert_eq!(plan("F/A.md", "prose"), Plan::Undetected);
+    assert_eq!(plan("F/A.md", "prose", &[], &|_| true), Plan::Undetected);
 }
 
 #[test]
@@ -262,4 +270,131 @@ fn real_run_writes_no_review_note() {
     assert!(e.read(&review_path()).is_none());
     assert!(o.open_path.is_none());
     assert!(o.vars.get("review_path").is_none());
+}
+
+// ---- WP-8: target-based plan, serial publication, chain-safe backfill ----------------------
+
+fn serial_rows() -> Vec<cv_actions::pipelines::SerialSource> {
+    #[derive(serde::Deserialize)]
+    struct Rows {
+        serial: Vec<cv_actions::pipelines::SerialSource>,
+    }
+    let src = "[[serial]]\nname = \"Zeta Long Name\"\nshort = \"Zeta:  Tale\"\nprefix = [\"https://fic.example/s/1/\"]\n";
+    toml::from_str::<Rows>(src).unwrap().serial
+}
+
+#[test]
+fn publication_from_serial_row_names_the_story() {
+    let rows = serial_rows();
+    let text = "---\nsource: https://fic.example/s/1/3\npublication: Other\n---\nChapter 3\n";
+    assert_eq!(
+        plan("F/Site Title | Fic Site.md", text, &rows, &|_| true),
+        Plan::Rename("F/Zeta Tale - Chapter 3.md".into())
+    );
+    assert_eq!(
+        plan("F/Zeta Tale - Chapter 3.md", text, &rows, &|_| true),
+        Plan::Already
+    );
+    // No serial match: the `publication` frontmatter names the story.
+    let text = "---\nsource: https://elsewhere.example/\npublication: Eta Saga\n---\nChapter 2\n";
+    assert_eq!(
+        plan("F/Eta - Chapter 2.md", text, &rows, &|_| true),
+        Plan::Rename("F/Eta Saga - Chapter 2.md".into())
+    );
+}
+
+#[test]
+fn target_shaped_note_with_wrong_story_is_renamed() {
+    let fm = "---\ntags:\n  - fanfic\npublication: Theta Arc\n---\n";
+    let p = "F/Wrong Name - Chapter 4.md";
+    let e = example_env(&[(p, &format!("{fm}x\n"))]);
+    let o = e
+        .run(BACKFILL, json!({"dry_run": false}), active(p))
+        .unwrap();
+    assert_eq!(count(&o, "renamed"), 1);
+    assert!(e.read("F/Theta Arc - Chapter 4.md").is_some());
+}
+
+/// Three notes numbered one too high by the site; the body carries the logical number.
+fn chain() -> StepEnv {
+    example_env(&[
+        ("F/S - Chapter 1.md", &note("Chapter 0\n")),
+        ("F/S - Chapter 2.md", &note("Chapter 1\n")),
+        ("F/S - Chapter 3.md", &note("Chapter 2\n")),
+    ])
+}
+
+#[test]
+fn down_shift_chain_renames_holders_first() {
+    let e = chain();
+    let o = e
+        .run(BACKFILL, json!({}), active("F/S - Chapter 1.md"))
+        .unwrap();
+    assert_eq!(count(&o, "would_rename"), 3);
+    assert_eq!(count(&o, "collision"), 0);
+    let o = e
+        .run(
+            BACKFILL,
+            json!({"dry_run": false}),
+            active("F/S - Chapter 1.md"),
+        )
+        .unwrap();
+    assert_eq!(count(&o, "renamed"), 3);
+    assert_eq!(count(&o, "collision"), 0);
+    for (n, body) in [(0, "Chapter 0\n"), (1, "Chapter 1\n"), (2, "Chapter 2\n")] {
+        assert_eq!(
+            e.read(&format!("F/S - Chapter {n}.md")).unwrap(),
+            note(body)
+        );
+    }
+    assert!(e.read("F/S - Chapter 3.md").is_none());
+}
+
+#[test]
+fn duplicate_cycle_and_static_holder_are_collisions() {
+    let e = example_env(&[
+        // Two notes claim `Dup - Chapter 1`.
+        ("F/Dup - Chapter 5 - W.md", &note("Chapter 1\n")),
+        ("F/Dup - Chapter 6 - W.md", &note("Chapter 1\n")),
+        // A swap: each target held by the other mover.
+        ("F/Cy - Chapter 1.md", &note("Chapter 2\n")),
+        ("F/Cy - Chapter 2.md", &note("Chapter 1\n")),
+        // The holder stays (already its target).
+        ("F/Hold - Chapter 9 - W.md", &note("Chapter 8\n")),
+        ("F/Hold - Chapter 8.md", &note("Chapter 8\n")),
+    ]);
+    let o = e
+        .run(BACKFILL, json!({}), active("F/Cy - Chapter 1.md"))
+        .unwrap();
+    assert_eq!(count(&o, "collision"), 5);
+    assert_eq!(count(&o, "would_rename"), 0);
+    let t = e.read(&review_path()).unwrap();
+    assert!(t.contains("Dup - Chapter 1 (duplicate target)"), "{t}");
+    assert!(t.contains("Cy - Chapter 1 (cycle)"), "{t}");
+    assert!(t.contains("Hold - Chapter 8 (exists)"), "{t}");
+    let o = e
+        .run(
+            BACKFILL,
+            json!({"dry_run": false}),
+            active("F/Cy - Chapter 1.md"),
+        )
+        .unwrap();
+    assert_eq!(count(&o, "renamed"), 0);
+    assert!(e.read("F/Dup - Chapter 5 - W.md").is_some());
+    assert!(e.read("F/Hold - Chapter 9 - W.md").is_some());
+}
+
+#[test]
+fn order_renames_withholds_a_chain_behind_a_withheld_holder() {
+    use super::fanfic_title::{Withheld, order_renames};
+    let r = |s: &str, d: &str| (s.to_owned(), d.to_owned());
+    // c → b is held by b, whose own target a is held by a non-mover.
+    let renames = [r("b", "a"), r("c", "b")];
+    let (order, held) = order_renames(&renames, &|p| p == "a" || p == "b");
+    assert!(order.is_empty());
+    assert_eq!(held.len(), 2);
+    assert!(held.iter().all(|(_, _, w)| *w == Withheld::Exists));
+    let (order, held) = order_renames(&renames, &|p| p == "b");
+    assert_eq!(order, vec![r("b", "a"), r("c", "b")]);
+    assert!(held.is_empty());
 }

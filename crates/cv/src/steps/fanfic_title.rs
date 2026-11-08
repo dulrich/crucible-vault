@@ -16,7 +16,12 @@
 //! active-path follow) see the new path.
 //!
 //! **Backfill scope** walks the notes the index tags `fanfic` (outside system folders, in path
-//! order) and applies the same rule. Outcome vars: `scanned`, `already`, `renamed` (real run),
+//! order) and applies the same rule, chain-safe (WP-8): every note is planned first, then
+//! [`order_renames`] withholds duplicate targets, cycles and targets held by a note that does not
+//! move (all counted as `collision`) and runs the rest holder-first, so a down-shifted run of
+//! chapters renames cleanly. The target's story is the matched `[[serial]]` row's publication,
+//! else the note's `publication` frontmatter, else the title's; a note is `already` only when its
+//! name equals the target. Outcome vars: `scanned`, `already`, `renamed` (real run),
 //! `would_rename` (dry run), `collision`, `undetected`, `conflict`, `dry_run`. A second run renames
 //! nothing (renamed notes are in the target shape).
 //!
@@ -25,16 +30,18 @@
 //! the collisions and the undetected notes, and sets outcome vars `review_path` and the outcome's
 //! `open_path`. A real run writes no note.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
+use cv_actions::pipelines::SerialSource;
 use cv_actions::{ConfigSet, StepKind};
-use cv_ingest::fanfic_title::{detect, is_target_shape, target_name};
+use cv_ingest::fanfic_title::{detect_with, target_name};
 use cv_note::FrontmatterDoc;
 use cv_text::vpath;
 use cv_vault::VaultError;
 use serde::Serialize;
 
-use super::file::target_path;
+use super::auto_file::{clip_of, serial_hit};
+use super::file::{kind_def, target_path};
 use super::materialize::{join, now};
 use super::params::{check_keys, check_placeholders, expand, get_bool, get_str};
 use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag};
@@ -112,20 +119,165 @@ pub(crate) enum Plan {
     Rename(String),
 }
 
-/// The pure rule: `path` and the note's `text` → what to do.
-pub(crate) fn plan(path: &str, text: &str) -> Plan {
+/// The story publication of a note (WP-8): the matched `[[serial]]` row's `publication()`
+/// (from the note's `source`/`author`), else its `publication` frontmatter text, else none.
+fn story_publication(
+    doc: &FrontmatterDoc,
+    serial: &[SerialSource],
+    is_kind: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let nonempty = |s: &str| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+    if let Some(row) = serial_hit(serial, &clip_of(doc), is_kind) {
+        return nonempty(row.publication());
+    }
+    doc.get("publication")
+        .ok()
+        .flatten()
+        .and_then(|v| nonempty(&cv_note::js_text(&v)))
+}
+
+/// The pure rule: `path`, the note's `text`, the `[[serial]]` rows and the defined-kind test →
+/// what to do. `Already` only when the basename equals the computed target.
+pub(crate) fn plan(
+    path: &str,
+    text: &str,
+    serial: &[SerialSource],
+    is_kind: &dyn Fn(&str) -> bool,
+) -> Plan {
     let title = vpath::stem(path);
-    if is_target_shape(title) {
-        return Plan::Already;
-    }
     let doc = FrontmatterDoc::new(text);
-    match detect(title, doc.body()) {
+    let publication = story_publication(&doc, serial, is_kind);
+    match detect_with(title, doc.body(), publication.as_deref()) {
         None => Plan::Undetected,
-        Some(t) => Plan::Rename(join(
-            vpath::parent(path),
-            &format!("{}.md", target_name(&t)),
-        )),
+        Some(t) => {
+            let name = target_name(&t);
+            if name == title {
+                Plan::Already
+            } else {
+                Plan::Rename(join(vpath::parent(path), &format!("{name}.md")))
+            }
+        }
     }
+}
+
+/// [`plan`] with the step's config.
+fn plan_in(ctx: &StepCtx<'_>, path: &str, text: &str) -> Plan {
+    let config = ctx.config;
+    let is_kind = |k: &str| kind_def(config, k).is_ok();
+    plan(path, text, &config.sources().serial, &is_kind)
+}
+
+/// Why a planned backfill rename is withheld.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Withheld {
+    /// Two or more notes compute the same target.
+    Duplicate,
+    /// The target exists and its holder is not moving.
+    Exists,
+    /// The renames form a cycle (each target held by the next mover).
+    Cycle,
+}
+
+impl Withheld {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Duplicate => "duplicate target",
+            Self::Exists => "exists",
+            Self::Cycle => "cycle",
+        }
+    }
+}
+
+/// A withheld rename: `(src, dst, why)`.
+pub(crate) type WithheldRename = (String, String, Withheld);
+
+/// Chain-safe ordering of planned renames `(src, dst)` (pure; `exists` = a path is taken now):
+/// returns the renames to run, holders first (a target held by a note that itself moves is
+/// freed before it is claimed), and the withheld ones with their reason.
+///
+/// Every src moves to one dst and (after duplicate removal) every dst has one claimer, so
+/// "dst is held by mover m" is a functional graph: cycles are withheld, then any rename whose
+/// target is taken by a non-mover (fixpoint: a withheld mover holds its path) is withheld, and
+/// the rest are emitted depth-first, the holder before its claimer.
+pub(crate) fn order_renames(
+    renames: &[(String, String)],
+    exists: &dyn Fn(&str) -> bool,
+) -> (Vec<(String, String)>, Vec<WithheldRename>) {
+    use std::collections::{BTreeMap, HashMap};
+    let mut claims: HashMap<&str, usize> = HashMap::new();
+    for (_, d) in renames {
+        *claims.entry(d.as_str()).or_default() += 1;
+    }
+    let mut withheld: BTreeMap<usize, Withheld> = BTreeMap::new();
+    for (i, (_, d)) in renames.iter().enumerate() {
+        if claims[d.as_str()] > 1 {
+            withheld.insert(i, Withheld::Duplicate);
+        }
+    }
+    let by_src: HashMap<&str, usize> = renames
+        .iter()
+        .enumerate()
+        .map(|(i, (s, _))| (s.as_str(), i))
+        .collect();
+    // The mover holding rename i's target, if any (and not withheld).
+    let next = |i: usize, w: &BTreeMap<usize, Withheld>| {
+        by_src
+            .get(renames[i].1.as_str())
+            .copied()
+            .filter(|j| !w.contains_key(j))
+    };
+    // Cycles among the live renames.
+    for start in 0..renames.len() {
+        if withheld.contains_key(&start) {
+            continue;
+        }
+        let mut seen = vec![start];
+        let mut cur = start;
+        while let Some(j) = next(cur, &withheld) {
+            if let Some(pos) = seen.iter().position(|&s| s == j) {
+                if pos == 0 {
+                    for &m in &seen {
+                        withheld.insert(m, Withheld::Cycle);
+                    }
+                }
+                break;
+            }
+            seen.push(j);
+            cur = j;
+        }
+    }
+    // Targets taken by a note that does not move.
+    loop {
+        let mut changed = false;
+        for (i, (_, dst)) in renames.iter().enumerate() {
+            if !withheld.contains_key(&i) && exists(dst) && next(i, &withheld).is_none() {
+                withheld.insert(i, Withheld::Exists);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut done = vec![false; renames.len()];
+    let mut order = Vec::new();
+    for start in 0..renames.len() {
+        let mut stack = Vec::new();
+        let mut cur = Some(start);
+        while let Some(i) = cur.filter(|i| !done[*i] && !withheld.contains_key(i)) {
+            stack.push(i);
+            done[i] = true;
+            cur = next(i, &withheld);
+        }
+        while let Some(i) = stack.pop() {
+            order.push(renames[i].clone());
+        }
+    }
+    let withheld = withheld
+        .into_iter()
+        .map(|(i, w)| (renames[i].0.clone(), renames[i].1.clone(), w))
+        .collect();
+    (order, withheld)
 }
 
 /// How one rename attempt ended.
@@ -181,7 +333,7 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
     let (bytes, _) = ctx.read_required(&src)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let mut v = NoteVars::default();
-    match plan(&src, &text) {
+    match plan_in(ctx, &src, &text) {
         Plan::Already => v.fanfic_already = 1,
         Plan::Undetected => v.fanfic_undetected = 1,
         Plan::Rename(dst) => match rename(ctx, &src, &dst)? {
@@ -214,7 +366,7 @@ const REVIEW_PREFIX: &str = "fanfic-titles-";
 struct Findings {
     /// `(old path, new path)`.
     rename: Vec<(String, String)>,
-    collision: Vec<(String, String)>,
+    collision: Vec<(String, String, Withheld)>,
     undetected: Vec<String>,
 }
 
@@ -258,7 +410,7 @@ fn render_review(date: &str, v: &BackfillVars, f: &Findings) -> String {
         "Collision",
         f.collision
             .iter()
-            .map(|(o, n)| format!("{} \u{2192} {} (exists)", link(o), base(n)))
+            .map(|(o, n, w)| format!("{} \u{2192} {} ({})", link(o), base(n), w.label()))
             .collect(),
     );
     section(
@@ -298,6 +450,7 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
     };
     let mut out = StepOutcome::default();
     let mut found = Findings::default();
+    let mut planned = Vec::new();
     for path in &paths {
         let Some((bytes, _)) = ctx.read(path)? else {
             continue;
@@ -306,22 +459,30 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
             continue;
         };
         v.scanned += 1;
-        match plan(path, &text) {
+        match plan_in(ctx, path, &text) {
             Plan::Already => v.already += 1,
             Plan::Undetected => {
                 v.undetected += 1;
                 found.undetected.push(path.clone());
             }
-            Plan::Rename(dst) if dry_run => {
-                if ctx.read(&dst)?.is_some() {
-                    v.collision += 1;
-                    found.collision.push((path.clone(), dst));
-                } else {
-                    v.would_rename += 1;
-                    found.rename.push((path.clone(), dst));
-                }
-            }
-            Plan::Rename(dst) => match rename(ctx, path, &dst) {
+            Plan::Rename(dst) => planned.push((path.clone(), dst)),
+        }
+    }
+    let mut taken = HashSet::new();
+    for (_, dst) in &planned {
+        if ctx.read(dst)?.is_some() {
+            taken.insert(dst.clone());
+        }
+    }
+    let (order, withheld) = order_renames(&planned, &|p| taken.contains(p));
+    v.collision = u32::try_from(withheld.len()).unwrap_or(u32::MAX);
+    found.collision = withheld;
+    if dry_run {
+        v.would_rename = u32::try_from(order.len()).unwrap_or(u32::MAX);
+        found.rename = order;
+    } else {
+        for (src, dst) in order {
+            match rename(ctx, &src, &dst) {
                 Ok(Attempt::Collision) => v.collision += 1,
                 Ok(Attempt::Renamed { rewritten }) => {
                     v.renamed += 1;
@@ -332,7 +493,7 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
                 }
                 Err(e) if e.is_conflict() => v.conflict += 1,
                 Err(e) => return Err(e),
-            },
+            }
         }
     }
     if dry_run {

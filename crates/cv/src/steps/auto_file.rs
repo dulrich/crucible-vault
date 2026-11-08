@@ -102,6 +102,23 @@ pub(in crate::steps) struct Clip {
     pub(in crate::steps) host: Option<String>,
 }
 
+/// The clip facts of a note's frontmatter (`source`, `author`).
+pub(in crate::steps) fn clip_of(doc: &FrontmatterDoc) -> Clip {
+    let source = doc
+        .get("source")
+        .ok()
+        .flatten()
+        .map(|v| cv_note::js_text(&v))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    Clip {
+        host: canonical_bare_host(&source),
+        authors: doc.get_texts("author"),
+        source,
+    }
+}
+
 /// A configured host (`www.fanfiction.net`, or a full URL) in the same form as
 /// [`canonical_bare_host`]: a full URL goes through it, a bare host through `bare_host_name`.
 fn configured_host(s: &str) -> Option<String> {
@@ -302,16 +319,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         .map_err(|_| StepError::failed(format!("{clip_path} is not UTF-8")))?;
     let doc = FrontmatterDoc::new(text.as_str());
     let get = |k: &str| doc.get(k).ok().flatten();
-    let source = get("source")
-        .map(|v| cv_note::js_text(&v))
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let clip = Clip {
-        host: canonical_bare_host(&source),
-        authors: doc.get_texts("author"),
-        source,
-    };
+    let clip = clip_of(&doc);
     let published = get("published")
         .map(|v| cv_note::js_text(&v))
         .and_then(|s| s.trim().get(..10).map(str::to_owned))

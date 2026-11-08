@@ -7,13 +7,16 @@
 //! 2. `Story (…) - Chapter N - …` → story is the text before ` (`;
 //! 3. `Story, Chapter N…` → story is the text before `, Chapter`.
 //!
-//! Otherwise the body fallback: the first of the first [`BODY_LINES`] non-blank body lines
-//! (heading `#` markers skipped) that starts with `Chapter N` gives N, and the story is the first
-//! ` - `/` | ` separated segment of the title (site, author and fandom suffixes dropped).
+//! WP-8: the body's chapter line wins over the title's N (sites number chapters by position, the
+//! body carries the logical number): the first of the first [`BODY_LINES`] counted body lines
+//! (non-blank, outside callout blocks; leading `#`/`>`/`*`/`_` markers stripped) that reads
+//! `Chapter N` gives N; other `Chapter…` lines are skipped. Without a title shape the story is the
+//! first ` - `/` | ` separated segment of the title (site, author and fandom suffixes dropped). A
+//! caller-supplied publication (the serial row's) overrides the story ([`detect_with`]).
 //!
 //! N is a plain decimal integer: `Chapter 12.5`, a number that overflows `u32`, or one with a
-//! leading zero is undetected (`None`), never rounded or normalised. Characters invalid in file
-//! names are removed from the story; an empty story is `None`.
+//! leading zero is undetected, never rounded or normalised. Characters invalid in file names are
+//! removed from the story and whitespace runs collapsed; an empty story is `None`.
 
 /// Body lines (non-blank, after the frontmatter) the fallback looks at.
 pub const BODY_LINES: usize = 15;
@@ -45,23 +48,45 @@ pub fn is_target_shape(title: &str) -> bool {
 }
 
 /// Detects the story and chapter of a note named `title` with body `body` (frontmatter already
-/// removed). `None` when undetectable; callers check [`is_target_shape`] first.
+/// removed); `detect_with(title, body, None)`.
 #[must_use]
 pub fn detect(title: &str, body: &str) -> Option<FanficTitle> {
-    if let Some(found) = from_title(title) {
-        return found;
+    detect_with(title, body, None)
+}
+
+/// Detects the story and chapter (plan WP-8): the chapter is the body's first `Chapter N` line
+/// (logical numbering) else the title shape's N; the story is `publication` (the work's serial
+/// row / `publication` frontmatter) when non-empty after sanitising, else the title shape's head,
+/// else the first ` - `/` | ` title segment. `None` when no chapter number or story is found.
+#[must_use]
+pub fn detect_with(title: &str, body: &str, publication: Option<&str>) -> Option<FanficTitle> {
+    let shape = from_title(title);
+    let chapter = match (body_chapter(body), &shape) {
+        (Some(n), _) => n,
+        (None, Some((_, Ok(n)))) => *n,
+        _ => return None,
+    };
+    if let Some(story) = publication.map(sanitise).filter(|p| !p.is_empty()) {
+        return Some(FanficTitle { story, chapter });
     }
-    let chapter = body_chapter(body)?;
-    let first = title
-        .split(" - ")
-        .next()
-        .and_then(|s| s.split(" | ").next())?;
-    build(first, chapter)
+    let head = match shape {
+        Some((head, _)) => head,
+        None => title
+            .split(" - ")
+            .next()
+            .and_then(|s| s.split(" | ").next())?,
+    };
+    build(head, chapter)
+}
+
+/// Drops characters invalid in file names, collapses whitespace runs to one space, trims.
+fn sanitise(s: &str) -> String {
+    let kept: String = s.chars().filter(|c| !INVALID.contains(c)).collect();
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn build(story: &str, chapter: u32) -> Option<FanficTitle> {
-    let story: String = story.chars().filter(|c| !INVALID.contains(c)).collect();
-    let story = story.trim().to_owned();
+    let story = sanitise(story);
     (!story.is_empty()).then_some(FanficTitle { story, chapter })
 }
 
@@ -77,7 +102,7 @@ fn number(s: &str) -> Option<Result<u32, ()>> {
     let bad_tail = match chars.next() {
         None => false,
         Some('.') => chars.next().is_some_and(|c| c.is_ascii_digit()),
-        Some(c) => c.is_alphanumeric() || c == '_',
+        Some(c) => c.is_alphanumeric(),
     };
     let digits = &s[..end];
     if bad_tail || (digits.len() > 1 && digits.starts_with('0')) {
@@ -86,9 +111,9 @@ fn number(s: &str) -> Option<Result<u32, ()>> {
     Some(digits.parse().map_err(|_| ()))
 }
 
-/// The title shapes: `None` = no shape matched (try the body); `Some(None)` = a shape matched
-/// but is not detectable (no fallback: the title names a chapter we cannot read).
-fn from_title(title: &str) -> Option<Option<FanficTitle>> {
+/// The title shapes: `None` = no shape matched; `Some((head, n))` = the story head and the
+/// shape's number (`Err` when not a plain integer: only a body chapter line can rescue it).
+fn from_title(title: &str) -> Option<(&str, Result<u32, ()>)> {
     let lower = title.to_ascii_lowercase();
     for (sep, is_dash) in [(" - chapter ", true), (", chapter ", false)] {
         let mut from = 0;
@@ -99,9 +124,6 @@ fn from_title(title: &str) -> Option<Option<FanficTitle>> {
             let Some(n) = number(&title[after..]) else {
                 continue;
             };
-            let Ok(n) = n else {
-                return Some(None);
-            };
             let mut head = &title[..at];
             if is_dash
                 && head.trim_end().ends_with(')')
@@ -109,31 +131,48 @@ fn from_title(title: &str) -> Option<Option<FanficTitle>> {
             {
                 head = &head[..p];
             }
-            return Some(build(head, n));
+            return Some((head, n));
         }
     }
     None
 }
 
+/// The body lines the fallback counts: blank lines and callout blocks (a `> [!` line and the
+/// `>` lines after it — the enrich abstract, `[!removed]-` folds) are skipped.
+fn counted_lines(body: &str) -> impl Iterator<Item = &str> {
+    let mut in_callout = false;
+    body.lines().filter_map(move |l| {
+        let t = l.trim();
+        if t.is_empty() {
+            in_callout = false;
+            return None;
+        }
+        if t.starts_with("> [!") || (in_callout && t.starts_with('>')) {
+            in_callout = true;
+            return None;
+        }
+        in_callout = false;
+        Some(t)
+    })
+}
+
+/// The first counted line (of [`BODY_LINES`]) reading `Chapter N` once leading whitespace, `#`,
+/// `>`, `*` and `_` markers are stripped; other `Chapter…` lines are skipped.
 fn body_chapter(body: &str) -> Option<u32> {
-    for line in body
-        .lines()
-        .map(|l| l.trim().trim_start_matches('#').trim_start())
-        .filter(|l| !l.is_empty())
-        .take(BODY_LINES)
-    {
-        let Some(head) = line.get(..7) else { continue };
+    counted_lines(body).take(BODY_LINES).find_map(|line| {
+        let line = line
+            .trim_start_matches(|c: char| matches!(c, '#' | '>' | '*' | '_') || c.is_whitespace());
+        let head = line.get(..7)?;
         if !head.eq_ignore_ascii_case("chapter") {
-            continue;
+            return None;
         }
         let rest = &line[7..];
         let trimmed = rest.trim_start();
         if trimmed.len() == rest.len() {
-            continue;
+            return None;
         }
-        return number(trimmed).and_then(Result::ok);
-    }
-    None
+        number(trimmed).and_then(Result::ok)
+    })
 }
 
 #[cfg(test)]
@@ -224,7 +263,11 @@ mod tests {
 
     #[test]
     fn integers_only() {
-        assert_eq!(d("Alpha - Chapter 12.5 - X", "Chapter 3\n"), None);
+        assert_eq!(d("Alpha - Chapter 12.5 - X", "prose\n"), None);
+        assert_eq!(
+            d("Alpha - Chapter 12.5 - X", "Chapter 3\n"),
+            some("Alpha", 3)
+        );
         assert_eq!(d("Alpha - Chapter 007 - X", ""), None);
         assert_eq!(d("Alpha - Chapter 99999999999 - X", ""), None);
         assert_eq!(d("Alpha", "Chapter 1.5\n"), None);
@@ -239,5 +282,59 @@ mod tests {
         assert_eq!(d(" : - Chapter 2 - X", ""), None);
         let t = detect("Alpha, Chapter 6", "").unwrap();
         assert_eq!(target_name(&t), "Alpha - Chapter 6");
+    }
+
+    #[test]
+    fn body_markers_are_stripped() {
+        assert_eq!(d("Alpha", "**Chapter 9 \n"), some("Alpha", 9));
+        assert_eq!(d("Alpha", "***Chapter 4:*** Name\n"), some("Alpha", 4));
+        assert_eq!(d("Alpha", "> **Chapter 2**\n"), some("Alpha", 2));
+        assert_eq!(d("Alpha", "## Chapter 5\n"), some("Alpha", 5));
+        assert_eq!(d("Alpha", "\u{a0}_Chapter 6: x_\n"), some("Alpha", 6));
+        assert_eq!(d("Alpha", "_Chapter 8_\n"), some("Alpha", 8));
+    }
+
+    #[test]
+    fn non_numbered_chapter_lines_are_skipped() {
+        assert_eq!(
+            d("Alpha", "Chapter Text\nChapters: 3/?\nChapter 7: X\n"),
+            some("Alpha", 7)
+        );
+    }
+
+    #[test]
+    fn callout_blocks_are_not_counted() {
+        let abs = format!(
+            "> [!abstract]-\n{}\n> [!removed]- Removed\n> gone\n",
+            "> summary line\n".repeat(15)
+        );
+        let body = format!("{abs}{}Chapter 157: Of Things\n", "meta\n".repeat(3));
+        assert_eq!(d("Gamma Tale", &body), some("Gamma Tale", 157));
+    }
+
+    #[test]
+    fn body_number_beats_title_number() {
+        assert_eq!(
+            d("Alpha - Chapter 12 - W", "Rating: T\nChapter 10\n"),
+            some("Alpha", 10)
+        );
+        assert_eq!(
+            d("Alpha - Chapter 12 - W", "no chapter line\n"),
+            some("Alpha", 12)
+        );
+    }
+
+    #[test]
+    fn publication_overrides_story_and_is_cleaned() {
+        let t = detect_with(
+            "Site Title - Chapter 3 - W",
+            "",
+            Some(" Delta:  The  Tale "),
+        )
+        .unwrap();
+        assert_eq!((t.story.as_str(), t.chapter), ("Delta The Tale", 3));
+        let t = detect_with("Site Title - Chapter 3 - W", "", Some(" : ")).unwrap();
+        assert_eq!(t.story, "Site Title");
+        assert_eq!(detect_with("Delta", "prose\n", Some("Delta")), None);
     }
 }
