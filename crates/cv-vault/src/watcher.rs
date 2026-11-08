@@ -175,6 +175,11 @@ impl Echoes {
         self.map.insert(path.to_string(), (after, now));
     }
 
+    /// Whether the writer itself recently removed `path` (not consumed).
+    fn is_removal(&self, path: &str) -> bool {
+        self.map.get(path).is_some_and(|(h, _)| h.is_none())
+    }
+
     /// Whether `path`'s current state `cur` is the writer's echo (consumed on match).
     pub(crate) fn take_match(&mut self, path: &str, cur: Option<&ContentHash>) -> bool {
         self.expire(Instant::now());
@@ -199,12 +204,21 @@ impl Stat {
     }
 }
 
+/// How long an unpaired `Name(From)` waits for its `Name(To)` half before the source is examined
+/// alone (a move out of the vault, reported `Deleted`). Bounds a notify-thread stall between the
+/// halves; without it a stall past the debounce split an external rename into Deleted + Created.
+const MOVE_PAIR_GRACE: Duration = Duration::from_millis(500);
+
 /// Per-watcher state, living on the writer thread.
 pub(crate) struct WatchState {
     root: PathBuf,
     seen: HashMap<String, Stat>,
     pending: HashMap<String, Instant>,
     renames: Vec<(String, String, Instant)>,
+    /// Rename sources (`Name(From)`) still waiting for their `Name(Both)` pairing: notify sends the
+    /// halves one at a time, so a stalled notify thread can split them past the debounce. A source
+    /// is held for [`MOVE_PAIR_GRACE`] before it may be examined (and reported deleted) alone.
+    moving_from: HashMap<String, Instant>,
     debounce: Duration,
     /// Symlinked vault entries → their resolved target file (plan editor-cutover-blockers WP-1).
     links: HashMap<String, PathBuf>,
@@ -290,6 +304,7 @@ impl WatchState {
             seen,
             pending: HashMap::new(),
             renames: Vec::new(),
+            moving_from: HashMap::new(),
             debounce,
             links,
             by_target,
@@ -349,7 +364,17 @@ impl WatchState {
         match ev.kind {
             K::Access(AccessKind::Close(AccessMode::Write)) => {}
             K::Access(_) => return,
+            K::Modify(ModifyKind::Name(RenameMode::From)) => {
+                for p in &ev.paths {
+                    if let Some(r) = self.rel(p) {
+                        self.moving_from.insert(r, now);
+                    }
+                }
+            }
             K::Modify(ModifyKind::Name(RenameMode::Both)) if ev.paths.len() == 2 => {
+                if let Some(f) = rel_path(&self.root, &ev.paths[0]) {
+                    self.moving_from.remove(&f);
+                }
                 if let (Some(f), Some(t)) = (self.rel(&ev.paths[0]), self.rel(&ev.paths[1])) {
                     self.renames.push((f, t, now));
                     return;
@@ -373,11 +398,21 @@ impl WatchState {
     /// How long until the next pending path is due (`None` = nothing pending).
     pub(crate) fn next_due(&self, now: Instant) -> Option<Duration> {
         self.pending
-            .values()
-            .copied()
+            .iter()
+            .map(|(p, at)| self.hold_until(p, *at))
             .chain(self.renames.iter().map(|r| r.2))
             .map(|at| (at + self.debounce).saturating_duration_since(now))
             .min()
+    }
+
+    /// When pending `path` (last hinted at `at`) may be examined: quiet for the debounce window,
+    /// and past the pairing grace if it is an unpaired rename source.
+    fn hold_until(&self, path: &str, at: Instant) -> Instant {
+        let grace = self
+            .moving_from
+            .get(path)
+            .map(|t| *t + MOVE_PAIR_GRACE.saturating_sub(self.debounce));
+        grace.map_or(at, |g| g.max(at))
     }
 
     /// Examines every path quiet for the debounce window; applies external changes to the index
@@ -386,6 +421,8 @@ impl WatchState {
         let now = Instant::now();
         let deb = self.debounce;
         let due = |at: Instant| now.duration_since(at) >= deb;
+        // The writer's own moves (into `.trash`, or by link + unlink) need no pairing grace.
+        self.moving_from.retain(|p, _| !w.echoes.is_removal(p));
         let mut out = Vec::new();
         // Renames whose halves are both quiet.
         let busy = |p: &str, pending: &HashMap<String, Instant>| {
@@ -406,12 +443,13 @@ impl WatchState {
         let mut paths: Vec<String> = self
             .pending
             .iter()
-            .filter(|(_, at)| due(**at))
+            .filter(|(p, at)| due(self.hold_until(p, **at)))
             .map(|(p, _)| p.clone())
             .collect();
         paths.sort();
         for p in paths {
             self.pending.remove(&p);
+            self.moving_from.remove(&p);
             self.examine(w, &p, &mut out);
         }
         out
@@ -613,5 +651,36 @@ impl WatchState {
                 Origin::External
             },
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{EventKind as K, ModifyKind, RenameMode};
+
+    fn name(mode: RenameMode, paths: &[&Path]) -> notify::Event {
+        paths.iter().fold(
+            notify::Event::new(K::Modify(ModifyKind::Name(mode))),
+            |e, p| e.add_path(p.to_path_buf()),
+        )
+    }
+
+    /// WP-3 (plan test-flake-pass): a rename source stays held past the debounce until its
+    /// `Both` half pairs it, so a notify-thread stall cannot split an external rename.
+    #[test]
+    fn unpaired_rename_source_is_held_until_paired() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("c.md"), "C").unwrap();
+        let deb = Duration::from_millis(50);
+        let mut st = WatchState::seed(dir.path(), deb);
+        let (c, d) = (dir.path().join("c.md"), dir.path().join("d.md"));
+        st.on_notify(&name(RenameMode::From, &[&c]));
+        let wait = st.next_due(Instant::now()).unwrap();
+        assert!(wait > deb * 4, "From half held for the grace, got {wait:?}");
+        st.on_notify(&name(RenameMode::To, &[&d]));
+        st.on_notify(&name(RenameMode::Both, &[&c, &d]));
+        assert!(st.moving_from.is_empty());
+        assert!(st.next_due(Instant::now()).unwrap() <= deb);
     }
 }
