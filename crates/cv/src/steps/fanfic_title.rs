@@ -7,7 +7,7 @@
 //! | `scope` | `"note"` (one note) \| `"backfill"` (every indexed `fanfic`-tagged note) | `"note"` |
 //! | `kind` | note scope: the filed kind (usually `"{param.kind}"`); anything but `fanfic` makes the step a no-op | — (always runs) |
 //! | `path` | note scope: the note (placeholders ok; `{vars.moved_path}` after `move`) | the active note |
-//! | `dry_run` | backfill only: count, write nothing; a job param `dry_run` wins | `true` |
+//! | `dry_run` | backfill only: count, rename nothing (writes only the review note below); a job param `dry_run` wins | `true` |
 //!
 //! **Note scope** (in `file-as-kind`, after `move`): a note already in the target shape, an
 //! undetectable one, or one whose target name exists is left as is and counted (`fanfic_already`,
@@ -19,6 +19,11 @@
 //! order) and applies the same rule. Outcome vars: `scanned`, `already`, `renamed` (real run),
 //! `would_rename` (dry run), `collision`, `undetected`, `conflict`, `dry_run`. A second run renames
 //! nothing (renamed notes are in the target shape).
+//!
+//! A **dry run** also writes the review note `_crucible/reviews/fanfic-titles-<YYYY-MM-DD>.md`
+//! (overwritten when it exists: it holds no user input) listing what an apply run would rename,
+//! the collisions and the undetected notes, and sets outcome vars `review_path` and the outcome's
+//! `open_path`. A real run writes no note.
 
 use std::collections::BTreeSet;
 
@@ -30,7 +35,7 @@ use cv_vault::VaultError;
 use serde::Serialize;
 
 use super::file::target_path;
-use super::materialize::join;
+use super::materialize::{join, now};
 use super::params::{check_keys, check_placeholders, expand, get_bool, get_str};
 use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag};
 
@@ -199,6 +204,71 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
     Ok(out)
 }
 
+/// Where the dry-run review notes live.
+const REVIEW_DIR: &str = "_crucible/reviews";
+/// Review note name prefix (`<prefix><date>.md`).
+const REVIEW_PREFIX: &str = "fanfic-titles-";
+
+/// What a dry run found, in path order.
+#[derive(Debug, Default)]
+struct Findings {
+    /// `(old path, new path)`.
+    rename: Vec<(String, String)>,
+    collision: Vec<(String, String)>,
+    undetected: Vec<String>,
+}
+
+/// A resolvable wikilink `[[path-without-.md|basename]]`; names with link syntax characters fall
+/// back to a backticked path.
+fn link(path: &str) -> String {
+    let stem = path.strip_suffix(".md").unwrap_or(path);
+    if stem.contains(['|', '[', ']', '#', '^']) {
+        return format!("`{path}`");
+    }
+    format!("[[{stem}|{}]]", vpath::stem(path))
+}
+
+fn section(out: &mut String, title: &str, lines: Vec<String>) {
+    out.push_str(&format!("\n## {title} ({})\n\n", lines.len()));
+    if lines.is_empty() {
+        out.push_str("- (none)\n");
+    }
+    for l in lines {
+        out.push_str(&format!("- {l}\n"));
+    }
+}
+
+/// The pure review-note renderer.
+fn render_review(date: &str, v: &BackfillVars, f: &Findings) -> String {
+    let base = |p: &str| vpath::stem(p).to_owned();
+    let mut out = format!(
+        "# Fanfic title backfill \u{2014} dry run {date}\n\nScanned {}, already {}, would rename {}, collision {}, undetected {}.\n\nApply: run \u{201c}Fanfic: chapter titles\u{201d} with Dry run off.\n",
+        v.scanned, v.already, v.would_rename, v.collision, v.undetected
+    );
+    section(
+        &mut out,
+        "Would rename",
+        f.rename
+            .iter()
+            .map(|(o, n)| format!("{} \u{2192} {}", link(o), base(n)))
+            .collect(),
+    );
+    section(
+        &mut out,
+        "Collision",
+        f.collision
+            .iter()
+            .map(|(o, n)| format!("{} \u{2192} {} (exists)", link(o), base(n)))
+            .collect(),
+    );
+    section(
+        &mut out,
+        "Undetected",
+        f.undetected.iter().map(|o| link(o)).collect(),
+    );
+    out
+}
+
 #[derive(Serialize, Default)]
 struct BackfillVars {
     scanned: u32,
@@ -209,6 +279,8 @@ struct BackfillVars {
     undetected: u32,
     conflict: u32,
     dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_path: Option<String>,
 }
 
 fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
@@ -225,6 +297,7 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         ..BackfillVars::default()
     };
     let mut out = StepOutcome::default();
+    let mut found = Findings::default();
     for path in &paths {
         let Some((bytes, _)) = ctx.read(path)? else {
             continue;
@@ -235,12 +308,17 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
         v.scanned += 1;
         match plan(path, &text) {
             Plan::Already => v.already += 1,
-            Plan::Undetected => v.undetected += 1,
+            Plan::Undetected => {
+                v.undetected += 1;
+                found.undetected.push(path.clone());
+            }
             Plan::Rename(dst) if dry_run => {
                 if ctx.read(&dst)?.is_some() {
                     v.collision += 1;
+                    found.collision.push((path.clone(), dst));
                 } else {
                     v.would_rename += 1;
+                    found.rename.push((path.clone(), dst));
                 }
             }
             Plan::Rename(dst) => match rename(ctx, path, &dst) {
@@ -256,6 +334,21 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
                 Err(e) => return Err(e),
             },
         }
+    }
+    if dry_run {
+        let date = now().date().format("%Y-%m-%d").to_string();
+        let review = format!("{REVIEW_DIR}/{REVIEW_PREFIX}{date}.md");
+        let text = render_review(&date, &v, &found).into_bytes();
+        match ctx.read(&review)? {
+            Some((_, hash)) => {
+                ctx.write(&review, text, Some(hash))?;
+            }
+            None => {
+                ctx.create(&review, text)?;
+            }
+        }
+        out.open_path = Some(review.clone());
+        v.review_path = Some(review);
     }
     out.set_vars(&v);
     Ok(out)

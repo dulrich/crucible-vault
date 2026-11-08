@@ -195,3 +195,71 @@ fn bad_params_are_rejected() {
         );
     }
 }
+
+fn review_path() -> String {
+    let date = super::materialize::now().date().format("%Y-%m-%d");
+    format!("_crucible/reviews/fanfic-titles-{date}.md")
+}
+
+#[test]
+fn dry_run_writes_review_note() {
+    let e = corpus();
+    let o = e
+        .run(BACKFILL, json!({}), active("F/A - Chapter 1.md"))
+        .unwrap();
+    let rp = review_path();
+    assert_eq!(var(&o, "review_path"), json!(rp));
+    assert_eq!(o.open_path.as_deref(), Some(rp.as_str()));
+    let t = e.read(&rp).unwrap();
+    assert!(
+        t.starts_with("# Fanfic title backfill \u{2014} dry run "),
+        "{t}"
+    );
+    assert!(t.contains("Scanned 6, already 2, would rename 2, collision 1, undetected 1."));
+    assert!(t.contains("Apply: run \u{201c}Fanfic: chapter titles\u{201d} with Dry run off."));
+    assert!(t.contains("## Would rename (2)"));
+    assert!(t.contains(
+        "- [[F/B - Chapter 2 - W - Fandom|B - Chapter 2 - W - Fandom]] \u{2192} B - Chapter 2\n"
+    ));
+    // The `|` in the name cannot sit in a wikilink: plain backticked path.
+    assert!(t.contains("- `F/D | Site.md` \u{2192} D - Chapter 7\n"));
+    assert!(t.contains(
+        "## Collision (1)\n\n- [[F/C - Chapter 5 - W|C - Chapter 5 - W]] \u{2192} C - Chapter 5 (exists)\n"
+    ));
+    assert!(t.contains("## Undetected (1)\n\n- [[F/E|E]]\n"));
+}
+
+#[test]
+fn second_dry_run_overwrites_and_empty_sections_say_none() {
+    let e = corpus();
+    for _ in 0..2 {
+        e.run(BACKFILL, json!({}), active("F/A - Chapter 1.md"))
+            .unwrap();
+    }
+    assert!(
+        e.read(&review_path())
+            .unwrap()
+            .contains("## Would rename (2)")
+    );
+    let e = example_env(&[("F/A - Chapter 1.md", &note("x\n"))]);
+    e.run(BACKFILL, json!({}), active("F/A - Chapter 1.md"))
+        .unwrap();
+    let t = e.read(&review_path()).unwrap();
+    assert!(t.contains("## Would rename (0)\n\n- (none)\n"), "{t}");
+    assert!(t.contains("## Undetected (0)\n\n- (none)\n"), "{t}");
+}
+
+#[test]
+fn real_run_writes_no_review_note() {
+    let e = corpus();
+    let o = e
+        .run(
+            BACKFILL,
+            json!({"dry_run": false}),
+            active("F/A - Chapter 1.md"),
+        )
+        .unwrap();
+    assert!(e.read(&review_path()).is_none());
+    assert!(o.open_path.is_none());
+    assert!(o.vars.get("review_path").is_none());
+}
