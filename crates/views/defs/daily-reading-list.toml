@@ -1,5 +1,7 @@
 # Migrated from vault-repo `_custom/bases/daily-reading-list.base` (view `Reading List`), expressions verbatim.
 # `this` = the day note; rows are the reading entries in `daily/day/<day>/`.
+# `formula.access` (plan round-23 WP-4): 🔒 = user action needed (the note is a teaser, `complete: false`,
+# or paid/founding without `complete: true`); it clears when the full body lands (`complete: true`).
 
 [filters]
 and = ['file.folder == "daily/day/" + this.file.name']
@@ -8,11 +10,12 @@ and = ['file.folder == "daily/day/" + this.file.name']
 tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "using").join(", ")'
 minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
 read = 'if(note.read == true, "✅", "❌")'
+access = 'if(note.complete == false || ((note.access == "paid" || note.access == "founding") && note.complete != true), "🔒", "")'
 
 [[views]]
 type = "table"
 name = "Reading List"
-order = ["file.name", "note.publication", "formula.tags", "word-count", "formula.minutes", "note.read"]
+order = ["file.name", "formula.access", "note.publication", "formula.tags", "word-count", "formula.minutes", "note.read"]
 summaries = { "word-count" = "Sum", "formula.minutes" = "Sum" }
 columnSize = { "note.read" = 137, "word-count" = 80, "formula.minutes" = 80 }
 maxHeight = "none"
@@ -28,3 +31,6 @@ checkbox = true
 
 [properties."note.publication"]
 displayName = "Author"
+
+[properties."formula.access"]
+displayName = "Access"

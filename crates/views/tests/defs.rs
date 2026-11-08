@@ -85,6 +85,11 @@ struct Fx {
 }
 
 fn fixture() -> Fx {
+    fixture_with(&[])
+}
+
+/// `fixture()` plus extra synthetic vault files `(relative path, content)`.
+fn fixture_with(extra: &[(&str, &str)]) -> Fx {
     let tmp = tempfile::tempdir().unwrap();
     let vault = tmp.path().join("vault");
     let mut files = Vec::new();
@@ -93,6 +98,12 @@ fn fixture() -> Fx {
         &vault,
         &mut files,
     );
+    for (rel, content) in extra {
+        let f = vault.join(rel);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, content).unwrap();
+        files.push(f);
+    }
     // Deterministic mtimes: one hour apart in sorted path order.
     files.sort();
     let epoch = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
@@ -503,4 +514,51 @@ fn trash_section_orders_by_expiry_groups_by_reason_and_sums_size() {
     assert_eq!(names, ["b.md", "c.txt", "a.png"]);
     let sizes: Vec<_> = column(&r, "size_mib").into_iter().map(|(_, v)| v).collect();
     assert_eq!(sizes, ["0.5", "3", "1"]);
+}
+
+/// Reading List Access column (plan round-23 WP-4): 🔒 when `complete == false`, or when `access`
+/// is paid/founding and `complete` is not true; blank otherwise.
+#[test]
+fn reading_list_access_marks_user_action_needed() {
+    let fx = fixture_with(&[
+        (
+            "daily/day/2026-10-01/Teaser.md",
+            "---\nword-count: 10\nread: false\ncomplete: false\n---\nx\n",
+        ),
+        (
+            "daily/day/2026-10-01/Paid Stub.md",
+            "---\nword-count: 10\nread: false\naccess: paid\n---\nx\n",
+        ),
+        (
+            "daily/day/2026-10-01/Founding Stub.md",
+            "---\nword-count: 10\nread: false\naccess: founding\n---\nx\n",
+        ),
+        (
+            "daily/day/2026-10-01/Paid Full.md",
+            "---\nword-count: 10\nread: false\naccess: paid\ncomplete: true\n---\nx\n",
+        ),
+    ]);
+    let mut host = fx.host();
+    let r = fx.run(
+        &mut host,
+        "daily-reading-list#Reading List",
+        Some("daily/day/2026-10-01.md"),
+    );
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    let got: std::collections::BTreeMap<String, String> =
+        column(&r, "Access").into_iter().collect();
+    let lock = "🔒";
+    for (name, want) in [
+        ("Teaser", lock),
+        ("Paid Stub", lock),
+        ("Founding Stub", lock),
+        ("Paid Full", ""),
+        ("Alpha Post", ""),
+    ] {
+        assert_eq!(
+            got.get(name).map(String::as_str),
+            Some(want),
+            "{name}: {got:?}"
+        );
+    }
 }

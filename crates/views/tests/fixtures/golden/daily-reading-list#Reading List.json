@@ -5,6 +5,10 @@
       "label": "file name"
     },
     {
+      "key": "formula.access",
+      "label": "Access"
+    },
+    {
       "key": "note.publication",
       "label": "Author"
     },
@@ -43,6 +47,10 @@
               "t": "link"
             },
             {
+              "t": "text",
+              "v": ""
+            },
+            {
               "t": "null"
             },
             {
@@ -70,6 +78,10 @@
               "label": "World News",
               "path": "daily/day/2026-10-01/World News.md",
               "t": "link"
+            },
+            {
+              "t": "text",
+              "v": ""
             },
             {
               "t": "null"
@@ -113,6 +125,9 @@
           "t": "null"
         },
         {
+          "t": "null"
+        },
+        {
           "t": "number",
           "v": 1400.0
         },
@@ -128,6 +143,9 @@
     },
     {
       "cells": [
+        {
+          "t": "null"
+        },
         {
           "t": "null"
         },
