@@ -689,6 +689,52 @@ fn render_fold(
     (fold_block, rep)
 }
 
+/// The removed spans of a note body's `> [!removed]-` fold(s), in order. Mirrors the writer
+/// ([`render_fold`], layout in the module docs): the fold sits inside a `%% cv-enrich %%` block, each
+/// removed line is `> `-prefixed (a blank one is a bare `>`), and disjoint groups are separated by a
+/// lone `>` line. A span is therefore the unquoted lines between lone `>` lines; a blank line
+/// *inside* a removed group is written as the same bare `>`, so it splits that group into two
+/// spans (the writer does not distinguish them). Empty spans are dropped.
+#[must_use]
+pub fn removed_spans(body: &str) -> Vec<String> {
+    let raw: Vec<&str> = body.split('\n').collect();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let close = (raw[i].trim() == MARK_OPEN)
+            .then(|| blocks::managed_close(&raw, i))
+            .flatten();
+        let Some(j) = close else {
+            i += 1;
+            continue;
+        };
+        if let Some(h) = raw[i + 1..j]
+            .iter()
+            .position(|l| l.trim_end() == FOLD_HEADER)
+        {
+            let mut cur: Vec<&str> = Vec::new();
+            let mut flush = |cur: &mut Vec<&str>| {
+                let t = cur.join("\n");
+                if !t.trim().is_empty() {
+                    spans.push(t.trim().to_owned());
+                }
+                cur.clear();
+            };
+            for l in &raw[i + 1 + h + 1..j] {
+                let l = l.trim_end();
+                if l == ">" {
+                    flush(&mut cur);
+                } else {
+                    cur.push(l.strip_prefix("> ").unwrap_or(l));
+                }
+            }
+            flush(&mut cur);
+        }
+        i = j + 1;
+    }
+    spans
+}
+
 /// Phase 6: the body without folded lines, with the inserted headings, the top block first and
 /// the fold block last.
 fn assemble(

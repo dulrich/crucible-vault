@@ -89,6 +89,7 @@ pub static STEP: Union = Union {
         Variant::of(&TRANSCRIPT_REFINE, "Refine transcript"),
         Variant::of(&YT_CLIP_TIDY, "YouTube clip tidy"),
         Variant::of(&FANFIC_TITLE, "Fanfic chapter title"),
+        Variant::of(&REMOVALS_REVIEW, "Removals review"),
     ],
 };
 

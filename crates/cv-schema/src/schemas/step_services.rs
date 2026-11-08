@@ -472,6 +472,49 @@ pub static FANFIC_TITLE: Record = Record {
     summary: None,
 };
 
+/// `removals_review` — `crates/cv/src/steps/removals_review.rs` (`parse`; plan `round-23-daemon-memory-mail-enrich-fanfic` WP-6).
+pub static REMOVALS_REVIEW: Record = Record {
+    name: "removals_review",
+    fields: &[
+        field(
+            "mode",
+            "Mode",
+            "review: sample enrichment removals into `_crucible/reviews/removals-<date>.md`; score: read that note's ticks (outcome vars only, nothing written)",
+            Node::Enum(&["review", "score"]),
+        )
+        .dflt(D::Str("review")),
+        field(
+            "limit",
+            "Limit",
+            "Review: removed spans sampled, stratified by intake type (a job param `limit` wins)",
+            POS_INT,
+        )
+        .dflt(D::Int(100)),
+        field(
+            "seed",
+            "Seed",
+            "Review: sampling seed; the same seed over the same corpus reproduces the sample (a job param `seed` wins)",
+            POS_INT,
+        )
+        .dflt(D::Int(1)),
+        field(
+            "overwrite",
+            "Overwrite",
+            "Review: replace an existing note of the same date, discarding its ticks (a job param `overwrite` wins)",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+        field(
+            "path",
+            "Review note",
+            "Score: the review note to read (a job param `path` wins); default the newest `_crucible/reviews/removals-*.md`",
+            Node::Str,
+        ),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `transcript_refine` — `crates/cv/src/steps/transcript_refine.rs` (`parse`; plan `youtube-transcript-auto-refine` WP-1).
 pub static TRANSCRIPT_REFINE: Record = Record {
     name: "transcript_refine",

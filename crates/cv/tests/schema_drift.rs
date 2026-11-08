@@ -226,6 +226,11 @@ const STEPS: &[(&str, &str)] = &[
         "kind = \"{param.kind}\"\npath = \"{vars.moved_path}\"",
     ),
     ("fanfic_title", "scope = \"backfill\"\ndry_run = true"),
+    (
+        "removals_review",
+        "mode = \"review\"\nlimit = 100\nseed = 1\noverwrite = false",
+    ),
+    ("removals_review", "mode = \"score\"\npath = \"x.md\""),
 ];
 
 const ACTION_FULL: &str = r#"

@@ -214,6 +214,8 @@ step_kinds! {
     YtClipTidy = "yt_clip_tidy", true, false;
     /// Renames a fanfic note to `<story> - Chapter <n>` (plan `round-23-daemon-memory-mail-enrich-fanfic` WP-5).
     FanficTitle = "fanfic_title", true, false;
+    /// Samples enrichment removals into a review note, or scores its ticks (plan `round-23-daemon-memory-mail-enrich-fanfic` WP-6).
+    RemovalsReview = "removals_review", true, false;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

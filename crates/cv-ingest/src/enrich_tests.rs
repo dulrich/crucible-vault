@@ -97,6 +97,32 @@ fn parse_errors_are_typed() {
     assert_eq!(parse("[1, {\"a\": 2}]"), Err(EnrichError::NotAnObject));
 }
 
+/// Plan round-23 WP-6: the reader mirrors the writer, one span per disjoint folded group.
+#[test]
+fn removed_spans_mirror_the_writer() {
+    let e = enrich(&note(), &full(), &[], opts());
+    let spans = removed_spans(&e.text);
+    assert_eq!(spans.len(), e.report.spans_folded);
+    assert!(spans[0].starts_with("## Sponsor\nThis issue"), "{spans:?}");
+    assert!(spans[1].starts_with("Subscribe now"), "{spans:?}");
+    assert!(spans[1].ends_with("Share this letter with a friend."));
+    // The reader sees the same spans after a re-run (prior folds carried).
+    let again = enrich(&e.text, &full(), &[], opts()).text;
+    assert_eq!(removed_spans(&again), spans);
+}
+
+#[test]
+fn removed_spans_hand_written_and_degenerate() {
+    let fold = "text\n%% cv-enrich %%\n> [!removed]-\n> one\n> two\n>\n> three\n>\n>\n> four\n\n%% /cv-enrich %%\n";
+    assert_eq!(removed_spans(fold), ["one\ntwo", "three", "four"]);
+    // The top block (no `[!removed]-` header) and a loose callout are not folds.
+    let top = "%% cv-enrich %%\n> [!abstract]-\n> S\n\n%% /cv-enrich %%\n> [!removed]-\n> loose\n";
+    assert!(removed_spans(top).is_empty());
+    // An unterminated block is ordinary text.
+    assert!(removed_spans("%% cv-enrich %%\n> [!removed]-\n> x\n").is_empty());
+    assert!(removed_spans("").is_empty());
+}
+
 #[test]
 fn squeeze_collapses_whitespace() {
     assert_eq!(squeeze("  a \t b\n c  "), "a b c");

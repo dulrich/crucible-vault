@@ -537,6 +537,54 @@ default = "true"
 type = "fanfic_title"
 scope = "backfill"
 
+# Removals review (plan round-23 WP-6): enrichment folds removed text, and that text is note content
+# an agent must not read, so the user labels it. `removals-review` samples up to `limit` removed
+# spans of the enriched notes, stratified by intake type (blog/mail/youtube/clip) and seeded (same
+# seed + same corpus = same sample), into one note `_crucible/reviews/removals-<date>.md`: a `- [ ]`
+# item per span (note link, type, the span quoted). Tick = the text should NOT have been removed.
+# An existing note of the same date is an error unless `overwrite = true` (it may hold ticks).
+# `limit`/`seed` are text (no integer param kind); a non-positive or non-integer value fails.
+[[action]]
+id = "removals-review"
+label = "Removals: sample a review note"
+group = "Maintenance"
+resources = { note = false, keys = ["removals::review"] }
+[[action.params]]
+name = "limit"
+label = "Spans sampled"
+kind = "text"
+default = "100"
+[[action.params]]
+name = "seed"
+label = "Seed"
+kind = "text"
+default = "1"
+[[action.params]]
+name = "overwrite"
+label = "Overwrite an existing note"
+kind = "bool"
+default = "false"
+[[action.steps]]
+type = "removals_review"
+mode = "review"
+
+# Scores a ticked review note: precision = 1 - ticked/items, overall and per type, as job outcome
+# vars only (`items`, `ticked`, `precision`, `items_<type>`, `ticked_<type>`, `precision_<type>`).
+# Reads the newest `_crucible/reviews/removals-*.md` unless `path` is set. Writes nothing.
+[[action]]
+id = "removals-score"
+label = "Removals: score the review note"
+group = "Maintenance"
+resources = { note = false, keys = ["removals::review"] }
+[[action.params]]
+name = "path"
+label = "Review note (blank = newest)"
+kind = "text"
+default = ""
+[[action.steps]]
+type = "removals_review"
+mode = "score"
+
 [[action]]
 id = "image-describe-note"
 label = "Describe images in note"

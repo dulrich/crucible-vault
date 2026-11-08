@@ -31,6 +31,7 @@
 //! | `TranscriptRefine` | [`transcript_refine`] | youtube-transcript-auto-refine WP-1 |
 //! | `YtClipTidy` | [`yt_clip_tidy`] | round-19-yt-cleanup-intake WP-2 |
 //! | `FanficTitle` | [`fanfic_title`] | round-23-daemon-memory-mail-enrich-fanfic WP-5 |
+//! | `RemovalsReview` | [`removals_review`] | round-23-daemon-memory-mail-enrich-fanfic WP-6 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -95,6 +96,9 @@ mod reconcile_boilerplate;
 mod reconcile_repair;
 #[cfg(test)]
 mod reconcile_tests;
+pub mod removals_review;
+#[cfg(test)]
+mod removals_review_tests;
 pub mod search;
 #[cfg(test)]
 mod search_tests;
@@ -713,6 +717,7 @@ step_modules! {
     TranscriptRefine => transcript_refine::TranscriptRefine,
     YtClipTidy => yt_clip_tidy::YtClipTidy,
     FanficTitle => fanfic_title::FanficTitle,
+    RemovalsReview => removals_review::RemovalsReview,
     RunAction => RunActionStep,
 }
 
