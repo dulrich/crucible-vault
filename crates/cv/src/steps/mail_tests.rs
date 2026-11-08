@@ -766,3 +766,42 @@ fn new_mail_note_enqueues_one_enrich_job() {
     execute(&st, &mut ctx).unwrap();
     assert_eq!(rec.calls().len(), 1);
 }
+
+#[test]
+fn maildir_write_check_reports_unwritable_or_missing() {
+    use crate::steps::mail::maildir_write_error;
+    use cv_actions::pipelines::MailPipeline;
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = MailPipeline {
+        enabled: true,
+        maildir: d.path().display().to_string(),
+        ..MailPipeline::default()
+    };
+    assert_eq!(maildir_write_error(&cfg), None, "writable dir is clean");
+    assert_eq!(
+        std::fs::read_dir(d.path()).unwrap().count(),
+        0,
+        "probe file removed"
+    );
+    cfg.maildir = d.path().join("absent").display().to_string();
+    assert!(
+        maildir_write_error(&cfg)
+            .unwrap()
+            .contains("not an existing")
+    );
+    cfg.enabled = false;
+    assert_eq!(maildir_write_error(&cfg), None, "disabled is not an error");
+    cfg.enabled = true;
+    cfg.maildir = "  ".into();
+    assert_eq!(maildir_write_error(&cfg), None, "unset is not an error");
+    // Read-only dir (skipped when the permission bits do not bind, i.e. root).
+    cfg.maildir = d.path().display().to_string();
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let binds = std::fs::File::create(d.path().join("x")).is_err();
+    let err = maildir_write_error(&cfg);
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    if binds {
+        assert!(err.unwrap().contains("not writable"));
+    }
+}

@@ -1,7 +1,8 @@
 {
   "defaultScope": "user",
   "units": [
-    { "path": "deploy/crucible-vault.service", "scope": "user" }
+    { "path": "deploy/crucible-vault.service", "scope": "user" },
+    { "path": "deploy/crucible-vault.service.d/maildir.conf", "scope": "user", "base": ["deploy/crucible-vault.service"] }
   ],
   "exclude": []
 }

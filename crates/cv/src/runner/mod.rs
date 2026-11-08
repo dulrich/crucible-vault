@@ -393,7 +393,12 @@ impl Runner {
 
     /// Current config errors (`cv status` `config_errors`).
     pub fn config_errors(&self) -> Vec<String> {
-        self.config().errors()
+        let cfg = self.config();
+        let mut errors = cfg.errors();
+        errors.extend(crate::steps::mail::maildir_write_error(
+            &cfg.pipelines().mail,
+        ));
+        errors
     }
 
     /// The clock.

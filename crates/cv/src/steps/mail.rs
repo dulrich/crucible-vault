@@ -552,6 +552,31 @@ fn handle(
     Ok(Handled::New)
 }
 
+/// A config-error line when mail intake is enabled with a maildir the daemon cannot write
+/// (missing, not a directory, or a create+remove probe fails, e.g. `EROFS` under the unit
+/// sandbox; round-23 WP-2), else `None`. A disabled or unset maildir is not an error. The probe
+/// file is `.cv-write-probe-<pid>` (a dot name the scan ignores), removed at once.
+pub(crate) fn maildir_write_error(cfg: &cv_actions::pipelines::MailPipeline) -> Option<String> {
+    let dir = cfg.maildir.trim();
+    if !cfg.enabled || dir.is_empty() {
+        return None;
+    }
+    let root = Path::new(dir);
+    if !root.is_dir() {
+        return Some(format!("mail.maildir {dir}: not an existing directory"));
+    }
+    let probe = root.join(format!(".cv-write-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            None
+        }
+        Err(e) => Some(format!(
+            "mail.maildir {dir}: not writable ({e}); track-mail cannot move messages (unit ReadWritePaths? migration 0034)"
+        )),
+    }
+}
+
 /// Executes the step.
 pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
