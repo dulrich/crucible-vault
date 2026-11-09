@@ -201,7 +201,7 @@ fn daemon_folder_rename_is_one_renamed_per_file() {
 }
 
 #[test]
-fn expired_move_echo_degrades_to_delete_and_create() {
+fn expired_echo_surfaces_externally_after_the_writer_rename() {
     let fx = Fx::new(&[("a.md", "A")]);
     let quick = WatchConfig {
         debounce: DEB,
@@ -210,8 +210,20 @@ fn expired_move_echo_degrades_to_delete_and_create() {
     let (wh, rx, _j) = spawn_writer_with_watcher(fx.live(), quick).unwrap();
     wh.rename("a.md", "c.md", h("A")).unwrap();
     let mut evs = first_then_tail(&rx);
+    // The writer reports its rename at once (note-path-continuity D1).
+    assert_eq!(
+        evs.remove(0),
+        VaultEvent {
+            path: "c.md".into(),
+            kind: EventKind::Renamed {
+                from: "a.md".into()
+            },
+            origin: Origin::Daemon
+        }
+    );
     evs.sort_by(|a, b| a.path.cmp(&b.path));
-    // Echoes expired: both halves surface (as external), nothing is lost or paired.
+    // Echoes expired: the watcher no longer recognises both halves, so they surface as
+    // external; nothing is lost.
     assert_eq!(
         evs,
         vec![

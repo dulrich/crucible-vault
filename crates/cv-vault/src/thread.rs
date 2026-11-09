@@ -111,7 +111,8 @@ pub fn spawn_writer(writer: VaultWriter) -> Result<(WriterHandle, JoinHandle<()>
 /// Spawns the writer thread with a recursive watcher on the live root. The watcher is started,
 /// then the `(size, mtime)` map is seeded from a walk — before this returns, and emitting nothing
 /// (I4). External changes are applied to the index on the writer thread, then sent on the
-/// returned receiver; the daemon's own writes surface (at most once) as `Origin::Daemon`.
+/// returned receiver; the daemon's own mutations are sent by the writer itself (exactly once,
+/// `Origin::Daemon`, before the mutating call returns — plan note-path-continuity D1).
 pub fn spawn_writer_with_watcher(
     writer: VaultWriter,
     cfg: WatchConfig,
@@ -131,6 +132,7 @@ pub fn spawn_writer_with_watcher(
     sync_link_dirs(&mut watcher, &mut state, &mut link_dirs);
     let (tx, rx) = mpsc::channel::<Job>();
     let (ev_tx, ev_rx) = mpsc::channel::<VaultEvent>();
+    writer.set_event_sender(ev_tx.clone());
     let idle = cfg.debounce.max(Duration::from_millis(10));
     let join = std::thread::Builder::new()
         .name("cv-writer".into())

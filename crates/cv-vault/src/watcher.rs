@@ -5,8 +5,9 @@
 //! temp and the final name — `docs/spikes/core-index/FINDINGS.md:64`). Raw events are therefore
 //! only *hints*: a path is re-examined once it has been quiet for the debounce window, and its
 //! current `(size, mtime)` then hash decide whether anything changed. The writer records
-//! `(path → after_hash)` for its own writes; a change matching that echo is `Origin::Daemon` and
-//! is not re-applied to the index. Crucible's equivalent (Obsidian's startup event replay and
+//! `(path → after_hash)` for its own writes and reports them itself (`Origin::Daemon`, plan
+//! note-path-continuity D1); a change matching that echo is dropped here, so the watcher only
+//! reports `Origin::External`. Crucible's equivalent (Obsidian's startup event replay and
 //! write-queue echo handling) is dropped as Obsidian-induced: the initial scan here only seeds
 //! the `(size, mtime)` map and emits nothing (I4).
 
@@ -28,7 +29,7 @@ pub enum EventKind {
     Created,
     Modified,
     /// Gone; `replaced_by` names the note that absorbed it when the writer deleted it via
-    /// `VaultWriter::delete_replaced` (round 11 WP-1, Decision 1; filled here, WP-R6).
+    /// `VaultWriter::delete_replaced` (round 11 WP-1, Decision 1; emitted by the writer).
     Deleted {
         replaced_by: Option<String>,
     },
@@ -41,7 +42,7 @@ pub enum EventKind {
 /// Who caused it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    /// The daemon's own write (an echo; the index already has it).
+    /// The daemon's own mutation, reported by the writer before its call returns.
     Daemon,
     /// Someone else (applied to the index before it is emitted).
     External,
@@ -76,19 +77,21 @@ impl Default for WatchConfig {
 
 const ECHO_CAP: usize = 4096;
 
-/// The writer's own recent writes: path → hash after (`None` = removed).
+/// How a matched echo is handled: the event is always dropped (the writer emitted it); an
+/// `Unindexed` echo additionally re-applies the change to the index, because the writer's own
+/// index update failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Echo {
+    Indexed,
+    Unindexed,
+}
+
+/// The writer's own recent writes: path → (hash after (`None` = removed), indexed?, when). A
+/// watcher fs change matching one is the writer's own mutation, which the writer already reported
+/// itself (plan note-path-continuity D1): the watcher drops it and never synthesizes a daemon event.
 #[derive(Debug)]
 pub(crate) struct Echoes {
-    map: HashMap<String, (Option<ContentHash>, Instant)>,
-    /// The writer's own moves: destination → (source, when). The vault fs moves by hard link +
-    /// unlink (or a fresh symlink), never `rename(2)`, so notify never pairs them; this record
-    /// lets the watcher collapse the source's removal and the destination's appearance into one
-    /// `Renamed` (plan intake-round-2-clean-dedupe-reading WP-5a). Unmatched or expired, the two
-    /// path echoes above still classify both halves as before (`Deleted` + `Created`).
-    moves: HashMap<String, (String, Instant)>,
-    /// Round 11 WP-1 (Decision 1): the writer's own replacement deletes, deleted path →
-    /// (absorbing note, when). Read by the event bridge when it reports that path's `Deleted`.
-    replaced: HashMap<String, (String, Instant)>,
+    map: HashMap<String, (Option<ContentHash>, Echo, Instant)>,
     ttl: Duration,
 }
 
@@ -96,98 +99,55 @@ impl Echoes {
     pub(crate) fn new(ttl: Duration) -> Self {
         Self {
             map: HashMap::new(),
-            moves: HashMap::new(),
-            replaced: HashMap::new(),
             ttl,
         }
     }
 
     fn expire(&mut self, now: Instant) {
         let ttl = self.ttl;
-        self.map.retain(|_, (_, at)| now.duration_since(*at) < ttl);
-        self.moves
-            .retain(|_, (_, at)| now.duration_since(*at) < ttl);
-        self.replaced
-            .retain(|_, (_, at)| now.duration_since(*at) < ttl);
+        self.map
+            .retain(|_, (_, _, at)| now.duration_since(*at) < ttl);
     }
 
-    /// Records the writer's move `from → to` (alongside the two path echoes).
-    pub(crate) fn register_move(&mut self, from: &str, to: &str) {
-        let now = Instant::now();
-        self.expire(now);
-        if self.moves.len() >= ECHO_CAP
-            && let Some(oldest) = self
-                .moves
-                .iter()
-                .min_by_key(|(_, (_, at))| *at)
-                .map(|(k, _)| k.clone())
-        {
-            self.moves.remove(&oldest);
-        }
-        self.moves.insert(to.to_string(), (from.to_string(), now));
-    }
-
-    /// Records that the writer deleted `path` because `by` absorbed it (bounded like the
-    /// other echo records).
-    pub(crate) fn register_replaced(&mut self, path: &str, by: &str) {
-        let now = Instant::now();
-        self.expire(now);
-        if self.replaced.len() >= ECHO_CAP {
-            self.replaced.clear();
-        }
-        self.replaced
-            .insert(path.to_string(), (by.to_string(), now));
-    }
-
-    /// Consumes the live replacement record for `path`, returning the absorbing note.
-    pub(crate) fn take_replaced(&mut self, path: &str) -> Option<String> {
-        self.expire(Instant::now());
-        self.replaced.remove(path).map(|(b, _)| b)
-    }
-
-    /// The destination of a live move echo whose source is `from` (not consumed).
-    fn move_dest(&mut self, from: &str) -> Option<String> {
-        self.expire(Instant::now());
-        self.moves
-            .iter()
-            .find(|(_, (f, _))| f == from)
-            .map(|(t, _)| t.clone())
-    }
-
-    /// Consumes the live move echo landing at `to`, returning its source.
-    fn take_move(&mut self, to: &str) -> Option<String> {
-        self.expire(Instant::now());
-        self.moves.remove(to).map(|(f, _)| f)
-    }
-
-    pub(crate) fn register(&mut self, path: &str, after: Option<ContentHash>) {
+    pub(crate) fn register(&mut self, path: &str, after: Option<ContentHash>, kind: Echo) {
         let now = Instant::now();
         self.expire(now);
         if self.map.len() >= ECHO_CAP
             && let Some(oldest) = self
                 .map
                 .iter()
-                .min_by_key(|(_, (_, at))| *at)
+                .min_by_key(|(_, (_, _, at))| *at)
                 .map(|(k, _)| k.clone())
         {
             self.map.remove(&oldest);
         }
-        self.map.insert(path.to_string(), (after, now));
+        self.map.insert(path.to_string(), (after, kind, now));
     }
 
     /// Whether the writer itself recently removed `path` (not consumed).
     fn is_removal(&self, path: &str) -> bool {
-        self.map.get(path).is_some_and(|(h, _)| h.is_none())
+        self.map.get(path).is_some_and(|(h, _, _)| h.is_none())
+    }
+
+    /// Whether the writer recently left `path` holding content `h` (not consumed).
+    fn is_written(&mut self, path: &str, h: &ContentHash) -> bool {
+        self.expire(Instant::now());
+        self.map
+            .get(path)
+            .is_some_and(|(e, _, _)| e.as_ref() == Some(h))
     }
 
     /// Whether `path`'s current state `cur` is the writer's echo (consumed on match).
-    pub(crate) fn take_match(&mut self, path: &str, cur: Option<&ContentHash>) -> bool {
+    pub(crate) fn take_match(&mut self, path: &str, cur: Option<&ContentHash>) -> Option<Echo> {
         self.expire(Instant::now());
-        if self.map.get(path).is_some_and(|(h, _)| h.as_ref() == cur) {
-            self.map.remove(path);
-            return true;
+        if self
+            .map
+            .get(path)
+            .is_some_and(|(h, _, _)| h.as_ref() == cur)
+        {
+            return self.map.remove(path).map(|(_, k, _)| k);
         }
-        false
+        None
     }
 }
 
@@ -470,16 +430,20 @@ impl WatchState {
         if !md.is_file() || self.root.join(from).symlink_metadata().is_ok() {
             return false;
         }
-        let Some(prev) = self.seen.get(from) else {
-            return false;
+        // `from` is either a path the watcher has seen unchanged, or one the writer just put
+        // there and the watcher has not flushed yet (its live echo carries the content hash).
+        let seen_same = match self.seen.get(from) {
+            Some(prev) if !prev.same(&md) => return false,
+            Some(_) => true,
+            None => false,
         };
-        if !prev.same(&md) {
-            return false;
-        }
         let Ok(bytes) = std::fs::read(&to_full) else {
             return false;
         };
         let h = ContentHash::of(&bytes);
+        if !seen_same && !w.echoes.is_written(from, &h) {
+            return false;
+        }
         self.seen.remove(from);
         self.seen.insert(
             to.to_string(),
@@ -489,30 +453,34 @@ impl WatchState {
                 hash: Some(h.clone()),
             },
         );
-        let daemon = w.echoes.take_match(to, Some(&h));
+        let echo = w.echoes.take_match(to, Some(&h));
         w.echoes.take_match(from, None);
-        if !daemon {
-            let (m, c) = file_times(&md);
-            let res = match w.index.rename_file(from, to) {
-                Ok(_) | Err(cv_index::Error::NotFound(_)) => {
-                    w.index.upsert_file(to, &bytes, m, c).map(|_| ())
-                }
-                Err(e) => Err(e),
-            };
-            if let Err(e) = res {
-                tracing::warn!(from, to, error = %e, "index update for external rename failed");
-            }
+        if !seen_same {
+            w.echoes.take_match(from, Some(&h)); // the writer's state at `from`, now moved on
         }
+        if echo == Some(Echo::Indexed) {
+            return true; // the writer's own move: already reported by the writer
+        }
+        let (m, c) = file_times(&md);
+        let res = match w.index.rename_file(from, to) {
+            Ok(_) | Err(cv_index::Error::NotFound(_)) => {
+                w.index.upsert_file(to, &bytes, m, c).map(|_| ())
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = res {
+            tracing::warn!(from, to, error = %e, "index update for external rename failed");
+        }
+        if echo.is_some() {
+            return true;
+        }
+        w.lineage_mut().renamed(from, to);
         out.push(VaultEvent {
             path: to.to_string(),
             kind: EventKind::Renamed {
                 from: from.to_string(),
             },
-            origin: if daemon {
-                Origin::Daemon
-            } else {
-                Origin::External
-            },
+            origin: Origin::External,
         });
         true
     }
@@ -560,36 +528,25 @@ impl WatchState {
             Ok(md) if md.is_file() => md,
             Ok(_) => return,
             Err(_) => {
-                let Some(prev) = self.seen.remove(path) else {
+                if self.seen.remove(path).is_none() {
                     return; // created and gone between hints: nothing to report
-                };
-                // The source of a daemon move: examine its destination now, which claims this
-                // path (`seen` entry consumed) when it classifies the move as one `Renamed`.
-                if let Some(to) = w.echoes.move_dest(path)
-                    && to != path
-                    && self.root.join(&to).exists()
-                {
-                    self.seen.insert(path.to_string(), prev);
-                    self.pending.remove(&to);
-                    self.examine_file(w, &to, out);
-                    if self.seen.remove(path).is_none() {
-                        return;
+                }
+                match w.echoes.take_match(path, None) {
+                    Some(Echo::Indexed) => {}
+                    echo => {
+                        if let Err(e) = w.index.remove_file(path) {
+                            tracing::warn!(path, error = %e, "index update for external delete failed");
+                        }
+                        if echo.is_none() {
+                            w.lineage_mut().deleted(path);
+                            out.push(VaultEvent {
+                                path: path.to_string(),
+                                kind: EventKind::Deleted { replaced_by: None },
+                                origin: Origin::External,
+                            });
+                        }
                     }
                 }
-                let daemon = w.echoes.take_match(path, None);
-                let replaced_by = w.echoes.take_replaced(path);
-                if !daemon && let Err(e) = w.index.remove_file(path) {
-                    tracing::warn!(path, error = %e, "index update for external delete failed");
-                }
-                out.push(VaultEvent {
-                    path: path.to_string(),
-                    kind: EventKind::Deleted { replaced_by },
-                    origin: if daemon {
-                        Origin::Daemon
-                    } else {
-                        Origin::External
-                    },
-                });
                 return;
             }
         };
@@ -614,29 +571,18 @@ impl WatchState {
         if prev.as_ref().and_then(|p| p.hash.as_ref()) == Some(&h) {
             return;
         }
-        let daemon = w.echoes.take_match(path, Some(&h));
-        if !daemon {
+        let echo = w.echoes.take_match(path, Some(&h));
+        if echo != Some(Echo::Indexed) {
             let (m, c) = file_times(&md);
             if let Err(e) = w.index.upsert_file(path, &bytes, m, c) {
                 tracing::warn!(path, error = %e, "index update for external change failed");
             }
         }
-        // A daemon move's destination, its source gone and not yet reported: one `Renamed`.
-        if daemon
-            && prev.is_none()
-            && let Some(from) = w.echoes.take_move(path)
-            && self.root.join(&from).symlink_metadata().is_err()
-            && self.seen.remove(&from).is_some()
-        {
-            w.echoes.take_match(&from, None);
-            self.pending.remove(&from);
-            self.refresh_link(&from);
-            out.push(VaultEvent {
-                path: path.to_string(),
-                kind: EventKind::Renamed { from },
-                origin: Origin::Daemon,
-            });
-            return;
+        if echo.is_some() {
+            return; // the writer's own mutation: already reported by the writer
+        }
+        if prev.is_none() {
+            w.lineage_mut().created(path);
         }
         out.push(VaultEvent {
             path: path.to_string(),
@@ -645,11 +591,7 @@ impl WatchState {
             } else {
                 EventKind::Modified
             },
-            origin: if daemon {
-                Origin::Daemon
-            } else {
-                Origin::External
-            },
+            origin: Origin::External,
         });
     }
 }

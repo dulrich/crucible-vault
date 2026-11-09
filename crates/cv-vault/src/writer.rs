@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use cv_index::{Index, LinkRow};
@@ -10,10 +11,11 @@ use cv_index::{Index, LinkRow};
 use crate::error::{Result, VaultError};
 use crate::fs::VaultFs;
 use crate::hash::ContentHash;
+use crate::lineage::{LineageSink, NoLineage};
 use crate::path::validate_rel_path;
 use crate::rewrite::rewrite_note;
 use crate::trash::{TrashReason, TrashRecord};
-use crate::watcher::Echoes;
+use crate::watcher::{Echo, Echoes, EventKind, Origin, VaultEvent};
 use cv_index::file_times;
 
 /// What a rename did to inbound links.
@@ -53,6 +55,9 @@ pub struct VaultWriter {
     /// Trash records not yet handed to a sink (plan tidiness-trash-orphans WP-1).
     trash_records: Vec<TrashRecord>,
     trash_sink: Option<TrashSink>,
+    /// Writer-authored events (plan note-path-continuity D1); `None` without a watcher.
+    events: Option<Sender<VaultEvent>>,
+    lineage: Box<dyn LineageSink>,
 }
 
 /// Receives each [`TrashRecord`] right after its move (the daemon persists it to `trash_entries`).
@@ -79,6 +84,8 @@ impl VaultWriter {
             echoes: Echoes::new(DEFAULT_ECHO_TTL),
             trash_records: Vec::new(),
             trash_sink: None,
+            events: None,
+            lineage: Box::new(NoLineage),
         }
     }
 
@@ -167,7 +174,8 @@ impl VaultWriter {
     }
 
     /// Indexes a just-written live file and records its echo. An index failure is logged and
-    /// the echo is *not* recorded, so the watcher re-applies the change.
+    /// the echo is recorded [`Echo::Unindexed`], so the watcher re-applies the change to the
+    /// index (but still drops the event: the writer reports it).
     fn index_written(&mut self, path: &str, bytes: &[u8], full: &Path, hash: &ContentHash) {
         let res = std::fs::metadata(full)
             .map_err(|e| crate::error::io(full, e))
@@ -176,8 +184,44 @@ impl VaultWriter {
                 Ok(self.index.upsert_file(path, bytes, m, c)?)
             });
         match res {
-            Ok(_) => self.echoes.register(path, Some(hash.clone())),
-            Err(e) => tracing::warn!(path, error = %e, "index update after write failed"),
+            Ok(_) => self
+                .echoes
+                .register(path, Some(hash.clone()), Echo::Indexed),
+            Err(e) => {
+                tracing::warn!(path, error = %e, "index update after write failed");
+                self.echoes
+                    .register(path, Some(hash.clone()), Echo::Unindexed);
+            }
+        }
+    }
+
+    /// Hands the writer its event sender (the watcher thread's channel).
+    pub(crate) fn set_event_sender(&mut self, tx: Sender<VaultEvent>) {
+        self.events = Some(tx);
+    }
+
+    /// Installs the lineage sink (plan note-path-continuity D2); the default records nothing.
+    pub fn set_lineage_sink(&mut self, sink: Box<dyn LineageSink>) {
+        self.lineage = sink;
+    }
+
+    /// The lineage sink (the watcher records External transitions through it).
+    pub(crate) fn lineage_mut(&mut self) -> &mut dyn LineageSink {
+        self.lineage.as_mut()
+    }
+
+    /// Emits one writer-authored (`Origin::Daemon`) event, synchronously.
+    fn emit(&self, path: &str, kind: EventKind) {
+        if let Some(tx) = &self.events
+            && tx
+                .send(VaultEvent {
+                    path: path.to_string(),
+                    kind,
+                    origin: Origin::Daemon,
+                })
+                .is_err()
+        {
+            tracing::debug!("vault event dropped: no subscriber");
         }
     }
 
@@ -189,8 +233,15 @@ impl VaultWriter {
         bytes: &[u8],
         expected: Option<ContentHash>,
     ) -> Result<ContentHash> {
+        let created = expected.is_none();
         let (h, full) = self.fs.put(path, bytes, expected.as_ref())?;
         self.index_written(path, bytes, &full, &h);
+        if created {
+            self.lineage.created(path);
+            self.emit(path, EventKind::Created);
+        } else {
+            self.emit(path, EventKind::Modified);
+        }
         Ok(h)
     }
 
@@ -209,13 +260,11 @@ impl VaultWriter {
     }
 
     /// Round 11 WP-1 (Decision 1): [`Self::delete`] of a note absorbed by `by` (auto-file's
-    /// replacement / containment trash). The recorded `path → by` is what the watcher puts on
-    /// its `Deleted { replaced_by }` event, so the bridge sends
+    /// replacement / containment trash). The writer emits `Deleted { replaced_by: Some(by) }`
+    /// itself, so the bridge sends
     /// `file_changed { kind: deleted, replaced_by }` and clients retarget instead.
     pub fn delete_replaced(&mut self, path: &str, expected: ContentHash, by: &str) -> Result<()> {
-        self.remove(path, expected, false, TrashReason::Replaced)?;
-        self.echoes.register_replaced(path, by);
-        Ok(())
+        self.remove(path, expected, false, TrashReason::Replaced, Some(by))
     }
 
     /// Recoverable delete recorded with `reason` (WP-2's sweep passes [`TrashReason::Orphan`]).
@@ -225,7 +274,7 @@ impl VaultWriter {
         expected: ContentHash,
         reason: TrashReason,
     ) -> Result<()> {
-        self.remove(path, expected, false, reason)
+        self.remove(path, expected, false, reason, None)
     }
 
     /// Installs the trash-record sink; records queued before it are handed over now.
@@ -249,7 +298,7 @@ impl VaultWriter {
         expected: ContentHash,
         permanent: bool,
     ) -> Result<()> {
-        self.remove(path, expected, permanent, TrashReason::Deleted)
+        self.remove(path, expected, permanent, TrashReason::Deleted, None)
     }
 
     /// The one delete path: CAS remove, then a [`TrashRecord`] for a recoverable move (only
@@ -260,6 +309,7 @@ impl VaultWriter {
         expected: ContentHash,
         permanent: bool,
         reason: TrashReason,
+        replaced_by: Option<&str>,
     ) -> Result<()> {
         if let Some(moved) = self.fs.remove_with(path, &expected, permanent)? {
             let trashed_ms = std::time::SystemTime::now()
@@ -277,9 +327,22 @@ impl VaultWriter {
             }
         }
         match self.index.remove_file(path) {
-            Ok(_) => self.echoes.register(path, None),
-            Err(e) => tracing::warn!(path, error = %e, "index update after delete failed"),
+            Ok(_) => self.echoes.register(path, None, Echo::Indexed),
+            Err(e) => {
+                tracing::warn!(path, error = %e, "index update after delete failed");
+                self.echoes.register(path, None, Echo::Unindexed);
+            }
         }
+        match replaced_by {
+            Some(by) => self.lineage.replaced(path, by),
+            None => self.lineage.deleted(path),
+        }
+        self.emit(
+            path,
+            EventKind::Deleted {
+                replaced_by: replaced_by.map(str::to_string),
+            },
+        );
         Ok(())
     }
 
@@ -309,7 +372,7 @@ impl VaultWriter {
                 skipped.push(a.clone());
                 continue;
             };
-            match self.remove(a, ah, permanent, TrashReason::NoteAttachment) {
+            match self.remove(a, ah, permanent, TrashReason::NoteAttachment, None) {
                 Ok(()) => removed.push(a.clone()),
                 Err(e) => {
                     tracing::warn!(path = %a, error = %e, "delete_note: attachment kept");
@@ -399,14 +462,22 @@ impl VaultWriter {
             self.index.upsert_file(to, &bytes, m, c)?;
             Ok(())
         })();
-        match res {
-            Ok(()) => {
-                self.echoes.register(from, None);
-                self.echoes.register(to, Some(h.clone()));
-                self.echoes.register_move(from, to);
+        let echo = match res {
+            Ok(()) => Echo::Indexed,
+            Err(e) => {
+                tracing::warn!(from, to, error = %e, "index update after rename failed");
+                Echo::Unindexed
             }
-            Err(e) => tracing::warn!(from, to, error = %e, "index update after rename failed"),
-        }
+        };
+        self.echoes.register(from, None, echo);
+        self.echoes.register(to, Some(h.clone()), echo);
+        self.lineage.renamed(from, to);
+        self.emit(
+            to,
+            EventKind::Renamed {
+                from: from.to_string(),
+            },
+        );
         // Resolver after the rename, and the same without the moved file (uniqueness check).
         let with = self.index.resolver().clone();
         let mut without = with.clone();
