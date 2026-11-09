@@ -1,8 +1,7 @@
 //! `image_describe` (plan `v0-automation-pipelines` WP-6): describe localized images into the
 //! MD5-keyed `image_descriptions` store the search feed folds into note chunks.
 //!
-//! Port of Crucible `describeOneImage` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/utils/
-//! imageDescribe.ts:340-447`), the two-pass prompts (`src/providers/shared.ts:96,98`), the
+//! Port of Crucible `describeOneImage` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/utils/imageDescribe.ts:340-447`), the two-pass prompts (`src/providers/shared.ts:96,98`), the
 //! vision wire (`src/providers/openaiCompatible.ts:277-296`), `extractSvgText`
 //! (`src/search/imageTranscode.ts:44-77`), the record shape and `fnv1a` description hash
 //! (`src/search/imageDescriptionStore.ts:36-60,114-121,178-201`) and the backfill prunes
@@ -25,8 +24,7 @@
 //!
 //! Describe wire (plan `round-16-version-describe-intake` WP-2; settled numbers from
 //! `docs/spikes/describe-budget/FINDINGS.md` §1–3, not re-derived here). Crucible gates its describe
-//! settings on `isLocal` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/providers/
-//! openaiCompatible.ts:271-296`, `src/providers/shared.ts:99-108`); the same gate here is
+//! settings on `isLocal` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/providers/openaiCompatible.ts:271-296`, `src/providers/shared.ts:99-108`); the same gate here is
 //! [`cv_providers::limiter::is_local`] (explicit `local`, else a loopback `openai-compatible`).
 //! For a **local** provider both passes send `reasoning_effort: "none"` (reasoning-on extraction
 //! returns empty content at any practical cap and is no more accurate), the model family's

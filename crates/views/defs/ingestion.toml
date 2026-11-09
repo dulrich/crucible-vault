@@ -8,8 +8,8 @@
 read = 'if(note.read == true, "✅", "❌")'
 created = 'if(note.created, note.created, file.ctime)'
 
-# Markdown notes directly in the clipper inbox (`clippings.ts`). The live vault's Web Clipper
-# writes to `Clippings` (user-confirmed 2026-10-15); Crucible's `ingestionClipperInboxFolder`
+# Markdown notes directly in the clipper inbox (`clippings.ts`). The Web Clipper
+# writes to `Clippings` by default; Crucible's `ingestionClipperInboxFolder`
 # setting defaults to `_clippings/inbox` (`src/types.ts:897`).
 [[views]]
 type = "table"

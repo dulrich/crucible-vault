@@ -205,7 +205,7 @@ fn shipped_examples_validate_a_refine_step() {
     for id in [
         "refine-transcript",
         "refine-transcript-openrouter",
-        "refine-transcript-openrouter-gemma",
+        "refine-transcript-openrouter-mimo",
         "refine-transcript-cli",
     ] {
         let s = step(&format!("agent = \"{id}\""));
@@ -217,8 +217,8 @@ fn shipped_examples_validate_a_refine_step() {
     assert_eq!(super::validate(&s, &c), Ok(()));
     for m in [
         "local:local-chat-model",
-        "openrouter:@preset/example-model",
-        "openrouter:@preset/example-model",
+        "openrouter:xiaomi/mimo-v2.6-pro",
+        "openrouter:openai/gpt-6.1-terra",
         "codex:gpt-5.5",
     ] {
         let s = step(&format!("agent = \"refine-transcript\"\nmodel = \"{m}\""));

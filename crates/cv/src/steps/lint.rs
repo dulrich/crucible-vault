@@ -1,6 +1,6 @@
 //! Step module `lint`: run `cv_note::lint_note` on one note and write only when it changed.
 //!
-//! Ported from Crucible's `obsidian-crucible:lint-note` command (`src/lint.ts`, settings
+//! Ported from Crucible's `lint-note` command (`src/lint.ts`, settings
 //! `lintFrontmatterInsert`, `lintCreatedKey`, `lintModifiedKey`, `lintBlankLineAfterYaml`,
 //! `lintYamlKeyPriority`, `lintStepEnabled`) and `lint-cleanup-transcript` (the "Ingest as Post"
 //! chain's transcript cleanup, `cv_note::cleanup_youtube_transcript`). Dropped

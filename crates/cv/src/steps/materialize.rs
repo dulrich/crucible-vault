@@ -10,7 +10,7 @@
 //! to the job and the cycle guard covers echoes, I5), opening a workspace leaf (we return
 //! `open_path` to the client instead), `Notice` toasts, and the `enabled` toggle per period (a
 //! period without settings simply disarms the actions that use it). The empty-file-only
-//! self-guard for externally created notes is kept (`obsidian-crucible/AGENTS.md:280`) as
+//! self-guard for externally created notes is kept (`https://github.com/dulrich/obsidian-crucible/blob/master/AGENTS.md:280`) as
 //! `only_if_empty`.
 //!
 //! # Period settings

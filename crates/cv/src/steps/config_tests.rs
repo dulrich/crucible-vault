@@ -28,7 +28,7 @@ fn example_config_arms_every_action() {
         assert!(c.armed(id).is_some(), "{id} armed");
     }
     let kinds = c.table("kinds.toml")["kinds"].as_table().unwrap();
-    assert_eq!(kinds.len(), 10);
+    assert_eq!(kinds.len(), 9);
     assert_eq!(
         c.table("captures.toml")["capture"]
             .as_array()

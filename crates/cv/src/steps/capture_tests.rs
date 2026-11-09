@@ -163,7 +163,7 @@ fn capture_interpolates_vars_for_agent_output() {
     );
 }
 
-// Vectors from `obsidian-crucible/tests/captureEmptyBodyGuard.test.mjs`.
+// Vectors from `https://github.com/dulrich/obsidian-crucible/blob/master/tests/captureEmptyBodyGuard.test.mjs`.
 #[test]
 fn capture_empty_body_guard_vectors() {
     let existing = "---\ntitle: note\n---\n\nOriginal body, must survive untouched.";

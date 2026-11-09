@@ -15,7 +15,7 @@ pub const DEFAULT_CLIPBOARD_CMD: &str = "wl-paste --no-newline";
 pub const DEFAULT_CLIPBOARD_CMD_X11: &str = "xclip -o -selection clipboard";
 
 /// The vault root when `CV_VAULT` is unset: `~/vault`, i.e. this directory under `$HOME` (plan
-/// public-release WP-2, C#11; the configured vault is the live vault, D24).
+/// public-release WP-2, C#11; the configured vault is the one the daemon writes, D24).
 pub const DEFAULT_VAULT: &str = "vault";
 
 /// Resolved daemon/CLI configuration.

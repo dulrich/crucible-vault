@@ -9,8 +9,7 @@
 //!
 //! **Secrets never reach errors or logs**: URLs may carry an API key in the query string
 //! (`YOUTUBE_API_KEY`, WP-4), so reqwest errors are stripped of their URL and logs use
-//! [`redact_url`]. Replaces Crucible's `requestUrl` wrappers (`https://github.com/dulrich/obsidian-crucible/blob/master/src/
-//! orchestration/utils/{youtubeApi,xApi,blogsApi}.ts`); Obsidian's `requestUrl` (its CORS-free
+//! [`redact_url`]. Replaces Crucible's `requestUrl` wrappers (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/utils/{youtubeApi,xApi,blogsApi}.ts`); Obsidian's `requestUrl` (its CORS-free
 //! fetch) is the Obsidian-induced part and is dropped.
 
 use std::collections::HashMap;

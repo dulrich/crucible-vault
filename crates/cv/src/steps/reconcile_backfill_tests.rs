@@ -475,8 +475,8 @@ fn recleaned_is_pure_and_idempotent() {
 /// persisted, re-keyed rows, so B must run first); a second run changes nothing.
 #[test]
 fn one_non_dry_run_rekeys_unknown_sender_mail_and_backfills_its_publication() {
-    const EXAMPLE_DIGEST: &str = "[[newsletter]]\nname = \"Example Digest\"\nfrom = [\"hello@plain.example\"]\nkind = \"blog\"\n";
-    let w = rematch_world(EXAMPLE_DIGEST, "<p>alpha beta gamma</p>");
+    const NEWSLETTER_ROW: &str = "[[newsletter]]\nname = \"Sample Letter\"\nfrom = [\"hello@plain.example\"]\nkind = \"blog\"\n";
+    let w = rematch_world(NEWSLETTER_ROW, "<p>alpha beta gamma</p>");
     let (r0, _) = w.row(KIND, UNKNOWN, "m1@plain.example").unwrap();
     let path = r0.note_path.unwrap();
     let before = w.env.read(&path).unwrap();
@@ -489,10 +489,10 @@ fn one_non_dry_run_rekeys_unknown_sender_mail_and_backfills_its_publication() {
     assert_eq!(n(&first, "mail_rematched"), 1);
     assert_eq!(n(&first, "publication_backfilled"), 1);
     assert!(w.row(KIND, UNKNOWN, "m1@plain.example").is_none());
-    let (r, _) = w.row(KIND, "Example Digest", "m1@plain.example").unwrap();
+    let (r, _) = w.row(KIND, "Sample Letter", "m1@plain.example").unwrap();
     assert_eq!(r.note_path.as_deref(), Some(path.as_str()));
     let after = w.env.read(&path).unwrap();
-    assert!(after.contains("publication: Example Digest\n"), "{after}");
+    assert!(after.contains("publication: Sample Letter\n"), "{after}");
 
     let second = w.reconcile(false);
     assert_eq!(n(&second, "mail_rematched"), 0);

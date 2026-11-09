@@ -50,13 +50,13 @@ const NOTES: &[(&str, &str)] = &[
     ),
     ("core/works/Empty.md", "---\nwork-status: complete\n---\n"),
     (
-        "initiatives/alpha/INITIATIVE.md",
-        "---\ninitiative-title: Alpha\npending-plans: [\"p1\", \" \"]\n---\n# Blocked on User\n\n- [ ] ask one\n- [x] asked\n\n# Other\n\n- [ ] not counted\n",
+        "projects/alpha/PROJECT.md",
+        "---\nproject-title: Alpha\npending-items: [\"p1\", \" \"]\n---\n# Blocked on User\n\n- [ ] ask one\n- [x] asked\n\n# Other\n\n- [ ] not counted\n",
     ),
-    ("initiatives/alpha/README.md", "# readme\n"),
+    ("projects/alpha/README.md", "# readme\n"),
     (
-        "initiatives/beta/INITIATIVE.md",
-        "---\ninitiative-status: \" Blocked \"\n---\n",
+        "projects/beta/PROJECT.md",
+        "---\nproject-status: \" Blocked \"\n---\n",
     ),
     ("stack/tool1.md", "---\ndescription: first\n---\n#using\n"),
     (
@@ -398,7 +398,7 @@ status = [" "]
 [[views]]
 type = "tasks"
 name = "Blocked"
-filters = 'file.name == "INITIATIVE"'
+filters = 'file.name == "PROJECT"'
 status = [" "]
 task_filter = '["Blocked on User", "Blockers"].contains(value.heading)'
 task_group = "file"
@@ -443,9 +443,9 @@ fn tasks_overdue_grouped_by_heading() {
     assert_eq!(first.line, Some(1));
 
     let b = fx.run(&mut h, "monthly-tasks#Blocked", None);
-    assert_eq!(grid(&b), vec![vec!["ask one", "INITIATIVE", " "]]);
+    assert_eq!(grid(&b), vec![vec!["ask one", "PROJECT", " "]]);
     assert!(
-        matches!(&b.groups[0].key, Some(Cell::Link { path, .. }) if path == "initiatives/alpha/INITIATIVE.md")
+        matches!(&b.groups[0].key, Some(Cell::Link { path, .. }) if path == "projects/alpha/PROJECT.md")
     );
 }
 
@@ -513,14 +513,14 @@ name = "Half"
 #[test]
 fn hosting_ids_invalidation_and_reload() {
     let fx = fixture(&[(
-        "hubs.toml",
+        "lists.toml",
         "[[views]]\ntype='table'\nname='Stack'\nfilters='file.folder == \"stack\"'\norder=['file.name','note.description']\n",
     )]);
     let mut h = fx.host();
-    assert_eq!(h.view_ids(), vec!["hubs#Stack"]);
+    assert_eq!(h.view_ids(), vec!["lists#Stack"]);
     let reader = fx.reader();
     let p = h
-        .run(reader.generation(), &RunRequest::view("hubs#Stack"))
+        .run(reader.generation(), &RunRequest::view("lists#Stack"))
         .unwrap()
         .into_protocol()
         .unwrap();
@@ -532,11 +532,11 @@ fn hosting_ids_invalidation_and_reload() {
     );
     assert_eq!(
         h.on_index_generation(reader.generation() + 1),
-        vec!["hubs#Stack"]
+        vec!["lists#Stack"]
     );
     // Still serves the old generation through a fresh connection.
     assert!(
-        h.run(reader.generation(), &RunRequest::view("hubs#Stack"))
+        h.run(reader.generation(), &RunRequest::view("lists#Stack"))
             .is_ok()
     );
 
@@ -545,9 +545,9 @@ fn hosting_ids_invalidation_and_reload() {
         "[[views]]\ntype='tasks'\nname='All'\n",
     )
     .unwrap();
-    std::fs::write(fx.config.join("views").join("hubs.toml"), "not toml [").unwrap();
+    std::fs::write(fx.config.join("views").join("lists.toml"), "not toml [").unwrap();
     let ids = h.on_config_changed(&fx.config);
-    assert_eq!(ids, vec!["hubs#Stack", "more#All"]);
+    assert_eq!(ids, vec!["lists#Stack", "more#All"]);
     assert_eq!(h.view_ids(), vec!["more#All"]);
     assert_eq!(h.load_notices().len(), 1);
     // A missing views dir is simply no views.

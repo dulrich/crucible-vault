@@ -1,10 +1,10 @@
 //! Step module `file`: `guard`, `move`, `copy`, `set_props`, `remove_props`, `upsert_tags`,
 //! `mark_forwarded` — the building blocks of the file-as-kind and refine-transcript actions.
 //!
-//! Sources (all under `https://github.com/dulrich/obsidian-crucible/blob/master/`): the chain guard step (`src/chains.ts`,
+//! Sources (all in the Crucible repository, `https://github.com/dulrich/obsidian-crucible/blob/master/`): the chain guard step (`src/chains.ts`,
 //! `guardCondition {type: "not-has-tag"}`), the internal commands `crucible:upsert-tags`,
 //! `crucible:upsert-property`, `crucible:copy-note-to-folder`,
-//! `obsidian-crucible:move-current-file-to-folder` / `move-current-file-to-daily-folder`
+//! `move-current-file-to-folder` / `move-current-file-to-daily-folder`
 //! (`src/internalCommands.ts`), and `src/markForwarded.ts:3-16` (`[ ]` → `[>]`). Dropped
 //! (Obsidian-induced): the command-id indirection and arg strings (`{"tags": "x"}` → typed step
 //! keys), `processFrontMatter` whole-block re-serialization (minimal-diff `FrontmatterDoc`

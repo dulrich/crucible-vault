@@ -1,5 +1,5 @@
 # Example `sources.toml` (plan v0-automation-pipelines, D21): the tracked-source registry, which
-# replaces Crucible's `Tracked Channels.md` / `Tracked Feeds.md` tables.
+# replaces Crucible's Markdown tables of tracked YouTube channels and blogs.
 #
 # [[youtube]]: channel (name), id (UC…), tags, priority (high | normal | low | skip | ignore).
 # [[blog]]: name, link (RSS/Atom feed), method (rss; others are skipped), tags, priority,
@@ -11,7 +11,7 @@
 #   `from`, a `list_id` or `hosts`. Mail from an unmatched sender is still captured (source
 #   "unknown-sender"). hosts (web-clip hosts, www. ignored) files a clip from that host as the row's
 #   kind with its publication (auto-file step 2b, after the [[blog]]-row host match).
-# [[serial]] (plan round-11-feedback-todos, replaces the core/works notes): name (unique), short
+# [[serial]] (plan round-11-feedback-todos, replaces per-work notes): name (unique), short
 #   (publication; default name), author (bare name; [[ ]] and # ignored), prefix (source-URL
 #   prefixes), kind (kinds.toml key; required: a row without it is never filed), status (active | complete | ignored; the Works
 #   view's, filing ignores it). A clip matches when its author list holds `author` AND some prefix

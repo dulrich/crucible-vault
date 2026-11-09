@@ -40,8 +40,9 @@ section = "# Daily Brief"
 # fx = [{ base = "EUR", quote = "USD" }]
 # weather = [{ label = "Home", lat = 0.0, lon = 0.0 }]
 
-# Importance scorer: unset = stub (items stay unscored). Provisional SystemOne response
-# `{"score": n}` (D21); a url without a model falls back to the stub.
+# Importance scorer: unset = stub (items stay unscored). `url` is a llama.cpp-style
+# decision-model endpoint (`/v1/systemone`) answering `{"score": n}` (D21); a url without a model
+# falls back to the stub.
 [scorer]
 # url = "http://127.0.0.1:9000/v1/systemone"
 # model = "local/importance"

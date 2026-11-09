@@ -203,7 +203,7 @@ needs = ["active_path"]
 name = "kind"
 label = "Kind"
 kind = "enum"
-choices = ["transcript", "fanfic", "blog", "3-2-1", "repo", "prompt-kit", "post", "news", "thread", "quote"]
+choices = ["transcript", "fanfic", "blog", "repo", "prompt-kit", "post", "news", "thread", "quote"]
 required = true
 [[action.steps]]
 type = "move"
@@ -242,7 +242,7 @@ resources = { note = true, keys = ["raw::{path}"] }
 name = "provider"
 label = "Provider"
 kind = "enum"
-choices = ["local:local-chat-model", "openrouter:@preset/example-model", "openrouter:@preset/example-model", "codex:gpt-5.5"]
+choices = ["local:local-chat-model", "openrouter:openai/gpt-6.1-terra", "openrouter:xiaomi/mimo-v2.6-pro", "codex:gpt-5.5"]
 default = "local:local-chat-model"
 [[action.steps]]
 type = "guard"

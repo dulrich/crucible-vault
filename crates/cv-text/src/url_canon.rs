@@ -723,10 +723,10 @@ mod tests {
                 .canonical,
             "https://example.com/"
         );
-        let ch = canonicalize_url("https://www.youtube.com/@example-creator/").unwrap();
+        let ch = canonicalize_url("https://www.youtube.com/@samplechannel/").unwrap();
         assert_eq!(
             ch.tracked_source.unwrap().canonical,
-            "https://www.youtube.com/@example-creator"
+            "https://www.youtube.com/@samplechannel"
         );
         assert!(canonicalize_url("ftp://example.com/x").is_none());
         assert!(canonicalize_url("   ").is_none());
@@ -749,7 +749,7 @@ mod tests {
             );
         }
         assert_eq!(
-            extract_video_id_from_url("https://www.youtube.com/@example-creator"),
+            extract_video_id_from_url("https://www.youtube.com/@samplechannel"),
             None
         );
     }
@@ -764,9 +764,8 @@ mod tests {
     }
 
     // ---- https://github.com/dulrich/obsidian-crucible/blob/master/tests/postId.test.mjs
-    const SUBSTACK_EMAIL: &str = "https://www.blog.example.com/p/top-universities-and-national-intelligence?publication_id=1&post_id=200711891&isFreemail=false&r=52ktrf&triedRedirect=true&utm_source=substack&utm_medium=email";
-    const SUBSTACK_SLUG: &str =
-        "https://www.blog.example.com/p/top-universities-and-national-intelligence";
+    const SUBSTACK_EMAIL: &str = "https://writer.example/p/sample-post-title?publication_id=1&post_id=200711891&isFreemail=false&r=52ktrf&triedRedirect=true&utm_source=substack&utm_medium=email";
+    const SUBSTACK_SLUG: &str = "https://writer.example/p/sample-post-title";
 
     fn pid(u: &str) -> String {
         post_id_from_url(u, &PostIdOptions::default())

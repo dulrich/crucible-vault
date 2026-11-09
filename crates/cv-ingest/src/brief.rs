@@ -132,12 +132,12 @@ mod tests {
         };
         assert_eq!(fx_line(&fx), "- USD/MXN: 18.23 _(as of 2026-10-14)_");
         let w = WeatherLine {
-            label: "Bolzano, IT".into(),
+            label: "Sampletown".into(),
             high_c: 24.5,
             low_c: -2.5,
             code: 61,
         };
-        assert_eq!(weather_line(&w), "- Bolzano, IT: ↑25°C / ↓-2°C, light rain");
+        assert_eq!(weather_line(&w), "- Sampletown: ↑25°C / ↓-2°C, light rain");
         assert_eq!(weather_label(7), "code 7");
         let body = brief_body(
             "2026-10-15 06:00 +00:00",
@@ -145,11 +145,11 @@ mod tests {
                 ("USD/MXN".into(), Ok(fx)),
                 ("EUR/USD".into(), Err("HTTP 500".into())),
             ],
-            &[("Bolzano, IT".into(), Ok(w))],
+            &[("Sampletown".into(), Ok(w))],
         );
         assert_eq!(
             body,
-            "**FX Rates** _(updated 2026-10-15 06:00 +00:00)_\n- USD/MXN: 18.23 _(as of 2026-10-14)_\n- EUR/USD: *lookup failed (HTTP 500)*\n\n**Weather**\n- Bolzano, IT: ↑25°C / ↓-2°C, light rain"
+            "**FX Rates** _(updated 2026-10-15 06:00 +00:00)_\n- USD/MXN: 18.23 _(as of 2026-10-14)_\n- EUR/USD: *lookup failed (HTTP 500)*\n\n**Weather**\n- Sampletown: ↑25°C / ↓-2°C, light rain"
         );
         assert_eq!(brief_body("s", &[], &[]), "");
     }

@@ -165,15 +165,15 @@ fn function_and_field_vectors() {
             "xy",
         ),
         (
-            Some("initiatives/alpha/INITIATIVE.md"),
+            Some("projects/alpha/PROJECT.md"),
             None,
             "file.tasks.filter(value.status == \" \" && value.heading == \"Blocked on User\").length",
             "1",
         ),
         (
-            Some("initiatives/alpha/INITIATIVE.md"),
+            Some("projects/alpha/PROJECT.md"),
             None,
-            "list(note[\"pending-plans\"]).filter(value.toString().trim() != \"\").length",
+            "list(note[\"pending-items\"]).filter(value.toString().trim() != \"\").length",
             "1",
         ),
         (A, None, "!true || 1 == 1 && 2 != 3", "true"),
@@ -196,15 +196,15 @@ fn function_and_field_vectors() {
 fn every_base_vector_evaluates_without_panic() {
     let fx = fixture(&[]);
     for v in crate::expr::tests_support::BASE_VECTORS {
-        for row in [A, Some("initiatives/alpha/INITIATIVE.md"), None] {
+        for row in [A, Some("projects/alpha/PROJECT.md"), None] {
             let _ = ev(&fx, row, Some("core/works/Ann Blog.md"), v);
         }
     }
-    // The real initiatives formula on a fixture initiative.
+    // A project-list formula on a fixture project.
     assert_eq!(
         t(
             &fx,
-            Some("initiatives/alpha/INITIATIVE.md"),
+            Some("projects/alpha/PROJECT.md"),
             None,
             crate::expr::tests_support::BASE_VECTORS[16]
         ),
@@ -213,7 +213,7 @@ fn every_base_vector_evaluates_without_panic() {
     assert_eq!(
         t(
             &fx,
-            Some("initiatives/beta/INITIATIVE.md"),
+            Some("projects/beta/PROJECT.md"),
             None,
             crate::expr::tests_support::BASE_VECTORS[16]
         ),
@@ -222,7 +222,7 @@ fn every_base_vector_evaluates_without_panic() {
     assert_eq!(
         t(
             &fx,
-            Some("initiatives/beta/INITIATIVE.md"),
+            Some("projects/beta/PROJECT.md"),
             None,
             crate::expr::tests_support::BASE_VECTORS[20]
         ),
@@ -231,7 +231,7 @@ fn every_base_vector_evaluates_without_panic() {
     assert_eq!(
         t(
             &fx,
-            Some("initiatives/alpha/INITIATIVE.md"),
+            Some("projects/alpha/PROJECT.md"),
             None,
             crate::expr::tests_support::BASE_VECTORS[18]
         ),

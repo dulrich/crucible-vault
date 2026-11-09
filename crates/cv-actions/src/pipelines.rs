@@ -7,9 +7,8 @@
 //! [`crate::ConfigSet`] with the other files: hot-reloaded, and a file that fails to parse or to
 //! type-check keeps its last valid version and reports the error.
 //!
-//! `sources.toml` carries Crucible's registry columns (`https://github.com/dulrich/obsidian-crucible/blob/master/docs/
-//! tracked-sources.md`): the Markdown registry tables (`core/Tracked Channels.md`,
-//! `core/Tracked Feeds.md`) were the Obsidian-induced storage and are dropped for TOML; row
+//! `sources.toml` carries Crucible's registry columns (`https://github.com/dulrich/obsidian-crucible/blob/master/docs/tracked-sources.md`): the Markdown registry tables (one note of tracked YouTube
+//! channels, one of tracked blogs) were the Obsidian-induced storage and are dropped for TOML; row
 //! policy (skip/ignore priorities, non-`UC` ids, non-RSS methods) stays with the trackers.
 
 use serde::Deserialize;
@@ -391,7 +390,7 @@ pub struct SourcesConfig {
     pub blog: Vec<BlogSource>,
     /// `[[newsletter]]` mail senders (plan auto-intake-sprint WP-4).
     pub newsletter: Vec<NewsletterSource>,
-    /// `[[serial]]` works (plan round-11-feedback-todos Decision 4; replaces the `core/works`
+    /// `[[serial]]` works (plan round-11-feedback-todos Decision 4; replaces the per-work
     /// notes).
     pub serial: Vec<SerialSource>,
 }
@@ -911,7 +910,7 @@ max_tokens = 800
 [daily_brief]
 enabled = true
 fx = [{ base = "EUR", quote = "USD" }]
-weather = [{ label = "Home", lat = 52.5, lon = 13.4 }]
+weather = [{ label = "Sampletown", lat = 10.5, lon = 20.4 }]
 [scorer]
 url = "http://127.0.0.1:9000"
 model = "local/scorer"
@@ -925,7 +924,7 @@ retention_days = 14
         .unwrap();
         let c = PipelinesConfig::from_table(&p).unwrap();
         assert!(c.youtube.channel_enrich);
-        assert_eq!(c.daily_brief.weather[0].lat, 52.5);
+        assert_eq!(c.daily_brief.weather[0].lat, 10.5);
         assert_eq!(c.blogs.automatable_window, 3);
         assert_eq!(c.scorer.model.as_deref(), Some("local/scorer"));
         for bad in [

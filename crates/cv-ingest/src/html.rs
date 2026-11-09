@@ -1,8 +1,7 @@
 //! HTML → Markdown for blog bodies (over `htmd`, plan `v0-automation-pipelines` dependency
 //! posture) and the display word count.
 //!
-//! Replaces Crucible's use of Obsidian's `htmlToMarkdown` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/
-//! orchestration/utils/blogsApi.ts:74`) — an Obsidian-provided API, so the dependency is the
+//! Replaces Crucible's use of Obsidian's `htmlToMarkdown` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/utils/blogsApi.ts:74`) — an Obsidian-provided API, so the dependency is the
 //! constraint, not the behaviour. If the output starts needing repeated post-processing shims,
 //! that is the own-vs-depend trigger (principle #7), not a reason to add more shims here.
 

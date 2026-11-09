@@ -1,0 +1,59 @@
+# crucible-vault core daemon, live mode — an example systemd user unit. Copy it to ~/.config/systemd/user/crucible-vault.service,
+# adjust the marked lines, then `systemctl --user daemon-reload && systemctl --user enable --now crucible-vault`.
+# Requires `cv cutover mark --vault <vault> --yes` first: without the state.db marker, live mode against the protected vault is refused.
+# Alternative without systemd: run `cv daemon` from a login script or a cron `@reboot` entry (no sandbox, then).
+[Unit]
+Description=crucible-vault core daemon (live mode)
+
+[Service]
+Type=simple
+# Adjust to the installed path of the `cv` binary.
+ExecStart=%h/.cargo/bin/cv daemon
+# Optional: link-write roots. A live write through a symlinked note may land under these (crates/cv/src/config.rs).
+# If you set this, also add the same directory as a ReadWritePaths= line below.
+#Environment=CV_LINK_WRITE_ROOTS=/path/to/linked/notes
+# Optional secrets file (KEY=value lines, e.g. provider API keys); `-` = ignored when absent.
+EnvironmentFile=-%h/.config/crucible-vault/env
+Restart=on-failure
+
+# Sandbox: a strict filesystem and syscall baseline, networked variant (provider HTTP).
+# Writes: the vault and link-write roots (set ReadWritePaths= below to your vault), state.db/search.db/uri-spool (~/.local/state/crucible-vault),
+# the index generations (~/.cache/crucible-vault) and the optional system trash; RuntimeDirectory= creates the socket dir (%t/crucible-vault) on each boot (the state and cache dirs must already exist).
+# Secrets under ~/.config/crucible-vault stay read-only.
+# MemoryDenyWriteExecute is omitted: providers.toml may configure `cli` providers whose children (node/bun CLIs) run a JIT.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Adjust to your vault directory (and any link-write roots).
+ReadWritePaths=%h/vault
+ReadWritePaths=%h/.local/state/crucible-vault
+ReadWritePaths=%h/.cache/crucible-vault
+RuntimeDirectory=crucible-vault
+RuntimeDirectoryMode=0700
+ReadWritePaths=-%h/.local/share/Trash
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Notes and attachments the daemon writes keep ordinary 0644/0755 modes (the vault is shared with the editor and Obsidian).
+UMask=0022
+
+[Install]
+WantedBy=default.target

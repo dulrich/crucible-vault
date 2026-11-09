@@ -98,7 +98,7 @@ fn views_invalidated_re_requests_a_shown_view() {
     // Other ids leave it alone.
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::ViewsInvalidated {
-            view_ids: vec!["hubs#Hub View B".into()],
+            view_ids: vec!["lists#Hub View B".into()],
         },
     )));
     need(&mut app);

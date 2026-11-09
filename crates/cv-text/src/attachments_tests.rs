@@ -80,14 +80,14 @@ fn clamp_image_quality_handles_nan_undefined_and_bounds() {
 
 #[test]
 fn repoint_rewrites_moved_embed_prefixes_md_wiki_encoded_raw() {
-    let content = "![](_resources/Clippings/example-person/3ff_MD5.webp)\n![[_resources/Clippings/example-person/abc_MD5.png]]\nProse mentioning _resources/Clippings/example-person/ stays untouched.";
+    let content = "![](_resources/Clippings/sample-subject/3ff_MD5.webp)\n![[_resources/Clippings/sample-subject/abc_MD5.png]]\nProse mentioning _resources/Clippings/sample-subject/ stays untouched.";
     assert_eq!(
         repoint_attachment_folder_prefix(
             content,
-            "_resources/Clippings/example-person",
-            "_resources/daily/day/2026-06-13/example-person"
+            "_resources/Clippings/sample-subject",
+            "_resources/daily/day/2026-06-13/sample-subject"
         ),
-        "![](_resources/daily/day/2026-06-13/example-person/3ff_MD5.webp)\n![[_resources/daily/day/2026-06-13/example-person/abc_MD5.png]]\nProse mentioning _resources/Clippings/example-person/ stays untouched."
+        "![](_resources/daily/day/2026-06-13/sample-subject/3ff_MD5.webp)\n![[_resources/daily/day/2026-06-13/sample-subject/abc_MD5.png]]\nProse mentioning _resources/Clippings/sample-subject/ stays untouched."
     );
 }
 
@@ -103,14 +103,19 @@ fn repoint_handles_pct20_prefixes_and_is_idempotent() {
 
 #[test]
 fn plan_prefers_expected_folder_then_unique_name() {
-    let exp = "_resources/daily/day/2026-06-13/example-person";
+    let exp = "_resources/daily/day/2026-06-13/sample-subject";
     let paths = [
-        "_resources/daily/day/2026-06-13/example-person/3ff_MD5.webp",
+        "_resources/daily/day/2026-06-13/sample-subject/3ff_MD5.webp",
         "_resources/other/elsewhere/3ff_MD5.webp",
     ];
     assert_eq!(
-        plan("_resources/Clippings/example-person/3ff_MD5.webp", exp, &paths).as_deref(),
-        Some("_resources/daily/day/2026-06-13/example-person/3ff_MD5.webp")
+        plan(
+            "_resources/Clippings/sample-subject/3ff_MD5.webp",
+            exp,
+            &paths
+        )
+        .as_deref(),
+        Some("_resources/daily/day/2026-06-13/sample-subject/3ff_MD5.webp")
     );
     assert_eq!(
         plan(
@@ -516,14 +521,14 @@ fn rewrite_is_idempotent() {
 
 #[test]
 fn repoint_wiki_link_alongside_embeds() {
-    let content = "![](_resources/Clippings/example-person/3ff_MD5.webp)\n[[_resources/Clippings/example-person/doc_MD5.pdf|Open: the source PDF]]";
+    let content = "![](_resources/Clippings/sample-subject/3ff_MD5.webp)\n[[_resources/Clippings/sample-subject/doc_MD5.pdf|Open: the source PDF]]";
     assert_eq!(
         repoint_attachment_folder_prefix(
             content,
-            "_resources/Clippings/example-person",
-            "_resources/daily/day/2026-06-13/example-person"
+            "_resources/Clippings/sample-subject",
+            "_resources/daily/day/2026-06-13/sample-subject"
         ),
-        "![](_resources/daily/day/2026-06-13/example-person/3ff_MD5.webp)\n[[_resources/daily/day/2026-06-13/example-person/doc_MD5.pdf|Open: the source PDF]]"
+        "![](_resources/daily/day/2026-06-13/sample-subject/3ff_MD5.webp)\n[[_resources/daily/day/2026-06-13/sample-subject/doc_MD5.pdf|Open: the source PDF]]"
     );
 }
 
@@ -541,12 +546,12 @@ fn repoint_pct20_markdown_link_idempotent() {
 
 #[test]
 fn repoint_never_rewrites_ordinary_note_links() {
-    let content = "[[_resources/Clippings/example-person/Some Note]]\n[a note](_resources/Clippings/example-person/Some%20Note.md)";
+    let content = "[[_resources/Clippings/sample-subject/Some Note]]\n[a note](_resources/Clippings/sample-subject/Some%20Note.md)";
     assert_eq!(
         repoint_attachment_folder_prefix(
             content,
-            "_resources/Clippings/example-person",
-            "_resources/daily/day/2026-06-13/example-person"
+            "_resources/Clippings/sample-subject",
+            "_resources/daily/day/2026-06-13/sample-subject"
         ),
         content
     );

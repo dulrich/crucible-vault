@@ -6,7 +6,7 @@
 //!
 //! Crucible reference: `src/orchestration/NoteLockManager.ts:47-112` (per-note lock state and its
 //! change event) and `src/noteLockOverlay.ts:29-72` (grayed overlay + spinner naming the holder),
-//! under `https://github.com/dulrich/obsidian-crucible/blob/master/`. The Obsidian-induced part (plugin-side
+//! in the Crucible repository (`https://github.com/dulrich/obsidian-crucible/blob/master/`). The Obsidian-induced part (plugin-side
 //! lock bookkeeping around Obsidian's editor) is dropped: the daemon is the authority, and the
 //! editor only mirrors its signal.
 

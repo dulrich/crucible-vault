@@ -1,7 +1,7 @@
 //! Day/month period date math for nav (WP-4).
 //!
 //! Replaces the Note Toolbar `{{js:}}` day/month bars (inventory #2, D10 "Nav bars"). The bar
-//! items are transcribed from the live Note Toolbar settings (`folderMappings`: `daily/day` →
+//! items are taken from the Note Toolbar settings (`folderMappings`: `daily/day` →
 //! Day nav, `daily/month` → Month nav). Pure: "today" is always injected.
 
 use chrono::{Datelike, Days, Months, NaiveDate};

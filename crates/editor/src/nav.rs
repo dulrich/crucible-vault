@@ -1,6 +1,6 @@
 //! Day/month nav bars (WP-4), replacing Note Toolbar's `{{js:}}` bars (inventory #2).
 //!
-//! Items come from `editor_model::period::bar_for` (transcribed from the live Note Toolbar
+//! Items come from `editor_model::period::bar_for` (taken from the Note Toolbar
 //! settings). Period targets run `period.open`, which materializes the note and returns
 //! `open_path`; the result opens in the bar's own pane — the bar belongs to the pane, not the
 //! "active file", which drops Note Toolbar's wrong-nav-in-split caveat.

@@ -20,16 +20,11 @@ folder = "{period.day}"
 label = "Fanfic"
 tags = ["fanfic"]
 folder = "{period.day}"
-hosts = ["archiveofourown.org", "forums.spacebattles.com", "www.fanfiction.net", "m.fanfiction.net", "www.royalroad.com", "www.author-site-a.example", "author-site-b.example"]
+hosts = ["archiveofourown.org", "forums.spacebattles.com", "www.fanfiction.net", "m.fanfiction.net", "www.royalroad.com"]
 
 [kinds.blog]
 label = "Blog"
 tags = ["blog"]
-folder = "{period.day}"
-
-[kinds.newsletter-a]
-label = "newsletter-a"
-tags = ["newsletter-a"]
 folder = "{period.day}"
 
 [kinds.repo]

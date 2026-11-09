@@ -100,7 +100,7 @@ fn migrated_reading_list_has_an_unread_row() {
 and = ['file.folder == "daily/day/" + this.file.name']
 
 [formulas]
-tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "using").join(", ")'
+tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "pinned").join(", ")'
 minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
 read = 'if(note.read == true, "✅", "❌")'
 

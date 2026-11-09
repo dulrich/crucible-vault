@@ -18,17 +18,17 @@ model = "local:local-chat-model"
 max_tokens = 16384
 
 [refine-transcript-openrouter]
-name = "Transcript Refiner (OpenRouter)"
+name = "Transcript Refiner (OpenRouter GPT-6.1-Terra)"
 prompt_file = "_custom/prompts/Refine Transcript.md"
 input = "{{content}}"
-model = "openrouter:@preset/example-model"
+model = "openrouter:openai/gpt-6.1-terra"
 max_tokens = 16384
 
-[refine-transcript-openrouter-gemma]
-name = "Transcript Refiner (OpenRouter Gemma)"
+[refine-transcript-openrouter-mimo]
+name = "Transcript Refiner (OpenRouter MiMo-V2.6-Pro)"
 prompt_file = "_custom/prompts/Refine Transcript.md"
 input = "{{content}}"
-model = "openrouter:@preset/example-model"
+model = "openrouter:xiaomi/mimo-v2.6-pro"
 max_tokens = 16384
 
 # The CLI refiner edited the note in place given its path; here it receives the body like the
@@ -42,14 +42,14 @@ max_tokens = 16384
 
 # Intake enrich (plan intake-auto-enrich WP-3, D29): ONE call per intake note returns a JSON object
 # (summary, entities, key_claims, chapters, spans, content_ends_after) of verbatim anchors that
-# the `intake_enrich` step resolves and applies; the model never rewrites the note. Terra at the
-# family's default (low) effort; the spike's answers were well under 4k tokens. Repoint `model`
-# at another route (e.g. a local one) without code changes if the codex leg degrades.
+# the `intake_enrich` step resolves and applies; the model never rewrites the note. GPT-6.1-Terra
+# at its default (low) effort; the spike's answers were well under 4k tokens. Repoint `model`
+# at another route (e.g. the local llama.cpp provider or MiMo-V2.6-Pro) without code changes.
 [intake-enrich]
 name = "Intake Enrich"
 prompt_file = "_custom/prompts/Intake Enrich.md"
 input = "{{content}}"
-model = "router:codex-profile-a/gpt-6.1-terra"
+model = "openrouter:openai/gpt-6.1-terra"
 max_tokens = 8192
 
 # Transcript refine (plan youtube-transcript-auto-refine WP-1, D30): the `transcript_refine` step
@@ -61,5 +61,5 @@ max_tokens = 8192
 name = "Transcript Refine"
 prompt_file = "_custom/prompts/Refine Transcript Chapters.md"
 input = "{{value}}"
-model = "router:codex-profile-a/gpt-6.1-terra"
+model = "openrouter:openai/gpt-6.1-terra"
 max_tokens = 32000

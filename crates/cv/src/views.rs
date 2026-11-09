@@ -615,7 +615,7 @@ mod tests {
         let config = tmp.join("config");
         std::fs::create_dir_all(config.join("views")).unwrap();
         std::fs::write(
-            config.join("views/hubs.toml"),
+            config.join("views/lists.toml"),
             "[[views]]\ntype='table'\nname='On'\nfilters='note.status == \"on\"'\norder=['file.name']\n",
         )
         .unwrap();
@@ -640,7 +640,7 @@ mod tests {
                 })
                 .collect()
         };
-        let id = "hubs#On".to_owned();
+        let id = "lists#On".to_owned();
         assert_eq!(
             names(&reg.run(&id, None, None, None).await.unwrap()),
             ["t1"]

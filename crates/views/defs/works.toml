@@ -1,4 +1,4 @@
-# Works over `sources.toml` (plan round-11-feedback-todos Decision 5; replaces the `core/works`
+# Works over `sources.toml` (plan round-11-feedback-todos Decision 5; replaces the per-work
 # notes, migrated by deploy migration 0007).
 # - Active/Complete read `source = "sources"`: every `[[serial]]` row plus every `[[blog]]`,
 #   `[[newsletter]]` and `[[youtube]]` row with `works = true` (`ignored` serial rows are in
