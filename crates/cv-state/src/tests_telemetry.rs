@@ -30,27 +30,24 @@ fn fail_now(s: &mut StateDb, id: &str, now: i64) {
 }
 
 #[test]
-fn v15_database_migrates_to_v16_and_marks_existing_rows_partial() {
+fn baseline_database_has_the_telemetry_tables_and_instruments_new_rows() {
+    // The v15→v16 path no longer exists (1.0.0 baseline folds it in); the schema shape is
+    // pinned by the baseline fixture, so this checks the tables exist and new rows are
+    // fully instrumented (not partial).
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("state.db");
-    {
-        let c = rusqlite::Connection::open(&p).unwrap();
-        c.execute_batch(migrate::BASELINE).unwrap();
-        c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
-            .unwrap();
-        c.execute(
-            "INSERT INTO jobs (id, job_type, lane, status, params, resource_keys, created_ms, settled_at_ms)
-             VALUES ('old', 't', 1, 'done', '{}', '[]', 5, 9)",
-            [],
-        )
-        .unwrap();
-    }
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
     assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
-    let t = s.job_telemetry("old").unwrap().unwrap();
-    assert!(t.partial);
-    assert_eq!(split_buckets(&t), None, "pre-v16 intervals are unavailable");
-    // A row created after the step is fully instrumented.
+    {
+        let c = rusqlite::Connection::open(&p).unwrap();
+        for t in ["job_attempt_times", "job_wait_events", "job_step_times"] {
+            let n: i64 = c
+                .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{t}");
+        }
+    }
+    // A row created on a fresh baseline is fully instrumented.
     let id = id_of(s.enqueue(job("t", None, &[]), 10).unwrap());
     s.claim(12).unwrap();
     s.settle(&id, &JobResult::Done, 15).unwrap();

@@ -246,14 +246,13 @@ mod tests {
     }
 
     #[test]
-    fn v16_database_migrates_to_v17_with_an_empty_lineage() {
+    fn baseline_database_opens_with_an_empty_lineage() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("state.db");
         {
             let c = rusqlite::Connection::open(&p).unwrap();
             c.execute_batch(crate::migrate::BASELINE).unwrap();
-            c.execute_batch(crate::migrate::MIGRATIONS[0]).unwrap();
-            c.pragma_update(None, "user_version", crate::migrate::BASELINE_VERSION + 1)
+            c.pragma_update(None, "user_version", crate::migrate::BASELINE_VERSION)
                 .unwrap();
         }
         let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();

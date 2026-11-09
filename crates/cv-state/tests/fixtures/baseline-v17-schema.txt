@@ -1,13 +1,18 @@
-user_version=15
+user_version=17
+index|job_wait_events_job|job_wait_events|CREATE INDEX job_wait_events_job ON job_wait_events(job_id, seq)
 index|jobs_claim|jobs|CREATE INDEX jobs_claim ON jobs(status, lane, id)
 index|jobs_dedupe|jobs|CREATE INDEX jobs_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL
 index|jobs_settled|jobs|CREATE INDEX jobs_settled ON jobs(settled_at_ms) WHERE settled_at_ms IS NOT NULL
 index|link_records_x_status_id|link_records|CREATE INDEX link_records_x_status_id ON link_records(x_status_id)
 index|link_records_yt_video_id|link_records|CREATE INDEX link_records_yt_video_id ON link_records(yt_video_id)
+index|path_lineage_at|path_lineage|CREATE INDEX path_lineage_at ON path_lineage(at_ms)
+index|path_lineage_from|path_lineage|CREATE INDEX path_lineage_from ON path_lineage(from_path, seq)
 index|sqlite_autoindex_api_usage_1|api_usage|NULL
 index|sqlite_autoindex_ignored_ids_1|ignored_ids|NULL
 index|sqlite_autoindex_image_descriptions_1|image_descriptions|NULL
+index|sqlite_autoindex_job_attempt_times_1|job_attempt_times|NULL
 index|sqlite_autoindex_job_step_checkpoints_1|job_step_checkpoints|NULL
+index|sqlite_autoindex_job_step_times_1|job_step_times|NULL
 index|sqlite_autoindex_jobs_1|jobs|NULL
 index|sqlite_autoindex_link_records_1|link_records|NULL
 index|sqlite_autoindex_mail_boilerplate_1|mail_boilerplate|NULL
@@ -54,12 +59,36 @@ table|image_descriptions|image_descriptions|CREATE TABLE image_descriptions (
     described_at      TEXT NOT NULL,
     raw               TEXT NOT NULL
 )
+table|job_attempt_times|job_attempt_times|CREATE TABLE job_attempt_times (
+    job_id      TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    claimed_ms  INTEGER NOT NULL,
+    settled_ms  INTEGER,
+    PRIMARY KEY (job_id, attempt)
+)
 table|job_step_checkpoints|job_step_checkpoints|CREATE TABLE job_step_checkpoints (
     job_id      TEXT NOT NULL,
     step_index  INTEGER NOT NULL,
     outcome     TEXT NOT NULL,
     at_ms       INTEGER NOT NULL,
     PRIMARY KEY (job_id, step_index)
+)
+table|job_step_times|job_step_times|CREATE TABLE job_step_times (
+    job_id      TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    step_index  INTEGER NOT NULL,
+    step_kind   TEXT NOT NULL,
+    start_ms    INTEGER NOT NULL,
+    end_ms      INTEGER,
+    PRIMARY KEY (job_id, attempt, step_index)
+)
+table|job_wait_events|job_wait_events|CREATE TABLE job_wait_events (
+    seq       INTEGER PRIMARY KEY,
+    job_id    TEXT NOT NULL,
+    at_ms     INTEGER NOT NULL,
+    cause     TEXT NOT NULL,
+    blocker   TEXT,
+    until_ms  INTEGER
 )
 table|jobs|jobs|CREATE TABLE jobs (
     id              TEXT PRIMARY KEY,
@@ -80,7 +109,7 @@ table|jobs|jobs|CREATE TABLE jobs (
     failure_reason  TEXT,
     failure_kind    TEXT,
     notes           TEXT
-, cancel_requested INTEGER NOT NULL DEFAULT 0)
+, cancel_requested INTEGER NOT NULL DEFAULT 0, tel_attempt INTEGER NOT NULL DEFAULT 0, first_claimed_ms INTEGER, last_claimed_ms INTEGER, tel_partial INTEGER NOT NULL DEFAULT 0)
 table|link_records|link_records|CREATE TABLE link_records (
     canonical_url        TEXT PRIMARY KEY,
     url                  TEXT NOT NULL,
@@ -109,6 +138,17 @@ table|mail_boilerplate_seen|mail_boilerplate_seen|CREATE TABLE mail_boilerplate_
          message_id  TEXT NOT NULL,
          PRIMARY KEY (source_key, message_id)
      )
+table|path_lineage|path_lineage|CREATE TABLE path_lineage (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL CHECK (kind IN ('created', 'renamed', 'replaced', 'deleted')),
+    from_path  TEXT NOT NULL,
+    to_path    TEXT,
+    at_ms      INTEGER NOT NULL
+)
+table|path_lineage_floor|path_lineage_floor|CREATE TABLE path_lineage_floor (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    pruned  INTEGER NOT NULL
+)
 table|schedule_runs|schedule_runs|CREATE TABLE schedule_runs (
     action_id    TEXT PRIMARY KEY,
     last_run_ms  INTEGER NOT NULL
@@ -124,6 +164,7 @@ table|service_health|service_health|CREATE TABLE service_health (
     retry_at_ms           INTEGER,
     probe_acquired_at_ms  INTEGER
 )
+table|sqlite_sequence|sqlite_sequence|CREATE TABLE sqlite_sequence(name,seq)
 table|tracker_items|tracker_items|CREATE TABLE tracker_items (
     source_kind    TEXT NOT NULL,
     source_key     TEXT NOT NULL,
