@@ -285,11 +285,12 @@ impl App {
             let Some(d) = &self.daemon else {
                 return Err(DaemonError::Disconnected);
             };
-            let (bytes, hash) = match prefetched {
+            let read = match prefetched {
                 Some(read) => read,
-                None => d.read_file(path)?,
+                None => d.read_bound(path)?,
             };
-            let doc = crate::source::SourceBuffer::new(path, &bytes, hash);
+            let mut doc = crate::source::SourceBuffer::new(path, &read.bytes, read.hash);
+            doc.set_lineage_cursor(read.cursor);
             let mode = self.initial_mode(path);
             let mut od = OpenDoc {
                 buffer: doc,
@@ -394,13 +395,44 @@ impl App {
         self.sweep_pdf_docs();
     }
 
-    /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`).
+    /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`). Plan
+    /// note-path-continuity D3: a read that finds the path gone asks lineage first; a `Moved`
+    /// answer retargets the document (never the "deleted" state), and the buffer's missing state
+    /// the read would have raised is cleared.
     pub(super) fn reload_tab(&mut self, path: &str, hash: Option<&str>) {
-        let daemon = self.daemon.as_ref();
+        let daemon = self.daemon.clone();
         let Some(doc) = self.docs.get_mut(path) else {
             return;
         };
-        if let Some(e) = crate::source::file_changed(&mut doc.buffer, hash, daemon) {
+        let moved = std::cell::RefCell::new(None);
+        let cursor = doc.buffer.lineage_cursor();
+        let err = match daemon.as_ref() {
+            None => None,
+            Some(d) => doc
+                .buffer
+                .external_change(hash, || match d.read_file(path) {
+                    Err(DaemonError::NotFound(p)) => {
+                        let resolved = cursor.and_then(|c| d.resolve_path(path, Some(c)).ok());
+                        match resolved.map(|r| (r.resolution, r.head)) {
+                            Some((cv_protocol::PathResolution::Moved { to }, head)) => {
+                                *moved.borrow_mut() = Some((to, head));
+                            }
+                            Some((cv_protocol::PathResolution::Live { .. }, _)) => {
+                                return d.read_file(path);
+                            }
+                            _ => {}
+                        }
+                        Err(DaemonError::NotFound(p))
+                    }
+                    other => other,
+                }),
+        };
+        if let Some((to, head)) = moved.into_inner() {
+            if let Some(o) = self.docs.get_mut(path) {
+                o.buffer.clear_missing();
+            }
+            self.follow_resolved(path, &to, head);
+        } else if let Some(e) = err {
             self.status.set_error(e);
         }
     }

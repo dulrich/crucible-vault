@@ -431,7 +431,9 @@ impl App {
             }
         }
         let edited = buf(&self.docs, &from).is_some_and(|d| d.edit_seq() != seq);
+        let cursor = self.cursor_of(&from);
         self.follow_moved(&from, to, edited);
+        self.rebind_after_move(cursor, &from, to);
     }
 
     /// The tail of a move follow ([`Self::follow_open`], WP-5 title renames): unedited →

@@ -210,19 +210,30 @@ impl App {
                         hash,
                         from,
                         replaced_by,
+                        seq,
                         ..
                     } => {
                         if let Some(from) = from.as_deref() {
                             // Round 9 WP-3 (Decision 4): a daemon move re-keys the open tabs
-                            // (the bridge sends this before the source `Deleted`).
-                            self.follow_daemon_move(from, &path);
+                            // (the bridge sends this before the source `Deleted`). Plan
+                            // note-path-continuity D3: only when the event is later than the
+                            // document's lineage cursor.
+                            self.follow_move_event(from, &path, seq);
                         }
-                        if kind == cv_protocol::ChangeKind::Deleted
-                            && let Some(by) = replaced_by.as_deref()
-                        {
+                        let deleted = kind == cv_protocol::ChangeKind::Deleted;
+                        let mut handled = false;
+                        if deleted && let Some(by) = replaced_by.as_deref() {
                             // Round 11 WP-1 (Decision 1): an absorbed note's tabs land on the
                             // note that absorbed it (a dirty one keeps the conflict path below).
-                            self.follow_replaced(&path, by);
+                            if self.event_stale(&path, seq) {
+                                handled = true;
+                            } else {
+                                self.follow_replaced(&path, by);
+                            }
+                        } else if deleted {
+                            // D3: a delete of an open path asks lineage where the note went
+                            // before the tab may report "deleted".
+                            handled = self.resolve_deleted(&path, seq);
                         }
                         self.reading.file_changed(&path);
                         if kind != cv_protocol::ChangeKind::Modified {
@@ -230,7 +241,9 @@ impl App {
                             // then rewrites the note, whose re-lower must see them.
                             self.resolver.invalidate();
                         }
-                        self.reload_tab(&path, hash.as_deref());
+                        if !handled {
+                            self.reload_tab(&path, hash.as_deref());
+                        }
                         self.panels.invalidate();
                         if path.starts_with(crate::palette::CONFIG_PREFIX) {
                             self.palette.invalidate();

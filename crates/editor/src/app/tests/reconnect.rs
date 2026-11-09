@@ -193,3 +193,18 @@ fn reconnect_before_the_old_saves_failure_resyncs_after_it() {
     assert!(t.is_dirty());
     assert!(!t.take_resync_pending());
 }
+
+/// Plan note-path-continuity D3: a note moved while the editor was disconnected is followed on
+/// reconnect (dirty text kept, saved at the new path), never marked missing.
+#[test]
+fn reconnect_follows_a_note_moved_while_disconnected() {
+    let (_tmp, d, mut app) = setup(&["r9/a.md"], 0);
+    type_x(&mut app);
+    let _unfed = d.daemon_move("r9/a.md", "r9/b.md").expect("move");
+    reconnect(&mut app);
+    assert!(app.doc("r9/a.md").is_none(), "left the old path");
+    let t = doc(&mut app, "r9/b.md");
+    assert_eq!(t.text(), "xbody", "dirty text kept");
+    assert!(!t.is_missing() && t.conflict().is_none());
+    assert_eq!(app.status.error_text(), None);
+}

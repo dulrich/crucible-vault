@@ -109,3 +109,150 @@ fn plain_session_close_follows_visit_order() {
     let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
     assert_eq!(active_path(&app).as_deref(), Some("r14c/b.md"));
 }
+
+// Plan note-path-continuity WP-3 (D3): the editor resolves lineage before it reports "deleted".
+
+fn deleted_event(path: &str, seq: Option<u64>) -> Notification {
+    Notification::FileChanged {
+        path: path.to_owned(),
+        kind: ChangeKind::Deleted,
+        hash: None,
+        origin: Origin::Daemon,
+        from: None,
+        replaced_by: None,
+        seq,
+    }
+}
+
+/// Saves `path`'s buffer on the daemon and lands the outcome (the retry, if any, is pumped).
+fn save_now(app: &mut App, d: &FakeDaemon, path: &str) {
+    let job = app
+        .doc_mut(path)
+        .and_then(|b| b.begin_save())
+        .expect("a save starts");
+    let outcome = job.run(d);
+    let _ = app.send(job.done(outcome));
+}
+
+#[test]
+fn chained_moves_end_on_the_final_path() {
+    let (_tmp, d, mut app) = setup(&["wp3a/a.md"]);
+    let mut ns = d.daemon_move("wp3a/a.md", "wp3a/b.md").expect("a to b");
+    ns.extend(d.daemon_move("wp3a/b.md", "wp3a/c.md").expect("b to c"));
+    feed(&mut app, ns);
+    assert_eq!(open_paths(&app), vec!["wp3a/c.md".to_owned()]);
+    assert_eq!(app.status.error_text(), None);
+    let doc = app.doc("wp3a/c.md").expect("at c");
+    assert!(!doc.is_missing() && doc.conflict().is_none());
+    assert_eq!(
+        doc.lineage_cursor(),
+        d.lineage_head().ok(),
+        "cursor advanced"
+    );
+}
+
+#[test]
+fn degraded_deleted_plus_created_retargets_through_lineage() {
+    let (_tmp, d, mut app) = setup(&["wp3b/a.md"]);
+    let ev = d
+        .daemon_move_degraded("wp3b/a.md", "wp3b/c.md")
+        .expect("move");
+    feed(&mut app, ev);
+    assert_eq!(open_paths(&app), vec!["wp3b/c.md".to_owned()]);
+    assert_eq!(app.status.error_text(), None, "no `file deleted on disk`");
+    let doc = app.doc("wp3b/c.md").expect("at c");
+    assert!(!doc.is_missing() && doc.conflict().is_none());
+}
+
+#[test]
+fn dirty_tab_moved_before_its_save_keeps_its_text_and_saves_at_the_new_path() {
+    let (_tmp, d, mut app) = setup(&["wp3c/a.md"]);
+    type_x(&mut app);
+    let _unfed = d.daemon_move("wp3c/a.md", "wp3c/c.md").expect("move");
+    save_now(&mut app, &d, "wp3c/a.md");
+    assert_eq!(open_paths(&app), vec!["wp3c/c.md".to_owned()]);
+    let doc = app.doc("wp3c/c.md").expect("at c");
+    assert_eq!(doc.text(), "xbody");
+    assert!(!doc.is_dirty() && doc.conflict().is_none() && !doc.is_missing());
+    assert_eq!(d.read_file("wp3c/c.md").expect("c").0, b"xbody");
+    assert!(d.read_file("wp3c/a.md").is_err(), "nothing recreated at a");
+}
+
+#[test]
+fn dirty_tab_moved_before_its_save_hits_the_conflict_bar_when_c_changed() {
+    let (_tmp, d, mut app) = setup(&["wp3c2/a.md"]);
+    type_x(&mut app);
+    let _unfed = d.daemon_move("wp3c2/a.md", "wp3c2/c.md").expect("move");
+    d.write_note("wp3c2/c.md", "other", &ContentHash::of(b"body"))
+        .expect("c edited elsewhere");
+    save_now(&mut app, &d, "wp3c2/a.md");
+    let doc = app.doc("wp3c2/c.md").expect("at c");
+    assert_eq!(doc.text(), "xbody", "dirty text kept");
+    assert!(doc.is_dirty() && doc.conflict().is_some() && !doc.is_missing());
+    assert_eq!(
+        d.read_file("wp3c2/c.md").expect("c").0,
+        b"other",
+        "no overwrite"
+    );
+}
+
+#[test]
+fn tab_follows_its_own_note_when_a_new_note_took_the_old_path() {
+    let (_tmp, d, mut app) = setup(&["wp3d/a.md"]);
+    let pair = d.daemon_move("wp3d/a.md", "wp3d/b.md").expect("move");
+    d.create_note("wp3d/a.md", "new").expect("new note at a");
+    feed(&mut app, pair);
+    assert_eq!(open_paths(&app), vec!["wp3d/b.md".to_owned()]);
+    assert_eq!(app.doc("wp3d/b.md").expect("own note").text(), "body");
+    assert!(app.doc("wp3d/a.md").is_none());
+    assert_eq!(app.status.error_text(), None);
+}
+
+#[test]
+fn a_delayed_move_notification_leaves_a_tab_opened_after_it_alone() {
+    let (_tmp, d) = fake();
+    let d = Arc::new(d);
+    d.create_note("wp3e/a.md", "x").expect("x");
+    let delayed = d.daemon_move("wp3e/a.md", "wp3e/b.md").expect("move");
+    d.create_note("wp3e/a.md", "y").expect("y at a");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.queue_rpcs();
+    let _ = app.send(Message::Explorer(ExplorerMsg::Open("wp3e/a.md".into())));
+    feed(&mut app, delayed);
+    assert_eq!(open_paths(&app), vec!["wp3e/a.md".to_owned()]);
+    assert_eq!(app.doc("wp3e/a.md").expect("y").text(), "y");
+    assert!(app.doc("wp3e/b.md").is_none());
+    assert_eq!(app.status.error_text(), None);
+}
+
+#[test]
+fn a_real_delete_still_shows_file_deleted_on_disk() {
+    let (_tmp, d, mut app) = setup(&["wp3f/a.md"]);
+    d.delete("wp3f/a.md").expect("delete");
+    feed(
+        &mut app,
+        vec![deleted_event("wp3f/a.md", d.lineage_head().ok())],
+    );
+    assert_eq!(app.status.error_text(), Some("file deleted on disk"));
+}
+
+#[test]
+fn a_delayed_replaced_notification_leaves_a_tab_opened_after_it_alone() {
+    let (_tmp, d) = fake();
+    let d = Arc::new(d);
+    d.create_note("wp3g/a.md", "x").expect("x");
+    d.create_note("wp3g/t.md", "target").expect("target");
+    let delayed = d
+        .daemon_delete_replaced("wp3g/a.md", "wp3g/t.md")
+        .expect("replaced");
+    d.create_note("wp3g/a.md", "y").expect("y at a");
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let mut app = App::new(Some(dc), None);
+    app.queue_rpcs();
+    let _ = app.send(Message::Explorer(ExplorerMsg::Open("wp3g/a.md".into())));
+    feed(&mut app, delayed);
+    assert_eq!(open_paths(&app), vec!["wp3g/a.md".to_owned()]);
+    assert_eq!(app.doc("wp3g/a.md").expect("y").text(), "y");
+    assert_eq!(app.status.error_text(), None);
+}

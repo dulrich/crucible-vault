@@ -327,6 +327,18 @@ impl App {
             doc.defer_resync();
             return Task::none();
         }
+        // Plan note-path-continuity D3: revalidate (path, cursor) before reading; a note that
+        // moved while disconnected is followed and resynced at its new path.
+        let path = &match self.resolve_open(path) {
+            super::files::Resolved::Moved(to, head) => {
+                self.follow_resolved(path, &to, head);
+                to
+            }
+            super::files::Resolved::Live | super::files::Resolved::Gone => path.to_owned(),
+        };
+        let Some(doc) = buf_mut(&mut self.docs, path) else {
+            return Task::none();
+        };
         match d.read_file(path) {
             Ok((bytes, hash)) => {
                 let job = doc.resync(&bytes, hash);

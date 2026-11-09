@@ -75,7 +75,28 @@ impl Default for FakeLookups {
     }
 }
 
+/// One lineage transition kind (mirrors `cv_state::lineage::LineageKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeKind {
+    Created,
+    Renamed,
+    Replaced,
+    Deleted,
+}
+
+/// One recorded identity transition (plan note-path-continuity D2).
+#[derive(Debug, Clone)]
+struct Edge {
+    seq: u64,
+    kind: EdgeKind,
+    from: String,
+    to: Option<String>,
+}
+
 struct Inner {
+    /// Plan note-path-continuity WP-3: the fake's path lineage (monotonic `seq`, from 1).
+    lineage: Vec<Edge>,
+    lineage_head: u64,
     lookups: FakeLookups,
     index: Index,
     subscriber: Option<(Vec<Topic>, Sender<Notification>)>,
@@ -162,6 +183,8 @@ impl FakeDaemon {
         };
         Ok(Self {
             inner: Mutex::new(Inner {
+                lineage: Vec::new(),
+                lineage_head: 0,
                 lookups: FakeLookups::default(),
                 index,
                 subscriber: None,
@@ -260,6 +283,7 @@ impl FakeDaemon {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(&a, &b)?;
+        let seq = Some(record(&mut g, EdgeKind::Renamed, from, Some(to)));
         let n = g.index.rebuild(&self.vault_root)?;
         let pair = vec![
             Notification::FileChanged {
@@ -269,7 +293,7 @@ impl FakeDaemon {
                 origin: Origin::Daemon,
                 from: Some(from.to_owned()),
                 replaced_by: None,
-                seq: None,
+                seq,
             },
             Notification::FileChanged {
                 path: from.to_owned(),
@@ -278,7 +302,7 @@ impl FakeDaemon {
                 origin: Origin::Daemon,
                 from: None,
                 replaced_by: None,
-                seq: None,
+                seq,
             },
             Notification::IndexGeneration { n },
         ];
@@ -286,6 +310,75 @@ impl FakeDaemon {
             emit(&mut g, p.clone());
         }
         Ok(pair)
+    }
+
+    /// Plan note-path-continuity WP-3 (tests only): the spike's degraded shape. The move is
+    /// recorded in lineage (`from` -> `to`) but the notifications are the debounce-split pair
+    /// `Deleted(from)` + `Created(to)`, unpaired and without a `seq`; they are returned for the
+    /// test to feed (now or later), never emitted.
+    pub fn daemon_move_degraded(&self, from: &str, to: &str) -> Result<Vec<Notification>> {
+        let (a, b) = (
+            vault_abs(&self.vault_root, from)?,
+            vault_abs(&self.vault_root, to)?,
+        );
+        let mut g = self.lock()?;
+        if !a.exists() {
+            return Err(DaemonError::NotFound(from.to_owned()));
+        }
+        if let Some(parent) = b.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&a, &b)?;
+        record(&mut g, EdgeKind::Renamed, from, Some(to));
+        g.index.rebuild(&self.vault_root)?;
+        let hash = current_hash(&b)?.map(|h| h.as_str().to_owned());
+        let ev = |path: &str, kind, hash| Notification::FileChanged {
+            path: path.to_owned(),
+            kind,
+            hash,
+            origin: Origin::External,
+            from: None,
+            replaced_by: None,
+            seq: None,
+        };
+        Ok(vec![
+            ev(from, ChangeKind::Deleted, None),
+            ev(to, ChangeKind::Created, hash),
+        ])
+    }
+
+    /// Plan note-path-continuity WP-3 (tests only): `path` is deleted because `by` absorbed it
+    /// (auto-file's trash): lineage `Replaced(path -> by)` and `Deleted { replaced_by }`.
+    pub fn daemon_delete_replaced(&self, path: &str, by: &str) -> Result<Vec<Notification>> {
+        let abs = vault_abs(&self.vault_root, path)?;
+        let mut g = self.lock()?;
+        std::fs::remove_file(&abs).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => DaemonError::NotFound(path.to_owned()),
+            _ => DaemonError::Io(e),
+        })?;
+        let seq = Some(record(&mut g, EdgeKind::Replaced, path, Some(by)));
+        let n = g.index.rebuild(&self.vault_root)?;
+        let out = vec![
+            Notification::FileChanged {
+                path: path.to_owned(),
+                kind: ChangeKind::Deleted,
+                hash: None,
+                origin: Origin::Daemon,
+                from: None,
+                replaced_by: Some(by.to_owned()),
+                seq,
+            },
+            Notification::IndexGeneration { n },
+        ];
+        for n in &out {
+            emit(&mut g, n.clone());
+        }
+        Ok(out)
+    }
+
+    /// The fake's current lineage head (tests only).
+    pub fn lineage_head(&self) -> Result<u64> {
+        Ok(self.lock()?.lineage_head)
     }
 
     /// WP-7: scripts `view_run(id, _)` to return `result` (and lists `id` in `views_list`).
@@ -424,7 +517,8 @@ impl FakeDaemon {
                 std::fs::rename(&abs, &dest)?;
             }
         }
-        self.after_write(g, path, ChangeKind::Deleted, None)
+        let seq = record(g, EdgeKind::Deleted, path, None);
+        self.after_write(g, path, ChangeKind::Deleted, None, Some(seq))
     }
 
     fn after_write(
@@ -433,6 +527,7 @@ impl FakeDaemon {
         path: &str,
         kind: ChangeKind,
         hash: Option<String>,
+        seq: Option<u64>,
     ) -> Result<()> {
         let n = g.index.rebuild(&self.vault_root)?;
         emit(
@@ -444,7 +539,7 @@ impl FakeDaemon {
                 origin: Origin::Daemon,
                 from: None,
                 replaced_by: None,
-                seq: None,
+                seq,
             },
         );
         emit(g, Notification::IndexGeneration { n });
@@ -466,6 +561,40 @@ fn terminal(job_id: String, outcome: std::result::Result<Option<String>, String>
         open_path,
         hold: None,
     }
+}
+
+/// Appends one transition; returns its `seq`.
+fn record(g: &mut Inner, kind: EdgeKind, from: &str, to: Option<&str>) -> u64 {
+    g.lineage_head += 1;
+    let seq = g.lineage_head;
+    g.lineage.push(Edge {
+        seq,
+        kind,
+        from: from.to_owned(),
+        to: to.map(str::to_owned),
+    });
+    seq
+}
+
+/// Where the chain from `path` after `since` ends (mirrors `StateDb::lineage_resolve`):
+/// `Err(())` = a delete, `Ok(path)` = the end (`path` itself = unchanged).
+fn follow_chain(g: &Inner, path: &str, since: u64) -> std::result::Result<String, ()> {
+    let mut cur = path.to_owned();
+    let mut cursor = since;
+    while let Some(e) = g
+        .lineage
+        .iter()
+        .find(|e| e.from == cur && e.seq > cursor && e.kind != EdgeKind::Created)
+    {
+        match (&e.kind, &e.to) {
+            (EdgeKind::Renamed | EdgeKind::Replaced, Some(to)) => {
+                cur.clone_from(to);
+                cursor = e.seq;
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok(cur)
 }
 
 fn emit(g: &mut Inner, n: Notification) {
@@ -519,7 +648,9 @@ impl DaemonClient for FakeDaemon {
         } else {
             ChangeKind::Created
         };
-        self.after_write(&mut g, path, kind, Some(hash.as_str().to_owned()))?;
+        let seq =
+            (kind == ChangeKind::Created).then(|| record(&mut g, EdgeKind::Created, path, None));
+        self.after_write(&mut g, path, kind, Some(hash.as_str().to_owned()), seq)?;
         Ok(hash)
     }
 
@@ -551,11 +682,13 @@ impl DaemonClient for FakeDaemon {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&abs, bytes)?;
+            let seq = record(&mut g, EdgeKind::Created, &path, None);
             self.after_write(
                 &mut g,
                 &path,
                 ChangeKind::Created,
                 Some(h.as_str().to_owned()),
+                Some(seq),
             )?;
         }
         Ok(path)
@@ -575,7 +708,8 @@ impl DaemonClient for FakeDaemon {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(&a, &b)?;
-        self.after_write(&mut g, to, ChangeKind::Renamed, None)
+        let seq = record(&mut g, EdgeKind::Renamed, from, Some(to));
+        self.after_write(&mut g, to, ChangeKind::Renamed, None, Some(seq))
     }
 
     fn delete(&self, path: &str) -> Result<()> {
@@ -586,7 +720,8 @@ impl DaemonClient for FakeDaemon {
             std::io::ErrorKind::NotFound => DaemonError::NotFound(path.to_owned()),
             _ => DaemonError::Io(e),
         })?;
-        self.after_write(&mut g, path, ChangeKind::Deleted, None)
+        let seq = record(&mut g, EdgeKind::Deleted, path, None);
+        self.after_write(&mut g, path, ChangeKind::Deleted, None, Some(seq))
     }
 
     fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
@@ -768,24 +903,37 @@ impl DaemonClient for FakeDaemon {
         Ok(())
     }
 
-    /// Minimal (plan note-path-continuity WP-2): no lineage yet (WP-3 adds cursor semantics);
-    /// a present file is `Live`, anything else `Unknown`, at head 0.
+    /// Plan note-path-continuity D2 (mirrors `StateDb::lineage_resolve`): `since: None` reports
+    /// the path now (`Live` / `Unknown`) plus the head; with a cursor, every later edge from
+    /// the path is followed hop by hop (rename / replace follow, delete ends `Deleted`) and a
+    /// chain end that is not on disk is `Unknown`.
     fn resolve_path(
         &self,
         path: &str,
-        _since: Option<u64>,
+        since: Option<u64>,
     ) -> Result<cv_protocol::ResolvePathResult> {
-        let abs = vault_abs(&self.vault_root, path)?;
-        let resolution = if abs.is_file() {
-            cv_protocol::PathResolution::Live {
-                path: path.to_owned(),
+        use cv_protocol::PathResolution;
+        let g = self.lock()?;
+        let on_disk = |p: &str| vault_abs(&self.vault_root, p).map(|a| a.is_file());
+        let resolution = match since.map(|s| follow_chain(&g, path, s)) {
+            Some(Err(())) => PathResolution::Deleted,
+            None | Some(Ok(_)) => {
+                let end = match since {
+                    Some(s) => follow_chain(&g, path, s).unwrap_or_default(),
+                    None => path.to_owned(),
+                };
+                if !on_disk(&end)? {
+                    PathResolution::Unknown
+                } else if end == path {
+                    PathResolution::Live { path: end }
+                } else {
+                    PathResolution::Moved { to: end }
+                }
             }
-        } else {
-            cv_protocol::PathResolution::Unknown
         };
         Ok(cv_protocol::ResolvePathResult {
             resolution,
-            head: 0,
+            head: g.lineage_head,
         })
     }
 
@@ -824,6 +972,61 @@ impl DaemonClient for FakeDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_vault() -> (tempfile::TempDir, FakeDaemon) {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault).expect("vault");
+        let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
+        (tmp, d)
+    }
+
+    /// Plan note-path-continuity WP-3: chains follow hop by hop after the cursor, a reused path
+    /// resolves per incarnation, and a delete ends the chain.
+    #[test]
+    fn lineage_resolves_chains_per_incarnation() {
+        use cv_protocol::PathResolution::{Deleted, Live, Moved, Unknown};
+        let (_t, d) = fake_vault();
+        d.create_note("a.md", "x").expect("x");
+        let x = d.resolve_path("a.md", None).expect("head").head;
+        d.rename("a.md", "b.md").expect("a to b");
+        d.rename("b.md", "c.md").expect("b to c");
+        d.create_note("a.md", "y").expect("y at a");
+        let y = d.resolve_path("a.md", None).expect("head").head;
+        let res = |p: &str, s| d.resolve_path(p, Some(s)).expect("resolve").resolution;
+        assert_eq!(res("a.md", x), Moved { to: "c.md".into() });
+        assert_eq!(
+            res("a.md", y),
+            Live {
+                path: "a.md".into()
+            }
+        );
+        d.delete("c.md").expect("delete");
+        assert_eq!(res("a.md", x), Deleted);
+        assert_eq!(res("zzz.md", 0), Unknown);
+        assert_eq!(
+            d.resolve_path("a.md", None).expect("now").head,
+            d.lineage_head().expect("h")
+        );
+    }
+
+    /// Notifications carry the edge's `seq`, strictly increasing.
+    #[test]
+    fn notifications_carry_the_lineage_seq() {
+        let (_t, d) = fake_vault();
+        d.create_note("a.md", "x").expect("x");
+        let rx = d.subscribe(&[Topic::FileChanged]).expect("sub");
+        d.rename("a.md", "b.md").expect("rename");
+        d.delete("b.md").expect("delete");
+        let seqs: Vec<Option<u64>> = rx
+            .try_iter()
+            .filter_map(|n| match n {
+                Notification::FileChanged { seq, .. } => Some(seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seqs, vec![Some(2), Some(3)]);
+    }
 
     #[test]
     fn lookups_are_canned_and_scriptable() {

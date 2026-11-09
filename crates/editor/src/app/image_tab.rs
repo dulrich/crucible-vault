@@ -12,7 +12,7 @@ use crate::message::{ImageTabMsg, MediaKey};
 use cv_text::file_kind::{self, FileKind};
 
 /// A file read made while classifying it (bytes, content hash).
-type Prefetched = (Vec<u8>, crate::daemon::ContentHash);
+type Prefetched = crate::daemon::BoundRead;
 
 impl App {
     /// The kind of `path` for [`Self::open_into`], plus its bytes when classifying had to read
@@ -30,8 +30,8 @@ impl App {
         let Some(d) = &self.daemon else {
             return Err(DaemonError::Disconnected);
         };
-        let read = d.read_file(path)?;
-        Ok((file_kind::sniff(&read.0), Some(read)))
+        let read = d.read_bound(path)?;
+        Ok((file_kind::sniff(&read.bytes), Some(read)))
     }
 
     /// Opens vault file `path` with the system opener (`open_url_cmd`) by its absolute path

@@ -112,6 +112,9 @@ pub(super) struct SaveState {
     /// WP-5 (audit E2): a title rename of this note is in flight; saves are held (queued as
     /// `save_again`) so the old path is never written or recreated.
     renaming: bool,
+    /// Plan note-path-continuity D3: the lineage cursor of the incarnation whose bytes this
+    /// buffer holds (`None` = an old daemon without lineage, or a buffer not bound to one).
+    lineage: Option<u64>,
 }
 
 impl SaveState {
@@ -126,6 +129,7 @@ impl SaveState {
             disk_title: title.clone(),
             name_title: title,
             renaming: false,
+            lineage: None,
         }
     }
 }
@@ -151,6 +155,31 @@ impl SourceBuffer {
     /// plan editor-data-safety WP-2: the conflict is "the file is gone".
     pub fn is_missing(&self) -> bool {
         self.save.conflict == Some(Conflict::Missing)
+    }
+
+    /// The lineage cursor of the incarnation this buffer's bytes belong to (plan
+    /// note-path-continuity D3).
+    pub fn lineage_cursor(&self) -> Option<u64> {
+        self.save.lineage
+    }
+
+    /// Binds the buffer to the cursor its bytes were read at.
+    pub fn set_lineage_cursor(&mut self, cursor: Option<u64>) {
+        self.save.lineage = cursor;
+    }
+
+    /// Advances the cursor (never backwards); a no-op for an unbound buffer.
+    pub fn advance_lineage(&mut self, to: u64) {
+        if let Some(c) = &mut self.save.lineage {
+            *c = (*c).max(to);
+        }
+    }
+
+    /// Drops the missing-file conflict (the note was found at a new path, not deleted).
+    pub fn clear_missing(&mut self) {
+        if self.save.conflict == Some(Conflict::Missing) {
+            self.save.conflict = None;
+        }
     }
 
     /// A dirty buffer whose file is gone enters the missing-file state (no-op when clean).

@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// Where the note an open document holds went (plan note-path-continuity D3).
+pub(super) enum Resolved {
+    /// It lives at this path now; the second field is the lineage head to rebind at.
+    Moved(String, u64),
+    /// It is still at its path.
+    Live,
+    /// Deleted, or not resolvable: today's deleted / missing handling applies.
+    Gone,
+}
+
 impl App {
     pub(super) fn update_bookmarks(&mut self, m: BookmarkMsg) -> Task<Message> {
         match m {
@@ -199,7 +209,11 @@ impl App {
                         .apply_op(&op, &final_path, &self.ui.expanded, &indexed);
                     match &op {
                         FileOp::Create { .. } => self.open(&final_path),
-                        FileOp::Rename { from, to } => self.retarget(from, to),
+                        FileOp::Rename { from, to } => {
+                            let cursor = self.cursor_of(from);
+                            self.retarget(from, to);
+                            self.rebind_after_move(cursor, from, to);
+                        }
                         FileOp::Delete { path } => self.close_path(path),
                     }
                 }
@@ -315,6 +329,128 @@ impl App {
             })
     }
 
+    /// The lineage cursor of the document open at `path` (plan note-path-continuity D3).
+    pub(super) fn cursor_of(&self, path: &str) -> Option<u64> {
+        self.docs.get(path).and_then(|o| o.buffer.lineage_cursor())
+    }
+
+    /// D3 gating: an event whose `seq` is not later than the open document's cursor describes
+    /// a transition the document was bound after (or already followed): it does not apply.
+    /// `seq: None` (an old daemon) and an unbound document never gate.
+    pub(super) fn event_stale(&self, path: &str, seq: Option<u64>) -> bool {
+        matches!((seq, self.cursor_of(path)), (Some(s), Some(c)) if s <= c)
+    }
+
+    /// D3: asks the daemon where the note open at `path` went, as of the document's cursor. A
+    /// `Live` answer advances the cursor to the head. No cursor (an old daemon), an error, a
+    /// `Deleted`, or an `Unknown` with the file absent is [`Resolved::Gone`] (today's state).
+    pub(super) fn resolve_open(&mut self, path: &str) -> Resolved {
+        use cv_protocol::PathResolution;
+        let Some(d) = self.daemon.clone() else {
+            return Resolved::Gone;
+        };
+        let Some(cursor) = self.cursor_of(path) else {
+            return Resolved::Gone;
+        };
+        let Ok(r) = d.resolve_path(path, Some(cursor)) else {
+            return Resolved::Gone;
+        };
+        let live = match r.resolution {
+            PathResolution::Moved { to } => return Resolved::Moved(to, r.head),
+            PathResolution::Deleted => return Resolved::Gone,
+            PathResolution::Unknown => !matches!(d.read_file(path), Err(DaemonError::NotFound(_))),
+            PathResolution::Live { .. } => true,
+        };
+        if !live {
+            return Resolved::Gone;
+        }
+        if let Some(o) = self.docs.get_mut(path) {
+            o.buffer.advance_lineage(r.head);
+        }
+        Resolved::Live
+    }
+
+    /// D3: follows a resolved move of the open note `from` to `to` (clean buffer re-keyed or
+    /// rebuilt, dirty text kept through the edited-move path) and binds the document at `to` to
+    /// the resolution's `head`.
+    pub(super) fn follow_resolved(&mut self, from: &str, to: &str, head: u64) {
+        let fresh = !self.docs.contains_key(to);
+        self.follow_daemon_move(from, to);
+        if fresh
+            && !self.docs.contains_key(from)
+            && let Some(o) = self.docs.get_mut(to)
+        {
+            o.buffer.advance_lineage(head);
+        }
+    }
+
+    /// D3: a `Renamed { from }` notification carrying lineage `seq`; a stale one (the document
+    /// was bound after it) leaves the document alone.
+    pub(super) fn follow_move_event(&mut self, from: &str, to: &str, seq: Option<u64>) {
+        if self.event_stale(from, seq) {
+            self.retarget_holds(from, to);
+            return;
+        }
+        // A delayed notification of a chain: `to` may already have moved on. Lineage knows where
+        // the note is now, so follow that instead of failing to read `to`.
+        if self.docs.contains_key(from)
+            && self
+                .daemon
+                .as_ref()
+                .is_some_and(|d| matches!(d.read_file(to), Err(DaemonError::NotFound(_))))
+            && let Resolved::Moved(end, head) = self.resolve_open(from)
+        {
+            self.follow_resolved(from, &end, head);
+            return;
+        }
+        let fresh = !self.docs.contains_key(to);
+        self.follow_daemon_move(from, to);
+        if let Some(s) = seq
+            && fresh
+            && !self.docs.contains_key(from)
+            && let Some(o) = self.docs.get_mut(to)
+        {
+            o.buffer.advance_lineage(s);
+        }
+    }
+
+    /// D3: a `Deleted { path }` with no `replaced_by` on an open path. Resolves before anything
+    /// is reported: a `Moved` answer retargets (the tab never sees "deleted"); the stale and
+    /// `Live` cases leave the document alone. `true` = handled (skip the reload that would read
+    /// the old path); `false` = the note is gone, take today's deleted / missing path.
+    pub(super) fn resolve_deleted(&mut self, path: &str, seq: Option<u64>) -> bool {
+        if !self.docs.contains_key(path) {
+            return false;
+        }
+        if self.event_stale(path, seq) {
+            return true;
+        }
+        match self.resolve_open(path) {
+            Resolved::Moved(to, head) => {
+                self.follow_resolved(path, &to, head);
+                true
+            }
+            Resolved::Live => true,
+            Resolved::Gone => false,
+        }
+    }
+
+    /// D3: after an editor-initiated move of the note at `from` (cursor `cursor` before it), asks
+    /// lineage whether it ended at exactly `to` and, if so, advances the document's cursor so
+    /// the move's own edge is not re-followed.
+    pub(super) fn rebind_after_move(&mut self, cursor: Option<u64>, from: &str, to: &str) {
+        use cv_protocol::PathResolution;
+        let (Some(c), Some(d)) = (cursor, self.daemon.clone()) else {
+            return;
+        };
+        if let Ok(r) = d.resolve_path(from, Some(c))
+            && matches!(&r.resolution, PathResolution::Moved { to: t } if t == to)
+            && let Some(o) = self.docs.get_mut(to)
+        {
+            o.buffer.advance_lineage(r.head);
+        }
+    }
+
     /// Round 9 WP-3 (Decision 4): a daemon-side move of `from` to `to` (the `Renamed { from }`
     /// notification) retargets every open tab. Bytes unchanged → re-keyed in place, dirty text
     /// and all, with no deleted / missing state; bytes changed under unsaved edits → the
@@ -385,7 +521,13 @@ impl App {
                         doc
                     }
                     old => OpenDoc {
-                        buffer: crate::source::SourceBuffer::new(to, &bytes, hash),
+                        buffer: {
+                            let mut b = crate::source::SourceBuffer::new(to, &bytes, hash);
+                            b.set_lineage_cursor(
+                                old.as_ref().and_then(|d| d.buffer.lineage_cursor()),
+                            );
+                            b
+                        },
                         close_waiters: old
                             .as_ref()
                             .map(|d| d.close_waiters.clone())
@@ -517,7 +659,9 @@ impl App {
                     .docs
                     .get(from)
                     .is_some_and(|d| d.buffer.is_dirty() || d.buffer.edit_seq() != seq);
+                let cursor = self.cursor_of(from);
                 self.follow_moved(from, to, edited);
+                self.rebind_after_move(cursor, from, to);
                 Task::none()
             }
             Err(e) => {

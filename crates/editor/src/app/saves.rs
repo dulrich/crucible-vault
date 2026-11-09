@@ -266,6 +266,13 @@ impl App {
         outcome: crate::source::SaveOutcome,
         after: Option<AfterSave>,
     ) -> Task<Message> {
+        // Plan note-path-continuity D3: a save CAS-refused against "no file" asks lineage where
+        // the note went before it may report missing; a move retargets and retries there.
+        if matches!(&outcome, crate::source::SaveOutcome::Conflict(h) if h.as_str().is_empty())
+            && let Some(to) = self.save_moved(path, seq, &outcome)
+        {
+            return self.retry_save_at(&to, after);
+        }
         let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
         let result = buf_mut(&mut self.docs, path).map(|d| d.finish_save(seq, outcome));
         // Plan round-18 WP-2: a daemon `HELD` refusal keeps the buffer dirty and posts the one
@@ -328,6 +335,56 @@ impl App {
             waiters,
             resume,
         ])
+    }
+
+    /// D3: `path`'s save found no file. When lineage says the note moved, the unlanded save is
+    /// retired (no missing state), the document follows the move and its new path is returned.
+    fn save_moved(
+        &mut self,
+        path: &str,
+        seq: u64,
+        outcome: &crate::source::SaveOutcome,
+    ) -> Option<String> {
+        let super::files::Resolved::Moved(to, head) = self.resolve_open(path) else {
+            return None;
+        };
+        let doc = buf_mut(&mut self.docs, path)?;
+        let _ = doc.finish_save(seq, outcome.clone());
+        doc.clear_missing();
+        self.follow_resolved(path, &to, head);
+        Some(to)
+    }
+
+    /// D3: re-runs a save at the path the note moved to, under the same CAS rules. When no save
+    /// starts (the move carried edits over changed bytes: the conflict bar is up) the save lands
+    /// as a conflict for its continuation and the close / quit waiters.
+    fn retry_save_at(&mut self, to: &str, after: Option<AfterSave>) -> Task<Message> {
+        if let Some(job) = buf_mut(&mut self.docs, to).and_then(|b| b.begin_save()) {
+            let path = to.to_owned();
+            let seq = job.seq;
+            return self.rpc(
+                move |d| Ok(job.run(d)),
+                move |r| {
+                    Message::Source(SourceMsg::Saved {
+                        path,
+                        seq,
+                        outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                        after,
+                    })
+                },
+            );
+        }
+        let landed = if self.docs.contains_key(to) {
+            Landed::Conflict
+        } else {
+            Landed::Gone
+        };
+        let waiters = self.note_save_landed(to, matches!(landed, Landed::Gone));
+        let resume = match after {
+            Some(a) => self.resume_after(to, a, &landed),
+            None => Task::none(),
+        };
+        Task::batch([waiters, resume])
     }
 
     /// A save-first continuation after its save landed. Only `Clean` (or a closed

@@ -195,8 +195,8 @@ pub fn context(tab: Option<&SourceBuffer>, reading_sel: Option<String>) -> Actio
         value: None,
         line,
         buffer_hash: Some(tab.base_hash().as_str().to_owned()),
-        // WP-3 passes the document's cursor; until then the daemon binds at enqueue.
-        lineage_cursor: None,
+        // Plan note-path-continuity D3: the document's cursor (`None` binds at enqueue).
+        lineage_cursor: tab.lineage_cursor(),
     }
 }
 
