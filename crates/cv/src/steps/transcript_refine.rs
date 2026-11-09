@@ -51,8 +51,6 @@ use super::util::{has_tag, note_tags};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 const DEFAULT_AGENT: &str = "transcript-refine";
-/// The folder of raw copies (the manual `refine-transcript` action's `copy to`).
-const RAW_FOLDER: &str = "_raw_transcript";
 /// The tag a refined note carries (the manual action's `not_tag` guard).
 pub(crate) const REFINED_TAG: &str = "refined";
 
@@ -242,18 +240,25 @@ fn refine_chunk(
     Ok((reply.to_owned(), answer.model_ref()))
 }
 
-/// Copies the original note bytes to `_raw_transcript/<name>.md` (the `copy` step's naming) and
+/// Copies the original note bytes to `<raw-transcript folder>/<name>.md` (`vault.toml` `[structure]
+/// raw_transcript_folder`, default `_raw_transcript`; the `copy` step's naming) and
 /// returns the vault path. An existing identical copy is reused; a different file there (an
 /// earlier manual refine or an abandoned attempt) is never overwritten — the next free
 /// `<stem>-2.md` … `<stem>-9.md` is used instead.
 fn save_raw(ctx: &mut StepCtx<'_>, path: &str, original: &[u8]) -> Result<String, StepError> {
     let name = cv_text::vpath::basename(path);
     let stem = name.strip_suffix(".md").unwrap_or(name);
+    let raw = ctx
+        .config
+        .vault()
+        .structure
+        .raw_transcript_folder()
+        .to_owned();
     for n in 1..=9 {
         let candidate = if n == 1 {
-            format!("{RAW_FOLDER}/{stem}.md")
+            format!("{raw}/{stem}.md")
         } else {
-            format!("{RAW_FOLDER}/{stem}-{n}.md")
+            format!("{raw}/{stem}-{n}.md")
         };
         match ctx.read(&candidate)? {
             Some((existing, _)) if existing == original => return Ok(candidate),

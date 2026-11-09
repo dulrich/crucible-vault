@@ -356,8 +356,9 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
     Ok(out)
 }
 
-/// Where the dry-run review notes live.
-const REVIEW_DIR: &str = "_crucible/reviews";
+/// Where the dry-run review notes live, under the app folder (`vault.toml` `[structure]
+/// app_folder`, plan public-release WP-2; default `_crucible/reviews`).
+const REVIEW_SUBDIR: &str = "reviews";
 /// Review note name prefix (`<prefix><date>.md`).
 const REVIEW_PREFIX: &str = "fanfic-titles-";
 
@@ -498,7 +499,10 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
     }
     if dry_run {
         let date = now().date().format("%Y-%m-%d").to_string();
-        let review = format!("{REVIEW_DIR}/{REVIEW_PREFIX}{date}.md");
+        let review = format!(
+            "{}/{REVIEW_SUBDIR}/{REVIEW_PREFIX}{date}.md",
+            ctx.config.app_folder()
+        );
         let text = render_review(&date, &v, &found).into_bytes();
         match ctx.read(&review)? {
             Some((_, hash)) => {

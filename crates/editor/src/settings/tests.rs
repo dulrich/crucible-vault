@@ -394,6 +394,10 @@ hidden = ["quit", "my.action"]
 [keys]
 quick_switcher = ["Ctrl+P", "Ctrl+Alt+P"]
 quit = []
+
+[property_types]
+model = "text"
+TQ_explain = "checkbox"
 "##;
 
 /// Plan round-11 WP-7: `nav_links` absent → the defaults, `[]` → none, a malformed entry is
@@ -455,6 +459,11 @@ fn editor_and_bookmarks_schemas_match_the_editor_parsers() {
     let p = editor_prefs::parse(EDITOR_SAMPLE, Surround::Med).expect("editor parse");
     assert_ne!(p, Prefs::default(), "every field read");
     assert!(!p.auto_lint, "auto_lint is read (default true)");
+    assert_eq!(
+        p.property_types.get("TQ_explain"),
+        Some(&editor_model::props::PropType::Checkbox),
+        "[property_types] is read (plan public-release WP-2)"
+    );
     let b = crate::bookmarks::parse(BOOKMARKS_SAMPLE.as_bytes()).expect("bookmarks parse");
     assert_eq!(b.len(), 2);
     // Round trip: the bookmarks renderer's output validates against the schema.

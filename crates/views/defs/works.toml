@@ -67,7 +67,7 @@ sort = [{ property = "note.name", direction = "ASC" }]
 type = "table"
 name = "Unread"
 filters = { and = [
-  'file.inFolder("daily/day")',
+  'file.inFolder(folder("day"))',
   'note.read != true',
   'file.serial',
 ] }
@@ -79,7 +79,7 @@ summaries = { "note.word-count" = "Sum", "formula.minutes" = "Sum" }
 type = "table"
 name = "Entries"
 filters = { and = [
-  'file.inFolder("daily/day")',
+  'file.inFolder(folder("day"))',
   'file.serial',
 ] }
 order = ["file.name", "formula.tags", "note.word-count", "formula.read", "formula.created"]

@@ -181,6 +181,7 @@ impl Fx {
         ViewHost::new(&self.config, &self.base)
             .with_state_db(&self.state)
             .with_trash_retention_days(30)
+            .with_folders(folders("daily/day"))
             .with_today(NaiveDate::from_ymd_opt(2026, 10, 3).unwrap())
     }
     fn run(&self, host: &mut ViewHost, id: &str, this: Option<&str>) -> ViewResult {
@@ -561,4 +562,57 @@ fn reading_list_access_marks_user_action_needed() {
             "{name}: {got:?}"
         );
     }
+}
+
+/// The daemon's `folder("<key>")` table for a day folder (the other keys at their defaults).
+fn folders(day: &str) -> std::collections::BTreeMap<String, String> {
+    [
+        ("day", day),
+        ("x_inbox", "Clippings"),
+        ("x_metadata", "_x_metadata"),
+        ("youtube_metadata", "_yt_metadata"),
+        ("app", "_crucible"),
+        ("raw_transcript", "_raw_transcript"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect()
+}
+
+/// Plan public-release WP-2 (C#1): the shipped defs read the day folder from config, so a
+/// non-default `[periods.day].folder` moves the rows with it; a legacy def with the literal
+/// folder still parses and reads the literal.
+#[test]
+fn day_folder_follows_the_configured_folder() {
+    let day1 =
+        std::fs::read_to_string(crate_dir().join("tests/fixtures/vault/daily/day/2026-10-01.md"))
+            .unwrap();
+    let day2 =
+        std::fs::read_to_string(crate_dir().join("tests/fixtures/vault/daily/day/2026-10-02.md"))
+            .unwrap();
+    let fx = fixture_with(&[
+        ("journal/2026-10-01.md", &day1),
+        ("journal/2026-10-02.md", &day2),
+    ]);
+    let legacy = std::fs::read_to_string(fx.config.join("views/monthly-tasks.toml"))
+        .unwrap()
+        .replace(r#"folder("day")"#, r#""daily/day""#);
+    std::fs::write(fx.config.join("views/legacy-tasks.toml"), legacy).unwrap();
+    let tasks = |host: &mut ViewHost, id: &str| -> Vec<String> {
+        let r = fx.run(host, id, Some(MONTH));
+        assert!(r.notices.is_empty(), "{:?}", r.notices);
+        r.rows().map(|row| text(&row.cells[0])).collect()
+    };
+    let mut journal = fx.host().with_folders(folders("journal"));
+    // The copied day notes carry (a subset of) the open tasks the `daily/day` ones do.
+    let moved = tasks(&mut journal, "monthly-tasks#Overdue");
+    let mut default = fx.host();
+    let original = tasks(&mut default, "monthly-tasks#Overdue");
+    assert!(!moved.is_empty());
+    assert!(
+        moved.iter().all(|t| original.contains(t)),
+        "{moved:?} ⊄ {original:?}"
+    );
+    // The literal-folder legacy def ignores the setting and reads `daily/day`, as before.
+    assert_eq!(tasks(&mut journal, "legacy-tasks#Overdue"), original);
 }

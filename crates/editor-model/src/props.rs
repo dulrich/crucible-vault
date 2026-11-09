@@ -2,9 +2,13 @@
 //! built straight from the parsed `JsValue` and rendered by both Reading's properties block
 //! (`render::RenderModel::properties`) and the Properties sidebar.
 //!
-//! [`TYPES`] is transcribed from the live vault's `.obsidian/types.json` (34 keys, plus `trim-label`) by the
-//! orchestrator (plan `v0-editor.md` WP-5 brief pin 8); agents never read that file (I1). A value
-//! that does not fit its declared type is [`Property::flagged`].
+//! [`TYPES`] is the neutral core map (plan public-release WP-2, C#13): Obsidian's own keys
+//! (`aliases`, `tags`, `cssclasses`), `created`, and the keys the daemon itself writes (`word-count`,
+//! `read`, `trim-label`). A vault adds its own through `editor.toml` `[property_types]`
+//! ([`set_extra_types`]; an extra entry overrides a core one). A value that does not fit its
+//! declared type is [`Property::flagged`].
+
+use std::collections::BTreeMap;
 
 use ofm::frontmatter::{JsValue, js_number_to_string, json_stringify, parse_frontmatter};
 
@@ -81,47 +85,55 @@ pub enum PropType {
     Multitext,
 }
 
-/// The vault's property type map.
-pub const TYPES: [(&str, PropType); 35] = [
+/// The built-in (core) property type map.
+pub const TYPES: [(&str, PropType); 7] = [
     ("aliases", PropType::Aliases),
     ("tags", PropType::Tags),
+    ("cssclasses", PropType::Multitext),
     ("created", PropType::Date),
     ("word-count", PropType::Number),
-    ("review-after-commits", PropType::Number),
-    ("review-after-lines", PropType::Number),
     ("read", PropType::Checkbox),
     ("trim-label", PropType::Checkbox),
-    ("model", PropType::Text),
-    ("TQ_extra_instructions", PropType::Text),
-    ("cssclasses", PropType::Multitext),
-    ("pending-plans", PropType::Multitext),
-    ("source-prefix-filter", PropType::Multitext),
-    ("topics", PropType::Multitext),
-    ("TQ_explain", PropType::Checkbox),
-    ("TQ_short_mode", PropType::Checkbox),
-    ("TQ_show_backlink", PropType::Checkbox),
-    ("TQ_show_cancelled_date", PropType::Checkbox),
-    ("TQ_show_created_date", PropType::Checkbox),
-    ("TQ_show_depends_on", PropType::Checkbox),
-    ("TQ_show_done_date", PropType::Checkbox),
-    ("TQ_show_due_date", PropType::Checkbox),
-    ("TQ_show_edit_button", PropType::Checkbox),
-    ("TQ_show_id", PropType::Checkbox),
-    ("TQ_show_on_completion", PropType::Checkbox),
-    ("TQ_show_postpone_button", PropType::Checkbox),
-    ("TQ_show_priority", PropType::Checkbox),
-    ("TQ_show_recurrence_rule", PropType::Checkbox),
-    ("TQ_show_scheduled_date", PropType::Checkbox),
-    ("TQ_show_start_date", PropType::Checkbox),
-    ("TQ_show_tags", PropType::Checkbox),
-    ("TQ_show_task_count", PropType::Checkbox),
-    ("TQ_show_toolbar", PropType::Checkbox),
-    ("TQ_show_tree", PropType::Checkbox),
-    ("TQ_show_urgency", PropType::Checkbox),
 ];
 
-/// The declared type of `key`, if the map has it.
+/// The configured extension (`editor.toml` `[property_types]`), set by the editor on every prefs
+/// change; read by every [`Property::new`], on whichever thread renders.
+static EXTRA: std::sync::RwLock<BTreeMap<String, PropType>> =
+    std::sync::RwLock::new(BTreeMap::new());
+
+/// Replaces the configured extension of [`TYPES`] (key → type).
+pub fn set_extra_types(types: BTreeMap<String, PropType>) {
+    *EXTRA
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = types;
+}
+
+impl PropType {
+    /// The `editor.toml` `[property_types]` value name (Obsidian's `types.json` names).
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "aliases" => Self::Aliases,
+            "tags" => Self::Tags,
+            "date" => Self::Date,
+            "number" => Self::Number,
+            "checkbox" => Self::Checkbox,
+            "text" => Self::Text,
+            "multitext" => Self::Multitext,
+            _ => return None,
+        })
+    }
+}
+
+/// The declared type of `key`: the configured extension first, then [`TYPES`].
 pub fn type_of(key: &str) -> Option<PropType> {
+    if let Some(t) = EXTRA
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+    {
+        return Some(*t);
+    }
     TYPES.iter().find(|(k, _)| *k == key).map(|(_, t)| *t)
 }
 
@@ -199,4 +211,64 @@ fn prop_url(t: &str) -> Option<(String, String)> {
     let url = url.trim();
     (!url.is_empty() && !url.contains(char::is_whitespace) && crate::render::is_remote(url))
         .then(|| (url.to_owned(), label.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The owner's property extras as `editor.toml` `[property_types]` states them (plan
+    /// public-release WP-2, C#13; WP-6 writes them): the pre-WP-2 built-in map minus the core.
+    const OWNER_EXTRAS: &[(&str, &str)] = &[
+        ("review-after-commits", "number"),
+        ("review-after-lines", "number"),
+        ("model", "text"),
+        ("TQ_extra_instructions", "text"),
+        ("pending-plans", "multitext"),
+        ("source-prefix-filter", "multitext"),
+        ("topics", "multitext"),
+        ("TQ_explain", "checkbox"),
+        ("TQ_short_mode", "checkbox"),
+        ("TQ_show_backlink", "checkbox"),
+        ("TQ_show_cancelled_date", "checkbox"),
+        ("TQ_show_created_date", "checkbox"),
+        ("TQ_show_depends_on", "checkbox"),
+        ("TQ_show_done_date", "checkbox"),
+        ("TQ_show_due_date", "checkbox"),
+        ("TQ_show_edit_button", "checkbox"),
+        ("TQ_show_id", "checkbox"),
+        ("TQ_show_on_completion", "checkbox"),
+        ("TQ_show_postpone_button", "checkbox"),
+        ("TQ_show_priority", "checkbox"),
+        ("TQ_show_recurrence_rule", "checkbox"),
+        ("TQ_show_scheduled_date", "checkbox"),
+        ("TQ_show_start_date", "checkbox"),
+        ("TQ_show_tags", "checkbox"),
+        ("TQ_show_task_count", "checkbox"),
+        ("TQ_show_toolbar", "checkbox"),
+        ("TQ_show_tree", "checkbox"),
+        ("TQ_show_urgency", "checkbox"),
+    ];
+
+    /// Empty config = the neutral core only; the owner's extras restore every old type (35 keys).
+    #[test]
+    fn core_types_plus_configured_extension() {
+        assert_eq!(type_of("tags"), Some(PropType::Tags));
+        assert_eq!(type_of("TQ_show_tree"), None);
+        assert_eq!(type_of("model"), None);
+        set_extra_types(
+            OWNER_EXTRAS
+                .iter()
+                .map(|(k, t)| ((*k).to_owned(), PropType::parse(t).unwrap()))
+                .collect(),
+        );
+        assert_eq!(TYPES.len() + OWNER_EXTRAS.len(), 35);
+        assert_eq!(type_of("TQ_show_tree"), Some(PropType::Checkbox));
+        assert_eq!(type_of("review-after-lines"), Some(PropType::Number));
+        assert_eq!(type_of("pending-plans"), Some(PropType::Multitext));
+        assert!(Property::new("TQ_explain", &JsValue::Str("yes".into())).flagged);
+        assert_eq!(type_of("created"), Some(PropType::Date));
+        set_extra_types(BTreeMap::new());
+        assert_eq!(type_of("model"), None);
+    }
 }

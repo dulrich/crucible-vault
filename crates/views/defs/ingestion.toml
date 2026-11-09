@@ -15,7 +15,7 @@ created = 'if(note.created, note.created, file.ctime)'
 type = "table"
 name = "Unprocessed clippings"
 filters = { and = [
-  'file.folder == "Clippings"',
+  'file.folder == folder("x_inbox")',
   'file.ext == "md"',
 ] }
 order = ["file.name", "formula.created"]
@@ -52,7 +52,7 @@ sort = [{ property = "formula.created", direction = "DESC" }]
 type = "table"
 name = "X posts"
 filters = { and = [
-  'file.inFolder("_x_metadata")',
+  'file.inFolder(folder("x_metadata"))',
   'note["status-id"]',
 ] }
 order = ["file.name", "note.status-id", "note.url", "note.state"]

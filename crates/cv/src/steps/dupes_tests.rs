@@ -15,7 +15,12 @@ struct Env(StepEnv);
 
 impl Env {
     fn new(files: &[(&str, String)]) -> Self {
-        let config = config_of(&[("actions.toml", ACTIONS)]);
+        Self::with_vault_toml(files, "")
+    }
+
+    /// `new` with a `vault.toml` (plan public-release WP-2: `[structure]`).
+    fn with_vault_toml(files: &[(&str, String)], vault: &str) -> Self {
+        let config = config_of(&[("actions.toml", ACTIONS), ("vault.toml", vault)]);
         let action = config.armed("dupes-scan").unwrap().clone();
         Self(StepEnv::new(
             LiveFixture::new(files.iter().map(|(p, t)| (*p, t.as_str()))),
@@ -79,19 +84,70 @@ fn note(fm: &str, body: &str) -> String {
 fn exclusions_drop_daily_pairs_excluded_folders_and_transcript_pairing() {
     let body = words("x", 60);
     let src = "source: \"https://blog.example/p/one\"\n";
-    let env = Env::new(&[
-        ("daily/day/a.md", note("", &body)),
-        ("daily/day/b.md", note("", &body)),
-        ("initiatives/c.md", note("", &body)),
-        ("_yt_metadata/d.md", note("", &body)),
-        (".trash/e.md", note("", &body)),
-        ("_raw_transcript/t.md", note(src, &words("t", 60))),
-        ("daily/day/t.md", note(src, &words("u", 60))),
-    ]);
+    let env = Env::with_vault_toml(
+        &[
+            ("daily/day/a.md", note("", &body)),
+            ("daily/day/b.md", note("", &body)),
+            ("initiatives/c.md", note("", &body)),
+            ("_yt_metadata/d.md", note("", &body)),
+            (".trash/e.md", note("", &body)),
+            ("_raw_transcript/t.md", note(src, &words("t", 60))),
+            ("daily/day/t.md", note(src, &words("u", 60))),
+        ],
+        OWNER_EXCLUDE,
+    );
     let o = env.run();
     assert_eq!(var(&o, "pairs"), 0, "{:?}", o.vars);
     assert_eq!(var(&o, "written"), 0);
     assert_eq!(var(&o, "notes"), 4, "excluded folders are not scanned");
+}
+
+/// The owner's exclude list as a `vault.toml` states it (plan public-release WP-2: the five
+/// folders that were built in before; WP-6 writes this).
+const OWNER_EXCLUDE: &str = "[structure]\nexclude = [\".trash\", \"initiatives\", \"_yt_metadata\", \"_custom\", \"_crucible\"]\n";
+
+/// Plan public-release WP-2 (C#9, C#10): with no `[structure]` the shared default list applies
+/// (`initiatives/` is scanned, the `[x]` metadata root is not), and the pair exclusions follow a
+/// non-default day and raw-transcript folder.
+#[test]
+fn default_exclude_list_and_configured_pair_folders() {
+    let body = words("x", 60);
+    let env = Env::new(&[
+        ("initiatives/c.md", note("", &body)),
+        ("_x_metadata/d.md", note("", &body)),
+        ("_crucible/e.md", note("", &body)),
+        ("other/f.md", note("", &body)),
+    ]);
+    let o = env.run();
+    assert_eq!(var(&o, "notes"), 2, "{:?}", o.vars);
+    assert_eq!(var(&o, "pairs"), 1);
+    let src = "source: \"https://blog.example/p/one\"\n";
+    let config = config_of(&[
+        ("actions.toml", ACTIONS),
+        (
+            "vault.toml",
+            "[structure]\nraw_transcript_folder = \"raw\"\napp_folder = \"_app\"\n",
+        ),
+        (
+            "captures.toml",
+            "[periods.day]\nfolder = \"journal/days\"\n",
+        ),
+    ]);
+    let action = config.armed("dupes-scan").unwrap().clone();
+    let env = Env(StepEnv::new(
+        LiveFixture::new([
+            ("journal/days/a.md", note("", &body)),
+            ("journal/days/b.md", note("", &body)),
+            ("raw/t.md", note(src, &words("t", 60))),
+            ("journal/days/t.md", note(src, &words("u", 60))),
+            ("_app/x.md", note("", &body)),
+        ]),
+        config,
+        action,
+    ));
+    let o = env.run();
+    assert_eq!(var(&o, "notes"), 4, "the configured app folder is excluded");
+    assert_eq!(var(&o, "pairs"), 0, "{:?}", o.vars);
 }
 
 #[test]

@@ -463,7 +463,7 @@ pub static EDITOR_FILE: Record = Record {
         field(
             "nav_links",
             "Nav links",
-            "Links shown after Today on the note nav bar (every markdown note; day/month notes keep their period buttons). A link to a missing note creates it. Absent = Sample Charts and Works; [] = none",
+            "Links shown after Today on the note nav bar (every markdown note; day/month notes keep their period buttons). A link to a missing note creates it. Absent = one Publications page (_crucible/Publications.md, created with the works views); [] = none",
             Node::List(&Node::Record(&NAV_LINK)),
         ),
         field(
@@ -496,6 +496,20 @@ pub static EDITOR_FILE: Record = Record {
             "Key overrides",
             "Command id → chords; [] unbinds",
             Node::Map(&Node::Chords),
+        ),
+        field(
+            "property_types",
+            "Property types",
+            "Property name → type, added to the built-in aliases, tags, cssclasses, created, word-count, read and trim-label (an entry here wins). Absent = the built-ins only",
+            Node::Map(&Node::Enum(&[
+                "text",
+                "multitext",
+                "number",
+                "checkbox",
+                "date",
+                "tags",
+                "aliases",
+            ])),
         ),
     ],
     rules: &[],

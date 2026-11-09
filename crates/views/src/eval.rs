@@ -44,6 +44,9 @@ pub struct Env<'a> {
     /// `cv_actions::pipelines::SerialSource::matches`, never restated here). Exposed as
     /// `file.serial` (the row name, or null); `None` = no data (every `file.serial` is null).
     pub serial: Option<&'a BTreeMap<String, String>>,
+    /// `folder("<key>")` values (vault-structure folders from the daemon's typed config, plan
+    /// public-release WP-2); an unknown key or `None` is null.
+    pub folders: Option<&'a BTreeMap<String, String>>,
 }
 
 impl Env<'_> {
@@ -465,6 +468,17 @@ impl<'a> RowCtx<'a> {
                 };
                 let label = if label.is_empty() { url.clone() } else { label };
                 Value::Url { url, label }
+            }
+            Func::Folder => {
+                let key = arg(0)?.to_text();
+                match self.env.folders.and_then(|m| m.get(&key)) {
+                    Some(f) => Value::Str(f.clone()),
+                    None => {
+                        self.env
+                            .notice(format!("folder({key:?}): no such vault folder setting"));
+                        Value::Null
+                    }
+                }
             }
             Func::Today => Value::date(self.env.today),
             Func::Now => Value::Date(self.env.now, false),

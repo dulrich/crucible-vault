@@ -10,7 +10,7 @@ unread_words = 'if(note.read == true, 0, number(note["word-count"]))'
 
 [filters]
 and = [
-  'file.inFolder("daily/day")',
+  'file.inFolder(folder("day"))',
   '(this["author-filter"] && this["author-filter"].toString().trim() != "" || list(this["source-prefix-filter"]).filter(value.toString().trim() != "").length > 0) && (!(this["author-filter"] && this["author-filter"].toString().trim() != "") || list(note.author).map(value.toString().trim().replace("#", "")).contains(this["author-filter"].toString().trim().replace("#", ""))) && (list(this["source-prefix-filter"]).filter(value.toString().trim() != "").length == 0 || list(this["source-prefix-filter"]).filter(value.toString().trim() != "").filter(note.source.toString().trim().startsWith(value.toString().trim())).length > 0)',
 ]
 

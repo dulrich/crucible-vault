@@ -54,7 +54,7 @@ impl FileOp {
     pub fn run(&self, d: &dyn crate::daemon::DaemonClient) -> Result<String, String> {
         match self {
             Self::Create { path } => d
-                .create_note(path, "")
+                .create_note(path, editor_model::period::seed_for(path))
                 .map_err(|e| crate::daemon::rpc_err(&e)),
             Self::Rename { from, to } => d
                 .rename(from, to)

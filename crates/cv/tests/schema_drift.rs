@@ -414,6 +414,11 @@ folder_template = "{{folder}}/_att"
 name_template = "{{md5}}.{{ext}}"
 timeout_secs = 10
 max_bytes = 1000
+
+[structure]
+app_folder = "_app"
+exclude = [".trash", "initiatives"]
+raw_transcript_folder = "raw"
 "#,
     "[remote_media]\nvideo = \"thumbnail\"\naudio = \"link\"\npdf = \"link\"\nimage_format = \"webp\"\nimage_quality = 72.5\n",
 ];

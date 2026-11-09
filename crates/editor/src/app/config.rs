@@ -216,6 +216,8 @@ impl App {
         self.palette.set_hidden(prefs.palette_hidden.clone());
         // WP-4: `[keys]` overrides rebuild the effective keymap live (no restart).
         self.palette.set_keys(prefs.keys.clone());
+        // Plan public-release WP-2: `[property_types]` extends the built-in property types.
+        editor_model::props::set_extra_types(prefs.property_types.clone());
         self.reading.set_anchor(&mut self.docs, prefs.anchor());
         self.prefs = prefs;
         self.sync_hotkeys();

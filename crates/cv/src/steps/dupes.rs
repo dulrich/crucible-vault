@@ -9,9 +9,11 @@
 //! directions. [`score`] is the one-pair scorer WP-8 reuses; [`PairScore::keep`] is the scan's
 //! aggressive threshold (identity match, or max directional containment >= [`KEEP_CONTAINMENT`]).
 //!
-//! **Exclusions (Decision 1).** Notes under `.trash/`, `initiatives/`, `_yt_metadata/`, `_custom/`
-//! and `_crucible/` (vault machinery; user decision 2026-10-23) are not scanned; `daily × daily`
-//! is never a pair; a `_raw_transcript × daily` pair with matching identity (the designed
+//! **Exclusions (Decision 1).** Notes under the shared exclude list (`ConfigSet::exclude_folders`:
+//! `vault.toml` `[structure] exclude`, default `.trash/`, `_custom/`, the app folder and the
+//! pipeline metadata roots; plan public-release WP-2, C#9) are not scanned; `day × day` (the top
+//! folder of `[periods.day].folder`, default `daily`) is never a pair; a `raw × day` pair (`raw` =
+//! the top of `[structure] raw_transcript_folder`, default `_raw_transcript`) with matching identity (the designed
 //! pairing) is dropped; a pair already carrying each other in
 //! `not-duplicate-of` (WP-7) is `suppressed`.
 //!
@@ -57,14 +59,37 @@ pub(crate) const POSSIBLE_KEY: &str = "possible-duplicate";
 /// The frontmatter key a "not duplicates" verdict writes (WP-7); it suppresses the pair.
 pub(crate) const NOT_DUP_KEY: &str = "not-duplicate-of";
 
-/// Top folders never scanned (Decision 1).
-pub(crate) const EXCLUDED_TOPS: [&str; 5] = [
-    ".trash",
-    "initiatives",
-    "_yt_metadata",
-    "_custom",
-    "_crucible",
-];
+/// The folder pair exclusions (Decision 1, C#10): the top folders of the configured day folder
+/// (`captures.toml` `[periods.day].folder`) and raw-transcript folder (`vault.toml` `[structure]
+/// raw_transcript_folder`).
+struct PairTops {
+    day: String,
+    raw: String,
+}
+
+impl PairTops {
+    fn of(config: &ConfigSet) -> Self {
+        Self {
+            day: top_of_folder_or_self(&config.day_folder()).to_owned(),
+            raw: top_of_folder_or_self(config.vault().structure.raw_transcript_folder()).to_owned(),
+        }
+    }
+
+    /// Decision 1 pair exclusions (folder-level ones are applied before scanning): `day × day`
+    /// is never a pair; `raw × day` with matching identity (the designed pairing) is dropped.
+    fn excluded(&self, a: &str, b: &str, identity_match: bool) -> bool {
+        let (d, r) = (self.day.as_str(), self.raw.as_str());
+        if a == d && b == d {
+            return true;
+        }
+        identity_match && ((a == r && b == d) || (a == d && b == r))
+    }
+}
+
+/// The top folder of a folder path (`daily/day` → `daily`; a single segment is itself).
+fn top_of_folder_or_self(folder: &str) -> &str {
+    folder.split_once('/').map_or(folder, |(t, _)| t)
+}
 
 /// The `dupes_scan` step.
 pub(crate) struct DupesScan;
@@ -215,18 +240,6 @@ fn hashes(text: &str) -> Option<Vec<u32>> {
     Some(v)
 }
 
-/// Decision 1 pair exclusions (folder-level ones are applied before scanning).
-fn excluded(a: &str, b: &str, identity_match: bool) -> bool {
-    if a == "daily" && b == "daily" {
-        return true;
-    }
-    identity_match
-        && matches!(
-            (a, b),
-            ("_raw_transcript", "daily") | ("daily", "_raw_transcript")
-        )
-}
-
 fn read_text(ctx: &StepCtx<'_>, path: &str) -> Result<Option<String>, StepError> {
     Ok(ctx.read(path)?.and_then(|(b, _)| String::from_utf8(b).ok()))
 }
@@ -273,6 +286,8 @@ fn ratio(num: u32, den: u32) -> f64 {
 /// The scan.
 fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let opts = post_id_options(ctx.config);
+    let exclude = ctx.config.exclude_folders();
+    let pairs = PairTops::of(ctx.config);
     let files = ctx.index()?.query().file_paths()?;
     let mut resolver = Resolver::default();
     for (id, p) in &files {
@@ -281,7 +296,7 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let eligible: Vec<(i64, String)> = files
         .into_iter()
         .filter(|(_, p)| {
-            p.to_ascii_lowercase().ends_with(".md") && !EXCLUDED_TOPS.contains(&top_of(p))
+            p.to_ascii_lowercase().ends_with(".md") && !super::link_scan::is_excluded(p, &exclude)
         })
         .collect();
 
@@ -385,7 +400,7 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             }
             let (na, nb) = (&notes[a], &notes[b]);
             let identity_match = ident_eq(na, nb);
-            if excluded(&na.top, &nb.top, identity_match) {
+            if pairs.excluded(&na.top, &nb.top, identity_match) {
                 return;
             }
             let inter = if na.n > 0 && nb.n > 0 {

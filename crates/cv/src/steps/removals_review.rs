@@ -40,8 +40,11 @@ use super::materialize::now;
 use super::params::{check_keys, get_bool, get_pos_int, get_str};
 use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag, job_pos_int};
 
-/// Where review notes live.
-const REVIEW_DIR: &str = "_crucible/reviews";
+/// Where review notes live: `<app folder>/reviews` (`vault.toml` `[structure] app_folder`, plan
+/// public-release WP-2; default `_crucible/reviews`).
+fn review_dir(config: &ConfigSet) -> String {
+    format!("{}/reviews", config.app_folder())
+}
 /// Filename stem of a review note.
 const REVIEW_PREFIX: &str = "removals-";
 const DEFAULT_LIMIT: usize = 100;
@@ -382,7 +385,8 @@ fn review(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let seed = job_u64(ctx, "seed", p.seed)?;
     let overwrite = job_flag(ctx, "overwrite").unwrap_or(p.overwrite);
     let date = now().date().format("%Y-%m-%d").to_string();
-    let path = format!("{REVIEW_DIR}/{REVIEW_PREFIX}{date}.md");
+    let review_dir = review_dir(ctx.config);
+    let path = format!("{review_dir}/{REVIEW_PREFIX}{date}.md");
     let existing = ctx.read(&path)?;
     if existing.is_some() && !overwrite {
         return Err(StepError::failed(format!(
@@ -429,14 +433,15 @@ fn review(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
 
 /// The newest review note by path (the date in the name sorts), from the index.
 fn newest_review(ctx: &StepCtx<'_>) -> Result<Option<String>, StepError> {
+    let dir = review_dir(ctx.config);
     let reader = ctx.index()?;
     Ok(reader
         .query()
-        .md_files_under(REVIEW_DIR)?
+        .md_files_under(&dir)?
         .into_iter()
         .map(|f| f.path)
         .filter(|p| {
-            vpath::parent(p) == REVIEW_DIR
+            vpath::parent(p) == dir
                 && vpath::stem(p).starts_with(REVIEW_PREFIX)
                 && p.ends_with(".md")
         })
@@ -455,7 +460,8 @@ fn score(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         Some(path) => path,
         None => newest_review(ctx)?.ok_or_else(|| {
             StepError::failed(format!(
-                "removals_review: no {REVIEW_DIR}/{REVIEW_PREFIX}*.md note found"
+                "removals_review: no {}/{REVIEW_PREFIX}*.md note found",
+                review_dir(ctx.config)
             ))
         })?,
     };

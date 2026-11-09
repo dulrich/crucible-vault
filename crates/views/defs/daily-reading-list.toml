@@ -4,7 +4,7 @@
 # or paid/founding without `complete: true`); it clears when the full body lands (`complete: true`).
 
 [filters]
-and = ['file.folder == "daily/day/" + this.file.name']
+and = ['file.folder == folder("day") + "/" + this.file.name']
 
 [formulas]
 tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "using").join(", ")'

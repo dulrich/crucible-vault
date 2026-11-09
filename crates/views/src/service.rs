@@ -70,6 +70,9 @@ pub struct ViewHost {
     /// ([`Self::set_trash_retention_days`]; the daemon pushes `ConfigSet`'s typed value, so tidy
     /// and the Trash view share one value and default). `0` (also before any push) = no expiry.
     trash_retention_days: u32,
+    /// `folder("<key>")` values as the embedder last pushed them ([`Self::set_folders`]; plan
+    /// public-release WP-2). Empty (also before any push) = every key null.
+    folders: std::collections::BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for ViewHost {
@@ -97,7 +100,14 @@ impl ViewHost {
             sources: Vec::new(),
             serial: None,
             trash_retention_days: 0,
+            folders: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Sets the vault-structure folders view expressions read through `folder("<key>")` (the
+    /// daemon pushes them from its typed config, plan public-release WP-2).
+    pub fn set_folders(&mut self, folders: std::collections::BTreeMap<String, String>) {
+        self.folders = folders;
     }
 
     /// Sets the Trash view's retention (`vault.toml` `[trash] retention_days`, typed by the
@@ -110,6 +120,13 @@ impl ViewHost {
     #[must_use]
     pub fn with_trash_retention_days(mut self, days: u32) -> Self {
         self.trash_retention_days = days;
+        self
+    }
+
+    /// [`Self::set_folders`] as a builder.
+    #[must_use]
+    pub fn with_folders(mut self, folders: std::collections::BTreeMap<String, String>) -> Self {
+        self.folders = folders;
         self
     }
 
@@ -288,6 +305,7 @@ impl ViewHost {
             now: today.and_time(Local::now().time()),
             notices: RefCell::default(),
             serial: self.serial.as_ref(),
+            folders: Some(&self.folders),
         };
         let mut r = engine::run(&env, view, records.as_deref(), ui_sort, select)?;
         r.notices

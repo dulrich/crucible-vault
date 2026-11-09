@@ -9,8 +9,8 @@ category = 'if(list(note.tags).map(value.toString().replace("#", "")).contains("
 
 [filters]
 and = [
-  'file.inFolder("daily/day")',
-  'file.path.startsWith("daily/day/" + this.file.name)',
+  'file.inFolder(folder("day"))',
+  'file.path.startsWith(folder("day") + "/" + this.file.name)',
 ]
 
 [[views]]

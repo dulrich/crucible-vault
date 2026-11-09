@@ -4,14 +4,15 @@
 //! Port of Crucible `LinkScanWorkflow.run` (`https://github.com/dulrich/obsidian-crucible/blob/master/src/orchestration/workflows/
 //! LinkScanWorkflow.ts:38-115`) with the per-URL input of `applyLinkToRegistry`
 //! (`utils/linkRegistry.ts:36-56`) and `normalizeExclusions`/`isExcluded` (`:69-90`); default
-//! exclusions `["_crucible"]` (`src/types.ts:888`). Dropped as Obsidian-induced: the metadata-cache
+//! exclusions `["_crucible"]` (`src/types.ts:888`); here the default is the shared exclude list
+//! (`ConfigSet::exclude_folders`, plan public-release WP-2, C#9) and an explicit `exclude` wins. Dropped as Obsidian-induced: the metadata-cache
 //! lookup (frontmatter `type` comes from the index), progress reporting and the
 //! `link-registry-changed` event. Not carried: the note-stub skip (plan WP-3).
 //!
 //! | key | values | default |
 //! |---|---|---|
 //! | `scope` | `"note"` (the run's active note) \| `"vault"` (every indexed markdown note) | `"note"` |
-//! | `exclude` | folder prefixes (string or list) | `["_crucible"]` |
+//! | `exclude` | folder prefixes (string or list) | the shared exclude list (`vault.toml` `[structure] exclude`; default `.trash`, `_custom`, the app folder, the metadata roots) |
 //!
 //! Outcome vars (counts only): `scanned`, `records`, `created`, `updated`, `unchanged`,
 //! `candidates`.
@@ -29,8 +30,6 @@ use super::materialize::now;
 use super::params::{check_keys, get_str, get_str_list};
 use crate::steps::{StepCtx, StepError, StepModule, StepOutcome};
 
-const DEFAULT_EXCLUDE: &[&str] = &["_crucible"];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
     Note,
@@ -42,7 +41,7 @@ pub(crate) struct Params {
     exclude: Vec<String>,
 }
 
-fn parse(t: &toml::Table) -> Result<Params, String> {
+fn parse(t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
     check_keys(t, StepKind::LinkScan, "link_scan")?;
     let scope = match get_str(t, "scope")?.as_deref() {
         None | Some("note") => Scope::Note,
@@ -52,7 +51,7 @@ fn parse(t: &toml::Table) -> Result<Params, String> {
     let raw = if t.contains_key("exclude") {
         get_str_list(t, "exclude")?
     } else {
-        DEFAULT_EXCLUDE.iter().map(|s| (*s).to_owned()).collect()
+        config.exclude_folders()
     };
     Ok(Params {
         scope,
@@ -73,7 +72,7 @@ fn normalize_exclusions(raw: &[String]) -> Vec<String> {
 }
 
 /// Crucible `isExcluded`: `path` is an exclusion or a descendant of one.
-fn is_excluded(path: &str, exclusions: &[String]) -> bool {
+pub(crate) fn is_excluded(path: &str, exclusions: &[String]) -> bool {
     exclusions.iter().any(|e| {
         path == e
             || path
@@ -93,8 +92,8 @@ pub(crate) struct LinkScan;
 impl StepModule for LinkScan {
     type Params = Params;
 
-    fn parse(_: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
-        parse(t)
+    fn parse(_: StepKind, t: &toml::Table, config: &ConfigSet) -> Result<Params, String> {
+        parse(t, config)
     }
 
     fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {

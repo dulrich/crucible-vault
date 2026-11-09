@@ -190,12 +190,72 @@ impl RemoteMediaConfig {
     }
 }
 
+/// The default `[structure] app_folder` (C#7, plan public-release WP-2).
+pub const DEFAULT_APP_FOLDER: &str = "_crucible";
+/// The day-note folder when `captures.toml` configures no `[periods.day].folder` (C#1).
+pub const DEFAULT_DAY_FOLDER: &str = "daily/day";
+/// The default `[structure] raw_transcript_folder` (C#4).
+pub const DEFAULT_RAW_TRANSCRIPT_FOLDER: &str = "_raw_transcript";
+
+/// `[structure]` (plan public-release WP-2): the vault folders the daemon's steps treat as
+/// machinery. Every key is optional; an unset or blank key means the default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StructureConfig {
+    /// The app machinery folder (review notes; excluded by default); default
+    /// [`DEFAULT_APP_FOLDER`].
+    pub app_folder: Option<String>,
+    /// The shared exclude list (folder prefixes) `dupes_scan` and `link_scan`'s default read;
+    /// unset = `.trash`, `_custom`, the app folder and the configured pipeline metadata roots
+    /// ([`crate::ConfigSet::exclude_folders`]).
+    pub exclude: Option<Vec<String>>,
+    /// Where `transcript_refine` keeps the raw copy; default [`DEFAULT_RAW_TRANSCRIPT_FOLDER`].
+    pub raw_transcript_folder: Option<String>,
+}
+
+/// A folder value with surrounding whitespace and slashes trimmed; `None` when blank.
+#[must_use]
+pub fn folder_key(v: Option<&str>) -> Option<&str> {
+    v.map(|s| s.trim().trim_matches('/'))
+        .filter(|s| !s.is_empty())
+}
+
+/// The day folder of a parsed `captures.toml` (`[periods.day].folder`, the key `materialize`'s
+/// period settings read; slashes trimmed); [`DEFAULT_DAY_FOLDER`] when unset or blank.
+#[must_use]
+pub fn day_folder_of(captures: &toml::Table) -> String {
+    let f = captures
+        .get("periods")
+        .and_then(toml::Value::as_table)
+        .and_then(|p| p.get("day"))
+        .and_then(toml::Value::as_table)
+        .and_then(|d| d.get("folder"))
+        .and_then(toml::Value::as_str);
+    folder_key(f).unwrap_or(DEFAULT_DAY_FOLDER).to_owned()
+}
+
+impl StructureConfig {
+    /// The app folder ([`DEFAULT_APP_FOLDER`] when unset).
+    #[must_use]
+    pub fn app_folder(&self) -> &str {
+        folder_key(self.app_folder.as_deref()).unwrap_or(DEFAULT_APP_FOLDER)
+    }
+
+    /// The raw-transcript folder ([`DEFAULT_RAW_TRANSCRIPT_FOLDER`] when unset).
+    #[must_use]
+    pub fn raw_transcript_folder(&self) -> &str {
+        folder_key(self.raw_transcript_folder.as_deref()).unwrap_or(DEFAULT_RAW_TRANSCRIPT_FOLDER)
+    }
+}
+
 /// `vault.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct VaultConfig {
     /// `[trash]`.
     pub trash: TrashConfig,
+    /// `[structure]`.
+    pub structure: StructureConfig,
     /// `[remote_media]`.
     pub remote_media: RemoteMediaConfig,
 }

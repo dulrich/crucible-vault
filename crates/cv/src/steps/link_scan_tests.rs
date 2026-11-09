@@ -133,3 +133,30 @@ fn note_scope_skips_non_markdown_active_path() {
     let o = run(&e, "", Some("n/_attachments/x.png")).unwrap();
     assert_eq!((n(&o, "scanned"), n(&o, "created")), (0, 0));
 }
+
+/// Plan public-release WP-2 (C#9): the default exclusion is the shared list (`.trash`, `_custom`,
+/// the app folder, the metadata roots); an explicit `exclude` still overrides it.
+#[test]
+fn default_exclude_is_the_shared_list_and_an_explicit_one_wins() {
+    let files = [
+        ("n/a.md", A),
+        ("_crucible/c.md", "https://excluded.example/c\n"),
+        (".trash/t.md", "https://excluded.example/t\n"),
+        ("_custom/u.md", "https://excluded.example/u\n"),
+        ("_yt_metadata/y.md", "https://excluded.example/y\n"),
+    ];
+    let o = run(&env(&files), "scope = \"vault\"", None).unwrap();
+    assert_eq!(n(&o, "scanned"), 1, "only n/a.md");
+    let o = run(
+        &env(&files),
+        "scope = \"vault\"\nexclude = [\"_crucible\"]",
+        None,
+    )
+    .unwrap();
+    // `.trash/` is never indexed, so the explicit list scans n/a, _custom and _yt_metadata.
+    assert_eq!(
+        n(&o, "scanned"),
+        3,
+        "the explicit list replaces the default"
+    );
+}

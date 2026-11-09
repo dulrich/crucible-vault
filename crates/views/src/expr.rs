@@ -45,6 +45,8 @@ pub enum Func {
     Today,
     Now,
     Date,
+    /// `folder("<key>")`: a configured vault-structure folder (plan public-release WP-2).
+    Folder,
 }
 
 /// Methods (`recv.name(args)`).
@@ -85,6 +87,7 @@ impl Func {
             "today" => (Self::Today, 0, 0),
             "now" => (Self::Now, 0, 0),
             "date" => (Self::Date, 1, 1),
+            "folder" => (Self::Folder, 1, 1),
             _ => return None,
         })
     }

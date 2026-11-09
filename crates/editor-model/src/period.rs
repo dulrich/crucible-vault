@@ -10,10 +10,24 @@ use chrono::{Datelike, Days, Months, NaiveDate};
 pub const DAY_FOLDER: &str = "daily/day";
 /// Folder of month notes.
 pub const MONTH_FOLDER: &str = "daily/month";
-/// Fixed Day-bar link.
-pub const CONTROL_PLANE: &str = "dashboard/Sample Charts.md";
-/// Fixed Day-bar link.
-pub const WORKS: &str = "core/Works.md";
+/// The default nav link (plan public-release WP-2, C#12): the per-publication works views, on a
+/// page under the default app folder (`vault.toml` `[structure] app_folder`, `_crucible`).
+pub const PUBLICATIONS: &str = "_crucible/Publications.md";
+
+/// The body a missing [`PUBLICATIONS`] page is created with (a nav link to a missing note creates
+/// it): the `works` views — per publication (Active / Complete), its entries and the unread ones.
+pub const PUBLICATIONS_SEED: &str = "# Publications\n\n## Active\n\n```crucible-view\nworks#Active\n```\n\n## Complete\n\n```crucible-view\nworks#Complete\n```\n\n## Entries\n\n```crucible-view\nworks#Entries\n```\n\n## Unread\n\n```crucible-view\nworks#Unread\n```\n";
+
+/// The content a nav-created note starts with: [`PUBLICATIONS_SEED`] for [`PUBLICATIONS`], else
+/// empty.
+#[must_use]
+pub fn seed_for(path: &str) -> &'static str {
+    if path == PUBLICATIONS {
+        PUBLICATIONS_SEED
+    } else {
+        ""
+    }
+}
 
 /// The day / month note folders navigation recognizes (plan `editor-settings-tab` WP-4, audit
 /// E2): the editor fills them from `captures.toml` `[periods.day].folder` /
@@ -85,18 +99,13 @@ pub struct NavLink {
     pub path: String,
 }
 
-/// The default links: Sample Charts and Works.
+/// The default links: one "Publications" page ([`PUBLICATIONS`]; a configured `nav_links`
+/// overrides it).
 pub fn default_nav_links() -> Vec<NavLink> {
-    vec![
-        NavLink {
-            label: "Sample Charts".into(),
-            path: CONTROL_PLANE.into(),
-        },
-        NavLink {
-            label: "Works".into(),
-            path: WORKS.into(),
-        },
-    ]
+    vec![NavLink {
+        label: "Publications".into(),
+        path: PUBLICATIONS.into(),
+    }]
 }
 
 /// One bar button.
@@ -296,7 +305,7 @@ mod tests {
     #[test]
     fn bars() {
         let today = d(2026, 10, 13);
-        let links = default_nav_links();
+        let links = owner_links();
         let day = bar_for("daily/day/2026-12-31.md", today, &F, &links).expect("day bar");
         let labels: Vec<&str> = day.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
@@ -312,6 +321,7 @@ mod tests {
         );
         assert_eq!(day[5].target, NavTarget::Period(Period::Day, d(2027, 1, 1)));
         assert_eq!(day[3].target, NavTarget::Path(CONTROL_PLANE.into()));
+        assert_eq!(day[4].target, NavTarget::Path(WORKS.into()));
         assert_eq!(
             day[1].target,
             NavTarget::Period(Period::Month, d(2026, 12, 1))
@@ -344,14 +354,38 @@ mod tests {
         assert_eq!(entry.len(), 3);
     }
 
+    /// Plan public-release WP-2 (C#12): the default is one Publications link, seeded with the
+    /// works views when created; the owner's configured links reproduce the old bar.
     #[test]
     fn ordinary_note_gets_today_plus_links() {
         let today = d(2026, 10, 13);
         let bar = bar_for("notes/a.md", today, &F, &default_nav_links()).expect("bar");
         let labels: Vec<&str> = bar.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels, ["Today", "Sample Charts", "Works"]);
+        assert_eq!(labels, ["Today", "Publications"]);
         assert_eq!(bar[0].target, NavTarget::Period(Period::Day, today));
+        assert_eq!(bar[1].target, NavTarget::Path(PUBLICATIONS.into()));
+        assert!(seed_for(PUBLICATIONS).contains("works#Active"));
+        assert_eq!(seed_for("notes/x.md"), "");
+        let bar = bar_for("notes/a.md", today, &F, &owner_links()).expect("bar");
+        let labels: Vec<&str> = bar.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Today", "Sample Charts", "Works"]);
         assert_eq!(bar[2].target, NavTarget::Path(WORKS.into()));
+    }
+
+    /// The owner's `editor.toml` `nav_links` (written by WP-6): the pre-WP-2 built-in default.
+    const CONTROL_PLANE: &str = "dashboard/Sample Charts.md";
+    const WORKS: &str = "core/Works.md";
+    fn owner_links() -> Vec<NavLink> {
+        vec![
+            NavLink {
+                label: "Sample Charts".into(),
+                path: CONTROL_PLANE.into(),
+            },
+            NavLink {
+                label: "Works".into(),
+                path: WORKS.into(),
+            },
+        ]
     }
 
     #[test]

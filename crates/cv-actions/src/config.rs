@@ -200,6 +200,46 @@ impl ConfigSet {
         &self.vault
     }
 
+    /// `vault.toml` `[structure] app_folder` (default `_crucible`).
+    #[must_use]
+    pub fn app_folder(&self) -> &str {
+        self.vault.structure.app_folder()
+    }
+
+    /// The shared exclude list (plan public-release WP-2, C#9): `vault.toml` `[structure]
+    /// exclude` when set (entries trimmed of slashes, blanks dropped), else `.trash`, `_custom`,
+    /// the app folder and the configured `pipelines.toml` metadata roots (`[youtube]` and `[x]`
+    /// `metadata_root`), deduplicated in that order. Folder prefixes: a path is excluded when it
+    /// is an entry or lies under one.
+    #[must_use]
+    pub fn exclude_folders(&self) -> Vec<String> {
+        let raw: Vec<String> = match &self.vault.structure.exclude {
+            Some(v) => v.clone(),
+            None => vec![
+                ".trash".into(),
+                "_custom".into(),
+                self.app_folder().to_owned(),
+                self.pipelines.youtube.metadata_root.clone(),
+                self.pipelines.x.metadata_root.clone(),
+            ],
+        };
+        let mut out: Vec<String> = Vec::new();
+        for e in &raw {
+            if let Some(f) = crate::vault::folder_key(Some(e))
+                && !out.iter().any(|o| o == f)
+            {
+                out.push(f.to_owned());
+            }
+        }
+        out
+    }
+
+    /// `captures.toml` `[periods.day].folder` (slashes trimmed; `daily/day` when unset or blank).
+    #[must_use]
+    pub fn day_folder(&self) -> String {
+        crate::vault::day_folder_of(self.table("captures.toml"))
+    }
+
     /// The typed `pipelines.toml` (default = every pipeline off).
     #[must_use]
     pub fn pipelines(&self) -> &PipelinesConfig {
@@ -806,5 +846,68 @@ type = "lint"
         c.reload(&BTreeMap::new(), &ok);
         assert_eq!(c.vault().trash.location, TrashLocation::Vault);
         assert!(c.errors().is_empty());
+    }
+
+    /// Plan public-release WP-2 (C#7, C#9, C#1): empty config = the neutral defaults; the shared
+    /// exclude list derives from the app folder and the configured metadata roots; an explicit
+    /// list (the owner's five folders) is used as stated.
+    #[test]
+    fn structure_defaults_and_shared_exclude_list() {
+        let mut c = ConfigSet::new();
+        c.reload(&BTreeMap::new(), &ok);
+        assert_eq!(c.app_folder(), "_crucible");
+        assert_eq!(
+            c.vault().structure.raw_transcript_folder(),
+            "_raw_transcript"
+        );
+        assert_eq!(c.day_folder(), "daily/day");
+        assert_eq!(
+            c.exclude_folders(),
+            [
+                ".trash",
+                "_custom",
+                "_crucible",
+                "_yt_metadata",
+                "_x_metadata"
+            ]
+        );
+        let f = |pairs: &[(&str, &str)]| -> BTreeMap<String, Option<String>> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), Some((*v).to_owned())))
+                .collect()
+        };
+        c.reload(
+            &f(&[
+                ("vault.toml", "[structure]\napp_folder = \"/_app/\"\n"),
+                ("pipelines.toml", "[youtube]\nmetadata_root = \"_yt\"\n"),
+                ("captures.toml", "[periods.day]\nfolder = \"journal/\"\n"),
+            ]),
+            &ok,
+        );
+        assert_eq!(c.app_folder(), "_app");
+        assert_eq!(c.day_folder(), "journal");
+        assert_eq!(
+            c.exclude_folders(),
+            [".trash", "_custom", "_app", "_yt", "_x_metadata"]
+        );
+        c.reload(
+            &f(&[(
+                "vault.toml",
+                "[structure]\nexclude = [\".trash\", \"initiatives\", \"_yt_metadata\", \"_custom\", \"_crucible\", \"initiatives/\"]\n",
+            )]),
+            &ok,
+        );
+        assert_eq!(
+            c.exclude_folders(),
+            [
+                ".trash",
+                "initiatives",
+                "_yt_metadata",
+                "_custom",
+                "_crucible"
+            ]
+        );
+        assert!(c.errors().is_empty(), "{:?}", c.errors());
     }
 }

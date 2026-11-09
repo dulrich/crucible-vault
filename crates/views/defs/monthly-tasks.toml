@@ -6,7 +6,7 @@
 type = "tasks"
 name = "Overdue"
 filters = { and = [
-  'file.folder == "daily/day"',
+  'file.folder == folder("day")',
   'file.name.startsWith(this.file.name)',
   'file.name < today().format("YYYY-MM-DD")',
 ] }

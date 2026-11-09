@@ -89,10 +89,8 @@ fn outline_links_and_props_from_the_buffer() {
         get("word-count"),
         (Some(PropType::Number), "⚠ lots".to_owned())
     );
-    assert_eq!(
-        get("topics"),
-        (Some(PropType::Multitext), "[one]".to_owned())
-    );
+    // `topics` is not a built-in type (plan public-release WP-2): untyped unless configured.
+    assert_eq!(get("topics"), (None, "one".to_owned()));
     assert_eq!(get("mood"), (None, "[calm] [warm]".to_owned()));
     // Plan round-6 WP-5: a wikilink value renders as a link (render model's parse).
     let related = app.panels.props.iter().find(|p| p.key == "related");
@@ -250,14 +248,14 @@ fn pure_helpers() {
     assert!(!is_externalish("Note.md"));
     let long = "x".repeat(200);
     assert_eq!(snippet(&long).chars().count(), SNIPPET_CHARS + 1);
-    assert_eq!(editor_model::props::TYPES.len(), 35);
+    assert_eq!(editor_model::props::TYPES.len(), 7);
     let show = |k: &str, v: JsValue| props::display(&editor_model::props::Property::new(k, &v));
-    assert_eq!(show("TQ_show_tree", JsValue::Str("yes".into())), "⚠ yes");
+    assert_eq!(show("read", JsValue::Str("yes".into())), "⚠ yes");
     assert_eq!(
         show("created", JsValue::Str("2026-01-02T10:00".into())),
         "2026-01-02T10:00"
     );
-    assert_eq!(show("review-after-lines", JsValue::Num(12.0)), "12");
+    assert_eq!(show("word-count", JsValue::Num(12.0)), "12");
 }
 
 /// editor-usability-round WP-5 measurement harness (not a gate): Toggle Panels latency against a

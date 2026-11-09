@@ -167,6 +167,7 @@ fn ev(fx: &Fx, row: Option<&str>, this: Option<&str>, src: &str) -> Value {
         now: day(2026, 10, 3).and_hms_opt(12, 0, 0).unwrap(),
         notices: RefCell::default(),
         serial: None,
+        folders: None,
     };
     let file = row.and_then(|p| db.file(p).unwrap());
     let ctx = RowCtx::new(&env, file);
@@ -572,6 +573,7 @@ fn sql_narrowing_compiles_simple_conjuncts() {
         now: day(2026, 10, 3).and_hms_opt(0, 0, 0).unwrap(),
         notices: RefCell::default(),
         serial: None,
+        folders: None,
     };
     let ctx = RowCtx::new(&env, None);
     let f = |s: &str| crate::def::Filter::Expr(parse(s).unwrap());

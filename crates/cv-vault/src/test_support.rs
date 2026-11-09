@@ -152,6 +152,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "is not under the temp dir")]
     fn fixture_refuses_a_non_temp_root() {
-        assert_temp_root(Path::new("~/vault"));
+        assert_temp_root(Path::new("/srv/vault"));
     }
 }

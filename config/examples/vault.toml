@@ -18,3 +18,13 @@ convert_images = false          # re-encode downloaded images, keeping the resul
 image_format = "webp"           # "webp" | "jpeg"
 timeout_secs = 30               # per download
 max_bytes = 52428800            # per download (50 MiB)
+
+# Vault structure (plan public-release WP-2): the machinery folders the daemon's steps read.
+# Every key is optional; absent = the default shown.
+[structure]
+app_folder = "_crucible"        # the app's own folder (review notes land in <app_folder>/reviews)
+# exclude = [".trash", "_custom", "_crucible", "_yt_metadata", "_x_metadata"]
+                                # folders dupes_scan and link_scan skip (a link_scan step's own
+                                # `exclude` wins); unset = .trash, _custom, the app folder and the
+                                # pipelines.toml [youtube]/[x] metadata_root folders
+raw_transcript_folder = "_raw_transcript"  # where transcript_refine keeps the original note

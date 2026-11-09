@@ -172,8 +172,11 @@ pub struct ViewSettings {
     pub sources: SourcesConfig,
     /// `vault.toml` `[trash] retention_days` (the value tidy expires by).
     pub trash_retention_days: u32,
-    /// `captures.toml` `[periods.day].folder` ([`DEFAULT_DAY_FOLDER`] when unset).
+    /// `captures.toml` `[periods.day].folder` (`daily/day` when unset).
     pub day_folder: String,
+    /// The vault-structure folders view expressions read through `folder("<key>")` (plan
+    /// public-release WP-2, C#1-3; [`view_folders`]).
+    pub folders: BTreeMap<String, String>,
 }
 
 impl ViewSettings {
@@ -183,27 +186,43 @@ impl ViewSettings {
         Self {
             sources: c.sources().clone(),
             trash_retention_days: c.vault().trash.retention_days,
-            day_folder: day_folder_of(c.table("captures.toml")),
+            day_folder: c.day_folder(),
+            folders: view_folders(c),
         }
     }
 }
 
-/// The default day-note folder when `captures.toml` configures no `[periods.day].folder`.
-const DEFAULT_DAY_FOLDER: &str = "daily/day";
+/// The Web Clipper's default folder: what `folder("x_inbox")` reads when `pipelines.toml` `[x]
+/// inbox` is unset (C#2).
+const DEFAULT_CLIPPER_INBOX: &str = "Clippings";
 
-/// The day folder from a parsed `captures.toml` (`[periods.day].folder`, slashes trimmed, the
-/// same key `materialize`'s period settings read); [`DEFAULT_DAY_FOLDER`] when unset or blank.
-fn day_folder_of(captures: &toml::Table) -> String {
-    captures
-        .get("periods")
-        .and_then(toml::Value::as_table)
-        .and_then(|p| p.get("day"))
-        .and_then(toml::Value::as_table)
-        .and_then(|d| d.get("folder"))
-        .and_then(toml::Value::as_str)
-        .map(|f| f.trim().trim_matches('/'))
-        .filter(|f| !f.is_empty())
-        .map_or_else(|| DEFAULT_DAY_FOLDER.to_owned(), str::to_owned)
+/// The `folder("<key>")` table of view expressions (plan public-release WP-2, C#1-3), from the
+/// same typed config every daemon step reads: `day` (`captures.toml` `[periods.day].folder`),
+/// `x_inbox` (`[x] inbox`, else `Clippings`), `x_metadata` / `youtube_metadata` (`[x]` /
+/// `[youtube] metadata_root`), `app` and `raw_transcript` (`vault.toml` `[structure]`).
+fn view_folders(c: &ConfigSet) -> BTreeMap<String, String> {
+    let p = c.pipelines();
+    let inbox =
+        cv_actions::vault::folder_key(p.x.inbox.as_deref()).unwrap_or(DEFAULT_CLIPPER_INBOX);
+    let trim = |s: &str| {
+        cv_actions::vault::folder_key(Some(s))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    BTreeMap::from([
+        ("day".to_owned(), c.day_folder()),
+        ("x_inbox".to_owned(), inbox.to_owned()),
+        ("x_metadata".to_owned(), trim(&p.x.metadata_root)),
+        (
+            "youtube_metadata".to_owned(),
+            trim(&p.youtube.metadata_root),
+        ),
+        ("app".to_owned(), c.app_folder().to_owned()),
+        (
+            "raw_transcript".to_owned(),
+            c.vault().structure.raw_transcript_folder().to_owned(),
+        ),
+    ])
 }
 
 /// One day-folder note as the source-row counts read it.
@@ -408,6 +427,7 @@ fn serve(
     ids: &Mutex<Vec<String>>,
 ) {
     host.set_trash_retention_days(settings.trash_retention_days);
+    host.set_folders(settings.folders.clone());
     let mut reader: Option<cv_index::Reader> = None;
     let mut sources_stale = true;
     let invalidate = |v: Vec<String>| {
@@ -482,12 +502,14 @@ fn serve(
             Cmd::StateChanged(table) => invalidate(host.on_state_changed(table)),
             Cmd::Settings(s) => {
                 host.set_trash_retention_days(s.trash_retention_days);
+                host.set_folders(s.folders.clone());
                 settings = s;
                 sources_stale = true;
                 invalidate(host.view_ids());
             }
             Cmd::Config(dir, s) => {
                 host.set_trash_retention_days(s.trash_retention_days);
+                host.set_folders(s.folders.clone());
                 settings = s;
                 sources_stale = true;
                 invalidate(host.on_config_changed(&dir));
@@ -502,7 +524,7 @@ fn serve(
 mod tests {
     #[test]
     fn day_folder_comes_from_the_period_config() {
-        let t = |s: &str| super::day_folder_of(&s.parse::<toml::Table>().unwrap());
+        let t = |s: &str| cv_actions::vault::day_folder_of(&s.parse::<toml::Table>().unwrap());
         assert_eq!(t(""), "daily/day");
         assert_eq!(t("[periods.day]\nformat='YYYY'"), "daily/day");
         assert_eq!(t("[periods.day]\nfolder=' '"), "daily/day");

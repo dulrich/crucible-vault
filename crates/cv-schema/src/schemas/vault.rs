@@ -140,6 +140,36 @@ pub static VAULT_REMOTE_MEDIA: Record = Record {
     summary: None,
 };
 
+/// `[structure]` — `StructureConfig`, `crates/cv-actions/src/vault.rs` (plan public-release
+/// WP-2): the machinery folders the daemon's steps read.
+pub static VAULT_STRUCTURE: Record = Record {
+    name: "structure",
+    fields: &[
+        field(
+            "app_folder",
+            "App folder",
+            "The app's own folder (review notes); excluded from scans by default",
+            Node::Str,
+        )
+        .dflt(D::Str("_crucible")),
+        field(
+            "exclude",
+            "Excluded folders",
+            "Folders the duplicate scan and the link scan skip (a link-scan step's own exclude wins); unset = .trash, _custom, the app folder and the pipeline metadata roots",
+            STR_LIST,
+        ),
+        field(
+            "raw_transcript_folder",
+            "Raw transcript folder",
+            "Where transcript refining keeps the original note",
+            Node::Str,
+        )
+        .dflt(D::Str("_raw_transcript")),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `vault.toml`.
 pub static VAULT_FILE: Record = Record {
     name: "vault.toml",
@@ -149,6 +179,12 @@ pub static VAULT_FILE: Record = Record {
             "Trash",
             "Trash location and retention",
             Node::Record(&VAULT_TRASH),
+        ),
+        field(
+            "structure",
+            "Vault structure",
+            "The app folder, the excluded folders and the raw transcript folder",
+            Node::Record(&VAULT_STRUCTURE),
         ),
         field(
             "remote_media",

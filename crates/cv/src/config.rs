@@ -14,13 +14,14 @@ pub const DEFAULT_CLIPBOARD_CMD: &str = "wl-paste --no-newline";
 /// the host on X11, where `wl-paste` cannot read the clipboard).
 pub const DEFAULT_CLIPBOARD_CMD_X11: &str = "xclip -o -selection clipboard";
 
-/// The vault root when `CV_VAULT` is unset (the configured vault is the live vault, D24).
-pub const DEFAULT_VAULT: &str = "~/vault";
+/// The vault root when `CV_VAULT` is unset: `~/vault`, i.e. this directory under `$HOME` (plan
+/// public-release WP-2, C#11; the configured vault is the live vault, D24).
+pub const DEFAULT_VAULT: &str = "vault";
 
 /// Resolved daemon/CLI configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// `CV_VAULT`: the vault root (default [`DEFAULT_VAULT`]).
+    /// `CV_VAULT`: the vault root (default `$HOME/`[`DEFAULT_VAULT`]).
     pub vault: PathBuf,
     /// `CV_STATE_DB`.
     pub state_db: PathBuf,
@@ -69,7 +70,10 @@ impl Config {
                 None => Ok(home()?.join(fallback)),
             }
         };
-        let vault = get("CV_VAULT").map_or_else(|| PathBuf::from(DEFAULT_VAULT), PathBuf::from);
+        let vault = match get("CV_VAULT") {
+            Some(v) => PathBuf::from(v),
+            None => home()?.join(DEFAULT_VAULT),
+        };
         let state_dir = || -> Result<PathBuf> {
             Ok(xdg("XDG_STATE_HOME", ".local/state")?.join("crucible-vault"))
         };
@@ -218,7 +222,7 @@ mod tests {
     #[test]
     fn defaults_follow_xdg_and_home() {
         let c = Config::resolve(env(&[("HOME", "/h"), ("XDG_RUNTIME_DIR", "/run/u")])).unwrap();
-        assert_eq!(c.vault, PathBuf::from(DEFAULT_VAULT));
+        assert_eq!(c.vault, PathBuf::from("/h/vault"));
         assert_eq!(
             c.state_db,
             PathBuf::from("/h/.local/state/crucible-vault/state.db")
@@ -229,7 +233,7 @@ mod tests {
         );
         assert_eq!(
             c.config_dir,
-            PathBuf::from(DEFAULT_VAULT).join("_custom/crucible-vault")
+            PathBuf::from("/h/vault/_custom/crucible-vault")
         );
         assert_eq!(c.socket, PathBuf::from("/run/u/crucible-vault/daemon.sock"));
         assert_eq!(

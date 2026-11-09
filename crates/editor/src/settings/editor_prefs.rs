@@ -21,6 +21,7 @@ pub use crate::header::QuickSwitchOpen;
 use crate::header::TabTitle;
 use crate::theme::{Rgb, Surround, parse_hex};
 use editor_model::period::{NavLink, default_nav_links};
+use editor_model::props::PropType;
 
 /// The vault file.
 pub const EDITOR_PATH: &str = cv_schema::config_path!("editor.toml");
@@ -116,6 +117,9 @@ pub struct Prefs {
     /// `nav_open` (plan round-14 WP-2): whether a nav-bar button opens in a new tab (the
     /// wikilink placement) or replaces the active clean tab.
     pub nav_open: NavOpen,
+    /// `[property_types]` (plan public-release WP-2, C#13): property name → type, extending the
+    /// built-in `editor_model::props::TYPES`; unknown type names are skipped.
+    pub property_types: BTreeMap<String, PropType>,
 }
 
 /// `nav_open`: where a nav-bar button puts its note.
@@ -204,6 +208,7 @@ impl Default for Prefs {
             keys: BTreeMap::new(),
             open_url_cmd: default_open_url_cmd(),
             nav_links: default_nav_links(),
+            property_types: BTreeMap::new(),
             nav_open: NavOpen::NewTab,
         }
     }
@@ -340,6 +345,14 @@ pub fn from_doc(doc: &ConfigDoc, fallback_surround: Surround) -> Prefs {
             Some("new-tab") => NavOpen::NewTab,
             _ => d.nav_open,
         },
+        property_types: doc
+            .keys(&p("property_types"))
+            .into_iter()
+            .filter_map(|k| {
+                let t = doc.get_str(&Path::root().key("property_types").key(&k))?;
+                Some((k, PropType::parse(t)?))
+            })
+            .collect(),
     }
 }
 
