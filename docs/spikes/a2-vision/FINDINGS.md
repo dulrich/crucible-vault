@@ -16,8 +16,8 @@
 - Secrets: `~/.config/crucible-vault/` holds no YouTube key; the unit environment carries only `CV_LINK_WRITE_ROOTS`.
 
 ## Q3: blog full-body consistency and filed-blog shape (added 2026-10-15 for audit M4)
-Commands: python3 -I scripts run from `~/vault` (read-only; frontmatter parsed with `re.match(r'---\n(.*?)\n---\n')`; aggregates printed only).
+Commands: python3 -I scripts run from `$VAULT` (read-only; frontmatter parsed with `re.match(r'---\n(.*?)\n---\n')`; aggregates printed only).
 - `_blog_metadata/**.md` grouped by frontmatter `blog:` → 46 blogs; 44 have `has-body: true` on every post, 2 on none, 0 mixed. Body chars (after frontmatter) p10/p50/p90 = 784 / 5,645 / 22,943 over 1,255 notes. Keys on all 1,255: `source, post-id, blog, published, word-count, kind, has-body, fetched_at, source_command`.
 - Notes under `daily/day/<date>/` (depth ≥ 3) whose frontmatter tags include `blog` → 1,130. Key counts: title/source/post-id/author/published/created/description/word-count/tags 1,130; read 1,129; modified 1,128; x-metadata 193.
 - Reading List predicate: `_custom/crucible-vault/views/daily-reading-list.toml:5` `file.folder == "daily/day/" + this.file.name`. Kind `blog`: `kinds.toml` `[kinds.blog] tags=["blog"] folder="{period.day}"`.
-- Registry tables: `grep -c '^|'` = 19 lines in `core/Tracked Channels.md`, 33 in `core/Tracked Feeds.md` (incl. header/separator rows).
+- Registry tables: `grep -c '^|'` = 19 lines in the YouTube registry note, 33 in the blog registry note (incl. header/separator rows).

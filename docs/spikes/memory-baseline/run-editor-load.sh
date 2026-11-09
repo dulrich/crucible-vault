@@ -17,12 +17,12 @@ for _a in "$@"; do case "$_a" in --help|-h)
 build_flags "${BASH_SOURCE[0]}" "$@"
 
 label=$1; dl=$2; shift 2
-S=~/.local/share/cv-mem-scratch; sock=$S/run/$dl.sock
+S=$SCRATCH_BASE/cv-mem-scratch; sock=$S/run/$dl.sock
 [ -f $S/run/imgnotes.txt ] || (cd $S/vault && grep -rcE '!\[\[[^]]*\.(png|jpe?g|webp|gif)|!\[[^]]*\]\([^)]*\.(png|jpe?g|webp|gif)' --include='*.md' . | sort -t: -k2 -rn | head -15 | cut -d: -f1 | sed 's|^\./||' > $S/run/imgnotes.txt)
 cp $S/xdg/crucible-vault/editor.json.orig $S/xdg/crucible-vault/editor.json
 env -i HOME=$HOME PATH=$PATH DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR \
   XDG_STATE_HOME=$S/xdg CV_SOCKET=$sock RUST_LOG=info "$@" \
-  <code-root>/crucible-vault/target/release/cvault-editor > $S/run/edload-$label.log 2>&1 &
+  $REPO/target/release/cvault-editor > $S/run/edload-$label.log 2>&1 &
 P=$!; sleep 8
 row(){ printf '%s\t%s\t' "$label" "$1"; awk '/^Rss:/{r=$2}/^Pss_Anon:/{a=$2}/^Pss_File:/{f=$2}END{printf "%d\t%d\t%d\t",r,a,f}' /proc/$P/smaps_rollup; awk '{printf "%d\t",($14+$15)/100}' /proc/$P/stat; awk '/VmSwap/{printf "%d\n",$2}' /proc/$P/status; }
 row idle

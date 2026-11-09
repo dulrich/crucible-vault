@@ -74,7 +74,7 @@ Command: `CARGO_TARGET_DIR=~/.cache/cv-search-spike-target RUSTFLAGS="-C target-
 
 ## 7. Node → Rust: what the port actually is
 
-- The companion is about 3.9k LOC of `.mjs`. Much of it is Node workarounds, which per AGENTS.md should not be carried forward:
+- The companion is about 3.9k LOC of `.mjs`. Much of it is Node workarounds, which per the project contract should not be carried forward:
   - the off-request time-sliced matrix rebuild (`vectors.mjs` WP-2);
   - the `SharedArrayBuffer` worker-shard pool (WP-3);
   - deadline/supersede plumbing for a cross-process HTTP client (`deadline.mjs`, `searchClients.mjs`);
@@ -91,7 +91,7 @@ Command: `CARGO_TARGET_DIR=~/.cache/cv-search-spike-target RUSTFLAGS="-C target-
   - The cost is ~10 MiB of resident memory added to the daemon's ~330 MiB plateau, against ~650 MiB and a Docker container saved.
   - It removes the HTTP feed, schema-version handshake and remote compare entirely.
   - Rough size: ~1.2–1.8 kSLOC of Rust: schema + upsert ~400, query building + RRF ~400, binary scan + rescore ~200, protocol + editor hook ~300–500, tests. The existing feed/compare code retires.
-- Either option is a plan, not a direct change. It touches `cv-search`, `cv-protocol`, the `cv` daemon and an editor search surface. Also, `cv-search` today has no `rusqlite` edge, so the new edge (on an already-locked package) is the kind of exception AGENTS.md records.
+- Either option is a plan, not a direct change. It touches `cv-search`, `cv-protocol`, the `cv` daemon and an editor search surface. Also, `cv-search` today has no `rusqlite` edge, so the new edge (on an already-locked package) is the kind of exception the project contract records.
 
 ## 8. Open questions for the plan (not answered by this spike)
 

@@ -1,11 +1,11 @@
 # WP-8 — embed migration on a scratch copy, view parity, editor RSS (2026-10-13)
 
-Plan `plans/v0-editor.md` WP-8 (+ audit E1). Aggregates only: counts, hashes, MiB, %, seconds, view ids, `_custom/` template names. Per-path data (picks, path lists, stderr) lived only in the scratch dir `~/.local/share/cv-wp8-scratch/`.
+Plan `plans/v0-editor.md` WP-8 (+ audit E1). Aggregates only: counts, hashes, MiB, %, seconds, view ids, `_custom/` template names. Per-path data (picks, path lists, stderr) lived only in the scratch dir `$SCRATCH_BASE/cv-wp8-scratch/`.
 
 ## Setup
 
 - Binaries: worktree `target/release/{cv,cvault-editor,cvault-migrate-views}` at base `eef433a` + WP-8 changes.
-- Copy (21:25:50–21:25:56 local): `rsync -a --exclude .obsidian --exclude .trash ~/vault/ <scratch>/vault/` — 8,101 `.md` (88 of them symlinks, all under `initiatives/`), 1.8 GiB.
+- Copy (21:25:50–21:25:56 local): `rsync -a --exclude .obsidian --exclude .trash $VAULT/ <scratch>/vault/` — 8,101 `.md` (88 of them symlinks, all under `initiatives/`), 1.8 GiB.
 - `<scratch>/config/` = only `views/` (a copy of `crates/views/defs/*.toml`).
 - Daemon: `CV_MODE=live CV_VAULT=<scratch>/vault CV_SOCKET=<scratch>/run/daemon.sock CV_STATE_DB=<scratch>/state/state.db CV_INDEX_DB=<scratch>/state/index.db CV_SCRATCH=<scratch>/overlay CV_CONFIG_DIR=<scratch>/config`, `CV_OPEN_CMD` unset; `cv daemon`. `cv status` → `mode: live`, `generation: 1`, `config errors: none`. Every client used the same `CV_SOCKET`.
 
@@ -30,7 +30,7 @@ Commands: `cvault-migrate-views --dry-run --report <scratch>/dryrun-1.json`, `cv
 | Files with `monthly-reading#By Tag` / of those lacking `#By Day` | — | 8 / 0 |
 | Templates' fences (`day`/`month`/`work-template.md`) | rewritten | 1 / 4 / 1 |
 
-Per-target occurrences (dry-run): `blog-story-list#Stories` 21, `daily-reading-list#Reading List` 193, `hubs#Project Alpha` 1, `hubs#Hub View B` 1, `hubs#Hub View C` 1, `initiatives#Active/Blocked/Paused` 1 each, `monthly-reading#By Tag` 8, `monthly-reading#Unread` 9, `works#Active/Complete/Unread` 1 each, `query:monthly-tasks` 8. Dry-run wall: 0.19 s. The 88 symlinked notes carry 0 `.base` embeds and 0 `query` fences (`grep` over them), so not following symlinks loses nothing for the migration.
+Per-target occurrences (dry-run): `blog-story-list#Stories` 21, `daily-reading-list#Reading List` 193, `hubs#<project>` 1, `hubs#Hub View B` 1, `hubs#Hub View C` 1, `initiatives#Active/Blocked/Paused` 1 each, `monthly-reading#By Tag` 8, `monthly-reading#Unread` 9, `works#Active/Complete/Unread` 1 each, `query:monthly-tasks` 8. Dry-run wall: 0.19 s. The 88 symlinked notes carry 0 `.base` embeds and 0 `query` fences (`grep` over them), so not following symlinks loses nothing for the migration.
 
 ## Parity (pin 6)
 
@@ -49,8 +49,8 @@ Live: `obsidian base:query path=_custom/bases/<f>.base view="<View>" format=path
 | works#Unread | 10 | 12 | 7ba12c2108fa | efd78ce30665 | 0 / 2 | 0 | **fail (unexplained)** |
 
 - **initiatives:** every `initiatives/*/INITIATIVE.md` in the vault is a symlink (29 of the 88 symlinked notes, all pointing outside the vault). `cv-index` walks with `follow_links(false)` (`crates/cv-index/src/index.rs:262`), so the index holds 0 `initiatives/%/INITIATIVE.md` rows (`sqlite3 -readonly <scratch>/state/index-1.db`: 8,013 `.md` files indexed of 8,101 on disk) and the views are empty. A daemon/index behaviour, not a view-definition defect; it blocks the initiatives views at cut-over (`docs/cutover.md` row E8).
-- **works#Unread:** scratch has 2 extra rows, both entries 3 levels deep under `daily/` with `read: false`; mtimes equal on both sides (no drift since the copy). The `.base` Unread filter is a generated 20-branch literal and `core/works` has 20 top-level works (none born after the `.base`), so it is not a stale literal. Cause not determined without reading note content: a semantic difference between the `.base` literal as Obsidian evaluates it and WP-7's `files("core/works")` cross-file rewrite (or the evaluator). Flagged for review.
-- **hubs#Project Alpha** (needs `this`): covered by WP-7's `goldens` test (`crates/views/tests/defs.rs`, host `core/projects/project-alpha/Hub.md`): the golden `hubs#Project Alpha.json` lists the folder's other note and a tagged note, not the host. Implicit in the golden (no dedicated assert).
+- **works#Unread:** scratch has 2 extra rows, both entries 3 levels deep under `daily/` with `read: false`; mtimes equal on both sides (no drift since the copy). The `.base` Unread filter is a generated 20-branch literal and `<works folder>` has 20 top-level works (none born after the `.base`), so it is not a stale literal. Cause not determined without reading note content: a semantic difference between the `.base` literal as Obsidian evaluates it and WP-7's `files("<works folder>")` cross-file rewrite (or the evaluator). Flagged for review.
+- **hubs#<project>** (needs `this`): covered by WP-7's `goldens` test (`crates/views/tests/defs.rs`, host `<hub note>`): the golden `hubs#Project Alpha.json` lists the folder's other note and a tagged note, not the host. Implicit in the golden (no dedicated assert).
 - **daily-reading-list:** 192 host notes `daily/day/<name>.md` (192 folders, 0 without a host). `drl-dump.sh` (sum of `dump daily-reading-list#Reading List --this daily/day/<host>`): **2,714** rows, 0 failures. Independent `drl-count.sh` (direct children of `daily/day/<name>/`, the `.base` filter `file.folder == "daily/day/" + this.file.name`): **2,714** `.md` (2,716 files incl. 2 non-`.md`, which `cv` does not index; Obsidian Bases would list them). S2 reference: 2,713 over 189 folders — the vault grew by 3 folders.
 
 ## Editor RSS (pin 7, audit E1)
@@ -123,11 +123,11 @@ Compared with WP-8 at the default budget, RSS at 20 notes fell from 568–746 Mi
 
 ## Re-verify (editor-cutover-blockers WP-3)
 
-Binaries: the WP-3 worktree's `target/release/{cv,cvault-migrate-views}` at base `1bb30ef` (WP-1 + WP-2), built with `cargo build --release -p cv -p editor`. Scratch: `~/.local/share/cv-cutover-scratch/` (fresh; `<scratch>` below).
+Binaries: the WP-3 worktree's `target/release/{cv,cvault-migrate-views}` at base `1bb30ef` (WP-1 + WP-2), built with `cargo build --release -p cv -p editor`. Scratch: `$SCRATCH_BASE/cv-cutover-scratch/` (fresh; `<scratch>` below).
 
 ### Setup
 
-- Copy (00:49:05–00:49:10 local): `rsync -a --exclude .obsidian --exclude .trash ~/vault/ <scratch>/vault/` — 8,101 `.md` (88 symlinks), 30 `initiatives/` entries.
+- Copy (00:49:05–00:49:10 local): `rsync -a --exclude .obsidian --exclude .trash $VAULT/ <scratch>/vault/` — 8,101 `.md` (88 symlinks), 30 `initiatives/` entries.
 - `<scratch>/config/views/` = copy of `crates/views/defs/*.toml`, nothing else. `<scratch>/env.sh` = the WP-8 isolation env with every path under `<scratch>`, `CV_OPEN_CMD` and `CV_LINK_WRITE_ROOTS` unset, `PATH` led by the worktree's `target/release`.
 - Daemon: `source <scratch>/env.sh; exec cv daemon` (harness-owned background task); `cv status` → `mode: live`, `generation: 1`, `config errors: none`. Daemon runs: #1 parity + migration (links unset), #2 works#Unread variant (links unset), #3 refusal (links unset), #4 write-through (`CV_LINK_WRITE_ROOTS=<scratch>/standin`, verified in `/proc/<pid>/environ`).
 - Live capture note: `obsidian base:query … format=paths` prints nothing when stdout is a pipe; captured as `script -q -c 'obsidian base:query path=_custom/bases/<f>.base view="<View>" format=paths' /dev/null | tr -d '\r'`, then the RADV `WARNING: radv is not a conformant Vulkan implementation` banner line was filtered out (it appeared once, in the works#Unread capture). Live captured 00:50:51, 1.7 min after the rsync.
@@ -169,7 +169,7 @@ Hash = first 12 hex of `sort -u | sha256sum`. Scratch: `cvault-migrate-views dum
 | works#Complete | 2 | 2 | a6ab21b41549 | a6ab21b41549 | 0 / 0 | pass |
 | works#Unread | 10 | 12 | 7ba12c2108fa | efd78ce30665 | 0 / 2 | **pass (intended +2)** |
 
-- works#Unread: scratch hash `efd78ce30665` = the `cutover-blockers` §Q1 control hash; both extras have equal mtimes live vs scratch (no drift). Variant recompute: added `!value.properties["author-filter"].toString().contains("[[") && ` to the `files("core/works").filter(value.folder == "core/works" && …` clause in `<scratch>/config/views/works.toml`, restarted the daemon, `dump "works#Unread"` → **10 rows, `7ba12c2108fa` = live**. Config restored (`diff -r crates/views/defs <scratch>/config/views` empty).
+- works#Unread: scratch hash `efd78ce30665` = the `cutover-blockers` §Q1 control hash; both extras have equal mtimes live vs scratch (no drift). Variant recompute: added `!value.properties["author-filter"].toString().contains("[[") && ` to the `files("<works folder>").filter(value.folder == "<works folder>" && …` clause in `<scratch>/config/views/works.toml`, restarted the daemon, `dump "works#Unread"` → **10 rows, `7ba12c2108fa` = live**. Config restored (`diff -r crates/views/defs <scratch>/config/views` empty).
 
 ### Symlink write-through (check 3)
 

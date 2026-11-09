@@ -22,7 +22,7 @@ binary cand=400 rescore=f32  threads= 1: 0.704 ms/query recall@10=0.9950
 binary cand=400 rescore=int8 threads= 1: 0.685 ms/query recall@10=0.9635
 binary cand=400 rescore=f32  threads= 4: 0.512 ms/query recall@10=0.9950
 memory: f32=327 MiB int8=81 MiB binary=10 MiB
-	Command being timed: "~/.cache/cv-search-spike-target/release/search-bench ~/.local/share/crucible-vault-spike/search/search.sqlite 200"
+	Command being timed: "$SCRATCH_BASE/cv-search-spike-target/release/search-bench $SCRATCH_BASE/crucible-vault-spike/search/search.sqlite 200"
 	User time (seconds): 24.71
 	System time (seconds): 1.25
 	Percent of CPU this job got: 332%

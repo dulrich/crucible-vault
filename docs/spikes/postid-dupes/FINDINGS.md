@@ -1,6 +1,6 @@
 # Post-id / canonical-URL identity vs duplicate notes (round-12 spike)
 
-Aggregates only; live vault read-only (V=~/vault), DB copies in a temp dir `T` (`cp ~/.local/state/crucible-vault/search.db* $T/`, `cp ~/.local/state/crucible-vault/state.db* $T/st/`), opened read-only. Driver: `src/main.rs` (copy of the round-11 dupes driver) + `src/identity.rs` (new); own `[workspace]`, deps `cv-text` path + `rusqlite =0.40.2`, `cp ../../../Cargo.lock .`. Raw outputs: `out/`.
+Aggregates only; live vault read-only (V=$VAULT), DB copies in a temp dir `T` (`cp ~/.local/state/crucible-vault/search.db* $T/`, `cp ~/.local/state/crucible-vault/state.db* $T/st/`), opened read-only. Driver: `src/main.rs` (copy of the round-11 dupes driver) + `src/identity.rs` (new); own `[workspace]`, deps `cv-text` path + `rusqlite =0.40.2`, `cp ../../../Cargo.lock .`. Raw outputs: `out/`.
 Build: `CARGO_TARGET_DIR=$PWD/target nice -n 10 cargo build --release --offline -j 4`.
 Identity = stored `post-id`, else `cv_text::url_canon::post_id_from_url(source, &PostIdOptions::default())`, else `canonicalize_url(source).canonical`. Defaults match the daemon's blog tracker (`crates/cv/src/steps/tracker/blogs.rs:100` `canon_opts()` = `PostIdOptions::default()`; `signals.rs:306` passes configured per-host rules, none assumed here). A second identity, "recomputed-first" (recomputed id before stored), is used where stale ids matter. Vault drifted slightly since round 11 (9,580 notes now), so pair counts differ by a few from `docs/spikes/dupes/FINDINGS.md`.
 

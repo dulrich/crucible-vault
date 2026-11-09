@@ -18,7 +18,7 @@ fi
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
 build_flags "${BASH_SOURCE[0]}" "$@"
 cand=$1; out=${2:-results-$cand.tsv}
-VAULT=${VAULT:-~/vault}
+VAULT=${VAULT:?set VAULT to the vault path}
 HERE=$(cd "$(dirname "$0")" && pwd)
 export PDFIUM_LIB_DIR=$HERE/vendor/pdfium/lib
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT

@@ -6,23 +6,23 @@ cv reads newsletters from a **Maildir drop folder outside the vault** (plan `aut
 
 Pick a directory outside the vault, for example `~/Mail/newsletters`. cv scans `<maildir>/new/*` and loose `<maildir>/*.eml`. Either of these fills it.
 
-### Proton Bridge + mbsync (automatic)
+### IMAP fetcher (automatic)
 
-1. Install and sign in to Proton Mail Bridge (it exposes a local IMAP server on `127.0.0.1`, with a Bridge-generated password).
-2. Install `isync` (`mbsync`) and create `~/.mbsyncrc` with an IMAP account pointing at the Bridge (host `127.0.0.1`, the Bridge's IMAP port, the Bridge username and password, `TLSType STARTTLS`/`CertificateFile` as Bridge documents), a Maildir store at `~/Mail/newsletters`, and a channel that syncs only the newsletter folder (next section), e.g. `Patterns "Folders/Newsletters"`, `Create Near`, `SyncState *`.
-3. Run `mbsync <channel>` from a systemd user timer (every 10 to 15 minutes). mbsync writes new mail to `<maildir>/new/`.
+1. Use any IMAP-to-Maildir fetcher your mail provider supports (for example `isync`/`mbsync`, `offlineimap` or `getmail`). If your provider only exposes IMAP through a local bridge app, run that first.
+2. Configure one IMAP account (host, port, username and password or app password, TLS settings as your provider documents), a Maildir store at `~/Mail/newsletters`, and a channel that syncs only the newsletter folder (next section).
+3. Run the fetcher from a systemd user timer (every 10 to 15 minutes). It writes new mail to `<maildir>/new/`.
 
-### Saving `.eml` by hand (no Bridge)
+### Saving `.eml` by hand (no fetcher)
 
-In Proton Mail web open a newsletter, use **More → Export** (or drag the message out), and put the `.eml` file into `<maildir>/` (loose files are scanned). Useful when you only want a few paid issues.
+In your mail client or your provider's web interface, export or drag out a newsletter as an `.eml` file and put it into `<maildir>/` (loose files are scanned). Useful when you only want a few paid issues.
 
-## 2. A Proton filter that routes newsletters to one folder
+## 2. A mail filter that routes newsletters to one folder
 
-In Proton Mail: Settings → Filters → Add filter. Match the senders (or the `List-Id` / `List-Unsubscribe` header, when the publisher sets one), and apply **Move to** a folder named `Newsletters` (and optionally mark as read). Sync only that folder with mbsync. Many ESPs (HubSpot and others) omit `List-Id`, so match on `From`.
+In your mail provider's filter settings, match the senders (or the `List-Id` / `List-Unsubscribe` header, when the publisher sets one), and move matches to a folder named `Newsletters` (optionally marking them read). Sync only that folder with your fetcher. Many ESPs omit `List-Id`, so match on `From`.
 
 ## 3. Turn it on
 
-In `pipelines.toml` (the migration `0001-auto-intake-config` adds this disabled):
+In `pipelines.toml` (see `config/examples/pipelines.toml`; leave `maildir` unset until the folder exists):
 
 ```toml
 [mail]
@@ -55,8 +55,6 @@ A row needs a `from`, a `list_id` or a `hosts` list. `hosts = ["letter.example"]
 
 **Substack auto-match (plan `intake-followups-mail-youtube` WP-2).** Mail whose `List-Id` (else sender local part) is `<pub>.substack.com` needs no `[[newsletter]]` row when a `[[blog]]` row's feed `link` host is `<pub>.substack.com`: it behaves as a newsletter of kind `blog` named for that blog row, mirroring it (RSS supersede, the blog row's paywall markers). An explicit `[[newsletter]]` row always wins over the auto-match. To follow a Substack publication you only need a `[[blog]]` row on `https://<pub>.substack.com/feed`.
 
-Migration `0002-intake-followups` adds the rows the 2026-10-21 mail dump needed (each only when absent): `[[newsletter]]` rows for the `news` senders Newsbit and Example News Report, the `blog` senders Example Weekly (example-creator) and Example Letter (beehiiv), and `blog`-linked rows for Example Newsletter and Example Author (custom-domain feeds the host auto-match cannot reach); plus `[[blog]]` rows on `<pub>.substack.com/feed` for pub-a, pub-b and pub-c, which the auto-match then covers. A new `[[blog]]` row makes `track-blogs` fetch that feed.
-
 **Body cleanup (WP-1).** Before the word count and the note are made, the markdown body is cleaned of newsletter chrome (`cv_ingest::mail::clean_body`): tracking redirects are unwrapped, `utm_*` parameters and tracking pixels dropped, share/like/restack rows and the unsubscribe footer removed. The paywall-marker verdict is taken on the body before cleanup, so removed chrome can never turn a partial message complete.
 
 ## Round 2: cleanup rules, canonical identity, publication (plan `intake-round-2-clean-dedupe-reading`)
@@ -84,9 +82,9 @@ The one-shot repairs these rounds also ran (mail re-key and token strip, forum p
 
 - **Boilerplate** (`bp_learned`, `bp_stripped`, `bp_guarded`, `bp_conflict`): seeds each newsletter's set from its processed `.eml` files (and, for a linked email note whose message is gone, from the note's current body, once), then strips every known-sender `via: email` note with it, written only on a change, with `description` recomputed. `bp_guarded` counts notes the half-body guard kept. A second run changes nothing.
 
-The deploy migration `0004-round-9-identity-repair` runs the reconcile once, then the localize folder backfills; a note excluded from the backfill before escaped-paren image URLs were matched (`\(`/`\)` in a remote image URL) gets one retry, every other excluded note stays excluded.
+A one-time deploy migration ran the reconcile once, then the localize folder backfills; a note excluded from the backfill before escaped-paren image URLs were matched (`\(`/`\)` in a remote image URL) gets one retry, every other excluded note stays excluded.
 
-The historical same-id duplicates that are not a mail/RSS pair stay as they are. The deploy migration `0003-intake-round-2` also adds the `tag = "clippings"` starter to `clip-images` and the Author column, `maxHeight = "none"` and numeric column widths to the Reading List view, then runs the reconcile once.
+The historical same-id duplicates that are not a mail/RSS pair stay as they are. A one-time deploy migration also added the `tag = "clippings"` starter to `clip-images` and the Author column, `maxHeight = "none"` and numeric column widths to the Reading List view, then ran the reconcile once.
 
 ## What happens to a message
 
