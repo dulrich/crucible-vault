@@ -28,3 +28,22 @@ app_folder = "_crucible"        # the app's own folder (review notes land in <ap
                                 # `exclude` wins); unset = .trash, _custom, the app folder and the
                                 # pipelines.toml [youtube]/[x] metadata_root folders
 raw_transcript_folder = "_raw_transcript"  # where transcript_refine keeps the original note
+
+# Training signals (plan public-release WP-4): the label vocabulary `cv signals export` reads.
+# Absent = no label tags carried into `label.tags`, no weak importance, no Observations signal.
+# Each [signals.labels.<tag>] is carried into `label.tags`; its optional rule (0..=5) shapes the
+# weak importance in a fixed order: the lowest matching `value`, then the lowest `ceiling`
+# (clamps a set importance; never makes a row), then every `floor` and the Observations floor
+# (max). A tag without a key is only carried.
+# [signals.labels.favourite]
+# floor = 4
+# [signals.labels.skip]
+# value = 0
+# [signals.labels.later]
+#
+# The Observations signal: a top-level bullet under `heading` in a note of the captures.toml
+# [periods.<period>] folder that links a capture raises that capture to `floor`.
+# [signals.observations]
+# heading = "# Observations"    # required
+# period = "month"              # default "month"
+# floor = 4                     # default 4

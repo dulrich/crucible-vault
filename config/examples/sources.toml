@@ -13,7 +13,7 @@
 #   kind with its publication (auto-file step 2b, after the [[blog]]-row host match).
 # [[serial]] (plan round-11-feedback-todos, replaces the core/works notes): name (unique), short
 #   (publication; default name), author (bare name; [[ ]] and # ignored), prefix (source-URL
-#   prefixes), kind (kinds.toml key; default fanfic), status (active | complete | ignored; the Works
+#   prefixes), kind (kinds.toml key; required: a row without it is never filed), status (active | complete | ignored; the Works
 #   view's, filing ignores it). A clip matches when its author list holds `author` AND some prefix
 #   starts its source (a row with neither matches nothing); the first matching row in file order
 #   files it as `kind` and gives it the row's publication.

@@ -1,13 +1,12 @@
 //! Importance scorer (plan `v0-automation-pipelines` WP-10, D5: no ML stack here).
 //!
-//! [`ImportanceScorer::Stub`] never scores; [`ImportanceScorer::SystemOne`] POSTs the SystemOne
-//! router body (`../inference-server/router/AGENTS.md`, patch 0013):
+//! [`ImportanceScorer::Stub`] never scores; [`ImportanceScorer::Http`] POSTs to an HTTP scoring
+//! endpoint returning `{"score": n}`, with the body
 //! `{"model":"<provider>/<model-id>","state":"…","questions":{"importance":"…"}}`.
 //!
-//! **Provisional response contract** (no response shape is defined upstream yet; for
-//! `../eval-tool/` to implement): a JSON object with a numeric top-level `score`. Anything
-//! else is [`FetchError::Malformed`]. Callers treat every error as "no score" — a scorer failure
-//! never blocks intake.
+//! **Provisional response contract** (the endpoint implements it): a JSON object with a
+//! numeric top-level `score`. Anything else is [`FetchError::Malformed`]. Callers treat every
+//! error as "no score" — a scorer failure never blocks intake.
 
 use std::time::Duration;
 
@@ -49,8 +48,8 @@ pub enum StubReason {
 pub enum ImportanceScorer {
     /// Never scores.
     Stub,
-    /// SystemOne-shaped endpoint.
-    SystemOne {
+    /// An HTTP scoring endpoint returning `{"score": n}`.
+    Http {
         /// Full POST URL.
         url: String,
         /// `<provider>/<model-id>`.
@@ -68,7 +67,7 @@ impl ImportanceScorer {
             (None, _) => (Self::Stub, Some(StubReason::Unconfigured)),
             (Some(_), None) => (Self::Stub, Some(StubReason::MissingModel)),
             (Some(u), Some(m)) => (
-                Self::SystemOne {
+                Self::Http {
                     url: u.to_owned(),
                     model: m.to_owned(),
                 },
@@ -86,7 +85,7 @@ impl ImportanceScorer {
         )
     }
 
-    /// The 0013 request body.
+    /// The request body.
     #[must_use]
     pub fn request_body(model: &str, item: &ScoreItem<'_>) -> Value {
         json!({
@@ -114,7 +113,7 @@ impl ImportanceScorer {
         client: &WebClient,
         item: &ScoreItem<'_>,
     ) -> Result<Option<f64>, FetchError> {
-        let Self::SystemOne { url, model } = self else {
+        let Self::Http { url, model } = self else {
             return Ok(None);
         };
         let mut req = FetchRequest::get(SERVICE, url);

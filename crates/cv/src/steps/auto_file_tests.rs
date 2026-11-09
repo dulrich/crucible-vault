@@ -47,6 +47,7 @@ kind = "not-a-kind"
 [[serial]]
 name = "The Saga"
 prefix = ["https://saga.example/"]
+kind = "fanfic"
 
 [[serial]]
 name = "Ann Posts"

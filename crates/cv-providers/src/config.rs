@@ -92,8 +92,8 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     /// File name (no path separators) under the secrets dir holding the API key.
     pub api_key_file: Option<String>,
-    /// `anthropic` only: header name carrying the key instead of `x-api-key` (e.g. the inference
-    /// router's `x-gateway-key`). Absent = `x-api-key`.
+    /// `anthropic` only: header name carrying the key instead of `x-api-key` (e.g. a gateway's
+    /// `x-gateway-key`). Absent = `x-api-key`.
     pub auth_header: Option<String>,
     /// Explicit completion concurrency cap; `0`/absent falls back to the default.
     pub max_concurrent_requests: Option<u32>,

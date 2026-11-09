@@ -7,9 +7,8 @@ use super::fanfic_title::{Plan, plan};
 use super::testkit::{StepEnv, active, example_env};
 
 const FM: &str = "---\ntags:\n  - fanfic\n---\n";
-const NOTE_STEP: &str =
-    "type = \"fanfic_title\"\nkind = \"{param.kind}\"\npath = \"{vars.moved_path}\"";
-const BACKFILL: &str = "type = \"fanfic_title\"\nscope = \"backfill\"";
+const NOTE_STEP: &str = "type = \"fanfic_title\"\nmatch_kind = \"fanfic\"\nkind = \"{param.kind}\"\npath = \"{vars.moved_path}\"";
+const BACKFILL: &str = "type = \"fanfic_title\"\nscope = \"backfill\"\nkind = \"fanfic\"";
 
 fn note(body: &str) -> String {
     format!("{FM}{body}")
@@ -170,6 +169,23 @@ fn backfill_dry_run_counts_only() {
     assert!(o.output_paths.is_empty());
 }
 
+/// Plan public-release WP-4 pin: backfill selects by its `kind` param. `kind = "fanfic"` is
+/// today's selection (the counts above); another kind selects none of these notes.
+#[test]
+fn backfill_selects_by_its_kind_param() {
+    let e = corpus();
+    let other = "type = \"fanfic_title\"\nscope = \"backfill\"\nkind = \"serial\"";
+    let o = e
+        .run(
+            other,
+            json!({"dry_run": false}),
+            active("F/A - Chapter 1.md"),
+        )
+        .unwrap();
+    assert_eq!((count(&o, "scanned"), count(&o, "renamed")), (0, 0));
+    assert!(e.read("F/B - Chapter 2 - W - Fandom.md").is_some());
+}
+
 #[test]
 fn backfill_renames_then_is_idempotent() {
     let e = corpus();
@@ -195,6 +211,11 @@ fn bad_params_are_rejected() {
         "type = \"fanfic_title\"\nscope = \"backfill\"\npath = \"x.md\"",
         "type = \"fanfic_title\"\nscope = \"all\"",
         "type = \"fanfic_title\"\nx = 1",
+        // Plan public-release WP-4: no built-in kind; backfill takes `kind`, note `match_kind`.
+        "type = \"fanfic_title\"\nscope = \"backfill\"",
+        "type = \"fanfic_title\"\nkind = \"{param.kind}\"",
+        "type = \"fanfic_title\"\nscope = \"backfill\"\nkind = \"fanfic\"\nmatch_kind = \"fanfic\"",
+        "type = \"fanfic_title\"\nscope = \"backfill\"\nkind = \"{param.kind}\"",
     ] {
         let step = cv_actions::Step::from_table(src.parse::<toml::Table>().unwrap()).unwrap();
         assert!(
@@ -224,7 +245,7 @@ fn dry_run_writes_review_note() {
         "{t}"
     );
     assert!(t.contains("Scanned 6, already 2, would rename 2, collision 1, undetected 1."));
-    assert!(t.contains("Apply: run \u{201c}Fanfic: chapter titles\u{201d} with Dry run off."));
+    assert!(t.contains("Apply: run this backfill again with Dry run off."));
     assert!(t.contains("## Would rename (2)"));
     assert!(t.contains(
         "- [[F/B - Chapter 2 - W - Fandom|B - Chapter 2 - W - Fandom]] \u{2192} B - Chapter 2\n"

@@ -170,6 +170,92 @@ pub static VAULT_STRUCTURE: Record = Record {
     summary: None,
 };
 
+/// A weak training importance, 0..=5.
+const IMPORTANCE: Node = Node::Int {
+    min: Some(0),
+    max: Some(5),
+};
+
+/// `[signals.labels.<tag>]` — `LabelRuleConfig`, `crates/cv-actions/src/vault.rs` (plan
+/// public-release WP-4, C#27).
+pub static SIGNALS_LABEL: Record = Record {
+    name: "label",
+    fields: &[
+        field(
+            "value",
+            "Fixed importance",
+            "A capture with this tag gets this weak importance (the lowest matching value wins)",
+            IMPORTANCE,
+        ),
+        field(
+            "floor",
+            "Importance floor",
+            "A capture with this tag gets at least this weak importance (applied last)",
+            IMPORTANCE,
+        ),
+        field(
+            "ceiling",
+            "Importance ceiling",
+            "Caps an importance another rule set; never makes a row on its own",
+            IMPORTANCE,
+        ),
+    ],
+    rules: &[],
+    summary: None,
+};
+
+/// `[signals.observations]` — `ObservationsConfig` (C#29). Absent = off.
+pub static SIGNALS_OBSERVATIONS: Record = Record {
+    name: "observations",
+    fields: &[
+        field(
+            "heading",
+            "Section heading",
+            "The heading (with its #s) whose bullets cite captures, e.g. # Observations",
+            Node::Str,
+        )
+        .req(),
+        field(
+            "period",
+            "Period",
+            "The captures.toml period whose folder is scanned",
+            Node::Str,
+        )
+        .dflt(D::Str("month")),
+        field(
+            "floor",
+            "Importance floor",
+            "A cited capture gets at least this weak importance",
+            IMPORTANCE,
+        )
+        .dflt(D::Int(4)),
+    ],
+    rules: &[],
+    summary: None,
+};
+
+/// `[signals]` — `SignalsConfig` (plan public-release WP-4): the training-export label
+/// vocabulary; absent = no label tags, no Observations signal.
+pub static VAULT_SIGNALS: Record = Record {
+    name: "signals",
+    fields: &[
+        field(
+            "labels",
+            "Label tags",
+            "Tags carried into training labels, each with an optional importance rule",
+            Node::Map(&Node::Record(&SIGNALS_LABEL)),
+        ),
+        field(
+            "observations",
+            "Observations signal",
+            "Period-note sections whose links raise a capture's importance; unset = off",
+            Node::Record(&SIGNALS_OBSERVATIONS),
+        ),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// `vault.toml`.
 pub static VAULT_FILE: Record = Record {
     name: "vault.toml",
@@ -191,6 +277,12 @@ pub static VAULT_FILE: Record = Record {
             "Remote content",
             "How remote images, video, audio and PDFs are handled",
             Node::Record(&VAULT_REMOTE_MEDIA),
+        ),
+        field(
+            "signals",
+            "Training signals",
+            "Label tags and the Observations signal of the training export",
+            Node::Record(&VAULT_SIGNALS),
         ),
     ],
     rules: &[],

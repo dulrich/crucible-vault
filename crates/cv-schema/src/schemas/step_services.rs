@@ -444,14 +444,20 @@ pub static FANFIC_TITLE: Record = Record {
         field(
             "scope",
             "Scope",
-            "note: rename one note to `<story> - Chapter <n>`; backfill: rename every fanfic-tagged note not already in that shape",
+            "note: rename one note to `<story> - Chapter <n>`; backfill: rename every note tagged with `kind` not already in that shape",
             Node::Enum(&["note", "backfill"]),
         )
         .dflt(D::Str("note")),
         field(
             "kind",
             "Kind",
-            "Note scope: the filed kind (usually {param.kind}); any kind but fanfic makes the step a no-op",
+            "Note scope: the filed kind (usually {param.kind}), unset = always runs; backfill (required): the kind whose tagged notes are renamed",
+            Node::Str,
+        ),
+        field(
+            "match_kind",
+            "Kind to rename",
+            "Note scope (required): the step renames only when the filed kind equals this kind, e.g. a serial-fiction kind",
             Node::Str,
         ),
         field(

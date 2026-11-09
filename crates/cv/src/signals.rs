@@ -28,10 +28,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use cv_actions::ConfigSet;
 use cv_actions::pipelines::{Priority, SourcesConfig};
+use cv_actions::vault::SignalsConfig;
 use cv_index::{LinkKind, Query};
 use cv_ingest::signals::{
-    CaptureInput, CaptureLabel, RawProp, RowBase, TrainingRow, build_rows, export_file_name,
-    normalize_source_tags,
+    CaptureInput, CaptureLabel, LabelRule, LabelRules, RawProp, RowBase, TrainingRow, build_rows,
+    export_file_name, normalize_source_tags, normalize_tag,
 };
 use cv_text::url_canon::bare_host;
 use serde_json::{Map, Value, json};
@@ -385,6 +386,24 @@ fn channel_from_link(v: Option<&Value>, root: &str) -> Option<String> {
         .then(|| channel.to_owned())
 }
 
+/// The `vault.toml [signals]` label vocabulary as `cv_ingest` rules (plan public-release WP-4):
+/// tags normalized; the Observations floor only when that signal is configured.
+fn label_rules(s: &SignalsConfig) -> LabelRules {
+    LabelRules {
+        labels: s
+            .labels
+            .iter()
+            .map(|(tag, r)| LabelRule {
+                tag: normalize_tag(tag),
+                value: r.value,
+                floor: r.floor,
+                ceiling: r.ceiling,
+            })
+            .collect(),
+        observed_floor: s.observations.as_ref().map(|o| o.floor),
+    }
+}
+
 /// Every training row of the vault.
 pub fn collect(
     q: &Query<'_>,
@@ -407,13 +426,20 @@ pub fn collect(
             .iter()
             .map(|b| (b.link.as_str(), b.canon.method())),
     );
-    let observations = match (weak, period_folder(set, "month")) {
-        (true, Some(m)) => observation_signals(q, vault, &m)?,
-        (true, None) => {
-            tracing::warn!("signals: captures.toml has no [periods.month]; no observation signals");
-            BTreeMap::new()
-        }
-        (false, _) => BTreeMap::new(),
+    let signals = &set.vault().signals;
+    let rules = label_rules(signals);
+    let observations = match (weak, &signals.observations) {
+        (true, Some(o)) => match period_folder(set, &o.period) {
+            Some(folder) => observation_signals(q, vault, &folder, &o.heading)?,
+            None => {
+                tracing::warn!(
+                    "signals: captures.toml has no [periods.{}]; no observation signals",
+                    o.period
+                );
+                BTreeMap::new()
+            }
+        },
+        _ => BTreeMap::new(),
     };
     let mut caps = Vec::new();
     for path in notes_with_any_prop(q, &["yt-video-id", "source", "post-id"])? {
@@ -437,7 +463,7 @@ pub fn collect(
             tags: n.tags,
         });
     }
-    Ok(build_rows(&caps, weak, today))
+    Ok(build_rows(&caps, weak, today, &rules))
 }
 
 /// Per-note signals (Crucible `captureIndex.ts:36-48` `CaptureRecord` minus the source
@@ -518,7 +544,7 @@ struct ObservationSignal {
 }
 
 /// Crucible `scanObservationSignals` (`src/sourceEval/signals.ts:17-79`) over every markdown
-/// note under `monthly_folder` (recursive): in the `# Observations` section
+/// note under `monthly_folder` (recursive): in the `heading` section (configured, e.g. `# Observations`)
 /// (`cv_text::find_section_range`), a top-level bullet whose first wikilink resolves to a note
 /// sets the current note (one month per monthly note); an indented bullet counts one quote for
 /// it; a top-level bullet without a resolvable link clears it. `getFirstLinkpathDest` becomes
@@ -528,13 +554,14 @@ fn observation_signals(
     q: &Query<'_>,
     vault_root: &Path,
     monthly_folder: &str,
+    heading: &str,
 ) -> Result<BTreeMap<String, ObservationSignal>> {
     let mut by_note: BTreeMap<String, (BTreeSet<String>, u32)> = BTreeMap::new();
     for file in q.md_files_under(monthly_folder.trim_matches('/'))? {
         let Ok(text) = std::fs::read_to_string(vault_root.join(&file.path)) else {
             continue;
         };
-        let Some(sec) = cv_text::find_section_range(&text, "# Observations") else {
+        let Some(sec) = cv_text::find_section_range(&text, heading) else {
             continue;
         };
         // Line (1-based) → the first resolved wikilink on it.
@@ -615,7 +642,15 @@ mod tests {
     const CAPTURES: &str = "[periods.day]\nfolder = \"daily\"\n[periods.month]\nfolder = \"monthly\"\nformat = \"YYYY-MM\"\n";
     const SOURCES: &str = "[[youtube]]\nchannel = \"Chan A\"\nid = \"UCa\"\ntags = [\"AI\"]\npriority = \"high\"\n[[blog]]\nname = \"Blog B\"\nlink = \"https://b.example/feed\"\n";
 
+    /// The former built-in label vocabulary and Observations signal, stated as `vault.toml`
+    /// (plan public-release WP-4 pin: output identical to the pre-config export).
+    const OWNER_SIGNALS: &str = "[signals.labels.gold]\nfloor = 4\n[signals.labels.high-value]\n[signals.labels.revisit]\n[signals.labels.reference]\n[signals.labels.low-value]\nvalue = 0\n[signals.observations]\nheading = \"# Observations\"\nperiod = \"month\"\nfloor = 4\n";
+
     fn setup() -> (tempfile::TempDir, Config, ConfigSet) {
+        setup_with(OWNER_SIGNALS)
+    }
+
+    fn setup_with(vault_toml: &str) -> (tempfile::TempDir, Config, ConfigSet) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let vault = root.join("vault");
@@ -678,6 +713,7 @@ mod tests {
             &BTreeMap::from([
                 ("captures.toml".to_owned(), Some(CAPTURES.to_owned())),
                 ("sources.toml".to_owned(), Some(SOURCES.to_owned())),
+                ("vault.toml".to_owned(), Some(vault_toml.to_owned())),
             ]),
             &crate::steps::validate,
         );
@@ -690,6 +726,26 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    /// Plan public-release WP-4: with no `[signals]` the export carries no label tags and has
+    /// no weak rows (no label rule, no Observations signal); human rows are unchanged otherwise.
+    #[test]
+    fn empty_signals_config_has_no_label_or_observation_effect() {
+        let (tmp, config, set) = setup_with("");
+        let data = tmp.path().join("data").to_string_lossy().into_owned();
+        let env = |k: &str| (k == "XDG_DATA_HOME").then(|| data.clone());
+        let weak = ExportOpts {
+            out: Some(tmp.path().join("out/w.jsonl")),
+            weak: true,
+        };
+        let (path, count) = export(&config, &set, env, &weak, "2026-10-15").unwrap();
+        assert_eq!(count, 1, "only the human row");
+        let r = &rows(&path)[0];
+        assert_eq!(
+            r["label"],
+            json!({"importance": 3, "urgent": true, "tags": []})
+        );
     }
 
     #[test]
@@ -819,7 +875,7 @@ mod tests {
         assert_eq!(s.label.unwrap().importance, Some(2));
         assert!(s.tags.contains(&"gold".to_owned()) && s.tags.contains(&"x".to_owned()));
         assert_eq!(notes_with_any_prop(&q, &["read", "k"]).unwrap().len(), 2);
-        let obs = observation_signals(&q, &vault, "m").unwrap();
+        let obs = observation_signals(&q, &vault, "m", "# Observations").unwrap();
         let sig = |months, quotes| ObservationSignal { months, quotes };
         assert_eq!(obs["c/a.md"], sig(2, 3));
         assert_eq!(obs["c/b.md"], sig(1, 0));

@@ -212,6 +212,7 @@ kind = "{param.kind}"
 # a collision or undetectable title leaves the name alone; plan round-23 WP-5).
 [[action.steps]]
 type = "fanfic_title"
+match_kind = "fanfic"
 kind = "{param.kind}"
 path = "{vars.moved_path}"
 [[action.steps]]
@@ -536,6 +537,7 @@ default = "true"
 [[action.steps]]
 type = "fanfic_title"
 scope = "backfill"
+kind = "fanfic"
 
 # Removals review (plan round-23 WP-6): enrichment folds removed text, and that text is note content
 # an agent must not read, so the user labels it. `removals-review` samples up to `limit` removed

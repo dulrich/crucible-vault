@@ -1,6 +1,6 @@
 //! `cv-providers`: model provider clients for the core daemon (plan `v0-core-daemon.md` WP-4).
 //!
-//! Kinds: `openai-compatible` (LM Studio, llama.cpp, OpenRouter, inference-server),
+//! Kinds: `openai-compatible` (LM Studio, llama.cpp, OpenRouter, any OpenAI-compatible server),
 //! `anthropic`, `google`, `ollama`, `cli` (Codex). Carried from Crucible
 //! `https://github.com/dulrich/obsidian-crucible/blob/master/src/providers/*.ts`; see each module for citations and drops.
 

@@ -264,9 +264,10 @@ pub struct WeatherPlace {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ScorerConfig {
-    /// SystemOne-shaped scoring endpoint.
+    /// An HTTP scoring endpoint returning `{"score": n}`.
     pub url: Option<String>,
-    /// SystemOne `model` (`<provider>/<model-id>`); a `url` without it falls back to the stub.
+    /// The scoring endpoint's `model` (`<provider>/<model-id>`); a `url` without it falls back
+    /// to the stub.
     pub model: Option<String>,
 }
 
@@ -407,9 +408,6 @@ impl SourcesConfig {
             }
             if c.serial[..i].iter().any(|o| o.name.trim() == s.name.trim()) {
                 return Err(format!("serial {:?}: duplicate name", s.name));
-            }
-            if s.kind.trim().is_empty() {
-                return Err(format!("serial {:?}: `kind` is empty", s.name));
             }
         }
         for n in &c.newsletter {
@@ -564,8 +562,10 @@ pub struct SerialSource {
     /// Source-URL prefixes; some non-empty one must start the clip's `source`.
     #[serde(default)]
     pub prefix: Vec<String>,
-    /// The `kinds.toml` kind its clips file as (default `fanfic`).
-    #[serde(default = "fanfic_kind")]
+    /// The `kinds.toml` kind its clips file as (no default, plan public-release WP-4 C#30;
+    /// absent or blank = never filed: `auto_file` skips the row with a warning; the Works view
+    /// still lists it).
+    #[serde(default)]
     pub kind: String,
     /// `active`, `complete` or `ignored`.
     #[serde(default)]
@@ -573,10 +573,6 @@ pub struct SerialSource {
     /// Listed in the Works view (every serial row is; accepted for uniformity, Decision 5).
     #[serde(default)]
     pub works: bool,
-}
-
-fn fanfic_kind() -> String {
-    "fanfic".into()
 }
 
 /// An author for comparison: trimmed, a `[[…]]` wrapper stripped (a link's `|alias` and
@@ -831,7 +827,10 @@ status = "ignored"
     fn serial_rows_parse_validate_and_reject_bad_status() {
         let parse = |s: &str| SourcesConfig::from_table(&s.parse::<toml::Table>().unwrap());
         let c = parse("[[serial]]\nname = \"W\"\nauthor = \"Ann\"\n[[serial]]\nname = \"X\"\nshort = \"XX\"\nkind = \"book\"\nstatus = \"complete\"\nworks = true\nprefix = [\"https://x.example/\"]\n").unwrap();
-        assert_eq!(c.serial[0].kind, "fanfic");
+        assert_eq!(
+            c.serial[0].kind, "",
+            "no default kind (plan public-release WP-4)"
+        );
         assert_eq!(c.serial[0].status, SerialStatus::Active);
         assert_eq!(c.serial[0].publication(), "W");
         assert_eq!(c.serial[1].publication(), "XX");

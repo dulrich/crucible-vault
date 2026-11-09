@@ -3,14 +3,58 @@
 //! Ported from Crucible `src/sourceEval/export.ts`: the row shape `SourceEvalTrainingExample`
 //! (`:35-51`), `buildTrainingExamples` (`:166-200`), the human rule `buildHumanTrainingExample`
 //! (`:202-220`: `eval-importance` set and not `eval-skip`), the weak rule
-//! `buildWeakCaptureTrainingExample` (`:222-246`: no human importance; `#low-value` → 0,
-//! `#gold` or any Observations month → max(…, 4), else no row; `rated` = today), `labelTags`
-//! (`:432-440`), `normalizeSourceTags` (`:442-449`) and the JSONL shape (`:248-251`). The caller
-//! (the `cv signals export` CLI) gathers the inputs from the index and does the JSON emission;
-//! this module has no serde.
+//! `buildWeakCaptureTrainingExample` (`:222-246`: no human importance; configured label rules
+//! and the Observations floor, else no row; `rated` = today), `labelTags` (`:432-440`),
+//! `normalizeSourceTags` (`:442-449`) and the JSONL shape (`:248-251`). The caller (the
+//! `cv signals export` CLI) gathers the inputs from the index, parses the label configuration
+//! into [`LabelRules`] and does the JSON emission; this module has no serde.
+//!
+//! Crucible hard-coded its label vocabulary (`LABEL_TAGS` `export.ts:104`; `#low-value` →
+//! 0, `#gold` / an Observations month → max(…, 4)); here it is configuration
+//! (`vault.toml [signals]`, plan public-release WP-4, C#27/C#29) with an empty default.
+//!
+//! **Published eval-label schema** (C#28; the frontmatter keys a human label is read from,
+//! [`parse_eval_label`]): `eval-importance` (integer 0..=5, number or numeric string),
+//! `eval-urgent` (`true`), `eval-rated` (date string), `eval-tags` (list or comma string, `#`
+//! optional), and `eval-skip` (`true` excludes the note from every row).
 
-/// Label tags carried into `label.tags` (`LABEL_TAGS`, `export.ts:104`).
-pub const LABEL_TAGS: &[&str] = &["gold", "high-value", "revisit", "reference", "low-value"];
+/// One configured label tag (`vault.toml [signals.labels.<tag>]`, C#27). Every configured
+/// tag is carried into `label.tags`; the optional rule shapes the weak importance (0..=5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabelRule {
+    /// The tag, normalized ([`normalize_tag`]).
+    pub tag: String,
+    /// A fixed weak importance.
+    pub value: Option<i64>,
+    /// A weak importance floor (`max(importance or 0, floor)`).
+    pub floor: Option<i64>,
+    /// A weak importance ceiling (clamps an importance already set; never creates a row).
+    pub ceiling: Option<i64>,
+}
+
+/// The label configuration [`weak_row`] and [`label_tags`] read. The default (empty) carries
+/// no label tags and derives no weak importance.
+///
+/// Weak importance order (fixed, independent of table order): (1) every matching `value`,
+/// the lowest wins; (2) every matching `ceiling` clamps a set importance, the lowest wins;
+/// (3) every matching `floor`, then `observed_floor` when an Observations section cites the
+/// capture, raise it to `max(importance or 0, floor)`. No rule matched = no weak row. The
+/// former built-ins are `low-value = { value = 0 }`, `gold = { floor = 4 }` and
+/// `observed_floor = 4`, with `high-value`, `revisit`, `reference` carried without a rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabelRules {
+    /// Configured label tags, in config order.
+    pub labels: Vec<LabelRule>,
+    /// The importance floor of a capture an Observations section cites; `None` = the
+    /// Observations signal has no effect.
+    pub observed_floor: Option<i64>,
+}
+
+impl LabelRules {
+    fn carries(&self, tag: &str) -> bool {
+        self.labels.iter().any(|l| l.tag == tag)
+    }
+}
 
 /// `human` or `weak`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +83,7 @@ pub struct TrainingLabel {
     pub importance: i64,
     /// Urgent flag.
     pub urgent: bool,
-    /// Label tags (subset of [`LABEL_TAGS`]).
+    /// Label tags (subset of the configured [`LabelRules`] tags).
     pub tags: Vec<String>,
 }
 
@@ -188,13 +232,13 @@ pub fn normalize_source_tags(tags: &[String]) -> Vec<String> {
     out
 }
 
-/// `labelTags`: note tags + eval tags restricted to [`LABEL_TAGS`].
+/// `labelTags`: note tags + eval tags restricted to the configured label tags.
 #[must_use]
-pub fn label_tags(note_tags: &[String], eval_tags: &[String]) -> Vec<String> {
+pub fn label_tags(note_tags: &[String], eval_tags: &[String], rules: &LabelRules) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for t in note_tags.iter().chain(eval_tags) {
         let n = normalize_tag(t);
-        if LABEL_TAGS.contains(&n.as_str()) && !out.contains(&n) {
+        if rules.carries(&n) && !out.contains(&n) {
             out.push(n);
         }
     }
@@ -203,7 +247,7 @@ pub fn label_tags(note_tags: &[String], eval_tags: &[String]) -> Vec<String> {
 
 /// `buildHumanTrainingExample`: `eval-importance` set and not `eval-skip`.
 #[must_use]
-pub fn human_row(c: &CaptureInput) -> Option<TrainingRow> {
+pub fn human_row(c: &CaptureInput, rules: &LabelRules) -> Option<TrainingRow> {
     if c.eval_skip || c.base.id.is_empty() {
         return None;
     }
@@ -214,17 +258,17 @@ pub fn human_row(c: &CaptureInput) -> Option<TrainingRow> {
         label: TrainingLabel {
             importance,
             urgent: label.urgent,
-            tags: label_tags(&c.tags, &label.tags),
+            tags: label_tags(&c.tags, &label.tags, rules),
         },
         label_source: LabelSource::Human,
         rated: label.rated.clone(),
     })
 }
 
-/// `buildWeakCaptureTrainingExample`: no human importance; `low-value` → 0, `gold` or an
-/// observation month → max(…, 4); `rated` = `today`.
+/// `buildWeakCaptureTrainingExample`: no human importance; the [`LabelRules`] order (values,
+/// ceilings, floors, the Observations floor); `rated` = `today`.
 #[must_use]
-pub fn weak_row(c: &CaptureInput, today: &str) -> Option<TrainingRow> {
+pub fn weak_row(c: &CaptureInput, today: &str, rules: &LabelRules) -> Option<TrainingRow> {
     if c.eval_skip
         || c.base.id.is_empty()
         || c.label.as_ref().is_some_and(|l| l.importance.is_some())
@@ -232,15 +276,18 @@ pub fn weak_row(c: &CaptureInput, today: &str) -> Option<TrainingRow> {
         return None;
     }
     let tags: Vec<String> = c.tags.iter().map(|t| normalize_tag(t)).collect();
-    let mut importance: Option<i64> = None;
-    if tags.iter().any(|t| t == "low-value") {
-        importance = Some(0);
+    let matching: Vec<&LabelRule> = rules
+        .labels
+        .iter()
+        .filter(|r| tags.contains(&r.tag))
+        .collect();
+    let mut importance: Option<i64> = matching.iter().filter_map(|r| r.value).min();
+    if let Some(ceiling) = matching.iter().filter_map(|r| r.ceiling).min() {
+        importance = importance.map(|i| i.min(ceiling));
     }
-    if tags.iter().any(|t| t == "gold") {
-        importance = Some(importance.unwrap_or(0).max(4));
-    }
-    if c.observed_months > 0 {
-        importance = Some(importance.unwrap_or(0).max(4));
+    let observed = rules.observed_floor.filter(|_| c.observed_months > 0);
+    for floor in matching.iter().filter_map(|r| r.floor).chain(observed) {
+        importance = Some(importance.unwrap_or(0).max(floor));
     }
     let empty = Vec::new();
     Some(TrainingRow {
@@ -248,7 +295,7 @@ pub fn weak_row(c: &CaptureInput, today: &str) -> Option<TrainingRow> {
         label: TrainingLabel {
             importance: importance?,
             urgent: false,
-            tags: label_tags(&c.tags, c.label.as_ref().map_or(&empty, |l| &l.tags)),
+            tags: label_tags(&c.tags, c.label.as_ref().map_or(&empty, |l| &l.tags), rules),
         },
         label_source: LabelSource::Weak,
         rated: Some(today.to_owned()),
@@ -258,19 +305,24 @@ pub fn weak_row(c: &CaptureInput, today: &str) -> Option<TrainingRow> {
 /// `buildTrainingExamples` (captures only): human rows first, then (with `include_weak`) weak
 /// rows whose `source_type:id` has no row yet.
 #[must_use]
-pub fn build_rows(captures: &[CaptureInput], include_weak: bool, today: &str) -> Vec<TrainingRow> {
+pub fn build_rows(
+    captures: &[CaptureInput],
+    include_weak: bool,
+    today: &str,
+    rules: &LabelRules,
+) -> Vec<TrainingRow> {
     let key = |r: &TrainingRow| format!("{}:{}", r.base.source_type, r.base.id);
     let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
     for c in captures {
-        if let Some(r) = human_row(c) {
+        if let Some(r) = human_row(c, rules) {
             seen.insert(key(&r));
             rows.push(r);
         }
     }
     if include_weak {
         for c in captures {
-            if let Some(r) = weak_row(c, today)
+            if let Some(r) = weak_row(c, today, rules)
                 && seen.insert(key(&r))
             {
                 rows.push(r);
@@ -347,7 +399,7 @@ mod tests {
 
     #[test]
     fn human_and_weak_rules() {
-        let h = human_row(&cap("a", &["gold", "x"], Some(3), 0)).unwrap();
+        let h = human_row(&cap("a", &["gold", "x"], Some(3), 0), &owner()).unwrap();
         assert_eq!(h.label_source, LabelSource::Human);
         assert_eq!(
             h.label,
@@ -360,38 +412,102 @@ mod tests {
         assert_eq!(h.rated.as_deref(), Some("2026-10-01"));
         let mut skip = cap("a", &[], Some(3), 0);
         skip.eval_skip = true;
-        assert!(human_row(&skip).is_none());
+        assert!(human_row(&skip, &owner()).is_none());
 
         let t = "2026-10-15";
         assert_eq!(
-            weak_row(&cap("s", &["#low-value"], None, 0), t)
+            weak_row(&cap("s", &["#low-value"], None, 0), t, &owner())
                 .unwrap()
                 .label
                 .importance,
             0
         );
         assert_eq!(
-            weak_row(&cap("g", &["Gold"], None, 0), t)
+            weak_row(&cap("g", &["Gold"], None, 0), t, &owner())
                 .unwrap()
                 .label
                 .importance,
             4
         );
-        let o = weak_row(&cap("o", &[], None, 1), t).unwrap();
+        let o = weak_row(&cap("o", &[], None, 1), t, &owner()).unwrap();
         assert_eq!((o.label.importance, o.rated.as_deref()), (4, Some(t)));
-        assert!(weak_row(&cap("n", &["x"], None, 0), t).is_none());
+        assert!(weak_row(&cap("n", &["x"], None, 0), t, &owner()).is_none());
         // Human wins over weak; weak only with include_weak.
         let caps = [
             cap("a", &["gold"], Some(1), 2),
             cap("g", &["gold"], None, 0),
         ];
-        let rows = build_rows(&caps, true, t);
+        let rows = build_rows(&caps, true, t, &owner());
         assert_eq!(rows.len(), 2);
         assert_eq!(
             (rows[0].label.importance, rows[0].label_source),
             (1, LabelSource::Human)
         );
-        assert_eq!(build_rows(&caps, false, t).len(), 1);
+        assert_eq!(build_rows(&caps, false, t, &owner()).len(), 1);
         assert_eq!(normalize_source_tags(&["AI".into(), "#ai".into()]), ["#ai"]);
+    }
+
+    /// The former built-in vocabulary, stated as configuration (WP-4 pin).
+    fn owner() -> LabelRules {
+        let rule = |tag: &str, value, floor| LabelRule {
+            tag: tag.into(),
+            value,
+            floor,
+            ceiling: None,
+        };
+        LabelRules {
+            labels: vec![
+                rule("gold", None, Some(4)),
+                rule("high-value", None, None),
+                rule("revisit", None, None),
+                rule("reference", None, None),
+                rule("low-value", Some(0), None),
+            ],
+            observed_floor: Some(4),
+        }
+    }
+
+    /// Plan public-release WP-4: slop + gold = 4 (value then floor), table order irrelevant,
+    /// a ceiling clamps but never creates a row.
+    #[test]
+    fn rule_order_and_ceiling() {
+        let t = "2026-10-15";
+        let mut r = owner();
+        r.labels.reverse();
+        let both = weak_row(&cap("b", &["low-value", "gold"], None, 0), t, &r).unwrap();
+        assert_eq!(both.label.importance, 4);
+        assert_eq!(both.label.tags, ["low-value", "gold"]);
+        r.labels.push(LabelRule {
+            tag: "meh".into(),
+            ceiling: Some(2),
+            ..LabelRule::default()
+        });
+        assert!(weak_row(&cap("m", &["meh"], None, 0), t, &r).is_none());
+        let c = weak_row(&cap("m", &["meh", "gold"], None, 0), t, &r).unwrap();
+        assert_eq!(c.label.importance, 4, "floors apply after ceilings");
+        r.labels.push(LabelRule {
+            tag: "fav".into(),
+            value: Some(5),
+            ..LabelRule::default()
+        });
+        let c = weak_row(&cap("m", &["meh", "fav"], None, 0), t, &r).unwrap();
+        assert_eq!(c.label.importance, 2);
+    }
+
+    /// Plan public-release WP-4: the empty default carries no label tags and derives no weak
+    /// row, Observations months included.
+    #[test]
+    fn empty_rules_have_no_effect() {
+        let t = "2026-10-15";
+        let none = LabelRules::default();
+        for c in [
+            cap("s", &["low-value"], None, 0),
+            cap("g", &["gold"], None, 0),
+            cap("o", &[], None, 3),
+        ] {
+            assert!(weak_row(&c, t, &none).is_none());
+        }
+        let h = human_row(&cap("a", &["gold"], Some(3), 0), &none).unwrap();
+        assert!(h.label.tags.is_empty());
     }
 }

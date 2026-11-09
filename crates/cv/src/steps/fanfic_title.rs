@@ -1,21 +1,23 @@
 //! Step module `fanfic_title` (plan `round-23-daemon-memory-mail-enrich-fanfic` WP-5): renames a
-//! fanfic note to `<story> - Chapter <n>` through the writer's rename (inbound links follow), using
+//! serial-fiction chapter note (the configured kind, e.g. `fanfic`) to `<story> - Chapter <n>` through the writer's rename (inbound links follow), using
 //! the pure [`cv_ingest::fanfic_title`] detector.
 //!
 //! | key | values | default |
 //! |---|---|---|
-//! | `scope` | `"note"` (one note) \| `"backfill"` (every indexed `fanfic`-tagged note) | `"note"` |
-//! | `kind` | note scope: the filed kind (usually `"{param.kind}"`); anything but `fanfic` makes the step a no-op | — (always runs) |
+//! | `scope` | `"note"` (one note) \| `"backfill"` (every indexed note tagged `kind`) | `"note"` |
+//! | `match_kind` | note scope, **required**: the kind this step renames (e.g. `"fanfic"`) | — |
+//! | `kind` | note scope: the filed kind (usually `"{param.kind}"`); any kind but `match_kind` makes the step a no-op; backfill, **required**: the kind (tag) whose notes are renamed | note: — (always runs) |
 //! | `path` | note scope: the note (placeholders ok; `{vars.moved_path}` after `move`) | the active note |
 //! | `dry_run` | backfill only: count, rename nothing (writes only the review note below); a job param `dry_run` wins | `true` |
 //!
 //! **Note scope** (in `file-as-kind`, after `move`): a note already in the target shape, an
 //! undetectable one, or one whose target name exists is left as is and counted (`fanfic_already`,
-//! `fanfic_undetected`, `fanfic_skipped_collision`; `fanfic_renamed` = 1 on a rename). A rename
+//! `fanfic_undetected`, `fanfic_skipped_collision`; `fanfic_renamed` = 1 on a rename). Counter names keep
+//! their `fanfic_` prefix whatever the kind (telemetry continuity, plan public-release WP-4). A rename
 //! sets `moved_path` / `moved_from` / `open_path` like `move`, so later steps (and the runner's
 //! active-path follow) see the new path.
 //!
-//! **Backfill scope** walks the notes the index tags `fanfic` (outside system folders, in path
+//! **Backfill scope** walks the notes the index tags `kind` (outside system folders, in path
 //! order) and applies the same rule, chain-safe (WP-8): every note is planned first, then
 //! [`order_renames`] withholds duplicate targets, cycles and targets held by a note that does not
 //! move (all counted as `collision`) and runs the rest holder-first, so a down-shifted run of
@@ -25,7 +27,7 @@
 //! `would_rename` (dry run), `collision`, `undetected`, `conflict`, `dry_run`. A second run renames
 //! nothing (renamed notes are in the target shape).
 //!
-//! A **dry run** also writes the review note `_crucible/reviews/fanfic-titles-<YYYY-MM-DD>.md`
+//! A **dry run** also writes the review note `<app_folder>/reviews/<kind>-titles-<YYYY-MM-DD>.md`
 //! (overwritten when it exists: it holds no user input) listing what an apply run would rename,
 //! the collisions and the undetected notes, and sets outcome vars `review_path` and the outcome's
 //! `open_path`. A real run writes no note.
@@ -46,9 +48,6 @@ use super::materialize::{join, now};
 use super::params::{check_keys, check_placeholders, expand, get_bool, get_str};
 use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag};
 
-/// The kind this step acts on.
-const KIND: &str = "fanfic";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
     Note,
@@ -59,7 +58,11 @@ pub(crate) enum Scope {
 #[derive(Debug, Clone)]
 pub(crate) struct Params {
     scope: Scope,
+    /// Note scope: the filed kind (placeholders ok); `None` = always runs.
     kind: Option<String>,
+    /// The kind this step renames (plan public-release WP-4, C#30): note scope `match_kind`,
+    /// backfill `kind`. Required; there is no built-in kind.
+    target: String,
     path: Option<String>,
     dry_run: bool,
 }
@@ -82,12 +85,27 @@ impl StepModule for FanficTitle {
             }
         };
         let (kind_p, path) = (get_str(t, "kind")?, get_str(t, "path")?);
+        let match_kind = get_str(t, "match_kind")?;
         let dry_run = get_bool(t, "dry_run")?;
-        if scope == Scope::Backfill && (kind_p.is_some() || path.is_some()) {
-            return Err("fanfic_title step: `kind`/`path` need scope = \"note\"".into());
+        if scope == Scope::Backfill && (match_kind.is_some() || path.is_some()) {
+            return Err("fanfic_title step: `match_kind`/`path` need scope = \"note\"".into());
         }
         if scope == Scope::Note && dry_run.is_some() {
             return Err("fanfic_title step: `dry_run` needs scope = \"backfill\"".into());
+        }
+        let (target, kind_p) = match scope {
+            Scope::Note => (
+                match_kind.ok_or("fanfic_title step: scope = \"note\" needs `match_kind`")?,
+                kind_p,
+            ),
+            Scope::Backfill => (
+                kind_p.ok_or("fanfic_title step: scope = \"backfill\" needs `kind`")?,
+                None,
+            ),
+        };
+        let target = target.trim().to_owned();
+        if target.is_empty() || target.contains('{') {
+            return Err("fanfic_title step: the kind to rename must be a plain kind name".into());
         }
         for s in kind_p.iter().chain(path.iter()) {
             check_placeholders(s)?;
@@ -95,6 +113,7 @@ impl StepModule for FanficTitle {
         Ok(Params {
             scope,
             kind: kind_p,
+            target,
             path,
             dry_run: dry_run.unwrap_or(true),
         })
@@ -103,7 +122,11 @@ impl StepModule for FanficTitle {
     fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         match p.scope {
             Scope::Note => run_note(&p, ctx),
-            Scope::Backfill => backfill(job_flag(ctx, "dry_run").unwrap_or(p.dry_run), ctx),
+            Scope::Backfill => backfill(
+                &p.target,
+                job_flag(ctx, "dry_run").unwrap_or(p.dry_run),
+                ctx,
+            ),
         }
     }
 }
@@ -325,7 +348,7 @@ struct MovedVars {
 fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut out = StepOutcome::default();
     if let Some(k) = &p.kind
-        && expand(ctx, k)?.trim() != KIND
+        && expand(ctx, k)?.trim() != p.target
     {
         return Ok(out);
     }
@@ -359,8 +382,8 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
 /// Where the dry-run review notes live, under the app folder (`vault.toml` `[structure]
 /// app_folder`, plan public-release WP-2; default `_crucible/reviews`).
 const REVIEW_SUBDIR: &str = "reviews";
-/// Review note name prefix (`<prefix><date>.md`).
-const REVIEW_PREFIX: &str = "fanfic-titles-";
+/// Review note name suffix (`<kind><suffix><date>.md`, e.g. `fanfic-titles-2026-11-08.md`).
+const REVIEW_SUFFIX: &str = "-titles-";
 
 /// What a dry run found, in path order.
 #[derive(Debug, Default)]
@@ -391,12 +414,25 @@ fn section(out: &mut String, title: &str, lines: Vec<String>) {
     }
 }
 
+/// `fanfic` → `Fanfic` (the review heading).
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or_else(String::new, |f| {
+        f.to_uppercase().chain(c).collect::<String>()
+    })
+}
+
 /// The pure review-note renderer.
-fn render_review(date: &str, v: &BackfillVars, f: &Findings) -> String {
+fn render_review(kind: &str, date: &str, v: &BackfillVars, f: &Findings) -> String {
     let base = |p: &str| vpath::stem(p).to_owned();
     let mut out = format!(
-        "# Fanfic title backfill \u{2014} dry run {date}\n\nScanned {}, already {}, would rename {}, collision {}, undetected {}.\n\nApply: run \u{201c}Fanfic: chapter titles\u{201d} with Dry run off.\n",
-        v.scanned, v.already, v.would_rename, v.collision, v.undetected
+        "# {} title backfill \u{2014} dry run {date}\n\nScanned {}, already {}, would rename {}, collision {}, undetected {}.\n\nApply: run this backfill again with Dry run off.\n",
+        capitalized(kind),
+        v.scanned,
+        v.already,
+        v.would_rename,
+        v.collision,
+        v.undetected
     );
     section(
         &mut out,
@@ -436,11 +472,11 @@ struct BackfillVars {
     review_path: Option<String>,
 }
 
-fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+fn backfill(kind: &str, dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let paths: BTreeSet<String> = ctx
         .index()?
         .query()
-        .tagged(KIND)?
+        .tagged(kind)?
         .into_iter()
         .map(|r| r.path)
         .filter(|p| p.ends_with(".md") && vpath::is_user_path(p))
@@ -500,10 +536,10 @@ fn backfill(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErr
     if dry_run {
         let date = now().date().format("%Y-%m-%d").to_string();
         let review = format!(
-            "{}/{REVIEW_SUBDIR}/{REVIEW_PREFIX}{date}.md",
+            "{}/{REVIEW_SUBDIR}/{kind}{REVIEW_SUFFIX}{date}.md",
             ctx.config.app_folder()
         );
-        let text = render_review(&date, &v, &found).into_bytes();
+        let text = render_review(kind, &date, &v, &found).into_bytes();
         match ctx.read(&review)? {
             Some((_, hash)) => {
                 ctx.write(&review, text, Some(hash))?;

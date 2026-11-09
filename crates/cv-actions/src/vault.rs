@@ -248,6 +248,79 @@ impl StructureConfig {
     }
 }
 
+/// One `[signals.labels.<tag>]` rule (plan public-release WP-4, C#27): every key optional,
+/// each 0..=5. A tag with no rule is only carried into a row's `label.tags`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LabelRuleConfig {
+    /// A fixed weak importance (the lowest matching value wins).
+    pub value: Option<i64>,
+    /// A weak importance floor (applied after values and ceilings).
+    pub floor: Option<i64>,
+    /// A weak importance ceiling (clamps a set importance; never creates a row).
+    pub ceiling: Option<i64>,
+}
+
+/// The default `[signals.observations] period`.
+pub const DEFAULT_OBSERVATIONS_PERIOD: &str = "month";
+/// The default `[signals.observations] floor`.
+pub const DEFAULT_OBSERVATIONS_FLOOR: i64 = 4;
+
+fn default_observations_period() -> String {
+    DEFAULT_OBSERVATIONS_PERIOD.to_owned()
+}
+
+fn default_observations_floor() -> i64 {
+    DEFAULT_OBSERVATIONS_FLOOR
+}
+
+/// `[signals.observations]` (C#29): the period notes whose `heading` section cites a capture
+/// raise its weak importance to `floor`. Absent = the signal is off.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationsConfig {
+    /// The section heading, with its `#`s (e.g. `"# Observations"`); required.
+    pub heading: String,
+    /// The `captures.toml [periods.<period>]` whose folder is scanned; default
+    /// [`DEFAULT_OBSERVATIONS_PERIOD`].
+    #[serde(default = "default_observations_period")]
+    pub period: String,
+    /// The importance floor (0..=5); default [`DEFAULT_OBSERVATIONS_FLOOR`].
+    #[serde(default = "default_observations_floor")]
+    pub floor: i64,
+}
+
+/// `[signals]` (plan public-release WP-4): the `cv signals export` label vocabulary. The
+/// default (absent) carries no label tags and has no Observations signal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SignalsConfig {
+    /// Label tags (normalized: `#` stripped, lowercased) and their rules.
+    pub labels: std::collections::BTreeMap<String, LabelRuleConfig>,
+    /// The Observations signal; `None` = off.
+    pub observations: Option<ObservationsConfig>,
+}
+
+impl SignalsConfig {
+    fn check(&self) -> Result<(), String> {
+        let ok = |v: Option<i64>| v.is_none_or(|n| (0..=5).contains(&n));
+        for (tag, r) in &self.labels {
+            if !(ok(r.value) && ok(r.floor) && ok(r.ceiling)) {
+                return Err(format!("signals.labels.{tag}: importance must be 0..=5"));
+            }
+        }
+        if let Some(o) = &self.observations {
+            if o.heading.trim().is_empty() {
+                return Err("signals.observations: heading is empty".into());
+            }
+            if !ok(Some(o.floor)) {
+                return Err("signals.observations: floor must be 0..=5".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `vault.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -258,6 +331,8 @@ pub struct VaultConfig {
     pub structure: StructureConfig,
     /// `[remote_media]`.
     pub remote_media: RemoteMediaConfig,
+    /// `[signals]` (plan public-release WP-4).
+    pub signals: SignalsConfig,
 }
 
 impl VaultConfig {
@@ -268,6 +343,7 @@ impl VaultConfig {
             .try_into()
             .map_err(|e: toml::de::Error| e.message().to_owned())?;
         c.remote_media.check()?;
+        c.signals.check()?;
         Ok(c)
     }
 }
@@ -300,6 +376,26 @@ mod tests {
         assert!(parse("[trash]\nlocation = \"bin\"\n").is_err());
         assert!(parse("[trash]\nretention_days = -1\n").is_err());
         assert!(parse("[trash]\nextra = 1\n").is_err());
+    }
+
+    /// Plan public-release WP-4: `[signals]` absent = no labels, Observations off; a table
+    /// parses with the documented defaults; out-of-range importance is rejected.
+    #[test]
+    fn signals_defaults_and_parse() {
+        assert_eq!(parse("").unwrap().signals, SignalsConfig::default());
+        let s = parse(
+            "[signals.labels.favourite]\nfloor = 4\n[signals.labels.skip]\nvalue = 0\n\
+             [signals.labels.later]\n[signals.observations]\nheading = \"# Notes\"\n",
+        )
+        .unwrap()
+        .signals;
+        assert_eq!(s.labels.len(), 3);
+        assert_eq!(s.labels["skip"].value, Some(0));
+        let o = s.observations.unwrap();
+        assert_eq!((o.period.as_str(), o.floor), ("month", 4));
+        assert!(parse("[signals.labels.x]\nfloor = 6\n").is_err());
+        assert!(parse("[signals.observations]\nperiod = \"month\"\n").is_err());
+        assert!(parse("[signals.labels.x]\nweight = 1\n").is_err());
     }
 
     #[test]

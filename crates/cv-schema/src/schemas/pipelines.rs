@@ -264,7 +264,7 @@ pub static PIPE_SCORER: Record = Record {
         field(
             "url",
             "URL",
-            "SystemOne-shaped scoring endpoint (unset = stub)",
+            "HTTP scoring endpoint returning {\"score\": n} (unset = stub)",
             Node::Str,
         ),
         field(
@@ -555,10 +555,9 @@ pub static SOURCE_SERIAL: Record = Record {
         field(
             "kind",
             "Kind",
-            "kinds.toml kind its clips are filed as",
+            "kinds.toml kind its clips are filed as (unset: filing skips the row)",
             Node::Str,
-        )
-        .dflt(D::Str("fanfic")),
+        ),
         field(
             "status",
             "Status",

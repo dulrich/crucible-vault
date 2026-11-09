@@ -223,9 +223,12 @@ const STEPS: &[(&str, &str)] = &[
     ("yt_clip_tidy", "scope = \"backfill\"\ndry_run = true"),
     (
         "fanfic_title",
-        "kind = \"{param.kind}\"\npath = \"{vars.moved_path}\"",
+        "match_kind = \"fanfic\"\nkind = \"{param.kind}\"\npath = \"{vars.moved_path}\"",
     ),
-    ("fanfic_title", "scope = \"backfill\"\ndry_run = true"),
+    (
+        "fanfic_title",
+        "scope = \"backfill\"\nkind = \"fanfic\"\ndry_run = true",
+    ),
     (
         "removals_review",
         "mode = \"review\"\nlimit = 100\nseed = 1\noverwrite = false",
@@ -419,6 +422,16 @@ max_bytes = 1000
 app_folder = "_app"
 exclude = [".trash", "initiatives"]
 raw_transcript_folder = "raw"
+
+[signals.labels.favourite]
+value = 3
+floor = 4
+ceiling = 5
+
+[signals.observations]
+heading = "Seen"
+period = "month"
+floor = 4
 "#,
     "[remote_media]\nvideo = \"thumbnail\"\naudio = \"link\"\npdf = \"link\"\nimage_format = \"webp\"\nimage_quality = 72.5\n",
 ];
