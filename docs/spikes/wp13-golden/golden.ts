@@ -1,8 +1,12 @@
 // Golden vectors for the cv-search chunker port (WP-13). Runs Crucible's own chunker.ts
 // (read-only import) over SYNTHETIC inputs only and prints JSON. Strings are emitted as UTF-16
 // code-unit arrays so lone surrogates survive the round trip.
-// Usage: bun run runs/spike/wp13-golden/golden.ts <code-root>/obsidian-crucible > crates/cv-search/tests/fixtures/golden.json
-const root = process.argv[2] ?? '<code-root>/obsidian-crucible';
+// Usage: bun run docs/spikes/wp13-golden/golden.ts <obsidian-crucible checkout> (or set CRUCIBLE_CHECKOUT) > crates/cv-search/tests/fixtures/golden.json
+const root = process.argv[2] ?? process.env.CRUCIBLE_CHECKOUT;
+if (!root) {
+  console.error('usage: golden.ts <obsidian-crucible checkout> (or set CRUCIBLE_CHECKOUT)');
+  process.exit(2);
+}
 const m = await import(`${root}/src/search/chunker.ts`);
 const { buildSearchChunks, hashSearchContent, stripFrontmatterBlock, parseSearchDocument } = m;
 

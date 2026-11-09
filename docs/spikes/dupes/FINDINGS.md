@@ -1,7 +1,7 @@
 # Duplicate-note detection spike (round-11 WP-8)
 
 Aggregates only. Live vault read-only; search.db copied to a temp dir (`T=/tmp/dupes-XXXX`, `cp ~/.local/state/crucible-vault/search.db* $T/`) and opened `SQLITE_OPEN_READ_ONLY`. Driver: this folder's `src/main.rs` (own `[workspace]`, own target dir; deps `cv-text` path + `rusqlite =0.40.2`; `cp ../../../Cargo.lock .`).
-Build: `CARGO_TARGET_DIR=$PWD/target nice -n 10 cargo build --release --offline -j 4`. V=~/vault.
+Build: `CARGO_TARGET_DIR=$PWD/target nice -n 10 cargo build --release --offline -j 4`. V=$VAULT.
 
 ## Corpus
 - 9077 `.md` files with >= 20 shingles (533 shorter excluded), `.obsidian/.git` skipped; `.trash/` holds 4 top entries and 14 md (stays in the shingle universe, flagged). search.db: 8752 sources, 94466 chunks, 94466 vectors, dim 1024 `bge-m3-f16`, 4096-byte f32 blobs (`sqlite3 -readonly search.db "select length(embedding),count(*) from vectors group by 1"`). `.trash` is not indexed in search.db.

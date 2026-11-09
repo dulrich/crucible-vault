@@ -4,14 +4,14 @@ Questions: why does every live image describe fail with `finish reason "length"`
 
 ## Facts from source and the live system
 
-- **Crucible's describe wire** (`https://github.com/dulrich/obsidian-crucible/blob/master/src/providers/openaiCompatible.ts:271-296`, `src/providers/shared.ts:99-108`): `temperature: 0`, per-pass `max_tokens` (narrative 512, extraction 2048), and `reasoning_effort: 'none'` for local providers only. Its comment calls the last one "a correctness requirement" (without it the content comes back empty). The cv port (`crates/cv/src/steps/image_describe.rs`, `crates/cv-providers/src/wire.rs`) sends none of these: no temperature, no reasoning field, and a single 4096 cap.
+- **Crucible's describe wire** (`src/providers/openaiCompatible.ts:271-296`, `src/providers/shared.ts:99-108` in https://github.com/dulrich/obsidian-crucible): `temperature: 0`, per-pass `max_tokens` (narrative 512, extraction 2048), and `reasoning_effort: 'none'` for local providers only. Its comment calls the last one "a correctness requirement" (without it the content comes back empty). The cv port (`crates/cv/src/steps/image_describe.rs`, `crates/cv-providers/src/wire.rs`) sends none of these: no temperature, no reasoning field, and a single 4096 cap.
 - **Live failure rate:** `journalctl --user -u crucible-vault --since -7d | grep image_describe` → 17 `recording permanent failure … finish reason "length"`, 0 successes.
 - **Intake delay:** `clip-images` = `localize` → child `image-describe-note` → child `clip-auto-file`. Both children lock the clip note, so filing waits for describe. Job-queue timing (`state.db` `jobs`, `settled_at_ms - created_ms`) for the 2026-10-28 16:15 clip: describe 133.0 s, auto-file 133.1 s. Worst case over 7 days: 419 s.
 - **Mail:** watcher → `track-mail` takes 0.8 s on average (416 runs over 7 days). The rest of the delay is the watcher's 5 s quiet + 1 s size-stable wait (`crates/cv/src/daemon/mail_watch.rs:41-48`).
 
 ## Measurements
 
-Image sets: **A** = 9 non-personal images (benchmark charts, UI screenshots, an infographic, a 2×2 diagram, a game render; `manifest-a.txt`), whose text was read and judged. **B** = the 18 vault-derived samples of the July bench (`eval-tool/local-inference-bench/measurements/wp7-multimodal-2026-07-26/samples`), for which only finish, token counts and timings are recorded. All images were downscaled to a 1568 px long edge as cv does; both cv prompts were used. Scripts: `run.sh` (sweep 1), `loop.sh` (sampler arms), `cand.sh` (candidate settings).
+Image sets: **A** = 9 images from outside the vault (4 benchmark charts, 2 UI screenshots, an infographic, a 2×2 diagram, a game render; `manifest-a.txt` lists neutral ids and kinds only, not the original file names), whose text was read and judged. **B** = 18 vault-derived samples from an earlier bench (not part of this repo), for which only finish, token counts and timings are recorded. All images were downscaled to a 1568 px long edge as cv does; both cv prompts were used. Scripts: `run.sh` (sweep 1), `loop.sh` (sampler arms), `cand.sh` (candidate settings).
 
 **1. Temperature 0 with an 8192 cap (Crucible's sampler)** — `run.sh`:
 

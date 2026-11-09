@@ -1,6 +1,6 @@
 # Spike: chained daemon moves lose the note's path link (2026-11-08)
 
-Scope: the 2026-11-08 report that a fanfic clip's tab stayed on `Clippings/…` with "file deleted on disk" while the note was moved to `daily/day/2026-11-08/` and renamed to `<story> - Chapter 66` (filed by `file-as-kind`: `move` step, then `fanfic_title` rename step, back to back). Synthetic temp vault only. The live vault and daemon were not touched.
+Scope: a report that a clipped note's editor tab stayed on its `Clippings/…` path with "file deleted on disk" after the note was moved into a day folder and renamed with a chapter-style title (filed by `file-as-kind`: `move` step, then a rename step, back to back). Synthetic temp vault only. No live vault or daemon was touched.
 
 Re-run: save the test below as `crates/cv-vault/tests/spike_chain.rs` (it uses `crates/cv-vault/tests/common`), run `cargo test -p cv-vault --test spike_chain -- --nocapture --test-threads=1`, then delete it.
 

@@ -14,12 +14,12 @@ Promoted from `runs/spike/paywall-signal/` by plan auto-intake-sprint WP-6. Aggr
 
 ## 3. Works → kind
 
-21 notes in `core/works`: 20 with `source-prefix-filter` (hosts: archiveofourown.org 11, forums.spacebattles.com 5, other fanfic and story hosts 5), 15 with `author-filter`; tags carrying a `kinds.toml` key: fanfic 7, blog 2, 3-2-1 1.
+21 works notes: 20 with `source-prefix-filter` (21 prefixes over 3 host groups: 11, 5 and 5), 15 with `author-filter`; tags carrying a `kinds.toml` key: 7 of one kind, 2 of another, 1 of a third.
 
 ## 4. Mail infrastructure
 
-No IMAP/MTA/Bridge on the machine (`protonmail-bridge`, `hydroxide`, `mbsync`, `fetchmail`, `notmuch`, `postfix`, `msmtp` all absent; no Maildir). Proton config present only for VPN/Pass/Drive/Authenticator.
+No IMAP/MTA/bridge tooling on the machine (no mail fetchers or MTAs installed; no Maildir). No mail-provider config present beyond non-mail clients.
 
-## 5. Real newsletter `.eml` shape (user sample, 2026-10-20)
+## 5. Real newsletter `.eml` shape (maintainer sample, 2026-10-20)
 
-Structure only (no body text recorded): 88 KB, CRLF, Proton export with full headers. `multipart/mixed` → `multipart/related` → one `text/html; charset=utf-8`, `Content-Transfer-Encoding: base64` (60 KB decoded). **No `List-Id`**; `List-Unsubscribe` and `Message-Id` sit on the ESP's domain (HubSpot); `From` is on the publisher's domain. Link hosts in the HTML: 26 × `*.hubspotlinks.com` tracking redirects, 2 × `*.hubspotemail.net`, **zero direct publisher post URLs** and no "view in browser" text. The publisher is not in `sources.toml`. So for ESP-sent newsletters: URL identity is unavailable without fetching (WP-4 fetches nothing), the `[[newsletter]]` matcher must work on `From` (address or domain) because `List-Id` may be absent, and this is an email-only source (outcome `new`).
+Structure only (no body text recorded): 88 KB, CRLF, provider export with full headers. `multipart/mixed` → `multipart/related` → one `text/html; charset=utf-8`, `Content-Transfer-Encoding: base64` (60 KB decoded). **No `List-Id`**; `List-Unsubscribe` and `Message-Id` sit on the ESP's domain (HubSpot); `From` is on the publisher's domain. Link hosts in the HTML: 26 × `*.hubspotlinks.com` tracking redirects, 2 × `*.hubspotemail.net`, **zero direct publisher post URLs** and no "view in browser" text. The publisher is not in `sources.toml`. So for ESP-sent newsletters: URL identity is unavailable without fetching (WP-4 fetches nothing), the `[[newsletter]]` matcher must work on `From` (address or domain) because `List-Id` may be absent, and this is an email-only source (outcome `new`).

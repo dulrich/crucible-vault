@@ -1,9 +1,9 @@
-A01 <code-root>/private-repo-b/references/aa-cost-per-task-pareto.png
-A02 <code-root>/private-repo-b/references/grammar-benchmark.png
-A03 <code-root>/private-repo-b/references/translation-chart.png
-A04 <code-root>/private-repo-b/references/translate-benchmark.png
-A05 <code-root>/fleet-tooling/references/fitness-tracker-user-settings.png
-A06 <code-root>/fleet-tooling/references/initiative-tracker-seg-group-bug.png
-A07 <code-root>/private-repo-a/nutrition/stages-of-fasting.jpg
-A08 <code-root>/private-repo-a/dating/beta-alpha-quadrant.png
-A09 <code-root>/private-repo-c/runs/wp45-enemies.png
+A01 image-set-a/A01 (benchmark chart)
+A02 image-set-a/A02 (benchmark chart)
+A03 image-set-a/A03 (benchmark chart)
+A04 image-set-a/A04 (benchmark chart)
+A05 image-set-a/A05 (UI screenshot)
+A06 image-set-a/A06 (UI screenshot)
+A07 image-set-a/A07 (infographic)
+A08 image-set-a/A08 (2x2 diagram)
+A09 image-set-a/A09 (game render)

@@ -86,8 +86,8 @@ Smoke: `run.sh smoke 90`. Phase 1: `bash matrix.sh > matrix.log`. Phase 2: `bash
 # usage: run.sh <label> <duration-s> [ENV=VAL ...]   (env applied to the daemon only)
 set -euo pipefail
 label=$1; dur=$2; shift 2
-S=~/.cache/cv-spike-threads
-OUT=<code-root>/crucible-vault/runs/spike/daemon-threads/out/$label; rm -rf "$OUT"; mkdir -p "$OUT"
+S=$SCRATCH_BASE/cv-spike-threads
+OUT=$REPO/docs/spikes/daemon-threads/out/$label; rm -rf "$OUT"; mkdir -p "$OUT"
 # fresh state + index each run; vault restored from pristine
 rm -rf "$S/state" "$S/cache" "$S/run" "$S/data" "$S/vault"; mkdir -p "$S/state" "$S/cache" "$S/run" "$S/data"
 cp -a "$S/pristine" "$S/vault"

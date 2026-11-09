@@ -14,7 +14,7 @@ if [ "${1:-}" = "--help" ]; then echo "usage: fidelity.sh [outfile.tsv]"; exit 0
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../../scripts/lib/build-id.sh"
 build_flags "${BASH_SOURCE[0]}" "$@"
 out=${1:-results-fidelity.tsv}
-VAULT=${VAULT:-~/vault}
+VAULT=${VAULT:?set VAULT to the vault path}
 HERE=$(cd "$(dirname "$0")" && pwd)
 export PDFIUM_LIB_DIR=$HERE/vendor/pdfium/lib
 printf 'idx\tline\n' > "$out"

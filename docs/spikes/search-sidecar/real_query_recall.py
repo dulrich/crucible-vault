@@ -1,17 +1,17 @@
-# Throwaway: binary+f32-rescore recall@10 on real short-query embeddings (generic queries, not vault text). Aggregates only.
+# Throwaway: binary+f32-rescore recall@10 on real short-query embeddings (generic queries, not vault text). Aggregates only. (Query list neutralised for publication; real-query-recall.log came from an earlier, different generic list.)
 import sqlite3, sys, json, urllib.request, numpy as np
 c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 blobs = [r[0] for r in c.execute("select embedding from chunks where embedding is not null order by rowid")]
 M = np.frombuffer(b"".join(blobs), dtype="<f4").reshape(len(blobs), -1)
 B = np.packbits(M > 0, axis=1)
-Q = ["AI coding agents", "local language models", "how to sleep better", "fantasy novel dragon chapter", "weekly newsletter ideas",
-     "stock market outlook", "rust programming", "obsidian plugin", "productivity system", "machine learning papers",
-     "exercise and fitness", "meeting notes", "travel plans", "history of science", "philosophy of mind",
-     "startup fundraising", "music recommendations", "cooking recipes", "home renovation", "parenting advice",
-     "climate change policy", "space exploration", "video game design", "writing tips", "personal finance budget",
-     "open source licensing", "database performance", "security vulnerability", "election news", "mental health",
-     "book review", "podcast transcript", "robotics", "semiconductor supply chain", "anthropic claude", "self insert fanfiction",
-     "deep research report", "inflation and interest rates", "learning a language", "time management"]
+Q = ["renewable energy storage", "marine biology", "sleep and recovery", "medieval architecture", "weekly planning templates",
+     "equity market outlook", "systems programming", "plugin development", "task management system", "statistics and machine learning",
+     "strength training", "meeting agenda", "city travel itinerary", "history of mathematics", "philosophy of language",
+     "early stage fundraising", "jazz recommendations", "bread baking", "kitchen renovation", "child development",
+     "carbon policy", "planetary science", "board game design", "technical writing", "household budget",
+     "software licensing", "query optimisation", "vulnerability disclosure", "election polling", "stress management",
+     "novel review", "interview transcript", "industrial robotics", "chip manufacturing", "language model evaluation",
+     "serialised fiction", "literature survey", "interest rate policy", "learning a foreign language", "time blocking"]
 def emb(t):
     r = json.load(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:4811/v1/embeddings", data=json.dumps({"model": "bge-m3-f16", "input": t}).encode(), headers={"content-type": "application/json"})))
     return np.array(r["data"][0]["embedding"], dtype="f4")

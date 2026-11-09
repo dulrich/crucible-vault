@@ -1,6 +1,6 @@
 # Spike: transcript-refine (terra refine + chapters, single call) — 2026-10-30
 
-Question: can the intake-enrich model (`router:codex-profile-a/gpt-6.1-terra`) refine a whole YouTube transcript with chapter headings in one call, within output/time limits, for dialog and monologue?
+Question: can the intake-enrich model (`router:router-profile/gpt-6.1-terra`) refine a whole YouTube transcript with chapter headings in one call, within output/time limits, for dialog and monologue?
 
 ## Corpus (aggregates only for vault material)
 
@@ -24,4 +24,4 @@ Question: can the intake-enrich model (`router:codex-profile-a/gpt-6.1-terra`) r
 - Word retention 0.79–0.94 (filler/false-start removal). Timestamps left: 0–1 per doc.
 - Public dialog quality (read): 11 sensible chapter titles, every turn `**Name:**`-labelled, links preserved.
 
-Commands: `host-env run crucible-vault -- ./run.sh` (all docs in `corpus/`); the v-7900 rerun ran with the other docs moved aside.
+Commands: `./run.sh` (with the gateway key in the environment) (all docs in `corpus/`); the v-7900 rerun ran with the other docs moved aside.

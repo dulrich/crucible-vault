@@ -20,7 +20,7 @@ build_flags "${BASH_SOURCE[0]}" "$@"
 
 set -u
 label=$1; S=${SCRATCH:?SCRATCH unset}; title=crucible-vault
-here=$(dirname "$(readlink -f "$0")"); g=<code-root>/crucible-vault/runs/spike/gui-rss
+here=$(dirname "$(readlink -f "$0")"); g=$REPO/docs/spikes/gui-rss
 out=$here/results; mkdir -p $out
 log=$out/$label.log; err=$S/logs/$label.stderr
 rm -rf "$XDG_STATE_HOME/crucible-vault"

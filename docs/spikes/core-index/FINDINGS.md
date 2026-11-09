@@ -14,7 +14,7 @@ Build: `cd runs/spike/core-index && cargo build --release` (first build 40.8 s, 
 
 | Metric | Runs | Value / spread | Command |
 |---|---|---|---|
-| Cold full index wall (warm cache) | 5 across builds; final build 2 | 4.40–4.56 s (final: 4.56, 4.56) | `/usr/bin/time -v ./target/release/cvx index ~/vault ~/.local/share/crucible-vault-spike/live.db` |
+| Cold full index wall (warm cache) | 5 across builds; final build 2 | 4.40–4.56 s (final: 4.56, 4.56) | `/usr/bin/time -v ./target/release/cvx index $VAULT ~/.local/share/crucible-vault-spike/live.db` |
 | …parse share (mdview split+yaml+lex, regex tags) | same | 2.72–2.76 s (≈61 %); walk 29–45 ms; SQLite writes ≈1.7 s | stderr `index:` line of same command |
 | Peak RSS full index | same | 26.3–26.8 MB without `_resources` rows; 31.3–31.9 MB with | same (`Maximum resident set size`) |
 | DB size | same | 53.4 MB final (deterministic across runs) | `stat -c %s ~/.local/share/crucible-vault-spike/live.db` |
@@ -33,7 +33,7 @@ Re-index latency is dominated by a naive `Resolver::load` (re-reads all 15.5k fi
 - Blocks: 111 callouts (quote 52, note 42, tip 8, warning 4, important 4, caution 1), 995 footnote defs, 1,220 footnote refs.
 
 ## mdview reuse verdict
-Path dependency on `<code-root>/crucible-tui/crates/mdview` (unmodified) works and produced the numbers above.
+Path dependency on `https://github.com/dulrich/crucible-tui/tree/master/crates/mdview` (unmodified) works and produced the numbers above.
 - **Fit:** `frontmatter::split_frontmatter`, `frontmatter::parse_frontmatter` → `JsValue` (`JsObject::entries()`), `lex::lex(body, glyphs::Tier::Unicode)` → `token::Token` tree with `Wikilink{slug, fragment, embed, alias}`, `Link{href}`, `Image{href}`, nested List/Table/Blockquote. `#heading`, `|alias`, `![[embed]]` correct with no extra work.
 - **Reimplemented:** tags (fm list/string + inline), footnotes, callouts, fm `[[link]]` values, link resolution (mdview `wikiresolve` probes the filesystem per lookup — viewer-shaped, unusable for batch), percent-decoding md hrefs, `JsValue`→JSON. The glyph `Tier` argument to the lexer is a rendering leak. Tokens carry no byte spans (needed later for rename/link rewrite).
 - **Unwanted deps:** `syntect` + `two-face` (runtime and a grammar-dumping `build.rs` — most of the 40 s first build), `rustix` with `termios`, `ryu-js`, `unicode-segmentation`; pager/CLI/ANSI modules compile in unused. 85 crates in the normal-deps tree. The lexer carries marked.js render-parity machinery (BOM stand-ins, text re-slicing); parse = 61 % of cold index (~0.34 ms/file).
