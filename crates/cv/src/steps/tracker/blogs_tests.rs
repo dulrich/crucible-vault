@@ -384,27 +384,6 @@ fn interrupted_note_write_replays_as_record_only() {
 }
 
 #[test]
-fn seeding_from_existing_blog_notes_produces_nothing() {
-    let files = [
-        (
-            "_blog_metadata/b/post-a.md",
-            "---\nsource: BASE/p/a\npost-id: \"BASE/p/a\"\n---\n",
-        ),
-        (
-            "_crucible/orchestration/blogs/new-posts/2026-10-01.md",
-            "- [ ] [B](BASE/p/b?utm_source=rss)\n",
-        ),
-    ];
-    let w = world(&files, ON, &[("Full", "/a", "body = \"full\"")]);
-    set(&w, "/a", 200, rss(&[("b", true), ("a", true)]));
-    let o = run(&w).unwrap();
-    assert_eq!(n(&o, "new"), json!(0));
-    assert_eq!(n(&o, "notes"), json!(0));
-    assert!(daily(&w).is_empty());
-    assert!(note(&w, "a").is_none() && note(&w, "b").is_none());
-}
-
-#[test]
 fn one_feed_failing_counts_all_failing_defers() {
     let rows = [("A", "/a", ""), ("B", "/b", "")];
     let w = world(&[], ON, &rows);

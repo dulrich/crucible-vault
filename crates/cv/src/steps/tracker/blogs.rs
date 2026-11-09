@@ -46,7 +46,7 @@ use super::super::cancel_source::{blog_keys, orphans_pass};
 use super::super::file::kind_def;
 use super::super::materialize::{join, now};
 use super::super::params::{expand, get_str, get_str_list};
-use super::super::util::{fetch_bounded, md_files_under};
+use super::super::util::fetch_bounded;
 use super::super::web::{client, create_or_found};
 use super::super::{StepCtx, StepError, StepModule, StepOutcome, lint, localize};
 use super::substack;
@@ -63,8 +63,6 @@ pub const PROP: &str = "post-id";
 pub const SERVICE: &str = "blog-feed";
 /// Breaker / usage service of Substack post probes (plan auto-intake-sprint WP-2).
 pub const PROBE_SERVICE: &str = "substack-api";
-/// Crucible's blog metadata root (read-only seeding input).
-pub const METADATA_ROOT: &str = "_blog_metadata";
 /// The `kinds.toml` kind a captured post is filed as.
 pub const NOTE_KIND: &str = "blog";
 
@@ -98,54 +96,12 @@ struct Vars {
     probe_failed: usize,
 }
 
-fn canon_opts() -> cv_text::url_canon::PostIdOptions {
-    cv_text::url_canon::PostIdOptions::default()
-}
-
 fn unquote(v: &str) -> String {
     v.trim()
         .trim_matches('"')
         .trim_matches('\'')
         .trim()
         .to_owned()
-}
-
-/// First-run seed: `post-id`/`source` of `_blog_metadata/**` notes, and every URL (as written
-/// and canonicalized) in Crucible's `_crucible/orchestration/**` notes. Filed blog notes are
-/// matched per candidate through the index (`post-id`, `source`).
-fn seed(ctx: &StepCtx<'_>) -> BTreeSet<String> {
-    let mut ids = BTreeSet::new();
-    let add_url = |ids: &mut BTreeSet<String>, u: &str| {
-        let u = u.trim();
-        if u.is_empty() {
-            return;
-        }
-        ids.insert(u.to_owned());
-        ids.insert(cv_text::url_canon::post_id_from_url(u, &canon_opts()));
-    };
-    for p in md_files_under(ctx, METADATA_ROOT) {
-        let Ok(text) = std::fs::read_to_string(ctx.vault_root.join(&p)) else {
-            continue;
-        };
-        for line in text.lines().take(60) {
-            if let Some(v) = line.strip_prefix("post-id:") {
-                let v = unquote(v);
-                if !v.is_empty() {
-                    ids.insert(v);
-                }
-            } else if let Some(v) = line.strip_prefix("source:") {
-                add_url(&mut ids, &unquote(v));
-            }
-        }
-    }
-    for p in md_files_under(ctx, super::youtube::CRUCIBLE_ROOT) {
-        if let Ok(text) = std::fs::read_to_string(ctx.vault_root.join(&p)) {
-            for u in cv_ingest::extract_urls(&text) {
-                add_url(&mut ids, &u);
-            }
-        }
-    }
-    ids
 }
 
 fn body_mode(m: BodyMode) -> policy::BodyMode {
@@ -458,7 +414,7 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         })
         .cloned()
         .collect();
-    let mut seen = SeenSet::load(ctx, KIND, PROP, seed)?;
+    let mut seen = SeenSet::load(ctx, KIND, PROP, |_| BTreeSet::new())?;
     super::heal_source_names(
         ctx,
         KIND,

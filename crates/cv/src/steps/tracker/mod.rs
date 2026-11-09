@@ -4,8 +4,8 @@
 //! Core pieces (WP-8's blog tracker builds on them):
 //!
 //! - [`SeenSet`]: `tracker_items` ids + `ignored_ids` + an index prop (`yt-video-id`, `post-id`,
-//!   …), seeded once on the kind's first run (rows persisted as `Skipped`) so nothing the vault
-//!   or Crucible's intake already surfaced produces a line;
+//!   …), seeded once on the kind's first run (rows persisted as `Skipped`; YouTube seeds from its
+//!   `_yt_metadata` notes, blogs seed nothing) so trackers start from config and state.db only;
 //! - [`fetch_bounded`](super::util::fetch_bounded): the per-run fetch loop, at most
 //!   [`MAX_IN_FLIGHT`](super::util::MAX_IN_FLIGHT) requests in flight;
 //! - [`emit_line`]: one daily intake line through the `tracker-intake` capture preset, with
@@ -14,7 +14,7 @@
 //!
 //! Crucible reference: `src/orchestration/workflows/FeedTrackerWorkflow.ts` and
 //! `utils/feedIntake.ts` (seen-set + intake notes). Dropped as Obsidian-induced: the per-run
-//! intake notes under `_crucible/orchestration/*/new-*` (lines go to the daily note instead, plan
+//! intake notes (lines go to the daily note instead, plan
 //! Decisions locked "Tracker intake → daily lines") and the metadata-cache vault scan (the index
 //! prop query replaces it).
 
@@ -141,7 +141,7 @@ pub struct SeenSet {
 impl SeenSet {
     /// Loads the seen-set of `kind`: every `tracker_items` id + every `ignored_ids` id of `kind`,
     /// plus index notes whose `prop` equals an id (checked per candidate). On the kind's first run
-    /// (no `tracker_items` rows) `seed` supplies the ids the vault / Crucible already surfaced;
+    /// (no `tracker_items` rows) `seed` supplies the ids the vault already surfaced;
     /// they are persisted as `Skipped` rows (`source_key = "seed"`), so the seeding happens once.
     pub fn load(
         ctx: &StepCtx<'_>,

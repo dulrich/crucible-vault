@@ -200,7 +200,7 @@ fn params_validate() {
 }
 
 #[test]
-fn first_run_seeds_from_metadata_and_crucible_intake_and_writes_nothing() {
+fn first_run_seeds_from_metadata_notes_and_writes_nothing() {
     let w = world(
         &[
             (
@@ -208,12 +208,12 @@ fn first_run_seeds_from_metadata_and_crucible_intake_and_writes_nothing() {
                 "---\nvideoId: x\n---\n",
             ),
             (
-                "_crucible/orchestration/youtube/new-videos/2026-10-01.md",
-                "- [ ] [t](https://www.youtube.com/watch?v=aaaaaaaaaa2)\n",
+                "_yt_metadata/chan-a/aaaaaaaaaa2.md",
+                "---\nvideoId: x\n---\n",
             ),
             (
-                "_crucible/orchestration/ignored.md",
-                "## Videos\n- aaaaaaaaaa3\n",
+                "_yt_metadata/chan-a/aaaaaaaaaa3.md",
+                "---\nvideoId: x\n---\n",
             ),
         ],
         std_routes(),

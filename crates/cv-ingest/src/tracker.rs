@@ -1,51 +1,5 @@
-//! Tracker helpers (plan `v0-automation-pipelines` WP-7): seen-set id extraction, the uploads
-//! playlist id and the Ignore Shorts predicate. Pure: callers read files and fetch.
-
-use std::collections::BTreeSet;
-
-use cv_text::url_canon::extract_video_id_from_url;
-
-/// Whether `s` is a bare 11-char YouTube video id.
-fn is_video_id(s: &str) -> bool {
-    s.len() == 11
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-fn is_sep(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '"' | '\'')
-}
-
-/// Every YouTube video id in `text`: ids of YouTube URLs anywhere (Crucible intake notes under
-/// `_crucible/orchestration/youtube/new-videos`, `utils/feedSources.ts:101`) plus bare ids listed
-/// as `- <id>` bullets under a `## Videos` heading (Crucible `_crucible/orchestration/ignored.md`,
-/// `utils/ignoredIds.ts:12`).
-#[must_use]
-pub fn youtube_ids_in_text(text: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut in_videos = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('#') {
-            in_videos = t == "## Videos";
-            continue;
-        }
-        if in_videos
-            && let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))
-            && is_video_id(rest.trim())
-        {
-            out.insert(rest.trim().to_owned());
-        }
-        for tok in t.split(is_sep) {
-            if tok.contains("youtu")
-                && let Some(id) = extract_video_id_from_url(tok)
-            {
-                out.insert(id);
-            }
-        }
-    }
-    out
-}
+//! Tracker helpers (plan `v0-automation-pipelines` WP-7): the uploads playlist id, the Ignore
+//! Shorts predicate and the intake line title. Pure: callers read files and fetch.
 
 /// An item title made safe for a `[title](url)` intake line: one line, brackets escaped.
 #[must_use]
@@ -92,13 +46,6 @@ pub fn is_ignored_short(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ids_from_urls_and_ignored_list() {
-        let t = "# New videos\n- [ ] [A](https://www.youtube.com/watch?v=aaaaaaaaaaa) x\nhttps://youtu.be/bbbbbbbbbbb\n## Videos\n- ccccccccccc\n- not-an-id\n## Blogs\n- ddddddddddd\n";
-        let ids: Vec<_> = youtube_ids_in_text(t).into_iter().collect();
-        assert_eq!(ids, ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]);
-    }
 
     #[test]
     fn uploads_and_shorts() {

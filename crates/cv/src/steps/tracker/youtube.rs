@@ -19,7 +19,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use cv_actions::{ConfigSet, StepKind};
-use cv_ingest::tracker::{is_ignored_short, uploads_playlist_id, youtube_ids_in_text};
+use cv_ingest::tracker::{is_ignored_short, uploads_playlist_id};
 use cv_ingest::youtube::{parse_iso8601_duration, watch_url};
 use cv_protocol::TrackerOutcome;
 use cv_providers::web::FetchError;
@@ -41,8 +41,6 @@ use crate::now_ms;
 pub const KIND: &str = "youtube";
 /// The index prop carrying a captured note's video id.
 pub const PROP: &str = "yt-video-id";
-/// Crucible's orchestration folder (intake notes, `ignored.md`), read-only seeding input.
-pub const CRUCIBLE_ROOT: &str = "_crucible/orchestration";
 
 const DEFAULT_LIMIT: u32 = 50;
 
@@ -84,19 +82,13 @@ struct Vars {
     failed: usize,
 }
 
-/// First-run seed: ids of existing `_yt_metadata/**/<id>.md` notes plus the video ids in
-/// Crucible's `_crucible/orchestration/**` notes (intake notes, `ignored.md`).
+/// First-run seed: ids of existing `_yt_metadata/**/<id>.md` notes.
 fn seed(ctx: &StepCtx<'_>) -> BTreeSet<String> {
     let mut ids = BTreeSet::new();
     for p in md_files_under(ctx, &metadata_root(ctx)) {
         let stem = cv_text::vpath::stem(&p);
         if stem.len() == 11 {
             ids.insert(stem.to_owned());
-        }
-    }
-    for p in md_files_under(ctx, CRUCIBLE_ROOT) {
-        if let Ok(text) = std::fs::read_to_string(ctx.vault_root.join(&p)) {
-            ids.extend(youtube_ids_in_text(&text));
         }
     }
     ids
