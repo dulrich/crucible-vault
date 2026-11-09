@@ -204,6 +204,7 @@ fn late_attachment_re_renders_the_doc() {
             origin: Origin::Daemon,
             from: None,
             replaced_by: None,
+            seq: None,
         },
     )));
     let _ = app.send(Message::Reading(ReadingMsg::Tick));

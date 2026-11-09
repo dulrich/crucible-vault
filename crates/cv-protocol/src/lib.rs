@@ -179,6 +179,44 @@ pub enum Request {
     /// Runs the `intake-reconcile` action and waits (bounded) for it (plan auto-intake-sprint
     /// WP-6) → [`ReconcileIntakeResult`]. An unknown action is `NOT_FOUND`.
     ReconcileIntake(ReconcileIntakeParams),
+    /// Where the note bound at `path` as of lineage cursor `since` lives now (plan
+    /// note-path-continuity D2) → [`ResolvePathResult`]. Answered on the daemon's writer thread,
+    /// so it observes every mutation that returned before it. An old daemon answers
+    /// `METHOD_NOT_FOUND`.
+    ResolvePath(ResolvePathParams),
+}
+
+/// `resolve_path` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvePathParams {
+    pub path: String,
+    /// The holder's lineage cursor; `None` = no cursor (report the path as it is now, plus
+    /// the head to bind with).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// Where a (path, cursor) binding ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PathResolution {
+    /// No identity transition left `path` after the cursor and the file exists.
+    Live { path: String },
+    /// The note now lives at `to` (the end of the whole chain, a replaced hop included).
+    Moved { to: String },
+    /// The chain ends in a delete.
+    Deleted,
+    /// Lineage cannot say: the file is absent with no recorded transition, or the cursor is
+    /// older than the retained lineage.
+    Unknown,
+}
+
+/// `resolve_path` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvePathResult {
+    pub resolution: PathResolution,
+    /// The lineage head the answer is valid through: the holder's new cursor.
+    pub head: u64,
 }
 
 /// `reconcile_intake` params.
@@ -395,6 +433,11 @@ pub struct ActionContext {
     pub line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_hash: Option<String>,
+    /// Plan note-path-continuity D4: the lineage cursor `active_path` is bound at (the runner
+    /// fills it at enqueue when absent and keeps it with the job, so a retry after a restart still
+    /// has it). A job without one behaves as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_cursor: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -764,6 +807,11 @@ pub enum Notification {
         /// views at it instead of reporting a deletion. Old peers ignore / omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replaced_by: Option<String>,
+        /// Plan note-path-continuity D2: the lineage sequence number of the identity transition
+        /// this change reports (created / renamed / deleted; both halves of a rename carry it), so a
+        /// consumer orders it against its own cursor. Old peers ignore / omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     IndexGeneration {
         n: u64,

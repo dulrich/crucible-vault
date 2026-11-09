@@ -240,6 +240,7 @@ fn missing_bookmarks_on_load_and_after_delete() {
             origin: cv_protocol::Origin::External,
             from: None,
             replaced_by: None,
+            seq: None,
         },
     )));
     // The daemon's rebuild lands as a new generation (refreshed there too).

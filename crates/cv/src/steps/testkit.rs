@@ -205,6 +205,7 @@ impl StepEnv {
             writer: Some(self.fx.writer.clone()),
             children: &NoChildren,
             written: Vec::new(),
+            guard: None,
         }
     }
 

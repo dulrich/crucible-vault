@@ -901,6 +901,7 @@ fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
             origin: cv_protocol::Origin::Daemon,
             from: None,
             replaced_by: None,
+            seq: None,
         },
     );
     for (path, kind) in [
@@ -916,6 +917,7 @@ fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
                 origin: cv_protocol::Origin::Daemon,
                 from: None,
                 replaced_by: None,
+                seq: None,
             },
         );
     }

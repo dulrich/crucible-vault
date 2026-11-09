@@ -1,5 +1,8 @@
 //! The notification bridge: vault events → `file_changed`, and notifications → view invalidation.
 
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Instant;
+
 use super::read_sync::ReadSync;
 use super::*;
 
@@ -15,63 +18,86 @@ pub(super) fn start_event_bridge(
     std::thread::Builder::new()
         .name("cv-events".into())
         .spawn(move || {
-            while let Ok(ev) = rx.recv() {
-                // A `.gitignore` create/modify/delete/rename changes index membership: rebuild
-                // (plan editor-ui-round-3 WP-1). Checked before anything else, since the file is
-                // itself a dot-file the index never holds.
-                let ignore_changed = cv_index::is_gitignore_path(&ev.path)
-                    || matches!(&ev.kind, EventKind::Renamed { from } if cv_index::is_gitignore_path(from));
-                let (kind, want_hash) = match ev.kind {
-                    EventKind::Created => (ChangeKind::Created, true),
-                    EventKind::Modified => (ChangeKind::Modified, true),
-                    EventKind::Deleted { .. } => (ChangeKind::Deleted, false),
-                    EventKind::Renamed { .. } => (ChangeKind::Renamed, false),
+            loop {
+                // Wait for the next event, or until the earliest read-sync deadline (D6).
+                let next = match read_sync.next_due() {
+                    Some(t) => match rx.recv_timeout(t.saturating_duration_since(Instant::now())) {
+                        Ok(ev) => Some(ev),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                    None => match rx.recv() {
+                        Ok(ev) => Some(ev),
+                        Err(_) => break,
+                    },
                 };
-                let hash = if want_hash {
-                    weak.upgrade().and_then(|s| s.writer()).and_then(|w| {
-                        let p = ev.path.clone();
-                        w.call(move |vw| vw.fs().hash(&p))
-                            .ok()
-                            .and_then(Result::ok)
-                            .flatten()
-                            .map(|h| h.as_str().to_owned())
-                    })
-                } else {
-                    None
-                };
+                if let Some(ev) = next {
+                    forward(&weak, &events, &mut read_sync, ev);
+                }
                 if let Some(s) = weak.upgrade() {
-                    sync_read(&s, &mut read_sync, &ev.path, &ev.kind);
-                }
-                // Round 11 WP-1 (Decision 1): a delete the writer recorded as absorbed by another
-                // note (auto-file's trash) reports that note as `replaced_by` (the watcher fills it).
-                let replaced_by = match &ev.kind {
-                    EventKind::Deleted { replaced_by } => replaced_by.clone(),
-                    _ => None,
-                };
-                let origin = match ev.origin {
-                    cv_vault::Origin::Daemon => Origin::Daemon,
-                    cv_vault::Origin::External => Origin::External,
-                };
-                for n in file_changes(ev.path, &ev.kind, kind, hash, origin, replaced_by) {
-                    let _ = events.send(n);
-                }
-                if ignore_changed
-                    && let Some(w) = weak.upgrade().and_then(|s| s.writer())
-                {
-                    match w.call(|vw| vw.rebuild()) {
-                        Ok(Ok(n)) => {
-                            let _ = events.send(Notification::IndexGeneration { n });
-                        }
-                        Ok(Err(e)) => {
-                            tracing::error!(error = %e, "index rebuild after .gitignore change failed");
-                        }
-                        Err(e) => tracing::warn!(error = %e, "writer gone during .gitignore rebuild"),
-                    }
+                    settle_read(&s, &mut read_sync);
                 }
             }
         })
         .context("spawning event bridge")?;
     Ok(())
+}
+
+/// One vault event → `file_changed` notifications (published at once), plus the read-sync fold
+/// and a `.gitignore` rebuild.
+fn forward(
+    weak: &std::sync::Weak<Shared>,
+    events: &broadcast::Sender<Notification>,
+    read_sync: &mut ReadSync,
+    ev: VaultEvent,
+) {
+    // A `.gitignore` create/modify/delete/rename changes index membership: rebuild (plan
+    // editor-ui-round-3 WP-1). Checked before anything else, since the file is itself a dot-file
+    // the index never holds.
+    let ignore_changed = cv_index::is_gitignore_path(&ev.path)
+        || matches!(&ev.kind, EventKind::Renamed { from } if cv_index::is_gitignore_path(from));
+    let kind = match ev.kind {
+        EventKind::Created => ChangeKind::Created,
+        EventKind::Modified => ChangeKind::Modified,
+        EventKind::Deleted { .. } => ChangeKind::Deleted,
+        EventKind::Renamed { .. } => ChangeKind::Renamed,
+    };
+    // Plan note-path-continuity WP-2: the hash is the one the mutation produced, carried on the
+    // event (never re-read at handling time, which could report a later state of the path or
+    // none at all for an intermediate hop of a chain). Renames keep reporting none on the wire.
+    let hash = match kind {
+        ChangeKind::Created | ChangeKind::Modified => {
+            ev.hash.as_ref().map(|h| h.as_str().to_owned())
+        }
+        ChangeKind::Deleted | ChangeKind::Renamed => None,
+    };
+    if let Some(s) = weak.upgrade() {
+        sync_read(&s, read_sync, &ev.path, &ev.kind);
+    }
+    // Round 11 WP-1 (Decision 1): a delete the writer recorded as absorbed by another note
+    // (auto-file's trash) reports that note as `replaced_by` (the writer fills it).
+    let replaced_by = match &ev.kind {
+        EventKind::Deleted { replaced_by } => replaced_by.clone(),
+        _ => None,
+    };
+    let origin = match ev.origin {
+        cv_vault::Origin::Daemon => Origin::Daemon,
+        cv_vault::Origin::External => Origin::External,
+    };
+    for n in file_changes(ev.path, &ev.kind, kind, hash, origin, replaced_by, ev.seq) {
+        let _ = events.send(n);
+    }
+    if ignore_changed && let Some(w) = weak.upgrade().and_then(|s| s.writer()) {
+        match w.call(|vw| vw.rebuild()) {
+            Ok(Ok(n)) => {
+                let _ = events.send(Notification::IndexGeneration { n });
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "index rebuild after .gitignore change failed");
+            }
+            Err(e) => tracing::warn!(error = %e, "writer gone during .gitignore rebuild"),
+        }
+    }
 }
 
 /// The last-seen `read` map, seeded from the index (an unreadable index logs and starts empty).
@@ -98,26 +124,34 @@ fn seed_read_sync(shared: &Arc<Shared>) -> ReadSync {
 /// `tracker_items` change signal on the state db (`set_tracker_item_status`), which is also what
 /// the Intake UI tick relies on to refresh views.
 fn sync_read(shared: &Arc<Shared>, rs: &mut ReadSync, path: &str, kind: &EventKind) {
-    let read_now = || {
-        let p = path.to_owned();
-        let w = shared.writer()?;
-        match w.call(move |vw| read_sync::read_of(&vw.index().query(), &p)) {
-            Ok(Ok(v)) => Some(v),
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "read-sync: index read failed");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "read-sync: writer gone");
-                None
-            }
-        }
-    };
-    if rs.observe(path, kind, read_now) {
-        match read_sync::tick_open_rows(&shared.state, path) {
+    rs.observe(path, kind, Instant::now(), || read_index(shared, path));
+}
+
+/// Settles every read-sync path quiet for [`read_sync::READ_QUIET`] (D6) and ticks the open
+/// tracker rows of each not-true → `true` transition.
+fn settle_read(shared: &Arc<Shared>, rs: &mut ReadSync) {
+    for path in rs.settle(Instant::now(), |p| read_index(shared, p)) {
+        match read_sync::tick_open_rows(&shared.state, &path) {
             Ok(0) => {}
             Ok(n) => tracing::info!(rows = n, "read-sync: ticked open tracker rows"),
             Err(e) => tracing::warn!(error = %e, "read-sync: tick failed"),
+        }
+    }
+}
+
+/// The note's current `read` from the index, through the writer (`None` = unreadable).
+fn read_index(shared: &Arc<Shared>, path: &str) -> Option<bool> {
+    let p = path.to_owned();
+    let w = shared.writer()?;
+    match w.call(move |vw| read_sync::read_of(&vw.index().query(), &p)) {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "read-sync: index read failed");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "read-sync: writer gone");
+            None
         }
     }
 }
@@ -176,6 +210,7 @@ fn file_changes(
     hash: Option<String>,
     origin: Origin,
     replaced_by: Option<String>,
+    seq: Option<u64>,
 ) -> Vec<Notification> {
     let from = match ev_kind {
         EventKind::Renamed { from } => Some(from.clone()),
@@ -189,6 +224,7 @@ fn file_changes(
         origin,
         from: from.clone(),
         replaced_by,
+        seq,
     });
     if let Some(from) = from {
         out.push(Notification::FileChanged {
@@ -198,6 +234,7 @@ fn file_changes(
             origin,
             from: None,
             replaced_by: None,
+            seq,
         });
     }
     out
@@ -219,6 +256,7 @@ mod tests {
             None,
             Origin::Daemon,
             None,
+            Some(7),
         );
         assert_eq!(
             got,
@@ -230,6 +268,7 @@ mod tests {
                     origin: Origin::Daemon,
                     from: Some("a.md".into()),
                     replaced_by: None,
+                    seq: Some(7),
                 },
                 Notification::FileChanged {
                     path: "a.md".into(),
@@ -238,6 +277,7 @@ mod tests {
                     origin: Origin::Daemon,
                     from: None,
                     replaced_by: None,
+                    seq: Some(7),
                 },
             ]
         );
@@ -247,6 +287,7 @@ mod tests {
             ChangeKind::Created,
             None,
             Origin::External,
+            None,
             None,
         );
         assert_eq!(one.len(), 1);

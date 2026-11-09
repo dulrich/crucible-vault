@@ -46,7 +46,7 @@ fn v15_database_migrates_to_v16_and_marks_existing_rows_partial() {
         .unwrap();
     }
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 16);
+    assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     let t = s.job_telemetry("old").unwrap().unwrap();
     assert!(t.partial);
     assert_eq!(split_buckets(&t), None, "pre-v16 intervals are unavailable");

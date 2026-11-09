@@ -456,6 +456,9 @@ pub struct StepCtx<'a> {
     pub(crate) writer: Option<WriterHandle>,
     pub(crate) children: &'a dyn ChildSpawner,
     pub(crate) written: Vec<String>,
+    /// Arms the runner's cycle guard for a path before the write that mutates it is issued
+    /// (plan note-path-continuity D5); `None` outside a runner.
+    pub(crate) guard: Option<&'a dyn Fn(&str)>,
 }
 
 impl<'a> StepCtx<'a> {
@@ -518,6 +521,7 @@ impl<'a> StepCtx<'a> {
     ) -> Result<Result<ContentHash, VaultError>, StepError> {
         #[cfg(test)]
         race::before_write(self, path)?;
+        self.arm(path);
         let p = path.to_owned();
         let r = self
             .writer()?
@@ -559,6 +563,7 @@ impl<'a> StepCtx<'a> {
 
     /// Creates `path` (error if it exists).
     pub fn create(&mut self, path: &str, bytes: Vec<u8>) -> Result<ContentHash, StepError> {
+        self.arm(path);
         let p = path.to_owned();
         let h = self.writer()?.call(move |vw| vw.create(&p, &bytes))??;
         self.written.push(path.to_owned());
@@ -571,9 +576,19 @@ impl<'a> StepCtx<'a> {
         touched: &[&str],
         f: impl FnOnce(&mut cv_vault::VaultWriter) -> T + Send + 'static,
     ) -> Result<T, StepError> {
+        for p in touched {
+            self.arm(p);
+        }
         let out = self.writer()?.call(f)?;
         self.written.extend(touched.iter().map(|s| (*s).to_owned()));
         Ok(out)
+    }
+
+    /// D5: arms the cycle guard for `path` before its write is issued.
+    fn arm(&self, path: &str) {
+        if let Some(g) = self.guard {
+            g(path);
+        }
     }
 
     /// Paths this step wrote so far.
@@ -599,6 +614,7 @@ impl<'a> StepCtx<'a> {
             writer: self.writer.clone(),
             children: self.children,
             written: Vec::new(),
+            guard: self.guard,
         }
     }
 }

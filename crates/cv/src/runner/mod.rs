@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, Step};
 use cv_protocol::Lane;
-use cv_protocol::{ActionContext, JobState, JobStatus, Notification};
+use cv_protocol::{ActionContext, JobState, JobStatus, Notification, PathResolution};
 use cv_state::{BreakerFailure, EnqueueOutcome, JobResult, NewJob, StateDb};
 use cv_vault::WriterHandle;
 use serde::{Deserialize, Serialize};
@@ -470,7 +470,15 @@ impl Inner {
     }
 
     /// The queue row for a run of `action` (resource keys derived, lane resolved).
-    fn new_job(&self, action: &Action, req: RunRequest) -> Result<NewJob, EnqueueError> {
+    fn new_job(&self, action: &Action, mut req: RunRequest) -> Result<NewJob, EnqueueError> {
+        // D4: the job keeps the lineage cursor its note was bound at (the triggering event's
+        // seq, else the head now), persisted in its params so a retry still has it.
+        if req.context.active_path.is_some() && req.context.lineage_cursor.is_none() {
+            match lock(&self.state).lineage_head() {
+                Ok(h) => req.context.lineage_cursor = Some(h),
+                Err(e) => tracing::warn!(error = %e, "lineage head unreadable; job unbound"),
+            }
+        }
         let mut keys = action
             .resources
             .derive(req.context.active_path.as_deref(), &req.params)

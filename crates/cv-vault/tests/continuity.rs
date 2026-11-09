@@ -55,23 +55,27 @@ impl Rec {
 }
 
 impl LineageSink for Rec {
-    fn created(&mut self, path: &str) {
+    fn created(&mut self, path: &str) -> Option<u64> {
         self.0.lock().unwrap().push(Tr::Created(path.into()));
+        None
     }
-    fn renamed(&mut self, from: &str, to: &str) {
+    fn renamed(&mut self, from: &str, to: &str) -> Option<u64> {
         self.0
             .lock()
             .unwrap()
             .push(Tr::Renamed(from.into(), to.into()));
+        None
     }
-    fn replaced(&mut self, from: &str, by: &str) {
+    fn replaced(&mut self, from: &str, by: &str) -> Option<u64> {
         self.0
             .lock()
             .unwrap()
             .push(Tr::Replaced(from.into(), by.into()));
+        None
     }
-    fn deleted(&mut self, path: &str) {
+    fn deleted(&mut self, path: &str) -> Option<u64> {
         self.0.lock().unwrap().push(Tr::Deleted(path.into()));
+        None
     }
 }
 
@@ -88,6 +92,8 @@ fn daemon(path: &str, kind: EventKind) -> VaultEvent {
         path: path.into(),
         kind,
         origin: Origin::Daemon,
+        seq: None,
+        hash: None,
     }
 }
 
@@ -158,6 +164,8 @@ fn external_write_racing_a_writer_write_still_surfaces() {
                 path: "a.md".into(),
                 kind: EventKind::Modified,
                 origin: Origin::External,
+                seq: None,
+                hash: None,
             },
         ]
     );
@@ -186,6 +194,8 @@ fn external_rename_of_a_just_written_path_is_one_renamed() {
                         from: "c.md".into()
                     },
                     origin: Origin::External,
+                    seq: None,
+                    hash: None,
                 },
             ],
             "gap {gap:?}"

@@ -270,6 +270,7 @@ fn scratch_dry_run() {
         writer: Some(writer),
         children: &super::testkit::NoChildren,
         written: Vec::new(),
+        guard: None,
     };
     let t1 = std::time::Instant::now();
     let o = <super::dupes::DupesScan as super::StepModule>::run(true, &mut ctx).unwrap();

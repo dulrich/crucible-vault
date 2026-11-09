@@ -28,6 +28,7 @@ fn file_changed(app: &mut App, path: &str, kind: ChangeKind, origin: Origin) {
             origin,
             from: None,
             replaced_by: None,
+            seq: None,
         },
     )));
 }

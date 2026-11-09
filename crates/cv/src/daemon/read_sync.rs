@@ -5,36 +5,52 @@
 //! not recoverable from the index; [`ReadSync`] keeps its own last-seen `read` per path, seeded
 //! from the index at startup. One-way: a row is never un-ticked, and `true → true` never re-ticks
 //! (a user-reopened row stays open).
+//!
+//! Quiet window (plan note-path-continuity D6, `docs/decisions.md` normative): a `read` flip that
+//! reverts within the former watcher debounce is not a transition. Daemon events now arrive
+//! immediately, so a content change only marks its path pending; the value is read and settled
+//! once the path has been quiet for [`READ_QUIET`].
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use super::*;
 
-/// Last-seen `read == true` per markdown path. Owned by the event-bridge thread.
+/// How long a path must be quiet before its `read` value settles (the former debounce).
+pub(super) const READ_QUIET: Duration = Duration::from_millis(150);
+
+/// Last-seen `read == true` per markdown path, plus the paths waiting out [`READ_QUIET`]. Owned
+/// by the event-bridge thread.
 #[derive(Debug, Default)]
 pub(super) struct ReadSync {
     seen: HashMap<String, bool>,
+    pending: HashMap<String, Instant>,
 }
 
 impl ReadSync {
     /// A map seeded with the current index state.
     pub(super) fn seeded(seen: HashMap<String, bool>) -> Self {
-        Self { seen }
+        Self {
+            seen,
+            pending: HashMap::new(),
+        }
     }
 
-    /// Folds one vault event in; returns whether `path` just went not-true → `true`. `read_now`
-    /// reads the note's current `read` from the index (`None` = unreadable: no change recorded);
-    /// it is called only for events that need it.
+    /// Folds one vault event in at `now`. A content change marks its path pending (settled by
+    /// [`Self::settle`] once quiet); a move carries the state (and any pending deadline) to the
+    /// destination; a delete forgets both. `read_now` reads the note's current `read` from the
+    /// index (`None` = unreadable) and is called only for a move whose source was never seen.
     pub(super) fn observe(
         &mut self,
         path: &str,
         kind: &EventKind,
+        now: Instant,
         read_now: impl FnOnce() -> Option<bool>,
-    ) -> bool {
+    ) {
         match kind {
             EventKind::Deleted { .. } => {
                 self.seen.remove(path);
-                false
+                self.pending.remove(path);
             }
             EventKind::Renamed { from } => {
                 // A move carries no transition: the destination inherits the source's state.
@@ -45,19 +61,49 @@ impl ReadSync {
                 if let Some(v) = moved {
                     self.seen.insert(path.to_owned(), v);
                 }
-                false
+                if let Some(due) = self.pending.remove(from) {
+                    self.pending.insert(path.to_owned(), due);
+                }
             }
             EventKind::Created | EventKind::Modified => {
-                if !is_md(path) {
-                    return false;
+                if is_md(path) {
+                    self.pending.insert(path.to_owned(), now + READ_QUIET);
                 }
-                let Some(now) = read_now() else {
-                    return false;
-                };
-                let was = self.seen.insert(path.to_owned(), now).unwrap_or(false);
-                !was && now
             }
         }
+    }
+
+    /// The earliest pending deadline.
+    pub(super) fn next_due(&self) -> Option<Instant> {
+        self.pending.values().min().copied()
+    }
+
+    /// Settles every path quiet since its deadline: reads its value with `read_now` and returns
+    /// the paths that went not-true → `true` (sorted).
+    pub(super) fn settle(
+        &mut self,
+        now: Instant,
+        mut read_now: impl FnMut(&str) -> Option<bool>,
+    ) -> Vec<String> {
+        let mut due: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, t)| **t <= now)
+            .map(|(p, _)| p.clone())
+            .collect();
+        due.sort();
+        let mut out = Vec::new();
+        for p in due {
+            self.pending.remove(&p);
+            let Some(v) = read_now(&p) else {
+                continue;
+            };
+            let was = self.seen.insert(p.clone(), v).unwrap_or(false);
+            if !was && v {
+                out.push(p);
+            }
+        }
+        out
     }
 }
 
@@ -146,11 +192,55 @@ mod tests {
             .unwrap()
     }
 
+    /// One event, then a settle once the quiet window has passed; whether `path` transitioned.
+    fn step(rs: &mut ReadSync, path: &str, kind: &EventKind, read: Option<bool>) -> bool {
+        let t0 = Instant::now();
+        rs.observe(path, kind, t0, || read);
+        let got = rs.settle(t0 + READ_QUIET, |_| read);
+        assert!(got.iter().all(|p| p == path));
+        !got.is_empty()
+    }
+
     /// Drives one event the way the bridge does.
     fn event(rs: &mut ReadSync, state: &Mutex<StateDb>, path: &str, now: bool) {
-        if rs.observe(path, &EventKind::Modified, || Some(now)) {
+        if step(rs, path, &EventKind::Modified, Some(now)) {
             tick_open_rows(state, path).unwrap();
         }
+    }
+
+    #[test]
+    fn read_flip_reverted_inside_the_quiet_window_ticks_nothing() {
+        let (_d, state) = db();
+        add(&state, "blog", "b1", Some("n.md"));
+        let mut rs = ReadSync::seeded(HashMap::from([("n.md".to_owned(), true)]));
+        let t0 = Instant::now();
+        // true → false → true, each edit inside the window: the value settles once, unchanged.
+        rs.observe("n.md", &EventKind::Modified, t0, || None);
+        let t1 = t0 + Duration::from_millis(50);
+        assert!(rs.settle(t1, |_| Some(false)).is_empty(), "not quiet yet");
+        rs.observe("n.md", &EventKind::Modified, t1, || None);
+        assert!(
+            rs.settle(t0 + READ_QUIET, |_| Some(false)).is_empty(),
+            "window restarted"
+        );
+        assert_eq!(rs.next_due(), Some(t1 + READ_QUIET));
+        assert!(rs.settle(t1 + READ_QUIET, |_| Some(true)).is_empty());
+        assert_eq!(rs.next_due(), None);
+        assert_eq!(status(&state, "blog", "b1"), None, "nothing ticked");
+        // A settled false → true still ticks.
+        rs.observe("n.md", &EventKind::Modified, t1, || None);
+        assert!(rs.settle(t1 + READ_QUIET, |_| Some(false)).is_empty());
+        // false → true → false inside the window (the brief flip): settles false, ticks nothing.
+        rs.observe("n.md", &EventKind::Modified, t1, || None);
+        let t2 = t1 + Duration::from_millis(40);
+        rs.observe("n.md", &EventKind::Modified, t2, || None);
+        assert!(rs.settle(t2 + READ_QUIET, |_| Some(false)).is_empty());
+        assert_eq!(status(&state, "blog", "b1"), None, "flip ticked nothing");
+        rs.observe("n.md", &EventKind::Modified, t1, || None);
+        assert_eq!(
+            rs.settle(t1 + READ_QUIET, |_| Some(true)),
+            vec!["n.md".to_owned()]
+        );
     }
 
     #[test]
@@ -208,7 +298,7 @@ mod tests {
     fn note_without_rows_is_a_no_op() {
         let (_d, state) = db();
         let mut rs = ReadSync::default();
-        assert!(rs.observe("n.md", &EventKind::Modified, || Some(true)));
+        assert!(step(&mut rs, "n.md", &EventKind::Modified, Some(true)));
         assert_eq!(tick_open_rows(&state, "n.md").unwrap(), 0);
     }
 
@@ -227,12 +317,17 @@ mod tests {
         let ren = EventKind::Renamed {
             from: "a.md".into(),
         };
-        assert!(!rs.observe("b.md", &ren, || Some(true)));
-        assert!(!rs.observe("b.md", &EventKind::Modified, || Some(true)));
-        assert!(!rs.observe("b.md", &EventKind::Deleted { replaced_by: None }, || None));
+        assert!(!step(&mut rs, "b.md", &ren, Some(true)));
+        assert!(!step(&mut rs, "b.md", &EventKind::Modified, Some(true)));
+        assert!(!step(
+            &mut rs,
+            "b.md",
+            &EventKind::Deleted { replaced_by: None },
+            None
+        ));
         // Deleted forgot it: a recreate that is read counts as a transition.
-        assert!(rs.observe("b.md", &EventKind::Created, || Some(true)));
+        assert!(step(&mut rs, "b.md", &EventKind::Created, Some(true)));
         // Non-markdown paths are ignored.
-        assert!(!rs.observe("x.png", &EventKind::Modified, || Some(true)));
+        assert!(!step(&mut rs, "x.png", &EventKind::Modified, Some(true)));
     }
 }

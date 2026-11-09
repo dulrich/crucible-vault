@@ -48,14 +48,43 @@ pub enum Origin {
     External,
 }
 
-/// A normalized vault change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A normalized vault change. Equality compares the change itself (`path`, `kind`, `origin`);
+/// `seq` and `hash` are delivery metadata (plan note-path-continuity D2).
+#[derive(Debug, Clone)]
 pub struct VaultEvent {
     /// Vault-relative path.
     pub path: String,
     pub kind: EventKind,
     pub origin: Origin,
+    /// The lineage sequence number the sink assigned to this identity transition (created,
+    /// renamed, deleted; `None` for content changes or without a recording sink).
+    pub seq: Option<u64>,
+    /// The content hash this change produced (`None` for deletes, or when unknown), captured
+    /// at mutation time so the event never reports a later state of the path.
+    pub hash: Option<ContentHash>,
 }
+
+impl VaultEvent {
+    /// An event without delivery metadata.
+    #[must_use]
+    pub fn new(path: impl Into<String>, kind: EventKind, origin: Origin) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            origin,
+            seq: None,
+            hash: None,
+        }
+    }
+}
+
+impl PartialEq for VaultEvent {
+    fn eq(&self, o: &Self) -> bool {
+        self.path == o.path && self.kind == o.kind && self.origin == o.origin
+    }
+}
+
+impl Eq for VaultEvent {}
 
 /// Watcher timings.
 #[derive(Debug, Clone, Copy)]
@@ -474,13 +503,15 @@ impl WatchState {
         if echo.is_some() {
             return true;
         }
-        w.lineage_mut().renamed(from, to);
+        let seq = w.lineage_mut().renamed(from, to);
         out.push(VaultEvent {
             path: to.to_string(),
             kind: EventKind::Renamed {
                 from: from.to_string(),
             },
             origin: Origin::External,
+            seq,
+            hash: Some(ContentHash::of(&bytes)),
         });
         true
     }
@@ -538,11 +569,13 @@ impl WatchState {
                             tracing::warn!(path, error = %e, "index update for external delete failed");
                         }
                         if echo.is_none() {
-                            w.lineage_mut().deleted(path);
+                            let seq = w.lineage_mut().deleted(path);
                             out.push(VaultEvent {
                                 path: path.to_string(),
                                 kind: EventKind::Deleted { replaced_by: None },
                                 origin: Origin::External,
+                                seq,
+                                hash: None,
                             });
                         }
                     }
@@ -581,9 +614,11 @@ impl WatchState {
         if echo.is_some() {
             return; // the writer's own mutation: already reported by the writer
         }
-        if prev.is_none() {
-            w.lineage_mut().created(path);
-        }
+        let seq = if prev.is_none() {
+            w.lineage_mut().created(path)
+        } else {
+            None
+        };
         out.push(VaultEvent {
             path: path.to_string(),
             kind: if prev.is_none() {
@@ -592,6 +627,8 @@ impl WatchState {
                 EventKind::Modified
             },
             origin: Origin::External,
+            seq,
+            hash: Some(h),
         });
     }
 }

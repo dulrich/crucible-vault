@@ -86,4 +86,5 @@ methods! {
     NoteSetBool = "note_set_bool" (NoteSetBoolParams) -> NoteSetBoolResult;
     MemoryReport = "memory_report" (crate::MemoryReport) -> ();
     ReconcileIntake = "reconcile_intake" (ReconcileIntakeParams) -> ReconcileIntakeResult;
+    ResolvePath = "resolve_path" (ResolvePathParams) -> ResolvePathResult;
 }

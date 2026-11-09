@@ -67,7 +67,9 @@ fn daemon_write_is_echo_external_write_is_applied() {
         vec![VaultEvent {
             path: "b.md".into(),
             kind: EventKind::Modified,
-            origin: Origin::External
+            origin: Origin::External,
+            seq: None,
+            hash: None,
         }]
     );
     let tags = wh
@@ -82,7 +84,9 @@ fn daemon_write_is_echo_external_write_is_applied() {
         vec![VaultEvent {
             path: "n.md".into(),
             kind: EventKind::Created,
-            origin: Origin::External
+            origin: Origin::External,
+            seq: None,
+            hash: None,
         }]
     );
     assert!(
@@ -125,14 +129,18 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
             VaultEvent {
                 path: "b.md".into(),
                 kind: EventKind::Deleted { replaced_by: None },
-                origin: Origin::Daemon
+                origin: Origin::Daemon,
+                seq: None,
+                hash: None,
             },
             VaultEvent {
                 path: "c.md".into(),
                 kind: EventKind::Renamed {
                     from: "a.md".into()
                 },
-                origin: Origin::Daemon
+                origin: Origin::Daemon,
+                seq: None,
+                hash: None,
             },
         ]
     );
@@ -146,7 +154,9 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
             kind: EventKind::Renamed {
                 from: "c.md".into()
             },
-            origin: Origin::External
+            origin: Origin::External,
+            seq: None,
+            hash: None,
         }]
     );
     assert!(
@@ -195,6 +205,8 @@ fn daemon_folder_rename_is_one_renamed_per_file() {
                 from: format!("f/{n}.md"),
             },
             origin: Origin::Daemon,
+            seq: None,
+            hash: None,
         })
         .collect();
     assert_eq!(evs, want);
@@ -218,7 +230,9 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
             kind: EventKind::Renamed {
                 from: "a.md".into()
             },
-            origin: Origin::Daemon
+            origin: Origin::Daemon,
+            seq: None,
+            hash: None,
         }
     );
     evs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -230,12 +244,16 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
             VaultEvent {
                 path: "a.md".into(),
                 kind: EventKind::Deleted { replaced_by: None },
-                origin: Origin::External
+                origin: Origin::External,
+                seq: None,
+                hash: None,
             },
             VaultEvent {
                 path: "c.md".into(),
                 kind: EventKind::Created,
-                origin: Origin::External
+                origin: Origin::External,
+                seq: None,
+                hash: None,
             },
         ]
     );
@@ -260,7 +278,9 @@ fn delete_replaced_carries_replaced_by_on_the_event() {
             kind: EventKind::Deleted {
                 replaced_by: Some("b.md".into())
             },
-            origin: Origin::Daemon
+            origin: Origin::Daemon,
+            seq: None,
+            hash: None,
         }]
     );
 }

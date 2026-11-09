@@ -409,6 +409,7 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
         origin: Origin::Daemon,
         from: None,
         replaced_by: None,
+        seq: None,
     });
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(calls.load(Ordering::SeqCst), 1, "cycle guard: no self-feed");
@@ -980,3 +981,6 @@ async fn held_check_runs_in_the_writer_not_the_handler() {
     go_tx.send(()).unwrap();
     d.shutdown().await.unwrap();
 }
+#[cfg(test)]
+#[path = "tests_lineage.rs"]
+mod tests_lineage;

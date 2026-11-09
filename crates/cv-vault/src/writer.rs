@@ -211,13 +211,15 @@ impl VaultWriter {
     }
 
     /// Emits one writer-authored (`Origin::Daemon`) event, synchronously.
-    fn emit(&self, path: &str, kind: EventKind) {
+    fn emit(&self, path: &str, kind: EventKind, seq: Option<u64>, hash: Option<&ContentHash>) {
         if let Some(tx) = &self.events
             && tx
                 .send(VaultEvent {
                     path: path.to_string(),
                     kind,
                     origin: Origin::Daemon,
+                    seq,
+                    hash: hash.cloned(),
                 })
                 .is_err()
         {
@@ -237,10 +239,10 @@ impl VaultWriter {
         let (h, full) = self.fs.put(path, bytes, expected.as_ref())?;
         self.index_written(path, bytes, &full, &h);
         if created {
-            self.lineage.created(path);
-            self.emit(path, EventKind::Created);
+            let seq = self.lineage.created(path);
+            self.emit(path, EventKind::Created, seq, Some(&h));
         } else {
-            self.emit(path, EventKind::Modified);
+            self.emit(path, EventKind::Modified, None, Some(&h));
         }
         Ok(h)
     }
@@ -333,15 +335,17 @@ impl VaultWriter {
                 self.echoes.register(path, None, Echo::Unindexed);
             }
         }
-        match replaced_by {
+        let seq = match replaced_by {
             Some(by) => self.lineage.replaced(path, by),
             None => self.lineage.deleted(path),
-        }
+        };
         self.emit(
             path,
             EventKind::Deleted {
                 replaced_by: replaced_by.map(str::to_string),
             },
+            seq,
+            None,
         );
         Ok(())
     }
@@ -471,12 +475,14 @@ impl VaultWriter {
         };
         self.echoes.register(from, None, echo);
         self.echoes.register(to, Some(h.clone()), echo);
-        self.lineage.renamed(from, to);
+        let seq = self.lineage.renamed(from, to);
         self.emit(
             to,
             EventKind::Renamed {
                 from: from.to_string(),
             },
+            seq,
+            Some(&h),
         );
         // Resolver after the rename, and the same without the moved file (uniqueness check).
         let with = self.index.resolver().clone();

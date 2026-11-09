@@ -28,6 +28,8 @@ impl ChildSpawner for Spawner<'_> {
     ) -> Result<String, String> {
         let context = ActionContext {
             active_path: Some(active_path.to_owned()),
+            // A different note: bound at the child's enqueue, never at the parent's cursor.
+            lineage_cursor: None,
             ..self.context.clone()
         };
         self.spawn_with(action_id, params, context)
@@ -138,7 +140,7 @@ pub(super) fn execute_steps(
     for (i, step) in action.steps.iter().enumerate() {
         if let Some(o) = done.get(&i) {
             absorb(o, &mut summary, &mut vars);
-            steps::follow_move(&mut context, o);
+            follow_step_move(inner, &mut context, o);
             inner.retarget_hold(job_id, &context);
             if o.stop {
                 break;
@@ -148,30 +150,6 @@ pub(super) fn execute_steps(
         if lock(&inner.state).cancel_requested(job_id).unwrap_or(false) {
             return (JobResult::Cancelled, summary);
         }
-        let spawner = Spawner {
-            inner,
-            parent_job: job_id,
-            parent: jp,
-            context: &context,
-            lane,
-            config,
-        };
-        let mut ctx = StepCtx {
-            action,
-            step_index: i,
-            params: &jp.params,
-            context: &context,
-            vars: &vars,
-            config,
-            vault_root: &inner.vault_root,
-            index_db: &inner.index_db,
-            search: Some(&inner.search),
-            system_trash: inner.system_trash.as_deref(),
-            state: &inner.state,
-            writer: inner.writer.writer(),
-            children: &spawner,
-            written: Vec::new(),
-        };
         let idx = i64::try_from(i).unwrap_or(i64::MAX);
         let started = lock(&inner.state).step_started(
             job_id,
@@ -182,12 +160,63 @@ pub(super) fn execute_steps(
         if let Err(e) = started {
             tracing::warn!(job_id, error = %e, "telemetry: step start not recorded");
         }
-        let res = inner.executor.execute(step, &mut ctx);
+        // D5: the cycle guard is armed before each write is issued (the step write seam).
+        let guard = |p: &str| inner.record_writes(&action.id, &[p.to_owned()]);
+        let mut follows = 0;
+        let res = loop {
+            // D4: the job's note followed through lineage before the step acts on it.
+            match follow_lineage(inner, &mut context) {
+                Follow::Same => {}
+                Follow::Moved => inner.retarget_hold(job_id, &context),
+                Follow::Gone(path) => break Err(StepError::NoteGone { path }),
+            }
+            let spawner = Spawner {
+                inner,
+                parent_job: job_id,
+                parent: jp,
+                context: &context,
+                lane,
+                config,
+            };
+            let mut ctx = StepCtx {
+                action,
+                step_index: i,
+                params: &jp.params,
+                context: &context,
+                vars: &vars,
+                config,
+                vault_root: &inner.vault_root,
+                index_db: &inner.index_db,
+                search: Some(&inner.search),
+                system_trash: inner.system_trash.as_deref(),
+                state: &inner.state,
+                writer: inner.writer.writer(),
+                children: &spawner,
+                written: Vec::new(),
+                guard: Some(&guard),
+            };
+            let res = inner.executor.execute(step, &mut ctx);
+            let written = std::mem::take(&mut ctx.written);
+            inner.record_writes(&action.id, &written);
+            // A step whose note went missing re-runs at the note's new path (D4).
+            if matches!(res, Err(StepError::NoteGone { .. }))
+                && follows < MAX_FOLLOWS
+                && matches!(follow_lineage(inner, &mut context), Follow::Moved)
+            {
+                follows += 1;
+                inner.retarget_hold(job_id, &context);
+                tracing::info!(
+                    job = job_id,
+                    step = i + 1,
+                    "note moved; step re-runs at its new path"
+                );
+                continue;
+            }
+            break res;
+        };
         if let Err(e) = lock(&inner.state).step_ended(job_id, idx, inner.clock.now_ms()) {
             tracing::warn!(job_id, error = %e, "telemetry: step end not recorded");
         }
-        let written = std::mem::take(&mut ctx.written);
-        inner.record_writes(&action.id, &written);
         match res {
             Ok(o) => {
                 let text = match serde_json::to_string(&o) {
@@ -208,7 +237,7 @@ pub(super) fn execute_steps(
                     );
                 }
                 absorb(&o, &mut summary, &mut vars);
-                steps::follow_move(&mut context, &o);
+                follow_step_move(inner, &mut context, &o);
                 inner.retarget_hold(job_id, &context);
                 if o.stop {
                     break;
@@ -224,14 +253,11 @@ pub(super) fn execute_steps(
                 );
             }
             Err(StepError::NoteGone { path }) => {
-                // A retried job whose note was moved or deleted since the first attempt settles
-                // quietly (plan round-11 Decision 3); a first attempt still fails.
+                // A retried job whose note was deleted since the first attempt settles quietly
+                // (plan round-11 Decision 3; a moved note was followed above, plan
+                // note-path-continuity D4); a first attempt still fails.
                 if retry {
-                    tracing::info!(
-                        job = job_id,
-                        step = i + 1,
-                        "note moved or deleted; job skipped"
-                    );
+                    tracing::info!(job = job_id, step = i + 1, "note deleted; job skipped");
                     return (JobResult::Done, summary);
                 }
                 return (
@@ -263,4 +289,71 @@ pub(super) fn execute_steps(
         }
     }
     (JobResult::Done, summary)
+}
+
+/// How often one step re-runs after its note moved under it (D4).
+const MAX_FOLLOWS: usize = 3;
+
+/// What lineage says about the job's note (plan note-path-continuity D4).
+enum Follow {
+    /// Still at `active_path` (or no cursor / lineage cannot say: today's behavior).
+    Same,
+    /// The context now points at the note's new path.
+    Moved,
+    /// The note was deleted and another file now sits at its old path: never act on it.
+    Gone(String),
+}
+
+/// D4: when lineage has an identity edge on the job's `active_path` after its cursor, follows
+/// it. `Moved` updates the context (the same fields `steps::follow_move` updates) and advances
+/// the cursor; `Live` advances the cursor; `Deleted` / `Unknown` keep today's behavior, except
+/// that a deleted note whose path was reused by another file is reported gone instead of
+/// running the step on that file.
+fn follow_lineage(inner: &Inner, context: &mut ActionContext) -> Follow {
+    let (Some(path), Some(cursor)) = (context.active_path.clone(), context.lineage_cursor) else {
+        return Follow::Same;
+    };
+    match crate::lineage::resolve(&inner.state, &inner.vault_root, &path, Some(cursor)) {
+        Ok(r) => match r.resolution {
+            PathResolution::Live { .. } => {
+                context.lineage_cursor = Some(r.head);
+                Follow::Same
+            }
+            PathResolution::Moved { to } => {
+                tracing::info!("job note moved; following it");
+                context.active_path = Some(to);
+                context.lineage_cursor = Some(r.head);
+                Follow::Moved
+            }
+            PathResolution::Deleted if inner.vault_root.join(&path).exists() => Follow::Gone(path),
+            PathResolution::Deleted | PathResolution::Unknown => Follow::Same,
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "lineage resolve failed; running unfollowed");
+            Follow::Same
+        }
+    }
+}
+
+/// [`steps::follow_move`] plus the cursor: when a step moved the active note, the new path is
+/// re-derived from the old binding through lineage (the step's own rename is an edge after the
+/// cursor), so the cursor never describes the old path's history. Without a lineage answer the
+/// cursor is dropped and later steps behave as before.
+fn follow_step_move(inner: &Inner, context: &mut ActionContext, o: &StepOutcome) {
+    let before = context.active_path.clone();
+    steps::follow_move(context, o);
+    if context.active_path == before {
+        return;
+    }
+    let (Some(old), Some(cursor)) = (before, context.lineage_cursor) else {
+        return;
+    };
+    let r = crate::lineage::resolve(&inner.state, &inner.vault_root, &old, Some(cursor));
+    match r.map(|r| (r.resolution, r.head)) {
+        Ok((PathResolution::Moved { to }, head)) => {
+            context.active_path = Some(to);
+            context.lineage_cursor = Some(head);
+        }
+        _ => context.lineage_cursor = None,
+    }
 }

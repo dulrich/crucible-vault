@@ -24,9 +24,9 @@ pub(super) async fn event_loop(
         tokio::select! {
             _ = stop.changed() => return,
             r = rx.recv() => match r {
-                Ok(Notification::FileChanged { path, kind, origin, .. }) => {
+                Ok(Notification::FileChanged { path, kind, origin, seq, .. }) => {
                     let rn = runner.clone();
-                    let res = tokio::task::spawn_blocking(move || on_change(&rn, &path, kind, origin)).await;
+                    let res = tokio::task::spawn_blocking(move || on_change_at(&rn, &path, kind, origin, seq)).await;
                     if let Err(e) = res {
                         tracing::error!(error = %e, "event starter panicked");
                     }
@@ -51,11 +51,24 @@ fn origin_ok(sel: OriginSel, o: Origin) -> bool {
 }
 
 /// Handles one change synchronously; returns the job ids enqueued.
+#[cfg(test)]
 pub(crate) fn on_change(
     runner: &Runner,
     path: &str,
     kind: ChangeKind,
     origin: Origin,
+) -> Vec<String> {
+    on_change_at(runner, path, kind, origin, None)
+}
+
+/// [`on_change`] for an event carrying lineage `seq` (plan note-path-continuity D4): a started
+/// job binds its note at that seq, so a move after the event is followed.
+pub(crate) fn on_change_at(
+    runner: &Runner,
+    path: &str,
+    kind: ChangeKind,
+    origin: Origin,
+    seq: Option<u64>,
 ) -> Vec<String> {
     let config = runner.config();
     let mut out = Vec::new();
@@ -80,7 +93,8 @@ pub(crate) fn on_change(
             tracing::info!(action = %action.id, "cycle guard: daemon write does not re-trigger");
             continue;
         }
-        let req = RunRequest::event(action, path, kind);
+        let mut req = RunRequest::event(action, path, kind);
+        req.context.lineage_cursor = seq;
         match runner.enqueue(action, req) {
             Ok(id) => out.push(id),
             Err(e) => tracing::warn!(action = %action.id, error = %e, "event run refused"),

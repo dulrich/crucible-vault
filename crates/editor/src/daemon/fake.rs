@@ -269,6 +269,7 @@ impl FakeDaemon {
                 origin: Origin::Daemon,
                 from: Some(from.to_owned()),
                 replaced_by: None,
+                seq: None,
             },
             Notification::FileChanged {
                 path: from.to_owned(),
@@ -277,6 +278,7 @@ impl FakeDaemon {
                 origin: Origin::Daemon,
                 from: None,
                 replaced_by: None,
+                seq: None,
             },
             Notification::IndexGeneration { n },
         ];
@@ -442,6 +444,7 @@ impl FakeDaemon {
                 origin: Origin::Daemon,
                 from: None,
                 replaced_by: None,
+                seq: None,
             },
         );
         emit(g, Notification::IndexGeneration { n });
@@ -763,6 +766,27 @@ impl DaemonClient for FakeDaemon {
 
     fn memory_report(&self, _report: &cv_protocol::MemoryReport) -> Result<()> {
         Ok(())
+    }
+
+    /// Minimal (plan note-path-continuity WP-2): no lineage yet (WP-3 adds cursor semantics);
+    /// a present file is `Live`, anything else `Unknown`, at head 0.
+    fn resolve_path(
+        &self,
+        path: &str,
+        _since: Option<u64>,
+    ) -> Result<cv_protocol::ResolvePathResult> {
+        let abs = vault_abs(&self.vault_root, path)?;
+        let resolution = if abs.is_file() {
+            cv_protocol::PathResolution::Live {
+                path: path.to_owned(),
+            }
+        } else {
+            cv_protocol::PathResolution::Unknown
+        };
+        Ok(cv_protocol::ResolvePathResult {
+            resolution,
+            head: 0,
+        })
     }
 
     fn lookup_channels(&self, ids: &[String]) -> Result<Vec<cv_protocol::LookupChannel>> {

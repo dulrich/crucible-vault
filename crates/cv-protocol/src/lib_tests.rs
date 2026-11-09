@@ -522,6 +522,7 @@ fn file_changed_from_is_optional_both_ways() {
         origin: Origin::Daemon,
         from: Some("a.md".into()),
         replaced_by: None,
+        seq: None,
     };
     let v = serde_json::to_value(&with).expect("ser");
     assert_eq!(v["params"]["from"], "a.md");
@@ -538,6 +539,7 @@ fn notifications_round_trip_and_topic() {
             origin: Origin::External,
             from: None,
             replaced_by: None,
+            seq: None,
         },
         Notification::IndexGeneration { n: 3 },
         Notification::JobUpdated(JobStatus {
@@ -717,6 +719,13 @@ fn method_markers_match_the_wire() {
     );
     check::<m::MemoryReport>(MemoryReport::default(), s);
     check::<m::ReconcileIntake>(ReconcileIntakeParams { dry_run: true }, s);
+    check::<m::ResolvePath>(
+        ResolvePathParams {
+            path: "a.md".into(),
+            since: Some(3),
+        },
+        s,
+    );
     assert_eq!(seen, METHOD_NAMES);
     // Unit methods carry no `params` key, exactly as the enum always serialised them.
     let v =
@@ -837,5 +846,85 @@ fn job_timeline_wire_strings() {
     assert_eq!(
         WaitCause::parse(WaitCause::Key.as_str()),
         Some(WaitCause::Key)
+    );
+}
+
+/// Plan note-path-continuity D2: `resolve_path` and `file_changed.seq` round-trip, and old
+/// peers' payloads (no `seq`, no `since`, no `lineage_cursor`) still decode.
+#[test]
+fn resolve_path_and_seq_round_trip_with_old_peers() {
+    let req = Request::ResolvePath(ResolvePathParams {
+        path: "a.md".into(),
+        since: Some(9),
+    });
+    let v = serde_json::to_value(&req).expect("ser");
+    assert_eq!(
+        v,
+        json!({"method":"resolve_path","params":{"path":"a.md","since":9}})
+    );
+    assert_eq!(serde_json::from_value::<Request>(v).expect("de"), req);
+    let bare: Request =
+        serde_json::from_value(json!({"method":"resolve_path","params":{"path":"a.md"}}))
+            .expect("no since");
+    assert_eq!(
+        bare,
+        Request::ResolvePath(ResolvePathParams {
+            path: "a.md".into(),
+            since: None
+        })
+    );
+    for resolution in [
+        PathResolution::Live {
+            path: "a.md".into(),
+        },
+        PathResolution::Moved { to: "b.md".into() },
+        PathResolution::Deleted,
+        PathResolution::Unknown,
+    ] {
+        let r = ResolvePathResult {
+            resolution,
+            head: 4,
+        };
+        let v = serde_json::to_value(&r).expect("ser");
+        assert_eq!(
+            serde_json::from_value::<ResolvePathResult>(v).expect("de"),
+            r
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(ResolvePathResult {
+            resolution: PathResolution::Moved { to: "b.md".into() },
+            head: 4
+        })
+        .expect("ser"),
+        json!({"resolution":{"state":"moved","to":"b.md"},"head":4})
+    );
+    // `seq` on `file_changed`: emitted when set, absent (and defaulted) for old peers.
+    let n = Notification::FileChanged {
+        path: "b.md".into(),
+        kind: ChangeKind::Renamed,
+        hash: None,
+        origin: Origin::Daemon,
+        from: Some("a.md".into()),
+        replaced_by: None,
+        seq: Some(12),
+    };
+    let v = serde_json::to_value(&n).expect("ser");
+    assert_eq!(v["params"]["seq"], 12);
+    assert_eq!(serde_json::from_value::<Notification>(v).expect("de"), n);
+    let old: Notification = serde_json::from_str(
+        r#"{"method":"file_changed","params":{"path":"a.md","kind":"created","origin":"external"}}"#,
+    )
+    .expect("old peer");
+    assert!(matches!(old, Notification::FileChanged { seq: None, .. }));
+    assert!(!serde_json::to_string(&old).expect("ser").contains("seq"));
+    // An old client's context has no cursor; it is not serialized when absent.
+    let ctx: ActionContext =
+        serde_json::from_value(json!({"active_path":"a.md"})).expect("old ctx");
+    assert_eq!(ctx.lineage_cursor, None);
+    assert!(
+        !serde_json::to_string(&ctx)
+            .expect("ser")
+            .contains("lineage")
     );
 }

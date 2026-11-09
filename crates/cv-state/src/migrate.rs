@@ -3,7 +3,7 @@
 //! The schema is keyed on SQLite's `PRAGMA user_version`. A fresh database (version 0) is
 //! created directly at [`BASELINE_VERSION`] (15) from [`BASELINE`], the schema the retired 0.1.1
 //! baseline (v11) plus its v12–v15 steps produced (fixture `tests/fixtures/baseline-v15-schema.txt`),
-//! then brought forward by [`MIGRATIONS`] (v16: job telemetry). A database at [`latest_version`]
+//! then brought forward by [`MIGRATIONS`] (v16: job telemetry; v17: path lineage). A database at [`latest_version`]
 //! opens with no schema write. Versions `1..BASELINE_VERSION` predate the baseline and are refused
 //! with [`StateError::PreBaseline`]; a version newer than this build knows is refused with
 //! [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no down-migration and
@@ -174,7 +174,29 @@ CREATE INDEX trash_entries_trashed ON trash_entries(trashed_ms);
 /// first/last claim times, a partial-coverage marker (`tel_partial`, set on every pre-v16 row),
 /// and three child tables pruned with their job: attempt claim/settle times, wait-cause change
 /// events, and per-step start/end times.
-pub const MIGRATIONS: &[&str] = &[V16_JOB_TELEMETRY];
+///
+/// v17 (plan note-path-continuity WP-2, D2): durable path lineage. One row per identity
+/// transition the writer (or the watcher, for External changes) records, in mutation order;
+/// `seq` is `AUTOINCREMENT` so a number is never reused after pruning. `path_lineage_floor`
+/// holds the highest pruned `seq` (a cursor below it can no longer be vouched for).
+pub const MIGRATIONS: &[&str] = &[V16_JOB_TELEMETRY, V17_PATH_LINEAGE];
+
+const V17_PATH_LINEAGE: &str = r"
+CREATE TABLE path_lineage (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL CHECK (kind IN ('created', 'renamed', 'replaced', 'deleted')),
+    from_path  TEXT NOT NULL,
+    to_path    TEXT,
+    at_ms      INTEGER NOT NULL
+);
+CREATE INDEX path_lineage_from ON path_lineage(from_path, seq);
+CREATE INDEX path_lineage_at ON path_lineage(at_ms);
+CREATE TABLE path_lineage_floor (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    pruned  INTEGER NOT NULL
+);
+INSERT INTO path_lineage_floor (id, pruned) VALUES (1, 0);
+";
 
 const V16_JOB_TELEMETRY: &str = r"
 ALTER TABLE jobs ADD COLUMN tel_attempt INTEGER NOT NULL DEFAULT 0;

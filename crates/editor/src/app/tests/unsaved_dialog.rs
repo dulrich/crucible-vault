@@ -47,6 +47,7 @@ fn deleted(app: &mut App, path: &str) {
             origin: cv_protocol::Origin::Daemon,
             from: None,
             replaced_by: None,
+            seq: None,
         },
     )));
 }
