@@ -85,7 +85,7 @@
             },
             {
               "t": "text",
-              "v": ""
+              "v": "refined"
             },
             {
               "t": "number",
@@ -137,7 +137,7 @@
             },
             {
               "t": "text",
-              "v": "fanfic, transcript"
+              "v": "serial, transcript"
             },
             {
               "t": "number",
@@ -175,7 +175,7 @@
         },
         {
           "t": "number",
-          "v": 11.600000000000001
+          "v": 11.6
         },
         {
           "t": "null"

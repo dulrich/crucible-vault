@@ -1,11 +1,11 @@
-# Migrated from vault-repo `_custom/bases/monthly-reading.base` (`Unread`, `By Tag`), expressions verbatim,
-# plus `By Day` restored from the deleted Dataview `monthly-note-reading-by-tag.js`.
-# `this` = the month note (`this.file.name` = `YYYY-MM`).
+# Example: reading list for a month note. Copy into `<config>/views/` (see README.md).
+# Views: `Unread`, `By Tag`, `By Day`. `this` = the month note (`this.file.name` = `YYYY-MM`).
+# Notes tagged `serial`, `blog`, `news` or `transcript` are categorised; anything else is `other`.
 
 [formulas]
-tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "using").join(", ")'
+tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings").join(", ")'
 minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
-category = 'if(list(note.tags).map(value.toString().replace("#", "")).contains("blog"), "blog", if(list(note.tags).map(value.toString().replace("#", "")).contains("news"), "news", if(list(note.tags).map(value.toString().replace("#", "")).contains("transcript"), "transcript", if(list(note.tags).map(value.toString().replace("#", "")).contains("fanfic"), "fanfic", "other"))))'
+category = 'if(list(note.tags).map(value.toString().replace("#", "")).contains("blog"), "blog", if(list(note.tags).map(value.toString().replace("#", "")).contains("news"), "news", if(list(note.tags).map(value.toString().replace("#", "")).contains("transcript"), "transcript", if(list(note.tags).map(value.toString().replace("#", "")).contains("serial"), "serial", "other"))))'
 
 [filters]
 and = [
@@ -30,10 +30,10 @@ order = ["file.name", "note.created", "note.word-count", "formula.minutes"]
 sort = [{ property = "note.created", direction = "ASC" }]
 summaries = { "note.word-count" = "Sum", "formula.minutes" = "Sum" }
 
-# Restored: words per day x category for the host month. Category = first match in the script's
-# priority order (blog, news, transcript, fanfic; else other); notes tagged `daily` are excluded;
+# Words per day x category for the host month. Category = first match in
+# priority order (blog, news, transcript, serial; else other); notes tagged `daily` are excluded;
 # Total row + column; Average/day = total / days with entries. Cells are "words / minutes" at
-# `reading_wpm` from `_custom/Settings.md` (the script's default 250 when missing).
+# `reading_wpm` from `_custom/Settings.md` (250 when missing).
 [[views]]
 type = "pivot"
 name = "By Day"
@@ -45,7 +45,7 @@ columns = [
   { label = "Blog", when = 'list(note.tags).map(value.toString().replace("#", "")).contains("blog")' },
   { label = "News", when = 'list(note.tags).map(value.toString().replace("#", "")).contains("news")' },
   { label = "Transcript", when = 'list(note.tags).map(value.toString().replace("#", "")).contains("transcript")' },
-  { label = "Fanfic", when = 'list(note.tags).map(value.toString().replace("#", "")).contains("fanfic")' },
+  { label = "Serial", when = 'list(note.tags).map(value.toString().replace("#", "")).contains("serial")' },
   { label = "Other" },
 ]
 value = 'number(note["word-count"])'

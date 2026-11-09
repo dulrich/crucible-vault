@@ -16,19 +16,12 @@ const IDS: &[&str] = &[
     "blog-story-list#Stories",
     "daily-intake#Intake",
     "daily-reading-list#Reading List",
-    "hubs#Hub View A",
-    "hubs#Project Alpha",
-    "hubs#Hub View B",
-    "hubs#Hub View C",
     "ingestion#Possible duplicates",
     "ingestion#Trash",
     "ingestion#Unprocessed clippings",
     "ingestion#Unrefined transcripts",
     "ingestion#X posts",
     "ingestion#YouTube without metadata",
-    "initiatives#Active",
-    "initiatives#Blocked",
-    "initiatives#Paused",
     "intake-by-source#Intake by source",
     "monthly-reading#By Day",
     "monthly-reading#By Tag",
@@ -48,10 +41,14 @@ fn host_of(id: &str) -> Option<&'static str> {
         Some("backlinks") => Some("stack/Tool One.md"),
         Some("blog-story-list") => Some("core/works/Ann Blog.md"),
         Some("daily-reading-list" | "daily-intake") => Some("daily/day/2026-10-01.md"),
-        Some("hubs") => Some("core/projects/project-alpha/Hub.md"),
         Some("monthly-reading" | "monthly-tasks") => Some(MONTH),
         _ => None,
     }
+}
+
+/// `config/examples/views/`: the shipped example view defs (plus a README, skipped by the loader).
+fn examples_dir() -> PathBuf {
+    crate_dir().join("../../config/examples/views")
 }
 
 fn crate_dir() -> PathBuf {
@@ -119,6 +116,8 @@ fn fixture_with(extra: &[(&str, &str)]) -> Fx {
     let config = tmp.path().join("config");
     let mut defs = Vec::new();
     copy_tree(&crate_dir().join("defs"), &config.join("views"), &mut defs);
+    // The example views (`config/examples/views/`) load alongside the built-ins, so they stay valid.
+    copy_tree(&examples_dir(), &config.join("views"), &mut defs);
     let base = tmp.path().join("idx").join("index.db");
     std::fs::create_dir_all(base.parent().unwrap()).unwrap();
     let index = cv_index::Index::create(&vault, &base).unwrap();
@@ -219,7 +218,7 @@ fn mask(v: &mut Json) {
 }
 
 #[test]
-fn defs_load_without_notices_and_yield_the_26_ids() {
+fn defs_load_without_notices_and_yield_the_19_ids() {
     let fx = fixture();
     let host = fx.host();
     assert!(host.load_notices().is_empty(), "{:?}", host.load_notices());
@@ -314,9 +313,9 @@ fn by_day_pivot_total_and_average() {
     // 6.25 → "6.2": Rust's `toFixed` rounds half-to-even where JS printed "6.3".
     assert_eq!(text(&total.cells[b]), "1250 / 6.2m");
     assert_eq!(text(&avg.cells[b]), "417 / 2.1m");
-    // First match wins: fanfic+transcript counts as Transcript.
+    // First match wins: serial+transcript counts as Transcript.
     let tr = col(&r, "Transcript");
-    let f = col(&r, "Fanfic");
+    let f = col(&r, "Serial");
     assert_eq!(text(&total.cells[tr]), "300 / 1.5m");
     assert!(matches!(total.cells[f], Cell::Null) || text(&total.cells[f]) == "—");
 }
@@ -468,33 +467,6 @@ fn works_unread_uses_the_injected_serial_match_set() {
 }
 
 #[test]
-fn initiative_task_counts_and_missing_files() {
-    let fx = fixture();
-    let mut host = fx.host();
-    let r = fx.run(&mut host, "initiatives#Active", None);
-    assert_eq!(
-        column(&r, "Blocked on User"),
-        [("Alpha".into(), "2".into()), ("delta".into(), "·".into())]
-    );
-    assert_eq!(
-        column(&r, "Tasks"),
-        [("Alpha".into(), "2".into()), ("delta".into(), "·".into())]
-    );
-    assert_eq!(
-        column(&r, "feedback"),
-        [
-            ("Alpha".into(), "FEEDBACK".into()),
-            ("delta".into(), "~~FEEDBACK~~".into())
-        ]
-    );
-    let r = fx.run(&mut host, "initiatives#Blocked", None);
-    assert_eq!(column(&r, "Blocked on User"), [("beta".into(), "1".into())]);
-    assert_eq!(column(&r, "readme"), [("beta".into(), "~~README~~".into())]);
-    let r = fx.run(&mut host, "initiatives#Paused", None);
-    assert_eq!(column(&r, "Tasks"), [("Gamma".into(), "·".into())]);
-}
-
-#[test]
 fn backlinks_here() {
     let fx = fixture();
     let mut host = fx.host();
@@ -615,4 +587,35 @@ fn day_folder_follows_the_configured_folder() {
     );
     // The literal-folder legacy def ignores the setting and reads `daily/day`, as before.
     assert_eq!(tasks(&mut journal, "legacy-tasks#Overdue"), original);
+}
+
+/// Every file in `config/examples/views/` is a def the loader accepts, and each is covered by the
+/// golden ids above.
+#[test]
+fn every_example_view_parses() {
+    let mut names: Vec<String> = std::fs::read_dir(examples_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".toml"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "blog-story-list.toml",
+            "daily-reading-list.toml",
+            "monthly-reading.toml"
+        ]
+    );
+    let fx = fixture();
+    let host = fx.host();
+    assert!(host.load_notices().is_empty(), "{:?}", host.load_notices());
+    let ids = host.view_ids();
+    for n in &names {
+        let stem = n.trim_end_matches(".toml");
+        assert!(
+            ids.iter().any(|i| i.starts_with(&format!("{stem}#"))),
+            "{stem} not loaded"
+        );
+    }
 }

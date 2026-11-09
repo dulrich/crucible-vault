@@ -1,13 +1,13 @@
-# Migrated from vault-repo `_custom/bases/daily-reading-list.base` (view `Reading List`), expressions verbatim.
+# Example: reading list for a day note. Copy into `<config>/views/` (see README.md).
 # `this` = the day note; rows are the reading entries in `daily/day/<day>/`.
-# `formula.access` (plan round-23 WP-4): 🔒 = user action needed (the note is a teaser, `complete: false`,
+# `formula.access` (example): 🔒 = user action needed (the note is a teaser, `complete: false`,
 # or paid/founding without `complete: true`); it clears when the full body lands (`complete: true`).
 
 [filters]
 and = ['file.folder == folder("day") + "/" + this.file.name']
 
 [formulas]
-tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "refined" && value != "using").join(", ")'
+tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings").join(", ")'
 minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
 read = 'if(note.read == true, "✅", "❌")'
 access = 'if(note.complete == false || ((note.access == "paid" || note.access == "founding") && note.complete != true), "🔒", "")'

@@ -10,8 +10,8 @@
 //! The result decodes with serde straight into `views::result`:
 //! an unknown cell tag decodes as `Cell::Unknown` and renders empty; a malformed result
 //! becomes an [`State::Error`] entry shown in the fence. Cell behaviour follows the producer-set
-//! [`ColumnRole`], never column-key strings. Text cells written `~~x~~` (missing initiative
-//! files, `defs/initiatives.toml`) render struck through and dimmed.
+//! [`ColumnRole`], never column-key strings. Text cells written `~~x~~` (missing linked
+//! files) render struck through and dimmed.
 
 mod decode;
 mod layout;

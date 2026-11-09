@@ -1,8 +1,8 @@
-# Migrated from vault-repo `_custom/bases/blog-story-list.base` (view `Stories`), expressions verbatim.
+# Example: stories of one work. Copy into `<config>/views/` (see README.md).
 # `this` = the work note embedding the view (its `author-filter` / `source-prefix-filter`).
 
 [formulas]
-tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings" && value != "using").join(", ")'
+tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings").join(", ")'
 minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
 read = 'if(note.read == true, "✅", "❌")'
 created = 'if(note.created, note.created, file.ctime)'

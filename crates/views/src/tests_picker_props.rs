@@ -93,7 +93,7 @@ summaries = { "word-count" = "Sum" }
 /// not-read rows' words and minutes.
 #[test]
 fn migrated_reading_list_has_an_unread_row() {
-    let migrated = r##"# Migrated from vault-repo `_custom/bases/daily-reading-list.base` (view `Reading List`), expressions verbatim.
+    let migrated = r##"# A day-note reading list with an `Unread` summary row.
 # `this` = the day note; rows are the reading entries in `daily/day/<day>/`.
 
 [filters]
