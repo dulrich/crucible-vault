@@ -184,15 +184,15 @@ fn trash_entry(path: &str, reason: TrashReason, at: i64) -> NewTrashEntry {
     }
 }
 
-/// A fresh database is created at the v15 baseline, brought to the latest version, with the
+/// A fresh database is created at the v17 baseline (the latest version), with the
 /// ledger and label tables present and empty.
 #[test]
 fn fresh_database_is_created_at_latest_version() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("state.db");
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-    assert_eq!(migrate::BASELINE_VERSION, 15);
-    assert!(migrate::latest_version() > migrate::BASELINE_VERSION);
+    assert_eq!(migrate::BASELINE_VERSION, 17);
+    assert_eq!(migrate::latest_version(), migrate::BASELINE_VERSION);
     assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     assert!(s.trash_entries().unwrap().is_empty());
     drop(s);

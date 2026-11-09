@@ -1,9 +1,12 @@
-//! Forward-only, versioned migrations for `state.db`, from the 0.2.0 baseline (D27).
+//! Forward-only, versioned migrations for `state.db`, from the 1.0.0 baseline (D31).
+//!
+//! Per-major baseline rule: structural migrations collapse into one baseline per major version;
+//! within a major, schema changes are ladder steps appended to [`MIGRATIONS`].
 //!
 //! The schema is keyed on SQLite's `PRAGMA user_version`. A fresh database (version 0) is
-//! created directly at [`BASELINE_VERSION`] (15) from [`BASELINE`], the schema the retired 0.1.1
-//! baseline (v11) plus its v12–v15 steps produced (fixture `tests/fixtures/baseline-v15-schema.txt`),
-//! then brought forward by [`MIGRATIONS`] (v16: job telemetry; v17: path lineage). A database at [`latest_version`]
+//! created directly at [`BASELINE_VERSION`] (17) from [`BASELINE`], the schema the retired v15
+//! baseline plus its v16 and v17 steps produced (fixture `tests/fixtures/baseline-v17-schema.txt`),
+//! then brought forward by [`MIGRATIONS`] (empty at 1.0.0). A database at [`latest_version`]
 //! opens with no schema write. Versions `1..BASELINE_VERSION` predate the baseline and are refused
 //! with [`StateError::PreBaseline`]; a version newer than this build knows is refused with
 //! [`StateError::NewerSchema`]. state.db is primary data (D14), so there is no down-migration and
@@ -18,12 +21,13 @@
 use crate::error::{Result, StateError};
 use rusqlite::Connection;
 
-/// `user_version` of the 0.2.0 baseline schema.
-pub const BASELINE_VERSION: i64 = 15;
+/// `user_version` of the 1.0.0 baseline schema.
+pub const BASELINE_VERSION: i64 = 17;
 
-/// The 0.2.0 baseline schema (state.db v15). Byte-for-byte the `sqlite_master` the v11 baseline
-/// plus its four post-baseline steps (v12–v15) produced, including the column order their
-/// `ALTER TABLE … ADD COLUMN` steps left (fixture `tests/fixtures/baseline-v15-schema.txt`).
+/// The 1.0.0 baseline schema (state.db v17). Byte-for-byte the `sqlite_master` the retired v15
+/// baseline plus its v16 (job telemetry) and v17 (path lineage) steps produced, including the
+/// column order their `ALTER TABLE … ADD COLUMN` steps left (fixture
+/// `tests/fixtures/baseline-v17-schema.txt`).
 pub const BASELINE: &str = r"
 CREATE TABLE api_usage (
     service  TEXT NOT NULL,
@@ -85,7 +89,43 @@ CREATE TABLE jobs (
     failure_reason  TEXT,
     failure_kind    TEXT,
     notes           TEXT
-, cancel_requested INTEGER NOT NULL DEFAULT 0);
+, cancel_requested INTEGER NOT NULL DEFAULT 0, tel_attempt INTEGER NOT NULL DEFAULT 0, first_claimed_ms INTEGER, last_claimed_ms INTEGER, tel_partial INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE job_attempt_times (
+    job_id      TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    claimed_ms  INTEGER NOT NULL,
+    settled_ms  INTEGER,
+    PRIMARY KEY (job_id, attempt)
+);
+CREATE TABLE job_wait_events (
+    seq       INTEGER PRIMARY KEY,
+    job_id    TEXT NOT NULL,
+    at_ms     INTEGER NOT NULL,
+    cause     TEXT NOT NULL,
+    blocker   TEXT,
+    until_ms  INTEGER
+);
+CREATE TABLE job_step_times (
+    job_id      TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,
+    step_index  INTEGER NOT NULL,
+    step_kind   TEXT NOT NULL,
+    start_ms    INTEGER NOT NULL,
+    end_ms      INTEGER,
+    PRIMARY KEY (job_id, attempt, step_index)
+);
+CREATE TABLE path_lineage (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL CHECK (kind IN ('created', 'renamed', 'replaced', 'deleted')),
+    from_path  TEXT NOT NULL,
+    to_path    TEXT,
+    at_ms      INTEGER NOT NULL
+);
+CREATE TABLE path_lineage_floor (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    pruned  INTEGER NOT NULL
+);
+INSERT INTO path_lineage_floor (id, pruned) VALUES (1, 0);
 CREATE TABLE link_records (
     canonical_url        TEXT PRIMARY KEY,
     url                  TEXT NOT NULL,
@@ -165,71 +205,15 @@ CREATE INDEX tracker_items_source_seen ON tracker_items(source_kind, source_key,
 CREATE INDEX tracker_items_url ON tracker_items(url);
 CREATE INDEX trash_entries_path ON trash_entries(location, trash_path);
 CREATE INDEX trash_entries_trashed ON trash_entries(trashed_ms);
-";
-
-/// Post-baseline steps (v16+). Later WPs append (never edit) entries.
-///
-/// v16 (plan job-telemetry WP-1): job timing and wait-cause telemetry. Additive only: a
-/// monotonic per-job telemetry attempt (`tel_attempt`; never reset, unlike `attempts`), the
-/// first/last claim times, a partial-coverage marker (`tel_partial`, set on every pre-v16 row),
-/// and three child tables pruned with their job: attempt claim/settle times, wait-cause change
-/// events, and per-step start/end times.
-///
-/// v17 (plan note-path-continuity WP-2, D2): durable path lineage. One row per identity
-/// transition the writer (or the watcher, for External changes) records, in mutation order;
-/// `seq` is `AUTOINCREMENT` so a number is never reused after pruning. `path_lineage_floor`
-/// holds the highest pruned `seq` (a cursor below it can no longer be vouched for).
-pub const MIGRATIONS: &[&str] = &[V16_JOB_TELEMETRY, V17_PATH_LINEAGE];
-
-const V17_PATH_LINEAGE: &str = r"
-CREATE TABLE path_lineage (
-    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind       TEXT NOT NULL CHECK (kind IN ('created', 'renamed', 'replaced', 'deleted')),
-    from_path  TEXT NOT NULL,
-    to_path    TEXT,
-    at_ms      INTEGER NOT NULL
-);
+CREATE INDEX job_wait_events_job ON job_wait_events(job_id, seq);
 CREATE INDEX path_lineage_from ON path_lineage(from_path, seq);
 CREATE INDEX path_lineage_at ON path_lineage(at_ms);
-CREATE TABLE path_lineage_floor (
-    id      INTEGER PRIMARY KEY CHECK (id = 1),
-    pruned  INTEGER NOT NULL
-);
-INSERT INTO path_lineage_floor (id, pruned) VALUES (1, 0);
 ";
 
-const V16_JOB_TELEMETRY: &str = r"
-ALTER TABLE jobs ADD COLUMN tel_attempt INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN first_claimed_ms INTEGER;
-ALTER TABLE jobs ADD COLUMN last_claimed_ms INTEGER;
-ALTER TABLE jobs ADD COLUMN tel_partial INTEGER NOT NULL DEFAULT 0;
-UPDATE jobs SET tel_partial = 1;
-CREATE TABLE job_attempt_times (
-    job_id      TEXT NOT NULL,
-    attempt     INTEGER NOT NULL,
-    claimed_ms  INTEGER NOT NULL,
-    settled_ms  INTEGER,
-    PRIMARY KEY (job_id, attempt)
-);
-CREATE TABLE job_wait_events (
-    seq       INTEGER PRIMARY KEY,
-    job_id    TEXT NOT NULL,
-    at_ms     INTEGER NOT NULL,
-    cause     TEXT NOT NULL,
-    blocker   TEXT,
-    until_ms  INTEGER
-);
-CREATE INDEX job_wait_events_job ON job_wait_events(job_id, seq);
-CREATE TABLE job_step_times (
-    job_id      TEXT NOT NULL,
-    attempt     INTEGER NOT NULL,
-    step_index  INTEGER NOT NULL,
-    step_kind   TEXT NOT NULL,
-    start_ms    INTEGER NOT NULL,
-    end_ms      INTEGER,
-    PRIMARY KEY (job_id, attempt, step_index)
-);
-";
+/// Steps after the baseline. Empty at 1.0.0: within a major version, schema changes append here
+/// (never edit) and entry `i` moves the database from `BASELINE_VERSION + i` to
+/// `BASELINE_VERSION + i + 1`; the next major folds them into a new baseline (D31).
+pub const MIGRATIONS: &[&str] = &[];
 
 /// Highest schema version this build knows.
 #[must_use]

@@ -301,20 +301,35 @@ fn schema_dump(c: &rusqlite::Connection) -> String {
     format!("user_version={v}\n{}\n", rows.join("\n"))
 }
 
-/// D27: a fresh database gets exactly the schema the retired v11 baseline + v12–v15 chain produced.
+/// D31: a fresh database gets exactly the schema the retired v15 baseline + v16 + v17 ladder produced.
 #[test]
-fn fresh_baseline_matches_the_v15_chain_schema() {
+fn fresh_baseline_matches_the_v17_chain_schema() {
     let c = rusqlite::Connection::open_in_memory().unwrap();
     c.execute_batch(migrate::BASELINE).unwrap();
     c.pragma_update(None, "user_version", migrate::BASELINE_VERSION)
         .unwrap();
     assert_eq!(
         schema_dump(&c),
-        include_str!("../tests/fixtures/baseline-v15-schema.txt")
+        include_str!("../tests/fixtures/baseline-v17-schema.txt")
     );
 }
 
-/// A database already at the latest version opens with no write.
+/// A fresh database has exactly one lineage-floor row `(1, 0)` (read by `lineage_floor`).
+#[test]
+fn fresh_baseline_seeds_the_lineage_floor() {
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    migrate::migrate(&mut c).unwrap();
+    let rows: Vec<(i64, i64)> = c
+        .prepare("SELECT id, pruned FROM path_lineage_floor")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(std::result::Result::unwrap)
+        .collect();
+    assert_eq!(rows, vec![(1, 0)]);
+}
+
+/// A v17 database (the baseline; `MIGRATIONS` is empty) opens with no write.
 #[test]
 fn baseline_database_opens_without_a_schema_write() {
     let dir = tempfile::tempdir().unwrap();
@@ -333,7 +348,7 @@ fn baseline_database_opens_without_a_schema_write() {
     assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
 }
 
-/// D27: versions 1..=14 predate the 0.2.0 baseline and are refused, by writer and reader.
+/// D31: versions 1..=16 predate the 1.0.0 baseline and are refused, by writer and reader.
 #[test]
 fn pre_baseline_versions_are_refused() {
     for v in 1..migrate::BASELINE_VERSION {
@@ -345,12 +360,12 @@ fn pre_baseline_versions_are_refused() {
         }
         let err = StateDb::open(&p, 1, QueueConfig::default()).unwrap_err();
         assert!(
-            matches!(err, StateError::PreBaseline { found, baseline: 15 } if found == v),
+            matches!(err, StateError::PreBaseline { found, baseline: 17 } if found == v),
             "{err}"
         );
         let msg = err.to_string();
         assert!(
-            msg.contains(&format!("version {v} ")) && msg.contains("predates the 0.2.0 baseline"),
+            msg.contains(&format!("version {v} ")) && msg.contains("predates the 1.0.0 baseline"),
             "{msg}"
         );
         assert!(matches!(
