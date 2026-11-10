@@ -376,6 +376,7 @@ fn file_changed_renamed_marks_every_view_stale() {
     let epoch = app.views.get(ID, Some(NOTE)).expect("entry").epoch;
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: "Other.md".into(),
             kind: cv_protocol::ChangeKind::Renamed,
             hash: None,

@@ -87,4 +87,6 @@ methods! {
     MemoryReport = "memory_report" (crate::MemoryReport) -> ();
     ReconcileIntake = "reconcile_intake" (ReconcileIntakeParams) -> ReconcileIntakeResult;
     ResolvePath = "resolve_path" (ResolvePathParams) -> ResolvePathResult;
+    BindNote = "bind_note" (BindNoteParams) -> BindNoteResult;
+    LocateNote = "locate_note" (LocateNoteParams) -> NoteLocation;
 }

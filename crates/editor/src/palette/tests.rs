@@ -895,6 +895,7 @@ fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
     notify(
         app,
         Notification::FileChanged {
+            id: None,
             path: "a.md".into(),
             kind: cv_protocol::ChangeKind::Modified,
             hash: Some(ContentHash::of(&tagged).as_str().to_owned()),
@@ -911,6 +912,7 @@ fn run_live_file_as_kind(d: &FakeDaemon, app: &mut App) {
         notify(
             app,
             Notification::FileChanged {
+                id: None,
                 path: path.into(),
                 kind,
                 hash: None,

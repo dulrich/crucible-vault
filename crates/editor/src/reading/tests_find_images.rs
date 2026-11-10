@@ -198,6 +198,7 @@ fn late_attachment_re_renders_the_doc() {
     doc.generation = d.index().generation();
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: key.clone(),
             kind: ChangeKind::Created,
             hash: None,

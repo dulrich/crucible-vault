@@ -522,6 +522,8 @@ impl Shared {
                 reply::<m::MemoryReport>(Ok(()))
             }
             Request::ResolvePath(p) => reply::<m::ResolvePath>(self.resolve_path(p).await),
+            Request::BindNote(p) => reply::<m::BindNote>(self.bind_note(p).await),
+            Request::LocateNote(p) => reply::<m::LocateNote>(self.locate_note(p).await),
         }
     }
 }

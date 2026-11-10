@@ -114,6 +114,7 @@ fn plain_session_close_follows_visit_order() {
 
 fn deleted_event(path: &str, seq: Option<u64>) -> Notification {
     Notification::FileChanged {
+        id: None,
         path: path.to_owned(),
         kind: ChangeKind::Deleted,
         hash: None,

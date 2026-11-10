@@ -188,6 +188,7 @@ pub fn context(tab: Option<&SourceBuffer>, reading_sel: Option<String>) -> Actio
     };
     let line = u32::try_from(tab.cursor().position.line).ok();
     ActionContext {
+        active_id: None,
         active_path: Some(tab.path().to_owned()),
         selection: reading_sel
             .filter(|s| !s.is_empty())

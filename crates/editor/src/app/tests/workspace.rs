@@ -13,6 +13,7 @@ use crate::panes;
 fn changed(app: &mut App, path: &str, kind: ChangeKind) {
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: path.to_owned(),
             kind,
             hash: None,
@@ -818,6 +819,7 @@ fn app_open_file_adds_tab_and_status_updates() {
     assert!(app.status.line().contains(&format!("gen {g}")));
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: p.clone(),
             kind: ChangeKind::Modified,
             hash: None,

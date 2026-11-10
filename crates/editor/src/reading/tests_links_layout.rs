@@ -22,6 +22,7 @@ fn dims_survive_resolver_invalidation_for_an_unrelated_create() {
     assert_eq!(dims(&app), Some((300, 150)));
     let changed = |path: &str, kind| {
         Message::Status(StatusMsg::Notification(Notification::FileChanged {
+            id: None,
             path: path.to_owned(),
             kind,
             hash: None,

@@ -108,6 +108,7 @@ fn file_membership_change_drops_cached_resolver() {
     let changed = |app: &mut App, path: &str, kind: ChangeKind| {
         let _ = app.send(Message::Status(StatusMsg::Notification(
             Notification::FileChanged {
+                id: None,
                 path: path.to_owned(),
                 kind,
                 hash: None,
@@ -158,6 +159,7 @@ fn one_vault_change_invalidates_the_shared_resolver_for_both_consumers() {
     let (epoch, version) = (app.resolver.epoch(), app.resolver.version());
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: "C.md".to_owned(),
             kind: ChangeKind::Created,
             hash: None,

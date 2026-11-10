@@ -44,6 +44,7 @@ fn all_requests_round_trip() {
             topics: vec![Topic::FileChanged, Topic::ViewsInvalidated],
         }),
         Request::WriteNote(WriteNoteParams {
+            id: None,
             path: "a.md".into(),
             content: "x".into(),
             base_hash: "h".into(),
@@ -58,6 +59,7 @@ fn all_requests_round_trip() {
             data_base64: "AA==".into(),
         }),
         Request::Rename(RenameParams {
+            id: None,
             from: "a.md".into(),
             to: "c.md".into(),
         }),
@@ -359,11 +361,15 @@ fn results_round_trip() {
     });
     assert_eq!(
         round_trip(&WriteNoteResult::Conflict {
+            path: None,
             current_hash: "h2".into()
         }),
         json!({"conflict":{"current_hash":"h2"}})
     );
-    round_trip(&WriteNoteResult::Written { hash: "h".into() });
+    round_trip(&WriteNoteResult::Written {
+        path: None,
+        hash: "h".into(),
+    });
     round_trip(&CreateNoteResult {
         path: "x 1.md".into(),
     });
@@ -516,6 +522,7 @@ fn file_changed_from_is_optional_both_ways() {
     ));
     assert!(!serde_json::to_string(&n).expect("ser").contains("from"));
     let with = Notification::FileChanged {
+        id: None,
         path: "b.md".into(),
         kind: ChangeKind::Renamed,
         hash: None,
@@ -533,6 +540,7 @@ fn file_changed_from_is_optional_both_ways() {
 fn notifications_round_trip_and_topic() {
     let all = vec![
         Notification::FileChanged {
+            id: None,
             path: "a.md".into(),
             kind: ChangeKind::Modified,
             hash: Some("h".into()),
@@ -596,6 +604,7 @@ fn method_markers_match_the_wire() {
     );
     check::<m::WriteNote>(
         WriteNoteParams {
+            id: None,
             path: "a".into(),
             content: "x".into(),
             base_hash: String::new(),
@@ -619,6 +628,7 @@ fn method_markers_match_the_wire() {
     );
     check::<m::Rename>(
         RenameParams {
+            id: None,
             from: "a".into(),
             to: "b".into(),
         },
@@ -726,6 +736,13 @@ fn method_markers_match_the_wire() {
         },
         s,
     );
+    check::<m::BindNote>(
+        BindNoteParams {
+            path: "a.md".into(),
+        },
+        s,
+    );
+    check::<m::LocateNote>(LocateNoteParams { id: NoteId(1) }, s);
     assert_eq!(seen, METHOD_NAMES);
     // Unit methods carry no `params` key, exactly as the enum always serialised them.
     let v =
@@ -737,6 +754,7 @@ fn method_markers_match_the_wire() {
 #[test]
 fn retyped_results_keep_their_wire_shape() {
     let r = RenameResult {
+        from: None,
         rewritten: vec!["a.md".into()],
         skipped_conflicts: vec![],
     };
@@ -901,6 +919,7 @@ fn resolve_path_and_seq_round_trip_with_old_peers() {
     );
     // `seq` on `file_changed`: emitted when set, absent (and defaulted) for old peers.
     let n = Notification::FileChanged {
+        id: None,
         path: "b.md".into(),
         kind: ChangeKind::Renamed,
         hash: None,
@@ -927,4 +946,162 @@ fn resolve_path_and_seq_round_trip_with_old_peers() {
             .expect("ser")
             .contains("lineage")
     );
+}
+
+/// Plan note-identity D2: the id rides additively. Old peers' messages (no `id` / `active_id` /
+/// result `path` / `from`) parse with the new fields absent, and absent fields are not
+/// serialized; present ones are bare integers.
+#[test]
+fn note_id_fields_are_additive_on_the_wire() {
+    let old: WriteNoteParams =
+        serde_json::from_value(json!({"path":"a.md","content":"x","base_hash":""})).unwrap();
+    assert_eq!(old.id, None);
+    assert_eq!(
+        round_trip(&old),
+        json!({"path":"a.md","content":"x","base_hash":""})
+    );
+    let new = WriteNoteParams {
+        id: Some(NoteId(9)),
+        ..old
+    };
+    assert_eq!(round_trip(&new)["id"], json!(9));
+    let r: RenameParams = serde_json::from_value(json!({"from":"a","to":"b"})).unwrap();
+    assert_eq!(r.id, None);
+    assert_eq!(round_trip(&r), json!({"from":"a","to":"b"}));
+    let res: RenameResult =
+        serde_json::from_value(json!({"rewritten":[],"skipped_conflicts":[]})).unwrap();
+    assert_eq!(
+        round_trip(&res),
+        json!({"rewritten":[],"skipped_conflicts":[]})
+    );
+    let w: WriteNoteResult = serde_json::from_value(json!({"written":{"hash":"h"}})).unwrap();
+    assert_eq!(
+        w,
+        WriteNoteResult::Written {
+            hash: "h".into(),
+            path: None
+        }
+    );
+    assert_eq!(round_trip(&w), json!({"written":{"hash":"h"}}));
+    let ctx: ActionContext = serde_json::from_value(json!({"active_path":"a.md"})).unwrap();
+    assert_eq!(ctx.active_id, None);
+    assert_eq!(round_trip(&ctx), json!({"active_path":"a.md"}));
+    let ctx = ActionContext {
+        active_id: Some(NoteId(4)),
+        ..ctx
+    };
+    assert_eq!(round_trip(&ctx)["active_id"], json!(4));
+    let n: Notification = serde_json::from_value(json!({
+        "method":"file_changed",
+        "params":{"path":"a.md","kind":"created","origin":"daemon"}
+    }))
+    .unwrap();
+    assert!(matches!(n, Notification::FileChanged { id: None, .. }));
+    assert!(round_trip(&n)["params"].get("id").is_none());
+}
+
+/// `bind_note` / `locate_note` wire shapes.
+#[test]
+fn bind_and_locate_note_wire_shapes() {
+    let req = Request::BindNote(BindNoteParams {
+        path: "a.md".into(),
+    });
+    assert_eq!(
+        round_trip(&req),
+        json!({"method":"bind_note","params":{"path":"a.md"}})
+    );
+    assert_eq!(req.method(), "bind_note");
+    assert_eq!(
+        round_trip(&BindNoteResult { id: NoteId(3) }),
+        json!({"id":3})
+    );
+    let req = Request::LocateNote(LocateNoteParams { id: NoteId(3) });
+    assert_eq!(
+        round_trip(&req),
+        json!({"method":"locate_note","params":{"id":3}})
+    );
+    assert!(METHOD_NAMES.contains(&"locate_note") && METHOD_NAMES.contains(&"bind_note"));
+    assert_eq!(
+        round_trip(&NoteLocation::Live {
+            path: "b.md".into()
+        }),
+        json!({"state":"live","path":"b.md"})
+    );
+    assert_eq!(
+        round_trip(&NoteLocation::Gone {
+            replaced_by: Some(NoteId(5))
+        }),
+        json!({"state":"gone","replaced_by":5})
+    );
+    assert_eq!(
+        round_trip(&NoteLocation::Gone { replaced_by: None }),
+        json!({"state":"gone"})
+    );
+    assert_eq!(
+        round_trip(&NoteLocation::Unknown),
+        json!({"state":"unknown"})
+    );
+}
+
+/// D7: the shared constructor's rename pair — destination `Renamed { from }` first, then the
+/// source `Deleted`, one `seq` and one `id`; a non-rename is one notification.
+#[test]
+fn file_changed_builds_the_rename_pair() {
+    let got = file_changed(FileChange {
+        path: "b.md".into(),
+        kind: ChangeKind::Renamed,
+        hash: None,
+        origin: Origin::External,
+        from: Some("a.md".into()),
+        replaced_by: None,
+        seq: Some(2),
+        id: Some(NoteId(8)),
+    });
+    let shape: Vec<_> = got
+        .iter()
+        .map(|n| match n {
+            Notification::FileChanged {
+                path,
+                kind,
+                from,
+                seq,
+                id,
+                origin,
+                ..
+            } => (path.as_str(), *kind, from.clone(), *seq, *id, *origin),
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (
+                "b.md",
+                ChangeKind::Renamed,
+                Some("a.md".to_owned()),
+                Some(2),
+                Some(NoteId(8)),
+                Origin::External
+            ),
+            (
+                "a.md",
+                ChangeKind::Deleted,
+                None,
+                Some(2),
+                Some(NoteId(8)),
+                Origin::External
+            ),
+        ]
+    );
+    let one = file_changed(FileChange {
+        path: "c.md".into(),
+        kind: ChangeKind::Modified,
+        hash: Some("h".into()),
+        origin: Origin::Daemon,
+        from: None,
+        replaced_by: None,
+        seq: None,
+        id: Some(NoteId(1)),
+    });
+    assert_eq!(one.len(), 1);
 }

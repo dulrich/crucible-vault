@@ -32,6 +32,7 @@ fn feed(app: &mut App, n: Notification) {
 
 fn changed(path: &str, kind: ChangeKind, hash: Option<String>) -> Notification {
     Notification::FileChanged {
+        id: None,
         path: path.to_owned(),
         kind,
         hash,

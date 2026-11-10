@@ -8,6 +8,7 @@ use cv_protocol::{ChangeKind, Origin};
 fn deleted_by(app: &mut App, path: &str, by: &str) {
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: path.into(),
             kind: ChangeKind::Deleted,
             hash: None,

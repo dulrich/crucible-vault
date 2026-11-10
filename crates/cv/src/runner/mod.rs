@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use cv_actions::{Action, ConfigSet, LaneChoice, Step};
 use cv_protocol::Lane;
-use cv_protocol::{ActionContext, JobState, JobStatus, Notification, PathResolution};
+use cv_protocol::{ActionContext, JobState, JobStatus, Notification};
 use cv_state::{BreakerFailure, EnqueueOutcome, JobResult, NewJob, StateDb};
 use cv_vault::WriterHandle;
 use serde::{Deserialize, Serialize};
@@ -469,15 +469,37 @@ impl Inner {
         self.enqueued(out)
     }
 
+    /// The id of the file at `path` (`None`: no file, no writer, or a store failure). An id
+    /// already bound is read from `state.db` (the writer persists every binding before its
+    /// mutation returns), so an enqueue does not wait behind a busy writer; only a path without
+    /// one is minted, on the writer thread. Never call while holding the state mutex.
+    fn bind_existing(&self, path: &str) -> Option<cv_protocol::NoteId> {
+        match lock(&self.state).note_id_at(path) {
+            Ok(Some(id)) => return Some(cv_protocol::NoteId(id)),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "note id lookup failed; binding on the writer"),
+        }
+        let w = self.writer.writer()?;
+        let p = path.to_owned();
+        let r = w.call(move |vw| match vw.fs().hash(&p) {
+            Ok(Some(_)) => vw.bind_note(&p),
+            _ => None,
+        });
+        match r {
+            Ok(id) => id.map(|i| cv_protocol::NoteId(i.0)),
+            Err(e) => {
+                tracing::warn!(error = %e, "note id bind failed; job unbound");
+                None
+            }
+        }
+    }
+
     /// The queue row for a run of `action` (resource keys derived, lane resolved).
     fn new_job(&self, action: &Action, mut req: RunRequest) -> Result<NewJob, EnqueueError> {
-        // D4: the job keeps the lineage cursor its note was bound at (the triggering event's
-        // seq, else the head now), persisted in its params so a retry still has it.
-        if req.context.active_path.is_some() && req.context.lineage_cursor.is_none() {
-            match lock(&self.state).lineage_head() {
-                Ok(h) => req.context.lineage_cursor = Some(h),
-                Err(e) => tracing::warn!(error = %e, "lineage head unreadable; job unbound"),
-            }
+        // Plan note-identity D5: the job keeps its note's id (the triggering event's, else bound
+        // now), persisted in its params so a retry still has it. No id = the job runs unbound.
+        if let (Some(path), None) = (&req.context.active_path, req.context.active_id) {
+            req.context.active_id = self.bind_existing(path);
         }
         let mut keys = action
             .resources

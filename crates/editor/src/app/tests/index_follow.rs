@@ -22,6 +22,7 @@ fn candidates(app: &App) -> Vec<String> {
 fn file_changed(app: &mut App, path: &str, kind: ChangeKind, origin: Origin) {
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: path.to_owned(),
             kind,
             hash: None,

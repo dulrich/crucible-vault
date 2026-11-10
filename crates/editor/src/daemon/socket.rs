@@ -93,13 +93,14 @@ impl DaemonClient for SocketDaemon {
         base_hash: &ContentHash,
     ) -> Result<ContentHash> {
         let r = self.call::<m::WriteNote>(WriteNoteParams {
+            id: None,
             path: path.to_owned(),
             content: content.to_owned(),
             base_hash: base_hash.as_str().to_owned(),
         })?;
         match r {
-            WriteNoteResult::Written { hash } => Ok(ContentHash::from_hex(hash)),
-            WriteNoteResult::Conflict { current_hash } => Err(DaemonError::Conflict {
+            WriteNoteResult::Written { hash, .. } => Ok(ContentHash::from_hex(hash)),
+            WriteNoteResult::Conflict { current_hash, .. } => Err(DaemonError::Conflict {
                 current_hash: ContentHash::from_hex(current_hash),
             }),
         }
@@ -124,7 +125,8 @@ impl DaemonClient for SocketDaemon {
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
         let (from, to) = (from.to_owned(), to.to_owned());
-        self.call::<m::Rename>(RenameParams { from, to }).map(drop)
+        self.call::<m::Rename>(RenameParams { id: None, from, to })
+            .map(drop)
     }
 
     fn delete(&self, path: &str) -> Result<()> {

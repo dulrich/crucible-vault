@@ -403,6 +403,7 @@ fn ignore_shorts_list_add_again_across_save_echo() {
         let (bytes, h) = d.read_file(PIPES).expect("saved");
         let _ = app.send(Message::Status(StatusMsg::Notification(
             Notification::FileChanged {
+                id: None,
                 path: PIPES.to_owned(),
                 kind: cv_protocol::ChangeKind::Modified,
                 hash: Some(h.as_str().to_owned()),

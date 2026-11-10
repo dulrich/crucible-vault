@@ -184,6 +184,52 @@ pub enum Request {
     /// so it observes every mutation that returned before it. An old daemon answers
     /// `METHOD_NOT_FOUND`.
     ResolvePath(ResolvePathParams),
+    /// The id of the file now at `path` (plan note-identity D2), minted if it has none →
+    /// [`BindNoteResult`]. Answered on the daemon's writer thread. A path with no file is
+    /// `NOT_FOUND` (never a mint). An old daemon answers `METHOD_NOT_FOUND`.
+    BindNote(BindNoteParams),
+    /// Where the note `id` is now (plan note-identity D2) → [`NoteLocation`]. Answered on the
+    /// daemon's writer thread, so it observes every mutation that returned before it.
+    LocateNote(LocateNoteParams),
+}
+
+/// A daemon-minted, never-reused note id: the identity of one vault file across renames (plan
+/// note-identity D1). A bare integer on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NoteId(pub u64);
+
+/// `bind_note` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindNoteParams {
+    pub path: String,
+}
+
+/// `bind_note` result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindNoteResult {
+    pub id: NoteId,
+}
+
+/// `locate_note` params.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocateNoteParams {
+    pub id: NoteId,
+}
+
+/// `locate_note` result: where a note id is now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum NoteLocation {
+    /// Bound to this live path.
+    Live { path: String },
+    /// Retired: deleted, or absorbed by the note `replaced_by`.
+    Gone {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced_by: Option<NoteId>,
+    },
+    /// Never minted, or its tombstone was pruned.
+    Unknown,
 }
 
 /// `resolve_path` params.
@@ -278,14 +324,28 @@ pub struct WriteNoteParams {
     pub path: String,
     pub content: String,
     pub base_hash: String,
+    /// Plan note-identity D2: the note to write. When present the daemon writes at the id's
+    /// current path (ignoring a stale `path`), or revives a retired id at `path` when
+    /// `base_hash` is empty (D3); an unresolvable id fails, never falling back to `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<NoteId>,
 }
 
-/// `write_note` result: the new hash, or a CAS conflict.
+/// `write_note` result: the new hash, or a CAS conflict. `path` (by-id writes only) is the path
+/// the daemon acted on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WriteNoteResult {
-    Written { hash: String },
-    Conflict { current_hash: String },
+    Written {
+        hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Conflict {
+        current_hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +382,10 @@ pub struct WriteAttachmentResult {
 pub struct RenameParams {
     pub from: String,
     pub to: String,
+    /// Plan note-identity D2: the note to rename. When present the daemon renames the id's
+    /// current path (ignoring a stale `from`); an unresolvable id fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<NoteId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,6 +502,10 @@ pub struct ActionContext {
     /// has it). A job without one behaves as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_cursor: Option<u64>,
+    /// Plan note-identity D5: the id of the note at `active_path` (the runner binds it at enqueue
+    /// when absent; a job without one runs unbound).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_id: Option<NoteId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -751,6 +819,9 @@ pub struct SubscribeResult {
 pub struct RenameResult {
     pub rewritten: Vec<String>,
     pub skipped_conflicts: Vec<String>,
+    /// By-id renames only: the source path the daemon renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 /// `delete` result (an empty object).
@@ -812,6 +883,10 @@ pub enum Notification {
         /// consumer orders it against its own cursor. Old peers ignore / omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
+        /// Plan note-identity D2: the id of the note this change concerns (both halves of a
+        /// rename carry it; a delete carries the retired id). Old peers ignore / omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<NoteId>,
     },
     IndexGeneration {
         n: u64,
@@ -840,6 +915,53 @@ impl Notification {
             Self::ViewsInvalidated { .. } => Topic::ViewsInvalidated,
         }
     }
+}
+
+/// One vault event, in protocol types: the input of [`file_changed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    pub path: String,
+    pub kind: ChangeKind,
+    pub hash: Option<String>,
+    pub origin: Origin,
+    /// A rename's source path (`kind` is then [`ChangeKind::Renamed`]).
+    pub from: Option<String>,
+    pub replaced_by: Option<String>,
+    pub seq: Option<u64>,
+    pub id: Option<NoteId>,
+}
+
+/// One vault event's `file_changed` notifications (plan note-identity D7: the daemon bridge and
+/// the editor's test daemon both build them here). A rename (`from` set) reports the destination
+/// as `Renamed { from }` first, then its source as `Deleted`: a client that follows moves re-keys
+/// on the first and finds nothing open for the second, while clients without a rename record
+/// still drop the old path. Both halves carry the same `seq` and `id`.
+#[must_use]
+pub fn file_changed(c: FileChange) -> Vec<Notification> {
+    let mut out = Vec::with_capacity(2);
+    out.push(Notification::FileChanged {
+        path: c.path,
+        kind: c.kind,
+        hash: c.hash,
+        origin: c.origin,
+        from: c.from.clone(),
+        replaced_by: c.replaced_by,
+        seq: c.seq,
+        id: c.id,
+    });
+    if let Some(from) = c.from {
+        out.push(Notification::FileChanged {
+            path: from,
+            kind: ChangeKind::Deleted,
+            hash: None,
+            origin: c.origin,
+            from: None,
+            replaced_by: None,
+            seq: c.seq,
+            id: c.id,
+        });
+    }
+    out
 }
 
 #[cfg(test)]

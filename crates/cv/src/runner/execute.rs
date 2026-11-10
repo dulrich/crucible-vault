@@ -28,8 +28,9 @@ impl ChildSpawner for Spawner<'_> {
     ) -> Result<String, String> {
         let context = ActionContext {
             active_path: Some(active_path.to_owned()),
-            // A different note: bound at the child's enqueue, never at the parent's cursor.
+            // A different note: bound at the child's enqueue, never at the parent's id.
             lineage_cursor: None,
+            active_id: None,
             ..self.context.clone()
         };
         self.spawn_with(action_id, params, context)
@@ -140,7 +141,7 @@ pub(super) fn execute_steps(
     for (i, step) in action.steps.iter().enumerate() {
         if let Some(o) = done.get(&i) {
             absorb(o, &mut summary, &mut vars);
-            follow_step_move(inner, &mut context, o);
+            steps::follow_move(&mut context, o);
             inner.retarget_hold(job_id, &context);
             if o.stop {
                 break;
@@ -164,8 +165,8 @@ pub(super) fn execute_steps(
         let guard = |p: &str| inner.record_writes(&action.id, &[p.to_owned()]);
         let mut follows = 0;
         let res = loop {
-            // D4: the job's note followed through lineage before the step acts on it.
-            match follow_lineage(inner, &mut context) {
+            // Plan note-identity D5: the job's note located by id before the step acts on it.
+            match follow_note(inner, &mut context) {
                 Follow::Same => {}
                 Follow::Moved => inner.retarget_hold(job_id, &context),
                 Follow::Gone(path) => break Err(StepError::NoteGone { path }),
@@ -201,7 +202,7 @@ pub(super) fn execute_steps(
             // A step whose note went missing re-runs at the note's new path (D4).
             if matches!(res, Err(StepError::NoteGone { .. }))
                 && follows < MAX_FOLLOWS
-                && matches!(follow_lineage(inner, &mut context), Follow::Moved)
+                && matches!(follow_note(inner, &mut context), Follow::Moved)
             {
                 follows += 1;
                 inner.retarget_hold(job_id, &context);
@@ -237,7 +238,7 @@ pub(super) fn execute_steps(
                     );
                 }
                 absorb(&o, &mut summary, &mut vars);
-                follow_step_move(inner, &mut context, &o);
+                steps::follow_move(&mut context, &o);
                 inner.retarget_hold(job_id, &context);
                 if o.stop {
                     break;
@@ -294,66 +295,37 @@ pub(super) fn execute_steps(
 /// How often one step re-runs after its note moved under it (D4).
 const MAX_FOLLOWS: usize = 3;
 
-/// What lineage says about the job's note (plan note-path-continuity D4).
+/// Where the job's note is (plan note-identity D5).
 enum Follow {
-    /// Still at `active_path` (or no cursor / lineage cannot say: today's behavior).
+    /// Still at `active_path` (or no id / the store cannot say: today's behavior).
     Same,
     /// The context now points at the note's new path.
     Moved,
-    /// The note was deleted and another file now sits at its old path: never act on it.
+    /// The note is retired: never act on whatever file now sits at its old path.
     Gone(String),
 }
 
-/// D4: when lineage has an identity edge on the job's `active_path` after its cursor, follows
-/// it. `Moved` updates the context (the same fields `steps::follow_move` updates) and advances
-/// the cursor; `Live` advances the cursor; `Deleted` / `Unknown` keep today's behavior, except
-/// that a deleted note whose path was reused by another file is reported gone instead of
-/// running the step on that file.
-fn follow_lineage(inner: &Inner, context: &mut ActionContext) -> Follow {
-    let (Some(path), Some(cursor)) = (context.active_path.clone(), context.lineage_cursor) else {
+/// D5: locates the job's `active_id` on the writer thread. `Live` at another path updates
+/// `active_path`; `Gone` reports the note gone (the caller settles it as today: a retry quietly,
+/// a first attempt fails); `Unknown`, no id, no writer or a store failure run unbound.
+fn follow_note(inner: &Inner, context: &mut ActionContext) -> Follow {
+    let (Some(path), Some(id)) = (context.active_path.clone(), context.active_id) else {
         return Follow::Same;
     };
-    match crate::lineage::resolve(&inner.state, &inner.vault_root, &path, Some(cursor)) {
-        Ok(r) => match r.resolution {
-            PathResolution::Live { .. } => {
-                context.lineage_cursor = Some(r.head);
-                Follow::Same
-            }
-            PathResolution::Moved { to } => {
-                tracing::info!("job note moved; following it");
-                context.active_path = Some(to);
-                context.lineage_cursor = Some(r.head);
-                Follow::Moved
-            }
-            PathResolution::Deleted if inner.vault_root.join(&path).exists() => Follow::Gone(path),
-            PathResolution::Deleted | PathResolution::Unknown => Follow::Same,
-        },
+    let Some(w) = inner.writer.writer() else {
+        return Follow::Same;
+    };
+    match w.locate_note(cv_vault::NoteId(id.0)) {
+        Ok(Some(cv_vault::NoteLocation::Live { path: now })) if now != path => {
+            tracing::info!("job note moved; following it");
+            context.active_path = Some(now);
+            Follow::Moved
+        }
+        Ok(Some(cv_vault::NoteLocation::Gone { .. })) => Follow::Gone(path),
+        Ok(_) => Follow::Same,
         Err(e) => {
-            tracing::warn!(error = %e, "lineage resolve failed; running unfollowed");
+            tracing::warn!(error = %e, "note locate failed; running unfollowed");
             Follow::Same
         }
-    }
-}
-
-/// [`steps::follow_move`] plus the cursor: when a step moved the active note, the new path is
-/// re-derived from the old binding through lineage (the step's own rename is an edge after the
-/// cursor), so the cursor never describes the old path's history. Without a lineage answer the
-/// cursor is dropped and later steps behave as before.
-fn follow_step_move(inner: &Inner, context: &mut ActionContext, o: &StepOutcome) {
-    let before = context.active_path.clone();
-    steps::follow_move(context, o);
-    if context.active_path == before {
-        return;
-    }
-    let (Some(old), Some(cursor)) = (before, context.lineage_cursor) else {
-        return;
-    };
-    let r = crate::lineage::resolve(&inner.state, &inner.vault_root, &old, Some(cursor));
-    match r.map(|r| (r.resolution, r.head)) {
-        Ok((PathResolution::Moved { to }, head)) => {
-            context.active_path = Some(to);
-            context.lineage_cursor = Some(head);
-        }
-        _ => context.lineage_cursor = None,
     }
 }

@@ -51,6 +51,7 @@ fn font(v: f64) -> Message {
 fn changed(app: &mut App, path: &str, hash: Option<String>) {
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: path.to_owned(),
             kind: ChangeKind::Modified,
             hash,

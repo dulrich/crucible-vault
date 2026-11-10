@@ -1,8 +1,243 @@
-//! Plan note-path-continuity WP-2: lineage through the live daemon — `resolve_path` as a causal
-//! barrier, jobs following moved notes (D4) and the cycle guard armed before the write (D5).
+//! Plan note-path-continuity WP-2 / note-identity WP-2: identity through the live daemon —
+//! `resolve_path` and `locate_note` as causal barriers, writes and renames by note id, jobs
+//! following moved notes by id (note-identity D5) and the cycle guard armed before the write.
 
 use super::*;
-use cv_protocol::{PathResolution, ResolvePathParams, ResolvePathResult};
+use cv_protocol::{
+    BindNoteParams, BindNoteResult, LocateNoteParams, NoteId, NoteLocation, PathResolution,
+    ResolvePathParams, ResolvePathResult, WriteNoteParams,
+};
+
+fn bind(c: &Client, path: &str) -> NoteId {
+    let v = c
+        .request(Request::BindNote(BindNoteParams { path: path.into() }))
+        .unwrap();
+    serde_json::from_value::<BindNoteResult>(v).unwrap().id
+}
+
+fn locate(c: &Client, id: NoteId) -> NoteLocation {
+    let v = c
+        .request(Request::LocateNote(LocateNoteParams { id }))
+        .unwrap();
+    serde_json::from_value(v).unwrap()
+}
+
+fn live(path: &str) -> NoteLocation {
+    NoteLocation::Live { path: path.into() }
+}
+
+fn rename(c: &Client, from: &str, to: &str, id: Option<NoteId>) -> Result<Value, ClientError> {
+    c.request(Request::Rename(cv_protocol::RenameParams {
+        from: from.into(),
+        to: to.into(),
+        id,
+    }))
+}
+
+fn write_by_id(c: &Client, id: NoteId, path: &str, text: &str, base: &str) -> Value {
+    c.request(Request::WriteNote(WriteNoteParams {
+        path: path.into(),
+        content: text.into(),
+        base_hash: base.into(),
+        id: Some(id),
+    }))
+    .unwrap()
+}
+
+fn hash_of(text: &str) -> String {
+    ContentHash::of(text.as_bytes()).as_str().to_owned()
+}
+
+fn rpc_code(r: Result<Value, ClientError>) -> i64 {
+    match r {
+        Err(ClientError::Rpc(e)) => e.code,
+        other => panic!("expected an RPC error, got {other:?}"),
+    }
+}
+
+/// D2: `bind_note` is stable for one file and refuses a path with no file (never a mint);
+/// `locate_note` issued right after a rename observes it, through a chain and a rebuild.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn locate_issued_right_after_a_rename_observes_it() {
+    let env = Env::new("");
+    let d = start(&env, appending_exec(Arc::new(AtomicUsize::new(0)))).await;
+    let c = env.client();
+    let id = bind(&c, "a.md");
+    assert_eq!(bind(&c, "a.md"), id);
+    assert_eq!(locate(&c, id), live("a.md"));
+    let missing = c.request(Request::BindNote(BindNoteParams {
+        path: "nope.md".into(),
+    }));
+    assert_eq!(rpc_code(missing), error_codes::NOT_FOUND);
+    for (from, to) in [("a.md", "b.md"), ("b.md", "sub/c.md")] {
+        rename(&c, from, to, None).unwrap();
+    }
+    assert_eq!(locate(&c, id), live("sub/c.md"));
+    assert_eq!(bind(&c, "sub/c.md"), id);
+    d.shared().rebuild_index().await.unwrap();
+    assert_eq!(locate(&c, id), live("sub/c.md"));
+    assert_eq!(locate(&c, NoteId(u64::MAX >> 2)), NoteLocation::Unknown);
+    d.shutdown().await.unwrap();
+}
+
+/// D2 invariant: a write by id with a stale path lands at the note's current path and never at
+/// a reused one (A moves away, B is created at A's old path; B is untouched).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_by_id_lands_at_the_moved_path_never_at_a_reused_one() {
+    let env = Env::new("");
+    let d = start(&env, appending_exec(Arc::new(AtomicUsize::new(0)))).await;
+    let c = env.client();
+    let vault = env.vault();
+    let a = bind(&c, "a.md");
+    rename(&c, "a.md", "moved.md", None).unwrap();
+    c.request(Request::CreateNote(cv_protocol::CreateNoteParams {
+        path: "a.md".into(),
+        content: "# B\n".into(),
+    }))
+    .unwrap();
+    let b = bind(&c, "a.md");
+    assert_ne!(a, b);
+    let r = write_by_id(&c, a, "a.md", "# A2\n", &hash_of("# A\n"));
+    assert_eq!(r["written"]["path"], json!("moved.md"), "{r:?}");
+    assert_eq!(
+        std::fs::read_to_string(vault.join("moved.md")).unwrap(),
+        "# A2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.join("a.md")).unwrap(),
+        "# B\n"
+    );
+    // A CAS conflict by id reports the path too, and still writes nothing.
+    let r = write_by_id(&c, a, "a.md", "# A3\n", &hash_of("# A\n"));
+    assert_eq!(r["conflict"]["path"], json!("moved.md"), "{r:?}");
+    // Without an id the reply is today's shape (no path).
+    let r = c
+        .request(Request::WriteNote(WriteNoteParams {
+            path: "a.md".into(),
+            content: "# B2\n".into(),
+            base_hash: hash_of("# B\n"),
+            id: None,
+        }))
+        .unwrap();
+    assert!(r["written"].get("path").is_none(), "{r:?}");
+    d.shutdown().await.unwrap();
+}
+
+/// D3: a by-id write with the "no file" base revives the retired id at the request's path (the
+/// same id, and the write's event carries it); a path held by another file is refused and nothing
+/// is overwritten; a retired id with a real base, or an unknown id, is `NOT_FOUND` and writes
+/// nothing at the request's path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revive_keeps_the_id_and_refuses_a_taken_path() {
+    let env = Env::new("");
+    let d = start(&env, appending_exec(Arc::new(AtomicUsize::new(0)))).await;
+    let c = env.client();
+    let vault = env.vault();
+    let mut rx = d.subscribe();
+    let a = bind(&c, "a.md");
+    c.request(Request::Delete(cv_protocol::DeleteParams {
+        path: "a.md".into(),
+        mode: cv_protocol::DeleteMode::Permanent,
+    }))
+    .unwrap();
+    assert!(matches!(locate(&c, a), NoteLocation::Gone { .. }));
+    // A real base on a gone note: not found, nothing written.
+    let r = c.request(Request::WriteNote(WriteNoteParams {
+        path: "a.md".into(),
+        content: "# A\n".into(),
+        base_hash: hash_of("# A\n"),
+        id: Some(a),
+    }));
+    assert_eq!(rpc_code(r), error_codes::NOT_FOUND);
+    assert!(!vault.join("a.md").exists());
+    // Keep mine: revived at the same id.
+    let r = write_by_id(&c, a, "a.md", "# mine\n", "");
+    assert_eq!(r["written"]["path"], json!("a.md"), "{r:?}");
+    assert_eq!(locate(&c, a), live("a.md"));
+    assert_eq!(bind(&c, "a.md"), a);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut event_id = None;
+    while Instant::now() < deadline && event_id.is_none() {
+        match rx.try_recv() {
+            Ok(Notification::FileChanged {
+                ref path,
+                kind: ChangeKind::Created,
+                id,
+                ..
+            }) if path == "a.md" => event_id = Some(id),
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert_eq!(
+        event_id,
+        Some(Some(a)),
+        "the revive's create carries the same id"
+    );
+    // Taken: B retired, another file now at its path; Keep mine is refused, never overwritten.
+    let b = bind(&c, "inbox/x.md");
+    rename(&c, "inbox/x.md", "inbox/old.md", None).unwrap();
+    std::fs::write(vault.join("inbox/x.md"), "# other\n").unwrap();
+    rename(&c, "inbox/old.md", "inbox/gone.md", None).unwrap();
+    c.request(Request::Delete(cv_protocol::DeleteParams {
+        path: "inbox/gone.md".into(),
+        mode: cv_protocol::DeleteMode::Permanent,
+    }))
+    .unwrap();
+    assert!(matches!(locate(&c, b), NoteLocation::Gone { .. }));
+    let r = write_by_id(&c, b, "inbox/x.md", "# mine\n", "");
+    assert!(r.get("conflict").is_some(), "{r:?}");
+    assert_eq!(
+        std::fs::read_to_string(vault.join("inbox/x.md")).unwrap(),
+        "# other\n"
+    );
+    assert!(matches!(locate(&c, b), NoteLocation::Gone { .. }));
+    // Unknown id: not found, nothing created.
+    let r = c.request(Request::WriteNote(WriteNoteParams {
+        path: "new.md".into(),
+        content: "# n\n".into(),
+        base_hash: String::new(),
+        id: Some(NoteId(u64::MAX >> 2)),
+    }));
+    assert_eq!(rpc_code(r), error_codes::NOT_FOUND);
+    assert!(!vault.join("new.md").exists());
+    d.shutdown().await.unwrap();
+}
+
+/// D2: a rename by id moves the note from its current path (a stale `from` is ignored), reports
+/// the source it used and keeps the id; a gone id is `NOT_FOUND` and renames nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rename_by_id_acts_on_the_current_path() {
+    let env = Env::new("");
+    let d = start(&env, appending_exec(Arc::new(AtomicUsize::new(0)))).await;
+    let c = env.client();
+    let vault = env.vault();
+    let a = bind(&c, "a.md");
+    rename(&c, "a.md", "b.md", None).unwrap();
+    std::fs::write(vault.join("a.md"), "# reused\n").unwrap();
+    let r = rename(&c, "a.md", "c.md", Some(a)).unwrap();
+    assert_eq!(r["from"], json!("b.md"), "{r:?}");
+    assert_eq!(locate(&c, a), live("c.md"));
+    assert_eq!(
+        std::fs::read_to_string(vault.join("a.md")).unwrap(),
+        "# reused\n"
+    );
+    assert!(
+        rename(&c, "a.md", "z.md", None)
+            .unwrap()
+            .get("from")
+            .is_none()
+    );
+    c.request(Request::Delete(cv_protocol::DeleteParams {
+        path: "c.md".into(),
+        mode: cv_protocol::DeleteMode::Permanent,
+    }))
+    .unwrap();
+    let r = rename(&c, "c.md", "d.md", Some(a));
+    assert_eq!(rpc_code(r), error_codes::NOT_FOUND);
+    assert!(!vault.join("d.md").exists());
+    d.shutdown().await.unwrap();
+}
 
 fn resolve(c: &Client, path: &str, since: Option<u64>) -> ResolvePathResult {
     let v = c
@@ -29,6 +264,7 @@ async fn resolve_issued_right_after_a_rename_observes_it() {
     );
     for (from, to) in [("a.md", "b.md"), ("b.md", "sub/c.md")] {
         c.request(Request::Rename(cv_protocol::RenameParams {
+            id: None,
             from: from.into(),
             to: to.into(),
         }))
@@ -108,6 +344,8 @@ fn mover_exec(seen: Arc<Mutex<Vec<String>>>) -> Arc<dyn StepExecutor> {
             }
             return Ok(StepOutcome::default());
         }
+        // Plan note-identity D5: every job here holds its note's id.
+        assert!(ctx.context.active_id.is_some(), "job bound by id");
         seen.lock().unwrap().push(path.clone());
         let (mut bytes, hash) = ctx.read_required(&path)?;
         bytes.extend_from_slice(b"touched\n");
@@ -137,7 +375,7 @@ fn settle(d: &RunningDaemon, job_id: &str) -> cv_state::Job {
     out.unwrap()
 }
 
-/// D4 (round-23 `clip-enrich` shape): a first-attempt and a retried job whose note moved
+/// Note-identity D5 (round-23 `clip-enrich` shape), on ids: a first-attempt and a retried job whose note moved
 /// complete at the new path; a deleted note still settles as before (retry: quiet done; first
 /// attempt: failed); a path reused after the move is never acted on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

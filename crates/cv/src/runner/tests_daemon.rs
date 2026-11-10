@@ -403,6 +403,7 @@ async fn event_starter_fires_on_live_edits_only_and_cycle_guard_holds() {
     // (the echo is injected as the watcher would send it).
     let mut rx = d.subscribe();
     d.shared().publish(Notification::FileChanged {
+        id: None,
         path: "inbox/x.md".into(),
         kind: ChangeKind::Modified,
         hash: None,
@@ -849,6 +850,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     let write = || {
         let cur = std::fs::read(vault.join(held)).unwrap();
         Request::WriteNote(cv_protocol::WriteNoteParams {
+            id: None,
             path: held.into(),
             content: "# changed\n".into(),
             base_hash: ContentHash::of(&cur).as_str().to_owned(),
@@ -865,6 +867,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     );
     assert_held(
         c.request(Request::Rename(cv_protocol::RenameParams {
+            id: None,
             from: held.into(),
             to: "inbox/y.md".into(),
         })),
@@ -873,6 +876,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     // An unheld note whose backlink source (the rewrite set) is held.
     assert_held(
         c.request(Request::Rename(cv_protocol::RenameParams {
+            id: None,
             from: "c.md".into(),
             to: "d.md".into(),
         })),
@@ -911,6 +915,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     poll(|| runner.held_notes().is_empty());
     // Released: the same requests go through.
     c.request(Request::Rename(cv_protocol::RenameParams {
+        id: None,
         from: "c.md".into(),
         to: "d.md".into(),
     }))
@@ -936,6 +941,7 @@ async fn held_check_runs_in_the_writer_not_the_handler() {
     // Before the hold: executed by the writer, lands.
     let before = c
         .request(Request::WriteNote(cv_protocol::WriteNoteParams {
+            id: None,
             path: "a.md".into(),
             content: "# before\n".into(),
             base_hash: ContentHash::of(b"# A\n").as_str().to_owned(),
@@ -961,6 +967,7 @@ async fn held_check_runs_in_the_writer_not_the_handler() {
         )
         .unwrap();
         c.request(Request::WriteNote(cv_protocol::WriteNoteParams {
+            id: None,
             path: "a.md".into(),
             content: "# late\n".into(),
             base_hash: before_hash,

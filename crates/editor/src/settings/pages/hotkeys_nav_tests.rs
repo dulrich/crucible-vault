@@ -234,6 +234,7 @@ fn missing_bookmarks_on_load_and_after_delete() {
     d.delete("wp9/b.md").expect("delete");
     let _ = app.send(Message::Status(crate::message::StatusMsg::Notification(
         cv_protocol::Notification::FileChanged {
+            id: None,
             path: "wp9/b.md".into(),
             kind: cv_protocol::ChangeKind::Deleted,
             hash: None,

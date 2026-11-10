@@ -287,6 +287,7 @@ impl FakeDaemon {
         let n = g.index.rebuild(&self.vault_root)?;
         let pair = vec![
             Notification::FileChanged {
+                id: None,
                 path: to.to_owned(),
                 kind: ChangeKind::Renamed,
                 hash: None,
@@ -296,6 +297,7 @@ impl FakeDaemon {
                 seq,
             },
             Notification::FileChanged {
+                id: None,
                 path: from.to_owned(),
                 kind: ChangeKind::Deleted,
                 hash: None,
@@ -333,6 +335,7 @@ impl FakeDaemon {
         g.index.rebuild(&self.vault_root)?;
         let hash = current_hash(&b)?.map(|h| h.as_str().to_owned());
         let ev = |path: &str, kind, hash| Notification::FileChanged {
+            id: None,
             path: path.to_owned(),
             kind,
             hash,
@@ -360,6 +363,7 @@ impl FakeDaemon {
         let n = g.index.rebuild(&self.vault_root)?;
         let out = vec![
             Notification::FileChanged {
+                id: None,
                 path: path.to_owned(),
                 kind: ChangeKind::Deleted,
                 hash: None,
@@ -533,6 +537,7 @@ impl FakeDaemon {
         emit(
             g,
             Notification::FileChanged {
+                id: None,
                 path: path.to_owned(),
                 kind,
                 hash,

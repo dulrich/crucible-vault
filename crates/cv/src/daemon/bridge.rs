@@ -84,7 +84,21 @@ fn forward(
         cv_vault::Origin::Daemon => Origin::Daemon,
         cv_vault::Origin::External => Origin::External,
     };
-    for n in file_changes(ev.path, &ev.kind, kind, hash, origin, replaced_by, ev.seq) {
+    let from = match &ev.kind {
+        EventKind::Renamed { from } => Some(from.clone()),
+        _ => None,
+    };
+    let change = cv_protocol::FileChange {
+        path: ev.path,
+        kind,
+        hash,
+        origin,
+        from,
+        replaced_by,
+        seq: ev.seq,
+        id: ev.id.map(|i| cv_protocol::NoteId(i.0)),
+    };
+    for n in cv_protocol::file_changed(change) {
         let _ = events.send(n);
     }
     if ignore_changed && let Some(w) = weak.upgrade().and_then(|s| s.writer()) {
@@ -198,66 +212,24 @@ pub(super) async fn generation_listener(shared: Arc<Shared>, mut stop: watch::Re
     }
 }
 
-/// One vault event's `file_changed` notifications. A rename (daemon or external) reports the
-/// destination as `Renamed { from }` first, then its source as `Deleted`: a client that follows
-/// moves (the editor's tabs) re-keys on the first and finds nothing open for the second, while
-/// clients without a rename record (no starter lists `deleted`) still drop the old path (plan
-/// intake-round-2-clean-dedupe-reading WP-5a proposal 1; plan round-9-feedback-todos WP-3).
-fn file_changes(
-    path: String,
-    ev_kind: &EventKind,
-    kind: ChangeKind,
-    hash: Option<String>,
-    origin: Origin,
-    replaced_by: Option<String>,
-    seq: Option<u64>,
-) -> Vec<Notification> {
-    let from = match ev_kind {
-        EventKind::Renamed { from } => Some(from.clone()),
-        _ => None,
-    };
-    let mut out = Vec::with_capacity(2);
-    out.push(Notification::FileChanged {
-        path,
-        kind,
-        hash,
-        origin,
-        from: from.clone(),
-        replaced_by,
-        seq,
-    });
-    if let Some(from) = from {
-        out.push(Notification::FileChanged {
-            path: from,
-            kind: ChangeKind::Deleted,
-            hash: None,
-            origin,
-            from: None,
-            replaced_by: None,
-            seq,
-        });
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The bridge's input shape → the shared constructor (plan note-identity D7): a rename pair
+    /// carries one `seq` and one `id`.
     #[test]
     fn rename_reports_destination_with_from_then_source_deleted() {
-        let ev = EventKind::Renamed {
-            from: "a.md".into(),
-        };
-        let got = file_changes(
-            "b.md".into(),
-            &ev,
-            ChangeKind::Renamed,
-            None,
-            Origin::Daemon,
-            None,
-            Some(7),
-        );
+        let got = cv_protocol::file_changed(cv_protocol::FileChange {
+            path: "b.md".into(),
+            kind: ChangeKind::Renamed,
+            hash: None,
+            origin: Origin::Daemon,
+            from: Some("a.md".into()),
+            replaced_by: None,
+            seq: Some(7),
+            id: Some(cv_protocol::NoteId(3)),
+        });
         assert_eq!(
             got,
             vec![
@@ -269,6 +241,7 @@ mod tests {
                     from: Some("a.md".into()),
                     replaced_by: None,
                     seq: Some(7),
+                    id: Some(cv_protocol::NoteId(3)),
                 },
                 Notification::FileChanged {
                     path: "a.md".into(),
@@ -278,18 +251,20 @@ mod tests {
                     from: None,
                     replaced_by: None,
                     seq: Some(7),
+                    id: Some(cv_protocol::NoteId(3)),
                 },
             ]
         );
-        let one = file_changes(
-            "c.md".into(),
-            &EventKind::Created,
-            ChangeKind::Created,
-            None,
-            Origin::External,
-            None,
-            None,
-        );
+        let one = cv_protocol::file_changed(cv_protocol::FileChange {
+            path: "c.md".into(),
+            kind: ChangeKind::Created,
+            hash: None,
+            origin: Origin::External,
+            from: None,
+            replaced_by: None,
+            seq: None,
+            id: None,
+        });
         assert_eq!(one.len(), 1);
     }
 }

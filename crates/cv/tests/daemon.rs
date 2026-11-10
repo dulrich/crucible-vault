@@ -196,6 +196,7 @@ async fn write_note_cas_conflict_does_not_clobber() {
     let h1 = hash_of(&live_a);
     let v = c
         .request(Request::WriteNote(WriteNoteParams {
+            id: None,
             path: "a.md".into(),
             content: "client version".into(),
             base_hash: h0.clone(),
@@ -205,6 +206,7 @@ async fn write_note_cas_conflict_does_not_clobber() {
     assert_eq!(
         r,
         WriteNoteResult::Conflict {
+            path: None,
             current_hash: h1.clone()
         }
     );
@@ -212,6 +214,7 @@ async fn write_note_cas_conflict_does_not_clobber() {
     // A correct base hash wins.
     let v = c
         .request(Request::WriteNote(WriteNoteParams {
+            id: None,
             path: "a.md".into(),
             content: "client version".into(),
             base_hash: h1.clone(),
@@ -295,6 +298,7 @@ async fn mutations_land_in_the_vault() {
     assert_eq!(v["path"], "a 1.md");
     let h = hash_of(&env.vault().join("a 1.md"));
     c.request(Request::WriteNote(WriteNoteParams {
+        id: None,
         path: "a 1.md".into(),
         content: "dup2".into(),
         base_hash: h,
@@ -305,6 +309,7 @@ async fn mutations_land_in_the_vault() {
         "dup2"
     );
     c.request(Request::Rename(RenameParams {
+        id: None,
         from: "notes/b.md".into(),
         to: "notes/c.md".into(),
     }))
@@ -854,6 +859,7 @@ async fn incremental_changes_invalidate_views_coalesced() {
     for body in ["# A\n- [ ] one\n", "# A\n- [ ] one\n- [ ] two\n"] {
         let v = c
             .request(Request::WriteNote(WriteNoteParams {
+                id: None,
                 path: "a.md".into(),
                 content: body.into(),
                 base_hash: base.clone(),

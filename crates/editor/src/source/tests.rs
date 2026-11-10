@@ -64,6 +64,7 @@ fn save_now(app: &mut App, d: &FakeDaemon) -> SaveOutcome {
 fn notify(app: &mut App, path: &str, hash: Option<String>) {
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: path.to_owned(),
             kind: ChangeKind::Modified,
             hash,

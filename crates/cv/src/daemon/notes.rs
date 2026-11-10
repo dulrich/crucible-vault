@@ -1,5 +1,8 @@
 //! Vault/note RPC handlers and the writer-job helpers they share.
 
+use cv_protocol::{BindNoteParams, BindNoteResult, LocateNoteParams};
+use cv_vault::{NoteId, NoteLocation};
+
 use super::*;
 
 impl Shared {
@@ -31,6 +34,7 @@ impl Shared {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(JobError::Invalid(m))) => Err(rpc_err(error_codes::INVALID_PARAMS, m)),
             Ok(Err(JobError::Held { path, label })) => Err(rpc_held(&path, &label)),
+            Ok(Err(JobError::Unavailable(m))) => Err(unavailable(&m)),
             Ok(Err(JobError::Vault(e))) | Err(e) => Err(rpc_from_vault(e)),
         }
     }
@@ -50,34 +54,96 @@ impl Shared {
         }
     }
 
-    /// `write_note`: a CAS write; a hash conflict is a result, not an error.
+    /// `write_note`: a CAS write; a hash conflict is a result, not an error. With an `id` (plan
+    /// note-identity D2) the note's current path is resolved in the same writer job as the write
+    /// ([`write_target`]), so no other mutation can land between the two.
     pub(super) async fn write_note(&self, p: WriteNoteParams) -> Result<WriteNoteResult, RpcError> {
         let expected = (!p.base_hash.is_empty()).then(|| ContentHash::from_hex(p.base_hash));
+        let by_id = p.id.is_some();
         let holds = self.holds_view();
-        let res = self
-            .with_writer(move |w| {
-                w.call(move |vw| {
-                    // Plan round-18 Decision 2: refused inside the writer job, before mutation.
-                    holds.refuse([p.path.as_str()])?;
-                    Ok(vw.write(&p.path, p.content.as_bytes(), expected)?)
-                })
+        let (path, res) = self
+            .writer_job(move |vw| {
+                let target = match p.id {
+                    None => WriteTarget::At(p.path),
+                    Some(id) => write_target(vw, id, p.path, expected.is_none())?,
+                };
+                let (path, revive) = match target {
+                    WriteTarget::At(path) => (path, None),
+                    WriteTarget::Revive(path) => (path, p.id),
+                    WriteTarget::Taken { path, found } => {
+                        let err = VaultError::Conflict {
+                            path: path.clone(),
+                            expected: None,
+                            found,
+                        };
+                        return Ok((path, Err(err)));
+                    }
+                };
+                // Plan round-18 Decision 2: refused inside the writer job, before mutation.
+                holds.refuse([path.as_str()])?;
+                if let Some(id) = revive {
+                    // D3: the same id, live again at the request's path, before the write binds
+                    // it (so the write's event carries this id, never a fresh one).
+                    if vw.revive_note(NoteId(id.0), &path).is_none() {
+                        let err = VaultError::Conflict {
+                            path: path.clone(),
+                            expected: None,
+                            found: None,
+                        };
+                        return Ok((path, Err(err)));
+                    }
+                }
+                let res = vw.write(&path, p.content.as_bytes(), expected);
+                if revive.is_some()
+                    && let Err(e) = &res
+                {
+                    tracing::warn!(error = %e, "write after a note-id revive failed");
+                }
+                Ok((path, res))
             })
             .await?;
-        let res = match res {
-            Ok(Ok(h)) => Ok(h),
-            Ok(Err(JobError::Held { path, label })) => return Err(rpc_held(&path, &label)),
-            Ok(Err(JobError::Invalid(m))) => return Err(rpc_err(error_codes::INVALID_PARAMS, m)),
-            Ok(Err(JobError::Vault(e))) | Err(e) => Err(e),
-        };
+        let path = by_id.then_some(path);
         match res {
             Ok(h) => Ok(WriteNoteResult::Written {
                 hash: h.as_str().to_owned(),
+                path,
             }),
             Err(VaultError::Conflict { found, .. }) => Ok(WriteNoteResult::Conflict {
                 current_hash: found.map(|h| h.as_str().to_owned()).unwrap_or_default(),
+                path,
             }),
             Err(e) => Err(rpc_from_vault(e)),
         }
+    }
+
+    /// `bind_note` (plan note-identity D2): the id of the file now at `path`, on the writer
+    /// thread. A path with no file is `NOT_FOUND`, never a mint.
+    pub(super) async fn bind_note(&self, p: BindNoteParams) -> Result<BindNoteResult, RpcError> {
+        cv_vault::validate_rel_path(&p.path)
+            .map_err(|e| rpc_err(error_codes::INVALID_PARAMS, e.to_string()))?;
+        let id = self
+            .writer_job(move |vw| {
+                if vw.fs().hash(&p.path)?.is_none() {
+                    return Err(VaultError::NotFound(p.path).into());
+                }
+                vw.bind_note(&p.path).ok_or_else(ids_unavailable)
+            })
+            .await?;
+        Ok(BindNoteResult {
+            id: cv_protocol::NoteId(id.0),
+        })
+    }
+
+    /// `locate_note` (plan note-identity D2): where the id is now, on the writer thread, so it
+    /// observes every mutation that returned before it.
+    pub(super) async fn locate_note(
+        &self,
+        p: LocateNoteParams,
+    ) -> Result<cv_protocol::NoteLocation, RpcError> {
+        let loc = self
+            .writer_job(move |vw| vw.locate_note(NoteId(p.id.0)).ok_or_else(ids_unavailable))
+            .await?;
+        Ok(wire_location(loc))
     }
 
     /// `resolve_path` (plan note-path-continuity D2): answered on the writer thread, so it
@@ -101,25 +167,33 @@ impl Shared {
     /// `rename`: read the hash and rename in one writer job, so the CAS token is the hash the
     /// writer itself just read and no other writer job can interleave.
     pub(super) async fn rename(&self, p: RenameParams) -> Result<RenameResult, RpcError> {
+        let by_id = p.id.is_some();
         let holds = self.holds_view();
-        let out = self
+        let (from, out) = self
             .writer_job(move |vw| {
+                // Plan note-identity D2: by id, the note's current path, resolved in this job.
+                let from = match p.id {
+                    None => p.from,
+                    Some(id) => live_path(vw, id, p.from)?,
+                };
                 // Plan round-18 Decision 2: both endpoints and every backlink source the rename
                 // would rewrite (`VaultWriter::rename_touched`, the set `rename` itself gathers),
                 // before mutation. With no holds nothing is queried (the request runs exactly as
                 // before).
                 if !holds.is_empty() {
-                    let touched = vw.rename_touched(&p.from, &p.to)?;
+                    let touched = vw.rename_touched(&from, &p.to)?;
                     holds.refuse(touched.iter().map(String::as_str))?;
                 }
                 let h = vw
                     .fs()
-                    .hash(&p.from)?
-                    .ok_or_else(|| VaultError::NotFound(p.from.clone()))?;
-                Ok(vw.rename(&p.from, &p.to, h)?)
+                    .hash(&from)?
+                    .ok_or_else(|| VaultError::NotFound(from.clone()))?;
+                let out = vw.rename(&from, &p.to, h)?;
+                Ok((from, out))
             })
             .await?;
         Ok(RenameResult {
+            from: by_id.then_some(from),
             rewritten: out.rewritten,
             skipped_conflicts: out.skipped_conflicts,
         })
@@ -346,6 +420,71 @@ impl Shared {
                 Ok(UriResult::OpenRequested { path })
             }
         }
+    }
+}
+
+/// Where a by-id `write_note` acts (plan note-identity D2/D3).
+enum WriteTarget {
+    /// Write here under the request's CAS.
+    At(String),
+    /// The id is retired and the write creates (D3 Keep mine): revive it here, then write.
+    Revive(String),
+    /// D3 refused: another file already sits at the request's path.
+    Taken {
+        path: String,
+        found: Option<ContentHash>,
+    },
+}
+
+/// Resolves a by-id write on the writer thread: `Live` → its live path (a stale `path` is
+/// ignored); `Gone` with the "no file" base → revive at `path` unless a file is there; `Gone`
+/// otherwise, or `Unknown` → `NOT_FOUND` (never a write at `path`).
+fn write_target(
+    vw: &mut cv_vault::VaultWriter,
+    id: cv_protocol::NoteId,
+    path: String,
+    creates: bool,
+) -> Result<WriteTarget, JobError> {
+    match vw.locate_note(NoteId(id.0)).ok_or_else(ids_unavailable)? {
+        NoteLocation::Live { path } => Ok(WriteTarget::At(path)),
+        NoteLocation::Gone { .. } if creates => match vw.fs().hash(&path)? {
+            Some(found) => Ok(WriteTarget::Taken {
+                path,
+                found: Some(found),
+            }),
+            None => Ok(WriteTarget::Revive(path)),
+        },
+        NoteLocation::Gone { .. } | NoteLocation::Unknown => Err(VaultError::NotFound(path).into()),
+    }
+}
+
+/// The live path of `id` (a by-id rename's source); `Gone` / `Unknown` → `NOT_FOUND` at the
+/// caller's stale path.
+fn live_path(
+    vw: &mut cv_vault::VaultWriter,
+    id: cv_protocol::NoteId,
+    stale: String,
+) -> Result<String, JobError> {
+    match vw.locate_note(NoteId(id.0)).ok_or_else(ids_unavailable)? {
+        NoteLocation::Live { path } => Ok(path),
+        NoteLocation::Gone { .. } | NoteLocation::Unknown => {
+            Err(VaultError::NotFound(stale).into())
+        }
+    }
+}
+
+fn ids_unavailable() -> JobError {
+    JobError::Unavailable("note ids unavailable".into())
+}
+
+/// A vault [`NoteLocation`] on the wire.
+pub(crate) fn wire_location(loc: NoteLocation) -> cv_protocol::NoteLocation {
+    match loc {
+        NoteLocation::Live { path } => cv_protocol::NoteLocation::Live { path },
+        NoteLocation::Gone { replaced_by } => cv_protocol::NoteLocation::Gone {
+            replaced_by: replaced_by.map(|i| cv_protocol::NoteId(i.0)),
+        },
+        NoteLocation::Unknown => cv_protocol::NoteLocation::Unknown,
     }
 }
 

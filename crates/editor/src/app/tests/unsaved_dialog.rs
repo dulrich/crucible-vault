@@ -41,6 +41,7 @@ pub(super) fn dialog_notes(app: &App) -> Vec<(String, LossReason)> {
 fn deleted(app: &mut App, path: &str) {
     let _ = app.send(Message::Status(StatusMsg::Notification(
         Notification::FileChanged {
+            id: None,
             path: path.to_owned(),
             kind: cv_protocol::ChangeKind::Deleted,
             hash: None,
