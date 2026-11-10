@@ -126,6 +126,7 @@ pub(super) fn land(app: &mut App, path: &str, seq: u64, outcome: SaveOutcome) {
         id: app.note_id(path),
         seq,
         outcome,
+        at: None,
         after: None,
     }));
 }

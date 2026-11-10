@@ -160,6 +160,7 @@ fn autosave_tick_lints_then_saves_through_the_app() {
         d.create_note(p, NOTE).expect("create");
         let dc: Arc<dyn DaemonClient> = d.clone();
         let mut app = App::new(Some(dc), None);
+        app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
         app.prefs.auto_lint = enabled;
         let _ = app.send(Message::Tabs(TabsMsg::Open(p.to_owned())));
         let b = app.active_doc_mut().expect("doc");

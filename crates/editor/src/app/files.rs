@@ -361,26 +361,29 @@ impl App {
         }
     }
 
-    /// Plan note-identity D4: a `file_changed` carrying note id `id` (now at `path`). Returns the
-    /// document to reload (echo / silent reload / conflict bar / deleted state), if any.
+    /// Plan note-identity D4: a `file_changed` carrying note id `id` (now at `path`, content
+    /// `hash`). Returns the document to reload now (echo / silent reload / conflict bar /
+    /// deleted state), if any; a settle's answer reloads later ([`super::settle::AfterSettle`]).
     ///
     /// - A move (`from`) of a note no document holds still retargets holds and file tabs (by path).
     /// - `Deleted` whose path is not the document's current path is the source half of a rename
     ///   pair the document already followed (audit E1): the document is live elsewhere, nothing
     ///   happens to it. At its current path, `replaced_by` takes the E2 tab move, and otherwise
-    ///   `locate_note` decides: moved → follow; still live → nothing; gone → today's deleted /
-    ///   missing / replaced handling.
+    ///   the settle decides ([`Self::apply_settled`]); no answer re-reads the path.
     /// - Any other kind at a path that is not the document's: a `Renamed` from the document's
-    ///   path follows it; anything else is settled by `locate_note`, never by guessing.
+    ///   path follows it; anything else is settled, never guessed, and reloads once the
+    ///   document is at `path`.
     /// - A different note at the path of an open document (path reuse) never touches it.
     pub(super) fn doc_file_changed(
         &mut self,
         id: NoteId,
         path: &str,
+        hash: Option<&str>,
         kind: cv_protocol::ChangeKind,
         from: Option<&str>,
         replaced_by: Option<&str>,
     ) -> Option<NoteId> {
+        use super::settle::AfterSettle;
         if let Some(f) = from {
             self.retarget_holds(f, path);
             if self.docs.by_id(id).is_none() && !self.docs.contains_key(f) && self.path_open(f) {
@@ -397,40 +400,20 @@ impl App {
             if let Some(by) = replaced_by {
                 return (!self.follow_replaced(id, by)).then_some(id);
             }
-            let located = self.daemon.clone().map(|d| d.locate_note(id));
-            return match located {
-                Some(Ok(NoteLocation::Live { path: to })) if to != path => {
-                    self.follow_doc(id, &to, Follow::Daemon);
-                    None
-                }
-                Some(Ok(NoteLocation::Live { .. })) => None,
-                Some(Ok(NoteLocation::Gone {
-                    replaced_by: Some(by),
-                })) => match self.located_path(by) {
-                    Some(to) if self.follow_replaced(id, &to) => None,
-                    _ => {
-                        self.doc_gone(id);
-                        None
-                    }
-                },
-                Some(Ok(NoteLocation::Gone { .. } | NoteLocation::Unknown)) => {
-                    self.doc_gone(id);
-                    None
-                }
-                // No answer (disconnected, an error): re-read the path as before.
-                _ => Some(id),
-            };
+            if self.daemon.is_none() {
+                return Some(id);
+            }
+            let hash = hash.map(str::to_owned);
+            self.settle_doc(id, AfterSettle::Deleted { hash });
+            return None;
         }
         if cur != path {
-            match from {
-                Some(f) if f == cur => self.follow_doc(id, path, Follow::Daemon),
-                _ => {
-                    if let Some(to) = self.located_path(id)
-                        && to != cur
-                    {
-                        self.follow_doc(id, &to, Follow::Daemon);
-                    }
-                }
+            if from == Some(cur.as_str()) {
+                self.follow_doc(id, path, Follow::Daemon);
+            } else {
+                let (path, hash) = (path.to_owned(), hash.map(str::to_owned));
+                self.settle_doc(id, AfterSettle::Changed { path, hash });
+                return None;
             }
         }
         (self.docs.path_of(id).as_deref() == Some(path)).then_some(id)
@@ -439,7 +422,7 @@ impl App {
     /// Today's deleted handling for document `id` whose note is gone (D4: decided from the id,
     /// never by re-reading the path, which may hold another note now): unsaved edits enter the
     /// missing-file state (kept, Keep mine revives the id), a clean document says so.
-    fn doc_gone(&mut self, id: NoteId) {
+    pub(super) fn doc_gone(&mut self, id: NoteId) {
         let Some(od) = self.docs.by_id_mut(id) else {
             return;
         };
@@ -449,14 +432,6 @@ impl App {
             }
         } else {
             self.status.set_error("file deleted on disk".into());
-        }
-    }
-
-    /// Where note `id` lives now, when the daemon says it is live.
-    pub(super) fn located_path(&self, id: NoteId) -> Option<String> {
-        match self.daemon.as_ref()?.locate_note(id) {
-            Ok(NoteLocation::Live { path }) => Some(path),
-            _ => None,
         }
     }
 
@@ -488,13 +463,9 @@ impl App {
     /// holds (its base, or its in-flight save) → the path field changes and nothing else
     /// (cursor, undo, dirty text, the in-flight save all survive); edits the move did not carry
     /// → the text is kept behind the conflict bar (audit M2); otherwise the buffer is rebuilt
-    /// from disk. A `to` that is already gone (a delayed event of a chain) is settled by
-    /// `locate_note`, never by guessing.
+    /// from disk. A `to` that is already gone (a delayed event of a chain) is settled
+    /// ([`Self::settle_doc`]), never guessed; an answer naming `to` again stops there.
     pub(super) fn follow_doc(&mut self, id: NoteId, to: &str, how: Follow) {
-        self.follow_doc_at(id, to, how, true);
-    }
-
-    fn follow_doc_at(&mut self, id: NoteId, to: &str, how: Follow, locate: bool) {
         let Some(from) = self.docs.path_of(id) else {
             return;
         };
@@ -504,14 +475,9 @@ impl App {
         let Some(d) = self.daemon.clone() else { return };
         let (bytes, hash) = match d.read_file(to) {
             Ok(r) => r,
-            Err(DaemonError::NotFound(p)) => {
-                if locate && let Ok(NoteLocation::Live { path }) = d.locate_note(id) {
-                    if path != to {
-                        self.follow_doc_at(id, &path, how, false);
-                    }
-                    return;
-                }
-                self.status.set_error(open_error(&DaemonError::NotFound(p)));
+            Err(DaemonError::NotFound(_)) => {
+                let failed = to.to_owned();
+                self.settle_doc(id, super::settle::AfterSettle::Follow { failed });
                 return;
             }
             Err(e) => {
@@ -567,10 +533,11 @@ impl App {
     /// Round 11 WP-1 (Decision 1) + plan note-identity audit E2: document `id` was retired
     /// because the note at `to` absorbed it. Its tabs move to the absorbing document: a tab in a
     /// pane already showing `to` closes, every other tab retargets, the retired document is
-    /// dropped and the absorber's is used (opened and bound when it is not open yet) — never
-    /// the retired document under a new path, whose saves would address a retired id. A dirty
-    /// retired document is left to today's deleted-on-disk handling (`false`: the caller
-    /// reloads; edits are never discarded).
+    /// dropped and the absorber's is used (opened and bound when it is not open yet: plan
+    /// WP-R4, off the UI thread, the move completing in [`Self::absorb`]) — never the retired
+    /// document under a new path, whose saves would address a retired id. A dirty retired
+    /// document is left to today's deleted-on-disk handling (`false`: the caller reloads; edits
+    /// are never discarded).
     pub(super) fn follow_replaced(&mut self, id: NoteId, to: &str) -> bool {
         let Some(from) = self.docs.path_of(id) else {
             return false;
@@ -579,31 +546,23 @@ impl App {
             return false;
         }
         // `to` is a path the daemon named: the same-path rule picks its open document.
-        let open_absorber = self.docs.id_of(to);
-        let absorber = if open_absorber.is_some() {
-            // Already open (possibly dirty): its document stays; the tabs just show it.
-            None
-        } else {
-            let Some(d) = self.daemon.clone() else {
+        if self.docs.id_of(to).is_none() {
+            if self.daemon.is_none() {
                 return false;
-            };
-            match super::tabs::bind_read_note(d.as_ref(), to) {
-                Ok((aid, bytes, hash)) => {
-                    let mut b = crate::source::SourceBuffer::new(to, &bytes, hash);
-                    b.set_note_id(aid);
-                    Some(OpenDoc {
-                        id: aid,
-                        buffer: b,
-                        close_waiters: Vec::new(),
-                        reading: crate::reading::DocReading::default(),
-                    })
-                }
-                Err(e) => {
-                    self.status.set_error(open_error(&e));
-                    return false;
-                }
             }
+            self.start_open(to, super::settle::OpenFor::Absorb(id));
+            return true;
+        }
+        self.absorb(id, to, None)
+    }
+
+    /// The E2 tab move of retired document `id` onto the note at `to`: its open document, or
+    /// `absorber` (just opened, not yet in the store).
+    pub(super) fn absorb(&mut self, id: NoteId, to: &str, absorber: Option<OpenDoc>) -> bool {
+        let Some(from) = self.docs.path_of(id) else {
+            return false;
         };
+        let open_absorber = self.docs.id_of(to);
         let dup: Vec<u64> = self
             .panes
             .iter()

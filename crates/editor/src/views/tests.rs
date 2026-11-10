@@ -29,6 +29,7 @@ fn setup() -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
     let d = Arc::new(FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
     let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
     let mut app = App::new(Some(dc), None);
+    app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
     app.queue_rpcs();
     let _ = app.send(Message::Tabs(TabsMsg::Open(NOTE.to_owned())));
     (tmp, d, app)

@@ -262,6 +262,7 @@ mod loss_dialog {
             id: app.note_id("d2f/a.md"),
             seq,
             outcome: SaveOutcome::Failed("daemon disconnected".into()),
+            at: None,
             after: None,
         }));
         assert!(!app.exiting);

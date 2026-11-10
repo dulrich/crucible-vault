@@ -316,13 +316,10 @@ impl App {
 
     /// Reconnect resync of one open document against the disk (audit E1: a document with a
     /// save in flight on the old connection waits for that save's completion). Plan
-    /// note-identity D4: the note id is located first — moved while disconnected → the
-    /// document follows and resyncs at its new path; gone → today's missing handling (never a
-    /// read of another note now at the old path).
+    /// note-identity D4 / WP-R4: the note is settled first, off the UI thread — moved while
+    /// disconnected → the document follows and resyncs at its new path ([`Self::resync_read`]);
+    /// gone → [`Self::apply_settled`] (never a read of another note now at the old path).
     pub(super) fn resync_doc(&mut self, id: NoteId) -> Task<Message> {
-        let Some(d) = self.daemon.clone() else {
-            return Task::none();
-        };
         let Some(doc) = self.docs.by_id_mut(id).map(|o| &mut o.buffer) else {
             return Task::none();
         };
@@ -330,20 +327,15 @@ impl App {
             doc.defer_resync();
             return Task::none();
         }
-        let cur = doc.path().to_owned();
-        match d.locate_note(id) {
-            Ok(NoteLocation::Live { path }) if path != cur => {
-                self.follow_doc(id, &path, super::files::Follow::Daemon);
-            }
-            Ok(NoteLocation::Live { .. }) => {}
-            Ok(NoteLocation::Gone { .. } | NoteLocation::Unknown) => {
-                if let Some(o) = self.docs.by_id_mut(id) {
-                    o.buffer.mark_missing();
-                }
-                return Task::none();
-            }
-            Err(e) => tracing::warn!(error = %e, "reconnect locate failed; resyncing by path"),
-        }
+        self.settle_doc(id, super::settle::AfterSettle::Resync);
+        Task::batch(std::mem::take(&mut self.deferred))
+    }
+
+    /// The re-read half of [`Self::resync_doc`], at the document's path once it is settled.
+    pub(super) fn resync_read(&mut self, id: NoteId) -> Task<Message> {
+        let Some(d) = self.daemon.clone() else {
+            return Task::none();
+        };
         let Some(doc) = self.docs.by_id_mut(id).map(|o| &mut o.buffer) else {
             return Task::none();
         };

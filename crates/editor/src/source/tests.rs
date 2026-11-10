@@ -23,6 +23,7 @@ fn setup() -> (tempfile::TempDir, Arc<FakeDaemon>, App, String) {
         .expect("create");
     let dc: Arc<dyn DaemonClient> = d.clone();
     let mut app = App::new(Some(dc), None);
+    app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
     let _ = app.send(Message::Tabs(TabsMsg::Open(p.clone())));
     (tmp, d, app, p)
 }
@@ -58,7 +59,7 @@ fn save_now(app: &mut App, d: &FakeDaemon) -> SaveOutcome {
     let job = buf(app).begin_save().expect("a save job");
     let out = job.run(d);
     let _ = app.send(job.done(out.clone()));
-    out
+    out.0
 }
 
 fn notify(app: &mut App, path: &str, hash: Option<String>) {
@@ -160,7 +161,7 @@ fn echo_arriving_before_save_result_is_ignored() {
     type_text(&mut app, "Q");
     let job = buf(&mut app).begin_save().expect("job");
     let out = job.run(d.as_ref());
-    let SaveOutcome::Saved(h) = out.clone() else {
+    let (SaveOutcome::Saved(h), _) = out.clone() else {
         panic!("saved")
     };
     notify(&mut app, &p, Some(h.as_str().to_owned()));
@@ -249,7 +250,7 @@ fn save_in_flight_queues_one_follow_up() {
     let job = buf(&mut app).begin_save().expect("job");
     type_text(&mut app, "b");
     assert!(buf(&mut app).begin_save().is_none(), "one in flight");
-    let out = job.run(d.as_ref());
+    let (out, _) = job.run(d.as_ref());
     // Still dirty after the first save lands (edit `b` came later); a follow-up is due.
     assert_eq!(buf(&mut app).finish_save(job.seq, out), Ok(true));
     assert!(buf(&mut app).is_dirty());

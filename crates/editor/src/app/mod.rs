@@ -40,6 +40,7 @@ mod menu;
 pub mod pdf_tab;
 mod saves;
 pub(crate) mod scroll;
+pub mod settle;
 mod status;
 pub mod tab_drag;
 mod tabs;
@@ -89,6 +90,8 @@ pub struct OpenDoc {
     pub close_waiters: Vec<u64>,
     /// The document's Reading state (mode, rendered model, per-tab places).
     pub reading: crate::reading::DocReading,
+    /// Plan WP-R4: the newest settle request for this document (a completion must carry it).
+    pub settle: u64,
 }
 
 /// The document store (plan note-identity D4): one [`OpenDoc`] per open note, keyed by its
@@ -264,7 +267,7 @@ static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// `Restore` and `NewTab`, a tab of the path already in the target pane is just focused, and a path open
 /// nowhere opens a new tab there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Place {
+pub enum Place {
     /// Focus an existing tab wherever it is (links, explorer, history; Quick Switch `switch`).
     Focus,
     /// Like `Focus`, but a new tab replaces the pane's active tab when that one is clean.
@@ -516,6 +519,12 @@ pub struct App {
     /// WP-R2 (review E1): the one PDF store — documents, tab and embed consumers (only
     /// `Send` data).
     pub pdf: crate::pdf::store::PdfStore<iced::widget::image::Handle>,
+    /// Plan WP-R4: tasks helpers started (settles, opens), returned by the current `update`.
+    deferred: Vec<Task<Message>>,
+    /// Plan WP-R4: note opens in flight, by path ([`settle`]).
+    opening: settle::Opening,
+    /// Plan WP-R4: the last settle / open request number.
+    req_seq: u64,
 }
 
 /// A quit in progress: the saves it waits on, and whether one failed.
@@ -649,6 +658,9 @@ impl App {
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::SystemClipboard::detect()),
             pdf: crate::pdf::store::PdfStore::default(),
+            deferred: Vec::new(),
+            opening: settle::Opening::new(),
+            req_seq: 0,
         };
         // Plan round-17 WP-6: the restored section; a panel section makes the panels live.
         if let Some(s) = app.ui.side.0 {

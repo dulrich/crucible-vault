@@ -19,13 +19,12 @@ pub enum SaveOutcome {
     Saved(ContentHash),
     Conflict(ContentHash),
     Failed(String),
-    /// Plan note-identity D4: saved by id at this path, not the one the job carried (the note
-    /// had moved; the document takes its path from the reply).
-    SavedAt(ContentHash, String),
-    /// Plan note-identity D4: a CAS conflict of a note that lives at this other path now
-    /// (`locate_note`, since a conflict reply carries no path).
-    ConflictAt(ContentHash, String),
 }
+
+/// A save's outcome plus, plan note-identity D4 / WP-R4 (review E2), the path the note lives at
+/// when that is not the one the job carried (the daemon's reply for a save, the one settle
+/// interpreter for a conflict); the document takes that path before the outcome applies.
+pub type Landing = (SaveOutcome, Option<String>);
 
 /// A save ready to run off the UI thread.
 #[derive(Debug, Clone)]
@@ -41,39 +40,45 @@ pub struct SaveJob {
 
 impl SaveJob {
     /// Runs the CAS write (blocking; call from `spawn_blocking` or a test).
-    pub fn run(&self, d: &dyn DaemonClient) -> SaveOutcome {
+    pub fn run(&self, d: &dyn DaemonClient) -> Landing {
         let Some(id) = self.id else {
-            return match d.write_note(&self.path, &self.text, &self.base) {
+            let outcome = match d.write_note(&self.path, &self.text, &self.base) {
                 Ok(h) => SaveOutcome::Saved(h),
                 Err(DaemonError::Conflict { current_hash }) => SaveOutcome::Conflict(current_hash),
                 Err(e) => SaveOutcome::Failed(crate::daemon::rpc_err(&e)),
             };
+            return (outcome, None);
         };
         // Plan note-identity D3/D4: by id, the daemon writes at the note's current path (the
         // document follows that path from the `file_changed` it emits); `self.path` only
         // matters for the "Keep mine" revive of a retired id (base = no file).
         match d.write_note_by_id(id, &self.path, &self.text, &self.base) {
-            Ok((h, at)) if at != self.path => SaveOutcome::SavedAt(h, at),
-            Ok((h, _)) => SaveOutcome::Saved(h),
-            Err(DaemonError::Conflict { current_hash }) => match d.locate_note(id) {
-                Ok(crate::daemon::NoteLocation::Live { path }) if path != self.path => {
-                    SaveOutcome::ConflictAt(current_hash, path)
-                }
-                _ => SaveOutcome::Conflict(current_hash),
-            },
+            Ok((h, at)) => {
+                let at = (at != self.path).then_some(at);
+                (SaveOutcome::Saved(h), at)
+            }
+            // A conflict reply carries no path: the one settle interpreter says where it is.
+            Err(DaemonError::Conflict { current_hash }) => {
+                let at = match crate::app::settle::settle(d, id, &self.path) {
+                    crate::app::settle::Settled::Moved(p) => Some(p),
+                    _ => None,
+                };
+                (SaveOutcome::Conflict(current_hash), at)
+            }
             // The note is gone (deleted / retired): the same "no file" CAS answer a path write
             // got, so the buffer takes its missing-file state (Keep mine revives the id).
-            Err(DaemonError::NotFound(_)) => SaveOutcome::Conflict(no_base()),
-            Err(e) => SaveOutcome::Failed(crate::daemon::rpc_err(&e)),
+            Err(DaemonError::NotFound(_)) => (SaveOutcome::Conflict(no_base()), None),
+            Err(e) => (SaveOutcome::Failed(crate::daemon::rpc_err(&e)), None),
         }
     }
 
-    /// The message that reports `outcome` back.
-    pub fn done(&self, outcome: SaveOutcome) -> Message {
+    /// The message that reports `landing` back.
+    pub fn done(&self, (outcome, at): Landing) -> Message {
         Message::Source(SourceMsg::Saved {
             id: self.id,
             seq: self.seq,
             outcome,
+            at,
             after: None,
         })
     }
@@ -284,7 +289,7 @@ impl SourceBuffer {
     pub fn finish_save(&mut self, seq: u64, outcome: SaveOutcome) -> Result<bool, String> {
         let title = self.save.in_flight.take().and_then(|f| f.title);
         match outcome {
-            SaveOutcome::Saved(h) | SaveOutcome::SavedAt(h, _) => {
+            SaveOutcome::Saved(h) => {
                 self.save.base_hash = h;
                 self.save.disk_title = title;
                 if self.title_rename().is_none() {
@@ -295,7 +300,7 @@ impl SourceBuffer {
                 }
                 Ok(self.save.dirty && std::mem::take(&mut self.save.save_again))
             }
-            SaveOutcome::Conflict(current) | SaveOutcome::ConflictAt(current, _) => {
+            SaveOutcome::Conflict(current) => {
                 self.save.conflict = Some(Conflict::from_disk(current));
                 Ok(false)
             }
@@ -470,7 +475,7 @@ pub(crate) fn spawn_save(
         async move {
             tokio::task::spawn_blocking(move || job.run(d.as_ref()))
                 .await
-                .unwrap_or_else(|e| SaveOutcome::Failed(e.to_string()))
+                .unwrap_or_else(|e| (SaveOutcome::Failed(e.to_string()), None))
         },
         move |o| done.done(o),
     )

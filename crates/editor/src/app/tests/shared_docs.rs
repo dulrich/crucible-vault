@@ -83,6 +83,7 @@ pub(super) fn saved(app: &mut App, path: &str, seq: u64) {
         id: app.note_id(path),
         seq,
         outcome: SaveOutcome::Saved(ContentHash::from_hex("h1")),
+        at: None,
         after: None,
     }));
 }

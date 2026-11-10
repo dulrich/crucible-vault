@@ -67,6 +67,21 @@ pub enum Message {
         seq: u64,
         result: Result<String, String>,
     },
+    /// Plan WP-R4: a settle of document `id` (asked at `from`, request `req`) finished.
+    Settled {
+        id: crate::daemon::NoteId,
+        req: u64,
+        from: String,
+        settled: crate::app::settle::Settled,
+        then: crate::app::settle::AfterSettle,
+    },
+    /// Plan WP-R4: the bind + read of an open of `path` (request `req`) finished.
+    NoteOpened {
+        path: String,
+        req: u64,
+        purpose: crate::app::settle::OpenFor,
+        result: Result<crate::app::settle::Opened, crate::app::settle::OpenFailed>,
+    },
     /// Keyboard modifier state, tracked once
     /// in `App.modifiers` and never dropped by a modal layer.
     Modifiers(iced::keyboard::Modifiers),
@@ -124,6 +139,8 @@ pub enum SourceMsg {
         id: Option<crate::daemon::NoteId>,
         seq: u64,
         outcome: crate::source::SaveOutcome,
+        /// WP-R4: where the note lives, when not at the job's path ([`crate::source::Landing`]).
+        at: Option<String>,
         after: Option<AfterSave>,
     },
     /// Conflict bar: re-save against the on-disk hash.
@@ -840,6 +857,8 @@ impl Message {
             | Self::PdfTab(_)
             | Self::MediaLoaded { .. }
             | Self::TitleRenamed { .. }
+            | Self::Settled { .. }
+            | Self::NoteOpened { .. }
             | Self::Modifiers(_) => MsgKind::Completion,
         }
     }

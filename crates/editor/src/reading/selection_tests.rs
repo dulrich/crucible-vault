@@ -64,6 +64,7 @@ impl H {
             buffer: buffer(text),
             close_waiters: Vec::new(),
             reading: DocReading::default(),
+            settle: 0,
         };
         store.register(&mut od, ViewMode::Reading, true, None);
         let mut docs = Docs::new();
@@ -364,6 +365,7 @@ fn ctrl_a_and_ctrl_c_take_the_focused_reading_view() {
     let d: Arc<dyn DaemonClient> =
         Arc::new(crate::daemon::FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake"));
     let mut app = crate::app::App::new(Some(Arc::clone(&d)), None);
+    app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
     let _ = app.send(Message::Tabs(crate::message::TabsMsg::Open(
         PATH.to_owned(),
     )));

@@ -36,6 +36,7 @@ pub(crate) fn setup(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<dyn Daem
 
 pub(crate) fn app_on(d: &Arc<dyn DaemonClient>, path: &str) -> App {
     let mut app = App::new(Some(Arc::clone(d)), None);
+    app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
     let _ = app.send(Message::Tabs(TabsMsg::Open(path.to_owned())));
     assert_eq!(app.active_tab().and_then(|t| t.path()), Some(path));
     app
@@ -307,6 +308,7 @@ fn e1_modes_persist_and_restored_reading_tabs_render_on_tick() {
     let (tmp, d) = setup(&[("A.md", b"# A\n"), ("B.md", b"# B\n")]);
     let state = tmp.path().join("state/editor.json");
     let mut app = App::new(Some(Arc::clone(&d)), Some(state.clone()));
+    app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
     let _ = app.send(Message::Tabs(TabsMsg::Open("A.md".into())));
     let _ = app.send(Message::Tabs(TabsMsg::Open("B.md".into())));
     assert!(

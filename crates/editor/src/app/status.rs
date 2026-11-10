@@ -221,6 +221,7 @@ impl App {
                             Some(i) => self.doc_file_changed(
                                 i,
                                 &path,
+                                hash.as_deref(),
                                 kind,
                                 from.as_deref(),
                                 replaced_by.as_deref(),

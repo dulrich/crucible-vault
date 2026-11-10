@@ -259,6 +259,20 @@ impl App {
         path: &str,
         how: Place,
     ) -> Result<(), DaemonError> {
+        let t = self.open_then(pane, path, how, super::settle::OpenThen::Nothing)?;
+        self.defer(t);
+        Ok(())
+    }
+
+    /// [`Self::open_into`], then `then` once the tab is placed: now when the note is open
+    /// already (the returned task), else when its open completes ([`Self::note_opened`]).
+    pub(super) fn open_then(
+        &mut self,
+        pane: Pane,
+        path: &str,
+        how: Place,
+        then: super::settle::OpenThen,
+    ) -> Result<Task<Message>, DaemonError> {
         let pane = if self.panes.get(pane).is_some() {
             pane
         } else {
@@ -271,7 +285,7 @@ impl App {
             if how != Place::Restore {
                 self.open_external(path);
             }
-            return Ok(());
+            return Ok(Task::none());
         }
         // Plan round-15 WP-3: a PDF opens a PDF tab the same way (no document; restored too).
         let is_image = file_kind == cv_text::file_kind::FileKind::Image;
@@ -284,40 +298,44 @@ impl App {
                 .and_then(|ps| ps.tabs.iter().position(|t| t.shows(path)));
             if let Some(i) = here {
                 self.focus_tab(pane, i, path);
-                return Ok(());
+                return Ok(self.open_continue(path, then));
             }
             match (how, panes::find(&self.panes, path)) {
                 (Place::Focus | Place::Replace, Some((p, i))) => {
                     self.focus_tab(p, i, path);
-                    return Ok(());
+                    return Ok(self.open_continue(path, then));
                 }
                 (Place::Move, Some((p, i))) => {
                     // The tab (and so its shared document: edits, undo) moves pane.
                     self.move_tab((p, i), pane, None);
-                    return Ok(());
+                    return Ok(self.open_continue(path, then));
                 }
                 _ => {}
             }
         }
         if !is_image && !is_pdf && !self.docs.contains_key(path) {
-            let Some(d) = &self.daemon else {
+            let Some(d) = self.daemon.clone() else {
                 return Err(DaemonError::Disconnected);
             };
             // Plan note-identity D4: open is bind + read, bound to the same file (the classify
-            // read, if any, predates the bind and is not reused).
+            // read, if any, predates the bind and is not reused). Plan WP-R4 (Decision 1): off
+            // the UI thread — the tab appears when the open completes ([`Self::note_opened`]).
+            // Session restore (`App::new`, before the first frame) still opens in order inline.
+            if !self.restoring {
+                let record = !self.history_nav;
+                self.start_open(
+                    path,
+                    super::settle::OpenFor::Tab {
+                        pane,
+                        how,
+                        record,
+                        then,
+                    },
+                );
+                return Ok(Task::none());
+            }
             let (id, bytes, hash) = bind_read_note(d.as_ref(), path)?;
-            let mut doc = crate::source::SourceBuffer::new(path, &bytes, hash);
-            doc.set_note_id(id);
-            let mode = self.initial_mode(path);
-            let mut od = OpenDoc {
-                id,
-                buffer: doc,
-                close_waiters: Vec::new(),
-                reading: crate::reading::DocReading::default(),
-            };
-            self.reading
-                .register(&mut od, mode, !self.restoring, self.daemon.as_ref());
-            self.docs.insert(od);
+            self.insert_doc(id, path, &bytes, hash);
         }
         let tab = if is_image {
             Tab::new(TabKind::image(path))
@@ -353,7 +371,7 @@ impl App {
         }
         self.record_visit(pane, path);
         self.ui.touch_recent(path);
-        Ok(())
+        Ok(self.open_continue(path, then))
     }
 
     /// Pushes note `path` onto `pane`'s history (not while restoring or stepping
@@ -424,42 +442,46 @@ impl App {
     }
 
     /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`) for
-    /// document `id` at its current path. Plan note-identity D4: a read that finds the path gone
-    /// asks `locate_note` first; a `Live` answer elsewhere follows the document there (never the
-    /// "deleted" state) and the missing state the read would have raised is cleared.
+    /// document `id` at its current path. Plan note-identity D4 / WP-R4: a read that finds the
+    /// path gone is settled ([`Self::settle_doc`]): moved → the document follows (the missing
+    /// state the read raised is cleared), still here → re-read once, gone → [`Self::doc_gone`].
     pub(super) fn reload_doc(&mut self, id: NoteId, hash: Option<&str>) {
-        let daemon = self.daemon.clone();
-        let Some(doc) = self.docs.by_id_mut(id) else {
-            return;
-        };
-        let path = doc.buffer.path().to_owned();
-        let moved = std::cell::RefCell::new(None);
-        let err = match daemon.as_ref() {
-            None => None,
-            Some(d) => doc
-                .buffer
-                .external_change(hash, || match d.read_file(&path) {
-                    Err(DaemonError::NotFound(p)) => {
-                        match d.locate_note(id) {
-                            Ok(NoteLocation::Live { path: to }) if to != path => {
-                                *moved.borrow_mut() = Some(to);
-                            }
-                            Ok(NoteLocation::Live { .. }) => return d.read_file(&path),
-                            _ => {}
-                        }
-                        Err(DaemonError::NotFound(p))
-                    }
-                    other => other,
-                }),
-        };
-        if let Some(to) = moved.into_inner() {
-            if let Some(o) = self.docs.by_id_mut(id) {
-                o.buffer.clear_missing();
-            }
-            self.follow_doc(id, &to, super::files::Follow::Daemon);
-        } else if let Some(e) = err {
+        if let Some((true, err)) = self.external_change(id, hash) {
+            let hash = hash.map(str::to_owned);
+            self.settle_doc(id, super::settle::AfterSettle::Reread { hash, err });
+        }
+    }
+
+    /// [`Self::reload_doc`] after a settle said the note is still here: no second settle.
+    pub(super) fn reread_doc(&mut self, id: NoteId, hash: Option<&str>) {
+        if let Some(o) = self.docs.by_id_mut(id) {
+            o.buffer.clear_missing();
+        }
+        if let Some((_, Some(e))) = self.external_change(id, hash) {
             self.status.set_error(e);
         }
+    }
+
+    /// Runs `external_change` for document `id`: `(read found the path gone, error)`. An error
+    /// with the path still readable is surfaced here; a gone path's error is the caller's.
+    fn external_change(
+        &mut self,
+        id: NoteId,
+        hash: Option<&str>,
+    ) -> Option<(bool, Option<String>)> {
+        let d = self.daemon.clone()?;
+        let doc = self.docs.by_id_mut(id)?;
+        let path = doc.buffer.path().to_owned();
+        let mut gone = false;
+        let err = doc.buffer.external_change(hash, || {
+            let r = d.read_file(&path);
+            gone = matches!(r, Err(DaemonError::NotFound(_)));
+            r
+        });
+        if !gone && let Some(e) = &err {
+            self.status.set_error(e.clone());
+        }
+        Some((gone, err))
     }
 
     pub(super) fn update_tabs(&mut self, m: TabsMsg) -> Task<Message> {

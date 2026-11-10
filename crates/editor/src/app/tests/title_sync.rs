@@ -176,6 +176,7 @@ fn title_rename_waits_for_an_in_flight_follow_up_save() {
         id: app.note_id("ts6/Old.md"),
         seq,
         outcome: crate::source::SaveOutcome::Saved(h),
+        at: None,
         after: None,
     }));
     assert_eq!(app.open_paths(), ["ts6/New.md"]);

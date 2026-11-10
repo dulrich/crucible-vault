@@ -796,6 +796,7 @@ fn app_open_file_adds_tab_and_status_updates() {
     let state = tmp.path().join("state/crucible-vault/editor.json");
     let d: Arc<dyn DaemonClient> = Arc::new(d);
     let mut app = App::new(Some(Arc::clone(&d)), Some(state.clone()));
+    app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
     assert!(app.status.connected);
     assert!(app.explorer.paths.contains(&p));
 

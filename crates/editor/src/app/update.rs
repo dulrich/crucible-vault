@@ -1,6 +1,7 @@
 //! The top-level `update` dispatcher, panes, nav, panels, views and the subscription.
 
 use super::connection::{notification_stream, opener_stream};
+use super::settle::OpenThen;
 use super::*;
 use crate::ui_state::{SideOpen, SideSection};
 
@@ -31,7 +32,8 @@ impl App {
         } else {
             self.scroll_tabs_into_view(&views_before)
         };
-        let extra: Vec<Task<Message>> = [flush, auto, restore, persist, strip]
+        let deferred = Task::batch(std::mem::take(&mut self.deferred));
+        let extra: Vec<Task<Message>> = [deferred, flush, auto, restore, persist, strip]
             .into_iter()
             .filter(|t| t.units() > 0)
             .collect();
@@ -112,8 +114,9 @@ impl App {
                 id,
                 seq,
                 outcome,
+                at,
                 after,
-            }) => return self.on_save_landed(id, seq, outcome, after),
+            }) => return self.on_save_landed(id, seq, (outcome, at), after),
             Message::Source(m) => {
                 // plan editor-round-4 WP-2: Shift+click extends the selection.
                 let m = crate::source::shift_click(m, self.modifiers.shift());
@@ -179,6 +182,19 @@ impl App {
                 seq,
                 result,
             } => return self.title_renamed(id, &from, &to, seq, result),
+            Message::Settled {
+                id,
+                req,
+                from,
+                settled,
+                then,
+            } => return self.settled(id, req, &from, settled, then),
+            Message::NoteOpened {
+                path,
+                req,
+                purpose,
+                result,
+            } => self.note_opened(&path, req, purpose, result),
             Message::OpenUrl(url) => {
                 if let Err(e) = crate::open_url::open(&self.prefs.open_url_cmd, &url) {
                     self.status.set_error(e);
@@ -251,15 +267,20 @@ impl App {
                             // nothing (no new tab, even with Ctrl held); it only jumps.
                             let same = fragment.is_some()
                                 && self.active_note().is_some_and(|t| t.path == path);
-                            if !same {
+                            let then = fragment.map_or(OpenThen::Nothing, OpenThen::Heading);
+                            if same {
+                                self.open_continue(&path, then)
+                            } else {
                                 // WP-R3 (review E7): the one new-tab decision for link clicks.
-                                self.open_with(&path, self.click_place());
-                            }
-                            match fragment {
-                                // `open_with` reads and lowers the note inline, so the jump
-                                // needs no pending state.
-                                Some(f) => self.jump_to_heading(&path, &f),
-                                None => continue,
+                                // WP-R4: the jump runs once the tab is placed.
+                                let how = self.click_place();
+                                match self.open_then(self.focus, &path, how, then) {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        self.status.set_error(open_error(&e));
+                                        continue;
+                                    }
+                                }
                             }
                         }
                         crate::reading::Effect::MissingLink(target) => {
@@ -349,8 +370,9 @@ impl App {
         match m {
             NavMsg::Go { pane, target } => match target {
                 NavTarget::Path(p) => {
-                    match self.open_into(pane, &p, self.nav_place(self.modifiers.command())) {
-                        Ok(()) => {}
+                    let how = self.nav_place(self.modifiers.command());
+                    match self.open_then(pane, &p, how, OpenThen::CreateMissing) {
+                        Ok(t) => return t,
                         // Plan round-11 WP-7: a link to a missing note creates it (the
                         // configured path is already a full vault path) and `Done` opens it
                         // in the focused pane.
@@ -578,15 +600,16 @@ impl App {
             }
             crate::views::Effect::Open { path, line } => {
                 // Plan round-14 WP-2: Ctrl/Cmd+click on a link cell adds a new tab.
-                self.open_with(&path, self.click_place());
                 let line = line.and_then(|l| usize::try_from(l.saturating_sub(1)).ok());
-                // WP-R7 (Decision 4): the one mode-aware go-to-line, so Reading tops the block.
-                match line {
-                    Some(line) if self.active_note().is_some_and(|t| t.path == path) => {
-                        self.jump_to_line(&path, line)
-                    }
-                    _ => Task::none(),
-                }
+                // WP-R7 (Decision 4): the one mode-aware go-to-line, so Reading tops the block;
+                // WP-R4: once the tab is placed.
+                let then = line.map_or(OpenThen::Nothing, OpenThen::Line);
+                let how = self.click_place();
+                self.open_then(self.focus, &path, how, then)
+                    .unwrap_or_else(|e| {
+                        self.status.set_error(open_error(&e));
+                        Task::none()
+                    })
             }
         }
     }

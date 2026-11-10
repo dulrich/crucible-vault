@@ -282,10 +282,13 @@ impl App {
         Some(self.rpc(
             move |d| Ok(job.run(d)),
             move |r| {
+                let (outcome, at) =
+                    r.unwrap_or_else(|e| (crate::source::SaveOutcome::Failed(e), None));
                 Message::Source(SourceMsg::Saved {
                     id,
                     seq,
-                    outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
+                    outcome,
+                    at,
                     after: Some(after),
                 })
             },
@@ -300,7 +303,7 @@ impl App {
         &mut self,
         id: Option<NoteId>,
         seq: u64,
-        outcome: crate::source::SaveOutcome,
+        (outcome, at): crate::source::Landing,
         after: Option<AfterSave>,
     ) -> Task<Message> {
         // Plan note-identity D4: the completion is addressed to the note id; the path is read
@@ -308,17 +311,9 @@ impl App {
         // document closed meanwhile is `Landed::Gone`.
         // The reply says where the daemon acted: the document takes that path (the one move
         // function), then the outcome applies as a plain one.
-        let outcome = match (outcome, id) {
-            (crate::source::SaveOutcome::SavedAt(h, to), Some(i)) => {
-                self.move_doc_path(i, &to);
-                crate::source::SaveOutcome::Saved(h)
-            }
-            (crate::source::SaveOutcome::ConflictAt(h, to), Some(i)) => {
-                self.move_doc_path(i, &to);
-                crate::source::SaveOutcome::Conflict(h)
-            }
-            (o, _) => o,
-        };
+        if let (Some(to), Some(i)) = (at, id) {
+            self.move_doc_path(i, &to);
+        }
         let path = id.and_then(|i| self.docs.path_of(i));
         let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
         let result = id

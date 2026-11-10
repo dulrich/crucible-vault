@@ -73,6 +73,7 @@ mod replaced;
 mod save_continue;
 mod scroll_matrix;
 mod search_modal;
+mod settle;
 mod shared_docs;
 mod strip;
 mod strip_route;

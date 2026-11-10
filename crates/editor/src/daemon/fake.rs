@@ -173,6 +173,15 @@ fn change(path: &str, kind: ChangeKind, origin: Origin, id: NoteId) -> FileChang
     }
 }
 
+impl Inner {
+    fn assert_off_ui_thread(&self, method: &str) {
+        assert!(
+            self.ui_thread != Some(std::thread::current().id()),
+            "{method} called on the UI thread"
+        );
+    }
+}
+
 struct Inner {
     /// Plan note-identity WP-3: the fake's note-id bindings.
     ids: Ids,
@@ -211,6 +220,9 @@ struct Inner {
     /// Every `write_note` / `rename` / `delete` / `delete_note` / `note_set_bool` request that
     /// reached the fake, as `"<method> <path>"`, in order.
     mutation_calls: Vec<String>,
+    /// Plan WP-R4 (review E1): `bind_note` / `locate_note` called on this thread (the UI
+    /// thread in a test) panic — the stand-in for a daemon that blocks.
+    ui_thread: Option<std::thread::ThreadId>,
 }
 
 /// The fake daemon.
@@ -286,6 +298,7 @@ impl FakeDaemon {
                 search_calls: Vec::new(),
                 held_reply: None,
                 mutation_calls: Vec::new(),
+                ui_thread: None,
             }),
             hello,
             vault_root: vault_root.to_path_buf(),
@@ -533,6 +546,12 @@ impl FakeDaemon {
     }
 
     /// The current index generation.
+    /// Plan WP-R4: `bind_note` / `locate_note` called on `t` panic from now on (`None` = off).
+    pub fn forbid_identity_calls_on(&self, t: Option<std::thread::ThreadId>) -> Result<()> {
+        self.lock()?.ui_thread = t;
+        Ok(())
+    }
+
     pub fn generation(&self) -> Result<u64> {
         Ok(self.lock()?.index.generation()?)
     }
@@ -722,6 +741,7 @@ impl DaemonClient for FakeDaemon {
     fn bind_note(&self, path: &str) -> Result<NoteId> {
         let abs = vault_abs(&self.vault_root, path)?;
         let mut g = self.lock()?;
+        g.assert_off_ui_thread("bind_note");
         if !abs.is_file() {
             return Err(DaemonError::NotFound(path.to_owned()));
         }
@@ -729,7 +749,9 @@ impl DaemonClient for FakeDaemon {
     }
 
     fn locate_note(&self, id: NoteId) -> Result<NoteLocation> {
-        Ok(self.lock()?.ids.locate(id))
+        let g = self.lock()?;
+        g.assert_off_ui_thread("locate_note");
+        Ok(g.ids.locate(id))
     }
 
     fn rename_by_id(&self, id: NoteId, to: &str) -> Result<String> {

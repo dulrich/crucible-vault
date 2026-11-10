@@ -40,7 +40,7 @@ pub(crate) use keys::{test_key_binding, test_key_binding_link, test_key_binding_
 pub use place::{EDGE_SCROLL, Relayout, VISIBLE_LINES, rows_at, viewport_lines};
 #[cfg(test)]
 pub(crate) use place::{EditorOps, fresh_view, scroll_content};
-pub use save::{AUTOSAVE_DELAY, Conflict, SaveJob, SaveOutcome, file_changed};
+pub use save::{AUTOSAVE_DELAY, Conflict, Landing, SaveJob, SaveOutcome, file_changed};
 pub(crate) use save::{autosave_timer, flush, spawn_save};
 pub(crate) use view::EDITOR_PADDING;
 pub use view::{SLOTS, editor_id, view};
