@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use common::{Fx, h};
 use cv_vault::{
-    ContentHash, EventKind, LineageSink, Origin, VaultEvent, WatchConfig, WriterHandle,
-    spawn_writer_with_watcher,
+    ContentHash, EventKind, LineageSink, NoteId, NoteIdSink, NoteLocation, Origin, VaultEvent,
+    WatchConfig, WriterHandle, spawn_writer_with_watcher,
 };
 
 const DEB: Duration = Duration::from_millis(50);
@@ -79,10 +79,55 @@ impl LineageSink for Rec {
     }
 }
 
+/// An in-memory id store with the daemon sink's semantics (mint-or-get, move, retire).
+#[derive(Default)]
+struct Ids {
+    live: std::collections::BTreeMap<String, NoteId>,
+    next: u64,
+}
+
+impl Ids {
+    fn get(&mut self, p: &str) -> NoteId {
+        if let Some(id) = self.live.get(p) {
+            return *id;
+        }
+        self.next += 1;
+        self.live.insert(p.into(), NoteId(self.next));
+        NoteId(self.next)
+    }
+}
+
+impl NoteIdSink for Ids {
+    fn bind(&mut self, path: &str) -> Option<NoteId> {
+        Some(self.get(path))
+    }
+    fn moved(&mut self, from: &str, to: &str) -> Option<NoteId> {
+        let id = self.get(from);
+        self.live.remove(from);
+        self.live.insert(to.into(), id);
+        Some(id)
+    }
+    fn retired(&mut self, path: &str, by: Option<&str>) -> Option<NoteId> {
+        if let Some(b) = by {
+            self.get(b);
+        }
+        let id = self.get(path);
+        self.live.remove(path);
+        Some(id)
+    }
+    fn revive(&mut self, _: NoteId, _: &str) -> Option<NoteId> {
+        None
+    }
+    fn locate(&mut self, _: NoteId) -> Option<NoteLocation> {
+        None
+    }
+}
+
 fn spawn(fx: &Fx) -> (WriterHandle, Receiver<VaultEvent>, Rec) {
     let rec = Rec::default();
     let mut w = fx.live();
     w.set_lineage_sink(Box::new(rec.clone()));
+    w.set_note_id_sink(Box::new(Ids::default()));
     let (wh, rx, _j) = spawn_writer_with_watcher(w, cfg()).unwrap();
     (wh, rx, rec)
 }
@@ -93,6 +138,7 @@ fn daemon(path: &str, kind: EventKind) -> VaultEvent {
         kind,
         origin: Origin::Daemon,
         seq: None,
+        id: None,
         hash: None,
     }
 }
@@ -165,6 +211,7 @@ fn external_write_racing_a_writer_write_still_surfaces() {
                 kind: EventKind::Modified,
                 origin: Origin::External,
                 seq: None,
+                id: None,
                 hash: None,
             },
         ]
@@ -195,6 +242,7 @@ fn external_rename_of_a_just_written_path_is_one_renamed() {
                     },
                     origin: Origin::External,
                     seq: None,
+                    id: None,
                     hash: None,
                 },
             ],
@@ -245,9 +293,25 @@ struct Model {
     next: usize,
     events: Vec<VaultEvent>,
     lineage: Vec<Tr>,
+    /// Model file identity per live path, and the identity each expected event concerns.
+    fids: std::collections::BTreeMap<String, usize>,
+    ev_fids: Vec<usize>,
+    next_fid: usize,
 }
 
 impl Model {
+    fn ev(&mut self, e: VaultEvent, fid: usize) {
+        self.events.push(e);
+        self.ev_fids.push(fid);
+    }
+    fn born(&mut self, p: &str) -> usize {
+        self.next_fid += 1;
+        self.fids.insert(p.to_string(), self.next_fid);
+        self.next_fid
+    }
+    fn gone(&mut self, p: &str) -> usize {
+        self.fids.remove(p).unwrap()
+    }
     fn fresh(&mut self, dir: &str) -> String {
         self.next += 1;
         format!("{dir}/n{}.md", self.next)
@@ -270,7 +334,9 @@ impl Model {
         let c = self.live.remove(from).unwrap();
         self.live.insert(to.to_string(), c);
         self.vacated.push(from.to_string());
-        self.events.push(renamed(from, to));
+        let fid = self.gone(from);
+        self.fids.insert(to.to_string(), fid);
+        self.ev(renamed(from, to), fid);
         self.lineage.push(Tr::Renamed(from.into(), to.into()));
     }
 }
@@ -284,7 +350,8 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             let c = format!("created {p}");
             wh.create(&p, c.clone().into_bytes()).unwrap();
             m.live.insert(p.clone(), c);
-            m.events.push(daemon(&p, EventKind::Created));
+            let fid = m.born(&p);
+            m.ev(daemon(&p, EventKind::Created), fid);
             m.lineage.push(Tr::Created(p));
         }
         1 => {
@@ -295,7 +362,8 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             wh.write(&p, c.clone().into_bytes(), Some(m.hash(&p)))
                 .unwrap();
             m.live.insert(p.clone(), c);
-            m.events.push(daemon(&p, EventKind::Modified));
+            let fid = m.fids[&p];
+            m.ev(daemon(&p, EventKind::Modified), fid);
         }
         2 => {
             let Some(mut p) = rng.pick(&m.paths()).cloned() else {
@@ -339,12 +407,16 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             .unwrap()
             .unwrap();
             m.live.remove(&a);
-            m.events.push(daemon(
-                &a,
-                EventKind::Deleted {
-                    replaced_by: Some(by.clone()),
-                },
-            ));
+            let fid = m.gone(&a);
+            m.ev(
+                daemon(
+                    &a,
+                    EventKind::Deleted {
+                        replaced_by: Some(by.clone()),
+                    },
+                ),
+                fid,
+            );
             m.lineage.push(Tr::Replaced(a, by));
         }
         5 => {
@@ -353,8 +425,8 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             };
             wh.delete(&p, m.hash(&p)).unwrap();
             m.live.remove(&p);
-            m.events
-                .push(daemon(&p, EventKind::Deleted { replaced_by: None }));
+            let fid = m.gone(&p);
+            m.ev(daemon(&p, EventKind::Deleted { replaced_by: None }), fid);
             m.lineage.push(Tr::Deleted(p));
         }
         _ => {
@@ -371,7 +443,8 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             let c = format!("reused {p} {}", rng.below(1000));
             wh.create(&p, c.clone().into_bytes()).unwrap();
             m.live.insert(p.clone(), c);
-            m.events.push(daemon(&p, EventKind::Created));
+            let fid = m.born(&p);
+            m.ev(daemon(&p, EventKind::Created), fid);
             m.lineage.push(Tr::Created(p));
         }
     }
@@ -390,6 +463,13 @@ fn run_seed(seed: u64) {
         next: 0,
         events: Vec::new(),
         lineage: Vec::new(),
+        fids: start
+            .iter()
+            .enumerate()
+            .map(|(i, (p, _))| (p.to_string(), i + 1))
+            .collect(),
+        ev_fids: Vec::new(),
+        next_fid: start.len(),
     };
     let mut rng = Rng::new(seed);
     let mut got = Vec::new();
@@ -422,6 +502,52 @@ fn run_seed(seed: u64) {
         .into_iter()
         .collect();
     assert_eq!(fold, disk, "seed {seed}: fold vs disk");
+    // Plan note-identity WP-1: every event carries an id; ids and model files correspond one to
+    // one; folding by id tracks each file to its final path, never two live paths per id.
+    let mut id_of_fid = std::collections::BTreeMap::new();
+    let mut fid_of_id = std::collections::BTreeMap::new();
+    let mut by_id: std::collections::BTreeMap<NoteId, String> = std::collections::BTreeMap::new();
+    for (e, fid) in got.iter().zip(&m.ev_fids) {
+        let id =
+            e.id.unwrap_or_else(|| panic!("seed {seed}: no id on {e:?}"));
+        assert_eq!(
+            *id_of_fid.entry(*fid).or_insert(id),
+            id,
+            "seed {seed}: {e:?}"
+        );
+        assert_eq!(
+            *fid_of_id.entry(id).or_insert(*fid),
+            *fid,
+            "seed {seed}: {e:?}"
+        );
+        match &e.kind {
+            EventKind::Created => assert!(by_id.insert(id, e.path.clone()).is_none()),
+            EventKind::Modified => {
+                let p = by_id.entry(id).or_insert_with(|| e.path.clone());
+                assert_eq!(*p, e.path, "seed {seed}: {e:?}");
+            }
+            EventKind::Renamed { from } => {
+                let p = by_id.entry(id).or_insert_with(|| from.clone());
+                assert_eq!(p, from, "seed {seed}: {e:?}");
+                *p = e.path.clone();
+            }
+            EventKind::Deleted { .. } => {
+                let p = by_id.remove(&id).unwrap_or_else(|| e.path.clone());
+                assert_eq!(p, e.path, "seed {seed}: {e:?}");
+            }
+        }
+        let live: BTreeSet<&String> = by_id.values().collect();
+        assert_eq!(
+            live.len(),
+            by_id.len(),
+            "seed {seed}: a path bound to two ids"
+        );
+    }
+    for (p, fid) in &m.fids {
+        if let Some(id) = id_of_fid.get(fid) {
+            assert_eq!(by_id.get(id), Some(p), "seed {seed}: id {id:?} final path");
+        }
+    }
     assert_eq!(
         disk,
         m.live.keys().cloned().collect::<BTreeSet<_>>(),

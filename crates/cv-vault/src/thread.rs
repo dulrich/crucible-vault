@@ -12,6 +12,7 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::error::{Result, VaultError};
 use crate::hash::ContentHash;
+use crate::note_id::{NoteId, NoteLocation};
 use crate::watcher::{VaultEvent, WatchConfig, WatchState};
 use crate::writer::{RenameOutcome, VaultWriter};
 
@@ -90,6 +91,18 @@ impl WriterHandle {
     /// [`VaultWriter::rebuild`].
     pub fn rebuild(&self) -> Result<u64> {
         self.call(VaultWriter::rebuild)?
+    }
+
+    /// [`VaultWriter::bind_note`]: the id of the file at `path`, minted if needed, on the writer
+    /// thread (plan note-identity WP-2 answers `bind_note` through this).
+    pub fn bind_note(&self, path: &str) -> Result<Option<NoteId>> {
+        let p = path.to_string();
+        self.call(move |w| w.bind_note(&p))
+    }
+
+    /// [`VaultWriter::locate_note`], on the writer thread (WP-2 `locate_note`).
+    pub fn locate_note(&self, id: NoteId) -> Result<Option<NoteLocation>> {
+        self.call(move |w| w.locate_note(id))
     }
 }
 

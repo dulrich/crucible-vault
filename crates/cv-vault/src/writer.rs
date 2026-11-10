@@ -12,6 +12,7 @@ use crate::error::{Result, VaultError};
 use crate::fs::VaultFs;
 use crate::hash::ContentHash;
 use crate::lineage::{LineageSink, NoLineage};
+use crate::note_id::{NoNoteIds, NoteId, NoteIdSink, NoteLocation};
 use crate::path::validate_rel_path;
 use crate::rewrite::rewrite_note;
 use crate::trash::{TrashReason, TrashRecord};
@@ -58,6 +59,8 @@ pub struct VaultWriter {
     /// Writer-authored events (plan note-path-continuity D1); `None` without a watcher.
     events: Option<Sender<VaultEvent>>,
     lineage: Box<dyn LineageSink>,
+    /// The note-id binding (plan note-identity D1), updated beside lineage.
+    ids: Box<dyn NoteIdSink>,
 }
 
 /// Receives each [`TrashRecord`] right after its move (the daemon persists it to `trash_entries`).
@@ -86,6 +89,7 @@ impl VaultWriter {
             trash_sink: None,
             events: None,
             lineage: Box::new(NoLineage),
+            ids: Box::new(NoNoteIds),
         }
     }
 
@@ -210,8 +214,44 @@ impl VaultWriter {
         self.lineage.as_mut()
     }
 
+    /// Installs the note-id sink (plan note-identity D1); the default binds nothing.
+    pub fn set_note_id_sink(&mut self, sink: Box<dyn NoteIdSink>) {
+        self.ids = sink;
+    }
+
+    /// The note-id sink (the watcher binds External transitions through it).
+    pub(crate) fn note_ids_mut(&mut self) -> &mut dyn NoteIdSink {
+        self.ids.as_mut()
+    }
+
+    /// The id of the file at `path`, minted if it has none (`None` without a sink, or on a store
+    /// failure). Runs on the writer thread, so it observes every mutation that returned before
+    /// it (plan note-identity D2 `bind_note`; call through [`crate::WriterHandle::bind_note`]).
+    pub fn bind_note(&mut self, path: &str) -> Option<NoteId> {
+        self.ids.bind(path)
+    }
+
+    /// Where `id` is now (`None` without a sink, or on a store failure); writer-thread ordered
+    /// like [`Self::bind_note`].
+    pub fn locate_note(&mut self, id: NoteId) -> Option<NoteLocation> {
+        self.ids.locate(id)
+    }
+
+    /// Makes the retired `id` live again at `path` (plan note-identity D3, storage half); `None`
+    /// if it cannot be (unknown, live elsewhere, `path` taken, or no sink).
+    pub fn revive_note(&mut self, id: NoteId, path: &str) -> Option<NoteId> {
+        self.ids.revive(id, path)
+    }
+
     /// Emits one writer-authored (`Origin::Daemon`) event, synchronously.
-    fn emit(&self, path: &str, kind: EventKind, seq: Option<u64>, hash: Option<&ContentHash>) {
+    fn emit(
+        &self,
+        path: &str,
+        kind: EventKind,
+        seq: Option<u64>,
+        id: Option<NoteId>,
+        hash: Option<&ContentHash>,
+    ) {
         if let Some(tx) = &self.events
             && tx
                 .send(VaultEvent {
@@ -219,6 +259,7 @@ impl VaultWriter {
                     kind,
                     origin: Origin::Daemon,
                     seq,
+                    id,
                     hash: hash.cloned(),
                 })
                 .is_err()
@@ -240,9 +281,11 @@ impl VaultWriter {
         self.index_written(path, bytes, &full, &h);
         if created {
             let seq = self.lineage.created(path);
-            self.emit(path, EventKind::Created, seq, Some(&h));
+            let id = self.ids.bind(path);
+            self.emit(path, EventKind::Created, seq, id, Some(&h));
         } else {
-            self.emit(path, EventKind::Modified, None, Some(&h));
+            let id = self.ids.bind(path);
+            self.emit(path, EventKind::Modified, None, id, Some(&h));
         }
         Ok(h)
     }
@@ -339,12 +382,14 @@ impl VaultWriter {
             Some(by) => self.lineage.replaced(path, by),
             None => self.lineage.deleted(path),
         };
+        let id = self.ids.retired(path, replaced_by);
         self.emit(
             path,
             EventKind::Deleted {
                 replaced_by: replaced_by.map(str::to_string),
             },
             seq,
+            id,
             None,
         );
         Ok(())
@@ -476,12 +521,14 @@ impl VaultWriter {
         self.echoes.register(from, None, echo);
         self.echoes.register(to, Some(h.clone()), echo);
         let seq = self.lineage.renamed(from, to);
+        let id = self.ids.moved(from, to);
         self.emit(
             to,
             EventKind::Renamed {
                 from: from.to_string(),
             },
             seq,
+            id,
             Some(&h),
         );
         // Resolver after the rename, and the same without the moved file (uniqueness check).

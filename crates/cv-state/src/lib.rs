@@ -14,6 +14,7 @@ mod lineage;
 pub mod link_records;
 mod mail_boilerplate;
 pub mod migrate;
+mod note_ids;
 mod query;
 mod runner_state;
 mod store;
@@ -32,6 +33,7 @@ pub use image_descriptions::ImageDescription;
 pub use job::{EnqueueOutcome, FailureReason, Job, JobResult, JobStatus, NewJob, namespaced_key};
 pub use lineage::{LINEAGE_RETENTION_MS, LineageEnd, LineageKind, LineageResolution};
 pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
+pub use note_ids::{NOTE_ID_RETENTION_MS, NoteIdLocation};
 pub use query::{ListQuery, StatusCount};
 pub use runner_state::StepCheckpoint;
 pub use store::{

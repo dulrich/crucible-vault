@@ -69,6 +69,7 @@ fn daemon_write_is_echo_external_write_is_applied() {
             kind: EventKind::Modified,
             origin: Origin::External,
             seq: None,
+            id: None,
             hash: None,
         }]
     );
@@ -86,6 +87,7 @@ fn daemon_write_is_echo_external_write_is_applied() {
             kind: EventKind::Created,
             origin: Origin::External,
             seq: None,
+            id: None,
             hash: None,
         }]
     );
@@ -131,6 +133,7 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
                 kind: EventKind::Deleted { replaced_by: None },
                 origin: Origin::Daemon,
                 seq: None,
+                id: None,
                 hash: None,
             },
             VaultEvent {
@@ -140,6 +143,7 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
                 },
                 origin: Origin::Daemon,
                 seq: None,
+                id: None,
                 hash: None,
             },
         ]
@@ -156,6 +160,7 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
             },
             origin: Origin::External,
             seq: None,
+            id: None,
             hash: None,
         }]
     );
@@ -206,6 +211,7 @@ fn daemon_folder_rename_is_one_renamed_per_file() {
             },
             origin: Origin::Daemon,
             seq: None,
+            id: None,
             hash: None,
         })
         .collect();
@@ -232,6 +238,7 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
             },
             origin: Origin::Daemon,
             seq: None,
+            id: None,
             hash: None,
         }
     );
@@ -246,6 +253,7 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
                 kind: EventKind::Deleted { replaced_by: None },
                 origin: Origin::External,
                 seq: None,
+                id: None,
                 hash: None,
             },
             VaultEvent {
@@ -253,6 +261,7 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
                 kind: EventKind::Created,
                 origin: Origin::External,
                 seq: None,
+                id: None,
                 hash: None,
             },
         ]
@@ -280,6 +289,7 @@ fn delete_replaced_carries_replaced_by_on_the_event() {
             },
             origin: Origin::Daemon,
             seq: None,
+            id: None,
             hash: None,
         }]
     );

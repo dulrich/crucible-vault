@@ -210,10 +210,24 @@ CREATE INDEX path_lineage_from ON path_lineage(from_path, seq);
 CREATE INDEX path_lineage_at ON path_lineage(at_ms);
 ";
 
-/// Steps after the baseline. Empty at 1.0.0: within a major version, schema changes append here
-/// (never edit) and entry `i` moves the database from `BASELINE_VERSION + i` to
-/// `BASELINE_VERSION + i + 1`; the next major folds them into a new baseline (D31).
-pub const MIGRATIONS: &[&str] = &[];
+/// Steps after the baseline. Within a major version, schema changes append here (never edit)
+/// and entry `i` moves the database from `BASELINE_VERSION + i` to `BASELINE_VERSION + i + 1`;
+/// the next major folds them into a new baseline (D31).
+pub const MIGRATIONS: &[&str] = &[
+    // v18 (plan note-identity WP-1): durable note ids. A live row (`retired_ms IS NULL`) binds an
+    // id to the file now at `path`; a tombstone keeps its last path and absorber. AUTOINCREMENT
+    // keeps the id high-water mark in `sqlite_sequence`, so pruning never lets an id be reused.
+    r"
+CREATE TABLE note_ids (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    path         TEXT NOT NULL,
+    retired_ms   INTEGER,
+    replaced_by  INTEGER
+);
+CREATE UNIQUE INDEX note_ids_live_path ON note_ids(path) WHERE retired_ms IS NULL;
+CREATE INDEX note_ids_retired ON note_ids(retired_ms) WHERE retired_ms IS NOT NULL;
+",
+];
 
 /// Highest schema version this build knows.
 #[must_use]

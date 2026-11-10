@@ -49,7 +49,7 @@ pub enum Origin {
 }
 
 /// A normalized vault change. Equality compares the change itself (`path`, `kind`, `origin`);
-/// `seq` and `hash` are delivery metadata (plan note-path-continuity D2).
+/// `seq`, `id` and `hash` are delivery metadata (plan note-path-continuity D2).
 #[derive(Debug, Clone)]
 pub struct VaultEvent {
     /// Vault-relative path.
@@ -59,6 +59,10 @@ pub struct VaultEvent {
     /// The lineage sequence number the sink assigned to this identity transition (created,
     /// renamed, deleted; `None` for content changes or without a recording sink).
     pub seq: Option<u64>,
+    /// The note id of the file this event concerns (plan note-identity D1; minted on demand,
+    /// `None` without an id sink or on a store failure). A rename keeps it; a delete carries the
+    /// retired id.
+    pub id: Option<crate::NoteId>,
     /// The content hash this change produced (`None` for deletes, or when unknown), captured
     /// at mutation time so the event never reports a later state of the path.
     pub hash: Option<ContentHash>,
@@ -73,6 +77,7 @@ impl VaultEvent {
             kind,
             origin,
             seq: None,
+            id: None,
             hash: None,
         }
     }
@@ -504,6 +509,7 @@ impl WatchState {
             return true;
         }
         let seq = w.lineage_mut().renamed(from, to);
+        let id = w.note_ids_mut().moved(from, to);
         out.push(VaultEvent {
             path: to.to_string(),
             kind: EventKind::Renamed {
@@ -511,6 +517,7 @@ impl WatchState {
             },
             origin: Origin::External,
             seq,
+            id,
             hash: Some(ContentHash::of(&bytes)),
         });
         true
@@ -570,11 +577,13 @@ impl WatchState {
                         }
                         if echo.is_none() {
                             let seq = w.lineage_mut().deleted(path);
+                            let id = w.note_ids_mut().retired(path, None);
                             out.push(VaultEvent {
                                 path: path.to_string(),
                                 kind: EventKind::Deleted { replaced_by: None },
                                 origin: Origin::External,
                                 seq,
+                                id,
                                 hash: None,
                             });
                         }
@@ -619,6 +628,7 @@ impl WatchState {
         } else {
             None
         };
+        let id = w.note_ids_mut().bind(path);
         out.push(VaultEvent {
             path: path.to_string(),
             kind: if prev.is_none() {
@@ -628,6 +638,7 @@ impl WatchState {
             },
             origin: Origin::External,
             seq,
+            id,
             hash: Some(h),
         });
     }

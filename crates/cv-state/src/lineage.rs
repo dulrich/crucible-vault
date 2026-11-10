@@ -256,7 +256,10 @@ mod tests {
                 .unwrap();
         }
         let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 17);
+        assert_eq!(
+            s.schema_version().unwrap(),
+            crate::migrate::latest_version()
+        );
         assert_eq!(
             (s.lineage_head().unwrap(), s.lineage_floor().unwrap()),
             (0, 0)

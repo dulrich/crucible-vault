@@ -208,6 +208,9 @@ impl Daemon {
         // Plan note-path-continuity D2: every identity transition reaches `path_lineage`,
         // synchronously on the writer thread.
         crate::lineage::install(&mut writer, &state);
+        // Plan note-identity D1: every vault file keeps a durable id in `note_ids`, bound on the
+        // writer thread at the same transition sites.
+        crate::note_id::install(&mut writer, &state);
         let (handle, vault_events, writer_join) =
             cv_vault::spawn_writer_with_watcher(writer, opts.watch).context("starting writer")?;
         let views = ViewRegistry::start(

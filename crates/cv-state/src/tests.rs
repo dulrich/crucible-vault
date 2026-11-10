@@ -329,7 +329,7 @@ fn fresh_baseline_seeds_the_lineage_floor() {
     assert_eq!(rows, vec![(1, 0)]);
 }
 
-/// A v17 database (the baseline; `MIGRATIONS` is empty) opens with no write.
+/// A database at the latest version opens with no write.
 #[test]
 fn baseline_database_opens_without_a_schema_write() {
     let dir = tempfile::tempdir().unwrap();
