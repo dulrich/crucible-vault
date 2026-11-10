@@ -286,7 +286,7 @@ impl App {
         let Some(ps) = self.panes.get_mut(self.focus) else {
             return self.dispatch_call(call);
         };
-        let Some(path) = ps.active_note().map(|t| t.path.to_owned()) else {
+        let Some(note) = ps.active_note().map(|t| t.note) else {
             if call.needs.contains(&cv_protocol::ContextNeed::ActivePath) {
                 self.status
                     .set_error(format!("{}: open a note first", call.title));
@@ -294,14 +294,14 @@ impl App {
             }
             return self.dispatch_call(call);
         };
-        let Some(doc) = buf_mut(&mut self.docs, &path) else {
+        let Some(doc) = buf_id_mut(&mut self.docs, note) else {
             return self.dispatch_call(call);
         };
         if !doc.is_dirty() {
             return self.dispatch_call(call);
         }
         let title = call.title.clone();
-        self.save_then(&path, Some(AfterSave::RunCall(call)))
+        self.save_then_id(note, Some(AfterSave::RunCall(call)))
             .unwrap_or_else(|| {
                 self.status.set_error(format!(
                     "{title}: not run (the note is saving or has a conflict)"

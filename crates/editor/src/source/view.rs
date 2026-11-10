@@ -106,10 +106,14 @@ pub fn view<'a>(
         };
         let bar = row![
             text(msg).color(tokens.warn_text.to_color()),
-            button(text("Keep mine"))
-                .on_press(Message::Source(SourceMsg::KeepMine(doc.path.clone()))),
-            button(text("Take theirs"))
-                .on_press(Message::Source(SourceMsg::TakeTheirs(doc.path.clone()))),
+            button(text("Keep mine")).on_press(Message::Source(match doc.note_id() {
+                Some(id) => SourceMsg::KeepMineNote(id),
+                None => SourceMsg::KeepMine(doc.path.clone()),
+            })),
+            button(text("Take theirs")).on_press(Message::Source(match doc.note_id() {
+                Some(id) => SourceMsg::TakeTheirsNote(id),
+                None => SourceMsg::TakeTheirs(doc.path.clone()),
+            })),
         ]
         .spacing(8);
         container(bar)

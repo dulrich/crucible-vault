@@ -67,7 +67,7 @@ impl App {
             }
             TabKind::Note(p) => p,
         };
-        let Some(doc) = buf(&self.docs, path) else {
+        let Some(doc) = buf_id(&self.docs, tab.note) else {
             return iced::widget::Space::new().into();
         };
         let body = crate::reading::tab_body(
@@ -147,9 +147,8 @@ impl App {
             TabKind::Note(p) => {
                 let siblings: Vec<&str> = ps.tabs.iter().filter_map(Tab::path).collect();
                 let fm = match self.prefs.tab_title {
-                    crate::header::TabTitle::Title => {
-                        buf(&self.docs, p).and_then(crate::source::SourceBuffer::frontmatter_title)
-                    }
+                    crate::header::TabTitle::Title => buf_id(&self.docs, tab.note)
+                        .and_then(crate::source::SourceBuffer::frontmatter_title),
                     _ => None,
                 };
                 crate::header::resolve(self.prefs.tab_title, p, &siblings, fm.as_deref())
@@ -209,9 +208,8 @@ impl App {
             let (dirty, saving) = match &tab.kind {
                 TabKind::Settings => (self.settings.any_dirty(), false),
                 TabKind::Log | TabKind::File { .. } => (false, false),
-                TabKind::Note(p) => {
-                    buf(&self.docs, p).map_or((false, false), |d| (d.is_dirty(), d.is_saving()))
-                }
+                TabKind::Note(_) => buf_id(&self.docs, tab.note)
+                    .map_or((false, false), |d| (d.is_dirty(), d.is_saving())),
             };
             let title = ellipsize(&self.tab_header_title(ps, tab), TITLE_MAX_CHARS);
             let lbl = control_label(title, 14.0)

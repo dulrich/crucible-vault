@@ -65,6 +65,11 @@ pub use status::{NOTICE_INLINE_CHARS, Notice, Severity, StatusModel};
 pub struct Tab {
     pub id: u64,
     pub kind: TabKind,
+    /// Plan note-identity, WP-4: the note id of the document a note tab shows (`None` for
+    /// file / Settings / Log tabs and an unbound note tab). Runtime only — never serialized
+    /// ([`TabKind`] is the persisted shape, D4: persisted tabs bind at restore). A tab finds
+    /// its document by this id, never by its path; it changes only in the E2 tab move.
+    pub note: Option<NoteId>,
 }
 
 pub use crate::ui_state::{TabKind, Viewer};
@@ -103,22 +108,34 @@ impl Docs {
         Self::default()
     }
 
-    /// The id of the document whose path is `path`.
+    /// The id of the document whose path is `path` — the one same-path rule (plan
+    /// note-identity, WP-4): two open documents can share a path (a dirty document whose note
+    /// was deleted stays open in its missing state while another note moves onto its path);
+    /// then the live one wins over the missing one. Only lookups that genuinely start from a
+    /// path come here; a tab finds its document by [`Tab::note`].
     pub fn id_of(&self, path: &str) -> Option<NoteId> {
-        self.by_id
-            .iter()
-            .find(|(_, d)| d.buffer.path() == path)
-            .map(|(id, _)| *id)
+        let mut found = None;
+        for (id, d) in &self.by_id {
+            if d.buffer.path() != path {
+                continue;
+            }
+            if !d.buffer.is_missing() {
+                return Some(*id);
+            }
+            found = Some(*id);
+        }
+        found
     }
 
-    /// The document open at `path`.
+    /// The document open at `path` (the same-path rule of [`Self::id_of`]).
     pub fn get(&self, path: &str) -> Option<&OpenDoc> {
-        self.by_id.values().find(|d| d.buffer.path() == path)
+        self.by_id.get(&self.id_of(path)?)
     }
 
-    /// The document open at `path`, mutably.
+    /// The document open at `path`, mutably (the same-path rule of [`Self::id_of`]).
     pub fn get_mut(&mut self, path: &str) -> Option<&mut OpenDoc> {
-        self.by_id.values_mut().find(|d| d.buffer.path() == path)
+        let id = self.id_of(path)?;
+        self.by_id.get_mut(&id)
     }
 
     /// Whether a document is open at `path`.
@@ -139,6 +156,11 @@ impl Docs {
     /// The current path of document `id`.
     pub fn path_of(&self, id: NoteId) -> Option<String> {
         self.by_id.get(&id).map(|d| d.buffer.path().to_owned())
+    }
+
+    /// [`Self::path_of`] for an optional id.
+    pub fn path_of_opt(&self, id: Option<NoteId>) -> Option<String> {
+        self.path_of(id?)
     }
 
     /// Opens `doc` (keyed by its own id).
@@ -207,6 +229,16 @@ fn buf<'a>(docs: &'a Docs, path: &str) -> Option<&'a crate::source::SourceBuffer
     docs.get(path).map(|d| &d.buffer)
 }
 
+/// The source buffer of document `id` (a tab's document, plan note-identity, WP-4).
+fn buf_id(docs: &Docs, id: Option<NoteId>) -> Option<&crate::source::SourceBuffer> {
+    docs.by_id(id?).map(|d| &d.buffer)
+}
+
+/// [`buf_id`], mutably.
+fn buf_id_mut(docs: &mut Docs, id: Option<NoteId>) -> Option<&mut crate::source::SourceBuffer> {
+    docs.by_id_mut(id?).map(|d| &mut d.buffer)
+}
+
 /// [`buf`], mutably.
 fn buf_mut<'a>(docs: &'a mut Docs, path: &str) -> Option<&'a mut crate::source::SourceBuffer> {
     docs.get_mut(path).map(|d| &mut d.buffer)
@@ -221,6 +253,8 @@ pub const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_mill
 pub struct NoteRef<'a> {
     pub id: u64,
     pub path: &'a str,
+    /// The tab's document ([`Tab::note`]).
+    pub note: Option<NoteId>,
 }
 
 /// The next [`Tab::id`].
@@ -252,12 +286,20 @@ impl Tab {
         Self {
             id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             kind,
+            note: None,
         }
     }
 
-    /// A new note tab (fresh id) showing `path`.
+    /// A new note tab (fresh id) showing `path`, unbound (tests; the app opens bound tabs).
     pub fn note(path: &str) -> Self {
         Self::new(TabKind::Note(path.to_owned()))
+    }
+
+    /// A new note tab (fresh id) showing document `id` at `path`.
+    pub fn bound(path: &str, id: NoteId) -> Self {
+        let mut t = Self::note(path);
+        t.note = Some(id);
+        t
     }
 
     /// The note path, when this is a note tab.
@@ -278,7 +320,11 @@ impl Tab {
 
     /// This tab as a note (`None` for Settings / Log).
     pub fn as_note(&self) -> Option<NoteRef<'_>> {
-        self.path().map(|path| NoteRef { id: self.id, path })
+        self.path().map(|path| NoteRef {
+            id: self.id,
+            path,
+            note: self.note,
+        })
     }
 
     /// Plan round-15 WP-2: this tab's file moved to `to`. The one retarget rule: a file tab

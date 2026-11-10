@@ -169,7 +169,7 @@ mod duplicates {
             // Same pane, closed while a save is in flight (the close waits on it).
             let (_tmp, _d, mut app) = setup(&["w7s/a.md"]);
             let pane = app.focus;
-            let extra = Tab::note("w7s/a.md");
+            let extra = Tab::bound("w7s/a.md", app.note_id("w7s/a.md").expect("bound"));
             let extra_id = extra.id;
             let first_id = app.active_note().expect("tab").id;
             if let Some(ps) = app.panes.get_mut(pane) {

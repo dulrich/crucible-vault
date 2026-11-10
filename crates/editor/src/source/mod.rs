@@ -211,13 +211,14 @@ pub fn update(
                 Task::none()
             }
         }
-        SourceMsg::KeepMine(_) => spawn_save(daemon, buf.keep_mine()),
+        SourceMsg::KeepMine(_) | SourceMsg::KeepMineNote(_) => spawn_save(daemon, buf.keep_mine()),
         // Routed by the app (`App::update_inner`); never reaches here.
         SourceMsg::Viewport { .. }
         | SourceMsg::Saved { .. }
         | SourceMsg::LinkKey(_)
         | SourceMsg::LinkPick(_) => Task::none(),
-        SourceMsg::TakeTheirs(path) => {
+        SourceMsg::TakeTheirs(_) | SourceMsg::TakeTheirsNote(_) => {
+            let path = buf.path().to_owned();
             if let Some(d) = daemon {
                 match d.read_file(&path) {
                     Ok((bytes, h)) => buf.reload(&bytes, h),

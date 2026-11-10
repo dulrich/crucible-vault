@@ -141,7 +141,7 @@ impl App {
             FindMsg::Query(q) => {
                 let Some((text, seq)) = ps
                     .active_note()
-                    .and_then(|t| buf(&self.docs, t.path))
+                    .and_then(|t| buf_id(&self.docs, t.note))
                     .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
@@ -175,7 +175,7 @@ impl App {
                 }
                 let at = ps
                     .active_note()
-                    .and_then(|t| buf(&self.docs, t.path))
+                    .and_then(|t| buf_id(&self.docs, t.note))
                     .map_or(0, |d| {
                         let c = d.cursor().position;
                         editor_model::undo::offset_of(
@@ -197,7 +197,7 @@ impl App {
                 };
                 let Some((text, seq)) = ps
                     .active_note()
-                    .and_then(|t| buf(&self.docs, t.path))
+                    .and_then(|t| buf_id(&self.docs, t.note))
                     .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
@@ -239,7 +239,7 @@ impl App {
         let Some(tab) = ps.active.and_then(|i| ps.tabs.get(i)) else {
             return Task::none();
         };
-        let view = tab.id;
+        let (view, note) = (tab.id, tab.note);
         let Some(path) = tab.path().map(str::to_owned) else {
             return Task::none();
         };
@@ -265,7 +265,7 @@ impl App {
             return crate::reading::probe(&path, view, n, Some(b));
         }
         let range = bar.range();
-        let Some(doc) = buf(&self.docs, &path) else {
+        let Some(doc) = buf_id(&self.docs, note) else {
             return Task::none();
         };
         let text = doc.text();
@@ -283,7 +283,7 @@ impl App {
         let (l1, c1) = editor_model::find::line_col(&text, r.end);
         let mode = self.reading.mode(&self.docs, &path);
         if mode.shows_source()
-            && let Some(doc) = buf_mut(&mut self.docs, &path)
+            && let Some(doc) = buf_id_mut(&mut self.docs, note)
         {
             doc.select_range((l0, c0), (l1, c1));
         }
@@ -383,7 +383,7 @@ impl App {
     /// buffer's start / end (the shaped editor scrolls to its cursor; the selection drops);
     /// Reading/Split: the reading scrollable snaps to its top / bottom.
     pub(super) fn go_to_edge(&mut self, bottom: bool) -> Task<Message> {
-        let Some(path) = self.active_note().map(|t| t.path.to_owned()) else {
+        let Some((path, note)) = self.active_note().map(|t| (t.path.to_owned(), t.note)) else {
             return Task::none();
         };
         let mode = self.reading.mode(&self.docs, &path);
@@ -391,7 +391,7 @@ impl App {
         let view = self.view_of(&path);
         self.reading.set_edge(&mut self.docs, &path, view, bottom);
         if mode.shows_source()
-            && let Some(doc) = buf_mut(&mut self.docs, &path)
+            && let Some(doc) = buf_id_mut(&mut self.docs, note)
         {
             doc.go_to_edge(bottom);
         }

@@ -130,6 +130,11 @@ pub enum SourceMsg {
     KeepMine(String),
     /// Conflict bar: reload from disk.
     TakeTheirs(String),
+    /// Plan note-identity, WP-4: [`Self::KeepMine`] from a tab's conflict bar, addressed to the
+    /// tab's document by its id (two documents can share a path).
+    KeepMineNote(crate::daemon::NoteId),
+    /// [`Self::TakeTheirs`] from a tab's conflict bar, addressed to the tab's document.
+    TakeTheirsNote(crate::daemon::NoteId),
     /// A key the source editor handles itself as one undoable edit / smart motion (WP-1).
     Key(SourceKey),
     /// Middle-press over the source editor of `path` at `at` (editor-local coordinates): place
@@ -686,7 +691,9 @@ impl SourceMsg {
     /// The document this message acts on.
     pub fn target(&self) -> SourceTarget<'_> {
         match self {
-            Self::AutosaveDue { id, .. } => SourceTarget::Note(*id),
+            Self::AutosaveDue { id, .. } | Self::KeepMineNote(id) | Self::TakeTheirsNote(id) => {
+                SourceTarget::Note(*id)
+            }
             Self::KeepMine(path)
             | Self::TakeTheirs(path)
             | Self::MiddleClick { path, .. }
@@ -719,6 +726,8 @@ impl SourceMsg {
             | Self::Saved { .. }
             | Self::KeepMine(_)
             | Self::TakeTheirs(_)
+            | Self::KeepMineNote(_)
+            | Self::TakeTheirsNote(_)
             | Self::MiddleClick { .. }
             | Self::CommandClick { .. }
             | Self::PastePrimary { .. }
@@ -743,6 +752,8 @@ impl SourceMsg {
             | Self::Save
             | Self::KeepMine(_)
             | Self::TakeTheirs(_)
+            | Self::KeepMineNote(_)
+            | Self::TakeTheirsNote(_)
             | Self::Key(_)
             | Self::MiddleClick { .. }
             | Self::CommandClick { .. }

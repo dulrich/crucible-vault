@@ -74,6 +74,21 @@ impl App {
                 }
                 self.docs.remove(&path);
             }
+            Message::Source(SourceMsg::TakeTheirsNote(id))
+                if self.docs.by_id(id).is_some_and(|d| d.buffer.is_missing()) =>
+            {
+                // Plan note-identity, WP-4: the same, for the tab's own document — only the
+                // tabs of document `id` close, never another document's at the same path.
+                let tabs: Vec<u64> = self
+                    .panes
+                    .iter()
+                    .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.note == Some(id)).map(|t| t.id))
+                    .collect();
+                for t in tabs {
+                    self.remove_tab(t);
+                }
+                self.docs.remove_id(id);
+            }
             Message::Source(SourceMsg::Viewport { path, lines }) => {
                 if let Some(d) = buf_mut(&mut self.docs, &path)
                     && d.on_layout(lines) == crate::source::Relayout::Again
@@ -103,6 +118,7 @@ impl App {
                 // plan editor-round-4 WP-2: Shift+click extends the selection.
                 let m = crate::source::shift_click(m, self.modifiers.shift());
                 let active = self.active_note().map(|t| (t.path.to_owned(), t.id));
+                let active_note = self.active_note().and_then(|t| t.note);
                 let motion = m.is_user_motion();
                 if motion && let Some((p, id)) = &active {
                     // Plan round-6 WP-1: any user scroll, motion, edit or key in the source
@@ -119,17 +135,18 @@ impl App {
                         iced::widget::text_editor::Edit::Insert('[')
                     ))
                 );
-                let path = match m.target() {
-                    SourceTarget::Path(p) => Some(p.to_owned()),
-                    SourceTarget::Note(id) => self.docs.path_of(id),
-                    SourceTarget::Active => active.map(|(p, _)| p),
+                // Plan note-identity, WP-4: the active tab's input goes to its own document.
+                let note = match m.target() {
+                    SourceTarget::Path(p) => self.docs.id_of(p),
+                    SourceTarget::Note(id) => Some(id),
+                    SourceTarget::Active => active_note,
                     SourceTarget::App => None,
                 };
                 // Plan round-9 WP-6 (D26): the autosave point lints the buffer first.
                 let lint_cfg = matches!(&m, SourceMsg::AutosaveDue { .. })
                     .then(|| self.auto_lint_cfg())
                     .flatten();
-                let Some(buf) = path.and_then(|p| self.docs.get_mut(&p)) else {
+                let Some(buf) = note.and_then(|id| self.docs.by_id_mut(id)) else {
                     return Task::none();
                 };
                 let fx = crate::source::update(
@@ -495,7 +512,7 @@ impl App {
             .panes
             .get(self.focus)
             .and_then(PaneState::active_note)
-            .and_then(|t| buf(&self.docs, t.path));
+            .and_then(|t| buf_id(&self.docs, t.note));
         self.panels.sync_buffer(tab, d.as_deref());
         if let Some(d) = &d
             && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)

@@ -58,7 +58,7 @@ impl crate::app::App {
             self.link_ta = None;
             return;
         };
-        let Some(doc) = self.doc(&tab.1) else {
+        let Some(doc) = self.tab_doc(tab.0) else {
             self.link_ta = None;
             return;
         };
@@ -188,7 +188,7 @@ impl crate::app::App {
             return;
         };
         let link = editor_model::link_form::wikilink(path, &self.explorer.paths);
-        let Some(doc) = self.doc_mut(&a.path) else {
+        let Some(doc) = self.tab_doc_mut(a.tab) else {
             return;
         };
         let Some(line) = doc.line_text(a.line) else {
@@ -218,7 +218,7 @@ impl crate::app::App {
         if a.path != path || a.tab != id || self.active_note().is_none_or(|t| t.id != id) {
             return None;
         }
-        let doc = self.doc(path)?;
+        let doc = self.tab_doc(id)?;
         Some(overlay(
             a,
             doc.top_line(),

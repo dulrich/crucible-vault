@@ -7,7 +7,10 @@ use std::time::Instant;
 use super::rename_order::{Order, deliver};
 use super::unsaved_dialog::{save, setup, type_x};
 use super::*;
+use crate::app::NoteId;
 use crate::daemon::Topic;
+use crate::message::{ExplorerMsg, SourceMsg};
+use iced::widget::pane_grid::Pane;
 
 fn file_changes(rx: &Receiver<Notification>) -> Vec<Notification> {
     rx.try_iter()
@@ -193,4 +196,158 @@ fn a_new_note_at_a_deleted_notes_path_is_another_note() {
     let outcome = job.run(d.as_ref());
     let _ = app.send(job.done(outcome));
     assert_eq!(d.read_file("ni6/a.md").expect("new").0, b"new note");
+}
+
+/// The tab (pane, index) whose document is `id`.
+fn tab_of(app: &App, id: NoteId) -> (Pane, usize) {
+    app.panes
+        .iter()
+        .find_map(|(p, ps)| {
+            ps.tabs
+                .iter()
+                .position(|t| t.note == Some(id))
+                .map(|i| (*p, i))
+        })
+        .expect("a tab of the document")
+}
+
+/// Focuses the tab of document `id`.
+fn focus_doc(app: &mut App, id: NoteId) {
+    let (p, i) = tab_of(app, id);
+    app.focus = p;
+    app.panes.get_mut(p).expect("pane").activate(i);
+}
+
+/// Two open documents at one path: a dirty document whose note was deleted (missing state),
+/// then another open note moved onto its path. Returns (missing id, moved id).
+fn two_docs_at_one_path(prefix: &str) -> (tempfile::TempDir, Arc<FakeDaemon>, App, NoteId, NoteId) {
+    let a = format!("{prefix}/a.md");
+    let b = format!("{prefix}/b.md");
+    let (tmp, d, mut app) = setup(&[a.as_str()]);
+    let gone = app.note_id(&a).expect("a bound");
+    type_x(&mut app);
+    let rx = d.subscribe(&[Topic::FileChanged]).expect("sub");
+    d.delete(&a).expect("delete");
+    feed(&mut app, file_changes(&rx));
+    assert!(app.doc(&a).is_some_and(|b| b.is_missing()));
+    d.create_note(&b, "other").expect("b");
+    let _ = app.send(Message::Explorer(ExplorerMsg::Open(b.clone())));
+    let moved = app.note_id(&b).expect("b bound");
+    let pair = d.daemon_move(&b, &a).expect("move onto a");
+    feed(&mut app, pair);
+    assert_eq!(app.docs.len(), 2, "both documents open");
+    assert_eq!(app.docs.path_of(gone).as_deref(), Some(a.as_str()));
+    assert_eq!(app.docs.path_of(moved).as_deref(), Some(a.as_str()));
+    (tmp, d, app, gone, moved)
+}
+
+fn text_of(app: &App, id: NoteId) -> String {
+    app.docs.by_id(id).expect("open").buffer.text()
+}
+
+/// Plan note-identity, WP-4: with two documents at one path each tab shows and edits its own
+/// document, and the path lookups take the live one (the same-path rule).
+#[test]
+fn two_documents_at_one_path_each_tab_edits_its_own() {
+    let (_tmp, _d, mut app, gone, moved) = two_docs_at_one_path("ni7");
+    assert_eq!(app.note_id("ni7/a.md"), Some(moved), "the live one wins");
+    focus_doc(&mut app, gone);
+    assert_eq!(app.active_doc().map(|b| b.text()), Some("xbody".into()));
+    type_x(&mut app);
+    assert_eq!(text_of(&app, gone), "xxbody");
+    assert_eq!(text_of(&app, moved), "other");
+    focus_doc(&mut app, moved);
+    assert_eq!(app.active_doc().map(|b| b.text()), Some("other".into()));
+    type_x(&mut app);
+    assert_eq!(text_of(&app, moved), "xother");
+    assert_eq!(text_of(&app, gone), "xxbody");
+}
+
+/// Each document's save addresses its own id: the moved note saves normally, and "Keep mine" on
+/// the missing one (whose path another note now holds) is refused (D3), never landing on it.
+#[test]
+fn two_documents_at_one_path_save_by_their_own_ids() {
+    let (_tmp, d, mut app, gone, moved) = two_docs_at_one_path("ni8");
+    focus_doc(&mut app, moved);
+    type_x(&mut app);
+    let job = app
+        .active_doc_mut()
+        .and_then(|b| b.begin_save())
+        .expect("save");
+    assert_eq!(job.id, Some(moved));
+    let outcome = job.run(d.as_ref());
+    let _ = app.send(job.done(outcome));
+    assert_eq!(d.read_file("ni8/a.md").expect("a").0, b"xother");
+    focus_doc(&mut app, gone);
+    let _ = app.send(Message::Source(SourceMsg::KeepMineNote(gone)));
+    app.pump();
+    assert_eq!(d.read_file("ni8/a.md").expect("a").0, b"xother", "refused");
+    assert_eq!(text_of(&app, gone), "xbody", "edits kept");
+    assert!(!app.docs.by_id(moved).expect("open").buffer.is_dirty());
+}
+
+/// Closing one tab of two same-path documents drops that document only; the other stays open
+/// and intact.
+#[test]
+fn closing_one_same_path_tab_leaves_the_other_document() {
+    let (_tmp, d, mut app, gone, moved) = two_docs_at_one_path("ni9");
+    // Take theirs on the missing one closes its tabs and drops it — not the moved note.
+    focus_doc(&mut app, gone);
+    let _ = app.send(Message::Source(SourceMsg::TakeTheirsNote(gone)));
+    assert!(app.docs.by_id(gone).is_none(), "missing document dropped");
+    assert_eq!(text_of(&app, moved), "other", "the other intact");
+    assert_eq!(app.open_paths(), ["ni9/a.md"]);
+    let (p, i) = tab_of(&app, moved);
+    let tab = app.panes.get(p).expect("pane").tabs[i].id;
+    let _ = app.close_tab(tab);
+    assert!(app.docs.is_empty());
+    assert_eq!(d.read_file("ni9/a.md").expect("a").0, b"other");
+    // And the reverse: closing the moved one's tab keeps the dirty missing document.
+    let (_tmp, _d, mut app, gone, moved) = two_docs_at_one_path("ni10");
+    let (p, i) = tab_of(&app, moved);
+    let tab = app.panes.get(p).expect("pane").tabs[i].id;
+    let _ = app.close_tab(tab);
+    assert!(app.docs.by_id(moved).is_none(), "the clean one closed");
+    assert_eq!(text_of(&app, gone), "xbody", "the missing one kept");
+}
+
+/// A tab moved to another pane keeps its document (by id), and a restored session binds its
+/// note tabs.
+#[test]
+fn a_moved_tab_keeps_its_document_and_restore_binds_tabs() {
+    let (tmp, d) = fake();
+    let d = Arc::new(d);
+    d.create_note("ni11/a.md", "body").expect("create");
+    let state = tmp.path().join("editor.json");
+    let id = {
+        let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+        let mut app = App::new(Some(dc), Some(state.clone()));
+        app.queue_rpcs();
+        let _ = app.send(Message::Explorer(ExplorerMsg::Open("ni11/a.md".into())));
+        let id = app.note_id("ni11/a.md").expect("bound");
+        let from = tab_of(&app, id);
+        let (to, _) = app
+            .panes
+            .split(
+                crate::panes::axis_of(crate::ui_state::SplitDir::Right),
+                from.0,
+                crate::panes::PaneState::default(),
+            )
+            .expect("split");
+        app.move_tab(from, to, None);
+        assert_eq!(tab_of(&app, id).0, to, "moved");
+        app.focus = to;
+        type_x(&mut app);
+        assert_eq!(text_of(&app, id), "xbody");
+        let _ = app.send(Message::PersistDue);
+        id
+    };
+    let dc: Arc<dyn DaemonClient> = Arc::clone(&d) as Arc<dyn DaemonClient>;
+    let app = App::new(Some(dc), Some(state));
+    assert_eq!(app.note_id("ni11/a.md"), Some(id));
+    let (p, i) = tab_of(&app, id);
+    assert_eq!(
+        app.panes.get(p).expect("pane").tabs[i].path(),
+        Some("ni11/a.md")
+    );
 }

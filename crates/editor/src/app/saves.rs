@@ -109,8 +109,17 @@ impl App {
 
     /// Why `path`'s edits could not be saved (`fallback` when no conflict / outage explains it).
     pub(super) fn loss_reason(&self, path: &str, fallback: &str) -> crate::dialog::LossReason {
+        self.loss_reason_id(self.docs.id_of(path), fallback)
+    }
+
+    /// [`Self::loss_reason`] for document `id` (a tab's document, plan note-identity, WP-4).
+    pub(super) fn loss_reason_id(
+        &self,
+        id: Option<NoteId>,
+        fallback: &str,
+    ) -> crate::dialog::LossReason {
         use crate::dialog::LossReason;
-        match buf(&self.docs, path) {
+        match buf_id(&self.docs, id) {
             Some(d) if d.is_missing() => LossReason::Missing,
             Some(d) if d.conflict().is_some() => LossReason::Conflict,
             _ if !self.status.connected => LossReason::Disconnected,
@@ -120,8 +129,16 @@ impl App {
 
     /// Opens the unsaved-edits dialog for one note's tab close.
     pub(super) fn close_dialog(&mut self, path: &str, ids: Vec<u64>, fallback: &str) {
+        self.close_dialog_id(self.docs.id_of(path), ids, fallback);
+    }
+
+    /// [`Self::close_dialog`] for document `id` (a tab's document, plan note-identity, WP-4).
+    pub(super) fn close_dialog_id(&mut self, id: Option<NoteId>, ids: Vec<u64>, fallback: &str) {
+        let Some(path) = self.docs.path_of_opt(id) else {
+            return;
+        };
         let mut losses = crate::dialog::UnsavedEdits::default();
-        losses.note(path, self.loss_reason(path, fallback));
+        losses.note(&path, self.loss_reason_id(id, fallback));
         self.dialog = Some(crate::dialog::Dialog::Unsaved {
             losses,
             then: crate::dialog::Discard::CloseTabs(ids),
@@ -129,10 +146,10 @@ impl App {
     }
 
     /// Each pane's active note path (WP-3 tab-switch flush snapshot).
-    pub(super) fn active_paths(&self) -> Vec<(Pane, String)> {
+    pub(super) fn active_paths(&self) -> Vec<(Pane, String, Option<NoteId>)> {
         self.panes
             .iter()
-            .filter_map(|(p, ps)| ps.active_note().map(|t| (*p, t.path.to_owned())))
+            .filter_map(|(p, ps)| ps.active_note().map(|t| (*p, t.path.to_owned(), t.note)))
             .collect()
     }
 
@@ -140,18 +157,28 @@ impl App {
     /// Alt+N, open/Quick Switch, history, closing a neighbour) runs through `update`, so one
     /// before/after comparison here flushes the note a pane switched away from — no per-path
     /// save calls. The tab must still exist (a closed tab already went through `close_tab`).
-    pub(super) fn flush_switched_away(&mut self, before: &[(Pane, String)]) -> Task<Message> {
-        let left: Vec<String> = before
+    pub(super) fn flush_switched_away(
+        &mut self,
+        before: &[(Pane, String, Option<NoteId>)],
+    ) -> Task<Message> {
+        // Plan note-identity, WP-4: the document a pane switched away from, by its tab's id.
+        let left: Vec<Option<NoteId>> = before
             .iter()
-            .filter(|(p, path)| {
+            .filter(|(p, path, note)| {
                 self.panes
                     .get(*p)
                     .and_then(|ps| ps.active_tab())
-                    .is_none_or(|t| !t.shows(path))
+                    .is_none_or(|t| !t.shows(path) || t.note != *note)
             })
-            .map(|(_, path)| path.clone())
+            .map(|(_, _, note)| *note)
             .collect();
-        Task::batch(left.iter().map(|path| self.flush_note(path)))
+        Task::batch(
+            left.into_iter()
+                .map(|note| match buf_id_mut(&mut self.docs, note) {
+                    Some(doc) => crate::source::flush(doc, self.daemon.as_ref()),
+                    None => Task::none(),
+                }),
+        )
     }
 
     /// Flushes the note tab at `path` now (no-op when clean, saving — re-queued — conflicted,
@@ -234,10 +261,20 @@ impl App {
         path: &str,
         after: Option<AfterSave>,
     ) -> Option<Task<Message>> {
-        if self.refuse_held_save(path) {
+        self.save_then_id(self.docs.id_of(path), after)
+    }
+
+    /// [`Self::save_then`] for document `id` (a tab's document, plan note-identity, WP-4).
+    pub(super) fn save_then_id(
+        &mut self,
+        id: Option<NoteId>,
+        after: Option<AfterSave>,
+    ) -> Option<Task<Message>> {
+        let path = self.docs.path_of_opt(id)?;
+        if self.refuse_held_save(&path) {
             return None;
         }
-        let job = buf_mut(&mut self.docs, path)?.begin_save()?;
+        let job = buf_id_mut(&mut self.docs, id)?.begin_save()?;
         let Some(after) = after else {
             return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));
         };

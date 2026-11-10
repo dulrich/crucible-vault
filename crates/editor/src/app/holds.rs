@@ -77,13 +77,14 @@ pub(super) fn source_gate(m: &SourceMsg) -> Gate {
         | SourceMsg::LinkKey(LinkKey::Enter | LinkKey::Tab)
         | SourceMsg::LinkPick(_) => Gate::Drop,
         SourceMsg::Cut => Gate::CopyOnly,
-        SourceMsg::Save | SourceMsg::KeepMine(_) => Gate::Refuse,
+        SourceMsg::Save | SourceMsg::KeepMine(_) | SourceMsg::KeepMineNote(_) => Gate::Refuse,
         // Every remaining variant passes; listed so a new `SourceMsg` fails to compile here.
         SourceMsg::Action(_)
         | SourceMsg::Key(SourceKey::Home { .. } | SourceKey::End { .. })
         | SourceMsg::Viewport { .. }
         | SourceMsg::Saved { .. }
         | SourceMsg::TakeTheirs(_)
+        | SourceMsg::TakeTheirsNote(_)
         | SourceMsg::MiddleClick { .. }
         | SourceMsg::CommandClick { .. }
         | SourceMsg::LinkKey(LinkKey::Up | LinkKey::Down | LinkKey::Escape) => Gate::Pass,

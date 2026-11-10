@@ -547,6 +547,7 @@ impl App {
             return;
         }
         self.docs.set_path(id, to);
+        self.retarget_note_tabs(id, id, to);
         self.move_path_state(&from, to);
         // Its pending filename edit is dropped and the text renders now under `to`.
         if let Some(od) = self.docs.by_id_mut(id) {
@@ -572,7 +573,9 @@ impl App {
         if from == to || self.docs.by_id(id).is_some_and(|d| d.buffer.is_dirty()) {
             return false;
         }
-        let absorber = if self.docs.contains_key(to) {
+        // `to` is a path the daemon named: the same-path rule picks its open document.
+        let open_absorber = self.docs.id_of(to);
+        let absorber = if open_absorber.is_some() {
             // Already open (possibly dirty): its document stays; the tabs just show it.
             None
         } else {
@@ -600,12 +603,15 @@ impl App {
             .panes
             .iter()
             .filter(|(_, ps)| ps.tabs.iter().any(|t| t.shows(to)))
-            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.shows(&from)).map(|t| t.id))
+            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.note == Some(id)).map(|t| t.id))
             .collect();
         for t in dup {
             self.remove_tab(t);
         }
         let retired = self.docs.remove_id(id);
+        let Some(aid) = open_absorber.or(absorber.as_ref().map(|a| a.id)) else {
+            return false;
+        };
         if let Some(mut a) = absorber {
             // The retired document's close waiters and Reading state carry over to the note
             // that absorbed it (as the rebuilt buffer did before ids).
@@ -616,8 +622,9 @@ impl App {
             a.reading.clear_title();
             self.docs.insert(a);
         }
+        self.retarget_note_tabs(id, aid, to);
         self.move_path_state(&from, to);
-        if let Some(od) = self.docs.get_mut(to)
+        if let Some(od) = self.docs.by_id_mut(aid)
             && od.reading.mode.shows_reading()
         {
             self.reading.recompute(od, self.daemon.as_ref());
@@ -634,7 +641,13 @@ impl App {
     /// stores by id and removes this tail.
     pub(super) fn move_path_state(&mut self, from: &str, to: &str) {
         for (_, ps) in self.panes.iter_mut() {
-            for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
+            // Note tabs bound to a document moved by id ([`Self::retarget_note_tabs`]); this
+            // retargets file tabs (and unbound note tabs) by path.
+            for t in ps
+                .tabs
+                .iter_mut()
+                .filter(|t| t.note.is_none() && t.shows(from))
+            {
                 t.retarget(to);
             }
             ps.history.retarget(from, to);
@@ -645,6 +658,19 @@ impl App {
         self.pdf_note_closed(from);
         self.views.rehost(from, to);
         self.views.invalidate(&[]);
+    }
+
+    /// Plan note-identity, WP-4: every tab of document `id` now shows document `new` at `to`
+    /// (`new == id` for a move; the absorber's id in the E2 tab move — the one place a tab's
+    /// note id changes). Its `TabKind::Note` path follows, so navigation, history and
+    /// persistence see `to`.
+    fn retarget_note_tabs(&mut self, id: NoteId, new: NoteId, to: &str) {
+        for (_, ps) in self.panes.iter_mut() {
+            for t in ps.tabs.iter_mut().filter(|t| t.note == Some(id)) {
+                t.note = Some(new);
+                t.retarget(to);
+            }
+        }
     }
 
     /// Plan usability-sprint-captures-links WP-5: after a save of note `id` landed, renames the
