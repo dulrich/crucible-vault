@@ -98,7 +98,9 @@ fn save_conflict_against_no_file_is_missing_and_take_theirs_closes_tabs() {
     std::fs::remove_file(d.vault_root().join("d2t/a.md")).expect("rm");
     save(&mut app, &d, "d2t/a.md");
     assert!(missing(&app, "d2t/a.md"));
-    let _ = app.send(Message::Source(SourceMsg::TakeTheirs("d2t/a.md".into())));
+    let _ = app.send(Message::Source(SourceMsg::TakeTheirs(
+        app.note_id("d2t/a.md").expect("open"),
+    )));
     assert!(app.open_paths().is_empty());
     assert!(app.doc("d2t/a.md").is_none());
     assert!(d.read_file("d2t/a.md").is_err(), "nothing written");

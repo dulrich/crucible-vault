@@ -315,8 +315,7 @@ impl App {
                 let absorber = match result {
                     _ if self.docs.id_of(path).is_some() => None,
                     Ok(o) if self.docs.by_id(o.id).is_none() => {
-                        let mut buffer = crate::source::SourceBuffer::new(path, &o.bytes, o.hash);
-                        buffer.set_note_id(o.id);
+                        let buffer = crate::source::SourceBuffer::new(o.id, path, &o.bytes, o.hash);
                         Some(OpenDoc {
                             id: o.id,
                             buffer,
@@ -355,8 +354,7 @@ impl App {
 
     /// A new document for note `id` read at `path`.
     pub(super) fn insert_doc(&mut self, id: NoteId, path: &str, bytes: &[u8], hash: ContentHash) {
-        let mut buffer = crate::source::SourceBuffer::new(path, bytes, hash);
-        buffer.set_note_id(id);
+        let buffer = crate::source::SourceBuffer::new(id, path, bytes, hash);
         let mode = self.initial_mode(path);
         let mut od = OpenDoc {
             id,

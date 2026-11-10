@@ -80,7 +80,7 @@ pub(super) fn duplicated() -> (tempfile::TempDir, Arc<FakeDaemon>, App, Pane, Pa
 
 pub(super) fn saved(app: &mut App, path: &str, seq: u64) {
     let _ = app.send(Message::Source(SourceMsg::Saved {
-        id: app.note_id(path),
+        id: app.note_id(path).expect("open"),
         seq,
         outcome: SaveOutcome::Saved(ContentHash::from_hex("h1")),
         at: None,

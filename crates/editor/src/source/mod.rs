@@ -99,26 +99,22 @@ pub fn update(
             };
             edited(buf, changed)
         }
-        SourceMsg::MiddleClick { path, at: p } => {
+        SourceMsg::MiddleClick { id, at: p } => {
             buf.perform(
                 Action::Click(Point::new(p.x - EDITOR_PADDING, p.y - EDITOR_PADDING)),
                 Instant::now(),
             );
-            clipboard::read_primary().map(move |text| {
-                Message::Source(SourceMsg::PastePrimary {
-                    path: path.clone(),
-                    text,
-                })
-            })
+            clipboard::read_primary()
+                .map(move |text| Message::Source(SourceMsg::PastePrimary { id, text }))
         }
-        SourceMsg::CommandClick { path, at: p } => {
+        SourceMsg::CommandClick { at: p, .. } => {
             buf.perform(
                 Action::Click(Point::new(p.x - EDITOR_PADDING, p.y - EDITOR_PADDING)),
                 Instant::now(),
             );
             let pos = buf.cursor().position;
             let line = buf.shaped().line(pos.line).map(|l| l.text.into_owned());
-            match line.and_then(|l| command_click_msg(&path, &l, pos.column)) {
+            match line.and_then(|l| command_click_msg(&buf.path, &l, pos.column)) {
                 Some(m) => Task::done(m),
                 None => Task::none(),
             }
@@ -133,9 +129,9 @@ pub fn update(
             Task::batch([write, edited(buf, changed)])
         }
         SourceMsg::Paste => {
-            let path = buf.path.clone();
+            let id = buf.note_id();
             let daemon = daemon.map(Arc::clone);
-            let p = path.clone();
+            let p = buf.path.clone();
             Task::perform(
                 async move {
                     tokio::task::spawn_blocking(move || {
@@ -152,15 +148,10 @@ pub fn update(
                         }
                     })
                 },
-                move |outcome| {
-                    Message::Source(SourceMsg::PasteResolved {
-                        path: path.clone(),
-                        outcome,
-                    })
-                },
+                move |outcome| Message::Source(SourceMsg::PasteResolved { id, outcome }),
             )
         }
-        SourceMsg::PasteResolved { path, outcome } => {
+        SourceMsg::PasteResolved { id, outcome } => {
             use crate::clipboard_image::PasteOutcome;
             match outcome {
                 PasteOutcome::Insert(s) => {
@@ -173,12 +164,8 @@ pub fn update(
                 }
                 PasteOutcome::Text { notice } => {
                     fx.extend(notice.map(Effect::Error));
-                    clipboard::read().map(move |text| {
-                        Message::Source(SourceMsg::PastePrimary {
-                            path: path.clone(),
-                            text,
-                        })
-                    })
+                    clipboard::read()
+                        .map(move |text| Message::Source(SourceMsg::PastePrimary { id, text }))
                 }
             }
         }
@@ -211,13 +198,13 @@ pub fn update(
                 Task::none()
             }
         }
-        SourceMsg::KeepMine(_) | SourceMsg::KeepMineNote(_) => spawn_save(daemon, buf.keep_mine()),
+        SourceMsg::KeepMine(_) => spawn_save(daemon, buf.keep_mine()),
         // Routed by the app (`App::update_inner`); never reaches here.
         SourceMsg::Viewport { .. }
         | SourceMsg::Saved { .. }
         | SourceMsg::LinkKey(_)
         | SourceMsg::LinkPick(_) => Task::none(),
-        SourceMsg::TakeTheirs(_) | SourceMsg::TakeTheirsNote(_) => {
+        SourceMsg::TakeTheirs(_) => {
             let path = buf.path().to_owned();
             if let Some(d) = daemon {
                 match d.read_file(&path) {

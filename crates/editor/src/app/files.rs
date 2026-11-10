@@ -338,7 +338,10 @@ impl App {
                 to,
             });
         }
-        self.save_then(path, Some(AfterSave::Rename(to)))
+        let Some(id) = self.docs.id_of(path) else {
+            return Task::none();
+        };
+        self.save_then(id, Some(AfterSave::Rename(to)))
             .unwrap_or_else(|| {
                 self.status
                     .set_error("rename not done (the note is saving or has a conflict)".into());
@@ -495,9 +498,7 @@ impl App {
         if edited {
             od.buffer.follow_move(hash);
         } else if !od.buffer.holds_bytes(&hash) {
-            let mut b = crate::source::SourceBuffer::new(&from, &bytes, hash);
-            b.set_note_id(id);
-            od.buffer = b;
+            od.buffer = crate::source::SourceBuffer::new(id, &from, &bytes, hash);
         }
         self.move_doc_path(id, to);
         if edited {
@@ -743,7 +744,7 @@ impl App {
                 };
                 doc.settle_title();
                 if held {
-                    crate::source::autosave_timer(Some(id), doc.edit_seq())
+                    crate::source::autosave_timer(id, doc.edit_seq())
                 } else {
                     Task::none()
                 }

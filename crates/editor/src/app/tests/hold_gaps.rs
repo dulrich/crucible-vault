@@ -115,7 +115,7 @@ fn held_replies_post_the_hold_notice_for_save_rename_delete_and_set_bool() {
     clear_notice(&mut app);
     let _ = app.send(Message::Explorer(crate::message::ExplorerMsg::NoteDeleted(
         Err(crate::daemon::rpc_err(
-            &d.delete_note("hr/closed.md", &[], crate::daemon::DeleteMode::Trash)
+            &d.delete_note(None, "hr/closed.md", &[], crate::daemon::DeleteMode::Trash)
                 .expect_err("held"),
         )),
     )));

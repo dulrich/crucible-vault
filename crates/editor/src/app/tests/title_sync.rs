@@ -173,7 +173,7 @@ fn title_rename_waits_for_an_in_flight_follow_up_save() {
     let base = d.read_file("ts6/Old.md").expect("disk").1;
     let h = d.write_note("ts6/Old.md", &text, &base).expect("write");
     let _ = app.send(Message::Source(crate::message::SourceMsg::Saved {
-        id: app.note_id("ts6/Old.md"),
+        id: app.note_id("ts6/Old.md").expect("open"),
         seq,
         outcome: crate::source::SaveOutcome::Saved(h),
         at: None,

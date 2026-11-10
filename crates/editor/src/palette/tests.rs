@@ -1272,7 +1272,12 @@ fn persisted_command_ids_are_pinned() {
 fn context_line_is_the_cursors_zero_based_index() {
     use iced::widget::text_editor::{Cursor, Position};
     let text = "# Today\n\n- [ ] forward me\n- [ ] not me\n";
-    let mut b = SourceBuffer::new("d.md", text.as_bytes(), ContentHash::of(text.as_bytes()));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("d.md"),
+        "d.md",
+        text.as_bytes(),
+        ContentHash::of(text.as_bytes()),
+    );
     b.move_to(Cursor {
         position: Position { line: 2, column: 4 },
         selection: None,

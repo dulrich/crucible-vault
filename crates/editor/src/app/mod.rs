@@ -161,9 +161,14 @@ impl Docs {
         self.by_id.get(&id).map(|d| d.buffer.path().to_owned())
     }
 
-    /// [`Self::path_of`] for an optional id.
-    pub fn path_of_opt(&self, id: Option<NoteId>) -> Option<String> {
-        self.path_of(id?)
+    /// The source buffer of a tab's document ([`Tab::note`]; `None` for a tab with none).
+    pub fn buffer(&self, note: Option<NoteId>) -> Option<&crate::source::SourceBuffer> {
+        self.by_id(note?).map(|d| &d.buffer)
+    }
+
+    /// [`Self::buffer`], mutably.
+    pub fn buffer_mut(&mut self, note: Option<NoteId>) -> Option<&mut crate::source::SourceBuffer> {
+        self.by_id_mut(note?).map(|d| &mut d.buffer)
     }
 
     /// Opens `doc` (keyed by its own id).
@@ -230,16 +235,6 @@ pub use crate::daemon::{NoteId, NoteLocation};
 /// The source buffer of the document open at `path` (a field-level borrow of [`App::docs`]).
 fn buf<'a>(docs: &'a Docs, path: &str) -> Option<&'a crate::source::SourceBuffer> {
     docs.get(path).map(|d| &d.buffer)
-}
-
-/// The source buffer of document `id` (a tab's document, plan note-identity, WP-4).
-fn buf_id(docs: &Docs, id: Option<NoteId>) -> Option<&crate::source::SourceBuffer> {
-    docs.by_id(id?).map(|d| &d.buffer)
-}
-
-/// [`buf_id`], mutably.
-fn buf_id_mut(docs: &mut Docs, id: Option<NoteId>) -> Option<&mut crate::source::SourceBuffer> {
-    docs.by_id_mut(id?).map(|d| &mut d.buffer)
 }
 
 /// [`buf`], mutably.

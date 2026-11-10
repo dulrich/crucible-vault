@@ -42,7 +42,10 @@ impl App {
         if !buf(&self.docs, &path).is_some_and(|d| d.is_dirty()) {
             return self.begin_delete(path);
         }
-        self.save_then(&path, Some(AfterSave::Delete))
+        let Some(id) = self.docs.id_of(&path) else {
+            return self.begin_delete(path);
+        };
+        self.save_then(id, Some(AfterSave::Delete))
             .unwrap_or_else(|| {
                 self.status
                     .set_error("delete not done (the note is saving or has a conflict)".into());
@@ -79,10 +82,17 @@ impl App {
             self.dialog = Some(crate::dialog::Dialog::DeleteUnsaved(path));
             return Task::none();
         }
-        let p = path.clone();
+        // An open document is addressed by its id: the preview names its current path.
+        let id = self.docs.id_of(&path);
         self.rpc(
-            move |d| d.delete_preview(&p).map_err(|e| e.to_string()),
-            move |result| Message::Explorer(ExplorerMsg::DeletePreview { path, result }),
+            move |d| match d.delete_preview(id, &path) {
+                Ok(r) => Ok((r.path.unwrap_or(path), Ok(r.items))),
+                Err(e) => Ok((path, Err(e.to_string()))),
+            },
+            |r| {
+                let (path, result) = r.unwrap_or_else(|e| (String::new(), Err(e)));
+                Message::Explorer(ExplorerMsg::DeletePreview { path, result })
+            },
         )
     }
 
@@ -98,28 +108,21 @@ impl App {
             self.dialog = Some(crate::dialog::Dialog::DeleteUnsaved(path));
             return Task::none();
         }
+        let id = self.docs.id_of(&path);
         self.rpc(
             move |d| {
-                d.delete_note(&path, &attachments, mode)
+                d.delete_note(id, &path, &attachments, mode)
                     .map_err(|e| crate::daemon::rpc_err(&e))
             },
             |r| Message::Explorer(ExplorerMsg::NoteDeleted(r)),
         )
     }
 
-    /// Why `path`'s edits could not be saved (`fallback` when no conflict / outage explains it).
-    pub(super) fn loss_reason(&self, path: &str, fallback: &str) -> crate::dialog::LossReason {
-        self.loss_reason_id(self.docs.id_of(path), fallback)
-    }
-
-    /// [`Self::loss_reason`] for document `id` (a tab's document, plan note-identity, WP-4).
-    pub(super) fn loss_reason_id(
-        &self,
-        id: Option<NoteId>,
-        fallback: &str,
-    ) -> crate::dialog::LossReason {
+    /// Why document `id`'s edits could not be saved (`fallback` when no conflict / outage
+    /// explains it).
+    pub(super) fn loss_reason(&self, id: NoteId, fallback: &str) -> crate::dialog::LossReason {
         use crate::dialog::LossReason;
-        match buf_id(&self.docs, id) {
+        match self.docs.by_id(id).map(|d| &d.buffer) {
             Some(d) if d.is_missing() => LossReason::Missing,
             Some(d) if d.conflict().is_some() => LossReason::Conflict,
             _ if !self.status.connected => LossReason::Disconnected,
@@ -127,18 +130,13 @@ impl App {
         }
     }
 
-    /// Opens the unsaved-edits dialog for one note's tab close.
-    pub(super) fn close_dialog(&mut self, path: &str, ids: Vec<u64>, fallback: &str) {
-        self.close_dialog_id(self.docs.id_of(path), ids, fallback);
-    }
-
-    /// [`Self::close_dialog`] for document `id` (a tab's document, plan note-identity, WP-4).
-    pub(super) fn close_dialog_id(&mut self, id: Option<NoteId>, ids: Vec<u64>, fallback: &str) {
-        let Some(path) = self.docs.path_of_opt(id) else {
+    /// Opens the unsaved-edits dialog for the tab close of document `id`.
+    pub(super) fn close_dialog(&mut self, id: NoteId, ids: Vec<u64>, fallback: &str) {
+        let Some(path) = self.docs.path_of(id) else {
             return;
         };
         let mut losses = crate::dialog::UnsavedEdits::default();
-        losses.note(&path, self.loss_reason_id(id, fallback));
+        losses.note(&path, self.loss_reason(id, fallback));
         self.dialog = Some(crate::dialog::Dialog::Unsaved {
             losses,
             then: crate::dialog::Discard::CloseTabs(ids),
@@ -174,8 +172,8 @@ impl App {
             .collect();
         Task::batch(
             left.into_iter()
-                .map(|note| match buf_id_mut(&mut self.docs, note) {
-                    Some(doc) => crate::source::flush(doc, self.daemon.as_ref()),
+                .map(|note| match note.and_then(|i| self.docs.by_id_mut(i)) {
+                    Some(od) => crate::source::flush(&mut od.buffer, self.daemon.as_ref()),
                     None => Task::none(),
                 }),
         )
@@ -253,28 +251,19 @@ impl App {
         (paths, Task::batch(tasks))
     }
 
-    /// The one save path. Starts `path`'s
-    /// save; `after` (a save-first continuation) runs when it lands, `None` is a plain save.
-    /// `None` back when no save can start (clean, in flight, renaming or conflicted).
+    /// The one save path. Starts document `id`'s save; `after` (a save-first continuation)
+    /// runs when it lands, `None` is a plain save. `None` back when no save can start (clean,
+    /// in flight, renaming or conflicted).
     pub(super) fn save_then(
         &mut self,
-        path: &str,
+        id: NoteId,
         after: Option<AfterSave>,
     ) -> Option<Task<Message>> {
-        self.save_then_id(self.docs.id_of(path), after)
-    }
-
-    /// [`Self::save_then`] for document `id` (a tab's document, plan note-identity, WP-4).
-    pub(super) fn save_then_id(
-        &mut self,
-        id: Option<NoteId>,
-        after: Option<AfterSave>,
-    ) -> Option<Task<Message>> {
-        let path = self.docs.path_of_opt(id)?;
+        let path = self.docs.path_of(id)?;
         if self.refuse_held_save(&path) {
             return None;
         }
-        let job = buf_id_mut(&mut self.docs, id)?.begin_save()?;
+        let job = self.docs.by_id_mut(id)?.buffer.begin_save()?;
         let Some(after) = after else {
             return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));
         };
@@ -301,7 +290,7 @@ impl App {
     /// itself) and the close/quit waiters, then resumes the continuation.
     pub(super) fn on_save_landed(
         &mut self,
-        id: Option<NoteId>,
+        id: NoteId,
         seq: u64,
         (outcome, at): crate::source::Landing,
         after: Option<AfterSave>,
@@ -311,13 +300,13 @@ impl App {
         // document closed meanwhile is `Landed::Gone`.
         // The reply says where the daemon acted: the document takes that path (the one move
         // function), then the outcome applies as a plain one.
-        if let (Some(to), Some(i)) = (at, id) {
-            self.move_doc_path(i, &to);
+        if let Some(to) = at {
+            self.move_doc_path(id, &to);
         }
-        let path = id.and_then(|i| self.docs.path_of(i));
         let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
-        let result = id
-            .and_then(|i| self.docs.by_id_mut(i))
+        let result = self
+            .docs
+            .by_id_mut(id)
             .map(|d| d.buffer.finish_save(seq, outcome));
         // Plan round-18 WP-2: a daemon `HELD` refusal keeps the buffer dirty and posts the one
         // hold notice (not a generic failure); later text sees a plain message.
@@ -338,13 +327,11 @@ impl App {
         {
             self.status.set_error(format!("save failed: {e}"));
         }
-        let follow = match (&result, &path) {
-            (Some(Ok(true)), Some(p)) => self.save_then(p, after.clone()),
+        let follow = match &result {
+            Some(Ok(true)) => self.save_then(id, after.clone()),
             _ => None,
         };
-        let dirty = id
-            .and_then(|i| self.docs.by_id(i))
-            .is_some_and(|d| d.buffer.is_dirty());
+        let dirty = self.docs.by_id(id).is_some_and(|d| d.buffer.is_dirty());
         let landed = match result {
             None => Landed::Gone,
             Some(Err(e)) => Landed::Failed(e),
@@ -354,29 +341,25 @@ impl App {
         };
         // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this save was
         // in flight resyncs now (a follow-up save already started runs on the current client).
-        let resync = match id {
-            Some(i)
-                if self
-                    .docs
-                    .by_id_mut(i)
-                    .is_some_and(|d| d.buffer.take_resync_pending() && !d.buffer.is_saving()) =>
-            {
-                self.resync_doc(i)
-            }
-            _ => Task::none(),
+        let resync = if self
+            .docs
+            .by_id_mut(id)
+            .is_some_and(|d| d.buffer.take_resync_pending() && !d.buffer.is_saving())
+        {
+            self.resync_doc(id)
+        } else {
+            Task::none()
         };
         // Plan usability-sprint-captures-links WP-5: a landed save that changed `title`.
-        let sync = match id {
-            Some(i) if ok && after.is_none() => self.title_sync(i),
-            _ => Task::none(),
+        let sync = if ok && after.is_none() {
+            self.title_sync(id)
+        } else {
+            Task::none()
         };
         // A save for a document no longer open resolves any wait as landed.
         let waiters = self.note_save_landed(id, ok || matches!(landed, Landed::Gone));
         let resume = match after {
-            Some(a) if follow.is_none() => {
-                let path = id.and_then(|i| self.docs.path_of(i)).or(path);
-                self.resume_after(id, path.as_deref().unwrap_or_default(), a, &landed)
-            }
+            Some(a) if follow.is_none() => self.resume_after(id, a, &landed),
             _ => Task::none(),
         };
         Task::batch([
@@ -390,14 +373,13 @@ impl App {
 
     /// A save-first continuation after its save landed. Only `Clean` (or a closed
     /// document) proceeds; a failed save never closes, quits, deletes, renames or runs — except
-    /// a run, which today proceeds over a newer unsaved edit.
-    fn resume_after(
-        &mut self,
-        id: Option<NoteId>,
-        path: &str,
-        after: AfterSave,
-        landed: &Landed,
-    ) -> Task<Message> {
+    /// a run, which today proceeds over a newer unsaved edit. Every continuation that needs the
+    /// note's path has an open document (`Landed::Gone` is the only closed case).
+    fn resume_after(&mut self, note: NoteId, after: AfterSave, landed: &Landed) -> Task<Message> {
+        let Some(path) = self.docs.path_of(note) else {
+            return self.resume_gone(note, after);
+        };
+        let path = path.as_str();
         let clean = matches!(landed, Landed::Clean | Landed::Gone);
         let (why, refusal) = match landed {
             Landed::Failed(e) => (e.clone(), format!("save failed: {e}")),
@@ -414,23 +396,20 @@ impl App {
             // Audit E1: the close removes exactly the tab it was asked for (by id).
             AfterSave::CloseTab(id) => {
                 if panes::find_id(&self.panes, id).is_some() && !(clean && self.remove_tab(id)) {
-                    self.close_dialog(path, vec![id], &why);
+                    self.close_dialog(note, vec![id], &why);
                 }
             }
             AfterSave::Quit => {
-                let reason = (!clean).then(|| self.loss_reason(path, &why));
+                let reason = (!clean).then(|| self.loss_reason(note, &why));
                 let Some(q) = &mut self.quit else {
                     return Task::none();
                 };
-                if let Some(i) = id {
-                    q.pending.remove(&i);
-                }
+                q.pending.remove(&note);
                 if let Some(reason) = reason {
                     q.losses.note(path, reason);
                 }
                 return self.quit_progress();
             }
-            AfterSave::Delete | AfterSave::Rename(_) if matches!(landed, Landed::Gone) => {}
             AfterSave::Delete if clean => return self.begin_delete(path.to_owned()),
             AfterSave::Rename(to) if clean => {
                 return self.dispatch_op(FileOp::Rename {
@@ -445,9 +424,7 @@ impl App {
                 .status
                 .set_error(format!("rename not done ({refusal})")),
             AfterSave::RunCall(call) => match landed {
-                Landed::Gone => self
-                    .status
-                    .set_error(format!("{}: not run (note closed)", call.title)),
+                Landed::Gone => return self.resume_gone(note, AfterSave::RunCall(call)),
                 Landed::Clean | Landed::Changed => {
                     let reading_sel = self
                         .active_note()
@@ -465,16 +442,33 @@ impl App {
         Task::none()
     }
 
+    /// [`Self::resume_after`] for a document closed before its save landed: a close or quit
+    /// proceeds, a delete or rename is dropped, a run is refused.
+    fn resume_gone(&mut self, note: NoteId, after: AfterSave) -> Task<Message> {
+        match after {
+            AfterSave::CloseTab(id) => {
+                self.remove_tab(id);
+            }
+            AfterSave::Quit => {
+                let Some(q) = &mut self.quit else {
+                    return Task::none();
+                };
+                q.pending.remove(&note);
+                return self.quit_progress();
+            }
+            AfterSave::Delete | AfterSave::Rename(_) => {}
+            AfterSave::RunCall(call) => self
+                .status
+                .set_error(format!("{}: not run (note closed)", call.title)),
+        }
+        Task::none()
+    }
+
     /// WP-3 rework: a normal note save (`SourceMsg::Saved`, already applied to the buffer)
     /// landed; resolves a close or quit waiting on it. Clean → done; saved but a queued
     /// follow-up is in flight → keep waiting; conflict, failure or a newer unsaved edit →
     /// cancel with a status message. Every await ends here, so the wait is bounded.
-    pub(super) fn note_save_landed(&mut self, id: Option<NoteId>, ok: bool) -> Task<Message> {
-        let Some(id) = id else {
-            return Task::none();
-        };
-        let path = self.docs.path_of(id).unwrap_or_default();
-        let path = path.as_str();
+    pub(super) fn note_save_landed(&mut self, id: NoteId, ok: bool) -> Task<Message> {
         let waiting_quit = self.quit.as_ref().is_some_and(|q| q.awaiting.contains(&id));
         let waiting_close = self
             .docs
@@ -511,16 +505,17 @@ impl App {
                     .filter(|id| panes::find_id(&self.panes, *id).is_some())
                     .collect();
                 if !ids.is_empty() && self.quit.is_none() {
-                    self.close_dialog(path, ids, why);
+                    self.close_dialog(id, ids, why);
                 }
             }
         }
         if waiting_quit {
-            let reason = (!done).then(|| self.loss_reason(path, why));
+            let reason = (!done).then(|| self.loss_reason(id, why));
+            let path = self.docs.path_of(id);
             if let Some(q) = &mut self.quit {
                 q.awaiting.remove(&id);
-                if let Some(reason) = reason {
-                    q.losses.note(path, reason);
+                if let (Some(reason), Some(path)) = (reason, path) {
+                    q.losses.note(&path, reason);
                 }
             }
             return self.quit_progress();
@@ -573,13 +568,16 @@ impl App {
                 held.insert(path);
                 continue;
             }
-            let reason = self.loss_reason(&path, "the save could not start");
-            if let Some(t) = self.save_then(&path, Some(AfterSave::Quit)) {
+            let Some(note) = self.docs.id_of(&path) else {
+                continue;
+            };
+            let reason = self.loss_reason(note, "the save could not start");
+            if let Some(t) = self.save_then(note, Some(AfterSave::Quit)) {
                 saves.push(t);
-                pending.extend(self.docs.id_of(&path));
+                pending.insert(note);
             } else if buf(&self.docs, &path).is_some_and(|d| d.is_saving()) {
                 // WP-3 rework: in flight — `begin_save` queued the follow-up; await it.
-                awaiting.extend(self.docs.id_of(&path));
+                awaiting.insert(note);
             } else {
                 // Conflict / missing file (or a save that cannot start).
                 losses.note(&path, reason);

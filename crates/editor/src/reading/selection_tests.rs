@@ -35,6 +35,7 @@ fn renderer() -> iced::Renderer {
 
 fn buffer(text: &str) -> SourceBuffer {
     SourceBuffer::new(
+        crate::daemon::bound_id(PATH),
         PATH,
         text.as_bytes(),
         crate::daemon::ContentHash::of(text.as_bytes()),

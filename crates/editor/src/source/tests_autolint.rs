@@ -20,7 +20,12 @@ fn cfg() -> AutoLint {
 }
 
 fn buffer(path: &str) -> SourceBuffer {
-    SourceBuffer::new(path, NOTE.as_bytes(), ContentHash::of(NOTE.as_bytes()))
+    SourceBuffer::new(
+        crate::daemon::bound_id(path),
+        path,
+        NOTE.as_bytes(),
+        ContentHash::of(NOTE.as_bytes()),
+    )
 }
 
 fn at(line: usize, column: usize) -> Cursor {
@@ -115,7 +120,12 @@ fn skipped_when_disabled_or_without_frontmatter() {
     assert!(!b.auto_lint(&c, Instant::now()));
 
     let bare = "just a body\n";
-    let mut b = SourceBuffer::new("b.md", bare.as_bytes(), ContentHash::of(bare.as_bytes()));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("b.md"),
+        "b.md",
+        bare.as_bytes(),
+        ContentHash::of(bare.as_bytes()),
+    );
     b.move_to(at(0, 4));
     assert!(b.perform(Action::Edit(Edit::Insert('x')), Instant::now()));
     assert!(!b.auto_lint(&cfg(), Instant::now()));

@@ -6,7 +6,7 @@ use iced::widget::text_editor::{self, Content};
 
 use super::place::{VISIBLE_LINES, fresh_view};
 use super::save::SaveState;
-use crate::daemon::ContentHash;
+use crate::daemon::{ContentHash, NoteId};
 
 /// The buffer text: a shaped iced `Content` while the tab is visible in Source/Split, else the
 /// plain text plus the saved cursor/selection (plan editor-cutover-blockers WP-2 — a shaped
@@ -74,12 +74,13 @@ pub(super) fn to_iced(c: undo::Cursor) -> text_editor::Cursor {
 
 impl SourceBuffer {
     /// A buffer over bytes read from disk with their daemon content hash.
-    pub fn new(path: &str, bytes: &[u8], hash: ContentHash) -> Self {
-        Self::with_cap(path, bytes, hash, undo::DEFAULT_CAP_BYTES)
+    /// `id` is the note it belongs to (plan note-identity D4; it never changes afterwards).
+    pub fn new(id: NoteId, path: &str, bytes: &[u8], hash: ContentHash) -> Self {
+        Self::with_cap(id, path, bytes, hash, undo::DEFAULT_CAP_BYTES)
     }
 
     /// As [`Self::new`] with an explicit undo byte cap.
-    pub fn with_cap(path: &str, bytes: &[u8], hash: ContentHash, cap: usize) -> Self {
+    pub fn with_cap(id: NoteId, path: &str, bytes: &[u8], hash: ContentHash, cap: usize) -> Self {
         let text = String::from_utf8_lossy(bytes).into_owned();
         let title = crate::header::frontmatter_title(&text);
         Self {
@@ -90,7 +91,7 @@ impl SourceBuffer {
             },
             history: UndoHistory::new(cap),
             edit_seq: 0,
-            save: SaveState::new(hash, title),
+            save: SaveState::new(id, hash, title),
             epoch: 0,
             primary: None,
             top_line: 0,

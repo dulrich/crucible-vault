@@ -67,20 +67,12 @@ impl App {
             Message::Settings(m) => return self.update_settings(m),
             Message::Log(m) => return self.update_log(m),
             Message::Explorer(m) => return self.update_explorer(m),
-            Message::Source(SourceMsg::TakeTheirs(path))
-                if buf(&self.docs, &path).is_some_and(|d| d.is_missing()) =>
-            {
-                // plan editor-data-safety WP-2: the file is gone — discard and close its tabs.
-                while let Some(id) = self.tab_at(panes::find(&self.panes, &path)).map(|t| t.id) {
-                    self.remove_tab(id);
-                }
-                self.docs.remove(&path);
-            }
-            Message::Source(SourceMsg::TakeTheirsNote(id))
+            Message::Source(SourceMsg::TakeTheirs(id))
                 if self.docs.by_id(id).is_some_and(|d| d.buffer.is_missing()) =>
             {
-                // Plan note-identity, WP-4: the same, for the tab's own document — only the
-                // tabs of document `id` close, never another document's at the same path.
+                // plan editor-data-safety WP-2: the file is gone — discard and close its tabs;
+                // plan note-identity WP-4: only the tabs of document `id` close, never another
+                // document's at the same path.
                 let tabs: Vec<u64> = self
                     .panes
                     .iter()
@@ -140,7 +132,6 @@ impl App {
                 );
                 // Plan note-identity, WP-4: the active tab's input goes to its own document.
                 let note = match m.target() {
-                    SourceTarget::Path(p) => self.docs.id_of(p),
                     SourceTarget::Note(id) => Some(id),
                     SourceTarget::Active => active_note,
                     SourceTarget::App => None,
@@ -534,7 +525,7 @@ impl App {
             .panes
             .get(self.focus)
             .and_then(PaneState::active_note)
-            .and_then(|t| buf_id(&self.docs, t.note));
+            .and_then(|t| self.docs.buffer(t.note));
         self.panels.sync_buffer(tab, d.as_deref());
         if let Some(d) = &d
             && let Err(e) = self.panels.sync_tags(d.as_ref(), generation)

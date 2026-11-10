@@ -8,14 +8,14 @@ use std::sync::mpsc::Receiver;
 use cv_protocol::client::{ClientError, RpcClient};
 use cv_protocol::{
     BindNoteParams, CreateNoteParams, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams,
-    HelloResult, LocateNoteParams, PathParams, RenameParams, SubscribeParams, ViewRunParams,
-    WriteAttachmentParams, WriteNoteParams, WriteNoteResult, methods as m,
+    DeletePreviewResult, HelloResult, LocateNoteParams, PathParams, RenameParams, SubscribeParams,
+    ViewRunParams, WriteAttachmentParams, WriteNoteParams, WriteNoteResult, methods as m,
 };
 
 use super::{
-    ActionInfo, ContentHash, DaemonClient, DaemonError, DeletePreviewItem, LocalIndex, NoteId,
-    NoteLocation, Notification, Result, RunActionParams, RunActionResult, StatusResult, Topic,
-    ViewResult, ViewsListResult,
+    ActionInfo, ContentHash, DaemonClient, DaemonError, LocalIndex, NoteId, NoteLocation,
+    Notification, Result, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
+    ViewsListResult,
 };
 
 impl From<ClientError> for DaemonError {
@@ -197,22 +197,21 @@ impl DaemonClient for SocketDaemon {
         .map(drop)
     }
 
-    fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
+    fn delete_preview(&self, id: Option<NoteId>, path: &str) -> Result<DeletePreviewResult> {
         let path = path.to_owned();
-        Ok(self
-            .call::<m::DeletePreview>(PathParams { id: None, path })?
-            .items)
+        self.call::<m::DeletePreview>(PathParams { id, path })
     }
 
     fn delete_note(
         &self,
+        id: Option<NoteId>,
         path: &str,
         attachments: &[String],
         mode: DeleteMode,
     ) -> Result<DeleteNoteResult> {
         let (path, attachments) = (path.to_owned(), attachments.to_vec());
         self.call::<m::DeleteNote>(DeleteNoteParams {
-            id: None,
+            id,
             path,
             attachments,
             mode,

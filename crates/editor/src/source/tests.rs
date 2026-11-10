@@ -211,7 +211,8 @@ fn dirty_buffer_external_change_shows_bar_and_take_theirs_reloads() {
         Some(&Conflict::Changed(theirs.clone()))
     );
     assert!(buf(&mut app).text().starts_with('x'), "buffer kept");
-    let _ = app.send(Message::Source(SourceMsg::TakeTheirs(p.clone())));
+    let id = buf(&mut app).note_id();
+    let _ = app.send(Message::Source(SourceMsg::TakeTheirs(id)));
     let b = buf(&mut app);
     assert_eq!(b.text(), "external\n");
     assert!(b.conflict().is_none() && !b.is_dirty());
@@ -263,7 +264,12 @@ fn save_in_flight_queues_one_follow_up() {
 fn undo_on_one_megabyte_buffer_timing() {
     let line = "lorem ipsum dolor sit amet [[link]] #tag consectetur adipiscing\n";
     let text = line.repeat(1_000_000 / line.len() + 1);
-    let mut b = SourceBuffer::new("big.md", text.as_bytes(), ContentHash::of(text.as_bytes()));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("big.md"),
+        "big.md",
+        text.as_bytes(),
+        ContentHash::of(text.as_bytes()),
+    );
     b.move_to(Cursor {
         position: Position {
             line: 7000,
@@ -346,7 +352,12 @@ fn highlighter_change_line_reentry() {
 
 #[test]
 fn materialise_round_trip_keeps_text_cursor_undo_and_save_state() {
-    let mut b = SourceBuffer::new("n.md", b"alpha\nbeta\r\ngamma\n", ContentHash::of(b"x"));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("n.md"),
+        "n.md",
+        b"alpha\nbeta\r\ngamma\n",
+        ContentHash::of(b"x"),
+    );
     assert!(!b.is_shaped(), "new buffers start plain");
     let now = Instant::now();
     b.move_to(Cursor {
@@ -420,7 +431,12 @@ fn view_tree_position_stable_across_dirty_states() {
         let el = view(b, t, false, crate::theme::BASE_TEXT_SIZE, &km, None, None);
         Tree::new(&el).children.iter().map(|c| c.tag).collect()
     }
-    let mut b = SourceBuffer::new("n.md", b"text\n", ContentHash::of(b"text\n"));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("n.md"),
+        "n.md",
+        b"text\n",
+        ContentHash::of(b"text\n"),
+    );
     b.set_shaped(true);
     let clean = shape(&b);
     assert!(b.perform(Action::Edit(Edit::Insert('x')), Instant::now()));
@@ -542,10 +558,11 @@ fn smart_home_end_on_unwrapped_lines() {
 
 #[test]
 fn primary_paste_inserts_as_one_edit() {
-    let (_t, _d, mut app, p) = setup();
+    let (_t, _d, mut app, _p) = setup();
     at(&mut app, 0, 4, None);
+    let id = buf(&mut app).note_id();
     let _ = app.send(Message::Source(SourceMsg::PastePrimary {
-        path: p,
+        id,
         text: Some(" big".into()),
     }));
     assert_eq!(buf(&mut app).text(), "line big one\nline two\nline three\n");
@@ -558,7 +575,12 @@ fn primary_paste_inserts_as_one_edit() {
 #[test]
 fn toggle_frontmatter_bool_flips_only_the_scalar() {
     let src = "---\nread: false # x\ntags: [a]\n---\nbody\n";
-    let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("t.md"),
+        "t.md",
+        src.as_bytes(),
+        ContentHash::of(src.as_bytes()),
+    );
     let seq = b.edit_seq();
     assert!(b.set_frontmatter_bool("read", None, Instant::now()));
     assert_eq!(b.text(), "---\nread: true # x\ntags: [a]\n---\nbody\n");
@@ -584,7 +606,12 @@ fn toggle_frontmatter_bool_upserts_in_one_undo_step() {
         ),
         ("body\n", "---\nread: true\n---\nbody\n"),
     ] {
-        let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+        let mut b = SourceBuffer::new(
+            crate::daemon::bound_id("t.md"),
+            "t.md",
+            src.as_bytes(),
+            ContentHash::of(src.as_bytes()),
+        );
         let seq = b.edit_seq();
         assert!(b.set_frontmatter_bool("read", None, Instant::now()));
         assert_eq!(b.text(), want);
@@ -597,7 +624,12 @@ fn toggle_frontmatter_bool_upserts_in_one_undo_step() {
 #[test]
 fn toggle_task_on_plain_buffer_is_one_undoable_edit() {
     let src = "---\na: 1\n---\n- [ ] one\n- [/] two\n";
-    let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("t.md"),
+        "t.md",
+        src.as_bytes(),
+        ContentHash::of(src.as_bytes()),
+    );
     assert!(!b.is_shaped(), "a fresh buffer stays plain (Reading mode)");
     let seq = b.edit_seq();
     assert!(b.toggle_task(3, Instant::now()));
@@ -619,7 +651,12 @@ fn toggle_task_on_plain_buffer_is_one_undoable_edit() {
 #[test]
 fn toggle_task_on_shaped_buffer_keeps_cursor_and_undoes() {
     let src = "intro\n- [x] done\n";
-    let mut b = SourceBuffer::new("t.md", src.as_bytes(), ContentHash::of(src.as_bytes()));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("t.md"),
+        "t.md",
+        src.as_bytes(),
+        ContentHash::of(src.as_bytes()),
+    );
     b.materialise();
     let at = Cursor {
         position: Position { line: 0, column: 2 },
@@ -962,10 +999,8 @@ fn image_paste_stores_attachment_and_inserts_embed() {
         outcome
     );
     at(&mut app, 0, 4, None);
-    let _ = app.send(Message::Source(SourceMsg::PasteResolved {
-        path: p,
-        outcome,
-    }));
+    let id = buf(&mut app).note_id();
+    let _ = app.send(Message::Source(SourceMsg::PasteResolved { id, outcome }));
     assert_eq!(
         buf(&mut app).text(),
         format!("line![[{name}]] one\nline two\nline three\n")
@@ -1234,7 +1269,12 @@ mod layout {
 #[test]
 fn missing_file_conflict_is_missing_not_an_empty_hash() {
     use crate::daemon::DaemonError;
-    let mut b = SourceBuffer::new("m.md", b"x\n", ContentHash::of(b"x\n"));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("m.md"),
+        "m.md",
+        b"x\n",
+        ContentHash::of(b"x\n"),
+    );
     assert!(b.paste("y".into(), Instant::now()));
     // A NotFound read under edits.
     let gone = || Err(DaemonError::NotFound("m.md".into()));
@@ -1272,7 +1312,12 @@ fn missing_file_conflict_is_missing_not_an_empty_hash() {
     assert!(!b.is_missing());
     assert_eq!(b.keep_mine().expect("job").base.as_str(), "ffff");
     // A clean buffer never enters the missing state.
-    let mut c = SourceBuffer::new("c.md", b"x\n", ContentHash::of(b"x\n"));
+    let mut c = SourceBuffer::new(
+        crate::daemon::bound_id("c.md"),
+        "c.md",
+        b"x\n",
+        ContentHash::of(b"x\n"),
+    );
     c.mark_missing();
     assert!(c.conflict().is_none());
 }
@@ -1281,7 +1326,12 @@ fn missing_file_conflict_is_missing_not_an_empty_hash() {
 #[test]
 fn on_layout_runs_the_carry_and_the_setter_does_not() {
     let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
-    let mut b = SourceBuffer::new("l.md", text.as_bytes(), ContentHash::of(text.as_bytes()));
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("l.md"),
+        "l.md",
+        text.as_bytes(),
+        ContentHash::of(text.as_bytes()),
+    );
     b.materialise();
     b.set_visible_lines(10);
     b.scroll_to_line_anchored(40, 0.0);

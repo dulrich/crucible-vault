@@ -60,7 +60,7 @@ fn doc<'a>(app: &'a mut App, path: &str) -> &'a mut crate::source::SourceBuffer 
 
 fn land(app: &mut App, path: &str, seq: u64, outcome: SaveOutcome) {
     let _ = app.send(Message::Source(SourceMsg::Saved {
-        id: app.note_id(path),
+        id: app.note_id(path).expect("open"),
         seq,
         outcome,
         at: None,

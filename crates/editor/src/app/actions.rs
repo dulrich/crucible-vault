@@ -294,14 +294,12 @@ impl App {
             }
             return self.dispatch_call(call);
         };
-        let Some(doc) = buf_id_mut(&mut self.docs, note) else {
+        let Some(note) = note.filter(|n| self.docs.by_id(*n).is_some_and(|d| d.buffer.is_dirty()))
+        else {
             return self.dispatch_call(call);
         };
-        if !doc.is_dirty() {
-            return self.dispatch_call(call);
-        }
         let title = call.title.clone();
-        self.save_then_id(note, Some(AfterSave::RunCall(call)))
+        self.save_then(note, Some(AfterSave::RunCall(call)))
             .unwrap_or_else(|| {
                 self.status.set_error(format!(
                     "{title}: not run (the note is saving or has a conflict)"

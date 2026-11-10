@@ -77,14 +77,13 @@ pub(super) fn source_gate(m: &SourceMsg) -> Gate {
         | SourceMsg::LinkKey(LinkKey::Enter | LinkKey::Tab)
         | SourceMsg::LinkPick(_) => Gate::Drop,
         SourceMsg::Cut => Gate::CopyOnly,
-        SourceMsg::Save | SourceMsg::KeepMine(_) | SourceMsg::KeepMineNote(_) => Gate::Refuse,
+        SourceMsg::Save | SourceMsg::KeepMine(_) => Gate::Refuse,
         // Every remaining variant passes; listed so a new `SourceMsg` fails to compile here.
         SourceMsg::Action(_)
         | SourceMsg::Key(SourceKey::Home { .. } | SourceKey::End { .. })
         | SourceMsg::Viewport { .. }
         | SourceMsg::Saved { .. }
         | SourceMsg::TakeTheirs(_)
-        | SourceMsg::TakeTheirsNote(_)
         | SourceMsg::MiddleClick { .. }
         | SourceMsg::CommandClick { .. }
         | SourceMsg::LinkKey(LinkKey::Up | LinkKey::Down | LinkKey::Escape) => Gate::Pass,
@@ -166,8 +165,11 @@ impl App {
                 .into_iter()
                 .filter(|id| panes::find_id(&self.panes, *id).is_some())
                 .collect();
-            if !ids.is_empty() && self.dialog.is_none() {
-                self.close_dialog(path, ids, "not connected");
+            if !ids.is_empty()
+                && self.dialog.is_none()
+                && let Some(note) = self.docs.id_of(path)
+            {
+                self.close_dialog(note, ids, "not connected");
             }
             if let Some(q) = &mut self.quit
                 && q.held.remove(path)
@@ -214,12 +216,16 @@ impl App {
         } else {
             return self.quit_progress();
         };
-        let started = self.save_then(path, Some(after));
+        // The holds are path-keyed: the document is resolved once here.
+        let Some(note) = self.docs.id_of(path) else {
+            return self.quit_progress();
+        };
+        let started = self.save_then(note, Some(after));
         let saving = buf(&self.docs, path).is_some_and(|d| d.is_saving());
         match started {
             Some(t) => {
                 if quit && let Some(q) = &mut self.quit {
-                    q.pending.extend(self.docs.id_of(path));
+                    q.pending.insert(note);
                 }
                 self.add_close_waiters(path, &rest);
                 t
@@ -227,20 +233,20 @@ impl App {
             None if saving => {
                 // A save is in flight (the follow-up is queued): the landing resolves the waits.
                 if quit && let Some(q) = &mut self.quit {
-                    q.awaiting.extend(self.docs.id_of(path));
+                    q.awaiting.insert(note);
                 }
                 self.add_close_waiters(path, &ids);
                 Task::none()
             }
             None => {
                 if quit {
-                    let reason = self.loss_reason(path, "the save could not start");
+                    let reason = self.loss_reason(note, "the save could not start");
                     if let Some(q) = &mut self.quit {
                         q.losses.note(path, reason);
                     }
                 }
                 if !ids.is_empty() && self.quit.is_none() {
-                    self.close_dialog(path, ids, "the save could not start");
+                    self.close_dialog(note, ids, "the save could not start");
                 }
                 self.quit_progress()
             }
@@ -354,7 +360,6 @@ impl App {
     /// notice.
     pub(super) fn held_source_gate(&mut self, m: &SourceMsg) -> Gate {
         let path = match m.target() {
-            SourceTarget::Path(p) => Some(p.to_owned()),
             SourceTarget::Note(id) => self.docs.path_of(id),
             SourceTarget::Active => self.active_note().map(|t| t.path.to_owned()),
             // The `[[` list inserts into the active note.

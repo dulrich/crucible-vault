@@ -16,12 +16,14 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 pub use cv_protocol::{
-    ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, HelloResult, JobStatus,
-    LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult, NoteId,
-    NoteLocation, Notification, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
-    ViewsListResult,
+    ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, DeletePreviewResult, HelloResult,
+    JobStatus, LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult,
+    NoteId, NoteLocation, Notification, RunActionParams, RunActionResult, StatusResult, Topic,
+    ViewResult, ViewsListResult,
 };
 pub use cv_vault::ContentHash;
+#[cfg(test)]
+pub use fake::bound_id;
 #[cfg(any(test, feature = "fake"))]
 pub use fake::{ActionHandler, FakeDaemon, FakeLookups};
 pub use local::LocalIndex;
@@ -151,11 +153,14 @@ pub trait DaemonClient: Send + Sync {
     /// Deletes.
     fn delete(&self, path: &str) -> Result<()>;
     /// The note's embeds / attachments with whether something else references them
-    /// (plan editor-ui-round-3 WP-3).
-    fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>>;
-    /// Deletes `path` and those of `attachments` nothing else references at delete time.
+    /// (plan editor-ui-round-3 WP-3). With `id` (an open document, WP-R2's by-id addressing)
+    /// the daemon acts on the note's current path and names it in the result.
+    fn delete_preview(&self, id: Option<NoteId>, path: &str) -> Result<DeletePreviewResult>;
+    /// Deletes `path` (by `id` when given, as [`Self::delete_preview`]) and those of
+    /// `attachments` nothing else references at delete time.
     fn delete_note(
         &self,
+        id: Option<NoteId>,
         path: &str,
         attachments: &[String],
         mode: DeleteMode,

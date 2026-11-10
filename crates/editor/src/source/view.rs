@@ -52,6 +52,7 @@ pub fn view<'a>(
     link: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let link_open = link.is_some();
+    let id = doc.note_id();
     // The find paint comes from the focused pane's bar, at view time.
     let (find, find_all) = find.map_or_else(
         || (None, std::sync::Arc::from([])),
@@ -76,19 +77,9 @@ pub fn view<'a>(
                     },
                     highlighter::to_format,
                 ),
-            move |at| {
-                Message::Source(SourceMsg::MiddleClick {
-                    path: doc.path.clone(),
-                    at,
-                })
-            },
+            move |at| Message::Source(SourceMsg::MiddleClick { id, at }),
         )
-        .on_command_left(move |at| {
-            Message::Source(SourceMsg::CommandClick {
-                path: doc.path.clone(),
-                at,
-            })
-        })
+        .on_command_left(move |at| Message::Source(SourceMsg::CommandClick { id, at }))
         .into(),
         // Never visible in practice (the app materialises visible tabs before drawing).
         Repr::Plain { text: t, .. } => text(t.as_str()).size(font_size).into(),
@@ -106,14 +97,9 @@ pub fn view<'a>(
         };
         let bar = row![
             text(msg).color(tokens.warn_text.to_color()),
-            button(text("Keep mine")).on_press(Message::Source(match doc.note_id() {
-                Some(id) => SourceMsg::KeepMineNote(id),
-                None => SourceMsg::KeepMine(doc.path.clone()),
-            })),
-            button(text("Take theirs")).on_press(Message::Source(match doc.note_id() {
-                Some(id) => SourceMsg::TakeTheirsNote(id),
-                None => SourceMsg::TakeTheirs(doc.path.clone()),
-            })),
+            button(text("Keep mine")).on_press(Message::Source(SourceMsg::KeepMine(doc.note_id()))),
+            button(text("Take theirs"))
+                .on_press(Message::Source(SourceMsg::TakeTheirs(doc.note_id()))),
         ]
         .spacing(8);
         container(bar)

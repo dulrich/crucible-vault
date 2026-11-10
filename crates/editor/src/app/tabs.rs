@@ -75,14 +75,14 @@ impl App {
     /// The document tab `tab` (a [`Tab::id`]) shows, by its note id (plan note-identity, WP-4).
     pub fn tab_doc(&self, tab: u64) -> Option<&crate::source::SourceBuffer> {
         let (p, i) = panes::find_id(&self.panes, tab)?;
-        buf_id(&self.docs, self.panes.get(p)?.tabs.get(i)?.note)
+        self.docs.buffer(self.panes.get(p)?.tabs.get(i)?.note)
     }
 
     /// [`Self::tab_doc`], mutably.
     pub fn tab_doc_mut(&mut self, tab: u64) -> Option<&mut crate::source::SourceBuffer> {
         let (p, i) = panes::find_id(&self.panes, tab)?;
         let note = self.panes.get(p)?.tabs.get(i)?.note;
-        buf_id_mut(&mut self.docs, note)
+        self.docs.buffer_mut(note)
     }
 
     /// The document open at `path`, mutably.
@@ -92,13 +92,13 @@ impl App {
 
     /// The focused pane's active note's document.
     pub fn active_doc(&self) -> Option<&crate::source::SourceBuffer> {
-        self.active_note().and_then(|t| buf_id(&self.docs, t.note))
+        self.active_note().and_then(|t| self.docs.buffer(t.note))
     }
 
     /// The focused pane's active note's document, mutably.
     pub fn active_doc_mut(&mut self) -> Option<&mut crate::source::SourceBuffer> {
         let id = self.active_note()?.note;
-        buf_id_mut(&mut self.docs, id)
+        self.docs.buffer_mut(id)
     }
 
     /// Tests: the note saves a quit in progress waits on (started + in flight), per document.
@@ -354,7 +354,10 @@ impl App {
             match active {
                 Some(i)
                     if how == Place::Replace
-                        && !buf_id(&self.docs, ps.tabs[i].note).is_some_and(|d| d.is_dirty()) =>
+                        && !self
+                            .docs
+                            .buffer(ps.tabs[i].note)
+                            .is_some_and(|d| d.is_dirty()) =>
                 {
                     replaced = Some(std::mem::replace(&mut ps.tabs[i], tab));
                     ps.activate(i);
@@ -620,7 +623,7 @@ impl App {
             TabKind::Note(p) => p,
         };
         // Plan note-identity, WP-4: the tab's own document, by its id (never by path).
-        let Some(doc) = buf_id_mut(&mut self.docs, note) else {
+        let Some((nid, doc)) = note.and_then(|n| self.docs.by_id(n).map(|d| (n, &d.buffer))) else {
             self.remove_tab(id);
             return Task::none();
         };
@@ -628,9 +631,8 @@ impl App {
             self.remove_tab(id);
             return Task::none();
         }
-        let nid = note;
         if doc.conflict().is_some() || !self.status.connected {
-            self.close_dialog_id(nid, vec![id], "not connected");
+            self.close_dialog(nid, vec![id], "not connected");
             return Task::none();
         }
         // Plan round-18 WP-2 (Decision 3): a held note's close waits for the release, then
@@ -645,19 +647,19 @@ impl App {
             }
             return Task::none();
         }
-        if let Some(t) = self.save_then_id(nid, Some(AfterSave::CloseTab(id))) {
+        if let Some(t) = self.save_then(nid, Some(AfterSave::CloseTab(id))) {
             return t;
         }
         // WP-3 rework: a save is in flight (`begin_save` queued the follow-up); the close
         // completes when it lands clean (`note_save_landed`).
-        match nid.and_then(|n| self.docs.by_id_mut(n)) {
+        match self.docs.by_id_mut(nid) {
             Some(d) if d.buffer.is_saving() => {
                 if !d.close_waiters.contains(&id) {
                     d.close_waiters.push(id);
                 }
             }
             // A dirty buffer whose save cannot start.
-            _ => self.close_dialog_id(nid, vec![id], "the save could not start"),
+            _ => self.close_dialog(nid, vec![id], "the save could not start"),
         }
         Task::none()
     }

@@ -157,7 +157,7 @@ fn keep_mine_on_a_deleted_note_keeps_its_id() {
         .doc_mut("ni4/a.md")
         .and_then(|b| b.keep_mine())
         .expect("keep mine");
-    assert_eq!(job.id, Some(id), "addressed to the same note");
+    assert_eq!(job.id, id, "addressed to the same note");
     let outcome = job.run(d.as_ref());
     let _ = app.send(job.done(outcome));
     assert_eq!(d.read_file("ni4/a.md").expect("revived").0, b"xbody");
@@ -274,12 +274,12 @@ fn two_documents_at_one_path_save_by_their_own_ids() {
         .active_doc_mut()
         .and_then(|b| b.begin_save())
         .expect("save");
-    assert_eq!(job.id, Some(moved));
+    assert_eq!(job.id, moved);
     let outcome = job.run(d.as_ref());
     let _ = app.send(job.done(outcome));
     assert_eq!(d.read_file("ni8/a.md").expect("a").0, b"xother");
     focus_doc(&mut app, gone);
-    let _ = app.send(Message::Source(SourceMsg::KeepMineNote(gone)));
+    let _ = app.send(Message::Source(SourceMsg::KeepMine(gone)));
     app.pump();
     assert_eq!(d.read_file("ni8/a.md").expect("a").0, b"xother", "refused");
     assert_eq!(text_of(&app, gone), "xbody", "edits kept");
@@ -293,7 +293,7 @@ fn closing_one_same_path_tab_leaves_the_other_document() {
     let (_tmp, d, mut app, gone, moved) = two_docs_at_one_path("ni9");
     // Take theirs on the missing one closes its tabs and drops it — not the moved note.
     focus_doc(&mut app, gone);
-    let _ = app.send(Message::Source(SourceMsg::TakeTheirsNote(gone)));
+    let _ = app.send(Message::Source(SourceMsg::TakeTheirs(gone)));
     assert!(app.docs.by_id(gone).is_none(), "missing document dropped");
     assert_eq!(text_of(&app, moved), "other", "the other intact");
     assert_eq!(app.open_paths(), ["ni9/a.md"]);
@@ -349,5 +349,31 @@ fn a_moved_tab_keeps_its_document_and_restore_binds_tabs() {
     assert_eq!(
         app.panes.get(p).expect("pane").tabs[i].path(),
         Some("ni11/a.md")
+    );
+}
+
+/// Plan WP-R5 (review E3): the delete of an open document goes by its id (WP-R2), so a note the
+/// daemon moved before the editor heard of it is previewed and deleted at its current path.
+#[test]
+fn a_by_id_delete_of_a_moved_document_acts_on_its_current_path() {
+    let (_tmp, d, mut app) = setup(&["ni11/a.md"]);
+    let _pair = d.daemon_move("ni11/a.md", "ni11/b.md").expect("move");
+    // The move's notifications are not delivered: the document still says `a.md`.
+    assert!(app.note_id("ni11/a.md").is_some());
+    let _ = app.begin_delete("ni11/a.md".to_owned());
+    app.pump();
+    let confirm = match app.dialog.as_ref() {
+        Some(crate::dialog::Dialog::DeleteConfirm(c)) => c.path.clone(),
+        other => panic!("delete confirm expected, got {other:?}"),
+    };
+    assert_eq!(
+        confirm, "ni11/b.md",
+        "the preview names the note's current path"
+    );
+    let _ = app.send(Message::Dialog(crate::dialog::DialogMsg::Ok));
+    app.pump();
+    assert!(
+        matches!(d.read_file("ni11/b.md"), Err(DaemonError::NotFound(_))),
+        "deleted where it lives"
     );
 }

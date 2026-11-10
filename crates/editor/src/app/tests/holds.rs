@@ -53,7 +53,10 @@ fn held_note_drops_edits_refuses_saves_and_releases_on_terminal() {
         iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('y')),
         Instant::now(),
     );
-    assert!(app.save_then("h/a.md", None).is_none());
+    assert!(
+        app.save_then(app.note_id("h/a.md").expect("open"), None)
+            .is_none()
+    );
     assert!(!app.doc("h/a.md").expect("open").is_saving());
     // The terminal status releases it; edits flow again.
     feed(&mut app, job("j1", JobState::Done, Some("h/a.md")));

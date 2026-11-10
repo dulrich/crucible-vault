@@ -136,40 +136,36 @@ pub enum SourceMsg {
     /// A save finished; `after` is the save-first continuation, if any.
     /// Plan note-identity D4: addressed to the note id (`None` = a buffer bound to no note).
     Saved {
-        id: Option<crate::daemon::NoteId>,
+        id: crate::daemon::NoteId,
         seq: u64,
         outcome: crate::source::SaveOutcome,
         /// WP-R4: where the note lives, when not at the job's path ([`crate::source::Landing`]).
         at: Option<String>,
         after: Option<AfterSave>,
     },
-    /// Conflict bar: re-save against the on-disk hash.
-    KeepMine(String),
-    /// Conflict bar: reload from disk.
-    TakeTheirs(String),
-    /// Plan note-identity, WP-4: [`Self::KeepMine`] from a tab's conflict bar, addressed to the
-    /// tab's document by its id (two documents can share a path).
-    KeepMineNote(crate::daemon::NoteId),
-    /// [`Self::TakeTheirs`] from a tab's conflict bar, addressed to the tab's document.
-    TakeTheirsNote(crate::daemon::NoteId),
+    /// Conflict bar: re-save the document of this note against the on-disk hash (addressed by
+    /// id: two documents can share a path, plan note-identity WP-4).
+    KeepMine(crate::daemon::NoteId),
+    /// Conflict bar: reload the document of this note from disk.
+    TakeTheirs(crate::daemon::NoteId),
     /// A key the source editor handles itself as one undoable edit / smart motion (WP-1).
     Key(SourceKey),
-    /// Middle-press over the source editor of `path` at `at` (editor-local coordinates): place
+    /// Middle-press over the source editor of note `id` at `at` (editor-local coordinates): place
     /// the cursor, then paste PRIMARY. editor-usability-round WP-5: the position comes with the
     /// press (`widget::middle_click`), not from a message per pointer move.
     MiddleClick {
-        path: String,
+        id: crate::daemon::NoteId,
         at: iced::Point,
     },
     /// Plan usability-sprint-captures-links WP-3: Ctrl/Cmd+left-press over the source editor of
-    /// `path` at `at` (editor-local): place the cursor, then follow the link under it.
+    /// note `id` at `at` (editor-local): place the cursor, then follow the link under it.
     CommandClick {
-        path: String,
+        id: crate::daemon::NoteId,
         at: iced::Point,
     },
     /// The PRIMARY selection read for a middle-click paste.
     PastePrimary {
-        path: String,
+        id: crate::daemon::NoteId,
         text: Option<String>,
     },
     /// plan editor-ui-round-3 WP-5: Ctrl+X in the focused source editor — the selection, or
@@ -178,9 +174,9 @@ pub enum SourceMsg {
     /// Plan editor-feedback-round-2 WP-9: Ctrl+V in the focused source editor (the active
     /// note) — image-aware via `clipboard_image`.
     Paste,
-    /// The resolved Ctrl+V for `path` (image stored + embed, remote embed, or text paste).
+    /// The resolved Ctrl+V for note `id` (image stored + embed, remote embed, or text paste).
     PasteResolved {
-        path: String,
+        id: crate::daemon::NoteId,
         outcome: crate::clipboard_image::PasteOutcome,
     },
     /// Plan round-5 WP-9: a key intercepted while the `[[` note list is open.
@@ -693,11 +689,9 @@ pub enum ThemeMsg {
 
 /// Which document a [`SourceMsg`] acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceTarget<'a> {
+pub enum SourceTarget {
     /// The open document of this note id (plan note-identity D4).
     Note(crate::daemon::NoteId),
-    /// The note at this path, wherever its tabs are.
-    Path(&'a str),
     /// The focused pane's active note (the focused source editor).
     Active,
     /// Handled by `App` itself (never reaches `source::update`).
@@ -706,17 +700,15 @@ pub enum SourceTarget<'a> {
 
 impl SourceMsg {
     /// The document this message acts on.
-    pub fn target(&self) -> SourceTarget<'_> {
+    pub fn target(&self) -> SourceTarget {
         match self {
-            Self::AutosaveDue { id, .. } | Self::KeepMineNote(id) | Self::TakeTheirsNote(id) => {
-                SourceTarget::Note(*id)
-            }
-            Self::KeepMine(path)
-            | Self::TakeTheirs(path)
-            | Self::MiddleClick { path, .. }
-            | Self::CommandClick { path, .. }
-            | Self::PastePrimary { path, .. }
-            | Self::PasteResolved { path, .. } => SourceTarget::Path(path),
+            Self::AutosaveDue { id, .. }
+            | Self::KeepMine(id)
+            | Self::TakeTheirs(id)
+            | Self::MiddleClick { id, .. }
+            | Self::CommandClick { id, .. }
+            | Self::PastePrimary { id, .. }
+            | Self::PasteResolved { id, .. } => SourceTarget::Note(*id),
             Self::Action(_)
             | Self::Undo
             | Self::Redo
@@ -743,8 +735,6 @@ impl SourceMsg {
             | Self::Saved { .. }
             | Self::KeepMine(_)
             | Self::TakeTheirs(_)
-            | Self::KeepMineNote(_)
-            | Self::TakeTheirsNote(_)
             | Self::MiddleClick { .. }
             | Self::CommandClick { .. }
             | Self::PastePrimary { .. }
@@ -769,8 +759,6 @@ impl SourceMsg {
             | Self::Save
             | Self::KeepMine(_)
             | Self::TakeTheirs(_)
-            | Self::KeepMineNote(_)
-            | Self::TakeTheirsNote(_)
             | Self::Key(_)
             | Self::MiddleClick { .. }
             | Self::CommandClick { .. }

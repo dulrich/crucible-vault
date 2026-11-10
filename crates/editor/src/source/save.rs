@@ -29,9 +29,8 @@ pub type Landing = (SaveOutcome, Option<String>);
 /// A save ready to run off the UI thread.
 #[derive(Debug, Clone)]
 pub struct SaveJob {
-    /// Plan note-identity D4: the note the save is addressed to (`None` = a buffer not bound to
-    /// a note, e.g. a standalone test buffer: the write goes by path).
-    pub id: Option<NoteId>,
+    /// Plan note-identity D4: the note the save is addressed to.
+    pub id: NoteId,
     pub path: String,
     pub seq: u64,
     pub(super) text: String,
@@ -41,14 +40,7 @@ pub struct SaveJob {
 impl SaveJob {
     /// Runs the CAS write (blocking; call from `spawn_blocking` or a test).
     pub fn run(&self, d: &dyn DaemonClient) -> Landing {
-        let Some(id) = self.id else {
-            let outcome = match d.write_note(&self.path, &self.text, &self.base) {
-                Ok(h) => SaveOutcome::Saved(h),
-                Err(DaemonError::Conflict { current_hash }) => SaveOutcome::Conflict(current_hash),
-                Err(e) => SaveOutcome::Failed(crate::daemon::rpc_err(&e)),
-            };
-            return (outcome, None);
-        };
+        let id = self.id;
         // Plan note-identity D3/D4: by id, the daemon writes at the note's current path (the
         // document follows that path from the `file_changed` it emits); `self.path` only
         // matters for the "Keep mine" revive of a retired id (base = no file).
@@ -146,11 +138,11 @@ pub(super) struct SaveState {
     /// `save_again`) so the old path is never written or recreated.
     renaming: bool,
     /// Plan note-identity D4: the note this buffer belongs to.
-    note: Option<NoteId>,
+    note: NoteId,
 }
 
 impl SaveState {
-    pub(super) fn new(base_hash: ContentHash, title: Option<String>) -> Self {
+    pub(super) fn new(note: NoteId, base_hash: ContentHash, title: Option<String>) -> Self {
         Self {
             base_hash,
             dirty: false,
@@ -161,7 +153,7 @@ impl SaveState {
             disk_title: title.clone(),
             name_title: title,
             renaming: false,
-            note: None,
+            note,
         }
     }
 }
@@ -190,7 +182,7 @@ impl SourceBuffer {
     }
 
     /// The note this buffer belongs to (plan note-identity D4).
-    pub fn note_id(&self) -> Option<NoteId> {
+    pub fn note_id(&self) -> NoteId {
         self.save.note
     }
 
@@ -204,11 +196,6 @@ impl SourceBuffer {
                 .in_flight
                 .as_ref()
                 .is_some_and(|f| f.hash == *hash)
-    }
-
-    /// Binds the buffer to note `id` (at open; the id never changes afterwards).
-    pub fn set_note_id(&mut self, id: NoteId) {
-        self.save.note = Some(id);
     }
 
     /// Drops the missing-file conflict (the note was found at a new path, not deleted).
@@ -482,11 +469,8 @@ pub(crate) fn spawn_save(
 }
 
 /// The autosave debounce for note `id`'s edit `seq` (plan note-identity D4: addressed by id, so a
-/// move while it runs cannot miss the document). A buffer bound to no note arms nothing.
-pub(crate) fn autosave_timer(id: Option<NoteId>, seq: u64) -> Task<Message> {
-    let Some(id) = id else {
-        return Task::none();
-    };
+/// move while it runs cannot miss the document).
+pub(crate) fn autosave_timer(id: NoteId, seq: u64) -> Task<Message> {
     // The sleep future is built lazily inside the async block (it needs the executor's reactor).
     Task::perform(
         async { tokio::time::sleep(AUTOSAVE_DELAY).await },

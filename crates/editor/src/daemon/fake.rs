@@ -10,7 +10,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cv_index::Index;
-use cv_protocol::{ChangeKind, FileChange, JobState, NoteId, NoteLocation, Origin, file_changed};
+use cv_protocol::{
+    ChangeKind, DeletePreviewResult, FileChange, JobState, NoteId, NoteLocation, Origin,
+    file_changed,
+};
 
 use super::{
     ActionInfo, ContentHash, DaemonClient, DaemonError, DeleteMode, DeleteNoteResult,
@@ -243,6 +246,18 @@ impl std::fmt::Debug for FakeDaemon {
 }
 
 impl FakeDaemon {
+    /// Where a by-id call acts (WP-R2's addressing): note `id`'s live path, else `path`.
+    fn live_path(&self, id: Option<NoteId>, path: &str) -> Result<String> {
+        match id
+            .map(|id| self.lock().map(|g| (id, g.ids.locate(id))))
+            .transpose()?
+        {
+            None => Ok(path.to_owned()),
+            Some((_, NoteLocation::Live { path })) => Ok(path),
+            Some((id, _)) => Err(DaemonError::NotFound(format!("note {}", id.0))),
+        }
+    }
+
     /// One job's status (the fake's job table; tests only).
     pub fn job(&self, job_id: &str) -> Result<JobStatus> {
         self.lock()?
@@ -828,29 +843,36 @@ impl DaemonClient for FakeDaemon {
         self.retire_and_emit(&mut g, path)
     }
 
-    fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
+    fn delete_preview(&self, id: Option<NoteId>, path: &str) -> Result<DeletePreviewResult> {
+        let at = self.live_path(id, path)?;
         let g = self.lock()?;
-        let items = cv_index::delete_preview(&g.index.query(), path)?;
-        Ok(items
-            .into_iter()
-            .map(|(path, referenced_elsewhere)| DeletePreviewItem {
-                path,
-                referenced_elsewhere,
-            })
-            .collect())
+        let items = cv_index::delete_preview(&g.index.query(), &at)?;
+        Ok(DeletePreviewResult {
+            items: items
+                .into_iter()
+                .map(|(path, referenced_elsewhere)| DeletePreviewItem {
+                    path,
+                    referenced_elsewhere,
+                })
+                .collect(),
+            path: id.map(|_| at),
+        })
     }
 
     fn delete_note(
         &self,
+        id: Option<NoteId>,
         path: &str,
         attachments: &[String],
         mode: DeleteMode,
     ) -> Result<DeleteNoteResult> {
+        let at = self.live_path(id, path)?;
+        let path = at.as_str();
         self.mutation("delete_note", path)?;
         let mut g = self.lock()?;
         self.remove_mode(&mut g, path, mode)?;
         let mut out = DeleteNoteResult {
-            path: None,
+            path: id.map(|_| at.clone()),
             removed: vec![path.to_owned()],
             skipped: Vec::new(),
         };
@@ -1040,6 +1062,17 @@ impl DaemonClient for FakeDaemon {
     }
 }
 
+/// Tests: a note id for a standalone buffer, minted by a throwaway fake's `bind_note` (never
+/// fabricated) over an empty note at `path`.
+#[cfg(test)]
+pub fn bound_id(path: &str) -> NoteId {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+    let d = FakeDaemon::open(&vault, &tmp.path().join("data")).expect("fake");
+    d.create_note(path, "").expect("create");
+    d.bind_note(path).expect("bind")
+}
 #[cfg(test)]
 mod tests {
     use super::*;

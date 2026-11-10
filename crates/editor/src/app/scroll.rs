@@ -141,7 +141,7 @@ impl App {
             FindMsg::Query(q) => {
                 let Some((text, seq)) = ps
                     .active_note()
-                    .and_then(|t| buf_id(&self.docs, t.note))
+                    .and_then(|t| self.docs.buffer(t.note))
                     .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
@@ -175,7 +175,7 @@ impl App {
                 }
                 let at = ps
                     .active_note()
-                    .and_then(|t| buf_id(&self.docs, t.note))
+                    .and_then(|t| self.docs.buffer(t.note))
                     .map_or(0, |d| {
                         let c = d.cursor().position;
                         editor_model::undo::offset_of(
@@ -197,7 +197,7 @@ impl App {
                 };
                 let Some((text, seq)) = ps
                     .active_note()
-                    .and_then(|t| buf_id(&self.docs, t.note))
+                    .and_then(|t| self.docs.buffer(t.note))
                     .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
@@ -265,7 +265,7 @@ impl App {
             return crate::reading::probe(&path, view, n, Some(b));
         }
         let range = bar.range();
-        let Some(doc) = buf_id(&self.docs, note) else {
+        let Some(doc) = self.docs.buffer(note) else {
             return Task::none();
         };
         let text = doc.text();
@@ -283,7 +283,7 @@ impl App {
         let (l1, c1) = editor_model::find::line_col(&text, r.end);
         let mode = self.reading.mode(&self.docs, &path);
         if mode.shows_source()
-            && let Some(doc) = buf_id_mut(&mut self.docs, note)
+            && let Some(doc) = self.docs.buffer_mut(note)
         {
             doc.select_range((l0, c0), (l1, c1));
         }
@@ -391,7 +391,7 @@ impl App {
         let view = self.view_of(&path);
         self.reading.set_edge(&mut self.docs, &path, view, bottom);
         if mode.shows_source()
-            && let Some(doc) = buf_id_mut(&mut self.docs, note)
+            && let Some(doc) = self.docs.buffer_mut(note)
         {
             doc.go_to_edge(bottom);
         }
