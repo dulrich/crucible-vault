@@ -208,7 +208,7 @@ impl App {
                 if let Some(o) = self.docs.by_id_mut(id) {
                     o.buffer.clear_missing();
                 }
-                self.follow_doc(id, &to, super::files::Follow::Daemon);
+                self.follow_doc(id, &to, super::identity::Follow::Daemon);
             }
             Settled::Absorbed(to) => {
                 if !self.follow_replaced(id, &to) {

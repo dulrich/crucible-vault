@@ -35,6 +35,7 @@ mod config;
 mod connection;
 mod files;
 mod holds;
+mod identity;
 mod image_tab;
 mod menu;
 pub mod pdf_tab;

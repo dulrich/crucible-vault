@@ -436,6 +436,6 @@ impl App {
             .docs
             .by_id(id)
             .is_some_and(|d| d.buffer.edit_seq() != seq);
-        self.follow_doc(id, to, super::files::Follow::Edited(edited));
+        self.follow_doc(id, to, super::identity::Follow::Edited(edited));
     }
 }

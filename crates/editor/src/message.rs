@@ -9,6 +9,10 @@ use iced::widget::pane_grid::{self, Pane};
 use crate::theme::Surround;
 use crate::widget::virtual_list::ListWindow;
 
+#[path = "message_keys.rs"]
+mod keys;
+pub use keys::{LinkKey, SourceKey};
+
 /// Every message the app handles.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -183,35 +187,6 @@ pub enum SourceMsg {
     LinkKey(LinkKey),
     /// Plan round-5 WP-9: a `[[` list row was clicked (its vault path).
     LinkPick(String),
-}
-
-/// Plan round-5 WP-9: keys the open `[[` note list takes from the source editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkKey {
-    Up,
-    Down,
-    Enter,
-    Tab,
-    Escape,
-}
-
-/// WP-1 source keys routed through `SourceMsg::Key` (each one transaction or motion).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceKey {
-    /// Enter with list continuation.
-    Enter,
-    /// Ctrl+Backspace: delete to the previous word boundary (or the selection).
-    DeleteWordBack,
-    /// Ctrl+Delete: delete to the next word boundary (or the selection).
-    DeleteWordForward,
-    /// Smart Home (`select` = Shift).
-    Home { select: bool },
-    /// Smart End (`select` = Shift).
-    End { select: bool },
-    /// Tab: indent the selected lines, else insert `\t` (plan editor-feedback-round-2 WP-4).
-    Indent,
-    /// Shift+Tab: outdent the selected lines (or the cursor's line).
-    Outdent,
 }
 
 /// Plan round-14 WP-3: an image tab (vault path `path`, tab id `view`).
