@@ -20,7 +20,6 @@ fn changed(app: &mut App, path: &str, kind: ChangeKind) {
             origin: Origin::Daemon,
             from: None,
             replaced_by: None,
-            seq: None,
         },
     )));
 }
@@ -826,7 +825,6 @@ fn app_open_file_adds_tab_and_status_updates() {
             origin: Origin::External,
             from: None,
             replaced_by: None,
-            seq: None,
         },
     )));
     assert_eq!(

@@ -49,16 +49,13 @@ pub enum Origin {
 }
 
 /// A normalized vault change. Equality compares the change itself (`path`, `kind`, `origin`);
-/// `seq`, `id` and `hash` are delivery metadata (plan note-path-continuity D2).
+/// `id` and `hash` are delivery metadata (plan note-path-continuity D2).
 #[derive(Debug, Clone)]
 pub struct VaultEvent {
     /// Vault-relative path.
     pub path: String,
     pub kind: EventKind,
     pub origin: Origin,
-    /// The lineage sequence number the sink assigned to this identity transition (created,
-    /// renamed, deleted; `None` for content changes or without a recording sink).
-    pub seq: Option<u64>,
     /// The note id of the file this event concerns (plan note-identity D1; minted on demand,
     /// `None` without an id sink or on a store failure). A rename keeps it; a delete carries the
     /// retired id.
@@ -76,7 +73,6 @@ impl VaultEvent {
             path: path.into(),
             kind,
             origin,
-            seq: None,
             id: None,
             hash: None,
         }
@@ -508,7 +504,6 @@ impl WatchState {
         if echo.is_some() {
             return true;
         }
-        let seq = w.lineage_mut().renamed(from, to);
         let id = w.note_ids_mut().moved(from, to);
         out.push(VaultEvent {
             path: to.to_string(),
@@ -516,7 +511,6 @@ impl WatchState {
                 from: from.to_string(),
             },
             origin: Origin::External,
-            seq,
             id,
             hash: Some(ContentHash::of(&bytes)),
         });
@@ -576,13 +570,11 @@ impl WatchState {
                             tracing::warn!(path, error = %e, "index update for external delete failed");
                         }
                         if echo.is_none() {
-                            let seq = w.lineage_mut().deleted(path);
                             let id = w.note_ids_mut().retired(path, None);
                             out.push(VaultEvent {
                                 path: path.to_string(),
                                 kind: EventKind::Deleted { replaced_by: None },
                                 origin: Origin::External,
-                                seq,
                                 id,
                                 hash: None,
                             });
@@ -623,11 +615,6 @@ impl WatchState {
         if echo.is_some() {
             return; // the writer's own mutation: already reported by the writer
         }
-        let seq = if prev.is_none() {
-            w.lineage_mut().created(path)
-        } else {
-            None
-        };
         let id = w.note_ids_mut().bind(path);
         out.push(VaultEvent {
             path: path.to_string(),
@@ -637,7 +624,6 @@ impl WatchState {
                 EventKind::Modified
             },
             origin: Origin::External,
-            seq,
             id,
             hash: Some(h),
         });

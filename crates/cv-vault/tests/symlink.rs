@@ -284,7 +284,6 @@ fn external_edit_to_the_target_emits_a_change_for_the_vault_path() {
             path: "f/linked.md".into(),
             kind: EventKind::Modified,
             origin: Origin::External,
-            seq: None,
             id: None,
             hash: None,
         }),
@@ -320,7 +319,6 @@ fn dangling_link_is_indexed_once_its_target_appears() {
             path: "later.md".into(),
             kind: EventKind::Created,
             origin: Origin::External,
-            seq: None,
             id: None,
             hash: None,
         }),
@@ -378,7 +376,6 @@ fn daemon_move_of_a_linked_note_is_one_renamed() {
                 from: "f/linked.md".into()
             },
             origin: Origin::Daemon,
-            seq: None,
             id: None,
             hash: None,
         }]

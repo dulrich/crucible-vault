@@ -29,7 +29,6 @@ impl ChildSpawner for Spawner<'_> {
         let context = ActionContext {
             active_path: Some(active_path.to_owned()),
             // A different note: bound at the child's enqueue, never at the parent's id.
-            lineage_cursor: None,
             active_id: None,
             ..self.context.clone()
         };

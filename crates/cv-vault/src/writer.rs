@@ -11,7 +11,6 @@ use cv_index::{Index, LinkRow};
 use crate::error::{Result, VaultError};
 use crate::fs::VaultFs;
 use crate::hash::ContentHash;
-use crate::lineage::{LineageSink, NoLineage};
 use crate::note_id::{NoNoteIds, NoteId, NoteIdSink, NoteLocation};
 use crate::path::validate_rel_path;
 use crate::rewrite::rewrite_note;
@@ -58,8 +57,7 @@ pub struct VaultWriter {
     trash_sink: Option<TrashSink>,
     /// Writer-authored events (plan note-path-continuity D1); `None` without a watcher.
     events: Option<Sender<VaultEvent>>,
-    lineage: Box<dyn LineageSink>,
-    /// The note-id binding (plan note-identity D1), updated beside lineage.
+    /// The note-id binding (plan note-identity D1), written at the transition sites.
     ids: Box<dyn NoteIdSink>,
 }
 
@@ -88,7 +86,6 @@ impl VaultWriter {
             trash_records: Vec::new(),
             trash_sink: None,
             events: None,
-            lineage: Box::new(NoLineage),
             ids: Box::new(NoNoteIds),
         }
     }
@@ -204,16 +201,6 @@ impl VaultWriter {
         self.events = Some(tx);
     }
 
-    /// Installs the lineage sink (plan note-path-continuity D2); the default records nothing.
-    pub fn set_lineage_sink(&mut self, sink: Box<dyn LineageSink>) {
-        self.lineage = sink;
-    }
-
-    /// The lineage sink (the watcher records External transitions through it).
-    pub(crate) fn lineage_mut(&mut self) -> &mut dyn LineageSink {
-        self.lineage.as_mut()
-    }
-
     /// Installs the note-id sink (plan note-identity D1); the default binds nothing.
     pub fn set_note_id_sink(&mut self, sink: Box<dyn NoteIdSink>) {
         self.ids = sink;
@@ -244,21 +231,13 @@ impl VaultWriter {
     }
 
     /// Emits one writer-authored (`Origin::Daemon`) event, synchronously.
-    fn emit(
-        &self,
-        path: &str,
-        kind: EventKind,
-        seq: Option<u64>,
-        id: Option<NoteId>,
-        hash: Option<&ContentHash>,
-    ) {
+    fn emit(&self, path: &str, kind: EventKind, id: Option<NoteId>, hash: Option<&ContentHash>) {
         if let Some(tx) = &self.events
             && tx
                 .send(VaultEvent {
                     path: path.to_string(),
                     kind,
                     origin: Origin::Daemon,
-                    seq,
                     id,
                     hash: hash.cloned(),
                 })
@@ -280,12 +259,11 @@ impl VaultWriter {
         let (h, full) = self.fs.put(path, bytes, expected.as_ref())?;
         self.index_written(path, bytes, &full, &h);
         if created {
-            let seq = self.lineage.created(path);
             let id = self.ids.bind(path);
-            self.emit(path, EventKind::Created, seq, id, Some(&h));
+            self.emit(path, EventKind::Created, id, Some(&h));
         } else {
             let id = self.ids.bind(path);
-            self.emit(path, EventKind::Modified, None, id, Some(&h));
+            self.emit(path, EventKind::Modified, id, Some(&h));
         }
         Ok(h)
     }
@@ -378,17 +356,12 @@ impl VaultWriter {
                 self.echoes.register(path, None, Echo::Unindexed);
             }
         }
-        let seq = match replaced_by {
-            Some(by) => self.lineage.replaced(path, by),
-            None => self.lineage.deleted(path),
-        };
         let id = self.ids.retired(path, replaced_by);
         self.emit(
             path,
             EventKind::Deleted {
                 replaced_by: replaced_by.map(str::to_string),
             },
-            seq,
             id,
             None,
         );
@@ -520,14 +493,12 @@ impl VaultWriter {
         };
         self.echoes.register(from, None, echo);
         self.echoes.register(to, Some(h.clone()), echo);
-        let seq = self.lineage.renamed(from, to);
         let id = self.ids.moved(from, to);
         self.emit(
             to,
             EventKind::Renamed {
                 from: from.to_string(),
             },
-            seq,
             id,
             Some(&h),
         );

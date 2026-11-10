@@ -15,7 +15,6 @@ fn deleted_by(app: &mut App, path: &str, by: &str) {
             origin: Origin::Daemon,
             from: None,
             replaced_by: Some(by.into()),
-            seq: None,
         },
     )));
 }

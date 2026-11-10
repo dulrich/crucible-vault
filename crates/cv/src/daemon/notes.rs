@@ -146,24 +146,6 @@ impl Shared {
         Ok(wire_location(loc))
     }
 
-    /// `resolve_path` (plan note-path-continuity D2): answered on the writer thread, so it
-    /// observes every mutation that returned before it (the causal barrier).
-    pub(super) async fn resolve_path(
-        &self,
-        p: ResolvePathParams,
-    ) -> Result<ResolvePathResult, RpcError> {
-        cv_vault::validate_rel_path(&p.path)
-            .map_err(|e| rpc_err(error_codes::INVALID_PARAMS, e.to_string()))?;
-        let state = Arc::clone(&self.state);
-        let root = self.vault_root.clone();
-        self.with_writer(move |w| {
-            w.call(move |_vw| crate::lineage::resolve(&state, &root, &p.path, p.since))
-        })
-        .await?
-        .map_err(rpc_from_vault)?
-        .map_err(internal)
-    }
-
     /// `rename`: read the hash and rename in one writer job, so the CAS token is the hash the
     /// writer itself just read and no other writer job can interleave.
     pub(super) async fn rename(&self, p: RenameParams) -> Result<RenameResult, RpcError> {

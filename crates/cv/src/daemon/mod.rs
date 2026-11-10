@@ -21,9 +21,8 @@ use cv_protocol::{
     ChangeKind, CreateNoteResult, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams,
     DeletePreviewItem, DeletePreviewResult, DeleteResult, HelloResult, IntakeListResult, JobStatus,
     JobsListResult, Method, Notification, Origin, PROTOCOL_VERSION, PathParams, RenameParams,
-    RenameResult, Request, ResolvePathParams, ResolvePathResult, RpcError, StatusResult, UriResult,
-    ViewsListResult, WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams,
-    WriteNoteResult, error_codes,
+    RenameResult, Request, RpcError, StatusResult, UriResult, ViewsListResult,
+    WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams, WriteNoteResult, error_codes,
 };
 use cv_state::{QueueConfig, RetryOutcome, StateDb, StateError, StateReader};
 use cv_vault::{
@@ -205,9 +204,6 @@ impl Daemon {
         let mut writer = VaultWriter::open(fs, &config.index_db).context("opening the index")?;
         // Plan tidiness-trash-orphans WP-1: every trash move reaches `trash_entries`.
         trash::install_ledger(&mut writer, Arc::clone(&state));
-        // Plan note-path-continuity D2: every identity transition reaches `path_lineage`,
-        // synchronously on the writer thread.
-        crate::lineage::install(&mut writer, &state);
         // Plan note-identity D1: every vault file keeps a durable id in `note_ids`, bound on the
         // writer thread at the same transition sites.
         crate::note_id::install(&mut writer, &state);
@@ -521,7 +517,6 @@ impl Shared {
                 self.memory_report(p);
                 reply::<m::MemoryReport>(Ok(()))
             }
-            Request::ResolvePath(p) => reply::<m::ResolvePath>(self.resolve_path(p).await),
             Request::BindNote(p) => reply::<m::BindNote>(self.bind_note(p).await),
             Request::LocateNote(p) => reply::<m::LocateNote>(self.locate_note(p).await),
         }

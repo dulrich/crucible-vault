@@ -45,7 +45,6 @@ impl Env {
         ));
         let fs = VaultFs::live(&self.vault).unwrap();
         let mut w = VaultWriter::open(fs, &self.index).unwrap();
-        crate::lineage::install(&mut w, &state);
         crate::note_id::install(&mut w, &state);
         let cfg = WatchConfig {
             debounce: Duration::from_millis(50),

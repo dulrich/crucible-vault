@@ -179,11 +179,6 @@ pub enum Request {
     /// Runs the `intake-reconcile` action and waits (bounded) for it (plan auto-intake-sprint
     /// WP-6) → [`ReconcileIntakeResult`]. An unknown action is `NOT_FOUND`.
     ReconcileIntake(ReconcileIntakeParams),
-    /// Where the note bound at `path` as of lineage cursor `since` lives now (plan
-    /// note-path-continuity D2) → [`ResolvePathResult`]. Answered on the daemon's writer thread,
-    /// so it observes every mutation that returned before it. An old daemon answers
-    /// `METHOD_NOT_FOUND`.
-    ResolvePath(ResolvePathParams),
     /// The id of the file now at `path` (plan note-identity D2), minted if it has none →
     /// [`BindNoteResult`]. Answered on the daemon's writer thread. A path with no file is
     /// `NOT_FOUND` (never a mint). An old daemon answers `METHOD_NOT_FOUND`.
@@ -230,39 +225,6 @@ pub enum NoteLocation {
     },
     /// Never minted, or its tombstone was pruned.
     Unknown,
-}
-
-/// `resolve_path` params.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvePathParams {
-    pub path: String,
-    /// The holder's lineage cursor; `None` = no cursor (report the path as it is now, plus
-    /// the head to bind with).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub since: Option<u64>,
-}
-
-/// Where a (path, cursor) binding ends.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum PathResolution {
-    /// No identity transition left `path` after the cursor and the file exists.
-    Live { path: String },
-    /// The note now lives at `to` (the end of the whole chain, a replaced hop included).
-    Moved { to: String },
-    /// The chain ends in a delete.
-    Deleted,
-    /// Lineage cannot say: the file is absent with no recorded transition, or the cursor is
-    /// older than the retained lineage.
-    Unknown,
-}
-
-/// `resolve_path` result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvePathResult {
-    pub resolution: PathResolution,
-    /// The lineage head the answer is valid through: the holder's new cursor.
-    pub head: u64,
 }
 
 /// `reconcile_intake` params.
@@ -497,11 +459,6 @@ pub struct ActionContext {
     pub line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_hash: Option<String>,
-    /// Plan note-path-continuity D4: the lineage cursor `active_path` is bound at (the runner
-    /// fills it at enqueue when absent and keeps it with the job, so a retry after a restart still
-    /// has it). A job without one behaves as before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_cursor: Option<u64>,
     /// Plan note-identity D5: the id of the note at `active_path` (the runner binds it at enqueue
     /// when absent; a job without one runs unbound).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -878,11 +835,6 @@ pub enum Notification {
         /// views at it instead of reporting a deletion. Old peers ignore / omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replaced_by: Option<String>,
-        /// Plan note-path-continuity D2: the lineage sequence number of the identity transition
-        /// this change reports (created / renamed / deleted; both halves of a rename carry it), so a
-        /// consumer orders it against its own cursor. Old peers ignore / omit it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        seq: Option<u64>,
         /// Plan note-identity D2: the id of the note this change concerns (both halves of a
         /// rename carry it; a delete carries the retired id). Old peers ignore / omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -927,7 +879,6 @@ pub struct FileChange {
     /// A rename's source path (`kind` is then [`ChangeKind::Renamed`]).
     pub from: Option<String>,
     pub replaced_by: Option<String>,
-    pub seq: Option<u64>,
     pub id: Option<NoteId>,
 }
 
@@ -935,7 +886,7 @@ pub struct FileChange {
 /// the editor's test daemon both build them here). A rename (`from` set) reports the destination
 /// as `Renamed { from }` first, then its source as `Deleted`: a client that follows moves re-keys
 /// on the first and finds nothing open for the second, while clients without a rename record
-/// still drop the old path. Both halves carry the same `seq` and `id`.
+/// still drop the old path. Both halves carry the same `id`.
 #[must_use]
 pub fn file_changed(c: FileChange) -> Vec<Notification> {
     let mut out = Vec::with_capacity(2);
@@ -946,7 +897,6 @@ pub fn file_changed(c: FileChange) -> Vec<Notification> {
         origin: c.origin,
         from: c.from.clone(),
         replaced_by: c.replaced_by,
-        seq: c.seq,
         id: c.id,
     });
     if let Some(from) = c.from {
@@ -957,7 +907,6 @@ pub fn file_changed(c: FileChange) -> Vec<Notification> {
             origin: c.origin,
             from: None,
             replaced_by: None,
-            seq: c.seq,
             id: c.id,
         });
     }

@@ -110,9 +110,9 @@ fn plain_session_close_follows_visit_order() {
     assert_eq!(active_path(&app).as_deref(), Some("r14c/b.md"));
 }
 
-// Plan note-path-continuity WP-3 (D3): the editor resolves lineage before it reports "deleted".
+// Plan note-path-continuity WP-3 (D3): the editor settles a move before it reports "deleted".
 
-fn deleted_event(path: &str, seq: Option<u64>) -> Notification {
+fn deleted_event(path: &str) -> Notification {
     Notification::FileChanged {
         id: None,
         path: path.to_owned(),
@@ -121,7 +121,6 @@ fn deleted_event(path: &str, seq: Option<u64>) -> Notification {
         origin: Origin::Daemon,
         from: None,
         replaced_by: None,
-        seq,
     }
 }
 
@@ -146,7 +145,7 @@ fn chained_moves_end_on_the_final_path() {
     assert_eq!(app.status.error_text(), None);
     let doc = app.doc("wp3a/c.md").expect("at c");
     assert!(!doc.is_missing() && doc.conflict().is_none());
-    // Plan note-identity D4: the document is bound to the note id, not a lineage cursor; the
+    // Plan note-identity D4: the document is bound to the note id, not a path cursor; the
     // same document (same id) followed both moves.
     assert_eq!(app.note_id("wp3a/c.md"), Some(id), "same note id");
 }
@@ -234,10 +233,7 @@ fn a_delayed_move_notification_leaves_a_tab_opened_after_it_alone() {
 fn a_real_delete_still_shows_file_deleted_on_disk() {
     let (_tmp, d, mut app) = setup(&["wp3f/a.md"]);
     d.delete("wp3f/a.md").expect("delete");
-    feed(
-        &mut app,
-        vec![deleted_event("wp3f/a.md", d.lineage_head().ok())],
-    );
+    feed(&mut app, vec![deleted_event("wp3f/a.md")]);
     assert_eq!(app.status.error_text(), Some("file deleted on disk"));
 }
 

@@ -1,5 +1,5 @@
 //! [`NoteIdSink`]: the durable note-id binding (plan note-identity D1), kept on the writer thread
-//! beside [`crate::LineageSink`] at the same transition sites. The daemon's implementation stores
+//! at the identity-transition sites. The daemon's implementation stores
 //! ids in `state.db`; `cv-vault` only calls it and stamps the returned id on the event it emits
 //! ([`crate::VaultEvent::id`]). Without an installed sink ([`NoNoteIds`]) events carry no id.
 

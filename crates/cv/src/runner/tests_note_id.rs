@@ -1,11 +1,10 @@
-//! Plan note-path-continuity WP-2 / note-identity WP-2: identity through the live daemon —
-//! `resolve_path` and `locate_note` as causal barriers, writes and renames by note id, jobs
+//! Plan note-identity WP-2 (continuing note-path-continuity WP-2): identity through the live daemon —
+//! `locate_note` as a causal barrier, writes and renames by note id, jobs
 //! following moved notes by id (note-identity D5) and the cycle guard armed before the write.
 
 use super::*;
 use cv_protocol::{
-    BindNoteParams, BindNoteResult, LocateNoteParams, NoteId, NoteLocation, PathResolution,
-    ResolvePathParams, ResolvePathResult, WriteNoteParams,
+    BindNoteParams, BindNoteResult, LocateNoteParams, NoteId, NoteLocation, WriteNoteParams,
 };
 
 fn bind(c: &Client, path: &str) -> NoteId {
@@ -236,59 +235,6 @@ async fn rename_by_id_acts_on_the_current_path() {
     let r = rename(&c, "c.md", "d.md", Some(a));
     assert_eq!(rpc_code(r), error_codes::NOT_FOUND);
     assert!(!vault.join("d.md").exists());
-    d.shutdown().await.unwrap();
-}
-
-fn resolve(c: &Client, path: &str, since: Option<u64>) -> ResolvePathResult {
-    let v = c
-        .request(Request::ResolvePath(ResolvePathParams {
-            path: path.into(),
-            since,
-        }))
-        .unwrap();
-    serde_json::from_value(v).unwrap()
-}
-
-/// D2: a `resolve_path` issued right after a `rename` returns observes it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn resolve_issued_right_after_a_rename_observes_it() {
-    let env = Env::new("");
-    let d = start(&env, appending_exec(Arc::new(AtomicUsize::new(0)))).await;
-    let c = env.client();
-    let before = resolve(&c, "a.md", None);
-    assert_eq!(
-        before.resolution,
-        PathResolution::Live {
-            path: "a.md".into()
-        }
-    );
-    for (from, to) in [("a.md", "b.md"), ("b.md", "sub/c.md")] {
-        c.request(Request::Rename(cv_protocol::RenameParams {
-            id: None,
-            from: from.into(),
-            to: to.into(),
-        }))
-        .unwrap();
-    }
-    let after = resolve(&c, "a.md", Some(before.head));
-    assert_eq!(
-        after.resolution,
-        PathResolution::Moved {
-            to: "sub/c.md".into()
-        }
-    );
-    assert!(after.head > before.head);
-    // Bound after the moves: nothing left `a.md` since, and nothing lives there.
-    assert_eq!(
-        resolve(&c, "a.md", Some(after.head)).resolution,
-        PathResolution::Unknown
-    );
-    // Lineage survives an index rebuild (it lives in state.db).
-    d.shared().rebuild_index().await.unwrap();
-    assert_eq!(
-        resolve(&c, "a.md", Some(before.head)).resolution,
-        after.resolution
-    );
     d.shutdown().await.unwrap();
 }
 

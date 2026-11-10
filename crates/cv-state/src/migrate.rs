@@ -227,6 +227,13 @@ CREATE TABLE note_ids (
 CREATE UNIQUE INDEX note_ids_live_path ON note_ids(path) WHERE retired_ms IS NULL;
 CREATE INDEX note_ids_retired ON note_ids(retired_ms) WHERE retired_ms IS NOT NULL;
 ",
+    // v19 (plan note-identity WP-6): the path-lineage scheme of plan note-path-continuity (D2-D4)
+    // is superseded by note ids and removed; its indexes drop with the tables. The 1.0.0 baseline
+    // still creates them (migration history), so a fresh database passes through both.
+    r"
+DROP TABLE path_lineage;
+DROP TABLE path_lineage_floor;
+",
 ];
 
 /// Highest schema version this build knows.

@@ -68,7 +68,6 @@ fn daemon_write_is_echo_external_write_is_applied() {
             path: "b.md".into(),
             kind: EventKind::Modified,
             origin: Origin::External,
-            seq: None,
             id: None,
             hash: None,
         }]
@@ -86,7 +85,6 @@ fn daemon_write_is_echo_external_write_is_applied() {
             path: "n.md".into(),
             kind: EventKind::Created,
             origin: Origin::External,
-            seq: None,
             id: None,
             hash: None,
         }]
@@ -132,7 +130,6 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
                 path: "b.md".into(),
                 kind: EventKind::Deleted { replaced_by: None },
                 origin: Origin::Daemon,
-                seq: None,
                 id: None,
                 hash: None,
             },
@@ -142,7 +139,6 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
                     from: "a.md".into()
                 },
                 origin: Origin::Daemon,
-                seq: None,
                 id: None,
                 hash: None,
             },
@@ -159,7 +155,6 @@ fn daemon_rename_and_delete_echo_and_external_rename() {
                 from: "c.md".into()
             },
             origin: Origin::External,
-            seq: None,
             id: None,
             hash: None,
         }]
@@ -210,7 +205,6 @@ fn daemon_folder_rename_is_one_renamed_per_file() {
                 from: format!("f/{n}.md"),
             },
             origin: Origin::Daemon,
-            seq: None,
             id: None,
             hash: None,
         })
@@ -237,7 +231,6 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
                 from: "a.md".into()
             },
             origin: Origin::Daemon,
-            seq: None,
             id: None,
             hash: None,
         }
@@ -252,7 +245,6 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
                 path: "a.md".into(),
                 kind: EventKind::Deleted { replaced_by: None },
                 origin: Origin::External,
-                seq: None,
                 id: None,
                 hash: None,
             },
@@ -260,7 +252,6 @@ fn expired_echo_surfaces_externally_after_the_writer_rename() {
                 path: "c.md".into(),
                 kind: EventKind::Created,
                 origin: Origin::External,
-                seq: None,
                 id: None,
                 hash: None,
             },
@@ -288,7 +279,6 @@ fn delete_replaced_carries_replaced_by_on_the_event() {
                 replaced_by: Some("b.md".into())
             },
             origin: Origin::Daemon,
-            seq: None,
             id: None,
             hash: None,
         }]

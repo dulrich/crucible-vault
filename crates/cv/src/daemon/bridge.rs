@@ -95,7 +95,6 @@ fn forward(
         origin,
         from,
         replaced_by,
-        seq: ev.seq,
         id: ev.id.map(|i| cv_protocol::NoteId(i.0)),
     };
     for n in cv_protocol::file_changed(change) {
@@ -217,7 +216,7 @@ mod tests {
     use super::*;
 
     /// The bridge's input shape → the shared constructor (plan note-identity D7): a rename pair
-    /// carries one `seq` and one `id`.
+    /// carries one `id`.
     #[test]
     fn rename_reports_destination_with_from_then_source_deleted() {
         let got = cv_protocol::file_changed(cv_protocol::FileChange {
@@ -227,7 +226,6 @@ mod tests {
             origin: Origin::Daemon,
             from: Some("a.md".into()),
             replaced_by: None,
-            seq: Some(7),
             id: Some(cv_protocol::NoteId(3)),
         });
         assert_eq!(
@@ -240,7 +238,6 @@ mod tests {
                     origin: Origin::Daemon,
                     from: Some("a.md".into()),
                     replaced_by: None,
-                    seq: Some(7),
                     id: Some(cv_protocol::NoteId(3)),
                 },
                 Notification::FileChanged {
@@ -250,7 +247,6 @@ mod tests {
                     origin: Origin::Daemon,
                     from: None,
                     replaced_by: None,
-                    seq: Some(7),
                     id: Some(cv_protocol::NoteId(3)),
                 },
             ]
@@ -262,7 +258,6 @@ mod tests {
             origin: Origin::External,
             from: None,
             replaced_by: None,
-            seq: None,
             id: None,
         });
         assert_eq!(one.len(), 1);

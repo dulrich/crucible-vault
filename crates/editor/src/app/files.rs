@@ -455,8 +455,8 @@ impl App {
         }
     }
 
-    /// The `id: None` fallback of [`Self::doc_file_changed`]: today's path matching (no lineage,
-    /// no id to settle anything by). Returns the document to reload.
+    /// The `id: None` fallback of [`Self::doc_file_changed`]: today's path matching (no id to settle
+    /// anything by). Returns the document to reload.
     pub(super) fn path_file_changed(
         &mut self,
         path: &str,

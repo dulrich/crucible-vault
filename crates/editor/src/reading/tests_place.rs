@@ -115,7 +115,6 @@ fn file_membership_change_drops_cached_resolver() {
                 origin: Origin::Daemon,
                 from: None,
                 replaced_by: None,
-                seq: None,
             },
         )));
     };
@@ -166,7 +165,6 @@ fn one_vault_change_invalidates_the_shared_resolver_for_both_consumers() {
             origin: Origin::Daemon,
             from: None,
             replaced_by: None,
-            seq: None,
         },
     )));
     assert!(!app.reading.resolver.is_built(), "Reading sees the drop");

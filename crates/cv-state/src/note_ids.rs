@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn v17_database_migrates_to_v18_and_bindings_survive_reopen() {
+    fn v17_database_migrates_to_v19_and_bindings_survive_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("state.db");
         {
@@ -331,16 +331,10 @@ mod tests {
             c.execute_batch(crate::migrate::BASELINE).unwrap();
             c.pragma_update(None, "user_version", crate::migrate::BASELINE_VERSION)
                 .unwrap();
-            c.execute(
-                "INSERT INTO path_lineage (kind, from_path, at_ms) VALUES ('created', 'a.md', 1)",
-                [],
-            )
-            .unwrap();
         }
         let a = {
             let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-            assert_eq!(s.schema_version().unwrap(), 18);
-            assert_eq!(s.lineage_head().unwrap(), 1, "lineage rows kept");
+            assert_eq!(s.schema_version().unwrap(), 19);
             s.note_id_bind("a.md").unwrap()
         };
         let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();

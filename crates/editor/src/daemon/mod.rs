@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 pub use cv_protocol::{
     ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, HelloResult, JobStatus,
     LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult, NoteId,
-    NoteLocation, Notification, PathResolution, ResolvePathResult, RunActionParams,
-    RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult,
+    NoteLocation, Notification, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
+    ViewsListResult,
 };
 pub use cv_vault::ContentHash;
 #[cfg(any(test, feature = "fake"))]
@@ -206,21 +206,6 @@ pub trait DaemonClient: Send + Sync {
     /// The `state.db` path (from `hello`).
     fn state_db(&self) -> &Path;
 
-    /// Where the note bound at `path` as of lineage cursor `since` lives now (plan
-    /// note-path-continuity D2; `None` = no cursor, report the path now plus the head). An old
-    /// daemon answers method-not-found (see [`bind_read`]).
-    fn resolve_path(&self, path: &str, since: Option<u64>) -> Result<ResolvePathResult>;
-
-    /// [`Self::read_file`] bound to a lineage cursor describing the same incarnation as the
-    /// bytes (see [`bind_read`]).
-    fn read_bound(&self, path: &str) -> Result<BoundRead> {
-        bind_read(
-            path,
-            |since| self.resolve_path(path, since),
-            || self.read_file(path),
-        )
-    }
-
     /// Reads a note from disk with the same content hash the daemon uses for CAS.
     fn read_file(&self, path: &str) -> Result<(Vec<u8>, ContentHash)> {
         let abs = vault_abs(self.vault_root(), path)?;
@@ -231,65 +216,6 @@ pub trait DaemonClient: Send + Sync {
         let hash = ContentHash::of(&bytes);
         Ok((bytes, hash))
     }
-}
-
-/// A local note read bound to its lineage cursor (plan note-path-continuity D2, cycle-2 audit E1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundRead {
-    pub bytes: Vec<u8>,
-    pub hash: ContentHash,
-    /// The lineage cursor the bytes' incarnation is valid at (`None` = an old daemon without
-    /// lineage: behave as before).
-    pub cursor: Option<u64>,
-}
-
-/// How often [`bind_read`] retries a read that raced an identity transition on its path.
-const BIND_ATTEMPTS: usize = 4;
-
-/// Binds a local read of `path` to a cursor of the same incarnation: take the head `h1` (no
-/// cursor), read the bytes locally, then confirm with `resolve(Some(h1))` that no identity
-/// transition left the path between `h1` and that answer's head `h2`; the bytes then belong to
-/// the incarnation alive over `[h1, h2]`, and `h2` is the cursor. A raced read (moved, deleted,
-/// replaced, reused) retries. An old daemon (method not found) yields the plain read, unbound.
-/// A missing file is the read's `NotFound` (the caller resolves it).
-pub fn bind_read(
-    path: &str,
-    mut resolve: impl FnMut(Option<u64>) -> Result<ResolvePathResult>,
-    mut read: impl FnMut() -> Result<(Vec<u8>, ContentHash)>,
-) -> Result<BoundRead> {
-    for _ in 0..BIND_ATTEMPTS {
-        let h1 = match resolve(None) {
-            Ok(r) => r.head,
-            Err(DaemonError::Rpc(e)) if e.code == cv_protocol::error_codes::METHOD_NOT_FOUND => {
-                let (bytes, hash) = read()?;
-                return Ok(BoundRead {
-                    bytes,
-                    hash,
-                    cursor: None,
-                });
-            }
-            Err(e) => return Err(e),
-        };
-        let got = read();
-        let after = resolve(Some(h1))?;
-        let live = matches!(&after.resolution, PathResolution::Live { path: p } if p == path);
-        match got {
-            Ok((bytes, hash)) if live => {
-                return Ok(BoundRead {
-                    bytes,
-                    hash,
-                    cursor: Some(after.head),
-                });
-            }
-            Ok(_) => {} // raced a transition: the bytes may be another incarnation
-            Err(DaemonError::NotFound(p)) if !live => return Err(DaemonError::NotFound(p)),
-            Err(DaemonError::NotFound(_)) => {} // appeared after the read: read again
-            Err(e) => return Err(e),
-        }
-    }
-    Err(DaemonError::Protocol(format!(
-        "{path}: identity kept changing during the read"
-    )))
 }
 
 /// Joins a vault-relative path onto `root`, refusing absolute paths and `..`.
@@ -324,109 +250,4 @@ pub fn connect(connector: &Connector) -> Result<Connection> {
         client,
         rx: Arc::new(Mutex::new(Some(rx))),
     })
-}
-
-#[cfg(test)]
-mod bind_tests {
-    use super::*;
-    use std::cell::RefCell;
-
-    /// A scripted daemon: a lineage log over one path plus its current bytes.
-    #[derive(Default)]
-    struct World {
-        head: u64,
-        /// `(seq, leaving edge)` on `a.md`: `Some(to)` = moved, `None` = deleted.
-        edges: Vec<(u64, Option<String>)>,
-        bytes: Option<Vec<u8>>,
-    }
-
-    impl World {
-        fn resolve(&self, since: Option<u64>) -> ResolvePathResult {
-            let resolution = match since.and_then(|c| self.edges.iter().find(|(s, _)| *s > c)) {
-                Some((_, Some(to))) => PathResolution::Moved { to: to.clone() },
-                Some((_, None)) => PathResolution::Deleted,
-                None if self.bytes.is_some() => PathResolution::Live {
-                    path: "a.md".into(),
-                },
-                None => PathResolution::Unknown,
-            };
-            ResolvePathResult {
-                resolution,
-                head: self.head,
-            }
-        }
-    }
-
-    /// Cycle-2 audit E1: X is moved a.md→b.md and Y created at a.md between the cursor and the
-    /// local read. The read returns Y's bytes; the bound result must carry a cursor of Y's
-    /// incarnation (never the pre-move cursor that would later "follow" X's move with Y's bytes).
-    #[test]
-    fn bound_read_bytes_and_cursor_are_the_same_incarnation() {
-        let w = RefCell::new(World {
-            head: 5,
-            bytes: Some(b"X".to_vec()),
-            ..World::default()
-        });
-        let reads = RefCell::new(0);
-        let got = bind_read(
-            "a.md",
-            |since| Ok(w.borrow().resolve(since)),
-            || {
-                let mut n = reads.borrow_mut();
-                *n += 1;
-                if *n == 1 {
-                    // The race, after the first cursor was taken.
-                    let mut w = w.borrow_mut();
-                    w.edges.push((6, Some("b.md".into())));
-                    w.head = 7; // seq 7: Y created at a.md
-                    w.bytes = Some(b"Y".to_vec());
-                }
-                let b = w.borrow().bytes.clone().unwrap();
-                let h = ContentHash::of(&b);
-                Ok((b, h))
-            },
-        )
-        .unwrap();
-        assert_eq!(*reads.borrow(), 2, "the raced read was retried");
-        assert_eq!(got.bytes, b"Y");
-        assert_eq!(got.cursor, Some(7));
-        // That cursor resolves to Y's own incarnation, still live at a.md.
-        assert_eq!(
-            w.borrow().resolve(got.cursor).resolution,
-            PathResolution::Live {
-                path: "a.md".into()
-            }
-        );
-        // No race: bound at once.
-        let quiet = bind_read(
-            "a.md",
-            |since| Ok(w.borrow().resolve(since)),
-            || Ok((b"Y".to_vec(), ContentHash::of(b"Y"))),
-        )
-        .unwrap();
-        assert_eq!(quiet.cursor, Some(7));
-        // An old daemon: the plain read, unbound.
-        let old = bind_read(
-            "a.md",
-            |_| {
-                Err(DaemonError::Rpc(cv_protocol::RpcError {
-                    code: cv_protocol::error_codes::METHOD_NOT_FOUND,
-                    message: "nope".into(),
-                    data: None,
-                }))
-            },
-            || Ok((b"Z".to_vec(), ContentHash::of(b"Z"))),
-        )
-        .unwrap();
-        assert_eq!((old.bytes, old.cursor), (b"Z".to_vec(), None));
-        // A deleted note is the read's NotFound.
-        w.borrow_mut().edges.push((8, None));
-        w.borrow_mut().bytes = None;
-        let gone = bind_read(
-            "a.md",
-            |since| Ok(w.borrow().resolve(since)),
-            || Err(DaemonError::NotFound("a.md".into())),
-        );
-        assert!(matches!(gone, Err(DaemonError::NotFound(_))));
-    }
 }

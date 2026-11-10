@@ -192,7 +192,7 @@ fn fresh_database_is_created_at_latest_version() {
     let p = dir.path().join("state.db");
     let s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
     assert_eq!(migrate::BASELINE_VERSION, 17);
-    assert_eq!(migrate::latest_version(), migrate::BASELINE_VERSION + 1);
+    assert_eq!(migrate::latest_version(), migrate::BASELINE_VERSION + 2);
     assert_eq!(s.schema_version().unwrap(), migrate::latest_version());
     assert!(s.trash_entries().unwrap().is_empty());
     drop(s);

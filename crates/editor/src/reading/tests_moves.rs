@@ -39,7 +39,6 @@ fn changed(path: &str, kind: ChangeKind, hash: Option<String>) -> Notification {
         origin: Origin::Daemon,
         from: None,
         replaced_by: None,
-        seq: None,
     }
 }
 

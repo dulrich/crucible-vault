@@ -1,7 +1,7 @@
 //! Note ids in the daemon (plan note-identity WP-1, D1): the `state.db` sink the writer keeps
-//! every id → path binding current through, beside the lineage sink ([`crate::lineage`]).
+//! every id → path binding current through, at the identity-transition sites.
 //!
-//! Like lineage, the sink persists **synchronously on the writer thread**, inside the mutation, so
+//! The sink persists **synchronously on the writer thread**, inside the mutation, so
 //! a binding is durable before the mutating call returns, and it locks the shared `state.db` mutex
 //! there: nothing may hold that mutex while blocking on a writer call. A store failure is logged
 //! and the event carries no id (never a guessed one). WP-2 answers `bind_note` / `locate_note`

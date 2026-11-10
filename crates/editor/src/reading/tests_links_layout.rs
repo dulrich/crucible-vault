@@ -29,7 +29,6 @@ fn dims_survive_resolver_invalidation_for_an_unrelated_create() {
             origin: Origin::Daemon,
             from: None,
             replaced_by: None,
-            seq: None,
         }))
     };
     let epoch = app.resolver.epoch();

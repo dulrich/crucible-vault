@@ -7,7 +7,6 @@ pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod jobs;
-pub mod lineage;
 pub mod lookup;
 pub mod media_audit;
 pub mod note_id;

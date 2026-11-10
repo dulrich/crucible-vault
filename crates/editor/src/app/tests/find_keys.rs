@@ -410,7 +410,6 @@ fn ignore_shorts_list_add_again_across_save_echo() {
                 origin: cv_protocol::Origin::Daemon,
                 from: None,
                 replaced_by: None,
-                seq: None,
             },
         )));
         String::from_utf8(bytes).expect("utf8")

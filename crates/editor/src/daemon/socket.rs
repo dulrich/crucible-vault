@@ -280,17 +280,6 @@ impl DaemonClient for SocketDaemon {
         self.call::<m::MemoryReport>(report.clone()).map(drop)
     }
 
-    fn resolve_path(
-        &self,
-        path: &str,
-        since: Option<u64>,
-    ) -> Result<cv_protocol::ResolvePathResult> {
-        self.call::<m::ResolvePath>(cv_protocol::ResolvePathParams {
-            path: path.to_owned(),
-            since,
-        })
-    }
-
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let rx = self.rpc.notifications()?;
         let topics = topics.to_vec();

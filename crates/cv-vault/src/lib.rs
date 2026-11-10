@@ -13,7 +13,6 @@
 mod error;
 mod fs;
 mod hash;
-mod lineage;
 mod note_id;
 mod path;
 mod rewrite;
@@ -27,7 +26,6 @@ mod writer;
 pub use error::{Result, VaultError};
 pub use fs::VaultFs;
 pub use hash::ContentHash;
-pub use lineage::{LineageSink, NoLineage};
 pub use note_id::{NoNoteIds, NoteId, NoteIdSink, NoteLocation};
 pub use path::validate_rel_path;
 pub use thread::{WriterHandle, spawn_writer, spawn_writer_with_watcher};

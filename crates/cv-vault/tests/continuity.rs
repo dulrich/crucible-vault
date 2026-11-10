@@ -1,4 +1,4 @@
-//! Writer-authored path events and lineage (plan note-path-continuity WP-1, D1/D2): the spike's
+//! Writer-authored path events (plan note-path-continuity WP-1, D1): the spike's
 //! chained-move repros (`docs/spikes/chained-move/FINDINGS.md` C1/C2), a seeded property test
 //! over random writer op sequences, and an external write racing a writer write.
 
@@ -6,13 +6,12 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{Fx, h};
 use cv_vault::{
-    ContentHash, EventKind, LineageSink, NoteId, NoteIdSink, NoteLocation, Origin, VaultEvent,
-    WatchConfig, WriterHandle, spawn_writer_with_watcher,
+    ContentHash, EventKind, NoteId, NoteIdSink, NoteLocation, Origin, VaultEvent, WatchConfig,
+    WriterHandle, spawn_writer_with_watcher,
 };
 
 const DEB: Duration = Duration::from_millis(50);
@@ -35,48 +34,6 @@ fn collect(rx: &Receiver<VaultEvent>, window: Duration) -> Vec<VaultEvent> {
         }
     }
     out
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Tr {
-    Created(String),
-    Renamed(String, String),
-    Replaced(String, String),
-    Deleted(String),
-}
-
-#[derive(Clone, Default)]
-struct Rec(Arc<Mutex<Vec<Tr>>>);
-
-impl Rec {
-    fn take(&self) -> Vec<Tr> {
-        std::mem::take(&mut *self.0.lock().unwrap())
-    }
-}
-
-impl LineageSink for Rec {
-    fn created(&mut self, path: &str) -> Option<u64> {
-        self.0.lock().unwrap().push(Tr::Created(path.into()));
-        None
-    }
-    fn renamed(&mut self, from: &str, to: &str) -> Option<u64> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(Tr::Renamed(from.into(), to.into()));
-        None
-    }
-    fn replaced(&mut self, from: &str, by: &str) -> Option<u64> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(Tr::Replaced(from.into(), by.into()));
-        None
-    }
-    fn deleted(&mut self, path: &str) -> Option<u64> {
-        self.0.lock().unwrap().push(Tr::Deleted(path.into()));
-        None
-    }
 }
 
 /// An in-memory id store with the daemon sink's semantics (mint-or-get, move, retire).
@@ -123,13 +80,11 @@ impl NoteIdSink for Ids {
     }
 }
 
-fn spawn(fx: &Fx) -> (WriterHandle, Receiver<VaultEvent>, Rec) {
-    let rec = Rec::default();
+fn spawn(fx: &Fx) -> (WriterHandle, Receiver<VaultEvent>) {
     let mut w = fx.live();
-    w.set_lineage_sink(Box::new(rec.clone()));
     w.set_note_id_sink(Box::new(Ids::default()));
     let (wh, rx, _j) = spawn_writer_with_watcher(w, cfg()).unwrap();
-    (wh, rx, rec)
+    (wh, rx)
 }
 
 fn daemon(path: &str, kind: EventKind) -> VaultEvent {
@@ -137,7 +92,6 @@ fn daemon(path: &str, kind: EventKind) -> VaultEvent {
         path: path.into(),
         kind,
         origin: Origin::Daemon,
-        seq: None,
         id: None,
         hash: None,
     }
@@ -152,7 +106,7 @@ const SRC: &str = "---\ntitle: x\n---\nChapter 66\nbody\n";
 #[test]
 fn chained_move_then_rename_is_two_renamed() {
     let fx = Fx::new(&[("Clippings/c.md", SRC)]);
-    let (wh, rx, rec) = spawn(&fx);
+    let (wh, rx) = spawn(&fx);
     wh.rename("Clippings/c.md", "day/c.md", h(SRC)).unwrap();
     wh.rename("day/c.md", "day/S - Chapter 66.md", h(SRC))
         .unwrap();
@@ -164,19 +118,12 @@ fn chained_move_then_rename_is_two_renamed() {
             renamed("day/c.md", "day/S - Chapter 66.md"),
         ]
     );
-    assert_eq!(
-        rec.take(),
-        vec![
-            Tr::Renamed("Clippings/c.md".into(), "day/c.md".into()),
-            Tr::Renamed("day/c.md".into(), "day/S - Chapter 66.md".into()),
-        ]
-    );
 }
 
 #[test]
 fn chained_move_rename_then_write_is_two_renamed_and_modified() {
     let fx = Fx::new(&[("Clippings/c.md", SRC)]);
-    let (wh, rx, _rec) = spawn(&fx);
+    let (wh, rx) = spawn(&fx);
     wh.rename("Clippings/c.md", "day/c.md", h(SRC)).unwrap();
     wh.rename("day/c.md", "day/S - Chapter 66.md", h(SRC))
         .unwrap();
@@ -197,7 +144,7 @@ fn chained_move_rename_then_write_is_two_renamed_and_modified() {
 #[test]
 fn external_write_racing_a_writer_write_still_surfaces() {
     let fx = Fx::new(&[("a.md", "A")]);
-    let (wh, rx, _rec) = spawn(&fx);
+    let (wh, rx) = spawn(&fx);
     wh.write("a.md", b"A2 daemon".to_vec(), Some(h("A")))
         .unwrap();
     std::fs::write(fx.vault.path().join("a.md"), "A3 external edit").unwrap();
@@ -210,7 +157,6 @@ fn external_write_racing_a_writer_write_still_surfaces() {
                 path: "a.md".into(),
                 kind: EventKind::Modified,
                 origin: Origin::External,
-                seq: None,
                 id: None,
                 hash: None,
             },
@@ -226,7 +172,7 @@ fn external_write_racing_a_writer_write_still_surfaces() {
 fn external_rename_of_a_just_written_path_is_one_renamed() {
     for gap in [Duration::ZERO, DEB / 2] {
         let fx = Fx::new(&[("a.md", "A")]);
-        let (wh, rx, rec) = spawn(&fx);
+        let (wh, rx) = spawn(&fx);
         wh.rename("a.md", "c.md", h("A")).unwrap();
         std::thread::sleep(gap);
         std::fs::rename(fx.vault.path().join("c.md"), fx.vault.path().join("d.md")).unwrap();
@@ -241,18 +187,9 @@ fn external_rename_of_a_just_written_path_is_one_renamed() {
                         from: "c.md".into()
                     },
                     origin: Origin::External,
-                    seq: None,
                     id: None,
                     hash: None,
                 },
-            ],
-            "gap {gap:?}"
-        );
-        assert_eq!(
-            rec.take(),
-            vec![
-                Tr::Renamed("a.md".into(), "c.md".into()),
-                Tr::Renamed("c.md".into(), "d.md".into()),
             ],
             "gap {gap:?}"
         );
@@ -292,7 +229,6 @@ struct Model {
     vacated: Vec<String>,
     next: usize,
     events: Vec<VaultEvent>,
-    lineage: Vec<Tr>,
     /// Model file identity per live path, and the identity each expected event concerns.
     fids: std::collections::BTreeMap<String, usize>,
     ev_fids: Vec<usize>,
@@ -337,7 +273,6 @@ impl Model {
         let fid = self.gone(from);
         self.fids.insert(to.to_string(), fid);
         self.ev(renamed(from, to), fid);
-        self.lineage.push(Tr::Renamed(from.into(), to.into()));
     }
 }
 
@@ -352,7 +287,6 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             m.live.insert(p.clone(), c);
             let fid = m.born(&p);
             m.ev(daemon(&p, EventKind::Created), fid);
-            m.lineage.push(Tr::Created(p));
         }
         1 => {
             let Some(p) = rng.pick(&m.paths()).cloned() else {
@@ -417,7 +351,6 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
                 ),
                 fid,
             );
-            m.lineage.push(Tr::Replaced(a, by));
         }
         5 => {
             let Some(p) = rng.pick(&m.paths()).cloned() else {
@@ -427,7 +360,6 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             m.live.remove(&p);
             let fid = m.gone(&p);
             m.ev(daemon(&p, EventKind::Deleted { replaced_by: None }), fid);
-            m.lineage.push(Tr::Deleted(p));
         }
         _ => {
             // Path reuse: create at a path just moved away from.
@@ -445,7 +377,6 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
             m.live.insert(p.clone(), c);
             let fid = m.born(&p);
             m.ev(daemon(&p, EventKind::Created), fid);
-            m.lineage.push(Tr::Created(p));
         }
     }
 }
@@ -453,7 +384,7 @@ fn step(rng: &mut Rng, wh: &WriterHandle, m: &mut Model) {
 fn run_seed(seed: u64) {
     let start = [("d0/a.md", "A"), ("d1/b.md", "B"), ("d2/c.md", "C")];
     let fx = Fx::new(&start);
-    let (wh, rx, rec) = spawn(&fx);
+    let (wh, rx) = spawn(&fx);
     let mut m = Model {
         live: start
             .iter()
@@ -462,7 +393,6 @@ fn run_seed(seed: u64) {
         vacated: Vec::new(),
         next: 0,
         events: Vec::new(),
-        lineage: Vec::new(),
         fids: start
             .iter()
             .enumerate()
@@ -482,7 +412,6 @@ fn run_seed(seed: u64) {
     }
     got.extend(collect(&rx, DEB * 6));
     assert_eq!(got, m.events, "seed {seed}: event stream");
-    assert_eq!(rec.take(), m.lineage, "seed {seed}: lineage");
     // Folding the stream over the starting set yields the on-disk set.
     let mut fold: BTreeSet<String> = start.iter().map(|(p, _)| p.to_string()).collect();
     for e in &got {
@@ -557,7 +486,7 @@ fn run_seed(seed: u64) {
 
 /// Seeds via `CV_PROP_SEEDS` (default 4).
 #[test]
-fn random_writer_ops_fold_to_the_disk_set_and_match_lineage() {
+fn random_writer_ops_fold_to_the_disk_set_and_match_the_model() {
     let n: u64 = std::env::var("CV_PROP_SEEDS")
         .ok()
         .and_then(|s| s.parse().ok())

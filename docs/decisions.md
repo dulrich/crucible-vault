@@ -259,3 +259,9 @@ Settled with the maintainer in the feature-planning stream. Questions came from 
 - **1.0.0 baseline:** `BASELINE_VERSION = 17`; `BASELINE` is the v15 baseline with the v16 (job telemetry) and v17 (path lineage, including the `path_lineage_floor` seed row) steps folded in, byte-for-byte the `sqlite_master` the old chain produced (fixture `crates/cv-state/tests/fixtures/baseline-v17-schema.txt`, replacing the v15 one). `MIGRATIONS` is empty; the machinery stays so 1.x can append.
 - **Refusals:** versions `1..17` are refused with `StateError::PreBaseline` ("predates the 1.0.0 baseline"); a newer database is refused with `NewerSchema`. A database already at v17 opens with no schema write.
 - **Version:** the workspace version is `1.0.0` in `[workspace.package]`, inherited by every member (`Cargo.lock` changes only the members' `version` lines).
+
+## D32 — Note identity is the note id (2026-11-10; plan note-identity)
+
+- **Decision:** a vault file's identity is a daemon-minted note id, bound on the writer thread in `state.db` (`note_ids`, schema v18) at every identity transition; a rename keeps it, a delete retires it, and a retired id never comes back. The editor keys open documents by it (tabs reference the id) and the runner keys jobs by it (`active_id`), so both follow a moved note without replaying a path history.
+- **Superseded and removed:** the path-plus-cursor lineage scheme of note-path-continuity (its D2–D4: `path_lineage`, `resolve_path`, `file_changed.seq`, `ActionContext.lineage_cursor`, the editor's bound reads). Its D1 (writer-authored immediate events, the watcher reporting External only), D5 and D6 are kept. state.db v19 drops `path_lineage` and `path_lineage_floor`; the 1.0.0 baseline still creates them (migration history, D31) and a fresh database passes through both.
+- **Follow-up:** per-document editor stores still keyed by path re-key to the note id in a later plan (WP-5 of note-identity, moved out).

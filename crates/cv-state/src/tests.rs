@@ -314,19 +314,33 @@ fn fresh_baseline_matches_the_v17_chain_schema() {
     );
 }
 
-/// A fresh database has exactly one lineage-floor row `(1, 0)` (read by `lineage_floor`).
+/// Plan note-identity WP-6: a v18 database (baseline + the note-id step) migrates to v19, which
+/// drops both path-history tables and leaves the note-id table (and its rows) alone.
 #[test]
-fn fresh_baseline_seeds_the_lineage_floor() {
+fn v18_database_migrates_to_v19_without_the_path_history_tables() {
     let mut c = rusqlite::Connection::open_in_memory().unwrap();
-    migrate::migrate(&mut c).unwrap();
-    let rows: Vec<(i64, i64)> = c
-        .prepare("SELECT id, pruned FROM path_lineage_floor")
+    c.execute_batch(migrate::BASELINE).unwrap();
+    c.execute_batch(migrate::MIGRATIONS[0]).unwrap();
+    c.pragma_update(None, "user_version", 18).unwrap();
+    c.execute("INSERT INTO note_ids (path) VALUES ('a.md')", [])
+        .unwrap();
+    let tables = |c: &rusqlite::Connection| -> Vec<String> {
+        c.prepare(
+            r"SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'path\_%' ESCAPE '\'",
+        )
         .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map([], |r| r.get(0))
         .unwrap()
         .map(std::result::Result::unwrap)
-        .collect();
-    assert_eq!(rows, vec![(1, 0)]);
+        .collect()
+    };
+    assert_eq!(tables(&c).len(), 2, "the v18 database still has both");
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 19);
+    assert!(tables(&c).is_empty(), "v19 drops both path-history tables");
+    let ids: i64 = c
+        .query_row("SELECT COUNT(*) FROM note_ids", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ids, 1, "note-id rows survive");
 }
 
 /// A database at the latest version opens with no write.

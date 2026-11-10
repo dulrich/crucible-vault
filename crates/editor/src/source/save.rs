@@ -142,9 +142,6 @@ pub(super) struct SaveState {
     renaming: bool,
     /// Plan note-identity D4: the note this buffer belongs to.
     note: Option<NoteId>,
-    /// Plan note-path-continuity D3: the lineage cursor of the incarnation whose bytes this
-    /// buffer holds (`None` = an old daemon without lineage, or a buffer not bound to one).
-    lineage: Option<u64>,
 }
 
 impl SaveState {
@@ -160,7 +157,6 @@ impl SaveState {
             name_title: title,
             renaming: false,
             note: None,
-            lineage: None,
         }
     }
 }
@@ -208,24 +204,6 @@ impl SourceBuffer {
     /// Binds the buffer to note `id` (at open; the id never changes afterwards).
     pub fn set_note_id(&mut self, id: NoteId) {
         self.save.note = Some(id);
-    }
-
-    /// The lineage cursor of the incarnation this buffer's bytes belong to (plan
-    /// note-path-continuity D3).
-    pub fn lineage_cursor(&self) -> Option<u64> {
-        self.save.lineage
-    }
-
-    /// Binds the buffer to the cursor its bytes were read at.
-    pub fn set_lineage_cursor(&mut self, cursor: Option<u64>) {
-        self.save.lineage = cursor;
-    }
-
-    /// Advances the cursor (never backwards); a no-op for an unbound buffer.
-    pub fn advance_lineage(&mut self, to: u64) {
-        if let Some(c) = &mut self.save.lineage {
-            *c = (*c).max(to);
-        }
     }
 
     /// Drops the missing-file conflict (the note was found at a new path, not deleted).
