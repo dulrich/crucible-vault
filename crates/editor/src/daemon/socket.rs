@@ -7,15 +7,15 @@ use std::sync::mpsc::Receiver;
 
 use cv_protocol::client::{ClientError, RpcClient};
 use cv_protocol::{
-    CreateNoteParams, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams, HelloResult,
-    PathParams, RenameParams, SubscribeParams, ViewRunParams, WriteAttachmentParams,
-    WriteNoteParams, WriteNoteResult, methods as m,
+    BindNoteParams, CreateNoteParams, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams,
+    HelloResult, LocateNoteParams, PathParams, RenameParams, SubscribeParams, ViewRunParams,
+    WriteAttachmentParams, WriteNoteParams, WriteNoteResult, methods as m,
 };
 
 use super::{
-    ActionInfo, ContentHash, DaemonClient, DaemonError, DeletePreviewItem, LocalIndex,
-    Notification, Result, RunActionParams, RunActionResult, StatusResult, Topic, ViewResult,
-    ViewsListResult,
+    ActionInfo, ContentHash, DaemonClient, DaemonError, DeletePreviewItem, LocalIndex, NoteId,
+    NoteLocation, Notification, Result, RunActionParams, RunActionResult, StatusResult, Topic,
+    ViewResult, ViewsListResult,
 };
 
 impl From<ClientError> for DaemonError {
@@ -79,6 +79,17 @@ impl SocketDaemon {
     fn call<M: cv_protocol::Method>(&self, params: M::Params) -> Result<M::Result> {
         Ok(self.rpc.call::<M>(params)?)
     }
+
+    /// [`Self::call`] with a daemon `NOT_FOUND` mapped to [`DaemonError::NotFound`] (the by-id
+    /// and bind calls, where it means an unresolvable id or a path with no file).
+    fn call_nf<M: cv_protocol::Method>(&self, params: M::Params) -> Result<M::Result> {
+        self.call::<M>(params).map_err(|e| match e {
+            DaemonError::Rpc(r) if r.code == cv_protocol::error_codes::NOT_FOUND => {
+                DaemonError::NotFound(r.message)
+            }
+            e => e,
+        })
+    }
 }
 
 impl DaemonClient for SocketDaemon {
@@ -104,6 +115,53 @@ impl DaemonClient for SocketDaemon {
                 current_hash: ContentHash::from_hex(current_hash),
             }),
         }
+    }
+
+    fn write_note_by_id(
+        &self,
+        id: NoteId,
+        path: &str,
+        content: &str,
+        base_hash: &ContentHash,
+    ) -> Result<(ContentHash, String)> {
+        let r = self.call_nf::<m::WriteNote>(WriteNoteParams {
+            id: Some(id),
+            path: path.to_owned(),
+            content: content.to_owned(),
+            base_hash: base_hash.as_str().to_owned(),
+        })?;
+        match r {
+            WriteNoteResult::Written {
+                hash,
+                path: Some(at),
+            } => Ok((ContentHash::from_hex(hash), at)),
+            WriteNoteResult::Written { path: None, .. } => Err(DaemonError::Protocol(
+                "write_note by id answered without a path".into(),
+            )),
+            WriteNoteResult::Conflict { current_hash, .. } => Err(DaemonError::Conflict {
+                current_hash: ContentHash::from_hex(current_hash),
+            }),
+        }
+    }
+
+    fn bind_note(&self, path: &str) -> Result<NoteId> {
+        let path = path.to_owned();
+        Ok(self.call_nf::<m::BindNote>(BindNoteParams { path })?.id)
+    }
+
+    fn locate_note(&self, id: NoteId) -> Result<NoteLocation> {
+        self.call_nf::<m::LocateNote>(LocateNoteParams { id })
+    }
+
+    fn rename_by_id(&self, id: NoteId, to: &str) -> Result<String> {
+        let r = self.call_nf::<m::Rename>(RenameParams {
+            id: Some(id),
+            from: String::new(),
+            to: to.to_owned(),
+        })?;
+        r.from.ok_or_else(|| {
+            DaemonError::Protocol("rename by id answered without a source path".into())
+        })
     }
 
     fn create_note(&self, path: &str, content: &str) -> Result<String> {

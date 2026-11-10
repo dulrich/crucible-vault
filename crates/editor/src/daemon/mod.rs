@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 
 pub use cv_protocol::{
     ActionInfo, DeleteMode, DeleteNoteResult, DeletePreviewItem, HelloResult, JobStatus,
-    LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult, Notification,
-    PathResolution, ResolvePathResult, RunActionParams, RunActionResult, StatusResult, Topic,
-    ViewResult, ViewsListResult,
+    LookupChannel, LookupCurrency, LookupGeoResult, LookupModel, LookupModelsResult, NoteId,
+    NoteLocation, Notification, PathResolution, ResolvePathResult, RunActionParams,
+    RunActionResult, StatusResult, Topic, ViewResult, ViewsListResult,
 };
 pub use cv_vault::ContentHash;
 #[cfg(any(test, feature = "fake"))]
@@ -121,6 +121,26 @@ pub trait DaemonClient: Send + Sync {
     /// CAS write: `Ok(new hash)` or [`DaemonError::Conflict`] with the on-disk hash.
     fn write_note(&self, path: &str, content: &str, base_hash: &ContentHash)
     -> Result<ContentHash>;
+    /// Plan note-identity D2/D3: [`Self::write_note`] addressed to the note `id`. The daemon
+    /// writes at the id's current path (ignoring a stale `path`), or revives a retired id at
+    /// `path` when `base_hash` is [`no_base`]; an unresolvable id is [`DaemonError::NotFound`],
+    /// never a write at `path`. Returns the new hash and the path the daemon acted on (a
+    /// `Conflict` error carries only the on-disk hash).
+    fn write_note_by_id(
+        &self,
+        id: NoteId,
+        path: &str,
+        content: &str,
+        base_hash: &ContentHash,
+    ) -> Result<(ContentHash, String)>;
+    /// The id of the file now at `path`, minted if it has none; a path with no file is
+    /// [`DaemonError::NotFound`] (plan note-identity D2).
+    fn bind_note(&self, path: &str) -> Result<NoteId>;
+    /// Where the note `id` is now (plan note-identity D2).
+    fn locate_note(&self, id: NoteId) -> Result<NoteLocation>;
+    /// [`Self::rename`] addressed to the note `id`: renames the id's current path to `to` and
+    /// returns that source path; an unresolvable id is [`DaemonError::NotFound`].
+    fn rename_by_id(&self, id: NoteId, to: &str) -> Result<String>;
     /// Creates a note; the daemon may suffix the name, so the final path is returned.
     fn create_note(&self, path: &str, content: &str) -> Result<String>;
     /// Stores attachment `bytes` (extension `ext`) for `note_path` in the vault's attachment

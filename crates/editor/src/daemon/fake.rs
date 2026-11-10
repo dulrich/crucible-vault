@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cv_index::Index;
-use cv_protocol::{ChangeKind, JobState, Origin};
+use cv_protocol::{ChangeKind, FileChange, JobState, NoteId, NoteLocation, Origin, file_changed};
 
 use super::{
     ActionInfo, ContentHash, DaemonClient, DaemonError, DeleteMode, DeleteNoteResult,
@@ -93,7 +93,108 @@ struct Edge {
     to: Option<String>,
 }
 
+/// Where one note id is (mirrors the daemon's id store, plan note-identity D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Slot {
+    Live(String),
+    /// Retired: deleted (`None`) or absorbed by another note.
+    Gone(Option<NoteId>),
+}
+
+/// The fake's note-id bindings (plan note-identity WP-3): ids are minted on demand, never
+/// reused, move with a rename, retire on a delete / replace and are revived only by a write.
+#[derive(Default)]
+struct Ids {
+    last: u64,
+    notes: BTreeMap<NoteId, Slot>,
+    live: BTreeMap<String, NoteId>,
+}
+
+impl Ids {
+    fn mint(&mut self, path: &str) -> NoteId {
+        self.last += 1;
+        let id = NoteId(self.last);
+        self.notes.insert(id, Slot::Live(path.to_owned()));
+        self.live.insert(path.to_owned(), id);
+        id
+    }
+
+    /// The id of the file at `path`, minted if it has none.
+    fn id_of(&mut self, path: &str) -> NoteId {
+        match self.live.get(path) {
+            Some(id) => *id,
+            None => self.mint(path),
+        }
+    }
+
+    /// Retires any stale binding at `path` (its file is gone), then binds a new id there.
+    fn mint_fresh(&mut self, path: &str) -> NoteId {
+        if let Some(old) = self.live.remove(path) {
+            self.notes.insert(old, Slot::Gone(None));
+        }
+        self.mint(path)
+    }
+
+    /// Retires the id at `path` (minted first if absent) and returns it.
+    fn retire(&mut self, path: &str, replaced_by: Option<NoteId>) -> NoteId {
+        let id = self.id_of(path);
+        self.live.remove(path);
+        self.notes.insert(id, Slot::Gone(replaced_by));
+        id
+    }
+
+    /// Moves the id at `from` to `to`; a note already at `to` is absorbed (retired, recording
+    /// the mover).
+    fn rebind(&mut self, from: &str, to: &str) -> NoteId {
+        let id = self.id_of(from);
+        self.live.remove(from);
+        if let Some(old) = self.live.remove(to)
+            && old != id
+        {
+            self.notes.insert(old, Slot::Gone(Some(id)));
+        }
+        self.live.insert(to.to_owned(), id);
+        self.notes.insert(id, Slot::Live(to.to_owned()));
+        id
+    }
+
+    /// Binds the retired `id` again at `path` (D3 revive).
+    fn revive(&mut self, id: NoteId, path: &str) {
+        if let Some(old) = self.live.remove(path) {
+            self.notes.insert(old, Slot::Gone(None));
+        }
+        self.live.insert(path.to_owned(), id);
+        self.notes.insert(id, Slot::Live(path.to_owned()));
+    }
+
+    fn locate(&self, id: NoteId) -> NoteLocation {
+        match self.notes.get(&id) {
+            Some(Slot::Live(path)) => NoteLocation::Live { path: path.clone() },
+            Some(Slot::Gone(replaced_by)) => NoteLocation::Gone {
+                replaced_by: *replaced_by,
+            },
+            None => NoteLocation::Unknown,
+        }
+    }
+}
+
+/// A `FileChange` with only the fields every fake event sets.
+fn change(path: &str, kind: ChangeKind, origin: Origin, id: NoteId) -> FileChange {
+    FileChange {
+        path: path.to_owned(),
+        kind,
+        hash: None,
+        origin,
+        from: None,
+        replaced_by: None,
+        seq: None,
+        id: Some(id),
+    }
+}
+
 struct Inner {
+    /// Plan note-identity WP-3: the fake's note-id bindings.
+    ids: Ids,
     /// Plan note-path-continuity WP-3: the fake's path lineage (monotonic `seq`, from 1).
     lineage: Vec<Edge>,
     lineage_head: u64,
@@ -183,6 +284,7 @@ impl FakeDaemon {
         };
         Ok(Self {
             inner: Mutex::new(Inner {
+                ids: Ids::default(),
                 lineage: Vec::new(),
                 lineage_head: 0,
                 lookups: FakeLookups::default(),
@@ -271,11 +373,22 @@ impl FakeDaemon {
     /// then the source `Deleted`) to the subscriber and in the return value (tests feed it to
     /// the app).
     pub fn daemon_move(&self, from: &str, to: &str) -> Result<Vec<Notification>> {
+        let mut g = self.lock()?;
+        let pair = self.rename_core(&mut g, from, to)?;
+        for p in &pair {
+            emit(&mut g, p.clone());
+        }
+        Ok(pair)
+    }
+
+    /// Renames `from` to `to` on disk, rebinds the note's id, records the lineage edge and
+    /// rebuilds the index. Returns the notifications, not yet emitted: the bridge's pair
+    /// (built by `cv_protocol::file_changed`) and the index generation.
+    fn rename_core(&self, g: &mut Inner, from: &str, to: &str) -> Result<Vec<Notification>> {
         let (a, b) = (
             vault_abs(&self.vault_root, from)?,
             vault_abs(&self.vault_root, to)?,
         );
-        let mut g = self.lock()?;
         if !a.exists() {
             return Err(DaemonError::NotFound(from.to_owned()));
         }
@@ -283,35 +396,16 @@ impl FakeDaemon {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(&a, &b)?;
-        let seq = Some(record(&mut g, EdgeKind::Renamed, from, Some(to)));
+        let seq = record(g, EdgeKind::Renamed, from, Some(to));
+        let id = g.ids.rebind(from, to);
         let n = g.index.rebuild(&self.vault_root)?;
-        let pair = vec![
-            Notification::FileChanged {
-                id: None,
-                path: to.to_owned(),
-                kind: ChangeKind::Renamed,
-                hash: None,
-                origin: Origin::Daemon,
-                from: Some(from.to_owned()),
-                replaced_by: None,
-                seq,
-            },
-            Notification::FileChanged {
-                id: None,
-                path: from.to_owned(),
-                kind: ChangeKind::Deleted,
-                hash: None,
-                origin: Origin::Daemon,
-                from: None,
-                replaced_by: None,
-                seq,
-            },
-            Notification::IndexGeneration { n },
-        ];
-        for p in &pair {
-            emit(&mut g, p.clone());
-        }
-        Ok(pair)
+        let mut out = file_changed(FileChange {
+            from: Some(from.to_owned()),
+            seq: Some(seq),
+            ..change(to, ChangeKind::Renamed, Origin::Daemon, id)
+        });
+        out.push(Notification::IndexGeneration { n });
+        Ok(out)
     }
 
     /// Plan note-path-continuity WP-3 (tests only): the spike's degraded shape. The move is
@@ -334,20 +428,15 @@ impl FakeDaemon {
         record(&mut g, EdgeKind::Renamed, from, Some(to));
         g.index.rebuild(&self.vault_root)?;
         let hash = current_hash(&b)?.map(|h| h.as_str().to_owned());
-        let ev = |path: &str, kind, hash| Notification::FileChanged {
-            id: None,
-            path: path.to_owned(),
-            kind,
+        // Unpaired: the old id is retired, the file now at `to` gets a new one.
+        let old = g.ids.retire(from, None);
+        let new = g.ids.mint_fresh(to);
+        let mut out = file_changed(change(from, ChangeKind::Deleted, Origin::External, old));
+        out.extend(file_changed(FileChange {
             hash,
-            origin: Origin::External,
-            from: None,
-            replaced_by: None,
-            seq: None,
-        };
-        Ok(vec![
-            ev(from, ChangeKind::Deleted, None),
-            ev(to, ChangeKind::Created, hash),
-        ])
+            ..change(to, ChangeKind::Created, Origin::External, new)
+        }));
+        Ok(out)
     }
 
     /// Plan note-path-continuity WP-3 (tests only): `path` is deleted because `by` absorbed it
@@ -360,20 +449,15 @@ impl FakeDaemon {
             _ => DaemonError::Io(e),
         })?;
         let seq = Some(record(&mut g, EdgeKind::Replaced, path, Some(by)));
+        let absorber = g.ids.id_of(by);
+        let id = g.ids.retire(path, Some(absorber));
         let n = g.index.rebuild(&self.vault_root)?;
-        let out = vec![
-            Notification::FileChanged {
-                id: None,
-                path: path.to_owned(),
-                kind: ChangeKind::Deleted,
-                hash: None,
-                origin: Origin::Daemon,
-                from: None,
-                replaced_by: Some(by.to_owned()),
-                seq,
-            },
-            Notification::IndexGeneration { n },
-        ];
+        let mut out = file_changed(FileChange {
+            replaced_by: Some(by.to_owned()),
+            seq,
+            ..change(path, ChangeKind::Deleted, Origin::Daemon, id)
+        });
+        out.push(Notification::IndexGeneration { n });
         for n in &out {
             emit(&mut g, n.clone());
         }
@@ -521,34 +605,82 @@ impl FakeDaemon {
                 std::fs::rename(&abs, &dest)?;
             }
         }
-        let seq = record(g, EdgeKind::Deleted, path, None);
-        self.after_write(g, path, ChangeKind::Deleted, None, Some(seq))
+        self.retire_and_emit(g, path)
     }
 
-    fn after_write(
+    /// A delete of `path` (already off disk): records the edge, retires the note's id and
+    /// reports the `Deleted` carrying it.
+    fn retire_and_emit(&self, g: &mut Inner, path: &str) -> Result<()> {
+        let seq = record(g, EdgeKind::Deleted, path, None);
+        let id = g.ids.retire(path, None);
+        self.after_write(
+            g,
+            FileChange {
+                seq: Some(seq),
+                ..change(path, ChangeKind::Deleted, Origin::Daemon, id)
+            },
+        )
+    }
+
+    /// Rebuilds the index, then emits `c`'s notifications (via the shared constructor) and the
+    /// new generation.
+    fn after_write(&self, g: &mut Inner, c: FileChange) -> Result<()> {
+        let n = g.index.rebuild(&self.vault_root)?;
+        for notification in file_changed(c) {
+            emit(g, notification);
+        }
+        emit(g, Notification::IndexGeneration { n });
+        Ok(())
+    }
+
+    /// The CAS write shared by the path and by-id calls: writes `content` at `path` if the file
+    /// matches `base_hash`. A created file gets a fresh id, or `revive`'s id back (D3).
+    fn write_at(
         &self,
         g: &mut Inner,
         path: &str,
-        kind: ChangeKind,
-        hash: Option<String>,
-        seq: Option<u64>,
-    ) -> Result<()> {
-        let n = g.index.rebuild(&self.vault_root)?;
-        emit(
+        content: &str,
+        base_hash: &ContentHash,
+        revive: Option<NoteId>,
+    ) -> Result<ContentHash> {
+        let abs = vault_abs(&self.vault_root, path)?;
+        let found = current_hash(&abs)?;
+        let matches = match &found {
+            Some(h) => h == base_hash,
+            None => is_no_base(base_hash),
+        };
+        if !matches {
+            return Err(DaemonError::Conflict {
+                current_hash: found.unwrap_or_else(no_base),
+            });
+        }
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&abs, content.as_bytes())?;
+        let hash = ContentHash::of(content.as_bytes());
+        let (kind, seq, id) = if found.is_some() {
+            (ChangeKind::Modified, None, g.ids.id_of(path))
+        } else {
+            let seq = record(g, EdgeKind::Created, path, None);
+            let id = match revive {
+                Some(id) => {
+                    g.ids.revive(id, path);
+                    id
+                }
+                None => g.ids.mint_fresh(path),
+            };
+            (ChangeKind::Created, Some(seq), id)
+        };
+        self.after_write(
             g,
-            Notification::FileChanged {
-                id: None,
-                path: path.to_owned(),
-                kind,
-                hash,
-                origin: Origin::Daemon,
-                from: None,
-                replaced_by: None,
+            FileChange {
+                hash: Some(hash.as_str().to_owned()),
                 seq,
+                ..change(path, kind, Origin::Daemon, id)
             },
-        );
-        emit(g, Notification::IndexGeneration { n });
-        Ok(())
+        )?;
+        Ok(hash)
     }
 }
 
@@ -631,32 +763,60 @@ impl DaemonClient for FakeDaemon {
         base_hash: &ContentHash,
     ) -> Result<ContentHash> {
         self.mutation("write_note", path)?;
+        let mut g = self.lock()?;
+        self.write_at(&mut g, path, content, base_hash, None)
+    }
+
+    fn write_note_by_id(
+        &self,
+        id: NoteId,
+        path: &str,
+        content: &str,
+        base_hash: &ContentHash,
+    ) -> Result<(ContentHash, String)> {
+        self.mutation("write_note", path)?;
+        let mut g = self.lock()?;
+        match g.ids.locate(id) {
+            NoteLocation::Live { path: at } => {
+                let hash = self.write_at(&mut g, &at, content, base_hash, None)?;
+                Ok((hash, at))
+            }
+            // D3: the "no file" base revives the same id at the request's path.
+            NoteLocation::Gone { .. } if is_no_base(base_hash) => {
+                let hash = self.write_at(&mut g, path, content, base_hash, Some(id))?;
+                Ok((hash, path.to_owned()))
+            }
+            NoteLocation::Gone { .. } | NoteLocation::Unknown => {
+                Err(DaemonError::NotFound(format!("note {}", id.0)))
+            }
+        }
+    }
+
+    fn bind_note(&self, path: &str) -> Result<NoteId> {
         let abs = vault_abs(&self.vault_root, path)?;
         let mut g = self.lock()?;
-        let found = current_hash(&abs)?;
-        let matches = match &found {
-            Some(h) => h == base_hash,
-            None => is_no_base(base_hash),
-        };
-        if !matches {
-            return Err(DaemonError::Conflict {
-                current_hash: found.unwrap_or_else(no_base),
-            });
+        if !abs.is_file() {
+            return Err(DaemonError::NotFound(path.to_owned()));
         }
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&abs, content.as_bytes())?;
-        let hash = ContentHash::of(content.as_bytes());
-        let kind = if found.is_some() {
-            ChangeKind::Modified
-        } else {
-            ChangeKind::Created
+        Ok(g.ids.id_of(path))
+    }
+
+    fn locate_note(&self, id: NoteId) -> Result<NoteLocation> {
+        Ok(self.lock()?.ids.locate(id))
+    }
+
+    fn rename_by_id(&self, id: NoteId, to: &str) -> Result<String> {
+        let live = match self.lock()?.ids.locate(id) {
+            NoteLocation::Live { path } => path,
+            _ => return Err(DaemonError::NotFound(format!("note {}", id.0))),
         };
-        let seq =
-            (kind == ChangeKind::Created).then(|| record(&mut g, EdgeKind::Created, path, None));
-        self.after_write(&mut g, path, kind, Some(hash.as_str().to_owned()), seq)?;
-        Ok(hash)
+        self.mutation("rename", &live)?;
+        let mut g = self.lock()?;
+        let out = self.rename_core(&mut g, &live, to)?;
+        for n in out {
+            emit(&mut g, n);
+        }
+        Ok(live)
     }
 
     fn create_note(&self, path: &str, content: &str) -> Result<String> {
@@ -688,12 +848,14 @@ impl DaemonClient for FakeDaemon {
             }
             std::fs::write(&abs, bytes)?;
             let seq = record(&mut g, EdgeKind::Created, &path, None);
+            let id = g.ids.mint_fresh(&path);
             self.after_write(
                 &mut g,
-                &path,
-                ChangeKind::Created,
-                Some(h.as_str().to_owned()),
-                Some(seq),
+                FileChange {
+                    hash: Some(h.as_str().to_owned()),
+                    seq: Some(seq),
+                    ..change(&path, ChangeKind::Created, Origin::Daemon, id)
+                },
             )?;
         }
         Ok(path)
@@ -701,20 +863,11 @@ impl DaemonClient for FakeDaemon {
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
         self.mutation("rename", from)?;
-        let (a, b) = (
-            vault_abs(&self.vault_root, from)?,
-            vault_abs(&self.vault_root, to)?,
-        );
         let mut g = self.lock()?;
-        if !a.exists() {
-            return Err(DaemonError::NotFound(from.to_owned()));
+        for n in self.rename_core(&mut g, from, to)? {
+            emit(&mut g, n);
         }
-        if let Some(parent) = b.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(&a, &b)?;
-        let seq = record(&mut g, EdgeKind::Renamed, from, Some(to));
-        self.after_write(&mut g, to, ChangeKind::Renamed, None, Some(seq))
+        Ok(())
     }
 
     fn delete(&self, path: &str) -> Result<()> {
@@ -725,8 +878,7 @@ impl DaemonClient for FakeDaemon {
             std::io::ErrorKind::NotFound => DaemonError::NotFound(path.to_owned()),
             _ => DaemonError::Io(e),
         })?;
-        let seq = record(&mut g, EdgeKind::Deleted, path, None);
-        self.after_write(&mut g, path, ChangeKind::Deleted, None, Some(seq))
+        self.retire_and_emit(&mut g, path)
     }
 
     fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
@@ -1016,6 +1168,7 @@ mod tests {
     }
 
     /// Notifications carry the edge's `seq`, strictly increasing.
+    #[ignore = "note-identity WP-4: the rename now reports the production pair (seqs [2, 2, 3]); the asserted pre-D7 shape is superseded by rename_reports_the_pair_with_one_id_and_seq"]
     #[test]
     fn notifications_carry_the_lineage_seq() {
         let (_t, d) = fake_vault();
@@ -1031,6 +1184,171 @@ mod tests {
             })
             .collect();
         assert_eq!(seqs, vec![Some(2), Some(3)]);
+    }
+
+    fn file_changes(rx: &Receiver<Notification>) -> Vec<Notification> {
+        rx.try_iter()
+            .filter(|n| matches!(n, Notification::FileChanged { .. }))
+            .collect()
+    }
+
+    /// Plan note-identity D7: `rename` reports the production pair, `Renamed { from }` then the
+    /// source `Deleted`, with one id and one seq.
+    #[test]
+    fn rename_reports_the_pair_with_one_id_and_seq() {
+        let (_t, d) = fake_vault();
+        d.create_note("a.md", "x").expect("x");
+        let id = d.bind_note("a.md").expect("bind");
+        let rx = d.subscribe(&[Topic::FileChanged]).expect("sub");
+        d.rename("a.md", "b.md").expect("rename");
+        let got: Vec<_> = file_changes(&rx)
+            .into_iter()
+            .map(|n| match n {
+                Notification::FileChanged {
+                    path,
+                    kind,
+                    from,
+                    seq,
+                    id,
+                    ..
+                } => (path, kind, from, seq, id),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "b.md".to_owned(),
+                    ChangeKind::Renamed,
+                    Some("a.md".to_owned()),
+                    Some(2),
+                    Some(id)
+                ),
+                (
+                    "a.md".to_owned(),
+                    ChangeKind::Deleted,
+                    None,
+                    Some(2),
+                    Some(id)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_keeps_the_id_and_delete_retires_it() {
+        let (_t, d) = fake_vault();
+        d.create_note("a.md", "x").expect("x");
+        let id = d.bind_note("a.md").expect("bind");
+        assert_eq!(d.bind_note("a.md").expect("again"), id);
+        d.rename("a.md", "b.md").expect("rename");
+        assert_eq!(d.bind_note("b.md").expect("rebind"), id);
+        assert_eq!(
+            d.locate_note(id).expect("locate"),
+            NoteLocation::Live {
+                path: "b.md".into()
+            }
+        );
+        d.delete("b.md").expect("delete");
+        assert_eq!(
+            d.locate_note(id).expect("locate"),
+            NoteLocation::Gone { replaced_by: None }
+        );
+        assert_eq!(
+            d.locate_note(NoteId(999)).expect("locate"),
+            NoteLocation::Unknown
+        );
+    }
+
+    #[test]
+    fn replace_records_the_absorber_and_a_reused_path_gets_a_new_id() {
+        let (_t, d) = fake_vault();
+        d.create_note("a.md", "x").expect("a");
+        d.create_note("b.md", "y").expect("b");
+        let (a, b) = (
+            d.bind_note("a.md").expect("a"),
+            d.bind_note("b.md").expect("b"),
+        );
+        let out = d.daemon_delete_replaced("a.md", "b.md").expect("replace");
+        assert!(matches!(
+            &out[0],
+            Notification::FileChanged { id: Some(i), replaced_by: Some(_), .. } if *i == a
+        ));
+        assert_eq!(
+            d.locate_note(a).expect("locate"),
+            NoteLocation::Gone {
+                replaced_by: Some(b)
+            }
+        );
+        d.create_note("a.md", "z").expect("reuse");
+        let fresh = d.bind_note("a.md").expect("bind");
+        assert!(fresh != a && fresh != b);
+    }
+
+    /// D3: a write by a retired id with the empty base revives the same id at the request's
+    /// path, and a taken path is a conflict.
+    #[test]
+    fn revive_keeps_the_id_and_refuses_a_taken_path() {
+        let (_t, d) = fake_vault();
+        d.create_note("a.md", "x").expect("x");
+        let id = d.bind_note("a.md").expect("bind");
+        d.delete("a.md").expect("delete");
+        d.create_note("taken.md", "t").expect("taken");
+        let refused = d.write_note_by_id(id, "taken.md", "mine", &no_base());
+        assert!(matches!(refused, Err(DaemonError::Conflict { .. })));
+        assert_eq!(
+            d.locate_note(id).expect("locate"),
+            NoteLocation::Gone { replaced_by: None }
+        );
+        let (_, at) = d
+            .write_note_by_id(id, "back.md", "mine", &no_base())
+            .expect("revive");
+        assert_eq!(at, "back.md");
+        assert_eq!(d.bind_note("back.md").expect("bind"), id);
+        // A non-empty base on a retired id never writes.
+        d.delete("back.md").expect("delete");
+        let base = ContentHash::of(b"mine");
+        assert!(matches!(
+            d.write_note_by_id(id, "back.md", "again", &base),
+            Err(DaemonError::NotFound(_))
+        ));
+        assert!(d.read_file("back.md").is_err());
+    }
+
+    #[test]
+    fn write_and_rename_by_id_follow_the_live_path_not_the_request() {
+        let (_t, d) = fake_vault();
+        d.create_note("a.md", "x").expect("x");
+        let id = d.bind_note("a.md").expect("bind");
+        d.rename("a.md", "b.md").expect("rename");
+        let base = ContentHash::of(b"x");
+        let (_, at) = d.write_note_by_id(id, "a.md", "y", &base).expect("write");
+        assert_eq!(at, "b.md");
+        assert_eq!(d.read_file("b.md").expect("b").0, b"y");
+        assert!(
+            d.read_file("a.md").is_err(),
+            "nothing written at the stale path"
+        );
+        assert_eq!(d.rename_by_id(id, "c.md").expect("rename"), "b.md");
+        assert_eq!(d.read_file("c.md").expect("c").0, b"y");
+        assert!(matches!(
+            d.rename_by_id(NoteId(999), "z.md"),
+            Err(DaemonError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn bind_on_a_missing_path_fails() {
+        let (_t, d) = fake_vault();
+        assert!(matches!(
+            d.bind_note("nope.md"),
+            Err(DaemonError::NotFound(_))
+        ));
+        assert_eq!(
+            d.locate_note(NoteId(1)).expect("nothing minted"),
+            NoteLocation::Unknown
+        );
     }
 
     #[test]

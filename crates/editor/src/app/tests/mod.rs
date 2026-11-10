@@ -67,6 +67,7 @@ mod image_menu;
 mod index_follow;
 mod link_typeahead;
 mod reconnect;
+mod rename_order;
 mod replaced;
 mod save_continue;
 mod scroll_matrix;
