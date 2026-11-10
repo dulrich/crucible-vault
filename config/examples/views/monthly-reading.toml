@@ -5,6 +5,7 @@
 [formulas]
 tags = 'list(note.tags).map(value.toString().replace("#", "")).filter(value != "clippings").join(", ")'
 minutes = '(number(note["word-count"]) / number(file("_custom/Settings.md").properties.reading_wpm)).round(1)'
+access = 'if(note.complete == false || ((note.access == "paid" || note.access == "founding") && note.complete != true), "🔒", "")'
 category = 'if(list(note.tags).map(value.toString().replace("#", "")).contains("blog"), "blog", if(list(note.tags).map(value.toString().replace("#", "")).contains("news"), "news", if(list(note.tags).map(value.toString().replace("#", "")).contains("transcript"), "transcript", if(list(note.tags).map(value.toString().replace("#", "")).contains("serial"), "serial", "other"))))'
 
 [filters]
@@ -17,7 +18,7 @@ and = [
 type = "table"
 name = "Unread"
 filters = { and = ['note.read == false'] }
-order = ["file.name", "formula.tags", "note.word-count", "formula.minutes", "note.created"]
+order = ["file.name", "formula.access", "note.publication", "formula.tags", "note.word-count", "formula.minutes", "note.created"]
 sort = [{ property = "note.created", direction = "ASC" }]
 summaries = { "note.word-count" = "Sum", "formula.minutes" = "Sum" }
 
@@ -54,3 +55,24 @@ display = 'if(value > 0, value.round(0).toString() + " / " + (value / number(if(
 total_column = "Total"
 total_row = "Total"
 average_row = "Average/day"
+
+[properties."file.name"]
+displayName = "Note"
+
+[properties."formula.access"]
+displayName = "Access"
+
+[properties."note.publication"]
+displayName = "Author"
+
+[properties."formula.tags"]
+displayName = "Tags"
+
+[properties."note.word-count"]
+displayName = "Words"
+
+[properties."formula.minutes"]
+displayName = "Minutes"
+
+[properties."note.created"]
+displayName = "Created"

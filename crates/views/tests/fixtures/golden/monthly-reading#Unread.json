@@ -2,23 +2,31 @@
   "columns": [
     {
       "key": "file.name",
-      "label": "file name"
+      "label": "Note"
+    },
+    {
+      "key": "formula.access",
+      "label": "Access"
+    },
+    {
+      "key": "note.publication",
+      "label": "Author"
     },
     {
       "key": "formula.tags",
-      "label": "tags"
+      "label": "Tags"
     },
     {
       "key": "note.word-count",
-      "label": "word-count"
+      "label": "Words"
     },
     {
       "key": "formula.minutes",
-      "label": "minutes"
+      "label": "Minutes"
     },
     {
       "key": "note.created",
-      "label": "created"
+      "label": "Created"
     }
   ],
   "groups": [
@@ -30,6 +38,13 @@
               "label": "World News",
               "path": "daily/day/2026-10-01/World News.md",
               "t": "link"
+            },
+            {
+              "t": "text",
+              "v": ""
+            },
+            {
+              "t": "null"
             },
             {
               "t": "text",
@@ -59,6 +74,13 @@
             },
             {
               "t": "text",
+              "v": ""
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
               "v": "blog"
             },
             {
@@ -82,6 +104,13 @@
               "label": "Misc Notes",
               "path": "daily/day/2026-10-03/Misc Notes.md",
               "t": "link"
+            },
+            {
+              "t": "text",
+              "v": ""
+            },
+            {
+              "t": "null"
             },
             {
               "t": "text",
@@ -111,6 +140,13 @@
             },
             {
               "t": "text",
+              "v": ""
+            },
+            {
+              "t": "null"
+            },
+            {
+              "t": "text",
               "v": "blog"
             },
             {
@@ -134,6 +170,13 @@
               "label": "Story Ch 1",
               "path": "daily/day/2026-10-03/Story Ch 1.md",
               "t": "link"
+            },
+            {
+              "t": "text",
+              "v": ""
+            },
+            {
+              "t": "null"
             },
             {
               "t": "text",
@@ -163,6 +206,12 @@
   "summaries": [
     {
       "cells": [
+        {
+          "t": "null"
+        },
+        {
+          "t": "null"
+        },
         {
           "t": "null"
         },

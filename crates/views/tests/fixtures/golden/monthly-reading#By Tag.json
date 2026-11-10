@@ -2,19 +2,19 @@
   "columns": [
     {
       "key": "file.name",
-      "label": "file name"
+      "label": "Note"
     },
     {
       "key": "note.created",
-      "label": "created"
+      "label": "Created"
     },
     {
       "key": "note.word-count",
-      "label": "word-count"
+      "label": "Words"
     },
     {
       "key": "formula.minutes",
-      "label": "minutes"
+      "label": "Minutes"
     }
   ],
   "groups": [
