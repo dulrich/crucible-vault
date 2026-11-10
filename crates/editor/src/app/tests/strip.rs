@@ -96,5 +96,8 @@ fn tab_strip_fraction_and_activation_scroll() {
     assert!(task.units() > 0);
     drop(app.view());
     let _ = app.send(Message::Tabs(TabsMsg::DragPress(app.focus, 5)));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("n5.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("n5.md")
+    );
 }

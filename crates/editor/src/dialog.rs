@@ -66,13 +66,21 @@ pub enum Dialog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteConfirm {
     pub path: String,
+    /// Plan WP-R5: the open document the confirm was opened for (`None`: the note is not open);
+    /// OK deletes it by id, wherever it lives by then.
+    pub note: Option<crate::daemon::NoteId>,
     pub mode: DeleteMode,
     /// `(item, ticked)`.
     pub items: Vec<(DeletePreviewItem, bool)>,
 }
 
 impl DeleteConfirm {
-    pub fn new(path: String, mode: DeleteMode, items: Vec<DeletePreviewItem>) -> Self {
+    pub fn new(
+        path: String,
+        note: Option<crate::daemon::NoteId>,
+        mode: DeleteMode,
+        items: Vec<DeletePreviewItem>,
+    ) -> Self {
         let items = items
             .into_iter()
             .map(|i| {
@@ -80,7 +88,12 @@ impl DeleteConfirm {
                 (i, tick)
             })
             .collect();
-        Self { path, mode, items }
+        Self {
+            path,
+            note,
+            mode,
+            items,
+        }
     }
 
     /// Flips item `n`'s tick; referenced-elsewhere items stay unticked.
@@ -275,6 +288,7 @@ mod tests {
     fn tick_rules_orphans_ticked_referenced_untickable() {
         let mut c = DeleteConfirm::new(
             "n.md".into(),
+            None,
             DeleteMode::Trash,
             vec![item("own.png", false), item("shared.png", true)],
         );

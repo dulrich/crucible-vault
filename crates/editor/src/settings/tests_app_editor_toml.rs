@@ -275,7 +275,7 @@ fn explorer_trash_always_confirms_with_orphan_ticks() {
         "trash mode"
     );
     assert!(
-        crate::panes::find(&app.panes, "wp3del/one.md").is_none(),
+        crate::panes::find(&app.panes, "wp3del/one.md", &app.docs).is_none(),
         "open tab closed"
     );
 }

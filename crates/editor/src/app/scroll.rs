@@ -115,7 +115,7 @@ impl App {
         };
         match m {
             FindMsg::Open => {
-                if ps.active_note().is_none() {
+                if ps.active_note(&self.docs).is_none() {
                     return Task::none();
                 }
                 ps.find.get_or_insert_with(Default::default);
@@ -140,14 +140,14 @@ impl App {
             FindMsg::Focus(_) => {}
             FindMsg::Query(q) => {
                 let Some((text, seq)) = ps
-                    .active_note()
+                    .active_note(&self.docs)
                     .and_then(|t| self.docs.buffer(t.note))
                     .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
                 };
                 let path = ps
-                    .active_note()
+                    .active_note(&self.docs)
                     .map(|t| t.path.to_owned())
                     .unwrap_or_default();
                 let view = ps.active_tab().map_or(0, |t| t.id);
@@ -174,7 +174,7 @@ impl App {
                     return self.show_match();
                 }
                 let at = ps
-                    .active_note()
+                    .active_note(&self.docs)
                     .and_then(|t| self.docs.buffer(t.note))
                     .map_or(0, |d| {
                         let c = d.cursor().position;
@@ -196,14 +196,14 @@ impl App {
                     return Task::none();
                 };
                 let Some((text, seq)) = ps
-                    .active_note()
+                    .active_note(&self.docs)
                     .and_then(|t| self.docs.buffer(t.note))
                     .map(|d| (d.text(), d.edit_seq()))
                 else {
                     return Task::none();
                 };
                 let path = ps
-                    .active_note()
+                    .active_note(&self.docs)
                     .map(|t| t.path.to_owned())
                     .unwrap_or_default();
                 let Some(bar) = &mut ps.find else {
@@ -239,8 +239,8 @@ impl App {
         let Some(tab) = ps.active.and_then(|i| ps.tabs.get(i)) else {
             return Task::none();
         };
-        let (view, note) = (tab.id, tab.note);
-        let Some(path) = tab.path().map(str::to_owned) else {
+        let (view, note) = (tab.id, tab.note());
+        let Some(path) = tab.path(&self.docs).map(str::to_owned) else {
             return Task::none();
         };
         let Some(bar) = ps.find.as_mut() else {
@@ -427,21 +427,24 @@ impl App {
         if self.palette.open || self.switcher.open || self.dialog.is_some() {
             return None;
         }
-        match &self.active_tab()?.kind {
+        let tab = self.active_tab()?;
+        match &tab.kind {
             TabKind::Settings => {
                 Some((crate::settings::body_scroll_id(self.settings.section), None))
             }
             TabKind::Log | TabKind::File { .. } => None,
-            TabKind::Note(path) => self
-                .reading
-                .mode(&self.docs, path)
-                .shows_reading()
-                .then(|| {
-                    (
-                        crate::find::reading_scroll_id(path, self.view_of(path)),
-                        Some(path.to_owned()),
-                    )
-                }),
+            TabKind::Note(_) | TabKind::Unbound(_) => {
+                let path = tab.path(&self.docs)?;
+                self.reading
+                    .mode(&self.docs, path)
+                    .shows_reading()
+                    .then(|| {
+                        (
+                            crate::find::reading_scroll_id(path, self.view_of(path)),
+                            Some(path.to_owned()),
+                        )
+                    })
+            }
         }
     }
 

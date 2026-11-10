@@ -11,13 +11,18 @@ fn feed(app: &mut App, ns: Vec<Notification>) {
 }
 
 fn active_path(app: &App) -> Option<String> {
-    app.active_tab().and_then(|t| t.path().map(str::to_owned))
+    app.active_tab()
+        .and_then(|t| t.path(&app.docs).map(str::to_owned))
 }
 
 fn open_paths(app: &App) -> Vec<String> {
     app.panes
         .iter()
-        .flat_map(|(_, ps)| ps.tabs.iter().filter_map(|t| t.path().map(str::to_owned)))
+        .flat_map(|(_, ps)| {
+            ps.tabs
+                .iter()
+                .filter_map(|t| t.path(&app.docs).map(str::to_owned))
+        })
         .collect()
 }
 

@@ -120,7 +120,7 @@ impl App {
     /// Folds the live pane grid and view modes into `self.ui`, the snapshot
     /// `editor.json` holds (the WP-1 flat `tabs` / `active_tab` are read-only: never written).
     pub(super) fn sync_ui_state(&mut self) {
-        self.ui.panes = Some(panes::snapshot(&self.panes, self.focus));
+        self.ui.panes = Some(panes::snapshot(&self.panes, self.focus, &self.docs));
         self.ui.view_filters.clone_from(&self.views.filters);
         self.ui.view_sorts.clone_from(&self.views.sorts);
         self.ui.tabs.clear();
@@ -128,7 +128,7 @@ impl App {
         self.ui.modes = self
             .panes
             .iter()
-            .flat_map(|(_, ps)| ps.tabs.iter().filter_map(Tab::path))
+            .flat_map(|(_, ps)| ps.tabs.iter().filter_map(|t| t.path(&self.docs)))
             .map(|p| (p.to_owned(), self.reading.mode(&self.docs, p)))
             .collect();
     }

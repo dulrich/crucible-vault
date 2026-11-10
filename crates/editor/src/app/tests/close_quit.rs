@@ -111,7 +111,10 @@ mod in_flight {
         let (_tmp, _d, mut app) = setup(&["w3x/a.md", "w3x/b.md"]);
         let seq = in_flight(&mut app, "w3x/a.md");
         let _ = app.send(Message::Tabs(TabsMsg::CloseActive));
-        assert!(panes::find(&app.panes, "w3x/a.md").is_some(), "still open");
+        assert!(
+            panes::find(&app.panes, "w3x/a.md", &app.docs).is_some(),
+            "still open"
+        );
         assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
         land(
             &mut app,
@@ -119,8 +122,11 @@ mod in_flight {
             seq,
             SaveOutcome::Saved(ContentHash::from_hex("h1")),
         );
-        assert!(panes::find(&app.panes, "w3x/a.md").is_none(), "closed");
-        assert!(panes::find(&app.panes, "w3x/b.md").is_some());
+        assert!(
+            panes::find(&app.panes, "w3x/a.md", &app.docs).is_none(),
+            "closed"
+        );
+        assert!(panes::find(&app.panes, "w3x/b.md", &app.docs).is_some());
     }
 }
 
@@ -169,7 +175,7 @@ mod duplicates {
             // Same pane, closed while a save is in flight (the close waits on it).
             let (_tmp, _d, mut app) = setup(&["w7s/a.md"]);
             let pane = app.focus;
-            let extra = Tab::bound("w7s/a.md", app.note_id("w7s/a.md").expect("bound"));
+            let extra = Tab::bound(app.note_id("w7s/a.md").expect("bound"));
             let extra_id = extra.id;
             let first_id = app.active_note().expect("tab").id;
             if let Some(ps) = app.panes.get_mut(pane) {
@@ -307,7 +313,7 @@ mod loss_dialog {
             app.panes
                 .iter()
                 .flat_map(|(_, ps)| ps.tabs.iter())
-                .filter(|t| t.shows("d2c/a.md"))
+                .filter(|t| t.shows("d2c/a.md", &app.docs))
                 .count()
         };
         assert_eq!(count(&app), 2);

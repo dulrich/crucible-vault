@@ -540,7 +540,7 @@ fn settings_tab_persists_and_old_ui_state_loads() {
         let _ = app.send(s(SettingsMsg::Open));
         let _ = app.send(Message::PersistDue);
         let leaves = app.ui.panes.as_ref().map(|l| l.root.leaves()[0].0.to_vec());
-        assert_eq!(leaves, Some(vec![crate::app::TabKind::Settings]));
+        assert_eq!(leaves, Some(vec![crate::ui_state::TabKind::Settings]));
         assert!(app.ui.modes.is_empty(), "no mode entry");
     }
     let app = app_over(&d, Some(state.clone()));

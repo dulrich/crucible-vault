@@ -56,7 +56,10 @@ fn edit_typed_during_a_save_first_keeps_its_follow_up_save() {
     let _ = app.update(Message::Source(SourceMsg::Save));
     app.pump();
     assert_eq!(d.read_file("r2fu/a.md").expect("file").0, b"xxbody");
-    assert!(panes::find(&app.panes, "r2fu/a.md").is_none(), "closed");
+    assert!(
+        panes::find(&app.panes, "r2fu/a.md", &app.docs).is_none(),
+        "closed"
+    );
     assert!(app.dialog.is_none(), "{:?}", app.status.notice);
 }
 
@@ -101,7 +104,7 @@ fn created_arriving_under_a_dialog_is_applied() {
     app.pump();
     assert!(d.read_file("r2cr new.md").is_ok());
     assert_eq!(
-        app.active_tab().and_then(|t| t.path()),
+        app.active_tab().and_then(|t| t.path(&app.docs)),
         Some("r2cr new.md"),
         "the created note opened"
     );
@@ -124,7 +127,7 @@ fn shift_released_under_a_dialog_does_not_stick() {
     );
     assert!(app.status.error_text().is_none(), "{:?}", app.status.notice);
     assert_eq!(
-        app.active_tab().and_then(|t| t.path()),
+        app.active_tab().and_then(|t| t.path(&app.docs)),
         Some("r2sh/Works.md")
     );
 }

@@ -128,7 +128,7 @@ fn row_click_opens_the_path_at_its_line() {
         line: Some(3),
     }));
     let tab = app.active_tab().expect("tab");
-    assert_eq!(tab.path(), Some("Linker.md"));
+    assert_eq!(tab.path(&app.docs), Some("Linker.md"));
     // WP-R7 (Decision 4): mode-aware through `jump_to_line` — Reading tops the line's block.
     let p = "Linker.md";
     assert_eq!(app.reading.mode(&app.docs, p), ViewMode::Reading);

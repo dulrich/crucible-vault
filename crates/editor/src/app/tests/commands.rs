@@ -164,11 +164,20 @@ fn go_to_tab_selects_in_the_focused_pane_and_ignores_out_of_range() {
     open(&mut app, "wp4g/a.md");
     open(&mut app, "wp4g/b.md");
     let _ = app.send(Message::Palette(PaletteMsg::Key(c("Alt+1"))));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4g/a.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("wp4g/a.md")
+    );
     let _ = app.send(Message::Tabs(TabsMsg::GoTo(2)));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4g/b.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("wp4g/b.md")
+    );
     let _ = app.send(Message::Tabs(TabsMsg::GoTo(5)));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4g/b.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("wp4g/b.md")
+    );
 }
 
 #[test]

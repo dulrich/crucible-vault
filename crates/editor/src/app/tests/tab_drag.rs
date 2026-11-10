@@ -19,7 +19,7 @@ fn paths(app: &App, pane: Pane) -> Vec<String> {
         .map(|ps| {
             ps.tabs
                 .iter()
-                .filter_map(|t| t.path().map(str::to_owned))
+                .filter_map(|t| t.path(&app.docs).map(str::to_owned))
                 .collect()
         })
         .unwrap_or_default()
@@ -122,7 +122,7 @@ fn preview(app: &App, pane: Pane) -> Vec<String> {
         app.panes
             .get(p)
             .and_then(|ps| ps.tabs.get(i))
-            .and_then(|t| t.path().map(str::to_owned))
+            .and_then(|t| t.path(&app.docs).map(str::to_owned))
             .unwrap_or_default()
     };
     let len = app.panes.get(pane).map_or(0, |ps| ps.tabs.len());

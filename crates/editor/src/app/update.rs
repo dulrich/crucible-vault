@@ -76,7 +76,12 @@ impl App {
                 let tabs: Vec<u64> = self
                     .panes
                     .iter()
-                    .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.note == Some(id)).map(|t| t.id))
+                    .flat_map(|(_, ps)| {
+                        ps.tabs
+                            .iter()
+                            .filter(|t| t.note() == Some(id))
+                            .map(|t| t.id)
+                    })
                     .collect();
                 for t in tabs {
                     self.remove_tab(t);
@@ -234,13 +239,13 @@ impl App {
                 let active = self
                     .panes
                     .get(self.focus)
-                    .and_then(PaneState::active_note)
-                    .map(|t| t.path);
+                    .and_then(|ps| ps.active_note(&self.docs))
+                    .map(|t| t.path.to_owned());
                 let fx = crate::reading::update(
                     &mut self.reading,
                     m,
                     &mut self.docs,
-                    active,
+                    active.as_deref(),
                     self.daemon.as_ref(),
                 );
                 // WP-R2: a re-lower or mode switch may drop inline PDF embeds.
@@ -524,7 +529,7 @@ impl App {
         let tab = self
             .panes
             .get(self.focus)
-            .and_then(PaneState::active_note)
+            .and_then(|ps| ps.active_note(&self.docs))
             .and_then(|t| self.docs.buffer(t.note));
         self.panels.sync_buffer(tab, d.as_deref());
         if let Some(d) = &d

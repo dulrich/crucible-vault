@@ -16,7 +16,11 @@ fn open(app: &mut App, p: &str) {
 
 fn tab_target(app: &App, path: &str) -> Target {
     let ps = app.panes.get(app.focus).expect("pane");
-    let tab = ps.tabs.iter().find(|t| t.shows(path)).expect("tab");
+    let tab = ps
+        .tabs
+        .iter()
+        .find(|t| t.shows(path, &app.docs))
+        .expect("tab");
     Target::Tab {
         pane: app.focus,
         id: tab.id,
@@ -30,7 +34,7 @@ fn tab_paths(app: &App) -> Vec<String> {
         .map(|ps| {
             ps.tabs
                 .iter()
-                .filter_map(|t| t.path().map(str::to_owned))
+                .filter_map(|t| t.path(&app.docs).map(str::to_owned))
                 .collect()
         })
         .unwrap_or_default()
@@ -69,7 +73,10 @@ fn menu_opens_at_the_cursor_and_closes_on_escape_outside_click_and_choice() {
     let _ = app.send(menu(MenuMsg::Open(row("m4/a.md", false), AT)));
     let _ = app.send(menu(MenuMsg::Choose(Item::Open)));
     assert!(app.context_menu.is_none());
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("m4/a.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("m4/a.md")
+    );
     // Pane input is dropped while it is open.
     let _ = app.send(menu(MenuMsg::Open(row("m4/a.md", false), AT)));
     let _ = app.send(Message::Source(SourceMsg::Action(
@@ -157,7 +164,10 @@ fn explorer_row_menu_open_in_new_pane_rename_and_folder_new_note() {
     let _ = app.send(menu(MenuMsg::Choose(Item::OpenInNewPane)));
     assert_eq!(app.panes.len(), 2);
     assert_ne!(app.focus, first);
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("m4row/a.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("m4row/a.md")
+    );
 
     let _ = app.send(menu(MenuMsg::Open(row("m4row/b.md", false), AT)));
     let _ = app.send(menu(MenuMsg::Choose(Item::Rename)));

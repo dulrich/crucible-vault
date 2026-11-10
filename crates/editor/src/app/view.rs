@@ -65,9 +65,12 @@ impl App {
                     tab.id,
                 );
             }
-            TabKind::Note(p) => p,
+            TabKind::Note(_) | TabKind::Unbound(_) => match tab.path(&self.docs) {
+                Some(p) => p,
+                None => return iced::widget::Space::new().into(),
+            },
         };
-        let Some(doc) = self.docs.buffer(tab.note) else {
+        let Some(doc) = self.docs.buffer(tab.note()) else {
             return iced::widget::Space::new().into();
         };
         let body = crate::reading::tab_body(
@@ -144,12 +147,14 @@ impl App {
             TabKind::Settings => "Settings".to_owned(),
             TabKind::Log => "Log".to_owned(),
             TabKind::File { path: p, .. } => p.rsplit('/').next().unwrap_or(p).to_owned(),
-            TabKind::Note(p) => {
-                let siblings: Vec<&str> = ps.tabs.iter().filter_map(Tab::path).collect();
+            TabKind::Note(_) | TabKind::Unbound(_) => {
+                let p = tab.path(&self.docs).unwrap_or_default();
+                let siblings: Vec<&str> =
+                    ps.tabs.iter().filter_map(|t| t.path(&self.docs)).collect();
                 let fm = match self.prefs.tab_title {
                     crate::header::TabTitle::Title => self
                         .docs
-                        .buffer(tab.note)
+                        .buffer(tab.note())
                         .and_then(crate::source::SourceBuffer::frontmatter_title),
                     _ => None,
                 };
@@ -210,9 +215,9 @@ impl App {
             let (dirty, saving) = match &tab.kind {
                 TabKind::Settings => (self.settings.any_dirty(), false),
                 TabKind::Log | TabKind::File { .. } => (false, false),
-                TabKind::Note(_) => self
+                TabKind::Note(_) | TabKind::Unbound(_) => self
                     .docs
-                    .buffer(tab.note)
+                    .buffer(tab.note())
                     .map_or((false, false), |d| (d.is_dirty(), d.is_saving())),
             };
             let title = ellipsize(&self.tab_header_title(ps, tab), TITLE_MAX_CHARS);
@@ -240,7 +245,7 @@ impl App {
             // The rollover fill a `button` header used to give (lost when headers became
             // `mouse_area`s for drag); the active block keeps `panel_2`.
             let hovered = !active && self.tab_drag.header_hover() == Some(tab.id);
-            let hover = match tab.path() {
+            let hover = match tab.path(&self.docs) {
                 Some(p) => p.to_owned(),
                 None => self.tab_header_title(ps, tab),
             };
@@ -264,7 +269,7 @@ impl App {
             .align_y(iced::Alignment::Center);
             // WP-4: right-click a note tab for its context menu.
             // Plan round-22 WP-3: file (image / PDF) tabs get Copy path / Reveal / Close.
-            let chip: Element<'a, Message> = match (tab.path(), tab.file_path()) {
+            let chip: Element<'a, Message> = match (tab.path(&self.docs), tab.file_path()) {
                 (Some(p), _) => crate::context_menu::on_right(
                     chip,
                     crate::context_menu::Target::Tab {
@@ -459,7 +464,7 @@ impl App {
         let t = self.tokens;
         let focused = pane == self.focus;
         let mode = ps
-            .active_note()
+            .active_note(&self.docs)
             .map(|tab| self.reading.mode(&self.docs, tab.path));
         let mode_icon = match mode {
             Some(crate::reading::ViewMode::Source) => Icon::Code,
@@ -478,12 +483,12 @@ impl App {
         // Stable slots: tab bar, note control bar (`Space` for Settings / no tab), find bar,
         // period nav bar (`Space` when the note gets none), body — so the body's tree position
         // (and the editor's widget state) never depends on which bars are showing.
-        let note_bar: Element<'a, Message> = match ps.active_note() {
+        let note_bar: Element<'a, Message> = match ps.active_note(&self.docs) {
             Some(tab) => self.note_bar(pane, ps, tab, mode_btn.into()),
             None => Space::new().into(),
         };
         let nav_bar: Element<'a, Message> = ps
-            .active_note()
+            .active_note(&self.docs)
             .and_then(|tab| {
                 nav::bar(
                     pane,
@@ -518,7 +523,7 @@ impl App {
         ]
         .spacing(4);
         // The dropdown sits in a stack layer above the pane body (layer 0 never moves).
-        let menu: Element<'a, Message> = match (menu_open, ps.active_note(), mode) {
+        let menu: Element<'a, Message> = match (menu_open, ps.active_note(&self.docs), mode) {
             (true, Some(tab), Some(current)) => {
                 use crate::reading::ViewMode;
                 let item = |label: &'static str, icon: Icon, m: ViewMode| {

@@ -124,7 +124,7 @@ fn explorer_rename_move_new_trash_via_rpc() {
     let _ = app.send(Message::Explorer(ExplorerMsg::Submit));
     assert!(app.explorer.contains("wp4moved/fresh.md"));
     assert_eq!(
-        app.active_tab().and_then(|t| t.path()),
+        app.active_tab().and_then(|t| t.path(&app.docs)),
         Some("wp4moved/fresh.md")
     );
 
@@ -325,7 +325,7 @@ fn switcher_ranks_opens_and_creates_on_miss() {
     let _ = app.send(Message::Switcher(SwitcherMsg::Submit));
     assert!(!app.switcher.open);
     assert_eq!(
-        app.active_tab().and_then(|t| t.path()),
+        app.active_tab().and_then(|t| t.path(&app.docs)),
         Some("wp4sw/Works.md")
     );
 
@@ -337,7 +337,7 @@ fn switcher_ranks_opens_and_creates_on_miss() {
     let _ = app.send(Message::Switcher(SwitcherMsg::Submit));
     assert!(d.read_file("qqzz brand idea.md").is_ok(), "note.create ran");
     assert_eq!(
-        app.active_tab().and_then(|t| t.path()),
+        app.active_tab().and_then(|t| t.path(&app.docs)),
         Some("qqzz brand idea.md")
     );
 
@@ -482,7 +482,7 @@ fn nav_runs_period_open_and_opens_in_the_same_pane() {
             .map(|s| {
                 s.tabs
                     .iter()
-                    .filter_map(|t| t.path().map(str::to_owned))
+                    .filter_map(|t| t.path(&app.docs).map(str::to_owned))
                     .collect()
             })
             .unwrap_or_default()
@@ -544,7 +544,7 @@ fn panes_split_open_close_and_persist() {
         ["wp4p/a.md", "wp4p/b.md", "wp4p/c.md"]
     );
     assert_eq!(
-        restored.active_tab().and_then(|t| t.path()),
+        restored.active_tab().and_then(|t| t.path(&restored.docs)),
         Some("wp4p/c.md")
     );
     assert!(matches!(
@@ -581,7 +581,10 @@ fn single_pane_era_editor_json_loads_into_one_pane() {
     let app = app_over(&d, Some(state));
     assert_eq!(app.panes.len(), 1);
     assert_eq!(app.open_paths(), ["wp4old/a.md", "wp4old/b.md"]);
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp4old/a.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("wp4old/a.md")
+    );
     let _ = panes::order(&app.panes);
 }
 
@@ -849,7 +852,7 @@ fn pane_paths(app: &App, pane: iced::widget::pane_grid::Pane) -> Vec<String> {
         .map(|s| {
             s.tabs
                 .iter()
-                .filter_map(|t| t.path().map(str::to_owned))
+                .filter_map(|t| t.path(&app.docs).map(str::to_owned))
                 .collect()
         })
         .unwrap_or_default()

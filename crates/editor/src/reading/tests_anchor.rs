@@ -66,7 +66,10 @@ fn cross_note_open_then_jump_and_unknown_fragment_stays_at_top() {
     let (_t, d) = setup(&[("a.md", b"[[B#Target]]\n"), ("B.md", NOTE)]);
     let mut app = app_on(&d, "a.md");
     let _ = app.send(open_link("a.md", "B", Some("Target")));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("B.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("B.md")
+    );
     let want = app
         .reading
         .doc(&app.docs, "B.md")
@@ -79,7 +82,10 @@ fn cross_note_open_then_jump_and_unknown_fragment_stays_at_top() {
     let (_t, d) = setup(&[("a.md", b"x\n"), ("B.md", NOTE)]);
     let mut app = app_on(&d, "a.md");
     let _ = app.send(open_link("a.md", "B", Some("Nope")));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("B.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("B.md")
+    );
     let _ = app.send(open_link("B.md", "", Some("^abc")));
     assert_eq!(top(&app, "B.md"), None);
     assert!(app.status.notice.is_none());

@@ -38,7 +38,7 @@ pub(crate) fn app_on(d: &Arc<dyn DaemonClient>, path: &str) -> App {
     let mut app = App::new(Some(Arc::clone(d)), None);
     app.queue_rpcs(); // WP-R4: a note open completes through its queued RPC
     let _ = app.send(Message::Tabs(TabsMsg::Open(path.to_owned())));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some(path));
+    assert_eq!(app.active_tab().and_then(|t| t.path(&app.docs)), Some(path));
     app
 }
 

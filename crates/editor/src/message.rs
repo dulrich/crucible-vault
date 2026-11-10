@@ -363,9 +363,11 @@ pub enum ExplorerMsg {
     Done(crate::explorer::FileOpDone, Option<crate::daemon::NoteId>),
     /// plan editor-ui-round-3 WP-3: "Delete note…" on the active note.
     DeleteActive,
-    /// The `delete_preview` answer for `path` (opens the delete dialog).
+    /// The `delete_preview` answer for `path` (opens the delete dialog); `note` is the open
+    /// document it was asked for (plan WP-R5: the delete then goes by id).
     DeletePreview {
         path: String,
+        note: Option<crate::daemon::NoteId>,
         result: Result<Vec<crate::daemon::DeletePreviewItem>, String>,
     },
     /// `delete_note` finished.

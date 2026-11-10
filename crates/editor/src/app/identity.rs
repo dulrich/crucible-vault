@@ -2,7 +2,8 @@
 //! note by id through daemon `file_changed` notifications, moves, deletions and absorptions —
 //! `doc_file_changed` (and its `id: None` fallback `path_file_changed`), `doc_gone`,
 //! `follow_daemon_move`, `follow_doc`, `move_doc_path`, `follow_replaced`, `absorb`,
-//! `move_path_state`, `retarget_note_tabs` and the [`Follow`] mode. Locating a note off the UI
+//! `move_path_state`, `repoint_tabs` and the [`Follow`] mode. A note tab holds only its note id
+//! and reads its path from the document (plan WP-R5, review E3), so a move updates no tab. Locating a note off the UI
 //! thread (settle, open, insert) stays in `settle.rs`; bookmarks, explorer ops, Reading-side
 //! edits and title sync stay in `files.rs`.
 
@@ -180,7 +181,7 @@ impl App {
 
     /// Plan note-identity D4: **the one owner of a document's path change.** The document keeps
     /// its key (its id); its path field changes, then everything path-keyed follows from here
-    /// ([`Self::move_path_state`]): tabs, history, recents and the per-path satellite stores.
+    /// ([`Self::move_path_state`]): history, recents and the per-path satellite stores.
     pub(super) fn move_doc_path(&mut self, id: NoteId, to: &str) {
         let Some(from) = self.docs.path_of(id) else {
             return;
@@ -189,7 +190,6 @@ impl App {
             return;
         }
         self.docs.set_path(id, to);
-        self.retarget_note_tabs(id, id, to);
         self.move_path_state(&from, to);
         // Its pending filename edit is dropped and the text renders now under `to`.
         if let Some(od) = self.docs.by_id_mut(id) {
@@ -237,8 +237,13 @@ impl App {
         let dup: Vec<u64> = self
             .panes
             .iter()
-            .filter(|(_, ps)| ps.tabs.iter().any(|t| t.shows(to)))
-            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.note == Some(id)).map(|t| t.id))
+            .filter(|(_, ps)| ps.tabs.iter().any(|t| t.shows(to, &self.docs)))
+            .flat_map(|(_, ps)| {
+                ps.tabs
+                    .iter()
+                    .filter(|t| t.note() == Some(id))
+                    .map(|t| t.id)
+            })
             .collect();
         for t in dup {
             self.remove_tab(t);
@@ -257,7 +262,7 @@ impl App {
             a.reading.clear_title();
             self.docs.insert(a);
         }
-        self.retarget_note_tabs(id, aid, to);
+        self.repoint_tabs(id, aid);
         self.move_path_state(&from, to);
         if let Some(od) = self.docs.by_id_mut(aid)
             && od.reading.mode.shows_reading()
@@ -269,19 +274,19 @@ impl App {
     }
 
     /// The path-keyed tail of every move follow ([`Self::move_doc_path`], the E2 tab move): every
-    /// tab of `from` (and its history) moves to `to` and the per-path satellite stores are
+    /// path-carrying tab of `from` (and its history) moves to `to` and the per-path satellite stores are
     /// re-keyed. Hosted view results move with the host and go stale (re-run against `to` while
     /// the old result stays shown — no flash), and every other view goes stale too, since a
     /// rename changes link targets they may list (WP-8). Plan note-identity WP-5 re-keys these
     /// stores by id and removes this tail.
     pub(super) fn move_path_state(&mut self, from: &str, to: &str) {
         for (_, ps) in self.panes.iter_mut() {
-            // Note tabs bound to a document moved by id ([`Self::retarget_note_tabs`]); this
+            // A bound note tab reads its path from its document, so it needs nothing here; this
             // retargets file tabs (and unbound note tabs) by path.
             for t in ps
                 .tabs
                 .iter_mut()
-                .filter(|t| t.note.is_none() && t.shows(from))
+                .filter(|t| t.note().is_none() && t.shows(from, &self.docs))
             {
                 t.retarget(to);
             }
@@ -295,15 +300,13 @@ impl App {
         self.views.invalidate(&[]);
     }
 
-    /// Plan note-identity, WP-4: every tab of document `id` now shows document `new` at `to`
-    /// (`new == id` for a move; the absorber's id in the E2 tab move — the one place a tab's
-    /// note id changes). Its `TabKind::Note` path follows, so navigation, history and
-    /// persistence see `to`.
-    fn retarget_note_tabs(&mut self, id: NoteId, new: NoteId, to: &str) {
+    /// The E2 tab move (audit E2): every tab of retired document `id` now shows the absorbing
+    /// document `new` — the one place a tab's note id changes. Its path is `new`'s, read from
+    /// the store.
+    fn repoint_tabs(&mut self, id: NoteId, new: NoteId) {
         for (_, ps) in self.panes.iter_mut() {
-            for t in ps.tabs.iter_mut().filter(|t| t.note == Some(id)) {
-                t.note = Some(new);
-                t.retarget(to);
+            for t in ps.tabs.iter_mut().filter(|t| t.note() == Some(id)) {
+                t.kind = TabKind::Note(new);
             }
         }
     }

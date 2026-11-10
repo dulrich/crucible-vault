@@ -1,10 +1,10 @@
 //! Plan round-14 WP-3: image tabs, the system opener for external files, file-card embeds.
 
 use super::*;
-use crate::app::TabKind;
 use crate::daemon::FakeDaemon;
 use crate::message::{ImageTabMsg, MediaKey, PdfTabMsg};
 use crate::pdf::store::{Consumer, Doc, PageKey};
+use crate::ui_state::TabKind;
 
 fn png(w: u32, h: u32) -> Vec<u8> {
     let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
@@ -37,7 +37,7 @@ fn open(app: &mut App, path: &str) {
 fn kinds(app: &App) -> Vec<TabKind> {
     app.panes
         .iter()
-        .flat_map(|(_, ps)| ps.tabs.iter().map(|t| t.kind.clone()))
+        .flat_map(|(_, ps)| ps.tabs.iter().filter_map(|t| t.persisted(&app.docs)))
         .collect()
 }
 

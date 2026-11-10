@@ -171,7 +171,10 @@ fn assigning_a_bookmark_chord_writes_keys_and_survives_reorder() {
     );
     // The chord opens it.
     key(&mut app, "Alt+9");
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("wp9/a.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("wp9/a.md")
+    );
     // Clear drops the keys.
     hk(
         &mut app,

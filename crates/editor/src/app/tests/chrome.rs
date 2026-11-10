@@ -23,7 +23,8 @@ fn open(app: &mut App, p: &str) {
 }
 
 fn active(app: &App) -> Option<String> {
-    app.active_tab().and_then(|t| t.path().map(str::to_owned))
+    app.active_tab()
+        .and_then(|t| t.path(&app.docs).map(str::to_owned))
 }
 
 fn history(app: &App) -> Vec<String> {

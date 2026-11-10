@@ -205,7 +205,7 @@ fn tab_of(app: &App, id: NoteId) -> (Pane, usize) {
         .find_map(|(p, ps)| {
             ps.tabs
                 .iter()
-                .position(|t| t.note == Some(id))
+                .position(|t| t.note() == Some(id))
                 .map(|i| (*p, i))
         })
         .expect("a tab of the document")
@@ -347,7 +347,7 @@ fn a_moved_tab_keeps_its_document_and_restore_binds_tabs() {
     assert_eq!(app.note_id("ni11/a.md"), Some(id));
     let (p, i) = tab_of(&app, id);
     assert_eq!(
-        app.panes.get(p).expect("pane").tabs[i].path(),
+        app.panes.get(p).expect("pane").tabs[i].path(&app.docs),
         Some("ni11/a.md")
     );
 }

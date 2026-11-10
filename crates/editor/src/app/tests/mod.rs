@@ -78,6 +78,7 @@ mod shared_docs;
 mod strip;
 mod strip_route;
 mod tab_drag;
+mod tab_identity;
 mod title_sync;
 mod unsaved_dialog;
 mod view_scale;

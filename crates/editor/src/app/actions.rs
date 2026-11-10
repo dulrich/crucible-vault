@@ -286,7 +286,7 @@ impl App {
         let Some(ps) = self.panes.get_mut(self.focus) else {
             return self.dispatch_call(call);
         };
-        let Some(note) = ps.active_note().map(|t| t.note) else {
+        let Some(note) = ps.active_note(&self.docs).map(|t| t.note) else {
             if call.needs.contains(&cv_protocol::ContextNeed::ActivePath) {
                 self.status
                     .set_error(format!("{}: open a note first", call.title));

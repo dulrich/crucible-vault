@@ -29,7 +29,12 @@ fn queued(app: &mut App) -> Vec<Message> {
 fn tabs_of(app: &App, path: &str) -> usize {
     app.panes
         .iter()
-        .map(|(_, ps)| ps.tabs.iter().filter(|t| t.path() == Some(path)).count())
+        .map(|(_, ps)| {
+            ps.tabs
+                .iter()
+                .filter(|t| t.path(&app.docs) == Some(path))
+                .count()
+        })
         .sum()
 }
 

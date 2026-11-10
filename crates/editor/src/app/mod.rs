@@ -56,25 +56,58 @@ pub use connection::RecordingSink;
 pub use connection::{NoopSink, NotifHandle, OpenerNotices, RpcExec, TestSink, reconnect_delay};
 pub use status::{NOTICE_INLINE_CHARS, Notice, Severity, StatusModel};
 
-/// One open tab (plan editor-feedback-round-2 WP-7): a view of a note's document, or one of
-/// the singleton tabs (Settings, Log). A note's [`crate::source::SourceBuffer`] lives in the
-/// path-keyed [`OpenDoc`] store on [`App`], so two tabs of one note are mirrored views of one
-/// document (content, undo, dirty/saving, conflict, cursor). `id` is unique per tab for the
-/// session: it identifies the tab across async work (a close waiting on a save, audit E1) and
-/// keys per-view state (image pins, Reading place). The kind is a type, never a
-/// reserved path; singleton tabs never reach a daemon read or write.
+/// One open tab (plan editor-feedback-round-2 WP-7): a view of a note's document, a file, or one
+/// of the singleton tabs (Settings, Log). A note's [`crate::source::SourceBuffer`] lives in the
+/// id-keyed [`Docs`] store on [`App`], so two tabs of one note are mirrored views of one document
+/// (content, undo, dirty/saving, conflict, cursor). `id` is unique per tab for the session: it
+/// identifies the tab across async work (a close waiting on a save, audit E1) and keys per-view
+/// state (image pins, Reading place). The kind is a type, never a reserved path; singleton tabs
+/// never reach a daemon read or write. Plan WP-R5 (review E3): a bound note tab holds only its
+/// note id — its path is the document's ([`Tab::path`]), so a move updates no tab.
 #[derive(Debug, Clone)]
 pub struct Tab {
     pub id: u64,
     pub kind: TabKind,
-    /// Plan note-identity, WP-4: the note id of the document a note tab shows (`None` for
-    /// file / Settings / Log tabs and an unbound note tab). Runtime only — never serialized
-    /// ([`TabKind`] is the persisted shape, D4: persisted tabs bind at restore). A tab finds
-    /// its document by this id, never by its path; it changes only in the E2 tab move.
-    pub note: Option<NoteId>,
 }
 
-pub use crate::ui_state::{TabKind, Viewer};
+/// What a tab shows at runtime (plan WP-R5, review E3). The persisted shape is
+/// [`crate::ui_state::TabKind`] (paths, D4): [`Tab::persisted`] writes it and a restored note
+/// binds through [`App::open_into`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabKind {
+    /// A note tab bound to its open document: the path is the document's, never cached here.
+    Note(NoteId),
+    /// A note tab with no document yet (built before its open binds it; tests): the one state
+    /// that carries a note path, since nothing else knows it yet.
+    Unbound(String),
+    /// WP-R2 (review E6): a vault file shown read-only with no document (image or PDF).
+    File { viewer: Viewer, path: String },
+    /// The Settings tab.
+    Settings,
+    /// The notice log.
+    Log,
+}
+
+impl TabKind {
+    /// An image file tab.
+    pub fn image(path: &str) -> Self {
+        Self::File {
+            viewer: Viewer::Image,
+            path: path.to_owned(),
+        }
+    }
+
+    /// A PDF file tab.
+    pub fn pdf(path: &str) -> Self {
+        Self::File {
+            viewer: Viewer::Pdf,
+            path: path.to_owned(),
+        }
+    }
+}
+
+use crate::ui_state::TabKind as PersistedKind;
+pub use crate::ui_state::Viewer;
 
 /// One open document: everything per note path lives here, so a close is one
 /// `remove` and a rename one re-key. A document lives while at least one tab shows its path.
@@ -100,7 +133,8 @@ pub struct OpenDoc {
 /// path-addressed lookups below are derived from the documents themselves (a scan — a handful of
 /// open notes), so there is no second map that could drift from a document's path. The only
 /// path change is [`Docs::set_path`], called from [`App::move_doc_path`]; nothing re-keys a
-/// document.
+/// document. It is also the only home of a bound note tab's path (plan WP-R5, review E3): a tab
+/// holds the id and reads the path here ([`Tab::path`]), so a move updates no tab.
 #[derive(Debug, Default)]
 pub struct Docs {
     by_id: std::collections::HashMap<NoteId, OpenDoc>,
@@ -247,12 +281,13 @@ fn buf_mut<'a>(docs: &'a mut Docs, path: &str) -> Option<&'a mut crate::source::
 /// tab switches) is written once.
 pub const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// A note tab, borrowed: its id and vault path ([`Tab::as_note`]).
+/// A note tab, borrowed: its id and vault path ([`Tab::as_note`]) — the path is the document's
+/// for a bound tab, read from [`Docs`] at the call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoteRef<'a> {
     pub id: u64,
     pub path: &'a str,
-    /// The tab's document ([`Tab::note`]).
+    /// The tab's document ([`Tab::note`]; `None` for an unbound tab).
     pub note: Option<NoteId>,
 }
 
@@ -285,26 +320,41 @@ impl Tab {
         Self {
             id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             kind,
-            note: None,
         }
     }
 
-    /// A new note tab (fresh id) showing `path`, unbound (tests; the app opens bound tabs).
-    pub fn note(path: &str) -> Self {
-        Self::new(TabKind::Note(path.to_owned()))
+    /// A new note tab (fresh id) showing `path`, not yet bound to a document.
+    pub fn unbound(path: &str) -> Self {
+        Self::new(TabKind::Unbound(path.to_owned()))
     }
 
-    /// A new note tab (fresh id) showing document `id` at `path`.
-    pub fn bound(path: &str, id: NoteId) -> Self {
-        let mut t = Self::note(path);
-        t.note = Some(id);
-        t
+    /// A new note tab (fresh id) showing document `id`.
+    pub fn bound(id: NoteId) -> Self {
+        Self::new(TabKind::Note(id))
     }
 
-    /// The note path, when this is a note tab.
-    pub fn path(&self) -> Option<&str> {
+    /// The note id of the document a bound note tab shows (`None` for every other tab).
+    pub fn note(&self) -> Option<NoteId> {
         match &self.kind {
-            TabKind::Note(p) => Some(p),
+            TabKind::Note(id) => Some(*id),
+            TabKind::Unbound(_) | TabKind::File { .. } | TabKind::Settings | TabKind::Log => None,
+        }
+    }
+
+    /// Whether this is a note tab (bound or not).
+    pub fn is_note(&self) -> bool {
+        match &self.kind {
+            TabKind::Note(_) | TabKind::Unbound(_) => true,
+            TabKind::File { .. } | TabKind::Settings | TabKind::Log => false,
+        }
+    }
+
+    /// The note path, when this is a note tab: a bound tab's is its document's current path
+    /// (`None` once the document is gone from `docs`, as for a closed tab).
+    pub fn path<'a>(&'a self, docs: &'a Docs) -> Option<&'a str> {
+        match &self.kind {
+            TabKind::Note(id) => docs.by_id(*id).map(|d| d.buffer.path()),
+            TabKind::Unbound(p) => Some(p),
             TabKind::File { .. } | TabKind::Settings | TabKind::Log => None,
         }
     }
@@ -317,28 +367,44 @@ impl Tab {
         }
     }
 
-    /// This tab as a note (`None` for Settings / Log).
-    pub fn as_note(&self) -> Option<NoteRef<'_>> {
-        self.path().map(|path| NoteRef {
+    /// This tab as a note (`None` for Settings / Log / file tabs and a bound tab whose document
+    /// is gone).
+    pub fn as_note<'a>(&'a self, docs: &'a Docs) -> Option<NoteRef<'a>> {
+        self.path(docs).map(|path| NoteRef {
             id: self.id,
             path,
-            note: self.note,
+            note: self.note(),
         })
     }
 
-    /// Plan round-15 WP-2: this tab's file moved to `to`. The one retarget rule: a file tab
-    /// keeps its kind (a note stays a note, an image an image — a later PDF tab joins here);
-    /// Settings / Log show no file and are untouched.
+    /// The persisted shape of this tab (D4: paths): a bound note writes its document's current
+    /// path; `None` for a bound tab whose document is gone.
+    pub fn persisted(&self, docs: &Docs) -> Option<crate::ui_state::TabKind> {
+        use crate::ui_state::TabKind as P;
+        Some(match &self.kind {
+            TabKind::Note(_) | TabKind::Unbound(_) => P::Note(self.path(docs)?.to_owned()),
+            TabKind::File { viewer, path } => P::File {
+                viewer: *viewer,
+                path: path.clone(),
+            },
+            TabKind::Settings => P::Settings,
+            TabKind::Log => P::Log,
+        })
+    }
+
+    /// Plan round-15 WP-2: this tab's file moved to `to`. The one retarget rule for tabs that
+    /// carry a path (file tabs, an unbound note tab); a bound note tab's path is its document's,
+    /// so a move never touches it; Settings / Log show no file.
     pub fn retarget(&mut self, to: &str) {
         match &mut self.kind {
-            TabKind::Note(p) | TabKind::File { path: p, .. } => to.clone_into(p),
-            TabKind::Settings | TabKind::Log => {}
+            TabKind::Unbound(p) | TabKind::File { path: p, .. } => to.clone_into(p),
+            TabKind::Note(_) | TabKind::Settings | TabKind::Log => {}
         }
     }
 
-    /// Whether this tab shows the note (or, plan round-14 WP-3, the image) at `path`.
-    pub fn shows(&self, path: &str) -> bool {
-        self.path().or_else(|| self.file_path()) == Some(path)
+    /// Whether this tab shows the note (or, plan round-14 WP-3, the file) at `path`.
+    pub fn shows(&self, path: &str, docs: &Docs) -> bool {
+        self.path(docs).or_else(|| self.file_path()) == Some(path)
     }
 }
 
@@ -673,13 +739,15 @@ impl App {
         app.load_bookmarks();
         for (pane, tabs, active) in plan {
             for kind in tabs {
+                // The persisted kind (paths): a note binds through its open (D4).
                 match kind {
-                    TabKind::Note(p) | TabKind::File { path: p, .. } => {
+                    PersistedKind::Note(p) | PersistedKind::File { path: p, .. } => {
                         if let Err(e) = app.open_into(pane, &p, Place::Restore) {
                             app.status.set_error(open_error(&e));
                         }
                     }
-                    TabKind::Settings | TabKind::Log => app.open_singleton(kind, pane),
+                    PersistedKind::Settings => app.open_singleton(TabKind::Settings, pane),
+                    PersistedKind::Log => app.open_singleton(TabKind::Log, pane),
                 }
             }
             if let Some(ps) = app.panes.get_mut(pane)
@@ -694,7 +762,7 @@ impl App {
         app.focus = focus;
         app.restoring = false;
         for (_, ps) in app.panes.iter_mut() {
-            if let Some(p) = ps.active_note().map(|t| t.path.to_owned()) {
+            if let Some(p) = ps.active_note(&app.docs).map(|t| t.path.to_owned()) {
                 ps.history.push(&p);
             }
         }
@@ -715,7 +783,7 @@ impl App {
         let visible: std::collections::HashSet<String> = self
             .panes
             .iter()
-            .filter_map(|(_, ps)| ps.active_note())
+            .filter_map(|(_, ps)| ps.active_note(&self.docs))
             .filter(|t| self.reading.mode(&self.docs, t.path).shows_source())
             .map(|t| t.path.to_owned())
             .collect();

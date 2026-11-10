@@ -50,7 +50,7 @@ pub(super) fn views(app: &App, path: &str) -> Vec<(Pane, u64)> {
         .flat_map(|(p, ps)| {
             ps.tabs
                 .iter()
-                .filter(|t| t.shows(path))
+                .filter(|t| t.shows(path, &app.docs))
                 .map(move |t| (*p, t.id))
         })
         .collect()
@@ -62,7 +62,7 @@ fn tab_paths(app: &App, pane: Pane) -> Vec<String> {
         .map(|ps| {
             ps.tabs
                 .iter()
-                .filter_map(|t| t.path().map(str::to_owned))
+                .filter_map(|t| t.path(&app.docs).map(str::to_owned))
                 .collect()
         })
         .unwrap_or_default()

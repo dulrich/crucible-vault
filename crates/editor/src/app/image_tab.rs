@@ -145,7 +145,7 @@ impl App {
             })
             .collect();
         for (_, ps) in self.panes.iter_mut() {
-            for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
+            for t in ps.tabs.iter_mut().filter(|t| t.shows(from, &self.docs)) {
                 t.retarget(to);
             }
             ps.history.retarget(from, to);

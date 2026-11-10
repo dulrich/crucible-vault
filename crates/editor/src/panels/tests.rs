@@ -123,7 +123,7 @@ fn outline_links_and_props_from_the_buffer() {
     let _ = app.send(Message::Panels(PanelsMsg::OutlineJump(10)));
     assert_eq!(app.active_doc().expect("doc").cursor().position.line, 10);
     let tab = app.active_tab().expect("tab");
-    assert_eq!(tab.path(), Some("a.md"));
+    assert_eq!(tab.path(&app.docs), Some("a.md"));
 }
 
 #[test]
@@ -157,7 +157,10 @@ fn backlinks_tags_and_search_from_the_index() {
         Some(("alpha".into(), vec!["a.md".into(), "sub/c.md".into()]))
     );
     let _ = app.send(Message::Panels(PanelsMsg::Open("sub/c.md".into())));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("sub/c.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("sub/c.md")
+    );
 }
 
 fn hit(path: &str, heading: &str, snippet: &str) -> cv_protocol::SearchHit {

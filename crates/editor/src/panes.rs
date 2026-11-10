@@ -3,8 +3,8 @@
 
 use iced::widget::pane_grid::{self, Axis, Configuration, Node, Pane};
 
-use crate::app::{NoteRef, Tab, TabKind};
-use crate::ui_state::{PaneLayout, PaneNode, SplitDir};
+use crate::app::{Docs, NoteRef, Tab, TabKind};
+use crate::ui_state::{PaneLayout, PaneNode, SplitDir, TabKind as PersistedKind};
 
 /// One pane: its tabs and the active index.
 #[derive(Debug, Default)]
@@ -26,8 +26,8 @@ impl PaneState {
     }
 
     /// The active tab when it is a note (never Settings / Log).
-    pub fn active_note(&self) -> Option<NoteRef<'_>> {
-        self.active_tab().and_then(Tab::as_note)
+    pub fn active_note<'a>(&'a self, docs: &'a Docs) -> Option<NoteRef<'a>> {
+        self.active_tab().and_then(|t| t.as_note(docs))
     }
 
     /// Makes tab `i` active and the most recently used (an out-of-range `i` is ignored).
@@ -109,14 +109,25 @@ pub fn axis_of(dir: SplitDir) -> Axis {
 }
 
 /// Snapshot of the grid for `editor.json`.
-pub fn snapshot(state: &pane_grid::State<PaneState>, focus: Pane) -> PaneLayout {
-    fn walk(n: &Node, state: &pane_grid::State<PaneState>) -> PaneNode {
+/// A note tab persists its document's current path ([`Tab::persisted`]); a bound tab whose
+/// document is gone is skipped (the active index follows the kept tabs).
+pub fn snapshot(state: &pane_grid::State<PaneState>, focus: Pane, docs: &Docs) -> PaneLayout {
+    fn walk(n: &Node, state: &pane_grid::State<PaneState>, docs: &Docs) -> PaneNode {
         match n {
             Node::Pane(p) => {
-                let (tabs, active) = state
-                    .get(*p)
-                    .map(|s| (s.tabs.iter().map(|t| t.kind.clone()).collect(), s.active))
-                    .unwrap_or_default();
+                let (tabs, active) = state.get(*p).map_or_else(Default::default, |s| {
+                    let mut tabs = Vec::new();
+                    let mut active = None;
+                    for (i, t) in s.tabs.iter().enumerate() {
+                        if let Some(k) = t.persisted(docs) {
+                            if s.active == Some(i) {
+                                active = Some(tabs.len());
+                            }
+                            tabs.push(k);
+                        }
+                    }
+                    (tabs, active)
+                });
                 PaneNode::Leaf { tabs, active }
             }
             Node::Split {
@@ -124,14 +135,14 @@ pub fn snapshot(state: &pane_grid::State<PaneState>, focus: Pane) -> PaneLayout 
             } => PaneNode::Split {
                 dir: dir_of(*axis),
                 ratio_milli: ratio_to_milli(*ratio),
-                a: Box::new(walk(a, state)),
-                b: Box::new(walk(b, state)),
+                a: Box::new(walk(a, state, docs)),
+                b: Box::new(walk(b, state, docs)),
             },
         }
     }
     let focused = order(state).iter().position(|p| *p == focus).unwrap_or(0);
     PaneLayout {
-        root: walk(state.layout(), state),
+        root: walk(state.layout(), state, docs),
         focused,
     }
 }
@@ -156,7 +167,7 @@ fn milli_to_ratio(m: u16) -> f32 {
 /// active)` in layout order) and the pane to focus.
 pub type Restore = (
     pane_grid::State<PaneState>,
-    Vec<(Pane, Vec<TabKind>, Option<usize>)>,
+    Vec<(Pane, Vec<PersistedKind>, Option<usize>)>,
     Pane,
 );
 
@@ -197,7 +208,7 @@ pub fn restore(layout: &PaneLayout) -> Restore {
 }
 
 /// The single-pane layout a WP-1 `editor.json` describes.
-pub fn from_flat(tabs: &[TabKind], active: Option<usize>) -> PaneLayout {
+pub fn from_flat(tabs: &[PersistedKind], active: Option<usize>) -> PaneLayout {
     PaneLayout {
         root: PaneNode::Leaf {
             tabs: tabs.to_vec(),
@@ -208,10 +219,13 @@ pub fn from_flat(tabs: &[TabKind], active: Option<usize>) -> PaneLayout {
 }
 
 /// The pane and index of the first tab showing `path`, if open anywhere.
-pub fn find(state: &pane_grid::State<PaneState>, path: &str) -> Option<(Pane, usize)> {
-    state
-        .iter()
-        .find_map(|(p, s)| s.tabs.iter().position(|t| t.shows(path)).map(|i| (*p, i)))
+pub fn find(state: &pane_grid::State<PaneState>, path: &str, docs: &Docs) -> Option<(Pane, usize)> {
+    state.iter().find_map(|(p, s)| {
+        s.tabs
+            .iter()
+            .position(|t| t.shows(path, docs))
+            .map(|i| (*p, i))
+    })
 }
 
 /// The pane and index of the first tab of `kind` (the singleton Settings / Log tabs).

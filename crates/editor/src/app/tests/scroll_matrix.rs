@@ -404,7 +404,7 @@ fn setup(mode: ViewMode) -> (tempfile::TempDir, App, Ui) {
         model: editor_model::render::RenderModel::default(),
     };
     ui.update(&mut app, Message::Tabs(TabsMsg::Open(PATH.into())));
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some(PATH));
+    assert_eq!(app.active_tab().and_then(|t| t.path(&app.docs)), Some(PATH));
     // Rendered once in Reading, so every mode can map source lines to blocks.
     for m in [ViewMode::Reading, mode] {
         ui.update(

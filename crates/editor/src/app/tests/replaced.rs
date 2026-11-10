@@ -22,7 +22,11 @@ fn deleted_by(app: &mut App, path: &str, by: &str) {
 fn open_paths(app: &App) -> Vec<String> {
     app.panes
         .iter()
-        .flat_map(|(_, ps)| ps.tabs.iter().filter_map(|t| t.path().map(str::to_owned)))
+        .flat_map(|(_, ps)| {
+            ps.tabs
+                .iter()
+                .filter_map(|t| t.path(&app.docs).map(str::to_owned))
+        })
         .collect()
 }
 

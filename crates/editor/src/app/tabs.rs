@@ -16,7 +16,7 @@ impl App {
             .or_else(|| {
                 self.panes
                     .iter()
-                    .filter_map(|(_, ps)| ps.active_note())
+                    .filter_map(|(_, ps)| ps.active_note(&self.docs))
                     .find(|t| t.path == path)
             })
             .map_or(0, |t| t.id)
@@ -41,8 +41,14 @@ impl App {
             if before.iter().any(|(b, _)| *b == id) {
                 continue;
             }
+            let note_path = match &kind {
+                TabKind::Note(n) => self.docs.path_of(*n),
+                TabKind::Unbound(p) => Some(p.clone()),
+                TabKind::File { .. } | TabKind::Settings | TabKind::Log => None,
+            };
             match kind {
-                TabKind::Note(p) => {
+                TabKind::Note(_) | TabKind::Unbound(_) => {
+                    let Some(p) = note_path else { continue };
                     tasks.extend(self.reading.restore(&mut self.docs, &p, id));
                     if self.reading.mode(&self.docs, &p).shows_reading() {
                         tasks.extend(self.views.restore(&p));
@@ -59,7 +65,9 @@ impl App {
 
     /// The focused pane's active tab when it is a note (never the Settings tab).
     pub fn active_note(&self) -> Option<NoteRef<'_>> {
-        self.panes.get(self.focus).and_then(PaneState::active_note)
+        self.panes
+            .get(self.focus)
+            .and_then(|ps| ps.active_note(&self.docs))
     }
 
     /// The document open at `path` (plan editor-feedback-round-2 WP-7).
@@ -75,13 +83,13 @@ impl App {
     /// The document tab `tab` (a [`Tab::id`]) shows, by its note id (plan note-identity, WP-4).
     pub fn tab_doc(&self, tab: u64) -> Option<&crate::source::SourceBuffer> {
         let (p, i) = panes::find_id(&self.panes, tab)?;
-        self.docs.buffer(self.panes.get(p)?.tabs.get(i)?.note)
+        self.docs.buffer(self.panes.get(p)?.tabs.get(i)?.note())
     }
 
     /// [`Self::tab_doc`], mutably.
     pub fn tab_doc_mut(&mut self, tab: u64) -> Option<&mut crate::source::SourceBuffer> {
         let (p, i) = panes::find_id(&self.panes, tab)?;
-        let note = self.panes.get(p)?.tabs.get(i)?.note;
+        let note = self.panes.get(p)?.tabs.get(i)?.note();
         self.docs.buffer_mut(note)
     }
 
@@ -116,7 +124,7 @@ impl App {
 
     /// Whether any tab shows `path`.
     pub(super) fn path_open(&self, path: &str) -> bool {
-        panes::find(&self.panes, path).is_some()
+        panes::find(&self.panes, path, &self.docs).is_some()
     }
 
     /// The iced scale factor (`editor.toml` `ui_scale`, clamped 0.5–3.0).
@@ -130,7 +138,12 @@ impl App {
         panes::order(&self.panes)
             .into_iter()
             .filter_map(|p| self.panes.get(p))
-            .flat_map(|s| s.tabs.iter().filter_map(Tab::path).map(str::to_owned))
+            .flat_map(|s| {
+                s.tabs
+                    .iter()
+                    .filter_map(|t| t.path(&self.docs))
+                    .map(str::to_owned)
+            })
             .collect()
     }
 
@@ -209,7 +222,7 @@ impl App {
         let Some(tab) = self.panes.get_mut(from.0).and_then(|ps| ps.remove(from.1)) else {
             return false;
         };
-        let path = tab.path().map(str::to_owned);
+        let path = tab.path(&self.docs).map(str::to_owned);
         let Some(ps) = self.panes.get_mut(to) else {
             return false;
         };
@@ -295,12 +308,12 @@ impl App {
             let here = self
                 .panes
                 .get(pane)
-                .and_then(|ps| ps.tabs.iter().position(|t| t.shows(path)));
+                .and_then(|ps| ps.tabs.iter().position(|t| t.shows(path, &self.docs)));
             if let Some(i) = here {
                 self.focus_tab(pane, i, path);
                 return Ok(self.open_continue(path, then));
             }
-            match (how, panes::find(&self.panes, path)) {
+            match (how, panes::find(&self.panes, path, &self.docs)) {
                 (Place::Focus | Place::Replace, Some((p, i))) => {
                     self.focus_tab(p, i, path);
                     return Ok(self.open_continue(path, then));
@@ -344,8 +357,8 @@ impl App {
         } else {
             // Opening a path that is already open joins its document (the same-path rule).
             match self.docs.id_of(path) {
-                Some(id) => Tab::bound(path, id),
-                None => Tab::note(path),
+                Some(id) => Tab::bound(id),
+                None => Tab::unbound(path),
             }
         };
         let mut replaced = None;
@@ -356,7 +369,7 @@ impl App {
                     if how == Place::Replace
                         && !self
                             .docs
-                            .buffer(ps.tabs[i].note)
+                            .buffer(ps.tabs[i].note())
                             .is_some_and(|d| d.is_dirty()) =>
                 {
                     replaced = Some(std::mem::replace(&mut ps.tabs[i], tab));
@@ -422,16 +435,17 @@ impl App {
         }
         // A note tab's inline PDF embeds go with it.
         self.pdf.view_closed(tab.id, &mut self.reading.images);
-        let Some(path) = tab.path() else {
+        let Some(path) = tab.path(&self.docs).map(str::to_owned) else {
             return;
         };
+        let path = path.as_str();
         self.sink.closed(path);
         // Plan note-identity, WP-4: a document lives while a tab references its id.
-        if let Some(id) = tab.note
+        if let Some(id) = tab.note()
             && !self
                 .panes
                 .iter()
-                .any(|(_, ps)| ps.tabs.iter().any(|t| t.note == Some(id)))
+                .any(|(_, ps)| ps.tabs.iter().any(|t| t.note() == Some(id)))
         {
             self.docs.remove_id(id);
         }
@@ -570,7 +584,7 @@ impl App {
             && i < ps.tabs.len()
         {
             ps.activate(i);
-            let path = ps.tabs[i].path().map(str::to_owned);
+            let path = ps.tabs[i].path(&self.docs).map(str::to_owned);
             self.focus = pane;
             if let Some(path) = path {
                 self.record_visit(pane, &path);
@@ -607,8 +621,8 @@ impl App {
         let Some(tab) = self.tab_at(panes::find_id(&self.panes, id)).cloned() else {
             return Task::none();
         };
-        let note = tab.note;
-        let path = match tab.kind {
+        let note = tab.note();
+        let path = match &tab.kind {
             // WP-2: closing the Settings tab flushes pending settings writes (the model and
             // its save loops outlive the tab, so the writes land after the close).
             TabKind::Settings => {
@@ -620,7 +634,13 @@ impl App {
                 self.remove_tab(id);
                 return Task::none();
             }
-            TabKind::Note(p) => p,
+            TabKind::Note(_) | TabKind::Unbound(_) => match tab.path(&self.docs) {
+                Some(p) => p.to_owned(),
+                None => {
+                    self.remove_tab(id);
+                    return Task::none();
+                }
+            },
         };
         // Plan note-identity, WP-4: the tab's own document, by its id (never by path).
         let Some((nid, doc)) = note.and_then(|n| self.docs.by_id(n).map(|d| (n, &d.buffer))) else {
@@ -677,7 +697,7 @@ impl App {
 
     /// Closes every tab on `path` (trashed files).
     pub(super) fn close_path(&mut self, path: &str) {
-        while let Some((pane, i)) = panes::find(&self.panes, path) {
+        while let Some((pane, i)) = panes::find(&self.panes, path, &self.docs) {
             match self.panes.get_mut(pane).and_then(|ps| ps.remove(i)) {
                 Some(t) => self.on_tab_closed(&t),
                 None => break,
@@ -693,8 +713,13 @@ impl App {
         match &kind {
             TabKind::Log => self.status.log.unread = 0,
             TabKind::Settings => {}
-            TabKind::Note(p) | TabKind::File { path: p, .. } => {
-                let p = p.clone();
+            TabKind::Note(_) | TabKind::Unbound(_) | TabKind::File { .. } => {
+                let p = match &kind {
+                    TabKind::Note(n) => self.docs.path_of(*n),
+                    TabKind::Unbound(p) | TabKind::File { path: p, .. } => Some(p.clone()),
+                    TabKind::Settings | TabKind::Log => None,
+                };
+                let Some(p) = p else { return };
                 if let Err(e) = self.open_into(pane, &p, Place::Focus) {
                     self.status.set_error(open_error(&e));
                 }

@@ -165,9 +165,10 @@ impl App {
                 Some(path) => return self.begin_delete(path),
                 None => self.status.set_error("no active note".into()),
             },
-            ExplorerMsg::DeletePreview { path, result } => match result {
+            ExplorerMsg::DeletePreview { path, note, result } => match result {
                 Ok(items) => {
-                    let c = crate::dialog::DeleteConfirm::new(path, self.prefs.delete_mode, items);
+                    let mode = self.prefs.delete_mode;
+                    let c = crate::dialog::DeleteConfirm::new(path, note, mode, items);
                     self.dialog = Some(crate::dialog::Dialog::DeleteConfirm(c));
                 }
                 Err(e) => self.status.set_error(e),

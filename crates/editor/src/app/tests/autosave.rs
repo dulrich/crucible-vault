@@ -37,7 +37,7 @@ fn dirty_in_place(app: &mut App, path: &str) {
 }
 
 fn select(app: &mut App, path: &str) {
-    let (p, i) = panes::find(&app.panes, path).expect("open");
+    let (p, i) = panes::find(&app.panes, path, &app.docs).expect("open");
     let _ = app.send(Message::Tabs(TabsMsg::Select(p, i)));
 }
 

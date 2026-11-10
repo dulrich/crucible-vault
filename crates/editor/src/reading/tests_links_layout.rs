@@ -209,7 +209,10 @@ fn unresolved_link_click_creates_under_create_mode() {
         fragment: None,
     }));
     assert!(d.read_file("Nope.md").is_ok(), "created at the root");
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("Nope.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("Nope.md")
+    );
     let _ = app.send(Message::Reading(ReadingMsg::OpenLink {
         src: "A.md".into(),
         target: "sub/Deep".into(),
@@ -219,7 +222,10 @@ fn unresolved_link_click_creates_under_create_mode() {
         d.read_file("sub/Deep.md").is_ok(),
         "created at the link's path"
     );
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("sub/Deep.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("sub/Deep.md")
+    );
     assert!(
         app.status
             .notice
@@ -244,7 +250,7 @@ fn nav_link_to_missing_note_creates_and_opens_it() {
     }));
     assert!(d.read_file("core/Inbox.md").is_ok(), "created at the path");
     assert_eq!(
-        app.active_tab().and_then(|t| t.path()),
+        app.active_tab().and_then(|t| t.path(&app.docs)),
         Some("core/Inbox.md")
     );
 }
@@ -270,7 +276,10 @@ fn link_menu_create_note_under_warn_mode() {
     let _ = app.send(Message::Menu(MenuMsg::Open(t, at)));
     let _ = app.send(Message::Menu(MenuMsg::Choose(Item::CreateNote)));
     assert!(d.read_file("Nope.md").is_ok());
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some("Nope.md"));
+    assert_eq!(
+        app.active_tab().and_then(|t| t.path(&app.docs)),
+        Some("Nope.md")
+    );
 }
 
 /// Plan round-6 WP-5: a Reading table-cell link (drawn through the same `run_el` spans as the
@@ -367,7 +376,7 @@ fn find_paint_follows_the_focused_pane_only() {
     assert_ne!(app.focus, first);
     let tab_b = app.active_tab().map(|t| t.id).expect("tab b");
     assert_ne!(tab_a, tab_b, "two tabs on one note");
-    assert_eq!(app.active_tab().and_then(|t| t.path()), Some(p));
+    assert_eq!(app.active_tab().and_then(|t| t.path(&app.docs)), Some(p));
     let _ = app.send(Message::Panes(PanesMsg::Focus(first)));
     let _ = app.send(Message::Find(FindMsg::Next));
     let paint = app

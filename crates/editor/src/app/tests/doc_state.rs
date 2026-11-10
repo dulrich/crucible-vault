@@ -1,13 +1,13 @@
 //! The app state model: tab kind, per-document state and debounced persistence.
 
 use super::*;
-use crate::app::TabKind;
 use crate::message::PanesMsg;
+use crate::ui_state::TabKind;
 
 fn kinds(app: &App) -> Vec<TabKind> {
     app.panes
         .iter()
-        .flat_map(|(_, ps)| ps.tabs.iter().map(|t| t.kind.clone()))
+        .flat_map(|(_, ps)| ps.tabs.iter().filter_map(|t| t.persisted(&app.docs)))
         .collect()
 }
 
@@ -25,11 +25,18 @@ fn activating_the_log_tab_runs_no_settings_scroll_restore() {
     let log = app
         .panes
         .get(pane)
-        .and_then(|ps| ps.tabs.iter().position(|t| t.kind == TabKind::Log))
+        .and_then(|ps| {
+            ps.tabs
+                .iter()
+                .position(|t| t.kind == crate::app::TabKind::Log)
+        })
         .expect("log tab");
     assert!(app.active_note().is_some(), "the note is active");
     let task = app.update(Message::Tabs(TabsMsg::Select(pane, log)));
-    assert!(app.active_tab().is_some_and(|t| t.kind == TabKind::Log));
+    assert!(
+        app.active_tab()
+            .is_some_and(|t| t.kind == crate::app::TabKind::Log)
+    );
     assert_eq!(
         task.units(),
         0,
@@ -41,7 +48,11 @@ fn activating_the_log_tab_runs_no_settings_scroll_restore() {
     let settings = app
         .panes
         .get(pane)
-        .and_then(|ps| ps.tabs.iter().position(|t| t.kind == TabKind::Settings))
+        .and_then(|ps| {
+            ps.tabs
+                .iter()
+                .position(|t| t.kind == crate::app::TabKind::Settings)
+        })
         .expect("settings tab");
     let task = app.update(Message::Tabs(TabsMsg::Select(pane, settings)));
     assert!(task.units() > 0, "Settings re-applies its place");

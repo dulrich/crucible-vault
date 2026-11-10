@@ -29,7 +29,7 @@ impl App {
             },
             (DialogMsg::Ok, Dialog::DeleteConfirm(c)) => {
                 let ticked = c.ticked();
-                self.run_delete_note(c.path, ticked, c.mode)
+                self.run_delete_note(c.path, c.note, ticked, c.mode)
             }
             (DialogMsg::Ok, Dialog::DeleteUnsaved(path)) => self.save_then_delete(path),
             _ => Task::none(),
@@ -89,29 +89,37 @@ impl App {
                 Ok(r) => Ok((r.path.unwrap_or(path), Ok(r.items))),
                 Err(e) => Ok((path, Err(e.to_string()))),
             },
-            |r| {
+            move |r| {
                 let (path, result) = r.unwrap_or_else(|e| (String::new(), Err(e)));
-                Message::Explorer(ExplorerMsg::DeletePreview { path, result })
+                Message::Explorer(ExplorerMsg::DeletePreview {
+                    path,
+                    note: id,
+                    result,
+                })
             },
         )
     }
 
-    /// Dialog OK: `delete_note` with the ticked items in the `editor.toml` `delete_mode`.
+    /// Dialog OK: `delete_note` with the ticked items in the `editor.toml` `delete_mode`. Plan
+    /// WP-R5: `note` is the open document the confirm was opened for, so a note moved since is
+    /// deleted at its current path (by id); a note that was not open goes by `path`.
     fn run_delete_note(
         &mut self,
         path: String,
+        note: Option<NoteId>,
         attachments: Vec<String>,
         mode: crate::daemon::DeleteMode,
     ) -> Task<Message> {
+        // The document's current path when it is still open (it may have moved since).
+        let path = note.and_then(|n| self.docs.path_of(n)).unwrap_or(path);
         if self.doc_dirty(&path) {
             // Edited between the confirm opening and OK: back through the unsaved-edits dialog.
             self.dialog = Some(crate::dialog::Dialog::DeleteUnsaved(path));
             return Task::none();
         }
-        let id = self.docs.id_of(&path);
         self.rpc(
             move |d| {
-                d.delete_note(id, &path, &attachments, mode)
+                d.delete_note(note, &path, &attachments, mode)
                     .map_err(|e| crate::daemon::rpc_err(&e))
             },
             |r| Message::Explorer(ExplorerMsg::NoteDeleted(r)),
@@ -147,7 +155,10 @@ impl App {
     pub(super) fn active_paths(&self) -> Vec<(Pane, String, Option<NoteId>)> {
         self.panes
             .iter()
-            .filter_map(|(p, ps)| ps.active_note().map(|t| (*p, t.path.to_owned(), t.note)))
+            .filter_map(|(p, ps)| {
+                ps.active_note(&self.docs)
+                    .map(|t| (*p, t.path.to_owned(), t.note))
+            })
             .collect()
     }
 
@@ -166,7 +177,7 @@ impl App {
                 self.panes
                     .get(*p)
                     .and_then(|ps| ps.active_tab())
-                    .is_none_or(|t| !t.shows(path) || t.note != *note)
+                    .is_none_or(|t| !t.shows(path, &self.docs) || t.note() != *note)
             })
             .map(|(_, _, note)| *note)
             .collect();
