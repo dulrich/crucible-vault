@@ -15,6 +15,10 @@ use cv_protocol::{
     file_changed,
 };
 
+mod script;
+
+use script::Script;
+
 use super::{
     ActionInfo, ContentHash, DaemonClient, DaemonError, DeleteMode, DeleteNoteResult,
     DeletePreviewItem, HelloResult, JobStatus, LocalIndex, Notification, Result, RunActionParams,
@@ -78,91 +82,6 @@ impl Default for FakeLookups {
     }
 }
 
-/// Where one note id is (mirrors the daemon's id store, plan note-identity D1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Slot {
-    Live(String),
-    /// Retired: deleted (`None`) or absorbed by another note.
-    Gone(Option<NoteId>),
-}
-
-/// The fake's note-id bindings (plan note-identity WP-3): ids are minted on demand, never
-/// reused, move with a rename, retire on a delete / replace and are revived only by a write.
-#[derive(Default)]
-struct Ids {
-    last: u64,
-    notes: BTreeMap<NoteId, Slot>,
-    live: BTreeMap<String, NoteId>,
-}
-
-impl Ids {
-    fn mint(&mut self, path: &str) -> NoteId {
-        self.last += 1;
-        let id = NoteId(self.last);
-        self.notes.insert(id, Slot::Live(path.to_owned()));
-        self.live.insert(path.to_owned(), id);
-        id
-    }
-
-    /// The id of the file at `path`, minted if it has none.
-    fn id_of(&mut self, path: &str) -> NoteId {
-        match self.live.get(path) {
-            Some(id) => *id,
-            None => self.mint(path),
-        }
-    }
-
-    /// Retires any stale binding at `path` (its file is gone), then binds a new id there.
-    fn mint_fresh(&mut self, path: &str) -> NoteId {
-        if let Some(old) = self.live.remove(path) {
-            self.notes.insert(old, Slot::Gone(None));
-        }
-        self.mint(path)
-    }
-
-    /// Retires the id at `path` (minted first if absent) and returns it.
-    fn retire(&mut self, path: &str, replaced_by: Option<NoteId>) -> NoteId {
-        let id = self.id_of(path);
-        self.live.remove(path);
-        self.notes.insert(id, Slot::Gone(replaced_by));
-        id
-    }
-
-    /// Moves the id at `from` to `to`; a note already at `to` is absorbed (retired, recording
-    /// the mover).
-    fn rebind(&mut self, from: &str, to: &str) -> NoteId {
-        let id = self.id_of(from);
-        self.live.remove(from);
-        if let Some(old) = self.live.remove(to)
-            && old != id
-        {
-            self.notes.insert(old, Slot::Gone(Some(id)));
-        }
-        self.live.insert(to.to_owned(), id);
-        self.notes.insert(id, Slot::Live(to.to_owned()));
-        id
-    }
-
-    /// Binds the retired `id` again at `path` (D3 revive).
-    fn revive(&mut self, id: NoteId, path: &str) {
-        if let Some(old) = self.live.remove(path) {
-            self.notes.insert(old, Slot::Gone(None));
-        }
-        self.live.insert(path.to_owned(), id);
-        self.notes.insert(id, Slot::Live(path.to_owned()));
-    }
-
-    fn locate(&self, id: NoteId) -> NoteLocation {
-        match self.notes.get(&id) {
-            Some(Slot::Live(path)) => NoteLocation::Live { path: path.clone() },
-            Some(Slot::Gone(replaced_by)) => NoteLocation::Gone {
-                replaced_by: *replaced_by,
-            },
-            None => NoteLocation::Unknown,
-        }
-    }
-}
-
 /// A `FileChange` with only the fields every fake event sets.
 fn change(path: &str, kind: ChangeKind, origin: Origin, id: NoteId) -> FileChange {
     FileChange {
@@ -185,44 +104,48 @@ impl Inner {
     }
 }
 
+/// The id operations, each one call into the real store (the daemon's own `note_id_*`).
+impl Inner {
+    /// The id of the file at `path`, minted if it has none.
+    fn id_of(&mut self, path: &str) -> Result<NoteId> {
+        Ok(self.ids.note_id_bind(path)?)
+    }
+
+    /// Retires any stale binding at `path` (its file is gone), then binds a new id there.
+    fn mint_fresh(&mut self, path: &str) -> Result<NoteId> {
+        if self.ids.note_id_at(path)?.is_some() {
+            self.ids.note_id_retire(path, None, 0)?;
+        }
+        self.id_of(path)
+    }
+
+    /// Retires the id at `path` (minted first if absent) and returns it.
+    fn retire(&mut self, path: &str, replaced_by: Option<NoteId>) -> Result<NoteId> {
+        Ok(self.ids.note_id_retire(path, replaced_by, 0)?)
+    }
+
+    /// Moves the id at `from` to `to` (a stale binding at `to` is retired).
+    fn rebind(&mut self, from: &str, to: &str) -> Result<NoteId> {
+        Ok(self.ids.note_id_move(from, to, 0)?)
+    }
+
+    fn locate(&self, id: NoteId) -> Result<NoteLocation> {
+        Ok(self.ids.note_id_locate(id)?)
+    }
+}
+
 struct Inner {
-    /// Plan note-identity WP-3: the fake's note-id bindings.
-    ids: Ids,
+    /// The note-id bindings: the real `state.db` id store (what the daemon runs on) over the
+    /// fake's own `data_dir`, never the live one.
+    ids: cv_state::StateDb,
     lookups: FakeLookups,
     index: Index,
     subscriber: Option<(Vec<Topic>, Sender<Notification>)>,
     actions: BTreeMap<String, (ActionInfo, ActionHandler)>,
     jobs: BTreeMap<String, JobStatus>,
     next_job: u64,
-    /// WP-7: scripted view results, and every `view_run` call `(view_id, this_path)` in order.
-    views: BTreeMap<String, ViewResult>,
-    view_calls: Vec<(String, Option<String>)>,
-    /// The UI sort sent with each `view_run`, parallel to `view_calls`.
-    view_sorts: Vec<Option<cv_protocol::ViewSort>>,
-    /// Plan round-13 WP-4: the selection sent with each `view_run`, parallel to `view_calls`.
-    view_selects: Vec<Option<cv_protocol::ViewSelect>>,
-    /// editor-usability-round WP-5: actions run as durable jobs (job id now, handler and
-    /// terminal `JobUpdated` on [`FakeDaemon::complete_deferred`]), and the queued runs.
-    deferred_ids: std::collections::BTreeSet<String>,
-    queued: Vec<(String, RunActionParams)>,
-    /// A scripted `tracker_item_set_status` failure message.
-    done_fail: Option<String>,
-    /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call (fails with
-    /// `done_fail` too).
-    status_calls: Vec<cv_protocol::TrackerItemSetStatusParams>,
-    /// Plan round-8-intake-views-anchor WP-3: every `note_set_bool` call.
-    bool_calls: Vec<cv_protocol::NoteSetBoolParams>,
-    /// Plan semsearch-crate WP-4: the canned `search` result, the "disconnected" mode, and
-    /// every `search` call `(query, limit)`.
-    search: cv_protocol::SearchResult,
-    search_disconnected: bool,
-    search_calls: Vec<(String, u32)>,
-    /// Plan round-18 WP-2: while `Some((path, label))`, `write_note` / `rename` / `delete` /
-    /// `delete_note` / `note_set_bool` answer the daemon's `HELD` refusal.
-    held_reply: Option<(String, String)>,
-    /// Every `write_note` / `rename` / `delete` / `delete_note` / `note_set_bool` request that
-    /// reached the fake, as `"<method> <path>"`, in order.
-    mutation_calls: Vec<String>,
+    /// The scripted replies and call recorders (`fake/script.rs`).
+    script: Script,
     /// Plan WP-R4 (review E1): `bind_note` / `locate_note` called on this thread (the UI
     /// thread in a test) panic — the stand-in for a daemon that blocks.
     ui_thread: Option<std::thread::ThreadId>,
@@ -249,7 +172,7 @@ impl FakeDaemon {
     /// Where a by-id call acts (WP-R2's addressing): note `id`'s live path, else `path`.
     fn live_path(&self, id: Option<NoteId>, path: &str) -> Result<String> {
         match id
-            .map(|id| self.lock().map(|g| (id, g.ids.locate(id))))
+            .map(|id| self.lock().and_then(|g| Ok((id, g.locate(id)?))))
             .transpose()?
         {
             None => Ok(path.to_owned()),
@@ -274,11 +197,7 @@ impl FakeDaemon {
         let index = Index::create(vault_root, &base)?;
         let generation = index.generation()?;
         let state_db = data_dir.join("state.db");
-        drop(cv_state::StateDb::open(
-            &state_db,
-            0,
-            cv_state::QueueConfig::default(),
-        )?);
+        let ids = cv_state::StateDb::open(&state_db, 0, cv_state::QueueConfig::default())?;
         let hello = HelloResult {
             protocol_version: cv_protocol::PROTOCOL_VERSION,
             index_schema: cv_index::SCHEMA_VERSION,
@@ -289,30 +208,14 @@ impl FakeDaemon {
         };
         Ok(Self {
             inner: Mutex::new(Inner {
-                ids: Ids::default(),
+                ids,
                 lookups: FakeLookups::default(),
                 index,
                 subscriber: None,
                 actions: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 next_job: 1,
-                views: BTreeMap::new(),
-                view_calls: Vec::new(),
-                view_sorts: Vec::new(),
-                view_selects: Vec::new(),
-                deferred_ids: std::collections::BTreeSet::new(),
-                queued: Vec::new(),
-                status_calls: Vec::new(),
-                bool_calls: Vec::new(),
-                done_fail: None,
-                search: cv_protocol::SearchResult {
-                    hits: Vec::new(),
-                    semantic: false,
-                },
-                search_disconnected: false,
-                search_calls: Vec::new(),
-                held_reply: None,
-                mutation_calls: Vec::new(),
+                script: Script::new(),
                 ui_thread: None,
             }),
             hello,
@@ -334,35 +237,6 @@ impl FakeDaemon {
             .actions
             .insert(info.id.clone(), (info, handler));
         Ok(())
-    }
-
-    /// Makes `action_id` durable: `run_action` returns only a job id (emitting `pending`); the
-    /// handler runs and the terminal status (with `open_path`) is emitted on
-    /// [`FakeDaemon::complete_deferred`], like the real runner's durable path.
-    pub fn defer_action(&self, action_id: &str) -> Result<()> {
-        self.lock()?.deferred_ids.insert(action_id.to_owned());
-        Ok(())
-    }
-
-    /// Runs every queued durable job and emits its terminal `JobUpdated`. Returns the job ids.
-    pub fn complete_deferred(&self) -> Result<Vec<String>> {
-        let queued = std::mem::take(&mut self.lock()?.queued);
-        let mut done = Vec::new();
-        for (job_id, params) in queued {
-            let handler = {
-                let g = self.lock()?;
-                g.actions
-                    .get(&params.action_id)
-                    .map(|(_, h)| Arc::clone(h))
-                    .ok_or_else(|| DaemonError::NotFound(params.action_id.clone()))?
-            };
-            let job = terminal(job_id.clone(), handler(&params));
-            let mut g = self.lock()?;
-            g.jobs.insert(job_id.clone(), job.clone());
-            emit(&mut g, Notification::JobUpdated(job));
-            done.push(job_id);
-        }
-        Ok(done)
     }
 
     /// Emits an arbitrary notification (tests of the UI's reaction).
@@ -396,11 +270,20 @@ impl FakeDaemon {
         if !a.exists() {
             return Err(DaemonError::NotFound(from.to_owned()));
         }
+        // The daemon's rule (`VaultError::Exists` -> `INVALID_PARAMS`, cv/daemon/errors.rs): a
+        // rename never overwrites an existing destination.
+        if b.exists() {
+            return Err(DaemonError::Rpc(cv_protocol::RpcError {
+                code: cv_protocol::error_codes::INVALID_PARAMS,
+                message: format!("already exists: {to}"),
+                data: None,
+            }));
+        }
         if let Some(parent) = b.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(&a, &b)?;
-        let id = g.ids.rebind(from, to);
+        let id = g.rebind(from, to)?;
         let n = g.index.rebuild(&self.vault_root)?;
         let mut out = file_changed(FileChange {
             from: Some(from.to_owned()),
@@ -429,8 +312,8 @@ impl FakeDaemon {
         g.index.rebuild(&self.vault_root)?;
         let hash = current_hash(&b)?.map(|h| h.as_str().to_owned());
         // Unpaired: the old id is retired, the file now at `to` gets a new one.
-        let old = g.ids.retire(from, None);
-        let new = g.ids.mint_fresh(to);
+        let old = g.retire(from, None)?;
+        let new = g.mint_fresh(to)?;
         let mut out = file_changed(change(from, ChangeKind::Deleted, Origin::External, old));
         out.extend(file_changed(FileChange {
             hash,
@@ -448,8 +331,8 @@ impl FakeDaemon {
             std::io::ErrorKind::NotFound => DaemonError::NotFound(path.to_owned()),
             _ => DaemonError::Io(e),
         })?;
-        let absorber = g.ids.id_of(by);
-        let id = g.ids.retire(path, Some(absorber));
+        let absorber = g.id_of(by)?;
+        let id = g.retire(path, Some(absorber))?;
         let n = g.index.rebuild(&self.vault_root)?;
         let mut out = file_changed(FileChange {
             replaced_by: Some(by.to_owned()),
@@ -460,85 +343,6 @@ impl FakeDaemon {
             emit(&mut g, n.clone());
         }
         Ok(out)
-    }
-
-    /// WP-7: scripts `view_run(id, _)` to return `result` (and lists `id` in `views_list`).
-    pub fn set_view_result(&self, id: &str, result: ViewResult) -> Result<()> {
-        self.lock()?.views.insert(id.to_owned(), result);
-        Ok(())
-    }
-
-    /// WP-7: every `view_run` call so far, `(view_id, this_path)` in order.
-    /// The sort each `view_run` carried, parallel to [`Self::view_calls`].
-    pub fn view_sorts(&self) -> Result<Vec<Option<cv_protocol::ViewSort>>> {
-        Ok(self.lock()?.view_sorts.clone())
-    }
-
-    /// Plan round-13 WP-4: the selection each `view_run` carried, parallel to [`Self::view_calls`].
-    pub fn view_selects(&self) -> Result<Vec<Option<cv_protocol::ViewSelect>>> {
-        Ok(self.lock()?.view_selects.clone())
-    }
-
-    pub fn view_calls(&self) -> Result<Vec<(String, Option<String>)>> {
-        Ok(self.lock()?.view_calls.clone())
-    }
-
-    /// Plan round-6-feedback-todos WP-6: every `tracker_item_set_status` call so far, in order.
-    pub fn status_calls(&self) -> Result<Vec<cv_protocol::TrackerItemSetStatusParams>> {
-        Ok(self.lock()?.status_calls.clone())
-    }
-
-    /// Plan round-18 WP-2: the mutating requests that reached the fake (`"<method> <path>"`).
-    pub fn mutation_calls(&self) -> Result<Vec<String>> {
-        Ok(self.lock()?.mutation_calls.clone())
-    }
-
-    /// Plan round-18 WP-2: makes the mutating requests answer `HELD` (`None` = succeed again).
-    pub fn set_held_reply(&self, held: Option<(&str, &str)>) -> Result<()> {
-        self.lock()?.held_reply = held.map(|(p, l)| (p.to_owned(), l.to_owned()));
-        Ok(())
-    }
-
-    /// Logs one mutating request, then answers the scripted `HELD` refusal when set.
-    fn mutation(&self, method: &str, path: &str) -> Result<()> {
-        let mut g = self.lock()?;
-        g.mutation_calls.push(format!("{method} {path}"));
-        match &g.held_reply {
-            Some((held, label)) => Err(DaemonError::Rpc(cv_protocol::RpcError {
-                code: cv_protocol::error_codes::HELD,
-                message: format!("{label} is updating {held}"),
-                data: Some(serde_json::json!({"path": held, "label": label})),
-            })),
-            None => Ok(()),
-        }
-    }
-
-    /// Plan round-8-intake-views-anchor WP-3: every `note_set_bool` call so far, in order.
-    pub fn bool_calls(&self) -> Result<Vec<cv_protocol::NoteSetBoolParams>> {
-        Ok(self.lock()?.bool_calls.clone())
-    }
-
-    /// Plan semsearch-crate WP-4: the canned `search` answer.
-    pub fn set_search_result(&self, result: cv_protocol::SearchResult) -> Result<()> {
-        self.lock()?.search = result;
-        Ok(())
-    }
-
-    /// Plan semsearch-crate WP-4: `search` answers [`DaemonError::Disconnected`] while `on`.
-    pub fn set_search_disconnected(&self, on: bool) -> Result<()> {
-        self.lock()?.search_disconnected = on;
-        Ok(())
-    }
-
-    /// Plan semsearch-crate WP-4: every `search` call `(query, limit)` so far.
-    pub fn search_calls(&self) -> Result<Vec<(String, u32)>> {
-        Ok(self.lock()?.search_calls.clone())
-    }
-
-    /// Round-5 WP-11: makes `tracker_item_set_status` fail with `msg` (`None` = succeed).
-    pub fn set_done_failure(&self, msg: Option<&str>) -> Result<()> {
-        self.lock()?.done_fail = msg.map(str::to_owned);
-        Ok(())
     }
 
     /// WP-5: replaces the canned lookup data.
@@ -610,7 +414,7 @@ impl FakeDaemon {
     /// A delete of `path` (already off disk): retires the note's id and
     /// reports the `Deleted` carrying it.
     fn retire_and_emit(&self, g: &mut Inner, path: &str) -> Result<()> {
-        let id = g.ids.retire(path, None);
+        let id = g.retire(path, None)?;
         self.after_write(
             g,
             FileChange {
@@ -654,19 +458,21 @@ impl FakeDaemon {
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // D3: the revived id is live again at `path` before the write binds it, so the write's
+        // event carries it, never a fresh one; the store refuses a path another id holds.
+        if let Some(id) = revive
+            && !g.ids.note_id_revive(id, path)?
+        {
+            return Err(DaemonError::Conflict {
+                current_hash: no_base(),
+            });
+        }
         std::fs::write(&abs, content.as_bytes())?;
         let hash = ContentHash::of(content.as_bytes());
-        let (kind, id) = if found.is_some() {
-            (ChangeKind::Modified, g.ids.id_of(path))
-        } else {
-            let id = match revive {
-                Some(id) => {
-                    g.ids.revive(id, path);
-                    id
-                }
-                None => g.ids.mint_fresh(path),
-            };
-            (ChangeKind::Created, id)
+        let (kind, id) = match (found.is_some(), revive) {
+            (true, _) => (ChangeKind::Modified, g.id_of(path)?),
+            (false, Some(id)) => (ChangeKind::Created, id),
+            (false, None) => (ChangeKind::Created, g.mint_fresh(path)?),
         };
         self.after_write(
             g,
@@ -737,7 +543,7 @@ impl DaemonClient for FakeDaemon {
     ) -> Result<(ContentHash, String)> {
         self.mutation("write_note", path)?;
         let mut g = self.lock()?;
-        match g.ids.locate(id) {
+        match g.locate(id)? {
             NoteLocation::Live { path: at } => {
                 let hash = self.write_at(&mut g, &at, content, base_hash, None)?;
                 Ok((hash, at))
@@ -760,17 +566,17 @@ impl DaemonClient for FakeDaemon {
         if !abs.is_file() {
             return Err(DaemonError::NotFound(path.to_owned()));
         }
-        Ok(g.ids.id_of(path))
+        g.id_of(path)
     }
 
     fn locate_note(&self, id: NoteId) -> Result<NoteLocation> {
         let g = self.lock()?;
         g.assert_off_ui_thread("locate_note");
-        Ok(g.ids.locate(id))
+        g.locate(id)
     }
 
     fn rename_by_id(&self, id: NoteId, to: &str) -> Result<String> {
-        let live = match self.lock()?.ids.locate(id) {
+        let live = match self.lock()?.locate(id)? {
             NoteLocation::Live { path } => path,
             _ => return Err(DaemonError::NotFound(format!("note {}", id.0))),
         };
@@ -811,7 +617,7 @@ impl DaemonClient for FakeDaemon {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&abs, bytes)?;
-            let id = g.ids.mint_fresh(&path);
+            let id = g.mint_fresh(&path)?;
             self.after_write(
                 &mut g,
                 FileChange {
@@ -897,34 +703,19 @@ impl DaemonClient for FakeDaemon {
     }
 
     fn run_action(&self, params: RunActionParams) -> Result<RunActionResult> {
-        let handler = {
-            let mut g = self.lock()?;
+        let (handler, deferred) = {
+            let g = self.lock()?;
             let handler = g
                 .actions
                 .get(&params.action_id)
                 .map(|(_, h)| Arc::clone(h))
                 .ok_or_else(|| DaemonError::NotFound(params.action_id.clone()))?;
-            if g.deferred_ids.contains(&params.action_id) {
-                let job_id = format!("fake-{}", g.next_job);
-                g.next_job += 1;
-                let job = JobStatus {
-                    job_id: job_id.clone(),
-                    status: JobState::Pending,
-                    message: None,
-                    output_paths: Vec::new(),
-                    open_path: None,
-                    hold: None,
-                };
-                g.jobs.insert(job_id.clone(), job.clone());
-                g.queued.push((job_id.clone(), params));
-                emit(&mut g, Notification::JobUpdated(job));
-                return Ok(RunActionResult {
-                    job_id,
-                    open_path: None,
-                });
-            }
-            handler
+            let deferred = g.script.deferred_ids.contains(&params.action_id);
+            (handler, deferred)
         };
+        if deferred {
+            return self.queue_deferred(params);
+        }
         // The handler runs without the lock so it may call back into the fake.
         let outcome = handler(&params);
         let mut g = self.lock()?;
@@ -952,7 +743,7 @@ impl DaemonClient for FakeDaemon {
 
     fn views_list(&self) -> Result<ViewsListResult> {
         Ok(ViewsListResult {
-            view_ids: self.lock()?.views.keys().cloned().collect(),
+            view_ids: self.lock()?.script.views.keys().cloned().collect(),
         })
     }
 
@@ -963,15 +754,9 @@ impl DaemonClient for FakeDaemon {
         sort: Option<&cv_protocol::ViewSort>,
         select: Option<&cv_protocol::ViewSelect>,
     ) -> Result<ViewResult> {
-        let mut g = self.lock()?;
-        g.view_calls
-            .push((view_id.to_owned(), this_path.map(str::to_owned)));
-        g.view_sorts.push(sort.cloned());
-        g.view_selects.push(select.cloned());
-        g.views
-            .get(view_id)
-            .cloned()
-            .ok_or_else(|| DaemonError::NotFound(view_id.to_owned()))
+        self.lock()?
+            .script
+            .run_view(view_id, this_path, sort, select)
     }
 
     fn lookup_currencies(&self) -> Result<Vec<cv_protocol::LookupCurrency>> {
@@ -999,30 +784,16 @@ impl DaemonClient for FakeDaemon {
     }
 
     fn search(&self, query: &str, limit: u32) -> Result<cv_protocol::SearchResult> {
-        let mut g = self.lock()?;
-        g.search_calls.push((query.to_owned(), limit));
-        if g.search_disconnected {
-            return Err(DaemonError::Disconnected);
-        }
-        Ok(g.search.clone())
+        self.lock()?.script.run_search(query, limit)
     }
 
     fn tracker_item_set_status(&self, p: &cv_protocol::TrackerItemSetStatusParams) -> Result<()> {
-        let mut g = self.lock()?;
-        g.status_calls.push(p.clone());
-        match &g.done_fail {
-            Some(msg) => Err(DaemonError::Rpc(cv_protocol::RpcError {
-                code: cv_protocol::error_codes::NOT_FOUND,
-                message: msg.clone(),
-                data: None,
-            })),
-            None => Ok(()),
-        }
+        self.lock()?.script.set_status(p)
     }
 
     fn note_set_bool(&self, p: &cv_protocol::NoteSetBoolParams) -> Result<()> {
         self.mutation("note_set_bool", &p.path)?;
-        self.lock()?.bool_calls.push(p.clone());
+        self.lock()?.script.record_bool(p);
         Ok(())
     }
 
@@ -1127,86 +898,30 @@ mod tests {
         );
     }
 
+    /// The daemon refuses a rename onto an existing destination (`VaultError::Exists` ->
+    /// `INVALID_PARAMS`); neither file nor id moves.
     #[test]
-    fn rename_keeps_the_id_and_delete_retires_it() {
+    fn rename_onto_an_existing_destination_is_refused() {
         let (_t, d) = fake_vault();
-        d.create_note("a.md", "x").expect("x");
+        d.create_note("a.md", "a").expect("a");
+        d.create_note("b.md", "b").expect("b");
         let id = d.bind_note("a.md").expect("bind");
-        assert_eq!(d.bind_note("a.md").expect("again"), id);
-        d.rename("a.md", "b.md").expect("rename");
-        assert_eq!(d.bind_note("b.md").expect("rebind"), id);
+        let refused = d.rename("a.md", "b.md");
+        assert!(matches!(
+            &refused,
+            Err(DaemonError::Rpc(e))
+                if e.code == cv_protocol::error_codes::INVALID_PARAMS
+                    && e.message == "already exists: b.md"
+        ));
+        assert_eq!(d.read_file("a.md").expect("a").0, b"a");
+        assert_eq!(d.read_file("b.md").expect("b").0, b"b");
         assert_eq!(
             d.locate_note(id).expect("locate"),
             NoteLocation::Live {
-                path: "b.md".into()
+                path: "a.md".into()
             }
         );
-        d.delete("b.md").expect("delete");
-        assert_eq!(
-            d.locate_note(id).expect("locate"),
-            NoteLocation::Gone { replaced_by: None }
-        );
-        assert_eq!(
-            d.locate_note(NoteId(999)).expect("locate"),
-            NoteLocation::Unknown
-        );
     }
-
-    #[test]
-    fn replace_records_the_absorber_and_a_reused_path_gets_a_new_id() {
-        let (_t, d) = fake_vault();
-        d.create_note("a.md", "x").expect("a");
-        d.create_note("b.md", "y").expect("b");
-        let (a, b) = (
-            d.bind_note("a.md").expect("a"),
-            d.bind_note("b.md").expect("b"),
-        );
-        let out = d.daemon_delete_replaced("a.md", "b.md").expect("replace");
-        assert!(matches!(
-            &out[0],
-            Notification::FileChanged { id: Some(i), replaced_by: Some(_), .. } if *i == a
-        ));
-        assert_eq!(
-            d.locate_note(a).expect("locate"),
-            NoteLocation::Gone {
-                replaced_by: Some(b)
-            }
-        );
-        d.create_note("a.md", "z").expect("reuse");
-        let fresh = d.bind_note("a.md").expect("bind");
-        assert!(fresh != a && fresh != b);
-    }
-
-    /// D3: a write by a retired id with the empty base revives the same id at the request's
-    /// path, and a taken path is a conflict.
-    #[test]
-    fn revive_keeps_the_id_and_refuses_a_taken_path() {
-        let (_t, d) = fake_vault();
-        d.create_note("a.md", "x").expect("x");
-        let id = d.bind_note("a.md").expect("bind");
-        d.delete("a.md").expect("delete");
-        d.create_note("taken.md", "t").expect("taken");
-        let refused = d.write_note_by_id(id, "taken.md", "mine", &no_base());
-        assert!(matches!(refused, Err(DaemonError::Conflict { .. })));
-        assert_eq!(
-            d.locate_note(id).expect("locate"),
-            NoteLocation::Gone { replaced_by: None }
-        );
-        let (_, at) = d
-            .write_note_by_id(id, "back.md", "mine", &no_base())
-            .expect("revive");
-        assert_eq!(at, "back.md");
-        assert_eq!(d.bind_note("back.md").expect("bind"), id);
-        // A non-empty base on a retired id never writes.
-        d.delete("back.md").expect("delete");
-        let base = ContentHash::of(b"mine");
-        assert!(matches!(
-            d.write_note_by_id(id, "back.md", "again", &base),
-            Err(DaemonError::NotFound(_))
-        ));
-        assert!(d.read_file("back.md").is_err());
-    }
-
     #[test]
     fn write_and_rename_by_id_follow_the_live_path_not_the_request() {
         let (_t, d) = fake_vault();
@@ -1227,19 +942,6 @@ mod tests {
             d.rename_by_id(NoteId(999), "z.md"),
             Err(DaemonError::NotFound(_))
         ));
-    }
-
-    #[test]
-    fn bind_on_a_missing_path_fails() {
-        let (_t, d) = fake_vault();
-        assert!(matches!(
-            d.bind_note("nope.md"),
-            Err(DaemonError::NotFound(_))
-        ));
-        assert_eq!(
-            d.locate_note(NoteId(1)).expect("nothing minted"),
-            NoteLocation::Unknown
-        );
     }
 
     #[test]
