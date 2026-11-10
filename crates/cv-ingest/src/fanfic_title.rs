@@ -18,6 +18,8 @@
 //! leading zero is undetected, never rounded or normalised. Characters invalid in file names are
 //! removed from the story and whitespace runs collapsed; an empty story is `None`.
 
+use cv_text::vpath;
+
 /// Body lines (non-blank, after the frontmatter) the fallback looks at.
 pub const BODY_LINES: usize = 15;
 
@@ -45,6 +47,42 @@ pub fn is_target_shape(title: &str) -> bool {
         let (head, num) = (&title[..i], &title[i + " - Chapter ".len()..]);
         !head.is_empty() && !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit())
     })
+}
+
+/// What the rule says about one note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// Already `<story> - Chapter <n>`.
+    Already,
+    /// No shape detected.
+    Undetected,
+    /// Rename to this path (same folder).
+    Rename(String),
+}
+
+/// The rule over plain inputs (plan `tn-review-2026-11-10-remediation` WP-R8): the note's vault
+/// `path`, its `body` (frontmatter removed) and the story `publication` the caller resolved (the
+/// serial row's, else the `publication` frontmatter) → what to do. `Already` only when the
+/// basename equals the computed target; a rename keeps the note's folder.
+#[must_use]
+pub fn plan(path: &str, body: &str, publication: Option<&str>) -> Plan {
+    let title = vpath::stem(path);
+    match detect_with(title, body, publication) {
+        None => Plan::Undetected,
+        Some(t) => {
+            let name = target_name(&t);
+            if name == title {
+                return Plan::Already;
+            }
+            let folder = vpath::parent(path).trim_matches('/');
+            let file = format!("{name}.md");
+            Plan::Rename(if folder.is_empty() {
+                file
+            } else {
+                format!("{folder}/{file}")
+            })
+        }
+    }
 }
 
 /// Detects the story and chapter of a note named `title` with body `body` (frontmatter already
@@ -185,6 +223,20 @@ mod tests {
 
     fn some(story: &str, n: u32) -> Option<(String, u32)> {
         Some((story.to_owned(), n))
+    }
+
+    #[test]
+    fn plan_keeps_the_folder_and_flags_the_target_shape() {
+        assert_eq!(plan("F/A - Chapter 2.md", "x", None), Plan::Already);
+        assert_eq!(
+            plan("F/A - Chapter 2 - W.md", "x", None),
+            Plan::Rename("F/A - Chapter 2.md".into())
+        );
+        assert_eq!(
+            plan("A - Chapter 2 - W.md", "x", Some("Story")),
+            Plan::Rename("Story - Chapter 2.md".into())
+        );
+        assert_eq!(plan("F/Nothing.md", "x", None), Plan::Undetected);
     }
 
     #[test]

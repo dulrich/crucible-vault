@@ -21,7 +21,7 @@
 //!
 //! **Backfill scope** walks the notes the index tags `kind` (outside system folders, in path
 //! order) and applies the same rule, chain-safe (WP-8): every note is planned first, then
-//! [`order_renames`] withholds duplicate targets, cycles and targets held by a note that does not
+//! [`order_renames`](cv_ingest::rename_plan::order_renames) withholds duplicate targets, cycles and targets held by a note that does not
 //! move (all counted as `collision`) and runs the rest holder-first, so a down-shifted run of
 //! chapters renames cleanly. The target's story is the matched `[[serial]]` row's publication,
 //! else the note's `publication` frontmatter, else the title's; a note is `already` only when its
@@ -38,23 +38,24 @@ use std::collections::{BTreeSet, HashSet};
 
 use cv_actions::pipelines::SerialSource;
 use cv_actions::{ConfigSet, StepKind};
-use cv_ingest::fanfic_title::{detect_with, target_name};
+use cv_ingest::fanfic_title::plan as plan_for;
+use cv_ingest::rename_plan::order_renames;
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_text::vpath;
 use cv_vault::VaultError;
 use serde::Serialize;
 
 use super::auto_file::{clip_of, serial_hit};
+use super::fanfic_title_review::{Findings, REVIEW_SUFFIX, render_review};
 use super::file::{kind_def, target_path};
-use super::materialize::{join, now};
-use super::params::{check_keys, check_placeholders, expand, get_bool, get_str};
-use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag};
+use super::materialize::now;
+use super::params::{
+    Scope, check_keys, check_placeholders, expand, get_bool, get_scope, get_str, job_dry_run,
+};
+use super::review_note::{Overwrite, dated_path, upsert};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
-    Note,
-    Backfill,
-}
+pub(crate) use cv_ingest::fanfic_title::Plan;
 
 /// Parsed step params.
 #[derive(Debug, Clone)]
@@ -77,15 +78,7 @@ impl StepModule for FanficTitle {
 
     fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
         check_keys(t, kind, "fanfic_title")?;
-        let scope = match get_str(t, "scope")?.as_deref() {
-            None | Some("note") => Scope::Note,
-            Some("backfill") => Scope::Backfill,
-            Some(s) => {
-                return Err(format!(
-                    "fanfic_title step: `scope` {s:?} is not note|backfill"
-                ));
-            }
-        };
+        let scope = get_scope(t, "fanfic_title")?;
         let (kind_p, path) = (get_str(t, "kind")?, get_str(t, "path")?);
         let match_kind = get_str(t, "match_kind")?;
         let dry_run = get_bool(t, "dry_run")?;
@@ -124,24 +117,9 @@ impl StepModule for FanficTitle {
     fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         match p.scope {
             Scope::Note => run_note(&p, ctx),
-            Scope::Backfill => backfill(
-                &p.target,
-                job_flag(ctx, "dry_run").unwrap_or(p.dry_run),
-                ctx,
-            ),
+            Scope::Backfill => backfill(&p.target, job_dry_run(ctx, p.dry_run), ctx),
         }
     }
-}
-
-/// What the rule says about one note.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Plan {
-    /// Already `<story> - Chapter <n>`.
-    Already,
-    /// No shape detected.
-    Undetected,
-    /// Rename to this path (same folder).
-    Rename(String),
 }
 
 /// The story publication of a note (WP-8): the matched `[[serial]]` row's `publication()`
@@ -161,28 +139,18 @@ fn story_publication(
         .and_then(|v| nonempty(&cv_note::js_text(&v)))
 }
 
-/// The pure rule: `path`, the note's `text`, the `[[serial]]` rows and the defined-kind test →
-/// what to do. `Already` only when the basename equals the computed target.
+/// The rule over the note's `text`, the `[[serial]]` rows and the defined-kind test: the adapter
+/// that reads `cv_note`/`cv_actions` types and hands the plain inputs to
+/// [`cv_ingest::fanfic_title::plan`].
 pub(crate) fn plan(
     path: &str,
     text: &str,
     serial: &[SerialSource],
     is_kind: &dyn Fn(&str) -> bool,
 ) -> Plan {
-    let title = vpath::stem(path);
     let doc = FrontmatterDoc::new(text);
     let publication = story_publication(&doc, serial, is_kind);
-    match detect_with(title, doc.body(), publication.as_deref()) {
-        None => Plan::Undetected,
-        Some(t) => {
-            let name = target_name(&t);
-            if name == title {
-                Plan::Already
-            } else {
-                Plan::Rename(join(vpath::parent(path), &format!("{name}.md")))
-            }
-        }
-    }
+    plan_for(path, doc.body(), publication.as_deref())
 }
 
 /// [`plan`] with the step's config.
@@ -190,119 +158,6 @@ fn plan_in(ctx: &StepCtx<'_>, path: &str, text: &str) -> Plan {
     let config = ctx.config;
     let is_kind = |k: &str| kind_def(config, k).is_ok();
     plan(path, text, &config.sources().serial, &is_kind)
-}
-
-/// Why a planned backfill rename is withheld.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Withheld {
-    /// Two or more notes compute the same target.
-    Duplicate,
-    /// The target exists and its holder is not moving.
-    Exists,
-    /// The renames form a cycle (each target held by the next mover).
-    Cycle,
-}
-
-impl Withheld {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Duplicate => "duplicate target",
-            Self::Exists => "exists",
-            Self::Cycle => "cycle",
-        }
-    }
-}
-
-/// A withheld rename: `(src, dst, why)`.
-pub(crate) type WithheldRename = (String, String, Withheld);
-
-/// Chain-safe ordering of planned renames `(src, dst)` (pure; `exists` = a path is taken now):
-/// returns the renames to run, holders first (a target held by a note that itself moves is
-/// freed before it is claimed), and the withheld ones with their reason.
-///
-/// Every src moves to one dst and (after duplicate removal) every dst has one claimer, so
-/// "dst is held by mover m" is a functional graph: cycles are withheld, then any rename whose
-/// target is taken by a non-mover (fixpoint: a withheld mover holds its path) is withheld, and
-/// the rest are emitted depth-first, the holder before its claimer.
-pub(crate) fn order_renames(
-    renames: &[(String, String)],
-    exists: &dyn Fn(&str) -> bool,
-) -> (Vec<(String, String)>, Vec<WithheldRename>) {
-    use std::collections::{BTreeMap, HashMap};
-    let mut claims: HashMap<&str, usize> = HashMap::new();
-    for (_, d) in renames {
-        *claims.entry(d.as_str()).or_default() += 1;
-    }
-    let mut withheld: BTreeMap<usize, Withheld> = BTreeMap::new();
-    for (i, (_, d)) in renames.iter().enumerate() {
-        if claims[d.as_str()] > 1 {
-            withheld.insert(i, Withheld::Duplicate);
-        }
-    }
-    let by_src: HashMap<&str, usize> = renames
-        .iter()
-        .enumerate()
-        .map(|(i, (s, _))| (s.as_str(), i))
-        .collect();
-    // The mover holding rename i's target, if any (and not withheld).
-    let next = |i: usize, w: &BTreeMap<usize, Withheld>| {
-        by_src
-            .get(renames[i].1.as_str())
-            .copied()
-            .filter(|j| !w.contains_key(j))
-    };
-    // Cycles among the live renames.
-    for start in 0..renames.len() {
-        if withheld.contains_key(&start) {
-            continue;
-        }
-        let mut seen = vec![start];
-        let mut cur = start;
-        while let Some(j) = next(cur, &withheld) {
-            if let Some(pos) = seen.iter().position(|&s| s == j) {
-                if pos == 0 {
-                    for &m in &seen {
-                        withheld.insert(m, Withheld::Cycle);
-                    }
-                }
-                break;
-            }
-            seen.push(j);
-            cur = j;
-        }
-    }
-    // Targets taken by a note that does not move.
-    loop {
-        let mut changed = false;
-        for (i, (_, dst)) in renames.iter().enumerate() {
-            if !withheld.contains_key(&i) && exists(dst) && next(i, &withheld).is_none() {
-                withheld.insert(i, Withheld::Exists);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let mut done = vec![false; renames.len()];
-    let mut order = Vec::new();
-    for start in 0..renames.len() {
-        let mut stack = Vec::new();
-        let mut cur = Some(start);
-        while let Some(i) = cur.filter(|i| !done[*i] && !withheld.contains_key(i)) {
-            stack.push(i);
-            done[i] = true;
-            cur = next(i, &withheld);
-        }
-        while let Some(i) = stack.pop() {
-            order.push(renames[i].clone());
-        }
-    }
-    let withheld = withheld
-        .into_iter()
-        .map(|(i, w)| (renames[i].0.clone(), renames[i].1.clone(), w))
-        .collect();
-    (order, withheld)
 }
 
 /// How one rename attempt ended.
@@ -412,106 +267,19 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
     Ok(out)
 }
 
-/// Where the dry-run review notes live, under the app folder (`vault.toml` `[structure]
-/// app_folder`, plan public-release WP-2; default `_crucible/reviews`).
-const REVIEW_SUBDIR: &str = "reviews";
-/// Review note name suffix (`<kind><suffix><date>.md`, e.g. `fanfic-titles-2026-11-08.md`).
-const REVIEW_SUFFIX: &str = "-titles-";
-
-/// What a dry run found, in path order.
-#[derive(Debug, Default)]
-struct Findings {
-    /// `(old path, new path)`.
-    rename: Vec<(String, String)>,
-    collision: Vec<(String, String, Withheld)>,
-    undetected: Vec<String>,
-    /// Already named right, with a stale `title`.
-    retitle: Vec<String>,
-}
-
-/// A resolvable wikilink `[[path-without-.md|basename]]`; names with link syntax characters fall
-/// back to a backticked path.
-fn link(path: &str) -> String {
-    let stem = path.strip_suffix(".md").unwrap_or(path);
-    if stem.contains(['|', '[', ']', '#', '^']) {
-        return format!("`{path}`");
-    }
-    format!("[[{stem}|{}]]", vpath::stem(path))
-}
-
-fn section(out: &mut String, title: &str, lines: Vec<String>) {
-    out.push_str(&format!("\n## {title} ({})\n\n", lines.len()));
-    if lines.is_empty() {
-        out.push_str("- (none)\n");
-    }
-    for l in lines {
-        out.push_str(&format!("- {l}\n"));
-    }
-}
-
-/// `fanfic` → `Fanfic` (the review heading).
-fn capitalized(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map_or_else(String::new, |f| {
-        f.to_uppercase().chain(c).collect::<String>()
-    })
-}
-
-/// The pure review-note renderer.
-fn render_review(kind: &str, date: &str, v: &BackfillVars, f: &Findings) -> String {
-    let base = |p: &str| vpath::stem(p).to_owned();
-    let mut out = format!(
-        "# {} title backfill \u{2014} dry run {date}\n\nScanned {}, already {}, would rename {}, would retitle {}, collision {}, undetected {}.\n\nApply: run this backfill again with Dry run off.\n",
-        capitalized(kind),
-        v.scanned,
-        v.already,
-        v.would_rename,
-        v.would_retitle,
-        v.collision,
-        v.undetected
-    );
-    section(
-        &mut out,
-        "Would rename",
-        f.rename
-            .iter()
-            .map(|(o, n)| format!("{} \u{2192} {}", link(o), base(n)))
-            .collect(),
-    );
-    section(
-        &mut out,
-        "Would retitle",
-        f.retitle.iter().map(|o| link(o)).collect(),
-    );
-    section(
-        &mut out,
-        "Collision",
-        f.collision
-            .iter()
-            .map(|(o, n, w)| format!("{} \u{2192} {} ({})", link(o), base(n), w.label()))
-            .collect(),
-    );
-    section(
-        &mut out,
-        "Undetected",
-        f.undetected.iter().map(|o| link(o)).collect(),
-    );
-    out
-}
-
 #[derive(Serialize, Default)]
-struct BackfillVars {
-    scanned: u32,
-    already: u32,
-    renamed: u32,
-    would_rename: u32,
+pub(super) struct BackfillVars {
+    pub(super) scanned: u32,
+    pub(super) already: u32,
+    pub(super) renamed: u32,
+    pub(super) would_rename: u32,
     /// Already named right; `title` set to the name (real run).
-    retitled: u32,
+    pub(super) retitled: u32,
     /// Already named right with a stale `title` (dry run).
-    would_retitle: u32,
-    collision: u32,
-    undetected: u32,
-    conflict: u32,
+    pub(super) would_retitle: u32,
+    pub(super) collision: u32,
+    pub(super) undetected: u32,
+    pub(super) conflict: u32,
     dry_run: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_path: Option<String>,
@@ -597,19 +365,9 @@ fn backfill(kind: &str, dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutc
     }
     if dry_run {
         let date = now().date().format("%Y-%m-%d").to_string();
-        let review = format!(
-            "{}/{REVIEW_SUBDIR}/{kind}{REVIEW_SUFFIX}{date}.md",
-            ctx.config.app_folder()
-        );
+        let review = dated_path(ctx.config, &format!("{kind}{REVIEW_SUFFIX}"), &date);
         let text = render_review(kind, &date, &v, &found).into_bytes();
-        match ctx.read(&review)? {
-            Some((_, hash)) => {
-                ctx.write(&review, text, Some(hash))?;
-            }
-            None => {
-                ctx.create(&review, text)?;
-            }
-        }
+        upsert(ctx, "fanfic_title", &review, text, Overwrite::Always)?;
         out.open_path = Some(review.clone());
         v.review_path = Some(review);
     }

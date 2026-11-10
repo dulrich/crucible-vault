@@ -60,6 +60,7 @@ use cv_text::{format_moment, parse_moment_date_strict};
 use serde::Serialize;
 
 use super::params::{check_keys, check_placeholders, expand, get_bool, get_str, value_text};
+use super::review_note::Slot;
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 // ---------------------------------------------------------------------------------------------
@@ -270,10 +271,8 @@ pub(super) fn ensure_note(
     date: NaiveDate,
     title: &str,
 ) -> Result<Ensured, StepError> {
-    let existing = ctx.read(path)?;
-    if let Some((bytes, _)) = &existing
-        && !bytes.is_empty()
-    {
+    let slot = Slot::read(ctx, path)?;
+    if slot.existing().is_some_and(|b| !b.is_empty()) {
         return Ok(Ensured::Untouched);
     }
     let body = match template.filter(|t| !t.trim().is_empty()) {
@@ -293,19 +292,15 @@ pub(super) fn ensure_note(
             render(ctx, &text, target, title, "")?
         }
     };
-    match existing {
-        None => {
-            ctx.create(path, body.into_bytes())?;
-            Ok(Ensured::Created)
-        }
-        Some((_, hash)) => {
-            if body.is_empty() {
-                return Ok(Ensured::Untouched);
-            }
-            ctx.write(path, body.into_bytes(), Some(hash))?;
-            Ok(Ensured::Filled)
-        }
+    if slot.existing().is_some() && body.is_empty() {
+        return Ok(Ensured::Untouched);
     }
+    let created = slot.write(ctx, body.into_bytes())?;
+    Ok(if created {
+        Ensured::Created
+    } else {
+        Ensured::Filled
+    })
 }
 
 // ---------------------------------------------------------------------------------------------

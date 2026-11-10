@@ -3,9 +3,8 @@
 
 use serde_json::{Value, json};
 
-use super::removals_review::{
-    Kind, Span, allocate, classify, precision, render_review, sample, tally,
-};
+use super::intake_kind::{Kind, classify};
+use super::removals_review::{Span, allocate, precision, render_review, sample, tally};
 use super::testkit::{StepEnv, active, example_env, today};
 
 const REVIEW: &str = "type = \"removals_review\"\nmode = \"review\"";

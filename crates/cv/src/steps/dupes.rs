@@ -103,7 +103,7 @@ impl StepModule for DupesScan {
     }
 
     fn run(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-        run(super::job_flag(ctx, "dry_run").unwrap_or(dry_run), ctx)
+        run(super::params::job_dry_run(ctx, dry_run), ctx)
     }
 }
 

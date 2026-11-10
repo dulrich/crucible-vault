@@ -43,19 +43,13 @@ use cv_text::vpath::is_user_path;
 use serde::Serialize;
 
 use super::file::cleanup_kind;
-use super::params::{check_keys, get_bool, get_str};
+use super::params::{Scope, check_keys, get_bool, get_scope, job_dry_run};
 use super::web::link_targets;
 use super::youtube::{metadata_publication, with_publication};
-use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// The backfill's metadata-link frontmatter key (the `yt_metadata` list key).
 const META_KEY: &str = "yt-metadata";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
-    Note,
-    Backfill,
-}
 
 /// Parsed step params.
 #[derive(Debug, Clone, Copy)]
@@ -72,15 +66,7 @@ impl StepModule for YtClipTidy {
 
     fn parse(kind: StepKind, t: &toml::Table, _config: &ConfigSet) -> Result<Params, String> {
         check_keys(t, kind, "yt_clip_tidy")?;
-        let scope = match get_str(t, "scope")?.as_deref() {
-            None | Some("note") => Scope::Note,
-            Some("backfill") => Scope::Backfill,
-            Some(s) => {
-                return Err(format!(
-                    "yt_clip_tidy step: `scope` {s:?} is not note|backfill"
-                ));
-            }
-        };
+        let scope = get_scope(t, "yt_clip_tidy")?;
         let dry_run = get_bool(t, "dry_run")?;
         if scope == Scope::Note && dry_run.is_some() {
             return Err("yt_clip_tidy step: `dry_run` needs scope = \"backfill\"".into());
@@ -94,7 +80,7 @@ impl StepModule for YtClipTidy {
     fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         match p.scope {
             Scope::Note => run_note(ctx),
-            Scope::Backfill => backfill(job_flag(ctx, "dry_run").unwrap_or(p.dry_run), ctx),
+            Scope::Backfill => backfill(job_dry_run(ctx, p.dry_run), ctx),
         }
     }
 }

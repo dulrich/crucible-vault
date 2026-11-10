@@ -403,21 +403,6 @@ fn duplicate_cycle_and_static_holder_are_collisions() {
     assert!(e.read("F/Hold - Chapter 9 - W.md").is_some());
 }
 
-#[test]
-fn order_renames_withholds_a_chain_behind_a_withheld_holder() {
-    use super::fanfic_title::{Withheld, order_renames};
-    let r = |s: &str, d: &str| (s.to_owned(), d.to_owned());
-    // c → b is held by b, whose own target a is held by a non-mover.
-    let renames = [r("b", "a"), r("c", "b")];
-    let (order, held) = order_renames(&renames, &|p| p == "a" || p == "b");
-    assert!(order.is_empty());
-    assert_eq!(held.len(), 2);
-    assert!(held.iter().all(|(_, _, w)| *w == Withheld::Exists));
-    let (order, held) = order_renames(&renames, &|p| p == "b");
-    assert_eq!(order, vec![r("b", "a"), r("c", "b")]);
-    assert!(held.is_empty());
-}
-
 // ---- 2026-11-10: the note's `title` follows the chapter name ----------------------------------
 
 fn titled(title: &str, body: &str) -> String {

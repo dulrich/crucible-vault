@@ -13,8 +13,9 @@ use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
 use super::intake_enrich::{Params, already_enriched, parse, pick_backfill, reattach, run_note};
+use super::params::job_pos_int;
 use super::testkit::{ActionBuilder, AtRecorder, Hook, StepEnv, fake, mgr, providers};
-use super::{DeferCause, StepError, StepOutcome, job_pos_int};
+use super::{DeferCause, StepError, StepOutcome};
 
 const AGENTS: &str = r#"
 [intake-enrich]

@@ -32,19 +32,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cv_actions::{ConfigSet, StepKind};
 use cv_note::FrontmatterDoc;
-use cv_text::url_canon::is_youtube_video;
 use cv_text::vpath;
 use serde_json::{Value, json};
 
+use super::intake_kind::{IntakeKinds, Kind, is_blank};
 use super::materialize::now;
-use super::params::{check_keys, get_bool, get_pos_int, get_str};
-use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag, job_pos_int};
+use super::params::{check_keys, get_bool, get_pos_int, get_str, job_flag, job_pos_int_in};
+use super::review_note::{Overwrite, claim, dated_path, link, review_dir};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
-/// Where review notes live: `<app folder>/reviews` (`vault.toml` `[structure] app_folder`, plan
-/// public-release WP-2; default `_crucible/reviews`).
-fn review_dir(config: &ConfigSet) -> String {
-    format!("{}/reviews", config.app_folder())
-}
 /// Filename stem of a review note.
 const REVIEW_PREFIX: &str = "removals-";
 const DEFAULT_LIMIT: usize = 100;
@@ -53,42 +49,6 @@ const DEFAULT_SEED: u64 = 1;
 pub(crate) const MAX_QUOTE_LINES: usize = 8;
 /// Instruction line of a review note.
 const INSTRUCTION: &str = "Tick = this text should NOT have been removed.";
-
-/// The intake types, in report order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Kind {
-    Blog,
-    Mail,
-    Youtube,
-    Clip,
-}
-
-impl Kind {
-    pub(crate) const ALL: [Kind; 4] = [Kind::Blog, Kind::Mail, Kind::Youtube, Kind::Clip];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Kind::Blog => "blog",
-            Kind::Mail => "mail",
-            Kind::Youtube => "youtube",
-            Kind::Clip => "clip",
-        }
-    }
-}
-
-/// The pure intake classifier: `post-id` → blog, `message-id` → mail, a YouTube `source` URL →
-/// youtube, anything else → clip.
-pub(crate) fn classify(has_post_id: bool, has_message_id: bool, source: &str) -> Kind {
-    if has_post_id {
-        Kind::Blog
-    } else if has_message_id {
-        Kind::Mail
-    } else if is_youtube_video(source) {
-        Kind::Youtube
-    } else {
-        Kind::Clip
-    }
-}
 
 /// How many of each type's spans to sample: `pops[i]` is type i's population. At most `limit` in
 /// total; everything when the population fits; otherwise proportional (largest remainder) with at
@@ -214,10 +174,10 @@ fn quote(text: &str) -> String {
 pub(crate) fn render_review(date: &str, items: &[(Kind, Span)]) -> String {
     let mut out = format!("# Removals review {date}\n\n{INSTRUCTION}\n\n");
     for (kind, s) in items {
-        let note = s.path.strip_suffix(".md").unwrap_or(&s.path);
         let t = kind.label();
         out.push_str(&format!(
-            "- [ ] [[{note}]] ({t}) %%rm {t}%%\n{}\n",
+            "- [ ] {} ({t}) %%rm {t}%%\n{}\n",
+            link(&s.path, false),
             quote(&s.text)
         ));
     }
@@ -316,14 +276,6 @@ impl StepModule for RemovalsReview {
     }
 }
 
-fn is_blank(v: &Value) -> bool {
-    match v {
-        Value::Null => true,
-        Value::String(s) => s.trim().is_empty(),
-        _ => false,
-    }
-}
-
 /// Every removed span of every enriched user note, by type, in path order.
 fn population(ctx: &StepCtx<'_>) -> Result<BTreeMap<Kind, Vec<Span>>, StepError> {
     let reader = ctx.index()?;
@@ -335,15 +287,7 @@ fn population(ctx: &StepCtx<'_>) -> Result<BTreeMap<Kind, Vec<Span>>, StepError>
         .map(|r| r.path)
         .filter(|p| p.ends_with(".md") && vpath::is_user_path(p))
         .collect();
-    let post: BTreeSet<String> = q.md_paths_with_prop_key("post-id")?.into_iter().collect();
-    let mail: BTreeSet<String> = q
-        .md_paths_with_prop_key("message-id")?
-        .into_iter()
-        .collect();
-    let mut source: BTreeMap<String, String> = BTreeMap::new();
-    for r in q.md_props_with_key("source")? {
-        source.insert(r.path, cv_index::prop_text(&r.value));
-    }
+    let kinds = IntakeKinds::load(ctx)?;
     let mut pop: BTreeMap<Kind, Vec<Span>> = BTreeMap::new();
     for path in &enriched {
         let Some((bytes, _)) = ctx.read(path)? else {
@@ -352,11 +296,7 @@ fn population(ctx: &StepCtx<'_>) -> Result<BTreeMap<Kind, Vec<Span>>, StepError>
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
-        let kind = classify(
-            post.contains(path),
-            mail.contains(path),
-            source.get(path).map_or("", String::as_str),
-        );
+        let kind = kinds.kind(path);
         let spans = cv_ingest::enrich::removed_spans(FrontmatterDoc::new(&text).body());
         pop.entry(kind)
             .or_default()
@@ -369,30 +309,18 @@ fn population(ctx: &StepCtx<'_>) -> Result<BTreeMap<Kind, Vec<Span>>, StepError>
     Ok(pop)
 }
 
-fn job_u64(ctx: &StepCtx<'_>, key: &str, default: u64) -> Result<u64, StepError> {
-    match job_pos_int(ctx.params, key)
-        .map_err(|e| StepError::failed(format!("removals_review: {e}")))?
-    {
-        Some(n) => Ok(n as u64),
-        None => Ok(default),
-    }
-}
-
 fn review(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let limit = job_pos_int(ctx.params, "limit")
-        .map_err(|e| StepError::failed(format!("removals_review: {e}")))?
-        .unwrap_or(p.limit);
-    let seed = job_u64(ctx, "seed", p.seed)?;
+    let limit = job_pos_int_in(ctx, "removals_review", "limit")?.unwrap_or(p.limit);
+    let seed = job_pos_int_in(ctx, "removals_review", "seed")?.map_or(p.seed, |n| n as u64);
     let overwrite = job_flag(ctx, "overwrite").unwrap_or(p.overwrite);
     let date = now().date().format("%Y-%m-%d").to_string();
-    let review_dir = review_dir(ctx.config);
-    let path = format!("{review_dir}/{REVIEW_PREFIX}{date}.md");
-    let existing = ctx.read(&path)?;
-    if existing.is_some() && !overwrite {
-        return Err(StepError::failed(format!(
-            "removals_review: {path} already exists (it may hold ticks); run with overwrite = true to replace it"
-        )));
-    }
+    let path = dated_path(ctx.config, REVIEW_PREFIX, &date);
+    let policy = if overwrite {
+        Overwrite::Always
+    } else {
+        Overwrite::Refuse
+    };
+    let slot = claim(ctx, "removals_review", &path, policy)?;
     let pop = population(ctx)?;
     let pops: Vec<usize> = Kind::ALL
         .iter()
@@ -414,14 +342,7 @@ fn review(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     vars.insert("review_path".into(), json!(path));
     vars.insert("open_path".into(), json!(path));
     let text = render_review(&date, &items).into_bytes();
-    match existing {
-        Some((_, hash)) => {
-            ctx.write(&path, text, Some(hash))?;
-        }
-        None => {
-            ctx.create(&path, text)?;
-        }
-    }
+    slot.write(ctx, text)?;
     let mut out = StepOutcome {
         vars,
         open_path: Some(path.clone()),

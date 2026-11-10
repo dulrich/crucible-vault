@@ -44,13 +44,14 @@ use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::enrich::{self, BannerRef, EnrichOpts, EnrichReport};
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_providers::ProviderManager;
-use cv_text::url_canon::is_youtube_video;
 use serde::Serialize;
-use serde_json::Value;
 
 use super::agent;
-use super::params::{check_keys, get_bool, get_pos_int, get_str};
-use super::{StepCtx, StepError, StepModule, StepOutcome, job_flag, job_pos_int};
+use super::intake_kind::{IntakeKinds, is_blank};
+use super::params::{
+    Scope, check_keys, get_bool, get_pos_int, get_scope, get_str, job_flag, job_pos_int_in,
+};
+use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// The action a single note is enriched by (also the backfill's child).
 pub(crate) const ENRICH_ACTION: &str = "intake-enrich";
@@ -58,12 +59,6 @@ const DEFAULT_AGENT: &str = "intake-enrich";
 const DEFAULT_LIMIT: usize = 20;
 /// Bodies under this many words are cleaned (fold) but get no top block or headings.
 pub(crate) const SHORT_WORDS: usize = 150;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
-    Note,
-    Backfill,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Params {
@@ -75,15 +70,7 @@ pub(crate) struct Params {
 
 pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
     check_keys(t, StepKind::IntakeEnrich, "intake_enrich")?;
-    let scope = match get_str(t, "scope")?.as_deref() {
-        None | Some("note") => Scope::Note,
-        Some("backfill") => Scope::Backfill,
-        Some(s) => {
-            return Err(format!(
-                "intake_enrich step: `scope` {s:?} is not note|backfill"
-            ));
-        }
-    };
+    let scope = get_scope(t, "intake_enrich")?;
     let limit = get_pos_int(t, "limit")
         .map_err(|e| format!("intake_enrich step: {e}"))?
         .unwrap_or(DEFAULT_LIMIT);
@@ -288,15 +275,6 @@ pub(crate) fn pick_backfill(
     v.into_iter().take(limit).map(|(p, _)| p.clone()).collect()
 }
 
-/// [`cv_note::is_blank`]'s rule over the index's `serde_json` property values (there is no `JsValue` conversion at the index boundary): null and a whitespace-only string are blank, everything else is set.
-fn json_is_blank(v: &Value) -> bool {
-    match v {
-        Value::Null => true,
-        Value::String(s) => s.trim().is_empty(),
-        _ => false,
-    }
-}
-
 /// The backfill's view of the vault's intake notes.
 struct IntakeNotes {
     /// Candidates with their `ctime`.
@@ -318,21 +296,13 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
         .into_iter()
         .map(|f| (f.path, f.ctime))
         .collect();
-    let mut cands = BTreeSet::new();
-    for key in ["post-id", "message-id"] {
-        cands.extend(q.md_paths_with_prop_key(key)?);
-    }
-    let mut youtube = BTreeSet::new();
-    for r in q.md_props_with_key("source")? {
-        if is_youtube_video(&cv_index::prop_text(&r.value)) {
-            youtube.insert(r.path.clone());
-            cands.insert(r.path);
-        }
-    }
+    let kinds = IntakeKinds::load(ctx)?;
+    let youtube = kinds.youtube();
+    let cands = kinds.candidates();
     let enriched: BTreeSet<String> = q
         .md_props_with_key("enriched")?
         .into_iter()
-        .filter(|r| !json_is_blank(&r.value))
+        .filter(|r| !is_blank(&r.value))
         .map(|r| r.path)
         .collect();
     let mut refine = BTreeSet::new();
@@ -364,9 +334,7 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
 }
 
 fn backfill(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-    let limit = job_pos_int(ctx.params, "limit")
-        .map_err(|e| StepError::failed(format!("intake_enrich: {e}")))?
-        .unwrap_or(p.limit);
+    let limit = job_pos_int_in(ctx, "intake_enrich", "limit")?.unwrap_or(p.limit);
     let notes = intake_notes(ctx)?;
     let picks = pick_backfill(&notes.ctimes, &notes.enriched, &notes.refine, limit);
     let (mut ok, mut failed) = (0, 0);

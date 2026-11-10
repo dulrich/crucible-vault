@@ -2,9 +2,85 @@
 //! the schema-driven allowed-key check, typed key getters and `{…}` placeholder handling.
 
 use cv_actions::StepKind;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{StepCtx, StepError};
+
+/// The `scope = note|backfill` grammar shared by `fanfic_title` and `yt_clip_tidy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    Note,
+    Backfill,
+}
+
+/// An optional `scope` key (`note` when absent): anything but `note`/`backfill` is
+/// `"{what} step: `scope` {s:?} is not note|backfill"`.
+pub(crate) fn get_scope(t: &toml::Table, what: &str) -> Result<Scope, String> {
+    match get_str(t, "scope")?.as_deref() {
+        None | Some("note") => Ok(Scope::Note),
+        Some("backfill") => Ok(Scope::Backfill),
+        Some(s) => Err(format!("{what} step: `scope` {s:?} is not note|backfill")),
+    }
+}
+
+/// A boolean job param `key`: a bool, or the string `"true"`/`"false"` (any case); anything
+/// else (absent, another type, another string) is `None`.
+fn flag_of(params: &Map<String, Value>, key: &str) -> Option<bool> {
+    match params.get(key) {
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::String(s)) if s.eq_ignore_ascii_case("true") => Some(true),
+        Some(Value::String(s)) if s.eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
+}
+
+/// The job's boolean param `key` (see [`flag_of`]). A present job flag wins over the step param
+/// (`job_flag(ctx, key).unwrap_or(step_value)`), the one precedence rule (D3).
+pub(crate) fn job_flag(ctx: &StepCtx<'_>, key: &str) -> Option<bool> {
+    flag_of(ctx.params, key)
+}
+
+/// The effective `dry_run`: the job param when present, else the step's value.
+pub(crate) fn job_dry_run(ctx: &StepCtx<'_>, step_value: bool) -> bool {
+    job_flag(ctx, "dry_run").unwrap_or(step_value)
+}
+
+/// A positive-integer job param `key`, the job-side twin of [`get_pos_int`]: a JSON
+/// integer > 0 or its decimal text (the action's param kinds have no integer) wins over the step
+/// key; absent, null or a blank string is `None`; anything else is rejected, never rounded or
+/// coerced. The error reads "job param `key` VALUE is not a positive integer" (callers prefix
+/// their step name).
+pub(crate) fn job_pos_int(params: &Map<String, Value>, key: &str) -> Result<Option<usize>, String> {
+    let bad = |v: &Value| format!("job param `{key}` {v} is not a positive integer");
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v @ Value::Number(n)) => n
+            .as_u64()
+            .filter(|n| *n > 0)
+            .and_then(|n| usize::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| bad(v)),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(v @ Value::String(s)) => s
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(Some)
+            .ok_or_else(|| bad(v)),
+        Some(v) => Err(bad(v)),
+    }
+}
+
+/// [`job_pos_int`] on the step's job params, a rejection prefixed with the step name
+/// (`"{what}: job param …"`) as a failed step.
+pub(crate) fn job_pos_int_in(
+    ctx: &StepCtx<'_>,
+    what: &str,
+    key: &str,
+) -> Result<Option<usize>, StepError> {
+    job_pos_int(ctx.params, key).map_err(|e| StepError::failed(format!("{what}: {e}")))
+}
 
 /// Whether `key` is a param of `kind`: the `cv_schema::step_schema(kind)` record's fields are
 /// the allowed keys (SM6 — one source for the parser and the Settings form).

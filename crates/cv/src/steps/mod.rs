@@ -60,6 +60,7 @@ mod dupes_resolve_tests;
 #[cfg(test)]
 mod dupes_tests;
 pub mod fanfic_title;
+mod fanfic_title_review;
 #[cfg(test)]
 mod fanfic_title_tests;
 pub mod file;
@@ -73,6 +74,7 @@ mod intake_enrich_tests;
 pub mod intake_finalize;
 #[cfg(test)]
 mod intake_finalize_tests;
+pub(crate) mod intake_kind;
 pub mod link_scan;
 pub mod lint;
 #[cfg(test)]
@@ -99,6 +101,7 @@ mod reconcile_tests;
 pub mod removals_review;
 #[cfg(test)]
 mod removals_review_tests;
+pub(crate) mod review_note;
 pub mod search;
 #[cfg(test)]
 mod search_tests;
@@ -361,50 +364,6 @@ pub trait ChildSpawner {
     ) -> Result<String, String> {
         let _ = (action_id, params, active_path);
         Err("spawning on another path is not supported here".into())
-    }
-}
-
-/// A boolean job param `key`: a bool, or the string `"true"`/`"false"` (any case); anything
-/// else (absent, another type, another string) is `None`.
-fn flag_of(params: &Map<String, Value>, key: &str) -> Option<bool> {
-    match params.get(key) {
-        Some(Value::Bool(b)) => Some(*b),
-        Some(Value::String(s)) if s.eq_ignore_ascii_case("true") => Some(true),
-        Some(Value::String(s)) if s.eq_ignore_ascii_case("false") => Some(false),
-        _ => None,
-    }
-}
-
-/// The job's boolean param `key` (see [`flag_of`]). A present job flag wins over the step param
-/// (`job_flag(ctx, key).unwrap_or(step_value)`), the one precedence rule (D3).
-pub(crate) fn job_flag(ctx: &StepCtx<'_>, key: &str) -> Option<bool> {
-    flag_of(ctx.params, key)
-}
-
-/// A positive-integer job param `key`, the job-side twin of [`params::get_pos_int`]: a JSON
-/// integer > 0 or its decimal text (the action's param kinds have no integer) wins over the step
-/// key; absent, null or a blank string is `None`; anything else is rejected, never rounded or
-/// coerced. The error reads "job param `key` VALUE is not a positive integer" (callers prefix
-/// their step name).
-pub(crate) fn job_pos_int(params: &Map<String, Value>, key: &str) -> Result<Option<usize>, String> {
-    let bad = |v: &Value| format!("job param `{key}` {v} is not a positive integer");
-    match params.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v @ Value::Number(n)) => n
-            .as_u64()
-            .filter(|n| *n > 0)
-            .and_then(|n| usize::try_from(n).ok())
-            .map(Some)
-            .ok_or_else(|| bad(v)),
-        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
-        Some(v @ Value::String(s)) => s
-            .trim()
-            .parse::<usize>()
-            .ok()
-            .filter(|n| *n > 0)
-            .map(Some)
-            .ok_or_else(|| bad(v)),
-        Some(v) => Err(bad(v)),
     }
 }
 
