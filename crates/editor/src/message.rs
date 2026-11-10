@@ -58,7 +58,10 @@ pub enum Message {
     },
     /// Plan usability-sprint-captures-links WP-5: a `title` → filename rename finished
     /// (`seq` = the buffer's edit sequence when it was issued).
+    /// Plan note-identity D4: addressed to the renamed document by `id`; `from` is the path the
+    /// rename was issued at, used only for the path-based explorer tree.
     TitleRenamed {
+        id: crate::daemon::NoteId,
         from: String,
         to: String,
         seq: u64,
@@ -110,13 +113,15 @@ pub enum SourceMsg {
         lines: usize,
     },
     /// The autosave debounce for edit `seq` elapsed.
+    /// Plan note-identity D4: addressed to the note id (a move while it runs never misses it).
     AutosaveDue {
-        path: String,
+        id: crate::daemon::NoteId,
         seq: u64,
     },
     /// A save finished; `after` is the save-first continuation, if any.
+    /// Plan note-identity D4: addressed to the note id (`None` = a buffer bound to no note).
     Saved {
-        path: String,
+        id: Option<crate::daemon::NoteId>,
         seq: u64,
         outcome: crate::source::SaveOutcome,
         after: Option<AfterSave>,
@@ -360,7 +365,9 @@ pub enum ExplorerMsg {
     Submit,
     Cancel,
     /// An RPC file operation finished.
-    Done(crate::explorer::FileOpDone),
+    /// Plan note-identity D4: the second field is the open document the op targets (a rename of
+    /// an open note), by id.
+    Done(crate::explorer::FileOpDone, Option<crate::daemon::NoteId>),
     /// plan editor-ui-round-3 WP-3: "Delete note…" on the active note.
     DeleteActive,
     /// The `delete_preview` answer for `path` (opens the delete dialog).
@@ -425,8 +432,9 @@ pub enum PaletteMsg {
     /// `run_action` returned.
     Ran {
         title: String,
-        /// The invoking tab's `(path, edit_seq)` at dispatch (WP-5 follow-the-note).
-        origin: Option<(String, u64)>,
+        /// The invoking note's `(id, edit_seq)` at dispatch (WP-5 follow-the-note; plan
+        /// note-identity D4: by id).
+        origin: Option<(crate::daemon::NoteId, u64)>,
         result: Result<cv_protocol::RunActionResult, String>,
     },
     /// Toast expiry tick.
@@ -664,6 +672,8 @@ pub enum ThemeMsg {
 /// Which document a [`SourceMsg`] acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceTarget<'a> {
+    /// The open document of this note id (plan note-identity D4).
+    Note(crate::daemon::NoteId),
     /// The note at this path, wherever its tabs are.
     Path(&'a str),
     /// The focused pane's active note (the focused source editor).
@@ -676,8 +686,8 @@ impl SourceMsg {
     /// The document this message acts on.
     pub fn target(&self) -> SourceTarget<'_> {
         match self {
-            Self::AutosaveDue { path, .. }
-            | Self::KeepMine(path)
+            Self::AutosaveDue { id, .. } => SourceTarget::Note(*id),
+            Self::KeepMine(path)
             | Self::TakeTheirs(path)
             | Self::MiddleClick { path, .. }
             | Self::CommandClick { path, .. }
@@ -855,7 +865,7 @@ impl ExplorerMsg {
         match self {
             Self::Refresh
             | Self::Scrolled(_)
-            | Self::Done(_)
+            | Self::Done(..)
             | Self::DeletePreview { .. }
             | Self::NoteDeleted(_) => MsgKind::Completion,
             Self::Toggle(_)

@@ -60,7 +60,7 @@ fn doc<'a>(app: &'a mut App, path: &str) -> &'a mut crate::source::SourceBuffer 
 
 fn land(app: &mut App, path: &str, seq: u64, outcome: SaveOutcome) {
     let _ = app.send(Message::Source(SourceMsg::Saved {
-        path: path.to_owned(),
+        id: app.note_id(path),
         seq,
         outcome,
         after: None,
@@ -207,4 +207,25 @@ fn reconnect_follows_a_note_moved_while_disconnected() {
     assert_eq!(t.text(), "xbody", "dirty text kept");
     assert!(!t.is_missing() && t.conflict().is_none());
     assert_eq!(app.status.error_text(), None);
+}
+
+/// Plan note-identity D4: reconnect locates every open note id; a note moved while disconnected
+/// is found at its new path (same id) and a later save lands there.
+#[test]
+fn reconnect_after_a_move_finds_the_note_by_id_and_saves_there() {
+    let (_tmp, d, mut app) = setup(&["r10/a.md"], 0);
+    let id = app.note_id("r10/a.md").expect("bound");
+    let _unfed = d.daemon_move("r10/a.md", "r10/b.md").expect("move");
+    reconnect(&mut app);
+    assert_eq!(app.note_id("r10/b.md"), Some(id));
+    assert!(app.doc("r10/a.md").is_none(), "left the old path");
+    type_x(&mut app);
+    let job = doc(&mut app, "r10/b.md")
+        .begin_save()
+        .expect("a save starts");
+    let outcome = job.run(d.as_ref());
+    let _ = app.send(job.done(outcome));
+    assert_eq!(d.read_file("r10/b.md").expect("b").0, b"xbody");
+    assert!(d.read_file("r10/a.md").is_err(), "nothing recreated at a");
+    assert!(!doc(&mut app, "r10/b.md").is_dirty());
 }

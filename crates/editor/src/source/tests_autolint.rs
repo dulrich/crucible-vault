@@ -165,10 +165,8 @@ fn autosave_tick_lints_then_saves_through_the_app() {
         let b = app.active_doc_mut().expect("doc");
         user_edit(b);
         let seq = b.edit_seq();
-        let _ = app.send(Message::Source(SourceMsg::AutosaveDue {
-            path: p.to_owned(),
-            seq,
-        }));
+        let id = app.note_id(p).expect("open");
+        let _ = app.send(Message::Source(SourceMsg::AutosaveDue { id, seq }));
         let b = app.active_doc_mut().expect("doc");
         assert_eq!(b.text().contains("updated: "), enabled);
         assert!(b.is_saving(), "the (linted) text went out as the save");

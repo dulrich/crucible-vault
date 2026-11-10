@@ -7,7 +7,7 @@ use std::time::Duration;
 use iced::Task;
 
 use super::SourceBuffer;
-use crate::daemon::{ContentHash, DaemonClient, DaemonError, is_no_base, no_base};
+use crate::daemon::{ContentHash, DaemonClient, DaemonError, NoteId, is_no_base, no_base};
 use crate::message::{Message, SourceMsg};
 
 /// Autosave debounce after the last edit.
@@ -19,11 +19,20 @@ pub enum SaveOutcome {
     Saved(ContentHash),
     Conflict(ContentHash),
     Failed(String),
+    /// Plan note-identity D4: saved by id at this path, not the one the job carried (the note
+    /// had moved; the document takes its path from the reply).
+    SavedAt(ContentHash, String),
+    /// Plan note-identity D4: a CAS conflict of a note that lives at this other path now
+    /// (`locate_note`, since a conflict reply carries no path).
+    ConflictAt(ContentHash, String),
 }
 
 /// A save ready to run off the UI thread.
 #[derive(Debug, Clone)]
 pub struct SaveJob {
+    /// Plan note-identity D4: the note the save is addressed to (`None` = a buffer not bound to
+    /// a note, e.g. a standalone test buffer: the write goes by path).
+    pub id: Option<NoteId>,
     pub path: String,
     pub seq: u64,
     pub(super) text: String,
@@ -33,9 +42,28 @@ pub struct SaveJob {
 impl SaveJob {
     /// Runs the CAS write (blocking; call from `spawn_blocking` or a test).
     pub fn run(&self, d: &dyn DaemonClient) -> SaveOutcome {
-        match d.write_note(&self.path, &self.text, &self.base) {
-            Ok(h) => SaveOutcome::Saved(h),
-            Err(DaemonError::Conflict { current_hash }) => SaveOutcome::Conflict(current_hash),
+        let Some(id) = self.id else {
+            return match d.write_note(&self.path, &self.text, &self.base) {
+                Ok(h) => SaveOutcome::Saved(h),
+                Err(DaemonError::Conflict { current_hash }) => SaveOutcome::Conflict(current_hash),
+                Err(e) => SaveOutcome::Failed(crate::daemon::rpc_err(&e)),
+            };
+        };
+        // Plan note-identity D3/D4: by id, the daemon writes at the note's current path (the
+        // document follows that path from the `file_changed` it emits); `self.path` only
+        // matters for the "Keep mine" revive of a retired id (base = no file).
+        match d.write_note_by_id(id, &self.path, &self.text, &self.base) {
+            Ok((h, at)) if at != self.path => SaveOutcome::SavedAt(h, at),
+            Ok((h, _)) => SaveOutcome::Saved(h),
+            Err(DaemonError::Conflict { current_hash }) => match d.locate_note(id) {
+                Ok(crate::daemon::NoteLocation::Live { path }) if path != self.path => {
+                    SaveOutcome::ConflictAt(current_hash, path)
+                }
+                _ => SaveOutcome::Conflict(current_hash),
+            },
+            // The note is gone (deleted / retired): the same "no file" CAS answer a path write
+            // got, so the buffer takes its missing-file state (Keep mine revives the id).
+            Err(DaemonError::NotFound(_)) => SaveOutcome::Conflict(no_base()),
             Err(e) => SaveOutcome::Failed(crate::daemon::rpc_err(&e)),
         }
     }
@@ -43,7 +71,7 @@ impl SaveJob {
     /// The message that reports `outcome` back.
     pub fn done(&self, outcome: SaveOutcome) -> Message {
         Message::Source(SourceMsg::Saved {
-            path: self.path.clone(),
+            id: self.id,
             seq: self.seq,
             outcome,
             after: None,
@@ -112,6 +140,8 @@ pub(super) struct SaveState {
     /// WP-5 (audit E2): a title rename of this note is in flight; saves are held (queued as
     /// `save_again`) so the old path is never written or recreated.
     renaming: bool,
+    /// Plan note-identity D4: the note this buffer belongs to.
+    note: Option<NoteId>,
     /// Plan note-path-continuity D3: the lineage cursor of the incarnation whose bytes this
     /// buffer holds (`None` = an old daemon without lineage, or a buffer not bound to one).
     lineage: Option<u64>,
@@ -129,6 +159,7 @@ impl SaveState {
             disk_title: title.clone(),
             name_title: title,
             renaming: false,
+            note: None,
             lineage: None,
         }
     }
@@ -155,6 +186,28 @@ impl SourceBuffer {
     /// plan editor-data-safety WP-2: the conflict is "the file is gone".
     pub fn is_missing(&self) -> bool {
         self.save.conflict == Some(Conflict::Missing)
+    }
+
+    /// The note this buffer belongs to (plan note-identity D4).
+    pub fn note_id(&self) -> Option<NoteId> {
+        self.save.note
+    }
+
+    /// Whether `hash` is bytes this buffer already holds: its base, or the text of its in-flight
+    /// save (plan note-identity D4: a move of the note carrying our own save is not an edit
+    /// elsewhere).
+    pub fn holds_bytes(&self, hash: &ContentHash) -> bool {
+        *hash == self.save.base_hash
+            || self
+                .save
+                .in_flight
+                .as_ref()
+                .is_some_and(|f| f.hash == *hash)
+    }
+
+    /// Binds the buffer to note `id` (at open; the id never changes afterwards).
+    pub fn set_note_id(&mut self, id: NoteId) {
+        self.save.note = Some(id);
     }
 
     /// The lineage cursor of the incarnation this buffer's bytes belong to (plan
@@ -241,6 +294,7 @@ impl SourceBuffer {
         });
         self.save.save_again = false;
         Some(SaveJob {
+            id: self.save.note,
             path: self.path.clone(),
             seq: self.edit_seq,
             text,
@@ -252,7 +306,7 @@ impl SourceBuffer {
     pub fn finish_save(&mut self, seq: u64, outcome: SaveOutcome) -> Result<bool, String> {
         let title = self.save.in_flight.take().and_then(|f| f.title);
         match outcome {
-            SaveOutcome::Saved(h) => {
+            SaveOutcome::Saved(h) | SaveOutcome::SavedAt(h, _) => {
                 self.save.base_hash = h;
                 self.save.disk_title = title;
                 if self.title_rename().is_none() {
@@ -263,7 +317,7 @@ impl SourceBuffer {
                 }
                 Ok(self.save.dirty && std::mem::take(&mut self.save.save_again))
             }
-            SaveOutcome::Conflict(current) => {
+            SaveOutcome::Conflict(current) | SaveOutcome::ConflictAt(current, _) => {
                 self.save.conflict = Some(Conflict::from_disk(current));
                 Ok(false)
             }
@@ -303,7 +357,9 @@ impl SourceBuffer {
                     Err(e) => return Some(format!("file changed: {e}")),
                 },
             };
-            if current != self.save.base_hash {
+            // Plan note-identity D4: the disk holding our in-flight save (a move notification
+            // consumed before its reply) is our own bytes, not a change elsewhere.
+            if !self.holds_bytes(&current) {
                 self.save.conflict = Some(Conflict::from_disk(current));
             }
             return None;
@@ -351,8 +407,9 @@ impl SourceBuffer {
     /// The note moved to `to` (whose on-disk hash is `disk`) while this buffer had edits the move
     /// did not carry: follow the path, keep the text, and raise the conflict bar (Keep mine
     /// saves it at `to`; Take theirs discards it). editor-usability-round WP-5, audit M2.
-    pub fn follow_move(&mut self, to: &str, disk: ContentHash) {
-        to.clone_into(&mut self.path);
+    /// Plan note-identity D4: the path itself changes only through the document store
+    /// (`Docs::set_path`); this keeps the text and raises the bar.
+    pub fn follow_move(&mut self, disk: ContentHash) {
         self.save.dirty = true;
         self.save.conflict = Some(Conflict::from_disk(disk));
     }
@@ -441,16 +498,16 @@ pub(crate) fn spawn_save(
     )
 }
 
-pub(crate) fn autosave_timer(path: String, seq: u64) -> Task<Message> {
+/// The autosave debounce for note `id`'s edit `seq` (plan note-identity D4: addressed by id, so a
+/// move while it runs cannot miss the document). A buffer bound to no note arms nothing.
+pub(crate) fn autosave_timer(id: Option<NoteId>, seq: u64) -> Task<Message> {
+    let Some(id) = id else {
+        return Task::none();
+    };
     // The sleep future is built lazily inside the async block (it needs the executor's reactor).
     Task::perform(
         async { tokio::time::sleep(AUTOSAVE_DELAY).await },
-        move |()| {
-            Message::Source(SourceMsg::AutosaveDue {
-                path: path.clone(),
-                seq,
-            })
-        },
+        move |()| Message::Source(SourceMsg::AutosaveDue { id, seq }),
     )
 }
 

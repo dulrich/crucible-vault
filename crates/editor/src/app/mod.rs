@@ -75,6 +75,8 @@ pub use crate::ui_state::{TabKind, Viewer};
 /// with the document.
 #[derive(Debug)]
 pub struct OpenDoc {
+    /// The note's identity (plan note-identity D3/D4): never changes while the document is open.
+    pub id: NoteId,
     pub buffer: crate::source::SourceBuffer,
     /// Tabs (by [`Tab::id`]) whose close waits on this note's in-flight normal save (WP-3
     /// rework; audit E1: a close keeps its target tab identity across the save, so closing one
@@ -84,8 +86,121 @@ pub struct OpenDoc {
     pub reading: crate::reading::DocReading,
 }
 
-/// The document store: one [`OpenDoc`] per open note path (plan editor-feedback-round-2 WP-7).
-pub type Docs = std::collections::HashMap<String, OpenDoc>;
+/// The document store (plan note-identity D4): one [`OpenDoc`] per open note, keyed by its
+/// daemon-minted [`NoteId`]. The path is a field of the document (its buffer's path); the
+/// path-addressed lookups below are derived from the documents themselves (a scan — a handful of
+/// open notes), so there is no second map that could drift from a document's path. The only
+/// path change is [`Docs::set_path`], called from [`App::move_doc_path`]; nothing re-keys a
+/// document.
+#[derive(Debug, Default)]
+pub struct Docs {
+    by_id: std::collections::HashMap<NoteId, OpenDoc>,
+}
+
+impl Docs {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The id of the document whose path is `path`.
+    pub fn id_of(&self, path: &str) -> Option<NoteId> {
+        self.by_id
+            .iter()
+            .find(|(_, d)| d.buffer.path() == path)
+            .map(|(id, _)| *id)
+    }
+
+    /// The document open at `path`.
+    pub fn get(&self, path: &str) -> Option<&OpenDoc> {
+        self.by_id.values().find(|d| d.buffer.path() == path)
+    }
+
+    /// The document open at `path`, mutably.
+    pub fn get_mut(&mut self, path: &str) -> Option<&mut OpenDoc> {
+        self.by_id.values_mut().find(|d| d.buffer.path() == path)
+    }
+
+    /// Whether a document is open at `path`.
+    pub fn contains_key(&self, path: &str) -> bool {
+        self.get(path).is_some()
+    }
+
+    /// The document `id`.
+    pub fn by_id(&self, id: NoteId) -> Option<&OpenDoc> {
+        self.by_id.get(&id)
+    }
+
+    /// The document `id`, mutably.
+    pub fn by_id_mut(&mut self, id: NoteId) -> Option<&mut OpenDoc> {
+        self.by_id.get_mut(&id)
+    }
+
+    /// The current path of document `id`.
+    pub fn path_of(&self, id: NoteId) -> Option<String> {
+        self.by_id.get(&id).map(|d| d.buffer.path().to_owned())
+    }
+
+    /// Opens `doc` (keyed by its own id).
+    pub fn insert(&mut self, doc: OpenDoc) {
+        self.by_id.insert(doc.id, doc);
+    }
+
+    /// Drops the document open at `path`.
+    pub fn remove(&mut self, path: &str) -> Option<OpenDoc> {
+        let id = self.id_of(path)?;
+        self.by_id.remove(&id)
+    }
+
+    /// Drops document `id`.
+    pub fn remove_id(&mut self, id: NoteId) -> Option<OpenDoc> {
+        self.by_id.remove(&id)
+    }
+
+    /// The one path change of a document: `id` now lives at `to` (its key never changes).
+    fn set_path(&mut self, id: NoteId, to: &str) {
+        if let Some(d) = self.by_id.get_mut(&id) {
+            d.buffer.rename_clean(to);
+        }
+    }
+
+    /// Every open document with its path.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &OpenDoc)> {
+        self.by_id.values().map(|d| (d.buffer.path(), d))
+    }
+
+    /// Every open document's path.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.by_id.values().map(|d| d.buffer.path())
+    }
+
+    /// Every open document's id.
+    pub fn ids(&self) -> Vec<NoteId> {
+        self.by_id.keys().copied().collect()
+    }
+
+    /// Every open document.
+    pub fn values(&self) -> impl Iterator<Item = &OpenDoc> {
+        self.by_id.values()
+    }
+
+    /// Every open document, mutably.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut OpenDoc> {
+        self.by_id.values_mut()
+    }
+
+    /// How many documents are open.
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    /// No document is open.
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+}
+
+pub use crate::daemon::{NoteId, NoteLocation};
 
 /// The source buffer of the document open at `path` (a field-level borrow of [`App::docs`]).
 fn buf<'a>(docs: &'a Docs, path: &str) -> Option<&'a crate::source::SourceBuffer> {
@@ -360,12 +475,13 @@ pub struct App {
 /// A quit in progress: the saves it waits on, and whether one failed.
 #[derive(Debug, Default)]
 pub(crate) struct QuitState {
-    pending: std::collections::HashSet<String>,
+    /// Plan note-identity D4: the notes (by id) whose save-before-quit is in flight.
+    pending: std::collections::HashSet<NoteId>,
     /// Settings files whose flush write has not landed yet (plan editor-feedback-round-2 WP-2).
     settings: std::collections::HashSet<String>,
     /// Notes whose normal (autosave/flush) save was already in flight at quit; resolved by
     /// their `SourceMsg::Saved` (plan editor-feedback-round-2 WP-3 rework).
-    awaiting: std::collections::HashSet<String>,
+    awaiting: std::collections::HashSet<NoteId>,
     /// Plan round-18 WP-2: dirty notes a running job holds; saved (then counted `pending`) when
     /// the hold releases, a loss on disconnect (a second quit offers "quit anyway").
     held: std::collections::HashSet<String>,
@@ -549,8 +665,9 @@ impl App {
             .filter(|t| self.reading.mode(&self.docs, t.path).shows_source())
             .map(|t| t.path.to_owned())
             .collect();
-        for (path, doc) in &mut self.docs {
-            doc.buffer.set_shaped(visible.contains(path));
+        for doc in self.docs.values_mut() {
+            let shaped = visible.contains(doc.buffer.path());
+            doc.buffer.set_shaped(shaped);
         }
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         if ms >= 1.0 {

@@ -2,14 +2,14 @@
 
 use super::*;
 
-/// Where the note an open document holds went (plan note-path-continuity D3).
-pub(super) enum Resolved {
-    /// It lives at this path now; the second field is the lineage head to rebind at.
-    Moved(String, u64),
-    /// It is still at its path.
-    Live,
-    /// Deleted, or not resolvable: today's deleted / missing handling applies.
-    Gone,
+/// How a followed move treats a document's buffer (plan note-identity D4, [`App::follow_doc`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Follow {
+    /// A daemon-side move: unsaved edits are kept behind the conflict bar only when the moved
+    /// bytes are not ones the buffer holds (its base or its in-flight save).
+    Daemon,
+    /// An editor-initiated move: `true` = edited since it was issued (conflict bar).
+    Edited(bool),
 }
 
 impl App {
@@ -117,10 +117,18 @@ impl App {
         if let FileOp::Rename { from, to } = &op {
             self.explorer.expect_rename(from, to);
         }
+        // Plan note-identity D4: a rename of an open note carries that document's id, so its
+        // completion finds it wherever a notification consumed first already moved it.
+        let note = match &op {
+            FileOp::Rename { from, .. } => self.docs.id_of(from),
+            FileOp::Create { .. } | FileOp::Delete { .. } => None,
+        };
         let back = op.clone();
         self.rpc(
             move |d| op.run(d),
-            move |result| Message::Explorer(ExplorerMsg::Done(FileOpDone { op: back, result })),
+            move |result| {
+                Message::Explorer(ExplorerMsg::Done(FileOpDone { op: back, result }, note))
+            },
         )
     }
 
@@ -202,18 +210,22 @@ impl App {
                 Err(e) => self.status.set_error(e),
             },
             ExplorerMsg::Cancel => self.explorer.edit = None,
-            ExplorerMsg::Done(FileOpDone { op, result }) => match result {
+            ExplorerMsg::Done(FileOpDone { op, result }, note) => match result {
                 Ok(final_path) => {
                     let indexed = self.indexed_fn();
                     self.explorer
                         .apply_op(&op, &final_path, &self.ui.expanded, &indexed);
                     match &op {
                         FileOp::Create { .. } => self.open(&final_path),
-                        FileOp::Rename { from, to } => {
-                            let cursor = self.cursor_of(from);
-                            self.retarget(from, to);
-                            self.rebind_after_move(cursor, from, to);
-                        }
+                        FileOp::Rename { from, .. } => match note {
+                            Some(id) => self.follow_doc(id, &final_path, Follow::Daemon),
+                            None if !self.docs.contains_key(from) && self.path_open(from) => {
+                                // Plan round-15 WP-2: only file tabs show a path without a
+                                // document.
+                                self.retarget_file(from, &final_path);
+                            }
+                            None => {}
+                        },
                         FileOp::Delete { path } => self.close_path(path),
                     }
                 }
@@ -240,9 +252,9 @@ impl App {
         if !f(&mut od.buffer, std::time::Instant::now()) {
             return Some(Task::none());
         }
-        let seq = od.buffer.edit_seq();
+        let (id, seq) = (od.buffer.note_id(), od.buffer.edit_seq());
         self.reading.recompute(od, self.daemon.as_ref());
-        Some(crate::source::autosave_timer(path.to_owned(), seq))
+        Some(crate::source::autosave_timer(id, seq))
     }
 
     /// [`Self::edit_buffer`] for a Reading / view control; a note with no open buffer says so
@@ -329,266 +341,326 @@ impl App {
             })
     }
 
-    /// The lineage cursor of the document open at `path` (plan note-path-continuity D3).
-    pub(super) fn cursor_of(&self, path: &str) -> Option<u64> {
-        self.docs.get(path).and_then(|o| o.buffer.lineage_cursor())
-    }
-
-    /// D3 gating: an event whose `seq` is not later than the open document's cursor describes
-    /// a transition the document was bound after (or already followed): it does not apply.
-    /// `seq: None` (an old daemon) and an unbound document never gate.
-    pub(super) fn event_stale(&self, path: &str, seq: Option<u64>) -> bool {
-        matches!((seq, self.cursor_of(path)), (Some(s), Some(c)) if s <= c)
-    }
-
-    /// D3: asks the daemon where the note open at `path` went, as of the document's cursor. A
-    /// `Live` answer advances the cursor to the head. No cursor (an old daemon), an error, a
-    /// `Deleted`, or an `Unknown` with the file absent is [`Resolved::Gone`] (today's state).
-    pub(super) fn resolve_open(&mut self, path: &str) -> Resolved {
-        use cv_protocol::PathResolution;
-        let Some(d) = self.daemon.clone() else {
-            return Resolved::Gone;
-        };
-        let Some(cursor) = self.cursor_of(path) else {
-            return Resolved::Gone;
-        };
-        let Ok(r) = d.resolve_path(path, Some(cursor)) else {
-            return Resolved::Gone;
-        };
-        let live = match r.resolution {
-            PathResolution::Moved { to } => return Resolved::Moved(to, r.head),
-            PathResolution::Deleted => return Resolved::Gone,
-            PathResolution::Unknown => !matches!(d.read_file(path), Err(DaemonError::NotFound(_))),
-            PathResolution::Live { .. } => true,
-        };
-        if !live {
-            return Resolved::Gone;
-        }
-        if let Some(o) = self.docs.get_mut(path) {
-            o.buffer.advance_lineage(r.head);
-        }
-        Resolved::Live
-    }
-
-    /// D3: follows a resolved move of the open note `from` to `to` (clean buffer re-keyed or
-    /// rebuilt, dirty text kept through the edited-move path) and binds the document at `to` to
-    /// the resolution's `head`.
-    pub(super) fn follow_resolved(&mut self, from: &str, to: &str, head: u64) {
-        let fresh = !self.docs.contains_key(to);
-        self.follow_daemon_move(from, to);
-        if fresh
-            && !self.docs.contains_key(from)
-            && let Some(o) = self.docs.get_mut(to)
-        {
-            o.buffer.advance_lineage(head);
-        }
-    }
-
-    /// D3: a `Renamed { from }` notification carrying lineage `seq`; a stale one (the document
-    /// was bound after it) leaves the document alone.
-    pub(super) fn follow_move_event(&mut self, from: &str, to: &str, seq: Option<u64>) {
-        if self.event_stale(from, seq) {
-            self.retarget_holds(from, to);
-            return;
-        }
-        // A delayed notification of a chain: `to` may already have moved on. Lineage knows where
-        // the note is now, so follow that instead of failing to read `to`.
-        if self.docs.contains_key(from)
-            && self
-                .daemon
-                .as_ref()
-                .is_some_and(|d| matches!(d.read_file(to), Err(DaemonError::NotFound(_))))
-            && let Resolved::Moved(end, head) = self.resolve_open(from)
-        {
-            self.follow_resolved(from, &end, head);
-            return;
-        }
-        let fresh = !self.docs.contains_key(to);
-        self.follow_daemon_move(from, to);
-        if let Some(s) = seq
-            && fresh
-            && !self.docs.contains_key(from)
-            && let Some(o) = self.docs.get_mut(to)
-        {
-            o.buffer.advance_lineage(s);
-        }
-    }
-
-    /// D3: a `Deleted { path }` with no `replaced_by` on an open path. Resolves before anything
-    /// is reported: a `Moved` answer retargets (the tab never sees "deleted"); the stale and
-    /// `Live` cases leave the document alone. `true` = handled (skip the reload that would read
-    /// the old path); `false` = the note is gone, take today's deleted / missing path.
-    pub(super) fn resolve_deleted(&mut self, path: &str, seq: Option<u64>) -> bool {
-        if !self.docs.contains_key(path) {
-            return false;
-        }
-        if self.event_stale(path, seq) {
-            return true;
-        }
-        match self.resolve_open(path) {
-            Resolved::Moved(to, head) => {
-                self.follow_resolved(path, &to, head);
-                true
-            }
-            Resolved::Live => true,
-            Resolved::Gone => false,
-        }
-    }
-
-    /// D3: after an editor-initiated move of the note at `from` (cursor `cursor` before it), asks
-    /// lineage whether it ended at exactly `to` and, if so, advances the document's cursor so
-    /// the move's own edge is not re-followed.
-    pub(super) fn rebind_after_move(&mut self, cursor: Option<u64>, from: &str, to: &str) {
-        use cv_protocol::PathResolution;
-        let (Some(c), Some(d)) = (cursor, self.daemon.clone()) else {
-            return;
-        };
-        if let Ok(r) = d.resolve_path(from, Some(c))
-            && matches!(&r.resolution, PathResolution::Moved { to: t } if t == to)
-            && let Some(o) = self.docs.get_mut(to)
-        {
-            o.buffer.advance_lineage(r.head);
-        }
-    }
-
-    /// Round 9 WP-3 (Decision 4): a daemon-side move of `from` to `to` (the `Renamed { from }`
-    /// notification) retargets every open tab. Bytes unchanged → re-keyed in place, dirty text
-    /// and all, with no deleted / missing state; bytes changed under unsaved edits → the
-    /// edited-move path (text kept behind the conflict bar).
+    /// Plan note-identity D4: a daemon-side move of `from` to `to` known only by its paths (an
+    /// `id: None` notification, see `update_status`): the document open at `from`, if any,
+    /// follows; otherwise only file tabs show the path.
     pub(super) fn follow_daemon_move(&mut self, from: &str, to: &str) {
         self.retarget_holds(from, to);
         if from == to || !self.path_open(from) {
             return;
         }
-        let base = buf(&self.docs, from)
-            .filter(|b| b.is_dirty())
-            .map(|b| b.base_hash().clone());
-        let edited_elsewhere = base.is_some_and(|base| {
-            self.daemon
-                .as_ref()
-                .and_then(|d| d.read_file(to).ok())
-                .is_some_and(|(_, h)| h != base)
-        });
-        self.follow_moved(from, to, edited_elsewhere);
+        match self.docs.id_of(from) {
+            Some(id) => self.follow_doc(id, to, Follow::Daemon),
+            // Plan round-15 WP-2: only file tabs show a path without a document.
+            None => self.retarget_file(from, to),
+        }
     }
 
-    /// Round 11 WP-1 (Decision 1): `from` was deleted because `to` absorbed it (the
-    /// `file_changed { deleted, replaced_by }` of auto-file's trash). Unless `from` has unsaved
-    /// edits (left to the deleted-on-disk conflict path), a tab of `from` in a pane already
-    /// showing `to` is closed and every other tab of `from` retargets to `to`; an open `to`
-    /// document is kept as is (see [`Self::move_path_state`]).
-    pub(super) fn follow_replaced(&mut self, from: &str, to: &str) {
-        if from == to
-            || !self.path_open(from)
-            || buf(&self.docs, from).is_some_and(|b| b.is_dirty())
+    /// Plan note-identity D4: a `file_changed` carrying note id `id` (now at `path`). Returns the
+    /// document to reload (echo / silent reload / conflict bar / deleted state), if any.
+    ///
+    /// - A move (`from`) of a note no document holds still retargets holds and file tabs (by path).
+    /// - `Deleted` whose path is not the document's current path is the source half of a rename
+    ///   pair the document already followed (audit E1): the document is live elsewhere, nothing
+    ///   happens to it. At its current path, `replaced_by` takes the E2 tab move, and otherwise
+    ///   `locate_note` decides: moved → follow; still live → nothing; gone → today's deleted /
+    ///   missing / replaced handling.
+    /// - Any other kind at a path that is not the document's: a `Renamed` from the document's
+    ///   path follows it; anything else is settled by `locate_note`, never by guessing.
+    /// - A different note at the path of an open document (path reuse) never touches it.
+    pub(super) fn doc_file_changed(
+        &mut self,
+        id: NoteId,
+        path: &str,
+        kind: cv_protocol::ChangeKind,
+        from: Option<&str>,
+        replaced_by: Option<&str>,
+    ) -> Option<NoteId> {
+        if let Some(f) = from {
+            self.retarget_holds(f, path);
+            if self.docs.by_id(id).is_none() && !self.docs.contains_key(f) && self.path_open(f) {
+                // Plan round-15 WP-2: only file tabs show a path without a document.
+                self.retarget_file(f, path);
+            }
+        }
+        let cur = self.docs.path_of(id)?;
+        if kind == cv_protocol::ChangeKind::Deleted {
+            if cur != path {
+                // Audit E1: the rename pair's source half; the document is live at `cur`.
+                return None;
+            }
+            if let Some(by) = replaced_by {
+                return (!self.follow_replaced(id, by)).then_some(id);
+            }
+            let located = self.daemon.clone().map(|d| d.locate_note(id));
+            return match located {
+                Some(Ok(NoteLocation::Live { path: to })) if to != path => {
+                    self.follow_doc(id, &to, Follow::Daemon);
+                    None
+                }
+                Some(Ok(NoteLocation::Live { .. })) => None,
+                Some(Ok(NoteLocation::Gone {
+                    replaced_by: Some(by),
+                })) => match self.located_path(by) {
+                    Some(to) if self.follow_replaced(id, &to) => None,
+                    _ => {
+                        self.doc_gone(id);
+                        None
+                    }
+                },
+                Some(Ok(NoteLocation::Gone { .. } | NoteLocation::Unknown)) => {
+                    self.doc_gone(id);
+                    None
+                }
+                // No answer (disconnected, an error): re-read the path as before.
+                _ => Some(id),
+            };
+        }
+        if cur != path {
+            match from {
+                Some(f) if f == cur => self.follow_doc(id, path, Follow::Daemon),
+                _ => {
+                    if let Some(to) = self.located_path(id)
+                        && to != cur
+                    {
+                        self.follow_doc(id, &to, Follow::Daemon);
+                    }
+                }
+            }
+        }
+        (self.docs.path_of(id).as_deref() == Some(path)).then_some(id)
+    }
+
+    /// Today's deleted handling for document `id` whose note is gone (D4: decided from the id,
+    /// never by re-reading the path, which may hold another note now): unsaved edits enter the
+    /// missing-file state (kept, Keep mine revives the id), a clean document says so.
+    fn doc_gone(&mut self, id: NoteId) {
+        let Some(od) = self.docs.by_id_mut(id) else {
+            return;
+        };
+        if od.buffer.is_dirty() {
+            if !crate::daemon::is_no_base(od.buffer.base_hash()) {
+                od.buffer.mark_missing();
+            }
+        } else {
+            self.status.set_error("file deleted on disk".into());
+        }
+    }
+
+    /// Where note `id` lives now, when the daemon says it is live.
+    pub(super) fn located_path(&self, id: NoteId) -> Option<String> {
+        match self.daemon.as_ref()?.locate_note(id) {
+            Ok(NoteLocation::Live { path }) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// The `id: None` fallback of [`Self::doc_file_changed`]: today's path matching (no lineage,
+    /// no id to settle anything by). Returns the document to reload.
+    pub(super) fn path_file_changed(
+        &mut self,
+        path: &str,
+        kind: cv_protocol::ChangeKind,
+        from: Option<&str>,
+        replaced_by: Option<&str>,
+    ) -> Option<NoteId> {
+        if let Some(f) = from {
+            // Round 9 WP-3 (Decision 4): the bridge sends this before the source `Deleted`.
+            self.follow_daemon_move(f, path);
+        }
+        let id = self.docs.id_of(path)?;
+        if kind == cv_protocol::ChangeKind::Deleted
+            && let Some(by) = replaced_by
+            && self.follow_replaced(id, by)
         {
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Plan note-identity D4: document `id` now lives at `to` (a rename reply, a `Renamed`
+    /// notification, a located move). Round 9 WP-3 / round 7 WP-2: bytes the buffer already
+    /// holds (its base, or its in-flight save) → the path field changes and nothing else
+    /// (cursor, undo, dirty text, the in-flight save all survive); edits the move did not carry
+    /// → the text is kept behind the conflict bar (audit M2); otherwise the buffer is rebuilt
+    /// from disk. A `to` that is already gone (a delayed event of a chain) is settled by
+    /// `locate_note`, never by guessing.
+    pub(super) fn follow_doc(&mut self, id: NoteId, to: &str, how: Follow) {
+        self.follow_doc_at(id, to, how, true);
+    }
+
+    fn follow_doc_at(&mut self, id: NoteId, to: &str, how: Follow, locate: bool) {
+        let Some(from) = self.docs.path_of(id) else {
+            return;
+        };
+        if from == to {
             return;
         }
+        let Some(d) = self.daemon.clone() else { return };
+        let (bytes, hash) = match d.read_file(to) {
+            Ok(r) => r,
+            Err(DaemonError::NotFound(p)) => {
+                if locate && let Ok(NoteLocation::Live { path }) = d.locate_note(id) {
+                    if path != to {
+                        self.follow_doc_at(id, &path, how, false);
+                    }
+                    return;
+                }
+                self.status.set_error(open_error(&DaemonError::NotFound(p)));
+                return;
+            }
+            Err(e) => {
+                self.status.set_error(open_error(&e));
+                return;
+            }
+        };
+        let Some(od) = self.docs.by_id_mut(id) else {
+            return;
+        };
+        let edited = match how {
+            Follow::Daemon => od.buffer.is_dirty() && !od.buffer.holds_bytes(&hash),
+            Follow::Edited(e) => e,
+        };
+        if edited {
+            od.buffer.follow_move(hash);
+        } else if !od.buffer.holds_bytes(&hash) {
+            let mut b = crate::source::SourceBuffer::new(&from, &bytes, hash);
+            b.set_note_id(id);
+            od.buffer = b;
+        }
+        self.move_doc_path(id, to);
+        if edited {
+            self.status.set_error(format!(
+                "{from} moved to {to} while you were editing: keep mine saves your text there"
+            ));
+        }
+    }
+
+    /// Plan note-identity D4: **the one owner of a document's path change.** The document keeps
+    /// its key (its id); its path field changes, then everything path-keyed follows from here
+    /// ([`Self::move_path_state`]): tabs, history, recents and the per-path satellite stores.
+    pub(super) fn move_doc_path(&mut self, id: NoteId, to: &str) {
+        let Some(from) = self.docs.path_of(id) else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+        self.docs.set_path(id, to);
+        self.move_path_state(&from, to);
+        // Its pending filename edit is dropped and the text renders now under `to`.
+        if let Some(od) = self.docs.by_id_mut(id) {
+            od.reading.clear_title();
+            if od.reading.mode.shows_reading() {
+                self.reading.recompute(od, self.daemon.as_ref());
+            }
+        }
+        self.ui.touch_recent(to);
+    }
+
+    /// Round 11 WP-1 (Decision 1) + plan note-identity audit E2: document `id` was retired
+    /// because the note at `to` absorbed it. Its tabs move to the absorbing document: a tab in a
+    /// pane already showing `to` closes, every other tab retargets, the retired document is
+    /// dropped and the absorber's is used (opened and bound when it is not open yet) — never
+    /// the retired document under a new path, whose saves would address a retired id. A dirty
+    /// retired document is left to today's deleted-on-disk handling (`false`: the caller
+    /// reloads; edits are never discarded).
+    pub(super) fn follow_replaced(&mut self, id: NoteId, to: &str) -> bool {
+        let Some(from) = self.docs.path_of(id) else {
+            return false;
+        };
+        if from == to || self.docs.by_id(id).is_some_and(|d| d.buffer.is_dirty()) {
+            return false;
+        }
+        let absorber = if self.docs.contains_key(to) {
+            // Already open (possibly dirty): its document stays; the tabs just show it.
+            None
+        } else {
+            let Some(d) = self.daemon.clone() else {
+                return false;
+            };
+            match super::tabs::bind_read_note(d.as_ref(), to) {
+                Ok((aid, bytes, hash)) => {
+                    let mut b = crate::source::SourceBuffer::new(to, &bytes, hash);
+                    b.set_note_id(aid);
+                    Some(OpenDoc {
+                        id: aid,
+                        buffer: b,
+                        close_waiters: Vec::new(),
+                        reading: crate::reading::DocReading::default(),
+                    })
+                }
+                Err(e) => {
+                    self.status.set_error(open_error(&e));
+                    return false;
+                }
+            }
+        };
         let dup: Vec<u64> = self
             .panes
             .iter()
             .filter(|(_, ps)| ps.tabs.iter().any(|t| t.shows(to)))
-            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.shows(from)).map(|t| t.id))
+            .flat_map(|(_, ps)| ps.tabs.iter().filter(|t| t.shows(&from)).map(|t| t.id))
             .collect();
-        for id in dup {
-            self.remove_tab(id);
+        for t in dup {
+            self.remove_tab(t);
         }
-        self.retarget(from, to);
-    }
-
-    /// A renamed file's open tabs follow it (re-read at the new path). Plan
-    /// editor-feedback-round-2 WP-7: the document key and every tab of `from` move to `to`
-    /// (tab ids kept); `from`'s reading / title / image-pin state is torn down. Plan
-    /// editor-feedback-round-2 WP-8: the explorer rename, the breadcrumb rename and an action's
-    /// `move` (via [`Self::follow_open`]) all end here.
-    pub(super) fn retarget(&mut self, from: &str, to: &str) {
-        if !self.path_open(from) {
-            return;
-        }
-        if !self.docs.contains_key(from) {
-            // Plan round-15 WP-2: only file tabs show a path without a document.
-            self.retarget_file(from, to);
-            return;
-        }
-        let Some(d) = &self.daemon else { return };
-        match d.read_file(to) {
-            Ok((bytes, hash)) => {
-                // WP-2 (round 7): an unedited buffer whose bytes the move kept is re-keyed in
-                // place (cursor, selection, undo, top_line survive); otherwise rebuild from disk.
-                let doc = match self.docs.remove(from) {
-                    Some(mut doc) if *doc.buffer.base_hash() == hash => {
-                        doc.buffer.rename_clean(to);
-                        doc
-                    }
-                    old => OpenDoc {
-                        buffer: {
-                            let mut b = crate::source::SourceBuffer::new(to, &bytes, hash);
-                            b.set_lineage_cursor(
-                                old.as_ref().and_then(|d| d.buffer.lineage_cursor()),
-                            );
-                            b
-                        },
-                        close_waiters: old
-                            .as_ref()
-                            .map(|d| d.close_waiters.clone())
-                            .unwrap_or_default(),
-                        // The Reading state moves with the rename even when the buffer is rebuilt.
-                        reading: old.map(|d| d.reading).unwrap_or_default(),
-                    },
-                };
-                self.move_path_state(from, to, doc);
+        let retired = self.docs.remove_id(id);
+        if let Some(mut a) = absorber {
+            // The retired document's close waiters and Reading state carry over to the note
+            // that absorbed it (as the rebuilt buffer did before ids).
+            if let Some(r) = retired {
+                a.close_waiters = r.close_waiters;
+                a.reading = r.reading;
             }
-            Err(e) => self.status.set_error(open_error(&e)),
+            a.reading.clear_title();
+            self.docs.insert(a);
         }
+        self.move_path_state(&from, to);
+        if let Some(od) = self.docs.get_mut(to)
+            && od.reading.mode.shows_reading()
+        {
+            self.reading.recompute(od, self.daemon.as_ref());
+        }
+        self.ui.touch_recent(to);
+        true
     }
 
-    /// The shared tail of every rename follow: every tab of `from` (and its history) moves to
-    /// `to`, `doc` is installed under `to`, per-path state is re-keyed. Hosted view results move
-    /// with the host and go stale (re-run against `to` while the old result stays shown — no
-    /// flash), and every other view goes stale too, since a rename changes link targets they
-    /// may list (WP-8).
-    pub(super) fn move_path_state(&mut self, from: &str, to: &str, mut doc: OpenDoc) {
+    /// The path-keyed tail of every move follow ([`Self::move_doc_path`], the E2 tab move): every
+    /// tab of `from` (and its history) moves to `to` and the per-path satellite stores are
+    /// re-keyed. Hosted view results move with the host and go stale (re-run against `to` while
+    /// the old result stays shown — no flash), and every other view goes stale too, since a
+    /// rename changes link targets they may list (WP-8). Plan note-identity WP-5 re-keys these
+    /// stores by id and removes this tail.
+    pub(super) fn move_path_state(&mut self, from: &str, to: &str) {
         for (_, ps) in self.panes.iter_mut() {
             for t in ps.tabs.iter_mut().filter(|t| t.shows(from)) {
                 t.retarget(to);
             }
             ps.history.retarget(from, to);
         }
-        // The document (close waiters, Reading state) moves as one; its pending filename edit
-        // is dropped, the `from` image pins move to `to` (plan round-16 WP-3: the tab's image
-        // sensors never re-fire for an unchanged key), and the new text renders now under `to`.
-        doc.reading.clear_title();
+        // The `from` image pins move to `to` (plan round-16 WP-3: the tab's image sensors never
+        // re-fire for an unchanged key).
         self.reading.renamed(from, to);
         self.pdf_note_closed(from);
         self.views.rehost(from, to);
         self.views.invalidate(&[]);
-        if self.docs.contains_key(to) {
-            // Round 11 WP-1 (audit E2): `to` is already open (possibly dirty, e.g. the note that
-            // absorbed `from`): its document stays; `from`'s tabs now just show it.
-            self.ui.touch_recent(to);
-            return;
-        }
-        if doc.reading.mode.shows_reading() {
-            self.reading.recompute(&mut doc, self.daemon.as_ref());
-        }
-        self.docs.insert(to.to_owned(), doc);
-        self.ui.touch_recent(to);
     }
 
-    /// Plan usability-sprint-captures-links WP-5: after a save of `path` landed, renames the note
-    /// when its on-disk `title` changed and the filename was the old title's form. Not while
+    /// Plan usability-sprint-captures-links WP-5: after a save of note `id` landed, renames the
+    /// note when its on-disk `title` changed and the filename was the old title's form. Not while
     /// closing/quitting, or while a follow-up save or another rename
     /// is in flight (the next landed save re-evaluates). A target that exists refuses the rename.
-    pub(super) fn title_sync(&mut self, path: &str) -> Task<Message> {
+    pub(super) fn title_sync(&mut self, id: NoteId) -> Task<Message> {
         if self
             .docs
-            .get(path)
+            .by_id(id)
             .is_none_or(|d| !d.close_waiters.is_empty())
             || self.quit.is_some()
         {
             return Task::none();
         }
-        let Some(doc) = buf(&self.docs, path) else {
+        let Some(doc) = self.docs.by_id(id).map(|d| &d.buffer) else {
             return Task::none();
         };
         if doc.is_saving() || doc.is_renaming() {
@@ -597,6 +669,7 @@ impl App {
         let Some(to) = doc.title_rename() else {
             return Task::none();
         };
+        let path = doc.path().to_owned();
         let Some(d) = self.daemon.clone() else {
             return Task::none();
         };
@@ -604,28 +677,31 @@ impl App {
         if to.to_lowercase() != path.to_lowercase()
             && !matches!(d.read_file(&to), Err(DaemonError::NotFound(_)))
         {
-            if let Some(doc) = buf_mut(&mut self.docs, path) {
-                doc.settle_title();
+            if let Some(od) = self.docs.by_id_mut(id) {
+                od.buffer.settle_title();
             }
             self.status
                 .set_error(format!("title changed; not renamed: {to} already exists"));
             return Task::none();
         }
-        let Some(doc) = buf_mut(&mut self.docs, path) else {
+        let Some(doc) = self.docs.by_id_mut(id).map(|d| &mut d.buffer) else {
             return Task::none();
         };
         doc.set_renaming(true);
         let seq = doc.edit_seq();
-        self.explorer.expect_rename(path, &to);
-        let op = FileOp::Rename {
-            from: path.to_owned(),
-            to: to.clone(),
-        };
-        let from = path.to_owned();
+        self.explorer.expect_rename(&path, &to);
+        let target = to.clone();
+        // Plan note-identity D4: the rename goes by id (the daemon renames wherever the note is
+        // now) and its reply is addressed to the id.
         self.rpc(
-            move |d| op.run(d),
+            move |d| {
+                d.rename_by_id(id, &target)
+                    .map(|_| target)
+                    .map_err(|e| crate::daemon::rpc_err(&e))
+            },
             move |result| Message::TitleRenamed {
-                from,
+                id,
+                from: path,
                 to,
                 seq,
                 result,
@@ -635,8 +711,11 @@ impl App {
 
     /// WP-5: a title rename finished. The tab follows (edits typed while it was in flight are
     /// kept, behind the conflict bar); a failure leaves the tab and relaunches a held save.
+    /// Plan note-identity D4: the document is found by `id` whatever path it has by now (a
+    /// `Renamed` notification consumed first already moved it: the follow is then a no-op).
     pub(super) fn title_renamed(
         &mut self,
+        id: NoteId,
         from: &str,
         to: &str,
         seq: u64,
@@ -644,7 +723,7 @@ impl App {
     ) -> Task<Message> {
         let held = self
             .docs
-            .get_mut(from)
+            .by_id_mut(id)
             .is_some_and(|d| d.buffer.set_renaming(false));
         match result {
             Ok(final_path) => {
@@ -657,11 +736,9 @@ impl App {
                     .apply_op(&op, &final_path, &self.ui.expanded, &indexed);
                 let edited = self
                     .docs
-                    .get(from)
+                    .by_id(id)
                     .is_some_and(|d| d.buffer.is_dirty() || d.buffer.edit_seq() != seq);
-                let cursor = self.cursor_of(from);
-                self.follow_moved(from, to, edited);
-                self.rebind_after_move(cursor, from, to);
+                self.follow_doc(id, &final_path, Follow::Edited(edited));
                 Task::none()
             }
             Err(e) => {
@@ -671,12 +748,12 @@ impl App {
                     self.status
                         .set_error(format!("title changed; rename failed: {e}"));
                 }
-                let Some(doc) = buf_mut(&mut self.docs, from) else {
+                let Some(doc) = self.docs.by_id_mut(id).map(|d| &mut d.buffer) else {
                     return Task::none();
                 };
                 doc.settle_title();
                 if held {
-                    crate::source::autosave_timer(from.to_owned(), doc.edit_seq())
+                    crate::source::autosave_timer(Some(id), doc.edit_seq())
                 } else {
                     Task::none()
                 }

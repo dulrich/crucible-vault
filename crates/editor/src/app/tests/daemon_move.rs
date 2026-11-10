@@ -138,6 +138,7 @@ fn save_now(app: &mut App, d: &FakeDaemon, path: &str) {
 #[test]
 fn chained_moves_end_on_the_final_path() {
     let (_tmp, d, mut app) = setup(&["wp3a/a.md"]);
+    let id = app.note_id("wp3a/a.md").expect("bound");
     let mut ns = d.daemon_move("wp3a/a.md", "wp3a/b.md").expect("a to b");
     ns.extend(d.daemon_move("wp3a/b.md", "wp3a/c.md").expect("b to c"));
     feed(&mut app, ns);
@@ -145,24 +146,26 @@ fn chained_moves_end_on_the_final_path() {
     assert_eq!(app.status.error_text(), None);
     let doc = app.doc("wp3a/c.md").expect("at c");
     assert!(!doc.is_missing() && doc.conflict().is_none());
-    assert_eq!(
-        doc.lineage_cursor(),
-        d.lineage_head().ok(),
-        "cursor advanced"
-    );
+    // Plan note-identity D4: the document is bound to the note id, not a lineage cursor; the
+    // same document (same id) followed both moves.
+    assert_eq!(app.note_id("wp3a/c.md"), Some(id), "same note id");
 }
 
 #[test]
-fn degraded_deleted_plus_created_retargets_through_lineage() {
+fn degraded_deleted_plus_created_is_a_delete_under_note_ids() {
+    // Plan note-identity D1 (kept residual): an unpaired move retires the id and mints a new one
+    // for the file at `to`. The open document keeps its id (D3), so it is not silently rebound
+    // to the other id: it takes today's deleted handling, and `c` is a different note.
     let (_tmp, d, mut app) = setup(&["wp3b/a.md"]);
+    let id = app.note_id("wp3b/a.md").expect("bound");
     let ev = d
         .daemon_move_degraded("wp3b/a.md", "wp3b/c.md")
         .expect("move");
     feed(&mut app, ev);
-    assert_eq!(open_paths(&app), vec!["wp3b/c.md".to_owned()]);
-    assert_eq!(app.status.error_text(), None, "no `file deleted on disk`");
-    let doc = app.doc("wp3b/c.md").expect("at c");
-    assert!(!doc.is_missing() && doc.conflict().is_none());
+    assert_eq!(open_paths(&app), vec!["wp3b/a.md".to_owned()]);
+    assert_eq!(app.status.error_text(), Some("file deleted on disk"));
+    assert_eq!(app.note_id("wp3b/a.md"), Some(id));
+    assert_ne!(d.bind_note("wp3b/c.md").ok(), Some(id), "c is another note");
 }
 
 #[test]

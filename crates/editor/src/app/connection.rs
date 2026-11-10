@@ -255,8 +255,8 @@ impl App {
         self.palette.loading = false;
         let fetch = self.fetch_actions();
         let status = self.refresh_status_if_open();
-        let paths: Vec<String> = self.docs.keys().cloned().collect();
-        let saves: Vec<Task<Message>> = paths.iter().map(|p| self.resync_doc(p)).collect();
+        let ids = self.docs.ids();
+        let saves: Vec<Task<Message>> = ids.into_iter().map(|i| self.resync_doc(i)).collect();
         let memory = self.send_memory_report();
         Task::batch([released, fetch, status, memory].into_iter().chain(saves))
     }
@@ -315,31 +315,40 @@ impl App {
     }
 
     /// Reconnect resync of one open document against the disk (audit E1: a document with a
-    /// save in flight on the old connection waits for that save's completion).
-    pub(super) fn resync_doc(&mut self, path: &str) -> Task<Message> {
+    /// save in flight on the old connection waits for that save's completion). Plan
+    /// note-identity D4: the note id is located first — moved while disconnected → the
+    /// document follows and resyncs at its new path; gone → today's missing handling (never a
+    /// read of another note now at the old path).
+    pub(super) fn resync_doc(&mut self, id: NoteId) -> Task<Message> {
         let Some(d) = self.daemon.clone() else {
             return Task::none();
         };
-        let Some(doc) = buf_mut(&mut self.docs, path) else {
+        let Some(doc) = self.docs.by_id_mut(id).map(|o| &mut o.buffer) else {
             return Task::none();
         };
         if doc.is_saving() {
             doc.defer_resync();
             return Task::none();
         }
-        // Plan note-path-continuity D3: revalidate (path, cursor) before reading; a note that
-        // moved while disconnected is followed and resynced at its new path.
-        let path = &match self.resolve_open(path) {
-            super::files::Resolved::Moved(to, head) => {
-                self.follow_resolved(path, &to, head);
-                to
+        let cur = doc.path().to_owned();
+        match d.locate_note(id) {
+            Ok(NoteLocation::Live { path }) if path != cur => {
+                self.follow_doc(id, &path, super::files::Follow::Daemon);
             }
-            super::files::Resolved::Live | super::files::Resolved::Gone => path.to_owned(),
-        };
-        let Some(doc) = buf_mut(&mut self.docs, path) else {
+            Ok(NoteLocation::Live { .. }) => {}
+            Ok(NoteLocation::Gone { .. } | NoteLocation::Unknown) => {
+                if let Some(o) = self.docs.by_id_mut(id) {
+                    o.buffer.mark_missing();
+                }
+                return Task::none();
+            }
+            Err(e) => tracing::warn!(error = %e, "reconnect locate failed; resyncing by path"),
+        }
+        let Some(doc) = self.docs.by_id_mut(id).map(|o| &mut o.buffer) else {
             return Task::none();
         };
-        match d.read_file(path) {
+        let path = doc.path().to_owned();
+        match d.read_file(&path) {
             Ok((bytes, hash)) => {
                 let job = doc.resync(&bytes, hash);
                 crate::source::spawn_save(Some(&d), job)
@@ -354,7 +363,7 @@ impl App {
                 self.status.notify_from(
                     Severity::Warning,
                     format!("re-reading after reconnect failed: {e}"),
-                    path.to_owned(),
+                    path,
                 );
                 Task::none()
             }

@@ -169,7 +169,7 @@ impl App {
             .docs
             .iter()
             .filter(|(_, d)| d.buffer.is_dirty())
-            .map(|(p, _)| p.clone())
+            .map(|(p, _)| p.to_owned())
             .collect();
         Task::batch(dirty.iter().map(|path| self.flush_note(path)))
     }
@@ -241,12 +241,12 @@ impl App {
         let Some(after) = after else {
             return Some(crate::source::spawn_save(self.daemon.as_ref(), Some(job)));
         };
-        let (path, seq) = (job.path.to_owned(), job.seq);
+        let (id, seq) = (job.id, job.seq);
         Some(self.rpc(
             move |d| Ok(job.run(d)),
             move |r| {
                 Message::Source(SourceMsg::Saved {
-                    path,
+                    id,
                     seq,
                     outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
                     after: Some(after),
@@ -261,20 +261,32 @@ impl App {
     /// itself) and the close/quit waiters, then resumes the continuation.
     pub(super) fn on_save_landed(
         &mut self,
-        path: &str,
+        id: Option<NoteId>,
         seq: u64,
         outcome: crate::source::SaveOutcome,
         after: Option<AfterSave>,
     ) -> Task<Message> {
-        // Plan note-path-continuity D3: a save CAS-refused against "no file" asks lineage where
-        // the note went before it may report missing; a move retargets and retries there.
-        if matches!(&outcome, crate::source::SaveOutcome::Conflict(h) if h.as_str().is_empty())
-            && let Some(to) = self.save_moved(path, seq, &outcome)
-        {
-            return self.retry_save_at(&to, after);
-        }
+        // Plan note-identity D4: the completion is addressed to the note id; the path is read
+        // from the document now (a move since the save started changed only that field). A
+        // document closed meanwhile is `Landed::Gone`.
+        // The reply says where the daemon acted: the document takes that path (the one move
+        // function), then the outcome applies as a plain one.
+        let outcome = match (outcome, id) {
+            (crate::source::SaveOutcome::SavedAt(h, to), Some(i)) => {
+                self.move_doc_path(i, &to);
+                crate::source::SaveOutcome::Saved(h)
+            }
+            (crate::source::SaveOutcome::ConflictAt(h, to), Some(i)) => {
+                self.move_doc_path(i, &to);
+                crate::source::SaveOutcome::Conflict(h)
+            }
+            (o, _) => o,
+        };
+        let path = id.and_then(|i| self.docs.path_of(i));
         let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
-        let result = buf_mut(&mut self.docs, path).map(|d| d.finish_save(seq, outcome));
+        let result = id
+            .and_then(|i| self.docs.by_id_mut(i))
+            .map(|d| d.buffer.finish_save(seq, outcome));
         // Plan round-18 WP-2: a daemon `HELD` refusal keeps the buffer dirty and posts the one
         // hold notice (not a generic failure); later text sees a plain message.
         let held = match &result {
@@ -294,38 +306,45 @@ impl App {
         {
             self.status.set_error(format!("save failed: {e}"));
         }
-        let follow = match result {
-            Some(Ok(true)) => self.save_then(path, after.clone()),
+        let follow = match (&result, &path) {
+            (Some(Ok(true)), Some(p)) => self.save_then(p, after.clone()),
             _ => None,
         };
+        let dirty = id
+            .and_then(|i| self.docs.by_id(i))
+            .is_some_and(|d| d.buffer.is_dirty());
         let landed = match result {
             None => Landed::Gone,
             Some(Err(e)) => Landed::Failed(e),
             Some(Ok(_)) if !ok => Landed::Conflict,
-            Some(Ok(_)) if buf(&self.docs, path).is_some_and(|d| d.is_dirty()) => Landed::Changed,
+            Some(Ok(_)) if dirty => Landed::Changed,
             Some(Ok(_)) => Landed::Clean,
         };
         // plan editor-data-safety WP-1 (audit E1): a reconnect that arrived while this save was
         // in flight resyncs now (a follow-up save already started runs on the current client).
-        let resync = if self
-            .docs
-            .get_mut(path)
-            .is_some_and(|d| d.buffer.take_resync_pending() && !d.buffer.is_saving())
-        {
-            self.resync_doc(path)
-        } else {
-            Task::none()
+        let resync = match id {
+            Some(i)
+                if self
+                    .docs
+                    .by_id_mut(i)
+                    .is_some_and(|d| d.buffer.take_resync_pending() && !d.buffer.is_saving()) =>
+            {
+                self.resync_doc(i)
+            }
+            _ => Task::none(),
         };
         // Plan usability-sprint-captures-links WP-5: a landed save that changed `title`.
-        let sync = if ok && after.is_none() {
-            self.title_sync(path)
-        } else {
-            Task::none()
+        let sync = match id {
+            Some(i) if ok && after.is_none() => self.title_sync(i),
+            _ => Task::none(),
         };
         // A save for a document no longer open resolves any wait as landed.
-        let waiters = self.note_save_landed(path, ok || matches!(landed, Landed::Gone));
+        let waiters = self.note_save_landed(id, ok || matches!(landed, Landed::Gone));
         let resume = match after {
-            Some(a) if follow.is_none() => self.resume_after(path, a, &landed),
+            Some(a) if follow.is_none() => {
+                let path = id.and_then(|i| self.docs.path_of(i)).or(path);
+                self.resume_after(id, path.as_deref().unwrap_or_default(), a, &landed)
+            }
             _ => Task::none(),
         };
         Task::batch([
@@ -337,60 +356,16 @@ impl App {
         ])
     }
 
-    /// D3: `path`'s save found no file. When lineage says the note moved, the unlanded save is
-    /// retired (no missing state), the document follows the move and its new path is returned.
-    fn save_moved(
-        &mut self,
-        path: &str,
-        seq: u64,
-        outcome: &crate::source::SaveOutcome,
-    ) -> Option<String> {
-        let super::files::Resolved::Moved(to, head) = self.resolve_open(path) else {
-            return None;
-        };
-        let doc = buf_mut(&mut self.docs, path)?;
-        let _ = doc.finish_save(seq, outcome.clone());
-        doc.clear_missing();
-        self.follow_resolved(path, &to, head);
-        Some(to)
-    }
-
-    /// D3: re-runs a save at the path the note moved to, under the same CAS rules. When no save
-    /// starts (the move carried edits over changed bytes: the conflict bar is up) the save lands
-    /// as a conflict for its continuation and the close / quit waiters.
-    fn retry_save_at(&mut self, to: &str, after: Option<AfterSave>) -> Task<Message> {
-        if let Some(job) = buf_mut(&mut self.docs, to).and_then(|b| b.begin_save()) {
-            let path = to.to_owned();
-            let seq = job.seq;
-            return self.rpc(
-                move |d| Ok(job.run(d)),
-                move |r| {
-                    Message::Source(SourceMsg::Saved {
-                        path,
-                        seq,
-                        outcome: r.unwrap_or_else(crate::source::SaveOutcome::Failed),
-                        after,
-                    })
-                },
-            );
-        }
-        let landed = if self.docs.contains_key(to) {
-            Landed::Conflict
-        } else {
-            Landed::Gone
-        };
-        let waiters = self.note_save_landed(to, matches!(landed, Landed::Gone));
-        let resume = match after {
-            Some(a) => self.resume_after(to, a, &landed),
-            None => Task::none(),
-        };
-        Task::batch([waiters, resume])
-    }
-
     /// A save-first continuation after its save landed. Only `Clean` (or a closed
     /// document) proceeds; a failed save never closes, quits, deletes, renames or runs — except
     /// a run, which today proceeds over a newer unsaved edit.
-    fn resume_after(&mut self, path: &str, after: AfterSave, landed: &Landed) -> Task<Message> {
+    fn resume_after(
+        &mut self,
+        id: Option<NoteId>,
+        path: &str,
+        after: AfterSave,
+        landed: &Landed,
+    ) -> Task<Message> {
         let clean = matches!(landed, Landed::Clean | Landed::Gone);
         let (why, refusal) = match landed {
             Landed::Failed(e) => (e.clone(), format!("save failed: {e}")),
@@ -415,7 +390,9 @@ impl App {
                 let Some(q) = &mut self.quit else {
                     return Task::none();
                 };
-                q.pending.remove(path);
+                if let Some(i) = id {
+                    q.pending.remove(&i);
+                }
                 if let Some(reason) = reason {
                     q.losses.note(path, reason);
                 }
@@ -460,19 +437,21 @@ impl App {
     /// landed; resolves a close or quit waiting on it. Clean → done; saved but a queued
     /// follow-up is in flight → keep waiting; conflict, failure or a newer unsaved edit →
     /// cancel with a status message. Every await ends here, so the wait is bounded.
-    pub(super) fn note_save_landed(&mut self, path: &str, ok: bool) -> Task<Message> {
-        let waiting_quit = self
-            .quit
-            .as_ref()
-            .is_some_and(|q| q.awaiting.contains(path));
+    pub(super) fn note_save_landed(&mut self, id: Option<NoteId>, ok: bool) -> Task<Message> {
+        let Some(id) = id else {
+            return Task::none();
+        };
+        let path = self.docs.path_of(id).unwrap_or_default();
+        let path = path.as_str();
+        let waiting_quit = self.quit.as_ref().is_some_and(|q| q.awaiting.contains(&id));
         let waiting_close = self
             .docs
-            .get(path)
+            .by_id(id)
             .is_some_and(|d| !d.close_waiters.is_empty());
         if !waiting_quit && !waiting_close {
             return Task::none();
         }
-        let (saving, dirty) = self.docs.get(path).map_or((false, false), |d| {
+        let (saving, dirty) = self.docs.by_id(id).map_or((false, false), |d| {
             (d.buffer.is_saving(), d.buffer.is_dirty())
         });
         if ok && saving {
@@ -487,7 +466,7 @@ impl App {
         if waiting_close {
             let ids = self
                 .docs
-                .get_mut(path)
+                .by_id_mut(id)
                 .map(|d| std::mem::take(&mut d.close_waiters))
                 .unwrap_or_default();
             if done {
@@ -507,7 +486,7 @@ impl App {
         if waiting_quit {
             let reason = (!done).then(|| self.loss_reason(path, why));
             if let Some(q) = &mut self.quit {
-                q.awaiting.remove(path);
+                q.awaiting.remove(&id);
                 if let Some(reason) = reason {
                     q.losses.note(path, reason);
                 }
@@ -530,7 +509,7 @@ impl App {
             .docs
             .iter()
             .filter(|(_, d)| d.buffer.is_dirty())
-            .map(|(p, _)| p.clone())
+            .map(|(p, _)| p.to_owned())
             .collect();
         let settings_pending = self
             .settings
@@ -565,10 +544,10 @@ impl App {
             let reason = self.loss_reason(&path, "the save could not start");
             if let Some(t) = self.save_then(&path, Some(AfterSave::Quit)) {
                 saves.push(t);
-                pending.insert(path);
+                pending.extend(self.docs.id_of(&path));
             } else if buf(&self.docs, &path).is_some_and(|d| d.is_saving()) {
                 // WP-3 rework: in flight — `begin_save` queued the follow-up; await it.
-                awaiting.insert(path);
+                awaiting.extend(self.docs.id_of(&path));
             } else {
                 // Conflict / missing file (or a save that cannot start).
                 losses.note(&path, reason);

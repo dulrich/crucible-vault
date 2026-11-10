@@ -210,39 +210,36 @@ impl App {
                         hash,
                         from,
                         replaced_by,
-                        seq,
+                        id,
                         ..
                     } => {
-                        if let Some(from) = from.as_deref() {
-                            // Round 9 WP-3 (Decision 4): a daemon move re-keys the open tabs
-                            // (the bridge sends this before the source `Deleted`). Plan
-                            // note-path-continuity D3: only when the event is later than the
-                            // document's lineage cursor.
-                            self.follow_move_event(from, &path, seq);
-                        }
-                        let deleted = kind == cv_protocol::ChangeKind::Deleted;
-                        let mut handled = false;
-                        if deleted && let Some(by) = replaced_by.as_deref() {
-                            // Round 11 WP-1 (Decision 1): an absorbed note's tabs land on the
-                            // note that absorbed it (a dirty one keeps the conflict path below).
-                            if self.event_stale(&path, seq) {
-                                handled = true;
-                            } else {
-                                self.follow_replaced(&path, by);
-                            }
-                        } else if deleted {
-                            // D3: a delete of an open path asks lineage where the note went
-                            // before the tab may report "deleted".
-                            handled = self.resolve_deleted(&path, seq);
-                        }
+                        // Plan note-identity D4: open documents are matched by note id; the path
+                        // is only where the note is now. `id: None` means the daemon had no id
+                        // for the event (a `state.db` store failure on its side): with nothing
+                        // to match by, that one notification falls back to path matching.
+                        let reload = match id {
+                            Some(i) => self.doc_file_changed(
+                                i,
+                                &path,
+                                kind,
+                                from.as_deref(),
+                                replaced_by.as_deref(),
+                            ),
+                            None => self.path_file_changed(
+                                &path,
+                                kind,
+                                from.as_deref(),
+                                replaced_by.as_deref(),
+                            ),
+                        };
                         self.reading.file_changed(&path);
                         if kind != cv_protocol::ChangeKind::Modified {
-                            // Before `reload_tab`: a localize pass creates the attachments,
+                            // Before `reload_doc`: a localize pass creates the attachments,
                             // then rewrites the note, whose re-lower must see them.
                             self.resolver.invalidate();
                         }
-                        if !handled {
-                            self.reload_tab(&path, hash.as_deref());
+                        if let Some(i) = reload {
+                            self.reload_doc(i, hash.as_deref());
                         }
                         self.panels.invalidate();
                         if path.starts_with(crate::palette::CONFIG_PREFIX) {

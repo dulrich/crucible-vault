@@ -60,12 +60,14 @@ impl H {
     fn new(text: &str) -> Self {
         let mut store = ReadingStore::new();
         let mut od = OpenDoc {
+            id: crate::daemon::NoteId(1),
             buffer: buffer(text),
             close_waiters: Vec::new(),
             reading: DocReading::default(),
         };
         store.register(&mut od, ViewMode::Reading, true, None);
-        let docs = Docs::from([(PATH.to_owned(), od)]);
+        let mut docs = Docs::new();
+        docs.insert(od);
         Self {
             store,
             docs,

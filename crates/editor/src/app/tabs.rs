@@ -67,6 +67,11 @@ impl App {
         buf(&self.docs, path)
     }
 
+    /// The note id of the document open at `path` (plan note-identity D4).
+    pub fn note_id(&self, path: &str) -> Option<NoteId> {
+        self.docs.id_of(path)
+    }
+
     /// The document open at `path`, mutably.
     pub fn doc_mut(&mut self, path: &str) -> Option<&mut crate::source::SourceBuffer> {
         buf_mut(&mut self.docs, path)
@@ -248,7 +253,7 @@ impl App {
         };
         // Plan round-14 WP-3: no binary file is read into a text buffer. An external file goes
         // to the system opener (no tab; skipped on restore); an image opens an image tab.
-        let (file_kind, prefetched) = self.classify_open(path)?;
+        let (file_kind, _prefetched) = self.classify_open(path)?;
         if file_kind == cv_text::file_kind::FileKind::External {
             if how != Place::Restore {
                 self.open_external(path);
@@ -285,21 +290,21 @@ impl App {
             let Some(d) = &self.daemon else {
                 return Err(DaemonError::Disconnected);
             };
-            let read = match prefetched {
-                Some(read) => read,
-                None => d.read_bound(path)?,
-            };
-            let mut doc = crate::source::SourceBuffer::new(path, &read.bytes, read.hash);
-            doc.set_lineage_cursor(read.cursor);
+            // Plan note-identity D4: open is bind + read, bound to the same file (the classify
+            // read, if any, predates the bind and is not reused).
+            let (id, bytes, hash) = bind_read_note(d.as_ref(), path)?;
+            let mut doc = crate::source::SourceBuffer::new(path, &bytes, hash);
+            doc.set_note_id(id);
             let mode = self.initial_mode(path);
             let mut od = OpenDoc {
+                id,
                 buffer: doc,
                 close_waiters: Vec::new(),
                 reading: crate::reading::DocReading::default(),
             };
             self.reading
                 .register(&mut od, mode, !self.restoring, self.daemon.as_ref());
-            self.docs.insert(path.to_owned(), od);
+            self.docs.insert(od);
         }
         let tab = if is_image {
             Tab::new(TabKind::image(path))
@@ -395,31 +400,28 @@ impl App {
         self.sweep_pdf_docs();
     }
 
-    /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`). Plan
-    /// note-path-continuity D3: a read that finds the path gone asks lineage first; a `Moved`
-    /// answer retargets the document (never the "deleted" state), and the buffer's missing state
-    /// the read would have raised is cleared.
-    pub(super) fn reload_tab(&mut self, path: &str, hash: Option<&str>) {
+    /// `file_changed`: echo / silent reload / conflict bar (WP-2 `source::file_changed`) for
+    /// document `id` at its current path. Plan note-identity D4: a read that finds the path gone
+    /// asks `locate_note` first; a `Live` answer elsewhere follows the document there (never the
+    /// "deleted" state) and the missing state the read would have raised is cleared.
+    pub(super) fn reload_doc(&mut self, id: NoteId, hash: Option<&str>) {
         let daemon = self.daemon.clone();
-        let Some(doc) = self.docs.get_mut(path) else {
+        let Some(doc) = self.docs.by_id_mut(id) else {
             return;
         };
+        let path = doc.buffer.path().to_owned();
         let moved = std::cell::RefCell::new(None);
-        let cursor = doc.buffer.lineage_cursor();
         let err = match daemon.as_ref() {
             None => None,
             Some(d) => doc
                 .buffer
-                .external_change(hash, || match d.read_file(path) {
+                .external_change(hash, || match d.read_file(&path) {
                     Err(DaemonError::NotFound(p)) => {
-                        let resolved = cursor.and_then(|c| d.resolve_path(path, Some(c)).ok());
-                        match resolved.map(|r| (r.resolution, r.head)) {
-                            Some((cv_protocol::PathResolution::Moved { to }, head)) => {
-                                *moved.borrow_mut() = Some((to, head));
+                        match d.locate_note(id) {
+                            Ok(NoteLocation::Live { path: to }) if to != path => {
+                                *moved.borrow_mut() = Some(to);
                             }
-                            Some((cv_protocol::PathResolution::Live { .. }, _)) => {
-                                return d.read_file(path);
-                            }
+                            Ok(NoteLocation::Live { .. }) => return d.read_file(&path),
                             _ => {}
                         }
                         Err(DaemonError::NotFound(p))
@@ -427,11 +429,11 @@ impl App {
                     other => other,
                 }),
         };
-        if let Some((to, head)) = moved.into_inner() {
-            if let Some(o) = self.docs.get_mut(path) {
+        if let Some(to) = moved.into_inner() {
+            if let Some(o) = self.docs.by_id_mut(id) {
                 o.buffer.clear_missing();
             }
-            self.follow_resolved(path, &to, head);
+            self.follow_doc(id, &to, super::files::Follow::Daemon);
         } else if let Some(e) = err {
             self.status.set_error(e);
         }
@@ -671,4 +673,30 @@ impl App {
             self.sync_view_files();
         }
     }
+}
+
+/// How often [`bind_read_note`] retries a read that raced an identity transition on its path.
+const BIND_ATTEMPTS: usize = 4;
+
+/// Plan note-identity D4: binds `path` to its note id and reads it, bound to the same file:
+/// bind, read, then `locate_note` must still place the id at `path` (a move, delete or replace
+/// between the bind and the read is settled by asking, never by guessing, and the pair retried).
+pub(super) fn bind_read_note(
+    d: &dyn DaemonClient,
+    path: &str,
+) -> Result<(NoteId, Vec<u8>, crate::daemon::ContentHash), DaemonError> {
+    for _ in 0..BIND_ATTEMPTS {
+        let id = d.bind_note(path)?;
+        let read = d.read_file(path);
+        match (d.locate_note(id)?, read) {
+            (NoteLocation::Live { path: p }, Ok((bytes, hash))) if p == path => {
+                return Ok((id, bytes, hash));
+            }
+            (NoteLocation::Live { path: p }, Err(e)) if p == path => return Err(e),
+            _ => {} // raced a transition: the bytes may belong to another note
+        }
+    }
+    Err(DaemonError::Protocol(format!(
+        "{path}: identity kept changing during the read"
+    )))
 }

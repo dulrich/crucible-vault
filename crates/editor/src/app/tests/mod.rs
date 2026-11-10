@@ -66,6 +66,7 @@ mod holds;
 mod image_menu;
 mod index_follow;
 mod link_typeahead;
+mod note_identity;
 mod reconnect;
 mod rename_order;
 mod replaced;

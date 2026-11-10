@@ -1167,8 +1167,8 @@ mod tests {
         );
     }
 
-    /// Notifications carry the edge's `seq`, strictly increasing.
-    #[ignore = "note-identity WP-4: the rename now reports the production pair (seqs [2, 2, 3]); the asserted pre-D7 shape is superseded by rename_reports_the_pair_with_one_id_and_seq"]
+    /// Notifications carry the edge's `seq`, increasing per edge (a rename reports its pair under
+    /// one seq, plan note-identity D7).
     #[test]
     fn notifications_carry_the_lineage_seq() {
         let (_t, d) = fake_vault();
@@ -1183,7 +1183,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(seqs, vec![Some(2), Some(3)]);
+        assert_eq!(seqs, vec![Some(2), Some(2), Some(3)]);
     }
 
     fn file_changes(rx: &Receiver<Notification>) -> Vec<Notification> {

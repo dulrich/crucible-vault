@@ -345,11 +345,10 @@ impl App {
             context,
         };
         let title = call.title;
-        let origin = params
-            .context
-            .active_path
-            .as_ref()
-            .and_then(|p| Some((p.clone(), buf(&self.docs, p)?.edit_seq())));
+        let origin = params.context.active_path.as_ref().and_then(|p| {
+            let d = self.docs.get(p)?;
+            Some((d.id, d.buffer.edit_seq()))
+        });
         self.rpc(
             move |d| d.run_action(params).map_err(|e| e.to_string()),
             move |result| {
@@ -409,12 +408,17 @@ impl App {
         }
     }
 
-    /// An action asks the client to open `to`. If the invoking tab is still open at its original
-    /// path and that file no longer exists, the tab follows the note (retarget, as explorer
-    /// renames do); edits made during the run are kept and surfaced as a conflict instead of
-    /// being replaced (audit M2). Otherwise `to` opens as a new tab.
-    pub(super) fn follow_open(&mut self, origin: Option<(String, u64)>, to: &str) {
-        let Some((from, seq)) = origin.filter(|(p, _)| p != to) else {
+    /// An action asks the client to open `to`. If the invoking note's document is still open,
+    /// not already at `to`, and its file no longer exists at its path, the document follows the
+    /// note (as explorer renames do); edits made during the run are kept and surfaced as a
+    /// conflict instead of being replaced (audit M2). Otherwise `to` opens as a new tab. Plan
+    /// note-identity D4: the origin is the note id, so a move followed meanwhile cannot lose it.
+    pub(super) fn follow_open(&mut self, origin: Option<(NoteId, u64)>, to: &str) {
+        let Some((id, seq)) = origin else {
+            self.open(to);
+            return;
+        };
+        let Some(from) = self.docs.path_of(id).filter(|p| p != to) else {
             self.open(to);
             return;
         };
@@ -430,35 +434,10 @@ impl App {
                 return;
             }
         }
-        let edited = buf(&self.docs, &from).is_some_and(|d| d.edit_seq() != seq);
-        let cursor = self.cursor_of(&from);
-        self.follow_moved(&from, to, edited);
-        self.rebind_after_move(cursor, &from, to);
-    }
-
-    /// The tail of a move follow ([`Self::follow_open`], WP-5 title renames): unedited →
-    /// [`Self::retarget`]; edited since the move was issued → the buffer follows to `to` keeping
-    /// its text, behind the conflict bar (audit M2 / usability-sprint audit E2).
-    pub(super) fn follow_moved(&mut self, from: &str, to: &str, edited: bool) {
-        if !edited {
-            self.retarget(from, to);
-            return;
-        }
-        let Some(d) = self.daemon.clone() else { return };
-        let hash = match d.read_file(to) {
-            Ok((_, h)) => h,
-            Err(e) => {
-                self.status.set_error(open_error(&e));
-                return;
-            }
-        };
-        let Some(mut doc) = self.docs.remove(from) else {
-            return;
-        };
-        doc.buffer.follow_move(to, hash);
-        self.move_path_state(from, to, doc);
-        self.status.set_error(format!(
-            "{from} moved to {to} while you were editing: keep mine saves your text there"
-        ));
+        let edited = self
+            .docs
+            .by_id(id)
+            .is_some_and(|d| d.buffer.edit_seq() != seq);
+        self.follow_doc(id, to, super::files::Follow::Edited(edited));
     }
 }

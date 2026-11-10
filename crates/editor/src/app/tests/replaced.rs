@@ -39,6 +39,13 @@ fn replaced_clean_tab_lands_on_the_target_without_a_deleted_status() {
     assert!(!doc.is_missing() && doc.conflict().is_none());
     assert_eq!(doc.text(), "target");
     assert_eq!(app.status.error_text(), None, "no `file deleted on disk`");
+    // Plan note-identity audit E2: the tab now shows the absorbing note's own document (its
+    // id), so an edit saves and lands in the absorbing note.
+    assert_eq!(app.note_id("Blog/t.md"), d.bind_note("Blog/t.md").ok());
+    type_x(&mut app);
+    super::unsaved_dialog::save(&mut app, &d, "Blog/t.md");
+    assert_eq!(d.read_file("Blog/t.md").expect("t").0, b"xtarget");
+    assert!(app.doc("Blog/t.md").is_some_and(|b| !b.is_dirty()));
 }
 
 #[test]

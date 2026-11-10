@@ -259,7 +259,7 @@ mod loss_dialog {
         let _ = app.send(Message::Tabs(TabsMsg::Quit));
         assert_eq!(app.quit_waits(), Some(1));
         let _ = app.send(Message::Source(SourceMsg::Saved {
-            path: "d2f/a.md".into(),
+            id: app.note_id("d2f/a.md"),
             seq,
             outcome: SaveOutcome::Failed("daemon disconnected".into()),
             after: None,

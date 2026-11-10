@@ -123,7 +123,7 @@ pub(super) fn in_flight(app: &mut App, path: &str) -> u64 {
 
 pub(super) fn land(app: &mut App, path: &str, seq: u64, outcome: SaveOutcome) {
     let _ = app.send(Message::Source(SourceMsg::Saved {
-        path: path.to_owned(),
+        id: app.note_id(path),
         seq,
         outcome,
         after: None,

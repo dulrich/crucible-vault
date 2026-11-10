@@ -70,7 +70,7 @@ pub fn update(
             .take_new_primary()
             .map_or_else(Task::none, clipboard::write_primary);
         if changed {
-            Task::batch([primary, autosave_timer(buf.path.clone(), buf.edit_seq)])
+            Task::batch([primary, autosave_timer(buf.note_id(), buf.edit_seq)])
         } else {
             primary
         }
@@ -189,7 +189,7 @@ pub fn update(
                 buf.redo()
             };
             if changed {
-                autosave_timer(buf.path.clone(), buf.edit_seq)
+                autosave_timer(buf.note_id(), buf.edit_seq)
             } else {
                 Task::none()
             }

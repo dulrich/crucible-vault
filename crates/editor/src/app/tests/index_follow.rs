@@ -67,12 +67,15 @@ fn op_or_delta_insert_of_non_indexed_path_is_dropped() {
     let mut app = app_over(&d, None);
     std::fs::create_dir_all(vault.join("r3ign")).expect("mkdir");
     std::fs::write(vault.join("r3ign/new.md"), "n").expect("write");
-    let _ = app.send(Message::Explorer(ExplorerMsg::Done(FileOpDone {
-        op: FileOp::Create {
-            path: "r3ign/new.md".into(),
+    let _ = app.send(Message::Explorer(ExplorerMsg::Done(
+        FileOpDone {
+            op: FileOp::Create {
+                path: "r3ign/new.md".into(),
+            },
+            result: Ok("r3ign/new.md".into()),
         },
-        result: Ok("r3ign/new.md".into()),
-    })));
+        None,
+    )));
     assert!(!app.explorer.contains("r3ign/new.md"), "op insert dropped");
     file_changed(
         &mut app,
@@ -86,12 +89,15 @@ fn op_or_delta_insert_of_non_indexed_path_is_dropped() {
     );
     // An indexed path still inserts.
     d.create_note("r3ok/b.md", "b").expect("create");
-    let _ = app.send(Message::Explorer(ExplorerMsg::Done(FileOpDone {
-        op: FileOp::Create {
-            path: "r3ok/b.md".into(),
+    let _ = app.send(Message::Explorer(ExplorerMsg::Done(
+        FileOpDone {
+            op: FileOp::Create {
+                path: "r3ok/b.md".into(),
+            },
+            result: Ok("r3ok/b.md".into()),
         },
-        result: Ok("r3ok/b.md".into()),
-    })));
+        None,
+    )));
     assert!(app.explorer.contains("r3ok/b.md"));
 }
 

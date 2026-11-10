@@ -627,11 +627,12 @@ fn terminal_status_before_the_reply_still_follows_and_original_kept_opens_new_ta
         ["a.md"],
         "unknown job: remembered, not opened"
     );
+    let note = app.note_id("a.md").expect("open");
     pal(
         &mut app,
         PaletteMsg::Ran {
             title: "t".into(),
-            origin: Some(("a.md".into(), 0)),
+            origin: Some((note, 0)),
             result: Ok(cv_protocol::RunActionResult {
                 job_id: "early".into(),
                 open_path: None,

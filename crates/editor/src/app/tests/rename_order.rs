@@ -3,8 +3,8 @@
 //! RPC reply an editor operation waits on race on the wire; each scenario is written once and
 //! run in every [`Order`] through [`deliver`].
 //!
-//! Orders that fail only because documents are still keyed by path are `#[ignore]`d with a
-//! `note-identity WP-4` marker; WP-4 (documents keyed by id) un-marks them.
+//! With open documents keyed by note id (plan note-identity, work package 4) and every
+//! completion addressed to the id, all orders pass.
 
 use std::time::Instant;
 
@@ -89,11 +89,13 @@ fn title_rename_scenario(order: Order) {
     let doc = app.doc("sp/Old.md").expect("still at from");
     assert!(doc.is_renaming());
     let seq = doc.edit_seq();
+    let id = app.note_id("sp/Old.md").expect("bound");
     let pair = d
         .daemon_move("sp/Old.md", "sp/New.md")
         .expect("rename on disk");
     deliver(&mut app, order, pair, |app| {
         let _ = app.send(Message::TitleRenamed {
+            id,
             from: "sp/Old.md".into(),
             to: "sp/New.md".into(),
             seq,
@@ -116,17 +118,21 @@ fn manual_rename_scenario(order: Order) {
     d.create_note("sm/Old.md", OLD).expect("create");
     let mut app = app_over(&d, None);
     let _ = app.send(Message::Explorer(ExplorerMsg::Open("sm/Old.md".into())));
+    let note = app.note_id("sm/Old.md");
     let pair = d
         .daemon_move("sm/Old.md", "sm/New.md")
         .expect("rename on disk");
     deliver(&mut app, order, pair, |app| {
-        let _ = app.send(Message::Explorer(ExplorerMsg::Done(FileOpDone {
-            op: FileOp::Rename {
-                from: "sm/Old.md".into(),
-                to: "sm/New.md".into(),
+        let _ = app.send(Message::Explorer(ExplorerMsg::Done(
+            FileOpDone {
+                op: FileOp::Rename {
+                    from: "sm/Old.md".into(),
+                    to: "sm/New.md".into(),
+                },
+                result: Ok("sm/New.md".into()),
             },
-            result: Ok("sm/New.md".into()),
-        })));
+            note,
+        )));
     });
     assert_eq!(app.open_paths(), ["sm/New.md"]);
     let doc = app.doc_mut("sm/New.md").expect("followed");
@@ -169,8 +175,8 @@ fn save_in_flight_scenario(order: Order) {
 
 in_orders! { title_rename_scenario:
     title_rename_reply_first => Order::ReplyFirst;
-    title_rename_notification_first => Order::NotificationFirst, ignore = "note-identity WP-4: the rename flag stays set because TitleRenamed addresses the path the followed move re-keyed";
-    title_rename_reply_between_the_pair => Order::ReplyBetween, ignore = "note-identity WP-4: the rename flag stays set because TitleRenamed addresses the path the followed move re-keyed";
+    title_rename_notification_first => Order::NotificationFirst;
+    title_rename_reply_between_the_pair => Order::ReplyBetween;
 }
 
 in_orders! { manual_rename_scenario:
@@ -181,6 +187,6 @@ in_orders! { manual_rename_scenario:
 
 in_orders! { save_in_flight_scenario:
     save_in_flight_reply_first => Order::ReplyFirst;
-    save_in_flight_notification_first => Order::NotificationFirst, ignore = "note-identity WP-4: the save flag stays set because SourceMsg::Saved addresses the path the followed move re-keyed";
-    save_in_flight_reply_between_the_pair => Order::ReplyBetween, ignore = "note-identity WP-4: the save flag stays set because SourceMsg::Saved addresses the path the followed move re-keyed";
+    save_in_flight_notification_first => Order::NotificationFirst;
+    save_in_flight_reply_between_the_pair => Order::ReplyBetween;
 }

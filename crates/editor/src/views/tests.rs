@@ -399,6 +399,7 @@ fn retarget_rehosts_view_entries_under_the_new_path() {
     d.set_view_result(ID, ViewResult(result())).expect("script");
     need(&mut app);
     d.rename(NOTE, "Moved.md").expect("rename");
+    let note = app.note_id(NOTE);
     let _ = app.send(Message::Explorer(crate::message::ExplorerMsg::Done(
         crate::explorer::FileOpDone {
             op: crate::explorer::FileOp::Rename {
@@ -407,6 +408,7 @@ fn retarget_rehosts_view_entries_under_the_new_path() {
             },
             result: Ok("Moved.md".into()),
         },
+        note,
     )));
     assert!(app.views.get(ID, Some(NOTE)).is_none());
     let e = app.views.get(ID, Some("Moved.md")).expect("rehosted");

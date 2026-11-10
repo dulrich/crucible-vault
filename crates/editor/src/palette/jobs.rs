@@ -54,8 +54,9 @@ pub struct Jobs {
     /// job id → title of the action that started it.
     pub job_titles: HashMap<String, String>,
     /// editor-usability-round WP-5 (audit B1/M2): job id → the invoking tab's
-    /// `(path, edit_seq)` at dispatch, so a terminal `open_path` can follow the note.
-    pub job_origins: HashMap<String, (String, u64)>,
+    /// `(note id, edit_seq)` at dispatch, so a terminal `open_path` can follow the note (plan
+    /// note-identity D4: by id, so a move meanwhile cannot lose it).
+    pub job_origins: HashMap<String, (crate::daemon::NoteId, u64)>,
     /// Terminal `open_path`s that arrived before the `run_action` reply (job id → path).
     pub early_open: HashMap<String, String>,
 }

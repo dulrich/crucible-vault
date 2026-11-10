@@ -131,7 +131,7 @@ impl App {
             return self.resume_hold_waits(&h.path);
         }
         match buf(&self.docs, &h.path).filter(|b| b.is_dirty()) {
-            Some(b) => crate::source::autosave_timer(h.path, b.edit_seq()),
+            Some(b) => crate::source::autosave_timer(b.note_id(), b.edit_seq()),
             None => Task::none(),
         }
     }
@@ -218,7 +218,7 @@ impl App {
         match started {
             Some(t) => {
                 if quit && let Some(q) = &mut self.quit {
-                    q.pending.insert(path.to_owned());
+                    q.pending.extend(self.docs.id_of(path));
                 }
                 self.add_close_waiters(path, &rest);
                 t
@@ -226,7 +226,7 @@ impl App {
             None if saving => {
                 // A save is in flight (the follow-up is queued): the landing resolves the waits.
                 if quit && let Some(q) = &mut self.quit {
-                    q.awaiting.insert(path.to_owned());
+                    q.awaiting.extend(self.docs.id_of(path));
                 }
                 self.add_close_waiters(path, &ids);
                 Task::none()
@@ -354,6 +354,7 @@ impl App {
     pub(super) fn held_source_gate(&mut self, m: &SourceMsg) -> Gate {
         let path = match m.target() {
             SourceTarget::Path(p) => Some(p.to_owned()),
+            SourceTarget::Note(id) => self.docs.path_of(id),
             SourceTarget::Active => self.active_note().map(|t| t.path.to_owned()),
             // The `[[` list inserts into the active note.
             SourceTarget::App if matches!(m, SourceMsg::LinkKey(_) | SourceMsg::LinkPick(_)) => {

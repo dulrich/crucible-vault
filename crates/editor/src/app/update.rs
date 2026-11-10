@@ -94,11 +94,11 @@ impl App {
             }
             Message::Source(SourceMsg::LinkPick(path)) => self.link_ta_accept(&path),
             Message::Source(SourceMsg::Saved {
-                path,
+                id,
                 seq,
                 outcome,
                 after,
-            }) => return self.on_save_landed(&path, seq, outcome, after),
+            }) => return self.on_save_landed(id, seq, outcome, after),
             Message::Source(m) => {
                 // plan editor-round-4 WP-2: Shift+click extends the selection.
                 let m = crate::source::shift_click(m, self.modifiers.shift());
@@ -121,6 +121,7 @@ impl App {
                 );
                 let path = match m.target() {
                     SourceTarget::Path(p) => Some(p.to_owned()),
+                    SourceTarget::Note(id) => self.docs.path_of(id),
                     SourceTarget::Active => active.map(|(p, _)| p),
                     SourceTarget::App => None,
                 };
@@ -155,11 +156,12 @@ impl App {
             }
             Message::Modifiers(m) => self.modifiers = m,
             Message::TitleRenamed {
+                id,
                 from,
                 to,
                 seq,
                 result,
-            } => return self.title_renamed(&from, &to, seq, result),
+            } => return self.title_renamed(id, &from, &to, seq, result),
             Message::OpenUrl(url) => {
                 if let Err(e) = crate::open_url::open(&self.prefs.open_url_cmd, &url) {
                     self.status.set_error(e);

@@ -657,7 +657,7 @@ fn update_store(
                 .iter()
                 .filter(|(_, d)| d.reading.title.is_some())
                 .map(|(p, _)| {
-                    let path = p.clone();
+                    let path = p.to_owned();
                     iced::widget::operation::is_focused(title_id(p)).map(move |focused| {
                         Message::Reading(ReadingMsg::TitleFocus {
                             path: path.clone(),

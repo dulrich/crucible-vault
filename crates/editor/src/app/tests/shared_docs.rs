@@ -80,7 +80,7 @@ pub(super) fn duplicated() -> (tempfile::TempDir, Arc<FakeDaemon>, App, Pane, Pa
 
 pub(super) fn saved(app: &mut App, path: &str, seq: u64) {
     let _ = app.send(Message::Source(SourceMsg::Saved {
-        path: path.to_owned(),
+        id: app.note_id(path),
         seq,
         outcome: SaveOutcome::Saved(ContentHash::from_hex("h1")),
         after: None,
@@ -144,10 +144,8 @@ fn save_completion_with_two_tabs_of_one_path() {
     assert!(!doc.is_dirty() && !doc.is_saving());
     assert_eq!(views(&app, "w7/a.md").len(), 2, "both tabs stay");
     // The autosave timer is path-keyed too: the one (clean) document answers it.
-    let _ = app.send(Message::Source(SourceMsg::AutosaveDue {
-        path: "w7/a.md".into(),
-        seq,
-    }));
+    let id = app.note_id("w7/a.md").expect("open");
+    let _ = app.send(Message::Source(SourceMsg::AutosaveDue { id, seq }));
     assert!(!app.doc("w7/a.md").expect("doc").is_saving(), "clean");
 }
 
@@ -259,6 +257,7 @@ fn rename_retargets_every_tab_and_the_document_key() {
     let (_tmp, d, mut app, _left, _right) = duplicated();
     let ids: Vec<u64> = views(&app, "w7/a.md").iter().map(|v| v.1).collect();
     d.rename("w7/a.md", "w7/z.md").expect("rename");
+    let note = app.note_id("w7/a.md");
     let _ = app.send(Message::Explorer(ExplorerMsg::Done(
         crate::explorer::FileOpDone {
             op: crate::explorer::FileOp::Rename {
@@ -267,6 +266,7 @@ fn rename_retargets_every_tab_and_the_document_key() {
             },
             result: Ok("w7/z.md".into()),
         },
+        note,
     )));
     assert!(views(&app, "w7/a.md").is_empty());
     let now: Vec<u64> = views(&app, "w7/z.md").iter().map(|v| v.1).collect();

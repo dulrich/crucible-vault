@@ -113,15 +113,18 @@ fn edit_during_title_rename_is_kept_and_from_is_not_recreated() {
     assert!(doc.begin_save().is_none(), "saves held during the rename");
     let typed = doc.edit_seq();
     d.rename("ts5/Old.md", "ts5/New.md").expect("rename");
+    let id = app.note_id("ts5/Old.md").expect("open");
     let _ = app.send(Message::TitleRenamed {
+        id,
         from: "ts5/Old.md".into(),
         to: "ts5/New.md".into(),
         seq,
         result: Ok("ts5/New.md".into()),
     });
-    // The typed edit's autosave, addressed to `from`, is a no-op after the follow.
+    // The typed edit's autosave (plan note-identity D4: addressed to the note id) starts no
+    // save: the followed edits sit behind the conflict bar.
     let _ = app.send(Message::Source(crate::message::SourceMsg::AutosaveDue {
-        path: "ts5/Old.md".into(),
+        id,
         seq: typed,
     }));
     assert_eq!(app.open_paths(), ["ts5/New.md"]);
@@ -170,7 +173,7 @@ fn title_rename_waits_for_an_in_flight_follow_up_save() {
     let base = d.read_file("ts6/Old.md").expect("disk").1;
     let h = d.write_note("ts6/Old.md", &text, &base).expect("write");
     let _ = app.send(Message::Source(crate::message::SourceMsg::Saved {
-        path: "ts6/Old.md".into(),
+        id: app.note_id("ts6/Old.md"),
         seq,
         outcome: crate::source::SaveOutcome::Saved(h),
         after: None,

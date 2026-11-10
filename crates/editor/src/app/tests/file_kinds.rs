@@ -452,7 +452,7 @@ fn a_pdf_embed_renders_pins_survives_recompute_and_opens_the_tab_at_its_page() {
     let dc = app.daemon.clone();
     let mut od = app.docs.remove("A.md").expect("open");
     app.reading.recompute(&mut od, dc.as_ref());
-    app.docs.insert("A.md".into(), od);
+    app.docs.insert(od);
     app.prune_pdf_embeds();
     assert_eq!(app.reading.images.pins(&key), 1, "survives recompute");
     // The embed leaves the model: the recompute releases it.
@@ -460,7 +460,7 @@ fn a_pdf_embed_renders_pins_survives_recompute_and_opens_the_tab_at_its_page() {
     od.buffer
         .reload(b"gone\n", crate::daemon::ContentHash::of(b"gone\n"));
     app.reading.recompute(&mut od, dc.as_ref());
-    app.docs.insert("A.md".into(), od);
+    app.docs.insert(od);
     app.prune_pdf_embeds();
     assert_eq!(
         app.reading.images.pins(&key),
