@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cv_state::{NOTE_ID_RETENTION_MS, NoteIdLocation, StateDb, StateError};
+use cv_state::{NOTE_ID_RETENTION_MS, StateDb, StateError};
 use cv_vault::{NoteId, NoteIdSink, NoteLocation, VaultWriter};
 
 use crate::now_ms;
@@ -62,11 +62,10 @@ pub fn prune(db: &mut StateDb, now: i64) {
 
 impl NoteIdSink for StateNoteIds {
     fn bind(&mut self, path: &str) -> Option<NoteId> {
-        self.run("bind", |db, _| db.note_id_bind(path)).map(NoteId)
+        self.run("bind", |db, _| db.note_id_bind(path))
     }
     fn moved(&mut self, from: &str, to: &str) -> Option<NoteId> {
         self.run("move", |db, now| db.note_id_move(from, to, now))
-            .map(NoteId)
     }
     fn retired(&mut self, path: &str, replaced_by: Option<&str>) -> Option<NoteId> {
         let id = self.run("retire", |db, now| {
@@ -78,21 +77,14 @@ impl NoteIdSink for StateNoteIds {
             self.retirements = 0;
             prune(&mut lock(&self.state), now_ms());
         }
-        id.map(NoteId)
+        id
     }
     fn revive(&mut self, id: NoteId, path: &str) -> Option<NoteId> {
-        self.run("revive", |db, _| db.note_id_revive(id.0, path))
+        self.run("revive", |db, _| db.note_id_revive(id, path))
             .and_then(|ok| ok.then_some(id))
     }
     fn locate(&mut self, id: NoteId) -> Option<NoteLocation> {
-        self.run("locate", |db, _| db.note_id_locate(id.0))
-            .map(|l| match l {
-                NoteIdLocation::Live { path } => NoteLocation::Live { path },
-                NoteIdLocation::Gone { replaced_by } => NoteLocation::Gone {
-                    replaced_by: replaced_by.map(NoteId),
-                },
-                NoteIdLocation::Unknown => NoteLocation::Unknown,
-            })
+        self.run("locate", |db, _| db.note_id_locate(id))
     }
 }
 

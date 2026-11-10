@@ -7,32 +7,22 @@
 //! `replaced_by` the absorbing note's id for a replace). Ids come from `AUTOINCREMENT`, so
 //! `sqlite_sequence` keeps the high-water mark and an id is never minted twice, tombstone pruning
 //! included. Tombstones older than [`NOTE_ID_RETENTION_MS`] are pruned by [`StateDb::note_id_prune`];
-//! a pruned id answers [`NoteIdLocation::Unknown`].
+//! a pruned id answers [`NoteLocation::Unknown`].
 
 use crate::error::Result;
 use crate::store::StateDb;
+use cv_protocol::{NoteId, NoteLocation};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 /// Tombstone retention: retired ids older than this are pruned (≥ 30 days required by D1).
 pub const NOTE_ID_RETENTION_MS: i64 = 90 * 86_400_000;
 
-/// Where a note id is now.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoteIdLocation {
-    /// Bound to this live path.
-    Live { path: String },
-    /// Retired (deleted, or replaced by the note with id `replaced_by`).
-    Gone { replaced_by: Option<u64> },
-    /// Never minted, or its tombstone was pruned.
-    Unknown,
+fn to_id(v: i64) -> NoteId {
+    NoteId(u64::try_from(v).unwrap_or(0))
 }
 
-fn to_u64(v: i64) -> u64 {
-    u64::try_from(v).unwrap_or(0)
-}
-
-fn to_i64(v: u64) -> i64 {
-    i64::try_from(v).unwrap_or(i64::MAX)
+fn to_i64(v: NoteId) -> i64 {
+    i64::try_from(v.0).unwrap_or(i64::MAX)
 }
 
 fn live_at(tx: &Transaction<'_>, path: &str) -> Result<Option<i64>> {
@@ -60,7 +50,7 @@ fn retire_row(tx: &Transaction<'_>, id: i64, by: Option<i64>, now: i64) -> Resul
 
 impl StateDb {
     /// The live id at `path`, if any (no mint).
-    pub fn note_id_at(&self, path: &str) -> Result<Option<u64>> {
+    pub fn note_id_at(&self, path: &str) -> Result<Option<NoteId>> {
         let v: Option<i64> = self
             .conn()
             .query_row(
@@ -69,28 +59,28 @@ impl StateDb {
                 |r| r.get(0),
             )
             .optional()?;
-        Ok(v.map(to_u64))
+        Ok(v.map(to_id))
     }
 
     /// The live id at `path`, minting one if the path has none.
-    pub fn note_id_bind(&mut self, path: &str) -> Result<u64> {
+    pub fn note_id_bind(&mut self, path: &str) -> Result<NoteId> {
         let tx = self.conn.transaction()?;
         let id = match live_at(&tx, path)? {
             Some(id) => id,
             None => mint(&tx, path)?,
         };
         tx.commit()?;
-        Ok(to_u64(id))
+        Ok(to_id(id))
     }
 
     /// The file at `from` now lives at `to`: its id (minted if `from` had none) moves to `to`. A
     /// stale live binding already at `to` is retired first (`now` is its retirement time), so a
     /// path never holds two live ids.
-    pub fn note_id_move(&mut self, from: &str, to: &str, now: i64) -> Result<u64> {
+    pub fn note_id_move(&mut self, from: &str, to: &str, now: i64) -> Result<NoteId> {
         let tx = self.conn.transaction()?;
         let id = Self::move_in(&tx, from, to, now)?;
         tx.commit()?;
-        Ok(to_u64(id))
+        Ok(to_id(id))
     }
 
     fn move_in(tx: &Transaction<'_>, from: &str, to: &str, now: i64) -> Result<i64> {
@@ -115,36 +105,15 @@ impl StateDb {
         }
     }
 
-    /// Folder `from` became `to`: every live binding under `from/` moves under `to/`, in one
-    /// transaction. Returns how many moved.
-    pub fn note_id_move_prefix(&mut self, from: &str, to: &str, now: i64) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        let prefix = format!("{from}/");
-        let paths: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT path FROM note_ids WHERE retired_ms IS NULL
-                 AND substr(path, 1, length(?1)) = ?1 ORDER BY path",
-            )?;
-            stmt.query_map(params![prefix], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
-        };
-        for p in &paths {
-            let target = format!("{to}/{}", &p[prefix.len()..]);
-            Self::move_in(&tx, p, &target, now)?;
-        }
-        tx.commit()?;
-        Ok(paths.len())
-    }
-
     /// The file at `path` is gone (deleted, or absorbed by the note with id `replaced_by`): its id
     /// (minted first if the path had none, so the retirement is still nameable) becomes a
     /// tombstone. Returns the retired id.
     pub fn note_id_retire(
         &mut self,
         path: &str,
-        replaced_by: Option<u64>,
+        replaced_by: Option<NoteId>,
         now: i64,
-    ) -> Result<u64> {
+    ) -> Result<NoteId> {
         let tx = self.conn.transaction()?;
         let id = match live_at(&tx, path)? {
             Some(id) => id,
@@ -152,13 +121,13 @@ impl StateDb {
         };
         retire_row(&tx, id, replaced_by.map(to_i64), now)?;
         tx.commit()?;
-        Ok(to_u64(id))
+        Ok(to_id(id))
     }
 
     /// Makes the retired `id` live again at `path` (D3: a write by id to a deleted note keeps the
     /// id). `true` if `id` is now live at `path` (already live there included); `false` if `id`
     /// is unknown (never minted or pruned), live elsewhere, or `path` holds another live id.
-    pub fn note_id_revive(&mut self, id: u64, path: &str) -> Result<bool> {
+    pub fn note_id_revive(&mut self, id: NoteId, path: &str) -> Result<bool> {
         let id = to_i64(id);
         let tx = self.conn.transaction()?;
         let row: Option<(String, Option<i64>)> = tx
@@ -189,7 +158,7 @@ impl StateDb {
     }
 
     /// Where `id` is now.
-    pub fn note_id_locate(&self, id: u64) -> Result<NoteIdLocation> {
+    pub fn note_id_locate(&self, id: NoteId) -> Result<NoteLocation> {
         let row: Option<(String, Option<i64>, Option<i64>)> = self
             .conn()
             .query_row(
@@ -199,10 +168,10 @@ impl StateDb {
             )
             .optional()?;
         Ok(match row {
-            None => NoteIdLocation::Unknown,
-            Some((path, None, _)) => NoteIdLocation::Live { path },
-            Some((_, Some(_), by)) => NoteIdLocation::Gone {
-                replaced_by: by.map(to_u64),
+            None => NoteLocation::Unknown,
+            Some((path, None, _)) => NoteLocation::Live { path },
+            Some((_, Some(_), by)) => NoteLocation::Gone {
+                replaced_by: by.map(to_id),
             },
         })
     }
@@ -221,7 +190,7 @@ impl StateDb {
 mod tests {
     use super::*;
     use crate::QueueConfig;
-    use NoteIdLocation::{Gone, Live, Unknown};
+    use NoteLocation::{Gone, Live, Unknown};
 
     fn db() -> (tempfile::TempDir, StateDb) {
         let dir = tempfile::tempdir().unwrap();
@@ -229,7 +198,7 @@ mod tests {
         (dir, s)
     }
 
-    fn live(p: &str) -> NoteIdLocation {
+    fn live(p: &str) -> NoteLocation {
         Live { path: p.into() }
     }
 
@@ -250,18 +219,6 @@ mod tests {
     }
 
     #[test]
-    fn folder_rename_moves_every_binding_under_the_prefix() {
-        let (_d, mut s) = db();
-        let a = s.note_id_bind("f/a.md").unwrap();
-        let b = s.note_id_bind("f/sub/b.md").unwrap();
-        let other = s.note_id_bind("ff/c.md").unwrap();
-        assert_eq!(s.note_id_move_prefix("f", "g/h", 1).unwrap(), 2);
-        assert_eq!(s.note_id_locate(a).unwrap(), live("g/h/a.md"));
-        assert_eq!(s.note_id_locate(b).unwrap(), live("g/h/sub/b.md"));
-        assert_eq!(s.note_id_locate(other).unwrap(), live("ff/c.md"));
-    }
-
-    #[test]
     fn replace_and_delete_leave_tombstones() {
         let (_d, mut s) = db();
         let a = s.note_id_bind("a.md").unwrap();
@@ -275,7 +232,7 @@ mod tests {
         );
         assert_eq!(s.note_id_retire("b.md", None, 6).unwrap(), b);
         assert_eq!(s.note_id_locate(b).unwrap(), Gone { replaced_by: None });
-        assert_eq!(s.note_id_locate(9999).unwrap(), Unknown);
+        assert_eq!(s.note_id_locate(NoteId(9999)).unwrap(), Unknown);
     }
 
     #[test]
@@ -293,7 +250,7 @@ mod tests {
         assert_eq!(s.note_id_locate(old).unwrap(), live("q.md"));
         assert!(s.note_id_revive(old, "q.md").unwrap(), "already live there");
         assert!(!s.note_id_revive(old, "r.md").unwrap(), "live elsewhere");
-        assert!(!s.note_id_revive(4242, "z.md").unwrap(), "unknown");
+        assert!(!s.note_id_revive(NoteId(4242), "z.md").unwrap(), "unknown");
     }
 
     #[test]

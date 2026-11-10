@@ -56,48 +56,10 @@ fn forward(
     // the index never holds.
     let ignore_changed = cv_index::is_gitignore_path(&ev.path)
         || matches!(&ev.kind, EventKind::Renamed { from } if cv_index::is_gitignore_path(from));
-    let kind = match ev.kind {
-        EventKind::Created => ChangeKind::Created,
-        EventKind::Modified => ChangeKind::Modified,
-        EventKind::Deleted { .. } => ChangeKind::Deleted,
-        EventKind::Renamed { .. } => ChangeKind::Renamed,
-    };
-    // Plan note-path-continuity WP-2: the hash is the one the mutation produced, carried on the
-    // event (never re-read at handling time, which could report a later state of the path or
-    // none at all for an intermediate hop of a chain). Renames keep reporting none on the wire.
-    let hash = match kind {
-        ChangeKind::Created | ChangeKind::Modified => {
-            ev.hash.as_ref().map(|h| h.as_str().to_owned())
-        }
-        ChangeKind::Deleted | ChangeKind::Renamed => None,
-    };
     if let Some(s) = weak.upgrade() {
         sync_read(&s, read_sync, &ev.path, &ev.kind);
     }
-    // Round 11 WP-1 (Decision 1): a delete the writer recorded as absorbed by another note
-    // (auto-file's trash) reports that note as `replaced_by` (the writer fills it).
-    let replaced_by = match &ev.kind {
-        EventKind::Deleted { replaced_by } => replaced_by.clone(),
-        _ => None,
-    };
-    let origin = match ev.origin {
-        cv_vault::Origin::Daemon => Origin::Daemon,
-        cv_vault::Origin::External => Origin::External,
-    };
-    let from = match &ev.kind {
-        EventKind::Renamed { from } => Some(from.clone()),
-        _ => None,
-    };
-    let change = cv_protocol::FileChange {
-        path: ev.path,
-        kind,
-        hash,
-        origin,
-        from,
-        replaced_by,
-        id: ev.id.map(|i| cv_protocol::NoteId(i.0)),
-    };
-    for n in cv_protocol::file_changed(change) {
+    for n in cv_protocol::file_changed(ev.into()) {
         let _ = events.send(n);
     }
     if ignore_changed && let Some(w) = weak.upgrade().and_then(|s| s.writer()) {
@@ -208,58 +170,5 @@ pub(super) async fn generation_listener(shared: Arc<Shared>, mut stop: watch::Re
                 Err(broadcast::error::RecvError::Closed) => return,
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The bridge's input shape → the shared constructor (plan note-identity D7): a rename pair
-    /// carries one `id`.
-    #[test]
-    fn rename_reports_destination_with_from_then_source_deleted() {
-        let got = cv_protocol::file_changed(cv_protocol::FileChange {
-            path: "b.md".into(),
-            kind: ChangeKind::Renamed,
-            hash: None,
-            origin: Origin::Daemon,
-            from: Some("a.md".into()),
-            replaced_by: None,
-            id: Some(cv_protocol::NoteId(3)),
-        });
-        assert_eq!(
-            got,
-            vec![
-                Notification::FileChanged {
-                    path: "b.md".into(),
-                    kind: ChangeKind::Renamed,
-                    hash: None,
-                    origin: Origin::Daemon,
-                    from: Some("a.md".into()),
-                    replaced_by: None,
-                    id: Some(cv_protocol::NoteId(3)),
-                },
-                Notification::FileChanged {
-                    path: "a.md".into(),
-                    kind: ChangeKind::Deleted,
-                    hash: None,
-                    origin: Origin::Daemon,
-                    from: None,
-                    replaced_by: None,
-                    id: Some(cv_protocol::NoteId(3)),
-                },
-            ]
-        );
-        let one = cv_protocol::file_changed(cv_protocol::FileChange {
-            path: "c.md".into(),
-            kind: ChangeKind::Created,
-            hash: None,
-            origin: Origin::External,
-            from: None,
-            replaced_by: None,
-            id: None,
-        });
-        assert_eq!(one.len(), 1);
     }
 }

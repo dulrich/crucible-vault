@@ -31,7 +31,7 @@ pub use id::new_job_id;
 pub use image_descriptions::ImageDescription;
 pub use job::{EnqueueOutcome, FailureReason, Job, JobResult, JobStatus, NewJob, namespaced_key};
 pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
-pub use note_ids::{NOTE_ID_RETENTION_MS, NoteIdLocation};
+pub use note_ids::NOTE_ID_RETENTION_MS;
 pub use query::{ListQuery, StatusCount};
 pub use runner_state::StepCheckpoint;
 pub use store::{

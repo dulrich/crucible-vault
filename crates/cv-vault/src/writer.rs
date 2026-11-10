@@ -255,16 +255,15 @@ impl VaultWriter {
         bytes: &[u8],
         expected: Option<ContentHash>,
     ) -> Result<ContentHash> {
-        let created = expected.is_none();
+        let kind = if expected.is_none() {
+            EventKind::Created
+        } else {
+            EventKind::Modified
+        };
         let (h, full) = self.fs.put(path, bytes, expected.as_ref())?;
         self.index_written(path, bytes, &full, &h);
-        if created {
-            let id = self.ids.bind(path);
-            self.emit(path, EventKind::Created, id, Some(&h));
-        } else {
-            let id = self.ids.bind(path);
-            self.emit(path, EventKind::Modified, id, Some(&h));
-        }
+        let id = self.ids.bind(path);
+        self.emit(path, kind, id, Some(&h));
         Ok(h)
     }
 

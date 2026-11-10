@@ -314,7 +314,7 @@ fn follow_note(inner: &Inner, context: &mut ActionContext) -> Follow {
     let Some(w) = inner.writer.writer() else {
         return Follow::Same;
     };
-    match w.locate_note(cv_vault::NoteId(id.0)) {
+    match w.locate_note(id) {
         Ok(Some(cv_vault::NoteLocation::Live { path: now })) if now != path => {
             tracing::info!("job note moved; following it");
             context.active_path = Some(now);

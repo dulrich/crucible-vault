@@ -1,7 +1,7 @@
 //! Vault/note RPC handlers and the writer-job helpers they share.
 
 use cv_protocol::{BindNoteParams, BindNoteResult, LocateNoteParams};
-use cv_vault::{NoteId, NoteLocation};
+use cv_vault::NoteLocation;
 
 use super::*;
 
@@ -84,7 +84,7 @@ impl Shared {
                 if let Some(id) = revive {
                     // D3: the same id, live again at the request's path, before the write binds
                     // it (so the write's event carries this id, never a fresh one).
-                    if vw.revive_note(NoteId(id.0), &path).is_none() {
+                    if vw.revive_note(id, &path).is_none() {
                         let err = VaultError::Conflict {
                             path: path.clone(),
                             expected: None,
@@ -129,9 +129,7 @@ impl Shared {
                 vw.bind_note(&p.path).ok_or_else(ids_unavailable)
             })
             .await?;
-        Ok(BindNoteResult {
-            id: cv_protocol::NoteId(id.0),
-        })
+        Ok(BindNoteResult { id })
     }
 
     /// `locate_note` (plan note-identity D2): where the id is now, on the writer thread, so it
@@ -140,10 +138,8 @@ impl Shared {
         &self,
         p: LocateNoteParams,
     ) -> Result<cv_protocol::NoteLocation, RpcError> {
-        let loc = self
-            .writer_job(move |vw| vw.locate_note(NoteId(p.id.0)).ok_or_else(ids_unavailable))
-            .await?;
-        Ok(wire_location(loc))
+        self.writer_job(move |vw| vw.locate_note(p.id).ok_or_else(ids_unavailable))
+            .await
     }
 
     /// `rename`: read the hash and rename in one writer job, so the CAS token is the hash the
@@ -427,7 +423,7 @@ fn write_target(
     path: String,
     creates: bool,
 ) -> Result<WriteTarget, JobError> {
-    match vw.locate_note(NoteId(id.0)).ok_or_else(ids_unavailable)? {
+    match vw.locate_note(id).ok_or_else(ids_unavailable)? {
         NoteLocation::Live { path } => Ok(WriteTarget::At(path)),
         NoteLocation::Gone { .. } if creates => match vw.fs().hash(&path)? {
             Some(found) => Ok(WriteTarget::Taken {
@@ -447,7 +443,7 @@ fn live_path(
     id: cv_protocol::NoteId,
     stale: String,
 ) -> Result<String, JobError> {
-    match vw.locate_note(NoteId(id.0)).ok_or_else(ids_unavailable)? {
+    match vw.locate_note(id).ok_or_else(ids_unavailable)? {
         NoteLocation::Live { path } => Ok(path),
         NoteLocation::Gone { .. } | NoteLocation::Unknown => {
             Err(VaultError::NotFound(stale).into())
@@ -457,17 +453,6 @@ fn live_path(
 
 fn ids_unavailable() -> JobError {
     JobError::Unavailable("note ids unavailable".into())
-}
-
-/// A vault [`NoteLocation`] on the wire.
-pub(crate) fn wire_location(loc: NoteLocation) -> cv_protocol::NoteLocation {
-    match loc {
-        NoteLocation::Live { path } => cv_protocol::NoteLocation::Live { path },
-        NoteLocation::Gone { replaced_by } => cv_protocol::NoteLocation::Gone {
-            replaced_by: replaced_by.map(|i| cv_protocol::NoteId(i.0)),
-        },
-        NoteLocation::Unknown => cv_protocol::NoteLocation::Unknown,
-    }
 }
 
 pub(super) fn run_open_cmd(cmd: &Path, abs: &Path) {

@@ -39,14 +39,10 @@ pub enum EventKind {
     },
 }
 
-/// Who caused it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    /// The daemon's own mutation, reported by the writer before its call returns.
-    Daemon,
-    /// Someone else (applied to the index before it is emitted).
-    External,
-}
+/// Who caused it: [`Origin::Daemon`] for the daemon's own mutation (reported by the writer before
+/// its call returns), [`Origin::External`] for anyone else's (applied to the index before it is
+/// emitted).
+pub use cv_protocol::Origin;
 
 /// A normalized vault change. Equality compares the change itself (`path`, `kind`, `origin`);
 /// `id` and `hash` are delivery metadata (plan note-path-continuity D2).
@@ -86,6 +82,34 @@ impl PartialEq for VaultEvent {
 }
 
 impl Eq for VaultEvent {}
+
+/// The one typed conversion to the wire's flat [`cv_protocol::FileChange`] (`from` is set only
+/// for a rename, `replaced_by` only for a delete). The hash is the one the mutation produced,
+/// carried on the event (plan note-path-continuity WP-2); renames and deletes report none.
+impl From<VaultEvent> for cv_protocol::FileChange {
+    fn from(ev: VaultEvent) -> Self {
+        use cv_protocol::ChangeKind;
+        let (kind, from, replaced_by) = match ev.kind {
+            EventKind::Created => (ChangeKind::Created, None, None),
+            EventKind::Modified => (ChangeKind::Modified, None, None),
+            EventKind::Deleted { replaced_by } => (ChangeKind::Deleted, None, replaced_by),
+            EventKind::Renamed { from } => (ChangeKind::Renamed, Some(from), None),
+        };
+        let hash = match kind {
+            ChangeKind::Created | ChangeKind::Modified => ev.hash.map(|h| h.as_str().to_owned()),
+            ChangeKind::Deleted | ChangeKind::Renamed => None,
+        };
+        Self {
+            path: ev.path,
+            kind,
+            hash,
+            origin: ev.origin,
+            from,
+            replaced_by,
+            id: ev.id,
+        }
+    }
+}
 
 /// Watcher timings.
 #[derive(Debug, Clone, Copy)]
@@ -658,5 +682,48 @@ mod tests {
         st.on_notify(&name(RenameMode::Both, &[&c, &d]));
         assert!(st.moving_from.is_empty());
         assert!(st.next_due(Instant::now()).unwrap() <= deb);
+    }
+
+    /// The typed event → flat wire input: `from` only on a rename, `replaced_by` only on a
+    /// delete, and only a create/modify carries its hash.
+    #[test]
+    fn event_converts_to_file_change() {
+        use cv_protocol::{ChangeKind, FileChange, NoteId};
+        let mut ev = VaultEvent::new(
+            "b.md",
+            EventKind::Renamed {
+                from: "a.md".into(),
+            },
+            Origin::Daemon,
+        );
+        ev.id = Some(NoteId(3));
+        ev.hash = Some(ContentHash::of(b"x"));
+        let c = FileChange::from(ev);
+        assert_eq!(
+            (c.kind, c.from.as_deref(), c.hash, c.id),
+            (ChangeKind::Renamed, Some("a.md"), None, Some(NoteId(3)))
+        );
+        let mut ev = VaultEvent::new("b.md", EventKind::Modified, Origin::External);
+        ev.hash = Some(ContentHash::of(b"x"));
+        let c = FileChange::from(ev);
+        assert_eq!(
+            (c.kind, c.from, c.hash),
+            (
+                ChangeKind::Modified,
+                None,
+                Some(ContentHash::of(b"x").as_str().to_owned())
+            )
+        );
+        let c = FileChange::from(VaultEvent::new(
+            "a.md",
+            EventKind::Deleted {
+                replaced_by: Some("k.md".into()),
+            },
+            Origin::Daemon,
+        ));
+        assert_eq!(
+            (c.kind, c.from, c.replaced_by.as_deref()),
+            (ChangeKind::Deleted, None, Some("k.md"))
+        );
     }
 }

@@ -475,7 +475,7 @@ impl Inner {
     /// one is minted, on the writer thread. Never call while holding the state mutex.
     fn bind_existing(&self, path: &str) -> Option<cv_protocol::NoteId> {
         match lock(&self.state).note_id_at(path) {
-            Ok(Some(id)) => return Some(cv_protocol::NoteId(id)),
+            Ok(Some(id)) => return Some(id),
             Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "note id lookup failed; binding on the writer"),
         }
@@ -486,7 +486,7 @@ impl Inner {
             _ => None,
         });
         match r {
-            Ok(id) => id.map(|i| cv_protocol::NoteId(i.0)),
+            Ok(id) => id,
             Err(e) => {
                 tracing::warn!(error = %e, "note id bind failed; job unbound");
                 None

@@ -3,20 +3,7 @@
 //! ids in `state.db`; `cv-vault` only calls it and stamps the returned id on the event it emits
 //! ([`crate::VaultEvent::id`]). Without an installed sink ([`NoNoteIds`]) events carry no id.
 
-/// A daemon-minted, never-reused note id: the identity of one vault file across renames.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NoteId(pub u64);
-
-/// Where a note id is now.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoteLocation {
-    /// Bound to this live path.
-    Live { path: String },
-    /// Retired: deleted, or absorbed by the note `replaced_by`.
-    Gone { replaced_by: Option<NoteId> },
-    /// Never minted, or its tombstone was pruned.
-    Unknown,
-}
+pub use cv_protocol::{NoteId, NoteLocation};
 
 /// Keeps every id → path binding current. Called on the writer thread after the mutation
 /// succeeded and before the mutating call returns; implementations must not call back into the

@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use cv_protocol::{
-    ChangeKind, CreateNoteResult, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams,
+    CreateNoteResult, DeleteMode, DeleteNoteParams, DeleteNoteResult, DeleteParams,
     DeletePreviewItem, DeletePreviewResult, DeleteResult, HelloResult, IntakeListResult, JobStatus,
-    JobsListResult, Method, Notification, Origin, PROTOCOL_VERSION, PathParams, RenameParams,
-    RenameResult, Request, RpcError, StatusResult, UriResult, ViewsListResult,
-    WriteAttachmentParams, WriteAttachmentResult, WriteNoteParams, WriteNoteResult, error_codes,
+    JobsListResult, Method, Notification, PROTOCOL_VERSION, PathParams, RenameParams, RenameResult,
+    Request, RpcError, StatusResult, UriResult, ViewsListResult, WriteAttachmentParams,
+    WriteAttachmentResult, WriteNoteParams, WriteNoteResult, error_codes,
 };
 use cv_state::{QueueConfig, RetryOutcome, StateDb, StateError, StateReader};
 use cv_vault::{
