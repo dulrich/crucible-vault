@@ -244,7 +244,9 @@ fn dry_run_writes_review_note() {
         t.starts_with("# Fanfic title backfill \u{2014} dry run "),
         "{t}"
     );
-    assert!(t.contains("Scanned 6, already 2, would rename 2, collision 1, undetected 1."));
+    assert!(t.contains(
+        "Scanned 6, already 2, would rename 2, would retitle 0, collision 1, undetected 1."
+    ));
     assert!(t.contains("Apply: run this backfill again with Dry run off."));
     assert!(t.contains("## Would rename (2)"));
     assert!(t.contains(
@@ -418,4 +420,114 @@ fn order_renames_withholds_a_chain_behind_a_withheld_holder() {
     let (order, held) = order_renames(&renames, &|p| p == "b");
     assert_eq!(order, vec![r("b", "a"), r("c", "b")]);
     assert!(held.is_empty());
+}
+
+// ---- 2026-11-10: the note's `title` follows the chapter name ----------------------------------
+
+fn titled(title: &str, body: &str) -> String {
+    format!("---\ntitle: {title}\ntags:\n  - fanfic\n---\n{body}")
+}
+
+#[test]
+fn filing_sets_a_stale_title_to_the_new_name() {
+    let src = "Clips/Alpha - Chapter 3 - Writer - Fandom.md";
+    let e = example_env(&[(src, &titled("Alpha (crossover, long clip title)", "text\n"))]);
+    let o = e
+        .run_vars(
+            NOTE_STEP,
+            json!({"kind": "fanfic"}),
+            active(src),
+            &moved(src),
+        )
+        .unwrap();
+    assert_eq!(var(&o, "fanfic_renamed"), json!(1));
+    assert_eq!(
+        var(&o, "fanfic_retitled"),
+        json!(0),
+        "a rename is not counted as a retitle"
+    );
+    assert_eq!(
+        e.read("Clips/Alpha - Chapter 3.md").unwrap(),
+        titled("Alpha - Chapter 3", "text\n")
+    );
+}
+
+#[test]
+fn a_note_without_a_title_is_not_given_one() {
+    let src = "Clips/Alpha - Chapter 3 - Writer - Fandom.md";
+    let e = example_env(&[(src, &note("text\n"))]);
+    e.run_vars(
+        NOTE_STEP,
+        json!({"kind": "fanfic"}),
+        active(src),
+        &moved(src),
+    )
+    .unwrap();
+    assert_eq!(
+        e.read("Clips/Alpha - Chapter 3.md").unwrap(),
+        note("text\n")
+    );
+}
+
+#[test]
+fn already_named_note_with_a_stale_title_is_retitled_once() {
+    let p = "Clips/Alpha - Chapter 3.md";
+    let e = example_env(&[(p, &titled("Old clip title", "text\n"))]);
+    let o = e
+        .run_vars(NOTE_STEP, json!({"kind": "fanfic"}), active(p), &moved(p))
+        .unwrap();
+    assert_eq!(var(&o, "fanfic_already"), json!(1));
+    assert_eq!(var(&o, "fanfic_retitled"), json!(1));
+    assert_eq!(e.read(p).unwrap(), titled("Alpha - Chapter 3", "text\n"));
+    let o = e
+        .run_vars(NOTE_STEP, json!({"kind": "fanfic"}), active(p), &moved(p))
+        .unwrap();
+    assert_eq!(var(&o, "fanfic_retitled"), json!(0));
+    assert!(o.output_paths.is_empty());
+}
+
+#[test]
+fn backfill_retitles_stale_titles_after_a_dry_run_lists_them() {
+    let e = example_env(&[
+        ("F/A - Chapter 1.md", &titled("A clip title", "x\n")),
+        ("F/B - Chapter 2.md", &titled("B - Chapter 2", "x\n")),
+        ("F/C - Chapter 3 - W.md", &titled("C clip title", "x\n")),
+    ]);
+    let ctx = || active("F/A - Chapter 1.md");
+    let o = e.run(BACKFILL, json!({}), ctx()).unwrap();
+    assert_eq!(count(&o, "already"), 2);
+    assert_eq!(count(&o, "would_retitle"), 1);
+    let t = e.read(&review_path()).unwrap();
+    assert!(
+        t.contains("## Would retitle (1)\n\n- [[F/A - Chapter 1|A - Chapter 1]]\n"),
+        "{t}"
+    );
+    assert_eq!(
+        e.read("F/A - Chapter 1.md").unwrap(),
+        titled("A clip title", "x\n")
+    );
+    let o = e.run(BACKFILL, json!({"dry_run": false}), ctx()).unwrap();
+    assert_eq!(count(&o, "retitled"), 1);
+    assert_eq!(count(&o, "renamed"), 1);
+    assert_eq!(
+        e.read("F/A - Chapter 1.md").unwrap(),
+        titled("A - Chapter 1", "x\n")
+    );
+    assert_eq!(
+        e.read("F/C - Chapter 3.md").unwrap(),
+        titled("C - Chapter 3", "x\n")
+    );
+    let o = e.run(BACKFILL, json!({"dry_run": false}), ctx()).unwrap();
+    assert_eq!((count(&o, "retitled"), count(&o, "renamed")), (0, 0));
+}
+
+#[test]
+fn retitled_text_is_pure() {
+    use super::fanfic_title::retitled_text;
+    assert_eq!(retitled_text("no frontmatter\n", "X"), None);
+    assert_eq!(retitled_text(&titled("X", ""), "X"), None);
+    assert_eq!(
+        retitled_text(&titled("Y", ""), "X").as_deref(),
+        Some(titled("X", "").as_str())
+    );
 }

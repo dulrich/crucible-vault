@@ -12,7 +12,9 @@
 //!
 //! **Note scope** (in `file-as-kind`, after `move`): a note already in the target shape, an
 //! undetectable one, or one whose target name exists is left as is and counted (`fanfic_already`,
-//! `fanfic_undetected`, `fanfic_skipped_collision`; `fanfic_renamed` = 1 on a rename). Counter names keep
+//! `fanfic_undetected`, `fanfic_skipped_collision`; `fanfic_renamed` = 1 on a rename). A rename also sets
+//! the note's frontmatter `title` to the new name, and a note already named right whose `title`
+//! differs has it set (`fanfic_retitled` = 1); a note without a `title` is not given one. Counter names keep
 //! their `fanfic_` prefix whatever the kind (telemetry continuity, plan public-release WP-4). A rename
 //! sets `moved_path` / `moved_from` / `open_path` like `move`, so later steps (and the runner's
 //! active-path follow) see the new path.
@@ -24,7 +26,7 @@
 //! chapters renames cleanly. The target's story is the matched `[[serial]]` row's publication,
 //! else the note's `publication` frontmatter, else the title's; a note is `already` only when its
 //! name equals the target. Outcome vars: `scanned`, `already`, `renamed` (real run),
-//! `would_rename` (dry run), `collision`, `undetected`, `conflict`, `dry_run`. A second run renames
+//! `would_rename` (dry run), `retitled` / `would_retitle` (already named right, stale `title`), `collision`, `undetected`, `conflict`, `dry_run`. A second run renames
 //! nothing (renamed notes are in the target shape).
 //!
 //! A **dry run** also writes the review note `<app_folder>/reviews/<kind>-titles-<YYYY-MM-DD>.md`
@@ -37,7 +39,7 @@ use std::collections::{BTreeSet, HashSet};
 use cv_actions::pipelines::SerialSource;
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::fanfic_title::{detect_with, target_name};
-use cv_note::FrontmatterDoc;
+use cv_note::{FrontmatterDoc, JsValue};
 use cv_text::vpath;
 use cv_vault::VaultError;
 use serde::Serialize;
@@ -321,12 +323,37 @@ fn rename(ctx: &mut StepCtx<'_>, src: &str, dst: &str) -> Result<Attempt, StepEr
     };
     let (s, d) = (src.to_owned(), dst.to_owned());
     match ctx.with_writer(&[src, dst], move |vw| vw.rename(&s, &d, hash))? {
-        Ok(r) => Ok(Attempt::Renamed {
-            rewritten: r.rewritten,
-        }),
+        Ok(r) => {
+            // The renamed note's `title` follows its new name (2026-11-10 user report: a filed
+            // chapter kept the clip's title).
+            retitle(ctx, dst)?;
+            Ok(Attempt::Renamed {
+                rewritten: r.rewritten,
+            })
+        }
         Err(VaultError::Exists(_)) => Ok(Attempt::Collision),
         Err(e) => Err(e.into()),
     }
+}
+
+/// `text` with its frontmatter `title` set to `name`, when the note has a `title` that differs;
+/// `None` when there is none, it already matches, or the frontmatter does not parse (a note
+/// without a `title` is not given one).
+pub(crate) fn retitled_text(text: &str, name: &str) -> Option<String> {
+    let mut doc = FrontmatterDoc::new(text);
+    let current = doc.get("title").ok().flatten()?;
+    if cv_note::js_text(&current).trim() == name {
+        return None;
+    }
+    doc.set("title", &JsValue::Str(name.to_owned()))
+        .ok()?
+        .then(|| doc.into_text())
+}
+
+/// Sets `path`'s frontmatter `title` to its basename (see [`retitled_text`]); `true` on a change.
+fn retitle(ctx: &mut StepCtx<'_>, path: &str) -> Result<bool, StepError> {
+    let name = vpath::stem(path).to_owned();
+    Ok(ctx.modify(path, |t| Ok(retitled_text(t, &name)))?.is_some())
 }
 
 /// Note-scope outcome vars.
@@ -336,6 +363,8 @@ struct NoteVars {
     fanfic_skipped_collision: u32,
     fanfic_undetected: u32,
     fanfic_already: u32,
+    /// Already named right, but its `title` was stale and is now set to the name.
+    fanfic_retitled: u32,
 }
 
 /// The vars of a rename (`moved_from` = [`super::MOVED_FROM`]).
@@ -357,7 +386,13 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let mut v = NoteVars::default();
     match plan_in(ctx, &src, &text) {
-        Plan::Already => v.fanfic_already = 1,
+        Plan::Already => {
+            v.fanfic_already = 1;
+            if retitle(ctx, &src)? {
+                v.fanfic_retitled = 1;
+                out.push_output(src);
+            }
+        }
         Plan::Undetected => v.fanfic_undetected = 1,
         Plan::Rename(dst) => match rename(ctx, &src, &dst)? {
             Attempt::Collision => v.fanfic_skipped_collision = 1,
@@ -392,6 +427,8 @@ struct Findings {
     rename: Vec<(String, String)>,
     collision: Vec<(String, String, Withheld)>,
     undetected: Vec<String>,
+    /// Already named right, with a stale `title`.
+    retitle: Vec<String>,
 }
 
 /// A resolvable wikilink `[[path-without-.md|basename]]`; names with link syntax characters fall
@@ -426,11 +463,12 @@ fn capitalized(s: &str) -> String {
 fn render_review(kind: &str, date: &str, v: &BackfillVars, f: &Findings) -> String {
     let base = |p: &str| vpath::stem(p).to_owned();
     let mut out = format!(
-        "# {} title backfill \u{2014} dry run {date}\n\nScanned {}, already {}, would rename {}, collision {}, undetected {}.\n\nApply: run this backfill again with Dry run off.\n",
+        "# {} title backfill \u{2014} dry run {date}\n\nScanned {}, already {}, would rename {}, would retitle {}, collision {}, undetected {}.\n\nApply: run this backfill again with Dry run off.\n",
         capitalized(kind),
         v.scanned,
         v.already,
         v.would_rename,
+        v.would_retitle,
         v.collision,
         v.undetected
     );
@@ -441,6 +479,11 @@ fn render_review(kind: &str, date: &str, v: &BackfillVars, f: &Findings) -> Stri
             .iter()
             .map(|(o, n)| format!("{} \u{2192} {}", link(o), base(n)))
             .collect(),
+    );
+    section(
+        &mut out,
+        "Would retitle",
+        f.retitle.iter().map(|o| link(o)).collect(),
     );
     section(
         &mut out,
@@ -464,6 +507,10 @@ struct BackfillVars {
     already: u32,
     renamed: u32,
     would_rename: u32,
+    /// Already named right; `title` set to the name (real run).
+    retitled: u32,
+    /// Already named right with a stale `title` (dry run).
+    would_retitle: u32,
     collision: u32,
     undetected: u32,
     conflict: u32,
@@ -497,7 +544,12 @@ fn backfill(kind: &str, dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutc
         };
         v.scanned += 1;
         match plan_in(ctx, path, &text) {
-            Plan::Already => v.already += 1,
+            Plan::Already => {
+                v.already += 1;
+                if retitled_text(&text, vpath::stem(path)).is_some() {
+                    found.retitle.push(path.clone());
+                }
+            }
             Plan::Undetected => {
                 v.undetected += 1;
                 found.undetected.push(path.clone());
@@ -516,6 +568,7 @@ fn backfill(kind: &str, dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutc
     found.collision = withheld;
     if dry_run {
         v.would_rename = u32::try_from(order.len()).unwrap_or(u32::MAX);
+        v.would_retitle = u32::try_from(found.retitle.len()).unwrap_or(u32::MAX);
         found.rename = order;
     } else {
         for (src, dst) in order {
@@ -528,6 +581,17 @@ fn backfill(kind: &str, dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutc
                         out.push_output(r);
                     }
                 }
+                Err(e) if e.is_conflict() => v.conflict += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        for path in std::mem::take(&mut found.retitle) {
+            match retitle(ctx, &path) {
+                Ok(true) => {
+                    v.retitled += 1;
+                    out.push_output(path);
+                }
+                Ok(false) => {}
                 Err(e) if e.is_conflict() => v.conflict += 1,
                 Err(e) => return Err(e),
             }
