@@ -64,13 +64,16 @@ fn all_requests_round_trip() {
             to: "c.md".into(),
         }),
         Request::Delete(DeleteParams {
+            id: None,
             path: "c.md".into(),
             mode: DeleteMode::Permanent,
         }),
         Request::DeletePreview(PathParams {
+            id: None,
             path: "c.md".into(),
         }),
         Request::DeleteNote(DeleteNoteParams {
+            id: None,
             path: "c.md".into(),
             attachments: vec!["img.png".into()],
             mode: DeleteMode::Trash,
@@ -141,6 +144,7 @@ fn delete_without_mode_is_trash() {
     assert_eq!(
         v.call,
         Request::Delete(DeleteParams {
+            id: None,
             path: "a.md".into(),
             mode: DeleteMode::Trash,
         })
@@ -268,6 +272,7 @@ fn lookup_wire_shapes() {
     let v = round_trip(&RpcRequest::new(
         RpcId::Num(7),
         Request::NoteSetBool(NoteSetBoolParams {
+            id: None,
             path: "a.md".into(),
             key: "read".into(),
             value: true,
@@ -278,7 +283,10 @@ fn lookup_wire_shapes() {
         v["params"],
         json!({"path": "a.md", "key": "read", "value": true})
     );
-    round_trip(&NoteSetBoolResult { hash: "h".into() });
+    round_trip(&NoteSetBoolResult {
+        path: None,
+        hash: "h".into(),
+    });
     let report = MemoryReport {
         uptime_secs: 60,
         rss: Some(1 << 20),
@@ -634,14 +642,22 @@ fn method_markers_match_the_wire() {
     );
     check::<m::Delete>(
         DeleteParams {
+            id: None,
             path: "a".into(),
             mode: DeleteMode::Trash,
         },
         s,
     );
-    check::<m::DeletePreview>(PathParams { path: "a".into() }, s);
+    check::<m::DeletePreview>(
+        PathParams {
+            id: None,
+            path: "a".into(),
+        },
+        s,
+    );
     check::<m::DeleteNote>(
         DeleteNoteParams {
+            id: None,
             path: "a".into(),
             attachments: vec![],
             mode: DeleteMode::Trash,
@@ -719,6 +735,7 @@ fn method_markers_match_the_wire() {
     );
     check::<m::NoteSetBool>(
         NoteSetBoolParams {
+            id: None,
             path: "a".into(),
             key: "k".into(),
             value: true,
@@ -753,7 +770,7 @@ fn retyped_results_keep_their_wire_shape() {
         round_trip(&r),
         json!({"rewritten": ["a.md"], "skipped_conflicts": []})
     );
-    assert_eq!(round_trip(&DeleteResult {}), json!({}));
+    assert_eq!(round_trip(&DeleteResult { path: None }), json!({}));
     let t = SubscribeResult {
         topics: vec![Topic::JobUpdated],
     };
@@ -1009,4 +1026,42 @@ fn file_changed_builds_the_rename_pair() {
         id: Some(NoteId(1)),
     });
     assert_eq!(one.len(), 1);
+}
+
+/// Plan tn-review-2026-11-10-remediation D2 (audit F3): the delete / preview / set-bool `id`s and
+/// their results' acted-on `path` are additive — absent ones keep the old shape byte for byte.
+#[test]
+fn by_id_delete_and_set_bool_fields_are_additive() {
+    fn same<T: serde::Serialize + serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+        let t: T = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&t).unwrap(), v, "old shape kept");
+        t
+    }
+    let d: DeleteParams = same(json!({"path":"a.md","mode":"trash"}));
+    assert_eq!(d.id, None);
+    let p: PathParams = same(json!({"path":"a.md"}));
+    assert_eq!(p.id, None);
+    let n: DeleteNoteParams = same(json!({"path":"a.md","attachments":[],"mode":"trash"}));
+    assert_eq!(n.id, None);
+    let s: NoteSetBoolParams = same(json!({"path":"a.md","key":"k","value":true}));
+    assert_eq!(s.id, None);
+    assert_eq!(same::<DeleteResult>(json!({})).path, None);
+    assert_eq!(same::<DeletePreviewResult>(json!({"items":[]})).path, None);
+    assert_eq!(
+        same::<DeleteNoteResult>(json!({"removed":["a.md"],"skipped":[]})).path,
+        None
+    );
+    assert_eq!(same::<NoteSetBoolResult>(json!({"hash":"h"})).path, None);
+    // By id: the request carries `id`, the reply the path acted on.
+    let d = DeleteParams {
+        id: Some(NoteId(3)),
+        ..d
+    };
+    assert_eq!(serde_json::to_value(&d).unwrap()["id"], json!(3));
+    let r = DeleteResult {
+        path: Some("b.md".into()),
+    };
+    assert_eq!(serde_json::to_value(&r).unwrap(), json!({"path":"b.md"}));
+    let r: NoteSetBoolResult = serde_json::from_value(json!({"hash":"h","path":"b.md"})).unwrap();
+    assert_eq!(r.path.as_deref(), Some("b.md"));
 }

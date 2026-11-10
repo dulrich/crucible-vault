@@ -33,7 +33,8 @@ pub(crate) fn rpc_from_vault(e: VaultError) -> RpcError {
         e @ (VaultError::Io { .. }
         | VaultError::Index(_)
         | VaultError::Watch(_)
-        | VaultError::Json(_)) => internal(e),
+        | VaultError::Json(_)
+        | VaultError::NoteId(_)) => internal(e),
     }
 }
 
@@ -64,8 +65,6 @@ pub(crate) enum JobError {
         path: String,
         label: String,
     },
-    /// The daemon cannot answer right now (e.g. the note-id store failed; already logged).
-    Unavailable(String),
 }
 
 /// The `HELD` refusal of a request that would change `path`, held by action `label`.

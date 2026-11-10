@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use cv_state::{NOTE_ID_RETENTION_MS, StateDb, StateError};
-use cv_vault::{NoteId, NoteIdSink, NoteLocation, VaultWriter};
+use cv_vault::{IdResult, NoteId, NoteIdError, NoteIdSink, NoteLocation, VaultWriter};
 
 use crate::now_ms;
 use crate::sync::lock;
@@ -38,16 +38,13 @@ impl StateNoteIds {
         &mut self,
         what: &'static str,
         f: impl FnOnce(&mut StateDb, i64) -> Result<T, StateError>,
-    ) -> Option<T> {
+    ) -> IdResult<T> {
         let now = now_ms();
         let mut db = lock(&self.state);
-        match f(&mut db, now) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(error = %e, op = what, "note id: binding not recorded");
-                None
-            }
-        }
+        f(&mut db, now).map_err(|e| {
+            tracing::warn!(error = %e, op = what, "note id: binding not recorded");
+            NoteIdError(format!("{what}: {e}"))
+        })
     }
 }
 
@@ -61,13 +58,13 @@ pub fn prune(db: &mut StateDb, now: i64) {
 }
 
 impl NoteIdSink for StateNoteIds {
-    fn bind(&mut self, path: &str) -> Option<NoteId> {
+    fn bind(&mut self, path: &str) -> IdResult<NoteId> {
         self.run("bind", |db, _| db.note_id_bind(path))
     }
-    fn moved(&mut self, from: &str, to: &str) -> Option<NoteId> {
+    fn moved(&mut self, from: &str, to: &str) -> IdResult<NoteId> {
         self.run("move", |db, now| db.note_id_move(from, to, now))
     }
-    fn retired(&mut self, path: &str, replaced_by: Option<&str>) -> Option<NoteId> {
+    fn retired(&mut self, path: &str, replaced_by: Option<&str>) -> IdResult<NoteId> {
         let id = self.run("retire", |db, now| {
             let by = replaced_by.map(|b| db.note_id_bind(b)).transpose()?;
             db.note_id_retire(path, by, now)
@@ -79,19 +76,68 @@ impl NoteIdSink for StateNoteIds {
         }
         id
     }
-    fn revive(&mut self, id: NoteId, path: &str) -> Option<NoteId> {
+    fn revive(&mut self, id: NoteId, path: &str) -> IdResult<bool> {
         self.run("revive", |db, _| db.note_id_revive(id, path))
-            .and_then(|ok| ok.then_some(id))
     }
-    fn locate(&mut self, id: NoteId) -> Option<NoteLocation> {
+    fn locate(&mut self, id: NoteId) -> IdResult<NoteLocation> {
         self.run("locate", |db, _| db.note_id_locate(id))
     }
 }
 
-/// Installs the sink on `writer` (before the writer thread starts) and runs one retention pass.
-pub fn install(writer: &mut VaultWriter, state: &Arc<Mutex<StateDb>>) {
-    prune(&mut lock(state), now_ms());
-    writer.set_note_id_sink(Box::new(StateNoteIds::new(Arc::clone(state))));
+/// The daemon's sink over `state`, for [`VaultWriter::open`].
+pub fn sink(state: &Arc<Mutex<StateDb>>) -> Box<dyn NoteIdSink> {
+    Box::new(StateNoteIds::new(Arc::clone(state)))
+}
+
+/// Startup pass on the opened (reconciled) writer, before its thread starts: one retention pass,
+/// then the repair (plan tn-review-2026-11-10-remediation Decision 3).
+pub fn install(writer: &VaultWriter, state: &Arc<Mutex<StateDb>>) {
+    let now = now_ms();
+    let mut db = lock(state);
+    prune(&mut db, now);
+    repair(&mut db, writer, now);
+}
+
+/// Retires each live id row whose file is absent, exactly as a delete seen while running
+/// (`note_id_retire`; the tombstone then ages out under the normal retention). The index's file
+/// set is only a fast positive check — it omits `.gitignore`d files that exist and can be bound
+/// (audit F1) — so every other row is confirmed `NotFound` on the filesystem first; an inspection
+/// error is not absence and keeps the row.
+fn repair(db: &mut StateDb, writer: &VaultWriter, now: i64) {
+    let live = match db.note_id_live_paths() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "note id repair: listing live rows failed; skipped");
+            return;
+        }
+    };
+    let indexed: std::collections::HashSet<String> = match writer.index().query().file_paths() {
+        Ok(v) => v.into_iter().map(|(_, p)| p).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "note id repair: index file list failed; checking every row");
+            std::collections::HashSet::new()
+        }
+    };
+    let root = writer.fs().root();
+    let mut retired = 0usize;
+    for path in live {
+        if indexed.contains(&path) {
+            continue;
+        }
+        match std::fs::symlink_metadata(root.join(&path)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match db.note_id_retire(&path, None, now) {
+                    Ok(_) => retired += 1,
+                    Err(e) => tracing::warn!(error = %e, "note id repair: retire failed"),
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "note id repair: cannot inspect a file; row kept"),
+        }
+    }
+    if retired > 0 {
+        tracing::info!(retired, "note id repair: retired rows whose file is absent");
+    }
 }
 
 #[cfg(test)]

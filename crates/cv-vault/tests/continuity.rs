@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use common::{Fx, h};
 use cv_vault::{
-    ContentHash, EventKind, NoteId, NoteIdSink, NoteLocation, Origin, VaultEvent, WatchConfig,
-    WriterHandle, spawn_writer_with_watcher,
+    ContentHash, EventKind, NoteId, Origin, VaultEvent, WatchConfig, WriterHandle,
+    spawn_writer_with_watcher,
 };
 
 const DEB: Duration = Duration::from_millis(50);
@@ -37,52 +37,8 @@ fn collect(rx: &Receiver<VaultEvent>, window: Duration) -> Vec<VaultEvent> {
 }
 
 /// An in-memory id store with the daemon sink's semantics (mint-or-get, move, retire).
-#[derive(Default)]
-struct Ids {
-    live: std::collections::BTreeMap<String, NoteId>,
-    next: u64,
-}
-
-impl Ids {
-    fn get(&mut self, p: &str) -> NoteId {
-        if let Some(id) = self.live.get(p) {
-            return *id;
-        }
-        self.next += 1;
-        self.live.insert(p.into(), NoteId(self.next));
-        NoteId(self.next)
-    }
-}
-
-impl NoteIdSink for Ids {
-    fn bind(&mut self, path: &str) -> Option<NoteId> {
-        Some(self.get(path))
-    }
-    fn moved(&mut self, from: &str, to: &str) -> Option<NoteId> {
-        let id = self.get(from);
-        self.live.remove(from);
-        self.live.insert(to.into(), id);
-        Some(id)
-    }
-    fn retired(&mut self, path: &str, by: Option<&str>) -> Option<NoteId> {
-        if let Some(b) = by {
-            self.get(b);
-        }
-        let id = self.get(path);
-        self.live.remove(path);
-        Some(id)
-    }
-    fn revive(&mut self, _: NoteId, _: &str) -> Option<NoteId> {
-        None
-    }
-    fn locate(&mut self, _: NoteId) -> Option<NoteLocation> {
-        None
-    }
-}
-
 fn spawn(fx: &Fx) -> (WriterHandle, Receiver<VaultEvent>) {
-    let mut w = fx.live();
-    w.set_note_id_sink(Box::new(Ids::default()));
+    let w = fx.live();
     let (wh, rx, _j) = spawn_writer_with_watcher(w, cfg()).unwrap();
     (wh, rx)
 }

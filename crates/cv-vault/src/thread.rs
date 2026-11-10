@@ -95,14 +95,14 @@ impl WriterHandle {
 
     /// [`VaultWriter::bind_note`]: the id of the file at `path`, minted if needed, on the writer
     /// thread (plan note-identity WP-2 answers `bind_note` through this).
-    pub fn bind_note(&self, path: &str) -> Result<Option<NoteId>> {
+    pub fn bind_note(&self, path: &str) -> Result<NoteId> {
         let p = path.to_string();
-        self.call(move |w| w.bind_note(&p))
+        Ok(self.call(move |w| w.bind_note(&p))??)
     }
 
     /// [`VaultWriter::locate_note`], on the writer thread (WP-2 `locate_note`).
-    pub fn locate_note(&self, id: NoteId) -> Result<Option<NoteLocation>> {
-        self.call(move |w| w.locate_note(id))
+    pub fn locate_note(&self, id: NoteId) -> Result<NoteLocation> {
+        Ok(self.call(move |w| w.locate_note(id))??)
     }
 }
 

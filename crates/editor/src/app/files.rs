@@ -301,7 +301,12 @@ impl App {
         }) {
             return t;
         }
-        let p = cv_protocol::NoteSetBoolParams { path, key, value };
+        let p = cv_protocol::NoteSetBoolParams {
+            id: None,
+            path,
+            key,
+            value,
+        };
         self.rpc(
             move |d| d.note_set_bool(&p).map_err(|e| crate::daemon::rpc_err(&e)),
             |r| Message::Views(crate::message::ViewsMsg::BoolSet(r)),

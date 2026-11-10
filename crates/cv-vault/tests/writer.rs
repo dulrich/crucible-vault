@@ -315,3 +315,22 @@ fn open_reconciles_files_created_while_stopped() {
         Some(ing.id)
     );
 }
+
+/// Decision 4: a failing id sink makes the write report the failure. The file operation has
+/// already happened and is not rolled back.
+#[test]
+fn failing_sink_reports_the_failure_after_the_write() {
+    let fx = Fx::new(&[("a.md", "one")]);
+    let ids = common::MemIds::default();
+    let fail = std::sync::Arc::clone(&ids.fail);
+    let mut w =
+        cv_vault::VaultWriter::open(common::live_fs(fx.vault.path()), &fx.base(), Box::new(ids))
+            .unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let err = w.write("a.md", b"two", Some(h("one"))).unwrap_err();
+    assert!(matches!(err, VaultError::NoteId(_)), "{err:?}");
+    assert_eq!(fx.read("a.md"), "two", "the write itself landed");
+    assert!(w.bind_note("a.md").is_err());
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    w.write("a.md", b"three", Some(h("two"))).unwrap();
+}

@@ -315,12 +315,12 @@ fn follow_note(inner: &Inner, context: &mut ActionContext) -> Follow {
         return Follow::Same;
     };
     match w.locate_note(id) {
-        Ok(Some(cv_vault::NoteLocation::Live { path: now })) if now != path => {
+        Ok(cv_vault::NoteLocation::Live { path: now }) if now != path => {
             tracing::info!("job note moved; following it");
             context.active_path = Some(now);
             Follow::Moved
         }
-        Ok(Some(cv_vault::NoteLocation::Gone { .. })) => Follow::Gone(path),
+        Ok(cv_vault::NoteLocation::Gone { .. }) => Follow::Gone(path),
         Ok(_) => Follow::Same,
         Err(e) => {
             tracing::warn!(error = %e, "note locate failed; running unfollowed");

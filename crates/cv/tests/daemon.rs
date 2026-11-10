@@ -244,6 +244,7 @@ async fn note_set_bool_edits_frontmatter() {
     let mut c = client(&env);
     let set = |c: &mut Client, path: &str, value: bool| {
         c.request(Request::NoteSetBool(NoteSetBoolParams {
+            id: None,
             path: path.into(),
             key: "read".into(),
             value,
@@ -317,6 +318,7 @@ async fn mutations_land_in_the_vault() {
     assert!(!env.vault().join("notes/b.md").exists());
     assert!(env.vault().join("notes/c.md").exists());
     c.request(Request::Delete(DeleteParams {
+        id: None,
         mode: DeleteMode::Trash,
         path: "a 1.md".into(),
     }))
@@ -325,6 +327,7 @@ async fn mutations_land_in_the_vault() {
     assert!(env.vault().join(".trash/a 1.md").exists());
     assert_eq!(
         rpc_code(c.request(Request::Delete(DeleteParams {
+            id: None,
             mode: DeleteMode::Trash,
             path: "nope.md".into()
         }))),
@@ -333,12 +336,14 @@ async fn mutations_land_in_the_vault() {
     // plan editor-ui-round-3 WP-3: the preview / delete_note RPCs are wired.
     let pv = c
         .request(Request::DeletePreview(PathParams {
+            id: None,
             path: "notes/c.md".into(),
         }))
         .unwrap();
     assert!(pv["items"].is_array(), "{pv}");
     let dn = c
         .request(Request::DeleteNote(cv_protocol::DeleteNoteParams {
+            id: None,
             path: "notes/c.md".into(),
             attachments: vec!["missing.png".into()],
             mode: DeleteMode::Permanent,
@@ -362,6 +367,7 @@ async fn trash_moves_reach_the_ledger_and_follow_vault_toml() {
     let c = client(&env);
     let rows = || lock_rows(&d);
     c.request(Request::Delete(DeleteParams {
+        id: None,
         mode: DeleteMode::Trash,
         path: "a.md".into(),
     }))
@@ -389,6 +395,7 @@ async fn trash_moves_reach_the_ledger_and_follow_vault_toml() {
         matches!(n, Notification::ConfigReloaded { .. })
     });
     c.request(Request::Delete(DeleteParams {
+        id: None,
         mode: DeleteMode::Trash,
         path: "notes/b.md".into(),
     }))
@@ -1075,6 +1082,108 @@ async fn job_timeline_and_stats_over_rpc() {
         serde_json::to_string(&st).unwrap()
     );
     assert!(!wire.contains(SENTINEL), "params text leaked: {wire}");
+    drop(c);
+    d.shutdown().await.unwrap();
+}
+
+/// Plan tn-review-2026-11-10-remediation D2: delete, delete_preview, delete_note and
+/// note_set_bool follow an id past a stale path and echo the path acted on; by-path replies keep
+/// their shape; a retired id is `NOT_FOUND`, never a fallback to the stale path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn by_id_delete_preview_delete_note_and_set_bool_follow_the_id() {
+    let env = Env::new();
+    let d = start(&env).await;
+    let c = client(&env);
+    let bind = |p: &str| {
+        let v = c
+            .request(Request::BindNote(cv_protocol::BindNoteParams {
+                path: p.into(),
+            }))
+            .unwrap();
+        serde_json::from_value::<cv_protocol::NoteId>(v["id"].clone()).unwrap()
+    };
+    let rename = |from: &str, to: &str| {
+        c.request(Request::Rename(RenameParams {
+            id: None,
+            from: from.into(),
+            to: to.into(),
+        }))
+        .unwrap();
+    };
+    let a = bind("a.md");
+    rename("a.md", "moved.md");
+    // By path: the reply has no `path`.
+    let r = c
+        .request(Request::NoteSetBool(NoteSetBoolParams {
+            id: None,
+            path: "moved.md".into(),
+            key: "k".into(),
+            value: false,
+        }))
+        .unwrap();
+    assert!(r.get("path").is_none(), "{r}");
+    let r = c
+        .request(Request::NoteSetBool(NoteSetBoolParams {
+            id: Some(a),
+            path: "a.md".into(),
+            key: "k".into(),
+            value: true,
+        }))
+        .unwrap();
+    assert_eq!(r["path"], json!("moved.md"), "{r}");
+    let text = std::fs::read_to_string(env.vault().join("moved.md")).unwrap();
+    assert!(text.contains("k: true"), "{text}");
+    assert!(
+        !env.vault().join("a.md").exists(),
+        "never a write at the stale path"
+    );
+    let pv = c
+        .request(Request::DeletePreview(PathParams {
+            id: Some(a),
+            path: "a.md".into(),
+        }))
+        .unwrap();
+    assert_eq!(pv["path"], json!("moved.md"), "{pv}");
+    let del = c
+        .request(Request::Delete(DeleteParams {
+            id: Some(a),
+            mode: DeleteMode::Trash,
+            path: "a.md".into(),
+        }))
+        .unwrap();
+    assert_eq!(del, json!({"path":"moved.md"}));
+    assert!(!env.vault().join("moved.md").exists());
+    // The id is retired now: no fallback to the stale path.
+    std::fs::write(env.vault().join("a.md"), "x").unwrap();
+    for req in [
+        Request::Delete(DeleteParams {
+            id: Some(a),
+            mode: DeleteMode::Trash,
+            path: "a.md".into(),
+        }),
+        Request::NoteSetBool(NoteSetBoolParams {
+            id: Some(a),
+            path: "a.md".into(),
+            key: "k".into(),
+            value: true,
+        }),
+    ] {
+        assert_eq!(rpc_code(c.request(req)), error_codes::NOT_FOUND);
+    }
+    assert!(env.vault().join("a.md").exists());
+    let b = bind("notes/b.md");
+    rename("notes/b.md", "notes/c.md");
+    let dn = c
+        .request(Request::DeleteNote(cv_protocol::DeleteNoteParams {
+            id: Some(b),
+            path: "notes/b.md".into(),
+            attachments: vec![],
+            mode: DeleteMode::Permanent,
+        }))
+        .unwrap();
+    assert_eq!(dn["path"], json!("notes/c.md"), "{dn}");
+    assert_eq!(dn["removed"], json!(["notes/c.md"]), "{dn}");
+    assert!(!env.vault().join("notes/c.md").exists());
     drop(c);
     d.shutdown().await.unwrap();
 }

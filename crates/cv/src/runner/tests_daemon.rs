@@ -858,6 +858,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     assert_held(c.request(write()), held);
     assert_held(
         c.request(Request::NoteSetBool(cv_protocol::NoteSetBoolParams {
+            id: None,
             path: held.into(),
             key: "done".into(),
             value: true,
@@ -883,6 +884,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     );
     assert_held(
         c.request(Request::Delete(cv_protocol::DeleteParams {
+            id: None,
             path: held.into(),
             mode: cv_protocol::DeleteMode::Trash,
         })),
@@ -890,6 +892,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     );
     assert_held(
         c.request(Request::Delete(cv_protocol::DeleteParams {
+            id: None,
             path: "inbox".into(),
             mode: cv_protocol::DeleteMode::Trash,
         })),
@@ -897,6 +900,7 @@ async fn client_writes_to_a_held_note_are_refused_until_release() {
     );
     assert_held(
         c.request(Request::DeleteNote(cv_protocol::DeleteNoteParams {
+            id: None,
             path: held.into(),
             attachments: Vec::new(),
             mode: cv_protocol::DeleteMode::Trash,

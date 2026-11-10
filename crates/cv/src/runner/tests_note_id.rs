@@ -135,6 +135,7 @@ async fn revive_keeps_the_id_and_refuses_a_taken_path() {
     let mut rx = d.subscribe();
     let a = bind(&c, "a.md");
     c.request(Request::Delete(cv_protocol::DeleteParams {
+        id: None,
         path: "a.md".into(),
         mode: cv_protocol::DeleteMode::Permanent,
     }))
@@ -179,6 +180,7 @@ async fn revive_keeps_the_id_and_refuses_a_taken_path() {
     std::fs::write(vault.join("inbox/x.md"), "# other\n").unwrap();
     rename(&c, "inbox/old.md", "inbox/gone.md", None).unwrap();
     c.request(Request::Delete(cv_protocol::DeleteParams {
+        id: None,
         path: "inbox/gone.md".into(),
         mode: cv_protocol::DeleteMode::Permanent,
     }))
@@ -228,6 +230,7 @@ async fn rename_by_id_acts_on_the_current_path() {
             .is_none()
     );
     c.request(Request::Delete(cv_protocol::DeleteParams {
+        id: None,
         path: "c.md".into(),
         mode: cv_protocol::DeleteMode::Permanent,
     }))

@@ -189,13 +189,19 @@ impl DaemonClient for SocketDaemon {
 
     fn delete(&self, path: &str) -> Result<()> {
         let (path, mode) = (path.to_owned(), DeleteMode::Trash);
-        self.call::<m::Delete>(DeleteParams { path, mode })
-            .map(drop)
+        self.call::<m::Delete>(DeleteParams {
+            id: None,
+            path,
+            mode,
+        })
+        .map(drop)
     }
 
     fn delete_preview(&self, path: &str) -> Result<Vec<DeletePreviewItem>> {
         let path = path.to_owned();
-        Ok(self.call::<m::DeletePreview>(PathParams { path })?.items)
+        Ok(self
+            .call::<m::DeletePreview>(PathParams { id: None, path })?
+            .items)
     }
 
     fn delete_note(
@@ -206,6 +212,7 @@ impl DaemonClient for SocketDaemon {
     ) -> Result<DeleteNoteResult> {
         let (path, attachments) = (path.to_owned(), attachments.to_vec());
         self.call::<m::DeleteNote>(DeleteNoteParams {
+            id: None,
             path,
             attachments,
             mode,

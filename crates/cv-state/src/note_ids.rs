@@ -62,6 +62,15 @@ impl StateDb {
         Ok(v.map(to_id))
     }
 
+    /// Every live row's path (the daemon's startup repair checks each against the vault).
+    pub fn note_id_live_paths(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn()
+            .prepare("SELECT path FROM note_ids WHERE retired_ms IS NULL")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
     /// The live id at `path`, minting one if the path has none.
     pub fn note_id_bind(&mut self, path: &str) -> Result<NoteId> {
         let tx = self.conn.transaction()?;

@@ -357,6 +357,7 @@ fn checkbox_cells_toggle_the_buffer_or_call_note_set_bool() {
     assert_eq!(
         d.bool_calls().expect("calls"),
         [cv_protocol::NoteSetBoolParams {
+            id: None,
             path: "Linker.md".into(),
             key: "read".into(),
             value: false,

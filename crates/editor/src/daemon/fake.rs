@@ -828,6 +828,7 @@ impl DaemonClient for FakeDaemon {
         let mut g = self.lock()?;
         self.remove_mode(&mut g, path, mode)?;
         let mut out = DeleteNoteResult {
+            path: None,
             removed: vec![path.to_owned()],
             skipped: Vec::new(),
         };

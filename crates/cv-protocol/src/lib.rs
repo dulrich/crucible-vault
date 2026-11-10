@@ -316,9 +316,15 @@ pub struct RenameParams {
     pub id: Option<NoteId>,
 }
 
+/// `delete_preview` params (by path, or by id).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathParams {
     pub path: String,
+    /// By-id addressing (plan tn-review-2026-11-10-remediation Decision 2): the note acted on is
+    /// the id's live path (a stale `path` is ignored); an unresolvable id fails, never falling
+    /// back to `path`. Absent = by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<NoteId>,
 }
 
 /// How a delete removes a file: `trash` moves it to the trash `vault.toml` `[trash] location`
@@ -338,6 +344,11 @@ pub struct DeleteParams {
     pub path: String,
     #[serde(default)]
     pub mode: DeleteMode,
+    /// By-id addressing (plan tn-review-2026-11-10-remediation Decision 2): the note acted on is
+    /// the id's live path (a stale `path` is ignored); an unresolvable id fails, never falling
+    /// back to `path`. Absent = by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<NoteId>,
 }
 
 /// One `delete_preview` item: an embed / non-note link target of the note that exists.
@@ -351,6 +362,9 @@ pub struct DeletePreviewItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletePreviewResult {
     pub items: Vec<DeletePreviewItem>,
+    /// By-id requests only: the path acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// `delete_note`: delete `path` (CAS delete) and then each listed attachment that nothing
@@ -362,6 +376,11 @@ pub struct DeleteNoteParams {
     pub attachments: Vec<String>,
     #[serde(default)]
     pub mode: DeleteMode,
+    /// By-id addressing (plan tn-review-2026-11-10-remediation Decision 2): the note acted on is
+    /// the id's live path (a stale `path` is ignored); an unresolvable id fails, never falling
+    /// back to `path`. Absent = by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<NoteId>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +389,9 @@ pub struct DeleteNoteResult {
     pub removed: Vec<String>,
     /// Attachments left in place (referenced elsewhere at delete time, or already gone).
     pub skipped: Vec<String>,
+    /// By-id requests only: the path acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -723,12 +745,20 @@ pub struct NoteSetBoolParams {
     pub path: String,
     pub key: String,
     pub value: bool,
+    /// By-id addressing (plan tn-review-2026-11-10-remediation Decision 2): the note acted on is
+    /// the id's live path (a stale `path` is ignored); an unresolvable id fails, never falling
+    /// back to `path`. Absent = by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<NoteId>,
 }
 
 /// `note_set_bool` result: the note's hash after the call (unchanged when already set).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteSetBoolResult {
     pub hash: String,
+    /// By-id requests only: the path acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// `subscribe` result: every topic the connection now receives.
@@ -747,9 +777,13 @@ pub struct RenameResult {
     pub from: Option<String>,
 }
 
-/// `delete` result (an empty object).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeleteResult {}
+/// `delete` result (an empty object for a by-path request).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteResult {
+    /// By-id requests only: the path acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupChannelsParams {

@@ -70,7 +70,12 @@ impl Lx {
 
     /// Live writer allowlisting the repo.
     fn writer(&self) -> VaultWriter {
-        VaultWriter::open(self.fs(vec![self.repo.path().to_path_buf()]), &self.base()).unwrap()
+        VaultWriter::open(
+            self.fs(vec![self.repo.path().to_path_buf()]),
+            &self.base(),
+            Box::new(common::MemIds::default()),
+        )
+        .unwrap()
     }
 
     fn target_text(&self) -> String {
@@ -105,7 +110,12 @@ fn cas_write_through_link_updates_target_and_keeps_link() {
 #[test]
 fn link_write_outside_root_and_allowlist_is_refused_until_allowlisted() {
     let lx = Lx::new();
-    let mut w = VaultWriter::open(lx.fs(Vec::new()), &lx.base()).unwrap();
+    let mut w = VaultWriter::open(
+        lx.fs(Vec::new()),
+        &lx.base(),
+        Box::new(common::MemIds::default()),
+    )
+    .unwrap();
     let err = w
         .write("f/linked.md", b"nope", Some(h("T [[a]]")))
         .unwrap_err();
@@ -127,7 +137,12 @@ fn link_write_outside_root_and_allowlist_is_refused_until_allowlisted() {
 fn link_into_the_vault_root_is_writable_without_an_allowlist() {
     let lx = Lx::new();
     lx.link(&lx.vault.path().join("a.md"), "alias.md");
-    let mut w = VaultWriter::open(lx.fs(Vec::new()), &lx.base()).unwrap();
+    let mut w = VaultWriter::open(
+        lx.fs(Vec::new()),
+        &lx.base(),
+        Box::new(common::MemIds::default()),
+    )
+    .unwrap();
     w.write("alias.md", b"# A2\n", Some(h("# A\n"))).unwrap();
     assert_eq!(
         std::fs::read_to_string(lx.vault.path().join("a.md")).unwrap(),

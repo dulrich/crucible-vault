@@ -26,7 +26,7 @@ mod writer;
 pub use error::{Result, VaultError};
 pub use fs::VaultFs;
 pub use hash::ContentHash;
-pub use note_id::{NoNoteIds, NoteId, NoteIdSink, NoteLocation};
+pub use note_id::{IdResult, NoteId, NoteIdError, NoteIdSink, NoteLocation};
 pub use path::validate_rel_path;
 pub use thread::{WriterHandle, spawn_writer, spawn_writer_with_watcher};
 pub use trash::{

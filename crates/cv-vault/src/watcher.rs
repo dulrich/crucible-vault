@@ -528,7 +528,7 @@ impl WatchState {
         if echo.is_some() {
             return true;
         }
-        let id = w.note_ids_mut().moved(from, to);
+        let id = external_id(w.note_ids_mut().moved(from, to));
         out.push(VaultEvent {
             path: to.to_string(),
             kind: EventKind::Renamed {
@@ -594,7 +594,7 @@ impl WatchState {
                             tracing::warn!(path, error = %e, "index update for external delete failed");
                         }
                         if echo.is_none() {
-                            let id = w.note_ids_mut().retired(path, None);
+                            let id = external_id(w.note_ids_mut().retired(path, None));
                             out.push(VaultEvent {
                                 path: path.to_string(),
                                 kind: EventKind::Deleted { replaced_by: None },
@@ -639,7 +639,7 @@ impl WatchState {
         if echo.is_some() {
             return; // the writer's own mutation: already reported by the writer
         }
-        let id = w.note_ids_mut().bind(path);
+        let id = external_id(w.note_ids_mut().bind(path));
         out.push(VaultEvent {
             path: path.to_string(),
             kind: if prev.is_none() {
@@ -652,6 +652,15 @@ impl WatchState {
             hash: Some(h),
         });
     }
+}
+
+/// An External transition's id: there is no caller to report a store failure to, so it is logged
+/// and the event carries no id; startup repair reconciles a row left stale (Decision 3/4).
+fn external_id(
+    r: crate::note_id::IdResult<crate::note_id::NoteId>,
+) -> Option<crate::note_id::NoteId> {
+    r.map_err(|e| tracing::warn!(error = %e, "note id: external transition not recorded"))
+        .ok()
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ use cv_index::{Index, LinkRow};
 use crate::error::{Result, VaultError};
 use crate::fs::VaultFs;
 use crate::hash::ContentHash;
-use crate::note_id::{NoNoteIds, NoteId, NoteIdSink, NoteLocation};
+use crate::note_id::{IdResult, NoteId, NoteIdSink, NoteLocation};
 use crate::path::validate_rel_path;
 use crate::rewrite::rewrite_note;
 use crate::trash::{TrashReason, TrashRecord};
@@ -77,8 +77,9 @@ impl std::fmt::Debug for VaultWriter {
 pub(crate) const DEFAULT_ECHO_TTL: Duration = Duration::from_secs(5);
 
 impl VaultWriter {
-    /// A writer over `fs` and the index writer handle `index` (which must index `fs.root()`).
-    pub fn new(fs: VaultFs, index: Index) -> Self {
+    /// A writer over `fs` and the index writer handle `index` (which must index `fs.root()`),
+    /// keeping note ids through `ids`.
+    pub fn new(fs: VaultFs, index: Index, ids: Box<dyn NoteIdSink>) -> Self {
         Self {
             fs,
             index,
@@ -86,13 +87,13 @@ impl VaultWriter {
             trash_records: Vec::new(),
             trash_sink: None,
             events: None,
-            ids: Box::new(NoNoteIds),
+            ids,
         }
     }
 
     /// Opens the index at base path `index_base` for `fs.root()`, creating it when there is none
     /// and rebuilding it on a schema/generation mismatch (D14: derived, never migrated).
-    pub fn open(fs: VaultFs, index_base: &Path) -> Result<Self> {
+    pub fn open(fs: VaultFs, index_base: &Path, ids: Box<dyn NoteIdSink>) -> Result<Self> {
         let index = match Index::open(index_base) {
             Ok(mut i) => {
                 i.load_ignore(fs.root());
@@ -125,7 +126,7 @@ impl VaultWriter {
             ) => Index::create(fs.root(), index_base)?,
             Err(e) => return Err(e.into()),
         };
-        Ok(Self::new(fs, index))
+        Ok(Self::new(fs, index, ids))
     }
 
     /// Echo entries expire after `ttl` (tests use short values).
@@ -201,32 +202,26 @@ impl VaultWriter {
         self.events = Some(tx);
     }
 
-    /// Installs the note-id sink (plan note-identity D1); the default binds nothing.
-    pub fn set_note_id_sink(&mut self, sink: Box<dyn NoteIdSink>) {
-        self.ids = sink;
-    }
-
     /// The note-id sink (the watcher binds External transitions through it).
     pub(crate) fn note_ids_mut(&mut self) -> &mut dyn NoteIdSink {
         self.ids.as_mut()
     }
 
-    /// The id of the file at `path`, minted if it has none (`None` without a sink, or on a store
-    /// failure). Runs on the writer thread, so it observes every mutation that returned before
-    /// it (plan note-identity D2 `bind_note`; call through [`crate::WriterHandle::bind_note`]).
-    pub fn bind_note(&mut self, path: &str) -> Option<NoteId> {
+    /// The id of the file at `path`, minted if it has none. Runs on the writer thread, so it
+    /// observes every mutation that returned before it (plan note-identity D2 `bind_note`; call
+    /// through [`crate::WriterHandle::bind_note`]).
+    pub fn bind_note(&mut self, path: &str) -> IdResult<NoteId> {
         self.ids.bind(path)
     }
 
-    /// Where `id` is now (`None` without a sink, or on a store failure); writer-thread ordered
-    /// like [`Self::bind_note`].
-    pub fn locate_note(&mut self, id: NoteId) -> Option<NoteLocation> {
+    /// Where `id` is now; writer-thread ordered like [`Self::bind_note`].
+    pub fn locate_note(&mut self, id: NoteId) -> IdResult<NoteLocation> {
         self.ids.locate(id)
     }
 
-    /// Makes the retired `id` live again at `path` (plan note-identity D3, storage half); `None`
-    /// if it cannot be (unknown, live elsewhere, `path` taken, or no sink).
-    pub fn revive_note(&mut self, id: NoteId, path: &str) -> Option<NoteId> {
+    /// Makes the retired `id` live again at `path` (plan note-identity D3, storage half); `false`
+    /// if it cannot be (unknown, live elsewhere, or `path` taken).
+    pub fn revive_note(&mut self, id: NoteId, path: &str) -> IdResult<bool> {
         self.ids.revive(id, path)
     }
 
@@ -262,8 +257,11 @@ impl VaultWriter {
         };
         let (h, full) = self.fs.put(path, bytes, expected.as_ref())?;
         self.index_written(path, bytes, &full, &h);
+        // Decision 4: a binding failure is reported after the event (the file is written and
+        // not rolled back); startup repair reconciles a row left stale.
         let id = self.ids.bind(path);
-        self.emit(path, kind, id, Some(&h));
+        self.emit(path, kind, id.as_ref().ok().copied(), Some(&h));
+        id?;
         Ok(h)
     }
 
@@ -361,9 +359,10 @@ impl VaultWriter {
             EventKind::Deleted {
                 replaced_by: replaced_by.map(str::to_string),
             },
-            id,
+            id.as_ref().ok().copied(),
             None,
         );
+        id?;
         Ok(())
     }
 
@@ -498,9 +497,11 @@ impl VaultWriter {
             EventKind::Renamed {
                 from: from.to_string(),
             },
-            id,
+            id.as_ref().ok().copied(),
             Some(&h),
         );
+        // Decision 4: reported after the link rewrites below, which the move already committed.
+        let id_failed = id.err();
         // Resolver after the rename, and the same without the moved file (uniqueness check).
         let with = self.index.resolver().clone();
         let mut without = with.clone();
@@ -563,6 +564,9 @@ impl VaultWriter {
         }
         outcome.rewritten.sort();
         outcome.skipped_conflicts.sort();
+        if let Some(e) = id_failed {
+            return Err(e.into());
+        }
         Ok(outcome)
     }
 

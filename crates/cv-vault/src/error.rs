@@ -39,6 +39,10 @@ pub enum VaultError {
     Watch(#[from] notify::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// The note-id store failed (Decision 4). Raised after the file operation it follows, which
+    /// is not rolled back.
+    #[error(transparent)]
+    NoteId(#[from] crate::note_id::NoteIdError),
     /// The writer thread is gone (panicked or shut down).
     #[error("writer thread is gone")]
     WriterGone,

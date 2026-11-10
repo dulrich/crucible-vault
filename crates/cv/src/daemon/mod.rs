@@ -201,12 +201,14 @@ impl Daemon {
             .with_link_write_roots(config.link_write_roots.clone());
         let vault_root = fs.root().to_path_buf();
         // `open` creates the index when absent and rebuilds on a schema/generation mismatch.
-        let mut writer = VaultWriter::open(fs, &config.index_db).context("opening the index")?;
+        let mut writer = VaultWriter::open(fs, &config.index_db, crate::note_id::sink(&state))
+            .context("opening the index")?;
         // Plan tidiness-trash-orphans WP-1: every trash move reaches `trash_entries`.
         trash::install_ledger(&mut writer, Arc::clone(&state));
         // Plan note-identity D1: every vault file keeps a durable id in `note_ids`, bound on the
-        // writer thread at the same transition sites.
-        crate::note_id::install(&mut writer, &state);
+        // writer thread at the same transition sites (the sink above); rows whose file vanished
+        // while the daemon was down are retired here.
+        crate::note_id::install(&writer, &state);
         let (handle, vault_events, writer_join) =
             cv_vault::spawn_writer_with_watcher(writer, opts.watch).context("starting writer")?;
         let views = ViewRegistry::start(

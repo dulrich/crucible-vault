@@ -482,7 +482,7 @@ impl Inner {
         let w = self.writer.writer()?;
         let p = path.to_owned();
         let r = w.call(move |vw| match vw.fs().hash(&p) {
-            Ok(Some(_)) => vw.bind_note(&p),
+            Ok(Some(_)) => vw.bind_note(&p).ok(), // the sink logs a store failure
             _ => None,
         });
         match r {

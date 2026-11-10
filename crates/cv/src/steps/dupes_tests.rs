@@ -284,7 +284,12 @@ fn scratch_dry_run() {
     config.reload(&files, &crate::steps::validate);
     let fs = cv_vault::VaultFs::live(&vault).unwrap();
     let t0 = std::time::Instant::now();
-    let w = cv_vault::VaultWriter::open(fs, &index_db).unwrap();
+    let w = cv_vault::VaultWriter::open(
+        fs,
+        &index_db,
+        Box::new(cv_vault::test_support::MemNoteIds::default()),
+    )
+    .unwrap();
     let (writer, _join) = cv_vault::spawn_writer(w).unwrap();
     eprintln!("index build {:?}", t0.elapsed());
     let status = |k: &str| {
