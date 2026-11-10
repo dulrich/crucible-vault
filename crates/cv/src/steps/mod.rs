@@ -163,24 +163,6 @@ impl StepOutcome {
     }
 }
 
-/// The var a `move` step sets to the note it moved **from** (alongside `moved_path`).
-pub const MOVED_FROM: &str = "moved_from";
-
-/// Once a step has moved the run's active note, later steps that default to the active note
-/// operate on the moved path (plan `editor-feedback-round-2` WP-8): when `o` reports a move whose
-/// source is `context.active_path`, the active path becomes the destination. Explicit `path`
-/// params are unaffected. The runner applies this to fresh and checkpoint-replayed outcomes alike.
-pub fn follow_move(context: &mut ActionContext, o: &StepOutcome) {
-    let (Some(Value::String(from)), Some(Value::String(to))) =
-        (o.vars.get(MOVED_FROM), o.vars.get("moved_path"))
-    else {
-        return;
-    };
-    if context.active_path.as_deref() == Some(from.as_str()) {
-        context.active_path = Some(to.clone());
-    }
-}
-
 /// A step failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepError {

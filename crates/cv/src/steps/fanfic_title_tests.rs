@@ -65,10 +65,6 @@ fn filing_a_fanfic_renames_it_and_rewrites_links() {
         .unwrap();
     assert_eq!(var(&o, "fanfic_renamed"), json!(1));
     assert_eq!(var(&o, "moved_path"), json!("Clips/Alpha - Chapter 3.md"));
-    assert_eq!(
-        var(&o, "moved_from"),
-        json!("Clips/Alpha - Chapter 3 - Writer - Fandom.md")
-    );
     assert!(e.read("Clips/Alpha - Chapter 3.md").is_some());
     assert!(
         e.read("Clips/Alpha - Chapter 3 - Writer - Fandom.md")

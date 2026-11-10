@@ -48,6 +48,9 @@ async fn clip_filing_runs_first_and_enrichment_follows_the_final_path_serialized
     let live = Arc::new(AtomicUsize::new(0));
     let max_live = Arc::new(AtomicUsize::new(0));
     let (l2, lv, ml) = (Arc::clone(&log), Arc::clone(&live), Arc::clone(&max_live));
+    let clips = ["Clippings/a.md", "Clippings/b.md", "Clippings/c.md"];
+    let w = vault_writer(&f, &clips);
+    let w2 = w.clone();
     let exec = FnExec(Box::new(move |step, ctx| {
         let path = ctx.context.active_path.clone().unwrap_or_default();
         let name = path.rsplit('/').next().unwrap_or_default().to_owned();
@@ -71,10 +74,10 @@ async fn clip_filing_runs_first_and_enrichment_follows_the_final_path_serialized
             ("file-as-kind", _) => {
                 let to = format!("Kind/{name}");
                 l2.lock().unwrap().push(format!("filed {to}"));
+                // The move goes through the writer; the runner follows the clip by id.
+                move_on(&w2, &path, &to);
                 let mut o = StepOutcome::default();
                 o.vars.insert("moved_path".into(), serde_json::json!(to));
-                o.vars
-                    .insert(steps::MOVED_FROM.into(), serde_json::json!(path));
                 Ok(o)
             }
             ("clip-enrich", kind) => {
@@ -88,8 +91,16 @@ async fn clip_filing_runs_first_and_enrichment_follows_the_final_path_serialized
             _ => Ok(StepOutcome::default()),
         }
     }));
-    let r = runner(&f, Arc::new(exec), Arc::new(SystemClock), 2, FILING_FIRST);
-    let ids: Vec<String> = ["Clippings/a.md", "Clippings/b.md", "Clippings/c.md"]
+    let r = runner_on(
+        &f,
+        Some(w),
+        Arc::new(exec),
+        Arc::new(SystemClock),
+        2,
+        0,
+        FILING_FIRST,
+    );
+    let ids: Vec<String> = clips
         .iter()
         .map(|p| enqueue(&r, "clip-images", Some(p), Lane::Background))
         .collect();

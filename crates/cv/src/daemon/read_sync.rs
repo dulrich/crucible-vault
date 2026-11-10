@@ -20,7 +20,7 @@ use super::*;
 pub(super) const READ_QUIET: Duration = Duration::from_millis(150);
 
 /// Last-seen `read == true` per markdown path, plus the paths waiting out [`READ_QUIET`]. Owned
-/// by the event-bridge thread.
+/// by [`read_sync_listener`].
 #[derive(Debug, Default)]
 pub(super) struct ReadSync {
     seen: HashMap<String, bool>,
@@ -104,6 +104,112 @@ impl ReadSync {
             }
         }
         out
+    }
+}
+
+/// Read-sync's feed: each vault event's `(path, kind)`, sent by the event bridge after the writer
+/// updated the index. Unbounded, so no event is ever dropped (the old consumer's guarantee).
+pub(super) type Feed = tokio::sync::mpsc::UnboundedSender<(String, EventKind)>;
+
+/// The read-sync listener (review 2026-11-10 D7), beside `generation_listener`: folds each vault
+/// event from its own [`Feed`] into [`ReadSync`] and settles quiet paths, ticking the open tracker
+/// rows of each not-true → `true` transition. Index reads and ticks run on the blocking pool,
+/// never on the event-bridge thread. Errors are logged.
+pub(super) async fn read_sync_listener(
+    shared: Arc<Shared>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<(String, EventKind)>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let s = Arc::clone(&shared);
+    let Ok(mut rs) = tokio::task::spawn_blocking(move || seed(&s)).await else {
+        return;
+    };
+    loop {
+        let due = rs.next_due();
+        let flush = async {
+            match due {
+                Some(t) => tokio::time::sleep_until(t.into()).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = stop.changed() => return,
+            () = flush => {
+                let s = Arc::clone(&shared);
+                let settled = tokio::task::spawn_blocking(move || {
+                    settle_read(&s, &mut rs);
+                    rs
+                });
+                match settled.await {
+                    Ok(r) => rs = r,
+                    Err(_) => return,
+                }
+            }
+            ev = rx.recv() => {
+                let Some((path, kind)) = ev else { return };
+                // Only a move from a never-seen source reads the index.
+                let unseen =
+                    matches!(&kind, EventKind::Renamed { from } if !rs.seen.contains_key(from));
+                let now = if unseen && is_md(&path) {
+                    let (s, p) = (Arc::clone(&shared), path.clone());
+                    tokio::task::spawn_blocking(move || read_index(&s, &p))
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                rs.observe(&path, &kind, Instant::now(), || now);
+            }
+        }
+    }
+}
+
+/// The last-seen `read` map, seeded from the index (an unreadable index logs and starts empty).
+fn seed(shared: &Arc<Shared>) -> ReadSync {
+    let seeded = shared
+        .writer()
+        .ok_or_else(|| anyhow!("writer gone"))
+        .and_then(|w| {
+            w.call(|vw| seed_map(&vw.index().query()))
+                .map_err(Into::into)
+                .and_then(|r| r)
+        });
+    match seeded {
+        Ok(m) => ReadSync::seeded(m),
+        Err(e) => {
+            tracing::warn!(error = %e, "read-sync seed failed; starting empty");
+            ReadSync::default()
+        }
+    }
+}
+
+/// Settles every path quiet for [`READ_QUIET`] (D6) and ticks the open tracker rows of each
+/// not-true → `true` transition.
+fn settle_read(shared: &Arc<Shared>, rs: &mut ReadSync) {
+    for path in rs.settle(Instant::now(), |p| read_index(shared, p)) {
+        match tick_open_rows(&shared.state, &path) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "read-sync: ticked open tracker rows"),
+            Err(e) => tracing::warn!(error = %e, "read-sync: tick failed"),
+        }
+    }
+}
+
+/// The note's current `read` from the index, through the writer (`None` = unreadable).
+fn read_index(shared: &Arc<Shared>, path: &str) -> Option<bool> {
+    let p = path.to_owned();
+    let w = shared.writer()?;
+    match w.call(move |vw| read_of(&vw.index().query(), &p)) {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "read-sync: index read failed");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "read-sync: writer gone");
+            None
+        }
     }
 }
 

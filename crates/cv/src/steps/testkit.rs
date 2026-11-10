@@ -342,7 +342,8 @@ impl StepEnv {
         self.run_steps(&action.steps, params, context)
     }
 
-    /// Runs `steps` like the runner does (vars merged, stop honoured, active path follows a move).
+    /// Runs `steps` like the runner does (vars merged, stop honoured, active path follows the note
+    /// by id before each step, as the runner's `refresh`).
     pub fn run_steps(
         &self,
         steps: &[Step],
@@ -352,11 +353,24 @@ impl StepEnv {
         let mut vars = Map::new();
         let mut open = None;
         for step in steps {
+            if let Some(path) = context.active_path.clone() {
+                let w = &self.fx.writer;
+                match context.active_id {
+                    None if w.read(&path).unwrap().is_some() => {
+                        context.active_id = Some(w.bind_note(&path).unwrap());
+                    }
+                    Some(id) => {
+                        if let cv_vault::NoteLocation::Live { path } = w.locate_note(id).unwrap() {
+                            context.active_path = Some(path);
+                        }
+                    }
+                    None => {}
+                }
+            }
             let o = self.exec(step, &params, &context, &vars)?;
             if o.open_path.is_some() {
                 open = o.open_path.clone();
             }
-            super::follow_move(&mut context, &o);
             vars.extend(o.vars);
             if o.stop {
                 break;

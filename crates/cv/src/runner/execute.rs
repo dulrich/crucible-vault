@@ -6,8 +6,8 @@ struct Spawner<'a> {
     inner: &'a Inner,
     parent_job: &'a str,
     parent: &'a JobParams,
-    /// The run's current context: `active_path` already follows a `move` of the active note, so a
-    /// child spawned after the move runs on the moved path (plan round-16 WP-5).
+    /// The run's current context: `active_path` already follows the note by id (`refresh`), so a
+    /// child spawned after a move runs on the moved path (plan round-16 WP-5).
     context: &'a ActionContext,
     lane: Lane,
     config: &'a ConfigSet,
@@ -122,7 +122,7 @@ pub(super) fn execute_steps(
         done.insert(i, o);
     }
     let mut seen_outputs = BTreeSet::new();
-    // The run's own context: `active_path` follows a `move` of the active note (WP-8).
+    // The run's own context: `active_path` follows the note by id (`refresh`, review D3).
     let mut context = jp.context.clone();
     let mut absorb = |o: &StepOutcome, summary: &mut RunSummary, vars: &mut Map<String, Value>| {
         if o.open_path.is_some() {
@@ -140,8 +140,6 @@ pub(super) fn execute_steps(
     for (i, step) in action.steps.iter().enumerate() {
         if let Some(o) = done.get(&i) {
             absorb(o, &mut summary, &mut vars);
-            steps::follow_move(&mut context, o);
-            inner.retarget_hold(job_id, &context);
             if o.stop {
                 break;
             }
@@ -165,10 +163,8 @@ pub(super) fn execute_steps(
         let mut follows = 0;
         let res = loop {
             // Plan note-identity D5: the job's note located by id before the step acts on it.
-            match follow_note(inner, &mut context) {
-                Follow::Same => {}
-                Follow::Moved => inner.retarget_hold(job_id, &context),
-                Follow::Gone(path) => break Err(StepError::NoteGone { path }),
+            if let Err(e) = refresh(inner, job_id, &mut context) {
+                break Err(e);
             }
             let spawner = Spawner {
                 inner,
@@ -199,12 +195,12 @@ pub(super) fn execute_steps(
             let written = std::mem::take(&mut ctx.written);
             inner.record_writes(&action.id, &written);
             // A step whose note went missing re-runs at the note's new path (D4).
-            if matches!(res, Err(StepError::NoteGone { .. }))
-                && follows < MAX_FOLLOWS
-                && matches!(follow_note(inner, &mut context), Follow::Moved)
-            {
+            if matches!(res, Err(StepError::NoteGone { .. })) && follows < MAX_FOLLOWS {
+                let before = context.active_path.clone();
+                if refresh(inner, job_id, &mut context).is_err() || context.active_path == before {
+                    break res;
+                }
                 follows += 1;
-                inner.retarget_hold(job_id, &context);
                 tracing::info!(
                     job = job_id,
                     step = i + 1,
@@ -237,8 +233,6 @@ pub(super) fn execute_steps(
                     );
                 }
                 absorb(&o, &mut summary, &mut vars);
-                steps::follow_move(&mut context, &o);
-                inner.retarget_hold(job_id, &context);
                 if o.stop {
                     break;
                 }
@@ -294,37 +288,32 @@ pub(super) fn execute_steps(
 /// How often one step re-runs after its note moved under it (D4).
 const MAX_FOLLOWS: usize = 3;
 
-/// Where the job's note is (plan note-identity D5).
-enum Follow {
-    /// Still at `active_path` (or no id / the store cannot say: today's behavior).
-    Same,
-    /// The context now points at the note's new path.
-    Moved,
-    /// The note is retired: never act on whatever file now sits at its old path.
-    Gone(String),
-}
-
-/// D5: locates the job's `active_id` on the writer thread. `Live` at another path updates
-/// `active_path`; `Gone` reports the note gone (the caller settles it as today: a retry quietly,
-/// a first attempt fails); `Unknown`, no id, no writer or a store failure run unbound.
-fn follow_note(inner: &Inner, context: &mut ActionContext) -> Follow {
-    let (Some(path), Some(id)) = (context.active_path.clone(), context.active_id) else {
-        return Follow::Same;
+/// The one way a job follows its note (plan note-identity D5; review 2026-11-10 D3): run before
+/// each step and on `NoteGone`. A job with an `active_id` is located on the writer thread; one
+/// without (its path named no file at enqueue) is bound first. `Live` at another path moves
+/// `active_path` and retargets the hold; `Gone` is `NoteGone` (the caller settles it as today: a
+/// retry quietly, a first attempt fails); `Unknown`, no path or no writer leave the context as is.
+/// An id-store failure fails the step attempt: the job never acts on a possibly stale path.
+fn refresh(inner: &Inner, job_id: &str, context: &mut ActionContext) -> Result<(), StepError> {
+    let Some(path) = context.active_path.clone() else {
+        return Ok(());
+    };
+    let store = |e: String| StepError::failed(format!("locating the job's note: {e}"));
+    let Some(id) = context.active_id else {
+        context.active_id = inner.bind_existing(&path).map_err(store)?;
+        return Ok(());
     };
     let Some(w) = inner.writer.writer() else {
-        return Follow::Same;
+        return Ok(());
     };
-    match w.locate_note(id) {
-        Ok(cv_vault::NoteLocation::Live { path: now }) if now != path => {
+    match w.locate_note(id).map_err(|e| store(e.to_string()))? {
+        cv_vault::NoteLocation::Live { path: now } if now != path => {
             tracing::info!("job note moved; following it");
             context.active_path = Some(now);
-            Follow::Moved
+            inner.retarget_hold(job_id, context);
+            Ok(())
         }
-        Ok(cv_vault::NoteLocation::Gone { .. }) => Follow::Gone(path),
-        Ok(_) => Follow::Same,
-        Err(e) => {
-            tracing::warn!(error = %e, "note locate failed; running unfollowed");
-            Follow::Same
-        }
+        cv_vault::NoteLocation::Gone { .. } => Err(StepError::NoteGone { path }),
+        _ => Ok(()),
     }
 }

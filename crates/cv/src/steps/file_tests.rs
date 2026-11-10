@@ -6,7 +6,6 @@ use cv_actions::Step;
 use cv_protocol::ActionContext;
 use serde_json::{Map, json};
 
-use super::StepOutcome;
 use super::testkit::{active, example_env, fails, note_gone, today, tomorrow};
 
 // ---- forward task / mark_forwarded -----------------------------------------------------------
@@ -242,19 +241,6 @@ fn file_as_kind_move_first_tags_the_moved_note() {
 }
 
 #[test]
-fn follow_move_only_follows_the_active_note() {
-    let mut ctx = active("a.md");
-    let mut o = StepOutcome::default();
-    o.vars.insert("moved_path".into(), json!("b/a.md"));
-    o.vars.insert(super::MOVED_FROM.into(), json!("other.md"));
-    super::follow_move(&mut ctx, &o);
-    assert_eq!(ctx.active_path.as_deref(), Some("a.md"));
-    o.vars.insert(super::MOVED_FROM.into(), json!("a.md"));
-    super::follow_move(&mut ctx, &o);
-    assert_eq!(ctx.active_path.as_deref(), Some("b/a.md"));
-}
-
-#[test]
 fn copy_set_props_upsert_tags_are_idempotent() {
     let env = example_env(&[("t.md", "---\ntags:\n  - transcript\n---\nraw words\n")]);
     let copy = "type = \"copy\"\nto = \"_raw_transcript\"";
@@ -321,7 +307,6 @@ fn file_as_kind_on_a_note_already_at_its_destination_is_a_noop() {
         .expect("same-path move is not an error");
     assert_eq!(open.as_deref(), Some(p.as_str()));
     assert_eq!(vars["moved_path"], json!(p));
-    assert_eq!(vars["moved_from"], json!(p));
 }
 
 /// Plan round-12 WP-5: `file-as-kind` (via `upsert_tags { kind }`) writes `trim-label: false` for

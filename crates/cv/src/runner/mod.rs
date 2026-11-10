@@ -469,37 +469,37 @@ impl Inner {
         self.enqueued(out)
     }
 
-    /// The id of the file at `path` (`None`: no file, no writer, or a store failure). An id
-    /// already bound is read from `state.db` (the writer persists every binding before its
-    /// mutation returns), so an enqueue does not wait behind a busy writer; only a path without
-    /// one is minted, on the writer thread. Never call while holding the state mutex.
-    fn bind_existing(&self, path: &str) -> Option<cv_protocol::NoteId> {
+    /// The id of the file at `path` (`Ok(None)`: no file or no writer; `Err`: the id store
+    /// failed). An id already bound is read from `state.db` (the writer persists every binding
+    /// before its mutation returns), so an enqueue does not wait behind a busy writer; only a path
+    /// without one is minted, on the writer thread. Never call while holding the state mutex.
+    pub(super) fn bind_existing(&self, path: &str) -> Result<Option<cv_protocol::NoteId>, String> {
         match lock(&self.state).note_id_at(path) {
-            Ok(Some(id)) => return Some(id),
+            Ok(Some(id)) => return Ok(Some(id)),
             Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "note id lookup failed; binding on the writer"),
         }
-        let w = self.writer.writer()?;
+        let Some(w) = self.writer.writer() else {
+            return Ok(None);
+        };
         let p = path.to_owned();
-        let r = w.call(move |vw| match vw.fs().hash(&p) {
-            Ok(Some(_)) => vw.bind_note(&p).ok(), // the sink logs a store failure
-            _ => None,
-        });
-        match r {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, "note id bind failed; job unbound");
-                None
-            }
-        }
+        w.call(move |vw| match vw.fs().hash(&p) {
+            Ok(Some(_)) => vw.bind_note(&p).map(Some).map_err(|e| e.to_string()),
+            _ => Ok(None),
+        })
+        .map_err(|e| e.to_string())?
     }
 
     /// The queue row for a run of `action` (resource keys derived, lane resolved).
     fn new_job(&self, action: &Action, mut req: RunRequest) -> Result<NewJob, EnqueueError> {
         // Plan note-identity D5: the job keeps its note's id (the triggering event's, else bound
-        // now), persisted in its params so a retry still has it. No id = the job runs unbound.
+        // now), persisted in its params so a retry still has it. A path naming no file yet (or a
+        // store failure) stays unbound here; the runner's `refresh` binds it before each step.
         if let (Some(path), None) = (&req.context.active_path, req.context.active_id) {
-            req.context.active_id = self.bind_existing(path);
+            req.context.active_id = self.bind_existing(path).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "note id bind failed; bound before the first step");
+                None
+            });
         }
         let mut keys = action
             .resources

@@ -81,9 +81,50 @@ fn runner_pools(
     fast_slots: usize,
     src: &str,
 ) -> Runner {
+    runner_on(f, None, exec, clock, concurrency, fast_slots, src)
+}
+
+/// A writer over `<tmp>/vault` seeded with `files`, binding note ids in the fixture's
+/// `state.db` (the daemon's sink), for runner tests that follow a note by id (review D3).
+fn vault_writer(f: &Fixture, files: &[&str]) -> WriterHandle {
+    let vault = f._dir.path().join("vault");
+    for p in files {
+        let at = vault.join(p);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, "# note\n").unwrap();
+    }
+    std::fs::create_dir_all(&vault).unwrap();
+    let w = cv_vault::VaultWriter::open(
+        cv_vault::VaultFs::live(&vault).unwrap(),
+        &f._dir.path().join("index.db"),
+        crate::note_id::sink(&f.state),
+    )
+    .unwrap();
+    cv_vault::spawn_writer(w).unwrap().0
+}
+
+/// Moves `from` to `to` through the writer (a step's `move`, or a concurrent rename).
+fn move_on(w: &WriterHandle, from: &str, to: &str) {
+    let (from, to) = (from.to_owned(), to.to_owned());
+    w.call(move |vw| {
+        let h = vw.fs().hash(&from).unwrap().unwrap();
+        vw.rename(&from, &to, h).unwrap();
+    })
+    .unwrap();
+}
+
+fn runner_on(
+    f: &Fixture,
+    writer: Option<WriterHandle>,
+    exec: Arc<dyn StepExecutor>,
+    clock: Arc<dyn Clock>,
+    concurrency: usize,
+    fast_slots: usize,
+    src: &str,
+) -> Runner {
     let r = Runner::new(RunnerDeps {
         state: Arc::clone(&f.state),
-        writer: Arc::new(None::<WriterHandle>),
+        writer: Arc::new(writer),
         events: f.events.clone(),
         executor: exec,
         clock,
@@ -460,24 +501,25 @@ fn moved_outcome() -> StepOutcome {
     };
     o.vars
         .insert("moved_path".into(), serde_json::json!("stack/a.md"));
-    o.vars
-        .insert(steps::MOVED_FROM.into(), serde_json::json!("inbox/a.md"));
     o
 }
 
-/// WP-8: after a step moves the active note, later steps see the moved path as the active note
-/// — on a fresh run and when the move is replayed from a checkpoint on resume.
+/// WP-8, on note ids (review 2026-11-10 D3: no outcome-var follow): after a step moves the active
+/// note, later steps see the moved path as the active note — on a fresh run and when the move is
+/// replayed from a checkpoint on resume.
 #[test]
 fn active_path_follows_a_move_fresh_and_on_resume() {
     for resume in [false, true] {
         let f = fixture();
+        let w = vault_writer(&f, &["inbox/a.md"]);
         let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
-        let s2 = Arc::clone(&seen);
+        let (s2, w2) = (Arc::clone(&seen), w.clone());
         let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |_, ctx| {
             s2.lock()
                 .unwrap()
                 .push((ctx.step_index, ctx.context.active_path.clone()));
             Ok(if ctx.step_index == 0 {
+                move_on(&w2, "inbox/a.md", "stack/a.md");
                 moved_outcome()
             } else {
                 StepOutcome::default()
@@ -488,10 +530,20 @@ fn active_path_follows_a_move_fresh_and_on_resume() {
             .enable_all()
             .build()
             .unwrap();
-        let r = runner(&f, exec, Arc::new(SystemClock), 1, MOVE_THEN_TAG);
+        let r = runner_on(
+            &f,
+            Some(w.clone()),
+            exec,
+            Arc::new(SystemClock),
+            1,
+            0,
+            MOVE_THEN_TAG,
+        );
         let mut rx = f.events.subscribe();
         let id = enqueue(&r, "file", Some("inbox/a.md"), Lane::User);
         if resume {
+            // The move landed before the restart; only its checkpoint says so.
+            move_on(&w, "inbox/a.md", "stack/a.md");
             let text = serde_json::to_string(&moved_outcome()).unwrap();
             f.state
                 .lock()

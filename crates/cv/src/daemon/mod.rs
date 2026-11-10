@@ -259,7 +259,10 @@ impl Daemon {
             opts,
         } = self;
         let listener = crate::server::bind(&shared.config.socket)?;
-        start_event_bridge(&shared, vault_events)?;
+        // Read-sync's own unbounded feed (review D7): created before the bridge starts, so no event
+        // precedes the listener's seed and none is ever dropped.
+        let (read_tx, read_rx) = tokio::sync::mpsc::unbounded_channel();
+        start_event_bridge(&shared, vault_events, read_tx)?;
         drain_spool(&shared).await;
         let (stop_tx, stop_rx) = watch::channel(false);
         let writer_source: Arc<dyn crate::runner::WriterSource> = Arc::new(Arc::downgrade(&shared));
@@ -293,6 +296,11 @@ impl Daemon {
         ];
         tasks.extend([
             tokio::spawn(generation_listener(Arc::clone(&shared), stop_rx.clone())),
+            tokio::spawn(read_sync::read_sync_listener(
+                Arc::clone(&shared),
+                read_rx,
+                stop_rx.clone(),
+            )),
             tokio::spawn(memory::memory_logger(Arc::clone(&shared), stop_rx.clone())),
             tokio::spawn(config_poller(
                 Arc::clone(&shared),

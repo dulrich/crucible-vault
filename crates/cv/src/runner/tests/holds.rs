@@ -119,6 +119,8 @@ async fn note_hold_published_while_running_and_released_after() {
 #[test]
 fn note_hold_follows_a_move_and_is_released_on_deferral() {
     let f = fixture();
+    let w = vault_writer(&f, &["inbox/a.md"]);
+    let w2 = w.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let c2 = Arc::clone(&calls);
     let exec: Arc<dyn StepExecutor> = Arc::new(FnExec(Box::new(move |_, ctx| {
@@ -130,6 +132,7 @@ fn note_hold_follows_a_move_and_is_released_on_deferral() {
             });
         }
         Ok(if ctx.step_index == 0 {
+            move_on(&w2, "inbox/a.md", "stack/a.md");
             moved_outcome()
         } else {
             StepOutcome::default()
@@ -141,7 +144,7 @@ fn note_hold_follows_a_move_and_is_released_on_deferral() {
         .build()
         .unwrap();
     let src = format!("{MOVE_THEN_TAG}{AGENT_REPLACE}");
-    let r = runner(&f, exec, Arc::new(SystemClock), 1, &src);
+    let r = runner_on(&f, Some(w), exec, Arc::new(SystemClock), 1, 0, &src);
     let mut rx = f.events.subscribe();
     let id = enqueue(&r, "file", Some("inbox/a.md"), Lane::User);
     rt.block_on(async {
@@ -160,7 +163,7 @@ fn note_hold_follows_a_move_and_is_released_on_deferral() {
             held(JobState::Running, "stack/a.md", l),
             held(JobState::Deferred, "stack/a.md", l),
             // The retry replays the move checkpoint: the hold starts on the job's original
-            // context and follows the replayed move.
+            // context and follows the note by id before the next step.
             held(JobState::Running, "inbox/a.md", l),
             held(JobState::Running, "stack/a.md", l),
             held(JobState::Done, "stack/a.md", l),

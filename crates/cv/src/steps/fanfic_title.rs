@@ -16,8 +16,8 @@
 //! the note's frontmatter `title` to the new name, and a note already named right whose `title`
 //! differs has it set (`fanfic_retitled` = 1); a note without a `title` is not given one. Counter names keep
 //! their `fanfic_` prefix whatever the kind (telemetry continuity, plan public-release WP-4). A rename
-//! sets `moved_path` / `moved_from` / `open_path` like `move`, so later steps (and the runner's
-//! active-path follow) see the new path.
+//! sets `moved_path` / `open_path` like `move`; later steps see the new path through the runner's
+//! follow by note id.
 //!
 //! **Backfill scope** walks the notes the index tags `kind` (outside system folders, in path
 //! order) and applies the same rule, chain-safe (WP-8): every note is planned first, then
@@ -367,11 +367,10 @@ struct NoteVars {
     fanfic_retitled: u32,
 }
 
-/// The vars of a rename (`moved_from` = [`super::MOVED_FROM`]).
+/// The vars of a rename.
 #[derive(Serialize)]
 struct MovedVars {
     moved_path: String,
-    moved_from: String,
 }
 
 fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
@@ -400,7 +399,6 @@ fn run_note(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError>
                 v.fanfic_renamed = 1;
                 out.set_vars(&MovedVars {
                     moved_path: dst.clone(),
-                    moved_from: src,
                 });
                 out.open_path = Some(dst.clone());
                 out.push_output(dst);

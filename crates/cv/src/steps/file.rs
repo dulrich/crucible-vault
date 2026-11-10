@@ -414,7 +414,6 @@ fn move_note(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError
     let mut out = StepOutcome::default();
     out.set_vars(&MoveVars {
         moved_path: dst.clone(),
-        moved_from: src.clone(),
         link_conflicts: None,
     });
     out.open_path = Some(dst.clone());
@@ -442,11 +441,10 @@ fn move_note(ctx: &mut StepCtx<'_>, p: &Params) -> Result<StepOutcome, StepError
     Ok(out)
 }
 
-/// `move` outcome vars (`moved_from` = [`super::MOVED_FROM`]).
+/// `move` outcome vars.
 #[derive(Serialize)]
 struct MoveVars {
     moved_path: String,
-    moved_from: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     link_conflicts: Option<usize>,
 }
