@@ -46,6 +46,11 @@ fn owned_by(o: &str, owner: &str) -> bool {
 
 /// Default byte budget, in MiB.
 pub const DEFAULT_BUDGET_MB: usize = 64;
+/// Most image decodes running at once, process-wide (a decode holds the file bytes, the full
+/// decoded bitmap and the resized copy; unbounded parallelism spiked load RSS, WP-3).
+const DECODE_CONCURRENCY: usize = 2;
+/// Permits for [`DECODE_CONCURRENCY`]; waited on in the async future, never on a blocking thread.
+static DECODE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(DECODE_CONCURRENCY);
 /// Display widths are rounded up to this bucket, and capped at [`MAX_WIDTH`].
 const WIDTH_BUCKET: u32 = 64;
 /// Largest decoded width.
@@ -529,6 +534,19 @@ pub fn decode(bytes: &[u8], max_width: u32) -> Result<Decoded, DecodeError> {
     })
 }
 
+/// Runs `f` on the blocking pool once `gate` grants a permit, holding it until `f` returns.
+/// The permit is dropped on every path (error, panic, cancellation of the future).
+async fn run_gated<T: Send + 'static>(
+    gate: &'static tokio::sync::Semaphore,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let Ok(_permit) = gate.acquire().await else {
+        // The gate is never closed; treat a closed gate as a cancelled task.
+        return tokio::task::spawn_blocking(f).await;
+    };
+    tokio::task::spawn_blocking(f).await
+}
+
 /// Reads `key` (vault path) through the daemon client and decodes it, off the UI thread.
 pub fn load_task<M: Send + 'static>(
     daemon: Arc<dyn DaemonClient>,
@@ -539,7 +557,7 @@ pub fn load_task<M: Send + 'static>(
     let k = key.clone();
     Task::perform(
         async move {
-            match tokio::task::spawn_blocking(move || {
+            match run_gated(&DECODE_GATE, move || {
                 let (bytes, _) = daemon
                     .read_file(&k)
                     .map_err(|e| DecodeError::Read(e.to_string()))?;
@@ -553,4 +571,44 @@ pub fn load_task<M: Send + 'static>(
         },
         move |r| done(key.clone(), r),
     )
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_GATE: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::const_new(DECODE_CONCURRENCY);
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn gate_caps_concurrent_decodes_and_completes_all() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        let done = rt.block_on(async {
+            let mut set = tokio::task::JoinSet::new();
+            for i in 0..8usize {
+                set.spawn(run_gated(&TEST_GATE, move || {
+                    let now = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+                    PEAK.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    RUNNING.fetch_sub(1, Ordering::SeqCst);
+                    i
+                }));
+            }
+            let mut n = 0;
+            while let Some(r) = set.join_next().await {
+                r.unwrap().unwrap();
+                n += 1;
+            }
+            n
+        });
+        assert_eq!(done, 8);
+        assert!(PEAK.load(Ordering::SeqCst) <= DECODE_CONCURRENCY);
+        assert_eq!(TEST_GATE.available_permits(), DECODE_CONCURRENCY);
+    }
 }

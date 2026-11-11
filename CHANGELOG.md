@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - **Hidden tabs release their images:** a tab that no pane shows no longer keeps its images, image-tab bitmap or PDF pages in memory; they are decoded again when the tab is shown. With 15 image-heavy notes open this saves about 186 MiB of editor memory.
+- **Image decodes are capped at two at a time:** opening image-heavy notes no longer decodes every image at once, which lowers the editor's memory peak while loading (about 123 MiB over settled before, about 88 MiB with the cap, at 15 notes) with no measurable change in load time.
 - **Search index open:** the first search opens the index on a blocking thread instead of a tokio worker, and `semsearch` 0.3.1 computes its sign codes straight from the stored vectors, so opening allocates about 45 MiB instead of about 428 MiB. Search results are unchanged.
 - **View property decode:** view property values are decoded straight from the stored JSON text instead of through an intermediate JSON tree, which saves about 18 MiB of allocation per pass over the views. View results are unchanged.
 
