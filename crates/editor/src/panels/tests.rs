@@ -104,7 +104,8 @@ fn outline_links_and_props_from_the_buffer() {
             }][..]
         )
     );
-    let unchecked = editor_model::props::Property::new("read", &JsValue::Bool(false));
+    let unchecked =
+        editor_model::props::Property::new("read", &JsValue::Bool(false), &Default::default());
     assert_eq!(props::display(&unchecked), "☐");
 
     // Unsaved edits show up on the next tick; the outline click moves the cursor only.
@@ -252,7 +253,13 @@ fn pure_helpers() {
     let long = "x".repeat(200);
     assert_eq!(snippet(&long).chars().count(), SNIPPET_CHARS + 1);
     assert_eq!(editor_model::props::TYPES.len(), 7);
-    let show = |k: &str, v: JsValue| props::display(&editor_model::props::Property::new(k, &v));
+    let show = |k: &str, v: JsValue| {
+        props::display(&editor_model::props::Property::new(
+            k,
+            &v,
+            &Default::default(),
+        ))
+    };
     assert_eq!(show("read", JsValue::Str("yes".into())), "⚠ yes");
     assert_eq!(
         show("created", JsValue::Str("2026-01-02T10:00".into())),
@@ -364,6 +371,7 @@ fn sidebar_property_links_and_unresolved_marking() {
             JsValue::Str("plain".into()),
             JsValue::Str("https://e.com".into()),
         ]),
+        &Default::default(),
     );
     assert_eq!(
         props::links(&r),
@@ -383,7 +391,11 @@ fn sidebar_property_links_and_unresolved_marking() {
         )
     );
     assert_eq!(props::display(&r), "Bee, plain, https://e.com");
-    let model = editor_model::props::Property::new("model", &JsValue::Str("gpt".into()));
+    let model = editor_model::props::Property::new(
+        "model",
+        &JsValue::Str("gpt".into()),
+        &Default::default(),
+    );
     assert!(props::links(&model).is_none());
     assert_eq!(props::display(&model), "gpt");
 

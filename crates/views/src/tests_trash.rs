@@ -106,7 +106,10 @@ fn trash_view_runs_end_to_end_and_follows_the_pushed_retention() {
     let mut host = fx
         .host()
         .with_state_db(&state)
-        .with_trash_retention_days(30);
+        .with_settings(crate::HostSettings {
+            trash_retention_days: 30,
+            ..crate::HostSettings::default()
+        });
     let r = fx.run(&mut host, "trash#T", None);
     assert!(r.notices.is_empty(), "{:?}", r.notices);
     assert!(
@@ -124,7 +127,7 @@ fn trash_view_runs_end_to_end_and_follows_the_pushed_retention() {
         r.rows()
             .all(|row| matches!(row.cells[2], Cell::Date { .. }))
     );
-    host.set_trash_retention_days(0);
+    host.set_settings(crate::HostSettings::default());
     let r = fx.run(&mut host, "trash#T", None);
     assert!(r.rows().all(|row| row.cells[2] == Cell::Null));
 }

@@ -365,9 +365,9 @@ impl App {
     fn update_nav(&mut self, m: NavMsg) -> Task<Message> {
         match m {
             NavMsg::Go { pane, target } => match target {
-                NavTarget::Path(p) => {
+                NavTarget::Path { path: p, seed } => {
                     let how = self.nav_place(self.modifiers.command());
-                    match self.open_then(pane, &p, how, OpenThen::CreateMissing) {
+                    match self.open_then(pane, &p, how, OpenThen::CreateMissing(seed.clone())) {
                         Ok(t) => return t,
                         // Plan round-11 WP-7: a link to a missing note creates it (the
                         // configured path is already a full vault path) and `Done` opens it
@@ -376,7 +376,10 @@ impl App {
                             if self.panes.get(pane).is_some() {
                                 self.focus = pane;
                             }
-                            return self.dispatch_op(FileOp::Create { path: p });
+                            return self.dispatch_op(FileOp::Create {
+                                path: p,
+                                content: seed,
+                            });
                         }
                         Err(e) => self.status.set_error(open_error(&e)),
                     }

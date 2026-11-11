@@ -170,13 +170,11 @@ impl ViewRegistry {
 pub struct ViewSettings {
     /// `sources.toml`.
     pub sources: SourcesConfig,
-    /// `vault.toml` `[trash] retention_days` (the value tidy expires by).
-    pub trash_retention_days: u32,
+    /// What the host itself takes: the `folder("<key>")` table and `vault.toml` `[trash]
+    /// retention_days` (the value tidy expires by), in the `views`-owned type (review S6).
+    pub host: views::HostSettings,
     /// `captures.toml` `[periods.day].folder` (`daily/day` when unset).
     pub day_folder: String,
-    /// The vault-structure folders view expressions read through `folder("<key>")` (plan
-    /// public-release WP-2, C#1-3; [`view_folders`]).
-    pub folders: BTreeMap<String, String>,
 }
 
 impl ViewSettings {
@@ -185,44 +183,27 @@ impl ViewSettings {
     pub fn of(c: &ConfigSet) -> Self {
         Self {
             sources: c.sources().clone(),
-            trash_retention_days: c.vault().trash.retention_days,
+            host: views::HostSettings {
+                folders: host_folders(c),
+                trash_retention_days: c.vault().trash.retention_days,
+            },
             day_folder: c.day_folder(),
-            folders: view_folders(c),
         }
     }
 }
 
-/// The Web Clipper's default folder: what `folder("x_inbox")` reads when `pipelines.toml` `[x]
-/// inbox` is unset (C#2).
-const DEFAULT_CLIPPER_INBOX: &str = "Clippings";
-
-/// The `folder("<key>")` table of view expressions (plan public-release WP-2, C#1-3), from the
-/// same typed config every daemon step reads: `day` (`captures.toml` `[periods.day].folder`),
-/// `x_inbox` (`[x] inbox`, else `Clippings`), `x_metadata` / `youtube_metadata` (`[x]` /
-/// `[youtube] metadata_root`), `app` and `raw_transcript` (`vault.toml` `[structure]`).
-fn view_folders(c: &ConfigSet) -> BTreeMap<String, String> {
+/// The `folder("<key>")` values of view expressions (plan public-release WP-2, C#1-3; review S6:
+/// the keys are `views::FolderKey`), from the same typed accessors every daemon step reads.
+fn host_folders(c: &ConfigSet) -> views::Folders {
     let p = c.pipelines();
-    let inbox =
-        cv_actions::vault::folder_key(p.x.inbox.as_deref()).unwrap_or(DEFAULT_CLIPPER_INBOX);
-    let trim = |s: &str| {
-        cv_actions::vault::folder_key(Some(s))
-            .unwrap_or_default()
-            .to_owned()
-    };
-    BTreeMap::from([
-        ("day".to_owned(), c.day_folder()),
-        ("x_inbox".to_owned(), inbox.to_owned()),
-        ("x_metadata".to_owned(), trim(&p.x.metadata_root)),
-        (
-            "youtube_metadata".to_owned(),
-            trim(&p.youtube.metadata_root),
-        ),
-        ("app".to_owned(), c.app_folder().to_owned()),
-        (
-            "raw_transcript".to_owned(),
-            c.vault().structure.raw_transcript_folder().to_owned(),
-        ),
-    ])
+    views::Folders {
+        day: c.day_folder(),
+        x_inbox: p.x.clipper_inbox().to_owned(),
+        x_metadata: p.x.metadata_root().to_owned(),
+        youtube_metadata: p.youtube.metadata_root().to_owned(),
+        app: c.app_folder().to_owned(),
+        raw_transcript: c.vault().structure.raw_transcript_folder().to_owned(),
+    }
 }
 
 /// One day-folder note as the source-row counts read it.
@@ -426,8 +407,7 @@ fn serve(
     events: &broadcast::Sender<Notification>,
     ids: &Mutex<Vec<String>>,
 ) {
-    host.set_trash_retention_days(settings.trash_retention_days);
-    host.set_folders(settings.folders.clone());
+    host.set_settings(settings.host.clone());
     let mut reader: Option<cv_index::Reader> = None;
     let mut sources_stale = true;
     let invalidate = |v: Vec<String>| {
@@ -501,15 +481,13 @@ fn serve(
             }
             Cmd::StateChanged(table) => invalidate(host.on_state_changed(table)),
             Cmd::Settings(s) => {
-                host.set_trash_retention_days(s.trash_retention_days);
-                host.set_folders(s.folders.clone());
+                host.set_settings(s.host.clone());
                 settings = s;
                 sources_stale = true;
                 invalidate(host.view_ids());
             }
             Cmd::Config(dir, s) => {
-                host.set_trash_retention_days(s.trash_retention_days);
-                host.set_folders(s.folders.clone());
+                host.set_settings(s.host.clone());
                 settings = s;
                 sources_stale = true;
                 invalidate(host.on_config_changed(&dir));
@@ -543,7 +521,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = ConfigSet::new();
         assert_eq!(
-            ViewSettings::of(&c).trash_retention_days,
+            ViewSettings::of(&c).host.trash_retention_days,
             c.vault().trash.retention_days
         );
         std::fs::write(
@@ -552,7 +530,7 @@ mod tests {
         )
         .unwrap();
         crate::runner::load_config_dir(dir.path(), &mut c);
-        assert_eq!(ViewSettings::of(&c).trash_retention_days, 7);
+        assert_eq!(ViewSettings::of(&c).host.trash_retention_days, 7);
         std::fs::write(
             dir.path().join("vault.toml"),
             "[trash]\nretention_days = \"soon\"\n",
@@ -566,7 +544,7 @@ mod tests {
             "tidy keeps the last valid value"
         );
         assert_eq!(
-            ViewSettings::of(&c).trash_retention_days,
+            ViewSettings::of(&c).host.trash_retention_days,
             7,
             "and so does the view host"
         );

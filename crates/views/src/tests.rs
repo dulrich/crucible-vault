@@ -510,6 +510,33 @@ name = "Half"
     assert!(p.notices.iter().any(|n| n.contains("pivot needs")));
 }
 
+/// Review S6: an unknown `folder("<key>")` is one load notice naming the definition and the key;
+/// evaluating it yields null with no per-row notice. A known key is no notice.
+#[test]
+fn unknown_folder_key_is_a_load_notice() {
+    let def = "[formulas]\nf = 'folder(\"nope\")'\ng = 'folder(\"day\")'\n[[views]]\ntype='table'\nname='T'\norder=['file.name', 'formula.f', 'formula.g']\n";
+    let fx = fixture(&[("folders.toml", def)]);
+    let mut h = fx.host().with_settings(crate::HostSettings {
+        folders: crate::Folders {
+            day: "daily/day".into(),
+            ..crate::Folders::default()
+        },
+        ..crate::HostSettings::default()
+    });
+    assert_eq!(
+        h.load_notices(),
+        ["folders: folder(\"nope\"): no such vault folder setting"]
+    );
+    let r = fx.run(&mut h, "folders#T", None);
+    assert!(r.rows().count() > 1);
+    assert!(r.rows().all(|row| row.cells[1] == Cell::Null));
+    assert!(r.rows().all(|row| text(&row.cells[2]) == "daily/day"));
+    assert_eq!(
+        r.notices,
+        ["load: folders: folder(\"nope\"): no such vault folder setting"]
+    );
+}
+
 #[test]
 fn hosting_ids_invalidation_and_reload() {
     let fx = fixture(&[(

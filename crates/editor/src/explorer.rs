@@ -37,9 +37,18 @@ pub fn centred_offset(index: usize, len: usize, viewport: f32) -> f32 {
 /// A file operation dispatched over RPC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOp {
-    Create { path: String },
-    Rename { from: String, to: String },
-    Delete { path: String },
+    /// A new note at `path` with `content` (a nav link's seed; empty for an explorer create).
+    Create {
+        path: String,
+        content: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Delete {
+        path: String,
+    },
 }
 
 /// A finished file operation: the final path (create may be suffixed) or an error.
@@ -53,8 +62,8 @@ impl FileOp {
     /// Runs the RPC (blocking; off the UI thread).
     pub fn run(&self, d: &dyn crate::daemon::DaemonClient) -> Result<String, String> {
         match self {
-            Self::Create { path } => d
-                .create_note(path, editor_model::period::seed_for(path))
+            Self::Create { path, content } => d
+                .create_note(path, content)
                 .map_err(|e| crate::daemon::rpc_err(&e)),
             Self::Rename { from, to } => d
                 .rename(from, to)
@@ -365,6 +374,7 @@ impl Explorer {
                 };
                 FileOp::Create {
                     path: join(&edit.target, &leaf),
+                    content: String::new(),
                 }
             }
             EditKind::Rename => {

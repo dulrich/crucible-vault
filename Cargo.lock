@@ -986,6 +986,7 @@ dependencies = [
 name = "cv-schema"
 version = "1.0.0"
 dependencies = [
+ "cv-actions",
  "toml_edit",
 ]
 

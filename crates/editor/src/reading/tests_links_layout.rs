@@ -246,7 +246,7 @@ fn nav_link_to_missing_note_creates_and_opens_it() {
     let pane = app.focus;
     let _ = app.send(Message::Nav(crate::message::NavMsg::Go {
         pane,
-        target: NavTarget::Path("core/Inbox.md".into()),
+        target: NavTarget::path("core/Inbox.md"),
     }));
     assert!(d.read_file("core/Inbox.md").is_ok(), "created at the path");
     assert_eq!(

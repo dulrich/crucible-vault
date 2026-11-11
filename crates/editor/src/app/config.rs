@@ -179,6 +179,13 @@ impl App {
         if let (Some(d), Some(f)) = (&self.daemon, self.settings.files.get_mut(CAPTURES_PATH)) {
             f.load(d.as_ref());
         }
+        // Review S5: `vault.toml` too — the default nav link lives under its app folder.
+        if let (Some(d), Some(f)) = (
+            &self.daemon,
+            self.settings.files.get_mut(crate::settings::VAULT_PATH),
+        ) {
+            f.load(d.as_ref());
+        }
         // Plan round-9 WP-6: auto-lint reads the `lint-note` action's params from it.
         if let (Some(d), Some(f)) = (
             &self.daemon,
@@ -217,9 +224,13 @@ impl App {
         // WP-4: `[keys]` overrides rebuild the effective keymap live (no restart).
         self.palette.set_keys(prefs.keys.clone());
         // Plan public-release WP-2: `[property_types]` extends the built-in property types.
-        editor_model::props::set_extra_types(prefs.property_types.clone());
+        self.reading
+            .property_types
+            .clone_from(&prefs.property_types);
+        self.panels.property_types.clone_from(&prefs.property_types);
         self.reading.set_anchor(&mut self.docs, prefs.anchor());
         self.prefs = prefs;
+        self.sync_nav_links();
         self.sync_hotkeys();
     }
 
@@ -240,9 +251,21 @@ impl App {
             CAPTURES_PATH => {
                 self.period_folders = period_folders(self.settings.file(CAPTURES_PATH));
             }
+            crate::settings::VAULT_PATH => self.sync_nav_links(),
             ACTIONS_PATH => self.sync_hotkeys(),
             _ => {}
         }
+    }
+
+    /// Re-derives [`Self::nav_links`]: the configured `nav_links`, else the default page under the
+    /// configured app folder (review S5).
+    pub(super) fn sync_nav_links(&mut self) {
+        self.nav_links = match &self.prefs.nav_links {
+            Some(links) => links.clone(),
+            None => editor_model::period::default_nav_links(&crate::settings::app_folder(
+                self.settings.file(crate::settings::VAULT_PATH),
+            )),
+        };
     }
 
     /// Refreshes the Hotkeys page's keymap / action snapshots from the palette.

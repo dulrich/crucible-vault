@@ -460,14 +460,37 @@ impl Base {
             view.checkboxes.clone_from(&checkboxes);
             views.push(view);
         }
-        Self {
+        let base = Self {
             stem: stem.to_string(),
             source: def.source,
             formulas,
             views,
             uses_serial: false,
         }
-        .with_serial_scan()
+        .with_serial_scan();
+        base.unknown_folder_notices(load_notices);
+        base
+    }
+
+    /// Review S6: one load notice per unknown literal `folder("<key>")` key (evaluation yields null
+    /// without a per-row notice).
+    fn unknown_folder_notices(&self, load_notices: &mut Vec<String>) {
+        let keys = std::cell::RefCell::new(Vec::new());
+        self.any_expr(&|e| {
+            e.folder_keys(&mut keys.borrow_mut());
+            false
+        });
+        let mut keys = keys.into_inner();
+        keys.sort();
+        keys.dedup();
+        for k in keys {
+            if crate::FolderKey::parse(&k).is_none() {
+                load_notices.push(format!(
+                    "{}: folder({k:?}): no such vault folder setting",
+                    self.stem
+                ));
+            }
+        }
     }
 
     fn with_serial_scan(mut self) -> Self {
@@ -479,8 +502,22 @@ impl Base {
     /// filter or `select_by` of this base reads the property `file.serial`.
     pub fn reads_serial(&self) -> bool {
         let is_serial = |id: &str| norm(id) == "file.serial";
-        let reads = |e: &Expr| e.references("file", "serial");
         let sums = |s: &[(String, SumFn)]| s.iter().any(|(id, _)| is_serial(id));
+        self.any_expr(&|e| e.references("file", "serial"))
+            || self.views.iter().any(|v| {
+                v.order.iter().any(|(id, _, _)| is_serial(id))
+                    || sums(&v.summaries)
+                    || v.summary_rows.iter().any(|r| sums(&r.summaries))
+                    || v.pivot
+                        .as_ref()
+                        .is_some_and(|p| p.columns.iter().any(|(id, _)| is_serial(id)))
+                    || v.select_by.as_deref().is_some_and(is_serial)
+            })
+    }
+
+    /// Whether `reads` holds for any compiled expression of this base: formulas, filters, columns,
+    /// sort keys, group-by, summary-row filters, pivot and task filter.
+    fn any_expr(&self, reads: &dyn Fn(&Expr) -> bool) -> bool {
         fn filter(f: &Filter, reads: &dyn Fn(&Expr) -> bool) -> bool {
             match f {
                 Filter::Expr(e) => reads(e),
@@ -492,25 +529,19 @@ impl Base {
         self.formulas.values().any(|f| f.as_ref().is_ok_and(reads))
             || self.views.iter().any(|v| {
                 v.filters.iter().any(|f| filter(f, &reads))
-                    || v.order.iter().any(|(id, e, _)| is_serial(id) || reads(e))
+                    || v.order.iter().any(|(_, e, _)| reads(e))
                     || v.sort.iter().any(|(e, _)| reads(e))
                     || v.group.as_ref().is_some_and(|(e, _)| reads(e))
-                    || sums(&v.summaries)
-                    || v.summary_rows
-                        .iter()
-                        .any(|r| reads(&r.filter) || sums(&r.summaries))
+                    || v.summary_rows.iter().any(|r| reads(&r.filter))
                     || v.pivot.as_ref().is_some_and(|p| {
                         reads(&p.rows)
                             || reads(&p.value)
                             || p.display.as_ref().is_some_and(reads)
-                            || p.columns
-                                .iter()
-                                .any(|(id, e)| is_serial(id) || e.as_ref().is_some_and(reads))
+                            || p.columns.iter().any(|(_, e)| e.as_ref().is_some_and(reads))
                     })
                     || v.tasks
                         .as_ref()
                         .is_some_and(|t| t.task_filter.as_ref().is_some_and(reads))
-                    || v.select_by.as_deref().is_some_and(is_serial)
             })
     }
 

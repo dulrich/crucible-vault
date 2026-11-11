@@ -6,28 +6,20 @@
 
 use chrono::{Datelike, Days, Months, NaiveDate};
 
-/// Folder of day notes.
+/// Folder of day notes when `captures.toml` configures no `[periods.day].folder`. The editor reads
+/// that same key itself ([`PeriodFolders::from_config`]); this fallback is the editor's one copy of
+/// `cv_actions::vault::DEFAULT_DAY_FOLDER` (review S5: the editor has no `cv-actions` edge and the
+/// daemon sends no day folder, and the schema leaves the key required with no default).
 pub const DAY_FOLDER: &str = "daily/day";
 /// Folder of month notes.
 pub const MONTH_FOLDER: &str = "daily/month";
-/// The default nav link (plan public-release WP-2, C#12): the per-publication works views, on a
-/// page under the default app folder (`vault.toml` `[structure] app_folder`, `_crucible`).
-pub const PUBLICATIONS: &str = "_crucible/Publications.md";
+/// The default nav link's page (plan public-release WP-2, C#12; review S5): the per-publication
+/// works views, on this page under the configured app folder (`vault.toml` `[structure] app_folder`).
+pub const PUBLICATIONS_PAGE: &str = "Publications.md";
 
-/// The body a missing [`PUBLICATIONS`] page is created with (a nav link to a missing note creates
+/// The body the default nav link creates its missing page with (a nav link to a missing note creates
 /// it): the `works` views — per publication (Active / Complete), its entries and the unread ones.
 pub const PUBLICATIONS_SEED: &str = "# Publications\n\n## Active\n\n```crucible-view\nworks#Active\n```\n\n## Complete\n\n```crucible-view\nworks#Complete\n```\n\n## Entries\n\n```crucible-view\nworks#Entries\n```\n\n## Unread\n\n```crucible-view\nworks#Unread\n```\n";
-
-/// The content a nav-created note starts with: [`PUBLICATIONS_SEED`] for [`PUBLICATIONS`], else
-/// empty.
-#[must_use]
-pub fn seed_for(path: &str) -> &'static str {
-    if path == PUBLICATIONS {
-        PUBLICATIONS_SEED
-    } else {
-        ""
-    }
-}
 
 /// The day / month note folders navigation recognizes (plan `editor-settings-tab` WP-4, audit
 /// E2): the editor fills them from `captures.toml` `[periods.day].folder` /
@@ -88,8 +80,19 @@ impl Period {
 pub enum NavTarget {
     /// `run_action period.open {period, date}` (month: first of month).
     Period(Period, NaiveDate),
-    /// Opens a fixed vault path directly.
-    Path(String),
+    /// Opens a fixed vault path directly; a missing note is created with `seed` (review E7: the
+    /// seed belongs to the link).
+    Path { path: String, seed: String },
+}
+
+impl NavTarget {
+    /// A path target with no seed (a configured link).
+    pub fn path(path: impl Into<String>) -> Self {
+        Self::Path {
+            path: path.into(),
+            seed: String::new(),
+        }
+    }
 }
 
 /// One configured nav link (editor.toml `nav_links`).
@@ -97,14 +100,18 @@ pub enum NavTarget {
 pub struct NavLink {
     pub label: String,
     pub path: String,
+    /// The body a missing [`Self::path`] is created with (empty for a configured link).
+    pub seed: String,
 }
 
-/// The default links: one "Publications" page ([`PUBLICATIONS`]; a configured `nav_links`
-/// overrides it).
-pub fn default_nav_links() -> Vec<NavLink> {
+/// The default links under `app_folder` (the configured `[structure] app_folder`): one
+/// "Publications" page ([`PUBLICATIONS_PAGE`], seeded with [`PUBLICATIONS_SEED`]; a configured
+/// `nav_links` overrides it).
+pub fn default_nav_links(app_folder: &str) -> Vec<NavLink> {
     vec![NavLink {
         label: "Publications".into(),
-        path: PUBLICATIONS.into(),
+        path: format!("{app_folder}/{PUBLICATIONS_PAGE}"),
+        seed: PUBLICATIONS_SEED.into(),
     }]
 }
 
@@ -202,7 +209,10 @@ pub fn bar_for(
     let link_items = || {
         links.iter().map(|l| NavItem {
             label: l.label.clone(),
-            target: NavTarget::Path(l.path.clone()),
+            target: NavTarget::Path {
+                path: l.path.clone(),
+                seed: l.seed.clone(),
+            },
         })
     };
     if let Some(d) = day_note_date(path, folders) {
@@ -320,8 +330,8 @@ mod tests {
             ]
         );
         assert_eq!(day[5].target, NavTarget::Period(Period::Day, d(2027, 1, 1)));
-        assert_eq!(day[3].target, NavTarget::Path(CONTROL_PLANE.into()));
-        assert_eq!(day[4].target, NavTarget::Path(WORKS.into()));
+        assert_eq!(day[3].target, NavTarget::path(CONTROL_PLANE));
+        assert_eq!(day[4].target, NavTarget::path(WORKS));
         assert_eq!(
             day[1].target,
             NavTarget::Period(Period::Month, d(2026, 12, 1))
@@ -359,17 +369,24 @@ mod tests {
     #[test]
     fn ordinary_note_gets_today_plus_links() {
         let today = d(2026, 10, 13);
-        let bar = bar_for("notes/a.md", today, &F, &default_nav_links()).expect("bar");
+        let bar = bar_for("notes/a.md", today, &F, &default_nav_links("_crucible")).expect("bar");
         let labels: Vec<&str> = bar.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["Today", "Publications"]);
         assert_eq!(bar[0].target, NavTarget::Period(Period::Day, today));
-        assert_eq!(bar[1].target, NavTarget::Path(PUBLICATIONS.into()));
-        assert!(seed_for(PUBLICATIONS).contains("works#Active"));
-        assert_eq!(seed_for("notes/x.md"), "");
+        assert_eq!(
+            bar[1].target,
+            NavTarget::Path {
+                path: "_crucible/Publications.md".into(),
+                seed: PUBLICATIONS_SEED.into(),
+            }
+        );
+        assert!(PUBLICATIONS_SEED.contains("works#Active"));
+        // The page follows the configured app folder (review S5).
+        assert_eq!(default_nav_links("app")[0].path, "app/Publications.md");
         let bar = bar_for("notes/a.md", today, &F, &owner_links()).expect("bar");
         let labels: Vec<&str> = bar.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["Today", "Sample Charts", "Works"]);
-        assert_eq!(bar[2].target, NavTarget::Path(WORKS.into()));
+        assert_eq!(bar[2].target, NavTarget::path(WORKS));
     }
 
     /// The owner's `editor.toml` `nav_links` (written by WP-6): the pre-WP-2 built-in default.
@@ -380,10 +397,12 @@ mod tests {
             NavLink {
                 label: "Sample Charts".into(),
                 path: CONTROL_PLANE.into(),
+                seed: String::new(),
             },
             NavLink {
                 label: "Works".into(),
                 path: WORKS.into(),
+                seed: String::new(),
             },
         ]
     }
@@ -394,11 +413,12 @@ mod tests {
         let links = [NavLink {
             label: "Inbox".into(),
             path: "core/Inbox.md".into(),
+            seed: String::new(),
         }];
         let bar = bar_for("notes/a.md", today, &F, &links).expect("bar");
         assert_eq!(bar.len(), 2);
         assert_eq!(bar[1].label, "Inbox");
-        assert_eq!(bar[1].target, NavTarget::Path("core/Inbox.md".into()));
+        assert_eq!(bar[1].target, NavTarget::path("core/Inbox.md"));
         let day = bar_for("daily/day/2026-10-13.md", today, &F, &links).expect("bar");
         assert_eq!(day.len(), 5);
         assert_eq!(day[3].label, "Inbox");

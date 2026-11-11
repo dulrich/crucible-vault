@@ -574,6 +574,9 @@ pub struct App {
     /// plan editor-settings-tab WP-4 (audit E2): the day / month note folders from the loaded
     /// `captures.toml` (constants when absent / unloaded / malformed).
     pub period_folders: editor_model::period::PeriodFolders,
+    /// Review S5/E7: the effective nav links — `editor.toml` `nav_links`, else the default page
+    /// under `vault.toml` `[structure] app_folder` (re-derived when either file changes).
+    pub nav_links: Vec<editor_model::period::NavLink>,
     /// plan editor-ui-round-3 WP-4: the open right-click menu (one at a time).
     pub context_menu: Option<crate::context_menu::ContextMenu>,
     /// plan editor-round-4 WP-4: the image clipboard writer (`xclip` in production).
@@ -717,6 +720,7 @@ impl App {
             settings: crate::settings::Settings::default(),
             prefs: crate::settings::editor_prefs::Prefs::default(),
             period_folders: editor_model::period::PeriodFolders::default(),
+            nav_links: Vec::new(),
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::SystemClipboard::detect()),
             pdf: crate::pdf::store::PdfStore::default(),

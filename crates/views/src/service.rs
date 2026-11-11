@@ -66,13 +66,9 @@ pub struct ViewHost {
     sources: Vec<engine::Record>,
     /// Note path → first matching `[[serial]]` row name (`file.serial`), from [`Self::set_sources`].
     serial: Option<std::collections::BTreeMap<String, String>>,
-    /// `vault.toml` `[trash] retention_days` as the embedder last pushed it
-    /// ([`Self::set_trash_retention_days`]; the daemon pushes `ConfigSet`'s typed value, so tidy
-    /// and the Trash view share one value and default). `0` (also before any push) = no expiry.
-    trash_retention_days: u32,
-    /// `folder("<key>")` values as the embedder last pushed them ([`Self::set_folders`]; plan
-    /// public-release WP-2). Empty (also before any push) = every key null.
-    folders: std::collections::BTreeMap<String, String>,
+    /// The folders and trash retention as the embedder last pushed them ([`Self::set_settings`];
+    /// review S6). `None` (before any push) = every `folder("<key>")` null and no trash expiry.
+    settings: Option<crate::HostSettings>,
 }
 
 impl std::fmt::Debug for ViewHost {
@@ -99,34 +95,20 @@ impl ViewHost {
             today: None,
             sources: Vec::new(),
             serial: None,
-            trash_retention_days: 0,
-            folders: std::collections::BTreeMap::new(),
+            settings: None,
         }
     }
 
-    /// Sets the vault-structure folders view expressions read through `folder("<key>")` (the
-    /// daemon pushes them from its typed config, plan public-release WP-2).
-    pub fn set_folders(&mut self, folders: std::collections::BTreeMap<String, String>) {
-        self.folders = folders;
+    /// Sets the folders view expressions read through `folder("<key>")` and the Trash view's
+    /// retention, typed by the embedder (the daemon pushes them from its typed config).
+    pub fn set_settings(&mut self, settings: crate::HostSettings) {
+        self.settings = Some(settings);
     }
 
-    /// Sets the Trash view's retention (`vault.toml` `[trash] retention_days`, typed by the
-    /// embedder; plan tn-review-2026-10-26-remediation WP-R6). `0` = never expire.
-    pub fn set_trash_retention_days(&mut self, days: u32) {
-        self.trash_retention_days = days;
-    }
-
-    /// [`Self::set_trash_retention_days`] as a builder.
+    /// [`Self::set_settings`] as a builder.
     #[must_use]
-    pub fn with_trash_retention_days(mut self, days: u32) -> Self {
-        self.trash_retention_days = days;
-        self
-    }
-
-    /// [`Self::set_folders`] as a builder.
-    #[must_use]
-    pub fn with_folders(mut self, folders: std::collections::BTreeMap<String, String>) -> Self {
-        self.folders = folders;
+    pub fn with_settings(mut self, settings: crate::HostSettings) -> Self {
+        self.settings = Some(settings);
         self
     }
 
@@ -278,7 +260,7 @@ impl ViewHost {
                     .state_db
                     .clone()
                     .ok_or_else(|| ViewsError::NoStateDb(view_id.to_string()))?;
-                let days = self.trash_retention_days;
+                let days = self.settings.as_ref().map_or(0, |s| s.trash_retention_days);
                 let sc = open_state(&mut self.state_conn, &path)?;
                 Some(trash_records(sc, days).map_err(ViewsError::State)?)
             }
@@ -305,7 +287,7 @@ impl ViewHost {
             now: today.and_time(Local::now().time()),
             notices: RefCell::default(),
             serial: self.serial.as_ref(),
-            folders: Some(&self.folders),
+            folders: self.settings.as_ref().map(|s| &s.folders),
         };
         let mut r = engine::run(&env, view, records.as_deref(), ui_sort, select)?;
         r.notices

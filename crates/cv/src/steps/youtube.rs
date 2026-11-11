@@ -109,12 +109,11 @@ const KIND: MetadataKind = MetadataKind {
     id_var: "video_id",
     anchor: "yt-video-id",
     list_key: "yt-metadata",
-    default_root: "_yt_metadata",
     valid: |id| !id.is_empty() && !id.contains('/') && !id.contains(".."),
 };
 
 pub(crate) fn metadata_root(ctx: &StepCtx<'_>) -> String {
-    KIND.root(&ctx.config.pipelines().youtube.metadata_root)
+    ctx.config.pipelines().youtube.metadata_root().to_owned()
 }
 
 pub(crate) fn no_key() -> StepError {

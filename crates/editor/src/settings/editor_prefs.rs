@@ -20,7 +20,7 @@ use crate::daemon::DeleteMode;
 pub use crate::header::QuickSwitchOpen;
 use crate::header::TabTitle;
 use crate::theme::{Rgb, Surround, parse_hex};
-use editor_model::period::{NavLink, default_nav_links};
+use editor_model::period::NavLink;
 use editor_model::props::PropType;
 
 /// The vault file.
@@ -111,9 +111,9 @@ pub struct Prefs {
     /// empty → [`default_open_url_cmd`].
     pub open_url_cmd: Vec<String>,
     /// `nav_links` (plan round-11 WP-7): the nav-bar links after Today. Key absent (or not a
-    /// list) → [`default_nav_links`]; an explicit `[]` → none; entries without a `label` or
-    /// `path` are skipped.
-    pub nav_links: Vec<NavLink>,
+    /// list) → `None`, which the App resolves to [`editor_model::period::default_nav_links`] under the configured app
+    /// folder (review S5); an explicit `[]` → none; entries without a `label` or `path` are skipped.
+    pub nav_links: Option<Vec<NavLink>>,
     /// `nav_open` (plan round-14 WP-2): whether a nav-bar button opens in a new tab (the
     /// wikilink placement) or replaces the active clean tab.
     pub nav_open: NavOpen,
@@ -133,23 +133,25 @@ pub enum NavOpen {
 }
 
 /// The `nav_links` list of a doc (see [`Prefs::nav_links`]).
-fn nav_links_of(doc: &ConfigDoc) -> Vec<NavLink> {
+fn nav_links_of(doc: &ConfigDoc) -> Option<Vec<NavLink>> {
     let list = p("nav_links");
     if !doc
         .get(&list)
         .is_some_and(|i| i.is_array() || i.is_array_of_tables())
     {
-        return default_nav_links();
+        return None;
     }
-    (0..doc.len(&list))
+    let links = (0..doc.len(&list))
         .filter_map(|i| {
             let e = list.index(i);
             Some(NavLink {
                 label: doc.get_str(&e.key("label"))?.to_owned(),
                 path: doc.get_str(&e.key("path"))?.to_owned(),
+                seed: String::new(),
             })
         })
-        .collect()
+        .collect();
+    Some(links)
 }
 
 /// `search.location`: where the search command opens (plan round-12-feedback-todos WP-3).
@@ -207,7 +209,7 @@ impl Default for Prefs {
             palette_hidden: Vec::new(),
             keys: BTreeMap::new(),
             open_url_cmd: default_open_url_cmd(),
-            nav_links: default_nav_links(),
+            nav_links: None,
             property_types: BTreeMap::new(),
             nav_open: NavOpen::NewTab,
         }

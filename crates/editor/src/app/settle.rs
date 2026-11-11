@@ -93,8 +93,9 @@ pub enum OpenThen {
     Heading(String),
     /// Go to 0-based line `0` (a view row).
     Line(usize),
-    /// A nav link: a missing note is created (plan round-11 WP-7).
-    CreateMissing,
+    /// A nav link: a missing note is created (plan round-11 WP-7) with the link's seed `0`
+    /// (review E7).
+    CreateMissing(String),
 }
 
 /// Why an open failed.
@@ -278,10 +279,14 @@ impl App {
                 }
                 let o = match result {
                     Ok(o) => o,
-                    Err(OpenFailed::NotFound) if then == OpenThen::CreateMissing => {
+                    Err(OpenFailed::NotFound) if matches!(then, OpenThen::CreateMissing(_)) => {
                         self.focus = pane;
+                        let OpenThen::CreateMissing(content) = then else {
+                            return;
+                        };
                         let t = self.dispatch_op(FileOp::Create {
                             path: path.to_owned(),
+                            content,
                         });
                         return self.defer(t);
                     }

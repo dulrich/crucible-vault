@@ -172,6 +172,29 @@ impl Expr {
     /// Whether the expression reads the property `owner.field` (`file.serial`, or the indexed
     /// form `file["serial"]`). Walks the AST, so the text only appearing inside a string literal
     /// is not a reference.
+    /// Pushes the literal key of every `folder("<key>")` call in the expression onto `out`.
+    pub fn folder_keys(&self, out: &mut Vec<String>) {
+        match self {
+            Self::Lit(_) | Self::Ident(_) => {}
+            Self::Call(Func::Folder, v) => {
+                if let [Self::Lit(Value::Str(k))] = v.as_slice() {
+                    out.push(k.clone());
+                }
+                v.iter().for_each(|e| e.folder_keys(out));
+            }
+            Self::List(v) | Self::Call(_, v) => v.iter().for_each(|e| e.folder_keys(out)),
+            Self::Member(e, _) | Self::Not(e) | Self::Neg(e) => e.folder_keys(out),
+            Self::Index(a, b) | Self::Bin(_, a, b) => {
+                a.folder_keys(out);
+                b.folder_keys(out);
+            }
+            Self::Method(r, _, a) => {
+                r.folder_keys(out);
+                a.iter().for_each(|e| e.folder_keys(out));
+            }
+        }
+    }
+
     pub fn references(&self, owner: &str, field: &str) -> bool {
         match self {
             Self::Lit(_) => false,

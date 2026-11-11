@@ -70,6 +70,7 @@ fn op_or_delta_insert_of_non_indexed_path_is_dropped() {
         FileOpDone {
             op: FileOp::Create {
                 path: "r3ign/new.md".into(),
+                content: String::new(),
             },
             result: Ok("r3ign/new.md".into()),
         },
@@ -92,6 +93,7 @@ fn op_or_delta_insert_of_non_indexed_path_is_dropped() {
         FileOpDone {
             op: FileOp::Create {
                 path: "r3ok/b.md".into(),
+                content: String::new(),
             },
             result: Ok("r3ok/b.md".into()),
         },

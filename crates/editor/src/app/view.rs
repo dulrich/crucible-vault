@@ -495,7 +495,7 @@ impl App {
                     tab.path,
                     self.today(),
                     &self.period_folders,
-                    &self.prefs.nav_links,
+                    &self.nav_links,
                     t,
                 )
             })

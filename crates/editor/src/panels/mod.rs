@@ -135,6 +135,9 @@ pub struct Panels {
     pub outline: Vec<OutlineItem>,
     pub links: Links,
     pub props: Vec<Property>,
+    /// `editor.toml` `[property_types]` the sidebar types [`Self::props`] by (set by
+    /// `App::apply_prefs`; review E6).
+    pub(crate) property_types: editor_model::props::PropTypes,
     /// Plan round-6 WP-5: sidebar property wikilink targets that do not resolve (dimmed; their
     /// menu offers Create note). Empty without a resolver (no daemon), like Reading's.
     pub prop_unresolved: HashSet<String>,
@@ -323,7 +326,7 @@ impl Panels {
         let src = tab.text();
         let note = ofm::parse(&src);
         self.outline = outline::from_note(&src, &note);
-        self.props = props::from_note(&note);
+        self.props = props::from_note(&note, &self.property_types);
         self.prop_unresolved = if self.resolver.is_built() {
             self.props
                 .iter()

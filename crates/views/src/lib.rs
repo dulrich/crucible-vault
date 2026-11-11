@@ -13,12 +13,14 @@ pub mod eval;
 pub mod expr;
 pub mod result;
 pub mod service;
+pub mod settings;
 pub mod value;
 
 pub use def::{SumFn, norm as canonical_property_id};
 pub use eval::FILE_PROPERTY_IDS;
 pub use result::ViewResult;
 pub use service::{RunRequest, ViewHost, ViewsError};
+pub use settings::{FolderKey, Folders, HostSettings};
 
 #[cfg(test)]
 mod tests;

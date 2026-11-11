@@ -45,8 +45,9 @@ pub struct Env<'a> {
     /// `file.serial` (the row name, or null); `None` = no data (every `file.serial` is null).
     pub serial: Option<&'a BTreeMap<String, String>>,
     /// `folder("<key>")` values (vault-structure folders from the daemon's typed config, plan
-    /// public-release WP-2); an unknown key or `None` is null.
-    pub folders: Option<&'a BTreeMap<String, String>>,
+    /// public-release WP-2); an unknown key or `None` is null (an unknown literal key is a load notice,
+    /// review S6).
+    pub folders: Option<&'a crate::Folders>,
 }
 
 impl Env<'_> {
@@ -471,13 +472,9 @@ impl<'a> RowCtx<'a> {
             }
             Func::Folder => {
                 let key = arg(0)?.to_text();
-                match self.env.folders.and_then(|m| m.get(&key)) {
-                    Some(f) => Value::Str(f.clone()),
-                    None => {
-                        self.env
-                            .notice(format!("folder({key:?}): no such vault folder setting"));
-                        Value::Null
-                    }
+                match (self.env.folders, crate::FolderKey::parse(&key)) {
+                    (Some(f), Some(k)) => Value::Str(f.get(k).to_owned()),
+                    _ => Value::Null,
                 }
             }
             Func::Today => Value::date(self.env.today),

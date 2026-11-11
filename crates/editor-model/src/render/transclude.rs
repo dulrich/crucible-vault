@@ -20,7 +20,12 @@ fn fill(blocks: &mut [Block], fetch: &mut dyn FnMut(&str) -> Option<String>) {
                 content,
             } => {
                 *content = fetch(target).map(|src| {
-                    let m = lower_with(&src, LowerOptions { transclude: false });
+                    // Only the blocks are kept, so the embedded note's properties need no types.
+                    let m = lower_with(
+                        &src,
+                        LowerOptions { transclude: false },
+                        &crate::props::PropTypes::new(),
+                    );
                     let mut blocks = match fragment.as_deref() {
                         Some(f) if !f.starts_with('^') => section(m.blocks, f),
                         _ => m.blocks,

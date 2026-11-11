@@ -106,12 +106,11 @@ const KIND: MetadataKind = MetadataKind {
     id_var: "status_id",
     anchor: ANCHOR,
     list_key: LIST_KEY,
-    default_root: "_x_metadata",
     valid: valid_id,
 };
 
 fn metadata_root(ctx: &StepCtx<'_>) -> String {
-    KIND.root(&ctx.config.pipelines().x.metadata_root)
+    ctx.config.pipelines().x.metadata_root().to_owned()
 }
 
 fn valid_id(id: &str) -> bool {

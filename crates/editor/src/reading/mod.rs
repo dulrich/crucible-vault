@@ -185,6 +185,8 @@ pub struct ReadingStore {
     /// Plan round-8-intake-views-anchor WP-4: `editor.toml` `scroll_anchor` as a fraction of
     /// the viewport height (0 = top; set by `App::apply_prefs`).
     anchor: f32,
+    /// `editor.toml` `[property_types]` (set by `App::apply_prefs`; review E6).
+    pub(crate) property_types: editor_model::props::PropTypes,
 }
 
 /// The widget id of `path`'s breadcrumb filename input (blur polling).
@@ -364,7 +366,11 @@ impl ReadingStore {
             self.resolver.refresh(d.as_ref());
         }
         let generation = daemon.and_then(|d| d.index().generation());
-        let mut model = render::lower(&doc.text());
+        let mut model = render::lower_with(
+            &doc.text(),
+            render::LowerOptions::default(),
+            &self.property_types,
+        );
         let mut fetch = |target: &str| {
             let d = daemon?;
             let path = self.resolve(doc.path(), target)?;

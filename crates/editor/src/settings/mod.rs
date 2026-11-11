@@ -64,7 +64,7 @@ pub mod widgets;
 
 use std::collections::BTreeMap;
 
-pub use captures::{CAPTURES_PATH, period_folders};
+pub use captures::{CAPTURES_PATH, VAULT_PATH, app_folder, period_folders};
 pub use edit::{DocEdit, ScalarValue};
 pub use input::{FormMsg, traverse_key_event, typeahead_key_event};
 pub use save_loop::{

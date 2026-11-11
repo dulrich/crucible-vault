@@ -95,7 +95,7 @@ impl Default for YoutubePipeline {
     fn default() -> Self {
         Self {
             enabled: false,
-            metadata_root: "_yt_metadata".into(),
+            metadata_root: crate::vault::DEFAULT_YT_METADATA_ROOT.into(),
             channel_enrich: false,
             long_kind: "transcript".into(),
             short_kind: "post".into(),
@@ -115,11 +115,36 @@ pub struct XPipeline {
     pub inbox: Option<String>,
 }
 
+impl YoutubePipeline {
+    /// The metadata root, trimmed ([`crate::vault::DEFAULT_YT_METADATA_ROOT`] when blank).
+    #[must_use]
+    pub fn metadata_root(&self) -> &str {
+        crate::vault::folder_key(Some(&self.metadata_root))
+            .unwrap_or(crate::vault::DEFAULT_YT_METADATA_ROOT)
+    }
+}
+
+impl XPipeline {
+    /// The metadata root, trimmed ([`crate::vault::DEFAULT_X_METADATA_ROOT`] when blank).
+    #[must_use]
+    pub fn metadata_root(&self) -> &str {
+        crate::vault::folder_key(Some(&self.metadata_root))
+            .unwrap_or(crate::vault::DEFAULT_X_METADATA_ROOT)
+    }
+
+    /// The clipper inbox, trimmed ([`crate::vault::DEFAULT_CLIPPER_INBOX`] when unset or blank).
+    #[must_use]
+    pub fn clipper_inbox(&self) -> &str {
+        crate::vault::folder_key(self.inbox.as_deref())
+            .unwrap_or(crate::vault::DEFAULT_CLIPPER_INBOX)
+    }
+}
+
 impl Default for XPipeline {
     fn default() -> Self {
         Self {
             enabled: false,
-            metadata_root: "_x_metadata".into(),
+            metadata_root: crate::vault::DEFAULT_X_METADATA_ROOT.into(),
             inbox: None,
         }
     }

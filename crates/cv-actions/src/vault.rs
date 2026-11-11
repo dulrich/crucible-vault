@@ -196,6 +196,13 @@ pub const DEFAULT_APP_FOLDER: &str = "_crucible";
 pub const DEFAULT_DAY_FOLDER: &str = "daily/day";
 /// The default `[structure] raw_transcript_folder` (C#4).
 pub const DEFAULT_RAW_TRANSCRIPT_FOLDER: &str = "_raw_transcript";
+/// The default `pipelines.toml` `[youtube] metadata_root` (review S5: the one owner).
+pub const DEFAULT_YT_METADATA_ROOT: &str = "_yt_metadata";
+/// The default `pipelines.toml` `[x] metadata_root`.
+pub const DEFAULT_X_METADATA_ROOT: &str = "_x_metadata";
+/// The Web Clipper's default folder: the clipper inbox when `pipelines.toml` `[x] inbox` is unset
+/// (C#2).
+pub const DEFAULT_CLIPPER_INBOX: &str = "Clippings";
 
 /// `[structure]` (plan public-release WP-2): the vault folders the daemon's steps treat as
 /// machinery. Every key is optional; an unset or blank key means the default.

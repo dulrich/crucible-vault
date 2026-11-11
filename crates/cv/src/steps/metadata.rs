@@ -11,22 +11,13 @@ use super::web::{append_link, link_targets};
 use super::{StepCtx, StepError, StepOutcome};
 
 /// What differs between the metadata kinds: the id key the link list (`list_key`) is inserted
-/// after, the default root folder, and the id check (an invalid id is a no-op run).
+/// after and the id check (an invalid id is a no-op run).
 pub(crate) struct MetadataKind {
     /// The outcome var naming the id (`video_id` / `status_id`).
     pub id_var: &'static str,
     pub anchor: &'static str,
     pub list_key: &'static str,
-    pub default_root: &'static str,
     pub valid: fn(&str) -> bool,
-}
-
-impl MetadataKind {
-    /// The configured root (`/`-trimmed), else [`Self::default_root`].
-    pub fn root(&self, configured: &str) -> String {
-        let r = configured.trim_matches('/');
-        if r.is_empty() { self.default_root } else { r }.to_owned()
-    }
 }
 
 /// A found or created metadata note; `output` reports `path` as a step output, `extra` is

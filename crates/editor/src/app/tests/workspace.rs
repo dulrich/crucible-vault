@@ -870,7 +870,7 @@ fn nav_open_placement_default_replace_and_ctrl_click() {
         let pane = app.focus;
         let _ = app.send(Message::Nav(NavMsg::Go {
             pane,
-            target: NavTarget::Path(p.to_owned()),
+            target: NavTarget::path(p),
         }));
     };
     let mut app = app_over(&d, None);
@@ -903,6 +903,37 @@ fn nav_open_placement_default_replace_and_ctrl_click() {
         ["r14n/a.md", "r14n/c.md", "r14n/c.md"]
     );
     assert_eq!(app.panes.get(pane).and_then(|s| s.active), Some(2));
+}
+
+/// Review E7/S5: the default nav link's page lives under the configured app folder and is created
+/// with the link's seed; typing the same path into the explorer creates an empty note.
+#[test]
+fn nav_link_seeds_its_page_and_the_explorer_create_does_not() {
+    let (_tmp, d) = fake_arc();
+    let vault_toml = d.vault_root().join(crate::settings::VAULT_PATH);
+    std::fs::create_dir_all(vault_toml.parent().expect("parent")).expect("dir");
+    std::fs::write(&vault_toml, "[structure]\napp_folder = \"/r7app/\"\n").expect("write");
+    let mut app = app_over(&d, None);
+    let link = app.nav_links.first().cloned().expect("default link");
+    assert_eq!(link.path, "r7app/Publications.md");
+    let pane = app.focus;
+    let _ = app.send(Message::Nav(NavMsg::Go {
+        pane,
+        target: NavTarget::Path {
+            path: link.path.clone(),
+            seed: link.seed.clone(),
+        },
+    }));
+    let (bytes, _) = d.read_file("r7app/Publications.md").expect("created");
+    assert_eq!(bytes, editor_model::period::PUBLICATIONS_SEED.as_bytes());
+
+    let _ = app.send(Message::Explorer(ExplorerMsg::BeginNew));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Input(
+        "_crucible/Publications".into(),
+    )));
+    let _ = app.send(Message::Explorer(ExplorerMsg::Submit));
+    let (bytes, _) = d.read_file("_crucible/Publications.md").expect("created");
+    assert!(bytes.is_empty(), "the explorer create is never seeded");
 }
 
 /// Plan round-14 WP-2 / WP-R3: `click_place()` reads the held modifier (new tab with Ctrl, else

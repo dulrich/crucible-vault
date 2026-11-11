@@ -5,7 +5,7 @@
 //! [`TYPES`] is the neutral core map (plan public-release WP-2, C#13): Obsidian's own keys
 //! (`aliases`, `tags`, `cssclasses`), `created`, and the keys the daemon itself writes (`word-count`,
 //! `read`, `trim-label`). A vault adds its own through `editor.toml` `[property_types]`
-//! ([`set_extra_types`]; an extra entry overrides a core one). A value that does not fit its
+//! ([`PropTypes`], passed by the caller; an extra entry overrides a core one). A value that does not fit its
 //! declared type is [`Property::flagged`].
 
 use std::collections::BTreeMap;
@@ -46,9 +46,9 @@ pub struct Property {
 }
 
 impl Property {
-    /// `key: value`, typed by [`TYPES`].
-    pub fn new(key: &str, value: &JsValue) -> Self {
-        let ty = type_of(key);
+    /// `key: value`, typed by `extra` then [`TYPES`].
+    pub fn new(key: &str, value: &JsValue, extra: &PropTypes) -> Self {
+        let ty = type_of(key, extra);
         let flagged = match (ty, value) {
             (_, JsValue::Null) => false,
             (Some(PropType::Checkbox), v) => !matches!(v, JsValue::Bool(_)),
@@ -96,17 +96,9 @@ pub const TYPES: [(&str, PropType); 7] = [
     ("trim-label", PropType::Checkbox),
 ];
 
-/// The configured extension (`editor.toml` `[property_types]`), set by the editor on every prefs
-/// change; read by every [`Property::new`], on whichever thread renders.
-static EXTRA: std::sync::RwLock<BTreeMap<String, PropType>> =
-    std::sync::RwLock::new(BTreeMap::new());
-
-/// Replaces the configured extension of [`TYPES`] (key → type).
-pub fn set_extra_types(types: BTreeMap<String, PropType>) {
-    *EXTRA
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = types;
-}
+/// The configured extension of [`TYPES`] (`editor.toml` `[property_types]`, key → type), owned by the
+/// editor's prefs and passed to every typing call.
+pub type PropTypes = BTreeMap<String, PropType>;
 
 impl PropType {
     /// The `editor.toml` `[property_types]` value name (Obsidian's `types.json` names).
@@ -126,12 +118,8 @@ impl PropType {
 }
 
 /// The declared type of `key`: the configured extension first, then [`TYPES`].
-pub fn type_of(key: &str) -> Option<PropType> {
-    if let Some(t) = EXTRA
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(key)
-    {
+pub fn type_of(key: &str, extra: &PropTypes) -> Option<PropType> {
+    if let Some(t) = extra.get(key) {
         return Some(*t);
     }
     TYPES.iter().find(|(k, _)| *k == key).map(|(_, t)| *t)
@@ -148,21 +136,21 @@ fn is_date(s: &str) -> bool {
 }
 
 /// The properties of a parsed frontmatter object, in key order (none for a non-object).
-pub fn from_value(v: &JsValue) -> Vec<Property> {
+pub fn from_value(v: &JsValue, extra: &PropTypes) -> Vec<Property> {
     match v {
         JsValue::Obj(o) => o
             .entries()
             .into_iter()
-            .map(|(k, v)| Property::new(k, v))
+            .map(|(k, v)| Property::new(k, v, extra))
             .collect(),
         _ => Vec::new(),
     }
 }
 
 /// The frontmatter YAML as properties; a parse failure yields none.
-pub fn from_yaml(meta: &str) -> Vec<Property> {
+pub fn from_yaml(meta: &str, extra: &PropTypes) -> Vec<Property> {
     parse_frontmatter(meta)
-        .map(|v| from_value(&v))
+        .map(|v| from_value(&v, extra))
         .unwrap_or_default()
 }
 
@@ -253,22 +241,23 @@ mod tests {
     /// Empty config = the neutral core only; the owner's extras restore every old type (35 keys).
     #[test]
     fn core_types_plus_configured_extension() {
-        assert_eq!(type_of("tags"), Some(PropType::Tags));
-        assert_eq!(type_of("TQ_show_tree"), None);
-        assert_eq!(type_of("model"), None);
-        set_extra_types(
-            OWNER_EXTRAS
-                .iter()
-                .map(|(k, t)| ((*k).to_owned(), PropType::parse(t).unwrap()))
-                .collect(),
-        );
+        let none = PropTypes::new();
+        assert_eq!(type_of("tags", &none), Some(PropType::Tags));
+        assert_eq!(type_of("TQ_show_tree", &none), None);
+        assert_eq!(type_of("model", &none), None);
+        let owner: PropTypes = OWNER_EXTRAS
+            .iter()
+            .map(|(k, t)| ((*k).to_owned(), PropType::parse(t).unwrap()))
+            .collect();
         assert_eq!(TYPES.len() + OWNER_EXTRAS.len(), 35);
-        assert_eq!(type_of("TQ_show_tree"), Some(PropType::Checkbox));
-        assert_eq!(type_of("review-after-lines"), Some(PropType::Number));
-        assert_eq!(type_of("pending-plans"), Some(PropType::Multitext));
-        assert!(Property::new("TQ_explain", &JsValue::Str("yes".into())).flagged);
-        assert_eq!(type_of("created"), Some(PropType::Date));
-        set_extra_types(BTreeMap::new());
-        assert_eq!(type_of("model"), None);
+        assert_eq!(type_of("TQ_show_tree", &owner), Some(PropType::Checkbox));
+        assert_eq!(
+            type_of("review-after-lines", &owner),
+            Some(PropType::Number)
+        );
+        assert_eq!(type_of("pending-plans", &owner), Some(PropType::Multitext));
+        assert!(Property::new("TQ_explain", &JsValue::Str("yes".into()), &owner).flagged);
+        assert_eq!(type_of("created", &owner), Some(PropType::Date));
+        assert_eq!(type_of("model", &none), None);
     }
 }

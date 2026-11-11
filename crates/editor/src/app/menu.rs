@@ -21,7 +21,10 @@ impl App {
     /// the focused (clicked) pane, a failure is an error notice.
     fn create_missing(&mut self, target: &str) -> Task<Message> {
         let path = crate::reading::missing_note_path(target, &self.explorer.target_folder());
-        self.dispatch_op(FileOp::Create { path })
+        self.dispatch_op(FileOp::Create {
+            path,
+            content: String::new(),
+        })
     }
 
     /// plan editor-data-safety WP-2 (audit E3): while a dialog is open it takes input

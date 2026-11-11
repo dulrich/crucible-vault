@@ -29,20 +29,28 @@ pub fn is_remote(url: &str) -> bool {
         && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
 }
 
-/// Lowers a whole note (frontmatter included) with default options.
+/// Lowers a whole note (frontmatter included) with default options and core property types.
 pub fn lower(source: &str) -> RenderModel {
-    lower_with(source, LowerOptions::default())
+    lower_with(
+        source,
+        LowerOptions::default(),
+        &crate::props::PropTypes::new(),
+    )
 }
 
-/// Lowers a whole note.
-pub fn lower_with(source: &str, opts: LowerOptions) -> RenderModel {
+/// Lowers a whole note, typing its properties by `types` (the configured extension).
+pub fn lower_with(
+    source: &str,
+    opts: LowerOptions,
+    types: &crate::props::PropTypes,
+) -> RenderModel {
     let (meta, body) = ofm::frontmatter::split_frontmatter(source);
     let body = body.strip_prefix('\u{feff}').unwrap_or(body);
     // `body` is a suffix of `source`: its first line's index in the full note.
     let line_offset = source[..source.len() - body.len()].matches('\n').count();
     let properties = meta
         .as_deref()
-        .map(crate::props::from_yaml)
+        .map(|m| crate::props::from_yaml(m, types))
         .unwrap_or_default();
     let mut options = ofm::comrak_options();
     options.extension.footnotes = true;

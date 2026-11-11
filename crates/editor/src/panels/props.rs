@@ -116,12 +116,12 @@ pub fn display(p: &Property) -> String {
 
 /// The typed properties of a parsed note (empty without frontmatter; a YAML error is one
 /// flagged row).
-pub fn from_note(note: &ofm::Note) -> Vec<Property> {
+pub fn from_note(note: &ofm::Note, types: &editor_model::props::PropTypes) -> Vec<Property> {
     let Some(fm) = &note.frontmatter else {
         return Vec::new();
     };
     match &fm.value {
-        Ok(v) => from_value(v),
+        Ok(v) => from_value(v, types),
         Err(_) => vec![Property {
             key: "frontmatter".into(),
             ty: None,

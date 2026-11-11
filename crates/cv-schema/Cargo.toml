@@ -11,5 +11,9 @@ publish.workspace = true
 # package was already locked (via `proc-macro-crate`); this crate only adds dependency edges.
 toml_edit = { version = "=0.25.17", features = ["parse", "display"] }
 
+[dev-dependencies]
+# Review S5: `tests/defaults.rs` ties the schema's folder defaults to their `cv-actions` owners.
+cv-actions = { path = "../cv-actions" }
+
 [lints]
 workspace = true

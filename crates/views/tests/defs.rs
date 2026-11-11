@@ -179,8 +179,7 @@ impl Fx {
     fn host(&self) -> ViewHost {
         ViewHost::new(&self.config, &self.base)
             .with_state_db(&self.state)
-            .with_trash_retention_days(30)
-            .with_folders(folders("daily/day"))
+            .with_settings(settings("daily/day"))
             .with_today(NaiveDate::from_ymd_opt(2026, 10, 3).unwrap())
     }
     fn run(&self, host: &mut ViewHost, id: &str, this: Option<&str>) -> ViewResult {
@@ -536,19 +535,19 @@ fn reading_list_access_marks_user_action_needed() {
     }
 }
 
-/// The daemon's `folder("<key>")` table for a day folder (the other keys at their defaults).
-fn folders(day: &str) -> std::collections::BTreeMap<String, String> {
-    [
-        ("day", day),
-        ("x_inbox", "Clippings"),
-        ("x_metadata", "_x_metadata"),
-        ("youtube_metadata", "_yt_metadata"),
-        ("app", "_crucible"),
-        ("raw_transcript", "_raw_transcript"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .collect()
+/// The daemon's pushed settings for a day folder (the other folders at their defaults, retention 30).
+fn settings(day: &str) -> views::HostSettings {
+    views::HostSettings {
+        folders: views::Folders {
+            day: day.to_owned(),
+            x_inbox: "Clippings".to_owned(),
+            x_metadata: "_x_metadata".to_owned(),
+            youtube_metadata: "_yt_metadata".to_owned(),
+            app: "_crucible".to_owned(),
+            raw_transcript: "_raw_transcript".to_owned(),
+        },
+        trash_retention_days: 30,
+    }
 }
 
 /// Plan public-release WP-2 (C#1): the shipped defs read the day folder from config, so a
@@ -575,7 +574,7 @@ fn day_folder_follows_the_configured_folder() {
         assert!(r.notices.is_empty(), "{:?}", r.notices);
         r.rows().map(|row| text(&row.cells[0])).collect()
     };
-    let mut journal = fx.host().with_folders(folders("journal"));
+    let mut journal = fx.host().with_settings(settings("journal"));
     // The copied day notes carry (a subset of) the open tasks the `daily/day` ones do.
     let moved = tasks(&mut journal, "monthly-tasks#Overdue");
     let mut default = fx.host();
