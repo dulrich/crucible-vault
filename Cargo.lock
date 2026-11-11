@@ -862,7 +862,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cv"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "cv-actions"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-protocol",
  "cv-text",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "cv-index"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-text",
  "ofm",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "cv-ingest"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
  "cv-text",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "cv-malloc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-protocol",
  "libc",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "cv-note"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-text",
  "ofm",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "cv-protocol"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "cv-providers"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-ingest",
  "cv-testkit",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "cv-schema"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-actions",
  "toml_edit",
@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "cv-search"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-providers",
  "cv-state",
@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "cv-state"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-protocol",
  "rusqlite",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "cv-testkit"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "socket2",
  "tempfile",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "cv-text"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "percent-encoding",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "cv-vault"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "cv-index",
  "cv-protocol",
@@ -1146,7 +1146,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "editor"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "editor-model"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "comrak",
@@ -5262,7 +5262,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "views"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "cv-index",

@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.0.1 — 2026-11-11
 
 ### Changed
 
@@ -12,6 +12,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - **Memory:** both processes release freed heap through one `cv-malloc` entry (triggers and thresholds unchanged), and the protocol client no longer copies a reply's payload or keeps a large reply's line buffer.
 - **View test goldens** are one line per column and per row.
 - **Memory, replies:** the daemon serialises each reply straight to text (lower peak memory, no leftover allocator arenas), and its idle and 5-minute releases now trim above 16 MiB of free memory.
+- **Memory, idle release:** the daemon releases freed heap once no request and no job has run for 20 seconds, so memory left by editor view requests no longer waits for the next job; the 5-minute tick stays as a backstop.
+- **Memory, views:** a view run loads only the note properties its expressions can reach, and falls back to loading all of them when that set cannot be enumerated.
 - **Reply key order:** object keys in a reply follow struct declaration order instead of sorted order (equal as JSON; clients that decode by field name are unaffected).
 
 ### Security
