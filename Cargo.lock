@@ -1021,6 +1021,7 @@ dependencies = [
 name = "cv-testkit"
 version = "1.0.0"
 dependencies = [
+ "socket2",
  "tempfile",
 ]
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use cv_actions::{ConfigSet, Step};
 use cv_protocol::ActionContext;
-use cv_testkit::{MockHttp, Reply};
+use cv_testkit::{DeadPort, MockHttp, Reply};
 use cv_vault::test_support::LiveFixture;
 use serde_json::Value;
 
@@ -309,7 +309,8 @@ fn one_permanently_failed_download_among_several_is_counted_and_delinked() {
 
 #[test]
 fn all_unreachable_succeeds_and_leaves_the_refs() {
-    let port = MockHttp::unused_port(); // nothing listens: connection refused
+    let dead = DeadPort::new(); // held, never listens: connection refused
+    let port = dead.port();
     let note = format!("![](http://127.0.0.1:{port}/a.png) ![](http://127.0.0.1:{port}/b.png)\n");
     let (env, res) = with_server(HashMap::new(), None, move |_, _| {
         let env = env(&[("n.md", note.as_bytes())]);
@@ -326,7 +327,8 @@ fn all_unreachable_succeeds_and_leaves_the_refs() {
 
 #[test]
 fn folder_backfill_leaves_an_all_unreachable_note_unrecorded() {
-    let port = MockHttp::unused_port();
+    let dead = DeadPort::new();
+    let port = dead.port();
     let note = format!("![](http://127.0.0.1:{port}/a.png)\n");
     let (env, out) = with_server(HashMap::new(), None, move |_, _| {
         let env = env(&[("Clippings/n.md", note.as_bytes())]);

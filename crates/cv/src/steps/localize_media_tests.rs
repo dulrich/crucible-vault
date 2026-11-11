@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cv_testkit::{MockHttp, Reply};
+use cv_testkit::{DeadPort, MockHttp, Reply};
 use serde_json::Value;
 
 use super::{Env, StepOutcome, env, ignored, png, rt, var};
@@ -485,7 +485,8 @@ fn second_pass_over_localized_audio_and_pdf_writes_nothing() {
 #[test]
 fn folder_backfill_never_settles_a_note_with_a_transient_failure() {
     let ok = png(28);
-    let down = MockHttp::unused_port();
+    let dead = DeadPort::new();
+    let down = dead.port();
     let (env, outs, b) = with_media(vec![("/ok.png", "image/png", ok.clone())], move |b, _| {
         let mixed =
             format!("![]({b}/ok.png)\n![](http://127.0.0.1:{down}/t.png)\n![]({b}/s404/g.png)\n");

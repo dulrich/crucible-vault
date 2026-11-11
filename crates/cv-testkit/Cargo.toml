@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 # Exact `=x.y.z` pins, all declared up front at WP-1 of `plans/v0-core-daemon.md` so later
 # WPs never edit manifests or Cargo.lock. A bump is a deliberate change of its own.
+socket2 = "=0.6.5"
 
 [lints]
 workspace = true

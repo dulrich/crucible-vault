@@ -10,7 +10,7 @@ use cv_actions::{Action, ConfigSet, ResourceSpec, Step};
 use cv_protocol::{ActionContext, ParamKind, ParamSpec};
 use cv_providers::ProviderManager;
 use cv_state::FailureReason;
-use cv_testkit::MockHttp;
+use cv_testkit::{DeadPort, MockHttp};
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value};
 
@@ -396,8 +396,9 @@ async fn outage_is_deferred() {
         }
     );
 
-    // server down: bind then drop to get a port nobody listens on
-    let port = MockHttp::unused_port();
+    // server down: a held, never-listening reservation (connection refused)
+    let dead = DeadPort::new();
+    let port = dead.port();
     let e = Arc::new(env(config_with(
         AGENTS,
         &providers_toml(&format!("http://127.0.0.1:{port}/v1")),

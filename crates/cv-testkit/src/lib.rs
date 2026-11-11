@@ -6,7 +6,7 @@
 
 pub mod http;
 
-pub use http::{MockHttp, Reply, Request};
+pub use http::{DeadPort, MockHttp, Reply, Request};
 
 use std::fmt::Write as _;
 use std::fs;

@@ -8,6 +8,43 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// A held, never-listening loopback reservation: connections to [`DeadPort::port`] are refused,
+/// and no other process can draw the number with `bind(0)` while the guard lives. Bind it to a
+/// named variable (`let dead = DeadPort::new();`) that outlives every request in the test.
+pub struct DeadPort {
+    _sock: socket2::Socket,
+    port: u16,
+}
+
+impl DeadPort {
+    /// Binds `127.0.0.1:0` with `SO_REUSEADDR` and never calls `listen`.
+    pub fn new() -> Self {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("socket");
+        sock.set_reuse_address(true).expect("SO_REUSEADDR");
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
+        sock.bind(&addr.into()).expect("bind 127.0.0.1:0");
+        let port = sock
+            .local_addr()
+            .expect("local addr")
+            .as_socket()
+            .expect("inet addr")
+            .port();
+        Self { _sock: sock, port }
+    }
+
+    /// The reserved port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Default for DeadPort {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One recorded request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -160,12 +197,6 @@ impl MockHttp {
     /// The base URL, `http://127.0.0.1:<port>` (no trailing slash).
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
-    }
-
-    /// A loopback port nothing listens on (bound, then released): connections are refused.
-    pub fn unused_port() -> u16 {
-        let l = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-        l.local_addr().expect("local addr").port()
     }
 
     /// The bound address.
