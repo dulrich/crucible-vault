@@ -1,0 +1,454 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index f5606553..eb6282c2 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5266,6 +5266,7 @@ version = "1.0.0"
+ dependencies = [
+  "chrono",
+  "cv-index",
++ "cv-malloc",
+  "cv-protocol",
+  "cv-testkit",
+  "rusqlite",
+diff --git a/crates/cv-malloc/src/lib.rs b/crates/cv-malloc/src/lib.rs
+index eb04be4d..25268832 100644
+--- a/crates/cv-malloc/src/lib.rs
++++ b/crates/cv-malloc/src/lib.rs
+@@ -60,8 +60,11 @@ pub fn tune_daemon() {
+     unsafe {
+         libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD_BYTES);
+     }
++    spike::apply_env_knobs();
+ }
+ 
++pub mod spike;
++
+ /// Sets the environment variable `key` to `value` only when it is unset (plan
+ /// memory-instrumentation-and-reduction WP-M5: the editor's GPU driver defaults, which the Vulkan
+ /// loader and wgpu read from the environment). Call first thing in `main`, before any thread exists.
+diff --git a/crates/cv-malloc/src/spike.rs b/crates/cv-malloc/src/spike.rs
+new file mode 100644
+index 00000000..95467404
+--- /dev/null
++++ b/crates/cv-malloc/src/spike.rs
+@@ -0,0 +1,120 @@
++//! SPIKE (memory-release-strategy WP-0), throwaway: env-selected glibc knobs, a counting
++//! allocator, malloc_info dumps and a timed, logged release.
++#![allow(unsafe_code, missing_docs, clippy::all)]
++
++use std::alloc::{GlobalAlloc, Layout, System};
++use std::cell::Cell;
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
++use std::time::Instant;
++
++fn env_i32(k: &str) -> Option<i32> {
++    std::env::var(k).ok().and_then(|v| v.parse().ok())
++}
++
++/// CVMR_TRIM_THRESHOLD / CVMR_MMAP_THRESHOLD / CVMR_TOP_PAD / CVMR_ARENA_MAX via mallopt
++/// (applied after tune_daemon's own trim threshold, so they win).
++pub fn apply_env_knobs() {
++    #[cfg(all(target_os = "linux", target_env = "gnu"))]
++    unsafe {
++        if let Some(v) = env_i32("CVMR_TRIM_THRESHOLD") {
++            libc::mallopt(libc::M_TRIM_THRESHOLD, v);
++        }
++        if let Some(v) = env_i32("CVMR_MMAP_THRESHOLD") {
++            libc::mallopt(libc::M_MMAP_THRESHOLD, v);
++        }
++        if let Some(v) = env_i32("CVMR_TOP_PAD") {
++            libc::mallopt(libc::M_TOP_PAD, v);
++        }
++        if let Some(v) = env_i32("CVMR_ARENA_MAX") {
++            libc::mallopt(libc::M_ARENA_MAX, v);
++        }
++    }
++    COUNT.store(std::env::var_os("CVMR_COUNT").is_some(), Relaxed);
++}
++
++static COUNT: AtomicBool = AtomicBool::new(false);
++static TOTAL: AtomicU64 = AtomicU64::new(0);
++thread_local! { static MINE: Cell<u64> = const { Cell::new(0) }; }
++
++pub struct Counting;
++unsafe impl GlobalAlloc for Counting {
++    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
++        if COUNT.load(Relaxed) {
++            TOTAL.fetch_add(l.size() as u64, Relaxed);
++            let _ = MINE.try_with(|c| c.set(c.get() + l.size() as u64));
++        }
++        unsafe { System.alloc(l) }
++    }
++    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
++        unsafe { System.dealloc(p, l) }
++    }
++    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
++        if COUNT.load(Relaxed) {
++            TOTAL.fetch_add(l.size() as u64, Relaxed);
++            let _ = MINE.try_with(|c| c.set(c.get() + l.size() as u64));
++        }
++        unsafe { System.alloc_zeroed(l) }
++    }
++    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
++        if COUNT.load(Relaxed) && n > l.size() {
++            let d = (n - l.size()) as u64;
++            TOTAL.fetch_add(d, Relaxed);
++            let _ = MINE.try_with(|c| c.set(c.get() + d));
++        }
++        unsafe { System.realloc(p, l, n) }
++    }
++}
++
++/// Cumulative bytes allocated, process-wide and on this thread (0 unless CVMR_COUNT).
++pub fn allocated() -> (u64, u64) {
++    (TOTAL.load(Relaxed), MINE.try_with(Cell::get).unwrap_or(0))
++}
++
++/// Writes `malloc_info` XML plus mallinfo2 hblk counts to `path`.
++pub fn dump(path: &str) {
++    #[cfg(all(target_os = "linux", target_env = "gnu"))]
++    unsafe {
++        let Ok(c) = std::ffi::CString::new(path) else { return };
++        let f = libc::fopen(c.as_ptr(), c"w".as_ptr());
++        if f.is_null() {
++            return;
++        }
++        libc::malloc_info(0, f);
++        libc::fclose(f);
++        let m = libc::mallinfo2();
++        let (t, _) = allocated();
++        let _ = std::fs::write(
++            format!("{path}.mallinfo"),
++            format!(
++                "arena={} uord={} ford={} hblks={} hblkhd={} keepcost={} total_alloc={}\n",
++                m.arena, m.uordblks, m.fordblks, m.hblks, m.hblkhd, m.keepcost, t
++            ),
++        );
++    }
++}
++
++fn anon() -> u64 {
++    crate::anon_rss().unwrap_or(0)
++}
++
++/// Threshold-gated (32 MiB free-resident) trim, timed; one `CVMR trim` line on stderr per call
++/// that trims. `force` skips the threshold.
++pub fn timed_release(trigger: &str, force: bool) {
++    let Some(fr) = crate::current_free_resident() else { return };
++    if !force && !crate::over_threshold(fr) {
++        return;
++    }
++    let a0 = anon();
++    let t = Instant::now();
++    let r = crate::trim();
++    let us = t.elapsed().as_micros();
++    let a1 = anon();
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_millis())
++        .unwrap_or(0);
++    eprintln!(
++        "CVMR trim ts_ms={now} trigger={trigger} us={us} free_res={fr} anon_before={a0} anon_after={a1} released={} ret={r}",
++        a0.saturating_sub(a1)
++    );
++}
+diff --git a/crates/cv/src/cli.rs b/crates/cv/src/cli.rs
+index 7161ef7d..71b81cc3 100644
+--- a/crates/cv/src/cli.rs
++++ b/crates/cv/src/cli.rs
+@@ -99,6 +99,7 @@ fn report(r: Result<()>) -> i32 {
+ fn cmd_daemon() -> Result<()> {
+     // Before any thread exists (daemon threads spawn in `Daemon::start`).
+     cv_malloc::tune_daemon();
++    crate::spike::start();
+     let config = Config::from_env()?;
+     let daemon = Daemon::start(config, DaemonOptions::default())?;
+     let rt = crate::daemon::build_runtime()?;
+diff --git a/crates/cv/src/daemon/memory.rs b/crates/cv/src/daemon/memory.rs
+index 8673a48d..7ef84748 100644
+--- a/crates/cv/src/daemon/memory.rs
++++ b/crates/cv/src/daemon/memory.rs
+@@ -23,6 +23,13 @@ const EDITOR_FRESH: Duration = Duration::from_secs(600);
+ /// the threshold alone rate-limits it (`cv_malloc::Figure`). Runs on the blocking pool, never a
+ /// worker.
+ pub(crate) fn release_after_burst() {
++    if crate::spike::flag("CVMR_NO_JOB_TRIM") {
++        return;
++    }
++    if crate::spike::flag("CVMR_LOG") || true {
++        cv_malloc::spike::timed_release("job", false);
++        return;
++    }
+     if let Some(r) = cv_malloc::release(cv_malloc::Figure::FreeResident) {
+         tracing::debug!(
+             target: "cv::memory",
+diff --git a/crates/cv/src/daemon/mod.rs b/crates/cv/src/daemon/mod.rs
+index 781bfdc0..a7749f60 100644
+--- a/crates/cv/src/daemon/mod.rs
++++ b/crates/cv/src/daemon/mod.rs
+@@ -451,6 +451,9 @@ impl Shared {
+     /// method, each returning that method's [`Method::Result`].
+     pub async fn handle(&self, req: Request) -> Result<Value, RpcError> {
+         use cv_protocol::methods as m;
++        if !matches!(req, Request::Status | Request::JobsStats(_) | Request::MemoryReport(_)) {
++            crate::spike::activity();
++        }
+         match req {
+             Request::Hello(_) | Request::Subscribe(_) => Err(rpc_err(
+                 error_codes::INVALID_REQUEST,
+diff --git a/crates/cv/src/daemon/notes.rs b/crates/cv/src/daemon/notes.rs
+index 291183e3..7d451d07 100644
+--- a/crates/cv/src/daemon/notes.rs
++++ b/crates/cv/src/daemon/notes.rs
+@@ -293,9 +293,14 @@ impl Shared {
+     ) -> Result<cv_protocol::SearchResult, RpcError> {
+         let runner = self.runner_or_err()?;
+         let mgr = crate::steps::agent::manager().map_err(|e| internal(e.to_string()))?;
+-        crate::search_query::search(runner.search_db(), &runner.config(), mgr, params)
++        let r =         crate::search_query::search(runner.search_db(), &runner.config(), mgr, params)
+             .await
+-            .map_err(internal)
++            .map_err(internal);
++        if crate::spike::flag("CVMR_AFTER_SEARCH") {
++            let _ = tokio::task::spawn_blocking(|| cv_malloc::spike::timed_release("search", false)).await;
++        }
++        crate::spike::activity();
++        r
+     }
+ 
+     /// `write_attachment`: validates, resolves the path with the `localize` default templates,
+diff --git a/crates/cv/src/lib.rs b/crates/cv/src/lib.rs
+index 293b5811..c91ca44d 100644
+--- a/crates/cv/src/lib.rs
++++ b/crates/cv/src/lib.rs
+@@ -3,6 +3,7 @@
+ //! Library + thin `main` so integration tests drive an in-process daemon.
+ 
+ pub mod cli;
++pub mod spike;
+ pub mod client;
+ pub mod config;
+ pub mod daemon;
+diff --git a/crates/cv/src/main.rs b/crates/cv/src/main.rs
+index 2996a949..4ca9945f 100644
+--- a/crates/cv/src/main.rs
++++ b/crates/cv/src/main.rs
+@@ -1,6 +1,9 @@
+ //! `cv` binary: logging + CLI dispatch. `cv daemon` builds its own tokio runtime (see
+ //! `cv::cli`).
+ 
++#[global_allocator]
++static SPIKE_ALLOC: cv_malloc::spike::Counting = cv_malloc::spike::Counting;
++
+ fn main() {
+     tracing_subscriber::fmt()
+         .with_env_filter(
+diff --git a/crates/cv/src/runner/claim.rs b/crates/cv/src/runner/claim.rs
+index a1b2ba03..afcac8f5 100644
+--- a/crates/cv/src/runner/claim.rs
++++ b/crates/cv/src/runner/claim.rs
+@@ -255,7 +255,9 @@ pub(super) async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
+                 let lane = job.lane;
+                 let retry = job.attempts > 1;
+                 match tokio::task::spawn_blocking(move || {
++                    crate::spike::job_start();
+                     let r = execute_steps(&inner2, &job_id, lane, retry, &action, &jp, &config);
++                    crate::spike::job_end();
+                     crate::daemon::release_after_burst();
+                     r
+                 })
+diff --git a/crates/cv/src/spike.rs b/crates/cv/src/spike.rs
+new file mode 100644
+index 00000000..8d52c8b9
+--- /dev/null
++++ b/crates/cv/src/spike.rs
+@@ -0,0 +1,83 @@
++//! SPIKE (memory-release-strategy WP-0), throwaway: env-selected release triggers.
++//! CVMR_PERIODIC_SECS=N   trim (gated) every N s on a dedicated thread
++//! CVMR_IDLE_SECS=N       trim (gated) once after N s with no request and no running job
++//! CVMR_AFTER_VIEW=1      trim (gated) on cv-view when its queue is empty after a Cmd::Run
++//! CVMR_AFTER_SEARCH=1    trim (gated) on the blocking pool after each search
++//! CVMR_NO_JOB_TRIM=1     disable the existing after-job trim
++//! CVMR_DIAG_DIR=dir      poll dir/dump.req each 1 s; write dir/<n>.xml (malloc_info) on request
++#![allow(missing_docs, clippy::all)]
++
++use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
++use std::time::{Duration, Instant};
++
++static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
++static LAST_ACTIVITY_MS: AtomicU64 = AtomicU64::new(0);
++static JOBS_RUNNING: AtomicI64 = AtomicI64::new(0);
++static ACTIVITY_SEQ: AtomicU64 = AtomicU64::new(0);
++
++fn now_ms() -> u64 {
++    START.get_or_init(Instant::now).elapsed().as_millis() as u64
++}
++fn env_secs(k: &str) -> Option<u64> {
++    std::env::var(k).ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0)
++}
++pub fn flag(k: &str) -> bool {
++    std::env::var_os(k).is_some()
++}
++
++pub fn activity() {
++    LAST_ACTIVITY_MS.store(now_ms(), Relaxed);
++    ACTIVITY_SEQ.fetch_add(1, Relaxed);
++}
++pub fn job_start() {
++    JOBS_RUNNING.fetch_add(1, Relaxed);
++    activity();
++}
++pub fn job_end() {
++    JOBS_RUNNING.fetch_sub(1, Relaxed);
++    activity();
++}
++
++pub fn start() {
++    let _ = now_ms();
++    if let Some(n) = env_secs("CVMR_PERIODIC_SECS") {
++        let _ = std::thread::Builder::new().name("cvmr-periodic".into()).spawn(move || loop {
++            std::thread::sleep(Duration::from_secs(n));
++            cv_malloc::spike::timed_release("periodic", flag("CVMR_FORCE"));
++        });
++    }
++    if let Some(n) = env_secs("CVMR_IDLE_SECS") {
++        let _ = std::thread::Builder::new().name("cvmr-idle".into()).spawn(move || {
++            let mut done_seq = u64::MAX;
++            loop {
++                std::thread::sleep(Duration::from_millis(500));
++                let seq = ACTIVITY_SEQ.load(Relaxed);
++                if seq == done_seq || JOBS_RUNNING.load(Relaxed) > 0 {
++                    continue;
++                }
++                if now_ms().saturating_sub(LAST_ACTIVITY_MS.load(Relaxed)) >= n * 1000 {
++                    cv_malloc::spike::timed_release("idle", false);
++                    done_seq = seq;
++                }
++            }
++        });
++    }
++    if let Ok(dir) = std::env::var("CVMR_DIAG_DIR") {
++        let _ = std::thread::Builder::new().name("cvmr-diag".into()).spawn(move || {
++            let req = format!("{dir}/dump.req");
++            loop {
++                std::thread::sleep(Duration::from_millis(300));
++                if let Ok(name) = std::fs::read_to_string(&req) {
++                    let _ = std::fs::remove_file(&req);
++                    let name = name.trim();
++                    if name == "trim" {
++                        cv_malloc::spike::timed_release("diag", true);
++                    } else {
++                        cv_malloc::spike::dump(&format!("{dir}/{name}.xml"));
++                    }
++                    let _ = std::fs::write(format!("{dir}/{name}.done"), "");
++                }
++            }
++        });
++    }
++}
+diff --git a/crates/cv/src/views.rs b/crates/cv/src/views.rs
+index a4a91375..1f9e61e1 100644
+--- a/crates/cv/src/views.rs
++++ b/crates/cv/src/views.rs
+@@ -416,7 +416,16 @@ fn serve(
+             let _ = events.send(Notification::ViewsInvalidated { view_ids: v });
+         }
+     };
+-    while let Ok(cmd) = rx.recv() {
++    let after_view = crate::spike::flag("CVMR_AFTER_VIEW");
++    let mut next: Option<Cmd> = None;
++    loop {
++        let cmd = match next.take() {
++            Some(c) => c,
++            None => match rx.recv() {
++                Ok(c) => c,
++                Err(_) => break,
++            },
++        };
+         match cmd {
+             Cmd::Run {
+                 view_id,
+@@ -446,6 +455,8 @@ fn serve(
+                         Err(e) => tracing::warn!(error = %e, "view host: computing source rows"),
+                     }
+                 }
++                let spike_t = std::time::Instant::now();
++                let (spike_g0, spike_m0) = cv_malloc::spike::allocated();
+                 let res = match reader.as_ref() {
+                     Some(r) => host
+                         .run(
+@@ -461,7 +472,19 @@ fn serve(
+                         .map_err(|e| e.to_string()),
+                     None => Err("no index reader".into()),
+                 };
++                let (spike_g1, spike_m1) = cv_malloc::spike::allocated();
++                if crate::spike::flag("CVMR_COUNT") {
++                    eprintln!("CVMR view id={view_id:?} us={} alloc_view_thread={} alloc_global={}", spike_t.elapsed().as_micros(), spike_m1 - spike_m0, spike_g1 - spike_g0);
++                }
+                 let _ = reply.send(res);
++                crate::spike::activity();
++                match rx.try_recv() {
++                    Ok(c) => next = Some(c),
++                    Err(mpsc::TryRecvError::Empty) if after_view => {
++                        cv_malloc::spike::timed_release("view", false);
++                    }
++                    Err(_) => {}
++                }
+             }
+             Cmd::Generation(n) => {
+                 reader = match cv_index::Reader::open(base, n) {
+diff --git a/crates/views/Cargo.toml b/crates/views/Cargo.toml
+index d397cdf1..0858573a 100644
+--- a/crates/views/Cargo.toml
++++ b/crates/views/Cargo.toml
+@@ -19,6 +19,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock", "
+ rusqlite = { version = "=0.40.2", features = ["bundled"] }
+ cv-index = { path = "../cv-index" }
+ cv-protocol = { path = "../cv-protocol" }
++cv-malloc = { path = "../cv-malloc" }
+ 
+ [dev-dependencies]
+ tempfile = "=3.27.0"
+diff --git a/crates/views/src/db.rs b/crates/views/src/db.rs
+index 6beefa22..eec55a9b 100644
+--- a/crates/views/src/db.rs
++++ b/crates/views/src/db.rs
+@@ -98,21 +98,27 @@ impl<'c> Db<'c> {
+     /// Bulk-loads props and tags for `files` (one query each instead of one per file).
+     pub fn preload(&self, files: &[Arc<FileInfo>]) -> rusqlite::Result<()> {
+         let ids: HashSet<i64> = files.iter().map(|f| f.id).collect();
++        let spike_a0 = cv_malloc::spike::allocated().1;
++        let (mut spike_scanned, mut spike_kept, mut spike_bytes) = (0u64, 0u64, 0u64);
+         let mut props: HashMap<i64, BTreeMap<String, Value>> = HashMap::new();
+         let mut stmt = self
+             .conn
+             .prepare_cached("SELECT file_id, key, value FROM props")?;
+         let mut rows = stmt.query([])?;
+         while let Some(r) = rows.next()? {
++            spike_scanned += 1;
+             let id: i64 = r.get(0)?;
+             if ids.contains(&id) {
+                 let v: String = r.get(2)?;
++                spike_kept += 1;
++                spike_bytes += v.len() as u64;
+                 props
+                     .entry(id)
+                     .or_default()
+                     .insert(r.get(1)?, json_value(&v));
+             }
+         }
++        let spike_a1 = cv_malloc::spike::allocated().1;
+         let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
+         let mut stmt = self.conn.prepare_cached("SELECT file_id, tag FROM tags")?;
+         let mut rows = stmt.query([])?;
+@@ -126,6 +132,10 @@ impl<'c> Db<'c> {
+                 }
+             }
+         }
++        let spike_a2 = cv_malloc::spike::allocated().1;
++        if std::env::var_os("CVMR_COUNT").is_some() {
++            eprintln!("CVMR preload cands={} props_scanned={spike_scanned} props_kept={spike_kept} prop_value_bytes={spike_bytes} alloc_props={} alloc_tags={}", ids.len(), spike_a1 - spike_a0, spike_a2 - spike_a1);
++        }
+         let mut pc = self.props.borrow_mut();
+         let mut tc = self.tags.borrow_mut();
+         for id in ids {
