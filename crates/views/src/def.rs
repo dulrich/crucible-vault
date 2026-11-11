@@ -358,6 +358,50 @@ pub struct View {
 }
 
 impl View {
+    /// Whether `reads` holds for any compiled expression of this view: filters, `order`
+    /// expressions, sort keys, group-by, summary-row filters, pivot (rows, value, display,
+    /// column predicates) and task filter. The one enumeration of a view's expressions, shared
+    /// by [`Base::reads_serial`] and the reachable-key walk of a run.
+    pub fn any_expr(&self, reads: &dyn Fn(&Expr) -> bool) -> bool {
+        fn filter(f: &Filter, reads: &dyn Fn(&Expr) -> bool) -> bool {
+            match f {
+                Filter::Expr(e) => reads(e),
+                Filter::And(v) | Filter::Or(v) | Filter::Not(v) => {
+                    v.iter().any(|f| filter(f, reads))
+                }
+            }
+        }
+        self.filters.iter().any(|f| filter(f, reads))
+            || self.order.iter().any(|(_, e, _)| reads(e))
+            || self.sort.iter().any(|(e, _)| reads(e))
+            || self.group.as_ref().is_some_and(|(e, _)| reads(e))
+            || self.summary_rows.iter().any(|r| reads(&r.filter))
+            || self.pivot.as_ref().is_some_and(|p| {
+                reads(&p.rows)
+                    || reads(&p.value)
+                    || p.display.as_ref().is_some_and(reads)
+                    || p.columns.iter().any(|(_, e)| e.as_ref().is_some_and(reads))
+            })
+            || self
+                .tasks
+                .as_ref()
+                .is_some_and(|t| t.task_filter.as_ref().is_some_and(reads))
+    }
+
+    /// Whether `reads` holds for any property id this view carries outside a compiled
+    /// expression: `order` ids, `summaries` and summary-row ids, pivot column ids, `select_by`.
+    pub fn any_id(&self, reads: &dyn Fn(&str) -> bool) -> bool {
+        let sums = |s: &[(String, SumFn)]| s.iter().any(|(id, _)| reads(id));
+        self.order.iter().any(|(id, _, _)| reads(id))
+            || sums(&self.summaries)
+            || self.summary_rows.iter().any(|r| sums(&r.summaries))
+            || self
+                .pivot
+                .as_ref()
+                .is_some_and(|p| p.columns.iter().any(|(id, _)| reads(id)))
+            || self.select_by.as_deref().is_some_and(reads)
+    }
+
     /// The frontmatter key (`note.` dropped) the checkbox column `id` (as written in `order`)
     /// toggles; `None` when `id` is not a frontmatter checkbox.
     #[must_use]
@@ -501,48 +545,18 @@ impl Base {
     /// Whether any compiled filter, formula, column, sort key, group-by, summary, pivot, task
     /// filter or `select_by` of this base reads the property `file.serial`.
     pub fn reads_serial(&self) -> bool {
-        let is_serial = |id: &str| norm(id) == "file.serial";
-        let sums = |s: &[(String, SumFn)]| s.iter().any(|(id, _)| is_serial(id));
         self.any_expr(&|e| e.references("file", "serial"))
-            || self.views.iter().any(|v| {
-                v.order.iter().any(|(id, _, _)| is_serial(id))
-                    || sums(&v.summaries)
-                    || v.summary_rows.iter().any(|r| sums(&r.summaries))
-                    || v.pivot
-                        .as_ref()
-                        .is_some_and(|p| p.columns.iter().any(|(id, _)| is_serial(id)))
-                    || v.select_by.as_deref().is_some_and(is_serial)
-            })
+            || self
+                .views
+                .iter()
+                .any(|v| v.any_id(&|id| norm(id) == "file.serial"))
     }
 
-    /// Whether `reads` holds for any compiled expression of this base: formulas, filters, columns,
-    /// sort keys, group-by, summary-row filters, pivot and task filter.
+    /// Whether `reads` holds for any compiled expression of this base: formulas and every view's
+    /// expressions ([`View::any_expr`]).
     fn any_expr(&self, reads: &dyn Fn(&Expr) -> bool) -> bool {
-        fn filter(f: &Filter, reads: &dyn Fn(&Expr) -> bool) -> bool {
-            match f {
-                Filter::Expr(e) => reads(e),
-                Filter::And(v) | Filter::Or(v) | Filter::Not(v) => {
-                    v.iter().any(|f| filter(f, reads))
-                }
-            }
-        }
         self.formulas.values().any(|f| f.as_ref().is_ok_and(reads))
-            || self.views.iter().any(|v| {
-                v.filters.iter().any(|f| filter(f, &reads))
-                    || v.order.iter().any(|(_, e, _)| reads(e))
-                    || v.sort.iter().any(|(e, _)| reads(e))
-                    || v.group.as_ref().is_some_and(|(e, _)| reads(e))
-                    || v.summary_rows.iter().any(|r| reads(&r.filter))
-                    || v.pivot.as_ref().is_some_and(|p| {
-                        reads(&p.rows)
-                            || reads(&p.value)
-                            || p.display.as_ref().is_some_and(reads)
-                            || p.columns.iter().any(|(_, e)| e.as_ref().is_some_and(reads))
-                    })
-                    || v.tasks
-                        .as_ref()
-                        .is_some_and(|t| t.task_filter.as_ref().is_some_and(reads))
-            })
+            || self.views.iter().any(|v| v.any_expr(reads))
     }
 
     pub fn id(&self, v: &View) -> String {

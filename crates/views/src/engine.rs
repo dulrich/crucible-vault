@@ -3,7 +3,8 @@
 //! `file.folder|name|path.startsWith(<const>)`, `note.k == <const text|bool>`), then every filter
 //! is re-checked in Rust, so SQL only ever narrows — correctness never depends on it.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use rusqlite::types::Value as SqlValue;
@@ -22,6 +23,27 @@ type R<T> = rusqlite::Result<T>;
 
 /// Candidate count above which props/tags are bulk-loaded.
 const PRELOAD_AT: usize = 32;
+
+/// The frontmatter keys a run of `view` can read by a statically known name — over every
+/// formula of the base (formulas reference each other), every view expression and property id
+/// ([`View::any_expr`], [`View::any_id`]) and the request's UI `sort` and `select` — or `None`
+/// ("all") when any of them reaches a key that cannot be enumerated ([`Expr::prop_keys`]).
+pub fn reachable_keys(
+    formulas: &BTreeMap<String, Result<Expr, String>>,
+    view: &View,
+    ui_sort: Option<&cv_protocol::ViewSort>,
+    select: Option<&cv_protocol::ViewSelect>,
+) -> Option<BTreeSet<String>> {
+    let out = RefCell::new(BTreeSet::new());
+    let open = |e: &Expr| !e.prop_keys(&mut out.borrow_mut());
+    let open_id = |id: &str| open(&crate::expr::property(id));
+    let all = formulas.values().any(|f| f.as_ref().is_ok_and(open))
+        || view.any_expr(&open)
+        || view.any_id(&open_id)
+        || ui_sort.is_some_and(|s| open_id(&s.property))
+        || select.is_some_and(|s| open_id(&s.property));
+    (!all).then(|| out.into_inner())
+}
 
 /// The compiled SQL narrowing: a `WHERE` suffix (`AND …` clauses over alias `f`) and its args.
 #[derive(Debug, Default)]
@@ -285,7 +307,13 @@ pub fn run(
             let n = narrow(&view.filters, &unbound)?;
             let cands = env.db.candidates(&n.sql, &n.args)?;
             if cands.len() > PRELOAD_AT {
-                env.db.preload(&cands)?;
+                // Projection: the cached maps hold only the keys this run can name. Every prop
+                // read goes through `prop(f, key)` with a key from `reachable_keys` (a superset of
+                // all statically nameable keys), so a key absent from a projected map is absent
+                // from the note. The only whole-map reader, `file.properties`, makes the set
+                // `None` (load everything), as does any computed key.
+                let keys = reachable_keys(env.formulas, view, ui_sort, select);
+                env.db.preload(&cands, keys.as_ref())?;
             }
             cands
                 .into_iter()

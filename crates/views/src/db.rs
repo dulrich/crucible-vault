@@ -3,7 +3,7 @@
 //! `SQLITE_OPEN_READ_ONLY` by the caller.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -95,14 +95,26 @@ impl<'c> Db<'c> {
         Ok(out)
     }
 
-    /// Bulk-loads props and tags for `files` (one query each instead of one per file).
-    pub fn preload(&self, files: &[Arc<FileInfo>]) -> rusqlite::Result<()> {
+    /// Bulk-loads props and tags for `files` (one query each instead of one per file). With
+    /// `keys`, only props whose key is in the set are loaded (an empty set loads none — SQLite accepts an empty `IN ()`); the
+    /// caller guarantees the set covers every key the run reads (`engine::reachable_keys`), so
+    /// the projected cache entries answer every `prop(f, key)` read. `None` loads every key.
+    pub fn preload(
+        &self,
+        files: &[Arc<FileInfo>],
+        keys: Option<&BTreeSet<String>>,
+    ) -> rusqlite::Result<()> {
         let ids: HashSet<i64> = files.iter().map(|f| f.id).collect();
         let mut props: HashMap<i64, BTreeMap<String, Value>> = HashMap::new();
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT file_id, key, value FROM props")?;
-        let mut rows = stmt.query([])?;
+        let sql = match keys {
+            None => "SELECT file_id, key, value FROM props".to_string(),
+            Some(k) => format!(
+                "SELECT file_id, key, value FROM props WHERE key IN ({})",
+                vec!["?"; k.len()].join(",")
+            ),
+        };
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let mut rows = stmt.query(params_from_iter(keys.into_iter().flatten()))?;
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
             if ids.contains(&id) {
@@ -133,6 +145,12 @@ impl<'c> Db<'c> {
             tc.insert(id, Arc::new(tags.remove(&id).unwrap_or_default()));
         }
         Ok(())
+    }
+
+    /// The cached props map of file `id`, if loaded (tests inspect the preload projection).
+    #[cfg(test)]
+    pub(crate) fn cached_props(&self, id: i64) -> Option<Arc<BTreeMap<String, Value>>> {
+        self.props.borrow().get(&id).cloned()
     }
 
     /// The file at vault path `path` (any extension), if indexed.

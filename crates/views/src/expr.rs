@@ -195,6 +195,52 @@ impl Expr {
         }
     }
 
+    /// Adds to `out` every frontmatter key the expression can read by a statically known name:
+    /// every non-reserved bare identifier, every member name and every literal index (a member
+    /// on any file value falls through to that file's prop, so all of them count — a superset).
+    /// Returns `false` when the set cannot be enumerated: `.properties` (the whole map), an index
+    /// that is not a literal (a computed key), or `note` used as a value other than as the base
+    /// of a literal member/index.
+    pub fn prop_keys(&self, out: &mut std::collections::BTreeSet<String>) -> bool {
+        let is_note = |e: &Self| matches!(e, Self::Ident(n) if n == "note");
+        match self {
+            Self::Lit(_) => true,
+            Self::Ident(n) => match n.as_str() {
+                "note" => false,
+                "file" | "formula" | "this" | "value" | "outer" => true,
+                other => {
+                    out.insert(other.to_string());
+                    true
+                }
+            },
+            Self::Member(b, name) => {
+                if name == "properties" {
+                    return false;
+                }
+                out.insert(name.clone());
+                is_note(b) || b.prop_keys(out)
+            }
+            Self::Index(b, i) => {
+                let Self::Lit(k) = &**i else {
+                    return false;
+                };
+                let k = match k {
+                    Value::Str(s) => s.clone(),
+                    other => other.to_text(),
+                };
+                if k == "properties" {
+                    return false;
+                }
+                out.insert(k);
+                is_note(b) || b.prop_keys(out)
+            }
+            Self::List(v) | Self::Call(_, v) => v.iter().all(|e| e.prop_keys(out)),
+            Self::Not(e) | Self::Neg(e) => e.prop_keys(out),
+            Self::Bin(_, a, b) => a.prop_keys(out) && b.prop_keys(out),
+            Self::Method(r, _, a) => r.prop_keys(out) && a.iter().all(|e| e.prop_keys(out)),
+        }
+    }
+
     pub fn references(&self, owner: &str, field: &str) -> bool {
         match self {
             Self::Lit(_) => false,
