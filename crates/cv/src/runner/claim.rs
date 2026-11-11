@@ -255,8 +255,10 @@ pub(super) async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 let lane = job.lane;
                 let retry = job.attempts > 1;
                 match tokio::task::spawn_blocking(move || {
+                    // Dropped last, also on a step panic (caught below as a failed job).
+                    let _running = crate::daemon::running_job();
                     let r = execute_steps(&inner2, &job_id, lane, retry, &action, &jp, &config);
-                    crate::daemon::release_after_burst();
+                    crate::daemon::release_after_burst(crate::daemon::ReleaseReason::Job);
                     r
                 })
                 .await

@@ -55,7 +55,7 @@ use bridge::{generation_listener, start_event_bridge};
 pub use errors::rpc_err;
 pub(crate) use errors::{JobError, rpc_from_state, rpc_from_vault, rpc_held};
 use errors::{internal, reply, unavailable};
-pub(crate) use memory::release_after_burst;
+pub(crate) use memory::{ReleaseReason, release_after_burst, running_job};
 
 /// Broadcast capacity for notifications (a lagging subscriber skips, never blocks).
 const EVENT_CAPACITY: usize = 1024;
@@ -303,6 +303,7 @@ impl Daemon {
                 stop_rx.clone(),
             )),
             tokio::spawn(memory::memory_logger(Arc::clone(&shared), stop_rx.clone())),
+            tokio::spawn(memory::idle_release(stop_rx.clone())),
             tokio::spawn(config_poller(
                 Arc::clone(&shared),
                 opts.config_poll,
@@ -451,6 +452,7 @@ impl Shared {
     /// method, each returning that method's [`Method::Result`].
     pub async fn handle(&self, req: Request) -> Result<Value, RpcError> {
         use cv_protocol::methods as m;
+        memory::mark_activity();
         match req {
             Request::Hello(_) | Request::Subscribe(_) => Err(rpc_err(
                 error_codes::INVALID_REQUEST,

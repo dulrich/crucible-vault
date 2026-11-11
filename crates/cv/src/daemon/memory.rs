@@ -2,8 +2,14 @@
 //! `memstat::Registry` with the daemon's gauges, a 5-minute `cv::memory` journal line, the
 //! editor's latest `memory_report`, and `status.memory`. The journal is the only history; nothing
 //! is persisted elsewhere. No gauge or read may panic.
+//!
+//! It also returns freed heap to the OS (plan memory-release-strategy WP-1; spike record
+//! `docs/spikes/memory-release-strategy/FINDINGS.md`) from three triggers, all through
+//! [`release_after_burst`]: the end of a job, [`IDLE_RELEASE_AFTER`] of quiet (no request, no
+//! running job), and the [`SAMPLE_EVERY`] tick as a backstop for sessions that never go idle.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use cv_protocol::{MemoryReport, MemoryStatus, ReportedMemory};
@@ -18,18 +24,134 @@ const SAMPLE_EVERY: Duration = Duration::from_secs(300);
 /// An editor report older than this is not journaled.
 const EDITOR_FRESH: Duration = Duration::from_secs(600);
 
-/// Returns freed heap pages to the OS after a job's burst of allocation: judged on the
-/// free-resident figure (anonymous RSS minus live allocator bytes), which falls after a trim, so
-/// the threshold alone rate-limits it (`cv_malloc::Figure`). Runs on the blocking pool, never a
-/// worker.
-pub(crate) fn release_after_burst() {
+/// Quiet time (no request, no running job) after which freed heap is released once.
+const IDLE_RELEASE_AFTER: Duration = Duration::from_secs(20);
+/// How often the idle task checks; the release need not fire at exactly [`IDLE_RELEASE_AFTER`].
+const IDLE_POLL: Duration = Duration::from_secs(5);
+
+/// Why a release was attempted (the debug log label).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReleaseReason {
+    /// A job's steps finished.
+    Job,
+    /// The daemon has been quiet for [`IDLE_RELEASE_AFTER`].
+    Idle,
+    /// The [`SAMPLE_EVERY`] tick (sessions that never go idle).
+    Sampler,
+}
+
+impl ReleaseReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Job => "trim after job",
+            Self::Idle => "trim after idle",
+            Self::Sampler => "trim on sampler tick",
+        }
+    }
+}
+
+/// Returns freed heap pages to the OS, the one release path for all three triggers (a job's end,
+/// [`IDLE_RELEASE_AFTER`] of quiet, the sampler tick; plan memory-release-strategy WP-1): judged
+/// on the free-resident figure (anonymous RSS minus live allocator bytes), which falls after a
+/// trim, so the threshold alone rate-limits it (`cv_malloc::Figure`). Runs on the blocking pool,
+/// never a worker.
+pub(crate) fn release_after_burst(reason: ReleaseReason) {
     if let Some(r) = cv_malloc::release(cv_malloc::Figure::FreeResident) {
         tracing::debug!(
             target: "cv::memory",
             free_resident = r.figure,
             trimmed = r.trimmed,
-            "trim after job"
+            "{}",
+            reason.label()
         );
+    }
+}
+
+/// Milliseconds since the first activity mark or read (a process-local monotonic epoch).
+fn now_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(EPOCH.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+static LAST_ACTIVITY_MS: AtomicU64 = AtomicU64::new(0);
+static RUNNING_JOBS: AtomicUsize = AtomicUsize::new(0);
+
+/// Marks request or job activity (one relaxed store; safe on the request path).
+pub(crate) fn mark_activity() {
+    LAST_ACTIVITY_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+/// Counts one job as running while alive; dropping it (also on unwind, so a panicking step is
+/// not leaked) decrements the count and marks activity.
+pub(crate) struct RunningJob<'a>(&'a AtomicUsize);
+
+impl<'a> RunningJob<'a> {
+    fn enter(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for RunningJob<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+        mark_activity();
+    }
+}
+
+/// Guards the running-job count for the daemon (create it inside the blocking closure).
+pub(crate) fn running_job() -> RunningJob<'static> {
+    mark_activity();
+    RunningJob::enter(&RUNNING_JOBS)
+}
+
+/// Pure idle decision: release only when quiet for [`IDLE_RELEASE_AFTER`], no job runs, and this
+/// idle period has not released yet.
+fn idle_release_due(quiet: Duration, running: usize, released: bool) -> bool {
+    quiet >= IDLE_RELEASE_AFTER && running == 0 && !released
+}
+
+/// Per-idle-period state: re-armed whenever the activity stamp changes.
+#[derive(Debug, Default)]
+struct IdleGate {
+    seen_ms: u64,
+    released: bool,
+}
+
+impl IdleGate {
+    /// `true` when a release is due now; records it so the period releases once.
+    fn poll(&mut self, last_ms: u64, now_ms: u64, running: usize) -> bool {
+        if last_ms != self.seen_ms {
+            self.seen_ms = last_ms;
+            self.released = false;
+        }
+        let quiet = Duration::from_millis(now_ms.saturating_sub(last_ms));
+        let due = idle_release_due(quiet, running, self.released);
+        if due {
+            self.released = true;
+        }
+        due
+    }
+}
+
+/// Releases freed heap once per idle period (see [`IDLE_RELEASE_AFTER`]); the trim runs on the
+/// blocking pool.
+pub(super) async fn idle_release(mut stop: watch::Receiver<bool>) {
+    let mut gate = IdleGate::default();
+    let mut tick = tokio::time::interval(IDLE_POLL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = stop.changed() => return,
+        }
+        let running = RUNNING_JOBS.load(Ordering::SeqCst);
+        if gate.poll(LAST_ACTIVITY_MS.load(Ordering::Relaxed), now_ms(), running)
+            && let Err(e) =
+                tokio::task::spawn_blocking(|| release_after_burst(ReleaseReason::Idle)).await
+        {
+            tracing::warn!(target: "cv::memory", error = %e, "idle release task");
+        }
     }
 }
 
@@ -183,6 +305,11 @@ pub(super) async fn memory_logger(shared: Arc<Shared>, mut stop: watch::Receiver
             _ = tick.tick() => {}
             _ = stop.changed() => return,
         }
+        if let Err(e) =
+            tokio::task::spawn_blocking(|| release_after_burst(ReleaseReason::Sampler)).await
+        {
+            tracing::warn!(target: "cv::memory", error = %e, "sampler release task");
+        }
         let r = shared.daemon_report().await;
         let total = r.rss.unwrap_or(0).saturating_add(r.swap.unwrap_or(0));
         let base = *baseline.get_or_insert(total);
@@ -225,4 +352,53 @@ fn log_report(process: &str, r: &MemoryReport, delta: Option<i128>, age_secs: Op
         gauges = %gauges.join(" "),
         "memory"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const S: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn not_yet_quiet_does_not_release() {
+        assert!(!idle_release_due(IDLE_RELEASE_AFTER - S, 0, false));
+    }
+
+    #[test]
+    fn quiet_with_a_running_job_does_not_release() {
+        assert!(!idle_release_due(IDLE_RELEASE_AFTER, 1, false));
+    }
+
+    #[test]
+    fn quiet_and_idle_releases() {
+        assert!(idle_release_due(IDLE_RELEASE_AFTER, 0, false));
+    }
+
+    #[test]
+    fn already_released_this_period_does_not_release() {
+        let mut g = IdleGate::default();
+        assert!(g.poll(1_000, 1_000 + 20_000, 0));
+        assert!(!g.poll(1_000, 1_000 + 25_000, 0));
+    }
+
+    #[test]
+    fn new_activity_rearms() {
+        let mut g = IdleGate::default();
+        assert!(g.poll(1_000, 21_000, 0));
+        assert!(!g.poll(30_000, 31_000, 0));
+        assert!(g.poll(30_000, 50_000, 0));
+    }
+
+    #[test]
+    fn running_job_count_recovers_after_a_panic() {
+        let counter = AtomicUsize::new(0);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = RunningJob::enter(&counter);
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+            panic!("step panicked");
+        }));
+        assert!(r.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
 }
