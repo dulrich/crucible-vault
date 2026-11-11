@@ -246,3 +246,119 @@ Daemon spike:
 - **Equality:** `PROTO=plain bash eqrun.sh 2`, then `bash eqcmp.sh out/E-r*/eq.txt out/E-r*-proto/eq2.txt` (it needs explicit file arguments; called bare it prints `same=0 diff=0`).
 - **Prototype gates (plain tree):** `cargo test -p cv -p views -p cv-search` passes with and without `CVP_DIRECT=1 CVP_REUSE=1` (543 passed / 1 ignored, 63, 18, 11, 11, 7, 5, 2); `cargo clippy -p cv -p views -p cv-search --all-targets -- -D warnings` fails on the single placement error above; `shellcheck -s bash -S warning` is clean on every script after two small fixes.
 - **Environment knobs (prototype binaries only):** `CVP_DIRECT` direct decode, `CVP_REUSE` caches across runs, `CVP_OPEN_BLOCKING` open under `block_in_place`, `CVP_SEMS` sign bits from the blob (needs the sign-bits change in `semsearch`); instrumentation `CVMR_COUNT`, `CVMR_STAT_MS`, `CVMR_DUMP_RELEASE`.
+
+## Post-implementation (1.0.1 against the release candidate)
+
+Measurement of the `memory-followups` work packages (WP-2 hidden-tab image release, WP-3 decode cap of 2, WP-4 blocking index open with `semsearch` 0.3.1, WP-5 view property values decoded straight from JSON text) against the shipped 1.0.1. Memory figures are the criteria; latency and CPU are not reported as findings. Aggregates only.
+
+### Host and builds
+
+- Shared workstation, 24 cores, 61 GiB. Every block ran with no `rustc` running (the `rustc` count was 0 in every block header and every daemon sample) and no build overlapped a block.
+- **pre** = tag `v1.0.1` (`e31a9a7d`), built against `semsearch` 0.3.0 (`git archive v0.3.0` extracted beside the tree; the tree's `Cargo.lock` still pins 0.3.0 and is unchanged after the build).
+- **post** = master at `592805d5` (WP-2, WP-3, WP-4, WP-5 landed), built against `semsearch` 0.3.1 (symlinked; the lock pins 0.3.1, unchanged).
+- Each tree sits at `<scratch>/<name>/crucible-vault` with `crucible-tui` beside it and its own `CARGO_TARGET_DIR`; all builds are `--release`. Editor trees: `cargo build --release -p editor -p cv` (default `gpu` feature), uninstrumented on both sides. Daemon trees: `cargo build --release -p cv --bin cv`, four of them: pre and post uninstrumented (headline and equality), pre and post instrumented with the counting allocator (`instr.patch`).
+- `instr.patch` applied to pre unchanged. On post it rejected in two files and the probes were placed by hand, instrumentation only, in the scratch tree: in `search_query.rs` the open-allocation and open-time probes moved inside the `spawn_blocking` closure that now performs the index open (the counter is per thread, so it has to be read on the blocking thread); in `views/src/db.rs` the property-preload probes went around the property loop and the tag loop, and the per-value decode probe into `json_value`.
+- Vault: a copy of the live vault made with `rsync --no-links` without `.git`, `.obsidian`, `.trash`; config neutralised (`schedules.toml` emptied, 6 of 6 pipelines `enabled = false`, `maildir = ""`, 3 of 3 `base_url` at `http://127.0.0.1:9/v1`, checked by grep counts); `search.db` from a read-only `sqlite3 .backup`. Search answered keyword-only. The live daemon, editor, socket and vault were not touched.
+
+### Criterion 1 — editor settled RSS after S1 (`idle60`), post at least 140 MiB lower in all 3 cycles
+
+S1: 15 image-heavy tabs opened 3 s apart, two re-show cycles, idle 60 s; pre and post interleaved, 3 cycles. The editor ran on X11 (`DISPLAY` only). Sanity check passed: the `opened` rss is far above the `idle` rss in every session (about 126 MiB idle, 236 to 262 MiB post and 482 MiB pre when opened).
+
+| cycle | pre `idle60` rss (MiB) | post `idle60` rss (MiB) | difference (MiB) | psi `some avg10` (pre / post) |
+|---|---|---|---|---|
+| 1 | 454.3 | 197.5 | 256.8 | 0.00 / 15.53 |
+| 2 | 454.7 | 197.5 | 257.2 | 23.88 / 0.00 |
+| 3 | 434.4 | 197.3 | 237.1 | 0.00 / 0.00 |
+
+**Pass** (smallest difference 237.1 against 140). Spike: 186.
+
+### Criterion 2 — editor load peak over settled at or below 100 MiB on post in all 3 cycles
+
+Definition as in the spike's decode-peak table: `hwm` after the opening phase (the high-water mark is reset before the 15 opens) minus the settled `opened+10` rss.
+
+| cycle | pre hwm / settled / peak over settled (MiB) | post hwm / settled / peak over settled (MiB) |
+|---|---|---|
+| 1 | 486.5 / 416.7 / 69.8 | 333.7 / 203.7 / 130.0 |
+| 2 | 487.3 / 416.9 / 70.4 | 332.5 / 196.8 / 135.7 |
+| 3 | 485.7 / 416.1 / 69.6 | 287.9 / 196.6 / 91.3 |
+
+**Miss** on cycles 1 and 2 (130.0 and 135.7 against 100); cycle 3 is within (91.3). The absolute peak is far lower on post (hwm 288 to 334 against 486 to 487 MiB) because the settled level is so much lower; the peak over settled is larger because the pre settled level already carries the retained images. The spike's figure was about 88 at cap 2. Cycle 1 of post had psi 15.53 at the session start, but cycle 2 (psi 0.00) is as high, so the miss is not explained by contention. Not re-run, per the brief; the variation between cycles (91 to 136) is wide for an uncontended memory figure.
+
+**Disposition (user, 2026-11-11): released as is.** The criterion compares the peak with a settled level that hidden-tab release lowered by about 220 MiB; measured from the idle level (about 126 MiB) the opening peak is 162 to 208 MiB on post against about 360 MiB on pre. The decode cap was not measured on its own here, so its separate effect on the opening peak is not established by this run.
+
+### Criterion 3 — daemon index-open allocation on post at or below 60 MiB
+
+Scenario-A block and a `S` block (index open alone) per side, counting allocator on; the open allocation is the `open_kib` field of the `CVMR search open=true` line (one line per block).
+
+| block | pre (MiB) | post (MiB) |
+|---|---|---|
+| A (scenario A, instrumented) | 428.5 | 45.2 |
+| S (index open alone) | 428.5 | 45.2 |
+
+**Pass** (45.2 against 60). Spike: 45.2 and 427.9. psi 0.00, `rustc` 0 in all four blocks; no errors logged.
+
+### Criterion 4 — daemon view-thread allocation per pass on post at or below 225 MiB
+
+From `vsum.pl` over the instrumented scenario-A block's log, three passes of 15 views.
+
+| pass | pre total (MiB) | post total (MiB) |
+|---|---|---|
+| 1 | 224.0 | 206.0 |
+| 2 | 223.9 | 206.0 |
+| 3 | 223.9 | 206.0 |
+
+Largest components, pre against post: property preload 106.9 against 89.0 MiB, parse 31.3 against 22.9, candidates 26.4 on both, tag preload 23.9 on both, links 7.5 on both.
+
+**Pass** (206.0 against 225). Spike: 219.9 and 237.7 (the pre figure here, 224.0, is below the spike's 237.7 because the tree is 1.0.1, which already carries the earlier releases' changes).
+
+### Criterion 5 — daemon scenario A, uninstrumented: post peak at or below 100 MiB, median settled within 10 MiB of pre
+
+`AIDLE=120`, pre and post rotated per cycle, 3 cycles; anonymous RSS in MiB from `summarize.sh` (peak = maximum over the block, settled = mean of the last 10 s).
+
+| cycle | pre peak / settled | post peak / settled | psi / `rustc` |
+|---|---|---|---|
+| 1 | 79 / 60 | 82 / 62 | 0.00 / 0 |
+| 2 | 80 / 59 | 80 / 60 | 0.00 / 0 |
+| 3 | 79 / 59 | 80 / 61 | 0.00 / 0 |
+
+Post peaks 82, 80, 80 (all at or below 100). Median settled: pre 59, post 61, a difference of 2 MiB (at most 10). **Pass.** No block logged an error.
+
+### Criterion 6 — every view and search reply identical between pre and post
+
+Two rounds of the equality block (two jobs, drain, then 51 replies per pass: 26 views, 10 searches, one view error, one job error, listings and job replies), pre and post per round, no knobs; each block runs the client twice (the second pass reads the kept view caches). Compared with `eqcmp.sh` on explicit file arguments, by hash and length.
+
+- pre round 1 against pre round 2: 41 identical, 10 different. By kind: `job` 3, `job_timeline` 3, `jobs_list` 1, `jobs_stats` 1, `status` 1, and `view` 1.
+- All four runs together (both pre and both post): the same 41 identical, the same 10 different, with the same kind counts. Since the all-four difference set contains every pre-against-post difference and every pre-against-pre difference and has the same size as the pre-against-pre set, every pre-against-post difference is one of the run-dependent replies: the job, timeline, list, stats and status replies and the one view that also differs between two pre runs.
+- All 26 views but that one, all 10 searches, the view and job error replies, and the `views_list`, `actions_list`, `intake_list` and `lookup_currencies` replies are identical across all four runs, in both passes.
+
+**Pass.**
+
+### Summary
+
+| criterion | result |
+|---|---|
+| 1 editor settled RSS at least 140 MiB lower | pass (237 to 257 MiB lower) |
+| 2 editor load peak over settled at most 100 MiB | **miss** (130.0, 135.7, 91.3 MiB; pre 70 MiB) |
+| 3 index-open allocation at most 60 MiB | pass (45.2; pre 428.5) |
+| 4 view-thread allocation per pass at most 225 MiB | pass (206.0; pre 224.0) |
+| 5 scenario A peak at most 100 and settled median within +10 | pass (peaks 80 to 82; median settled +2) |
+| 6 replies identical | pass |
+
+### Commands
+
+Run from the harness copies in the scratch directory `<scratch>/…`; scratch paths are written `<scratch>/…`.
+
+- **Trees:** `git worktree add --detach <scratch>/<name>/crucible-vault <rev>` for `<name>` in editor `ref` and `proto`, daemon `ref`, `plain`, `iref`, `ipost` (`ref`, `iref` at `e31a9a7d`; `proto`, `plain`, `ipost` at `592805d5`); `crucible-tui` symlinked beside each; `semsearch` an archive of `v0.3.0` beside the pre trees and a symlink to the sibling repo beside the post trees; `git apply` (pre) and `git apply --reject` plus the hand placement above (post) of `instr.patch` for `iref` and `ipost`.
+- **Builds:** `CARGO_TARGET_DIR=<scratch>/<name>/target cargo build --release -p editor -p cv` (editor trees) and `… -p cv --bin cv` (daemon trees); the lock check is `grep -A1 'name = "semsearch"' Cargo.lock` in each tree.
+- **Editor:** `DISPLAY=:0 ./matrix.sh spec 3` with the two-line spec `s1-pre ref S1` and `s1-post proto S1` (the spike's `session.sh`, `daemon.sh` and `matrix.sh`, unchanged apart from running from the scratch copy); numbers from `perl rsum.pl out/s1-*.rows` (label, phase, rss, hwm, psi and `rustc` count from the block header). Criterion 1 is the `idle60` rss; criterion 2 is the `opened` hwm minus the `opened+10` rss.
+- **Scenario-A and S instrumented blocks:** `SUB=1 AIDLE=30 ADUMP="0 29" bash run.sh I-A-<pre|post> A CVMR_COUNT=1 CVMR_STAT_MS=1000 CVMR_DUMP_RELEASE=1` and `bash run.sh I-S-<pre|post> S CVMR_COUNT=1 CVMR_STAT_MS=1000`, binary switched through the `<scratch>/target` symlink; criterion 3 from `grep "CVMR search open=true" out/<block>/cvmr.log` (the `open_kib` field), criterion 4 from `perl vsum.pl out/I-A-<pre|post>/cvmr.log`.
+- **Headline:** `bash h.sh 3` (a wrapper for `AIDLE=120 bash run.sh H-A-c<N>-<pre|post> A`, order rotated per cycle, binary through the symlink), table from `bash summarize.sh H-A-`.
+- **Equality:** `bash e.sh 2` (a wrapper for `bash run.sh E-r<N>-<pre|post> E` on the uninstrumented trees, pre then post per round), then `bash eqcmp.sh out/E-r1-pre/eq.txt out/E-r2-pre/eq.txt …` with explicit file arguments, for `eq.txt` and `eq2.txt`, the output reduced to the kind counts with `awk`.
+
+### Not measured
+
+- Latency and CPU: recorded by `summarize.sh` but not reported, per the criteria (shared host).
+- The semantic search path (no embedder; search stayed keyword-only in every block).
+- Daemon scenario B (job replay with pipelined views) and the editor scenarios S2, S3, O and V: out of scope for this work package.
+- The editor's per-structure attribution (image cache, view store, resolver): the editor builds were uninstrumented, so only the `/proc` figures (`Rss`, `VmHWM`) exist.
+- Settled RSS of the editor after longer idle than the 60 s of S1.
