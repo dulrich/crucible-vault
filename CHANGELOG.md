@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- **Editor stays responsive while the daemon is busy:** opening, reloading and reconnecting a note settle off the UI thread, and an open note is addressed by its note id, so it follows a rename, a move, or a replacement by another note.
+- **Reconnect states:** a note deleted while the editor was disconnected reads "file deleted on disk"; two rapid opens of the same unopened path keep the later one.
+- **Config vocabulary:** an unknown `folder("<key>")` in a view definition is reported as one load notice, and the default Publications page follows `[structure] app_folder`; creating it from the explorer gives an empty note, the navigation link seeds it.
+- **Memory:** both processes release freed heap through one `cv-malloc` entry (triggers and thresholds unchanged), and the protocol client no longer copies a reply's payload or keeps a large reply's line buffer.
+- **View test goldens** are one line per column and per row.
+
+### Added
+
+- **Migration libs for new migrations:** `deploy/migrations/lib/view-def.sh` (anchored view-definition edits) and `anchor_array_add` (TOML array adds).
+
 ## 1.0.0 - 2026-11-08
 
 First public release: a Rust Obsidian-Flavored-Markdown vault app that pairs a headless core daemon with an editor GUI client.
