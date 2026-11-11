@@ -710,6 +710,9 @@ fn one_completion_serves_a_tab_and_an_embed_of_the_same_page() {
     let (_tmp, _d, mut app, pdf, view) = embed_setup(b"![[doc.pdf#page=2]]\n");
     embed_shown(&mut app, view, 1, 300.0);
     embed_doc_opened(&mut app, &pdf);
+    // Memory follow-ups WP-2: the note must stay visible (its pins are released when hidden), so
+    // the PDF tab opens in a second pane.
+    let _ = app.send(Message::Panes(crate::message::PanesMsg::SplitRight));
     open(&mut app, "doc.pdf");
     let tab = app.active_tab().expect("tab").id;
     page_shown(&mut app, tab, 1, 300.0);
@@ -721,4 +724,70 @@ fn one_completion_serves_a_tab_and_an_embed_of_the_same_page() {
     assert_eq!(app.pdf.held(&embed_of(view), &pk), Some(key.as_str()));
     assert_eq!(app.pdf.held(&Consumer::Tab(tab), &pk), Some(key.as_str()));
     assert_eq!(app.reading.images.pins(&key), 2);
+}
+
+fn show_tab(app: &mut App, id: u64) {
+    let ps = app.panes.get_mut(app.focus).expect("pane");
+    let i = ps.tabs.iter().position(|t| t.id == id).expect("tab");
+    ps.activate(i);
+    app.release_hidden_pins();
+}
+
+/// Memory follow-ups WP-2: an image tab no pane shows releases its pin and entry; shown again
+/// its sensor's `Shown` re-pins and re-loads it.
+#[test]
+fn a_hidden_image_tab_releases_its_pin_and_a_reshow_repins() {
+    let (_tmp, _d, mut app) = setup(
+        &[("att/p.png", &png(8, 4)), ("att/q.png", &png(8, 4))],
+        false,
+    );
+    open(&mut app, "att/p.png");
+    let id = app.active_tab().expect("tab").id;
+    let shown = |app: &mut App| {
+        let _ = app.send(Message::ImageTab(ImageTabMsg::Shown {
+            path: "att/p.png".into(),
+            view: id,
+            width: 300.0,
+        }));
+        let decoded = crate::image_cache::decode(&png(8, 4), 320).map_err(|e| e.to_string());
+        let _ = app.send(Message::MediaLoaded {
+            key: MediaKey::Image("att/p.png".into()),
+            result: decoded,
+        });
+    };
+    shown(&mut app);
+    let fresh = app.reading.images.used_bytes();
+    assert_eq!(app.reading.images.pins("att/p.png"), 1);
+    open(&mut app, "att/q.png");
+    assert_eq!(app.reading.images.pins("att/p.png"), 0);
+    assert!(!app.reading.images.contains("att/p.png"), "entry gone");
+    show_tab(&mut app, id);
+    shown(&mut app);
+    assert_eq!(app.reading.images.pins("att/p.png"), 1, "re-pinned");
+    assert_eq!(app.reading.images.used_bytes(), fresh, "as a fresh open");
+}
+
+/// Memory follow-ups WP-2: a note's PDF-embed page pins (their own owner namespace) follow the
+/// same rule: released when the note's tab is hidden, re-pinned by the embed sensor.
+#[test]
+fn a_hidden_note_releases_its_pdf_embed_pins() {
+    let (_tmp, _d, mut app, pdf, view) = embed_setup(b"![[doc.pdf#page=2]]\n");
+    embed_shown(&mut app, view, 1, 300.0);
+    embed_doc_opened(&mut app, &pdf);
+    let width = crate::image_cache::decode_width(300.0);
+    let key = PageKey::new("doc.pdf", 1).cache_key(width);
+    let bytes = Arc::new(pdf.clone());
+    rendered(&mut app, 1, &key, crate::pdf::render_page(&bytes, 1, width));
+    assert_eq!(app.reading.images.pins(&key), 1);
+    let fresh = app.reading.images.pdf_bytes();
+    assert!(fresh > 0);
+    open(&mut app, "doc.pdf");
+    assert_eq!(app.reading.images.pins(&key), 0, "hidden: pin released");
+    assert!(!app.reading.images.contains(&key));
+    assert!(app.pdf.pages_of(&embed_of(view), "doc.pdf").is_none());
+    show_tab(&mut app, view);
+    embed_shown(&mut app, view, 1, 300.0);
+    rendered(&mut app, 1, &key, crate::pdf::render_page(&bytes, 1, width));
+    assert_eq!(app.reading.images.pins(&key), 1, "re-pinned by on_show");
+    assert_eq!(app.reading.images.pdf_bytes(), fresh, "as a fresh open");
 }

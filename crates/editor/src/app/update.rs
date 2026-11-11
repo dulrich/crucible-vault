@@ -22,6 +22,7 @@ impl App {
         }
         let flush = self.flush_switched_away(&before);
         self.sync_buffers();
+        self.release_hidden_pins();
         let auto = self.schedule_settings_autosave();
         let restore = self.restore_places(&views_before);
         let persist = self.schedule_persist();

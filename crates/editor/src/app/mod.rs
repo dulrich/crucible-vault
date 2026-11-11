@@ -585,6 +585,9 @@ pub struct App {
     /// WP-R2 (review E1): the one PDF store — documents, tab and embed consumers (only
     /// `Send` data).
     pub pdf: crate::pdf::store::PdfStore<iced::widget::image::Handle>,
+    /// Tabs no pane shows whose image pins were already released ([`App::release_hidden_pins`]);
+    /// a tab leaves the set when it is shown again or closed.
+    released_tabs: std::collections::HashSet<u64>,
     /// Plan WP-R4: tasks helpers started (settles, opens), returned by the current `update`.
     deferred: Vec<Task<Message>>,
     /// Plan WP-R4: note opens in flight, keyed by (path, note id) ([`settle`]).
@@ -725,6 +728,7 @@ impl App {
             context_menu: None,
             clip_writer: Arc::new(crate::clipboard_image::SystemClipboard::detect()),
             pdf: crate::pdf::store::PdfStore::default(),
+            released_tabs: std::collections::HashSet::new(),
             deferred: Vec::new(),
             opening: settle::Opening::new(),
             req_seq: 0,
@@ -776,6 +780,43 @@ impl App {
         app.sync_ui_state();
         app.persisted = Some(app.ui.clone());
         app
+    }
+
+    /// Memory follow-ups WP-2: releases the image-cache pins of every open tab that no pane shows
+    /// (the active tab of each pane is visible, through [`PaneState::active_tab`]; unlike
+    /// `sync_buffers`' set this one covers Reading-mode notes and image / PDF file tabs, and is
+    /// keyed by tab). Each tab's pins go by the exact owner it took them with: the per-view owner
+    /// `view_owner(path, tab id)` of a note's Reading images and of an image tab, and every PDF
+    /// consumer of the tab (its pages and a note's embeds) through `PdfStore::view_closed`. A
+    /// tab shown again is unmounted-then-mounted, so its sensors fire `on_show` and re-pin
+    /// (nothing hidden stays in the widget tree: the pane body is built from the active tab
+    /// only). A tab already released is skipped. Idempotent; run after every update.
+    pub(crate) fn release_hidden_pins(&mut self) {
+        let visible: std::collections::HashSet<u64> = self
+            .panes
+            .iter()
+            .filter_map(|(_, ps)| ps.active_tab().map(|t| t.id))
+            .collect();
+        let mut hidden = std::collections::HashSet::new();
+        let mut fresh: Vec<u64> = Vec::new();
+        let mut owners = std::collections::HashSet::new();
+        for (_, ps) in self.panes.iter() {
+            for t in ps.tabs.iter().filter(|t| !visible.contains(&t.id)) {
+                hidden.insert(t.id);
+                if self.released_tabs.contains(&t.id) {
+                    continue;
+                }
+                fresh.push(t.id);
+                if let Some(path) = t.path(&self.docs).or_else(|| t.file_path()) {
+                    owners.insert(crate::image_cache::view_owner(path, t.id));
+                }
+            }
+        }
+        self.released_tabs = hidden;
+        self.reading.images.release_exact(&owners);
+        for id in fresh {
+            self.pdf.view_closed(id, &mut self.reading.images);
+        }
     }
 
     /// Lazy source buffers (plan editor-cutover-blockers WP-2): a document keeps its shaped

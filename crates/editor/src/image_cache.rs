@@ -364,6 +364,33 @@ impl ImageCache {
         self.retain_owner(owner, &HashSet::new());
     }
 
+    /// Releases the pins of exactly the owners in `owners` (never by path prefix: a view owner
+    /// is released only as itself, see [`view_owner`]): their pending loads are dropped and an
+    /// entry no owner pins any more goes at once, like [`Self::release_owner`] (it does not wait
+    /// for the byte budget). Used for tabs no pane shows.
+    pub fn release_exact(&mut self, owners: &HashSet<String>) {
+        if owners.is_empty() {
+            return;
+        }
+        for (k, w) in &mut self.pending {
+            w.retain(|o| !owners.contains(o));
+            if w.is_empty() {
+                self.reserved.remove(k);
+            }
+        }
+        let mut freed = Vec::new();
+        for (k, e) in &mut self.entries {
+            let pinned = !e.owners.is_empty();
+            e.owners.retain(|o| !owners.contains(o));
+            if pinned && e.owners.is_empty() {
+                freed.push(k.clone());
+            }
+        }
+        for k in freed {
+            self.remove(&k);
+        }
+    }
+
     /// Plan round-16 WP-3: document `from` now lives at `to` (a rename, the daemon's move
     /// included): every pin (resident or pending) of `from` and its per-view owners moves to the
     /// same owner under `to`. The open tab's image sensors are keyed by image key and stay in

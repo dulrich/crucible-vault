@@ -121,6 +121,92 @@ fn image_pins_are_per_view() {
     assert!(c.contains("j"));
 }
 
+fn decoded_px() -> crate::image_cache::Decoded {
+    crate::image_cache::Decoded {
+        handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]),
+        width: 1,
+        height: 1,
+        bytes: 4,
+    }
+}
+
+/// Memory follow-ups WP-2: `release_exact` releases only the named owners (a bare path, another
+/// view and a path that merely starts with it are untouched); unpinned entries go at once.
+#[test]
+fn release_exact_names_owners_never_prefixes() {
+    use crate::image_cache::{ImageCache, view_owner};
+    let mut c = ImageCache::with_budget(1 << 20);
+    let (v1, v2) = (view_owner("a.md", 1), view_owner("a.md", 2));
+    for (o, k) in [(&v1, "x"), (&v2, "y"), (&view_owner("a.md.md", 1), "z")] {
+        assert!(c.show(o, k));
+        assert!(c.loaded(k, Some(decoded_px())));
+    }
+    assert!(!c.show("a.md", "x"), "a bare-path owner pins x too");
+    c.release_exact(&HashSet::from([v1.clone(), v2]));
+    assert_eq!(c.pins("x"), 1, "only the exact view owner went");
+    assert!(!c.contains("y") && c.contains("z"));
+    c.release_exact(&HashSet::from([v1]));
+    assert_eq!(c.pins("x"), 1, "a bare owner is not a view owner");
+}
+
+/// Memory follow-ups WP-2: a tab no pane shows holds no pins and no unpinned entries; shown
+/// again it re-pins through the sensor's `show` and the cache is what a fresh open gives.
+#[test]
+fn hidden_note_tab_releases_its_pins_and_a_reshow_repins() {
+    use crate::image_cache::view_owner;
+    let (_tmp, _d, mut app) = setup(&["w2/a.md", "w2/b.md"]);
+    let pane = app.focus;
+    let (a, b) = (views(&app, "w2/a.md")[0].1, views(&app, "w2/b.md")[0].1);
+    let tab_of = |app: &mut App, id: u64| {
+        let ps = app.panes.get_mut(pane).expect("pane");
+        let i = ps.tabs.iter().position(|t| t.id == id).expect("tab");
+        ps.activate(i);
+        app.release_hidden_pins();
+    };
+    let pin = |app: &mut App, id: u64| {
+        let o = view_owner("w2/a.md", id);
+        assert!(app.reading.images.show(&o, "k"), "on_show starts the load");
+        assert!(app.reading.images.loaded("k", Some(decoded_px())));
+    };
+    tab_of(&mut app, a);
+    pin(&mut app, a);
+    let fresh = app.reading.images.used_bytes();
+    assert_eq!(app.reading.images.pins("k"), 1);
+    tab_of(&mut app, b);
+    assert!(!app.reading.images.contains("k"), "hidden: entry gone");
+    assert_eq!(app.reading.images.used_bytes(), 0);
+    // A pass over a tab already released does nothing more (a pin taken since stays).
+    assert!(app.reading.images.show(&view_owner("w2/a.md", a), "k"));
+    app.release_hidden_pins();
+    assert_eq!(app.reading.images.pending_len(), 1, "not released twice");
+    tab_of(&mut app, a);
+    let _ = app.reading.images.loaded("k", Some(decoded_px()));
+    assert_eq!(app.reading.images.pins("k"), 1);
+    assert_eq!(app.reading.images.used_bytes(), fresh, "as a fresh open");
+}
+
+/// Memory follow-ups WP-2: two views of one image keep it while either is visible; it drops
+/// when both are hidden (the exact owners released, never the path).
+#[test]
+fn a_shared_image_survives_until_every_view_is_hidden() {
+    use crate::image_cache::view_owner;
+    let (_tmp, d, mut app, left, right) = duplicated();
+    let (l, r) = (views(&app, "w7/a.md")[0].1, views(&app, "w7/a.md")[1].1);
+    for id in [l, r] {
+        let _ = app.reading.images.show(&view_owner("w7/a.md", id), "k");
+    }
+    assert!(app.reading.images.loaded("k", Some(decoded_px())));
+    assert_eq!(app.reading.images.pins("k"), 2);
+    // Another note takes over each pane in turn.
+    d.create_note("w7/b.md", "body").expect("create");
+    for (pane, expect_pins) in [(left, 1), (right, 0)] {
+        let _ = app.send(Message::Panes(PanesMsg::Focus(pane)));
+        quick(&mut app, QuickSwitchOpen::Duplicate, "w7/b.md");
+        assert_eq!(app.reading.images.pins("k"), expect_pins);
+    }
+    assert!(!app.reading.images.contains("k"), "both hidden: dropped");
+}
+
 #[test]
 fn duplicate_tabs_share_one_document_and_its_edits() {
     let (_tmp, _d, mut app, left, right) = duplicated();
