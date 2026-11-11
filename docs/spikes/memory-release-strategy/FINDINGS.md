@@ -238,3 +238,60 @@ Aggregates only; reply bodies were compared by hash and length and discarded. Pr
 - **Not measured:** scenario B at a 16 MiB threshold; notifications and connection-level replies (same pattern); the request side.
 
 Commands (spike scratch directory): `bash eqrun.sh 2` (uses `eqclient.pl`) and a `join` over `out/W6E-r{1,2}-{ref,reply}/eq.txt`; `bash w6matrix.sh D` / `A` / `B`; `bash w6thr.sh`; tables from `bash summarize.sh W6D` / `W6A` / `W6B` / `W6T` and `perl w6sum.pl out/W6D-*`.
+
+## Post-implementation, reply serialisation (2026-11-11)
+
+Aggregates only; the scratch vault was a copy of the live vault with symlinks and `.git` removed and the config neutralised as in the Method section, deleted afterwards.
+
+- **Compared:** two unpatched release builds of `cv` (no `spike.patch`, no `reply.patch`, no instrumentation): **pre** = `38f52df8` (before the reply change) and **post** = `54ed2c24` (reply serialisation straight to text; idle and 5-minute sampler releases trim above 16 MiB of free-resident memory, the after-job release stays at 32 MiB). The commits between them are docs only. Both built from detached worktrees against the sibling `semsearch` 0.3.0 checkout, each with its own target directory; the harness picked the binary through a repointed `/tmp/cvmr/target` symlink.
+- **Order:** scenario A first (6 cycles, `AIDLE=120`), then scenario B (3 cycles). Odd cycles ran pre then post, even cycles post then pre. A smoke block per binary first (`AIDLE=30`): 39 `view` lines ok and 15 searches ok on each, err 0.
+- **Contention:** none. psi 0.00 and no running `rustc` in every block (`psi` and `rc` columns below), so no block is labelled contended and nothing was re-run. The `trim*` and `relM` columns are 0 for unpatched binaries (they come from the spike patch's log lines) and are left out of the tables.
+
+**Scenario A** (anon MiB; view latency ms client-side; CPU s of the daemon):
+
+| cycle | binary | peak | meanL | settled | v50 | v95 | cpu_s | psi | rc |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | pre | 135 | 93 | 61 | 6 | 75 | 2.3 | 0.00 | 0 |
+| 1 | post | 78 | 66 | 59 | 5 | 55 | 2.2 | 0.00 | 0 |
+| 2 | post | 79 | 67 | 59 | 5 | 58 | 2.2 | 0.00 | 0 |
+| 2 | pre | 133 | 96 | 64 | 6 | 76 | 2.3 | 0.00 | 0 |
+| 3 | pre | 120 | 91 | 62 | 6 | 72 | 2.2 | 0.00 | 0 |
+| 3 | post | 80 | 66 | 58 | 5 | 53 | 2.1 | 0.00 | 0 |
+| 4 | post | 80 | 67 | 59 | 5 | 53 | 2.1 | 0.00 | 0 |
+| 4 | pre | 135 | 101 | **86** | 6 | 77 | 2.3 | 0.00 | 0 |
+| 5 | pre | 113 | 80 | 62 | 6 | 72 | 2.2 | 0.00 | 0 |
+| 5 | post | 79 | 66 | 59 | 5 | 59 | 2.1 | 0.00 | 0 |
+| 6 | post | 80 | 67 | 60 | 6 | 57 | 2.2 | 0.00 | 0 |
+| 6 | pre | 108 | 86 | **84** | 6 | 74 | 2.2 | 0.00 | 0 |
+
+**Scenario B** (anon MiB; ms; dupes-scan and link-scan-all p95 from `cv jobs stats`; ratio = post / pre of the same cycle):
+
+| cycle | binary | peak | meanL | settled | view p95 | dupes95 | lsa95 | cpu_s | psi | rc |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | pre | 200 | 126 | 85 | 404 | 5.2 s | 982 ms | 216.5 | 0.00 | 0 |
+| 1 | post | 168 | 122 | 74 | 408 | 5.2 s | 956 ms | 212.3 | 0.00 | 0 |
+| 2 | post | 170 | 125 | 75 | 408 | 5.2 s | 963 ms | 215.1 | 0.00 | 0 |
+| 2 | pre | 199 | 122 | 76 | 402 | 5.2 s | 971 ms | 215.7 | 0.00 | 0 |
+| 3 | pre | 192 | 122 | 72 | 398 | 5.1 s | 965 ms | 212.6 | 0.00 | 0 |
+| 3 | post | 169 | 121 | 72 | 402 | 5.2 s | 959 ms | 212.8 | 0.00 | 0 |
+
+| cycle | view p95 post/pre | dupes95 post/pre | lsa95 post/pre | cpu_s post/pre |
+|---|---|---|---|---|
+| 1 | 1.010 | 1.00 | 0.973 | 0.981 |
+| 2 | 1.015 | 1.00 | 0.992 | 0.997 |
+| 3 | 1.010 | 1.02 | 0.994 | 1.001 |
+
+The dupes-scan p95 is printed by `cv jobs stats` at 0.1 s resolution, so its ratio is coarse; the largest observed difference is 0.1 s.
+
+**Pass criteria** (all passed; nothing missed, nothing changed to make it pass):
+
+1. Scenario A settled on post at or below 75 MiB: **pass in all 6 cycles** (59, 59, 58, 59, 59, 60).
+2. Scenario A peak on post at or below 100 MiB: **pass in all 6 cycles** (78, 79, 80, 80, 79, 80).
+3. Scenario B post against the same cycle's pre, view p95, dupes-scan p95 and link-scan-all p95 within 10 % and CPU within 5 %: **pass in all 3 cycles** (largest ratios: view p95 1.015, dupes-scan p95 1.02, link-scan-all p95 0.994, CPU 1.001).
+
+- **Against the prototype:** scenario A settled 58–60 and peak 78–80 reproduce the prototype's 59–62 and 79–81 at a 16 MiB threshold. The A view p95 was 53–59 against the prototype's 53–58, and CPU 2.1–2.2 against 2.2. Scenario B peak 168–170 against the prototype's 168–169 (reference 192–200 here against 192–197); view p95, dupes-scan p95, link-scan-all p95 and CPU tie within noise, as the prototype found.
+- **Reference bad mode:** it appeared on pre in 2 of 6 cycles (cycles 4 and 6, settled 86 and 84, above about 75), roughly the 1 in 4 rate expected; post never showed it (settled 58–60 in every cycle, a 2 MiB range). The reference's A peak was 108–135.
+- **Scenario B at the 16 MiB quiet-time threshold** had not been measured before. On post the B settled figure was 74, 75 and 72 MiB against 85, 76 and 72 on pre, so it is level with or below the reference in every cycle (11 MiB lower in cycle 1, 1 lower in cycle 2, equal in cycle 3), no regression; the quiet-time threshold costs nothing there, as expected because the after-job release stays at 32 MiB (the release count was not logged on these unpatched builds). The B CPU was 212.3–215.1 s on post against 212.6–216.5 s on pre, so no CPU cost.
+- **Not measured:** the 5-minute sampler backstop (beyond the 120 s idle window); search stayed keyword-only (the embedder connection to port 9 is refused locally, no re-embedding, no outbound calls), so the semantic path never ran; `localize-on-edit`, search refresh and the network-bound actions were not exercised; the A client is sequential, not the real editor's request pattern; storage is tmpfs. Notifications and connection-level replies still build a `Value`. Six A cycles on pre gave two bad-mode blocks; the criteria are absolute levels on post for that reason.
+
+Commands (spike's scratch directory; scratch root `/tmp/cvmr`): `git worktree add --detach /tmp/cvmr/pre/crucible-vault 38f52df8` and `… /tmp/cvmr/post/crucible-vault 54ed2c24` with `crucible-tui` and `semsearch` symlinked in each parent; `CARGO_TARGET_DIR=/tmp/cvmr/<pre|post>/target cargo build --release -p cv --bin cv` from each worktree; vault copy with `rsync -rt --exclude=.git`, symlinks deleted and config neutralised with `sed`; `sqlite3 -readonly <live search.db> ".backup /tmp/cvmr/ro/search.db"`; smoke `AIDLE=30 bash run.sh W8-smoke-<pre|post> A` then `bash summarize.sh W8-smoke`; driver (`ln -sfn /tmp/cvmr/<pre|post>/target /tmp/cvmr/target` then `AIDLE=120 bash run.sh W8A-c<N>-<pre|post> A` for N = 1..6, then `bash run.sh W8B-c<N>-<pre|post> B` for N = 1..3, order rotated per cycle); tables from `bash summarize.sh W8A-` and `bash summarize.sh W8B-`; ratios computed by hand from those rows.
