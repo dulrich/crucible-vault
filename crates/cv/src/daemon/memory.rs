@@ -29,6 +29,13 @@ const IDLE_RELEASE_AFTER: Duration = Duration::from_secs(20);
 /// How often the idle task checks; the release need not fire at exactly [`IDLE_RELEASE_AFTER`].
 const IDLE_POLL: Duration = Duration::from_secs(5);
 
+/// Free-resident bytes above which an idle or sampler release trims (16 MiB). Once replies stopped
+/// building a `Value` tree, about 22 MiB of free memory remains after a burst, under the 32 MiB
+/// job threshold, so the idle release never trimmed; 16 MiB stays above the 6-9 MiB that remains
+/// after a trim, so the 5-minute sampler tick cannot re-trim a settled daemon (plan
+/// memory-release-strategy WP-7).
+const QUIET_TRIM_THRESHOLD: u64 = 16 * 1024 * 1024;
+
 /// Why a release was attempted (the debug log label).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ReleaseReason {
@@ -41,6 +48,15 @@ pub(crate) enum ReleaseReason {
 }
 
 impl ReleaseReason {
+    /// The free-resident threshold this trigger trims above: a job's end keeps the shared
+    /// default, the quiet-time triggers use [`QUIET_TRIM_THRESHOLD`].
+    fn threshold(self) -> u64 {
+        match self {
+            Self::Job => cv_malloc::TRIM_RETAINED_THRESHOLD,
+            Self::Idle | Self::Sampler => QUIET_TRIM_THRESHOLD,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Job => "trim after job",
@@ -53,10 +69,10 @@ impl ReleaseReason {
 /// Returns freed heap pages to the OS, the one release path for all three triggers (a job's end,
 /// [`IDLE_RELEASE_AFTER`] of quiet, the sampler tick; plan memory-release-strategy WP-1): judged
 /// on the free-resident figure (anonymous RSS minus live allocator bytes), which falls after a
-/// trim, so the threshold alone rate-limits it (`cv_malloc::Figure`). Runs on the blocking pool,
+/// trim, so the threshold alone rate-limits it (per [`ReleaseReason::threshold`]) (`cv_malloc::Figure`). Runs on the blocking pool,
 /// never a worker.
 pub(crate) fn release_after_burst(reason: ReleaseReason) {
-    if let Some(r) = cv_malloc::release(cv_malloc::Figure::FreeResident) {
+    if let Some(r) = cv_malloc::release_above(cv_malloc::Figure::FreeResident, reason.threshold()) {
         tracing::debug!(
             target: "cv::memory",
             free_resident = r.figure,
@@ -359,6 +375,25 @@ mod tests {
     use super::*;
 
     const S: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn each_reason_uses_its_threshold_strictly() {
+        let mib = 1024 * 1024;
+        assert_eq!(ReleaseReason::Job.threshold(), 32 * mib);
+        assert_eq!(ReleaseReason::Idle.threshold(), 16 * mib);
+        assert_eq!(ReleaseReason::Sampler.threshold(), 16 * mib);
+        for r in [
+            ReleaseReason::Job,
+            ReleaseReason::Idle,
+            ReleaseReason::Sampler,
+        ] {
+            let t = r.threshold();
+            assert!(!cv_malloc::above(t, t), "{r:?} at the boundary");
+            assert!(cv_malloc::above(t + 1, t), "{r:?} just above");
+        }
+        // A settled free-resident figure (6-9 MiB) never re-trims.
+        assert!(!cv_malloc::above(9 * mib, QUIET_TRIM_THRESHOLD));
+    }
 
     #[test]
     fn not_yet_quiet_does_not_release() {

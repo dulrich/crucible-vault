@@ -109,8 +109,9 @@ pub fn info() -> MallocInfo {
     }
 }
 
-/// Allocator bytes retained above live data beyond which a trim is worthwhile (32 MiB); small
-/// workloads never cross it, so the threshold is the rate limiter.
+/// Default allocator bytes retained above live data beyond which a trim is worthwhile (32 MiB;
+/// the editor's and a job's end); small workloads never cross it, so the threshold is the rate
+/// limiter. Callers may choose their own through [`release_above`].
 pub const TRIM_RETAINED_THRESHOLD: u64 = 32 * 1024 * 1024;
 
 /// This process's anonymous RSS from `/proc/self/status` (`RssAnon`); `None` when unreadable.
@@ -160,15 +161,27 @@ impl Figure {
 /// Whether a figure warrants a trim: strictly above [`TRIM_RETAINED_THRESHOLD`].
 #[must_use]
 pub fn over_threshold(figure: u64) -> bool {
-    figure > TRIM_RETAINED_THRESHOLD
+    above(figure, TRIM_RETAINED_THRESHOLD)
 }
 
-/// The one release entry: reads `figure` and trims when it exceeds [`TRIM_RETAINED_THRESHOLD`].
-/// Returns `None` when the figure is unreadable or below the threshold (nothing was trimmed);
-/// the caller owns any logging and any trigger policy.
+/// Whether `figure` is strictly above a caller-chosen `threshold`.
+#[must_use]
+pub fn above(figure: u64, threshold: u64) -> bool {
+    figure > threshold
+}
+
+/// The release entry for callers content with the default threshold: [`release_above`] with
+/// [`TRIM_RETAINED_THRESHOLD`] (32 MiB; the editor's).
 pub fn release(figure: Figure) -> Option<Release> {
+    release_above(figure, TRIM_RETAINED_THRESHOLD)
+}
+
+/// The one release implementation: reads `figure` and trims when it is strictly above the
+/// caller's `threshold`. Returns `None` when the figure is unreadable or not above it (nothing
+/// was trimmed); the caller owns any logging and any trigger policy.
+pub fn release_above(figure: Figure, threshold: u64) -> Option<Release> {
     let figure = figure.read()?;
-    over_threshold(figure).then(|| Release {
+    above(figure, threshold).then(|| Release {
         figure,
         trimmed: trim(),
     })
@@ -241,6 +254,7 @@ mod tests {
         assert!(!over_threshold(0));
         assert!(!over_threshold(TRIM_RETAINED_THRESHOLD));
         assert!(over_threshold(TRIM_RETAINED_THRESHOLD + 1));
+        assert!(!above(5, 5) && above(6, 5) && !above(4, 5));
     }
 
     #[test]

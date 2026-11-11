@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - **Config vocabulary:** an unknown `folder("<key>")` in a view definition is reported as one load notice, and the default Publications page follows `[structure] app_folder`; creating it from the explorer gives an empty note, the navigation link seeds it.
 - **Memory:** both processes release freed heap through one `cv-malloc` entry (triggers and thresholds unchanged), and the protocol client no longer copies a reply's payload or keeps a large reply's line buffer.
 - **View test goldens** are one line per column and per row.
+- **Memory, replies:** the daemon serialises each reply straight to text (lower peak memory, no leftover allocator arenas), and its idle and 5-minute releases now trim above 16 MiB of free memory.
+- **Reply key order:** object keys in a reply follow struct declaration order instead of sorted order (equal as JSON; clients that decode by field name are unaffected).
 
 ### Security
 

@@ -79,6 +79,30 @@ fn response(id: RpcId, outcome: Result<Value, RpcError>) -> Value {
     .unwrap_or_else(|e| json!({"jsonrpc": JSONRPC_VERSION, "id": null, "error": {"code": error_codes::INTERNAL_ERROR, "message": e.to_string()}}))
 }
 
+/// The response line (with its trailing newline) for a dispatched call whose result is already
+/// serialised: the envelope is written around the payload bytes, in the key order the `Value`
+/// envelope serialises to (`id`, `jsonrpc`, `result`), so no `Value` tree is built for a reply.
+fn response_line(id: RpcId, outcome: Result<String, RpcError>) -> String {
+    let payload = match outcome {
+        Ok(p) => p,
+        Err(e) => {
+            let mut s = response(id, Err(e)).to_string();
+            s.push('\n');
+            return s;
+        }
+    };
+    let id = serde_json::to_string(&id).unwrap_or_else(|_| "null".to_owned());
+    let mut s = String::with_capacity(payload.len() + id.len() + 36);
+    s.push_str("{\"id\":");
+    s.push_str(&id);
+    s.push_str(",\"jsonrpc\":\"");
+    s.push_str(JSONRPC_VERSION);
+    s.push_str("\",\"result\":");
+    s.push_str(&payload);
+    s.push_str("}\n");
+    s
+}
+
 fn null_id_error(code: i64, message: &str) -> Value {
     json!({"jsonrpc": JSONRPC_VERSION, "id": null, "error": {"code": code, "message": message}})
 }
@@ -98,17 +122,17 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
     let mut topics: HashSet<Topic> = HashSet::new();
     let mut greeted = false;
     let mut guard = OpenSubGuard(&shared, false);
-    let (reply_tx, mut replies) = mpsc::unbounded_channel::<Value>();
+    let (reply_tx, mut replies) = mpsc::unbounded_channel::<String>();
     let mut calls = JoinSet::new();
     loop {
         let mut snapshot: Vec<Value> = Vec::new();
-        let out: Value = tokio::select! {
+        let buf: String = tokio::select! {
             _ = stop.changed() => break,
             Some(v) = replies.recv() => v,
             Some(_) = calls.join_next(), if !calls.is_empty() => continue,
             ev = events.recv(), if !topics.is_empty() => match ev {
                 Ok(n) if topics.contains(&n.topic()) => match serde_json::to_value(RpcNotification::new(n)) {
-                    Ok(v) => v,
+                    Ok(v) => line_of(&v),
                     Err(e) => { tracing::warn!(error = %e, "encoding notification"); continue; }
                 },
                 Ok(_) => continue,
@@ -133,11 +157,11 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
                         snapshot = held_snapshot(&shared);
                     }
                     match step {
-                        Line::Reply(v) => v,
+                        Line::Reply(v) => line_of(&v),
                         Line::Dispatch(id, req) => {
                             let (shared, tx) = (Arc::clone(&shared), reply_tx.clone());
                             calls.spawn(async move {
-                                let _ = tx.send(response(id, shared.handle(req).await));
+                                let _ = tx.send(response_line(id, shared.handle(req).await));
                             });
                             continue;
                         }
@@ -147,8 +171,6 @@ async fn connection(stream: UnixStream, shared: Arc<Shared>, mut stop: watch::Re
                 Err(e) => { tracing::debug!(error = %e, "connection read"); break; }
             },
         };
-        let mut buf = out.to_string();
-        buf.push('\n');
         if let Err(e) = wr.write_all(buf.as_bytes()).await {
             tracing::debug!(error = %e, "connection write");
             break;
@@ -254,4 +276,74 @@ fn handle_line(
         other => return Line::Dispatch(id, other),
     };
     Line::Reply(response(id, outcome))
+}
+
+/// `v` as one response line with its trailing newline.
+fn line_of(v: &Value) -> String {
+    let mut buf = v.to_string();
+    buf.push('\n');
+    buf
+}
+
+#[cfg(test)]
+mod reply_line_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[derive(serde::Serialize)]
+    struct Inner {
+        name: String,
+        n: u32,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Payload {
+        zeta: Vec<Inner>,
+        alpha: BTreeMap<String, Inner>,
+        flag: bool,
+    }
+
+    fn payload() -> Payload {
+        Payload {
+            zeta: vec![Inner {
+                name: "a \"q\"\n".into(),
+                n: 1,
+            }],
+            alpha: BTreeMap::from([(
+                "k".to_owned(),
+                Inner {
+                    name: "b".into(),
+                    n: 2,
+                },
+            )]),
+            flag: true,
+        }
+    }
+
+    /// The new line parses to the same JSON as the old `Value` envelope, for each id kind.
+    #[test]
+    fn typed_reply_line_equals_the_value_envelope() {
+        for id in [RpcId::Num(7), RpcId::Str("req-1".into())] {
+            let p = payload();
+            let old = response(id.clone(), Ok(serde_json::to_value(&p).expect("value")));
+            let line = response_line(id, Ok(serde_json::to_string(&p).expect("string")));
+            assert!(line.ends_with("}\n"));
+            let new: Value = serde_json::from_str(&line).expect("parse");
+            assert_eq!(new, old);
+            assert!(line.starts_with("{\"id\":"));
+            assert!(line.find("\"jsonrpc\"") < line.find("\"result\""));
+        }
+    }
+
+    /// An error outcome is exactly today's bytes.
+    #[test]
+    fn error_reply_line_is_todays_bytes() {
+        let err = || RpcError {
+            code: error_codes::NOT_FOUND,
+            message: "gone".into(),
+            data: Some(json!({"path": "a.md"})),
+        };
+        let old = format!("{}\n", response(RpcId::Num(3), Err(err())));
+        assert_eq!(response_line(RpcId::Num(3), Err(err())), old);
+    }
 }

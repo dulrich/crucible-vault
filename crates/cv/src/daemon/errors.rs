@@ -83,8 +83,8 @@ impl From<VaultError> for JobError {
 }
 
 /// Serialises method `M`'s typed result (ties each handler's return type to the contract).
-pub(super) fn reply<M: Method>(r: Result<M::Result, RpcError>) -> Result<Value, RpcError> {
-    serde_json::to_value(r?).map_err(internal)
+pub(super) fn reply<M: Method>(r: Result<M::Result, RpcError>) -> Result<String, RpcError> {
+    serde_json::to_string(&r?).map_err(internal)
 }
 
 #[cfg(test)]

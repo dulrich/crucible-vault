@@ -234,3 +234,50 @@ fn socket_schema_mismatch_is_refused() {
         other => panic!("expected mismatch, got {other:?}"),
     }
 }
+
+/// Replies serialised straight to text carry object keys in struct declaration order; the
+/// client decodes by field name, so they decode to the same typed values as the sorted form.
+#[test]
+fn declaration_order_replies_decode_like_sorted_ones() {
+    fn both<T>(v: &T) -> (T, T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let decode = |s: String| {
+            let v: serde_json::Value = serde_json::from_str(&s).expect("parse");
+            serde_json::from_value::<T>(v).expect("decode")
+        };
+        (
+            decode(serde_json::to_string(v).expect("declaration order")),
+            decode(
+                serde_json::to_string(&serde_json::to_value(v).expect("value")).expect("sorted"),
+            ),
+        )
+    }
+    let search = cv_protocol::SearchResult {
+        hits: vec![cv_protocol::SearchHit {
+            path: "a.md".into(),
+            title: "T".into(),
+            heading: "H".into(),
+            snippet: "s".into(),
+            score: 0.5,
+        }],
+        semantic: true,
+    };
+    let (decl, sorted) = both(&search);
+    assert_eq!(decl, search);
+    assert_eq!(sorted, search);
+
+    let actions = vec![cv_protocol::ActionInfo {
+        id: "x".into(),
+        title: "X".into(),
+        group: Some("g".into()),
+        keys: vec!["k".into()],
+        params: Vec::new(),
+        needs: Vec::new(),
+        durable: true,
+    }];
+    let (decl, sorted) = both(&actions);
+    assert_eq!(decl, actions);
+    assert_eq!(sorted, actions);
+}

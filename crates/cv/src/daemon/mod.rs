@@ -450,7 +450,7 @@ impl Shared {
 
     /// Handles every request except `hello`/`subscribe` (connection-level): one handler per
     /// method, each returning that method's [`Method::Result`].
-    pub async fn handle(&self, req: Request) -> Result<Value, RpcError> {
+    pub async fn handle(&self, req: Request) -> Result<String, RpcError> {
         use cv_protocol::methods as m;
         memory::mark_activity();
         match req {
