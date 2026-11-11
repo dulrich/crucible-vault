@@ -286,9 +286,151 @@ pub fn sort_cmp(a: &Value, b: &Value) -> Ordering {
     }
 }
 
+impl Value {
+    /// Decodes JSON text straight into a `Value`, building no intermediate
+    /// `serde_json::Value`. Equal, case by case, to `from_json(&serde_json::from_str(text)?)`
+    /// under the workspace's default `serde_json` features (BTreeMap objects, last duplicate
+    /// key wins; numbers as u64/i64/f64, each converted with `as f64` like `Number::as_f64`).
+    pub fn from_json_text(text: &str) -> Result<Value, serde_json::Error> {
+        serde_json::from_str::<JsonText>(text).map(|j| j.0)
+    }
+}
+
+/// Private deserialize target for `Value::from_json_text`; keeps `Value` itself free of a
+/// public `Deserialize` impl.
+struct JsonText(Value);
+
+impl<'de> serde::Deserialize<'de> for JsonText {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(JsonTextVisitor).map(JsonText)
+    }
+}
+
+struct JsonTextVisitor;
+
+impl<'de> serde::de::Visitor<'de> for JsonTextVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_bool<E>(self, b: bool) -> Result<Value, E> {
+        Ok(Value::Bool(b))
+    }
+
+    fn visit_i64<E>(self, n: i64) -> Result<Value, E> {
+        Ok(Value::Num(n as f64))
+    }
+
+    fn visit_u64<E>(self, n: u64) -> Result<Value, E> {
+        Ok(Value::Num(n as f64))
+    }
+
+    fn visit_f64<E>(self, n: f64) -> Result<Value, E> {
+        Ok(Value::Num(n))
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Value, E> {
+        Ok(match parse_date(s) {
+            Some((d, only)) => Value::Date(d, only),
+            None => Value::Str(s.to_string()),
+        })
+    }
+
+    fn visit_string<E>(self, s: String) -> Result<Value, E> {
+        Ok(match parse_date(&s) {
+            Some((d, only)) => Value::Date(d, only),
+            None => Value::Str(s),
+        })
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut v = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(JsonText(x)) = seq.next_element()? {
+            v.push(x);
+        }
+        Ok(Value::list(v))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        // BTreeMap insert: the last duplicate key wins, as in `serde_json::Map` under default
+        // features, and iteration is key-sorted either way.
+        let mut o = BTreeMap::new();
+        while let Some((k, JsonText(v))) = map.next_entry::<String, JsonText>()? {
+            o.insert(k, v);
+        }
+        Ok(Value::Object(Arc::new(o)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_json_text_matches_from_json() {
+        let deep_ok = format!("{}{}", "[".repeat(100), "]".repeat(100));
+        let too_deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        let cases: Vec<&str> = vec![
+            "null",
+            "true",
+            "false",
+            "0",
+            "-0",
+            "-17",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "18446744073709551615",
+            "18446744073709551616",
+            "1.0",
+            "-0.0",
+            "1e300",
+            "1e400",
+            "-1e400",
+            "0.30000000000000004",
+            "3.0",
+            "\"\"",
+            r#""a\"b\\c\/\n\t""#,
+            r#""\u0000""#,
+            r#""😀""#,
+            "\"héllo wörld 日本\"",
+            "\"2024-05-06\"",
+            "\"2024-05-06T07:08:09\"",
+            "[]",
+            "{}",
+            r#"[1, [2, {"a": [3, {"b": null}]}], "x"]"#,
+            r#"{"z": {"y": [ {"x": 1.5} ]}, "a": []}"#,
+            r#"{"k": 1, "k": 2}"#,
+            r#"{"b": 1, "a": 2, "c": 3}"#,
+            "  \n\t 42 \r\n ",
+            &deep_ok,
+            "",
+            "   ",
+            "[1, 2,]",
+            r#"{"a": 1,}"#,
+            "1 2",
+            "{} x",
+            "nul",
+            "hello",
+            "\"unterminated",
+            &too_deep,
+        ];
+        for text in cases {
+            let got = Value::from_json_text(text).map(|v| format!("{v:?}"));
+            let want = serde_json::from_str::<serde_json::Value>(text)
+                .map(|j| format!("{:?}", Value::from_json(&j)));
+            match (&got, &want) {
+                (Ok(g), Ok(w)) => assert_eq!(g, w, "value mismatch for {text:?}"),
+                (Err(_), Err(_)) => {}
+                _ => panic!("outcome mismatch for {text:?}: got {got:?}, want {want:?}"),
+            }
+        }
+    }
 
     #[test]
     fn coercions() {

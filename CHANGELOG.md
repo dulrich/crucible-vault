@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - **Search index open:** the first search opens the index on a blocking thread instead of a tokio worker, and `semsearch` 0.3.1 computes its sign codes straight from the stored vectors, so opening allocates about 45 MiB instead of about 428 MiB. Search results are unchanged.
+- **View property decode:** view property values are decoded straight from the stored JSON text instead of through an intermediate JSON tree, which saves about 18 MiB of allocation per pass over the views. View results are unchanged.
 
 ## 1.0.1 — 2026-11-11
 

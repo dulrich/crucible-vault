@@ -118,11 +118,8 @@ impl<'c> Db<'c> {
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
             if ids.contains(&id) {
-                let v: String = r.get(2)?;
-                props
-                    .entry(id)
-                    .or_default()
-                    .insert(r.get(1)?, json_value(&v));
+                let v = json_value(text_ref(r, 2)?);
+                props.entry(id).or_default().insert(r.get(1)?, v);
             }
         }
         let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
@@ -179,8 +176,8 @@ impl<'c> Db<'c> {
             .conn
             .prepare_cached("SELECT key, value FROM props WHERE file_id = ?1")?;
         let rows = stmt.query_map([f.id], |r| {
-            let v: String = r.get(1)?;
-            Ok((r.get::<_, String>(0)?, json_value(&v)))
+            let v = json_value(text_ref(r, 1)?);
+            Ok((r.get::<_, String>(0)?, v))
         })?;
         let map: BTreeMap<String, Value> = rows.collect::<rusqlite::Result<_>>()?;
         let map = Arc::new(map);
@@ -294,9 +291,32 @@ impl<'c> Db<'c> {
     }
 }
 
+/// Column `idx` as borrowed text, with no `String` copy. Errors are exactly those of
+/// `r.get::<_, String>(idx)`, mirroring rusqlite 0.41.1 `Row::get`'s `FromSqlError` mapping
+/// for the two errors `ValueRef::as_str` can raise (`InvalidType`, `Utf8Error`).
+fn text_ref<'r>(r: &'r Row<'_>, idx: usize) -> rusqlite::Result<&'r str> {
+    let value = r.get_ref(idx)?;
+    value.as_str().map_err(|err| match err {
+        rusqlite::types::FromSqlError::InvalidType => rusqlite::Error::InvalidColumnType(
+            idx,
+            r.as_ref()
+                .column_name(idx)
+                .map_or_else(|_| String::new(), str::to_string),
+            value.data_type(),
+        ),
+        rusqlite::types::FromSqlError::Utf8Error(e) => rusqlite::Error::Utf8Error(idx, e),
+        rusqlite::types::FromSqlError::OutOfRange(i) => {
+            rusqlite::Error::IntegralValueOutOfRange(idx, i)
+        }
+        rusqlite::types::FromSqlError::Other(e) => {
+            rusqlite::Error::FromSqlConversionFailure(idx, value.data_type(), e)
+        }
+        e => rusqlite::Error::FromSqlConversionFailure(idx, value.data_type(), Box::new(e)),
+    })
+}
+
 fn json_value(text: &str) -> Value {
-    serde_json::from_str::<serde_json::Value>(text)
-        .map_or_else(|_| Value::Str(text.to_string()), |j| Value::from_json(&j))
+    Value::from_json_text(text).unwrap_or_else(|_| Value::Str(text.to_string()))
 }
 
 /// Escapes `%`, `_` and `\` for `LIKE … ESCAPE '\'`.
@@ -309,4 +329,41 @@ pub fn like_escape(s: &str) -> String {
         o.push(c);
     }
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_value_falls_back_to_raw_text() {
+        for text in ["", "not json", "[1, 2,]", "1 2", "{} x", "\"open"] {
+            match json_value(text) {
+                Value::Str(s) => assert_eq!(s, text),
+                other => panic!("{text:?} decoded to {other:?}"),
+            }
+        }
+        assert!(matches!(json_value("2.5"), Value::Num(n) if n == 2.5));
+    }
+
+    #[test]
+    fn text_ref_errors_match_get_string() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT 'k', NULL AS value UNION ALL SELECT 'k', 7 UNION ALL SELECT 'k', '[1]'",
+            )
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        for _ in 0..2 {
+            let r = rows.next().unwrap().unwrap();
+            let want = format!("{:?}", r.get::<_, String>(1).unwrap_err());
+            let got = format!("{:?}", text_ref(r, 1).unwrap_err());
+            assert!(want.starts_with("InvalidColumnType(1, \"value\""), "{want}");
+            assert_eq!(got, want);
+        }
+        let r = rows.next().unwrap().unwrap();
+        assert_eq!(text_ref(r, 1).unwrap(), "[1]");
+        assert!(matches!(json_value(text_ref(r, 1).unwrap()), Value::List(l) if l.len() == 1));
+    }
 }
