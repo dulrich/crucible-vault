@@ -287,10 +287,13 @@ impl App {
 
     /// Plan memory-instrumentation-and-reduction WP-M4: trims the glibc heap off the UI thread,
     /// only after a quiet period (no input, no finished decode), above the retained threshold,
-    /// and at most once per quiet period.
+    /// and at most once per quiet period. The editor judges on arena-retained
+    /// ([`cv_malloc::Figure::ArenaRetained`]), not the daemon's free-resident: arena-retained
+    /// never falls after a trim (`cv-malloc/src/lib.rs`, `MallocInfo::retained`), so
+    /// [`crate::memory::should_trim`]'s once-per-quiet-period rule is what stops repeat trims.
     pub fn maybe_trim(&mut self) -> Task<Message> {
         let now = std::time::Instant::now();
-        let retained = cv_malloc::info().retained();
+        let retained = cv_malloc::Figure::ArenaRetained.read().unwrap_or(0);
         if !crate::memory::should_trim(
             now,
             crate::memory::last_activity(),
@@ -301,11 +304,15 @@ impl App {
         }
         self.last_trim = Some(now);
         Task::future(async move {
-            match tokio::task::spawn_blocking(cv_malloc::trim).await {
-                Ok(released) => tracing::debug!(
+            match tokio::task::spawn_blocking(|| {
+                cv_malloc::release(cv_malloc::Figure::ArenaRetained)
+            })
+            .await
+            {
+                Ok(release) => tracing::debug!(
                     target: "cvault_editor::memory",
                     retained_bytes = retained,
-                    released,
+                    released = release.is_some_and(|r| r.trimmed),
                     "quiet-period malloc_trim"
                 ),
                 Err(e) => tracing::debug!(target: "cvault_editor::memory", error = %e, "trim task"),

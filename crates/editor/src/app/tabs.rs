@@ -293,7 +293,7 @@ impl App {
         };
         // Plan round-14 WP-3: no binary file is read into a text buffer. An external file goes
         // to the system opener (no tab; skipped on restore); an image opens an image tab.
-        let (file_kind, _prefetched) = self.classify_open(path)?;
+        let file_kind = self.classify_open(path)?;
         if file_kind == cv_text::file_kind::FileKind::External {
             if how != Place::Restore {
                 self.open_external(path);

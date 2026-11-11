@@ -55,6 +55,7 @@ use bridge::{generation_listener, start_event_bridge};
 pub use errors::rpc_err;
 pub(crate) use errors::{JobError, rpc_from_state, rpc_from_vault, rpc_held};
 use errors::{internal, reply, unavailable};
+pub(crate) use memory::release_after_burst;
 
 /// Broadcast capacity for notifications (a lagging subscriber skips, never blocks).
 const EVENT_CAPACITY: usize = 1024;

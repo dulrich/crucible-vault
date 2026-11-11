@@ -559,7 +559,7 @@ impl App {
     }
 
     /// WP-6: moves the folder-mode note into `folder` (a [`switcher::folder_candidates`] label)
-    /// through [`Self::dispatch_op`]; completion follows via `ExplorerMsg::Done` → `retarget`.
+    /// through [`Self::dispatch_op`]; completion follows via `ExplorerMsg::Done`: a note with an id follows through `follow_doc`, a path-only file tab through `retarget_file`.
     fn move_note_to(&mut self, folder: &str) -> Task<Message> {
         let Some(from) = self.switcher.move_from.take() else {
             return Task::none();

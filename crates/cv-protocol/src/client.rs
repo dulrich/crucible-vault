@@ -217,10 +217,23 @@ fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, ClientError> {
     m.lock().map_err(|_| ClientError::Disconnected)
 }
 
+/// A reply line buffer larger than this is dropped after use, so one big reply's allocation is
+/// not held for the connection's life (typical lines are far smaller).
+const LINE_BUF_CAP: usize = 1 << 20;
+
+/// Empties `line`, releasing its allocation when it grew past [`LINE_BUF_CAP`].
+fn reset_line(line: &mut String) {
+    if line.capacity() > LINE_BUF_CAP {
+        *line = String::new();
+    } else {
+        line.clear();
+    }
+}
+
 fn read_loop(mut reader: BufReader<UnixStream>, inbox: &Inbox) {
     let mut line = String::new();
     loop {
-        line.clear();
+        reset_line(&mut line);
         match reader.read_line(&mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
@@ -245,13 +258,18 @@ fn read_loop(mut reader: BufReader<UnixStream>, inbox: &Inbox) {
             .and_then(|id| inbox.pending.lock().ok().and_then(|mut p| p.remove(&id)));
         match waiter {
             Some(tx) => {
-                let reply = match v.get("error") {
-                    Some(e) => Err(serde_json::from_value(e.clone()).unwrap_or(RpcError {
+                // Take `error`/`result` out of the parsed message: the payload moves, no copy.
+                let mut fields = match v {
+                    Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                let reply = match fields.remove("error") {
+                    Some(e) => Err(serde_json::from_value(e).unwrap_or(RpcError {
                         code: error_codes::INTERNAL_ERROR,
                         message: "unparseable error".into(),
                         data: None,
                     })),
-                    None => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
+                    None => Ok(fields.remove("result").unwrap_or(Value::Null)),
                 };
                 let _ = tx.send(reply);
             }
@@ -273,5 +291,56 @@ fn read_loop(mut reader: BufReader<UnixStream>, inbox: &Inbox) {
     }
     if let Ok(mut u) = inbox.unmatched.lock() {
         *u = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_line_releases_only_oversized_buffers() {
+        let mut small = String::with_capacity(4096);
+        small.push_str("abc");
+        reset_line(&mut small);
+        assert!(small.is_empty() && small.capacity() >= 4096);
+        let mut big = "x".repeat(LINE_BUF_CAP + 1);
+        reset_line(&mut big);
+        assert!(big.is_empty() && big.capacity() < LINE_BUF_CAP);
+    }
+
+    #[test]
+    fn read_loop_delivers_a_multi_mib_reply_and_an_error() {
+        let (mut server, client_end) = UnixStream::pair().expect("pair");
+        let inbox = Arc::new(Inbox::default());
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        {
+            let mut p = inbox.pending.lock().expect("lock");
+            p.insert(1, tx1);
+            p.insert(2, tx2);
+        }
+        let rinbox = Arc::clone(&inbox);
+        let reader = std::thread::spawn(move || read_loop(BufReader::new(client_end), &rinbox));
+        let blob = "y".repeat(4 << 20);
+        let reply = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"blob":"{blob}"}}}}"#);
+        server.write_all(reply.as_bytes()).expect("write");
+        server.write_all(b"\n").expect("write");
+        let err = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"nope"}}"#;
+        server.write_all(err.as_bytes()).expect("write");
+        server.write_all(b"\n").expect("write");
+
+        let v = rx1
+            .recv_timeout(Duration::from_secs(10))
+            .expect("reply")
+            .expect("ok result");
+        assert_eq!(v["blob"].as_str().map(str::len), Some(4 << 20));
+        let e = rx2
+            .recv_timeout(Duration::from_secs(10))
+            .expect("reply")
+            .expect_err("error reply");
+        assert_eq!(e.message, "nope");
+        drop(server);
+        reader.join().expect("reader exits on EOF");
     }
 }

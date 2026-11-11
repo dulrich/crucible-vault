@@ -502,7 +502,8 @@ pub struct App {
     pub sink: Arc<dyn TestSink>,
     /// Tests: the injected "today" for nav (`None` = local date).
     pub today: Option<NaiveDate>,
-    /// WP-3: per-tab reading state (mode, render cache, image handles), keyed by path.
+    /// WP-3: cross-document reading state (image cache, shared resolver, settings); each document's own
+    /// reading state is on its `OpenDoc`.
     pub reading: crate::reading::ReadingStore,
     /// WP-5: command palette, action invocation and the job toast.
     pub palette: crate::palette::Palette,
@@ -579,14 +580,14 @@ pub struct App {
     pub nav_links: Vec<editor_model::period::NavLink>,
     /// plan editor-ui-round-3 WP-4: the open right-click menu (one at a time).
     pub context_menu: Option<crate::context_menu::ContextMenu>,
-    /// plan editor-round-4 WP-4: the image clipboard writer (`xclip` in production).
+    /// plan editor-round-4 WP-4: the image clipboard writer (`wl-copy` under Wayland, else `xclip`, in production).
     pub clip_writer: Arc<dyn crate::clipboard_image::ClipboardWriter + Send + Sync>,
     /// WP-R2 (review E1): the one PDF store — documents, tab and embed consumers (only
     /// `Send` data).
     pub pdf: crate::pdf::store::PdfStore<iced::widget::image::Handle>,
     /// Plan WP-R4: tasks helpers started (settles, opens), returned by the current `update`.
     deferred: Vec<Task<Message>>,
-    /// Plan WP-R4: note opens in flight, by path ([`settle`]).
+    /// Plan WP-R4: note opens in flight, keyed by (path, note id) ([`settle`]).
     opening: settle::Opening,
     /// Plan WP-R4: the last settle / open request number.
     req_seq: u64,

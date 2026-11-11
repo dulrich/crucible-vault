@@ -18,6 +18,21 @@ const SAMPLE_EVERY: Duration = Duration::from_secs(300);
 /// An editor report older than this is not journaled.
 const EDITOR_FRESH: Duration = Duration::from_secs(600);
 
+/// Returns freed heap pages to the OS after a job's burst of allocation: judged on the
+/// free-resident figure (anonymous RSS minus live allocator bytes), which falls after a trim, so
+/// the threshold alone rate-limits it (`cv_malloc::Figure`). Runs on the blocking pool, never a
+/// worker.
+pub(crate) fn release_after_burst() {
+    if let Some(r) = cv_malloc::release(cv_malloc::Figure::FreeResident) {
+        tracing::debug!(
+            target: "cv::memory",
+            free_resident = r.figure,
+            trimmed = r.trimmed,
+            "trim after job"
+        );
+    }
+}
+
 /// The daemon's registry plus the latest client report.
 pub(super) struct Memory {
     registry: Arc<Registry>,

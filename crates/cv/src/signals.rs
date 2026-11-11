@@ -14,7 +14,8 @@
 //! `$HOME/.local/share/…`), and an `--out` inside the vault is refused.
 //!
 //! Dropped as Obsidian-induced: the metadata-cache walk (index queries), the in-vault export
-//! folder setting (`sourceEvalExportFolder`), and the Markdown source registries (`sources.toml`).
+//! folder setting (`sourceEvalExportFolder`), and the Markdown source registries: channels and blogs
+//! come from the daemon's `sources.toml` (the config set), not from notes in the vault.
 //! Deviations: captures are every indexed note with a `yt-video-id`, `source` or `post-id`
 //! property outside the period folders and the metadata roots (Crucible: notes under the daily
 //! folder); a blog capture matching no configured blog is keyed by its URL host (Crucible:

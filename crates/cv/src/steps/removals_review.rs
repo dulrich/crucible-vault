@@ -14,7 +14,8 @@
 //! reader of the fold `cv_ingest::enrich` writes) of every enriched note (non-empty `enriched`)
 //! outside `.trash/` and `_`/`.`-prefixed top folders, typed by [`classify`]: `post-id` is a blog,
 //! `message-id` mail, a YouTube `source` youtube, anything else a clip (the same predicates as
-//! `intake_enrich`'s backfill). [`allocate`] splits `limit` over the types proportionally (at least
+//! `intake_enrich`'s backfill, both from
+//! `steps/intake_kind.rs`). [`allocate`] splits `limit` over the types proportionally (at least
 //! one per non-empty type while the limit allows) and [`sample`] picks each type's spans by a
 //! seeded hash (FNV-1a over the seed, path and span index, finished with splitmix64; no `rand`), so
 //! the same seed over the same corpus gives the same sample. One note is created at

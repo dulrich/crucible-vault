@@ -178,7 +178,7 @@ pub enum Request {
     /// are `NOT_FOUND`.
     NoteSetBool(NoteSetBoolParams),
     /// A client's memory snapshot (plan memory-instrumentation-and-reduction WP-M1) → `null`;
-    /// the daemon keeps the latest one per process kind and reports it in `status`. An old
+    /// the daemon keeps the latest editor report and reports it in `status`. An old
     /// daemon answers `METHOD_NOT_FOUND`, which a client drops silently.
     MemoryReport(MemoryReport),
     /// Runs the `intake-reconcile` action and waits (bounded) for it (plan auto-intake-sprint

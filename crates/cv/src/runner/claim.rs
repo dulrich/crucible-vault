@@ -225,15 +225,6 @@ pub(super) fn failed(error: String) -> JobResult {
     }
 }
 
-/// Returns freed heap pages to the OS when anonymous RSS exceeds live allocator bytes by more than
-/// [`cv_malloc::TRIM_RETAINED_THRESHOLD`] (the free-resident figure, which falls after a trim).
-/// Runs on the blocking pool, never a worker.
-fn trim_after_job() {
-    if let Some((free_resident, trimmed)) = cv_malloc::trim_if_free_resident() {
-        tracing::debug!(target: "cv::memory", free_resident, trimmed, "trim after job");
-    }
-}
-
 /// Executes one claimed job end to end and settles it.
 /// The job's `running` entry (pool record, note hold and permit) is removed right after the
 /// settle, the one removal site, so all three clear together.
@@ -265,7 +256,7 @@ pub(super) async fn run_job(inner: Arc<Inner>, job: cv_state::Job) {
                 let retry = job.attempts > 1;
                 match tokio::task::spawn_blocking(move || {
                     let r = execute_steps(&inner2, &job_id, lane, retry, &action, &jp, &config);
-                    trim_after_job();
+                    crate::daemon::release_after_burst();
                     r
                 })
                 .await

@@ -126,11 +126,52 @@ pub fn current_free_resident() -> Option<u64> {
     anon_rss().map(|a| free_resident(a, info().in_use))
 }
 
-/// Trims when [`current_free_resident`] exceeds [`TRIM_RETAINED_THRESHOLD`]; returns
-/// `(free_resident, trimmed)` when it did, `None` otherwise (the caller owns any logging).
-pub fn trim_if_free_resident() -> Option<(u64, bool)> {
-    let free = current_free_resident()?;
-    (free > TRIM_RETAINED_THRESHOLD).then(|| (free, trim()))
+/// Which figure [`release`] judges by. The daemon uses [`Figure::FreeResident`], which falls after
+/// a trim; the editor uses [`Figure::ArenaRetained`] ([`MallocInfo::retained`]), which never falls
+/// after a trim, so it relies on the editor's once-per-quiet-period rule instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Figure {
+    /// [`current_free_resident`]: anonymous RSS minus live allocator bytes.
+    FreeResident,
+    /// [`MallocInfo::retained`]: bytes held from the OS but not in use.
+    ArenaRetained,
+}
+
+/// What [`release`] did: the figure it read and whether `malloc_trim` released memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Release {
+    /// The figure read, in bytes.
+    pub figure: u64,
+    /// `true` if the trim released any memory.
+    pub trimmed: bool,
+}
+
+impl Figure {
+    /// Reads this figure now (`None` when it is unreadable).
+    #[must_use]
+    pub fn read(self) -> Option<u64> {
+        match self {
+            Self::FreeResident => current_free_resident(),
+            Self::ArenaRetained => Some(info().retained()),
+        }
+    }
+}
+
+/// Whether a figure warrants a trim: strictly above [`TRIM_RETAINED_THRESHOLD`].
+#[must_use]
+pub fn over_threshold(figure: u64) -> bool {
+    figure > TRIM_RETAINED_THRESHOLD
+}
+
+/// The one release entry: reads `figure` and trims when it exceeds [`TRIM_RETAINED_THRESHOLD`].
+/// Returns `None` when the figure is unreadable or below the threshold (nothing was trimmed);
+/// the caller owns any logging and any trigger policy.
+pub fn release(figure: Figure) -> Option<Release> {
+    let figure = figure.read()?;
+    over_threshold(figure).then(|| Release {
+        figure,
+        trimmed: trim(),
+    })
 }
 
 /// The one mapping of a `memstat` snapshot (Serialize-only) plus `mallinfo2` onto the wire type (shared by the daemon and the editor; `cv-protocol` must not depend on
@@ -193,6 +234,21 @@ mod tests {
     fn free_resident_is_anon_minus_in_use_saturating() {
         assert_eq!(free_resident(100, 30), 70);
         assert_eq!(free_resident(30, 100), 0);
+    }
+
+    #[test]
+    fn over_threshold_is_strict() {
+        assert!(!over_threshold(0));
+        assert!(!over_threshold(TRIM_RETAINED_THRESHOLD));
+        assert!(over_threshold(TRIM_RETAINED_THRESHOLD + 1));
+    }
+
+    #[test]
+    fn figure_selection_reads_the_named_figure() {
+        // Arena-retained is always readable; other test threads allocate, so only presence is
+        // stable. Free-resident is `None` exactly when `/proc/self/status` is unreadable.
+        assert!(Figure::ArenaRetained.read().is_some());
+        assert_eq!(Figure::FreeResident.read().is_some(), anon_rss().is_some());
     }
 
     #[test]
