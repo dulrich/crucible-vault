@@ -16,7 +16,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - **Migration libs for new migrations:** `deploy/migrations/lib/view-def.sh` (anchored view-definition edits) and `anchor_array_add` (TOML array adds).
 
-## 1.0.0 - 2026-11-08
+## 1.0.0 — 2026-11-08
 
 First public release: a Rust Obsidian-Flavored-Markdown vault app that pairs a headless core daemon with an editor GUI client.
 
