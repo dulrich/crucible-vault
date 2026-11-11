@@ -13,11 +13,11 @@ use crate::error::SearchError;
 /// only around index calls, never across an embed call.
 pub type SharedIndex = Arc<Mutex<Index>>;
 
-/// `CV_SEARCH_DB` plus its lazily opened shared handle.
-#[derive(Debug)]
+/// `CV_SEARCH_DB` plus its lazily opened shared handle. Clones share one handle cell.
+#[derive(Debug, Clone)]
 pub struct SearchDb {
     path: PathBuf,
-    cell: Mutex<Option<SharedIndex>>,
+    cell: Arc<Mutex<Option<SharedIndex>>>,
 }
 
 impl SearchDb {
@@ -26,7 +26,7 @@ impl SearchDb {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            cell: Mutex::new(None),
+            cell: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -81,4 +81,23 @@ impl SearchDb {
 /// Locks `index`, recovering from poison (the index's own transactions keep it consistent).
 pub fn lock(index: &Mutex<Index>) -> std::sync::MutexGuard<'_, Index> {
     index.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_shares_the_opened_index() {
+        let dir = std::env::temp_dir().join(format!("cv-search-clone-{}", std::process::id()));
+        let db = SearchDb::new(dir.join("search.db"));
+        let other = db.clone();
+        assert!(!other.is_open());
+        let a = db.shared().expect("open");
+        let b = other.if_open().expect("opened through the original");
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&a, &other.shared().expect("shared")));
+        drop((a, b, db, other));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

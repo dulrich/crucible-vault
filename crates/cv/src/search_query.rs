@@ -35,15 +35,18 @@ pub async fn search(
         });
     }
     let limit = params.limit.clamp(1, MAX_LIMIT) as usize;
-    let shared = db.shared().map_err(|e| e.to_string())?;
-
-    let probe = std::sync::Arc::clone(&shared);
-    let space = tokio::task::spawn_blocking(move || {
-        let idx = cv_search::index::lock(&probe);
-        idx.space().cloned().filter(|_| idx.embedded_count() > 0)
+    // The first call opens the index (blocking); keep it off the tokio workers.
+    let db = db.clone();
+    let (shared, space) = tokio::task::spawn_blocking(move || {
+        let shared = db.shared().map_err(|e| e.to_string())?;
+        let space = {
+            let idx = cv_search::index::lock(&shared);
+            idx.space().cloned().filter(|_| idx.embedded_count() > 0)
+        };
+        Ok::<_, String>((shared, space))
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
 
     let mut vector = None;
     if let (Some(space), Some(t)) = (space, crate::steps::search::query_embed_target(config))
