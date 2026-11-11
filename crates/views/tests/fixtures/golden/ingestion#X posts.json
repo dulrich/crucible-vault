@@ -1,47 +1,14 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "file name"
-    },
-    {
-      "key": "note.status-id",
-      "label": "status-id"
-    },
-    {
-      "key": "note.url",
-      "label": "url"
-    },
-    {
-      "key": "note.state",
-      "label": "state"
-    }
+    {"key":"file.name","label":"file name"},
+    {"key":"note.status-id","label":"status-id"},
+    {"key":"note.url","label":"url"},
+    {"key":"note.state","label":"state"}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "1800000000000000001",
-              "path": "_x_metadata/someone/1800000000000000001.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": "1800000000000000001"
-            },
-            {
-              "t": "text",
-              "v": "https://x.com/someone/status/1800000000000000001"
-            },
-            {
-              "t": "text",
-              "v": "ok"
-            }
-          ],
-          "path": "_x_metadata/someone/1800000000000000001.md"
-        }
+        {"cells":[{"label":"1800000000000000001","path":"_x_metadata/someone/1800000000000000001.md","t":"link"},{"t":"text","v":"1800000000000000001"},{"t":"text","v":"https://x.com/someone/status/1800000000000000001"},{"t":"text","v":"ok"}],"path":"_x_metadata/someone/1800000000000000001.md"}
       ],
       "summaries": []
     }

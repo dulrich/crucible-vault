@@ -1,21 +1,9 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "Note"
-    },
-    {
-      "key": "note.created",
-      "label": "Created"
-    },
-    {
-      "key": "note.word-count",
-      "label": "Words"
-    },
-    {
-      "key": "formula.minutes",
-      "label": "Minutes"
-    }
+    {"key":"file.name","label":"Note"},
+    {"key":"note.created","label":"Created"},
+    {"key":"note.word-count","label":"Words"},
+    {"key":"formula.minutes","label":"Minutes"}
   ],
   "groups": [
     {
@@ -24,72 +12,9 @@
         "v": "blog"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Alpha Post",
-              "path": "daily/day/2026-10-01/Alpha Post.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-01"
-            },
-            {
-              "t": "number",
-              "v": 400.0
-            },
-            {
-              "t": "number",
-              "v": 2.0
-            }
-          ],
-          "path": "daily/day/2026-10-01/Alpha Post.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Beta Post",
-              "path": "daily/day/2026-10-02/Beta Post.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-02"
-            },
-            {
-              "t": "number",
-              "v": 600.0
-            },
-            {
-              "t": "number",
-              "v": 3.0
-            }
-          ],
-          "path": "daily/day/2026-10-02/Beta Post.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Other Post",
-              "path": "daily/day/2026-10-03/Other Post.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-03"
-            },
-            {
-              "t": "number",
-              "v": 250.0
-            },
-            {
-              "t": "number",
-              "v": 1.3
-            }
-          ],
-          "path": "daily/day/2026-10-03/Other Post.md"
-        }
+        {"cells":[{"label":"Alpha Post","path":"daily/day/2026-10-01/Alpha Post.md","t":"link"},{"t":"date","v":"2026-10-01"},{"t":"number","v":400.0},{"t":"number","v":2.0}],"path":"daily/day/2026-10-01/Alpha Post.md"},
+        {"cells":[{"label":"Beta Post","path":"daily/day/2026-10-02/Beta Post.md","t":"link"},{"t":"date","v":"2026-10-02"},{"t":"number","v":600.0},{"t":"number","v":3.0}],"path":"daily/day/2026-10-02/Beta Post.md"},
+        {"cells":[{"label":"Other Post","path":"daily/day/2026-10-03/Other Post.md","t":"link"},{"t":"date","v":"2026-10-03"},{"t":"number","v":250.0},{"t":"number","v":1.3}],"path":"daily/day/2026-10-03/Other Post.md"}
       ],
       "summaries": [
         {
@@ -119,28 +44,7 @@
         "v": "news"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "World News",
-              "path": "daily/day/2026-10-01/World News.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-01"
-            },
-            {
-              "t": "number",
-              "v": 1000.0
-            },
-            {
-              "t": "number",
-              "v": 5.0
-            }
-          ],
-          "path": "daily/day/2026-10-01/World News.md"
-        }
+        {"cells":[{"label":"World News","path":"daily/day/2026-10-01/World News.md","t":"link"},{"t":"date","v":"2026-10-01"},{"t":"number","v":1000.0},{"t":"number","v":5.0}],"path":"daily/day/2026-10-01/World News.md"}
       ],
       "summaries": [
         {
@@ -170,28 +74,7 @@
         "v": "other"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Misc Notes",
-              "path": "daily/day/2026-10-03/Misc Notes.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-03"
-            },
-            {
-              "t": "number",
-              "v": 150.0
-            },
-            {
-              "t": "number",
-              "v": 0.8
-            }
-          ],
-          "path": "daily/day/2026-10-03/Misc Notes.md"
-        }
+        {"cells":[{"label":"Misc Notes","path":"daily/day/2026-10-03/Misc Notes.md","t":"link"},{"t":"date","v":"2026-10-03"},{"t":"number","v":150.0},{"t":"number","v":0.8}],"path":"daily/day/2026-10-03/Misc Notes.md"}
       ],
       "summaries": [
         {
@@ -221,28 +104,7 @@
         "v": "transcript"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Story Ch 1",
-              "path": "daily/day/2026-10-03/Story Ch 1.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-03"
-            },
-            {
-              "t": "number",
-              "v": 300.0
-            },
-            {
-              "t": "number",
-              "v": 1.5
-            }
-          ],
-          "path": "daily/day/2026-10-03/Story Ch 1.md"
-        }
+        {"cells":[{"label":"Story Ch 1","path":"daily/day/2026-10-03/Story Ch 1.md","t":"link"},{"t":"date","v":"2026-10-03"},{"t":"number","v":300.0},{"t":"number","v":1.5}],"path":"daily/day/2026-10-03/Story Ch 1.md"}
       ],
       "summaries": [
         {

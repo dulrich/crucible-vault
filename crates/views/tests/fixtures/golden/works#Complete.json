@@ -1,72 +1,17 @@
 {
   "columns": [
-    {
-      "key": "note.name",
-      "label": "Name",
-      "role": {
-        "kind": "name"
-      }
-    },
-    {
-      "key": "note.status",
-      "label": "Status"
-    },
-    {
-      "key": "note.author",
-      "label": "Author"
-    },
-    {
-      "key": "note.kind",
-      "label": "Kind"
-    },
-    {
-      "key": "formula.entries",
-      "label": "Entries"
-    },
-    {
-      "key": "formula.unread",
-      "label": "Unread"
-    },
-    {
-      "key": "note.last_update",
-      "label": "Last Update"
-    }
+    {"key":"note.name","label":"Name","role":{"kind":"name"}},
+    {"key":"note.status","label":"Status"},
+    {"key":"note.author","label":"Author"},
+    {"key":"note.kind","label":"Kind"},
+    {"key":"formula.entries","label":"Entries"},
+    {"key":"formula.unread","label":"Unread"},
+    {"key":"note.last_update","label":"Last Update"}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "t": "text",
-              "v": "Bob News"
-            },
-            {
-              "t": "text",
-              "v": "complete"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "fanfic"
-            },
-            {
-              "t": "number",
-              "v": 2.0
-            },
-            {
-              "t": "number",
-              "v": 2.0
-            },
-            {
-              "t": "date",
-              "v": "2026-10-01"
-            }
-          ],
-          "select": "Bob News"
-        }
+        {"cells":[{"t":"text","v":"Bob News"},{"t":"text","v":"complete"},{"t":"null"},{"t":"text","v":"fanfic"},{"t":"number","v":2.0},{"t":"number","v":2.0},{"t":"date","v":"2026-10-01"}],"select":"Bob News"}
       ],
       "summaries": []
     }

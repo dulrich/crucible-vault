@@ -1,21 +1,9 @@
 {
   "columns": [
-    {
-      "key": "formula.item",
-      "label": "Title"
-    },
-    {
-      "key": "formula.type",
-      "label": "Type"
-    },
-    {
-      "key": "formula.length",
-      "label": "Length"
-    },
-    {
-      "key": "day",
-      "label": "Day"
-    }
+    {"key":"formula.item","label":"Title"},
+    {"key":"formula.type","label":"Type"},
+    {"key":"formula.length","label":"Length"},
+    {"key":"day","label":"Day"}
   ],
   "groups": [
     {
@@ -24,50 +12,8 @@
         "v": "Chan A"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Other day",
-              "t": "url",
-              "url": "https://y.example/3"
-            },
-            {
-              "t": "text",
-              "v": "YouTube"
-            },
-            {
-              "t": "text",
-              "v": "1:00"
-            },
-            {
-              "t": "text",
-              "v": "2026-10-02"
-            }
-          ],
-          "key": "[\"youtube\",\"UC1\",\"v3\"]"
-        },
-        {
-          "cells": [
-            {
-              "label": "Short-ish",
-              "t": "url",
-              "url": "https://y.example/4"
-            },
-            {
-              "t": "text",
-              "v": "YouTube"
-            },
-            {
-              "t": "text",
-              "v": "1:05"
-            },
-            {
-              "t": "text",
-              "v": "2026-10-01"
-            }
-          ],
-          "key": "[\"youtube\",\"UC1\",\"v4\"]"
-        }
+        {"cells":[{"label":"Other day","t":"url","url":"https://y.example/3"},{"t":"text","v":"YouTube"},{"t":"text","v":"1:00"},{"t":"text","v":"2026-10-02"}],"key":"[\"youtube\",\"UC1\",\"v3\"]"},
+        {"cells":[{"label":"Short-ish","t":"url","url":"https://y.example/4"},{"t":"text","v":"YouTube"},{"t":"text","v":"1:05"},{"t":"text","v":"2026-10-01"}],"key":"[\"youtube\",\"UC1\",\"v4\"]"}
       ],
       "summaries": []
     },
@@ -77,28 +23,7 @@
         "v": "Feed C"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Teaser",
-              "t": "url",
-              "url": "https://c.example/2"
-            },
-            {
-              "t": "text",
-              "v": "Blog"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "text",
-              "v": "2026-10-01"
-            }
-          ],
-          "key": "[\"blog\",\"https://c.example/feed\",\"p2\"]"
-        }
+        {"cells":[{"label":"Teaser","t":"url","url":"https://c.example/2"},{"t":"text","v":"Blog"},{"t":"text","v":""},{"t":"text","v":"2026-10-01"}],"key":"[\"blog\",\"https://c.example/feed\",\"p2\"]"}
       ],
       "summaries": []
     }

@@ -1,39 +1,13 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "file name"
-    },
-    {
-      "key": "note.yt-video-id",
-      "label": "yt-video-id"
-    },
-    {
-      "key": "formula.created",
-      "label": "created"
-    }
+    {"key":"file.name","label":"file name"},
+    {"key":"note.yt-video-id","label":"yt-video-id"},
+    {"key":"formula.created","label":"created"}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Video Capture",
-              "path": "notes/Video Capture.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": "abc123XYZ00"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-07"
-            }
-          ],
-          "path": "notes/Video Capture.md"
-        }
+        {"cells":[{"label":"Video Capture","path":"notes/Video Capture.md","t":"link"},{"t":"text","v":"abc123XYZ00"},{"t":"date","v":"2026-10-07"}],"path":"notes/Video Capture.md"}
       ],
       "summaries": []
     }

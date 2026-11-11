@@ -1,26 +1,8 @@
 {
   "columns": [
-    {
-      "key": "task",
-      "label": "Task",
-      "role": {
-        "kind": "task_text"
-      }
-    },
-    {
-      "key": "file",
-      "label": "File",
-      "role": {
-        "kind": "task_file"
-      }
-    },
-    {
-      "key": "status",
-      "label": "Status",
-      "role": {
-        "kind": "status"
-      }
-    }
+    {"key":"task","label":"Task","role":{"kind":"task_text"}},
+    {"key":"file","label":"File","role":{"kind":"task_file"}},
+    {"key":"status","label":"Status","role":{"kind":"status"}}
   ],
   "groups": [
     {
@@ -29,25 +11,7 @@
         "v": "General"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "t": "text",
-              "v": "loose task"
-            },
-            {
-              "label": "2026-10-01",
-              "path": "daily/day/2026-10-01.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": " "
-            }
-          ],
-          "line": 4,
-          "path": "daily/day/2026-10-01.md"
-        }
+        {"cells":[{"t":"text","v":"loose task"},{"label":"2026-10-01","path":"daily/day/2026-10-01.md","t":"link"},{"t":"text","v":" "}],"line":4,"path":"daily/day/2026-10-01.md"}
       ],
       "summaries": []
     },
@@ -57,25 +21,7 @@
         "v": "Morning"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "t": "text",
-              "v": "open one"
-            },
-            {
-              "label": "2026-10-01",
-              "path": "daily/day/2026-10-01.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": " "
-            }
-          ],
-          "line": 9,
-          "path": "daily/day/2026-10-01.md"
-        }
+        {"cells":[{"t":"text","v":"open one"},{"label":"2026-10-01","path":"daily/day/2026-10-01.md","t":"link"},{"t":"text","v":" "}],"line":9,"path":"daily/day/2026-10-01.md"}
       ],
       "summaries": []
     },
@@ -85,25 +31,7 @@
         "v": "Work"
       },
       "rows": [
-        {
-          "cells": [
-            {
-              "t": "text",
-              "v": "yesterday task"
-            },
-            {
-              "label": "2026-10-02",
-              "path": "daily/day/2026-10-02.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": " "
-            }
-          ],
-          "line": 6,
-          "path": "daily/day/2026-10-02.md"
-        }
+        {"cells":[{"t":"text","v":"yesterday task"},{"label":"2026-10-02","path":"daily/day/2026-10-02.md","t":"link"},{"t":"text","v":" "}],"line":6,"path":"daily/day/2026-10-02.md"}
       ],
       "summaries": []
     }

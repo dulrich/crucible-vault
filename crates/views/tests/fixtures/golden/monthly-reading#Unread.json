@@ -1,202 +1,21 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "Note"
-    },
-    {
-      "key": "formula.access",
-      "label": "Access"
-    },
-    {
-      "key": "note.publication",
-      "label": "Author"
-    },
-    {
-      "key": "formula.tags",
-      "label": "Tags"
-    },
-    {
-      "key": "note.word-count",
-      "label": "Words"
-    },
-    {
-      "key": "formula.minutes",
-      "label": "Minutes"
-    },
-    {
-      "key": "note.created",
-      "label": "Created"
-    }
+    {"key":"file.name","label":"Note"},
+    {"key":"formula.access","label":"Access"},
+    {"key":"note.publication","label":"Author"},
+    {"key":"formula.tags","label":"Tags"},
+    {"key":"note.word-count","label":"Words"},
+    {"key":"formula.minutes","label":"Minutes"},
+    {"key":"note.created","label":"Created"}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "World News",
-              "path": "daily/day/2026-10-01/World News.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "news"
-            },
-            {
-              "t": "number",
-              "v": 1000.0
-            },
-            {
-              "t": "number",
-              "v": 5.0
-            },
-            {
-              "t": "date",
-              "v": "2026-10-01"
-            }
-          ],
-          "path": "daily/day/2026-10-01/World News.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Beta Post",
-              "path": "daily/day/2026-10-02/Beta Post.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "blog"
-            },
-            {
-              "t": "number",
-              "v": 600.0
-            },
-            {
-              "t": "number",
-              "v": 3.0
-            },
-            {
-              "t": "date",
-              "v": "2026-10-02"
-            }
-          ],
-          "path": "daily/day/2026-10-02/Beta Post.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Misc Notes",
-              "path": "daily/day/2026-10-03/Misc Notes.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "refined"
-            },
-            {
-              "t": "number",
-              "v": 150.0
-            },
-            {
-              "t": "number",
-              "v": 0.8
-            },
-            {
-              "t": "date",
-              "v": "2026-10-03"
-            }
-          ],
-          "path": "daily/day/2026-10-03/Misc Notes.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Other Post",
-              "path": "daily/day/2026-10-03/Other Post.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "blog"
-            },
-            {
-              "t": "number",
-              "v": 250.0
-            },
-            {
-              "t": "number",
-              "v": 1.3
-            },
-            {
-              "t": "date",
-              "v": "2026-10-03"
-            }
-          ],
-          "path": "daily/day/2026-10-03/Other Post.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Story Ch 1",
-              "path": "daily/day/2026-10-03/Story Ch 1.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "serial, transcript"
-            },
-            {
-              "t": "number",
-              "v": 300.0
-            },
-            {
-              "t": "number",
-              "v": 1.5
-            },
-            {
-              "t": "date",
-              "v": "2026-10-03"
-            }
-          ],
-          "path": "daily/day/2026-10-03/Story Ch 1.md"
-        }
+        {"cells":[{"label":"World News","path":"daily/day/2026-10-01/World News.md","t":"link"},{"t":"text","v":""},{"t":"null"},{"t":"text","v":"news"},{"t":"number","v":1000.0},{"t":"number","v":5.0},{"t":"date","v":"2026-10-01"}],"path":"daily/day/2026-10-01/World News.md"},
+        {"cells":[{"label":"Beta Post","path":"daily/day/2026-10-02/Beta Post.md","t":"link"},{"t":"text","v":""},{"t":"null"},{"t":"text","v":"blog"},{"t":"number","v":600.0},{"t":"number","v":3.0},{"t":"date","v":"2026-10-02"}],"path":"daily/day/2026-10-02/Beta Post.md"},
+        {"cells":[{"label":"Misc Notes","path":"daily/day/2026-10-03/Misc Notes.md","t":"link"},{"t":"text","v":""},{"t":"null"},{"t":"text","v":"refined"},{"t":"number","v":150.0},{"t":"number","v":0.8},{"t":"date","v":"2026-10-03"}],"path":"daily/day/2026-10-03/Misc Notes.md"},
+        {"cells":[{"label":"Other Post","path":"daily/day/2026-10-03/Other Post.md","t":"link"},{"t":"text","v":""},{"t":"null"},{"t":"text","v":"blog"},{"t":"number","v":250.0},{"t":"number","v":1.3},{"t":"date","v":"2026-10-03"}],"path":"daily/day/2026-10-03/Other Post.md"},
+        {"cells":[{"label":"Story Ch 1","path":"daily/day/2026-10-03/Story Ch 1.md","t":"link"},{"t":"text","v":""},{"t":"null"},{"t":"text","v":"serial, transcript"},{"t":"number","v":300.0},{"t":"number","v":1.5},{"t":"date","v":"2026-10-03"}],"path":"daily/day/2026-10-03/Story Ch 1.md"}
       ],
       "summaries": []
     }

@@ -226,6 +226,43 @@ fn defs_load_without_notices_and_yield_the_19_ids() {
     assert_eq!(ids, IDS);
 }
 
+/// Golden layout: objects and other arrays one entry per line (keys in the fixed `Value` order);
+/// the `columns` and `rows` arrays carry one compact line per element, so a golden diff reads as
+/// one changed row. Still plain JSON.
+fn write_golden(v: &Json, depth: usize, key: Option<&str>, out: &mut String) {
+    let pad = |n: usize| "  ".repeat(n);
+    match v {
+        Json::Array(a) if !a.is_empty() => {
+            let per_line = matches!(key, Some("columns" | "rows"));
+            out.push_str("[\n");
+            for (i, e) in a.iter().enumerate() {
+                out.push_str(&pad(depth + 1));
+                if per_line {
+                    out.push_str(&serde_json::to_string(e).unwrap());
+                } else {
+                    write_golden(e, depth + 1, None, out);
+                }
+                out.push_str(if i + 1 < a.len() { ",\n" } else { "\n" });
+            }
+            out.push_str(&pad(depth));
+            out.push(']');
+        }
+        Json::Object(m) if !m.is_empty() => {
+            out.push_str("{\n");
+            for (i, (k, e)) in m.iter().enumerate() {
+                out.push_str(&pad(depth + 1));
+                out.push_str(&serde_json::to_string(k).unwrap());
+                out.push_str(": ");
+                write_golden(e, depth + 1, Some(k), out);
+                out.push_str(if i + 1 < m.len() { ",\n" } else { "\n" });
+            }
+            out.push_str(&pad(depth));
+            out.push('}');
+        }
+        other => out.push_str(&serde_json::to_string(other).unwrap()),
+    }
+}
+
 #[test]
 fn goldens() {
     let fx = fixture();
@@ -243,7 +280,8 @@ fn goldens() {
         let got: Json = serde_json::from_str(&serde_json::to_string(&got).unwrap()).unwrap();
         let path = dir.join(format!("{id}.json"));
         if update {
-            let mut s = serde_json::to_string_pretty(&got).unwrap();
+            let mut s = String::new();
+            write_golden(&got, 0, None, &mut s);
             s.push('\n');
             std::fs::write(&path, s).unwrap();
             continue;

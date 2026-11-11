@@ -1,97 +1,17 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "file name"
-    },
-    {
-      "key": "formula.tags",
-      "label": "tags"
-    },
-    {
-      "key": "note.word-count",
-      "label": "word-count"
-    },
-    {
-      "key": "formula.minutes",
-      "label": "minutes"
-    },
-    {
-      "key": "formula.created",
-      "label": "created"
-    },
-    {
-      "key": "note.read",
-      "label": "Read",
-      "role": {
-        "key": "read",
-        "kind": "checkbox"
-      }
-    }
+    {"key":"file.name","label":"file name"},
+    {"key":"formula.tags","label":"tags"},
+    {"key":"note.word-count","label":"word-count"},
+    {"key":"formula.minutes","label":"minutes"},
+    {"key":"formula.created","label":"created"},
+    {"key":"note.read","label":"Read","role":{"key":"read","kind":"checkbox"}}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Alpha Post",
-              "path": "daily/day/2026-10-01/Alpha Post.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": "blog"
-            },
-            {
-              "t": "number",
-              "v": 400.0
-            },
-            {
-              "t": "number",
-              "v": 2.0
-            },
-            {
-              "t": "date",
-              "v": "2026-10-01"
-            },
-            {
-              "t": "bool",
-              "v": true
-            }
-          ],
-          "path": "daily/day/2026-10-01/Alpha Post.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Beta Post",
-              "path": "daily/day/2026-10-02/Beta Post.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": "blog"
-            },
-            {
-              "t": "number",
-              "v": 600.0
-            },
-            {
-              "t": "number",
-              "v": 3.0
-            },
-            {
-              "t": "date",
-              "v": "2026-10-02"
-            },
-            {
-              "t": "bool",
-              "v": false
-            }
-          ],
-          "path": "daily/day/2026-10-02/Beta Post.md"
-        }
+        {"cells":[{"label":"Alpha Post","path":"daily/day/2026-10-01/Alpha Post.md","t":"link"},{"t":"text","v":"blog"},{"t":"number","v":400.0},{"t":"number","v":2.0},{"t":"date","v":"2026-10-01"},{"t":"bool","v":true}],"path":"daily/day/2026-10-01/Alpha Post.md"},
+        {"cells":[{"label":"Beta Post","path":"daily/day/2026-10-02/Beta Post.md","t":"link"},{"t":"text","v":"blog"},{"t":"number","v":600.0},{"t":"number","v":3.0},{"t":"date","v":"2026-10-02"},{"t":"bool","v":false}],"path":"daily/day/2026-10-02/Beta Post.md"}
       ],
       "summaries": []
     }

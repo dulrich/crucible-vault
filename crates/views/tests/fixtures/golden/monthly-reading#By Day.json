@@ -1,124 +1,19 @@
 {
   "columns": [
-    {
-      "key": "rows",
-      "label": "Day"
-    },
-    {
-      "key": "Blog",
-      "label": "Blog"
-    },
-    {
-      "key": "News",
-      "label": "News"
-    },
-    {
-      "key": "Transcript",
-      "label": "Transcript"
-    },
-    {
-      "key": "Serial",
-      "label": "Serial"
-    },
-    {
-      "key": "Other",
-      "label": "Other"
-    },
-    {
-      "key": "total",
-      "label": "Total"
-    }
+    {"key":"rows","label":"Day"},
+    {"key":"Blog","label":"Blog"},
+    {"key":"News","label":"News"},
+    {"key":"Transcript","label":"Transcript"},
+    {"key":"Serial","label":"Serial"},
+    {"key":"Other","label":"Other"},
+    {"key":"total","label":"Total"}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "t": "text",
-              "v": "2026-10-01"
-            },
-            {
-              "t": "text",
-              "v": "400 / 2.0m"
-            },
-            {
-              "t": "text",
-              "v": "1000 / 5.0m"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "1400 / 7.0m"
-            }
-          ]
-        },
-        {
-          "cells": [
-            {
-              "t": "text",
-              "v": "2026-10-02"
-            },
-            {
-              "t": "text",
-              "v": "600 / 3.0m"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "600 / 3.0m"
-            }
-          ]
-        },
-        {
-          "cells": [
-            {
-              "t": "text",
-              "v": "2026-10-03"
-            },
-            {
-              "t": "text",
-              "v": "250 / 1.2m"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "300 / 1.5m"
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "150 / 0.8m"
-            },
-            {
-              "t": "text",
-              "v": "700 / 3.5m"
-            }
-          ]
-        }
+        {"cells":[{"t":"text","v":"2026-10-01"},{"t":"text","v":"400 / 2.0m"},{"t":"text","v":"1000 / 5.0m"},{"t":"null"},{"t":"null"},{"t":"null"},{"t":"text","v":"1400 / 7.0m"}]},
+        {"cells":[{"t":"text","v":"2026-10-02"},{"t":"text","v":"600 / 3.0m"},{"t":"null"},{"t":"null"},{"t":"null"},{"t":"null"},{"t":"text","v":"600 / 3.0m"}]},
+        {"cells":[{"t":"text","v":"2026-10-03"},{"t":"text","v":"250 / 1.2m"},{"t":"null"},{"t":"text","v":"300 / 1.5m"},{"t":"null"},{"t":"text","v":"150 / 0.8m"},{"t":"text","v":"700 / 3.5m"}]}
       ],
       "summaries": []
     }

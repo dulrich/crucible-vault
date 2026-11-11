@@ -1,45 +1,13 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "file name"
-    },
-    {
-      "key": "file.mtime",
-      "label": "mtime"
-    }
+    {"key":"file.name","label":"file name"},
+    {"key":"file.mtime","label":"mtime"}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Tool Two",
-              "path": "stack/Tool Two.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "<datetime>"
-            }
-          ],
-          "path": "stack/Tool Two.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "Linker",
-              "path": "notes/Linker.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "<datetime>"
-            }
-          ],
-          "path": "notes/Linker.md"
-        }
+        {"cells":[{"label":"Tool Two","path":"stack/Tool Two.md","t":"link"},{"t":"date","v":"<datetime>"}],"path":"stack/Tool Two.md"},
+        {"cells":[{"label":"Linker","path":"notes/Linker.md","t":"link"},{"t":"date","v":"<datetime>"}],"path":"notes/Linker.md"}
       ],
       "summaries": []
     }

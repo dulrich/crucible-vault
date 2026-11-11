@@ -1,110 +1,18 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "file name"
-    },
-    {
-      "key": "formula.access",
-      "label": "Access"
-    },
-    {
-      "key": "note.publication",
-      "label": "Author"
-    },
-    {
-      "key": "formula.tags",
-      "label": "tags"
-    },
-    {
-      "key": "word-count",
-      "label": "word-count",
-      "width": 80.0
-    },
-    {
-      "key": "formula.minutes",
-      "label": "minutes",
-      "width": 80.0
-    },
-    {
-      "key": "note.read",
-      "label": "Read",
-      "role": {
-        "key": "read",
-        "kind": "checkbox"
-      },
-      "width": 137.0
-    }
+    {"key":"file.name","label":"file name"},
+    {"key":"formula.access","label":"Access"},
+    {"key":"note.publication","label":"Author"},
+    {"key":"formula.tags","label":"tags"},
+    {"key":"word-count","label":"word-count","width":80.0},
+    {"key":"formula.minutes","label":"minutes","width":80.0},
+    {"key":"note.read","label":"Read","role":{"key":"read","kind":"checkbox"},"width":137.0}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Alpha Post",
-              "path": "daily/day/2026-10-01/Alpha Post.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "blog"
-            },
-            {
-              "t": "number",
-              "v": 400.0
-            },
-            {
-              "t": "number",
-              "v": 2.0
-            },
-            {
-              "t": "bool",
-              "v": true
-            }
-          ],
-          "path": "daily/day/2026-10-01/Alpha Post.md"
-        },
-        {
-          "cells": [
-            {
-              "label": "World News",
-              "path": "daily/day/2026-10-01/World News.md",
-              "t": "link"
-            },
-            {
-              "t": "text",
-              "v": ""
-            },
-            {
-              "t": "null"
-            },
-            {
-              "t": "text",
-              "v": "news"
-            },
-            {
-              "t": "number",
-              "v": 1000.0
-            },
-            {
-              "t": "number",
-              "v": 5.0
-            },
-            {
-              "t": "bool",
-              "v": false
-            }
-          ],
-          "path": "daily/day/2026-10-01/World News.md"
-        }
+        {"cells":[{"label":"Alpha Post","path":"daily/day/2026-10-01/Alpha Post.md","t":"link"},{"t":"text","v":""},{"t":"null"},{"t":"text","v":"blog"},{"t":"number","v":400.0},{"t":"number","v":2.0},{"t":"bool","v":true}],"path":"daily/day/2026-10-01/Alpha Post.md"},
+        {"cells":[{"label":"World News","path":"daily/day/2026-10-01/World News.md","t":"link"},{"t":"text","v":""},{"t":"null"},{"t":"text","v":"news"},{"t":"number","v":1000.0},{"t":"number","v":5.0},{"t":"bool","v":false}],"path":"daily/day/2026-10-01/World News.md"}
       ],
       "summaries": []
     }

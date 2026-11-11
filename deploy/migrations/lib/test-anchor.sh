@@ -92,6 +92,55 @@ anchor_die "0000: boom" 2>"$scratch/err" || rc=$?
 [[ $rc == 1 ]] || fail "anchor_die status $rc"
 grep -q '^    0000: boom$' "$scratch/err" || fail "anchor_die message"
 
-say "6. --help"
+say "6. anchor_array_add vs 0036 / 0039 hosts edits"
+loc=$here/../local
+sed -n "/<<'EOF_KIND'\$/,/^EOF_KIND\$/{//!p}" "$loc/test-0036.sh" >"$scratch/k36.toml"
+awk '/kinds\.toml" <<.EOF_FIX.$/ {on=1; next} on && /^EOF_FIX$/ {exit} on' "$loc/test-0039.sh" >"$scratch/k39.toml"
+[[ -s $scratch/k36.toml && -s $scratch/k39.toml ]] || fail "could not extract the kinds fixtures"
+export CV_MIGRATIONS_LIB=$here
+for hv in 36 39; do
+  k=$scratch/k$hv.toml
+  # the migration's own edit, run on a copy
+  if [[ $hv == 36 ]]; then
+    hosts=(m.fanfiction.net www.royalroad.com www.author-site-a.example author-site-b.example)
+    ( source "$loc/0036-fanfic-titles.sh"; _0036_wire_hosts "$k" "$scratch/mig$hv.toml" )
+  else
+    hosts=(www.author-site-a.example author-site-b.example)
+    ( source "$loc/0039-public-release-config.sh"; _0039_hosts "$k" "$scratch/mig$hv.toml" )
+  fi
+  cp -- "$k" "$scratch/lib$hv.toml"
+  for h in "${hosts[@]}"; do
+    rc=0
+    anchor_array_add "$scratch/lib$hv.toml" kinds.fanfic hosts "$h" || rc=$?
+    [[ $rc == 0 || $rc == 2 ]] || fail "0$hv: array_add $h status $rc"
+  done
+  cmp "$scratch/mig$hv.toml" "$scratch/lib$hv.toml" || fail "0$hv: lib result differs from the migration's"
+  cp -- "$scratch/lib$hv.toml" "$scratch/once$hv.toml"
+  for h in "${hosts[@]}"; do
+    rc=0
+    anchor_array_add "$scratch/lib$hv.toml" kinds.fanfic hosts "$h" || rc=$?
+    [[ $rc == 2 ]] || fail "0$hv: second add of $h status $rc, want 2"
+  done
+  cmp "$scratch/once$hv.toml" "$scratch/lib$hv.toml" || fail "0$hv: second run changed the file"
+  [[ $(grep -c '^hosts' "$scratch/lib$hv.toml") == $(grep -c '^hosts' "$k") ]] || fail "0$hv: hosts lines added or lost"
+  grep -qxF 'hosts = ["blog.example"]' "$scratch/lib$hv.toml" || [[ $hv == 36 ]] || fail "0$hv: other kind touched"
+done
+grep -qxF 'hosts = ["archiveofourown.org", "www.royalroad.com", "m.fanfiction.net", "www.author-site-a.example", "author-site-b.example"]  # mine' "$scratch/lib36.toml" || fail "0036: hosts line wrong"
+# changed anchors: status 1, message on stderr, file untouched
+chk() { # <label> <sed-script> <table> <key>
+  cp -- "$scratch/k39.toml" "$scratch/c.toml"
+  sed -i "$2" "$scratch/c.toml"
+  cp -- "$scratch/c.toml" "$scratch/c.keep"
+  rc=0
+  anchor_array_add "$scratch/c.toml" "$3" "$4" new.example 2>"$scratch/err" || rc=$?
+  [[ $rc == 1 ]] || fail "$1: status $rc, want 1"
+  [[ -s $scratch/err ]] || fail "$1: no message"
+  cmp "$scratch/c.keep" "$scratch/c.toml" || fail "$1: file touched"
+}
+chk "no table" 's/^\[kinds.fanfic\]$/[kinds.story]/' kinds.fanfic hosts
+chk "no key" '/^hosts = \["archive/d' kinds.fanfic hosts
+chk "multi-line array" 's/^\[kinds.fanfic\]$/[kinds.fanfic]\nhosts = [\n  "x"\n]/;/^hosts = \["archive/d' kinds.fanfic hosts
+
+say "7. --help"
 bash "$here/test-anchor.sh" --help | grep -q '^usage:' || fail "--help"
 say PASS

@@ -1,31 +1,12 @@
 {
   "columns": [
-    {
-      "key": "file.name",
-      "label": "file name"
-    },
-    {
-      "key": "formula.created",
-      "label": "created"
-    }
+    {"key":"file.name","label":"file name"},
+    {"key":"formula.created","label":"created"}
   ],
   "groups": [
     {
       "rows": [
-        {
-          "cells": [
-            {
-              "label": "Clipped Article",
-              "path": "Clippings/Clipped Article.md",
-              "t": "link"
-            },
-            {
-              "t": "date",
-              "v": "2026-10-10"
-            }
-          ],
-          "path": "Clippings/Clipped Article.md"
-        }
+        {"cells":[{"label":"Clipped Article","path":"Clippings/Clipped Article.md","t":"link"},{"t":"date","v":"2026-10-10"}],"path":"Clippings/Clipped Article.md"}
       ],
       "summaries": []
     }
