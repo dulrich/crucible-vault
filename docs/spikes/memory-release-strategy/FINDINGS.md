@@ -175,3 +175,66 @@ Run from the spike's scratch directory; scratch root `/tmp/cvmr`.
 - **Per block:** `ln -sfn /tmp/cvmr/<pre|post>/target /tmp/cvmr/target; bash run.sh W3<A|B>-c<N>-<pre|post> <A|B>`; smoke `AIDLE=30 bash run.sh W3-smoke-<pre|post> A`.
 - **Scratch vault, search DB and note list:** vault copy without symlinks and `.git`, config neutralised as in the Method section; `sqlite3 -readonly <live search.db> ".backup /tmp/cvmr/ro/search.db"`; 50 note paths from a sorted `find` outside `_custom/`.
 - **Tables:** `bash summarize.sh W3A-` and `bash summarize.sh W3B-`; the idle time series is `awk` over `out/W3A-c<N>-post/samples.txt` from the `idle` phase time in `out/W3A-c<N>-post/phases`.
+
+## Diagnosis of the settled misses (2026-11-11)
+
+Aggregates only. Follows the two missed criteria above. All figures are MiB of RssAnon; settled is the mean of the last 10 s of a 120 s idle window. Binaries: `ref`, an unpatched release build of `36550c94`, and `diag`, the same commit plus an instrumentation patch (release log lines, `malloc_info` dumps before and after the idle trim, a counting allocator by thread class; with no `CVMR_*` variable set it runs the production idle gate). Same scratch vault copy, neutralised config and isolation as the Method section.
+
+- **What is left after the idle release is not live heap.** `mallinfo2` in-use is about 61 MiB in every block and the best floor is 66–67. The excess in a bad block is the **top chunk of a non-main glibc arena**: `malloc_trim` shrinks the top only for the main arena and, for thread arenas, only releases chunks sitting in the free bins.
+- **Those arenas hold only reply serialisation.** `reply::<M>()` (`crates/cv/src/daemon/errors.rs:86`) builds a `serde_json::Value` tree per reply on a tokio thread: 11–35 MiB allocated per arena, 0 live afterwards, spread over 1–3 arenas. The single `cv-view` arena is reused and stable.
+- **The bad mode is random.** Over 12 unpatched blocks on identical input the daemon settled at 67–103. Whether a block ends bad depends on whether a reply arena's free memory ends in its top chunk or in bins (inference: free order and fastbin consolidation, not the trigger).
+
+| block | anon at idle start | after release | in use | non-main top chunks after trim | largest top |
+|---|---|---|---|---|---|
+| D-1 | 132.8 | 88.2 | 61.0 | **21.8** | **20.5** |
+| D-2 | 127.2 | 80.0 | 60.9 | **14.0** | **12.8** |
+| D-3 | 130.5 | 66.7 | 60.9 | 1.2 | 0.2 |
+| D-4 | 118.1 | 69.9 | 60.9 | 3.4 | 2.1 |
+| D-5 | 116.5 | 68.8 | 61.0 | 2.0 | 0.8 |
+| D-6 | 114.9 | 66.7 | 60.9 | 1.3 | 0.2 |
+
+- **Floor composition (good block):** `[heap]` 21.2 (12.5 Rust-live plus SQLite and other C allocations), mmapped chunks 19–25 (live), the view arena about 14 (about 20 MiB free in fragmented chunks, the same in good and bad blocks), others about 8.
+- **No release trigger removes the residue.** Scenario A, 3 interleaved cycles each: a re-armed release, a release at 40 s, two releases, and repeated releases at an 8 MiB threshold all tie with the single release; the bad mode (about 91) appears at random in each, and a second trim leaves it (94 → 91).
+- **An allocator-level workaround does:** `glibc.malloc.mxfast=0` plus a 16 MiB release threshold settled 67 / 70 / 72 with peak 92–96 (same-cycle reference 67–103 and 128–142). In scenario B it showed no p95 more than 10 % worse, at 273–419 after-job trims per 180 s block (4–5 times the count at 32 MiB) and +1.5–6 % daemon CPU; two of its three B cycles were contended. `mxfast=0` alone settles at about 91, because free-resident stays just under 32 MiB and nothing trims. **Not adopted:** the root cause is fixed instead (next section).
+- **Idle climb:** one allocation of about 6 MiB on an event thread, once per block at a random time, leaves +2.6 MiB resident (14 of 33 blocks). The +15 MiB climb seen in cycle 3 above was not reproduced in 33 blocks.
+- **Not measured:** `mxfast=0` alone in B; the semantic search path; the sampler-tick backstop (beyond the 120 s window); a per-thread split of the event-thread class.
+
+Commands (spike scratch directory): `bash diagA.sh`, `bash diagsum.sh W5`, `perl regions.pl out/W5D-<n>/r000-idle-{pre,post}.xml`, `perl timeline.pl out/W5D-<n> 1`, `bash matrix5A.sh`, `bash followA.sh`, `bash matrix5B.sh "mxthr16=…"`, then `bash summarize.sh W5A-` / `W5F-` / `W5B-`.
+
+## Reply serialisation straight to text (2026-11-11)
+
+Aggregates only; reply bodies were compared by hash and length and discarded. Prototype: `reply.patch` beside this file (3 files in `crates/cv`, +39/−10, against `38f52df8`): `reply()` returns `serde_json::to_string` of the typed result, `Shared::handle` returns `Result<String, RpcError>`, and a `response_line()` in `server.rs` writes the envelope `{"id":…,"jsonrpc":"2.0","result":<payload>}` around the payload; errors, notifications and connection-level replies keep the `Value` path. No new dependency or cargo feature. Applied alone to `38f52df8`: `cargo clippy -p cv --all-targets -- -D warnings` clean, `cargo test -p cv` 540 passed, `cargo fmt --all --check` clean.
+
+- **Reply path today:** handler result → `serde_json::to_value` (tree) → envelope `Value` → sent over an unbounded channel → `to_string` plus newline → `write_all`, all on tokio worker threads. No other consumer reads the reply `Value`.
+- **Equivalence** (51 replies per run, 2 rounds, patched against unpatched): `views_list`, 25 of 26 views, an erroring view, `intake_list`, `lookup_currencies` and an erroring job request are byte-identical. `search` (10) and `actions_list` differ **in key order only** (struct declaration order instead of sorted keys; canonical re-encodings are equal). `status`, the job listings and one nondeterministic view differ between two unpatched runs as well. No float or non-string-key difference.
+- Both binaries below are `38f52df8` plus the instrumentation (off by default), the patched one with `reply.patch`. psi 0.00 and no running `rustc` in every block.
+
+**Diagnostic blocks** (5 interleaved cycles, counting allocator on): reply allocation 49.9 MiB per pass → 8.4; non-main arenas holding reply allocations before the release 1, 1, 3, 2, 2 (9–61 MiB) → **0** in all 5; peak 116–137 → 78–81.
+
+**Scenario A** (`AIDLE=120`, 6 interleaved cycles):
+
+| | peak | settled | view p50 / p95 ms | released | CPU s |
+|---|---|---|---|---|---|
+| reference | 111–136 | 59, 60, 60, 63, 73, 82 | 6 / 74–79 | 30–77 | 2.3 |
+| patched | 79–81 | 79–81 | 5 / 53–58 | **0** | 2.2 |
+
+- The patched build settles higher because nothing is released: the idle release reads about 22 MiB free-resident, under the 32 MiB threshold, and skips. About 18 MiB of that is free in the view arena.
+
+**Scenario A with a 16 MiB threshold on both** (3 interleaved cycles, single set):
+
+| | peak | settled | view p95 ms | released |
+|---|---|---|---|---|
+| reference | 111, 120, 135 | 62, 59, **84** | 74–75 | 31–61 |
+| patched | 79, 80, 80 | 62, 59, 61 | 53 | 20–21 |
+
+**Scenario B** (3 interleaved cycles, 32 MiB threshold):
+
+| | peak | view p95 ms | dupes-scan p95 | link-scan-all p95 | CPU s |
+|---|---|---|---|---|---|
+| reference | 192–197 | 406–418 | 5.2 s | 953 ms–1.0 s | 215.7–216.2 |
+| patched | 168–169 | 397–408 | 5.2 s | 979 ms–1.0 s | 213.1–216.0 |
+
+- **Verdict:** adopt direct reply serialisation together with a 16 MiB threshold for the idle release. Alone, the reply change removes the bad mode and lowers the peak by 30–55 MiB in A and about 25 MiB in B, but leaves the typical settled level about 20 MiB higher than today.
+- **Not measured:** scenario B at a 16 MiB threshold; notifications and connection-level replies (same pattern); the request side.
+
+Commands (spike scratch directory): `bash eqrun.sh 2` (uses `eqclient.pl`) and a `join` over `out/W6E-r{1,2}-{ref,reply}/eq.txt`; `bash w6matrix.sh D` / `A` / `B`; `bash w6thr.sh`; tables from `bash summarize.sh W6D` / `W6A` / `W6B` / `W6T` and `perl w6sum.pl out/W6D-*`.

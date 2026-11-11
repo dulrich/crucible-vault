@@ -1,0 +1,115 @@
+diff -ru a/crates/cv/src/daemon/errors.rs b/crates/cv/src/daemon/errors.rs
+--- a/crates/cv/src/daemon/errors.rs
++++ b/crates/cv/src/daemon/errors.rs
+@@ -83,8 +83,8 @@
+ }
+ 
+ /// Serialises method `M`'s typed result (ties each handler's return type to the contract).
+-pub(super) fn reply<M: Method>(r: Result<M::Result, RpcError>) -> Result<Value, RpcError> {
+-    serde_json::to_value(r?).map_err(internal)
++pub(super) fn reply<M: Method>(r: Result<M::Result, RpcError>) -> Result<String, RpcError> {
++    serde_json::to_string(&r?).map_err(internal)
+ }
+ 
+ #[cfg(test)]
+diff -ru a/crates/cv/src/daemon/mod.rs b/crates/cv/src/daemon/mod.rs
+--- a/crates/cv/src/daemon/mod.rs
++++ b/crates/cv/src/daemon/mod.rs
+@@ -450,7 +450,7 @@
+ 
+     /// Handles every request except `hello`/`subscribe` (connection-level): one handler per
+     /// method, each returning that method's [`Method::Result`].
+-    pub async fn handle(&self, req: Request) -> Result<Value, RpcError> {
++    pub async fn handle(&self, req: Request) -> Result<String, RpcError> {
+         use cv_protocol::methods as m;
+         memory::mark_activity();
+         match req {
+diff -ru a/crates/cv/src/server.rs b/crates/cv/src/server.rs
+--- a/crates/cv/src/server.rs
++++ b/crates/cv/src/server.rs
+@@ -79,6 +79,30 @@
+     .unwrap_or_else(|e| json!({"jsonrpc": JSONRPC_VERSION, "id": null, "error": {"code": error_codes::INTERNAL_ERROR, "message": e.to_string()}}))
+ }
+ 
++/// The response line (with its trailing newline) for a dispatched call whose result is already
++/// serialised: the envelope is written around the payload bytes, in the key order the `Value`
++/// envelope serialises to (`id`, `jsonrpc`, `result`), so no `Value` tree is built for a reply.
++fn response_line(id: RpcId, outcome: Result<String, RpcError>) -> String {
++    let payload = match outcome {
++        Ok(p) => p,
++        Err(e) => {
++            let mut s = response(id, Err(e)).to_string();
++            s.push('\n');
++            return s;
++        }
++    };
++    let id = serde_json::to_string(&id).unwrap_or_else(|_| "null".to_owned());
++    let mut s = String::with_capacity(payload.len() + id.len() + 36);
++    s.push_str("{\"id\":");
++    s.push_str(&id);
++    s.push_str(",\"jsonrpc\":\"");
++    s.push_str(JSONRPC_VERSION);
++    s.push_str("\",\"result\":");
++    s.push_str(&payload);
++    s.push_str("}\n");
++    s
++}
++
+ fn null_id_error(code: i64, message: &str) -> Value {
+     json!({"jsonrpc": JSONRPC_VERSION, "id": null, "error": {"code": code, "message": message}})
+ }
+@@ -98,17 +122,17 @@
+     let mut topics: HashSet<Topic> = HashSet::new();
+     let mut greeted = false;
+     let mut guard = OpenSubGuard(&shared, false);
+-    let (reply_tx, mut replies) = mpsc::unbounded_channel::<Value>();
++    let (reply_tx, mut replies) = mpsc::unbounded_channel::<String>();
+     let mut calls = JoinSet::new();
+     loop {
+         let mut snapshot: Vec<Value> = Vec::new();
+-        let out: Value = tokio::select! {
++        let buf: String = tokio::select! {
+             _ = stop.changed() => break,
+             Some(v) = replies.recv() => v,
+             Some(_) = calls.join_next(), if !calls.is_empty() => continue,
+             ev = events.recv(), if !topics.is_empty() => match ev {
+                 Ok(n) if topics.contains(&n.topic()) => match serde_json::to_value(RpcNotification::new(n)) {
+-                    Ok(v) => v,
++                    Ok(v) => line_of(&v),
+                     Err(e) => { tracing::warn!(error = %e, "encoding notification"); continue; }
+                 },
+                 Ok(_) => continue,
+@@ -133,11 +157,11 @@
+                         snapshot = held_snapshot(&shared);
+                     }
+                     match step {
+-                        Line::Reply(v) => v,
++                        Line::Reply(v) => line_of(&v),
+                         Line::Dispatch(id, req) => {
+                             let (shared, tx) = (Arc::clone(&shared), reply_tx.clone());
+                             calls.spawn(async move {
+-                                let _ = tx.send(response(id, shared.handle(req).await));
++                                let _ = tx.send(response_line(id, shared.handle(req).await));
+                             });
+                             continue;
+                         }
+@@ -147,8 +171,6 @@
+                 Err(e) => { tracing::debug!(error = %e, "connection read"); break; }
+             },
+         };
+-        let mut buf = out.to_string();
+-        buf.push('\n');
+         if let Err(e) = wr.write_all(buf.as_bytes()).await {
+             tracing::debug!(error = %e, "connection write");
+             break;
+@@ -255,3 +277,10 @@
+     };
+     Line::Reply(response(id, outcome))
+ }
++
++/// `v` as one response line with its trailing newline.
++fn line_of(v: &Value) -> String {
++    let mut buf = v.to_string();
++    buf.push('\n');
++    buf
++}
