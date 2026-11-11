@@ -16,7 +16,7 @@ regex = "=1.13.1"
 cv-providers = { path = "../cv-providers" }
 cv-state = { path = "../cv-state" }
 # The in-process search index (plan semsearch-crate; D22), a path dep like `ofm` in cv-index.
-semsearch = { path = "../../../semsearch/crates/semsearch", version = "0.2" }
+semsearch = { path = "../../../semsearch/crates/semsearch", version = "0.3" }
 
 [lints]
 workspace = true

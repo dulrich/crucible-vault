@@ -12,6 +12,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - **Memory:** both processes release freed heap through one `cv-malloc` entry (triggers and thresholds unchanged), and the protocol client no longer copies a reply's payload or keeps a large reply's line buffer.
 - **View test goldens** are one line per column and per row.
 
+### Security
+
+- **Dependency updates for three advisories:** `rusqlite` 0.40.2 → 0.41.1 with `libsqlite3-sys` 0.38.2 → 0.39.1 (RUSTSEC-2026-0459, through `semsearch` 0.3.0), `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-root-certs` 1.0.9 → 1.0.12 (RUSTSEC-2026-0382, RUSTSEC-2026-0383).
+
 ### Added
 
 - **Migration libs for new migrations:** `deploy/migrations/lib/view-def.sh` (anchored view-definition edits) and `anchor_array_add` (TOML array adds).

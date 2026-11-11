@@ -10,7 +10,7 @@ publish.workspace = true
 # WPs never edit manifests or Cargo.lock. A bump is a deliberate change of its own.
 thiserror = "=2.0.21"
 serde_json = "=1.0.154"
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite = { version = "=0.41.1", features = ["bundled"] }
 tracing = "=0.1.44"
 sha2 = "=0.11.1"
 hex = "=0.4.3"
