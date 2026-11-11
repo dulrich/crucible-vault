@@ -110,3 +110,68 @@ Run from the spike's scratch directory; scratch root `/tmp/cvmr`.
 - **Matrices:** `bash matrixA.sh > matrixA.log`; `bash matrixB.sh > matrixB.log`; `AIDLE=330 bash run.sh A-single-p300 A CVMR_PERIODIC_SECS=300`.
 - **Tables:** `bash summarize.sh A-c` / `B-`; `bash triggers.sh B-`; `perl overlap.pl out/B-*`; `bash attrib.sh`.
 - **Environment knobs (spike binary only):** triggers `CVMR_PERIODIC_SECS`, `CVMR_IDLE_SECS`, `CVMR_AFTER_VIEW`, `CVMR_AFTER_SEARCH`, `CVMR_FORCE`, `CVMR_NO_JOB_TRIM`; malloc `CVMR_TRIM_THRESHOLD`, `CVMR_MMAP_THRESHOLD`, `CVMR_TOP_PAD`, `CVMR_ARENA_MAX`; diagnostics `CVMR_COUNT`, `CVMR_DIAG_DIR`.
+
+## Post-implementation (2026-11-10)
+
+Aggregates only. Same harness, scratch vault copy, neutralised config and isolation as the Method section; no spike patch on either binary, so the `trim*` and `relM` columns are 0 by construction (they come from the patch's log lines) and the release itself cannot be seen in them.
+
+- **Compared:** two unpatched release builds of `cv`, `056e3e51` (pre: the commit before the idle release and the view preload projection) and `36550c94` (post: contains `b56ed15c`, the idle release after 20 s with no request and no running job plus the 5-minute sampler-tick backstop, and `36550c94`, view runs preload only the property keys they can reach). Each block is a fresh daemon on a fresh scratch copy.
+- **Order:** 3 interleaved cycles, A pair then B pair in each: cycle 1 pre, post; cycle 2 post, pre; cycle 3 pre, post. Run times 21:50–22:23, 12 blocks, one driver.
+- **Smoke first:** `W3-smoke-pre` / `W3-smoke-post` (A, 30 s idle): `err` 0, 78 `view ... ok` lines on each (26 views times 3 passes), no `/run/user/` socket.
+- Anon in MiB of RssAnon; settled is the mean of the last 10 s of the 60 s idle window; v50/v95 are client-side ms; `err` was 0 in all 12 blocks.
+
+### Scenario A (3 view passes with 5 searches each, then 60 s idle, no jobs)
+
+| cycle | binary | peak | meanL | settled | v50 | v95 | psi | rc |
+|---|---|---|---|---|---|---|---|---|
+| 1 | pre | 164 | 118 | 141 | 13 | 73 | 1.33 | 0 |
+| 1 | post | 120 | 82 | 69 | 5 | 70 | 0.00 | 0 |
+| 2 | post | 142 | 99 | 112 | 5 | 71 | 0.00 | 0 |
+| 2 | pre | 140 | 108 | 140 | 13 | 74 | 0.00 | 0 |
+| 3 | pre | 139 | 103 | 139 | 14 | 70 | 0.00 | 0 |
+| 3 | post | 117 | 84 | 110 | 5 | 65 | 0.00 | 0 |
+
+### Scenario B (180 s job replay plus a pipelined view pass every 20 s, then drain and 60 s idle)
+
+| cycle | binary | peak | meanL | settled | v95 | dupes95 | lsa95 | psi | rc |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | pre | 239 | 134 | 82 | 647 | 5.9 s | 1.1 s | 0.31 | 18 |
+| 1 | post | 201 | 130 | 81 | 382 | 5.2 s | 1.0 s | 0.00 | 0 |
+| 2 | post | 205 | 127 | 80 | 387 | 5.2 s | 1.0 s | 0.00 | 0 |
+| 2 | pre | 234 | 126 | 164 | 630 | 5.3 s | 1.1 s | 0.00 | 0 |
+| 3 | pre | 218 | 126 | 92 | 637 | 5.1 s | 1.1 s | 0.00 | 0 |
+| 3 | post | 188 | 127 | 79 | 391 | 5.2 s | 1.0 s | 0.13 | 1 |
+
+Post / pre ratio of the p95 columns in B (from the unrounded `summarize.sh` values shown above; the job p95s are printed to 0.1 s, so those ratios are coarse):
+
+| cycle | view p95 | dupes95 | lsa95 |
+|---|---|---|---|
+| 1 | 0.59 | 0.88 | 0.91 |
+| 2 | 0.61 | 0.98 | 0.91 |
+| 3 | 0.61 | 1.02 | 0.91 |
+
+### Pass criteria
+
+| criterion | cycle 1 | cycle 2 | cycle 3 | result |
+|---|---|---|---|---|
+| 1. A settled anon on post at or below 95 MiB | 69 pass | 112 **miss** | 110 **miss** | **MISS** (2 of 3 cycles) |
+| 2. A peak anon lower on post than on pre | 120 < 164 pass | 142 > 140 **miss** | 117 < 139 pass | **MISS** (cycle 2, by 2 MiB) |
+| 3. B view p95, dupes95, lsa95 no more than 10 % worse | pass (0.59 / 0.88 / 0.91) | pass (0.61 / 0.98 / 0.91) | pass (0.61 / 1.02 / 0.91) | pass |
+
+- Criteria 1 and 2 missed; per the plan they are reported, not fixed. No source, threshold or harness change was made.
+- **Settled in A, what the samples show (not a root cause):** the idle release fires, but late and not always deep. Anon on post held 99 / 141 / 115 MiB until about 20–25 s into the idle window, then dropped to 69 (cycle 1), 111 (cycle 2) and 94 then climbing back to 109 (cycle 3) over the next 30 s. Without the spike patch's log lines the trim and its freed bytes are not visible, and the sampled drop is consistent with one release at about the 20 s mark. Why cycles 2 and 3 settle about 40 MiB above cycle 1 was not investigated (candidates: the 5 searches' blocking-pool threads still exiting after the release, the 32 MiB gate leaving residue, anon re-growing from the 5 s sampler); each would need its own measurement.
+- **Against the spike's estimates:** baseline settled in A was about 143 (spike) and is 139–141 on pre here, so the pre build reproduces the spike. Post settles at 69 / 112 / 110, inside the spike's trigger-option range (65–90) only in cycle 1; the 20 s idle trigger was not shown to match periodic 60 s (65 in all three spike cycles). The spike inferred N above 10 s would match periodic; this measurement does not confirm it.
+- **Peak:** post is lower than pre by 44 / -2 / 22 MiB in A and by 38 / 29 / 30 MiB in B (239 to 201, 234 to 205, 218 to 188). The preload estimate (35.6 MiB falling to an estimated 2–10 MiB per full-vault view) predicts a drop of up to about 25–33 MiB at the peak of a single view; the B peak drop of 29–38 MiB is in that range, but the peak also depends on arena placement and on overlapping requests, so these figures are consistent with the projection and do not isolate it. The A peak drop is smaller and noisier because the A client is sequential and its peak is set by the 5 keyword searches (about 80 MiB each on blocking threads per the spike), which this work did not change.
+- **View latency:** the B view p95 fell by about 40 % on post (647 / 630 / 637 to 382 / 387 / 391 ms) and the A view p50 from 13–14 to 5 ms, the visible effect of the smaller preload. A view p95 is within noise (70 / 71 / 65 against 73 / 74 / 70 ms). Daemon CPU in B is 216–218 s on post against 219–223 s on pre, in A 2.1 s against 2.8 s.
+- **Contended blocks:** `W3B-c1-pre` ran with 18 concurrent `rustc` (psi 0.31); no other block had psi above 0.14 or more than 1 `rustc`; `W3A-c1-pre` psi 1.33, below the contention line. The contended block only affects criterion 3 in cycle 1, which passes with margin on view and job p95 (and cycles 2 and 3 give the same direction), so no re-run was made. Neither A miss comes from a contended block.
+- **Odd value:** `W3B-c2-pre` settled at 164, against 82 and 92 on the other pre cycles; the pre B idle settled value is noisy and was not used by any criterion.
+- **Not measured or different from production:** the idle window is 60 s (the release fires at about 20 s, so only about 40 s after it are observed, and the sampler-tick backstop never ran); search is keyword-only because the embedder's endpoint refuses connections locally; the A client is sequential, not the editor's request pattern; the release and its freed bytes are not logged; tmpfs storage affects absolute latencies, not the comparisons; one set of 3 cycles, no re-runs.
+
+### Commands
+
+Run from the spike's scratch directory; scratch root `/tmp/cvmr`.
+
+- **Builds:** `git worktree add --detach /tmp/cvmr/pre/crucible-vault 056e3e51` and `.../post/crucible-vault 36550c94`, each with `crucible-tui` and `semsearch` symlinked beside it; `CARGO_TARGET_DIR=/tmp/cvmr/<pre|post>/target cargo build --release -p cv --bin cv` from each worktree.
+- **Per block:** `ln -sfn /tmp/cvmr/<pre|post>/target /tmp/cvmr/target; bash run.sh W3<A|B>-c<N>-<pre|post> <A|B>`; smoke `AIDLE=30 bash run.sh W3-smoke-<pre|post> A`.
+- **Scratch vault, search DB and note list:** vault copy without symlinks and `.git`, config neutralised as in the Method section; `sqlite3 -readonly <live search.db> ".backup /tmp/cvmr/ro/search.db"`; 50 note paths from a sorted `find` outside `_custom/`.
+- **Tables:** `bash summarize.sh W3A-` and `bash summarize.sh W3B-`; the idle time series is `awk` over `out/W3A-c<N>-post/samples.txt` from the `idle` phase time in `out/W3A-c<N>-post/phases`.
