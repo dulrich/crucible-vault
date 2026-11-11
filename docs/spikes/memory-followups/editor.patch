@@ -1,0 +1,668 @@
+diff --git a/crates/cv-protocol/src/client.rs b/crates/cv-protocol/src/client.rs
+index 6effbc37..8d0583af 100644
+--- a/crates/cv-protocol/src/client.rs
++++ b/crates/cv-protocol/src/client.rs
+@@ -242,6 +242,9 @@ fn read_loop(mut reader: BufReader<UnixStream>, inbox: &Inbox) {
+         let Ok(v) = serde_json::from_str::<Value>(&line) else {
+             continue;
+         };
++        if line.len() > 65_536 && std::env::var_os("CV_ME_PROBE").is_some() {
++            eprintln!("CVME - reply line_bytes={} value_est_bytes={}", line.len(), me_value_bytes(&v));
++        }
+         if v.get("id").is_none() {
+             if let Ok(n) = serde_json::from_value::<RpcNotification>(v)
+                 && let Ok(mut s) = inbox.subscriber.lock()
+@@ -344,3 +347,19 @@ mod tests {
+         reader.join().expect("reader exits on EOF");
+     }
+ }
++
++/// Spike (memory-followups WP-0): estimated heap of a parsed `Value` (allocation sizes of
++/// strings, vectors and maps; enum slots counted inside their parent).
++fn me_value_bytes(v: &Value) -> usize {
++    const SLOT: usize = std::mem::size_of::<Value>();
++    match v {
++        Value::String(s) => s.capacity(),
++        Value::Array(a) => a.capacity() * SLOT + a.iter().map(me_value_bytes).sum::<usize>(),
++        // BTreeMap node overhead approximated as one key `String` + one `Value` slot + 16 B.
++        Value::Object(m) => m
++            .iter()
++            .map(|(k, x)| 24 + k.capacity() + SLOT + 16 + me_value_bytes(x))
++            .sum(),
++        _ => 0,
++    }
++}
+diff --git a/crates/editor/src/app/config.rs b/crates/editor/src/app/config.rs
+index bb2827aa..dad2604c 100644
+--- a/crates/editor/src/app/config.rs
++++ b/crates/editor/src/app/config.rs
+@@ -41,9 +41,22 @@ impl App {
+ 
+     pub(super) fn refresh_files(&mut self) {
+         let Some(d) = &self.daemon else { return };
++        let me_m1 = crate::me::on().then(crate::me::in_use);
+         if let Err(e) = self.explorer.build(d.index(), &self.ui.expanded) {
+             self.status.set_error(e);
+         }
++        if let Some(m1) = me_m1 {
++            crate::me::log(
++                "explorer",
++                format_args!(
++                    "paths={} rows={} delta_bytes={} at={:.1}",
++                    self.explorer.paths.len(),
++                    self.explorer.rows.len(),
++                    crate::me::in_use() as i64 - m1 as i64,
++                    crate::me::ms()
++                ),
++            );
++        }
+         if self.switcher.open {
+             self.switcher.refresh(&self.explorer.paths, &self.ui.recent);
+         }
+diff --git a/crates/editor/src/app/mod.rs b/crates/editor/src/app/mod.rs
+index 75860602..65b33998 100644
+--- a/crates/editor/src/app/mod.rs
++++ b/crates/editor/src/app/mod.rs
+@@ -796,6 +796,7 @@ impl App {
+             let shaped = visible.contains(doc.buffer.path());
+             doc.buffer.set_shaped(shaped);
+         }
++        self.me_visibility();
+         let ms = t0.elapsed().as_secs_f64() * 1e3;
+         if ms >= 1.0 {
+             tracing::debug!(elapsed_ms = ms, "sync_buffers");
+@@ -815,3 +816,42 @@ fn open_error(e: &DaemonError) -> String {
+         other => format!("open failed: {other}"),
+     }
+ }
++
++impl App {
++    /// Spike (memory-followups WP-0): one visibility pass after each update — the Reading-visible
++    /// paths (for `CV_ME_READING`) and the image owners of every non-active note tab (released
++    /// under `CV_ME_HIDE`).
++    fn me_visibility(&mut self) {
++        let hide = crate::me::knob("CV_ME_HIDE");
++        let reading = crate::me::knob("CV_ME_READING");
++        if hide.is_none() && reading.is_none() {
++            return;
++        }
++        let visible: std::collections::HashSet<String> = self
++            .panes
++            .iter()
++            .filter_map(|(_, ps)| ps.active_note(&self.docs))
++            .filter(|t| self.reading.mode(&self.docs, t.path).shows_reading())
++            .map(|t| t.path.to_owned())
++            .collect();
++        if hide.is_some() {
++            let hidden: std::collections::HashSet<String> = self
++                .panes
++                .iter()
++                .flat_map(|(_, ps)| {
++                    ps.tabs
++                        .iter()
++                        .enumerate()
++                        .filter(move |(i, _)| ps.active != Some(*i))
++                        .filter_map(|(_, t)| t.as_note(&self.docs))
++                        .map(|n| crate::image_cache::view_owner(n.path, n.id))
++                })
++                .collect();
++            self.reading.images.me_release_exact(&hidden);
++        }
++        if reading.as_deref() == Some("drop") {
++            self.reading.me_drop_hidden(&mut self.docs, &visible);
++        }
++        self.reading.me_visible = Some(visible);
++    }
++}
+diff --git a/crates/editor/src/app/update.rs b/crates/editor/src/app/update.rs
+index f4d576c5..36eeb116 100644
+--- a/crates/editor/src/app/update.rs
++++ b/crates/editor/src/app/update.rs
+@@ -22,6 +22,9 @@ impl App {
+         }
+         let flush = self.flush_switched_away(&before);
+         self.sync_buffers();
++        if crate::me::on() {
++            self.me_probe(&before);
++        }
+         let auto = self.schedule_settings_autosave();
+         let restore = self.restore_places(&views_before);
+         let persist = self.schedule_persist();
+@@ -724,3 +727,39 @@ fn tab_drag_event(e: iced::Event, _: iced::event::Status, _: iced::window::Id) -
+         _ => None,
+     }
+ }
++
++static ME_LAST_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++impl App {
++    /// Spike (memory-followups WP-0): a `switch` line when a pane's active note changed, and a
++    /// `probe` line at most once a second.
++    fn me_probe(&self, before: &[(iced::widget::pane_grid::Pane, String, Option<crate::app::NoteId>)]) {
++        let after = self.active_paths();
++        if after.iter().map(|a| &a.1).ne(before.iter().map(|b| &b.1)) {
++            let k = after.first().map_or(0, |a| crate::me::h(&a.1));
++            crate::me::log("switch", format_args!("k={k:x}"));
++        }
++        let now = crate::me::ms() as u64;
++        let last = ME_LAST_PROBE.load(std::sync::atomic::Ordering::Relaxed);
++        if now < last + 1000 {
++            return;
++        }
++        ME_LAST_PROBE.store(now, std::sync::atomic::Ordering::Relaxed);
++        let s = self.reading.images.me_stats();
++        let tabs: usize = self.panes.iter().map(|(_, ps)| ps.tabs.len()).sum();
++        let models = self.docs.values().filter(|d| d.reading.doc.is_some()).count();
++        let m = cv_malloc::info();
++        crate::me::log(
++            "probe",
++            format_args!(
++                "tabs={tabs} docs={} models={models} img_entries={} img_bytes={} pinned_entries={} pinned_bytes={} pending={} dims={} dims_bytes={} failed={} failed_bytes={} views={} explorer_paths={} in_use={} retained={}",
++                self.docs.values().count(),
++                s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8],
++                self.views.entries.len(),
++                self.explorer.paths.len(),
++                m.in_use,
++                m.retained()
++            ),
++        );
++    }
++}
+diff --git a/crates/editor/src/explorer.rs b/crates/editor/src/explorer.rs
+index 945d344c..a2f0bd10 100644
+--- a/crates/editor/src/explorer.rs
++++ b/crates/editor/src/explorer.rs
+@@ -571,3 +571,94 @@ mod tests {
+         assert!((ROW_HEIGHT - 24.0).abs() < f32::EPSILON);
+     }
+ }
++
++/// Spike (memory-followups WP-0, ME5): allocator-measured bytes of every whole-vault path
++/// structure at HEAD and of the cheapest sharing, over the path list in `CV_ME_PATHS`
++/// (`id<TAB>path` lines). Prints aggregates only. `cargo test -p editor me_acct -- --ignored --nocapture`.
++#[cfg(test)]
++mod me_acct {
++    use std::collections::{BTreeSet, HashMap};
++    use std::sync::Arc;
++
++    fn used() -> i64 {
++        i64::try_from(cv_malloc::info().in_use).unwrap_or(0)
++    }
++
++    #[test]
++    #[ignore = "spike accounting; needs CV_ME_PATHS"]
++    fn me_acct() {
++        let Ok(list) = std::env::var("CV_ME_PATHS") else { return };
++        let text = std::fs::read_to_string(list).expect("paths");
++        let m = used();
++        let rows: Vec<(i64, String)> = text
++            .lines()
++            .filter_map(|l| l.split_once('\t'))
++            .map(|(i, p)| (i.parse().unwrap_or(0), p.to_owned()))
++            .collect();
++        let rows_b = used() - m;
++        drop(text);
++        let raw: usize = rows.iter().map(|(_, p)| p.len()).sum();
++        println!("ME5 n={} raw_path_bytes={raw} rows_vec_bytes={rows_b}", rows.len());
++        let meas = |name: &str, f: &mut dyn FnMut() -> Box<dyn std::any::Any>| {
++            let m0 = used();
++            let v = f();
++            let b = used() - m0;
++            println!("ME5 {name}={b}");
++            (b, v)
++        };
++        // HEAD: ResolverCache::refresh.
++        let (r, _k_r) = meas("resolver_struct", &mut || {
++            let mut r = cv_index::Resolver::default();
++            for (id, p) in &rows {
++                r.add(*id, p);
++            }
++            Box::new(r)
++        });
++        let (ids, _k_ids) = meas("resolver_ids_map", &mut || {
++            Box::new(rows.iter().map(|(i, p)| (p.clone(), *i)).collect::<HashMap<String, i64>>())
++        });
++        let (paths, _k_paths) = meas("resolver_paths_map", &mut || {
++            Box::new(rows.iter().map(|(i, p)| (*i, p.clone())).collect::<HashMap<i64, String>>())
++        });
++        // HEAD: Explorer::build + relayout (`files`, `folders`, `paths`).
++        let (tree, _k_tree) = meas("explorer_files_folders", &mut || {
++            Box::new(super::tree_of(rows.iter().map(|(_, p)| p.clone())))
++        });
++        let files: Vec<String> = rows.iter().map(|(_, p)| p.clone()).filter(|p| super::shown(p)).collect();
++        let (epaths, _k_epaths) = meas("explorer_paths_vec", &mut || Box::new(files.clone()));
++        drop(files);
++        println!(
++            "ME5 head_total={}",
++            r + ids + paths + tree + epaths
++        );
++        // Cheapest sharing: one `Arc<str>` per path, built once from the scan; the resolver
++        // cache's `paths` holds clones, its `ids` map is dropped (the resolver's `exact` map
++        // already answers path -> id), the explorer's `files` and `paths` hold clones.
++        let (shared, tbox) = meas("shared_table", &mut || {
++            Box::new(rows.iter().map(|(i, p)| (*i, Arc::<str>::from(p.as_str()))).collect::<Vec<_>>())
++        });
++        let table: Vec<(i64, Arc<str>)> = tbox.downcast_ref::<Vec<(i64, Arc<str>)>>().expect("table").clone();
++        let (spaths, _k_spaths) = meas("shared_resolver_paths_map", &mut || {
++            Box::new(table.iter().map(|(i, p)| (*i, Arc::clone(p))).collect::<HashMap<i64, Arc<str>>>())
++        });
++        let (sfiles, _k_sfiles) = meas("shared_explorer_files", &mut || {
++            Box::new(
++                table
++                    .iter()
++                    .filter(|(_, p)| super::shown(p))
++                    .map(|(_, p)| Arc::clone(p))
++                    .collect::<BTreeSet<Arc<str>>>(),
++            )
++        });
++        let (svec, _k_svec) = meas("shared_explorer_paths_vec", &mut || {
++            Box::new(table.iter().filter(|(_, p)| super::shown(p)).map(|(_, p)| Arc::clone(p)).collect::<Vec<_>>())
++        });
++        let _files_only = meas("head_explorer_files_only", &mut || {
++            Box::new(rows.iter().filter(|(_, p)| super::shown(p)).map(|(_, p)| p.clone()).collect::<BTreeSet<String>>())
++        });
++        println!(
++            "ME5 shared_total_excl_resolver_struct={} (+ resolver_struct {r} unchanged; explorer folders counted in head explorer_files_folders)",
++            shared + spaths + sfiles + svec
++        );
++    }
++}
+diff --git a/crates/editor/src/image_cache.rs b/crates/editor/src/image_cache.rs
+index 185dc3de..a3156094 100644
+--- a/crates/editor/src/image_cache.rs
++++ b/crates/editor/src/image_cache.rs
+@@ -179,6 +179,9 @@ pub struct ImageCache {
+     /// image tab shows it; a Reading embed does not reload it). Forgotten when the file
+     /// changes ([`Self::forget_dims_of`]) or a load of the key succeeds.
+     failed: HashMap<String, String>,
++    /// Spike (memory-followups WP-0, `CV_ME_HIDE=b`): unpinned entries stay, evicted LRU under
++    /// the budget.
++    me_keep: bool,
+ }
+ 
+ impl Default for ImageCache {
+@@ -208,6 +211,7 @@ impl ImageCache {
+             reserved: HashMap::new(),
+             dims: HashMap::new(),
+             failed: HashMap::new(),
++            me_keep: crate::me::knob("CV_ME_HIDE").as_deref() == Some("b"),
+         }
+     }
+ 
+@@ -334,6 +338,9 @@ impl ImageCache {
+         }
+         let waiting = self.pending.entry(key.to_owned()).or_default();
+         let start = waiting.is_empty();
++        if start {
++            crate::me::log("load_start", format_args!("k={:x}", crate::me::h(key)));
++        }
+         waiting.insert(owner.to_owned());
+         start
+     }
+@@ -353,7 +360,9 @@ impl ImageCache {
+             }
+             None => false,
+         };
+-        if release {
++        if release && self.me_keep {
++            self.evict("");
++        } else if release {
+             self.remove(key);
+         }
+     }
+@@ -404,6 +413,10 @@ impl ImageCache {
+                 e.owners.is_empty().then(|| k.clone())
+             })
+             .collect();
++        if self.me_keep {
++            self.evict("");
++            return;
++        }
+         for k in drop {
+             self.remove(&k);
+         }
+@@ -414,6 +427,16 @@ impl ImageCache {
+     pub fn loaded(&mut self, key: &str, decoded: Option<Decoded>) -> bool {
+         crate::memory::touch();
+         let owners = self.pending.remove(key).unwrap_or_default();
++        crate::me::log(
++            "loaded",
++            format_args!(
++                "k={:x} ok={} waiters={} bytes={}",
++                crate::me::h(key),
++                decoded.is_some(),
++                owners.len(),
++                decoded.as_ref().map_or(0, |d| d.bytes)
++            ),
++        );
+         // The reservation becomes the resident entry's bytes (or goes with a failed load).
+         let pdf = self.reserved.remove(key).is_some();
+         let Some(d) = decoded else { return false };
+@@ -478,15 +501,22 @@ pub fn decode_width(display: f32) -> u32 {
+ 
+ /// Decodes `bytes`, downscaled to at most `max_width` (aspect kept), into an RGBA handle.
+ pub fn decode(bytes: &[u8], max_width: u32) -> Result<Decoded, DecodeError> {
++    let bytes_in = bytes.len();
++    let t0 = crate::me::ms();
+     let img = image::load_from_memory(bytes)?;
++    let (sw, sh, sc) = (img.width(), img.height(), img.color().bytes_per_pixel());
+     let img = if img.width() > max_width {
+         let h =
+             (u64::from(img.height()) * u64::from(max_width) / u64::from(img.width().max(1))).max(1);
++        if crate::me::knob("CV_ME_DECODE").as_deref() == Some("thumb") {
++            img.thumbnail(max_width, u32::try_from(h).unwrap_or(u32::MAX))
++        } else {
+         img.resize(
+             max_width,
+             u32::try_from(h).unwrap_or(u32::MAX),
+             image::imageops::FilterType::Triangle,
+         )
++        }
+     } else {
+         img
+     };
+@@ -494,6 +524,14 @@ pub fn decode(bytes: &[u8], max_width: u32) -> Result<Decoded, DecodeError> {
+     let (width, height) = rgba.dimensions();
+     let raw = rgba.into_raw();
+     let bytes = raw.len();
++    crate::me::log(
++        "decode",
++        format_args!(
++            "src={sw}x{sh}x{sc} out={width}x{height} file={} ms={:.1}",
++            bytes_in,
++            crate::me::ms() - t0
++        ),
++    );
+     Ok(Decoded {
+         handle: Handle::from_rgba(width, height, raw),
+         width,
+@@ -513,10 +551,12 @@ pub fn load_task<M: Send + 'static>(
+     Task::perform(
+         async move {
+             match tokio::task::spawn_blocking(move || {
++                me_gate(move || {
+                 let (bytes, _) = daemon
+                     .read_file(&k)
+                     .map_err(|e| DecodeError::Read(e.to_string()))?;
+                 decode(&bytes, width)
++                })
+             })
+             .await
+             {
+@@ -527,3 +567,85 @@ pub fn load_task<M: Send + 'static>(
+         move |r| done(key.clone(), r),
+     )
+ }
++
++impl ImageCache {
++    /// Spike (memory-followups WP-0): `(entries, used, pinned_entries, pinned_bytes, pending,
++    /// dims_n, dims_bytes, failed_n, failed_bytes)`; dims bytes = placeholder RGBA + key.
++    pub fn me_stats(&self) -> [usize; 9] {
++        let pinned: Vec<&Entry> = self.entries.values().filter(|e| !e.owners.is_empty()).collect();
++        let dims_bytes: usize = self
++            .dims
++            .iter()
++            .map(|(k, d)| {
++                let (pw, ph) = placeholder_size(d.width, d.height);
++                k.capacity() + (pw as usize) * (ph as usize) * 4 + 64
++            })
++            .sum();
++        let failed_bytes: usize = self.failed.iter().map(|(k, v)| k.capacity() + v.capacity() + 48).sum();
++        [
++            self.entries.len(),
++            self.used,
++            pinned.len(),
++            pinned.iter().map(|e| e.bytes).sum(),
++            self.pending.len(),
++            self.dims.len(),
++            dims_bytes,
++            self.failed.len(),
++            failed_bytes,
++        ]
++    }
++}
++
++impl ImageCache {
++    /// Spike (memory-followups WP-0, `CV_ME_HIDE`): drops exactly the owners in `hidden` from
++    /// every entry and pending load; unpinned entries go at once (`a`) or stay for LRU (`b`).
++    pub fn me_release_exact(&mut self, hidden: &HashSet<String>) {
++        if hidden.is_empty() {
++            return;
++        }
++        for (k, w) in &mut self.pending {
++            w.retain(|o| !hidden.contains(o));
++            if w.is_empty() {
++                self.reserved.remove(k);
++            }
++        }
++        let mut freed = Vec::new();
++        for (k, e) in &mut self.entries {
++            let n = e.owners.len();
++            e.owners.retain(|o| !hidden.contains(o));
++            if n > 0 && e.owners.is_empty() {
++                freed.push(k.clone());
++            }
++        }
++        if freed.is_empty() {
++            return;
++        }
++        if self.me_keep {
++            self.evict("");
++        } else {
++            for k in freed {
++                self.remove(&k);
++            }
++        }
++    }
++}
++
++/// Spike (memory-followups WP-0, `CV_ME_DECODE_CAP=n`): a counting gate over blocking decodes.
++static ME_GATE: (std::sync::Mutex<usize>, std::sync::Condvar) =
++    (std::sync::Mutex::new(0), std::sync::Condvar::new());
++
++fn me_gate<T>(f: impl FnOnce() -> T) -> T {
++    let cap = crate::me::knob("CV_ME_DECODE_CAP").and_then(|v| v.parse::<usize>().ok());
++    let Some(cap) = cap else { return f() };
++    {
++        let mut n = ME_GATE.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        while *n >= cap {
++            n = ME_GATE.1.wait(n).unwrap_or_else(std::sync::PoisonError::into_inner);
++        }
++        *n += 1;
++    }
++    let r = f();
++    *ME_GATE.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
++    ME_GATE.1.notify_one();
++    r
++}
+diff --git a/crates/editor/src/lib.rs b/crates/editor/src/lib.rs
+index e58eb13e..dc2971e1 100644
+--- a/crates/editor/src/lib.rs
++++ b/crates/editor/src/lib.rs
+@@ -17,6 +17,7 @@ pub mod icons;
+ pub mod image_cache;
+ pub mod link_ta;
+ pub mod log;
++pub mod me;
+ pub mod memory;
+ pub mod message;
+ pub mod nav;
+diff --git a/crates/editor/src/reading/mod.rs b/crates/editor/src/reading/mod.rs
+index c8a66fe2..82e3e90b 100644
+--- a/crates/editor/src/reading/mod.rs
++++ b/crates/editor/src/reading/mod.rs
+@@ -187,6 +187,9 @@ pub struct ReadingStore {
+     anchor: f32,
+     /// `editor.toml` `[property_types]` (set by `App::apply_prefs`; review E6).
+     pub(crate) property_types: editor_model::props::PropTypes,
++    /// Spike (memory-followups WP-0, `CV_ME_READING`): paths shown in a Reading pane after the
++    /// last update.
++    pub me_visible: Option<HashSet<String>>,
+ }
+ 
+ /// The widget id of `path`'s breadcrumb filename input (blur polling).
+@@ -365,6 +368,8 @@ impl ReadingStore {
+         if let Some(d) = daemon {
+             self.resolver.refresh(d.as_ref());
+         }
++        let me_m0 = crate::me::on().then(crate::me::in_use);
++        let me_t0 = crate::me::ms();
+         let generation = daemon.and_then(|d| d.index().generation());
+         let mut model = render::lower_with(
+             &doc.text(),
+@@ -430,7 +435,7 @@ impl ReadingStore {
+         // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
+         entry.clear_selections();
+         entry.seen_seq = Some(seq);
+-        entry.doc = Some(Doc {
++        let me_new = Doc {
+             seq,
+             epoch,
+             generation,
+@@ -441,7 +446,21 @@ impl ReadingStore {
+             pdf_pages,
+             runs,
+             unresolved,
+-        });
++        };
++        if let Some(m0) = me_m0 {
++            crate::me::log(
++                "doc",
++                format_args!(
++                    "k={:x} bytes={} len={} images={} ms={:.1}",
++                    crate::me::h(doc.path()),
++                    crate::me::in_use().saturating_sub(m0),
++                    doc.text().len(),
++                    me_new.images.len(),
++                    crate::me::ms() - me_t0
++                ),
++            );
++        }
++        entry.doc = Some(me_new);
+     }
+ 
+     /// Debounce: re-render `od` once its `edit_seq` held still for a tick (or the index moved).
+@@ -452,6 +471,11 @@ impl ReadingStore {
+         if !entry.mode.shows_reading() {
+             return;
+         }
++        if matches!(crate::me::knob("CV_ME_READING").as_deref(), Some("skip" | "drop"))
++            && self.me_visible.as_ref().is_some_and(|v| !v.contains(doc.path()))
++        {
++            return;
++        }
+         let seq = doc.edit_seq();
+         let resolver_epoch = self.resolver.epoch();
+         let stale = match &entry.doc {
+@@ -655,9 +679,20 @@ fn update_store(
+             }
+         }
+         ReadingMsg::Tick => {
++            let (me_r0, me_t0) = (store.recomputes, crate::me::ms());
+             for od in docs.values_mut() {
+                 store.tick(od, daemon);
+             }
++            if store.recomputes > me_r0 {
++                crate::me::log(
++                    "tick",
++                    format_args!(
++                        "relowered={} ms={:.1}",
++                        store.recomputes - me_r0,
++                        crate::me::ms() - me_t0
++                    ),
++                );
++            }
+             // Blur poll: a pending filename edit whose input lost focus is submitted.
+             let polls: Vec<Task<Message>> = docs
+                 .iter()
+@@ -831,3 +866,17 @@ mod link_menu_tests;
+ mod selection_tests;
+ #[cfg(test)]
+ pub(crate) mod tests;
++
++impl ReadingStore {
++    /// Spike (memory-followups WP-0, `CV_ME_READING=drop`): drops the render model of every
++    /// document not in `visible` (the next tick re-lowers it once it is shown again).
++    pub fn me_drop_hidden(&mut self, docs: &mut Docs, visible: &HashSet<String>) {
++        for od in docs.values_mut() {
++            if od.reading.doc.is_some() && !visible.contains(od.buffer.path()) {
++                od.reading.doc = None;
++                od.reading.seen_seq = None;
++                crate::me::log("drop_model", format_args!("k={:x}", crate::me::h(od.buffer.path())));
++            }
++        }
++    }
++}
+diff --git a/crates/editor/src/reading/resolver.rs b/crates/editor/src/reading/resolver.rs
+index cfbeceb5..30aa0ba4 100644
+--- a/crates/editor/src/reading/resolver.rs
++++ b/crates/editor/src/reading/resolver.rs
+@@ -80,6 +80,7 @@ impl ResolverCache {
+             return;
+         }
+         let t0 = std::time::Instant::now();
++        let me_m0 = crate::me::on().then(crate::me::in_use);
+         // One scan (editor-usability-round WP-5): the old per-folder walk was quadratic over
+         // folders (docs/spikes/panels-lag/FINDINGS.md).
+         match d.index().with_query(|q| q.file_paths()) {
+@@ -101,6 +102,17 @@ impl ResolverCache {
+                     paths,
+                 });
+                 g.version += 1;
++                if let Some(m0) = me_m0 {
++                    crate::me::log(
++                        "resolver",
++                        format_args!(
++                            "rows={} bytes={} ms={:.1}",
++                            g.built.as_ref().map_or(0, |b| b.paths.len()),
++                            crate::me::in_use() as i64 - m0 as i64,
++                            t0.elapsed().as_secs_f64() * 1e3
++                        ),
++                    );
++                }
+             }
+             Err(e) => tracing::warn!(error = %e, "resolver rebuild failed"),
+         }
+diff --git a/crates/editor/src/me.rs b/crates/editor/src/me.rs
+new file mode 100644
+index 00000000..4c20197d
+--- /dev/null
++++ b/crates/editor/src/me.rs
+@@ -0,0 +1,37 @@
++//! Spike instrumentation (memory-followups WP-0; never shipped). Every line is
++//! `CVME <ms since start> <kind> k=v ...` on stderr, only when `CV_ME_PROBE` is set.
++
++use std::sync::OnceLock;
++use std::time::Instant;
++
++static START: OnceLock<Instant> = OnceLock::new();
++static ON: OnceLock<bool> = OnceLock::new();
++
++pub fn on() -> bool {
++    *ON.get_or_init(|| std::env::var_os("CV_ME_PROBE").is_some())
++}
++
++pub fn ms() -> f64 {
++    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1e3
++}
++
++pub fn knob(name: &str) -> Option<String> {
++    std::env::var(name).ok().filter(|v| !v.is_empty())
++}
++
++pub fn in_use() -> u64 {
++    cv_malloc::info().in_use
++}
++
++pub fn log(kind: &str, fields: std::fmt::Arguments<'_>) {
++    if on() {
++        eprintln!("CVME {:.1} {kind} {fields}", ms());
++    }
++}
++
++/// FNV-1a of a key, so logs carry no paths.
++pub fn h(s: &str) -> u64 {
++    s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |a, b| {
++        (a ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
++    })
++}

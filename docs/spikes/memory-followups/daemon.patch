@@ -1,0 +1,661 @@
+diff --git a/crates/cv/src/search_query.rs b/crates/cv/src/search_query.rs
+index 0ca95ad0..62f9b7f8 100644
+--- a/crates/cv/src/search_query.rs
++++ b/crates/cv/src/search_query.rs
+@@ -35,7 +35,13 @@ pub async fn search(
+         });
+     }
+     let limit = params.limit.clamp(1, MAX_LIMIT) as usize;
+-    let shared = db.shared().map_err(|e| e.to_string())?;
++    // PROTOTYPE (item 1): `CVP_OPEN_BLOCKING` opens the shared index under `block_in_place` (the
++    // worker hands its other tasks off while the ~0.4 s open runs).
++    let shared = if std::env::var_os("CVP_OPEN_BLOCKING").is_some() && !db.is_open() {
++        tokio::task::block_in_place(|| db.shared()).map_err(|e| e.to_string())?
++    } else {
++        db.shared().map_err(|e| e.to_string())?
++    };
+ 
+     let probe = std::sync::Arc::clone(&shared);
+     let space = tokio::task::spawn_blocking(move || {
+diff --git a/crates/views/src/db.rs b/crates/views/src/db.rs
+index ae000eb4..fa8817e7 100644
+--- a/crates/views/src/db.rs
++++ b/crates/views/src/db.rs
+@@ -49,9 +49,10 @@ fn file_row(r: &Row<'_>) -> rusqlite::Result<FileInfo> {
+ 
+ type Cache<K, V> = RefCell<HashMap<K, V>>;
+ 
+-/// The per-run data source.
+-pub struct Db<'c> {
+-    conn: &'c Connection,
++/// The caches a `Db` reads through. PROTOTYPE (item 3): kept across runs by the view host while
++/// the index generation and the connection's `PRAGMA data_version` are unchanged.
++#[derive(Default)]
++pub struct Caches {
+     by_path: Cache<String, Option<Arc<FileInfo>>>,
+     props: Cache<i64, Arc<BTreeMap<String, Value>>>,
+     tags: Cache<i64, Arc<Vec<String>>>,
+@@ -59,19 +60,67 @@ pub struct Db<'c> {
+     backlinks: Cache<i64, Arc<Vec<Value>>>,
+     tasks: Cache<i64, Arc<Vec<TaskInfo>>>,
+     folders: Cache<String, Arc<Vec<Value>>>,
++    /// Files whose `props` entry is projected to this key set (absent = every key loaded).
++    props_cover: Cache<i64, BTreeSet<String>>,
++    /// Candidate lists by (sql, debug-printed args); only used when shared across runs.
++    cands: Cache<(String, String), Vec<Arc<FileInfo>>>,
++}
++
++enum CachesRef<'c> {
++    Owned(Box<Caches>),
++    Shared(&'c Caches),
++}
++
++impl std::ops::Deref for CachesRef<'_> {
++    type Target = Caches;
++    fn deref(&self) -> &Caches {
++        match self {
++            Self::Owned(c) => c,
++            Self::Shared(c) => c,
++        }
++    }
++}
++
++/// The per-run data source.
++pub struct Db<'c> {
++    conn: &'c Connection,
++    c: CachesRef<'c>,
++    /// The key set this run's preload projected to (`None` = no projected preload this run).
++    run_keys: RefCell<Option<BTreeSet<String>>>,
+ }
+ 
+ impl<'c> Db<'c> {
+     pub fn new(conn: &'c Connection) -> Self {
+         Self {
+             conn,
+-            by_path: RefCell::default(),
+-            props: RefCell::default(),
+-            tags: RefCell::default(),
+-            links: RefCell::default(),
+-            backlinks: RefCell::default(),
+-            tasks: RefCell::default(),
+-            folders: RefCell::default(),
++            c: CachesRef::Owned(Box::default()),
++            run_keys: RefCell::default(),
++        }
++    }
++
++    /// A run over caches kept by the caller (valid for one generation + `data_version` only).
++    pub fn with_caches(conn: &'c Connection, c: &'c Caches) -> Self {
++        Self {
++            conn,
++            c: CachesRef::Shared(c),
++            run_keys: RefCell::default(),
++        }
++    }
++
++    fn shared(&self) -> bool {
++        matches!(self.c, CachesRef::Shared(_))
++    }
++
++    /// Whether `id`'s cached props answer this run: every key loaded, or the projection
++    /// covers this run's preload key set.
++    fn props_answer(&self, id: i64) -> bool {
++        match self.c.props_cover.borrow().get(&id) {
++            None => true,
++            Some(cover) => self
++                .run_keys
++                .borrow()
++                .as_ref()
++                .is_some_and(|k| k.is_subset(cover)),
+         }
+     }
+ 
+@@ -83,15 +132,24 @@ impl<'c> Db<'c> {
+     ) -> rusqlite::Result<Vec<Arc<FileInfo>>> {
+         let sql =
+             format!("SELECT {COLS} FROM files f WHERE f.is_md = 1{where_sql} ORDER BY f.path");
++        let key = self.shared().then(|| (sql.clone(), format!("{args:?}")));
++        if let Some(k) = &key
++            && let Some(v) = self.c.cands.borrow().get(k)
++        {
++            return Ok(v.clone());
++        }
+         let mut stmt = self.conn.prepare_cached(&sql)?;
+         let rows = stmt.query_map(params_from_iter(args.iter()), file_row)?;
+         let out: Vec<Arc<FileInfo>> = rows
+             .map(|r| r.map(Arc::new))
+             .collect::<rusqlite::Result<_>>()?;
+-        let mut cache = self.by_path.borrow_mut();
++        let mut cache = self.c.by_path.borrow_mut();
+         for f in &out {
+             cache.insert(f.path.clone(), Some(Arc::clone(f)));
+         }
++        if let Some(k) = key {
++            self.c.cands.borrow_mut().insert(k, out.clone());
++        }
+         Ok(out)
+     }
+ 
+@@ -104,6 +162,10 @@ impl<'c> Db<'c> {
+         files: &[Arc<FileInfo>],
+         keys: Option<&BTreeSet<String>>,
+     ) -> rusqlite::Result<()> {
++        *self.run_keys.borrow_mut() = keys.cloned();
++        if self.shared() {
++            return self.preload_shared(files, keys);
++        }
+         let ids: HashSet<i64> = files.iter().map(|f| f.id).collect();
+         let mut props: HashMap<i64, BTreeMap<String, Value>> = HashMap::new();
+         let sql = match keys {
+@@ -118,11 +180,13 @@ impl<'c> Db<'c> {
+         while let Some(r) = rows.next()? {
+             let id: i64 = r.get(0)?;
+             if ids.contains(&id) {
+-                let v: String = r.get(2)?;
+-                props
+-                    .entry(id)
+-                    .or_default()
+-                    .insert(r.get(1)?, json_value(&v));
++                let v = if crate::proto::direct() {
++                    json_value(r.get_ref(2)?.as_str()?)
++                } else {
++                    let v: String = r.get(2)?;
++                    json_value(&v)
++                };
++                props.entry(id).or_default().insert(r.get(1)?, v);
+             }
+         }
+         let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
+@@ -138,11 +202,119 @@ impl<'c> Db<'c> {
+                 }
+             }
+         }
+-        let mut pc = self.props.borrow_mut();
+-        let mut tc = self.tags.borrow_mut();
++        let mut pc = self.c.props.borrow_mut();
++        let mut tc = self.c.tags.borrow_mut();
++        let mut cover = self.c.props_cover.borrow_mut();
+         for id in ids {
+             pc.insert(id, Arc::new(props.remove(&id).unwrap_or_default()));
+             tc.insert(id, Arc::new(tags.remove(&id).unwrap_or_default()));
++            match keys {
++                Some(k) => cover.insert(id, k.clone()),
++                None => cover.remove(&id),
++            };
++        }
++        Ok(())
++    }
++
++    /// PROTOTYPE (item 3) `preload` over caches kept across runs: loads props only for files
++    /// whose cached entry does not already answer `keys` (merging the newly loaded keys into a
++    /// projected entry), and tags only for files without a tags entry; skips each table scan when
++    /// nothing is missing.
++    fn preload_shared(
++        &self,
++        files: &[Arc<FileInfo>],
++        keys: Option<&BTreeSet<String>>,
++    ) -> rusqlite::Result<()> {
++        let need: HashSet<i64> = {
++            let pc = self.c.props.borrow();
++            let cover = self.c.props_cover.borrow();
++            files
++                .iter()
++                .map(|f| f.id)
++                .filter(|id| {
++                    !pc.contains_key(id)
++                        || cover
++                            .get(id)
++                            .is_some_and(|c| keys.is_none_or(|k| !k.is_subset(c)))
++                })
++                .collect()
++        };
++        if !need.is_empty() {
++            let mut props: HashMap<i64, BTreeMap<String, Value>> = HashMap::new();
++            let sql = match keys {
++                None => "SELECT file_id, key, value FROM props".to_string(),
++                Some(k) => format!(
++                    "SELECT file_id, key, value FROM props WHERE key IN ({})",
++                    vec!["?"; k.len()].join(",")
++                ),
++            };
++            let mut stmt = self.conn.prepare_cached(&sql)?;
++            let mut rows = stmt.query(params_from_iter(keys.into_iter().flatten()))?;
++            while let Some(r) = rows.next()? {
++                let id: i64 = r.get(0)?;
++                if need.contains(&id) {
++                    let v = if crate::proto::direct() {
++                        json_value(r.get_ref(2)?.as_str()?)
++                    } else {
++                        let v: String = r.get(2)?;
++                        json_value(&v)
++                    };
++                    props.entry(id).or_default().insert(r.get(1)?, v);
++                }
++            }
++            let mut pc = self.c.props.borrow_mut();
++            let mut cover = self.c.props_cover.borrow_mut();
++            for id in need {
++                let loaded = props.remove(&id).unwrap_or_default();
++                match keys {
++                    None => {
++                        pc.insert(id, Arc::new(loaded));
++                        cover.remove(&id);
++                    }
++                    Some(k) => {
++                        // A projected entry gains the new keys; a missing one starts at `k`.
++                        let (mut map, mut c) = match (pc.get(&id), cover.get(&id)) {
++                            (Some(m), Some(c)) => ((**m).clone(), c.clone()),
++                            _ => (BTreeMap::new(), BTreeSet::new()),
++                        };
++                        for key in k {
++                            map.remove(key);
++                        }
++                        map.extend(loaded);
++                        c.extend(k.iter().cloned());
++                        pc.insert(id, Arc::new(map));
++                        cover.insert(id, c);
++                    }
++                }
++            }
++        }
++        let need: HashSet<i64> = {
++            let tc = self.c.tags.borrow();
++            files
++                .iter()
++                .map(|f| f.id)
++                .filter(|id| !tc.contains_key(id))
++                .collect()
++        };
++        if need.is_empty() {
++            return Ok(());
++        }
++        let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
++        let mut stmt = self.conn.prepare_cached("SELECT file_id, tag FROM tags")?;
++        let mut rows = stmt.query([])?;
++        while let Some(r) = rows.next()? {
++            let id: i64 = r.get(0)?;
++            if need.contains(&id) {
++                let t: String = r.get(1)?;
++                let v = tags.entry(id).or_default();
++                if !v.contains(&t) {
++                    v.push(t);
++                }
++            }
++        }
++        let mut tc = self.c.tags.borrow_mut();
++        for id in need {
++            tc.insert(id, Arc::new(tags.remove(&id).unwrap_or_default()));
+         }
+         Ok(())
+     }
+@@ -150,12 +322,12 @@ impl<'c> Db<'c> {
+     /// The cached props map of file `id`, if loaded (tests inspect the preload projection).
+     #[cfg(test)]
+     pub(crate) fn cached_props(&self, id: i64) -> Option<Arc<BTreeMap<String, Value>>> {
+-        self.props.borrow().get(&id).cloned()
++        self.c.props.borrow().get(&id).cloned()
+     }
+ 
+     /// The file at vault path `path` (any extension), if indexed.
+     pub fn file(&self, path: &str) -> rusqlite::Result<Option<Arc<FileInfo>>> {
+-        if let Some(f) = self.by_path.borrow().get(path) {
++        if let Some(f) = self.c.by_path.borrow().get(path) {
+             return Ok(f.clone());
+         }
+         let f = self
+@@ -164,7 +336,7 @@ impl<'c> Db<'c> {
+             .query_row([path], file_row)
+             .optional()?
+             .map(Arc::new);
+-        self.by_path
++        self.c.by_path
+             .borrow_mut()
+             .insert(path.to_string(), f.clone());
+         Ok(f)
+@@ -172,7 +344,9 @@ impl<'c> Db<'c> {
+ 
+     /// Frontmatter of `f`.
+     pub fn props(&self, f: &FileInfo) -> rusqlite::Result<Arc<BTreeMap<String, Value>>> {
+-        if let Some(p) = self.props.borrow().get(&f.id) {
++        if let Some(p) = self.c.props.borrow().get(&f.id)
++            && self.props_answer(f.id)
++        {
+             return Ok(Arc::clone(p));
+         }
+         let mut stmt = self
+@@ -184,13 +358,14 @@ impl<'c> Db<'c> {
+         })?;
+         let map: BTreeMap<String, Value> = rows.collect::<rusqlite::Result<_>>()?;
+         let map = Arc::new(map);
+-        self.props.borrow_mut().insert(f.id, Arc::clone(&map));
++        self.c.props.borrow_mut().insert(f.id, Arc::clone(&map));
++        self.c.props_cover.borrow_mut().remove(&f.id);
+         Ok(map)
+     }
+ 
+     /// Distinct tags of `f` (frontmatter + inline), without `#`.
+     pub fn tags(&self, f: &FileInfo) -> rusqlite::Result<Arc<Vec<String>>> {
+-        if let Some(p) = self.tags.borrow().get(&f.id) {
++        if let Some(p) = self.c.tags.borrow().get(&f.id) {
+             return Ok(Arc::clone(p));
+         }
+         let mut stmt = self
+@@ -200,13 +375,13 @@ impl<'c> Db<'c> {
+             .query_map([f.id], |r| r.get(0))?
+             .collect::<rusqlite::Result<_>>()?;
+         let v = Arc::new(v);
+-        self.tags.borrow_mut().insert(f.id, Arc::clone(&v));
++        self.c.tags.borrow_mut().insert(f.id, Arc::clone(&v));
+         Ok(v)
+     }
+ 
+     /// Outgoing internal links of `f` as link values (resolved path when resolved).
+     pub fn links(&self, f: &FileInfo) -> rusqlite::Result<Arc<Vec<Value>>> {
+-        if let Some(p) = self.links.borrow().get(&f.id) {
++        if let Some(p) = self.c.links.borrow().get(&f.id) {
+             return Ok(Arc::clone(p));
+         }
+         let mut stmt = self.conn.prepare_cached(
+@@ -223,13 +398,13 @@ impl<'c> Db<'c> {
+             })?
+             .collect::<rusqlite::Result<_>>()?;
+         let v = Arc::new(v);
+-        self.links.borrow_mut().insert(f.id, Arc::clone(&v));
++        self.c.links.borrow_mut().insert(f.id, Arc::clone(&v));
+         Ok(v)
+     }
+ 
+     /// Distinct files linking to `f`, as links.
+     pub fn backlinks(&self, f: &FileInfo) -> rusqlite::Result<Arc<Vec<Value>>> {
+-        if let Some(p) = self.backlinks.borrow().get(&f.id) {
++        if let Some(p) = self.c.backlinks.borrow().get(&f.id) {
+             return Ok(Arc::clone(p));
+         }
+         let mut stmt = self.conn.prepare_cached(
+@@ -244,13 +419,13 @@ impl<'c> Db<'c> {
+             })?
+             .collect::<rusqlite::Result<_>>()?;
+         let v = Arc::new(v);
+-        self.backlinks.borrow_mut().insert(f.id, Arc::clone(&v));
++        self.c.backlinks.borrow_mut().insert(f.id, Arc::clone(&v));
+         Ok(v)
+     }
+ 
+     /// Tasks of `f` in line order.
+     pub fn tasks(&self, f: &FileInfo) -> rusqlite::Result<Arc<Vec<TaskInfo>>> {
+-        if let Some(p) = self.tasks.borrow().get(&f.id) {
++        if let Some(p) = self.c.tasks.borrow().get(&f.id) {
+             return Ok(Arc::clone(p));
+         }
+         let mut stmt = self.conn.prepare_cached(
+@@ -267,14 +442,14 @@ impl<'c> Db<'c> {
+             })?
+             .collect::<rusqlite::Result<_>>()?;
+         let v = Arc::new(v);
+-        self.tasks.borrow_mut().insert(f.id, Arc::clone(&v));
++        self.c.tasks.borrow_mut().insert(f.id, Arc::clone(&v));
+         Ok(v)
+     }
+ 
+     /// Markdown files in `folder` or below it, by path, as file handles (`files(folder)`).
+     pub fn folder_files(&self, folder: &str) -> rusqlite::Result<Arc<Vec<Value>>> {
+         let folder = folder.trim_matches('/').to_string();
+-        if let Some(p) = self.folders.borrow().get(&folder) {
++        if let Some(p) = self.c.folders.borrow().get(&folder) {
+             return Ok(Arc::clone(p));
+         }
+         let files = if folder.is_empty() {
+@@ -289,12 +464,15 @@ impl<'c> Db<'c> {
+             )?
+         };
+         let v = Arc::new(files.into_iter().map(Value::File).collect::<Vec<_>>());
+-        self.folders.borrow_mut().insert(folder, Arc::clone(&v));
++        self.c.folders.borrow_mut().insert(folder, Arc::clone(&v));
+         Ok(v)
+     }
+ }
+ 
+ fn json_value(text: &str) -> Value {
++    if crate::proto::direct() {
++        return crate::value::from_json_text(text).unwrap_or_else(|| Value::Str(text.to_string()));
++    }
+     serde_json::from_str::<serde_json::Value>(text)
+         .map_or_else(|_| Value::Str(text.to_string()), |j| Value::from_json(&j))
+ }
+diff --git a/crates/views/src/lib.rs b/crates/views/src/lib.rs
+index 73e96a0b..e130c8a3 100644
+--- a/crates/views/src/lib.rs
++++ b/crates/views/src/lib.rs
+@@ -14,6 +14,7 @@ pub mod expr;
+ pub mod result;
+ pub mod service;
+ pub mod settings;
++pub mod proto;
+ pub mod value;
+ 
+ pub use def::{SumFn, norm as canonical_property_id};
+diff --git a/crates/views/src/proto.rs b/crates/views/src/proto.rs
+new file mode 100644
+index 00000000..1220643e
+--- /dev/null
++++ b/crates/views/src/proto.rs
+@@ -0,0 +1,20 @@
++//! PROTOTYPE knobs (memory-followups WP-1), read once from the environment.
++#![allow(missing_docs)]
++
++use std::sync::OnceLock;
++
++fn flag(cell: &'static OnceLock<bool>, key: &str) -> bool {
++    *cell.get_or_init(|| std::env::var_os(key).is_some())
++}
++
++/// `CVP_DIRECT`: property values decode straight into `views::Value` (item 2).
++pub fn direct() -> bool {
++    static C: OnceLock<bool> = OnceLock::new();
++    flag(&C, "CVP_DIRECT")
++}
++
++/// `CVP_REUSE`: the view host keeps one `Db` cache set across runs (item 3).
++pub fn reuse() -> bool {
++    static C: OnceLock<bool> = OnceLock::new();
++    flag(&C, "CVP_REUSE")
++}
+diff --git a/crates/views/src/service.rs b/crates/views/src/service.rs
+index 9b723573..240e68a9 100644
+--- a/crates/views/src/service.rs
++++ b/crates/views/src/service.rs
+@@ -59,6 +59,8 @@ pub struct ViewHost {
+     bases: Vec<Base>,
+     load_notices: Vec<String>,
+     conn: Option<(u64, Connection)>,
++    /// PROTOTYPE (item 3): `Db` caches kept across runs, keyed by (generation, `PRAGMA data_version`).
++    kept: Option<(u64, i64, crate::db::Caches)>,
+     state_db: Option<PathBuf>,
+     state_conn: Option<Connection>,
+     today: Option<NaiveDate>,
+@@ -90,6 +92,7 @@ impl ViewHost {
+             bases,
+             load_notices,
+             conn: None,
++            kept: None,
+             state_db: None,
+             state_conn: None,
+             today: None,
+@@ -274,7 +277,18 @@ impl ViewHost {
+         let Some(view) = base.views.get(vi) else {
+             return Err(ViewsError::UnknownView(view_id.to_string()));
+         };
+-        let db = Db::new(conn);
++        let db = if crate::proto::reuse() {
++            let dv: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
++            if self.kept.as_ref().is_none_or(|(g, d, _)| *g != generation || *d != dv) {
++                self.kept = Some((generation, dv, crate::db::Caches::default()));
++            }
++            match &self.kept {
++                Some((_, _, c)) => Db::with_caches(conn, c),
++                None => Db::new(conn),
++            }
++        } else {
++            Db::new(conn)
++        };
+         let this = match this_path {
+             Some(p) => db.file(p)?,
+             None => None,
+diff --git a/crates/views/src/tests.rs b/crates/views/src/tests.rs
+index 7cdc165d..5f8aff1a 100644
+--- a/crates/views/src/tests.rs
++++ b/crates/views/src/tests.rs
+@@ -704,3 +704,6 @@ mod vectors;
+ 
+ #[path = "tests_reachable.rs"]
+ mod reachable;
++
++#[path = "tests_reuse.rs"]
++mod reuse;
+diff --git a/crates/views/src/tests_reuse.rs b/crates/views/src/tests_reuse.rs
+new file mode 100644
+index 00000000..b36c17b7
+--- /dev/null
++++ b/crates/views/src/tests_reuse.rs
+@@ -0,0 +1,60 @@
++//! PROTOTYPE (memory-followups WP-1, item 3): kept `Db` caches answer like a fresh host, before
++//! and after an incremental index write within one generation. Run with `CVP_REUSE=1`.
++
++use super::*;
++
++const VIEWS: &str = r##"
++[[views]]
++type = "table"
++name = "K"
++order = ["file.name", "note.k"]
++
++[[views]]
++type = "table"
++name = "J"
++filters = 'note.j != "skip"'
++order = ["file.name", "note.j", "note.k"]
++
++[[views]]
++type = "table"
++name = "All"
++order = ["file.name", "file.properties"]
++"##;
++
++#[test]
++fn kept_caches_match_a_fresh_host_across_a_write() {
++    let tmp = tempfile::tempdir().unwrap();
++    let vault = tmp.path().join("vault");
++    std::fs::create_dir_all(vault.join("n")).unwrap();
++    for i in 0..40 {
++        std::fs::write(
++            vault.join("n").join(format!("{i:02}.md")),
++            format!("---\nk: v{i}\nj: w{i}\nz: {i}\n---\nbody\n"),
++        )
++        .unwrap();
++    }
++    let config = tmp.path().join("config");
++    std::fs::create_dir_all(config.join("views")).unwrap();
++    std::fs::write(config.join("views").join("t.toml"), VIEWS).unwrap();
++    let base = tmp.path().join("idx").join("index.db");
++    std::fs::create_dir_all(base.parent().unwrap()).unwrap();
++    let mut index = cv_index::Index::create(&vault, &base).unwrap();
++    let g = cv_index::Reader::open_current(&base).unwrap().generation();
++    let ids = ["t#K", "t#J", "t#All", "t#K", "t#J"];
++    let mut kept = ViewHost::new(&config, &base);
++    let check = |kept: &mut ViewHost| {
++        for id in ids {
++            let mut fresh = ViewHost::new(&config, &base);
++            let a = grid(&kept.run(g, &RunRequest::view(id)).unwrap());
++            let b = grid(&fresh.run(g, &RunRequest::view(id)).unwrap());
++            assert_eq!(a, b, "{id}");
++        }
++    };
++    check(&mut kept);
++    index
++        .upsert_file("n/03.md", b"---\nk: changed\nj: skip\n---\nbody\n", 1, 1)
++        .unwrap();
++    check(&mut kept);
++    let after = grid(&kept.run(g, &RunRequest::view("t#K")).unwrap());
++    assert!(after.iter().any(|r| r.iter().any(|c| c == "changed")));
++}
+diff --git a/crates/views/src/value.rs b/crates/views/src/value.rs
+index b5ff6188..ec531c9e 100644
+--- a/crates/views/src/value.rs
++++ b/crates/views/src/value.rs
+@@ -324,3 +324,76 @@ mod tests {
+         );
+     }
+ }
++
++/// PROTOTYPE (memory-followups WP-1, item 2): decodes a property's JSON text straight into a
++/// [`Value`], with the same result as `Value::from_json(&serde_json::from_str(text)?)`: numbers
++/// become `f64` (`as_f64`), strings go through [`parse_date`], objects are key-sorted maps (last
++/// duplicate wins, as `serde_json::Map`). `None` when the text is not one JSON value.
++pub(crate) fn from_json_text(text: &str) -> Option<Value> {
++    serde_json::from_str::<Direct>(text).ok().map(|d| d.0)
++}
++
++struct Direct(Value);
++
++impl<'de> serde::Deserialize<'de> for Direct {
++    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
++        d.deserialize_any(DirectVisitor).map(Direct)
++    }
++}
++
++struct DirectVisitor;
++
++impl<'de> serde::de::Visitor<'de> for DirectVisitor {
++    type Value = Value;
++
++    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("any JSON value")
++    }
++    fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
++        Ok(Value::Bool(v))
++    }
++    #[allow(clippy::cast_precision_loss)]
++    fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
++        Ok(Value::Num(v as f64))
++    }
++    #[allow(clippy::cast_precision_loss)]
++    fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
++        Ok(Value::Num(v as f64))
++    }
++    fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
++        // serde_json's `Number::as_f64` of a parsed float: always `Some` (finite).
++        Ok(Value::Num(v))
++    }
++    fn visit_str<E>(self, s: &str) -> Result<Value, E> {
++        Ok(match parse_date(s) {
++            Some((d, only)) => Value::Date(d, only),
++            None => Value::Str(s.to_owned()),
++        })
++    }
++    fn visit_string<E>(self, s: String) -> Result<Value, E> {
++        Ok(match parse_date(&s) {
++            Some((d, only)) => Value::Date(d, only),
++            None => Value::Str(s),
++        })
++    }
++    fn visit_unit<E>(self) -> Result<Value, E> {
++        Ok(Value::Null)
++    }
++    fn visit_none<E>(self) -> Result<Value, E> {
++        Ok(Value::Null)
++    }
++    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<Value, A::Error> {
++        let mut v = Vec::with_capacity(a.size_hint().unwrap_or(0));
++        while let Some(Direct(x)) = a.next_element()? {
++            v.push(x);
++        }
++        Ok(Value::list(v))
++    }
++    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut a: A) -> Result<Value, A::Error> {
++        let mut m = BTreeMap::new();
++        while let Some((k, Direct(x))) = a.next_entry::<String, Direct>()? {
++            m.insert(k, x);
++        }
++        Ok(Value::Object(Arc::new(m)))
++    }
++}
