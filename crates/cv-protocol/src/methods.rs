@@ -88,4 +88,5 @@ methods! {
     ReconcileIntake = "reconcile_intake" (ReconcileIntakeParams) -> ReconcileIntakeResult;
     BindNote = "bind_note" (BindNoteParams) -> BindNoteResult;
     LocateNote = "locate_note" (LocateNoteParams) -> NoteLocation;
+    ImageDescription = "image_description" (ImageDescriptionParams) -> ImageDescriptionResult;
 }

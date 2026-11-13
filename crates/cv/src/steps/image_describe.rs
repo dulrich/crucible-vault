@@ -310,7 +310,7 @@ fn record(
     }
 }
 
-fn is_image(path: &str) -> bool {
+pub(crate) fn is_image(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, e)| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }

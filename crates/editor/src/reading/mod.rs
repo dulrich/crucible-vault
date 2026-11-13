@@ -187,6 +187,9 @@ pub struct ReadingStore {
     anchor: f32,
     /// `editor.toml` `[property_types]` (set by `App::apply_prefs`; review E6).
     pub(crate) property_types: editor_model::props::PropTypes,
+    /// Plan round-24 WP-3: each vault image's stored description for the session, by image key
+    /// (`None` = requested/pending or none stored; present = never requested again).
+    pub(crate) descriptions: HashMap<String, Option<String>>,
 }
 
 /// The widget id of `path`'s breadcrumb filename input (blur polling).
@@ -506,7 +509,8 @@ impl ReadingStore {
         let Some(d) = daemon else {
             return Task::none();
         };
-        if self.images.show(&image_cache::view_owner(tab, view), key) {
+        let describe = self.describe_task(d, key);
+        let load = if self.images.show(&image_cache::view_owner(tab, view), key) {
             image_cache::load_task(
                 Arc::clone(d),
                 key.to_owned(),
@@ -518,7 +522,38 @@ impl ReadingStore {
             )
         } else {
             Task::none()
+        };
+        Task::batch([describe, load])
+    }
+
+    /// Plan round-24 WP-3: requests vault image `key`'s description once per session, on the
+    /// blocking pool (an error, incl. an old daemon's method-not-found, caches "none").
+    fn describe_task(&mut self, d: &Arc<dyn DaemonClient>, key: &str) -> Task<Message> {
+        if self.descriptions.contains_key(key) {
+            return Task::none();
         }
+        self.descriptions.insert(key.to_owned(), None);
+        let d = Arc::clone(d);
+        let k = key.to_owned();
+        let key = key.to_owned();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || d.image_description(&k))
+                    .await
+                    .ok()
+                    .and_then(|r| {
+                        r.map_err(|e| tracing::debug!(error = %e, "image_description dropped"))
+                            .ok()
+                    })
+                    .flatten()
+            },
+            move |narrative| {
+                Message::Reading(ReadingMsg::ImageDescribed {
+                    key: key.clone(),
+                    narrative,
+                })
+            },
+        )
     }
 }
 
@@ -742,6 +777,9 @@ fn update_store(
             width,
         } => {
             return store.image_shown(docs, &tab, view, &key, width, daemon);
+        }
+        ReadingMsg::ImageDescribed { key, narrative } => {
+            store.descriptions.insert(key, narrative);
         }
         ReadingMsg::ImageHidden { tab, view, key } => {
             store

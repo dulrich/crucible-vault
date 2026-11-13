@@ -28,8 +28,13 @@ pub enum Target {
     /// An explorer row (`folder` = a folder row).
     Row { path: String, folder: bool },
     /// plan editor-round-4 WP-4: a Reading image — `src` is the vault path (resolved key) or,
-    /// when `remote`, the URL.
-    Image { src: String, remote: bool },
+    /// when `remote`, the URL. Plan round-24 WP-3: `alt` is what Copy alt text copies (the
+    /// stored image description, else the non-empty markdown alt); `None` hides the item.
+    Image {
+        src: String,
+        remote: bool,
+        alt: Option<String>,
+    },
     /// Plan round-5 WP-8: a Reading link in note `src` — `target` is the unresolved wiki target
     /// / relative md URL, or (when `external`) the URL. `selection` = the press was inside the
     /// tab's Reading selection (tab id `view`), which adds Copy.
@@ -82,12 +87,17 @@ pub enum Item {
     CopyImagePath,
     /// Plan round-6 WP-4: create the note an unresolved link names.
     CreateNote,
+    /// Plan round-24 WP-3: copy an image's description / markdown alt.
+    CopyAltText,
 }
 
 impl Item {
     /// Plan round-6 WP-3: items the image half of a [`Target::LinkedImage`] owns.
     pub fn is_image_item(self) -> bool {
-        matches!(self, Item::CopyImage | Item::CopyImagePath)
+        matches!(
+            self,
+            Item::CopyImage | Item::CopyImagePath | Item::CopyAltText
+        )
     }
 }
 
@@ -146,11 +156,20 @@ pub fn items(target: &Target) -> Vec<(Item, String)> {
             (Item::Delete, "Delete…"),
         ]),
         // No "Open in new pane" (audit E1): it would load binary bytes into a note buffer.
-        Target::Image { remote: false, .. } => named(&[
-            (Item::CopyImage, "Copy image"),
-            (Item::CopyPath, "Copy path"),
-        ]),
-        Target::Image { remote: true, .. } => named(&[(Item::CopyUrl, "Copy URL")]),
+        Target::Image { remote, alt, .. } => {
+            let mut v = if *remote {
+                named(&[(Item::CopyUrl, "Copy URL")])
+            } else {
+                named(&[
+                    (Item::CopyImage, "Copy image"),
+                    (Item::CopyPath, "Copy path"),
+                ])
+            };
+            if alt.is_some() {
+                v.push((Item::CopyAltText, "Copy alt text".to_owned()));
+            }
+            v
+        }
         Target::Link {
             external,
             selection,
@@ -289,6 +308,7 @@ mod tests {
             image: Box::new(Target::Image {
                 src: "img/a.png".into(),
                 remote: false,
+                alt: None,
             }),
         };
         let got: Vec<(Item, String)> = items(&t);
@@ -304,5 +324,24 @@ mod tests {
             ]
         );
         assert_eq!(got[4].0, Item::CopyImagePath);
+    }
+
+    /// Plan round-24 WP-3: Copy alt text is listed only when there is alt text to copy.
+    #[test]
+    fn copy_alt_text_shown_only_with_alt() {
+        let img = |remote, alt: Option<&str>| Target::Image {
+            src: "img/a.png".into(),
+            remote,
+            alt: alt.map(Into::into),
+        };
+        let has = |t: &Target| {
+            items(t)
+                .iter()
+                .any(|(i, l)| *i == Item::CopyAltText && l == "Copy alt text")
+        };
+        assert!(has(&img(false, Some("a cat"))));
+        assert!(has(&img(true, Some("a cat"))));
+        assert!(!has(&img(false, None)));
+        assert!(!has(&img(true, None)));
     }
 }

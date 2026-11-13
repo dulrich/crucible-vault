@@ -201,6 +201,11 @@ pub trait DaemonClient: Send + Sync {
     /// Reports this process's memory snapshot to the daemon (plan memory-instrumentation-and-
     /// reduction WP-M2); an old daemon answers method-not-found, which callers drop.
     fn memory_report(&self, report: &cv_protocol::MemoryReport) -> Result<()>;
+    /// Plan round-24 WP-3: the stored description of vault image `path`, if any. An old daemon
+    /// answers method-not-found, which reads as `None`. Defaults to `None` (fakes).
+    fn image_description(&self, _path: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;

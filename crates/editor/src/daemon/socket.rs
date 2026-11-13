@@ -286,6 +286,17 @@ impl DaemonClient for SocketDaemon {
         self.call::<m::MemoryReport>(report.clone()).map(drop)
     }
 
+    fn image_description(&self, path: &str) -> Result<Option<String>> {
+        let path = path.to_owned();
+        match self.call::<m::ImageDescription>(cv_protocol::ImageDescriptionParams { path }) {
+            Ok(r) => Ok(r.narrative),
+            Err(DaemonError::Rpc(e)) if e.code == cv_protocol::error_codes::METHOD_NOT_FOUND => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let rx = self.rpc.notifications()?;
         let topics = topics.to_vec();

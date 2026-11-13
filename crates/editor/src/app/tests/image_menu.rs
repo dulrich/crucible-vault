@@ -32,6 +32,7 @@ fn img(src: &str, remote: bool) -> Target {
     Target::Image {
         src: src.into(),
         remote,
+        alt: None,
     }
 }
 

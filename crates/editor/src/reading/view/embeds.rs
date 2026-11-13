@@ -178,6 +178,7 @@ pub(super) fn image_block<'a>(
         let target = crate::context_menu::Target::Image {
             src: src.to_owned(),
             remote: true,
+            alt: (!alt.trim().is_empty()).then(|| alt.to_owned()),
         };
         let label = placeholder(format!("[remote image: {alt}]"));
         // Plan round-6 WP-3: a linked remote image clicks through the outer href instead
@@ -237,9 +238,15 @@ pub(super) fn image_block<'a>(
     let shown_key = key.clone();
     let shown_tab = tab.clone();
     let view = cx.view;
+    // Plan round-24 WP-3: the stored description (fetched on first show) is the hover text and
+    // what Copy alt text copies; without one, Copy alt text copies the markdown alt.
+    let description = described(cx, key);
     let menu_target = crate::context_menu::Target::Image {
         src: key.clone(),
         remote: false,
+        alt: description
+            .clone()
+            .or_else(|| (!alt.trim().is_empty()).then(|| alt.to_owned())),
     };
     let sensed = sensor(content)
         .key_ref(key.as_str())
@@ -259,10 +266,28 @@ pub(super) fn image_block<'a>(
         }));
     // plan editor-round-4 WP-4: right-click → Copy image / Copy path.
     // Plan round-6 WP-3: a linked image's menu is attached by [`linked_image`] instead.
+    let shown: Element<'a, Message> = match description {
+        Some(d) => iced::widget::tooltip(
+            sensed,
+            container(text(d).size(cx.sz(13.0)))
+                .padding(6)
+                .max_width(480)
+                .style(crate::theme::seg_group_style(t)),
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .delay(std::time::Duration::from_millis(600))
+        .into(),
+        None => sensed.into(),
+    };
     if link.is_some() {
-        return sensed.into();
+        return shown;
     }
-    crate::context_menu::on_right(sensed, menu_target)
+    crate::context_menu::on_right(shown, menu_target)
+}
+
+/// Plan round-24 WP-3: vault image `key`'s cached description (none while pending / absent).
+fn described(cx: &Ctx<'_, '_>, key: &str) -> Option<String> {
+    cx.store.descriptions.get(key).cloned().flatten()
 }
 
 /// Plan round-6 WP-3: the left-click message of a linked image with `href` in note `path`.
@@ -333,7 +358,11 @@ fn linked_image_target(
     match image {
         Some(src) => crate::context_menu::Target::LinkedImage {
             link: Box::new(link),
-            image: Box::new(crate::context_menu::Target::Image { src, remote }),
+            image: Box::new(crate::context_menu::Target::Image {
+                alt: if remote { None } else { described(cx, &src) },
+                src,
+                remote,
+            }),
         },
         None => link,
     }
@@ -437,6 +466,7 @@ pub(super) fn remote_card<'a>(
     let target = crate::context_menu::Target::Image {
         src: url.to_owned(),
         remote: true,
+        alt: None,
     };
     crate::context_menu::on_right(
         button(label)

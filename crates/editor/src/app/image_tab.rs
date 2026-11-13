@@ -205,6 +205,7 @@ impl App {
         let target = crate::context_menu::Target::Image {
             src: path.to_owned(),
             remote: false,
+            alt: None,
         };
         let body = crate::context_menu::on_right(body, target);
         sensor(body)

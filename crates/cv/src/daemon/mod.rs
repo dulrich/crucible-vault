@@ -42,6 +42,7 @@ use crate::{now_ms, spool};
 mod background;
 mod bridge;
 mod errors;
+mod images;
 mod mail_watch;
 mod memory;
 mod notes;
@@ -532,6 +533,9 @@ impl Shared {
             }
             Request::BindNote(p) => reply::<m::BindNote>(self.bind_note(p).await),
             Request::LocateNote(p) => reply::<m::LocateNote>(self.locate_note(p).await),
+            Request::ImageDescription(p) => {
+                reply::<m::ImageDescription>(self.image_description(p).await)
+            }
         }
     }
 }

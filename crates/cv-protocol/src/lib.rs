@@ -191,6 +191,26 @@ pub enum Request {
     /// Where the note `id` is now (plan note-identity D2) → [`NoteLocation`]. Answered on the
     /// daemon's writer thread, so it observes every mutation that returned before it.
     LocateNote(LocateNoteParams),
+    /// The stored description narrative of the vault image at `path` (plan round-24-quick-wins
+    /// WP-3) → [`ImageDescriptionResult`]. A missing file, a path outside the vault or a
+    /// non-image answers `narrative: null`, never an error. An old daemon answers
+    /// `METHOD_NOT_FOUND`, which a client treats as "no description".
+    ImageDescription(ImageDescriptionParams),
+}
+
+/// `image_description` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageDescriptionParams {
+    /// Vault-relative image path.
+    pub path: String,
+}
+
+/// `image_description` result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageDescriptionResult {
+    /// The stored narrative; `None` when the image has no (non-empty) description.
+    #[serde(default)]
+    pub narrative: Option<String>,
 }
 
 /// `reconcile_intake` params.

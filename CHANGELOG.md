@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - **Fanfic `Ch` titles:** a clip titled `Fanfic <Story> Ch <n>, <Fandom>` (or `Ch. <n>`) is renamed to `<Story> - Chapter <n>` at filing, and by the `fanfic-title-backfill` action.
 - **Home on list lines:** in Source, Home on a list or task line (`- `, `- [ ] `, `1. `, `1) [x] `) first stops just after the marker, then at the indent end and column 0 as before.
 - **Reading uses Inter for body text:** plain Reading text was drawn in the generic sans-serif fallback (DejaVu Sans on Debian) instead of the app font, so Inter's arrows never showed; `<-` and `=>` now render as arrows in Reading as they do in Source. Stored, copied and found text is unchanged (`->` and `--` have no Inter substitution).
+- **Image descriptions as alt text:** hovering a described vault image in Reading shows its stored description, and the image menu gains **Copy alt text** (the description, else the markdown alt). The daemon answers a new `image_description` request; an older daemon simply yields no description.
 
 ## 1.0.2 — 2026-11-11
 

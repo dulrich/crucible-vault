@@ -289,6 +289,11 @@ pub enum ReadingMsg {
     },
     /// An image sensor left view.
     ImageHidden { tab: String, view: u64, key: String },
+    /// Plan round-24 WP-3: vault image `key`'s description arrived (`None` = none stored).
+    ImageDescribed {
+        key: String,
+        narrative: Option<String>,
+    },
     /// A host-note task checkbox was clicked: toggle the box at source `line` of `path`.
     ToggleTask { path: String, line: usize },
     /// plan usability-sprint-captures-links WP-4: a frontmatter boolean checkbox was clicked:
@@ -837,6 +842,7 @@ impl ReadingMsg {
             | Self::Tick
             | Self::ImageShown { .. }
             | Self::ImageHidden { .. }
+            | Self::ImageDescribed { .. }
             | Self::SelectDone { .. }
             | Self::CodeCopiedDone { .. } => MsgKind::Completion,
             Self::CycleMode

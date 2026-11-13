@@ -751,6 +751,12 @@ fn method_markers_match_the_wire() {
         s,
     );
     check::<m::LocateNote>(LocateNoteParams { id: NoteId(1) }, s);
+    check::<m::ImageDescription>(
+        ImageDescriptionParams {
+            path: "a.png".into(),
+        },
+        s,
+    );
     assert_eq!(seen, METHOD_NAMES);
     // Unit methods carry no `params` key, exactly as the enum always serialised them.
     let v =
@@ -925,6 +931,28 @@ fn note_id_fields_are_additive_on_the_wire() {
     .unwrap();
     assert!(matches!(n, Notification::FileChanged { id: None, .. }));
     assert!(round_trip(&n)["params"].get("id").is_none());
+}
+
+/// `image_description` wire shapes (plan round-24-quick-wins WP-3).
+#[test]
+fn image_description_wire_shapes() {
+    let req = Request::ImageDescription(ImageDescriptionParams {
+        path: "img/a.png".into(),
+    });
+    assert_eq!(
+        round_trip(&req),
+        json!({"method":"image_description","params":{"path":"img/a.png"}})
+    );
+    assert_eq!(
+        round_trip(&ImageDescriptionResult {
+            narrative: Some("a cat".into())
+        }),
+        json!({"narrative":"a cat"})
+    );
+    assert_eq!(
+        round_trip(&ImageDescriptionResult { narrative: None }),
+        json!({"narrative":null})
+    );
 }
 
 /// `bind_note` / `locate_note` wire shapes.

@@ -157,7 +157,7 @@ impl App {
                 Target::Tab { path, .. } | Target::FileTab { path, .. } | Target::Row { path, .. },
                 Item::Reveal,
             ) => self.reveal(&path),
-            (Target::Image { src, remote: false }, Item::CopyImage) => {
+            (Target::Image { src, remote: false, .. }, Item::CopyImage) => {
                 self.sink.copied_image(&src);
                 let Some(d) = self.daemon.clone() else {
                     self.status
@@ -251,8 +251,15 @@ impl App {
                 },
                 Item::CopyUrl,
             )
-            | (Target::Image { src, remote: true }, Item::CopyUrl)
-            | (Target::Image { src, remote: false }, Item::CopyPath)
+            | (Target::Image { src, remote: true, .. }, Item::CopyUrl)
+            | (Target::Image { src, remote: false, .. }, Item::CopyPath)
+            // Plan round-24 WP-3: Copy alt text (description, else markdown alt).
+            | (
+                Target::Image {
+                    alt: Some(src), ..
+                },
+                Item::CopyAltText,
+            )
             | (
                 Target::Tab { path: src, .. }
                 | Target::FileTab { path: src, .. }
