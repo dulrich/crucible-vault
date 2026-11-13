@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - **Fanfic `Ch` titles:** a clip titled `Fanfic <Story> Ch <n>, <Fandom>` (or `Ch. <n>`) is renamed to `<Story> - Chapter <n>` at filing, and by the `fanfic-title-backfill` action.
+- **Home on list lines:** in Source, Home on a list or task line (`- `, `- [ ] `, `1. `, `1) [x] `) first stops just after the marker, then at the indent end and column 0 as before.
 
 ## 1.0.2 — 2026-11-11
 

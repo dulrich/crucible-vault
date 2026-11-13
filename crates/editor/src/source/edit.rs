@@ -278,7 +278,12 @@ impl SourceBuffer {
         let column = if end {
             editing::end_target(pos.column, visual, line.len())
         } else {
-            editing::home_target(pos.column, editing::indent_width(&line), visual)
+            editing::home_target(
+                pos.column,
+                editing::indent_width(&line),
+                visual,
+                editing::list_content_start(&line),
+            )
         };
         let position = text_editor::Position {
             line: pos.line,

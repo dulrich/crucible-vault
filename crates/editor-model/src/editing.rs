@@ -109,20 +109,55 @@ pub fn is_list_prefix(prefix: &str) -> bool {
     marker(rest).is_some_and(|(n, _)| rest[n..].bytes().all(|b| b == b' '))
 }
 
+/// Byte column where the content starts on a list line: after the indent, the list marker and
+/// an optional task box (`[ ] `/`[x] `, for ordered markers too). `None` for a non-list line.
+pub fn list_content_start(line: &str) -> Option<usize> {
+    let indent = indent_width(line);
+    let rest = &line[indent..];
+    let (n, _) = marker(rest)?;
+    let mut end = indent + n;
+    // `marker` takes the task box for unordered markers only; accept it after `1. ` here.
+    let b = line.as_bytes();
+    if b.get(end) == Some(&b'[')
+        && let Some(close) = line.get(end + 1..).and_then(|r| r.char_indices().nth(1))
+        && close.1 == ']'
+    {
+        let after = end + 1 + close.0 + 1;
+        match b.get(after) {
+            Some(b' ') => end = after + 1,
+            None => end = after,
+            _ => {}
+        }
+    }
+    Some(end)
+}
+
 /// Smart Home. `col`: logical byte column before; `indent`: [`indent_width`]; `visual_home`: the
 /// column iced's visual-line `Home` motion lands on from `col`. A visual home past column 0 means
 /// the cursor is on a wrapped continuation row.
 ///
 /// - continuation row, not at its start → its start; at its start → the indent end;
 /// - first row: past the indent → indent end; inside the indent or at its end (indent > 0) →
-///   column 0; at column 0 → the indent end.
-pub fn home_target(col: usize, indent: usize, visual_home: usize) -> usize {
+///   column 0; at column 0 → the indent end;
+/// - first row of a list line (`content_start`, see [`list_content_start`]): past the content
+///   start → the content start; from there the rule above applies.
+pub fn home_target(
+    col: usize,
+    indent: usize,
+    visual_home: usize,
+    content_start: Option<usize>,
+) -> usize {
     if visual_home > 0 {
         return if col != visual_home {
             visual_home
         } else {
             indent
         };
+    }
+    if let Some(cs) = content_start
+        && col > cs
+    {
+        return cs;
     }
     if col > indent {
         indent
@@ -229,15 +264,35 @@ mod tests {
     #[test]
     fn home_table() {
         // First row (visual home 0), indent 4.
-        assert_eq!(home_target(10, 4, 0), 4);
-        assert_eq!(home_target(4, 4, 0), 0);
-        assert_eq!(home_target(2, 4, 0), 0);
-        assert_eq!(home_target(0, 4, 0), 4);
-        assert_eq!(home_target(0, 0, 0), 0);
-        assert_eq!(home_target(5, 0, 0), 0);
+        assert_eq!(home_target(10, 4, 0, None), 4);
+        assert_eq!(home_target(4, 4, 0, None), 0);
+        assert_eq!(home_target(2, 4, 0, None), 0);
+        assert_eq!(home_target(0, 4, 0, None), 4);
+        assert_eq!(home_target(0, 0, 0, None), 0);
+        assert_eq!(home_target(5, 0, 0, None), 0);
         // Continuation row starting at 40.
-        assert_eq!(home_target(50, 4, 40), 40);
-        assert_eq!(home_target(40, 4, 40), 4);
+        assert_eq!(home_target(50, 4, 40, None), 40);
+        assert_eq!(home_target(40, 4, 40, None), 4);
+        // List lines: `- abc` (content 2), `- [ ] abc` (6), `1. abc` (3), `1) [x] abc` (7).
+        for (line, indent, cs) in [
+            ("- abc", 0, 2),
+            ("- [ ] abc", 0, 6),
+            ("1. abc", 0, 3),
+            ("1) [x] abc", 0, 7),
+            ("  - abc", 2, 4),
+        ] {
+            assert_eq!(list_content_start(line), Some(cs), "{line}");
+            let c = Some(cs);
+            assert_eq!(home_target(cs + 2, indent, 0, c), cs, "{line} past");
+            assert_eq!(home_target(cs, indent, 0, c), indent, "{line} at");
+            assert_eq!(home_target(indent, indent, 0, c), 0, "{line} indent end");
+        }
+        // Wrapped continuation row of a list line is unchanged.
+        assert_eq!(home_target(50, 0, 40, Some(2)), 40);
+        // Marker-less line.
+        assert_eq!(list_content_start("plain text"), None);
+        assert_eq!(list_content_start("-x"), None);
+        assert_eq!(home_target(5, 0, 0, list_content_start("plain")), 0);
     }
 
     #[test]
