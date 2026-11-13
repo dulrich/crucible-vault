@@ -792,6 +792,20 @@ fn painted<'a>(
     }
 }
 
+/// The font of a Reading text piece: the app's family by name, never `Font::DEFAULT` (generic
+/// sans-serif, which fontconfig resolves to DejaVu Sans, so Inter's contextual alternates for
+/// `->`, `<-`, `=>` never applied; plan round-24 WP-1). Text stays ASCII; only the face changes.
+pub(super) fn text_font(strong: bool, em: bool) -> Font {
+    let mut font = Font::with_name(crate::theme::FONT_FAMILY);
+    if strong {
+        font.weight = Weight::Bold;
+    }
+    if em {
+        font.style = FontStyle::Italic;
+    }
+    font
+}
+
 fn inlines_view<'a>(
     cx: &Ctx<'a, '_>,
     inlines: &'a [Inline],
@@ -813,13 +827,7 @@ fn inlines_view<'a>(
         let at: usize = spans.iter().map(|s| s.text.len()).sum();
         match i {
             Inline::Text { text, style } => {
-                let mut font = Font::DEFAULT;
-                if style.strong || bold {
-                    font.weight = Weight::Bold;
-                }
-                if style.em {
-                    font.style = FontStyle::Italic;
-                }
+                let font = text_font(style.strong || bold, style.em);
                 let style_span = |piece: Cow<'a, str>| {
                     let mut s = span(piece)
                         .font(font)
