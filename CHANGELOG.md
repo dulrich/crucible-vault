@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- **Fanfic `Ch` titles:** a clip titled `Fanfic <Story> Ch <n>, <Fandom>` (or `Ch. <n>`) is renamed to `<Story> - Chapter <n>` at filing, and by the `fanfic-title-backfill` action.
+
 ## 1.0.2 — 2026-11-11
 
 ### Changed

@@ -172,6 +172,30 @@ fn from_title(title: &str) -> Option<(&str, Result<u32, ()>)> {
             return Some((head, n));
         }
     }
+    fanfic_ch(title, &lower)
+}
+
+/// The `Fanfic <Story> Ch <n>[, <Fandom>]` shape (`Ch.` too): the story is the text between the
+/// prefix and the first whole-word `Ch` followed by a number. Tried after the `Chapter` shapes.
+fn fanfic_ch<'a>(title: &'a str, lower: &str) -> Option<(&'a str, Result<u32, ()>)> {
+    if !lower.starts_with("fanfic ") {
+        return None;
+    }
+    let mut from = 6;
+    while let Some(i) = lower[from..].find(" ch") {
+        let at = from + i;
+        from = at + 1;
+        let rest = &title[at + 3..];
+        let rest = match rest.strip_prefix('.') {
+            Some(r) => r,
+            None if rest.starts_with(char::is_whitespace) => rest,
+            None => continue,
+        };
+        let Some(n) = number(rest.trim_start()) else {
+            continue;
+        };
+        return Some((&title[7..at], n));
+    }
     None
 }
 
@@ -297,6 +321,31 @@ mod tests {
         let near = format!("{}Chapter 2\n", "line\n".repeat(14));
         assert_eq!(d("Alpha", &near), some("Alpha", 2));
         assert_eq!(d("Alpha", "Chapters of life\n"), None);
+    }
+
+    #[test]
+    fn fanfic_ch_shape() {
+        assert_eq!(
+            d("Fanfic Fighting From the Shadows Ch 1, Harry Potter", ""),
+            some("Fighting From the Shadows", 1)
+        );
+        assert_eq!(d("fanfic Alpha CH. 12, X", ""), some("Alpha", 12));
+        assert_eq!(d("Fanfic Alpha Ch 4", ""), some("Alpha", 4));
+        assert_eq!(
+            d("Fanfic Chasing Stars Ch 3, X", ""),
+            some("Chasing Stars", 3)
+        );
+        assert_eq!(d("Fanfic Alpha Ch Ch 2, X", ""), some("Alpha Ch", 2));
+    }
+
+    #[test]
+    fn fanfic_ch_edges() {
+        assert_eq!(d("Fanfic Alpha Ch 2.5, X", "prose\n"), None);
+        assert_eq!(d("Fanfic Alpha Story, X", "prose\n"), None);
+        assert_eq!(
+            d("Fanfic Alpha Story - Writer", "Chapter 3\n"),
+            some("Fanfic Alpha Story", 3)
+        );
     }
 
     #[test]
