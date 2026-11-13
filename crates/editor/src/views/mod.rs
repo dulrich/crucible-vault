@@ -18,7 +18,6 @@ mod layout;
 mod store;
 
 use iced::font::Weight;
-use iced::widget::text::Wrapping;
 use iced::widget::{column, container, row, sensor, space, text};
 use iced::{Border, Element, Font, Length, Theme};
 
@@ -27,6 +26,7 @@ use layout::line_view;
 
 use crate::message::{Message, ViewsMsg};
 use crate::theme::Tokens;
+use crate::widget::chrome_text::chrome_text;
 use crate::widget::virtual_list::{ListWindow, VirtualList};
 
 /// Row height of the result table.
@@ -64,6 +64,15 @@ pub fn row_height(scale: f32) -> f32 {
     ROW_HEIGHT * scale
 }
 
+/// The message a sortable column header's click publishes.
+pub(crate) fn sort_msg(id: &str, host: &str, column: &str) -> Message {
+    Message::Views(ViewsMsg::SortBy {
+        id: id.to_owned(),
+        host: Some(host.to_owned()),
+        column: column.to_owned(),
+    })
+}
+
 pub fn fence<'a>(
     store: &'a ViewStore,
     id: &str,
@@ -86,13 +95,14 @@ pub fn fence<'a>(
             result_view(d, id, host, window, store, t, scale)
         }
     };
-    let title = text(id.to_owned())
-        .size(px(13.0, scale))
+    // plan round-24 WP-2: header text is selectable (drag + Ctrl+C), see `widget::chrome_text`.
+    let mut sel = t.accent_ui.to_color();
+    sel.a = 0.35;
+    let title = chrome_text::<Message>(id.to_owned(), px(13.0, scale), t.heading.to_color(), sel)
         .font(Font {
             weight: Weight::Bold,
             ..Font::default()
-        })
-        .color(t.heading.to_color());
+        });
     let toggle = match entry.map(|e| &e.state) {
         Some(State::Ready(d)) if d.open_lines.is_some() => {
             Some(open_toggle(id, store.filters.contains(id), t, scale))
@@ -108,9 +118,7 @@ pub fn fence<'a>(
             .padding([0, 6])
             .style(iced::widget::button::text)
             .on_press(msg);
-        let name = text(value)
-            .size(px(12.0, scale))
-            .color(t.accent_ui.to_color());
+        let name = chrome_text::<Message>(value, px(12.0, scale), t.accent_ui.to_color(), sel);
         Element::from(
             row![name, clear]
                 .spacing(2)
@@ -224,23 +232,19 @@ fn result_view<'a>(
                     }
                     _ => "",
                 };
-                let label = text(format!("{}{mark}", c.label))
-                    .size(px(13.0, scale))
-                    .wrapping(Wrapping::None)
-                    .color(t.text_dim.to_color());
-                let header: Element<'a, Message> = if d.kind == Kind::Table {
-                    iced::widget::button(label)
-                        .padding(0)
-                        .style(|_, _| iced::widget::button::Style::default())
-                        .on_press(Message::Views(ViewsMsg::SortBy {
-                            id: id.to_owned(),
-                            host: Some(host.to_owned()),
-                            column: c.key.clone(),
-                        }))
-                        .into()
-                } else {
-                    label.into()
-                };
+                let mut sel = t.accent_ui.to_color();
+                sel.a = 0.35;
+                let mut label = chrome_text::<Message>(
+                    format!("{}{mark}", c.label),
+                    px(13.0, scale),
+                    t.text_dim.to_color(),
+                    sel,
+                );
+                if d.kind == Kind::Table {
+                    // A plain click sorts; a drag past the threshold selects instead.
+                    label = label.on_click(sort_msg(id, host, &c.key));
+                }
+                let header: Element<'a, Message> = label.into();
                 container(header)
                     .width(lengths.get(i).copied().unwrap_or(Length::FillPortion(1)))
                     .clip(true)

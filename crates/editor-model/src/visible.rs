@@ -25,6 +25,8 @@ pub enum Sep {
     Line,
     /// A tab — table cells of one row.
     Cell,
+    /// `: ` — a property value after its key (round-24 WP-2: the key is its own run).
+    Colon,
 }
 
 impl Sep {
@@ -34,6 +36,7 @@ impl Sep {
             Self::Block => "\n\n",
             Self::Line => "\n",
             Self::Cell => "\t",
+            Self::Colon => ": ",
         }
     }
 }
@@ -302,14 +305,16 @@ pub fn visible_runs(model: &RenderModel) -> Vec<VisRun> {
         part: Part::Properties,
     };
     for p in &model.properties {
+        // round-24 WP-2: the key is its own (selectable) run; the value run follows after `: `.
+        // A boolean row (a checkbox) has only the key run.
+        let sep = if w.out.is_empty() {
+            Sep::Block
+        } else {
+            Sep::Line
+        };
+        w.push(p.key.clone(), Vec::new(), sep, false);
         if let Some(text) = property_text(p) {
-            let sep = if w.out.is_empty() {
-                Sep::Block
-            } else {
-                Sep::Line
-            };
-            w.pending = Some((sep, format!("{}: ", p.key)));
-            w.push(text, Vec::new(), sep, false);
+            w.push(text, Vec::new(), Sep::Colon, false);
         }
     }
     for (i, b) in model.blocks.iter().enumerate() {
@@ -379,22 +384,40 @@ mod tests {
     fn runs_cover_properties_blocks_and_footnotes_in_order() {
         let m = lower("---\ntags: a\ndone: true\n---\n# Head\n\nbody[^1] x\n\n[^1]: note foo\n");
         let rs = visible_runs(&m);
-        assert_eq!(texts(&rs), vec!["a", "Head", "body[1] x", "note foo"]);
+        assert_eq!(
+            texts(&rs),
+            vec!["tags", "a", "done", "Head", "body[1] x", "note foo"]
+        );
         let parts: Vec<Part> = rs.iter().map(|r| r.part).collect();
         assert_eq!(
             parts,
             vec![
+                Part::Properties,
+                Part::Properties,
                 Part::Properties,
                 Part::Block(0),
                 Part::Block(1),
                 Part::Footnote(0)
             ]
         );
-        assert_eq!(rs[0].prefix, "tags: ");
-        assert_eq!(rs[3].prefix, "[1] ");
-        assert_eq!(rs[3].sep, Sep::Block);
+        // round-24 WP-2: the key is its own run, the value follows after `: `.
+        assert_eq!(rs[1].sep, Sep::Colon);
+        assert_eq!(rs[2].sep, Sep::Line);
+        assert_eq!(rs[5].prefix, "[1] ");
+        assert_eq!(rs[5].sep, Sep::Block);
         // The footnote ref is visible text but never searched.
-        assert_eq!(rs[2].segments, vec![0..4, 7..9]);
+        assert_eq!(rs[4].segments, vec![0..4, 7..9]);
+    }
+
+    #[test]
+    fn property_key_is_its_own_run_and_copies_once() {
+        let m = lower("---\ntags: a\n---\nbody\n");
+        let rs = visible_runs(&m);
+        assert_eq!(texts(&rs), vec!["tags", "a", "body"]);
+        // Key start .. value end copies `key: value` once (the `: ` is the value run's sep).
+        let copied = format!("{}{}{}", rs[0].text, rs[1].sep.as_str(), rs[1].text);
+        assert_eq!(copied, "tags: a");
+        assert!(rs[0].prefix.is_empty() && rs[1].prefix.is_empty());
     }
 
     #[test]

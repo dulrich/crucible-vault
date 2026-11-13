@@ -296,12 +296,7 @@ fn properties<'a>(cx: &Ctx<'a, '_>, props: &'a [Property]) -> Element<'a, Messag
             let side = cx.sz(14.0);
             let mark = task_box(if *b { 'x' } else { ' ' }, side, t);
             return row![
-                container(
-                    text(p.key.as_str())
-                        .size(cx.sz(14.0))
-                        .color(t.text_dim.to_color())
-                )
-                .width(Length::Fixed(140.0)),
+                key_el(cx, &p.key),
                 button(mark)
                     .padding(0)
                     .style(button::text)
@@ -336,18 +331,21 @@ fn properties<'a>(cx: &Ctx<'a, '_>, props: &'a [Property]) -> Element<'a, Messag
             });
         }
         row![
-            container(
-                text(p.key.as_str())
-                    .size(cx.sz(14.0))
-                    .color(t.text_dim.to_color())
-            )
-            .width(Length::Fixed(140.0)),
+            key_el(cx, &p.key),
             cx.run_el(cx.take_run().0, spans, cx.sz(14.0)),
         ]
         .spacing(8)
         .into()
     });
     boxed(column(rows).spacing(4).into(), t, t.line)
+}
+
+/// plan round-24 WP-2: a property key as a selectable run (the first of its row's runs).
+fn key_el<'a>(cx: &Ctx<'a, '_>, key: &'a str) -> Element<'a, Message> {
+    let spans = vec![span(key).color(cx.t.text_dim.to_color())];
+    container(cx.run_el(cx.take_run().0, spans, cx.sz(14.0)))
+        .width(Length::Fixed(140.0))
+        .into()
 }
 
 /// plan usability-sprint-captures-links WP-4: the click message of a frontmatter boolean.
