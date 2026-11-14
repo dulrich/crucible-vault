@@ -256,7 +256,7 @@ fn merge(
 }
 
 /// The `publication` of the source row a tracker row belongs to.
-fn publication_of_row(ctx: &StepCtx<'_>, r: &TrackerItem) -> Option<String> {
+pub(super) fn publication_of_row(ctx: &StepCtx<'_>, r: &TrackerItem) -> Option<String> {
     let s = ctx.config.sources();
     match r.source_kind.as_str() {
         "blog" => s.by_feed(&r.source_key).map(|b| b.publication().to_owned()),

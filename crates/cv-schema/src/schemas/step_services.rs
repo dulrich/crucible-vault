@@ -478,6 +478,20 @@ pub static FANFIC_TITLE: Record = Record {
     summary: None,
 };
 
+/// `intake_frontmatter_backfill` — `crates/cv/src/steps/intake_frontmatter_backfill.rs` (`dry_run`; sets `read: false` and a blank `publication` on day-folder notes with a `post-id` or `message-id`, never overwriting).
+pub static INTAKE_FRONTMATTER_BACKFILL: Record = Record {
+    name: "intake_frontmatter_backfill",
+    fields: &[field(
+        "dry_run",
+        "Dry run",
+        "Compute every count but write nothing (a job param dry_run = true also turns it on)",
+        Node::Bool,
+    )
+    .dflt(D::Bool(false))],
+    rules: &[],
+    summary: None,
+};
+
 /// `removals_review` — `crates/cv/src/steps/removals_review.rs` (`parse`; plan `round-23-daemon-memory-mail-enrich-fanfic` WP-6).
 pub static REMOVALS_REVIEW: Record = Record {
     name: "removals_review",

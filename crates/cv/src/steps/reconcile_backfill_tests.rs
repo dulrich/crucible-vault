@@ -552,3 +552,86 @@ fn folded_newsletter_name_rekeys_mail_rows_and_boilerplate() {
     assert!(!seen(&w, "Old Letter") && seen(&w, "New Pub"));
     assert_eq!(n(&w.reconcile(false), "mail_renamed"), 0);
 }
+
+/// Plan sources-publication-model WP-4: `only = "sources"` runs the re-match (and publication)
+/// phases and nothing else.
+#[test]
+fn only_sources_rematches_and_skips_the_other_phases() {
+    let mut w = rematch_world(HEATMAP, "<p>alpha beta gamma</p>");
+    // An open, never-probed Substack blog row: the full run would probe it (and count it unlinked).
+    w.env
+        .state
+        .lock()
+        .unwrap()
+        .insert_tracker_item(&TrackerItem {
+            source_kind: "blog".into(),
+            source_key: "feed".into(),
+            item_id: "slug".into(),
+            title: "T".into(),
+            url: "https://x.substack.com/p/slug".into(),
+            first_seen_ms: 1,
+            day: "2026-10-21".into(),
+            outcome: TrackerOutcome::Note,
+            score: None,
+            full_body: None,
+            note_path: None,
+            source_name: None,
+            duration_s: None,
+            word_count: None,
+            access: None,
+            complete: None,
+            full_word_count: None,
+        })
+        .unwrap();
+    w.env
+        .params
+        .insert("only".into(), Value::String("sources".into()));
+    w.env.params.insert("dry_run".into(), Value::Bool(true));
+    let dry = w.reconcile(false);
+    assert_eq!((n(&dry, "mail_rematched"), n(&dry, "null_paths")), (1, 0));
+    assert!(
+        w.row(KIND, UNKNOWN, "m1@plain.example").is_some(),
+        "dry run writes nothing"
+    );
+    w.env.params.remove("dry_run");
+    let o = w.reconcile(false);
+    assert_eq!(o.vars["only"], "sources");
+    for k in [
+        "null_paths",
+        "probed",
+        "probe_failed",
+        "probe_skipped",
+        "ticked",
+        "left_open",
+        "skipped_kind",
+        "mail_recleaned_r2",
+        "bp_learned",
+    ] {
+        assert_eq!(n(&o, k), 0, "{k}");
+    }
+    assert_eq!(n(&o, "mail_rematched"), 1);
+    assert!(w.row(KIND, UNKNOWN, "m1@plain.example").is_none());
+    assert!(w.row(KIND, "Newsbit", "m1@plain.example").is_some());
+    let (b, status) = w.row("blog", "feed", "slug").unwrap();
+    assert_eq!(
+        (b.access, status),
+        (None, None),
+        "the open blog row is untouched"
+    );
+}
+
+#[test]
+fn an_unknown_only_value_is_a_step_error_naming_the_accepted_one() {
+    let mut w = world(&[]);
+    for bad in [
+        Value::String("all".into()),
+        Value::String(String::new()),
+        Value::Null,
+        Value::Bool(true),
+    ] {
+        w.env.params.insert("only".into(), bad.clone());
+        let t: toml::Table = "type = \"intake_reconcile\"".parse().unwrap();
+        let e = execute(&Step::from_table(t).unwrap(), &mut w.env.ctx()).unwrap_err();
+        assert!(e.to_string().contains("\"sources\""), "{bad}: {e}");
+    }
+}

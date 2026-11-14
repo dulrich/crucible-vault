@@ -216,6 +216,8 @@ step_kinds! {
     FanficTitle = "fanfic_title", true, false;
     /// Samples enrichment removals into a review note, or scores its ticks (plan `round-23-daemon-memory-mail-enrich-fanfic` WP-6).
     RemovalsReview = "removals_review", true, false;
+    /// Backfills `read: false` and `publication` on existing intake notes (plan `sources-publication-model` WP-4).
+    IntakeFrontmatterBackfill = "intake_frontmatter_backfill", true, false;
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):

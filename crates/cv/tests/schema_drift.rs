@@ -235,6 +235,7 @@ const STEPS: &[(&str, &str)] = &[
         "mode = \"review\"\nlimit = 100\nseed = 1\noverwrite = false",
     ),
     ("removals_review", "mode = \"score\"\npath = \"x.md\""),
+    ("intake_frontmatter_backfill", "dry_run = true"),
 ];
 
 const ACTION_FULL: &str = r#"

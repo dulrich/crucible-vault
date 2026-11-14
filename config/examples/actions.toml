@@ -374,6 +374,8 @@ type = "auto_file"
 # One-shot reconcile of existing `note` tracker rows (plan auto-intake-sprint WP-6): links NULL-path
 # rows to their notes, probes open blog rows and ticks complete ones. Run by `cv intake reconcile
 # [--dry-run]` (a job param `dry_run = true` writes nothing). The step holds `intake::identity`.
+# A job param `only = "sources"` runs just the unknown-sender re-match and the publication phase
+# (plan sources-publication-model WP-4); the daemon enqueues it when a hot reload changes `sources.toml`.
 [[action]]
 id = "intake-reconcile"
 label = "Reconcile intake rows"
@@ -381,6 +383,19 @@ group = "Ingest"
 resources = { note = false, keys = ["tracker::reconcile"] }
 [[action.steps]]
 type = "intake_reconcile"
+
+# One-shot frontmatter backfill of existing intake notes (plan sources-publication-model WP-4): every
+# day-folder note with a `post-id` or `message-id` and no `read` key gets `read: false`, and one with
+# a blank `publication` gets its source record's (by `source`/`author`, else its tracker row's). Never
+# overwrites; a write conflict is skipped. Job param `dry_run = true` counts only. Shares the
+# reconcile's resource key so the two never interleave.
+[[action]]
+id = "intake-frontmatter-backfill"
+label = "Backfill intake frontmatter"
+group = "Ingest"
+resources = { note = false, keys = ["tracker::reconcile"] }
+[[action.steps]]
+type = "intake_frontmatter_backfill"
 
 # Duplicate scan (plan round-12-feedback-todos WP-6): labels candidate pairs (same recomputed
 # identity, or shingle containment >= 0.7) in both notes' `possible-duplicate`; never removes.

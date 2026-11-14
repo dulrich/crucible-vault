@@ -27,6 +27,12 @@
 //! 9. **Publication** (F, [`super::reconcile_repair`]): `publication_backfilled`,
 //!    `publication_no_row`, `publication_conflict`.
 //!
+//! A job param `only = "sources"` (plan `sources-publication-model` WP-4) runs only phase 5's
+//! re-match (with its leading mail-key rename) and phase 9 — no link, probe, tick, re-clean,
+//! boilerplate or network; any other `only` value is a step error. The daemon enqueues it when a
+//! hot reload changes `sources.toml`. It composes with `dry_run`, and the full run is unchanged
+//! without the param. Vars of phases that did not run are 0; `only` is echoed.
+//!
 //! `dry_run` (step param; a job param `dry_run`, bool or `"true"`/`"false"`, wins over it) computes every count of every phase and
 //! writes nothing to `state.db` or the vault (the probe is a read-only fetch); it is echoed as the
 //! `dry_run` var. Outcome vars are aggregate counts only. The step holds `intake::identity`
@@ -66,7 +72,28 @@ impl StepModule for IntakeReconcile {
     }
 
     fn run(dry_run: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
-        run(super::params::job_dry_run(ctx, dry_run), ctx)
+        let only = only_sources(ctx.params).map_err(StepError::failed)?;
+        let dry = super::params::job_dry_run(ctx, dry_run);
+        if only {
+            run_sources(dry, ctx)
+        } else {
+            run(dry, ctx)
+        }
+    }
+}
+
+/// The only accepted value of the `only` job param.
+const ONLY_SOURCES: &str = "sources";
+
+/// The `only` job param: `Ok(true)` for `"sources"`, `Ok(false)` when absent; any other value
+/// (another string, blank, null, another type) is an error naming the accepted one.
+fn only_sources(params: &serde_json::Map<String, serde_json::Value>) -> Result<bool, String> {
+    match params.get("only") {
+        None => Ok(false),
+        Some(serde_json::Value::String(s)) if s == ONLY_SOURCES => Ok(true),
+        Some(v) => Err(format!(
+            "intake_reconcile: job param `only` {v} is not accepted; the only value is {ONLY_SOURCES:?}"
+        )),
     }
 }
 
@@ -84,6 +111,9 @@ struct Vars {
     left_open: u32,
     skipped_kind: u32,
     dry_run: bool,
+    /// Echoes the `only` job param (absent on a full run).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    only: Option<&'static str>,
     #[serde(flatten)]
     backfill: backfill::Counts,
     #[serde(flatten)]
@@ -182,6 +212,33 @@ const PHASES: &[(&str, Phase)] = &[
         repair::publication(ctx, &p.sh, &mut v.repair)
     }),
 ];
+
+/// The [`PHASES`] a sources-only run keeps: the unknown-sender re-match and the publication phase.
+const SOURCES_PHASES: &[&str] = &["mail", "publication"];
+
+/// The sources-only run (`only = "sources"`): the phases that follow a `sources.toml` change.
+fn run_sources(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let mut v = Vars {
+        dry_run: dry,
+        only: Some(ONLY_SOURCES),
+        ..Vars::default()
+    };
+    let mut pass = Pass {
+        sh: backfill::Shared {
+            dry,
+            pre_linked: std::collections::BTreeSet::new(),
+            paths: std::collections::HashMap::new(),
+        },
+        sidx: None,
+    };
+    for (name, phase) in PHASES.iter().filter(|(n, _)| SOURCES_PHASES.contains(n)) {
+        tracing::debug!(phase = name, "intake_reconcile: sources-only phase");
+        phase(ctx, &mut pass, &mut v)?;
+    }
+    let mut out = StepOutcome::default();
+    out.set_vars(&v);
+    Ok(out)
+}
 
 fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let mut v = Vars {

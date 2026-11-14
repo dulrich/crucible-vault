@@ -82,7 +82,7 @@ pub(super) async fn config_poller(
                 if fp != last {
                     last = fp;
                     shared.lookups.invalidate_models();
-                    let errors = shared.runner().map(Runner::reload_config).unwrap_or_default();
+                    let errors = shared.runner().map(Runner::reload_config_observed).unwrap_or_default();
                     // After the reload: the view host takes the reloaded typed settings (WP-R6).
                     let config = shared.runner().map(Runner::config).unwrap_or_default();
                     shared.views.notify_config(&dir, &config);

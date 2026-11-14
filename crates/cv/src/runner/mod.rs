@@ -149,6 +149,12 @@ pub struct JobParams {
     pub chain: Vec<String>,
 }
 
+/// The action a changed `sources.toml` re-runs (sources-only).
+pub const REMATCH_ACTION: &str = "intake-reconcile";
+
+/// The job `dedupe_key` of the sources-only re-match; the action's resource key only serializes.
+pub const SOURCES_REMATCH_DEDUPE: &str = "intake-reconcile:sources";
+
 /// A run to enqueue.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
@@ -191,6 +197,24 @@ impl RunRequest {
             chain: Vec::new(),
             default_lane: Lane::Background,
             dedupe_key: Some(format!("{}::{key}", action.id)),
+        }
+    }
+
+    /// The sources-only re-match after a changed `sources.toml` (plan sources-publication-model
+    /// WP-4): a background run with `only = "sources"` under its own dedupe key
+    /// [`SOURCES_REMATCH_DEDUPE`], so repeated saves leave at most one queued or running re-match.
+    #[must_use]
+    pub fn sources_rematch(action: &Action) -> Self {
+        let mut params = Map::new();
+        apply_defaults(action, &mut params);
+        params.insert("only".to_owned(), Value::String("sources".to_owned()));
+        Self {
+            params,
+            context: ActionContext::default(),
+            trigger: Trigger::Command,
+            chain: Vec::new(),
+            default_lane: Lane::Background,
+            dedupe_key: Some(SOURCES_REMATCH_DEDUPE.to_owned()),
         }
     }
 
@@ -381,8 +405,40 @@ impl Runner {
 
     /// Re-reads `CV_CONFIG_DIR` (hot reload, pin 2); returns the current errors.
     pub fn reload_config(&self) -> Vec<String> {
-        let mut next = (*self.config()).clone();
+        self.reload().0
+    }
+
+    /// [`Self::reload_config`] for an observed change (the config watcher): when the reload
+    /// changed the typed `sources.toml`, enqueues the sources-only re-match (plan
+    /// sources-publication-model WP-4). Start-up uses [`Self::reload_config`] and never enqueues.
+    pub fn reload_config_observed(&self) -> Vec<String> {
+        let (errors, sources_changed) = self.reload();
+        if sources_changed {
+            self.enqueue_sources_rematch();
+        }
+        errors
+    }
+
+    /// Enqueues the sources-only `intake-reconcile` run; skipped (one `debug` line) when the
+    /// config has no armed such action. A duplicate of a queued or running run is coalesced.
+    fn enqueue_sources_rematch(&self) {
+        let cfg = self.config();
+        let Some(action) = cfg.armed(REMATCH_ACTION) else {
+            tracing::debug!("sources changed; no `{REMATCH_ACTION}` action, re-match not enqueued");
+            return;
+        };
+        match self.enqueue(action, RunRequest::sources_rematch(action)) {
+            Ok(id) => tracing::info!(job = %id, "sources changed; re-match enqueued"),
+            Err(e) => tracing::warn!(error = %e, "sources changed; re-match not enqueued"),
+        }
+    }
+
+    /// The reload; also whether the typed sources differ from the previous snapshot's.
+    fn reload(&self) -> (Vec<String>, bool) {
+        let before = self.config();
+        let mut next = (*before).clone();
         load_config_dir(&self.inner.config_dir, &mut next);
+        let sources_changed = before.sources() != next.sources();
         let errors = next.errors();
         for e in &errors {
             tracing::warn!(error = %e, "config");
@@ -391,7 +447,7 @@ impl Runner {
             tracing::info!(notice = %n, "config");
         }
         self.set_config(next);
-        errors
+        (errors, sources_changed)
     }
 
     /// Current config errors (`cv status` `config_errors`).

@@ -32,6 +32,7 @@
 //! | `YtClipTidy` | [`yt_clip_tidy`] | round-19-yt-cleanup-intake WP-2 |
 //! | `FanficTitle` | [`fanfic_title`] | round-23-daemon-memory-mail-enrich-fanfic WP-5 |
 //! | `RemovalsReview` | [`removals_review`] | round-23-daemon-memory-mail-enrich-fanfic WP-6 |
+//! | `IntakeFrontmatterBackfill` | [`intake_frontmatter_backfill`] | sources-publication-model WP-4 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -74,6 +75,9 @@ mod intake_enrich_tests;
 pub mod intake_finalize;
 #[cfg(test)]
 mod intake_finalize_tests;
+pub mod intake_frontmatter_backfill;
+#[cfg(test)]
+mod intake_frontmatter_backfill_tests;
 pub(crate) mod intake_kind;
 pub mod link_scan;
 pub mod lint;
@@ -675,6 +679,7 @@ step_modules! {
     YtClipTidy => yt_clip_tidy::YtClipTidy,
     FanficTitle => fanfic_title::FanficTitle,
     RemovalsReview => removals_review::RemovalsReview,
+    IntakeFrontmatterBackfill => intake_frontmatter_backfill::IntakeFrontmatterBackfill,
     RunAction => RunActionStep,
 }
 

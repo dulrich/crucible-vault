@@ -507,7 +507,7 @@ fn example_config_files_load_cleanly() {
     super::load_config_dir(&dir, &mut set);
     drop(tmp);
     assert!(set.errors().is_empty(), "{:?}", set.errors());
-    assert_eq!(set.armed_actions().count(), 45);
+    assert_eq!(set.armed_actions().count(), 46);
     assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
     // Plan sources-publication-model WP-1: the example is publication-shape.
     assert_eq!(set.sources().publications().len(), 2);
