@@ -1,4 +1,4 @@
-// THROWAWAY spike (runs/spike/inter-features): which Inter OpenType features substitute ASCII sequences.
+// THROWAWAY spike (docs/spikes/inter-features): which Inter OpenType features substitute ASCII sequences.
 use iced::advanced::graphics::text::cosmic_text::{self as ct, Attrs, Buffer, Family, FeatureTag, FontFeatures, Metrics, Shaping};
 
 fn ids(fs: &mut ct::FontSystem, s: &str, feats: &[&[u8; 4]]) -> Vec<u16> {
