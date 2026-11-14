@@ -350,7 +350,8 @@ retention_days = 14
 mode = "view"
 "##];
 
-const SOURCES: &[&str] = &[r#"
+const SOURCES: &[&str] = &[
+    r#"
 [[youtube]]
 channel = "Example"
 short = "Ex"
@@ -391,7 +392,29 @@ prefix = ["https://serial.example/s/1/"]
 kind = "fanfic"
 status = "complete"
 works = true
-"#];
+"#,
+    r#"
+[[publication]]
+name = "Example Pub"
+short = "Ex Pub"
+kind = "blog"
+author = "Ann"
+status = "active"
+tags = ["a"]
+priority = "high"
+works = true
+feeds = ["https://pub.example/feed"]
+method = "rss"
+canon = "substack"
+body = "full"
+paywall_markers = ["Upgrade"]
+from = ["@pub.example"]
+list_id = ["pub.example"]
+hosts = ["pub.example"]
+prefix = ["https://pub.example/p/"]
+channel_id = "UCpub"
+"#,
+];
 
 /// Plan remote-media-sprint WP-2 (deferred audit item E4): `vault.toml` joins the sample loop,
 /// with a full `[remote_media]` table.

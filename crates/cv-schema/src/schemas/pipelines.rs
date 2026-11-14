@@ -571,6 +571,109 @@ pub static SOURCE_SERIAL: Record = Record {
     summary: None,
 };
 
+/// One `[[publication]]` record (plan sources-publication-model WP-1): everything one
+/// publication is matched by.
+pub static SOURCE_PUBLICATION: Record = Record {
+    name: "publication",
+    fields: &[
+        field("name", "Name", "Display name (unique)", Node::Str).req(),
+        field(
+            "short",
+            "Short",
+            "Publication name shown in the Author column; default = name",
+            Node::Str,
+        ),
+        field(
+            "kind",
+            "Kind",
+            "kinds.toml kind its items are filed as",
+            Node::Str,
+        ),
+        field(
+            "author",
+            "Author",
+            "Display author; matches clips by author only when no prefix is set ([[ ]] and # ignored)",
+            Node::Str,
+        ),
+        field(
+            "status",
+            "Status",
+            "Works-view status; filing ignores it",
+            Node::Enum(&["active", "complete", "ignored"]),
+        )
+        .dflt(D::Str("active")),
+        field("tags", "Tags", "Tags", STR_LIST),
+        field(
+            "priority",
+            "Priority",
+            "skip/ignore exclude the record from tracker runs",
+            PRIORITY,
+        )
+        .dflt(D::Str("normal")),
+        field(
+            "works",
+            "In Works",
+            "List this publication in the Works view; unset = the kind default",
+            Node::Bool,
+        ),
+        field("feeds", "Feeds", "RSS/Atom feed URLs", STR_LIST),
+        field(
+            "method",
+            "Method",
+            "Feed fetch method; non-rss feeds are skipped",
+            Node::Str,
+        )
+        .dflt(D::Str("rss")),
+        field(
+            "canon",
+            "Canon",
+            "Post-id canonicalization",
+            Node::Enum(&["auto", "substack", "strip-params", "keep-params"]),
+        )
+        .dflt(D::Str("auto")),
+        field(
+            "body",
+            "Body",
+            "auto / full (always capture) / snippet (never)",
+            Node::Enum(&["auto", "full", "snippet"]),
+        )
+        .dflt(D::Str("auto")),
+        field(
+            "paywall_markers",
+            "Paywall markers",
+            "Body phrases (case-insensitive) that mark a post or email incomplete",
+            STR_LIST,
+        ),
+        field(
+            "from",
+            "From",
+            "Mail sender matchers, case-insensitive: a@b.example or @b.example",
+            STR_LIST,
+        ),
+        field("list_id", "List-Id", "Mail List-Id matchers", STR_LIST),
+        field(
+            "hosts",
+            "Clip hosts",
+            "Web-clip hosts (www. ignored) filed as this publication",
+            STR_LIST,
+        ),
+        field(
+            "prefix",
+            "Source prefixes",
+            "Source-URL prefixes; when any is set clips match by prefix alone (author ignored)",
+            STR_LIST,
+        ),
+        field(
+            "channel_id",
+            "Channel id",
+            "YouTube channel id (UC…)",
+            Node::Str,
+        ),
+    ],
+    rules: &[],
+    summary: None,
+};
+
 /// The `works` flag every sources row accepts (Decision 5).
 const WORKS_FIELD: Field = field(
     "works",
@@ -586,27 +689,33 @@ pub static SOURCES_FILE: Record = Record {
     fields: &[
         field(
             "youtube",
-            "YouTube channels",
-            "One [[youtube]] each",
+            "YouTube channels (deprecated)",
+            "Legacy: one [[youtube]] each; use [[publication]] (cv sources migrate)",
             Node::List(&Node::Record(&SOURCE_YOUTUBE)),
         ),
         field(
             "blog",
-            "Blogs",
-            "One [[blog]] each",
+            "Blogs (deprecated)",
+            "Legacy: one [[blog]] each; use [[publication]] (cv sources migrate)",
             Node::List(&Node::Record(&SOURCE_BLOG)),
         ),
         field(
             "newsletter",
-            "Newsletters",
-            "One [[newsletter]] each",
+            "Newsletters (deprecated)",
+            "Legacy: one [[newsletter]] each; use [[publication]] (cv sources migrate)",
             Node::List(&Node::Record(&SOURCE_NEWSLETTER)),
         ),
         field(
             "serial",
-            "Serials",
-            "One [[serial]] each",
+            "Serials (deprecated)",
+            "Legacy: one [[serial]] each; use [[publication]] (cv sources migrate)",
             Node::List(&Node::Record(&SOURCE_SERIAL)),
+        ),
+        field(
+            "publication",
+            "Publications",
+            "One [[publication]] per publication: its feeds, mail senders, hosts, prefixes and channel",
+            Node::List(&Node::Record(&SOURCE_PUBLICATION)),
         ),
     ],
     rules: &[],

@@ -18,7 +18,10 @@ const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the 
 /// Usage text.
 #[must_use]
 pub fn usage() -> String {
-    USAGE_TEMPLATE.replace("{JOBS}", crate::jobs::USAGE)
+    USAGE_TEMPLATE.replace(
+        "{JOBS}",
+        &format!("{}{}", crate::jobs::USAGE, crate::sources::USAGE),
+    )
 }
 
 /// Version line printed by `cv --version`: `cv <semver> (<build id>)`.
@@ -79,6 +82,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("jobs") => crate::jobs::run(args),
         Some("intake") => crate::jobs::run(args),
         Some("run") => crate::jobs::run(args),
+        Some("sources") => crate::sources::run(&args[1..]),
         _ => {
             eprint!("{}", usage());
             2

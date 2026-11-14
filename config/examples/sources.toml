@@ -1,50 +1,47 @@
-# Example `sources.toml` (plan v0-automation-pipelines, D21): the tracked-source registry, which
-# replaces Crucible's Markdown tables of tracked YouTube channels and blogs.
+# Example `sources.toml` (plan sources-publication-model, D21): the tracked-source registry, one
+# [[publication]] per publication, which replaces Crucible's Markdown tables of tracked YouTube
+# channels and blogs.
 #
-# [[youtube]]: channel (name), id (UC…), tags, priority (high | normal | low | skip | ignore).
-# [[blog]]: name, link (RSS/Atom feed), method (rss; others are skipped), tags, priority,
+# [[publication]] keys:
+#   name (unique), short (the `publication` shown in the Author column; default name),
+#   kind (kinds.toml key its items file as), author (bare name; [[ ]] and # ignored),
+#   status (active | complete | ignored; the Works view's, filing ignores it), tags,
+#   priority (high | normal | low | skip | ignore; skip / ignore are excluded from runs),
+#   works (listed in the Works view; unset = the kind default),
+#   feeds (RSS/Atom feed URLs) with method (rss; others are skipped),
 #   canon (auto | substack | strip-params | keep-params), body (auto | full | snippet),
-#   paywall_markers (body phrases marking a post incomplete; default none).
-# [[newsletter]] (Maildir intake, plan auto-intake-sprint): name, from (exact address or @domain,
-#   case-insensitive), list_id, blog (the name of a [[blog]] row it mirrors; must exist), kind
-#   (default blog), tags, paywall_markers (united with the linked blog row's). A row needs a
-#   `from`, a `list_id` or `hosts`. Mail from an unmatched sender is still captured (source
-#   "unknown-sender"). hosts (web-clip hosts, www. ignored) files a clip from that host as the row's
-#   kind with its publication (auto-file step 2b, after the [[blog]]-row host match).
-# [[serial]] (plan round-11-feedback-todos, replaces per-work notes): name (unique), short
-#   (publication; default name), author (bare name; [[ ]] and # ignored), prefix (source-URL
-#   prefixes), kind (kinds.toml key; required: a row without it is never filed), status (active | complete | ignored; the Works
-#   view's, filing ignores it). A clip matches when its author list holds `author` AND some prefix
-#   starts its source (a row with neither matches nothing); the first matching row in file order
-#   files it as `kind` and gives it the row's publication.
-# Every row kind accepts works = true (listed in the Works view; default false).
-# skip / ignore rows are kept but excluded from runs.
+#   paywall_markers (body phrases marking a post or email incomplete),
+#   from (mail senders: exact address or @domain, case-insensitive), list_id (List-Id matchers),
+#   hosts (web-clip hosts, www. ignored), prefix (source-URL prefixes: when any is set a clip
+#   matches by prefix alone, otherwise by author), channel_id (YouTube UC… id).
+# A record needs at least one of feeds, from, list_id, hosts, prefix, channel_id or author, and
+# no sender, list id, feed, host, prefix or channel id may belong to two records. Mail from an
+# unmatched sender is still captured (source "unknown-sender").
+# Legacy [[youtube]] / [[blog]] / [[newsletter]] / [[serial]] tables still load (folded into
+# records by publication name); `cv sources migrate` rewrites them as [[publication]].
 
-[[youtube]]
-channel = "Example Channel"
-id = "UCxxxxxxxxxxxxxxxxxxxxxx"
+[[publication]]
+name = "Example Channel"
 tags = ["example"]
 priority = "normal"
+channel_id = "UCxxxxxxxxxxxxxxxxxxxxxx"
 
-[[blog]]
+[[publication]]
 name = "Example Blog"
-link = "https://example.com/feed.xml"
-method = "rss"
 tags = ["example"]
 priority = "normal"
+feeds = ["https://example.com/feed.xml"]
+method = "rss"
 canon = "auto"
 body = "auto"
 
-# [[newsletter]]
-# name = "Example Letter"
+# A newsletter that mirrors the blog joins its record:
 # from = ["writer@news.example"]      # or "@news.example"
-# list_id = "letter.news.example"
-# blog = "Example Blog"
+# list_id = ["letter.news.example"]
 # kind = "blog"
-# tags = ["example"]
 # paywall_markers = ["Upgrade to read the rest"]
 
-# [[serial]]
+# [[publication]]
 # name = "Example Serial"
 # short = "Example"
 # author = "Example Author"

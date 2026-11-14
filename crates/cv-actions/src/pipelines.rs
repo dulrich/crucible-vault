@@ -13,6 +13,8 @@
 
 use serde::Deserialize;
 
+pub use crate::sources::{Publication, RowRef};
+
 /// `pipelines.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -349,7 +351,7 @@ impl Default for QueuePipelineConfig {
 }
 
 /// Source priority (`high`, `normal`, `low`, `skip`, `ignore`; default `normal`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     High,
@@ -371,7 +373,7 @@ impl Priority {
 }
 
 /// Blog post-id canonicalization (`auto`, `substack`, `strip-params`, `keep-params`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BlogCanon {
     #[default]
@@ -396,7 +398,7 @@ impl BlogCanon {
 }
 
 /// Blog body mode (`auto`, `full`, `snippet`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BodyMode {
     #[default]
@@ -410,14 +412,30 @@ pub enum BodyMode {
 #[serde(deny_unknown_fields, default)]
 pub struct SourcesConfig {
     /// `[[youtube]]` channels.
+    // removed in WP-2 (plans/sources-publication-model.md)
     pub youtube: Vec<YoutubeSource>,
     /// `[[blog]]` feeds.
+    // removed in WP-2 (plans/sources-publication-model.md)
     pub blog: Vec<BlogSource>,
     /// `[[newsletter]]` mail senders (plan auto-intake-sprint WP-4).
+    // removed in WP-2 (plans/sources-publication-model.md)
     pub newsletter: Vec<NewsletterSource>,
     /// `[[serial]]` works (plan round-11-feedback-todos Decision 4; replaces the per-work
     /// notes).
+    // removed in WP-2 (plans/sources-publication-model.md)
     pub serial: Vec<SerialSource>,
+    /// `[[publication]]` records as written (plan sources-publication-model WP-1); the folded set,
+    /// legacy rows included, is [`SourcesConfig::publications`].
+    pub publication: Vec<Publication>,
+    /// Every publication record: `[[publication]]` rows with the legacy rows folded in.
+    #[serde(skip)]
+    pub(crate) folded: Vec<Publication>,
+    /// The rows each folded record came from (parallel to `folded`).
+    #[serde(skip)]
+    pub(crate) origins: Vec<Vec<RowRef>>,
+    /// The one load notice of a fold that merged rows.
+    #[serde(skip)]
+    pub(crate) notice: Option<String>,
 }
 
 impl SourcesConfig {
@@ -453,6 +471,8 @@ impl SourcesConfig {
                 ));
             }
         }
+        let mut c = c;
+        crate::sources::fold(&mut c)?;
         Ok(c)
     }
 }
@@ -560,7 +580,7 @@ fn blog_kind() -> String {
 }
 
 /// A `[[serial]]` row's status (a view concern; filing ignores it).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SerialStatus {
     #[default]
@@ -601,7 +621,7 @@ pub struct SerialSource {
 
 /// An author for comparison: trimmed, a `[[…]]` wrapper stripped (a link's `|alias` and
 /// `#heading` dropped, so the link target names the author), `#` removed, trimmed again.
-fn author_key(a: &str) -> String {
+pub(crate) fn author_key(a: &str) -> String {
     let t = a.trim();
     // Only a wrapped entry is a link; a bare author keeps its `#` handling (`C#` → `C`).
     let inner = if t.starts_with("[[") && t.ends_with("]]") {

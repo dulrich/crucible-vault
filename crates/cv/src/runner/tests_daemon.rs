@@ -509,7 +509,13 @@ fn example_config_files_load_cleanly() {
     assert!(set.errors().is_empty(), "{:?}", set.errors());
     assert_eq!(set.armed_actions().count(), 45);
     assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
-    assert_eq!(set.sources().blog.len(), 1);
+    // Plan sources-publication-model WP-1: the example is publication-shape.
+    assert_eq!(set.sources().publications().len(), 2);
+    assert!(
+        set.sources()
+            .by_feed("https://example.com/feed.xml")
+            .is_some()
+    );
     assert!(
         set.armed("search-refresh")
             .unwrap()
