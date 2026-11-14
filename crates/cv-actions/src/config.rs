@@ -22,7 +22,7 @@ use serde::Deserialize;
 use crate::model::{
     Action, LaneChoice, OriginSel, ResourceSpec, Schedule, Selector, Starter, Step,
 };
-use crate::pipelines::{PipelinesConfig, SourcesConfig};
+use crate::pipelines::{PipelinesConfig, Publication, SourcesConfig};
 use crate::vault::VaultConfig;
 
 /// Every config file name WP-9 loads, in load order.
@@ -120,6 +120,35 @@ pub struct ConfigSet {
     sources: SourcesConfig,
     vault: VaultConfig,
     typed_errors: BTreeMap<String, String>,
+}
+
+/// The resolved In-Works value of `p` over the `kinds.toml` root table `kinds_file` (plan
+/// sources-publication-model WP-5): the record's own `works` when set, else the `works` boolean
+/// of `[kinds.<p.kind>]` when the record has a kind and that kind defines it, else false.
+///
+/// # Errors
+/// The kind's `works` is consulted and is not a boolean (a reported config error, never read as
+/// false).
+pub fn resolve_in_works(kinds_file: &toml::Table, p: &Publication) -> Result<bool, String> {
+    if let Some(w) = p.works {
+        return Ok(w);
+    }
+    let Some(kind) = p.kind.as_deref() else {
+        return Ok(false);
+    };
+    match kinds_file
+        .get("kinds")
+        .and_then(toml::Value::as_table)
+        .and_then(|k| k.get(kind))
+        .and_then(toml::Value::as_table)
+        .and_then(|d| d.get("works"))
+    {
+        None => Ok(false),
+        Some(toml::Value::Boolean(b)) => Ok(*b),
+        Some(_) => Err(format!(
+            "kinds.toml [kinds.{kind}]: `works` must be a boolean"
+        )),
+    }
 }
 
 impl ConfigSet {
@@ -250,6 +279,15 @@ impl ConfigSet {
     #[must_use]
     pub fn sources(&self) -> &SourcesConfig {
         &self.sources
+    }
+
+    /// Whether `p` is listed in the Works view and carries `file.serial` (plan
+    /// sources-publication-model WP-5): see [`resolve_in_works`]. The one resolution of the flag.
+    ///
+    /// # Errors
+    /// A non-boolean `works` on the `kinds.toml` kind the record's own `works` defers to.
+    pub fn in_works(&self, p: &Publication) -> Result<bool, String> {
+        resolve_in_works(self.table("kinds.toml"), p)
     }
 
     fn rebuild(&mut self, validate: StepValidator) {

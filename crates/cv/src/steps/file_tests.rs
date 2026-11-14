@@ -369,3 +369,22 @@ fn missing_target_note_is_note_gone() {
         "missing.md"
     );
 }
+
+/// Plan sources-publication-model WP-5: `works` is an allowed `[kinds.NAME]` key (a kind setting
+/// it still loads for every kind-consuming step); an unknown key is still rejected.
+#[test]
+fn kind_def_accepts_works_and_rejects_unknown_keys() {
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(
+        "kinds.toml".to_owned(),
+        Some(
+            "[kinds.fanfic]\nlabel='F'\nworks=true\n[kinds.bad]\nworks=true\nbogus=1\n".to_owned(),
+        ),
+    );
+    let mut config = cv_actions::ConfigSet::new();
+    config.reload(&files, &crate::steps::validate);
+    let def = super::file::kind_def(&config, "fanfic").unwrap();
+    assert_eq!(def.get("works"), Some(&toml::Value::Boolean(true)));
+    let e = super::file::kind_def(&config, "bad").unwrap_err();
+    assert!(e.contains("bogus"), "{e}");
+}

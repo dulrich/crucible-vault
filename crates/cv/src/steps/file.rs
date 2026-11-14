@@ -56,6 +56,7 @@ const KIND_KEYS: &[&str] = &[
     "cleanup_transcript",
     "props",
     "hosts",
+    "works",
 ];
 
 /// The `[kinds.NAME]` table of `kinds.toml`.

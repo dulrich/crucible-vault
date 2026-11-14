@@ -170,6 +170,9 @@ impl ViewRegistry {
 pub struct ViewSettings {
     /// `sources.toml`.
     pub sources: SourcesConfig,
+    /// The resolved In-Works value of each `sources` record, in record order
+    /// ([`ConfigSet::in_works`]); an error is a malformed `kinds.toml` `works`.
+    pub in_works: Result<Vec<bool>, String>,
     /// What the host itself takes: the `folder("<key>")` table and `vault.toml` `[trash]
     /// retention_days` (the value tidy expires by), in the `views`-owned type (review S6).
     pub host: views::HostSettings,
@@ -183,6 +186,12 @@ impl ViewSettings {
     pub fn of(c: &ConfigSet) -> Self {
         Self {
             sources: c.sources().clone(),
+            in_works: c
+                .sources()
+                .publications()
+                .iter()
+                .map(|p| c.in_works(p))
+                .collect(),
             host: views::HostSettings {
                 folders: host_folders(c),
                 trash_retention_days: c.vault().trash.retention_days,
@@ -218,18 +227,24 @@ struct Entry {
 }
 
 /// The `source = "sources"` records and the `file.serial` match set (plan round-11-feedback-todos
-/// Decision 5), over the `daily/day` notes of `q`:
-/// - one record per `[[serial]]` row plus per `[[blog]]`/`[[newsletter]]`/`[[youtube]]` row with
-///   `works = true` (config order), binding `name`, `publication`, `author` (bare; null when
-///   unset), `prefix` (list), `kind` (serial/newsletter: its `kind`; blog/youtube: the row type),
-///   `status` (serial: its status; others `active`), `row`, `entries`, `unread` (`read != true`)
-///   and `last_update` (latest `created`, else file ctime; null without entries). Serial rows
-///   count the notes `Publication::matches_note` accepts (the auto-file matcher, shared — never
-///   restated as a view expression); other rows count notes whose `publication` equals theirs;
-/// - note path → name of the first serial row (config order) matching it.
+/// Decision 5; plan sources-publication-model WP-5), over the `daily/day` notes of `q`. Only the
+/// records whose resolved In-Works value (`in_works`, one per record, [`ConfigSet::in_works`]:
+/// the record's `works`, else its kind's, else off) is true take part; a record is never listed
+/// twice:
+/// - one row per In-Works record (config order), binding `name`, `publication`, `author` (bare;
+///   null when unset), `prefix` (list), `kind` (a work record: its `kind`, else empty; others:
+///   `kind`, else the row shape), `status` (a work record: its status; others `active`), `row`
+///   (`serial` for a work record — a prefix or an author — or one that came from a `[[serial]]`
+///   row, else blog/newsletter/youtube by shape), `entries`, `unread` (`read != true`) and
+///   `last_update` (latest `created`, else file ctime; null without entries). Work records count
+///   the notes `Publication::matches_note` accepts (the auto-file matcher, shared — never
+///   restated as a view expression); other records count notes whose `publication` equals theirs;
+/// - note path → name of the first In-Works work record (config order) matching it; a note
+///   matching only a record with In Works off has none.
 fn source_data(
     q: &cv_index::Query<'_>,
     cfg: &SourcesConfig,
+    in_works: &[bool],
     day_folder: &str,
 ) -> Result<(Vec<views::engine::Record>, BTreeMap<String, String>), String> {
     use views::value::Value;
@@ -265,18 +280,21 @@ fn source_data(
             }
         }
     }
-    // Work records (a prefix or an author: the former `[[serial]]` rows) are always emitted and
-    // set `file.serial`; other records only with `works = true` (plan sources-publication-model
-    // WP-2 keeps the per-table rule; WP-5 replaces it).
-    let serialish = |i: usize, p: &cv_actions::pipelines::Publication| {
-        p.is_work() || cfg.origins()[i].iter().any(|o| o.table == "serial")
-    };
-    let works: Vec<&cv_actions::pipelines::Publication> = cfg
+    // In-Works records only (plan sources-publication-model WP-5); a work record (a prefix or an
+    // author, or a former `[[serial]]` row) is a `serial` row and sets `file.serial`.
+    let listed: Vec<(usize, &cv_actions::pipelines::Publication)> = cfg
         .publications()
         .iter()
         .enumerate()
+        .filter(|(i, _)| in_works.get(*i).copied().unwrap_or(false))
+        .collect();
+    let serialish = |i: usize, p: &cv_actions::pipelines::Publication| {
+        p.is_work() || cfg.origins()[i].iter().any(|o| o.table == "serial")
+    };
+    let works: Vec<&cv_actions::pipelines::Publication> = listed
+        .iter()
         .filter(|(i, p)| serialish(*i, p))
-        .map(|(_, p)| p)
+        .map(|(_, p)| *p)
         .collect();
     let mut serial_of = BTreeMap::new();
     for (path, e) in &notes {
@@ -373,11 +391,9 @@ fn source_data(
         }
     }
     for shape in ["blog", "newsletter", "youtube"] {
-        for (_, p) in cfg
-            .publications()
+        for (_, p) in listed
             .iter()
-            .enumerate()
-            .filter(|(i, p)| !serialish(*i, p) && p.works == Some(true) && row_of(p).0 == shape)
+            .filter(|(i, p)| !serialish(*i, p) && row_of(p).0 == shape)
         {
             let f = by_pub(p.publication());
             let (_, kind) = row_of(p);
@@ -444,7 +460,13 @@ fn serve(
                     && host.needs_sources(&view_id)
                     && let Some(r) = reader.as_ref()
                 {
-                    match source_data(&r.query(), &settings.sources, &settings.day_folder) {
+                    match settings
+                        .in_works
+                        .as_ref()
+                        .map_err(Clone::clone)
+                        .and_then(|w| {
+                            source_data(&r.query(), &settings.sources, w, &settings.day_folder)
+                        }) {
                         Ok((records, serial)) => {
                             host.set_sources(records, serial);
                             sources_stale = false;
@@ -848,10 +870,12 @@ mod tests {
              [[views]]\ntype='table'\nname='Grouped'\nfilters='file.serial'\norder=['file.name']\nsort=[{property='file.name',direction='ASC'}]\ngroupBy={property='file.serial',direction='ASC'}\n",
         )
         .unwrap();
-        let sources = "[[serial]]\nname='Saga'\nauthor='Ann'\nprefix=['https://s.example/w/1/']\n\
+        let sources = "[[serial]]\nname='Saga'\nkind='fanfic'\nauthor='Ann'\nprefix=['https://s.example/w/1/']\n\
                        [[blog]]\nname='Feed'\nlink='https://f.example/rss'\nworks=true\n\
                        [[blog]]\nname='Hidden'\nlink='https://h.example/rss'\n";
         std::fs::write(config.join("sources.toml"), sources).unwrap();
+        // The kind default lists the work records (plan sources-publication-model WP-5).
+        std::fs::write(config.join("kinds.toml"), "[kinds.fanfic]\nworks = true\n").unwrap();
         let base = tmp.path().join("idx").join("index.db");
         std::fs::create_dir_all(base.parent().unwrap()).unwrap();
         let mut index = cv_index::Index::create(&vault, &base).unwrap();
@@ -917,7 +941,7 @@ mod tests {
         // Config change: a second serial row appears and the blog row loses `works`.
         std::fs::write(
             config.join("sources.toml"),
-            format!("{sources}[[serial]]\nname='Other'\nprefix=['https://other.example/']\n")
+            format!("{sources}[[serial]]\nname='Other'\nkind='fanfic'\nprefix=['https://other.example/']\n")
                 .replace("works=true\n", ""),
         )
         .unwrap();
@@ -943,5 +967,65 @@ mod tests {
         reg.notify_generation(g);
         let rows = source_rows(&reg.run(&all, None, None, None).await.unwrap());
         assert_eq!(rows[1], s("Saga", "3", "1", "2026-10-04"));
+    }
+
+    /// Plan sources-publication-model WP-5: only In-Works records (the record's `works`, else its
+    /// kind's, else off) are listed — once each — and only they set `file.serial`.
+    #[tokio::test]
+    async fn in_works_governs_rows_and_file_serial() {
+        let root = std::env::temp_dir().join(format!("cv-views-inworks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tmp = TmpRoot(root);
+        let vault = tmp.path().join("vault");
+        std::fs::create_dir_all(vault.join("daily/day/2026-10-01")).unwrap();
+        for (name, author) in [("a1", "Kind On"), ("a2", "Kind Off"), ("a3", "Rec Off")] {
+            std::fs::write(
+                vault.join(format!("daily/day/2026-10-01/{name}.md")),
+                format!("---\nauthor: {author}\ncreated: 2026-10-01\n---\n"),
+            )
+            .unwrap();
+        }
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(config.join("views")).unwrap();
+        std::fs::write(
+            config.join("views/works.toml"),
+            "[[views]]\ntype='table'\nname='All'\nsource='sources'\norder=['name','entries','unread','last_update']\nsort=[{property='name',direction='ASC'}]\n\
+             [[views]]\ntype='table'\nname='Serial'\nfilters='file.serial'\norder=['file.name']\nsort=[{property='file.name',direction='ASC'}]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("kinds.toml"),
+            "[kinds.yes]\nworks = true\n[kinds.no]\nlabel = 'n'\n",
+        )
+        .unwrap();
+        // KindOn: kind default true; KindOff: kind default off; RecOff: `works = false` over a
+        // true kind; RecOn: `works = true` over an off kind with a prefix (one row, not two);
+        // Bare: no kind, no `works`.
+        std::fs::write(
+            config.join("sources.toml"),
+            "[[serial]]\nname='KindOn'\nkind='yes'\nauthor='Kind On'\n\
+             [[serial]]\nname='KindOff'\nkind='no'\nauthor='Kind Off'\n\
+             [[publication]]\nname='RecOff'\nkind='yes'\nworks=false\nauthor='Rec Off'\n\
+             [[serial]]\nname='RecOn'\nkind='no'\nworks=true\nprefix=['https://r.example/']\n\
+             [[blog]]\nname='Bare'\nlink='https://b.example/rss'\n",
+        )
+        .unwrap();
+        let base = tmp.path().join("idx").join("index.db");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        cv_index::Index::create(&vault, &base).unwrap();
+        let (tx, _rx) = broadcast::channel(64);
+        let reg = ViewRegistry::start(&config, &base, None, tx).unwrap();
+        reg.set_config(&loaded(&config));
+        let names = |r: &ViewResult| {
+            source_rows(r)
+                .into_iter()
+                .map(|(n, ..)| n)
+                .collect::<Vec<_>>()
+        };
+        let all = reg.run("works#All", None, None, None).await.unwrap();
+        assert_eq!(names(&all), ["KindOn", "RecOn"]);
+        // Only the In-Works record's note carries `file.serial` (Unread/Entries read it).
+        let serial = reg.run("works#Serial", None, None, None).await.unwrap();
+        assert_eq!(names(&serial), ["a1"]);
     }
 }

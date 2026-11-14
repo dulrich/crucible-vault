@@ -377,3 +377,28 @@ fn sources_fold_notice_is_a_load_notice() {
     c.reload(&BTreeMap::new(), &ok);
     assert!(c.notices().is_empty());
 }
+
+/// Plan sources-publication-model WP-5: the record's `works` wins, else its kind's, else false.
+#[test]
+fn in_works_resolves_record_then_kind_then_false() {
+    let kinds: toml::Table =
+        "[kinds.on]\nworks = true\n[kinds.off]\nlabel = 'x'\n[kinds.bad]\nworks = 'yes'\n"
+            .parse()
+            .unwrap();
+    let p = |kind: Option<&str>, works: Option<bool>| Publication {
+        kind: kind.map(str::to_owned),
+        works,
+        ..Publication::default()
+    };
+    let r = |k, w| resolve_in_works(&kinds, &p(k, w)).unwrap();
+    assert!(r(Some("on"), None));
+    assert!(!r(Some("on"), Some(false)));
+    assert!(r(Some("off"), Some(true)));
+    assert!(!r(Some("off"), None));
+    assert!(!r(Some("undefined"), None));
+    assert!(!r(None, None));
+    assert!(r(None, Some(true)));
+    // A malformed kind `works` is an error when consulted, never false; the record wins first.
+    assert!(resolve_in_works(&kinds, &p(Some("bad"), None)).is_err());
+    assert!(r(Some("bad"), Some(true)));
+}

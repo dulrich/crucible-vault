@@ -1,18 +1,23 @@
 # Works over `sources.toml` (plan round-11-feedback-todos Decision 5; replaces the per-work
-# notes, migrated by deploy migration 0007).
-# - Active/Complete read `source = "sources"`: every `[[serial]]` row plus every `[[blog]]`,
-#   `[[newsletter]]` and `[[youtube]]` row with `works = true` (`ignored` serial rows are in
-#   neither view). The daemon computes each row's fields: `name`, `publication`, `author` (bare),
-#   `prefix`, `kind`, `status`, `row` (serial|blog|newsletter|youtube) and the per-row counts over
-#   `daily/day` notes — `entries`, `unread` (`read != true`) and `last_update` (latest
-#   `created ?? file.ctime`). Serial rows count notes matched by the shared serial matcher
-#   (`cv_actions::pipelines::SerialSource::matches`: a row with a prefix matches by prefix alone,
-#   else by author; a row with neither matches nothing); other rows count notes whose
-#   `publication` equals the row's. Zero renders `·` (the `entries`/`unread` formulas below).
+# notes, migrated by deploy migration 0007; plan sources-publication-model WP-5).
+# - Which records are listed: a publication is "In Works" when its own `works` says so, else when
+#   its kind's `[kinds.<kind>] works` in `kinds.toml` does, else not (a record with no kind and no
+#   `works` is not listed). Only In-Works records appear below and only they set `file.serial`;
+#   each is listed once.
+# - Active/Complete read `source = "sources"`: one row per In-Works record (`ignored` records are
+#   in neither view). The daemon computes each row's fields: `name`, `publication`, `author`
+#   (bare), `prefix`, `kind`, `status`, `row` (serial for a record with a prefix or an author,
+#   else blog|newsletter|youtube) and the per-row counts over `daily/day` notes — `entries`,
+#   `unread` (`read != true`) and `last_update` (latest `created ?? file.ctime`). Work records
+#   count notes matched by the shared matcher (`Publication::matches_note`: a record with a prefix
+#   matches by prefix alone, else by author; one with neither matches nothing); other records
+#   count notes whose `publication` equals the record's. Zero renders `·` (the
+#   `entries`/`unread` formulas below).
 # - Unread stays an index view of unread `daily/day` notes; `file.serial` is the name of the first
-#   `[[serial]]` row (config order) the note matches by that same matcher (null when none),
-#   supplied by the daemon — never restated as an expression here.
-# - Entries `select_by = "file.serial"` (plan round-13 WP-4): clicking a `[[serial]]` row's Name in
+#   In-Works work record (config order) the note matches by that same matcher (null when none, or
+#   when the only match has In Works off), supplied by the daemon — never restated as an
+#   expression here.
+# - Entries `select_by = "file.serial"` (plan round-13 WP-4): clicking a work row's Name in
 #   Active/Complete on the same note filters Entries to that work; clicking it again clears.
 
 [formulas]

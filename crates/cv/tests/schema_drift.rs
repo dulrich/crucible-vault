@@ -66,6 +66,7 @@ tags = ["one", "two"]
 folder = "{period.day}"
 cleanup_transcript = true
 props = { source = "web", rank = 1 }
+works = true
 hosts = ["one.example", "www.two.example"]
 
 [kinds.k2]

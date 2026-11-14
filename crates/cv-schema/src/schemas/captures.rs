@@ -42,6 +42,13 @@ pub static KIND: Record = Record {
             "Clip hosts auto_file files under this kind (www. ignored)",
             STR_LIST,
         ),
+        field(
+            "works",
+            "In Works",
+            "Publications of this kind are listed in the Works view unless the publication sets its own `works`",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
     ],
     rules: &[],
     summary: None,
