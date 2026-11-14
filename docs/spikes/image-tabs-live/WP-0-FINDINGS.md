@@ -2,7 +2,7 @@
 
 Aggregates only; the note list lives in `/dev/shm/cv-imgtabs/img15.tsv` (outside the repo).
 
-- Scripts (scratch, untracked): `runs/spike/image-tabs-live/`. Set: `sh pick.sh <vault> 15 <list>` — the 15 notes with the most image embeds (37–71 each), opened 3 s apart with `cv uri obsidian://open?vault=vault&file=…`.
+- Scripts were throwaway scratch. Set: `sh pick.sh <vault> 15 <list>` — the 15 notes with the most image embeds (37–71 each), opened 3 s apart with `cv uri obsidian://open?vault=vault&file=…`.
 - Sampler: `sh sample.sh samples.tsv <stop-file> 2` — `/proc/<pid>/smaps_rollup` Rss and Pss_Anon for `cvault-editor` and `cv daemon` every 2 s. The editor's `cv status` gauges refresh only every 300 s (`crates/editor/src/memory.rs` `REPORT_EVERY`), so they are not used here.
 
 | phase | editor rss | editor anon | daemon rss |
