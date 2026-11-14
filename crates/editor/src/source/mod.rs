@@ -76,6 +76,11 @@ pub fn update(
         }
     };
     let task = match msg {
+        SourceMsg::Action(Action::SelectAll) => {
+            // Round-25 WP-2: body ↔ whole note; a selection, never an edit.
+            buf.select_all_toggle();
+            edited(buf, false)
+        }
         SourceMsg::Action(a) => {
             let changed = buf.perform(a, Instant::now());
             edited(buf, changed)

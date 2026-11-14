@@ -76,6 +76,59 @@ fn notify(app: &mut App, path: &str, hash: Option<String>) {
     )));
 }
 
+/// Round-25 WP-2: Ctrl+A toggles body -> whole note -> body, in either selection direction,
+/// and is not an edit (no dirty flag, nothing to undo).
+#[test]
+fn select_all_toggles_body_and_whole_note() {
+    let text = "---\na: 1\n---\nbody\nmore\n";
+    let mut b = SourceBuffer::new(
+        crate::daemon::bound_id("fm.md"),
+        "fm.md",
+        text.as_bytes(),
+        ContentHash::of(text.as_bytes()),
+    );
+    let body = Cursor {
+        position: Position { line: 5, column: 0 },
+        selection: Some(Position { line: 3, column: 0 }),
+    };
+    let whole = Cursor {
+        position: Position { line: 5, column: 0 },
+        selection: Some(Position { line: 0, column: 0 }),
+    };
+    b.select_all_toggle();
+    assert_eq!(b.cursor(), body);
+    b.select_all_toggle();
+    assert_eq!(b.cursor(), whole);
+    b.select_all_toggle();
+    assert_eq!(b.cursor(), body);
+    // A backwards body selection toggles to the whole note too.
+    b.move_to(Cursor {
+        position: Position { line: 3, column: 0 },
+        selection: Some(Position { line: 5, column: 0 }),
+    });
+    b.select_all_toggle();
+    assert_eq!(b.cursor(), whole);
+    assert!(!b.is_dirty());
+    assert!(!b.undo());
+
+    // No frontmatter: everything, every time.
+    let plain = "one\ntwo";
+    let mut p = SourceBuffer::new(
+        crate::daemon::bound_id("p.md"),
+        "p.md",
+        plain.as_bytes(),
+        ContentHash::of(plain.as_bytes()),
+    );
+    p.select_all_toggle();
+    let all = Cursor {
+        position: Position { line: 1, column: 3 },
+        selection: Some(Position { line: 0, column: 0 }),
+    };
+    assert_eq!(p.cursor(), all);
+    p.select_all_toggle();
+    assert_eq!(p.cursor(), all);
+}
+
 #[test]
 fn edits_route_through_undo_and_restore_cursor() {
     let (_t, _d, mut app, _p) = setup();

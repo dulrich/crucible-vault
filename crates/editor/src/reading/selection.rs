@@ -6,7 +6,7 @@
 
 use editor_model::visible::VisRun;
 
-use crate::widget::selectable::{SelPos, Selection};
+use crate::widget::selectable::Selection;
 
 /// The largest char boundary of `s` at or below `i`.
 fn floor(s: &str, i: usize) -> usize {
@@ -49,11 +49,8 @@ pub fn copy_text(runs: &[VisRun], sel: Selection) -> String {
     out
 }
 
-/// The whole-document selection: `(start of run 0, end of the last run)`.
-pub fn all(runs: &[VisRun]) -> Option<Selection> {
-    let last = runs.len().checked_sub(1)?;
-    Some(Selection::new(
-        SelPos::new(0, 0),
-        SelPos::new(last, runs[last].text.len()),
-    ))
+/// Ctrl+A: the body first, then the whole document, then the body (see
+/// `editor_model::select_all`).
+pub fn all(runs: &[VisRun], current: Option<Selection>) -> Option<Selection> {
+    editor_model::select_all::select_all_next(runs, current)
 }

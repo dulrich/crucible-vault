@@ -188,7 +188,10 @@ impl ReadingStore {
     /// Ctrl+A: selects `path`'s whole rendered document in tab `view`; false when nothing is
     /// rendered.
     pub fn select_all(&mut self, docs: &mut Docs, path: &str, view: u64) -> bool {
-        let all = self.doc(docs, path).and_then(|d| selection::all(&d.runs));
+        let current = self.selection(docs, path, view);
+        let all = self
+            .doc(docs, path)
+            .and_then(|d| selection::all(&d.runs, current));
         self.set_selection(docs, path, view, all);
         self.selection(docs, path, view).is_some()
     }

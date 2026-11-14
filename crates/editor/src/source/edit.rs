@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use editor_model::editing::{self, ListEnter};
+use editor_model::select_all;
 use editor_model::undo::{self, Change, EditKind};
 use iced::widget::text_editor::{self, Action, Content, Edit, Motion};
 
@@ -252,6 +253,29 @@ impl SourceBuffer {
             self.shaped().move_to(before);
         }
         changed
+    }
+
+    /// Ctrl+A (round-25 WP-2): selects the body, then the whole note, then the body again (see
+    /// `editor_model::select_all`). A navigation, not an edit: no undo entry.
+    pub fn select_all_toggle(&mut self) {
+        let text = self.text();
+        let before = self.shaped().cursor();
+        let off =
+            |p: text_editor::Position| undo::offset_of(&text, undo::Pos::new(p.line, p.column));
+        let (Some(cursor), anchor) = (off(before.position), before.selection.map(off)) else {
+            return;
+        };
+        // An unmappable anchor counts as no selection.
+        let (a, c) = select_all::source_select_all_next(&text, anchor.flatten(), cursor);
+        let pos = |o: usize| {
+            let (line, column) = select_all::line_col(&text, o);
+            text_editor::Position { line, column }
+        };
+        self.shaped().move_to(text_editor::Cursor {
+            position: pos(c),
+            selection: (a != c).then(|| pos(a)),
+        });
+        self.track_top(None, before.position.line);
     }
 
     /// Smart Home / End (see `editor_model::editing`); `select` extends the selection.

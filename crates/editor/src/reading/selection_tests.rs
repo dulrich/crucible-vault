@@ -273,7 +273,7 @@ fn copy_text_of_list_table_code_and_image() {
     let md = "- one\n- [x] two\n  1. sub\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nfn x() {\n    y\n}\n```\n\n![pic](https://e.x/i.png)\n";
     let model = render::lower(md);
     let rs = runs(&model);
-    let all = selection::all(&rs).expect("runs");
+    let all = selection::all(&rs, None).expect("runs");
     assert_eq!(
         copy_text(&rs, all),
         "- one\n- [x] two\n  1. sub\n\na\tb\n1\t2\n\nfn x() {\n    y\n}\n\npic"

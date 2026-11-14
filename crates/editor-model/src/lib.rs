@@ -20,5 +20,6 @@ pub mod props;
 pub mod rank;
 pub mod reading;
 pub mod render;
+pub mod select_all;
 pub mod undo;
 pub mod visible;
