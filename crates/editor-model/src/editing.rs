@@ -140,7 +140,9 @@ pub fn list_content_start(line: &str) -> Option<usize> {
 /// - first row: past the indent → indent end; inside the indent or at its end (indent > 0) →
 ///   column 0; at column 0 → the indent end;
 /// - first row of a list line (`content_start`, see [`list_content_start`]): past the content
-///   start → the content start; from there the rule above applies.
+///   start → the content start; from there the rule above applies. Repeated Home cycles content
+///   start → indent end (indent > 0) → column 0 → content start; with no indent it cycles
+///   content start ↔ column 0.
 pub fn home_target(
     col: usize,
     indent: usize,
@@ -164,7 +166,7 @@ pub fn home_target(
     } else if col > 0 {
         0
     } else {
-        indent
+        content_start.unwrap_or(indent)
     }
 }
 
@@ -285,8 +287,23 @@ mod tests {
             let c = Some(cs);
             assert_eq!(home_target(cs + 2, indent, 0, c), cs, "{line} past");
             assert_eq!(home_target(cs, indent, 0, c), indent, "{line} at");
-            assert_eq!(home_target(indent, indent, 0, c), 0, "{line} indent end");
+            assert_eq!(
+                home_target(indent, indent, 0, c),
+                if indent > 0 { 0 } else { cs },
+                "{line} indent end"
+            );
+            assert_eq!(home_target(0, indent, 0, c), cs, "{line} cycle");
         }
+        // Explicit Home walks on the first row of list lines.
+        // `  - abc` (indent 2, content 4): 7 → 4 → 2 → 0 → 4.
+        assert_eq!(home_target(7, 2, 0, Some(4)), 4);
+        assert_eq!(home_target(4, 2, 0, Some(4)), 2);
+        assert_eq!(home_target(2, 2, 0, Some(4)), 0);
+        assert_eq!(home_target(0, 2, 0, Some(4)), 4);
+        // `- abc` (content 2, no indent): 5 → 2 → 0 → 2.
+        assert_eq!(home_target(5, 0, 0, Some(2)), 2);
+        assert_eq!(home_target(2, 0, 0, Some(2)), 0);
+        assert_eq!(home_target(0, 0, 0, Some(2)), 2);
         // Wrapped continuation row of a list line is unchanged.
         assert_eq!(home_target(50, 0, 40, Some(2)), 40);
         // Marker-less line.
