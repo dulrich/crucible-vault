@@ -100,6 +100,8 @@ pub struct Settings {
     pub body_offsets: std::collections::HashMap<Section, f32>,
     /// Plan round-5 WP-6: the network-backed pickers' session cache.
     pub lookups: lookups::Lookups,
+    /// The Sources page (plan sources-publication-model WP-6): the pending apply prompt.
+    pub sources: pages::sources::SourcesState,
 }
 
 impl Default for Settings {
@@ -115,6 +117,7 @@ impl Default for Settings {
             hotkeys: pages::hotkeys::HotkeyState::default(),
             body_offsets: std::collections::HashMap::new(),
             lookups: lookups::Lookups::default(),
+            sources: pages::sources::SourcesState::default(),
         }
     }
 }
@@ -179,6 +182,8 @@ pub enum SettingsMsg {
     StatusLoaded(Result<cv_protocol::StatusResult, String>),
     /// A Hotkeys page control (WP-4).
     Hotkey(pages::hotkeys::HotkeyMsg),
+    /// A Sources page control (plan sources-publication-model WP-6).
+    Sources(pages::sources::SourcesMsg),
 }
 
 #[cfg(test)]

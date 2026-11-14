@@ -90,6 +90,10 @@ pub fn page<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a, 
     el
 }
 
+fn sec_file(s: &Settings) -> Option<&ConfigFile> {
+    s.section.file().and_then(|p| s.file(p))
+}
+
 fn page_inner<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a, Message> {
     let cx = pages::PageCx { s, paths, t };
     let heading = text(s.section.label()).size(20).color(t.heading.to_color());
@@ -97,6 +101,10 @@ fn page_inner<'a>(s: &'a Settings, paths: &'a [String], t: Tokens) -> Element<'a
         Section::Status => status::view(&s.status, t),
         Section::Hotkeys => pages::hotkeys::view(cx),
         Section::Views => pages::views::view(cx),
+        Section::Sources => match sec_file(s) {
+            Some(f) => pages::sources::view(cx, f),
+            None => Space::new().into(),
+        },
         sec => match sec.file().and_then(|p| s.file(p)) {
             // The Editor page's intro is its migration / malformed note, when there is one.
             Some(f) => pages::generic(

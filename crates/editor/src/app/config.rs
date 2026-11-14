@@ -416,6 +416,11 @@ impl App {
             .is_some_and(|f| f.file_changed(hash, d.as_ref()));
         if reloaded {
             self.settings.form.clear_drafts(path);
+            if path == crate::settings::pages::sources::SOURCES_PATH
+                || path == crate::settings::pages::sources::KINDS_PATH
+            {
+                self.settings.sources.prompt = None;
+            }
             self.on_settings_content(path);
         }
     }
@@ -464,6 +469,7 @@ impl App {
                 return self.refresh_status_if_open();
             }
             SettingsMsg::Hotkey(m) => return self.update_hotkeys(m),
+            SettingsMsg::Sources(m) => self.settings.sources_msg(m),
             SettingsMsg::Section(s) => {
                 self.settings.section = s;
                 self.settings.form.unpin_all();

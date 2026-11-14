@@ -504,6 +504,27 @@ pub fn parse_number(s: &str, float: bool) -> Option<Value> {
     None
 }
 
+/// The rows of the list item at `item` (`publication[2]`) under `schema`, one level in, exactly
+/// as the generic form shows them when that item is expanded (plan sources-publication-model
+/// WP-6: the Sources overview reuses them for an expanded record). Empty when `item` is not a
+/// list item of the schema.
+pub fn item_rows(cx: &Ctx<'_>, schema: &'static Node, item: &Path) -> Vec<Row> {
+    let mut node = schema;
+    for seg in &item.0 {
+        node = match (node, seg) {
+            (Node::Record(r), Seg::Key(k)) => match r.field(k) {
+                Some(f) => &f.node,
+                None => return Vec::new(),
+            },
+            (Node::List(inner), Seg::Index(_)) => inner,
+            _ => return Vec::new(),
+        };
+    }
+    let mut out = Vec::new();
+    children(cx, item, node, &Leaf::bare("Item"), 1, &mut out);
+    out
+}
+
 /// The fields of record `r` at `p` (`skip`: a union tag key), then any keys the schema does not
 /// know, read-only.
 fn record_rows(
@@ -636,13 +657,14 @@ fn compound(node: &Node) -> bool {
 /// file's row order carries first-match semantics, so the sort is display-only. Every other list
 /// (Action steps / params / starters, Pipelines lists, Editor `nav_links`, a view's lists) stays
 /// manual with ↑↓.
-const SORTED_LISTS: [(&str, &str); 10] = [
+const SORTED_LISTS: [(&str, &str); 11] = [
     (PROVIDERS_PATH, "provider"),
     (PROVIDERS_PATH, "provider[].models"),
     (SOURCES_PATH, "youtube"),
     (SOURCES_PATH, "blog"),
     (SOURCES_PATH, "newsletter"),
     (SOURCES_PATH, "serial"),
+    (SOURCES_PATH, "publication"),
     (SCHEDULES_PATH, "schedule"),
     (ACTIONS_PATH, "action"),
     (BOOKMARKS_PATH, "bookmark"),
