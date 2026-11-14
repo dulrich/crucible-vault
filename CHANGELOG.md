@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- **Publication records:** `sources.toml` now holds one `[[publication]]` per publication (its feeds, mail senders and list ids, hosts, URL prefixes, YouTube channel, kind and In Works) instead of separate blog, newsletter, serial and YouTube rows. The old tables still load, folded by publication name, and are deprecated; `cv sources migrate [--dry-run]` rewrites them as records. A sender, feed, host, prefix or channel shared by two records is a config error.
+- **Sources overview:** Settings, Sources lists the publications grouped by kind, with an In Works toggle on each.
+- **Create Source from note:** an editor command proposes a publication from the open note (name, kind, host and prefix, and the sender from the retained email) as an unsaved record in Settings, Sources, or opens the record that already matches.
+- **`intake-frontmatter-backfill`:** a one-shot action that sets `read: false` on every older intake note that lacks it, and `publication` where blank, without overwriting anything. On the owner's vault the Reading List and Unread grow by roughly 600 notes.
+- **Migration 0041:** reconciles intake first (so mail keyed by an old newsletter name is re-keyed), rewrites `sources.toml` as publication records, sets `[kinds.fanfic] works = true` and drops each record's own `works` that equals its kind default, then runs the backfill. It fails, touching nothing, when `sources.toml` does not load (for example a matcher shared by two publications). `cv sources migrate` warns when legacy newsletter names are about to be renamed.
+
+### Changed
+
+- **One note per post across a publication's hosts:** a post is identified by its publication and path, so the feed copy, the custom-domain copy and the email of one post are one note in either arrival order, and a new RSS post is resolved against the vault before it is written.
+- **In Works per publication and per kind:** a publication is in Works when its own `works` says so, else when its kind's `works` in `kinds.toml` does, else not; Works rows and `file.serial` follow it, so Works Unread no longer lists a publication that is out of Works.
+- **Saving sources re-matches unknown-sender rows:** a change to `sources.toml` enqueues a sources-only reconcile, so mail from a sender you just added is filed against it without a manual `cv intake reconcile`.
+
+### Known limitations
+
+- A `sources.toml` save that lands while a re-match is already running is folded into that run and may not be picked up until the next save or a full `cv intake reconcile`.
+
 ## 1.0.4 — 2026-11-13
 
 ### Changed

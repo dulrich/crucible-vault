@@ -77,6 +77,17 @@ fn new_key(table: &str, old: &str) -> String {
     .to_owned()
 }
 
+/// The one-line stderr warning when migrating would rename legacy newsletter names (their mail
+/// tracker rows are re-keyed only by `cv intake reconcile`, which needs the legacy rows loaded).
+fn rename_warning(cfg: &SourcesConfig) -> Option<String> {
+    let n = cfg.mail_key_renames().len();
+    (n > 0).then(|| {
+        format!(
+            "cv: warning: {n} legacy newsletter name(s) will be renamed; run `cv intake reconcile` first so mail rows are re-keyed"
+        )
+    })
+}
+
 /// Migrates `text`: `Ok(None)` when it has no legacy rows, else the new file text and counts.
 pub fn migrate_text(text: &str) -> Result<Option<(String, Counts)>> {
     let table: toml::Table = text.parse().context("parsing sources.toml")?;
@@ -84,6 +95,9 @@ pub fn migrate_text(text: &str) -> Result<Option<(String, Counts)>> {
         .map_err(|e| anyhow::anyhow!("sources.toml does not load: {e}"))?;
     if !cfg.has_legacy_rows() {
         return Ok(None);
+    }
+    if let Some(w) = rename_warning(&cfg) {
+        eprintln!("{w}");
     }
     let recs = cfg.publications();
     for (i, r) in recs.iter().enumerate() {
@@ -249,6 +263,24 @@ mod tests {
         assert_eq!(migrate_file(&p, false).unwrap(), "nothing to migrate\n");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), once);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn rename_warning_only_while_legacy_newsletter_names_differ() {
+        let renamed = "[[blog]]\nname = \"Blog\"\nshort = \"Pub\"\nlink = \"https://b.example/feed\"\n[[newsletter]]\nname = \"Letter\"\nshort = \"Pub\"\nfrom = [\"@b.example\"]\n";
+        let w = rename_warning(&load(renamed)).expect("a renamed newsletter warns");
+        assert!(w.contains("1 legacy newsletter") && w.contains("cv intake reconcile"));
+        assert_eq!(
+            rename_warning(&load(LEGACY)),
+            None,
+            "same-name newsletter: no rename"
+        );
+        let (out, _) = migrate_text(renamed).unwrap().unwrap();
+        assert_eq!(
+            rename_warning(&load(&out)),
+            None,
+            "migrated file: nothing to rename"
+        );
     }
 
     #[test]

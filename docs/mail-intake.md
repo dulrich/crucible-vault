@@ -36,24 +36,26 @@ An empty `maildir` is "unset" and the step does nothing. Handled messages are mo
 
 With `watch = true` (the default) the daemon watches `<maildir>` and `<maildir>/new` (non-recursive) and enqueues `track-mail` the moment a dropped message is ready, with no quiet window: a writer-finished event (a rename into place, which covers a browser `.part` → `.eml` and mbsync `tmp/` → `new/`, or a close-after-write) on a message whose bytes pass a structural completeness check (headers terminated, every MIME multipart closed by its `--boundary--` line, nested levels included). An incomplete message waits for its next event. The `track-mail` scan applies the same check to every candidate whatever triggered it: an incomplete message is left untouched in place (counted `incomplete`) and picked up by a later scan, so a complete message never gets a half-written neighbour consumed. The 15-minute schedule stays as the backstop, and a missing directory is logged once and left to the schedule until the config changes. Migration `0002-intake-followups` writes the explicit `watch = true` into an existing `[mail]` block.
 
-## 4. Describe the senders: `[[newsletter]]` rows
+## 4. Describe the senders: `[[publication]]` records
 
-In `sources.toml` (editable in the Settings tab):
+In `sources.toml` (editable in the Settings tab, Sources page, grouped by kind). One record describes one publication, and its newsletter is just its `from` / `list_id` matchers (plan `sources-publication-model`, D33):
 
 ```toml
-[[newsletter]]
-name = "Example Letter"
-from = ["writer@news.example"]      # exact address, or "@news.example" for a whole domain
-# list_id = "letter.news.example"   # when the publisher sets List-Id
-blog = "Example Blog"               # optional: the [[blog]] row this letter mirrors (its RSS stubs are superseded)
-kind = "blog"                       # kinds.toml key for the captured note
+[[publication]]
+name = "Example Blog"
+feeds = ["https://blog.example/feed"]   # the RSS feed; its stubs are superseded by the fuller email
+from = ["writer@news.example"]          # exact address, or "@news.example" for a whole domain
+# list_id = ["letter.news.example"]     # when the publisher sets List-Id
+kind = "blog"                           # kinds.toml key for the captured note
 tags = ["example"]
 paywall_markers = ["Upgrade to read the rest"]
 ```
 
-A row needs a `from`, a `list_id` or a `hosts` list. `hosts = ["letter.example"]` (kinds.toml `hosts` forms, `www.` ignored; plan round-11-feedback-todos Decision 7) files a web clip from that host as the row's `kind` with its publication, with no `[[blog]]` row needed; this is auto-file step (2b), after the `[[blog]]`-row host match and before kinds.toml `hosts`. A hosts-only row (e.g. a beehiiv publication clipped from the web) matches no mail. `works = true` on any sources row lists it in the Works view. Mail from a sender no row matches is still captured (source "unknown-sender") and left open in Intake; it is never dropped.
+The legacy `[[newsletter]]` / `[[blog]]` / `[[serial]]` / `[[youtube]]` tables still load (folded into records by publication name) but are deprecated; `cv sources migrate [--dry-run]` rewrites them as `[[publication]]` records (migration `0041` does it for the live file, after a reconcile so mail keyed by an old newsletter name is re-keyed). A sender, list id, feed, host, prefix or channel id may belong to one record only: sharing one is a config error. A post's identity is `cv-publication:<record name>:<path>`, derived at match time and never stored, so the same post seen on the feed host, the custom domain and in the email is one note.
 
-**Substack auto-match (plan `intake-followups-mail-youtube` WP-2).** Mail whose `List-Id` (else sender local part) is `<pub>.substack.com` needs no `[[newsletter]]` row when a `[[blog]]` row's feed `link` host is `<pub>.substack.com`: it behaves as a newsletter of kind `blog` named for that blog row, mirroring it (RSS supersede, the blog row's paywall markers). An explicit `[[newsletter]]` row always wins over the auto-match. To follow a Substack publication you only need a `[[blog]]` row on `https://<pub>.substack.com/feed`.
+A record needs a `from`, a `list_id` or a `hosts` list to match mail (or a feed, prefix, channel id or author for the other paths). `hosts = ["letter.example"]` (kinds.toml `hosts` forms, `www.` ignored; plan round-11-feedback-todos Decision 7) files a web clip from that host as the row's `kind` with its publication, with no `[[blog]]` row needed; this is auto-file step (2b), after the `[[blog]]`-row host match and before kinds.toml `hosts`. A hosts-only row (e.g. a beehiiv publication clipped from the web) matches no mail. `works = true` on any sources row lists it in the Works view. Mail from a sender no row matches is still captured (source "unknown-sender") and left open in Intake; it is never dropped.
+
+**Substack auto-match (plan `intake-followups-mail-youtube` WP-2).** Mail whose `List-Id` (else sender local part) is `<pub>.substack.com` needs no `from` / `list_id` on a record when a record's feed host is `<pub>.substack.com`: it behaves as a newsletter of kind `blog` named for that record, mirroring it (RSS supersede, the record's paywall markers). A record whose `from` / `list_id` matches always wins over the auto-match. To follow a Substack publication you only need a `[[publication]]` with `feeds = ["https://<pub>.substack.com/feed"]`.
 
 **Body cleanup (WP-1).** Before the word count and the note are made, the markdown body is cleaned of newsletter chrome (`cv_ingest::mail::clean_body`): tracking redirects are unwrapped, `utm_*` parameters and tracking pixels dropped, share/like/restack rows and the unsubscribe footer removed. The paywall-marker verdict is taken on the body before cleanup, so removed chrome can never turn a partial message complete.
 
@@ -103,3 +105,9 @@ Re-running is a no-op (the Message-ID is recorded).
 - **YouTube** (`yt_*`): an open YouTube row ticks when its filed note is a clipping of that video with transcript text; a note that only embeds the video never does (`yt_no_evidence`).
 
 The `.eml` files must still sit in the processed folders for the re-match; rows whose message is gone stay `unknown-sender`.
+
+## Saving sources re-matches; Create Source from note (plan `sources-publication-model`, D33)
+
+- **Reload-triggered re-match.** When the daemon's config watcher sees `sources.toml` change in a way that alters the records (a Settings save, a hand edit), it enqueues a sources-only run of `intake-reconcile` (job param `only = "sources"`): the unknown-sender re-match and the publication phase, without the other repairs. Mail that was `unknown-sender` because its sender had no record is re-keyed to the new record and its note gets the record's kind, tags and `publication`, with no manual reconcile. A save that lands while a re-match is already running is folded into that run and may not be picked up until the next save or a full `cv intake reconcile`.
+- **Create Source from note.** The editor command on a captured note asks the daemon (`propose_source`) which publication already matches it, or builds a proposed record: name from the note's `publication` or site, kind from the note, host and prefix from `source`, and, for a `via: email` note, the sender and list id read from the retained message found by the note's `message-id`. When the message is no longer in the Maildir those fields are left empty and the proposal says so; they are never guessed from the tracker row's label. The proposal opens in Settings, Sources as an unsaved new record (or the existing record expanded); saving goes through the normal write and triggers the re-match above.
+- **Older notes.** `cv run intake-frontmatter-backfill` (migration `0041` runs it once) sets `read: false` on every day-folder intake note lacking the key and `publication` where blank; it never overwrites.
