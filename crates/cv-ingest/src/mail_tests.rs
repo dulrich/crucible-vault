@@ -361,3 +361,22 @@ fn the_identity_guard_rejects_tokens_jwts_and_trackers() {
         assert!(!is_clean_identity(bad), "{bad}");
     }
 }
+
+#[test]
+fn a_link_on_a_listed_publication_host_is_proven() {
+    let body = "<a href=\"https://alt.example/p/slug-two\">x</a>\
+                <a href=\"https://unrelated.example/p/other\">y</a>";
+    let p = sub_post("zed", "S", body);
+    let hosts = vec!["www.alt.example".to_owned()];
+    assert_eq!(
+        canonical_post_url_in(&p, Some("https://custom.example/feed"), &hosts).as_deref(),
+        Some("https://custom.example/p/slug-two")
+    );
+    assert_eq!(canonical_post_url(&p, None), None);
+    let other = sub_post(
+        "zed",
+        "S",
+        "<a href=\"https://unrelated.example/p/other\">y</a>",
+    );
+    assert_eq!(canonical_post_url_in(&other, None, &hosts), None);
+}

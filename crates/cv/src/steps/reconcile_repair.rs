@@ -130,8 +130,10 @@ pub(super) fn merge_mail_twins(
         let Some(post) = post else {
             continue;
         };
-        let blog_link = resolve_newsletter(&post, &sources).and_then(|n| mail_blog_link(&post, n));
-        let Some(canon) = mail::canonical_post_url(&post, blog_link) else {
+        let nl = resolve_newsletter(&post, &sources);
+        let blog_link = nl.and_then(|n| mail_blog_link(&post, n));
+        let pub_hosts = nl.map(supersede::publication_host_list).unwrap_or_default();
+        let Some(canon) = mail::canonical_post_url_in(&post, blog_link, &pub_hosts) else {
             continue;
         };
         if let Some(idx) = sidx.as_mut() {

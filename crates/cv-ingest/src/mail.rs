@@ -356,6 +356,19 @@ pub fn extract_post_urls_for(html: &str, subject: &str) -> Vec<String> {
 /// identity. The result passes [`is_clean_identity`]; `None` when no candidate survives.
 #[must_use]
 pub fn canonical_post_url(post: &MailPost, blog_link: Option<&str>) -> Option<String> {
+    canonical_post_url_in(post, blog_link, &[])
+}
+
+/// [`canonical_post_url`] where a candidate on any of `pub_hosts` (the resolved publication's
+/// feed and `hosts` hosts, `www.` ignored) is also proven (plan sources-publication-model WP-3).
+/// The rebase target stays the `blog_link` host.
+#[must_use]
+pub fn canonical_post_url_in(
+    post: &MailPost,
+    blog_link: Option<&str>,
+    pub_hosts: &[String],
+) -> Option<String> {
+    let pub_bare: Vec<String> = pub_hosts.iter().filter_map(|h| bare_host_name(h)).collect();
     let sub = substack_host(post).and_then(|h| bare_host_name(&h));
     let blog_host = blog_link.and_then(http_host);
     let blog_bare = blog_host.as_deref().and_then(bare_host_name);
@@ -365,7 +378,9 @@ pub fn canonical_post_url(post: &MailPost, blog_link: Option<&str>) -> Option<St
             return None;
         }
         let h = bare_host_name(&host);
-        let proven = h.is_some() && (sub == h || blog_bare == h);
+        let proven = h
+            .as_ref()
+            .is_some_and(|hh| sub == h || blog_bare == h || pub_bare.contains(hh));
         if !proven {
             return None;
         }

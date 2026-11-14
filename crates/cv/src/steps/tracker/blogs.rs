@@ -397,6 +397,36 @@ fn supersede_existing(
     } else {
         ev.complete
     };
+    resolve_post(ctx, sidx, cfg, row, key, post, None, complete)
+}
+
+/// Runs the supersede engine for a **new** feed post before its note is written (plan
+/// sources-publication-model WP-3): identity first, then containment, so a post whose mail copy
+/// is already a note merges into it instead of writing a second note. The post went through the
+/// probe batch, so its evidence (`ev`) is the probed one and its `complete` may be `true`.
+fn supersede_new(
+    ctx: &mut StepCtx<'_>,
+    sidx: &SupersedeIndex,
+    cfg: &cv_actions::pipelines::SupersedeConfig,
+    row: &BlogSource,
+    key: &str,
+    post: &BlogPost,
+    ev: &Evidence,
+) -> Result<Resolved, StepError> {
+    resolve_post(ctx, sidx, cfg, row, key, post, ev.access, ev.complete)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_post(
+    ctx: &mut StepCtx<'_>,
+    sidx: &SupersedeIndex,
+    cfg: &cv_actions::pipelines::SupersedeConfig,
+    row: &BlogSource,
+    key: &str,
+    post: &BlogPost,
+    access: Option<Access>,
+    complete: Option<bool>,
+) -> Result<Resolved, StepError> {
     let body_md = post
         .body_html
         .as_deref()
@@ -414,7 +444,7 @@ fn supersede_existing(
         )
         .ok(),
         body_md: &body_md,
-        access: None,
+        access,
         complete,
         publication: Some(row.publication()),
         origin: Origin::Tracker,
@@ -607,6 +637,33 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             cand.complete = ev.complete;
             cand.full_word_count = ev.full_words.map(i64::from);
             if auto {
+                // A new post resolves before it is written (plan sources-publication-model
+                // WP-3): a match records against the existing note and writes nothing.
+                let r = supersede_new(ctx, &sidx, &sup_cfg, row, &key, &post, &ev)?;
+                if let Some(p) = r.path.clone() {
+                    cand.access = r.access.clone();
+                    cand.complete = r.complete;
+                    if r.action == SupersedeAction::Replaced {
+                        out.output_paths.push(p.clone());
+                        if let Err(e) = localize::run(
+                            &localize::Params::note(p.clone(), &ctx.config.vault().remote_media),
+                            ctx,
+                        ) {
+                            localize_failed += 1;
+                            tracing::warn!(path = %p, error = %e, "track_blogs: inline localize failed");
+                        }
+                    }
+                    let score = super::score_item(ctx, &cand);
+                    let inserted =
+                        record_with(ctx, &cand, TrackerOutcome::Note, full, score, Some(p))?;
+                    // Ticked only on the resolved body's predicate (audit M2).
+                    if inserted && cand.complete == Some(true) {
+                        ctx.state()
+                            .finalize_tracker_item(KIND, &key, &post.post_id, None, true)?;
+                    }
+                    evidence.push_back(post.has_body());
+                    continue;
+                }
                 let (written, path) = write_note(
                     ctx,
                     row,

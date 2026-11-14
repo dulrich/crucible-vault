@@ -375,7 +375,8 @@ fn handle(
     let blog_link = nl.and_then(|n| mail_blog_link(post, n));
     // The one post identity (plan intake-round-2-clean-dedupe-reading WP-2): publication-proven,
     // token-free, rebased onto the blog row's host. `None` leaves the Message-ID as the identity.
-    let canon = mail::canonical_post_url(post, blog_link);
+    let pub_hosts = nl.map(supersede::publication_host_list).unwrap_or_default();
+    let canon = mail::canonical_post_url_in(post, blog_link, &pub_hosts);
     let markers: Vec<String> = nl.map(|n| n.paywall_markers.clone()).unwrap_or_default();
     let body_md = raw_markdown(post);
     // The paywall-marker verdict is taken on the pre-cleanup body: removing an "Upgrade to paid"

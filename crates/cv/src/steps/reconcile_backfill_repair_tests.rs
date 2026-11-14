@@ -398,3 +398,71 @@ fn css_predicate_is_narrow() {
     assert!(!has_css("A note about JSON {\"Key\": 1} values"));
     assert!(!has_css("Plain prose: no braces at all."));
 }
+
+// ---- publication-scoped identity (plan sources-publication-model WP-3) ----------------------
+
+/// `Zed` publishes on its Substack host and its custom domain; `Other` carries a cross-post
+/// under the same slug.
+const TRI: &str = "[[publication]]\nname = \"Zed\"\nshort = \"ZZ\"\nfeeds = [\"https://zed.substack.com/feed\"]\nhosts = [\"custom.example\"]\n[[publication]]\nname = \"Other\"\nfeeds = [\"https://other.substack.com/feed\"]\n";
+
+fn rss_at(source: &str) -> String {
+    format!(
+        "---\ntitle: \"Slug One\"\nsource: {source}\nauthor:\n  - \"[[Pub]]\"\ncomplete: false\nvia: rss\n---\n\nA teaser.\n"
+    )
+}
+
+#[test]
+fn reconcile_merges_a_mail_note_with_its_custom_domain_rss_twin_and_leaves_the_cross_post() {
+    let mut w = world(&[
+        (
+            "Letters/rss.md",
+            rss_at("https://custom.example/p/slug-one"),
+        ),
+        (
+            "Letters/cross.md",
+            rss_at("https://other.substack.com/p/slug-one"),
+        ),
+        ("mailnotes/m.md", mail_note(true, LONG)),
+    ]);
+    w.put("processed/m1", &zed_eml());
+    add_row(
+        &w,
+        "mail",
+        "Zed",
+        "m1@zed.example",
+        TrackerOutcome::Note,
+        Some("mailnotes/m.md"),
+    );
+    w.sources(TRI);
+    let cross0 = w.env.read("Letters/cross.md").unwrap();
+    let o = w.reconcile(false);
+    assert_eq!((n(&o, "dup_merged"), n(&o, "dup_other")), (1, 0));
+    assert!(!w.env.vault().join("mailnotes/m.md").exists());
+    assert!(w.env.read("Letters/rss.md").unwrap().contains(LONG));
+    assert_eq!(w.env.read("Letters/cross.md").unwrap(), cross0);
+}
+
+#[test]
+fn rss_then_mail_custom_domain_copy_resolves_into_the_rss_note() {
+    let mut w = world(&[
+        (
+            "Letters/rss.md",
+            rss_at("https://custom.example/p/slug-one"),
+        ),
+        (
+            "Letters/cross.md",
+            rss_at("https://other.substack.com/p/slug-one"),
+        ),
+    ]);
+    w.sources(TRI);
+    w.put("new/m1", &zed_eml());
+    w.track();
+    let (row, _) = w.row("mail", "Zed", "m1@zed.example").expect("mail row");
+    assert_eq!(row.note_path.as_deref(), Some("Letters/rss.md"));
+    assert!(
+        w.env
+            .read("Letters/cross.md")
+            .unwrap()
+            .contains("A teaser.")
+    );
+}

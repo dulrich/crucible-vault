@@ -8,7 +8,11 @@
 //! existing one ([`Decision::Keep`]), never a replacement.
 
 use cv_text::similar::Shingles;
-use cv_text::url_canon::{PostIdOptions, canonicalize_url, post_id_from_url};
+use std::collections::HashMap;
+
+use cv_text::url_canon::{
+    PostIdOptions, bare_host_name, canonicalize_url, http_host, post_id_from_url,
+};
 
 /// What the engine does with an incoming item against one existing note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +156,82 @@ pub fn identity_keys(url: &str) -> Vec<String> {
     out
 }
 
+/// The prefix of a publication-scoped identity key. It holds no `://`, so the key can never
+/// equal a URL, and no stored `post-id` carries it.
+pub const PUBLICATION_KEY_PREFIX: &str = "cv-publication:";
+
+/// Host → publication record `name` (hosts in comparison form, `www.` ignored), built by the
+/// caller from its sources config (plan sources-publication-model WP-3). Empty = no
+/// publication-scoped keys, exactly the plain [`identity_keys`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PublicationHosts {
+    by_host: HashMap<String, String>,
+}
+
+impl PublicationHosts {
+    /// Records `host` (any case, `www.` ignored) as belonging to publication `name`; the first
+    /// record to claim a host keeps it.
+    pub fn insert(&mut self, host: &str, name: &str) {
+        if let Some(h) = bare_host_name(host)
+            && !name.trim().is_empty()
+        {
+            self.by_host
+                .entry(h)
+                .or_insert_with(|| name.trim().to_owned());
+        }
+    }
+
+    /// The publication `name` owning `host` (`www.` ignored).
+    #[must_use]
+    pub fn publication_of(&self, host: &str) -> Option<&str> {
+        self.by_host.get(&bare_host_name(host)?).map(String::as_str)
+    }
+
+    /// Whether no host is mapped.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_host.is_empty()
+    }
+}
+
+/// The path of a canonical `scheme://host/path?…` URL, trailing slash trimmed; `None` for the
+/// root.
+fn canonical_path(canonical: &str) -> Option<&str> {
+    let rest = canonical.split_once("://")?.1;
+    let path = &rest[rest.find('/')?..];
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let path = path.trim_end_matches('/');
+    (!path.is_empty()).then_some(path)
+}
+
+/// [`identity_keys`] plus, when the URL's host belongs to a publication in `pubs`, one key
+/// `cv-publication:<name>:<path>` shared by every host copy of one post of that publication.
+/// The key is derived at match time and never stored.
+#[must_use]
+pub fn identity_keys_in(url: &str, pubs: &PublicationHosts) -> Vec<String> {
+    let mut out = identity_keys(url);
+    if pubs.is_empty() {
+        return out;
+    }
+    let Some(c) = canonicalize_url(url.trim()) else {
+        return out;
+    };
+    let mut forms = vec![c.canonical.clone()];
+    if let Some(m) = open_substack(&c.canonical) {
+        forms.push(m);
+    }
+    for f in forms {
+        if let (Some(h), Some(p)) = (http_host(&f), canonical_path(&f))
+            && let Some(name) = pubs.publication_of(&h)
+        {
+            out.push(format!("{PUBLICATION_KEY_PREFIX}{name}:{p}"));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +253,30 @@ mod tests {
         assert!(identity_keys("  ").is_empty());
     }
 
+    #[test]
+    fn publication_key_joins_host_copies_and_scopes_by_record() {
+        let mut pubs = PublicationHosts::default();
+        pubs.insert("www.custom.example", "Alpha");
+        pubs.insert("alpha.substack.com", "Alpha");
+        pubs.insert("beta.substack.com", "Beta");
+        let key = |u: &str| {
+            identity_keys_in(u, &pubs)
+                .into_iter()
+                .filter(|k| k.starts_with(PUBLICATION_KEY_PREFIX))
+                .collect::<Vec<_>>()
+        };
+        let a = key("https://custom.example/p/slug/?utm_source=x");
+        assert_eq!(a, vec!["cv-publication:Alpha:/p/slug".to_owned()]);
+        assert_eq!(key("https://open.substack.com/pub/alpha/p/slug"), a);
+        assert_ne!(key("https://beta.substack.com/p/slug"), a);
+        // A host of no publication yields exactly the plain keys.
+        let u = "https://other.example/p/slug";
+        assert_eq!(identity_keys_in(u, &pubs), identity_keys(u));
+        assert_eq!(
+            identity_keys_in("post-id-x", &pubs),
+            identity_keys("post-id-x")
+        );
+    }
     #[test]
     fn complete_existing_is_kept() {
         let d = decide(&side(STUB, Some(true)), &side(FULL, Some(true)), true, 80);

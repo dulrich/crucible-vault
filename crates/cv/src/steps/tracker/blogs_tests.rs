@@ -689,3 +689,56 @@ fn new_blog_note_enqueues_one_enrich_job_and_a_rerun_adds_none() {
     execute(&step(""), &mut ctx).unwrap();
     assert_eq!(rec.calls().len(), 1);
 }
+
+// ---- publication-scoped identity (plan sources-publication-model WP-3) ----------------------
+
+/// The `Full` record also owns `custom.example` (its custom domain); `Beta` is another
+/// publication carrying a cross-post under the same slug.
+const THREE_HOSTS: &str = "body = \"full\"\n[[newsletter]]\nname = \"Full\"\nhosts = [\"custom.example\"]\n[[newsletter]]\nname = \"Beta\"\nhosts = [\"beta.example\"]";
+
+#[test]
+fn mail_then_rss_custom_domain_copy_is_not_captured_again_and_the_cross_post_stays() {
+    let mail = "---\nsource: https://www.custom.example/p/x\nvia: email\naccess: free\ncomplete: true\n---\n\nBody of x here\n";
+    let cross =
+        "---\nsource: https://beta.example/p/x\nvia: rss\ncomplete: true\n---\n\nBody of x here\n";
+    let files = [("notes/mail.md", mail), ("notes/cross.md", cross)];
+    let w = world(&files, ON, &[("Full", "/a", THREE_HOSTS)]);
+    set(&w, "/a", 200, rss(&[("x", true)]));
+    let o = run(&w).unwrap();
+    assert_eq!((n(&o, "new"), n(&o, "notes")), (json!(0), json!(0)));
+    assert!(note(&w, "x").is_none(), "no second note");
+    assert_eq!(w.read("notes/mail.md").unwrap(), mail);
+    assert_eq!(w.read("notes/cross.md").unwrap(), cross);
+    assert_eq!(item(&w, "x").complete, Some(true));
+}
+
+#[test]
+fn a_new_post_contained_in_an_existing_note_records_against_it_and_writes_nothing() {
+    let body = "Seven quiet wizards boxed the old pickled plums for the long winter market while the river ran past the mill and the town bells rang out over the frozen square at dawn";
+    let existing = format!(
+        "---\nsource: BASE/letters/m1\nvia: email\nauthor:\n  - \"[[Ann]]\"\naccess: free\ncomplete: true\n---\n\n{body}\n"
+    );
+    let w = world(
+        &[("notes/m.md", existing.as_str())],
+        ON,
+        &[("Full", "/a", FULL)],
+    );
+    let feed = format!(
+        "<rss><channel><title>B</title><item><title>Post y</title><link>{}/p/y</link><dc:creator>Ann</dc:creator><pubDate>Tue, 14 Oct 2026 10:00:00 +0000</pubDate><description>d</description><content:encoded><![CDATA[<p>{body}</p>]]></content:encoded></item></channel></rss>",
+        w.base
+    );
+    set(&w, "/a", 200, feed);
+    set(&w, "/api/v1/posts/y", 200, probe("everyone", 40));
+    let o = run(&w).unwrap();
+    assert_eq!(n(&o, "notes"), json!(0));
+    assert!(
+        note(&w, "y").is_none(),
+        "the contained post wrote no second note"
+    );
+    let r = item(&w, "y");
+    assert_eq!(
+        (r.outcome, r.note_path.as_deref(), r.complete),
+        (TrackerOutcome::Note, Some("notes/m.md"), Some(true))
+    );
+    assert_eq!(status(&w, "y"), Some('x'));
+}

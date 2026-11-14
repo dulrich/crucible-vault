@@ -4,7 +4,7 @@
 //! caller creates or records anything:
 //!
 //! 1. **identity**: index notes whose `source` (canonicalized on both sides,
-//!    [`cv_ingest::supersede::identity_keys`]) or `post-id` equals one of the item's keys;
+//!    [`cv_ingest::supersede::identity_keys_in`], with the publication-scoped key) or `post-id` equals one of the item's keys;
 //! 2. otherwise **containment**: notes from the same source (index `source` host, and an
 //!    overlapping `author` when both have one, plus `tracker_items` rows of the caller's source
 //!    with a `note_path`) dated within ±`[supersede] window_days` of the item (a missing date is in
@@ -28,12 +28,12 @@
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::NaiveDate;
-use cv_actions::pipelines::SupersedeConfig;
+use cv_actions::pipelines::{Publication, SourcesConfig, SupersedeConfig};
 use cv_ingest::access::Access;
-use cv_ingest::supersede::{Decision, Side, decide, identity_keys, overlap};
+use cv_ingest::supersede::{Decision, PublicationHosts, Side, decide, identity_keys_in, overlap};
 use cv_note::{FrontmatterDoc, JsValue, calculate_word_count};
 use cv_text::similar::Shingles;
-use cv_text::url_canon::canonical_bare_host;
+use cv_text::url_canon::{canonical_bare_host, http_host};
 
 use crate::steps::{StepCtx, StepError};
 
@@ -136,6 +136,32 @@ struct NoteMeta {
 pub struct SupersedeIndex {
     by_key: HashMap<String, BTreeSet<String>>,
     notes: HashMap<String, NoteMeta>,
+    pubs: PublicationHosts,
+}
+
+/// Every host of `p` (its feed hosts, which include a Substack host, and its `hosts`), as
+/// written (callers compare in `www.`-free lowercase form).
+#[must_use]
+pub fn publication_host_list(p: &Publication) -> Vec<String> {
+    p.feeds
+        .iter()
+        .filter_map(|f| http_host(f.trim()))
+        .chain(p.hosts.iter().map(|h| h.trim().to_owned()))
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
+/// The host → record `name` map of every publication (plan sources-publication-model WP-3):
+/// the data behind the publication-scoped identity key. First record wins a shared host.
+#[must_use]
+pub fn publication_hosts(sources: &SourcesConfig) -> PublicationHosts {
+    let mut m = PublicationHosts::default();
+    for p in sources.publications() {
+        for h in publication_host_list(p) {
+            m.insert(&h, &p.name);
+        }
+    }
+    m
 }
 
 fn json_strings(v: &serde_json::Value) -> Vec<String> {
@@ -163,7 +189,10 @@ impl SupersedeIndex {
         let reader = ctx.index()?;
         let q = reader.query();
         let rows = |key: &str| Ok::<_, StepError>(q.md_props_with_key(key)?);
-        let mut idx = Self::default();
+        let mut idx = Self {
+            pubs: publication_hosts(ctx.config.sources()),
+            ..Self::default()
+        };
         for r in rows("source")? {
             for s in json_strings(&r.value) {
                 idx.insert_identity(&r.path, &s);
@@ -199,7 +228,7 @@ impl SupersedeIndex {
 
     /// Records `path` under every identity key of `value` (a URL or a post id).
     pub fn insert_identity(&mut self, path: &str, value: &str) {
-        for k in identity_keys(value) {
+        for k in identity_keys_in(value, &self.pubs) {
             self.by_key.entry(k).or_default().insert(path.to_owned());
         }
     }
@@ -209,7 +238,7 @@ impl SupersedeIndex {
     pub fn identity_matches(&self, urls: &[String], exclude: Option<&str>) -> Vec<String> {
         let mut out = BTreeSet::new();
         for u in urls {
-            for k in identity_keys(u) {
+            for k in identity_keys_in(u, &self.pubs) {
                 if let Some(ps) = self.by_key.get(&k) {
                     out.extend(ps.iter().filter(|p| Some(p.as_str()) != exclude).cloned());
                 }
