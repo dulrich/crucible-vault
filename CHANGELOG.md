@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 1.0.4 — 2026-11-13
+
+### Changed
+
+- **Home on list lines cycles:** in Source, a further Home at column 0 of a list or task line returns to the content start after the marker, so repeated Home presses cycle content start → indent end → column 0 → content start.
+- **Ctrl+A selects the body first:** in a note with frontmatter, Ctrl+A in Reading or Source selects the body; pressing it again selects the whole note, properties included, and a third press returns to the body.
+- **Reading typography:** Reading shows `->` `-->` `--` `---` `...` `!=` `>=` `<=` in prose as `→` `⟶` `–` `—` `…` `≠` `≥` `≤`. Inline code, code and math blocks, tags, URLs and `$math$` keep their ASCII. The file, Source mode, copy and search still use the ASCII: copying pastes ASCII, and find `->` highlights the arrow.
+
 ## 1.0.3 — 2026-11-13
 
 ### Changed
