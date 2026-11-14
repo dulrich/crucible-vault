@@ -412,17 +412,17 @@ pub enum BodyMode {
 #[serde(deny_unknown_fields, default)]
 pub struct SourcesConfig {
     /// `[[youtube]]` channels.
-    // removed in WP-2 (plans/sources-publication-model.md)
+    // removed in WP-2 (plan sources-publication-model)
     pub youtube: Vec<YoutubeSource>,
     /// `[[blog]]` feeds.
-    // removed in WP-2 (plans/sources-publication-model.md)
+    // removed in WP-2 (plan sources-publication-model)
     pub blog: Vec<BlogSource>,
     /// `[[newsletter]]` mail senders (plan auto-intake-sprint WP-4).
-    // removed in WP-2 (plans/sources-publication-model.md)
+    // removed in WP-2 (plan sources-publication-model)
     pub newsletter: Vec<NewsletterSource>,
     /// `[[serial]]` works (plan round-11-feedback-todos Decision 4; replaces the per-work
     /// notes).
-    // removed in WP-2 (plans/sources-publication-model.md)
+    // removed in WP-2 (plan sources-publication-model)
     pub serial: Vec<SerialSource>,
     /// `[[publication]]` records as written (plan sources-publication-model WP-1); the folded set,
     /// legacy rows included, is [`SourcesConfig::publications`].
