@@ -184,6 +184,10 @@ pub enum SettingsMsg {
     Hotkey(pages::hotkeys::HotkeyMsg),
     /// A Sources page control (plan sources-publication-model WP-6).
     Sources(pages::sources::SourcesMsg),
+    /// "Create Source from note" on the active note (plan sources-publication-model WP-7).
+    CreateSourceFromNote,
+    /// The `propose_source` answer (or the user-facing failure text).
+    SourceProposed(Result<cv_protocol::ProposeSourceResult, String>),
 }
 
 #[cfg(test)]

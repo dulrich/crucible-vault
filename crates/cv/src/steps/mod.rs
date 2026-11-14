@@ -96,6 +96,7 @@ pub(crate) mod metadata;
 pub mod params;
 pub mod reconcile;
 mod reconcile_backfill;
+pub(crate) use reconcile_backfill::message_map;
 #[cfg(test)]
 mod reconcile_backfill_tests;
 mod reconcile_boilerplate;

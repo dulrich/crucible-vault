@@ -167,8 +167,9 @@ pub(super) fn youtube(
     Ok(())
 }
 
-/// Message-ID → file, over the two processed directories (read-only; first file wins).
-pub(super) fn message_map(root: &Path, processed: &str) -> HashMap<String, PathBuf> {
+/// Message-ID → file, over the two processed directories (read-only; first file wins). Also the
+/// retained-message lookup of `propose_source` (plan sources-publication-model WP-7).
+pub(crate) fn message_map(root: &Path, processed: &str) -> HashMap<String, PathBuf> {
     let mut dirs = vec![root.join(processed.trim()), root.join("processed")];
     dirs.dedup();
     let mut map = HashMap::new();

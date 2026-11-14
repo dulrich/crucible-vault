@@ -1233,6 +1233,7 @@ fn persisted_command_ids_are_pinned() {
         "open_log",
         "delete_note",
         "move_note",
+        "create_source_from_note",
         "go_to_top",
         "go_to_bottom",
         "panel.files",
@@ -1251,7 +1252,7 @@ fn persisted_command_ids_are_pinned() {
     all.extend(["command_palette", "preset.lint-note"]);
     let bind: Vec<String> = bindables().into_iter().map(|b| b.id).collect();
     assert_eq!(bind, all);
-    assert_eq!(all.len(), 46);
+    assert_eq!(all.len(), 47);
     let preset = |action, period| Preset { action, period }.id();
     assert_eq!(preset(PERIOD_OPEN, Some(PeriodSel::Day)), "open_period.day");
     assert_eq!(

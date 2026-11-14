@@ -8,6 +8,7 @@
 
 pub mod hotkeys;
 pub mod sources;
+pub mod sources_propose;
 pub mod views;
 
 use iced::Element;
@@ -99,5 +100,7 @@ pub fn generic<'a>(
 
 #[cfg(test)]
 mod hotkeys_tests;
+#[cfg(test)]
+mod sources_propose_tests;
 #[cfg(test)]
 mod sources_tests;

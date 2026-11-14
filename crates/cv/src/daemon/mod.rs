@@ -46,6 +46,7 @@ mod images;
 mod mail_watch;
 mod memory;
 mod notes;
+mod propose;
 mod queue;
 mod read_sync;
 pub(crate) mod trash;
@@ -536,6 +537,7 @@ impl Shared {
             Request::ImageDescription(p) => {
                 reply::<m::ImageDescription>(self.image_description(p).await)
             }
+            Request::ProposeSource(p) => reply::<m::ProposeSource>(self.propose_source(p).await),
         }
     }
 }

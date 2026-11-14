@@ -757,6 +757,12 @@ fn method_markers_match_the_wire() {
         },
         s,
     );
+    check::<m::ProposeSource>(
+        ProposeSourceParams {
+            note: "a.md".into(),
+        },
+        s,
+    );
     assert_eq!(seen, METHOD_NAMES);
     // Unit methods carry no `params` key, exactly as the enum always serialised them.
     let v =
@@ -1092,4 +1098,45 @@ fn by_id_delete_and_set_bool_fields_are_additive() {
     assert_eq!(serde_json::to_value(&r).unwrap(), json!({"path":"b.md"}));
     let r: NoteSetBoolResult = serde_json::from_value(json!({"hash":"h","path":"b.md"})).unwrap();
     assert_eq!(r.path.as_deref(), Some("b.md"));
+}
+
+/// `propose_source` wire shapes (plan sources-publication-model WP-7).
+#[test]
+fn propose_source_wire_shapes() {
+    let req = Request::ProposeSource(ProposeSourceParams {
+        note: "n.md".into(),
+    });
+    assert_eq!(
+        round_trip(&req),
+        json!({"method":"propose_source","params":{"note":"n.md"}})
+    );
+    let proposed = ProposeSourceResult::Proposed {
+        record: ProposedSource {
+            name: "Example".into(),
+            kind: Some("blog".into()),
+            matchers: SourceMatchers {
+                hosts: vec!["example.com".into()],
+                prefix: vec!["https://example.com/a/".into()],
+                ..SourceMatchers::default()
+            },
+        },
+        notes: vec!["n".into()],
+    };
+    assert_eq!(
+        round_trip(&proposed),
+        json!({"match":"proposed","record":{"name":"Example","kind":"blog",
+            "hosts":["example.com"],"prefix":["https://example.com/a/"]},"notes":["n"]})
+    );
+    let existing = ProposeSourceResult::Existing {
+        name: "Example".into(),
+        missing: SourceMatchers {
+            from: vec!["a@example.com".into()],
+            ..SourceMatchers::default()
+        },
+        notes: vec![],
+    };
+    assert_eq!(
+        round_trip(&existing),
+        json!({"match":"existing","name":"Example","missing":{"from":["a@example.com"]},"notes":[]})
+    );
 }

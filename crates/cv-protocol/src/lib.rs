@@ -196,6 +196,82 @@ pub enum Request {
     /// non-image answers `narrative: null`, never an error. An old daemon answers
     /// `METHOD_NOT_FOUND`, which a client treats as "no description".
     ImageDescription(ImageDescriptionParams),
+    /// The publication record a note belongs to, or a proposed one (plan
+    /// sources-publication-model WP-7) → [`ProposeSourceResult`]. Read-only: nothing is written,
+    /// nothing enqueued. A path with no note is `NOT_FOUND`. An old daemon answers
+    /// `METHOD_NOT_FOUND`, which the editor reports as "restart the daemon".
+    ProposeSource(ProposeSourceParams),
+}
+
+/// `propose_source` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposeSourceParams {
+    /// Vault-relative note path.
+    pub note: String,
+}
+
+/// The matcher fields of a publication record a proposal names (each a list, as the
+/// `[[publication]]` keys are).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceMatchers {
+    /// Mail sender addresses (`from`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from: Vec<String>,
+    /// Mail `List-Id`s (`list_id`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list_id: Vec<String>,
+    /// Web-clip hosts (`hosts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// Source-URL prefixes (`prefix`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix: Vec<String>,
+}
+
+impl SourceMatchers {
+    /// Whether no field holds a value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.from.is_empty()
+            && self.list_id.is_empty()
+            && self.hosts.is_empty()
+            && self.prefix.is_empty()
+    }
+}
+
+/// A proposed `[[publication]]` record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedSource {
+    /// The record name.
+    pub name: String,
+    /// The note's kind, when it carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The matcher fields.
+    #[serde(flatten)]
+    pub matchers: SourceMatchers,
+}
+
+/// `propose_source` result. Both variants carry plain-language `notes` (why a field was left
+/// empty, where a value came from).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "match", rename_all = "snake_case")]
+pub enum ProposeSourceResult {
+    /// A record already matches the note; `missing` holds the note's matcher values the record
+    /// lacks (candidate sender, list id, host).
+    Existing {
+        name: String,
+        #[serde(default)]
+        missing: SourceMatchers,
+        #[serde(default)]
+        notes: Vec<String>,
+    },
+    /// No record matches; `record` is the proposal.
+    Proposed {
+        record: ProposedSource,
+        #[serde(default)]
+        notes: Vec<String>,
+    },
 }
 
 /// `image_description` params.

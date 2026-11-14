@@ -41,6 +41,9 @@ pub struct SourcesState {
     /// The kind whose "Apply to N publications" prompt is showing. Cleared when either file
     /// reloads, or when another kind default is toggled.
     pub prompt: Option<String>,
+    /// The last "Create Source from note" answer's notes and offer (plan
+    /// sources-publication-model WP-7).
+    pub from_note: Option<super::sources_propose::FromNote>,
 }
 
 /// Sources page messages (wrapped in [`SettingsMsg::Sources`]).
@@ -52,6 +55,10 @@ pub enum SourcesMsg {
     Apply(String),
     /// Dismiss the prompt.
     Keep,
+    /// Add the offered values to the matched record (WP-7).
+    ApplyOffer,
+    /// Dismiss the "Create Source from note" notes and offer.
+    DismissFromNote,
 }
 
 /// A `works` value as the file holds it: a non-boolean is never read as off.
@@ -347,6 +354,8 @@ impl Settings {
                 }
             }
             SourcesMsg::Keep => self.sources.prompt = None,
+            SourcesMsg::ApplyOffer => self.apply_offer(),
+            SourcesMsg::DismissFromNote => self.sources.from_note = None,
         }
     }
 
@@ -415,6 +424,9 @@ fn overview_view<'a>(cx: PageCx<'a>, f: &'a ConfigFile) -> Element<'a, Message> 
     let kinds = cx.s.kinds_doc();
     let editable = f.editable();
     let mut col = column![file_header(f, t)].spacing(8);
+    if let Some(fnote) = &cx.s.sources.from_note {
+        col = col.push(from_note_view(fnote, editable, t));
+    }
     for g in overview(doc, kinds) {
         col = col.push(group_title(cx, &g, doc, kinds));
         for m in &g.members {
@@ -485,6 +497,41 @@ fn overview_view<'a>(cx: PageCx<'a>, f: &'a ConfigFile) -> Element<'a, Message> 
         t,
     ));
     col.push(save_bar(f, t)).into()
+}
+
+/// The "Create Source from note" notes, and the offer of the matched record's missing values with
+/// its explicit Add control (plan sources-publication-model WP-7).
+fn from_note_view<'a>(
+    f: &super::sources_propose::FromNote,
+    editable: bool,
+    t: theme::Tokens,
+) -> Element<'a, Message> {
+    let mut col = column![].spacing(4);
+    for n in &f.notes {
+        col = col.push(text(n.clone()).size(12).color(t.text_faint.to_color()));
+    }
+    let mut line = row![].spacing(8).align_y(Alignment::Center);
+    if let Some((name, m)) = &f.offer {
+        line = line
+            .push(
+                text(format!(
+                    "Add to {name}: {}",
+                    super::sources_propose::offer_summary(m)
+                ))
+                .size(12),
+            )
+            .push(text_button(
+                "Add",
+                editable.then(|| msg(SettingsMsg::Sources(SourcesMsg::ApplyOffer))),
+                t,
+            ));
+    }
+    line = line.push(text_button(
+        "Dismiss",
+        Some(msg(SettingsMsg::Sources(SourcesMsg::DismissFromNote))),
+        t,
+    ));
+    col.push(line).into()
 }
 
 /// The In Works toggle; a non-boolean value shows as invalid, never as off.

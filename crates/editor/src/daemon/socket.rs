@@ -297,6 +297,11 @@ impl DaemonClient for SocketDaemon {
         }
     }
 
+    fn propose_source(&self, path: &str) -> Result<cv_protocol::ProposeSourceResult> {
+        let note = path.to_owned();
+        self.call::<m::ProposeSource>(cv_protocol::ProposeSourceParams { note })
+    }
+
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let rx = self.rpc.notifications()?;
         let topics = topics.to_vec();

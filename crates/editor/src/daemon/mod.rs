@@ -206,6 +206,16 @@ pub trait DaemonClient: Send + Sync {
     fn image_description(&self, _path: &str) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Plan sources-publication-model WP-7: the publication record note `path` belongs to, or a
+    /// proposed one (read-only). An old daemon answers method-not-found (the default here, for
+    /// fakes), which the command reports as "restart the daemon".
+    fn propose_source(&self, _path: &str) -> Result<cv_protocol::ProposeSourceResult> {
+        Err(DaemonError::Rpc(cv_protocol::RpcError {
+            code: cv_protocol::error_codes::METHOD_NOT_FOUND,
+            message: "method not found: propose_source".to_owned(),
+            data: None,
+        }))
+    }
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;

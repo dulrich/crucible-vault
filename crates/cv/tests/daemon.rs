@@ -1187,3 +1187,51 @@ async fn by_id_delete_preview_delete_note_and_set_bool_follow_the_id() {
     drop(c);
     d.shutdown().await.unwrap();
 }
+
+/// Plan sources-publication-model WP-7: `propose_source` answers a proposal for a web note,
+/// writes nothing (note bytes, mtime and the job list unchanged) and answers `NOT_FOUND` for a
+/// path with no note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn propose_source_is_read_only_and_not_found_for_unknown_notes() {
+    let env = Env::new();
+    let note = env.vault().join("clip.md");
+    std::fs::write(
+        &note,
+        "---\nsource: https://www.site.example/essays/one\n---\nbody\n",
+    )
+    .unwrap();
+    let d = start(&env).await;
+    let c = client(&env);
+    let jobs = |c: &Client| {
+        c.request(Request::JobsList(cv_protocol::JobsListParams::default()))
+            .unwrap()["jobs"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+    let before_jobs = jobs(&c);
+    let before = (
+        std::fs::read(&note).unwrap(),
+        std::fs::metadata(&note).unwrap().modified().unwrap(),
+    );
+    let r = c
+        .request(Request::ProposeSource(cv_protocol::ProposeSourceParams {
+            note: "clip.md".into(),
+        }))
+        .unwrap();
+    assert_eq!(r["match"], json!("proposed"), "{r}");
+    assert_eq!(r["record"]["hosts"], json!(["site.example"]), "{r}");
+    assert_eq!(
+        (
+            std::fs::read(&note).unwrap(),
+            std::fs::metadata(&note).unwrap().modified().unwrap()
+        ),
+        before
+    );
+    assert_eq!(jobs(&c), before_jobs);
+    let missing = c.request(Request::ProposeSource(cv_protocol::ProposeSourceParams {
+        note: "nope.md".into(),
+    }));
+    assert_eq!(rpc_code(missing), error_codes::NOT_FOUND);
+    drop(c);
+    d.shutdown().await.unwrap();
+}

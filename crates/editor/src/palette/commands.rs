@@ -52,6 +52,9 @@ pub enum ClientCmd {
     DeleteNote,
     /// Plan usability-sprint-captures-links WP-6: move the active note to a picked folder.
     MoveNote,
+    /// Plan sources-publication-model WP-7: propose a `[[publication]]` record from the active
+    /// note (Settings → Sources).
+    CreateSourceFromNote,
     /// plan editor-ui-round-3 WP-5: Go to top / bottom of the note (Ctrl+PgUp / Ctrl+PgDn).
     GoToTop,
     GoToBottom,
@@ -340,6 +343,13 @@ static TABLE: LazyLock<Vec<CmdSpec>> = LazyLock::new(|| {
         cmd(C::MoveNote, "move_note", "Move note…", &[], |_| {
             Message::Switcher(SwitcherMsg::OpenMove)
         }),
+        cmd(
+            C::CreateSourceFromNote,
+            "create_source_from_note",
+            "Create Source from note",
+            &[],
+            |_| Message::Settings(crate::settings::SettingsMsg::CreateSourceFromNote),
+        ),
         cmd(
             C::GoToTop,
             "go_to_top",

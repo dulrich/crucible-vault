@@ -569,8 +569,61 @@ impl App {
             }
             SettingsMsg::RefreshStatus => return self.fetch_status(),
             SettingsMsg::StatusLoaded(r) => self.settings.status.loaded(r),
+            SettingsMsg::CreateSourceFromNote => return self.create_source_from_note(),
+            SettingsMsg::SourceProposed(r) => return self.source_proposed(r),
         }
         Task::none()
+    }
+
+    /// Plan sources-publication-model WP-7: asks the daemon (off the UI thread) which
+    /// publication the active note belongs to.
+    fn create_source_from_note(&mut self) -> Task<Message> {
+        use crate::settings::SettingsMsg;
+        use crate::settings::pages::sources_propose::propose_error;
+        let Some(path) = self.active_note().map(|t| t.path.to_owned()) else {
+            self.status.set_error("no active note".into());
+            return Task::none();
+        };
+        self.rpc(
+            move |d| d.propose_source(&path).map_err(|e| propose_error(&e)),
+            |r| Message::Settings(SettingsMsg::SourceProposed(r)),
+        )
+    }
+
+    /// The `propose_source` answer: opens Settings → Sources with the proposal as an unsaved
+    /// record, or the matched record expanded with its offer; the notes are logged and shown on
+    /// the page.
+    fn source_proposed(
+        &mut self,
+        r: Result<cv_protocol::ProposeSourceResult, String>,
+    ) -> Task<Message> {
+        use crate::settings::{Section, SettingsMsg};
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                self.status.set_error(e);
+                return Task::none();
+            }
+        };
+        self.open_singleton(TabKind::Settings, self.focus);
+        match self.settings.apply_proposal(r) {
+            Ok(_) => {
+                if let Some(f) = &self.settings.sources.from_note {
+                    for n in &f.notes {
+                        self.status.notify(
+                            crate::app::Severity::Info,
+                            format!("Create Source from note: {n}"),
+                        );
+                    }
+                }
+                self.update_settings(SettingsMsg::Section(Section::Sources))
+            }
+            Err(e) => {
+                self.status
+                    .set_error(format!("Create Source from note: {e}"));
+                Task::none()
+            }
+        }
     }
 
     /// A settings write landed: notices, the requeued follow-up ([`FinishOutcome`]), quit

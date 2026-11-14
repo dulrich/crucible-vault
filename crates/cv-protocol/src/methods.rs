@@ -89,4 +89,5 @@ methods! {
     BindNote = "bind_note" (BindNoteParams) -> BindNoteResult;
     LocateNote = "locate_note" (LocateNoteParams) -> NoteLocation;
     ImageDescription = "image_description" (ImageDescriptionParams) -> ImageDescriptionResult;
+    ProposeSource = "propose_source" (ProposeSourceParams) -> ProposeSourceResult;
 }
