@@ -412,18 +412,14 @@ pub enum BodyMode {
 #[serde(deny_unknown_fields, default)]
 pub struct SourcesConfig {
     /// `[[youtube]]` channels.
-    // removed in WP-2 (plan sources-publication-model)
-    pub youtube: Vec<YoutubeSource>,
+    pub(crate) youtube: Vec<YoutubeSource>,
     /// `[[blog]]` feeds.
-    // removed in WP-2 (plan sources-publication-model)
-    pub blog: Vec<BlogSource>,
+    pub(crate) blog: Vec<BlogSource>,
     /// `[[newsletter]]` mail senders (plan auto-intake-sprint WP-4).
-    // removed in WP-2 (plan sources-publication-model)
-    pub newsletter: Vec<NewsletterSource>,
+    pub(crate) newsletter: Vec<NewsletterSource>,
     /// `[[serial]]` works (plan round-11-feedback-todos Decision 4; replaces the per-work
     /// notes).
-    // removed in WP-2 (plan sources-publication-model)
-    pub serial: Vec<SerialSource>,
+    pub(crate) serial: Vec<SerialSource>,
     /// `[[publication]]` records as written (plan sources-publication-model WP-1); the folded set,
     /// legacy rows included, is [`SourcesConfig::publications`].
     pub publication: Vec<Publication>,
@@ -480,7 +476,7 @@ impl SourcesConfig {
 /// One tracked YouTube channel.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct YoutubeSource {
+pub(crate) struct YoutubeSource {
     /// Display name.
     pub channel: String,
     /// Publication name shown in the Author column (default: `channel`; plan intake-round-2 WP-3).
@@ -502,7 +498,7 @@ pub struct YoutubeSource {
 /// One tracked blog feed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BlogSource {
+pub(crate) struct BlogSource {
     /// Display name.
     pub name: String,
     /// Publication name shown in the Author column (default: `name`; plan intake-round-2 WP-3).
@@ -541,7 +537,7 @@ fn rss() -> String {
 /// address, or `@domain` suffix) or `list_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NewsletterSource {
+pub(crate) struct NewsletterSource {
     /// Display name (also the `tracker_items.source_key` of its mails).
     pub name: String,
     /// Publication name shown in the Author column (default: `name`; plan intake-round-2 WP-3).
@@ -594,7 +590,7 @@ pub enum SerialStatus {
 /// publication.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SerialSource {
+pub(crate) struct SerialSource {
     /// Display name (unique among serial rows).
     pub name: String,
     /// Publication name (default: `name`).
@@ -644,6 +640,7 @@ impl SerialSource {
     /// prefix alone — some prefix must start the trimmed `source`, the author is ignored; a row
     /// with only an author matches when it equals one of the note's authors (both normalized by
     /// [`author_key`]); a row with neither matches nothing. `status` does not affect matching.
+    #[cfg(test)]
     #[must_use]
     pub fn matches(&self, authors: &[&str], source: &str) -> bool {
         let want = self

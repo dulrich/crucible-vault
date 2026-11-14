@@ -287,12 +287,12 @@ fn base_row(
         let Some(channel) = channel else {
             return Ok(None);
         };
-        let info = match sources.youtube.iter().find(|s| s.id == channel) {
-            Some(s) => SourceInfo {
-                key: s.id.clone(),
-                name: s.channel.clone(),
+        let info = match sources.channels().find(|(id, _)| *id == channel) {
+            Some((id, s)) => SourceInfo {
+                key: id.to_owned(),
+                name: s.name.clone(),
                 tags: s.tags.clone(),
-                priority: priority_str(s.priority),
+                priority: priority_str(s.priority()),
             },
             None => SourceInfo {
                 name: channel.clone(),
@@ -317,21 +317,19 @@ fn base_row(
         let blog_name = str_prop(fm, "blog").map(|s| s.to_lowercase());
         let src_host = source.and_then(bare_host).or_else(|| bare_host(&id));
         let configured = sources
-            .blog
-            .iter()
-            .find(|b| blog_name.as_deref() == Some(b.name.trim().to_lowercase().as_str()))
+            .feeds()
+            .find(|(_, b)| blog_name.as_deref() == Some(b.name.trim().to_lowercase().as_str()))
             .or_else(|| {
                 sources
-                    .blog
-                    .iter()
-                    .find(|b| src_host.is_some() && bare_host(&b.link) == src_host)
+                    .feeds()
+                    .find(|(l, _)| src_host.is_some() && bare_host(l) == src_host)
             });
         let info = match configured {
-            Some(b) => SourceInfo {
-                key: b.link.clone(),
+            Some((link, b)) => SourceInfo {
+                key: link.to_owned(),
                 name: b.name.clone(),
                 tags: b.tags.clone(),
-                priority: priority_str(b.priority),
+                priority: priority_str(b.priority()),
             },
             None => {
                 let Some(h) = src_host else {
@@ -422,10 +420,7 @@ pub fn collect(
         .filter_map(|p| period_folder(set, p))
         .collect();
     let hosts = cv_text::url_canon::build_blog_canon_host_map(
-        sources
-            .blog
-            .iter()
-            .map(|b| (b.link.as_str(), b.canon.method())),
+        sources.feeds().map(|(l, b)| (l, b.canon().method())),
     );
     let signals = &set.vault().signals;
     let rules = label_rules(signals);

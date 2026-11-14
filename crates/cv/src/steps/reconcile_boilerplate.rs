@@ -150,8 +150,7 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
     } else {
         message_map(Path::new(cfg.maildir.trim()), &cfg.processed)
     };
-    let newsletters = ctx.config.sources().newsletter.clone();
-    let blogs = ctx.config.sources().blog.clone();
+    let sources = ctx.config.sources().clone();
     // Seed from the processed messages.
     let mut files: Vec<_> = map.values().cloned().collect();
     files.sort();
@@ -159,7 +158,7 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
         let Some(post) = std::fs::read(&f).ok().and_then(|b| mail::parse_eml(&b)) else {
             continue;
         };
-        let Some(nl) = resolve_newsletter(&post, &newsletters, &blogs) else {
+        let Some(nl) = resolve_newsletter(&post, &sources) else {
             continue;
         };
         let body = mail::clean_body(&raw_markdown(&post));

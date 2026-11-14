@@ -131,6 +131,57 @@ impl Publication {
         self.status.unwrap_or_default()
     }
 
+    /// The feed post-id canonicalization (default `auto`).
+    #[must_use]
+    pub fn canon(&self) -> BlogCanon {
+        self.canon.unwrap_or_default()
+    }
+
+    /// The feed body mode (default `auto`).
+    #[must_use]
+    pub fn body(&self) -> BodyMode {
+        self.body.unwrap_or_default()
+    }
+
+    /// The kind its items file as (default `blog`, the old `[[newsletter]]` default).
+    #[must_use]
+    pub fn kind_or_blog(&self) -> &str {
+        self.kind.as_deref().and_then(nonblank).unwrap_or("blog")
+    }
+
+    /// The record's feed whose host is `host` (`www.` ignored), else its first feed: the blog
+    /// tracker key a mail or clip of this publication is contained under.
+    #[must_use]
+    pub fn feed_for_host(&self, host: Option<&str>) -> Option<&str> {
+        let want = host.and_then(bare_host);
+        want.as_ref()
+            .and_then(|w| self.feeds.iter().find(|f| feed_host(f).as_ref() == Some(w)))
+            .or_else(|| self.feeds.first())
+            .map(|f| f.trim())
+    }
+
+    /// Whether the record matches notes by URL prefix or author (the former `[[serial]]` rows).
+    #[must_use]
+    pub fn is_work(&self) -> bool {
+        self.prefixes().next().is_some() || self.author.as_deref().and_then(nonblank).is_some()
+    }
+
+    /// The former `SerialSource::matches`: a record with any non-blank prefix matches by prefix
+    /// alone (some prefix starts the trimmed `source`); else one whose author equals one of
+    /// `authors` (normalized by `author_key`); else nothing.
+    #[must_use]
+    pub fn matches_note(&self, authors: &[&str], source: &str) -> bool {
+        let src = source.trim();
+        if self.prefixes().next().is_some() {
+            return self.prefixes().any(|p| src.starts_with(p));
+        }
+        self.author
+            .as_deref()
+            .map(author_key)
+            .filter(|a| !a.is_empty())
+            .is_some_and(|w| authors.iter().any(|c| author_key(c) == w))
+    }
+
     /// Whether some matcher is set (feeds, from, list_id, hosts, prefix, channel_id, author).
     #[must_use]
     pub fn has_matcher(&self) -> bool {
@@ -207,8 +258,8 @@ impl SourcesConfig {
         &self.origins
     }
 
-    /// The load notice of a fold that merged legacy rows (one per file), else `None`. Wired to
-    /// the config-error surface by WP-2.
+    /// The load notice of a fold that merged legacy rows (one per file), else `None`. Surfaced as
+    /// a load notice by `ConfigSet::notices` (never an error).
     #[must_use]
     pub fn fold_notice(&self) -> Option<String> {
         self.notice.clone()
@@ -287,6 +338,39 @@ impl SourcesConfig {
         self.folded
             .iter()
             .find(|p| p.feeds.iter().any(|f| f.trim() == link))
+    }
+
+    /// Every `(feed link, record)` pair, records in order and feeds in record order.
+    pub fn feeds(&self) -> impl Iterator<Item = (&str, &Publication)> {
+        self.folded
+            .iter()
+            .flat_map(|p| p.feeds.iter().map(move |f| (f.as_str(), p)))
+    }
+
+    /// Every record with a YouTube channel id, as `(id, record)`.
+    pub fn channels(&self) -> impl Iterator<Item = (&str, &Publication)> {
+        self.folded
+            .iter()
+            .filter_map(|p| p.channel_id.as_deref().map(|c| (c.trim(), p)))
+    }
+
+    /// Mail tracker keys a fold renamed: `(legacy [[newsletter]] name, record name)` for every
+    /// newsletter row folded into a record of another name (plan sources-publication-model WP-2).
+    /// Empty once the file holds only `[[publication]]` rows.
+    #[must_use]
+    pub fn mail_key_renames(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (rec, origins) in self.folded.iter().zip(&self.origins) {
+            for o in origins.iter().filter(|o| o.table == "newsletter") {
+                if let Some(n) = self.newsletter.get(o.index)
+                    && n.name != rec.name
+                    && !out.iter().any(|(a, _): &(String, String)| *a == n.name)
+                {
+                    out.push((n.name.clone(), rec.name.clone()));
+                }
+            }
+        }
+        out
     }
 
     /// The publication with YouTube channel id `id`.

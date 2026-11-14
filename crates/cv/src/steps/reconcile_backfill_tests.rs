@@ -511,3 +511,44 @@ mod boilerplate;
 
 #[path = "reconcile_backfill_repair_tests.rs"]
 mod repair;
+
+/// Plan sources-publication-model WP-2: a `blog = ` link folds a newsletter into a record of
+/// another name; the reconcile re-keys that newsletter's mail rows and learned boilerplate to
+/// the record name, once.
+#[test]
+fn folded_newsletter_name_rekeys_mail_rows_and_boilerplate() {
+    let mut w = world(&[]);
+    w.sources("[[newsletter]]\nname = \"Old Letter\"\nfrom = [\"hello@plain.example\"]\n");
+    w.put(
+        "new/r1",
+        &eml(
+            "r1@plain.example",
+            "hello@plain.example",
+            "<p>Body text here.</p>",
+        ),
+    );
+    w.track();
+    assert!(w.row(KIND, "Old Letter", "r1@plain.example").is_some());
+    let seen = |w: &World, k: &str| {
+        w.env
+            .state
+            .lock()
+            .unwrap()
+            .mail_boilerplate_seen(k, "r1@plain.example")
+            .unwrap()
+    };
+    assert!(seen(&w, "Old Letter"));
+    w.sources(
+        "[[blog]]\nname = \"New Pub\"\nlink = \"https://plain.example/feed\"\n\n[[newsletter]]\nname = \"Old Letter\"\nfrom = [\"hello@plain.example\"]\nblog = \"New Pub\"\n",
+    );
+    let dry = w.reconcile(true);
+    assert_eq!(n(&dry, "mail_renamed"), 1);
+    assert!(w.row(KIND, "Old Letter", "r1@plain.example").is_some());
+    let o = w.reconcile(false);
+    assert_eq!(n(&o, "mail_renamed"), 1);
+    assert!(w.row(KIND, "Old Letter", "r1@plain.example").is_none());
+    let (r, _) = w.row(KIND, "New Pub", "r1@plain.example").unwrap();
+    assert_eq!(r.source_name.as_deref(), Some("New Pub"));
+    assert!(!seen(&w, "Old Letter") && seen(&w, "New Pub"));
+    assert_eq!(n(&w.reconcile(false), "mail_renamed"), 0);
+}

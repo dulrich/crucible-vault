@@ -239,11 +239,9 @@ pub(crate) fn finalize_note(
                     let markers: Vec<String> = ctx
                         .config
                         .sources()
-                        .blog
-                        .iter()
-                        .filter(|b| b.link.trim() == key)
-                        .flat_map(|b| b.paywall_markers.clone())
-                        .collect();
+                        .by_feed(key)
+                        .map(|b| b.paywall_markers.clone())
+                        .unwrap_or_default();
                     body_verdict(
                         access.as_deref().and_then(Access::parse),
                         doc.body(),

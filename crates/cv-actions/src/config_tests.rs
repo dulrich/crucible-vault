@@ -354,3 +354,26 @@ fn structure_defaults_and_shared_exclude_list() {
     );
     assert!(c.errors().is_empty(), "{:?}", c.errors());
 }
+
+/// Plan sources-publication-model WP-2: a fold that merged legacy rows reaches the config's
+/// load-notice surface, never its errors.
+#[test]
+fn sources_fold_notice_is_a_load_notice() {
+    let mut c = ConfigSet::default();
+    let mut f = BTreeMap::new();
+    f.insert(
+        "sources.toml".to_owned(),
+        Some(
+            "[[blog]]\nname = \"P\"\nlink = \"https://p.example/feed\"\n\
+             [[newsletter]]\nname = \"P\"\nfrom = [\"a@p.example\"]\n"
+                .to_owned(),
+        ),
+    );
+    c.reload(&f, &ok);
+    assert!(c.errors().is_empty(), "{:?}", c.errors());
+    let n = c.notices();
+    assert_eq!(n.len(), 1, "{n:?}");
+    assert!(n[0].contains("\"P\" (blog+newsletter)"), "{n:?}");
+    c.reload(&BTreeMap::new(), &ok);
+    assert!(c.notices().is_empty());
+}

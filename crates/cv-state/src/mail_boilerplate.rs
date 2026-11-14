@@ -69,6 +69,36 @@ impl StateDb {
         tx.commit()?;
         Ok(fresh)
     }
+    /// Moves everything learned for `old_key` to `new_key` in one transaction (a fold renamed a
+    /// mail `source_key`; plan sources-publication-model WP-2): line counts add onto `new_key`'s,
+    /// seen Message-IDs union (so a message is still learned once), and `old_key`'s rows are
+    /// deleted. Idempotent: nothing under `old_key` (or equal keys) is a no-op returning `false`.
+    pub fn rekey_mail_boilerplate(&mut self, old_key: &str, new_key: &str) -> Result<bool> {
+        if old_key == new_key {
+            return Ok(false);
+        }
+        let tx = self.conn().unchecked_transaction()?;
+        let lines = tx.execute(
+            "INSERT INTO mail_boilerplate (source_key, line_key, count)
+             SELECT ?2, line_key, count FROM mail_boilerplate WHERE source_key = ?1
+             ON CONFLICT(source_key, line_key) DO UPDATE SET count = count + excluded.count",
+            params![old_key, new_key],
+        )?;
+        let seen = tx.execute(
+            "INSERT OR IGNORE INTO mail_boilerplate_seen (source_key, message_id)
+             SELECT ?2, message_id FROM mail_boilerplate_seen WHERE source_key = ?1",
+            params![old_key, new_key],
+        )?;
+        let gone = tx.execute(
+            "DELETE FROM mail_boilerplate WHERE source_key = ?1",
+            params![old_key],
+        )? + tx.execute(
+            "DELETE FROM mail_boilerplate_seen WHERE source_key = ?1",
+            params![old_key],
+        )?;
+        tx.commit()?;
+        Ok(lines + seen + gone > 0)
+    }
 }
 
 #[cfg(test)]
@@ -89,5 +119,33 @@ mod tests {
         assert_eq!(got, [(1, 2), (big, 1)]);
         assert!(s.mail_boilerplate_seen("nl", "<b>").unwrap());
         assert!(!s.mail_boilerplate_seen("nl", "<c>").unwrap());
+    }
+
+    #[test]
+    fn rekey_moves_merges_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = StateDb::open(&dir.path().join("s.db"), 1, QueueConfig::default()).unwrap();
+        // Fresh move: nothing under the new key.
+        assert!(s.learn_mail_boilerplate("old", "<a>", &[1, 2]).unwrap());
+        assert!(s.rekey_mail_boilerplate("old", "new").unwrap());
+        assert!(s.mail_boilerplate_lines("old").unwrap().is_empty());
+        assert!(!s.mail_boilerplate_seen("old", "<a>").unwrap());
+        let mut got = s.mail_boilerplate_lines("new").unwrap();
+        got.sort_unstable();
+        assert_eq!(got, [(1, 1), (2, 1)]);
+        assert!(s.mail_boilerplate_seen("new", "<a>").unwrap());
+        // Idempotent re-run: the old key is absent.
+        assert!(!s.rekey_mail_boilerplate("old", "new").unwrap());
+        assert_eq!(s.mail_boilerplate_lines("new").unwrap().len(), 2);
+        // Collision: counts add, seen ids union, the moved message is never learned again.
+        assert!(s.learn_mail_boilerplate("old", "<b>", &[2, 3]).unwrap());
+        assert!(s.rekey_mail_boilerplate("old", "new").unwrap());
+        let mut got = s.mail_boilerplate_lines("new").unwrap();
+        got.sort_unstable();
+        assert_eq!(got, [(1, 1), (2, 2), (3, 1)]);
+        assert!(s.mail_boilerplate_seen("new", "<a>").unwrap());
+        assert!(s.mail_boilerplate_seen("new", "<b>").unwrap());
+        assert!(!s.learn_mail_boilerplate("new", "<b>", &[9]).unwrap());
+        assert!(s.mail_boilerplate_lines("old").unwrap().is_empty());
     }
 }

@@ -404,6 +404,14 @@ impl ConfigSet {
         out
     }
 
+    /// Every current load notice (not an error: the config loaded and works): today the
+    /// `sources.toml` fold notice of legacy rows merged into one publication record (plan
+    /// sources-publication-model WP-2).
+    #[must_use]
+    pub fn notices(&self) -> Vec<String> {
+        self.sources.fold_notice().into_iter().collect()
+    }
+
     /// Any parsed action (armed or not).
     #[must_use]
     pub fn action(&self, id: &str) -> Option<&Action> {

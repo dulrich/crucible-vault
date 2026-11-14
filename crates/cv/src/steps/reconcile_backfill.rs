@@ -45,7 +45,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use cv_actions::pipelines::NewsletterSource;
+use cv_actions::pipelines::Publication;
 use cv_ingest::access;
 use cv_ingest::mail;
 use cv_note::{FrontmatterDoc, JsValue};
@@ -69,6 +69,8 @@ pub(super) struct Counts {
     /// Always 0: no code inserts `x` tracker rows.
     x_ticked: u32,
     mail_rematched: u32,
+    /// Tracker rows re-keyed from a legacy `[[newsletter]]` name a fold renamed.
+    mail_renamed: u32,
     mail_collisions: u32,
     mail_missing: u32,
     mail_unmatched: u32,
@@ -193,12 +195,12 @@ pub(super) fn message_map(root: &Path, processed: &str) -> HashMap<String, PathB
 fn retag(
     ctx: &mut StepCtx<'_>,
     path: &str,
-    nl: &NewsletterSource,
+    nl: &Publication,
     marker: bool,
     dry: bool,
     c: &mut Counts,
 ) -> Result<Option<String>, StepError> {
-    let (folder, tags, _) = note_target(ctx, &nl.kind, &nl.tags)?;
+    let (folder, tags, _) = note_target(ctx, nl.kind_or_blog(), &nl.tags)?;
     let Some((bytes, hash)) = ctx.read(path)? else {
         return Ok(None);
     };
@@ -243,8 +245,31 @@ fn retag(
     }
 }
 
+/// Phase B, first: re-keys the mail rows (and learned boilerplate) of every legacy
+/// `[[newsletter]]` name the publication fold renamed (`SourcesConfig::mail_key_renames`; plan
+/// sources-publication-model WP-2). Idempotent: an old key with no rows is a no-op.
+fn rename_mail_keys(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<(), StepError> {
+    for (old, new) in ctx.config.sources().mail_key_renames() {
+        let rows = ctx.state().tracker_rows_of_source(KIND, &old)?;
+        if sh.dry {
+            c.mail_renamed += u32::try_from(rows.len()).unwrap_or(u32::MAX);
+            continue;
+        }
+        for r in rows {
+            let moved = ctx
+                .state()
+                .rekey_tracker_item(KIND, &old, &r.item_id, &new, &new)?;
+            c.mail_renamed += u32::from(moved != Rekey::Absent);
+            c.mail_collisions += u32::from(moved == Rekey::Merged);
+        }
+        ctx.state().rekey_mail_boilerplate(&old, &new)?;
+    }
+    Ok(())
+}
+
 /// Phase B.
 pub(super) fn mail(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<(), StepError> {
+    rename_mail_keys(ctx, sh, c)?;
     let rows = ctx.state().tracker_rows_of_source(KIND, UNKNOWN)?;
     if rows.is_empty() {
         return Ok(());
@@ -255,8 +280,7 @@ pub(super) fn mail(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result
     } else {
         message_map(Path::new(cfg.maildir.trim()), &cfg.processed)
     };
-    let newsletters = ctx.config.sources().newsletter.clone();
-    let blogs = ctx.config.sources().blog.clone();
+    let sources = ctx.config.sources().clone();
     let mut tagged: BTreeSet<String> = BTreeSet::new();
     let mut finalized: BTreeSet<String> = BTreeSet::new();
     for r in rows {
@@ -268,11 +292,10 @@ pub(super) fn mail(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result
             c.mail_missing += 1;
             continue;
         };
-        let Some(nl) = resolve_newsletter(&post, &newsletters, &blogs) else {
+        let Some(nl) = resolve_newsletter(&post, &sources) else {
             c.mail_unmatched += 1;
             continue;
         };
-        let nl: &NewsletterSource = &nl;
         c.mail_rematched += 1;
         if sh.dry {
             let exists = ctx
@@ -295,15 +318,8 @@ pub(super) fn mail(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result
         };
         let mut text = None;
         if r.outcome == TrackerOutcome::Note && tagged.insert(path.clone()) {
-            let mut markers = nl.paywall_markers.clone();
-            if let Some(b) = nl
-                .blog
-                .as_deref()
-                .and_then(|n| blogs.iter().find(|b| b.name == n))
-            {
-                markers.extend(b.paywall_markers.iter().cloned());
-            }
-            let marker = access::marker_hit(&raw_markdown(&post), &markers);
+            let markers = &nl.paywall_markers;
+            let marker = access::marker_hit(&raw_markdown(&post), markers);
             text = retag(ctx, &path, nl, marker, sh.dry, c)?;
         }
         if finalized.insert(path.clone()) {

@@ -387,6 +387,9 @@ impl Runner {
         for e in &errors {
             tracing::warn!(error = %e, "config");
         }
+        for n in next.notices() {
+            tracing::info!(notice = %n, "config");
+        }
         self.set_config(next);
         errors
     }

@@ -194,10 +194,9 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
     let rows: Vec<_> = ctx
         .config
         .sources()
-        .youtube
-        .iter()
-        .filter(|r| !r.priority.is_excluded())
-        .filter_map(|r| uploads_playlist_id(&r.id).map(|pl| (r.clone(), pl)))
+        .channels()
+        .filter(|(_, r)| !r.priority().is_excluded())
+        .filter_map(|(id, r)| uploads_playlist_id(id).map(|pl| ((id.to_owned(), r.clone()), pl)))
         .collect();
     let key = secret(API_KEY_SECRET).ok_or_else(no_key)?;
     let mut seen = SeenSet::load(ctx, KIND, PROP, seed)?;
@@ -205,7 +204,7 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
         ctx,
         KIND,
         rows.iter()
-            .map(|(r, _)| (r.id.as_str(), r.channel.as_str())),
+            .map(|((id, r), _)| (id.as_str(), r.name.as_str())),
     )?;
     let shorts = ctx.config.pipelines().ignore_shorts.clone();
 
@@ -227,7 +226,7 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             deferred = Some(d);
         }
     };
-    for ((row, _), list) in rows.iter().zip(lists) {
+    for (((row_id, row), _), list) in rows.iter().zip(lists) {
         let items: Vec<PlaylistItem> = match list {
             Ok(v) => {
                 record_usage(ctx, api::SERVICE, 1);
@@ -293,8 +292,8 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
             }
             let cand = Candidate {
                 source_kind: KIND.into(),
-                source_key: row.id.clone(),
-                source_name: row.channel.clone(),
+                source_key: row_id.clone(),
+                source_name: row.name.clone(),
                 item_id: id.clone(),
                 title,
                 url: watch_url(&id),
@@ -309,9 +308,9 @@ pub(crate) fn run(max: u32, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepEr
                 record(ctx, &cand, TrackerOutcome::Skipped)?;
                 continue;
             }
-            let names = [row.channel.as_str(), channel_title.as_str()];
+            let names = [row.name.as_str(), channel_title.as_str()];
             if is_ignored_short(
-                &row.id,
+                row_id,
                 &names,
                 duration,
                 &shorts.channels,

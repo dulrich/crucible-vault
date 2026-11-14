@@ -258,11 +258,9 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
         let markers: Vec<String> = ctx
             .config
             .sources()
-            .blog
-            .iter()
-            .filter(|b| b.link.trim() == w.item.source_key)
-            .flat_map(|b| b.paywall_markers.clone())
-            .collect();
+            .by_feed(&w.item.source_key)
+            .map(|b| b.paywall_markers.clone())
+            .unwrap_or_default();
         let verdict = body_verdict(
             access_s.as_deref().and_then(Access::parse),
             doc.body(),

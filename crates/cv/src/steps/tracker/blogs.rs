@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use cv_actions::pipelines::{BlogSource, BodyMode};
+use cv_actions::pipelines::{BlogCanon, BodyMode, Priority, SourcesConfig};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access::{self, Access};
 use cv_ingest::blogs::{self as policy, BlogPost};
@@ -110,6 +110,45 @@ fn body_mode(m: BodyMode) -> policy::BodyMode {
         BodyMode::Full => policy::BodyMode::Full,
         BodyMode::Snippet => policy::BodyMode::Snippet,
     }
+}
+
+/// One tracked feed: a publication record's feed with the record's feed settings (plan
+/// sources-publication-model WP-2; the tracker `source_key` stays the feed link).
+#[derive(Debug, Clone)]
+struct BlogSource {
+    name: String,
+    link: String,
+    method: String,
+    tags: Vec<String>,
+    priority: Priority,
+    canon: BlogCanon,
+    body: BodyMode,
+    paywall_markers: Vec<String>,
+    publication: String,
+}
+
+impl BlogSource {
+    fn publication(&self) -> &str {
+        &self.publication
+    }
+}
+
+/// One [`BlogSource`] per feed of every publication record, in record order.
+fn blog_rows(sources: &SourcesConfig) -> Vec<BlogSource> {
+    sources
+        .feeds()
+        .map(|(link, p)| BlogSource {
+            name: p.name.clone(),
+            link: link.to_owned(),
+            method: p.method().to_owned(),
+            tags: p.tags.clone(),
+            priority: p.priority(),
+            canon: p.canon(),
+            body: p.body(),
+            paywall_markers: p.paywall_markers.clone(),
+            publication: p.publication().to_owned(),
+        })
+        .collect()
 }
 
 fn row_is_valid(r: &BlogSource) -> Result<(), String> {
@@ -398,11 +437,8 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
     let window = usize::try_from(cfg.automatable_window.max(1)).unwrap_or(usize::MAX);
     let mut invalid = 0;
-    let rows: Vec<BlogSource> = ctx
-        .config
-        .sources()
-        .blog
-        .iter()
+    let rows: Vec<BlogSource> = blog_rows(ctx.config.sources())
+        .into_iter()
         .filter(|r| !r.priority.is_excluded())
         .filter(|r| match row_is_valid(r) {
             Ok(()) => true,
@@ -412,7 +448,6 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 false
             }
         })
-        .cloned()
         .collect();
     let mut seen = SeenSet::load(ctx, KIND, PROP, |_| BTreeSet::new())?;
     super::heal_source_names(

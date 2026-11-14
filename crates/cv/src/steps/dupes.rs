@@ -139,9 +139,8 @@ pub(crate) fn post_id_options(config: &ConfigSet) -> PostIdOptions {
         host_rules: build_blog_canon_host_map(
             config
                 .sources()
-                .blog
-                .iter()
-                .map(|b| (b.link.as_str(), b.canon.method())),
+                .feeds()
+                .map(|(l, b)| (l, b.canon().method())),
         ),
     }
 }

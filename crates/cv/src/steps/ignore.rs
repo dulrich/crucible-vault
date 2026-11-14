@@ -111,10 +111,9 @@ fn run(mode: Mode, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             let tracked = ctx
                 .config
                 .sources()
-                .youtube
-                .iter()
-                .find(|r| !channel_id.is_empty() && r.id == channel_id)
-                .map(|r| r.channel.clone())
+                .channels()
+                .find(|(id, _)| !channel_id.is_empty() && *id == channel_id)
+                .map(|(_, r)| r.name.clone())
                 .unwrap_or_default();
             let names = [title.as_str(), tracked.as_str()];
             let shorts = &ctx.config.pipelines().ignore_shorts;

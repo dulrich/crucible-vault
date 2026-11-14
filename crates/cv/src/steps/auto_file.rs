@@ -41,7 +41,7 @@
 //! unchanged). The matched serial row's `publication()` (any kind), else the matched host row's,
 //! is written to the clip when absent, before the child is spawned.
 
-use cv_actions::pipelines::{SerialSource, SourcesConfig};
+use cv_actions::pipelines::{Publication, SourcesConfig};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_note::{FrontmatterDoc, JsValue};
@@ -144,60 +144,55 @@ pub(in crate::steps) struct HostRow {
     pub(in crate::steps) publication: Option<String>,
 }
 
-/// Matches the clip host against the `[[newsletter]]` rows' linked blog host and the `[[blog]]`
-/// rows' host (feed URL host); failing those, step (2b): the first `[[newsletter]]` row whose
-/// `hosts` lists it (its `kind`, markers and publication; no blog key).
+/// Matches the clip host against the publication records' feed hosts (the former `[[blog]]`
+/// rows, first record in order); failing those, step (2b): the first record whose `hosts` lists
+/// it. Kind, markers and publication are the record's (plan sources-publication-model WP-2).
 pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<HostRow> {
-    let Some(blog) = sources
-        .blog
-        .iter()
-        .find(|b| canonical_bare_host(&b.link).as_deref() == Some(host))
-    else {
-        let n = sources.newsletter.iter().find(|n| {
-            n.hosts
-                .iter()
-                .filter_map(|h| configured_host(h))
-                .any(|h| h == host)
-        })?;
-        return Some(HostRow {
-            blog: None,
-            kind: Some(n.kind.clone()),
-            markers: n.paywall_markers.clone(),
-            publication: Some(n.publication().to_owned()),
-        });
-    };
-    let mut row = HostRow {
-        blog: Some((blog.name.clone(), blog.link.trim().to_owned())),
-        kind: Some("blog".into()),
-        markers: blog.paywall_markers.clone(),
-        publication: Some(blog.publication().to_owned()),
-    };
-    if let Some(n) = sources
-        .newsletter
-        .iter()
-        .find(|n| n.blog.as_deref() == Some(blog.name.as_str()))
+    if let Some((link, p)) = sources
+        .feeds()
+        .find(|(l, _)| canonical_bare_host(l).as_deref() == Some(host))
     {
-        row.kind = Some(n.kind.clone());
-        row.markers.extend(n.paywall_markers.iter().cloned());
+        return Some(HostRow {
+            blog: Some((p.name.clone(), link.trim().to_owned())),
+            kind: Some(p.kind_or_blog().to_owned()),
+            markers: p.paywall_markers.clone(),
+            publication: Some(p.publication().to_owned()),
+        });
     }
-    Some(row)
+    let p = sources.publications().iter().find(|p| {
+        p.hosts
+            .iter()
+            .filter_map(|h| configured_host(h))
+            .any(|h| h == host)
+    })?;
+    Some(HostRow {
+        blog: p
+            .feed_for_host(Some(host))
+            .map(|l| (p.name.clone(), l.to_owned())),
+        kind: Some(p.kind_or_blog().to_owned()),
+        markers: p.paywall_markers.clone(),
+        publication: Some(p.publication().to_owned()),
+    })
 }
 
-/// The first `[[serial]]` row (config order) that matches the clip and whose `kind` `is_kind`;
-/// a matching row with an undefined kind is skipped with a warning (never coerced).
+/// The first work record (one with a prefix or author, config order) that matches the clip and
+/// whose `kind` `is_kind`; a matching record with an undefined kind is skipped with a warning
+/// (never coerced).
 pub(in crate::steps) fn serial_hit<'a>(
-    serial: &'a [SerialSource],
+    sources: &'a SourcesConfig,
     clip: &Clip,
     is_kind: impl Fn(&str) -> bool,
-) -> Option<&'a SerialSource> {
+) -> Option<&'a Publication> {
     let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
-    serial
+    sources
+        .publications()
         .iter()
-        .filter(|s| s.matches(&authors, &clip.source))
+        .filter(|s| s.is_work() && s.matches_note(&authors, &clip.source))
         .find(|s| {
-            let ok = is_kind(s.kind.trim());
+            let kind = s.kind.as_deref().unwrap_or("").trim();
+            let ok = is_kind(kind);
             if !ok {
-                tracing::warn!(serial = %s.name, kind = %s.kind, "auto_file: serial row kind is not defined in kinds.toml; row skipped");
+                tracing::warn!(serial = %s.name, %kind, "auto_file: serial row kind is not defined in kinds.toml; row skipped");
             }
             ok
         })
@@ -474,9 +469,9 @@ fn file_by_kind(
 ) -> Result<(), StepError> {
     let is_kind = |k: &str| kind_def(ctx.config, k).is_ok();
     let mut work_pub = None;
-    let kind = if let Some(s) = serial_hit(&sources.serial, clip, is_kind) {
+    let kind = if let Some(s) = serial_hit(sources, clip, is_kind) {
         work_pub = Some(s.publication().trim().to_owned()).filter(|p| !p.is_empty());
-        Some(s.kind.trim().to_owned())
+        Some(s.kind.as_deref().unwrap_or("").trim().to_owned())
     } else if let Some(k) = row.and_then(|r| r.kind.clone()) {
         Some(k)
     } else if cv_text::url_canon::is_youtube_video(&clip.source) {

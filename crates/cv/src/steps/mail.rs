@@ -31,10 +31,9 @@
 //! untouched and counted `incomplete`; whichever event or schedule triggered the scan, it is
 //! picked up by a later one.
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use cv_actions::pipelines::{BlogSource, NewsletterSource};
+use cv_actions::pipelines::{Publication, SourcesConfig};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_ingest::mail::{self, MailPost};
@@ -307,7 +306,7 @@ fn note_path(
 
 /// Counters and shared inputs of one run.
 struct Run<'a> {
-    rows: &'a [NewsletterSource],
+    sources: &'a SourcesConfig,
     complete_percent: u32,
     sidx: SupersedeIndex,
     sup_cfg: cv_actions::pipelines::SupersedeConfig,
@@ -321,37 +320,21 @@ enum Handled {
     Seen,
 }
 
-/// The newsletter row a message belongs to (plan intake-followups-mail-youtube WP-2): an explicit
-/// `[[newsletter]]` match always wins; otherwise a Substack message (`mail::substack_host`) mirrors
-/// the first `[[blog]]` row whose feed host equals it, as a synthesized row named for the blog
-/// (kind `blog`, no extra tags or markers; the blog row's own markers apply downstream).
-/// WP-5's reconcile re-match of already-recorded rows reuses this.
+/// The publication record a message belongs to (plan sources-publication-model WP-2, through
+/// `SourcesConfig::by_mail`): a record whose `from`/`list_id` matches always wins; otherwise a
+/// Substack message (`mail::substack_host`) belongs to the first record with a feed on that host.
+/// The reconcile's re-match of already-recorded rows reuses this.
 pub(crate) fn resolve_newsletter<'a>(
     post: &MailPost,
-    rows: &'a [NewsletterSource],
-    blogs: &[BlogSource],
-) -> Option<Cow<'a, NewsletterSource>> {
-    if let Some(r) =
-        mail::match_newsletter(post, rows, |r| (r.from.as_slice(), r.list_id.as_deref()))
-    {
-        return Some(Cow::Borrowed(r));
-    }
-    let host = mail::substack_host(post)?;
-    let blog = blogs
-        .iter()
-        .find(|b| cv_text::url_canon::http_host(&b.link).is_some_and(|h| h == host))?;
-    Some(Cow::Owned(NewsletterSource {
-        name: blog.name.clone(),
-        short: blog.short.clone(),
-        from: Vec::new(),
-        list_id: None,
-        blog: Some(blog.name.clone()),
-        kind: "blog".into(),
-        tags: Vec::new(),
-        paywall_markers: Vec::new(),
-        hosts: Vec::new(),
-        works: false,
-    }))
+    sources: &'a SourcesConfig,
+) -> Option<&'a Publication> {
+    sources.by_mail(&post.from_addr, post.list_id.as_deref())
+}
+
+/// The blog feed a matched message is contained under (the record's feed on the message's
+/// Substack host, else its first feed; `None` for a record without feeds).
+pub(crate) fn mail_blog_link<'a>(post: &MailPost, p: &'a Publication) -> Option<&'a str> {
+    p.feed_for_host(mail::substack_host(post).as_deref())
 }
 
 /// The message body as markdown before any cleanup (the HTML part converted, else the trimmed
@@ -378,8 +361,7 @@ fn handle(
     post: &MailPost,
     out: &mut StepOutcome,
 ) -> Result<Handled, StepError> {
-    let nl = resolve_newsletter(post, run.rows, &ctx.config.sources().blog);
-    let nl = nl.as_deref();
+    let nl = resolve_newsletter(post, run.sources);
     let key = nl.map_or(UNKNOWN, |n| n.name.as_str()).to_owned();
     for k in [key.as_str(), UNKNOWN] {
         if ctx
@@ -390,21 +372,11 @@ fn handle(
             return Ok(Handled::Seen);
         }
     }
-    let blog_row = nl.and_then(|n| n.blog.as_deref()).and_then(|b| {
-        ctx.config
-            .sources()
-            .blog
-            .iter()
-            .find(|r| r.name == b)
-            .cloned()
-    });
+    let blog_link = nl.and_then(|n| mail_blog_link(post, n));
     // The one post identity (plan intake-round-2-clean-dedupe-reading WP-2): publication-proven,
     // token-free, rebased onto the blog row's host. `None` leaves the Message-ID as the identity.
-    let canon = mail::canonical_post_url(post, blog_row.as_ref().map(|b| b.link.as_str()));
-    let mut markers: Vec<String> = nl.map(|n| n.paywall_markers.clone()).unwrap_or_default();
-    if let Some(b) = &blog_row {
-        markers.extend(b.paywall_markers.iter().cloned());
-    }
+    let canon = mail::canonical_post_url(post, blog_link);
+    let markers: Vec<String> = nl.map(|n| n.paywall_markers.clone()).unwrap_or_default();
     let body_md = raw_markdown(post);
     // The paywall-marker verdict is taken on the pre-cleanup body: removing an "Upgrade to paid"
     // chrome line must never turn a partial message complete (plan intake-followups-mail-youtube
@@ -434,7 +406,7 @@ fn handle(
     } else {
         post.subject.clone()
     };
-    let blog_key = blog_row.as_ref().map(|b| b.link.trim().to_owned());
+    let blog_key = blog_link.map(str::to_owned);
     let inc = Incoming {
         own_path: None,
         urls: canon.iter().cloned().collect(),
@@ -452,7 +424,7 @@ fn handle(
         body_md: &body_md,
         access: None,
         complete,
-        publication: nl.map(NewsletterSource::publication),
+        publication: nl.map(Publication::publication),
         origin: Origin::Mail,
     };
     let resolved = supersede::resolve(ctx, &run.sidx, &run.sup_cfg, &inc)?;
@@ -501,7 +473,7 @@ fn handle(
         return Ok(Handled::Kept);
     }
     // New: capture a note.
-    let kind = nl.map_or("blog", |n| n.kind.as_str());
+    let kind = nl.map_or("blog", Publication::kind_or_blog);
     let extra = nl.map(|n| n.tags.clone()).unwrap_or_default();
     let (folder, tags, kind_defined) = note_target(ctx, kind, &extra)?;
     let (path, exists) = note_path(ctx, &folder, &title, &post.message_id)?;
@@ -509,7 +481,7 @@ fn handle(
         let created = now().format("%Y-%m-%d").to_string();
         let refs = NoteRefs {
             source: canon.as_deref(),
-            publication: nl.map(NewsletterSource::publication),
+            publication: nl.map(Publication::publication),
             kind,
         };
         let text = captured_note(
@@ -592,8 +564,9 @@ pub(crate) fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
     let root = PathBuf::from(cfg.maildir.trim());
     let mut vars = Vars::default();
+    let sources = ctx.config.sources().clone();
     let mut run = Run {
-        rows: &ctx.config.sources().newsletter.clone(),
+        sources: &sources,
         complete_percent: ctx.config.pipelines().blogs.complete_percent,
         sidx: SupersedeIndex::build(ctx).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "track_mail: supersede index unavailable");

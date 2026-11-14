@@ -191,34 +191,40 @@ pub(crate) fn cancel_orphaned(
     Ok(changed)
 }
 
-/// `[[youtube]] id`s, `skip`/`ignore` rows included.
+/// Channel ids of every publication record (the YouTube tracker's `source_key`), `skip`/`ignore`
+/// rows included.
 pub(crate) fn youtube_keys(config: &ConfigSet) -> Vec<String> {
     config
         .sources()
-        .youtube
-        .iter()
-        .map(|r| r.id.clone())
+        .channels()
+        .map(|(id, _)| id.to_owned())
         .collect()
 }
 
-/// Trimmed `[[blog]] link`s, `skip`/`ignore` rows included (the blog tracker's `source_key`).
+/// Trimmed feed links of every publication record, `skip`/`ignore` rows included (the blog
+/// tracker's `source_key`).
 pub(crate) fn blog_keys(config: &ConfigSet) -> Vec<String> {
     config
         .sources()
-        .blog
-        .iter()
-        .map(|r| r.link.trim().to_owned())
+        .feeds()
+        .map(|(l, _)| l.trim().to_owned())
         .collect()
 }
 
-/// `[[newsletter]] name`s plus every `[[blog]] name` (a superset of the Substack-mirrored
-/// synthesized newsletter names, so it can only cancel less).
+/// Every publication record's name (the mail `source_key`), plus the legacy names a fold renamed
+/// (`mail_key_renames`) so their rows stay open until the reconcile re-keys them.
 pub(crate) fn mail_keys(config: &ConfigSet) -> Vec<String> {
     let s = config.sources();
-    s.newsletter
+    let from_mail = |i: usize| s.origins()[i].iter().any(|o| o.table == "newsletter");
+    let (mail, rest): (Vec<_>, Vec<_>) = s
+        .publications()
         .iter()
-        .map(|r| r.name.clone())
-        .chain(s.blog.iter().map(|r| r.name.clone()))
+        .enumerate()
+        .partition(|(i, _)| from_mail(*i));
+    mail.into_iter()
+        .chain(rest)
+        .map(|(_, r)| r.name.clone())
+        .chain(s.mail_key_renames().into_iter().map(|(old, _)| old))
         .collect()
 }
 

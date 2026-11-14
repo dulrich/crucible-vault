@@ -133,10 +133,9 @@ fn channel_folder(ctx: &StepCtx<'_>, channel_id: &str, title: &str) -> String {
     let tracked = ctx
         .config
         .sources()
-        .youtube
-        .iter()
-        .find(|r| !channel_id.is_empty() && r.id == channel_id)
-        .map(|r| slugify(&r.channel))
+        .by_channel(channel_id)
+        .filter(|_| !channel_id.is_empty())
+        .map(|r| slugify(&r.name))
         .filter(|s| !s.is_empty());
     tracked
         .or_else(|| Some(slugify(title)).filter(|s| !s.is_empty()))
@@ -202,9 +201,8 @@ pub(crate) fn find_metadata_note(
 fn untracked_publication(ctx: &StepCtx<'_>, meta: &VideoMeta) -> Option<String> {
     ctx.config
         .sources()
-        .youtube
-        .iter()
-        .find(|r| !meta.channel_id.is_empty() && r.id == meta.channel_id)
+        .by_channel(&meta.channel_id)
+        .filter(|_| !meta.channel_id.is_empty())
         .map(|r| r.publication().to_owned())
         .or_else(|| Some(meta.channel_title.trim().to_owned()))
         .filter(|p| !p.is_empty())

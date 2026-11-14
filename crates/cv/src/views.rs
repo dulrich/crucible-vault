@@ -224,7 +224,7 @@ struct Entry {
 ///   unset), `prefix` (list), `kind` (serial/newsletter: its `kind`; blog/youtube: the row type),
 ///   `status` (serial: its status; others `active`), `row`, `entries`, `unread` (`read != true`)
 ///   and `last_update` (latest `created`, else file ctime; null without entries). Serial rows
-///   count the notes [`SerialSource::matches`] accepts (the auto-file matcher, shared — never
+///   count the notes `Publication::matches_note` accepts (the auto-file matcher, shared — never
 ///   restated as a view expression); other rows count notes whose `publication` equals theirs;
 /// - note path → name of the first serial row (config order) matching it.
 fn source_data(
@@ -265,10 +265,23 @@ fn source_data(
             }
         }
     }
+    // Work records (a prefix or an author: the former `[[serial]]` rows) are always emitted and
+    // set `file.serial`; other records only with `works = true` (plan sources-publication-model
+    // WP-2 keeps the per-table rule; WP-5 replaces it).
+    let serialish = |i: usize, p: &cv_actions::pipelines::Publication| {
+        p.is_work() || cfg.origins()[i].iter().any(|o| o.table == "serial")
+    };
+    let works: Vec<&cv_actions::pipelines::Publication> = cfg
+        .publications()
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| serialish(*i, p))
+        .map(|(_, p)| p)
+        .collect();
     let mut serial_of = BTreeMap::new();
     for (path, e) in &notes {
         let a: Vec<&str> = e.authors.iter().map(String::as_str).collect();
-        if let Some(s) = cfg.serial.iter().find(|s| s.matches(&a, &e.source)) {
+        if let Some(s) = works.iter().find(|s| s.matches_note(&a, &e.source)) {
             serial_of.insert(path.clone(), s.name.clone());
         }
     }
@@ -328,8 +341,8 @@ fn source_data(
         let p = p.trim().to_owned();
         move |e: &Entry| e.publication == p
     };
-    for s in &cfg.serial {
-        let status = match s.status {
+    for s in &works {
+        let status = match s.status() {
             SerialStatus::Active => "active",
             SerialStatus::Complete => "complete",
             SerialStatus::Ignored => "ignored",
@@ -340,52 +353,45 @@ fn source_data(
             s.publication(),
             s.author.as_deref(),
             &s.prefix,
-            &s.kind,
+            s.kind.as_deref().unwrap_or(""),
             status,
             &|e: &Entry| {
                 let a: Vec<&str> = e.authors.iter().map(String::as_str).collect();
-                s.matches(&a, &e.source)
+                s.matches_note(&a, &e.source)
             },
         );
     }
-    for b in cfg.blog.iter().filter(|b| b.works) {
-        let f = by_pub(b.publication());
-        push(
-            "blog",
-            &b.name,
-            b.publication(),
-            None,
-            &[],
-            "blog",
-            "active",
-            &f,
-        );
+    // One row per listed record, grouped by shape as the old tables were (blog, newsletter,
+    // youtube).
+    fn row_of(p: &cv_actions::pipelines::Publication) -> (&'static str, &str) {
+        if p.channel_id.is_some() {
+            ("youtube", "youtube")
+        } else if p.feeds.is_empty() {
+            ("newsletter", p.kind_or_blog())
+        } else {
+            ("blog", p.kind.as_deref().unwrap_or("blog"))
+        }
     }
-    for n in cfg.newsletter.iter().filter(|n| n.works) {
-        let f = by_pub(n.publication());
-        push(
-            "newsletter",
-            &n.name,
-            n.publication(),
-            None,
-            &[],
-            &n.kind,
-            "active",
-            &f,
-        );
-    }
-    for y in cfg.youtube.iter().filter(|y| y.works) {
-        let f = by_pub(y.publication());
-        push(
-            "youtube",
-            &y.channel,
-            y.publication(),
-            None,
-            &[],
-            "youtube",
-            "active",
-            &f,
-        );
+    for shape in ["blog", "newsletter", "youtube"] {
+        for (_, p) in cfg
+            .publications()
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| !serialish(*i, p) && p.works == Some(true) && row_of(p).0 == shape)
+        {
+            let f = by_pub(p.publication());
+            let (_, kind) = row_of(p);
+            push(
+                shape,
+                &p.name,
+                p.publication(),
+                None,
+                &[],
+                kind,
+                "active",
+                &f,
+            );
+        }
     }
     Ok((out, serial_of))
 }

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use super::fanfic_title::{Plan, plan};
 use super::testkit::{StepEnv, active, example_env};
+use cv_actions::pipelines::SourcesConfig;
 
 const FM: &str = "---\ntags:\n  - fanfic\n---\n";
 const NOTE_STEP: &str = "type = \"fanfic_title\"\nmatch_kind = \"fanfic\"\nkind = \"{param.kind}\"\npath = \"{vars.moved_path}\"";
@@ -27,23 +28,36 @@ fn moved(path: &str) -> serde_json::Map<String, Value> {
 #[test]
 fn plan_is_pure_per_shape() {
     assert_eq!(
-        plan("F/A - Chapter 2.md", "x", &[], &|_| true),
+        plan(
+            "F/A - Chapter 2.md",
+            "x",
+            &SourcesConfig::default(),
+            &|_| true
+        ),
         Plan::Already
     );
     assert_eq!(
-        plan("F/A - Chapter 2 - W - Fandom.md", "x", &[], &|_| true),
+        plan(
+            "F/A - Chapter 2 - W - Fandom.md",
+            "x",
+            &SourcesConfig::default(),
+            &|_| true
+        ),
         Plan::Rename("F/A - Chapter 2.md".into())
     );
     assert_eq!(
         plan(
             "F/A | Site.md",
             "---\nk: v\n---\n\n# Chapter 4\n",
-            &[],
+            &SourcesConfig::default(),
             &|_| true
         ),
         Plan::Rename("F/A - Chapter 4.md".into())
     );
-    assert_eq!(plan("F/A.md", "prose", &[], &|_| true), Plan::Undetected);
+    assert_eq!(
+        plan("F/A.md", "prose", &SourcesConfig::default(), &|_| true),
+        Plan::Undetected
+    );
 }
 
 #[test]
@@ -293,13 +307,9 @@ fn real_run_writes_no_review_note() {
 
 // ---- WP-8: target-based plan, serial publication, chain-safe backfill ----------------------
 
-fn serial_rows() -> Vec<cv_actions::pipelines::SerialSource> {
-    #[derive(serde::Deserialize)]
-    struct Rows {
-        serial: Vec<cv_actions::pipelines::SerialSource>,
-    }
+fn serial_rows() -> cv_actions::pipelines::SourcesConfig {
     let src = "[[serial]]\nname = \"Zeta Long Name\"\nshort = \"Zeta:  Tale\"\nprefix = [\"https://fic.example/s/1/\"]\n";
-    toml::from_str::<Rows>(src).unwrap().serial
+    cv_actions::pipelines::SourcesConfig::from_table(&src.parse().unwrap()).unwrap()
 }
 
 #[test]

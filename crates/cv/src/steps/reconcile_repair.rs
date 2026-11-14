@@ -41,7 +41,7 @@ use cv_state::TrackerItem;
 use cv_vault::VaultError;
 use serde::Serialize;
 
-use super::mail::resolve_newsletter;
+use super::mail::{mail_blog_link, resolve_newsletter};
 use super::reconcile_backfill::{Shared, message_map, read_text};
 use super::{StepCtx, StepError};
 use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
@@ -114,8 +114,7 @@ pub(super) fn merge_mail_twins(
     } else {
         message_map(Path::new(cfg.maildir.trim()), &cfg.processed)
     };
-    let newsletters = ctx.config.sources().newsletter.clone();
-    let blogs = ctx.config.sources().blog.clone();
+    let sources = ctx.config.sources().clone();
     let sup_cfg = ctx.config.pipelines().supersede.clone();
     super::reconcile_backfill::index(sidx, ctx)?;
     for path in paths {
@@ -131,10 +130,8 @@ pub(super) fn merge_mail_twins(
         let Some(post) = post else {
             continue;
         };
-        let blog_link = resolve_newsletter(&post, &newsletters, &blogs)
-            .and_then(|n| n.blog.clone())
-            .and_then(|b| blogs.iter().find(|r| r.name == b).map(|r| r.link.clone()));
-        let Some(canon) = mail::canonical_post_url(&post, blog_link.as_deref()) else {
+        let blog_link = resolve_newsletter(&post, &sources).and_then(|n| mail_blog_link(&post, n));
+        let Some(canon) = mail::canonical_post_url(&post, blog_link) else {
             continue;
         };
         if let Some(idx) = sidx.as_mut() {
@@ -260,36 +257,32 @@ fn merge(
 fn publication_of_row(ctx: &StepCtx<'_>, r: &TrackerItem) -> Option<String> {
     let s = ctx.config.sources();
     match r.source_kind.as_str() {
-        "blog" => s
-            .blog
-            .iter()
-            .find(|b| b.link.trim() == r.source_key)
-            .map(|b| b.publication().to_owned()),
-        "mail" => s
-            .newsletter
-            .iter()
-            .find(|n| n.name == r.source_key)
-            .map(|n| n.publication().to_owned())
-            .or_else(|| {
-                s.blog
-                    .iter()
-                    .find(|b| b.name == r.source_key)
-                    .map(|b| b.publication().to_owned())
-            }),
+        "blog" => s.by_feed(&r.source_key).map(|b| b.publication().to_owned()),
+        "mail" => {
+            let renamed = s
+                .mail_key_renames()
+                .into_iter()
+                .find(|(old, _)| *old == r.source_key)
+                .map(|(_, new)| new);
+            let key = renamed.as_deref().unwrap_or(&r.source_key);
+            s.publications()
+                .iter()
+                .find(|n| n.name == key)
+                .map(|n| n.publication().to_owned())
+        }
         "youtube" => s
-            .youtube
-            .iter()
-            .find(|y| y.id == r.source_key)
+            .by_channel(&r.source_key)
             .map(|y| y.publication().to_owned()),
         _ => None,
     }
 }
 
-/// Notes (outside `.trash/`) whose indexed `source` and `author` match some `[[serial]]` row:
+/// Notes (outside `.trash/`) whose indexed `source` and `author` match some work record (one
+/// with a prefix or author, the former `[[serial]]` rows):
 /// the index prefilter for phase F's serial half (the note's own frontmatter is re-checked).
 fn serial_candidates(
     ctx: &StepCtx<'_>,
-    serial: &[cv_actions::pipelines::SerialSource],
+    serial: &[cv_actions::pipelines::Publication],
 ) -> Result<Vec<String>, StepError> {
     if serial.is_empty() {
         return Ok(Vec::new());
@@ -311,16 +304,16 @@ fn serial_candidates(
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let source = cv_index::prop_text(&r.value);
-        if serial.iter().any(|s| s.matches(&a, &source)) {
+        if serial.iter().any(|s| s.matches_note(&a, &source)) {
             out.push(r.path);
         }
     }
     Ok(out)
 }
 
-/// The publication of the first `[[serial]]` row (config order) the note matches.
+/// The publication of the first work record (config order) the note matches.
 fn serial_publication(
-    serial: &[cv_actions::pipelines::SerialSource],
+    serial: &[cv_actions::pipelines::Publication],
     doc: &FrontmatterDoc,
 ) -> Option<String> {
     let authors = doc.get_texts("author");
@@ -333,7 +326,7 @@ fn serial_publication(
         .unwrap_or_default();
     serial
         .iter()
-        .find(|s| s.matches(&authors, &source))
+        .find(|s| s.matches_note(&authors, &source))
         .map(|s| s.publication().to_owned())
 }
 
@@ -351,7 +344,14 @@ pub(super) fn publication(
         }
     }
     // Round 11 E1: notes matching a `[[serial]]` row join the candidates (each note once).
-    let serial = ctx.config.sources().serial.clone();
+    let serial: Vec<_> = ctx
+        .config
+        .sources()
+        .publications()
+        .iter()
+        .filter(|p| p.is_work())
+        .cloned()
+        .collect();
     let mut paths: BTreeSet<String> = by_note.keys().cloned().collect();
     paths.extend(serial_candidates(ctx, &serial)?);
     for path in paths {

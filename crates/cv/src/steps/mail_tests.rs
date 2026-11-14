@@ -75,6 +75,10 @@ fn world(files: &[(&str, String)]) -> World {
 }
 
 fn world_with(sources: &str, files: &[(&str, String)]) -> World {
+    world_kinds(sources, KINDS, files)
+}
+
+fn world_kinds(sources: &str, kinds: &str, files: &[(&str, String)]) -> World {
     let mail = tempfile::tempdir().unwrap();
     let pipelines = format!(
         "[mail]\nenabled = true\nmaildir = {:?}\n",
@@ -83,7 +87,7 @@ fn world_with(sources: &str, files: &[(&str, String)]) -> World {
     let config = config_of(&[
         ("pipelines.toml", &pipelines),
         ("sources.toml", sources),
-        ("kinds.toml", KINDS),
+        ("kinds.toml", kinds),
         ("captures.toml", CAPTURES),
     ]);
     let action = ActionBuilder::new("track-mail", vec![], ResourceSpec::default()).build();
@@ -176,13 +180,13 @@ fn duplicate_message_id_gives_one_note_and_files_move_on() {
         "an unparseable message is left in place"
     );
     assert_eq!(w.notes("Letters").len(), 1);
-    let (r, status) = w.row("Paid Letter", "d1@paid.example").unwrap();
+    let (r, status) = w.row("Paid Blog", "d1@paid.example").unwrap();
     assert_eq!(
         status,
         Some('x'),
         "a complete email from a known sender is done"
     );
-    assert_eq!(r.source_name.as_deref(), Some("Paid Letter"));
+    assert_eq!(r.source_name.as_deref(), Some("Paid Blog"));
     let text = w.env.read(&r.note_path.unwrap()).unwrap();
     assert!(text.contains("  - blog\n  - letters\n"), "{text}");
     assert!(!w.exists("new/a") && w.exists("cur/a:2,S"));
@@ -286,7 +290,7 @@ fn full_subscriber_email_replaces_the_stub_and_ticks_it() {
         (r.access.as_deref(), r.complete, status),
         (Some("paid"), Some(true), Some('x'))
     );
-    let (mail, mstatus) = w.row("Paid Letter", "f1@paid.example").unwrap();
+    let (mail, mstatus) = w.row("Paid Blog", "f1@paid.example").unwrap();
     assert_eq!(mail.outcome, TrackerOutcome::Skipped);
     assert_eq!(mail.note_path.as_deref(), Some("Letters/Deep dive.md"));
     assert_eq!(mstatus, None);
@@ -317,7 +321,7 @@ fn truncated_email_does_not_replace_or_tick_the_stub() {
     let (r, status) = blog_row(&w);
     assert_eq!((r.complete, status), (Some(false), None));
     assert_eq!(
-        w.row("Paid Letter", "t1@paid.example").unwrap().0.outcome,
+        w.row("Paid Blog", "t1@paid.example").unwrap().0.outcome,
         TrackerOutcome::Skipped
     );
 }
@@ -480,8 +484,10 @@ fn explicit_newsletter_row_wins_over_the_substack_match() {
         &substack_eml("s3@substack.com", "examplepub", &substack_body(120)),
     );
     w.run();
-    assert!(w.row("Explicit Pub", "s3@substack.com").is_some());
-    assert!(w.row("Example Pub", "s3@substack.com").is_none());
+    // The `blog = ` link folds the newsletter into the blog's publication record (plan
+    // sources-publication-model WP-2): its mail is keyed by the record name.
+    assert!(w.row("Example Pub", "s3@substack.com").is_some());
+    assert!(w.row("Explicit Pub", "s3@substack.com").is_none());
 }
 
 #[test]
@@ -572,7 +578,7 @@ fn restack_only_mail_meets_its_custom_domain_rss_note() {
         1
     );
     assert_eq!(w.notes("Letters").len(), 1, "no second note");
-    let (mail, _) = w.row("Custom Letter", "k1@substack.com").unwrap();
+    let (mail, _) = w.row("Custom Blog", "k1@substack.com").unwrap();
     assert_eq!(mail.note_path.as_deref(), Some("Letters/Deep dive.md"));
     let text = w.env.read("Letters/Deep dive.md").unwrap();
     assert!(
@@ -727,7 +733,7 @@ fn incomplete_multipart_is_left_untouched_while_a_complete_message_is_processed(
     );
     assert!(!w.exists("new/b"), "the complete message moved on");
     assert!(
-        w.row("Paid Letter", "a1@paid.example").is_none(),
+        w.row("Paid Blog", "a1@paid.example").is_none(),
         "A not recorded"
     );
     // Once A's closing boundary lands, a later scan handles it.
@@ -804,4 +810,38 @@ fn maildir_write_check_reports_unwritable_or_missing() {
     if binds {
         assert!(err.unwrap().contains("not writable"));
     }
+}
+
+/// Plan sources-publication-model WP-2: a newsletter row and a serial row of one publication fold
+/// into one record, so a mail matched by sender files as the serial's kind, under the record's
+/// publication, keyed by the record name.
+#[test]
+fn merged_newsletter_and_serial_file_mail_as_the_serial_kind() {
+    let sources = "[[newsletter]]\nname = \"Saga Mail\"\nshort = \"Saga\"\nfrom = [\"author@saga.example\"]\ntags = [\"letters\"]\n\n[[serial]]\nname = \"Saga\"\nkind = \"fanfic\"\nprefix = [\"https://saga.example/chapters/\"]\n";
+    let kinds = format!(
+        "{KINDS}[kinds.fanfic]\nlabel = \"Fanfic\"\ntags = [\"fanfic\"]\nfolder = \"Fic\"\n"
+    );
+    let w = world_kinds(sources, &kinds, &[]);
+    w.put(
+        "new/s1",
+        &eml(
+            "s1@saga.example",
+            "author@saga.example",
+            "Chapter 9",
+            &format!("<p>{}</p>", words("w", 0, 50)),
+        ),
+    );
+    w.run();
+    let (r, _) = w.row("Saga Mail", "s1@saga.example").unwrap();
+    let path = r.note_path.unwrap();
+    assert!(path.starts_with("Fic/"), "{path}");
+    let text = w.env.read(&path).unwrap();
+    assert!(
+        text.contains("publication: Saga\n") || text.contains("publication: \"Saga\"\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  - fanfic\n") && text.contains("  - letters\n"),
+        "{text}"
+    );
 }

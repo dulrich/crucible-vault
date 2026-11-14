@@ -36,7 +36,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use cv_actions::pipelines::SerialSource;
+use cv_actions::pipelines::SourcesConfig;
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::fanfic_title::plan as plan_for;
 use cv_ingest::rename_plan::order_renames;
@@ -126,7 +126,7 @@ impl StepModule for FanficTitle {
 /// (from the note's `source`/`author`), else its `publication` frontmatter text, else none.
 fn story_publication(
     doc: &FrontmatterDoc,
-    serial: &[SerialSource],
+    serial: &SourcesConfig,
     is_kind: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
     let nonempty = |s: &str| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
@@ -145,7 +145,7 @@ fn story_publication(
 pub(crate) fn plan(
     path: &str,
     text: &str,
-    serial: &[SerialSource],
+    serial: &SourcesConfig,
     is_kind: &dyn Fn(&str) -> bool,
 ) -> Plan {
     let doc = FrontmatterDoc::new(text);
@@ -157,7 +157,7 @@ pub(crate) fn plan(
 fn plan_in(ctx: &StepCtx<'_>, path: &str, text: &str) -> Plan {
     let config = ctx.config;
     let is_kind = |k: &str| kind_def(config, k).is_ok();
-    plan(path, text, &config.sources().serial, &is_kind)
+    plan(path, text, config.sources(), &is_kind)
 }
 
 /// How one rename attempt ended.
