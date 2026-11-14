@@ -235,6 +235,36 @@ fn run_table_matches_the_drawn_runs() {
     assert_eq!(drawn, want);
 }
 
+/// Round-25 WP-3: the widget shapes display text (`→`, `—`), the run table measures the same
+/// bytes, and a drag/Ctrl+A copy yields the source ASCII.
+#[test]
+fn substituted_runs_draw_display_bytes_and_copy_ascii() {
+    let md = "---\ntags: a\n---\na -> b -- c\n\n**x-**>y ... `p->q`\n";
+    let mut h = H::new(md);
+    let table = h.store.doc(&h.docs, PATH).expect("doc").runs.clone();
+    assert_eq!(table[2].text, "a → b – c");
+    // `**x-**>y`: the `->` spans two styled pieces, so it stays ASCII.
+    assert_eq!(table[3].text, "x->y … p->q");
+    let drawn: Vec<(usize, usize)> = h.boxes().iter().map(|b| (b.run, b.len)).collect();
+    let want: Vec<(usize, usize)> = table
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (i, r.text.len()))
+        .collect();
+    assert_eq!(drawn, want);
+    let (a, b) = (SelPos::new(2, 0), SelPos::new(3, table[3].text.len()));
+    let (pa, pb) = (h.pt(a), h.pt(b));
+    h.drag(pa, pb);
+    assert_eq!(h.text().as_deref(), Some("a -> b -- c\n\nx->y ... p->q"));
+    let body = selection::all(&table, None).expect("body");
+    assert_eq!(copy_text(&table, body), "a -> b -- c\n\nx->y ... p->q");
+    let whole = selection::all(&table, Some(body)).expect("whole");
+    assert_eq!(
+        copy_text(&table, whole),
+        "tags: a\n\na -> b -- c\n\nx->y ... p->q"
+    );
+}
+
 #[test]
 fn cross_block_drag_selects_and_copies_with_a_blank_line() {
     let mut h = H::new("First para here\n\nSecond para there\n");

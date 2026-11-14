@@ -42,8 +42,10 @@ pub fn copy_text(runs: &[VisRun], sel: Selection) -> String {
         if i != lo.run || (a == 0 && hi.run > lo.run) {
             out.push_str(&r.prefix);
         }
+        // Round-25 WP-3: the selection speaks display bytes; copy translates once, to source.
+        let (a, b) = (r.to_source(a), r.to_source(b));
         if a < b {
-            out.push_str(&r.text[a..b]);
+            out.push_str(&r.src()[a..b]);
         }
     }
     out

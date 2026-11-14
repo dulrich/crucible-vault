@@ -741,6 +741,15 @@ fn link_msg(path: &str) -> impl Fn(LinkTarget) -> Message + 'static {
 /// A rich-text span of the reading view.
 type RSpan<'a> = iced::widget::text::Span<'a, LinkTarget>;
 
+/// Round-25 WP-3: a piece's display text — exactly the bytes the run table's `VisRun::text`
+/// holds for it (one function, [`editor_model::visible::inline_display`]), so shaped lengths,
+/// hit-tests and stored selections all speak display bytes.
+fn display(i: &Inline) -> Cow<'_, str> {
+    editor_model::visible::inline_display(i)
+        .map(|d| d.0)
+        .unwrap_or_default()
+}
+
 /// `text[r]`, borrowed when `text` is.
 fn sub<'a>(text: &Cow<'a, str>, r: std::ops::Range<usize>) -> Cow<'a, str> {
     match text {
@@ -792,7 +801,7 @@ fn painted<'a>(
 
 /// The font of a Reading text piece: the app's family by name, never `Font::DEFAULT` (generic
 /// sans-serif, which fontconfig resolves to DejaVu Sans, so Inter's contextual alternates for
-/// `->`, `<-`, `=>` never applied; plan round-24 WP-1). Text stays ASCII; only the face changes.
+/// `->`, `<-`, `=>` never applied; plan round-24 WP-1). The face, plus the round-25 WP-3 display substitutions (`display`).
 pub(super) fn text_font(strong: bool, em: bool) -> Font {
     let mut font = Font::with_name(crate::theme::FONT_FAMILY);
     if strong {
@@ -824,7 +833,7 @@ fn inlines_view<'a>(
         // The piece's byte offset in the run text (= `VisRun::text`).
         let at: usize = spans.iter().map(|s| s.text.len()).sum();
         match i {
-            Inline::Text { text, style } => {
+            Inline::Text { style, .. } => {
                 let font = text_font(style.strong || bold, style.em);
                 let style_span = |piece: Cow<'a, str>| {
                     let mut s = span(piece)
@@ -836,14 +845,7 @@ fn inlines_view<'a>(
                     }
                     s
                 };
-                painted(
-                    cx,
-                    run,
-                    at,
-                    &mut spans,
-                    Cow::Borrowed(text.as_str()),
-                    style_span,
-                );
+                painted(cx, run, at, &mut spans, display(i), style_span);
             }
             // plan editor-round-4 WP-3: code spans, link labels and tags are visible text too,
             // painted like `Text`; split link pieces keep their click target.
@@ -859,32 +861,27 @@ fn inlines_view<'a>(
                 target, fragment, ..
             } => {
                 // No permanent underline: the run widget underlines the hovered link itself.
-                let label = editor_model::visible::inline_visible(i)
-                    .unwrap_or_default()
-                    .into_owned();
+                let label = editor_model::visible::inline_display(i)
+                    .map(|d| d.0)
+                    .unwrap_or_default();
                 let color = link_color(cx, target);
                 let l = LinkTarget::Vault {
                     target: target.clone(),
                     fragment: fragment.clone(),
                 };
-                painted(cx, run, at, &mut spans, Cow::Owned(label), |p| {
+                painted(cx, run, at, &mut spans, label, |p| {
                     span(p).color(color).link(l.clone())
                 });
             }
-            Inline::Link { url, label } => {
+            Inline::Link { url, .. } => {
                 let l = href_target(url);
                 let color = match &l {
                     LinkTarget::Vault { target, .. } => link_color(cx, target),
                     _ => link_color(cx, url),
                 };
-                painted(
-                    cx,
-                    run,
-                    at,
-                    &mut spans,
-                    Cow::Borrowed(label.as_str()),
-                    |p| span(p).color(color).link(l.clone()),
-                );
+                painted(cx, run, at, &mut spans, display(i), |p| {
+                    span(p).color(color).link(l.clone())
+                });
             }
             Inline::Tag(tag) => painted(
                 cx,

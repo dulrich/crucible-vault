@@ -73,6 +73,8 @@ mod tests {
     fn run(text: &str, part: Part) -> VisRun {
         VisRun {
             text: text.into(),
+            source: String::new(),
+            subs: Vec::new(),
             sep: Sep::Block,
             prefix: String::new(),
             image: false,
