@@ -29,12 +29,12 @@ const IDLE_RELEASE_AFTER: Duration = Duration::from_secs(20);
 /// How often the idle task checks; the release need not fire at exactly [`IDLE_RELEASE_AFTER`].
 const IDLE_POLL: Duration = Duration::from_secs(5);
 
-/// Free-resident bytes above which an idle or sampler release trims (16 MiB). Once replies stopped
-/// building a `Value` tree, about 22 MiB of free memory remains after a burst, under the 32 MiB
-/// job threshold, so the idle release never trimmed; 16 MiB stays above the 6-9 MiB that remains
-/// after a trim, so the 5-minute sampler tick cannot re-trim a settled daemon (plan
-/// memory-release-strategy WP-7).
-const QUIET_TRIM_THRESHOLD: u64 = 16 * 1024 * 1024;
+/// Free-resident bytes above which an idle or sampler release trims (6 MiB). The old 16 MiB left a
+/// post-burst thread-arena residue untrimmed for good (S1, 14 of 191 blocks, 1.5-15.7 MiB); holds
+/// under 6 MiB end at normal anon, and a trimmed daemon keeps 0-1.2 MiB, so 6 MiB still stops the
+/// 5-minute sampler re-trimming a settled one. Measured in
+/// `docs/spikes/glibc-mxfast/WP-1-FINDINGS.md` and `docs/spikes/arena-late-growth/WP-1-FINDINGS.md`.
+const QUIET_TRIM_THRESHOLD: u64 = 6 * 1024 * 1024;
 
 /// Why a release was attempted (the debug log label).
 #[derive(Debug, Clone, Copy)]
@@ -379,9 +379,16 @@ mod tests {
     #[test]
     fn each_reason_uses_its_threshold_strictly() {
         let mib = 1024 * 1024;
-        assert_eq!(ReleaseReason::Job.threshold(), 32 * mib);
-        assert_eq!(ReleaseReason::Idle.threshold(), 16 * mib);
-        assert_eq!(ReleaseReason::Sampler.threshold(), 16 * mib);
+        assert_eq!(
+            ReleaseReason::Job.threshold(),
+            cv_malloc::TRIM_RETAINED_THRESHOLD
+        );
+        assert_eq!(ReleaseReason::Idle.threshold(), QUIET_TRIM_THRESHOLD);
+        assert_eq!(ReleaseReason::Sampler.threshold(), QUIET_TRIM_THRESHOLD);
+        // Above what a trimmed daemon keeps (up to 1.2 MiB; 2 MiB with margin), below the lowest
+        // S1 hold with excess anon (6.9 MiB).
+        assert!(QUIET_TRIM_THRESHOLD > 2 * mib);
+        assert!(QUIET_TRIM_THRESHOLD < 6 * mib + 900 * 1024);
         for r in [
             ReleaseReason::Job,
             ReleaseReason::Idle,
@@ -391,8 +398,8 @@ mod tests {
             assert!(!cv_malloc::above(t, t), "{r:?} at the boundary");
             assert!(cv_malloc::above(t + 1, t), "{r:?} just above");
         }
-        // A settled free-resident figure (6-9 MiB) never re-trims.
-        assert!(!cv_malloc::above(9 * mib, QUIET_TRIM_THRESHOLD));
+        // A settled free-resident figure (0-1.2 MiB) never re-trims.
+        assert!(!cv_malloc::above(mib + 200 * 1024, QUIET_TRIM_THRESHOLD));
     }
 
     #[test]

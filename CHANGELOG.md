@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Daemon: the idle and sampler memory releases now trim above 6 MiB of free-resident memory instead of 16 MiB, so a post-burst thread-arena residue of 7–16 MiB is no longer held for good.
+
 ## 1.1.0 — 2026-11-14
 
 ### Added
