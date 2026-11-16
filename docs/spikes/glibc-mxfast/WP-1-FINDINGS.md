@@ -58,10 +58,10 @@ The first single mx0 block (49 MiB, 0 free-res) was a normal-mode block. Read ne
 
 ## Reproduce
 
-Scratch harness at `runs/spike/glibc-mxfast/` (prunable; the essential scripts are inlined below). It needs the research repo's `live-host-measurement-confounds/` (`client.pl`, `var/scratch/` vault copy, `lhmc-bench` image) and `research/scripts/measure.mjs`.
+The harness ran from a throwaway scratch directory holding the scripts inlined below, plus a `bin/cv` copy of the release binary. It needs the research repo's `live-host-measurement-confounds/` (`client.pl`, `var/scratch/` vault copy, `lhmc-bench` image) and `research/scripts/measure.mjs`.
 
 ```
-cp target/release/cv runs/spike/glibc-mxfast/bin/cv
+cp target/release/cv <scratch>/bin/cv
 for i in $(seq 8); do ./run-block.sh base; done                                   # P
 bun …/research/scripts/measure.mjs run --config main.json --out main --host local   # B (report: measure.mjs report main)
 for l in 1 2 3 4; do bun …/measure.mjs run --config probe-$l.json --out probe-$l --host local & sleep 37; done; wait   # C
