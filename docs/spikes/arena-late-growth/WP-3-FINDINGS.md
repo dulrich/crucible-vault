@@ -2,7 +2,7 @@
 
 Aggregates only. Scenario-A blocks on the research scratch vault copy; no note text, titles or paths. Daemon logs stayed in `/tmp/cvwp3/`, outside every repo.
 
-Basis: `docs/spikes/arena-late-growth/WP-1-FINDINGS.md` (the S1/S2 split, the harness reused here and inlined in the appendix). Plan: WP-3 of `plans/idle-release-threshold-and-arena-growth.md`.
+Basis: `docs/spikes/arena-late-growth/WP-1-FINDINGS.md` (the S1/S2 split, the harness reused here and inlined in the appendix). Plan: WP-3 of plan idle-release-threshold-and-arena-growth.
 
 Binaries (frozen, never rebuilt here): `bin-110/cv` = release 1.1.0, `cv --build` `5cd0f5b6d606ebc2fd58fc44fa788ae0b5089a15`; `bin-wp2/cv` = release build of WP-2 commit `03d541d5` (quiet-trim threshold 6 MiB), `cv --build` `03d541d5405e833566690a45efcd159b6f615c89` (clean). Each block records `cv --build` in its `meta.txt`; all 45 `wp2`/24 `wp2p*` blocks read `03d541d5…`, all `a110`/`b110` blocks read `5cd0f5b6…`.
 
