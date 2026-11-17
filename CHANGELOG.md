@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - Editor: the struck-through tab title of a note whose file is gone draws its strikethrough through the text, not above it.
+- Editor: a note whose file is restored on disk after it went gone (a new file at its path, also while the daemon was down) leaves the gone state — a clean note shows the restored file; a note with unsaved edits keeps them behind the changed-on-disk bar (Keep mine / Take theirs).
+- Editor: in Reading mode the gone pill lines up with the body column instead of spanning the pane.
 
 ## 1.1.2 — 2026-11-17
 

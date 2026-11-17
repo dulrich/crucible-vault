@@ -230,3 +230,52 @@ fn reconnect_after_a_move_finds_the_note_by_id_and_saves_there() {
     assert!(d.read_file("r10/a.md").is_err(), "nothing recreated at a");
     assert!(!doc(&mut app, "r10/b.md").is_dirty());
 }
+
+/// Plan note-gone-restore WP-1 trigger (b): a gone note's file restored while the daemon was
+/// down (no `file_changed` reaches the editor) is restored by the reconnect resync — clean →
+/// the restored bytes; dirty → the changed-on-disk bar, text kept.
+fn gone_restored_while_down(
+    prefix: &str,
+    dirty: bool,
+) -> (tempfile::TempDir, Arc<FakeDaemon>, App) {
+    let path = format!("{prefix}/a.md");
+    let (tmp, d, mut app) = setup(&[path.as_str()], 0);
+    let old = app.note_id(&path).expect("bound");
+    if dirty {
+        type_x(&mut app);
+    }
+    let rx = d
+        .subscribe(&[crate::daemon::Topic::FileChanged])
+        .expect("sub");
+    d.delete(&path).expect("delete");
+    for n in rx.try_iter() {
+        let _ = app.send(Message::Status(StatusMsg::Notification(n)));
+    }
+    assert!(doc(&mut app, &path).is_missing());
+    let _ = app.send(Message::Status(StatusMsg::Disconnected));
+    d.create_note(&path, "restored").expect("restore");
+    let _ = app.send(Message::Status(StatusMsg::ReconnectDue));
+    let new = d.bind_note(&path).expect("new id");
+    assert_ne!(new, old);
+    assert_eq!(app.note_id(&path), Some(new));
+    assert!(app.docs.by_id(old).is_none());
+    (tmp, d, app)
+}
+
+#[test]
+fn reconnect_restores_a_clean_gone_note_restored_while_down() {
+    let (_tmp, _d, mut app) = gone_restored_while_down("r11", false);
+    let t = doc(&mut app, "r11/a.md");
+    assert!(!t.is_missing() && t.conflict().is_none() && !t.is_dirty());
+    assert_eq!(t.text(), "restored");
+}
+
+#[test]
+fn reconnect_restores_a_dirty_gone_note_behind_the_changed_bar() {
+    let (_tmp, d, mut app) = gone_restored_while_down("r12", true);
+    let disk = d.read_file("r12/a.md").expect("a").1;
+    let t = doc(&mut app, "r12/a.md");
+    assert!(!t.is_missing() && t.is_dirty());
+    assert_eq!(t.text(), "xbody");
+    assert_eq!(t.conflict(), Some(&crate::source::Conflict::Changed(disk)));
+}

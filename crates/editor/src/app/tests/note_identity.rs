@@ -166,9 +166,10 @@ fn keep_mine_on_a_deleted_note_keeps_its_id() {
     assert!(app.doc("ni4/a.md").is_some_and(|b| !b.is_dirty()));
 }
 
-/// Path reuse: a document whose note was deleted is not confused with a new note created at the
-/// same path (another id): the new note's notifications leave it alone and its save never lands
-/// on the new note.
+/// Path reuse, superseded for gone documents by plan note-gone-restore WP-1: a new note created
+/// at a deleted note's path (another id) restores the gone document onto it — the dirty text is
+/// kept behind the changed-on-disk bar, and Keep mine writes it over the new note (CAS against
+/// its hash), never via the retired id.
 #[test]
 fn a_new_note_at_a_deleted_notes_path_is_another_note() {
     let (_tmp, d, mut app) = setup(&["ni6/a.md"]);
@@ -186,16 +187,22 @@ fn a_new_note_at_a_deleted_notes_path_is_another_note() {
         "xbody",
         "edits kept, not replaced by the new note"
     );
-    assert!(doc.is_missing(), "its own note is gone");
-    assert_eq!(app.note_id("ni6/a.md"), Some(id));
-    // Keep mine revives the retired id at the path, which the new note now holds: refused.
+    assert!(!doc.is_missing(), "restored");
+    let disk = d.read_file("ni6/a.md").expect("new").1;
+    assert_eq!(
+        doc.conflict(),
+        Some(&crate::source::Conflict::Changed(disk))
+    );
+    assert_eq!(app.note_id("ni6/a.md"), Some(other));
+    assert!(app.docs.by_id(id).is_none(), "the retired document is gone");
     let job = app
         .doc_mut("ni6/a.md")
         .and_then(|b| b.keep_mine())
         .expect("keep mine");
+    assert_eq!(job.id, other, "addressed to the restored note");
     let outcome = job.run(d.as_ref());
     let _ = app.send(job.done(outcome));
-    assert_eq!(d.read_file("ni6/a.md").expect("new").0, b"new note");
+    assert_eq!(d.read_file("ni6/a.md").expect("new").0, b"xbody");
 }
 
 /// The tab (pane, index) whose document is `id`.

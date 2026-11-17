@@ -538,11 +538,18 @@ impl App {
             );
         // Plan note-gone-banner WP-1: the gone pill's stable slot (a `Space` unless the active
         // tab's document is gone), in every view mode.
+        // Plan note-gone-restore WP-1: in Reading it lines up with the body column.
         let gone_pill: Element<'a, Message> = ps
             .active_note(&self.docs)
-            .and_then(|tab| self.docs.buffer(tab.note))
-            .filter(|d| d.is_missing())
-            .map_or_else(|| Space::new().into(), |d| gone_pill(d.note_id(), t));
+            .and_then(|tab| self.docs.by_id(tab.note?))
+            .filter(|d| d.buffer.is_missing())
+            .map_or_else(
+                || Space::new().into(),
+                |d| {
+                    let reading = d.reading.mode == crate::reading::ViewMode::Reading;
+                    gone_pill(d.buffer.note_id(), reading, t)
+                },
+            );
         let body: Element<'a, Message> = match ps.active_tab() {
             Some(tab) => self.tab_body(tab),
             None => text("No file open").color(t.text_faint.to_color()).into(),
@@ -885,10 +892,21 @@ impl App {
     }
 }
 
-/// Plan note-gone-banner WP-1: the full-width error pill for a note whose file is gone from disk
+/// Plan note-gone-restore WP-1: the Reading body's horizontal inset — the column padding
+/// (`reading/view.rs`, `padding(8)`) on both sides plus, on the right, the scroll gutter and the
+/// embedded scrollbar ([`crate::theme::gutter_scroll`]: iced's default 10 px bar).
+const READING_INSET: iced::Padding = iced::Padding {
+    top: 0.0,
+    bottom: 0.0,
+    left: 8.0,
+    right: 8.0 + crate::theme::SCROLL_GUTTER + 10.0,
+};
+
+/// Plan note-gone-banner WP-1: the error pill (full width in Source/Split, inset to the body
+/// column in Reading) for a note whose file is gone from disk
 /// (clean or dirty): Keep recreates the file from the buffer, Close discards it and closes the
 /// note's tabs (the missing-file `TakeTheirs` path).
-fn gone_pill<'a>(id: NoteId, t: Tokens) -> Element<'a, Message> {
+fn gone_pill<'a>(id: NoteId, reading: bool, t: Tokens) -> Element<'a, Message> {
     use crate::icons::Icon;
     use iced::font::Weight;
     use iced::widget::{rich_text, span};
@@ -919,7 +937,7 @@ fn gone_pill<'a>(id: NoteId, t: Tokens) -> Element<'a, Message> {
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
-    container(bar)
+    let pill = container(bar)
         .padding(6)
         .width(Length::Fill)
         .style(move |_| container::Style {
@@ -930,6 +948,11 @@ fn gone_pill<'a>(id: NoteId, t: Tokens) -> Element<'a, Message> {
                 radius: 6.0.into(),
             },
             ..container::Style::default()
-        })
-        .into()
+        });
+    let inset = if reading {
+        READING_INSET
+    } else {
+        iced::Padding::ZERO
+    };
+    container(pill).padding(inset).width(Length::Fill).into()
 }

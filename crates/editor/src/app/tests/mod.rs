@@ -61,6 +61,7 @@ mod daemon_move;
 mod doc_state;
 mod file_kinds;
 mod find_keys;
+mod gone_restore;
 mod hold_gaps;
 mod holds;
 mod image_menu;

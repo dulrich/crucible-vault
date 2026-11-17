@@ -409,6 +409,28 @@ impl SourceBuffer {
         }
     }
 
+    /// Plan note-gone-restore WP-1: this gone buffer moves onto note `note`, the file restored at
+    /// its path (`bytes`, hash `disk`). Clean → it loads the restored bytes. Dirty → the text
+    /// is kept behind the changed-on-disk bar (`Conflict::Changed(disk)`, base = `disk`: Keep
+    /// mine CAS-writes over the restored file, Take theirs loads it), unless the restored file
+    /// already holds this exact text (adopted as clean). Never call while a save is in flight.
+    pub fn restore(&mut self, note: NoteId, bytes: &[u8], disk: ContentHash) {
+        self.save.note = note;
+        self.save.resync_pending = false;
+        self.save.save_again = false;
+        if !self.save.dirty {
+            self.reload(bytes, disk);
+            return;
+        }
+        if ContentHash::of(self.text().as_bytes()) == disk {
+            self.save.dirty = false;
+            self.save.conflict = None;
+        } else {
+            self.save.conflict = Some(Conflict::Changed(disk.clone()));
+        }
+        self.save.base_hash = disk;
+    }
+
     /// plan editor-data-safety WP-1 (audit E1): mark a reconnect resync as waiting on the
     /// in-flight save's completion.
     pub fn defer_resync(&mut self) {

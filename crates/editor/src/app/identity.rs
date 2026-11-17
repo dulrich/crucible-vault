@@ -47,7 +47,10 @@ impl App {
     /// - Any other kind at a path that is not the document's: a `Renamed` from the document's
     ///   path follows it; anything else is settled, never guessed, and reloads once the
     ///   document is at `path`.
-    /// - A different note at the path of an open document (path reuse) never touches it.
+    /// - A different note at the path of an open document (path reuse) never touches it —
+    ///   except a document in the gone state: a note (re)appearing at its path restores it
+    ///   (plan note-gone-restore WP-1, [`Self::restore_at`]; this supersedes the old contract
+    ///   for gone documents only).
     pub(super) fn doc_file_changed(
         &mut self,
         id: NoteId,
@@ -65,7 +68,12 @@ impl App {
                 self.retarget_file(f, path);
             }
         }
-        let cur = self.docs.path_of(id)?;
+        let Some(cur) = self.docs.path_of(id) else {
+            if kind != cv_protocol::ChangeKind::Deleted {
+                self.restore_at(path);
+            }
+            return None;
+        };
         if kind == cv_protocol::ChangeKind::Deleted {
             if cur != path {
                 // Audit E1: the rename pair's source half; the document is live at `cur`.
@@ -91,6 +99,54 @@ impl App {
             }
         }
         (self.docs.path_of(id).as_deref() == Some(path)).then_some(id)
+    }
+
+    /// Plan note-gone-restore WP-1: a note may be live again at `path`, where a gone (missing)
+    /// document sits and no live document does. Locates it off the UI thread (bind + read,
+    /// [`super::settle::OpenFor::Restore`]); [`Self::restore_gone`] completes it.
+    pub(super) fn restore_at(&mut self, path: &str) {
+        if self.daemon.is_none() || self.docs.id_of(path).is_none() {
+            return;
+        }
+        let gone = self
+            .docs
+            .iter()
+            .find(|(p, d)| *p == path && d.buffer.is_missing())
+            .map(|(_, d)| d.id);
+        // `id_of` prefers a live document: one open at the path means no gone one is restored.
+        if let Some(rid) = gone
+            && self.docs.id_of(path) == Some(rid)
+        {
+            self.start_open(path, super::settle::OpenFor::Restore(rid));
+        }
+    }
+
+    /// Plan note-gone-restore WP-1: gone document `rid` is replaced by a new document for the
+    /// note `o` restored at its path (no document is re-keyed: the `OpenDoc` id contract). The
+    /// buffer carries over ([`crate::source::SourceBuffer::restore`]: clean → restored bytes,
+    /// dirty → changed-on-disk bar, text kept), with its close waiters and Reading state; every
+    /// tab of `rid`, in every pane, repoints (audit E1: none is closed — unlike [`Self::absorb`],
+    /// whose duplicate-tab rule would match these same-path tabs). The caller has checked that
+    /// no save is in flight (audit E2).
+    pub(super) fn restore_gone(&mut self, rid: NoteId, o: super::settle::Opened) {
+        let Some(mut old) = self.docs.remove_id(rid) else {
+            return;
+        };
+        self.restore_after_save.remove(&rid);
+        old.buffer.restore(o.id, &o.bytes, o.hash);
+        let mut od = OpenDoc {
+            id: o.id,
+            buffer: old.buffer,
+            close_waiters: old.close_waiters,
+            reading: old.reading,
+            settle: 0,
+        };
+        od.reading.clear_title();
+        if od.reading.mode.shows_reading() {
+            self.reading.recompute(&mut od, self.daemon.as_ref());
+        }
+        self.docs.insert(od);
+        self.repoint_tabs(rid, o.id);
     }
 
     /// Today's deleted handling for document `id` whose note is gone (D4: decided from the id,

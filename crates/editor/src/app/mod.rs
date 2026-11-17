@@ -592,6 +592,9 @@ pub struct App {
     deferred: Vec<Task<Message>>,
     /// Plan WP-R4: note opens in flight, keyed by (path, note id) ([`settle`]).
     opening: settle::Opening,
+    /// Plan note-gone-restore WP-1 (audit E2): gone documents whose restore waits on their
+    /// in-flight save; the save's completion re-runs it ([`App::restore_at`]).
+    restore_after_save: std::collections::HashSet<NoteId>,
     /// Plan WP-R4: the last settle / open request number.
     req_seq: u64,
 }
@@ -731,6 +734,7 @@ impl App {
             released_tabs: std::collections::HashSet::new(),
             deferred: Vec::new(),
             opening: settle::Opening::new(),
+            restore_after_save: std::collections::HashSet::new(),
             req_seq: 0,
         };
         // Plan round-17 WP-6: the restored section; a panel section makes the panels live.

@@ -361,6 +361,21 @@ impl App {
         } else {
             Task::none()
         };
+        // Plan note-gone-restore WP-1 (audit E2): a restore deferred behind this save runs now
+        // (off the UI thread; a close or quit this save resolves below wins over it).
+        if self.restore_after_save.remove(&id)
+            && let Some((p, saving)) = self
+                .docs
+                .by_id(id)
+                .filter(|d| d.buffer.is_missing())
+                .map(|d| (d.buffer.path().to_owned(), d.buffer.is_saving()))
+        {
+            if saving {
+                self.restore_after_save.insert(id);
+            } else {
+                self.restore_at(&p);
+            }
+        }
         // Plan usability-sprint-captures-links WP-5: a landed save that changed `title`.
         let sync = if ok && after.is_none() {
             self.title_sync(id)

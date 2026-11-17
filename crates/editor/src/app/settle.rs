@@ -83,6 +83,9 @@ pub enum OpenFor {
     },
     /// The absorbing note of retired document `0` ([`App::follow_replaced`]).
     Absorb(NoteId),
+    /// Plan note-gone-restore WP-1: the note restored at the path of gone document `0`
+    /// ([`App::restore_at`]).
+    Restore(NoteId),
 }
 
 /// What a tab open does once its tab is placed (inline when the note was already open).
@@ -109,7 +112,7 @@ impl OpenFor {
     fn absorbs(&self) -> Option<NoteId> {
         match self {
             Self::Tab { .. } => None,
-            Self::Absorb(id) => Some(*id),
+            Self::Absorb(id) | Self::Restore(id) => Some(*id),
         }
     }
 }
@@ -185,6 +188,7 @@ impl App {
         let answered = s != Settled::NoAnswer;
         let live = matches!(s, Settled::Here | Settled::Moved(_) | Settled::NoAnswer);
         let here = s == Settled::Here;
+        let s_gone = s == Settled::Gone;
         self.apply_settled(id, s);
         match then {
             AfterSettle::Deleted { hash } if !answered => self.reload_doc(id, hash.as_deref()),
@@ -196,6 +200,13 @@ impl App {
             AfterSettle::Reread { hash, .. } if here => self.reread_doc(id, hash.as_deref()),
             AfterSettle::Reread { err: Some(e), .. } if !answered => self.status.set_error(e),
             AfterSettle::Resync if live => return self.resync_read(id),
+            // Plan note-gone-restore WP-1 trigger (b): a file restored while the daemon was down
+            // reaches the editor only here; a live note at the path restores the gone document.
+            AfterSettle::Resync if s_gone => {
+                if let Some(p) = self.docs.path_of(id) {
+                    self.restore_at(&p);
+                }
+            }
             _ => {}
         }
         Task::none()
@@ -342,6 +353,26 @@ impl App {
                 if !self.absorb(rid, path, absorber) {
                     self.doc_gone(rid);
                 }
+            }
+            OpenFor::Restore(rid) => {
+                // No live note at the path (still gone, an error): the document stays gone.
+                let Ok(o) = result else { return };
+                let Some(d) = self.docs.by_id(rid) else {
+                    return;
+                };
+                if !d.buffer.is_missing()
+                    || d.buffer.path() != path
+                    || o.id == rid
+                    || self.docs.by_id(o.id).is_some()
+                {
+                    return;
+                }
+                if d.buffer.is_saving() {
+                    // Audit E2: the in-flight save settles first; its completion re-runs this.
+                    self.restore_after_save.insert(rid);
+                    return;
+                }
+                self.restore_gone(rid, o);
             }
         }
     }
