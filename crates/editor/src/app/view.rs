@@ -232,13 +232,18 @@ impl App {
                 let sp: iced::widget::text::Span<'_, ()> = iced::widget::span(title)
                     .strikethrough(true)
                     .color(t.error_text.to_color());
-                iced::widget::rich_text(vec![sp])
-                    .size(14.0)
-                    .font(iced::Font::with_name(FONT_FAMILY))
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .align_y(iced::alignment::Vertical::Center)
-                    .height(Length::Fill)
-                    .into()
+                // iced 0.14 `rich_text` draws span decorations from the paragraph's top, ignoring
+                // its own `align_y`; the text keeps its natural height and the container centres
+                // it, so the strikethrough stays on the glyphs.
+                container(
+                    iced::widget::rich_text(vec![sp])
+                        .size(14.0)
+                        .font(iced::Font::with_name(FONT_FAMILY))
+                        .wrapping(iced::widget::text::Wrapping::None),
+                )
+                .height(Length::Fill)
+                .align_y(iced::alignment::Vertical::Center)
+                .into()
             } else {
                 control_label(title, 14.0)
                     .font(iced::Font::with_name(FONT_FAMILY))
