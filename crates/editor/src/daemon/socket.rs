@@ -302,6 +302,20 @@ impl DaemonClient for SocketDaemon {
         self.call::<m::ProposeSource>(cv_protocol::ProposeSourceParams { note })
     }
 
+    fn resolve_removals(
+        &self,
+        p: &cv_protocol::ResolveRemovalsParams,
+    ) -> Result<cv_protocol::ResolveRemovalsResult> {
+        self.call::<m::ResolveRemovals>(p.clone())
+    }
+
+    fn next_fold_note(
+        &self,
+        p: &cv_protocol::NextFoldNoteParams,
+    ) -> Result<cv_protocol::NextFoldNoteResult> {
+        self.call::<m::NextFoldNote>(p.clone())
+    }
+
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>> {
         let rx = self.rpc.notifications()?;
         let topics = topics.to_vec();

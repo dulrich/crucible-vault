@@ -55,6 +55,12 @@ pub enum ClientCmd {
     /// Plan sources-publication-model WP-7: propose a `[[publication]]` record from the active
     /// note (Settings → Sources).
     CreateSourceFromNote,
+    /// Plan intake-removals-sources-rescan WP-6: open the next note that still has a
+    /// `[!removed]` fold (no default chord).
+    NextNoteWithRemovals,
+    /// Plan intake-removals-sources-rescan WP-6: "Trim selection as removed" with the span kind
+    /// picked from the palette (one row per kind; no default chord).
+    TrimSelection(cv_protocol::RemovalKind),
     /// plan editor-ui-round-3 WP-5: Go to top / bottom of the note (Ctrl+PgUp / Ctrl+PgDn).
     GoToTop,
     GoToBottom,
@@ -294,6 +300,31 @@ static TABLE: LazyLock<Vec<CmdSpec>> = LazyLock::new(|| {
             }))
         },
     ));
+    v.push(cmd(
+        C::NextNoteWithRemovals,
+        "next_note_with_removals",
+        "Next note with removals",
+        &[],
+        |_| Message::Removals(crate::message::RemovalsMsg::Next),
+    ));
+    // The kind is picked by choosing the palette row (the same family pattern as the surrounds).
+    {
+        use cv_protocol::RemovalKind as K;
+        let kinds = [
+            (K::Sponsor, "sponsor", "Trim selection as removed: sponsor"),
+            (K::Cta, "cta", "Trim selection as removed: cta"),
+            (K::Chrome, "chrome", "Trim selection as removed: chrome"),
+            (K::Footer, "footer", "Trim selection as removed: footer"),
+        ];
+        v.extend(family(
+            lit(&kinds),
+            "trim_selection",
+            "Editor",
+            C::TrimSelection,
+            |_| Vec::new(),
+            |k| Message::Removals(crate::message::RemovalsMsg::Trim(k)),
+        ));
+    }
     let surrounds = [
         (Surround::Dark, "dark", "Set surround: Dark"),
         (Surround::Med, "med", "Set surround: Med"),

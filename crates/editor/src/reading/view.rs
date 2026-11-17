@@ -181,10 +181,11 @@ pub fn reading<'a>(
     // position whether or not the note has frontmatter. The filename edit moved to the note
     // control bar's breadcrumb (plan editor-feedback-round-2 WP-6).
     let mut items: Vec<Element<'a, Message>> = vec![properties(&cx, &doc.model.properties)];
+    let fold_drawn = Cell::new(false);
     items.extend(doc.model.blocks.iter().enumerate().map(|(i, b)| {
         // plan editor-ui-round-3 WP-6: an id'd container per top-level block, so a widget
         // operation can read its layout bounds (place-keeping across mode switches).
-        container(block(&cx, b))
+        container(top_block(&cx, b, &fold_drawn))
             .id(super::block_id(path, view, i))
             .into()
     }));
@@ -429,6 +430,125 @@ fn copy_overlay<'a>(
     iced::widget::hover(body, layer)
 }
 
+/// A top-level block: the first `[!removed]` callout of a note with fold groups carries the
+/// Delete / Keep controls (plan intake-removals-sources-rescan WP-6; every other block, and a
+/// callout inside a transclusion or list, is drawn by [`block`] unchanged).
+fn top_block<'a>(cx: &Ctx<'a, '_>, b: &'a Block, fold_drawn: &Cell<bool>) -> Element<'a, Message> {
+    match b {
+        Block::Callout {
+            kind,
+            title,
+            fold,
+            children,
+        } if kind == "removed" && !cx.doc.fold_groups.is_empty() => {
+            let controls = !fold_drawn.replace(true);
+            callout(
+                cx,
+                kind,
+                title.as_deref(),
+                *fold,
+                children,
+                controls.then_some(()),
+            )
+        }
+        _ => block(cx, b),
+    }
+}
+
+/// A small text button of the fold controls.
+fn fold_button<'a>(cx: &Ctx<'a, '_>, label: &'static str, msg: Message) -> Element<'a, Message> {
+    let t = cx.t;
+    button(text(label).size(cx.sz(13.0)))
+        .padding([1, 8])
+        .style(move |_: &Theme, status| {
+            let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                text_color: if hot { t.accent_ui } else { t.text_dim }.to_color(),
+                border: Border {
+                    color: t.line.to_color(),
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..button::Style::default()
+            }
+        })
+        .on_press(msg)
+        .into()
+}
+
+/// A callout; `fold_controls` (the removed-content fold of a note with groups) adds "Delete all"
+/// on the title line and one row per group below it (kind label, preview, Delete, Keep). The
+/// group rows come from [`super::fold_controls::rows`]; the fold's own lines are drawn as usual.
+fn callout<'a>(
+    cx: &Ctx<'a, '_>,
+    kind: &'a str,
+    title: Option<&'a str>,
+    fold: Option<Fold>,
+    children: &'a [Block],
+    fold_controls: Option<()>,
+) -> Element<'a, Message> {
+    let t = cx.t;
+    let marker = match fold {
+        Some(Fold::Folded) => "▸ ",
+        Some(Fold::Open) => "▾ ",
+        None => "",
+    };
+    let head = format!(
+        "{marker}{}",
+        title.map_or_else(|| capitalize(kind), str::to_owned)
+    );
+    let edge = callout_color(kind, t);
+    let head_run = cx.run_el(
+        cx.take_run().0,
+        vec![span(head).color(edge.to_color())],
+        cx.sz(16.0),
+    );
+    let mut col: Vec<Element<'a, Message>> = Vec::new();
+    if fold_controls.is_some() {
+        let msg = |op| {
+            Message::Reading(ReadingMsg::Removals {
+                path: cx.path.to_owned(),
+                op,
+            })
+        };
+        col.push(
+            row![
+                container(head_run).width(Length::Fill),
+                fold_button(cx, "Delete all", msg(super::fold_controls::delete_all())),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center)
+            .into(),
+        );
+        for r in super::fold_controls::rows(&cx.doc.fold_groups) {
+            let label = r.kind.clone().unwrap_or_default();
+            let info = if r.preview.is_empty() {
+                format!("{} lines", r.lines)
+            } else {
+                format!("{} lines: {}", r.lines, r.preview)
+            };
+            col.push(
+                row![
+                    container(text(label).size(cx.sz(12.0)).color(edge.to_color()))
+                        .width(Length::Fixed(cx.sz(64.0))),
+                    container(text(info).size(cx.sz(12.0)).color(t.text_faint.to_color()))
+                        .width(Length::Fill),
+                    fold_button(cx, "Delete", msg(r.delete)),
+                    fold_button(cx, "Keep", msg(r.keep)),
+                ]
+                .spacing(6)
+                .align_y(iced::alignment::Vertical::Center)
+                .into(),
+            );
+        }
+    } else {
+        col.push(head_run);
+    }
+    // Folding is shown by the marker; the body stays readable (no fold state in v0).
+    col.extend(children.iter().map(|c| block(cx, c)));
+    boxed(column(col).spacing(6).into(), t, edge)
+}
+
 fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
     let t = cx.t;
     match b {
@@ -480,26 +600,7 @@ fn block<'a>(cx: &Ctx<'a, '_>, b: &'a Block) -> Element<'a, Message> {
             title,
             fold,
             children,
-        } => {
-            let marker = match fold {
-                Some(Fold::Folded) => "▸ ",
-                Some(Fold::Open) => "▾ ",
-                None => "",
-            };
-            let head = format!(
-                "{marker}{}",
-                title.clone().unwrap_or_else(|| capitalize(kind))
-            );
-            let edge = callout_color(kind, t);
-            let mut col: Vec<Element<'a, Message>> = vec![cx.run_el(
-                cx.take_run().0,
-                vec![span(head).color(edge.to_color())],
-                cx.sz(16.0),
-            )];
-            // Folding is shown by the marker; the body stays readable (no fold state in v0).
-            col.extend(children.iter().map(|c| block(cx, c)));
-            boxed(column(col).spacing(6).into(), t, edge)
-        }
+        } => callout(cx, kind, title.as_deref(), *fold, children, None),
         Block::CodeBlock { lang, text: code } => {
             let mut col: Vec<Element<'a, Message>> = Vec::new();
             if !lang.is_empty() {

@@ -69,6 +69,7 @@ mod index_follow;
 mod link_typeahead;
 mod note_identity;
 mod reconnect;
+mod removals;
 mod rename_order;
 mod replaced;
 mod save_continue;

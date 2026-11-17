@@ -19,6 +19,7 @@ pub mod place;
 pub mod props;
 pub mod rank;
 pub mod reading;
+pub mod removals;
 pub mod render;
 pub mod select_all;
 pub mod undo;

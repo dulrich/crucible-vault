@@ -5,7 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use cv_protocol::{JobState, SearchResult, ViewResult};
+use cv_protocol::{
+    JobState, NextFoldNoteParams, NextFoldNoteResult, ResolveRemovalsParams, ResolveRemovalsResult,
+    SearchResult, ViewResult,
+};
 
 use super::{DaemonError, FakeDaemon, Notification, Result, RunActionParams, emit, terminal};
 
@@ -40,6 +43,12 @@ pub(super) struct Script {
     /// Every `write_note` / `rename` / `delete` / `delete_note` / `note_set_bool` request that
     /// reached the fake, as `"<method> <path>"`, in order.
     mutation_calls: Vec<String>,
+    /// Plan intake-removals-sources-rescan WP-6: the scripted `resolve_removals` /
+    /// `next_fold_note` answers (`None` = method-not-found, an old daemon) and every call.
+    removals_reply: Option<ResolveRemovalsResult>,
+    removals_calls: Vec<ResolveRemovalsParams>,
+    next_fold_reply: Option<NextFoldNoteResult>,
+    next_fold_calls: Vec<NextFoldNoteParams>,
 }
 
 impl Script {
@@ -62,6 +71,10 @@ impl Script {
             search_calls: Vec::new(),
             held_reply: None,
             mutation_calls: Vec::new(),
+            removals_reply: None,
+            removals_calls: Vec::new(),
+            next_fold_reply: None,
+            next_fold_calls: Vec::new(),
         }
     }
 
@@ -114,6 +127,23 @@ impl Script {
             })),
             None => Ok(()),
         }
+    }
+
+    pub(super) fn run_resolve(
+        &mut self,
+        p: &ResolveRemovalsParams,
+    ) -> Result<ResolveRemovalsResult> {
+        self.removals_calls.push(p.clone());
+        self.removals_reply
+            .clone()
+            .ok_or_else(|| super::super::method_not_found("resolve_removals"))
+    }
+
+    pub(super) fn run_next_fold(&mut self, p: &NextFoldNoteParams) -> Result<NextFoldNoteResult> {
+        self.next_fold_calls.push(p.clone());
+        self.next_fold_reply
+            .clone()
+            .ok_or_else(|| super::super::method_not_found("next_fold_note"))
     }
 
     pub(super) fn record_bool(&mut self, p: &cv_protocol::NoteSetBoolParams) {
@@ -244,5 +274,28 @@ impl FakeDaemon {
     pub fn set_done_failure(&self, msg: Option<&str>) -> Result<()> {
         self.lock()?.script.done_fail = msg.map(str::to_owned);
         Ok(())
+    }
+
+    /// Plan intake-removals-sources-rescan WP-6: scripts the `resolve_removals` answer (`None` =
+    /// method-not-found, like an old daemon).
+    pub fn set_removals_reply(&self, r: Option<ResolveRemovalsResult>) -> Result<()> {
+        self.lock()?.script.removals_reply = r;
+        Ok(())
+    }
+
+    /// Every `resolve_removals` request so far, in order.
+    pub fn removals_calls(&self) -> Result<Vec<ResolveRemovalsParams>> {
+        Ok(self.lock()?.script.removals_calls.clone())
+    }
+
+    /// Scripts the `next_fold_note` answer (`None` = method-not-found).
+    pub fn set_next_fold_reply(&self, r: Option<NextFoldNoteResult>) -> Result<()> {
+        self.lock()?.script.next_fold_reply = r;
+        Ok(())
+    }
+
+    /// Every `next_fold_note` request so far, in order.
+    pub fn next_fold_calls(&self) -> Result<Vec<NextFoldNoteParams>> {
+        Ok(self.lock()?.script.next_fold_calls.clone())
     }
 }

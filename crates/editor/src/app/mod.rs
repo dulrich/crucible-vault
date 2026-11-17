@@ -39,6 +39,7 @@ mod identity;
 mod image_tab;
 mod menu;
 pub mod pdf_tab;
+mod removals;
 mod saves;
 pub(crate) mod scroll;
 pub mod settle;

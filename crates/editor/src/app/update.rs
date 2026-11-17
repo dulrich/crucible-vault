@@ -207,6 +207,10 @@ impl App {
                     self.status.set_error(e);
                 }
             }
+            Message::Reading(crate::message::ReadingMsg::Removals { path, op }) => {
+                return self.removals_click(path, op);
+            }
+            Message::Removals(m) => return self.update_removals(m),
             Message::Reading(crate::message::ReadingMsg::ToggleTask { path, line }) => {
                 return self.toggle_task(&path, line);
             }

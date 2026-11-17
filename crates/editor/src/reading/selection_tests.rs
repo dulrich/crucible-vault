@@ -513,3 +513,34 @@ fn find_split_inline_code_keeps_one_whole_value_payload_and_one_glyph() {
         h.other
     );
 }
+
+/// Plan intake-removals-sources-rescan WP-6: the fold's controls are drawn — the real
+/// `view::reading` tree puts the fold's own lines lower with the Doc's fold groups than without
+/// them (the same note, the same callout), and a note without a fold is laid out the same.
+#[test]
+fn fold_controls_are_drawn_only_for_a_fold_with_groups() {
+    let body = cv_ingest::enrich::fold_ranges(
+        "intro\n\nSponsor one\n\nend\n",
+        &[(2, 2, cv_ingest::enrich::SpanKind::Sponsor)],
+    )
+    .expect("fold");
+    let last_y = |h: &mut H| h.boxes().last().map(|b| b.bounds.y).expect("a run");
+    let clear = |h: &mut H| {
+        h.docs
+            .get_mut(PATH)
+            .and_then(|od| od.reading.doc.as_mut())
+            .expect("doc")
+            .fold_groups
+            .clear();
+    };
+    let mut h = H::new(&body);
+    let with = last_y(&mut h);
+    clear(&mut h);
+    let without = last_y(&mut h);
+    assert!(with > without, "controls add rows: {with} vs {without}");
+
+    let mut plain = H::new("just text\n");
+    let a = last_y(&mut plain);
+    clear(&mut plain);
+    assert_eq!(a, last_y(&mut plain));
+}

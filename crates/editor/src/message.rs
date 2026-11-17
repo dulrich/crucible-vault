@@ -27,6 +27,8 @@ pub enum Message {
     HoldTick,
     Source(SourceMsg),
     Reading(ReadingMsg),
+    /// Plan intake-removals-sources-rescan WP-6: the removal review commands and their answers.
+    Removals(RemovalsMsg),
     Explorer(ExplorerMsg),
     Switcher(SwitcherMsg),
     Palette(PaletteMsg),
@@ -114,6 +116,9 @@ pub enum AfterSave {
     Rename(String),
     /// Run the palette call.
     RunCall(crate::palette::Call),
+    /// Plan intake-removals-sources-rescan WP-6: send `resolve_removals` with this operation
+    /// (the hash it carries is the one the save just landed).
+    Removals(cv_protocol::RemovalOp),
 }
 
 /// WP-2: source editing. `Action`/`Undo`/`Redo`/`Save` target the active tab; the rest name
@@ -248,9 +253,37 @@ pub enum PdfTabMsg {
     EmbedOpen { path: String, page: usize },
 }
 
+/// Plan intake-removals-sources-rescan WP-6: removal review (palette commands, daemon answers).
+#[derive(Debug, Clone)]
+pub enum RemovalsMsg {
+    /// "Trim selection as removed" with the picked span kind.
+    Trim(cv_protocol::RemovalKind),
+    /// "Next note with removals".
+    Next,
+    /// The `resolve_removals` answer (or the user-facing failure text).
+    Resolved(Result<cv_protocol::ResolveRemovalsResult, String>),
+    /// The `next_fold_note` answer (or the user-facing failure text).
+    NextFound(Result<cv_protocol::NextFoldNoteResult, String>),
+}
+
+impl RemovalsMsg {
+    pub fn kind(&self) -> MsgKind {
+        match self {
+            Self::Trim(_) | Self::Next => MsgKind::Input,
+            Self::Resolved(_) | Self::NextFound(_) => MsgKind::Completion,
+        }
+    }
+}
+
 /// WP-3: reading pane.
 #[derive(Debug, Clone)]
 pub enum ReadingMsg {
+    /// Plan intake-removals-sources-rescan WP-6: a Delete / Keep / Delete all click on the
+    /// `[!removed]` fold of `path` (saves first when dirty, then `resolve_removals`).
+    Removals {
+        path: String,
+        op: cv_protocol::RemovalOp,
+    },
     /// Toggle the active tab's mode Source ↔ Reading; Split → Source (Ctrl+E; the palette too).
     CycleMode,
     /// Set a tab's mode by path.
@@ -806,6 +839,7 @@ impl Message {
             Self::Find(m) => m.kind(),
             Self::Tabs(m) => m.kind(),
             Self::Reading(m) => m.kind(),
+            Self::Removals(m) => m.kind(),
             Self::Explorer(m) => m.kind(),
             Self::Palette(m) => m.kind(),
             Self::Panels(m) => m.kind(),
@@ -856,6 +890,7 @@ impl ReadingMsg {
             | Self::TitleRevert
             | Self::TitleFocus { .. }
             | Self::Select { .. }
+            | Self::Removals { .. }
             | Self::Copy { .. } => MsgKind::Input,
         }
     }

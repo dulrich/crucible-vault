@@ -42,6 +42,9 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock", "
 cv-protocol = { path = "../cv-protocol" }
 cv-index = { path = "../cv-index" }
 cv-state = { path = "../cv-state" }
+# Plan intake-removals-sources-rescan WP-6: Reading lists the fold groups with `enrich::fold_groups`
+# (pure crate; never re-parse the fold).
+cv-ingest = { path = "../cv-ingest" }
 cv-text = { path = "../cv-text" }
 cv-vault = { path = "../cv-vault" }
 # Only the `fake` feature (`--fake <dir>`)

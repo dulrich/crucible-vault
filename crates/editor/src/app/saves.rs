@@ -460,6 +460,13 @@ impl App {
             AfterSave::Rename(_) => self
                 .status
                 .set_error(format!("rename not done ({refusal})")),
+            AfterSave::Removals(op) => match landed {
+                Landed::Clean => return self.send_removals(path, op),
+                Landed::Gone => {}
+                Landed::Failed(_) | Landed::Conflict | Landed::Changed => self
+                    .status
+                    .set_error(format!("Removals: not done ({refusal})")),
+            },
             AfterSave::RunCall(call) => match landed {
                 Landed::Gone => return self.resume_gone(note, AfterSave::RunCall(call)),
                 Landed::Clean | Landed::Changed => {
@@ -493,7 +500,7 @@ impl App {
                 q.pending.remove(&note);
                 return self.quit_progress();
             }
-            AfterSave::Delete | AfterSave::Rename(_) => {}
+            AfterSave::Delete | AfterSave::Rename(_) | AfterSave::Removals(_) => {}
             AfterSave::RunCall(call) => self
                 .status
                 .set_error(format!("{}: not run (note closed)", call.title)),

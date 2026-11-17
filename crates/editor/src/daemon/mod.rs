@@ -216,6 +216,24 @@ pub trait DaemonClient: Send + Sync {
             data: None,
         }))
     }
+    /// Plan intake-removals-sources-rescan WP-6: resolves one fold group, all groups, or trims a
+    /// line range of note `p.id` (the daemon is the only writer). A refusal is a result, not an
+    /// error. An old daemon answers method-not-found (the default here, for fakes), which the
+    /// caller reports as "restart the daemon".
+    fn resolve_removals(
+        &self,
+        _p: &cv_protocol::ResolveRemovalsParams,
+    ) -> Result<cv_protocol::ResolveRemovalsResult> {
+        Err(method_not_found("resolve_removals"))
+    }
+    /// Plan intake-removals-sources-rescan WP-6: the next note after the given one that still has
+    /// a removed-content fold. Defaults to method-not-found like [`Self::resolve_removals`].
+    fn next_fold_note(
+        &self,
+        _p: &cv_protocol::NextFoldNoteParams,
+    ) -> Result<cv_protocol::NextFoldNoteResult> {
+        Err(method_not_found("next_fold_note"))
+    }
     /// Subscribes to `topics`; notifications arrive on the returned channel, which closes when
     /// the connection drops. A later call replaces the earlier receiver.
     fn subscribe(&self, topics: &[Topic]) -> Result<Receiver<Notification>>;
@@ -236,6 +254,15 @@ pub trait DaemonClient: Send + Sync {
         let hash = ContentHash::of(&bytes);
         Ok((bytes, hash))
     }
+}
+
+/// The daemon's "method not found" answer for `method` (what an older daemon sends).
+pub fn method_not_found(method: &str) -> DaemonError {
+    DaemonError::Rpc(cv_protocol::RpcError {
+        code: cv_protocol::error_codes::METHOD_NOT_FOUND,
+        message: format!("method not found: {method}"),
+        data: None,
+    })
 }
 
 /// Joins a vault-relative path onto `root`, refusing absolute paths and `..`.

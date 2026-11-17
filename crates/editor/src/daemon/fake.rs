@@ -791,6 +791,20 @@ impl DaemonClient for FakeDaemon {
         self.lock()?.script.set_status(p)
     }
 
+    fn resolve_removals(
+        &self,
+        p: &cv_protocol::ResolveRemovalsParams,
+    ) -> Result<cv_protocol::ResolveRemovalsResult> {
+        self.lock()?.script.run_resolve(p)
+    }
+
+    fn next_fold_note(
+        &self,
+        p: &cv_protocol::NextFoldNoteParams,
+    ) -> Result<cv_protocol::NextFoldNoteResult> {
+        self.lock()?.script.run_next_fold(p)
+    }
+
     fn note_set_bool(&self, p: &cv_protocol::NoteSetBoolParams) -> Result<()> {
         self.mutation("note_set_bool", &p.path)?;
         self.lock()?.script.record_bool(p);

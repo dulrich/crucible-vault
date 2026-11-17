@@ -11,6 +11,7 @@
 //! (audit E2) and the handle-release vs renderer-reclamation distinction.
 
 mod accessors;
+pub mod fold_controls;
 mod links;
 mod place;
 pub mod resolver;
@@ -94,6 +95,15 @@ impl ViewMode {
     }
 }
 
+/// The fold groups of the note `text` (frontmatter removed first, as the daemon does). A note
+/// without the fold marker skips the parse.
+fn fold_groups_of(text: &str) -> Vec<cv_ingest::enrich::FoldGroup> {
+    if !text.contains("[!removed]") {
+        return Vec::new();
+    }
+    cv_ingest::enrich::fold_groups(editor_model::removals::body_of(text))
+}
+
 /// A rendered document.
 #[derive(Debug, Clone)]
 pub struct Doc {
@@ -122,6 +132,10 @@ pub struct Doc {
     /// view hands to `OpenLink`) that do not resolve — drawn dimmed, menu offers "Create note".
     /// Empty without a daemon (no resolver: nothing is known missing).
     pub unresolved: HashSet<String>,
+    /// Plan intake-removals-sources-rescan WP-6: the note's removed-content fold groups
+    /// (`cv_ingest::enrich::fold_groups` over the body; never a second parse of the fold), in
+    /// document order. Empty for a note without a fold.
+    pub fold_groups: Vec<cv_ingest::enrich::FoldGroup>,
 }
 
 /// One document's Reading state: everything per note path, owned by its [`OpenDoc`] — a close
@@ -369,11 +383,10 @@ impl ReadingStore {
             self.resolver.refresh(d.as_ref());
         }
         let generation = daemon.and_then(|d| d.index().generation());
-        let mut model = render::lower_with(
-            &doc.text(),
-            render::LowerOptions::default(),
-            &self.property_types,
-        );
+        let text = doc.text();
+        let fold_groups = fold_groups_of(&text);
+        let mut model =
+            render::lower_with(&text, render::LowerOptions::default(), &self.property_types);
         let mut fetch = |target: &str| {
             let d = daemon?;
             let path = self.resolve(doc.path(), target)?;
@@ -444,6 +457,7 @@ impl ReadingStore {
             pdf_pages,
             runs,
             unresolved,
+            fold_groups,
         });
     }
 
@@ -763,6 +777,8 @@ fn update_store(
         }
         | ReadingMsg::TitleSubmit { .. }
         | ReadingMsg::TitleFocus { .. } => {}
+        // Handled by `App` before it reaches the reading reducer (it saves, then asks the daemon).
+        ReadingMsg::Removals { .. } => {}
         ReadingMsg::OpenLink {
             src,
             target,

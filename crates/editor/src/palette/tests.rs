@@ -1223,6 +1223,11 @@ fn persisted_command_ids_are_pinned() {
         "open_period.day",
         "open_period.week",
         "open_period.month",
+        "next_note_with_removals",
+        "trim_selection.sponsor",
+        "trim_selection.cta",
+        "trim_selection.chrome",
+        "trim_selection.footer",
         "set_surround.dark",
         "set_surround.med",
         "set_surround.light",
@@ -1252,7 +1257,7 @@ fn persisted_command_ids_are_pinned() {
     all.extend(["command_palette", "preset.lint-note"]);
     let bind: Vec<String> = bindables().into_iter().map(|b| b.id).collect();
     assert_eq!(bind, all);
-    assert_eq!(all.len(), 47);
+    assert_eq!(all.len(), 52);
     let preset = |action, period| Preset { action, period }.id();
     assert_eq!(preset(PERIOD_OPEN, Some(PeriodSel::Day)), "open_period.day");
     assert_eq!(
