@@ -16,18 +16,45 @@
 //!   anchored boilerplate line exists but the half-body guard kept the body), `bp_conflict`
 //!   (CAS lost, skipped). A second run writes nothing.
 //!
+//! - **RSS** (plan `intake-removals-sources-rescan` WP-5): every `blog` tracker row with a note
+//!   is learned once per `post-id` from the note body with generated blocks (top block, inserted
+//!   headings, the `[!removed]` fold) excluded, under the feed's publication record name; then
+//!   each note's recurring head/tail lines are folded ([`apply`]). Counts `bp_rss_learned`,
+//!   `bp_rss_folded` (notes written), `bp_lines_folded`.
+//!
+//! **Keys.** Learned lines are keyed by the publication record name for every source kind (mail:
+//! the newsletter `source_key`, already the record name; RSS: the record owning the feed). The
+//! `_seen` table's `message_id` holds a mail Message-ID as is and an RSS post as `rss:<post-id>`,
+//! so both kinds of one record share the line counts without colliding; the RSS share threshold
+//! counts every learned item of the record. **Labels** are looked up by the note's `publication`
+//! frontmatter value (the value `removal_labels.publication` records; at capture, the value the
+//! note is written with); a note without `publication` gets no label tiers.
+//!
+//! **Tiers** ([`cv_ingest::boilerplate::plan`]), per normalized line, for mail and RSS alike:
+//! a Keep label vetoes everything (never stripped, never folded) > a Delete label (stripped when
+//! in an anchored head/tail run) > recurrence (mail: stripped at count >= 2; RSS: folded as a
+//! `chrome` head / `footer` tail group at >= 3 posts and >= 30 % of the record's learned items).
+//! Counts `bp_lines_stripped` (mail recurrence), `bp_lines_deleted` / `bp_notes_deleted`,
+//! `bp_lines_vetoed` / `bp_notes_vetoed`, `bp_publications` (records whose notes changed),
+//! `bp_label_unknown` (label rows with an unknown verdict, ignored). Generated blocks and the
+//! existing fold are never learned, stripped or moved; a second run writes nothing.
+//!
 //! `dry` learns into in-memory sets only and writes nothing to `state.db` or the vault.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use cv_ingest::boilerplate::{self, LineSet};
+use cv_ingest::boilerplate::{self, Action, Labels, LineSet, Plan, Recur};
+use cv_ingest::enrich::{self, SpanKind};
 use cv_ingest::mail;
 use cv_note::FrontmatterDoc;
+use cv_text::blocks;
+use cv_text::sections::heading_text;
 use serde::Serialize;
 
 use super::mail::{KIND, UNKNOWN, raw_markdown, resolve_newsletter};
 use super::reconcile_backfill::{Shared, message_map, redescribed};
+use super::tracker::blogs;
 use super::{StepCtx, StepError};
 
 /// The boilerplate phase's outcome vars (aggregates only; flattened into the reconcile vars).
@@ -37,6 +64,158 @@ pub(super) struct Counts {
     bp_stripped: u32,
     bp_guarded: u32,
     bp_conflict: u32,
+    bp_rss_learned: u32,
+    bp_rss_folded: u32,
+    bp_lines_folded: u32,
+    bp_lines_stripped: u32,
+    bp_lines_deleted: u32,
+    bp_notes_deleted: u32,
+    bp_lines_vetoed: u32,
+    bp_notes_vetoed: u32,
+    bp_publications: u32,
+    bp_label_unknown: u32,
+}
+
+fn n32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+impl Counts {
+    /// Adds one note's tier counts.
+    fn note(&mut self, p: &Plan, recur: Recur) {
+        match recur {
+            Recur::Mail => self.bp_lines_stripped += n32(p.recurred),
+            Recur::Rss { .. } => self.bp_lines_folded += n32(p.recurred),
+        }
+        self.bp_lines_deleted += n32(p.deleted);
+        self.bp_notes_deleted += u32::from(p.deleted > 0);
+        self.bp_lines_vetoed += n32(p.vetoed);
+        self.bp_notes_vetoed += u32::from(p.vetoed > 0);
+    }
+}
+
+/// The `_seen` id of an RSS post (a Message-ID never starts with `rss:`).
+pub(super) fn rss_seen_id(post_id: &str) -> String {
+    format!("rss:{post_id}")
+}
+
+/// Per raw body line (split at `\n`): inside a generated block — a well-formed `%% cv-enrich %%`
+/// block (top block or `[!removed]` fold) or an inserted heading (marker, heading, its blank).
+fn hidden_mask(raw: &[&str]) -> Vec<bool> {
+    let mut hidden = vec![false; raw.len()];
+    let mut i = 0;
+    while i < raw.len() {
+        let t = raw[i].trim();
+        let close = (t == blocks::ENRICH_OPEN)
+            .then(|| blocks::managed_close(raw, i))
+            .flatten();
+        if let Some(j) = close {
+            hidden[i..=j].iter_mut().for_each(|h| *h = true);
+            i = j + 1;
+            continue;
+        }
+        if t == blocks::ENRICH_HEADING {
+            hidden[i] = true;
+            i += 1;
+            if i < raw.len() && heading_text(raw[i]).is_some() {
+                hidden[i] = true;
+                i += 1;
+                if i < raw.len() && raw[i].trim().is_empty() {
+                    hidden[i] = true;
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    hidden
+}
+
+/// The body's lines outside generated blocks, joined (what RSS learning reads).
+pub(super) fn plain_body(body: &str) -> String {
+    let raw: Vec<&str> = body.split('\n').collect();
+    let hidden = hidden_mask(&raw);
+    raw.iter()
+        .zip(&hidden)
+        .filter(|(_, h)| !**h)
+        .map(|(l, _)| *l)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Applies the tiers to a whole note `text` (frontmatter kept byte-for-byte): `None` when nothing
+/// changes. Only lines outside generated blocks are classified; the anchored runs are taken over
+/// those lines. Mail strips; RSS strips Delete-labelled lines and folds the rest of each run as
+/// `chrome` (head) / `footer` (tail) groups via [`enrich::fold_ranges`].
+pub(super) fn apply(
+    text: &str,
+    set: &LineSet,
+    labels: &Labels,
+    recur: Recur,
+) -> (Option<String>, Plan) {
+    let doc = FrontmatterDoc::new(text);
+    let body = doc.body();
+    let prefix = &text[..text.len() - body.len()];
+    let raw: Vec<&str> = body.split('\n').collect();
+    let hidden = hidden_mask(&raw);
+    if recur == Recur::Mail && !hidden.contains(&true) {
+        // The pre-WP-5 path, unchanged for a plain mail body.
+        let lines: Vec<&str> = body.lines().collect();
+        let plan = boilerplate::plan(&lines, &[], set, labels, recur);
+        return (stripped_with(text, set, labels), plan);
+    }
+    let plain: Vec<usize> = (0..raw.len()).filter(|&i| !hidden[i]).collect();
+    let lines: Vec<&str> = plain.iter().map(|&i| raw[i]).collect();
+    let plan = boilerplate::plan(&lines, &[], set, labels, recur);
+    let mut act = vec![Action::Keep; raw.len()];
+    for (k, &i) in plain.iter().enumerate() {
+        act[i] = plan.actions[k];
+    }
+    if act.iter().all(|a| *a == Action::Keep) {
+        return (None, plan);
+    }
+    // Remove the stripped lines; a blank line left next to a cut collapses into its neighbour.
+    let mut kept: Vec<(usize, &str)> = Vec::with_capacity(raw.len());
+    let mut cut = false;
+    for (i, l) in raw.iter().enumerate() {
+        if act[i] == Action::Strip {
+            cut = true;
+            continue;
+        }
+        let blank = l.trim().is_empty() && !hidden[i];
+        if blank && cut && kept.last().is_none_or(|(_, p)| p.trim().is_empty()) {
+            continue;
+        }
+        if !blank {
+            cut = false;
+        }
+        kept.push((i, l));
+    }
+    let new_body: String = kept.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
+    let mut ranges: Vec<(usize, usize, SpanKind)> = Vec::new();
+    for (k, (i, _)) in kept.iter().enumerate() {
+        let kind = match act[*i] {
+            Action::FoldHead => SpanKind::Chrome,
+            Action::FoldTail => SpanKind::Footer,
+            _ => continue,
+        };
+        match ranges.last_mut() {
+            Some((_, last, kd)) if *last + 1 == k && kept[*last].0 + 1 == *i && *kd == kind => {
+                *last = k;
+            }
+            _ => ranges.push((k, k, kind)),
+        }
+    }
+    let out = match enrich::fold_ranges(&new_body, &ranges) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "boilerplate: fold refused; note left unchanged");
+            return (None, Plan::default());
+        }
+    };
+    let out = format!("{prefix}{out}");
+    ((out != text).then_some(out), plan)
 }
 
 /// The distinct persisted line keys of one body.
@@ -49,33 +228,82 @@ fn line_keys(body: &str) -> Vec<u64> {
     keys.into_iter().collect()
 }
 
-/// Capture: learns `body` (the cleaned, pre-strip body) for `source_key` once by `message_id`,
-/// then strips it with the updated set.
+/// One publication's labels from `state.db` and the count of ignored unknown-verdict rows.
+fn load_labels(ctx: &StepCtx<'_>, publication: &str) -> Result<(Labels, usize), StepError> {
+    let (keep, delete, unknown) = ctx.state().publication_labels(publication)?;
+    if unknown > 0 {
+        tracing::warn!(
+            unknown,
+            "boilerplate: removal labels with an unknown verdict ignored"
+        );
+    }
+    Ok((
+        Labels {
+            keep: keep.into_iter().collect(),
+            delete: delete.into_iter().collect(),
+        },
+        unknown,
+    ))
+}
+
+/// Capture: learns `body` (the cleaned, pre-strip body) for `source_key` (the record name) once by
+/// `message_id`, then strips it with the updated set and `publication`'s labels.
 pub(super) fn learn_and_strip(
     ctx: &StepCtx<'_>,
     source_key: &str,
+    publication: &str,
     message_id: &str,
     body: &str,
 ) -> Result<String, StepError> {
+    let (labels, _) = load_labels(ctx, publication)?;
     let mut db = ctx.state();
     db.learn_mail_boilerplate(source_key, message_id, &line_keys(body))?;
     let set = LineSet::from_entries(db.mail_boilerplate_lines(source_key)?);
-    Ok(boilerplate::strip(body, &set))
+    Ok(boilerplate::strip_tiered(body, &set, &labels))
+}
+
+/// RSS capture: learns the captured note `text`'s body (before enrich) for the record once by
+/// `post-id`, then applies the tiers (recurring head/tail lines folded); returns the text to write.
+pub(crate) fn learn_and_fold_rss(
+    ctx: &StepCtx<'_>,
+    record: &str,
+    publication: &str,
+    post_id: &str,
+    text: &str,
+) -> Result<String, StepError> {
+    let (labels, _) = load_labels(ctx, publication)?;
+    let body = plain_body(FrontmatterDoc::new(text).body());
+    let (set, posts) = {
+        let mut db = ctx.state();
+        db.learn_mail_boilerplate(record, &rss_seen_id(post_id), &line_keys(&body))?;
+        (
+            LineSet::from_entries(db.mail_boilerplate_lines(record)?),
+            db.mail_boilerplate_seen_count(record)?,
+        )
+    };
+    Ok(apply(text, &set, &labels, Recur::Rss { posts })
+        .0
+        .unwrap_or_else(|| text.to_owned()))
 }
 
 /// In-run learned sets (loaded from `state.db` on first use; dry runs never persist).
 struct Sets {
     dry: bool,
     sets: HashMap<String, LineSet>,
+    /// Learned items per key (the RSS share denominator).
+    posts: HashMap<String, u32>,
     seen: HashSet<(String, String)>,
+    labels: HashMap<String, Labels>,
 }
 
 impl Sets {
     fn set(&mut self, ctx: &StepCtx<'_>, key: &str) -> Result<&mut LineSet, StepError> {
         if !self.sets.contains_key(key) {
             let entries = ctx.state().mail_boilerplate_lines(key)?;
+            let posts = ctx.state().mail_boilerplate_seen_count(key)?;
             self.sets
                 .insert(key.to_owned(), LineSet::from_entries(entries));
+            self.posts.insert(key.to_owned(), posts);
         }
         Ok(self.sets.get_mut(key).unwrap_or_else(|| unreachable!()))
     }
@@ -94,6 +322,7 @@ impl Sets {
         }
         // Load the set before persisting, so the in-memory copy counts this message once.
         boilerplate::learn(self.set(ctx, key)?, body);
+        *self.posts.entry(key.to_owned()).or_insert(0) += 1;
         if !self.dry {
             ctx.state()
                 .learn_mail_boilerplate(key, mid, &line_keys(body))?;
@@ -101,11 +330,29 @@ impl Sets {
         self.seen.insert(id);
         Ok(true)
     }
+
+    /// The labels of `publication` (cached; unknown verdicts counted once per publication).
+    fn labels(
+        &mut self,
+        ctx: &StepCtx<'_>,
+        publication: &str,
+        c: &mut Counts,
+    ) -> Result<&Labels, StepError> {
+        if !self.labels.contains_key(publication) {
+            let (l, unknown) = load_labels(ctx, publication)?;
+            c.bp_label_unknown += n32(unknown);
+            self.labels.insert(publication.to_owned(), l);
+        }
+        Ok(self
+            .labels
+            .get(publication)
+            .unwrap_or_else(|| unreachable!()))
+    }
 }
 
-/// `text` with its body stripped (frontmatter and surrounding newlines kept byte-for-byte);
-/// `None` when nothing changes.
-pub(super) fn stripped(text: &str, set: &LineSet) -> Option<String> {
+/// `text` with its body stripped by the tiers (frontmatter and surrounding newlines kept
+/// byte-for-byte); `None` when nothing changes.
+fn stripped_with(text: &str, set: &LineSet, labels: &Labels) -> Option<String> {
     let doc = FrontmatterDoc::new(text);
     let body = doc.body();
     let prefix = &text[..text.len() - body.len()];
@@ -116,7 +363,10 @@ pub(super) fn stripped(text: &str, set: &LineSet) -> Option<String> {
     }
     let lead = &body[..body.len() - body.trim_start_matches(newline).len()];
     let trail = &body[body.trim_end_matches(newline).len()..];
-    let out = format!("{prefix}{lead}{}{trail}", boilerplate::strip(core, set));
+    let out = format!(
+        "{prefix}{lead}{}{trail}",
+        boilerplate::strip_tiered(core, set, labels)
+    );
     (out != text).then_some(out)
 }
 
@@ -142,7 +392,9 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
     let mut sets = Sets {
         dry: sh.dry,
         sets: HashMap::new(),
+        posts: HashMap::new(),
         seen: HashSet::new(),
+        labels: HashMap::new(),
     };
     let cfg = ctx.config.pipelines().mail.clone();
     let map = if cfg.maildir.trim().is_empty() {
@@ -164,14 +416,18 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
         let body = mail::clean_body(&raw_markdown(&post));
         c.bp_learned += u32::from(sets.learn(ctx, &nl.name, &post.message_id, &body)?);
     }
-    // Known-sender notes: learn the ones without an `.eml` from their current body, then strip.
+    // Known-sender notes: learn the ones without an `.eml` from their current body; RSS notes:
+    // learn once per `post-id` under the feed's record. Then apply the tiers.
     let rows: Vec<_> = ctx
         .state()
         .tracker_items_with_note()?
         .into_iter()
-        .filter(|r| r.source_kind == KIND && r.source_key != UNKNOWN)
+        .filter(|r| {
+            (r.source_kind == KIND && r.source_key != UNKNOWN) || r.source_kind == blogs::KIND
+        })
         .collect();
-    let mut targets: Vec<(String, String)> = Vec::new();
+    // (record, note path, is RSS)
+    let mut targets: Vec<(String, String, bool)> = Vec::new();
     for r in rows {
         let Some(path) = r.note_path.clone() else {
             continue;
@@ -183,29 +439,60 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
             continue;
         };
         let doc = FrontmatterDoc::new(text.as_str());
+        let body = plain_body(doc.body());
+        if r.source_kind == blogs::KIND {
+            let Some(rec) = sources.by_feed(&r.source_key) else {
+                continue;
+            };
+            let learned = sets.learn(ctx, &rec.name, &rss_seen_id(&r.item_id), &body)?;
+            c.bp_rss_learned += u32::from(learned);
+            targets.push((rec.name.clone(), path, true));
+            continue;
+        }
         if !is_email(&doc) {
             continue;
         }
         if !map.contains_key(&r.item_id) {
-            c.bp_learned += u32::from(sets.learn(ctx, &r.source_key, &r.item_id, doc.body())?);
+            c.bp_learned += u32::from(sets.learn(ctx, &r.source_key, &r.item_id, &body)?);
         }
-        targets.push((r.source_key, path));
+        targets.push((r.source_key, path, false));
     }
-    for (key, path) in targets {
+    let mut touched: BTreeSet<String> = BTreeSet::new();
+    for (key, path, rss) in targets {
         let Some((bytes, hash)) = ctx.read(&path)? else {
             continue;
         };
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
+        let publication = FrontmatterDoc::new(text.as_str())
+            .get_str("publication")
+            .map(|p| p.trim().to_owned())
+            .unwrap_or_default();
+        let labels = sets.labels(ctx, &publication, c)?.clone();
+        let recur = if rss {
+            sets.set(ctx, &key)?;
+            Recur::Rss {
+                posts: sets.posts.get(&key).copied().unwrap_or(0),
+            }
+        } else {
+            Recur::Mail
+        };
         let set = sets.set(ctx, &key)?;
-        let Some(body_new) = stripped(&text, set) else {
-            if anchored_boiler(FrontmatterDoc::new(text.as_str()).body(), set) {
+        let (changed, plan) = apply(&text, set, &labels, recur);
+        let Some(body_new) = changed else {
+            if !rss
+                && (plan.guarded || anchored_boiler(FrontmatterDoc::new(text.as_str()).body(), set))
+            {
                 c.bp_guarded += 1;
             }
             continue;
         };
-        let new = redescribed(&body_new, true).unwrap_or(body_new);
+        let new = if rss {
+            body_new
+        } else {
+            redescribed(&body_new, true).unwrap_or(body_new)
+        };
         if !sh.dry {
             match ctx.write(&path, new.into_bytes(), Some(hash)) {
                 Ok(_) => {}
@@ -216,7 +503,14 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
                 Err(e) => return Err(e),
             }
         }
-        c.bp_stripped += 1;
+        c.note(&plan, recur);
+        if rss {
+            c.bp_rss_folded += 1;
+        } else {
+            c.bp_stripped += 1;
+        }
+        touched.insert(key);
     }
+    c.bp_publications += n32(touched.len());
     Ok(())
 }

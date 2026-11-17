@@ -1580,6 +1580,160 @@ pub fn trim_lines(body: &str, first: usize, last: usize) -> Result<Trimmed, Fold
     })
 }
 
+/// Move body lines into the note's `[!removed]` fold without a model call (plan
+/// `intake-removals-sources-rescan` WP-5: recurring RSS lines), one group per
+/// `(first, last, kind)` range — 0-based inclusive body line indices (lines split at `\n`, as
+/// [`trim_lines`]), ascending and disjoint, of a frontmatter-free body. The groups are written
+/// exactly as [`enrich`] writes them (one `%% cv-fold … %%` metadata line each, `> `-quoted
+/// content), appended to the body's last fold block, or to a new fold block at the end of the
+/// body; everything else stays byte-identical. [`fold_groups`] lists them and
+/// [`resolve_groups`] Keep restores each at its anchor.
+///
+/// # Errors
+/// As [`trim_lines`] for each range; [`FoldError::EmptyRange`] also when ranges overlap or are
+/// out of order.
+pub fn fold_ranges(body: &str, groups: &[(usize, usize, SpanKind)]) -> Result<String, FoldError> {
+    let mut prev: Option<usize> = None;
+    for (f, l, _) in groups {
+        trim_lines(body, *f, *l)?;
+        if prev.is_some_and(|p| *f <= p) {
+            return Err(FoldError::EmptyRange);
+        }
+        prev = Some(*l);
+    }
+    if groups.is_empty() {
+        return Ok(body.to_owned());
+    }
+    let raw: Vec<&str> = body.split('\n').collect();
+    let folds = parse_folds(&raw);
+    let mut hidden = vec![false; raw.len()];
+    // Per raw line: generated (top block, heading marker + heading + blank, fold blocks).
+    let mut i = 0;
+    while i < raw.len() {
+        let t = raw[i].trim();
+        let close = (t == MARK_OPEN)
+            .then(|| blocks::managed_close(&raw, i))
+            .flatten();
+        if let Some(j) = close {
+            hidden[i..=j].iter_mut().for_each(|h| *h = true);
+            i = j + 1;
+            continue;
+        }
+        if t == MARK_HEADING {
+            hidden[i] = true;
+            i += 1;
+            if i < raw.len() && heading_text(raw[i]).is_some() {
+                hidden[i] = true;
+                i += 1;
+                if i < raw.len() && raw[i].trim().is_empty() {
+                    hidden[i] = true;
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    let blank = |k: usize| raw[k].trim().is_empty();
+    let in_fold = |k: usize| folds.iter().any(|f| (f.open..=f.close).contains(&k));
+    let mut out: Vec<usize> = Vec::with_capacity(raw.len());
+    let mut metas: Vec<String> = Vec::with_capacity(groups.len());
+    let mut content: Vec<Vec<String>> = Vec::with_capacity(groups.len());
+    let mut i = 0;
+    for (f, l, kind) in groups {
+        out.extend(i..*f);
+        i = l + 1;
+        // As `plan_groups` over `strip_generated`'s lines: the blank run in front of a fold block
+        // (or the end) is layout, so a group followed only by it never joins.
+        let join = out.last().is_none_or(|&k| blank(k))
+            && raw.get(i).is_some_and(|x| x.trim().is_empty())
+            && (i + 1..raw.len()).any(|k| !blank(k) && !in_fold(k));
+        if join {
+            i += 1;
+        }
+        let plain_after = |q: usize| out[q + 1..].iter().filter(|&&k| !hidden[k]).count();
+        let anchor = match out.iter().rposition(|&k| !hidden[k] && !blank(k)) {
+            Some(q) => {
+                let t = squeeze(raw[out[q]]);
+                let occ = out[..=q]
+                    .iter()
+                    .filter(|&&k| !hidden[k] && squeeze(raw[k]) == t)
+                    .count();
+                Anchor {
+                    after: Some((t, occ)),
+                    gap: plain_after(q),
+                    join,
+                }
+            }
+            None => {
+                let lead = out.iter().take_while(|&&k| hidden[k]).count();
+                let skip = usize::from(lead > 0 && out.get(lead).is_some_and(|&k| blank(k)));
+                Anchor {
+                    after: None,
+                    gap: out[lead..].iter().filter(|&&k| !hidden[k]).count() - skip,
+                    join,
+                }
+            }
+        };
+        metas.push(render_meta(l - f + 1, kind, &anchor));
+        content.push(raw[*f..=*l].iter().map(|x| quote(x)).collect());
+    }
+    out.extend(i..raw.len());
+    let mut res: Vec<String> = Vec::with_capacity(out.len() + metas.len() * 2 + 8);
+    match folds.last() {
+        Some(fold) => {
+            let header = (fold.open + 1..fold.close)
+                .find(|&k| raw[k].trim_end() == FOLD_HEADER)
+                .unwrap_or(fold.open + 1);
+            let last = (header..fold.close)
+                .rev()
+                .find(|&k| !raw[k].trim().is_empty())
+                .unwrap_or(header);
+            for k in out {
+                if k == fold.open {
+                    // A group taken from just above the fold leaves one blank line, as `enrich`.
+                    while res.len() >= 2 && res[res.len() - 2..].iter().all(|l| l.trim().is_empty())
+                    {
+                        res.pop();
+                    }
+                }
+                if k == header {
+                    res.extend(metas.iter().cloned());
+                }
+                res.push(raw[k].to_owned());
+                if k == last {
+                    for (n, g) in content.iter().enumerate() {
+                        if n > 0 || last != header {
+                            res.push(">".to_owned());
+                        }
+                        res.extend(g.iter().cloned());
+                    }
+                }
+            }
+        }
+        None => {
+            res.extend(out.iter().map(|&k| raw[k].to_owned()));
+            while res.last().is_some_and(|l| l.trim().is_empty()) {
+                res.pop();
+            }
+            res.push(String::new());
+            res.push(MARK_OPEN.to_owned());
+            res.extend(metas);
+            res.push(FOLD_HEADER.to_owned());
+            for (n, g) in content.into_iter().enumerate() {
+                if n > 0 {
+                    res.push(">".to_owned());
+                }
+                res.extend(g);
+            }
+            res.push(String::new());
+            res.push(MARK_CLOSE.to_owned());
+            res.push(String::new());
+        }
+    }
+    Ok(res.join("\n"))
+}
+
 /// Phase 6: the body without folded lines, with the inserted headings, the top block first and
 /// the fold block last.
 fn assemble(

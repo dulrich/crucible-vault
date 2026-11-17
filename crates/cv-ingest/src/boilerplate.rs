@@ -134,39 +134,21 @@ fn run_len(order: &[usize], kinds: &[Kind]) -> usize {
 /// at least one other message when the caller learned this body first). Mid-body boilerplate is
 /// kept; if head+tail would remove more than half of the non-blank lines the body is unchanged.
 pub fn strip(body: &str, set: &LineSet) -> String {
+    strip_tiered(body, set, &Labels::default())
+}
+
+/// [`strip`] with the publication's removal labels applied ([`plan`] with [`Recur::Mail`]): a
+/// Keep-labelled line is never stripped, a Delete-labelled line is boilerplate in an anchored run.
+pub fn strip_tiered(body: &str, set: &LineSet, labels: &Labels) -> String {
     let lines: Vec<&str> = body.lines().collect();
-    let fenced = fence_mask(&lines);
-    let kinds: Vec<Kind> = lines
-        .iter()
-        .zip(&fenced)
-        .map(|(l, &f)| match normalize_line(l) {
-            _ if f => Kind::Content,
-            None => Kind::Neutral,
-            Some(n) if set.count(&n) >= THRESHOLD => Kind::Boiler,
-            Some(_) => Kind::Content,
-        })
-        .collect();
-    let n = lines.len();
-    let fwd: Vec<usize> = (0..n).collect();
-    let back: Vec<usize> = (0..n).rev().collect();
-    let head = run_len(&fwd, &kinds);
-    let tail = run_len(&back, &kinds);
-    let mut remove = vec![false; n];
-    remove[..head].iter_mut().for_each(|r| *r = true);
-    remove[n - tail..].iter_mut().for_each(|r| *r = true);
-    let nonblank = lines.iter().filter(|l| !l.trim().is_empty()).count();
-    let removed = lines
-        .iter()
-        .zip(&remove)
-        .filter(|(l, r)| **r && !l.trim().is_empty())
-        .count();
-    if removed == 0 || removed * 2 > nonblank {
+    let p = plan(&lines, &[], set, labels, Recur::Mail);
+    if !p.actions.contains(&Action::Strip) {
         return body.to_owned();
     }
     let kept: Vec<&str> = lines
         .iter()
-        .zip(&remove)
-        .filter(|(_, r)| !**r)
+        .zip(&p.actions)
+        .filter(|(_, a)| **a != Action::Strip)
         .map(|(l, _)| *l)
         .collect();
     let start = kept.iter().position(|l| !l.trim().is_empty());
@@ -174,6 +156,183 @@ pub fn strip(body: &str, set: &LineSet) -> String {
     match (start, last) {
         (Some(s), Some(e)) => kept[s..=e].join("\n"),
         _ => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tiers (plan `intake-removals-sources-rescan` WP-5)
+// ---------------------------------------------------------------------------------------------
+
+/// RSS recurrence: a line is recurring once it was seen in at least this many learned posts…
+pub const RSS_MIN_POSTS: u32 = 3;
+/// …and in at least this percentage of the publication's learned posts.
+pub const RSS_MIN_PERCENT: u32 = 30;
+
+/// One publication's removal labels as [`line_key`] sets. Precedence per normalized line:
+/// **Keep** (never stripped, never folded; vetoes a Delete label and recurrence) > **Delete**
+/// (boilerplate in an anchored head/tail run: stripped outright) > **recurrence** (mail:
+/// stripped, RSS: folded). Mid-body lines are never touched, whatever their tier.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Labels {
+    pub keep: HashSet<u64>,
+    pub delete: HashSet<u64>,
+}
+
+/// The source kind deciding the recurrence tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recur {
+    /// Mail: recurring at count >= 2 (one other message); recurring lines are stripped.
+    Mail,
+    /// RSS: recurring at count >= [`RSS_MIN_POSTS`] and >= [`RSS_MIN_PERCENT`] % of `posts`
+    /// (the publication's learned posts); recurring lines are folded, never stripped.
+    Rss { posts: u32 },
+}
+
+impl Recur {
+    fn recurs(self, count: u32) -> bool {
+        match self {
+            Self::Mail => count >= THRESHOLD,
+            Self::Rss { posts } => {
+                count >= RSS_MIN_POSTS
+                    && u64::from(count) * 100 >= u64::from(posts) * u64::from(RSS_MIN_PERCENT)
+            }
+        }
+    }
+}
+
+/// What happens to one body line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Stays in the body.
+    Keep,
+    /// Removed outright.
+    Strip,
+    /// Moved into the `[!removed]` fold as part of the head (`chrome`) run (RSS only).
+    FoldHead,
+    /// Moved into the `[!removed]` fold as part of the tail (`footer`) run (RSS only).
+    FoldTail,
+}
+
+/// [`plan`]'s result: one action per input line plus per-tier line counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    pub actions: Vec<Action>,
+    /// Lines a Keep label vetoed (a Delete label or recurrence would have made them boilerplate).
+    pub vetoed: usize,
+    /// Non-blank Delete-labelled lines stripped.
+    pub deleted: usize,
+    /// Non-blank lines removed by recurrence (mail: stripped, RSS: folded), gap lines included.
+    pub recurred: usize,
+    /// An anchored run existed but the half-body guard refused it.
+    pub guarded: bool,
+}
+
+/// Classifies `lines` (one body) against the learned `set` and the publication's `labels`.
+/// `protected[i]` (missing = false) marks a line that is never boilerplate and never removed
+/// (generated blocks, an existing fold). The anchored head/tail run, gap and half-body guards are
+/// [`strip`]'s. In a run: mail strips every line; RSS strips Delete-labelled lines and folds the
+/// rest (gap and blank lines included, so a group is contiguous).
+pub fn plan(
+    lines: &[&str],
+    protected: &[bool],
+    set: &LineSet,
+    labels: &Labels,
+    recur: Recur,
+) -> Plan {
+    let fenced = fence_mask(lines);
+    let prot = |i: usize| protected.get(i).copied().unwrap_or(false);
+    let mut vetoed = 0;
+    let mut del = vec![false; lines.len()];
+    let mut kept = vec![false; lines.len()];
+    let kinds: Vec<Kind> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if fenced[i] || prot(i) {
+                return Kind::Content;
+            }
+            let Some(n) = normalize_line(l) else {
+                return Kind::Neutral;
+            };
+            let k = line_key(&n);
+            let deleted = labels.delete.contains(&k);
+            let recurs = recur.recurs(set.counts.get(&k).copied().unwrap_or(0));
+            if labels.keep.contains(&k) {
+                kept[i] = true;
+                vetoed += usize::from(deleted || recurs);
+                Kind::Content
+            } else if deleted || recurs {
+                del[i] = deleted;
+                Kind::Boiler
+            } else {
+                Kind::Content
+            }
+        })
+        .collect();
+    let n = lines.len();
+    let fwd: Vec<usize> = (0..n).collect();
+    let back: Vec<usize> = (0..n).rev().collect();
+    let head = run_len(&fwd, &kinds);
+    let tail = run_len(&back, &kinds);
+    let mut actions = vec![Action::Keep; n];
+    let blank = |i: usize| lines[i].trim().is_empty();
+    for (i, a) in actions.iter_mut().enumerate() {
+        let (in_head, in_tail) = (i < head, i >= n - tail);
+        // A Keep-labelled line stays even as a gap line inside a run.
+        if !(in_head || in_tail) || prot(i) || kept[i] {
+            continue;
+        }
+        *a = match recur {
+            Recur::Mail => Action::Strip,
+            Recur::Rss { .. } if del[i] => Action::Strip,
+            Recur::Rss { .. } if in_head => Action::FoldHead,
+            Recur::Rss { .. } => Action::FoldTail,
+        };
+    }
+    // A fold group neither starts nor ends with a blank line (they stay in the body).
+    let mut i = 0;
+    while i < n {
+        let a = actions[i];
+        if !matches!(a, Action::FoldHead | Action::FoldTail) {
+            i += 1;
+            continue;
+        }
+        let s = i;
+        while i < n && actions[i] == a {
+            i += 1;
+        }
+        let mut e = i;
+        let mut b = s;
+        while b < e && blank(b) {
+            actions[b] = Action::Keep;
+            b += 1;
+        }
+        while e > b && blank(e - 1) {
+            actions[e - 1] = Action::Keep;
+            e -= 1;
+        }
+    }
+    let nonblank = (0..n).filter(|&i| !blank(i)).count();
+    let removed = (0..n)
+        .filter(|&i| actions[i] != Action::Keep && !blank(i))
+        .count();
+    if removed == 0 || removed * 2 > nonblank {
+        return Plan {
+            actions: vec![Action::Keep; n],
+            vetoed,
+            guarded: removed > 0,
+            ..Plan::default()
+        };
+    }
+    let deleted = (0..n)
+        .filter(|&i| del[i] && actions[i] == Action::Strip && !blank(i))
+        .count();
+    Plan {
+        recurred: removed - deleted,
+        actions,
+        vetoed,
+        deleted,
+        guarded: false,
     }
 }
 
@@ -246,5 +405,69 @@ mod tests {
         assert_eq!(line_key("hello world"), 0x779a_65e7_023c_d2e7);
         let s = set_of(&["hello world line"]);
         assert_eq!(LineSet::from_entries(s.iter().collect::<Vec<_>>()), s);
+    }
+    // ---- tiers (plan intake-removals-sources-rescan WP-5) ----
+
+    fn labels(keep: &[&str], delete: &[&str]) -> Labels {
+        let k = |v: &[&str]| v.iter().map(|l| line_key(l)).collect();
+        Labels {
+            keep: k(keep),
+            delete: k(delete),
+        }
+    }
+
+    const BODY: &str = "Header chrome line\nStory line one here\nStory line two here\nStory line three here\nStory line four here\nSigned off by staff\nFooter one recurring\nFooter two recurring";
+
+    #[test]
+    fn mail_tiers_keep_vetoes_delete_strips_anchored_only() {
+        let other = "Other story alpha\nOther story beta\nOther story gamma\nFooter one recurring\nFooter two recurring";
+        let mut s = set_of(&[other]);
+        learn(&mut s, BODY);
+        // Recurrence only: the footer goes.
+        assert!(!strip_tiered(BODY, &s, &Labels::default()).contains("Footer one"));
+        // Keep vetoes recurrence for one line; the other recurring line still goes.
+        let l = labels(&["Footer one recurring"], &[]);
+        let out = strip_tiered(BODY, &s, &l);
+        assert!(out.contains("Footer one recurring") && !out.contains("Footer two"));
+        assert_eq!(
+            plan(&BODY.lines().collect::<Vec<_>>(), &[], &s, &l, Recur::Mail).vetoed,
+            1
+        );
+        // Delete label: stripped at the head (never seen elsewhere), left alone mid-body.
+        let long = "Header chrome line\nBody a line here\nBody b line here\nBody c line here\nBody d line here\nMid label line\nBody e line here\nBody f line here\nBody g line here\nBody h line here";
+        let l = labels(&[], &["Header chrome line", "Mid label line"]);
+        let out = strip_tiered(long, &LineSet::new(), &l);
+        assert!(out.starts_with("Body a line here"));
+        assert!(out.contains("Mid label line"));
+        // Keep beats Delete for the same line.
+        let l = labels(&["Header chrome line"], &["Header chrome line"]);
+        assert!(strip_tiered(BODY, &s, &l).starts_with("Header chrome line"));
+    }
+
+    #[test]
+    fn rss_tiers_fold_recurrence_strip_deletes_and_respect_the_share() {
+        let lines: Vec<&str> = BODY.lines().collect();
+        let foot = "Story x\nFooter one recurring\nFooter two recurring";
+        let three = set_of(&[foot, foot, foot]);
+        let two = set_of(&[foot, foot]);
+        let none = Labels::default();
+        // 2 posts: nothing.
+        let p = plan(&lines, &[], &two, &none, Recur::Rss { posts: 2 });
+        assert!(p.actions.iter().all(|a| *a == Action::Keep));
+        // 3 posts under 30 % (3 of 11): nothing.
+        let p = plan(&lines, &[], &three, &none, Recur::Rss { posts: 11 });
+        assert!(p.actions.iter().all(|a| *a == Action::Keep));
+        // 3 posts at 30 % (3 of 10): the tail is folded as a footer run, never stripped.
+        let p = plan(&lines, &[], &three, &none, Recur::Rss { posts: 10 });
+        assert_eq!(&p.actions[6..], [Action::FoldTail, Action::FoldTail]);
+        assert!(p.actions[..6].iter().all(|a| *a == Action::Keep));
+        assert_eq!((p.recurred, p.deleted), (2, 0));
+        // A Delete-labelled head line is stripped, a Keep-labelled footer line stays.
+        let l = labels(&["Footer two recurring"], &["Header chrome line"]);
+        let p = plan(&lines, &[], &three, &l, Recur::Rss { posts: 10 });
+        assert_eq!(p.actions[0], Action::Strip);
+        assert_eq!(p.actions[6], Action::FoldTail);
+        assert_eq!(p.actions[7], Action::Keep);
+        assert_eq!((p.deleted, p.recurred, p.vetoed), (1, 1, 1));
     }
 }

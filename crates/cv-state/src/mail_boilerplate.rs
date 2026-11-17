@@ -43,6 +43,17 @@ impl StateDb {
         Ok(n > 0)
     }
 
+    /// How many messages / posts were learned for `source_key` (the denominator of the RSS
+    /// recurrence share; plan `intake-removals-sources-rescan` WP-5).
+    pub fn mail_boilerplate_seen_count(&self, source_key: &str) -> Result<u32> {
+        let n: i64 = self.conn().query_row(
+            "SELECT count(*) FROM mail_boilerplate_seen WHERE source_key = ?1",
+            params![source_key],
+            |r| r.get(0),
+        )?;
+        Ok(u32::try_from(n).unwrap_or(u32::MAX))
+    }
+
     /// Learns one message in one transaction: each distinct key of `line_keys` gains one count.
     /// Idempotent by `message_id` — returns `false` (and writes nothing) when it was learned before.
     pub fn learn_mail_boilerplate(

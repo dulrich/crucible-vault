@@ -21,7 +21,10 @@
 //! 6. **Re-clean** (C, [`super::reconcile_backfill`]): `mail_recleaned_r2`,
 //!    `mail_clean_unchanged`, `mail_clean_conflict`, `mail_description_repaired`.
 //! 7. **Boilerplate** ([`super::reconcile_boilerplate`]): `bp_learned`, `bp_stripped`,
-//!    `bp_guarded`, `bp_conflict`.
+//!    `bp_guarded`, `bp_conflict`; per-publication RSS learning and tiers (WP-5):
+//!    `bp_rss_learned`, `bp_rss_folded`, `bp_lines_folded`, `bp_lines_stripped`,
+//!    `bp_lines_deleted`, `bp_notes_deleted`, `bp_lines_vetoed`, `bp_notes_vetoed`,
+//!    `bp_publications`, `bp_label_unknown`.
 //! 8. **Mail↔RSS merge** (E, [`super::reconcile_repair`]): `dup_merged`, `dup_marked`,
 //!    `dup_other`, `dup_distinct`, `dup_conflict`.
 //! 9. **Publication** (F, [`super::reconcile_repair`]): `publication_backfilled`,

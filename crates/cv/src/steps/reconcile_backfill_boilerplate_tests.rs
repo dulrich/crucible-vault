@@ -165,3 +165,169 @@ fn reconcile_drops_semicolon_free_css_and_recomputes_the_css_description() {
     let again = w.reconcile(false);
     assert_eq!(n(&again, "mail_recleaned_r2"), 0);
 }
+
+// ---- per-publication learning, RSS and label tiers (plan intake-removals-sources-rescan WP-5) --
+
+const FEED: &str = "https://feed.example/feed";
+const BLOG: &str = "[[blog]]\nname = \"Feed Pub\"\nlink = \"https://feed.example/feed\"\n";
+const RSS_FOOT1: &str = "Thanks for reading Feed Pub, subscribe for more.";
+const RSS_FOOT2: &str = "Share this post with a friend today.";
+
+fn label(publication: &str, line: &str, verdict: &str) -> cv_state::RemovalLabel {
+    cv_state::RemovalLabel {
+        note_id: 1,
+        publication: publication.into(),
+        kind: "footer".into(),
+        verdict: verdict.into(),
+        origin: "fold".into(),
+        line: line.into(),
+        line_key: cv_ingest::boilerplate::line_key(line),
+        at_ms: 1,
+    }
+}
+
+fn add_labels(w: &World, rows: &[cv_state::RemovalLabel]) {
+    w.env
+        .state
+        .lock()
+        .unwrap()
+        .insert_removal_labels(rows)
+        .unwrap();
+}
+
+fn rss_note(i: usize, top: bool) -> String {
+    let top = if top {
+        "%% cv-enrich %%\n> [!summary]\n> Thanks for reading Feed Pub, subscribe for more.\n\n%% /cv-enrich %%\n\n"
+    } else {
+        ""
+    };
+    format!(
+        "---\ntitle: \"P{i}\"\npublication: \"Feed Pub\"\npost-id: \"p{i}\"\n---\n{top}Post {i} opening paragraph words.\n\nPost {i} second paragraph words.\n\nPost {i} third paragraph words.\n\nPost {i} fourth paragraph words.\n\n{RSS_FOOT1}\n\n{RSS_FOOT2}\n"
+    )
+}
+
+/// `n` RSS notes under `Blogs/` with their `blog` rows (note 0 carries an enriched top block).
+fn rss_world(n: usize) -> World {
+    let files: Vec<(String, String)> = (0..n)
+        .map(|i| (format!("Blogs/p{i}.md"), rss_note(i, i == 0)))
+        .collect();
+    let refs: Vec<(&str, String)> = files.iter().map(|(p, t)| (p.as_str(), t.clone())).collect();
+    let mut w = world(&refs);
+    w.sources(BLOG);
+    for (i, (p, _)) in files.iter().enumerate() {
+        add_row(
+            &w,
+            "blog",
+            FEED,
+            &format!("p{i}"),
+            TrackerOutcome::Line,
+            Some(p),
+        );
+    }
+    w
+}
+
+#[test]
+fn reconcile_learns_rss_once_per_post_folds_recurring_footers_and_is_idempotent() {
+    let w = rss_world(4);
+    // A Keep label on one footer line for the publication: it stays in every body.
+    add_labels(&w, &[label("Feed Pub", RSS_FOOT2, "keep")]);
+    let o = w.reconcile(false);
+    assert_eq!(n(&o, "bp_rss_learned"), 4);
+    assert_eq!(n(&o, "bp_rss_folded"), 4);
+    assert_eq!(n(&o, "bp_lines_folded"), 4);
+    assert_eq!(n(&o, "bp_lines_vetoed"), 4);
+    assert_eq!(n(&o, "bp_publications"), 1);
+    assert_eq!(n(&o, "bp_label_unknown"), 0);
+    for i in 0..4 {
+        let t = w.env.read(&format!("Blogs/p{i}.md")).unwrap();
+        let g = cv_ingest::enrich::fold_groups(cv_note::FrontmatterDoc::new(t.as_str()).body());
+        assert_eq!(g.len(), 1, "{t}");
+        assert_eq!(g[0].kind, Some(cv_ingest::enrich::SpanKind::Footer));
+        assert_eq!(g[0].lines, [RSS_FOOT1]);
+        assert!(t.contains(&format!("\n{RSS_FOOT2}\n")), "{t}");
+        assert!(t.starts_with(&format!(
+            "---\ntitle: \"P{i}\"\npublication: \"Feed Pub\"\n"
+        )));
+    }
+    // The generated top block (which quotes the footer) is never learned or moved.
+    let t0 = w.env.read("Blogs/p0.md").unwrap();
+    assert!(t0.contains("%% cv-enrich %%\n> [!summary]\n> Thanks for reading"));
+    // Re-run: nothing learned again, nothing written.
+    let o = w.reconcile(false);
+    assert_eq!((n(&o, "bp_rss_learned"), n(&o, "bp_rss_folded")), (0, 0));
+    assert_eq!(w.env.read("Blogs/p0.md").unwrap(), t0);
+}
+
+#[test]
+fn rss_capture_learns_once_and_folds_from_the_third_post_unless_kept() {
+    let w = rss_world(0);
+    let ctx = w.env.ctx();
+    let cap = |i: usize| {
+        crate::steps::reconcile_boilerplate::learn_and_fold_rss(
+            &ctx,
+            "Feed Pub",
+            "Feed Pub",
+            &format!("p{i}"),
+            &rss_note(i, false),
+        )
+        .unwrap()
+    };
+    assert_eq!(cap(0), rss_note(0, false));
+    assert_eq!(cap(1), rss_note(1, false));
+    // The same post again is not learned twice: still 2 posts, nothing folded.
+    assert_eq!(cap(1), rss_note(1, false));
+    let third = cap(2);
+    assert!(
+        third.contains("> [!removed]-") && third.contains("kind=footer"),
+        "{third}"
+    );
+    // Keep label: the line survives a capture that would fold it.
+    add_labels(
+        &w,
+        &[
+            label("Feed Pub", RSS_FOOT1, "keep"),
+            label("Feed Pub", RSS_FOOT2, "keep"),
+        ],
+    );
+    assert_eq!(cap(3), rss_note(3, false));
+}
+
+#[test]
+fn mail_capture_keeps_a_keep_labelled_footer_line_and_strips_the_rest() {
+    let mut w = world(&[]);
+    w.sources(HEATMAP);
+    add_labels(&w, &[label("Newsbit", FOOT1, "keep")]);
+    w.put(
+        "new/m1",
+        &bp_eml(
+            "m1@plain.example",
+            "hello@plain.example",
+            "First",
+            14,
+            "Alpha",
+        ),
+    );
+    w.put(
+        "new/m2",
+        &bp_eml(
+            "m2@plain.example",
+            "hello@plain.example",
+            "Second",
+            15,
+            "Beta",
+        ),
+    );
+    w.track();
+    let notes = [
+        note_of(&w, "Newsbit", "m1@plain.example"),
+        note_of(&w, "Newsbit", "m2@plain.example"),
+    ];
+    assert!(notes.iter().all(|t| t.contains(FOOT1)), "{notes:?}");
+    assert_eq!(notes.iter().filter(|t| t.contains(FOOT2)).count(), 1);
+    let o = w.reconcile(false);
+    assert_eq!(n(&o, "bp_stripped"), 1);
+    assert!(n(&o, "bp_lines_vetoed") >= 1);
+    assert!(note_of(&w, "Newsbit", "m1@plain.example").contains(FOOT1));
+    assert!(!note_of(&w, "Newsbit", "m1@plain.example").contains(FOOT2));
+}

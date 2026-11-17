@@ -388,8 +388,16 @@ fn handle(
     // Per-sender boilerplate (plan round-10-feedback-todos WP-2): a matched newsletter learns
     // this message's pre-strip body once, then strips its anchored head/tail runs. Words and
     // completeness see the stripped body (boilerplate is not content). Unknown senders: neither.
-    let body_md = if nl.is_some() {
-        super::reconcile_boilerplate::learn_and_strip(ctx, &key, &post.message_id, &body_md)?
+    // Labels join on the publication value the note is written with (plan
+    // intake-removals-sources-rescan WP-5).
+    let body_md = if let Some(p) = nl {
+        super::reconcile_boilerplate::learn_and_strip(
+            ctx,
+            &key,
+            p.publication(),
+            &post.message_id,
+            &body_md,
+        )?
     } else {
         body_md
     };

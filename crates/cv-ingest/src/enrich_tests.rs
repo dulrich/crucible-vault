@@ -731,3 +731,68 @@ fn malformed_folds_are_total() {
         let _ = trim_lines(s, 0, 0);
     }
 }
+
+/// WP-5: `fold_ranges` writes byte-identical groups to `enrich`, appends to an existing fold, and
+/// round-trips through `fold_groups` + `resolve_groups` (Keep restores at the anchor, Delete drops).
+#[test]
+fn fold_ranges_matches_enrich_and_round_trips() {
+    // (body, ranges) mirroring round_trip_cases 0, 1, 2, 4.
+    type Case = (&'static str, Vec<(usize, usize, SpanKind)>, Vec<Span>);
+    let cases: Vec<Case> = vec![
+        (
+            round_trip_cases()[0].0,
+            vec![(0, 0, SpanKind::Sponsor)],
+            round_trip_cases()[0].1.clone(),
+        ),
+        (
+            round_trip_cases()[1].0,
+            vec![(3, 3, SpanKind::Chrome)],
+            round_trip_cases()[1].1.clone(),
+        ),
+        (
+            round_trip_cases()[2].0,
+            vec![(5, 6, SpanKind::Cta)],
+            round_trip_cases()[2].1.clone(),
+        ),
+        (
+            round_trip_cases()[4].0,
+            vec![(3, 4, SpanKind::Sponsor)],
+            round_trip_cases()[4].1.clone(),
+        ),
+    ];
+    for (body, ranges, spans) in cases {
+        let ours = fold_ranges(body, &ranges).unwrap();
+        assert_eq!(ours, fold_only(body, spans), "body:\n{body}");
+        let g = fold_groups(&ours);
+        assert_eq!(g.len(), ranges.len());
+        assert!(g.iter().all(|g| g.anchored));
+        let k = resolve_groups(&ours, &GroupTarget::All, Verdict::Keep).unwrap();
+        assert_eq!(k.text, body);
+        let d = resolve_groups(&ours, &GroupTarget::All, Verdict::Delete).unwrap();
+        assert!(!d.text.contains("[!removed]"));
+    }
+    // An enriched note's fold gains a footer group; Keep of that group restores it in place.
+    let body = "Sponsored by Acme.\n\nReal one.\nReal two.\nReal three.\nReal four.\n\nFooter a line\nFooter b line\n";
+    let first = fold_only(body, round_trip_cases()[0].1.clone());
+    let lines: Vec<&str> = first.split('\n').collect();
+    let a = lines.iter().position(|l| *l == "Footer a line").unwrap();
+    let both = fold_ranges(&first, &[(a, a + 1, SpanKind::Footer)]).unwrap();
+    assert_eq!(both.matches("> [!removed]-").count(), 1, "{both:?}");
+    let g = fold_groups(&both);
+    assert_eq!(g.len(), 2);
+    assert_eq!(g[1].kind, Some(SpanKind::Footer));
+    let k = resolve_groups(&both, &GroupTarget::One(g[1].id.clone()), Verdict::Keep).unwrap();
+    assert_eq!(k.text, first);
+    assert_eq!(
+        resolve_groups(&both, &GroupTarget::All, Verdict::Keep)
+            .unwrap()
+            .text,
+        body
+    );
+    // A range touching the generated fold is refused.
+    let f = both.split('\n').position(|l| l == "> [!removed]-").unwrap();
+    assert_eq!(
+        fold_ranges(&both, &[(f, f, SpanKind::Footer)]),
+        Err(FoldError::Generated)
+    );
+}

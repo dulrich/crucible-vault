@@ -59,6 +59,31 @@ impl StateDb {
         Ok(rows.len())
     }
 
+    /// One publication's labelled line keys (plan WP-5's label tiers): `(keep, delete, unknown)`
+    /// — the distinct keys labelled `keep`, those labelled `delete`, and how many rows carry any
+    /// other verdict (ignored, never read as delete). A blank `publication` has no labels.
+    pub fn publication_labels(&self, publication: &str) -> Result<(Vec<u64>, Vec<u64>, usize)> {
+        let (mut keep, mut delete, mut unknown) = (Vec::new(), Vec::new(), 0);
+        if publication.trim().is_empty() {
+            return Ok((keep, delete, unknown));
+        }
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT DISTINCT line_key, verdict FROM removal_labels WHERE publication = ?1",
+        )?;
+        let rows = stmt.query_map(params![publication], |r| {
+            Ok((from_db(r.get(0)?), r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (k, v) = row?;
+            match v.as_str() {
+                "keep" => keep.push(k),
+                "delete" => delete.push(k),
+                _ => unknown += 1,
+            }
+        }
+        Ok((keep, delete, unknown))
+    }
+
     /// Every removal label, oldest first.
     pub fn removal_labels(&self) -> Result<Vec<RemovalLabel>> {
         read_all(self.conn())

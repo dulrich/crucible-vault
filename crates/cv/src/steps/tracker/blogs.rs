@@ -258,6 +258,15 @@ fn write_note(
         ev.complete,
         Some(row.publication()),
     );
+    // Per-publication recurring lines (plan intake-removals-sources-rescan WP-5): learned once
+    // per `post-id` from the body before enrich; recurring head/tail lines go to the fold.
+    let text = super::super::reconcile_boilerplate::learn_and_fold_rss(
+        ctx,
+        &row.name,
+        row.publication(),
+        &post.post_id,
+        &text,
+    )?;
     if !create_or_found(ctx, &path, text.into_bytes())? {
         return Ok((false, path));
     }
