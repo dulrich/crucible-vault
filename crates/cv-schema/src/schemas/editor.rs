@@ -463,7 +463,7 @@ pub static EDITOR_FILE: Record = Record {
         field(
             "nav_links",
             "Nav links",
-            "Links shown after Today on the note nav bar (every markdown note; day/month notes keep their period buttons). A link to a missing note creates it. Absent = one Publications page (_crucible/Publications.md, created with the works views); [] = none",
+            "Links shown after Today on the note nav bar (every markdown note; day/month notes keep their period buttons). A link to a missing note creates it. Absent = one Publications page (Publications.md in the vault app_folder, default _crucible; created with the works views); [] = none",
             Node::List(&Node::Record(&NAV_LINK)),
         ),
         field(
