@@ -11,11 +11,11 @@ use crate::store::StateDb;
 use rusqlite::params;
 
 /// The u64 line key as the stored signed integer (bit-preserving).
-fn to_db(k: u64) -> i64 {
+pub(crate) fn to_db(k: u64) -> i64 {
     i64::from_ne_bytes(k.to_ne_bytes())
 }
 
-fn from_db(k: i64) -> u64 {
+pub(crate) fn from_db(k: i64) -> u64 {
     u64::from_ne_bytes(k.to_ne_bytes())
 }
 

@@ -234,6 +234,24 @@ CREATE INDEX note_ids_retired ON note_ids(retired_ms) WHERE retired_ms IS NOT NU
 DROP TABLE path_lineage;
 DROP TABLE path_lineage_floor;
 ",
+    // v20 (plan intake-removals-sources-rescan WP-4): one row per line the user labelled while
+    // resolving a `[!removed]` fold group or trimming a selection. `publication` and `kind` are
+    // blank when unknown; `line`/`line_key` come from `cv_ingest::boilerplate`. The index serves
+    // the per-publication recurring-line learning (WP-5).
+    r"
+CREATE TABLE removal_labels (
+    id           INTEGER PRIMARY KEY,
+    note_id      INTEGER NOT NULL,
+    publication  TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    verdict      TEXT NOT NULL CHECK (verdict IN ('delete', 'keep')),
+    origin       TEXT NOT NULL CHECK (origin IN ('fold', 'selection')),
+    line         TEXT NOT NULL,
+    line_key     INTEGER NOT NULL,
+    at_ms        INTEGER NOT NULL
+);
+CREATE INDEX removal_labels_pub_key ON removal_labels(publication, line_key, verdict);
+",
 ];
 
 /// Highest schema version this build knows.

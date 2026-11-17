@@ -1,5 +1,5 @@
 //! Hand-rolled CLI dispatch (no clap is pinned): `cv daemon`, `cv uri <url>`, `cv status`,
-//! `cv signals …`, `cv jobs|intake|run …`, `cv --help`, `cv --version`.
+//! `cv signals …`, `cv jobs|intake|run …`, `cv removals export`, `cv --help`, `cv --version`.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -20,7 +20,12 @@ const USAGE_TEMPLATE: &str = "usage: cv <command>\n\n  cv daemon        run the 
 pub fn usage() -> String {
     USAGE_TEMPLATE.replace(
         "{JOBS}",
-        &format!("{}{}", crate::jobs::USAGE, crate::sources::USAGE),
+        &format!(
+            "{}{}{}",
+            crate::jobs::USAGE,
+            crate::sources::USAGE,
+            crate::removals::USAGE
+        ),
     )
 }
 
@@ -83,6 +88,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("intake") => crate::jobs::run(args),
         Some("run") => crate::jobs::run(args),
         Some("sources") => crate::sources::run(&args[1..]),
+        Some("removals") => crate::removals::run(&args[1..]),
         _ => {
             eprint!("{}", usage());
             2

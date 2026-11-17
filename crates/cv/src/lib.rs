@@ -10,6 +10,7 @@ pub mod jobs;
 pub mod lookup;
 pub mod media_audit;
 pub mod note_id;
+pub mod removals;
 pub mod runner;
 pub mod search_query;
 pub mod server;

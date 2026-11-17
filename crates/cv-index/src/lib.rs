@@ -34,6 +34,7 @@ pub use index::{Index, ReconcileCounts, file_times, rel_path};
 pub use queries::attachments::{
     OrphanRow, attachment_vault_paths, delete_preview, orphaned_attachments, referenced_elsewhere,
 };
+pub use queries::callouts::notes_with_callout;
 pub use query::{
     BlockRow, FileRow, FtsHit, LinkKind, LinkRow, PropRow, Query, Reader, TagCount, TagRow,
     TaskRow, prop_text, prop_texts,

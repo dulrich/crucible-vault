@@ -236,6 +236,7 @@ const STEPS: &[(&str, &str)] = &[
     ),
     ("removals_review", "mode = \"score\"\npath = \"x.md\""),
     ("intake_frontmatter_backfill", "dry_run = true"),
+    ("media_cleanup", ""),
 ];
 
 const ACTION_FULL: &str = r#"

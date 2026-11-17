@@ -91,6 +91,7 @@ pub static STEP: Union = Union {
         Variant::of(&FANFIC_TITLE, "Fanfic chapter title"),
         Variant::of(&REMOVALS_REVIEW, "Removals review"),
         Variant::of(&INTAKE_FRONTMATTER_BACKFILL, "Backfill intake frontmatter"),
+        Variant::of(&MEDIA_CLEANUP, "Removals media cleanup"),
     ],
 };
 

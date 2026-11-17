@@ -74,6 +74,20 @@ fn parse(t: &toml::Table) -> Result<Params, String> {
     Ok(Params { min_age_hours })
 }
 
+/// The orphan minimum age in ms: the first armed `tidy` step's `min_age_hours`, else the
+/// default (plan intake-removals-sources-rescan WP-4, the `media_cleanup` step).
+pub(crate) fn configured_min_age_ms(config: &ConfigSet) -> i64 {
+    let hours = config
+        .armed_actions()
+        .flat_map(|a| a.steps.iter())
+        .filter(|s| s.kind == StepKind::Tidy)
+        .find_map(|s| parse(&s.params).ok())
+        .map_or(DEFAULT_MIN_AGE_HOURS, |p| p.min_age_hours);
+    i64::try_from(hours)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(HOUR_MS)
+}
+
 /// The `tidy` step.
 pub(crate) struct Tidy;
 

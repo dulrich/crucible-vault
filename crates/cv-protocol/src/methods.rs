@@ -90,4 +90,6 @@ methods! {
     LocateNote = "locate_note" (LocateNoteParams) -> NoteLocation;
     ImageDescription = "image_description" (ImageDescriptionParams) -> ImageDescriptionResult;
     ProposeSource = "propose_source" (ProposeSourceParams) -> ProposeSourceResult;
+    ResolveRemovals = "resolve_removals" (ResolveRemovalsParams) -> ResolveRemovalsResult;
+    NextFoldNote = "next_fold_note" (NextFoldNoteParams) -> NextFoldNoteResult;
 }

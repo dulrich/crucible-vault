@@ -12,7 +12,11 @@ use super::testkit::example_config;
 fn example_config_arms_every_action() {
     let c = example_config();
     assert!(c.errors().is_empty(), "{:?}", c.errors());
-    assert_eq!(c.armed_actions().count(), 46);
+    assert_eq!(
+        c.armed_actions().count(),
+        47,
+        "46 + the built-in media cleanup"
+    );
     for id in [
         "period.open",
         "note.create",

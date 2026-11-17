@@ -22,8 +22,9 @@ pub mod vault;
 pub use config::{CONFIG_FILES, ConfigSet, StepValidator};
 pub use cv_protocol::{ParamKind, ParamSpec};
 pub use model::{
-    ATTACHMENTS_KEY, Action, INTAKE_IDENTITY_KEY, LaneChoice, OriginSel, PropSelector,
-    ResourceSpec, RunAction, Schedule, Selector, Starter, Step, StepKind,
+    ATTACHMENTS_KEY, Action, INTAKE_IDENTITY_KEY, LaneChoice, MEDIA_CLEANUP_ACTION, OriginSel,
+    PropSelector, ResourceSpec, RunAction, Schedule, Selector, Starter, Step, StepKind,
+    media_cleanup_action,
 };
 pub use pipelines::{PipelinesConfig, SourcesConfig};
 pub use vault::{

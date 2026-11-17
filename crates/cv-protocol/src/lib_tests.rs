@@ -769,6 +769,17 @@ fn method_markers_match_the_wire() {
         },
         s,
     );
+    check::<m::ResolveRemovals>(
+        ResolveRemovalsParams {
+            id: NoteId(1),
+            base_hash: "h".into(),
+            op: RemovalOp::All {
+                verdict: RemovalVerdict::Delete,
+            },
+        },
+        s,
+    );
+    check::<m::NextFoldNote>(NextFoldNoteParams::default(), s);
     assert_eq!(seen, METHOD_NAMES);
     // Unit methods carry no `params` key, exactly as the enum always serialised them.
     let v =
@@ -1144,5 +1155,71 @@ fn propose_source_wire_shapes() {
     assert_eq!(
         round_trip(&existing),
         json!({"match":"existing","name":"Example","missing":{"from":["a@example.com"]},"notes":[]})
+    );
+}
+
+/// Plan intake-removals-sources-rescan WP-4: both removal requests round-trip with their pinned
+/// wire shapes; unknown enum strings are refused, never defaulted.
+#[test]
+fn removal_requests_round_trip() {
+    let trim = Request::ResolveRemovals(ResolveRemovalsParams {
+        id: NoteId(3),
+        base_hash: "abc".into(),
+        op: RemovalOp::Trim {
+            first: 2,
+            last: 4,
+            kind: Some(RemovalKind::Cta),
+        },
+    });
+    let v = serde_json::to_value(&trim).expect("v");
+    assert_eq!(
+        v,
+        json!({"method": "resolve_removals", "params": {"id": 3, "base_hash": "abc",
+            "op": {"form": "trim", "first": 2, "last": 4, "kind": "cta"}}})
+    );
+    assert_eq!(serde_json::from_value::<Request>(v).expect("back"), trim);
+    let group = json!({"method": "resolve_removals", "params": {"id": 3, "base_hash": "abc",
+        "op": {"form": "group", "group": "g1", "verdict": "keep"}}});
+    let r: Request = serde_json::from_value(group.clone()).expect("group");
+    assert_eq!(serde_json::to_value(&r).expect("v"), group);
+    let bad = json!({"method": "resolve_removals", "params": {"id": 3, "base_hash": "abc",
+        "op": {"form": "group", "group": "g1", "verdict": "maybe"}}});
+    assert!(serde_json::from_value::<Request>(bad).is_err());
+    let next = Request::NextFoldNote(NextFoldNoteParams {
+        id: None,
+        path: Some("a.md".into()),
+    });
+    let v = serde_json::to_value(&next).expect("v");
+    assert_eq!(
+        v,
+        json!({"method": "next_fold_note", "params": {"path": "a.md"}})
+    );
+    assert_eq!(serde_json::from_value::<Request>(v).expect("back"), next);
+    let refused = ResolveRemovalsResult::Refused {
+        reason: RemovalRefusal::StaleHash,
+        current_hash: Some("x".into()),
+    };
+    assert_eq!(
+        round_trip(&refused),
+        json!({"outcome": "refused", "reason": "stale_hash", "current_hash": "x"})
+    );
+    let applied = ResolveRemovalsResult::Applied(RemovalsApplied {
+        hash: "h".into(),
+        path: "a.md".into(),
+        groups: 1,
+        media_queued: 2,
+        cleanup_job: Some("j1".into()),
+        ..RemovalsApplied::default()
+    });
+    let wire = round_trip(&applied);
+    assert_eq!(wire["outcome"], "applied");
+    assert_eq!(
+        (wire["media_queued"].clone(), wire["cleanup_job"].clone()),
+        (json!(2), json!("j1"))
+    );
+    assert!(wire.get("cleanup_failed").is_none());
+    assert_eq!(
+        round_trip(&NextFoldNoteResult { path: None }),
+        json!({"path": null})
     );
 }

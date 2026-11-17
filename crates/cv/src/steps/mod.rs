@@ -33,6 +33,7 @@
 //! | `FanficTitle` | [`fanfic_title`] | round-23-daemon-memory-mail-enrich-fanfic WP-5 |
 //! | `RemovalsReview` | [`removals_review`] | round-23-daemon-memory-mail-enrich-fanfic WP-6 |
 //! | `IntakeFrontmatterBackfill` | [`intake_frontmatter_backfill`] | sources-publication-model WP-4 |
+//! | `MediaCleanup` | [`media_cleanup`] | intake-removals-sources-rescan WP-4 |
 //!
 //! A module's `run` runs on a blocking thread inside a claimed job (I3 holds for the job's
 //! resource keys). It reads with [`StepCtx::read`] (content + hash) and mutates **only** through
@@ -92,6 +93,7 @@ mod mail_tests;
 pub mod materialize;
 #[cfg(test)]
 mod materialize_tests;
+pub mod media_cleanup;
 pub(crate) mod metadata;
 pub mod params;
 pub mod reconcile;
@@ -681,6 +683,7 @@ step_modules! {
     FanficTitle => fanfic_title::FanficTitle,
     RemovalsReview => removals_review::RemovalsReview,
     IntakeFrontmatterBackfill => intake_frontmatter_backfill::IntakeFrontmatterBackfill,
+    MediaCleanup => media_cleanup::MediaCleanup,
     RunAction => RunActionStep,
 }
 

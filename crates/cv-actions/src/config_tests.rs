@@ -116,7 +116,11 @@ fn good_then_bad_keeps_old_actions_and_reports() {
     let mut c = ConfigSet::new();
     c.reload(&files(GOOD), &ok);
     assert!(c.errors().is_empty(), "{:?}", c.errors());
-    assert_eq!(c.armed_actions().count(), 2);
+    assert_eq!(
+        c.armed_actions().count(),
+        3,
+        "2 + the built-in media cleanup"
+    );
     let a = c.armed("a").unwrap();
     assert_eq!(a.params[0].kind, ParamKind::Text);
     assert!(!a.durable);
@@ -126,7 +130,11 @@ fn good_then_bad_keeps_old_actions_and_reports() {
     let errs = c.errors();
     assert_eq!(errs.len(), 1);
     assert!(errs[0].starts_with("actions.toml:"), "{errs:?}");
-    assert_eq!(c.armed_actions().count(), 2, "last valid version kept");
+    assert_eq!(
+        c.armed_actions().count(),
+        3,
+        "last valid version kept (+ built-in)"
+    );
     // A parseable file with one invalid entry disarms exactly that action.
     c.reload(
         &files(&format!("{GOOD}\n[[action]]\nid = \"c\"\nbogus = 1\n")),
@@ -138,7 +146,7 @@ fn good_then_bad_keeps_old_actions_and_reports() {
     assert!(c.armed("a").is_some());
     // Missing file → empty.
     c.reload(&BTreeMap::new(), &ok);
-    assert_eq!(c.armed_actions().count(), 0);
+    assert_eq!(c.armed_actions().count(), 1, "only the built-in");
     assert!(c.errors().is_empty());
 }
 
@@ -401,4 +409,28 @@ fn in_works_resolves_record_then_kind_then_false() {
     // A malformed kind `works` is an error when consulted, never false; the record wins first.
     assert!(resolve_in_works(&kinds, &p(Some("bad"), None)).is_err());
     assert!(r(Some("bad"), Some(true)));
+}
+
+/// Plan intake-removals-sources-rescan WP-4: the built-in media cleanup action is always armed
+/// (no user config needed); a user action under its reserved id is refused and the built-in wins.
+#[test]
+fn reserved_media_cleanup_id_is_builtin_and_refused_for_users() {
+    let mut c = ConfigSet::new();
+    c.reload(&files(GOOD), &ok);
+    assert!(c.errors().is_empty(), "{:?}", c.errors());
+    let b = c.armed(MEDIA_CLEANUP_ACTION).unwrap();
+    assert_eq!(b, &crate::model::media_cleanup_action());
+    assert!(!b.has_command_starter());
+    c.reload(
+        &files(&format!(
+            "[[action]]\nid = \"{MEDIA_CLEANUP_ACTION}\"\n[[action.steps]]\ntype = \"guard\"\n"
+        )),
+        &ok,
+    );
+    assert_eq!(c.errors().len(), 1, "{:?}", c.errors());
+    assert!(c.errors()[0].contains("reserved"), "{:?}", c.errors());
+    assert_eq!(
+        c.armed(MEDIA_CLEANUP_ACTION).unwrap(),
+        &crate::model::media_cleanup_action()
+    );
 }

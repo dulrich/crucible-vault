@@ -335,12 +335,63 @@ fn v18_database_migrates_to_v19_without_the_path_history_tables() {
         .collect()
     };
     assert_eq!(tables(&c).len(), 2, "the v18 database still has both");
-    assert_eq!(migrate::migrate(&mut c).unwrap(), 19);
+    assert_eq!(migrate::migrate(&mut c).unwrap(), migrate::latest_version());
     assert!(tables(&c).is_empty(), "v19 drops both path-history tables");
     let ids: i64 = c
         .query_row("SELECT COUNT(*) FROM note_ids", [], |r| r.get(0))
         .unwrap();
     assert_eq!(ids, 1, "note-id rows survive");
+}
+
+/// Plan intake-removals-sources-rescan WP-4: a v19 database migrates to v20 and gains the
+/// `removal_labels` table; a fresh database lands on v20 with it too.
+#[test]
+fn v19_database_migrates_to_v20_with_removal_labels() {
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(migrate::BASELINE).unwrap();
+    c.execute_batch(migrate::MIGRATIONS[0]).unwrap();
+    c.execute_batch(migrate::MIGRATIONS[1]).unwrap();
+    c.pragma_update(None, "user_version", 19).unwrap();
+    assert_eq!(migrate::migrate(&mut c).unwrap(), 20);
+    let n: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('removal_labels', 'removal_labels_pub_key')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("state.db");
+    let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 20);
+    let row = |verdict: &str, line: &str| crate::RemovalLabel {
+        note_id: 7,
+        publication: "pub".into(),
+        kind: String::new(),
+        verdict: verdict.into(),
+        origin: "fold".into(),
+        line: line.into(),
+        line_key: u64::MAX - line.len() as u64,
+        at_ms: 5,
+    };
+    let rows = vec![row("delete", "a"), row("keep", "b")];
+    assert_eq!(s.insert_removal_labels(&rows).unwrap(), 2);
+    assert_eq!(s.removal_labels().unwrap(), rows);
+    assert!(
+        s.insert_removal_labels(&[row("maybe", "c")]).is_err(),
+        "CHECK refuses"
+    );
+    assert_eq!(
+        s.removal_labels().unwrap().len(),
+        2,
+        "failed batch wrote nothing"
+    );
+    assert_eq!(
+        StateReader::open(&p).unwrap().removal_labels().unwrap(),
+        rows
+    );
 }
 
 /// A database at the latest version opens with no write.

@@ -20,7 +20,8 @@ use cv_protocol::{ContextNeed, ParamKind, ParamSpec};
 use serde::Deserialize;
 
 use crate::model::{
-    Action, LaneChoice, OriginSel, ResourceSpec, Schedule, Selector, Starter, Step,
+    Action, LaneChoice, MEDIA_CLEANUP_ACTION, OriginSel, ResourceSpec, Schedule, Selector, Starter,
+    Step,
 };
 use crate::pipelines::{PipelinesConfig, Publication, SourcesConfig};
 use crate::vault::VaultConfig;
@@ -330,6 +331,16 @@ impl ConfigSet {
                 },
             }
         }
+        // The built-in removals media cleanup (plan intake-removals-sources-rescan WP-4): a user
+        // action under the reserved id is refused, the built-in always wins.
+        let builtin = MEDIA_CLEANUP_ACTION;
+        if self.actions.contains_key(builtin) || self.disarmed.remove(builtin).is_some() {
+            self.entry_errors.push(format!(
+                "actions.toml: action id {builtin:?} is reserved for a built-in action"
+            ));
+        }
+        self.actions
+            .insert(builtin.to_owned(), crate::model::media_cleanup_action());
         self.apply_schedules();
         // Structural disarms, then step validation (which may consult the whole set).
         let ids: Vec<String> = self.actions.keys().cloned().collect();

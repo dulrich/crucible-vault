@@ -49,6 +49,7 @@ mod notes;
 mod propose;
 mod queue;
 mod read_sync;
+mod removals;
 pub(crate) mod trash;
 
 pub(crate) use background::clear_stale_socket;
@@ -538,6 +539,10 @@ impl Shared {
                 reply::<m::ImageDescription>(self.image_description(p).await)
             }
             Request::ProposeSource(p) => reply::<m::ProposeSource>(self.propose_source(p).await),
+            Request::ResolveRemovals(p) => {
+                reply::<m::ResolveRemovals>(self.resolve_removals(p).await)
+            }
+            Request::NextFoldNote(p) => reply::<m::NextFoldNote>(self.next_fold_note(p).await),
         }
     }
 }

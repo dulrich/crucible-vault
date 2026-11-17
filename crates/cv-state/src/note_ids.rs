@@ -300,7 +300,10 @@ mod tests {
         }
         let a = {
             let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
-            assert_eq!(s.schema_version().unwrap(), 19);
+            assert_eq!(
+                s.schema_version().unwrap(),
+                crate::migrate::latest_version()
+            );
             s.note_id_bind("a.md").unwrap()
         };
         let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();

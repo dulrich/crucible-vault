@@ -11,6 +11,7 @@ mod enums;
 mod jobs;
 pub mod methods;
 mod note;
+mod removals;
 pub use enums::{
     BreakerState, ContextNeed, FailureKind, Lane, TrackerOutcome, TrashLocation, TrashReason,
 };
@@ -19,6 +20,10 @@ pub use methods::{METHOD_NAMES, Method};
 pub use note::{
     BindNoteParams, BindNoteResult, ChangeKind, FileChange, LocateNoteParams, NoteId, NoteLocation,
     Origin, file_changed,
+};
+pub use removals::{
+    NextFoldNoteParams, NextFoldNoteResult, RemovalKind, RemovalOp, RemovalRefusal, RemovalVerdict,
+    RemovalsApplied, ResolveRemovalsParams, ResolveRemovalsResult,
 };
 
 /// Protocol version exchanged in `hello`; a mismatch is refused, never degraded.
@@ -201,6 +206,13 @@ pub enum Request {
     /// nothing enqueued. A path with no note is `NOT_FOUND`. An old daemon answers
     /// `METHOD_NOT_FOUND`, which the editor reports as "restart the daemon".
     ProposeSource(ProposeSourceParams),
+    /// Resolves `[!removed]` fold groups or trims a body line range of the note `id` (plan
+    /// intake-removals-sources-rescan WP-4) → [`ResolveRemovalsResult`]; a refusal is a result,
+    /// not an error. An old daemon answers `METHOD_NOT_FOUND`.
+    ResolveRemovals(ResolveRemovalsParams),
+    /// The next note (path order, wrapping) that still has a fold (WP-4) →
+    /// [`NextFoldNoteResult`]. An old daemon answers `METHOD_NOT_FOUND`.
+    NextFoldNote(NextFoldNoteParams),
 }
 
 /// `propose_source` params.

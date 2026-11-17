@@ -218,6 +218,45 @@ step_kinds! {
     RemovalsReview = "removals_review", true, false;
     /// Backfills `read: false` and `publication` on existing intake notes (plan `sources-publication-model` WP-4).
     IntakeFrontmatterBackfill = "intake_frontmatter_backfill", true, false;
+    /// Trashes the orphaned managed media of a resolved removal (plan
+    /// `intake-removals-sources-rescan` WP-4). Built-in only: the step of the reserved
+    /// [`MEDIA_CLEANUP_ACTION`]. It takes no step params; a user action naming it loads but is
+    /// harmless: a run without the `paths` job param fails without touching anything, and a
+    /// path that is not a managed media name (`…_MD5.<media ext>`) or lies under `.trash/` is
+    /// skipped, so only old, unlinked managed media can ever be trashed.
+    MediaCleanup = "media_cleanup", true, false;
+}
+
+/// The reserved id of the built-in action the daemon enqueues after `resolve_removals` (plan
+/// `intake-removals-sources-rescan` WP-4): one background `media_cleanup` step, injected into
+/// every [`crate::ConfigSet`]; a user action with this id is refused.
+pub const MEDIA_CLEANUP_ACTION: &str = "removals-media-cleanup";
+
+/// The built-in [`MEDIA_CLEANUP_ACTION`]: background lane, no starters (never in the palette,
+/// never scheduled), no note key; the step's intrinsic [`ATTACHMENTS_KEY`] serializes it.
+#[must_use]
+pub fn media_cleanup_action() -> Action {
+    Action {
+        id: MEDIA_CLEANUP_ACTION.into(),
+        label: MEDIA_CLEANUP_ACTION.into(),
+        group: None,
+        keys: Vec::new(),
+        params: Vec::new(),
+        needs: Vec::new(),
+        lane: LaneChoice::Background,
+        durable: true,
+        hold: false,
+        fast: false,
+        steps: vec![Step {
+            kind: StepKind::MediaCleanup,
+            params: toml::Table::new(),
+        }],
+        starters: Vec::new(),
+        resources: ResourceSpec {
+            note: false,
+            keys: Vec::new(),
+        },
+    }
 }
 
 /// The shared queue resource key of every supersede-engine caller (plan auto-intake-sprint WP-3):
@@ -245,7 +284,7 @@ impl StepKind {
     pub fn intrinsic_resource_keys(self) -> &'static [&'static str] {
         match self {
             StepKind::TrackBlogs | StepKind::TrackMail => &[ATTACHMENTS_KEY, INTAKE_IDENTITY_KEY],
-            StepKind::Localize | StepKind::Tidy => &[ATTACHMENTS_KEY],
+            StepKind::Localize | StepKind::Tidy | StepKind::MediaCleanup => &[ATTACHMENTS_KEY],
             StepKind::AutoFile | StepKind::IntakeReconcile | StepKind::IntakeFinalize => {
                 &[INTAKE_IDENTITY_KEY]
             }

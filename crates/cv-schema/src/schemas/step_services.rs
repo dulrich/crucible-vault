@@ -492,6 +492,14 @@ pub static INTAKE_FRONTMATTER_BACKFILL: Record = Record {
     summary: None,
 };
 
+/// `media_cleanup` — `crates/cv/src/steps/media_cleanup.rs` (no step params; the step of the built-in `removals-media-cleanup` action, plan `intake-removals-sources-rescan` WP-4, which reads the `paths` job param).
+pub static MEDIA_CLEANUP: Record = Record {
+    name: "media_cleanup",
+    fields: &[],
+    rules: &[],
+    summary: None,
+};
+
 /// `removals_review` — `crates/cv/src/steps/removals_review.rs` (`parse`; plan `round-23-daemon-memory-mail-enrich-fanfic` WP-6).
 pub static REMOVALS_REVIEW: Record = Record {
     name: "removals_review",
