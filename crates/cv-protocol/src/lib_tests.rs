@@ -743,7 +743,13 @@ fn method_markers_match_the_wire() {
         s,
     );
     check::<m::MemoryReport>(MemoryReport::default(), s);
-    check::<m::ReconcileIntake>(ReconcileIntakeParams { dry_run: true }, s);
+    check::<m::ReconcileIntake>(
+        ReconcileIntakeParams {
+            dry_run: true,
+            sources_only: true,
+        },
+        s,
+    );
     check::<m::BindNote>(
         BindNoteParams {
             path: "a.md".into(),

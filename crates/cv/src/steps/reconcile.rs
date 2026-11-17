@@ -25,7 +25,7 @@
 //! 8. **Mail↔RSS merge** (E, [`super::reconcile_repair`]): `dup_merged`, `dup_marked`,
 //!    `dup_other`, `dup_distinct`, `dup_conflict`.
 //! 9. **Publication** (F, [`super::reconcile_repair`]): `publication_backfilled`,
-//!    `publication_no_row`, `publication_conflict`.
+//!    `publication_overwritten`, `publication_no_row`, `publication_conflict`.
 //!
 //! A job param `only = "sources"` (plan `sources-publication-model` WP-4) runs only phase 5's
 //! re-match (with its leading mail-key rename) and phase 9 — no link, probe, tick, re-clean,

@@ -295,6 +295,10 @@ pub struct ReconcileIntakeParams {
     /// Compute every count but write nothing.
     #[serde(default)]
     pub dry_run: bool,
+    /// Run only the sources re-match (the `only = "sources"` job param); the rest of the
+    /// reconcile (link, probe, tick, re-clean, boilerplate) is skipped.
+    #[serde(default)]
+    pub sources_only: bool,
 }
 
 /// `reconcile_intake` result: the job's terminal (or, after the bounded wait, last) state and

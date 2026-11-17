@@ -17,6 +17,10 @@ pub enum Command {
     IntakeReconcile {
         dry_run: bool,
     },
+    /// `cv sources rescan [--dry-run]`: the sources-only reconcile.
+    SourcesRescan {
+        dry_run: bool,
+    },
     Run {
         action_id: String,
         note: Option<String>,
@@ -144,6 +148,8 @@ pub fn parse(args: &[String]) -> Option<Command> {
         }
         ["intake", "reconcile"] => Some(Command::IntakeReconcile { dry_run: false }),
         ["intake", "reconcile", "--dry-run"] => Some(Command::IntakeReconcile { dry_run: true }),
+        ["sources", "rescan"] => Some(Command::SourcesRescan { dry_run: false }),
+        ["sources", "rescan", "--dry-run"] => Some(Command::SourcesRescan { dry_run: true }),
         ["run", action, rest @ ..] if !action.starts_with('-') => {
             let note = match rest {
                 [] => None,

@@ -23,7 +23,8 @@
 //!   pointing at a missing note, and a rerun finishes the pair.
 //! - **F. Publication** ([`publication`]): each note linked from a tracker row (`note_path`) with
 //!   no `publication` gets its source row's (`short`, else name; `channel` for YouTube),
-//!   inserted after `author`, never overwriting (`publication_backfilled`). A note none of whose
+//!   inserted after `author` (`publication_backfilled`); a `sources.toml` prefix that starts the
+//!   note's `source` instead decides alone and replaces any other value (`publication_overwritten`). A note none of whose
 //!   rows maps to a source row is `publication_no_row`; a lost CAS race `publication_conflict`.
 //!   Tracker rows never carry a `[[serial]]` source, so serial rows join separately (round 11
 //!   E1): an indexed note (outside `.trash/`) that matches a `[[serial]]` row by
@@ -55,8 +56,18 @@ pub(super) struct Counts {
     dup_distinct: u32,
     dup_conflict: u32,
     publication_backfilled: u32,
+    publication_overwritten: u32,
     publication_no_row: u32,
     publication_conflict: u32,
+}
+
+impl Counts {
+    fn count_publication(&mut self, fill: Fill) {
+        match fill {
+            Fill::Backfill => self.publication_backfilled += 1,
+            Fill::Overwrite => self.publication_overwritten += 1,
+        }
+    }
 }
 
 /// An RSS-origin note: `via: rss`, or `via: email` with no `message-id` (an RSS note a mail
@@ -279,38 +290,66 @@ pub(super) fn publication_of_row(ctx: &StepCtx<'_>, r: &TrackerItem) -> Option<S
     }
 }
 
-/// Notes (outside `.trash/`) whose indexed `source` and `author` match some work record (one
-/// with a prefix or author, the former `[[serial]]` rows):
-/// the index prefilter for phase F's serial half (the note's own frontmatter is re-checked).
-fn serial_candidates(
-    ctx: &StepCtx<'_>,
-    serial: &[cv_actions::pipelines::Publication],
-) -> Result<Vec<String>, StepError> {
-    if serial.is_empty() {
-        return Ok(Vec::new());
-    }
+/// Indexed notes (outside `.trash/`) that carry a `source` property: the index prefilter for
+/// phase F's source-driven half (a prefix match may overwrite; the note's own frontmatter is
+/// re-checked per note).
+fn source_candidates(ctx: &StepCtx<'_>) -> Result<Vec<String>, StepError> {
     let reader = ctx.index()?;
-    let q = reader.query();
-    let mut authors: HashMap<String, Vec<String>> = HashMap::new();
-    for r in q.md_props_with_key("author")? {
-        let a = authors.entry(r.path).or_default();
-        a.extend(cv_index::prop_texts(&r.value));
-    }
-    let mut out = Vec::new();
-    for r in q.md_props_with_key("source")? {
-        if r.path.starts_with(".trash/") {
-            continue;
+    Ok(reader
+        .query()
+        .md_props_with_key("source")?
+        .into_iter()
+        .map(|r| r.path)
+        .filter(|p| !p.starts_with(".trash/"))
+        .collect())
+}
+
+/// How phase F changes a note's `publication`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Fill {
+    /// The key was blank or absent.
+    Backfill,
+    /// A prefix match replaced a different non-blank value.
+    Overwrite,
+}
+
+/// The pure phase-F decision for one note: `None` (leave it), or the publication to write.
+/// A `sources.toml` prefix match on the note's `source` decides alone and replaces any other
+/// value; otherwise only a blank `publication` is filled, from the tracker row (`tracked`), else
+/// the work-record match. Malformed frontmatter is left alone.
+pub(super) fn decide_publication(
+    sources: &cv_actions::pipelines::SourcesConfig,
+    serial: &[cv_actions::pipelines::Publication],
+    doc: &FrontmatterDoc,
+    tracked: Option<&str>,
+) -> Option<(String, Fill)> {
+    let current = doc.get("publication").ok()?; // malformed frontmatter: skip
+    let blank = crate::supersede::publication_blank(doc);
+    let source = doc
+        .get("source")
+        .ok()
+        .flatten()
+        .map(|v| cv_note::js_text(&v))
+        .unwrap_or_default();
+    if let Some(rec) = sources.by_prefix(&source) {
+        let want = rec.publication();
+        if !blank && current.as_ref().map(cv_note::js_text).as_deref() == Some(want) {
+            return None;
         }
-        let a: Vec<&str> = authors
-            .get(&r.path)
-            .map(|v| v.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        let source = cv_index::prop_text(&r.value);
-        if serial.iter().any(|s| s.matches_note(&a, &source)) {
-            out.push(r.path);
-        }
+        let fill = if blank {
+            Fill::Backfill
+        } else {
+            Fill::Overwrite
+        };
+        return Some((want.to_owned(), fill));
     }
-    Ok(out)
+    if !blank {
+        return None;
+    }
+    tracked
+        .map(str::to_owned)
+        .or_else(|| serial_publication(serial, doc))
+        .map(|p| (p, Fill::Backfill))
 }
 
 /// The publication of the first work record (config order) the note matches.
@@ -341,50 +380,53 @@ pub(super) fn publication(
     let rows = ctx.state().tracker_items_with_note()?;
     let mut by_note: BTreeMap<String, Vec<TrackerItem>> = BTreeMap::new();
     for r in rows {
-        if let Some(p) = r.note_path.clone() {
+        if let Some(p) = r.note_path.clone()
+            && !p.starts_with(".trash/")
+        {
             by_note.entry(p).or_default().push(r);
         }
     }
+    let cfg = ctx.config;
+    let sources = cfg.sources();
     // Round 11 E1: notes matching a `[[serial]]` row join the candidates (each note once).
-    let serial: Vec<_> = ctx
-        .config
-        .sources()
+    let serial: Vec<_> = sources
         .publications()
         .iter()
         .filter(|p| p.is_work())
         .cloned()
         .collect();
     let mut paths: BTreeSet<String> = by_note.keys().cloned().collect();
-    paths.extend(serial_candidates(ctx, &serial)?);
+    paths.extend(source_candidates(ctx)?);
     for path in paths {
         let Some(text) = read_text(ctx, &path)? else {
             continue;
         };
         let doc = FrontmatterDoc::new(text.as_str());
-        if !crate::supersede::publication_blank(&doc) {
-            continue;
-        }
         let rows = by_note.get(&path);
         let tracked = rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r)));
-        let Some(p) = tracked.or_else(|| serial_publication(&serial, &doc)) else {
-            if rows.is_some() {
+        let Some((_, fill)) = decide_publication(sources, &serial, &doc, tracked.as_deref()) else {
+            if rows.is_some() && crate::supersede::publication_blank(&doc) {
                 c.publication_no_row += 1;
             }
             continue;
         };
         if sh.dry {
-            c.publication_backfilled += 1;
+            c.count_publication(fill);
             continue;
         }
+        let mut done = fill;
         match ctx.modify(&path, |old| {
-            let mut d = FrontmatterDoc::new(old);
-            if !crate::supersede::publication_blank(&d) {
+            let d = FrontmatterDoc::new(old);
+            let Some((p, fill)) = decide_publication(sources, &serial, &d, tracked.as_deref())
+            else {
                 return Ok(None);
-            }
-            d.insert_after("author", "publication", &JsValue::Str(p.clone()))?;
+            };
+            done = fill;
+            let mut d = d;
+            d.insert_after("author", "publication", &JsValue::Str(p))?;
             Ok(Some(d.into_text()))
         }) {
-            Ok(Some(_)) => c.publication_backfilled += 1,
+            Ok(Some(_)) => c.count_publication(done),
             Ok(None) => {}
             Err(e) if e.is_conflict() => c.publication_conflict += 1,
             Err(e) => return Err(e),

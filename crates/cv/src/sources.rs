@@ -12,14 +12,25 @@ use cv_schema::toml_edit::{DocumentMut, Item};
 use crate::config::Config;
 
 /// Usage line (also appended to the top-level `cv --help`).
-pub const USAGE: &str = "  cv sources migrate [--dry-run]   rewrite sources.toml legacy rows as [[publication]] records (no daemon needed); prints counts as key=value\n";
+pub const USAGE: &str = "  cv sources migrate [--dry-run]   rewrite sources.toml legacy rows as [[publication]] records (no daemon needed); prints counts as key=value\n  cv sources rescan [--dry-run]    re-match every note against sources.toml (a prefix match overwrites `publication`) through the daemon; prints counts as key=value\n";
 
 /// The leading comment of a migrated file (replaces any generated-by header).
 pub const HEADER: &str =
     "# sources.toml: one [[publication]] per publication (written by `cv sources migrate`).\n";
 
-/// `cv sources …`; returns the exit code.
+/// `cv sources migrate|rescan …`; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
+    if args.first().is_some_and(|a| a == "rescan") {
+        let mut full = vec!["sources".to_owned()];
+        full.extend_from_slice(args);
+        return match crate::jobs::parse(&full) {
+            Some(_) => crate::jobs::run(&full),
+            None => {
+                eprint!("usage:\n{USAGE}");
+                2
+            }
+        };
+    }
     let dry_run = match args {
         [m] if m == "migrate" => false,
         [m, d] if m == "migrate" && d == "--dry-run" => true,

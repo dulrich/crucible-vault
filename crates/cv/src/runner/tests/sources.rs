@@ -89,3 +89,38 @@ fn a_config_without_the_action_enqueues_nothing() {
     r.reload_config_observed();
     assert!(queued(&f).is_empty());
 }
+
+/// Plan intake-removals-sources-rescan WP-2: a change observed while the re-match is running
+/// enqueues exactly one follow-up; further changes coalesce into it; no change, none.
+#[test]
+fn a_change_while_the_rematch_runs_enqueues_exactly_one_follow_up() {
+    let (f, r) = setup(ACTIONS);
+    put(&r, "sources.toml", ONE);
+    r.reload_config_observed();
+    let first = queued(&f);
+    assert_eq!(first.len(), 1);
+    // The runner claims it: it is now running and has read the config.
+    let claimed = f
+        .state
+        .lock()
+        .unwrap()
+        .claim(i64::MAX / 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, first[0].id);
+    // An unchanged reload adds nothing.
+    r.reload_config_observed();
+    assert_eq!(queued(&f).len(), 1);
+    // A change now schedules one follow-up, under its own key.
+    put(&r, "sources.toml", TWO);
+    r.reload_config_observed();
+    let jobs = queued(&f);
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().any(|j| j.dedupe_key.as_deref()
+        == Some("action:intake-reconcile::intake-reconcile:sources-next")
+        && j.status == cv_state::JobStatus::Queued));
+    // A further change coalesces into the queued follow-up.
+    put(&r, "sources.toml", ONE);
+    r.reload_config_observed();
+    assert_eq!(queued(&f).len(), 2);
+}

@@ -155,6 +155,10 @@ pub const REMATCH_ACTION: &str = "intake-reconcile";
 /// The job `dedupe_key` of the sources-only re-match; the action's resource key only serializes.
 pub const SOURCES_REMATCH_DEDUPE: &str = "intake-reconcile:sources";
 
+/// The dedupe key of the follow-up sources re-match enqueued while the first is already running
+/// (it read the config at its start): at most one such follow-up is queued at a time.
+pub const SOURCES_REMATCH_NEXT_DEDUPE: &str = "intake-reconcile:sources-next";
+
 /// A run to enqueue.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
@@ -427,7 +431,7 @@ impl Runner {
             tracing::debug!("sources changed; no `{REMATCH_ACTION}` action, re-match not enqueued");
             return;
         };
-        match self.enqueue(action, RunRequest::sources_rematch(action)) {
+        match self.inner.enqueue_rematch(action) {
             Ok(id) => tracing::info!(job = %id, "sources changed; re-match enqueued"),
             Err(e) => tracing::warn!(error = %e, "sources changed; re-match not enqueued"),
         }
@@ -525,6 +529,32 @@ impl Inner {
         let out = lock(&self.state)
             .enqueue(job, self.clock.now_ms())
             .map_err(|e| EnqueueError::State(e.to_string()))?;
+        self.enqueued(out)
+    }
+
+    /// The sources re-match for a changed `sources.toml`. A pending one under
+    /// [`SOURCES_REMATCH_DEDUPE`] that is still *queued* absorbs the change (it has not read the
+    /// config yet). One already running (or settled between the dedupe check and now) read the
+    /// config at its start, so the change enqueues exactly one follow-up under
+    /// [`SOURCES_REMATCH_NEXT_DEDUPE`]; further changes coalesce into that queued follow-up, and
+    /// once it runs a new change finds the base key free. Both share the step's resource key, so
+    /// they never overlap.
+    fn enqueue_rematch(&self, action: &Action) -> Result<String, EnqueueError> {
+        let job = self.new_job(action, RunRequest::sources_rematch(action))?;
+        let out = lock(&self.state)
+            .enqueue(job, self.clock.now_ms())
+            .map_err(|e| EnqueueError::State(e.to_string()))?;
+        if let EnqueueOutcome::Duplicate(id) = &out {
+            let queued = matches!(
+                lock(&self.state).job(id),
+                Ok(Some(j)) if j.status == cv_state::JobStatus::Queued
+            );
+            if !queued {
+                let mut next = RunRequest::sources_rematch(action);
+                next.dedupe_key = Some(SOURCES_REMATCH_NEXT_DEDUPE.to_owned());
+                return self.enqueue(action, next);
+            }
+        }
         self.enqueued(out)
     }
 

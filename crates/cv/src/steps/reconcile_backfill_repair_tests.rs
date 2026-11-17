@@ -284,15 +284,85 @@ fn serial_matched_note_without_a_tracker_row_gets_the_publication() {
     let c0 = w.env.read("Stories/c.md").unwrap();
     let o = w.reconcile(false);
     assert_eq!(n(&o, "publication_backfilled"), 1);
+    // A prefix match overwrites (plan intake-removals-sources-rescan WP-2): b held `Mine`.
+    assert_eq!(n(&o, "publication_overwritten"), 1);
     let a = w.env.read("Stories/a.md").unwrap();
     assert!(a.contains("  - \"[[Ann|A]]\"\npublication: Saga\n"), "{a}");
-    assert_eq!(w.env.read("Stories/b.md").unwrap(), b0, "never overwritten");
+    let b = w.env.read("Stories/b.md").unwrap();
+    assert!(
+        b.contains("publication: Saga\n") && !b.contains("Mine"),
+        "{b}"
+    );
     assert_eq!(
         w.env.read("Stories/c.md").unwrap(),
         c0,
         "prefix mismatch (a prefix decides alone, Decision 7)"
     );
+    let _ = b0;
     assert_eq!(n(&w.reconcile(false), "publication_backfilled"), 0);
+}
+
+const SAGA: &str = "[[publication]]\nname = \"The Saga\"\nshort = \"Saga\"\nprefix = [\"https://saga.example/\"]\n[[publication]]\nname = \"Hosty\"\nshort = \"Host\"\nhosts = [\"host.example\"]\n";
+
+fn saga_note(source: &str, publication: Option<&str>) -> String {
+    let p = publication.map_or(String::new(), |p| format!("publication: {p}\n"));
+    format!("---\ntitle: \"T\"\nsource: {source}\nauthor:\n  - Ann\n{p}---\n\nBody.\n")
+}
+
+/// Plan intake-removals-sources-rescan WP-2: a prefix match overwrites a different value and
+/// fills a blank one; a host-only match never overwrites; `.trash/` is untouched; dry run counts
+/// the same and writes nothing; a second run changes nothing.
+#[test]
+fn a_prefix_match_overwrites_and_other_matches_do_not() {
+    let mut w = world(&[
+        (
+            "S/over.md",
+            saga_note("https://saga.example/s/1", Some("Old")),
+        ),
+        (
+            "S/blank.md",
+            saga_note("https://saga.example/s/2", Some("\"\"")),
+        ),
+        ("S/absent.md", saga_note("https://saga.example/s/3", None)),
+        (
+            "S/same.md",
+            saga_note("https://saga.example/s/4", Some("Saga")),
+        ),
+        (
+            "S/host.md",
+            saga_note("https://host.example/p/1", Some("Mine")),
+        ),
+        (
+            ".trash/gone.md",
+            saga_note("https://saga.example/s/5", Some("Old")),
+        ),
+    ]);
+    w.sources(SAGA);
+    let before = |p: &str| w.env.read(p).unwrap();
+    let trash = || std::fs::read_to_string(w.env.vault().join(".trash/gone.md")).unwrap();
+    let (host0, trash0, same0) = (before("S/host.md"), trash(), before("S/same.md"));
+    let over0 = before("S/over.md");
+    let dry = w.reconcile(true);
+    assert_eq!(n(&dry, "publication_overwritten"), 1);
+    assert_eq!(n(&dry, "publication_backfilled"), 2);
+    assert_eq!(
+        w.env.read("S/over.md").unwrap(),
+        over0,
+        "dry run writes nothing"
+    );
+    let o = w.reconcile(false);
+    assert_eq!(repair_vars(&dry), repair_vars(&o));
+    for p in ["S/over.md", "S/blank.md", "S/absent.md"] {
+        let t = w.env.read(p).unwrap();
+        assert!(t.contains("publication: Saga\n"), "{p}: {t}");
+        assert_eq!(t.matches("publication").count(), 1, "{t}");
+    }
+    assert_eq!(w.env.read("S/host.md").unwrap(), host0);
+    assert_eq!(trash(), trash0);
+    assert_eq!(w.env.read("S/same.md").unwrap(), same0);
+    let again = w.reconcile(false);
+    assert_eq!(n(&again, "publication_overwritten"), 0);
+    assert_eq!(n(&again, "publication_backfilled"), 0);
 }
 
 #[test]

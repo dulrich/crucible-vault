@@ -297,6 +297,16 @@ impl SourcesConfig {
         })
     }
 
+    /// The first record (in order) with a non-blank prefix that starts the trimmed `source`:
+    /// step (a) of [`Self::by_note`].
+    #[must_use]
+    pub fn by_prefix(&self, source: &str) -> Option<&Publication> {
+        let src = source.trim();
+        self.folded
+            .iter()
+            .find(|p| p.prefixes().any(|pre| src.starts_with(pre)))
+    }
+
     /// The publication a note (its `author` entries and `source` URL) belongs to: a record whose
     /// non-blank prefix starts the trimmed source (author ignored), else one whose feed host or
     /// `hosts` entry is the source's host (`www.` ignored), else a prefix-less record whose
@@ -305,11 +315,7 @@ impl SourcesConfig {
     #[must_use]
     pub fn by_note(&self, authors: &[&str], source: &str) -> Option<&Publication> {
         let src = source.trim();
-        if let Some(p) = self
-            .folded
-            .iter()
-            .find(|p| p.prefixes().any(|pre| src.starts_with(pre)))
-        {
+        if let Some(p) = self.by_prefix(src) {
             return Some(p);
         }
         if let Some(host) = feed_host(src)

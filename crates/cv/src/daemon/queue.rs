@@ -175,6 +175,9 @@ impl Shared {
     ) -> Result<cv_protocol::ReconcileIntakeResult, RpcError> {
         let mut params = serde_json::Map::new();
         params.insert("dry_run".into(), Value::Bool(p.dry_run));
+        if p.sources_only {
+            params.insert("only".into(), Value::String("sources".into()));
+        }
         let started = crate::runner::run_action(
             self,
             self.runner_or_err()?,

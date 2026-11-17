@@ -42,6 +42,14 @@ fn parse_accepts_and_rejects() {
         Some(Command::IntakeReconcile { dry_run: true })
     );
     assert_eq!(
+        parse(&a(&["sources", "rescan", "--dry-run"])),
+        Some(Command::SourcesRescan { dry_run: true })
+    );
+    assert_eq!(
+        parse(&a(&["sources", "rescan"])),
+        Some(Command::SourcesRescan { dry_run: false })
+    );
+    assert_eq!(
         parse(&a(&["jobs", "retry", "j1"])),
         Some(Command::JobRetry("j1".into()))
     );

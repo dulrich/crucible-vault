@@ -119,7 +119,8 @@ fn call(config: &Config, cmd: &Command) -> Result<String> {
         Command::IntakeList(p) => {
             render_intake(&client.call::<methods::IntakeList>(p.clone()).map_err(e)?)
         }
-        Command::IntakeReconcile { dry_run } => reconcile(&client, *dry_run)?,
+        Command::IntakeReconcile { dry_run } => reconcile(&client, *dry_run, false)?,
+        Command::SourcesRescan { dry_run } => reconcile(&client, *dry_run, true)?,
         Command::Run { action_id, note } => {
             let r = client
                 .call::<methods::RunAction>(RunActionParams {
@@ -145,10 +146,13 @@ const RECONCILE_CALL_WAIT: std::time::Duration = std::time::Duration::from_secs(
 
 /// Runs the reconcile job through the daemon and renders its counts as `key=value` lines; a job
 /// that did not complete is an error (exit 1).
-fn reconcile(client: &Client, dry_run: bool) -> Result<String> {
+fn reconcile(client: &Client, dry_run: bool, sources_only: bool) -> Result<String> {
     let r = client
         .call_within::<methods::ReconcileIntake>(
-            cv_protocol::ReconcileIntakeParams { dry_run },
+            cv_protocol::ReconcileIntakeParams {
+                dry_run,
+                sources_only,
+            },
             RECONCILE_CALL_WAIT,
         )
         .map_err(|e| anyhow!("{e}"))?;
