@@ -146,6 +146,16 @@ impl App {
                 let lint_cfg = matches!(&m, SourceMsg::AutosaveDue { .. })
                     .then(|| self.auto_lint_cfg())
                     .flatten();
+                // Plan note-gone-restore-edges WP-1, case 3: Keep never writes over an open note
+                // that took a gone document's path.
+                if matches!(&m, SourceMsg::KeepMine(_))
+                    && let Some(p) = note.and_then(|id| self.gone_path_taken(id))
+                {
+                    self.status.set_error(format!(
+                        "another open note now sits at {p}: Keep would overwrite it (close discards)"
+                    ));
+                    return Task::none();
+                }
                 let Some(buf) = note.and_then(|id| self.docs.by_id_mut(id)) else {
                     return Task::none();
                 };

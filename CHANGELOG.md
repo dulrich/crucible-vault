@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Editor: a gone note also leaves the gone state when its file comes back through an event the daemon could not attach a note id to, and when Keep finds the path already taken by the restored file (it stays gone until the restore lands, then keeps its edits behind the changed-on-disk bar). When an already-open note is moved onto a gone note's path, a clean gone note's tabs switch to it; a gone note with unsaved edits stays gone, and Keep refuses with a status message instead of overwriting the other note.
+
 ## 1.1.3 — 2026-11-17
 
 ### Fixed

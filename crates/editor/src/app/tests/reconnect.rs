@@ -279,3 +279,32 @@ fn reconnect_restores_a_dirty_gone_note_behind_the_changed_bar() {
     assert_eq!(t.text(), "xbody");
     assert_eq!(t.conflict(), Some(&crate::source::Conflict::Changed(disk)));
 }
+
+/// Plan note-gone-restore-edges WP-1 (audit E1), daemon-down variant: an open note moved onto a
+/// clean gone document's path while the daemon was down; the reconnect resync follows the move
+/// and the gone document's tab moves onto it (one tab left).
+#[test]
+fn reconnect_moves_a_clean_gone_note_onto_the_open_note_moved_there() {
+    let (_tmp, d, mut app) = setup(&["r13/a.md", "r13/b.md"], 0);
+    let old = app.note_id("r13/a.md").expect("bound");
+    let b = app.note_id("r13/b.md").expect("bound");
+    let rx = d
+        .subscribe(&[crate::daemon::Topic::FileChanged])
+        .expect("sub");
+    d.delete("r13/a.md").expect("delete");
+    for n in rx.try_iter() {
+        let _ = app.send(Message::Status(StatusMsg::Notification(n)));
+    }
+    assert!(doc(&mut app, "r13/a.md").is_missing());
+    let _ = app.send(Message::Status(StatusMsg::Disconnected));
+    d.daemon_move("r13/b.md", "r13/a.md").expect("move");
+    let _ = app.send(Message::Status(StatusMsg::ReconnectDue));
+    assert!(app.docs.by_id(old).is_none(), "gone document absorbed");
+    assert_eq!(app.note_id("r13/a.md"), Some(b));
+    let notes: Vec<_> = app
+        .panes
+        .iter()
+        .flat_map(|(_, ps)| ps.tabs.iter().filter_map(|t| t.note()))
+        .collect();
+    assert_eq!(notes, [b], "one tab of the moved note");
+}

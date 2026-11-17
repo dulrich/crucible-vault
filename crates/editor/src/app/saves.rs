@@ -315,6 +315,10 @@ impl App {
             self.move_doc_path(id, &to);
         }
         let ok = matches!(outcome, crate::source::SaveOutcome::Saved(_));
+        // Plan note-gone-restore-edges WP-1, case 2: a file sits at the path (a real hash).
+        let occupied = matches!(&outcome, crate::source::SaveOutcome::Conflict(h)
+            if !crate::daemon::is_no_base(h))
+            && self.docs.by_id(id).is_some_and(|d| d.buffer.is_reviving());
         let result = self
             .docs
             .by_id_mut(id)
@@ -361,6 +365,13 @@ impl App {
         } else {
             Task::none()
         };
+        // Case 2: a gone document's revive answered `Conflict` (a file is back) restores onto
+        // the note at its path; the re-run below picks it up.
+        // Audit E2: it stays gone (never `Changed` on the retired id) until the restore lands.
+        if occupied && let Some(d) = self.docs.by_id_mut(id) {
+            d.buffer.mark_missing();
+            self.restore_after_save.insert(id);
+        }
         // Plan note-gone-restore WP-1 (audit E2): a restore deferred behind this save runs now
         // (off the UI thread; a close or quit this save resolves below wins over it).
         if self.restore_after_save.remove(&id)

@@ -360,11 +360,14 @@ impl App {
                 let Some(d) = self.docs.by_id(rid) else {
                     return;
                 };
-                if !d.buffer.is_missing()
-                    || d.buffer.path() != path
-                    || o.id == rid
-                    || self.docs.by_id(o.id).is_some()
-                {
+                if !d.buffer.is_missing() || d.buffer.path() != path || o.id == rid {
+                    return;
+                }
+                if self.docs.by_id(o.id).is_some() {
+                    // Case 3 (plan note-gone-restore-edges WP-1): the note is open meanwhile.
+                    if self.docs.path_of(o.id).as_deref() == Some(path) {
+                        self.restore_onto_open(rid, path);
+                    }
                     return;
                 }
                 if d.buffer.is_saving() {

@@ -105,20 +105,56 @@ impl App {
     /// document sits and no live document does. Locates it off the UI thread (bind + read,
     /// [`super::settle::OpenFor::Restore`]); [`Self::restore_gone`] completes it.
     pub(super) fn restore_at(&mut self, path: &str) {
-        if self.daemon.is_none() || self.docs.id_of(path).is_none() {
+        if self.daemon.is_none() {
             return;
         }
-        let gone = self
-            .docs
+        let Some(rid) = self.gone_at(path) else {
+            return;
+        };
+        match self.docs.id_of(path) {
+            // `id_of` prefers a live document (plan note-gone-restore-edges WP-1, case 3).
+            Some(live) if live != rid => self.restore_onto_open(rid, path),
+            Some(_) => self.start_open(path, super::settle::OpenFor::Restore(rid)),
+            None => {}
+        }
+    }
+
+    /// The gone (missing) document at `path`, if any (live documents at the path aside).
+    pub(super) fn gone_at(&self, path: &str) -> Option<NoteId> {
+        self.docs
             .iter()
             .find(|(p, d)| *p == path && d.buffer.is_missing())
-            .map(|(_, d)| d.id);
-        // `id_of` prefers a live document: one open at the path means no gone one is restored.
-        if let Some(rid) = gone
-            && self.docs.id_of(path) == Some(rid)
-        {
-            self.start_open(path, super::settle::OpenFor::Restore(rid));
+            .map(|(_, d)| d.id)
+    }
+
+    /// Plan note-gone-restore-edges WP-1, case 3 (user decision 2026-11-17): the note at gone
+    /// document `rid`'s path is already open. Clean → its tabs move onto that document
+    /// ([`Self::absorb`]; a pane already showing it keeps one tab). Dirty → it stays gone with
+    /// its edits (Keep refuses: [`Self::gone_path_taken`]). A save in flight defers the move.
+    pub(super) fn restore_onto_open(&mut self, rid: NoteId, path: &str) {
+        let Some(d) = self.docs.by_id(rid) else {
+            return;
+        };
+        if d.buffer.is_dirty() {
+            return;
         }
+        if d.buffer.is_saving() {
+            self.restore_after_save.insert(rid);
+            return;
+        }
+        self.restore_after_save.remove(&rid);
+        self.absorb(rid, path, None);
+    }
+
+    /// Plan note-gone-restore-edges WP-1, case 3: the open note that took gone document `id`'s
+    /// path, if any — Keep on it would write over that note, so it is refused.
+    pub(super) fn gone_path_taken(&self, id: NoteId) -> Option<String> {
+        let d = self.docs.by_id(id).filter(|d| d.buffer.is_missing())?;
+        let path = d.buffer.path();
+        self.docs
+            .id_of(path)
+            .filter(|live| *live != id)
+            .map(|_| path.to_owned())
     }
 
     /// Plan note-gone-restore WP-1: gone document `rid` is replaced by a new document for the
@@ -175,6 +211,14 @@ impl App {
             self.follow_daemon_move(f, path);
         }
         let id = self.docs.id_of(path)?;
+        // Plan note-gone-restore-edges WP-1, case 1: a note (re)appearing at a gone document's
+        // path restores it (a failed restore leaves it gone), never reloads the retired id.
+        if kind != cv_protocol::ChangeKind::Deleted
+            && self.docs.by_id(id).is_some_and(|d| d.buffer.is_missing())
+        {
+            self.restore_at(path);
+            return None;
+        }
         if kind == cv_protocol::ChangeKind::Deleted
             && let Some(by) = replaced_by
             && self.follow_replaced(id, by)
@@ -251,6 +295,9 @@ impl App {
             }
         }
         self.ui.touch_recent(to);
+        // Plan note-gone-restore-edges WP-1 (audit E1): a live note moved onto a gone
+        // document's path takes it (case 3).
+        self.restore_at(to);
     }
 
     /// Round 11 WP-1 (Decision 1) + plan note-identity audit E2: document `id` was retired
@@ -289,7 +336,12 @@ impl App {
         let dup: Vec<u64> = self
             .panes
             .iter()
-            .filter(|(_, ps)| ps.tabs.iter().any(|t| t.shows(to, &self.docs)))
+            // The retired document's own tabs never count (a gone document shares `to`).
+            .filter(|(_, ps)| {
+                ps.tabs
+                    .iter()
+                    .any(|t| t.note() != Some(id) && t.shows(to, &self.docs))
+            })
             .flat_map(|(_, ps)| {
                 ps.tabs
                     .iter()
@@ -315,7 +367,9 @@ impl App {
             self.docs.insert(a);
         }
         self.repoint_tabs(id, aid);
-        self.move_path_state(&from, to);
+        if from != to {
+            self.move_path_state(&from, to);
+        }
         if let Some(od) = self.docs.by_id_mut(aid)
             && od.reading.mode.shows_reading()
         {

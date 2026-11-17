@@ -112,6 +112,10 @@ pub(super) struct InFlight {
     hash: ContentHash,
     /// WP-5: the frontmatter title of that text.
     title: Option<String>,
+    /// Plan note-gone-restore-edges WP-1 (E2): a Keep-mine revive of a gone buffer. On its
+    /// `Conflict` answer (another note sits at the path) the app keeps the buffer gone, never
+    /// `Changed` on the retired id, and restores it onto the note at the path.
+    revive: bool,
 }
 
 /// The buffer's save state.
@@ -174,6 +178,12 @@ impl SourceBuffer {
     /// The conflict when the conflict bar is up.
     pub fn conflict(&self) -> Option<&Conflict> {
         self.save.conflict.as_ref()
+    }
+
+    /// Plan note-gone-restore-edges WP-1: the save in flight is a Keep-mine revive of a gone
+    /// buffer (its retired id, "no file" base).
+    pub fn is_reviving(&self) -> bool {
+        self.save.in_flight.as_ref().is_some_and(|f| f.revive)
     }
 
     /// plan editor-data-safety WP-2: the conflict is "the file is gone".
@@ -265,6 +275,7 @@ impl SourceBuffer {
         self.save.in_flight = Some(InFlight {
             hash: ContentHash::of(text.as_bytes()),
             title: crate::header::frontmatter_title(&text),
+            revive: false,
         });
         self.save.save_again = false;
         Some(SaveJob {
@@ -403,7 +414,11 @@ impl SourceBuffer {
         let gone = current == Conflict::Missing;
         self.save.base_hash = current.base();
         if gone || self.save.dirty {
-            self.start_save()
+            let job = self.start_save();
+            if gone && let Some(f) = self.save.in_flight.as_mut().filter(|_| job.is_some()) {
+                f.revive = true;
+            }
+            job
         } else {
             None
         }

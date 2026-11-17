@@ -33,12 +33,12 @@ pub(super) fn type_x(app: &mut App) {
     ))));
 }
 
-fn quick(app: &mut App, mode: QuickSwitchOpen, path: &str) {
+pub(super) fn quick(app: &mut App, mode: QuickSwitchOpen, path: &str) {
     app.prefs.quick_switch_open = mode;
     let _ = app.send(Message::Switcher(SwitcherMsg::Pick(path.to_owned())));
 }
 
-fn split(app: &mut App) -> Pane {
+pub(super) fn split(app: &mut App) -> Pane {
     let _ = app.send(Message::Panes(PanesMsg::SplitRight));
     app.focus
 }
