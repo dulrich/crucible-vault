@@ -12,7 +12,9 @@ use cv_state::FailureReason;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
-use super::intake_enrich::{Params, already_enriched, parse, pick_backfill, reattach, run_note};
+use super::intake_enrich::{
+    Params, already_enriched, parse, pick_backfill, pick_capped, reattach, run_note,
+};
 use super::params::job_pos_int;
 use super::testkit::{ActionBuilder, AtRecorder, Hook, StepEnv, fake, mgr, providers};
 use super::{DeferCause, StepError, StepOutcome};
@@ -461,4 +463,182 @@ async fn a_recurring_banner_folds_without_any_model_span() {
     assert!(t.contains(&format!("> {banner}")), "{t}");
     assert_eq!(t.matches(banner).count(), 1, "{t}");
     assert_eq!(var(&o, "banners_folded"), json!(1));
+}
+
+fn empty_answer() -> String {
+    json!({
+        "summary": null, "entities": [], "key_claims": [], "chapters": [],
+        "spans": [], "content_ends_after": null
+    })
+    .to_string()
+}
+
+/// WP-7: a long note with an empty answer is a miss (no stamp, body unchanged, counted); a second
+/// miss makes 2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_long_note_miss_counts_without_stamping_and_accumulates() {
+    let (base, _mock) = fake(200, &empty_answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    let orig = long_note();
+    e.fx.write("n.md", orig.clone());
+    let o = exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
+    let t = read(&e, "n.md");
+    assert!(t.contains("\nenrich-miss: 1\n"), "{t}");
+    assert!(
+        !t.contains("enriched:") && !t.contains("enrich-model"),
+        "{t}"
+    );
+    assert_eq!(t.replace("enrich-miss: 1\n", ""), orig);
+    assert_eq!(var(&o, "enriched"), json!(false));
+    assert_eq!(var(&o, "miss"), json!(true));
+    assert_eq!(var(&o, "enrich_miss"), json!(1));
+    let o = exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
+    assert!(read(&e, "n.md").contains("\nenrich-miss: 2\n"));
+    assert_eq!(var(&o, "enrich_miss"), json!(2));
+}
+
+/// WP-7: a later successful enrich stamps and removes `enrich-miss`; a malformed value reads as 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_successful_enrich_removes_enrich_miss() {
+    let (base, _mock) = fake(200, &answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write(
+        "n.md",
+        long_note().replacen("title: T\n", "title: T\nenrich-miss: 2\n", 1),
+    );
+    let o = exec(&e, "n.md", Map::new(), params(false)).await.unwrap();
+    let t = read(&e, "n.md");
+    assert!(
+        t.contains("\nenriched: 20") && !t.contains("enrich-miss"),
+        "{t}"
+    );
+    assert_eq!(var(&o, "enriched"), json!(true));
+    assert_eq!(var(&o, "miss"), Value::Null);
+    // Malformed count: reads as 0, overwritten by the next miss.
+    let (base, _mock) = fake(200, &empty_answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write(
+        "m.md",
+        long_note().replacen("title: T\n", "title: T\nenrich-miss: lots\n", 1),
+    );
+    exec(&e, "m.md", Map::new(), params(false)).await.unwrap();
+    assert!(read(&e, "m.md").contains("\nenrich-miss: 1\n"));
+}
+
+/// WP-7: a short note with an empty answer is never a miss; it is stamped as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_note_with_an_empty_answer_is_stamped() {
+    let (base, _mock) = fake(200, &empty_answer(), "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    e.fx.write("s.md", short_note());
+    let o = exec(&e, "s.md", Map::new(), params(false)).await.unwrap();
+    let t = read(&e, "s.md");
+    assert!(
+        t.contains("\nenriched: 20") && !t.contains("enrich-miss"),
+        "{t}"
+    );
+    assert_eq!(var(&o, "enriched"), json!(true));
+    assert_eq!(var(&o, "miss"), Value::Null);
+}
+
+#[test]
+fn pick_capped_holds_back_notes_at_the_cap_and_counts_them() {
+    let cands: BTreeMap<String, i64> = [("a.md", 4), ("b.md", 3), ("c.md", 2), ("d.md", 1)]
+        .into_iter()
+        .map(|(p, c)| (p.to_owned(), c))
+        .collect();
+    let none = BTreeSet::new();
+    let misses: BTreeMap<String, u32> = [("a.md", 3), ("b.md", 2), ("c.md", 9)]
+        .into_iter()
+        .map(|(p, c)| (p.to_owned(), c))
+        .collect();
+    let (picks, capped) = pick_capped(&cands, &none, &none, &misses, 10);
+    assert_eq!(
+        (picks, capped),
+        (vec!["b.md".to_owned(), "d.md".to_owned()], 2)
+    );
+    // A refine-pending pick is left alone by the cap.
+    let pending: BTreeSet<String> = ["a.md".to_owned()].into();
+    let (picks, capped) = pick_capped(&cands, &none, &pending, &misses, 10);
+    assert_eq!((picks.len(), capped), (3, 1));
+}
+
+fn backfill_step(extra: &str) -> cv_actions::Step {
+    let mut s: toml::Table = format!("scope = \"backfill\"\n{extra}").parse().unwrap();
+    s.insert("type".into(), "intake_enrich".into());
+    cv_actions::Step::from_table(s).unwrap()
+}
+
+#[test]
+fn backfill_skips_a_note_at_the_cap_and_reports_it() {
+    let fx = LiveFixture::new([
+        (
+            "Posts/ok.md",
+            "---\npost-id: \"1\"\nenrich-miss: 2\n---\nbody\n",
+        ),
+        (
+            "Posts/capped.md",
+            "---\npost-id: \"2\"\nenrich-miss: 3\n---\nbody\n",
+        ),
+    ]);
+    let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
+    let rec = AtRecorder::default();
+    let mut ctx = e.ctx();
+    ctx.children = &rec;
+    let o = super::execute(&backfill_step(""), &mut ctx).unwrap();
+    assert_eq!(rec.calls(), ["intake-enrich@Posts/ok.md"]);
+    assert_eq!(var(&o, "miss_capped"), json!(1));
+}
+
+#[test]
+fn recover_unstamps_only_long_notes_with_neither_block_and_is_idempotent() {
+    use cv_ingest::enrich::{EnrichOpts, enrich, parse as parse_answer};
+    let para = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ";
+    let body = format!(
+        "\n{}\n\n{CTA}\n\n{}\n",
+        para.repeat(15).trim(),
+        para.repeat(5).trim()
+    );
+    let parsed = parse_answer(&answer()).unwrap();
+    let with = |top| enrich(&body, &parsed, &[], EnrichOpts { top_block: top }).text;
+    let stamp = "enriched: 2026-10-01\nenrich-model: fake:m1\nenrich-miss: 1\n";
+    let note = |id: u32, b: &str| format!("---\npost-id: \"{id}\"\nmine: x\n{stamp}---\n{b}");
+    let (long_none, long_top, long_fold) =
+        (note(1, &body), note(2, &with(true)), note(3, &with(false)));
+    assert!(long_top.contains("[!abstract]-") && long_fold.contains("[!removed]-"));
+    let short = note(4, "short body\n");
+    let fx = LiveFixture::new([
+        ("Posts/none.md", long_none.as_str()),
+        ("Posts/top.md", long_top.as_str()),
+        ("Posts/fold.md", long_fold.as_str()),
+        ("Posts/short.md", short.as_str()),
+    ]);
+    let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
+    let rec = AtRecorder::default();
+    let run = || {
+        let mut ctx = e.ctx();
+        ctx.children = &rec;
+        super::execute(&backfill_step("recover = true"), &mut ctx).unwrap()
+    };
+    let o = run();
+    assert_eq!(var(&o, "recovered"), json!(1));
+    assert_eq!(var(&o, "recover_conflict"), json!(0));
+    assert_eq!(var(&o, "candidates"), json!(4));
+    let t = read(&e, "Posts/none.md");
+    assert!(
+        !t.contains("enriched:") && !t.contains("enrich-model"),
+        "{t}"
+    );
+    assert!(
+        t.contains("mine: x\n") && t.contains("enrich-miss: 1\n"),
+        "{t}"
+    );
+    assert_eq!(read(&e, "Posts/top.md"), long_top);
+    assert_eq!(read(&e, "Posts/fold.md"), long_fold);
+    assert_eq!(read(&e, "Posts/short.md"), short);
+    assert!(rec.calls().is_empty());
+    // The index catches up asynchronously in the fixture; the second run reads files, and the
+    // un-stamped note is no longer stamped on disk, so nothing else changes.
+    let o = run();
+    assert_eq!(var(&o, "recovered"), json!(0));
 }

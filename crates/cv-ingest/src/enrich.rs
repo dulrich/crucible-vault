@@ -1160,6 +1160,14 @@ pub fn fold_groups(body: &str) -> Vec<FoldGroup> {
         .collect()
 }
 
+/// Whether a frontmatter-free note body carries a generated block: a well-formed managed
+/// top block (`> [!abstract]-`) or `> [!removed]-` fold. Built on the one block parser
+/// (`strip_generated`); an unterminated marker is ordinary text.
+#[must_use]
+pub fn has_generated_block(body: &str) -> bool {
+    strip_generated(body).had_generated
+}
+
 /// The removed spans of a note body's `> [!removed]-` fold(s), in order, one per fold group
 /// ([`fold_groups`]): each group's lines with trailing whitespace trimmed, joined, trimmed; empty
 /// spans are dropped. Old-layout content (no `%% cv-fold %%` metadata) splits at every lone `>`

@@ -396,6 +396,13 @@ pub static INTAKE_ENRICH: Record = Record {
         )
         .dflt(D::Bool(false)),
         field(
+            "recover",
+            "Recover",
+            "Backfill only: un-stamp long notes whose `enriched` stamp has neither a top block nor a fold (no enqueue); a job param `recover` wins",
+            Node::Bool,
+        )
+        .dflt(D::Bool(false)),
+        field(
             "agent",
             "Agent",
             "The agents.toml id that returns the enrich JSON",

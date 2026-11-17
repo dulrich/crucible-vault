@@ -303,3 +303,30 @@ fn cancelled_row_survives_a_complete_resolve() {
     assert_eq!(r.action, Verdict::Replaced);
     assert_eq!(row_state(&e, url), (Some(true), Some('-')));
 }
+
+#[test]
+fn replacing_a_stub_drops_the_enrich_stamp_keys() {
+    let (stub, full) = (words("w", 0, 30), words("w", 0, 100));
+    let url = "https://ex.substack.com/p/s";
+    let e = env(&[(
+        "notes/a.md",
+        note(
+            url,
+            "word-count: 30\ncomplete: false\nenriched: 2026-10-01\nenrich-model: p:m\nenrich-miss: 2\nmine: kept\n",
+            &stub,
+        ),
+    )]);
+    row(&e, "notes/a.md", url);
+    let mut inc = incoming(&[url], &full);
+    inc.complete = Some(true);
+    assert_eq!(run(&e, &inc).action, Verdict::Replaced);
+    let t = e.read("notes/a.md").unwrap();
+    assert!(
+        !t.contains("enriched") && !t.contains("enrich-model") && !t.contains("enrich-miss"),
+        "{t}"
+    );
+    assert!(
+        t.contains("mine: kept\n") && t.contains("word-count: 100\ncomplete: true\nvia: email\n"),
+        "{t}"
+    );
+}
