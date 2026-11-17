@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- `cv sources rescan [--dry-run]`: re-runs the publication phase of the reconcile on demand and prints its counts. A prefix match in `sources.toml` now decides a note's `publication` and replaces a different value (`publication_overwritten`).
+- `cv removals export`: prints the removal labels as JSON lines. `state.db` moves to schema v20 (`removal_labels`).
+- Removals review: the daemon requests `resolve_removals` (Delete or Keep a fold group, all groups, or trim a line range) and `next_fold_note`; fold groups carry kind and position metadata (`%% cv-fold … %%`), and Keep restores a group where it was. Deleting a group queues a media cleanup job (`removals-media-cleanup`).
+- Editor: Reading shows Delete / Keep per fold group and Delete all on the removed callout; palette commands `next_note_with_removals` and `trim_selection.sponsor` / `.cta` / `.chrome` / `.footer` (no default key).
+- Learning per publication: Keep labels veto, Delete labels strip in anchored runs, and RSS recurrence (3 posts and 30 % of the record's learned items) folds recurring head and tail lines as `chrome` / `footer` groups; mail keeps stripping on recurrence.
+- Transcript linking: a clip of a link-only post becomes its transcript (`transcript-of` on the clip, `transcript` on the post); the reconcile repairs existing pairs (`transcript_linked`).
+- `intake-enrich-recover` action and the `recover` key of the `intake_enrich` backfill step; migration `0042` adds the action, re-scans sources, reconciles, and runs the recovery and the backfill.
+
+### Changed
+
+- Reconcile: `publication_overwritten`, the `bp_*` learning counts and `transcript_linked` / `transcript_conflict` join the printed counts; a `sources.toml` change during a running re-match enqueues one follow-up run.
+- Enrich: a long note whose enrich finds nothing counts `enrich-miss` and the backfill stops retrying it at 3.
+- Editor: the fold controls are one row list above the fold's lines, only on the first top-level fold; trimming in Reading narrows by text match and can widen to more lines of the block. RSS fold writes do not recompute `description`.
+
+### Fixed
+
+- Superseding a stub with a fuller body no longer keeps the stub's `enriched` stamp, so the new body is enriched.
+
 ## 1.1.4 — 2026-11-17
 
 ### Fixed

@@ -509,8 +509,8 @@ fn example_config_files_load_cleanly() {
     assert!(set.errors().is_empty(), "{:?}", set.errors());
     assert_eq!(
         set.armed_actions().count(),
-        47,
-        "46 + the built-in media cleanup"
+        48,
+        "47 + the built-in media cleanup (intake-enrich-recover added by plan intake-removals-sources-rescan WP-9)"
     );
     assert_eq!(set.pipelines().x.inbox.as_deref(), Some("Clippings"));
     // Plan sources-publication-model WP-1: the example is publication-shape.

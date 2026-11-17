@@ -515,6 +515,20 @@ default = "20"
 type = "intake_enrich"
 scope = "backfill"
 
+# One-shot recovery (plan intake-removals-sources-rescan WP-7): un-stamps long notes whose `enriched`
+# stamp has neither a top block nor a fold (a stamp a superseded body kept), bounded by the
+# `enrich-miss` cap; it enqueues nothing and ignores `limit`. Run `intake-enrich-backfill` afterwards
+# so the un-stamped notes are enriched again. A second run finds nothing more to recover.
+[[action]]
+id = "intake-enrich-recover"
+label = "Intake: recover enrich stamps"
+group = "Ingest"
+resources = { note = false, keys = ["intake::enrich-backfill"] }
+[[action.steps]]
+type = "intake_enrich"
+scope = "backfill"
+recover = true
+
 # One-shot YouTube clip backfill (plan round-19-yt-cleanup-intake WP-3): over every indexed note whose
 # `source` is a YouTube URL (outside `.trash/`, `_yt_metadata/`, `_raw_transcript/`, `_custom/`) it
 # deletes the thumbnail embed + clipped description above `## Transcript`, strips the transcript
