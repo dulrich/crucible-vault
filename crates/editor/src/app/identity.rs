@@ -94,18 +94,14 @@ impl App {
     }
 
     /// Today's deleted handling for document `id` whose note is gone (D4: decided from the id,
-    /// never by re-reading the path, which may hold another note now): unsaved edits enter the
-    /// missing-file state (kept, Keep mine revives the id), a clean document says so.
+    /// never by re-reading the path, which may hold another note now): the document, clean or
+    /// dirty, enters the gone (missing-file) state (kept, Keep recreates it, Close discards it).
     pub(super) fn doc_gone(&mut self, id: NoteId) {
         let Some(od) = self.docs.by_id_mut(id) else {
             return;
         };
-        if od.buffer.is_dirty() {
-            if !crate::daemon::is_no_base(od.buffer.base_hash()) {
-                od.buffer.mark_missing();
-            }
-        } else {
-            self.status.set_error("file deleted on disk".into());
+        if !crate::daemon::is_no_base(od.buffer.base_hash()) {
+            od.buffer.mark_missing();
         }
     }
 

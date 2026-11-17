@@ -221,10 +221,31 @@ impl App {
                     .map_or((false, false), |d| (d.is_dirty(), d.is_saving())),
             };
             let title = ellipsize(&self.tab_header_title(ps, tab), TITLE_MAX_CHARS);
-            let lbl = control_label(title, 14.0)
-                .font(iced::Font::with_name(FONT_FAMILY))
-                .wrapping(iced::widget::text::Wrapping::None)
-                .color(colour.to_color());
+            // Plan note-gone-banner WP-1: a note whose file is gone shows its title in the error
+            // colour, struck through.
+            let gone = matches!(tab.kind, TabKind::Note(_) | TabKind::Unbound(_))
+                && self
+                    .docs
+                    .buffer(tab.note())
+                    .is_some_and(crate::source::SourceBuffer::is_missing);
+            let lbl: Element<'_, Message> = if gone {
+                let sp: iced::widget::text::Span<'_, ()> = iced::widget::span(title)
+                    .strikethrough(true)
+                    .color(t.error_text.to_color());
+                iced::widget::rich_text(vec![sp])
+                    .size(14.0)
+                    .font(iced::Font::with_name(FONT_FAMILY))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                control_label(title, 14.0)
+                    .font(iced::Font::with_name(FONT_FAMILY))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .color(colour.to_color())
+                    .into()
+            };
             // The marker owns a fixed-width slot, blank when clean: the header never resizes.
             let mark =
                 container(control_label(marker(dirty, saving), 14.0).color(colour.to_color()))
@@ -481,7 +502,8 @@ impl App {
                 mode.map(|_| Message::Panes(PanesMsg::ModeMenu((!menu_open).then_some(pane)))),
             );
         // Stable slots: tab bar, note control bar (`Space` for Settings / no tab), find bar,
-        // period nav bar (`Space` when the note gets none), body — so the body's tree position
+        // period nav bar (`Space` when the note gets none), gone pill (`Space` unless the note's file is
+        // gone), body — so the body's tree position
         // (and the editor's widget state) never depends on which bars are showing.
         let note_bar: Element<'a, Message> = match ps.active_note(&self.docs) {
             Some(tab) => self.note_bar(pane, ps, tab, mode_btn.into()),
@@ -509,6 +531,13 @@ impl App {
                         .into()
                 },
             );
+        // Plan note-gone-banner WP-1: the gone pill's stable slot (a `Space` unless the active
+        // tab's document is gone), in every view mode.
+        let gone_pill: Element<'a, Message> = ps
+            .active_note(&self.docs)
+            .and_then(|tab| self.docs.buffer(tab.note))
+            .filter(|d| d.is_missing())
+            .map_or_else(|| Space::new().into(), |d| gone_pill(d.note_id(), t));
         let body: Element<'a, Message> = match ps.active_tab() {
             Some(tab) => self.tab_body(tab),
             None => text("No file open").color(t.text_faint.to_color()).into(),
@@ -519,6 +548,7 @@ impl App {
             // Stable slot: an empty `Space` while the find bar is closed.
             crate::find::view(pane, ps.find.as_ref(), t),
             nav_bar,
+            gone_pill,
             body,
         ]
         .spacing(4);
@@ -848,4 +878,53 @@ impl App {
         };
         iced::widget::stack![base, overlay, menu].into()
     }
+}
+
+/// Plan note-gone-banner WP-1: the full-width error pill for a note whose file is gone from disk
+/// (clean or dirty): Keep recreates the file from the buffer, Close discards it and closes the
+/// note's tabs (the missing-file `TakeTheirs` path).
+fn gone_pill<'a>(id: NoteId, t: Tokens) -> Element<'a, Message> {
+    use crate::icons::Icon;
+    use iced::font::Weight;
+    use iced::widget::{rich_text, span};
+    let err = t.error_text.to_color();
+    let mut bold = iced::Font::with_name(crate::theme::FONT_FAMILY);
+    bold.weight = Weight::Bold;
+    let plain = |s: &'static str| -> iced::widget::text::Span<'a, ()> { span(s) };
+    let strong = |s: &'static str| -> iced::widget::text::Span<'a, ()> { span(s).font(bold) };
+    let msg = rich_text(vec![
+        plain("The file is gone from disk (deleted or moved out of the vault); choose "),
+        strong("Keep"),
+        plain(" to recreate it or "),
+        strong("Close"),
+        plain(" if this is intentional."),
+    ])
+    .size(13)
+    .color(err)
+    .width(Length::Fill);
+    let icon = text(Icon::CircleAlert.glyph().to_string())
+        .font(crate::icons::FONT)
+        .size(crate::theme::ICON_SIZE)
+        .color(err);
+    let bar = row![
+        icon,
+        msg,
+        button(text("Keep").size(13)).on_press(Message::Source(SourceMsg::KeepMine(id))),
+        button(text("Close").size(13)).on_press(Message::Source(SourceMsg::TakeTheirs(id))),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    container(bar)
+        .padding(6)
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(t.panel_2.to_color().into()),
+            border: iced::Border {
+                color: err,
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }

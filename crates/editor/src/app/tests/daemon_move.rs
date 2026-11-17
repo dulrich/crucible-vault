@@ -167,7 +167,15 @@ fn degraded_deleted_plus_created_is_a_delete_under_note_ids() {
         .expect("move");
     feed(&mut app, ev);
     assert_eq!(open_paths(&app), vec!["wp3b/a.md".to_owned()]);
-    assert_eq!(app.status.error_text(), Some("file deleted on disk"));
+    assert_eq!(
+        app.status.error_text(),
+        None,
+        "the pill replaces the status error"
+    );
+    assert!(
+        app.doc("wp3b/a.md").is_some_and(|d| d.is_missing()),
+        "gone state"
+    );
     assert_eq!(app.note_id("wp3b/a.md"), Some(id));
     assert_ne!(d.bind_note("wp3b/c.md").ok(), Some(id), "c is another note");
 }
@@ -235,11 +243,15 @@ fn a_delayed_move_notification_leaves_a_tab_opened_after_it_alone() {
 }
 
 #[test]
-fn a_real_delete_still_shows_file_deleted_on_disk() {
+fn a_real_delete_enters_the_gone_state() {
     let (_tmp, d, mut app) = setup(&["wp3f/a.md"]);
     d.delete("wp3f/a.md").expect("delete");
     feed(&mut app, vec![deleted_event("wp3f/a.md")]);
-    assert_eq!(app.status.error_text(), Some("file deleted on disk"));
+    assert_eq!(app.status.error_text(), None);
+    assert!(
+        app.doc("wp3f/a.md").is_some_and(|d| d.is_missing()),
+        "gone state"
+    );
 }
 
 #[test]

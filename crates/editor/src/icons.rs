@@ -79,6 +79,9 @@ pub enum Icon {
     // plan round-21 WP-2: the code-block copy button (copy = U+E0A2, read from the vendored font's
     // `cmap` + `post` glyph names).
     Copy,
+    // plan note-gone-banner WP-1: the gone-note pill (circle-alert = U+E07B, read from the
+    // vendored font's `cmap` + `post` glyph names).
+    CircleAlert,
 }
 
 impl Icon {
@@ -138,6 +141,7 @@ impl Icon {
             Self::CornerUpLeft => '\u{e0ab}',
             Self::TableProperties => '\u{e4df}',
             Self::Copy => '\u{e0a2}',
+            Self::CircleAlert => '\u{e07b}',
         }
     }
 }
@@ -185,6 +189,7 @@ mod tests {
             (Icon::Tags, '\u{e35f}'),
             (Icon::FolderTree, '\u{e33f}'),
             (Icon::Copy, '\u{e0a2}'),
+            (Icon::CircleAlert, '\u{e07b}'),
         ] {
             assert_eq!(i.glyph(), cp);
         }

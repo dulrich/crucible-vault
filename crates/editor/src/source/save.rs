@@ -205,11 +205,9 @@ impl SourceBuffer {
         }
     }
 
-    /// A dirty buffer whose file is gone enters the missing-file state (no-op when clean).
+    /// A buffer whose file is gone (clean or dirty) enters the missing-file ("gone") state.
     pub fn mark_missing(&mut self) {
-        if self.save.dirty {
-            self.save.conflict = Some(Conflict::Missing);
-        }
+        self.save.conflict = Some(Conflict::Missing);
     }
 
     /// Replaces the text with what is on disk, keeping the cursor line (clamped);
@@ -253,6 +251,12 @@ impl SourceBuffer {
         if !self.save.dirty || self.save.conflict.is_some() {
             return None;
         }
+        self.start_save()
+    }
+
+    /// The save job proper (the caller has decided a save is wanted): queues a follow-up instead
+    /// when one is in flight or a rename is pending.
+    fn start_save(&mut self) -> Option<SaveJob> {
         if self.save.in_flight.is_some() || self.save.renaming {
             self.save.save_again = true;
             return None;
@@ -391,11 +395,18 @@ impl SourceBuffer {
         to.clone_into(&mut self.path);
     }
 
-    /// Keep mine: re-save against the on-disk hash (recreating a missing file).
+    /// Keep mine: re-save against the on-disk hash (recreating a missing file). A gone buffer
+    /// saves even when clean (it recreates the file from the buffer text); any other conflict
+    /// implies unsaved edits, so an ordinary dirty check applies.
     pub fn keep_mine(&mut self) -> Option<SaveJob> {
         let current = self.save.conflict.take()?;
+        let gone = current == Conflict::Missing;
         self.save.base_hash = current.base();
-        self.begin_save()
+        if gone || self.save.dirty {
+            self.start_save()
+        } else {
+            None
+        }
     }
 
     /// plan editor-data-safety WP-1 (audit E1): mark a reconnect resync as waiting on the

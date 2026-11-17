@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - Settings: the `nav_links` help text names the Publications page under the configured `app_folder` instead of a fixed `_crucible/Publications.md`.
+- Editor: a note whose file is gone from disk (deleted or moved out of the vault), clean or edited, now shows a full-width error pill in Source, Reading and Split with Keep (recreate the file) and Close (discard and close its tabs), and its tab title turns red and struck through; the old status-line message and the Source-only bar are gone, and a clean gone note no longer counts as an unsaved loss at quit.
 
 ## 1.1.1 — 2026-11-16
 

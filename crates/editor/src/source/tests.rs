@@ -1364,14 +1364,19 @@ fn missing_file_conflict_is_missing_not_an_empty_hash() {
     );
     assert!(!b.is_missing());
     assert_eq!(b.keep_mine().expect("job").base.as_str(), "ffff");
-    // A clean buffer never enters the missing state.
+    // A clean buffer enters the gone (missing) state too; Keep recreates the file even though
+    // nothing is dirty, and ordinary `begin_save` still refuses a clean buffer.
     let mut c = SourceBuffer::new(
         crate::daemon::bound_id("c.md"),
         "c.md",
         b"x\n",
         ContentHash::of(b"x\n"),
     );
+    assert!(c.begin_save().is_none());
     c.mark_missing();
+    assert!(c.is_missing() && !c.is_dirty());
+    let job = c.keep_mine().expect("clean gone buffer saves on Keep");
+    assert!(crate::daemon::is_no_base(&job.base) && job.text == "x\n");
     assert!(c.conflict().is_none());
 }
 

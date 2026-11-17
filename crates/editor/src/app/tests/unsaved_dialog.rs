@@ -89,6 +89,81 @@ fn deleted_under_edits_enters_missing_state_and_keep_mine_recreates() {
     assert!(!t.is_dirty() && t.conflict().is_none());
 }
 
+/// Plan note-gone-banner WP-1: a clean document whose file is gone enters the gone state (the
+/// pill and tab style), with no status-line error.
+#[test]
+fn clean_doc_gone_enters_the_gone_state_without_a_status_error() {
+    let (_tmp, d, mut app) = setup(&["ng1/a.md"]);
+    d.delete("ng1/a.md").expect("delete");
+    deleted(&mut app, "ng1/a.md");
+    assert!(missing(&app, "ng1/a.md"));
+    assert!(!app.doc("ng1/a.md").expect("doc").is_dirty());
+    assert_eq!(app.status.error_text(), None);
+}
+
+/// Keep on a clean gone document recreates the file from the buffer and clears the state.
+#[test]
+fn keep_on_a_clean_gone_doc_recreates_the_file() {
+    let (_tmp, d, mut app) = setup(&["ng2/a.md"]);
+    d.delete("ng2/a.md").expect("delete");
+    deleted(&mut app, "ng2/a.md");
+    keep_mine(&mut app, &d, "ng2/a.md");
+    assert_eq!(d.read_file("ng2/a.md").expect("file").0, b"body");
+    let t = app.doc("ng2/a.md").expect("doc");
+    assert!(!t.is_dirty() && t.conflict().is_none());
+}
+
+/// The pill's Close (missing-file `TakeTheirs`) closes the document's tabs with no dialog, for a
+/// clean and a dirty gone document alike.
+#[test]
+fn pill_close_closes_the_tabs_without_a_dialog_clean_and_dirty() {
+    for dirty in [false, true] {
+        let (_tmp, d, mut app) = setup(&["ng3/a.md"]);
+        if dirty {
+            type_x(&mut app);
+        }
+        d.delete("ng3/a.md").expect("delete");
+        deleted(&mut app, "ng3/a.md");
+        assert!(missing(&app, "ng3/a.md"), "dirty={dirty}");
+        let id = app.note_id("ng3/a.md").expect("open");
+        let _ = app.send(Message::Source(SourceMsg::TakeTheirs(id)));
+        assert!(app.open_paths().is_empty(), "dirty={dirty}");
+        assert!(app.doc("ng3/a.md").is_none() && app.dialog.is_none());
+    }
+}
+
+/// Quit with a clean gone document exits without the Unsaved dialog.
+#[test]
+fn quit_with_a_clean_gone_doc_exits_without_the_dialog() {
+    let (_tmp, d, mut app) = setup(&["ng4/a.md"]);
+    d.delete("ng4/a.md").expect("delete");
+    deleted(&mut app, "ng4/a.md");
+    let _ = app.send(Message::Tabs(TabsMsg::Quit));
+    assert!(app.dialog.is_none());
+    assert!(app.exiting);
+}
+
+/// Header close: a clean gone note closes with no dialog; a dirty one keeps the Unsaved dialog.
+#[test]
+fn header_close_of_a_gone_note_dialogs_only_when_dirty() {
+    let (_tmp, d, mut app) = setup(&["ng5/a.md", "ng5/b.md"]);
+    d.delete("ng5/a.md").expect("delete");
+    deleted(&mut app, "ng5/a.md");
+    let _ = app.send(Message::Tabs(TabsMsg::Close(app.focus, 0)));
+    assert!(app.dialog.is_none());
+    assert!(app.doc("ng5/a.md").is_none(), "clean gone note closed");
+    // `b` is now tab 0; edit it, delete it, and close from the header.
+    type_x(&mut app);
+    d.delete("ng5/b.md").expect("delete");
+    deleted(&mut app, "ng5/b.md");
+    let _ = app.send(Message::Tabs(TabsMsg::Close(app.focus, 0)));
+    assert_eq!(
+        dialog_notes(&app),
+        [("ng5/b.md".to_owned(), LossReason::Missing)]
+    );
+    assert!(app.doc("ng5/b.md").is_some(), "dirty text kept");
+}
+
 /// Audit E2 (b): a save CAS conflict with an empty current hash → missing; Take theirs
 /// discards the edits and closes the note's tabs (no re-read of a missing file).
 #[test]

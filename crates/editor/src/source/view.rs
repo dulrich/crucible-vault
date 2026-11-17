@@ -89,14 +89,11 @@ pub fn view<'a>(
     // unused). Plan editor-feedback-round-2 WP-6: it is out of the editor's vertical flow, so a
     // conflict bar never pushes the editor down (dirty / saving live on the tab header, see
     // `crate::header`).
-    let conflict: Element<'a, Message> = if doc.conflict().is_some() {
-        let msg = if doc.is_missing() {
-            "The file is gone from disk (deleted or moved away). Keep mine recreates it; Take theirs closes it."
-        } else {
-            "File changed on disk while you were editing."
-        };
+    // Plan note-gone-banner WP-1: the missing-file variant is the full-width pill in the pane
+    // column (`app/view.rs`); this overlay is the changed-on-disk conflict only.
+    let conflict: Element<'a, Message> = if doc.conflict().is_some() && !doc.is_missing() {
         let bar = row![
-            text(msg).color(tokens.warn_text.to_color()),
+            text("File changed on disk while you were editing.").color(tokens.warn_text.to_color()),
             button(text("Keep mine")).on_press(Message::Source(SourceMsg::KeepMine(doc.note_id()))),
             button(text("Take theirs"))
                 .on_press(Message::Source(SourceMsg::TakeTheirs(doc.note_id()))),
