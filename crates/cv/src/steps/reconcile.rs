@@ -29,6 +29,9 @@
 //!    `dup_other`, `dup_distinct`, `dup_conflict`.
 //! 9. **Publication** (F, [`super::reconcile_repair`]): `publication_backfilled`,
 //!    `publication_overwritten`, `publication_no_row`, `publication_conflict`.
+//! 10. **Link-only transcripts** (G, [`super::reconcile_repair`]): `transcript_linked`,
+//!     `transcript_conflict` (a clip kept as `duplicate-of` a complete, free, link-only tracker
+//!     post becomes its `transcript-of` clip; plan intake-removals-sources-rescan WP-8).
 //!
 //! A job param `only = "sources"` (plan `sources-publication-model` WP-4) runs only phase 5's
 //! re-match (with its leading mail-key rename) and phase 9 — no link, probe, tick, re-clean,
@@ -193,7 +196,7 @@ struct Pass {
 /// One table phase: reads and writes through the step context, counts into the aggregate vars.
 type Phase = fn(&mut StepCtx<'_>, &mut Pass, &mut Vars) -> Result<(), StepError>;
 
-/// Phases 4–9, in run order (see the module doc for their vars).
+/// Phases 4–10, in run order (see the module doc for their vars).
 const PHASES: &[(&str, Phase)] = &[
     ("youtube", |ctx, p, v| {
         backfill::youtube(ctx, &p.sh, &mut p.sidx, &mut v.backfill)
@@ -213,6 +216,9 @@ const PHASES: &[(&str, Phase)] = &[
     }),
     ("publication", |ctx, p, v| {
         repair::publication(ctx, &p.sh, &mut v.repair)
+    }),
+    ("transcripts", |ctx, p, v| {
+        repair::transcript_links(ctx, &p.sh, &mut v.repair)
     }),
 ];
 

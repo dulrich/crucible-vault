@@ -9,7 +9,8 @@
 //!
 //! Runs on the run's active note only. In order: read the note and its CAS hash *before* the
 //! model call; skip (`skipped` outcome var, no model call, no write) when `source` is not a
-//! YouTube URL (`"not youtube"`), the note carries the `refined` tag (`"already refined"` — the
+//! YouTube URL and the note carries no non-blank `transcript-of` (a link-only post's clipped
+//! transcript, plan intake-removals-sources-rescan WP-8) (`"not youtube"`), the note carries the `refined` tag (`"already refined"` — the
 //! manual `refine-transcript` action's convention), or it has no `## Transcript` text outside the
 //! managed enrich blocks (`"no transcript"`), or that text is under
 //! [`cv_ingest::transcript::MIN_REFINE_WORDS`] words (`"short transcript"`: a model answer to a
@@ -136,7 +137,10 @@ pub(crate) fn run_note(
     let youtube = doc
         .get_str_trimmed("source")
         .is_some_and(|s| is_youtube_video(&s));
-    if !youtube {
+    // A link-only post's clipped transcript (`transcript-of`, plan intake-removals-sources-rescan
+    // WP-8) is refined like a YouTube one.
+    let transcript_of = doc.get_str_trimmed("transcript-of").is_some();
+    if !youtube && !transcript_of {
         return Ok(skip("not youtube"));
     }
     if is_refined(&text) {

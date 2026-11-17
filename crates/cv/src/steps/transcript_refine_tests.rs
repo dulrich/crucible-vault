@@ -218,6 +218,29 @@ async fn skips_make_no_model_call_and_no_write() {
     assert!(raw_dir_absent(&e));
 }
 
+/// WP-8: a clip carrying a non-blank `transcript-of` is refined without a YouTube source; a plain
+/// non-YouTube note (blank `transcript-of` included) still skips.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transcript_of_clip_is_refined_and_a_plain_note_still_skips() {
+    let (base, mock) = fake(200, REFINED, "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    let linked = format!(
+        "---\nsource: https://example.com/post\ntranscript-of: \"[[Posts/P]]\"\nenriched: x\n---\n\n## Transcript\n\n{RAW}\n"
+    );
+    e.fx.write("Clips/l.md", linked);
+    let o = exec(&e, "Clips/l.md").await.unwrap();
+    assert!(var(&o, "skipped").is_null(), "{o:?}");
+    let t = read(&e, "Clips/l.md");
+    assert!(t.contains(REFINED) && !t.contains("enriched:"), "{t}");
+    let blank =
+        "---\nsource: https://example.com/post\ntranscript-of: \"\"\n---\n\n## Transcript\n\nx\n";
+    e.fx.write("Clips/b.md", blank);
+    let o = exec(&e, "Clips/b.md").await.unwrap();
+    assert_eq!(var(&o, "skipped"), json!("not youtube"));
+    assert_eq!(read(&e, "Clips/b.md"), blank);
+    assert_eq!(mock.requests().len(), 1);
+}
+
 /// A transcript under `MIN_REFINE_WORDS` is skipped before any model call (live: 173/196-word
 /// transcripts failed retention on every backfill pass); one at the floor is refined.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

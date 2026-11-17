@@ -30,12 +30,18 @@
 //!    A match spawns `file-as-kind { kind }` as a child (move + tags + lint); no match leaves the
 //!    clip in place.
 //!
+//!    **Link-only transcript** (Decision 6): when the kept target is a complete, free tracker post
+//!    whose body is one single-link line and the clip has at least `MIN_REFINE_WORDS` words
+//!    ([`is_link_only`]), the clip gets `transcript-of: "[[target]]"` (no `duplicate-of`), its body
+//!    under one `## Transcript` section, the configured long kind, and the post gets
+//!    `transcript: "[[clip]]"` (and the clip's `publication` when its own is blank);
+//!    `action = "transcript"`.
 //! 3. **Enrichment** (plan round-16 WP-5, filing first): `localize` + describe run afterwards, as
 //!    the `clip-enrich` child, on the note's final path: the supersede target (`Replaced`), or the
 //!    clip left in place (no kind match, `filed = "already"`, `duplicate`). A filed clip is
 //!    enriched by `file-as-kind`'s last step on the moved path; a trashed clip never is.
 //!
-//! The step never moves the clip itself. Outcome vars: `action` (`replaced|merged|duplicate|new|
+//! The step never moves the clip itself. Outcome vars: `action` (`replaced|merged|duplicate|transcript|new|
 //! missing`), `target`, `kind`, `child_job_id`, `enrich_job_id`. A clip that already sits in its kind's folder with
 //! all of the kind's tags spawns no child and reports `kind` with `filed = "already"` (`action`
 //! unchanged). The matched serial row's `publication()` (any kind), else the matched host row's,
@@ -45,6 +51,7 @@ use cv_actions::pipelines::{Publication, SourcesConfig};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_note::{FrontmatterDoc, JsValue};
+use cv_state::TrackerItem;
 use cv_text::url_canon::{bare_host_name, canonical_bare_host};
 use serde::Serialize;
 
@@ -387,6 +394,33 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 .read(&target)?
                 .and_then(|(b, _)| String::from_utf8(b).ok())
                 .map(|t| FrontmatterDoc::new(t.as_str()).body().to_owned());
+            // Link-only post (plan intake-removals-sources-rescan Decision 6): the clip is the
+            // post's transcript, not its duplicate; it continues through the clip pipeline.
+            if let Some(tb) = &target_body
+                && target_is_link_only(ctx, &target, tb, words)?
+            {
+                let post_link = wikilink(&target);
+                ctx.modify(&clip_path, |old| Ok(link_clip(old, &post_link)?))?;
+                out.push_output(clip_path.clone());
+                vars.action = "transcript";
+                let long = ctx.config.pipelines().youtube.long_kind.trim().to_owned();
+                file_by_kind(
+                    ctx,
+                    &clip_path,
+                    &clip,
+                    &body,
+                    row.as_ref(),
+                    &mut vars,
+                    Some(&long),
+                )?;
+                let final_path = final_clip_path(ctx, &clip_path, vars.kind.as_deref());
+                link_post_note(ctx, &target, &final_path, &clip_path)?;
+                if vars.child_job_id.is_none() {
+                    vars.enrich_job_id = enrich(ctx, &clip_path);
+                }
+                out.set_vars(&vars);
+                return Ok(out);
+            }
             let contained = target_body.is_some_and(|tb| {
                 cv_text::similar::containment(&body, &tb) * 100.0
                     >= f64::from(sup_cfg.threshold_percent.min(100))
@@ -410,15 +444,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
 
     // ---- kind ---------------------------------------------------------------------------------
-    file_by_kind(
-        ctx,
-        &clip_path,
-        &clip,
-        &body,
-        row.as_ref(),
-        &sources,
-        &mut vars,
-    )?;
+    file_by_kind(ctx, &clip_path, &clip, &body, row.as_ref(), &mut vars, None)?;
     // No `file-as-kind` child: the clip stays where it is, so it is enriched in place. A filed
     // clip is enriched by `file-as-kind`'s own last step, on the moved path.
     if vars.child_job_id.is_none() {
@@ -464,9 +490,10 @@ fn file_by_kind(
     clip: &Clip,
     body: &str,
     row: Option<&HostRow>,
-    sources: &SourcesConfig,
     vars: &mut Vars,
+    force_kind: Option<&str>,
 ) -> Result<(), StepError> {
+    let sources: &SourcesConfig = ctx.config.sources();
     let is_kind = |k: &str| kind_def(ctx.config, k).is_ok();
     let mut work_pub = None;
     let kind = if let Some(s) = serial_hit(sources, clip, is_kind) {
@@ -481,6 +508,8 @@ fn file_by_kind(
     } else {
         None
     };
+    // A link-only transcript clip files under the configured long kind whatever its host says.
+    let kind = force_kind.map(str::to_owned).or(kind);
     let Some(kind) = kind else {
         return Ok(());
     };
@@ -519,5 +548,194 @@ fn file_by_kind(
         }
     }
     vars.kind = Some(kind);
+    Ok(())
+}
+
+// ---- link-only transcript (plan intake-removals-sources-rescan WP-8, Decision 6) -----------------
+
+/// The end byte of the markdown link at the start of `s` (`[text](url)`, the text may itself hold
+/// an image `![alt](src)`), or `None` when `s` does not start with a well-formed link.
+fn link_end(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'[') {
+        return None;
+    }
+    let close = |from: usize, open: u8, shut: u8| -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, &c) in b.iter().enumerate().skip(from) {
+            if c == open {
+                depth += 1;
+            } else if c == shut {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    };
+    let text_end = close(0, b'[', b']')?;
+    if text_end == 1 || b.get(text_end + 1) != Some(&b'(') {
+        return None;
+    }
+    let url_end = close(text_end + 1, b'(', b')')?;
+    let url = &s[text_end + 2..url_end];
+    (!url.is_empty() && !url.contains(char::is_whitespace)).then_some(url_end + 1)
+}
+
+/// The non-blank lines of a frontmatter-free `body`, well-formed generated (`cv-enrich`) blocks
+/// and the enrich heading marker ignored.
+fn visible_lines(body: &str) -> Vec<&str> {
+    use cv_text::blocks::{self, ENRICH_HEADING, ENRICH_OPEN};
+    let ls = blocks::lines(body);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < ls.len() {
+        let t = ls[i].text.trim();
+        if t == ENRICH_OPEN
+            && let Some(j) = blocks::managed_close(&ls, i)
+        {
+            i = j + 1;
+            continue;
+        }
+        if !t.is_empty() && t != ENRICH_HEADING {
+            out.push(t);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The link-only predicate (Decision 6), pure: `rows` are the `blog` tracker rows resolving to the
+/// target. True when there is at least one and every one is complete (`Some(true)`), free
+/// (`access` is `free`; paid, founding, unknown or NULL do not qualify) with `word_count` 0; the
+/// target's body (generated blocks ignored) is exactly one non-blank line that is a single
+/// markdown link; and the clip has at least [`cv_ingest::transcript::MIN_REFINE_WORDS`] words.
+/// It also matches an audio-only episode: nothing stored tells a video link from an audio one.
+pub(crate) fn is_link_only(rows: &[TrackerItem], target_body: &str, clip_words: usize) -> bool {
+    if clip_words < cv_ingest::transcript::MIN_REFINE_WORDS {
+        return false;
+    }
+    let blog: Vec<&TrackerItem> = rows.iter().filter(|r| r.source_kind == "blog").collect();
+    let rows_ok = !blog.is_empty()
+        && blog.iter().all(|r| {
+            r.complete == Some(true)
+                && r.word_count == Some(0)
+                && r.access
+                    .as_deref()
+                    .is_some_and(|a| a.trim().eq_ignore_ascii_case("free"))
+        });
+    if !rows_ok {
+        return false;
+    }
+    matches!(visible_lines(target_body).as_slice(), [l] if link_end(l) == Some(l.len()))
+}
+
+/// [`is_link_only`] for `target`, reading its tracker rows (the `StateDb` guard is dropped before
+/// returning).
+pub(crate) fn target_is_link_only(
+    ctx: &StepCtx<'_>,
+    target: &str,
+    target_body: &str,
+    clip_words: usize,
+) -> Result<bool, StepError> {
+    let rows = ctx.state().tracker_items_for_note(target)?;
+    Ok(is_link_only(&rows, target_body, clip_words))
+}
+
+/// `[[path]]` for a note path (`.md` dropped).
+pub(crate) fn wikilink(path: &str) -> String {
+    format!("[[{}]]", path.strip_suffix(".md").unwrap_or(path))
+}
+
+/// The clip edit: `transcript-of: "<post_link>"` replaces `duplicate-of`, and the body goes under
+/// one `## Transcript` section unless it already has one (then the clip's `enriched` stamp stays,
+/// else it is cleared in the same text: the text under refine/enrich changed). `None` when nothing
+/// changes. Frontmatter outside the named keys is byte-preserved.
+pub(crate) fn link_clip(text: &str, post_link: &str) -> Result<Option<String>, cv_note::FmError> {
+    let mut d = FrontmatterDoc::new(text);
+    let mut changed = d.set("transcript-of", &JsValue::Str(post_link.to_owned()))?;
+    changed |= d.remove("duplicate-of")?;
+    let body = d.body().to_owned();
+    if cv_ingest::transcript::locate(&body).is_none() {
+        let mut out = d.into_text();
+        let off = out.len() - body.len();
+        let lead = body.len() - body.trim_start().len();
+        out.truncate(off);
+        out.push_str(&body[..lead]);
+        out.push_str("## Transcript\n\n");
+        out.push_str(&body[lead..]);
+        let mut d = FrontmatterDoc::new(out);
+        d.remove("enriched")?;
+        return Ok(Some(d.into_text()));
+    }
+    Ok(changed.then(|| d.into_text()))
+}
+
+/// The post edit: `transcript: "<clip_link>"` (when its `transcript` is blank) and, when the post's own `publication` is blank and
+/// `publication` is given, that publication (after `author`). `None` when nothing changes.
+pub(crate) fn link_post(
+    text: &str,
+    clip_link: &str,
+    publication: Option<&str>,
+) -> Result<Option<String>, cv_note::FmError> {
+    let mut d = FrontmatterDoc::new(text);
+    // A post that already names a transcript keeps it (never flap between two clips).
+    let mut changed = false;
+    if d.is_blank("transcript")? {
+        changed = d.set("transcript", &JsValue::Str(clip_link.to_owned()))?;
+    }
+    if let Some(p) = publication
+        && crate::supersede::publication_blank(&d)
+    {
+        d.insert_after("author", "publication", &JsValue::Str(p.to_owned()))?;
+        changed = true;
+    }
+    Ok(changed.then(|| d.into_text()))
+}
+
+/// The `publication` of the note at `path` when non-blank.
+pub(crate) fn publication_of(text: &str) -> Option<String> {
+    let d = FrontmatterDoc::new(text);
+    if crate::supersede::publication_blank(&d) {
+        return None;
+    }
+    d.get("publication")
+        .ok()
+        .flatten()
+        .map(|v| cv_note::js_text(&v))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Where the clip will sit once its `file-as-kind` child ran: the kind's folder (expanded as the
+/// `move` does) plus the clip's basename; the clip's current path when it is not moved. (The
+/// writer rewrites links on a move, so the post's link follows either way.)
+fn final_clip_path(ctx: &StepCtx<'_>, clip_path: &str, kind: Option<&str>) -> String {
+    let dest = kind
+        .and_then(|k| kind_def(ctx.config, k).ok())
+        .and_then(|def| get_str(def, "folder").ok().flatten())
+        .and_then(|f| expand(ctx, &f).ok())
+        .map(|f| f.trim().trim_matches('/').to_owned())
+        .filter(|f| !f.is_empty())
+        .map(|f| format!("{f}/{}", cv_text::vpath::basename(clip_path)));
+    dest.unwrap_or_else(|| clip_path.to_owned())
+}
+
+/// Writes the post's `transcript` link (and the clip's publication when the post has none).
+fn link_post_note(
+    ctx: &mut StepCtx<'_>,
+    target: &str,
+    final_path: &str,
+    clip_path: &str,
+) -> Result<(), StepError> {
+    let publication = ctx
+        .read(clip_path)?
+        .and_then(|(b, _)| String::from_utf8(b).ok())
+        .and_then(|t| publication_of(&t));
+    let link = wikilink(final_path);
+    ctx.modify(target, |old| {
+        Ok(link_post(old, &link, publication.as_deref())?)
+    })?;
     Ok(())
 }

@@ -379,3 +379,64 @@ fn non_blog_open_rows_are_never_ticked() {
         assert_eq!(db.tracker_item(k, key, id).unwrap().unwrap().complete, None);
     }
 }
+
+// ---- link-only transcripts, phase G (plan intake-removals-sources-rescan WP-8) -----------------
+
+/// An existing `duplicate-of` pair (clip outside `Clippings/`, with an `enriched` stamp) is
+/// repaired into a transcript pair; a dry run counts and writes nothing; a second run is a no-op.
+#[test]
+fn reconcile_links_an_existing_duplicate_pair_as_a_transcript() {
+    let post = "---\ntitle: P\nsource: BASE/p/ep\ncomplete: true\n---\n\n[Listen](https://api.x.example/feed/podcast/1)\n";
+    let clip = format!(
+        "---\ntitle: C\nsource: BASE/p/ep\npublication: Pub\nduplicate-of: \"[[Notes/Post]]\"\nenriched: 2026-10-01\n---\n\n{}\n",
+        words(320)
+    );
+    let w = world(&[
+        ("Notes/Post.md", post.to_owned()),
+        ("Day/Clip.md", clip.clone()),
+    ]);
+    w.state
+        .lock()
+        .unwrap()
+        .insert_tracker_item(&TrackerItem {
+            source_kind: "blog".into(),
+            source_key: "feed".into(),
+            item_id: "ep".into(),
+            title: "T".into(),
+            url: format!("{}/p/ep", w.base),
+            first_seen_ms: 1,
+            day: "2026-10-16".into(),
+            outcome: TrackerOutcome::Note,
+            score: None,
+            full_body: Some(true),
+            note_path: Some("Notes/Post.md".into()),
+            source_name: None,
+            duration_s: None,
+            word_count: Some(0),
+            access: Some("free".into()),
+            complete: Some(true),
+            full_word_count: None,
+        })
+        .unwrap();
+    let clip = clip.replace("BASE", &w.base);
+    let dry = run(&w, "dry_run = true").unwrap();
+    assert_eq!(n(&dry, "transcript_linked"), json!(1));
+    assert_eq!(w.read("Day/Clip.md").unwrap(), clip);
+    let o = run(&w, "dry_run = false").unwrap();
+    assert_eq!(n(&o, "transcript_linked"), json!(1));
+    assert_eq!(n(&o, "transcript_conflict"), json!(0));
+    let c = w.read("Day/Clip.md").unwrap();
+    assert!(c.contains("transcript-of: \"[[Notes/Post]]\""), "{c}");
+    assert!(
+        !c.contains("duplicate-of") && !c.contains("enriched"),
+        "{c}"
+    );
+    assert!(c.contains("\n## Transcript\n\nw0 w1"), "{c}");
+    let p = w.read("Notes/Post.md").unwrap();
+    assert!(p.contains("transcript: \"[[Day/Clip]]\""), "{p}");
+    assert!(p.contains("publication: Pub"), "{p}");
+    let again = run(&w, "dry_run = false").unwrap();
+    assert_eq!(n(&again, "transcript_linked"), json!(0));
+    assert_eq!(w.read("Day/Clip.md").unwrap(), c);
+    assert_eq!(w.read("Notes/Post.md").unwrap(), p);
+}

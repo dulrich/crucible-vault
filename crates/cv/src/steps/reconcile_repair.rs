@@ -31,6 +31,17 @@
 //!   `SerialSource::matches` (its `author` list + `source`) and has no `publication` gets the
 //!   first matching row's, through the same write; a tracker-linked note's own row wins, and
 //!   each note is written at most once per pass.
+//! - **G. Link-only transcripts** ([`transcript_links`], plan intake-removals-sources-rescan
+//!   WP-8, Decision 6), after F: a clip carrying `duplicate-of: "[[post]]"` whose post satisfies
+//!   [`super::auto_file::is_link_only`] (a complete, free tracker post whose body is one
+//!   single-link line; the clip has at least `MIN_REFINE_WORDS` words) becomes the post's
+//!   transcript: `duplicate-of` is replaced by `transcript-of`, the body goes under one
+//!   `## Transcript` section and the clip's `enriched` stamp is cleared in that same write when the
+//!   section was added, and the post gets `transcript: "[[clip]]"` plus a blank `publication`
+//!   from the clip (`transcript_linked`, one per pair changed). A clip that already carries
+//!   `transcript-of` only completes the post side (a blank `transcript`, a blank `publication`).
+//!   The clip need not sit under `Clippings/` and is never moved. A lost CAS is
+//!   `transcript_conflict`; a second run changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -42,6 +53,7 @@ use cv_state::TrackerItem;
 use cv_vault::VaultError;
 use serde::Serialize;
 
+use super::auto_file::{link_clip, link_post, publication_of, target_is_link_only, wikilink};
 use super::mail::{mail_blog_link, resolve_newsletter};
 use super::reconcile_backfill::{Shared, message_map, read_text};
 use super::{StepCtx, StepError};
@@ -59,6 +71,8 @@ pub(super) struct Counts {
     publication_overwritten: u32,
     publication_no_row: u32,
     publication_conflict: u32,
+    transcript_linked: u32,
+    transcript_conflict: u32,
 }
 
 impl Counts {
@@ -433,4 +447,102 @@ pub(super) fn publication(
         }
     }
     Ok(())
+}
+
+/// The note path a `[[link]]` value names (`.md` appended when missing; alias and anchor dropped).
+fn link_target(value: &str) -> Option<String> {
+    let inner = value.trim().strip_prefix("[[")?.strip_suffix("]]")?;
+    let name = inner.split(['|', '#']).next()?.trim();
+    (!name.is_empty()).then(|| {
+        if name.ends_with(".md") {
+            name.to_owned()
+        } else {
+            format!("{name}.md")
+        }
+    })
+}
+
+/// Phase G: link-only transcripts (see the module doc).
+pub(super) fn transcript_links(
+    ctx: &mut StepCtx<'_>,
+    sh: &Shared,
+    c: &mut Counts,
+) -> Result<(), StepError> {
+    let mut paths: BTreeSet<String> = BTreeSet::new();
+    {
+        let reader = ctx.index()?;
+        for key in ["duplicate-of", "transcript-of"] {
+            paths.extend(
+                reader
+                    .query()
+                    .md_props_with_key(key)?
+                    .into_iter()
+                    .map(|r| r.path)
+                    .filter(|p| !p.starts_with(".trash/")),
+            );
+        }
+    }
+    for clip_path in paths {
+        let Some(text) = read_text(ctx, &clip_path)? else {
+            continue;
+        };
+        let doc = FrontmatterDoc::new(text.as_str());
+        let linked = doc.get_str_trimmed("transcript-of");
+        let dup = doc.get_str_trimmed("duplicate-of");
+        let Some(target) = linked
+            .as_deref()
+            .or(dup.as_deref())
+            .and_then(link_target)
+            .filter(|t| *t != clip_path)
+        else {
+            continue;
+        };
+        let Some(post_text) = read_text(ctx, &target)? else {
+            continue;
+        };
+        if linked.is_none() {
+            let words = doc.body().split_whitespace().count();
+            let post_body = FrontmatterDoc::new(post_text.as_str()).body().to_owned();
+            if !target_is_link_only(ctx, &target, &post_body, words)? {
+                continue;
+            }
+        }
+        let (post_link, clip_link) = (wikilink(&target), wikilink(&clip_path));
+        let new_clip = link_clip(&text, &post_link).map_err(fm_err)?;
+        let publication = publication_of(new_clip.as_deref().unwrap_or(&text));
+        let new_post = link_post(&post_text, &clip_link, publication.as_deref()).map_err(fm_err)?;
+        if new_clip.is_none() && new_post.is_none() {
+            continue;
+        }
+        if sh.dry {
+            c.transcript_linked += 1;
+            continue;
+        }
+        let mut changed = false;
+        let mut lost = false;
+        match ctx.modify(&clip_path, |old| Ok(link_clip(old, &post_link)?)) {
+            Ok(w) => changed |= w.is_some(),
+            Err(e) if e.is_conflict() => lost = true,
+            Err(e) => return Err(e),
+        }
+        if !lost {
+            match ctx.modify(&target, |old| {
+                Ok(link_post(old, &clip_link, publication.as_deref())?)
+            }) {
+                Ok(w) => changed |= w.is_some(),
+                Err(e) if e.is_conflict() => lost = true,
+                Err(e) => return Err(e),
+            }
+        }
+        if lost {
+            c.transcript_conflict += 1;
+        } else if changed {
+            c.transcript_linked += 1;
+        }
+    }
+    Ok(())
+}
+
+fn fm_err(e: cv_note::FmError) -> StepError {
+    StepError::failed(format!("transcript link: frontmatter: {e}"))
 }

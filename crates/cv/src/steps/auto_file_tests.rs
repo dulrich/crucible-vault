@@ -765,3 +765,170 @@ fn youtube_clip_kind_follows_transcript_length() {
     run(&e, "Clippings/C.md", &rec);
     assert!(rec.kinds().is_empty());
 }
+
+// ---- link-only transcript (plan intake-removals-sources-rescan WP-8, Decision 6) ---------------
+
+const POST_URL: &str = "https://plain.example/p/ep";
+const LINK_LINE: &str = "[Listen](https://api.plain.example/feed/podcast/1)";
+
+fn post_note(body: &str) -> String {
+    doc(
+        &format!("title: P\nsource: {POST_URL}\ncomplete: true\nauthor:\n  - Ann\n"),
+        body,
+    )
+}
+
+fn clip_note(n: usize) -> String {
+    doc(
+        &format!("source: {POST_URL}?utm=x\nauthor:\n  - Ann\n"),
+        &words("t", 0, n),
+    )
+}
+
+/// A `blog` tracker row on `path` with the given evidence.
+fn evidence_row(e: &StepEnv, path: &str, access: Option<&str>, complete: Option<bool>, wc: i64) {
+    e.state
+        .lock()
+        .unwrap()
+        .insert_tracker_item(&TrackerItem {
+            source_kind: "blog".into(),
+            source_key: "https://plain.example/feed".into(),
+            item_id: POST_URL.into(),
+            title: "T".into(),
+            url: POST_URL.into(),
+            first_seen_ms: 1,
+            day: "2026-10-01".into(),
+            outcome: TrackerOutcome::Note,
+            score: None,
+            full_body: Some(true),
+            note_path: Some(path.into()),
+            source_name: None,
+            duration_s: None,
+            word_count: Some(wc),
+            access: access.map(str::to_owned),
+            complete,
+            full_word_count: None,
+        })
+        .unwrap();
+}
+
+fn tr(access: Option<&str>, complete: Option<bool>, wc: i64) -> TrackerItem {
+    let e = world(&[]);
+    evidence_row(&e, "Notes/Post.md", access, complete, wc);
+    let rows = e
+        .state
+        .lock()
+        .unwrap()
+        .tracker_items_for_note("Notes/Post.md");
+    rows.unwrap().remove(0)
+}
+
+#[test]
+fn link_only_predicate_is_pure_and_strict() {
+    use super::auto_file::is_link_only;
+    let ok = tr(Some("free"), Some(true), 0);
+    let body = format!("\n{LINK_LINE}\n");
+    assert!(is_link_only(std::slice::from_ref(&ok), &body, 300));
+    // An image-wrapped link and a generated block beside it still count.
+    let wrapped = "[![p](https://x.example/i.png)](https://x.example/e)";
+    assert!(is_link_only(std::slice::from_ref(&ok), wrapped, 300));
+    let gen_ = format!("%% cv-enrich %%\n> [!abstract]-\n> sum\n%% /cv-enrich %%\n\n{LINK_LINE}\n");
+    assert!(is_link_only(std::slice::from_ref(&ok), &gen_, 300));
+    // Every other shape is false.
+    assert!(
+        !is_link_only(std::slice::from_ref(&ok), &body, 299),
+        "short clip"
+    );
+    assert!(!is_link_only(
+        std::slice::from_ref(&ok),
+        &format!("{LINK_LINE}\ntext\n"),
+        300
+    ));
+    assert!(!is_link_only(
+        std::slice::from_ref(&ok),
+        &format!("{LINK_LINE} {LINK_LINE}"),
+        300
+    ));
+    assert!(!is_link_only(
+        std::slice::from_ref(&ok),
+        &format!("see {LINK_LINE}"),
+        300
+    ));
+    for bad in [
+        tr(Some("paid"), Some(true), 0),
+        tr(Some("unknown"), Some(true), 0),
+        tr(None, Some(true), 0),
+        tr(Some("free"), Some(false), 0),
+        tr(Some("free"), None, 0),
+        tr(Some("free"), Some(true), 12),
+    ] {
+        assert!(!is_link_only(&[bad], &body, 300));
+    }
+    assert!(!is_link_only(&[], &body, 300), "no tracker row");
+}
+
+#[test]
+fn link_only_post_then_clip_links_the_pair_as_transcript() {
+    let e = world(&[
+        ("Notes/Post.md", post_note(LINK_LINE)),
+        ("Clippings/Vid.md", clip_note(320)),
+    ]);
+    evidence_row(&e, "Notes/Post.md", Some("free"), Some(true), 0);
+    let rec = Rec::default();
+    let o = run(&e, "Clippings/Vid.md", &rec);
+    assert_eq!(var(&o, "action"), Some("transcript"));
+    assert_eq!(var(&o, "target"), Some("Notes/Post.md"));
+    // The configured long kind (default `transcript`), whatever the host row says.
+    assert_eq!(rec.kinds(), ["file-as-kind:transcript"]);
+    let clip = e.read("Clippings/Vid.md").unwrap();
+    assert!(clip.contains("transcript-of: \"[[Notes/Post]]\""), "{clip}");
+    assert!(!clip.contains("duplicate-of"), "{clip}");
+    assert!(clip.contains("\n## Transcript\n\nt0 t1"), "{clip}");
+    assert_eq!(clip.matches("## Transcript").count(), 1);
+    let post = e.read("Notes/Post.md").unwrap();
+    assert!(
+        post.contains("transcript: \"[[") && post.contains("/Vid]]\""),
+        "{post}"
+    );
+    assert!(
+        post.ends_with(&format!("{LINK_LINE}\n")),
+        "body untouched: {post}"
+    );
+    // The clip continues through the existing pipeline: the file child enriches it.
+    assert!(rec.enriched().is_empty() && var(&o, "child_job_id").is_some());
+    assert!(!trashed(&e));
+    // The clip's publication (set from the host row) is adopted by the post when blank.
+    let p = clip.lines().find(|l| l.starts_with("publication:"));
+    assert_eq!(
+        post.lines().find(|l| l.starts_with("publication:")),
+        p,
+        "{post}"
+    );
+}
+
+#[test]
+fn short_complete_post_and_paywalled_excerpt_keep_the_duplicate_outcome() {
+    let cases = [
+        // Complete, free, short, but three lines of text: not link-only.
+        (
+            post_note("A short post with real text.\n\nSecond paragraph here.\n\nThird."),
+            Some("free"),
+        ),
+        // A link-only body whose row is a paid excerpt.
+        (post_note(LINK_LINE), Some("paid")),
+    ];
+    for (post, access) in cases {
+        let e = world(&[
+            ("Notes/Post.md", post),
+            ("Clippings/Vid.md", clip_note(320)),
+        ]);
+        evidence_row(&e, "Notes/Post.md", access, Some(true), 0);
+        let rec = Rec::default();
+        let o = run(&e, "Clippings/Vid.md", &rec);
+        assert_eq!(var(&o, "action"), Some("duplicate"), "{access:?}");
+        let clip = e.read("Clippings/Vid.md").unwrap();
+        assert!(clip.contains("duplicate-of: \"[[Notes/Post]]\""), "{clip}");
+        assert!(!clip.contains("transcript-of") && !clip.contains("## Transcript"));
+        assert!(!e.read("Notes/Post.md").unwrap().contains("transcript:"));
+    }
+}
