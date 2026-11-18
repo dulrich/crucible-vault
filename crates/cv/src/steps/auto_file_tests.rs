@@ -825,7 +825,7 @@ fn tr(access: Option<&str>, complete: Option<bool>, wc: i64) -> TrackerItem {
 
 #[test]
 fn link_only_predicate_is_pure_and_strict() {
-    use super::auto_file::is_link_only;
+    use super::transcript_link::is_link_only;
     let ok = tr(Some("free"), Some(true), 0);
     let body = format!("\n{LINK_LINE}\n");
     assert!(is_link_only(std::slice::from_ref(&ok), &body, 300));
@@ -934,15 +934,16 @@ fn short_complete_post_and_paywalled_excerpt_keep_the_duplicate_outcome() {
 }
 
 #[test]
-fn parity_visible_lines_skip_blocks_and_marker_only() {
-    let body = "%% cv-enrich %%\n> [!abstract]- S\n%% /cv-enrich %%\n%% cv-enrich heading %%\n### Chapter\n\n[x](https://a.example/p)\n%% cv-enrich %%\n> [!removed]-\n%% /cv-enrich %%\n%% cv-enrich %%\ntail\n";
-    assert_eq!(
-        super::auto_file::visible_lines(body),
-        [
-            "### Chapter",
-            "[x](https://a.example/p)",
-            "%% cv-enrich %%",
-            "tail"
-        ]
+fn linking_a_clip_clears_its_whole_enrich_stamp() {
+    let clip = doc(
+        "source: x\nenriched: 2026-10-01\nenrich-model: fake:m1\nenrich-miss: 1\nduplicate-of: \"[[Notes/Post]]\"\n",
+        "body text\n",
+    );
+    let pair = super::transcript_link::link_pair("Notes/Post.md");
+    let t = pair.clip(&clip).unwrap().unwrap();
+    assert!(t.contains("transcript-of: \"[[Notes/Post]]\""), "{t}");
+    assert!(
+        !t.contains("enriched:") && !t.contains("enrich-model") && !t.contains("enrich-miss"),
+        "{t}"
     );
 }

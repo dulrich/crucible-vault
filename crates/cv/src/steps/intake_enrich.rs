@@ -45,8 +45,8 @@
 //!
 //! **Recovery** (`scope = "backfill"`, `recover = true`; nothing is enqueued): for every intake
 //! candidate with a non-blank `enriched`, a body of [`SHORT_WORDS`] words or more and neither
-//! generated block, remove `enriched` and `enrich-model` with a CAS write (a lost CAS is
-//! counted). `enrich-miss` stays, so the cap still bounds the retries. A second run recovers 0.
+//! generated block, remove `enriched`, `enrich-model` and `enrich-miss` with a CAS write (a lost
+//! CAS is counted). A second run recovers 0.
 //!
 //! Outcome vars: `skipped` (`"already enriched"`), `enriched`, `anchors_resolved`,
 //! `anchors_dropped`, `lines_folded`, `banners_folded`, `fold_refused_over_half`, `top_block`,
@@ -270,10 +270,7 @@ pub(crate) fn run_note(
     }
     let mut doc = reattach(&text, body, &edit.text);
     let date = super::materialize::now().format("%Y-%m-%d").to_string();
-    doc.set("enriched", &JsValue::Str(date)).map_err(fm_err)?;
-    doc.set("enrich-model", &JsValue::Str(model_ref))
-        .map_err(fm_err)?;
-    doc.remove("enrich-miss").map_err(fm_err)?;
+    super::enrich_stamp::set(&mut doc, date, model_ref).map_err(fm_err)?;
     let new = doc.into_text();
     if new != text {
         ctx.write(&path, new.into_bytes(), Some(hash))?;
@@ -492,8 +489,8 @@ pub(crate) fn needs_recovery(text: &str) -> bool {
         && !enrich::has_generated_block(body)
 }
 
-/// Recovery mode: un-stamps (`enriched`, `enrich-model`) every stamped candidate that
-/// [`needs_recovery`], CAS-written; nothing is enqueued and `enrich-miss` is left as is.
+/// Recovery mode: clears the enrich stamp ([`super::enrich_stamp::clear`]) of every stamped
+/// candidate that [`needs_recovery`], CAS-written; nothing is enqueued.
 fn recover(ctx: &mut StepCtx<'_>, notes: &IntakeNotes) -> Result<StepOutcome, StepError> {
     let (mut recovered, mut conflict) = (0, 0);
     for path in notes.ctimes.keys().filter(|p| notes.enriched.contains(*p)) {
@@ -509,8 +506,7 @@ fn recover(ctx: &mut StepCtx<'_>, notes: &IntakeNotes) -> Result<StepOutcome, St
         let mut doc = FrontmatterDoc::new(text.as_str());
         let fm_err =
             |e: cv_note::FmError| StepError::failed(format!("intake_enrich: frontmatter: {e}"));
-        doc.remove("enriched").map_err(fm_err)?;
-        doc.remove("enrich-model").map_err(fm_err)?;
+        super::enrich_stamp::clear(&mut doc).map_err(fm_err)?;
         match ctx.try_write(path, doc.into_text().into_bytes(), Some(hash))? {
             Ok(_) => recovered += 1,
             Err(cv_vault::VaultError::Conflict { .. }) => conflict += 1,

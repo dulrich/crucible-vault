@@ -629,10 +629,7 @@ fn recover_unstamps_only_long_notes_with_neither_block_and_is_idempotent() {
         !t.contains("enriched:") && !t.contains("enrich-model"),
         "{t}"
     );
-    assert!(
-        t.contains("mine: x\n") && t.contains("enrich-miss: 1\n"),
-        "{t}"
-    );
+    assert!(t.contains("mine: x\n") && !t.contains("enrich-miss"), "{t}");
     assert_eq!(read(&e, "Posts/top.md"), long_top);
     assert_eq!(read(&e, "Posts/fold.md"), long_fold);
     assert_eq!(read(&e, "Posts/short.md"), short);
@@ -641,4 +638,25 @@ fn recover_unstamps_only_long_notes_with_neither_block_and_is_idempotent() {
     // un-stamped note is no longer stamped on disk, so nothing else changes.
     let o = run();
     assert_eq!(var(&o, "recovered"), json!(0));
+}
+
+/// Recovery clears the whole enrich stamp, the miss count included.
+#[test]
+fn recover_clears_the_enrich_miss_count() {
+    let body = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(20);
+    let note = format!(
+        "---\npost-id: \"1\"\nenriched: 2026-10-01\nenrich-model: fake:m1\nenrich-miss: 2\n---\n{body}\n"
+    );
+    let fx = LiveFixture::new([("Posts/n.md", note.as_str())]);
+    let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
+    let rec = AtRecorder::default();
+    let mut ctx = e.ctx();
+    ctx.children = &rec;
+    let o = super::execute(&backfill_step("recover = true"), &mut ctx).unwrap();
+    assert_eq!(var(&o, "recovered"), json!(1));
+    let t = read(&e, "Posts/n.md");
+    assert!(
+        !t.contains("enriched:") && !t.contains("enrich-model") && !t.contains("enrich-miss"),
+        "{t}"
+    );
 }

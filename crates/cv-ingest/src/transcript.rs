@@ -17,6 +17,8 @@
 //! - **Chunks**: a section over [`MAX_CHUNK_WORDS`] words splits at blank-line boundaries into
 //!   `ceil(words / MAX_CHUNK_WORDS)` target-sized chunks, each at most [`MAX_CHUNK_WORDS`]; a
 //!   single paragraph over the cap is split at word boundaries (auto-captions can be one block).
+//! - **Link-only body** ([`is_link_only_body`]): a post body that is one visible line holding a
+//!   single markdown link (generated blocks and the heading marker ignored).
 
 use std::ops::Range;
 
@@ -270,6 +272,57 @@ pub fn replace(body: &str, range: &Range<usize>, new: &str) -> String {
 #[must_use]
 pub fn chapter_headings(text: &str) -> usize {
     text.lines().filter(|l| l.starts_with("### ")).count()
+}
+
+/// Whether a frontmatter-free `body` (generated blocks and the enrich heading marker ignored) is
+/// exactly one non-blank line that is a single markdown link: the body of a link-only post whose
+/// transcript is a separate clip.
+#[must_use]
+pub fn is_link_only_body(body: &str) -> bool {
+    matches!(visible_lines(body).as_slice(), [l] if link_end(l) == Some(l.len()))
+}
+
+/// The end byte of the markdown link at the start of `s` (`[text](url)`, the text may itself hold
+/// an image `![alt](src)`), or `None` when `s` does not start with a well-formed link.
+fn link_end(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'[') {
+        return None;
+    }
+    let close = |from: usize, open: u8, shut: u8| -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, &c) in b.iter().enumerate().skip(from) {
+            if c == open {
+                depth += 1;
+            } else if c == shut {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    };
+    let text_end = close(0, b'[', b']')?;
+    if text_end == 1 || b.get(text_end + 1) != Some(&b'(') {
+        return None;
+    }
+    let url_end = close(text_end + 1, b'(', b')')?;
+    let url = &s[text_end + 2..url_end];
+    (!url.is_empty() && !url.contains(char::is_whitespace)).then_some(url_end + 1)
+}
+
+/// The non-blank lines of a frontmatter-free `body`, well-formed generated (`cv-enrich`) blocks
+/// and the enrich heading marker ignored.
+fn visible_lines(body: &str) -> Vec<&str> {
+    let ls = blocks::lines(body);
+    let classes = blocks::generated(&ls).classes;
+    ls.iter()
+        .zip(classes)
+        .filter(|(_, c)| !matches!(c, LineClass::Block | LineClass::HeadingMarker))
+        .map(|(l, _)| l.text.trim())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 #[cfg(test)]

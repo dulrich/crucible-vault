@@ -469,9 +469,7 @@ fn replaced_text(old: &str, inc: &Incoming<'_>, words: u64) -> Result<String, St
     let mut doc = FrontmatterDoc::new(text);
     // The new body was never enriched: drop the stamp (and miss count) so the note re-enters
     // the enrich backfill (plan intake-removals-sources-rescan WP-7).
-    for k in ["enriched", "enrich-model", "enrich-miss"] {
-        doc.remove(k)?;
-    }
+    crate::steps::enrich_stamp::clear(&mut doc)?;
     #[allow(clippy::cast_precision_loss)]
     doc.set("word-count", &JsValue::Num(words as f64))?;
     if let Some(a) = inc.access {

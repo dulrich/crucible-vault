@@ -293,7 +293,7 @@ async fn a_second_run_is_skipped_as_already_refined() {
 }
 
 /// Plan `tn-review-2026-11-04-remediation` Decision 5: the refine write clears the `enriched`
-/// stamp (and only it), so the following `intake_enrich` re-enriches the refined text.
+/// stamp, so the following `intake_enrich` re-enriches the refined text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refine_write_clears_the_enriched_stamp() {
     let (base, _mock) = fake(200, REFINED, "stop", None);
@@ -303,8 +303,24 @@ async fn a_refine_write_clears_the_enriched_stamp() {
     exec(&e, "n.md").await.unwrap();
     let t = read(&e, "n.md");
     assert!(!t.contains("enriched:"), "{t}");
-    assert!(t.contains("\nenrich-model: fake:m1\n"), "{t}");
+    assert!(!t.contains("enrich-model"), "{t}");
     assert!(!super::intake_enrich::already_enriched(&t), "{t}");
+    assert!(t.contains(REFINED), "{t}");
+}
+
+/// The refine write's stamp clear also drops the miss count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refine_write_clears_the_enrich_miss_count() {
+    let (base, _mock) = fake(200, REFINED, "stop", None);
+    let e = env(&base, "CV_TEST_KEY");
+    let before = note_with("enriched: 2026-10-01\nenrich-miss: 2\n", YT, RAW, "");
+    e.fx.write("n.md", before);
+    exec(&e, "n.md").await.unwrap();
+    let t = read(&e, "n.md");
+    assert!(
+        !t.contains("enriched:") && !t.contains("enrich-miss"),
+        "{t}"
+    );
     assert!(t.contains(REFINED), "{t}");
 }
 

@@ -61,6 +61,7 @@ pub mod dupes_resolve;
 mod dupes_resolve_tests;
 #[cfg(test)]
 mod dupes_tests;
+pub(crate) mod enrich_stamp;
 pub mod fanfic_title;
 mod fanfic_title_review;
 #[cfg(test)]
@@ -116,6 +117,7 @@ mod search_tests;
 pub(crate) mod testkit;
 pub mod tidy;
 pub mod tracker;
+mod transcript_link;
 pub mod transcript_refine;
 #[cfg(test)]
 mod transcript_refine_tests;

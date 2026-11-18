@@ -167,3 +167,17 @@ fn parity_locate_generated_lines() {
         ["One", "Two", "### Chapter\n\nThree\n%% cv-enrich %%\nFour"]
     );
 }
+
+#[test]
+fn parity_visible_lines_skip_blocks_and_marker_only() {
+    let body = "%% cv-enrich %%\n> [!abstract]- S\n%% /cv-enrich %%\n%% cv-enrich heading %%\n### Chapter\n\n[x](https://a.example/p)\n%% cv-enrich %%\n> [!removed]-\n%% /cv-enrich %%\n%% cv-enrich %%\ntail\n";
+    assert_eq!(
+        visible_lines(body),
+        [
+            "### Chapter",
+            "[x](https://a.example/p)",
+            "%% cv-enrich %%",
+            "tail"
+        ]
+    );
+}

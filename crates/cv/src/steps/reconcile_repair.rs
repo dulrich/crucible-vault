@@ -33,11 +33,11 @@
 //!   each note is written at most once per pass.
 //! - **G. Link-only transcripts** ([`transcript_links`], plan intake-removals-sources-rescan
 //!   WP-8, Decision 6), after F: a clip carrying `duplicate-of: "[[post]]"` whose post satisfies
-//!   [`super::auto_file::is_link_only`] (a complete, free tracker post whose body is one
+//!   [`super::transcript_link::is_link_only`] (a complete, free tracker post whose body is one
 //!   single-link line; the clip has at least `MIN_REFINE_WORDS` words) becomes the post's
 //!   transcript: `duplicate-of` is replaced by `transcript-of`, the body goes under one
 //!   `## Transcript` section, with the enrich pass's stale top block and inserted headings removed
-//!   and the clip's `enriched` / `enrich-model` cleared in that same write when the section was
+//!   and the clip's enrich stamp (`enriched`, `enrich-model`, `enrich-miss`) cleared in that same write when the section was
 //!   added, and the post gets `transcript: "[[clip]]"` plus a blank `publication`
 //!   from the clip (`transcript_linked`, one per pair changed). A clip that already carries
 //!   `transcript-of` only completes the post side (a blank `transcript`, a blank `publication`).
@@ -56,12 +56,10 @@ use cv_state::TrackerItem;
 use cv_vault::VaultError;
 use serde::Serialize;
 
-use super::auto_file::{
-    TrackedRank, clip_of, file_transcript_clip, link_clip, link_post, publication_for,
-    publication_of, target_is_link_only, wikilink,
-};
+use super::auto_file::{ChildAt, TrackedRank, clip_of, publication_for, spawn_file_as_kind};
 use super::mail::{mail_blog_link, resolve_newsletter};
 use super::reconcile_backfill::{Shared, message_map, read_text};
+use super::transcript_link::{link_pair, publication_of, target_is_link_only};
 use super::{StepCtx, StepError};
 use crate::supersede::{self, Action, Incoming, Origin, SupersedeIndex};
 
@@ -423,8 +421,11 @@ pub(super) fn publication(
 
 /// The note path a `[[link]]` value names (`.md` appended when missing; alias and anchor dropped).
 fn link_target(value: &str) -> Option<String> {
-    let inner = value.trim().strip_prefix("[[")?.strip_suffix("]]")?;
-    let name = inner.split(['|', '#']).next()?.trim();
+    let v = value.trim();
+    if !(v.starts_with("[[") && v.ends_with("]]")) {
+        return None;
+    }
+    let name = cv_text::wikilink::target(v);
     (!name.is_empty()).then(|| {
         if name.ends_with(".md") {
             name.to_owned()
@@ -479,10 +480,12 @@ pub(super) fn transcript_links(
                 continue;
             }
         }
-        let (post_link, clip_link) = (wikilink(&target), wikilink(&clip_path));
-        let new_clip = link_clip(&text, &post_link).map_err(fm_err)?;
+        let pair = link_pair(&target);
+        let new_clip = pair.clip(&text).map_err(fm_err)?;
         let publication = publication_of(new_clip.as_deref().unwrap_or(&text));
-        let new_post = link_post(&post_text, &clip_link, publication.as_deref()).map_err(fm_err)?;
+        let new_post = pair
+            .post(&post_text, &clip_path, publication.as_deref())
+            .map_err(fm_err)?;
         if new_clip.is_none() && new_post.is_none() {
             continue;
         }
@@ -493,7 +496,7 @@ pub(super) fn transcript_links(
         let mut changed = false;
         let mut lost = false;
         let mut clip_changed = false;
-        match ctx.modify(&clip_path, |old| Ok(link_clip(old, &post_link)?)) {
+        match ctx.modify(&clip_path, |old| Ok(pair.clip(old)?)) {
             Ok(w) => {
                 clip_changed = w.is_some();
                 changed |= clip_changed;
@@ -503,7 +506,7 @@ pub(super) fn transcript_links(
         }
         if !lost {
             match ctx.modify(&target, |old| {
-                Ok(link_post(old, &clip_link, publication.as_deref())?)
+                Ok(pair.post(old, &clip_path, publication.as_deref())?)
             }) {
                 Ok(w) => changed |= w.is_some(),
                 Err(e) if e.is_conflict() => lost = true,
@@ -518,7 +521,8 @@ pub(super) fn transcript_links(
         // A repaired clip is filed like a captured one: `file-as-kind` moves and tags it and runs
         // the clip pipeline, whose refine sees the whole section (stale enrich headings are gone).
         if clip_changed {
-            file_transcript_clip(ctx, &clip_path)?;
+            let long = ctx.config.pipelines().youtube.long_kind.trim().to_owned();
+            spawn_file_as_kind(ctx, &clip_path, &long, None, ChildAt::Clip)?;
         }
     }
     Ok(())

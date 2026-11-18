@@ -209,7 +209,7 @@ pub(crate) fn run_note(
         .map_err(fm_err)?;
     // Decision 5: the refined text is not what was enriched, so the stamp goes in this same
     // write and the following `intake_enrich` re-enriches it (also across a checkpoint replay).
-    doc.remove("enriched").map_err(fm_err)?;
+    super::enrich_stamp::clear(&mut doc).map_err(fm_err)?;
     ctx.write(&path, doc.into_text().into_bytes(), Some(hash))?;
 
     let mut out = StepOutcome::default();
