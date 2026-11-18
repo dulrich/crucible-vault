@@ -14,18 +14,17 @@
 //!    The clip is removed only in the first two cases; anything ambiguous keeps it. The engine owns
 //!    finalizing and ticking tracker rows; this step never ticks.
 //! 2. **Kind** (first match wins):
-//!    1. a `sources.toml` `[[serial]]` row, in config order, that matches the clip
-//!       ([`SourcesConfig::work_matches`]: prefix, else author) and whose `kind` is
-//!       a `kinds.toml` key (a row with an undefined kind is skipped with a warning; plan
-//!       round-11-feedback-todos Decision 4);
-//!    2. a `[[newsletter]]` row's linked blog host or a `[[blog]]` row host (`kind` of the
-//!       newsletter row, else `blog`);
-//!    3. (2b) a `[[newsletter]]` row whose `hosts` lists the clip host (that row's `kind`;
-//!       Decision 7);
-//!    4. a YouTube video `source` (plan round-19-yt-cleanup-intake WP-2): `pipelines.toml`
+//!    1. a `sources.toml` record matching the clip, walked in the one publication order
+//!       ([`SourcesConfig::matches`]: any record's URL prefix, then any record's host in canonical
+//!       form, then a prefix-less record's author, config order within each step). A prefix- or
+//!       author-matched record files as its `kind` when that is a `kinds.toml` key; one with an
+//!       undefined kind is skipped with a warning and the next match is tried (plan
+//!       round-11-feedback-todos Decision 4). A host-matched record files as its `kind`, else
+//!       `blog`;
+//!    2. a YouTube video `source` (plan round-19-yt-cleanup-intake WP-2): `pipelines.toml`
 //!       `[youtube] short_kind` (default `post`) when its `## Transcript` text is under
 //!       `MIN_REFINE_WORDS`, else `long_kind` (default `transcript`); not gated by `enabled`;
-//!    5. a `kinds.toml` kind whose `hosts` holds the clip host.
+//!    3. a `kinds.toml` kind whose `hosts` holds the clip host.
 //!
 //!    A match spawns `file-as-kind { kind }` as a child (move + tags + lint); no match leaves the
 //!    clip in place.
@@ -45,11 +44,11 @@
 //! The step never moves the clip itself. Outcome vars: `action` (`replaced|merged|duplicate|transcript|new|
 //! missing`), `target`, `kind`, `child_job_id`, `enrich_job_id`. A clip that already sits in its kind's folder with
 //! all of the kind's tags spawns no child and reports `kind` with `filed = "already"` (`action`
-//! unchanged). The matched serial row's `publication()` (any kind), else the matched host row's,
-//! is written to the clip when absent, before the child is spawned.
+//! unchanged). The publication of the record that gave the kind is written to the clip when
+//! absent, before the child is spawned.
 
 use cv_actions::pipelines::{Publication, SourcesConfig};
-use cv_actions::sources::{MatchOrder, PubMatch};
+use cv_actions::sources::PubMatch;
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_note::{FrontmatterDoc, JsValue};
@@ -128,39 +127,18 @@ pub(in crate::steps) fn clip_of(doc: &FrontmatterDoc) -> Clip {
     }
 }
 
-/// Where a note's tracker-row publication ranks against the resolver's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::steps) enum TrackedRank {
-    /// The resolver in [`MatchOrder::PrefixHostAuthor`], else the tracker's (the frontmatter
-    /// backfill).
-    AfterResolver,
-    /// The tracker's, else the resolver in [`MatchOrder::RecordOrder`] (the reconcile's
-    /// publication repair of a blank value, after its prefix step).
-    BeforeResolver,
-}
-
-/// The publication of a note with clip facts `clip` and tracker-row publication `tracked`, in
-/// `rank`.
+/// The publication of a note with clip facts `clip`: [`SourcesConfig::resolve`]'s record, else
+/// the tracker-row publication `tracked`.
 pub(in crate::steps) fn publication_for(
     sources: &SourcesConfig,
     clip: &Clip,
     tracked: Option<&str>,
-    rank: TrackedRank,
 ) -> Option<String> {
     let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
-    let resolved = |order| {
-        sources
-            .resolve(&authors, &clip.source, order)
-            .map(|m| m.publication().publication().to_owned())
-    };
-    match rank {
-        TrackedRank::AfterResolver => {
-            resolved(MatchOrder::PrefixHostAuthor).or_else(|| tracked.map(str::to_owned))
-        }
-        TrackedRank::BeforeResolver => tracked
-            .map(str::to_owned)
-            .or_else(|| resolved(MatchOrder::RecordOrder)),
-    }
+    sources
+        .resolve(&authors, &clip.source)
+        .map(|m| m.publication().publication().to_owned())
+        .or_else(|| tracked.map(str::to_owned))
 }
 
 /// The row a clip host matched in `sources.toml`.
@@ -195,7 +173,7 @@ pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<
     })
 }
 
-/// The first of [`SourcesConfig::work_matches`] for the clip whose `kind` `is_kind`; a matching
+/// The first of [`SourcesConfig::work_matches`] for the note whose `kind` `is_kind`; a matching
 /// record with an undefined kind is skipped with a warning (never coerced).
 pub(in crate::steps) fn serial_hit<'a>(
     sources: &'a SourcesConfig,
@@ -416,7 +394,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
                 vars.action = "transcript";
                 // The configured long kind whatever the host says; the publication rules still apply.
                 let long = ctx.config.pipelines().youtube.long_kind.trim().to_owned();
-                let (_, publication) = kind_rules(ctx, &clip, &body, row.as_ref())?;
+                let (_, publication) = kind_rules(ctx, &clip, &body)?;
                 file_clip(ctx, &clip_path, &long, publication.as_deref(), &mut vars)?;
                 let final_path = final_clip_path(ctx, &clip_path, vars.kind.as_deref());
                 link_post_note(ctx, &pair, &target, &final_path, &clip_path)?;
@@ -449,7 +427,7 @@ fn run(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     }
 
     // ---- kind ---------------------------------------------------------------------------------
-    let (kind, publication) = kind_rules(ctx, &clip, &body, row.as_ref())?;
+    let (kind, publication) = kind_rules(ctx, &clip, &body)?;
     if let Some(kind) = kind {
         file_clip(ctx, &clip_path, &kind, publication.as_deref(), &mut vars)?;
     }
@@ -491,30 +469,50 @@ fn enrich(ctx: &StepCtx<'_>, path: &str) -> Option<String> {
 }
 
 /// Step 2's kind rules: the clip's kind (first match wins, module doc) and the publication filing
-/// writes when absent (a serial row's, any kind, round-11 Decision 4, wins over a host row's).
+/// writes when absent (that of the record that gave the kind; none for the fallbacks).
 fn kind_rules(
     ctx: &StepCtx<'_>,
     clip: &Clip,
     body: &str,
-    row: Option<&HostRow>,
 ) -> Result<(Option<String>, Option<String>), StepError> {
     let sources: &SourcesConfig = ctx.config.sources();
-    let is_kind = |k: &str| kind_def(ctx.config, k).is_ok();
-    let mut work_pub = None;
-    let kind = if let Some(s) = serial_hit(sources, clip, is_kind) {
-        work_pub = Some(s.publication().trim().to_owned()).filter(|p| !p.is_empty());
-        Some(s.kind.as_deref().unwrap_or("").trim().to_owned())
-    } else if let Some(k) = row.and_then(|r| r.kind.clone()) {
-        Some(k)
-    } else if cv_text::url_canon::is_youtube_video(&clip.source) {
+    if let Some((kind, p)) = record_kind(sources, clip, |k| kind_def(ctx.config, k).is_ok()) {
+        let publication = Some(p.publication().trim().to_owned()).filter(|p| !p.is_empty());
+        return Ok((Some(kind), publication));
+    }
+    let kind = if cv_text::url_canon::is_youtube_video(&clip.source) {
         Some(youtube_kind(&ctx.config.pipelines().youtube, body))
     } else if let Some(h) = &clip.host {
         hosts_kind(ctx.config, h)?
     } else {
         None
     };
-    let publication = work_pub.or_else(|| row.and_then(|r| r.publication.clone()));
-    Ok((kind, publication))
+    Ok((kind, None))
+}
+
+/// The first record of [`SourcesConfig::matches`] for the clip that gives a kind, with that kind:
+/// a host match files as [`Publication::kind_or_blog`]; a prefix or author match needs a `kind`
+/// that `is_kind`, else it is skipped with a warning (never coerced).
+pub(in crate::steps) fn record_kind<'a>(
+    sources: &'a SourcesConfig,
+    clip: &Clip,
+    is_kind: impl Fn(&str) -> bool,
+) -> Option<(String, &'a Publication)> {
+    let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
+    sources
+        .matches(&authors, &clip.source)
+        .find_map(|m| match m {
+            PubMatch::Host { publication: p, .. } => Some((p.kind_or_blog().to_owned(), p)),
+            PubMatch::Prefix(p) | PubMatch::Author(p) => {
+                let kind = p.kind.as_deref().unwrap_or("").trim();
+                if is_kind(kind) {
+                    Some((kind.to_owned(), p))
+                } else {
+                    tracing::warn!(serial = %p.name, %kind, "auto_file: serial row kind is not defined in kinds.toml; row skipped");
+                    None
+                }
+            }
+        })
 }
 
 /// Files the clip under `kind` through [`spawn_file_as_kind`] (sets `vars.kind`, `vars.filed`,

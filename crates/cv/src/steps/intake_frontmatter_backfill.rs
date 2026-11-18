@@ -11,7 +11,8 @@
 //! - **`read`**: no `read` key at all gets `read: false` (no cut-off); an existing `read`, true or
 //!   false, is never touched.
 //! - **`publication`**: a blank or absent one gets the resolver's answer for the note's
-//!   `source` and `author` ([`cv_actions::pipelines::SourcesConfig::by_note`]), else the
+//!   `source` and `author` in the one publication order (URL prefix, then host, then author;
+//!   [`cv_actions::pipelines::SourcesConfig::by_note`]), else the
 //!   publication of the source row of a tracker row pointing at the note
 //!   ([`super::reconcile_repair::publication_of_row`]); when neither answers it stays absent. A
 //!   non-blank `publication` is never overwritten.
@@ -29,7 +30,7 @@ use cv_note::{FrontmatterDoc, JsValue};
 use cv_state::TrackerItem;
 use serde::Serialize;
 
-use super::auto_file::{self, TrackedRank, clip_of};
+use super::auto_file::{self, clip_of};
 use super::params::{check_keys, get_bool, job_dry_run};
 use super::reconcile_repair::publication_of_row;
 use super::{StepCtx, StepError, StepModule, StepOutcome};
@@ -104,12 +105,7 @@ fn publication_for(
     rows: Option<&Vec<TrackerItem>>,
 ) -> Option<String> {
     let tracked = rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r)));
-    auto_file::publication_for(
-        ctx.config.sources(),
-        &clip_of(doc),
-        tracked.as_deref(),
-        TrackedRank::AfterResolver,
-    )
+    auto_file::publication_for(ctx.config.sources(), &clip_of(doc), tracked.as_deref())
 }
 
 /// The candidate paths: day-folder notes with `post-id` or `message-id`.

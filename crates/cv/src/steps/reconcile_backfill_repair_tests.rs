@@ -509,7 +509,11 @@ fn reconcile_merges_a_mail_note_with_its_custom_domain_rss_twin_and_leaves_the_c
     assert_eq!((n(&o, "dup_merged"), n(&o, "dup_other")), (1, 0));
     assert!(!w.env.vault().join("mailnotes/m.md").exists());
     assert!(w.env.read("Letters/rss.md").unwrap().contains(LONG));
-    assert_eq!(w.env.read("Letters/cross.md").unwrap(), cross0);
+    // The cross-post is not merged; phase F's host step fills its blank publication.
+    assert_eq!(
+        w.env.read("Letters/cross.md").unwrap(),
+        cross0.replace("\ncomplete:", "\npublication: Other\ncomplete:")
+    );
 }
 
 #[test]

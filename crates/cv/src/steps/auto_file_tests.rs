@@ -947,3 +947,79 @@ fn linking_a_clip_clears_its_whole_enrich_stamp() {
         "{t}"
     );
 }
+
+// ---- one publication order at every site ----------------------------------------------------
+
+/// The record each site names for a note with `fm` frontmatter and tracker publication
+/// `tracked`: `(resolver, clip filing, reconcile blank fill, backfill)`.
+fn every_site(sources: &str, fm: &str, tracked: Option<&str>) -> [Option<String>; 4] {
+    use super::auto_file::{clip_of, publication_for, record_kind};
+    use super::reconcile_repair::decide_publication;
+    let s = cv_actions::pipelines::SourcesConfig::from_table(&sources.parse().unwrap()).unwrap();
+    let text = format!("---\n{fm}---\n\nBody.\n");
+    let d = cv_note::FrontmatterDoc::new(text.as_str());
+    let clip = clip_of(&d);
+    let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
+    [
+        s.by_note(&authors, &clip.source)
+            .map(|p| p.publication().to_owned()),
+        record_kind(&s, &clip, |k| k == "post" || k == "fanfic")
+            .map(|(_, p)| p.publication().to_owned()),
+        decide_publication(&s, &d, tracked).map(|(p, _)| p),
+        publication_for(&s, &clip, tracked),
+    ]
+}
+
+fn all(name: &str) -> [Option<String>; 4] {
+    std::array::from_fn(|_| Some(name.to_owned()))
+}
+
+#[test]
+fn prefix_record_wins_over_an_earlier_author_record_at_every_site() {
+    let s = "[[publication]]\nname = \"ByAuthor\"\nauthor = \"Ann\"\nkind = \"post\"\n[[publication]]\nname = \"ByPrefix\"\nprefix = [\"https://s.example/\"]\nkind = \"fanfic\"\n";
+    let fm = "source: https://s.example/1\nauthor: Ann\n";
+    assert_eq!(every_site(s, fm, None), all("ByPrefix"));
+}
+
+#[test]
+fn host_only_record_fills_a_blank_publication_at_every_site() {
+    let s = "[[publication]]\nname = \"HostOnly\"\nhosts = [\"h.example\"]\n";
+    let fm = "source: https://h.example/p/1\n";
+    assert_eq!(every_site(s, fm, None), all("HostOnly"));
+}
+
+#[test]
+fn listed_host_record_wins_over_a_later_feed_on_that_host_at_every_site() {
+    let s = "[[publication]]\nname = \"Listed\"\nhosts = [\"x.example\"]\n[[publication]]\nname = \"Fed\"\nfeeds = [\"https://x.example/feed\"]\n";
+    let fm = "source: https://x.example/p/1\n";
+    assert_eq!(every_site(s, fm, None), all("Listed"));
+    assert_eq!(
+        host_row("x.example", &config_sources(s)).and_then(|r| r.publication),
+        Some("Listed".to_owned())
+    );
+}
+
+#[test]
+fn alias_host_matches_the_record_host_at_every_site() {
+    let s = "[[publication]]\nname = \"Tube\"\nhosts = [\"youtube.com\"]\n";
+    let fm = "source: https://youtu.be/abcdefghijk\n";
+    assert_eq!(every_site(s, fm, None), all("Tube"));
+}
+
+#[test]
+fn resolver_beats_the_tracker_row_when_filling_a_blank_publication() {
+    let s = "[[publication]]\nname = \"ByAuthor\"\nauthor = \"Ann\"\nkind = \"post\"\n";
+    let fm = "source: https://none.example/1\nauthor: Ann\n";
+    assert_eq!(every_site(s, fm, Some("Tracked")), all("ByAuthor"));
+    // No resolver answer: the tracker row's.
+    let fm = "source: https://none.example/1\n";
+    let [_, _, reconcile, backfill] = every_site(s, fm, Some("Tracked"));
+    assert_eq!(
+        (reconcile, backfill),
+        (Some("Tracked".into()), Some("Tracked".into()))
+    );
+}
+
+fn config_sources(s: &str) -> cv_actions::pipelines::SourcesConfig {
+    cv_actions::pipelines::SourcesConfig::from_table(&s.parse().unwrap()).unwrap()
+}

@@ -3,10 +3,11 @@
 //! `[[publication]]` carries everything one publication is matched by (feeds, mail senders and
 //! list ids, clip hosts, URL prefixes, an author, a YouTube channel id). The legacy tables still
 //! load through [`legacy`]. [`SourcesConfig::by_mail`], [`SourcesConfig::by_feed`] and
-//! [`SourcesConfig::by_channel`] resolve tracker items; a note or clip resolves through
-//! [`SourcesConfig::resolve`] (typed [`PubMatch`], in a named [`MatchOrder`]),
-//! [`SourcesConfig::work_matches`] and [`SourcesConfig::by_host`]; [`SourcesConfig::by_note`] is
-//! the publication of `resolve` in [`MatchOrder::PrefixHostAuthor`].
+//! [`SourcesConfig::by_channel`] resolve tracker items. A note or clip resolves through one order,
+//! [`SourcesConfig::matches`]: any record's URL prefix, then any record's host (canonical form),
+//! then a prefix-less record's author, the first record in config order winning each step.
+//! [`SourcesConfig::resolve`] is its first match (typed [`PubMatch`]), [`SourcesConfig::by_note`]
+//! that match's publication and [`SourcesConfig::by_host`] its host step alone.
 
 pub(crate) mod legacy;
 
@@ -104,18 +105,6 @@ impl<'a> PubMatch<'a> {
             Self::Prefix(p) | Self::Host { publication: p, .. } | Self::Author(p) => p,
         }
     }
-}
-
-/// The order [`SourcesConfig::resolve`] tries the matchers in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchOrder {
-    /// Every record's prefixes first, then every record's hosts, then the prefix-less records'
-    /// authors; the first record in order wins each step (the source proposal and the
-    /// frontmatter backfill).
-    PrefixHostAuthor,
-    /// Work records in config order, each by its prefix, else its author; no host step (clip
-    /// filing's work pick, the reconcile's publication repair, the Works view).
-    RecordOrder,
 }
 
 pub(crate) fn nonblank(s: &str) -> Option<&str> {
@@ -226,6 +215,24 @@ impl Publication {
             .then_some(PubMatch::Author(self))
     }
 
+    /// The host step for one record: `host` (`canonical_bare_host` form) is the canonical host of
+    /// one of its feeds or a `hosts` entry through `configured_host`; contained under its feed on
+    /// that host, else its first feed.
+    fn host_match(&self, host: &str) -> Option<PubMatch<'_>> {
+        let on_host = |f: &&String| canonical_bare_host(f.trim()).as_deref() == Some(host);
+        let feed = self.feeds.iter().find(on_host);
+        let hit = feed.is_some()
+            || self
+                .hosts
+                .iter()
+                .filter_map(|h| nonblank(h))
+                .any(|h| configured_host(h).as_deref() == Some(host));
+        hit.then(|| PubMatch::Host {
+            publication: self,
+            feed: feed.or_else(|| self.feeds.first()).map(|f| f.trim()),
+        })
+    }
+
     fn author_key(&self) -> Option<String> {
         self.author
             .as_deref()
@@ -297,47 +304,43 @@ impl SourcesConfig {
             .find(|p| p.prefixes().any(|pre| src.starts_with(pre)))
     }
 
-    /// The record a note (its `author` entries and `source` URL) belongs to, tried in `order`.
-    /// [`MatchOrder::PrefixHostAuthor`]: a record whose non-blank prefix starts the trimmed
-    /// source, else one with a [`Publication::hosts`] entry on the source's host (`www.`
-    /// ignored), else a prefix-less record whose author equals one of the note's (`[[ ]]` and `#`
-    /// ignored). [`MatchOrder::RecordOrder`]: the first of [`Self::work_matches`].
-    #[must_use]
-    pub fn resolve(
-        &self,
-        authors: &[&str],
-        source: &str,
-        order: MatchOrder,
-    ) -> Option<PubMatch<'_>> {
-        if order == MatchOrder::RecordOrder {
-            return self.work_matches(authors, source).next();
-        }
+    /// Every record a note (its `author` entries and `source` URL) matches, in the one order:
+    /// each record (config order) with a non-blank prefix that starts the trimmed source, then
+    /// each record (config order) on the source's `canonical_bare_host` ([`Self::by_host`]), then
+    /// each prefix-less record whose author equals one of the note's (`[[ ]]` and `#` ignored).
+    /// A record matched by more than one step appears once per step.
+    pub fn matches<'a, 'b>(
+        &'a self,
+        authors: &'b [&'b str],
+        source: &'b str,
+    ) -> impl Iterator<Item = PubMatch<'a>> + use<'a, 'b> {
         let src = source.trim();
-        if let Some(p) = self.by_prefix(src) {
-            return Some(PubMatch::Prefix(p));
-        }
-        if let Some(host) = feed_host(src)
-            && let Some(p) = self.folded.iter().find(|p| {
-                p.hosts()
-                    .any(|(h, _)| bare_host(&h).as_ref() == Some(&host))
-            })
-        {
-            return Some(PubMatch::Host {
-                publication: p,
-                feed: p.feed_for_host(Some(&host)),
-            });
-        }
+        let host = canonical_bare_host(src);
         let keys: Vec<String> = authors.iter().map(|a| author_key(a)).collect();
-        self.folded
+        let prefix = self
+            .folded
             .iter()
-            .find(|p| {
+            .filter(move |p| p.prefixes().any(|pre| src.starts_with(pre)))
+            .map(PubMatch::Prefix);
+        let hosts = host.into_iter().flat_map(move |h| self.host_matches(h));
+        let author = self
+            .folded
+            .iter()
+            .filter(move |p| {
                 p.prefixes().next().is_none() && p.author_key().is_some_and(|w| keys.contains(&w))
             })
-            .map(PubMatch::Author)
+            .map(PubMatch::Author);
+        prefix.chain(hosts).chain(author)
+    }
+
+    /// The record a note belongs to: the first of [`Self::matches`].
+    #[must_use]
+    pub fn resolve(&self, authors: &[&str], source: &str) -> Option<PubMatch<'_>> {
+        self.matches(authors, source).next()
     }
 
     /// Every record (config order) the note matches by [`Publication::matches_note`]: its prefix,
-    /// else its author.
+    /// else its author (the fanfic title's serial pick).
     pub fn work_matches<'a, 'b>(
         &'a self,
         authors: &'b [&'b str],
@@ -348,36 +351,23 @@ impl SourcesConfig {
             .filter_map(move |p| p.work_match(authors, source))
     }
 
-    /// The publication a note belongs to: [`Self::resolve`] in [`MatchOrder::PrefixHostAuthor`].
+    /// The publication a note belongs to: the record of [`Self::resolve`].
     #[must_use]
     pub fn by_note(&self, authors: &[&str], source: &str) -> Option<&Publication> {
-        self.resolve(authors, source, MatchOrder::PrefixHostAuthor)
-            .map(PubMatch::publication)
+        self.resolve(authors, source).map(PubMatch::publication)
     }
 
-    /// The record a clip host (`canonical_bare_host` form) belongs to: the first feed (records
-    /// and feeds in order) whose canonical host is `host`, else the first record with a `hosts`
-    /// entry on it (a full-URL entry in canonical form, a bare one `www.`-free), contained under
-    /// its feed on that host, else its first feed.
+    fn host_matches(&self, host: String) -> impl Iterator<Item = PubMatch<'_>> {
+        self.folded.iter().filter_map(move |p| p.host_match(&host))
+    }
+
+    /// The host step of [`Self::matches`] alone: the first record (config order) one of whose
+    /// feeds has the canonical host `host` (`canonical_bare_host` form) or one of whose `hosts`
+    /// entries is `host` through `configured_host`, contained under its feed on that host, else
+    /// its first feed.
     #[must_use]
     pub fn by_host(&self, host: &str) -> Option<PubMatch<'_>> {
-        if let Some((link, p)) = self
-            .feeds()
-            .find(|(l, _)| canonical_bare_host(l).as_deref() == Some(host))
-        {
-            return Some(PubMatch::Host {
-                publication: p,
-                feed: Some(link.trim()),
-            });
-        }
-        let p = self.folded.iter().find(|p| {
-            p.hosts()
-                .any(|(h, feed)| feed.is_none() && configured_host(&h).as_deref() == Some(host))
-        })?;
-        Some(PubMatch::Host {
-            publication: p,
-            feed: p.feed_for_host(Some(host)),
-        })
+        self.host_matches(host.to_owned()).next()
     }
 
     /// The publication whose feeds include `link` (trimmed, exact).
@@ -602,15 +592,15 @@ mod tests {
         );
     }
 
-    /// The typed resolver in each order: prefix, host (with its feed), author, no match.
+    /// The typed resolver: prefix, host (with its feed), author, no match.
     #[test]
-    fn resolve_is_typed_in_each_order() {
+    fn resolve_is_typed_in_one_order() {
         let c = parse(
             "[[publication]]\nname = \"ByAuthor\"\nauthor = \"Ann\"\n[[publication]]\nname = \"ByPrefix\"\nprefix = [\"https://s.example/s/\"]\n[[publication]]\nname = \"ByHost\"\nfeeds = [\"https://h.example/feed\", \"https://www.k.example/rss\"]\nhosts = [\"s.example\"]\n",
         )
         .unwrap();
         let name = |m: Option<PubMatch<'_>>| m.map(|m| m.publication().name.clone());
-        let host = c.resolve(&[], "https://k.example/p/1", MatchOrder::PrefixHostAuthor);
+        let host = c.resolve(&[], "https://k.example/p/1");
         assert!(matches!(
             host,
             Some(PubMatch::Host {
@@ -619,36 +609,25 @@ mod tests {
             })
         ));
         assert_eq!(name(host).as_deref(), Some("ByHost"));
-        let pre = c.resolve(
-            &["Ann"],
-            "https://s.example/s/1",
-            MatchOrder::PrefixHostAuthor,
-        );
+        // Prefix beats the author record listed before it.
+        let pre = c.resolve(&["Ann"], "https://s.example/s/1");
         assert!(matches!(pre, Some(PubMatch::Prefix(_))));
         assert_eq!(name(pre).as_deref(), Some("ByPrefix"));
-        // Host beats author in `PrefixHostAuthor`; `RecordOrder` has no host step and takes the
-        // first work record in config order.
+        // Host beats author.
         let src = "https://s.example/other";
-        let by = |o| name(c.resolve(&["Ann"], src, o));
-        assert_eq!(by(MatchOrder::PrefixHostAuthor).as_deref(), Some("ByHost"));
-        assert_eq!(by(MatchOrder::RecordOrder).as_deref(), Some("ByAuthor"));
+        assert_eq!(name(c.resolve(&["Ann"], src)).as_deref(), Some("ByHost"));
         assert!(matches!(
-            c.resolve(&["Ann"], "https://s.example/s/1", MatchOrder::RecordOrder),
+            c.resolve(&["Ann"], "https://other.example/"),
             Some(PubMatch::Author(_))
         ));
-        assert_eq!(
-            name(c.resolve(
-                &["Bob"],
-                "https://none.example/",
-                MatchOrder::PrefixHostAuthor
-            )),
-            None
-        );
-        assert_eq!(
-            name(c.resolve(&["Bob"], "https://none.example/", MatchOrder::RecordOrder)),
-            None
-        );
-        // `by_host`: the canonical feed host first, then a `hosts` entry, under its feed.
+        assert_eq!(name(c.resolve(&["Bob"], "https://none.example/")), None);
+        // Every match, in order: prefix, host, author.
+        let all: Vec<String> = c
+            .matches(&["Ann"], "https://s.example/s/1")
+            .map(|m| m.publication().name.clone())
+            .collect();
+        assert_eq!(all, ["ByPrefix", "ByHost", "ByAuthor"]);
+        // `by_host`: a `hosts` entry, under the record's first feed.
         assert!(matches!(
             c.by_host("s.example"),
             Some(PubMatch::Host {

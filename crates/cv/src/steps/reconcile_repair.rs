@@ -21,16 +21,14 @@
 //!   `dup_distinct`, a note already carrying `duplicate-of` is skipped, a lost CAS race is
 //!   `dup_conflict`. Re-associate-then-trash means an interrupted run never leaves a row
 //!   pointing at a missing note, and a rerun finishes the pair.
-//! - **F. Publication** ([`publication`]): each note linked from a tracker row (`note_path`) with
-//!   no `publication` gets its source row's (`short`, else name; `channel` for YouTube),
-//!   inserted after `author` (`publication_backfilled`); a `sources.toml` prefix that starts the
-//!   note's `source` instead decides alone and replaces any other value (`publication_overwritten`). A note none of whose
-//!   rows maps to a source row is `publication_no_row`; a lost CAS race `publication_conflict`.
-//!   Tracker rows never carry a `[[serial]]` source, so serial rows join separately (round 11
-//!   E1): an indexed note (outside `.trash/`) that matches a `[[serial]]` row by
-//!   `SerialSource::matches` (its `author` list + `source`) and has no `publication` gets the
-//!   first matching row's, through the same write; a tracker-linked note's own row wins, and
-//!   each note is written at most once per pass.
+//! - **F. Publication** ([`publication`]): each note linked from a tracker row (`note_path`), and
+//!   each indexed note (outside `.trash/`) carrying a `source`, is considered once per pass. A `sources.toml` prefix that starts the note's `source` decides alone and replaces
+//!   any other value (`publication_overwritten`). A blank or absent `publication` is otherwise
+//!   filled in the one publication order (any record's prefix, then any record's host in canonical
+//!   form, then a prefix-less record's author; config order within each step), else from the
+//!   note's tracker source row (`short`, else name; `channel` for YouTube), inserted after
+//!   `author` (`publication_backfilled`). A note none of whose rows maps to a source row is
+//!   `publication_no_row`; a lost CAS race `publication_conflict`.
 //! - **G. Link-only transcripts** ([`transcript_links`], plan intake-removals-sources-rescan
 //!   WP-8, Decision 6), after F: a clip carrying `duplicate-of: "[[post]]"` whose post satisfies
 //!   [`super::transcript_link::is_link_only`] (a complete, free tracker post whose body is one
@@ -56,7 +54,7 @@ use cv_state::TrackerItem;
 use cv_vault::VaultError;
 use serde::Serialize;
 
-use super::auto_file::{ChildAt, TrackedRank, clip_of, publication_for, spawn_file_as_kind};
+use super::auto_file::{ChildAt, clip_of, publication_for, spawn_file_as_kind};
 use super::mail::{mail_blog_link, resolve_newsletter};
 use super::reconcile_backfill::{Shared, message_map, read_text};
 use super::transcript_link::{link_pair, publication_of, target_is_link_only};
@@ -333,8 +331,9 @@ pub(super) enum Fill {
 
 /// The pure phase-F decision for one note: `None` (leave it), or the publication to write.
 /// A `sources.toml` prefix match on the note's `source` decides alone and replaces any other
-/// value; otherwise only a blank `publication` is filled, from the tracker row (`tracked`), else
-/// the work-record match. Malformed frontmatter is left alone.
+/// value; otherwise only a blank `publication` is filled, from the one publication order
+/// ([`publication_for`]: prefix, host, author), else the tracker row (`tracked`). Malformed
+/// frontmatter is left alone.
 pub(super) fn decide_publication(
     sources: &cv_actions::pipelines::SourcesConfig,
     doc: &FrontmatterDoc,
@@ -358,8 +357,7 @@ pub(super) fn decide_publication(
     if !blank {
         return None;
     }
-    publication_for(sources, &clip, tracked, TrackedRank::BeforeResolver)
-        .map(|p| (p, Fill::Backfill))
+    publication_for(sources, &clip, tracked).map(|p| (p, Fill::Backfill))
 }
 
 /// Phase F.

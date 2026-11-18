@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## Unreleased
 
+### Changed
+
+- Publications: when several `sources.toml` records match a note or clip, every site (source proposal, clip filing, the frontmatter backfill and the reconcile) now picks the same one: a URL prefix first, then a host, then an author, the first record in the file winning each step. Alias hosts such as `youtu.be` or `twitter.com` now match a record listing `youtube.com` or `x.com` everywhere. The reconcile fills a blank `publication` from `sources.toml` before the tracker row, and now also matches by host. Existing `publication` values are not rewritten.
+
 ### Fixed
 
 - Transcript repair: a clip that had been enriched as a duplicate before the reconcile linked it as a transcript kept its chapter headings, so the transcript section ended at the first one and the refine skipped it as short. The repair now removes the old abstract and chapter headings and files the clip under the transcript kind, which runs the refine and a new enrich.
