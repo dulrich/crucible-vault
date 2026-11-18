@@ -36,11 +36,14 @@
 //!   [`super::auto_file::is_link_only`] (a complete, free tracker post whose body is one
 //!   single-link line; the clip has at least `MIN_REFINE_WORDS` words) becomes the post's
 //!   transcript: `duplicate-of` is replaced by `transcript-of`, the body goes under one
-//!   `## Transcript` section and the clip's `enriched` stamp is cleared in that same write when the
-//!   section was added, and the post gets `transcript: "[[clip]]"` plus a blank `publication`
+//!   `## Transcript` section, with the enrich pass's stale top block and inserted headings removed
+//!   and the clip's `enriched` / `enrich-model` cleared in that same write when the section was
+//!   added, and the post gets `transcript: "[[clip]]"` plus a blank `publication`
 //!   from the clip (`transcript_linked`, one per pair changed). A clip that already carries
 //!   `transcript-of` only completes the post side (a blank `transcript`, a blank `publication`).
-//!   The clip need not sit under `Clippings/` and is never moved. A lost CAS is
+//!   The clip need not sit under `Clippings/`; a clip the repair changed is then filed like a
+//!   captured one (`file-as-kind` with the configured long kind: move, tags, clip pipeline with the
+//!   refine), unless it is already filed under that kind. A lost CAS is
 //!   `transcript_conflict`; a second run changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -53,7 +56,9 @@ use cv_state::TrackerItem;
 use cv_vault::VaultError;
 use serde::Serialize;
 
-use super::auto_file::{link_clip, link_post, publication_of, target_is_link_only, wikilink};
+use super::auto_file::{
+    file_transcript_clip, link_clip, link_post, publication_of, target_is_link_only, wikilink,
+};
 use super::mail::{mail_blog_link, resolve_newsletter};
 use super::reconcile_backfill::{Shared, message_map, read_text};
 use super::{StepCtx, StepError};
@@ -520,8 +525,12 @@ pub(super) fn transcript_links(
         }
         let mut changed = false;
         let mut lost = false;
+        let mut clip_changed = false;
         match ctx.modify(&clip_path, |old| Ok(link_clip(old, &post_link)?)) {
-            Ok(w) => changed |= w.is_some(),
+            Ok(w) => {
+                clip_changed = w.is_some();
+                changed |= clip_changed;
+            }
             Err(e) if e.is_conflict() => lost = true,
             Err(e) => return Err(e),
         }
@@ -538,6 +547,11 @@ pub(super) fn transcript_links(
             c.transcript_conflict += 1;
         } else if changed {
             c.transcript_linked += 1;
+        }
+        // A repaired clip is filed like a captured one: `file-as-kind` moves and tags it and runs
+        // the clip pipeline, whose refine sees the whole section (stale enrich headings are gone).
+        if clip_changed {
+            file_transcript_clip(ctx, &clip_path)?;
         }
     }
     Ok(())

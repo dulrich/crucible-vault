@@ -440,3 +440,55 @@ fn reconcile_links_an_existing_duplicate_pair_as_a_transcript() {
     assert_eq!(w.read("Day/Clip.md").unwrap(), c);
     assert_eq!(w.read("Notes/Post.md").unwrap(), p);
 }
+
+/// A duplicate clip that was enriched before the repair (top block, inserted chapter headings)
+/// loses that structure when it becomes a transcript, so the whole body is one refinable section
+/// (the live defect: the first `##` chapter heading ended the section and refine skipped it).
+#[test]
+fn reconcile_transcript_repair_drops_stale_enrich_structure() {
+    let post = "---\ntitle: P\nsource: BASE/p/ep\ncomplete: true\n---\n\n[Listen](https://api.x.example/feed/podcast/1)\n";
+    let clip = format!(
+        "---\ntitle: C\nsource: BASE/p/ep\nduplicate-of: \"[[Notes/Post]]\"\nenriched: 2026-10-01\nenrich-model: m\n---\n\n%% cv-enrich %%\n> [!abstract]-\n> Blurb.\n%% /cv-enrich %%\n\n{}\n\n%% cv-enrich heading %%\n## Chapter\n\n{}\n",
+        words(40),
+        words(320)
+    );
+    let w = world(&[("Notes/Post.md", post.to_owned()), ("Day/Clip.md", clip)]);
+    w.state
+        .lock()
+        .unwrap()
+        .insert_tracker_item(&TrackerItem {
+            source_kind: "blog".into(),
+            source_key: "feed".into(),
+            item_id: "ep".into(),
+            title: "T".into(),
+            url: format!("{}/p/ep", w.base),
+            first_seen_ms: 1,
+            day: "2026-10-16".into(),
+            outcome: TrackerOutcome::Note,
+            score: None,
+            full_body: Some(true),
+            note_path: Some("Notes/Post.md".into()),
+            source_name: None,
+            duration_s: None,
+            word_count: Some(0),
+            access: Some("free".into()),
+            complete: Some(true),
+            full_word_count: None,
+        })
+        .unwrap();
+    let o = run(&w, "dry_run = false").unwrap();
+    assert_eq!(n(&o, "transcript_linked"), json!(1));
+    let c = w.read("Day/Clip.md").unwrap();
+    assert!(
+        !c.contains("cv-enrich") && !c.contains("## Chapter") && !c.contains("enrich-model"),
+        "{c}"
+    );
+    let body = cv_note::FrontmatterDoc::new(c.as_str()).body().to_owned();
+    assert!(
+        matches!(
+            cv_ingest::transcript::eligibility(&body),
+            cv_ingest::transcript::Eligibility::Ready { words: 360, .. }
+        ),
+        "{c}"
+    );
+}

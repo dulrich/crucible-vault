@@ -660,6 +660,10 @@ pub(crate) fn link_clip(text: &str, post_link: &str) -> Result<Option<String>, c
     if cv_ingest::transcript::locate(&body).is_none() {
         let mut out = d.into_text();
         let off = out.len() - body.len();
+        // A clip enriched before it was linked carries the enrich pass's top block and chapter
+        // headings; a `##` heading would end the new section at its first line, so they go (the
+        // enrich re-runs after the refine).
+        let body = cv_ingest::enrich::strip_structure(&body);
         let lead = body.len() - body.trim_start().len();
         out.truncate(off);
         out.push_str(&body[..lead]);
@@ -667,9 +671,42 @@ pub(crate) fn link_clip(text: &str, post_link: &str) -> Result<Option<String>, c
         out.push_str(&body[lead..]);
         let mut d = FrontmatterDoc::new(out);
         d.remove("enriched")?;
+        d.remove("enrich-model")?;
         return Ok(Some(d.into_text()));
     }
     Ok(changed.then(|| d.into_text()))
+}
+
+/// Enqueues `file-as-kind` with the configured long kind on a clip the reconcile just turned into
+/// a transcript (the capture branch files it through [`file_by_kind`]), so it is moved, tagged and
+/// run through the clip pipeline (refine, then enrich) like a newly captured one. `None` when the
+/// kind is blank, undefined, not a `file-as-kind` choice, the clip is already filed under it, or
+/// the enqueue failed (logged; the link itself stands).
+pub(crate) fn file_transcript_clip(
+    ctx: &StepCtx<'_>,
+    clip_path: &str,
+) -> Result<Option<String>, StepError> {
+    let kind = ctx.config.pipelines().youtube.long_kind.trim().to_owned();
+    if kind.is_empty() || kind_def(ctx.config, &kind).is_err() {
+        return Ok(None);
+    }
+    let allowed = ctx
+        .config
+        .action(FILE_ACTION)
+        .and_then(|a| a.params.iter().find(|p| p.name == "kind"))
+        .is_some_and(|p| p.choices.contains(&kind));
+    if !allowed || already_filed(ctx, clip_path, &kind)? {
+        return Ok(None);
+    }
+    let mut params = serde_json::Map::new();
+    params.insert("kind".into(), serde_json::Value::String(kind));
+    match ctx.children.spawn_child_at(FILE_ACTION, params, clip_path) {
+        Ok(id) => Ok(Some(id)),
+        Err(e) => {
+            tracing::warn!(error = %e, "transcript link: could not enqueue file-as-kind");
+            Ok(None)
+        }
+    }
 }
 
 /// The post edit: `transcript: "<clip_link>"` (when its `transcript` is blank) and, when the post's own `publication` is blank and

@@ -1168,6 +1168,49 @@ pub fn has_generated_block(body: &str) -> bool {
     strip_generated(body).had_generated
 }
 
+/// A frontmatter-free body without the enrich pass's structure: every well-formed managed top
+/// block (and one blank line after it) and every inserted heading (the marker, its heading line
+/// and one blank line after it) are removed; `> [!removed]-` folds and every other line are kept
+/// verbatim. For a body that is re-sectioned (a clip that becomes a transcript): a stale chapter
+/// heading would otherwise end the new section at its first line.
+#[must_use]
+pub fn strip_structure(body: &str) -> String {
+    let raw: Vec<&str> = body.split('\n').collect();
+    let mut out: Vec<&str> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let t = raw[i].trim();
+        let close = (t == MARK_OPEN)
+            .then(|| blocks::managed_close(&raw, i))
+            .flatten();
+        if let Some(j) = close {
+            if raw[i + 1..j].iter().any(|l| l.trim_end() == FOLD_HEADER) {
+                out.extend_from_slice(&raw[i..=j]);
+                i = j + 1;
+            } else {
+                i = j + 1;
+                if i < raw.len() && raw[i].trim().is_empty() {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if t == MARK_HEADING {
+            i += 1;
+            if i < raw.len() && heading_text(raw[i]).is_some() {
+                i += 1;
+                if i < raw.len() && raw[i].trim().is_empty() {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    out.join("\n")
+}
+
 /// The removed spans of a note body's `> [!removed]-` fold(s), in order, one per fold group
 /// ([`fold_groups`]): each group's lines with trailing whitespace trimmed, joined, trimmed; empty
 /// spans are dropped. Old-layout content (no `%% cv-fold %%` metadata) splits at every lone `>`

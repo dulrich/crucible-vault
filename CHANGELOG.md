@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Transcript repair: a clip that had been enriched as a duplicate before the reconcile linked it as a transcript kept its chapter headings, so the transcript section ended at the first one and the refine skipped it as short. The repair now removes the old abstract and chapter headings and files the clip under the transcript kind, which runs the refine and a new enrich.
+
 ## 1.2.0 — 2026-11-17
 
 ### Added

@@ -796,3 +796,19 @@ fn fold_ranges_matches_enrich_and_round_trips() {
         Err(FoldError::Generated)
     );
 }
+
+/// `strip_structure` removes the top block and inserted headings, keeps the fold and the text,
+/// and leaves a body without generated structure byte-identical.
+#[test]
+fn strip_structure_drops_the_top_block_and_inserted_headings_only() {
+    let plain = "First paragraph.\n\n## Own heading\n\nSecond paragraph.\n";
+    assert_eq!(strip_structure(plain), plain);
+    let fold = "%% cv-enrich %%\n> [!removed]-\n> Buy now.\n%% /cv-enrich %%\n";
+    let body = format!(
+        "%% cv-enrich %%\n> [!abstract]-\n> Blurb.\n%% /cv-enrich %%\n\nIntro line.\n\n%% cv-enrich heading %%\n## Chapter one\n\nText one.\n\n%% cv-enrich heading %%\n## Chapter two\n\nText two.\n\n{fold}"
+    );
+    assert_eq!(
+        strip_structure(&body),
+        format!("Intro line.\n\nText one.\n\nText two.\n\n{fold}")
+    );
+}
