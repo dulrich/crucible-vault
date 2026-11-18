@@ -4,8 +4,9 @@
 //! its kind label, a short preview and the two [`RemovalOp`]s its buttons send — so the drawn
 //! controls and the requests they make are testable without a renderer.
 
-use cv_ingest::enrich::FoldGroup;
+use cv_ingest::enrich::{FOLD_KIND, FoldGroup};
 use cv_protocol::{RemovalOp, RemovalVerdict};
+use editor_model::render::Block;
 
 /// The longest preview shown for a group (characters).
 const PREVIEW_CHARS: usize = 60;
@@ -55,6 +56,31 @@ pub fn rows(groups: &[FoldGroup]) -> Vec<FoldRow> {
             }
         })
         .collect()
+}
+
+/// The fold controls of a note: Reading draws them on the top-level block `block`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldControls {
+    /// The index of the first top-level removed-content callout.
+    pub block: usize,
+    /// One row per fold group ([`rows`]).
+    pub rows: Vec<FoldRow>,
+}
+
+/// The controls for a note with `blocks` and fold `groups`: on its first top-level removed
+/// callout, `None` when there are no groups or no such callout.
+#[must_use]
+pub fn controls(blocks: &[Block], groups: &[FoldGroup]) -> Option<FoldControls> {
+    if groups.is_empty() {
+        return None;
+    }
+    let block = blocks
+        .iter()
+        .position(|b| matches!(b, Block::Callout { kind, .. } if kind == FOLD_KIND))?;
+    Some(FoldControls {
+        block,
+        rows: rows(groups),
+    })
 }
 
 /// What the fold title's "Delete all" sends.
@@ -124,5 +150,27 @@ mod tests {
         let old =
             fold_groups("x\n\n%% cv-enrich %%\n> [!removed]-\n> old line\n\n%% /cv-enrich %%\n");
         assert_eq!(rows(&old)[0].kind, None);
+    }
+
+    /// Two top-level removed callouts and fold groups: the controls sit on the first only; no
+    /// groups, no controls.
+    #[test]
+    fn controls_point_at_the_first_removed_callout() {
+        let fold = "%% cv-enrich %%\n> [!removed]-\n> old line\n\n%% /cv-enrich %%\n";
+        let text = format!("intro\n\n{fold}\nmid\n\n{fold}");
+        let blocks = editor_model::render::lower(&text).blocks;
+        let removed: Vec<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| matches!(b, Block::Callout { kind, .. } if kind == FOLD_KIND))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(removed.len(), 2, "{blocks:?}");
+        let groups = fold_groups(&text);
+        assert!(!groups.is_empty());
+        let c = controls(&blocks, &groups).expect("controls");
+        assert_eq!(c.block, removed[0]);
+        assert_eq!(c.rows, rows(&groups));
+        assert_eq!(controls(&blocks, &[]), None);
     }
 }

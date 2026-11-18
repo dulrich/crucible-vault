@@ -4,6 +4,7 @@
 //! note's missing matcher values, which the user applies explicitly (one [`DocEdit::SetMany`]).
 //! Nothing is written until the normal settings save.
 
+use cv_actions::sources::{FIELD_FROM, FIELD_HOSTS, FIELD_LIST_ID, FIELD_PREFIX};
 use cv_protocol::{ProposeSourceResult, ProposedSource, SourceMatchers};
 use cv_schema::Path;
 
@@ -31,10 +32,10 @@ pub fn propose_error(e: &DaemonError) -> String {
 /// The matcher lists as `(key, value)` pairs, empty lists skipped.
 fn matcher_lists(m: &SourceMatchers) -> Vec<(&'static str, &Vec<String>)> {
     [
-        ("from", &m.from),
-        ("list_id", &m.list_id),
-        ("hosts", &m.hosts),
-        ("prefix", &m.prefix),
+        (FIELD_FROM, &m.from),
+        (FIELD_LIST_ID, &m.list_id),
+        (FIELD_HOSTS, &m.hosts),
+        (FIELD_PREFIX, &m.prefix),
     ]
     .into_iter()
     .filter(|(_, v)| !v.is_empty())

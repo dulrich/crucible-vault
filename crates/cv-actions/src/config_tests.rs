@@ -411,6 +411,24 @@ fn in_works_resolves_record_then_kind_then_false() {
     assert!(r(Some("bad"), Some(true)));
 }
 
+/// The In-Works rule over raw values: own setting, else the kind's default, else off.
+#[test]
+fn works_rule_truth_table() {
+    for own in [None, Some(true), Some(false)] {
+        for kind in [None, Some("k")] {
+            for default in [None, Some(true), Some(false)] {
+                let got = works_rule(own, kind, |_| default, false);
+                let want = own.or(kind.and(default)).unwrap_or(false);
+                assert_eq!(got, want, "own {own:?} kind {kind:?} default {default:?}");
+            }
+        }
+    }
+    // The kind default is looked up only when the record has no own setting and has a kind.
+    let never = |_: &str| -> Option<bool> { panic!("looked up") };
+    assert!(works_rule(Some(true), Some("k"), never, false));
+    assert!(!works_rule(None, None, never, false));
+}
+
 /// Plan intake-removals-sources-rescan WP-4: the built-in media cleanup action is always armed
 /// (no user config needed); a user action under its reserved id is refused and the built-in wins.
 #[test]

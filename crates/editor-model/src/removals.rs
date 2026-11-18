@@ -3,6 +3,7 @@
 //! at `\n`); the editor's buffer and the render model count lines of the **full** note. This
 //! module converts one to the other and turns a Source or Reading selection into whole lines.
 
+use crate::body::line_base;
 use crate::render::RenderModel;
 use crate::visible::{Part, VisRun};
 
@@ -27,26 +28,10 @@ impl TrimError {
     }
 }
 
-/// The note body of `text`: everything after the frontmatter block, the split the daemon applies
-/// before its fold operations (`cv-note`).
-#[must_use]
-pub fn body_of(text: &str) -> &str {
-    let body = cv_note::FrontmatterDoc::new(text).body().len();
-    &text[text.len() - body..]
-}
-
-/// How many lines the frontmatter block (fences included) takes off the top of `text`: body line
-/// 0 is full-note line `body_line_base(text)`. Uses the daemon's own split (`cv-note`).
-#[must_use]
-pub fn body_line_base(text: &str) -> usize {
-    let body = body_of(text).len();
-    text[..text.len() - body].matches('\n').count()
-}
-
 /// The 0-based inclusive **body** range of full-note lines `first..=last` of `text`; an error
 /// when any of them is a frontmatter line.
 pub fn body_range(text: &str, first: usize, last: usize) -> Result<(usize, usize), TrimError> {
-    let base = body_line_base(text);
+    let base = line_base(text);
     let total = text.matches('\n').count() + 1;
     if first > last || first < base || last >= total {
         return Err(TrimError::NotInBody);
@@ -82,8 +67,9 @@ pub fn source_lines(
 /// text `sel_text`. A run knows only its top-level block, and a block knows its source line range
 /// (`RenderModel::block_lines`), so the range starts as the blocks' lines; inside the first and
 /// last block it narrows to the first and last line whose text contains the selection's first
-/// and last non-blank line (a block drawn from several source lines). When the text cannot be
-/// found (markup differs) the block bound stays: it never narrows wrongly.
+/// and last non-blank line (a substring narrowing: a block drawn from several source lines). When
+/// the text cannot be found (markup differs) the block bound is the fallback: it never narrows
+/// wrongly.
 pub fn reading_lines(
     model: &RenderModel,
     runs: &[VisRun],
@@ -139,10 +125,10 @@ mod tests {
 
     #[test]
     fn body_range_drops_the_frontmatter_lines() {
-        assert_eq!(body_line_base(NOTE), 3);
+        assert_eq!(line_base(NOTE), 3);
         // Full-note line 5 is "first line" = body line 2 (0: "intro", 1: "", 2: "first line").
         assert_eq!(body_range(NOTE, 5, 6), Ok((2, 3)));
-        assert_eq!(body_line_base("no frontmatter\nx"), 0);
+        assert_eq!(line_base("no frontmatter\nx"), 0);
         assert_eq!(body_range("a\nb\nc", 1, 2), Ok((1, 2)));
 
         // A frontmatter or out-of-range line is refused.

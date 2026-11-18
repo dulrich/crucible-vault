@@ -185,11 +185,10 @@ pub fn reading<'a>(
     // position whether or not the note has frontmatter. The filename edit moved to the note
     // control bar's breadcrumb (plan editor-feedback-round-2 WP-6).
     let mut items: Vec<Element<'a, Message>> = vec![properties(&cx, &doc.model.properties)];
-    let fold_drawn = Cell::new(false);
     items.extend(doc.model.blocks.iter().enumerate().map(|(i, b)| {
         // plan editor-ui-round-3 WP-6: an id'd container per top-level block, so a widget
         // operation can read its layout bounds (place-keeping across mode switches).
-        container(top_block(&cx, b, &fold_drawn))
+        container(top_block(&cx, i, b))
             .id(super::block_id(path, view, i))
             .into()
     }));
@@ -434,27 +433,20 @@ fn copy_overlay<'a>(
     iced::widget::hover(body, layer)
 }
 
-/// A top-level block: the first `[!removed]` callout of a note with fold groups carries the
-/// Delete / Keep controls (plan intake-removals-sources-rescan WP-6; every other block, and a
-/// callout inside a transclusion or list, is drawn by [`block`] unchanged).
-fn top_block<'a>(cx: &Ctx<'a, '_>, b: &'a Block, fold_drawn: &Cell<bool>) -> Element<'a, Message> {
-    match b {
-        Block::Callout {
-            kind,
-            title,
-            fold,
-            children,
-        } if kind == "removed" && !cx.doc.fold_groups.is_empty() => {
-            let controls = !fold_drawn.replace(true);
-            callout(
-                cx,
+/// A top-level block: the first removed callout of a note with fold groups carries the Delete /
+/// Keep controls (plan intake-removals-sources-rescan WP-6; every other block, and a callout
+/// inside a transclusion or list, is drawn by [`block`] unchanged).
+fn top_block<'a>(cx: &Ctx<'a, '_>, i: usize, b: &'a Block) -> Element<'a, Message> {
+    match (b, &cx.doc.fold_controls) {
+        (
+            Block::Callout {
                 kind,
-                title.as_deref(),
-                *fold,
+                title,
+                fold,
                 children,
-                controls.then_some(()),
-            )
-        }
+            },
+            Some(c),
+        ) if c.block == i => callout(cx, kind, title.as_deref(), *fold, children, Some(&c.rows)),
         _ => block(cx, b),
     }
 }
@@ -480,16 +472,16 @@ fn fold_button<'a>(cx: &Ctx<'a, '_>, label: &'static str, msg: Message) -> Eleme
         .into()
 }
 
-/// A callout; `fold_controls` (the removed-content fold of a note with groups) adds "Delete all"
-/// on the title line and one row per group below it (kind label, preview, Delete, Keep). The
-/// group rows come from [`super::fold_controls::rows`]; the fold's own lines are drawn as usual.
+/// A callout; `fold_rows` (the removed-content fold of a note with groups) adds "Delete all" on
+/// the title line and one row per group below it (kind label, preview, Delete, Keep); the fold's
+/// own lines are drawn as usual.
 fn callout<'a>(
     cx: &Ctx<'a, '_>,
     kind: &'a str,
     title: Option<&'a str>,
     fold: Option<Fold>,
     children: &'a [Block],
-    fold_controls: Option<()>,
+    fold_rows: Option<&[super::fold_controls::FoldRow]>,
 ) -> Element<'a, Message> {
     let t = cx.t;
     let marker = match fold {
@@ -508,7 +500,7 @@ fn callout<'a>(
         cx.sz(16.0),
     );
     let mut col: Vec<Element<'a, Message>> = Vec::new();
-    if fold_controls.is_some() {
+    if let Some(rows) = fold_rows {
         let msg = |op| Message::Reading(ReadingMsg::Removals { note: cx.note, op });
         col.push(
             row![
@@ -519,7 +511,7 @@ fn callout<'a>(
             .align_y(iced::alignment::Vertical::Center)
             .into(),
         );
-        for r in super::fold_controls::rows(&cx.doc.fold_groups) {
+        for r in rows {
             let label = r.kind.clone().unwrap_or_default();
             let info = if r.preview.is_empty() {
                 format!("{} lines", r.lines)
@@ -532,8 +524,8 @@ fn callout<'a>(
                         .width(Length::Fixed(cx.sz(64.0))),
                     container(text(info).size(cx.sz(12.0)).color(t.text_faint.to_color()))
                         .width(Length::Fill),
-                    fold_button(cx, "Delete", msg(r.delete)),
-                    fold_button(cx, "Keep", msg(r.keep)),
+                    fold_button(cx, "Delete", msg(r.delete.clone())),
+                    fold_button(cx, "Keep", msg(r.keep.clone())),
                 ]
                 .spacing(6)
                 .align_y(iced::alignment::Vertical::Center)

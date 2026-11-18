@@ -98,10 +98,10 @@ impl ViewMode {
 /// The fold groups of the note `text` (frontmatter removed first, as the daemon does). A note
 /// without the fold marker skips the parse.
 fn fold_groups_of(text: &str) -> Vec<cv_ingest::enrich::FoldGroup> {
-    if !text.contains("[!removed]") {
+    if !text.contains(cv_ingest::enrich::FOLD_MARKER) {
         return Vec::new();
     }
-    cv_ingest::enrich::fold_groups(editor_model::removals::body_of(text))
+    cv_ingest::enrich::fold_groups(editor_model::body::of(text))
 }
 
 /// A rendered document.
@@ -136,6 +136,9 @@ pub struct Doc {
     /// (`cv_ingest::enrich::fold_groups` over the body; never a second parse of the fold), in
     /// document order. Empty for a note without a fold.
     pub fold_groups: Vec<cv_ingest::enrich::FoldGroup>,
+    /// Where the fold's Delete / Keep controls are drawn (the first top-level removed callout of
+    /// a note with fold groups) and their rows; `None` without groups or such a callout.
+    pub fold_controls: Option<fold_controls::FoldControls>,
 }
 
 /// One document's Reading state: everything per note path, owned by its [`OpenDoc`] — a close
@@ -446,6 +449,7 @@ impl ReadingStore {
         // Plan round-5 WP-7: run indices / byte offsets shift with a new Doc.
         entry.clear_selections();
         entry.seen_seq = Some(seq);
+        let fold_controls = fold_controls::controls(&model.blocks, &fold_groups);
         entry.doc = Some(Doc {
             seq,
             epoch,
@@ -458,6 +462,7 @@ impl ReadingStore {
             runs,
             unresolved,
             fold_groups,
+            fold_controls,
         });
     }
 

@@ -15,6 +15,7 @@ use std::ops::Range;
 
 use crate::props::{PropValue, Property};
 use crate::render::{Block, Fold, Inline, RenderModel};
+use crate::typography::{Display, Sub, substitute};
 
 /// What goes between a run and the run before it in the copy text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,28 +63,16 @@ impl Part {
     }
 }
 
-/// Round-25 WP-3: one typographic display substitution in a run — the display byte range of
-/// the glyph and the source (ASCII) byte range it stands for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sub {
-    pub disp: Range<usize>,
-    pub src: Range<usize>,
-}
-
-/// One visible text run.
+/// One visible text run; it reads as its [`Display`] (`text`, `subs`, `src()`, `to_source()`,
+/// `to_display()`).
 ///
 /// Round-25 WP-3 coordinate domain: `text`, `segments`, [`Occurrence::range`] and every
 /// selection byte offset are **display** bytes (what the run widget shapes and hit-tests). The
-/// source ASCII is [`VisRun::src`]; [`VisRun::to_source`] and [`VisRun::to_display`] translate
+/// source ASCII is [`Display::src`]; [`Display::to_source`] and [`Display::to_display`] translate
 /// (copy and find, nowhere else).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisRun {
-    /// The run's displayed text (selection byte offsets index into it).
-    pub text: String,
-    /// The source text when it differs from `text` (empty when `subs` is empty).
-    pub source: String,
-    /// The display substitutions, in order (empty: `text` is the source).
-    pub subs: Vec<Sub>,
+    pub(crate) display: Display,
     pub sep: Sep,
     /// Copied before the text when the run is not where the selection starts (list markers,
     /// property keys, footnote numbers).
@@ -97,6 +86,14 @@ pub struct VisRun {
     pub part: Part,
 }
 
+impl std::ops::Deref for VisRun {
+    type Target = Display;
+
+    fn deref(&self) -> &Display {
+        &self.display
+    }
+}
+
 /// One find occurrence over the visible runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Occurrence {
@@ -105,154 +102,6 @@ pub struct Occurrence {
     /// The byte range in the run's text.
     pub range: Range<usize>,
     pub part: Part,
-}
-
-impl VisRun {
-    /// The run's source text (what copy and find see).
-    pub fn src(&self) -> &str {
-        if self.subs.is_empty() {
-            &self.text
-        } else {
-            &self.source
-        }
-    }
-
-    /// Display byte `d` → source byte (a `d` inside a glyph floors to its source start).
-    pub fn to_source(&self, d: usize) -> usize {
-        let mut out = d;
-        for s in &self.subs {
-            if d >= s.disp.end {
-                out = d - s.disp.end + s.src.end;
-            } else if d > s.disp.start {
-                return s.src.start;
-            } else {
-                break;
-            }
-        }
-        out
-    }
-
-    /// Source byte `b` → display byte; inside a substituted sequence it rounds to the glyph's
-    /// end when `up`, else its start (so a partial match paints the whole glyph).
-    pub fn to_display(&self, b: usize, up: bool) -> usize {
-        let mut out = b;
-        for s in &self.subs {
-            if b >= s.src.end {
-                out = b - s.src.end + s.disp.end;
-            } else if b > s.src.start {
-                return if up { s.disp.end } else { s.disp.start };
-            } else {
-                break;
-            }
-        }
-        out
-    }
-}
-
-/// Round-25 WP-3: the Reading display form of prose `s` — `-->` `⟶`, `->` `→`, `---` `—`,
-/// `--` `–`, `!=` `≠`, `>=` `≥`, `<=` `≤`, `...` `…`, longest first — and its substitutions
-/// (piece-relative ranges). `<->`, `<--`, `<=>` stay (Inter ligates them,
-/// `docs/spikes/inter-features/WP-0-FINDINGS.md`); URL tokens (`://`, `www.`) and `$inline
-/// math$` are untouched.
-pub fn substitute(s: &str) -> (Cow<'_, str>, Vec<Sub>) {
-    const KEEP: [&str; 3] = ["<->", "<--", "<=>"];
-    const TABLE: [(&str, &str); 8] = [
-        ("-->", "⟶"),
-        ("---", "—"),
-        ("...", "…"),
-        ("->", "→"),
-        ("--", "–"),
-        ("!=", "≠"),
-        (">=", "≥"),
-        ("<=", "≤"),
-    ];
-    if !s.contains(['-', '!', '>', '<', '.']) {
-        return (Cow::Borrowed(s), Vec::new());
-    }
-    let skip = skip_ranges(s);
-    let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut subs = Vec::new();
-    let mut i = 0;
-    'outer: while i < s.len() {
-        if let Some(r) = skip.iter().find(|r| r.start == i) {
-            out.push_str(&s[r.clone()]);
-            i = r.end;
-            continue;
-        }
-        let rest = &s[i..];
-        if let Some(k) = KEEP.iter().find(|k| rest.starts_with(**k)) {
-            out.push_str(k);
-            i += k.len();
-            continue;
-        }
-        for (from, to) in TABLE {
-            if rest.starts_with(from) {
-                let at = out.len();
-                out.push_str(to);
-                subs.push(Sub {
-                    disp: at..out.len(),
-                    src: i..i + from.len(),
-                });
-                i += from.len();
-                continue 'outer;
-            }
-        }
-        let n = if b[i].is_ascii() {
-            1
-        } else {
-            rest.chars().next().map_or(1, char::len_utf8)
-        };
-        out.push_str(&s[i..i + n]);
-        i += n;
-    }
-    if subs.is_empty() {
-        (Cow::Borrowed(s), subs)
-    } else {
-        (Cow::Owned(out), subs)
-    }
-}
-
-/// The byte ranges of `s` never substituted: URL tokens and `$inline math$`.
-fn skip_ranges(s: &str) -> Vec<Range<usize>> {
-    let mut out: Vec<Range<usize>> = Vec::new();
-    let mut at = 0;
-    for tok in s.split(char::is_whitespace) {
-        if tok.contains("://") || tok.starts_with("www.") {
-            out.push(at..at + tok.len());
-        }
-        // `split` on a char predicate: the separator is one char wide.
-        at += tok.len();
-        at += s[at..].chars().next().map_or(0, char::len_utf8);
-    }
-    let b = s.as_bytes();
-    let mut i = 0;
-    while let Some(o) = s[i..].find('$').map(|o| o + i) {
-        let opens = b
-            .get(o + 1)
-            .is_some_and(|c| !c.is_ascii_whitespace() && *c != b'$');
-        let close = opens
-            .then(|| s[o + 1..].find('$').map(|c| c + o + 1))
-            .flatten()
-            .filter(|&c| !b[c - 1].is_ascii_whitespace());
-        match close {
-            Some(c) => {
-                out.push(o..c + 1);
-                i = c + 1;
-            }
-            None => i = o + 1,
-        }
-    }
-    out.sort_by_key(|r| r.start);
-    // Merge overlaps so each skip starts at a position the scan reaches.
-    let mut merged: Vec<Range<usize>> = Vec::new();
-    for r in out {
-        match merged.last_mut() {
-            Some(l) if r.start <= l.end => l.end = l.end.max(r.end),
-            _ => merged.push(r),
-        }
-    }
-    merged
 }
 
 /// Round-25 WP-3: an inline's Reading display text and substitutions — prose pieces (text,
@@ -309,9 +158,9 @@ pub fn inline_visible(i: &Inline) -> Option<Cow<'_, str>> {
 
 /// The visible text of an inline run with its find segments, exactly as the view builds its
 /// spans: footnote refs draw `[n]`, line breaks `\n` (neither searched). Round-25 WP-3: the
-/// text and segments are display bytes; also returns the source text and the run's
+/// text and segments are display bytes; the display also carries the source text and the run's
 /// substitutions (each inside one piece — never across a styled boundary).
-pub fn inlines_text(inlines: &[Inline]) -> (String, Vec<Range<usize>>, String, Vec<Sub>) {
+pub fn inlines_text(inlines: &[Inline]) -> Inlined {
     let mut s = String::new();
     let mut src = String::new();
     let mut segs = Vec::new();
@@ -342,10 +191,26 @@ pub fn inlines_text(inlines: &[Inline]) -> (String, Vec<Range<usize>>, String, V
             }
         }
     }
-    if subs.is_empty() {
-        src.clear();
+    Inlined {
+        display: Display::new(s, src, subs),
+        segments: segs,
     }
-    (s, segs, src, subs)
+}
+
+/// A run's display text and the find segments inside it.
+pub struct Inlined {
+    pub display: Display,
+    pub segments: Vec<Range<usize>>,
+}
+
+impl Inlined {
+    /// Text with the given find segments and no substitutions.
+    fn plain(text: String, segments: Vec<Range<usize>>) -> Self {
+        Self {
+            display: Display::plain(text),
+            segments,
+        }
+    }
 }
 
 /// A property row's visible values; `None` for a single-boolean row (drawn as a checkbox, no
@@ -403,27 +268,25 @@ struct Walk {
 }
 
 impl Walk {
-    fn push(&mut self, text: String, segments: Vec<Range<usize>>, sep: Sep, image: bool) {
+    fn push(&mut self, run: Inlined, sep: Sep, image: bool) {
         let (sep, prefix) = self.pending.take().unwrap_or((sep, String::new()));
         self.out.push(VisRun {
-            text,
-            source: String::new(),
-            subs: Vec::new(),
+            display: run.display,
             sep,
             prefix,
             image,
-            segments,
+            segments: run.segments,
             part: self.part,
         });
     }
 
+    /// A run of `text` with find segments `segments` and no substitutions.
+    fn push_text(&mut self, text: String, segments: Vec<Range<usize>>, sep: Sep, image: bool) {
+        self.push(Inlined::plain(text, segments), sep, image);
+    }
+
     fn inlines(&mut self, inlines: &[Inline], sep: Sep) {
-        let (text, segs, source, subs) = inlines_text(inlines);
-        self.push(text, segs, sep, false);
-        if let Some(r) = self.out.last_mut() {
-            r.source = source;
-            r.subs = subs;
-        }
+        self.push(inlines_text(inlines), sep, false);
     }
 
     /// `depth` = list nesting (0 = not in a list): runs inside a list are newline-separated.
@@ -473,28 +336,28 @@ impl Walk {
                 children,
             } => {
                 let head = callout_title(kind, title.as_ref(), *fold);
-                self.push(head, Vec::new(), sep, false);
+                self.push_text(head, Vec::new(), sep, false);
                 for c in children {
                     self.block(c, depth);
                 }
             }
             Block::CodeBlock { text, .. } => {
                 let all = std::iter::once(0..text.len()).collect();
-                self.push(text.clone(), all, sep, false);
+                self.push_text(text.clone(), all, sep, false);
             }
             Block::BlockQuote(children) => {
                 for c in children {
                     self.block(c, depth);
                 }
             }
-            Block::Image { alt, .. } => self.push(alt.clone(), Vec::new(), sep, true),
+            Block::Image { alt, .. } => self.push_text(alt.clone(), Vec::new(), sep, true),
             Block::Transclusion {
                 target,
                 fragment,
                 content,
             } => {
                 let head = transclusion_label(target, fragment.as_ref());
-                self.push(head, Vec::new(), sep, false);
+                self.push_text(head, Vec::new(), sep, false);
                 for c in content.iter().flatten() {
                     self.block(c, depth);
                 }
@@ -502,9 +365,9 @@ impl Walk {
             // The card's file name is its copy text (a non-text slot, as an image's alt).
             Block::FileEmbed { target } | Block::PdfEmbed { target, .. } => {
                 let name = target.rsplit('/').next().unwrap_or(target).to_owned();
-                self.push(name, Vec::new(), sep, true);
+                self.push_text(name, Vec::new(), sep, true);
             }
-            Block::RemoteMedia { url, .. } => self.push(url.clone(), Vec::new(), sep, true),
+            Block::RemoteMedia { url, .. } => self.push_text(url.clone(), Vec::new(), sep, true),
             Block::ThematicBreak | Block::ViewFence { .. } => {}
         }
     }
@@ -525,9 +388,9 @@ pub fn visible_runs(model: &RenderModel) -> Vec<VisRun> {
         } else {
             Sep::Line
         };
-        w.push(p.key.clone(), Vec::new(), sep, false);
+        w.push_text(p.key.clone(), Vec::new(), sep, false);
         if let Some(text) = property_text(p) {
-            w.push(text, Vec::new(), Sep::Colon, false);
+            w.push_text(text, Vec::new(), Sep::Colon, false);
         }
     }
     for (i, b) in model.blocks.iter().enumerate() {
@@ -655,29 +518,6 @@ mod tests {
         assert!(rs[2].segments.is_empty(), "callout titles are not searched");
         assert_eq!(rs[3].segments, vec![0..6, 6..7]);
         assert_eq!(rs[4].segments, vec![0..4]);
-    }
-
-    fn disp(s: &str) -> String {
-        substitute(s).0.into_owned()
-    }
-
-    #[test]
-    fn substitution_table_longest_first_with_exclusions() {
-        assert_eq!(disp("a -> b --> c"), "a → b ⟶ c");
-        assert_eq!(disp("x -- y --- z"), "x – y — z");
-        assert_eq!(disp("a != b >= c <= d..."), "a ≠ b ≥ c ≤ d…");
-        assert_eq!(disp("---->"), "—→");
-        // Inter ligates these itself.
-        assert_eq!(
-            disp("a <-> b <-- c <=> d <- e => f"),
-            "a <-> b <-- c <=> d <- e => f"
-        );
-        // URLs and inline math are untouched.
-        assert_eq!(
-            disp("see https://x.y/a--b...c -> www.q.r/--> $a<=b$ ok"),
-            "see https://x.y/a--b...c → www.q.r/--> $a<=b$ ok"
-        );
-        assert!(substitute("plain").1.is_empty());
     }
 
     #[test]

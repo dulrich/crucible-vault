@@ -8,6 +8,11 @@
 //! `iced` types); [`view`] is a thin renderer over it. A file that still has the legacy per-type
 //! tables shows a banner and the generic form instead of the overview.
 
+use cv_actions::sources::{
+    FIELD_AUTHOR, FIELD_CHANNEL_ID, FIELD_FEEDS, FIELD_FROM, FIELD_HOSTS, FIELD_LIST_ID,
+    FIELD_PREFIX, LEGACY_TABLE_NAMES,
+};
+use cv_actions::works_rule;
 use cv_schema::{ConfigDoc, Path};
 use iced::widget::{Space, column, row, text, toggler};
 use iced::{Alignment, Element};
@@ -31,8 +36,6 @@ pub const LEGACY_BANNER: &str = "This file still uses the old per-type tables ([
 
 /// The group title of records with no kind.
 pub const NO_KIND: &str = "No kind";
-
-const LEGACY_TABLES: [&str; 4] = ["youtube", "blog", "newsletter", "serial"];
 
 /// The Sources page's transient state (never written to a file; expansion lives in the form
 /// state, keyed by the record's path, which `Settings::edit` keeps attached across edits).
@@ -91,6 +94,18 @@ pub enum KindDefault {
     Value(Flag),
 }
 
+impl KindDefault {
+    /// The default as a boolean: `Unset` is off; `None` for `Undefined` and for a non-boolean
+    /// value, which have no usable default.
+    fn as_bool(self) -> Option<bool> {
+        match self {
+            Self::Unset | Self::Value(Flag::Off) => Some(false),
+            Self::Value(Flag::On) => Some(true),
+            Self::Undefined | Self::Value(Flag::Invalid) => None,
+        }
+    }
+}
+
 /// The page shape of the loaded `sources.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageShape {
@@ -106,7 +121,7 @@ pub enum PageShape {
 pub fn page_shape(f: &ConfigFile) -> PageShape {
     match (f.state(), f.doc()) {
         (LoadState::Loaded, Some(doc)) => {
-            if LEGACY_TABLES
+            if LEGACY_TABLE_NAMES
                 .iter()
                 .any(|t| doc.len(&Path::root().key(t)) > 0)
             {
@@ -144,20 +159,19 @@ pub fn kind_default(kinds: Option<&ConfigDoc>, kind: &str) -> KindDefault {
 }
 
 /// The In-Works value of record `i`: its own `works` when set, else its kind's default when it
-/// has a kind and the kind defines it, else off. Mirrors
-/// `cv_actions::config::resolve_in_works` (the editor does not depend on `cv-actions`); a
-/// non-boolean is [`Flag::Invalid`] where the resolver reports a config error.
+/// has a kind and the kind defines it, else off (`cv_actions::works_rule`); a non-boolean
+/// is [`Flag::Invalid`] where the daemon-side resolver reports a config error.
 pub fn resolve_in_works(sources: &ConfigDoc, kinds: Option<&ConfigDoc>, i: usize) -> Flag {
-    if let Some(own) = Flag::of(sources, &record(i).key("works")) {
-        return own;
-    }
-    let Some(kind) = record_kind(sources, i) else {
-        return Flag::Off;
-    };
-    match kind_default(kinds, &kind) {
-        KindDefault::Undefined | KindDefault::Unset => Flag::Off,
-        KindDefault::Value(f) => f,
-    }
+    let kind = record_kind(sources, i);
+    works_rule(
+        Flag::of(sources, &record(i).key("works")),
+        kind.as_deref(),
+        |k| match kind_default(kinds, k) {
+            KindDefault::Undefined | KindDefault::Unset => None,
+            KindDefault::Value(f) => Some(f),
+        },
+        Flag::Off,
+    )
 }
 
 /// One record line of the overview.
@@ -195,27 +209,27 @@ fn non_empty_list(doc: &ConfigDoc, p: &Path) -> bool {
 pub fn badges(doc: &ConfigDoc, i: usize) -> Vec<&'static str> {
     let rp = record(i);
     let mut out = Vec::new();
-    if non_empty_list(doc, &rp.key("feeds")) {
+    if non_empty_list(doc, &rp.key(FIELD_FEEDS)) {
         out.push("feed");
     }
-    if non_empty_list(doc, &rp.key("from")) || non_empty_list(doc, &rp.key("list_id")) {
+    if non_empty_list(doc, &rp.key(FIELD_FROM)) || non_empty_list(doc, &rp.key(FIELD_LIST_ID)) {
         out.push("mail");
     }
-    if non_empty_list(doc, &rp.key("prefix")) {
+    if non_empty_list(doc, &rp.key(FIELD_PREFIX)) {
         out.push("prefix");
     }
     if doc
-        .get_str(&rp.key("channel_id"))
+        .get_str(&rp.key(FIELD_CHANNEL_ID))
         .is_some_and(|s| !s.is_empty())
     {
         out.push("channel");
     }
-    if non_empty_list(doc, &rp.key("hosts")) {
+    if non_empty_list(doc, &rp.key(FIELD_HOSTS)) {
         out.push("host");
     }
     if out.is_empty()
         && doc
-            .get_str(&rp.key("author"))
+            .get_str(&rp.key(FIELD_AUTHOR))
             .is_some_and(|s| !s.is_empty())
     {
         out.push("author");
@@ -277,10 +291,8 @@ pub fn record_toggle_edit(
         Flag::Off => true,
     };
     let default = match record_kind(sources, i).map(|k| kind_default(kinds, &k)) {
-        None | Some(KindDefault::Undefined | KindDefault::Unset) => Some(false),
-        Some(KindDefault::Value(Flag::On)) => Some(true),
-        Some(KindDefault::Value(Flag::Off)) => Some(false),
-        Some(KindDefault::Value(Flag::Invalid)) => None,
+        None | Some(KindDefault::Undefined) => Some(false),
+        Some(d) => d.as_bool(),
     };
     let wp = record(i).key("works");
     Some(if default == Some(new) {
@@ -301,10 +313,8 @@ pub fn kind_toggle_edit(kind: &str, on: bool) -> DocEdit {
 /// The records of `kind` holding an explicit boolean `works` that differs from the kind's
 /// current default (file indices).
 pub fn pending_overrides(sources: &ConfigDoc, kinds: Option<&ConfigDoc>, kind: &str) -> Vec<usize> {
-    let default = match kind_default(kinds, kind) {
-        KindDefault::Value(Flag::On) => true,
-        KindDefault::Unset | KindDefault::Value(Flag::Off) => false,
-        KindDefault::Undefined | KindDefault::Value(Flag::Invalid) => return Vec::new(),
+    let Some(default) = kind_default(kinds, kind).as_bool() else {
+        return Vec::new();
     };
     (0..sources.len(&Path::root().key("publication")))
         .filter(|&i| {

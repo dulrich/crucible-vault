@@ -19,7 +19,7 @@ pub mod pipelines;
 pub mod sources;
 pub mod vault;
 
-pub use config::{CONFIG_FILES, ConfigSet, StepValidator};
+pub use config::{CONFIG_FILES, ConfigSet, StepValidator, works_rule};
 pub use cv_protocol::{ParamKind, ParamSpec};
 pub use model::{
     ATTACHMENTS_KEY, Action, INTAKE_IDENTITY_KEY, LaneChoice, MEDIA_CLEANUP_ACTION, OriginSel,

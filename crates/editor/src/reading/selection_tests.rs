@@ -535,8 +535,7 @@ fn fold_controls_are_drawn_only_for_a_fold_with_groups() {
             .get_mut(PATH)
             .and_then(|od| od.reading.doc.as_mut())
             .expect("doc")
-            .fold_groups
-            .clear();
+            .fold_controls = None;
     };
     let mut h = H::new(&body);
     let with = last_y(&mut h);

@@ -8,7 +8,10 @@ use std::fmt;
 
 use serde::Deserialize;
 
-use super::{Publication, bare_host, nonblank, normalize_list_id};
+use super::{
+    FIELD_AUTHOR, FIELD_CHANNEL_ID, FIELD_FEEDS, FIELD_FROM, FIELD_HOSTS, FIELD_LIST_ID,
+    FIELD_PREFIX, LEGACY_TABLE_NAMES, Publication, bare_host, nonblank, normalize_list_id,
+};
 #[cfg(test)]
 use crate::pipelines::author_key;
 use crate::pipelines::{
@@ -36,10 +39,10 @@ impl Table {
     pub fn name(self) -> &'static str {
         match self {
             Self::Publication => "publication",
-            Self::Blog => "blog",
-            Self::Newsletter => "newsletter",
-            Self::Serial => "serial",
-            Self::Youtube => "youtube",
+            Self::Youtube => LEGACY_TABLE_NAMES[0],
+            Self::Blog => LEGACY_TABLE_NAMES[1],
+            Self::Newsletter => LEGACY_TABLE_NAMES[2],
+            Self::Serial => LEGACY_TABLE_NAMES[3],
         }
     }
 }
@@ -201,7 +204,7 @@ fn merge(
     if r.short.as_deref().and_then(nonblank).is_none() {
         r.short = row.short.clone().filter(|s| nonblank(s).is_some());
     }
-    merge_scalar(&mut r.author, row.author.as_ref(), &name, "author")?;
+    merge_scalar(&mut r.author, row.author.as_ref(), &name, FIELD_AUTHOR)?;
     merge_scalar(&mut r.status, row.status.as_ref(), &name, "status")?;
     merge_scalar(&mut r.priority, row.priority.as_ref(), &name, "priority")?;
     merge_scalar(&mut r.works, row.works.as_ref(), &name, "works")?;
@@ -212,7 +215,7 @@ fn merge(
         &mut r.channel_id,
         row.channel_id.as_ref(),
         &name,
-        "channel_id",
+        FIELD_CHANNEL_ID,
     )?;
     union(&mut r.tags, &row.tags);
     union(&mut r.feeds, &row.feeds);
@@ -476,32 +479,32 @@ fn check_invariants(accs: &[Acc]) -> Result<(), String> {
     }
     type Proj = fn(&Publication) -> Vec<String>;
     let checks: [(&str, Proj); 6] = [
-        ("from", |p| {
+        (FIELD_FROM, |p| {
             p.from
                 .iter()
                 .filter_map(|s| nonblank(s))
                 .map(str::to_lowercase)
                 .collect()
         }),
-        ("list_id", |p| {
+        (FIELD_LIST_ID, |p| {
             p.list_id
                 .iter()
                 .map(|l| normalize_list_id(l))
                 .filter(|l| !l.is_empty())
                 .collect()
         }),
-        ("feeds", |p| {
+        (FIELD_FEEDS, |p| {
             p.feeds
                 .iter()
                 .filter_map(|s| nonblank(s))
                 .map(str::to_owned)
                 .collect()
         }),
-        ("hosts", |p| {
+        (FIELD_HOSTS, |p| {
             p.hosts.iter().filter_map(|h| bare_host(h)).collect()
         }),
-        ("prefix", |p| p.prefixes().map(str::to_owned).collect()),
-        ("channel_id", |p| {
+        (FIELD_PREFIX, |p| p.prefixes().map(str::to_owned).collect()),
+        (FIELD_CHANNEL_ID, |p| {
             p.channel_id
                 .as_deref()
                 .and_then(nonblank)

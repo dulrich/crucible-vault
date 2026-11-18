@@ -30,8 +30,9 @@ use pass::{
 // The fold layout and review operations live in [`crate::fold`]; re-exported so every
 // `cv_ingest::enrich::…` path keeps resolving.
 pub use crate::fold::{
-    FoldError, FoldGroup, FoldRange, GroupTarget, Placement, Resolution, ResolvedGroup, Trimmed,
-    Verdict, fold_groups, fold_ranges, removed_spans, resolve_groups, trim_lines,
+    FOLD_KIND, FOLD_MARKER, FoldError, FoldGroup, FoldRange, GroupTarget, Placement, Resolution,
+    ResolvedGroup, Trimmed, Verdict, fold_groups, fold_ranges, removed_spans, resolve_groups,
+    trim_lines,
 };
 
 /// Marker closing a generated block ([`cv_text::blocks::ENRICH_CLOSE`]).

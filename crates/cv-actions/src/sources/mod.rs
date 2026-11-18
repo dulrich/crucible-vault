@@ -19,6 +19,24 @@ use crate::pipelines::{
 use cv_text::mail_match::{mail_matches, normalize_list_id, substack_host};
 use cv_text::url_canon::{bare_host_name, canonical_bare_host, configured_host, http_host};
 
+/// The `from` matcher field of a `[[publication]]` record.
+pub const FIELD_FROM: &str = "from";
+/// The `list_id` matcher field.
+pub const FIELD_LIST_ID: &str = "list_id";
+/// The `feeds` matcher field.
+pub const FIELD_FEEDS: &str = "feeds";
+/// The `hosts` matcher field.
+pub const FIELD_HOSTS: &str = "hosts";
+/// The `prefix` matcher field.
+pub const FIELD_PREFIX: &str = "prefix";
+/// The `channel_id` matcher field.
+pub const FIELD_CHANNEL_ID: &str = "channel_id";
+/// The `author` field (a matcher when no prefix is set).
+pub const FIELD_AUTHOR: &str = "author";
+
+/// The legacy per-type table names, in display order.
+pub const LEGACY_TABLE_NAMES: [&str; 4] = ["youtube", "blog", "newsletter", "serial"];
+
 /// One `[[publication]]` record. Scalars are `None` when unset (the reader applies the default:
 /// [`Publication::priority`], [`Publication::method`], …); `works` absent means "the kind
 /// default" (plan WP-5).
@@ -656,6 +674,19 @@ mod tests {
                 ("www.h.example".to_owned(), None),
             ]
         );
+    }
+
+    #[test]
+    fn legacy_table_names_are_the_non_publication_table_names() {
+        use legacy::Table;
+        let names = [
+            Table::Youtube,
+            Table::Blog,
+            Table::Newsletter,
+            Table::Serial,
+        ]
+        .map(Table::name);
+        assert_eq!(names, LEGACY_TABLE_NAMES);
     }
 
     #[test]

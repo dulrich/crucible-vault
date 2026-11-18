@@ -131,25 +131,36 @@ pub struct ConfigSet {
 /// The kind's `works` is consulted and is not a boolean (a reported config error, never read as
 /// false).
 pub fn resolve_in_works(kinds_file: &toml::Table, p: &Publication) -> Result<bool, String> {
-    if let Some(w) = p.works {
-        return Ok(w);
-    }
-    let Some(kind) = p.kind.as_deref() else {
-        return Ok(false);
-    };
-    match kinds_file
-        .get("kinds")
-        .and_then(toml::Value::as_table)
-        .and_then(|k| k.get(kind))
-        .and_then(toml::Value::as_table)
-        .and_then(|d| d.get("works"))
-    {
-        None => Ok(false),
-        Some(toml::Value::Boolean(b)) => Ok(*b),
-        Some(_) => Err(format!(
-            "kinds.toml [kinds.{kind}]: `works` must be a boolean"
-        )),
-    }
+    works_rule(
+        p.works.map(Ok),
+        p.kind.as_deref(),
+        |kind| match kinds_file
+            .get("kinds")
+            .and_then(toml::Value::as_table)
+            .and_then(|k| k.get(kind))
+            .and_then(toml::Value::as_table)
+            .and_then(|d| d.get("works"))
+        {
+            None => None,
+            Some(toml::Value::Boolean(b)) => Some(Ok(*b)),
+            Some(_) => Some(Err(format!(
+                "kinds.toml [kinds.{kind}]: `works` must be a boolean"
+            ))),
+        },
+        Ok(false),
+    )
+}
+
+/// The In-Works rule over already-read values: the record's own setting when set, else the
+/// default of its `kind` when it has one and `kind_default` finds that kind defining it (looked up
+/// only then), else `off`.
+pub fn works_rule<T>(
+    own: Option<T>,
+    kind: Option<&str>,
+    kind_default: impl FnOnce(&str) -> Option<T>,
+    off: T,
+) -> T {
+    own.or_else(|| kind.and_then(kind_default)).unwrap_or(off)
 }
 
 impl ConfigSet {

@@ -1151,6 +1151,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "cv-actions",
  "cv-index",
  "cv-ingest",
  "cv-malloc",

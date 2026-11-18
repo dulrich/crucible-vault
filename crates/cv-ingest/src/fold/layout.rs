@@ -9,7 +9,18 @@ use cv_text::blocks;
 use super::meta::{Anchor, MalformedMeta, Meta, parse_meta};
 use crate::enrich::{MARK_CLOSE, MARK_OPEN, SpanKind, squeeze};
 
-pub(crate) const FOLD_HEADER: &str = "> [!removed]-";
+/// The one spelling of the fold callout's kind, so the kind, its marker and the header agree.
+macro_rules! fold_kind {
+    () => {
+        "removed"
+    };
+}
+
+/// The fold callout's kind (`removed`).
+pub const FOLD_KIND: &str = fold_kind!();
+/// The fold callout's marker (`[!removed]`).
+pub const FOLD_MARKER: &str = concat!("[!", fold_kind!(), "]");
+pub(crate) const FOLD_HEADER: &str = concat!("> [!", fold_kind!(), "]-");
 
 /// The writer of every `> [!removed]-` fold block: `head` (the open marker, then the lines before
 /// the header — metadata and any kept lines), the header, the content `chunks` (each non-empty,
