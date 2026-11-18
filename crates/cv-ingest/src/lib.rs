@@ -12,6 +12,7 @@ pub mod enrich;
 pub mod fanfic_title;
 pub mod feed;
 pub mod fm;
+pub mod fold;
 pub mod html;
 pub mod mail;
 pub mod rename_plan;
