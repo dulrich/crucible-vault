@@ -6,9 +6,8 @@
 //!
 //! | key | values | default |
 //! |---|---|---|
-//! | `scope` | `"note"` (the run's active note) \| `"backfill"` (enqueue `intake-enrich` per unenriched intake note) | `"note"` |
+//! | `scope` | `"note"` (the run's active note) \| `"backfill"` (enqueue `intake-enrich` per unenriched intake note) \| `"recover"` (recovery, below) | `"note"` |
 //! | `force` | re-run on a note that already carries `enriched`; a job param `force` wins | `false` |
-//! | `recover` | backfill only: recovery mode (below); a job param `recover` wins | `false` |
 //! | `agent` | the `agents.toml` id returning the JSON answer | `"intake-enrich"` |
 //! | `limit` | backfill only: notes enqueued per run, newest first (> 0) | `20` |
 //!
@@ -43,10 +42,11 @@
 //! follows. The batch is
 //! newest first over the union, at most `limit`, no duplicates.
 //!
-//! **Recovery** (`scope = "backfill"`, `recover = true`; nothing is enqueued): for every intake
+//! **Recovery** (`scope = "recover"`; nothing is enqueued): for every intake
 //! candidate with a non-blank `enriched`, a body of [`SHORT_WORDS`] words or more and neither
 //! generated block, remove `enriched`, `enrich-model` and `enrich-miss` with a CAS write (a lost
-//! CAS is counted). A second run recovers 0.
+//! CAS is counted). A second run recovers 0. A `recover` step key or job param is refused with a
+//! pointer to `scope = "recover"`.
 //!
 //! Outcome vars: `skipped` (`"already enriched"`), `enriched`, `anchors_resolved`,
 //! `anchors_dropped`, `lines_folded`, `banners_folded`, `fold_refused_over_half`, `top_block`,
@@ -64,9 +64,7 @@ use serde::Serialize;
 
 use super::agent;
 use super::intake_kind::{IntakeKinds, is_blank};
-use super::params::{
-    Scope, check_keys, get_bool, get_pos_int, get_scope, get_str, job_flag, job_pos_int_in,
-};
+use super::params::{check_keys, get_bool, get_pos_int, get_str, job_flag, job_pos_int_in};
 use super::{StepCtx, StepError, StepModule, StepOutcome};
 
 /// The action a single note is enriched by (also the backfill's child).
@@ -78,18 +76,42 @@ pub(crate) const SHORT_WORDS: usize = 150;
 /// The backfill never picks a note whose `enrich-miss` count is at or over this.
 pub(crate) const ENRICH_MISS_CAP: u32 = 3;
 
+/// The step's `scope`: the shared `note|backfill` grammar plus `recover`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Note,
+    Backfill,
+    Recover,
+}
+
+/// The refusal of the retired `recover` flag (`what` names the step key or the job param).
+fn obsolete_recover(what: &str) -> String {
+    format!("intake_enrich: {what} `recover` is no longer accepted; use `scope = \"recover\"`")
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Params {
     scope: Scope,
     force: bool,
-    recover: bool,
     agent: String,
     limit: usize,
 }
 
 pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
+    if t.contains_key("recover") {
+        return Err(obsolete_recover("step key"));
+    }
     check_keys(t, StepKind::IntakeEnrich, "intake_enrich")?;
-    let scope = get_scope(t, "intake_enrich")?;
+    let scope = match get_str(t, "scope")?.as_deref() {
+        None | Some("note") => Scope::Note,
+        Some("backfill") => Scope::Backfill,
+        Some("recover") => Scope::Recover,
+        Some(s) => {
+            return Err(format!(
+                "intake_enrich step: `scope` {s:?} is not note|backfill|recover"
+            ));
+        }
+    };
     let limit = get_pos_int(t, "limit")
         .map_err(|e| format!("intake_enrich step: {e}"))?
         .unwrap_or(DEFAULT_LIMIT);
@@ -100,7 +122,6 @@ pub(crate) fn parse(t: &toml::Table) -> Result<Params, String> {
     Ok(Params {
         scope,
         force: get_bool(t, "force")?.unwrap_or(false),
-        recover: get_bool(t, "recover")?.unwrap_or(false),
         agent: agent.trim().to_owned(),
         limit,
     })
@@ -119,9 +140,13 @@ impl StepModule for IntakeEnrich {
     }
 
     fn run(p: Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+        if ctx.params.contains_key("recover") {
+            return Err(StepError::failed(obsolete_recover("job param")));
+        }
         match p.scope {
             Scope::Note => run_note(&p, ctx, agent::manager()?),
             Scope::Backfill => backfill(&p, ctx),
+            Scope::Recover => recover(ctx),
         }
     }
 }
@@ -185,15 +210,6 @@ pub(crate) fn miss_count(v: Option<&JsValue>) -> u32 {
             c
         }
         Some(JsValue::Str(s)) => s.trim().parse().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-/// The `enrich-miss` count of an indexed property value (same rule as [`miss_count`]).
-fn miss_count_json(v: &serde_json::Value) -> u32 {
-    match v {
-        serde_json::Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
-        serde_json::Value::String(s) => s.trim().parse().unwrap_or(0),
         _ => 0,
     }
 }
@@ -334,24 +350,6 @@ struct RecoverVars {
     recover_conflict: usize,
 }
 
-#[cfg(test)]
-/// [`pick_capped`] with no recorded misses: the picks only.
-pub(crate) fn pick_backfill(
-    candidates: &BTreeMap<String, i64>,
-    enriched: &BTreeSet<String>,
-    refine_pending: &BTreeSet<String>,
-    limit: usize,
-) -> Vec<String> {
-    pick_capped(
-        candidates,
-        enriched,
-        refine_pending,
-        &BTreeMap::new(),
-        limit,
-    )
-    .0
-}
-
 /// The newest-first (`ctime` desc, then path) candidates, at most `limit`: the unenriched ones plus
 /// every path in `refine_pending` (a YouTube clip whose transcript is still unrefined, enriched
 /// or not). An unenriched note whose `enrich-miss` count (`misses`, absent = 0) is at or over
@@ -382,19 +380,14 @@ pub(crate) fn pick_capped(
     (picks, capped)
 }
 
-/// The backfill's view of the vault's intake notes.
+/// The vault's intake notes as both scopes see them.
 struct IntakeNotes {
     /// Candidates with their `ctime`.
     ctimes: BTreeMap<String, i64>,
     /// The already-enriched paths.
     enriched: BTreeSet<String>,
-    /// The `enrich-miss` count per path (only paths carrying the key).
-    misses: BTreeMap<String, u32>,
-    /// YouTube clips with a pending transcript refine (enriched or not): no `refined` tag and a
-    /// [`Ready`](cv_ingest::transcript::Eligibility::Ready) section — exactly the notes the step
-    /// would refine, so a note it skips or rejects (short, or split by managed blocks) is never
-    /// re-picked by every backfill pass.
-    refine: BTreeSet<String>,
+    /// The YouTube clips among the intake kinds.
+    youtube: BTreeSet<String>,
 }
 
 fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
@@ -406,19 +399,54 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
         .map(|f| (f.path, f.ctime))
         .collect();
     let kinds = IntakeKinds::load(ctx)?;
-    let youtube = kinds.youtube();
-    let cands = kinds.candidates();
     let enriched: BTreeSet<String> = q
         .md_props_with_key("enriched")?
         .into_iter()
         .filter(|r| !is_blank(&r.value))
         .map(|r| r.path)
         .collect();
-    let misses: BTreeMap<String, u32> = q
+    let cands = kinds
+        .candidates()
+        .into_iter()
+        .filter(|p| cv_text::vpath::is_user_path(p))
+        .map(|p| {
+            let c = ctimes.get(&p).copied().unwrap_or(0);
+            (p, c)
+        })
+        .collect();
+    Ok(IntakeNotes {
+        ctimes: cands,
+        enriched,
+        youtube: kinds.youtube(),
+    })
+}
+
+/// The `enrich-miss` count per path (only paths carrying the key).
+fn miss_counts(ctx: &StepCtx<'_>) -> Result<BTreeMap<String, u32>, StepError> {
+    let reader = ctx.index()?;
+    Ok(reader
+        .query()
         .md_props_with_key("enrich-miss")?
         .into_iter()
-        .map(|r| (r.path, miss_count_json(&r.value)))
-        .collect();
+        .map(|r| {
+            let v = match r.value {
+                serde_json::Value::Number(n) => n.as_f64().map(JsValue::Num),
+                serde_json::Value::String(s) => Some(JsValue::Str(s)),
+                _ => None,
+            };
+            (r.path, miss_count(v.as_ref()))
+        })
+        .collect())
+}
+
+/// YouTube clips with a pending transcript refine (enriched or not): no `refined` tag and a
+/// [`Ready`](cv_ingest::transcript::Eligibility::Ready) section — exactly the notes the step
+/// would refine, so a note it skips or rejects (short, or split by managed blocks) is never
+/// re-picked by every backfill pass.
+fn refine_pending(
+    ctx: &StepCtx<'_>,
+    youtube: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, StepError> {
     let mut refine = BTreeSet::new();
     for p in youtube.iter().filter(|p| cv_text::vpath::is_user_path(p)) {
         if let Some((bytes, _)) = ctx.read(p)?
@@ -432,35 +460,15 @@ fn intake_notes(ctx: &StepCtx<'_>) -> Result<IntakeNotes, StepError> {
             refine.insert(p.clone());
         }
     }
-    let cands = cands
-        .into_iter()
-        .filter(|p| cv_text::vpath::is_user_path(p))
-        .map(|p| {
-            let c = ctimes.get(&p).copied().unwrap_or(0);
-            (p, c)
-        })
-        .collect();
-    Ok(IntakeNotes {
-        ctimes: cands,
-        enriched,
-        misses,
-        refine,
-    })
+    Ok(refine)
 }
 
 fn backfill(p: &Params, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
     let limit = job_pos_int_in(ctx, "intake_enrich", "limit")?.unwrap_or(p.limit);
     let notes = intake_notes(ctx)?;
-    if job_flag(ctx, "recover").unwrap_or(p.recover) {
-        return recover(ctx, &notes);
-    }
-    let (picks, miss_capped) = pick_capped(
-        &notes.ctimes,
-        &notes.enriched,
-        &notes.refine,
-        &notes.misses,
-        limit,
-    );
+    let misses = miss_counts(ctx)?;
+    let refine = refine_pending(ctx, &notes.youtube)?;
+    let (picks, miss_capped) = pick_capped(&notes.ctimes, &notes.enriched, &refine, &misses, limit);
     let (mut ok, mut failed) = (0, 0);
     for path in &picks {
         if enqueue_for(ctx, path).is_some() {
@@ -489,9 +497,10 @@ pub(crate) fn needs_recovery(text: &str) -> bool {
         && !enrich::has_generated_block(body)
 }
 
-/// Recovery mode: clears the enrich stamp ([`super::enrich_stamp::clear`]) of every stamped
+/// The recover scope: clears the enrich stamp ([`super::enrich_stamp::clear`]) of every stamped
 /// candidate that [`needs_recovery`], CAS-written; nothing is enqueued.
-fn recover(ctx: &mut StepCtx<'_>, notes: &IntakeNotes) -> Result<StepOutcome, StepError> {
+fn recover(ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
+    let notes = intake_notes(ctx)?;
     let (mut recovered, mut conflict) = (0, 0);
     for path in notes.ctimes.keys().filter(|p| notes.enriched.contains(*p)) {
         let Some((bytes, hash)) = ctx.read(path)? else {

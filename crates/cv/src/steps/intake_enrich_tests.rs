@@ -12,9 +12,7 @@ use cv_state::FailureReason;
 use cv_vault::test_support::LiveFixture;
 use serde_json::{Map, Value, json};
 
-use super::intake_enrich::{
-    Params, already_enriched, parse, pick_backfill, pick_capped, reattach, run_note,
-};
+use super::intake_enrich::{Params, already_enriched, parse, pick_capped, reattach, run_note};
 use super::params::job_pos_int;
 use super::testkit::{ActionBuilder, AtRecorder, Hook, StepEnv, fake, mgr, providers};
 use super::{DeferCause, StepError, StepOutcome};
@@ -303,15 +301,26 @@ fn params_and_pure_selection() {
         .collect();
     let done: BTreeSet<String> = ["d.md".to_owned()].into();
     let none = BTreeSet::new();
-    assert_eq!(pick_backfill(&cands, &done, &none, 2), ["b.md", "c.md"]);
-    assert_eq!(pick_backfill(&cands, &none, &none, 10).len(), 4);
+    assert_eq!(
+        pick_capped(&cands, &done, &none, &BTreeMap::new(), 2).0,
+        ["b.md", "c.md"]
+    );
+    assert_eq!(
+        pick_capped(&cands, &none, &none, &BTreeMap::new(), 10)
+            .0
+            .len(),
+        4
+    );
     // An enriched path is picked only when refine-pending; no duplicates, same order and limit.
     let pending: BTreeSet<String> = ["d.md".to_owned(), "a.md".to_owned()].into();
     assert_eq!(
-        pick_backfill(&cands, &done, &pending, 10),
+        pick_capped(&cands, &done, &pending, &BTreeMap::new(), 10).0,
         ["b.md", "d.md", "c.md", "a.md"]
     );
-    assert_eq!(pick_backfill(&cands, &done, &pending, 2), ["b.md", "d.md"]);
+    assert_eq!(
+        pick_capped(&cands, &done, &pending, &BTreeMap::new(), 2).0,
+        ["b.md", "d.md"]
+    );
 
     let job = |v: Value| Map::from_iter([("limit".to_owned(), v)]);
     assert_eq!(job_pos_int(&Map::new(), "limit"), Ok(None));
@@ -569,6 +578,41 @@ fn backfill_step(extra: &str) -> cv_actions::Step {
     cv_actions::Step::from_table(s).unwrap()
 }
 
+fn recover_step() -> cv_actions::Step {
+    let mut s: toml::Table = "scope = \"recover\"".parse().unwrap();
+    s.insert("type".into(), "intake_enrich".into());
+    cv_actions::Step::from_table(s).unwrap()
+}
+
+#[test]
+fn a_recover_step_key_is_refused_with_the_scope_spelling() {
+    let err = parse(&"scope = \"backfill\"\nrecover = true".parse().unwrap()).unwrap_err();
+    assert_eq!(
+        err,
+        "intake_enrich: step key `recover` is no longer accepted; use `scope = \"recover\"`"
+    );
+    assert!(parse(&"scope = \"recover\"".parse().unwrap()).is_ok());
+}
+
+#[test]
+fn a_recover_job_param_is_refused_with_the_scope_spelling() {
+    let fx = LiveFixture::new([("Posts/n.md", "---\npost-id: \"1\"\n---\nbody\n")]);
+    let e = StepEnv::new(fx, config("http://127.0.0.1:1/v1", "CV_TEST_KEY"), action());
+    let rec = AtRecorder::default();
+    let job = Map::from_iter([("recover".to_owned(), json!(true))]);
+    let mut ctx = e.ctx();
+    ctx.children = &rec;
+    ctx.params = &job;
+    let err = super::execute(&backfill_step(""), &mut ctx).unwrap_err();
+    assert_eq!(
+        err,
+        StepError::failed(
+            "intake_enrich: job param `recover` is no longer accepted; use `scope = \"recover\"`"
+        )
+    );
+    assert!(rec.calls().is_empty());
+}
+
 #[test]
 fn backfill_skips_a_note_at_the_cap_and_reports_it() {
     let fx = LiveFixture::new([
@@ -618,7 +662,7 @@ fn recover_unstamps_only_long_notes_with_neither_block_and_is_idempotent() {
     let run = || {
         let mut ctx = e.ctx();
         ctx.children = &rec;
-        super::execute(&backfill_step("recover = true"), &mut ctx).unwrap()
+        super::execute(&recover_step(), &mut ctx).unwrap()
     };
     let o = run();
     assert_eq!(var(&o, "recovered"), json!(1));
@@ -652,7 +696,7 @@ fn recover_clears_the_enrich_miss_count() {
     let rec = AtRecorder::default();
     let mut ctx = e.ctx();
     ctx.children = &rec;
-    let o = super::execute(&backfill_step("recover = true"), &mut ctx).unwrap();
+    let o = super::execute(&recover_step(), &mut ctx).unwrap();
     assert_eq!(var(&o, "recovered"), json!(1));
     let t = read(&e, "Posts/n.md");
     assert!(

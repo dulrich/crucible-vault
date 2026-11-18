@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - Publications: when several `sources.toml` records match a note or clip, every site (source proposal, clip filing, the frontmatter backfill and the reconcile) now picks the same one: a URL prefix first, then a host, then an author, the first record in the file winning each step. Alias hosts such as `youtu.be` or `twitter.com` now match a record listing `youtube.com` or `x.com` everywhere. The reconcile fills a blank `publication` from `sources.toml` before the tracker row, and now also matches by host. Existing `publication` values are not rewritten.
+- Enrich recovery: the `intake_enrich` step now spells recovery `scope = "recover"`. A `recover = true` step key or a `recover` job param is refused with a message pointing at `scope = "recover"`. Migration `0043` rewrites the shipped `intake-enrich-recover` action to the new spelling.
 
 ### Fixed
 

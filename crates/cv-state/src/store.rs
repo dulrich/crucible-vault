@@ -167,6 +167,33 @@ impl StateDb {
         Ok(out)
     }
 
+    /// Enqueue `job`, or one successor when its duplicate is already running: a duplicate that is
+    /// still queued absorbs the enqueue (it has not started); a running one gets `job` again
+    /// under `next_dedupe_key`, itself deduped, so at most one successor is queued at a time.
+    /// Decided in one transaction.
+    pub fn enqueue_with_successor(
+        &mut self,
+        job: NewJob,
+        next_dedupe_key: &str,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut out = Self::enqueue_tx(&tx, job.clone(), now_ms)?;
+        if let EnqueueOutcome::Duplicate(id) = &out
+            && query::get(&tx, id)?.is_none_or(|j| j.status != JobStatus::Queued)
+        {
+            let next = NewJob {
+                dedupe_key: Some(next_dedupe_key.to_owned()),
+                ..job
+            };
+            out = Self::enqueue_tx(&tx, next, now_ms)?;
+        }
+        tx.commit()?;
+        Ok(out)
+    }
+
     /// A scheduled run: enqueues `job` and records `action_id`'s schedule run at `now_ms` in one
     /// transaction, so a crash leaves both rows or neither (a duplicate enqueue
     /// still records the run). On error nothing is written.

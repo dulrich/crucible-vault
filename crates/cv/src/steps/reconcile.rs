@@ -91,6 +91,15 @@ impl StepModule for IntakeReconcile {
 /// The only accepted value of the `only` job param.
 const ONLY_SOURCES: &str = "sources";
 
+/// Marks job `params` as a sources-only run (`only = "sources"`), the one spelling every caller
+/// enqueues.
+pub(crate) fn insert_only_sources(params: &mut serde_json::Map<String, serde_json::Value>) {
+    params.insert(
+        "only".to_owned(),
+        serde_json::Value::String(ONLY_SOURCES.to_owned()),
+    );
+}
+
 /// The `only` job param: `Ok(true)` for `"sources"`, `Ok(false)` when absent; any other value
 /// (another string, blank, null, another type) is an error naming the accepted one.
 fn only_sources(params: &serde_json::Map<String, serde_json::Value>) -> Result<bool, String> {
@@ -196,34 +205,43 @@ struct Pass {
 /// One table phase: reads and writes through the step context, counts into the aggregate vars.
 type Phase = fn(&mut StepCtx<'_>, &mut Pass, &mut Vars) -> Result<(), StepError>;
 
-/// Phases 4–10, in run order (see the module doc for their vars).
-const PHASES: &[(&str, Phase)] = &[
-    ("youtube", |ctx, p, v| {
+/// One table phase row: its name, whether a sources-only run keeps it, and the phase.
+struct PhaseRow {
+    name: &'static str,
+    sources: bool,
+    run: Phase,
+}
+
+const fn row(name: &'static str, sources: bool, run: Phase) -> PhaseRow {
+    PhaseRow { name, sources, run }
+}
+
+/// Phases 4–10, in run order (see the module doc for their vars). A sources-only run keeps the
+/// unknown-sender re-match (`mail`) and the publication phase.
+const PHASES: &[PhaseRow] = &[
+    row("youtube", false, |ctx, p, v| {
         backfill::youtube(ctx, &p.sh, &mut p.sidx, &mut v.backfill)
     }),
-    ("mail", |ctx, p, v| {
+    row("mail", true, |ctx, p, v| {
         backfill::mail(ctx, &p.sh, &mut v.backfill)
     }),
-    ("reclean", |ctx, p, v| {
+    row("reclean", false, |ctx, p, v| {
         backfill::reclean(ctx, &p.sh, &mut v.backfill)
     }),
     // After the re-clean so it strips cleaned bodies.
-    ("boilerplate", |ctx, p, v| {
+    row("boilerplate", false, |ctx, p, v| {
         boilerplate::run(ctx, &p.sh, &mut v.boilerplate)
     }),
-    ("merge", |ctx, p, v| {
+    row("merge", false, |ctx, p, v| {
         repair::merge_mail_twins(ctx, &p.sh, &mut p.sidx, &mut v.repair)
     }),
-    ("publication", |ctx, p, v| {
+    row("publication", true, |ctx, p, v| {
         repair::publication(ctx, &p.sh, &mut v.repair)
     }),
-    ("transcripts", |ctx, p, v| {
+    row("transcripts", false, |ctx, p, v| {
         repair::transcript_links(ctx, &p.sh, &mut v.repair)
     }),
 ];
-
-/// The [`PHASES`] a sources-only run keeps: the unknown-sender re-match and the publication phase.
-const SOURCES_PHASES: &[&str] = &["mail", "publication"];
 
 /// The sources-only run (`only = "sources"`): the phases that follow a `sources.toml` change.
 fn run_sources(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
@@ -240,9 +258,9 @@ fn run_sources(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepErro
         },
         sidx: None,
     };
-    for (name, phase) in PHASES.iter().filter(|(n, _)| SOURCES_PHASES.contains(n)) {
-        tracing::debug!(phase = name, "intake_reconcile: sources-only phase");
-        phase(ctx, &mut pass, &mut v)?;
+    for p in PHASES.iter().filter(|p| p.sources) {
+        tracing::debug!(phase = p.name, "intake_reconcile: sources-only phase");
+        (p.run)(ctx, &mut pass, &mut v)?;
     }
     let mut out = StepOutcome::default();
     out.set_vars(&v);
@@ -379,9 +397,9 @@ fn run(dry: bool, ctx: &mut StepCtx<'_>) -> Result<StepOutcome, StepError> {
             pass.sh.paths.insert(k, p.clone());
         }
     }
-    for (name, phase) in PHASES {
-        tracing::debug!(phase = name, "intake_reconcile: phase");
-        phase(ctx, &mut pass, &mut v)?;
+    for p in PHASES {
+        tracing::debug!(phase = p.name, "intake_reconcile: phase");
+        (p.run)(ctx, &mut pass, &mut v)?;
     }
 
     let mut out = StepOutcome::default();

@@ -334,6 +334,91 @@ pub fn plan(
     }
 }
 
+/// Applies the tiers to one note body: `None` when nothing changes. Only lines outside generated
+/// blocks are classified; the anchored runs are taken over those lines. Mail strips (a body
+/// without generated blocks goes through [`strip_tiered`] with its surrounding newlines kept);
+/// RSS strips Delete-labelled lines and folds the rest of each run as `chrome` (head) / `footer`
+/// (tail) groups via [`crate::enrich::fold_ranges`], which may refuse the fold.
+pub fn apply(
+    body: &str,
+    set: &LineSet,
+    labels: &Labels,
+    recur: Recur,
+) -> Result<(Option<String>, Plan), crate::enrich::FoldError> {
+    use crate::enrich::{FoldRange, SpanKind, fold_ranges};
+    let raw: Vec<&str> = body.split('\n').collect();
+    let classes = cv_text::blocks::generated(&raw).classes;
+    if recur == Recur::Mail && !classes.iter().any(|c| c.is_generated()) {
+        let lines: Vec<&str> = body.lines().collect();
+        let plan = plan(&lines, &[], set, labels, recur);
+        return Ok((strip_plain_mail(body, set, labels), plan));
+    }
+    let plain: Vec<usize> = (0..raw.len())
+        .filter(|&i| !classes[i].is_generated())
+        .collect();
+    let lines: Vec<&str> = plain.iter().map(|&i| raw[i]).collect();
+    let plan = plan(&lines, &[], set, labels, recur);
+    let mut act = vec![Action::Keep; raw.len()];
+    for (k, &i) in plain.iter().enumerate() {
+        act[i] = plan.actions[k];
+    }
+    if act.iter().all(|a| *a == Action::Keep) {
+        return Ok((None, plan));
+    }
+    // Remove the stripped lines; a blank line left next to a cut collapses into its neighbour.
+    let mut kept: Vec<(usize, &str)> = Vec::with_capacity(raw.len());
+    let mut cut = false;
+    for (i, l) in raw.iter().enumerate() {
+        if act[i] == Action::Strip {
+            cut = true;
+            continue;
+        }
+        let blank = l.trim().is_empty() && !classes[i].is_generated();
+        if blank && cut && kept.last().is_none_or(|(_, p)| p.trim().is_empty()) {
+            continue;
+        }
+        if !blank {
+            cut = false;
+        }
+        kept.push((i, l));
+    }
+    let new_body: String = kept.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
+    let mut ranges: Vec<FoldRange> = Vec::new();
+    for (k, (i, _)) in kept.iter().enumerate() {
+        let kind = match act[*i] {
+            Action::FoldHead => SpanKind::Chrome,
+            Action::FoldTail => SpanKind::Footer,
+            _ => continue,
+        };
+        match ranges.last_mut() {
+            Some(r) if r.last + 1 == k && kept[r.last].0 + 1 == *i && r.kind == kind => {
+                r.last = k;
+            }
+            _ => ranges.push(FoldRange {
+                first: k,
+                last: k,
+                kind,
+            }),
+        }
+    }
+    let out = fold_ranges(&new_body, &ranges)?;
+    Ok(((out != body).then_some(out), plan))
+}
+
+/// A mail body without generated blocks stripped by [`strip_tiered`], its leading and trailing
+/// newlines kept byte-for-byte; `None` when nothing changes.
+fn strip_plain_mail(body: &str, set: &LineSet, labels: &Labels) -> Option<String> {
+    let newline = |c: char| c == '\n' || c == '\r';
+    let core = body.trim_matches(newline);
+    if core.is_empty() {
+        return None;
+    }
+    let lead = &body[..body.len() - body.trim_start_matches(newline).len()];
+    let trail = &body[body.trim_end_matches(newline).len()..];
+    let out = format!("{lead}{}{trail}", strip_tiered(core, set, labels));
+    (out != body).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +552,51 @@ mod tests {
         assert_eq!(p.actions[6], Action::FoldTail);
         assert_eq!(p.actions[7], Action::Keep);
         assert_eq!((p.deleted, p.recurred, p.vetoed), (1, 1, 1));
+    }
+
+    #[test]
+    fn plain_mail_apply_is_strip_tiered_with_its_surrounding_newlines() {
+        let a = format!("Story one body line\n\n{FOOT}");
+        let b = format!("Different story entirely\n\n{FOOT}");
+        let c =
+            format!("Third story with words\nmore of the third story\nand a third line\n\n{FOOT}");
+        let mut s = set_of(&[&a, &b]);
+        learn(&mut s, &c);
+        let other = "Other story alpha\nOther story beta\nOther story gamma\nFooter one recurring\nFooter two recurring";
+        learn(&mut s, other);
+        learn(&mut s, BODY);
+        let fence = format!("Body of story two\n```\n{FOOT}\n```\nmore text here\n\n{FOOT}");
+        let fixtures = [
+            c.clone(),
+            BODY.to_owned(),
+            fence,
+            "Header line one\nHeader line two\nFooter line one".to_owned(),
+            String::new(),
+        ];
+        let label_sets = [
+            Labels::default(),
+            labels(&["Footer one recurring"], &[]),
+            labels(&[], &["Header chrome line"]),
+        ];
+        for f in &fixtures {
+            for (lead, trail) in [("", ""), ("\n\n", "\n"), ("", "\n"), ("\r\n", "\r\n")] {
+                let body = format!("{lead}{f}{trail}");
+                for l in &label_sets {
+                    let want = (!f.is_empty())
+                        .then(|| format!("{lead}{}{trail}", strip_tiered(f, &s, l)))
+                        .filter(|o| *o != body);
+                    let lines: Vec<&str> = body.lines().collect();
+                    let (got, p) = apply(&body, &s, l, Recur::Mail).expect("mail never folds");
+                    assert_eq!(got, want, "{body:?}");
+                    assert_eq!(p, plan(&lines, &[], &s, l, Recur::Mail));
+                }
+            }
+        }
+        // Pinned: the stripped body keeps its trailing newline.
+        let (got, _) = apply(&format!("{c}\n"), &s, &Labels::default(), Recur::Mail).unwrap();
+        assert_eq!(
+            got.as_deref(),
+            Some("Third story with words\nmore of the third story\nand a third line\n")
+        );
     }
 }

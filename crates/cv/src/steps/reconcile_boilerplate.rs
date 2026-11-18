@@ -44,8 +44,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use cv_ingest::boilerplate::{self, Action, Labels, LineSet, Plan, Recur};
-use cv_ingest::enrich::{self, SpanKind};
+use cv_ingest::boilerplate::{self, Labels, LineSet, Plan, Recur};
 use cv_ingest::mail;
 use cv_note::FrontmatterDoc;
 use cv_text::blocks;
@@ -80,11 +79,17 @@ fn n32(n: usize) -> u32 {
 }
 
 impl Counts {
-    /// Adds one note's tier counts.
+    /// Adds one changed note and its tier counts.
     fn note(&mut self, p: &Plan, recur: Recur) {
         match recur {
-            Recur::Mail => self.bp_lines_stripped += n32(p.recurred),
-            Recur::Rss { .. } => self.bp_lines_folded += n32(p.recurred),
+            Recur::Mail => {
+                self.bp_stripped += 1;
+                self.bp_lines_stripped += n32(p.recurred);
+            }
+            Recur::Rss { .. } => {
+                self.bp_rss_folded += 1;
+                self.bp_lines_folded += n32(p.recurred);
+            }
         }
         self.bp_lines_deleted += n32(p.deleted);
         self.bp_notes_deleted += u32::from(p.deleted > 0);
@@ -110,10 +115,8 @@ pub(super) fn plain_body(body: &str) -> String {
         .join("\n")
 }
 
-/// Applies the tiers to a whole note `text` (frontmatter kept byte-for-byte): `None` when nothing
-/// changes. Only lines outside generated blocks are classified; the anchored runs are taken over
-/// those lines. Mail strips; RSS strips Delete-labelled lines and folds the rest of each run as
-/// `chrome` (head) / `footer` (tail) groups via [`enrich::fold_ranges`].
+/// Applies the tiers to a whole note `text` (frontmatter kept byte-for-byte) through
+/// [`boilerplate::apply`]: `None` when nothing changes or the fold is refused.
 pub(super) fn apply(
     text: &str,
     set: &LineSet,
@@ -123,71 +126,13 @@ pub(super) fn apply(
     let doc = FrontmatterDoc::new(text);
     let body = doc.body();
     let prefix = &text[..text.len() - body.len()];
-    let raw: Vec<&str> = body.split('\n').collect();
-    let classes = blocks::generated(&raw).classes;
-    if recur == Recur::Mail && !classes.iter().any(|c| c.is_generated()) {
-        // The pre-WP-5 path, unchanged for a plain mail body.
-        let lines: Vec<&str> = body.lines().collect();
-        let plan = boilerplate::plan(&lines, &[], set, labels, recur);
-        return (stripped_with(text, set, labels), plan);
-    }
-    let plain: Vec<usize> = (0..raw.len())
-        .filter(|&i| !classes[i].is_generated())
-        .collect();
-    let lines: Vec<&str> = plain.iter().map(|&i| raw[i]).collect();
-    let plan = boilerplate::plan(&lines, &[], set, labels, recur);
-    let mut act = vec![Action::Keep; raw.len()];
-    for (k, &i) in plain.iter().enumerate() {
-        act[i] = plan.actions[k];
-    }
-    if act.iter().all(|a| *a == Action::Keep) {
-        return (None, plan);
-    }
-    // Remove the stripped lines; a blank line left next to a cut collapses into its neighbour.
-    let mut kept: Vec<(usize, &str)> = Vec::with_capacity(raw.len());
-    let mut cut = false;
-    for (i, l) in raw.iter().enumerate() {
-        if act[i] == Action::Strip {
-            cut = true;
-            continue;
-        }
-        let blank = l.trim().is_empty() && !classes[i].is_generated();
-        if blank && cut && kept.last().is_none_or(|(_, p)| p.trim().is_empty()) {
-            continue;
-        }
-        if !blank {
-            cut = false;
-        }
-        kept.push((i, l));
-    }
-    let new_body: String = kept.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
-    let mut ranges: Vec<enrich::FoldRange> = Vec::new();
-    for (k, (i, _)) in kept.iter().enumerate() {
-        let kind = match act[*i] {
-            Action::FoldHead => SpanKind::Chrome,
-            Action::FoldTail => SpanKind::Footer,
-            _ => continue,
-        };
-        match ranges.last_mut() {
-            Some(r) if r.last + 1 == k && kept[r.last].0 + 1 == *i && r.kind == kind => {
-                r.last = k;
-            }
-            _ => ranges.push(enrich::FoldRange {
-                first: k,
-                last: k,
-                kind,
-            }),
-        }
-    }
-    let out = match enrich::fold_ranges(&new_body, &ranges) {
-        Ok(b) => b,
+    match boilerplate::apply(body, set, labels, recur) {
+        Ok((changed, plan)) => (changed.map(|b| format!("{prefix}{b}")), plan),
         Err(e) => {
             tracing::warn!(error = %e, "boilerplate: fold refused; note left unchanged");
-            return (None, Plan::default());
+            (None, Plan::default())
         }
-    };
-    let out = format!("{prefix}{out}");
-    ((out != text).then_some(out), plan)
+    }
 }
 
 /// The distinct persisted line keys of one body.
@@ -322,26 +267,6 @@ impl Sets {
     }
 }
 
-/// `text` with its body stripped by the tiers (frontmatter and surrounding newlines kept
-/// byte-for-byte); `None` when nothing changes.
-fn stripped_with(text: &str, set: &LineSet, labels: &Labels) -> Option<String> {
-    let doc = FrontmatterDoc::new(text);
-    let body = doc.body();
-    let prefix = &text[..text.len() - body.len()];
-    let newline = |c: char| c == '\n' || c == '\r';
-    let core = body.trim_matches(newline);
-    if core.is_empty() {
-        return None;
-    }
-    let lead = &body[..body.len() - body.trim_start_matches(newline).len()];
-    let trail = &body[body.trim_end_matches(newline).len()..];
-    let out = format!(
-        "{prefix}{lead}{}{trail}",
-        boilerplate::strip_tiered(core, set, labels)
-    );
-    (out != text).then_some(out)
-}
-
 /// Whether the first or last countable line of `body` is boilerplate (so an unchanged strip was
 /// the half-body guard, not an absence of boilerplate).
 fn anchored_boiler(body: &str, set: &LineSet) -> bool {
@@ -357,6 +282,20 @@ fn anchored_boiler(body: &str, set: &LineSet) -> bool {
 fn is_email(doc: &FrontmatterDoc) -> bool {
     doc.get_str("via")
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("email"))
+}
+
+/// The source kind of one strip target (its [`Recur`] is resolved once the sets are seeded).
+#[derive(Clone, Copy)]
+enum Source {
+    Mail,
+    Rss,
+}
+
+/// One note the tiers apply to, under its record's learned set `key`.
+struct Target {
+    key: String,
+    path: String,
+    source: Source,
 }
 
 /// The boilerplate phase (after the re-clean, before the repair phases).
@@ -398,8 +337,7 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
             (r.source_kind == KIND && r.source_key != UNKNOWN) || r.source_kind == blogs::KIND
         })
         .collect();
-    // (record, note path, is RSS)
-    let mut targets: Vec<(String, String, bool)> = Vec::new();
+    let mut targets: Vec<Target> = Vec::new();
     for r in rows {
         let Some(path) = r.note_path.clone() else {
             continue;
@@ -418,7 +356,11 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
             };
             let learned = sets.learn(ctx, &rec.name, &rss_seen_id(&r.item_id), &body)?;
             c.bp_rss_learned += u32::from(learned);
-            targets.push((rec.name.clone(), path, true));
+            targets.push(Target {
+                key: rec.name.clone(),
+                path,
+                source: Source::Rss,
+            });
             continue;
         }
         if !is_email(&doc) {
@@ -427,10 +369,14 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
         if !map.contains_key(&r.item_id) {
             c.bp_learned += u32::from(sets.learn(ctx, &r.source_key, &r.item_id, &body)?);
         }
-        targets.push((r.source_key, path, false));
+        targets.push(Target {
+            key: r.source_key,
+            path,
+            source: Source::Mail,
+        });
     }
     let mut touched: BTreeSet<String> = BTreeSet::new();
-    for (key, path, rss) in targets {
+    for Target { key, path, source } in targets {
         let Some((bytes, hash)) = ctx.read(&path)? else {
             continue;
         };
@@ -442,28 +388,25 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
             .map(|p| p.trim().to_owned())
             .unwrap_or_default();
         let labels = sets.labels(ctx, &publication, c)?.clone();
-        let recur = if rss {
-            sets.set(ctx, &key)?;
-            Recur::Rss {
+        sets.set(ctx, &key)?;
+        let recur = match source {
+            Source::Mail => Recur::Mail,
+            Source::Rss => Recur::Rss {
                 posts: sets.posts.get(&key).copied().unwrap_or(0),
-            }
-        } else {
-            Recur::Mail
+            },
         };
         let set = sets.set(ctx, &key)?;
         let (changed, plan) = apply(&text, set, &labels, recur);
-        let Some(body_new) = changed else {
-            if !rss
-                && (plan.guarded || anchored_boiler(FrontmatterDoc::new(text.as_str()).body(), set))
-            {
-                c.bp_guarded += 1;
+        let new = match (changed, recur) {
+            (None, Recur::Mail) => {
+                if plan.guarded || anchored_boiler(FrontmatterDoc::new(text.as_str()).body(), set) {
+                    c.bp_guarded += 1;
+                }
+                continue;
             }
-            continue;
-        };
-        let new = if rss {
-            body_new
-        } else {
-            redescribed(&body_new, true).unwrap_or(body_new)
+            (None, Recur::Rss { .. }) => continue,
+            (Some(b), Recur::Mail) => redescribed(&b, true).unwrap_or(b),
+            (Some(b), Recur::Rss { .. }) => b,
         };
         if !sh.dry {
             match ctx.write(&path, new.into_bytes(), Some(hash)) {
@@ -476,11 +419,6 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
             }
         }
         c.note(&plan, recur);
-        if rss {
-            c.bp_rss_folded += 1;
-        } else {
-            c.bp_stripped += 1;
-        }
         touched.insert(key);
     }
     c.bp_publications += n32(touched.len());

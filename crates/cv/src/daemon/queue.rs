@@ -176,7 +176,7 @@ impl Shared {
         let mut params = serde_json::Map::new();
         params.insert("dry_run".into(), Value::Bool(p.dry_run));
         if p.sources_only {
-            params.insert("only".into(), Value::String("sources".into()));
+            crate::steps::reconcile::insert_only_sources(&mut params);
         }
         let started = crate::runner::run_action(
             self,

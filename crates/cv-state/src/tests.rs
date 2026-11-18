@@ -593,6 +593,35 @@ fn dedupe_is_type_namespaced_exact_and_pending_only() {
     assert_eq!(s.job(&e1).unwrap().unwrap().dedupe_key, None);
 }
 
+#[test]
+fn enqueue_with_successor_absorbs_into_queued_and_adds_one_after_running() {
+    let (_d, mut s) = db();
+    let enq = |s: &mut StateDb, now| {
+        s.enqueue_with_successor(job("t", Some("base"), &[]), "next", now)
+            .unwrap()
+    };
+    let a = id_of(enq(&mut s, 1));
+    // A queued duplicate absorbs the enqueue.
+    assert_eq!(enq(&mut s, 2), EnqueueOutcome::Duplicate(a.clone()));
+    // A running one gets exactly one successor under the next key; a second call coalesces.
+    assert_eq!(s.claim(3).unwrap().map(|j| j.id), Some(a.clone()));
+    let EnqueueOutcome::Enqueued(b) = enq(&mut s, 4) else {
+        panic!("no successor enqueued");
+    };
+    assert_eq!(
+        s.job(&b).unwrap().unwrap().dedupe_key.as_deref(),
+        Some("t::next")
+    );
+    assert_eq!(enq(&mut s, 5), EnqueueOutcome::Duplicate(b.clone()));
+    let queued = s
+        .list(&ListQuery::default())
+        .unwrap()
+        .into_iter()
+        .filter(|j| j.status == JobStatus::Queued)
+        .count();
+    assert_eq!(queued, 1);
+}
+
 #[path = "tests_tracker_trash.rs"]
 mod tracker_trash;
 

@@ -526,8 +526,7 @@ group = "Ingest"
 resources = { note = false, keys = ["intake::enrich-backfill"] }
 [[action.steps]]
 type = "intake_enrich"
-scope = "backfill"
-recover = true
+scope = "recover"
 
 # One-shot YouTube clip backfill (plan round-19-yt-cleanup-intake WP-3): over every indexed note whose
 # `source` is a YouTube URL (outside `.trash/`, `_yt_metadata/`, `_raw_transcript/`, `_custom/`) it

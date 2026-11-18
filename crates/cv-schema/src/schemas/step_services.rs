@@ -384,21 +384,14 @@ pub static INTAKE_ENRICH: Record = Record {
         field(
             "scope",
             "Scope",
-            "note: enrich the run's active note; backfill: enqueue the newest unenriched intake notes",
-            Node::Enum(&["note", "backfill"]),
+            "note: enrich the run's active note; backfill: enqueue the newest unenriched intake notes; recover: un-stamp long notes whose `enriched` stamp has neither a top block nor a fold (no enqueue)",
+            Node::Enum(&["note", "backfill", "recover"]),
         )
         .dflt(D::Str("note")),
         field(
             "force",
             "Force",
             "Re-run on a note that already carries `enriched` (a job param `force` wins)",
-            Node::Bool,
-        )
-        .dflt(D::Bool(false)),
-        field(
-            "recover",
-            "Recover",
-            "Backfill only: un-stamp long notes whose `enriched` stamp has neither a top block nor a fold (no enqueue); a job param `recover` wins",
             Node::Bool,
         )
         .dflt(D::Bool(false)),
