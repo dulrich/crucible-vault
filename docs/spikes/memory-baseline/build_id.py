@@ -1,6 +1,9 @@
-"""build_id.py — fleet build-id helper (plans/fleet-build-version-gate.md, Decision 3).
+"""build_id.py — fleet build-id helper (canonical copy-in template).
 
-Self-contained copy-in template, stdlib only.
+Self-contained copy-in template, stdlib only. Build id = last commit under the tool
+root, ignoring control-plane paths (BUILD_ID_EXCLUDES, relative to the tool root), plus
+`-dirty` when a tracked non-excluded file is modified; `unknown` without git metadata or
+when no commit matches.
 
     from build_id import handle_build_flags
     if "--help" in sys.argv[1:]: ...usage...; sys.exit(0)        # --help wins
@@ -11,6 +14,9 @@ Self-contained copy-in template, stdlib only.
 import os
 import subprocess
 import sys
+
+# Pathspecs every build-id git call uses, relative to the tool root (same literal text in every language).
+BUILD_ID_EXCLUDES = (".", ":(exclude)plans", ":(exclude)references", ":(exclude,glob)**/FEEDBACK.md", ":(exclude,glob)**/INITIATIVE.md")
 
 
 def _git(cwd, args):
@@ -39,10 +45,10 @@ def build_id(path):
         if d == top:
             break
         d = os.path.dirname(d)
-    sha = (_git(top, ["log", "-1", "--format=%H", "--", tool]) or "").strip()
+    sha = (_git(top, ["-C", tool, "log", "-1", "--format=%H", "--", *BUILD_ID_EXCLUDES]) or "").strip()
     if not sha:
         return "unknown"
-    st = _git(top, ["status", "--porcelain", "--untracked-files=no", "--", tool])
+    st = _git(top, ["-C", tool, "status", "--porcelain", "--untracked-files=no", "--", *BUILD_ID_EXCLUDES])
     return f"{sha}-dirty" if st and st.strip() else sha
 
 
