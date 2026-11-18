@@ -156,3 +156,14 @@ fn heading_rule_is_fence_kind_aware_and_allows_indent() {
     let s = locate(after).unwrap();
     assert_eq!(seg(after, &s), ["words here"]);
 }
+
+#[test]
+fn parity_locate_generated_lines() {
+    let body = "%% cv-enrich heading %%\n## Transcript\n\nOne\n%% cv-enrich %%\n## Inside\n%% /cv-enrich %%\nTwo\n%% cv-enrich heading %%\n### Chapter\n\nThree\n%% cv-enrich %%\nFour\n%% cv-enrich heading %%\n## Inserted\nFive\n";
+    let s = locate(body).expect("section");
+    assert_eq!((s.body_start, s.end), (38, 178));
+    assert_eq!(
+        seg(body, &s),
+        ["One", "Two", "### Chapter\n\nThree\n%% cv-enrich %%\nFour"]
+    );
+}

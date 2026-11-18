@@ -932,3 +932,17 @@ fn short_complete_post_and_paywalled_excerpt_keep_the_duplicate_outcome() {
         assert!(!e.read("Notes/Post.md").unwrap().contains("transcript:"));
     }
 }
+
+#[test]
+fn parity_visible_lines_skip_blocks_and_marker_only() {
+    let body = "%% cv-enrich %%\n> [!abstract]- S\n%% /cv-enrich %%\n%% cv-enrich heading %%\n### Chapter\n\n[x](https://a.example/p)\n%% cv-enrich %%\n> [!removed]-\n%% /cv-enrich %%\n%% cv-enrich %%\ntail\n";
+    assert_eq!(
+        super::auto_file::visible_lines(body),
+        [
+            "### Chapter",
+            "[x](https://a.example/p)",
+            "%% cv-enrich %%",
+            "tail"
+        ]
+    );
+}

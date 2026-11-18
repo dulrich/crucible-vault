@@ -53,7 +53,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use cv_text::blocks;
+use cv_text::blocks::{self, LineClass};
 use cv_text::sections::heading_text;
 use serde_json::Value;
 
@@ -335,15 +335,12 @@ fn strip_generated(rest: &str) -> Stripped {
     let mut prior_fold = Vec::new();
     let mut prior_meta = Vec::new();
     let (mut had_top, mut had_fold) = (false, false);
+    // Only a well-formed open…close pair is generated; an unterminated open marker and
+    // everything after it stay ordinary body lines (never discard user text).
+    let generated = blocks::generated(&raw);
     let mut i = 0;
     while i < raw.len() {
-        let t = raw[i].trim();
-        // Only a well-formed open…close pair is generated; an unterminated open marker and
-        // everything after it stay ordinary body lines (never discard user text).
-        let close = (t == MARK_OPEN)
-            .then(|| blocks::managed_close(&raw, i))
-            .flatten();
-        if let Some(j) = close {
+        if let Some(j) = generated.close_at(i) {
             let mut inner = &raw[i + 1..j];
             // The blank line ending the callout is layout, not fold content (older notes lack it).
             while inner.last().is_some_and(|l| l.trim().is_empty()) {
@@ -368,18 +365,9 @@ fn strip_generated(rest: &str) -> Stripped {
             i = j + 1;
             continue;
         }
-        if t == MARK_HEADING {
-            // Strip the heading (and its blank) only if it is still a heading line.
-            i += 1;
-            if i < raw.len() && heading_text(raw[i]).is_some() {
-                i += 1;
-                if i < raw.len() && raw[i].trim().is_empty() {
-                    i += 1;
-                }
-            }
-            continue;
+        if !generated.classes[i].is_generated() {
+            lines.push(raw[i].to_owned());
         }
-        lines.push(raw[i].to_owned());
         i += 1;
     }
     if had_top {
@@ -1046,15 +1034,7 @@ fn split_new(content: &[&str], metas: &[Meta]) -> Option<(usize, Vec<(usize, usi
 
 fn parse_folds(raw: &[&str]) -> Vec<PFold> {
     let mut folds = Vec::new();
-    let mut i = 0;
-    while i < raw.len() {
-        let close = (raw[i].trim() == MARK_OPEN)
-            .then(|| blocks::managed_close(raw, i))
-            .flatten();
-        let Some(j) = close else {
-            i += 1;
-            continue;
-        };
+    for (i, j) in blocks::generated(raw).blocks {
         let inner = &raw[i + 1..j];
         if let Some(h) = inner.iter().position(|l| l.trim_end() == FOLD_HEADER) {
             let mut content = &inner[h + 1..];
@@ -1096,7 +1076,6 @@ fn parse_folds(raw: &[&str]) -> Vec<PFold> {
                 groups,
             });
         }
-        i = j + 1;
     }
     folds
 }
@@ -1177,13 +1156,10 @@ pub fn has_generated_block(body: &str) -> bool {
 pub fn strip_structure(body: &str) -> String {
     let raw: Vec<&str> = body.split('\n').collect();
     let mut out: Vec<&str> = Vec::with_capacity(raw.len());
+    let generated = blocks::generated(&raw);
     let mut i = 0;
     while i < raw.len() {
-        let t = raw[i].trim();
-        let close = (t == MARK_OPEN)
-            .then(|| blocks::managed_close(&raw, i))
-            .flatten();
-        if let Some(j) = close {
+        if let Some(j) = generated.close_at(i) {
             if raw[i + 1..j].iter().any(|l| l.trim_end() == FOLD_HEADER) {
                 out.extend_from_slice(&raw[i..=j]);
                 i = j + 1;
@@ -1195,17 +1171,9 @@ pub fn strip_structure(body: &str) -> String {
             }
             continue;
         }
-        if t == MARK_HEADING {
-            i += 1;
-            if i < raw.len() && heading_text(raw[i]).is_some() {
-                i += 1;
-                if i < raw.len() && raw[i].trim().is_empty() {
-                    i += 1;
-                }
-            }
-            continue;
+        if !generated.classes[i].is_generated() {
+            out.push(raw[i]);
         }
-        out.push(raw[i]);
         i += 1;
     }
     out.join("\n")
@@ -1322,36 +1290,20 @@ enum Cls {
 /// The body as segments: plain lines, generated lines, and one placeholder per fold block.
 fn segments(raw: &[&str], folds: &[PFold]) -> Vec<(Cls, String)> {
     let mut segs = Vec::with_capacity(raw.len());
+    let classes = blocks::generated(raw).classes;
     let mut i = 0;
     while i < raw.len() {
-        let t = raw[i].trim();
         if let Some(b) = folds.iter().position(|f| f.open == i) {
             segs.push((Cls::Fold(b), String::new()));
             i = folds[b].close + 1;
             continue;
         }
-        let close = (t == MARK_OPEN)
-            .then(|| blocks::managed_close(raw, i))
-            .flatten();
-        if let Some(j) = close {
-            segs.extend(raw[i..=j].iter().map(|l| (Cls::Hidden, (*l).to_owned())));
-            i = j + 1;
-            continue;
-        }
-        if t == MARK_HEADING {
-            segs.push((Cls::Hidden, raw[i].to_owned()));
-            i += 1;
-            if i < raw.len() && heading_text(raw[i]).is_some() {
-                segs.push((Cls::Hidden, raw[i].to_owned()));
-                i += 1;
-                if i < raw.len() && raw[i].trim().is_empty() {
-                    segs.push((Cls::Hidden, raw[i].to_owned()));
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        segs.push((Cls::Plain, raw[i].to_owned()));
+        let cls = if classes[i].is_generated() {
+            Cls::Hidden
+        } else {
+            Cls::Plain
+        };
+        segs.push((cls, raw[i].to_owned()));
         i += 1;
     }
     segs
@@ -1600,24 +1552,14 @@ pub fn trim_lines(body: &str, first: usize, last: usize) -> Result<Trimmed, Fold
             lines: raw.len(),
         });
     }
-    let mut i = 0;
-    while i < raw.len() {
-        let t = raw[i].trim();
-        let close = (t == MARK_OPEN)
-            .then(|| blocks::managed_close(&raw, i))
-            .flatten();
-        let (s, e) = match close {
-            Some(j) => (i, j),
-            None if t == MARK_HEADING => (i, i),
-            None => {
-                i += 1;
-                continue;
-            }
-        };
-        if s <= last && first <= e {
-            return Err(FoldError::Generated);
-        }
-        i = e + 1;
+    // Only block lines and the heading marker are generated here; an inserted heading and its
+    // blank are ordinary lines a user may remove.
+    let classes = blocks::generated(&raw).classes;
+    if classes[first..=last]
+        .iter()
+        .any(|c| matches!(c, LineClass::Block | LineClass::HeadingMarker))
+    {
+        return Err(FoldError::Generated);
     }
     let removed = raw[first..=last].iter().map(|l| (*l).to_owned()).collect();
     let kept: Vec<&str> = raw[..first]
@@ -1657,34 +1599,12 @@ pub fn fold_ranges(body: &str, groups: &[(usize, usize, SpanKind)]) -> Result<St
     }
     let raw: Vec<&str> = body.split('\n').collect();
     let folds = parse_folds(&raw);
-    let mut hidden = vec![false; raw.len()];
     // Per raw line: generated (top block, heading marker + heading + blank, fold blocks).
-    let mut i = 0;
-    while i < raw.len() {
-        let t = raw[i].trim();
-        let close = (t == MARK_OPEN)
-            .then(|| blocks::managed_close(&raw, i))
-            .flatten();
-        if let Some(j) = close {
-            hidden[i..=j].iter_mut().for_each(|h| *h = true);
-            i = j + 1;
-            continue;
-        }
-        if t == MARK_HEADING {
-            hidden[i] = true;
-            i += 1;
-            if i < raw.len() && heading_text(raw[i]).is_some() {
-                hidden[i] = true;
-                i += 1;
-                if i < raw.len() && raw[i].trim().is_empty() {
-                    hidden[i] = true;
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
+    let hidden: Vec<bool> = blocks::generated(&raw)
+        .classes
+        .iter()
+        .map(|c| c.is_generated())
+        .collect();
     let blank = |k: usize| raw[k].trim().is_empty();
     let in_fold = |k: usize| folds.iter().any(|f| (f.open..=f.close).contains(&k));
     let mut out: Vec<usize> = Vec::with_capacity(raw.len());

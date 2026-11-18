@@ -585,25 +585,16 @@ fn link_end(s: &str) -> Option<usize> {
 
 /// The non-blank lines of a frontmatter-free `body`, well-formed generated (`cv-enrich`) blocks
 /// and the enrich heading marker ignored.
-fn visible_lines(body: &str) -> Vec<&str> {
-    use cv_text::blocks::{self, ENRICH_HEADING, ENRICH_OPEN};
+pub(super) fn visible_lines(body: &str) -> Vec<&str> {
+    use cv_text::blocks::{self, LineClass};
     let ls = blocks::lines(body);
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < ls.len() {
-        let t = ls[i].text.trim();
-        if t == ENRICH_OPEN
-            && let Some(j) = blocks::managed_close(&ls, i)
-        {
-            i = j + 1;
-            continue;
-        }
-        if !t.is_empty() && t != ENRICH_HEADING {
-            out.push(t);
-        }
-        i += 1;
-    }
-    out
+    let classes = blocks::generated(&ls).classes;
+    ls.iter()
+        .zip(classes)
+        .filter(|(_, c)| !matches!(c, LineClass::Block | LineClass::HeadingMarker))
+        .map(|(l, _)| l.text.trim())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// The link-only predicate (Decision 6), pure: `rows` are the `blog` tracker rows resolving to the

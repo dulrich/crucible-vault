@@ -812,3 +812,37 @@ fn strip_structure_drops_the_top_block_and_inserted_headings_only() {
         format!("Intro line.\n\nText one.\n\nText two.\n\n{fold}")
     );
 }
+
+/// A body exercising every generated-line class: a top block, an inserted heading (marker,
+/// heading, blank), a lone marker, a fold block adjacent to a second fold, an unclosed opener.
+const GEN_BODY: &str = "Intro\n%% cv-enrich %%\n> [!abstract]- Summary\n> s\n\n%% /cv-enrich %%\n\n%% cv-enrich heading %%\n### Chapter\n\nBody a\n%% cv-enrich heading %%\nBody b\n%% cv-enrich %%\n> [!removed]-\n> gone\n%% /cv-enrich %%\n%% cv-enrich %%\n> [!removed]-\n> also\n%% /cv-enrich %%\n%% cv-enrich %%\ntail";
+
+#[test]
+fn parity_trim_lines_refuses_marker_and_blocks_only() {
+    let n = GEN_BODY.split('\n').count();
+    let refused: Vec<usize> = (0..n)
+        .filter(|&k| matches!(trim_lines(GEN_BODY, k, k), Err(FoldError::Generated)))
+        .collect();
+    assert_eq!(
+        refused,
+        [1, 2, 3, 4, 5, 7, 11, 13, 14, 15, 16, 17, 18, 19, 20]
+    );
+}
+
+#[test]
+fn parity_strip_structure_keeps_folds() {
+    assert_eq!(
+        strip_structure(GEN_BODY),
+        "Intro\nBody a\nBody b\n%% cv-enrich %%\n> [!removed]-\n> gone\n%% /cv-enrich %%\n%% cv-enrich %%\n> [!removed]-\n> also\n%% /cv-enrich %%\n%% cv-enrich %%\ntail"
+    );
+}
+
+#[test]
+fn parity_parse_folds_boundaries() {
+    let raw: Vec<&str> = GEN_BODY.split('\n').collect();
+    let got: Vec<(usize, usize, usize)> = parse_folds(&raw)
+        .iter()
+        .map(|f| (f.open, f.close, f.groups.len()))
+        .collect();
+    assert_eq!(got, [(13, 16, 1), (17, 20, 1)]);
+}

@@ -49,7 +49,6 @@ use cv_ingest::enrich::{self, SpanKind};
 use cv_ingest::mail;
 use cv_note::FrontmatterDoc;
 use cv_text::blocks;
-use cv_text::sections::heading_text;
 use serde::Serialize;
 
 use super::mail::{KIND, UNKNOWN, raw_markdown, resolve_newsletter};
@@ -99,46 +98,13 @@ pub(super) fn rss_seen_id(post_id: &str) -> String {
     format!("rss:{post_id}")
 }
 
-/// Per raw body line (split at `\n`): inside a generated block — a well-formed `%% cv-enrich %%`
-/// block (top block or `[!removed]` fold) or an inserted heading (marker, heading, its blank).
-fn hidden_mask(raw: &[&str]) -> Vec<bool> {
-    let mut hidden = vec![false; raw.len()];
-    let mut i = 0;
-    while i < raw.len() {
-        let t = raw[i].trim();
-        let close = (t == blocks::ENRICH_OPEN)
-            .then(|| blocks::managed_close(raw, i))
-            .flatten();
-        if let Some(j) = close {
-            hidden[i..=j].iter_mut().for_each(|h| *h = true);
-            i = j + 1;
-            continue;
-        }
-        if t == blocks::ENRICH_HEADING {
-            hidden[i] = true;
-            i += 1;
-            if i < raw.len() && heading_text(raw[i]).is_some() {
-                hidden[i] = true;
-                i += 1;
-                if i < raw.len() && raw[i].trim().is_empty() {
-                    hidden[i] = true;
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    hidden
-}
-
 /// The body's lines outside generated blocks, joined (what RSS learning reads).
 pub(super) fn plain_body(body: &str) -> String {
     let raw: Vec<&str> = body.split('\n').collect();
-    let hidden = hidden_mask(&raw);
+    let classes = blocks::generated(&raw).classes;
     raw.iter()
-        .zip(&hidden)
-        .filter(|(_, h)| !**h)
+        .zip(&classes)
+        .filter(|(_, c)| !c.is_generated())
         .map(|(l, _)| *l)
         .collect::<Vec<_>>()
         .join("\n")
@@ -158,14 +124,16 @@ pub(super) fn apply(
     let body = doc.body();
     let prefix = &text[..text.len() - body.len()];
     let raw: Vec<&str> = body.split('\n').collect();
-    let hidden = hidden_mask(&raw);
-    if recur == Recur::Mail && !hidden.contains(&true) {
+    let classes = blocks::generated(&raw).classes;
+    if recur == Recur::Mail && !classes.iter().any(|c| c.is_generated()) {
         // The pre-WP-5 path, unchanged for a plain mail body.
         let lines: Vec<&str> = body.lines().collect();
         let plan = boilerplate::plan(&lines, &[], set, labels, recur);
         return (stripped_with(text, set, labels), plan);
     }
-    let plain: Vec<usize> = (0..raw.len()).filter(|&i| !hidden[i]).collect();
+    let plain: Vec<usize> = (0..raw.len())
+        .filter(|&i| !classes[i].is_generated())
+        .collect();
     let lines: Vec<&str> = plain.iter().map(|&i| raw[i]).collect();
     let plan = boilerplate::plan(&lines, &[], set, labels, recur);
     let mut act = vec![Action::Keep; raw.len()];
@@ -183,7 +151,7 @@ pub(super) fn apply(
             cut = true;
             continue;
         }
-        let blank = l.trim().is_empty() && !hidden[i];
+        let blank = l.trim().is_empty() && !classes[i].is_generated();
         if blank && cut && kept.last().is_none_or(|(_, p)| p.trim().is_empty()) {
             continue;
         }

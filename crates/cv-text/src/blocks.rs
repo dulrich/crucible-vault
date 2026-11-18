@@ -71,6 +71,83 @@ pub fn managed_close<S: AsRef<str>>(lines: &[S], i: usize) -> Option<usize> {
     (single_comment(lines[j].as_ref().trim()) != Some(name)).then_some(j)
 }
 
+/// The class of one line under [`generated`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineClass {
+    /// An ordinary line.
+    Plain,
+    /// A line of a well-formed enrich block, open and close markers included.
+    Block,
+    /// A `%% cv-enrich heading %%` marker line.
+    HeadingMarker,
+    /// The ATX heading line directly after a heading marker.
+    InsertedHeading,
+    /// The blank line directly after an inserted heading.
+    HeadingBlank,
+}
+
+impl LineClass {
+    /// Whether the line is not [`LineClass::Plain`].
+    #[must_use]
+    pub fn is_generated(self) -> bool {
+        self != Self::Plain
+    }
+}
+
+/// The enrich-generated structure of a line slice ([`generated`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generated {
+    /// Each well-formed enrich block as `(open, close)` line indices, in order; adjacent blocks stay distinct.
+    pub blocks: Vec<(usize, usize)>,
+    /// One class per input line.
+    pub classes: Vec<LineClass>,
+}
+
+impl Generated {
+    /// The close index of the block opening at line `i`, if one does.
+    #[must_use]
+    pub fn close_at(&self, i: usize) -> Option<usize> {
+        self.blocks
+            .binary_search_by_key(&i, |b| b.0)
+            .ok()
+            .map(|k| self.blocks[k].1)
+    }
+}
+
+/// Classifies `lines` in one top-to-bottom pass. A trimmed `%% cv-enrich %%` line that [`managed_close`] pairs opens a block running to its close (an unclosed opener is plain). Outside blocks, a trimmed `%% cv-enrich heading %%` line is a heading marker; the next line is an inserted heading when [`crate::sections::heading_text`] reads it as one, and the line after that is its heading blank when blank. Fences are not consulted.
+#[must_use]
+pub fn generated<S: AsRef<str>>(lines: &[S]) -> Generated {
+    let mut blocks = Vec::new();
+    let mut classes = vec![LineClass::Plain; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].as_ref().trim();
+        if t == ENRICH_OPEN
+            && let Some(j) = managed_close(lines, i)
+        {
+            blocks.push((i, j));
+            classes[i..=j].fill(LineClass::Block);
+            i = j + 1;
+            continue;
+        }
+        if t == ENRICH_HEADING {
+            classes[i] = LineClass::HeadingMarker;
+            i += 1;
+            if i < lines.len() && crate::sections::heading_text(lines[i].as_ref()).is_some() {
+                classes[i] = LineClass::InsertedHeading;
+                i += 1;
+                if i < lines.len() && lines[i].as_ref().trim().is_empty() {
+                    classes[i] = LineClass::HeadingBlank;
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    Generated { blocks, classes }
+}
+
 impl AsRef<str> for Line<'_> {
     fn as_ref(&self) -> &str {
         self.text
@@ -169,6 +246,36 @@ mod tests {
         assert_eq!(managed_close(&reopened, 1), Some(2));
         assert_eq!(managed_close(&["%% a %%", "%% /b %%"], 0), None);
         assert_eq!(single_comment(ENRICH_OPEN), Some(ENRICH_NAME));
+    }
+
+    #[test]
+    fn generated_classes() {
+        use LineClass::{
+            Block as B, HeadingBlank as Hb, HeadingMarker as M, InsertedHeading as H, Plain as P,
+        };
+        let ls = [
+            "x",
+            ENRICH_OPEN,
+            "a",
+            ENRICH_CLOSE,
+            ENRICH_OPEN,
+            ENRICH_CLOSE,
+            ENRICH_HEADING,
+            "### Ch",
+            "",
+            "",
+            ENRICH_HEADING,
+            "y",
+            "%% other %%",
+            "%% /other %%",
+            ENRICH_OPEN,
+            "z",
+        ];
+        let g = generated(&ls);
+        assert_eq!(g.blocks, [(1, 3), (4, 5)]);
+        assert_eq!(g.classes, [P, B, B, B, B, B, M, H, Hb, P, M, P, P, P, P, P]);
+        assert_eq!((g.close_at(4), g.close_at(2)), (Some(5), None));
+        assert!(!P.is_generated() && Hb.is_generated());
     }
 
     #[test]

@@ -20,7 +20,7 @@
 
 use std::ops::Range;
 
-use cv_text::blocks::{self, ENRICH_HEADING, ENRICH_OPEN, Line};
+use cv_text::blocks::{self, LineClass};
 
 /// A section over this many words is sent in several calls (spike: whole transcripts up to 12.8k
 /// words refined in one call, 8 of 418 unrefined clips are larger).
@@ -48,13 +48,6 @@ pub struct Section {
     pub segments: Vec<Range<usize>>,
 }
 
-/// The index of the close marker when `ls[i]` opens a well-formed `cv-enrich` pair.
-fn managed_close(ls: &[Line<'_>], i: usize) -> Option<usize> {
-    (ls[i].text.trim() == ENRICH_OPEN)
-        .then(|| blocks::managed_close(ls, i))
-        .flatten()
-}
-
 /// A level-1 or level-2 heading line (the section terminators).
 fn is_section_heading(t: &str) -> bool {
     t.starts_with("# ") || t.starts_with("## ")
@@ -68,11 +61,14 @@ pub fn locate(body: &str) -> Option<Section> {
     let fenced = blocks::fenced_lines(&ls);
     let h = blocks::transcript_heading(&ls, 0)?;
     let body_start = ls[h].end;
+    // Generated structure of the lines after the heading (indices offset by `h + 1`).
+    let generated = blocks::generated(&ls[h + 1..]);
+    let close = |i: usize| generated.close_at(i - h - 1).map(|j| j + h + 1);
     // Section end: the next level-1/2 heading outside fences and managed blocks.
     let mut end = body.len();
     let mut i = h + 1;
     while i < ls.len() {
-        if let Some(j) = managed_close(&ls, i) {
+        if let Some(j) = close(i) {
             i = j + 1;
             continue;
         }
@@ -96,8 +92,8 @@ pub fn locate(body: &str) -> Option<Section> {
     };
     let mut i = h + 1;
     while i < ls.len() && ls[i].start < end {
-        let managed = managed_close(&ls, i);
-        if managed.is_some() || ls[i].text.trim() == ENRICH_HEADING {
+        let managed = close(i);
+        if managed.is_some() || generated.classes[i - h - 1] == LineClass::HeadingMarker {
             if let Some(s) = seg_start.take() {
                 push(&mut segments, s, seg_end);
             }
