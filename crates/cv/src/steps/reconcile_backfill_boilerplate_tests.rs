@@ -174,12 +174,16 @@ const RSS_FOOT1: &str = "Thanks for reading Feed Pub, subscribe for more.";
 const RSS_FOOT2: &str = "Share this post with a friend today.";
 
 fn label(publication: &str, line: &str, verdict: &str) -> cv_state::RemovalLabel {
+    let verdict = match verdict {
+        "keep" => cv_protocol::RemovalVerdict::Keep,
+        _ => cv_protocol::RemovalVerdict::Delete,
+    };
     cv_state::RemovalLabel {
         note_id: 1,
         publication: publication.into(),
         kind: "footer".into(),
-        verdict: verdict.into(),
-        origin: "fold".into(),
+        verdict,
+        origin: cv_protocol::RemovalOrigin::Fold,
         line: line.into(),
         line_key: cv_ingest::boilerplate::line_key(line),
         at_ms: 1,

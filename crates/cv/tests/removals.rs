@@ -320,7 +320,7 @@ async fn keep_trashes_nothing_and_trim_labels_selection() {
     assert_eq!(a.restored_at_anchor + a.restored_at_end, 4);
     let text = std::fs::read_to_string(env.vault.join("post.md")).unwrap();
     assert!(text.contains("Sponsored by the synthetic widget company"));
-    assert!(labels(&d).iter().all(|r| r.verdict == "keep"));
+    assert!(labels(&d).iter().all(|r| r.verdict == RemovalVerdict::Keep));
     let p = bind(&c, "plain.md");
     let t = applied(resolve(
         &c,
@@ -366,29 +366,20 @@ async fn next_fold_note_orders_wraps_and_ends() {
     )
     .unwrap();
     let (d, c) = start(&env).await;
-    let next = |path: Option<&str>| -> Option<String> {
+    let after = |after: Option<NoteId>| -> Option<String> {
         let v = c
-            .request(Request::NextFoldNote(NextFoldNoteParams {
-                id: None,
-                path: path.map(str::to_owned),
-            }))
+            .request(Request::NextFoldNote(NextFoldNoteParams { after }))
             .unwrap();
         serde_json::from_value::<NextFoldNoteResult>(v)
             .unwrap()
             .path
     };
+    let next = |path: Option<&str>| after(path.map(|p| bind(&c, p)));
     assert_eq!(next(None).as_deref(), Some("b.md"));
     assert_eq!(next(Some("b.md")).as_deref(), Some("post.md"));
     assert_eq!(next(Some("c.md")).as_deref(), Some("post.md"));
     assert_eq!(next(Some("post.md")).as_deref(), Some("b.md"), "wraps");
     let id = bind(&c, "b.md");
-    let v = c
-        .request(Request::NextFoldNote(NextFoldNoteParams {
-            id: Some(id),
-            path: None,
-        }))
-        .unwrap();
-    assert_eq!(v["path"], "post.md");
     applied(resolve(
         &c,
         id,
@@ -409,5 +400,45 @@ async fn next_fold_note_orders_wraps_and_ends() {
     ));
     assert_eq!(next(None), None);
     drop(c);
+    d.shutdown().await.unwrap();
+}
+
+/// A gone or unknown `after` starts from the first candidate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn next_fold_note_with_a_gone_or_unknown_after_starts_from_the_first() {
+    let env = Env::new();
+    std::fs::write(env.vault.join("b.md"), POST).unwrap();
+    std::fs::write(env.vault.join("m.md"), POST).unwrap();
+    let (d, c) = start(&env).await;
+    let after = |after: Option<NoteId>| -> Option<String> {
+        let v = c
+            .request(Request::NextFoldNote(NextFoldNoteParams { after }))
+            .unwrap();
+        serde_json::from_value::<NextFoldNoteResult>(v)
+            .unwrap()
+            .path
+    };
+    assert_eq!(
+        after(Some(NoteId(999_999))).as_deref(),
+        Some("b.md"),
+        "unknown"
+    );
+    let gone = bind(&c, "m.md");
+    assert_eq!(after(Some(gone)).as_deref(), Some("post.md"), "live");
+    std::fs::remove_file(env.vault.join("m.md")).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let v = c
+            .request(Request::LocateNote(cv_protocol::LocateNoteParams {
+                id: gone,
+            }))
+            .unwrap();
+        if v["state"] != "live" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "m.md never went away");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(after(Some(gone)).as_deref(), Some("b.md"), "gone");
     d.shutdown().await.unwrap();
 }

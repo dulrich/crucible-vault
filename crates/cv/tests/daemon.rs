@@ -1189,8 +1189,8 @@ async fn by_id_delete_preview_delete_note_and_set_bool_follow_the_id() {
 }
 
 /// Plan sources-publication-model WP-7: `propose_source` answers a proposal for a web note,
-/// writes nothing (note bytes, mtime and the job list unchanged) and answers `NOT_FOUND` for a
-/// path with no note.
+/// by note id, writes nothing (note bytes, mtime and the job list unchanged) and answers
+/// `NOT_FOUND` for an id with no note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn propose_source_is_read_only_and_not_found_for_unknown_notes() {
     let env = Env::new();
@@ -1208,6 +1208,14 @@ async fn propose_source_is_read_only_and_not_found_for_unknown_notes() {
             .as_array()
             .map_or(0, Vec::len)
     };
+    let id: cv_protocol::BindNoteResult = serde_json::from_value(
+        c.request(Request::BindNote(cv_protocol::BindNoteParams {
+            path: "clip.md".into(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let id = id.id;
     let before_jobs = jobs(&c);
     let before = (
         std::fs::read(&note).unwrap(),
@@ -1215,7 +1223,7 @@ async fn propose_source_is_read_only_and_not_found_for_unknown_notes() {
     );
     let r = c
         .request(Request::ProposeSource(cv_protocol::ProposeSourceParams {
-            note: "clip.md".into(),
+            id,
         }))
         .unwrap();
     assert_eq!(r["match"], json!("proposed"), "{r}");
@@ -1229,7 +1237,7 @@ async fn propose_source_is_read_only_and_not_found_for_unknown_notes() {
     );
     assert_eq!(jobs(&c), before_jobs);
     let missing = c.request(Request::ProposeSource(cv_protocol::ProposeSourceParams {
-        note: "nope.md".into(),
+        id: cv_protocol::NoteId(999_999),
     }));
     assert_eq!(rpc_code(missing), error_codes::NOT_FOUND);
     drop(c);

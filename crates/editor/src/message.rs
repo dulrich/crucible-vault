@@ -279,9 +279,10 @@ impl RemovalsMsg {
 #[derive(Debug, Clone)]
 pub enum ReadingMsg {
     /// Plan intake-removals-sources-rescan WP-6: a Delete / Keep / Delete all click on the
-    /// `[!removed]` fold of `path` (saves first when dirty, then `resolve_removals`).
+    /// `[!removed]` fold of the tab's document `note` (saves first when dirty, then
+    /// `resolve_removals`).
     Removals {
-        path: String,
+        note: cv_protocol::NoteId,
         op: cv_protocol::RemovalOp,
     },
     /// Toggle the active tab's mode Source ↔ Reading; Split → Source (Ctrl+E; the palette too).

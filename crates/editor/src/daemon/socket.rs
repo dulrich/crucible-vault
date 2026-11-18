@@ -290,16 +290,13 @@ impl DaemonClient for SocketDaemon {
         let path = path.to_owned();
         match self.call::<m::ImageDescription>(cv_protocol::ImageDescriptionParams { path }) {
             Ok(r) => Ok(r.narrative),
-            Err(DaemonError::Rpc(e)) if e.code == cv_protocol::error_codes::METHOD_NOT_FOUND => {
-                Ok(None)
-            }
+            Err(e) if super::is_method_not_found(&e) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    fn propose_source(&self, path: &str) -> Result<cv_protocol::ProposeSourceResult> {
-        let note = path.to_owned();
-        self.call::<m::ProposeSource>(cv_protocol::ProposeSourceParams { note })
+    fn propose_source(&self, id: NoteId) -> Result<cv_protocol::ProposeSourceResult> {
+        self.call::<m::ProposeSource>(cv_protocol::ProposeSourceParams { id })
     }
 
     fn resolve_removals(

@@ -99,6 +99,7 @@ impl H {
             &self.views,
             &self.pdfs,
             PATH,
+            crate::daemon::NoteId(1),
             VIEW,
             t,
             1.0,

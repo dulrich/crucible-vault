@@ -453,7 +453,7 @@ impl App {
                 .status
                 .set_error(format!("rename not done ({refusal})")),
             AfterSave::Removals(op) => match landed {
-                Landed::Clean => return self.send_removals(path, op),
+                Landed::Clean => return self.send_removals(note, op),
                 Landed::Gone => {}
                 Landed::Failed(_) | Landed::Conflict | Landed::Changed => self
                     .status

@@ -34,7 +34,7 @@ pub use job::{EnqueueOutcome, FailureReason, Job, JobResult, JobStatus, NewJob, 
 pub use link_records::{LinkRecord, LinkRecordInput, MergeFlags, UpsertOutcome};
 pub use note_ids::NOTE_ID_RETENTION_MS;
 pub use query::{ListQuery, StatusCount};
-pub use removal_labels::RemovalLabel;
+pub use removal_labels::{PublicationLabels, RemovalLabel};
 pub use runner_state::StepCheckpoint;
 pub use store::{
     BreakerFailure, ChangeHook, DEFAULT_RETENTION_MS, DEFAULT_STALE_LEASE_MS, QueueConfig,

@@ -580,12 +580,12 @@ impl App {
     fn create_source_from_note(&mut self) -> Task<Message> {
         use crate::settings::SettingsMsg;
         use crate::settings::pages::sources_propose::propose_error;
-        let Some(path) = self.active_note().map(|t| t.path.to_owned()) else {
+        let Some(id) = self.active_note().and_then(|t| t.note) else {
             self.status.set_error("no active note".into());
             return Task::none();
         };
         self.rpc(
-            move |d| d.propose_source(&path).map_err(|e| propose_error(&e)),
+            move |d| d.propose_source(id).map_err(|e| propose_error(&e)),
             |r| Message::Settings(SettingsMsg::SourceProposed(r)),
         )
     }

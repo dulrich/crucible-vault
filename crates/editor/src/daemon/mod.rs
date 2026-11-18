@@ -206,15 +206,11 @@ pub trait DaemonClient: Send + Sync {
     fn image_description(&self, _path: &str) -> Result<Option<String>> {
         Ok(None)
     }
-    /// Plan sources-publication-model WP-7: the publication record note `path` belongs to, or a
-    /// proposed one (read-only). An old daemon answers method-not-found (the default here, for
+    /// Plan sources-publication-model WP-7: the publication record the note `id` belongs to, or
+    /// a proposed one (read-only). An old daemon answers method-not-found (the default here, for
     /// fakes), which the command reports as "restart the daemon".
-    fn propose_source(&self, _path: &str) -> Result<cv_protocol::ProposeSourceResult> {
-        Err(DaemonError::Rpc(cv_protocol::RpcError {
-            code: cv_protocol::error_codes::METHOD_NOT_FOUND,
-            message: "method not found: propose_source".to_owned(),
-            data: None,
-        }))
+    fn propose_source(&self, _id: NoteId) -> Result<cv_protocol::ProposeSourceResult> {
+        Err(method_not_found("propose_source"))
     }
     /// Plan intake-removals-sources-rescan WP-6: resolves one fold group, all groups, or trims a
     /// line range of note `p.id` (the daemon is the only writer). A refusal is a result, not an
@@ -263,6 +259,22 @@ pub fn method_not_found(method: &str) -> DaemonError {
         message: format!("method not found: {method}"),
         data: None,
     })
+}
+
+/// Whether `e` is the daemon's "method not found" answer.
+pub fn is_method_not_found(e: &DaemonError) -> bool {
+    matches!(e, DaemonError::Rpc(r) if r.code == cv_protocol::error_codes::METHOD_NOT_FOUND)
+}
+
+/// The user-facing text of a failed call, prefixed with `what`; an older daemon that lacks the
+/// request answers method-not-found.
+#[must_use]
+pub fn call_error_text(what: &str, e: &DaemonError) -> String {
+    if is_method_not_found(e) {
+        format!("{what}: the running daemon does not support this — restart it after installing")
+    } else {
+        format!("{what}: {e}")
+    }
 }
 
 /// Joins a vault-relative path onto `root`, refusing absolute paths and `..`.

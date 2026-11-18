@@ -6,13 +6,13 @@
 //! through the normal changed-on-disk follow, never from the reply.
 
 use cv_protocol::{
-    NextFoldNoteParams, NextFoldNoteResult, RemovalKind, RemovalOp, RemovalRefusal,
+    NextFoldNoteParams, NextFoldNoteResult, NoteId, RemovalKind, RemovalOp, RemovalRefusal,
     RemovalsApplied, ResolveRemovalsParams, ResolveRemovalsResult,
 };
 use iced::Task;
 
 use super::App;
-use crate::daemon::DaemonError;
+use crate::daemon::call_error_text;
 use crate::message::{AfterSave, Message, RemovalsMsg};
 
 /// The status text of an applied resolve — counts only, no note text.
@@ -50,35 +50,19 @@ pub fn refusal_text(r: RemovalRefusal) -> &'static str {
     }
 }
 
-/// The status text of a failed call; an older daemon that lacks the request answers
-/// method-not-found.
-#[must_use]
-pub fn call_error_text(what: &str, e: &DaemonError) -> String {
-    match e {
-        DaemonError::Rpc(r) if r.code == cv_protocol::error_codes::METHOD_NOT_FOUND => {
-            format!(
-                "{what}: the running daemon does not support this — restart it after installing"
-            )
-        }
-        e => format!("{what}: {e}"),
-    }
-}
-
 impl App {
-    /// A fold control click (or a trim, once its lines are known): saves first when the buffer
-    /// has unsaved edits and continues only when the save landed clean; otherwise sends at once.
-    pub(super) fn removals_click(&mut self, path: String, op: RemovalOp) -> Task<Message> {
-        let Some(id) = self.docs.id_of(&path) else {
+    /// A fold control click (or a trim, once its lines are known) on the document `note`: saves
+    /// first when the buffer has unsaved edits and continues only when the save landed clean;
+    /// otherwise sends at once.
+    pub(super) fn removals_click(&mut self, note: NoteId, op: RemovalOp) -> Task<Message> {
+        let Some(buf) = self.docs.buffer(Some(note)) else {
             self.status
                 .set_error("Removals: the note is not open".into());
             return Task::none();
         };
-        let Some(buf) = self.docs.buffer(Some(id)) else {
-            return Task::none();
-        };
         if buf.is_dirty() || buf.is_saving() {
             return self
-                .save_then(id, Some(AfterSave::Removals(op)))
+                .save_then(note, Some(AfterSave::Removals(op)))
                 .unwrap_or_else(|| {
                     self.status.set_error(
                         "Removals: not done (the note is saving or has a conflict); try again"
@@ -92,19 +76,16 @@ impl App {
                 .set_error("Removals: not done (the note has a conflict)".into());
             return Task::none();
         }
-        self.send_removals(&path, op)
+        self.send_removals(note, op)
     }
 
-    /// Sends `resolve_removals` for the note at `path` with the hash the daemon last confirmed.
-    pub(super) fn send_removals(&mut self, path: &str, op: RemovalOp) -> Task<Message> {
-        let Some(id) = self.docs.id_of(path) else {
-            return Task::none();
-        };
-        let Some(buf) = self.docs.buffer(Some(id)) else {
+    /// Sends `resolve_removals` for the document `note` with the hash the daemon last confirmed.
+    pub(super) fn send_removals(&mut self, note: NoteId, op: RemovalOp) -> Task<Message> {
+        let Some(buf) = self.docs.buffer(Some(note)) else {
             return Task::none();
         };
         let p = ResolveRemovalsParams {
-            id,
+            id: note,
             base_hash: buf.base_hash().as_str().to_owned(),
             op,
         };
@@ -139,13 +120,10 @@ impl App {
     }
 
     /// "Next note with removals": the daemon names the next note after the active one that still
-    /// has a fold (the active note's id when known, else its path; none active → neither).
+    /// has a fold (none active → from the first).
     fn next_note_with_removals(&mut self) -> Task<Message> {
-        let active = self.active_note().map(|t| t.path.to_owned());
-        let id = active.as_deref().and_then(|p| self.docs.id_of(p));
         let p = NextFoldNoteParams {
-            id,
-            path: if id.is_some() { None } else { active },
+            after: self.active_note().and_then(|t| t.note),
         };
         self.rpc(
             move |d| {
@@ -160,14 +138,14 @@ impl App {
     /// selection) expanded to whole lines, as 0-based inclusive body lines, sent as the `trim`
     /// form with `kind`.
     fn trim_selection(&mut self, kind: RemovalKind) -> Task<Message> {
-        let Some(path) = self.active_note().map(|t| t.path.to_owned()) else {
+        let Some(note) = self.active_note().and_then(|t| t.note) else {
             self.status
                 .set_error("Trim selection as removed: no active note".into());
             return Task::none();
         };
-        match self.selected_body_lines(&path) {
+        match self.selected_body_lines(note) {
             Ok((first, last)) => self.removals_click(
-                path,
+                note,
                 RemovalOp::Trim {
                     first,
                     last,
@@ -185,16 +163,17 @@ impl App {
     /// first (Split), then the other; `NoSelection` only when neither has one.
     fn selected_body_lines(
         &self,
-        path: &str,
+        note: NoteId,
     ) -> Result<(usize, usize), editor_model::removals::TrimError> {
         use editor_model::removals::TrimError;
         let Some(tab) = self.active_note() else {
             return Err(TrimError::NoSelection);
         };
-        let mode = self.reading.mode(&self.docs, path);
-        let Some(buf) = self.docs.get(path).map(|od| &od.buffer) else {
+        let Some(buf) = self.docs.buffer(Some(note)) else {
             return Err(TrimError::NoSelection);
         };
+        let path = buf.path();
+        let mode = self.reading.mode(&self.docs, path);
         let text = buf.text();
         let source = || {
             let c = buf.cursor();

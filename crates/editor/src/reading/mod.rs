@@ -845,6 +845,7 @@ pub fn tab_body<'a>(
             views,
             pdfs,
             doc.path(),
+            doc.note_id(),
             view,
             t,
             scale,

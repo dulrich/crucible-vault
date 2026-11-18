@@ -22,8 +22,8 @@ pub use note::{
     Origin, file_changed,
 };
 pub use removals::{
-    NextFoldNoteParams, NextFoldNoteResult, RemovalKind, RemovalOp, RemovalRefusal, RemovalVerdict,
-    RemovalsApplied, ResolveRemovalsParams, ResolveRemovalsResult,
+    NextFoldNoteParams, NextFoldNoteResult, RemovalKind, RemovalOp, RemovalOrigin, RemovalRefusal,
+    RemovalVerdict, RemovalsApplied, ResolveRemovalsParams, ResolveRemovalsResult,
 };
 
 /// Protocol version exchanged in `hello`; a mismatch is refused, never degraded.
@@ -203,7 +203,7 @@ pub enum Request {
     ImageDescription(ImageDescriptionParams),
     /// The publication record a note belongs to, or a proposed one (plan
     /// sources-publication-model WP-7) → [`ProposeSourceResult`]. Read-only: nothing is written,
-    /// nothing enqueued. A path with no note is `NOT_FOUND`. An old daemon answers
+    /// nothing enqueued. An id with no live note is `NOT_FOUND`. An old daemon answers
     /// `METHOD_NOT_FOUND`, which the editor reports as "restart the daemon".
     ProposeSource(ProposeSourceParams),
     /// Resolves `[!removed]` fold groups or trims a body line range of the note `id` (plan
@@ -217,9 +217,10 @@ pub enum Request {
 
 /// `propose_source` params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProposeSourceParams {
-    /// Vault-relative note path.
-    pub note: String,
+    /// The note (resolved to its current path on the daemon's writer thread).
+    pub id: NoteId,
 }
 
 /// The matcher fields of a publication record a proposal names (each a list, as the

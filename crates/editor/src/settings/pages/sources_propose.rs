@@ -25,12 +25,7 @@ pub struct FromNote {
 /// the request answers method-not-found.
 #[must_use]
 pub fn propose_error(e: &DaemonError) -> String {
-    match e {
-        DaemonError::Rpc(r) if r.code == cv_protocol::error_codes::METHOD_NOT_FOUND => {
-            "Create Source from note: the running daemon does not support this — restart it after installing".to_owned()
-        }
-        e => format!("Create Source from note: {e}"),
-    }
+    crate::daemon::call_error_text("Create Source from note", e)
 }
 
 /// The matcher lists as `(key, value)` pairs, empty lists skipped.

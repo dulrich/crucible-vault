@@ -366,21 +366,30 @@ fn v19_database_migrates_to_v20_with_removal_labels() {
     let p = dir.path().join("state.db");
     let mut s = StateDb::open(&p, 1, QueueConfig::default()).unwrap();
     assert_eq!(s.schema_version().unwrap(), 20);
-    let row = |verdict: &str, line: &str| crate::RemovalLabel {
+    let row = |verdict, line: &str| crate::RemovalLabel {
         note_id: 7,
         publication: "pub".into(),
         kind: String::new(),
-        verdict: verdict.into(),
-        origin: "fold".into(),
+        verdict,
+        origin: cv_protocol::RemovalOrigin::Fold,
         line: line.into(),
         line_key: u64::MAX - line.len() as u64,
         at_ms: 5,
     };
-    let rows = vec![row("delete", "a"), row("keep", "b")];
+    let rows = vec![
+        row(cv_protocol::RemovalVerdict::Delete, "a"),
+        row(cv_protocol::RemovalVerdict::Keep, "b"),
+    ];
     assert_eq!(s.insert_removal_labels(&rows).unwrap(), 2);
     assert_eq!(s.removal_labels().unwrap(), rows);
     assert!(
-        s.insert_removal_labels(&[row("maybe", "c")]).is_err(),
+        s.conn()
+            .execute(
+                "INSERT INTO removal_labels (note_id, publication, kind, verdict, origin, line,
+                     line_key, at_ms) VALUES (7, 'pub', '', 'maybe', 'fold', 'c', 1, 5)",
+                [],
+            )
+            .is_err(),
         "CHECK refuses"
     );
     assert_eq!(
@@ -636,3 +645,55 @@ mod settle_recovery;
 
 #[path = "tests_telemetry.rs"]
 mod telemetry;
+
+/// The stored and exported encodings of each verdict, each origin and an open-ended kind.
+#[test]
+fn removal_label_encodings_are_pinned() {
+    use cv_protocol::{RemovalOrigin, RemovalVerdict};
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = StateDb::open(&dir.path().join("state.db"), 1, QueueConfig::default()).unwrap();
+    let row = |verdict, origin| crate::RemovalLabel {
+        note_id: 1,
+        publication: "p".into(),
+        kind: "banner".into(),
+        verdict,
+        origin,
+        line: "l".into(),
+        line_key: 2,
+        at_ms: 3,
+    };
+    let rows = vec![
+        row(RemovalVerdict::Delete, RemovalOrigin::Fold),
+        row(RemovalVerdict::Keep, RemovalOrigin::Selection),
+    ];
+    s.insert_removal_labels(&rows).unwrap();
+    let stored: Vec<(String, String, String)> = s
+        .conn()
+        .prepare("SELECT kind, verdict, origin FROM removal_labels ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let owned = |a: &str, b: &str, c: &str| (a.to_owned(), b.to_owned(), c.to_owned());
+    assert_eq!(
+        stored,
+        vec![
+            owned("banner", "delete", "fold"),
+            owned("banner", "keep", "selection")
+        ]
+    );
+    let read = s.removal_labels().unwrap();
+    assert_eq!(read, rows);
+    let json: Vec<String> = read
+        .iter()
+        .map(|r| serde_json::to_string(r).unwrap())
+        .collect();
+    assert_eq!(
+        json,
+        vec![
+            r#"{"note_id":1,"publication":"p","kind":"banner","verdict":"delete","origin":"fold","line":"l","line_key":2,"at_ms":3}"#,
+            r#"{"note_id":1,"publication":"p","kind":"banner","verdict":"keep","origin":"selection","line":"l","line_key":2,"at_ms":3}"#,
+        ]
+    );
+}

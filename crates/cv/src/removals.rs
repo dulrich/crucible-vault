@@ -45,6 +45,7 @@ pub fn export(state_db: &Path, out: &mut impl Write) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use cv_protocol::{RemovalOrigin, RemovalVerdict};
     use cv_state::{QueueConfig, RemovalLabel, StateDb};
 
     #[test]
@@ -55,19 +56,19 @@ mod tests {
         let mut out = Vec::new();
         super::export(&p, &mut out).unwrap();
         assert!(out.is_empty());
-        let row = |verdict: &str, origin: &str, line: &str| RemovalLabel {
+        let row = |verdict, origin, line: &str| RemovalLabel {
             note_id: 4,
             publication: "Synth Pub".into(),
             kind: "cta".into(),
-            verdict: verdict.into(),
-            origin: origin.into(),
+            verdict,
+            origin,
             line: line.into(),
             line_key: 7,
             at_ms: 11,
         };
         db.insert_removal_labels(&[
-            row("delete", "fold", "subscribe now"),
-            row("keep", "selection", "real text"),
+            row(RemovalVerdict::Delete, RemovalOrigin::Fold, "subscribe now"),
+            row(RemovalVerdict::Keep, RemovalOrigin::Selection, "real text"),
         ])
         .unwrap();
         super::export(&p, &mut out).unwrap();

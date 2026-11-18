@@ -60,6 +60,8 @@ struct Ctx<'a, 'c> {
     pdfs: &'a crate::pdf::store::PdfStore<iced::widget::image::Handle>,
     doc: &'a Doc,
     path: &'a str,
+    /// The showing tab's document.
+    note: cv_protocol::NoteId,
     /// The showing view (tab id) — image pins are per view (plan editor-feedback-round-2 WP-7).
     view: u64,
     t: Tokens,
@@ -148,6 +150,7 @@ pub fn reading<'a>(
     views: &'a crate::views::ViewStore,
     pdfs: &'a crate::pdf::store::PdfStore<iced::widget::image::Handle>,
     path: &'a str,
+    note: cv_protocol::NoteId,
     view: u64,
     t: Tokens,
     scale: f32,
@@ -167,6 +170,7 @@ pub fn reading<'a>(
         pdfs,
         doc,
         path,
+        note,
         view,
         t,
         scale,
@@ -505,12 +509,7 @@ fn callout<'a>(
     );
     let mut col: Vec<Element<'a, Message>> = Vec::new();
     if fold_controls.is_some() {
-        let msg = |op| {
-            Message::Reading(ReadingMsg::Removals {
-                path: cx.path.to_owned(),
-                op,
-            })
-        };
+        let msg = |op| Message::Reading(ReadingMsg::Removals { note: cx.note, op });
         col.push(
             row![
                 container(head_run).width(Length::Fill),

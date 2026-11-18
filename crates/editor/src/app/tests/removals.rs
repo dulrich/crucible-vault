@@ -61,10 +61,8 @@ fn notice(app: &App) -> String {
 }
 
 fn click(app: &mut App, op: RemovalOp) {
-    let _ = app.send(Message::Reading(ReadingMsg::Removals {
-        path: NOTE.into(),
-        op,
-    }));
+    let note = app.note_id(NOTE).expect("bound");
+    let _ = app.send(Message::Reading(ReadingMsg::Removals { note, op }));
 }
 
 fn first_group(app: &App) -> String {
@@ -229,7 +227,7 @@ fn old_daemon_says_restart() {
 }
 
 /// Requirement: next-with-removals opens the returned note; `None` says so; the active note's id
-/// is sent (none active: neither id nor path).
+/// is sent as `after` (none active: none).
 #[test]
 fn next_note_opens_the_returned_path_or_reports_none() {
     let (_t, d, mut app) = app_with(&[(NOTE, "a\n"), ("rm/b.md", "b\n")]);
@@ -237,11 +235,7 @@ fn next_note_opens_the_returned_path_or_reports_none() {
         .expect("script");
     let _ = app.send(Message::Removals(RemovalsMsg::Next));
     let calls = d.next_fold_calls().expect("calls");
-    assert_eq!(
-        (calls[0].id, calls[0].path.clone()),
-        (None, None),
-        "none active"
-    );
+    assert_eq!(calls[0].after, None, "none active");
     open(&mut app, NOTE);
     d.set_next_fold_reply(Some(NextFoldNoteResult {
         path: Some("rm/b.md".into()),
@@ -249,7 +243,7 @@ fn next_note_opens_the_returned_path_or_reports_none() {
     .expect("script");
     let _ = app.send(Message::Removals(RemovalsMsg::Next));
     let calls = d.next_fold_calls().expect("calls");
-    assert_eq!(calls[1].id, app.note_id(NOTE));
+    assert_eq!(calls[1].after, app.note_id(NOTE));
     assert_eq!(
         app.active_tab().and_then(|t| t.path(&app.docs)),
         Some("rm/b.md")

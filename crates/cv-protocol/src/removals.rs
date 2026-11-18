@@ -50,6 +50,36 @@ pub enum RemovalVerdict {
     Keep,
 }
 
+impl RemovalVerdict {
+    /// The wire / label string (`delete` | `keep`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Delete => "delete",
+            Self::Keep => "keep",
+        }
+    }
+}
+
+/// Where a removal label came from: a resolved `[!removed]` fold group or a trimmed selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemovalOrigin {
+    Fold,
+    Selection,
+}
+
+impl RemovalOrigin {
+    /// The label string (`fold` | `selection`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fold => "fold",
+            Self::Selection => "selection",
+        }
+    }
+}
+
 /// The span kinds a trim can be labelled with (the four the enrich model emits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -143,15 +173,13 @@ pub struct RemovalsApplied {
     pub labels_failed: bool,
 }
 
-/// `next_fold_note` params: the note the client is on (by id, else path; both absent = start
-/// from the first).
+/// `next_fold_note` params: the note the client is on. Absent, gone or unknown starts from the
+/// first candidate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NextFoldNoteParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<NoteId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+    pub after: Option<NoteId>,
 }
 
 /// `next_fold_note` result: the first note after the current one in vault-path order (wrapping

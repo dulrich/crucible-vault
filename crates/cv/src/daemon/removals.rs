@@ -27,8 +27,8 @@ use cv_ingest::enrich::{
     trim_lines,
 };
 use cv_protocol::{
-    NextFoldNoteParams, NextFoldNoteResult, RemovalOp, RemovalRefusal, RemovalVerdict,
-    RemovalsApplied, ResolveRemovalsParams, ResolveRemovalsResult,
+    NextFoldNoteParams, NextFoldNoteResult, NoteId, RemovalOp, RemovalOrigin, RemovalRefusal,
+    RemovalVerdict, RemovalsApplied, ResolveRemovalsParams, ResolveRemovalsResult,
 };
 use cv_state::RemovalLabel;
 use cv_vault::NoteLocation;
@@ -39,11 +39,19 @@ use super::*;
 /// counts and the deleted lines.
 struct Applied {
     body: String,
-    labels: Vec<(String, &'static str, &'static str, String)>,
+    labels: Vec<Labelled>,
     groups: u32,
     at_anchor: u32,
     at_end: u32,
     deleted: Vec<String>,
+}
+
+/// One label row before the note and publication are known.
+struct Labelled {
+    kind: String,
+    verdict: RemovalVerdict,
+    origin: RemovalOrigin,
+    line: String,
 }
 
 fn refusal_of(e: &FoldError) -> RemovalRefusal {
@@ -61,15 +69,20 @@ fn count(n: usize) -> u32 {
 }
 
 fn label_lines(
-    out: &mut Vec<(String, &'static str, &'static str, String)>,
+    out: &mut Vec<Labelled>,
     kind: &str,
-    verdict: &'static str,
-    origin: &'static str,
+    verdict: RemovalVerdict,
+    origin: RemovalOrigin,
     lines: &[String],
 ) {
     for l in lines {
-        if let Some(n) = normalize_line(l) {
-            out.push((kind.to_owned(), verdict, origin, n));
+        if let Some(line) = normalize_line(l) {
+            out.push(Labelled {
+                kind: kind.to_owned(),
+                verdict,
+                origin,
+                line,
+            });
         }
     }
 }
@@ -90,7 +103,13 @@ fn apply(body: &str, op: &RemovalOp) -> Result<Applied, FoldError> {
             let t = trim_lines(body, *first, *last)?;
             let mut labels = Vec::new();
             let kind = kind.map(|k| k.as_str()).unwrap_or_default();
-            label_lines(&mut labels, kind, "delete", "selection", &t.removed);
+            label_lines(
+                &mut labels,
+                kind,
+                RemovalVerdict::Delete,
+                RemovalOrigin::Selection,
+                &t.removed,
+            );
             return Ok(Applied {
                 body: t.text,
                 labels,
@@ -120,11 +139,23 @@ fn apply(body: &str, op: &RemovalOp) -> Result<Applied, FoldError> {
         let kind = kind.as_ref().map(|k| k.as_str()).unwrap_or_default();
         match verdict {
             Verdict::Delete => {
-                label_lines(&mut a.labels, kind, "delete", "fold", lines);
+                label_lines(
+                    &mut a.labels,
+                    kind,
+                    RemovalVerdict::Delete,
+                    RemovalOrigin::Fold,
+                    lines,
+                );
                 a.deleted.extend(lines.iter().cloned());
             }
             Verdict::Keep => {
-                label_lines(&mut a.labels, kind, "keep", "fold", lines);
+                label_lines(
+                    &mut a.labels,
+                    kind,
+                    RemovalVerdict::Keep,
+                    RemovalOrigin::Fold,
+                    lines,
+                );
                 let n = count(lines.len());
                 match placement {
                     Some(Placement::Anchor) => a.at_anchor += n,
@@ -157,6 +188,116 @@ fn media_candidates(vw: &cv_vault::VaultWriter, path: &str, deleted: &[String]) 
     out
 }
 
+/// What one resolve writer job decided: a refusal that changed nothing, or an applied result
+/// with the media cleanup candidates the RPC tail enqueues.
+enum Resolved {
+    Refused(ResolveRemovalsResult),
+    Applied {
+        out: RemovalsApplied,
+        candidates: Vec<String>,
+    },
+}
+
+fn refused(reason: RemovalRefusal, current_hash: Option<String>) -> Resolved {
+    Resolved::Refused(ResolveRemovalsResult::Refused {
+        reason,
+        current_hash,
+    })
+}
+
+/// The note `id`'s live path, or none for a gone or unknown id.
+pub(super) fn locate_live(
+    vw: &mut cv_vault::VaultWriter,
+    id: NoteId,
+) -> Result<Option<String>, JobError> {
+    Ok(match vw.locate_note(id).map_err(VaultError::from)? {
+        NoteLocation::Live { path } => Some(path),
+        NoteLocation::Gone { .. } | NoteLocation::Unknown => None,
+    })
+}
+
+/// The writer job of one resolve: locate, hold check, compare-and-swap, apply, write, label
+/// insert, result assembly. Every refusal returns before the write.
+fn resolve_in_writer(
+    vw: &mut cv_vault::VaultWriter,
+    holds: &crate::runner::HoldsView,
+    state: &Mutex<StateDb>,
+    p: &ResolveRemovalsParams,
+) -> Result<Resolved, JobError> {
+    let Some(path) = locate_live(vw, p.id)? else {
+        return Ok(refused(RemovalRefusal::UnknownNote, None));
+    };
+    holds.refuse([path.as_str()])?;
+    let Some(bytes) = vw.fs().read(&path)? else {
+        return Ok(refused(RemovalRefusal::UnknownNote, None));
+    };
+    let hash = ContentHash::of(&bytes);
+    if hash.as_str() != p.base_hash {
+        return Ok(refused(
+            RemovalRefusal::StaleHash,
+            Some(hash.as_str().to_owned()),
+        ));
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|_| JobError::Invalid("the note is not UTF-8".into()))?;
+    let doc = cv_note::FrontmatterDoc::new(text);
+    let body = doc.body();
+    let a = match apply(body, &p.op) {
+        Ok(a) => a,
+        Err(e) => return Ok(refused(refusal_of(&e), None)),
+    };
+    let candidates = media_candidates(vw, &path, &a.deleted);
+    let new_hash = if a.body == body {
+        hash
+    } else {
+        let head = &doc.text()[..doc.text().len() - body.len()];
+        vw.write(&path, format!("{head}{}", a.body).as_bytes(), Some(hash))?
+    };
+    let publication = doc.get_str_trimmed("publication").unwrap_or_default();
+    let rows = label_rows(p.id, &publication, a.labels);
+    let mut out = RemovalsApplied {
+        hash: new_hash.as_str().to_owned(),
+        path,
+        groups: a.groups,
+        lines_labelled: count(rows.len()),
+        restored_at_anchor: a.at_anchor,
+        restored_at_end: a.at_end,
+        media_queued: count(candidates.len()),
+        ..RemovalsApplied::default()
+    };
+    insert_labels(state, &rows, &mut out);
+    Ok(Resolved::Applied { out, candidates })
+}
+
+/// The stored rows of `labels` for the note `id` in `publication`.
+fn label_rows(id: NoteId, publication: &str, labels: Vec<Labelled>) -> Vec<RemovalLabel> {
+    let now = now_ms();
+    labels
+        .into_iter()
+        .map(|l| RemovalLabel {
+            note_id: i64::try_from(id.0).unwrap_or(i64::MAX),
+            publication: publication.to_owned(),
+            kind: l.kind,
+            verdict: l.verdict,
+            origin: l.origin,
+            line_key: line_key(&l.line),
+            line: l.line,
+            at_ms: now,
+        })
+        .collect()
+}
+
+/// Inserts `rows` after the note write; a failure is logged and reported, the write stands.
+fn insert_labels(state: &Mutex<StateDb>, rows: &[RemovalLabel], out: &mut RemovalsApplied) {
+    if !rows.is_empty()
+        && let Err(e) = lock(state).insert_removal_labels(rows)
+    {
+        tracing::warn!(error = %e, rows = rows.len(), "recording removal labels");
+        out.labels_failed = true;
+        out.lines_labelled = 0;
+    }
+}
+
 impl Shared {
     /// `resolve_removals` (module doc).
     pub(super) async fn resolve_removals(
@@ -165,107 +306,30 @@ impl Shared {
     ) -> Result<ResolveRemovalsResult, RpcError> {
         let holds = self.holds_view();
         let state = Arc::clone(&self.state);
-        let (res, candidates) = self
-            .writer_job(move |vw| {
-                let refused = |reason, current_hash| {
-                    Ok((
-                        ResolveRemovalsResult::Refused {
-                            reason,
-                            current_hash,
-                        },
-                        Vec::new(),
-                    ))
-                };
-                let path = match vw.locate_note(p.id).map_err(VaultError::from)? {
-                    NoteLocation::Live { path } => path,
-                    NoteLocation::Gone { .. } | NoteLocation::Unknown => {
-                        return refused(RemovalRefusal::UnknownNote, None);
-                    }
-                };
-                holds.refuse([path.as_str()])?;
-                let Some(bytes) = vw.fs().read(&path)? else {
-                    return refused(RemovalRefusal::UnknownNote, None);
-                };
-                let hash = ContentHash::of(&bytes);
-                if hash.as_str() != p.base_hash {
-                    return refused(RemovalRefusal::StaleHash, Some(hash.as_str().to_owned()));
-                }
-                let text = String::from_utf8(bytes)
-                    .map_err(|_| JobError::Invalid("the note is not UTF-8".into()))?;
-                let doc = cv_note::FrontmatterDoc::new(text);
-                let body = doc.body();
-                let head = &doc.text()[..doc.text().len() - body.len()];
-                let a = match apply(body, &p.op) {
-                    Ok(a) => a,
-                    Err(e) => return refused(refusal_of(&e), None),
-                };
-                let publication = doc.get_str_trimmed("publication").unwrap_or_default();
-                let candidates = media_candidates(vw, &path, &a.deleted);
-                let new_hash = if a.body == body {
-                    hash
-                } else {
-                    let out = format!("{head}{}", a.body);
-                    vw.write(&path, out.as_bytes(), Some(hash))?
-                };
-                let now = now_ms();
-                let rows: Vec<RemovalLabel> = a
-                    .labels
-                    .into_iter()
-                    .map(|(kind, verdict, origin, line)| RemovalLabel {
-                        note_id: i64::try_from(p.id.0).unwrap_or(i64::MAX),
-                        publication: publication.clone(),
-                        kind,
-                        verdict: verdict.into(),
-                        origin: origin.into(),
-                        line_key: line_key(&line),
-                        line,
-                        at_ms: now,
-                    })
-                    .collect();
-                let out = RemovalsApplied {
-                    hash: new_hash.as_str().to_owned(),
-                    path: path.clone(),
-                    groups: a.groups,
-                    lines_labelled: count(rows.len()),
-                    restored_at_anchor: a.at_anchor,
-                    restored_at_end: a.at_end,
-                    media_queued: count(candidates.len()),
-                    ..RemovalsApplied::default()
-                };
-                let mut out = out;
-                if !rows.is_empty()
-                    && let Err(e) = lock(&state).insert_removal_labels(&rows)
-                {
-                    tracing::warn!(error = %e, rows = rows.len(), "recording removal labels");
-                    out.labels_failed = true;
-                    out.lines_labelled = 0;
-                }
-                Ok((ResolveRemovalsResult::Applied(out), candidates))
-            })
+        let resolved = self
+            .writer_job(move |vw| resolve_in_writer(vw, &holds, &state, &p))
             .await?;
-        let res = match res {
-            ResolveRemovalsResult::Applied(mut out) => {
-                if !candidates.is_empty() {
-                    match self.enqueue_media_cleanup(candidates) {
-                        Ok(id) => out.cleanup_job = Some(id),
-                        Err(e) => {
-                            tracing::warn!(error = %e, media = out.media_queued, "enqueueing the removals media cleanup");
-                            out.cleanup_failed = true;
-                        }
-                    }
-                }
-                tracing::info!(
-                    groups = out.groups,
-                    labelled = out.lines_labelled,
-                    media_queued = out.media_queued,
-                    cleanup_failed = out.cleanup_failed,
-                    "removals resolved"
-                );
-                ResolveRemovalsResult::Applied(out)
-            }
-            r @ ResolveRemovalsResult::Refused { .. } => r,
+        let (mut out, candidates) = match resolved {
+            Resolved::Refused(r) => return Ok(r),
+            Resolved::Applied { out, candidates } => (out, candidates),
         };
-        Ok(res)
+        if !candidates.is_empty() {
+            match self.enqueue_media_cleanup(candidates) {
+                Ok(id) => out.cleanup_job = Some(id),
+                Err(e) => {
+                    tracing::warn!(error = %e, media = out.media_queued, "enqueueing the removals media cleanup");
+                    out.cleanup_failed = true;
+                }
+            }
+        }
+        tracing::info!(
+            groups = out.groups,
+            labelled = out.lines_labelled,
+            media_queued = out.media_queued,
+            cleanup_failed = out.cleanup_failed,
+            "removals resolved"
+        );
+        Ok(ResolveRemovalsResult::Applied(out))
     }
 
     /// Enqueues the built-in media cleanup job over `paths` (module doc); its job id.
@@ -292,45 +356,51 @@ impl Shared {
     }
 
     /// `next_fold_note`: index candidates (notes with a `removed` callout, path order, no
-    /// `.trash/`), each confirmed by parsing its body for a fold group; the first after the
-    /// current note's path, wrapping, never the current note.
+    /// `.trash/`) are listed in one writer job; each is then read and confirmed by parsing its
+    /// body for a fold group off the executor. The first after the `after` note's path,
+    /// wrapping, never that note; a gone or unknown `after` starts from the first.
     pub(super) async fn next_fold_note(
         &self,
         p: NextFoldNoteParams,
     ) -> Result<NextFoldNoteResult, RpcError> {
-        self.writer_job(move |vw| {
-            let current = match p.id {
-                Some(id) => match vw.locate_note(id).map_err(VaultError::from)? {
-                    NoteLocation::Live { path } => Some(path),
-                    _ => p.path,
-                },
-                None => p.path,
-            };
-            let candidates = cv_index::notes_with_callout(&vw.index().query(), "removed")
-                .map_err(|e| JobError::Invalid(e.to_string()))?;
+        let (root, current, candidates) = self
+            .writer_job(move |vw| {
+                let current = match p.after {
+                    Some(id) => locate_live(vw, id)?,
+                    None => None,
+                };
+                let candidates = cv_index::notes_with_callout(&vw.index().query(), "removed")
+                    .map_err(|e| JobError::Invalid(e.to_string()))?;
+                Ok((vw.fs().root().to_path_buf(), current, candidates))
+            })
+            .await?;
+        tokio::task::spawn_blocking(move || {
             let split = current
                 .as_deref()
                 .map_or(0, |c| candidates.partition_point(|x| x.as_str() <= c));
-            let order = candidates[split..].iter().chain(&candidates[..split]);
-            for path in order {
-                if current.as_deref() == Some(path.as_str()) {
-                    continue;
-                }
-                let Some(bytes) = vw.fs().read(path)? else {
-                    continue;
-                };
-                let text = String::from_utf8_lossy(&bytes);
-                let doc = cv_note::FrontmatterDoc::new(text.into_owned());
-                if !fold_groups(doc.body()).is_empty() {
-                    return Ok(NextFoldNoteResult {
-                        path: Some(path.clone()),
-                    });
-                }
-            }
-            Ok(NextFoldNoteResult { path: None })
+            let path = candidates[split..]
+                .iter()
+                .chain(&candidates[..split])
+                .filter(|path| current.as_deref() != Some(path.as_str()))
+                .find(|path| has_fold(&root, path))
+                .cloned();
+            NextFoldNoteResult { path }
         })
         .await
+        .map_err(internal)
     }
+}
+
+/// Whether the vault note `rel` under `root` still has a fold group.
+fn has_fold(root: &Path, rel: &str) -> bool {
+    if cv_vault::validate_rel_path(rel).is_err() {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(root.join(rel)) else {
+        return false;
+    };
+    let doc = cv_note::FrontmatterDoc::new(String::from_utf8_lossy(&bytes).into_owned());
+    !fold_groups(doc.body()).is_empty()
 }
 
 #[cfg(test)]

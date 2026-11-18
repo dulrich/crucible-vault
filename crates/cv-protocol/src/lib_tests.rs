@@ -763,12 +763,7 @@ fn method_markers_match_the_wire() {
         },
         s,
     );
-    check::<m::ProposeSource>(
-        ProposeSourceParams {
-            note: "a.md".into(),
-        },
-        s,
-    );
+    check::<m::ProposeSource>(ProposeSourceParams { id: NoteId(1) }, s);
     check::<m::ResolveRemovals>(
         ResolveRemovalsParams {
             id: NoteId(1),
@@ -1120,12 +1115,10 @@ fn by_id_delete_and_set_bool_fields_are_additive() {
 /// `propose_source` wire shapes (plan sources-publication-model WP-7).
 #[test]
 fn propose_source_wire_shapes() {
-    let req = Request::ProposeSource(ProposeSourceParams {
-        note: "n.md".into(),
-    });
+    let req = Request::ProposeSource(ProposeSourceParams { id: NoteId(4) });
     assert_eq!(
         round_trip(&req),
-        json!({"method":"propose_source","params":{"note":"n.md"}})
+        json!({"method":"propose_source","params":{"id":4}})
     );
     let proposed = ProposeSourceResult::Proposed {
         record: ProposedSource {
@@ -1186,13 +1179,12 @@ fn removal_requests_round_trip() {
         "op": {"form": "group", "group": "g1", "verdict": "maybe"}}});
     assert!(serde_json::from_value::<Request>(bad).is_err());
     let next = Request::NextFoldNote(NextFoldNoteParams {
-        id: None,
-        path: Some("a.md".into()),
+        after: Some(NoteId(5)),
     });
     let v = serde_json::to_value(&next).expect("v");
     assert_eq!(
         v,
-        json!({"method": "next_fold_note", "params": {"path": "a.md"}})
+        json!({"method": "next_fold_note", "params": {"after": 5}})
     );
     assert_eq!(serde_json::from_value::<Request>(v).expect("back"), next);
     let refused = ResolveRemovalsResult::Refused {

@@ -483,3 +483,36 @@ fn a_dirty_gone_document_beside_the_open_note_stays_gone_and_keep_refuses() {
     assert!(!live.buffer.is_dirty() && live.buffer.conflict().is_none());
     assert_eq!(live.buffer.text(), "body");
 }
+
+/// A gone document and a live note sharing its path: a fold click in the gone tab (dirty, so
+/// it goes through the save-first continuation) sends nothing against the live note's id.
+#[test]
+fn a_fold_click_in_a_gone_tab_never_reaches_the_live_note_at_its_path() {
+    let (_tmp, d, mut app) = gone_beside_open("ge10", true);
+    let live = d.bind_note("ge10/a.md").expect("moved note");
+    let gone = app
+        .docs
+        .iter()
+        .find(|(_, od)| od.buffer.is_missing())
+        .map(|(_, od)| od.id)
+        .expect("still gone");
+    assert_ne!(gone, live);
+    d.set_removals_reply(Some(cv_protocol::ResolveRemovalsResult::Applied(
+        cv_protocol::RemovalsApplied::default(),
+    )))
+    .expect("script");
+    let op = cv_protocol::RemovalOp::All {
+        verdict: cv_protocol::RemovalVerdict::Delete,
+    };
+    let _ = app.send(Message::Reading(crate::message::ReadingMsg::Removals {
+        note: gone,
+        op: op.clone(),
+    }));
+    let calls = d.removals_calls().expect("calls");
+    assert!(calls.iter().all(|c| c.id != live), "{calls:?}");
+    assert_eq!(d.read_file("ge10/a.md").expect("a").0, b"body");
+    // The save-first continuation for the gone document, as a landed save would run it.
+    let _ = app.send_removals(gone, op);
+    let calls = d.removals_calls().expect("calls");
+    assert!(calls.iter().all(|c| c.id != live), "{calls:?}");
+}

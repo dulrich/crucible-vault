@@ -19,18 +19,18 @@ use cv_text::url_canon::{bare_host_name, http_host};
 use super::*;
 
 impl Shared {
-    /// `propose_source`: reads the note in one writer job, then computes the answer off the
-    /// executor against the current config snapshot.
+    /// `propose_source`: resolves the id and reads the note in one writer job, then computes
+    /// the answer off the executor against the current config snapshot. A gone or unknown id
+    /// is `NOT_FOUND`.
     pub(super) async fn propose_source(
         &self,
         p: ProposeSourceParams,
     ) -> Result<ProposeSourceResult, RpcError> {
-        cv_vault::validate_rel_path(&p.note)
-            .map_err(|e| rpc_err(error_codes::INVALID_PARAMS, e.to_string()))?;
         let config = self.runner_or_err()?.config();
-        let note = p.note;
         let bytes = self
             .writer_job(move |vw| {
+                let note = super::removals::locate_live(vw, p.id)?
+                    .ok_or_else(|| VaultError::NotFound(format!("note {}", p.id.0)))?;
                 Ok(vw
                     .read(&note)?
                     .ok_or_else(|| VaultError::NotFound(note.clone()))?)

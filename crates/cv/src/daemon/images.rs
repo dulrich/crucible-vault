@@ -26,6 +26,10 @@ impl Shared {
 
 /// The narrative for the vault image `rel`, or none. A missing file, a path outside `root`, a
 /// non-image, a store error or an empty/absent narrative all answer none.
+///
+/// Not `cv_vault::validate_rel_path`: this read-only lookup accepts `./` segments and images
+/// under skipped folders (embeds link to both), and confines the read by canonicalised
+/// containment under `root` instead.
 pub(super) fn lookup(root: &Path, state: &Mutex<StateDb>, rel: &str) -> ImageDescriptionResult {
     let none = ImageDescriptionResult::default();
     if !is_image(rel) {

@@ -36,7 +36,7 @@
 //! `chrome` head / `footer` tail group at >= 3 posts and >= 30 % of the record's learned items).
 //! Counts `bp_lines_stripped` (mail recurrence), `bp_lines_deleted` / `bp_notes_deleted`,
 //! `bp_lines_vetoed` / `bp_notes_vetoed`, `bp_publications` (records whose notes changed),
-//! `bp_label_unknown` (label rows with an unknown verdict, ignored). Generated blocks and the
+//! `bp_label_unknown` (always 0: the schema admits only the two verdicts). Generated blocks and the
 //! existing fold are never learned, stripped or moved; a second run writes nothing.
 //!
 //! `dry` learns into in-memory sets only and writes nothing to `state.db` or the vault.
@@ -71,6 +71,7 @@ pub(super) struct Counts {
     bp_lines_vetoed: u32,
     bp_notes_vetoed: u32,
     bp_publications: u32,
+    /// Always 0 (the schema admits only the two verdicts); kept in the outcome-var set.
     bp_label_unknown: u32,
 }
 
@@ -145,22 +146,13 @@ fn line_keys(body: &str) -> Vec<u64> {
     keys.into_iter().collect()
 }
 
-/// One publication's labels from `state.db` and the count of ignored unknown-verdict rows.
-fn load_labels(ctx: &StepCtx<'_>, publication: &str) -> Result<(Labels, usize), StepError> {
-    let (keep, delete, unknown) = ctx.state().publication_labels(publication)?;
-    if unknown > 0 {
-        tracing::warn!(
-            unknown,
-            "boilerplate: removal labels with an unknown verdict ignored"
-        );
-    }
-    Ok((
-        Labels {
-            keep: keep.into_iter().collect(),
-            delete: delete.into_iter().collect(),
-        },
-        unknown,
-    ))
+/// One publication's labels from `state.db`.
+fn load_labels(ctx: &StepCtx<'_>, publication: &str) -> Result<Labels, StepError> {
+    let l = ctx.state().publication_labels(publication)?;
+    Ok(Labels {
+        keep: l.keep.into_iter().collect(),
+        delete: l.delete.into_iter().collect(),
+    })
 }
 
 /// Capture: learns `body` (the cleaned, pre-strip body) for `source_key` (the record name) once by
@@ -172,7 +164,7 @@ pub(super) fn learn_and_strip(
     message_id: &str,
     body: &str,
 ) -> Result<String, StepError> {
-    let (labels, _) = load_labels(ctx, publication)?;
+    let labels = load_labels(ctx, publication)?;
     let mut db = ctx.state();
     db.learn_mail_boilerplate(source_key, message_id, &line_keys(body))?;
     let set = LineSet::from_entries(db.mail_boilerplate_lines(source_key)?);
@@ -188,7 +180,7 @@ pub(crate) fn learn_and_fold_rss(
     post_id: &str,
     text: &str,
 ) -> Result<String, StepError> {
-    let (labels, _) = load_labels(ctx, publication)?;
+    let labels = load_labels(ctx, publication)?;
     let body = plain_body(FrontmatterDoc::new(text).body());
     let (set, posts) = {
         let mut db = ctx.state();
@@ -248,16 +240,10 @@ impl Sets {
         Ok(true)
     }
 
-    /// The labels of `publication` (cached; unknown verdicts counted once per publication).
-    fn labels(
-        &mut self,
-        ctx: &StepCtx<'_>,
-        publication: &str,
-        c: &mut Counts,
-    ) -> Result<&Labels, StepError> {
+    /// The labels of `publication` (cached).
+    fn labels(&mut self, ctx: &StepCtx<'_>, publication: &str) -> Result<&Labels, StepError> {
         if !self.labels.contains_key(publication) {
-            let (l, unknown) = load_labels(ctx, publication)?;
-            c.bp_label_unknown += n32(unknown);
+            let l = load_labels(ctx, publication)?;
             self.labels.insert(publication.to_owned(), l);
         }
         Ok(self
@@ -387,7 +373,7 @@ pub(super) fn run(ctx: &mut StepCtx<'_>, sh: &Shared, c: &mut Counts) -> Result<
             .get_str("publication")
             .map(|p| p.trim().to_owned())
             .unwrap_or_default();
-        let labels = sets.labels(ctx, &publication, c)?.clone();
+        let labels = sets.labels(ctx, &publication)?.clone();
         sets.set(ctx, &key)?;
         let recur = match source {
             Source::Mail => Recur::Mail,

@@ -26,7 +26,7 @@ fn delete_and_keep_label_each_non_blank_group_line() {
     let rows: Vec<_> = del
         .labels
         .iter()
-        .map(|(k, v, o, _)| (k.as_str(), *v, *o))
+        .map(|l| (l.kind.as_str(), l.verdict.as_str(), l.origin.as_str()))
         .collect();
     assert_eq!(rows, [("sponsor", "delete", "fold"); 2]);
     assert_eq!(del.deleted.len(), 2);
@@ -39,7 +39,11 @@ fn delete_and_keep_label_each_non_blank_group_line() {
     )
     .unwrap();
     assert!(keep.body.contains("widget") && !keep.body.contains("[!removed]"));
-    assert!(keep.labels.iter().all(|(_, v, _, _)| *v == "keep"));
+    assert!(
+        keep.labels
+            .iter()
+            .all(|l| l.verdict == RemovalVerdict::Keep)
+    );
     assert!(keep.deleted.is_empty(), "keep deletes nothing");
     assert_eq!(keep.at_anchor + keep.at_end, 2);
 }
@@ -60,7 +64,14 @@ fn trim_labels_selection_and_unknown_group_is_refused() {
     let rows: Vec<_> = t
         .labels
         .iter()
-        .map(|(k, v, o, l)| (k.as_str(), *v, *o, l.as_str()))
+        .map(|l| {
+            (
+                l.kind.as_str(),
+                l.verdict.as_str(),
+                l.origin.as_str(),
+                l.line.as_str(),
+            )
+        })
         .collect();
     assert_eq!(
         rows,
