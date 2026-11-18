@@ -21,8 +21,16 @@ fn folded() -> String {
     let body = cv_ingest::enrich::fold_ranges(
         body,
         &[
-            (2, 3, cv_ingest::enrich::SpanKind::Sponsor),
-            (7, 7, cv_ingest::enrich::SpanKind::Cta),
+            cv_ingest::enrich::FoldRange {
+                first: 2,
+                last: 3,
+                kind: cv_ingest::enrich::SpanKind::Sponsor,
+            },
+            cv_ingest::enrich::FoldRange {
+                first: 7,
+                last: 7,
+                kind: cv_ingest::enrich::SpanKind::Cta,
+            },
         ],
     )
     .expect("fold");

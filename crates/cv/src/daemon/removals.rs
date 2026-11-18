@@ -49,7 +49,9 @@ struct Applied {
 fn refusal_of(e: &FoldError) -> RemovalRefusal {
     match e {
         FoldError::UnknownGroup(_) => RemovalRefusal::UnknownGroup,
-        FoldError::EmptyRange | FoldError::OutOfBounds { .. } => RemovalRefusal::BadRange,
+        FoldError::EmptyRange | FoldError::Unordered | FoldError::OutOfBounds { .. } => {
+            RemovalRefusal::BadRange
+        }
         FoldError::Generated => RemovalRefusal::Generated,
     }
 }

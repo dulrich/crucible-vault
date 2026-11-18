@@ -7,7 +7,7 @@
 //! and the forced/non-forced skip decision; banner detection is WP-5's.
 //!
 //! Decisions recorded here:
-//! - **Span kinds**: `sponsor|cta|chrome|footer` map to [`SpanKind`] variants; any other string is
+//! - **Span kinds**: `sponsor|cta|chrome|footer|banner` map to [`SpanKind`] variants; any other string is
 //!   kept as [`SpanKind::Other`] and folded like the rest (the model only lists removable spans).
 //! - **Anchors** compare whitespace-squeezed text ([`squeeze`]), never fuzzy. A span's
 //!   `first_line` matches a whole line not already claimed by an earlier span (so a repeated chrome
@@ -120,6 +120,8 @@ pub enum SpanKind {
     Cta,
     Chrome,
     Footer,
+    /// Lines folded as banners (no model span).
+    Banner,
     /// Any other kind string the model produced (still folded).
     Other(String),
 }
@@ -131,6 +133,7 @@ impl SpanKind {
             "cta" => Self::Cta,
             "chrome" => Self::Chrome,
             "footer" => Self::Footer,
+            "banner" => Self::Banner,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -530,9 +533,7 @@ fn banners_and_cap(
     }
     fold.extend(banner_lines.iter().copied());
     for &i in &banner_lines {
-        kinds
-            .entry(i)
-            .or_insert_with(|| SpanKind::Other(BANNER_KIND.to_owned()));
+        kinds.entry(i).or_insert(SpanKind::Banner);
     }
 
     let non_blank = sq.iter().filter(|s| !s.is_empty()).count();
@@ -722,23 +723,7 @@ fn plan_groups(
         if join {
             i += 1;
         }
-        let p = out.len();
-        let anchor = match out.iter().rposition(|&k| !blank(k)) {
-            Some(q) => {
-                let t = sq[out[q]].clone();
-                let occ = out[..=q].iter().filter(|&&k| sq[k] == t).count();
-                Anchor {
-                    after: Some((t, occ)),
-                    gap: p - q - 1,
-                    join,
-                }
-            }
-            None => Anchor {
-                after: None,
-                gap: p,
-                join,
-            },
-        };
+        let anchor = anchor_of(&out, sq, |_| false, join);
         let kind = kinds
             .get(&s)
             .cloned()
@@ -761,29 +746,84 @@ fn render_fold(
         spans_folded: groups.len(),
         ..EnrichReport::default()
     };
-    let mut fold_block: Vec<String> = Vec::new();
-    if !groups.is_empty() || !prior_fold.is_empty() {
-        fold_block.push(MARK_OPEN.to_owned());
-        fold_block.extend(prior_meta.iter().cloned());
-        fold_block.extend(
+    if groups.is_empty() && prior_fold.is_empty() {
+        return (Vec::new(), rep);
+    }
+    let head = std::iter::once(MARK_OPEN.to_owned())
+        .chain(prior_meta.iter().cloned())
+        .chain(
             groups
                 .iter()
                 .map(|g| render_meta(g.idx.len(), &g.kind, &g.anchor)),
         );
-        fold_block.push(FOLD_HEADER.to_owned());
-        fold_block.extend(prior_fold.iter().cloned());
-        let mut any = !prior_fold.is_empty();
-        for g in groups {
-            if any {
-                fold_block.push(">".to_owned());
-            }
-            any = true;
-            fold_block.extend(g.idx.iter().map(|&i| quote(&lines[i])));
+    let chunks = (!prior_fold.is_empty())
+        .then(|| prior_fold.to_vec())
+        .into_iter()
+        .chain(
+            groups
+                .iter()
+                .map(|g| g.idx.iter().map(|&i| quote(&lines[i])).collect()),
+        );
+    (write_fold(head, FOLD_HEADER, chunks, closing()), rep)
+}
+
+/// The writer of every `> [!removed]-` fold block: `head` (the open marker, then the lines before
+/// the header — metadata and any kept lines), the header, the content `chunks` (each non-empty,
+/// stored `> `-quoted; a lone `>` separates consecutive chunks), then `tail` (the lines after the
+/// content through the close marker).
+fn write_fold(
+    head: impl IntoIterator<Item = String>,
+    header: &str,
+    chunks: impl IntoIterator<Item = Vec<String>>,
+    tail: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = head.into_iter().collect();
+    out.push(header.to_owned());
+    for (k, c) in chunks.into_iter().enumerate() {
+        if k > 0 {
+            out.push(">".to_owned());
         }
-        fold_block.push(String::new()); // ends the callout (see the top block)
-        fold_block.push(MARK_CLOSE.to_owned());
+        out.extend(c);
     }
-    (fold_block, rep)
+    out.extend(tail);
+    out
+}
+
+/// The tail of a written fold: a blank line ending the callout (a close marker right after a
+/// `> ` line is a lazy continuation of it), then the close marker.
+fn closing() -> [String; 2] {
+    [String::new(), MARK_CLOSE.to_owned()]
+}
+
+/// The anchor a group leaves when it is cut after the surviving lines `kept` (indices into `sq`,
+/// the squeezed lines). `hidden(k)` marks a generated line: never an anchor, not counted in `gap`;
+/// a `start` anchor also skips one blank line after a leading generated block, as [`anchor_pos`]
+/// resolves it.
+fn anchor_of(kept: &[usize], sq: &[String], hidden: impl Fn(usize) -> bool, join: bool) -> Anchor {
+    let plain = |ks: &[usize]| ks.iter().filter(|&&k| !hidden(k)).count();
+    match kept.iter().rposition(|&k| !hidden(k) && !sq[k].is_empty()) {
+        Some(q) => {
+            let t = sq[kept[q]].clone();
+            let occ = kept[..=q]
+                .iter()
+                .filter(|&&k| !hidden(k) && sq[k] == t)
+                .count();
+            Anchor {
+                after: Some((t, occ)),
+                gap: plain(&kept[q + 1..]),
+                join,
+            }
+        }
+        None => {
+            let lead = kept.iter().take_while(|&&k| hidden(k)).count();
+            let skip = usize::from(lead > 0 && kept.get(lead).is_some_and(|&k| sq[k].is_empty()));
+            Anchor {
+                after: None,
+                gap: plain(&kept[lead..]) - skip,
+                join,
+            }
+        }
+    }
 }
 
 /// A removed line as stored in the fold (`> line`, a blank one as a bare `>`).
@@ -809,8 +849,6 @@ fn unquote(l: &str) -> &str {
 // Fold groups: metadata, listing, resolve, trim
 // ---------------------------------------------------------------------------------------------
 
-/// Kind of the lines folded as banners (no model span).
-const BANNER_KIND: &str = "banner";
 /// Name of the group metadata comment (`%% cv-fold … %%`).
 const META_NAME: &str = "cv-fold";
 
@@ -826,6 +864,7 @@ impl SpanKind {
             Self::Cta => "cta",
             Self::Chrome => "chrome",
             Self::Footer => "footer",
+            Self::Banner => "banner",
             Self::Other(s) => s,
         }
     }
@@ -841,11 +880,10 @@ struct Anchor {
     join: bool,
 }
 
-/// A parsed `%% cv-fold … %%` line; `n == 0` marks a malformed one (the fold then reads as old
-/// layout).
+/// A well-formed `%% cv-fold … %%` line.
 #[derive(Debug, Clone)]
 struct Meta {
-    n: usize,
+    n: std::num::NonZeroUsize,
     kind: Option<SpanKind>,
     anchor: Option<Anchor>,
 }
@@ -908,27 +946,27 @@ fn render_meta(n: usize, kind: &SpanKind, a: &Anchor) -> String {
     )
 }
 
-/// `Some` when `line` is a `%% cv-fold … %%` metadata line (well-formed or not).
-fn parse_meta(line: &str) -> Option<Meta> {
+/// A `%% cv-fold … %%` line without a positive `lines=` count (its fold reads as old layout).
+#[derive(Debug, Clone, Copy)]
+struct MalformedMeta;
+
+/// `Some` when `line` is a `%% cv-fold … %%` metadata line: `Ok` when well-formed.
+fn parse_meta(line: &str) -> Option<Result<Meta, MalformedMeta>> {
     let inner = blocks::single_comment(line.trim())?;
     let rest = inner.strip_prefix(META_NAME)?;
     if !(rest.is_empty() || rest.starts_with(' ')) {
         return None;
     }
     let (fields, text) = rest.split_once(" | ").unwrap_or((rest, ""));
-    let mut m = Meta {
-        n: 0,
-        kind: None,
-        anchor: None,
-    };
+    let (mut n, mut kind) = (0usize, None);
     let (mut at, mut occ, mut gap, mut join) = ("", 0usize, 0usize, false);
     for tok in fields.split_whitespace() {
         let Some((k, v)) = tok.split_once('=') else {
             continue;
         };
         match k {
-            "lines" => m.n = v.parse().unwrap_or(0),
-            "kind" => m.kind = Some(SpanKind::from_str(&unesc(v))),
+            "lines" => n = v.parse().unwrap_or(0),
+            "kind" => kind = Some(SpanKind::from_str(&unesc(v))),
             "at" => at = v,
             "occ" => occ = v.parse().unwrap_or(0),
             "gap" => gap = v.parse().unwrap_or(0),
@@ -936,8 +974,11 @@ fn parse_meta(line: &str) -> Option<Meta> {
             _ => {}
         }
     }
+    let Some(n) = std::num::NonZeroUsize::new(n) else {
+        return Some(Err(MalformedMeta));
+    };
     let text = squeeze(&unesc(text));
-    m.anchor = match at {
+    let anchor = match at {
         "start" => Some(Anchor {
             after: None,
             gap,
@@ -950,7 +991,7 @@ fn parse_meta(line: &str) -> Option<Meta> {
         }),
         _ => None,
     };
-    Some(m)
+    Some(Ok(Meta { n, kind, anchor }))
 }
 
 /// One group of a parsed fold block.
@@ -1015,10 +1056,7 @@ fn split_new(content: &[&str], metas: &[Meta]) -> Option<(usize, Vec<(usize, usi
     let mut end = content.len();
     let mut ranges = Vec::with_capacity(metas.len());
     for m in metas.iter().rev() {
-        if m.n == 0 || m.n > end {
-            return None;
-        }
-        let s = end - m.n;
+        let s = end.checked_sub(m.n.get())?;
         ranges.push((s, end));
         end = s;
         if end > 0 {
@@ -1042,19 +1080,23 @@ fn parse_folds(raw: &[&str]) -> Vec<PFold> {
                 content = &content[..content.len() - 1];
             }
             let mut pre = Vec::new();
-            let mut metas: Vec<(String, Meta)> = Vec::new();
+            let mut metas: Vec<(String, Result<Meta, MalformedMeta>)> = Vec::new();
             for l in &inner[..h] {
                 match parse_meta(l) {
                     Some(m) => metas.push(((*l).to_owned(), m)),
                     None => pre.push((*l).to_owned()),
                 }
             }
-            let ms: Vec<Meta> = metas.iter().map(|(_, m)| m.clone()).collect();
+            let ms: Option<Vec<Meta>> = metas.iter().map(|(_, m)| m.clone().ok()).collect();
             let mut groups = Vec::new();
-            match (!ms.is_empty()).then(|| split_new(content, &ms)).flatten() {
-                Some((old, ranges)) => {
+            let split = ms
+                .filter(|ms| !ms.is_empty())
+                .and_then(|ms| split_new(content, &ms).map(|sp| (ms, sp)));
+            match split {
+                Some((ms, (old, ranges))) => {
                     old_groups(&content[..old], &mut groups);
-                    for ((line, m), (s, e)) in metas.into_iter().zip(ranges) {
+                    let lines = metas.into_iter().map(|(l, _)| l);
+                    for ((line, m), (s, e)) in lines.zip(ms).zip(ranges) {
                         let g = PGroup {
                             meta: Some(line),
                             raw: content[s..e].iter().map(|l| (*l).to_owned()).collect(),
@@ -1256,6 +1298,8 @@ pub enum FoldError {
     UnknownGroup(String),
     /// The trim range is empty (`first > last`).
     EmptyRange,
+    /// Fold ranges overlap or are out of order.
+    Unordered,
     /// The trim range runs past the body's last line.
     OutOfBounds { last: usize, lines: usize },
     /// The trim range touches a generated `%% cv-enrich %%` block or heading marker.
@@ -1267,6 +1311,7 @@ impl fmt::Display for FoldError {
         match self {
             Self::UnknownGroup(id) => write!(f, "no fold group {id}"),
             Self::EmptyRange => write!(f, "empty line range"),
+            Self::Unordered => write!(f, "line ranges overlap or are out of order"),
             Self::OutOfBounds { last, lines } => {
                 write!(f, "line {last} is past the body's {lines} lines")
             }
@@ -1362,21 +1407,13 @@ fn end_pos(segs: &[(Cls, String)], b: usize) -> usize {
 }
 
 fn rebuild_fold(f: &PFold, close: &str) -> Vec<String> {
-    let mut out = vec![MARK_OPEN.to_owned()];
-    out.extend(f.pre.iter().cloned());
-    out.extend(f.groups.iter().filter_map(|g| g.meta.clone()));
-    out.push(f.header.clone());
+    let head = std::iter::once(MARK_OPEN.to_owned())
+        .chain(f.pre.iter().cloned())
+        .chain(f.groups.iter().filter_map(|g| g.meta.clone()));
     // Old-layout groups first: the metadata owns the tail of the content.
     let (old, new): (Vec<&PGroup>, Vec<&PGroup>) = f.groups.iter().partition(|g| g.meta.is_none());
-    for (k, g) in old.iter().chain(new.iter()).enumerate() {
-        if k > 0 {
-            out.push(">".to_owned());
-        }
-        out.extend(g.raw.iter().cloned());
-    }
-    out.push(String::new());
-    out.push(close.to_owned());
-    out
+    let chunks = old.into_iter().chain(new).map(|g| g.raw.clone());
+    write_fold(head, &f.header, chunks, [String::new(), close.to_owned()])
 }
 
 /// Render segments back to text: untouched folds verbatim, touched ones rebuilt, emptied ones
@@ -1543,24 +1580,7 @@ pub struct Trimmed {
 /// `%% cv-enrich %%` block (top block or fold) or a `%% cv-enrich heading %%` marker.
 pub fn trim_lines(body: &str, first: usize, last: usize) -> Result<Trimmed, FoldError> {
     let raw: Vec<&str> = body.split('\n').collect();
-    if first > last {
-        return Err(FoldError::EmptyRange);
-    }
-    if last >= raw.len() {
-        return Err(FoldError::OutOfBounds {
-            last,
-            lines: raw.len(),
-        });
-    }
-    // Only block lines and the heading marker are generated here; an inserted heading and its
-    // blank are ordinary lines a user may remove.
-    let classes = blocks::generated(&raw).classes;
-    if classes[first..=last]
-        .iter()
-        .any(|c| matches!(c, LineClass::Block | LineClass::HeadingMarker))
-    {
-        return Err(FoldError::Generated);
-    }
+    check_range(&blocks::generated(&raw).classes, first, last)?;
     let removed = raw[first..=last].iter().map(|l| (*l).to_owned()).collect();
     let kept: Vec<&str> = raw[..first]
         .iter()
@@ -1573,47 +1593,74 @@ pub fn trim_lines(body: &str, first: usize, last: usize) -> Result<Trimmed, Fold
     })
 }
 
-/// Move body lines into the note's `[!removed]` fold without a model call (plan
-/// `intake-removals-sources-rescan` WP-5: recurring RSS lines), one group per
-/// `(first, last, kind)` range — 0-based inclusive body line indices (lines split at `\n`, as
-/// [`trim_lines`]), ascending and disjoint, of a frontmatter-free body. The groups are written
-/// exactly as [`enrich`] writes them (one `%% cv-fold … %%` metadata line each, `> `-quoted
-/// content), appended to the body's last fold block, or to a new fold block at the end of the
-/// body; everything else stays byte-identical. [`fold_groups`] lists them and
-/// [`resolve_groups`] Keep restores each at its anchor.
+/// Refuse a line range [`trim_lines`] and [`fold_ranges`] cannot take (`classes` = one per line).
+fn check_range(classes: &[LineClass], first: usize, last: usize) -> Result<(), FoldError> {
+    if first > last {
+        return Err(FoldError::EmptyRange);
+    }
+    if last >= classes.len() {
+        return Err(FoldError::OutOfBounds {
+            last,
+            lines: classes.len(),
+        });
+    }
+    // Only block lines and the heading marker are generated here; an inserted heading and its
+    // blank are ordinary lines a user may remove.
+    if classes[first..=last]
+        .iter()
+        .any(|c| matches!(c, LineClass::Block | LineClass::HeadingMarker))
+    {
+        return Err(FoldError::Generated);
+    }
+    Ok(())
+}
+
+/// One [`fold_ranges`] group: body lines `first..=last` (0-based, inclusive) and their kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldRange {
+    pub first: usize,
+    pub last: usize,
+    pub kind: SpanKind,
+}
+
+/// Move body lines into the note's `[!removed]` fold without a model call, one group per
+/// [`FoldRange`] — ascending and disjoint, line indices split at `\n` as [`trim_lines`], of a
+/// frontmatter-free body; adjacent ranges stay separate groups. The groups are written exactly as
+/// [`enrich`] writes them (one `%% cv-fold … %%` metadata line each, `> `-quoted content),
+/// appended to the body's last fold block (its existing lines kept byte-for-byte), or to a new
+/// fold block at the end of the body; everything else stays byte-identical. [`fold_groups`]
+/// lists them and [`resolve_groups`] Keep restores each at its anchor.
 ///
 /// # Errors
-/// As [`trim_lines`] for each range; [`FoldError::EmptyRange`] also when ranges overlap or are
-/// out of order.
-pub fn fold_ranges(body: &str, groups: &[(usize, usize, SpanKind)]) -> Result<String, FoldError> {
+/// As [`trim_lines`] for each range; [`FoldError::Unordered`] when ranges overlap or are out of
+/// order.
+pub fn fold_ranges(body: &str, ranges: &[FoldRange]) -> Result<String, FoldError> {
+    let raw: Vec<&str> = body.split('\n').collect();
+    let classes = blocks::generated(&raw).classes;
     let mut prev: Option<usize> = None;
-    for (f, l, _) in groups {
-        trim_lines(body, *f, *l)?;
-        if prev.is_some_and(|p| *f <= p) {
-            return Err(FoldError::EmptyRange);
+    for r in ranges {
+        check_range(&classes, r.first, r.last)?;
+        if prev.is_some_and(|p| r.first <= p) {
+            return Err(FoldError::Unordered);
         }
-        prev = Some(*l);
+        prev = Some(r.last);
     }
-    if groups.is_empty() {
+    if ranges.is_empty() {
         return Ok(body.to_owned());
     }
-    let raw: Vec<&str> = body.split('\n').collect();
     let folds = parse_folds(&raw);
-    // Per raw line: generated (top block, heading marker + heading + blank, fold blocks).
-    let hidden: Vec<bool> = blocks::generated(&raw)
-        .classes
-        .iter()
-        .map(|c| c.is_generated())
-        .collect();
-    let blank = |k: usize| raw[k].trim().is_empty();
+    // Generated: top block, heading marker + heading + blank, fold blocks.
+    let hidden = |k: usize| classes[k].is_generated();
+    let sq: Vec<String> = raw.iter().map(|l| squeeze(l)).collect();
+    let blank = |k: usize| sq[k].is_empty();
     let in_fold = |k: usize| folds.iter().any(|f| (f.open..=f.close).contains(&k));
     let mut out: Vec<usize> = Vec::with_capacity(raw.len());
-    let mut metas: Vec<String> = Vec::with_capacity(groups.len());
-    let mut content: Vec<Vec<String>> = Vec::with_capacity(groups.len());
+    let mut metas: Vec<String> = Vec::with_capacity(ranges.len());
+    let mut chunks: Vec<Vec<String>> = Vec::with_capacity(ranges.len());
     let mut i = 0;
-    for (f, l, kind) in groups {
-        out.extend(i..*f);
-        i = l + 1;
+    for r in ranges {
+        out.extend(i..r.first);
+        i = r.last + 1;
         // As `plan_groups` over `strip_generated`'s lines: the blank run in front of a fold block
         // (or the end) is layout, so a group followed only by it never joins.
         let join = out.last().is_none_or(|&k| blank(k))
@@ -1622,84 +1669,51 @@ pub fn fold_ranges(body: &str, groups: &[(usize, usize, SpanKind)]) -> Result<St
         if join {
             i += 1;
         }
-        let plain_after = |q: usize| out[q + 1..].iter().filter(|&&k| !hidden[k]).count();
-        let anchor = match out.iter().rposition(|&k| !hidden[k] && !blank(k)) {
-            Some(q) => {
-                let t = squeeze(raw[out[q]]);
-                let occ = out[..=q]
-                    .iter()
-                    .filter(|&&k| !hidden[k] && squeeze(raw[k]) == t)
-                    .count();
-                Anchor {
-                    after: Some((t, occ)),
-                    gap: plain_after(q),
-                    join,
-                }
-            }
-            None => {
-                let lead = out.iter().take_while(|&&k| hidden[k]).count();
-                let skip = usize::from(lead > 0 && out.get(lead).is_some_and(|&k| blank(k)));
-                Anchor {
-                    after: None,
-                    gap: out[lead..].iter().filter(|&&k| !hidden[k]).count() - skip,
-                    join,
-                }
-            }
-        };
-        metas.push(render_meta(l - f + 1, kind, &anchor));
-        content.push(raw[*f..=*l].iter().map(|x| quote(x)).collect());
+        let anchor = anchor_of(&out, &sq, hidden, join);
+        metas.push(render_meta(r.last - r.first + 1, &r.kind, &anchor));
+        chunks.push(raw[r.first..=r.last].iter().map(|x| quote(x)).collect());
     }
     out.extend(i..raw.len());
+    let owned = |ks: &[&str]| ks.iter().map(|l| (*l).to_owned()).collect::<Vec<_>>();
     let mut res: Vec<String> = Vec::with_capacity(out.len() + metas.len() * 2 + 8);
-    match folds.last() {
-        Some(fold) => {
-            let header = (fold.open + 1..fold.close)
-                .find(|&k| raw[k].trim_end() == FOLD_HEADER)
-                .unwrap_or(fold.open + 1);
-            let last = (header..fold.close)
-                .rev()
-                .find(|&k| !raw[k].trim().is_empty())
-                .unwrap_or(header);
-            for k in out {
-                if k == fold.open {
-                    // A group taken from just above the fold leaves one blank line, as `enrich`.
-                    while res.len() >= 2 && res[res.len() - 2..].iter().all(|l| l.trim().is_empty())
-                    {
-                        res.pop();
-                    }
-                }
-                if k == header {
-                    res.extend(metas.iter().cloned());
-                }
-                res.push(raw[k].to_owned());
-                if k == last {
-                    for (n, g) in content.iter().enumerate() {
-                        if n > 0 || last != header {
-                            res.push(">".to_owned());
-                        }
-                        res.extend(g.iter().cloned());
-                    }
-                }
-            }
+    let Some(fold) = folds.last() else {
+        res.extend(out.iter().map(|&k| raw[k].to_owned()));
+        while res.last().is_some_and(|l| l.trim().is_empty()) {
+            res.pop();
         }
-        None => {
-            res.extend(out.iter().map(|&k| raw[k].to_owned()));
-            while res.last().is_some_and(|l| l.trim().is_empty()) {
+        res.push(String::new());
+        let head = std::iter::once(MARK_OPEN.to_owned()).chain(metas);
+        res.extend(write_fold(head, FOLD_HEADER, chunks, closing()));
+        res.push(String::new());
+        return Ok(res.join("\n"));
+    };
+    let header = (fold.open + 1..fold.close)
+        .find(|&k| raw[k].trim_end() == FOLD_HEADER)
+        .unwrap_or(fold.open + 1);
+    let last = (header..fold.close)
+        .rev()
+        .find(|&k| !raw[k].trim().is_empty())
+        .unwrap_or(header);
+    let mut chunks = Some(chunks);
+    for k in out {
+        if k == fold.open {
+            // A group taken from just above the fold leaves one blank line, as `enrich`.
+            while res.len() >= 2 && res[res.len() - 2..].iter().all(|l| l.trim().is_empty()) {
                 res.pop();
             }
-            res.push(String::new());
-            res.push(MARK_OPEN.to_owned());
-            res.extend(metas);
-            res.push(FOLD_HEADER.to_owned());
-            for (n, g) in content.into_iter().enumerate() {
-                if n > 0 {
-                    res.push(">".to_owned());
-                }
-                res.extend(g);
-            }
-            res.push(String::new());
-            res.push(MARK_CLOSE.to_owned());
-            res.push(String::new());
+            let head = owned(&raw[fold.open..header])
+                .into_iter()
+                .chain(metas.drain(..));
+            let stored = (last != header).then(|| owned(&raw[header + 1..=last]));
+            let all = stored.into_iter().chain(chunks.take().unwrap_or_default());
+            res.extend(write_fold(
+                head,
+                raw[header],
+                all,
+                owned(&raw[last + 1..=fold.close]),
+            ));
+        } else if !(fold.open..=fold.close).contains(&k) {
+            res.push(raw[k].to_owned());
         }
     }
     Ok(res.join("\n"))

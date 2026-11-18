@@ -732,31 +732,35 @@ fn malformed_folds_are_total() {
     }
 }
 
+fn fr(first: usize, last: usize, kind: SpanKind) -> FoldRange {
+    FoldRange { first, last, kind }
+}
+
 /// WP-5: `fold_ranges` writes byte-identical groups to `enrich`, appends to an existing fold, and
 /// round-trips through `fold_groups` + `resolve_groups` (Keep restores at the anchor, Delete drops).
 #[test]
 fn fold_ranges_matches_enrich_and_round_trips() {
     // (body, ranges) mirroring round_trip_cases 0, 1, 2, 4.
-    type Case = (&'static str, Vec<(usize, usize, SpanKind)>, Vec<Span>);
+    type Case = (&'static str, Vec<FoldRange>, Vec<Span>);
     let cases: Vec<Case> = vec![
         (
             round_trip_cases()[0].0,
-            vec![(0, 0, SpanKind::Sponsor)],
+            vec![fr(0, 0, SpanKind::Sponsor)],
             round_trip_cases()[0].1.clone(),
         ),
         (
             round_trip_cases()[1].0,
-            vec![(3, 3, SpanKind::Chrome)],
+            vec![fr(3, 3, SpanKind::Chrome)],
             round_trip_cases()[1].1.clone(),
         ),
         (
             round_trip_cases()[2].0,
-            vec![(5, 6, SpanKind::Cta)],
+            vec![fr(5, 6, SpanKind::Cta)],
             round_trip_cases()[2].1.clone(),
         ),
         (
             round_trip_cases()[4].0,
-            vec![(3, 4, SpanKind::Sponsor)],
+            vec![fr(3, 4, SpanKind::Sponsor)],
             round_trip_cases()[4].1.clone(),
         ),
     ];
@@ -776,7 +780,7 @@ fn fold_ranges_matches_enrich_and_round_trips() {
     let first = fold_only(body, round_trip_cases()[0].1.clone());
     let lines: Vec<&str> = first.split('\n').collect();
     let a = lines.iter().position(|l| *l == "Footer a line").unwrap();
-    let both = fold_ranges(&first, &[(a, a + 1, SpanKind::Footer)]).unwrap();
+    let both = fold_ranges(&first, &[fr(a, a + 1, SpanKind::Footer)]).unwrap();
     assert_eq!(both.matches("> [!removed]-").count(), 1, "{both:?}");
     let g = fold_groups(&both);
     assert_eq!(g.len(), 2);
@@ -792,7 +796,7 @@ fn fold_ranges_matches_enrich_and_round_trips() {
     // A range touching the generated fold is refused.
     let f = both.split('\n').position(|l| l == "> [!removed]-").unwrap();
     assert_eq!(
-        fold_ranges(&both, &[(f, f, SpanKind::Footer)]),
+        fold_ranges(&both, &[fr(f, f, SpanKind::Footer)]),
         Err(FoldError::Generated)
     );
 }
@@ -845,4 +849,57 @@ fn parity_parse_folds_boundaries() {
         .map(|f| (f.open, f.close, f.groups.len()))
         .collect();
     assert_eq!(got, [(13, 16, 1), (17, 20, 1)]);
+}
+
+/// A fold whose groups carry metadata only in part (an old-layout group, then a `cv-fold` group)
+/// keeps its stored lines byte-for-byte when `fold_ranges` or `enrich` appends a group.
+#[test]
+fn appending_to_a_partial_metadata_fold_keeps_its_lines() {
+    let pre = format!("{MARK_OPEN}\n%% cv-fold lines=1 kind=cta at=start gap=0 join=0 %%");
+    let content = format!("{FOLD_HEADER}\n> Old group.\n>\n> Meta group.");
+    let body = format!("Intro.\n\nBody one.\n\nTail line.\n\n{pre}\n{content}\n\n{MARK_CLOSE}\n");
+    let by_range = fold_ranges(&body, &[fr(4, 4, SpanKind::Footer)]).unwrap();
+    let by_enrich = fold_only(
+        &body,
+        vec![sp(SpanKind::Footer, "Tail line.", "Tail line.")],
+    );
+    for out in [&by_range, &by_enrich] {
+        assert!(
+            out.contains(&format!("{pre}\n%% cv-fold lines=1 kind=footer")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("{content}\n>\n> Tail line.\n")),
+            "{out}"
+        );
+        let kinds: Vec<_> = fold_groups(out).into_iter().map(|g| g.kind).collect();
+        assert_eq!(kinds, [None, Some(SpanKind::Cta), Some(SpanKind::Footer)]);
+    }
+}
+
+/// Adjacent ranges of different kinds stay two groups through `fold_ranges`.
+#[test]
+fn fold_ranges_keeps_adjacent_ranges_apart() {
+    let body = "Intro.\n\nAd one.\nFollow us.\n\nEnd.\n";
+    let out = fold_ranges(
+        body,
+        &[fr(2, 2, SpanKind::Sponsor), fr(3, 3, SpanKind::Cta)],
+    )
+    .unwrap();
+    let g = fold_groups(&out);
+    let kinds: Vec<_> = g.iter().map(|g| g.kind.clone()).collect();
+    assert_eq!(kinds, [Some(SpanKind::Sponsor), Some(SpanKind::Cta)]);
+    assert_eq!(
+        resolve_groups(&out, &GroupTarget::All, Verdict::Keep)
+            .unwrap()
+            .text,
+        body
+    );
+}
+
+/// `SpanKind::Banner` is stored as `banner`, and a stored `banner` reads back as `Banner`.
+#[test]
+fn banner_kind_round_trips_as_banner() {
+    assert_eq!(SpanKind::Banner.as_str(), "banner");
+    assert_eq!(SpanKind::from_str("banner"), SpanKind::Banner);
 }

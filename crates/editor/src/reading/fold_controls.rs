@@ -67,7 +67,7 @@ pub fn delete_all() -> RemovalOp {
 
 #[cfg(test)]
 mod tests {
-    use cv_ingest::enrich::{SpanKind, fold_groups, fold_ranges};
+    use cv_ingest::enrich::{FoldRange, SpanKind, fold_groups, fold_ranges};
 
     use super::*;
 
@@ -76,8 +76,22 @@ mod tests {
     #[test]
     fn rows_carry_kind_ids_and_ops() {
         let body = "intro\n\nSponsor one\nSponsor two\n\nmiddle\n\nSubscribe now\n\nend\n";
-        let body =
-            fold_ranges(body, &[(2, 3, SpanKind::Sponsor), (7, 7, SpanKind::Cta)]).expect("fold");
+        let body = fold_ranges(
+            body,
+            &[
+                FoldRange {
+                    first: 2,
+                    last: 3,
+                    kind: SpanKind::Sponsor,
+                },
+                FoldRange {
+                    first: 7,
+                    last: 7,
+                    kind: SpanKind::Cta,
+                },
+            ],
+        )
+        .expect("fold");
         let groups = fold_groups(&body);
         let r = rows(&groups);
         assert_eq!(r.len(), 2);

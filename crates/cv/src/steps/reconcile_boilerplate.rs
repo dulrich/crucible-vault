@@ -161,7 +161,7 @@ pub(super) fn apply(
         kept.push((i, l));
     }
     let new_body: String = kept.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
-    let mut ranges: Vec<(usize, usize, SpanKind)> = Vec::new();
+    let mut ranges: Vec<enrich::FoldRange> = Vec::new();
     for (k, (i, _)) in kept.iter().enumerate() {
         let kind = match act[*i] {
             Action::FoldHead => SpanKind::Chrome,
@@ -169,10 +169,14 @@ pub(super) fn apply(
             _ => continue,
         };
         match ranges.last_mut() {
-            Some((_, last, kd)) if *last + 1 == k && kept[*last].0 + 1 == *i && *kd == kind => {
-                *last = k;
+            Some(r) if r.last + 1 == k && kept[r.last].0 + 1 == *i && r.kind == kind => {
+                r.last = k;
             }
-            _ => ranges.push((k, k, kind)),
+            _ => ranges.push(enrich::FoldRange {
+                first: k,
+                last: k,
+                kind,
+            }),
         }
     }
     let out = match enrich::fold_ranges(&new_body, &ranges) {

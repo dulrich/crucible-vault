@@ -102,8 +102,13 @@ pub fn learn(set: &mut LineSet, body: &str) {
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Neutral,
-    Boiler,
+    /// Boilerplate; `delete` = a Delete label (not only recurrence) made it so.
+    Boiler {
+        delete: bool,
+    },
     Content,
+    /// Content because a Keep label vetoed it (never removed, even as a run's gap line).
+    Kept,
 }
 
 /// Length of the anchored run walking `order` (indices from one end): boilerplate lines, with up
@@ -115,11 +120,11 @@ fn run_len(order: &[usize], kinds: &[Kind]) -> usize {
     for (pos, &i) in order.iter().enumerate() {
         match kinds[i] {
             Kind::Neutral => {}
-            Kind::Boiler => {
+            Kind::Boiler { .. } => {
                 end = pos + 1;
                 gap = 0;
             }
-            Kind::Content => {
+            Kind::Content | Kind::Kept => {
                 gap += 1;
                 if gap > MAX_GAP {
                     break;
@@ -242,8 +247,6 @@ pub fn plan(
     let fenced = fence_mask(lines);
     let prot = |i: usize| protected.get(i).copied().unwrap_or(false);
     let mut vetoed = 0;
-    let mut del = vec![false; lines.len()];
-    let mut kept = vec![false; lines.len()];
     let kinds: Vec<Kind> = lines
         .iter()
         .enumerate()
@@ -258,12 +261,10 @@ pub fn plan(
             let deleted = labels.delete.contains(&k);
             let recurs = recur.recurs(set.counts.get(&k).copied().unwrap_or(0));
             if labels.keep.contains(&k) {
-                kept[i] = true;
                 vetoed += usize::from(deleted || recurs);
-                Kind::Content
+                Kind::Kept
             } else if deleted || recurs {
-                del[i] = deleted;
-                Kind::Boiler
+                Kind::Boiler { delete: deleted }
             } else {
                 Kind::Content
             }
@@ -279,12 +280,12 @@ pub fn plan(
     for (i, a) in actions.iter_mut().enumerate() {
         let (in_head, in_tail) = (i < head, i >= n - tail);
         // A Keep-labelled line stays even as a gap line inside a run.
-        if !(in_head || in_tail) || prot(i) || kept[i] {
+        if !(in_head || in_tail) || prot(i) || kinds[i] == Kind::Kept {
             continue;
         }
         *a = match recur {
             Recur::Mail => Action::Strip,
-            Recur::Rss { .. } if del[i] => Action::Strip,
+            Recur::Rss { .. } if kinds[i] == (Kind::Boiler { delete: true }) => Action::Strip,
             Recur::Rss { .. } if in_head => Action::FoldHead,
             Recur::Rss { .. } => Action::FoldTail,
         };
@@ -325,7 +326,9 @@ pub fn plan(
         };
     }
     let deleted = (0..n)
-        .filter(|&i| del[i] && actions[i] == Action::Strip && !blank(i))
+        .filter(|&i| {
+            kinds[i] == (Kind::Boiler { delete: true }) && actions[i] == Action::Strip && !blank(i)
+        })
         .count();
     Plan {
         recurred: removed - deleted,

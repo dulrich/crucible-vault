@@ -521,7 +521,11 @@ fn find_split_inline_code_keeps_one_whole_value_payload_and_one_glyph() {
 fn fold_controls_are_drawn_only_for_a_fold_with_groups() {
     let body = cv_ingest::enrich::fold_ranges(
         "intro\n\nSponsor one\n\nend\n",
-        &[(2, 2, cv_ingest::enrich::SpanKind::Sponsor)],
+        &[cv_ingest::enrich::FoldRange {
+            first: 2,
+            last: 2,
+            kind: cv_ingest::enrich::SpanKind::Sponsor,
+        }],
     )
     .expect("fold");
     let last_y = |h: &mut H| h.boxes().last().map(|b| b.bounds.y).expect("a run");
