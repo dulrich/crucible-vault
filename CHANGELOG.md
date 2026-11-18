@@ -2,16 +2,19 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 1.2.1 — 2026-11-17
 
 ### Changed
 
 - Publications: when several `sources.toml` records match a note or clip, every site (source proposal, clip filing, the frontmatter backfill and the reconcile) now picks the same one: a URL prefix first, then a host, then an author, the first record in the file winning each step. Alias hosts such as `youtu.be` or `twitter.com` now match a record listing `youtube.com` or `x.com` everywhere. The reconcile fills a blank `publication` from `sources.toml` before the tracker row, and now also matches by host. Existing `publication` values are not rewritten.
 - Enrich recovery: the `intake_enrich` step now spells recovery `scope = "recover"`. A `recover = true` step key or a `recover` job param is refused with a message pointing at `scope = "recover"`. Migration `0043` rewrites the shipped `intake-enrich-recover` action to the new spelling.
+- Daemon requests: `propose_source` now takes the note id (`{ id }`) and `next_fold_note` takes `{ after }`, the id of the note to continue from (a gone or unknown id starts from the first note). The editor and the daemon ship together; another client of these two requests must send ids.
 
 ### Fixed
 
 - Transcript repair: a clip that had been enriched as a duplicate before the reconcile linked it as a transcript kept its chapter headings, so the transcript section ended at the first one and the refine skipped it as short. The repair now removes the old abstract and chapter headings and files the clip under the transcript kind, which runs the refine and a new enrich.
+- Removals review: Delete, Keep and the trim commands in a tab whose note is gone now act on that document. Before, when a live note had the same path, the request could go to the live note.
+- Enrich: every path that clears a note's `enriched` stamp now also clears `enrich-model` and `enrich-miss`. A leftover `enrich-miss` count could hold a restructured note back from the backfill.
 
 ## 1.2.0 — 2026-11-17
 
