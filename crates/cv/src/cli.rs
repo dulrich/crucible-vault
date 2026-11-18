@@ -23,7 +23,7 @@ pub fn usage() -> String {
         &format!(
             "{}{}{}",
             crate::jobs::USAGE,
-            crate::sources::USAGE,
+            crate::sources_cli::USAGE,
             crate::removals::USAGE
         ),
     )
@@ -87,7 +87,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("jobs") => crate::jobs::run(args),
         Some("intake") => crate::jobs::run(args),
         Some("run") => crate::jobs::run(args),
-        Some("sources") => crate::sources::run(&args[1..]),
+        Some("sources") => crate::sources_cli::run(&args[1..]),
         Some("removals") => crate::removals::run(&args[1..]),
         _ => {
             eprint!("{}", usage());

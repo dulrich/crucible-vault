@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use cv_actions::pipelines::{RowRef, SourcesConfig};
+use cv_actions::pipelines::{RowRef, SourcesConfig, Table};
 use cv_schema::toml_edit::{DocumentMut, Item};
 
 use crate::config::Config;
@@ -78,11 +78,11 @@ impl Counts {
 
 /// The legacy key whose comments carry over to `new` (`link` → `feeds`, `id` → `channel_id`,
 /// `channel` → `name`).
-fn new_key(table: &str, old: &str) -> String {
+fn new_key(table: Table, old: &str) -> String {
     match (table, old) {
-        ("blog", "link") => "feeds",
-        ("youtube", "id") => "channel_id",
-        ("youtube", "channel") => "name",
+        (Table::Blog, "link") => "feeds",
+        (Table::Youtube, "id") => "channel_id",
+        (Table::Youtube, "channel") => "name",
         (_, k) => k,
     }
     .to_owned()
@@ -139,14 +139,14 @@ pub fn migrate_text(text: &str) -> Result<Option<(String, Counts)>> {
         bail!("migrated file loads to different records; refusing to write");
     }
     let origins = cfg.origins();
-    let legacy = |t: &str| origins.iter().flatten().filter(|o| o.table == t).count();
+    let legacy = |t: Table| origins.iter().flatten().filter(|o| o.table == t).count();
     let counts = Counts {
         records: recs.len(),
         merged: origins.iter().map(|o| o.len().saturating_sub(1)).sum(),
-        blog: legacy("blog"),
-        newsletter: legacy("newsletter"),
-        serial: legacy("serial"),
-        youtube: legacy("youtube"),
+        blog: legacy(Table::Blog),
+        newsletter: legacy(Table::Newsletter),
+        serial: legacy(Table::Serial),
+        youtube: legacy(Table::Youtube),
     };
     Ok(Some((out, counts)))
 }
@@ -165,7 +165,7 @@ fn carry_comments(src: &str, generated: &str, origins: &[Vec<RowRef>]) -> Result
     for (rec, rows) in arr.iter_mut().zip(origins) {
         for row in rows {
             let Some(t) = old
-                .get(row.table)
+                .get(row.table.name())
                 .and_then(Item::as_array_of_tables)
                 .and_then(|a| a.get(row.index))
             else {

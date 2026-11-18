@@ -1,5 +1,5 @@
 //! Pure text helpers for crucible-vault: the template token engine, Moment-format translation,
-//! markdown section editing, attachment-path planning, vault-path helpers and link resolution, next-daily-date resolution, URL canonicalization and near-duplicate text similarity (shingle containment).
+//! markdown section editing, attachment-path planning, vault-path helpers and link resolution, next-daily-date resolution, URL canonicalization, the mail sender/List-Id matchers and near-duplicate text similarity (shingle containment).
 //!
 //! Sync, I/O-free and clock-free: every time-dependent function takes its `now` as an argument.
 
@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod blocks;
 mod civil;
 pub mod file_kind;
+pub mod mail_match;
 mod md_refs;
 pub mod moment;
 pub mod remote_media;

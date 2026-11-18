@@ -33,7 +33,7 @@ use cv_ingest::access::Access;
 use cv_ingest::supersede::{Decision, PublicationHosts, Side, decide, identity_keys_in, overlap};
 use cv_note::{FrontmatterDoc, JsValue, calculate_word_count};
 use cv_text::similar::Shingles;
-use cv_text::url_canon::{canonical_bare_host, http_host};
+use cv_text::url_canon::canonical_bare_host;
 
 use crate::steps::{StepCtx, StepError};
 
@@ -139,16 +139,11 @@ pub struct SupersedeIndex {
     pubs: PublicationHosts,
 }
 
-/// Every host of `p` (its feed hosts, which include a Substack host, and its `hosts`), as
-/// written (callers compare in `www.`-free lowercase form).
+/// Every host of `p` ([`Publication::hosts`], feed hosts included), as written (callers compare
+/// in `www.`-free lowercase form).
 #[must_use]
 pub fn publication_host_list(p: &Publication) -> Vec<String> {
-    p.feeds
-        .iter()
-        .filter_map(|f| http_host(f.trim()))
-        .chain(p.hosts.iter().map(|h| h.trim().to_owned()))
-        .filter(|h| !h.is_empty())
-        .collect()
+    p.hosts().map(|(h, _)| h).collect()
 }
 
 /// The host → record `name` map of every publication (plan sources-publication-model WP-3):

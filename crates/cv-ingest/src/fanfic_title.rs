@@ -178,14 +178,17 @@ fn from_title(title: &str) -> Option<(&str, Result<u32, ()>)> {
 /// The `Fanfic <Story> Ch <n>[, <Fandom>]` shape (`Ch.` too): the story is the text between the
 /// prefix and the first whole-word `Ch` followed by a number. Tried after the `Chapter` shapes.
 fn fanfic_ch<'a>(title: &'a str, lower: &str) -> Option<(&'a str, Result<u32, ()>)> {
-    if !lower.starts_with("fanfic ") {
+    const PREFIX: &str = "fanfic ";
+    const MARKER: &str = " ch";
+    if !lower.starts_with(PREFIX) {
         return None;
     }
-    let mut from = 6;
-    while let Some(i) = lower[from..].find(" ch") {
+    // The search starts at the prefix's trailing space, so a `Ch` right after it is found.
+    let mut from = PREFIX.len() - 1;
+    while let Some(i) = lower[from..].find(MARKER) {
         let at = from + i;
         from = at + 1;
-        let rest = &title[at + 3..];
+        let rest = &title[at + MARKER.len()..];
         let rest = match rest.strip_prefix('.') {
             Some(r) => r,
             None if rest.starts_with(char::is_whitespace) => rest,
@@ -194,7 +197,7 @@ fn fanfic_ch<'a>(title: &'a str, lower: &str) -> Option<(&'a str, Result<u32, ()
         let Some(n) = number(rest.trim_start()) else {
             continue;
         };
-        return Some((&title[7..at], n));
+        return Some((&title[PREFIX.len()..at], n));
     }
     None
 }

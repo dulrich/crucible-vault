@@ -29,6 +29,7 @@ use cv_note::{FrontmatterDoc, JsValue};
 use cv_state::TrackerItem;
 use serde::Serialize;
 
+use super::auto_file::{self, TrackedRank, clip_of};
 use super::params::{check_keys, get_bool, job_dry_run};
 use super::reconcile_repair::publication_of_row;
 use super::{StepCtx, StepError, StepModule, StepOutcome};
@@ -102,19 +103,13 @@ fn publication_for(
     doc: &FrontmatterDoc,
     rows: Option<&Vec<TrackerItem>>,
 ) -> Option<String> {
-    let authors = doc.get_texts("author");
-    let authors: Vec<&str> = authors.iter().map(String::as_str).collect();
-    let source = doc
-        .get("source")
-        .ok()
-        .flatten()
-        .map(|v| cv_note::js_text(&v))
-        .unwrap_or_default();
-    ctx.config
-        .sources()
-        .by_note(&authors, &source)
-        .map(|p| p.publication().to_owned())
-        .or_else(|| rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r))))
+    let tracked = rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r)));
+    auto_file::publication_for(
+        ctx.config.sources(),
+        &clip_of(doc),
+        tracked.as_deref(),
+        TrackedRank::AfterResolver,
+    )
 }
 
 /// The candidate paths: day-folder notes with `post-id` or `message-id`.

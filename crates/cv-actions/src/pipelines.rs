@@ -13,7 +13,9 @@
 
 use serde::Deserialize;
 
-pub use crate::sources::{Publication, RowRef};
+pub use crate::sources::Publication;
+use crate::sources::legacy::{BlogSource, NewsletterSource, SerialSource, YoutubeSource};
+pub use crate::sources::legacy::{RowRef, Table};
 
 /// `pipelines.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -437,145 +439,16 @@ pub struct SourcesConfig {
 impl SourcesConfig {
     /// Parses a `sources.toml` table.
     pub fn from_table(t: &toml::Table) -> Result<Self, String> {
-        let c: Self = toml::Value::Table(t.clone())
+        let mut c: Self = toml::Value::Table(t.clone())
             .try_into()
             .map_err(|e: toml::de::Error| e.message().to_owned())?;
-        for (i, s) in c.serial.iter().enumerate() {
-            if s.name.trim().is_empty() {
-                return Err(format!("serial #{}: needs a non-empty `name`", i + 1));
-            }
-            if c.serial[..i].iter().any(|o| o.name.trim() == s.name.trim()) {
-                return Err(format!("serial {:?}: duplicate name", s.name));
-            }
-        }
-        for n in &c.newsletter {
-            if n.from.iter().all(|f| f.trim().is_empty())
-                && n.list_id.as_deref().is_none_or(|l| l.trim().is_empty())
-                && n.hosts.iter().all(|h| h.trim().is_empty())
-            {
-                return Err(format!(
-                    "newsletter {:?}: needs a `from`, `list_id` or `hosts` matcher",
-                    n.name
-                ));
-            }
-            if let Some(b) = n.blog.as_deref().filter(|b| !b.trim().is_empty())
-                && !c.blog.iter().any(|r| r.name == b)
-            {
-                return Err(format!(
-                    "newsletter {:?}: blog {b:?} names no [[blog]] row",
-                    n.name
-                ));
-            }
-        }
-        let mut c = c;
-        crate::sources::fold(&mut c)?;
+        crate::sources::legacy::validate(&c)?;
+        crate::sources::legacy::fold(&mut c)?;
         Ok(c)
     }
 }
 
-/// One tracked YouTube channel.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct YoutubeSource {
-    /// Display name.
-    pub channel: String,
-    /// Publication name shown in the Author column (default: `channel`; plan intake-round-2 WP-3).
-    #[serde(default)]
-    pub short: Option<String>,
-    /// Channel id (`UC…`).
-    pub id: String,
-    /// Tags.
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Priority.
-    #[serde(default)]
-    pub priority: Priority,
-    /// Listed in the Works view (plan round-11-feedback-todos Decision 5).
-    #[serde(default)]
-    pub works: bool,
-}
-
-/// One tracked blog feed.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct BlogSource {
-    /// Display name.
-    pub name: String,
-    /// Publication name shown in the Author column (default: `name`; plan intake-round-2 WP-3).
-    #[serde(default)]
-    pub short: Option<String>,
-    /// RSS/Atom feed URL.
-    pub link: String,
-    /// Fetch method (`rss`; other values are skipped by the tracker, as in Crucible).
-    #[serde(default = "rss")]
-    pub method: String,
-    /// Tags.
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Priority.
-    #[serde(default)]
-    pub priority: Priority,
-    /// Post-id canonicalization.
-    #[serde(default)]
-    pub canon: BlogCanon,
-    /// Body mode.
-    #[serde(default)]
-    pub body: BodyMode,
-    /// Body phrases (case-insensitive) marking a post incomplete (plan auto-intake-sprint WP-2).
-    #[serde(default)]
-    pub paywall_markers: Vec<String>,
-    /// Listed in the Works view (plan round-11-feedback-todos Decision 5).
-    #[serde(default)]
-    pub works: bool,
-}
-
-fn rss() -> String {
-    "rss".into()
-}
-
-/// One `[[newsletter]]` mail sender (plan auto-intake-sprint WP-4): matched by `from` (an exact
-/// address, or `@domain` suffix) or `list_id`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct NewsletterSource {
-    /// Display name (also the `tracker_items.source_key` of its mails).
-    pub name: String,
-    /// Publication name shown in the Author column (default: `name`; plan intake-round-2 WP-3).
-    #[serde(default)]
-    pub short: Option<String>,
-    /// Sender matchers, case-insensitive: `a@b.example` or `@b.example`.
-    #[serde(default)]
-    pub from: Vec<String>,
-    /// `List-Id` matcher.
-    #[serde(default)]
-    pub list_id: Option<String>,
-    /// The name of the `[[blog]]` row this newsletter mirrors (access evidence and dedup source).
-    #[serde(default)]
-    pub blog: Option<String>,
-    /// The `kinds.toml` kind its mails are filed as (default `blog`).
-    #[serde(default = "blog_kind")]
-    pub kind: String,
-    /// Extra tags.
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Body phrases (case-insensitive) marking an email incomplete (united with the linked blog row's).
-    #[serde(default)]
-    pub paywall_markers: Vec<String>,
-    /// Clip hosts (kinds.toml `hosts` forms) whose clips file as this row's `kind` with its
-    /// publication (plan round-11-feedback-todos Decision 7); a hosts-only row needs no mail
-    /// matcher.
-    #[serde(default)]
-    pub hosts: Vec<String>,
-    /// Listed in the Works view (plan round-11-feedback-todos Decision 5).
-    #[serde(default)]
-    pub works: bool,
-}
-
-fn blog_kind() -> String {
-    "blog".into()
-}
-
-/// A `[[serial]]` row's status (a view concern; filing ignores it).
+/// A work record's status (a view concern; filing ignores it).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SerialStatus {
@@ -583,36 +456,6 @@ pub enum SerialStatus {
     Active,
     Complete,
     Ignored,
-}
-
-/// One `[[serial]]` work (plan round-11-feedback-todos Decision 4): a clip matches it by
-/// `prefix`, else by `author` ([`SerialSource::matches`]) and files as its `kind` with its
-/// publication.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SerialSource {
-    /// Display name (unique among serial rows).
-    pub name: String,
-    /// Publication name (default: `name`).
-    #[serde(default)]
-    pub short: Option<String>,
-    /// The bare author name a clip's `author` list must contain.
-    #[serde(default)]
-    pub author: Option<String>,
-    /// Source-URL prefixes; some non-empty one must start the clip's `source`.
-    #[serde(default)]
-    pub prefix: Vec<String>,
-    /// The `kinds.toml` kind its clips file as (no default, plan public-release WP-4 C#30;
-    /// absent or blank = never filed: `auto_file` skips the row with a warning; the Works view
-    /// still lists it).
-    #[serde(default)]
-    pub kind: String,
-    /// `active`, `complete` or `ignored`.
-    #[serde(default)]
-    pub status: SerialStatus,
-    /// Listed in the Works view (every serial row is; accepted for uniformity, Decision 5).
-    #[serde(default)]
-    pub works: bool,
 }
 
 /// An author for comparison: trimmed, a `[[…]]` wrapper stripped (a link's `|alias` and
@@ -628,40 +471,6 @@ pub(crate) fn author_key(a: &str) -> String {
     inner.replace('#', "").trim().to_owned()
 }
 
-impl SerialSource {
-    /// The `publication` value for this work's notes (`short`, else `name`).
-    #[must_use]
-    pub fn publication(&self) -> &str {
-        publication_of(self.short.as_deref(), &self.name)
-    }
-
-    /// Whether a note with these `author` entries and `source` belongs to this work (plan
-    /// round-12-feedback-todos Decision 7): a row with any non-blank (trimmed) prefix matches by
-    /// prefix alone — some prefix must start the trimmed `source`, the author is ignored; a row
-    /// with only an author matches when it equals one of the note's authors (both normalized by
-    /// [`author_key`]); a row with neither matches nothing. `status` does not affect matching.
-    #[cfg(test)]
-    #[must_use]
-    pub fn matches(&self, authors: &[&str], source: &str) -> bool {
-        let want = self
-            .author
-            .as_deref()
-            .map(author_key)
-            .filter(|a| !a.is_empty());
-        let prefixes: Vec<&str> = self
-            .prefix
-            .iter()
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .collect();
-        if !prefixes.is_empty() {
-            let source = source.trim();
-            return prefixes.iter().any(|p| source.starts_with(p));
-        }
-        want.is_some_and(|w| authors.iter().any(|c| author_key(c) == w))
-    }
-}
-
 /// The `publication` frontmatter value of a source row: the trimmed `short` when non-empty, else
 /// `name` (`channel` for YouTube). Plan intake-round-2-clean-dedupe-reading WP-3.
 #[must_use]
@@ -669,30 +478,6 @@ pub fn publication_of<'a>(short: Option<&'a str>, name: &'a str) -> &'a str {
     match short.map(str::trim) {
         Some(s) if !s.is_empty() => s,
         _ => name,
-    }
-}
-
-impl YoutubeSource {
-    /// The `publication` value for this channel's notes (`short`, else `channel`).
-    #[must_use]
-    pub fn publication(&self) -> &str {
-        publication_of(self.short.as_deref(), &self.channel)
-    }
-}
-
-impl BlogSource {
-    /// The `publication` value for this feed's notes (`short`, else `name`).
-    #[must_use]
-    pub fn publication(&self) -> &str {
-        publication_of(self.short.as_deref(), &self.name)
-    }
-}
-
-impl NewsletterSource {
-    /// The `publication` value for this sender's notes (`short`, else `name`).
-    #[must_use]
-    pub fn publication(&self) -> &str {
-        publication_of(self.short.as_deref(), &self.name)
     }
 }
 

@@ -138,12 +138,7 @@ fn run_len(order: &[usize], kinds: &[Kind]) -> usize {
 /// Strips the anchored head and tail runs of boilerplate lines (count >= 2 in `set`, so seen in
 /// at least one other message when the caller learned this body first). Mid-body boilerplate is
 /// kept; if head+tail would remove more than half of the non-blank lines the body is unchanged.
-pub fn strip(body: &str, set: &LineSet) -> String {
-    strip_tiered(body, set, &Labels::default())
-}
-
-/// [`strip`] with the publication's removal labels applied ([`plan`] with [`Recur::Mail`]): a
-/// Keep-labelled line is never stripped, a Delete-labelled line is boilerplate in an anchored run.
+/// The publication's removal labels apply ([`plan`] with [`Recur::Mail`]): a Keep-labelled line is never stripped, a Delete-labelled line is boilerplate in an anchored run.
 pub fn strip_tiered(body: &str, set: &LineSet, labels: &Labels) -> String {
     let lines: Vec<&str> = body.lines().collect();
     let p = plan(&lines, &[], set, labels, Recur::Mail);
@@ -360,7 +355,7 @@ mod tests {
         let mut s = set_of(&[&a, &b]);
         learn(&mut s, &c);
         assert_eq!(
-            strip(&c, &s),
+            strip_tiered(&c, &s, &Labels::default()),
             "Third story with words\nmore of the third story\nand a third line"
         );
     }
@@ -370,21 +365,21 @@ mod tests {
         let a = "# Weekly Digest\nalpha alpha alpha\n# Weekly Digest\nbeta beta beta\nSign off line\nUnsub link here";
         let s = set_of(&[a, a]);
         let x = "# Weekly Digest\nreal content one\nreal content two\nreal content three\nreal content four\n# Weekly Digest\nmore real one\nmore real two\nmore real three\nSign off line\nUnsub link here";
-        let out = strip(x, &s);
+        let out = strip_tiered(x, &s, &Labels::default());
         assert!(out.starts_with("real content one"));
         assert!(out.contains("real content four\n# Weekly Digest\nmore real one"));
         assert!(!out.contains("Sign off line") && !out.contains("Unsub link"));
         let g = "# Weekly Digest\ngap line one\nSign off line\nbody one body\nbody two body\nbody three body\nbody four body\nbody five body";
-        assert!(!strip(g, &s).contains("gap line one"));
+        assert!(!strip_tiered(g, &s, &Labels::default()).contains("gap line one"));
     }
 
     #[test]
     fn near_total_match_is_refused_and_single_sender_unchanged() {
         let a = "Header line one\nHeader line two\nFooter line one";
         let s = set_of(&[a, a]);
-        assert_eq!(strip(a, &s), a);
+        assert_eq!(strip_tiered(a, &s, &Labels::default()), a);
         let one = set_of(&[a]);
-        assert_eq!(strip(a, &one), a);
+        assert_eq!(strip_tiered(a, &one, &Labels::default()), a);
     }
 
     #[test]
@@ -392,9 +387,9 @@ mod tests {
         let a = format!("Body of story one\n\n{FOOT}");
         let b = format!("Body of story two\n```\n{FOOT}\n```\nmore text here\n\n{FOOT}");
         let s = set_of(&[&a, &a, &b]);
-        let once = strip(&b, &s);
+        let once = strip_tiered(&b, &s, &Labels::default());
         assert!(once.contains("```\nYou are receiving"));
-        assert_eq!(strip(&once, &s), once);
+        assert_eq!(strip_tiered(&once, &s, &Labels::default()), once);
     }
 
     #[test]

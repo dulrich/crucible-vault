@@ -15,7 +15,7 @@ pub mod runner;
 pub mod search_query;
 pub mod server;
 pub mod signals;
-pub mod sources;
+pub mod sources_cli;
 pub mod spool;
 pub mod steps;
 pub mod supersede;

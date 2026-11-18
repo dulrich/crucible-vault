@@ -1,15 +1,13 @@
 //! `.eml` parsing for the Maildir newsletter intake (plan `auto-intake-sprint` WP-4).
 //!
 //! [`parse_eml`] turns raw message bytes into a [`MailPost`] (over `mail-parser`: MIME multipart,
-//! quoted-printable/base64 and non-UTF-8 charsets are decoded there). [`match_newsletter`] picks
-//! the configured `[[newsletter]]` row for a message by `From` (exact address or `@domain`
-//! suffix) or `List-Id`. Candidate post URLs (`MailPost.urls`) are read from the HTML: every href
+//! quoted-printable/base64 and non-UTF-8 charsets are decoded there). Candidate post URLs (`MailPost.urls`) are read from the HTML: every href
 //! goes through the mail-clean link resolver (Substack `/redirect/2/<b64>` decoded, `?url=`/`?u=`/
 //! `?redirect=` wrappers unwrapped, tracking params stripped; an untrustworthy target is rejected),
 //! and only post shapes survive, normalized without query or fragment: `<host>/p/<slug>`, and
 //! `open.substack.com/pub/<pub>/p/<slug>` mapped to `https://<pub>.substack.com/p/<slug>`. The
 //! message's own post (its title or "view in browser" link) comes first, then body order.
-//! Nothing is ever fetched. [`canonical_post_url`] (plan intake-round-2-clean-dedupe-reading WP-2)
+//! Nothing is ever fetched. [`canonical_post_url_in`] (plan intake-round-2-clean-dedupe-reading WP-2)
 //! picks the identity: the first candidate with publication evidence (the mail's Substack host or
 //! the matched blog row's host), rebased onto the blog row's host, and passed through the
 //! [`is_clean_identity`] guard (no `token=`/`r=`, JWT segment or tracker host). An unproven
@@ -20,6 +18,7 @@
 //!
 //! Pure: no I/O, no async.
 
+use cv_text::mail_match::{normalize_list_id, substack_host};
 #[cfg(test)]
 use cv_text::url_canon::http_host as url_host;
 use cv_text::url_canon::{bare_host_name, http_host, http_parts};
@@ -121,76 +120,6 @@ pub fn parse_eml(bytes: &[u8]) -> Option<MailPost> {
         text,
         urls,
     })
-}
-
-/// `"Name" <id.example>` / `<id.example>` / `id.example` → `id.example` (lowercase).
-fn normalize_list_id(s: &str) -> String {
-    let inner = match (s.rfind('<'), s.rfind('>')) {
-        (Some(a), Some(b)) if a < b => &s[a + 1..b],
-        _ => s,
-    };
-    inner.trim().to_lowercase()
-}
-
-/// Whether a row's matchers (`from` entries, `list_id`) match `post`: a `from` entry is an exact
-/// address, or an `@domain` suffix; both case-insensitive. Empty matchers never match.
-#[must_use]
-pub fn row_matches(post: &MailPost, from: &[String], list_id: Option<&str>) -> bool {
-    let addr = post.from_addr.to_lowercase();
-    let from_hit = !addr.is_empty()
-        && from.iter().any(|f| {
-            let f = f.trim().to_lowercase();
-            if f.is_empty() {
-                false
-            } else if f.starts_with('@') {
-                addr.ends_with(&f)
-            } else {
-                addr == f
-            }
-        });
-    let list_hit = match (list_id.map(normalize_list_id), post.list_id.as_deref()) {
-        (Some(want), Some(got)) => !want.is_empty() && want == got,
-        _ => false,
-    };
-    from_hit || list_hit
-}
-
-/// The first configured row matching `post`. `matchers` projects a row to its `(from, list_id)`
-/// (`cv-ingest` does not depend on the config crate, so the row type is the caller's).
-#[must_use]
-pub fn match_newsletter<'a, T>(
-    post: &MailPost,
-    rows: &'a [T],
-    matchers: impl Fn(&'a T) -> (&'a [String], Option<&'a str>),
-) -> Option<&'a T> {
-    rows.iter().find(|r| {
-        let (from, list_id) = matchers(r);
-        row_matches(post, from, list_id)
-    })
-}
-
-/// The `<pub>.substack.com` host a message comes from (plan intake-followups-mail-youtube WP-2):
-/// the `List-Id` when it is exactly `<pub>.substack.com` (one non-empty label), else
-/// `<local>.substack.com` for a `<local>@substack.com` sender, else `None`.
-#[must_use]
-pub fn substack_host(post: &MailPost) -> Option<String> {
-    const SUFFIX: &str = ".substack.com";
-    let single_label = |h: &str| {
-        h.strip_suffix(SUFFIX)
-            .is_some_and(|l| !l.is_empty() && !l.contains('.'))
-    };
-    if let Some(l) = post.list_id.as_deref() {
-        let l = l.trim().to_ascii_lowercase();
-        if single_label(&l) {
-            return Some(l);
-        }
-    }
-    let (local, domain) = post.from_addr.trim().rsplit_once('@')?;
-    if domain.eq_ignore_ascii_case("substack.com") && !local.is_empty() {
-        let h = format!("{}{SUFFIX}", local.to_ascii_lowercase());
-        return single_label(&h).then_some(h);
-    }
-    None
 }
 
 /// Query keys whose value is a literal target URL.
@@ -353,15 +282,10 @@ pub fn extract_post_urls_for(html: &str, subject: &str) -> Vec<String> {
 /// first candidate with **publication evidence** (its host is the mail's `substack_host`, which
 /// the mapped `open.substack.com/pub/<pub>` form also meets, or the blog row's host), rebased onto
 /// `https://<blog host>/p/<slug>` when a blog row is known. An unproven candidate is never the
-/// identity. The result passes [`is_clean_identity`]; `None` when no candidate survives.
-#[must_use]
-pub fn canonical_post_url(post: &MailPost, blog_link: Option<&str>) -> Option<String> {
-    canonical_post_url_in(post, blog_link, &[])
-}
-
-/// [`canonical_post_url`] where a candidate on any of `pub_hosts` (the resolved publication's
-/// feed and `hosts` hosts, `www.` ignored) is also proven (plan sources-publication-model WP-3).
-/// The rebase target stays the `blog_link` host.
+/// identity. A candidate on any of `pub_hosts` (the resolved publication's feed and `hosts`
+/// hosts, `www.` ignored) is also proven (plan sources-publication-model WP-3); the rebase target
+/// stays the `blog_link` host. The result passes [`is_clean_identity`]; `None` when no candidate
+/// survives.
 #[must_use]
 pub fn canonical_post_url_in(
     post: &MailPost,
@@ -369,7 +293,8 @@ pub fn canonical_post_url_in(
     pub_hosts: &[String],
 ) -> Option<String> {
     let pub_bare: Vec<String> = pub_hosts.iter().filter_map(|h| bare_host_name(h)).collect();
-    let sub = substack_host(post).and_then(|h| bare_host_name(&h));
+    let sub =
+        substack_host(&post.from_addr, post.list_id.as_deref()).and_then(|h| bare_host_name(&h));
     let blog_host = blog_link.and_then(http_host);
     let blog_bare = blog_host.as_deref().and_then(bare_host_name);
     post.urls.iter().find_map(|c| {

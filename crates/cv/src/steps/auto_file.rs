@@ -15,7 +15,7 @@
 //!    finalizing and ticking tracker rows; this step never ticks.
 //! 2. **Kind** (first match wins):
 //!    1. a `sources.toml` `[[serial]]` row, in config order, that matches the clip
-//!       ([`cv_actions::pipelines::SerialSource::matches`]: prefix, else author) and whose `kind` is
+//!       ([`SourcesConfig::work_matches`]: prefix, else author) and whose `kind` is
 //!       a `kinds.toml` key (a row with an undefined kind is skipped with a warning; plan
 //!       round-11-feedback-todos Decision 4);
 //!    2. a `[[newsletter]]` row's linked blog host or a `[[blog]]` row host (`kind` of the
@@ -48,11 +48,12 @@
 //! is written to the clip when absent, before the child is spawned.
 
 use cv_actions::pipelines::{Publication, SourcesConfig};
+use cv_actions::sources::{MatchOrder, PubMatch};
 use cv_actions::{ConfigSet, StepKind};
 use cv_ingest::access;
 use cv_note::{FrontmatterDoc, JsValue};
 use cv_state::TrackerItem;
-use cv_text::url_canon::{bare_host_name, canonical_bare_host};
+use cv_text::url_canon::{canonical_bare_host, configured_host};
 use serde::Serialize;
 
 use super::file::kind_def;
@@ -126,65 +127,75 @@ pub(in crate::steps) fn clip_of(doc: &FrontmatterDoc) -> Clip {
     }
 }
 
-/// A configured host (`www.fanfiction.net`, or a full URL) in the same form as
-/// [`canonical_bare_host`]: a full URL goes through it, a bare host through `bare_host_name`.
-fn configured_host(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.contains("://") {
-        canonical_bare_host(s)
-    } else {
-        bare_host_name(s)
+/// Where a note's tracker-row publication ranks against the resolver's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::steps) enum TrackedRank {
+    /// The resolver in [`MatchOrder::PrefixHostAuthor`], else the tracker's (the frontmatter
+    /// backfill).
+    AfterResolver,
+    /// The tracker's, else the resolver in [`MatchOrder::RecordOrder`] (the reconcile's
+    /// publication repair of a blank value, after its prefix step).
+    BeforeResolver,
+}
+
+/// The publication of a note with clip facts `clip` and tracker-row publication `tracked`, in
+/// `rank`.
+pub(in crate::steps) fn publication_for(
+    sources: &SourcesConfig,
+    clip: &Clip,
+    tracked: Option<&str>,
+    rank: TrackedRank,
+) -> Option<String> {
+    let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
+    let resolved = |order| {
+        sources
+            .resolve(&authors, &clip.source, order)
+            .map(|m| m.publication().publication().to_owned())
+    };
+    match rank {
+        TrackedRank::AfterResolver => {
+            resolved(MatchOrder::PrefixHostAuthor).or_else(|| tracked.map(str::to_owned))
+        }
+        TrackedRank::BeforeResolver => tracked
+            .map(str::to_owned)
+            .or_else(|| resolved(MatchOrder::RecordOrder)),
     }
 }
 
 /// The row a clip host matched in `sources.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(in crate::steps) struct HostRow {
-    /// The matched `[[blog]]` row's `(name, link)`.
+    /// The matched record's `(name, feed link)`.
     pub(in crate::steps) blog: Option<(String, String)>,
-    /// The kind: a linked newsletter row's, else `blog`.
+    /// The record's kind ([`Publication::kind_or_blog`]).
     pub(in crate::steps) kind: Option<String>,
-    /// Paywall markers of the matched rows.
+    /// The record's paywall markers.
     pub(in crate::steps) markers: Vec<String>,
-    /// The matched `[[blog]]` row's `publication` (`short`, else `name`; plan
+    /// The record's `publication` (`short`, else `name`; plan
     /// intake-round-2-clean-dedupe-reading WP-5b).
     pub(in crate::steps) publication: Option<String>,
 }
 
-/// Matches the clip host against the publication records' feed hosts (the former `[[blog]]`
-/// rows, first record in order); failing those, step (2b): the first record whose `hosts` lists
-/// it. Kind, markers and publication are the record's (plan sources-publication-model WP-2).
+/// The record [`SourcesConfig::by_host`] matches for the clip host, as a [`HostRow`] (plan
+/// sources-publication-model WP-2).
 pub(in crate::steps) fn host_row(host: &str, sources: &SourcesConfig) -> Option<HostRow> {
-    if let Some((link, p)) = sources
-        .feeds()
-        .find(|(l, _)| canonical_bare_host(l).as_deref() == Some(host))
-    {
-        return Some(HostRow {
-            blog: Some((p.name.clone(), link.trim().to_owned())),
-            kind: Some(p.kind_or_blog().to_owned()),
-            markers: p.paywall_markers.clone(),
-            publication: Some(p.publication().to_owned()),
-        });
-    }
-    let p = sources.publications().iter().find(|p| {
-        p.hosts
-            .iter()
-            .filter_map(|h| configured_host(h))
-            .any(|h| h == host)
-    })?;
+    let PubMatch::Host {
+        publication: p,
+        feed,
+    } = sources.by_host(host)?
+    else {
+        return None;
+    };
     Some(HostRow {
-        blog: p
-            .feed_for_host(Some(host))
-            .map(|l| (p.name.clone(), l.to_owned())),
+        blog: feed.map(|l| (p.name.clone(), l.to_owned())),
         kind: Some(p.kind_or_blog().to_owned()),
         markers: p.paywall_markers.clone(),
         publication: Some(p.publication().to_owned()),
     })
 }
 
-/// The first work record (one with a prefix or author, config order) that matches the clip and
-/// whose `kind` `is_kind`; a matching record with an undefined kind is skipped with a warning
-/// (never coerced).
+/// The first of [`SourcesConfig::work_matches`] for the clip whose `kind` `is_kind`; a matching
+/// record with an undefined kind is skipped with a warning (never coerced).
 pub(in crate::steps) fn serial_hit<'a>(
     sources: &'a SourcesConfig,
     clip: &Clip,
@@ -192,9 +203,8 @@ pub(in crate::steps) fn serial_hit<'a>(
 ) -> Option<&'a Publication> {
     let authors: Vec<&str> = clip.authors.iter().map(String::as_str).collect();
     sources
-        .publications()
-        .iter()
-        .filter(|s| s.is_work() && s.matches_note(&authors, &clip.source))
+        .work_matches(&authors, &clip.source)
+        .map(PubMatch::publication)
         .find(|s| {
             let kind = s.kind.as_deref().unwrap_or("").trim();
             let ok = is_kind(kind);

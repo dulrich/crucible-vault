@@ -3,17 +3,18 @@
 //! never blocks indexing. Queries and invalidation signals are typed [`Cmd`]s on one channel, so
 //! they are processed in the order they were sent.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use cv_actions::ConfigSet;
-use cv_actions::pipelines::{SerialStatus, SourcesConfig};
+use cv_actions::pipelines::SourcesConfig;
 use cv_protocol::{Notification, ViewResult, ViewSelect, ViewSort};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::sync::lock;
+
+mod sources;
 
 /// A command for the view-host thread.
 enum Cmd {
@@ -215,203 +216,6 @@ fn host_folders(c: &ConfigSet) -> views::Folders {
     }
 }
 
-/// One day-folder note as the source-row counts read it.
-#[derive(Default)]
-struct Entry {
-    authors: Vec<String>,
-    source: String,
-    publication: String,
-    read: bool,
-    created: Option<views::value::Value>,
-    ctime: i64,
-}
-
-/// The `source = "sources"` records and the `file.serial` match set (plan round-11-feedback-todos
-/// Decision 5; plan sources-publication-model WP-5), over the `daily/day` notes of `q`. Only the
-/// records whose resolved In-Works value (`in_works`, one per record, [`ConfigSet::in_works`]:
-/// the record's `works`, else its kind's, else off) is true take part; a record is never listed
-/// twice:
-/// - one row per In-Works record (config order), binding `name`, `publication`, `author` (bare;
-///   null when unset), `prefix` (list), `kind` (a work record: its `kind`, else empty; others:
-///   `kind`, else the row shape), `status` (a work record: its status; others `active`), `row`
-///   (`serial` for a work record — a prefix or an author — or one that came from a `[[serial]]`
-///   row, else blog/newsletter/youtube by shape), `entries`, `unread` (`read != true`) and
-///   `last_update` (latest `created`, else file ctime; null without entries). Work records count
-///   the notes `Publication::matches_note` accepts (the auto-file matcher, shared — never
-///   restated as a view expression); other records count notes whose `publication` equals theirs;
-/// - note path → name of the first In-Works work record (config order) matching it; a note
-///   matching only a record with In Works off has none.
-fn source_data(
-    q: &cv_index::Query<'_>,
-    cfg: &SourcesConfig,
-    in_works: &[bool],
-    day_folder: &str,
-) -> Result<(Vec<views::engine::Record>, BTreeMap<String, String>), String> {
-    use views::value::Value;
-    let ix = |e: cv_index::Error| format!("index: {e}");
-    let mut notes: BTreeMap<String, Entry> = q
-        .md_files_under(day_folder)
-        .map_err(ix)?
-        .into_iter()
-        .map(|f| {
-            (
-                f.path,
-                Entry {
-                    ctime: f.ctime,
-                    ..Entry::default()
-                },
-            )
-        })
-        .collect();
-    for key in ["author", "source", "publication", "read", "created"] {
-        for r in q.md_props_with_key(key).map_err(ix)? {
-            let Some(e) = notes.get_mut(&r.path) else {
-                continue;
-            };
-            match key {
-                "author" => e.authors.extend(cv_index::prop_texts(&r.value)),
-                "source" => e.source = cv_index::prop_text(&r.value),
-                "publication" => e.publication = cv_index::prop_text(&r.value).trim().to_owned(),
-                "read" => e.read = r.value == serde_json::Value::Bool(true),
-                _ => {
-                    let v = Value::from_json(&r.value);
-                    e.created = matches!(v, Value::Date(..)).then_some(v);
-                }
-            }
-        }
-    }
-    // In-Works records only (plan sources-publication-model WP-5); a work record (a prefix or an
-    // author, or a former `[[serial]]` row) is a `serial` row and sets `file.serial`.
-    let listed: Vec<(usize, &cv_actions::pipelines::Publication)> = cfg
-        .publications()
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| in_works.get(*i).copied().unwrap_or(false))
-        .collect();
-    let serialish = |i: usize, p: &cv_actions::pipelines::Publication| {
-        p.is_work() || cfg.origins()[i].iter().any(|o| o.table == "serial")
-    };
-    let works: Vec<&cv_actions::pipelines::Publication> = listed
-        .iter()
-        .filter(|(i, p)| serialish(*i, p))
-        .map(|(_, p)| *p)
-        .collect();
-    let mut serial_of = BTreeMap::new();
-    for (path, e) in &notes {
-        let a: Vec<&str> = e.authors.iter().map(String::as_str).collect();
-        if let Some(s) = works.iter().find(|s| s.matches_note(&a, &e.source)) {
-            serial_of.insert(path.clone(), s.name.clone());
-        }
-    }
-    let counts = |accept: &dyn Fn(&Entry) -> bool| {
-        let (mut n, mut unread, mut last) = (0.0, 0.0, None::<Value>);
-        for e in notes.values().filter(|e| accept(e)) {
-            n += 1.0;
-            if !e.read {
-                unread += 1.0;
-            }
-            let d = e
-                .created
-                .clone()
-                .unwrap_or_else(|| views::eval::ms_date(e.ctime));
-            if last.as_ref().is_none_or(|l| {
-                views::value::partial_cmp(&d, l).is_some_and(std::cmp::Ordering::is_gt)
-            }) {
-                last = Some(d);
-            }
-        }
-        (n, unread, last.unwrap_or(Value::Null))
-    };
-    let text = |s: &str| Value::Str(s.to_owned());
-    let mut out = Vec::new();
-    let mut push = |row: &str,
-                    name: &str,
-                    publication: &str,
-                    author: Option<&str>,
-                    prefix: &[String],
-                    kind: &str,
-                    status: &str,
-                    accept: &dyn Fn(&Entry) -> bool| {
-        let (n, unread, last) = counts(accept);
-        let mut m = BTreeMap::new();
-        m.insert("row".to_owned(), text(row));
-        m.insert("name".to_owned(), text(name));
-        m.insert("publication".to_owned(), text(publication));
-        m.insert(
-            "author".to_owned(),
-            author
-                .map(str::trim)
-                .filter(|a| !a.is_empty())
-                .map_or(Value::Null, text),
-        );
-        m.insert(
-            "prefix".to_owned(),
-            Value::list(prefix.iter().map(|p| text(p)).collect()),
-        );
-        m.insert("kind".to_owned(), text(kind));
-        m.insert("status".to_owned(), text(status));
-        m.insert("entries".to_owned(), Value::Num(n));
-        m.insert("unread".to_owned(), Value::Num(unread));
-        m.insert("last_update".to_owned(), last);
-        out.push(std::sync::Arc::new(m));
-    };
-    let by_pub = |p: &str| {
-        let p = p.trim().to_owned();
-        move |e: &Entry| e.publication == p
-    };
-    for s in &works {
-        let status = match s.status() {
-            SerialStatus::Active => "active",
-            SerialStatus::Complete => "complete",
-            SerialStatus::Ignored => "ignored",
-        };
-        push(
-            "serial",
-            &s.name,
-            s.publication(),
-            s.author.as_deref(),
-            &s.prefix,
-            s.kind.as_deref().unwrap_or(""),
-            status,
-            &|e: &Entry| {
-                let a: Vec<&str> = e.authors.iter().map(String::as_str).collect();
-                s.matches_note(&a, &e.source)
-            },
-        );
-    }
-    // One row per listed record, grouped by shape as the old tables were (blog, newsletter,
-    // youtube).
-    fn row_of(p: &cv_actions::pipelines::Publication) -> (&'static str, &str) {
-        if p.channel_id.is_some() {
-            ("youtube", "youtube")
-        } else if p.feeds.is_empty() {
-            ("newsletter", p.kind_or_blog())
-        } else {
-            ("blog", p.kind.as_deref().unwrap_or("blog"))
-        }
-    }
-    for shape in ["blog", "newsletter", "youtube"] {
-        for (_, p) in listed
-            .iter()
-            .filter(|(i, p)| !serialish(*i, p) && row_of(p).0 == shape)
-        {
-            let f = by_pub(p.publication());
-            let (_, kind) = row_of(p);
-            push(
-                shape,
-                &p.name,
-                p.publication(),
-                None,
-                &[],
-                kind,
-                "active",
-                &f,
-            );
-        }
-    }
-    Ok((out, serial_of))
-}
-
 fn log_notices(host: &views::ViewHost) {
     for n in host.load_notices() {
         tracing::warn!(notice = %n, "view definitions");
@@ -465,7 +269,11 @@ fn serve(
                         .as_ref()
                         .map_err(Clone::clone)
                         .and_then(|w| {
-                            source_data(&r.query(), &settings.sources, w, &settings.day_folder)
+                            sources::source_data(
+                                &r.query(),
+                                &sources::listed(&settings.sources, w),
+                                &settings.day_folder,
+                            )
                         }) {
                         Ok((records, serial)) => {
                             host.set_sources(records, serial);

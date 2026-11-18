@@ -409,6 +409,18 @@ pub fn canonical_bare_host(url: &str) -> Option<String> {
     canonicalize_url(url).and_then(|c| bare_host_name(&c.domain))
 }
 
+/// A configured host (`www.example.com`, or a full URL) in [`canonical_bare_host`] form: a full
+/// URL goes through it, a bare host through [`bare_host_name`].
+#[must_use]
+pub fn configured_host(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.contains("://") {
+        canonical_bare_host(s)
+    } else {
+        bare_host_name(s)
+    }
+}
+
 /// Whether `host` (lowercased) is Substack's: `substack.com` or a subdomain.
 #[must_use]
 pub fn is_substack_host(host: &str) -> bool {

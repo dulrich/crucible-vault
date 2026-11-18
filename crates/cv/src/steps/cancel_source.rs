@@ -215,12 +215,11 @@ pub(crate) fn blog_keys(config: &ConfigSet) -> Vec<String> {
 /// (`mail_key_renames`) so their rows stay open until the reconcile re-keys them.
 pub(crate) fn mail_keys(config: &ConfigSet) -> Vec<String> {
     let s = config.sources();
-    let from_mail = |i: usize| s.origins()[i].iter().any(|o| o.table == "newsletter");
     let (mail, rest): (Vec<_>, Vec<_>) = s
         .publications()
         .iter()
         .enumerate()
-        .partition(|(i, _)| from_mail(*i));
+        .partition(|(i, _)| s.was_newsletter(*i));
     mail.into_iter()
         .chain(rest)
         .map(|(_, r)| r.name.clone())

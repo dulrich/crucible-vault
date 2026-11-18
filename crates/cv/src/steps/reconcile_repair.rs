@@ -4,7 +4,7 @@
 //!
 //! - **E. Merge** ([`merge_mail_twins`]): each `via: email` note with a `message-id` finds its
 //!   `.eml` (processed Maildir, matched by Message-ID) and derives the one post identity with
-//!   [`cv_ingest::mail::canonical_post_url`] (blog row link from the resolver, as `track_mail`
+//!   [`cv_ingest::mail::canonical_post_url_in`] (blog row link from the resolver, as `track_mail`
 //!   does); a note whose message is gone, unparseable or yields no canonical URL is skipped. The
 //!   canonical identity is matched in the supersede index (kept current with the derived identities). **Only a
 //!   mail↔RSS pair is merged**: when every match is RSS-origin (`via: rss`, or `via: email` with
@@ -57,7 +57,8 @@ use cv_vault::VaultError;
 use serde::Serialize;
 
 use super::auto_file::{
-    file_transcript_clip, link_clip, link_post, publication_of, target_is_link_only, wikilink,
+    TrackedRank, clip_of, file_transcript_clip, link_clip, link_post, publication_for,
+    publication_of, target_is_link_only, wikilink,
 };
 use super::mail::{mail_blog_link, resolve_newsletter};
 use super::reconcile_backfill::{Shared, message_map, read_text};
@@ -338,19 +339,13 @@ pub(super) enum Fill {
 /// the work-record match. Malformed frontmatter is left alone.
 pub(super) fn decide_publication(
     sources: &cv_actions::pipelines::SourcesConfig,
-    serial: &[cv_actions::pipelines::Publication],
     doc: &FrontmatterDoc,
     tracked: Option<&str>,
 ) -> Option<(String, Fill)> {
     let current = doc.get("publication").ok()?; // malformed frontmatter: skip
     let blank = crate::supersede::publication_blank(doc);
-    let source = doc
-        .get("source")
-        .ok()
-        .flatten()
-        .map(|v| cv_note::js_text(&v))
-        .unwrap_or_default();
-    if let Some(rec) = sources.by_prefix(&source) {
+    let clip = clip_of(doc);
+    if let Some(rec) = sources.by_prefix(&clip.source) {
         let want = rec.publication();
         if !blank && current.as_ref().map(cv_note::js_text).as_deref() == Some(want) {
             return None;
@@ -365,29 +360,8 @@ pub(super) fn decide_publication(
     if !blank {
         return None;
     }
-    tracked
-        .map(str::to_owned)
-        .or_else(|| serial_publication(serial, doc))
+    publication_for(sources, &clip, tracked, TrackedRank::BeforeResolver)
         .map(|p| (p, Fill::Backfill))
-}
-
-/// The publication of the first work record (config order) the note matches.
-fn serial_publication(
-    serial: &[cv_actions::pipelines::Publication],
-    doc: &FrontmatterDoc,
-) -> Option<String> {
-    let authors = doc.get_texts("author");
-    let authors: Vec<&str> = authors.iter().map(String::as_str).collect();
-    let source = doc
-        .get("source")
-        .ok()
-        .flatten()
-        .map(|v| cv_note::js_text(&v))
-        .unwrap_or_default();
-    serial
-        .iter()
-        .find(|s| s.matches_note(&authors, &source))
-        .map(|s| s.publication().to_owned())
 }
 
 /// Phase F.
@@ -407,13 +381,7 @@ pub(super) fn publication(
     }
     let cfg = ctx.config;
     let sources = cfg.sources();
-    // Round 11 E1: notes matching a `[[serial]]` row join the candidates (each note once).
-    let serial: Vec<_> = sources
-        .publications()
-        .iter()
-        .filter(|p| p.is_work())
-        .cloned()
-        .collect();
+    // Round 11 E1: notes matching a work record join the candidates (each note once).
     let mut paths: BTreeSet<String> = by_note.keys().cloned().collect();
     paths.extend(source_candidates(ctx)?);
     for path in paths {
@@ -423,7 +391,7 @@ pub(super) fn publication(
         let doc = FrontmatterDoc::new(text.as_str());
         let rows = by_note.get(&path);
         let tracked = rows.and_then(|rs| rs.iter().find_map(|r| publication_of_row(ctx, r)));
-        let Some((_, fill)) = decide_publication(sources, &serial, &doc, tracked.as_deref()) else {
+        let Some((_, fill)) = decide_publication(sources, &doc, tracked.as_deref()) else {
             if rows.is_some() && crate::supersede::publication_blank(&doc) {
                 c.publication_no_row += 1;
             }
@@ -436,8 +404,7 @@ pub(super) fn publication(
         let mut done = fill;
         match ctx.modify(&path, |old| {
             let d = FrontmatterDoc::new(old);
-            let Some((p, fill)) = decide_publication(sources, &serial, &d, tracked.as_deref())
-            else {
+            let Some((p, fill)) = decide_publication(sources, &d, tracked.as_deref()) else {
                 return Ok(None);
             };
             done = fill;

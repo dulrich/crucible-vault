@@ -139,7 +139,8 @@ fn from_matcher_is_exact_or_domain_suffix() {
     let post = parse_eml(&crlf(QP)).unwrap();
     let yes = |from: &[&str], lid: Option<&str>| {
         let f: Vec<String> = from.iter().map(|s| (*s).to_owned()).collect();
-        row_matches(&post, &f, lid)
+        let l: Vec<String> = lid.iter().map(|s| (*s).to_owned()).collect();
+        cv_text::mail_match::mail_matches(&post.from_addr, post.list_id.as_deref(), &f, &l)
     };
     assert!(yes(&["ANN@news.example"], None));
     assert!(yes(&["@news.example"], None));
@@ -153,27 +154,16 @@ fn from_matcher_is_exact_or_domain_suffix() {
         (vec!["x@y.example".to_owned()], None::<String>),
         (vec![], Some("ann.news.example".to_owned())),
     ];
-    let hit = match_newsletter(&post, &rows, |r| (r.0.as_slice(), r.1.as_deref()));
+    let hit = rows.iter().find(|r| {
+        let l: Vec<String> = r.1.iter().cloned().collect();
+        cv_text::mail_match::mail_matches(&post.from_addr, post.list_id.as_deref(), &r.0, &l)
+    });
     assert_eq!(hit, Some(&rows[1]));
-}
-
-fn bare(from: &str, list_id: Option<&str>) -> MailPost {
-    MailPost {
-        message_id: "m".into(),
-        from_addr: from.into(),
-        from_name: String::new(),
-        list_id: list_id.map(str::to_owned),
-        subject: String::new(),
-        date: None,
-        html: None,
-        text: None,
-        urls: vec![],
-    }
 }
 
 #[test]
 fn substack_host_from_list_id_or_sender() {
-    let h = |f, l| substack_host(&bare(f, l));
+    let h = cv_text::mail_match::substack_host;
     let want = Some("examplepub.substack.com".to_owned());
     assert_eq!(h("x@y.example", Some("examplepub.substack.com")), want);
     assert_eq!(h("examplepub@substack.com", None), want);
@@ -187,7 +177,7 @@ fn substack_host_from_list_id_or_sender() {
 
 #[test]
 fn substack_host_rejects_non_substack_and_malformed() {
-    let h = |f, l| substack_host(&bare(f, l));
+    let h = cv_text::mail_match::substack_host;
     assert_eq!(h("ann@news.example", Some("ann.news.example")), None);
     assert_eq!(h("ann@news.example", None), None);
     assert_eq!(h("x@y.example", Some("substack.com")), None);
@@ -250,7 +240,7 @@ fn every_link_variant_converges_on_one_canonical_url() {
     for body in variant_bodies() {
         let p = sub_post("zed", "S", &body);
         assert_eq!(
-            canonical_post_url(&p, None).as_deref(),
+            canonical_post_url_in(&p, None, &[]).as_deref(),
             Some("https://zed.substack.com/p/slug-one"),
             "{body}"
         );
@@ -265,7 +255,7 @@ fn opaque_tracker_only_mail_has_no_identity() {
                 <a href=\"https://esp.example/v2/c/abc\">y</a>";
     let p = sub_post("zed", "S", body);
     assert!(p.urls.is_empty(), "{:?}", p.urls);
-    assert_eq!(canonical_post_url(&p, None), None);
+    assert_eq!(canonical_post_url_in(&p, None, &[]), None);
 }
 
 #[test]
@@ -275,9 +265,9 @@ fn a_link_to_another_publication_is_never_the_identity() {
                 <a href=\"https://blog.other.example/p/y\">y</a>";
     let p = sub_post("zed", "S", body);
     assert!(!p.urls.is_empty());
-    assert_eq!(canonical_post_url(&p, None), None);
+    assert_eq!(canonical_post_url_in(&p, None, &[]), None);
     assert_eq!(
-        canonical_post_url(&p, Some("https://custom.example/feed")),
+        canonical_post_url_in(&p, Some("https://custom.example/feed"), &[]),
         None,
         "an unproven link is never rebased"
     );
@@ -290,7 +280,7 @@ fn a_proven_candidate_rebases_onto_the_custom_domain_blog() {
     );
     let p = sub_post("zed", "S", &body);
     assert_eq!(
-        canonical_post_url(&p, Some("https://www.custom.example/feed")).as_deref(),
+        canonical_post_url_in(&p, Some("https://www.custom.example/feed"), &[]).as_deref(),
         Some("https://www.custom.example/p/slug-one")
     );
     // Evidence by the blog host alone (a custom-domain sender without a Substack host).
@@ -302,7 +292,7 @@ fn a_proven_candidate_rebases_onto_the_custom_domain_blog() {
     q.from_addr = "news@custom.example".into();
     q.list_id = None;
     assert_eq!(
-        canonical_post_url(&q, Some("https://custom.example/feed")).as_deref(),
+        canonical_post_url_in(&q, Some("https://custom.example/feed"), &[]).as_deref(),
         Some("https://custom.example/p/two")
     );
 }
@@ -314,7 +304,7 @@ fn the_messages_own_post_comes_first() {
     let p = sub_post("zed", "Today Title", body);
     assert_eq!(p.urls[0], "https://zed.substack.com/p/today");
     assert_eq!(
-        canonical_post_url(&p, None).as_deref(),
+        canonical_post_url_in(&p, None, &[]).as_deref(),
         Some("https://zed.substack.com/p/today")
     );
 }
@@ -325,13 +315,17 @@ fn odd_hrefs_never_panic_and_never_leak_tokens() {
                 <a href=\"https://zed.substack.com/p/%E0%A4\">bad pct</a><a href=\"https://%zz/p/q\">h</a>\
                 <a href=\"https://track.esp.example/r?url=%\">w</a><a href=https://zed.substack.com/p/>no slug</a>";
     let p = sub_post("zed", "S", body);
-    let _ = canonical_post_url(&p, Some("not a url"));
+    let _ = canonical_post_url_in(&p, Some("not a url"), &[]);
     let mut all: Vec<String> = variant_bodies()
         .iter()
         .flat_map(|b| {
             let p = sub_post("zed", "S", b);
             let mut v = p.urls.clone();
-            v.extend(canonical_post_url(&p, Some("https://custom.example/")));
+            v.extend(canonical_post_url_in(
+                &p,
+                Some("https://custom.example/"),
+                &[],
+            ));
             v
         })
         .collect();
@@ -372,7 +366,7 @@ fn a_link_on_a_listed_publication_host_is_proven() {
         canonical_post_url_in(&p, Some("https://custom.example/feed"), &hosts).as_deref(),
         Some("https://custom.example/p/slug-two")
     );
-    assert_eq!(canonical_post_url(&p, None), None);
+    assert_eq!(canonical_post_url_in(&p, None, &[]), None);
     let other = sub_post(
         "zed",
         "S",

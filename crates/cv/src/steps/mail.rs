@@ -322,7 +322,7 @@ enum Handled {
 
 /// The publication record a message belongs to (plan sources-publication-model WP-2, through
 /// `SourcesConfig::by_mail`): a record whose `from`/`list_id` matches always wins; otherwise a
-/// Substack message (`mail::substack_host`) belongs to the first record with a feed on that host.
+/// Substack message (`cv_text::mail_match::substack_host`) belongs to the first record with a feed on that host.
 /// The reconcile's re-match of already-recorded rows reuses this.
 pub(crate) fn resolve_newsletter<'a>(
     post: &MailPost,
@@ -334,7 +334,9 @@ pub(crate) fn resolve_newsletter<'a>(
 /// The blog feed a matched message is contained under (the record's feed on the message's
 /// Substack host, else its first feed; `None` for a record without feeds).
 pub(crate) fn mail_blog_link<'a>(post: &MailPost, p: &'a Publication) -> Option<&'a str> {
-    p.feed_for_host(mail::substack_host(post).as_deref())
+    p.feed_for_host(
+        cv_text::mail_match::substack_host(&post.from_addr, post.list_id.as_deref()).as_deref(),
+    )
 }
 
 /// The message body as markdown before any cleanup (the HTML part converted, else the trimmed

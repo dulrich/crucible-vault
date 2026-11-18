@@ -10,7 +10,7 @@
 //!   never re-derived from stripped notes (learning is keyed by Message-ID, so a stripped body is
 //!   never learned again). Counts `bp_learned`.
 //! - **Strip**: every `via: email` note linked from a `mail` row of a known sender (not
-//!   `unknown-sender`) has its body put through [`cv_ingest::boilerplate::strip`] with the seeded
+//!   `unknown-sender`) has its body put through [`cv_ingest::boilerplate::strip_tiered`] with the seeded
 //!   set; written (CAS) only on a change, with `description` recomputed from the stripped body
 //!   ([`super::reconcile_backfill::redescribed`]). Counts `bp_stripped`, `bp_guarded` (an
 //!   anchored boilerplate line exists but the half-body guard kept the body), `bp_conflict`
