@@ -19,6 +19,12 @@ pub enum Settled {
     Gone,
     /// The daemon did not answer (disconnected, an error): the document is left as it is.
     NoAnswer,
+    /// A note may be live again at a gone document's path: the path is probed by bind + read
+    /// ([`OpenFor::Restore`]), never by locating the retired id.
+    Reappeared,
+    /// The probe of a gone document's path found note `0` live there: the document restores
+    /// onto it ([`App::restore_gone`], or [`App::restore_onto_open`] when it is already open).
+    Restored(Opened),
 }
 
 /// The one daemon-side interpreter of a [`NoteLocation`] (blocking: run it off the UI thread).
@@ -56,7 +62,7 @@ pub enum AfterSettle {
 }
 
 /// A finished open: the bound id and the bytes read for it (never logged).
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Opened {
     pub id: NoteId,
     pub bytes: Arc<Vec<u8>>,
@@ -84,7 +90,7 @@ pub enum OpenFor {
     /// The absorbing note of retired document `0` ([`App::follow_replaced`]).
     Absorb(NoteId),
     /// Plan note-gone-restore WP-1: the note restored at the path of gone document `0`
-    /// ([`App::restore_at`]).
+    /// ([`Settled::Reappeared`]).
     Restore(NoteId),
 }
 
@@ -202,11 +208,7 @@ impl App {
             AfterSettle::Resync if live => return self.resync_read(id),
             // Plan note-gone-restore WP-1 trigger (b): a file restored while the daemon was down
             // reaches the editor only here; a live note at the path restores the gone document.
-            AfterSettle::Resync if s_gone => {
-                if let Some(p) = self.docs.path_of(id) {
-                    self.restore_at(&p);
-                }
-            }
+            AfterSettle::Resync if s_gone => self.apply_settled(id, Settled::Reappeared),
             _ => {}
         }
         Task::none()
@@ -228,6 +230,39 @@ impl App {
                 }
             }
             Settled::Gone => self.doc_gone(id),
+            Settled::Reappeared => {
+                let Some(path) = self
+                    .docs
+                    .by_id(id)
+                    .filter(|d| d.buffer.is_missing() && self.daemon.is_some())
+                    .map(|d| d.buffer.path().to_owned())
+                else {
+                    return;
+                };
+                match self.docs.id_of(&path) {
+                    // `id_of` prefers a live document (plan note-gone-restore-edges WP-1, case 3).
+                    Some(live) if live != id => self.restore_onto_open(id, &path),
+                    _ => self.start_open(&path, OpenFor::Restore(id)),
+                }
+            }
+            Settled::Restored(o) => {
+                let Some(path) = self.docs.path_of(id) else {
+                    return;
+                };
+                if self.docs.by_id(o.id).is_some() {
+                    // Case 3 (plan note-gone-restore-edges WP-1): the note is open meanwhile.
+                    if self.docs.path_of(o.id) == Some(path.clone()) {
+                        self.restore_onto_open(id, &path);
+                    }
+                } else if let Some(d) = self.docs.by_id_mut(id)
+                    && d.buffer.is_saving()
+                {
+                    // Audit E2: the in-flight save lands first; its completion probes again.
+                    d.buffer.defer_restore();
+                } else {
+                    self.restore_gone(id, o);
+                }
+            }
         }
     }
 
@@ -363,19 +398,7 @@ impl App {
                 if !d.buffer.is_missing() || d.buffer.path() != path || o.id == rid {
                     return;
                 }
-                if self.docs.by_id(o.id).is_some() {
-                    // Case 3 (plan note-gone-restore-edges WP-1): the note is open meanwhile.
-                    if self.docs.path_of(o.id).as_deref() == Some(path) {
-                        self.restore_onto_open(rid, path);
-                    }
-                    return;
-                }
-                if d.buffer.is_saving() {
-                    // Audit E2: the in-flight save settles first; its completion re-runs this.
-                    self.restore_after_save.insert(rid);
-                    return;
-                }
-                self.restore_gone(rid, o);
+                self.apply_settled(rid, Settled::Restored(o));
             }
         }
     }

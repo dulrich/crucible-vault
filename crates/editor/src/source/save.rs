@@ -112,10 +112,19 @@ pub(super) struct InFlight {
     hash: ContentHash,
     /// WP-5: the frontmatter title of that text.
     title: Option<String>,
-    /// Plan note-gone-restore-edges WP-1 (E2): a Keep-mine revive of a gone buffer. On its
-    /// `Conflict` answer (another note sits at the path) the app keeps the buffer gone, never
-    /// `Changed` on the retired id, and restores it onto the note at the path.
-    revive: bool,
+    /// What the save is for.
+    kind: SaveKind,
+}
+
+/// What a save is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveKind {
+    /// The buffer's text, written over its base.
+    Edit,
+    /// Keep mine on a gone buffer: its retired id against the "no file" base. On a `Conflict`
+    /// answer (another note sits at the path) the app keeps the buffer gone, never `Changed` on
+    /// the retired id, and restores it onto the note at the path.
+    Revive,
 }
 
 /// The buffer's save state.
@@ -132,6 +141,9 @@ pub(super) struct SaveState {
     /// plan editor-data-safety WP-1 (audit E1): a reconnect arrived while a save on the old
     /// connection was in flight; resync once its completion has been processed.
     resync_pending: bool,
+    /// A note may be live again at this gone buffer's path while a save is in flight; the path
+    /// is probed again once that save's completion has been processed.
+    restore_pending: bool,
     /// Plan usability-sprint-captures-links WP-5: the frontmatter `title` of the text last known
     /// on disk (`new`/`reload`/landed saves).
     disk_title: Option<String>,
@@ -154,6 +166,7 @@ impl SaveState {
             save_again: false,
             conflict: None,
             resync_pending: false,
+            restore_pending: false,
             disk_title: title.clone(),
             name_title: title,
             renaming: false,
@@ -180,10 +193,9 @@ impl SourceBuffer {
         self.save.conflict.as_ref()
     }
 
-    /// Plan note-gone-restore-edges WP-1: the save in flight is a Keep-mine revive of a gone
-    /// buffer (its retired id, "no file" base).
-    pub fn is_reviving(&self) -> bool {
-        self.save.in_flight.as_ref().is_some_and(|f| f.revive)
+    /// What the save in flight is for, if one is.
+    pub fn saving_kind(&self) -> Option<SaveKind> {
+        self.save.in_flight.as_ref().map(|f| f.kind)
     }
 
     /// plan editor-data-safety WP-2: the conflict is "the file is gone".
@@ -261,12 +273,12 @@ impl SourceBuffer {
         if !self.save.dirty || self.save.conflict.is_some() {
             return None;
         }
-        self.start_save()
+        self.start_save(SaveKind::Edit)
     }
 
     /// The save job proper (the caller has decided a save is wanted): queues a follow-up instead
     /// when one is in flight or a rename is pending.
-    fn start_save(&mut self) -> Option<SaveJob> {
+    fn start_save(&mut self, kind: SaveKind) -> Option<SaveJob> {
         if self.save.in_flight.is_some() || self.save.renaming {
             self.save.save_again = true;
             return None;
@@ -275,7 +287,7 @@ impl SourceBuffer {
         self.save.in_flight = Some(InFlight {
             hash: ContentHash::of(text.as_bytes()),
             title: crate::header::frontmatter_title(&text),
-            revive: false,
+            kind,
         });
         self.save.save_again = false;
         Some(SaveJob {
@@ -413,12 +425,10 @@ impl SourceBuffer {
         let current = self.save.conflict.take()?;
         let gone = current == Conflict::Missing;
         self.save.base_hash = current.base();
-        if gone || self.save.dirty {
-            let job = self.start_save();
-            if gone && let Some(f) = self.save.in_flight.as_mut().filter(|_| job.is_some()) {
-                f.revive = true;
-            }
-            job
+        if gone {
+            self.start_save(SaveKind::Revive)
+        } else if self.save.dirty {
+            self.start_save(SaveKind::Edit)
         } else {
             None
         }
@@ -432,6 +442,7 @@ impl SourceBuffer {
     pub fn restore(&mut self, note: NoteId, bytes: &[u8], disk: ContentHash) {
         self.save.note = note;
         self.save.resync_pending = false;
+        self.save.restore_pending = false;
         self.save.save_again = false;
         if !self.save.dirty {
             self.reload(bytes, disk);
@@ -455,6 +466,16 @@ impl SourceBuffer {
     /// Takes the deferred-resync mark (set while a save was in flight across a reconnect).
     pub fn take_resync_pending(&mut self) -> bool {
         std::mem::take(&mut self.save.resync_pending)
+    }
+
+    /// Marks a restore of this gone buffer as waiting on the in-flight save's completion.
+    pub fn defer_restore(&mut self) {
+        self.save.restore_pending = true;
+    }
+
+    /// Takes the deferred-restore mark once no save is in flight (until then it stays).
+    pub fn take_restore_pending(&mut self) -> bool {
+        !self.is_saving() && std::mem::take(&mut self.save.restore_pending)
     }
 
     /// Reconnect resync against the file now on disk (`bytes`, `disk`). Clean → reload when

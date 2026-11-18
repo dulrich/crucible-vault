@@ -49,8 +49,8 @@ impl App {
     ///   document is at `path`.
     /// - A different note at the path of an open document (path reuse) never touches it —
     ///   except a document in the gone state: a note (re)appearing at its path restores it
-    ///   (plan note-gone-restore WP-1, [`Self::restore_at`]; this supersedes the old contract
-    ///   for gone documents only).
+    ///   (plan note-gone-restore WP-1, [`super::settle::Settled::Reappeared`]; this supersedes
+    ///   the old contract for gone documents only).
     pub(super) fn doc_file_changed(
         &mut self,
         id: NoteId,
@@ -69,8 +69,10 @@ impl App {
             }
         }
         let Some(cur) = self.docs.path_of(id) else {
-            if kind != cv_protocol::ChangeKind::Deleted {
-                self.restore_at(path);
+            if kind != cv_protocol::ChangeKind::Deleted
+                && let Some(rid) = self.gone_at(path)
+            {
+                self.apply_settled(rid, super::settle::Settled::Reappeared);
             }
             return None;
         };
@@ -101,24 +103,6 @@ impl App {
         (self.docs.path_of(id).as_deref() == Some(path)).then_some(id)
     }
 
-    /// Plan note-gone-restore WP-1: a note may be live again at `path`, where a gone (missing)
-    /// document sits and no live document does. Locates it off the UI thread (bind + read,
-    /// [`super::settle::OpenFor::Restore`]); [`Self::restore_gone`] completes it.
-    pub(super) fn restore_at(&mut self, path: &str) {
-        if self.daemon.is_none() {
-            return;
-        }
-        let Some(rid) = self.gone_at(path) else {
-            return;
-        };
-        match self.docs.id_of(path) {
-            // `id_of` prefers a live document (plan note-gone-restore-edges WP-1, case 3).
-            Some(live) if live != rid => self.restore_onto_open(rid, path),
-            Some(_) => self.start_open(path, super::settle::OpenFor::Restore(rid)),
-            None => {}
-        }
-    }
-
     /// The gone (missing) document at `path`, if any (live documents at the path aside).
     pub(super) fn gone_at(&self, path: &str) -> Option<NoteId> {
         self.docs
@@ -130,31 +114,39 @@ impl App {
     /// Plan note-gone-restore-edges WP-1, case 3 (user decision 2026-11-17): the note at gone
     /// document `rid`'s path is already open. Clean → its tabs move onto that document
     /// ([`Self::absorb`]; a pane already showing it keeps one tab). Dirty → it stays gone with
-    /// its edits (Keep refuses: [`Self::gone_path_taken`]). A save in flight defers the move.
+    /// its edits (Keep refuses: [`Self::keep_mine`]). A save in flight defers the move.
     pub(super) fn restore_onto_open(&mut self, rid: NoteId, path: &str) {
-        let Some(d) = self.docs.by_id(rid) else {
+        let Some(d) = self.docs.by_id_mut(rid) else {
             return;
         };
         if d.buffer.is_dirty() {
             return;
         }
         if d.buffer.is_saving() {
-            self.restore_after_save.insert(rid);
+            d.buffer.defer_restore();
             return;
         }
-        self.restore_after_save.remove(&rid);
         self.absorb(rid, path, None);
     }
 
-    /// Plan note-gone-restore-edges WP-1, case 3: the open note that took gone document `id`'s
-    /// path, if any — Keep on it would write over that note, so it is refused.
-    pub(super) fn gone_path_taken(&self, id: NoteId) -> Option<String> {
-        let d = self.docs.by_id(id).filter(|d| d.buffer.is_missing())?;
+    /// Keep mine on document `id`. A gone document starts a revive save
+    /// ([`crate::source::SaveKind::Revive`]), refused when another open note took its path
+    /// (plan note-gone-restore-edges WP-1, case 3: Keep would write over that note).
+    pub(super) fn keep_mine(&mut self, id: NoteId) -> Task<Message> {
+        let Some(d) = self.docs.by_id(id) else {
+            return Task::none();
+        };
         let path = d.buffer.path();
-        self.docs
-            .id_of(path)
-            .filter(|live| *live != id)
-            .map(|_| path.to_owned())
+        if d.buffer.is_missing() && self.docs.id_of(path).is_some_and(|live| live != id) {
+            self.status.set_error(format!(
+                "another open note now sits at {path}: Keep would overwrite it (close discards)"
+            ));
+            return Task::none();
+        }
+        let Some(d) = self.docs.by_id_mut(id) else {
+            return Task::none();
+        };
+        crate::source::spawn_save(self.daemon.as_ref(), d.buffer.keep_mine())
     }
 
     /// Plan note-gone-restore WP-1: gone document `rid` is replaced by a new document for the
@@ -168,7 +160,6 @@ impl App {
         let Some(mut old) = self.docs.remove_id(rid) else {
             return;
         };
-        self.restore_after_save.remove(&rid);
         old.buffer.restore(o.id, &o.bytes, o.hash);
         let mut od = OpenDoc {
             id: o.id,
@@ -216,7 +207,7 @@ impl App {
         if kind != cv_protocol::ChangeKind::Deleted
             && self.docs.by_id(id).is_some_and(|d| d.buffer.is_missing())
         {
-            self.restore_at(path);
+            self.apply_settled(id, super::settle::Settled::Reappeared);
             return None;
         }
         if kind == cv_protocol::ChangeKind::Deleted
@@ -297,7 +288,9 @@ impl App {
         self.ui.touch_recent(to);
         // Plan note-gone-restore-edges WP-1 (audit E1): a live note moved onto a gone
         // document's path takes it (case 3).
-        self.restore_at(to);
+        if let Some(rid) = self.gone_at(to) {
+            self.apply_settled(rid, super::settle::Settled::Reappeared);
+        }
     }
 
     /// Round 11 WP-1 (Decision 1) + plan note-identity audit E2: document `id` was retired
